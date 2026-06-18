@@ -1,6 +1,6 @@
 {
   "name": "claude-peers-desk",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Desktop dock for multiple Claude Code peer sessions in a single window",
   "main": "out/main/index.js",
   "author": "vocsap",
