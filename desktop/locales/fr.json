@@ -117,6 +117,8 @@
   "create.name": "Nom",
   "create.model": "Modèle",
   "create.modelDefault": "défaut",
+  "create.extendedContext": "Contexte étendu (1M)",
+  "create.extendedContextHelp": "Ajoute [1m] pour utiliser la fenêtre de contexte de 1 million de tokens. Disponible sur Opus et Sonnet, pas Haiku.",
   "create.effort": "Effort",
   "create.effortAuto": "Auto",
   "create.effortFaster": "Plus rapide",

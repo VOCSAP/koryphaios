@@ -78,9 +78,10 @@ cd desktop && npm run dev        # dev mode (renderer HMR)
 
 - **`＋ Add peer`** -- start a new session in the window's project directory.
 - **`▾` (advanced create)** -- a popover to pick a sub-agent (scanned from
-  `.claude/agents` and `~/.claude/agents`), add free launch args (e.g.
-  `--model opus`), apply a preset, choose a custom colour, and (under
-  **Advanced**) run the peer in a **different working folder**. A peer launched
+  `.claude/agents` and `~/.claude/agents`), pick a model, toggle **Extended
+  context (1M)** (appends the `[1m]` suffix; Opus/Sonnet only, not Haiku), add
+  free launch args (e.g. `--model opus`), apply a preset, choose a custom colour,
+  and (under **Advanced**) run the peer in a **different working folder**. A peer launched
   in another folder still joins this window's group; only its cwd changes -- use
   with care, it can act on that folder.
 - Each row shows a **colour swatch**, a **status dot** (starting / running /

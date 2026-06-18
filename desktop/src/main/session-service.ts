@@ -156,9 +156,12 @@ export class SessionService extends EventEmitter {
     const model = input.model?.trim() || ''
     // Fold the structured agent/model choices into the persisted args so a fresh
     // restart re-applies them; --effort is kept separate (re-passed on resume).
+    // The model value is quoted because the 1M-context form carries a `[1m]`
+    // suffix whose brackets would otherwise be glob-expanded by the login shell
+    // on Unix (`opus[1m]` matches a file named `opus1`/`opusm` in the cwd).
     const args = [
       agent ? `--agent ${agent}` : '',
-      model ? `--model ${model}` : '',
+      model ? `--model "${model}"` : '',
       input.args?.trim() || ''
     ]
       .filter(Boolean)

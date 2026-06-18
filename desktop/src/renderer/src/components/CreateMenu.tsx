@@ -13,6 +13,18 @@ import { useT } from '../i18n'
 /** Effort slider stops. Index 0 = Auto (omit --effort), then the CLI levels. */
 const EFFORT_LEVELS = ['', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
+/**
+ * A model id can take the `[1m]` (1M context window) suffix when it is a
+ * concrete, non-Haiku model. Opus and Sonnet aliases and their full ids
+ * qualify; Haiku does not support 1M, and the empty "default" choice has no id
+ * to append to. Mirrors Claude Code: "Only append [1m] when the underlying
+ * model supports 1M context."
+ */
+function supports1mContext(id: string): boolean {
+  const m = id.trim().toLowerCase()
+  return m !== '' && !m.includes('haiku')
+}
+
 export function CreateMenu({ onClose }: { onClose: () => void }): React.JSX.Element {
   const t = useT()
   const createSession = useDeck((s) => s.createSession)
@@ -23,6 +35,10 @@ export function CreateMenu({ onClose }: { onClose: () => void }): React.JSX.Elem
   const [agent, setAgent] = useState('')
   const [name, setName] = useState('')
   const [model, setModel] = useState('')
+  // Extended 1M context: appends the `[1m]` suffix to the model id (Claude Code
+  // strips it before calling the provider). Only meaningful on a 1M-capable
+  // model (Opus / Sonnet, not Haiku) and only when a concrete model is picked.
+  const [extended, setExtended] = useState(false)
   const [effortIdx, setEffortIdx] = useState(0)
   const [extraArgs, setExtraArgs] = useState('')
   const [color, setColor] = useState('#4f86ff')
@@ -52,12 +68,19 @@ export function CreateMenu({ onClose }: { onClose: () => void }): React.JSX.Elem
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  // Whether the 1M toggle applies to the current pick, and the model id actually
+  // submitted (base id, or `<id>[1m]` when extended context is requested).
+  const canExtend = supports1mContext(model)
+  const use1m = extended && canExtend
+  const effectiveModel = use1m ? `${model}[1m]` : model
+
   // Keep the announce draft synced to the agent/model/effort choices until the
-  // operator edits it (then it stays as authored).
+  // operator edits it (then it stays as authored). Uses the effective model so
+  // the join note reflects the `[1m]` suffix when extended context is on.
   useEffect(() => {
     if (announceTouched) return
-    setAnnounce(defaultAnnounceDraft({ agent, model, effort: EFFORT_LEVELS[effortIdx] ?? '' }))
-  }, [agent, model, effortIdx, announceTouched])
+    setAnnounce(defaultAnnounceDraft({ agent, model: effectiveModel, effort: EFFORT_LEVELS[effortIdx] ?? '' }))
+  }, [agent, effectiveModel, effortIdx, announceTouched])
 
   const applyPreset = (p: LaunchPreset): void => {
     setExtraArgs((prev) => [prev.trim(), p.args.trim()].filter(Boolean).join(' '))
@@ -77,7 +100,7 @@ export function CreateMenu({ onClose }: { onClose: () => void }): React.JSX.Elem
     void createSession({
       name: name.trim() || undefined,
       agent: agent || undefined,
-      model: model || undefined,
+      model: effectiveModel || undefined,
       effort: effortLevel || undefined,
       args: extraArgs.trim() || undefined,
       cwd: folder ?? undefined,
@@ -138,6 +161,20 @@ export function CreateMenu({ onClose }: { onClose: () => void }): React.JSX.Elem
               </option>
             ))}
           </select>
+        </label>
+
+        <label
+          className="field field-check"
+          title={t('create.extendedContextHelp')}
+          aria-disabled={!canExtend}
+        >
+          <input
+            type="checkbox"
+            checked={use1m}
+            disabled={!canExtend}
+            onChange={(e) => setExtended(e.target.checked)}
+          />
+          <span>{t('create.extendedContext')}</span>
         </label>
 
         <div className="field">

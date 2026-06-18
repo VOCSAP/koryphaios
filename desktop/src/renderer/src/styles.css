@@ -729,6 +729,12 @@ button {
   height: 16px;
 }
 
+/* Dim a checkbox row whose toggle does not apply to the current selection
+   (e.g. the 1M-context toggle when the chosen model has no 1M variant). */
+.field-check[aria-disabled='true'] {
+  opacity: 0.5;
+}
+
 /* Inline validation error under a field input. The compound selector beats the
    generic ".field small" muted rule so the message actually renders red. */
 .field .field-error,
