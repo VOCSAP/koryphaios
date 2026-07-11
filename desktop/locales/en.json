@@ -105,6 +105,14 @@
   "modebar.countOne": "{n} session",
   "modebar.countOther": "{n} sessions",
 
+  "search.placeholder": "Search open sessions…",
+  "search.toggleTitle": "Search across sessions (Ctrl+Shift+F)",
+  "search.countOne": "{n} match",
+  "search.countOther": "{n} matches",
+  "search.noResults": "No matches in the open sessions' scrollback.",
+  "search.jumpTitle": "Double-click to jump to this match",
+  "search.hint": "Double-click a result to focus its tile and scroll the terminal to the match.",
+
   "message.placeholder": "Message all peers in the group…",
   "message.send": "Send",
   "message.sendTitle": "Broadcast to all peers (Enter to send, Shift+Enter for a newline)",

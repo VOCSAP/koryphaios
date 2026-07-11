@@ -4,6 +4,7 @@ import { useT } from '../i18n'
 import { Sidebar } from './Sidebar'
 import { TileArea } from './TileArea'
 import { DisplayModeBar } from './DisplayModeBar'
+import { SearchBar } from './SearchBar'
 import { SettingsView } from './SettingsView'
 import { WorkspacesDialog } from './WorkspacesDialog'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -31,6 +32,8 @@ export function App(): React.JSX.Element {
   const selectedId = useDeck((s) => s.selectedId)
   const maximizedId = useDeck((s) => s.maximizedId)
   const setMaximized = useDeck((s) => s.setMaximized)
+  const searchOpen = useDeck((s) => s.searchOpen)
+  const openSearch = useDeck((s) => s.openSearch)
   const sidebarWidth = useDeck((s) => s.sidebarWidth)
 
   useEffect(() => {
@@ -61,6 +64,20 @@ export function App(): React.JSX.Element {
     return () => window.removeEventListener('keydown', onKey)
   }, [selectedId, maximizedId, setMaximized])
 
+  // Ctrl+Shift+F toggles the cross-session search panel. Terminals swallow the
+  // combo before the PTY sees it (TerminalTile's key handler) but let the DOM
+  // event bubble up to this window-level listener.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault()
+        openSearch(!searchOpen)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [searchOpen, openSearch])
+
   if (!config) {
     // Bootstrap splash shown before init() resolves (config + locale dict load
     // together), so there is no dictionary to translate against yet.
@@ -73,6 +90,7 @@ export function App(): React.JSX.Element {
       <div className="main-pane">
         <DisplayModeBar />
         <TileArea />
+        <SearchBar />
       </div>
       {settingsOpen && <SettingsView />}
       {workspacesOpen && <WorkspacesDialog />}

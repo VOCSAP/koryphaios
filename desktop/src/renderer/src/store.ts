@@ -17,6 +17,8 @@ interface DeckState {
   availableLocales: LocaleOption[]
   selectedId: string | null
   maximizedId: string | null
+  /** Cross-session search panel visibility (Ctrl+Shift+F / modebar toggle). */
+  searchOpen: boolean
   settingsOpen: boolean
   workspacesOpen: boolean
   /** Workspaces window opened in load-only mode (startup arrow): hides Delete. */
@@ -48,6 +50,7 @@ interface DeckState {
   init(): Promise<void>
   setSelected(id: string | null): void
   setMaximized(id: string | null): void
+  openSearch(open: boolean): void
   openSettings(open: boolean): void
   openWorkspaces(open: boolean, opts?: { loadOnly?: boolean }): void
   openNewClearConfirm(open: boolean): void
@@ -93,6 +96,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   availableLocales: [],
   selectedId: null,
   maximizedId: null,
+  searchOpen: false,
   settingsOpen: false,
   workspacesOpen: false,
   workspacesLoadOnly: false,
@@ -163,6 +167,7 @@ export const useDeck = create<DeckState>((set, get) => ({
 
   setSelected: (id) => set({ selectedId: id }),
   setMaximized: (id) => set({ maximizedId: id }),
+  openSearch: (open) => set({ searchOpen: open }),
   openSettings: (open) => set({ settingsOpen: open }),
   openWorkspaces: (open, opts) => {
     set({ workspacesOpen: open, workspacesLoadOnly: open ? !!opts?.loadOnly : false })

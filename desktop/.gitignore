@@ -1,6 +1,9 @@
 node_modules/
 out/
 dist/
+# The desktop package is npm-managed (package-lock.json); a stray bun install
+# (e.g. for typechecking) must not add a second lockfile.
+bun.lock
 *.log
 .DS_Store
 # App-written runtime state when dogfooding the app from this dir.
