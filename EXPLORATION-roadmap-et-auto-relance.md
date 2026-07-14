@@ -142,9 +142,54 @@ interface RoadmapItem {
 }
 ```
 
-Table SQLite `roadmap_items` + index `(project_key, status)`. Colonne
-`deleted_at` (soft delete → `archived`) plutôt qu'un DELETE brutal, pour que
-la suppression par un agent soit réversible depuis la Deck.
+**Format physique** : une table dans la base SQLite existante du broker
+(`bun:sqlite`, WAL — `/var/lib/claude-peers/peers.db` sur Linux/macOS,
+`~/.claude-peers.db` sur Windows, surchargable via `CLAUDE_PEERS_DB` /
+`config.json`). Un item = une ligne ; `tags` et `depends_on` en colonnes TEXT
+JSON :
+
+```sql
+CREATE TABLE IF NOT EXISTS roadmap_items (
+  id          TEXT PRIMARY KEY,          -- uuid
+  project_key TEXT NOT NULL,
+  kind        TEXT NOT NULL,             -- feature|bug|debt|idea|chore
+  title       TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  rationale   TEXT NOT NULL DEFAULT '',
+  priority    TEXT NOT NULL DEFAULT 'could',
+  value       TEXT NOT NULL DEFAULT 'medium',
+  effort      TEXT NOT NULL DEFAULT 'medium',
+  status      TEXT NOT NULL DEFAULT 'idea',
+  tags        TEXT NOT NULL DEFAULT '[]',      -- JSON array
+  depends_on  TEXT NOT NULL DEFAULT '[]',      -- JSON array d'ids
+  created_by  TEXT NOT NULL DEFAULT '',        -- peer_id ou 'deck' -- texte libre, PAS de FK
+  updated_by  TEXT NOT NULL DEFAULT '',
+  created_at  TEXT NOT NULL,
+  updated_at  TEXT NOT NULL,
+  deleted_at  TEXT                              -- soft delete (archivage réversible)
+);
+CREATE INDEX IF NOT EXISTS idx_roadmap_project ON roadmap_items(project_key, status);
+```
+
+**Indépendance du cycle de vie des sessions — par construction** :
+
+1. **Aucune foreign key vers `peers`/`groups`/`peer_sessions`.** Contrairement
+   à `messages` (FK `from_token → peers` + cascade à la purge d'un peer
+   dormant), `created_by`/`updated_by` sont de simples instantanés texte du
+   `peer_id` au moment de l'écriture : une trace d'attribution, pas un lien.
+   Le peer peut être purgé ou renommé, la ligne ne bouge pas.
+2. **Scope = `project_key`**, propriété stable du repo — pas des groupes
+   (éphémères côté Deck) ni des sessions.
+3. **Aucun timer de nettoyage ne touche la table** : `cleanStalePeers`,
+   `sweepInactivePeers` et le TTL messages restent scopés peers/messages.
+   Pas de TTL roadmap ; la suppression publique est un archivage
+   (`deleted_at`), réversible depuis la Deck.
+4. La base survit au redémarrage du broker et de la machine (fichier WAL
+   relu tel quel), comme les groupes TOFU aujourd'hui.
+
+Limite assumée : en mode local la durabilité est *par machine* ; le partage
+multi-PC passe par un broker commun (mode HTTP), et l'export JSON (§2.3)
+fournit l'instantané versionnable/sauvegardable.
 
 ### 2.3 API broker (nouvelles routes, style existant)
 
