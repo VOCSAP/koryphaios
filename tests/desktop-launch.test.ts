@@ -208,6 +208,33 @@ test("an empty/whitespace pluginDir never emits the flag", () => {
   expect(none).toBe("claude run --session-id id-1");
 });
 
+// ----- supervisor flags (PLAN C5/C8): re-passed on fresh AND resume -----
+
+test("--mcp-config and --append-system-prompt-file are emitted on both modes", () => {
+  const fresh = buildSessionCommandLine({
+    baseCommand: "claude run",
+    sessionId: "id-1",
+    mcpConfig: "/state/supervisor-mcp.json",
+    appendSystemPromptFile: "/state/supervisor-system-prompt.md",
+    mode: "fresh"
+  });
+  expect(fresh).toBe(
+    'claude run --mcp-config "/state/supervisor-mcp.json" --append-system-prompt-file "/state/supervisor-system-prompt.md" --session-id id-1'
+  );
+
+  const resume = buildSessionCommandLine({
+    baseCommand: "claude run",
+    sessionId: "id-new",
+    prevSessionId: "id-old",
+    mcpConfig: "/state/supervisor-mcp.json",
+    appendSystemPromptFile: "/state/supervisor-system-prompt.md",
+    mode: "resume"
+  });
+  expect(resume).toContain('--mcp-config "/state/supervisor-mcp.json"');
+  expect(resume).toContain('--append-system-prompt-file "/state/supervisor-system-prompt.md"');
+  expect(resume).toContain("--resume id-old --fork-session");
+});
+
 // ----- initial prompt (PLAN C2) -----
 
 test("fresh launch appends the quoted prompt last (after args and --effort)", () => {

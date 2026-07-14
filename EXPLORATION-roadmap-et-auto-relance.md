@@ -592,21 +592,31 @@ vérifiés dans la doc Claude Code :
 | Briefing C2 (prompt initial) | Premier message, déjà en place | ✅ |
 | `UserPromptSubmit` | Contexte **par tour** | ✅ (écarté) |
 
-**Design retenu — trois couches empilables** :
-1. **Défaut** (livré en C5) : briefing C2 + instructions du MCP deck-control.
-2. **Extension** (le cœur de C8) : un fichier `supervisor.md` cherché dans
-   `.claude/claude-peers/supervisor.md` (projet) puis
-   `<configDir global>/supervisor.md` ; s'il existe, le spawn superviseur
-   ajoute `--append-system-prompt-file "<chemin>"` — le rôle est ancré **dans
-   le system prompt**, pas rejoué à chaque tour, pas dépendant du transcript.
-   Re-passé au resume (le system prompt n'est pas restauré par
-   `--fork-session`), comme `--effort`/`--mcp-config`.
-3. **Remplacement** (déjà livré) : le profil d'agent Settings
-   (`supervisorAgent`) pour un harness entièrement custom.
+**Design retenu (révisé après retour opérateur — décision sécurité)** : le
+harness du superviseur n'est **pas configurable du tout**, ni par fichier
+opérateur ni par profil d'agent. Menace : le superviseur détient les pouvoirs
+`deck_*` (spawner jusqu'à 8 agents briefés) ; un `supervisor.md` lu depuis le
+projet ou un profil d'agent (dont le corps **remplace** le system prompt)
+permettrait à un repo cloné de détourner silencieusement la session qui
+pilote l'app (exfiltration, spawns malveillants). Donc :
 
-Impl : `resolveSupervisorPromptFile()` dans `supervisor.ts` +
-`appendSystemPromptFile` dans `session-command.ts` (même patron que
-`mcpConfig`) + note Settings. ~0,5 j.
+1. Le rôle vit dans **deux constantes du code** (`SUPERVISOR_SYSTEM_PROMPT`
+   + `SUPERVISOR_BRIEFING`), avec une consigne explicite de refus de
+   détournement.
+2. L'ancrage se fait quand même **au niveau system prompt** (le bon niveau,
+   `--append-system-prompt-file` vérifié en interactif) mais via un fichier
+   **généré par l'app depuis la constante et réécrit à chaque spawn** — un
+   fichier trafiqué sur disque est écrasé. Re-passé au resume (comme
+   `--effort`/`--mcp-config`).
+3. L'option `supervisorAgent` de Settings (livrée en C5) est **retirée**
+   pour la même raison.
+4. Même principe pour le prompt de l'agent d'import de plan (C7) : constante
+   dans le code, jamais un template configurable.
+
+Limite assumée et documentée : l'opérateur au clavier peut toujours taper ce
+qu'il veut dans le terminal du superviseur — le verrou protège contre le
+détournement *silencieux* (fichiers portés par un repo, config), pas contre
+l'utilisateur légitime de sa propre machine ; c'est le bon périmètre.
 
 ## 8. Recommandation d'ensemble (mise à jour)
 

@@ -43,6 +43,13 @@ export interface SessionCommandInput {
    * Used by the supervisor's deck-control bridge (PLAN C5).
    */
   mcpConfig?: string
+  /**
+   * Path to a generated system-prompt extension, emitted as
+   * `--append-system-prompt-file "<path>"` on BOTH fresh and resume (the
+   * system prompt is rebuilt at every launch). Used to anchor the
+   * supervisor's role at harness level (PLAN C8).
+   */
+  appendSystemPromptFile?: string
   /** Shell-quoting flavour for the prompt (win32 = PowerShell). Test hook. */
   platform?: NodeJS.Platform
   mode: SpawnMode
@@ -58,6 +65,12 @@ function effortFlag(effort?: string): string {
 function mcpConfigFlag(mcpConfig?: string): string {
   const p = mcpConfig?.trim()
   return p ? ` --mcp-config "${p}"` : ''
+}
+
+/** ` --append-system-prompt-file "<path>"` when set, otherwise empty. */
+function appendSystemPromptFlag(path?: string): string {
+  const p = path?.trim()
+  return p ? ` --append-system-prompt-file "${p}"` : ''
 }
 
 /** ` --plugin-dir "<dir>"` when a plugin dir is set, otherwise empty. */
@@ -83,11 +96,12 @@ export function buildSessionCommandLine(input: SessionCommandInput): string {
 
   if (input.mode === 'resume' && input.prevSessionId) {
     // No args / --agent / --model: Claude auto-restores them on --fork-session.
-    // --effort and --mcp-config are the exceptions (not auto-restored).
-    return `${base}${pluginFlag(input.pluginDir)}${mcpConfigFlag(input.mcpConfig)} --resume ${input.prevSessionId} --fork-session --session-id ${input.sessionId}${effortFlag(input.effort)}`
+    // --effort, --mcp-config and --append-system-prompt-file are the
+    // exceptions (not auto-restored).
+    return `${base}${pluginFlag(input.pluginDir)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)} --resume ${input.prevSessionId} --fork-session --session-id ${input.sessionId}${effortFlag(input.effort)}`
   }
 
-  let line = `${base}${pluginFlag(input.pluginDir)}${mcpConfigFlag(input.mcpConfig)} --session-id ${input.sessionId}`
+  let line = `${base}${pluginFlag(input.pluginDir)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)} --session-id ${input.sessionId}`
   const extra = input.args?.trim()
   if (extra) line += ` ${extra}`
   line += effortFlag(input.effort)

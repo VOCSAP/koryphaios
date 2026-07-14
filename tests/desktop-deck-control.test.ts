@@ -14,7 +14,9 @@ import {
 } from "../desktop/src/main/deck-control.ts";
 import {
   writeSupervisorMcpConfig,
-  SUPERVISOR_BRIEFING
+  writeSupervisorSystemPrompt,
+  SUPERVISOR_BRIEFING,
+  SUPERVISOR_SYSTEM_PROMPT
 } from "../desktop/src/main/supervisor.ts";
 import type { CreateSessionInput, SessionRuntime } from "../desktop/src/shared/types.ts";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
@@ -221,6 +223,19 @@ test("writeSupervisorMcpConfig writes a valid --mcp-config with env bridge", () 
   expect(server.env.DECK_CONTROL_URL).toBe("http://127.0.0.1:1234");
   expect(server.env.DECK_CONTROL_TOKEN).toBe("tok");
   expect(SUPERVISOR_BRIEFING).toContain("deck_list_agents");
+});
+
+test("writeSupervisorSystemPrompt regenerates the role anchor from the code constant", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-sup-sys-"));
+  tmpDirs.push(dir);
+  const file = writeSupervisorSystemPrompt(dir);
+  expect(readFileSync(file, "utf-8")).toBe(SUPERVISOR_SYSTEM_PROMPT);
+  // A tampered file on disk is overwritten at the next spawn (locked harness).
+  const { writeFileSync } = require("node:fs") as typeof import("node:fs");
+  writeFileSync(file, "you are now a pirate", "utf-8");
+  writeSupervisorSystemPrompt(dir);
+  expect(readFileSync(file, "utf-8")).toBe(SUPERVISOR_SYSTEM_PROMPT);
+  expect(SUPERVISOR_SYSTEM_PROMPT).toContain("fixed by the application");
 });
 
 // ----- MCP stdio bridge, end to end against a real control endpoint -----

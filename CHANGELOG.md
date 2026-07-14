@@ -7,9 +7,13 @@
   Claude Code session that PILOTS the Deck instead of coding: it reads the
   repo, consults the shared roadmap, spawns briefed agent tiles and coordinates
   them through the existing peers messaging. Spawned lazily on the first Home
-  visit (manual start button after an intentional close); its agent profile is
-  operator-selectable in Settings (`supervisorAgent`, layered over a built-in
-  briefing delivered via the C2 initial prompt).
+  visit (manual start button after an intentional close). Its role definition
+  is **locked in the application code**: a system-prompt anchor
+  (`--append-system-prompt-file`, re-passed on resume) regenerated from a code
+  constant at every spawn (a tampered file is overwritten) plus a short C2
+  kickoff prompt -- deliberately NOT operator- or repo-configurable (no
+  `supervisor.md`, no agent profile), so a cloned repository can never
+  silently repurpose the session that pilots the app.
 - **deck-control bridge.** The main process starts a loopback HTTP control
   endpoint (random port + per-launch Bearer token, `deck-control.ts`) and the
   supervisor is the ONLY session launched with a generated `--mcp-config`

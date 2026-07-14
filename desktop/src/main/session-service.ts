@@ -213,9 +213,10 @@ export class SessionService extends EventEmitter {
       prompt: input.prompt?.trim() || '',
       // Filled by the ipc layer after `git worktree add` (PLAN C4).
       worktree: input.worktree,
-      // Supervisor session (PLAN C5): main-only inputs.
+      // Supervisor session (PLAN C5/C8): main-only inputs.
       supervisor: input.supervisor || undefined,
       mcpConfig: input.mcpConfig?.trim() || undefined,
+      appendSystemPromptFile: input.appendSystemPromptFile?.trim() || undefined,
       createdAt: Date.now()
     }
     this.defs.push(def)
@@ -504,6 +505,7 @@ export class SessionService extends EventEmitter {
         effort: def.effort,
         pluginDir: this.pluginDir,
         mcpConfig: def.mcpConfig,
+        appendSystemPromptFile: def.appendSystemPromptFile,
         mode: 'resume'
       })
     } else {
@@ -517,6 +519,7 @@ export class SessionService extends EventEmitter {
         pluginDir: this.pluginDir,
         prompt: def.prompt,
         mcpConfig: def.mcpConfig,
+        appendSystemPromptFile: def.appendSystemPromptFile,
         mode: 'fresh'
       })
     }

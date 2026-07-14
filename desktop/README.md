@@ -58,8 +58,10 @@ discovery.
   `.claude/agents`), spawns briefed tiles (optionally one worktree each) and
   coordinates them via peer messages. It is the only session bridged to the
   app (private `deck_*` MCP tools, per-launch token); destructive actions only
-  work on what it created, and spawns are capped. Pick its agent profile in
-  Settings > General.
+  work on what it created, and spawns are capped. Its role definition is fixed
+  by the application (code constants, re-anchored at system-prompt level on
+  every spawn) -- deliberately NOT operator- or repo-configurable, so a cloned
+  repository can never silently repurpose the session that pilots the app.
 - **English / French UI**, switchable live.
 
 ---

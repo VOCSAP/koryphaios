@@ -22,7 +22,12 @@ import type { SessionRuntime } from '@shared/types'
 import { listAgents } from './agents'
 import { createSessionWithWorktree } from './create-session'
 import { startDeckControl, type DeckControlDeps, type DeckControlServer } from './deck-control'
-import { SUPERVISOR_BRIEFING, SUPERVISOR_NAME, writeSupervisorMcpConfig } from './supervisor'
+import {
+  SUPERVISOR_BRIEFING,
+  SUPERVISOR_NAME,
+  writeSupervisorMcpConfig,
+  writeSupervisorSystemPrompt
+} from './supervisor'
 import {
   createWorktree,
   listWorktrees,
@@ -178,8 +183,11 @@ let controlServer: DeckControlServer | null = null
 
 /**
  * Return the live supervisor session, resume an exited one, or spawn it:
- * deck-control endpoint up, --mcp-config regenerated (per-launch token), the
- * operator-picked agent profile (Settings) layered over the built-in briefing.
+ * deck-control endpoint up, --mcp-config regenerated (per-launch token), role
+ * anchored at system-prompt level via a file regenerated from the CODE
+ * CONSTANT (never operator/repo-configurable -- PLAN C8 security decision:
+ * a customizable harness could silently repurpose a session that pilots the
+ * app; no --agent profile for the supervisor for the same reason).
  */
 const ensureSupervisor = async (): Promise<SessionRuntime> => {
   const existing = service.list().find((s) => s.supervisor)
@@ -192,20 +200,21 @@ const ensureSupervisor = async (): Promise<SessionRuntime> => {
     throw new Error('deck-control MCP script missing -- run `npm run build:mcp`')
   }
   if (!controlServer) controlServer = await startDeckControl(controlDeps)
+  const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
   const mcpConfig = writeSupervisorMcpConfig({
-    dir: join(app.getPath('userData'), APP_STATE_SUBDIR),
+    dir: stateDir,
     mcpScriptPath: mcpScript,
     execPath: process.execPath,
     controlUrl: controlServer.url,
     controlToken: controlServer.token
   })
-  const agent = getConfig().supervisorAgent?.trim() || ''
+  const appendSystemPromptFile = writeSupervisorSystemPrompt(stateDir)
   return service.create({
     name: SUPERVISOR_NAME,
-    agent: agent || undefined,
     prompt: SUPERVISOR_BRIEFING,
     supervisor: true,
     mcpConfig,
+    appendSystemPromptFile,
     announce: 'supervisor session joined this group'
   })
 }

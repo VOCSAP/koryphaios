@@ -55,6 +55,13 @@ export interface SessionDef {
    * --fork-session). Set only for the supervisor (deck-control bridge).
    */
   mcpConfig?: string
+  /**
+   * Path of a generated system-prompt extension passed as
+   * `--append-system-prompt-file` on BOTH fresh and resume. Set only for the
+   * supervisor: its role anchor, regenerated from a CODE CONSTANT at every
+   * spawn (never operator/repo-configurable -- PLAN C8 security decision).
+   */
+  appendSystemPromptFile?: string
   createdAt: number
 }
 
@@ -136,11 +143,6 @@ export interface AppConfig {
    * (quota.ts). Global default, overridable per session (SessionDef.autoResume).
    */
   autoResumeQuota: boolean
-  /**
-   * Agent profile the Home supervisor session launches with (PLAN C5), from
-   * the .claude/agents scan. Empty = no --agent (built-in briefing only).
-   */
-  supervisorAgent: string
 }
 
 /** A selectable language for the settings picker: stable code + native label. */
@@ -214,6 +216,8 @@ export interface CreateSessionInput {
   supervisor?: boolean
   /** MAIN-only (PLAN C5): --mcp-config path re-passed on every spawn. */
   mcpConfig?: string
+  /** MAIN-only (PLAN C8): --append-system-prompt-file path (supervisor anchor). */
+  appendSystemPromptFile?: string
   /** Optional explicit colour (hex); falls back to the rotating palette. */
   color?: string
   /**

@@ -31,7 +31,8 @@
 | 2026-07-14 | session exploration (suite) | C3-M3/M4 | Rail Agents\|Roadmap + RoadmapView (MoSCoW, CRUD, détail, poll 5 s), roadmap-service.ts (project_key miroir de server.ts) + IPC, « Lancer un agent sur cet item » (prompt C2 + in_progress + annonce), export/import JSON + cli roadmap-export/import. Versions bump 0.4.0 (core + desktop). | C3 code complet ; vérif visuelle UI au premier lancement réel. Ensuite : C4 (worktrees). |
 | 2026-07-14 | session exploration (suite) | C4 | worktree-service.ts (add/list/remove, jamais force ni suppression de branche), champ branche du menu avancé (création côté IPC, cwd = worktree), badge ⎇, dialog de nettoyage à la fermeture, hook worktreeInit en arrière-plan, 6 tests repo jetable. | Vérif manuelle 2 agents / 2 worktrees. Ensuite : C5 (superviseur). |
 | 2026-07-14 | session exploration (suite) | C5 | deck-control.ts (endpoint loopback + garde-fous ownership/cap), MCP stdio sans dépendance (build:mcp -> deck-plugin/mcp), supervisor.ts (--mcp-config généré + briefing C2), rail Home + HomeView (spawn lazy), profil sélectionnable Settings, filtres Agents/tuiles, 5 tests dont MCP stdio de bout en bout. Desktop bump 0.5.0. **Tous les chantiers C1-C5 sont codés.** | Validations manuelles restantes (C1 épisode réel, C3 UI, C4 2 worktrees, C5 scénario cible) au premier lancement réel de l'app. |
-| 2026-07-14 | session exploration (suite) | — | Exploration C6/C7/C8 (EXPLORATION §7) : vue Worktrees, import de plan par agent one-shot, harness superviseur via --append-system-prompt-file (vérifié doc CC). **Dogfooding réel de C3** : items C6/C7/C8 créés via les tools roadmap_* de cette session (broker auto-spawné) puis exportés par `cli.ts roadmap-export` → `roadmap-seed-v0.6.json` (re-keyé github.com/vocsap/claude-peers-mcp), importable sur ton poste : `bun cli.ts roadmap-import roadmap-seed-v0.6.json`. | Prochain chantier au choix : C6, C7 ou C8. |
+| 2026-07-14 | session exploration (suite) | — | Exploration C6/C7/C8 (EXPLORATION §7) : vue Worktrees, import de plan par agent one-shot, harness superviseur via --append-system-prompt-file (vérifié doc CC). **Dogfooding réel de C3** : items C6/C7/C8 créés via les tools roadmap_* de cette session (broker auto-spawné) puis exportés par `cli.ts roadmap-export` → `roadmap-seed-v0.6.json` (re-keyé github.com/vocsap/claude-peers-mcp), importable sur ton poste : `bun cli.ts roadmap-import roadmap-seed-v0.6.json`. | Prochain chantier au choix : C6 ou C7 (C8 traité). |
+| 2026-07-14 | session exploration (suite) | C8 | Verrouillage du harness superviseur (décision sécurité opérateur) : SUPERVISOR_SYSTEM_PROMPT constante code ancrée via --append-system-prompt-file (fichier régénéré à chaque spawn, écrasé si trafiqué, re-passé au resume), retrait de l'option supervisorAgent de Settings, prompt d'import C7 verrouillé par la même règle. bun test 313/313. | C6 (vue Worktrees) et C7 (import de plan) restent à implémenter. |
 
 ---
 
@@ -294,7 +295,8 @@ délégués à un agent one-shot (EXPLORATION §7.2).
 ### Jalons
 - [ ] Bouton « Importer un plan » dans l'en-tête de `RoadmapView.tsx` →
       `dialog.showOpenDialog` (fichier .md) via IPC.
-- [ ] Prompt d'import composé (module partagé, style `composeItemPrompt`) :
+- [ ] Prompt d'import : **constante dans le code de l'app** (décision C8 —
+      jamais un template configurable, pour éviter tout détournement) :
       lire le fichier, `roadmap_add` par item (tags `import` + nom du plan,
       depends_on évidents), résumé, `/exit` (la tuile s'auto-ferme, v0.3.3).
 - [ ] Spawn de l'agent one-shot via le create existant (C2) ; bascule vue
@@ -305,27 +307,33 @@ délégués à un agent one-shot (EXPLORATION §7.2).
 ### Done quand
 - [ ] Importer `PLAN-v0.4.md` produit des items cohérents dans la vue.
 
-## C8 — Harness superviseur personnalisable (~0,5 j) → v0.6
+## C8 — Harness superviseur **verrouillé** (~0,5 j) — FAIT
 
-**Objectif** : ancrer/étendre le rôle du superviseur au niveau **system
-prompt** (pas par tour — `UserPromptSubmit` écarté), via un fichier
-opérateur (EXPLORATION §7.3 ; `--append-system-prompt-file` vérifié
-fonctionnel en interactif).
+**Objectif révisé** (décision sécurité opérateur, EXPLORATION §7.3) : ancrer
+le rôle du superviseur au niveau **system prompt**, mais depuis des
+**constantes du code uniquement** — aucun fichier opérateur/repo, aucun
+profil d'agent : une personnalisation permettrait à un repo cloné de
+détourner silencieusement la session qui pilote l'app.
 
 ### Jalons
-- [ ] `resolveSupervisorPromptFile()` dans `supervisor.ts` :
-      `.claude/claude-peers/supervisor.md` (projet) >
-      `<configDir global>/supervisor.md` ; absent = rien.
-- [ ] `appendSystemPromptFile` dans `session-command.ts` (même patron que
-      `mcpConfig` : émis sur frais ET resume) + `SessionDef` + passage au
-      spawn superviseur.
-- [ ] Note dans Settings (à côté du profil superviseur) + doc README.
-- [ ] Tests : résolution du fichier (préséance), présence du flag dans la
-      ligne de commande, resume inclus.
+- [x] `SUPERVISOR_SYSTEM_PROMPT` (constante code, avec consigne de refus de
+      détournement) + `writeSupervisorSystemPrompt()` : fichier généré dans
+      l'app-state et **réécrit à chaque spawn** (un fichier trafiqué est
+      écrasé).
+- [x] `appendSystemPromptFile` dans `session-command.ts` (même patron que
+      `mcpConfig` : émis sur frais ET resume) + `SessionDef` + spawn
+      superviseur.
+- [x] **Retrait** de l'option `supervisorAgent` de Settings (livrée en C5,
+      invalidée par la décision : un profil d'agent remplace le system
+      prompt).
+- [x] C7 verrouillé par la même règle : le prompt de l'agent d'import sera
+      une constante du code (jalon reformulé dans C7).
+- [x] Tests : flags frais + resume (`desktop-launch`), régénération du
+      fichier écrasant une altération (`desktop-deck-control`).
 
 ### Done quand
-- [ ] Un `supervisor.md` projet change visiblement le comportement du
-      superviseur au prochain démarrage, sans hook par tour.
+- [x] Le rôle du superviseur est défini exclusivement par le code de l'app,
+      ancré au system prompt, ré-ancré à chaque spawn/resume.
 
 ---
 
