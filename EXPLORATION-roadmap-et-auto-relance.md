@@ -15,6 +15,9 @@
 >
 > Recherche effectuée le 2026-07-14 sur les sources des deux repos + le code
 > claude-peers v0.3.4.
+>
+> **Suivi d'exécution** : le plan de travail multi-sessions (jalons,
+> checkboxes, journal) vit dans [`PLAN-v0.4.md`](./PLAN-v0.4.md).
 
 ---
 
