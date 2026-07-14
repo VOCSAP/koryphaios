@@ -1,6 +1,6 @@
-# Exploration : Roadmap partagée + auto-relance quota dans la Deck
+# Exploration : Roadmap partagée, auto-relance quota, worktrees, superviseur
 
-> Document d'exploration (pas un DESIGN figé). Étudie deux fonctionnalités vues
+> Document d'exploration (pas un DESIGN figé). Étudie des fonctionnalités vues
 > dans des repos publics et leur transposition dans claude-peers / la Deck :
 >
 > 1. **Roadmap** — saisie / suivi / listing de features, bugs, dette, idées,
@@ -9,6 +9,9 @@
 >    fork d'AndyMik90/Aperant).
 > 2. **Auto-relance quota** — reprise automatique des sessions bloquées par la
 >    limite horaire d'usage (inspiré de [henryaj/autoclaude](https://github.com/henryaj/autoclaude)).
+> 3. **Worktrees** (§5) — sessions isolées dans des working trees git séparés.
+> 4. **Session superviseur** (§6) — une session Claude Code « chapeau » qui
+>    pilote la Deck elle-même (spawn d'agents, worktrees, templates, roadmap).
 >
 > Recherche effectuée le 2026-07-14 sur les sources des deux repos + le code
 > claude-peers v0.3.4.
@@ -298,13 +301,199 @@ UI + tests ≈ **1-2 jours**. Aucun impact broker/MCP.
 
 ---
 
-## 4. Recommandation d'ensemble
+## 5. Proposition C — Worktrees : des sessions isolées sur le même repo
 
-1. **Commencer par l'auto-relance quota** (Proposition B) : petite, isolée,
-   valeur immédiate pour toute Deck existante, zéro décision d'architecture.
-2. **Puis la Roadmap** (Proposition A) dans l'ordre M1 → M4 : le broker et le
-   MCP d'abord (utilisables par les agents avant même que l'UI existe), l'UI
-   Deck ensuite.
-3. Garder Worktrees comme exploration suivante ; Ideation devient gratuit
-   après la roadmap ; le reste d'Auto-Claude (Insights, Changelog, Graphiti,
-   sync issues) est écarté ou reporté.
+### 5.1 C'est quoi, un worktree git ?
+
+Un clone git a normalement UN répertoire de travail. `git worktree` permet
+d'attacher au même clone (même `.git`, même historique, mêmes objets)
+**plusieurs répertoires de travail**, chacun sur sa propre branche :
+
+```bash
+git worktree add ../mon-repo--fix-login -b fix-login   # crée le dossier + la branche
+git worktree list                                      # les worktrees du clone
+git worktree remove ../mon-repo--fix-login             # supprime le dossier (la branche reste)
+```
+
+Chaque worktree est un dossier complet et autonome (on peut y builder, y
+lancer des tests, y ouvrir un éditeur) mais il partage l'historique : un
+commit fait dans un worktree est immédiatement visible des autres. Deux
+worktrees ne peuvent pas être sur la même branche (garde-fou git). Coût
+quasi nul : pas de re-clone, les objets sont partagés.
+
+### 5.2 Pourquoi c'est central pour le multi-agent
+
+Aujourd'hui, deux tuiles Deck sur le même projet travaillent **dans le même
+dossier** : deux agents qui codent en parallèle se marchent dessus (diffs
+mélangés sur la même branche, `git status` pollué, builds concurrents,
+checkout impossible). C'est LA limite du parallélisme actuel.
+
+Avec worktrees : chaque agent reçoit son propre dossier + sa propre branche ;
+l'intégration se fait ensuite par les moyens git normaux (merge/rebase/PR),
+éventuellement par un agent « intégrateur ». C'est exactement le modèle
+d'Auto-Claude : chaque tâche de build s'exécute dans un worktree (« your main
+branch stays safe »), avec résolution de conflits assistée par IA au retour.
+
+### 5.3 Intégration Deck proposée
+
+- **Create-menu (avancé)** : une option « ➕ dans un nouveau worktree » avec un
+  nom de branche (défaut dérivé du nom de session : `agent/<nom>`). Le main
+  process exécute `git worktree add <racine>/.worktrees/<nom> -b <branche>`
+  (dossier sous `.worktrees/`, à ajouter au `.gitignore` du projet) puis
+  spawne la session avec `cwd = <worktree>`.
+- **Sidebar** : badge branche sur la ligne de session (le `row-sub` affiche
+  déjà le cwd en tooltip ; ajouter `⎇ fix-login`).
+- **Fermeture** : à la suppression de la tuile, proposer « supprimer aussi le
+  worktree ? » (`git worktree remove`, la branche est conservée). Jamais
+  automatique : le travail non mergé doit survivre à la fermeture.
+- **Synergies fortes avec l'existant** :
+  - `project_key` = remote git normalisé → identique dans tous les worktrees
+    du même repo → **la roadmap (§2) est automatiquement partagée** entre la
+    session sur `main` et celles dans les worktrees ;
+  - le `peer_id` par défaut dérive du cwd → chaque worktree-session a un nom
+    de pair distinct et lisible ;
+  - groupe de la fenêtre inchangé (le scope est forcé par env, pas par cwd).
+- **Points d'attention** : dépendances non partagées (un `node_modules` par
+  worktree → prévoir un hook post-création configurable, ex. `bun install`) ;
+  repos sans remote (fallback project_key déjà prévu §2.1) ; Windows : chemins
+  longs sous `.worktrees/` à surveiller.
+
+Effort : ~1 à 1,5 jour (service worktree + create-menu + badge + cleanup +
+tests sur repo jetable).
+
+---
+
+## 6. Proposition D — Session « superviseur » : Claude pilote la Deck
+
+### 6.1 L'idée
+
+Un rail de navigation **Home** avec une session Claude Code « chapeau »,
+pleine fenêtre, qui ne code pas elle-même mais **pilote l'application** :
+scanner le repo, lire la roadmap, spawner les bons agents avec les bons
+profils (`team-lead`, `dev`, `reviewer`, `devops`, `debugger`…), créer des
+worktrees, appliquer/créer des templates, superviser l'avancement.
+
+Cas d'usage cible :
+
+> « Reprends le développement du repo actuel » → le superviseur scanne les
+> fichiers, appelle `roadmap_list`, choisit les items `must` non traités,
+> crée un worktree par item, spawne `dev` et `reviewer` dessus avec un prompt
+> initial, puis coordonne par messages peers.
+
+### 6.2 Constat clé : 70 % du mécanisme existe déjà
+
+Le superviseur est **une tuile Claude Code normale** spawnée par la Deck, dans
+le même groupe forcé que les autres. Or tout membre du groupe a déjà, via le
+MCP claude-peers : `list_peers` (voir les agents et leurs `summary`),
+`send_message` (leur donner des instructions, recevoir leurs réponses),
+`set_summary`. **La coordination inter-agents est donc déjà résolue** — c'est
+le cœur du produit. Ce qui manque, c'est uniquement le bras « piloter l'app » :
+spawner/fermer des tuiles, créer des worktrees, manipuler les templates.
+
+À noter : Claude Code sait déjà spawner des sous-agents *internes* (tool
+Agent), mais ils sont invisibles et meurent avec le tour. Ce que veut
+l'opérateur ici, c'est des **tuiles réelles, observables, persistantes** —
+d'où le passage par la Deck.
+
+### 6.3 Mécanisme proposé : un MCP « deck-control » réservé au superviseur
+
+1. **Endpoint de contrôle dans le main process Electron** : petit serveur HTTP
+   loopback (`127.0.0.1`, port aléatoire, Bearer token régénéré à chaque
+   lancement) qui expose en interne les services existants (SessionService,
+   template-store, futur worktree-service). Même patron que le broker : la
+   Deck sait déjà faire ça proprement.
+2. **Serveur MCP stdio `deck-control`** (nouveau fichier, ~200 lignes, même
+   style que `server.ts`) : traduit des tools MCP en appels HTTP vers cet
+   endpoint. URL + token passés par env au spawn.
+3. **Injection sélective** : SEULE la tuile superviseur est lancée avec
+   `--mcp-config <fichier généré>` branchant `deck-control` (+ env). Les
+   agents normaux ne l'ont pas → séparation des privilèges nette : un `dev`
+   ne peut pas fermer les tuiles des autres.
+
+**Surface de tools v1 :**
+
+| Tool | Effet (via services existants) |
+|---|---|
+| `deck_list_agents` | Scan `.claude/agents` projet + `~/.claude/agents` (= `listAgents()`, déjà écrit) — **le dossier de profils de l'opérateur est donc vu tel quel** |
+| `deck_list_models` / `deck_list_presets` | `resolveLaunchConfig()` (déjà écrit) |
+| `deck_spawn_session` | `SessionService.create({name, agent, model, effort, cwd, worktree?, initial_prompt?})` |
+| `deck_list_sessions` | `SessionService.list()` (nom, peer_id, statut, thinking, cwd) |
+| `deck_restart_session` | `SessionService.restart()` |
+| `deck_close_session` | `SessionService.remove()` — garde-fou : cf. §6.5 |
+| `deck_create_worktree` / `deck_list_worktrees` / `deck_remove_worktree` | worktree-service (§5) |
+| `deck_list_templates` / `deck_apply_template` / `deck_save_template` | template-store (déjà écrit) |
+| `deck_announce` | mégaphone `/announce` existant |
+
+La roadmap n'apparaît pas ici : le superviseur l'a déjà par les tools
+`roadmap_*` du MCP claude-peers (§2.4). Chaque brique reste à sa place.
+
+### 6.4 Prérequis transverse : le prompt initial au spawn
+
+Pour « spawne le dev avec l'item #12 en consigne », il faut pouvoir attacher
+un prompt initial à une création de session. Le type `LaunchPreset.prompt`
+existe déjà dans `launch-config.ts` (« used by the UI, M5 ») **mais n'est
+câblé nulle part**. Deux voies :
+
+- **Argument positionnel** : `claude "<prompt>"` démarre l'interactif avec le
+  prompt soumis — le plus simple et déterministe ; passe par
+  `buildSessionCommandLine` (attention au quoting shell, déjà géré pour
+  `--model "opus[1m]"`).
+- **Injection PTY différée** : écrire `prompt + \r` quand la session est
+  prête (peer_id résolu). Utile pour le resume, mais plus fragile (timing).
+
+Recommandation : positionnel pour le spawn frais, et ce chantier débloque
+d'un coup les presets M5, le « Lancer un agent sur cet item » de la roadmap
+(§2.5) et le superviseur.
+
+### 6.5 Garde-fous
+
+- **Token par fenêtre + injection sélective** : seule la tuile Home a le MCP
+  de contrôle ; le token ne traverse jamais le repo ni la config projet.
+- **Opérations destructives** (`deck_close_session`, `deck_remove_worktree`) :
+  politique v1 = autorisées uniquement sur les objets que le superviseur a
+  lui-même créés (le contrôle endpoint tague `created_by: 'supervisor'`) ;
+  pour le reste, la Deck affiche un ConfirmDialog à l'opérateur (IPC existant).
+- **Plafond de spawn** (ex. 8 tuiles) pour éviter l'emballement.
+- Pour ses tools fichiers/bash, le superviseur reste une session Claude Code
+  normale : les modes de permission de l'opérateur s'appliquent.
+
+### 6.6 UX
+
+- Rail de navigation : **Home | Agents | Roadmap** (extension naturelle du
+  rail proposé §2.5).
+- **Home** = la tuile superviseur pleine largeur, spawnée à la première
+  visite. Son profil d'agent est **sélectionnable** (Settings) parmi le scan
+  `.claude/agents` — l'opérateur peut donc pointer son `team-lead` maison —
+  avec en défaut un profil `deck-supervisor.md` embarqué dans le plugin dir de
+  la Deck (instructions : « tu pilotes la Deck ; tu ne codes pas toi-même ;
+  utilise deck_* pour l'app, roadmap_* pour le backlog, send_message pour
+  coordonner »).
+- La ligne du superviseur n'apparaît pas dans la liste « Agents » (c'est le
+  chef d'orchestre, pas un musicien) mais il EST un peer visible des agents.
+
+### 6.7 Effort
+
+- Endpoint contrôle + MCP deck-control + injection sélective : ~2 j.
+- Rail Home + tuile pinnée + profil superviseur embarqué : ~1 j.
+- Prompt initial au spawn (§6.4, prérequis partagé) : ~0,5 j.
+- Garde-fous + tests : ~1 j.
+  Total ≈ 4-5 j, APRÈS worktrees (§5) et idéalement après la roadmap (§2),
+  que le superviseur consomme.
+
+---
+
+## 7. Recommandation d'ensemble (mise à jour)
+
+Ordre de valeur/risque croissant, chaque étape rendant la suivante plus utile :
+
+1. **Auto-relance quota** (§3) : petite, isolée, valeur immédiate. ~1-2 j.
+2. **Prompt initial au spawn** (§6.4) : minuscule, débloque presets M5,
+   roadmap→agent et superviseur. ~0,5 j.
+3. **Roadmap** (§2) M1→M4 : broker + MCP d'abord, UI ensuite. ~5-6 j.
+4. **Worktrees** (§5) : parallélisme réel des agents. ~1-1,5 j.
+5. **Superviseur** (§6) : la couche d'orchestration qui capitalise sur tout
+   ce qui précède (roadmap à lire, worktrees à créer, agents à spawner,
+   messagerie peers pour coordonner). ~4-5 j.
+
+Ideation devient gratuit après la roadmap ; Insights/Changelog/Graphiti/sync
+issues restent écartés ou reportés.
