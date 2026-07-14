@@ -210,6 +210,7 @@ export class SessionService extends EventEmitter {
       sessionId: '',
       color: input.color?.trim() || paletteColor(cfg.palette ?? DEFAULT_PALETTE, this.defs.length),
       effort: input.effort?.trim() || '',
+      prompt: input.prompt?.trim() || '',
       createdAt: Date.now()
     }
     this.defs.push(def)
@@ -503,6 +504,7 @@ export class SessionService extends EventEmitter {
         args: def.args,
         effort: def.effort,
         pluginDir: this.pluginDir,
+        prompt: def.prompt,
         mode: 'fresh'
       })
     }

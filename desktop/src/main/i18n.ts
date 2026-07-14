@@ -188,6 +188,10 @@ export const EN_DEFAULTS: Record<string, string> = {
   'create.effortSmarter': 'Smarter',
   'create.extraArgs': 'Extra launch args',
   'create.extraArgsPlaceholder': 'e.g. --add-dir ..',
+  'create.prompt': 'Initial prompt',
+  'create.promptPlaceholder': 'e.g. Read PLAN-v0.4.md and start C2',
+  'create.promptHelp':
+    'Submitted to Claude as soon as the session opens (fresh launch only; never re-played on resume).',
   'create.announce': 'Join announcement',
   'create.announcePlaceholder': 'agent: …, model: …, effort: …',
   'create.announceHelp':

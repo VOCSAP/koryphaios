@@ -26,6 +26,7 @@
 |---|---|---|---|---|
 | 2026-07-14 | exploration initiale | — | Exploration + design validés, création du plan | Démarrer C1 |
 | 2026-07-14 | session exploration (suite) | C1 | C1 complet : quota.ts, branchement session-service, toggle global + override par session, IPC session:quota, dot orange + badge + toast, i18n en/fr, 16 tests fixtures. bun test 280/280, typecheck node+web verts. Desktop bump 0.3.5. | C1 à valider à la main sur un vrai épisode de limite (test end-to-end impossible en CI). Ensuite : C2. |
+| 2026-07-14 | session exploration (suite) | C2 | C2 complet : prompt positionnel au spawn frais (quotePromptArg par plateforme), SessionDef.prompt persisté, champ « Prompt initial » + presets câblés dans CreateMenu, i18n, 5 tests. bun test 285/285, typecheck verts. | Vérif visuelle du champ au prochain lancement de l'app. Ensuite : C3 (roadmap, M1 broker). |
 
 ---
 
@@ -76,20 +77,26 @@ session (design §6.4) — débloque les presets M5, « Lancer un agent sur cet
 item » (C3-M4) et le superviseur (C5).
 
 ### Jalons
-- [ ] `CreateSessionInput.prompt` dans `desktop/src/shared/types.ts`.
-- [ ] `session-command.ts` : argument positionnel `claude "<prompt>"` sur le
-      spawn **frais uniquement** (jamais sur resume — Claude restaure la
-      conversation), quoting shell à la manière de `--model "opus[1m]"`.
-- [ ] `session-service.ts` : transporter `input.prompt` vers
-      `buildSessionCommandLine` (spawn frais).
-- [ ] Câbler `LaunchPreset.prompt` (déclaré dans `launch-config.ts`, jamais
-      utilisé) dans `CreateMenu.tsx` ; champ prompt libre dans le menu avancé.
-- [ ] Tests `buildSessionCommandLine` : quoting (guillemets, `$`, backticks),
-      resume sans prompt, prompt vide = comportement actuel.
+- [x] `CreateSessionInput.prompt` + `SessionDef.prompt` dans
+      `desktop/src/shared/types.ts` (persisté : un restart frais d'une session
+      expirée jamais utilisée rejoue le prompt ; un resume jamais).
+- [x] `session-command.ts` : argument positionnel sur le spawn **frais
+      uniquement**, ajouté en dernier ; quoting single-quote par plateforme
+      (`quotePromptArg` : POSIX `'\''`, PowerShell `''` — inerte pour `$`,
+      backticks et retours à la ligne dans les deux shells).
+- [x] `session-service.ts` : `input.prompt` → `def.prompt` →
+      `buildSessionCommandLine` (branche fraîche).
+- [x] `LaunchPreset.prompt` câblé dans `CreateMenu.tsx` (pré-remplit le champ,
+      dernier preset gagnant) + champ « Prompt initial » libre (textarea),
+      i18n en/fr + EN_DEFAULTS.
+- [x] Tests `buildSessionCommandLine`/`quotePromptArg` dans
+      `tests/desktop-launch.test.ts` : position, apostrophes/`$`/backticks/
+      newlines, quoting win32, resume sans prompt, prompt vide.
 
 ### Done quand
-- Un preset avec `prompt` ouvre une session qui démarre sur ce prompt.
-- Un resume ne rejoue jamais le prompt initial.
+- [x] Un preset avec `prompt` ouvre une session qui démarre sur ce prompt
+      (pré-rempli menu avancé → arg positionnel ; à confirmer visuellement).
+- [x] Un resume ne rejoue jamais le prompt initial (testé).
 
 ---
 

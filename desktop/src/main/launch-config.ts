@@ -36,7 +36,7 @@ export interface LaunchPreset {
   label: string
   /** Extra args appended after --session-id on a fresh launch. */
   args: string
-  /** Optional prompt to send once the session is ready (used by the UI, M5). */
+  /** Optional initial prompt: pre-fills the create menu's prompt field (PLAN C2). */
   prompt?: string
 }
 

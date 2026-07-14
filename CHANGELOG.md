@@ -16,6 +16,14 @@
   limited, with an "auto-resume at HH:MM" badge and a toast on injection
   (`session:quota` IPC event). New `desktop/src/main/quota.ts` +
   `tests/desktop-quota.test.ts` (PLAN-v0.4 C1).
+- **Initial prompt at spawn.** A session can now be created with a prompt that
+  is submitted to Claude as its positional argument on the fresh launch —
+  never re-played on resume (`--resume` restores the conversation). New
+  "Initial prompt" field in the advanced create menu; launch presets'
+  `prompt` field (declared since M5, previously unwired) now pre-fills it.
+  Quoting is platform-aware (POSIX `'\''` vs PowerShell `''`), covered in
+  `tests/desktop-launch.test.ts`. Groundwork for roadmap→agent and the
+  supervisor (PLAN-v0.4 C2).
 
 ## v0.3.4 -- 2026-06-03
 

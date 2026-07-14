@@ -41,6 +41,9 @@ export function CreateMenu({ onClose }: { onClose: () => void }): React.JSX.Elem
   const [extended, setExtended] = useState(false)
   const [effortIdx, setEffortIdx] = useState(0)
   const [extraArgs, setExtraArgs] = useState('')
+  // Initial prompt, submitted as Claude's positional argument on the fresh
+  // launch (PLAN C2). Presets with a `prompt` pre-fill it (last preset wins).
+  const [prompt, setPrompt] = useState('')
   const [color, setColor] = useState('#4f86ff')
   const [customColor, setCustomColor] = useState(false)
   const [folder, setFolder] = useState<string | null>(null)
@@ -84,6 +87,7 @@ export function CreateMenu({ onClose }: { onClose: () => void }): React.JSX.Elem
 
   const applyPreset = (p: LaunchPreset): void => {
     setExtraArgs((prev) => [prev.trim(), p.args.trim()].filter(Boolean).join(' '))
+    if (p.prompt?.trim()) setPrompt(p.prompt.trim())
   }
 
   const browse = async (): Promise<void> => {
@@ -103,6 +107,7 @@ export function CreateMenu({ onClose }: { onClose: () => void }): React.JSX.Elem
       model: effectiveModel || undefined,
       effort: effortLevel || undefined,
       args: extraArgs.trim() || undefined,
+      prompt: prompt.trim() || undefined,
       cwd: folder ?? undefined,
       // Only force a colour when the user explicitly picked one; otherwise the
       // main process assigns the next palette colour at spawn time.
@@ -215,6 +220,18 @@ export function CreateMenu({ onClose }: { onClose: () => void }): React.JSX.Elem
             placeholder={t('create.extraArgsPlaceholder')}
             onChange={(e) => setExtraArgs(e.target.value)}
           />
+        </label>
+
+        <label className="field">
+          <span>{t('create.prompt')}</span>
+          <textarea
+            className="announce-input"
+            rows={2}
+            value={prompt}
+            placeholder={t('create.promptPlaceholder')}
+            onChange={(e) => setPrompt(e.target.value)}
+          />
+          <small>{t('create.promptHelp')}</small>
         </label>
 
         <label className="field">

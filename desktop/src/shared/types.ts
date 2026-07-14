@@ -31,6 +31,12 @@ export interface SessionDef {
    * the global `AppConfig.autoResumeQuota`; true/false forces it for this tile.
    */
   autoResume?: boolean
+  /**
+   * Initial prompt submitted as Claude's positional argument on a FRESH launch
+   * (PLAN C2). Never re-played on resume (--resume restores the conversation);
+   * kept in the def so an expired-never-used session restarts with it.
+   */
+  prompt?: string
   createdAt: number
 }
 
@@ -169,6 +175,8 @@ export interface CreateSessionInput {
   effort?: string
   /** Extra free-form launch args appended verbatim. */
   args?: string
+  /** Initial prompt submitted on the fresh launch (positional arg, PLAN C2). */
+  prompt?: string
   /** Optional explicit colour (hex); falls back to the rotating palette. */
   color?: string
   /**

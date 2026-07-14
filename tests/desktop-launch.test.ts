@@ -10,7 +10,7 @@ import {
   DEFAULT_MODELS,
   localConfigPath
 } from "../desktop/src/main/launch-config.ts";
-import { buildSessionCommandLine } from "../desktop/src/main/session-command.ts";
+import { buildSessionCommandLine, quotePromptArg } from "../desktop/src/main/session-command.ts";
 import { buildShellInvocation } from "../desktop/src/main/shell-command.ts";
 
 const tmpDirs: string[] = [];
@@ -206,6 +206,56 @@ test("an empty/whitespace pluginDir never emits the flag", () => {
   expect(fresh).toBe("claude run --session-id id-1");
   const none = buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-1", mode: "fresh" });
   expect(none).toBe("claude run --session-id id-1");
+});
+
+// ----- initial prompt (PLAN C2) -----
+
+test("fresh launch appends the quoted prompt last (after args and --effort)", () => {
+  const line = buildSessionCommandLine({
+    baseCommand: "claude run",
+    sessionId: "id-1",
+    args: "--agent dev",
+    effort: "high",
+    prompt: "Read PLAN-v0.4.md and start C2",
+    platform: "linux",
+    mode: "fresh"
+  });
+  expect(line).toBe(
+    "claude run --session-id id-1 --agent dev --effort high 'Read PLAN-v0.4.md and start C2'"
+  );
+});
+
+test("posix prompt quoting is inert: apostrophes, $, backticks, newlines", () => {
+  expect(quotePromptArg("l'item #12: fix `foo` for $USER\nthen report", "linux")).toBe(
+    "'l'\\''item #12: fix `foo` for $USER\nthen report'"
+  );
+});
+
+test("win32 prompt quoting doubles embedded single quotes (PowerShell)", () => {
+  expect(quotePromptArg("l'item '12'", "win32")).toBe("'l''item ''12'''");
+});
+
+test("resume never re-plays the prompt (--resume restores the conversation)", () => {
+  const line = buildSessionCommandLine({
+    baseCommand: "claude run",
+    sessionId: "id-new",
+    prevSessionId: "id-old",
+    prompt: "should not appear",
+    platform: "linux",
+    mode: "resume"
+  });
+  expect(line).toBe("claude run --resume id-old --fork-session --session-id id-new");
+});
+
+test("an empty/whitespace prompt never emits a positional arg", () => {
+  const line = buildSessionCommandLine({
+    baseCommand: "claude run",
+    sessionId: "id-1",
+    prompt: "   ",
+    platform: "linux",
+    mode: "fresh"
+  });
+  expect(line).toBe("claude run --session-id id-1");
 });
 
 // ----- shell-command -----

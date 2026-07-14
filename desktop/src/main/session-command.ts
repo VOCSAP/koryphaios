@@ -31,6 +31,14 @@ export interface SessionCommandInput {
    * undefined => omit the flag (no plugin). Passed on BOTH fresh and resume.
    */
   pluginDir?: string
+  /**
+   * Initial prompt submitted as Claude's positional argument on a FRESH launch
+   * only (PLAN C2). Never re-played on resume: --resume restores the previous
+   * conversation, so the prompt already lives in the transcript.
+   */
+  prompt?: string
+  /** Shell-quoting flavour for the prompt (win32 = PowerShell). Test hook. */
+  platform?: NodeJS.Platform
   mode: SpawnMode
 }
 
@@ -46,6 +54,18 @@ function pluginFlag(pluginDir?: string): string {
   return d ? ` --plugin-dir "${d}"` : ''
 }
 
+/**
+ * Quote a free-text prompt as ONE argument of the command string the PTY shell
+ * parses (shell-command.ts: POSIX `sh -l -c "<cmd>"`, win32 PowerShell
+ * `-Command <cmd>`). Single quotes are the only quoting that is inert in both
+ * flavours (no $/backtick expansion); the embedded-quote escape differs:
+ * POSIX `'\''`, PowerShell doubles it (`''`). Newlines survive inside quotes.
+ */
+export function quotePromptArg(prompt: string, plat: NodeJS.Platform = process.platform): string {
+  if (plat === 'win32') return `'${prompt.replace(/'/g, "''")}'`
+  return `'${prompt.replace(/'/g, "'\\''")}'`
+}
+
 export function buildSessionCommandLine(input: SessionCommandInput): string {
   const base = input.baseCommand.trim()
 
@@ -59,5 +79,9 @@ export function buildSessionCommandLine(input: SessionCommandInput): string {
   const extra = input.args?.trim()
   if (extra) line += ` ${extra}`
   line += effortFlag(input.effort)
+  // Positional initial prompt, last so it never swallows a flag (fresh only --
+  // the resume branch above returns before reaching here by construction).
+  const prompt = input.prompt?.trim()
+  if (prompt) line += ` ${quotePromptArg(prompt, input.platform)}`
   return line
 }
