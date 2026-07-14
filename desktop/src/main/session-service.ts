@@ -14,6 +14,12 @@ import { resolvePeerId } from './peer-state'
 import { saveSessions } from './store'
 import { buildSessionCommandLine, type SpawnMode } from './session-command'
 import { ThinkingDetector, type ThinkingEvent } from './thinking'
+import {
+  QuotaDetector,
+  type QuotaClearEvent,
+  type QuotaLimitEvent,
+  type QuotaResumeDueEvent
+} from './quota'
 import { OpenIdRegistry } from './open-id-registry'
 import { listTranscriptIds, pickDiscoveredId, transcriptExists } from './session-transcript'
 import { clearDeskSessionId, readDeskSessionId } from './desk-session'
@@ -28,6 +34,10 @@ interface RuntimeState {
   thinking: boolean
   /** Restore-time: persisted id had no transcript, so it was not resumed. */
   expired: boolean
+  /** True while the session sits at a usage-limit screen (quota.ts). */
+  rateLimited: boolean
+  /** Epoch ms of the announced quota reset, or null when unknown/not limited. */
+  resumeAt: number | null
   /**
    * One-shot join-announce intent for a FRESH session. Set on create(), null on
    * restore (a resumed peer was already announced). Consumed (cleared) the first
@@ -52,6 +62,7 @@ export class SessionService extends EventEmitter {
   private runtime = new Map<string, RuntimeState>()
   private pty = new PtyManager()
   private thinkingDetector = new ThinkingDetector()
+  private quotaDetector = new QuotaDetector()
   private pollTimer: NodeJS.Timeout | null = null
 
   /** Live (post-fork) claude session ids open in this process; double-resume guard. */
@@ -86,6 +97,7 @@ export class SessionService extends EventEmitter {
     this.pty.on('data', (e: { id: string; data: string }) => {
       this.emit('data', e)
       this.thinkingDetector.feed(e.id, e.data)
+      this.quotaDetector.feed(e.id, e.data)
     })
     this.pty.on('exit', ({ id, exitCode }: { id: string; exitCode: number }) => {
       // pty-manager only emits 'exit' for a spontaneous process exit (the user
@@ -96,6 +108,7 @@ export class SessionService extends EventEmitter {
       const def = this.defs.find((d) => d.id === id)
       if (def?.sessionId) this.registry.release(def.sessionId)
       this.thinkingDetector.clear(id)
+      this.quotaDetector.clear(id)
 
       // A clean exit (/exit -> shell returns 0) auto-closes the tile, the way a
       // terminal tab closes when its shell exits, so it never lingers as a dead,
@@ -127,6 +140,26 @@ export class SessionService extends EventEmitter {
       r.thinking = busy
       this.emit('thinking', { id, busy })
     })
+
+    // Quota episodes (ipc -> session:quota). The detector observes/schedules;
+    // the injection decision (enabled? alive? still limited?) is made here.
+    this.quotaDetector.on('limit', ({ id, resetAt }: QuotaLimitEvent) => {
+      const r = this.runtime.get(id)
+      if (!r) return
+      r.rateLimited = true
+      r.resumeAt = resetAt
+      this.emit('quota', { id, limited: true, resetAt })
+      this.broadcast()
+    })
+    this.quotaDetector.on('clear', ({ id }: QuotaClearEvent) => {
+      const r = this.runtime.get(id)
+      if (!r || !r.rateLimited) return
+      r.rateLimited = false
+      r.resumeAt = null
+      this.emit('quota', { id, limited: false, resetAt: null })
+      this.broadcast()
+    })
+    this.quotaDetector.on('resume-due', ({ id }: QuotaResumeDueEvent) => this.autoResume(id))
   }
 
   /** Start the peer_id poll. No auto-restore: the app opens empty (see ctor). */
@@ -138,6 +171,7 @@ export class SessionService extends EventEmitter {
     if (this.pollTimer) clearInterval(this.pollTimer)
     this.pollTimer = null
     this.thinkingDetector.stop()
+    this.quotaDetector.stop()
     this.pty.killAll()
   }
 
@@ -185,6 +219,8 @@ export class SessionService extends EventEmitter {
       peerId: null,
       thinking: false,
       expired: false,
+      rateLimited: false,
+      resumeAt: null,
       // Fresh session -> announce its arrival once the peer_id resolves. The
       // advanced menu may supply a custom note; otherwise the agent/model/effort
       // default is composed downstream.
@@ -205,6 +241,7 @@ export class SessionService extends EventEmitter {
     if (def?.sessionId) this.registry.release(def.sessionId)
     this.pty.kill(id)
     this.thinkingDetector.clear(id)
+    this.quotaDetector.clear(id)
     this.defs = this.defs.filter((d) => d.id !== id)
     this.runtime.delete(id)
     this.persist()
@@ -225,6 +262,7 @@ export class SessionService extends EventEmitter {
     }
     this.pty.killAll()
     this.thinkingDetector.stop()
+    this.quotaDetector.stop()
     this.defs = []
     this.runtime.clear()
     this.persist()
@@ -269,6 +307,7 @@ export class SessionService extends EventEmitter {
     // Tear down whatever is currently live.
     this.pty.killAll()
     this.thinkingDetector.stop()
+    this.quotaDetector.stop()
     for (const d of this.defs) {
       if (d.sessionId) this.registry.release(d.sessionId)
     }
@@ -284,6 +323,8 @@ export class SessionService extends EventEmitter {
         peerId: null,
         thinking: false,
         expired: false,
+        rateLimited: false,
+        resumeAt: null,
         // Restored peers were already announced on their original join -> no
         // re-announce on restore.
         announce: null
@@ -307,6 +348,15 @@ export class SessionService extends EventEmitter {
     const def = this.defs.find((d) => d.id === id)
     if (!def || !color.trim()) return
     def.color = color.trim()
+    this.persist()
+    this.broadcast()
+  }
+
+  /** Per-session quota auto-resume override (context menu). Persisted. */
+  setAutoResume(id: string, enabled: boolean): void {
+    const def = this.defs.find((d) => d.id === id)
+    if (!def) return
+    def.autoResume = enabled
     this.persist()
     this.broadcast()
   }
@@ -465,7 +515,11 @@ export class SessionService extends EventEmitter {
       r.status = 'running'
       r.exitCode = null
       r.expired = false
+      r.rateLimited = false
+      r.resumeAt = null
     }
+    // Fresh process -> fresh quota episode state (stale buffer/timer dropped).
+    this.quotaDetector.clear(def.id)
     // sessionId may have just changed (fork-resume) -> persist before/after spawn.
     this.persist()
     // Drop any stale back-channel file from a previous run so discovery cannot
@@ -490,8 +544,37 @@ export class SessionService extends EventEmitter {
       pid: this.pty.pid(def.id),
       peerId: r?.peerId ?? null,
       thinking: r?.thinking ?? false,
-      expired: r?.expired ?? false
+      expired: r?.expired ?? false,
+      rateLimited: r?.rateLimited ?? false,
+      resumeAt: r?.resumeAt ?? null
     }
+  }
+
+  /**
+   * Inject the resume keystrokes when a quota episode's reset time passes:
+   * Escape (dismisses the /rate-limit-options menu), a 100 ms settle, then the
+   * literal prompt "continue" + Enter -- exactly what a human would type. Only
+   * fires when auto-resume is enabled for this session (per-session override,
+   * else the global setting), the PTY is alive and the episode is still open
+   * (the user may have resumed manually in the meantime).
+   */
+  private autoResume(id: string): void {
+    const def = this.defs.find((d) => d.id === id)
+    const r = this.runtime.get(id)
+    if (!def || !r) return
+    const enabled = def.autoResume ?? this.getConfig().autoResumeQuota
+    if (!enabled || !r.rateLimited || !this.pty.isAlive(id)) return
+
+    this.pty.write(id, '\x1b')
+    const t = setTimeout(() => {
+      if (!this.pty.isAlive(id)) return
+      this.pty.write(id, 'continue')
+      this.pty.write(id, '\r')
+    }, 100)
+    if (typeof t.unref === 'function') t.unref()
+    // The episode itself clears via the detector once the new turn's busy cues
+    // appear; this event only lets the renderer toast the injection.
+    this.emit('quota', { id, limited: true, resetAt: r.resumeAt, resumed: true })
   }
 
   private pollPeerIds(): void {

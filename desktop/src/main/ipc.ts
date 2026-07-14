@@ -58,6 +58,9 @@ export function registerIpc({
     service.setColor(id, color)
   )
   ipcMain.handle('sessions:restart', (_e, id: string) => service.restart(id))
+  ipcMain.handle('sessions:set-auto-resume', (_e, id: string, enabled: boolean) =>
+    service.setAutoResume(id, !!enabled)
+  )
   ipcMain.handle('sessions:peek-next-color', () => service.peekNextColor())
   ipcMain.handle('sessions:reorder', (_e, ids: string[]) => service.reorder(ids ?? []))
   // "New (clear)": save+detach the current workspace (while sessions still
@@ -148,4 +151,5 @@ export function registerIpc({
   service.on('exit', (e) => send('pty:exit', e))
   service.on('changed', (sessions) => send('sessions:changed', sessions))
   service.on('thinking', (e) => send('session:thinking', e))
+  service.on('quota', (e) => send('session:quota', e))
 }

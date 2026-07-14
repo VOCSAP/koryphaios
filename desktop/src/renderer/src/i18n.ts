@@ -20,6 +20,11 @@ export function translate(
 
 export type TFn = (key: string, params?: Record<string, string | number>) => string
 
+/** Locale-aware HH:MM for badges (quota resume time). */
+export function formatClock(epochMs: number): string {
+  return new Date(epochMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
 /** Hook returning a `t` whose identity changes when the active dict changes. */
 export function useT(): TFn {
   const dict = useDeck((s) => s.dict)

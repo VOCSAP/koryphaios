@@ -72,6 +72,8 @@ interface DeckState {
   renameSession(id: string, name: string): Promise<void>
   setColor(id: string, color: string): Promise<void>
   restartSession(id: string): Promise<void>
+  /** Per-session quota auto-resume override (context menu). */
+  setAutoResume(id: string, enabled: boolean): Promise<void>
   reorderSessions(ids: string[]): Promise<void>
   updateConfig(patch: Partial<AppConfig>): Promise<void>
   /** Broadcast a free-text operator message to all peers in the active group. */
@@ -151,6 +153,12 @@ export const useDeck = create<DeckState>((set, get) => ({
     window.api.onMenuExportTemplate(() => get().openExportTemplate(true))
     window.api.onMenuImportTemplate(() => get().openTemplates(true, { manage: true }))
     window.api.onWorkspaceCurrent((ws) => set({ currentWorkspaceName: ws?.name ?? null }))
+    // rateLimited/resumeAt state flows through onSessionsChanged (the service
+    // broadcasts on every episode transition); this listener only surfaces the
+    // injection moment as a toast.
+    window.api.onSessionQuota((e) => {
+      if (e.resumed) get().showToast('toast.quotaResumed', 'info')
+    })
     window.api.onConfigChanged((next) => {
       const prevLocale = get().config?.locale
       set({ config: next })
@@ -271,6 +279,11 @@ export const useDeck = create<DeckState>((set, get) => ({
 
   async restartSession(id) {
     await window.api.restartSession(id)
+  },
+
+  async setAutoResume(id, enabled) {
+    await window.api.setSessionAutoResume(id, enabled)
+    // The updated override arrives via onSessionsChanged (broadcast).
   },
 
   async reorderSessions(ids) {

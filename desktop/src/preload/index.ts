@@ -6,6 +6,7 @@ import type {
   LaunchConfig,
   PtyDataEvent,
   PtyExitEvent,
+  SessionQuotaEvent,
   SessionRuntime,
   SessionThinkingEvent,
   WorkspaceSummary
@@ -53,6 +54,8 @@ const api: DeckApi = {
   setSessionColor: (id: string, color: string) =>
     ipcRenderer.invoke('sessions:set-color', id, color),
   restartSession: (id: string) => ipcRenderer.invoke('sessions:restart', id),
+  setSessionAutoResume: (id: string, enabled: boolean) =>
+    ipcRenderer.invoke('sessions:set-auto-resume', id, enabled),
   peekNextColor: () => ipcRenderer.invoke('sessions:peek-next-color'),
   reorderSessions: (ids: string[]) => ipcRenderer.invoke('sessions:reorder', ids),
   newClear: () => ipcRenderer.invoke('app:new-clear'),
@@ -92,6 +95,7 @@ const api: DeckApi = {
     subscribe('sessions:changed', cb),
   onSessionThinking: (cb: (e: SessionThinkingEvent) => void) =>
     subscribe('session:thinking', cb),
+  onSessionQuota: (cb: (e: SessionQuotaEvent) => void) => subscribe('session:quota', cb),
   onConfigChanged: (cb: (config: AppConfig) => void) => subscribe('config:changed', cb),
   onMenuSettings: (cb: () => void) => subscribe('menu:settings', () => cb()),
   onMenuNewClear: (cb: () => void) => subscribe('menu:new-clear', () => cb()),

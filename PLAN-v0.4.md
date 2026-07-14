@@ -25,6 +25,7 @@
 | Date | Session / auteur | Chantier | Fait | Reste / notes |
 |---|---|---|---|---|
 | 2026-07-14 | exploration initiale | — | Exploration + design validés, création du plan | Démarrer C1 |
+| 2026-07-14 | session exploration (suite) | C1 | C1 complet : quota.ts, branchement session-service, toggle global + override par session, IPC session:quota, dot orange + badge + toast, i18n en/fr, 16 tests fixtures. bun test 280/280, typecheck node+web verts. Desktop bump 0.3.5. | C1 à valider à la main sur un vrai épisode de limite (test end-to-end impossible en CI). Ensuite : C2. |
 
 ---
 
@@ -34,34 +35,37 @@
 l'heure de reset annoncée (design §3, mécanisme hérité de henryaj/autoclaude).
 
 ### Jalons
-- [ ] `desktop/src/main/quota.ts` : `QuotaDetector` sur le modèle de
+- [x] `desktop/src/main/quota.ts` : `QuotaDetector` sur le modèle de
       `thinking.ts` — buffer glissant ~4 Ko ANSI-strippé par session,
       3 familles de regex (« hit your limit … resets 10pm »,
       « limit reached ∙ resets 2pm », « resets Nm ») + fallbacks prudents à
       word-boundaries ; parsing reset : `3pm` / `10:30am` / `3 pm` en heure
       locale, passé > 1 h → +24 h, variante minutes → now+N, inconnu →
       réessai périodique 15 min.
-- [ ] Branchement `session-service.ts` : feed sur `pty.on('data')` à côté du
+- [x] Branchement `session-service.ts` : feed sur `pty.on('data')` à côté du
       `ThinkingDetector` ; à l'échéance, re-vérifier l'état rate-limited puis
       injecter `pty.write('\x1b')` → 100 ms → `write('continue')` →
       `write('\r')` ; **un seul envoi par épisode** (flag réarmé sur nouvel
       épisode) ; clear sur exit/remove.
-- [ ] Opt-in : toggle global dans `AppConfig` (`desktop/src/shared/types.ts`
+- [x] Opt-in : toggle global dans `AppConfig` (`desktop/src/shared/types.ts`
       + `SettingsView.tsx`) + override par session (ContextMenu de
       `Sidebar.tsx`). **Défaut : off.**
-- [ ] UI : IPC `session:quota` (même patron que `session:thinking` dans
+- [x] UI : IPC `session:quota` (même patron que `session:thinking` dans
       `ipc.ts` / `preload/index.ts` / `store.ts`), dot orange `rate-limited`
       + badge « reprise à HH:MM » (sidebar + tuile), toast à la relance,
-      i18n `desktop/locales/en.json` / `fr.json`.
-- [ ] Tests bun à fixtures (vrais écrans de limite, dont le menu
+      i18n `desktop/locales/en.json` / `fr.json` (+ `EN_DEFAULTS` de
+      `main/i18n.ts`).
+- [x] Tests bun à fixtures (vrais écrans de limite, dont le menu
       `/rate-limit-options`) : détection, parsing des heures, cas limites
       (12am/12pm, passé <1 h), one-shot par épisode, message coupé entre
-      deux chunks PTY.
+      deux chunks PTY — `tests/desktop-quota.test.ts` (16 cas).
 
 ### Done quand
-- Une session limitée avec le toggle on reprend seule à l'heure annoncée.
-- Toggle off = comportement strictement identique à aujourd'hui.
-- `bun test` + typecheck desktop verts.
+- [ ] Une session limitée avec le toggle on reprend seule à l'heure annoncée
+      (**validation manuelle opérateur** sur un vrai épisode de limite).
+- [x] Toggle off = comportement strictement identique à aujourd'hui
+      (état/injection entièrement gardés par le flag).
+- [x] `bun test` (280/280) + typecheck desktop (node+web) verts.
 
 ---
 

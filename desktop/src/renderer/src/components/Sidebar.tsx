@@ -2,7 +2,7 @@ import { useState } from 'react'
 import type { SessionRuntime } from '@shared/types'
 import { moveBeside } from '@shared/reorder'
 import { useDeck } from '../store'
-import { useT } from '../i18n'
+import { formatClock, useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ContextMenu } from './ContextMenu'
 import { CreateMenu } from './CreateMenu'
@@ -20,6 +20,7 @@ interface RowDnd {
 
 function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }): React.JSX.Element {
   const t = useT()
+  const config = useDeck((s) => s.config!)
   const selectedId = useDeck((s) => s.selectedId)
   const maximizedId = useDeck((s) => s.maximizedId)
   const setSelected = useDeck((s) => s.setSelected)
@@ -27,7 +28,11 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
   const removeSession = useDeck((s) => s.removeSession)
   const renameSession = useDeck((s) => s.renameSession)
   const setColor = useDeck((s) => s.setColor)
+  const setAutoResume = useDeck((s) => s.setAutoResume)
   const showToast = useDeck((s) => s.showToast)
+
+  // Effective auto-resume: per-session override wins, else the global setting.
+  const autoResumeOn = session.autoResume ?? config.autoResumeQuota
 
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(session.name)
@@ -93,8 +98,14 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
         onChange={(e) => void setColor(session.id, e.target.value)}
       />
       <span
-        className={`dot dot-${session.status}${session.thinking ? ' dot-thinking' : ''}`}
-        title={session.thinking ? t('status.thinking') : t(`status.${session.status}`)}
+        className={`dot dot-${session.status}${session.rateLimited ? ' dot-limited' : session.thinking ? ' dot-thinking' : ''}`}
+        title={
+          session.rateLimited
+            ? t('status.rateLimited')
+            : session.thinking
+              ? t('status.thinking')
+              : t(`status.${session.status}`)
+        }
       />
       <div className="row-main">
         {editing ? (
@@ -122,6 +133,13 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
           {session.peerId ??
             t('session.pending', { id: (session.sessionId || session.id).slice(0, 8) })}
         </span>
+        {session.rateLimited && (
+          <span className="row-quota">
+            {autoResumeOn && session.resumeAt
+              ? t('quota.resumeAt', { time: formatClock(session.resumeAt) })
+              : t('quota.limited')}
+          </span>
+        )}
       </div>
       {!editing && (
         <button
@@ -179,6 +197,10 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
               label: t('sidebar.copyPeerId'),
               onSelect: copyPeerId,
               disabled: !session.peerId
+            },
+            {
+              label: autoResumeOn ? t('sidebar.autoResumeOff') : t('sidebar.autoResumeOn'),
+              onSelect: () => void setAutoResume(session.id, !autoResumeOn)
             }
           ]}
         />

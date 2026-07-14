@@ -24,7 +24,9 @@ const DEFAULT_CONFIG: AppConfig = {
   // '' = auto: main/i18n.ts derives en/fr from the OS locale.
   locale: '',
   palette: DEFAULT_PALETTE,
-  rememberScopeSecrets: true
+  rememberScopeSecrets: true,
+  // Quota auto-resume is opt-in (PLAN C1): off unless the operator enables it.
+  autoResumeQuota: false
 }
 
 function dataDir(): string {

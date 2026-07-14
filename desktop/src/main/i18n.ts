@@ -68,12 +68,17 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sidebar.renameTitle': 'Rename',
   'sidebar.removeTitle': 'Remove',
   'sidebar.copyPeerId': 'Copy peer id',
+  'sidebar.autoResumeOn': 'Enable quota auto-resume',
+  'sidebar.autoResumeOff': 'Disable quota auto-resume',
 
   'status.running': 'running',
   'status.starting': 'starting',
   'status.exited': 'exited',
   'status.thinking': 'thinking…',
+  'status.rateLimited': 'usage limit reached',
   'session.pending': 'Session {id}',
+  'quota.limited': 'usage limit reached',
+  'quota.resumeAt': 'auto-resume at {time}',
 
   'confirm.deleteTitle': 'Delete session?',
   'confirm.deleteMessage':
@@ -135,6 +140,9 @@ export const EN_DEFAULTS: Record<string, string> = {
   'settings.rememberScope': 'Remember shared scope secrets on this machine',
   'settings.rememberScopeHelp':
     'Stores a custom (shared) group secret encrypted via the OS keystore so its workspace can be restored without re-supplying the secret. Off = supply it via the launch argument each time.',
+  'settings.autoResumeQuota': 'Auto-resume sessions when the usage limit resets',
+  'settings.autoResumeQuotaHelp':
+    'When a session hits Claude\'s usage limit, wait for the reset time printed on screen, then submit "continue" automatically. Overridable per session via its right-click menu.',
   'settings.language': 'Language',
   'settings.languageAuto': 'Auto (system)',
   'settings.palette': 'Session colour palette',
@@ -163,6 +171,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'message.sendTitle': 'Broadcast to all peers (Enter to send, Shift+Enter for a newline)',
   'toast.announceSent': 'Message sent to the group',
   'toast.announceNoPeers': 'No peers to receive the message',
+  'toast.quotaResumed': 'Quota reset — "continue" sent automatically',
 
   'create.title': 'New peer session',
   'create.agent': 'Agent',

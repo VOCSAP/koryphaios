@@ -267,6 +267,15 @@ body {
   text-overflow: ellipsis;
 }
 
+/* Quota badge under the peer id while a session sits at the limit screen. */
+.row-quota {
+  font-size: 11px;
+  color: #e08a2e;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .row-edit {
   width: 100%;
   font: inherit;
@@ -396,6 +405,12 @@ body {
   animation: dot-pulse 1s ease-in-out infinite;
 }
 
+/* Rate-limited (quota) overrides both: steady slow orange pulse while waiting. */
+.dot-limited {
+  background: #e08a2e;
+  animation: dot-pulse 2.5s ease-in-out infinite;
+}
+
 @keyframes dot-pulse {
   0%,
   100% {
@@ -523,6 +538,16 @@ body {
 .tile-peer-pending {
   opacity: 0.6;
   font-style: italic;
+}
+
+/* Quota badge in the tile head while the session sits at the limit screen. */
+.tile-quota {
+  font-size: 11px;
+  color: #e08a2e;
+  border: 1px solid color-mix(in srgb, #e08a2e 45%, transparent);
+  border-radius: 10px;
+  padding: 1px 7px;
+  white-space: nowrap;
 }
 
 .tile-spacer {

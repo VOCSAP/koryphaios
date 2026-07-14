@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.3.5 (desktop) -- 2026-07-14
+
+### Added
+- **Quota auto-resume (opt-in).** When a tile hits Claude's usage limit, the
+  Deck now detects the rate-limit screen in the PTY stream (rolling
+  ANSI-stripped buffer; old "limit reached ∙ resets 2pm", new "You've hit your
+  limit · resets 10pm (TZ)" and "resets Nm" formats, plus conservative
+  fallbacks), parses the printed reset time (local clock; >1h past rolls to
+  tomorrow; unknown time retries every 15 min), and once it passes injects
+  `Escape` → `continue` → `Enter` — one shot per episode, exactly what a human
+  would type. Off by default: global toggle in Settings > General
+  (`autoResumeQuota`), overridable per session from the sidebar right-click
+  menu (`SessionDef.autoResume`). The tile/sidebar dot turns orange while
+  limited, with an "auto-resume at HH:MM" badge and a toast on injection
+  (`session:quota` IPC event). New `desktop/src/main/quota.ts` +
+  `tests/desktop-quota.test.ts` (PLAN-v0.4 C1).
+
 ## v0.3.4 -- 2026-06-03
 
 ### Added

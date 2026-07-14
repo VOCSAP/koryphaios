@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import type { SessionRuntime } from '@shared/types'
 import { useDeck } from '../store'
-import { useT } from '../i18n'
+import { formatClock, useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 
 const THEMES: Record<'dark' | 'light', ITheme> = {
@@ -184,8 +184,14 @@ export function TerminalTile({
         title={t('tile.fullscreenTitle')}
       >
         <span
-          className={`dot dot-${session.status}${session.thinking ? ' dot-thinking' : ''}`}
-          title={session.thinking ? t('status.thinking') : t(`status.${session.status}`)}
+          className={`dot dot-${session.status}${session.rateLimited ? ' dot-limited' : session.thinking ? ' dot-thinking' : ''}`}
+          title={
+            session.rateLimited
+              ? t('status.rateLimited')
+              : session.thinking
+                ? t('status.thinking')
+                : t(`status.${session.status}`)
+          }
         />
         <span className="tile-title" style={{ color: session.color || undefined }}>
           {session.name}
@@ -195,6 +201,13 @@ export function TerminalTile({
         ) : (
           <span className="tile-peer tile-peer-pending">
             {t('session.pending', { id: (session.sessionId || session.id).slice(0, 8) })}
+          </span>
+        )}
+        {session.rateLimited && (
+          <span className="tile-quota">
+            {(session.autoResume ?? config.autoResumeQuota) && session.resumeAt
+              ? t('quota.resumeAt', { time: formatClock(session.resumeAt) })
+              : t('quota.limited')}
           </span>
         )}
         <span className="tile-spacer" />

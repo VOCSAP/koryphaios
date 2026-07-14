@@ -26,6 +26,11 @@ export interface SessionDef {
    * since --effort is not auto-restored the way --agent/--model are.
    */
   effort?: string
+  /**
+   * Per-session override for quota auto-resume (PLAN C1). undefined = follow
+   * the global `AppConfig.autoResumeQuota`; true/false forces it for this tile.
+   */
+  autoResume?: boolean
   createdAt: number
 }
 
@@ -44,6 +49,10 @@ export interface SessionRuntime extends SessionDef {
    * overlay instead of a dead terminal. Always false for live/fresh sessions.
    */
   expired: boolean
+  /** True while the session sits at a usage-limit (quota) screen (quota.ts). */
+  rateLimited: boolean
+  /** Epoch ms of the announced quota reset, or null when unknown/not limited. */
+  resumeAt: number | null
 }
 
 /** Lightweight workspace row for the restore picker (no sessions payload). */
@@ -97,6 +106,12 @@ export interface AppConfig {
   palette: string[]
   /** Remember custom (shared) scope secrets on this machine, encrypted (D8). */
   rememberScopeSecrets: boolean
+  /**
+   * Auto-resume sessions stopped by the usage limit: when a tile shows the
+   * rate-limit screen, inject "continue" once the printed reset time passes
+   * (quota.ts). Global default, overridable per session (SessionDef.autoResume).
+   */
+  autoResumeQuota: boolean
 }
 
 /** A selectable language for the settings picker: stable code + native label. */
@@ -181,6 +196,16 @@ export interface SessionThinkingEvent {
   busy: boolean
 }
 
+export interface SessionQuotaEvent {
+  id: string
+  /** True while at the limit screen; false when the episode ends. */
+  limited: boolean
+  /** Epoch ms of the announced reset, or null when unknown/cleared. */
+  resetAt: number | null
+  /** Set on the event fired right after the auto-continue was injected. */
+  resumed?: boolean
+}
+
 /** The typed surface exposed on `window.api` by the preload script. */
 export interface DeckApi {
   // sessions
@@ -190,6 +215,8 @@ export interface DeckApi {
   renameSession(id: string, name: string): Promise<void>
   setSessionColor(id: string, color: string): Promise<void>
   restartSession(id: string): Promise<SessionRuntime>
+  /** Per-session quota auto-resume override (true/false); see SessionDef.autoResume. */
+  setSessionAutoResume(id: string, enabled: boolean): Promise<void>
   /** The colour the next auto-assigned session would receive (create preview). */
   peekNextColor(): Promise<string>
   /** Reorder the session list (sidebar drag-and-drop); drives sidebar + tiles. */
@@ -239,6 +266,7 @@ export interface DeckApi {
   onPtyExit(cb: (e: PtyExitEvent) => void): () => void
   onSessionsChanged(cb: (sessions: SessionRuntime[]) => void): () => void
   onSessionThinking(cb: (e: SessionThinkingEvent) => void): () => void
+  onSessionQuota(cb: (e: SessionQuotaEvent) => void): () => void
   onConfigChanged(cb: (config: AppConfig) => void): () => void
   /** Fired when the Edit > Settings… menu item (or Ctrl/Cmd+,) is chosen. */
   onMenuSettings(cb: () => void): () => void

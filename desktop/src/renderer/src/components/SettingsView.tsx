@@ -127,6 +127,16 @@ export function SettingsView(): React.JSX.Element {
                 <span>{t('settings.rememberScope')}</span>
               </label>
               <small className="field-check-help">{t('settings.rememberScopeHelp')}</small>
+
+              <label className="field field-check">
+                <input
+                  type="checkbox"
+                  checked={config.autoResumeQuota}
+                  onChange={(e) => set('autoResumeQuota', e.target.checked)}
+                />
+                <span>{t('settings.autoResumeQuota')}</span>
+              </label>
+              <small className="field-check-help">{t('settings.autoResumeQuotaHelp')}</small>
             </>
           )}
 

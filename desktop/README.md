@@ -33,6 +33,11 @@ discovery.
   resolves, plus free-text operator broadcasts typed into the sidebar message
   bar. Peers receive them framed as "informational only -- do not reply"; the
   Deck never reads inbound peer traffic.
+- **Quota auto-resume (opt-in).** When a session hits Claude's usage limit, the
+  Deck can wait for the reset time printed on screen and submit `continue`
+  automatically (one shot per episode). Off by default -- enable it in
+  Settings > General, or per session via the sidebar right-click menu. The
+  status dot turns orange with an "auto-resume at HH:MM" badge while waiting.
 - **English / French UI**, switchable live.
 
 ---
