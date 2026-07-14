@@ -45,6 +45,13 @@ discovery.
   operator through the Roadmap view (MoSCoW groups, value/effort badges,
   filters, archive/restore). "Launch an agent" on an item spawns a session
   pre-briefed with it and flags it in progress.
+- **Worktree sessions.** The advanced create menu can spawn a session in a
+  fresh git worktree (`.worktrees/<name>`, new branch), so parallel agents on
+  the same repo each get their own working dir + branch. Closing the tile
+  offers to remove the worktree (branch always kept; git's dirty-tree refusal
+  is respected). Optional `worktreeInit` command in the launch config (e.g.
+  `bun install`) runs in each fresh worktree. Add `.worktrees/` to your
+  project's `.gitignore`.
 - **English / French UI**, switchable live.
 
 ---

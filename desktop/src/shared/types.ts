@@ -37,6 +37,12 @@ export interface SessionDef {
    * kept in the def so an expired-never-used session restarts with it.
    */
   prompt?: string
+  /**
+   * Deck-created worktree this session runs in (PLAN C4): its absolute path
+   * and branch. undefined = normal session in the shared working dir. Drives
+   * the sidebar branch badge and the "also remove the worktree?" close flow.
+   */
+  worktree?: { path: string; branch: string }
   createdAt: number
 }
 
@@ -160,6 +166,8 @@ export interface LaunchConfig {
   presets: LaunchPreset[]
   /** Selectable models for the create dropdown (local config + built-in default). */
   models: ModelOption[]
+  /** Command run in the background inside a fresh worktree (PLAN C4), e.g. "bun install". */
+  worktreeInit?: string
 }
 
 export interface CreateSessionInput {
@@ -177,6 +185,14 @@ export interface CreateSessionInput {
   args?: string
   /** Initial prompt submitted on the fresh launch (positional arg, PLAN C2). */
   prompt?: string
+  /**
+   * Branch name: create a fresh worktree under <projectDir>/.worktrees and run
+   * the session in it (PLAN C4). Empty/undefined = normal session. The ipc
+   * layer creates the worktree and fills `worktree` before the service spawns.
+   */
+  worktreeBranch?: string
+  /** Filled by the MAIN process after worktree creation; not a renderer input. */
+  worktree?: { path: string; branch: string }
   /** Optional explicit colour (hex); falls back to the rotating palette. */
   color?: string
   /**
@@ -329,6 +345,9 @@ export interface DeckApi {
   roadmapList(filters: RoadmapListFilters): Promise<RoadmapItem[]>
   roadmapUpsert(fields: RoadmapUpsertFields): Promise<RoadmapItem>
   roadmapArchive(id: string): Promise<RoadmapItem>
+
+  // worktrees (PLAN C4): remove a Deck-created worktree dir (branch is kept).
+  removeWorktree(path: string): Promise<void>
 
   // templates (portable team recipes)
   listTemplates(): Promise<TemplateSummary[]>

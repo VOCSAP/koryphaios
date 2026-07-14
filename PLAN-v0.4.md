@@ -29,6 +29,7 @@
 | 2026-07-14 | session exploration (suite) | C2 | C2 complet : prompt positionnel au spawn frais (quotePromptArg par plateforme), SessionDef.prompt persisté, champ « Prompt initial » + presets câblés dans CreateMenu, i18n, 5 tests. bun test 285/285, typecheck verts. | Vérif visuelle du champ au prochain lancement de l'app. Ensuite : C3 (roadmap, M1 broker). |
 | 2026-07-14 | session exploration (suite) | C3-M1/M2 | Table roadmap_items + routes /roadmap/list\|upsert\|archive (8 tests) ; 5 tools MCP roadmap_* dans server.ts (préfixes d'id, fallback project_key local:) + instructions agents. bun test 293/293, tsc core vert. | M3 (UI Deck) puis M4 (liants). |
 | 2026-07-14 | session exploration (suite) | C3-M3/M4 | Rail Agents\|Roadmap + RoadmapView (MoSCoW, CRUD, détail, poll 5 s), roadmap-service.ts (project_key miroir de server.ts) + IPC, « Lancer un agent sur cet item » (prompt C2 + in_progress + annonce), export/import JSON + cli roadmap-export/import. Versions bump 0.4.0 (core + desktop). | C3 code complet ; vérif visuelle UI au premier lancement réel. Ensuite : C4 (worktrees). |
+| 2026-07-14 | session exploration (suite) | C4 | worktree-service.ts (add/list/remove, jamais force ni suppression de branche), champ branche du menu avancé (création côté IPC, cwd = worktree), badge ⎇, dialog de nettoyage à la fermeture, hook worktreeInit en arrière-plan, 6 tests repo jetable. | Vérif manuelle 2 agents / 2 worktrees. Ensuite : C5 (superviseur). |
 
 ---
 
@@ -184,22 +185,32 @@ value/effort), stocké broker, manipulé par les agents via MCP, visualisé et
 plusieurs agents sur le même repo (design §5).
 
 ### Jalons
-- [ ] `desktop/src/main/worktree-service.ts` :
-      `git worktree add <projet>/.worktrees/<nom> -b agent/<nom>`, `list`,
-      `remove` — **jamais** de suppression automatique de branche.
-- [ ] Option « dans un nouveau worktree » du `CreateMenu.tsx` (nom de branche,
-      défaut dérivé du nom de session) ; cwd de la session = worktree.
-- [ ] Badge branche `⎇` sur la ligne de session (`Sidebar.tsx`).
-- [ ] À la fermeture de tuile : dialog « supprimer aussi le worktree ? »
-      (ConfirmDialog existant), jamais automatique.
-- [ ] Hook post-création configurable (ex. `bun install` / `npm install`).
-- [ ] Doc : recommander `.worktrees/` dans le `.gitignore` des projets.
-- [ ] Tests bun sur repo git jetable : add/list/remove, collision de branche,
-      repo sans remote.
+- [x] `desktop/src/main/worktree-service.ts` : `createWorktree`
+      (`git worktree add <projet>/.worktrees/<nom> -b <branche>`),
+      `listWorktrees` (--porcelain), `removeWorktree` — **jamais** de
+      suppression de branche, **jamais** de --force (le refus git sur un
+      worktree sale est remonté tel quel).
+- [x] Champ « Branche de worktree » du menu avancé `CreateMenu.tsx`
+      (placeholder `agent/<nom>`, vide = pas de worktree ; exclusif avec le
+      dossier custom) ; le worktree est créé dans le handler IPC
+      `sessions:create` puis cwd de la session = worktree.
+- [x] Badge branche `⎇` dans le sous-titre de la ligne (`Sidebar.tsx`),
+      `SessionDef.worktree = { path, branch }` persisté.
+- [x] À la fermeture de tuile : second ConfirmDialog « supprimer aussi le
+      worktree ? », jamais automatique ; toast si git refuse.
+- [x] Hook post-création `worktreeInit` (launch config globale/locale,
+      ex. `bun install`) exécuté en arrière-plan, jamais bloquant ; préservé
+      par la sauvegarde Settings.
+- [x] Doc : `.worktrees/` à gitignorer (README desktop + help du champ).
+- [x] Tests `tests/desktop-worktree.test.ts` (6 cas) sur repo jetable :
+      create/list/remove, collision de branche, worktree sale refusé,
+      main tree refusé, sanitisation des noms.
 
 ### Done quand
-- 2 agents sur 2 worktrees du même repo travaillent sans se marcher dessus.
-- La roadmap (C3) est partagée entre worktrees (même `project_key`).
+- [ ] 2 agents sur 2 worktrees du même repo travaillent sans se marcher
+      dessus (**validation manuelle opérateur**).
+- [x] La roadmap (C3) est partagée entre worktrees (même `project_key`,
+      dérivé du remote — identique dans tous les worktrees par construction).
 
 ---
 

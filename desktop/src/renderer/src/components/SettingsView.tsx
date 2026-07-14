@@ -46,11 +46,13 @@ export function SettingsView(): React.JSX.Element {
   const [launchCommand, setLaunchCommand] = useState('')
   const [presets, setPresets] = useState<LaunchPreset[]>([])
   const [models, setModels] = useState<ModelOption[]>([])
+  const [worktreeInit, setWorktreeInit] = useState<string | undefined>(undefined)
   useEffect(() => {
     void window.api.getLaunchConfig().then((c) => {
       setLaunchCommand(c.launchCommand)
       setPresets(c.presets)
       setModels(c.models)
+      setWorktreeInit(c.worktreeInit)
     })
   }, [])
 
@@ -67,7 +69,14 @@ export function SettingsView(): React.JSX.Element {
   }
 
   const saveLaunchCommand = (): void => {
-    void window.api.saveLaunchConfig({ launchCommand: launchCommand.trim(), presets, models })
+    // worktreeInit is carried through unchanged so saving the command never
+    // drops a hook configured in the global config file (PLAN C4).
+    void window.api.saveLaunchConfig({
+      launchCommand: launchCommand.trim(),
+      presets,
+      models,
+      worktreeInit
+    })
   }
 
   const close = (): void => openSettings(false)

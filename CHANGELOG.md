@@ -38,6 +38,17 @@
   to a target project supported). New CLI commands `bun cli.ts roadmap-export`
   / `roadmap-import` (the local -> central broker migration path). The CLI now
   sends the configured Bearer token on all requests.
+- **Worktree sessions (C4).** The advanced create menu takes a worktree branch
+  name: the Deck runs `git worktree add <projectDir>/.worktrees/<name> -b
+  <branch>` and spawns the session inside it, so parallel agents on the same
+  repo never step on each other (one dir + one branch each; the roadmap stays
+  shared since `project_key` derives from the remote, identical across
+  worktrees). The sidebar row shows a `⎇ branch` badge; closing the tile
+  offers (never forces) to remove the worktree — the branch and its commits
+  are always kept, and git's dirty-tree refusal is surfaced, not overridden.
+  Optional `worktreeInit` command in the launch config (e.g. `bun install`)
+  runs in the background inside each fresh worktree. New
+  `desktop/src/main/worktree-service.ts` + `tests/desktop-worktree.test.ts`.
 
 ## v0.3.5 (desktop) -- 2026-07-14
 

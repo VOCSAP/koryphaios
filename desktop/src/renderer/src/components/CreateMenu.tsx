@@ -66,6 +66,10 @@ export function CreateMenu({
   const [color, setColor] = useState('#4f86ff')
   const [customColor, setCustomColor] = useState(false)
   const [folder, setFolder] = useState<string | null>(null)
+  // Worktree branch (PLAN C4): non-empty = spawn in a fresh git worktree on
+  // this new branch (under <projectDir>/.worktrees). Mutually exclusive with a
+  // custom working folder (the worktree IS the working folder).
+  const [worktreeBranch, setWorktreeBranch] = useState('')
   // Join-announce note, pre-filled with the agent/model/effort summary. It tracks
   // those choices until the operator edits it (then it stays as authored). An
   // initial.announce counts as authored from the start.
@@ -128,7 +132,9 @@ export function CreateMenu({
       effort: effortLevel || undefined,
       args: extraArgs.trim() || undefined,
       prompt: prompt.trim() || undefined,
-      cwd: folder ?? undefined,
+      worktreeBranch: worktreeBranch.trim() || undefined,
+      // A worktree session ignores the custom folder: the worktree is the cwd.
+      cwd: worktreeBranch.trim() ? undefined : (folder ?? undefined),
       // Only force a colour when the user explicitly picked one; otherwise the
       // main process assigns the next palette colour at spawn time.
       color: customColor ? color : undefined,
@@ -272,6 +278,15 @@ export function CreateMenu({
 
         <details className="advanced">
           <summary>{t('create.advanced')}</summary>
+          <div className="field">
+            <span>{t('create.worktree')}</span>
+            <input
+              value={worktreeBranch}
+              placeholder={t('create.worktreePlaceholder', { name: namePreview })}
+              onChange={(e) => setWorktreeBranch(e.target.value)}
+            />
+            <small>{t('create.worktreeHelp')}</small>
+          </div>
           <div className="field">
             <span>{t('create.workingFolder')}</span>
             <div className="field-row">

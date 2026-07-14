@@ -211,6 +211,8 @@ export class SessionService extends EventEmitter {
       color: input.color?.trim() || paletteColor(cfg.palette ?? DEFAULT_PALETTE, this.defs.length),
       effort: input.effort?.trim() || '',
       prompt: input.prompt?.trim() || '',
+      // Filled by the ipc layer after `git worktree add` (PLAN C4).
+      worktree: input.worktree,
       createdAt: Date.now()
     }
     this.defs.push(def)

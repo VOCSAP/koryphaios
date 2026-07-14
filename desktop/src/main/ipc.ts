@@ -10,6 +10,7 @@ import type {
 } from '@shared/types'
 import { resolveBrokerEndpoint } from './broker-client'
 import { archiveRoadmap, computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
+import { createWorktree, removeWorktree, runWorktreeInit } from './worktree-service'
 import type { SessionService } from './session-service'
 import type { WorkspaceService } from './workspace-service'
 import { listAgents } from './agents'
@@ -60,7 +61,20 @@ export function registerIpc({
 }: IpcDeps): void {
   // ----- sessions -----
   ipcMain.handle('sessions:list', () => service.list())
-  ipcMain.handle('sessions:create', (_e, input: CreateSessionInput) => service.create(input ?? {}))
+  ipcMain.handle('sessions:create', async (_e, input: CreateSessionInput) => {
+    const req = input ?? {}
+    // Worktree session (PLAN C4): create the worktree FIRST, run the optional
+    // init hook in the background, and spawn the session inside it.
+    const branch = req.worktreeBranch?.trim()
+    if (branch) {
+      const wt = await createWorktree(getConfig().projectDir, branch)
+      const init = resolveLaunchConfig(getConfig().projectDir).worktreeInit
+      if (init) runWorktreeInit(wt.path, init)
+      req.cwd = wt.path
+      req.worktree = { path: wt.path, branch: wt.branch ?? branch }
+    }
+    return service.create(req)
+  })
   ipcMain.handle('sessions:remove', (_e, id: string) => service.remove(id))
   ipcMain.handle('sessions:rename', (_e, id: string, name: string) => service.rename(id, name))
   ipcMain.handle('sessions:set-color', (_e, id: string, color: string) =>
@@ -140,6 +154,11 @@ export function registerIpc({
     const { endpoint } = roadmapCtx()
     return archiveRoadmap(endpoint, id)
   })
+
+  // ----- worktrees (PLAN C4) -----
+  ipcMain.handle('worktree:remove', (_e, path: string) =>
+    removeWorktree(getConfig().projectDir, path)
+  )
 
   // ----- create-menu data -----
   ipcMain.handle('agents:list', () => listAgents(getConfig().projectDir))

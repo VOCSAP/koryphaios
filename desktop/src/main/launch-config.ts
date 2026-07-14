@@ -45,6 +45,11 @@ export interface LaunchConfig {
   presets: LaunchPreset[]
   /** Selectable models for the create dropdown. Defaults to DEFAULT_MODELS. */
   models: ModelOption[]
+  /**
+   * Optional command run (in the background) inside a freshly created worktree
+   * (PLAN C4), e.g. "bun install". Empty = no hook.
+   */
+  worktreeInit?: string
 }
 
 export function globalConfigDir(env: NodeJS.ProcessEnv): string {
@@ -97,6 +102,9 @@ function readConfigFile(file: string): Partial<LaunchConfig> | null {
     if (Array.isArray(raw.models)) {
       out.models = raw.models.filter(isModel)
     }
+    if (typeof raw.worktreeInit === 'string' && raw.worktreeInit.trim()) {
+      out.worktreeInit = raw.worktreeInit.trim()
+    }
     return out
   } catch {
     return null
@@ -119,6 +127,7 @@ export function resolveLaunchConfig(
     if (src.presets) merged.presets = src.presets
     // Only override the default model list when the file supplies a non-empty one.
     if (src.models && src.models.length > 0) merged.models = src.models
+    if (src.worktreeInit) merged.worktreeInit = src.worktreeInit
   }
   return merged
 }

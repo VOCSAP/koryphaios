@@ -37,6 +37,11 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(session.name)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
+  // Second-step dialog after deleting a worktree session: also remove its dir?
+  const [confirmingWorktree, setConfirmingWorktree] = useState<{
+    path: string
+    branch: string
+  } | null>(null)
   // Right-click menu anchor (viewport coords), or null when closed.
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null)
 
@@ -130,6 +135,7 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
           </span>
         )}
         <span className="row-sub" title={session.cwd}>
+          {session.worktree && <span className="row-branch">⎇ {session.worktree.branch} · </span>}
           {session.peerId ??
             t('session.pending', { id: (session.sessionId || session.id).slice(0, 8) })}
         </span>
@@ -183,7 +189,30 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
           onCancel={() => setConfirmingDelete(false)}
           onConfirm={() => {
             setConfirmingDelete(false)
+            const wt = session.worktree
             void removeSession(session.id)
+            // Worktree session: offer (never force) to also remove the dir.
+            if (wt) setConfirmingWorktree(wt)
+          }}
+        />
+      )}
+      {confirmingWorktree && (
+        <ConfirmDialog
+          title={t('confirm.removeWorktreeTitle')}
+          message={t('confirm.removeWorktreeMessage', {
+            branch: confirmingWorktree.branch,
+            path: confirmingWorktree.path
+          })}
+          confirmLabel={t('confirm.removeWorktreeConfirm')}
+          onCancel={() => setConfirmingWorktree(null)}
+          onConfirm={() => {
+            const wt = confirmingWorktree
+            setConfirmingWorktree(null)
+            window.api.removeWorktree(wt.path).then(
+              () => showToast('toast.worktreeRemoved'),
+              // Dirty/locked worktree: git refuses -- surface it, never force.
+              () => showToast('toast.worktreeRemoveFailed', 'info')
+            )
           }}
         />
       )}

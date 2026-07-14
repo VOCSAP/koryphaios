@@ -281,6 +281,11 @@ body {
   text-overflow: ellipsis;
 }
 
+/* Worktree branch badge inside the row subtitle (PLAN C4). */
+.row-branch {
+  color: var(--accent);
+}
+
 /* Quota badge under the peer id while a session sits at the limit screen. */
 .row-quota {
   font-size: 11px;
