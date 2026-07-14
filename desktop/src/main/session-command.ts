@@ -37,6 +37,12 @@ export interface SessionCommandInput {
    * conversation, so the prompt already lives in the transcript.
    */
   prompt?: string
+  /**
+   * Path to a generated .mcp config, emitted as `--mcp-config "<path>"` on
+   * BOTH fresh and resume (not restored by --fork-session, like --effort).
+   * Used by the supervisor's deck-control bridge (PLAN C5).
+   */
+  mcpConfig?: string
   /** Shell-quoting flavour for the prompt (win32 = PowerShell). Test hook. */
   platform?: NodeJS.Platform
   mode: SpawnMode
@@ -46,6 +52,12 @@ export interface SessionCommandInput {
 function effortFlag(effort?: string): string {
   const e = effort?.trim()
   return e ? ` --effort ${e}` : ''
+}
+
+/** ` --mcp-config "<path>"` when set, otherwise empty. */
+function mcpConfigFlag(mcpConfig?: string): string {
+  const p = mcpConfig?.trim()
+  return p ? ` --mcp-config "${p}"` : ''
 }
 
 /** ` --plugin-dir "<dir>"` when a plugin dir is set, otherwise empty. */
@@ -71,11 +83,11 @@ export function buildSessionCommandLine(input: SessionCommandInput): string {
 
   if (input.mode === 'resume' && input.prevSessionId) {
     // No args / --agent / --model: Claude auto-restores them on --fork-session.
-    // --effort is the exception (not auto-restored) so it is re-passed here.
-    return `${base}${pluginFlag(input.pluginDir)} --resume ${input.prevSessionId} --fork-session --session-id ${input.sessionId}${effortFlag(input.effort)}`
+    // --effort and --mcp-config are the exceptions (not auto-restored).
+    return `${base}${pluginFlag(input.pluginDir)}${mcpConfigFlag(input.mcpConfig)} --resume ${input.prevSessionId} --fork-session --session-id ${input.sessionId}${effortFlag(input.effort)}`
   }
 
-  let line = `${base}${pluginFlag(input.pluginDir)} --session-id ${input.sessionId}`
+  let line = `${base}${pluginFlag(input.pluginDir)}${mcpConfigFlag(input.mcpConfig)} --session-id ${input.sessionId}`
   const extra = input.args?.trim()
   if (extra) line += ` ${extra}`
   line += effortFlag(input.effort)

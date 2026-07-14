@@ -20,7 +20,9 @@ function gridShape(mode: DisplayMode, cols: number, rows: number): { cols: numbe
 
 export function TileArea(): React.JSX.Element {
   const t = useT()
-  const sessions = useDeck((s) => s.sessions)
+  const allSessions = useDeck((s) => s.sessions)
+  // The supervisor renders in the Home view, never in the agents grid.
+  const sessions = allSessions.filter((s) => !s.supervisor)
   const config = useDeck((s) => s.config!)
   const maximizedId = useDeck((s) => s.maximizedId)
   const createSession = useDeck((s) => s.createSession)

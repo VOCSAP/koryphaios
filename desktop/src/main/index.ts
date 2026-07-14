@@ -18,6 +18,25 @@ import { WorkspaceService } from './workspace-service'
 import { resolveBrokerEndpoint, sendAnnounce } from './broker-client'
 import { composeJoinAnnounce, type JoinAnnounceIntent } from '@shared/announce'
 import { APP_STATE_SUBDIR, runDataMigration } from './migrate-data-dir'
+import type { SessionRuntime } from '@shared/types'
+import { listAgents } from './agents'
+import { createSessionWithWorktree } from './create-session'
+import { startDeckControl, type DeckControlDeps, type DeckControlServer } from './deck-control'
+import { SUPERVISOR_BRIEFING, SUPERVISOR_NAME, writeSupervisorMcpConfig } from './supervisor'
+import {
+  createWorktree,
+  listWorktrees,
+  removeWorktree,
+  runWorktreeInit
+} from './worktree-service'
+import {
+  globalTemplatesDir,
+  listTemplates,
+  localTemplatesDir,
+  readTemplate,
+  writeTemplate
+} from './template-store'
+import { templateToInputs, toTemplate } from '@shared/template'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -117,6 +136,79 @@ const broadcastAnnounce = async (text: string, excludePeerId?: string): Promise<
 service.on('peer-resolved', ({ peerId, intent }: { peerId: string; intent: JoinAnnounceIntent }) => {
   void broadcastAnnounce(composeJoinAnnounce(peerId, intent), peerId)
 })
+
+// ----- Supervisor deck-control (PLAN C5) -----
+// The loopback control endpoint the SUPERVISOR session pilots the app through.
+// Started lazily at the first Home visit; the URL/token pair is injected only
+// into the supervisor's generated --mcp-config, never into normal sessions.
+const controlDeps: DeckControlDeps = {
+  listAgents: () => listAgents(getConfig().projectDir),
+  listModels: () => resolveLaunchConfig(getConfig().projectDir).models,
+  listPresets: () => resolveLaunchConfig(getConfig().projectDir).presets,
+  spawnSession: (input) => createSessionWithWorktree(service, getConfig().projectDir, input),
+  listSessions: () => service.list(),
+  restartSession: (id) => void service.restart(id),
+  closeSession: (id) => service.remove(id),
+  createWorktree: async (branch) => {
+    const wt = await createWorktree(getConfig().projectDir, branch)
+    const init = resolveLaunchConfig(getConfig().projectDir).worktreeInit
+    if (init) runWorktreeInit(wt.path, init)
+    return wt
+  },
+  listWorktrees: () => listWorktrees(getConfig().projectDir),
+  removeWorktree: (path) => removeWorktree(getConfig().projectDir, path),
+  listTemplates: () => listTemplates(getConfig().projectDir),
+  // Append-only by contract (deck-control): never closes existing tiles.
+  applyTemplate: async (path) => {
+    const tpl = readTemplate(path)
+    if (!tpl) return 0
+    const inputs = templateToInputs(tpl)
+    for (const input of inputs) service.create(input)
+    return inputs.length
+  },
+  saveTemplate: (name, local) => {
+    const tpl = toTemplate(service.captureSessions(), name)
+    const dir = local ? localTemplatesDir(getConfig().projectDir) : globalTemplatesDir()
+    return writeTemplate(dir, name || tpl.name || 'template', tpl)
+  },
+  announce: (text) => broadcastAnnounce(text)
+}
+
+let controlServer: DeckControlServer | null = null
+
+/**
+ * Return the live supervisor session, resume an exited one, or spawn it:
+ * deck-control endpoint up, --mcp-config regenerated (per-launch token), the
+ * operator-picked agent profile (Settings) layered over the built-in briefing.
+ */
+const ensureSupervisor = async (): Promise<SessionRuntime> => {
+  const existing = service.list().find((s) => s.supervisor)
+  if (existing && existing.status !== 'exited') return existing
+  if (existing) return service.restart(existing.id)
+
+  if (!deckPluginDir) throw new Error('deck-plugin dir missing (build skipped)')
+  const mcpScript = join(deckPluginDir, 'mcp', 'deck-control-mcp.mjs')
+  if (!existsSync(mcpScript)) {
+    throw new Error('deck-control MCP script missing -- run `npm run build:mcp`')
+  }
+  if (!controlServer) controlServer = await startDeckControl(controlDeps)
+  const mcpConfig = writeSupervisorMcpConfig({
+    dir: join(app.getPath('userData'), APP_STATE_SUBDIR),
+    mcpScriptPath: mcpScript,
+    execPath: process.execPath,
+    controlUrl: controlServer.url,
+    controlToken: controlServer.token
+  })
+  const agent = getConfig().supervisorAgent?.trim() || ''
+  return service.create({
+    name: SUPERVISOR_NAME,
+    agent: agent || undefined,
+    prompt: SUPERVISOR_BRIEFING,
+    supervisor: true,
+    mcpConfig,
+    announce: 'supervisor session joined this group'
+  })
+}
 
 /**
  * Adopt a restored workspace's scope. No-op once a session is running (the scope
@@ -238,7 +330,8 @@ app.whenReady().then(() => {
     getConfig,
     setConfig,
     getWindow: () => mainWindow,
-    announce: (text: string) => broadcastAnnounce(text)
+    announce: (text: string) => broadcastAnnounce(text),
+    ensureSupervisor
   })
   service.start()
   // Attach an auto-save workspace capturing whatever the service just restored.
@@ -261,5 +354,6 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   workspaces.releaseOnQuit()
   service.stop()
+  controlServer?.close()
   activeScopeEnv.cleanup()
 })

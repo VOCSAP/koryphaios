@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.5.0 (desktop) -- 2026-07-14
+
+### Added
+- **Supervisor session (PLAN C5).** A new **Home** rail view hosts a full-width
+  Claude Code session that PILOTS the Deck instead of coding: it reads the
+  repo, consults the shared roadmap, spawns briefed agent tiles and coordinates
+  them through the existing peers messaging. Spawned lazily on the first Home
+  visit (manual start button after an intentional close); its agent profile is
+  operator-selectable in Settings (`supervisorAgent`, layered over a built-in
+  briefing delivered via the C2 initial prompt).
+- **deck-control bridge.** The main process starts a loopback HTTP control
+  endpoint (random port + per-launch Bearer token, `deck-control.ts`) and the
+  supervisor is the ONLY session launched with a generated `--mcp-config`
+  pointing at a dependency-free MCP stdio server
+  (`desktop/mcp/deck-control-mcp.ts`, built to `deck-plugin/mcp/*.mjs`, run by
+  the Electron binary as Node). 14 tools: `deck_list_agents/models/presets`,
+  `deck_spawn_session` (agent/model/effort/prompt/worktree_branch/announce),
+  `deck_list_sessions`, `deck_restart_session`, `deck_close_session`,
+  `deck_create_worktree`, `deck_list_worktrees`, `deck_remove_worktree`,
+  `deck_list_templates`, `deck_apply_template` (append-only),
+  `deck_save_template`, `deck_announce`.
+- **Guardrails.** Destructive tools (close session, remove worktree) only work
+  on objects the supervisor itself created; template application never
+  replaces/closes existing tiles; live sessions are capped at 8 on
+  `deck_spawn_session`; the control token never touches the repo, project
+  config or normal sessions. `--mcp-config` is re-passed on resume (like
+  `--effort`), and the supervisor is excluded from workspace/template capture
+  (its token only lives for the current app launch).
+  Tests: `tests/desktop-deck-control.test.ts` (dispatch, auth, guards, and an
+  end-to-end MCP stdio round-trip against a live control endpoint).
+
 ## v0.4.0 -- 2026-07-14
 
 ### Added

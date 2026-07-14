@@ -6,11 +6,13 @@ import type {
   I18nPayload,
   LaunchConfig,
   RoadmapListFilters,
-  RoadmapUpsertFields
+  RoadmapUpsertFields,
+  SessionRuntime
 } from '@shared/types'
 import { resolveBrokerEndpoint } from './broker-client'
 import { archiveRoadmap, computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
-import { createWorktree, removeWorktree, runWorktreeInit } from './worktree-service'
+import { createSessionWithWorktree } from './create-session'
+import { removeWorktree } from './worktree-service'
 import type { SessionService } from './session-service'
 import type { WorkspaceService } from './workspace-service'
 import { listAgents } from './agents'
@@ -49,6 +51,8 @@ interface IpcDeps {
   getWindow: () => BrowserWindow | null
   /** Broadcast a free-text operator message to the active group; returns peer count. */
   announce: (text: string) => Promise<number>
+  /** Spawn (or return) the Home supervisor session (PLAN C5). */
+  ensureSupervisor: () => Promise<SessionRuntime>
 }
 
 export function registerIpc({
@@ -57,24 +61,16 @@ export function registerIpc({
   getConfig,
   setConfig,
   getWindow,
-  announce
+  announce,
+  ensureSupervisor
 }: IpcDeps): void {
   // ----- sessions -----
   ipcMain.handle('sessions:list', () => service.list())
-  ipcMain.handle('sessions:create', async (_e, input: CreateSessionInput) => {
-    const req = input ?? {}
-    // Worktree session (PLAN C4): create the worktree FIRST, run the optional
-    // init hook in the background, and spawn the session inside it.
-    const branch = req.worktreeBranch?.trim()
-    if (branch) {
-      const wt = await createWorktree(getConfig().projectDir, branch)
-      const init = resolveLaunchConfig(getConfig().projectDir).worktreeInit
-      if (init) runWorktreeInit(wt.path, init)
-      req.cwd = wt.path
-      req.worktree = { path: wt.path, branch: wt.branch ?? branch }
-    }
-    return service.create(req)
-  })
+  // Worktree handling (PLAN C4) lives in the shared create path, also used by
+  // the supervisor's deck-control spawn.
+  ipcMain.handle('sessions:create', (_e, input: CreateSessionInput) =>
+    createSessionWithWorktree(service, getConfig().projectDir, input ?? {})
+  )
   ipcMain.handle('sessions:remove', (_e, id: string) => service.remove(id))
   ipcMain.handle('sessions:rename', (_e, id: string, name: string) => service.rename(id, name))
   ipcMain.handle('sessions:set-color', (_e, id: string, color: string) =>
@@ -159,6 +155,9 @@ export function registerIpc({
   ipcMain.handle('worktree:remove', (_e, path: string) =>
     removeWorktree(getConfig().projectDir, path)
   )
+
+  // ----- supervisor (PLAN C5) -----
+  ipcMain.handle('supervisor:ensure', () => ensureSupervisor())
 
   // ----- create-menu data -----
   ipcMain.handle('agents:list', () => listAgents(getConfig().projectDir))

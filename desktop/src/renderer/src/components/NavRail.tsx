@@ -3,8 +3,9 @@ import { useT } from '../i18n'
 import type { DeckView } from '@shared/types'
 
 // Vertical navigation rail (VS Code activity-bar style), left of everything.
-// PLAN C3-M3 ships Agents | Roadmap; the C5 supervisor adds Home later.
+// Home = the supervisor session (C5), Agents = the session tiles, Roadmap = C3.
 const VIEWS: { id: DeckView; icon: string; key: string }[] = [
+  { id: 'home', icon: '🏠', key: 'nav.home' },
   { id: 'agents', icon: '🖥', key: 'nav.agents' },
   { id: 'roadmap', icon: '🗺', key: 'nav.roadmap' }
 ]

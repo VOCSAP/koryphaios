@@ -6,6 +6,7 @@ import { TileArea } from './TileArea'
 import { DisplayModeBar } from './DisplayModeBar'
 import { NavRail } from './NavRail'
 import { RoadmapView } from './RoadmapView'
+import { HomeView } from './HomeView'
 import { SettingsView } from './SettingsView'
 import { WorkspacesDialog } from './WorkspacesDialog'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -73,7 +74,7 @@ export function App(): React.JSX.Element {
   return (
     <div className="app" style={{ '--sidebar-w': `${sidebarWidth}px` } as React.CSSProperties}>
       <NavRail />
-      {/* The agents view (sidebar + tiles) stays MOUNTED under the roadmap view:
+      {/* The agents and home views stay MOUNTED under the other views:
           unmounting TerminalTile would tear down the xterm instances and their
           scrollback. display:none keeps the PTYs and terminals alive. */}
       <div className={`view-agents${view === 'agents' ? '' : ' view-hidden'}`}>
@@ -82,6 +83,9 @@ export function App(): React.JSX.Element {
           <DisplayModeBar />
           <TileArea />
         </div>
+      </div>
+      <div className={`view-home${view === 'home' ? '' : ' view-hidden'}`}>
+        <HomeView active={view === 'home'} />
       </div>
       {view === 'roadmap' && <RoadmapView />}
       {settingsOpen && <SettingsView />}

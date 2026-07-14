@@ -30,6 +30,7 @@
 | 2026-07-14 | session exploration (suite) | C3-M1/M2 | Table roadmap_items + routes /roadmap/list\|upsert\|archive (8 tests) ; 5 tools MCP roadmap_* dans server.ts (préfixes d'id, fallback project_key local:) + instructions agents. bun test 293/293, tsc core vert. | M3 (UI Deck) puis M4 (liants). |
 | 2026-07-14 | session exploration (suite) | C3-M3/M4 | Rail Agents\|Roadmap + RoadmapView (MoSCoW, CRUD, détail, poll 5 s), roadmap-service.ts (project_key miroir de server.ts) + IPC, « Lancer un agent sur cet item » (prompt C2 + in_progress + annonce), export/import JSON + cli roadmap-export/import. Versions bump 0.4.0 (core + desktop). | C3 code complet ; vérif visuelle UI au premier lancement réel. Ensuite : C4 (worktrees). |
 | 2026-07-14 | session exploration (suite) | C4 | worktree-service.ts (add/list/remove, jamais force ni suppression de branche), champ branche du menu avancé (création côté IPC, cwd = worktree), badge ⎇, dialog de nettoyage à la fermeture, hook worktreeInit en arrière-plan, 6 tests repo jetable. | Vérif manuelle 2 agents / 2 worktrees. Ensuite : C5 (superviseur). |
+| 2026-07-14 | session exploration (suite) | C5 | deck-control.ts (endpoint loopback + garde-fous ownership/cap), MCP stdio sans dépendance (build:mcp -> deck-plugin/mcp), supervisor.ts (--mcp-config généré + briefing C2), rail Home + HomeView (spawn lazy), profil sélectionnable Settings, filtres Agents/tuiles, 5 tests dont MCP stdio de bout en bout. Desktop bump 0.5.0. **Tous les chantiers C1-C5 sont codés.** | Validations manuelles restantes (C1 épisode réel, C3 UI, C4 2 worktrees, C5 scénario cible) au premier lancement réel de l'app. |
 
 ---
 
@@ -221,37 +222,43 @@ la Deck (spawn d'agents profilés, worktrees, templates) sans coder elle-même ;
 coordination des agents via la messagerie peers existante (design §6).
 
 ### Jalons
-- [ ] Endpoint de contrôle HTTP loopback dans le main Electron : port
-      aléatoire, Bearer token régénéré à chaque lancement, exposant
-      `SessionService`, `listAgents` (`agents.ts`), `template-store.ts`,
-      worktree-service (C4).
-- [ ] Serveur MCP stdio `deck-control` (style `server.ts`) : tools
-      `deck_list_agents`, `deck_list_models`, `deck_list_presets`,
-      `deck_spawn_session` (agent/model/effort/cwd/worktree/initial_prompt),
-      `deck_list_sessions`, `deck_restart_session`, `deck_close_session`,
-      `deck_create_worktree`, `deck_list_worktrees`, `deck_remove_worktree`,
-      `deck_list_templates`, `deck_apply_template`, `deck_save_template`,
-      `deck_announce`.
-- [ ] Injection sélective : seule la tuile superviseur est lancée avec le
-      `--mcp-config` généré (+ env URL/token) — les agents normaux ne voient
-      jamais `deck-control`.
-- [ ] Rail **Home** : tuile superviseur pleine largeur, spawnée à la première
-      visite, absente de la liste « Agents » mais peer visible du groupe.
-- [ ] Profil d'agent du superviseur sélectionnable (Settings, scan
-      `.claude/agents` projet + `~/.claude/agents`) ; défaut
-      `deck-supervisor.md` embarqué dans `deck-plugin/` (« tu pilotes la
-      Deck ; tu ne codes pas ; deck_* pour l'app, roadmap_* pour le backlog,
-      send_message pour coordonner »).
-- [ ] Garde-fous : opérations destructives limitées aux objets créés par le
-      superviseur, sinon ConfirmDialog opérateur ; plafond de spawn (8) ;
-      token jamais écrit dans le repo/config projet.
-- [ ] Tests : endpoint (auth, tools), injection sélective, garde-fous.
+- [x] Endpoint de contrôle HTTP loopback (`deck-control.ts`, injecté/testable) :
+      port aléatoire, Bearer token par lancement, un endpoint `POST /call`
+      dispatchant vers SessionService / agents / templates / worktrees /
+      announce.
+- [x] Serveur MCP stdio `deck-control` **sans dépendance**
+      (`desktop/mcp/deck-control-mcp.ts`, JSON-RPC newline-delimited, buildé en
+      `deck-plugin/mcp/deck-control-mcp.mjs` par `npm run build:mcp`, exécuté
+      par le binaire Electron en mode Node — fonctionne packagé comme en dev) :
+      14 tools `deck_*` (agents/models/presets, spawn avec
+      agent/model/effort/prompt/worktree_branch/announce, list/restart/close
+      sessions, create/list/remove worktrees, templates list/apply/save,
+      announce).
+- [x] Injection sélective : seule la tuile superviseur reçoit le
+      `--mcp-config` généré (`supervisor.ts`, env URL/token par serveur MCP) ;
+      re-passé au resume (comme `--effort`) ; superviseur exclu de la capture
+      workspaces/templates (le token ne vit qu'un lancement d'app).
+- [x] Rail **Home** : tuile superviseur pleine largeur (`HomeView.tsx`,
+      maintenue montée), spawn lazy à la première visite (bouton manuel après
+      une fermeture volontaire), absente de la liste Agents et de la grille,
+      mais peer visible du groupe.
+- [x] Profil d'agent sélectionnable (Settings > Général, scan
+      `.claude/agents`) **par-dessus** un briefing intégré livré en prompt
+      initial C2 (décision : briefing C2 + instructions du MCP plutôt qu'un
+      `deck-supervisor.md` embarqué — pas de dépendance au support des agents
+      de plugin, comportement garanti).
+- [x] Garde-fous : destructif limité aux objets créés par le superviseur
+      (Sets ownership dans deck-control), apply_template append-only, plafond
+      de 8 sessions vives au spawn, token hors repo/config/env global.
+- [x] Tests `tests/desktop-deck-control.test.ts` (5 cas) : auth 401, dispatch,
+      ownership close/remove, spawn cap, fichier --mcp-config, et aller-retour
+      MCP stdio réel (initialize/tools list/tools call/refus gardé).
 
 ### Done quand
-- Scénario cible : « Reprends le développement du repo » → le superviseur lit
-  la roadmap (`roadmap_list`), liste les profils (`deck_list_agents`), crée
-  des worktrees, spawne dev/reviewer avec prompts initiaux, et coordonne par
-  `send_message` — le tout observable dans la Deck.
+- [ ] Scénario cible : « Reprends le développement du repo » → le superviseur
+      lit la roadmap, liste les profils, crée des worktrees, spawne
+      dev/reviewer briefés et coordonne par `send_message`
+      (**validation manuelle opérateur** au premier lancement réel).
 
 ---
 

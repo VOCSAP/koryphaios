@@ -240,7 +240,9 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
 
 export function Sidebar(): React.JSX.Element {
   const t = useT()
-  const sessions = useDeck((s) => s.sessions)
+  const allSessions = useDeck((s) => s.sessions)
+  // The supervisor lives in the Home rail view, not in the Agents list.
+  const sessions = allSessions.filter((s) => !s.supervisor)
   const config = useDeck((s) => s.config!)
   const createSession = useDeck((s) => s.createSession)
   const reorderSessions = useDeck((s) => s.reorderSessions)

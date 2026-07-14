@@ -52,6 +52,14 @@ discovery.
   is respected). Optional `worktreeInit` command in the launch config (e.g.
   `bun install`) runs in each fresh worktree. Add `.worktrees/` to your
   project's `.gitignore`.
+- **Supervisor session (Home).** The Home rail view hosts a Claude session
+  that pilots the window instead of coding: tell it "resume work on this
+  repo" and it reads the roadmap, picks agent profiles (your
+  `.claude/agents`), spawns briefed tiles (optionally one worktree each) and
+  coordinates them via peer messages. It is the only session bridged to the
+  app (private `deck_*` MCP tools, per-launch token); destructive actions only
+  work on what it created, and spawns are capped. Pick its agent profile in
+  Settings > General.
 - **English / French UI**, switchable live.
 
 ---

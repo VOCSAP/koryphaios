@@ -26,7 +26,9 @@ const DEFAULT_CONFIG: AppConfig = {
   palette: DEFAULT_PALETTE,
   rememberScopeSecrets: true,
   // Quota auto-resume is opt-in (PLAN C1): off unless the operator enables it.
-  autoResumeQuota: false
+  autoResumeQuota: false,
+  // Supervisor agent profile (PLAN C5): '' = built-in briefing only.
+  supervisorAgent: ''
 }
 
 function dataDir(): string {

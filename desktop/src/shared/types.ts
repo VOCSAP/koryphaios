@@ -43,6 +43,18 @@ export interface SessionDef {
    * the sidebar branch badge and the "also remove the worktree?" close flow.
    */
   worktree?: { path: string; branch: string }
+  /**
+   * The Home-rail SUPERVISOR session (PLAN C5): hidden from the Agents view,
+   * excluded from workspace/template capture, and the only session launched
+   * with the deck-control MCP (via mcpConfig below).
+   */
+  supervisor?: boolean
+  /**
+   * Path of a generated .mcp config file passed as `--mcp-config` on BOTH
+   * fresh and resume spawns (like --effort, it is not restored by
+   * --fork-session). Set only for the supervisor (deck-control bridge).
+   */
+  mcpConfig?: string
   createdAt: number
 }
 
@@ -124,6 +136,11 @@ export interface AppConfig {
    * (quota.ts). Global default, overridable per session (SessionDef.autoResume).
    */
   autoResumeQuota: boolean
+  /**
+   * Agent profile the Home supervisor session launches with (PLAN C5), from
+   * the .claude/agents scan. Empty = no --agent (built-in briefing only).
+   */
+  supervisorAgent: string
 }
 
 /** A selectable language for the settings picker: stable code + native label. */
@@ -193,6 +210,10 @@ export interface CreateSessionInput {
   worktreeBranch?: string
   /** Filled by the MAIN process after worktree creation; not a renderer input. */
   worktree?: { path: string; branch: string }
+  /** MAIN-only (PLAN C5): mark the created session as the supervisor. */
+  supervisor?: boolean
+  /** MAIN-only (PLAN C5): --mcp-config path re-passed on every spawn. */
+  mcpConfig?: string
   /** Optional explicit colour (hex); falls back to the rotating palette. */
   color?: string
   /**
@@ -265,8 +286,8 @@ export interface RoadmapArchiveResponse {
   item: RoadmapItem
 }
 
-/** Sidebar navigation rail views (PLAN C3-M3; 'home' arrives with C5). */
-export type DeckView = 'agents' | 'roadmap'
+/** Sidebar navigation rail views: supervisor Home (C5), Agents, Roadmap (C3). */
+export type DeckView = 'home' | 'agents' | 'roadmap'
 
 // ----- IPC channel payloads -----
 
@@ -348,6 +369,9 @@ export interface DeckApi {
 
   // worktrees (PLAN C4): remove a Deck-created worktree dir (branch is kept).
   removeWorktree(path: string): Promise<void>
+
+  // supervisor (PLAN C5): spawn (or return) the Home supervisor session.
+  ensureSupervisor(): Promise<SessionRuntime>
 
   // templates (portable team recipes)
   listTemplates(): Promise<TemplateSummary[]>

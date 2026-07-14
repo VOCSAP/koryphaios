@@ -76,6 +76,39 @@ body {
   display: none;
 }
 
+/* Home view: the supervisor tile, full width (PLAN C5). */
+.view-home {
+  height: 100vh;
+  min-width: 0;
+}
+
+.home-view {
+  display: flex;
+  height: 100%;
+  padding: 8px;
+}
+
+.home-view .tile {
+  flex: 1;
+  min-width: 0;
+}
+
+.home-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--fg-dim);
+  text-align: center;
+}
+
+.home-error {
+  color: var(--danger);
+  max-width: 560px;
+}
+
 .main-pane {
   display: flex;
   flex-direction: column;

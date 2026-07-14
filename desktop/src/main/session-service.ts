@@ -213,6 +213,9 @@ export class SessionService extends EventEmitter {
       prompt: input.prompt?.trim() || '',
       // Filled by the ipc layer after `git worktree add` (PLAN C4).
       worktree: input.worktree,
+      // Supervisor session (PLAN C5): main-only inputs.
+      supervisor: input.supervisor || undefined,
+      mcpConfig: input.mcpConfig?.trim() || undefined,
       createdAt: Date.now()
     }
     this.defs.push(def)
@@ -295,9 +298,14 @@ export class SessionService extends EventEmitter {
     }
   }
 
-  /** Snapshot the current persisted session defs (for a workspace save). */
+  /**
+   * Snapshot the current persisted session defs (for a workspace save). The
+   * supervisor is excluded: its deck-control token only lives for this app
+   * launch, and Home re-spawns it on demand -- restoring it as a normal tile
+   * would resurrect a dead bridge.
+   */
   captureSessions(): SessionDef[] {
-    return this.defs.map((d) => ({ ...d }))
+    return this.defs.filter((d) => !d.supervisor).map((d) => ({ ...d }))
   }
 
   /**
@@ -495,6 +503,7 @@ export class SessionService extends EventEmitter {
         prevSessionId: prev,
         effort: def.effort,
         pluginDir: this.pluginDir,
+        mcpConfig: def.mcpConfig,
         mode: 'resume'
       })
     } else {
@@ -507,6 +516,7 @@ export class SessionService extends EventEmitter {
         effort: def.effort,
         pluginDir: this.pluginDir,
         prompt: def.prompt,
+        mcpConfig: def.mcpConfig,
         mode: 'fresh'
       })
     }

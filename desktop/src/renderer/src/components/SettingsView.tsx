@@ -41,6 +41,12 @@ export function SettingsView(): React.JSX.Element {
   useEffect(() => setProjectDir(config.projectDir), [config.projectDir])
   useEffect(() => setShell(config.shell), [config.shell])
 
+  // Agent profiles for the supervisor picker (PLAN C5).
+  const [agents, setAgents] = useState<string[]>([])
+  useEffect(() => {
+    void window.api.listAgents().then(setAgents)
+  }, [])
+
   // launchCommand lives in the (global) launch config, not AppConfig. presets +
   // models are carried through unchanged so saving the command preserves them.
   const [launchCommand, setLaunchCommand] = useState('')
@@ -146,6 +152,22 @@ export function SettingsView(): React.JSX.Element {
                 <span>{t('settings.autoResumeQuota')}</span>
               </label>
               <small className="field-check-help">{t('settings.autoResumeQuotaHelp')}</small>
+
+              <label className="field">
+                <span>{t('settings.supervisorAgent')}</span>
+                <select
+                  value={config.supervisorAgent}
+                  onChange={(e) => set('supervisorAgent', e.target.value)}
+                >
+                  <option value="">{t('settings.supervisorAgentNone')}</option>
+                  {agents.map((a) => (
+                    <option key={a} value={a}>
+                      {a}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <small className="field-check-help">{t('settings.supervisorAgentHelp')}</small>
             </>
           )}
 
