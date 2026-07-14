@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type {
   AppConfig,
   CreateSessionInput,
+  DeckView,
   LocaleOption,
   SessionRuntime,
   TemplateSummary,
@@ -11,6 +12,8 @@ import type {
 interface DeckState {
   sessions: SessionRuntime[]
   config: AppConfig | null
+  /** Active navigation-rail view: agents (sessions) or roadmap. */
+  view: DeckView
   /** Active translation dict (flat key->template), fetched from main. */
   dict: Record<string, string>
   /** Languages offered in Settings, derived from the present locale files. */
@@ -46,6 +49,7 @@ interface DeckState {
   sidebarWidth: number
 
   init(): Promise<void>
+  setView(view: DeckView): void
   setSelected(id: string | null): void
   setMaximized(id: string | null): void
   openSettings(open: boolean): void
@@ -91,6 +95,7 @@ let toastToken = 0
 export const useDeck = create<DeckState>((set, get) => ({
   sessions: [],
   config: null,
+  view: 'agents',
   dict: {},
   availableLocales: [],
   selectedId: null,
@@ -169,6 +174,7 @@ export const useDeck = create<DeckState>((set, get) => ({
     })
   },
 
+  setView: (view) => set({ view }),
   setSelected: (id) => set({ selectedId: id }),
   setMaximized: (id) => set({ maximizedId: id }),
   openSettings: (open) => set({ settingsOpen: open }),

@@ -6,6 +6,8 @@ import type {
   LaunchConfig,
   PtyDataEvent,
   PtyExitEvent,
+  RoadmapListFilters,
+  RoadmapUpsertFields,
   SessionQuotaEvent,
   SessionRuntime,
   SessionThinkingEvent,
@@ -81,6 +83,10 @@ const api: DeckApi = {
   saveLaunchConfig: (cfg: LaunchConfig) => ipcRenderer.invoke('launch:set-global', cfg),
 
   announce: (text: string) => ipcRenderer.invoke('announce:send', text),
+
+  roadmapList: (filters: RoadmapListFilters) => ipcRenderer.invoke('roadmap:list', filters),
+  roadmapUpsert: (fields: RoadmapUpsertFields) => ipcRenderer.invoke('roadmap:upsert', fields),
+  roadmapArchive: (id: string) => ipcRenderer.invoke('roadmap:archive', id),
 
   listTemplates: () => ipcRenderer.invoke('template:list'),
   exportTemplate: (name: string, local: boolean) =>

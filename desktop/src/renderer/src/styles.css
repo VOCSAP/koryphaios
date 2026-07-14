@@ -57,9 +57,23 @@ body {
 }
 
 .app {
+  /* Nav rail + active view (the agents view nests its own sidebar grid). */
+  display: grid;
+  grid-template-columns: auto 1fr;
+  height: 100vh;
+}
+
+/* Agents view wrapper: the pre-rail layout, kept mounted (PTYs alive) and
+   hidden with display:none when another rail view is active. */
+.view-agents {
   display: grid;
   grid-template-columns: var(--sidebar-w) 1fr;
   height: 100vh;
+  min-width: 0;
+}
+
+.view-hidden {
+  display: none;
 }
 
 .main-pane {
@@ -1379,4 +1393,255 @@ code {
   gap: var(--gap);
   justify-content: center;
   flex-wrap: wrap;
+}
+
+/* ---------- Navigation rail (PLAN C3-M3) ---------- */
+
+.nav-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 58px;
+  padding: 6px 4px;
+  background: var(--bg-2);
+  border-right: 1px solid var(--border);
+}
+
+.nav-rail-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 2px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font: inherit;
+}
+
+.nav-rail-item:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+}
+
+.nav-rail-item.is-active {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.nav-rail-icon {
+  font-size: 18px;
+  line-height: 1;
+}
+
+.nav-rail-label {
+  font-size: 9px;
+  letter-spacing: 0.02em;
+}
+
+/* ---------- Roadmap view (PLAN C3-M3) ---------- */
+
+.roadmap-view {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-width: 0;
+}
+
+.roadmap-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.roadmap-head h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.roadmap-archived-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
+.roadmap-spacer {
+  flex: 1;
+}
+
+.roadmap-error {
+  padding: 8px 14px;
+  color: #e05a5a;
+  font-size: 12px;
+}
+
+.roadmap-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.roadmap-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px;
+  min-width: 0;
+}
+
+.roadmap-empty {
+  color: var(--fg-dim);
+  font-size: 13px;
+}
+
+.rm-section {
+  margin-bottom: 18px;
+}
+
+.rm-section-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.rm-count {
+  font-size: 11px;
+  color: var(--fg-dim);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0 7px;
+}
+
+/* MoSCoW section colours (also used as priority badges). */
+.rm-prio-must { color: #e05a5a; }
+.rm-prio-should { color: #e0b341; }
+.rm-prio-could { color: #4f86ff; }
+.rm-prio-wont { color: var(--fg-dim); }
+
+.rm-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 9px 11px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rm-card:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+.rm-card-selected {
+  border-color: var(--accent);
+}
+
+.rm-card-archived {
+  opacity: 0.55;
+}
+
+.rm-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rm-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rm-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.rm-badge {
+  font-size: 10.5px;
+  padding: 1px 7px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+}
+
+.rm-badge-value-high { color: #3ec46d; border-color: color-mix(in srgb, #3ec46d 50%, transparent); }
+.rm-badge-value-medium { color: #4f86ff; border-color: color-mix(in srgb, #4f86ff 50%, transparent); }
+.rm-badge-effort-high { color: #e05a5a; border-color: color-mix(in srgb, #e05a5a 50%, transparent); }
+.rm-badge-effort-low { color: #3ec46d; border-color: color-mix(in srgb, #3ec46d 50%, transparent); }
+.rm-badge-status-in_progress { color: #e0b341; border-color: color-mix(in srgb, #e0b341 50%, transparent); }
+.rm-badge-status-done { color: #3ec46d; border-color: color-mix(in srgb, #3ec46d 50%, transparent); }
+.rm-badge-tag { color: var(--accent); }
+
+.roadmap-detail {
+  width: 340px;
+  flex: 0 0 auto;
+  overflow-y: auto;
+  padding: 12px 14px;
+  border-left: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rm-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rm-detail-head h3 {
+  flex: 1;
+  margin: 0;
+  font-size: 14px;
+}
+
+.rm-detail-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.rm-detail-text {
+  margin: 0;
+  font-size: 12.5px;
+  white-space: pre-wrap;
+}
+
+.rm-detail-rationale {
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+.rm-detail-meta {
+  margin: 0;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.rm-detail-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.rm-detail-actions .danger {
+  color: #e05a5a;
+  border-color: color-mix(in srgb, #e05a5a 50%, transparent);
 }

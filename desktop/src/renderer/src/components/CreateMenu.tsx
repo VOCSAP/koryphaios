@@ -25,7 +25,26 @@ function supports1mContext(id: string): boolean {
   return m !== '' && !m.includes('haiku')
 }
 
-export function CreateMenu({ onClose }: { onClose: () => void }): React.JSX.Element {
+export interface CreateMenuInitial {
+  /** Pre-filled session name. */
+  name?: string
+  /** Pre-filled initial prompt (e.g. composed from a roadmap item, PLAN C3-M4). */
+  prompt?: string
+  /** Pre-filled join-announce note (marks it operator-authored: no auto-sync). */
+  announce?: string
+}
+
+export function CreateMenu({
+  onClose,
+  initial,
+  onCreate
+}: {
+  onClose: () => void
+  /** Optional pre-filled fields (roadmap "launch an agent on this item"). */
+  initial?: CreateMenuInitial
+  /** Called right after the session is created (before the menu closes). */
+  onCreate?: () => void
+}): React.JSX.Element {
   const t = useT()
   const createSession = useDeck((s) => s.createSession)
 
@@ -33,7 +52,7 @@ export function CreateMenu({ onClose }: { onClose: () => void }): React.JSX.Elem
   const [presets, setPresets] = useState<LaunchPreset[]>([])
   const [models, setModels] = useState<ModelOption[]>([])
   const [agent, setAgent] = useState('')
-  const [name, setName] = useState('')
+  const [name, setName] = useState(initial?.name ?? '')
   const [model, setModel] = useState('')
   // Extended 1M context: appends the `[1m]` suffix to the model id (Claude Code
   // strips it before calling the provider). Only meaningful on a 1M-capable
@@ -43,14 +62,15 @@ export function CreateMenu({ onClose }: { onClose: () => void }): React.JSX.Elem
   const [extraArgs, setExtraArgs] = useState('')
   // Initial prompt, submitted as Claude's positional argument on the fresh
   // launch (PLAN C2). Presets with a `prompt` pre-fill it (last preset wins).
-  const [prompt, setPrompt] = useState('')
+  const [prompt, setPrompt] = useState(initial?.prompt ?? '')
   const [color, setColor] = useState('#4f86ff')
   const [customColor, setCustomColor] = useState(false)
   const [folder, setFolder] = useState<string | null>(null)
   // Join-announce note, pre-filled with the agent/model/effort summary. It tracks
-  // those choices until the operator edits it (then it stays as authored).
-  const [announce, setAnnounce] = useState('')
-  const [announceTouched, setAnnounceTouched] = useState(false)
+  // those choices until the operator edits it (then it stays as authored). An
+  // initial.announce counts as authored from the start.
+  const [announce, setAnnounce] = useState(initial?.announce ?? '')
+  const [announceTouched, setAnnounceTouched] = useState(!!initial?.announce)
 
   useEffect(() => {
     void window.api.listAgents().then(setAgents)
@@ -114,6 +134,7 @@ export function CreateMenu({ onClose }: { onClose: () => void }): React.JSX.Elem
       color: customColor ? color : undefined,
       announce: announce.trim() || undefined
     })
+    onCreate?.()
     onClose()
   }
 

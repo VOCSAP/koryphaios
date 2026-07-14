@@ -28,6 +28,7 @@
 | 2026-07-14 | session exploration (suite) | C1 | C1 complet : quota.ts, branchement session-service, toggle global + override par session, IPC session:quota, dot orange + badge + toast, i18n en/fr, 16 tests fixtures. bun test 280/280, typecheck node+web verts. Desktop bump 0.3.5. | C1 à valider à la main sur un vrai épisode de limite (test end-to-end impossible en CI). Ensuite : C2. |
 | 2026-07-14 | session exploration (suite) | C2 | C2 complet : prompt positionnel au spawn frais (quotePromptArg par plateforme), SessionDef.prompt persisté, champ « Prompt initial » + presets câblés dans CreateMenu, i18n, 5 tests. bun test 285/285, typecheck verts. | Vérif visuelle du champ au prochain lancement de l'app. Ensuite : C3 (roadmap, M1 broker). |
 | 2026-07-14 | session exploration (suite) | C3-M1/M2 | Table roadmap_items + routes /roadmap/list\|upsert\|archive (8 tests) ; 5 tools MCP roadmap_* dans server.ts (préfixes d'id, fallback project_key local:) + instructions agents. bun test 293/293, tsc core vert. | M3 (UI Deck) puis M4 (liants). |
+| 2026-07-14 | session exploration (suite) | C3-M3/M4 | Rail Agents\|Roadmap + RoadmapView (MoSCoW, CRUD, détail, poll 5 s), roadmap-service.ts (project_key miroir de server.ts) + IPC, « Lancer un agent sur cet item » (prompt C2 + in_progress + annonce), export/import JSON + cli roadmap-export/import. Versions bump 0.4.0 (core + desktop). | C3 code complet ; vérif visuelle UI au premier lancement réel. Ensuite : C4 (worktrees). |
 
 ---
 
@@ -138,35 +139,42 @@ value/effort), stocké broker, manipulé par les agents via MCP, visualisé et
       messagerie existants (pas de test MCP-stdio dédié dans le repo).
 
 ### M3 — Deck UI
-- [ ] Rail de navigation **Agents | Roadmap** : état de vue dans `store.ts`
-      + `App.tsx` ; « Agents » = Sidebar + TileArea actuels inchangés.
-- [ ] Vue Roadmap : sections MoSCoW (Must/Should/Could/Won't) avec badges
-      value/effort colorés + compteurs, second regroupement par statut,
-      filtres kind/status, recherche.
-- [ ] Panneau détail + formulaire création/édition opérateur
-      (`created_by='deck'`), archivage/restauration.
-- [ ] Main process : `roadmap-service.ts` (réutilise `resolveBrokerEndpoint`
-      de `broker-client.ts`), IPC `roadmap:list|upsert|archive` (`ipc.ts`,
-      `preload/index.ts`, `preload/index.d.ts`), polling 5 s quand la vue
-      est ouverte.
-- [ ] i18n en/fr.
+- [x] Rail de navigation **Agents | Roadmap** (`NavRail.tsx`, état `view` dans
+      `store.ts`, `App.tsx`) ; « Agents » = Sidebar + TileArea inchangés,
+      **maintenus montés** (display:none) pour garder les xterm/PTY vivants.
+- [x] Vue Roadmap (`RoadmapView.tsx`) : sections MoSCoW avec badges
+      value/effort/statut colorés + compteurs, filtre kind, toggle archivés.
+      (Recherche plein-texte : reportée, non bloquante.)
+- [x] Panneau détail + formulaire création/édition opérateur
+      (`created_by='deck'`), archivage (ConfirmDialog) / restauration.
+- [x] Main process : `roadmap-service.ts` (réutilise `resolveBrokerEndpoint`,
+      miroir du project_key de server.ts, remote normalisé + fallback
+      `local:`), IPC `roadmap:list|upsert|archive`, polling 5 s quand la vue
+      est visible. Tests `tests/desktop-roadmap-service.test.ts` (6 cas dont
+      la cohérence du project_key avec le core et l'aller-retour broker réel).
+- [x] i18n en/fr + EN_DEFAULTS (~55 clés).
 
 ### M4 — Liants
-- [ ] « Lancer un agent sur cet item » : pré-remplit le CreateMenu avec un
-      prompt C2 (titre + description + critères) et passe l'item
-      `in_progress`.
-- [ ] Annonce `/announce` optionnelle sur changement opérateur (mégaphone
-      v0.3.4).
-- [ ] `GET /roadmap/export?project_key=` (JSON versionnable) + commandes
-      `bun cli.ts roadmap-export / roadmap-import` (migration local → broker
-      central, sauvegarde).
+- [x] « Lancer un agent sur cet item » : bouton du panneau détail → CreateMenu
+      pré-rempli (prompt C2 composé de l'item + annonce d'arrivée « works on
+      roadmap item: … ») ; l'item passe `in_progress` au spawn et l'agent est
+      chargé de tenir le statut via ses tools roadmap ; bascule sur la vue
+      Agents.
+- [x] Annonce au groupe : couverte par l'annonce d'arrivée pré-remplie du flux
+      « Lancer un agent » (décision : pas de checkbox d'annonce sur chaque
+      édition opérateur — bruit sans valeur ; reconsidérer si besoin réel).
+- [x] `GET /roadmap/export?project_key=` (JSON versionnable, archivés inclus)
+      + `POST /roadmap/import` (ids/timestamps/auteurs préservés, re-keying
+      supporté) + commandes `bun cli.ts roadmap-export / roadmap-import` ;
+      le CLI envoie désormais le Bearer token configuré.
 
 ### Done quand
-- Un agent crée un item via `roadmap_add` → visible en live dans la Deck.
-- Les items survivent à la fermeture de toutes les sessions, au redémarrage
-  du broker et de la machine.
-- Export/import JSON aller-retour sans perte.
-- Suite `bun test` complète verte.
+- [ ] Un agent crée un item via `roadmap_add` → visible en live dans la Deck
+      (**validation manuelle opérateur** au premier lancement réel).
+- [x] Les items survivent à la fermeture de toutes les sessions, au redémarrage
+      du broker et de la machine (testé : unregister de l'auteur, base fichier).
+- [x] Export/import JSON aller-retour sans perte (testé, y c. idempotence).
+- [x] Suite `bun test` complète verte.
 
 ---
 

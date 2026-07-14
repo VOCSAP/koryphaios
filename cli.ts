@@ -25,9 +25,27 @@ import type { Peer, GroupStatsResponse } from "./shared/types.ts";
 const config = await loadConfig();
 const BROKER_URL = brokerUrl(config);
 
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  return config.broker_token ? { ...extra, Authorization: `Bearer ${config.broker_token}` } : extra;
+}
+
 async function brokerGet<T>(path: string): Promise<T> {
   const res = await fetch(`${BROKER_URL}${path}`, {
+    headers: authHeaders(),
     signal: AbortSignal.timeout(3000),
+  });
+  if (!res.ok) {
+    throw new Error(`${res.status}: ${await res.text()}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+async function brokerPost<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BROKER_URL}${path}`, {
+    method: "POST",
+    headers: authHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(5000),
   });
   if (!res.ok) {
     throw new Error(`${res.status}: ${await res.text()}`);
@@ -134,14 +152,66 @@ switch (cmd) {
     break;
   }
 
+  case "roadmap-export": {
+    // Prints the JSON snapshot to stdout: redirect to a file to version/backup it.
+    const projectKey = flags[0];
+    if (!projectKey) {
+      console.error("Usage: bun cli.ts roadmap-export <project_key>  (e.g. github.com/owner/repo)");
+      process.exit(1);
+    }
+    try {
+      const dump = await brokerGet<unknown>(
+        `/roadmap/export?project_key=${encodeURIComponent(projectKey)}`
+      );
+      console.log(JSON.stringify(dump, null, 2));
+    } catch (e) {
+      console.error(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(1);
+    }
+    break;
+  }
+
+  case "roadmap-import": {
+    // Reads a roadmap-export JSON file and bulk-imports it (ids/timestamps kept).
+    const file = flags[0];
+    if (!file) {
+      console.error("Usage: bun cli.ts roadmap-import <export.json> [--project-key <key>]");
+      process.exit(1);
+    }
+    try {
+      const dump = JSON.parse(await Bun.file(file).text()) as {
+        project_key?: string;
+        items?: unknown[];
+      };
+      const keyFlagIdx = flags.indexOf("--project-key");
+      const projectKey = keyFlagIdx !== -1 ? flags[keyFlagIdx + 1] : dump.project_key;
+      if (!projectKey) {
+        console.error("No project_key in the file; pass --project-key <key>.");
+        process.exit(1);
+      }
+      const result = await brokerPost<{ imported: number }>("/roadmap/import", {
+        project_key: projectKey,
+        items: dump.items ?? [],
+      });
+      console.log(`Imported ${result.imported} item(s) into ${projectKey}.`);
+    } catch (e) {
+      console.error(`Import failed: ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(1);
+    }
+    break;
+  }
+
   default:
-    console.log(`claude-peers CLI v0.3
+    console.log(`claude-peers CLI v0.4
 
 Usage:
   bun cli.ts status                       Show broker status and all peers
   bun cli.ts peers [--include-dormant]    List peers across all groups
   bun cli.ts groups                       Show active peer counts per group
   bun cli.ts kill-broker                  Stop the broker daemon (Linux/macOS only)
+  bun cli.ts roadmap-export <project_key> Print a project's roadmap as JSON (stdout)
+  bun cli.ts roadmap-import <export.json> [--project-key <key>]
+                                          Bulk-import a roadmap export (ids kept)
 
 Note: 'send' is no longer available -- use the MCP send_message tool from
 within Claude Code (the broker requires a valid instance_token).

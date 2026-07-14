@@ -4,6 +4,8 @@ import { useT } from '../i18n'
 import { Sidebar } from './Sidebar'
 import { TileArea } from './TileArea'
 import { DisplayModeBar } from './DisplayModeBar'
+import { NavRail } from './NavRail'
+import { RoadmapView } from './RoadmapView'
 import { SettingsView } from './SettingsView'
 import { WorkspacesDialog } from './WorkspacesDialog'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -32,6 +34,7 @@ export function App(): React.JSX.Element {
   const maximizedId = useDeck((s) => s.maximizedId)
   const setMaximized = useDeck((s) => s.setMaximized)
   const sidebarWidth = useDeck((s) => s.sidebarWidth)
+  const view = useDeck((s) => s.view)
 
   useEffect(() => {
     void init()
@@ -69,11 +72,18 @@ export function App(): React.JSX.Element {
 
   return (
     <div className="app" style={{ '--sidebar-w': `${sidebarWidth}px` } as React.CSSProperties}>
-      <Sidebar />
-      <div className="main-pane">
-        <DisplayModeBar />
-        <TileArea />
+      <NavRail />
+      {/* The agents view (sidebar + tiles) stays MOUNTED under the roadmap view:
+          unmounting TerminalTile would tear down the xterm instances and their
+          scrollback. display:none keeps the PTYs and terminals alive. */}
+      <div className={`view-agents${view === 'agents' ? '' : ' view-hidden'}`}>
+        <Sidebar />
+        <div className="main-pane">
+          <DisplayModeBar />
+          <TileArea />
+        </div>
       </div>
+      {view === 'roadmap' && <RoadmapView />}
       {settingsOpen && <SettingsView />}
       {workspacesOpen && <WorkspacesDialog />}
       {saveAsOpen && <SaveAsDialog />}

@@ -38,6 +38,13 @@ discovery.
   automatically (one shot per episode). Off by default -- enable it in
   Settings > General, or per session via the sidebar right-click menu. The
   status dot turns orange with an "auto-resume at HH:MM" badge while waiting.
+- **Shared roadmap.** A navigation rail (Agents | Roadmap) exposes the
+  project's persistent backlog (features, bugs, debt, ideas), stored in the
+  claude-peers broker and shared with every Claude session working on the same
+  repository -- agents read/write it through their `roadmap_*` MCP tools, the
+  operator through the Roadmap view (MoSCoW groups, value/effort badges,
+  filters, archive/restore). "Launch an agent" on an item spawns a session
+  pre-briefed with it and flags it in progress.
 - **English / French UI**, switchable live.
 
 ---

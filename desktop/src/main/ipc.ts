@@ -1,6 +1,15 @@
 import { join } from 'node:path'
 import { app, BrowserWindow, dialog, ipcMain } from 'electron'
-import type { AppConfig, CreateSessionInput, I18nPayload, LaunchConfig } from '@shared/types'
+import type {
+  AppConfig,
+  CreateSessionInput,
+  I18nPayload,
+  LaunchConfig,
+  RoadmapListFilters,
+  RoadmapUpsertFields
+} from '@shared/types'
+import { resolveBrokerEndpoint } from './broker-client'
+import { archiveRoadmap, computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
 import type { SessionService } from './session-service'
 import type { WorkspaceService } from './workspace-service'
 import { listAgents } from './agents'
@@ -110,6 +119,27 @@ export function registerIpc({
 
   // ----- announce (outbound megaphone) -----
   ipcMain.handle('announce:send', (_e, text: string) => announce(text ?? ''))
+
+  // ----- roadmap (shared per-project backlog, PLAN C3) -----
+  // Endpoint + project key are resolved per call: cheap (config file read + one
+  // git exec) and always consistent with the current projectDir. Operator
+  // writes are stamped by='deck' inside roadmap-service.
+  const roadmapCtx = (): { endpoint: ReturnType<typeof resolveBrokerEndpoint>; key: string } => ({
+    endpoint: resolveBrokerEndpoint(),
+    key: computeDeckProjectKey(getConfig().projectDir)
+  })
+  ipcMain.handle('roadmap:list', (_e, filters: RoadmapListFilters) => {
+    const { endpoint, key } = roadmapCtx()
+    return listRoadmap(endpoint, key, filters ?? {})
+  })
+  ipcMain.handle('roadmap:upsert', (_e, fields: RoadmapUpsertFields) => {
+    const { endpoint, key } = roadmapCtx()
+    return upsertRoadmap(endpoint, key, fields ?? {})
+  })
+  ipcMain.handle('roadmap:archive', (_e, id: string) => {
+    const { endpoint } = roadmapCtx()
+    return archiveRoadmap(endpoint, id)
+  })
 
   // ----- create-menu data -----
   ipcMain.handle('agents:list', () => listAgents(getConfig().projectDir))

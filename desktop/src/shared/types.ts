@@ -187,6 +187,71 @@ export interface CreateSessionInput {
   announce?: string
 }
 
+// ----- Roadmap (PLAN C3) -----
+// Mirror of the core shared/types.ts roadmap entities (the desktop tree cannot
+// import repo-root shared/, same convention as broker-client.ts). Keep in sync.
+
+export type RoadmapKind = 'feature' | 'bug' | 'debt' | 'idea' | 'chore'
+export type RoadmapPriority = 'must' | 'should' | 'could' | 'wont'
+export type RoadmapLevel = 'low' | 'medium' | 'high'
+export type RoadmapStatus = 'idea' | 'planned' | 'in_progress' | 'done' | 'archived'
+
+export interface RoadmapItem {
+  id: string
+  project_key: string
+  kind: RoadmapKind
+  title: string
+  description: string
+  rationale: string
+  priority: RoadmapPriority
+  value: RoadmapLevel
+  effort: RoadmapLevel
+  status: RoadmapStatus
+  tags: string[]
+  depends_on: string[]
+  created_by: string
+  updated_by: string
+  created_at: string
+  updated_at: string
+  deleted_at: string | null
+}
+
+export interface RoadmapListFilters {
+  kind?: RoadmapKind
+  status?: RoadmapStatus
+  priority?: RoadmapPriority
+  tag?: string
+  include_archived?: boolean
+}
+
+/** Create (no id) or partial patch (id set); the main process stamps by='deck'. */
+export interface RoadmapUpsertFields {
+  id?: string
+  kind?: RoadmapKind
+  title?: string
+  description?: string
+  rationale?: string
+  priority?: RoadmapPriority
+  value?: RoadmapLevel
+  effort?: RoadmapLevel
+  status?: RoadmapStatus
+  tags?: string[]
+  depends_on?: string[]
+}
+
+export interface RoadmapListResponse {
+  items: RoadmapItem[]
+}
+export interface RoadmapUpsertResponse {
+  item: RoadmapItem
+}
+export interface RoadmapArchiveResponse {
+  item: RoadmapItem
+}
+
+/** Sidebar navigation rail views (PLAN C3-M3; 'home' arrives with C5). */
+export type DeckView = 'agents' | 'roadmap'
+
 // ----- IPC channel payloads -----
 
 export interface PtyDataEvent {
@@ -259,6 +324,11 @@ export interface DeckApi {
   // announce (outbound megaphone): broadcast a free-text operator message to all
   // peers in the active group. Returns the number of peers it reached.
   announce(text: string): Promise<number>
+
+  // roadmap (shared per-project backlog, PLAN C3)
+  roadmapList(filters: RoadmapListFilters): Promise<RoadmapItem[]>
+  roadmapUpsert(fields: RoadmapUpsertFields): Promise<RoadmapItem>
+  roadmapArchive(id: string): Promise<RoadmapItem>
 
   // templates (portable team recipes)
   listTemplates(): Promise<TemplateSummary[]>

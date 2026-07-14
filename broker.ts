@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * claude-peers broker daemon (v0.3.4)
+ * claude-peers broker daemon (v0.4.0)
  *
  * Singleton HTTP server on 127.0.0.1:<port> backed by SQLite.
  * Tracks registered Claude Code peers, isolates them by group, persists session
@@ -1089,6 +1089,89 @@ function handleRoadmapArchive(
   return { item: getRoadmapItem(body.id)! };
 }
 
+/** Full export of a project's roadmap (archived included) for backup/migration. */
+function handleRoadmapExport(projectKey: string): {
+  project_key: string;
+  exported_at: string;
+  items: RoadmapItem[];
+} {
+  const rows = db
+    .query("SELECT * FROM roadmap_items WHERE project_key = ? ORDER BY created_at, id")
+    .all(projectKey) as RoadmapRow[];
+  return {
+    project_key: projectKey,
+    exported_at: new Date().toISOString(),
+    items: rows.map(rowToRoadmapItem),
+  };
+}
+
+/**
+ * Bulk import (INSERT OR REPLACE) of exported items, preserving ids, statuses,
+ * authors and timestamps -- the migration path between a local broker and a
+ * central one. Every item is re-keyed to the given project_key.
+ */
+function handleRoadmapImport(body: {
+  project_key?: string;
+  items?: unknown;
+}): { imported: number } | { error: string; status: number } {
+  const projectKey =
+    typeof body.project_key === "string" && body.project_key.trim() ? body.project_key.trim() : "";
+  if (!projectKey) return { error: "project_key is required", status: 400 };
+  if (!Array.isArray(body.items)) return { error: "items must be an array", status: 400 };
+
+  const items = body.items as Partial<RoadmapItem>[];
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i]!;
+    if (
+      typeof it.id !== "string" ||
+      !it.id.trim() ||
+      typeof it.title !== "string" ||
+      !it.title.trim() ||
+      badEnum(it.kind, ROADMAP_KINDS) ||
+      it.kind === undefined ||
+      badEnum(it.priority, ROADMAP_PRIORITIES) ||
+      badEnum(it.value, ROADMAP_LEVELS) ||
+      badEnum(it.effort, ROADMAP_LEVELS) ||
+      badEnum(it.status, ROADMAP_STATUSES)
+    ) {
+      return { error: `invalid item at index ${i}`, status: 400 };
+    }
+  }
+
+  const insert = db.prepare(
+    `INSERT OR REPLACE INTO roadmap_items
+       (id, project_key, kind, title, description, rationale, priority, value,
+        effort, status, tags, depends_on, created_by, updated_by,
+        created_at, updated_at, deleted_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  const importAll = db.transaction((rows: Partial<RoadmapItem>[]) => {
+    for (const it of rows) {
+      insert.run(
+        it.id!.trim(),
+        projectKey,
+        it.kind!,
+        it.title!.trim(),
+        it.description ?? "",
+        it.rationale ?? "",
+        it.priority ?? "could",
+        it.value ?? "medium",
+        it.effort ?? "medium",
+        it.status ?? "idea",
+        JSON.stringify(cleanList(it.tags) ?? []),
+        JSON.stringify(cleanList(it.depends_on) ?? []),
+        it.created_by ?? "",
+        it.updated_by ?? "",
+        it.created_at ?? new Date().toISOString(),
+        it.updated_at ?? new Date().toISOString(),
+        it.deleted_at ?? null
+      );
+    }
+  });
+  importAll(items);
+  return { imported: items.length };
+}
+
 function handleGroupStats(): GroupStatsResponse {
   const rows = db.query(
     "SELECT group_id, COUNT(*) AS active_peers FROM peers WHERE status = 'active' GROUP BY group_id"
@@ -1178,6 +1261,11 @@ const server = Bun.serve<WsData>({
         const rows = db.query(sql).all() as Peer[];
         return Response.json(rows);
       }
+      if (path === "/roadmap/export") {
+        const pk = url.searchParams.get("project_key") ?? "";
+        if (!pk) return Response.json({ error: "project_key is required" }, { status: 400 });
+        return Response.json(handleRoadmapExport(pk));
+      }
       if (path === "/admin/purge-messages") {
         // Manual trigger for the TTL sweep (also runs at boot + every PURGE_INTERVAL_SEC).
         // Returns the number of rows deleted. Used by tests and for ad-hoc cleanup.
@@ -1243,6 +1331,13 @@ const server = Bun.serve<WsData>({
           }
           return Response.json(result);
         }
+        case "/roadmap/import": {
+          const result = handleRoadmapImport(body as { project_key?: string; items?: unknown });
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
         case "/roadmap/archive": {
           const result = handleRoadmapArchive(body as RoadmapArchiveRequest);
           if ("error" in result) {
@@ -1267,7 +1362,7 @@ const server = Bun.serve<WsData>({
 });
 
 console.error(
-  `[claude-peers broker v0.3.4] listening on ${BIND_HOST}:${PORT} ` +
+  `[claude-peers broker v0.4.0] listening on ${BIND_HOST}:${PORT} ` +
   `(db: ${DB_PATH}, dormant_ttl=${DORMANT_TTL_HOURS}h, msg_ttl=${MESSAGE_TTL_DAYS}d, ` +
   `flush_cap=${FLUSH_MAX_COUNT}/${FLUSH_MAX_AGE_HOURS}h, purge_interval=${PURGE_INTERVAL_SEC}s, ` +
   `activity_timeout=${ACTIVITY_TIMEOUT_MS / 1000}s, ws_idle=${WS_IDLE_TIMEOUT_SEC}s, ` +

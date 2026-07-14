@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.4.0 -- unreleased (PLAN-v0.4 C3 in progress)
+## v0.4.0 -- 2026-07-14
 
 ### Added
 - **Shared per-project roadmap (broker, C3-M1).** New `roadmap_items` table in
@@ -19,6 +19,25 @@
   repos without a git remote fall back to a stable `local:<hash>` project key.
   The MCP instructions now tell agents to consult the roadmap at task start,
   record discovered bugs/debt, and keep item statuses current.
+- **Deck roadmap view (C3-M3).** New navigation rail (Agents | Roadmap) on the
+  left of the window; the agents view stays mounted (PTYs/xterm alive) while
+  the roadmap is shown. The roadmap view groups items by MoSCoW priority with
+  value/effort/status badges and tags, filters by kind, optional archived
+  display, a detail panel and full operator CRUD (`created_by='deck'`); it
+  polls the broker every 5 s while visible so agent writes appear live. Main
+  process `roadmap-service.ts` mirrors server.ts's project-key resolution
+  (normalized git remote, else the same `local:<hash>` fallback) so the Deck
+  and its agents always see the same roadmap (`tests/desktop-roadmap-service.test.ts`).
+- **Launch an agent on an item (C3-M4).** The item detail panel can spawn a
+  session pre-filled with a composed initial prompt (uses the C2 positional
+  prompt) and a join announcement; the item is flagged `in_progress` at spawn
+  and the agent is instructed to keep its status current via the roadmap tools.
+- **Roadmap export/import (C3-M4).** `GET /roadmap/export?project_key=` returns
+  a versionable JSON snapshot (archived included); `POST /roadmap/import`
+  bulk-imports it preserving ids, statuses, authors and timestamps (re-keying
+  to a target project supported). New CLI commands `bun cli.ts roadmap-export`
+  / `roadmap-import` (the local -> central broker migration path). The CLI now
+  sends the configured Bearer token on all requests.
 
 ## v0.3.5 (desktop) -- 2026-07-14
 

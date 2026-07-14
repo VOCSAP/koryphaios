@@ -199,6 +199,70 @@ test("archive hides the item from default lists; restore via status patch", asyn
   expect(unknown.status).toBe(404);
 });
 
+// ----- export / import (backup + local -> central migration) -----
+
+test("export/import round-trips items with ids, statuses and timestamps intact", async () => {
+  const item = await add({ title: "Survives migration", kind: "debt", tags: ["migration"] });
+  await post(`${broker.url}/roadmap/archive`, { id: item.id, by: "deck" });
+
+  const exportRes = await fetch(
+    `${broker.url}/roadmap/export?project_key=${encodeURIComponent(PK)}`
+  );
+  expect(exportRes.status).toBe(200);
+  const dump = (await exportRes.json()) as {
+    project_key: string;
+    exported_at: string;
+    items: RoadmapItem[];
+  };
+  expect(dump.project_key).toBe(PK);
+  const exported = dump.items.find((i) => i.id === item.id);
+  expect(exported).toBeDefined();
+  expect(exported!.status).toBe("archived");
+
+  // Import into a DIFFERENT project key (re-keying) on the same broker: ids,
+  // statuses, authors and timestamps must arrive unchanged.
+  const targetPk = "github.com/vocsap/migrated";
+  const imp = await post<{ imported: number }>(`${broker.url}/roadmap/import`, {
+    project_key: targetPk,
+    items: dump.items,
+  });
+  expect(imp.status).toBe(200);
+  expect(imp.body.imported).toBe(dump.items.length);
+
+  const migrated = await post<ListRes>(`${broker.url}/roadmap/list`, {
+    project_key: targetPk,
+    include_archived: true,
+  });
+  const twin = migrated.body.items.find((i) => i.id === item.id);
+  expect(twin).toBeDefined();
+  expect(twin!.project_key).toBe(targetPk);
+  expect(twin!.status).toBe("archived");
+  expect(twin!.created_at).toBe(exported!.created_at);
+  expect(twin!.created_by).toBe(exported!.created_by);
+  expect(twin!.tags).toEqual(["migration"]);
+
+  // Re-import is idempotent (INSERT OR REPLACE).
+  const again = await post<{ imported: number }>(`${broker.url}/roadmap/import`, {
+    project_key: targetPk,
+    items: dump.items,
+  });
+  expect(again.status).toBe(200);
+  const after = await post<ListRes>(`${broker.url}/roadmap/list`, {
+    project_key: targetPk,
+    include_archived: true,
+  });
+  expect(after.body.items.length).toBe(migrated.body.items.length);
+
+  // Validation: bad payloads are rejected.
+  const noPk = await fetch(`${broker.url}/roadmap/export`);
+  expect(noPk.status).toBe(400);
+  const badItem = await post(`${broker.url}/roadmap/import`, {
+    project_key: targetPk,
+    items: [{ id: "x", title: "ok", kind: "epic" }],
+  });
+  expect(badItem.status).toBe(400);
+});
+
 // ----- lifecycle independence from peers -----
 
 test("items survive their author peer's unregister (no FK, plain-text attribution)", async () => {
