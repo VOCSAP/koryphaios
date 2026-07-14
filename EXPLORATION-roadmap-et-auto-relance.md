@@ -530,7 +530,85 @@ d'un coup les presets M5, le « Lancer un agent sur cet item » de la roadmap
 
 ---
 
-## 7. Recommandation d'ensemble (mise à jour)
+## 7. Explorations de suite (2026-07-14, après livraison C1-C5)
+
+### 7.1 Vue Worktrees dans le rail (→ PLAN C6)
+
+À quoi elle sert concrètement : **voir et gérer les worktrees que les agents
+utilisent** — aujourd'hui ils n'apparaissent qu'indirectement (badge ⎇ des
+sessions) ; un worktree dont la session est fermée devient invisible et
+s'accumule dans `.worktrees/`.
+
+- **Contenu** : une ligne par worktree du repo (`listWorktrees` existe déjà) :
+  branche, chemin, marqueur « main », **session Deck attachée** (match
+  `session.cwd`), et un état git enrichi — sale ? (`git status --porcelain`),
+  dernier commit (sujet + date), avance/retard vs la branche principale.
+  Les worktrees **orphelins** (sans session vivante) sont mis en évidence :
+  c'est le cas d'usage n°1, le nettoyage après merge.
+- **Actions** : créer un worktree (sans session), ouvrir une session dedans
+  (create avec `cwd` = worktree — permet de *reprendre* un worktree orphelin),
+  supprimer (réutilise `removeWorktree` : jamais forcé, branche conservée),
+  copier le chemin.
+- **Intégration** : 4ᵉ vue du rail (le `NavRail` est extensible par
+  construction) ; `worktree-service.ts` gagne un `worktreeStatus()` ;
+  IPC `worktree:list`. Le superviseur voit déjà tout ça via
+  `deck_list_worktrees` — cette vue est le miroir opérateur.
+
+### 7.2 Import d'un fichier de plan → briques de roadmap (→ PLAN C7)
+
+Question : script déterministe ou délégation à un agent ? **Verdict : agent.**
+Un plan généré par Claude Code est de la prose structurée libre ; en extraire
+des items et *juger* kind/priority/value/effort est exactement un travail de
+LLM — un parseur markdown ne tiendrait que sur un format rigide et casserait
+sur le reste. Et l'infrastructure existe déjà intégralement : tools
+`roadmap_*` (C3) + prompt initial au spawn (C2) + auto-fermeture des tuiles
+sur exit propre (v0.3.3).
+
+- **UX** : bouton « Importer un plan » dans la vue Roadmap → file picker →
+  la Deck spawne un **agent d'import one-shot** avec un prompt C2 :
+  « Lis `<fichier>`, extrais les items de travail, crée-les via `roadmap_add`
+  (estime kind/priority/value/effort, tag `import` + nom du plan, reporte les
+  dépendances évidentes dans depends_on), affiche un résumé de ce que tu as
+  créé, puis tape /exit. » La tuile apparaît, travaille sous les yeux de
+  l'opérateur, et se ferme seule. Zéro nouveau canal, ~0 code backend.
+- **Variante superviseur** : quand le superviseur tourne, la même demande
+  peut lui être faite à la main (« lis X et importe-le dans la roadmap ») —
+  gratuit dès aujourd'hui. Le bouton dédié reste plus simple et sans état.
+- **Écarté** : le parseur déterministe (fragile, jugement impossible) ; on ne
+  le reconsidérerait que pour un format de plan strict qui n'existe pas.
+
+### 7.3 Harness du superviseur personnalisable (→ PLAN C8)
+
+Question : comment étendre durablement le rôle du superviseur sans le hook
+`UserPromptSubmit` ? L'intuition est la bonne : ce hook injecte du contexte
+**à chaque tour** (vérifié) — trop lourd et au mauvais niveau. Les leviers
+vérifiés dans la doc Claude Code :
+
+| Levier | Niveau | Vérifié |
+|---|---|---|
+| `--append-system-prompt-file <path>` | **System prompt**, une fois, toute la session — **fonctionne en interactif** | ✅ doc CLI |
+| Profil d'agent (`.claude/agents/*.md`) | Le corps **remplace** le system prompt | ✅ doc subagents |
+| Instructions MCP (deck-control `initialize`) | Contexte, déjà en place | ✅ |
+| Briefing C2 (prompt initial) | Premier message, déjà en place | ✅ |
+| `UserPromptSubmit` | Contexte **par tour** | ✅ (écarté) |
+
+**Design retenu — trois couches empilables** :
+1. **Défaut** (livré en C5) : briefing C2 + instructions du MCP deck-control.
+2. **Extension** (le cœur de C8) : un fichier `supervisor.md` cherché dans
+   `.claude/claude-peers/supervisor.md` (projet) puis
+   `<configDir global>/supervisor.md` ; s'il existe, le spawn superviseur
+   ajoute `--append-system-prompt-file "<chemin>"` — le rôle est ancré **dans
+   le system prompt**, pas rejoué à chaque tour, pas dépendant du transcript.
+   Re-passé au resume (le system prompt n'est pas restauré par
+   `--fork-session`), comme `--effort`/`--mcp-config`.
+3. **Remplacement** (déjà livré) : le profil d'agent Settings
+   (`supervisorAgent`) pour un harness entièrement custom.
+
+Impl : `resolveSupervisorPromptFile()` dans `supervisor.ts` +
+`appendSystemPromptFile` dans `session-command.ts` (même patron que
+`mcpConfig`) + note Settings. ~0,5 j.
+
+## 8. Recommandation d'ensemble (mise à jour)
 
 Ordre de valeur/risque croissant, chaque étape rendant la suivante plus utile :
 

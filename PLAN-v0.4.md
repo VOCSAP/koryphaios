@@ -31,6 +31,7 @@
 | 2026-07-14 | session exploration (suite) | C3-M3/M4 | Rail Agents\|Roadmap + RoadmapView (MoSCoW, CRUD, détail, poll 5 s), roadmap-service.ts (project_key miroir de server.ts) + IPC, « Lancer un agent sur cet item » (prompt C2 + in_progress + annonce), export/import JSON + cli roadmap-export/import. Versions bump 0.4.0 (core + desktop). | C3 code complet ; vérif visuelle UI au premier lancement réel. Ensuite : C4 (worktrees). |
 | 2026-07-14 | session exploration (suite) | C4 | worktree-service.ts (add/list/remove, jamais force ni suppression de branche), champ branche du menu avancé (création côté IPC, cwd = worktree), badge ⎇, dialog de nettoyage à la fermeture, hook worktreeInit en arrière-plan, 6 tests repo jetable. | Vérif manuelle 2 agents / 2 worktrees. Ensuite : C5 (superviseur). |
 | 2026-07-14 | session exploration (suite) | C5 | deck-control.ts (endpoint loopback + garde-fous ownership/cap), MCP stdio sans dépendance (build:mcp -> deck-plugin/mcp), supervisor.ts (--mcp-config généré + briefing C2), rail Home + HomeView (spawn lazy), profil sélectionnable Settings, filtres Agents/tuiles, 5 tests dont MCP stdio de bout en bout. Desktop bump 0.5.0. **Tous les chantiers C1-C5 sont codés.** | Validations manuelles restantes (C1 épisode réel, C3 UI, C4 2 worktrees, C5 scénario cible) au premier lancement réel de l'app. |
+| 2026-07-14 | session exploration (suite) | — | Exploration C6/C7/C8 (EXPLORATION §7) : vue Worktrees, import de plan par agent one-shot, harness superviseur via --append-system-prompt-file (vérifié doc CC). **Dogfooding réel de C3** : items C6/C7/C8 créés via les tools roadmap_* de cette session (broker auto-spawné) puis exportés par `cli.ts roadmap-export` → `roadmap-seed-v0.6.json` (re-keyé github.com/vocsap/claude-peers-mcp), importable sur ton poste : `bun cli.ts roadmap-import roadmap-seed-v0.6.json`. | Prochain chantier au choix : C6, C7 ou C8. |
 
 ---
 
@@ -259,6 +260,72 @@ coordination des agents via la messagerie peers existante (design §6).
       lit la roadmap, liste les profils, crée des worktrees, spawne
       dev/reviewer briefés et coordonne par `send_message`
       (**validation manuelle opérateur** au premier lancement réel).
+
+---
+
+## C6 — Vue Worktrees dans le rail (~1 j) → v0.6
+
+**Objectif** : voir et gérer les worktrees que les agents utilisent —
+notamment les orphelins qui s'accumulent après fermeture des tuiles
+(design : EXPLORATION §7.1).
+
+### Jalons
+- [ ] `worktree-service.ts` : `worktreeStatus(path)` — sale ?
+      (`git status --porcelain`), dernier commit (sujet + date).
+- [ ] IPC `worktree:list` (liste + statut + session Deck attachée par match
+      de cwd) ; DeckApi + preload.
+- [ ] `WorktreesView.tsx` (4ᵉ vue du rail) : lignes branche/chemin/session/
+      état, orphelins mis en évidence, actions créer / ouvrir une session
+      dedans (cwd = worktree, reprise d'orphelin) / supprimer (ConfirmDialog,
+      jamais forcé) / copier le chemin. i18n en/fr + EN_DEFAULTS.
+- [ ] Tests : worktreeStatus sur repo jetable (propre/sale), match session.
+
+### Done quand
+- [ ] Un worktree orphelin est visible, reprenable (nouvelle session dedans)
+      et supprimable depuis la vue.
+
+## C7 — Import d'un plan → briques roadmap (~0,5-1 j) → v0.6
+
+**Objectif** : bouton « Importer un plan » (fichiers de plan générés par
+Claude Code) qui crée les items roadmap correspondants. **Décision : pas de
+parseur déterministe** — extraction et jugement kind/priority/value/effort
+délégués à un agent one-shot (EXPLORATION §7.2).
+
+### Jalons
+- [ ] Bouton « Importer un plan » dans l'en-tête de `RoadmapView.tsx` →
+      `dialog.showOpenDialog` (fichier .md) via IPC.
+- [ ] Prompt d'import composé (module partagé, style `composeItemPrompt`) :
+      lire le fichier, `roadmap_add` par item (tags `import` + nom du plan,
+      depends_on évidents), résumé, `/exit` (la tuile s'auto-ferme, v0.3.3).
+- [ ] Spawn de l'agent one-shot via le create existant (C2) ; bascule vue
+      Agents pour l'observer ; i18n.
+- [ ] Test : composition du prompt (pur) ; le flux complet reste une
+      validation manuelle (agent réel).
+
+### Done quand
+- [ ] Importer `PLAN-v0.4.md` produit des items cohérents dans la vue.
+
+## C8 — Harness superviseur personnalisable (~0,5 j) → v0.6
+
+**Objectif** : ancrer/étendre le rôle du superviseur au niveau **system
+prompt** (pas par tour — `UserPromptSubmit` écarté), via un fichier
+opérateur (EXPLORATION §7.3 ; `--append-system-prompt-file` vérifié
+fonctionnel en interactif).
+
+### Jalons
+- [ ] `resolveSupervisorPromptFile()` dans `supervisor.ts` :
+      `.claude/claude-peers/supervisor.md` (projet) >
+      `<configDir global>/supervisor.md` ; absent = rien.
+- [ ] `appendSystemPromptFile` dans `session-command.ts` (même patron que
+      `mcpConfig` : émis sur frais ET resume) + `SessionDef` + passage au
+      spawn superviseur.
+- [ ] Note dans Settings (à côté du profil superviseur) + doc README.
+- [ ] Tests : résolution du fichier (préséance), présence du flag dans la
+      ligne de commande, resume inclus.
+
+### Done quand
+- [ ] Un `supervisor.md` projet change visiblement le comportement du
+      superviseur au prochain démarrage, sans hook par tour.
 
 ---
 
