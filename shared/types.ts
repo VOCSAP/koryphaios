@@ -163,6 +163,97 @@ export interface AnnounceResponse {
   sent: number;
 }
 
+// --- Roadmap (v0.4, PLAN C3): shared per-project backlog ---
+//
+// Items are scoped by project_key (normalized git remote), NOT by group_id:
+// groups are ephemeral (Deck windows mint a fresh secret per launch) while the
+// project is stable, so every session working on the same repo shares one
+// roadmap regardless of its group. Items deliberately carry NO foreign key to
+// peers/groups -- created_by/updated_by are plain-text snapshots of a peer_id
+// (or 'deck' for the operator) -- so their lifecycle is fully independent of
+// sessions: no cleanup timer ever touches them, deletion is a reversible
+// archive (deleted_at), and rows survive broker restarts like any other table.
+
+export type RoadmapKind = "feature" | "bug" | "debt" | "idea" | "chore";
+export type RoadmapPriority = "must" | "should" | "could" | "wont"; // MoSCoW
+export type RoadmapLevel = "low" | "medium" | "high";
+export type RoadmapStatus = "idea" | "planned" | "in_progress" | "done" | "archived";
+
+export interface RoadmapItem {
+  /** uuid, immutable. */
+  id: string;
+  project_key: string;
+  kind: RoadmapKind;
+  title: string;
+  /** Free markdown. */
+  description: string;
+  /** Why it matters (business value, in words). */
+  rationale: string;
+  priority: RoadmapPriority;
+  /** Impact ("value" badge). */
+  value: RoadmapLevel;
+  /** Complexity ("effort" badge). */
+  effort: RoadmapLevel;
+  status: RoadmapStatus;
+  tags: string[];
+  /** ids of items this one depends on. */
+  depends_on: string[];
+  /** peer_id or 'deck' snapshot at creation -- attribution only, no FK. */
+  created_by: string;
+  updated_by: string;
+  created_at: string;
+  updated_at: string;
+  /** Set when archived (soft delete, reversible); null otherwise. */
+  deleted_at: string | null;
+}
+
+export interface RoadmapListRequest {
+  project_key: string;
+  kind?: RoadmapKind;
+  status?: RoadmapStatus;
+  priority?: RoadmapPriority;
+  /** Keep only items whose tags include this value. */
+  tag?: string;
+  /** Include archived items (excluded by default). */
+  include_archived?: boolean;
+}
+
+export interface RoadmapListResponse {
+  items: RoadmapItem[];
+}
+
+/** Create (no id) or partially patch (id set) an item. Omitted fields keep. */
+export interface RoadmapUpsertRequest {
+  id?: string;
+  /** Required on create; ignored on patch (an item never changes project). */
+  project_key?: string;
+  /** Author of the write: peer_id or 'deck'. */
+  by: string;
+  kind?: RoadmapKind;
+  title?: string;
+  description?: string;
+  rationale?: string;
+  priority?: RoadmapPriority;
+  value?: RoadmapLevel;
+  effort?: RoadmapLevel;
+  status?: RoadmapStatus;
+  tags?: string[];
+  depends_on?: string[];
+}
+
+export interface RoadmapUpsertResponse {
+  item: RoadmapItem;
+}
+
+export interface RoadmapArchiveRequest {
+  id: string;
+  by: string;
+}
+
+export interface RoadmapArchiveResponse {
+  item: RoadmapItem;
+}
+
 // --- Broker API: groups and identity introspection ---
 
 export interface GroupStatsRow {

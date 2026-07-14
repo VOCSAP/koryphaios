@@ -19,6 +19,7 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { hostname } from "node:os";
+import { createHash } from "node:crypto";
 import type {
   Peer,
   RegisterResponse,
@@ -30,6 +31,10 @@ import type {
   WhoamiResponse,
   ListGroupsResponse,
   SetIdResponse,
+  RoadmapItem,
+  RoadmapListResponse,
+  RoadmapUpsertResponse,
+  RoadmapArchiveResponse,
 } from "./shared/types.ts";
 import {
   generateSummary,
@@ -374,6 +379,12 @@ Available tools:
 - list_groups: Show available groups defined in user config and how many active peers each has.
 - switch_group: Move this session to another group (disconnect + re-register).
 - set_id: Rename your peer_id within the current group (display name only; routing is unchanged).
+- roadmap_list / roadmap_get / roadmap_add / roadmap_update / roadmap_archive: the project's shared roadmap (see below).
+
+This project also has a SHARED ROADMAP: a persistent backlog of features, bugs, tech debt and ideas, scoped to this repository (not to your group or session) and shared with every Claude instance working on it, now and in future sessions. Use it actively:
+- At the start of a task, call roadmap_list to see what is planned and in progress.
+- When you discover a bug, tech debt or a good idea outside your current task, record it with roadmap_add instead of letting it vanish with the session.
+- Keep the status of items you work on up to date (roadmap_update: planned -> in_progress -> done).
 
 When you start, proactively call set_summary to describe what you're working on. This helps other instances understand your context.`,
   }
@@ -490,6 +501,134 @@ const TOOLS = [
       required: ["new_id"],
     },
   },
+  {
+    name: "roadmap_list",
+    description:
+      "List the project's shared roadmap items (persistent backlog scoped to this repository, shared across sessions and groups). Optional filters. Archived items are hidden unless requested.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        kind: {
+          type: "string" as const,
+          enum: ["feature", "bug", "debt", "idea", "chore"],
+          description: "Only items of this kind.",
+        },
+        status: {
+          type: "string" as const,
+          enum: ["idea", "planned", "in_progress", "done", "archived"],
+          description: "Only items in this status.",
+        },
+        priority: {
+          type: "string" as const,
+          enum: ["must", "should", "could", "wont"],
+          description: "Only items with this MoSCoW priority.",
+        },
+        tag: { type: "string" as const, description: "Only items carrying this tag." },
+        include_archived: {
+          type: "boolean" as const,
+          description: "Include archived items (default false).",
+        },
+      },
+    },
+  },
+  {
+    name: "roadmap_get",
+    description:
+      "Show the full detail of one roadmap item (description, rationale, tags, dependencies, authorship). Accepts a full id or a unique prefix (e.g. the 8-char id shown by roadmap_list).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        id: { type: "string" as const, description: "Item id, or a unique id prefix." },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "roadmap_add",
+    description:
+      "Add an item to the project's shared roadmap. Use it to record features, bugs, tech debt or ideas so they survive this session. Only title is required; sensible defaults apply (kind=feature, priority=could, value/effort=medium, status=idea).",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string" as const, description: "Short imperative title." },
+        kind: {
+          type: "string" as const,
+          enum: ["feature", "bug", "debt", "idea", "chore"],
+          description: "Item kind (default feature).",
+        },
+        description: { type: "string" as const, description: "Free markdown details." },
+        rationale: { type: "string" as const, description: "Why it matters (business value)." },
+        priority: {
+          type: "string" as const,
+          enum: ["must", "should", "could", "wont"],
+          description: "MoSCoW priority (default could).",
+        },
+        value: {
+          type: "string" as const,
+          enum: ["low", "medium", "high"],
+          description: "Impact / value (default medium).",
+        },
+        effort: {
+          type: "string" as const,
+          enum: ["low", "medium", "high"],
+          description: "Complexity / effort (default medium).",
+        },
+        status: {
+          type: "string" as const,
+          enum: ["idea", "planned", "in_progress", "done"],
+          description: "Initial status (default idea).",
+        },
+        tags: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          description: "Free tags (e.g. component, milestone).",
+        },
+        depends_on: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          description: "Ids of items this one depends on.",
+        },
+      },
+      required: ["title"],
+    },
+  },
+  {
+    name: "roadmap_update",
+    description:
+      "Partially update a roadmap item: only the fields you pass change. Use it to move status (planned -> in_progress -> done), reprioritize, retag or rewrite. Accepts a full id or a unique prefix. Setting status=archived archives; any other status restores an archived item.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        id: { type: "string" as const, description: "Item id, or a unique id prefix." },
+        title: { type: "string" as const },
+        kind: { type: "string" as const, enum: ["feature", "bug", "debt", "idea", "chore"] },
+        description: { type: "string" as const },
+        rationale: { type: "string" as const },
+        priority: { type: "string" as const, enum: ["must", "should", "could", "wont"] },
+        value: { type: "string" as const, enum: ["low", "medium", "high"] },
+        effort: { type: "string" as const, enum: ["low", "medium", "high"] },
+        status: {
+          type: "string" as const,
+          enum: ["idea", "planned", "in_progress", "done", "archived"],
+        },
+        tags: { type: "array" as const, items: { type: "string" as const } },
+        depends_on: { type: "array" as const, items: { type: "string" as const } },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "roadmap_archive",
+    description:
+      "Archive a roadmap item (reversible soft delete: it disappears from default lists but can be restored with roadmap_update status). Accepts a full id or a unique prefix.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        id: { type: "string" as const, description: "Item id, or a unique id prefix." },
+      },
+      required: ["id"],
+    },
+  },
 ];
 
 // --- Tool handlers ---
@@ -522,6 +661,75 @@ function formatPeer(p: Peer): string {
   parts.push(`Last exchange: ${formatElapsed(p.last_activity_at)}`);
   return parts.join("\n  ");
 }
+
+// --- Roadmap helpers (v0.4, PLAN C3-M2) ---
+
+/**
+ * The roadmap scope for this session: the normalized git remote when there is
+ * one (cross-PC repo matching), else a stable local fallback derived from the
+ * git root / cwd so repos without a remote still get a per-project roadmap.
+ */
+function roadmapProjectKey(): string {
+  if (myProjectKey) return myProjectKey;
+  const anchor = myGitRoot ?? myCwd;
+  return `local:${createHash("sha256").update(anchor, "utf-8").digest("hex").slice(0, 16)}`;
+}
+
+/** Author stamp for roadmap writes: the resolved peer_id, else a host fallback. */
+function roadmapAuthor(): string {
+  return myPeerId ?? `${myHost || "unknown"}-unregistered`;
+}
+
+/**
+ * Resolve a full id or a UNIQUE id prefix (roadmap_list shows 8-char prefixes)
+ * against the project's items, archived included. Throws a descriptive error
+ * on no match / ambiguous prefix.
+ */
+async function resolveRoadmapId(idOrPrefix: string): Promise<string> {
+  const needle = idOrPrefix.trim();
+  if (!needle) throw new Error("empty id");
+  const { items } = await brokerFetch<RoadmapListResponse>("/roadmap/list", {
+    project_key: roadmapProjectKey(),
+    include_archived: true,
+  });
+  const exact = items.find((i) => i.id === needle);
+  if (exact) return exact.id;
+  const matches = items.filter((i) => i.id.startsWith(needle));
+  if (matches.length === 1) return matches[0]!.id;
+  if (matches.length === 0) throw new Error(`no roadmap item matches '${needle}'`);
+  throw new Error(
+    `ambiguous id prefix '${needle}' (${matches.length} matches) -- use more characters`
+  );
+}
+
+function formatRoadmapItemLine(i: RoadmapItem): string {
+  const tags = i.tags.length ? `  #${i.tags.join(" #")}` : "";
+  return `[${i.id.slice(0, 8)}] ${i.kind} · ${i.priority} · value:${i.value} effort:${i.effort} · ${i.status} — ${i.title}${tags}`;
+}
+
+function formatRoadmapItemDetail(i: RoadmapItem): string {
+  const lines = [
+    `${formatRoadmapItemLine(i)}`,
+    `id: ${i.id}`,
+    i.description ? `description: ${i.description}` : "",
+    i.rationale ? `rationale: ${i.rationale}` : "",
+    i.depends_on.length ? `depends_on: ${i.depends_on.map((d) => d.slice(0, 8)).join(", ")}` : "",
+    `created: ${i.created_at} by ${i.created_by}`,
+    `updated: ${i.updated_at} by ${i.updated_by}`,
+    i.deleted_at ? `archived: ${i.deleted_at}` : "",
+  ].filter(Boolean);
+  return lines.join("\n  ");
+}
+
+const roadmapToolError = (e: unknown): { content: { type: "text"; text: string }[]; isError: true } => ({
+  content: [
+    {
+      type: "text" as const,
+      text: `Roadmap error: ${e instanceof Error ? e.message : String(e)}`,
+    },
+  ],
+  isError: true,
+});
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   const { name, arguments: args } = req.params;
@@ -849,6 +1057,149 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           content: [{ type: "text" as const, text: `Error setting id: ${e instanceof Error ? e.message : String(e)}` }],
           isError: true,
         };
+      }
+    }
+
+    case "roadmap_list": {
+      const a = args as {
+        kind?: string;
+        status?: string;
+        priority?: string;
+        tag?: string;
+        include_archived?: boolean;
+      };
+      try {
+        const { items } = await brokerFetch<RoadmapListResponse>("/roadmap/list", {
+          project_key: roadmapProjectKey(),
+          kind: a.kind,
+          status: a.status,
+          priority: a.priority,
+          tag: a.tag,
+          include_archived: a.include_archived ?? false,
+        });
+        if (items.length === 0) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "The roadmap is empty (for these filters). Use roadmap_add to record features, bugs, debt or ideas.",
+              },
+            ],
+          };
+        }
+        // Group by MoSCoW priority for a scannable overview.
+        const order = ["must", "should", "could", "wont"] as const;
+        const blocks = order
+          .map((p) => {
+            const rows = items.filter((i) => i.priority === p);
+            if (rows.length === 0) return "";
+            return `${p.toUpperCase()} (${rows.length}):\n${rows.map(formatRoadmapItemLine).join("\n")}`;
+          })
+          .filter(Boolean);
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `${items.length} roadmap item(s):\n\n${blocks.join("\n\n")}\n\nUse roadmap_get <id> for details, roadmap_update to change status.`,
+            },
+          ],
+        };
+      } catch (e) {
+        return roadmapToolError(e);
+      }
+    }
+
+    case "roadmap_get": {
+      const a = args as { id: string };
+      try {
+        const id = await resolveRoadmapId(a.id);
+        const { items } = await brokerFetch<RoadmapListResponse>("/roadmap/list", {
+          project_key: roadmapProjectKey(),
+          include_archived: true,
+        });
+        const item = items.find((i) => i.id === id);
+        if (!item) throw new Error(`item ${id} vanished`);
+        return {
+          content: [{ type: "text" as const, text: formatRoadmapItemDetail(item) }],
+        };
+      } catch (e) {
+        return roadmapToolError(e);
+      }
+    }
+
+    case "roadmap_add": {
+      const a = args as Record<string, unknown> & { title: string };
+      try {
+        const { item } = await brokerFetch<RoadmapUpsertResponse>("/roadmap/upsert", {
+          project_key: roadmapProjectKey(),
+          by: roadmapAuthor(),
+          title: a.title,
+          kind: a.kind,
+          description: a.description,
+          rationale: a.rationale,
+          priority: a.priority,
+          value: a.value,
+          effort: a.effort,
+          status: a.status,
+          tags: a.tags,
+          depends_on: a.depends_on,
+        });
+        return {
+          content: [
+            { type: "text" as const, text: `Roadmap item created:\n${formatRoadmapItemDetail(item)}` },
+          ],
+        };
+      } catch (e) {
+        return roadmapToolError(e);
+      }
+    }
+
+    case "roadmap_update": {
+      const a = args as Record<string, unknown> & { id: string };
+      try {
+        const id = await resolveRoadmapId(a.id);
+        const { item } = await brokerFetch<RoadmapUpsertResponse>("/roadmap/upsert", {
+          id,
+          by: roadmapAuthor(),
+          title: a.title,
+          kind: a.kind,
+          description: a.description,
+          rationale: a.rationale,
+          priority: a.priority,
+          value: a.value,
+          effort: a.effort,
+          status: a.status,
+          tags: a.tags,
+          depends_on: a.depends_on,
+        });
+        return {
+          content: [
+            { type: "text" as const, text: `Roadmap item updated:\n${formatRoadmapItemDetail(item)}` },
+          ],
+        };
+      } catch (e) {
+        return roadmapToolError(e);
+      }
+    }
+
+    case "roadmap_archive": {
+      const a = args as { id: string };
+      try {
+        const id = await resolveRoadmapId(a.id);
+        const { item } = await brokerFetch<RoadmapArchiveResponse>("/roadmap/archive", {
+          id,
+          by: roadmapAuthor(),
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Roadmap item archived (restorable via roadmap_update status):\n${formatRoadmapItemLine(item)}`,
+            },
+          ],
+        };
+      } catch (e) {
+        return roadmapToolError(e);
       }
     }
 

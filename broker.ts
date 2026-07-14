@@ -32,6 +32,17 @@ import type {
   GroupStatsResponse,
   AnnounceRequest,
   AnnounceResponse,
+  RoadmapArchiveRequest,
+  RoadmapArchiveResponse,
+  RoadmapItem,
+  RoadmapKind,
+  RoadmapLevel,
+  RoadmapListRequest,
+  RoadmapListResponse,
+  RoadmapPriority,
+  RoadmapStatus,
+  RoadmapUpsertRequest,
+  RoadmapUpsertResponse,
   Peer,
   Message,
   GroupId,
@@ -194,6 +205,35 @@ db.run(`
 `);
 
 db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_lookup ON peer_sessions(group_id, host, cwd)`);
+
+// Roadmap items (v0.4, PLAN C3). Scoped by project_key, NOT group_id, and with
+// deliberately NO foreign key to peers/groups: created_by/updated_by are plain
+// text snapshots of a peer_id (or 'deck'), so items live independently of the
+// session lifecycle -- no cleanup timer touches this table, and deletion is a
+// reversible archive (deleted_at) rather than a DELETE.
+db.run(`
+  CREATE TABLE IF NOT EXISTS roadmap_items (
+    id TEXT PRIMARY KEY,
+    project_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    rationale TEXT NOT NULL DEFAULT '',
+    priority TEXT NOT NULL DEFAULT 'could',
+    value TEXT NOT NULL DEFAULT 'medium',
+    effort TEXT NOT NULL DEFAULT 'medium',
+    status TEXT NOT NULL DEFAULT 'idea',
+    tags TEXT NOT NULL DEFAULT '[]',
+    depends_on TEXT NOT NULL DEFAULT '[]',
+    created_by TEXT NOT NULL DEFAULT '',
+    updated_by TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT
+  )
+`);
+
+db.run(`CREATE INDEX IF NOT EXISTS idx_roadmap_project ON roadmap_items(project_key, status)`);
 
 // --- Helpers ---
 
@@ -847,6 +887,208 @@ function handlePeekMessages(body: PollMessagesRequest): PollMessagesResponse {
   return { messages: rows.map((r) => ({ ...r, delivered: Boolean(r.delivered) })) };
 }
 
+// --- Roadmap handlers (v0.4, PLAN C3) ---
+
+const ROADMAP_KINDS: readonly RoadmapKind[] = ["feature", "bug", "debt", "idea", "chore"];
+const ROADMAP_PRIORITIES: readonly RoadmapPriority[] = ["must", "should", "could", "wont"];
+const ROADMAP_LEVELS: readonly RoadmapLevel[] = ["low", "medium", "high"];
+const ROADMAP_STATUSES: readonly RoadmapStatus[] = [
+  "idea",
+  "planned",
+  "in_progress",
+  "done",
+  "archived",
+];
+
+type RoadmapRow = Omit<RoadmapItem, "tags" | "depends_on"> & { tags: string; depends_on: string };
+
+function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
+  const parseList = (s: string): string[] => {
+    try {
+      const v = JSON.parse(s);
+      return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
+    } catch {
+      return [];
+    }
+  };
+  return { ...row, tags: parseList(row.tags), depends_on: parseList(row.depends_on) };
+}
+
+/** Sanitize an optional string[] payload into a JSON-storable list. */
+function cleanList(v: unknown): string[] | null {
+  if (!Array.isArray(v)) return null;
+  return v.filter((x): x is string => typeof x === "string" && x.trim() !== "").map((x) => x.trim());
+}
+
+function badEnum<T extends string>(value: unknown, allowed: readonly T[]): boolean {
+  return value !== undefined && !allowed.includes(value as T);
+}
+
+function getRoadmapItem(id: string): RoadmapItem | null {
+  const row = db.query("SELECT * FROM roadmap_items WHERE id = ?").get(id) as RoadmapRow | null;
+  return row ? rowToRoadmapItem(row) : null;
+}
+
+function handleRoadmapList(
+  body: RoadmapListRequest
+): RoadmapListResponse | { error: string; status: number } {
+  if (!body.project_key || typeof body.project_key !== "string") {
+    return { error: "project_key is required", status: 400 };
+  }
+  if (
+    badEnum(body.kind, ROADMAP_KINDS) ||
+    badEnum(body.status, ROADMAP_STATUSES) ||
+    badEnum(body.priority, ROADMAP_PRIORITIES)
+  ) {
+    return { error: "invalid kind/status/priority filter", status: 400 };
+  }
+
+  let sql = "SELECT * FROM roadmap_items WHERE project_key = ?";
+  const params: string[] = [body.project_key];
+  if (body.status) {
+    sql += " AND status = ?";
+    params.push(body.status);
+  } else if (!body.include_archived) {
+    sql += " AND status != 'archived'";
+  }
+  if (body.kind) {
+    sql += " AND kind = ?";
+    params.push(body.kind);
+  }
+  if (body.priority) {
+    sql += " AND priority = ?";
+    params.push(body.priority);
+  }
+  sql += " ORDER BY created_at, id";
+
+  let items = (db.query(sql).all(...params) as RoadmapRow[]).map(rowToRoadmapItem);
+  if (body.tag) items = items.filter((i) => i.tags.includes(body.tag as string));
+  return { items };
+}
+
+function handleRoadmapUpsert(
+  body: RoadmapUpsertRequest
+): RoadmapUpsertResponse | { error: string; status: number } {
+  const by = typeof body.by === "string" && body.by.trim() ? body.by.trim() : "";
+  if (!by) return { error: "by (author peer_id) is required", status: 400 };
+  if (
+    badEnum(body.kind, ROADMAP_KINDS) ||
+    badEnum(body.priority, ROADMAP_PRIORITIES) ||
+    badEnum(body.value, ROADMAP_LEVELS) ||
+    badEnum(body.effort, ROADMAP_LEVELS) ||
+    badEnum(body.status, ROADMAP_STATUSES)
+  ) {
+    return { error: "invalid kind/priority/value/effort/status", status: 400 };
+  }
+
+  if (body.id) {
+    // Partial patch: omitted fields keep their value; project_key never moves.
+    const existing = getRoadmapItem(body.id);
+    if (!existing) return { error: "unknown roadmap item", status: 404 };
+
+    const next: RoadmapItem = {
+      ...existing,
+      kind: body.kind ?? existing.kind,
+      title: body.title !== undefined ? body.title.trim() : existing.title,
+      description: body.description ?? existing.description,
+      rationale: body.rationale ?? existing.rationale,
+      priority: body.priority ?? existing.priority,
+      value: body.value ?? existing.value,
+      effort: body.effort ?? existing.effort,
+      status: body.status ?? existing.status,
+      tags: cleanList(body.tags) ?? existing.tags,
+      depends_on: cleanList(body.depends_on) ?? existing.depends_on,
+      updated_by: by,
+    };
+    if (!next.title) return { error: "title cannot be empty", status: 400 };
+
+    // A status change away from 'archived' restores the item (clears the soft
+    // delete); archiving through upsert stamps it like /roadmap/archive does.
+    db.run(
+      `UPDATE roadmap_items SET
+         kind = ?, title = ?, description = ?, rationale = ?, priority = ?,
+         value = ?, effort = ?, status = ?, tags = ?, depends_on = ?,
+         updated_by = ?, updated_at = datetime('now'),
+         deleted_at = CASE
+           WHEN ? = 'archived' THEN COALESCE(deleted_at, datetime('now'))
+           ELSE NULL
+         END
+       WHERE id = ?`,
+      [
+        next.kind,
+        next.title,
+        next.description,
+        next.rationale,
+        next.priority,
+        next.value,
+        next.effort,
+        next.status,
+        JSON.stringify(next.tags),
+        JSON.stringify(next.depends_on),
+        next.updated_by,
+        next.status,
+        body.id,
+      ]
+    );
+    return { item: getRoadmapItem(body.id)! };
+  }
+
+  // Create.
+  const projectKey = typeof body.project_key === "string" ? body.project_key.trim() : "";
+  if (!projectKey) return { error: "project_key is required", status: 400 };
+  const title = typeof body.title === "string" ? body.title.trim() : "";
+  if (!title) return { error: "title is required", status: 400 };
+  if (body.status === "archived") {
+    return { error: "cannot create an item directly archived", status: 400 };
+  }
+
+  const id = randomUUID();
+  db.run(
+    `INSERT INTO roadmap_items
+       (id, project_key, kind, title, description, rationale, priority, value,
+        effort, status, tags, depends_on, created_by, updated_by,
+        created_at, updated_at, deleted_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL)`,
+    [
+      id,
+      projectKey,
+      body.kind ?? "feature",
+      title,
+      body.description ?? "",
+      body.rationale ?? "",
+      body.priority ?? "could",
+      body.value ?? "medium",
+      body.effort ?? "medium",
+      body.status ?? "idea",
+      JSON.stringify(cleanList(body.tags) ?? []),
+      JSON.stringify(cleanList(body.depends_on) ?? []),
+      by,
+      by,
+    ]
+  );
+  return { item: getRoadmapItem(id)! };
+}
+
+function handleRoadmapArchive(
+  body: RoadmapArchiveRequest
+): RoadmapArchiveResponse | { error: string; status: number } {
+  const by = typeof body.by === "string" && body.by.trim() ? body.by.trim() : "";
+  if (!by) return { error: "by (author peer_id) is required", status: 400 };
+  if (!body.id) return { error: "id is required", status: 400 };
+  const existing = getRoadmapItem(body.id);
+  if (!existing) return { error: "unknown roadmap item", status: 404 };
+
+  db.run(
+    `UPDATE roadmap_items SET
+       status = 'archived',
+       deleted_at = COALESCE(deleted_at, datetime('now')),
+       updated_by = ?, updated_at = datetime('now')
+     WHERE id = ?`,
+    [by, body.id]
+  );
+  return { item: getRoadmapItem(body.id)! };
+}
+
 function handleGroupStats(): GroupStatsResponse {
   const rows = db.query(
     "SELECT group_id, COUNT(*) AS active_peers FROM peers WHERE status = 'active' GROUP BY group_id"
@@ -982,6 +1224,27 @@ const server = Bun.serve<WsData>({
           return Response.json(handleSendMessage(body as SendMessageRequest));
         case "/announce": {
           const result = handleAnnounce(body as AnnounceRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/list": {
+          const result = handleRoadmapList(body as RoadmapListRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/upsert": {
+          const result = handleRoadmapUpsert(body as RoadmapUpsertRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/archive": {
+          const result = handleRoadmapArchive(body as RoadmapArchiveRequest);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }

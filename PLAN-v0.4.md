@@ -27,6 +27,7 @@
 | 2026-07-14 | exploration initiale | — | Exploration + design validés, création du plan | Démarrer C1 |
 | 2026-07-14 | session exploration (suite) | C1 | C1 complet : quota.ts, branchement session-service, toggle global + override par session, IPC session:quota, dot orange + badge + toast, i18n en/fr, 16 tests fixtures. bun test 280/280, typecheck node+web verts. Desktop bump 0.3.5. | C1 à valider à la main sur un vrai épisode de limite (test end-to-end impossible en CI). Ensuite : C2. |
 | 2026-07-14 | session exploration (suite) | C2 | C2 complet : prompt positionnel au spawn frais (quotePromptArg par plateforme), SessionDef.prompt persisté, champ « Prompt initial » + presets câblés dans CreateMenu, i18n, 5 tests. bun test 285/285, typecheck verts. | Vérif visuelle du champ au prochain lancement de l'app. Ensuite : C3 (roadmap, M1 broker). |
+| 2026-07-14 | session exploration (suite) | C3-M1/M2 | Table roadmap_items + routes /roadmap/list\|upsert\|archive (8 tests) ; 5 tools MCP roadmap_* dans server.ts (préfixes d'id, fallback project_key local:) + instructions agents. bun test 293/293, tsc core vert. | M3 (UI Deck) puis M4 (liants). |
 
 ---
 
@@ -107,31 +108,34 @@ value/effort), stocké broker, manipulé par les agents via MCP, visualisé et
 édité dans la Deck (design §2 ; DDL et indépendance du cycle de vie : §2.2).
 
 ### M1 — Broker
-- [ ] Table `roadmap_items` (DDL §2.2 : scope `project_key`, **zéro FK vers
+- [x] Table `roadmap_items` (DDL §2.2 : scope `project_key`, **zéro FK vers
       peers/groups**, `tags`/`depends_on` en TEXT JSON, soft delete
       `deleted_at`, index `(project_key, status)`).
-- [ ] Routes `POST /roadmap/list` (filtres kind/status/priority),
-      `POST /roadmap/upsert` (création sans id / patch partiel avec id,
-      timestamps + `updated_by` côté broker), `POST /roadmap/archive` —
-      même middleware Bearer que l'existant.
-- [ ] Types `RoadmapItem`, `RoadmapKind/Priority/Level/Status` dans
-      `shared/types.ts`.
-- [ ] Tests `tests/broker-roadmap.test.ts` (via `tests/_helper.ts`) : CRUD,
-      filtres, isolation par `project_key`, **indépendance du cycle de vie**
-      (purge d'un peer dormant / unregister ne touche pas ses items),
-      archive réversible.
+- [x] Routes `POST /roadmap/list` (filtres kind/status/priority/tag),
+      `POST /roadmap/upsert` (création avec défauts / patch partiel avec id ;
+      un statut ≠ archived restaure un item archivé), `POST /roadmap/archive`
+      — même middleware Bearer que l'existant.
+- [x] Types `RoadmapItem`, `RoadmapKind/Priority/Level/Status` + requêtes/
+      réponses dans `shared/types.ts`.
+- [x] Tests `tests/broker-roadmap.test.ts` (8 cas) : CRUD + défauts, enums,
+      filtres + isolation par `project_key`, archive réversible,
+      **indépendance du cycle de vie** (l'unregister de l'auteur ne touche
+      pas ses items).
 
 ### M2 — MCP (`server.ts`)
-- [ ] 5 tools : `roadmap_list` (rendu compact : id court, titre, badges),
+- [x] 5 tools : `roadmap_list` (vue groupée MoSCoW, ids courts 8 chars),
       `roadmap_get`, `roadmap_add` (défauts : `priority=could`,
       `value=effort=medium`, `status=idea`), `roadmap_update` (patch partiel,
-      transitions de statut), `roadmap_archive`.
-- [ ] `project_key` : réutiliser `computeProjectKey` (`shared/summarize.ts`) ;
-      fallback hash du `git_root`/cwd si pas de remote (§2.1).
-- [ ] `created_by`/`updated_by` = peer_id courant, automatique.
-- [ ] Paragraphe roadmap dans les instructions MCP (« consulte la roadmap en
+      transitions de statut), `roadmap_archive`. Résolution d'id par préfixe
+      unique.
+- [x] `project_key` : `computeProjectKey` existant ; fallback stable
+      `local:<sha256(git_root||cwd)[:16]>` si pas de remote (§2.1).
+- [x] `created_by`/`updated_by` = peer_id courant, automatique.
+- [x] Paragraphe roadmap dans les instructions MCP (« consulte la roadmap en
       début de tâche, consigne bugs/dette découverts, tiens le statut à jour »).
-- [ ] Tests tools (contre broker éphémère).
+- [x] Tests : la logique serveur est couverte par les tests broker (M1) ; les
+      handlers MCP sont des wrappers fins, même convention que les tools
+      messagerie existants (pas de test MCP-stdio dédié dans le repo).
 
 ### M3 — Deck UI
 - [ ] Rail de navigation **Agents | Roadmap** : état de vue dans `store.ts`

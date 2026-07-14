@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.4.0 -- unreleased (PLAN-v0.4 C3 in progress)
+
+### Added
+- **Shared per-project roadmap (broker, C3-M1).** New `roadmap_items` table in
+  the broker SQLite DB and three routes: `POST /roadmap/list` (filters
+  kind/status/priority/tag, archived hidden by default), `POST /roadmap/upsert`
+  (create with defaults or partial patch; a status change away from `archived`
+  restores the item) and `POST /roadmap/archive` (reversible soft delete via
+  `deleted_at`). Items are scoped by `project_key` (normalized git remote), NOT
+  by group, and carry no FK to peers/groups — `created_by`/`updated_by` are
+  plain-text peer_id snapshots — so their lifecycle is fully independent of
+  sessions: no cleanup timer touches the table (`tests/broker-roadmap.test.ts`).
+- **Roadmap MCP tools (C3-M2).** `server.ts` exposes `roadmap_list` (MoSCoW-
+  grouped overview), `roadmap_get`, `roadmap_add` (only title required),
+  `roadmap_update` (partial patch) and `roadmap_archive`. Ids accept unique
+  8-char prefixes. Author stamps use the session's peer_id automatically;
+  repos without a git remote fall back to a stable `local:<hash>` project key.
+  The MCP instructions now tell agents to consult the roadmap at task start,
+  record discovered bugs/debt, and keep item statuses current.
+
 ## v0.3.5 (desktop) -- 2026-07-14
 
 ### Added
