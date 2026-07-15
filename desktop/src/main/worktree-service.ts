@@ -100,6 +100,25 @@ export function isDeckWorktreePath(cwd: string): boolean {
   return resolve(cwd).split(sep).includes(WORKTREES_DIR)
 }
 
+export interface WorktreeStatus {
+  /** Count of uncommitted changes (`git status --porcelain` lines). */
+  dirty: number
+  /** Last commit as "subject (relative date)", or null (unborn/unreadable). */
+  lastCommit: string | null
+}
+
+/** Enriched per-worktree git status for the Worktrees view (PLAN C6). */
+export async function worktreeStatus(path: string): Promise<WorktreeStatus> {
+  const [porcelain, last] = await Promise.all([
+    git(['status', '--porcelain'], path).catch(() => ''),
+    git(['log', '-1', '--format=%s (%cr)'], path).catch(() => '')
+  ])
+  return {
+    dirty: porcelain.split('\n').filter((l) => l.trim() !== '').length,
+    lastCommit: last.trim() || null
+  }
+}
+
 /**
  * Fire-and-forget post-create hook (e.g. `bun install`), run inside the new
  * worktree through the platform shell. Errors are logged, never thrown: a

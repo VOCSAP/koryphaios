@@ -266,6 +266,22 @@ export const EN_DEFAULTS: Record<string, string> = {
   'settings.helpModel': 'Help assistant model',
   'settings.helpModelHelp':
     "Each question is a one-shot `claude -p` call with the active view's context. Haiku is cheap and usually enough.",
+  'nav.worktrees': 'Worktrees',
+  'worktrees.title': 'Git worktrees',
+  'worktrees.create': '＋ Create worktree',
+  'worktrees.branchPlaceholder': 'new branch, e.g. agent/fix-login',
+  'worktrees.empty':
+    'No worktrees yet. Create one here or spawn a session with a worktree branch (advanced create menu).',
+  'worktrees.main': 'main tree',
+  'worktrees.orphan': 'orphan — no session',
+  'worktrees.session': 'session: {name}',
+  'worktrees.dirty': '{n} uncommitted change(s)',
+  'worktrees.clean': 'clean',
+  'worktrees.openSession': 'Open a session here',
+  'worktrees.remove': 'Remove',
+  'worktrees.copyPath': 'Copy path',
+  'toast.worktreeCreated': 'Worktree created',
+  'toast.pathCopied': 'Path copied',
   'nav.home': 'Home',
   'home.starting': 'Starting the supervisor session…',
   'home.body':

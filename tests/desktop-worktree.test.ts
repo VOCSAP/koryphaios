@@ -14,6 +14,7 @@ import {
   listWorktrees,
   removeWorktree,
   worktreeDirName,
+  worktreeStatus,
   isDeckWorktreePath,
   WORKTREES_DIR
 } from "../desktop/src/main/worktree-service.ts";
@@ -84,6 +85,22 @@ test("a dirty worktree is refused (never --force): uncommitted work survives", a
   // Still listed: nothing was lost.
   const all = await listWorktrees(repo);
   expect(all.some((w) => w.path === wt.path)).toBe(true);
+});
+
+test("worktreeStatus reports dirty count and last commit (PLAN C6)", async () => {
+  const wt = await createWorktree(repo, "agent/status-check");
+  const clean = await worktreeStatus(wt.path);
+  expect(clean.dirty).toBe(0);
+  expect(clean.lastCommit).toContain("init");
+
+  writeFileSync(join(wt.path, "a.txt"), "x", "utf-8");
+  writeFileSync(join(wt.path, "b.txt"), "y", "utf-8");
+  const dirty = await worktreeStatus(wt.path);
+  expect(dirty.dirty).toBe(2);
+
+  const missing = await worktreeStatus(join(repo, "nope"));
+  expect(missing.dirty).toBe(0);
+  expect(missing.lastCommit).toBeNull();
 });
 
 test("isDeckWorktreePath flags only paths under a .worktrees dir", () => {

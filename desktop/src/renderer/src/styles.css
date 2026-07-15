@@ -1817,3 +1817,94 @@ code {
   outline: none;
   border-color: var(--accent);
 }
+
+/* ---------- Worktrees view (PLAN C6) ---------- */
+
+.worktrees-view {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-width: 0;
+}
+
+.worktrees-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.worktrees-head h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.worktrees-branch-input {
+  width: 240px;
+  font: inherit;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+
+.worktrees-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wt-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+}
+
+.wt-row-orphan {
+  border-color: color-mix(in srgb, #e08a2e 55%, var(--border));
+}
+
+.wt-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.wt-branch {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--accent);
+}
+
+.wt-badge-orphan {
+  color: #e08a2e;
+  border-color: color-mix(in srgb, #e08a2e 50%, transparent);
+}
+
+.wt-sub {
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.wt-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.wt-actions .danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+}

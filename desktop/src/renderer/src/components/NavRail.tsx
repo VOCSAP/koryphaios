@@ -7,7 +7,8 @@ import type { DeckView } from '@shared/types'
 const VIEWS: { id: DeckView; icon: string; key: string }[] = [
   { id: 'home', icon: '🏠', key: 'nav.home' },
   { id: 'agents', icon: '🖥', key: 'nav.agents' },
-  { id: 'roadmap', icon: '🗺', key: 'nav.roadmap' }
+  { id: 'roadmap', icon: '🗺', key: 'nav.roadmap' },
+  { id: 'worktrees', icon: '⎇', key: 'nav.worktrees' }
 ]
 
 export function NavRail(): React.JSX.Element {

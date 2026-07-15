@@ -294,8 +294,23 @@ export interface RoadmapArchiveResponse {
   item: RoadmapItem
 }
 
-/** Sidebar navigation rail views: supervisor Home (C5), Agents, Roadmap (C3). */
-export type DeckView = 'home' | 'agents' | 'roadmap'
+/** Navigation rail views: Home (C5), Agents, Roadmap (C3), Worktrees (C6). */
+export type DeckView = 'home' | 'agents' | 'roadmap' | 'worktrees'
+
+/** One row of the Worktrees view (PLAN C6): git state + attached session. */
+export interface WorktreeRow {
+  path: string
+  branch: string | null
+  /** The repo's main working tree (never removable from the Deck). */
+  main: boolean
+  /** Uncommitted changes count. */
+  dirty: number
+  /** Last commit "subject (relative date)", or null. */
+  lastCommit: string | null
+  /** Live Deck session running in this worktree, if any (orphan otherwise). */
+  sessionId: string | null
+  sessionName: string | null
+}
 
 /** One question/answer pair of the help popup (replayed for continuity, C9). */
 export interface HelpExchange {
@@ -381,8 +396,13 @@ export interface DeckApi {
   roadmapUpsert(fields: RoadmapUpsertFields): Promise<RoadmapItem>
   roadmapArchive(id: string): Promise<RoadmapItem>
 
-  // worktrees (PLAN C4): remove a Deck-created worktree dir (branch is kept).
+  // worktrees (PLAN C4/C6)
+  /** Remove a worktree dir (branch is kept; git refuses dirty trees). */
   removeWorktree(path: string): Promise<void>
+  /** All worktrees of the project with git status + attached session. */
+  listWorktrees(): Promise<WorktreeRow[]>
+  /** Create a fresh worktree on a NEW branch (init hook runs in background). */
+  createWorktree(branch: string): Promise<void>
 
   // supervisor (PLAN C5): spawn (or return) the Home supervisor session.
   ensureSupervisor(): Promise<SessionRuntime>

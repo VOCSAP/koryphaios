@@ -90,6 +90,8 @@ const api: DeckApi = {
   roadmapUpsert: (fields: RoadmapUpsertFields) => ipcRenderer.invoke('roadmap:upsert', fields),
   roadmapArchive: (id: string) => ipcRenderer.invoke('roadmap:archive', id),
   removeWorktree: (path: string) => ipcRenderer.invoke('worktree:remove', path),
+  listWorktrees: () => ipcRenderer.invoke('worktree:list'),
+  createWorktree: (branch: string) => ipcRenderer.invoke('worktree:create', branch),
   ensureSupervisor: () => ipcRenderer.invoke('supervisor:ensure'),
   askHelp: (question: string, view: DeckView, transcript: HelpExchange[]) =>
     ipcRenderer.invoke('help:ask', question, view, transcript),

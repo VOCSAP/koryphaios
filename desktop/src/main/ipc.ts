@@ -20,7 +20,14 @@ import {
 import { resolveBrokerEndpoint } from './broker-client'
 import { archiveRoadmap, computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
 import { createSessionWithWorktree } from './create-session'
-import { listWorktrees, removeWorktree } from './worktree-service'
+import {
+  createWorktree,
+  listWorktrees,
+  removeWorktree,
+  runWorktreeInit,
+  worktreeStatus
+} from './worktree-service'
+import { resolve as resolvePath } from 'node:path'
 import type { SessionService } from './session-service'
 import type { WorkspaceService } from './workspace-service'
 import { listAgents } from './agents'
@@ -159,10 +166,33 @@ export function registerIpc({
     return archiveRoadmap(endpoint, id)
   })
 
-  // ----- worktrees (PLAN C4) -----
+  // ----- worktrees (PLAN C4/C6) -----
   ipcMain.handle('worktree:remove', (_e, path: string) =>
     removeWorktree(getConfig().projectDir, path)
   )
+  ipcMain.handle('worktree:list', async () => {
+    const worktrees = await listWorktrees(getConfig().projectDir)
+    const sessions = service.list().filter((s) => s.status !== 'exited')
+    return Promise.all(
+      worktrees.map(async (w) => {
+        const status = await worktreeStatus(w.path)
+        const attached = sessions.find(
+          (s) => s.worktree?.path === w.path || resolvePath(s.cwd) === w.path
+        )
+        return {
+          ...w,
+          ...status,
+          sessionId: attached?.id ?? null,
+          sessionName: attached?.name ?? null
+        }
+      })
+    )
+  })
+  ipcMain.handle('worktree:create', async (_e, branch: string) => {
+    const wt = await createWorktree(getConfig().projectDir, branch ?? '')
+    const init = resolveLaunchConfig(getConfig().projectDir).worktreeInit
+    if (init) runWorktreeInit(wt.path, init)
+  })
 
   // ----- supervisor (PLAN C5) -----
   ipcMain.handle('supervisor:ensure', () => ensureSupervisor())

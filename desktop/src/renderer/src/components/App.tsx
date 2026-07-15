@@ -6,6 +6,7 @@ import { TileArea } from './TileArea'
 import { DisplayModeBar } from './DisplayModeBar'
 import { NavRail } from './NavRail'
 import { RoadmapView } from './RoadmapView'
+import { WorktreesView } from './WorktreesView'
 import { HomeView } from './HomeView'
 import { HelpAssistant } from './HelpAssistant'
 import { SettingsView } from './SettingsView'
@@ -89,6 +90,7 @@ export function App(): React.JSX.Element {
         <HomeView active={view === 'home'} />
       </div>
       {view === 'roadmap' && <RoadmapView />}
+      {view === 'worktrees' && <WorktreesView />}
       {settingsOpen && <SettingsView />}
       {workspacesOpen && <WorkspacesDialog />}
       {saveAsOpen && <SaveAsDialog />}
