@@ -20,11 +20,17 @@
 //     page screenshot is composited with the strokes, saved as a PNG under app
 //     state, and the file path is pasted into the docked agent's prompt so a
 //     multimodal agent can Read the annotated image.
+//
+// D2a generalizes the pane beyond the web: a WINDOW mode mirrors any OS window
+// (desktopCapturer still) and the same draw/send flow annotates it — design
+// feedback on native apps (the Deck itself, a Tauri build…) with zero
+// integration in the target. Element picking stays web-only; for native
+// targets the sketch + multimodal Read covers the "which element" question.
 
 import { useEffect, useRef, useState } from 'react'
 import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
-import type { ElementPick, SessionRuntime } from '@shared/types'
+import type { ElementPick, SessionRuntime, WindowSource } from '@shared/types'
 import type { WebviewIpcMessageEvent, WebviewNavigateEvent, WebviewTag } from '../webview-types'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
@@ -212,6 +218,12 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
   const [viewport, setViewport] = useState<ViewportPreset | null>(null)
   const [drawing, setDrawing] = useState(false)
   const [sendingDraw, setSendingDraw] = useState(false)
+  // Window-mirror mode (D2a). The webview stays mounted (hidden) meanwhile.
+  const [mode, setMode] = useState<'web' | 'window'>('web')
+  const [windows, setWindows] = useState<WindowSource[]>([])
+  const [windowId, setWindowId] = useState('')
+  const [shot, setShot] = useState<{ dataUrl: string; title: string } | null>(null)
+  const [shotLoading, setShotLoading] = useState(false)
   const [dockWidth, setDockWidth] = useState(520)
   const [dragging, setDragging] = useState(false)
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -338,6 +350,55 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     }
   }
 
+  // ----- window mirror (D2a) -----
+
+  function disarmModes(): void {
+    if (picking) {
+      try {
+        webviewRef.current?.send('deck:exit-inspect')
+      } catch {
+        /* not attached */
+      }
+      setPicking(false)
+    }
+    if (drawing) exitDraw()
+  }
+
+  async function captureShot(id: string): Promise<void> {
+    setShotLoading(true)
+    try {
+      const next = await window.api.captureWindow(id)
+      if (next) setShot(next)
+      else showToast('toast.drawFailed', 'info')
+    } finally {
+      setShotLoading(false)
+    }
+  }
+
+  async function refreshWindows(): Promise<void> {
+    const list = await window.api.listCaptureWindows()
+    setWindows(list)
+    // A remembered selection that vanished (window closed) resets the picker.
+    if (windowId && !list.some((w) => w.id === windowId)) {
+      setWindowId('')
+      setShot(null)
+    }
+  }
+
+  function switchMode(next: 'web' | 'window'): void {
+    if (next === mode) return
+    disarmModes()
+    setMode(next)
+    if (next === 'window') void refreshWindows()
+  }
+
+  function selectWindow(id: string): void {
+    disarmModes()
+    setWindowId(id)
+    setShot(null)
+    if (id) void captureShot(id)
+  }
+
   // ----- draw mode (D1b) -----
 
   function exitDraw(): void {
@@ -428,14 +489,21 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     hasStrokesRef.current = false
   }
 
-  /** Capture the page, composite the strokes on top, save, prompt the agent. */
+  /**
+   * Composite the strokes over the captured image, save, prompt the agent.
+   * Web mode captures the live page; window mode reuses the DISPLAYED still
+   * (the strokes were drawn on it — a fresh capture could have moved).
+   */
   async function sendAnnotation(): Promise<void> {
     const wv = webviewRef.current
     const canvas = canvasRef.current
-    if (!wv || !canvas || sendingDraw) return
+    if (!canvas || sendingDraw) return
+    if (mode === 'web' && !wv) return
+    if (mode === 'window' && !shot) return
     setSendingDraw(true)
     try {
-      const dataUrl = await window.api.captureBrowser(wv.getWebContentsId())
+      const dataUrl =
+        mode === 'web' ? await window.api.captureBrowser(wv!.getWebContentsId()) : shot!.dataUrl
       if (!dataUrl) {
         showToast('toast.drawFailed', 'info')
         return
@@ -461,7 +529,9 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
         return
       }
       const prompt =
-        tRef.current('browser.drawPrompt', { url: wv.getURL(), path }) + viewportContext()
+        mode === 'web'
+          ? tRef.current('browser.drawPrompt', { url: wv!.getURL(), path }) + viewportContext()
+          : tRef.current('browser.windowDrawPrompt', { title: shot!.title, path })
       deliverPrompt(prompt, 'toast.drawSent', 'toast.drawCopied')
       clearDraw()
       exitDraw()
@@ -532,71 +602,122 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
         <div className="browser-toolbar">
           <button
             type="button"
-            className="browser-btn"
-            title={t('browser.back')}
-            disabled={!canBack}
-            onClick={() => webviewRef.current?.goBack()}
+            className={`browser-btn${mode === 'web' ? ' browser-btn-active' : ''}`}
+            title={t('browser.modeWeb')}
+            onClick={() => switchMode('web')}
           >
-            ←
+            🌐
           </button>
           <button
             type="button"
-            className="browser-btn"
-            title={t('browser.forward')}
-            disabled={!canFwd}
-            onClick={() => webviewRef.current?.goForward()}
+            className={`browser-btn${mode === 'window' ? ' browser-btn-active' : ''}`}
+            title={t('browser.modeWindow')}
+            onClick={() => switchMode('window')}
           >
-            →
+            🪟
           </button>
-          <button
-            type="button"
-            className={`browser-btn${loading ? ' browser-btn-loading' : ''}`}
-            title={t('browser.reload')}
-            onClick={(e) => {
-              const wv = webviewRef.current
-              if (!wv) return
-              if (e.shiftKey) wv.reloadIgnoringCache()
-              else wv.reload()
-            }}
-          >
-            ⟳
-          </button>
-          <input
-            className="browser-url"
-            value={urlText}
-            placeholder={t('browser.urlPlaceholder')}
-            spellCheck={false}
-            onChange={(e) => setUrlText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') navigate()
-            }}
-            onFocus={(e) => e.target.select()}
-          />
-          <select
-            className="browser-viewport-select"
-            title={t('browser.viewport')}
-            value={viewport?.id ?? ''}
-            onChange={(e) => setViewport(VIEWPORTS.find((v) => v.id === e.target.value) ?? null)}
-          >
-            <option value="">{t('browser.viewportResponsive')}</option>
-            {VIEWPORTS.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.name} ({v.w}×{v.h})
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            className={`browser-btn${picking ? ' browser-btn-active' : ''}`}
-            title={t('browser.pick')}
-            onClick={togglePick}
-          >
-            ⌖
-          </button>
+          {mode === 'web' && (
+            <>
+              <button
+                type="button"
+                className="browser-btn"
+                title={t('browser.back')}
+                disabled={!canBack}
+                onClick={() => webviewRef.current?.goBack()}
+              >
+                ←
+              </button>
+              <button
+                type="button"
+                className="browser-btn"
+                title={t('browser.forward')}
+                disabled={!canFwd}
+                onClick={() => webviewRef.current?.goForward()}
+              >
+                →
+              </button>
+              <button
+                type="button"
+                className={`browser-btn${loading ? ' browser-btn-loading' : ''}`}
+                title={t('browser.reload')}
+                onClick={(e) => {
+                  const wv = webviewRef.current
+                  if (!wv) return
+                  if (e.shiftKey) wv.reloadIgnoringCache()
+                  else wv.reload()
+                }}
+              >
+                ⟳
+              </button>
+              <input
+                className="browser-url"
+                value={urlText}
+                placeholder={t('browser.urlPlaceholder')}
+                spellCheck={false}
+                onChange={(e) => setUrlText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') navigate()
+                }}
+                onFocus={(e) => e.target.select()}
+              />
+              <select
+                className="browser-viewport-select"
+                title={t('browser.viewport')}
+                value={viewport?.id ?? ''}
+                onChange={(e) =>
+                  setViewport(VIEWPORTS.find((v) => v.id === e.target.value) ?? null)
+                }
+              >
+                <option value="">{t('browser.viewportResponsive')}</option>
+                {VIEWPORTS.map((v) => (
+                  <option key={v.id} value={v.id}>
+                    {v.name} ({v.w}×{v.h})
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className={`browser-btn${picking ? ' browser-btn-active' : ''}`}
+                title={t('browser.pick')}
+                onClick={togglePick}
+              >
+                ⌖
+              </button>
+            </>
+          )}
+          {mode === 'window' && (
+            <>
+              <select
+                className="browser-window-select"
+                title={t('browser.modeWindow')}
+                value={windowId}
+                onChange={(e) => selectWindow(e.target.value)}
+              >
+                <option value="">{t('browser.windowSelect')}</option>
+                {windows.map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                className={`browser-btn${shotLoading ? ' browser-btn-loading' : ''}`}
+                title={t('browser.windowRefresh')}
+                onClick={() => {
+                  void refreshWindows()
+                  if (windowId) void captureShot(windowId)
+                }}
+              >
+                ⟳
+              </button>
+            </>
+          )}
           <button
             type="button"
             className={`browser-btn${drawing ? ' browser-btn-active' : ''}`}
             title={t('browser.draw')}
+            disabled={mode === 'window' && !shot}
             onClick={toggleDraw}
           >
             ✏
@@ -622,25 +743,29 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
               </button>
             </>
           )}
-          <button
-            type="button"
-            className="browser-btn"
-            title={t('browser.devtools')}
-            onClick={() => webviewRef.current?.openDevTools()}
-          >
-            🔧
-          </button>
-          <button
-            type="button"
-            className="browser-btn"
-            title={t('browser.external')}
-            onClick={() => {
-              const url = webviewRef.current?.getURL()
-              if (url) window.open(url)
-            }}
-          >
-            ↗
-          </button>
+          {mode === 'web' && (
+            <>
+              <button
+                type="button"
+                className="browser-btn"
+                title={t('browser.devtools')}
+                onClick={() => webviewRef.current?.openDevTools()}
+              >
+                🔧
+              </button>
+              <button
+                type="button"
+                className="browser-btn"
+                title={t('browser.external')}
+                onClick={() => {
+                  const url = webviewRef.current?.getURL()
+                  if (url) window.open(url)
+                }}
+              >
+                ↗
+              </button>
+            </>
+          )}
           <select
             className="browser-dock-select"
             title={t('browser.dockLabel')}
@@ -657,9 +782,10 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
           </select>
         </div>
         <div className="browser-body">
+          {/* The webview never unmounts on a mode switch: page state survives. */}
           <div
-            className={`browser-frame${viewport ? ' browser-frame-device' : ''}`}
-            style={viewport ? { width: viewport.w, height: viewport.h } : undefined}
+            className={`browser-frame${viewport ? ' browser-frame-device' : ''}${mode === 'window' ? ' view-hidden' : ''}`}
+            style={viewport && mode === 'web' ? { width: viewport.w, height: viewport.h } : undefined}
           >
             {preloadPath && (
               <webview
@@ -675,7 +801,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                 webpreferences="sandbox=no,backgroundThrottling=no"
               />
             )}
-            {drawing && (
+            {drawing && mode === 'web' && (
               <canvas
                 ref={canvasRef}
                 className="browser-draw-canvas"
@@ -686,6 +812,24 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
               />
             )}
           </div>
+          {mode === 'window' &&
+            (shot ? (
+              <div className="browser-shot-wrap">
+                <img className="browser-shot" src={shot.dataUrl} alt={shot.title} />
+                {drawing && (
+                  <canvas
+                    ref={canvasRef}
+                    className="browser-draw-canvas"
+                    onPointerDown={onDrawDown}
+                    onPointerMove={onDrawMove}
+                    onPointerUp={onDrawUp}
+                    onPointerCancel={onDrawUp}
+                  />
+                )}
+              </div>
+            ) : (
+              <div className="browser-window-empty">{t('browser.windowEmpty')}</div>
+            ))}
           {/* Webviews swallow mouse events; shield them while dragging the divider. */}
           {dragging && <div className="browser-drag-shield" />}
         </div>

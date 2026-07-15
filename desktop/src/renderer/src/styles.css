@@ -2641,7 +2641,36 @@ code {
   color: var(--accent);
 }
 
+/* Window mirror (D2a): shrink-wrapped around the still so the draw canvas
+   covers the image box exactly (stroke coords scale aspect-true at send). */
+.browser-shot-wrap {
+  position: relative;
+  display: flex;
+  margin: auto;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.browser-shot {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  min-width: 0;
+  min-height: 0;
+  object-fit: contain;
+  border: 1px solid var(--border);
+}
+
+.browser-window-empty {
+  margin: auto;
+  color: var(--fg-dim);
+  max-width: 420px;
+  text-align: center;
+  padding: 24px;
+}
+
 .browser-viewport-select,
+.browser-window-select,
 .browser-dock-select {
   max-width: 220px;
   background: var(--bg);
@@ -2650,6 +2679,12 @@ code {
   border-radius: 6px;
   padding: 4px 6px;
   font-size: 12px;
+}
+
+/* The window picker stands in for the URL bar: let it breathe. */
+.browser-window-select {
+  flex: 1;
+  max-width: 420px;
 }
 
 .browser-body {

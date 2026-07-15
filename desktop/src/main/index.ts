@@ -37,6 +37,7 @@ import { listAgents } from './agents'
 import { createSessionWithWorktree } from './create-session'
 import { Journal } from './journal'
 import { startDeckControl, type DeckControlDeps, type DeckControlServer } from './deck-control'
+import { startDesignEndpoint, type DesignEndpoint } from './design-endpoint'
 import {
   SUPERVISOR_BRIEFING,
   SUPERVISOR_NAME,
@@ -130,9 +131,25 @@ const deckPluginDir = ((): string => {
   return existsSync(dir) ? dir : ''
 })()
 
+// Design endpoint (PLAN D2b): loopback receiver for element picks coming from
+// EXTERNAL apps in design mode (Tauri/Electron dev builds running the
+// deck-design client). Started at whenReady; its url/token are injected into
+// every PTY the Deck spawns, so `tauri dev` launched from a session terminal
+// inherits the pair — nothing is persisted, nothing transits the broker (which
+// may be remote/headless: picks are a strictly local loop).
+let designServer: DesignEndpoint | null = null
+
 const service = new SessionService(
   getConfig,
-  () => activeScopeEnv.env,
+  () => ({
+    ...activeScopeEnv.env,
+    ...(designServer
+      ? {
+          CLAUDE_DECK_DESIGN_URL: designServer.url,
+          CLAUDE_DECK_DESIGN_TOKEN: designServer.token
+        }
+      : null)
+  }),
   safeLaunchCommand,
   deckPluginDir
 )
@@ -623,6 +640,17 @@ app.whenReady().then(() => {
   // Reflect the initial session count on the Export-template menu item (the app
   // starts empty, so it begins disabled).
   syncExportTemplateEnabled()
+  // Design endpoint (PLAN D2b): up before service.start() so even restored
+  // sessions get the env pair. Picks are forwarded to the renderer, which
+  // composes the prompt and routes it to the docked/selected agent.
+  startDesignEndpoint((event) => {
+    mainWindow?.webContents.send('design:pick', event)
+    journal.add('review', `design pick from ${event.source || 'an external app'}: <${event.pick.tagName}>`)
+  })
+    .then((srv) => {
+      designServer = srv
+    })
+    .catch((e) => console.error('[claude-peers-desk] design endpoint failed to start:', e))
   registerIpc({
     service,
     workspaces,

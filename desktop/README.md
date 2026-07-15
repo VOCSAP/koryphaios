@@ -214,6 +214,45 @@ An embedded web browser for web-front work, opened two ways:
   pasted into the docked agent's prompt -- the agent `Read`s the image and sees
   exactly what you circled. `⌫` clears the sketch, `Esc` exits. Covers the
   feedback the element picker can't express ("this whole block is misaligned").
+- **Window mirror (`🪟`)** -- the same pane can mirror **any OS window** (still
+  capture via `desktopCapturer`, `⟳` refreshes): pick a window, annotate the
+  capture with `✏`, send with `📸`. Design feedback on NATIVE apps -- the Deck
+  itself, a Tauri build, anything -- with zero integration in the target.
+  Element picking stays web-only; the sketch + the agent's multimodal `Read`
+  answer the "which element" question for native targets. The embedded web
+  page keeps its state while you're in window mode.
+
+#### Design mode inside external apps (Tauri, Electron…) — experimental
+
+Any webview-based app can join the element-picking loop **without being
+embedded** in the Deck:
+
+1. At launch the Deck starts a **loopback design endpoint** (127.0.0.1, random
+   port, Bearer token minted per launch -- same security model as the
+   supervisor's deck-control) and injects `CLAUDE_DECK_DESIGN_URL` /
+   `CLAUDE_DECK_DESIGN_TOKEN` into **every session terminal it spawns**. The
+   claude-peers broker is never involved: picks are a strictly local loop, so a
+   remote/headless broker deployment changes nothing.
+2. Add the client script (`deck-plugin/design/deck-design.js`, built by
+   `npm run build:design`) to your app's **dev build** and hand it the pair.
+   Tauri example (`src-tauri`, dev only):
+
+   ```rust
+   let url = std::env::var("CLAUDE_DECK_DESIGN_URL").unwrap_or_default();
+   let token = std::env::var("CLAUDE_DECK_DESIGN_TOKEN").unwrap_or_default();
+   builder.initialization_script(&format!(
+       "window.__DECK_DESIGN__={{url:'{url}',token:'{token}',source:'my-app'}};{script}",
+       script = include_str!("../deck-design.js")
+   ));
+   ```
+
+   Plain web page alternative: `<meta name="deck-design-url" …>` +
+   `<meta name="deck-design-token" …>` + a `<script src="deck-design.js">` tag.
+3. Launch the app **from a session terminal inside the Deck** (it inherits the
+   env pair), press `Ctrl+Shift+D` in the app, pick an element: its description
+   lands in the docked (else selected) agent's prompt, exactly like a pick from
+   the embedded browser. The script stays inert when the env pair is absent --
+   safe to leave in a dev build launched outside the Deck.
 
 Pages load in an isolated `persist:deck-browser` partition; `window.open` /
 `target=_blank` links open in the system browser, never in new Electron

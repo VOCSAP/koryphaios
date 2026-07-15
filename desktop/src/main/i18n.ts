@@ -336,6 +336,15 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.drawSent': "Annotated screenshot pasted into the docked agent's prompt",
   'toast.drawCopied': 'No running docked agent — annotation prompt copied',
   'toast.drawFailed': 'Screenshot capture failed',
+  'browser.modeWeb': 'Web page mode',
+  'browser.modeWindow': 'OS window mirror mode',
+  'browser.windowSelect': 'Choose a window…',
+  'browser.windowRefresh': 'Refresh the window list and capture',
+  'browser.windowEmpty':
+    'Pick an OS window to mirror it here — then annotate it with ✏ and send the capture to the docked agent with 📸.',
+  'browser.windowDrawPrompt':
+    'I annotated a screenshot of the window "{title}": read the image file {path} to see the highlighted areas. ',
+  'design.sourcePrefix': '[app: {source}] ',
   'nav.roadmap': 'Roadmap',
   'roadmap.title': 'Roadmap',
   'roadmap.add': '＋ Add item',

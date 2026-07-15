@@ -345,6 +345,8 @@ export interface ElementSelector {
  * Payload sent by the webview guest preload (browser-inspect.ts) over
  * `ipcRenderer.sendToHost('deck:element-selected', …)` when the operator picks
  * a DOM element in inspect mode. Composed into a prompt for the paired agent.
+ * The same shape travels over the design endpoint (D2b) when the pick comes
+ * from an EXTERNAL app running the deck-design client script.
  */
 export interface ElementPick {
   tagName: string
@@ -358,6 +360,21 @@ export interface ElementPick {
   width: number
   height: number
   pageUrl: string
+}
+
+/** An external-app pick forwarded by the design endpoint (PLAN D2b). */
+export interface DesignPickEvent {
+  /** Free-text app label sent by the client script ('' when omitted). */
+  source: string
+  pick: ElementPick
+}
+
+/** One capturable OS window/screen for the browser view's Window mode (D2a). */
+export interface WindowSource {
+  id: string
+  name: string
+  /** Small preview (PNG data URL) for the picker. */
+  thumbnail: string
 }
 
 // ----- Activity journal (PLAN C14) -----
@@ -554,6 +571,10 @@ export interface DeckApi {
   captureBrowser(webContentsId: number): Promise<string | null>
   /** Persist an annotated screenshot; returns the absolute file path. */
   saveAnnotation(dataUrl: string): Promise<string | null>
+  /** Capturable OS windows/screens for the Window mirror mode (D2a). */
+  listCaptureWindows(): Promise<WindowSource[]>
+  /** Full-size still of one window/screen; null when gone. */
+  captureWindow(id: string): Promise<{ dataUrl: string; title: string } | null>
 
   // supervisor (PLAN C5): spawn (or return) the Home supervisor session.
   ensureSupervisor(): Promise<SessionRuntime>
@@ -593,6 +614,8 @@ export interface DeckApi {
   onInboxOpen(cb: () => void): () => void
   /** Notification click: bring a session into view (agents view + selection). */
   onFocusSession(cb: (id: string) => void): () => void
+  /** External-app element pick received by the design endpoint (D2b). */
+  onDesignPick(cb: (event: DesignPickEvent) => void): () => void
   onConfigChanged(cb: (config: AppConfig) => void): () => void
   /** Fired when the Edit > Settings… menu item (or Ctrl/Cmd+,) is chosen. */
   onMenuSettings(cb: () => void): () => void

@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { app, BrowserWindow, dialog, ipcMain, webContents } from 'electron'
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, webContents } from 'electron'
 import type {
   AppConfig,
   CreateSessionInput,
@@ -150,6 +150,34 @@ export function registerIpc({
     } catch {
       return null
     }
+  })
+
+  // ----- window mirror (PLAN D2a) -----
+  // List capturable OS windows/screens for the browser view's Window mode.
+  // Thumbnails small on purpose: the picker only needs recognizable previews.
+  ipcMain.handle('design:list-windows', async () => {
+    const sources = await desktopCapturer.getSources({
+      types: ['window', 'screen'],
+      thumbnailSize: { width: 320, height: 200 },
+      fetchWindowIcons: false
+    })
+    return sources.map((s) => ({ id: s.id, name: s.name, thumbnail: s.thumbnail.toDataURL() }))
+  })
+
+  // Full-size still of one source. desktopCapturer's thumbnail IS the capture:
+  // requesting a large bounding box yields a native-resolution, aspect-true
+  // image without opening a getUserMedia stream (a still is also what the
+  // annotation flow wants — the page can't move under the strokes).
+  ipcMain.handle('design:capture-window', async (_e, id: string) => {
+    if (typeof id !== 'string' || !id) return null
+    const sources = await desktopCapturer.getSources({
+      types: ['window', 'screen'],
+      thumbnailSize: { width: 4096, height: 4096 },
+      fetchWindowIcons: false
+    })
+    const src = sources.find((s) => s.id === id)
+    if (!src || src.thumbnail.isEmpty()) return null
+    return { dataUrl: src.thumbnail.toDataURL(), title: src.name }
   })
 
   // Persist an annotated screenshot (page capture + operator strokes,
