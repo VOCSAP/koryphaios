@@ -224,8 +224,8 @@ export async function getRecentFiles(
  * different machines (with different cwd/git_root paths) can be matched.
  *
  * Examples:
- *   git@github.com:vocsap/claude-peers-mcp.git   -> github.com/vocsap/claude-peers-mcp
- *   https://github.com/vocsap/claude-peers-mcp.git -> github.com/vocsap/claude-peers-mcp
+ *   git@github.com:vocsap/koryphaios.git   -> github.com/vocsap/koryphaios
+ *   https://github.com/vocsap/koryphaios.git -> github.com/vocsap/koryphaios
  *   ssh://git@gitlab.com:2222/group/proj.git     -> gitlab.com/group/proj
  *
  * Returns null if no git remote is configured.
