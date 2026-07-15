@@ -281,5 +281,19 @@
   "diff.untracked": "non suivi",
   "diff.truncated": "Diff tronqué pour l'affichage (l'agent de review lit le diff complet).",
   "diff.review": "🔎 Faire relire par un agent",
-  "toast.reviewStarted": "Agent de review lancé — il s'adresse au team-lead s'il y en a un"
+  "toast.reviewStarted": "Agent de review lancé — il s'adresse au team-lead s'il y en a un",
+  "nav.journal": "Journal",
+  "journal.title": "Journal d'activité",
+  "journal.allKinds": "Tous les événements",
+  "journal.export": "Exporter…",
+  "journal.empty": "Rien pour l'instant — les spawns, sorties, épisodes de quota, annonces et opérations worktree de cette fenêtre apparaîtront ici.",
+  "journal.kind.session": "session",
+  "journal.kind.quota": "quota",
+  "journal.kind.attention": "attention",
+  "journal.kind.worktree": "worktree",
+  "journal.kind.announce": "annonce",
+  "journal.kind.dispatch": "dispatch",
+  "journal.kind.review": "review",
+  "journal.kind.checkpoint": "checkpoint",
+  "toast.journalExported": "Journal exporté"
 }

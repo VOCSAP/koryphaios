@@ -32,6 +32,7 @@ import {
 import { resolve as resolvePath } from 'node:path'
 import type { SessionService } from './session-service'
 import type { WorkspaceService } from './workspace-service'
+import type { Journal, JournalKind } from './journal'
 import { listAgents } from './agents'
 import { resolveLaunchConfig, saveGlobalConfig } from './launch-config'
 import {
@@ -70,6 +71,8 @@ interface IpcDeps {
   announce: (text: string) => Promise<number>
   /** Spawn (or return) the Home supervisor session (PLAN C5). */
   ensureSupervisor: () => Promise<SessionRuntime>
+  /** Activity journal (PLAN C14), owned by index.ts. */
+  journal: Journal
 }
 
 export function registerIpc({
@@ -79,7 +82,8 @@ export function registerIpc({
   setConfig,
   getWindow,
   announce,
-  ensureSupervisor
+  ensureSupervisor,
+  journal
 }: IpcDeps): void {
   // ----- sessions -----
   ipcMain.handle('sessions:list', () => service.list())
@@ -170,9 +174,10 @@ export function registerIpc({
   })
 
   // ----- worktrees (PLAN C4/C6) -----
-  ipcMain.handle('worktree:remove', (_e, path: string) =>
-    removeWorktree(getConfig().projectDir, path)
-  )
+  ipcMain.handle('worktree:remove', async (_e, path: string) => {
+    await removeWorktree(getConfig().projectDir, path)
+    journal.add('worktree', `worktree removed: ${path}`)
+  })
   ipcMain.handle('worktree:list', async () => {
     const worktrees = await listWorktrees(getConfig().projectDir)
     const sessions = service.list().filter((s) => s.status !== 'exited')
@@ -195,6 +200,7 @@ export function registerIpc({
     const wt = await createWorktree(getConfig().projectDir, branch ?? '')
     const init = resolveLaunchConfig(getConfig().projectDir).worktreeInit
     if (init) runWorktreeInit(wt.path, init)
+    journal.add('worktree', `worktree created on ⎇ ${wt.branch}`)
   })
 
   // ----- diff / review (PLAN C13) -----
@@ -226,7 +232,25 @@ export function registerIpc({
       prompt: composeDiffReviewPrompt({ dir, base: await diffBase(dir), leadPeerId: lead }),
       announce: `one-shot reviewer: reviews the diff in "${dir}"`
     })
+    journal.add('review', `review agent spawned on ${dir}${lead ? ` (reports to ${lead})` : ''}`)
     return true
+  })
+
+  // ----- activity journal (PLAN C14) -----
+  ipcMain.handle('journal:list', (_e, kind?: string | null) =>
+    journal.list((kind as JournalKind) || null)
+  )
+  // Plain-text export via a save dialog; returns the written path or null.
+  ipcMain.handle('journal:export', async () => {
+    const win = getWindow()
+    const res = await dialog.showSaveDialog(win ?? undefined!, {
+      defaultPath: join(getConfig().projectDir, 'deck-journal.txt'),
+      filters: [{ name: 'Text', extensions: ['txt'] }]
+    })
+    if (res.canceled || !res.filePath) return null
+    const { writeFileSync } = await import('node:fs')
+    writeFileSync(res.filePath, journal.toText() + '\n', 'utf-8')
+    return res.filePath
   })
 
   // ----- supervisor (PLAN C5) -----

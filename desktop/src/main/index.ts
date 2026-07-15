@@ -21,6 +21,7 @@ import { APP_STATE_SUBDIR, runDataMigration } from './migrate-data-dir'
 import type { SessionRuntime } from '@shared/types'
 import { listAgents } from './agents'
 import { createSessionWithWorktree } from './create-session'
+import { Journal } from './journal'
 import { startDeckControl, type DeckControlDeps, type DeckControlServer } from './deck-control'
 import {
   SUPERVISOR_BRIEFING,
@@ -118,6 +119,34 @@ const service = new SessionService(
   deckPluginDir
 )
 
+// Activity journal (PLAN C14): per-window narration of spawns, exits, quota
+// episodes, attention screens, worktree ops, announces… Ring-buffered, never
+// persisted. Fed here + in ipc.ts; read by the Journal rail view.
+const journal = new Journal()
+
+service.on('created', (r: SessionRuntime) => {
+  const branch = r.worktree ? ` on ⎇ ${r.worktree.branch}` : ''
+  journal.add('session', `session "${r.name}" spawned${branch}${r.supervisor ? ' (supervisor)' : ''}`)
+})
+service.on('removed', ({ name }: { id: string; name: string }) => {
+  journal.add('session', `session "${name}" closed`)
+})
+service.on('exit', ({ id, exitCode, name }: { id: string; exitCode: number; name?: string }) => {
+  const label = name ?? id.slice(0, 8)
+  journal.add(
+    'session',
+    exitCode === 0 ? `session "${label}" exited cleanly` : `session "${label}" exited with code ${exitCode}`
+  )
+})
+service.on(
+  'quota',
+  ({ id, limited, resumed }: { id: string; limited: boolean; resumed?: boolean }) => {
+    const name = service.list().find((s) => s.id === id)?.name ?? id.slice(0, 8)
+    if (resumed) journal.add('quota', `session "${name}" auto-resumed after the usage limit`)
+    else if (limited) journal.add('quota', `session "${name}" hit the usage limit`)
+  }
+)
+
 // Outbound megaphone: broadcast a system message to every active peer in this
 // window's forced group via the broker /announce endpoint. Best-effort -- an
 // announce must never crash the main process. Returns the peers it reached.
@@ -128,6 +157,7 @@ const broadcastAnnounce = async (text: string, excludePeerId?: string): Promise<
       { groupId: activeScope.groupId, secret: activeScope.secret, text, excludePeerId },
       { endpoint: resolveBrokerEndpoint() }
     )
+    if (sent > 0) journal.add('announce', `announce to ${sent} peer(s): ${text.slice(0, 120)}`)
     return sent
   } catch (e) {
     console.error('[claude-peers-desk] announce failed:', e)
@@ -145,9 +175,11 @@ service.on('peer-resolved', ({ peerId, intent }: { peerId: string; intent: JoinA
 // "Needs you" system notification (PLAN C11): a session hit a permission /
 // question / plan screen. Clicking brings the window up and selects the tile.
 service.on('attention', ({ id, waiting }: { id: string; waiting: boolean }) => {
-  if (!waiting || !config.notifyAttention) return
-  if (!Notification.isSupported()) return
+  if (!waiting) return
   const session = service.list().find((s) => s.id === id)
+  if (session) journal.add('attention', `session "${session.name}" waits for the operator`)
+  if (!config.notifyAttention) return
+  if (!Notification.isSupported()) return
   if (!session) return
   const isFr = (config.locale || app.getLocale()).toLowerCase().startsWith('fr')
   const n = new Notification({
@@ -238,6 +270,9 @@ const announceToLead = async (text: string): Promise<number> => {
       },
       { endpoint: resolveBrokerEndpoint() }
     )
+    if (sent > 0) {
+      journal.add('dispatch', `to lead "${target.peerId}": ${text.slice(0, 120)}`)
+    }
     return sent
   } catch (e) {
     console.error('[claude-peers-desk] lead announce failed:', e)
@@ -261,10 +296,14 @@ const controlDeps: DeckControlDeps = {
     const wt = await createWorktree(getConfig().projectDir, branch)
     const init = resolveLaunchConfig(getConfig().projectDir).worktreeInit
     if (init) runWorktreeInit(wt.path, init)
+    journal.add('worktree', `worktree created on ⎇ ${wt.branch} (supervisor)`)
     return wt
   },
   listWorktrees: () => listWorktrees(getConfig().projectDir),
-  removeWorktree: (path) => removeWorktree(getConfig().projectDir, path),
+  removeWorktree: async (path) => {
+    await removeWorktree(getConfig().projectDir, path)
+    journal.add('worktree', `worktree removed: ${path} (supervisor)`)
+  },
   listTemplates: () => listTemplates(getConfig().projectDir),
   // Append-only by contract (deck-control): never closes existing tiles.
   applyTemplate: async (path) => {
@@ -443,7 +482,8 @@ app.whenReady().then(() => {
     setConfig,
     getWindow: () => mainWindow,
     announce: (text: string) => broadcastAnnounce(text),
-    ensureSupervisor
+    ensureSupervisor,
+    journal
   })
   service.start()
   // Attach an auto-save workspace capturing whatever the service just restored.

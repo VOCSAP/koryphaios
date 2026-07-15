@@ -312,8 +312,29 @@ export interface RoadmapArchiveResponse {
   item: RoadmapItem
 }
 
-/** Navigation rail views: Home (C5), Agents, Roadmap (C3), Worktrees (C6). */
-export type DeckView = 'home' | 'agents' | 'roadmap' | 'worktrees'
+/** Navigation rail views: Home (C5), Agents, Roadmap (C3), Worktrees (C6), Journal (C14). */
+export type DeckView = 'home' | 'agents' | 'roadmap' | 'worktrees' | 'journal'
+
+// ----- Activity journal (PLAN C14) -----
+// Mirror of main/journal.ts shapes (kept import-free for bun tests).
+
+export type JournalKind =
+  | 'session'
+  | 'quota'
+  | 'attention'
+  | 'worktree'
+  | 'announce'
+  | 'dispatch'
+  | 'review'
+  | 'checkpoint'
+
+export interface JournalEntry {
+  id: number
+  /** Epoch ms. */
+  at: number
+  kind: JournalKind
+  text: string
+}
 
 /** One row of the Worktrees view (PLAN C6): git state + attached session. */
 export interface WorktreeRow {
@@ -467,6 +488,12 @@ export interface DeckApi {
   listWorktrees(): Promise<WorktreeRow[]>
   /** Create a fresh worktree on a NEW branch (init hook runs in background). */
   createWorktree(branch: string): Promise<void>
+
+  // activity journal (PLAN C14)
+  /** Entries oldest-first; pass a kind to filter, null/undefined for all. */
+  journalList(kind?: JournalKind | null): Promise<JournalEntry[]>
+  /** Save the journal as plain text (save dialog); returns the path or null. */
+  journalExport(): Promise<string | null>
 
   // diff / review (PLAN C13)
   /** Full diff picture of a dir (uncommitted + branch-vs-main for worktrees). */

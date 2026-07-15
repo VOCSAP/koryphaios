@@ -8,7 +8,8 @@ const VIEWS: { id: DeckView; icon: string; key: string }[] = [
   { id: 'home', icon: '🏠', key: 'nav.home' },
   { id: 'agents', icon: '🖥', key: 'nav.agents' },
   { id: 'roadmap', icon: '🗺', key: 'nav.roadmap' },
-  { id: 'worktrees', icon: '⎇', key: 'nav.worktrees' }
+  { id: 'worktrees', icon: '⎇', key: 'nav.worktrees' },
+  { id: 'journal', icon: '📜', key: 'nav.journal' }
 ]
 
 export function NavRail(): React.JSX.Element {

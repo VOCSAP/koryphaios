@@ -124,7 +124,8 @@ export class SessionService extends EventEmitter {
         this.defs = this.defs.filter((d) => d.id !== id)
         this.runtime.delete(id)
         this.persist()
-        this.emit('exit', { id, exitCode })
+        // name rides along for the journal (C14); the renderer ignores it.
+        this.emit('exit', { id, exitCode, name: def?.name })
         this.broadcast()
         return
       }
@@ -135,7 +136,7 @@ export class SessionService extends EventEmitter {
         r.exitCode = exitCode
         r.thinking = false
       }
-      this.emit('exit', { id, exitCode })
+      this.emit('exit', { id, exitCode, name: def?.name })
       this.broadcast()
     })
 
@@ -264,11 +265,14 @@ export class SessionService extends EventEmitter {
     })
     this.spawnSession(def, 'fresh')
     this.broadcast()
+    // Journal hook (PLAN C14): index.ts narrates spawns without diffing lists.
+    this.emit('created', this.toRuntime(def))
     return this.toRuntime(def)
   }
 
   remove(id: string): void {
     const def = this.defs.find((d) => d.id === id)
+    if (def) this.emit('removed', { id: def.id, name: def.name })
     if (def?.sessionId) this.registry.release(def.sessionId)
     this.pty.kill(id)
     this.thinkingDetector.clear(id)

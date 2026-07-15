@@ -281,5 +281,19 @@
   "diff.untracked": "untracked",
   "diff.truncated": "Diff truncated for display (the review agent reads the full one).",
   "diff.review": "🔎 Have an agent review this",
-  "toast.reviewStarted": "Review agent started — it reports to the team-lead when one is set"
+  "toast.reviewStarted": "Review agent started — it reports to the team-lead when one is set",
+  "nav.journal": "Journal",
+  "journal.title": "Activity journal",
+  "journal.allKinds": "All events",
+  "journal.export": "Export…",
+  "journal.empty": "Nothing yet — spawns, exits, quota episodes, announces and worktree operations of this window will appear here.",
+  "journal.kind.session": "session",
+  "journal.kind.quota": "quota",
+  "journal.kind.attention": "attention",
+  "journal.kind.worktree": "worktree",
+  "journal.kind.announce": "announce",
+  "journal.kind.dispatch": "dispatch",
+  "journal.kind.review": "review",
+  "journal.kind.checkpoint": "checkpoint",
+  "toast.journalExported": "Journal exported"
 }

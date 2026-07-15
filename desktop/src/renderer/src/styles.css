@@ -2169,3 +2169,72 @@ code {
   color: var(--accent);
   font-weight: 600;
 }
+
+/* ---------- Activity journal (PLAN C14) ---------- */
+
+.journal-view {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-width: 0;
+}
+
+.journal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.journal-head h2 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.journal-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.journal-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+  padding: 2px 0;
+}
+
+.journal-time {
+  color: var(--fg-dim);
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.journal-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.journal-kind-quota {
+  color: #e2a03f;
+}
+
+.journal-kind-attention {
+  color: #b678ff;
+}
+
+.journal-kind-announce,
+.journal-kind-dispatch {
+  color: var(--accent);
+}
+
+.journal-kind-checkpoint {
+  color: #4ec97a;
+}
