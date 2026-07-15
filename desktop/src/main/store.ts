@@ -27,6 +27,8 @@ const DEFAULT_CONFIG: AppConfig = {
   rememberScopeSecrets: true,
   // Quota auto-resume is opt-in (PLAN C1): off unless the operator enables it.
   autoResumeQuota: false,
+  // Team-lead suggestion pattern (PLAN C10): substring matched on agent/name.
+  leadPattern: 'team-lead',
   // Floating "?" help assistant (PLAN C9): shown by default, Haiku for cost.
   helpButton: true,
   helpModel: 'haiku'

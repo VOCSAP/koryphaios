@@ -131,6 +131,11 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
           />
         ) : (
           <span className="row-name" title={session.cwd} style={{ color: session.color || undefined }}>
+            {session.lead && (
+              <span title={t('sidebar.leadTitle')} className="row-lead">
+                👑{' '}
+              </span>
+            )}
             {session.name}
           </span>
         )}
@@ -230,6 +235,11 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
             {
               label: autoResumeOn ? t('sidebar.autoResumeOff') : t('sidebar.autoResumeOn'),
               onSelect: () => void setAutoResume(session.id, !autoResumeOn)
+            },
+            {
+              label: `👑 ${t('sidebar.setLead')}`,
+              onSelect: () => void window.api.setLead(session.id),
+              disabled: !!session.lead
             }
           ]}
         />

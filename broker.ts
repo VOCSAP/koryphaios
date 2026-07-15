@@ -813,6 +813,21 @@ function handleAnnounce(body: AnnounceRequest): AnnounceResponse | { error: stri
     }
   }
 
+  // Targeted announce (PLAN C10): deliver to ONE active peer (the team-lead
+  // notification path). Same sender/no-reply semantics; 404 surfaces a
+  // missing/dormant target so the Deck can tell the operator.
+  if (body.to_peer_id) {
+    const target = db.query(
+      "SELECT instance_token FROM peers WHERE group_id = ? AND peer_id = ? AND status = 'active'"
+    ).get(groupId, body.to_peer_id) as { instance_token: InstanceToken } | null;
+    if (!target) return { error: `no active peer '${body.to_peer_id}' in group`, status: 404 };
+    const at = new Date().toISOString();
+    const res = insertMessage.run(DECK_INSTANCE_TOKEN, target.instance_token, groupId, text, at);
+    updateLastActivity.run(at, target.instance_token);
+    pushDeckMessage(target.instance_token, Number(res.lastInsertRowid), text, at);
+    return { sent: 1 };
+  }
+
   const exclude = body.exclude_peer_id ?? null;
   const targets = db.query(
     `SELECT instance_token FROM peers

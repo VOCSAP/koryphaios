@@ -138,3 +138,41 @@ test("the reserved deck row never surfaces in group-stats", async () => {
   // No test registered a 'default' peer, so 'default' must be absent (deck excluded).
   expect(def).toBeUndefined();
 });
+
+// ----- targeted announce (PLAN C10): the team-lead notification path -----
+
+test("to_peer_id delivers to ONE active peer only; unknown target -> 404", async () => {
+  const lead = await register("t-host", "/lead");
+  const other = await register("t-host", "/other");
+
+  const targeted = await post<{ sent: number }>(`${broker.url}/announce`, {
+    group_id: "default",
+    group_secret_hash: null,
+    text: "next item: fix login",
+    to_peer_id: lead.body.peer_id,
+  });
+  expect(targeted.status).toBe(200);
+  expect(targeted.body.sent).toBe(1);
+
+  const leadPoll = await post<{ messages: { from_token: string; text: string }[] }>(
+    `${broker.url}/poll-messages`,
+    { instance_token: lead.body.instance_token }
+  );
+  expect(leadPoll.body.messages.some((m) => m.text === "next item: fix login")).toBe(true);
+  expect(
+    leadPoll.body.messages.find((m) => m.text === "next item: fix login")!.from_token
+  ).toBe("__deck__");
+
+  const otherPoll = await post<{ messages: { text: string }[] }>(`${broker.url}/poll-messages`, {
+    instance_token: other.body.instance_token,
+  });
+  expect(otherPoll.body.messages.some((m) => m.text === "next item: fix login")).toBe(false);
+
+  const missing = await post(`${broker.url}/announce`, {
+    group_id: "default",
+    group_secret_hash: null,
+    text: "hello",
+    to_peer_id: "ghost-peer",
+  });
+  expect(missing.status).toBe(404);
+});

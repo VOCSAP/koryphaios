@@ -96,6 +96,7 @@ export function registerIpc({
   ipcMain.handle('sessions:set-auto-resume', (_e, id: string, enabled: boolean) =>
     service.setAutoResume(id, !!enabled)
   )
+  ipcMain.handle('sessions:set-lead', (_e, id: string) => service.setLead(id))
   ipcMain.handle('sessions:peek-next-color', () => service.peekNextColor())
   ipcMain.handle('sessions:reorder', (_e, ids: string[]) => service.reorder(ids ?? []))
   // "New (clear)": save+detach the current workspace (while sessions still

@@ -79,6 +79,8 @@ export interface SendAnnounceParams {
   text: string
   /** peer_id to exclude (e.g. the just-joined peer, so it skips its own join). */
   excludePeerId?: string | null
+  /** Targeted announce (PLAN C10): deliver to this ONE active peer only. */
+  toPeerId?: string | null
 }
 
 export interface AnnounceDeps {
@@ -96,12 +98,15 @@ export function buildAnnouncePayload(params: SendAnnounceParams): {
   group_secret_hash: string
   text: string
   exclude_peer_id: string | null
+  to_peer_id: string | null
 } {
   return {
     group_id: params.groupId,
     group_secret_hash: computeGroupSecretHash(params.secret),
     text: params.text,
-    exclude_peer_id: params.excludePeerId ?? null
+    exclude_peer_id: params.excludePeerId ?? null,
+    // Targeted announce (PLAN C10): one active peer instead of the broadcast.
+    to_peer_id: params.toPeerId ?? null
   }
 }
 

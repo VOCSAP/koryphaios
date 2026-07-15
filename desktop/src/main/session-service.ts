@@ -215,9 +215,15 @@ export class SessionService extends EventEmitter {
       worktree: input.worktree,
       // Supervisor session (PLAN C5/C8): main-only inputs.
       supervisor: input.supervisor || undefined,
+      // Team-lead (PLAN C10): explicit flag; uniqueness enforced below.
+      lead: input.lead && !input.supervisor ? true : undefined,
       mcpConfig: input.mcpConfig?.trim() || undefined,
       appendSystemPromptFile: input.appendSystemPromptFile?.trim() || undefined,
       createdAt: Date.now()
+    }
+    // Single team-lead per window: designating a new one demotes the previous.
+    if (def.lead) {
+      for (const d of this.defs) delete d.lead
     }
     this.defs.push(def)
     this.runtime.set(def.id, {
@@ -328,6 +334,12 @@ export class SessionService extends EventEmitter {
       ...d,
       color: d.color || paletteColor(this.getConfig().palette ?? DEFAULT_PALETTE, i)
     }))
+    // Restored data may carry several leads (hand-edited file): keep the first.
+    let leadSeen = false
+    for (const d of this.defs) {
+      if (d.lead && leadSeen) delete d.lead
+      if (d.lead) leadSeen = true
+    }
     for (const d of this.defs) {
       this.runtime.set(d.id, {
         status: 'exited',
@@ -362,6 +374,25 @@ export class SessionService extends EventEmitter {
     def.color = color.trim()
     this.persist()
     this.broadcast()
+  }
+
+  /**
+   * Designate `id` as the window's team-lead (PLAN C10). Explicit and unique:
+   * the previous lead is demoted; the supervisor can never be the lead.
+   */
+  setLead(id: string): void {
+    const def = this.defs.find((d) => d.id === id)
+    if (!def || def.supervisor) return
+    for (const d of this.defs) delete d.lead
+    def.lead = true
+    this.persist()
+    this.broadcast()
+  }
+
+  /** The current team-lead runtime, if any. */
+  getLead(): SessionRuntime | null {
+    const def = this.defs.find((d) => d.lead)
+    return def ? this.toRuntime(def) : null
   }
 
   /** Per-session quota auto-resume override (context menu). Persisted. */

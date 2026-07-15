@@ -266,6 +266,13 @@ export const EN_DEFAULTS: Record<string, string> = {
   'settings.helpModel': 'Help assistant model',
   'settings.helpModelHelp':
     "Each question is a one-shot `claude -p` call with the active view's context. Haiku is cheap and usually enough.",
+  'sidebar.setLead': 'Designate as team-lead',
+  'sidebar.leadTitle':
+    'Team-lead: targeted Deck notices (dispatch, integrations) go to this session',
+  'create.lead': 'Team-lead of this window',
+  'create.leadHelp':
+    'Targeted Deck notices (queue dispatch, integration notices) go to the team-lead. One per window; designating a new one demotes the previous.',
+  'create.leadTaken': 'a team-lead already exists (checking moves the crown)',
   'nav.worktrees': 'Worktrees',
   'worktrees.title': 'Git worktrees',
   'worktrees.create': '＋ Create worktree',

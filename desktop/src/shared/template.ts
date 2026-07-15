@@ -20,6 +20,10 @@ export interface TemplateSession {
   args?: string
   effort?: string
   color?: string
+  /** Initial prompt submitted on the fresh spawn (PLAN C2/C18). */
+  prompt?: string
+  /** Team-lead entry (PLAN C10): at most one per template. */
+  lead?: boolean
 }
 
 export interface SessionTemplate {
@@ -37,6 +41,8 @@ interface DefLike {
   args?: string
   effort?: string
   color?: string
+  prompt?: string
+  lead?: boolean
 }
 
 /** Structural subset of CreateSessionInput a template produces (no cwd). */
@@ -46,6 +52,8 @@ export interface TemplateInput {
   args?: string
   effort?: string
   color?: string
+  prompt?: string
+  lead?: boolean
 }
 
 /**
@@ -62,6 +70,8 @@ export function toTemplate(defs: readonly DefLike[], name?: string): SessionTemp
       if (d.args && d.args.trim()) s.args = d.args.trim()
       if (d.effort && d.effort.trim()) s.effort = d.effort.trim()
       if (d.color && d.color.trim()) s.color = d.color.trim()
+      if (d.prompt && d.prompt.trim()) s.prompt = d.prompt.trim()
+      if (d.lead) s.lead = true
       return s
     })
   }
@@ -82,6 +92,8 @@ export function templateToInputs(tpl: SessionTemplate): TemplateInput[] {
     if (s.args && s.args.trim()) input.args = s.args.trim()
     if (s.effort && s.effort.trim()) input.effort = s.effort.trim()
     if (s.color && s.color.trim()) input.color = s.color.trim()
+    if (s.prompt && s.prompt.trim()) input.prompt = s.prompt.trim()
+    if (s.lead) input.lead = true
     return input
   })
 }
@@ -90,9 +102,10 @@ function isTemplateSession(v: unknown): v is TemplateSession {
   if (!v || typeof v !== 'object') return false
   const s = v as Record<string, unknown>
   if (typeof s.name !== 'string') return false
-  for (const k of ['command', 'args', 'effort', 'color'] as const) {
+  for (const k of ['command', 'args', 'effort', 'color', 'prompt'] as const) {
     if (s[k] !== undefined && typeof s[k] !== 'string') return false
   }
+  if (s.lead !== undefined && typeof s.lead !== 'boolean') return false
   return true
 }
 

@@ -50,6 +50,12 @@ export interface SessionDef {
    */
   supervisor?: boolean
   /**
+   * The window's TEAM-LEAD (PLAN C10): the peer targeted announces (dispatch,
+   * integration notices) go to. Explicit flag, single per window (the service
+   * enforces uniqueness); captured in workspaces and templates. 👑 badge.
+   */
+  lead?: boolean
+  /**
    * Path of a generated .mcp config file passed as `--mcp-config` on BOTH
    * fresh and resume spawns (like --effort, it is not restored by
    * --fork-session). Set only for the supervisor (deck-control bridge).
@@ -143,6 +149,12 @@ export interface AppConfig {
    * (quota.ts). Global default, overridable per session (SessionDef.autoResume).
    */
   autoResumeQuota: boolean
+  /**
+   * Case-insensitive substring suggesting the team-lead at spawn (PLAN C10):
+   * when the agent/session name matches AND no lead exists, the create menu
+   * pre-checks the team-lead box. Suggestion only -- the flag stays explicit.
+   */
+  leadPattern: string
   /** Show the floating "?" help-assistant button (PLAN C9). */
   helpButton: boolean
   /** Model alias for help invocations (`claude -p --model <x>`); haiku default. */
@@ -218,6 +230,8 @@ export interface CreateSessionInput {
   worktree?: { path: string; branch: string }
   /** MAIN-only (PLAN C5): mark the created session as the supervisor. */
   supervisor?: boolean
+  /** Designate the created session as the window's team-lead (PLAN C10). */
+  lead?: boolean
   /** MAIN-only (PLAN C5): --mcp-config path re-passed on every spawn. */
   mcpConfig?: string
   /** MAIN-only (PLAN C8): --append-system-prompt-file path (supervisor anchor). */
@@ -356,6 +370,8 @@ export interface DeckApi {
   restartSession(id: string): Promise<SessionRuntime>
   /** Per-session quota auto-resume override (true/false); see SessionDef.autoResume. */
   setSessionAutoResume(id: string, enabled: boolean): Promise<void>
+  /** Designate a session as the window's team-lead (unique, PLAN C10). */
+  setLead(id: string): Promise<void>
   /** The colour the next auto-assigned session would receive (create preview). */
   peekNextColor(): Promise<string>
   /** Reorder the session list (sidebar drag-and-drop); drives sidebar + tiles. */

@@ -142,6 +142,41 @@ service.on('peer-resolved', ({ peerId, intent }: { peerId: string; intent: JoinA
   void broadcastAnnounce(composeJoinAnnounce(peerId, intent), peerId)
 })
 
+/**
+ * Targeted announce to the window's TEAM-LEAD (PLAN C10). No lead designated:
+ * no-op -- unless exactly ONE non-supervisor session is active, which is then
+ * addressed with an explicit "no team-lead designated" mention (never silent
+ * implicit routing). Best-effort like every announce.
+ */
+const announceToLead = async (text: string): Promise<number> => {
+  if (!text.trim()) return 0
+  const live = service
+    .list()
+    .filter((s) => !s.supervisor && s.status !== 'exited' && s.peerId)
+  let target = live.find((s) => s.lead) ?? null
+  let body = text
+  if (!target) {
+    if (live.length !== 1) return 0
+    target = live[0]!
+    body = `${text}\n(No team-lead is designated; you are the only active session.)`
+  }
+  try {
+    const { sent } = await sendAnnounce(
+      {
+        groupId: activeScope.groupId,
+        secret: activeScope.secret,
+        text: body,
+        toPeerId: target.peerId
+      },
+      { endpoint: resolveBrokerEndpoint() }
+    )
+    return sent
+  } catch (e) {
+    console.error('[claude-peers-desk] lead announce failed:', e)
+    return 0
+  }
+}
+
 // ----- Supervisor deck-control (PLAN C5) -----
 // The loopback control endpoint the SUPERVISOR session pilots the app through.
 // Started lazily at the first Home visit; the URL/token pair is injected only

@@ -157,6 +157,12 @@ export interface AnnounceRequest {
   text: string;
   /** Optional peer_id to exclude from the broadcast (e.g. the just-joined peer). */
   exclude_peer_id?: PeerId | null;
+  /**
+   * Targeted announce (PLAN C10): deliver to this ONE active peer of the group
+   * instead of broadcasting (used to notify the team-lead). Same reserved
+   * `deck` sender and no-reply semantics. 404 when the peer is not active.
+   */
+  to_peer_id?: PeerId | null;
 }
 
 export interface AnnounceResponse {

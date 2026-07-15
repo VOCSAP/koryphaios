@@ -47,6 +47,13 @@ export function CreateMenu({
 }): React.JSX.Element {
   const t = useT()
   const createSession = useDeck((s) => s.createSession)
+  const sessions = useDeck((s) => s.sessions)
+  const config = useDeck((s) => s.config!)
+  // Team-lead (PLAN C10): explicit checkbox; the leadPattern match only
+  // pre-checks it when the seat is free. The operator always has final say.
+  const hasLead = sessions.some((s) => s.lead)
+  const [lead, setLead] = useState(false)
+  const [leadTouched, setLeadTouched] = useState(false)
 
   const [agents, setAgents] = useState<string[]>([])
   const [presets, setPresets] = useState<LaunchPreset[]>([])
@@ -124,6 +131,14 @@ export function CreateMenu({
   const namePreview = agent.trim() || 'peer'
   const effortLevel = EFFORT_LEVELS[effortIdx]
 
+  // Suggest team-lead while untouched: pattern matches AND the seat is free.
+  useEffect(() => {
+    if (leadTouched) return
+    const pattern = (config.leadPattern ?? '').trim().toLowerCase()
+    const candidate = `${agent} ${name}`.toLowerCase()
+    setLead(!hasLead && pattern !== '' && candidate.includes(pattern))
+  }, [agent, name, hasLead, leadTouched, config.leadPattern])
+
   const submit = (): void => {
     void createSession({
       name: name.trim() || undefined,
@@ -138,7 +153,8 @@ export function CreateMenu({
       // Only force a colour when the user explicitly picked one; otherwise the
       // main process assigns the next palette colour at spawn time.
       color: customColor ? color : undefined,
-      announce: announce.trim() || undefined
+      announce: announce.trim() || undefined,
+      lead: lead || undefined
     })
     onCreate?.()
     onClose()
@@ -193,6 +209,21 @@ export function CreateMenu({
               </option>
             ))}
           </select>
+        </label>
+
+        <label className="field field-check" title={t('create.leadHelp')}>
+          <input
+            type="checkbox"
+            checked={lead}
+            onChange={(e) => {
+              setLead(e.target.checked)
+              setLeadTouched(true)
+            }}
+          />
+          <span>
+            👑 {t('create.lead')}
+            {hasLead && !lead ? ` — ${t('create.leadTaken')}` : ''}
+          </span>
         </label>
 
         <label
