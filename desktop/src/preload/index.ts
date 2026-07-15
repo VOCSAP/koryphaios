@@ -101,6 +101,7 @@ const api: DeckApi = {
   journalExport: () => ipcRenderer.invoke('journal:export'),
   collectDiff: (dir: string) => ipcRenderer.invoke('diff:collect', dir),
   reviewDiff: (dir: string) => ipcRenderer.invoke('diff:review', dir),
+  getBrowserPreloadPath: () => ipcRenderer.invoke('browser:preload-path'),
   ensureSupervisor: () => ipcRenderer.invoke('supervisor:ensure'),
   askHelp: (question: string, view: DeckView, transcript: HelpExchange[]) =>
     ipcRenderer.invoke('help:ask', question, view, transcript),

@@ -186,6 +186,29 @@ cd desktop && npm run dev        # dev mode (renderer HMR)
   the full transcript history; repeated TUI repaint frames of the same line are
   collapsed into one result.
 
+### Browser view (🌐, experimental)
+
+An embedded web browser for web-front work, opened two ways:
+
+- **Rail entry `🌐 Browser`** -- full-width browser (URL bar, back/forward,
+  reload -- Shift-click bypasses the cache --, page DevTools, open-in-system-
+  browser). The last URL is remembered (`http://localhost:3000` by default).
+- **`🌐` button on an agent tile** -- the same browser with that agent's
+  terminal **docked on the left** (resizable split): the classic "agent on one
+  side, live site on the other" web-design loop. The docked terminal is a
+  second view of the same PTY -- the original tile in the Agents view keeps its
+  scrollback, and a resize nudge makes Claude's TUI repaint into the dock.
+- **Element picker (`⌖`)** -- click it, then click any element in the page: a
+  description (tag, size, best selector -- `data-testid`-style attributes are
+  preferred over structural CSS paths -- and visible text) is pasted into the
+  docked agent's prompt (bracketed paste, nothing auto-submitted): complete the
+  sentence and press Enter. With no docked agent the description is copied to
+  the clipboard. `Esc` cancels.
+
+Pages load in an isolated `persist:deck-browser` partition; `window.open` /
+`target=_blank` links open in the system browser, never in new Electron
+windows.
+
 ### Workspaces (🗂) -- save & restore
 
 A *workspace* is a restorable snapshot of the window: its session set (names,
@@ -465,9 +488,10 @@ src/
     store.ts              app config + sessions persistence (userData JSON)
     ipc.ts                IPC handlers + event forwarding
   preload/                contextBridge -> window.api (typed DeckApi)
+    browser-inspect.ts     guest preload of the browser <webview> (element picker)
   renderer/               React UI
     components/            Sidebar, CreateMenu, MessageBar, TileArea, TerminalTile,
-                           DisplayModeBar, SettingsDialog, WorkspacesDialog, ...
+                           BrowserView, DisplayModeBar, SettingsDialog, WorkspacesDialog, ...
     i18n.ts                renderer t() bound to the main-served dict
     store.ts               zustand store
   shared/types.ts         types shared across processes

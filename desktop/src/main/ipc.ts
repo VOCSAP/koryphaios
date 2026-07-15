@@ -133,6 +133,11 @@ export function registerIpc({
     service.resize(id, cols, rows)
   )
 
+  // ----- embedded browser (PLAN D1) -----
+  // Absolute path of the guest preload injected into the <webview>. Built as a
+  // second preload entry (electron.vite.config.ts) next to index.js.
+  ipcMain.handle('browser:preload-path', () => join(__dirname, '../preload/browser-inspect.js'))
+
   // ----- config -----
   ipcMain.handle('config:get', () => getConfig())
   ipcMain.handle('config:set', (_e, patch: Partial<AppConfig>) => setConfig(patch ?? {}))

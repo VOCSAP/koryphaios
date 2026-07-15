@@ -163,6 +163,8 @@ export interface AppConfig {
   helpButton: boolean
   /** Model alias for help invocations (`claude -p --model <x>`); haiku default. */
   helpModel: string
+  /** Last URL loaded in the embedded browser view (PLAN D1); restored on open. */
+  browserUrl: string
 }
 
 /** A selectable language for the settings picker: stable code + native label. */
@@ -325,8 +327,38 @@ export interface RoadmapArchiveResponse {
   item: RoadmapItem
 }
 
-/** Navigation rail views: Home (C5), Agents, Roadmap (C3), Worktrees (C6), Journal (C14). */
-export type DeckView = 'home' | 'agents' | 'roadmap' | 'worktrees' | 'journal'
+/** Navigation rail views: Home (C5), Agents, Browser (D1), Roadmap (C3), Worktrees (C6), Journal (C14). */
+export type DeckView = 'home' | 'agents' | 'browser' | 'roadmap' | 'worktrees' | 'journal'
+
+// ----- Embedded browser (PLAN D1, experimental) -----
+
+/**
+ * One candidate CSS selector for a picked element, best-first. `qa` = test
+ * attribute ([data-testid=…] and friends), `id` = #id, `css` = structural path.
+ */
+export interface ElementSelector {
+  type: 'qa' | 'attr' | 'id' | 'css'
+  value: string
+}
+
+/**
+ * Payload sent by the webview guest preload (browser-inspect.ts) over
+ * `ipcRenderer.sendToHost('deck:element-selected', …)` when the operator picks
+ * a DOM element in inspect mode. Composed into a prompt for the paired agent.
+ */
+export interface ElementPick {
+  tagName: string
+  id: string
+  classes: string[]
+  /** Trimmed innerText, capped (guest side) to keep prompts small. */
+  text: string
+  /** Candidate selectors, best-first; [0] feeds the prompt. */
+  selectors: ElementSelector[]
+  /** Rendered size in CSS px at pick time. */
+  width: number
+  height: number
+  pageUrl: string
+}
 
 // ----- Activity journal (PLAN C14) -----
 // Mirror of main/journal.ts shapes (kept import-free for bun tests).
@@ -515,6 +547,9 @@ export interface DeckApi {
   collectDiff(dir: string): Promise<SessionDiff>
   /** Spawn a one-shot review agent on the dir's diff (reports to the lead). */
   reviewDiff(dir: string): Promise<boolean>
+
+  // embedded browser (PLAN D1): absolute path of the webview guest preload.
+  getBrowserPreloadPath(): Promise<string>
 
   // supervisor (PLAN C5): spawn (or return) the Home supervisor session.
   ensureSupervisor(): Promise<SessionRuntime>

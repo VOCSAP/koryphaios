@@ -9,6 +9,7 @@ import { RoadmapView } from './RoadmapView'
 import { WorktreesView } from './WorktreesView'
 import { JournalView } from './JournalView'
 import { HomeView } from './HomeView'
+import { BrowserView } from './BrowserView'
 import { HelpAssistant } from './HelpAssistant'
 import { InboxPanel } from './InboxPanel'
 import { DiffPanel } from './DiffPanel'
@@ -44,6 +45,7 @@ export function App(): React.JSX.Element {
   const openSearch = useDeck((s) => s.openSearch)
   const sidebarWidth = useDeck((s) => s.sidebarWidth)
   const view = useDeck((s) => s.view)
+  const browserOpened = useDeck((s) => s.browserOpened)
   const inboxOpen = useDeck((s) => s.inboxOpen)
 
   useEffect(() => {
@@ -111,6 +113,14 @@ export function App(): React.JSX.Element {
       <div className={`view-home${view === 'home' ? '' : ' view-hidden'}`}>
         <HomeView active={view === 'home'} />
       </div>
+      {/* Browser view (PLAN D1): mounted lazily on first open, then kept alive
+          like agents/home — unmounting the <webview> would drop the page, and
+          unmounting the dock terminal its xterm. */}
+      {browserOpened && (
+        <div className={`view-browser${view === 'browser' ? '' : ' view-hidden'}`}>
+          <BrowserView active={view === 'browser'} />
+        </div>
+      )}
       {view === 'roadmap' && <RoadmapView />}
       {view === 'worktrees' && <WorktreesView />}
       {view === 'journal' && <JournalView />}

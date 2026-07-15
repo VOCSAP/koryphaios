@@ -7,6 +7,7 @@ import type { DeckView } from '@shared/types'
 const VIEWS: { id: DeckView; icon: string; key: string }[] = [
   { id: 'home', icon: '🏠', key: 'nav.home' },
   { id: 'agents', icon: '🖥', key: 'nav.agents' },
+  { id: 'browser', icon: '🌐', key: 'nav.browser' },
   { id: 'roadmap', icon: '🗺', key: 'nav.roadmap' },
   { id: 'worktrees', icon: '⎇', key: 'nav.worktrees' },
   { id: 'journal', icon: '📜', key: 'nav.journal' }

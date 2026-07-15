@@ -535,7 +535,9 @@ function createWindow(): void {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
-      contextIsolation: true
+      contextIsolation: true,
+      // Embedded browser view (PLAN D1): the renderer hosts a <webview> tag.
+      webviewTag: true
     }
   })
 
@@ -545,6 +547,15 @@ function createWindow(): void {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
     return { action: 'deny' }
+  })
+
+  // Embedded browser (PLAN D1): pages loaded in the <webview> never open new
+  // Electron windows — window.open/target=_blank goes to the system browser.
+  mainWindow.webContents.on('did-attach-webview', (_e, contents) => {
+    contents.setWindowOpenHandler(({ url }) => {
+      shell.openExternal(url)
+      return { action: 'deny' }
+    })
   })
 
   mainWindow.on('closed', () => {

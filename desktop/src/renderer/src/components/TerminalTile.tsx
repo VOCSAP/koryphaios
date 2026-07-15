@@ -50,6 +50,7 @@ export function TerminalTile({
   const setSelected = useDeck((s) => s.setSelected)
   const restartSession = useDeck((s) => s.restartSession)
   const removeSession = useDeck((s) => s.removeSession)
+  const openBrowser = useDeck((s) => s.openBrowser)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
 
   const hostRef = useRef<HTMLDivElement>(null)
@@ -239,6 +240,17 @@ export function TerminalTile({
             ↻
           </button>
         )}
+        <button
+          type="button"
+          className="tile-btn"
+          title={t('tile.browserTitle')}
+          onClick={(e) => {
+            e.stopPropagation()
+            openBrowser(id)
+          }}
+        >
+          🌐
+        </button>
         <button
           type="button"
           className="tile-btn"

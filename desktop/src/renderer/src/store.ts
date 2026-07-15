@@ -57,9 +57,24 @@ interface DeckState {
   inboxOpen: boolean
   /** Diff panel target (PLAN C13): a dir to diff + display title, or null. */
   diffTarget: { dir: string; title: string } | null
+  /**
+   * Embedded browser (PLAN D1): session docked next to the browser pane, or
+   * null for a full-width browser. Set by the tile's 🌐 button.
+   */
+  browserPairedId: string | null
+  /**
+   * True once the browser view has been opened at least this run: the webview
+   * mounts lazily (no dev-server hit at startup) then stays alive, same
+   * keep-mounted pattern as the agents/home views.
+   */
+  browserOpened: boolean
 
   init(): Promise<void>
   setView(view: DeckView): void
+  /** Open the browser view, optionally docking a session next to it (D1). */
+  openBrowser(pairedId?: string | null): void
+  /** Change/detach the docked session without leaving the browser view. */
+  setBrowserPaired(id: string | null): void
   /** Open/close the operator inbox panel (opening clears the unread count). */
   openInbox(open: boolean): void
   /** Open the diff panel on a dir (null closes it). */
@@ -135,6 +150,8 @@ export const useDeck = create<DeckState>((set, get) => ({
   inboxUnread: 0,
   inboxOpen: false,
   diffTarget: null,
+  browserPairedId: null,
+  browserOpened: false,
 
   async init() {
     const [sessions, config, i18n, workspaces, templates] = await Promise.all([
@@ -156,13 +173,15 @@ export const useDeck = create<DeckState>((set, get) => ({
     })
 
     window.api.onSessionsChanged((next) => {
-      const { selectedId, maximizedId } = get()
+      const { selectedId, maximizedId, browserPairedId } = get()
       const stillExists = next.some((s) => s.id === selectedId)
       const maxStillExists = next.some((s) => s.id === maximizedId)
+      const pairedStillExists = next.some((s) => s.id === browserPairedId)
       set({
         sessions: next,
         selectedId: stillExists ? selectedId : (next[0]?.id ?? null),
-        maximizedId: maxStillExists ? maximizedId : null
+        maximizedId: maxStillExists ? maximizedId : null,
+        browserPairedId: pairedStillExists ? browserPairedId : null
       })
     })
     window.api.onMenuSettings(() => get().openSettings(true))
@@ -210,7 +229,14 @@ export const useDeck = create<DeckState>((set, get) => ({
     })
   },
 
-  setView: (view) => set({ view }),
+  setView: (view) => set({ view, ...(view === 'browser' ? { browserOpened: true } : null) }),
+  openBrowser: (pairedId) =>
+    set((s) => ({
+      view: 'browser',
+      browserOpened: true,
+      browserPairedId: pairedId === undefined ? s.browserPairedId : pairedId
+    })),
+  setBrowserPaired: (id) => set({ browserPairedId: id }),
   openInbox: (open) => set({ inboxOpen: open, inboxUnread: 0 }),
   openDiff: (target) => set({ diffTarget: target }),
   setSelected: (id) => set({ selectedId: id }),
