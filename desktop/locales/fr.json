@@ -303,5 +303,7 @@
   "roadmap.dispatchNoLeadHint": "Désigne un team-lead (👑 dans la barre Agents) pour dispatcher la file.",
   "toast.dispatched": "Item envoyé au team-lead",
   "toast.dispatchNoLead": "Pas de team-lead — désignes-en un d'abord (👑)",
-  "toast.dispatchFailed": "Dispatch impossible (file vide ou broker injoignable)"
+  "toast.dispatchFailed": "Dispatch impossible (file vide ou broker injoignable)",
+  "help.digestTitle": "Résumé de reprise — où on en est et quoi faire ensuite",
+  "help.digestQuestion": "📋 Résumé de reprise"
 }

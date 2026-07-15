@@ -37,6 +37,32 @@ export function HelpAssistant(): React.JSX.Element | null {
 
   if (config.helpButton === false) return null
 
+  // Resume digest (PLAN C17): fixed question, sources configured globally.
+  const digest = (): void => {
+    if (busy) return
+    setBusy(true)
+    setMessages((m) => [...m, { question: t('help.digestQuestion'), answer: '', pending: true }])
+    window.api.askDigest().then(
+      (answer) => {
+        setBusy(false)
+        setMessages((m) =>
+          m.map((msg) => (msg.pending ? { question: msg.question, answer } : msg))
+        )
+      },
+      (e) => {
+        setBusy(false)
+        const detail = e instanceof Error ? e.message : String(e)
+        setMessages((m) =>
+          m.map((msg) =>
+            msg.pending
+              ? { question: msg.question, answer: t('help.failed', { error: detail }), error: true }
+              : msg
+          )
+        )
+      }
+    )
+  }
+
   const send = (): void => {
     const question = draft.trim()
     if (!question || busy) return
@@ -72,6 +98,14 @@ export function HelpAssistant(): React.JSX.Element | null {
         <div className="help-popup">
           <header className="help-head">
             <span className="help-title">{t('help.title')}</span>
+            <button
+              className="icon-btn"
+              title={t('help.digestTitle')}
+              disabled={busy}
+              onClick={digest}
+            >
+              📋
+            </button>
             <span className="help-model">{config.helpModel}</span>
             <button className="icon-btn" title={t('common.close')} onClick={() => setOpen(false)}>
               ✕

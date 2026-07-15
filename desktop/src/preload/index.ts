@@ -104,6 +104,7 @@ const api: DeckApi = {
   ensureSupervisor: () => ipcRenderer.invoke('supervisor:ensure'),
   askHelp: (question: string, view: DeckView, transcript: HelpExchange[]) =>
     ipcRenderer.invoke('help:ask', question, view, transcript),
+  askDigest: () => ipcRenderer.invoke('help:digest'),
 
   listTemplates: () => ipcRenderer.invoke('template:list'),
   exportTemplate: (name: string, local: boolean) =>

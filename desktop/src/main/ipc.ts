@@ -19,6 +19,14 @@ import {
   writeHelpSystemPrompt
 } from './help-assistant'
 import { resolveBrokerEndpoint } from './broker-client'
+import {
+  buildDigestSystemPrompt,
+  collectSources,
+  DIGEST_PROMPT,
+  readDigestConfig,
+  sourcesForProject
+} from './digest'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { archiveRoadmap, computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
 import { createSessionWithWorktree } from './create-session'
 import { composePlanImportPrompt } from './import-plan'
@@ -362,6 +370,37 @@ export function registerIpc({
       return runHelp({ command, shell: getConfig().shell, cwd: getConfig().projectDir })
     }
   )
+
+  // ----- resume digest (PLAN C17) -----
+  // Same read-only `claude -p` harness as help:ask, with the app snapshot PLUS
+  // the configured project sources. Sources come from the GLOBAL config only
+  // (readDigestConfig has no projectDir input by design — a repo-carried
+  // command list would execute arbitrary code on clone); commands still run
+  // with cwd = projectDir so generic sources adapt per project.
+  ipcMain.handle('help:digest', async () => {
+    const projectDir = getConfig().projectDir
+    const cfg = readDigestConfig()
+    const { key } = roadmapCtx()
+    const sources = await collectSources(sourcesForProject(cfg, key), projectDir)
+    const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
+    mkdirSync(stateDir, { recursive: true })
+    const systemPromptFile = join(stateDir, 'digest-system-prompt.md')
+    writeFileSync(
+      systemPromptFile,
+      buildDigestSystemPrompt({
+        locale: resolveLocale(getConfig().locale, app.getLocale()),
+        data: await helpSnapshot(),
+        sources
+      }),
+      'utf-8'
+    )
+    const command = buildHelpCommand({
+      promptText: DIGEST_PROMPT,
+      systemPromptFile,
+      model: getConfig().helpModel
+    })
+    return runHelp({ command, shell: getConfig().shell, cwd: projectDir })
+  })
 
   // ----- create-menu data -----
   ipcMain.handle('agents:list', () => listAgents(getConfig().projectDir))

@@ -521,6 +521,8 @@ export interface DeckApi {
 
   // help assistant (PLAN C9): one throwaway `claude -p` question, view-aware.
   askHelp(question: string, view: DeckView, transcript: HelpExchange[]): Promise<string>
+  /** Resume digest (PLAN C17): fixed prompt + globally-configured sources. */
+  askDigest(): Promise<string>
 
   // templates (portable team recipes)
   listTemplates(): Promise<TemplateSummary[]>

@@ -392,7 +392,9 @@ export const EN_DEFAULTS: Record<string, string> = {
     'Designate a team-lead (👑 in the Agents sidebar) to dispatch queued items.',
   'toast.dispatched': 'Item sent to the team-lead',
   'toast.dispatchNoLead': 'No team-lead — designate one first (👑)',
-  'toast.dispatchFailed': 'Dispatch failed (empty queue or broker unreachable)'
+  'toast.dispatchFailed': 'Dispatch failed (empty queue or broker unreachable)',
+  'help.digestTitle': 'Resume digest — where things stand and what to do next',
+  'help.digestQuestion': '📋 Resume digest'
 }
 
 /**
