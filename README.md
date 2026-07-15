@@ -13,7 +13,7 @@ Let your Claude Code instances find each other and talk -- across multiple proje
   +---------------------------+      +----------------------+
 ```
 
-This fork extends the original [louislva/claude-peers-mcp](https://github.com/louislva/claude-peers-mcp) with:
+This project started as a fork of [louislva/claude-peers-mcp](https://github.com/louislva/claude-peers-mcp) and is now a standalone repository (`vocsap/koryphaios`, home of the **Koryphaios** desktop orchestrator + the `claude-peers` core it is built on). It extends the original with:
 
 - **Remote broker over HTTP** (multi-PC LAN/Internet setup).
 - **Cross-PC repo matching** via normalized git remote URL (`project_key`).
@@ -71,15 +71,15 @@ Broker runs on the same PC as your Claude Code sessions. See [Quick start (local
 ### 1. Install
 
 ```bash
-git clone https://github.com/vocsap/claude-peers-mcp.git ~/claude-peers-mcp
-cd ~/claude-peers-mcp
+git clone https://github.com/vocsap/koryphaios.git ~/koryphaios
+cd ~/koryphaios
 bun install
 ```
 
 ### 2. Register the MCP server
 
 ```bash
-claude mcp add --scope user --transport stdio claude-peers -- bun ~/claude-peers-mcp/server.ts
+claude mcp add --scope user --transport stdio claude-peers -- bun ~/koryphaios/server.ts
 ```
 
 ### 3. Run Claude Code with the channel
@@ -115,8 +115,8 @@ Make sure your firewall allows TCP port 7899 from the outside.
 ### 2. On each PC client
 
 ```bash
-git clone https://github.com/vocsap/claude-peers-mcp.git ~/claude-peers-mcp
-cd ~/claude-peers-mcp
+git clone https://github.com/vocsap/koryphaios.git ~/koryphaios
+cd ~/koryphaios
 bun install
 ```
 
@@ -134,7 +134,7 @@ Set `broker_url` and `broker_token` in your settings file (`%APPDATA%\claude-pee
 Register the MCP server:
 
 ```bash
-claude mcp add --scope user --transport stdio claude-peers -- bun ~/claude-peers-mcp/server.ts
+claude mcp add --scope user --transport stdio claude-peers -- bun ~/koryphaios/server.ts
 ```
 
 Then launch Claude Code:
@@ -573,6 +573,31 @@ curl http://127.0.0.1:7899/health
 ```
 
 Existing in-flight messages are dropped along with the DB. Sessions transparently re-register on first use.
+
+## Repository rename (claude-peers-mcp -> koryphaios)
+
+The GitHub repository was renamed to `vocsap/koryphaios` (and detached from the
+original fork) when the desktop app became Koryphaios (v0.7). GitHub redirects
+the old clone/fetch/push URLs, so existing clones keep working — but the
+**shared roadmap is keyed by the normalized remote URL** (`project_key`), which
+is read from each clone's `.git/config`, not from GitHub:
+
+- a clone still pointing at `…/claude-peers-mcp.git` computes
+  `github.com/vocsap/claude-peers-mcp`;
+- a fresh clone (or one after `git remote set-url`) computes
+  `github.com/vocsap/koryphaios`.
+
+Mixed remotes therefore split the roadmap in two. To migrate once and for all,
+update every clone's remote, then re-key the items on the broker host:
+
+```bash
+# each clone:
+git remote set-url origin https://github.com/vocsap/koryphaios.git
+
+# broker host (old key -> new key; old items stay behind as a backup):
+bun cli.ts roadmap-export github.com/vocsap/claude-peers-mcp > roadmap-rename.json
+bun cli.ts roadmap-import roadmap-rename.json --project-key github.com/vocsap/koryphaios
+```
 
 ## Migration from upstream (OpenAI -> Anthropic)
 
