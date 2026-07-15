@@ -17,6 +17,7 @@ import { resolveLaunchConfig } from './launch-config'
 import { WorkspaceService } from './workspace-service'
 import { fetchOperatorInbox, resolveBrokerEndpoint, sendAnnounce } from './broker-client'
 import { computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
+import { createCheckpoint, purgeCheckpoints, restoreCommand } from './checkpoint-service'
 import { composeDispatchText, firstQueued } from './dispatch'
 import type { DispatchResult } from '@shared/types'
 import { composeJoinAnnounce, type JoinAnnounceIntent } from '@shared/announce'
@@ -283,6 +284,26 @@ const announceToLead = async (text: string): Promise<number> => {
   }
 }
 
+// ----- Git checkpoints (PLAN C16) -----
+// Before an agent spawns into a DIRTY tree, snapshot the tracked changes as a
+// dangling stash commit anchored under refs/claude-peers/ (no history, no
+// working-tree change). Best-effort: a non-git cwd or git error never blocks
+// the spawn. Piggybacks the >7-day purge on each attempt.
+const checkpointBeforeSpawn = async (dir: string): Promise<void> => {
+  try {
+    const cp = await createCheckpoint(dir)
+    if (cp) {
+      journal.add(
+        'checkpoint',
+        `checkpoint ${cp.sha.slice(0, 10)} of ${dir} before spawn — restore with: ${restoreCommand(cp)}`
+      )
+    }
+    void purgeCheckpoints(dir).catch(() => undefined)
+  } catch {
+    // Clean tree handled inside; anything else (non-git dir) is a no-op.
+  }
+}
+
 // ----- Queue → team-lead dispatch (PLAN C15) -----
 // The operator queues roadmap items; dispatching sends the first one to the
 // team-lead as a targeted announce (C10), unqueues it and remembers its id.
@@ -346,7 +367,8 @@ const controlDeps: DeckControlDeps = {
   listAgents: () => listAgents(getConfig().projectDir),
   listModels: () => resolveLaunchConfig(getConfig().projectDir).models,
   listPresets: () => resolveLaunchConfig(getConfig().projectDir).presets,
-  spawnSession: (input) => createSessionWithWorktree(service, getConfig().projectDir, input),
+  spawnSession: (input) =>
+    createSessionWithWorktree(service, getConfig().projectDir, input, checkpointBeforeSpawn),
   listSessions: () => service.list(),
   restartSession: (id) => void service.restart(id),
   closeSession: (id) => service.remove(id),
@@ -368,6 +390,8 @@ const controlDeps: DeckControlDeps = {
     const tpl = readTemplate(path)
     if (!tpl) return 0
     const inputs = templateToInputs(tpl)
+    // One checkpoint covers the whole batch (all spawn into the project dir).
+    if (inputs.length > 0) await checkpointBeforeSpawn(getConfig().projectDir)
     for (const input of inputs) service.create(input)
     return inputs.length
   },
@@ -542,7 +566,8 @@ app.whenReady().then(() => {
     announce: (text: string) => broadcastAnnounce(text),
     ensureSupervisor,
     journal,
-    dispatchNext
+    dispatchNext,
+    checkpoint: checkpointBeforeSpawn
   })
   service.start()
   // Attach an auto-save workspace capturing whatever the service just restored.

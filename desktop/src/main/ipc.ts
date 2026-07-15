@@ -76,6 +76,8 @@ interface IpcDeps {
   journal: Journal
   /** Dispatch the first queued roadmap item to the team-lead (PLAN C15). */
   dispatchNext: () => Promise<DispatchResult>
+  /** Git checkpoint of a dirty tree before an agent spawns there (PLAN C16). */
+  checkpoint: (dir: string) => Promise<void>
 }
 
 export function registerIpc({
@@ -87,14 +89,15 @@ export function registerIpc({
   announce,
   ensureSupervisor,
   journal,
-  dispatchNext
+  dispatchNext,
+  checkpoint
 }: IpcDeps): void {
   // ----- sessions -----
   ipcMain.handle('sessions:list', () => service.list())
   // Worktree handling (PLAN C4) lives in the shared create path, also used by
   // the supervisor's deck-control spawn.
   ipcMain.handle('sessions:create', (_e, input: CreateSessionInput) =>
-    createSessionWithWorktree(service, getConfig().projectDir, input ?? {})
+    createSessionWithWorktree(service, getConfig().projectDir, input ?? {}, checkpoint)
   )
   ipcMain.handle('sessions:remove', (_e, id: string) => service.remove(id))
   ipcMain.handle('sessions:rename', (_e, id: string, name: string) => service.rename(id, name))
@@ -233,12 +236,17 @@ export function registerIpc({
   ipcMain.handle('diff:review', async (_e, dir: string) => {
     const lead =
       service.list().find((s) => s.lead && s.status !== 'exited' && s.peerId)?.peerId ?? null
-    await createSessionWithWorktree(service, getConfig().projectDir, {
-      name: 'reviewer',
-      cwd: dir,
-      prompt: composeDiffReviewPrompt({ dir, base: await diffBase(dir), leadPeerId: lead }),
-      announce: `one-shot reviewer: reviews the diff in "${dir}"`
-    })
+    await createSessionWithWorktree(
+      service,
+      getConfig().projectDir,
+      {
+        name: 'reviewer',
+        cwd: dir,
+        prompt: composeDiffReviewPrompt({ dir, base: await diffBase(dir), leadPeerId: lead }),
+        announce: `one-shot reviewer: reviews the diff in "${dir}"`
+      },
+      checkpoint
+    )
     journal.add('review', `review agent spawned on ${dir}${lead ? ` (reports to ${lead})` : ''}`)
     return true
   })
@@ -278,11 +286,16 @@ export function registerIpc({
     })
     const file = res.canceled ? null : (res.filePaths[0] ?? null)
     if (!file) return false
-    await createSessionWithWorktree(service, getConfig().projectDir, {
-      name: 'plan-import',
-      prompt: composePlanImportPrompt(file),
-      announce: `one-shot agent: imports plan "${file}" into the shared roadmap`
-    })
+    await createSessionWithWorktree(
+      service,
+      getConfig().projectDir,
+      {
+        name: 'plan-import',
+        prompt: composePlanImportPrompt(file),
+        announce: `one-shot agent: imports plan "${file}" into the shared roadmap`
+      },
+      checkpoint
+    )
     return true
   })
 
@@ -366,10 +379,12 @@ export function registerIpc({
   ipcMain.handle('template:delete', (_e, path: string) =>
     deleteTemplate(path, getConfig().projectDir)
   )
-  ipcMain.handle('template:apply', (_e, path: string, mode: 'append' | 'replace') => {
+  ipcMain.handle('template:apply', async (_e, path: string, mode: 'append' | 'replace') => {
     const tpl = readTemplate(path)
     if (!tpl) return 0
     const inputs = templateToInputs(tpl)
+    // One checkpoint covers the batch: every session spawns in the project dir.
+    if (inputs.length > 0) await checkpoint(getConfig().projectDir)
     if (mode === 'replace') {
       // Detach + auto-save the current workspace, then clear (mirrors New clear).
       workspaces.startNew()
