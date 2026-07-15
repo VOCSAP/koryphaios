@@ -163,6 +163,8 @@ export interface AppConfig {
   helpButton: boolean
   /** Model alias for help invocations (`claude -p --model <x>`); haiku default. */
   helpModel: string
+  /** Last URL loaded in the embedded browser view (PLAN D1); restored on open. */
+  browserUrl: string
 }
 
 /** A selectable language for the settings picker: stable code + native label. */
@@ -325,8 +327,55 @@ export interface RoadmapArchiveResponse {
   item: RoadmapItem
 }
 
-/** Navigation rail views: Home (C5), Agents, Roadmap (C3), Worktrees (C6), Journal (C14). */
-export type DeckView = 'home' | 'agents' | 'roadmap' | 'worktrees' | 'journal'
+/** Navigation rail views: Home (C5), Agents, Browser (D1), Roadmap (C3), Worktrees (C6), Journal (C14). */
+export type DeckView = 'home' | 'agents' | 'browser' | 'roadmap' | 'worktrees' | 'journal'
+
+// ----- Embedded browser (PLAN D1, experimental) -----
+
+/**
+ * One candidate CSS selector for a picked element, best-first. `qa` = test
+ * attribute ([data-testid=…] and friends), `id` = #id, `css` = structural path.
+ */
+export interface ElementSelector {
+  type: 'qa' | 'attr' | 'id' | 'css'
+  value: string
+}
+
+/**
+ * Payload sent by the webview guest preload (browser-inspect.ts) over
+ * `ipcRenderer.sendToHost('deck:element-selected', …)` when the operator picks
+ * a DOM element in inspect mode. Composed into a prompt for the paired agent.
+ * The same shape travels over the design endpoint (D2b) when the pick comes
+ * from an EXTERNAL app running the deck-design client script.
+ */
+export interface ElementPick {
+  tagName: string
+  id: string
+  classes: string[]
+  /** Trimmed innerText, capped (guest side) to keep prompts small. */
+  text: string
+  /** Candidate selectors, best-first; [0] feeds the prompt. */
+  selectors: ElementSelector[]
+  /** Rendered size in CSS px at pick time. */
+  width: number
+  height: number
+  pageUrl: string
+}
+
+/** An external-app pick forwarded by the design endpoint (PLAN D2b). */
+export interface DesignPickEvent {
+  /** Free-text app label sent by the client script ('' when omitted). */
+  source: string
+  pick: ElementPick
+}
+
+/** One capturable OS window/screen for the browser view's Window mode (D2a). */
+export interface WindowSource {
+  id: string
+  name: string
+  /** Small preview (PNG data URL) for the picker. */
+  thumbnail: string
+}
 
 // ----- Activity journal (PLAN C14) -----
 // Mirror of main/journal.ts shapes (kept import-free for bun tests).
@@ -516,6 +565,17 @@ export interface DeckApi {
   /** Spawn a one-shot review agent on the dir's diff (reports to the lead). */
   reviewDiff(dir: string): Promise<boolean>
 
+  // embedded browser (PLAN D1): absolute path of the webview guest preload.
+  getBrowserPreloadPath(): Promise<string>
+  /** Screenshot of the browser webview (by webContents id) as a PNG data URL. */
+  captureBrowser(webContentsId: number): Promise<string | null>
+  /** Persist an annotated screenshot; returns the absolute file path. */
+  saveAnnotation(dataUrl: string): Promise<string | null>
+  /** Capturable OS windows/screens for the Window mirror mode (D2a). */
+  listCaptureWindows(): Promise<WindowSource[]>
+  /** Full-size still of one window/screen; null when gone. */
+  captureWindow(id: string): Promise<{ dataUrl: string; title: string } | null>
+
   // supervisor (PLAN C5): spawn (or return) the Home supervisor session.
   ensureSupervisor(): Promise<SessionRuntime>
 
@@ -554,6 +614,8 @@ export interface DeckApi {
   onInboxOpen(cb: () => void): () => void
   /** Notification click: bring a session into view (agents view + selection). */
   onFocusSession(cb: (id: string) => void): () => void
+  /** External-app element pick received by the design endpoint (D2b). */
+  onDesignPick(cb: (event: DesignPickEvent) => void): () => void
   onConfigChanged(cb: (config: AppConfig) => void): () => void
   /** Fired when the Edit > Settings… menu item (or Ctrl/Cmd+,) is chosen. */
   onMenuSettings(cb: () => void): () => void

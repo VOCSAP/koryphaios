@@ -2509,3 +2509,229 @@ code {
 .template-row-btn {
   opacity: 1;
 }
+
+/* ---------- Embedded browser view (PLAN D1) ---------- */
+
+/* Keep-mounted wrapper, same contract as .view-home. */
+.view-browser {
+  height: 100vh;
+  min-width: 0;
+}
+
+.browser-view {
+  display: flex;
+  height: 100vh;
+  min-width: 0;
+}
+
+/* Docked agent terminal (left of the browser pane). */
+.browser-dock {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: none;
+  border-right: 1px solid var(--border);
+  background: var(--bg-2);
+}
+
+.browser-dock-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  background: var(--bg-3);
+  border-bottom: 1px solid var(--border);
+  border-top: 2px solid var(--tile-color, transparent);
+}
+
+.browser-dock-term {
+  flex: 1;
+  min-height: 0;
+  padding: 4px 0 4px 6px;
+}
+
+.browser-divider {
+  flex: none;
+  width: 5px;
+  cursor: col-resize;
+  background: transparent;
+}
+
+.browser-divider:hover {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* Browser pane: toolbar + webview. */
+.browser-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+}
+
+.browser-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 8px;
+  background: var(--bg-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.browser-btn {
+  border: none;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 14px;
+  line-height: 1;
+  padding: 5px 7px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.browser-btn:hover:not(:disabled) {
+  background: var(--bg);
+  color: var(--fg);
+}
+
+.browser-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Element-picker armed: accent the crosshair button. */
+.browser-btn-active {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.browser-btn-active:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+@keyframes browser-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.browser-btn-loading {
+  animation: browser-spin 1s linear infinite;
+}
+
+.browser-url {
+  flex: 1;
+  min-width: 80px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+  outline: none;
+}
+
+.browser-url:focus {
+  border-color: var(--accent);
+}
+
+/* Send-annotation: accented so the "do it" action stands out while drawing. */
+.browser-btn-accent {
+  color: var(--accent);
+}
+
+/* Window mirror (D2a): shrink-wrapped around the still so the draw canvas
+   covers the image box exactly (stroke coords scale aspect-true at send). */
+.browser-shot-wrap {
+  position: relative;
+  display: flex;
+  margin: auto;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.browser-shot {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  min-width: 0;
+  min-height: 0;
+  object-fit: contain;
+  border: 1px solid var(--border);
+}
+
+.browser-window-empty {
+  margin: auto;
+  color: var(--fg-dim);
+  max-width: 420px;
+  text-align: center;
+  padding: 24px;
+}
+
+.browser-viewport-select,
+.browser-window-select,
+.browser-dock-select {
+  max-width: 220px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+/* The window picker stands in for the URL bar: let it breathe. */
+.browser-window-select {
+  flex: 1;
+  max-width: 420px;
+}
+
+.browser-body {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  background: var(--bg-2);
+  /* Device presets larger than the pane scroll instead of clipping. */
+  overflow: auto;
+}
+
+/* Wraps the webview (+ draw canvas): fills the pane, or a fixed device size. */
+.browser-frame {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.browser-frame-device {
+  flex: none;
+  margin: auto;
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
+}
+
+.browser-webview {
+  width: 100%;
+  height: 100%;
+}
+
+/* Draw-mode overlay (D1b): strokes land here, composited into the screenshot. */
+.browser-draw-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 4;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+/* Transparent overlay so divider drags keep receiving mouse events (webviews
+   are out-of-process and swallow them otherwise). */
+.browser-drag-shield {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  cursor: col-resize;
+}

@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { Sidebar } from './Sidebar'
@@ -9,6 +9,7 @@ import { RoadmapView } from './RoadmapView'
 import { WorktreesView } from './WorktreesView'
 import { JournalView } from './JournalView'
 import { HomeView } from './HomeView'
+import { BrowserView } from './BrowserView'
 import { HelpAssistant } from './HelpAssistant'
 import { InboxPanel } from './InboxPanel'
 import { DiffPanel } from './DiffPanel'
@@ -44,6 +45,7 @@ export function App(): React.JSX.Element {
   const openSearch = useDeck((s) => s.openSearch)
   const sidebarWidth = useDeck((s) => s.sidebarWidth)
   const view = useDeck((s) => s.view)
+  const browserOpened = useDeck((s) => s.browserOpened)
   const inboxOpen = useDeck((s) => s.inboxOpen)
 
   useEffect(() => {
@@ -57,8 +59,8 @@ export function App(): React.JSX.Element {
   // Reflect the current workspace name in the window title.
   useEffect(() => {
     document.title = currentWorkspaceName
-      ? `Claude Peers Deck — ${currentWorkspaceName}`
-      : 'Claude Peers Deck'
+      ? `Koryphaios — ${currentWorkspaceName}`
+      : 'Koryphaios'
   }, [currentWorkspaceName])
 
   // Ctrl+Shift+M toggles fullscreen of the selected tile.
@@ -73,6 +75,40 @@ export function App(): React.JSX.Element {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [selectedId, maximizedId, setMaximized])
+
+  // External-app element picks (design endpoint, PLAN D2b): compose the same
+  // prompt as the embedded browser's ⌖ and paste it into the docked agent
+  // (else the selected one; else the clipboard). Lives here rather than in the
+  // store to keep i18n out of it (store.ts and i18n.ts would import-cycle).
+  const tRef = useRef(t)
+  tRef.current = t
+  useEffect(() => {
+    return window.api.onDesignPick((event) => {
+      const tt = tRef.current
+      const { sessions, browserPairedId, selectedId, showToast } = useDeck.getState()
+      const pick = event.pick
+      const selector = pick.selectors[0]?.value ?? pick.tagName
+      let prompt = event.source ? tt('design.sourcePrefix', { source: event.source }) : ''
+      prompt += tt('browser.elementPrompt', {
+        tag: pick.tagName,
+        url: pick.pageUrl,
+        selector,
+        w: pick.width,
+        h: pick.height
+      })
+      if (pick.text) prompt += tt('browser.elementPromptText', { text: pick.text })
+      const target = [browserPairedId, selectedId]
+        .map((id) => sessions.find((s) => s.id === id))
+        .find((s) => s && s.status === 'running' && !s.supervisor)
+      if (target) {
+        window.api.ptyInput(target.id, `\x1b[200~${prompt}\x1b[201~`)
+        showToast('toast.pickSent')
+      } else {
+        void navigator.clipboard.writeText(prompt)
+        showToast('toast.pickCopied', 'info')
+      }
+    })
+  }, [])
 
   // Ctrl+Shift+F toggles the cross-session search panel. Terminals swallow the
   // combo before the PTY sees it (TerminalTile's key handler) but let the DOM
@@ -111,6 +147,14 @@ export function App(): React.JSX.Element {
       <div className={`view-home${view === 'home' ? '' : ' view-hidden'}`}>
         <HomeView active={view === 'home'} />
       </div>
+      {/* Browser view (PLAN D1): mounted lazily on first open, then kept alive
+          like agents/home — unmounting the <webview> would drop the page, and
+          unmounting the dock terminal its xterm. */}
+      {browserOpened && (
+        <div className={`view-browser${view === 'browser' ? '' : ' view-hidden'}`}>
+          <BrowserView active={view === 'browser'} />
+        </div>
+      )}
       {view === 'roadmap' && <RoadmapView />}
       {view === 'worktrees' && <WorktreesView />}
       {view === 'journal' && <JournalView />}

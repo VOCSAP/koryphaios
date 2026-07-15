@@ -33,7 +33,9 @@ const DEFAULT_CONFIG: AppConfig = {
   notifyAttention: true,
   // Floating "?" help assistant (PLAN C9): shown by default, Haiku for cost.
   helpButton: true,
-  helpModel: 'haiku'
+  helpModel: 'haiku',
+  // Embedded browser view (PLAN D1): the usual local dev-server address.
+  browserUrl: 'http://localhost:3000'
 }
 
 function dataDir(): string {

@@ -24,9 +24,9 @@ This fork extends the original [louislva/claude-peers-mcp](https://github.com/lo
 - **v0.3.4 Deck announcements (`POST /announce`)**: the desktop Deck broadcasts one-way, no-reply system messages to a group -- an automatic join announcement when a session's `peer_id` resolves, plus free-text operator messages from the sidebar. Sent from a reserved non-routable `deck` sender; peers receive them framed as "informational only, do not reply" and cannot reply back.
 - **v0.4 Shared roadmap**: a persistent per-project backlog in the broker (`roadmap_items`, scoped by normalized git remote, zero FK to peers/groups so items outlive sessions), driven by 5 new MCP tools (`roadmap_list/get/add/update/archive`) and the Deck's Roadmap view; JSON export/import (`bun cli.ts roadmap-export/import`).
 - **v0.6 orchestrator batch (broker side)**: targeted announces (`POST /announce` with `to_peer_id`, the team-lead notification path), an **operator inbox** (agents `send_message` to the reserved `operator` peer -- the human in front of the Deck -- drained via `POST /operator-inbox`), and a `queue` position on roadmap items (the Deck's dispatch queue).
-- **Desktop app (Claude Peers Deck)**: dock several Claude Code peer sessions in one window and orchestrate them as a small agent team (see below).
+- **Desktop app (Koryphaios, formerly Koryphaios)**: dock several Claude Code peer sessions in one window and orchestrate them as a small agent team (see below).
 
-## Desktop app (Claude Peers Deck)
+## Desktop app (Koryphaios)
 
 [`desktop/`](desktop/) is an Electron app that docks multiple Claude Code peer
 sessions into a single window -- each tile a real terminal (PTY) -- with an
@@ -49,7 +49,7 @@ Since v0.4-v0.6 the Deck has grown into an **AI orchestrator cockpit**:
 
 ```bash
 cd desktop && npm install && npm link      # one-time
-cd /path/to/your/project && claude-peers-desk
+cd /path/to/your/project && kory
 ```
 
 Full features, usage, build and packaging: **[desktop/README.md](desktop/README.md)**.

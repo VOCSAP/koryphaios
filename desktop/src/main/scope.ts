@@ -121,7 +121,7 @@ export function buildScopeEnv(scope: Scope, opts?: { dir?: string }): ScopeEnv {
   }
 
   try {
-    const dir = opts?.dir ?? mkdtempSync(join(tmpdir(), 'claude-peers-desk-'))
+    const dir = opts?.dir ?? mkdtempSync(join(tmpdir(), 'koryphaios-'))
     const filePath = join(dir, 'group-secret')
     const fd = openSync(filePath, 'w', 0o600)
     try {
@@ -141,7 +141,7 @@ export function buildScopeEnv(scope: Scope, opts?: { dir?: string }): ScopeEnv {
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e)
-    console.error(`[claude-peers-desk] secret-file transport failed, using env transport: ${msg}`)
+    console.error(`[koryphaios] secret-file transport failed, using env transport: ${msg}`)
     return {
       env: { ...base, [FORCE_GROUP_ENV]: scope.secret, [FORCE_GROUP_FILE_ENV]: '' },
       cleanup: () => {

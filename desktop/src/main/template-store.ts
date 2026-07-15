@@ -1,6 +1,6 @@
 // Filesystem layer for team templates. Discovers, reads and writes template
 // .json files in two locations:
-//   - global: <globalConfigDir>/templates  (e.g. %APPDATA%/claude-peers-desk/templates)
+//   - global: <globalConfigDir>/templates  (e.g. %APPDATA%/koryphaios/templates)
 //   - local:  <projectDir>/.claude/claude-peers/templates
 //
 // Node builtins + relative imports only (no electron, no `@shared/*` alias) so

@@ -8,8 +8,8 @@
 // parseCliContext (src/main/cli-context.ts).
 //
 // Usage:
-//   claude-peers-desk            # ephemeral scope, sessions scoped to $PWD
-//   claude-peers-desk my-scope   # custom (reproducible) scope id
+//   kory                         # ephemeral scope, sessions scoped to $PWD
+//   kory my-scope                # custom (reproducible) scope id
 
 const { spawn } = require('node:child_process')
 const path = require('node:path')
@@ -27,7 +27,7 @@ try {
   electron = require('electron')
 } catch {
   console.error(
-    '[claude-peers-desk] electron is not installed. Run `npm install` in the desktop/ package, then `npm run build`.'
+    '[koryphaios] electron is not installed. Run `npm install` in the desktop/ package, then `npm run build`.'
   )
   process.exit(1)
 }
@@ -49,6 +49,6 @@ child.on('exit', (code, signal) => {
 })
 
 child.on('error', (err) => {
-  console.error('[claude-peers-desk] failed to launch electron:', err.message)
+  console.error('[koryphaios] failed to launch electron:', err.message)
   process.exit(1)
 })

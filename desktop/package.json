@@ -1,20 +1,22 @@
 {
-  "name": "claude-peers-desk",
-  "version": "0.6.0",
-  "description": "Desktop dock for multiple Claude Code peer sessions in a single window",
+  "name": "koryphaios",
+  "version": "0.7.0",
+  "description": "Koryphaios — the chorus leader: a desktop orchestrator docking multiple Claude Code agent sessions (peers, roadmap, worktrees, embedded browser) in a single window",
   "main": "out/main/index.js",
   "author": "vocsap",
   "license": "MIT",
   "private": true,
   "bin": {
+    "kory": "./bin/launch.js",
     "claude-peers-desk": "./bin/launch.js"
   },
   "scripts": {
     "build:hook": "bun build hooks/desk-backchannel-hook.ts --target=node --outfile=deck-plugin/hooks/desk-backchannel-hook.mjs",
     "build:mcp": "bun build mcp/deck-control-mcp.ts --target=node --outfile=deck-plugin/mcp/deck-control-mcp.mjs",
-    "dev": "npm run build:hook && npm run build:mcp && electron-vite dev",
+    "build:design": "bun build design-client/deck-design.ts --target=browser --outfile=deck-plugin/design/deck-design.js",
+    "dev": "npm run build:hook && npm run build:mcp && npm run build:design && electron-vite dev",
     "start": "electron-vite preview",
-    "build": "npm run build:hook && npm run build:mcp && electron-vite build",
+    "build": "npm run build:hook && npm run build:mcp && npm run build:design && electron-vite build",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",

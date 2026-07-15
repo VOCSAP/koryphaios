@@ -22,7 +22,11 @@ export default defineConfig({
     },
     build: {
       rollupOptions: {
-        input: { index: resolve(__dirname, 'src/preload/index.ts') }
+        input: {
+          index: resolve(__dirname, 'src/preload/index.ts'),
+          // Guest preload injected into the embedded-browser <webview> (PLAN D1).
+          'browser-inspect': resolve(__dirname, 'src/preload/browser-inspect.ts')
+        }
       }
     }
   },

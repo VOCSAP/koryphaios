@@ -1,7 +1,7 @@
 // Resolves the command the Deck runs in each session PTY, plus optional launch
 // presets. First-wins precedence (DESIGN / PLAN §5):
 //   1. project-local <projectDir>/.claude/claude-peers/config.json
-//   2. global %APPDATA%\claude-peers-desk\config.json  (XDG equiv on Unix)
+//   2. global %APPDATA%\koryphaios\config.json  (XDG equiv on Unix)
 //   3. built-in default
 //
 // Pure node builtins only (no electron) so it is unit-testable and the global
@@ -53,10 +53,13 @@ export interface LaunchConfig {
 }
 
 export function globalConfigDir(env: NodeJS.ProcessEnv): string {
+  // "koryphaios" since the v0.7 rename; the desk->koryphaios migration
+  // (migrate-data-dir.ts) copies the legacy claude-peers-desk root over at
+  // boot, so this module can point straight at the new home.
   if (platform() === 'win32') {
-    return join(env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'claude-peers-desk')
+    return join(env.APPDATA || join(homedir(), 'AppData', 'Roaming'), 'koryphaios')
   }
-  return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'claude-peers-desk')
+  return join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'koryphaios')
 }
 
 export function globalConfigPath(env: NodeJS.ProcessEnv = process.env): string {

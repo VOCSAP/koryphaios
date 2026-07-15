@@ -1,5 +1,5 @@
 import { join } from 'node:path'
-import { app, BrowserWindow, dialog, ipcMain } from 'electron'
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, webContents } from 'electron'
 import type {
   AppConfig,
   CreateSessionInput,
@@ -26,7 +26,7 @@ import {
   readDigestConfig,
   sourcesForProject
 } from './digest'
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { archiveRoadmap, computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
 import { createSessionWithWorktree } from './create-session'
 import { composePlanImportPrompt } from './import-plan'
@@ -132,6 +132,82 @@ export function registerIpc({
   ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) =>
     service.resize(id, cols, rows)
   )
+
+  // ----- embedded browser (PLAN D1) -----
+  // Absolute path of the guest preload injected into the <webview>. Built as a
+  // second preload entry (electron.vite.config.ts) next to index.js.
+  ipcMain.handle('browser:preload-path', () => join(__dirname, '../preload/browser-inspect.js'))
+
+  // Screenshot of the browser <webview> (draw mode, D1). The id must belong to
+  // a webview hosted by OUR window — never an arbitrary webContents.
+  ipcMain.handle('browser:capture', async (_e, id: number) => {
+    const win = getWindow()
+    const wc = typeof id === 'number' ? webContents.fromId(id) : undefined
+    if (!win || !wc || wc.hostWebContents !== win.webContents) return null
+    try {
+      const img = await wc.capturePage()
+      return img.toDataURL()
+    } catch {
+      return null
+    }
+  })
+
+  // ----- window mirror (PLAN D2a) -----
+  // List capturable OS windows/screens for the browser view's Window mode.
+  // Thumbnails small on purpose: the picker only needs recognizable previews.
+  ipcMain.handle('design:list-windows', async () => {
+    const sources = await desktopCapturer.getSources({
+      types: ['window', 'screen'],
+      thumbnailSize: { width: 320, height: 200 },
+      fetchWindowIcons: false
+    })
+    return sources.map((s) => ({ id: s.id, name: s.name, thumbnail: s.thumbnail.toDataURL() }))
+  })
+
+  // Full-size still of one source. desktopCapturer's thumbnail IS the capture:
+  // requesting a large bounding box yields a native-resolution, aspect-true
+  // image without opening a getUserMedia stream (a still is also what the
+  // annotation flow wants — the page can't move under the strokes).
+  ipcMain.handle('design:capture-window', async (_e, id: string) => {
+    if (typeof id !== 'string' || !id) return null
+    const sources = await desktopCapturer.getSources({
+      types: ['window', 'screen'],
+      thumbnailSize: { width: 4096, height: 4096 },
+      fetchWindowIcons: false
+    })
+    const src = sources.find((s) => s.id === id)
+    if (!src || src.thumbnail.isEmpty()) return null
+    return { dataUrl: src.thumbnail.toDataURL(), title: src.name }
+  })
+
+  // Persist an annotated screenshot (page capture + operator strokes,
+  // composited renderer-side) so the docked agent can Read the image file.
+  // Kept under app state, pruned after 7 days (same policy as checkpoints).
+  ipcMain.handle('browser:save-annotation', (_e, dataUrl: string) => {
+    const PREFIX = 'data:image/png;base64,'
+    if (typeof dataUrl !== 'string' || !dataUrl.startsWith(PREFIX)) return null
+    const b64 = dataUrl.slice(PREFIX.length)
+    if (b64.length > 48 * 1024 * 1024) return null // ~36 MB decoded, plenty
+    const dir = join(app.getPath('userData'), APP_STATE_SUBDIR, 'annotations')
+    try {
+      mkdirSync(dir, { recursive: true })
+      for (const f of readdirSync(dir)) {
+        try {
+          const p = join(dir, f)
+          if (Date.now() - statSync(p).mtimeMs > 7 * 86_400_000) rmSync(p)
+        } catch {
+          /* concurrent cleanup */
+        }
+      }
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+      const path = join(dir, `annotation-${stamp}.png`)
+      writeFileSync(path, Buffer.from(b64, 'base64'))
+      return path
+    } catch (err) {
+      console.error('[browser] annotation save failed:', err)
+      return null
+    }
+  })
 
   // ----- config -----
   ipcMain.handle('config:get', () => getConfig())

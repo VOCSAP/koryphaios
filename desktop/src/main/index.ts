@@ -37,6 +37,7 @@ import { listAgents } from './agents'
 import { createSessionWithWorktree } from './create-session'
 import { Journal } from './journal'
 import { startDeckControl, type DeckControlDeps, type DeckControlServer } from './deck-control'
+import { startDesignEndpoint, type DesignEndpoint } from './design-endpoint'
 import {
   SUPERVISOR_BRIEFING,
   SUPERVISOR_NAME,
@@ -60,12 +61,13 @@ import { templateToInputs, toTemplate } from '@shared/template'
 
 let mainWindow: BrowserWindow | null = null
 
-// Harmonize the app-data folder on a single "claude-peers-desk" root (it was
-// historically split: Electron userData in "claude-peers-deck", launch config +
-// templates in "claude-peers-desk"). Must run before any getPath('userData') /
-// loadConfig() below. App state now lives under <userData>/config to avoid
-// colliding with the launch config.json at the root.
-app.setName('claude-peers-desk')
+// Pin the app-data folder on the "koryphaios" root (v0.7 rename; previously
+// "claude-peers-desk", and before that userData lived in "claude-peers-deck").
+// Must run before any getPath('userData') / loadConfig() below; the chained
+// migrations in migrate-data-dir.ts carry the legacy folders' content over.
+// App state lives under <userData>/config to avoid colliding with the launch
+// config.json at the root.
+app.setName('koryphaios')
 runDataMigration({ userDataDir: app.getPath('userData') })
 
 // Resolve the launch context (invocation cwd + optional custom scope id) and
@@ -98,7 +100,7 @@ if (activeScope.scopeKind === 'custom' && config.rememberScopeSecrets) {
   try {
     rememberScopeSecret(secretsDir(), secretCipher, activeScope.groupId, activeScope.secret)
   } catch (e) {
-    console.error('[claude-peers-desk] could not remember scope secret:', e)
+    console.error('[koryphaios] could not remember scope secret:', e)
   }
 }
 
@@ -130,9 +132,25 @@ const deckPluginDir = ((): string => {
   return existsSync(dir) ? dir : ''
 })()
 
+// Design endpoint (PLAN D2b): loopback receiver for element picks coming from
+// EXTERNAL apps in design mode (Tauri/Electron dev builds running the
+// deck-design client). Started at whenReady; its url/token are injected into
+// every PTY the Deck spawns, so `tauri dev` launched from a session terminal
+// inherits the pair — nothing is persisted, nothing transits the broker (which
+// may be remote/headless: picks are a strictly local loop).
+let designServer: DesignEndpoint | null = null
+
 const service = new SessionService(
   getConfig,
-  () => activeScopeEnv.env,
+  () => ({
+    ...activeScopeEnv.env,
+    ...(designServer
+      ? {
+          CLAUDE_DECK_DESIGN_URL: designServer.url,
+          CLAUDE_DECK_DESIGN_TOKEN: designServer.token
+        }
+      : null)
+  }),
   safeLaunchCommand,
   deckPluginDir
 )
@@ -178,7 +196,7 @@ const broadcastAnnounce = async (text: string, excludePeerId?: string): Promise<
     if (sent > 0) journal.add('announce', `announce to ${sent} peer(s): ${text.slice(0, 120)}`)
     return sent
   } catch (e) {
-    console.error('[claude-peers-desk] announce failed:', e)
+    console.error('[koryphaios] announce failed:', e)
     return 0
   }
 }
@@ -293,7 +311,7 @@ const announceToLead = async (text: string): Promise<number> => {
     }
     return sent
   } catch (e) {
-    console.error('[claude-peers-desk] lead announce failed:', e)
+    console.error('[koryphaios] lead announce failed:', e)
     return 0
   }
 }
@@ -343,7 +361,7 @@ const dispatchNext = async (): Promise<DispatchResult> => {
     dispatchedIds.add(item.id)
     return { sent: true, title: item.title }
   } catch (e) {
-    console.error('[claude-peers-desk] dispatch failed:', e)
+    console.error('[koryphaios] dispatch failed:', e)
     return { sent: false, reason: 'error' }
   }
 }
@@ -518,7 +536,7 @@ service.on('changed', (sessions: unknown[]) => {
       // Keep the renderer's window title in sync with the current workspace.
       mainWindow?.webContents.send('workspace:current', summary)
     } catch (e) {
-      console.error('[claude-peers-desk] auto-save failed:', e)
+      console.error('[koryphaios] auto-save failed:', e)
     }
   }, 1000)
 })
@@ -531,11 +549,13 @@ function createWindow(): void {
     minHeight: 600,
     show: false,
     backgroundColor: config.theme === 'light' ? '#f5f5f5' : '#1e1e1e',
-    title: 'Claude Peers Deck',
+    title: 'Koryphaios',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
-      contextIsolation: true
+      contextIsolation: true,
+      // Embedded browser view (PLAN D1): the renderer hosts a <webview> tag.
+      webviewTag: true
     }
   })
 
@@ -545,6 +565,15 @@ function createWindow(): void {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
     return { action: 'deny' }
+  })
+
+  // Embedded browser (PLAN D1): pages loaded in the <webview> never open new
+  // Electron windows — window.open/target=_blank goes to the system browser.
+  mainWindow.webContents.on('did-attach-webview', (_e, contents) => {
+    contents.setWindowOpenHandler(({ url }) => {
+      shell.openExternal(url)
+      return { action: 'deny' }
+    })
   })
 
   mainWindow.on('closed', () => {
@@ -577,7 +606,7 @@ app.whenReady().then(() => {
           buttons: isFr ? ['Utiliser cette commande', 'Refuser'] : ['Use this command', 'Refuse'],
           defaultId: 1,
           cancelId: 1,
-          title: 'Claude Peers Deck',
+          title: 'Koryphaios',
           message: isFr
             ? 'Ce projet définit sa propre commande de lancement des sessions.'
             : 'This project defines its own session launch command.',
@@ -612,6 +641,17 @@ app.whenReady().then(() => {
   // Reflect the initial session count on the Export-template menu item (the app
   // starts empty, so it begins disabled).
   syncExportTemplateEnabled()
+  // Design endpoint (PLAN D2b): up before service.start() so even restored
+  // sessions get the env pair. Picks are forwarded to the renderer, which
+  // composes the prompt and routes it to the docked/selected agent.
+  startDesignEndpoint((event) => {
+    mainWindow?.webContents.send('design:pick', event)
+    journal.add('review', `design pick from ${event.source || 'an external app'}: <${event.pick.tagName}>`)
+  })
+    .then((srv) => {
+      designServer = srv
+    })
+    .catch((e) => console.error('[koryphaios] design endpoint failed to start:', e))
   registerIpc({
     service,
     workspaces,
