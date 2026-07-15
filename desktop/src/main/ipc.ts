@@ -20,6 +20,7 @@ import {
 import { resolveBrokerEndpoint } from './broker-client'
 import { archiveRoadmap, computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
 import { createSessionWithWorktree } from './create-session'
+import { composePlanImportPrompt } from './import-plan'
 import {
   createWorktree,
   listWorktrees,
@@ -196,6 +197,29 @@ export function registerIpc({
 
   // ----- supervisor (PLAN C5) -----
   ipcMain.handle('supervisor:ensure', () => ensureSupervisor())
+
+  // ----- plan import (PLAN C7) -----
+  // File picker + one-shot import agent (code-constant prompt). Returns true
+  // when an agent was spawned, false when the picker was cancelled.
+  ipcMain.handle('roadmap:import-plan', async () => {
+    const win = getWindow()
+    const res = await dialog.showOpenDialog(win ?? undefined!, {
+      properties: ['openFile'],
+      defaultPath: getConfig().projectDir,
+      filters: [
+        { name: 'Plans', extensions: ['md', 'markdown', 'txt'] },
+        { name: 'All files', extensions: ['*'] }
+      ]
+    })
+    const file = res.canceled ? null : (res.filePaths[0] ?? null)
+    if (!file) return false
+    await createSessionWithWorktree(service, getConfig().projectDir, {
+      name: 'plan-import',
+      prompt: composePlanImportPrompt(file),
+      announce: `one-shot agent: imports plan "${file}" into the shared roadmap`
+    })
+    return true
+  })
 
   // ----- help assistant (PLAN C9) -----
   // One throwaway `claude -p` per question: no MCP (--strict-mcp-config), no

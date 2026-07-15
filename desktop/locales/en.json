@@ -269,6 +269,8 @@
   "roadmap.updatedBy": "updated {date} by {name}",
   "roadmap.launchAgent": "Launch an agent",
   "roadmap.launchAnnounce": "works on roadmap item: {title}",
+  "roadmap.importPlan": "📄 Import a plan…",
+  "toast.planImportStarted": "Import agent started — it converts the plan into roadmap items, then closes",
   "toast.roadmapSaved": "Roadmap item saved",
   "toast.roadmapArchived": "Roadmap item archived"
 }

@@ -252,6 +252,18 @@ export function RoadmapView(): React.JSX.Element {
           <span>{t('roadmap.showArchived')}</span>
         </label>
         <span className="roadmap-spacer" />
+        <button
+          onClick={() => {
+            void window.api.importPlan().then((spawned) => {
+              if (spawned) {
+                showToast('toast.planImportStarted')
+                setView('agents')
+              }
+            })
+          }}
+        >
+          {t('roadmap.importPlan')}
+        </button>
         <button className="primary" onClick={() => setDraft({ ...EMPTY_DRAFT })}>
           {t('roadmap.add')}
         </button>

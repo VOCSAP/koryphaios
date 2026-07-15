@@ -134,3 +134,17 @@ test("runHelp surfaces a failing invocation as a rejected promise", async () => 
   });
   await expect(runHelp({ command: cmd, shell: "/bin/sh", cwd: dir })).rejects.toThrow(/boom/);
 });
+
+// ----- plan import prompt (PLAN C7, code constant like the help prompt) -----
+
+import { composePlanImportPrompt } from "../desktop/src/main/import-plan.ts";
+
+test("plan-import prompt embeds the file, the roadmap_add flow and the /exit", () => {
+  const p = composePlanImportPrompt("/home/u/proj/PLAN-v0.4.md");
+  expect(p).toContain("/home/u/proj/PLAN-v0.4.md");
+  expect(p).toContain("roadmap_list");
+  expect(p).toContain("roadmap_add");
+  expect(p).toContain('"PLAN-v0.4.md"'); // tag = plan basename
+  expect(p).toContain("/exit");
+  expect(p).toContain("Do not modify any file");
+});

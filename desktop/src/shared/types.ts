@@ -395,6 +395,8 @@ export interface DeckApi {
   roadmapList(filters: RoadmapListFilters): Promise<RoadmapItem[]>
   roadmapUpsert(fields: RoadmapUpsertFields): Promise<RoadmapItem>
   roadmapArchive(id: string): Promise<RoadmapItem>
+  /** Pick a plan file and spawn a one-shot import agent (PLAN C7). */
+  importPlan(): Promise<boolean>
 
   // worktrees (PLAN C4/C6)
   /** Remove a worktree dir (branch is kept; git refuses dirty trees). */
