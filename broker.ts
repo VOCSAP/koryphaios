@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * claude-peers broker daemon (v0.4.0)
+ * claude-peers broker daemon (v0.6.0)
  *
  * Singleton HTTP server on 127.0.0.1:<port> backed by SQLite.
  * Tracks registered Claude Code peers, isolates them by group, persists session
@@ -1456,7 +1456,7 @@ const server = Bun.serve<WsData>({
 });
 
 console.error(
-  `[claude-peers broker v0.4.0] listening on ${BIND_HOST}:${PORT} ` +
+  `[claude-peers broker v0.6.0] listening on ${BIND_HOST}:${PORT} ` +
   `(db: ${DB_PATH}, dormant_ttl=${DORMANT_TTL_HOURS}h, msg_ttl=${MESSAGE_TTL_DAYS}d, ` +
   `flush_cap=${FLUSH_MAX_COUNT}/${FLUSH_MAX_AGE_HOURS}h, purge_interval=${PURGE_INTERVAL_SEC}s, ` +
   `activity_timeout=${ACTIVITY_TIMEOUT_MS / 1000}s, ws_idle=${WS_IDLE_TIMEOUT_SEC}s, ` +

@@ -1,5 +1,87 @@
 # Changelog
 
+## v0.6.0 -- 2026-07-15
+
+The "AI orchestrator" batch (PLAN C6-C19): the Deck grows from a session
+container into a cockpit for a small agent team — a designated team-lead, an
+operator inbox, diff review, an activity journal, a dispatch queue, git
+checkpoints, a resume digest, a template composer, and two security gates.
+
+### Added (core: broker / server)
+- **Targeted announce (C10).** `POST /announce` accepts `to_peer_id` to
+  deliver a Deck message to ONE active peer of the group (the team-lead
+  notification path); 404 when the target is missing/dormant. Same reserved
+  `deck` sender and no-reply semantics.
+- **Operator inbox (C12).** New reserved sentinel `__operator__`/`operator`
+  (dormant, never listed, never purged; `set_id` refuses the name).
+  `send_message` to `operator` parks the message on the sentinel in the
+  sender's group; new `POST /operator-inbox` (TOFU group auth) drains and
+  marks them delivered. `server.ts` MCP instructions present 'operator' as
+  the human in front of the Deck (questions, results, blockers).
+- **Roadmap dispatch queue (C15).** `roadmap_items.queue INTEGER NULL`
+  (idempotent migration): 1-based dispatch-queue position, settable through
+  `/roadmap/upsert` (positive integer or null), preserved by export/import.
+
+### Added (desktop, v0.6.0)
+- **Worktrees view (C6)** in the rail: every worktree with branch, dirty
+  count, last commit and the attached Deck session; orphans can be resumed
+  into a new session or removed (never forced, branch kept).
+- **Plan import (C7).** "Import a plan" in the Roadmap view: a file picker
+  plus a ONE-SHOT agent (code-constant prompt) that converts the plan into
+  deduplicated roadmap items, then exits.
+- **Team-lead (C10).** One 👑 per window (`SessionDef.lead`, uniqueness
+  enforced, captured in workspaces/templates): create-menu checkbox
+  (suggested by the configurable `leadPattern`), right-click designation,
+  and `announceToLead` targeted notices.
+- **"Needs you" detection (C11).** `attention.ts` spots Claude Code waiting
+  screens (permission chooser, trust prompt) in the PTY stream: ⏸ badge in
+  the sidebar/tile plus a clickable system notification (toggle
+  `notifyAttention`).
+- **Operator inbox (C12).** 10 s drain of `/operator-inbox`, per-batch
+  system notification, ✉ rail button with unread bubble and a read-only
+  panel (replies go through the existing megaphone).
+- **Diff / review (C13).** `diff-service.ts` collects uncommitted changes
+  plus branch-vs-main commits (worktrees, merge-base); DiffPanel from the
+  Worktrees view or a session's right-click; "Have an agent review this"
+  spawns a one-shot reviewer that reports to the team-lead via
+  `send_message` when one is live.
+- **Activity journal (C14).** In-memory ring buffer (500 entries) narrating
+  spawns/exits, quota episodes, attention screens, worktree operations,
+  announces, dispatches, reviews and checkpoints; filterable 📜 rail view
+  with plain-text export.
+- **Dispatch queue (C15).** Roadmap items can be queued (⏳ #n) and sent to
+  the team-lead one by one (full item + status contract, code-constant
+  message); when a dispatched item turns `done`, the next queued one is
+  auto-dispatched (20 s watcher). Button greyed with an explanation while
+  no lead is designated.
+- **Git checkpoints (C16).** Before an agent spawns into a DIRTY tree:
+  `git stash create` anchored under `refs/claude-peers/checkpoint-<ts>` (no
+  history/working-tree pollution), journal entry with the sha and the
+  `git stash apply` restore command, 7-day purge. Fresh worktrees skip it.
+- **Resume digest (C17).** 📋 button in the help popup: one read-only
+  `claude -p` briefing (C9 harness) grounded in the app snapshot plus
+  configured sources (files/globs + commands). Sources are read from the
+  GLOBAL config only (`digest.sources`, `digest.perProject[project_key]`) —
+  never from a project config, which would mean arbitrary command execution
+  on clone; commands still run with cwd = projectDir.
+- **Template composer (C18).** Create/edit/duplicate templates WITHOUT
+  spawning (manage mode of the template picker): per-entry advanced fields
+  (agent, model, effort, args, initial prompt, fresh-worktree branch,
+  announce, colour) and a single-lead crown; hierarchical rendering (lead
+  top-center). Applying routes through the worktree-aware path, and the
+  template's lead only becomes the window's when none exists yet.
+
+### Security
+- **Project launchCommand gate (C19).** A `launchCommand` carried by the
+  repo's `.claude/claude-peers/config.json` no longer runs silently: a
+  first-use warning dialog shows the command; approval stores its sha256
+  per project_key in the app state (a changed command asks again), refusal
+  falls back to the global command and persists nothing. Journal entry
+  either way.
+- The C8 code-constant rule extends to every new agent prompt (plan import,
+  reviewer, dispatch message, digest, help) — none is operator- or
+  repo-configurable.
+
 ## v0.5.0 (desktop) -- 2026-07-14
 
 ### Added

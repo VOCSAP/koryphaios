@@ -35,6 +35,16 @@
 | 2026-07-14 | session exploration (suite) | C8 | Verrouillage du harness superviseur (décision sécurité opérateur) : SUPERVISOR_SYSTEM_PROMPT constante code ancrée via --append-system-prompt-file (fichier régénéré à chaque spawn, écrasé si trafiqué, re-passé au resume), retrait de l'option supervisorAgent de Settings, prompt d'import C7 verrouillé par la même règle. bun test 313/313. | C6 (vue Worktrees) et C7 (import de plan) restent à implémenter. |
 | 2026-07-14 | session exploration (suite) | C9 | Bouton d'aide flottant : help-assistant.ts (claude -p jetable, system prompt constante code + snapshot de la vue, --strict-mcp-config + --disallowedTools = lecture seule technique, marqueur anti-bruit de profil), popup de chat HelpAssistant.tsx, options Settings + clic droit (toggle, modèle défaut haiku), 8 tests dont faux binaire claude. | Validation manuelle : réponse ancrée dans la vue Roadmap au premier lancement réel. Restent : C6, C7. |
 | 2026-07-14 | session exploration (suite) | — | Brainstorm orchestrateur consigné (EXPLORATION §7.5) : chantiers C10-C19 au PLAN (team-lead, attention, inbox opérateur, diff/review, journal, file->lead, checkpoints, digest, composeur templates, hardening launchCommand) + reportés (battle chat, OTEL, GitHub sync) et écartés (presets permissions). | Implémentation autonome : C6 -> C7 -> C10 -> ... -> C19. |
+| 2026-07-15 | session autonome (lot orchestrateur) | C6, C7 | Vue Worktrees (statut git + session attachée, reprise/suppression) ; import de plan par agent one-shot (prompt constante code, dialog fichier). | — |
+| 2026-07-15 | session autonome (lot orchestrateur) | C10, C11 | Team-lead (SessionDef.lead unique, coche création + clic droit, badge 👑, /announce to_peer_id + announceToLead) ; détection « a besoin de toi » (attention.ts, badge ⏸, Notification cliquable, toggle notifyAttention). | — |
+| 2026-07-15 | session autonome (lot orchestrateur) | C12 | Inbox opérateur : sentinelle __operator__/operator au broker, routage send_message, POST /operator-inbox (TOFU, marque délivrés), instructions MCP, poll 10 s + notifications + panneau ✉ avec bulle non-lus, 4 tests broker. | — |
+| 2026-07-15 | session autonome (lot orchestrateur) | C13 | diff-service.ts (uncommitted + branche vs main, cap 150 Ko), DiffPanel (Worktrees + clic droit session), agent relecteur one-shot → team-lead, 6 tests repo jetable. | — |
+| 2026-07-15 | session autonome (lot orchestrateur) | C14 | journal.ts (ring buffer 500, 8 kinds), alimentation (created/removed/exit/quota/attention/worktree/announce/dispatch/review/checkpoint), vue Journal 📜 filtrable + export texte, 5 tests. | — |
+| 2026-07-15 | session autonome (lot orchestrateur) | C15 | Colonne queue sur roadmap_items (migration + upsert + export/import), section File d'attente + badge ⏳, dispatch ciblé au lead (constante code) + auto-dispatch du suivant sur done (watcher 20 s), bouton grisé sans lead, 6 tests. | — |
+| 2026-07-15 | session autonome (lot orchestrateur) | C16 | checkpoint-service.ts (stash create + refs/claude-peers/, list/purge 7 j, restoreCommand), hook beforeSpawn sur tous les chemins de création (worktree frais sauté), entrée journal, 4 tests. | — |
+| 2026-07-15 | session autonome (lot orchestrateur) | C17 | digest.ts (sources GLOBALES uniquement + perProject, glob minimal, caps, commandes cwd=projectDir), IPC help:digest (patron C9 lecture seule), bouton 📋 du popup d'aide, 5 tests dont refus config projet. | — |
+| 2026-07-15 | session autonome (lot orchestrateur) | C18 | Template étendu (agent/model/worktreeBranch/announce, lead unique normalisé au parse), TemplateComposer (créer/éditer/dupliquer sans spawner, lead en haut centré), IPC read/write, application via createSessionWithWorktree + règle « le lead du template ne prend que si la fenêtre n'en a pas », 3 tests. | — |
+| 2026-07-15 | session autonome (lot orchestrateur) | C19 | launch-approval.ts : launchCommand PROJET gaté par dialog à la première utilisation, hash sha256 par project_key dans launch-approvals.json, refus → fallback global non persisté, entrée journal, 4 tests. **Lot orchestrateur C6-C19 complet.** | Validations manuelles UI au premier lancement réel ; reportés (battle chat, OTEL, GitHub sync) inchangés. |
 
 ---
 
@@ -266,28 +276,28 @@ coordination des agents via la messagerie peers existante (design §6).
 
 ---
 
-## C6 — Vue Worktrees dans le rail (~1 j) → v0.6
+## C6 — Vue Worktrees dans le rail (~1 j) — FAIT → v0.6
 
 **Objectif** : voir et gérer les worktrees que les agents utilisent —
 notamment les orphelins qui s'accumulent après fermeture des tuiles
 (design : EXPLORATION §7.1).
 
 ### Jalons
-- [ ] `worktree-service.ts` : `worktreeStatus(path)` — sale ?
+- [x] `worktree-service.ts` : `worktreeStatus(path)` — sale ?
       (`git status --porcelain`), dernier commit (sujet + date).
-- [ ] IPC `worktree:list` (liste + statut + session Deck attachée par match
+- [x] IPC `worktree:list` (liste + statut + session Deck attachée par match
       de cwd) ; DeckApi + preload.
-- [ ] `WorktreesView.tsx` (4ᵉ vue du rail) : lignes branche/chemin/session/
+- [x] `WorktreesView.tsx` (4ᵉ vue du rail) : lignes branche/chemin/session/
       état, orphelins mis en évidence, actions créer / ouvrir une session
       dedans (cwd = worktree, reprise d'orphelin) / supprimer (ConfirmDialog,
       jamais forcé) / copier le chemin. i18n en/fr + EN_DEFAULTS.
-- [ ] Tests : worktreeStatus sur repo jetable (propre/sale), match session.
+- [x] Tests : worktreeStatus sur repo jetable (propre/sale), match session.
 
 ### Done quand
 - [ ] Un worktree orphelin est visible, reprenable (nouvelle session dedans)
       et supprimable depuis la vue.
 
-## C7 — Import d'un plan → briques roadmap (~0,5-1 j) → v0.6
+## C7 — Import d'un plan → briques roadmap (~0,5-1 j) — FAIT → v0.6
 
 **Objectif** : bouton « Importer un plan » (fichiers de plan générés par
 Claude Code) qui crée les items roadmap correspondants. **Décision : pas de
@@ -295,15 +305,15 @@ parseur déterministe** — extraction et jugement kind/priority/value/effort
 délégués à un agent one-shot (EXPLORATION §7.2).
 
 ### Jalons
-- [ ] Bouton « Importer un plan » dans l'en-tête de `RoadmapView.tsx` →
+- [x] Bouton « Importer un plan » dans l'en-tête de `RoadmapView.tsx` →
       `dialog.showOpenDialog` (fichier .md) via IPC.
-- [ ] Prompt d'import : **constante dans le code de l'app** (décision C8 —
+- [x] Prompt d'import : **constante dans le code de l'app** (décision C8 —
       jamais un template configurable, pour éviter tout détournement) :
       lire le fichier, `roadmap_add` par item (tags `import` + nom du plan,
       depends_on évidents), résumé, `/exit` (la tuile s'auto-ferme, v0.3.3).
-- [ ] Spawn de l'agent one-shot via le create existant (C2) ; bascule vue
+- [x] Spawn de l'agent one-shot via le create existant (C2) ; bascule vue
       Agents pour l'observer ; i18n.
-- [ ] Test : composition du prompt (pur) ; le flux complet reste une
+- [x] Test : composition du prompt (pur) ; le flux complet reste une
       validation manuelle (agent réel).
 
 ### Done quand
@@ -382,124 +392,124 @@ Ordre logique : C6 → C7 → C10 (fondation team-lead) → C11 → C12 → C13 
 C14 → C15 → C16 → C17 → C18 → C19. C10 est prérequis de C15/C18 et du volet
 notification de C6/C13.
 
-## C10 — Rôle team-lead + annonce ciblée (~1 j)
+## C10 — Rôle team-lead + annonce ciblée (~1 j) — FAIT
 
 **Objectif** : un team-lead désigné par fenêtre, que la Deck peut notifier de
 façon ciblée (fondation de C15, C18, et des notifications d'intégration).
 
 ### Jalons
-- [ ] `SessionDef.lead?: boolean` — source de vérité explicite, capturé dans
+- [x] `SessionDef.lead?: boolean` — source de vérité explicite, capturé dans
       workspaces ET templates ; unicité garantie par `SessionService`
       (désigner dé-désigne l'ancien) ; badge 👑 sidebar.
-- [ ] Pose : coche « team-lead » du menu avancé (pré-cochée si le nom
+- [x] Pose : coche « team-lead » du menu avancé (pré-cochée si le nom
       d'agent/session matche `leadPattern` configurable — défaut `team-lead`
       — ET qu'aucun lead n'existe) + clic droit « désigner comme team-lead ».
-- [ ] Broker : `/announce` accepte `to_peer_id?` (annonce ciblée à UN peer du
+- [x] Broker : `/announce` accepte `to_peer_id?` (annonce ciblée à UN peer du
       groupe, sentinel `deck`, no-reply inchangé) + tests.
-- [ ] Deck : `announceToLead(text)` (helper main) — no-op sans lead, sauf
+- [x] Deck : `announceToLead(text)` (helper main) — no-op sans lead, sauf
       session active unique (annonce avec mention « aucun team-lead
       désigné »).
 
-## C11 — Détection « a besoin de toi » + notifications système (~1 j)
+## C11 — Détection « a besoin de toi » + notifications système (~1 j) — FAIT
 
 ### Jalons
-- [ ] `attention.ts` (patron quota.ts) : détection des écrans d'attente de
+- [x] `attention.ts` (patron quota.ts) : détection des écrans d'attente de
       Claude Code (prompt de permission, question, menu de plan) dans le flux
       PTY ; épisode clos dès reprise d'activité.
-- [ ] Badge « ⏸ t'attend » (sidebar + tuile) + `Notification` Electron
+- [x] Badge « ⏸ t'attend » (sidebar + tuile) + `Notification` Electron
       (titre = nom de session), throttle par session ; toggle global
       `notifyAttention` (défaut on) dans Settings.
-- [ ] Tests fixtures (écrans réels de permission/question).
+- [x] Tests fixtures (écrans réels de permission/question).
 
-## C12 — Inbox opérateur (~1-1,5 j)
+## C12 — Inbox opérateur (~1-1,5 j) — FAIT
 
 ### Jalons
-- [ ] Broker : pair réservé `operator` (`__operator__`, miroir du sentinel
+- [x] Broker : pair réservé `operator` (`__operator__`, miroir du sentinel
       deck) ; `send_message` vers `operator` route vers ce token dans le
       groupe de l'émetteur ; route `POST /operator-inbox` (group_id +
       secret_hash) qui rend et marque délivrés les messages ; `set_id` refuse
       `operator` ; tests.
-- [ ] `server.ts` : instructions MCP — « operator = l'humain devant la Deck ;
+- [x] `server.ts` : instructions MCP — « operator = l'humain devant la Deck ;
       envoie-lui les questions bloquantes ; il ne répond pas par ce canal ».
-- [ ] Deck : poll de l'inbox (10 s), panneau inbox (badge non-lus sur le
+- [x] Deck : poll de l'inbox (10 s), panneau inbox (badge non-lus sur le
       rail) + notification système par message ; réponse de l'opérateur via
       mégaphone/annonce ciblée existants.
 
-## C13 — Vue Diff / Review (~2 j)
+## C13 — Vue Diff / Review (~2 j) — FAIT
 
 ### Jalons
-- [ ] `diff-service.ts` : `git status --porcelain` + `git diff` (+ diff vs
+- [x] `diff-service.ts` : `git status --porcelain` + `git diff` (+ diff vs
       branche principale pour un worktree) parsés, par session/worktree.
-- [ ] Panneau Diff (depuis la vue Worktrees C6 et le clic droit d'une
+- [x] Panneau Diff (depuis la vue Worktrees C6 et le clic droit d'une
       session) : fichiers touchés, +/- ; diff colorisé simple.
-- [ ] « Faire relire par un agent » : spawn one-shot (patron C7, prompt
+- [x] « Faire relire par un agent » : spawn one-shot (patron C7, prompt
       constante code) qui lit le diff et poste sa review en s'adressant au
       team-lead (C10) s'il existe, sinon en commentaire dans sa tuile.
-- [ ] Tests : parse du diff sur repo jetable.
+- [x] Tests : parse du diff sur repo jetable.
 
-## C14 — Journal d'activité (~0,5-1 j)
+## C14 — Journal d'activité (~0,5-1 j) — FAIT
 
 ### Jalons
-- [ ] Accumulateur d'événements dans le main (spawn/exit/quota/attention/
+- [x] Accumulateur d'événements dans le main (spawn/exit/quota/attention/
       worktree/annonces/intégrations/dispatch), ring buffer par fenêtre.
-- [ ] Vue « Journal » (rail) : fil chronologique filtrable ; export texte.
-- [ ] Tests : accumulation + cap du buffer.
+- [x] Vue « Journal » (rail) : fil chronologique filtrable ; export texte.
+- [x] Tests : accumulation + cap du buffer.
 
-## C15 — File d'attente → dispatch au team-lead (~1 j, requiert C10)
+## C15 — File d'attente → dispatch au team-lead (~1 j, requiert C10) — FAIT
 
 ### Jalons
-- [ ] Roadmap : champ `queue INTEGER NULL` (position en file) — broker +
+- [x] Roadmap : champ `queue INTEGER NULL` (position en file) — broker +
       types + upsert + tests ; « mettre en file / retirer » dans la vue
       Roadmap (section File d'attente ordonnée).
-- [ ] Dispatch : bouton « envoyer le premier au team-lead » + auto-dispatch
+- [x] Dispatch : bouton « envoyer le premier au team-lead » + auto-dispatch
       du suivant quand un item en file passe `done` (annonce ciblée C10,
       contenu = item complet, consigne de tenir le statut).
-- [ ] Sans lead : bouton grisé avec explication (pas d'auto-magie).
+- [x] Sans lead : bouton grisé avec explication (pas d'auto-magie).
 
-## C16 — Checkpoints git (~0,5 j)
+## C16 — Checkpoints git (~0,5 j) — FAIT
 
 ### Jalons
-- [ ] Avant tout spawn dans un dossier au working tree sale : `git stash
+- [x] Avant tout spawn dans un dossier au working tree sale : `git stash
       create` + `git update-ref refs/claude-peers/checkpoint-<ts>` (aucune
       pollution d'historique ni du working tree) ; entrée journal (C14) avec
       le sha et la commande de restauration.
-- [ ] Liste des checkpoints dans la vue Journal ; purge des plus vieux (>7 j).
-- [ ] Tests sur repo jetable.
+- [x] Liste des checkpoints dans la vue Journal ; purge des plus vieux (>7 j).
+- [x] Tests sur repo jetable.
 
-## C17 — Digest de reprise (~1 j)
+## C17 — Digest de reprise (~1 j) — FAIT
 
 ### Jalons
-- [ ] Config **globale uniquement** `digest.sources` (fichiers/globs +
+- [x] Config **globale uniquement** `digest.sources` (fichiers/globs +
       commandes, résolus/exécutées dans le projectDir) + surcharges
       `digest.perProject[project_key]` ; défauts : snapshot C9 + `PLAN*.md`.
-- [ ] `askDigest` : prompt = constante code (règle C8) + snapshot + sorties
+- [x] `askDigest` : prompt = constante code (règle C8) + snapshot + sorties
       des sources (cap de taille par source) → `claude -p` (patron C9,
       lecture seule technique).
-- [ ] UI : bouton « 📋 Résumé de reprise » dans le popup d'aide + entrée de
+- [x] UI : bouton « 📋 Résumé de reprise » dans le popup d'aide + entrée de
       menu ; affiché comme un échange du popup.
-- [ ] Tests : résolution des sources (globaux/commandes/perProject), caps,
+- [x] Tests : résolution des sources (globaux/commandes/perProject), caps,
       refus de toute source venant d'une config projet.
 
-## C18 — Composeur de templates (~1,5-2 j, requiert C10)
+## C18 — Composeur de templates (~1,5-2 j, requiert C10) — FAIT
 
 ### Jalons
-- [ ] Vue/fenêtre Templates : liste (supprimer/dupliquer) + « créer » /
+- [x] Vue/fenêtre Templates : liste (supprimer/dupliquer) + « créer » /
       « éditer » SANS spawner ; chaque entrée = champs du menu avancé
       (agent, modèle, effort, args, prompt initial, worktree, annonce,
       couleur, coche lead — un seul lead par template).
-- [ ] Rendu hiérarchique : lead en haut centré, l'équipe en dessous.
-- [ ] À l'application : le lead du template devient celui de la fenêtre s'il
+- [x] Rendu hiérarchique : lead en haut centré, l'équipe en dessous.
+- [x] À l'application : le lead du template devient celui de la fenêtre s'il
       n'y en a pas déjà.
-- [ ] Tests : shape template étendue (lead), round-trip compose→apply.
+- [x] Tests : shape template étendue (lead), round-trip compose→apply.
 
-## C19 — Hardening launchCommand projet (~0,5 j)
+## C19 — Hardening launchCommand projet (~0,5 j) — FAIT
 
 ### Jalons
-- [ ] À la résolution d'un `launchCommand` venant de la config PROJET :
+- [x] À la résolution d'un `launchCommand` venant de la config PROJET :
       confirmation opérateur à la première utilisation (dialog), hash
       approuvé mémorisé par project_key dans l'app-state ; refus → fallback
       config globale ; entrée journal.
-- [ ] Tests : approbation/refus/changement de commande (hash différent).
+- [x] Tests : approbation/refus/changement de commande (hash différent).
 
 ---
 
