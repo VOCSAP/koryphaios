@@ -218,6 +218,12 @@ export interface RoadmapItem {
   updated_at: string;
   /** Set when archived (soft delete, reversible); null otherwise. */
   deleted_at: string | null;
+  /**
+   * Dispatch-queue position (PLAN C15): 1-based order of the operator's
+   * "send to the team-lead next" queue; null = not queued. Managed by the
+   * Deck; agents normally leave it alone.
+   */
+  queue: number | null;
 }
 
 export interface RoadmapListRequest {
@@ -252,6 +258,8 @@ export interface RoadmapUpsertRequest {
   status?: RoadmapStatus;
   tags?: string[];
   depends_on?: string[];
+  /** Queue position (C15): a positive integer to queue, null to unqueue. */
+  queue?: number | null;
 }
 
 export interface RoadmapUpsertResponse {

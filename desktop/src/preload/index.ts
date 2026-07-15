@@ -92,6 +92,7 @@ const api: DeckApi = {
   roadmapList: (filters: RoadmapListFilters) => ipcRenderer.invoke('roadmap:list', filters),
   roadmapUpsert: (fields: RoadmapUpsertFields) => ipcRenderer.invoke('roadmap:upsert', fields),
   roadmapArchive: (id: string) => ipcRenderer.invoke('roadmap:archive', id),
+  roadmapDispatch: () => ipcRenderer.invoke('roadmap:dispatch'),
   importPlan: () => ipcRenderer.invoke('roadmap:import-plan'),
   removeWorktree: (path: string) => ipcRenderer.invoke('worktree:remove', path),
   listWorktrees: () => ipcRenderer.invoke('worktree:list'),

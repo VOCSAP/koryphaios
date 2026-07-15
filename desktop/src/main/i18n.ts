@@ -383,7 +383,16 @@ export const EN_DEFAULTS: Record<string, string> = {
   'journal.kind.dispatch': 'dispatch',
   'journal.kind.review': 'review',
   'journal.kind.checkpoint': 'checkpoint',
-  'toast.journalExported': 'Journal exported'
+  'toast.journalExported': 'Journal exported',
+  'roadmap.queueSection': 'Dispatch queue',
+  'roadmap.queueAdd': '⏳ Queue for dispatch',
+  'roadmap.queueRemove': 'Remove from queue',
+  'roadmap.dispatchFirst': '▶ Send first to team-lead',
+  'roadmap.dispatchNoLeadHint':
+    'Designate a team-lead (👑 in the Agents sidebar) to dispatch queued items.',
+  'toast.dispatched': 'Item sent to the team-lead',
+  'toast.dispatchNoLead': 'No team-lead — designate one first (👑)',
+  'toast.dispatchFailed': 'Dispatch failed (empty queue or broker unreachable)'
 }
 
 /**

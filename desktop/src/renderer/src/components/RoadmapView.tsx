@@ -103,6 +103,11 @@ function ItemCard({
         <span className={`rm-badge rm-badge-status-${item.status}`}>
           {t(`roadmap.status.${item.status}`)}
         </span>
+        {item.queue !== null && (
+          <span className="rm-badge rm-badge-queue" title={t('roadmap.queueSection')}>
+            ⏳ #{item.queue}
+          </span>
+        )}
         {item.tags.map((tag) => (
           <span key={tag} className="rm-badge rm-badge-tag">
             #{tag}
@@ -136,6 +141,9 @@ export function RoadmapView(): React.JSX.Element {
   const t = useT()
   const showToast = useDeck((s) => s.showToast)
   const setView = useDeck((s) => s.setView)
+  const sessions = useDeck((s) => s.sessions)
+  // Dispatch needs a live team-lead (PLAN C15); the button greys out otherwise.
+  const hasLead = sessions.some((s) => s.lead && !s.supervisor && s.status !== 'exited')
 
   const [items, setItems] = useState<RoadmapItem[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -222,6 +230,30 @@ export function RoadmapView(): React.JSX.Element {
     }
   }
 
+  // Dispatch queue (PLAN C15): operator-ordered subset, rendered on top.
+  const queued = items
+    .filter((i) => i.queue !== null && i.status !== 'done' && i.status !== 'archived')
+    .sort((a, b) => a.queue! - b.queue!)
+
+  const setQueue = async (item: RoadmapItem, queue: number | null): Promise<void> => {
+    try {
+      await window.api.roadmapUpsert({ id: item.id, queue })
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const queueItem = (item: RoadmapItem): Promise<void> =>
+    setQueue(item, Math.max(0, ...items.map((i) => i.queue ?? 0)) + 1)
+
+  const dispatch = async (): Promise<void> => {
+    const r = await window.api.roadmapDispatch()
+    if (r.sent) showToast('toast.dispatched')
+    else showToast(r.reason === 'no-lead' ? 'toast.dispatchNoLead' : 'toast.dispatchFailed', 'info')
+    await refresh()
+  }
+
   const sections = PRIORITIES.map((p) => ({
     priority: p,
     rows: items.filter((i) => i.priority === p)
@@ -275,6 +307,35 @@ export function RoadmapView(): React.JSX.Element {
         <div className="roadmap-list">
           {loaded && items.length === 0 && !error && (
             <p className="roadmap-empty">{t('roadmap.empty')}</p>
+          )}
+          {queued.length > 0 && (
+            <section className="rm-section rm-section-queue">
+              <h3 className="rm-section-head rm-queue-head">
+                ⏳ {t('roadmap.queueSection')}
+                <span className="rm-count">{queued.length}</span>
+                <span className="roadmap-spacer" />
+                <button
+                  className="primary rm-dispatch-btn"
+                  disabled={!hasLead}
+                  title={hasLead ? undefined : t('roadmap.dispatchNoLeadHint')}
+                  onClick={() => void dispatch()}
+                >
+                  {t('roadmap.dispatchFirst')}
+                </button>
+              </h3>
+              {!hasLead && <p className="rm-queue-hint">{t('roadmap.dispatchNoLeadHint')}</p>}
+              {queued.map((item) => (
+                <div key={item.id} className="rm-queue-row">
+                  <span className="rm-queue-pos">#{item.queue}</span>
+                  <button className="rm-queue-title" onClick={() => setSelectedId(item.id)}>
+                    {KIND_ICONS[item.kind]} {item.title}
+                  </button>
+                  <button className="row-btn" title={t('roadmap.queueRemove')} onClick={() => void setQueue(item, null)}>
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </section>
           )}
           {sections.map(
             ({ priority, rows }) =>
@@ -336,6 +397,15 @@ export function RoadmapView(): React.JSX.Element {
                   {t('roadmap.launchAgent')}
                 </button>
               )}
+              {selected.status !== 'archived' &&
+                selected.status !== 'done' &&
+                (selected.queue === null ? (
+                  <button onClick={() => void queueItem(selected)}>{t('roadmap.queueAdd')}</button>
+                ) : (
+                  <button onClick={() => void setQueue(selected, null)}>
+                    {t('roadmap.queueRemove')}
+                  </button>
+                ))}
               <button onClick={() => setDraft(toDraft(selected))}>{t('common.edit')}</button>
               {selected.status === 'archived' ? (
                 <button onClick={() => void restore(selected)}>{t('roadmap.restore')}</button>

@@ -3,6 +3,7 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import type {
   AppConfig,
   CreateSessionInput,
+  DispatchResult,
   HelpExchange,
   I18nPayload,
   LaunchConfig,
@@ -73,6 +74,8 @@ interface IpcDeps {
   ensureSupervisor: () => Promise<SessionRuntime>
   /** Activity journal (PLAN C14), owned by index.ts. */
   journal: Journal
+  /** Dispatch the first queued roadmap item to the team-lead (PLAN C15). */
+  dispatchNext: () => Promise<DispatchResult>
 }
 
 export function registerIpc({
@@ -83,7 +86,8 @@ export function registerIpc({
   getWindow,
   announce,
   ensureSupervisor,
-  journal
+  journal,
+  dispatchNext
 }: IpcDeps): void {
   // ----- sessions -----
   ipcMain.handle('sessions:list', () => service.list())
@@ -172,6 +176,9 @@ export function registerIpc({
     const { endpoint } = roadmapCtx()
     return archiveRoadmap(endpoint, id)
   })
+  // Queue dispatch (PLAN C15): first queued item -> targeted announce to the
+  // team-lead. The renderer greys the button when no lead is designated.
+  ipcMain.handle('roadmap:dispatch', () => dispatchNext())
 
   // ----- worktrees (PLAN C4/C6) -----
   ipcMain.handle('worktree:remove', async (_e, path: string) => {

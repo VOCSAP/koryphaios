@@ -295,5 +295,13 @@
   "journal.kind.dispatch": "dispatch",
   "journal.kind.review": "review",
   "journal.kind.checkpoint": "checkpoint",
-  "toast.journalExported": "Journal exporté"
+  "toast.journalExported": "Journal exporté",
+  "roadmap.queueSection": "File d'attente",
+  "roadmap.queueAdd": "⏳ Mettre en file",
+  "roadmap.queueRemove": "Retirer de la file",
+  "roadmap.dispatchFirst": "▶ Envoyer le premier au team-lead",
+  "roadmap.dispatchNoLeadHint": "Désigne un team-lead (👑 dans la barre Agents) pour dispatcher la file.",
+  "toast.dispatched": "Item envoyé au team-lead",
+  "toast.dispatchNoLead": "Pas de team-lead — désignes-en un d'abord (👑)",
+  "toast.dispatchFailed": "Dispatch impossible (file vide ou broker injoignable)"
 }

@@ -16,6 +16,9 @@ import {
 import { resolveLaunchConfig } from './launch-config'
 import { WorkspaceService } from './workspace-service'
 import { fetchOperatorInbox, resolveBrokerEndpoint, sendAnnounce } from './broker-client'
+import { computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
+import { composeDispatchText, firstQueued } from './dispatch'
+import type { DispatchResult } from '@shared/types'
 import { composeJoinAnnounce, type JoinAnnounceIntent } from '@shared/announce'
 import { APP_STATE_SUBDIR, runDataMigration } from './migrate-data-dir'
 import type { SessionRuntime } from '@shared/types'
@@ -280,6 +283,61 @@ const announceToLead = async (text: string): Promise<number> => {
   }
 }
 
+// ----- Queue → team-lead dispatch (PLAN C15) -----
+// The operator queues roadmap items; dispatching sends the first one to the
+// team-lead as a targeted announce (C10), unqueues it and remembers its id.
+// A light watcher polls the tracked ids and auto-dispatches the next queued
+// item when a dispatched one turns done — the "conveyor belt" loop.
+const dispatchedIds = new Set<string>()
+const DISPATCH_WATCH_MS = 20_000
+
+const dispatchNext = async (): Promise<DispatchResult> => {
+  try {
+    const endpoint = resolveBrokerEndpoint()
+    const key = computeDeckProjectKey(config.projectDir)
+    const item = firstQueued(await listRoadmap(endpoint, key, {}))
+    if (!item) return { sent: false, reason: 'empty-queue' }
+    const sent = await announceToLead(composeDispatchText(item))
+    if (sent === 0) return { sent: false, reason: 'no-lead' }
+    // Unqueue + hand over as 'planned'; the lead moves it along from there.
+    await upsertRoadmap(endpoint, key, {
+      id: item.id,
+      queue: null,
+      status: item.status === 'idea' ? 'planned' : item.status
+    })
+    dispatchedIds.add(item.id)
+    return { sent: true, title: item.title }
+  } catch (e) {
+    console.error('[claude-peers-desk] dispatch failed:', e)
+    return { sent: false, reason: 'error' }
+  }
+}
+
+const watchDispatched = async (): Promise<void> => {
+  if (dispatchedIds.size === 0) return
+  try {
+    const endpoint = resolveBrokerEndpoint()
+    const key = computeDeckProjectKey(config.projectDir)
+    const items = await listRoadmap(endpoint, key, { include_archived: true })
+    let completed = false
+    for (const id of [...dispatchedIds]) {
+      const it = items.find((i) => i.id === id)
+      if (!it || it.status === 'done' || it.status === 'archived') {
+        dispatchedIds.delete(id)
+        completed = true
+        if (it) journal.add('dispatch', `dispatched item done: "${it.title}"`)
+      }
+    }
+    if (completed) {
+      const r = await dispatchNext()
+      if (r.sent) journal.add('dispatch', `auto-dispatched next queued item: "${r.title}"`)
+    }
+  } catch {
+    // Broker down: the next tick retries.
+  }
+}
+let dispatchTimer: NodeJS.Timeout | null = null
+
 // ----- Supervisor deck-control (PLAN C5) -----
 // The loopback control endpoint the SUPERVISOR session pilots the app through.
 // Started lazily at the first Home visit; the URL/token pair is injected only
@@ -483,13 +541,16 @@ app.whenReady().then(() => {
     getWindow: () => mainWindow,
     announce: (text: string) => broadcastAnnounce(text),
     ensureSupervisor,
-    journal
+    journal,
+    dispatchNext
   })
   service.start()
   // Attach an auto-save workspace capturing whatever the service just restored.
   workspaces.start()
   // Operator inbox drain (PLAN C12): messages agents addressed to 'operator'.
   inboxTimer = setInterval(() => void pollOperatorInbox(), INBOX_POLL_MS)
+  // Auto-dispatch watcher (PLAN C15): no-op while nothing was dispatched.
+  dispatchTimer = setInterval(() => void watchDispatched(), DISPATCH_WATCH_MS)
   createWindow()
 
   app.on('activate', () => {
@@ -507,6 +568,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   if (inboxTimer) clearInterval(inboxTimer)
+  if (dispatchTimer) clearInterval(dispatchTimer)
   workspaces.releaseOnQuit()
   service.stop()
   controlServer?.close()

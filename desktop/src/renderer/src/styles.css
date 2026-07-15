@@ -2238,3 +2238,65 @@ code {
 .journal-kind-checkpoint {
   color: #4ec97a;
 }
+
+/* ---------- Dispatch queue (PLAN C15) ---------- */
+
+.rm-section-queue {
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 14px;
+}
+
+.rm-queue-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rm-dispatch-btn {
+  font-size: 12px;
+}
+
+.rm-queue-hint {
+  margin: 4px 0;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.rm-queue-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.rm-queue-pos {
+  font-family: var(--mono, monospace);
+  font-size: 11px;
+  color: var(--fg-dim);
+  min-width: 26px;
+}
+
+.rm-queue-title {
+  flex: 1;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--fg);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rm-queue-title:hover {
+  color: var(--accent);
+}
+
+.rm-badge-queue {
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  color: var(--accent);
+}

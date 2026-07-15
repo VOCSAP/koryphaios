@@ -277,6 +277,8 @@ export interface RoadmapItem {
   created_at: string
   updated_at: string
   deleted_at: string | null
+  /** Dispatch-queue position (PLAN C15), 1-based; null = not queued. */
+  queue: number | null
 }
 
 export interface RoadmapListFilters {
@@ -300,6 +302,17 @@ export interface RoadmapUpsertFields {
   status?: RoadmapStatus
   tags?: string[]
   depends_on?: string[]
+  /** Queue position (C15): positive integer to queue, null to unqueue. */
+  queue?: number | null
+}
+
+/** Result of a queue dispatch to the team-lead (PLAN C15). */
+export interface DispatchResult {
+  sent: boolean
+  /** Title of the dispatched item when sent. */
+  title?: string
+  /** Failure reason when not sent: 'empty-queue' | 'no-lead' | 'error'. */
+  reason?: string
 }
 
 export interface RoadmapListResponse {
@@ -478,6 +491,8 @@ export interface DeckApi {
   roadmapList(filters: RoadmapListFilters): Promise<RoadmapItem[]>
   roadmapUpsert(fields: RoadmapUpsertFields): Promise<RoadmapItem>
   roadmapArchive(id: string): Promise<RoadmapItem>
+  /** Send the first queued item to the team-lead (PLAN C15). */
+  roadmapDispatch(): Promise<DispatchResult>
   /** Pick a plan file and spawn a one-shot import agent (PLAN C7). */
   importPlan(): Promise<boolean>
 

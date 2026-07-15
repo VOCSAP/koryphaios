@@ -244,9 +244,18 @@ db.run(`
     updated_by TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    deleted_at TEXT
+    deleted_at TEXT,
+    queue INTEGER
   )
 `);
+
+// Migration (v0.6, PLAN C15): dispatch-queue position on pre-existing tables.
+try {
+  db.run("ALTER TABLE roadmap_items ADD COLUMN queue INTEGER");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) console.error(`[broker] migration: ${msg}`);
+}
 
 db.run(`CREATE INDEX IF NOT EXISTS idx_roadmap_project ON roadmap_items(project_key, status)`);
 
@@ -1016,6 +1025,14 @@ function handleRoadmapUpsert(
   ) {
     return { error: "invalid kind/priority/value/effort/status", status: 400 };
   }
+  // Queue position (PLAN C15): positive integer or null (= unqueued).
+  if (
+    body.queue !== undefined &&
+    body.queue !== null &&
+    (!Number.isInteger(body.queue) || body.queue < 1)
+  ) {
+    return { error: "queue must be a positive integer or null", status: 400 };
+  }
 
   if (body.id) {
     // Partial patch: omitted fields keep their value; project_key never moves.
@@ -1034,6 +1051,7 @@ function handleRoadmapUpsert(
       status: body.status ?? existing.status,
       tags: cleanList(body.tags) ?? existing.tags,
       depends_on: cleanList(body.depends_on) ?? existing.depends_on,
+      queue: body.queue !== undefined ? body.queue : existing.queue,
       updated_by: by,
     };
     if (!next.title) return { error: "title cannot be empty", status: 400 };
@@ -1043,7 +1061,7 @@ function handleRoadmapUpsert(
     db.run(
       `UPDATE roadmap_items SET
          kind = ?, title = ?, description = ?, rationale = ?, priority = ?,
-         value = ?, effort = ?, status = ?, tags = ?, depends_on = ?,
+         value = ?, effort = ?, status = ?, tags = ?, depends_on = ?, queue = ?,
          updated_by = ?, updated_at = datetime('now'),
          deleted_at = CASE
            WHEN ? = 'archived' THEN COALESCE(deleted_at, datetime('now'))
@@ -1061,6 +1079,7 @@ function handleRoadmapUpsert(
         next.status,
         JSON.stringify(next.tags),
         JSON.stringify(next.depends_on),
+        next.queue,
         next.updated_by,
         next.status,
         body.id,
@@ -1083,8 +1102,8 @@ function handleRoadmapUpsert(
     `INSERT INTO roadmap_items
        (id, project_key, kind, title, description, rationale, priority, value,
         effort, status, tags, depends_on, created_by, updated_by,
-        created_at, updated_at, deleted_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL)`,
+        created_at, updated_at, deleted_at, queue)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?)`,
     [
       id,
       projectKey,
@@ -1100,6 +1119,7 @@ function handleRoadmapUpsert(
       JSON.stringify(cleanList(body.depends_on) ?? []),
       by,
       by,
+      body.queue ?? null,
     ]
   );
   return { item: getRoadmapItem(id)! };
@@ -1178,8 +1198,8 @@ function handleRoadmapImport(body: {
     `INSERT OR REPLACE INTO roadmap_items
        (id, project_key, kind, title, description, rationale, priority, value,
         effort, status, tags, depends_on, created_by, updated_by,
-        created_at, updated_at, deleted_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        created_at, updated_at, deleted_at, queue)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   const importAll = db.transaction((rows: Partial<RoadmapItem>[]) => {
     for (const it of rows) {
@@ -1200,7 +1220,10 @@ function handleRoadmapImport(body: {
         it.updated_by ?? "",
         it.created_at ?? new Date().toISOString(),
         it.updated_at ?? new Date().toISOString(),
-        it.deleted_at ?? null
+        it.deleted_at ?? null,
+        typeof it.queue === "number" && Number.isInteger(it.queue) && it.queue >= 1
+          ? it.queue
+          : null
       );
     }
   });
