@@ -3,12 +3,20 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron'
 import type {
   AppConfig,
   CreateSessionInput,
+  HelpExchange,
   I18nPayload,
   LaunchConfig,
   RoadmapListFilters,
   RoadmapUpsertFields,
   SessionRuntime
 } from '@shared/types'
+import { APP_STATE_SUBDIR } from './migrate-data-dir'
+import {
+  buildHelpCommand,
+  buildHelpPrompt,
+  runHelp,
+  writeHelpSystemPrompt
+} from './help-assistant'
 import { resolveBrokerEndpoint } from './broker-client'
 import { archiveRoadmap, computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
 import { createSessionWithWorktree } from './create-session'
@@ -158,6 +166,58 @@ export function registerIpc({
 
   // ----- supervisor (PLAN C5) -----
   ipcMain.handle('supervisor:ensure', () => ensureSupervisor())
+
+  // ----- help assistant (PLAN C9) -----
+  // One throwaway `claude -p` per question: no MCP (--strict-mcp-config), no
+  // mutating tools, system prompt = code constant + app-composed snapshot of
+  // the active view. Never touches the supervisor's context.
+  const helpSnapshot = async (view: string): Promise<unknown> => {
+    try {
+      if (view === 'roadmap') {
+        const { endpoint, key } = roadmapCtx()
+        const items = await listRoadmap(endpoint, key, {})
+        return items.map((i) => ({
+          id: i.id.slice(0, 8),
+          title: i.title,
+          kind: i.kind,
+          priority: i.priority,
+          value: i.value,
+          effort: i.effort,
+          status: i.status,
+          tags: i.tags
+        }))
+      }
+      // home / agents: the session set is the relevant screen content.
+      return service.list().map((s) => ({
+        name: s.name,
+        peer_id: s.peerId,
+        status: s.status,
+        thinking: s.thinking,
+        rate_limited: s.rateLimited,
+        cwd: s.cwd,
+        worktree_branch: s.worktree?.branch ?? null,
+        supervisor: !!s.supervisor
+      }))
+    } catch (e) {
+      return { snapshot_error: e instanceof Error ? e.message : String(e) }
+    }
+  }
+  ipcMain.handle(
+    'help:ask',
+    async (_e, question: string, view: string, transcript: HelpExchange[]) => {
+      const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
+      const systemPromptFile = writeHelpSystemPrompt(stateDir, {
+        view,
+        data: await helpSnapshot(view)
+      })
+      const command = buildHelpCommand({
+        promptText: buildHelpPrompt(question ?? '', transcript ?? []),
+        systemPromptFile,
+        model: getConfig().helpModel
+      })
+      return runHelp({ command, shell: getConfig().shell, cwd: getConfig().projectDir })
+    }
+  )
 
   // ----- create-menu data -----
   ipcMain.handle('agents:list', () => listAgents(getConfig().projectDir))

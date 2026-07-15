@@ -143,6 +143,10 @@ export interface AppConfig {
    * (quota.ts). Global default, overridable per session (SessionDef.autoResume).
    */
   autoResumeQuota: boolean
+  /** Show the floating "?" help-assistant button (PLAN C9). */
+  helpButton: boolean
+  /** Model alias for help invocations (`claude -p --model <x>`); haiku default. */
+  helpModel: string
 }
 
 /** A selectable language for the settings picker: stable code + native label. */
@@ -293,6 +297,12 @@ export interface RoadmapArchiveResponse {
 /** Sidebar navigation rail views: supervisor Home (C5), Agents, Roadmap (C3). */
 export type DeckView = 'home' | 'agents' | 'roadmap'
 
+/** One question/answer pair of the help popup (replayed for continuity, C9). */
+export interface HelpExchange {
+  question: string
+  answer: string
+}
+
 // ----- IPC channel payloads -----
 
 export interface PtyDataEvent {
@@ -376,6 +386,9 @@ export interface DeckApi {
 
   // supervisor (PLAN C5): spawn (or return) the Home supervisor session.
   ensureSupervisor(): Promise<SessionRuntime>
+
+  // help assistant (PLAN C9): one throwaway `claude -p` question, view-aware.
+  askHelp(question: string, view: DeckView, transcript: HelpExchange[]): Promise<string>
 
   // templates (portable team recipes)
   listTemplates(): Promise<TemplateSummary[]>

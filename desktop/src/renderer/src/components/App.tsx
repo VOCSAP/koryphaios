@@ -7,6 +7,7 @@ import { DisplayModeBar } from './DisplayModeBar'
 import { NavRail } from './NavRail'
 import { RoadmapView } from './RoadmapView'
 import { HomeView } from './HomeView'
+import { HelpAssistant } from './HelpAssistant'
 import { SettingsView } from './SettingsView'
 import { WorkspacesDialog } from './WorkspacesDialog'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -111,6 +112,7 @@ export function App(): React.JSX.Element {
           onConfirm={() => void confirmRestore()}
         />
       )}
+      <HelpAssistant />
       <Toast />
     </div>
   )

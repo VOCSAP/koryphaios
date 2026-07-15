@@ -26,7 +26,10 @@ const DEFAULT_CONFIG: AppConfig = {
   palette: DEFAULT_PALETTE,
   rememberScopeSecrets: true,
   // Quota auto-resume is opt-in (PLAN C1): off unless the operator enables it.
-  autoResumeQuota: false
+  autoResumeQuota: false,
+  // Floating "?" help assistant (PLAN C9): shown by default, Haiku for cost.
+  helpButton: true,
+  helpModel: 'haiku'
 }
 
 function dataDir(): string {

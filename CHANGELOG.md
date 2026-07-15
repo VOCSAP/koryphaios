@@ -34,6 +34,18 @@
   (its token only lives for the current app launch).
   Tests: `tests/desktop-deck-control.test.ts` (dispatch, auth, guards, and an
   end-to-end MCP stdio round-trip against a live control endpoint).
+- **Floating "?" help assistant (PLAN C9).** A floating button (all views)
+  opens a chat popup where each question runs a throwaway `claude -p` with an
+  app-generated system prompt: the code-constant role (C8 rule) plus the
+  active view and a JSON snapshot of what it shows (roadmap items, session
+  list). The assistant is TECHNICALLY read-only, not just prompt-constrained:
+  `--strict-mcp-config` loads zero MCP servers and `--disallowedTools` denies
+  every mutating tool (Read/Grep/Glob stay, so answers can be grounded in the
+  repo). Popup continuity replays the last 4 exchanges; a start marker strips
+  login-profile noise from the captured output. Options in Settings > General
+  and via right-click on the button: hide it, pick the model (default
+  `haiku`). New `desktop/src/main/help-assistant.ts` +
+  `tests/desktop-help.test.ts`.
 
 ## v0.4.0 -- 2026-07-14
 

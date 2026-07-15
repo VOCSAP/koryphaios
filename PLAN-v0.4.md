@@ -33,6 +33,7 @@
 | 2026-07-14 | session exploration (suite) | C5 | deck-control.ts (endpoint loopback + garde-fous ownership/cap), MCP stdio sans dépendance (build:mcp -> deck-plugin/mcp), supervisor.ts (--mcp-config généré + briefing C2), rail Home + HomeView (spawn lazy), profil sélectionnable Settings, filtres Agents/tuiles, 5 tests dont MCP stdio de bout en bout. Desktop bump 0.5.0. **Tous les chantiers C1-C5 sont codés.** | Validations manuelles restantes (C1 épisode réel, C3 UI, C4 2 worktrees, C5 scénario cible) au premier lancement réel de l'app. |
 | 2026-07-14 | session exploration (suite) | — | Exploration C6/C7/C8 (EXPLORATION §7) : vue Worktrees, import de plan par agent one-shot, harness superviseur via --append-system-prompt-file (vérifié doc CC). **Dogfooding réel de C3** : items C6/C7/C8 créés via les tools roadmap_* de cette session (broker auto-spawné) puis exportés par `cli.ts roadmap-export` → `roadmap-seed-v0.6.json` (re-keyé github.com/vocsap/claude-peers-mcp), importable sur ton poste : `bun cli.ts roadmap-import roadmap-seed-v0.6.json`. | Prochain chantier au choix : C6 ou C7 (C8 traité). |
 | 2026-07-14 | session exploration (suite) | C8 | Verrouillage du harness superviseur (décision sécurité opérateur) : SUPERVISOR_SYSTEM_PROMPT constante code ancrée via --append-system-prompt-file (fichier régénéré à chaque spawn, écrasé si trafiqué, re-passé au resume), retrait de l'option supervisorAgent de Settings, prompt d'import C7 verrouillé par la même règle. bun test 313/313. | C6 (vue Worktrees) et C7 (import de plan) restent à implémenter. |
+| 2026-07-14 | session exploration (suite) | C9 | Bouton d'aide flottant : help-assistant.ts (claude -p jetable, system prompt constante code + snapshot de la vue, --strict-mcp-config + --disallowedTools = lecture seule technique, marqueur anti-bruit de profil), popup de chat HelpAssistant.tsx, options Settings + clic droit (toggle, modèle défaut haiku), 8 tests dont faux binaire claude. | Validation manuelle : réponse ancrée dans la vue Roadmap au premier lancement réel. Restent : C6, C7. |
 
 ---
 
@@ -334,6 +335,38 @@ détourner silencieusement la session qui pilote l'app.
 ### Done quand
 - [x] Le rôle du superviseur est défini exclusivement par le code de l'app,
       ancré au system prompt, ré-ancré à chaque spawn/resume.
+
+---
+
+## C9 — Bouton d'aide flottant « ? » (~1 j) — FAIT
+
+**Objectif** : un assistant de compréhension/décision contextuel (« quelle
+brique traiter ? », « à quoi sert cette vue ? ») en invocations `claude -p`
+jetables, **sans toucher au contexte du superviseur** (EXPLORATION §7.4).
+
+### Jalons
+- [x] `help-assistant.ts` : system prompt = **constante du code** (règle C8)
+      + vue active + instantané JSON composé par l'app ; commande `claude -p`
+      via le shell de login (marqueur de démarrage strippant le bruit des
+      profils du stdout) ; continuité popup par rejeu des 4 derniers échanges.
+- [x] Lecture seule **technique** : `--strict-mcp-config` (zéro MCP chargé)
+      + `--disallowedTools` Bash/Edit/Write/Task/Web... (Read/Grep/Glob
+      restent pour ancrer les réponses dans le repo) + consigne « tu ne peux
+      pas agir » dans le prompt.
+- [x] IPC `help:ask` (snapshot par vue : roadmap → items compacts,
+      agents/home → sessions) ; `HelpAssistant.tsx` : bouton flottant +
+      popup de chat (transcript local, Entrée pour envoyer).
+- [x] Options : toggle `helpButton` + modèle `helpModel` (défaut **haiku**)
+      dans Settings > Général ET via clic droit sur le bouton (menu
+      contextuel : choix du modèle, masquer).
+- [x] Tests `tests/desktop-help.test.ts` (8 cas) : prompt/troncature/
+      transcript, flags de verrouillage, fallback modèle, aller-retour réel
+      contre un faux binaire `claude` (dont bruit de profil strippé et
+      erreur remontée).
+
+### Done quand
+- [ ] Une question posée depuis la vue Roadmap reçoit une réponse ancrée
+      dans les items affichés (**validation manuelle opérateur**).
 
 ---
 

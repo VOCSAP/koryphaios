@@ -62,6 +62,11 @@ discovery.
   by the application (code constants, re-anchored at system-prompt level on
   every spawn) -- deliberately NOT operator- or repo-configurable, so a cloned
   repository can never silently repurpose the session that pilots the app.
+- **Floating "?" help assistant.** Ask about the app or about what's on
+  screen ("which roadmap item should I tackle next?"): each question is a
+  one-shot `claude -p` call carrying the active view's context, technically
+  read-only (no MCP, no mutating tools) -- an advisor, never an actor.
+  Right-click the button to hide it or switch the model (Haiku by default).
 - **English / French UI**, switchable live.
 
 ---

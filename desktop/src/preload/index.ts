@@ -3,6 +3,8 @@ import type {
   AppConfig,
   CreateSessionInput,
   DeckApi,
+  DeckView,
+  HelpExchange,
   LaunchConfig,
   PtyDataEvent,
   PtyExitEvent,
@@ -89,6 +91,8 @@ const api: DeckApi = {
   roadmapArchive: (id: string) => ipcRenderer.invoke('roadmap:archive', id),
   removeWorktree: (path: string) => ipcRenderer.invoke('worktree:remove', path),
   ensureSupervisor: () => ipcRenderer.invoke('supervisor:ensure'),
+  askHelp: (question: string, view: DeckView, transcript: HelpExchange[]) =>
+    ipcRenderer.invoke('help:ask', question, view, transcript),
 
   listTemplates: () => ipcRenderer.invoke('template:list'),
   exportTemplate: (name: string, local: boolean) =>

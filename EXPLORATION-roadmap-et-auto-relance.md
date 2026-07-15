@@ -618,6 +618,28 @@ qu'il veut dans le terminal du superviseur — le verrou protège contre le
 détournement *silencieux* (fichiers portés par un repo, config), pas contre
 l'utilisateur légitime de sa propre machine ; c'est le bon périmètre.
 
+### 7.4 Bouton d'aide flottant « ? » (→ PLAN C9)
+
+Assistant de compréhension/décision contextuel, volontairement séparé du
+superviseur (son contexte n'a pas à être chargé d'aide à l'usage) :
+
+- **Mécanisme** : chaque question = une invocation `claude -p` jetable,
+  lancée par le main process à travers le même shell de login que les
+  sessions (résolution du binaire `claude` via PATH ; un marqueur de
+  démarrage strippe le bruit des profils — nvm/conda — du stdout capturé).
+- **Contexte** : system prompt = constante du code (règle C8) + « vue
+  active » + instantané JSON composé par l'app (roadmap → items compacts ;
+  agents/home → liste des sessions). Continuité du popup par rejeu des 4
+  derniers échanges dans le prompt (le CLI est sans état).
+- **Lecture seule TECHNIQUE, pas seulement promptée** : `--strict-mcp-config`
+  sans mcp-config = zéro serveur MCP chargé (ni claude-peers ni
+  deck-control), `--disallowedTools` sur tout ce qui mute (Bash/Edit/Write/
+  Task/Web...). Read/Grep/Glob restent disponibles pour ancrer les réponses
+  dans le repo. Le prompt dit en plus « tu ne peux pas agir ; explique
+  comment l'opérateur ou le superviseur peut le faire ».
+- **Options** : toggle du bouton + modèle (défaut **haiku**, coût/latence)
+  dans Settings > Général, et les deux aussi via clic droit sur le bouton.
+
 ## 8. Recommandation d'ensemble (mise à jour)
 
 Ordre de valeur/risque croissant, chaque étape rendant la suivante plus utile :

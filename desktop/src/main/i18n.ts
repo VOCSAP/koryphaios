@@ -252,6 +252,20 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.worktreeRemoved': 'Worktree removed (branch kept)',
   'toast.worktreeRemoveFailed': 'Worktree kept: git refused (uncommitted changes?)',
   'common.edit': 'Edit…',
+  'help.buttonTitle': 'Help assistant (right-click: options)',
+  'help.title': 'Help assistant',
+  'help.hint':
+    'Ask about the app or about what you see on screen — e.g. "which roadmap item should I tackle next?". Read-only advisor: it cannot act.',
+  'help.placeholder': 'Your question… (Enter to send)',
+  'help.send': 'Send',
+  'help.thinking': 'Thinking…',
+  'help.failed': 'Help invocation failed: {error}',
+  'help.model': 'Model: {model}',
+  'help.hide': 'Hide the help button (re-enable in Settings)',
+  'settings.helpButton': 'Show the floating "?" help button',
+  'settings.helpModel': 'Help assistant model',
+  'settings.helpModelHelp':
+    "Each question is a one-shot `claude -p` call with the active view's context. Haiku is cheap and usually enough.",
   'nav.home': 'Home',
   'home.starting': 'Starting the supervisor session…',
   'home.body':

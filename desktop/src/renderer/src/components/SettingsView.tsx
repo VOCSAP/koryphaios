@@ -146,6 +146,29 @@ export function SettingsView(): React.JSX.Element {
                 <span>{t('settings.autoResumeQuota')}</span>
               </label>
               <small className="field-check-help">{t('settings.autoResumeQuotaHelp')}</small>
+
+              <label className="field field-check">
+                <input
+                  type="checkbox"
+                  checked={config.helpButton !== false}
+                  onChange={(e) => set('helpButton', e.target.checked)}
+                />
+                <span>{t('settings.helpButton')}</span>
+              </label>
+              <label className="field">
+                <span>{t('settings.helpModel')}</span>
+                <select
+                  value={config.helpModel}
+                  onChange={(e) => set('helpModel', e.target.value)}
+                >
+                  {['haiku', 'sonnet', 'opus'].map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <small className="field-check-help">{t('settings.helpModelHelp')}</small>
             </>
           )}
 
