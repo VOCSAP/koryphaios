@@ -550,6 +550,10 @@ export interface DeckApi {
 
   // embedded browser (PLAN D1): absolute path of the webview guest preload.
   getBrowserPreloadPath(): Promise<string>
+  /** Screenshot of the browser webview (by webContents id) as a PNG data URL. */
+  captureBrowser(webContentsId: number): Promise<string | null>
+  /** Persist an annotated screenshot; returns the absolute file path. */
+  saveAnnotation(dataUrl: string): Promise<string | null>
 
   // supervisor (PLAN C5): spawn (or return) the Home supervisor session.
   ensureSupervisor(): Promise<SessionRuntime>

@@ -204,6 +204,16 @@ An embedded web browser for web-front work, opened two ways:
   docked agent's prompt (bracketed paste, nothing auto-submitted): complete the
   sentence and press Enter. With no docked agent the description is copied to
   the clipboard. `Esc` cancels.
+- **Viewport presets** -- render the page at a device size (iPhone SE, iPad,
+  laptop…) centred in the pane. The active preset is appended to every element
+  and annotation prompt (`[viewport: 375x667 – iPhone SE]`), so the agent knows
+  which breakpoint you were looking at when you complained about the layout.
+- **Draw mode (`✏`)** -- sketch freehand over the page (red strokes on a canvas
+  overlay), then `📸`: the page screenshot is composited with your strokes,
+  saved as a PNG under app state (pruned after 7 days), and its file path is
+  pasted into the docked agent's prompt -- the agent `Read`s the image and sees
+  exactly what you circled. `⌫` clears the sketch, `Esc` exits. Covers the
+  feedback the element picker can't express ("this whole block is misaligned").
 
 Pages load in an isolated `persist:deck-browser` partition; `window.open` /
 `target=_blank` links open in the system browser, never in new Electron

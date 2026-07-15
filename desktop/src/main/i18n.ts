@@ -324,6 +324,18 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.pickSent': "Element description pasted into the docked agent's prompt",
   'toast.pickCopied': 'No running docked agent — element description copied',
   'tile.browserTitle': 'Open the browser view with this agent',
+  'browser.viewport': 'Simulated device size',
+  'browser.viewportResponsive': 'Responsive (fill)',
+  'browser.viewportContext': '[viewport: {w}x{h} – {name}] ',
+  'browser.draw':
+    'Annotate the page (draw, then 📸 sends a screenshot to the docked agent; Esc cancels)',
+  'browser.drawSend': 'Send the annotated screenshot',
+  'browser.drawClear': 'Clear the drawing',
+  'browser.drawPrompt':
+    'I annotated a screenshot of {url}: read the image file {path} to see the highlighted areas. ',
+  'toast.drawSent': "Annotated screenshot pasted into the docked agent's prompt",
+  'toast.drawCopied': 'No running docked agent — annotation prompt copied',
+  'toast.drawFailed': 'Screenshot capture failed',
   'nav.roadmap': 'Roadmap',
   'roadmap.title': 'Roadmap',
   'roadmap.add': '＋ Add item',

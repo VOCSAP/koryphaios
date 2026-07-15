@@ -102,6 +102,8 @@ const api: DeckApi = {
   collectDiff: (dir: string) => ipcRenderer.invoke('diff:collect', dir),
   reviewDiff: (dir: string) => ipcRenderer.invoke('diff:review', dir),
   getBrowserPreloadPath: () => ipcRenderer.invoke('browser:preload-path'),
+  captureBrowser: (webContentsId: number) => ipcRenderer.invoke('browser:capture', webContentsId),
+  saveAnnotation: (dataUrl: string) => ipcRenderer.invoke('browser:save-annotation', dataUrl),
   ensureSupervisor: () => ipcRenderer.invoke('supervisor:ensure'),
   askHelp: (question: string, view: DeckView, transcript: HelpExchange[]) =>
     ipcRenderer.invoke('help:ask', question, view, transcript),

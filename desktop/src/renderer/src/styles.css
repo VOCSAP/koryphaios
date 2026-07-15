@@ -2636,6 +2636,12 @@ code {
   border-color: var(--accent);
 }
 
+/* Send-annotation: accented so the "do it" action stands out while drawing. */
+.browser-btn-accent {
+  color: var(--accent);
+}
+
+.browser-viewport-select,
 .browser-dock-select {
   max-width: 220px;
   background: var(--bg);
@@ -2648,14 +2654,42 @@ code {
 
 .browser-body {
   position: relative;
+  display: flex;
   flex: 1;
   min-height: 0;
   background: var(--bg-2);
+  /* Device presets larger than the pane scroll instead of clipping. */
+  overflow: auto;
+}
+
+/* Wraps the webview (+ draw canvas): fills the pane, or a fixed device size. */
+.browser-frame {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.browser-frame-device {
+  flex: none;
+  margin: auto;
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
 }
 
 .browser-webview {
   width: 100%;
   height: 100%;
+}
+
+/* Draw-mode overlay (D1b): strokes land here, composited into the screenshot. */
+.browser-draw-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 4;
+  cursor: crosshair;
+  touch-action: none;
 }
 
 /* Transparent overlay so divider drags keep receiving mouse events (webviews

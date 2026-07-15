@@ -18,6 +18,8 @@ export interface WebviewTag extends HTMLElement {
   openDevTools(): void
   isDevToolsOpened(): boolean
   send(channel: string, ...args: unknown[]): void
+  /** Id of the guest webContents (used by the main-side screenshot capture). */
+  getWebContentsId(): number
 }
 
 /** `did-navigate` / `did-navigate-in-page` payload subset. */
