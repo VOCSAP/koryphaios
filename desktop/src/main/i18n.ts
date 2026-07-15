@@ -358,7 +358,18 @@ export const EN_DEFAULTS: Record<string, string> = {
   'inbox.close': 'Close',
   'inbox.empty':
     "No messages yet. Agents can write to you with send_message to 'operator' — questions, results, blockers.",
-  'inbox.hint': 'Read-only — answer via the megaphone at the bottom of the Agents sidebar.'
+  'inbox.hint': 'Read-only — answer via the megaphone at the bottom of the Agents sidebar.',
+  'worktrees.diff': 'Diff',
+  'sidebar.viewDiff': 'View diff',
+  'diff.title': 'Diff — {name}',
+  'diff.branchSection': 'Branch commits vs {base}',
+  'diff.uncommittedSection': 'Uncommitted changes',
+  'diff.noChanges': 'no changes',
+  'diff.allClean': 'Working tree clean — nothing to review.',
+  'diff.untracked': 'untracked',
+  'diff.truncated': 'Diff truncated for display (the review agent reads the full one).',
+  'diff.review': '🔎 Have an agent review this',
+  'toast.reviewStarted': 'Review agent started — it reports to the team-lead when one is set'
 }
 
 /**

@@ -53,11 +53,15 @@ interface DeckState {
   /** Messages arrived while the panel was closed. */
   inboxUnread: number
   inboxOpen: boolean
+  /** Diff panel target (PLAN C13): a dir to diff + display title, or null. */
+  diffTarget: { dir: string; title: string } | null
 
   init(): Promise<void>
   setView(view: DeckView): void
   /** Open/close the operator inbox panel (opening clears the unread count). */
   openInbox(open: boolean): void
+  /** Open the diff panel on a dir (null closes it). */
+  openDiff(target: { dir: string; title: string } | null): void
   setSelected(id: string | null): void
   setMaximized(id: string | null): void
   openSettings(open: boolean): void
@@ -126,6 +130,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   inboxMessages: [],
   inboxUnread: 0,
   inboxOpen: false,
+  diffTarget: null,
 
   async init() {
     const [sessions, config, i18n, workspaces, templates] = await Promise.all([
@@ -203,6 +208,7 @@ export const useDeck = create<DeckState>((set, get) => ({
 
   setView: (view) => set({ view }),
   openInbox: (open) => set({ inboxOpen: open, inboxUnread: 0 }),
+  openDiff: (target) => set({ diffTarget: target }),
   setSelected: (id) => set({ selectedId: id }),
   setMaximized: (id) => set({ maximizedId: id }),
   openSettings: (open) => set({ settingsOpen: open }),

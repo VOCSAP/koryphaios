@@ -330,6 +330,29 @@ export interface WorktreeRow {
   sessionName: string | null
 }
 
+// ----- Diff / review (PLAN C13) -----
+// Mirror of main/diff-service.ts shapes (that module stays import-free for its
+// bun unit tests). Keep in sync.
+
+export interface DiffFile {
+  path: string
+  /** Added lines; null for binary and untracked files. */
+  additions: number | null
+  deletions: number | null
+  untracked: boolean
+}
+
+export interface SessionDiff {
+  /** Working tree vs HEAD + untracked files. */
+  uncommitted: DiffFile[]
+  /** Commits of the branch vs `base` (merge-base); null when no base. */
+  branch: DiffFile[] | null
+  base: string | null
+  /** Raw unified diff, capped (see truncated). */
+  text: string
+  truncated: boolean
+}
+
 /** One question/answer pair of the help popup (replayed for continuity, C9). */
 export interface HelpExchange {
   question: string
@@ -444,6 +467,12 @@ export interface DeckApi {
   listWorktrees(): Promise<WorktreeRow[]>
   /** Create a fresh worktree on a NEW branch (init hook runs in background). */
   createWorktree(branch: string): Promise<void>
+
+  // diff / review (PLAN C13)
+  /** Full diff picture of a dir (uncommitted + branch-vs-main for worktrees). */
+  collectDiff(dir: string): Promise<SessionDiff>
+  /** Spawn a one-shot review agent on the dir's diff (reports to the lead). */
+  reviewDiff(dir: string): Promise<boolean>
 
   // supervisor (PLAN C5): spawn (or return) the Home supervisor session.
   ensureSupervisor(): Promise<SessionRuntime>

@@ -16,6 +16,7 @@ export function WorktreesView(): React.JSX.Element {
   const showToast = useDeck((s) => s.showToast)
   const createSession = useDeck((s) => s.createSession)
   const setView = useDeck((s) => s.setView)
+  const openDiff = useDeck((s) => s.openDiff)
 
   const [rows, setRows] = useState<WorktreeRow[]>([])
   const [loaded, setLoaded] = useState(false)
@@ -136,6 +137,11 @@ export function WorktreesView(): React.JSX.Element {
                 {!w.sessionId && !w.main && (
                   <button onClick={() => void openSession(w)}>{t('worktrees.openSession')}</button>
                 )}
+                <button
+                  onClick={() => openDiff({ dir: w.path, title: `⎇ ${w.branch ?? w.path}` })}
+                >
+                  {t('worktrees.diff')}
+                </button>
                 <button onClick={() => copyPath(w)}>{t('worktrees.copyPath')}</button>
                 {!w.main && (
                   <button className="danger" onClick={() => setConfirmRemove(w)}>

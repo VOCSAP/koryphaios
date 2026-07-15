@@ -270,5 +270,16 @@
   "inbox.title": "Courrier de l'opérateur",
   "inbox.close": "Fermer",
   "inbox.empty": "Aucun message pour l'instant. Les agents peuvent t'écrire via send_message vers 'operator' — questions, résultats, blocages.",
-  "inbox.hint": "Lecture seule — réponds via le mégaphone en bas de la barre Agents."
+  "inbox.hint": "Lecture seule — réponds via le mégaphone en bas de la barre Agents.",
+  "worktrees.diff": "Diff",
+  "sidebar.viewDiff": "Voir le diff",
+  "diff.title": "Diff — {name}",
+  "diff.branchSection": "Commits de la branche vs {base}",
+  "diff.uncommittedSection": "Modifications non commitées",
+  "diff.noChanges": "aucun changement",
+  "diff.allClean": "Working tree propre — rien à relire.",
+  "diff.untracked": "non suivi",
+  "diff.truncated": "Diff tronqué pour l'affichage (l'agent de review lit le diff complet).",
+  "diff.review": "🔎 Faire relire par un agent",
+  "toast.reviewStarted": "Agent de review lancé — il s'adresse au team-lead s'il y en a un"
 }

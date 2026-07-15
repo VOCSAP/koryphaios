@@ -96,6 +96,8 @@ const api: DeckApi = {
   removeWorktree: (path: string) => ipcRenderer.invoke('worktree:remove', path),
   listWorktrees: () => ipcRenderer.invoke('worktree:list'),
   createWorktree: (branch: string) => ipcRenderer.invoke('worktree:create', branch),
+  collectDiff: (dir: string) => ipcRenderer.invoke('diff:collect', dir),
+  reviewDiff: (dir: string) => ipcRenderer.invoke('diff:review', dir),
   ensureSupervisor: () => ipcRenderer.invoke('supervisor:ensure'),
   askHelp: (question: string, view: DeckView, transcript: HelpExchange[]) =>
     ipcRenderer.invoke('help:ask', question, view, transcript),

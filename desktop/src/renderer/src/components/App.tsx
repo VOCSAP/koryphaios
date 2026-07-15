@@ -10,6 +10,7 @@ import { WorktreesView } from './WorktreesView'
 import { HomeView } from './HomeView'
 import { HelpAssistant } from './HelpAssistant'
 import { InboxPanel } from './InboxPanel'
+import { DiffPanel } from './DiffPanel'
 import { SettingsView } from './SettingsView'
 import { WorkspacesDialog } from './WorkspacesDialog'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -117,6 +118,7 @@ export function App(): React.JSX.Element {
         />
       )}
       {inboxOpen && <InboxPanel />}
+      <DiffPanel />
       <HelpAssistant />
       <Toast />
     </div>

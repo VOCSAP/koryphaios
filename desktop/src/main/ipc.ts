@@ -21,6 +21,7 @@ import { resolveBrokerEndpoint } from './broker-client'
 import { archiveRoadmap, computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
 import { createSessionWithWorktree } from './create-session'
 import { composePlanImportPrompt } from './import-plan'
+import { collectDiff, composeDiffReviewPrompt } from './diff-service'
 import {
   createWorktree,
   listWorktrees,
@@ -194,6 +195,38 @@ export function registerIpc({
     const wt = await createWorktree(getConfig().projectDir, branch ?? '')
     const init = resolveLaunchConfig(getConfig().projectDir).worktreeInit
     if (init) runWorktreeInit(wt.path, init)
+  })
+
+  // ----- diff / review (PLAN C13) -----
+  // Base resolution: a NON-MAIN worktree of the project is compared to the
+  // main worktree's branch (merge-base); anything else (main tree, foreign
+  // cwd) gets uncommitted-only. Never guessed from config.
+  const diffBase = async (dir: string): Promise<string | null> => {
+    try {
+      const all = await listWorktrees(getConfig().projectDir)
+      const main = all.find((w) => w.main)
+      const target = all.find((w) => w.path === resolvePath(dir))
+      if (!main?.branch || !target || target.main) return null
+      return main.branch
+    } catch {
+      return null
+    }
+  }
+  ipcMain.handle('diff:collect', async (_e, dir: string) =>
+    collectDiff(dir, await diffBase(dir))
+  )
+  // One-shot review agent (C7 pattern, code-constant prompt): reads the diff
+  // in place and reports to the team-lead peer (C10) when one is live.
+  ipcMain.handle('diff:review', async (_e, dir: string) => {
+    const lead =
+      service.list().find((s) => s.lead && s.status !== 'exited' && s.peerId)?.peerId ?? null
+    await createSessionWithWorktree(service, getConfig().projectDir, {
+      name: 'reviewer',
+      cwd: dir,
+      prompt: composeDiffReviewPrompt({ dir, base: await diffBase(dir), leadPeerId: lead }),
+      announce: `one-shot reviewer: reviews the diff in "${dir}"`
+    })
+    return true
   })
 
   // ----- supervisor (PLAN C5) -----

@@ -30,6 +30,7 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
   const setColor = useDeck((s) => s.setColor)
   const setAutoResume = useDeck((s) => s.setAutoResume)
   const showToast = useDeck((s) => s.showToast)
+  const openDiff = useDeck((s) => s.openDiff)
 
   // Effective auto-resume: per-session override wins, else the global setting.
   const autoResumeOn = session.autoResume ?? config.autoResumeQuota
@@ -245,6 +246,10 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
               label: `👑 ${t('sidebar.setLead')}`,
               onSelect: () => void window.api.setLead(session.id),
               disabled: !!session.lead
+            },
+            {
+              label: t('sidebar.viewDiff'),
+              onSelect: () => openDiff({ dir: session.cwd, title: session.name })
             }
           ]}
         />

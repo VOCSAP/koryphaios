@@ -2043,3 +2043,129 @@ code {
   color: var(--fg-dim);
   font-size: 11px;
 }
+
+/* ---------- Diff / review panel (PLAN C13) ---------- */
+
+.diff-modal {
+  width: 760px;
+  max-width: calc(100vw - 60px);
+  height: 78vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.diff-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.diff-title {
+  flex: 1;
+  font-weight: 600;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-body {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 10px 2px;
+}
+
+.diff-files-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+  margin-bottom: 4px;
+}
+
+.diff-file {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+  font-family: var(--mono, monospace);
+  padding: 1px 0;
+}
+
+.diff-file-path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-file-counts {
+  white-space: nowrap;
+}
+
+.diff-add {
+  color: #4ec97a;
+}
+
+.diff-del {
+  color: #e46a6a;
+}
+
+.diff-file-new {
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.diff-files-empty {
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.diff-truncated {
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.diff-text {
+  margin: 0;
+  font-size: 11px;
+  font-family: var(--mono, monospace);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.diff-line-add {
+  color: #4ec97a;
+  background: color-mix(in srgb, #4ec97a 8%, transparent);
+}
+
+.diff-line-del {
+  color: #e46a6a;
+  background: color-mix(in srgb, #e46a6a 8%, transparent);
+}
+
+.diff-line-hunk {
+  color: #6ab0f3;
+}
+
+.diff-line-file {
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.diff-line-section {
+  color: var(--accent);
+  font-weight: 600;
+}
