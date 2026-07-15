@@ -65,3 +65,53 @@ test("toTemplate -> JSON -> parseTemplate round-trips", () => {
   expect(back!.name).toBe("rt");
   expect(templateToInputs(back!)).toEqual([{ name: "a", args: "--agent a", effort: "high", color: "#abc" }]);
 });
+
+// ----- composer fields + lead uniqueness (PLAN C18) -----
+
+test("composer fields (agent/model/worktreeBranch/announce) round-trip to inputs", () => {
+  const tpl = parseTemplate({
+    type: TEMPLATE_TYPE,
+    version: 1,
+    name: "team",
+    sessions: [
+      {
+        name: "lead",
+        agent: "team-lead",
+        model: "opus",
+        prompt: "coordinate the team",
+        announce: "team-lead joined",
+        lead: true,
+      },
+      { name: "dev", agent: "developer", worktreeBranch: "agent/dev-1" },
+    ],
+  })!;
+  expect(tpl).not.toBeNull();
+  const inputs = templateToInputs(tpl);
+  expect(inputs[0]).toEqual({
+    name: "lead",
+    agent: "team-lead",
+    model: "opus",
+    prompt: "coordinate the team",
+    announce: "team-lead joined",
+    lead: true,
+  });
+  expect(inputs[1]).toEqual({ name: "dev", agent: "developer", worktreeBranch: "agent/dev-1" });
+});
+
+test("parseTemplate normalizes multiple leads down to the FIRST one", () => {
+  const tpl = parseTemplate({
+    type: TEMPLATE_TYPE,
+    version: 1,
+    sessions: [{ name: "a" }, { name: "b", lead: true }, { name: "c", lead: true }],
+  })!;
+  expect(tpl.sessions.map((s) => !!s.lead)).toEqual([false, true, false]);
+});
+
+test("parseTemplate rejects non-string composer fields", () => {
+  expect(
+    parseTemplate({ type: TEMPLATE_TYPE, version: 1, sessions: [{ name: "a", agent: 3 }] })
+  ).toBeNull();
+  expect(
+    parseTemplate({ type: TEMPLATE_TYPE, version: 1, sessions: [{ name: "a", worktreeBranch: {} }] })
+  ).toBeNull();
+});

@@ -107,6 +107,8 @@ const api: DeckApi = {
   askDigest: () => ipcRenderer.invoke('help:digest'),
 
   listTemplates: () => ipcRenderer.invoke('template:list'),
+  readTemplateFile: (path: string) => ipcRenderer.invoke('template:read', path),
+  writeTemplateFile: (name, local, tpl) => ipcRenderer.invoke('template:write', name, local, tpl),
   exportTemplate: (name: string, local: boolean) =>
     ipcRenderer.invoke('template:export', name, local),
   applyTemplate: (path: string, mode: 'append' | 'replace') =>

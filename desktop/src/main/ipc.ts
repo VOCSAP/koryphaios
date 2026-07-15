@@ -52,7 +52,7 @@ import {
   globalTemplatesDir,
   localTemplatesDir
 } from './template-store'
-import { toTemplate, templateToInputs } from '@shared/template'
+import { parseTemplate, toTemplate, templateToInputs } from '@shared/template'
 import { availableLocales, loadDict, resolveLocale } from './i18n'
 
 /**
@@ -430,10 +430,31 @@ export function registerIpc({
       service.closeAll()
       getWindow()?.webContents.send('workspace:current', null)
     }
+    // The template's lead becomes the window's ONLY when no lead exists yet
+    // (PLAN C18) — applying a team must not silently steal the crown.
+    const hasLead = service.list().some((s) => s.lead && s.status !== 'exited')
     // Each peer spawns in this window's current project dir + group (no cwd in
-    // the template); order is preserved by creation order.
-    for (const input of inputs) service.create(input)
+    // the template); order is preserved by creation order. Routed through the
+    // worktree-aware path so composer templates with worktreeBranch work.
+    for (const input of inputs) {
+      await createSessionWithWorktree(
+        service,
+        getConfig().projectDir,
+        hasLead ? { ...input, lead: undefined } : input
+      )
+    }
     return inputs.length
+  })
+
+  // ----- template composer (PLAN C18): read/write without spawning -----
+  ipcMain.handle('template:read', (_e, path: string) => readTemplate(path))
+  ipcMain.handle('template:write', (_e, name: string, local: boolean, tpl: unknown) => {
+    // parseTemplate validates the shape AND normalizes lead uniqueness.
+    const parsed = parseTemplate(tpl)
+    if (!parsed) throw new Error('invalid template')
+    if (name && name.trim()) parsed.name = name.trim()
+    const dir = local ? localTemplatesDir(getConfig().projectDir) : globalTemplatesDir()
+    return writeTemplate(dir, name || parsed.name || 'template', parsed)
   })
 
   // ----- forward service events to the renderer -----

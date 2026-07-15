@@ -394,7 +394,18 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.dispatchNoLead': 'No team-lead — designate one first (👑)',
   'toast.dispatchFailed': 'Dispatch failed (empty queue or broker unreachable)',
   'help.digestTitle': 'Resume digest — where things stand and what to do next',
-  'help.digestQuestion': '📋 Resume digest'
+  'help.digestQuestion': '📋 Resume digest',
+  'composer.new': '＋ New template',
+  'composer.edit': 'Edit',
+  'composer.duplicate': 'Duplicate',
+  'composer.createTitle': 'New template',
+  'composer.editTitle': 'Edit template',
+  'composer.templateName': 'Template name',
+  'composer.name': 'session name',
+  'composer.worktree': 'Worktree branch (fresh)',
+  'composer.addSession': '＋ Add a session',
+  'composer.save': 'Save template',
+  'toast.templateSaved': 'Template saved'
 }
 
 /**

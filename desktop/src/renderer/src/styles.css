@@ -2300,3 +2300,100 @@ code {
   border-color: color-mix(in srgb, var(--accent) 50%, transparent);
   color: var(--accent);
 }
+
+/* ---------- Template composer (PLAN C18) ---------- */
+
+.tc-modal {
+  width: 860px;
+  max-width: calc(100vw - 60px);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.tc-meta {
+  display: flex;
+  align-items: flex-end;
+  gap: 14px;
+}
+
+.tc-meta-name {
+  flex: 1;
+}
+
+.tc-body {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 10px 2px;
+}
+
+/* Hierarchy: the lead card alone, centered, on top of the team grid. */
+.tc-lead-row {
+  display: flex;
+  justify-content: center;
+}
+
+.tc-lead-row .tc-card {
+  width: min(420px, 100%);
+}
+
+.tc-team-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 10px;
+}
+
+.tc-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--bg-2);
+}
+
+.tc-card-lead {
+  border-color: color-mix(in srgb, #e2b23f 60%, transparent);
+}
+
+.tc-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tc-name {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 7px;
+}
+
+.tc-lead-toggle {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  cursor: pointer;
+}
+
+.tc-card .tc-remove {
+  opacity: 1;
+}
+
+.tc-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 10px;
+}
+
+.template-row-btn {
+  opacity: 1;
+}

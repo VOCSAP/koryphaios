@@ -392,7 +392,15 @@ const controlDeps: DeckControlDeps = {
     const inputs = templateToInputs(tpl)
     // One checkpoint covers the whole batch (all spawn into the project dir).
     if (inputs.length > 0) await checkpointBeforeSpawn(getConfig().projectDir)
-    for (const input of inputs) service.create(input)
+    // Template lead only lands when the window has none yet (PLAN C18).
+    const hasLead = service.list().some((s) => s.lead && s.status !== 'exited')
+    for (const input of inputs) {
+      await createSessionWithWorktree(
+        service,
+        getConfig().projectDir,
+        hasLead ? { ...input, lead: undefined } : input
+      )
+    }
     return inputs.length
   },
   saveTemplate: (name, local) => {

@@ -24,6 +24,17 @@ export interface TemplateSession {
   prompt?: string
   /** Team-lead entry (PLAN C10): at most one per template. */
   lead?: boolean
+  /** Subagent profile (`--agent`), composer-authored (PLAN C18). */
+  agent?: string
+  /** Model (`--model`), composer-authored (PLAN C18). */
+  model?: string
+  /**
+   * Fresh-worktree branch (PLAN C18): the session spawns in a NEW worktree on
+   * this branch. Applying twice fails on the existing branch — by design.
+   */
+  worktreeBranch?: string
+  /** Operator-authored join announce (PLAN C18). */
+  announce?: string
 }
 
 export interface SessionTemplate {
@@ -54,6 +65,10 @@ export interface TemplateInput {
   color?: string
   prompt?: string
   lead?: boolean
+  agent?: string
+  model?: string
+  worktreeBranch?: string
+  announce?: string
 }
 
 /**
@@ -94,6 +109,10 @@ export function templateToInputs(tpl: SessionTemplate): TemplateInput[] {
     if (s.color && s.color.trim()) input.color = s.color.trim()
     if (s.prompt && s.prompt.trim()) input.prompt = s.prompt.trim()
     if (s.lead) input.lead = true
+    if (s.agent && s.agent.trim()) input.agent = s.agent.trim()
+    if (s.model && s.model.trim()) input.model = s.model.trim()
+    if (s.worktreeBranch && s.worktreeBranch.trim()) input.worktreeBranch = s.worktreeBranch.trim()
+    if (s.announce && s.announce.trim()) input.announce = s.announce.trim()
     return input
   })
 }
@@ -102,7 +121,17 @@ function isTemplateSession(v: unknown): v is TemplateSession {
   if (!v || typeof v !== 'object') return false
   const s = v as Record<string, unknown>
   if (typeof s.name !== 'string') return false
-  for (const k of ['command', 'args', 'effort', 'color', 'prompt'] as const) {
+  for (const k of [
+    'command',
+    'args',
+    'effort',
+    'color',
+    'prompt',
+    'agent',
+    'model',
+    'worktreeBranch',
+    'announce'
+  ] as const) {
     if (s[k] !== undefined && typeof s[k] !== 'string') return false
   }
   if (s.lead !== undefined && typeof s.lead !== 'boolean') return false
@@ -112,7 +141,9 @@ function isTemplateSession(v: unknown): v is TemplateSession {
 /**
  * Validate untrusted JSON as a SessionTemplate. Returns null on any structural
  * problem (wrong type tag, missing/!array sessions, malformed entries) so a bad
- * file is simply skipped rather than crashing a scan.
+ * file is simply skipped rather than crashing a scan. Lead uniqueness (PLAN
+ * C10/C18: at most ONE per template) is normalized here — extra leads are
+ * demoted, first one wins.
  */
 export function parseTemplate(raw: unknown): SessionTemplate | null {
   if (!raw || typeof raw !== 'object') return null
@@ -120,10 +151,18 @@ export function parseTemplate(raw: unknown): SessionTemplate | null {
   if (r.type !== TEMPLATE_TYPE) return null
   if (typeof r.version !== 'number') return null
   if (!Array.isArray(r.sessions) || !r.sessions.every(isTemplateSession)) return null
+  let leadSeen = false
   const tpl: SessionTemplate = {
     type: TEMPLATE_TYPE,
     version: r.version,
-    sessions: (r.sessions as TemplateSession[]).map((s) => ({ ...s }))
+    sessions: (r.sessions as TemplateSession[]).map((s) => {
+      const copy = { ...s }
+      if (copy.lead) {
+        if (leadSeen) delete copy.lead
+        leadSeen = true
+      }
+      return copy
+    })
   }
   if (typeof r.name === 'string' && r.name.trim()) tpl.name = r.name.trim()
   return tpl

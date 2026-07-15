@@ -526,6 +526,14 @@ export interface DeckApi {
 
   // templates (portable team recipes)
   listTemplates(): Promise<TemplateSummary[]>
+  /** Full template content for the composer (PLAN C18); null when unreadable. */
+  readTemplateFile(path: string): Promise<import('./template').SessionTemplate | null>
+  /** Validate + write a composer-authored template; returns the path. */
+  writeTemplateFile(
+    name: string,
+    local: boolean,
+    tpl: import('./template').SessionTemplate
+  ): Promise<string>
   /** Export the current sessions as a template; `local` => project dir, else global. Returns the written path. */
   exportTemplate(name: string, local: boolean): Promise<string | null>
   /** Instantiate a template by path: 'append' adds to current sessions, 'replace' clears first. Returns count. */
