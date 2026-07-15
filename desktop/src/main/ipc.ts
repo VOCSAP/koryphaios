@@ -20,7 +20,7 @@ import {
 import { resolveBrokerEndpoint } from './broker-client'
 import { archiveRoadmap, computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
 import { createSessionWithWorktree } from './create-session'
-import { removeWorktree } from './worktree-service'
+import { listWorktrees, removeWorktree } from './worktree-service'
 import type { SessionService } from './session-service'
 import type { WorkspaceService } from './workspace-service'
 import { listAgents } from './agents'
@@ -169,11 +169,21 @@ export function registerIpc({
 
   // ----- help assistant (PLAN C9) -----
   // One throwaway `claude -p` per question: no MCP (--strict-mcp-config), no
-  // mutating tools, system prompt = code constant + app-composed snapshot of
-  // the active view. Never touches the supervisor's context.
-  const helpSnapshot = async (view: string): Promise<unknown> => {
-    try {
-      if (view === 'roadmap') {
+  // mutating tools. The assistant does NOT need tools to know the app state:
+  // the snapshot below is composed by the app (same broker/git reads the views
+  // use) and injected into the system prompt. It covers ALL views, not just
+  // the active one, so a roadmap question asked from the Agents view is still
+  // grounded; each part degrades to an error note instead of failing the call.
+  const helpSnapshot = async (): Promise<unknown> => {
+    const part = async <T>(fn: () => T | Promise<T>): Promise<T | { error: string }> => {
+      try {
+        return await fn()
+      } catch (e) {
+        return { error: e instanceof Error ? e.message : String(e) }
+      }
+    }
+    const [roadmap, worktrees] = await Promise.all([
+      part(async () => {
         const { endpoint, key } = roadmapCtx()
         const items = await listRoadmap(endpoint, key, {})
         return items.map((i) => ({
@@ -184,11 +194,14 @@ export function registerIpc({
           value: i.value,
           effort: i.effort,
           status: i.status,
-          tags: i.tags
+          tags: i.tags,
+          description: i.description.slice(0, 300)
         }))
-      }
-      // home / agents: the session set is the relevant screen content.
-      return service.list().map((s) => ({
+      }),
+      part(() => listWorktrees(getConfig().projectDir))
+    ])
+    const sessions = await part(() =>
+      service.list().map((s) => ({
         name: s.name,
         peer_id: s.peerId,
         status: s.status,
@@ -198,9 +211,8 @@ export function registerIpc({
         worktree_branch: s.worktree?.branch ?? null,
         supervisor: !!s.supervisor
       }))
-    } catch (e) {
-      return { snapshot_error: e instanceof Error ? e.message : String(e) }
-    }
+    )
+    return { roadmap_items: roadmap, sessions, git_worktrees: worktrees }
   }
   ipcMain.handle(
     'help:ask',
@@ -208,7 +220,7 @@ export function registerIpc({
       const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
       const systemPromptFile = writeHelpSystemPrompt(stateDir, {
         view,
-        data: await helpSnapshot(view)
+        data: await helpSnapshot()
       })
       const command = buildHelpCommand({
         promptText: buildHelpPrompt(question ?? '', transcript ?? []),

@@ -353,9 +353,14 @@ jetables, **sans toucher au contexte du superviseur** (EXPLORATION §7.4).
       + `--disallowedTools` Bash/Edit/Write/Task/Web... (Read/Grep/Glob
       restent pour ancrer les réponses dans le repo) + consigne « tu ne peux
       pas agir » dans le prompt.
-- [x] IPC `help:ask` (snapshot par vue : roadmap → items compacts,
-      agents/home → sessions) ; `HelpAssistant.tsx` : bouton flottant +
-      popup de chat (transcript local, Entrée pour envoyer).
+- [x] IPC `help:ask` — snapshot **multi-vues** (roadmap_items compacts +
+      description tronquée, sessions, git_worktrees ; chaque partie dégrade
+      en note d'erreur), vue active signalée : une question roadmap posée
+      depuis la vue Agents reste ancrée. Les données viennent de l'app (mêmes
+      lectures broker/git que les vues), PAS de tools MCP — c'est ce qui rend
+      la lecture seule compatible avec des réponses informées.
+      `HelpAssistant.tsx` : bouton flottant + popup de chat (transcript
+      local, Entrée pour envoyer).
 - [x] Options : toggle `helpButton` + modèle `helpModel` (défaut **haiku**)
       dans Settings > Général ET via clic droit sur le bouton (menu
       contextuel : choix du modèle, masquer).
