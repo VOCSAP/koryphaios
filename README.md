@@ -22,7 +22,9 @@ This fork extends the original [louislva/claude-peers-mcp](https://github.com/lo
 - **isolation by groups** (TOFU), **resume of identity** across reconnects, **WebSocket push** transport, dual `instance_token` + `peer_id` model.
 - **v0.3.3 delivery hardening**: heuristic ack via `send_message` (replying acknowledges prior messages from the same group), capped WS flush at reconnect (no more backlog avalanche), TTL purge of stale undelivered messages.
 - **v0.3.4 Deck announcements (`POST /announce`)**: the desktop Deck broadcasts one-way, no-reply system messages to a group -- an automatic join announcement when a session's `peer_id` resolves, plus free-text operator messages from the sidebar. Sent from a reserved non-routable `deck` sender; peers receive them framed as "informational only, do not reply" and cannot reply back.
-- **Desktop app (Claude Peers Deck)**: dock several Claude Code peer sessions in one window (see below).
+- **v0.4 Shared roadmap**: a persistent per-project backlog in the broker (`roadmap_items`, scoped by normalized git remote, zero FK to peers/groups so items outlive sessions), driven by 5 new MCP tools (`roadmap_list/get/add/update/archive`) and the Deck's Roadmap view; JSON export/import (`bun cli.ts roadmap-export/import`).
+- **v0.6 orchestrator batch (broker side)**: targeted announces (`POST /announce` with `to_peer_id`, the team-lead notification path), an **operator inbox** (agents `send_message` to the reserved `operator` peer -- the human in front of the Deck -- drained via `POST /operator-inbox`), and a `queue` position on roadmap items (the Deck's dispatch queue).
+- **Desktop app (Claude Peers Deck)**: dock several Claude Code peer sessions in one window and orchestrate them as a small agent team (see below).
 
 ## Desktop app (Claude Peers Deck)
 
@@ -30,6 +32,20 @@ This fork extends the original [louislva/claude-peers-mcp](https://github.com/lo
 sessions into a single window -- each tile a real terminal (PTY) -- with an
 isolated peer group per window, live tiling, and save / restore of session
 workspaces (each tile resumes its Claude conversation). English / French UI.
+
+Since v0.4-v0.6 the Deck has grown into an **AI orchestrator cockpit**:
+
+- **Navigation rail**: Home (supervisor) | Agents (tiles) | Roadmap | Worktrees | Journal.
+- **Supervisor session (Home)**: a Claude session that PILOTS the app through a locked, code-constant harness -- it reads the roadmap, spawns briefed agent tiles (14 `deck_*` MCP tools behind a loopback control endpoint) and coordinates them over the peers messaging.
+- **Shared roadmap view**: MoSCoW backlog with operator CRUD, "launch an agent on this item", plan-file import by a one-shot agent, and a **dispatch queue** that sends items one by one to the team-lead (auto-dispatching the next when one turns `done`).
+- **Team-lead 👑**: one designated session per window, target of dispatches and integration notices.
+- **Git worktrees**: spawn each agent in its own worktree/branch; a Worktrees view shows dirty state, attached sessions and orphans (resume or clean up).
+- **Diff / review**: per-session or per-worktree diff panel plus a one-shot reviewer agent that reports to the team-lead.
+- **Operator inbox ✉**: agents reach the human with `send_message` to `operator`; messages land in a Deck panel with system notifications.
+- **Awareness**: quota auto-resume (opt-in), "needs you" detection with clickable notifications, per-window activity journal 📜 with text export.
+- **Help assistant "?" and resume digest 📋**: throwaway read-only `claude -p` invocations grounded in the live app state (digest sources are configured in the GLOBAL config only -- never per repo).
+- **Templates**: hierarchical composer (lead top-center) to create/edit team recipes without spawning; applying never steals an existing crown.
+- **Safety**: git checkpoint (`git stash create` + `refs/claude-peers/*`) before spawning into a dirty tree, and a first-use approval dialog for any project-provided `launchCommand`. Every agent prompt (supervisor, import, reviewer, dispatch, digest, help) is a code constant -- never operator/repo-configurable.
 
 ```bash
 cd desktop && npm install && npm link      # one-time
@@ -283,8 +299,17 @@ The current peer is parked as `dormant` (resume-able), and a fresh registration 
 | `list_groups`    | Show available groups (from your user config) and how many active peers each has                              |
 | `switch_group`   | Move this session to another group by name. Disconnects the current peer (kept dormant) and re-registers      |
 | `set_id`         | Rename your `peer_id` within the current group. Refused with 409 on collision (active or dormant)             |
+| `roadmap_list` / `roadmap_get` | Browse the project's shared backlog (filters: kind/status/priority/tag; unique id prefixes accepted) |
+| `roadmap_add`    | Record a feature/bug/debt/idea/chore with MoSCoW priority, value/effort, tags, dependencies                   |
+| `roadmap_update` / `roadmap_archive` | Keep item statuses current (`planned` → `in_progress` → `done`); archive is a reversible soft delete |
 
 The `repo` scope matches across PCs by normalizing `git remote get-url origin`.
+
+Two **reserved recipients** exist for `send_message`: `operator` reaches the
+HUMAN in front of the desktop Deck (questions, results, blockers -- drained
+into the Deck's inbox panel, no reply comes back through this channel), and
+`deck` is the non-routable sender of Deck announcements (never a valid
+target). `set_id` refuses the reserved names `deck`, `system` and `operator`.
 
 ---
 
