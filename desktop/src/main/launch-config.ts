@@ -132,6 +132,16 @@ export function resolveLaunchConfig(
   return merged
 }
 
+/** The launchCommand a PROJECT config supplies, or null (PLAN C19 gating). */
+export function projectLaunchCommand(projectDir: string): string | null {
+  return readConfigFile(localConfigPath(projectDir))?.launchCommand ?? null
+}
+
+/** The launchCommand ignoring any project config: global file, else default. */
+export function globalLaunchCommand(env: NodeJS.ProcessEnv = process.env): string {
+  return readConfigFile(globalConfigPath(env))?.launchCommand ?? DEFAULT_LAUNCH_COMMAND
+}
+
 /** Create the project-local config on demand (UI action). No-op if it exists. */
 export function createLocalConfig(projectDir: string): string {
   const file = localConfigPath(projectDir)

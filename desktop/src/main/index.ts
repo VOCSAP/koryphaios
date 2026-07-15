@@ -1,6 +1,15 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { app, BrowserWindow, Menu, nativeTheme, Notification, safeStorage, shell } from 'electron'
+import {
+  app,
+  BrowserWindow,
+  dialog,
+  Menu,
+  nativeTheme,
+  Notification,
+  safeStorage,
+  shell
+} from 'electron'
 import type { AppConfig } from '@shared/types'
 import { loadConfig, saveConfig } from './store'
 import { buildAppMenu } from './menu'
@@ -13,7 +22,8 @@ import {
   recallScopeSecret,
   type SecretCipher
 } from './scope-secrets'
-import { resolveLaunchConfig } from './launch-config'
+import { globalLaunchCommand, projectLaunchCommand, resolveLaunchConfig } from './launch-config'
+import { resolveApprovedLaunchCommand } from './launch-approval'
 import { WorkspaceService } from './workspace-service'
 import { fetchOperatorInbox, resolveBrokerEndpoint, sendAnnounce } from './broker-client'
 import { computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
@@ -92,8 +102,12 @@ if (activeScope.scopeKind === 'custom' && config.rememberScopeSecrets) {
   }
 }
 
-// Resolve the base command each session runs (project-local > global > default).
-const launchConfig = resolveLaunchConfig(cliContext.projectDir)
+// Base command each session runs. presets/models/worktreeInit follow the
+// normal project > global precedence (resolveLaunchConfig at use sites); the
+// launchCommand itself is SECURITY-GATED (PLAN C19): the service starts on
+// the global/default command and a PROJECT-sourced launchCommand only lands
+// after the operator approves it once (see the app.whenReady gate below).
+const safeLaunchCommand = globalLaunchCommand()
 
 const getConfig = (): AppConfig => config
 const setConfig = (patch: Partial<AppConfig>): AppConfig => {
@@ -119,7 +133,7 @@ const deckPluginDir = ((): string => {
 const service = new SessionService(
   getConfig,
   () => activeScopeEnv.env,
-  launchConfig.launchCommand,
+  safeLaunchCommand,
   deckPluginDir
 )
 
@@ -546,6 +560,39 @@ function createWindow(): void {
 
 app.whenReady().then(() => {
   nativeTheme.themeSource = config.theme
+  // PLAN C19: gate a PROJECT-sourced launchCommand behind a one-time operator
+  // approval (hash remembered per project_key; a changed command asks again;
+  // refusal keeps the global/default command for this run).
+  const projCmd = projectLaunchCommand(cliContext.projectDir)
+  if (projCmd && projCmd.trim() !== safeLaunchCommand.trim()) {
+    const isFr = (config.locale || app.getLocale()).toLowerCase().startsWith('fr')
+    const decision = resolveApprovedLaunchCommand({
+      projectKey: computeDeckProjectKey(cliContext.projectDir),
+      projectCommand: projCmd,
+      fallback: safeLaunchCommand,
+      approvalsFile: join(app.getPath('userData'), APP_STATE_SUBDIR, 'launch-approvals.json'),
+      confirm: (command) =>
+        dialog.showMessageBoxSync({
+          type: 'warning',
+          buttons: isFr ? ['Utiliser cette commande', 'Refuser'] : ['Use this command', 'Refuse'],
+          defaultId: 1,
+          cancelId: 1,
+          title: 'Claude Peers Deck',
+          message: isFr
+            ? 'Ce projet définit sa propre commande de lancement des sessions.'
+            : 'This project defines its own session launch command.',
+          detail: isFr
+            ? `Commande (config du projet) :\n\n${command}\n\nElle sera exécutée dans chaque terminal de session de ce projet. N'accepte que si tu fais confiance à ce dépôt. Refuser garde la commande globale.`
+            : `Command (project config):\n\n${command}\n\nIt will run in every session terminal of this project. Accept only if you trust this repository. Refusing keeps the global command.`
+        }) === 0
+    })
+    if (decision.source === 'project') {
+      service.setLaunchCommand(decision.command)
+      if (decision.prompted) journal.add('session', `project launchCommand approved: ${decision.command}`)
+    } else {
+      journal.add('session', 'project launchCommand refused — using the global command')
+    }
+  }
   // Tailored menu (drops the confusing default Edit roles); no auto-open DevTools.
   // "New (clear)" routes through the renderer so it can confirm before clearing.
   const toRenderer = (channel: string, payload?: unknown): void =>

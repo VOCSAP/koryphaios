@@ -179,6 +179,15 @@ export class SessionService extends EventEmitter {
     })
   }
 
+  /**
+   * Swap the resolved base launch command (PLAN C19: a PROJECT-sourced
+   * launchCommand only lands here after operator approval). Affects future
+   * spawns only; live PTYs keep running what they started with.
+   */
+  setLaunchCommand(command: string): void {
+    this.launchCommand = command
+  }
+
   /** Start the peer_id poll. No auto-restore: the app opens empty (see ctor). */
   start(): void {
     this.pollTimer = setInterval(() => this.pollPeerIds(), PEER_POLL_MS)
