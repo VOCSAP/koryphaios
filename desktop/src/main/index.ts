@@ -15,7 +15,7 @@ import {
 } from './scope-secrets'
 import { resolveLaunchConfig } from './launch-config'
 import { WorkspaceService } from './workspace-service'
-import { resolveBrokerEndpoint, sendAnnounce } from './broker-client'
+import { fetchOperatorInbox, resolveBrokerEndpoint, sendAnnounce } from './broker-client'
 import { composeJoinAnnounce, type JoinAnnounceIntent } from '@shared/announce'
 import { APP_STATE_SUBDIR, runDataMigration } from './migrate-data-dir'
 import type { SessionRuntime } from '@shared/types'
@@ -161,6 +161,54 @@ service.on('attention', ({ id, waiting }: { id: string; waiting: boolean }) => {
   })
   n.show()
 })
+
+// ----- Operator inbox (PLAN C12) -----
+// Agents `send_message` to the reserved 'operator' peer; the broker parks those
+// messages on the sentinel row and the Deck drains them here every 10 s
+// (best-effort: the broker may not even be running before the first session
+// spawns). Drained batches go to the renderer inbox + a system notification.
+const INBOX_POLL_MS = 10_000
+let inboxTimer: NodeJS.Timeout | null = null
+
+const notifyInbox = (batch: { from: string; text: string }[]): void => {
+  if (!Notification.isSupported() || batch.length === 0) return
+  const isFr = (config.locale || app.getLocale()).toLowerCase().startsWith('fr')
+  const first = batch[0]!
+  const n = new Notification(
+    batch.length === 1
+      ? { title: first.from, body: first.text.slice(0, 160) }
+      : {
+          title: isFr ? `${batch.length} messages d'agents` : `${batch.length} agent messages`,
+          body: batch.map((m) => `${m.from}: ${m.text}`).join('\n').slice(0, 160)
+        }
+  )
+  n.on('click', () => {
+    mainWindow?.show()
+    mainWindow?.focus()
+    mainWindow?.webContents.send('inbox:open')
+  })
+  n.show()
+}
+
+const pollOperatorInbox = async (): Promise<void> => {
+  try {
+    const messages = await fetchOperatorInbox(
+      { groupId: activeScope.groupId, secret: activeScope.secret },
+      { endpoint: resolveBrokerEndpoint() }
+    )
+    if (messages.length === 0) return
+    const batch = messages.map((m) => ({
+      id: m.id,
+      from: m.from_peer_id,
+      text: m.text,
+      sentAt: m.sent_at
+    }))
+    mainWindow?.webContents.send('inbox:new', batch)
+    notifyInbox(batch)
+  } catch {
+    // Broker down / unreachable: silent, the next tick retries.
+  }
+}
 
 /**
  * Targeted announce to the window's TEAM-LEAD (PLAN C10). No lead designated:
@@ -400,6 +448,8 @@ app.whenReady().then(() => {
   service.start()
   // Attach an auto-save workspace capturing whatever the service just restored.
   workspaces.start()
+  // Operator inbox drain (PLAN C12): messages agents addressed to 'operator'.
+  inboxTimer = setInterval(() => void pollOperatorInbox(), INBOX_POLL_MS)
   createWindow()
 
   app.on('activate', () => {
@@ -416,6 +466,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  if (inboxTimer) clearInterval(inboxTimer)
   workspaces.releaseOnQuit()
   service.stop()
   controlServer?.close()

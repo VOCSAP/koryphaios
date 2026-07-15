@@ -5,6 +5,7 @@ import type {
   DeckApi,
   DeckView,
   HelpExchange,
+  InboxMessage,
   LaunchConfig,
   PtyDataEvent,
   PtyExitEvent,
@@ -115,6 +116,8 @@ const api: DeckApi = {
   onSessionQuota: (cb: (e: SessionQuotaEvent) => void) => subscribe('session:quota', cb),
   onSessionAttention: (cb: (e: SessionAttentionEvent) => void) =>
     subscribe('session:attention', cb),
+  onInboxMessages: (cb: (messages: InboxMessage[]) => void) => subscribe('inbox:new', cb),
+  onInboxOpen: (cb: () => void) => subscribe('inbox:open', () => cb()),
   onFocusSession: (cb: (id: string) => void) => subscribe('session:focus', cb),
   onConfigChanged: (cb: (config: AppConfig) => void) => subscribe('config:changed', cb),
   onMenuSettings: (cb: () => void) => subscribe('menu:settings', () => cb()),

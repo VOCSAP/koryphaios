@@ -9,6 +9,7 @@ import { RoadmapView } from './RoadmapView'
 import { WorktreesView } from './WorktreesView'
 import { HomeView } from './HomeView'
 import { HelpAssistant } from './HelpAssistant'
+import { InboxPanel } from './InboxPanel'
 import { SettingsView } from './SettingsView'
 import { WorkspacesDialog } from './WorkspacesDialog'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -38,6 +39,7 @@ export function App(): React.JSX.Element {
   const setMaximized = useDeck((s) => s.setMaximized)
   const sidebarWidth = useDeck((s) => s.sidebarWidth)
   const view = useDeck((s) => s.view)
+  const inboxOpen = useDeck((s) => s.inboxOpen)
 
   useEffect(() => {
     void init()
@@ -114,6 +116,7 @@ export function App(): React.JSX.Element {
           onConfirm={() => void confirmRestore()}
         />
       )}
+      {inboxOpen && <InboxPanel />}
       <HelpAssistant />
       <Toast />
     </div>

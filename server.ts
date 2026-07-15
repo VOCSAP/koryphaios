@@ -381,6 +381,8 @@ Available tools:
 - set_id: Rename your peer_id within the current group (display name only; routing is unchanged).
 - roadmap_list / roadmap_get / roadmap_add / roadmap_update / roadmap_archive: the project's shared roadmap (see below).
 
+Special recipient 'operator': send_message with to_peer_id 'operator' reaches the HUMAN operator's desktop inbox (works even though 'operator' is not in list_peers). Use it for blocking questions or important findings that need a human decision. The operator does not reply through this channel -- expect an answer as a deck announcement or new instructions.
+
 This project also has a SHARED ROADMAP: a persistent backlog of features, bugs, tech debt and ideas, scoped to this repository (not to your group or session) and shared with every Claude instance working on it, now and in future sessions. Use it actively:
 - At the start of a task, call roadmap_list to see what is planned and in progress.
 - When you discover a bug, tech debt or a good idea outside your current task, record it with roadmap_add instead of letting it vanish with the session.

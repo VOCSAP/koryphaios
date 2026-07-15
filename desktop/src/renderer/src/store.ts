@@ -3,6 +3,7 @@ import type {
   AppConfig,
   CreateSessionInput,
   DeckView,
+  InboxMessage,
   LocaleOption,
   SessionRuntime,
   TemplateSummary,
@@ -47,9 +48,16 @@ interface DeckState {
   workspaces: WorkspaceSummary[]
   /** Live sidebar width (px); seeded from config, persisted on drag end. */
   sidebarWidth: number
+  /** Operator inbox (PLAN C12): drained agent messages, newest LAST. */
+  inboxMessages: InboxMessage[]
+  /** Messages arrived while the panel was closed. */
+  inboxUnread: number
+  inboxOpen: boolean
 
   init(): Promise<void>
   setView(view: DeckView): void
+  /** Open/close the operator inbox panel (opening clears the unread count). */
+  openInbox(open: boolean): void
   setSelected(id: string | null): void
   setMaximized(id: string | null): void
   openSettings(open: boolean): void
@@ -115,6 +123,9 @@ export const useDeck = create<DeckState>((set, get) => ({
   currentWorkspaceName: null,
   workspaces: [],
   sidebarWidth: 260,
+  inboxMessages: [],
+  inboxUnread: 0,
+  inboxOpen: false,
 
   async init() {
     const [sessions, config, i18n, workspaces, templates] = await Promise.all([
@@ -168,6 +179,18 @@ export const useDeck = create<DeckState>((set, get) => ({
     window.api.onFocusSession((id) => {
       set({ view: 'agents', selectedId: id })
     })
+    // Operator inbox (PLAN C12): batches drained by the main-process poll.
+    window.api.onInboxMessages((batch) => {
+      const { inboxMessages, inboxUnread, inboxOpen } = get()
+      // Cap the in-memory history; the broker already marked them delivered.
+      const messages = [...inboxMessages, ...batch].slice(-200)
+      set({
+        inboxMessages: messages,
+        inboxUnread: inboxOpen ? 0 : inboxUnread + batch.length
+      })
+    })
+    // Notification click on an inbox message: surface the panel.
+    window.api.onInboxOpen(() => get().openInbox(true))
     window.api.onConfigChanged((next) => {
       const prevLocale = get().config?.locale
       set({ config: next })
@@ -179,6 +202,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   },
 
   setView: (view) => set({ view }),
+  openInbox: (open) => set({ inboxOpen: open, inboxUnread: 0 }),
   setSelected: (id) => set({ selectedId: id }),
   setMaximized: (id) => set({ maximizedId: id }),
   openSettings: (open) => set({ settingsOpen: open }),

@@ -148,8 +148,15 @@ export interface PollMessagesResponse {
 
 export const DECK_INSTANCE_TOKEN: InstanceToken = "__deck__";
 export const DECK_PEER_ID: PeerId = "deck";
-/** Reserved display ids set_id must refuse, to keep the sentinel unambiguous. */
-export const RESERVED_PEER_IDS: readonly PeerId[] = ["deck", "system"];
+/**
+ * Reserved OPERATOR inbox sentinel (v0.6, PLAN C12): the human in front of the
+ * Deck. Agents `send_message` to 'operator'; the Deck polls /operator-inbox.
+ * Like the deck row: permanently dormant, never listed, never purged.
+ */
+export const OPERATOR_INSTANCE_TOKEN: InstanceToken = "__operator__";
+export const OPERATOR_PEER_ID: PeerId = "operator";
+/** Reserved display ids set_id must refuse, to keep the sentinels unambiguous. */
+export const RESERVED_PEER_IDS: readonly PeerId[] = ["deck", "system", "operator"];
 
 export interface AnnounceRequest {
   group_id: GroupId;
@@ -258,6 +265,24 @@ export interface RoadmapArchiveRequest {
 
 export interface RoadmapArchiveResponse {
   item: RoadmapItem;
+}
+
+// --- Operator inbox (PLAN C12) ---
+
+export interface OperatorInboxRequest {
+  group_id: GroupId;
+  group_secret_hash: string | null;
+}
+
+export interface OperatorInboxMessage {
+  id: number;
+  from_peer_id: PeerId;
+  text: string;
+  sent_at: string;
+}
+
+export interface OperatorInboxResponse {
+  messages: OperatorInboxMessage[];
 }
 
 // --- Broker API: groups and identity introspection ---

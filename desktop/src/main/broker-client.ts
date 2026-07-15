@@ -110,6 +110,38 @@ export function buildAnnouncePayload(params: SendAnnounceParams): {
   }
 }
 
+/** One drained operator-inbox message (PLAN C12). */
+export interface OperatorInboxMessage {
+  id: number
+  from_peer_id: string
+  text: string
+  sent_at: string
+}
+
+/**
+ * POST /operator-inbox (PLAN C12): drain the messages agents sent to the
+ * reserved 'operator' peer of this window's group. Throws on failure so the
+ * polling caller can swallow it.
+ */
+export async function fetchOperatorInbox(
+  params: { groupId: string; secret: string },
+  deps: AnnounceDeps
+): Promise<OperatorInboxMessage[]> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (deps.endpoint.token) headers['Authorization'] = `Bearer ${deps.endpoint.token}`
+  const f = deps.fetchFn ?? fetch
+  const res = await f(`${deps.endpoint.url}/operator-inbox`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      group_id: params.groupId,
+      group_secret_hash: computeGroupSecretHash(params.secret)
+    })
+  })
+  if (!res.ok) throw new Error(`operator-inbox failed: ${res.status}`)
+  return ((await res.json()) as { messages: OperatorInboxMessage[] }).messages
+}
+
 /**
  * POST /announce. Best-effort: throws on a non-2xx or transport failure so the
  * caller can swallow it (an announce must never crash the Deck main process).

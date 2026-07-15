@@ -7,10 +7,8 @@
   "common.browse": "Parcourir…",
   "common.restore": "Restaurer",
   "common.maximize": "Agrandir",
-
   "app.brand": "Claude Peers Deck",
   "app.loading": "Chargement…",
-
   "sidebar.settings": "Paramètres",
   "sidebar.workspaces": "Espaces",
   "sidebar.addPeer": "＋ Ajouter un pair",
@@ -25,7 +23,6 @@
   "sidebar.copyPeerId": "Copier peer id",
   "sidebar.autoResumeOn": "Activer l'auto-relance quota",
   "sidebar.autoResumeOff": "Désactiver l'auto-relance quota",
-
   "status.running": "en cours",
   "status.starting": "démarrage",
   "status.exited": "terminé",
@@ -34,7 +31,6 @@
   "session.pending": "Session {id}",
   "quota.limited": "limite d'usage atteinte",
   "quota.resumeAt": "reprise auto à {time}",
-
   "confirm.deleteTitle": "Supprimer la session ?",
   "confirm.deleteMessage": "Retirer « {name} » ? Son terminal est fermé ; la session Claude sous-jacente reste reprenable plus tard depuis l'historique.",
   "confirm.closeTitle": "Fermer la session ?",
@@ -46,7 +42,6 @@
   "confirm.restoreLossMessage": "Restaurer fermera les sessions courantes et chargera cet espace à la place. Les sessions courantes sont sauvegardées automatiquement et peuvent être rouvertes plus tard.",
   "confirm.deleteWorkspaceTitle": "Supprimer l'espace ?",
   "confirm.deleteWorkspaceMessage": "Supprimer « {name} » ? Cela retire uniquement la disposition enregistrée ; l'historique des sessions Claude reste intact.",
-
   "workspaces.title": "Espaces de travail",
   "workspaces.save": "Enregistrer",
   "workspaces.saveAs": "Enregistrer sous…",
@@ -63,11 +58,9 @@
   "toast.workspaceSaved": "Espace enregistré",
   "toast.alreadyOpen": "Session déjà ouverte",
   "toast.peerIdCopied": "peer id copié",
-
   "tile.expiredTitle": "Session expirée",
   "tile.expiredBody": "Son transcript a disparu. Démarre une nouvelle session avec la même configuration.",
   "tile.startNew": "Démarrer une nouvelle",
-
   "settings.title": "Paramètres",
   "settings.catGeneral": "Général",
   "settings.catAppearance": "Apparence",
@@ -97,12 +90,10 @@
   "settings.paletteAdd": "＋ Ajouter une couleur",
   "settings.paletteReset": "Réinitialiser",
   "settings.paletteRemove": "Retirer la couleur",
-
   "mode.1x1": "1×1 (carrousel)",
   "mode.1x2": "1×2",
   "mode.2x2": "2×2",
   "mode.custom": "Personnalisé",
-
   "modebar.1x1Title": "Carrousel (un à la fois)",
   "modebar.1x2Title": "Une ligne, deux colonnes",
   "modebar.2x2Title": "Grille deux par deux",
@@ -111,14 +102,12 @@
   "modebar.rows": "Lignes",
   "modebar.countOne": "{n} session",
   "modebar.countOther": "{n} sessions",
-
   "message.placeholder": "Message à tous les pairs du groupe…",
   "message.send": "Envoyer",
   "message.sendTitle": "Diffuser à tous les pairs (Entrée pour envoyer, Maj+Entrée pour un saut de ligne)",
   "toast.announceSent": "Message envoyé au groupe",
   "toast.announceNoPeers": "Aucun pair pour recevoir le message",
   "toast.quotaResumed": "Quota réinitialisé — « continue » envoyé automatiquement",
-
   "create.title": "Nouvelle session pair",
   "create.agent": "Agent",
   "create.agentDefault": "défaut (aucun)",
@@ -146,18 +135,15 @@
   "create.workingFolder": "Dossier de travail",
   "create.workingFolderPlaceholder": "(dossier projet)",
   "create.workingFolderHelp": "Exécute ce pair dans un autre dossier. Il rejoint quand même le groupe de cette fenêtre ; seul son dossier de travail change. À utiliser avec précaution -- le pair peut agir sur ce dossier.",
-
   "tile.fullscreenTitle": "Double-cliquer pour basculer en plein écran",
   "tile.restartTitle": "Redémarrer le pair",
   "tile.closeTitle": "Fermer la session",
-
   "area.emptyTitle": "Aucun terminal pair pour l'instant",
   "area.emptyBody": "Ajoute une session pair Claude Code pour l'ancrer ici. Chaque tuile tourne dans un vrai terminal, isolé dans le groupe de cette fenêtre, donc OAuth fonctionne normalement.",
   "area.addTerminal": "＋ Ajouter un terminal pair",
   "area.restorePrevious": "Restaurer la session précédente",
   "area.useTemplate": "Utiliser template",
   "area.openWorkspacesTitle": "Ouvrir les espaces",
-
   "template.exportTitle": "Exporter un template",
   "template.name": "Nom du template",
   "template.namePlaceholder": "ex. Mon équipe",
@@ -179,7 +165,6 @@
   "confirm.applyTemplateMessage": "Appliquer ce template ferme les sessions courantes et ouvre le template à la place. Les sessions courantes sont auto-sauvegardées et réouvrables plus tard depuis les espaces.",
   "confirm.deleteTemplateTitle": "Supprimer le template ?",
   "confirm.deleteTemplateMessage": "Supprimer « {name} » ? Cela retire le fichier template enregistré ; les sessions en cours ne sont pas touchées.",
-
   "create.worktree": "Branche de worktree",
   "create.worktreePlaceholder": "ex. agent/{name} — vide = pas de worktree",
   "create.worktreeHelp": "Crée un worktree git sous .worktrees/ sur cette NOUVELLE branche et y lance la session : les agents parallèles ne se marchent plus dessus. Ajoutez .worktrees/ à votre .gitignore.",
@@ -280,5 +265,10 @@
   "roadmap.importPlan": "📄 Importer un plan…",
   "toast.planImportStarted": "Agent d'import lancé — il convertit le plan en items roadmap puis se ferme",
   "toast.roadmapSaved": "Item roadmap enregistré",
-  "toast.roadmapArchived": "Item roadmap archivé"
+  "toast.roadmapArchived": "Item roadmap archivé",
+  "nav.inbox": "Courrier",
+  "inbox.title": "Courrier de l'opérateur",
+  "inbox.close": "Fermer",
+  "inbox.empty": "Aucun message pour l'instant. Les agents peuvent t'écrire via send_message vers 'operator' — questions, résultats, blocages.",
+  "inbox.hint": "Lecture seule — réponds via le mégaphone en bas de la barre Agents."
 }

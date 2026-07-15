@@ -43,6 +43,9 @@ import type {
   RoadmapStatus,
   RoadmapUpsertRequest,
   RoadmapUpsertResponse,
+  OperatorInboxRequest,
+  OperatorInboxResponse,
+  OperatorInboxMessage,
   Peer,
   Message,
   GroupId,
@@ -51,6 +54,8 @@ import type {
 import {
   DECK_INSTANCE_TOKEN,
   DECK_PEER_ID,
+  OPERATOR_INSTANCE_TOKEN,
+  OPERATOR_PEER_ID,
   RESERVED_PEER_IDS,
 } from "./shared/types.ts";
 
@@ -190,6 +195,16 @@ db.run(
   [DECK_INSTANCE_TOKEN, DECK_PEER_ID]
 );
 
+// Reserved OPERATOR inbox sentinel (PLAN C12): the human in front of the Deck.
+// Agents send_message to 'operator'; the Deck drains /operator-inbox. Same
+// lifecycle rules as the deck row (permanently dormant, never listed/purged).
+db.run(
+  `INSERT OR IGNORE INTO peers
+     (instance_token, peer_id, group_id, pid, cwd, summary, registered_at, last_seen, host, client_pid, status)
+   VALUES (?, ?, 'default', 0, '', '', datetime('now'), datetime('now'), '', 0, 'dormant')`,
+  [OPERATOR_INSTANCE_TOKEN, OPERATOR_PEER_ID]
+);
+
 db.run(`CREATE INDEX IF NOT EXISTS idx_messages_pending ON messages(to_token, delivered)`);
 
 db.run(`
@@ -299,8 +314,8 @@ function cleanStalePeers(): void {
   const expired = db.query(
     `SELECT instance_token FROM peers
      WHERE status = 'dormant' AND last_seen < datetime('now', ?)
-       AND instance_token <> ?`
-  ).all(cutoff, DECK_INSTANCE_TOKEN) as { instance_token: string }[];
+       AND instance_token <> ? AND instance_token <> ?`
+  ).all(cutoff, DECK_INSTANCE_TOKEN, OPERATOR_INSTANCE_TOKEN) as { instance_token: string }[];
   for (const { instance_token } of expired) {
     // Must clear BOTH FK directions before deleting the peer row:
     // messages.from_token and messages.to_token both reference peers(instance_token).
@@ -714,9 +729,15 @@ function handleSendMessage(body: SendMessageRequest): SendMessageResponse {
     | null;
   if (!sender) return { ok: false, error: "Sender not registered" };
 
-  const target = db.query(
-    "SELECT instance_token FROM peers WHERE peer_id = ? AND group_id = ? AND status = 'active'"
-  ).get(body.to_peer_id, sender.group_id) as { instance_token: InstanceToken } | null;
+  // Operator inbox (PLAN C12): 'operator' routes to the reserved sentinel,
+  // scoped to the sender's group (the Deck drains it per group). No WS pool
+  // entry exists for it, so delivery is purely poll-based.
+  const target =
+    body.to_peer_id === OPERATOR_PEER_ID
+      ? { instance_token: OPERATOR_INSTANCE_TOKEN }
+      : (db.query(
+          "SELECT instance_token FROM peers WHERE peer_id = ? AND group_id = ? AND status = 'active'"
+        ).get(body.to_peer_id, sender.group_id) as { instance_token: InstanceToken } | null);
   if (!target) {
     return { ok: false, error: `Peer '${body.to_peer_id}' not found in your group` };
   }
@@ -1187,6 +1208,34 @@ function handleRoadmapImport(body: {
   return { imported: items.length };
 }
 
+/**
+ * Drain the operator inbox of a group (PLAN C12): messages agents sent to the
+ * reserved 'operator' sentinel. Same TOFU group auth as /announce. Returned
+ * messages are marked delivered (the Deck displays and keeps them locally).
+ */
+function handleOperatorInbox(
+  body: OperatorInboxRequest
+): OperatorInboxResponse | { error: string; status: number } {
+  const groupId = body.group_id;
+  if (!groupId) return { error: "group_id is required", status: 400 };
+  if (groupId !== "default") {
+    const existing = db.query(
+      "SELECT secret_hash FROM groups WHERE group_id = ?"
+    ).get(groupId) as { secret_hash: string | null } | null;
+    if (existing && existing.secret_hash !== (body.group_secret_hash ?? null)) {
+      return { error: "group_secret_hash mismatch (TOFU rejected)", status: 401 };
+    }
+  }
+  const rows = db.query(
+    `SELECT m.id, m.text, m.sent_at, COALESCE(p.peer_id, '<gone>') AS from_peer_id
+     FROM messages m LEFT JOIN peers p ON p.instance_token = m.from_token
+     WHERE m.to_token = ? AND m.group_id = ? AND m.delivered = 0
+     ORDER BY m.id`
+  ).all(OPERATOR_INSTANCE_TOKEN, groupId) as OperatorInboxMessage[];
+  for (const row of rows) markDelivered.run(row.id);
+  return { messages: rows };
+}
+
 function handleGroupStats(): GroupStatsResponse {
   const rows = db.query(
     "SELECT group_id, COUNT(*) AS active_peers FROM peers WHERE status = 'active' GROUP BY group_id"
@@ -1327,6 +1376,13 @@ const server = Bun.serve<WsData>({
           return Response.json(handleSendMessage(body as SendMessageRequest));
         case "/announce": {
           const result = handleAnnounce(body as AnnounceRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/operator-inbox": {
+          const result = handleOperatorInbox(body as OperatorInboxRequest);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }

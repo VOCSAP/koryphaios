@@ -336,6 +336,20 @@ export interface HelpExchange {
   answer: string
 }
 
+/**
+ * One message an agent sent to the reserved 'operator' peer (PLAN C12), drained
+ * from the broker by the main-process poll and pushed to the renderer inbox.
+ */
+export interface InboxMessage {
+  /** Broker message id (unique, monotonic — safe as a React key). */
+  id: number
+  /** Sender peer_id snapshot ('<gone>' when the peer row was purged). */
+  from: string
+  text: string
+  /** ISO timestamp (broker sent_at). */
+  sentAt: string
+}
+
 // ----- IPC channel payloads -----
 
 export interface PtyDataEvent {
@@ -453,6 +467,10 @@ export interface DeckApi {
   onSessionThinking(cb: (e: SessionThinkingEvent) => void): () => void
   onSessionQuota(cb: (e: SessionQuotaEvent) => void): () => void
   onSessionAttention(cb: (e: SessionAttentionEvent) => void): () => void
+  /** Operator-inbox batch drained from the broker (PLAN C12), oldest first. */
+  onInboxMessages(cb: (messages: InboxMessage[]) => void): () => void
+  /** Notification click on an inbox message: open the inbox panel. */
+  onInboxOpen(cb: () => void): () => void
   /** Notification click: bring a session into view (agents view + selection). */
   onFocusSession(cb: (id: string) => void): () => void
   onConfigChanged(cb: (config: AppConfig) => void): () => void

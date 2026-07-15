@@ -7,10 +7,8 @@
   "common.browse": "Browse…",
   "common.restore": "Restore",
   "common.maximize": "Maximize",
-
   "app.brand": "Claude Peers Deck",
   "app.loading": "Loading…",
-
   "sidebar.settings": "Settings",
   "sidebar.workspaces": "Workspaces",
   "sidebar.addPeer": "＋ Add peer",
@@ -25,7 +23,6 @@
   "sidebar.copyPeerId": "Copy peer id",
   "sidebar.autoResumeOn": "Enable quota auto-resume",
   "sidebar.autoResumeOff": "Disable quota auto-resume",
-
   "status.running": "running",
   "status.starting": "starting",
   "status.exited": "exited",
@@ -34,7 +31,6 @@
   "session.pending": "Session {id}",
   "quota.limited": "usage limit reached",
   "quota.resumeAt": "auto-resume at {time}",
-
   "confirm.deleteTitle": "Delete session?",
   "confirm.deleteMessage": "Remove \"{name}\"? Its terminal is closed; the underlying Claude session can still be resumed later from history.",
   "confirm.closeTitle": "Close session?",
@@ -46,7 +42,6 @@
   "confirm.restoreLossMessage": "Restoring will close the current sessions and load this workspace instead. The current sessions are auto-saved and can be reopened later.",
   "confirm.deleteWorkspaceTitle": "Delete workspace?",
   "confirm.deleteWorkspaceMessage": "Delete \"{name}\"? This removes the saved layout only; Claude session history is untouched.",
-
   "workspaces.title": "Workspaces",
   "workspaces.save": "Save",
   "workspaces.saveAs": "Save as…",
@@ -63,11 +58,9 @@
   "toast.workspaceSaved": "Workspace saved",
   "toast.alreadyOpen": "Session already open",
   "toast.peerIdCopied": "peer id copied",
-
   "tile.expiredTitle": "Session expired",
   "tile.expiredBody": "Its transcript is gone. Start a new session with the same setup.",
   "tile.startNew": "Start new",
-
   "settings.title": "Settings",
   "settings.catGeneral": "General",
   "settings.catAppearance": "Appearance",
@@ -97,12 +90,10 @@
   "settings.paletteAdd": "＋ Add colour",
   "settings.paletteReset": "Reset to default",
   "settings.paletteRemove": "Remove colour",
-
   "mode.1x1": "1×1 (carousel)",
   "mode.1x2": "1×2",
   "mode.2x2": "2×2",
   "mode.custom": "Custom",
-
   "modebar.1x1Title": "Carousel (one at a time)",
   "modebar.1x2Title": "One row, two columns",
   "modebar.2x2Title": "Two by two grid",
@@ -111,14 +102,12 @@
   "modebar.rows": "Rows",
   "modebar.countOne": "{n} session",
   "modebar.countOther": "{n} sessions",
-
   "message.placeholder": "Message all peers in the group…",
   "message.send": "Send",
   "message.sendTitle": "Broadcast to all peers (Enter to send, Shift+Enter for a newline)",
   "toast.announceSent": "Message sent to the group",
   "toast.announceNoPeers": "No peers to receive the message",
   "toast.quotaResumed": "Quota reset — \"continue\" sent automatically",
-
   "create.title": "New peer session",
   "create.agent": "Agent",
   "create.agentDefault": "default (none)",
@@ -146,18 +135,15 @@
   "create.workingFolder": "Working folder",
   "create.workingFolderPlaceholder": "(project dir)",
   "create.workingFolderHelp": "Run this peer in another directory. It still joins this window's group; only its working directory changes. Use with care -- the peer can act on that folder.",
-
   "tile.fullscreenTitle": "Double-click to toggle fullscreen",
   "tile.restartTitle": "Restart peer",
   "tile.closeTitle": "Close session",
-
   "area.emptyTitle": "No peer terminals yet",
   "area.emptyBody": "Add a Claude Code peer session to dock it here. Each tile runs in a real terminal, scoped to this window's isolated group, so OAuth works normally.",
   "area.addTerminal": "＋ Add peer terminal",
   "area.restorePrevious": "Restore previous session",
   "area.useTemplate": "Use template",
   "area.openWorkspacesTitle": "Open workspaces",
-
   "template.exportTitle": "Export template",
   "template.name": "Template name",
   "template.namePlaceholder": "e.g. My team",
@@ -179,7 +165,6 @@
   "confirm.applyTemplateMessage": "Applying this template closes the current sessions and opens the template instead. The current sessions are auto-saved and can be reopened later from Workspaces.",
   "confirm.deleteTemplateTitle": "Delete template?",
   "confirm.deleteTemplateMessage": "Delete \"{name}\"? This removes the saved template file; running sessions are untouched.",
-
   "create.worktree": "Worktree branch",
   "create.worktreePlaceholder": "e.g. agent/{name} — empty = no worktree",
   "create.worktreeHelp": "Creates a fresh git worktree under .worktrees/ on this NEW branch and runs the session in it, so parallel agents never step on each other. Add .worktrees/ to your .gitignore.",
@@ -280,5 +265,10 @@
   "roadmap.importPlan": "📄 Import a plan…",
   "toast.planImportStarted": "Import agent started — it converts the plan into roadmap items, then closes",
   "toast.roadmapSaved": "Roadmap item saved",
-  "toast.roadmapArchived": "Roadmap item archived"
+  "toast.roadmapArchived": "Roadmap item archived",
+  "nav.inbox": "Inbox",
+  "inbox.title": "Operator inbox",
+  "inbox.close": "Close",
+  "inbox.empty": "No messages yet. Agents can write to you with send_message to 'operator' — questions, results, blockers.",
+  "inbox.hint": "Read-only — answer via the megaphone at the bottom of the Agents sidebar."
 }

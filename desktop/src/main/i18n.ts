@@ -352,7 +352,13 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.planImportStarted':
     'Import agent started — it converts the plan into roadmap items, then closes',
   'toast.roadmapSaved': 'Roadmap item saved',
-  'toast.roadmapArchived': 'Roadmap item archived'
+  'toast.roadmapArchived': 'Roadmap item archived',
+  'nav.inbox': 'Inbox',
+  'inbox.title': 'Operator inbox',
+  'inbox.close': 'Close',
+  'inbox.empty':
+    "No messages yet. Agents can write to you with send_message to 'operator' — questions, results, blockers.",
+  'inbox.hint': 'Read-only — answer via the megaphone at the bottom of the Agents sidebar.'
 }
 
 /**
