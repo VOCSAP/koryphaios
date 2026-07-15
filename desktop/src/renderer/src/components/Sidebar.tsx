@@ -103,13 +103,15 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
         onChange={(e) => void setColor(session.id, e.target.value)}
       />
       <span
-        className={`dot dot-${session.status}${session.rateLimited ? ' dot-limited' : session.thinking ? ' dot-thinking' : ''}`}
+        className={`dot dot-${session.status}${session.needsAttention ? ' dot-attention' : session.rateLimited ? ' dot-limited' : session.thinking ? ' dot-thinking' : ''}`}
         title={
-          session.rateLimited
-            ? t('status.rateLimited')
-            : session.thinking
-              ? t('status.thinking')
-              : t(`status.${session.status}`)
+          session.needsAttention
+            ? t('status.needsAttention')
+            : session.rateLimited
+              ? t('status.rateLimited')
+              : session.thinking
+                ? t('status.thinking')
+                : t(`status.${session.status}`)
         }
       />
       <div className="row-main">
@@ -144,6 +146,9 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
           {session.peerId ??
             t('session.pending', { id: (session.sessionId || session.id).slice(0, 8) })}
         </span>
+        {session.needsAttention && (
+          <span className="row-attention">⏸ {t('attention.badge')}</span>
+        )}
         {session.rateLimited && (
           <span className="row-quota">
             {autoResumeOn && session.resumeAt

@@ -29,6 +29,8 @@ const DEFAULT_CONFIG: AppConfig = {
   autoResumeQuota: false,
   // Team-lead suggestion pattern (PLAN C10): substring matched on agent/name.
   leadPattern: 'team-lead',
+  // System notification when a session waits for the operator (PLAN C11).
+  notifyAttention: true,
   // Floating "?" help assistant (PLAN C9): shown by default, Haiku for cost.
   helpButton: true,
   helpModel: 'haiku'

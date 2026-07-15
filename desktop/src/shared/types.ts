@@ -90,6 +90,8 @@ export interface SessionRuntime extends SessionDef {
   rateLimited: boolean
   /** Epoch ms of the announced quota reset, or null when unknown/not limited. */
   resumeAt: number | null
+  /** True while the session waits for the operator (permission/question, C11). */
+  needsAttention: boolean
 }
 
 /** Lightweight workspace row for the restore picker (no sessions payload). */
@@ -155,6 +157,8 @@ export interface AppConfig {
    * pre-checks the team-lead box. Suggestion only -- the flag stays explicit.
    */
   leadPattern: string
+  /** System notification when a session waits for the operator (PLAN C11). */
+  notifyAttention: boolean
   /** Show the floating "?" help-assistant button (PLAN C9). */
   helpButton: boolean
   /** Model alias for help invocations (`claude -p --model <x>`); haiku default. */
@@ -349,6 +353,11 @@ export interface SessionThinkingEvent {
   busy: boolean
 }
 
+export interface SessionAttentionEvent {
+  id: string
+  waiting: boolean
+}
+
 export interface SessionQuotaEvent {
   id: string
   /** True while at the limit screen; false when the episode ends. */
@@ -443,6 +452,9 @@ export interface DeckApi {
   onSessionsChanged(cb: (sessions: SessionRuntime[]) => void): () => void
   onSessionThinking(cb: (e: SessionThinkingEvent) => void): () => void
   onSessionQuota(cb: (e: SessionQuotaEvent) => void): () => void
+  onSessionAttention(cb: (e: SessionAttentionEvent) => void): () => void
+  /** Notification click: bring a session into view (agents view + selection). */
+  onFocusSession(cb: (id: string) => void): () => void
   onConfigChanged(cb: (config: AppConfig) => void): () => void
   /** Fired when the Edit > Settings… menu item (or Ctrl/Cmd+,) is chosen. */
   onMenuSettings(cb: () => void): () => void

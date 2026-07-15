@@ -266,6 +266,9 @@ export const EN_DEFAULTS: Record<string, string> = {
   'settings.helpModel': 'Help assistant model',
   'settings.helpModelHelp':
     "Each question is a one-shot `claude -p` call with the active view's context. Haiku is cheap and usually enough.",
+  'status.needsAttention': 'waiting for you',
+  'attention.badge': 'needs you',
+  'settings.notifyAttention': 'System notification when a session waits for your input',
   'sidebar.setLead': 'Designate as team-lead',
   'sidebar.leadTitle':
     'Team-lead: targeted Deck notices (dispatch, integrations) go to this session',

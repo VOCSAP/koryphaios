@@ -150,6 +150,15 @@ export function SettingsView(): React.JSX.Element {
               <label className="field field-check">
                 <input
                   type="checkbox"
+                  checked={config.notifyAttention !== false}
+                  onChange={(e) => set('notifyAttention', e.target.checked)}
+                />
+                <span>{t('settings.notifyAttention')}</span>
+              </label>
+
+              <label className="field field-check">
+                <input
+                  type="checkbox"
                   checked={config.helpButton !== false}
                   onChange={(e) => set('helpButton', e.target.checked)}
                 />

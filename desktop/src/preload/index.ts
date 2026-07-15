@@ -10,6 +10,7 @@ import type {
   PtyExitEvent,
   RoadmapListFilters,
   RoadmapUpsertFields,
+  SessionAttentionEvent,
   SessionQuotaEvent,
   SessionRuntime,
   SessionThinkingEvent,
@@ -112,6 +113,9 @@ const api: DeckApi = {
   onSessionThinking: (cb: (e: SessionThinkingEvent) => void) =>
     subscribe('session:thinking', cb),
   onSessionQuota: (cb: (e: SessionQuotaEvent) => void) => subscribe('session:quota', cb),
+  onSessionAttention: (cb: (e: SessionAttentionEvent) => void) =>
+    subscribe('session:attention', cb),
+  onFocusSession: (cb: (id: string) => void) => subscribe('session:focus', cb),
   onConfigChanged: (cb: (config: AppConfig) => void) => subscribe('config:changed', cb),
   onMenuSettings: (cb: () => void) => subscribe('menu:settings', () => cb()),
   onMenuNewClear: (cb: () => void) => subscribe('menu:new-clear', () => cb()),

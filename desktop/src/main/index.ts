@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { app, BrowserWindow, Menu, nativeTheme, safeStorage, shell } from 'electron'
+import { app, BrowserWindow, Menu, nativeTheme, Notification, safeStorage, shell } from 'electron'
 import type { AppConfig } from '@shared/types'
 import { loadConfig, saveConfig } from './store'
 import { buildAppMenu } from './menu'
@@ -140,6 +140,26 @@ const broadcastAnnounce = async (text: string, excludePeerId?: string): Promise<
 // never on the spawn critical path.
 service.on('peer-resolved', ({ peerId, intent }: { peerId: string; intent: JoinAnnounceIntent }) => {
   void broadcastAnnounce(composeJoinAnnounce(peerId, intent), peerId)
+})
+
+// "Needs you" system notification (PLAN C11): a session hit a permission /
+// question / plan screen. Clicking brings the window up and selects the tile.
+service.on('attention', ({ id, waiting }: { id: string; waiting: boolean }) => {
+  if (!waiting || !config.notifyAttention) return
+  if (!Notification.isSupported()) return
+  const session = service.list().find((s) => s.id === id)
+  if (!session) return
+  const isFr = (config.locale || app.getLocale()).toLowerCase().startsWith('fr')
+  const n = new Notification({
+    title: session.name,
+    body: isFr ? 'attend une réponse de ta part' : 'is waiting for your input'
+  })
+  n.on('click', () => {
+    mainWindow?.show()
+    mainWindow?.focus()
+    mainWindow?.webContents.send('session:focus', id)
+  })
+  n.show()
 })
 
 /**

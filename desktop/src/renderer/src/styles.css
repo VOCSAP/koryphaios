@@ -1908,3 +1908,20 @@ code {
   color: var(--danger);
   border-color: color-mix(in srgb, var(--danger) 50%, transparent);
 }
+
+/* "Needs you" (PLAN C11): violet pulse takes priority over the other states. */
+.dot-attention {
+  background: #b678ff;
+  animation: dot-pulse 1.4s ease-in-out infinite;
+}
+
+.row-attention {
+  font-size: 11px;
+  color: #b678ff;
+  white-space: nowrap;
+}
+
+.tile-attention {
+  color: #b678ff;
+  border-color: color-mix(in srgb, #b678ff 45%, transparent);
+}

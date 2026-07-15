@@ -164,6 +164,10 @@ export const useDeck = create<DeckState>((set, get) => ({
     window.api.onSessionQuota((e) => {
       if (e.resumed) get().showToast('toast.quotaResumed', 'info')
     })
+    // System-notification click (PLAN C11): jump to the waiting session.
+    window.api.onFocusSession((id) => {
+      set({ view: 'agents', selectedId: id })
+    })
     window.api.onConfigChanged((next) => {
       const prevLocale = get().config?.locale
       set({ config: next })

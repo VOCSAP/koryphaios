@@ -327,4 +327,5 @@ export function registerIpc({
   service.on('changed', (sessions) => send('sessions:changed', sessions))
   service.on('thinking', (e) => send('session:thinking', e))
   service.on('quota', (e) => send('session:quota', e))
+  service.on('attention', (e) => send('session:attention', e))
 }

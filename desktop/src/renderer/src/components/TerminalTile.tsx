@@ -184,13 +184,15 @@ export function TerminalTile({
         title={t('tile.fullscreenTitle')}
       >
         <span
-          className={`dot dot-${session.status}${session.rateLimited ? ' dot-limited' : session.thinking ? ' dot-thinking' : ''}`}
+          className={`dot dot-${session.status}${session.needsAttention ? ' dot-attention' : session.rateLimited ? ' dot-limited' : session.thinking ? ' dot-thinking' : ''}`}
           title={
-            session.rateLimited
-              ? t('status.rateLimited')
-              : session.thinking
-                ? t('status.thinking')
-                : t(`status.${session.status}`)
+            session.needsAttention
+              ? t('status.needsAttention')
+              : session.rateLimited
+                ? t('status.rateLimited')
+                : session.thinking
+                  ? t('status.thinking')
+                  : t(`status.${session.status}`)
           }
         />
         <span className="tile-title" style={{ color: session.color || undefined }}>
@@ -202,6 +204,9 @@ export function TerminalTile({
           <span className="tile-peer tile-peer-pending">
             {t('session.pending', { id: (session.sessionId || session.id).slice(0, 8) })}
           </span>
+        )}
+        {session.needsAttention && (
+          <span className="tile-quota tile-attention">⏸ {t('attention.badge')}</span>
         )}
         {session.rateLimited && (
           <span className="tile-quota">
