@@ -137,6 +137,12 @@ cd desktop && npm run dev        # dev mode (renderer HMR)
   `Ctrl+Shift+M` on the selected tile).
 - The empty state offers **`＋ Add peer terminal`** and, when a previous
   workspace exists, **`Restore previous session`**.
+- **Cross-session search** (🔍 in the top bar, or `Ctrl+Shift+F`): searches the
+  scrollback of every open terminal, grouped by session. Double-click a result
+  to focus its tile and scroll the terminal to the match (highlighted via
+  selection). Scope is the live scrollback (last 8000 lines per session), not
+  the full transcript history; repeated TUI repaint frames of the same line are
+  collapsed into one result.
 
 ### Workspaces (🗂) -- save & restore
 

@@ -12,6 +12,7 @@ import { HomeView } from './HomeView'
 import { HelpAssistant } from './HelpAssistant'
 import { InboxPanel } from './InboxPanel'
 import { DiffPanel } from './DiffPanel'
+import { SearchBar } from './SearchBar'
 import { SettingsView } from './SettingsView'
 import { WorkspacesDialog } from './WorkspacesDialog'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -39,6 +40,8 @@ export function App(): React.JSX.Element {
   const selectedId = useDeck((s) => s.selectedId)
   const maximizedId = useDeck((s) => s.maximizedId)
   const setMaximized = useDeck((s) => s.setMaximized)
+  const searchOpen = useDeck((s) => s.searchOpen)
+  const openSearch = useDeck((s) => s.openSearch)
   const sidebarWidth = useDeck((s) => s.sidebarWidth)
   const view = useDeck((s) => s.view)
   const inboxOpen = useDeck((s) => s.inboxOpen)
@@ -71,6 +74,20 @@ export function App(): React.JSX.Element {
     return () => window.removeEventListener('keydown', onKey)
   }, [selectedId, maximizedId, setMaximized])
 
+  // Ctrl+Shift+F toggles the cross-session search panel. Terminals swallow the
+  // combo before the PTY sees it (TerminalTile's key handler) but let the DOM
+  // event bubble up to this window-level listener.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault()
+        openSearch(!searchOpen)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [searchOpen, openSearch])
+
   if (!config) {
     // Bootstrap splash shown before init() resolves (config + locale dict load
     // together), so there is no dictionary to translate against yet.
@@ -88,6 +105,7 @@ export function App(): React.JSX.Element {
         <div className="main-pane">
           <DisplayModeBar />
           <TileArea />
+          <SearchBar />
         </div>
       </div>
       <div className={`view-home${view === 'home' ? '' : ' view-hidden'}`}>

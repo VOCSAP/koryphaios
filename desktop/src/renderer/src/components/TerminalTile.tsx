@@ -5,6 +5,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import type { SessionRuntime } from '@shared/types'
 import { useDeck } from '../store'
 import { formatClock, useT } from '../i18n'
+import { registerTerminal, unregisterTerminal } from '../terminal-registry'
 import { ConfirmDialog } from './ConfirmDialog'
 
 const THEMES: Record<'dark' | 'light', ITheme> = {
@@ -86,6 +87,7 @@ export function TerminalTile({
     if (hostRef.current) term.open(hostRef.current)
     termRef.current = term
     fitRef.current = fit
+    registerTerminal(id, term)
 
     term.attachCustomKeyEventHandler((e) => {
       if (e.type !== 'keydown') return true
@@ -96,6 +98,12 @@ export function TerminalTile({
       // submits (falls through to xterm's default \r).
       if (e.key === 'Enter' && (e.ctrlKey || e.shiftKey) && !e.altKey && !e.metaKey) {
         window.api.ptyInput(id, '\x1b\r')
+        return false
+      }
+
+      // Ctrl+Shift+F belongs to the cross-session search bar: keep it away from
+      // xterm/the PTY and let the event bubble to App's window-level toggle.
+      if (e.ctrlKey && e.shiftKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === 'f') {
         return false
       }
 
@@ -125,6 +133,7 @@ export function TerminalTile({
       onInput.dispose()
       offData()
       offExit()
+      unregisterTerminal(id, term)
       term.dispose()
       termRef.current = null
       fitRef.current = null
@@ -172,6 +181,7 @@ export function TerminalTile({
         .filter(Boolean)
         .join(' ')}
       style={{ '--tile-color': session.color || 'transparent' } as React.CSSProperties}
+      data-session-id={id}
       onMouseDown={() => setSelected(id)}
     >
       <div

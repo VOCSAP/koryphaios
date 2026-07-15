@@ -15,6 +15,8 @@ export function DisplayModeBar(): React.JSX.Element {
   const config = useDeck((s) => s.config!)
   const updateConfig = useDeck((s) => s.updateConfig)
   const sessions = useDeck((s) => s.sessions)
+  const searchOpen = useDeck((s) => s.searchOpen)
+  const openSearch = useDeck((s) => s.openSearch)
 
   const clamp = (n: number): number => (Number.isFinite(n) && n >= 1 ? Math.floor(n) : 1)
 
@@ -56,6 +58,13 @@ export function DisplayModeBar(): React.JSX.Element {
       )}
 
       <span className="modebar-spacer" />
+      <button
+        className={`mode-btn search-toggle ${searchOpen ? 'mode-btn-active' : ''}`}
+        title={t('search.toggleTitle')}
+        onClick={() => openSearch(!searchOpen)}
+      >
+        🔍
+      </button>
       <span className="modebar-count">
         {t(sessions.length === 1 ? 'modebar.countOne' : 'modebar.countOther', {
           n: sessions.length

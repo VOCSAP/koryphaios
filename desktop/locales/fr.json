@@ -102,6 +102,15 @@
   "modebar.rows": "Lignes",
   "modebar.countOne": "{n} session",
   "modebar.countOther": "{n} sessions",
+
+  "search.placeholder": "Rechercher dans les sessions ouvertes…",
+  "search.toggleTitle": "Rechercher dans les sessions (Ctrl+Maj+F)",
+  "search.countOne": "{n} résultat",
+  "search.countOther": "{n} résultats",
+  "search.noResults": "Aucun résultat dans l'historique des sessions ouvertes.",
+  "search.jumpTitle": "Double-clic pour aller à ce résultat",
+  "search.hint": "Double-cliquez sur un résultat pour sélectionner sa tuile et faire défiler le terminal jusqu'au résultat.",
+
   "message.placeholder": "Message à tous les pairs du groupe…",
   "message.send": "Envoyer",
   "message.sendTitle": "Diffuser à tous les pairs (Entrée pour envoyer, Maj+Entrée pour un saut de ligne)",

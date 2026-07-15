@@ -114,6 +114,8 @@ body {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  /* Anchor for the cross-session search panel overlay. */
+  position: relative;
 }
 
 /* ---------- Display-mode bar ---------- */
@@ -473,6 +475,116 @@ body {
     opacity: 0.55;
     box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 0%, transparent);
   }
+}
+
+/* ---------- Cross-session search ---------- */
+.search-panel {
+  position: absolute;
+  top: 40px;
+  right: 10px;
+  width: 520px;
+  max-width: calc(100% - 20px);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  z-index: 30;
+}
+
+.search-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.search-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.search-count {
+  color: var(--fg-dim);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.search-results {
+  max-height: 45vh;
+  overflow-y: auto;
+  border-top: 1px solid var(--border);
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.search-empty {
+  color: var(--fg-dim);
+  text-align: center;
+  padding: 10px;
+}
+
+.search-group-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  padding: 6px 6px 2px;
+}
+
+.search-group-peer {
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--fg-dim);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 0 6px;
+}
+
+.search-hit {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  padding: 3px 6px 3px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-dim);
+  user-select: none;
+}
+
+.search-hit:hover {
+  background: var(--bg-3);
+  color: var(--fg);
+}
+
+.search-hit mark {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+  color: var(--fg);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.search-hint {
+  color: var(--fg-dim);
+  font-size: 11px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border);
 }
 
 /* ---------- Tile area ---------- */
