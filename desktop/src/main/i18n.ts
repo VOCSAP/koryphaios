@@ -53,7 +53,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'common.restore': 'Restore',
   'common.maximize': 'Maximize',
 
-  'app.brand': 'Claude Peers Deck',
+  'app.brand': 'Koryphaios',
   'app.loading': 'Loading…',
 
   'sidebar.settings': 'Settings',
@@ -279,10 +279,10 @@ export const EN_DEFAULTS: Record<string, string> = {
   'settings.notifyAttention': 'System notification when a session waits for your input',
   'sidebar.setLead': 'Designate as team-lead',
   'sidebar.leadTitle':
-    'Team-lead: targeted Deck notices (dispatch, integrations) go to this session',
+    'Team-lead: targeted app notices (dispatch, integrations) go to this session',
   'create.lead': 'Team-lead of this window',
   'create.leadHelp':
-    'Targeted Deck notices (queue dispatch, integration notices) go to the team-lead. One per window; designating a new one demotes the previous.',
+    'Targeted app notices (queue dispatch, integration notices) go to the team-lead. One per window; designating a new one demotes the previous.',
   'create.leadTaken': 'a team-lead already exists (checking moves the crown)',
   'nav.worktrees': 'Worktrees',
   'worktrees.title': 'Git worktrees',

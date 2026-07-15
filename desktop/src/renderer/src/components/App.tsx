@@ -59,8 +59,8 @@ export function App(): React.JSX.Element {
   // Reflect the current workspace name in the window title.
   useEffect(() => {
     document.title = currentWorkspaceName
-      ? `Claude Peers Deck — ${currentWorkspaceName}`
-      : 'Claude Peers Deck'
+      ? `Koryphaios — ${currentWorkspaceName}`
+      : 'Koryphaios'
   }, [currentWorkspaceName])
 
   // Ctrl+Shift+M toggles fullscreen of the selected tile.

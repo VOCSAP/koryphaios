@@ -1,4 +1,11 @@
-# Claude Peers Deck
+# Koryphaios
+
+> **Koryphaios** (Κορυφαῖος) — the leader of the chorus in Greek theatre: the
+> one who sets the rhythm, coordinates the chorus and speaks on its behalf.
+> Formerly **Claude Peers Deck** (≤ v0.6); the first run after upgrading
+> migrates the app data from the old `claude-peers-desk` folder automatically
+> (copy, never overwrite — a rollback keeps working). The `kory` bin replaces
+> `claude-peers-desk`, which remains as an alias.
 
 A desktop app that **docks multiple Claude Code peer sessions into a single
 window**, so you stop juggling a dozen floating terminals. Every tile is a real
@@ -121,12 +128,12 @@ From the directory you want the peers to work in:
 # one-time, from this repo:
 cd desktop
 npm install            # also rebuilds node-pty for Electron (see Develop)
-npm link               # exposes the `claude-peers-desk` bin globally
+npm link               # exposes the `kory` bin globally
 
 # then, in any project:
 cd /path/to/your/project
-claude-peers-desk            # opens a window scoped to this directory
-claude-peers-desk my-team    # optional: join/create a named (custom) shared group
+kory            # opens a window scoped to this directory
+kory my-team    # optional: join/create a named (custom) shared group
 ```
 
 - **No argument** -> an *ephemeral* private group (a fresh random secret each
@@ -296,7 +303,7 @@ button): discrete inputs on change, free-text inputs on blur.
 Each tile spawns the resolved launch command in a real pseudo-terminal:
 
 - **Command resolution** (first wins): `<project>/.claude/claude-peers/config.json`
-  -> global config (`%APPDATA%\claude-peers-desk` / XDG) -> default
+  -> global config (`%APPDATA%\kory` / XDG) -> default
   `claude --dangerously-load-development-channels server:claude-peers`.
 - **Shell wrapping (default = login, non-interactive):** `"$SHELL" -l -c "<cmd>"`
   (Unix) / `powershell -NoLogo -NoProfile -Command "<cmd>"` (Windows). This keeps
@@ -419,10 +426,10 @@ npm run package:mac      # dmg
 npm run package:linux    # AppImage
 ```
 
-On Windows the build emits, in `dist/`, both `Claude Peers Deck Setup <v>.exe`
-(NSIS installer) and `Claude Peers Deck-<v>-win.zip` (portable). The binary is
-named **`claude-peers-desk.exe`** (no spaces, via `executableName`) while the
-display name stays "Claude Peers Deck".
+On Windows the build emits, in `dist/`, both `Koryphaios Setup <v>.exe`
+(NSIS installer) and `Koryphaios-<v>-win.zip` (portable). The binary is
+named **`kory.exe`** (no spaces, via `executableName`) while the
+display name stays "Koryphaios".
 
 > First Windows build only: electron-builder extracts `winCodeSign` (which holds
 > macOS symlinks). If it fails with `Sub items Errors: 2`, enable **Windows
@@ -442,17 +449,17 @@ its folder**. Do not move the `.exe` out on its own.
 received` and open no window. Launch it detached instead:
 
 ```powershell
-Start-Process claude-peers-desk     # or just double-click the exe
+Start-Process kory     # or just double-click the exe
 ```
 
-**A `claude-peers-desk` command, scoped to the current directory.** Copy
-[`bin/claude-peers-desk.cmd.example`](bin/claude-peers-desk.cmd.example) to a
-folder on your PATH (e.g. `%USERPROFILE%\.cargo\bin\claude-peers-desk.cmd`), set
-`APP_DIR` inside it to the folder containing `claude-peers-desk.exe`, and use:
+**A `kory` command, scoped to the current directory.** Copy
+[`bin/kory.cmd.example`](bin/kory.cmd.example) to a
+folder on your PATH (e.g. `%USERPROFILE%\.cargo\bin\kory.cmd`), set
+`APP_DIR` inside it to the folder containing `kory.exe`, and use:
 
 ```bat
-claude-peers-desk            :: ephemeral group, sessions scoped to the cwd
-claude-peers-desk my-team    :: custom (shared) group; the arg is the secret
+kory            :: ephemeral group, sessions scoped to the cwd
+kory my-team    :: custom (shared) group; the arg is the secret
 ```
 
 The wrapper uses `start` (detached, no ICU error) and forwards the current
@@ -548,8 +555,8 @@ src/
 locales/                  en.json, fr.json
 bin/
   launch.js               dev CLI launcher (npm link) -> spawns electron
-  claude-peers-desk.cmd.example  wrapper template for a packaged build on PATH
-bin/launch.js             the `claude-peers-desk` launcher
+  kory.cmd.example  wrapper template for a packaged build on PATH
+bin/launch.js             the `kory` launcher
 ```
 
 ---

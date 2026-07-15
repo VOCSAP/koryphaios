@@ -61,12 +61,13 @@ import { templateToInputs, toTemplate } from '@shared/template'
 
 let mainWindow: BrowserWindow | null = null
 
-// Harmonize the app-data folder on a single "claude-peers-desk" root (it was
-// historically split: Electron userData in "claude-peers-deck", launch config +
-// templates in "claude-peers-desk"). Must run before any getPath('userData') /
-// loadConfig() below. App state now lives under <userData>/config to avoid
-// colliding with the launch config.json at the root.
-app.setName('claude-peers-desk')
+// Pin the app-data folder on the "koryphaios" root (v0.7 rename; previously
+// "claude-peers-desk", and before that userData lived in "claude-peers-deck").
+// Must run before any getPath('userData') / loadConfig() below; the chained
+// migrations in migrate-data-dir.ts carry the legacy folders' content over.
+// App state lives under <userData>/config to avoid colliding with the launch
+// config.json at the root.
+app.setName('koryphaios')
 runDataMigration({ userDataDir: app.getPath('userData') })
 
 // Resolve the launch context (invocation cwd + optional custom scope id) and
@@ -99,7 +100,7 @@ if (activeScope.scopeKind === 'custom' && config.rememberScopeSecrets) {
   try {
     rememberScopeSecret(secretsDir(), secretCipher, activeScope.groupId, activeScope.secret)
   } catch (e) {
-    console.error('[claude-peers-desk] could not remember scope secret:', e)
+    console.error('[koryphaios] could not remember scope secret:', e)
   }
 }
 
@@ -195,7 +196,7 @@ const broadcastAnnounce = async (text: string, excludePeerId?: string): Promise<
     if (sent > 0) journal.add('announce', `announce to ${sent} peer(s): ${text.slice(0, 120)}`)
     return sent
   } catch (e) {
-    console.error('[claude-peers-desk] announce failed:', e)
+    console.error('[koryphaios] announce failed:', e)
     return 0
   }
 }
@@ -310,7 +311,7 @@ const announceToLead = async (text: string): Promise<number> => {
     }
     return sent
   } catch (e) {
-    console.error('[claude-peers-desk] lead announce failed:', e)
+    console.error('[koryphaios] lead announce failed:', e)
     return 0
   }
 }
@@ -360,7 +361,7 @@ const dispatchNext = async (): Promise<DispatchResult> => {
     dispatchedIds.add(item.id)
     return { sent: true, title: item.title }
   } catch (e) {
-    console.error('[claude-peers-desk] dispatch failed:', e)
+    console.error('[koryphaios] dispatch failed:', e)
     return { sent: false, reason: 'error' }
   }
 }
@@ -535,7 +536,7 @@ service.on('changed', (sessions: unknown[]) => {
       // Keep the renderer's window title in sync with the current workspace.
       mainWindow?.webContents.send('workspace:current', summary)
     } catch (e) {
-      console.error('[claude-peers-desk] auto-save failed:', e)
+      console.error('[koryphaios] auto-save failed:', e)
     }
   }, 1000)
 })
@@ -548,7 +549,7 @@ function createWindow(): void {
     minHeight: 600,
     show: false,
     backgroundColor: config.theme === 'light' ? '#f5f5f5' : '#1e1e1e',
-    title: 'Claude Peers Deck',
+    title: 'Koryphaios',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -605,7 +606,7 @@ app.whenReady().then(() => {
           buttons: isFr ? ['Utiliser cette commande', 'Refuser'] : ['Use this command', 'Refuse'],
           defaultId: 1,
           cancelId: 1,
-          title: 'Claude Peers Deck',
+          title: 'Koryphaios',
           message: isFr
             ? 'Ce projet définit sa propre commande de lancement des sessions.'
             : 'This project defines its own session launch command.',
@@ -650,7 +651,7 @@ app.whenReady().then(() => {
     .then((srv) => {
       designServer = srv
     })
-    .catch((e) => console.error('[claude-peers-desk] design endpoint failed to start:', e))
+    .catch((e) => console.error('[koryphaios] design endpoint failed to start:', e))
   registerIpc({
     service,
     workspaces,

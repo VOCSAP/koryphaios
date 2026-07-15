@@ -1,12 +1,13 @@
 {
-  "name": "claude-peers-desk",
-  "version": "0.6.0",
-  "description": "Desktop dock for multiple Claude Code peer sessions in a single window",
+  "name": "koryphaios",
+  "version": "0.7.0",
+  "description": "Koryphaios — the chorus leader: a desktop orchestrator docking multiple Claude Code agent sessions (peers, roadmap, worktrees, embedded browser) in a single window",
   "main": "out/main/index.js",
   "author": "vocsap",
   "license": "MIT",
   "private": true,
   "bin": {
+    "kory": "./bin/launch.js",
     "claude-peers-desk": "./bin/launch.js"
   },
   "scripts": {

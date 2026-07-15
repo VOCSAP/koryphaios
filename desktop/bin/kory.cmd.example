@@ -1,7 +1,7 @@
 @echo off
-REM Wrapper to launch the PACKAGED Claude Peers Deck as `claude-peers-desk` from
+REM Wrapper to launch the PACKAGED Koryphaios as `kory` from
 REM any project directory. Copy this to a folder on your PATH (e.g.
-REM %USERPROFILE%\.cargo\bin\claude-peers-desk.cmd) and edit APP_DIR below.
+REM %USERPROFILE%\.cargo\bin\kory.cmd) and edit APP_DIR below.
 REM
 REM Why a wrapper and not the .exe directly on PATH:
 REM   - Running the GUI exe attached to a console (PowerShell) can trigger
@@ -10,13 +10,13 @@ REM     detaches it, which avoids that.
 REM   - It forwards the current directory as the project to scope sessions to.
 REM
 REM Usage:
-REM   claude-peers-desk            ephemeral group, sessions scoped to the cwd
-REM   claude-peers-desk my-team    custom (shared) group; the arg is the secret
+REM   kory            ephemeral group, sessions scoped to the cwd
+REM   kory my-team    custom (shared) group; the arg is the secret
 
-REM ---- EDIT ME: the folder that contains claude-peers-desk.exe -------------
-set "APP_DIR=C:\Path\To\Claude Peers Deck-0.1.0-win"
+REM ---- EDIT ME: the folder that contains koryphaios.exe -------------
+set "APP_DIR=C:\Path\To\Koryphaios-0.1.0-win"
 REM -------------------------------------------------------------------------
 
 set "CLAUDE_PEERS_DESK_PROJECT_DIR=%CD%"
 if not "%~1"=="" set "CLAUDE_PEERS_DESK_SCOPE_ID=%~1"
-start "" "%APP_DIR%\claude-peers-desk.exe"
+start "" "%APP_DIR%\koryphaios.exe"

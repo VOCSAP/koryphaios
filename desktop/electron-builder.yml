@@ -1,8 +1,8 @@
-appId: com.vocsap.claude-peers-desk
-productName: Claude Peers Deck
+appId: com.vocsap.koryphaios
+productName: Koryphaios
 # Space-free binary name (convenient on PATH); productName stays the display
 # name (window title, Start-menu shortcut, installer filename).
-executableName: claude-peers-desk
+executableName: koryphaios
 directories:
   output: dist
   buildResources: build
