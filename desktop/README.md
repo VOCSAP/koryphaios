@@ -67,6 +67,48 @@ discovery.
   one-shot `claude -p` call carrying the active view's context, technically
   read-only (no MCP, no mutating tools) -- an advisor, never an actor.
   Right-click the button to hide it or switch the model (Haiku by default).
+- **Team-lead 👑.** Designate ONE session per window as the team-lead (create
+  checkbox -- suggested by the configurable `leadPattern` -- or the sidebar
+  right-click). Targeted Deck notices (queue dispatch, review reports,
+  integration notes) go to it via a targeted announce.
+- **Worktrees view (⎇ rail).** Every worktree of the repo with its branch,
+  dirty count, last commit and attached session. Orphans (left by a closed
+  tile) can be resumed into a new session or removed -- never forced, branch
+  always kept.
+- **Roadmap extras.** "Import a plan…" hands a plan file (e.g. a `PLAN*.md`)
+  to a one-shot agent that converts it into deduplicated roadmap items. A
+  **dispatch queue** (⏳) sends queued items one by one to the team-lead --
+  full item + "keep the status current" contract -- and auto-dispatches the
+  next one when a dispatched item turns `done`.
+- **Diff / review.** A diff panel (per worktree from the Worktrees view, per
+  session from the sidebar right-click) shows uncommitted changes plus the
+  branch's commits vs main; "Have an agent review this" spawns a one-shot
+  reviewer that reports to the team-lead.
+- **Operator inbox ✉.** Agents write to the human with `send_message` to the
+  reserved `operator` peer; the Deck drains the broker inbox every 10 s into
+  a panel (unread bubble on the rail) with a system notification per batch.
+  Read-only: you answer through the megaphone.
+- **"Needs you" detection.** When a session hits a permission/question screen
+  the tile shows a ⏸ badge and a clickable system notification brings it into
+  view (toggle in Settings).
+- **Activity journal 📜.** A per-window ring buffer narrates spawns, exits,
+  quota episodes, waits, worktree operations, announces, dispatches and
+  checkpoints; filterable rail view with plain-text export.
+- **Resume digest 📋.** One click in the help popup produces a "where things
+  stand / in flight / what's next" briefing from the live app state plus
+  configurable sources (plan files, `git log`, commands run in the project
+  dir). Sources come from the GLOBAL config only -- never from a repo-carried
+  config.
+- **Template composer.** Create/edit/duplicate team templates without
+  spawning anything: per-entry agent/model/effort/args/prompt/worktree/
+  announce/colour and a single-lead crown, rendered hierarchically (lead
+  top-center). Applying a template only crowns its lead when the window has
+  none.
+- **Safety nets.** Before an agent spawns into a dirty working tree, the Deck
+  anchors a `git stash create` snapshot under `refs/claude-peers/` (restore
+  command in the journal; auto-purged after 7 days). A `launchCommand` coming
+  from a project's config triggers a one-time approval dialog (sha256
+  remembered per project; refusal falls back to the global command).
 - **English / French UI**, switchable live.
 
 ---
