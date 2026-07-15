@@ -34,6 +34,7 @@
 | 2026-07-14 | session exploration (suite) | — | Exploration C6/C7/C8 (EXPLORATION §7) : vue Worktrees, import de plan par agent one-shot, harness superviseur via --append-system-prompt-file (vérifié doc CC). **Dogfooding réel de C3** : items C6/C7/C8 créés via les tools roadmap_* de cette session (broker auto-spawné) puis exportés par `cli.ts roadmap-export` → `roadmap-seed-v0.6.json` (re-keyé github.com/vocsap/claude-peers-mcp), importable sur ton poste : `bun cli.ts roadmap-import roadmap-seed-v0.6.json`. | Prochain chantier au choix : C6 ou C7 (C8 traité). |
 | 2026-07-14 | session exploration (suite) | C8 | Verrouillage du harness superviseur (décision sécurité opérateur) : SUPERVISOR_SYSTEM_PROMPT constante code ancrée via --append-system-prompt-file (fichier régénéré à chaque spawn, écrasé si trafiqué, re-passé au resume), retrait de l'option supervisorAgent de Settings, prompt d'import C7 verrouillé par la même règle. bun test 313/313. | C6 (vue Worktrees) et C7 (import de plan) restent à implémenter. |
 | 2026-07-14 | session exploration (suite) | C9 | Bouton d'aide flottant : help-assistant.ts (claude -p jetable, system prompt constante code + snapshot de la vue, --strict-mcp-config + --disallowedTools = lecture seule technique, marqueur anti-bruit de profil), popup de chat HelpAssistant.tsx, options Settings + clic droit (toggle, modèle défaut haiku), 8 tests dont faux binaire claude. | Validation manuelle : réponse ancrée dans la vue Roadmap au premier lancement réel. Restent : C6, C7. |
+| 2026-07-14 | session exploration (suite) | — | Brainstorm orchestrateur consigné (EXPLORATION §7.5) : chantiers C10-C19 au PLAN (team-lead, attention, inbox opérateur, diff/review, journal, file->lead, checkpoints, digest, composeur templates, hardening launchCommand) + reportés (battle chat, OTEL, GitHub sync) et écartés (presets permissions). | Implémentation autonome : C6 -> C7 -> C10 -> ... -> C19. |
 
 ---
 
@@ -372,6 +373,155 @@ jetables, **sans toucher au contexte du superviseur** (EXPLORATION §7.4).
 ### Done quand
 - [ ] Une question posée depuis la vue Roadmap reçoit une réponse ancrée
       dans les items affichés (**validation manuelle opérateur**).
+
+---
+
+## Lot « orchestrateur IA » (décisions EXPLORATION §7.5) — ordre d'implémentation
+
+Ordre logique : C6 → C7 → C10 (fondation team-lead) → C11 → C12 → C13 →
+C14 → C15 → C16 → C17 → C18 → C19. C10 est prérequis de C15/C18 et du volet
+notification de C6/C13.
+
+## C10 — Rôle team-lead + annonce ciblée (~1 j)
+
+**Objectif** : un team-lead désigné par fenêtre, que la Deck peut notifier de
+façon ciblée (fondation de C15, C18, et des notifications d'intégration).
+
+### Jalons
+- [ ] `SessionDef.lead?: boolean` — source de vérité explicite, capturé dans
+      workspaces ET templates ; unicité garantie par `SessionService`
+      (désigner dé-désigne l'ancien) ; badge 👑 sidebar.
+- [ ] Pose : coche « team-lead » du menu avancé (pré-cochée si le nom
+      d'agent/session matche `leadPattern` configurable — défaut `team-lead`
+      — ET qu'aucun lead n'existe) + clic droit « désigner comme team-lead ».
+- [ ] Broker : `/announce` accepte `to_peer_id?` (annonce ciblée à UN peer du
+      groupe, sentinel `deck`, no-reply inchangé) + tests.
+- [ ] Deck : `announceToLead(text)` (helper main) — no-op sans lead, sauf
+      session active unique (annonce avec mention « aucun team-lead
+      désigné »).
+
+## C11 — Détection « a besoin de toi » + notifications système (~1 j)
+
+### Jalons
+- [ ] `attention.ts` (patron quota.ts) : détection des écrans d'attente de
+      Claude Code (prompt de permission, question, menu de plan) dans le flux
+      PTY ; épisode clos dès reprise d'activité.
+- [ ] Badge « ⏸ t'attend » (sidebar + tuile) + `Notification` Electron
+      (titre = nom de session), throttle par session ; toggle global
+      `notifyAttention` (défaut on) dans Settings.
+- [ ] Tests fixtures (écrans réels de permission/question).
+
+## C12 — Inbox opérateur (~1-1,5 j)
+
+### Jalons
+- [ ] Broker : pair réservé `operator` (`__operator__`, miroir du sentinel
+      deck) ; `send_message` vers `operator` route vers ce token dans le
+      groupe de l'émetteur ; route `POST /operator-inbox` (group_id +
+      secret_hash) qui rend et marque délivrés les messages ; `set_id` refuse
+      `operator` ; tests.
+- [ ] `server.ts` : instructions MCP — « operator = l'humain devant la Deck ;
+      envoie-lui les questions bloquantes ; il ne répond pas par ce canal ».
+- [ ] Deck : poll de l'inbox (10 s), panneau inbox (badge non-lus sur le
+      rail) + notification système par message ; réponse de l'opérateur via
+      mégaphone/annonce ciblée existants.
+
+## C13 — Vue Diff / Review (~2 j)
+
+### Jalons
+- [ ] `diff-service.ts` : `git status --porcelain` + `git diff` (+ diff vs
+      branche principale pour un worktree) parsés, par session/worktree.
+- [ ] Panneau Diff (depuis la vue Worktrees C6 et le clic droit d'une
+      session) : fichiers touchés, +/- ; diff colorisé simple.
+- [ ] « Faire relire par un agent » : spawn one-shot (patron C7, prompt
+      constante code) qui lit le diff et poste sa review en s'adressant au
+      team-lead (C10) s'il existe, sinon en commentaire dans sa tuile.
+- [ ] Tests : parse du diff sur repo jetable.
+
+## C14 — Journal d'activité (~0,5-1 j)
+
+### Jalons
+- [ ] Accumulateur d'événements dans le main (spawn/exit/quota/attention/
+      worktree/annonces/intégrations/dispatch), ring buffer par fenêtre.
+- [ ] Vue « Journal » (rail) : fil chronologique filtrable ; export texte.
+- [ ] Tests : accumulation + cap du buffer.
+
+## C15 — File d'attente → dispatch au team-lead (~1 j, requiert C10)
+
+### Jalons
+- [ ] Roadmap : champ `queue INTEGER NULL` (position en file) — broker +
+      types + upsert + tests ; « mettre en file / retirer » dans la vue
+      Roadmap (section File d'attente ordonnée).
+- [ ] Dispatch : bouton « envoyer le premier au team-lead » + auto-dispatch
+      du suivant quand un item en file passe `done` (annonce ciblée C10,
+      contenu = item complet, consigne de tenir le statut).
+- [ ] Sans lead : bouton grisé avec explication (pas d'auto-magie).
+
+## C16 — Checkpoints git (~0,5 j)
+
+### Jalons
+- [ ] Avant tout spawn dans un dossier au working tree sale : `git stash
+      create` + `git update-ref refs/claude-peers/checkpoint-<ts>` (aucune
+      pollution d'historique ni du working tree) ; entrée journal (C14) avec
+      le sha et la commande de restauration.
+- [ ] Liste des checkpoints dans la vue Journal ; purge des plus vieux (>7 j).
+- [ ] Tests sur repo jetable.
+
+## C17 — Digest de reprise (~1 j)
+
+### Jalons
+- [ ] Config **globale uniquement** `digest.sources` (fichiers/globs +
+      commandes, résolus/exécutées dans le projectDir) + surcharges
+      `digest.perProject[project_key]` ; défauts : snapshot C9 + `PLAN*.md`.
+- [ ] `askDigest` : prompt = constante code (règle C8) + snapshot + sorties
+      des sources (cap de taille par source) → `claude -p` (patron C9,
+      lecture seule technique).
+- [ ] UI : bouton « 📋 Résumé de reprise » dans le popup d'aide + entrée de
+      menu ; affiché comme un échange du popup.
+- [ ] Tests : résolution des sources (globaux/commandes/perProject), caps,
+      refus de toute source venant d'une config projet.
+
+## C18 — Composeur de templates (~1,5-2 j, requiert C10)
+
+### Jalons
+- [ ] Vue/fenêtre Templates : liste (supprimer/dupliquer) + « créer » /
+      « éditer » SANS spawner ; chaque entrée = champs du menu avancé
+      (agent, modèle, effort, args, prompt initial, worktree, annonce,
+      couleur, coche lead — un seul lead par template).
+- [ ] Rendu hiérarchique : lead en haut centré, l'équipe en dessous.
+- [ ] À l'application : le lead du template devient celui de la fenêtre s'il
+      n'y en a pas déjà.
+- [ ] Tests : shape template étendue (lead), round-trip compose→apply.
+
+## C19 — Hardening launchCommand projet (~0,5 j)
+
+### Jalons
+- [ ] À la résolution d'un `launchCommand` venant de la config PROJET :
+      confirmation opérateur à la première utilisation (dialog), hash
+      approuvé mémorisé par project_key dans l'app-state ; refus → fallback
+      config globale ; entrée journal.
+- [ ] Tests : approbation/refus/changement de commande (hash différent).
+
+---
+
+## Reportés (à ne pas perdre)
+
+- **Battle chat multi-modèles** (could) : N CLIs (claude -p / gemini /
+  codex exec) en parallèle + modèle juge ; le squelette technique est C9
+  (`runHelp` généralisé en adaptateurs). Variante notée, sans doute plus
+  utile : **panel de review multi-modèles** sur un plan/diff plutôt que du
+  chat libre. À reconsidérer après le lot orchestrateur.
+- **Suivi de consommation** (tokens/coût par session via télémétrie OTEL de
+  Claude Code + collecteur local) : utile, infra plus lourde.
+- **Sync GitHub Issues ↔ roadmap** : la porte reste ouverte (`tags`, futur
+  `external_url`).
+
+## Écartés (décisions)
+
+- **Presets de permissions par profil au spawn** (wont) : les définitions
+  d'agents dédiées de l'opérateur portent déjà leurs limites de tools.
+- **Parseur déterministe de plans** (C7) : jugement impossible sans LLM.
+- **Harness superviseur/import configurable** (C8) : sécurité — constantes
+  code uniquement.
 
 ---
 

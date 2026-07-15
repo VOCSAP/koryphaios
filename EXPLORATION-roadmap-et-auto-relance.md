@@ -640,6 +640,51 @@ superviseur (son contexte n'a pas à être chargé d'aide à l'usage) :
 - **Options** : toggle du bouton + modèle (défaut **haiku**, coût/latence)
   dans Settings > Général, et les deux aussi via clic droit sur le bouton.
 
+### 7.5 Brainstorm « orchestrateur IA » (2026-07-14, décisions opérateur)
+
+Pivot assumé : de « container à sessions » vers un orchestrateur/éditeur IA.
+Décisions issues de l'échange (les chantiers C10-C19 du PLAN les déclinent) :
+
+- **Rôle team-lead (fondation)** : un flag `lead` explicite sur la session —
+  jamais déduit silencieusement — avec unicité garantie par le service
+  (désigner déplace la couronne), posable par coche au spawn, par clic droit,
+  et **pré-suggéré** quand le nom d'agent/session matche un motif configurable
+  (défaut `team-lead`) et que la place est libre. Badge 👑. Capturé dans
+  workspaces et templates. Broker : `/announce` gagne un `to_peer_id`
+  optionnel (annonce ciblée, toujours sentinel `deck`, toujours no-reply).
+- **Intégration notifiée, pas d'app qui merge** : le merge reste à
+  l'opérateur ou à son team-lead ; l'app garantit l'*information* (annonce
+  ciblée au lead : « l'opérateur a intégré la branche X »). Pas de lead →
+  pas d'annonce, sauf session active unique (annonce avec mention explicite).
+- **File d'attente = dispatch au lead** : items ordonnés « en file » dans la
+  vue Roadmap ; la Deck annonce l'item suivant au team-lead (clic ou passage
+  à done du précédent). C'est le lead qui orchestre, pas l'app.
+- **Inbox opérateur** : pair réservé `operator` (miroir du sentinel `deck`,
+  en réception) — `send_message operator "..."` depuis un agent → panneau
+  inbox + notification système. Corrige l'asymétrie sortante du mégaphone.
+- **Détection « a besoin de toi »** : patron QuotaDetector appliqué aux
+  écrans d'attente de Claude Code (permission, question, plan) → badge
+  sidebar + notification système.
+- **Digest de reprise** : prompt = constante code (règle C8) ; **sources de
+  données configurables dans la config GLOBALE uniquement** (fichiers/globs +
+  commandes, ex. `kleos handoffs --last 5`), exécutées/résolues dans le
+  dossier projet (Kleos auto-dérive son space du cwd), surcharges par
+  `project_key` possibles dans le même fichier global. Interdit en config
+  projet : une commande portée par un repo cloné = exécution arbitraire.
+- **Composeur de templates** : créer/éditer un template sans spawner
+  (formulaire type menu avancé par entrée, dont la coche lead) ; rendu
+  hiérarchique lead en haut. À l'application, le lead du template devient
+  celui de la fenêtre s'il n'y en a pas.
+- **Hardening launchCommand projet** (constat au passage) : la config projet
+  peut déjà surcharger la commande lancée dans les tuiles → confirmation
+  opérateur à la première utilisation (hash mémorisé), même logique que
+  l'approbation des .mcp.json par Claude Code.
+- **Reportés** : battle chat multi-modèles (could — noter la variante « panel
+  de review multi-modèles » sur plans/reviews, plus utile que le chat libre) ;
+  suivi conso OTEL ; sync GitHub Issues.
+- **Écarté** : presets de permissions par profil au spawn (wont — les
+  définitions d'agents dédiées de l'opérateur couvrent déjà le besoin).
+
 ## 8. Recommandation d'ensemble (mise à jour)
 
 Ordre de valeur/risque croissant, chaque étape rendant la suivante plus utile :
