@@ -41,6 +41,7 @@ interface Draft {
   status: RoadmapStatus | 'archived'
   description: string
   rationale: string
+  context: string
   tags: string
 }
 
@@ -53,6 +54,7 @@ const EMPTY_DRAFT: Draft = {
   status: 'idea',
   description: '',
   rationale: '',
+  context: '',
   tags: ''
 }
 
@@ -67,6 +69,7 @@ function toDraft(i: RoadmapItem): Draft {
     status: i.status,
     description: i.description,
     rationale: i.rationale,
+    context: i.context,
     tags: i.tags.join(', ')
   }
 }
@@ -131,6 +134,7 @@ function composeItemPrompt(item: RoadmapItem): string {
     `Kind: ${item.kind} | Priority: ${item.priority} | Value: ${item.value} | Effort: ${item.effort}`,
     item.description ? `Description: ${item.description}` : '',
     item.rationale ? `Rationale: ${item.rationale}` : '',
+    item.context ? `Context (operator briefing): ${item.context}` : '',
     '',
     'Use roadmap_get for full context. The item is being marked in_progress; set it to done with roadmap_update when the work is complete (or add follow-up items if you discover more).'
   ].filter((l) => l !== '')
@@ -156,6 +160,8 @@ export function RoadmapView(): React.JSX.Element {
   const [confirmArchive, setConfirmArchive] = useState<RoadmapItem | null>(null)
   // Item the "launch an agent" flow is spawning for (advanced create pre-filled).
   const [launchItem, setLaunchItem] = useState<RoadmapItem | null>(null)
+  // Context wand (PLAN C21): one in-flight generation at a time.
+  const [wandBusy, setWandBusy] = useState(false)
 
   const refresh = useCallback(async (): Promise<void> => {
     try {
@@ -199,6 +205,7 @@ export function RoadmapView(): React.JSX.Element {
         status: draft.status === 'archived' ? undefined : draft.status,
         description: draft.description,
         rationale: draft.rationale,
+        context: draft.context,
         tags
       })
       setDraft(null)
@@ -246,6 +253,30 @@ export function RoadmapView(): React.JSX.Element {
 
   const queueItem = (item: RoadmapItem): Promise<void> =>
     setQueue(item, Math.max(0, ...items.map((i) => i.queue ?? 0)) + 1)
+
+  // Context wand (PLAN C21): a read-only haiku pass drafts the briefing from
+  // the item + the project files. It only fills the textarea (still editable);
+  // nothing is saved until the operator hits Save.
+  const wand = async (): Promise<void> => {
+    if (!draft || wandBusy) return
+    setWandBusy(true)
+    try {
+      const proposed = await window.api.roadmapWand({
+        title: draft.title,
+        kind: draft.kind,
+        description: draft.description,
+        rationale: draft.rationale,
+        context: draft.context
+      })
+      // The draft may have been closed while the wand ran: drop the result.
+      setDraft((d) => (d ? { ...d, context: proposed } : d))
+      setError(null)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setWandBusy(false)
+    }
+  }
 
   const dispatch = async (): Promise<void> => {
     const r = await window.api.roadmapDispatch()
@@ -386,6 +417,12 @@ export function RoadmapView(): React.JSX.Element {
             {selected.rationale && (
               <p className="rm-detail-text rm-detail-rationale">{selected.rationale}</p>
             )}
+            {selected.context && (
+              <div className="rm-detail-context">
+                <h4>{t('roadmap.fieldContext')}</h4>
+                <p className="rm-detail-text">{selected.context}</p>
+              </div>
+            )}
             <p className="rm-detail-meta">
               {t('roadmap.createdBy', { name: selected.created_by, date: selected.created_at })}
               <br />
@@ -520,6 +557,28 @@ export function RoadmapView(): React.JSX.Element {
                 value={draft.rationale}
                 onChange={(e) => setDraft({ ...draft, rationale: e.target.value })}
               />
+            </label>
+            <label className="field rm-context-field">
+              <span className="rm-context-label">
+                {t('roadmap.fieldContext')}
+                <button
+                  type="button"
+                  className="icon-btn rm-wand-btn"
+                  title={t('roadmap.wandTitle')}
+                  disabled={wandBusy || !draft.title.trim()}
+                  onClick={() => void wand()}
+                >
+                  {wandBusy ? '⏳' : '🪄'}
+                </button>
+              </span>
+              <textarea
+                rows={6}
+                value={draft.context}
+                placeholder={t('roadmap.fieldContextPlaceholder')}
+                disabled={wandBusy}
+                onChange={(e) => setDraft({ ...draft, context: e.target.value })}
+              />
+              {wandBusy && <span className="rm-wand-hint">{t('roadmap.wandBusy')}</span>}
             </label>
             <label className="field">
               <span>{t('roadmap.fieldTags')}</span>

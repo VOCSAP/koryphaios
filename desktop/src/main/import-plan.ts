@@ -17,8 +17,9 @@ export function composePlanImportPrompt(planPath: string): string {
     `1. Call roadmap_list to see what already exists (do not create duplicates; if an item clearly matches an existing one, skip it).`,
     `2. Read the plan file. Identify the distinct work items (features, bugs, debt, chores).`,
     `3. For each new item, call roadmap_add: judge kind, MoSCoW priority, value and effort from the text; set status to "planned" for items the plan commits to and "idea" for options; put a one-paragraph description and, when the plan states why, the rationale; tag every item with "import" and "${name}"; wire obvious depends_on between the items you created.`,
-    `4. Print a short summary table of what you created and what you skipped.`,
-    `5. Type /exit to close this session (your terminal closes automatically).`,
+    `4. Fill the "context" field of every item you create: it is the implementation briefing for the agent that will pick the item up later, in a fresh session that has not read the plan. Cover the objective, the constraints and scope boundaries the plan sets, pointers to the files/modules/tests the plan names, acceptance criteria, and any decision the plan has already made (approach chosen or ruled out). Quote the plan's specifics -- do not paraphrase vaguely.`,
+    `5. Print a short summary table of what you created and what you skipped.`,
+    `6. Type /exit to close this session (your terminal closes automatically).`,
     `Do not modify any file. Do not start implementing anything.`
   ].join('\n')
 }

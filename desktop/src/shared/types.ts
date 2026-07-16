@@ -116,6 +116,18 @@ export interface TemplateSummary {
   sessionCount: number
 }
 
+/**
+ * A discovered reusable prompt (PLAN C22), global or project-local; `path` is
+ * its id. Carries the full text: snippets are short by contract (the store
+ * skips files over its size cap) and the tile menu inserts them directly.
+ */
+export interface SnippetSummary {
+  path: string
+  name: string
+  source: 'global' | 'local'
+  text: string
+}
+
 export interface AppConfig {
   /** Default working directory used as the base for new sessions. */
   projectDir: string
@@ -268,6 +280,8 @@ export interface RoadmapItem {
   title: string
   description: string
   rationale: string
+  /** Implementation briefing for the agent picking the item up later (PLAN C20). */
+  context: string
   priority: RoadmapPriority
   value: RoadmapLevel
   effort: RoadmapLevel
@@ -298,6 +312,7 @@ export interface RoadmapUpsertFields {
   title?: string
   description?: string
   rationale?: string
+  context?: string
   priority?: RoadmapPriority
   value?: RoadmapLevel
   effort?: RoadmapLevel
@@ -306,6 +321,20 @@ export interface RoadmapUpsertFields {
   depends_on?: string[]
   /** Queue position (C15): positive integer to queue, null to unqueue. */
   queue?: number | null
+}
+
+/**
+ * Editor-side item draft the context wand grounds its briefing on (PLAN C21).
+ * Plain strings from the form -- never a saved item (the wand result itself
+ * only fills the textarea; saving stays an explicit operator action).
+ */
+export interface RoadmapWandDraft {
+  title: string
+  kind: string
+  description: string
+  rationale: string
+  /** Current content of the context textarea ('' when starting fresh). */
+  context: string
 }
 
 /** Result of a queue dispatch to the team-lead (PLAN C15). */
@@ -542,6 +571,8 @@ export interface DeckApi {
   roadmapArchive(id: string): Promise<RoadmapItem>
   /** Send the first queued item to the team-lead (PLAN C15). */
   roadmapDispatch(): Promise<DispatchResult>
+  /** Context wand (PLAN C21): read-only haiku pass drafting the context field. */
+  roadmapWand(draft: RoadmapWandDraft): Promise<string>
   /** Pick a plan file and spawn a one-shot import agent (PLAN C7). */
   importPlan(): Promise<boolean>
 
@@ -600,6 +631,13 @@ export interface DeckApi {
   applyTemplate(path: string, mode: 'append' | 'replace'): Promise<number>
   /** Delete a template file by path. Returns true if a file was removed. */
   deleteTemplate(path: string): Promise<boolean>
+
+  // snippets (reusable prompts, PLAN C22): project scope shadows global.
+  listSnippets(): Promise<SnippetSummary[]>
+  /** Write a snippet (`local` => project dir, else global). Returns the path. */
+  saveSnippet(name: string, local: boolean, text: string): Promise<string>
+  /** Delete a snippet file by path. Returns true if a file was removed. */
+  deleteSnippet(path: string): Promise<boolean>
 
   // events (return an unsubscribe fn)
   onPtyData(cb: (e: PtyDataEvent) => void): () => void

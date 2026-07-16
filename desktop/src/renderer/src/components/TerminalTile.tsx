@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from 'react'
 import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
-import type { SessionRuntime } from '@shared/types'
+import type { SessionRuntime, SnippetSummary } from '@shared/types'
 import { useDeck } from '../store'
 import { formatClock, useT } from '../i18n'
 import { registerTerminal, unregisterTerminal } from '../terminal-registry'
 import { ConfirmDialog } from './ConfirmDialog'
+import { ContextMenu, type ContextMenuItem } from './ContextMenu'
+import { SnippetsDialog } from './SnippetsDialog'
 
 const THEMES: Record<'dark' | 'light', ITheme> = {
   dark: { background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#d4d4d4', selectionBackground: '#264f78' },
@@ -52,6 +54,13 @@ export function TerminalTile({
   const removeSession = useDeck((s) => s.removeSession)
   const openBrowser = useDeck((s) => s.openBrowser)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
+  // Snippet menu (PLAN C22): saved prompts inserted into Claude's input field.
+  const [snippetMenu, setSnippetMenu] = useState<{
+    x: number
+    y: number
+    snippets: SnippetSummary[]
+  } | null>(null)
+  const [manageSnippets, setManageSnippets] = useState(false)
 
   const hostRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
@@ -171,6 +180,33 @@ export function TerminalTile({
   const isMax = maximizedId === id
   const selected = selectedId === id
 
+  // Open the saved-prompts menu anchored under the ⚡ button.
+  const openSnippetMenu = async (anchor: HTMLElement): Promise<void> => {
+    const rect = anchor.getBoundingClientRect()
+    const snippets = await window.api.listSnippets()
+    setSnippetMenu({ x: rect.left, y: rect.bottom + 4, snippets })
+  }
+
+  // Fill-not-send: paste goes through xterm's bracketed-paste path (onData ->
+  // PTY), which fills Claude Code's input field WITHOUT submitting it -- the
+  // operator can adjust the text, then press Enter.
+  const insertSnippet = (text: string): void => {
+    const term = termRef.current
+    if (!term) return
+    term.paste(text)
+    term.focus()
+  }
+
+  const snippetMenuItems = (snippets: SnippetSummary[]): ContextMenuItem[] => [
+    ...(snippets.length === 0
+      ? [{ label: t('snippets.empty'), onSelect: () => undefined, disabled: true }]
+      : snippets.map((s) => ({
+          label: `${s.source === 'local' ? '📁 ' : ''}${s.name}`,
+          onSelect: () => insertSnippet(s.text)
+        }))),
+    { label: t('snippets.manage'), onSelect: () => setManageSnippets(true) }
+  ]
+
   return (
     <div
       className={[
@@ -243,6 +279,17 @@ export function TerminalTile({
         <button
           type="button"
           className="tile-btn"
+          title={t('tile.snippetsTitle')}
+          onClick={(e) => {
+            e.stopPropagation()
+            void openSnippetMenu(e.currentTarget)
+          }}
+        >
+          ⚡
+        </button>
+        <button
+          type="button"
+          className="tile-btn"
           title={t('tile.browserTitle')}
           onClick={(e) => {
             e.stopPropagation()
@@ -302,6 +349,15 @@ export function TerminalTile({
           </div>
         </div>
       )}
+      {snippetMenu && (
+        <ContextMenu
+          x={snippetMenu.x}
+          y={snippetMenu.y}
+          items={snippetMenuItems(snippetMenu.snippets)}
+          onClose={() => setSnippetMenu(null)}
+        />
+      )}
+      {manageSnippets && <SnippetsDialog onClose={() => setManageSnippets(false)} />}
       {confirmingDelete && (
         <ConfirmDialog
           title={t('confirm.closeTitle')}

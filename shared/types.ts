@@ -202,6 +202,13 @@ export interface RoadmapItem {
   description: string;
   /** Why it matters (business value, in words). */
   rationale: string;
+  /**
+   * Implementation briefing for the agent that will pick the item up later
+   * (PLAN C20): objective, constraints/scope boundaries, pointers to relevant
+   * files, acceptance criteria, decisions already made. Description = what,
+   * rationale = why, context = how/where. Free markdown, '' when absent.
+   */
+  context: string;
   priority: RoadmapPriority;
   /** Impact ("value" badge). */
   value: RoadmapLevel;
@@ -252,6 +259,7 @@ export interface RoadmapUpsertRequest {
   title?: string;
   description?: string;
   rationale?: string;
+  context?: string;
   priority?: RoadmapPriority;
   value?: RoadmapLevel;
   effort?: RoadmapLevel;

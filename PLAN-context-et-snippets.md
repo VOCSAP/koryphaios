@@ -17,6 +17,7 @@
 | Date | Session / auteur | Chantier | Fait | Reste / notes |
 |---|---|---|---|---|
 | 2026-07-16 | session exploration | — | Brainstorm validé par l'opérateur, création du plan. | Implémenter C20 → C21 → C22, livraison en un seul lot. |
+| 2026-07-16 | session autonome (même session) | C20, C21, C22 | Lot complet : colonne `context` (migration + upsert + import/export + tools MCP + instructions + dispatch + prompt de lancement + éditeur/détail Deck + snapshot d'aide), prompt d'import C7 ajusté, `context-wand.ts` (constante C8, haiku épinglé, harness C9) + IPC `roadmap:wand` + bouton 🪄, `snippet-store.ts` + IPC + bouton ⚡ ContextMenu + `SnippetsDialog`, i18n en/fr + EN_DEFAULTS, styles. Versions core 0.7.0 / desktop 0.8.0, CHANGELOG + CLAUDE.md. Tests : broker-roadmap-context (4), desktop-snippet-store (5), desktop-context-wand (4), dispatch étendu ; fix du test template-store périmé depuis le rename v0.7.0. bun test 393/393, smoke check + typecheck node/web verts. | Validations manuelles UI au premier lancement réel (🪄 sur un vrai item, insertion ⚡ fill-not-send). |
 
 ---
 
@@ -98,31 +99,31 @@ d'implémentation qui suit l'item jusqu'à l'agent (dispatch, launch,
 `roadmap_get`), rempli par les agents comme par l'opérateur.
 
 ### Jalons
-- [ ] Broker (`broker.ts`) : colonne `context TEXT NOT NULL DEFAULT ''`
+- [x] Broker (`broker.ts`) : colonne `context TEXT NOT NULL DEFAULT ''`
       (CREATE TABLE + migration `ALTER TABLE` idempotente, patron C15) ;
       `handleRoadmapUpsert` (create + patch partiel), `handleRoadmapImport`
       (préservé au round-trip export/import).
-- [ ] Types : `shared/types.ts` (racine) `RoadmapItem.context` +
+- [x] Types : `shared/types.ts` (racine) `RoadmapItem.context` +
       `RoadmapUpsertRequest.context` ; miroir desktop
       `desktop/src/shared/types.ts` (`RoadmapItem`, `RoadmapUpsertFields`).
-- [ ] `server.ts` : paramètre `context` sur `roadmap_add`/`roadmap_update`
+- [x] `server.ts` : paramètre `context` sur `roadmap_add`/`roadmap_update`
       (description du schema = comment écrire un bon briefing),
       `formatRoadmapItemDetail` l'affiche, instructions MCP (section SHARED
       ROADMAP) demandent de le remplir. Bump version 0.7.0 (core).
-- [ ] Deck : `composeDispatchText` (dispatch.ts) et `composeItemPrompt`
+- [x] Deck : `composeDispatchText` (dispatch.ts) et `composeItemPrompt`
       (RoadmapView) portent le contexte comme champ délimité ; éditeur d'item
       avec textarea `context` (placeholder semi-structuré Objectif /
       Contraintes / Pointeurs / Critères) ; vue détail l'affiche ;
       `helpSnapshot` (ipc.ts) l'inclut (tronqué) pour l'assistant d'aide.
-- [ ] i18n en/fr (+ EN_DEFAULTS si applicable).
-- [ ] Tests : `tests/broker-roadmap-context.test.ts` (défaut '', create,
+- [x] i18n en/fr (+ EN_DEFAULTS si applicable).
+- [x] Tests : `tests/broker-roadmap-context.test.ts` (défaut '', create,
       patch préserve/écrase, round-trip export/import) ; extension
       `tests/desktop-dispatch.test.ts` (le dispatch porte le contexte).
 
 ### Done quand
 - [ ] Un item créé avec contexte par un agent (`roadmap_add`) arrive au
       team-lead avec le briefing dans le message de dispatch.
-- [ ] `bun test` + smoke check + typecheck desktop verts.
+- [x] `bun test` + smoke check + typecheck desktop verts.
 
 ---
 
@@ -133,28 +134,28 @@ par un passage Haiku lecture seule ancré dans le repo — pour les créations
 manuelles, sans jamais déposséder l'opérateur (résultat éditable, non sauvé).
 
 ### Jalons
-- [ ] `desktop/src/main/context-wand.ts` : `WAND_SYSTEM_PROMPT` **constante
+- [x] `desktop/src/main/context-wand.ts` : `WAND_SYSTEM_PROMPT` **constante
       code** (règle C8) forçant le patron Objective / Constraints / Pointers /
       Acceptance criteria, sortie = le seul contenu du champ, langue de
       l'item, conservation des décisions du brouillon opérateur ;
       `buildWandPrompt(draft)` ; `WAND_MODEL = 'haiku'` fixé. Réutilise
       `buildHelpCommand`/`runHelp` de `help-assistant.ts`
       (`--strict-mcp-config` + `--disallowedTools`, cwd = projectDir).
-- [ ] IPC `roadmap:wand` (ipc.ts) + `DeckApi.roadmapWand` (preload/types) :
+- [x] IPC `roadmap:wand` (ipc.ts) + `DeckApi.roadmapWand` (preload/types) :
       entrée = brouillon {title, kind, description, rationale, context},
       champs cappés ; sortie = texte proposé.
-- [ ] `RoadmapView.tsx` : bouton 🪄 sur le champ contexte de l'éditeur
+- [x] `RoadmapView.tsx` : bouton 🪄 sur le champ contexte de l'éditeur
       (état busy, erreurs dans la zone d'erreur existante) ; le résultat
       remplace la valeur du textarea, sauvegarde uniquement via le bouton
       Save existant.
-- [ ] i18n en/fr.
-- [ ] Tests : `tests/desktop-context-wand.test.ts` (patron imposé par le
+- [x] i18n en/fr.
+- [x] Tests : `tests/desktop-context-wand.test.ts` (patron imposé par le
       system prompt, composition du prompt avec/sans brouillon, caps).
 
 ### Done quand
 - [ ] Depuis l'éditeur d'un item, 🪄 produit un briefing structuré ancré
       dans les fichiers du projet ; rien n'est écrit au broker sans Save.
-- [ ] `bun test` + typecheck verts.
+- [x] `bun test` + typecheck verts.
 
 ---
 
@@ -165,28 +166,28 @@ les peers, je ferme la session »), les réutiliser depuis chaque tuile en un
 clic, portée projet > global.
 
 ### Jalons
-- [ ] `desktop/src/main/snippet-store.ts` (patron `template-store.ts`) :
+- [x] `desktop/src/main/snippet-store.ts` (patron `template-store.ts`) :
       dirs `<globalConfigDir>/snippets` + `<projectDir>/.claude/
       claude-peers/snippets`, un `.md` par snippet (safeBase), liste projet
       d'abord + masquage global à nom égal, garde-fous delete (extension +
       dossier autorisé), fichiers > 64 Ko ignorés.
-- [ ] IPC `snippet:list|save|delete` + `DeckApi.listSnippets/saveSnippet/
+- [x] IPC `snippet:list|save|delete` + `DeckApi.listSnippets/saveSnippet/
       deleteSnippet` (preload/types).
-- [ ] `TerminalTile.tsx` : bouton ⚡ dans la barre de la tuile → `ContextMenu`
+- [x] `TerminalTile.tsx` : bouton ⚡ dans la barre de la tuile → `ContextMenu`
       listant les snippets (projet puis global) + « Gérer... » ; sélection →
       `term.paste(text)` + focus terminal (**fill-not-send**).
-- [ ] `SnippetsDialog.tsx` : gestion (liste, créer, éditer nom/portée/texte,
+- [x] `SnippetsDialog.tsx` : gestion (liste, créer, éditer nom/portée/texte,
       supprimer) ; renommage/changement de portée = write nouveau + delete
       ancien.
-- [ ] i18n en/fr + styles.
-- [ ] Tests : `tests/desktop-snippet-store.test.ts` (write/list/ordre/
+- [x] i18n en/fr + styles.
+- [x] Tests : `tests/desktop-snippet-store.test.ts` (write/list/ordre/
       masquage/delete gardé/64 Ko).
 
 ### Done quand
 - [ ] Un snippet global ET un snippet projet apparaissent dans le menu de la
       tuile, s'insèrent dans le champ de saisie de Claude Code sans le
       soumettre ; le projet masque le global à nom égal.
-- [ ] `bun test` + typecheck verts.
+- [x] `bun test` + typecheck verts.
 
 ---
 

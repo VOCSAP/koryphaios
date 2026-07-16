@@ -18,6 +18,7 @@ import {
   runHelp,
   writeHelpSystemPrompt
 } from './help-assistant'
+import { buildWandPrompt, WAND_MODEL, writeWandSystemPrompt, type WandDraft } from './context-wand'
 import { resolveBrokerEndpoint } from './broker-client'
 import {
   buildDigestSystemPrompt,
@@ -52,6 +53,13 @@ import {
   globalTemplatesDir,
   localTemplatesDir
 } from './template-store'
+import {
+  deleteSnippet,
+  globalSnippetsDir,
+  listSnippets,
+  localSnippetsDir,
+  writeSnippet
+} from './snippet-store'
 import { parseTemplate, toTemplate, templateToInputs } from '@shared/template'
 import { availableLocales, loadDict, resolveLocale } from './i18n'
 
@@ -266,6 +274,18 @@ export function registerIpc({
   // Queue dispatch (PLAN C15): first queued item -> targeted announce to the
   // team-lead. The renderer greys the button when no lead is designated.
   ipcMain.handle('roadmap:dispatch', () => dispatchNext())
+  // Context wand (PLAN C21): one read-only `claude -p` (haiku, C9 harness)
+  // drafts the item's context field grounded in the project files. The result
+  // only fills the editor textarea -- saving stays an explicit operator action.
+  ipcMain.handle('roadmap:wand', (_e, draft: WandDraft) => {
+    const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
+    const command = buildHelpCommand({
+      promptText: buildWandPrompt(draft ?? { title: '', kind: '', description: '', rationale: '', context: '' }),
+      systemPromptFile: writeWandSystemPrompt(stateDir),
+      model: WAND_MODEL
+    })
+    return runHelp({ command, shell: getConfig().shell, cwd: getConfig().projectDir })
+  })
 
   // ----- worktrees (PLAN C4/C6) -----
   ipcMain.handle('worktree:remove', async (_e, path: string) => {
@@ -411,7 +431,8 @@ export function registerIpc({
           effort: i.effort,
           status: i.status,
           tags: i.tags,
-          description: i.description.slice(0, 300)
+          description: i.description.slice(0, 300),
+          context: i.context.slice(0, 300)
         }))
       }),
       part(() => listWorktrees(getConfig().projectDir))
@@ -521,6 +542,20 @@ export function registerIpc({
     }
     return inputs.length
   })
+
+  // ----- snippets (reusable prompts, PLAN C22) -----
+  // Fill-not-send: the renderer pastes the text into a session's input field;
+  // the main process only stores/lists .md files (project > global scope).
+  ipcMain.handle('snippet:list', () => listSnippets(getConfig().projectDir))
+  ipcMain.handle('snippet:save', (_e, name: string, local: boolean, text: string) => {
+    if (typeof name !== 'string' || !name.trim()) throw new Error('snippet name is required')
+    if (typeof text !== 'string' || !text.trim()) throw new Error('snippet text is required')
+    const dir = local ? localSnippetsDir(getConfig().projectDir) : globalSnippetsDir()
+    return writeSnippet(dir, name, text)
+  })
+  ipcMain.handle('snippet:delete', (_e, path: string) =>
+    deleteSnippet(path, getConfig().projectDir)
+  )
 
   // ----- template composer (PLAN C18): read/write without spawning -----
   ipcMain.handle('template:read', (_e, path: string) => readTemplate(path))

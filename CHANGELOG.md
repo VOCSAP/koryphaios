@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.7.0 -- 2026-07-16
+
+The "briefed agents" batch (PLAN-context-et-snippets C20-C22): roadmap items
+carry an implementation briefing that travels to the agent, a magic-wand
+assistant drafts it for manual creations, and recurring operator prompts
+become reusable snippets.
+
+### Added (core: broker / server, v0.7.0)
+- **Roadmap `context` field (C20).** `roadmap_items.context TEXT NOT NULL
+  DEFAULT ''` (idempotent migration): the implementation briefing for the
+  agent that will pick the item up later — objective, constraints/scope
+  boundaries, file pointers, acceptance criteria, decisions already made
+  (description = what, rationale = why, context = how/where). Settable
+  through `/roadmap/upsert` (partial-patch semantics), preserved by
+  archive and export/import. `roadmap_add`/`roadmap_update` expose it,
+  `roadmap_get` shows it, and the MCP instructions ask agents to ALWAYS
+  fill it (the agent that discovers a bug writes the briefing for the
+  future agent that fixes it).
+
+### Added (desktop, v0.8.0)
+- **Context in the Deck (C20).** Item editor textarea with a
+  semi-structured placeholder (Objective / Constraints / Pointers /
+  Acceptance criteria), detail panel block, and the briefing travels as a
+  delimited data field in both agent hand-offs: the C15 queue dispatch to
+  the team-lead (`Context (operator briefing): ...`) and the "Launch an
+  agent on this item" prompt. The plan-import agent (C7) is instructed to
+  fill `context` for every item it creates, quoting the plan's specifics.
+  The help-assistant snapshot includes it (truncated).
+- **Context wand (C21).** 🪄 button on the editor's context field: one
+  throwaway read-only `claude -p` (pinned haiku, same locked harness as
+  the help assistant — code-constant system prompt, `--strict-mcp-config`,
+  `--disallowedTools`) drafts the briefing grounded in the project files
+  (Read/Grep/Glob), preserving the operator's draft decisions. The result
+  only fills the textarea — nothing is saved until Save.
+- **Snippets (C22).** Reusable prompts as one `.md` file each, global
+  (`<globalConfigDir>/snippets`) or project
+  (`<projectDir>/.claude/claude-peers/snippets`, shadows global on a name
+  collision, shareable via git). New ⚡ tile button opens a menu that
+  pastes the snippet into Claude Code's input field through xterm's
+  bracketed-paste path — **fill-not-send**, never auto-submitted — plus a
+  manage dialog (create / edit / rename / change scope / delete).
+
+### Fixed
+- `tests/desktop-template-store.test.ts` still asserted the pre-rename
+  `claude-peers-desk` global dir (stale since the v0.7.0 desktop rename).
+- `desktop/package-lock.json` re-synced with the `kory` bin alias.
+
 ## v0.6.0 -- 2026-07-15
 
 The "AI orchestrator" batch (PLAN C6-C19): the Deck grows from a session
