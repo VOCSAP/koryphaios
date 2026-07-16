@@ -45,6 +45,7 @@
 | 2026-07-15 | session autonome (lot orchestrateur) | C17 | digest.ts (sources GLOBALES uniquement + perProject, glob minimal, caps, commandes cwd=projectDir), IPC help:digest (patron C9 lecture seule), bouton 📋 du popup d'aide, 5 tests dont refus config projet. | — |
 | 2026-07-15 | session autonome (lot orchestrateur) | C18 | Template étendu (agent/model/worktreeBranch/announce, lead unique normalisé au parse), TemplateComposer (créer/éditer/dupliquer sans spawner, lead en haut centré), IPC read/write, application via createSessionWithWorktree + règle « le lead du template ne prend que si la fenêtre n'en a pas », 3 tests. | — |
 | 2026-07-15 | session autonome (lot orchestrateur) | C19 | launch-approval.ts : launchCommand PROJET gaté par dialog à la première utilisation, hash sha256 par project_key dans launch-approvals.json, refus → fallback global non persisté, entrée journal, 4 tests. **Lot orchestrateur C6-C19 complet.** | Validations manuelles UI au premier lancement réel ; reportés (battle chat, OTEL, GitHub sync) inchangés. |
+| 2026-07-16 | session exploration (graph chat) | — | Le reporté « battle chat multi-modèles » est repris et absorbé par le **graph chat** : plan dédié [`EXPLORATION-graph-chat.md`](./EXPLORATION-graph-chat.md) (chantiers C23-C28 — chat en graphe DAG, nœuds = invocations headless stateless multi-CLI, battle = fan-out + nœud juge, merge de branches par tronc commun). | Suivi de cette feature dans EXPLORATION-graph-chat.md (ce plan ne la pilote plus). |
 
 ---
 
@@ -515,11 +516,14 @@ façon ciblée (fondation de C15, C18, et des notifications d'intégration).
 
 ## Reportés (à ne pas perdre)
 
-- **Battle chat multi-modèles** (could) : N CLIs (claude -p / gemini /
+- **Battle chat multi-modèles** (could) : ~~N CLIs (claude -p / gemini /
   codex exec) en parallèle + modèle juge ; le squelette technique est C9
-  (`runHelp` généralisé en adaptateurs). Variante notée, sans doute plus
-  utile : **panel de review multi-modèles** sur un plan/diff plutôt que du
-  chat libre. À reconsidérer après le lot orchestrateur.
+  (`runHelp` généralisé en adaptateurs).~~ **Repris le 2026-07-16 : ce
+  chantier est absorbé par le graph chat et piloté par
+  [`EXPLORATION-graph-chat.md`](./EXPLORATION-graph-chat.md) (C23-C28)** —
+  le battle y devient un motif du graphe (fan-out multi-cibles + nœud juge),
+  et la variante « panel de review multi-modèles » sur un plan/diff y est
+  couverte par les nœuds artefact (C28).
 - **Suivi de consommation** (tokens/coût par session via télémétrie OTEL de
   Claude Code + collecteur local) : utile, infra plus lourde.
 - **Sync GitHub Issues ↔ roadmap** : la porte reste ouverte (`tags`, futur
