@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * claude-peers broker daemon (v0.6.0)
+ * claude-peers broker daemon (v0.7.0)
  *
  * Singleton HTTP server on 127.0.0.1:<port> backed by SQLite.
  * Tracks registered Claude Code peers, isolates them by group, persists session
@@ -234,6 +234,7 @@ db.run(`
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     rationale TEXT NOT NULL DEFAULT '',
+    context TEXT NOT NULL DEFAULT '',
     priority TEXT NOT NULL DEFAULT 'could',
     value TEXT NOT NULL DEFAULT 'medium',
     effort TEXT NOT NULL DEFAULT 'medium',
@@ -252,6 +253,14 @@ db.run(`
 // Migration (v0.6, PLAN C15): dispatch-queue position on pre-existing tables.
 try {
   db.run("ALTER TABLE roadmap_items ADD COLUMN queue INTEGER");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) console.error(`[broker] migration: ${msg}`);
+}
+
+// Migration (v0.7, PLAN C20): agent briefing on pre-existing tables.
+try {
+  db.run("ALTER TABLE roadmap_items ADD COLUMN context TEXT NOT NULL DEFAULT ''");
 } catch (e) {
   const msg = e instanceof Error ? e.message : String(e);
   if (!msg.includes("duplicate column name")) console.error(`[broker] migration: ${msg}`);
@@ -1045,6 +1054,7 @@ function handleRoadmapUpsert(
       title: body.title !== undefined ? body.title.trim() : existing.title,
       description: body.description ?? existing.description,
       rationale: body.rationale ?? existing.rationale,
+      context: body.context ?? existing.context,
       priority: body.priority ?? existing.priority,
       value: body.value ?? existing.value,
       effort: body.effort ?? existing.effort,
@@ -1060,7 +1070,7 @@ function handleRoadmapUpsert(
     // delete); archiving through upsert stamps it like /roadmap/archive does.
     db.run(
       `UPDATE roadmap_items SET
-         kind = ?, title = ?, description = ?, rationale = ?, priority = ?,
+         kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
          value = ?, effort = ?, status = ?, tags = ?, depends_on = ?, queue = ?,
          updated_by = ?, updated_at = datetime('now'),
          deleted_at = CASE
@@ -1073,6 +1083,7 @@ function handleRoadmapUpsert(
         next.title,
         next.description,
         next.rationale,
+        next.context,
         next.priority,
         next.value,
         next.effort,
@@ -1100,10 +1111,10 @@ function handleRoadmapUpsert(
   const id = randomUUID();
   db.run(
     `INSERT INTO roadmap_items
-       (id, project_key, kind, title, description, rationale, priority, value,
+       (id, project_key, kind, title, description, rationale, context, priority, value,
         effort, status, tags, depends_on, created_by, updated_by,
         created_at, updated_at, deleted_at, queue)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?)`,
     [
       id,
       projectKey,
@@ -1111,6 +1122,7 @@ function handleRoadmapUpsert(
       title,
       body.description ?? "",
       body.rationale ?? "",
+      body.context ?? "",
       body.priority ?? "could",
       body.value ?? "medium",
       body.effort ?? "medium",
@@ -1196,10 +1208,10 @@ function handleRoadmapImport(body: {
 
   const insert = db.prepare(
     `INSERT OR REPLACE INTO roadmap_items
-       (id, project_key, kind, title, description, rationale, priority, value,
+       (id, project_key, kind, title, description, rationale, context, priority, value,
         effort, status, tags, depends_on, created_by, updated_by,
         created_at, updated_at, deleted_at, queue)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   const importAll = db.transaction((rows: Partial<RoadmapItem>[]) => {
     for (const it of rows) {
@@ -1210,6 +1222,7 @@ function handleRoadmapImport(body: {
         it.title!.trim(),
         it.description ?? "",
         it.rationale ?? "",
+        it.context ?? "",
         it.priority ?? "could",
         it.value ?? "medium",
         it.effort ?? "medium",
@@ -1456,7 +1469,7 @@ const server = Bun.serve<WsData>({
 });
 
 console.error(
-  `[claude-peers broker v0.6.0] listening on ${BIND_HOST}:${PORT} ` +
+  `[claude-peers broker v0.7.0] listening on ${BIND_HOST}:${PORT} ` +
   `(db: ${DB_PATH}, dormant_ttl=${DORMANT_TTL_HOURS}h, msg_ttl=${MESSAGE_TTL_DAYS}d, ` +
   `flush_cap=${FLUSH_MAX_COUNT}/${FLUSH_MAX_AGE_HOURS}h, purge_interval=${PURGE_INTERVAL_SEC}s, ` +
   `activity_timeout=${ACTIVITY_TIMEOUT_MS / 1000}s, ws_idle=${WS_IDLE_TIMEOUT_SEC}s, ` +

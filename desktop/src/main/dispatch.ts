@@ -38,6 +38,7 @@ export function composeDispatchText(item: RoadmapItem): string {
     `Kind: ${item.kind} | Priority: ${item.priority} | Value: ${item.value} | Effort: ${item.effort} | Status: ${item.status}`,
     item.description ? `Description: ${item.description}` : '',
     item.rationale ? `Rationale: ${item.rationale}` : '',
+    item.context ? `Context (operator briefing): ${item.context}` : '',
     item.tags.length ? `Tags: ${item.tags.join(', ')}` : '',
     item.depends_on.length ? `Depends on: ${item.depends_on.map((d) => d.slice(0, 8)).join(', ')}` : '',
     '',

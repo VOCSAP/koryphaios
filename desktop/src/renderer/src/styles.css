@@ -1786,6 +1786,54 @@ code {
   color: var(--fg-dim);
 }
 
+/* Context field (PLAN C20/C21): agent briefing + wand button. */
+.rm-detail-context {
+  border-left: 3px solid var(--border);
+  padding-left: 8px;
+}
+
+.rm-detail-context h4 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+}
+
+.rm-context-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rm-wand-btn {
+  font-size: 13px;
+  line-height: 1;
+}
+
+.rm-wand-hint {
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+/* Snippets (PLAN C22). */
+.snippets-hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.snippet-preview {
+  flex: 2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+
 .rm-detail-actions {
   display: flex;
   gap: 8px;

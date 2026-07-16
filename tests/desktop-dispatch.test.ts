@@ -17,6 +17,7 @@ function item(over: Partial<RoadmapItem>): RoadmapItem {
     title: "t",
     description: "",
     rationale: "",
+    context: "",
     priority: "could",
     value: "medium",
     effort: "medium",
@@ -59,6 +60,7 @@ test("composeDispatchText carries the full item and the status contract", () => 
       title: "Fix login",
       description: "Login breaks on Safari",
       rationale: "Blocks EU users",
+      context: "**Pointers**: auth/safari.ts — imitate the Chrome fallback",
       tags: ["auth", "p1"],
       depends_on: ["87654321-0000-0000-0000-000000000000"],
       queue: 1
@@ -68,6 +70,7 @@ test("composeDispatchText carries the full item and the status contract", () => 
   expect(text).toContain("Title: Fix login");
   expect(text).toContain("Description: Login breaks on Safari");
   expect(text).toContain("Rationale: Blocks EU users");
+  expect(text).toContain("Context (operator briefing): **Pointers**: auth/safari.ts");
   expect(text).toContain("Tags: auth, p1");
   expect(text).toContain("Depends on: 87654321");
   expect(text).toContain("roadmap_update");

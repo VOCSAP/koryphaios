@@ -94,6 +94,7 @@ const api: DeckApi = {
   roadmapUpsert: (fields: RoadmapUpsertFields) => ipcRenderer.invoke('roadmap:upsert', fields),
   roadmapArchive: (id: string) => ipcRenderer.invoke('roadmap:archive', id),
   roadmapDispatch: () => ipcRenderer.invoke('roadmap:dispatch'),
+  roadmapWand: (draft) => ipcRenderer.invoke('roadmap:wand', draft),
   importPlan: () => ipcRenderer.invoke('roadmap:import-plan'),
   removeWorktree: (path: string) => ipcRenderer.invoke('worktree:remove', path),
   listWorktrees: () => ipcRenderer.invoke('worktree:list'),
@@ -120,6 +121,11 @@ const api: DeckApi = {
   applyTemplate: (path: string, mode: 'append' | 'replace') =>
     ipcRenderer.invoke('template:apply', path, mode),
   deleteTemplate: (path: string) => ipcRenderer.invoke('template:delete', path),
+
+  listSnippets: () => ipcRenderer.invoke('snippet:list'),
+  saveSnippet: (name: string, local: boolean, text: string) =>
+    ipcRenderer.invoke('snippet:save', name, local, text),
+  deleteSnippet: (path: string) => ipcRenderer.invoke('snippet:delete', path),
 
   onPtyData: (cb: (e: PtyDataEvent) => void) => onPtyDataMux(cb),
   onPtyExit: (cb: (e: PtyExitEvent) => void) => onPtyExitMux(cb),

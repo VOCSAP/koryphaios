@@ -1,6 +1,6 @@
 {
   "name": "koryphaios",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Koryphaios — the chorus leader: a desktop orchestrator docking multiple Claude Code agent sessions (peers, roadmap, worktrees, embedded browser) in a single window",
   "main": "out/main/index.js",
   "author": "vocsap",

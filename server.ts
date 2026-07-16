@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * claude-peers MCP server (v0.6.0)
+ * claude-peers MCP server (v0.7.0)
  *
  * Runs locally alongside Claude Code. Always uses local context detection --
  * SSH mode is removed in v0.3.1.
@@ -360,7 +360,7 @@ async function pollFallback() {
 // --- MCP server ---
 
 const mcp = new Server(
-  { name: "claude-peers", version: "0.6.0" },
+  { name: "claude-peers", version: "0.7.0" },
   {
     capabilities: {
       experimental: { "claude/channel": {} },
@@ -386,7 +386,8 @@ Special recipient 'operator': send_message with to_peer_id 'operator' reaches th
 This project also has a SHARED ROADMAP: a persistent backlog of features, bugs, tech debt and ideas, scoped to this repository (not to your group or session) and shared with every Claude instance working on it, now and in future sessions. Use it actively:
 - At the start of a task, call roadmap_list to see what is planned and in progress.
 - When you discover a bug, tech debt or a good idea outside your current task, record it with roadmap_add instead of letting it vanish with the session.
-- Keep the status of items you work on up to date (roadmap_update: planned -> in_progress -> done).
+- ALWAYS fill the 'context' field when you add an item: it is the implementation briefing for the agent that will pick the item up later, in a fresh session with none of your current knowledge. Cover the objective, constraints / scope boundaries, pointers to the relevant files/modules/tests, acceptance criteria, and decisions already made -- especially what a fresh session cannot rediscover by exploring the repo (e.g. "the bug is in flushPendingForToken, cross-host reconnect case, see broker-flush-cap.test.ts").
+- Keep the status of items you work on up to date (roadmap_update: planned -> in_progress -> done), and enrich an item's context with roadmap_update when you learn something the next agent will need.
 
 When you start, proactively call set_summary to describe what you're working on. This helps other instances understand your context.`,
   }
@@ -560,6 +561,11 @@ const TOOLS = [
         },
         description: { type: "string" as const, description: "Free markdown details." },
         rationale: { type: "string" as const, description: "Why it matters (business value)." },
+        context: {
+          type: "string" as const,
+          description:
+            "Implementation briefing for the agent that will pick this item up later, in a FUTURE session with none of your current context. Cover: objective, constraints / scope boundaries (what NOT to touch), pointers to the relevant files/modules/tests, acceptance criteria, and decisions already made. Write what a fresh session cannot rediscover by exploring the repo.",
+        },
         priority: {
           type: "string" as const,
           enum: ["must", "should", "could", "wont"],
@@ -606,6 +612,11 @@ const TOOLS = [
         kind: { type: "string" as const, enum: ["feature", "bug", "debt", "idea", "chore"] },
         description: { type: "string" as const },
         rationale: { type: "string" as const },
+        context: {
+          type: "string" as const,
+          description:
+            "Implementation briefing for the agent that will pick this item up later (objective, constraints, file pointers, acceptance criteria, decisions made). Replaces the whole field.",
+        },
         priority: { type: "string" as const, enum: ["must", "should", "could", "wont"] },
         value: { type: "string" as const, enum: ["low", "medium", "high"] },
         effort: { type: "string" as const, enum: ["low", "medium", "high"] },
@@ -715,6 +726,7 @@ function formatRoadmapItemDetail(i: RoadmapItem): string {
     `id: ${i.id}`,
     i.description ? `description: ${i.description}` : "",
     i.rationale ? `rationale: ${i.rationale}` : "",
+    i.context ? `context (agent briefing): ${i.context}` : "",
     i.depends_on.length ? `depends_on: ${i.depends_on.map((d) => d.slice(0, 8)).join(", ")}` : "",
     `created: ${i.created_at} by ${i.created_by}`,
     `updated: ${i.updated_at} by ${i.updated_by}`,
@@ -1139,6 +1151,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           kind: a.kind,
           description: a.description,
           rationale: a.rationale,
+          context: a.context,
           priority: a.priority,
           value: a.value,
           effort: a.effort,
@@ -1167,6 +1180,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           kind: a.kind,
           description: a.description,
           rationale: a.rationale,
+          context: a.context,
           priority: a.priority,
           value: a.value,
           effort: a.effort,
