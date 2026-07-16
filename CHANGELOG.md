@@ -1,5 +1,20 @@
 # Changelog
 
+## docs -- 2026-07-16
+
+- **Working plans retired.** `PLAN-v0.4.md`, `PLAN-context-et-snippets.md`,
+  `EXPLORATION-roadmap-et-auto-relance.md` and `EXPLORATION-graph-chat.md`
+  (all chantiers shipped) are deleted; their per-batch narratives live in
+  this file, and the still-open deferred items (graph digest/artefact nodes,
+  graph export + per-node cost, OTEL consumption tracking, GitHub Issues
+  sync, the C23-C29 manual UI validation) moved to `roadmap-seed-v0.9.json`
+  (`bun cli.ts roadmap-import roadmap-seed-v0.9.json`).
+- **CLAUDE.md rewritten for a public repo.** The version-history narrative is
+  replaced by a current-state overview (core architecture, protocol
+  invariants, desktop overview, checks & conventions); pointers to the
+  deleted plans and machine-specific examples are gone. `Cxx` ids in code
+  comments now resolve through this changelog.
+
 ## desktop v0.9.0 -- 2026-07-16
 
 Graph chat & battle mode (EXPLORATION-graph-chat C23-C27): a canvas view
@@ -40,6 +55,29 @@ CLIs, and let a judge node arbitrate a battle.
   picks the strongest and produces the merged answer — the model mapping is
   revealed in a legend after the verdict. Degrades gracefully to no judge
   with <2 answers.
+- **Unified model picker (C29).** One `ModelPicker` shared by the graph
+  fan-out (multi-select chips) and the agents' advanced create menu (single,
+  Anthropic ∪ launch-config models): expandable provider sections
+  (Anthropic / OpenAI / Gemini + local endpoints), a separator, and
+  star-pinned favorites persisted in the app config (`providerId:modelId`
+  keys, pin order). Frontier providers only appear when their CLI is
+  detected on the machine (login-shell `command -v` / `Get-Command`, cached,
+  re-detect button in Settings); frontier model lists are CURATED IN CODE
+  (`FRONTIER_CATALOG`, the one constant to bump — the OAuth CLIs expose no
+  dynamic listing) while local OpenAI-compatible endpoints (Ollama, LiteLLM,
+  vLLM…) are discovered dynamically (`/v1/models`, Ollama `/api/tags`
+  fallback). New Settings > Models section manages local endpoints (name,
+  base URL, optional API key, discovered-model count). Local targets run as
+  a new `cli:'local'` through a direct `/v1/chat/completions` call from the
+  main process — the API key never reaches the renderer or a command line.
+- **Provider API keys encrypted at rest (C29/D12).** Local-provider Bearer
+  tokens go through Electron `safeStorage` (`provider-secrets.ts`, same
+  cipher surface as scope secrets): the renderer only ever sends a transient
+  `apiKey` when the operator (re)types one ('' = forget, ⊘ button) and only
+  ever receives a `hasKey` marker — `config:get/set/changed` are sanitized;
+  the config file stores `enc:<base64>` blobs (explicit `plain:` fallback
+  when no OS keyring), decrypted in main memory only at discovery/inference
+  time. A corrupt blob (OS key change) degrades to "no key stored".
 
 ## v0.7.0 -- 2026-07-16
 

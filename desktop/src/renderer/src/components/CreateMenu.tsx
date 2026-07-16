@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react'
 import type { LaunchPreset, ModelOption } from '@shared/types'
+import type { ProviderCatalog } from '@shared/models'
 import { defaultAnnounceDraft } from '@shared/announce'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
+import { ModelPicker } from './ModelPicker'
 
 /**
  * Advanced create popover: pick a subagent, a custom name + colour, a model, a
@@ -23,6 +25,32 @@ const EFFORT_LEVELS = ['', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 function supports1mContext(id: string): boolean {
   const m = id.trim().toLowerCase()
   return m !== '' && !m.includes('haiku')
+}
+
+/**
+ * Anthropic section of the create-menu picker (C29): the launch-config models
+ * (operator-curated, first) merged with the frontier catalog, deduped by id.
+ * Forced available: agent sessions run the claude CLI by construction.
+ */
+function mergeCreateCatalogs(
+  models: ModelOption[],
+  catalogs: ProviderCatalog[]
+): ProviderCatalog[] {
+  const frontier = catalogs.find((c) => c.id === 'anthropic')
+  const merged = [
+    ...models.map((m) => ({ id: m.id, label: m.label })),
+    ...(frontier?.models ?? []).filter((fm) => !models.some((m) => m.id === fm.id))
+  ]
+  return [
+    {
+      id: 'anthropic',
+      name: frontier?.name ?? 'Anthropic',
+      kind: 'frontier',
+      cli: 'claude',
+      available: true,
+      models: merged
+    }
+  ]
 }
 
 export interface CreateMenuInitial {
@@ -58,6 +86,9 @@ export function CreateMenu({
   const [agents, setAgents] = useState<string[]>([])
   const [presets, setPresets] = useState<LaunchPreset[]>([])
   const [models, setModels] = useState<ModelOption[]>([])
+  // Unified picker catalogs (C29): the Anthropic section + favorites, since
+  // agent sessions always run the claude CLI.
+  const [catalogs, setCatalogs] = useState<ProviderCatalog[]>([])
   const [agent, setAgent] = useState('')
   const [name, setName] = useState(initial?.name ?? '')
   const [model, setModel] = useState('')
@@ -89,6 +120,7 @@ export function CreateMenu({
       setPresets(c.presets)
       setModels(c.models)
     })
+    void window.api.modelCatalogs().then(setCatalogs)
     // Seed the colour swatch with the real colour the session would receive, so
     // the preview is honest even when the user does not pick a custom colour.
     void window.api.peekNextColor().then(setColor)
@@ -199,17 +231,28 @@ export function CreateMenu({
           </label>
         </div>
 
-        <label className="field">
+        <div className="field">
           <span>{t('create.model')}</span>
-          <select value={model} onChange={(e) => setModel(e.target.value)}>
-            <option value="">{t('create.modelDefault')}</option>
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
-              </option>
-            ))}
-          </select>
-        </label>
+          {/* Unified picker (C29): launch-config models first (operator-curated),
+              then the frontier Anthropic catalog; favorites pinned below the
+              separator. Always shown even if CLI detection failed — without
+              claude there would be no sessions at all. */}
+          <div className="create-model-picker">
+            <div
+              className={`mp-model${model === '' ? ' is-selected' : ''}`}
+              onClick={() => setModel('')}
+            >
+              <span className="mp-model-name">{t('create.modelDefault')}</span>
+            </div>
+            <ModelPicker
+              catalogs={mergeCreateCatalogs(models, catalogs)}
+              selected={[`anthropic:${model}`]}
+              multi={false}
+              onlyProviders={['anthropic']}
+              onPick={(_key, target) => setModel(target.model)}
+            />
+          </div>
+        </div>
 
         <label className="field field-check" title={t('create.leadHelp')}>
           <input

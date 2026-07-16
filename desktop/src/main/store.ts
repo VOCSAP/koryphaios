@@ -35,7 +35,10 @@ const DEFAULT_CONFIG: AppConfig = {
   helpButton: true,
   helpModel: 'haiku',
   // Embedded browser view (PLAN D1): the usual local dev-server address.
-  browserUrl: 'http://localhost:3000'
+  browserUrl: 'http://localhost:3000',
+  // Unified model pickers (C29): operator-pinned favorites + local endpoints.
+  modelFavorites: [],
+  localProviders: []
 }
 
 function dataDir(): string {

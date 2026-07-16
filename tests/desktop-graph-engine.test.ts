@@ -257,3 +257,51 @@ test("inference refuses non-user nodes and unknown nodes", async () => {
     "no inference target"
   );
 });
+
+// ----- local providers (C29) -----
+
+test("a 'local' target routes over HTTP with the provider's endpoint", async () => {
+  const doc = docOf([n("q", [], "user", "hello")]);
+  const httpCalls: unknown[] = [];
+  const out = await runInference(
+    {
+      ...deps(async () => "cli answer"),
+      localProviders: [{ id: "oll", name: "Ollama", baseUrl: "http://h", apiKey: "k" }],
+      http: async (input) => {
+        httpCalls.push(input);
+        return "local answer";
+      }
+    },
+    doc,
+    {
+      nodeId: "q",
+      targets: [
+        { cli: "claude", model: "sonnet" },
+        { cli: "local", model: "qwen3:32b", providerId: "oll" }
+      ],
+      battle: false
+    }
+  );
+  const local = out.nodes.find((x) => x.cli === "local")!;
+  expect(local.status).toBe("ok");
+  expect(local.text).toBe("local answer");
+  expect(local.providerId).toBe("oll");
+  expect(httpCalls).toHaveLength(1);
+  const call = httpCalls[0] as { baseUrl: string; apiKey?: string; model: string; system: string };
+  expect(call.baseUrl).toBe("http://h");
+  expect(call.apiKey).toBe("k");
+  expect(call.model).toBe("qwen3:32b");
+  expect(call.system).toContain("GRAPH CHAT");
+});
+
+test("a 'local' target with an unknown provider yields an error node", async () => {
+  const doc = docOf([n("q", [], "user", "hello")]);
+  const out = await runInference(
+    { ...deps(async () => "x"), localProviders: [] },
+    doc,
+    { nodeId: "q", targets: [{ cli: "local", model: "m", providerId: "ghost" }], battle: false }
+  );
+  const node = out.nodes.find((x) => x.type === "assistant")!;
+  expect(node.status).toBe("error");
+  expect(node.error).toContain("unknown local provider");
+});

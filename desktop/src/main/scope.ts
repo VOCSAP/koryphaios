@@ -47,8 +47,8 @@ function computeGroupId(secret: string): string {
 
 /**
  * Mirror the broker's deriveDefaultId base (broker.ts), minus the incremental
- * collision suffix. e.g. host="Olivier-PC", projectDir=".../claude-peers-mcp"
- * -> "olivier-pc-claude-peers".
+ * collision suffix. e.g. host="Dev-PC", projectDir=".../claude-peers-mcp"
+ * -> "dev-pc-claude-peers".
  */
 function deriveRoot(host: string, projectDir: string): string {
   const sanitize = (s: string): string =>

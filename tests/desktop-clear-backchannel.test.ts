@@ -44,7 +44,7 @@ describe("deriveSessionId (hook)", () => {
   test("handles a Windows backslash transcript_path under a posix path module", () => {
     expect(
       deriveSessionId({
-        transcript_path: "C:\\Users\\Olivier\\.claude\\projects\\p\\26bbec1f-c8fe-42a3.jsonl",
+        transcript_path: "C:\\Users\\dev\\.claude\\projects\\p\\26bbec1f-c8fe-42a3.jsonl",
       }),
     ).toBe("26bbec1f-c8fe-42a3");
   });

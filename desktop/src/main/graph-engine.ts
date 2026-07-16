@@ -24,9 +24,12 @@ import {
 import {
   buildAdapterCommand,
   GRAPH_INFER_TIMEOUT_MS,
-  writeContextFile
+  runHttpInference,
+  writeContextFile,
+  type HttpInferenceInput
 } from './model-adapters'
 import { runHelp } from './help-assistant'
+import type { LocalProviderConfig } from '../shared/models'
 
 // ---------------------------------------------------------------------------
 // Prompts (CODE CONSTANTS — C8)
@@ -165,6 +168,10 @@ export interface InferDeps {
   cwd: string
   /** Injectable for tests; defaults to runHelp with the graph timeout. */
   run?: (command: string) => Promise<string>
+  /** Configured local endpoints (C29) for cli 'local' targets. */
+  localProviders?: LocalProviderConfig[]
+  /** Injectable for tests; defaults to runHttpInference. */
+  http?: (input: HttpInferenceInput) => Promise<string>
 }
 
 export interface InferRequest {
@@ -199,17 +206,34 @@ export async function runInference(
     deps.run ??
     ((command: string) =>
       runHelp({ command, shell: deps.shell, cwd: deps.cwd, timeoutMs: GRAPH_INFER_TIMEOUT_MS }))
+  const http = deps.http ?? runHttpInference
   const filesDir = join(deps.stateDir, 'graphs')
   const compiled = compileContext(doc, req.nodeId)
 
+  /** One target inference: shell command for the CLIs, HTTP for 'local'. */
+  const runTarget = (target: ModelTarget): Promise<string> => {
+    if (target.cli === 'local') {
+      const provider = (deps.localProviders ?? []).find((p) => p.id === target.providerId)
+      if (!provider) {
+        return Promise.reject(new Error(`unknown local provider ${target.providerId ?? '?'}`))
+      }
+      return http({
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+        model: target.model,
+        system: compiled.system,
+        prompt: compiled.prompt
+      })
+    }
+    const content = target.cli === 'claude' ? compiled.system : composeSinglePrompt(compiled)
+    const contextFile = writeContextFile(filesDir, { nodeId: node.id, cli: target.cli }, content)
+    return run(buildAdapterCommand({ promptText: compiled.prompt, contextFile, target }))
+  }
+
   const settled = await Promise.allSettled(
     targets.map((target) => {
-      const content =
-        target.cli === 'claude' ? compiled.system : composeSinglePrompt(compiled)
-      const contextFile = writeContextFile(filesDir, { nodeId: node.id, cli: target.cli }, content)
-      const command = buildAdapterCommand({ promptText: compiled.prompt, contextFile, target })
       const started = Date.now()
-      return run(command).then((text) => ({ text, durationMs: Date.now() - started }))
+      return runTarget(target).then((text) => ({ text, durationMs: Date.now() - started }))
     })
   )
 
@@ -225,7 +249,8 @@ export async function runInference(
       y: node.y + FAN_Y,
       createdAt: Date.now(),
       cli: target.cli,
-      model: target.model
+      model: target.model,
+      ...(target.cli === 'local' && target.providerId ? { providerId: target.providerId } : {})
     }
     if (res.status === 'fulfilled') {
       base.text = res.value.text

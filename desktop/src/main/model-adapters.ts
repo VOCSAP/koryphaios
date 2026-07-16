@@ -89,7 +89,76 @@ export function buildAdapterCommand(input: AdapterInput): string {
       const cmd = `${bin}${model ? ` -m ${model}` : ''}`
       return stdinFromFile(cmd, input.contextFile, plat)
     }
+    case 'local':
+      // Local providers run over HTTP (runHttpInference), never a shell command.
+      throw new Error('local targets are not shell commands')
   }
+}
+
+// ---------------------------------------------------------------------------
+// Local providers (C29): direct OpenAI-compatible chat completion — covers
+// Ollama (/v1), LiteLLM, vLLM, OpenRouter-style proxies. Pure request builder
+// + an executor with injectable fetch, mirroring the shell adapters' split.
+
+/** POST target for a configured base URL ('…/v1' respected). */
+export function chatCompletionsUrl(baseUrl: string): string {
+  const base = baseUrl.replace(/\/+$/, '')
+  return /\/v1$/.test(base) ? `${base}/chat/completions` : `${base}/v1/chat/completions`
+}
+
+export interface HttpInferenceInput {
+  baseUrl: string
+  apiKey?: string
+  model: string
+  system: string
+  prompt: string
+}
+
+export function buildChatCompletionRequest(input: HttpInferenceInput): {
+  url: string
+  init: RequestInit
+} {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (input.apiKey) headers.Authorization = `Bearer ${input.apiKey}`
+  return {
+    url: chatCompletionsUrl(input.baseUrl),
+    init: {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: input.model,
+        stream: false,
+        messages: [
+          { role: 'system', content: input.system },
+          { role: 'user', content: input.prompt }
+        ]
+      })
+    }
+  }
+}
+
+/** One local chat completion; throws a bounded, readable error on failure. */
+export async function runHttpInference(
+  input: HttpInferenceInput,
+  fetchImpl: typeof fetch = fetch
+): Promise<string> {
+  const { url, init } = buildChatCompletionRequest(input)
+  const res = await fetchImpl(url, {
+    ...init,
+    signal: AbortSignal.timeout(GRAPH_INFER_TIMEOUT_MS)
+  })
+  if (!res.ok) {
+    const body = (await res.text().catch(() => '')).slice(0, 300)
+    throw new Error(`${url} -> HTTP ${res.status}${body ? `: ${body}` : ''}`)
+  }
+  const json = (await res.json()) as {
+    choices?: { message?: { content?: unknown } }[]
+  }
+  const content = json?.choices?.[0]?.message?.content
+  if (typeof content !== 'string' || !content) {
+    throw new Error(`${url} -> empty completion`)
+  }
+  return content.trim()
 }
 
 /**
