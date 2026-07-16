@@ -356,8 +356,15 @@ export interface RoadmapArchiveResponse {
   item: RoadmapItem
 }
 
-/** Navigation rail views: Home (C5), Agents, Browser (D1), Roadmap (C3), Worktrees (C6), Journal (C14). */
-export type DeckView = 'home' | 'agents' | 'browser' | 'roadmap' | 'worktrees' | 'journal'
+/** Navigation rail views: Home (C5), Agents, Browser (D1), Roadmap (C3), Graph (C26), Worktrees (C6), Journal (C14). */
+export type DeckView =
+  | 'home'
+  | 'agents'
+  | 'browser'
+  | 'roadmap'
+  | 'graph'
+  | 'worktrees'
+  | 'journal'
 
 // ----- Embedded browser (PLAN D1, experimental) -----
 
@@ -638,6 +645,31 @@ export interface DeckApi {
   saveSnippet(name: string, local: boolean, text: string): Promise<string>
   /** Delete a snippet file by path. Returns true if a file was removed. */
   deleteSnippet(path: string): Promise<boolean>
+
+  // graph chat (EXPLORATION-graph-chat C23-C27), per-project, desktop-local.
+  /** All graph docs of the current project, newest first. */
+  graphList(): Promise<import('./graph').GraphDoc[]>
+  /** Create an empty graph; returns the persisted doc. */
+  graphCreate(name: string): Promise<import('./graph').GraphDoc>
+  /** Delete a graph by id. Returns true if one was removed. */
+  graphDelete(id: string): Promise<boolean>
+  /** Validate + persist a whole doc (renderer-side edits). Returns the stamped doc. */
+  graphSave(doc: import('./graph').GraphDoc): Promise<import('./graph').GraphDoc | null>
+  /** Context inspector: the exact compiled context of a node. */
+  graphCompile(
+    graphId: string,
+    nodeId: string
+  ): Promise<{ system: string; prompt: string; merge: boolean }>
+  /** Run inference on a user node (fan-out targets + optional battle judge). */
+  graphInfer(
+    graphId: string,
+    req: {
+      nodeId: string
+      targets: import('./graph').ModelTarget[]
+      battle: boolean
+      judge?: import('./graph').ModelTarget
+    }
+  ): Promise<import('./graph').GraphDoc>
 
   // events (return an unsubscribe fn)
   onPtyData(cb: (e: PtyDataEvent) => void): () => void

@@ -125,6 +125,8 @@ export function runHelp(opts: {
   command: string
   shell: string
   cwd: string
+  /** Override for slower callers (graph inference, C24). Default: 120 s. */
+  timeoutMs?: number
 }): Promise<string> {
   const marker = `__CP_HELP_START_${randomBytes(6).toString('hex')}__`
   const inv = buildShellInvocation({
@@ -136,7 +138,12 @@ export function runHelp(opts: {
     execFile(
       inv.file,
       inv.args,
-      { cwd: opts.cwd, timeout: HELP_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, encoding: 'utf-8' },
+      {
+        cwd: opts.cwd,
+        timeout: opts.timeoutMs ?? HELP_TIMEOUT_MS,
+        maxBuffer: 8 * 1024 * 1024,
+        encoding: 'utf-8'
+      },
       (err, stdout, stderr) => {
         if (err) {
           const detail = (stderr || err.message || '').trim().slice(0, 500)

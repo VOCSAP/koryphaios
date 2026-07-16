@@ -14,6 +14,7 @@ export type JournalKind =
   | 'dispatch'
   | 'review'
   | 'checkpoint'
+  | 'graph'
 
 export interface JournalEntry {
   /** Monotonic id (stable React key, cheap "anything new?" cursor). */

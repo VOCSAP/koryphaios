@@ -1,5 +1,46 @@
 # Changelog
 
+## desktop v0.9.0 -- 2026-07-16
+
+Graph chat & battle mode (EXPLORATION-graph-chat C23-C27): a canvas view
+where every exchange is a node — branch "what if" explorations anywhere,
+cross N branches into one prompt node, fan a prompt out to several headless
+CLIs, and let a judge node arbitrate a battle.
+
+### Added (desktop, v0.9.0)
+- **Graph data model + engine (C23).** `shared/graph.ts`: DAG of typed nodes
+  (user / assistant / judge, N parents for cross/merge nodes), pure ops
+  (ancestors, cycle refusal, deterministic topological linearization,
+  three-way-style `mergePartition` — common trunk + per-branch deltas) and
+  shape validation. Per-project persistence (`graph-store.ts`) under the app
+  state dir, keyed by the deck project_key (stable across worktrees/clones).
+- **Headless CLI adapters (C24).** `model-adapters.ts` generalizes the C9
+  skeleton: `claude -p` (context via `--append-system-prompt-file`,
+  `--strict-mcp-config` + `--disallowedTools`), `codex exec --sandbox
+  read-only` and `gemini` (context file fed through stdin, POSIX redirection
+  or PowerShell `Get-Content -Raw` pipe). The compiled context always travels
+  by FILE (never the command line); `model` strings are sanitized; `runHelp`
+  gains an optional timeout (300 s for inference).
+- **Context compilation + inference (C25).** `graph-engine.ts`: three CODE
+  CONSTANT system prompts (linear chat, merge, judge — C8 rule). 0-1 parents
+  → labeled linear transcript; 2+ parents → documentary merge rendering
+  (trunk once + labeled divergent branch sections, never a fake linear
+  conversation). 60k-char budget with explicit elision markers. Fan-out via
+  `Promise.allSettled` (a failed target yields an error node, never blocks
+  siblings). IPC `graph:list/create/delete/save/compile/infer` + journal kind
+  `graph`.
+- **Graph view (C26).** New 🕸 rail view: per-project graph list,
+  dependency-free canvas (SVG bezier edges + positioned cards, pan/zoom/drag,
+  manual layout), multi-selection, reply / node-from-selection (cross) /
+  connect-parent (cycles refused) / leaf-only delete, and a context inspector
+  showing exactly what will be sent. i18n en/fr.
+- **Battle mode (C27).** Check several CLIs on a prompt node: one answer node
+  per target; with battle ON and ≥2 successful answers, a 🏆 judge node
+  (default claude/sonnet, configurable) compares the ANONYMIZED answers,
+  picks the strongest and produces the merged answer — the model mapping is
+  revealed in a legend after the verdict. Degrades gracefully to no judge
+  with <2 answers.
+
 ## v0.7.0 -- 2026-07-16
 
 The "briefed agents" batch (PLAN-context-et-snippets C20-C22): roadmap items

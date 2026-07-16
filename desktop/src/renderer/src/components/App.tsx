@@ -6,6 +6,7 @@ import { TileArea } from './TileArea'
 import { DisplayModeBar } from './DisplayModeBar'
 import { NavRail } from './NavRail'
 import { RoadmapView } from './RoadmapView'
+import { GraphView } from './GraphView'
 import { WorktreesView } from './WorktreesView'
 import { JournalView } from './JournalView'
 import { HomeView } from './HomeView'
@@ -156,6 +157,7 @@ export function App(): React.JSX.Element {
         </div>
       )}
       {view === 'roadmap' && <RoadmapView />}
+      {view === 'graph' && <GraphView />}
       {view === 'worktrees' && <WorktreesView />}
       {view === 'journal' && <JournalView />}
       {settingsOpen && <SettingsView />}
