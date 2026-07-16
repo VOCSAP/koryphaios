@@ -180,42 +180,42 @@ validé côté main par un parseur de shape façon `parseTemplate`),
 
 ## 7. Chantiers
 
-### C23 — Modèle + moteur pur + persistance (~1 j)
-- [ ] `shared/graph.ts` : types, `ancestorsOf`, `wouldCreateCycle`,
+### C23 — Modèle + moteur pur + persistance (~1 j) — FAIT
+- [x] `shared/graph.ts` : types, `ancestorsOf`, `wouldCreateCycle`,
       `linearize`, `mergePartition`, id generator.
-- [ ] `main/graph-store.ts` : load/save par projet (dossier en paramètre,
+- [x] `main/graph-store.ts` : load/save par projet (dossier en paramètre,
       patron snippet-store), parseur de shape.
-- [ ] Tests : cycles refusés, linéarisation déterministe, partition tronc +
+- [x] Tests : cycles refusés, linéarisation déterministe, partition tronc +
       deltas sur le cas « 2 branches de 10 nœuds », round-trip persistance.
 
-### C24 — Adaptateurs headless multi-CLI (~0,5 j)
-- [ ] `runHelp` : paramètre `timeoutMs` optionnel (défaut inchangé).
-- [ ] `main/model-adapters.ts` : builders claude/codex/gemini (D5/D6),
+### C24 — Adaptateurs headless multi-CLI (~0,5 j) — FAIT
+- [x] `runHelp` : paramètre `timeoutMs` optionnel (défaut inchangé).
+- [x] `main/model-adapters.ts` : builders claude/codex/gemini (D5/D6),
       helper stdin-fichier POSIX/PowerShell, validation `model`.
-- [ ] Tests : commandes générées par plateforme, quoting, modèle invalide
+- [x] Tests : commandes générées par plateforme, quoting, modèle invalide
       rejeté, fichier de contexte écrit.
 
-### C25 — Compilation + prompts constants + IPC (~1 j)
-- [ ] `main/graph-engine.ts` : 3 system prompts CONSTANTS (chat/merge/juge),
+### C25 — Compilation + prompts constants + IPC (~1 j) — FAIT
+- [x] `main/graph-engine.ts` : 3 system prompts CONSTANTS (chat/merge/juge),
       `compileContext` (linéaire + merge + budget D8), `runInference`
       (fan-out, nœuds erreur, juge).
-- [ ] IPC `graph:*` + preload + types `DeckApi`.
-- [ ] Tests : rendu linéaire, rendu merge (tronc unique + sections + system
+- [x] IPC `graph:*` + preload + types `DeckApi`.
+- [x] Tests : rendu linéaire, rendu merge (tronc unique + sections + system
       merge), budget/élision, prompt juge (étiquettes anonymisées), fan-out
       avec un faux binaire (patron desktop-help).
 
-### C26 — Vue Graph (canvas) (~1,5 j)
-- [ ] `GraphView.tsx` : liste de graphes, canvas pan/zoom/drag, nœuds/arêtes,
+### C26 — Vue Graph (canvas) (~1,5 j) — FAIT (validation UI restante)
+- [x] `GraphView.tsx` : liste de graphes, canvas pan/zoom/drag, nœuds/arêtes,
       sélection + multi-sélection, panneau d'actions, inspecteur de contexte,
       i18n en/fr, styles.
-- [ ] Rail : `DeckView 'graph'` + entrée NavRail.
+- [x] Rail : `DeckView 'graph'` + entrée NavRail.
 - [ ] Validation manuelle au premier lancement réel (pas de test UI).
 
-### C27 — Battle mode (~0,5 j)
-- [ ] UI cibles multiples + toggle battle + cible juge (défaut sonnet).
-- [ ] Câblage `runInference` battle (déjà côté moteur en C25) + positions en
+### C27 — Battle mode (~0,5 j) — FAIT
+- [x] UI cibles multiples + toggle battle + cible juge (défaut sonnet).
+- [x] Câblage `runInference` battle (déjà côté moteur en C25) + positions en
       éventail + nœud juge stylé (couronne 🏆 / badge « battle »).
-- [ ] Test : battle avec 1 seule réponse ok → pas de juge (dégradation).
+- [x] Test : battle avec 1 seule réponse ok → pas de juge (dégradation).
 
 ### C28 — Reportés (could, à reconsidérer après usage réel)
 - Nœuds **digest** : compression LLM (haiku) d'une branche au-delà du budget,
@@ -239,3 +239,4 @@ validé côté main par un parseur de shape façon `parseTemplate`),
 | Date | Session / auteur | Chantier | Fait | Reste / notes |
 |---|---|---|---|---|
 | 2026-07-16 | session exploration (graph chat) | — | Brainstorm capture démo + création du plan C23-C28 ; PLAN-v0.4 amendé (le reporté « battle chat » pointe ici). | Implémenter C23 → C27. |
+| 2026-07-16 | session exploration (graph chat) | C23-C27 | Lot complet : shared/graph.ts (DAG, linéarisation, mergePartition, parseGraphDoc), graph-store.ts (persistance par project_key), model-adapters.ts (claude/codex/gemini, contexte par fichier, runHelp timeoutMs), graph-engine.ts (3 prompts constants, compilation linéaire/merge, budget + élision, fan-out allSettled, juge anonymisé + légende), IPC graph:* + preload + types, GraphView.tsx (canvas SVG sans dépendance, pan/zoom/drag, multi-sélection, croisement, connect-parent anti-cycle, inspecteur de contexte, battle UI), i18n en/fr + EN_DEFAULTS, journal kind graph. 35 tests neufs (4 suites), bun test 428/428, smoke check + typecheck node/web verts. Desktop bump 0.9.0. | Validation manuelle UI (C26) au premier lancement réel ; C28 (digest, nœuds artefact, export) reporté. |

@@ -127,6 +127,14 @@ const api: DeckApi = {
     ipcRenderer.invoke('snippet:save', name, local, text),
   deleteSnippet: (path: string) => ipcRenderer.invoke('snippet:delete', path),
 
+  graphList: () => ipcRenderer.invoke('graph:list'),
+  graphCreate: (name: string) => ipcRenderer.invoke('graph:create', name),
+  graphDelete: (id: string) => ipcRenderer.invoke('graph:delete', id),
+  graphSave: (doc) => ipcRenderer.invoke('graph:save', doc),
+  graphCompile: (graphId: string, nodeId: string) =>
+    ipcRenderer.invoke('graph:compile', graphId, nodeId),
+  graphInfer: (graphId, req) => ipcRenderer.invoke('graph:infer', graphId, req),
+
   onPtyData: (cb: (e: PtyDataEvent) => void) => onPtyDataMux(cb),
   onPtyExit: (cb: (e: PtyExitEvent) => void) => onPtyExitMux(cb),
   onSessionsChanged: (cb: (sessions: SessionRuntime[]) => void) =>

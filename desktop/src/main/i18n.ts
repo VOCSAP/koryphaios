@@ -474,7 +474,40 @@ export const EN_DEFAULTS: Record<string, string> = {
   'composer.worktree': 'Worktree branch (fresh)',
   'composer.addSession': '＋ Add a session',
   'composer.save': 'Save template',
-  'toast.templateSaved': 'Template saved'
+  'toast.templateSaved': 'Template saved',
+  'nav.graph': 'Graph',
+  'graph.title': 'Graph chats',
+  'graph.defaultName': 'new graph',
+  'graph.newGraph': '＋ New',
+  'graph.empty': 'No graph yet — create one and add a root node.',
+  'graph.confirmDeleteTitle': 'Delete this graph?',
+  'graph.confirmDeleteMessage': 'All its nodes will be deleted. This cannot be undone.',
+  'graph.newRoot': '＋ Root node',
+  'graph.nodeUser': 'you',
+  'graph.selectHint':
+    'Select a node to act on it. Shift-click for multi-selection, drag to move, wheel to zoom.',
+  'graph.multiSelected': '{count} nodes selected',
+  'graph.fromSelection': '＋ Node from selection',
+  'graph.fromSelectionHint':
+    'Creates a prompt node with the selected nodes as parents — their histories are compiled as a common trunk plus one labeled section per branch.',
+  'graph.reply': 'Reply',
+  'graph.connect': 'Connect parent',
+  'graph.connectHint': 'Click the node to add as a parent (cycles are refused).',
+  'graph.inspect': 'Inspect context',
+  'graph.inspectorTitle': 'Compiled context (sent as system side)',
+  'graph.inspectorPrompt': "Prompt (the node's message)",
+  'graph.promptPlaceholder': 'Your message… (what if…? go deeper on…)',
+  'graph.targets': 'Inference targets',
+  'graph.modelDefault': 'default model',
+  'graph.battle': 'Battle mode (judge node merges the answers)',
+  'graph.battleHint':
+    'Each checked CLI answers independently, then a judge node compares the anonymized answers and produces the merged one.',
+  'graph.judge': 'Judge (claude)',
+  'graph.infer': '▶ Infer',
+  'graph.running': 'running…',
+  'graph.error': 'inference failed',
+  'graph.leafOnly': 'Only leaf nodes can be deleted.',
+  'graph.cycleRefused': 'Refused: this connection would create a cycle.'
 }
 
 /**

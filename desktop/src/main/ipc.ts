@@ -60,6 +60,9 @@ import {
   localSnippetsDir,
   writeSnippet
 } from './snippet-store'
+import { deleteGraph, loadGraphs, upsertGraph } from './graph-store'
+import { compileContext, runInference, type InferRequest } from './graph-engine'
+import { graphId as graphDocId, parseGraphDoc, type GraphDoc } from '../shared/graph'
 import { parseTemplate, toTemplate, templateToInputs } from '@shared/template'
 import { availableLocales, loadDict, resolveLocale } from './i18n'
 
@@ -556,6 +559,58 @@ export function registerIpc({
   ipcMain.handle('snippet:delete', (_e, path: string) =>
     deleteSnippet(path, getConfig().projectDir)
   )
+
+  // ----- graph chat (EXPLORATION-graph-chat C23-C27) -----
+  // Desktop-local per-project persistence (D7); inference = stateless headless
+  // fan-out (D1), context recompiled from the graph on every call.
+  const graphCtx = (): { stateDir: string; key: string } => ({
+    stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
+    key: computeDeckProjectKey(getConfig().projectDir)
+  })
+  ipcMain.handle('graph:list', () => {
+    const { stateDir, key } = graphCtx()
+    return loadGraphs(stateDir, key)
+  })
+  ipcMain.handle('graph:create', (_e, name: string) => {
+    const { stateDir, key } = graphCtx()
+    const doc: GraphDoc = {
+      id: graphDocId(),
+      name: (typeof name === 'string' && name.trim()) || 'graph',
+      nodes: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    }
+    return upsertGraph(stateDir, key, doc)
+  })
+  ipcMain.handle('graph:delete', (_e, id: string) => {
+    const { stateDir, key } = graphCtx()
+    return deleteGraph(stateDir, key, id)
+  })
+  ipcMain.handle('graph:save', (_e, raw: unknown) => {
+    const doc = parseGraphDoc(raw)
+    if (!doc) return null
+    const { stateDir, key } = graphCtx()
+    return upsertGraph(stateDir, key, doc)
+  })
+  ipcMain.handle('graph:compile', (_e, graphId: string, nodeId: string) => {
+    const { stateDir, key } = graphCtx()
+    const doc = loadGraphs(stateDir, key).find((d) => d.id === graphId)
+    if (!doc) throw new Error('unknown graph')
+    return compileContext(doc, nodeId)
+  })
+  ipcMain.handle('graph:infer', async (_e, graphId: string, req: InferRequest) => {
+    const { stateDir, key } = graphCtx()
+    // Re-read from disk: the renderer may have saved node moves meanwhile.
+    const doc = loadGraphs(stateDir, key).find((d) => d.id === graphId)
+    if (!doc) throw new Error('unknown graph')
+    const updated = await runInference(
+      { stateDir, shell: getConfig().shell, cwd: getConfig().projectDir },
+      doc,
+      req ?? ({} as InferRequest)
+    )
+    journal.add('graph', `graph inference on ${req.nodeId} (${req.targets?.length ?? 0} target(s)${req.battle ? ', battle' : ''})`)
+    return upsertGraph(stateDir, key, updated)
+  })
 
   // ----- template composer (PLAN C18): read/write without spawning -----
   ipcMain.handle('template:read', (_e, path: string) => readTemplate(path))
