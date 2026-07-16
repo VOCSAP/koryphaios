@@ -130,7 +130,7 @@
   "create.extraArgs": "Arguments de lancement",
   "create.extraArgsPlaceholder": "ex. --add-dir ..",
   "create.prompt": "Prompt initial",
-  "create.promptPlaceholder": "ex. Lis PLAN-v0.4.md et démarre C2",
+  "create.promptPlaceholder": "ex. Lis PLAN.md et démarre le chantier 2",
   "create.promptHelp": "Soumis à Claude dès l'ouverture de la session (lancement frais uniquement ; jamais rejoué au resume).",
   "create.announce": "Annonce d'arrivée",
   "create.announcePlaceholder": "agent : …, modèle : …, effort : …",

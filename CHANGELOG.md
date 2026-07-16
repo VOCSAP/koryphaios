@@ -1,5 +1,20 @@
 # Changelog
 
+## docs -- 2026-07-16
+
+- **Working plans retired.** `PLAN-v0.4.md`, `PLAN-context-et-snippets.md`,
+  `EXPLORATION-roadmap-et-auto-relance.md` and `EXPLORATION-graph-chat.md`
+  (all chantiers shipped) are deleted; their per-batch narratives live in
+  this file, and the still-open deferred items (graph digest/artefact nodes,
+  graph export + per-node cost, OTEL consumption tracking, GitHub Issues
+  sync, the C23-C29 manual UI validation) moved to `roadmap-seed-v0.9.json`
+  (`bun cli.ts roadmap-import roadmap-seed-v0.9.json`).
+- **CLAUDE.md rewritten for a public repo.** The version-history narrative is
+  replaced by a current-state overview (core architecture, protocol
+  invariants, desktop overview, checks & conventions); pointers to the
+  deleted plans and machine-specific examples are gone. `Cxx` ids in code
+  comments now resolve through this changelog.
+
 ## desktop v0.9.0 -- 2026-07-16
 
 Graph chat & battle mode (EXPLORATION-graph-chat C23-C27): a canvas view
