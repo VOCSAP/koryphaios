@@ -177,6 +177,13 @@ export interface AppConfig {
   helpModel: string
   /** Last URL loaded in the embedded browser view (PLAN D1); restored on open. */
   browserUrl: string
+  /**
+   * Pinned models of the unified pickers (C29), as `providerId:modelId` keys
+   * in pin order. Favorites of vanished providers are kept (they come back).
+   */
+  modelFavorites: string[]
+  /** OpenAI-compatible local endpoints (Ollama, LiteLLM…) added in Settings (C29). */
+  localProviders: import('./models').LocalProviderConfig[]
 }
 
 /** A selectable language for the settings picker: stable code + native label. */
@@ -660,6 +667,12 @@ export interface DeckApi {
     graphId: string,
     nodeId: string
   ): Promise<{ system: string; prompt: string; merge: boolean }>
+  /**
+   * Provider catalogs for the model pickers (C29): frontier providers gated
+   * on CLI detection, local providers with dynamically discovered models.
+   * `refresh` re-probes the CLIs and endpoints.
+   */
+  modelCatalogs(refresh?: boolean): Promise<import('./models').ProviderCatalog[]>
   /** Run inference on a user node (fan-out targets + optional battle judge). */
   graphInfer(
     graphId: string,

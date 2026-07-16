@@ -127,6 +127,7 @@ const api: DeckApi = {
     ipcRenderer.invoke('snippet:save', name, local, text),
   deleteSnippet: (path: string) => ipcRenderer.invoke('snippet:delete', path),
 
+  modelCatalogs: (refresh?: boolean) => ipcRenderer.invoke('models:catalog', refresh),
   graphList: () => ipcRenderer.invoke('graph:list'),
   graphCreate: (name: string) => ipcRenderer.invoke('graph:create', name),
   graphDelete: (id: string) => ipcRenderer.invoke('graph:delete', id),

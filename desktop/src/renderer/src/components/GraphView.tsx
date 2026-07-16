@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { GraphCli, GraphDoc, GraphNode, ModelTarget } from '@shared/graph'
-import { childrenOf, GRAPH_CLIS, graphId, wouldCreateCycle } from '@shared/graph'
+import { childrenOf, graphId, wouldCreateCycle } from '@shared/graph'
+import type { ProviderCatalog } from '@shared/models'
 import { useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
+import { ModelPicker } from './ModelPicker'
 
 // Graph chat view (EXPLORATION-graph-chat C26): a canvas where every exchange
 // is a node — branch a "what if" anywhere, cross N nodes into a fresh prompt
@@ -15,18 +17,12 @@ const NODE_H = 130
 const ZOOM_MIN = 0.25
 const ZOOM_MAX = 2
 
-/** Model presets per CLI ('' = the CLI's default model). Free text allowed. */
-const MODEL_PRESETS: Record<GraphCli, string[]> = {
-  claude: ['haiku', 'sonnet', 'opus'],
-  codex: [''],
-  gemini: ['']
-}
+const CLI_ICONS: Record<GraphCli, string> = { claude: '✴', codex: '◆', gemini: '✦', local: '🖳' }
 
-const CLI_ICONS: Record<GraphCli, string> = { claude: '✴', codex: '◆', gemini: '✦' }
-
-interface TargetDraft {
-  on: boolean
-  model: string
+/** Default fan-out selection before the operator picks anything. */
+const DEFAULT_TARGET_KEY = 'anthropic:sonnet'
+const DEFAULT_TARGETS: Record<string, ModelTarget> = {
+  [DEFAULT_TARGET_KEY]: { cli: 'claude', model: 'sonnet' }
 }
 
 type Camera = { x: number; y: number; zoom: number }
@@ -55,11 +51,11 @@ export function GraphView(): React.JSX.Element {
   const [inspector, setInspector] = useState<{ system: string; prompt: string } | null>(null)
   const [confirmDeleteGraph, setConfirmDeleteGraph] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
-  const [targets, setTargets] = useState<Record<GraphCli, TargetDraft>>({
-    claude: { on: true, model: 'sonnet' },
-    codex: { on: false, model: '' },
-    gemini: { on: false, model: '' }
-  })
+  // Fan-out selection (C29): favorite-style keys -> ModelTarget, driven by the
+  // unified ModelPicker (providers gated on CLI detection, locals discovered).
+  const [catalogs, setCatalogs] = useState<ProviderCatalog[]>([])
+  const [targetKeys, setTargetKeys] = useState<string[]>([DEFAULT_TARGET_KEY])
+  const [targetMap, setTargetMap] = useState<Record<string, ModelTarget>>(DEFAULT_TARGETS)
   const [battle, setBattle] = useState(false)
   const [judgeModel, setJudgeModel] = useState('sonnet')
 
@@ -87,6 +83,7 @@ export function GraphView(): React.JSX.Element {
 
   useEffect(() => {
     void refresh()
+    void window.api.modelCatalogs().then(setCatalogs)
   }, [refresh])
 
   useEffect(() => {
@@ -199,10 +196,13 @@ export function GraphView(): React.JSX.Element {
   // ----- inference (C25/C27) -----
 
   const activeTargets = (): ModelTarget[] =>
-    GRAPH_CLIS.filter((cli) => targets[cli].on).map((cli) => ({
-      cli,
-      model: targets[cli].model.trim()
-    }))
+    targetKeys.map((k) => targetMap[k]).filter((x): x is ModelTarget => !!x)
+
+  /** Picker click: toggle the model in the fan-out selection. */
+  const toggleTarget = (key: string, target: ModelTarget): void => {
+    setTargetMap((m) => ({ ...m, [key]: target }))
+    setTargetKeys((ks) => (ks.includes(key) ? ks.filter((k) => k !== key) : [...ks, key]))
+  }
 
   const infer = async (): Promise<void> => {
     if (!doc || !single || single.type !== 'user' || running) return
@@ -511,34 +511,31 @@ export function GraphView(): React.JSX.Element {
             {single.type === 'user' && (
               <div className="graph-infer-block">
                 <div className="graph-panel-title">{t('graph.targets')}</div>
-                {GRAPH_CLIS.map((cli) => (
-                  <div key={cli} className="graph-target-row">
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={targets[cli].on}
-                        onChange={(e) =>
-                          setTargets((ts) => ({ ...ts, [cli]: { ...ts[cli], on: e.target.checked } }))
-                        }
-                      />
-                      {CLI_ICONS[cli]} {cli}
-                    </label>
-                    <input
-                      className="graph-model-input"
-                      list={`graph-models-${cli}`}
-                      placeholder={t('graph.modelDefault')}
-                      value={targets[cli].model}
-                      onChange={(e) =>
-                        setTargets((ts) => ({ ...ts, [cli]: { ...ts[cli], model: e.target.value } }))
-                      }
-                    />
-                    <datalist id={`graph-models-${cli}`}>
-                      {MODEL_PRESETS[cli].filter(Boolean).map((m) => (
-                        <option key={m} value={m} />
-                      ))}
-                    </datalist>
+                {targetKeys.length > 0 && (
+                  <div className="graph-target-chips">
+                    {targetKeys.map((k) => {
+                      const tg = targetMap[k]
+                      if (!tg) return null
+                      return (
+                        <span key={k} className="graph-target-chip">
+                          {CLI_ICONS[tg.cli]} {tg.model || tg.cli}
+                          <button
+                            className="graph-chip-x"
+                            onClick={() => setTargetKeys((ks) => ks.filter((x) => x !== k))}
+                          >
+                            ✕
+                          </button>
+                        </span>
+                      )
+                    })}
                   </div>
-                ))}
+                )}
+                <ModelPicker
+                  catalogs={catalogs}
+                  selected={targetKeys}
+                  multi
+                  onPick={toggleTarget}
+                />
                 <label className="graph-battle-row" title={t('graph.battleHint')}>
                   <input
                     type="checkbox"
@@ -552,7 +549,6 @@ export function GraphView(): React.JSX.Element {
                     <span>🏆 {t('graph.judge')}</span>
                     <input
                       className="graph-model-input"
-                      list="graph-models-claude"
                       value={judgeModel}
                       onChange={(e) => setJudgeModel(e.target.value)}
                     />

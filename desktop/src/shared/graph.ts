@@ -9,14 +9,20 @@
 
 export type GraphNodeType = 'user' | 'assistant' | 'judge'
 
-/** Headless CLIs an assistant node can be produced by. */
-export type GraphCli = 'claude' | 'codex' | 'gemini'
-export const GRAPH_CLIS: GraphCli[] = ['claude', 'codex', 'gemini']
+/**
+ * How an assistant node is produced: one of the headless CLIs, or 'local' —
+ * a direct HTTP call to an OpenAI-compatible endpoint configured in Settings
+ * (Ollama, LiteLLM… — C29).
+ */
+export type GraphCli = 'claude' | 'codex' | 'gemini' | 'local'
+export const GRAPH_CLIS: GraphCli[] = ['claude', 'codex', 'gemini', 'local']
 
 /** One inference target of a fan-out. model '' = the CLI's default model. */
 export interface ModelTarget {
   cli: GraphCli
   model: string
+  /** cli 'local' only: which configured local provider runs it (C29). */
+  providerId?: string
 }
 
 export interface GraphNode {
@@ -34,6 +40,8 @@ export interface GraphNode {
   /** assistant/judge only. */
   cli?: GraphCli
   model?: string
+  /** cli 'local' only: the configured provider that produced it (C29). */
+  providerId?: string
   status?: 'ok' | 'error'
   error?: string
   durationMs?: number
@@ -193,6 +201,7 @@ export function parseGraphDoc(raw: unknown): GraphDoc | null {
     const cli = str(n.cli, 16) as GraphCli
     if (GRAPH_CLIS.includes(cli)) node.cli = cli
     if (typeof n.model === 'string') node.model = str(n.model, 128)
+    if (typeof n.providerId === 'string' && n.providerId) node.providerId = str(n.providerId, 64)
     if (n.status === 'ok' || n.status === 'error') node.status = n.status
     if (typeof n.error === 'string') node.error = str(n.error, 2000)
     if (typeof n.durationMs === 'number') node.durationMs = num(n.durationMs)

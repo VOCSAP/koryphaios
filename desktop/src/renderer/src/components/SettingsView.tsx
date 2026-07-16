@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import type { AppConfig, DisplayMode, LaunchPreset, ModelOption } from '@shared/types'
+import type { LocalProviderConfig, ProviderCatalog } from '@shared/models'
 import { DEFAULT_PALETTE } from '@shared/palette'
+import { graphId } from '@shared/graph'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 
@@ -10,12 +12,13 @@ import { useT } from '../i18n'
 // Edit > Settings…). Changes apply live -- discrete inputs on change, free-text
 // inputs on blur -- so switching the language is instant (no Save button).
 
-type Category = 'general' | 'appearance' | 'terminal'
+type Category = 'general' | 'appearance' | 'terminal' | 'models'
 
 const CATEGORIES: { id: Category; key: string }[] = [
   { id: 'general', key: 'settings.catGeneral' },
   { id: 'appearance', key: 'settings.catAppearance' },
-  { id: 'terminal', key: 'settings.catTerminal' }
+  { id: 'terminal', key: 'settings.catTerminal' },
+  { id: 'models', key: 'settings.catModels' }
 ]
 
 const DISPLAY_MODE_KEYS: { value: DisplayMode; key: string }[] = [
@@ -66,6 +69,27 @@ export function SettingsView(): React.JSX.Element {
       setProjectDir(dir)
       set('projectDir', dir)
     }
+  }
+
+  // Models category (C29): local providers buffered locally (committed on
+  // blur / add / delete), plus the live catalog for the detection status.
+  const [providers, setProviders] = useState<LocalProviderConfig[]>(config.localProviders ?? [])
+  useEffect(() => setProviders(config.localProviders ?? []), [config.localProviders])
+  const [catalogs, setCatalogs] = useState<ProviderCatalog[] | null>(null)
+  useEffect(() => {
+    if (active === 'models' && catalogs === null) {
+      void window.api.modelCatalogs().then(setCatalogs)
+    }
+  }, [active, catalogs])
+
+  const commitProviders = (next: LocalProviderConfig[]): void => {
+    setProviders(next)
+    set('localProviders', next)
+    setCatalogs(null) // re-discover on next look
+  }
+
+  const editProvider = (id: string, patch: Partial<LocalProviderConfig>): void => {
+    setProviders((ps) => ps.map((p) => (p.id === id ? { ...p, ...patch } : p)))
   }
 
   const saveLaunchCommand = (): void => {
@@ -311,6 +335,101 @@ export function SettingsView(): React.JSX.Element {
                 />
                 <span>{t('settings.interactiveShell')}</span>
               </label>
+            </>
+          )}
+
+          {active === 'models' && (
+            <>
+              {/* Frontier detection status (D11): a provider is offered in the
+                  pickers only when its CLI is installed. Lists are curated in
+                  code (shared/models.ts) — no reliable dynamic listing exists
+                  for the OAuth CLIs. */}
+              <div className="field">
+                <span>{t('settings.modelsDetection')}</span>
+                <div className="settings-detect-row">
+                  {(catalogs ?? [])
+                    .filter((c) => c.kind === 'frontier')
+                    .map((c) => (
+                      <span
+                        key={c.id}
+                        className={`settings-detect${c.available ? ' is-ok' : ''}`}
+                      >
+                        {c.available ? '✓' : '✗'} {c.name} ({c.cli})
+                      </span>
+                    ))}
+                  {catalogs === null && <span>{t('graph.running')}</span>}
+                  <button
+                    className="icon-btn"
+                    title={t('settings.modelsRefresh')}
+                    onClick={() => {
+                      setCatalogs(null)
+                      void window.api.modelCatalogs(true).then(setCatalogs)
+                    }}
+                  >
+                    ⟳
+                  </button>
+                </div>
+                <small>{t('settings.modelsDetectionHelp')}</small>
+              </div>
+
+              <div className="field">
+                <span>{t('settings.localProviders')}</span>
+                <small>{t('settings.localProvidersHelp')}</small>
+                {providers.map((p) => {
+                  const discovered = catalogs?.find((c) => c.id === p.id)
+                  return (
+                    <div key={p.id} className="settings-provider-row">
+                      <input
+                        className="settings-provider-name"
+                        placeholder={t('settings.providerName')}
+                        value={p.name}
+                        onChange={(e) => editProvider(p.id, { name: e.target.value })}
+                        onBlur={() => commitProviders(providers)}
+                      />
+                      <input
+                        className="settings-provider-url"
+                        placeholder="http://localhost:11434"
+                        value={p.baseUrl}
+                        onChange={(e) => editProvider(p.id, { baseUrl: e.target.value })}
+                        onBlur={() => commitProviders(providers)}
+                      />
+                      <input
+                        className="settings-provider-key"
+                        type="password"
+                        placeholder={t('settings.providerKey')}
+                        value={p.apiKey ?? ''}
+                        onChange={(e) => editProvider(p.id, { apiKey: e.target.value })}
+                        onBlur={() => commitProviders(providers)}
+                      />
+                      <span className="settings-provider-count">
+                        {discovered
+                          ? t('settings.providerModels', { count: discovered.models.length })
+                          : '…'}
+                      </span>
+                      <button
+                        className="icon-btn"
+                        title={t('common.delete')}
+                        onClick={() => commitProviders(providers.filter((x) => x.id !== p.id))}
+                      >
+                        🗑
+                      </button>
+                    </div>
+                  )
+                })}
+                <div>
+                  <button
+                    className="primary"
+                    onClick={() =>
+                      commitProviders([
+                        ...providers,
+                        { id: graphId(), name: '', baseUrl: 'http://localhost:11434' }
+                      ])
+                    }
+                  >
+                    {t('settings.addProvider')}
+                  </button>
+                </div>
+              </div>
             </>
           )}
         </div>

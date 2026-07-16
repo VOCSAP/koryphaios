@@ -40,6 +40,21 @@ CLIs, and let a judge node arbitrate a battle.
   picks the strongest and produces the merged answer — the model mapping is
   revealed in a legend after the verdict. Degrades gracefully to no judge
   with <2 answers.
+- **Unified model picker (C29).** One `ModelPicker` shared by the graph
+  fan-out (multi-select chips) and the agents' advanced create menu (single,
+  Anthropic ∪ launch-config models): expandable provider sections
+  (Anthropic / OpenAI / Gemini + local endpoints), a separator, and
+  star-pinned favorites persisted in the app config (`providerId:modelId`
+  keys, pin order). Frontier providers only appear when their CLI is
+  detected on the machine (login-shell `command -v` / `Get-Command`, cached,
+  re-detect button in Settings); frontier model lists are CURATED IN CODE
+  (`FRONTIER_CATALOG`, the one constant to bump — the OAuth CLIs expose no
+  dynamic listing) while local OpenAI-compatible endpoints (Ollama, LiteLLM,
+  vLLM…) are discovered dynamically (`/v1/models`, Ollama `/api/tags`
+  fallback). New Settings > Models section manages local endpoints (name,
+  base URL, optional API key, discovered-model count). Local targets run as
+  a new `cli:'local'` through a direct `/v1/chat/completions` call from the
+  main process — the API key never reaches the renderer or a command line.
 
 ## v0.7.0 -- 2026-07-16
 

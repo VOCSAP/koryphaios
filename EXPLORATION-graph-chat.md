@@ -1,4 +1,4 @@
-# EXPLORATION — Graph chat & battle mode (C23-C28)
+# EXPLORATION — Graph chat & battle mode (C23-C29)
 
 > **Document de travail multi-sessions** (même contrat que PLAN-v0.4.md : design
 > ET pilotage d'exécution dans ce fichier ; cocher les jalons et tenir le
@@ -217,6 +217,59 @@ validé côté main par un parseur de shape façon `parseTemplate`),
       éventail + nœud juge stylé (couronne 🏆 / badge « battle »).
 - [x] Test : battle avec 1 seule réponse ok → pas de juge (dégradation).
 
+### C29 — Sélecteur de modèles unifié (providers, favoris, locaux) — FAIT
+
+Demande opérateur (2026-07-16) : un picker « provider → flèche → modèles,
+étoile pour épingler en favoris », partagé entre le graph chat et la
+sélection avancée de modèle des agents ; support LiteLLM/Ollama ; providers
+frontier affichés seulement si leur CLI est détectée.
+
+Décisions :
+- **D9 — Un seul picker** (`ModelPicker.tsx`) : sections provider dépliables
+  (icône, nom, ›), séparateur, favoris épinglés en dessous (ordre
+  d'épinglage). Clé favori = `providerId:modelId` (split sur le PREMIER `:`,
+  les tags Ollama en contiennent), persistée dans `AppConfig.modelFavorites`.
+  Utilisé en multi-sélection (cibles du fan-out graph) et en mono (menu de
+  création avancé des agents, section Anthropic = modèles du launch-config
+  ∪ catalogue frontier).
+- **D10 — Frontier = catalogue curé dans le code, locaux = découverte
+  dynamique.** Réponse à la question « on maintient nous-mêmes ou
+  dynamique ? » : les CLIs OAuth (claude/codex/gemini) n'exposent pas de
+  `list models` et les APIs vendeurs exigent une clé que l'opérateur n'a pas
+  forcément → `FRONTIER_CATALOG` est LA constante à éditer quand un modèle
+  sort (`shared/models.ts` ; pour les agents, le `models` du launch-config
+  reste la surcharge opérateur, fusionnée dans le picker). À l'inverse les
+  endpoints locaux (Ollama, LiteLLM, vLLM — compatibles OpenAI) listent
+  leurs modèles : `GET /v1/models`, repli `GET /api/tags` (Ollama natif).
+- **D11 — Provider affiché ⇔ CLI détectée.** Détection `command -v` /
+  `Get-Command` via le shell login (même wrap que les sessions), cache la
+  durée du run, bouton re-détection dans Settings. Les providers locaux sont
+  « disponibles » si leur découverte a rendu ≥1 modèle.
+- **Exécution des modèles locaux** : nouveau `cli: 'local'` — appel HTTP
+  direct `/v1/chat/completions` depuis le process main (`runHttpInference`,
+  builder pur + fetch injectable), jamais de commande shell ; la clé API ne
+  quitte pas le main. `ModelTarget.providerId` route vers l'endpoint
+  configuré ; le nœud persiste `providerId` pour l'affichage.
+- **Settings > Modèles** : statut de détection des 3 CLIs + éditeur des
+  endpoints locaux (nom, URL, clé optionnelle, nombre de modèles découverts).
+
+Jalons :
+- [x] `shared/models.ts` : FRONTIER_CATALOG, clés favoris, `buildCatalogs`,
+      `resolveFavorites`, `toggleFavorite`.
+- [x] `main/model-registry.ts` : détection CLIs (cache + refresh),
+      `modelsUrlCandidates`, parseurs `/v1/models` + `/api/tags`,
+      `discoverLocalModels`, `getCatalogs` ; IPC `models:catalog`.
+- [x] Adaptateur HTTP local (`chatCompletionsUrl`,
+      `buildChatCompletionRequest`, `runHttpInference`) + routage moteur
+      (`InferDeps.localProviders`/`http`).
+- [x] `ModelPicker.tsx` + intégration GraphView (chips de cibles) et
+      CreateMenu (mono, Anthropic) ; `AppConfig.modelFavorites`/
+      `localProviders` ; Settings > Modèles ; i18n en/fr.
+- [x] Tests : catalogue/favoris (5), registry (6), adaptateur HTTP (3),
+      routage local moteur (2).
+- [ ] Validation manuelle UI (picker, favoris, endpoint Ollama réel) au
+      premier lancement.
+
 ### C28 — Reportés (could, à reconsidérer après usage réel)
 - Nœuds **digest** : compression LLM (haiku) d'une branche au-delà du budget,
   recette persistée sur le nœud (rejouable si le budget change).
@@ -240,3 +293,4 @@ validé côté main par un parseur de shape façon `parseTemplate`),
 |---|---|---|---|---|
 | 2026-07-16 | session exploration (graph chat) | — | Brainstorm capture démo + création du plan C23-C28 ; PLAN-v0.4 amendé (le reporté « battle chat » pointe ici). | Implémenter C23 → C27. |
 | 2026-07-16 | session exploration (graph chat) | C23-C27 | Lot complet : shared/graph.ts (DAG, linéarisation, mergePartition, parseGraphDoc), graph-store.ts (persistance par project_key), model-adapters.ts (claude/codex/gemini, contexte par fichier, runHelp timeoutMs), graph-engine.ts (3 prompts constants, compilation linéaire/merge, budget + élision, fan-out allSettled, juge anonymisé + légende), IPC graph:* + preload + types, GraphView.tsx (canvas SVG sans dépendance, pan/zoom/drag, multi-sélection, croisement, connect-parent anti-cycle, inspecteur de contexte, battle UI), i18n en/fr + EN_DEFAULTS, journal kind graph. 35 tests neufs (4 suites), bun test 428/428, smoke check + typecheck node/web verts. Desktop bump 0.9.0. | Validation manuelle UI (C26) au premier lancement réel ; C28 (digest, nœuds artefact, export) reporté. |
+| 2026-07-16 | session exploration (graph chat) | C29 | Sélecteur de modèles unifié : shared/models.ts (FRONTIER_CATALOG curé, clés favoris, buildCatalogs/resolveFavorites), model-registry.ts (détection CLIs via shell login + cache, découverte /v1/models + /api/tags), adaptateur HTTP local (chat/completions, clé API confinée au main), cli 'local' + providerId dans le moteur, ModelPicker.tsx (accordéon providers + ★ favoris) branché GraphView (chips multi-cibles) et CreateMenu (mono Anthropic ∪ launch-config), Settings > Modèles (détection + endpoints locaux), AppConfig.modelFavorites/localProviders, i18n. 16 tests neufs, bun test 444/444, typecheck verts. | Validation manuelle du picker + un endpoint Ollama réel au premier lancement. |

@@ -128,3 +128,58 @@ test("writeContextFile: parallel targets get distinct files, id sanitized", () =
   expect(evil.startsWith(dir)).toBe(true);
   expect(evil).not.toContain("..");
 });
+
+// ----- local HTTP adapter (C29) -----
+
+import {
+  buildChatCompletionRequest,
+  chatCompletionsUrl,
+  runHttpInference
+} from "../desktop/src/main/model-adapters.ts";
+
+test("chatCompletionsUrl respects an already-/v1 base", () => {
+  expect(chatCompletionsUrl("http://localhost:11434")).toBe(
+    "http://localhost:11434/v1/chat/completions"
+  );
+  expect(chatCompletionsUrl("http://litellm:4000/v1/")).toBe(
+    "http://litellm:4000/v1/chat/completions"
+  );
+});
+
+test("buildChatCompletionRequest: system+user messages, bearer only when keyed", () => {
+  const { url, init } = buildChatCompletionRequest({
+    baseUrl: "http://h",
+    apiKey: "sk-x",
+    model: "qwen3:32b",
+    system: "SYS",
+    prompt: "QUESTION"
+  });
+  expect(url).toBe("http://h/v1/chat/completions");
+  expect((init.headers as Record<string, string>).Authorization).toBe("Bearer sk-x");
+  const body = JSON.parse(init.body as string);
+  expect(body.model).toBe("qwen3:32b");
+  expect(body.stream).toBe(false);
+  expect(body.messages).toEqual([
+    { role: "system", content: "SYS" },
+    { role: "user", content: "QUESTION" }
+  ]);
+  const noKey = buildChatCompletionRequest({
+    baseUrl: "http://h",
+    model: "m",
+    system: "s",
+    prompt: "p"
+  });
+  expect((noKey.init.headers as Record<string, string>).Authorization).toBeUndefined();
+});
+
+test("runHttpInference: returns the completion, readable errors otherwise", async () => {
+  const ok = (json: unknown): typeof fetch =>
+    (async () => new Response(JSON.stringify(json), { status: 200 })) as typeof fetch;
+  const input = { baseUrl: "http://h", model: "m", system: "s", prompt: "p" };
+  await expect(
+    runHttpInference(input, ok({ choices: [{ message: { content: "  an answer  " } }] }))
+  ).resolves.toBe("an answer");
+  await expect(runHttpInference(input, ok({ choices: [] }))).rejects.toThrow("empty completion");
+  const http500 = (async () => new Response("boom", { status: 500 })) as typeof fetch;
+  await expect(runHttpInference(input, http500)).rejects.toThrow("HTTP 500");
+});

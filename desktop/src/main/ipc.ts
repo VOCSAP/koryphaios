@@ -61,6 +61,7 @@ import {
   writeSnippet
 } from './snippet-store'
 import { deleteGraph, loadGraphs, upsertGraph } from './graph-store'
+import { getCatalogs } from './model-registry'
 import { compileContext, runInference, type InferRequest } from './graph-engine'
 import { graphId as graphDocId, parseGraphDoc, type GraphDoc } from '../shared/graph'
 import { parseTemplate, toTemplate, templateToInputs } from '@shared/template'
@@ -567,6 +568,12 @@ export function registerIpc({
     stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
     key: computeDeckProjectKey(getConfig().projectDir)
   })
+  // Model catalogs for the pickers (C29): frontier CLIs detected through the
+  // login shell (cached for the app run), local endpoints discovered live.
+  ipcMain.handle('models:catalog', (_e, refresh?: boolean) =>
+    getCatalogs(getConfig().localProviders ?? [], getConfig().shell, { refresh: !!refresh })
+  )
+
   ipcMain.handle('graph:list', () => {
     const { stateDir, key } = graphCtx()
     return loadGraphs(stateDir, key)
@@ -604,7 +611,12 @@ export function registerIpc({
     const doc = loadGraphs(stateDir, key).find((d) => d.id === graphId)
     if (!doc) throw new Error('unknown graph')
     const updated = await runInference(
-      { stateDir, shell: getConfig().shell, cwd: getConfig().projectDir },
+      {
+        stateDir,
+        shell: getConfig().shell,
+        cwd: getConfig().projectDir,
+        localProviders: getConfig().localProviders ?? []
+      },
       doc,
       req ?? ({} as InferRequest)
     )
