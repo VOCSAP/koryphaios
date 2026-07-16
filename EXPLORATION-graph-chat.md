@@ -250,6 +250,16 @@ Décisions :
   builder pur + fetch injectable), jamais de commande shell ; la clé API ne
   quitte pas le main. `ModelTarget.providerId` route vers l'endpoint
   configuré ; le nœud persiste `providerId` pour l'affichage.
+- **D12 — Clés API chiffrées au repos (safeStorage, patron D8/scope-secrets)**
+  (`provider-secrets.ts`) : trois formes de la clé, une par zone de
+  confiance — renderer→main un champ `apiKey` TRANSITOIRE (présent seulement
+  quand l'opérateur vient de la (re)saisir, `''` = oubli explicite) ; au
+  repos `apiKeyEnc` = `enc:<base64(blob safeStorage)>` (repli explicite
+  `plain:<clé>` sans keyring OS — la feature marche, le repli est visible
+  dans la valeur) ; vers le renderer uniquement le marqueur `hasKey`
+  (config:get/set/changed sont assainis). Déchiffrement en mémoire main
+  au moment de la découverte et de l'inférence seulement ; blob corrompu
+  (clé OS changée) → « pas de clé », jamais d'erreur.
 - **Settings > Modèles** : statut de détection des 3 CLIs + éditeur des
   endpoints locaux (nom, URL, clé optionnelle, nombre de modèles découverts).
 
@@ -294,3 +304,4 @@ Jalons :
 | 2026-07-16 | session exploration (graph chat) | — | Brainstorm capture démo + création du plan C23-C28 ; PLAN-v0.4 amendé (le reporté « battle chat » pointe ici). | Implémenter C23 → C27. |
 | 2026-07-16 | session exploration (graph chat) | C23-C27 | Lot complet : shared/graph.ts (DAG, linéarisation, mergePartition, parseGraphDoc), graph-store.ts (persistance par project_key), model-adapters.ts (claude/codex/gemini, contexte par fichier, runHelp timeoutMs), graph-engine.ts (3 prompts constants, compilation linéaire/merge, budget + élision, fan-out allSettled, juge anonymisé + légende), IPC graph:* + preload + types, GraphView.tsx (canvas SVG sans dépendance, pan/zoom/drag, multi-sélection, croisement, connect-parent anti-cycle, inspecteur de contexte, battle UI), i18n en/fr + EN_DEFAULTS, journal kind graph. 35 tests neufs (4 suites), bun test 428/428, smoke check + typecheck node/web verts. Desktop bump 0.9.0. | Validation manuelle UI (C26) au premier lancement réel ; C28 (digest, nœuds artefact, export) reporté. |
 | 2026-07-16 | session exploration (graph chat) | C29 | Sélecteur de modèles unifié : shared/models.ts (FRONTIER_CATALOG curé, clés favoris, buildCatalogs/resolveFavorites), model-registry.ts (détection CLIs via shell login + cache, découverte /v1/models + /api/tags), adaptateur HTTP local (chat/completions, clé API confinée au main), cli 'local' + providerId dans le moteur, ModelPicker.tsx (accordéon providers + ★ favoris) branché GraphView (chips multi-cibles) et CreateMenu (mono Anthropic ∪ launch-config), Settings > Modèles (détection + endpoints locaux), AppConfig.modelFavorites/localProviders, i18n. 16 tests neufs, bun test 444/444, typecheck verts. | Validation manuelle du picker + un endpoint Ollama réel au premier lancement. |
+| 2026-07-16 | session exploration (graph chat) | C29 (durcissement) | Clés API des providers locaux chiffrées au repos via safeStorage (provider-secrets.ts, décision D12) : patch renderer chiffré dans setConfig, config assainie (hasKey) sur get/set/changed, déchiffrement mémoire main à la découverte/inférence, repli explicite plain: sans keyring, bouton ⊘ d'oubli dans Settings. 6 tests neufs (fake cipher), bun test 450/450, typecheck verts. | — |

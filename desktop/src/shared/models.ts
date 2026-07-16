@@ -28,16 +28,30 @@ export interface ModelEntry {
   label?: string
 }
 
-/** One OpenAI-compatible local endpoint configured in Settings. */
+/**
+ * One OpenAI-compatible local endpoint configured in Settings. The API key
+ * has three shapes, one per trust zone (main/provider-secrets.ts):
+ * renderer -> main carries transient `apiKey` (only when just typed, '' =
+ * forget), the config file stores `apiKeyEnc` (safeStorage blob), and the
+ * renderer only ever sees the `hasKey` marker.
+ */
 export interface LocalProviderConfig {
   /** Stable id (generated once), used in favorite keys and node metadata. */
   id: string
   /** Display name ("Ollama", "LiteLLM bureau"…). */
   name: string
-  /** Base URL, e.g. http://localhost:11434 or http://litellm:4000/v1. */
+  /** Base URL (port included), e.g. http://localhost:11434 or http://litellm:4000/v1. */
   baseUrl: string
-  /** Optional Bearer token (LiteLLM master key…). Never leaves the main process. */
+  /**
+   * Plaintext Bearer token. TRANSIENT: set renderer->main when the operator
+   * (re)types a key ('' = clear), and in-memory main-side after decryption.
+   * Never persisted, never sent back to the renderer.
+   */
   apiKey?: string
+  /** Encrypted-at-rest key ('enc:<base64>' or explicit 'plain:<key>' fallback). Main only. */
+  apiKeyEnc?: string
+  /** Renderer-facing marker: a key is stored for this provider. */
+  hasKey?: boolean
 }
 
 /** A provider section of the picker, models resolved and ready to render. */

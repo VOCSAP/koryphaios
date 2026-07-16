@@ -22,6 +22,7 @@ import {
   recallScopeSecret,
   type SecretCipher
 } from './scope-secrets'
+import { applyProviderKeyPatch, sanitizeProviders } from './provider-secrets'
 import { globalLaunchCommand, projectLaunchCommand, resolveLaunchConfig } from './launch-config'
 import { resolveApprovedLaunchCommand } from './launch-approval'
 import { WorkspaceService } from './workspace-service'
@@ -113,12 +114,31 @@ const safeLaunchCommand = globalLaunchCommand()
 
 const getConfig = (): AppConfig => config
 const setConfig = (patch: Partial<AppConfig>): AppConfig => {
+  // Local-provider API keys never persist in clear (C29): a renderer patch
+  // carries transient `apiKey` fields that are encrypted (safeStorage) into
+  // `apiKeyEnc` here, and the renderer echo below only ever sees `hasKey`.
+  if (patch.localProviders) {
+    patch = {
+      ...patch,
+      localProviders: applyProviderKeyPatch(
+        config.localProviders ?? [],
+        patch.localProviders,
+        secretCipher
+      )
+    }
+  }
   config = { ...config, ...patch }
   saveConfig(config)
   nativeTheme.themeSource = config.theme
-  mainWindow?.webContents.send('config:changed', config)
+  mainWindow?.webContents.send('config:changed', sanitizeConfigForRenderer(config))
   return config
 }
+
+/** Renderer copy of the config: provider secrets stripped, `hasKey` exposed. */
+const sanitizeConfigForRenderer = (cfg: AppConfig): AppConfig => ({
+  ...cfg,
+  localProviders: sanitizeProviders(cfg.localProviders ?? [])
+})
 
 // Embedded plugin shipping the SessionStart back-channel hook, loaded into every
 // Deck session via --plugin-dir so a /clear-minted session id is captured at save
@@ -657,6 +677,7 @@ app.whenReady().then(() => {
     workspaces,
     getConfig,
     setConfig,
+    secretCipher,
     getWindow: () => mainWindow,
     announce: (text: string) => broadcastAnnounce(text),
     ensureSupervisor,

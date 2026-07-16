@@ -393,14 +393,30 @@ export function SettingsView(): React.JSX.Element {
                         onChange={(e) => editProvider(p.id, { baseUrl: e.target.value })}
                         onBlur={() => commitProviders(providers)}
                       />
+                      {/* Transient field (C29): `apiKey` is only sent when the
+                          operator types here; the stored key never comes back
+                          (safeStorage at rest, `hasKey` marker only). */}
                       <input
                         className="settings-provider-key"
                         type="password"
-                        placeholder={t('settings.providerKey')}
+                        placeholder={p.hasKey ? '••••••••' : t('settings.providerKey')}
                         value={p.apiKey ?? ''}
                         onChange={(e) => editProvider(p.id, { apiKey: e.target.value })}
                         onBlur={() => commitProviders(providers)}
                       />
+                      {p.hasKey && !p.apiKey && (
+                        <button
+                          className="icon-btn"
+                          title={t('settings.providerKeyClear')}
+                          onClick={() =>
+                            commitProviders(
+                              providers.map((x) => (x.id === p.id ? { ...x, apiKey: '' } : x))
+                            )
+                          }
+                        >
+                          ⊘
+                        </button>
+                      )}
                       <span className="settings-provider-count">
                         {discovered
                           ? t('settings.providerModels', { count: discovered.models.length })

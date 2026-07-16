@@ -420,6 +420,7 @@
   "settings.localProvidersHelp": "Endpoints compatibles OpenAI (Ollama, LiteLLM, vLLM…). Les modèles sont listés automatiquement via /v1/models (ou /api/tags d'Ollama).",
   "settings.providerName": "nom",
   "settings.providerKey": "Clé API (optionnelle)",
+  "settings.providerKeyClear": "Oublier la clé enregistrée",
   "settings.providerModels": "{count} modèle(s)",
   "settings.addProvider": "＋ Ajouter un endpoint"
 }

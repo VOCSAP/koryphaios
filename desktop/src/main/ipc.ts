@@ -62,6 +62,8 @@ import {
 } from './snippet-store'
 import { deleteGraph, loadGraphs, upsertGraph } from './graph-store'
 import { getCatalogs } from './model-registry'
+import { decryptProviders, sanitizeProviders } from './provider-secrets'
+import type { SecretCipher } from './scope-secrets'
 import { compileContext, runInference, type InferRequest } from './graph-engine'
 import { graphId as graphDocId, parseGraphDoc, type GraphDoc } from '../shared/graph'
 import { parseTemplate, toTemplate, templateToInputs } from '@shared/template'
@@ -87,6 +89,8 @@ interface IpcDeps {
   workspaces: WorkspaceService
   getConfig: () => AppConfig
   setConfig: (patch: Partial<AppConfig>) => AppConfig
+  /** safeStorage-backed cipher (index.ts): local-provider API keys (C29). */
+  secretCipher: SecretCipher
   getWindow: () => BrowserWindow | null
   /** Broadcast a free-text operator message to the active group; returns peer count. */
   announce: (text: string) => Promise<number>
@@ -105,6 +109,7 @@ export function registerIpc({
   workspaces,
   getConfig,
   setConfig,
+  secretCipher,
   getWindow,
   announce,
   ensureSupervisor,
@@ -222,8 +227,17 @@ export function registerIpc({
   })
 
   // ----- config -----
-  ipcMain.handle('config:get', () => getConfig())
-  ipcMain.handle('config:set', (_e, patch: Partial<AppConfig>) => setConfig(patch ?? {}))
+  // The renderer never sees provider secrets: localProviders are sanitized to
+  // a `hasKey` marker (C29). setConfig (index.ts) does the mirror encryption,
+  // and returns the sanitized echo for the same reason.
+  ipcMain.handle('config:get', () => ({
+    ...getConfig(),
+    localProviders: sanitizeProviders(getConfig().localProviders ?? [])
+  }))
+  ipcMain.handle('config:set', (_e, patch: Partial<AppConfig>) => ({
+    ...setConfig(patch ?? {}),
+    localProviders: sanitizeProviders(getConfig().localProviders ?? [])
+  }))
   ipcMain.handle('dialog:pickDirectory', async () => {
     const win = getWindow()
     const res = await dialog.showOpenDialog(win ?? undefined!, {
@@ -570,8 +584,13 @@ export function registerIpc({
   })
   // Model catalogs for the pickers (C29): frontier CLIs detected through the
   // login shell (cached for the app run), local endpoints discovered live.
+  // Keys are decrypted in memory here only — the catalog sent back carries none.
   ipcMain.handle('models:catalog', (_e, refresh?: boolean) =>
-    getCatalogs(getConfig().localProviders ?? [], getConfig().shell, { refresh: !!refresh })
+    getCatalogs(
+      decryptProviders(getConfig().localProviders ?? [], secretCipher),
+      getConfig().shell,
+      { refresh: !!refresh }
+    )
   )
 
   ipcMain.handle('graph:list', () => {
@@ -615,7 +634,7 @@ export function registerIpc({
         stateDir,
         shell: getConfig().shell,
         cwd: getConfig().projectDir,
-        localProviders: getConfig().localProviders ?? []
+        localProviders: decryptProviders(getConfig().localProviders ?? [], secretCipher)
       },
       doc,
       req ?? ({} as InferRequest)

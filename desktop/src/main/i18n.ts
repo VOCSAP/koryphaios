@@ -524,6 +524,7 @@ export const EN_DEFAULTS: Record<string, string> = {
     'OpenAI-compatible endpoints (Ollama, LiteLLM, vLLM…). Models are listed automatically via /v1/models (or Ollama /api/tags).',
   'settings.providerName': 'name',
   'settings.providerKey': 'API key (optional)',
+  'settings.providerKeyClear': 'Forget the stored key',
   'settings.providerModels': '{count} model(s)',
   'settings.addProvider': '＋ Add an endpoint'
 }

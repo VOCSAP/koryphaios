@@ -55,6 +55,14 @@ CLIs, and let a judge node arbitrate a battle.
   base URL, optional API key, discovered-model count). Local targets run as
   a new `cli:'local'` through a direct `/v1/chat/completions` call from the
   main process — the API key never reaches the renderer or a command line.
+- **Provider API keys encrypted at rest (C29/D12).** Local-provider Bearer
+  tokens go through Electron `safeStorage` (`provider-secrets.ts`, same
+  cipher surface as scope secrets): the renderer only ever sends a transient
+  `apiKey` when the operator (re)types one ('' = forget, ⊘ button) and only
+  ever receives a `hasKey` marker — `config:get/set/changed` are sanitized;
+  the config file stores `enc:<base64>` blobs (explicit `plain:` fallback
+  when no OS keyring), decrypted in main memory only at discovery/inference
+  time. A corrupt blob (OS key change) degrades to "no key stored".
 
 ## v0.7.0 -- 2026-07-16
 
