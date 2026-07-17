@@ -20,10 +20,10 @@ This project started as a fork of [louislva/claude-peers-mcp](https://github.com
 - **Multi-provider auto-summary** (Anthropic + any OpenAI-compatible endpoint), with deterministic heuristic fallback.
 - **Centralized configuration** (env vars + JSON settings file).
 - **isolation by groups** (TOFU), **resume of identity** across reconnects, **WebSocket push** transport, dual `instance_token` + `peer_id` model.
-- **v0.3.3 delivery hardening**: heuristic ack via `send_message` (replying acknowledges prior messages from the same group), capped WS flush at reconnect (no more backlog avalanche), TTL purge of stale undelivered messages.
-- **v0.3.4 Deck announcements (`POST /announce`)**: the desktop Deck broadcasts one-way, no-reply system messages to a group -- an automatic join announcement when a session's `peer_id` resolves, plus free-text operator messages from the sidebar. Sent from a reserved non-routable `deck` sender; peers receive them framed as "informational only, do not reply" and cannot reply back.
-- **v0.4 Shared roadmap**: a persistent per-project backlog in the broker (`roadmap_items`, scoped by normalized git remote, zero FK to peers/groups so items outlive sessions), driven by 5 new MCP tools (`roadmap_list/get/add/update/archive`) and the Deck's Roadmap view; JSON export/import (`bun cli.ts roadmap-export/import`).
-- **v0.6 orchestrator batch (broker side)**: targeted announces (`POST /announce` with `to_peer_id`, the team-lead notification path), an **operator inbox** (agents `send_message` to the reserved `operator` peer -- the human in front of the Deck -- drained via `POST /operator-inbox`), and a `queue` position on roadmap items (the Deck's dispatch queue).
+- **delivery hardening**: heuristic ack via `send_message` (replying acknowledges prior messages from the same group), capped WS flush at reconnect (no more backlog avalanche), TTL purge of stale undelivered messages.
+- **Deck announcements (`POST /announce`)**: the desktop Deck broadcasts one-way, no-reply system messages to a group -- an automatic join announcement when a session's `peer_id` resolves, plus free-text operator messages from the sidebar. Sent from a reserved non-routable `deck` sender; peers receive them framed as "informational only, do not reply" and cannot reply back.
+- **Shared roadmap**: a persistent per-project backlog in the broker (`roadmap_items`, scoped by normalized git remote, zero FK to peers/groups so items outlive sessions), driven by 5 new MCP tools (`roadmap_list/get/add/update/archive`) and the Deck's Roadmap view; JSON export/import (`bun cli.ts roadmap-export/import`).
+- **Orchestrator batch (broker side)**: targeted announces (`POST /announce` with `to_peer_id`, the team-lead notification path), an **operator inbox** (agents `send_message` to the reserved `operator` peer -- the human in front of the Deck -- drained via `POST /operator-inbox`), and a `queue` position on roadmap items (the Deck's dispatch queue).
 - **Desktop app (Koryphaios, formerly Koryphaios)**: dock several Claude Code peer sessions in one window and orchestrate them as a small agent team (see below).
 
 ## Desktop app (Koryphaios)
@@ -33,7 +33,7 @@ sessions into a single window -- each tile a real terminal (PTY) -- with an
 isolated peer group per window, live tiling, and save / restore of session
 workspaces (each tile resumes its Claude conversation). English / French UI.
 
-Since v0.4-v0.6 the Deck has grown into an **AI orchestrator cockpit**:
+**AI orchestrator cockpit**:
 
 - **Navigation rail**: Home (supervisor) | Agents (tiles) | Roadmap | Worktrees | Journal.
 - **Supervisor session (Home)**: a Claude session that PILOTS the app through a locked, code-constant harness -- it reads the roadmap, spawns briefed agent tiles (14 `deck_*` MCP tools behind a loopback control endpoint) and coordinates them over the peers messaging.
@@ -601,9 +601,3 @@ git remote set-url origin https://github.com/vocsap/koryphaios.git
 bun cli.ts roadmap-export github.com/vocsap/claude-peers-mcp > roadmap-rename.json
 bun cli.ts roadmap-import roadmap-rename.json --project-key github.com/vocsap/koryphaios
 ```
-
-## Migration from upstream (OpenAI -> Anthropic)
-
-Coming from `louislva/claude-peers-mcp`?
-
-- The auto-summary now uses **Anthropic** (`claude-haiku-4-5-20251001`) by default, with an OpenAI-compatible alternative for LiteLLM/Ollama/etc. Replace `OPENAI_API_KEY` with `ANTHROPIC_API_KEY` in your env, or set the openai-compat variables.
