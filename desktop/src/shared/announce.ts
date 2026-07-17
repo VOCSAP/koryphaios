@@ -29,6 +29,15 @@ export function defaultAnnounceDraft(intent: Omit<JoinAnnounceIntent, 'custom'>)
 }
 
 /**
+ * Trailer appended to every join announce (PLAN K4): the broker-side deck note
+ * only forbids replying to 'deck', so without this line agents would greet the
+ * NEWCOMER via send_message ("welcome!") -- a token-burning reflex the channel
+ * instructions ("respond immediately to peer messages") otherwise encourages.
+ */
+export const JOIN_NO_REPLY_NOTE =
+  'Notification only: do NOT reply, do NOT greet or message the new peer about this. Continue your current task.'
+
+/**
  * Compose the final join-announce text broadcast once a fresh session's peer_id
  * resolves. The peer_id is always present (so peers can recognise the newcomer);
  * a custom note is appended after it, otherwise the structured default is used.
@@ -36,6 +45,6 @@ export function defaultAnnounceDraft(intent: Omit<JoinAnnounceIntent, 'custom'>)
 export function composeJoinAnnounce(peerId: string, intent: JoinAnnounceIntent): string {
   const head = `New peer "${peerId}" joined the group`
   const custom = intent.custom?.trim()
-  if (custom) return `${head}. ${custom}`
-  return `${head} (${defaultAnnounceDraft(intent)}).`
+  const body = custom ? `${head}. ${custom}` : `${head} (${defaultAnnounceDraft(intent)}).`
+  return `${body}\n${JOIN_NO_REPLY_NOTE}`
 }

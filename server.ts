@@ -65,7 +65,7 @@ const PEER_ID_REGEX = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/;
 // and reinforced by the sender being non-routable (send_message to 'deck' fails).
 // English wording for maximum model compatibility.
 const DECK_NO_REPLY_NOTE =
-  '\n\n[claude-peers] Informational only -- do NOT reply and do not call send_message toward "deck". Take it into account in your work if relevant.';
+  '\n\n[claude-peers] Informational only -- do NOT reply, do NOT call send_message toward "deck", and do NOT message any other peer about this announcement (no greetings, no acknowledgements). Take it into account in your work if relevant, then continue your current task.';
 
 function isDeckSender(idOrToken: string): boolean {
   return idOrToken === DECK_PEER_ID || idOrToken === DECK_INSTANCE_TOKEN;
@@ -360,7 +360,7 @@ async function pollFallback() {
 // --- MCP server ---
 
 const mcp = new Server(
-  { name: "claude-peers", version: "0.7.0" },
+  { name: "claude-peers", version: "0.8.0" },
   {
     capabilities: {
       experimental: { "claude/channel": {} },
@@ -388,6 +388,7 @@ This project also has a SHARED ROADMAP: a persistent backlog of features, bugs, 
 - When you discover a bug, tech debt or a good idea outside your current task, record it with roadmap_add instead of letting it vanish with the session.
 - ALWAYS fill the 'context' field when you add an item: it is the implementation briefing for the agent that will pick the item up later, in a fresh session with none of your current knowledge. Cover the objective, constraints / scope boundaries, pointers to the relevant files/modules/tests, acceptance criteria, and decisions already made -- especially what a fresh session cannot rediscover by exploring the repo (e.g. "the bug is in flushPendingForToken, cross-host reconnect case, see broker-flush-cap.test.ts").
 - Keep the status of items you work on up to date (roadmap_update: planned -> in_progress -> done), and enrich an item's context with roadmap_update when you learn something the next agent will need.
+- WORK-LOCK: setting an item to in_progress locks it under your peer_id -- it marks you as ACTIVELY working on it and blocks other sessions (and the operator's board) from moving it. Only flip an item to in_progress when you are really starting the work, not to "reserve" it. When you stop working on an item without finishing it, set it back to 'planned' (this releases the lock). If roadmap_update returns "item is locked by ...", pick another item instead of forcing.
 
 When you start, proactively call set_summary to describe what you're working on. This helps other instances understand your context.`,
   }
@@ -603,7 +604,7 @@ const TOOLS = [
   {
     name: "roadmap_update",
     description:
-      "Partially update a roadmap item: only the fields you pass change. Use it to move status (planned -> in_progress -> done), reprioritize, retag or rewrite. Accepts a full id or a unique prefix. Setting status=archived archives; any other status restores an archived item.",
+      "Partially update a roadmap item: only the fields you pass change. Use it to move status (planned -> in_progress -> done), reprioritize, retag or rewrite. Accepts a full id or a unique prefix. Setting status=archived archives; any other status restores an archived item. Moving an item to in_progress LOCKS it under your peer_id (you are actively working on it); leaving in_progress releases the lock. A status write on an item locked by another peer is refused (409) -- pick another item.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -626,6 +627,11 @@ const TOOLS = [
         },
         tags: { type: "array" as const, items: { type: "string" as const } },
         depends_on: { type: "array" as const, items: { type: "string" as const } },
+        locked: {
+          type: "boolean" as const,
+          description:
+            "Explicit work-lock control. Usually implicit (in_progress locks, leaving it unlocks); pass false to release your lock while staying in_progress, true to re-claim.",
+        },
       },
       required: ["id"],
     },
@@ -717,7 +723,8 @@ async function resolveRoadmapId(idOrPrefix: string): Promise<string> {
 
 function formatRoadmapItemLine(i: RoadmapItem): string {
   const tags = i.tags.length ? `  #${i.tags.join(" #")}` : "";
-  return `[${i.id.slice(0, 8)}] ${i.kind} · ${i.priority} · value:${i.value} effort:${i.effort} · ${i.status} — ${i.title}${tags}`;
+  const lock = i.locked ? ` 🔒${i.locked_by ?? ""}` : "";
+  return `[${i.id.slice(0, 8)}] ${i.kind} · ${i.priority} · value:${i.value} effort:${i.effort} · ${i.status}${lock} — ${i.title}${tags}`;
 }
 
 function formatRoadmapItemDetail(i: RoadmapItem): string {
@@ -728,6 +735,7 @@ function formatRoadmapItemDetail(i: RoadmapItem): string {
     i.rationale ? `rationale: ${i.rationale}` : "",
     i.context ? `context (agent briefing): ${i.context}` : "",
     i.depends_on.length ? `depends_on: ${i.depends_on.map((d) => d.slice(0, 8)).join(", ")}` : "",
+    i.locked ? `locked: by ${i.locked_by} since ${i.locked_at} (actively being worked on)` : "",
     `created: ${i.created_at} by ${i.created_by}`,
     `updated: ${i.updated_at} by ${i.updated_by}`,
     i.deleted_at ? `archived: ${i.deleted_at}` : "",
@@ -1187,6 +1195,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           status: a.status,
           tags: a.tags,
           depends_on: a.depends_on,
+          locked: typeof a.locked === "boolean" ? a.locked : undefined,
         });
         return {
           content: [

@@ -1632,22 +1632,114 @@ code {
   font-size: 12px;
 }
 
-.roadmap-body {
-  display: flex;
-  flex: 1;
-  min-height: 0;
-}
-
-.roadmap-list {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px 14px;
-  min-width: 0;
-}
-
 .roadmap-empty {
   color: var(--fg-dim);
   font-size: 13px;
+  padding: 12px 14px;
+  margin: 0;
+}
+
+/* ---------- Kanban board (PLAN K1): one column per status. ---------- */
+
+.rm-board {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  gap: 10px;
+  padding: 12px 14px;
+  overflow-x: auto;
+}
+
+.rm-col {
+  flex: 1 1 0;
+  min-width: 210px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: color-mix(in srgb, var(--fg) 2.5%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.rm-col-over {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+}
+
+.rm-col-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 9px 11px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-bottom: 1px solid var(--border);
+}
+
+.rm-col-head-idea { color: var(--fg-dim); }
+.rm-col-head-planned { color: #4f86ff; }
+.rm-col-head-in_progress { color: #e0b341; }
+.rm-col-head-done { color: #3ec46d; }
+.rm-col-head-archived { color: var(--fg-dim); }
+
+.rm-col-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+  min-height: 40px;
+}
+
+/* MoSCoW priority chip on each card. */
+.rm-prio-dot {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* Quick-switch hit area around the dot (K7): opens the priority dropdown. */
+.rm-prio-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  margin: -4px;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.rm-prio-chip:hover {
+  background: color-mix(in srgb, currentColor 18%, transparent);
+}
+
+/* Priority dropdown (K7): context-menu look, one colored row per level. */
+.rm-prio-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rm-prio-option-label {
+  flex: 1;
+}
+
+.rm-prio-check {
+  color: var(--fg-dim);
+}
+
+/* An agent actively works on the item (PLAN K2): frozen for the operator. */
+.rm-card-locked {
+  opacity: 0.55;
+  cursor: not-allowed;
+  border-style: dashed;
+}
+
+.rm-badge-locked {
+  color: #e0b341;
+  border-color: color-mix(in srgb, #e0b341 50%, transparent);
 }
 
 .rm-section {
@@ -1740,15 +1832,177 @@ code {
 .rm-badge-status-done { color: #3ec46d; border-color: color-mix(in srgb, #3ec46d 50%, transparent); }
 .rm-badge-tag { color: var(--accent); }
 
-.roadmap-detail {
-  width: 340px;
-  flex: 0 0 auto;
-  overflow-y: auto;
-  padding: 12px 14px;
-  border-left: 1px solid var(--border);
+/* Detail / edit modal (PLAN K5): the Trello-style foreground card. */
+.rm-modal {
+  width: 640px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+.rm-modal-form {
+  width: 560px;
+}
+
+.rm-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.rm-modal-section h4 {
+  margin: 0 0 4px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--fg-dim);
+}
+
+.rm-modal-rationale .md {
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+.rm-modal-context {
+  border-left: 3px solid var(--border);
+  padding-left: 10px;
+}
+
+.rm-locked-note {
+  margin: 0;
+  font-size: 11.5px;
+  color: #e0b341;
+}
+
+/* "Process now" dialog (PLAN K6): pick a live agent or spawn a new one. */
+.rm-assign-modal {
+  width: 440px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rm-assign-hint {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--fg-dim);
+}
+
+.rm-assign-empty {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+.rm-assign-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.rm-assign-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rm-assign-row:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+.rm-assign-dot {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+.rm-assign-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.rm-assign-peer {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+/* Markdown rendering (PLAN K5): token tree from markdown.ts. */
+.md {
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.md p {
+  margin: 0 0 8px;
+  white-space: pre-wrap;
+}
+
+.md p:last-child {
+  margin-bottom: 0;
+}
+
+.md h4,
+.md h5 {
+  margin: 10px 0 4px;
+  font-size: 12.5px;
+}
+
+.md h5 {
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+
+.md ul,
+.md ol {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+
+.md li {
+  margin: 2px 0;
+}
+
+.md code {
+  font-family: var(--mono, monospace);
+  font-size: 11.5px;
+  background: color-mix(in srgb, var(--fg) 8%, transparent);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.md-code {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+.md-code code {
+  background: none;
+  padding: 0;
+  white-space: pre;
+}
+
+/* Agent-provided links are surfaced, never navigated (href in the tooltip). */
+.md-link {
+  color: var(--accent);
+  text-decoration: underline dotted;
+  cursor: help;
 }
 
 .rm-detail-head {
@@ -2405,7 +2659,9 @@ code {
   border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
   border-radius: 8px;
   padding: 8px 10px;
-  margin-bottom: 14px;
+  /* Sits between the header and the board (K1), outside any padded list. */
+  margin: 12px 14px 0;
+  flex: 0 0 auto;
 }
 
 .rm-queue-head {

@@ -2,7 +2,9 @@
 
 import { test, expect } from "bun:test";
 import {
+  composeAssignText,
   composeDispatchText,
+  composeStopText,
   firstQueued,
   nextQueuePosition,
   queuedItems
@@ -30,6 +32,9 @@ function item(over: Partial<RoadmapItem>): RoadmapItem {
     updated_at: "2026-01-01",
     deleted_at: null,
     queue: null,
+    locked: false,
+    locked_by: null,
+    locked_at: null,
     ...over
   };
 }
@@ -75,4 +80,45 @@ test("composeDispatchText carries the full item and the status contract", () => 
   expect(text).toContain("Depends on: 87654321");
   expect(text).toContain("roadmap_update");
   expect(text).toContain("auto-dispatches the next queued item");
+});
+
+// PLAN K3: operator stop notice (CODE CONSTANT, C8 rule).
+test("composeStopText names the item and carries the unlock statement", () => {
+  const it = item({ id: "12345678-1111-2222-3333-444444444444", title: "Fix login" });
+  for (const via of [true, false]) {
+    const text = composeStopText(it, via);
+    expect(text).toContain('STOP all work on roadmap item "Fix login"');
+    expect(text).toContain("id 12345678");
+    expect(text).toContain("unlocked and moved back to planned");
+  }
+});
+
+test("composeStopText targets the supervisor or the whole group", () => {
+  const it = item({ title: "t" });
+  expect(composeStopText(it, true)).toContain("As supervisor:");
+  expect(composeStopText(it, true)).toContain('send_message to "operator"');
+  expect(composeStopText(it, false)).toContain("If you are working on this item: stop now");
+  expect(composeStopText(it, false)).not.toContain("As supervisor:");
+});
+
+// PLAN K6: direct "process now" assignment to one chosen peer (CODE CONSTANT).
+test("composeAssignText carries the full item and the take-it-now contract", () => {
+  const text = composeAssignText(
+    item({
+      id: "12345678-1111-2222-3333-444444444444",
+      title: "Fix login",
+      description: "Login breaks on Safari",
+      context: "auth/safari.ts",
+      tags: ["auth"]
+    })
+  );
+  expect(text).toContain("assigned THIS roadmap item to you");
+  expect(text).toContain("id 12345678");
+  expect(text).toContain("Title: Fix login");
+  expect(text).toContain("Description: Login breaks on Safari");
+  expect(text).toContain("Context (operator briefing): auth/safari.ts");
+  expect(text).toContain("Tags: auth");
+  expect(text).toContain("locks it under your peer_id");
+  // Targeted flow: no team-lead relaying step.
+  expect(text).not.toContain("team-lead");
 });

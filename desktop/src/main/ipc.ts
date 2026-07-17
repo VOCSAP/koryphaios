@@ -2,6 +2,7 @@ import { join } from 'node:path'
 import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, webContents } from 'electron'
 import type {
   AppConfig,
+  AssignResult,
   CreateSessionInput,
   DispatchResult,
   HelpExchange,
@@ -9,7 +10,8 @@ import type {
   LaunchConfig,
   RoadmapListFilters,
   RoadmapUpsertFields,
-  SessionRuntime
+  SessionRuntime,
+  StopResult
 } from '@shared/types'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
 import {
@@ -60,7 +62,7 @@ import {
   localSnippetsDir,
   writeSnippet
 } from './snippet-store'
-import { deleteGraph, loadGraphs, upsertGraph } from './graph-store'
+import { deleteGraph, loadGraphs, migrateGraphsAtRest, upsertGraph } from './graph-store'
 import { getCatalogs } from './model-registry'
 import { decryptProviders, sanitizeProviders } from './provider-secrets'
 import type { SecretCipher } from './scope-secrets'
@@ -100,6 +102,10 @@ interface IpcDeps {
   journal: Journal
   /** Dispatch the first queued roadmap item to the team-lead (PLAN C15). */
   dispatchNext: () => Promise<DispatchResult>
+  /** Operator stop on an in_progress item (PLAN K3): notify + unlock. */
+  stopRoadmapItem: (id: string) => Promise<StopResult>
+  /** Direct assignment to one live peer via targeted announce (PLAN K6). */
+  assignRoadmapItem: (id: string, peerId: string) => Promise<AssignResult>
   /** Git checkpoint of a dirty tree before an agent spawns there (PLAN C16). */
   checkpoint: (dir: string) => Promise<void>
 }
@@ -115,6 +121,8 @@ export function registerIpc({
   ensureSupervisor,
   journal,
   dispatchNext,
+  stopRoadmapItem,
+  assignRoadmapItem,
   checkpoint
 }: IpcDeps): void {
   // ----- sessions -----
@@ -292,6 +300,12 @@ export function registerIpc({
   // Queue dispatch (PLAN C15): first queued item -> targeted announce to the
   // team-lead. The renderer greys the button when no lead is designated.
   ipcMain.handle('roadmap:dispatch', () => dispatchNext())
+  // Operator stop (PLAN K3): notify the agents, release the lock.
+  ipcMain.handle('roadmap:stop', (_e, id: string) => stopRoadmapItem(id))
+  // Direct assignment (PLAN K6): "process now" on one chosen live peer.
+  ipcMain.handle('roadmap:assign', (_e, id: string, peerId: string) =>
+    assignRoadmapItem(id, peerId)
+  )
   // Context wand (PLAN C21): one read-only `claude -p` (haiku, C9 harness)
   // drafts the item's context field grounded in the project files. The result
   // only fills the editor textarea -- saving stays an explicit operator action.
@@ -576,8 +590,9 @@ export function registerIpc({
   )
 
   // ----- graph chat (EXPLORATION-graph-chat C23-C27) -----
-  // Desktop-local per-project persistence (D7); inference = stateless headless
-  // fan-out (D1), context recompiled from the graph on every call.
+  // Desktop-local per-project persistence (D7), encrypted at rest via the
+  // safeStorage-backed cipher (K8); inference = stateless headless fan-out
+  // (D1), context recompiled from the graph on every call.
   const graphCtx = (): { stateDir: string; key: string } => ({
     stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
     key: computeDeckProjectKey(getConfig().projectDir)
@@ -595,7 +610,10 @@ export function registerIpc({
 
   ipcMain.handle('graph:list', () => {
     const { stateDir, key } = graphCtx()
-    return loadGraphs(stateDir, key)
+    // Opportunistic K8 migration: a pre-encryption clear file is rewritten
+    // encrypted the first time the view lists it (cheap no-op afterwards).
+    migrateGraphsAtRest(stateDir, key, secretCipher)
+    return loadGraphs(stateDir, key, secretCipher)
   })
   ipcMain.handle('graph:create', (_e, name: string) => {
     const { stateDir, key } = graphCtx()
@@ -606,28 +624,28 @@ export function registerIpc({
       createdAt: Date.now(),
       updatedAt: Date.now()
     }
-    return upsertGraph(stateDir, key, doc)
+    return upsertGraph(stateDir, key, doc, secretCipher)
   })
   ipcMain.handle('graph:delete', (_e, id: string) => {
     const { stateDir, key } = graphCtx()
-    return deleteGraph(stateDir, key, id)
+    return deleteGraph(stateDir, key, id, secretCipher)
   })
   ipcMain.handle('graph:save', (_e, raw: unknown) => {
     const doc = parseGraphDoc(raw)
     if (!doc) return null
     const { stateDir, key } = graphCtx()
-    return upsertGraph(stateDir, key, doc)
+    return upsertGraph(stateDir, key, doc, secretCipher)
   })
   ipcMain.handle('graph:compile', (_e, graphId: string, nodeId: string) => {
     const { stateDir, key } = graphCtx()
-    const doc = loadGraphs(stateDir, key).find((d) => d.id === graphId)
+    const doc = loadGraphs(stateDir, key, secretCipher).find((d) => d.id === graphId)
     if (!doc) throw new Error('unknown graph')
     return compileContext(doc, nodeId)
   })
   ipcMain.handle('graph:infer', async (_e, graphId: string, req: InferRequest) => {
     const { stateDir, key } = graphCtx()
     // Re-read from disk: the renderer may have saved node moves meanwhile.
-    const doc = loadGraphs(stateDir, key).find((d) => d.id === graphId)
+    const doc = loadGraphs(stateDir, key, secretCipher).find((d) => d.id === graphId)
     if (!doc) throw new Error('unknown graph')
     const updated = await runInference(
       {
@@ -640,7 +658,7 @@ export function registerIpc({
       req ?? ({} as InferRequest)
     )
     journal.add('graph', `graph inference on ${req.nodeId} (${req.targets?.length ?? 0} target(s)${req.battle ? ', battle' : ''})`)
-    return upsertGraph(stateDir, key, updated)
+    return upsertGraph(stateDir, key, updated, secretCipher)
   })
 
   // ----- template composer (PLAN C18): read/write without spawning -----

@@ -231,6 +231,22 @@ export interface RoadmapItem {
    * Deck; agents normally leave it alone.
    */
   queue: number | null;
+  /**
+   * Agent work-lock (PLAN K2): true while an agent is ACTIVELY working on the
+   * item, distinguishing "really in progress" from "in_progress but waiting".
+   * Set automatically by the broker when a non-'deck' author moves the item to
+   * in_progress; cleared when the item leaves in_progress, on explicit unlock,
+   * or by the stale-lock sweep (owner peer gone / TTL).
+   */
+  locked: boolean;
+  /**
+   * peer_id snapshot of the lock owner (the author of the write that locked
+   * the item -- rides the existing `by` field, no registration protocol and no
+   * FK, like created_by). null when unlocked.
+   */
+  locked_by: string | null;
+  /** ISO timestamp of the lock, for the TTL sweep. null when unlocked. */
+  locked_at: string | null;
 }
 
 export interface RoadmapListRequest {
@@ -268,6 +284,17 @@ export interface RoadmapUpsertRequest {
   depends_on?: string[];
   /** Queue position (C15): a positive integer to queue, null to unqueue. */
   queue?: number | null;
+  /**
+   * Explicit lock control (PLAN K2). true claims the lock for `by`; false
+   * releases it. Usually implicit: moving to in_progress locks (non-'deck'
+   * authors), leaving in_progress unlocks.
+   */
+  locked?: boolean;
+  /**
+   * Bypass the lock guard (PLAN K2): allows a status write on an item locked
+   * by someone else. 'deck' never needs it (the operator always bypasses).
+   */
+  force?: boolean;
 }
 
 export interface RoadmapUpsertResponse {

@@ -29,8 +29,8 @@ import { WorkspaceService } from './workspace-service'
 import { fetchOperatorInbox, resolveBrokerEndpoint, sendAnnounce } from './broker-client'
 import { computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
 import { createCheckpoint, purgeCheckpoints, restoreCommand } from './checkpoint-service'
-import { composeDispatchText, firstQueued } from './dispatch'
-import type { DispatchResult } from '@shared/types'
+import { composeAssignText, composeDispatchText, composeStopText, firstQueued } from './dispatch'
+import type { AssignResult, DispatchResult, StopResult } from '@shared/types'
 import { composeJoinAnnounce, type JoinAnnounceIntent } from '@shared/announce'
 import { APP_STATE_SUBDIR, runDataMigration } from './migrate-data-dir'
 import type { SessionRuntime } from '@shared/types'
@@ -411,6 +411,118 @@ const watchDispatched = async (): Promise<void> => {
 }
 let dispatchTimer: NodeJS.Timeout | null = null
 
+// ----- Direct assignment to one chosen peer (PLAN K6) -----
+// The operator's "process now" flow: a targeted announce (CODE CONSTANT,
+// composeAssignText) to the selected live peer, then the item moves to
+// in_progress (unqueued). The lock arrives when the agent actually claims it
+// with its own roadmap_update, like the launch/dispatch flows.
+const assignRoadmapItem = async (id: string, peerId: string): Promise<AssignResult> => {
+  const target = peerId.trim()
+  if (!target) return { sent: false }
+  try {
+    const endpoint = resolveBrokerEndpoint()
+    const key = computeDeckProjectKey(config.projectDir)
+    const items = await listRoadmap(endpoint, key, {})
+    const item = items.find((i) => i.id === id)
+    if (!item) return { sent: false }
+    const { sent } = await sendAnnounce(
+      {
+        groupId: activeScope.groupId,
+        secret: activeScope.secret,
+        text: composeAssignText(item),
+        toPeerId: target
+      },
+      { endpoint }
+    )
+    if (sent === 0) return { sent: false }
+    await upsertRoadmap(endpoint, key, { id: item.id, status: 'in_progress', queue: null })
+    journal.add('dispatch', `item "${item.title}" assigned to "${target}"`)
+    return { sent: true }
+  } catch (e) {
+    console.error('[koryphaios] assign failed:', e)
+    return { sent: false }
+  }
+}
+
+// ----- Operator stop on an in_progress item (PLAN K3) -----
+// Notifies the agents (via the SUPERVISOR when one is live, so the operator
+// gets a report back through the inbox; group broadcast otherwise), then
+// releases the lock and drops the item back to 'planned'. The stop text is a
+// CODE CONSTANT (C8 rule) composed in dispatch.ts.
+const stopRoadmapItem = async (id: string): Promise<StopResult> => {
+  const endpoint = resolveBrokerEndpoint()
+  const key = computeDeckProjectKey(config.projectDir)
+  const items = await listRoadmap(endpoint, key, {})
+  const item = items.find((i) => i.id === id)
+  if (!item) return { stopped: false, via: 'none' }
+
+  // Notify first (while the item still names the working peer), then unlock.
+  let via: StopResult['via'] = 'none'
+  const supervisor = service
+    .list()
+    .find((s) => s.supervisor && s.status !== 'exited' && s.peerId)
+  if (supervisor) {
+    try {
+      const { sent } = await sendAnnounce(
+        {
+          groupId: activeScope.groupId,
+          secret: activeScope.secret,
+          text: composeStopText(item, true),
+          toPeerId: supervisor.peerId!
+        },
+        { endpoint }
+      )
+      if (sent > 0) via = 'supervisor'
+    } catch {
+      // Supervisor unreachable: fall through to the group broadcast.
+    }
+  }
+  if (via === 'none') {
+    const sent = await broadcastAnnounce(composeStopText(item, false))
+    if (sent > 0) via = 'broadcast'
+  }
+
+  await upsertRoadmap(
+    endpoint,
+    key,
+    item.status === 'in_progress'
+      ? { id: item.id, status: 'planned', locked: false }
+      : { id: item.id, locked: false }
+  )
+  journal.add('dispatch', `stop requested on "${item.title}" (via ${via})`)
+  return { stopped: true, via }
+}
+
+// ----- Deck-side lock release on idle terminals (PLAN K2) -----
+// A locked item whose owner is one of THIS window's tiles with a silent PTY
+// for LOCK_IDLE_MS is released (back to 'planned'). Finer than the broker's
+// sweep -- the heartbeat keeps a peer 'active' even when Claude sits idle --
+// but only covers sessions this Deck can observe; remote/CLI sessions rely on
+// the broker's TTL + owner-gone sweep.
+const LOCK_IDLE_MS = 2 * 3600_000
+const LOCK_WATCH_MS = 60_000
+const watchIdleLocks = async (): Promise<void> => {
+  try {
+    const endpoint = resolveBrokerEndpoint()
+    const key = computeDeckProjectKey(config.projectDir)
+    const items = await listRoadmap(endpoint, key, {})
+    for (const item of items) {
+      if (!item.locked || !item.locked_by) continue
+      const owner = service
+        .list()
+        .find((s) => s.peerId === item.locked_by && s.status !== 'exited')
+      if (!owner) continue // not one of our tiles: the broker sweep owns it
+      const last = service.lastOutputAt(owner.id)
+      if (last === null || Date.now() - last < LOCK_IDLE_MS) continue
+      await upsertRoadmap(endpoint, key, { id: item.id, status: 'planned', locked: false })
+      journal.add('dispatch', `lock released on "${item.title}" (session "${owner.name}" idle)`)
+    }
+  } catch {
+    // Broker down: the next tick retries.
+  }
+}
+let lockWatchTimer: NodeJS.Timeout | null = null
+
 // ----- Supervisor deck-control (PLAN C5) -----
 // The loopback control endpoint the SUPERVISOR session pilots the app through.
 // Started lazily at the first Home visit; the URL/token pair is injected only
@@ -683,6 +795,8 @@ app.whenReady().then(() => {
     ensureSupervisor,
     journal,
     dispatchNext,
+    stopRoadmapItem,
+    assignRoadmapItem,
     checkpoint: checkpointBeforeSpawn
   })
   service.start()
@@ -692,6 +806,8 @@ app.whenReady().then(() => {
   inboxTimer = setInterval(() => void pollOperatorInbox(), INBOX_POLL_MS)
   // Auto-dispatch watcher (PLAN C15): no-op while nothing was dispatched.
   dispatchTimer = setInterval(() => void watchDispatched(), DISPATCH_WATCH_MS)
+  // Idle-lock watcher (PLAN K2): releases locks held by silent local tiles.
+  lockWatchTimer = setInterval(() => void watchIdleLocks(), LOCK_WATCH_MS)
   createWindow()
 
   app.on('activate', () => {
@@ -710,6 +826,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', () => {
   if (inboxTimer) clearInterval(inboxTimer)
   if (dispatchTimer) clearInterval(dispatchTimer)
+  if (lockWatchTimer) clearInterval(lockWatchTimer)
   workspaces.releaseOnQuit()
   service.stop()
   controlServer?.close()
