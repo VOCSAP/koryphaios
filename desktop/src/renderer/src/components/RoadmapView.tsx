@@ -87,6 +87,7 @@ function BoardCard({
   item,
   onOpen,
   onMenu,
+  onPrio,
   onDragStart,
   onDragEnd,
   t
@@ -94,6 +95,7 @@ function BoardCard({
   item: RoadmapItem
   onOpen: () => void
   onMenu: (x: number, y: number) => void
+  onPrio: (x: number, y: number) => void
   onDragStart: (e: React.DragEvent) => void
   onDragEnd: () => void
   t: TFn
@@ -115,7 +117,21 @@ function BoardCard({
       title={locked ? t('roadmap.lockedHint') : undefined}
     >
       <span className="rm-card-head">
-        <span className={`rm-prio-dot rm-prio-${item.priority}`} title={t(`roadmap.priority.${item.priority}`)} />
+        {/* Priority quick-switch (K7): the chip opens a styled dropdown, no
+            detail view needed. A span, not a button (nested buttons are
+            invalid inside the card button). */}
+        <span
+          className={`rm-prio-chip rm-prio-${item.priority}`}
+          role="button"
+          title={`${t(`roadmap.priority.${item.priority}`)} — ${t('roadmap.prioPick')}`}
+          onClick={(e) => {
+            e.stopPropagation()
+            const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+            onPrio(r.left, r.bottom + 4)
+          }}
+        >
+          <span className="rm-prio-dot" />
+        </span>
         <span className="rm-kind" title={t(`roadmap.kind.${item.kind}`)}>
           {KIND_ICONS[item.kind]}
         </span>
@@ -194,6 +210,8 @@ export function RoadmapView(): React.JSX.Element {
   const [confirmStop, setConfirmStop] = useState<RoadmapItem | null>(null)
   // Right-click context menu on a card (K6): viewport anchor + target item.
   const [menu, setMenu] = useState<{ x: number; y: number; item: RoadmapItem } | null>(null)
+  // Priority quick-switch dropdown anchored under a card's chip (K7).
+  const [prioMenu, setPrioMenu] = useState<{ x: number; y: number; item: RoadmapItem } | null>(null)
   // "Process now" (K6): pick a live agent (targeted announce) or spawn one.
   const [assignItem, setAssignItem] = useState<RoadmapItem | null>(null)
   // Item the "launch an agent" flow is spawning for (advanced create pre-filled).
@@ -356,6 +374,19 @@ export function RoadmapView(): React.JSX.Element {
       else if (r.via === 'supervisor') showToast('toast.stopSupervisor')
       else if (r.via === 'broadcast') showToast('toast.stopBroadcast')
       else showToast('toast.stopNoPeers', 'info')
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  // Priority quick-switch (K7): metadata write, allowed even on locked items
+  // (the broker guard only protects status / lock claims).
+  const setPriority = async (item: RoadmapItem, priority: RoadmapPriority): Promise<void> => {
+    setPrioMenu(null)
+    if (item.priority === priority) return
+    try {
+      await window.api.roadmapUpsert({ id: item.id, priority })
       await refresh()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -526,6 +557,7 @@ export function RoadmapView(): React.JSX.Element {
                     item={item}
                     onOpen={() => setSelectedId(item.id)}
                     onMenu={(x, y) => setMenu({ x, y, item })}
+                    onPrio={(x, y) => setPrioMenu({ x, y, item })}
                     onDragStart={(e) => {
                       e.dataTransfer.setData('text/plain', item.id)
                       e.dataTransfer.effectAllowed = 'move'
@@ -770,6 +802,46 @@ export function RoadmapView(): React.JSX.Element {
           items={menuItems(menu.item)}
           onClose={() => setMenu(null)}
         />
+      )}
+
+      {prioMenu && (
+        <div
+          className="context-menu-backdrop"
+          onMouseDown={(e) => {
+            e.stopPropagation()
+            setPrioMenu(null)
+          }}
+          onContextMenu={(e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            setPrioMenu(null)
+          }}
+        >
+          <ul
+            className="context-menu rm-prio-menu"
+            style={{ left: prioMenu.x, top: prioMenu.y }}
+            role="menu"
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            {PRIORITIES.map((p) => (
+              <li key={p} role="none">
+                <button
+                  type="button"
+                  role="menuitem"
+                  className={`context-menu-item rm-prio-option rm-prio-${p}`}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    void setPriority(prioMenu.item, p)
+                  }}
+                >
+                  <span className="rm-prio-dot" />
+                  <span className="rm-prio-option-label">{t(`roadmap.priority.${p}`)}</span>
+                  {p === prioMenu.item.priority && <span className="rm-prio-check">✓</span>}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       {assignItem && (

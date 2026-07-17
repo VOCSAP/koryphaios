@@ -1700,6 +1700,36 @@ code {
   background: currentColor;
 }
 
+/* Quick-switch hit area around the dot (K7): opens the priority dropdown. */
+.rm-prio-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  margin: -4px;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.rm-prio-chip:hover {
+  background: color-mix(in srgb, currentColor 18%, transparent);
+}
+
+/* Priority dropdown (K7): context-menu look, one colored row per level. */
+.rm-prio-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rm-prio-option-label {
+  flex: 1;
+}
+
+.rm-prio-check {
+  color: var(--fg-dim);
+}
+
 /* An agent actively works on the item (PLAN K2): frozen for the operator. */
 .rm-card-locked {
   opacity: 0.55;

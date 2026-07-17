@@ -373,6 +373,7 @@
   "roadmap.stop": "⏹ Stop",
   "roadmap.confirmStopTitle": "Arrêter le travail sur cet item ?",
   "roadmap.confirmStopMessage": "Les agents seront prévenus d'arrêter « {title} ». L'item est déverrouillé et repasse en « planifié ».",
+  "roadmap.prioPick": "cliquer pour changer la priorité",
   "roadmap.menuEdit": "✏️ Éditer…",
   "roadmap.menuQueue": "⏳ Ajouter à la file de traitement",
   "roadmap.menuAssign": "▶ Traiter immédiatement…",

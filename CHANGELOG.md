@@ -1,5 +1,13 @@
 # Changelog
 
+## desktop v0.10.2 -- 2026-07-17
+
+### Added (desktop, v0.10.2)
+- **Priority quick-switch (K7).** The MoSCoW chip on each kanban card opens a
+  styled dropdown (context-menu look, colored rows, ✓ on the current level)
+  to change the priority without opening the detail modal. Metadata write:
+  allowed even on locked cards (the broker guard only protects status/lock).
+
 ## desktop v0.10.1 -- 2026-07-17
 
 Roadmap card context menu & direct assignment (K6).

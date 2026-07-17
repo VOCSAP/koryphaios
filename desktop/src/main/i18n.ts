@@ -473,6 +473,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'roadmap.confirmStopTitle': 'Stop work on this item?',
   'roadmap.confirmStopMessage':
     'Agents will be told to stop working on "{title}". The item is unlocked and returns to planned.',
+  'roadmap.prioPick': 'click to change priority',
   'roadmap.menuEdit': '✏️ Edit…',
   'roadmap.menuQueue': '⏳ Add to dispatch queue',
   'roadmap.menuAssign': '▶ Process now…',
