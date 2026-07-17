@@ -26,7 +26,10 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   endpoints, the compiled context traveling by FILE
   (`--append-system-prompt-file` or stdin — never the command line). Battle
   mode adds a 🏆 judge node arbitrating the anonymized answers. Persistence
-  is desktop-local per project_key (`graph-store.ts`).
+  is desktop-local per project_key (`graph-store.ts`), encrypted at rest via
+  the safeStorage-backed cipher (K8: envelope with a base64 payload; legacy
+  clear files are re-encrypted on first list; clear-text fallback when the OS
+  keychain is unavailable so the feature never breaks).
 - **Roadmap (🗺 rail view)**: kanban board over the broker's shared roadmap —
   one column per status (idea/planned/in_progress/done, + archived behind the
   toggle), MoSCoW priority as a colored chip + in-column sort, native HTML5

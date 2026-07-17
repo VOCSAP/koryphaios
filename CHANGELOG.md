@@ -1,5 +1,20 @@
 # Changelog
 
+## desktop v0.10.3 -- 2026-07-17
+
+### Added (desktop, v0.10.3)
+- **Graph conversations encrypted at rest (K8).** `graph-store.ts` accepts
+  the safeStorage-backed `SecretCipher` (same injected surface as the C29
+  provider keys / D8 scope secrets): the per-project graphs file becomes an
+  `{ v, cipher: 'safeStorage', payload }` envelope instead of clear JSON.
+  Legacy clear files keep loading and are re-encrypted on the first
+  `graph:list` (`migrateGraphsAtRest`); when the OS keychain is unavailable
+  (Linux without a keyring) the store falls back to clear text rather than
+  breaking the feature. An undecryptable file (OS key changed) yields an
+  empty list, never a crash. Deliberately NO server-side storage: the broker
+  is shared-token + possibly remote, so operator conversations stay on the
+  operator's machine (operator decision on top of D7).
+
 ## desktop v0.10.2 -- 2026-07-17
 
 ### Added (desktop, v0.10.2)

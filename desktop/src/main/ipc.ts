@@ -62,7 +62,7 @@ import {
   localSnippetsDir,
   writeSnippet
 } from './snippet-store'
-import { deleteGraph, loadGraphs, upsertGraph } from './graph-store'
+import { deleteGraph, loadGraphs, migrateGraphsAtRest, upsertGraph } from './graph-store'
 import { getCatalogs } from './model-registry'
 import { decryptProviders, sanitizeProviders } from './provider-secrets'
 import type { SecretCipher } from './scope-secrets'
@@ -590,8 +590,9 @@ export function registerIpc({
   )
 
   // ----- graph chat (EXPLORATION-graph-chat C23-C27) -----
-  // Desktop-local per-project persistence (D7); inference = stateless headless
-  // fan-out (D1), context recompiled from the graph on every call.
+  // Desktop-local per-project persistence (D7), encrypted at rest via the
+  // safeStorage-backed cipher (K8); inference = stateless headless fan-out
+  // (D1), context recompiled from the graph on every call.
   const graphCtx = (): { stateDir: string; key: string } => ({
     stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
     key: computeDeckProjectKey(getConfig().projectDir)
@@ -609,7 +610,10 @@ export function registerIpc({
 
   ipcMain.handle('graph:list', () => {
     const { stateDir, key } = graphCtx()
-    return loadGraphs(stateDir, key)
+    // Opportunistic K8 migration: a pre-encryption clear file is rewritten
+    // encrypted the first time the view lists it (cheap no-op afterwards).
+    migrateGraphsAtRest(stateDir, key, secretCipher)
+    return loadGraphs(stateDir, key, secretCipher)
   })
   ipcMain.handle('graph:create', (_e, name: string) => {
     const { stateDir, key } = graphCtx()
@@ -620,28 +624,28 @@ export function registerIpc({
       createdAt: Date.now(),
       updatedAt: Date.now()
     }
-    return upsertGraph(stateDir, key, doc)
+    return upsertGraph(stateDir, key, doc, secretCipher)
   })
   ipcMain.handle('graph:delete', (_e, id: string) => {
     const { stateDir, key } = graphCtx()
-    return deleteGraph(stateDir, key, id)
+    return deleteGraph(stateDir, key, id, secretCipher)
   })
   ipcMain.handle('graph:save', (_e, raw: unknown) => {
     const doc = parseGraphDoc(raw)
     if (!doc) return null
     const { stateDir, key } = graphCtx()
-    return upsertGraph(stateDir, key, doc)
+    return upsertGraph(stateDir, key, doc, secretCipher)
   })
   ipcMain.handle('graph:compile', (_e, graphId: string, nodeId: string) => {
     const { stateDir, key } = graphCtx()
-    const doc = loadGraphs(stateDir, key).find((d) => d.id === graphId)
+    const doc = loadGraphs(stateDir, key, secretCipher).find((d) => d.id === graphId)
     if (!doc) throw new Error('unknown graph')
     return compileContext(doc, nodeId)
   })
   ipcMain.handle('graph:infer', async (_e, graphId: string, req: InferRequest) => {
     const { stateDir, key } = graphCtx()
     // Re-read from disk: the renderer may have saved node moves meanwhile.
-    const doc = loadGraphs(stateDir, key).find((d) => d.id === graphId)
+    const doc = loadGraphs(stateDir, key, secretCipher).find((d) => d.id === graphId)
     if (!doc) throw new Error('unknown graph')
     const updated = await runInference(
       {
@@ -654,7 +658,7 @@ export function registerIpc({
       req ?? ({} as InferRequest)
     )
     journal.add('graph', `graph inference on ${req.nodeId} (${req.targets?.length ?? 0} target(s)${req.battle ? ', battle' : ''})`)
-    return upsertGraph(stateDir, key, updated)
+    return upsertGraph(stateDir, key, updated, secretCipher)
   })
 
   // ----- template composer (PLAN C18): read/write without spawning -----

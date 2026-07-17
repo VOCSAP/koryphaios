@@ -91,3 +91,84 @@ test("projects do not leak into each other", () => {
   // Two buckets = two files.
   expect(readFileSync(graphsFile(dir, "key-one"), "utf-8")).toContain('"a"');
 });
+
+// ----- encryption at rest (PLAN K8) -----
+// A fake SecretCipher (reversed base64) stands in for Electron safeStorage,
+// like the scope-secrets tests: the store only needs the injected surface.
+
+import { migrateGraphsAtRest } from "../desktop/src/main/graph-store.ts";
+import type { SecretCipher } from "../desktop/src/main/scope-secrets.ts";
+
+function fakeCipher(available = true): SecretCipher {
+  return {
+    isAvailable: () => available,
+    encrypt: (plain) => Buffer.from([...Buffer.from(plain, "utf-8")].reverse()),
+    decrypt: (buf) => Buffer.from([...buf].reverse()).toString("utf-8"),
+  };
+}
+
+test("saveGraphs with a cipher writes an envelope, never the clear content", () => {
+  const dir = tmp();
+  const cipher = fakeCipher();
+  saveGraphs(dir, KEY, [doc("a", "secret plan")], cipher);
+  const onDisk = readFileSync(graphsFile(dir, KEY), "utf-8");
+  expect(onDisk).not.toContain("secret plan");
+  const parsed = JSON.parse(onDisk) as { cipher: string; payload: string };
+  expect(parsed.cipher).toBe("safeStorage");
+  expect(typeof parsed.payload).toBe("string");
+  // Round-trip through the same cipher.
+  const loaded = loadGraphs(dir, KEY, cipher);
+  expect(loaded.map((d) => d.name)).toEqual(["secret plan"]);
+});
+
+test("upsert/delete keep the file encrypted end-to-end", () => {
+  const dir = tmp();
+  const cipher = fakeCipher();
+  upsertGraph(dir, KEY, doc("a", "one"), cipher);
+  upsertGraph(dir, KEY, doc("b", "two"), cipher);
+  expect(readFileSync(graphsFile(dir, KEY), "utf-8")).not.toContain("one");
+  expect(deleteGraph(dir, KEY, "a", cipher)).toBe(true);
+  expect(loadGraphs(dir, KEY, cipher).map((d) => d.id)).toEqual(["b"]);
+});
+
+test("a legacy clear file still loads and migrateGraphsAtRest re-encrypts it", () => {
+  const dir = tmp();
+  const cipher = fakeCipher();
+  // Pre-K8 layout: clear JSON array on disk.
+  mkdirSync(join(dir, "graphs"), { recursive: true });
+  writeFileSync(graphsFile(dir, KEY), JSON.stringify([doc("a", "legacy")]), "utf-8");
+
+  expect(loadGraphs(dir, KEY, cipher).map((d) => d.name)).toEqual(["legacy"]);
+  expect(migrateGraphsAtRest(dir, KEY, cipher)).toBe(true);
+  expect(readFileSync(graphsFile(dir, KEY), "utf-8")).not.toContain("legacy");
+  expect(loadGraphs(dir, KEY, cipher).map((d) => d.name)).toEqual(["legacy"]);
+  // Second call: already encrypted -> no-op.
+  expect(migrateGraphsAtRest(dir, KEY, cipher)).toBe(false);
+});
+
+test("an encrypted file without a usable cipher yields [] (never a crash)", () => {
+  const dir = tmp();
+  const cipher = fakeCipher();
+  saveGraphs(dir, KEY, [doc("a")], cipher);
+  expect(loadGraphs(dir, KEY)).toEqual([]);
+  expect(loadGraphs(dir, KEY, fakeCipher(false))).toEqual([]);
+  // Broken decryption (OS key changed): swallowed, empty list.
+  const broken: SecretCipher = {
+    isAvailable: () => true,
+    encrypt: (p) => Buffer.from(p),
+    decrypt: () => {
+      throw new Error("key mismatch");
+    },
+  };
+  expect(loadGraphs(dir, KEY, broken)).toEqual([]);
+});
+
+test("no keychain -> clear-text fallback keeps the feature working", () => {
+  const dir = tmp();
+  const off = fakeCipher(false);
+  saveGraphs(dir, KEY, [doc("a", "plain")], off);
+  // Written clear (array shape), readable with or without a cipher.
+  expect(JSON.parse(readFileSync(graphsFile(dir, KEY), "utf-8"))).toBeArray();
+  expect(loadGraphs(dir, KEY, off).map((d) => d.name)).toEqual(["plain"]);
+  expect(migrateGraphsAtRest(dir, KEY, off)).toBe(false);
+});
