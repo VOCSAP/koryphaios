@@ -1844,6 +1844,71 @@ code {
   color: #e0b341;
 }
 
+/* "Process now" dialog (PLAN K6): pick a live agent or spawn a new one. */
+.rm-assign-modal {
+  width: 440px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.rm-assign-hint {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--fg-dim);
+}
+
+.rm-assign-empty {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+.rm-assign-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.rm-assign-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, var(--fg) 4%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rm-assign-row:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+.rm-assign-dot {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+.rm-assign-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.rm-assign-peer {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
 /* Markdown rendering (PLAN K5): token tree from markdown.ts. */
 .md {
   font-size: 12.5px;

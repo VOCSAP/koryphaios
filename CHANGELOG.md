@@ -1,5 +1,24 @@
 # Changelog
 
+## desktop v0.10.1 -- 2026-07-17
+
+Roadmap card context menu & direct assignment (K6).
+
+### Added (desktop, v0.10.1)
+- **Card context menu (K6).** Right-click on a kanban card: ✏️ Edit… (opens
+  the edit modal; also reachable via a pencil button in the detail modal's
+  header, which replaces the old Edit action button), ⏳ Add to dispatch
+  queue, ▶ Process now…, 🗑 Delete (archives — the data model keeps deletion
+  a reversible archive, same confirmation dialog). Entries grey out when the
+  item is locked, closed or already queued. Reuses the generic `ContextMenu`.
+- **Process now (K6).** A dialog lists the window's live agents (peer_id
+  resolved, supervisor excluded, 👑 marks the lead): picking one sends the
+  item as a TARGETED announce (`composeAssignText`, CODE CONSTANT — full item
+  + take-it-now contract), moves it to in_progress (unqueued; the lock still
+  arrives when the agent claims it) and journals the assignment
+  (`assignRoadmapItem`, IPC `roadmap:assign`). The "＋ New agent on this
+  item…" button falls through to the existing launch flow.
+
 ## core v0.8.0 + desktop v0.10.0 -- 2026-07-17
 
 Roadmap kanban & agent work-lock (PLAN-ROADMAP-KANBAN K1-K5, plan retired

@@ -473,6 +473,17 @@ export const EN_DEFAULTS: Record<string, string> = {
   'roadmap.confirmStopTitle': 'Stop work on this item?',
   'roadmap.confirmStopMessage':
     'Agents will be told to stop working on "{title}". The item is unlocked and returns to planned.',
+  'roadmap.menuEdit': '✏️ Edit…',
+  'roadmap.menuQueue': '⏳ Add to dispatch queue',
+  'roadmap.menuAssign': '▶ Process now…',
+  'roadmap.menuDelete': '🗑 Delete (archives)',
+  'roadmap.assignTitle': 'Process now',
+  'roadmap.assignHint':
+    'Send "{title}" to a live agent (targeted announce), or spawn a fresh one on it.',
+  'roadmap.assignNoAgents': 'No live agent with a resolved peer_id — spawn a new one.',
+  'roadmap.assignNew': '＋ New agent on this item…',
+  'toast.assignSent': 'Item sent to the agent (moved to in progress)',
+  'toast.assignFailed': 'Assignment failed (peer unreachable or broker down)',
   'toast.stopSupervisor': 'Stop routed through the supervisor — it will report back to your inbox',
   'toast.stopBroadcast': 'Stop broadcast to the group',
   'toast.stopNoPeers': 'Item unlocked (no active peer to notify)',

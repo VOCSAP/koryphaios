@@ -2,6 +2,7 @@
 
 import { test, expect } from "bun:test";
 import {
+  composeAssignText,
   composeDispatchText,
   composeStopText,
   firstQueued,
@@ -98,4 +99,26 @@ test("composeStopText targets the supervisor or the whole group", () => {
   expect(composeStopText(it, true)).toContain('send_message to "operator"');
   expect(composeStopText(it, false)).toContain("If you are working on this item: stop now");
   expect(composeStopText(it, false)).not.toContain("As supervisor:");
+});
+
+// PLAN K6: direct "process now" assignment to one chosen peer (CODE CONSTANT).
+test("composeAssignText carries the full item and the take-it-now contract", () => {
+  const text = composeAssignText(
+    item({
+      id: "12345678-1111-2222-3333-444444444444",
+      title: "Fix login",
+      description: "Login breaks on Safari",
+      context: "auth/safari.ts",
+      tags: ["auth"]
+    })
+  );
+  expect(text).toContain("assigned THIS roadmap item to you");
+  expect(text).toContain("id 12345678");
+  expect(text).toContain("Title: Fix login");
+  expect(text).toContain("Description: Login breaks on Safari");
+  expect(text).toContain("Context (operator briefing): auth/safari.ts");
+  expect(text).toContain("Tags: auth");
+  expect(text).toContain("locks it under your peer_id");
+  // Targeted flow: no team-lead relaying step.
+  expect(text).not.toContain("team-lead");
 });

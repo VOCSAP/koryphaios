@@ -48,6 +48,29 @@ export function composeDispatchText(item: RoadmapItem): string {
 }
 
 /**
+ * Direct assignment of an item to ONE chosen peer (PLAN K6, the operator's
+ * "process now" flow): the full item plus the take-it-now contract. Targeted
+ * announce, so unlike the dispatch text there is no team-lead relaying step.
+ * CODE CONSTANT (C8 rule).
+ */
+export function composeAssignText(item: RoadmapItem): string {
+  const lines = [
+    `The operator assigned THIS roadmap item to you — take it now (id ${item.id.slice(0, 8)}):`,
+    '',
+    `Title: ${item.title}`,
+    `Kind: ${item.kind} | Priority: ${item.priority} | Value: ${item.value} | Effort: ${item.effort} | Status: ${item.status}`,
+    item.description ? `Description: ${item.description}` : '',
+    item.rationale ? `Rationale: ${item.rationale}` : '',
+    item.context ? `Context (operator briefing): ${item.context}` : '',
+    item.tags.length ? `Tags: ${item.tags.join(', ')}` : '',
+    item.depends_on.length ? `Depends on: ${item.depends_on.map((d) => d.slice(0, 8)).join(', ')}` : '',
+    '',
+    'Pause your current step if needed. Use roadmap_get for full context, set the item to in_progress with roadmap_update when you actually start (this locks it under your peer_id), done when complete — or back to planned if you must abandon it.'
+  ].filter((l) => l !== '')
+  return lines.join('\n')
+}
+
+/**
  * The operator's STOP notice on an in_progress item (PLAN K3). Sent to the
  * supervisor (coordinate + report back) or broadcast to the whole group as a
  * fallback. Like the dispatch text, this is a CODE CONSTANT (C8 rule).

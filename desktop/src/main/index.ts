@@ -29,8 +29,8 @@ import { WorkspaceService } from './workspace-service'
 import { fetchOperatorInbox, resolveBrokerEndpoint, sendAnnounce } from './broker-client'
 import { computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
 import { createCheckpoint, purgeCheckpoints, restoreCommand } from './checkpoint-service'
-import { composeDispatchText, composeStopText, firstQueued } from './dispatch'
-import type { DispatchResult, StopResult } from '@shared/types'
+import { composeAssignText, composeDispatchText, composeStopText, firstQueued } from './dispatch'
+import type { AssignResult, DispatchResult, StopResult } from '@shared/types'
 import { composeJoinAnnounce, type JoinAnnounceIntent } from '@shared/announce'
 import { APP_STATE_SUBDIR, runDataMigration } from './migrate-data-dir'
 import type { SessionRuntime } from '@shared/types'
@@ -411,6 +411,39 @@ const watchDispatched = async (): Promise<void> => {
 }
 let dispatchTimer: NodeJS.Timeout | null = null
 
+// ----- Direct assignment to one chosen peer (PLAN K6) -----
+// The operator's "process now" flow: a targeted announce (CODE CONSTANT,
+// composeAssignText) to the selected live peer, then the item moves to
+// in_progress (unqueued). The lock arrives when the agent actually claims it
+// with its own roadmap_update, like the launch/dispatch flows.
+const assignRoadmapItem = async (id: string, peerId: string): Promise<AssignResult> => {
+  const target = peerId.trim()
+  if (!target) return { sent: false }
+  try {
+    const endpoint = resolveBrokerEndpoint()
+    const key = computeDeckProjectKey(config.projectDir)
+    const items = await listRoadmap(endpoint, key, {})
+    const item = items.find((i) => i.id === id)
+    if (!item) return { sent: false }
+    const { sent } = await sendAnnounce(
+      {
+        groupId: activeScope.groupId,
+        secret: activeScope.secret,
+        text: composeAssignText(item),
+        toPeerId: target
+      },
+      { endpoint }
+    )
+    if (sent === 0) return { sent: false }
+    await upsertRoadmap(endpoint, key, { id: item.id, status: 'in_progress', queue: null })
+    journal.add('dispatch', `item "${item.title}" assigned to "${target}"`)
+    return { sent: true }
+  } catch (e) {
+    console.error('[koryphaios] assign failed:', e)
+    return { sent: false }
+  }
+}
+
 // ----- Operator stop on an in_progress item (PLAN K3) -----
 // Notifies the agents (via the SUPERVISOR when one is live, so the operator
 // gets a report back through the inbox; group broadcast otherwise), then
@@ -763,6 +796,7 @@ app.whenReady().then(() => {
     journal,
     dispatchNext,
     stopRoadmapItem,
+    assignRoadmapItem,
     checkpoint: checkpointBeforeSpawn
   })
   service.start()

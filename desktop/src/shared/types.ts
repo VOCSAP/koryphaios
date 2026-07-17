@@ -363,6 +363,12 @@ export interface DispatchResult {
   reason?: string
 }
 
+/** Result of a direct assignment to one chosen peer (PLAN K6). */
+export interface AssignResult {
+  /** The targeted announce reached the peer and the item moved to in_progress. */
+  sent: boolean
+}
+
 /** Result of an operator stop on an in_progress item (PLAN K3). */
 export interface StopResult {
   /** The item was unlocked and moved back to planned. */
@@ -607,6 +613,8 @@ export interface DeckApi {
   roadmapWand(draft: RoadmapWandDraft): Promise<string>
   /** Operator stop on an in_progress item (PLAN K3): notify agents + unlock. */
   roadmapStop(id: string): Promise<StopResult>
+  /** Assign an item to one live peer via a targeted announce (PLAN K6). */
+  roadmapAssign(id: string, peerId: string): Promise<AssignResult>
   /** Pick a plan file and spawn a one-shot import agent (PLAN C7). */
   importPlan(): Promise<boolean>
 

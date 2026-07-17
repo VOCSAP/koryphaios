@@ -2,6 +2,7 @@ import { join } from 'node:path'
 import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, webContents } from 'electron'
 import type {
   AppConfig,
+  AssignResult,
   CreateSessionInput,
   DispatchResult,
   HelpExchange,
@@ -103,6 +104,8 @@ interface IpcDeps {
   dispatchNext: () => Promise<DispatchResult>
   /** Operator stop on an in_progress item (PLAN K3): notify + unlock. */
   stopRoadmapItem: (id: string) => Promise<StopResult>
+  /** Direct assignment to one live peer via targeted announce (PLAN K6). */
+  assignRoadmapItem: (id: string, peerId: string) => Promise<AssignResult>
   /** Git checkpoint of a dirty tree before an agent spawns there (PLAN C16). */
   checkpoint: (dir: string) => Promise<void>
 }
@@ -119,6 +122,7 @@ export function registerIpc({
   journal,
   dispatchNext,
   stopRoadmapItem,
+  assignRoadmapItem,
   checkpoint
 }: IpcDeps): void {
   // ----- sessions -----
@@ -298,6 +302,10 @@ export function registerIpc({
   ipcMain.handle('roadmap:dispatch', () => dispatchNext())
   // Operator stop (PLAN K3): notify the agents, release the lock.
   ipcMain.handle('roadmap:stop', (_e, id: string) => stopRoadmapItem(id))
+  // Direct assignment (PLAN K6): "process now" on one chosen live peer.
+  ipcMain.handle('roadmap:assign', (_e, id: string, peerId: string) =>
+    assignRoadmapItem(id, peerId)
+  )
   // Context wand (PLAN C21): one read-only `claude -p` (haiku, C9 harness)
   // drafts the item's context field grounded in the project files. The result
   // only fills the editor textarea -- saving stays an explicit operator action.

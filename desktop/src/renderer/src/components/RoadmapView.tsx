@@ -10,6 +10,7 @@ import type {
 import { useDeck } from '../store'
 import { useT, type TFn } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
+import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { CreateMenu } from './CreateMenu'
 import { KIND_ICONS, RoadmapItemModal } from './RoadmapItemModal'
 
@@ -85,12 +86,14 @@ function isLocked(item: RoadmapItem): boolean {
 function BoardCard({
   item,
   onOpen,
+  onMenu,
   onDragStart,
   onDragEnd,
   t
 }: {
   item: RoadmapItem
   onOpen: () => void
+  onMenu: (x: number, y: number) => void
   onDragStart: (e: React.DragEvent) => void
   onDragEnd: () => void
   t: TFn
@@ -104,6 +107,11 @@ function BoardCard({
       onDragStart={draggable ? onDragStart : undefined}
       onDragEnd={onDragEnd}
       onClick={onOpen}
+      onContextMenu={(e) => {
+        e.preventDefault()
+        e.stopPropagation()
+        onMenu(e.clientX, e.clientY)
+      }}
       title={locked ? t('roadmap.lockedHint') : undefined}
     >
       <span className="rm-card-head">
@@ -184,6 +192,10 @@ export function RoadmapView(): React.JSX.Element {
   const [confirmDone, setConfirmDone] = useState<RoadmapItem | null>(null)
   // Operator stop on a locked item (K3), confirmed before the announce.
   const [confirmStop, setConfirmStop] = useState<RoadmapItem | null>(null)
+  // Right-click context menu on a card (K6): viewport anchor + target item.
+  const [menu, setMenu] = useState<{ x: number; y: number; item: RoadmapItem } | null>(null)
+  // "Process now" (K6): pick a live agent (targeted announce) or spawn one.
+  const [assignItem, setAssignItem] = useState<RoadmapItem | null>(null)
   // Item the "launch an agent" flow is spawning for (advanced create pre-filled).
   const [launchItem, setLaunchItem] = useState<RoadmapItem | null>(null)
   // Context wand (PLAN C21): one in-flight generation at a time.
@@ -350,6 +362,52 @@ export function RoadmapView(): React.JSX.Element {
     }
   }
 
+  // ----- direct assignment (K6) -----
+
+  // Live, addressable agents: peer_id resolved, not the supervisor.
+  const liveAgents = sessions.filter((s) => !s.supervisor && s.status !== 'exited' && s.peerId)
+
+  const assign = async (item: RoadmapItem, peerId: string): Promise<void> => {
+    setAssignItem(null)
+    try {
+      const r = await window.api.roadmapAssign(item.id, peerId)
+      showToast(r.sent ? 'toast.assignSent' : 'toast.assignFailed', r.sent ? 'success' : 'info')
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  // ----- card context menu (K6) -----
+
+  const menuItems = (item: RoadmapItem): ContextMenuItem[] => {
+    const locked = isLocked(item)
+    const closed = item.status === 'done' || item.status === 'archived'
+    return [
+      {
+        label: t('roadmap.menuEdit'),
+        disabled: locked,
+        onSelect: () => setDraft(toDraft(item))
+      },
+      {
+        label: t('roadmap.menuQueue'),
+        disabled: locked || closed || item.queue !== null,
+        onSelect: () => void queueItem(item)
+      },
+      {
+        label: t('roadmap.menuAssign'),
+        disabled: locked || closed,
+        onSelect: () => setAssignItem(item)
+      },
+      {
+        label: t('roadmap.menuDelete'),
+        danger: true,
+        disabled: locked || item.status === 'archived',
+        onSelect: () => setConfirmArchive(item)
+      }
+    ]
+  }
+
   const columns: RoadmapStatus[] = showArchived ? [...BOARD_COLUMNS, 'archived'] : BOARD_COLUMNS
   const columnItems = (status: RoadmapStatus): RoadmapItem[] =>
     items
@@ -467,6 +525,7 @@ export function RoadmapView(): React.JSX.Element {
                     key={item.id}
                     item={item}
                     onOpen={() => setSelectedId(item.id)}
+                    onMenu={(x, y) => setMenu({ x, y, item })}
                     onDragStart={(e) => {
                       e.dataTransfer.setData('text/plain', item.id)
                       e.dataTransfer.effectAllowed = 'move'
@@ -702,6 +761,63 @@ export function RoadmapView(): React.JSX.Element {
             void archive(item)
           }}
         />
+      )}
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menuItems(menu.item)}
+          onClose={() => setMenu(null)}
+        />
+      )}
+
+      {assignItem && (
+        <div className="modal-backdrop" onMouseDown={() => setAssignItem(null)}>
+          <div className="modal rm-assign-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <header className="rm-detail-head">
+              <h3>{t('roadmap.assignTitle')}</h3>
+              <button
+                className="icon-btn"
+                title={t('common.close')}
+                onClick={() => setAssignItem(null)}
+              >
+                ✕
+              </button>
+            </header>
+            <p className="rm-assign-hint">{t('roadmap.assignHint', { title: assignItem.title })}</p>
+            {liveAgents.length === 0 && (
+              <p className="rm-assign-empty">{t('roadmap.assignNoAgents')}</p>
+            )}
+            <div className="rm-assign-list">
+              {liveAgents.map((s) => (
+                <button
+                  key={s.id}
+                  className="rm-assign-row"
+                  onClick={() => void assign(assignItem, s.peerId!)}
+                >
+                  <span className="rm-assign-dot" style={{ background: s.color }} />
+                  <span className="rm-assign-name">{s.name}</span>
+                  {s.lead && <span title={t('sidebar.leadTitle')}>👑</span>}
+                  <span className="rm-assign-peer">{s.peerId}</span>
+                </button>
+              ))}
+            </div>
+            <div className="modal-actions">
+              <button onClick={() => setAssignItem(null)}>{t('common.cancel')}</button>
+              <button
+                className="primary"
+                onClick={() => {
+                  const item = assignItem
+                  setAssignItem(null)
+                  setLaunchItem(item)
+                }}
+              >
+                {t('roadmap.assignNew')}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   )

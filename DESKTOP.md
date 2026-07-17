@@ -42,7 +42,10 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   inbox) or broadcasts it to the group, then unlocks the item back to planned
   (`stopRoadmapItem`, `composeStopText`). An idle-lock watcher releases locks
   held by local tiles whose PTY printed nothing for 2 h; the broker's
-  TTL/owner-gone sweep covers everything the Deck cannot observe.
+  TTL/owner-gone sweep covers everything the Deck cannot observe. Right-click
+  on a card opens a context menu (edit / queue / process-now / delete-as-
+  archive); "Process now" targets one live agent with a CODE-CONSTANT
+  announce (`composeAssignText`, IPC `roadmap:assign`) or spawns a fresh one.
 - **Unified model picker** (`ModelPicker.tsx`, `shared/models.ts`,
   `model-registry.ts`): provider accordion + star-pinned favorites, shared by
   the graph fan-out and the agents' create menu. Frontier providers

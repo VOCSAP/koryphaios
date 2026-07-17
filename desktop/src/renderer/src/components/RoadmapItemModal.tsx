@@ -180,6 +180,14 @@ export function RoadmapItemModal({
             {KIND_ICONS[item.kind]}
           </span>
           <h3>{item.title}</h3>
+          <button
+            className="icon-btn"
+            title={stoppable ? t('roadmap.lockedHint') : t('common.edit')}
+            disabled={stoppable}
+            onClick={onEdit}
+          >
+            ✏️
+          </button>
           <button className="icon-btn" title={t('common.close')} onClick={onClose}>
             ✕
           </button>
@@ -249,9 +257,6 @@ export function RoadmapItemModal({
             ) : (
               <button onClick={onUnqueue}>{t('roadmap.queueRemove')}</button>
             ))}
-          <button onClick={onEdit} disabled={stoppable} title={stoppable ? t('roadmap.lockedHint') : undefined}>
-            {t('common.edit')}
-          </button>
           {item.status === 'archived' ? (
             <button onClick={onRestore}>{t('roadmap.restore')}</button>
           ) : (
