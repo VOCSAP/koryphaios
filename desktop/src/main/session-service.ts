@@ -69,6 +69,14 @@ export class SessionService extends EventEmitter {
   private attentionDetector = new AttentionDetector()
   private pollTimer: NodeJS.Timeout | null = null
 
+  /**
+   * Epoch ms of the last PTY output per session (PLAN K2): the "is the agent
+   * really doing something" signal the roadmap lock-release watcher reads.
+   * Updated on every data event, so it is kept out of RuntimeState (no
+   * broadcast churn).
+   */
+  private outputAt = new Map<string, number>()
+
   /** Live (post-fork) claude session ids open in this process; double-resume guard. */
   private registry = new OpenIdRegistry()
 
@@ -100,6 +108,7 @@ export class SessionService extends EventEmitter {
 
     this.pty.on('data', (e: { id: string; data: string }) => {
       this.emit('data', e)
+      this.outputAt.set(e.id, Date.now())
       this.thinkingDetector.feed(e.id, e.data)
       this.quotaDetector.feed(e.id, e.data)
       this.attentionDetector.feed(e.id, e.data)
@@ -289,6 +298,7 @@ export class SessionService extends EventEmitter {
     this.attentionDetector.clear(id)
     this.defs = this.defs.filter((d) => d.id !== id)
     this.runtime.delete(id)
+    this.outputAt.delete(id)
     this.persist()
     this.broadcast()
   }
@@ -311,6 +321,7 @@ export class SessionService extends EventEmitter {
     this.attentionDetector.stop()
     this.defs = []
     this.runtime.clear()
+    this.outputAt.clear()
     this.persist()
     this.broadcast()
   }
@@ -364,6 +375,7 @@ export class SessionService extends EventEmitter {
       if (d.sessionId) this.registry.release(d.sessionId)
     }
     this.runtime.clear()
+    this.outputAt.clear()
     this.defs = defs.map((d, i) => ({
       ...d,
       color: d.color || paletteColor(this.getConfig().palette ?? DEFAULT_PALETTE, i)
@@ -428,6 +440,14 @@ export class SessionService extends EventEmitter {
   getLead(): SessionRuntime | null {
     const def = this.defs.find((d) => d.lead)
     return def ? this.toRuntime(def) : null
+  }
+
+  /**
+   * Epoch ms of the last PTY output for a session, or null if it never wrote
+   * (PLAN K2: idleness signal for the roadmap lock-release watcher).
+   */
+  lastOutputAt(id: string): number | null {
+    return this.outputAt.get(id) ?? null
   }
 
   /** Per-session quota auto-resume override (context menu). Persisted. */

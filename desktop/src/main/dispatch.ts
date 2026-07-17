@@ -42,7 +42,29 @@ export function composeDispatchText(item: RoadmapItem): string {
     item.tags.length ? `Tags: ${item.tags.join(', ')}` : '',
     item.depends_on.length ? `Depends on: ${item.depends_on.map((d) => d.slice(0, 8)).join(', ')}` : '',
     '',
-    'As team-lead: take it yourself or brief another peer with send_message. Use roadmap_get for full context, set the item in_progress with roadmap_update when work starts, done when complete. Keep its status current — the Deck auto-dispatches the next queued item when this one is done.'
+    'As team-lead: take it yourself or brief another peer with send_message. Use roadmap_get for full context, set the item in_progress with roadmap_update when the work REALLY starts (this locks it under the working peer), done when complete. Keep its status current — the Deck auto-dispatches the next queued item when this one is done.'
   ].filter((l) => l !== '')
   return lines.join('\n')
+}
+
+/**
+ * The operator's STOP notice on an in_progress item (PLAN K3). Sent to the
+ * supervisor (coordinate + report back) or broadcast to the whole group as a
+ * fallback. Like the dispatch text, this is a CODE CONSTANT (C8 rule).
+ */
+export function composeStopText(item: RoadmapItem, viaSupervisor: boolean): string {
+  const head = [
+    `The operator asked to STOP all work on roadmap item "${item.title}" (id ${item.id.slice(0, 8)}).`,
+    'The item has been unlocked and moved back to planned. Do not write to it anymore.'
+  ]
+  if (viaSupervisor) {
+    head.push(
+      'As supervisor: relay the stop to the peers working on this item (send_message), verify they acknowledged, then report the outcome to the operator (send_message to "operator").'
+    )
+  } else {
+    head.push(
+      'If you are working on this item: stop now, leave the code in a safe state, and do not set the item in_progress again unless the operator re-dispatches it.'
+    )
+  }
+  return head.join('\n')
 }

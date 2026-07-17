@@ -1,5 +1,63 @@
 # Changelog
 
+## core v0.8.0 + desktop v0.10.0 -- 2026-07-17
+
+Roadmap kanban & agent work-lock (PLAN-ROADMAP-KANBAN K1-K5, plan retired
+into this entry): the Roadmap view becomes a status-column kanban board, and
+the broker learns to distinguish items *really being worked on* (locked by an
+agent) from items merely queued as in_progress.
+
+### Added (core, v0.8.0)
+- **Agent work-lock (K2).** `roadmap_items` gains `locked`/`locked_by`/
+  `locked_at` (plain-text peer_id snapshot, no FK — rides the existing `by`
+  field of every upsert, zero extra round-trip). A non-`deck` author writing
+  `status=in_progress` claims the lock; leaving in_progress (or archiving)
+  releases it; an explicit `locked: true|false` upsert field overrides. While
+  locked, status writes / lock claims by anyone but the owner or `deck` are
+  refused with 409 (`force: true` bypasses); non-status writes (context
+  enrichment, tags) stay open to everyone. The `roadmap_*` MCP tool
+  descriptions and channel instructions carry the contract ("in_progress =
+  actually working, planned = releases"), and item renderings show `🔒 owner`.
+- **Stale-lock sweep (K2).** `releaseStaleLocks` (every
+  `CLAUDE_PEERS_LOCK_SWEEP_SEC=60`) unlocks and drops an item back to
+  `planned` (attribution `lock-sweep`) when the item saw no write for
+  `CLAUDE_PEERS_LOCK_TTL_SEC=21600`, or when no active peer carries the
+  owner's peer_id for the item's project and the lock is older than
+  `CLAUDE_PEERS_LOCK_GRACE_SEC=600`.
+- **Deck announcements harden the no-reply contract (K4).**
+  `DECK_NO_REPLY_NOTE` now also forbids messaging *any other peer* about an
+  announcement (agents used to greet newcomers via send_message).
+
+### Added (desktop, v0.10.0)
+- **Kanban board (K1).** `RoadmapView.tsx` reworked: one column per status
+  (idea/planned/in_progress/done, + archived behind the existing toggle),
+  MoSCoW priority as a colored chip + in-column sort, native HTML5 drag &
+  drop between columns. Dropping on done asks for confirmation (the item
+  will no longer be picked up); a locked card is greyed, dash-bordered,
+  non-draggable and badged `🔒 locked_by`. The dispatch-queue strip and the
+  create/edit form (now a modal) are unchanged in behavior.
+- **Detail modal (K5).** Clicking a card opens a Trello-style foreground
+  modal (`RoadmapItemModal.tsx`): badge grid, titled sections for
+  description / rationale / context rendered as markdown, dependencies,
+  authorship, and the action bar. `markdown.ts` is an injection-safe
+  tokenizer (token tree only, React escapes every text node; supported:
+  headings, lists, fences, inline code/bold/italic, links surfaced but never
+  navigated) — no markdown dependency added.
+- **Operator stop (K3).** ⏹ Stop on a locked item, after confirmation,
+  sends a CODE-CONSTANT notice (`composeStopText`, C8 rule) through the live
+  supervisor when there is one (targeted announce; the supervisor relays,
+  verifies and reports back through the operator inbox) or broadcasts to the
+  group, then unlocks the item back to `planned` (`stopRoadmapItem`,
+  IPC `roadmap:stop`). Toasts distinguish supervisor / broadcast / no-peer.
+- **Idle-lock watcher (K2).** `SessionService` tracks `lastOutputAt` per
+  PTY; a minute-tick watcher releases locks owned by local tiles whose
+  terminal printed nothing for 2 h. Complements the broker sweep (the
+  heartbeat keeps an idle session `active`), and only for sessions this
+  Deck can observe.
+- **Join announces are explicitly no-reply (K4).** `composeJoinAnnounce`
+  appends "do NOT reply, do NOT greet or message the new peer" — the
+  broker-side deck note only forbade replying to `deck`.
+
 ## docs -- 2026-07-16
 
 - **Working plans retired.** `PLAN-v0.4.md`, `PLAN-context-et-snippets.md`,

@@ -302,6 +302,12 @@ export interface RoadmapItem {
   deleted_at: string | null
   /** Dispatch-queue position (PLAN C15), 1-based; null = not queued. */
   queue: number | null
+  /** Agent work-lock (PLAN K2): an agent is ACTIVELY working on the item. */
+  locked: boolean
+  /** peer_id snapshot of the lock owner; null when unlocked. */
+  locked_by: string | null
+  /** ISO timestamp of the lock; null when unlocked. */
+  locked_at: string | null
 }
 
 export interface RoadmapListFilters {
@@ -328,6 +334,10 @@ export interface RoadmapUpsertFields {
   depends_on?: string[]
   /** Queue position (C15): positive integer to queue, null to unqueue. */
   queue?: number | null
+  /** Explicit lock control (K2): false releases, true claims for the author. */
+  locked?: boolean
+  /** Bypass the broker's lock guard (K2); 'deck' writes never need it. */
+  force?: boolean
 }
 
 /**
@@ -351,6 +361,14 @@ export interface DispatchResult {
   title?: string
   /** Failure reason when not sent: 'empty-queue' | 'no-lead' | 'error'. */
   reason?: string
+}
+
+/** Result of an operator stop on an in_progress item (PLAN K3). */
+export interface StopResult {
+  /** The item was unlocked and moved back to planned. */
+  stopped: boolean
+  /** How the stop notice went out: coordinated by the supervisor, broadcast to the group, or not delivered (no active peer). */
+  via: 'supervisor' | 'broadcast' | 'none'
 }
 
 export interface RoadmapListResponse {
@@ -587,6 +605,8 @@ export interface DeckApi {
   roadmapDispatch(): Promise<DispatchResult>
   /** Context wand (PLAN C21): read-only haiku pass drafting the context field. */
   roadmapWand(draft: RoadmapWandDraft): Promise<string>
+  /** Operator stop on an in_progress item (PLAN K3): notify agents + unlock. */
+  roadmapStop(id: string): Promise<StopResult>
   /** Pick a plan file and spawn a one-shot import agent (PLAN C7). */
   importPlan(): Promise<boolean>
 

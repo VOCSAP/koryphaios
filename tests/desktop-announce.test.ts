@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 import {
   composeJoinAnnounce,
   defaultAnnounceDraft,
+  JOIN_NO_REPLY_NOTE,
   type JoinAnnounceIntent
 } from "../desktop/src/shared/announce.ts";
 
@@ -31,11 +32,26 @@ test("composeJoinAnnounce custom path keeps the peer_id head and appends the not
     effort: "high"
   };
   const text = composeJoinAnnounce("dev-1", intent);
-  expect(text).toBe('New peer "dev-1" joined the group. joining to help on the broker refactor');
+  expect(text).toBe(
+    `New peer "dev-1" joined the group. joining to help on the broker refactor\n${JOIN_NO_REPLY_NOTE}`
+  );
 });
 
 test("composeJoinAnnounce treats a whitespace-only custom note as empty (default path)", () => {
   const intent: JoinAnnounceIntent = { custom: "   ", agent: "", model: "", effort: "" };
   const text = composeJoinAnnounce("peer-x", intent);
-  expect(text).toBe('New peer "peer-x" joined the group (agent: default, model: default, effort: auto).');
+  expect(text).toBe(
+    `New peer "peer-x" joined the group (agent: default, model: default, effort: auto).\n${JOIN_NO_REPLY_NOTE}`
+  );
+});
+
+// PLAN K4: every join announce forbids replying AND greeting the newcomer --
+// the broker-side deck note only forbids replying to 'deck', which left agents
+// free to welcome the new peer via send_message.
+test("every join announce carries the no-reply/no-greeting note", () => {
+  for (const custom of [null, "custom note"]) {
+    const text = composeJoinAnnounce("p", { custom, agent: "", model: "", effort: "" });
+    expect(text).toContain("do NOT reply");
+    expect(text).toContain("do NOT greet");
+  }
 });

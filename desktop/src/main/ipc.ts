@@ -9,7 +9,8 @@ import type {
   LaunchConfig,
   RoadmapListFilters,
   RoadmapUpsertFields,
-  SessionRuntime
+  SessionRuntime,
+  StopResult
 } from '@shared/types'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
 import {
@@ -100,6 +101,8 @@ interface IpcDeps {
   journal: Journal
   /** Dispatch the first queued roadmap item to the team-lead (PLAN C15). */
   dispatchNext: () => Promise<DispatchResult>
+  /** Operator stop on an in_progress item (PLAN K3): notify + unlock. */
+  stopRoadmapItem: (id: string) => Promise<StopResult>
   /** Git checkpoint of a dirty tree before an agent spawns there (PLAN C16). */
   checkpoint: (dir: string) => Promise<void>
 }
@@ -115,6 +118,7 @@ export function registerIpc({
   ensureSupervisor,
   journal,
   dispatchNext,
+  stopRoadmapItem,
   checkpoint
 }: IpcDeps): void {
   // ----- sessions -----
@@ -292,6 +296,8 @@ export function registerIpc({
   // Queue dispatch (PLAN C15): first queued item -> targeted announce to the
   // team-lead. The renderer greys the button when no lead is designated.
   ipcMain.handle('roadmap:dispatch', () => dispatchNext())
+  // Operator stop (PLAN K3): notify the agents, release the lock.
+  ipcMain.handle('roadmap:stop', (_e, id: string) => stopRoadmapItem(id))
   // Context wand (PLAN C21): one read-only `claude -p` (haiku, C9 harness)
   // drafts the item's context field grounded in the project files. The result
   // only fills the editor textarea -- saving stays an explicit operator action.

@@ -27,6 +27,22 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   (`--append-system-prompt-file` or stdin — never the command line). Battle
   mode adds a 🏆 judge node arbitrating the anonymized answers. Persistence
   is desktop-local per project_key (`graph-store.ts`).
+- **Roadmap (🗺 rail view)**: kanban board over the broker's shared roadmap —
+  one column per status (idea/planned/in_progress/done, + archived behind the
+  toggle), MoSCoW priority as a colored chip + in-column sort, native HTML5
+  drag & drop between columns (`RoadmapView.tsx`). Dropping on done asks for
+  confirmation; a card locked by an agent (K2 work-lock: the broker locks an
+  item whose status an agent set to in_progress) is greyed, non-draggable and
+  carries a 🔒 `locked_by` badge. Clicking a card opens a foreground detail
+  modal (`RoadmapItemModal.tsx`) rendering description/rationale/context
+  through the injection-safe markdown tokenizer (`markdown.ts` — token tree,
+  React escapes every text node; agent links are shown, never navigated).
+  The ⏹ Stop button on a locked item routes a CODE-CONSTANT stop notice
+  through the live supervisor when there is one (report back via the operator
+  inbox) or broadcasts it to the group, then unlocks the item back to planned
+  (`stopRoadmapItem`, `composeStopText`). An idle-lock watcher releases locks
+  held by local tiles whose PTY printed nothing for 2 h; the broker's
+  TTL/owner-gone sweep covers everything the Deck cannot observe.
 - **Unified model picker** (`ModelPicker.tsx`, `shared/models.ts`,
   `model-registry.ts`): provider accordion + star-pinned favorites, shared by
   the graph fan-out and the agents' create menu. Frontier providers

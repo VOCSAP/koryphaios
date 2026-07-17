@@ -83,6 +83,11 @@ const CLEAN_INTERVAL_MS = Math.max(
   1_000,
   parseInt(process.env.CLAUDE_PEERS_CLEAN_INTERVAL_SEC ?? "30", 10) * 1000
 );
+// Roadmap work-lock sweep (PLAN K2): TTL without any write on the item, grace
+// period before an owner-less lock is released, and sweep cadence.
+const LOCK_TTL_SEC = Math.max(1, parseInt(process.env.CLAUDE_PEERS_LOCK_TTL_SEC ?? "21600", 10));
+const LOCK_GRACE_SEC = Math.max(1, parseInt(process.env.CLAUDE_PEERS_LOCK_GRACE_SEC ?? "600", 10));
+const LOCK_SWEEP_SEC = Math.max(1, parseInt(process.env.CLAUDE_PEERS_LOCK_SWEEP_SEC ?? "60", 10));
 const FLUSH_MAX_COUNT = Math.max(
   1,
   parseInt(process.env.CLAUDE_PEERS_FLUSH_MAX_COUNT ?? "20", 10)
@@ -266,6 +271,21 @@ try {
   if (!msg.includes("duplicate column name")) console.error(`[broker] migration: ${msg}`);
 }
 
+// Migration (v0.8, PLAN K2): agent work-lock on pre-existing tables. locked_by
+// is a plain-text peer_id snapshot (no FK), like created_by/updated_by.
+for (const col of [
+  "locked INTEGER NOT NULL DEFAULT 0",
+  "locked_by TEXT",
+  "locked_at TEXT",
+]) {
+  try {
+    db.run(`ALTER TABLE roadmap_items ADD COLUMN ${col}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!msg.includes("duplicate column name")) console.error(`[broker] migration: ${msg}`);
+  }
+}
+
 db.run(`CREATE INDEX IF NOT EXISTS idx_roadmap_project ON roadmap_items(project_key, status)`);
 
 // --- Helpers ---
@@ -356,6 +376,42 @@ function sweepInactivePeers(): void {
   );
 }
 setInterval(sweepInactivePeers, SWEEP_INTERVAL_SEC * 1000);
+
+// --- Stale roadmap-lock sweep (PLAN K2) ---
+// Releases agent work-locks whose owner is gone or that outlived the TTL, so a
+// crashed or abandoned session never freezes an item forever. A released item
+// drops back to 'planned': visibly up for grabs again. `datetime(...)` wraps
+// the stored values because locked_at/updated_at may mix SQLite and ISO-8601
+// formats depending on the writer.
+function releaseStaleLocks(): void {
+  const release = (where: string, params: string[]): void => {
+    db.run(
+      `UPDATE roadmap_items SET
+         locked = 0, locked_by = NULL, locked_at = NULL,
+         status = CASE WHEN status = 'in_progress' THEN 'planned' ELSE status END,
+         updated_by = 'lock-sweep', updated_at = datetime('now')
+       WHERE locked = 1 AND ${where}`,
+      params
+    );
+  };
+  // TTL: no write at all on the item for LOCK_TTL_SEC (any roadmap_update,
+  // e.g. a context enrichment by the working agent, refreshes updated_at).
+  release(`datetime(updated_at) < datetime('now', ?)`, [`-${LOCK_TTL_SEC} seconds`]);
+  // Owner gone: no ACTIVE peer carries the lock owner's peer_id for this
+  // project. The grace period keeps a reconnecting session (server.ts restart,
+  // brief network drop) from being stripped of its lock mid-flight.
+  release(
+    `datetime(locked_at) < datetime('now', ?)
+     AND NOT EXISTS (
+       SELECT 1 FROM peers p
+       WHERE p.peer_id = roadmap_items.locked_by
+         AND p.status = 'active'
+         AND (p.project_key IS NULL OR p.project_key = roadmap_items.project_key)
+     )`,
+    [`-${LOCK_GRACE_SEC} seconds`]
+  );
+}
+setInterval(releaseStaleLocks, LOCK_SWEEP_SEC * 1000);
 
 // --- Prepared statements ---
 
@@ -954,7 +1010,11 @@ const ROADMAP_STATUSES: readonly RoadmapStatus[] = [
   "archived",
 ];
 
-type RoadmapRow = Omit<RoadmapItem, "tags" | "depends_on"> & { tags: string; depends_on: string };
+type RoadmapRow = Omit<RoadmapItem, "tags" | "depends_on" | "locked"> & {
+  tags: string;
+  depends_on: string;
+  locked: number;
+};
 
 function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
   const parseList = (s: string): string[] => {
@@ -965,7 +1025,14 @@ function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
       return [];
     }
   };
-  return { ...row, tags: parseList(row.tags), depends_on: parseList(row.depends_on) };
+  return {
+    ...row,
+    tags: parseList(row.tags),
+    depends_on: parseList(row.depends_on),
+    locked: row.locked === 1,
+    locked_by: row.locked_by ?? null,
+    locked_at: row.locked_at ?? null,
+  };
 }
 
 /** Sanitize an optional string[] payload into a JSON-storable list. */
@@ -1042,11 +1109,31 @@ function handleRoadmapUpsert(
   ) {
     return { error: "queue must be a positive integer or null", status: 400 };
   }
+  if (body.locked !== undefined && typeof body.locked !== "boolean") {
+    return { error: "locked must be a boolean", status: 400 };
+  }
 
   if (body.id) {
     // Partial patch: omitted fields keep their value; project_key never moves.
     const existing = getRoadmapItem(body.id);
     if (!existing) return { error: "unknown roadmap item", status: 404 };
+
+    // Lock guard (PLAN K2): while an agent holds the work-lock, only the owner
+    // or the operator ('deck') may write the item's status or claim the lock
+    // (a same-status in_progress write IS a claim attempt). Other writes
+    // (context enrichment, tags...) stay open to everyone.
+    if (
+      existing.locked &&
+      (body.status !== undefined || body.locked === true) &&
+      by !== existing.locked_by &&
+      by !== "deck" &&
+      body.force !== true
+    ) {
+      return {
+        error: `item is locked by '${existing.locked_by}' (actively working on it) -- pick another item, or pass force:true if you are certain`,
+        status: 409,
+      };
+    }
 
     const next: RoadmapItem = {
       ...existing,
@@ -1066,12 +1153,34 @@ function handleRoadmapUpsert(
     };
     if (!next.title) return { error: "title cannot be empty", status: 400 };
 
+    // Work-lock resolution (PLAN K2). Leaving in_progress always releases the
+    // lock. While in_progress: an explicit `locked` wins; otherwise a non-'deck'
+    // author WRITING status=in_progress claims the lock (the Deck's own
+    // in_progress writes never lock -- the item is "submitted", the lock arrives
+    // when the agent actually starts). A same-owner re-claim keeps locked_at.
+    let locked = existing.locked;
+    let lockedBy = existing.locked_by;
+    if (next.status !== "in_progress") {
+      locked = false;
+    } else if (body.locked !== undefined) {
+      locked = body.locked;
+      if (body.locked) lockedBy = by;
+    } else if (body.status === "in_progress" && by !== "deck" && !existing.locked) {
+      locked = true;
+      lockedBy = by;
+    }
+    if (!locked) lockedBy = null;
+    const keptLockedAt =
+      locked && existing.locked && existing.locked_by === lockedBy ? existing.locked_at : null;
+
     // A status change away from 'archived' restores the item (clears the soft
     // delete); archiving through upsert stamps it like /roadmap/archive does.
     db.run(
       `UPDATE roadmap_items SET
          kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
          value = ?, effort = ?, status = ?, tags = ?, depends_on = ?, queue = ?,
+         locked = ?, locked_by = ?,
+         locked_at = CASE WHEN ? = 0 THEN NULL ELSE COALESCE(?, datetime('now')) END,
          updated_by = ?, updated_at = datetime('now'),
          deleted_at = CASE
            WHEN ? = 'archived' THEN COALESCE(deleted_at, datetime('now'))
@@ -1091,6 +1200,10 @@ function handleRoadmapUpsert(
         JSON.stringify(next.tags),
         JSON.stringify(next.depends_on),
         next.queue,
+        locked ? 1 : 0,
+        lockedBy,
+        locked ? 1 : 0,
+        keptLockedAt,
         next.updated_by,
         next.status,
         body.id,
@@ -1108,13 +1221,19 @@ function handleRoadmapUpsert(
     return { error: "cannot create an item directly archived", status: 400 };
   }
 
+  // An item born in_progress from an agent is locked from the start (PLAN K2).
+  const createStatus = body.status ?? "idea";
+  const createLocked =
+    createStatus === "in_progress" && (body.locked === true || (body.locked !== false && by !== "deck"));
+
   const id = randomUUID();
   db.run(
     `INSERT INTO roadmap_items
        (id, project_key, kind, title, description, rationale, context, priority, value,
         effort, status, tags, depends_on, created_by, updated_by,
-        created_at, updated_at, deleted_at, queue)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?)`,
+        created_at, updated_at, deleted_at, queue, locked, locked_by, locked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?, ?, ?,
+             CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END)`,
     [
       id,
       projectKey,
@@ -1126,12 +1245,15 @@ function handleRoadmapUpsert(
       body.priority ?? "could",
       body.value ?? "medium",
       body.effort ?? "medium",
-      body.status ?? "idea",
+      createStatus,
       JSON.stringify(cleanList(body.tags) ?? []),
       JSON.stringify(cleanList(body.depends_on) ?? []),
       by,
       by,
       body.queue ?? null,
+      createLocked ? 1 : 0,
+      createLocked ? by : null,
+      createLocked ? 1 : 0,
     ]
   );
   return { item: getRoadmapItem(id)! };
@@ -1146,10 +1268,19 @@ function handleRoadmapArchive(
   const existing = getRoadmapItem(body.id);
   if (!existing) return { error: "unknown roadmap item", status: 404 };
 
+  // Same lock guard as upsert (PLAN K2): archiving is a status change.
+  if (existing.locked && by !== existing.locked_by && by !== "deck") {
+    return {
+      error: `item is locked by '${existing.locked_by}' (actively working on it) -- cannot archive`,
+      status: 409,
+    };
+  }
+
   db.run(
     `UPDATE roadmap_items SET
        status = 'archived',
        deleted_at = COALESCE(deleted_at, datetime('now')),
+       locked = 0, locked_by = NULL, locked_at = NULL,
        updated_by = ?, updated_at = datetime('now')
      WHERE id = ?`,
     [by, body.id]
@@ -1474,5 +1605,6 @@ console.error(
   `flush_cap=${FLUSH_MAX_COUNT}/${FLUSH_MAX_AGE_HOURS}h, purge_interval=${PURGE_INTERVAL_SEC}s, ` +
   `activity_timeout=${ACTIVITY_TIMEOUT_MS / 1000}s, ws_idle=${WS_IDLE_TIMEOUT_SEC}s, ` +
   `active_stale=${ACTIVE_STALE_SEC}s, sweep_interval=${SWEEP_INTERVAL_SEC}s, ` +
+  `lock_ttl=${LOCK_TTL_SEC}s, lock_grace=${LOCK_GRACE_SEC}s, ` +
   `auth=${BROKER_TOKEN ? "token" : "none"})`
 );
