@@ -9,6 +9,7 @@ beforeAll(async () => {
   // PURGE_INTERVAL_SEC at max (3600) keeps the test deterministic; tests trigger purge manually.
   broker = await startBroker({
     CLAUDE_PEERS_MESSAGE_TTL_DAYS: "1",
+    CLAUDE_PEERS_GRAPH_DRAFT_TTL_DAYS: "1",
     CLAUDE_PEERS_PURGE_INTERVAL_SEC: "3600",
   });
 });
@@ -104,6 +105,54 @@ test("purge ne touche PAS les messages delivered=1 meme s'ils sont anciens", asy
   // Les 3 delivered=1 ciblant Y du test courant sont toujours la, les 2 delivered=0 ont disparu
   expect(countMessages("to_token = ? AND delivered = 1", y.body.instance_token)).toBe(3);
   expect(countMessages("to_token = ? AND delivered = 0", y.body.instance_token)).toBe(0);
+});
+
+test("purge des graph drafts : opened au-dela du TTL supprime, pending jamais", async () => {
+  // Deux drafts via l'API, backdates directement en SQLite (comme les messages).
+  const mk = async (title: string) => {
+    const res = await post<{ draft: { id: string } }>(`${broker.url}/graph-draft/add`, {
+      project_key: "github.com/vocsap/ttl-test",
+      by: "coder-1",
+      title,
+      prompt: "p",
+    });
+    expect(res.status).toBe(200);
+    return res.body.draft.id;
+  };
+  const openedOld = await mk("opened-old");
+  const pendingOld = await mk("pending-old");
+  const openedFresh = await mk("opened-fresh");
+  await get(`${broker.url}/admin/purge-messages`); // no-op baseline
+
+  const old = new Date(Date.now() - 72 * 3600 * 1000).toISOString();
+  const db = new Database(broker.dbPath);
+  try {
+    db.run("PRAGMA busy_timeout = 3000");
+    db.run("UPDATE graph_drafts SET status='opened', opened_at=? WHERE id=?", [old, openedOld]);
+    db.run("UPDATE graph_drafts SET created_at=? WHERE id=?", [old, pendingOld]);
+    db.run("UPDATE graph_drafts SET status='opened', opened_at=? WHERE id=?", [
+      new Date().toISOString(),
+      openedFresh,
+    ]);
+  } finally {
+    db.close();
+  }
+
+  const purge = await get<{ purged_drafts: number; draft_cutoff_days: number }>(
+    `${broker.url}/admin/purge-messages`
+  );
+  expect(purge.body.draft_cutoff_days).toBe(1);
+  expect(purge.body.purged_drafts).toBe(1);
+
+  const check = new Database(broker.dbPath, { readonly: true });
+  try {
+    const ids = (check.query("SELECT id FROM graph_drafts").all() as { id: string }[]).map((r) => r.id);
+    expect(ids).not.toContain(openedOld); // opened + vieux -> purge
+    expect(ids).toContain(pendingOld); // pending, meme tres vieux -> conserve
+    expect(ids).toContain(openedFresh); // opened recent -> conserve
+  } finally {
+    check.close();
+  }
 });
 
 test("purge run au boot du broker (initial call)", async () => {

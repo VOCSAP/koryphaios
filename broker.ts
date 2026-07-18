@@ -532,16 +532,20 @@ const upsertPeerSession = db.prepare(`
 
 // --- TTL purge of undelivered messages ---
 
-// Opened graph drafts are kept a month for reference, then swept. Pending
+// Opened graph drafts are kept for reference then swept; retention is
+// operator-tunable (CLAUDE_PEERS_GRAPH_DRAFT_TTL_DAYS, default 30). Pending
 // drafts are NEVER purged: they wait for the operator, however long.
-const GRAPH_DRAFT_OPENED_TTL_DAYS = 30;
+const GRAPH_DRAFT_TTL_DAYS = Math.max(
+  1,
+  parseInt(process.env.CLAUDE_PEERS_GRAPH_DRAFT_TTL_DAYS ?? "30", 10)
+);
 const purgeOpenedDraftsStmt = db.prepare(
   `DELETE FROM graph_drafts
    WHERE status = 'opened'
      AND opened_at < datetime('now', ?)`
 );
 
-function purgeOldMessages(): void {
+function purgeOldMessages(): { messages: number; drafts: number } {
   const cutoff = `-${MESSAGE_TTL_DAYS} days`;
   const result = purgeOldUndeliveredStmt.run(cutoff);
   if (result.changes > 0) {
@@ -549,7 +553,8 @@ function purgeOldMessages(): void {
       `[claude-peers broker] purged ${result.changes} stale undelivered messages (>${MESSAGE_TTL_DAYS}d)`
     );
   }
-  purgeOpenedDraftsStmt.run(`-${GRAPH_DRAFT_OPENED_TTL_DAYS} days`);
+  const drafts = purgeOpenedDraftsStmt.run(`-${GRAPH_DRAFT_TTL_DAYS} days`);
+  return { messages: result.changes, drafts: drafts.changes };
 }
 purgeOldMessages();
 setInterval(purgeOldMessages, PURGE_INTERVAL_SEC * 1000);
@@ -1612,9 +1617,13 @@ const server = Bun.serve<WsData>({
       if (path === "/admin/purge-messages") {
         // Manual trigger for the TTL sweep (also runs at boot + every PURGE_INTERVAL_SEC).
         // Returns the number of rows deleted. Used by tests and for ad-hoc cleanup.
-        const cutoff = `-${MESSAGE_TTL_DAYS} days`;
-        const result = purgeOldUndeliveredStmt.run(cutoff);
-        return Response.json({ purged: result.changes, cutoff_days: MESSAGE_TTL_DAYS });
+        const result = purgeOldMessages();
+        return Response.json({
+          purged: result.messages,
+          purged_drafts: result.drafts,
+          cutoff_days: MESSAGE_TTL_DAYS,
+          draft_cutoff_days: GRAPH_DRAFT_TTL_DAYS,
+        });
       }
       return new Response("claude-peers broker", { status: 200 });
     }
@@ -1734,7 +1743,7 @@ const server = Bun.serve<WsData>({
 
 console.error(
   `[claude-peers broker v0.7.0] listening on ${BIND_HOST}:${PORT} ` +
-  `(db: ${DB_PATH}, dormant_ttl=${DORMANT_TTL_HOURS}h, msg_ttl=${MESSAGE_TTL_DAYS}d, ` +
+  `(db: ${DB_PATH}, dormant_ttl=${DORMANT_TTL_HOURS}h, msg_ttl=${MESSAGE_TTL_DAYS}d, draft_ttl=${GRAPH_DRAFT_TTL_DAYS}d, ` +
   `flush_cap=${FLUSH_MAX_COUNT}/${FLUSH_MAX_AGE_HOURS}h, purge_interval=${PURGE_INTERVAL_SEC}s, ` +
   `activity_timeout=${ACTIVITY_TIMEOUT_MS / 1000}s, ws_idle=${WS_IDLE_TIMEOUT_SEC}s, ` +
   `active_stale=${ACTIVE_STALE_SEC}s, sweep_interval=${SWEEP_INTERVAL_SEC}s, ` +
