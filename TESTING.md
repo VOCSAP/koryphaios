@@ -24,3 +24,26 @@ test("hello world", () => {
 - Locale parity: `desktop/locales/en.json`, `fr.json` and the embedded
   `EN_DEFAULTS` (`desktop/src/main/i18n.ts`) must carry the same key set
   (enforced by `tests/desktop-i18n.test.ts`).
+
+The `desktop-precommit` skill (`.claude/skills/`) walks this checklist with
+the workarounds for the known environment quirks below.
+
+## Environment quirks (remote/proxied sessions)
+
+- Fresh container: run `bun install` (root) before the smoke check, and
+  `ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm install` in `desktop/` before the
+  typecheck — the Electron postinstall's binary download gets a 403 from the
+  agent proxy, and the typecheck doesn't need the binary anyway.
+- `tests/server-stdin-eof.test.ts` is flaky in sandboxed environments: re-run
+  it in isolation before treating a failure as a regression.
+
+## Adding a UI string (renderer)
+
+Three files must carry the same key, or `desktop-i18n.test.ts` fails:
+
+1. `desktop/locales/en.json`
+2. `desktop/locales/fr.json`
+3. `EN_DEFAULTS` in `desktop/src/main/i18n.ts`
+
+Prefix keys by view/domain (`graph.*`, `roadmap.*`, `nav.*`, `common.*`) and
+keep the three insertions in the same relative position as their neighbors.

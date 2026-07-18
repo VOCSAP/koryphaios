@@ -63,3 +63,27 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   operator approval (sha256 per project_key); resume-digest sources come from
   the GLOBAL config only (a repo-carried command list would execute arbitrary
   code on clone).
+
+## Renderer view conventions (canvas views especially)
+
+Micro-conventions inferred from the existing views — follow them when
+touching `GraphView.tsx` or building anything canvas-like:
+
+- **Dependency-free rendering**: SVG edges + absolutely-positioned divs,
+  manual camera (`translate/scale` on a world div). No graph/layout library.
+- **Pure logic goes to `desktop/src/shared/`**: anything main AND renderer
+  need (or that deserves a bun test) lives there with no electron/node
+  imports — e.g. grid constants, `layoutGraph`, `outlineOrder` in
+  `shared/graph.ts`. The renderer imports via the `@shared/` alias.
+- **Persistence pattern**: clone-and-replace the doc in local state, then
+  save through one `mutateDoc(next, debounce?)` helper (400 ms debounce for
+  keystroke/drag streams, immediate otherwise).
+- **Canvas overlays** (toolbars, panels floating over the canvas) must
+  `stopPropagation` on `mouseDown`/`click` (and `wheel` if scrollable),
+  otherwise the canvas pan/deselect handlers swallow the interaction.
+- **Reuse the app chrome**: `btn`, `icon-btn` (+ `.is-active`), CSS variables
+  (`--bg*`, `--fg*`, `--accent`, `--selected`, `--border`). Node-kind colors
+  are centralized in the `--graph-k-*` variables (styles.css) — timeline
+  bullets, card accents and edges must all read from them.
+- **i18n**: no hardcoded UI strings — see "Adding a UI string" in
+  `TESTING.md` (three files, parity-tested).
