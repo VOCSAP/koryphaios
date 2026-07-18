@@ -55,7 +55,7 @@ function sampleWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     pinned: false,
     cwd: "/abs/project",
     groupId: "a".repeat(64),
-    scopeName: "olivier-pc-foo",
+    scopeName: "dev-pc-foo",
     scopeKind: "ephemeral",
     displayMode: { kind: "grid", x: 2, y: 2 },
     createdAt: 1000,
@@ -151,9 +151,9 @@ test("deleteWorkspace removes json + lock and is a no-op when already gone", () 
 });
 
 test("autoName has a fixed prefix, no em dash, and the HH:MM", () => {
-  const name = autoName("olivier-pc-foo", new Date(2026, 5, 1, 14, 32));
+  const name = autoName("dev-pc-foo", new Date(2026, 5, 1, 14, 32));
   expect(name).toContain("auto");
-  expect(name).toContain("olivier-pc-foo");
+  expect(name).toContain("dev-pc-foo");
   expect(name).toContain("14:32");
   expect(name).not.toContain("—"); // em dash banned
 });

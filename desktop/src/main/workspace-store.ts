@@ -183,7 +183,7 @@ export function selectPrunableWorkspaces(workspaces: Workspace[], opts: PruneOpt
     .map((ws) => ws.id)
 }
 
-/** Auto-save display name, e.g. "auto · olivier-pc-foo · 14:32". No em dashes. */
+/** Auto-save display name, e.g. "auto · dev-pc-foo · 14:32". No em dashes. */
 export function autoName(scopeName: string, date: Date): string {
   const hh = String(date.getHours()).padStart(2, '0')
   const mm = String(date.getMinutes()).padStart(2, '0')

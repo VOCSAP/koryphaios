@@ -44,10 +44,10 @@ test("resolves the exact per-session file deterministically", () => {
   const cwd = "/home/u/proj";
   const key = computeCwdKey(cwd);
   const sid = "11111111-2222-3333-4444-555555555555";
-  writeFileSync(join(dir, `peer-id-${key}-${sid}.txt`), "olivier-pc-proj-2\n", "utf-8");
+  writeFileSync(join(dir, `peer-id-${key}-${sid}.txt`), "dev-pc-proj-2\n", "utf-8");
   // A different, newer session file for the same cwd must NOT win.
   writeFileSync(join(dir, `peer-id-${key}-99999999.txt`), "other-peer", "utf-8");
-  expect(resolvePeerId(cwd, sid, dir)).toBe("olivier-pc-proj-2");
+  expect(resolvePeerId(cwd, sid, dir)).toBe("dev-pc-proj-2");
 });
 
 test("falls back to the newest file when the exact one is absent", () => {

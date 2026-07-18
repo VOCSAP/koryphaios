@@ -16,8 +16,8 @@ test("defaultAnnounceDraft summarises agent/model/effort with fallbacks", () => 
 
 test("composeJoinAnnounce default path always includes the peer_id and the summary", () => {
   const intent: JoinAnnounceIntent = { custom: null, agent: "reviewer", model: "sonnet", effort: "" };
-  const text = composeJoinAnnounce("olivier-pc-foo-2", intent);
-  expect(text).toContain('"olivier-pc-foo-2"');
+  const text = composeJoinAnnounce("dev-pc-foo-2", intent);
+  expect(text).toContain('"dev-pc-foo-2"');
   expect(text).toContain("agent: reviewer");
   expect(text).toContain("model: sonnet");
   expect(text).toContain("effort: auto");

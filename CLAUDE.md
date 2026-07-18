@@ -69,7 +69,7 @@ The desktop Deck is a one-way (outbound-only) broker participant: it broadcasts 
 - `instance_token` (UUID v4, immutable) -- internal routing key. FK target for `messages`, key of the WebSocket pool, key of `peer_sessions`. Never exposed to Claude.
 - `peer_id` (display, mutable via `set_id`) -- what `list_peers`, `whoami`, `send_message` speak. Unique per `(peer_id, group_id)`, all statuses included (renaming over a dormant peer's name is rejected with 409).
 
-The default `peer_id` is derived from `(host, cwd, group_id)` via `deriveDefaultId` with a `MAX_SUFFIX=1000` guardrail. Typical defaults look like `olivier-pc-claude-peers-mcp` or `olivier-pc-foo-2` on collision.
+The default `peer_id` is derived from `(host, cwd, group_id)` via `deriveDefaultId` with a `MAX_SUFFIX=1000` guardrail. Typical defaults look like `dev-pc-claude-peers-mcp` or `dev-pc-foo-2` on collision.
 
 ## Resume flow (v0.3)
 
