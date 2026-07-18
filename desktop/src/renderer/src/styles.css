@@ -3184,8 +3184,24 @@ code {
   opacity: 0.7;
 }
 
+/* Links reuse the timeline color code: the kind of the node they lead to. */
+.graph-edge.k-prompt {
+  stroke: var(--graph-k-prompt);
+}
+
+.graph-edge.k-whatif {
+  stroke: var(--graph-k-whatif);
+}
+
+.graph-edge.k-merge {
+  stroke: var(--graph-k-merge);
+}
+
+.graph-edge.k-answer {
+  stroke: var(--graph-k-answer);
+}
+
 .graph-edge.is-judge {
-  stroke: #e0a53c;
   stroke-dasharray: 5 4;
 }
 

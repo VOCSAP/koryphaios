@@ -493,11 +493,15 @@ export function GraphView(): React.JSX.Element {
                 const x2 = e.to.x + NODE_W / 2
                 const y2 = e.to.y
                 const my = (y1 + y2) / 2
+                // Same color code as the timeline bullets: a link takes the
+                // kind of the node it leads to.
                 return (
                   <path
                     key={i}
                     d={`M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`}
-                    className={`graph-edge${e.to.type === 'judge' ? ' is-judge' : ''}`}
+                    className={`graph-edge k-${graphNodeKind(doc.nodes, e.to)}${
+                      e.to.type === 'judge' ? ' is-judge' : ''
+                    }`}
                   />
                 )
               })}
