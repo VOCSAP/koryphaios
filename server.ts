@@ -54,6 +54,17 @@ import {
 } from "./shared/config.ts";
 import { writePeerIdCache, writeDeskSessionId } from "./shared/peer-cache.ts";
 import { DECK_PEER_ID, DECK_INSTANCE_TOKEN } from "./shared/types.ts";
+import type { GraphDraftAddResponse } from "./shared/types.ts";
+import {
+  buildDraftPrepareArgs,
+  composeDraftUserMessage,
+  parseDraftOutput,
+  validateDraftPayload,
+  GRAPH_DRAFT_SYSTEM_PROMPT,
+  GRAPH_DRAFT_TIMEOUT_MS,
+} from "./shared/graph-draft.ts";
+import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 
 const PEER_ID_REGEX = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/;
 
@@ -380,6 +391,7 @@ Available tools:
 - switch_group: Move this session to another group (disconnect + re-register).
 - set_id: Rename your peer_id within the current group (display name only; routing is unchanged).
 - roadmap_list / roadmap_get / roadmap_add / roadmap_update / roadmap_archive: the project's shared roadmap (see below).
+- graph_draft_prepare / graph_draft_send: ONLY when the operator explicitly invites you to move a blocking question into the Koryphaios graph view — a cheap read-only haiku pass compiles the question plus the strictly relevant context/references into a prompt draft; you review it, then send it to the operator's Deck where it opens as a pre-filled, unsubmitted graph node (the operator picks the models and launches the inference).
 
 Special recipient 'operator': send_message with to_peer_id 'operator' reaches the HUMAN operator's desktop inbox (works even though 'operator' is not in list_peers). Use it for blocking questions or important findings that need a human decision. The operator does not reply through this channel -- expect an answer as a deck announcement or new instructions.
 
@@ -646,6 +658,43 @@ const TOOLS = [
         id: { type: "string" as const, description: "Item id, or a unique id prefix." },
       },
       required: ["id"],
+    },
+  },
+  {
+    name: "graph_draft_prepare",
+    description:
+      "OPERATOR-INVITED ONLY: call this when the human operator explicitly asks you to move a blocking question into the Koryphaios GRAPH view ('open a graph on this', 'passe en mode graphe'). Never call it on your own initiative. Runs a cheap READ-ONLY haiku one-shot in this project that reformulates your question and compiles only the strictly relevant context and file references into one ready-to-send prompt draft. The draft is returned TO YOU for supervision: review it, fix the question or re-run with better hints if needed, then submit it with graph_draft_send. Nothing is sent and no inference runs at this stage.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        question: {
+          type: "string" as const,
+          description:
+            "The blocking question, as raw as you like — the compiler reformulates it self-contained.",
+        },
+        hints: {
+          type: "string" as const,
+          description:
+            "Optional: files, symbols or areas you already identified as relevant (saves the compiler exploration).",
+        },
+      },
+      required: ["question"],
+    },
+  },
+  {
+    name: "graph_draft_send",
+    description:
+      "Send a reviewed graph draft to the operator's Deck. The draft is persisted broker-side (it survives Deck restarts) and appears in the operator inbox; when the operator opens it, it becomes a PRE-FILLED, UNSUBMITTED prompt node in a fresh graph conversation — the operator picks the target models and launches the inference. Pass the title and prompt from graph_draft_prepare, edited as you see fit.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: { type: "string" as const, description: "Short title (becomes the graph name)." },
+        prompt: {
+          type: "string" as const,
+          description: "The full prompt draft (markdown: question + curated context + references).",
+        },
+      },
+      required: ["title", "prompt"],
     },
   },
 ];
@@ -1228,10 +1277,109 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
     }
 
+    case "graph_draft_prepare": {
+      const a = args as { question?: string; hints?: string };
+      const question = (a.question ?? "").trim();
+      if (!question) {
+        return {
+          content: [{ type: "text" as const, text: "question is required" }],
+          isError: true,
+        };
+      }
+      try {
+        const output = await runDraftOneShot(composeDraftUserMessage(question, a.hints));
+        const { title, prompt } = parseDraftOutput(output, question.slice(0, 80));
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                `Draft prepared — REVIEW IT (edit or re-run with better hints if off), then submit with graph_draft_send:\n\n` +
+                `title: ${title}\n\n${prompt}`,
+            },
+          ],
+        };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return {
+          content: [{ type: "text" as const, text: `graph_draft_prepare failed: ${msg}` }],
+          isError: true,
+        };
+      }
+    }
+
+    case "graph_draft_send": {
+      const payload = validateDraftPayload(args as { title?: unknown; prompt?: unknown });
+      if ("error" in payload) {
+        return { content: [{ type: "text" as const, text: payload.error }], isError: true };
+      }
+      try {
+        const { draft } = await brokerFetch<GraphDraftAddResponse>("/graph-draft/add", {
+          project_key: roadmapProjectKey(),
+          by: roadmapAuthor(),
+          title: payload.title,
+          prompt: payload.prompt,
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Graph draft sent to the operator's Deck (id ${draft.id}). It stays pending — broker-persisted — until the operator opens it in the graph view, picks models and launches the inference. You can go back to your task.`,
+            },
+          ],
+        };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return {
+          content: [{ type: "text" as const, text: `graph_draft_send failed: ${msg}` }],
+          isError: true,
+        };
+      }
+    }
+
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
 });
+
+/**
+ * Run the read-only pinned-haiku one-shot that compiles a graph draft
+ * (system prompt = CODE CONSTANT, array-argv spawn: no shell quoting).
+ */
+async function runDraftOneShot(userMessage: string): Promise<string> {
+  const dir = join(tmpdir(), "claude-peers-graph-draft");
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `system-${process.pid}-${Date.now()}.md`);
+  writeFileSync(file, GRAPH_DRAFT_SYSTEM_PROMPT, "utf-8");
+  const proc = Bun.spawn({
+    cmd: buildDraftPrepareArgs({ userMessage, systemPromptFile: file }),
+    cwd: myCwd,
+    stdin: "ignore",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const timer = setTimeout(() => proc.kill(), GRAPH_DRAFT_TIMEOUT_MS);
+  try {
+    const [out, err, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    if (code !== 0) {
+      throw new Error(`haiku one-shot failed (exit ${code}): ${(err || out).slice(0, 400)}`);
+    }
+    const text = out.trim();
+    if (!text) throw new Error("haiku one-shot returned nothing");
+    return text;
+  } finally {
+    clearTimeout(timer);
+    try {
+      unlinkSync(file);
+    } catch {
+      // best-effort cleanup
+    }
+  }
+}
 
 // --- Startup ---
 

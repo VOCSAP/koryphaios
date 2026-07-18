@@ -523,6 +523,26 @@ export interface InboxMessage {
   sentAt: string
 }
 
+/**
+ * One pending graph draft: an agent-escalated question parked durably on the
+ * broker, waiting for the operator to open it in the graph view. Unlike the
+ * inbox drain, the poll is non-destructive — a Deck restart loses nothing.
+ */
+export interface DeckGraphDraft {
+  id: string
+  from: string
+  title: string
+  prompt: string
+  /** ISO timestamp (broker created_at). */
+  createdAt: string
+}
+
+/** Result of opening a draft: the created graph doc + its pre-filled node. */
+export interface GraphDraftOpenResult {
+  docId: string
+  nodeId: string
+}
+
 // ----- IPC channel payloads -----
 
 export interface PtyDataEvent {
@@ -711,6 +731,14 @@ export interface DeckApi {
       judge?: import('./graph').ModelTarget
     }
   ): Promise<import('./graph').GraphDoc>
+  /**
+   * Open a pending graph draft: marks it opened broker-side, creates a graph
+   * doc with the pre-filled (unsubmitted) prompt node, returns both ids for
+   * navigation. Inference stays a manual operator action.
+   */
+  graphDraftOpen(draft: DeckGraphDraft): Promise<GraphDraftOpenResult>
+  /** Persisted operator-inbox history (oldest first) for startup hydration. */
+  inboxHistory(): Promise<InboxMessage[]>
 
   // events (return an unsubscribe fn)
   onPtyData(cb: (e: PtyDataEvent) => void): () => void
@@ -721,6 +749,8 @@ export interface DeckApi {
   onSessionAttention(cb: (e: SessionAttentionEvent) => void): () => void
   /** Operator-inbox batch drained from the broker (PLAN C12), oldest first. */
   onInboxMessages(cb: (messages: InboxMessage[]) => void): () => void
+  /** Full pending graph-draft list (non-destructive broker poll). */
+  onGraphDrafts(cb: (drafts: DeckGraphDraft[]) => void): () => void
   /** Notification click on an inbox message: open the inbox panel. */
   onInboxOpen(cb: () => void): () => void
   /** Notification click: bring a session into view (agents view + selection). */

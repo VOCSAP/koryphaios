@@ -29,7 +29,14 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   is desktop-local per project_key (`graph-store.ts`), encrypted at rest via
   the safeStorage-backed cipher (K8: envelope with a base64 payload; legacy
   clear files are re-encrypted on first list; clear-text fallback when the OS
-  keychain is unavailable so the feature never breaks).
+  keychain is unavailable so the feature never breaks). Graph drafts: the
+  main process polls the broker's pending `graph_drafts` (agent-escalated
+  questions, see ARCHITECTURE.md) — they surface as action cards in the ✉
+  inbox with a pulsing rail glyph (`is-glowing`), and "Open in graph" creates
+  a doc with the pre-filled unsubmitted prompt node, flips the draft
+  broker-side, and navigates the graph view onto it (`graphFocus` in the
+  store). The inbox itself is persisted to `inbox-history.json`
+  (`inbox-store.ts`) because the broker drain is destructive.
 - **Roadmap (🗺 rail view)**: kanban board over the broker's shared roadmap —
   one column per status (idea/planned/in_progress/done, + archived behind the
   toggle), MoSCoW priority as a colored chip + in-column sort, native HTML5
@@ -63,3 +70,27 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   operator approval (sha256 per project_key); resume-digest sources come from
   the GLOBAL config only (a repo-carried command list would execute arbitrary
   code on clone).
+
+## Renderer view conventions (canvas views especially)
+
+Micro-conventions inferred from the existing views — follow them when
+touching `GraphView.tsx` or building anything canvas-like:
+
+- **Dependency-free rendering**: SVG edges + absolutely-positioned divs,
+  manual camera (`translate/scale` on a world div). No graph/layout library.
+- **Pure logic goes to `desktop/src/shared/`**: anything main AND renderer
+  need (or that deserves a bun test) lives there with no electron/node
+  imports — e.g. grid constants, `layoutGraph`, `outlineOrder` in
+  `shared/graph.ts`. The renderer imports via the `@shared/` alias.
+- **Persistence pattern**: clone-and-replace the doc in local state, then
+  save through one `mutateDoc(next, debounce?)` helper (400 ms debounce for
+  keystroke/drag streams, immediate otherwise).
+- **Canvas overlays** (toolbars, panels floating over the canvas) must
+  `stopPropagation` on `mouseDown`/`click` (and `wheel` if scrollable),
+  otherwise the canvas pan/deselect handlers swallow the interaction.
+- **Reuse the app chrome**: `btn`, `icon-btn` (+ `.is-active`), CSS variables
+  (`--bg*`, `--fg*`, `--accent`, `--selected`, `--border`). Node-kind colors
+  are centralized in the `--graph-k-*` variables (styles.css) — timeline
+  bullets, card accents and edges must all read from them.
+- **i18n**: no hardcoded UI strings — see "Adding a UI string" in
+  `TESTING.md` (three files, parity-tested).

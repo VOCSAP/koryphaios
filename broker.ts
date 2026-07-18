@@ -15,6 +15,7 @@ import { mkdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { loadConfig } from "./shared/config.ts";
+import { validateDraftPayload } from "./shared/graph-draft.ts";
 import type {
   RegisterRequest,
   RegisterResponse,
@@ -43,6 +44,14 @@ import type {
   RoadmapStatus,
   RoadmapUpsertRequest,
   RoadmapUpsertResponse,
+  GraphDraft,
+  GraphDraftAddRequest,
+  GraphDraftAddResponse,
+  GraphDraftListRequest,
+  GraphDraftListResponse,
+  GraphDraftOpenRequest,
+  GraphDraftOpenResponse,
+  GraphDraftStatus,
   OperatorInboxRequest,
   OperatorInboxResponse,
   OperatorInboxMessage,
@@ -288,6 +297,25 @@ for (const col of [
 
 db.run(`CREATE INDEX IF NOT EXISTS idx_roadmap_project ON roadmap_items(project_key, status)`);
 
+// Graph drafts: agent-escalated questions waiting to be opened in the Deck's
+// graph view. Same durability philosophy as roadmap_items (no FK, plain-text
+// peer snapshot) and deliberately NOT the messages table: listing is
+// non-destructive (no drain), the status only flips when the OPERATOR opens
+// the draft — a Deck crash or restart never loses a pending draft.
+db.run(`
+  CREATE TABLE IF NOT EXISTS graph_drafts (
+    id TEXT PRIMARY KEY,
+    project_key TEXT NOT NULL,
+    from_peer TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    opened_at TEXT
+  )
+`);
+db.run(`CREATE INDEX IF NOT EXISTS idx_graph_drafts_project ON graph_drafts(project_key, status)`);
+
 // --- Helpers ---
 
 function sessionKey(host: string, cwd: string, groupId: GroupId): string {
@@ -504,7 +532,20 @@ const upsertPeerSession = db.prepare(`
 
 // --- TTL purge of undelivered messages ---
 
-function purgeOldMessages(): void {
+// Opened graph drafts are kept for reference then swept; retention is
+// operator-tunable (CLAUDE_PEERS_GRAPH_DRAFT_TTL_DAYS, default 30). Pending
+// drafts are NEVER purged: they wait for the operator, however long.
+const GRAPH_DRAFT_TTL_DAYS = Math.max(
+  1,
+  parseInt(process.env.CLAUDE_PEERS_GRAPH_DRAFT_TTL_DAYS ?? "30", 10)
+);
+const purgeOpenedDraftsStmt = db.prepare(
+  `DELETE FROM graph_drafts
+   WHERE status = 'opened'
+     AND opened_at < datetime('now', ?)`
+);
+
+function purgeOldMessages(): { messages: number; drafts: number } {
   const cutoff = `-${MESSAGE_TTL_DAYS} days`;
   const result = purgeOldUndeliveredStmt.run(cutoff);
   if (result.changes > 0) {
@@ -512,6 +553,8 @@ function purgeOldMessages(): void {
       `[claude-peers broker] purged ${result.changes} stale undelivered messages (>${MESSAGE_TTL_DAYS}d)`
     );
   }
+  const drafts = purgeOpenedDraftsStmt.run(`-${GRAPH_DRAFT_TTL_DAYS} days`);
+  return { messages: result.changes, drafts: drafts.changes };
 }
 purgeOldMessages();
 setInterval(purgeOldMessages, PURGE_INTERVAL_SEC * 1000);
@@ -1403,6 +1446,80 @@ function handleOperatorInbox(
   return { messages: rows };
 }
 
+// --- Graph drafts (agent-escalated questions for the Deck's graph view) ---
+
+type GraphDraftRow = {
+  id: string;
+  project_key: string;
+  from_peer: string;
+  title: string;
+  prompt: string;
+  status: GraphDraftStatus;
+  created_at: string;
+  opened_at: string | null;
+};
+
+function rowToGraphDraft(row: GraphDraftRow): GraphDraft {
+  return { ...row };
+}
+
+function handleGraphDraftAdd(
+  body: GraphDraftAddRequest
+): GraphDraftAddResponse | { error: string; status: number } {
+  if (!body.project_key || typeof body.project_key !== "string") {
+    return { error: "project_key is required", status: 400 };
+  }
+  const payload = validateDraftPayload(body);
+  if ("error" in payload) return { error: payload.error, status: 400 };
+  const draft: GraphDraft = {
+    id: randomUUID(),
+    project_key: body.project_key,
+    from_peer: typeof body.by === "string" ? body.by.slice(0, 128) : "",
+    title: payload.title,
+    prompt: payload.prompt,
+    status: "pending",
+    created_at: new Date().toISOString(),
+    opened_at: null,
+  };
+  db.run(
+    `INSERT INTO graph_drafts (id, project_key, from_peer, title, prompt, status, created_at, opened_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    [draft.id, draft.project_key, draft.from_peer, draft.title, draft.prompt, draft.status, draft.created_at, draft.opened_at]
+  );
+  return { draft };
+}
+
+function handleGraphDraftList(
+  body: GraphDraftListRequest
+): GraphDraftListResponse | { error: string; status: number } {
+  if (!body.project_key || typeof body.project_key !== "string") {
+    return { error: "project_key is required", status: 400 };
+  }
+  let sql = "SELECT * FROM graph_drafts WHERE project_key = ?";
+  if (!body.include_opened) sql += " AND status = 'pending'";
+  sql += " ORDER BY created_at, id";
+  const rows = db.query(sql).all(body.project_key) as GraphDraftRow[];
+  return { drafts: rows.map(rowToGraphDraft) };
+}
+
+function handleGraphDraftOpen(
+  body: GraphDraftOpenRequest
+): GraphDraftOpenResponse | { error: string; status: number } {
+  if (!body.id || typeof body.id !== "string") {
+    return { error: "id is required", status: 400 };
+  }
+  const row = db.query("SELECT * FROM graph_drafts WHERE id = ?").get(body.id) as GraphDraftRow | null;
+  if (!row) return { error: "unknown graph draft", status: 404 };
+  if (row.status !== "opened") {
+    db.run("UPDATE graph_drafts SET status = 'opened', opened_at = ? WHERE id = ?", [
+      new Date().toISOString(),
+      row.id,
+    ]);
+  }
+  const fresh = db.query("SELECT * FROM graph_drafts WHERE id = ?").get(body.id) as GraphDraftRow;
+  return { draft: rowToGraphDraft(fresh) };
+}
+
 function handleGroupStats(): GroupStatsResponse {
   const rows = db.query(
     "SELECT group_id, COUNT(*) AS active_peers FROM peers WHERE status = 'active' GROUP BY group_id"
@@ -1500,9 +1617,13 @@ const server = Bun.serve<WsData>({
       if (path === "/admin/purge-messages") {
         // Manual trigger for the TTL sweep (also runs at boot + every PURGE_INTERVAL_SEC).
         // Returns the number of rows deleted. Used by tests and for ad-hoc cleanup.
-        const cutoff = `-${MESSAGE_TTL_DAYS} days`;
-        const result = purgeOldUndeliveredStmt.run(cutoff);
-        return Response.json({ purged: result.changes, cutoff_days: MESSAGE_TTL_DAYS });
+        const result = purgeOldMessages();
+        return Response.json({
+          purged: result.messages,
+          purged_drafts: result.drafts,
+          cutoff_days: MESSAGE_TTL_DAYS,
+          draft_cutoff_days: GRAPH_DRAFT_TTL_DAYS,
+        });
       }
       return new Response("claude-peers broker", { status: 200 });
     }
@@ -1583,6 +1704,27 @@ const server = Bun.serve<WsData>({
           }
           return Response.json(result);
         }
+        case "/graph-draft/add": {
+          const result = handleGraphDraftAdd(body as GraphDraftAddRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/graph-draft/list": {
+          const result = handleGraphDraftList(body as GraphDraftListRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/graph-draft/open": {
+          const result = handleGraphDraftOpen(body as GraphDraftOpenRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
         case "/poll-messages":
           return Response.json(handlePollMessages(body as PollMessagesRequest));
         case "/peek-messages":
@@ -1601,7 +1743,7 @@ const server = Bun.serve<WsData>({
 
 console.error(
   `[claude-peers broker v0.7.0] listening on ${BIND_HOST}:${PORT} ` +
-  `(db: ${DB_PATH}, dormant_ttl=${DORMANT_TTL_HOURS}h, msg_ttl=${MESSAGE_TTL_DAYS}d, ` +
+  `(db: ${DB_PATH}, dormant_ttl=${DORMANT_TTL_HOURS}h, msg_ttl=${MESSAGE_TTL_DAYS}d, draft_ttl=${GRAPH_DRAFT_TTL_DAYS}d, ` +
   `flush_cap=${FLUSH_MAX_COUNT}/${FLUSH_MAX_AGE_HOURS}h, purge_interval=${PURGE_INTERVAL_SEC}s, ` +
   `activity_timeout=${ACTIVITY_TIMEOUT_MS / 1000}s, ws_idle=${WS_IDLE_TIMEOUT_SEC}s, ` +
   `active_stale=${ACTIVE_STALE_SEC}s, sweep_interval=${SWEEP_INTERVAL_SEC}s, ` +

@@ -376,3 +376,52 @@ export interface WsMessageFrame {
 }
 
 export type WsFrame = WsMessageFrame;
+
+// --- Graph drafts (agent-escalated questions opened in the Deck's graph view) ---
+// An agent (invited by the operator) prepares a graph-chat prompt draft; the
+// broker parks it durably here (roadmap_items spirit: no FK, no destructive
+// drain) until the operator opens it in the Deck. Scoped by project_key.
+
+export type GraphDraftStatus = "pending" | "opened";
+
+export interface GraphDraft {
+  id: string;
+  project_key: string;
+  /** Sender peer_id snapshot (plain text, survives the peer row). */
+  from_peer: string;
+  /** Short title (becomes the graph doc name). */
+  title: string;
+  /** Full pre-filled prompt (markdown: question + curated context + refs). */
+  prompt: string;
+  status: GraphDraftStatus;
+  created_at: string; // ISO timestamp
+  opened_at: string | null; // ISO timestamp
+}
+
+export interface GraphDraftAddRequest {
+  project_key?: string;
+  by?: string;
+  title?: string;
+  prompt?: string;
+}
+
+export interface GraphDraftAddResponse {
+  draft: GraphDraft;
+}
+
+export interface GraphDraftListRequest {
+  project_key?: string;
+  include_opened?: boolean;
+}
+
+export interface GraphDraftListResponse {
+  drafts: GraphDraft[];
+}
+
+export interface GraphDraftOpenRequest {
+  id?: string;
+}
+
+export interface GraphDraftOpenResponse {
+  draft: GraphDraft;
+}

@@ -142,6 +142,56 @@ export async function fetchOperatorInbox(
   return ((await res.json()) as { messages: OperatorInboxMessage[] }).messages
 }
 
+/** One pending graph draft parked on the broker (agent-escalated question). */
+export interface BrokerGraphDraft {
+  id: string
+  project_key: string
+  from_peer: string
+  title: string
+  prompt: string
+  status: 'pending' | 'opened'
+  created_at: string
+  opened_at: string | null
+}
+
+/**
+ * POST /graph-draft/list: the PENDING drafts of this project. Non-destructive
+ * (unlike the inbox drain): polling never consumes anything — a draft only
+ * leaves this list when markGraphDraftOpened is called on operator action.
+ */
+export async function fetchGraphDrafts(
+  projectKey: string,
+  deps: AnnounceDeps
+): Promise<BrokerGraphDraft[]> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (deps.endpoint.token) headers['Authorization'] = `Bearer ${deps.endpoint.token}`
+  const f = deps.fetchFn ?? fetch
+  const res = await f(`${deps.endpoint.url}/graph-draft/list`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ project_key: projectKey })
+  })
+  if (!res.ok) throw new Error(`graph-draft/list failed: ${res.status}`)
+  return ((await res.json()) as { drafts: BrokerGraphDraft[] }).drafts
+}
+
+/** POST /graph-draft/open: flip a draft to opened (idempotent broker-side). */
+export async function markGraphDraftOpened(
+  id: string,
+  deps: AnnounceDeps
+): Promise<BrokerGraphDraft> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (deps.endpoint.token) headers['Authorization'] = `Bearer ${deps.endpoint.token}`
+  const f = deps.fetchFn ?? fetch
+  const res = await f(`${deps.endpoint.url}/graph-draft/open`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ id })
+  })
+  if (!res.ok) throw new Error(`graph-draft/open failed: ${res.status}`)
+  return ((await res.json()) as { draft: BrokerGraphDraft }).draft
+}
+
 /**
  * POST /announce. Best-effort: throws on a non-2xx or transport failure so the
  * caller can swallow it (an announce must never crash the Deck main process).

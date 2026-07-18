@@ -1,8 +1,22 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { GraphCli, GraphDoc, GraphNode, ModelTarget } from '@shared/graph'
-import { childrenOf, graphId, wouldCreateCycle } from '@shared/graph'
+import {
+  childrenOf,
+  findFreeSpot,
+  graphId,
+  graphNodeKind,
+  GRAPH_GRID,
+  GRAPH_NODE_H,
+  GRAPH_NODE_W,
+  GRAPH_PITCH_Y,
+  layoutGraph,
+  outlineOrder,
+  snapToGrid,
+  wouldCreateCycle
+} from '@shared/graph'
 import type { ProviderCatalog } from '@shared/models'
 import { useT } from '../i18n'
+import { useDeck } from '../store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ModelPicker } from './ModelPicker'
 
@@ -11,11 +25,15 @@ import { ModelPicker } from './ModelPicker'
 // node, fan a prompt out to several CLIs, and (C27) let a judge node merge a
 // battle. Rendering is dependency-free on purpose (SVG edges + positioned
 // divs, manual layout like the demo): consistent with the rest of the app.
+// Placement lives on a shared grid (GRAPH_GRID): drag snaps, automatic
+// placements respect the hierarchy, and layoutGraph re-tidies on demand.
 
-const NODE_W = 260
-const NODE_H = 130
+const NODE_W = GRAPH_NODE_W
+const NODE_H = GRAPH_NODE_H
 const ZOOM_MIN = 0.25
 const ZOOM_MAX = 2
+/** Timeline outline: chars kept per row before the ellipsis. */
+const OUTLINE_CHARS = 46
 
 const CLI_ICONS: Record<GraphCli, string> = { claude: '✴', codex: '◆', gemini: '✦', local: '🖳' }
 
@@ -58,6 +76,7 @@ export function GraphView(): React.JSX.Element {
   const [targetMap, setTargetMap] = useState<Record<string, ModelTarget>>(DEFAULT_TARGETS)
   const [battle, setBattle] = useState(false)
   const [judgeModel, setJudgeModel] = useState('sonnet')
+  const [showTimeline, setShowTimeline] = useState(false)
 
   const canvasRef = useRef<HTMLDivElement>(null)
   const drag = useRef<{
@@ -85,6 +104,26 @@ export function GraphView(): React.JSX.Element {
     void refresh()
     void window.api.modelCatalogs().then(setCatalogs)
   }, [refresh])
+
+  // Navigation request from outside (an opened graph draft): re-list so the
+  // freshly created doc is present, then activate it and select its
+  // pre-filled node. Two effects because the list update is asynchronous.
+  const graphFocus = useDeck((s) => s.graphFocus)
+  const clearGraphFocus = useDeck((s) => s.clearGraphFocus)
+  useEffect(() => {
+    if (graphFocus) void refresh()
+  }, [graphFocus, refresh])
+  useEffect(() => {
+    if (!graphFocus) return
+    const target = graphs.find((g) => g.id === graphFocus.docId)
+    if (!target) return // list not refreshed yet; next graphs update retries
+    setActiveId(target.id)
+    const node = target.nodes.find((n) => n.id === graphFocus.nodeId)
+    setSelection(node ? [node.id] : [])
+    if (node?.type === 'user') setDraftText(node.text)
+    setCamera({ x: 60, y: 40, zoom: 1 })
+    clearGraphFocus()
+  }, [graphFocus, graphs, clearGraphFocus])
 
   useEffect(() => {
     if (!notice) return
@@ -141,9 +180,21 @@ export function GraphView(): React.JSX.Element {
 
   const addNode = (parents: string[]): void => {
     if (!doc) return
-    const base =
-      parents.length > 0 ? doc.nodes.find((n) => n.id === parents[parents.length - 1]) : null
-    const pos = base ? { x: base.x, y: base.y + NODE_H + 60 } : viewportCenter()
+    // Hierarchy-aware placement: one parent -> the row right below it (a
+    // reply/what-if hangs under its parent); several parents (a cross) ->
+    // centered under them; no parent -> viewport center. findFreeSpot snaps
+    // to the grid and slides right along the row if the slot is taken.
+    const parentNodes = parents
+      .map((id) => doc.nodes.find((n) => n.id === id))
+      .filter((n): n is GraphNode => !!n)
+    const want =
+      parentNodes.length > 0
+        ? {
+            x: parentNodes.reduce((s, p) => s + p.x, 0) / parentNodes.length,
+            y: Math.max(...parentNodes.map((p) => p.y)) + GRAPH_PITCH_Y
+          }
+        : viewportCenter()
+    const pos = findFreeSpot(doc.nodes, want.x, want.y)
     const node: GraphNode = {
       id: graphId(),
       type: 'user',
@@ -268,8 +319,8 @@ export function GraphView(): React.JSX.Element {
     if (d.kind === 'pan') {
       setCamera((c) => ({ ...c, x: d.origX + dx, y: d.origY + dy }))
     } else if (d.id && doc) {
-      const nx = d.origX + dx / camera.zoom
-      const ny = d.origY + dy / camera.zoom
+      const nx = snapToGrid(d.origX + dx / camera.zoom)
+      const ny = snapToGrid(d.origY + dy / camera.zoom)
       mutateDoc(
         { ...doc, nodes: doc.nodes.map((n) => (n.id === d.id ? { ...n, x: nx, y: ny } : n)) },
         true
@@ -302,6 +353,62 @@ export function GraphView(): React.JSX.Element {
     if (drag.current?.moved) return
     setSelection([])
     setConnectMode(false)
+  }
+
+  /** Button zoom: same math as the wheel, anchored on the viewport center. */
+  const zoomBy = (factor: number): void => {
+    const el = canvasRef.current
+    if (!el) return
+    const cx = el.clientWidth / 2
+    const cy = el.clientHeight / 2
+    setCamera((c) => {
+      const zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, c.zoom * factor))
+      const gx = (cx - c.x) / c.zoom
+      const gy = (cy - c.y) / c.zoom
+      return { zoom, x: cx - gx * zoom, y: cy - gy * zoom }
+    })
+  }
+
+  /** Fit the whole graph in the viewport (nodes override for post-arrange). */
+  const fitView = (nodes?: GraphNode[]): void => {
+    const el = canvasRef.current
+    const list = nodes ?? doc?.nodes
+    if (!el || !list || list.length === 0) return
+    const pad = 60
+    const minX = Math.min(...list.map((n) => n.x)) - pad
+    const minY = Math.min(...list.map((n) => n.y)) - pad
+    const maxX = Math.max(...list.map((n) => n.x + NODE_W)) + pad
+    const maxY = Math.max(...list.map((n) => n.y + NODE_H)) + pad
+    const zoom = Math.min(
+      ZOOM_MAX,
+      Math.max(ZOOM_MIN, Math.min(el.clientWidth / (maxX - minX), el.clientHeight / (maxY - minY), 1))
+    )
+    setCamera({
+      zoom,
+      x: (el.clientWidth - (minX + maxX) * zoom) / 2,
+      y: (el.clientHeight - (minY + maxY) * zoom) / 2
+    })
+  }
+
+  /** Re-tidy every node on the grid by hierarchy level, then re-frame. */
+  const arrange = (): void => {
+    if (!doc) return
+    const nodes = layoutGraph(doc.nodes)
+    mutateDoc({ ...doc, nodes })
+    fitView(nodes)
+  }
+
+  /** Timeline click: select the node and pan the camera onto it. */
+  const navigateTo = (node: GraphNode): void => {
+    const el = canvasRef.current
+    if (!el) return
+    setSelection([node.id])
+    if (node.type === 'user') setDraftText(node.text)
+    setCamera((c) => ({
+      ...c,
+      x: el.clientWidth / 2 - (node.x + NODE_W / 2) * c.zoom,
+      y: el.clientHeight / 2 - (node.y + NODE_H / 2) * c.zoom
+    }))
   }
 
   const onWheel = (e: React.WheelEvent): void => {
@@ -380,6 +487,12 @@ export function GraphView(): React.JSX.Element {
       <div
         ref={canvasRef}
         className={`graph-canvas${connectMode ? ' is-connecting' : ''}`}
+        style={{
+          // Dot grid glued to the world: one dot every 2 grid steps, panned
+          // and zoomed with the camera so snapping reads on screen.
+          backgroundSize: `${GRAPH_GRID * 2 * camera.zoom}px ${GRAPH_GRID * 2 * camera.zoom}px`,
+          backgroundPosition: `${camera.x}px ${camera.y}px`
+        }}
         onMouseDown={onCanvasMouseDown}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
@@ -401,11 +514,15 @@ export function GraphView(): React.JSX.Element {
                 const x2 = e.to.x + NODE_W / 2
                 const y2 = e.to.y
                 const my = (y1 + y2) / 2
+                // Same color code as the timeline bullets: a link takes the
+                // kind of the node it leads to.
                 return (
                   <path
                     key={i}
                     d={`M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`}
-                    className={`graph-edge${e.to.type === 'judge' ? ' is-judge' : ''}`}
+                    className={`graph-edge k-${graphNodeKind(doc.nodes, e.to)}${
+                      e.to.type === 'judge' ? ' is-judge' : ''
+                    }`}
                   />
                 )
               })}
@@ -416,6 +533,7 @@ export function GraphView(): React.JSX.Element {
                 className={[
                   'graph-node',
                   `is-${n.type}`,
+                  `k-${graphNodeKind(doc.nodes, n)}`,
                   selection.includes(n.id) ? 'is-selected' : '',
                   n.status === 'error' ? 'is-error' : '',
                   running === n.id ? 'is-running' : ''
@@ -446,6 +564,75 @@ export function GraphView(): React.JSX.Element {
             </button>
             <span className="graph-zoom">{Math.round(camera.zoom * 100)}%</span>
           </div>
+        )}
+        {doc && (
+          <div
+            className="graph-zoomctl"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button className="icon-btn" title={t('graph.zoomIn')} onClick={() => zoomBy(1.2)}>
+              ＋
+            </button>
+            <button className="icon-btn" title={t('graph.zoomOut')} onClick={() => zoomBy(1 / 1.2)}>
+              －
+            </button>
+            <button className="icon-btn" title={t('graph.fitView')} onClick={() => fitView()}>
+              ⛶
+            </button>
+            <span className="graph-zoomctl-sep" />
+            <button className="icon-btn" title={t('graph.arrange')} onClick={arrange}>
+              ⊞
+            </button>
+            <button
+              className={`icon-btn${showTimeline ? ' is-active' : ''}`}
+              title={t('graph.timeline')}
+              onClick={() => setShowTimeline((v) => !v)}
+            >
+              ☰
+            </button>
+          </div>
+        )}
+        {doc && showTimeline && (
+          <aside
+            className="graph-timeline"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+            onWheel={(e) => e.stopPropagation()}
+          >
+            <div className="graph-timeline-title">{t('graph.timeline')}</div>
+            {doc.nodes.length === 0 && (
+              <div className="graph-timeline-empty">{t('graph.timelineEmpty')}</div>
+            )}
+            {outlineOrder(doc.nodes).map(({ node, depth }) => {
+              const kind = graphNodeKind(doc.nodes, node)
+              const raw = (node.status === 'error' ? `⚠ ${node.error ?? ''}` : node.text)
+                .replace(/\s+/g, ' ')
+                .trim()
+              const label = raw.slice(0, OUTLINE_CHARS) || nodeTitle(node, t)
+              return (
+                <button
+                  key={node.id}
+                  className={[
+                    'graph-timeline-row',
+                    `k-${kind}`,
+                    selection.includes(node.id) ? 'is-active' : ''
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  style={{ paddingLeft: 10 + depth * 12 }}
+                  title={`${nodeTitle(node, t)} — ${raw.slice(0, 200)}`}
+                  onClick={() => navigateTo(node)}
+                >
+                  <span className="graph-timeline-bullet" />
+                  <span className="graph-timeline-text">
+                    {label}
+                    {raw.length > OUTLINE_CHARS ? '…' : ''}
+                  </span>
+                </button>
+              )
+            })}
+          </aside>
         )}
         {notice && <div className="graph-notice">{notice}</div>}
         {connectMode && <div className="graph-connect-hint">{t('graph.connectHint')}</div>}

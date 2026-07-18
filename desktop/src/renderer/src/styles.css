@@ -2458,6 +2458,87 @@ code {
   font-size: 11px;
 }
 
+/* Pending graph drafts: action-required cards pinned above the message flow. */
+.inbox-drafts {
+  border-bottom: 1px solid var(--border);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 55%;
+  overflow-y: auto;
+}
+
+.inbox-drafts-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--graph-k-whatif);
+}
+
+.inbox-draft {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--graph-k-whatif);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.inbox-draft-glyph {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--graph-k-whatif);
+  animation: glyph-glow 2.2s ease-in-out infinite;
+}
+
+.inbox-draft-title {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.inbox-draft-excerpt {
+  font-size: 11px;
+  color: var(--fg-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 60px;
+  overflow: hidden;
+}
+
+.inbox-draft-open {
+  align-self: flex-end;
+  font-size: 12px;
+}
+
+/* The "fantasy glyph" glow: the inbox rail icon pulses while a draft awaits
+   the operator. Pure filter/opacity animation (GPU-cheap, no re-layout). */
+.nav-rail-item.is-glowing .nav-rail-icon {
+  animation: glyph-glow 2.2s ease-in-out infinite;
+}
+
+@keyframes glyph-glow {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 2px var(--graph-k-whatif));
+    opacity: 0.85;
+  }
+  50% {
+    filter: drop-shadow(0 0 9px var(--graph-k-whatif)) drop-shadow(0 0 18px var(--graph-k-whatif));
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-rail-item.is-glowing .nav-rail-icon,
+  .inbox-draft-glyph {
+    animation: none;
+    filter: drop-shadow(0 0 4px var(--graph-k-whatif));
+  }
+}
+
 /* ---------- Diff / review panel (PLAN C13) ---------- */
 
 .diff-modal {
@@ -3184,8 +3265,24 @@ code {
   opacity: 0.7;
 }
 
+/* Links reuse the timeline color code: the kind of the node they lead to. */
+.graph-edge.k-prompt {
+  stroke: var(--graph-k-prompt);
+}
+
+.graph-edge.k-whatif {
+  stroke: var(--graph-k-whatif);
+}
+
+.graph-edge.k-merge {
+  stroke: var(--graph-k-merge);
+}
+
+.graph-edge.k-answer {
+  stroke: var(--graph-k-answer);
+}
+
 .graph-edge.is-judge {
-  stroke: #e0a53c;
   stroke-dasharray: 5 4;
 }
 
@@ -3284,6 +3381,141 @@ code {
 .graph-zoom {
   color: var(--fg-dim);
   font-size: 11px;
+}
+
+/* Node kind palette (timeline bullets + canvas card accents). */
+:root {
+  --graph-k-prompt: var(--accent);
+  --graph-k-whatif: #b06ad8;
+  --graph-k-merge: #e0a53c;
+  --graph-k-answer: #3cb371;
+}
+
+.graph-node.is-user.k-whatif {
+  border-left-color: var(--graph-k-whatif);
+}
+
+.graph-node.is-user.k-merge {
+  border-left-color: var(--graph-k-merge);
+}
+
+/* zoom / arrange / timeline controls (top-right corner of the canvas) */
+.graph-zoomctl {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  z-index: 3;
+}
+
+.graph-zoomctl .icon-btn {
+  font-size: 13px;
+  line-height: 1;
+  padding: 5px 8px;
+}
+
+.graph-zoomctl .icon-btn.is-active {
+  background: var(--selected);
+  border-color: var(--accent);
+}
+
+.graph-zoomctl-sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 3px;
+  background: var(--border);
+}
+
+/* timeline outline panel (right edge, toggled by ☰) */
+.graph-timeline {
+  position: absolute;
+  top: 48px;
+  right: 10px;
+  bottom: 12px;
+  width: 230px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 6px;
+  z-index: 3;
+  cursor: default;
+}
+
+.graph-timeline-title {
+  font-weight: 600;
+  font-size: 12px;
+  padding: 0 4px 6px;
+  color: var(--fg);
+}
+
+.graph-timeline-empty {
+  color: var(--fg-dim);
+  font-size: 11px;
+  padding: 0 4px;
+}
+
+.graph-timeline-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  padding: 3px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.graph-timeline-row:hover {
+  background: var(--bg-3);
+}
+
+.graph-timeline-row.is-active {
+  background: var(--selected);
+}
+
+.graph-timeline-bullet {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.graph-timeline-row.k-prompt .graph-timeline-bullet {
+  background: var(--graph-k-prompt);
+}
+
+.graph-timeline-row.k-whatif .graph-timeline-bullet {
+  background: var(--graph-k-whatif);
+}
+
+.graph-timeline-row.k-merge .graph-timeline-bullet {
+  background: var(--graph-k-merge);
+}
+
+.graph-timeline-row.k-answer .graph-timeline-bullet {
+  background: var(--graph-k-answer);
+}
+
+.graph-timeline-row.k-answer {
+  color: var(--fg-dim);
+}
+
+.graph-timeline-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .graph-notice {
