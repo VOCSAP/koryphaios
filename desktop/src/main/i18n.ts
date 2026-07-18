@@ -535,6 +535,12 @@ export const EN_DEFAULTS: Record<string, string> = {
   'graph.error': 'inference failed',
   'graph.leafOnly': 'Only leaf nodes can be deleted.',
   'graph.cycleRefused': 'Refused: this connection would create a cycle.',
+  'graph.zoomIn': 'Zoom in',
+  'graph.zoomOut': 'Zoom out',
+  'graph.fitView': 'Fit view',
+  'graph.arrange': 'Auto-arrange nodes on the grid (by hierarchy level)',
+  'graph.timeline': 'Timeline',
+  'graph.timelineEmpty': 'No node yet.',
   'models.pin': 'Pin to favorites',
   'models.unpin': 'Unpin from favorites',
   'models.none':

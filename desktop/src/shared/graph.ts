@@ -158,6 +158,150 @@ export function childrenOf(nodes: GraphNode[], id: string): GraphNode[] {
 }
 
 // ---------------------------------------------------------------------------
+// Canvas grid + hierarchical layout. Pure helpers shared by the renderer
+// (GraphView) and the engine so every automatic placement lands on the same
+// grid: node size and pitches are the single source of truth here.
+
+export const GRAPH_GRID = 20
+export const GRAPH_NODE_W = 260
+export const GRAPH_NODE_H = 130
+/** Horizontal/vertical pitch between card origins in automatic placements (grid multiples). */
+export const GRAPH_PITCH_X = 340
+export const GRAPH_PITCH_Y = 180
+
+export function snapToGrid(v: number): number {
+  return Math.round(v / GRAPH_GRID) * GRAPH_GRID
+}
+
+/**
+ * Snap (x, y) to the grid, then scan RIGHT (same hierarchy level) until the
+ * card no longer overlaps an existing node. Keeps siblings created one by one
+ * on the same horizontal line instead of stacking them.
+ */
+export function findFreeSpot(
+  nodes: GraphNode[],
+  x: number,
+  y: number,
+  ignoreIds: string[] = []
+): { x: number; y: number } {
+  let sx = snapToGrid(x)
+  const sy = snapToGrid(y)
+  const ignore = new Set(ignoreIds)
+  const overlaps = (): boolean =>
+    nodes.some(
+      (n) =>
+        !ignore.has(n.id) &&
+        Math.abs(n.x - sx) < GRAPH_NODE_W + GRAPH_GRID &&
+        Math.abs(n.y - sy) < GRAPH_NODE_H + GRAPH_GRID
+    )
+  for (let i = 0; i < 500 && overlaps(); i++) sx += GRAPH_GRID * 2
+  return { x: sx, y: sy }
+}
+
+/**
+ * Visual/semantic kind of a node, for the outline timeline and canvas
+ * accents: 'prompt' (plain user text / continuation), 'whatif' (a user node
+ * branching off a parent that has several children), 'merge' (judge node, or
+ * a user node crossing several parents), 'answer' (assistant output).
+ */
+export type GraphNodeKind = 'prompt' | 'whatif' | 'merge' | 'answer'
+
+export function graphNodeKind(nodes: GraphNode[], node: GraphNode): GraphNodeKind {
+  if (node.type === 'judge') return 'merge'
+  if (node.type === 'assistant') return 'answer'
+  if (node.parents.length >= 2) return 'merge'
+  const parent = node.parents[0]
+  // Judge children are wiring, not conversation: they never make a sibling a branch.
+  if (parent && childrenOf(nodes, parent).filter((c) => c.type !== 'judge').length >= 2) {
+    return 'whatif'
+  }
+  return 'prompt'
+}
+
+export interface OutlineRow {
+  node: GraphNode
+  /** DFS depth (0 = root). A multi-parent node appears once, under the first parent reached. */
+  depth: number
+}
+
+/**
+ * Outline order for the timeline panel: depth-first from the roots (roots by
+ * createdAt, children left-to-right by canvas x then createdAt), each node
+ * listed exactly once. Orphans of a hand-edited doc are appended defensively.
+ */
+export function outlineOrder(nodes: GraphNode[]): OutlineRow[] {
+  const ids = new Set(nodes.map((n) => n.id))
+  const out: OutlineRow[] = []
+  const seen = new Set<string>()
+  const byCreation = (a: GraphNode, b: GraphNode): number =>
+    a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1)
+  const visit = (n: GraphNode, depth: number): void => {
+    if (seen.has(n.id)) return
+    seen.add(n.id)
+    out.push({ node: n, depth })
+    const children = nodes
+      .filter((c) => c.parents.includes(n.id))
+      .sort((a, b) => a.x - b.x || byCreation(a, b))
+    for (const c of children) visit(c, depth + 1)
+  }
+  const roots = nodes.filter((n) => !n.parents.some((p) => ids.has(p))).sort(byCreation)
+  for (const r of roots) visit(r, 0)
+  for (const n of [...nodes].sort(byCreation)) visit(n, 0)
+  return out
+}
+
+/**
+ * Recompute every node position as a clean hierarchical layout on the grid:
+ * depth (longest path from a root) becomes the row, siblings sit on the same
+ * horizontal line, each row is ordered by the mean x of its parents
+ * (barycenter pass, keeps edges roughly vertical) and centered around x=0.
+ * Returns a NEW node array; manual positions are overwritten by design.
+ */
+export function layoutGraph(nodes: GraphNode[]): GraphNode[] {
+  const byId = nodeMap(nodes)
+  const depths = new Map<string, number>()
+  const depthOf = (n: GraphNode): number => {
+    const cached = depths.get(n.id)
+    if (cached !== undefined) return cached
+    depths.set(n.id, 0) // pre-mark: a corrupt cycle must not recurse forever
+    const d = n.parents.reduce((max, pid) => {
+      const p = byId.get(pid)
+      return p ? Math.max(max, depthOf(p) + 1) : max
+    }, 0)
+    depths.set(n.id, d)
+    return d
+  }
+  for (const n of nodes) depthOf(n)
+
+  const levels = new Map<number, GraphNode[]>()
+  for (const n of nodes) {
+    const d = depths.get(n.id) ?? 0
+    const row = levels.get(d)
+    if (row) row.push(n)
+    else levels.set(d, [n])
+  }
+
+  const pos = new Map<string, { x: number; y: number }>()
+  const byCreation = (a: GraphNode, b: GraphNode): number =>
+    a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1)
+  for (const d of [...levels.keys()].sort((a, b) => a - b)) {
+    const row = levels.get(d)!
+    const keyOf = (n: GraphNode): number => {
+      const xs = n.parents.map((p) => pos.get(p)?.x).filter((x): x is number => x !== undefined)
+      return xs.length > 0 ? xs.reduce((s, x) => s + x, 0) / xs.length : 0
+    }
+    row.sort((a, b) => keyOf(a) - keyOf(b) || byCreation(a, b))
+    row.forEach((n, i) => {
+      pos.set(n.id, {
+        x: snapToGrid((i - (row.length - 1) / 2) * GRAPH_PITCH_X),
+        y: snapToGrid(d * GRAPH_PITCH_Y)
+      })
+    })
+  }
+  return nodes.map((n) => ({ ...n, ...pos.get(n.id)! }))
+}
+
+// ---------------------------------------------------------------------------
 // Shape validation (graph:save receives a whole doc from the renderer; a
 // corrupted payload must not be persisted). Mirrors parseTemplate's spirit:
 // returns a normalized doc or null.

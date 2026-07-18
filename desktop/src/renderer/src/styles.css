@@ -3286,6 +3286,141 @@ code {
   font-size: 11px;
 }
 
+/* Node kind palette (timeline bullets + canvas card accents). */
+:root {
+  --graph-k-prompt: var(--accent);
+  --graph-k-whatif: #b06ad8;
+  --graph-k-merge: #e0a53c;
+  --graph-k-answer: #3cb371;
+}
+
+.graph-node.is-user.k-whatif {
+  border-left-color: var(--graph-k-whatif);
+}
+
+.graph-node.is-user.k-merge {
+  border-left-color: var(--graph-k-merge);
+}
+
+/* zoom / arrange / timeline controls (top-right corner of the canvas) */
+.graph-zoomctl {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  z-index: 3;
+}
+
+.graph-zoomctl .icon-btn {
+  font-size: 13px;
+  line-height: 1;
+  padding: 5px 8px;
+}
+
+.graph-zoomctl .icon-btn.is-active {
+  background: var(--selected);
+  border-color: var(--accent);
+}
+
+.graph-zoomctl-sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 3px;
+  background: var(--border);
+}
+
+/* timeline outline panel (right edge, toggled by ☰) */
+.graph-timeline {
+  position: absolute;
+  top: 48px;
+  right: 10px;
+  bottom: 12px;
+  width: 230px;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 6px;
+  z-index: 3;
+  cursor: default;
+}
+
+.graph-timeline-title {
+  font-weight: 600;
+  font-size: 12px;
+  padding: 0 4px 6px;
+  color: var(--fg);
+}
+
+.graph-timeline-empty {
+  color: var(--fg-dim);
+  font-size: 11px;
+  padding: 0 4px;
+}
+
+.graph-timeline-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  padding: 3px 6px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.graph-timeline-row:hover {
+  background: var(--bg-3);
+}
+
+.graph-timeline-row.is-active {
+  background: var(--selected);
+}
+
+.graph-timeline-bullet {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.graph-timeline-row.k-prompt .graph-timeline-bullet {
+  background: var(--graph-k-prompt);
+}
+
+.graph-timeline-row.k-whatif .graph-timeline-bullet {
+  background: var(--graph-k-whatif);
+}
+
+.graph-timeline-row.k-merge .graph-timeline-bullet {
+  background: var(--graph-k-merge);
+}
+
+.graph-timeline-row.k-answer .graph-timeline-bullet {
+  background: var(--graph-k-answer);
+}
+
+.graph-timeline-row.k-answer {
+  color: var(--fg-dim);
+}
+
+.graph-timeline-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .graph-notice {
   position: absolute;
   bottom: 12px;

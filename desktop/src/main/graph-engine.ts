@@ -14,7 +14,10 @@
 import { join } from 'node:path'
 import {
   ancestorsOf,
+  findFreeSpot,
   graphId,
+  GRAPH_PITCH_X,
+  GRAPH_PITCH_Y,
   linearize,
   mergePartition,
   type GraphDoc,
@@ -181,9 +184,9 @@ export interface InferRequest {
   judge?: ModelTarget
 }
 
-/** Fan-out horizontal spread between sibling answer nodes (canvas px). */
-const FAN_X = 340
-const FAN_Y = 170
+/** Fan-out spread between sibling answer nodes: the shared grid pitches. */
+const FAN_X = GRAPH_PITCH_X
+const FAN_Y = GRAPH_PITCH_Y
 
 /**
  * Run one inference request against `doc` IN PLACE semantics: returns a new
@@ -238,15 +241,23 @@ export async function runInference(
   )
 
   const out: GraphDoc = { ...doc, nodes: [...doc.nodes] }
-  const answers: GraphNode[] = targets.map((target, i) => {
+  const answers: GraphNode[] = []
+  targets.forEach((target, i) => {
     const res = settled[i]!
+    // Siblings of one fan-out share a horizontal line under the prompt; the
+    // free-spot scan keeps that line while dodging pre-existing nodes.
+    const spot = findFreeSpot(
+      [...doc.nodes, ...answers],
+      node.x + (i - (targets.length - 1) / 2) * FAN_X,
+      node.y + FAN_Y
+    )
     const base: GraphNode = {
       id: graphId(),
       type: 'assistant',
       parents: [node.id],
       text: '',
-      x: node.x + (i - (targets.length - 1) / 2) * FAN_X,
-      y: node.y + FAN_Y,
+      x: spot.x,
+      y: spot.y,
       createdAt: Date.now(),
       cli: target.cli,
       model: target.model,
@@ -264,7 +275,7 @@ export async function runInference(
       )
       base.text = ''
     }
-    return base
+    answers.push(base)
   })
   out.nodes.push(...answers)
 
@@ -292,13 +303,14 @@ export async function runInference(
       target: judgeTarget
     })
     const started = Date.now()
+    const judgeSpot = findFreeSpot(out.nodes, node.x, node.y + 2 * FAN_Y)
     const judge: GraphNode = {
       id: graphId(),
       type: 'judge',
       parents: ok.map((a) => a.id),
       text: '',
-      x: node.x,
-      y: node.y + 2 * FAN_Y,
+      x: judgeSpot.x,
+      y: judgeSpot.y,
       createdAt: Date.now(),
       cli: judgeTarget.cli,
       model: judgeTarget.model
