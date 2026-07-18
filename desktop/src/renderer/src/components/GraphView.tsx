@@ -16,6 +16,7 @@ import {
 } from '@shared/graph'
 import type { ProviderCatalog } from '@shared/models'
 import { useT } from '../i18n'
+import { useDeck } from '../store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ModelPicker } from './ModelPicker'
 
@@ -103,6 +104,26 @@ export function GraphView(): React.JSX.Element {
     void refresh()
     void window.api.modelCatalogs().then(setCatalogs)
   }, [refresh])
+
+  // Navigation request from outside (an opened graph draft): re-list so the
+  // freshly created doc is present, then activate it and select its
+  // pre-filled node. Two effects because the list update is asynchronous.
+  const graphFocus = useDeck((s) => s.graphFocus)
+  const clearGraphFocus = useDeck((s) => s.clearGraphFocus)
+  useEffect(() => {
+    if (graphFocus) void refresh()
+  }, [graphFocus, refresh])
+  useEffect(() => {
+    if (!graphFocus) return
+    const target = graphs.find((g) => g.id === graphFocus.docId)
+    if (!target) return // list not refreshed yet; next graphs update retries
+    setActiveId(target.id)
+    const node = target.nodes.find((n) => n.id === graphFocus.nodeId)
+    setSelection(node ? [node.id] : [])
+    if (node?.type === 'user') setDraftText(node.text)
+    setCamera({ x: 60, y: 40, zoom: 1 })
+    clearGraphFocus()
+  }, [graphFocus, graphs, clearGraphFocus])
 
   useEffect(() => {
     if (!notice) return

@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type {
   AppConfig,
   CreateSessionInput,
+  DeckGraphDraft,
   DeckView,
   InboxMessage,
   LocaleOption,
@@ -55,6 +56,10 @@ interface DeckState {
   /** Messages arrived while the panel was closed. */
   inboxUnread: number
   inboxOpen: boolean
+  /** Pending graph drafts (agent-escalated questions): drive the rail glyph. */
+  graphDrafts: DeckGraphDraft[]
+  /** Graph view navigation request: open this doc and select this node. */
+  graphFocus: { docId: string; nodeId: string } | null
   /** Diff panel target (PLAN C13): a dir to diff + display title, or null. */
   diffTarget: { dir: string; title: string } | null
   /**
@@ -77,6 +82,10 @@ interface DeckState {
   setBrowserPaired(id: string | null): void
   /** Open/close the operator inbox panel (opening clears the unread count). */
   openInbox(open: boolean): void
+  /** Open a pending draft: create the pre-filled graph and navigate to it. */
+  openGraphDraft(draft: DeckGraphDraft): Promise<void>
+  /** GraphView consumed the navigation request. */
+  clearGraphFocus(): void
   /** Open the diff panel on a dir (null closes it). */
   openDiff(target: { dir: string; title: string } | null): void
   setSelected(id: string | null): void
@@ -149,6 +158,8 @@ export const useDeck = create<DeckState>((set, get) => ({
   inboxMessages: [],
   inboxUnread: 0,
   inboxOpen: false,
+  graphDrafts: [],
+  graphFocus: null,
   diffTarget: null,
   browserPairedId: null,
   browserOpened: false,
@@ -210,13 +221,25 @@ export const useDeck = create<DeckState>((set, get) => ({
     // Operator inbox (PLAN C12): batches drained by the main-process poll.
     window.api.onInboxMessages((batch) => {
       const { inboxMessages, inboxUnread, inboxOpen } = get()
-      // Cap the in-memory history; the broker already marked them delivered.
-      const messages = [...inboxMessages, ...batch].slice(-200)
+      // Dedupe by broker id: the disk-history hydration below and the live
+      // stream can race on the same batch after a restart.
+      const fresh = batch.filter((m) => !inboxMessages.some((x) => x.id === m.id))
+      const messages = [...inboxMessages, ...fresh].slice(-500)
       set({
         inboxMessages: messages,
-        inboxUnread: inboxOpen ? 0 : inboxUnread + batch.length
+        inboxUnread: inboxOpen ? 0 : inboxUnread + fresh.length
       })
     })
+    // Hydrate the persisted inbox history (the broker drain is destructive:
+    // this file is the only durable copy across Deck restarts/crashes).
+    void window.api.inboxHistory().then((history) => {
+      const { inboxMessages } = get()
+      const known = new Set(inboxMessages.map((m) => m.id))
+      const merged = [...history.filter((m) => !known.has(m.id)), ...inboxMessages]
+      set({ inboxMessages: merged.slice(-500) })
+    })
+    // Pending graph drafts: full list pushed by the main-process poll.
+    window.api.onGraphDrafts((drafts) => set({ graphDrafts: drafts }))
     // Notification click on an inbox message: surface the panel.
     window.api.onInboxOpen(() => get().openInbox(true))
     window.api.onConfigChanged((next) => {
@@ -238,6 +261,18 @@ export const useDeck = create<DeckState>((set, get) => ({
     })),
   setBrowserPaired: (id) => set({ browserPairedId: id }),
   openInbox: (open) => set({ inboxOpen: open, inboxUnread: 0 }),
+  openGraphDraft: async (draft) => {
+    // Main creates the pre-filled doc and flips the broker status; the local
+    // list is trimmed optimistically (the next poll confirms).
+    const res = await window.api.graphDraftOpen(draft)
+    set((s) => ({
+      graphDrafts: s.graphDrafts.filter((d) => d.id !== draft.id),
+      inboxOpen: false,
+      view: 'graph',
+      graphFocus: { docId: res.docId, nodeId: res.nodeId }
+    }))
+  },
+  clearGraphFocus: () => set({ graphFocus: null }),
   openDiff: (target) => set({ diffTarget: target }),
   setSelected: (id) => set({ selectedId: id }),
   setMaximized: (id) => set({ maximizedId: id }),

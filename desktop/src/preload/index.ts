@@ -137,6 +137,8 @@ const api: DeckApi = {
   graphCompile: (graphId: string, nodeId: string) =>
     ipcRenderer.invoke('graph:compile', graphId, nodeId),
   graphInfer: (graphId, req) => ipcRenderer.invoke('graph:infer', graphId, req),
+  graphDraftOpen: (draft) => ipcRenderer.invoke('graphDraft:open', draft),
+  inboxHistory: () => ipcRenderer.invoke('inbox:history'),
 
   onPtyData: (cb: (e: PtyDataEvent) => void) => onPtyDataMux(cb),
   onPtyExit: (cb: (e: PtyExitEvent) => void) => onPtyExitMux(cb),
@@ -148,6 +150,7 @@ const api: DeckApi = {
   onSessionAttention: (cb: (e: SessionAttentionEvent) => void) =>
     subscribe('session:attention', cb),
   onInboxMessages: (cb: (messages: InboxMessage[]) => void) => subscribe('inbox:new', cb),
+  onGraphDrafts: (cb) => subscribe('graphDrafts:update', cb),
   onInboxOpen: (cb: () => void) => subscribe('inbox:open', () => cb()),
   onFocusSession: (cb: (id: string) => void) => subscribe('session:focus', cb),
   onDesignPick: (cb: (event: DesignPickEvent) => void) => subscribe('design:pick', cb),

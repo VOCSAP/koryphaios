@@ -427,6 +427,8 @@ export const EN_DEFAULTS: Record<string, string> = {
   'inbox.close': 'Close',
   'inbox.empty':
     "No messages yet. Agents can write to you with send_message to 'operator' — questions, results, blockers.",
+  'inbox.drafts': 'Questions to open in the graph',
+  'inbox.openGraph': 'Open in graph',
   'inbox.hint': 'Read-only — answer via the megaphone at the bottom of the Agents sidebar.',
   'worktrees.diff': 'Diff',
   'sidebar.viewDiff': 'View diff',

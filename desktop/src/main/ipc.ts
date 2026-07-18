@@ -7,6 +7,7 @@ import type {
   DispatchResult,
   HelpExchange,
   I18nPayload,
+  DeckGraphDraft,
   LaunchConfig,
   RoadmapListFilters,
   RoadmapUpsertFields,
@@ -21,7 +22,8 @@ import {
   writeHelpSystemPrompt
 } from './help-assistant'
 import { buildWandPrompt, WAND_MODEL, writeWandSystemPrompt, type WandDraft } from './context-wand'
-import { resolveBrokerEndpoint } from './broker-client'
+import { markGraphDraftOpened, resolveBrokerEndpoint } from './broker-client'
+import { loadInboxHistory } from './inbox-store'
 import {
   buildDigestSystemPrompt,
   collectSources,
@@ -660,6 +662,49 @@ export function registerIpc({
     journal.add('graph', `graph inference on ${req.nodeId} (${req.targets?.length ?? 0} target(s)${req.battle ? ', battle' : ''})`)
     return upsertGraph(stateDir, key, updated, secretCipher)
   })
+  // Open a pending graph draft (operator click on the inbox card): create a
+  // graph doc whose single user node carries the pre-filled prompt — nothing
+  // is submitted, inference stays the manual circuit of the graph view.
+  ipcMain.handle('graphDraft:open', async (_e, draft: DeckGraphDraft) => {
+    if (!draft || typeof draft.id !== 'string' || typeof draft.prompt !== 'string') {
+      throw new Error('invalid draft')
+    }
+    const { stateDir, key } = graphCtx()
+    const nodeId = graphDocId()
+    const doc: GraphDoc = {
+      id: graphDocId(),
+      name: (typeof draft.title === 'string' && draft.title.trim().slice(0, 200)) || 'question',
+      nodes: [
+        {
+          id: nodeId,
+          type: 'user',
+          parents: [],
+          text: draft.prompt.slice(0, 512 * 1024),
+          x: 0,
+          y: 0,
+          createdAt: Date.now()
+        }
+      ],
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    }
+    upsertGraph(stateDir, key, doc, secretCipher)
+    // Broker flip is best-effort: opening must work even with the broker down
+    // (worst case the draft reappears as pending and the operator re-opens it).
+    try {
+      await markGraphDraftOpened(draft.id, { endpoint: resolveBrokerEndpoint() })
+    } catch {
+      // next poll keeps it pending; the created doc stands either way
+    }
+    journal.add('graph', `graph draft opened: ${doc.name} (from ${draft.from || '?'})`)
+    return { docId: doc.id, nodeId }
+  })
+
+  // Persisted operator-inbox history (startup hydration; drain is destructive
+  // broker-side, so this file is the only durable copy).
+  ipcMain.handle('inbox:history', () =>
+    loadInboxHistory(join(app.getPath('userData'), APP_STATE_SUBDIR))
+  )
 
   // ----- template composer (PLAN C18): read/write without spawning -----
   ipcMain.handle('template:read', (_e, path: string) => readTemplate(path))

@@ -26,7 +26,13 @@ import { applyProviderKeyPatch, sanitizeProviders } from './provider-secrets'
 import { globalLaunchCommand, projectLaunchCommand, resolveLaunchConfig } from './launch-config'
 import { resolveApprovedLaunchCommand } from './launch-approval'
 import { WorkspaceService } from './workspace-service'
-import { fetchOperatorInbox, resolveBrokerEndpoint, sendAnnounce } from './broker-client'
+import {
+  fetchGraphDrafts,
+  fetchOperatorInbox,
+  resolveBrokerEndpoint,
+  sendAnnounce
+} from './broker-client'
+import { appendInboxHistory } from './inbox-store'
 import { computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
 import { createCheckpoint, purgeCheckpoints, restoreCommand } from './checkpoint-service'
 import { composeAssignText, composeDispatchText, composeStopText, firstQueued } from './dispatch'
@@ -291,8 +297,57 @@ const pollOperatorInbox = async (): Promise<void> => {
       text: m.text,
       sentAt: m.sent_at
     }))
+    // The broker drain is destructive (delivered=1): journal the batch to
+    // disk BEFORE showing it, so a Deck restart replays the whole inbox.
+    appendInboxHistory(join(app.getPath('userData'), APP_STATE_SUBDIR), batch)
     mainWindow?.webContents.send('inbox:new', batch)
     notifyInbox(batch)
+  } catch {
+    // Broker down / unreachable: silent, the next tick retries.
+  }
+}
+
+// ----- Graph drafts poll -----
+// Agent-escalated questions parked broker-side (non-destructive list: nothing
+// is consumed until the operator opens a draft). The full pending list is
+// pushed to the renderer (inbox cards + glowing rail glyph); a system
+// notification fires once per new draft id.
+const notifiedDraftIds = new Set<string>()
+let lastDraftSignature = ''
+
+const pollGraphDrafts = async (): Promise<void> => {
+  try {
+    const drafts = await fetchGraphDrafts(computeDeckProjectKey(config.projectDir), {
+      endpoint: resolveBrokerEndpoint()
+    })
+    const list = drafts.map((d) => ({
+      id: d.id,
+      from: d.from_peer,
+      title: d.title,
+      prompt: d.prompt,
+      createdAt: d.created_at
+    }))
+    const signature = list.map((d) => d.id).join(',')
+    if (signature !== lastDraftSignature) {
+      lastDraftSignature = signature
+      mainWindow?.webContents.send('graphDrafts:update', list)
+    }
+    const fresh = list.filter((d) => !notifiedDraftIds.has(d.id))
+    for (const d of fresh) notifiedDraftIds.add(d.id)
+    if (fresh.length > 0 && Notification.isSupported()) {
+      const isFr = (config.locale || app.getLocale()).toLowerCase().startsWith('fr')
+      const first = fresh[0]!
+      const n = new Notification({
+        title: isFr ? `Question à ouvrir en graphe — ${first.from}` : `Graph question — ${first.from}`,
+        body: first.title.slice(0, 160)
+      })
+      n.on('click', () => {
+        mainWindow?.show()
+        mainWindow?.focus()
+        mainWindow?.webContents.send('inbox:open')
+      })
+      n.show()
+    }
   } catch {
     // Broker down / unreachable: silent, the next tick retries.
   }
@@ -802,8 +857,11 @@ app.whenReady().then(() => {
   service.start()
   // Attach an auto-save workspace capturing whatever the service just restored.
   workspaces.start()
-  // Operator inbox drain (PLAN C12): messages agents addressed to 'operator'.
-  inboxTimer = setInterval(() => void pollOperatorInbox(), INBOX_POLL_MS)
+  // Operator inbox drain (PLAN C12) + pending graph drafts (same cadence).
+  inboxTimer = setInterval(() => {
+    void pollOperatorInbox()
+    void pollGraphDrafts()
+  }, INBOX_POLL_MS)
   // Auto-dispatch watcher (PLAN C15): no-op while nothing was dispatched.
   dispatchTimer = setInterval(() => void watchDispatched(), DISPATCH_WATCH_MS)
   // Idle-lock watcher (PLAN K2): releases locks held by silent local tiles.

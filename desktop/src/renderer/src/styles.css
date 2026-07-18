@@ -2458,6 +2458,87 @@ code {
   font-size: 11px;
 }
 
+/* Pending graph drafts: action-required cards pinned above the message flow. */
+.inbox-drafts {
+  border-bottom: 1px solid var(--border);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 55%;
+  overflow-y: auto;
+}
+
+.inbox-drafts-title {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--graph-k-whatif);
+}
+
+.inbox-draft {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--graph-k-whatif);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.inbox-draft-glyph {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--graph-k-whatif);
+  animation: glyph-glow 2.2s ease-in-out infinite;
+}
+
+.inbox-draft-title {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+.inbox-draft-excerpt {
+  font-size: 11px;
+  color: var(--fg-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 60px;
+  overflow: hidden;
+}
+
+.inbox-draft-open {
+  align-self: flex-end;
+  font-size: 12px;
+}
+
+/* The "fantasy glyph" glow: the inbox rail icon pulses while a draft awaits
+   the operator. Pure filter/opacity animation (GPU-cheap, no re-layout). */
+.nav-rail-item.is-glowing .nav-rail-icon {
+  animation: glyph-glow 2.2s ease-in-out infinite;
+}
+
+@keyframes glyph-glow {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 2px var(--graph-k-whatif));
+    opacity: 0.85;
+  }
+  50% {
+    filter: drop-shadow(0 0 9px var(--graph-k-whatif)) drop-shadow(0 0 18px var(--graph-k-whatif));
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .nav-rail-item.is-glowing .nav-rail-icon,
+  .inbox-draft-glyph {
+    animation: none;
+    filter: drop-shadow(0 0 4px var(--graph-k-whatif));
+  }
+}
+
 /* ---------- Diff / review panel (PLAN C13) ---------- */
 
 .diff-modal {

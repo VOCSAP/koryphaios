@@ -21,6 +21,10 @@ export function NavRail(): React.JSX.Element {
   const inboxOpen = useDeck((s) => s.inboxOpen)
   const inboxUnread = useDeck((s) => s.inboxUnread)
   const openInbox = useDeck((s) => s.openInbox)
+  const draftCount = useDeck((s) => s.graphDrafts.length)
+  // Attention badge = unread messages + pending drafts; the glyph GLOW is
+  // drafts-only (an action is awaited, not just a message to read).
+  const badge = inboxUnread + draftCount
 
   return (
     <nav className="nav-rail">
@@ -38,13 +42,13 @@ export function NavRail(): React.JSX.Element {
       <div className="nav-rail-spacer" />
       {/* Operator inbox (PLAN C12): overlay panel, not a view. */}
       <button
-        className={`nav-rail-item${inboxOpen ? ' is-active' : ''}`}
+        className={`nav-rail-item${inboxOpen ? ' is-active' : ''}${draftCount > 0 ? ' is-glowing' : ''}`}
         title={t('nav.inbox')}
         onClick={() => openInbox(!inboxOpen)}
       >
         <span className="nav-rail-icon">
           ✉
-          {inboxUnread > 0 && <span className="nav-rail-badge">{inboxUnread}</span>}
+          {badge > 0 && <span className="nav-rail-badge">{badge}</span>}
         </span>
         <span className="nav-rail-label">{t('nav.inbox')}</span>
       </button>

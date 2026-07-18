@@ -330,6 +330,8 @@
   "inbox.title": "Courrier de l'opérateur",
   "inbox.close": "Fermer",
   "inbox.empty": "Aucun message pour l'instant. Les agents peuvent t'écrire via send_message vers 'operator' — questions, résultats, blocages.",
+  "inbox.drafts": "Questions à ouvrir en graphe",
+  "inbox.openGraph": "Ouvrir en graphe",
   "inbox.hint": "Lecture seule — réponds via le mégaphone en bas de la barre Agents.",
   "worktrees.diff": "Diff",
   "sidebar.viewDiff": "Voir le diff",

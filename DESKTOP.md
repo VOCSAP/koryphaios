@@ -29,7 +29,14 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   is desktop-local per project_key (`graph-store.ts`), encrypted at rest via
   the safeStorage-backed cipher (K8: envelope with a base64 payload; legacy
   clear files are re-encrypted on first list; clear-text fallback when the OS
-  keychain is unavailable so the feature never breaks).
+  keychain is unavailable so the feature never breaks). Graph drafts: the
+  main process polls the broker's pending `graph_drafts` (agent-escalated
+  questions, see ARCHITECTURE.md) — they surface as action cards in the ✉
+  inbox with a pulsing rail glyph (`is-glowing`), and "Open in graph" creates
+  a doc with the pre-filled unsubmitted prompt node, flips the draft
+  broker-side, and navigates the graph view onto it (`graphFocus` in the
+  store). The inbox itself is persisted to `inbox-history.json`
+  (`inbox-store.ts`) because the broker drain is destructive.
 - **Roadmap (🗺 rail view)**: kanban board over the broker's shared roadmap —
   one column per status (idea/planned/in_progress/done, + archived behind the
   toggle), MoSCoW priority as a colored chip + in-column sort, native HTML5
