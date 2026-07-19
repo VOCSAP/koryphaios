@@ -16,6 +16,7 @@
 
 import type { LocalProviderConfig } from '../shared/models'
 import type { SecretCipher } from './scope-secrets'
+import { reportError } from './log'
 
 const ENC_PREFIX = 'enc:'
 const PLAIN_PREFIX = 'plain:'
@@ -32,8 +33,11 @@ function decryptKey(cipher: SecretCipher, stored: string): string | undefined {
   if (stored.startsWith(ENC_PREFIX)) {
     try {
       return cipher.decrypt(Buffer.from(stored.slice(ENC_PREFIX.length), 'base64'))
-    } catch {
-      // OS key changed / other user profile: behave as "no key stored".
+    } catch (e) {
+      // OS key changed / other user profile: behave as "no key stored", but
+      // leave a trace (O6) -- downstream this looks like an unauthenticated
+      // provider call, which is otherwise a nightmare to diagnose.
+      reportError('secrets', 'stored provider key could not be decrypted (keychain changed?)', e)
       return undefined
     }
   }

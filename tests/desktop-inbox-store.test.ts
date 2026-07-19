@@ -61,3 +61,17 @@ test("malformed entries are filtered on load", () => {
   );
   expect(loadInboxHistory(d).map((m) => m.id)).toEqual([1, 2]);
 });
+
+test("a failed persist invokes onPersistError instead of swallowing (PLAN O6)", () => {
+  const d = dir();
+  // Block the state dir with a regular file so mkdir/write fails.
+  const blocked = join(d, "not-a-dir");
+  writeFileSync(blocked, "occupied");
+  const errors: unknown[] = [];
+  const merged = appendInboxHistory(join(blocked, "state"), [msg(1)], undefined, (e) =>
+    errors.push(e)
+  );
+  // The in-memory merge still works; the failure is reported, not hidden.
+  expect(merged.map((m) => m.id)).toEqual([1]);
+  expect(errors.length).toBe(1);
+});

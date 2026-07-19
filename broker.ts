@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * claude-peers broker daemon (v0.7.0)
+ * claude-peers broker daemon (v0.9.0)
  *
  * Singleton HTTP server on 127.0.0.1:<port> backed by SQLite.
  * Tracks registered Claude Code peers, isolates them by group, persists session
@@ -15,6 +15,7 @@ import { mkdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { loadConfig } from "./shared/config.ts";
+import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { validateDraftPayload } from "./shared/graph-draft.ts";
 import type {
   RegisterRequest,
@@ -114,10 +115,41 @@ const PURGE_INTERVAL_SEC = Math.max(
   parseInt(process.env.CLAUDE_PEERS_PURGE_INTERVAL_SEC ?? "3600", 10)
 );
 
+// Rolling file log (PLAN-observabilite-erreurs O1/O2). The broker daemon often
+// outlives the stderr of whoever spawned it (server.ts spawns it detached), so
+// it must own its on-disk trail. Console mirroring keeps `bun broker.ts` usable.
+const log = createLogger({ dir: coreLogDir(), name: "broker" }).child("broker");
+
+// Last-resort safety nets: an unhandled error is logged to the file before the
+// process dies (Bun would otherwise exit with a stack on a possibly-dead stderr).
+process.on("uncaughtException", (e) => {
+  log.error("uncaught exception, exiting", e);
+  process.exit(1);
+});
+process.on("unhandledRejection", (e) => {
+  log.error("unhandled rejection, exiting", e);
+  process.exit(1);
+});
+
+/**
+ * setInterval wrapper for the maintenance timers: they run outside the HTTP
+ * handler's try/catch, so a transient SQLite error (SQLITE_BUSY, disk full)
+ * must skip the iteration -- not kill the daemon.
+ */
+function guardedInterval(name: string, fn: () => unknown, ms: number): ReturnType<typeof setInterval> {
+  return setInterval(() => {
+    try {
+      fn();
+    } catch (e) {
+      log.error(`timer ${name}: iteration failed (skipped)`, e);
+    }
+  }, ms);
+}
+
 try {
   mkdirSync(dirname(DB_PATH), { recursive: true });
-} catch {
-  // best-effort
+} catch (e) {
+  log.warn(`cannot create db directory for ${DB_PATH} (best-effort)`, e);
 }
 
 // --- Database setup (v0.3 schema, no migration path) ---
@@ -170,7 +202,7 @@ try {
   db.run("ALTER TABLE peers ADD COLUMN last_activity_at TEXT DEFAULT NULL");
 } catch (e) {
   const msg = e instanceof Error ? e.message : String(e);
-  if (!msg.includes("duplicate column name")) console.error(`[broker] migration: ${msg}`);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
 }
 
 // Migration: add claude_cli_pid column (idempotent)
@@ -180,7 +212,7 @@ try {
   db.run("ALTER TABLE peers ADD COLUMN claude_cli_pid INTEGER");
 } catch (e) {
   const msg = e instanceof Error ? e.message : String(e);
-  if (!msg.includes("duplicate column name")) console.error(`[broker] migration: ${msg}`);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
 }
 
 db.run(`
@@ -269,7 +301,7 @@ try {
   db.run("ALTER TABLE roadmap_items ADD COLUMN queue INTEGER");
 } catch (e) {
   const msg = e instanceof Error ? e.message : String(e);
-  if (!msg.includes("duplicate column name")) console.error(`[broker] migration: ${msg}`);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
 }
 
 // Migration (v0.7, PLAN C20): agent briefing on pre-existing tables.
@@ -277,7 +309,7 @@ try {
   db.run("ALTER TABLE roadmap_items ADD COLUMN context TEXT NOT NULL DEFAULT ''");
 } catch (e) {
   const msg = e instanceof Error ? e.message : String(e);
-  if (!msg.includes("duplicate column name")) console.error(`[broker] migration: ${msg}`);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
 }
 
 // Migration (v0.8, PLAN K2): agent work-lock on pre-existing tables. locked_by
@@ -291,7 +323,7 @@ for (const col of [
     db.run(`ALTER TABLE roadmap_items ADD COLUMN ${col}`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    if (!msg.includes("duplicate column name")) console.error(`[broker] migration: ${msg}`);
+    if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
   }
 }
 
@@ -383,16 +415,21 @@ function cleanStalePeers(): void {
        AND instance_token <> ? AND instance_token <> ?`
   ).all(cutoff, DECK_INSTANCE_TOKEN, OPERATOR_INSTANCE_TOKEN) as { instance_token: string }[];
   for (const { instance_token } of expired) {
-    // Must clear BOTH FK directions before deleting the peer row:
-    // messages.from_token and messages.to_token both reference peers(instance_token).
-    db.run("DELETE FROM messages WHERE from_token = ? OR to_token = ?", [instance_token, instance_token]);
-    db.run("DELETE FROM peer_sessions WHERE instance_token = ?", [instance_token]);
-    db.run("DELETE FROM peers WHERE instance_token = ?", [instance_token]);
+    purgeDormantPeerTx(instance_token);
   }
 }
 
+// Must clear BOTH FK directions before deleting the peer row (messages.from_token
+// and messages.to_token both reference peers), and the three deletes must land
+// together: an abrupt death in between would leave a peer without its sessions.
+const purgeDormantPeerTx = db.transaction((instance_token: string) => {
+  db.run("DELETE FROM messages WHERE from_token = ? OR to_token = ?", [instance_token, instance_token]);
+  db.run("DELETE FROM peer_sessions WHERE instance_token = ?", [instance_token]);
+  db.run("DELETE FROM peers WHERE instance_token = ?", [instance_token]);
+});
+
 cleanStalePeers();
-setInterval(cleanStalePeers, CLEAN_INTERVAL_MS);
+guardedInterval("cleanStalePeers", cleanStalePeers, CLEAN_INTERVAL_MS);
 
 // --- Heartbeat-staleness sweep (active_stale_sec) ---
 
@@ -403,7 +440,7 @@ function sweepInactivePeers(): void {
     [cutoff]
   );
 }
-setInterval(sweepInactivePeers, SWEEP_INTERVAL_SEC * 1000);
+guardedInterval("sweepInactivePeers", sweepInactivePeers, SWEEP_INTERVAL_SEC * 1000);
 
 // --- Stale roadmap-lock sweep (PLAN K2) ---
 // Releases agent work-locks whose owner is gone or that outlived the TTL, so a
@@ -439,7 +476,7 @@ function releaseStaleLocks(): void {
     [`-${LOCK_GRACE_SEC} seconds`]
   );
 }
-setInterval(releaseStaleLocks, LOCK_SWEEP_SEC * 1000);
+guardedInterval("releaseStaleLocks", releaseStaleLocks, LOCK_SWEEP_SEC * 1000);
 
 // --- Prepared statements ---
 
@@ -516,6 +553,18 @@ const ackPriorMessagesForSender = db.prepare(
      AND sent_at < ?`
 );
 
+// Message insert + activity refresh + heuristic ack land atomically: an abrupt
+// broker death mid-sequence must not leave a message without its bookkeeping.
+const recordMessageTx = db.transaction(
+  (fromToken: string, toToken: string, groupId: string, text: string, sentAt: string): number => {
+    const result = insertMessage.run(fromToken, toToken, groupId, text, sentAt);
+    updateLastActivity.run(sentAt, fromToken);
+    updateLastActivity.run(sentAt, toToken);
+    ackPriorMessagesForSender.run(fromToken, groupId, sentAt);
+    return Number(result.lastInsertRowid);
+  }
+);
+
 const purgeOldUndeliveredStmt = db.prepare(
   `DELETE FROM messages
    WHERE delivered = 0
@@ -549,15 +598,15 @@ function purgeOldMessages(): { messages: number; drafts: number } {
   const cutoff = `-${MESSAGE_TTL_DAYS} days`;
   const result = purgeOldUndeliveredStmt.run(cutoff);
   if (result.changes > 0) {
-    console.error(
-      `[claude-peers broker] purged ${result.changes} stale undelivered messages (>${MESSAGE_TTL_DAYS}d)`
+    log.info(
+      `purged ${result.changes} stale undelivered messages (>${MESSAGE_TTL_DAYS}d)`
     );
   }
   const drafts = purgeOpenedDraftsStmt.run(`-${GRAPH_DRAFT_TTL_DAYS} days`);
   return { messages: result.changes, drafts: drafts.changes };
 }
 purgeOldMessages();
-setInterval(purgeOldMessages, PURGE_INTERVAL_SEC * 1000);
+guardedInterval("purgeOldMessages", purgeOldMessages, PURGE_INTERVAL_SEC * 1000);
 
 // --- /register: TOFU + resume ---
 
@@ -643,8 +692,8 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
       // Active collision: another process is already holding this session_key.
       // Mint a fresh peer with a derived id; do NOT touch peer_sessions
       // (the existing active row keeps the canonical session).
-      console.error(
-        `[broker] session_key collision: existing active peer ${existingPeer.peer_id} keeps the session, minting new peer`
+      log.warn(
+        `session_key collision: existing active peer ${existingPeer.peer_id} keeps the session, minting new peer`
       );
       const freshToken = randomUUID();
       const freshId = deriveDefaultId(body.host, body.cwd, groupId);
@@ -860,22 +909,13 @@ function handleSendMessage(body: SendMessageRequest): SendMessageResponse {
   }
 
   const sentAt = new Date().toISOString();
-  const result = insertMessage.run(
+  const messageId = recordMessageTx(
     sender.instance_token,
     target.instance_token,
     sender.group_id,
     body.text,
     sentAt
   );
-  const messageId = Number(result.lastInsertRowid);
-
-  updateLastActivity.run(sentAt, sender.instance_token);
-  updateLastActivity.run(sentAt, target.instance_token);
-
-  // Heuristic ack: the sender has necessarily read everything addressed to it in
-  // this group before sent_at (otherwise it could not be replying now). Mark
-  // those as delivered=1 so the next WS reconnect does not avalanche the backlog.
-  ackPriorMessagesForSender.run(sender.instance_token, sender.group_id, sentAt);
 
   // Try WebSocket push if the target is connected.
   const ws = wsPool.get(target.instance_token);
@@ -1736,13 +1776,15 @@ const server = Bun.serve<WsData>({
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      // The client only gets the message; keep the stack on the broker side.
+      log.error(`request ${url.pathname} failed with 500`, e);
       return Response.json({ error: msg }, { status: 500 });
     }
   },
 });
 
-console.error(
-  `[claude-peers broker v0.7.0] listening on ${BIND_HOST}:${PORT} ` +
+log.info(
+  `[claude-peers broker v0.9.0] listening on ${BIND_HOST}:${PORT} ` +
   `(db: ${DB_PATH}, dormant_ttl=${DORMANT_TTL_HOURS}h, msg_ttl=${MESSAGE_TTL_DAYS}d, draft_ttl=${GRAPH_DRAFT_TTL_DAYS}d, ` +
   `flush_cap=${FLUSH_MAX_COUNT}/${FLUSH_MAX_AGE_HOURS}h, purge_interval=${PURGE_INTERVAL_SEC}s, ` +
   `activity_timeout=${ACTIVITY_TIMEOUT_MS / 1000}s, ws_idle=${WS_IDLE_TIMEOUT_SEC}s, ` +

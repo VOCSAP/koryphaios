@@ -56,6 +56,19 @@ historical backlog at once):
 
 The fire-and-forget contract stays intact: WS push never marks `delivered=1`. Only `check_messages` and mechanic A do, plus the TTL purge removes orphaned old undelivered rows. The four ENV vars are documented in `README.md`.
 
+## Observability (PLAN-observabilite O1/O2)
+
+Both core processes own a **rolling on-disk log** via `shared/logger.ts`
+(5 MiB × 3 files, size rotation, sync appends): `broker.log` and `server.log`
+under `<claude-peers config dir>/logs/` (override `CLAUDE_PEERS_LOG_DIR`).
+This matters because the auto-spawned broker (`stdio` stdout ignored +
+`unref()`) outlives its spawner's stderr — the file is its only durable trail.
+Hardening invariants: `uncaughtException`/`unhandledRejection` log-then-exit(1)
+in both processes; the four broker maintenance timers run through
+`guardedInterval` (a SQLite error skips the iteration, never kills the
+daemon); multi-statement sequences use `db.transaction`; handler 500s log the
+stack broker-side. Conventions per layer: `.claude/skills/error-reporting/`.
+
 ## Deck announcements
 
 The desktop Deck is a one-way (outbound-only) broker participant: it broadcasts but never reads inbound peer traffic (except the operator inbox drain).

@@ -99,8 +99,12 @@ export class PtyManager extends EventEmitter {
     }
   }
 
-  write(id: string, data: string): void {
-    this.procs.get(id)?.proc.write(data)
+  /** Returns false when no live PTY carries this id (write silently dropped). */
+  write(id: string, data: string): boolean {
+    const s = this.procs.get(id)
+    if (!s) return false
+    s.proc.write(data)
+    return true
   }
 
   resize(id: string, cols: number, rows: number): void {

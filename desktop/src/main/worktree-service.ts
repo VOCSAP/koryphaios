@@ -14,6 +14,7 @@
 //   spawning the session is never gated on an `npm install`.
 
 import { exec, execFile } from 'node:child_process'
+import { reportError } from './log'
 import { existsSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 
@@ -128,6 +129,6 @@ export function runWorktreeInit(worktreePath: string, command: string): void {
   const cmd = command.trim()
   if (!cmd) return
   exec(cmd, { cwd: worktreePath, timeout: 10 * 60_000 }, (err) => {
-    if (err) console.error(`[worktree-init] '${cmd}' failed in ${worktreePath}:`, err.message)
+    if (err) reportError('worktree', `init '${cmd}' failed in ${worktreePath}: ${err.message}`)
   })
 }

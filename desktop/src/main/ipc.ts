@@ -23,6 +23,7 @@ import {
 } from './help-assistant'
 import { buildWandPrompt, WAND_MODEL, writeWandSystemPrompt, type WandDraft } from './context-wand'
 import { markGraphDraftOpened, resolveBrokerEndpoint } from './broker-client'
+import type { BrokerStatusEvent } from './broker-client'
 import { loadInboxHistory } from './inbox-store'
 import {
   buildDigestSystemPrompt,
@@ -72,6 +73,7 @@ import { compileContext, runInference, type InferRequest } from './graph-engine'
 import { graphId as graphDocId, parseGraphDoc, type GraphDoc } from '../shared/graph'
 import { parseTemplate, toTemplate, templateToInputs } from '@shared/template'
 import { availableLocales, loadDict, resolveLocale } from './i18n'
+import { reportError } from './log'
 
 /**
  * Build the renderer i18n payload from the current config. Reads shipped locale
@@ -110,6 +112,10 @@ interface IpcDeps {
   assignRoadmapItem: (id: string, peerId: string) => Promise<AssignResult>
   /** Git checkpoint of a dirty tree before an agent spawns there (PLAN C16). */
   checkpoint: (dir: string) => Promise<void>
+  /** Current broker reachability (PLAN O5), owned by index.ts. */
+  brokerStatus: () => BrokerStatusEvent
+  /** Force an immediate broker poll (banner Retry button). */
+  brokerRetry: () => void
 }
 
 export function registerIpc({
@@ -125,7 +131,9 @@ export function registerIpc({
   dispatchNext,
   stopRoadmapItem,
   assignRoadmapItem,
-  checkpoint
+  checkpoint,
+  brokerStatus,
+  brokerRetry
 }: IpcDeps): void {
   // ----- sessions -----
   ipcMain.handle('sessions:list', () => service.list())
@@ -401,9 +409,27 @@ export function registerIpc({
       filters: [{ name: 'Text', extensions: ['txt'] }]
     })
     if (res.canceled || !res.filePath) return null
-    const { writeFileSync } = await import('node:fs')
-    writeFileSync(res.filePath, journal.toText() + '\n', 'utf-8')
+    try {
+      writeFileSync(res.filePath, journal.toText() + '\n', 'utf-8')
+    } catch (e) {
+      reportError('journal', `export to ${res.filePath} failed`, e)
+      return null
+    }
     return res.filePath
+  })
+
+  // ----- broker reachability (PLAN O5) -----
+  ipcMain.handle('broker:status', () => brokerStatus())
+  ipcMain.handle('broker:retry', () => brokerRetry())
+
+  // ----- renderer error reporting (PLAN O4) -----
+  // ErrorBoundaries and the window-level error/unhandledrejection handlers
+  // forward here so renderer failures reach main.log + the journal.
+  ipcMain.on('app:report-error', (_e, scope: unknown, message: unknown) => {
+    reportError(
+      typeof scope === 'string' ? `renderer:${scope}` : 'renderer',
+      typeof message === 'string' ? message.slice(0, 2000) : String(message)
+    )
   })
 
   // ----- supervisor (PLAN C5) -----

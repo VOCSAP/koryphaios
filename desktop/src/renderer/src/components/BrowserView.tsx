@@ -214,6 +214,8 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
   const [canBack, setCanBack] = useState(false)
   const [canFwd, setCanFwd] = useState(false)
   const [loading, setLoading] = useState(false)
+  /** Last page-level failure (did-fail-load / renderer gone), or null (O6). */
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [picking, setPicking] = useState(false)
   const [viewport, setViewport] = useState<ViewportPreset | null>(null)
   const [drawing, setDrawing] = useState(false)
@@ -313,16 +315,38 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
       deliverPrompt(prompt, 'toast.pickSent', 'toast.pickCopied')
     }
 
+    // Page failure surfaces (O6): before these, a dead page was just a blank
+    // frame. -3 (ERR_ABORTED) is user navigation noise, not a failure.
+    const onFailLoad = (e: Event): void => {
+      const ev = e as Event & { errorCode: number; errorDescription: string; validatedURL: string; isMainFrame: boolean }
+      if (!ev.isMainFrame || ev.errorCode === -3) return
+      setLoadError(`${ev.errorDescription || ev.errorCode} — ${ev.validatedURL}`)
+    }
+    const onGone = (e: Event): void => {
+      const ev = e as Event & { details?: { reason?: string } }
+      const reason = ev.details?.reason ?? 'unknown'
+      if (reason === 'clean-exit') return
+      window.api.reportError('browser', `webview render process gone (${reason})`)
+      setLoadError(`renderer gone: ${reason}`)
+    }
+    const clearError = (): void => setLoadError(null)
+
     wv.addEventListener('did-navigate', onNavigate)
     wv.addEventListener('did-navigate-in-page', onNavigate)
     wv.addEventListener('did-start-loading', onStart)
+    wv.addEventListener('did-start-loading', clearError)
     wv.addEventListener('did-stop-loading', onStop)
+    wv.addEventListener('did-fail-load', onFailLoad)
+    wv.addEventListener('render-process-gone', onGone)
     wv.addEventListener('ipc-message', onIpc)
     return () => {
       wv.removeEventListener('did-navigate', onNavigate)
       wv.removeEventListener('did-navigate-in-page', onNavigate)
       wv.removeEventListener('did-start-loading', onStart)
+      wv.removeEventListener('did-start-loading', clearError)
       wv.removeEventListener('did-stop-loading', onStop)
+      wv.removeEventListener('did-fail-load', onFailLoad)
+      wv.removeEventListener('render-process-gone', onGone)
       wv.removeEventListener('ipc-message', onIpc)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -333,8 +357,9 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     const url = normalizeUrl(urlText)
     if (!wv || !url) return
     setUrlText(url)
-    void wv.loadURL(url).catch(() => {
-      /* aborted / unreachable: the webview shows its own error page */
+    void wv.loadURL(url).catch((e) => {
+      // did-fail-load paints the in-view error; keep a log trace as well (O6).
+      window.api.reportError('browser', `loadURL(${url}) rejected: ${String(e)}`)
     })
   }
 
@@ -810,6 +835,21 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                 onPointerUp={onDrawUp}
                 onPointerCancel={onDrawUp}
               />
+            )}
+            {loadError && mode === 'web' && (
+              <div className="browser-load-error" role="alert">
+                <p>{t('browser.loadFailed')}</p>
+                <p className="error-boundary-detail">{loadError}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoadError(null)
+                    webviewRef.current?.reload()
+                  }}
+                >
+                  {t('browser.reloadPage')}
+                </button>
+              </div>
             )}
           </div>
           {mode === 'window' &&

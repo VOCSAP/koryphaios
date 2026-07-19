@@ -27,6 +27,7 @@ import { globalLaunchCommand, projectLaunchCommand, resolveLaunchConfig } from '
 import { resolveApprovedLaunchCommand } from './launch-approval'
 import { WorkspaceService } from './workspace-service'
 import {
+  BrokerHealthTracker,
   fetchGraphDrafts,
   fetchOperatorInbox,
   resolveBrokerEndpoint,
@@ -43,6 +44,7 @@ import type { SessionRuntime } from '@shared/types'
 import { listAgents } from './agents'
 import { createSessionWithWorktree } from './create-session'
 import { Journal } from './journal'
+import { flushJournalSnapshot, initDeckLog, logInfo, onDeckError, reportError } from './log'
 import { startDeckControl, type DeckControlDeps, type DeckControlServer } from './deck-control'
 import { startDesignEndpoint, type DesignEndpoint } from './design-endpoint'
 import {
@@ -77,6 +79,53 @@ let mainWindow: BrowserWindow | null = null
 app.setName('koryphaios')
 runDataMigration({ userDataDir: app.getPath('userData') })
 
+// Rolling main.log under the platform logs dir (PLAN O3): in a packaged app
+// console output goes nowhere, this file is the only durable trail. Bound
+// before anything else can fail so even startup errors land in it.
+app.setAppLogsPath()
+initDeckLog(app.getPath('logs'))
+
+// Last-resort safety nets. Steady-state: log + journal and keep running (live
+// PTYs beat a crash). Before the window exists there is nothing to keep alive:
+// surface the error loudly and exit instead of dying silently.
+const handleFatal = (kind: string) => (e: unknown) => {
+  reportError('main', kind, e)
+  if (!app.isReady()) {
+    const msg = e instanceof Error ? (e.stack ?? e.message) : String(e)
+    try {
+      dialog.showErrorBox('Koryphaios', `Startup failure (${kind}):\n\n${msg}`)
+    } catch {
+      // dialog unavailable this early: the log line above is the trace.
+    }
+    process.exit(1)
+  }
+}
+process.on('uncaughtException', handleFatal('uncaught exception'))
+process.on('unhandledRejection', handleFatal('unhandled rejection'))
+
+// Renderer / GPU / utility process crashes never reach uncaughtException: hook
+// them explicitly, journal them, and offer a reload when the window died.
+app.on('render-process-gone', (_e, contents, details) => {
+  reportError('renderer', `render process gone (${details.reason}, exit ${details.exitCode})`)
+  if (details.reason === 'clean-exit') return
+  const win = BrowserWindow.fromWebContents(contents)
+  if (!win || win.isDestroyed()) return
+  const choice = dialog.showMessageBoxSync(win, {
+    type: 'error',
+    buttons: ['Reload', 'Close'],
+    defaultId: 0,
+    cancelId: 1,
+    title: 'Koryphaios',
+    message: 'The interface crashed.',
+    detail: `Reason: ${details.reason} (exit code ${details.exitCode}). Reload restores the window; running sessions are preserved.`
+  })
+  if (choice === 0) contents.reload()
+})
+app.on('child-process-gone', (_e, details) => {
+  if (details.reason === 'clean-exit' || details.reason === 'killed') return
+  reportError('main', `child process gone: ${details.type} (${details.reason}, exit ${details.exitCode})`)
+})
+
 // Resolve the launch context (invocation cwd + optional custom scope id) and
 // scope new sessions to that project dir. The override stays in-memory so the
 // app-wide config.json is not polluted with one project's directory.
@@ -107,7 +156,7 @@ if (activeScope.scopeKind === 'custom' && config.rememberScopeSecrets) {
   try {
     rememberScopeSecret(secretsDir(), secretCipher, activeScope.groupId, activeScope.secret)
   } catch (e) {
-    console.error('[koryphaios] could not remember scope secret:', e)
+    reportError('scope', 'could not remember scope secret', e)
   }
 }
 
@@ -186,6 +235,10 @@ const service = new SessionService(
 // persisted. Fed here + in ipc.ts; read by the Journal rail view.
 const journal = new Journal()
 
+// Route every reportError() into the journal (PLAN O3): failures show up in
+// the Journal view next to the activity they interrupted.
+onDeckError((scope, text) => journal.add('error', `[${scope}] ${text}`))
+
 service.on('created', (r: SessionRuntime) => {
   const branch = r.worktree ? ` on ⎇ ${r.worktree.branch}` : ''
   journal.add('session', `session "${r.name}" spawned${branch}${r.supervisor ? ' (supervisor)' : ''}`)
@@ -222,7 +275,7 @@ const broadcastAnnounce = async (text: string, excludePeerId?: string): Promise<
     if (sent > 0) journal.add('announce', `announce to ${sent} peer(s): ${text.slice(0, 120)}`)
     return sent
   } catch (e) {
-    console.error('[koryphaios] announce failed:', e)
+    reportError('announce', 'announce failed', e)
     return 0
   }
 }
@@ -263,6 +316,19 @@ service.on('attention', ({ id, waiting }: { id: string; waiting: boolean }) => {
 // spawns). Drained batches go to the renderer inbox + a system notification.
 const INBOX_POLL_MS = 10_000
 let inboxTimer: NodeJS.Timeout | null = null
+// Drained batches whose disk write failed, retried on the next poll (O6): the
+// broker already forgot them, this queue is their only copy.
+const pendingInboxWrites: { id: number; from: string; text: string; sentAt: string }[] = []
+
+// Broker reachability (PLAN O5): fed by the inbox poll below (one signal per
+// tick -- pollGraphDrafts runs the same tick, feeding both would collapse the
+// 2-failure hysteresis into a single tick). Transitions drive the renderer's
+// red banner + the log/journal.
+const brokerHealth = new BrokerHealthTracker((status) => {
+  if (status.up) logInfo('broker', 'broker reachable again')
+  else reportError('broker', `broker unreachable: ${status.lastError ?? 'unknown error'}`)
+  mainWindow?.webContents.send('broker:status', status)
+})
 
 const notifyInbox = (batch: { from: string; text: string }[]): void => {
   if (!Notification.isSupported() || batch.length === 0) return
@@ -290,7 +356,8 @@ const pollOperatorInbox = async (): Promise<void> => {
       { groupId: activeScope.groupId, secret: activeScope.secret },
       { endpoint: resolveBrokerEndpoint() }
     )
-    if (messages.length === 0) return
+    brokerHealth.recordSuccess()
+    if (messages.length === 0 && pendingInboxWrites.length === 0) return
     const batch = messages.map((m) => ({
       id: m.id,
       from: m.from_peer_id,
@@ -298,12 +365,22 @@ const pollOperatorInbox = async (): Promise<void> => {
       sentAt: m.sent_at
     }))
     // The broker drain is destructive (delivered=1): journal the batch to
-    // disk BEFORE showing it, so a Deck restart replays the whole inbox.
-    appendInboxHistory(join(app.getPath('userData'), APP_STATE_SUBDIR), batch)
+    // disk BEFORE showing it, so a Deck restart replays the whole inbox. A
+    // failed write re-queues the batch for the next tick (O6) -- these
+    // messages exist nowhere else once drained.
+    const toPersist = [...pendingInboxWrites.splice(0), ...batch]
+    let failed = false
+    appendInboxHistory(join(app.getPath('userData'), APP_STATE_SUBDIR), toPersist, undefined, (e) => {
+      failed = true
+      reportError('inbox', `history write failed (${toPersist.length} message(s) queued for retry)`, e)
+    })
+    if (failed) pendingInboxWrites.push(...toPersist)
     mainWindow?.webContents.send('inbox:new', batch)
     notifyInbox(batch)
-  } catch {
-    // Broker down / unreachable: silent, the next tick retries.
+  } catch (e) {
+    // Broker down / unreachable: the next tick retries; the health tracker
+    // owns the (deduplicated) reporting so this stays quiet per-tick.
+    brokerHealth.recordFailure(e)
   }
 }
 
@@ -386,7 +463,7 @@ const announceToLead = async (text: string): Promise<number> => {
     }
     return sent
   } catch (e) {
-    console.error('[koryphaios] lead announce failed:', e)
+    reportError('announce', 'lead announce failed', e)
     return 0
   }
 }
@@ -436,7 +513,7 @@ const dispatchNext = async (): Promise<DispatchResult> => {
     dispatchedIds.add(item.id)
     return { sent: true, title: item.title }
   } catch (e) {
-    console.error('[koryphaios] dispatch failed:', e)
+    reportError('dispatch', 'dispatch failed', e)
     return { sent: false, reason: 'error' }
   }
 }
@@ -494,7 +571,7 @@ const assignRoadmapItem = async (id: string, peerId: string): Promise<AssignResu
     journal.add('dispatch', `item "${item.title}" assigned to "${target}"`)
     return { sent: true }
   } catch (e) {
-    console.error('[koryphaios] assign failed:', e)
+    reportError('dispatch', 'assign failed', e)
     return { sent: false }
   }
 }
@@ -723,7 +800,7 @@ service.on('changed', (sessions: unknown[]) => {
       // Keep the renderer's window title in sync with the current workspace.
       mainWindow?.webContents.send('workspace:current', summary)
     } catch (e) {
-      console.error('[koryphaios] auto-save failed:', e)
+      reportError('workspace', 'auto-save failed', e)
     }
   }, 1000)
 })
@@ -838,7 +915,7 @@ app.whenReady().then(() => {
     .then((srv) => {
       designServer = srv
     })
-    .catch((e) => console.error('[koryphaios] design endpoint failed to start:', e))
+    .catch((e) => reportError('design', 'design endpoint failed to start', e))
   registerIpc({
     service,
     workspaces,
@@ -852,7 +929,12 @@ app.whenReady().then(() => {
     dispatchNext,
     stopRoadmapItem,
     assignRoadmapItem,
-    checkpoint: checkpointBeforeSpawn
+    checkpoint: checkpointBeforeSpawn,
+    brokerStatus: () => brokerHealth.status,
+    brokerRetry: () => {
+      void pollOperatorInbox()
+      void pollGraphDrafts()
+    }
   })
   service.start()
   // Attach an auto-save workspace capturing whatever the service just restored.
@@ -882,6 +964,10 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  // Persist this run's journal (PLAN O3): the ring buffer is the only
+  // narrative of the run and would otherwise evaporate with the process.
+  flushJournalSnapshot(app.getPath('logs'), journal.toText())
+  logInfo('main', 'quitting')
   if (inboxTimer) clearInterval(inboxTimer)
   if (dispatchTimer) clearInterval(dispatchTimer)
   if (lockWatchTimer) clearInterval(lockWatchTimer)

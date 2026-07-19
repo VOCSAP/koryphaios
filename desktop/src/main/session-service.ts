@@ -24,6 +24,7 @@ import { AttentionDetector, type AttentionEvent } from './attention'
 import { OpenIdRegistry } from './open-id-registry'
 import { listTranscriptIds, pickDiscoveredId, transcriptExists } from './session-transcript'
 import { clearDeskSessionId, readDeskSessionId } from './desk-session'
+import { reportError } from './log'
 import { DEFAULT_PALETTE, paletteColor } from '@shared/palette'
 import { reconcileOrder } from '@shared/reorder'
 import type { JoinAnnounceIntent } from '@shared/announce'
@@ -76,6 +77,8 @@ export class SessionService extends EventEmitter {
    * broadcast churn).
    */
   private outputAt = new Map<string, number>()
+  /** Sessions whose dead-PTY write was already reported once (O6, anti-spam). */
+  private deadWriteReported = new Set<string>()
 
   /** Live (post-fork) claude session ids open in this process; double-resume guard. */
   private registry = new OpenIdRegistry()
@@ -487,7 +490,13 @@ export class SessionService extends EventEmitter {
   }
 
   write(id: string, data: string): void {
-    this.pty.write(id, data)
+    // Writing into a dead PTY is a silent no-op at the pty layer; leave one
+    // trace per session so "I type and nothing happens" is diagnosable (O6).
+    if (!this.pty.write(id, data) && !this.deadWriteReported.has(id)) {
+      this.deadWriteReported.add(id)
+      const name = this.defs.find((d) => d.id === id)?.name ?? id.slice(0, 8)
+      reportError('session', `input dropped: session "${name}" has no live terminal`)
+    }
   }
 
   resize(id: string, cols: number, rows: number): void {
@@ -630,13 +639,26 @@ export class SessionService extends EventEmitter {
     // Drop any stale back-channel file from a previous run so discovery cannot
     // read an old id; the core rewrites it with the fresh minted id at register.
     clearDeskSessionId(def.id, this.peersDir())
-    this.pty.spawn(
-      def.id,
-      def.cwd,
-      { command, shell: cfg.shell, interactive: cfg.interactiveShell },
-      // Per-tile token: server.ts writes the real session id keyed by it (D1/D2/D10).
-      { ...this.getScopeEnv(), CLAUDE_PEERS_DESK_SESSION: def.id }
-    )
+    try {
+      this.pty.spawn(
+        def.id,
+        def.cwd,
+        { command, shell: cfg.shell, interactive: cfg.interactiveShell },
+        // Per-tile token: server.ts writes the real session id keyed by it (D1/D2/D10).
+        { ...this.getScopeEnv(), CLAUDE_PEERS_DESK_SESSION: def.id }
+      )
+      this.deadWriteReported.delete(def.id)
+    } catch (e) {
+      // node-pty throws synchronously on a bad cwd / missing shell binary.
+      // Without this catch the def was already pushed but never broadcast: an
+      // invisible zombie (O6). Mark the tile exited so the operator sees a
+      // dead tile whose Restart retries the spawn.
+      reportError('session', `spawn failed for "${def.name}" (cwd: ${def.cwd})`, e)
+      if (r) {
+        r.status = 'exited'
+        r.exitCode = -1
+      }
+    }
   }
 
   private toRuntime(def: SessionDef): SessionRuntime {

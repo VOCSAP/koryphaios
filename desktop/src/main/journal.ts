@@ -15,6 +15,8 @@ export type JournalKind =
   | 'review'
   | 'checkpoint'
   | 'graph'
+  // PLAN O3: swallowed failures surface here via log.ts reportError().
+  | 'error'
 
 export interface JournalEntry {
   /** Monotonic id (stable React key, cheap "anything new?" cursor). */

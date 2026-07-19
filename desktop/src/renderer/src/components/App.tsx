@@ -22,6 +22,8 @@ import { Toast } from './Toast'
 import { SaveAsDialog } from './SaveAsDialog'
 import { TemplatesDialog } from './TemplatesDialog'
 import { ExportTemplateDialog } from './ExportTemplateDialog'
+import { ErrorBoundary } from './ErrorBoundary'
+import { StatusBanner } from './StatusBanner'
 
 export function App(): React.JSX.Element {
   const t = useT()
@@ -48,6 +50,7 @@ export function App(): React.JSX.Element {
   const view = useDeck((s) => s.view)
   const browserOpened = useDeck((s) => s.browserOpened)
   const inboxOpen = useDeck((s) => s.inboxOpen)
+  const initError = useDeck((s) => s.initError)
 
   useEffect(() => {
     void init()
@@ -127,40 +130,82 @@ export function App(): React.JSX.Element {
 
   if (!config) {
     // Bootstrap splash shown before init() resolves (config + locale dict load
-    // together), so there is no dictionary to translate against yet.
+    // together), so there is no dictionary to translate against yet -- which is
+    // also why the failure text below is hardcoded bilingual (PLAN O4): a
+    // broken i18n invoke is precisely one of the ways init() can fail.
+    if (initError) {
+      const fr = (navigator.language || '').toLowerCase().startsWith('fr')
+      return (
+        <div className="loading loading-error" role="alert">
+          <h2>{fr ? 'Échec du démarrage' : 'Startup failed'}</h2>
+          <p className="error-boundary-detail">{initError}</p>
+          <button onClick={() => void init()}>{fr ? 'Réessayer' : 'Retry'}</button>
+        </div>
+      )
+    }
     return <div className="loading" aria-busy="true" />
   }
 
   return (
     <div className="app" style={{ '--sidebar-w': `${sidebarWidth}px` } as React.CSSProperties}>
+      {/* Fixed overlay (PLAN O5): shown while the broker is unreachable. */}
+      <StatusBanner />
       <NavRail />
       {/* The agents and home views stay MOUNTED under the other views:
           unmounting TerminalTile would tear down the xterm instances and their
           scrollback. display:none keeps the PTYs and terminals alive. */}
+      {/* Per-view boundaries (PLAN O4): the views are siblings of one tree, so
+          a render crash in one must not unmount the others (terminals included). */}
       <div className={`view-agents${view === 'agents' ? '' : ' view-hidden'}`}>
-        <Sidebar />
-        <div className="main-pane">
-          <DisplayModeBar />
-          <TileArea />
-          <SearchBar />
-        </div>
+        <ErrorBoundary scope="agents">
+          <Sidebar />
+          <div className="main-pane">
+            <DisplayModeBar />
+            <TileArea />
+            <SearchBar />
+          </div>
+        </ErrorBoundary>
       </div>
       <div className={`view-home${view === 'home' ? '' : ' view-hidden'}`}>
-        <HomeView active={view === 'home'} />
+        <ErrorBoundary scope="home">
+          <HomeView active={view === 'home'} />
+        </ErrorBoundary>
       </div>
       {/* Browser view (PLAN D1): mounted lazily on first open, then kept alive
           like agents/home — unmounting the <webview> would drop the page, and
           unmounting the dock terminal its xterm. */}
       {browserOpened && (
         <div className={`view-browser${view === 'browser' ? '' : ' view-hidden'}`}>
-          <BrowserView active={view === 'browser'} />
+          <ErrorBoundary scope="browser">
+            <BrowserView active={view === 'browser'} />
+          </ErrorBoundary>
         </div>
       )}
-      {view === 'roadmap' && <RoadmapView />}
-      {view === 'graph' && <GraphView />}
-      {view === 'worktrees' && <WorktreesView />}
-      {view === 'journal' && <JournalView />}
-      {settingsOpen && <SettingsView />}
+      {view === 'roadmap' && (
+        <ErrorBoundary scope="roadmap">
+          <RoadmapView />
+        </ErrorBoundary>
+      )}
+      {view === 'graph' && (
+        <ErrorBoundary scope="graph">
+          <GraphView />
+        </ErrorBoundary>
+      )}
+      {view === 'worktrees' && (
+        <ErrorBoundary scope="worktrees">
+          <WorktreesView />
+        </ErrorBoundary>
+      )}
+      {view === 'journal' && (
+        <ErrorBoundary scope="journal">
+          <JournalView />
+        </ErrorBoundary>
+      )}
+      {settingsOpen && (
+        <ErrorBoundary scope="settings">
+          <SettingsView />
+        </ErrorBoundary>
+      )}
       {workspacesOpen && <WorkspacesDialog />}
       {saveAsOpen && <SaveAsDialog />}
       {templatesOpen && <TemplatesDialog />}
@@ -183,9 +228,17 @@ export function App(): React.JSX.Element {
           onConfirm={() => void confirmRestore()}
         />
       )}
-      {inboxOpen && <InboxPanel />}
-      <DiffPanel />
-      <HelpAssistant />
+      {inboxOpen && (
+        <ErrorBoundary scope="inbox">
+          <InboxPanel />
+        </ErrorBoundary>
+      )}
+      <ErrorBoundary scope="diff">
+        <DiffPanel />
+      </ErrorBoundary>
+      <ErrorBoundary scope="help">
+        <HelpAssistant />
+      </ErrorBoundary>
       <Toast />
     </div>
   )

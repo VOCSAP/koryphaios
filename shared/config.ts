@@ -87,7 +87,12 @@ async function readFileConfig(): Promise<FileConfig> {
     }
     const data = (await file.json()) as FileConfig;
     return data ?? {};
-  } catch {
+  } catch (e) {
+    // Still boot on defaults (tolerant loader), but never silently: a malformed
+    // config.json would otherwise mis-target the whole deployment (port,
+    // broker_url, token) with no trace.
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error(`[claude-peers] ignoring malformed config ${path}: ${msg} (using defaults)`);
     return {};
   }
 }

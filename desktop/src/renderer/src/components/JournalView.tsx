@@ -17,7 +17,9 @@ const KINDS: JournalKind[] = [
   'announce',
   'dispatch',
   'review',
-  'checkpoint'
+  'checkpoint',
+  'graph',
+  'error'
 ]
 
 export function JournalView(): React.JSX.Element {

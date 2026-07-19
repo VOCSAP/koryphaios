@@ -444,6 +444,17 @@ export interface WindowSource {
   thumbnail: string
 }
 
+// ----- Broker reachability (PLAN O5) -----
+// Mirror of main/broker-client.ts BrokerStatusEvent (kept import-free).
+
+export interface BrokerStatusEvent {
+  up: boolean
+  /** Epoch ms of the last up/down transition. */
+  since: number
+  /** Message of the failure that opened the outage (null while up). */
+  lastError: string | null
+}
+
 // ----- Activity journal (PLAN C14) -----
 // Mirror of main/journal.ts shapes (kept import-free for bun tests).
 
@@ -456,6 +467,8 @@ export type JournalKind =
   | 'dispatch'
   | 'review'
   | 'checkpoint'
+  | 'graph'
+  | 'error'
 
 export interface JournalEntry {
   id: number
@@ -651,6 +664,15 @@ export interface DeckApi {
   journalList(kind?: JournalKind | null): Promise<JournalEntry[]>
   /** Save the journal as plain text (save dialog); returns the path or null. */
   journalExport(): Promise<string | null>
+
+  // error reporting (PLAN O4): renderer failures land in main.log + journal.
+  reportError(scope: string, message: string): void
+
+  // broker reachability (PLAN O5): drives the red banner.
+  getBrokerStatus(): Promise<BrokerStatusEvent>
+  /** Force an immediate broker poll (banner Retry button). */
+  retryBroker(): Promise<void>
+  onBrokerStatus(cb: (status: BrokerStatusEvent) => void): () => void
 
   // diff / review (PLAN C13)
   /** Full diff picture of a dir (uncommitted + branch-vs-main for worktrees). */

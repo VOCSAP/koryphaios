@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import type { AppConfig, SessionDef } from '@shared/types'
 import { DEFAULT_PALETTE } from '@shared/palette'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
+import { reportError } from './log'
 
 const DEFAULT_CONFIG: AppConfig = {
   projectDir: homedir(),
@@ -63,7 +64,9 @@ function writeJson(file: string, value: unknown): void {
   try {
     writeFileSync(file, JSON.stringify(value, null, 2), 'utf8')
   } catch (err) {
-    console.error('[store] write failed:', file, err)
+    // Config/session persistence loss (O6): journal + main.log, not just a
+    // console invisible in the packaged app.
+    reportError('store', `write failed: ${file}`, err)
   }
 }
 

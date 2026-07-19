@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type {
   AppConfig,
+  BrokerStatusEvent,
   CreateSessionInput,
   DeckGraphDraft,
   DeckView,
@@ -42,10 +43,12 @@ interface DeckState {
   templates: TemplateSummary[]
   /** Workspace id pending a restore confirm (loss warning), or null. */
   restoreLossId: string | null
-  /** Transient toast message (an i18n key), or null. */
+  /** Transient toast message (an i18n key, or raw text when toastRaw). */
   toast: string | null
   /** Toast colour variant. */
-  toastVariant: 'success' | 'info'
+  toastVariant: 'success' | 'info' | 'error'
+  /** True when `toast` is raw text (an error message), not an i18n key. */
+  toastRaw: boolean
   /** Name of the current workspace, shown in the window title. */
   currentWorkspaceName: string | null
   workspaces: WorkspaceSummary[]
@@ -73,6 +76,10 @@ interface DeckState {
    * keep-mounted pattern as the agents/home views.
    */
   browserOpened: boolean
+  /** Boot failure message (PLAN O4): init() rejected, splash shows a retry. */
+  initError: string | null
+  /** Broker reachability (PLAN O5): null until main reports, drives the banner. */
+  brokerStatus: BrokerStatusEvent | null
 
   init(): Promise<void>
   setView(view: DeckView): void
@@ -103,7 +110,12 @@ interface DeckState {
   removeTemplate(path: string): Promise<void>
   setSidebarWidth(px: number): void
 
-  showToast(key: string, variant?: 'success' | 'info'): void
+  /**
+   * Toast policy (PLAN O5): reserved for the outcome of a DIRECT user action.
+   * Background/systemic failures go to the log + journal (+ banner when the
+   * broker is down) -- never toast them. Same key throttled to one per 5 s.
+   */
+  showToast(key: string, variant?: 'success' | 'info' | 'error', opts?: { raw?: boolean }): void
   saveCurrent(): Promise<void>
   saveAs(name: string): Promise<void>
   requestRestore(id: string): void
@@ -130,6 +142,27 @@ interface DeckState {
 
 // Monotonic token so a newer toast cancels the prior auto-clear timer.
 let toastToken = 0
+// Last display time per toast key (throttle, PLAN O5).
+const lastToastAt = new Map<string, number>()
+
+/**
+ * Guard a direct user action (PLAN O6): before this, an IPC rejection became
+ * an unhandled promise rejection and the click silently no-oped. Now it lands
+ * in main.log + the journal and surfaces as an error toast (raw message).
+ */
+async function guarded(label: string, fn: () => Promise<unknown>): Promise<void> {
+  try {
+    await fn()
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    try {
+      window.api.reportError('store', `${label} failed: ${msg}`)
+    } catch {
+      // Reporting must never mask the toast.
+    }
+    useDeck.getState().showToast(`${label}: ${msg}`, 'error', { raw: true })
+  }
+}
 
 export const useDeck = create<DeckState>((set, get) => ({
   sessions: [],
@@ -152,6 +185,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   restoreLossId: null,
   toast: null,
   toastVariant: 'success',
+  toastRaw: false,
   currentWorkspaceName: null,
   workspaces: [],
   sidebarWidth: 260,
@@ -163,15 +197,32 @@ export const useDeck = create<DeckState>((set, get) => ({
   diffTarget: null,
   browserPairedId: null,
   browserOpened: false,
+  initError: null,
+  brokerStatus: null,
 
   async init() {
-    const [sessions, config, i18n, workspaces, templates] = await Promise.all([
-      window.api.listSessions(),
-      window.api.getConfig(),
-      window.api.getI18n(),
-      window.api.listWorkspaces(),
-      window.api.listTemplates()
-    ])
+    set({ initError: null })
+    let sessions: SessionRuntime[]
+    let config: AppConfig
+    let i18n: Awaited<ReturnType<typeof window.api.getI18n>>
+    let workspaces: WorkspaceSummary[]
+    let templates: TemplateSummary[]
+    try {
+      ;[sessions, config, i18n, workspaces, templates] = await Promise.all([
+        window.api.listSessions(),
+        window.api.getConfig(),
+        window.api.getI18n(),
+        window.api.listWorkspaces(),
+        window.api.listTemplates()
+      ])
+    } catch (e) {
+      // Without this catch a single failed bootstrap invoke left the splash
+      // spinning forever (PLAN O4). Surface it + let the operator retry.
+      const message = e instanceof Error ? e.message : String(e)
+      window.api.reportError('init', `bootstrap failed: ${message}`)
+      set({ initError: message })
+      return
+    }
     set({
       sessions,
       config,
@@ -242,6 +293,10 @@ export const useDeck = create<DeckState>((set, get) => ({
     window.api.onGraphDrafts((drafts) => set({ graphDrafts: drafts }))
     // Notification click on an inbox message: surface the panel.
     window.api.onInboxOpen(() => get().openInbox(true))
+    // Broker reachability (PLAN O5): transitions pushed by main + the current
+    // state fetched once (covers a reloaded renderer during an outage).
+    window.api.onBrokerStatus((status) => set({ brokerStatus: status }))
+    void window.api.getBrokerStatus().then((status) => set({ brokerStatus: status }))
     window.api.onConfigChanged((next) => {
       const prevLocale = get().config?.locale
       set({ config: next })
@@ -264,13 +319,15 @@ export const useDeck = create<DeckState>((set, get) => ({
   openGraphDraft: async (draft) => {
     // Main creates the pre-filled doc and flips the broker status; the local
     // list is trimmed optimistically (the next poll confirms).
-    const res = await window.api.graphDraftOpen(draft)
-    set((s) => ({
-      graphDrafts: s.graphDrafts.filter((d) => d.id !== draft.id),
-      inboxOpen: false,
-      view: 'graph',
-      graphFocus: { docId: res.docId, nodeId: res.nodeId }
-    }))
+    await guarded('open draft', async () => {
+      const res = await window.api.graphDraftOpen(draft)
+      set((s) => ({
+        graphDrafts: s.graphDrafts.filter((d) => d.id !== draft.id),
+        inboxOpen: false,
+        view: 'graph',
+        graphFocus: { docId: res.docId, nodeId: res.nodeId }
+      }))
+    })
   },
   clearGraphFocus: () => set({ graphFocus: null }),
   openDiff: (target) => set({ diffTarget: target }),
@@ -291,34 +348,48 @@ export const useDeck = create<DeckState>((set, get) => ({
   openExportTemplate: (open) => set({ exportTemplateOpen: open }),
 
   async refreshTemplates() {
-    const templates = await window.api.listTemplates()
-    set({ templates })
+    await guarded('list templates', async () => {
+      const templates = await window.api.listTemplates()
+      set({ templates })
+    })
   },
 
   async exportTemplate(name, local) {
-    const path = await window.api.exportTemplate(name, local)
-    set({ exportTemplateOpen: false })
-    if (path) get().showToast('toast.templateExported')
+    await guarded('export template', async () => {
+      const path = await window.api.exportTemplate(name, local)
+      set({ exportTemplateOpen: false })
+      if (path) get().showToast('toast.templateExported')
+    })
   },
 
   async applyTemplate(path, mode) {
-    await window.api.applyTemplate(path, mode)
-    set({ templatesOpen: false })
-    // Sessions refresh via onSessionsChanged (create/closeAll broadcast).
-    get().showToast('toast.templateApplied')
+    await guarded('apply template', async () => {
+      await window.api.applyTemplate(path, mode)
+      set({ templatesOpen: false })
+      // Sessions refresh via onSessionsChanged (create/closeAll broadcast).
+      get().showToast('toast.templateApplied')
+    })
   },
 
   async removeTemplate(path) {
-    const ok = await window.api.deleteTemplate(path)
-    // Keep the picker open; just refresh the list so the row disappears.
-    await get().refreshTemplates()
-    if (ok) get().showToast('toast.templateDeleted')
+    await guarded('delete template', async () => {
+      const ok = await window.api.deleteTemplate(path)
+      // Keep the picker open; just refresh the list so the row disappears.
+      await get().refreshTemplates()
+      if (ok) get().showToast('toast.templateDeleted')
+    })
   },
 
   setSidebarWidth: (px) => set({ sidebarWidth: Math.min(520, Math.max(180, Math.round(px))) }),
 
-  showToast: (key, variant = 'success') => {
-    set({ toast: key, toastVariant: variant })
+  showToast: (key, variant = 'success', opts) => {
+    // Throttle repeats (PLAN O5): a failing action retried in a loop must not
+    // strobe the UI -- one toast per key per 5 s.
+    const now = Date.now()
+    const last = lastToastAt.get(key) ?? 0
+    if (now - last < 5000) return
+    lastToastAt.set(key, now)
+    set({ toast: key, toastVariant: variant, toastRaw: opts?.raw ?? false })
     const token = ++toastToken
     setTimeout(() => {
       if (toastToken === token) set({ toast: null })
@@ -326,8 +397,10 @@ export const useDeck = create<DeckState>((set, get) => ({
   },
 
   async saveCurrent() {
-    await get().saveWorkspace()
-    get().showToast('toast.workspaceSaved')
+    await guarded('save workspace', async () => {
+      await get().saveWorkspace()
+      get().showToast('toast.workspaceSaved')
+    })
   },
 
   async saveAs(name) {
@@ -359,59 +432,71 @@ export const useDeck = create<DeckState>((set, get) => ({
   cancelRestore: () => set({ restoreLossId: null }),
 
   async newClear() {
-    await window.api.newClear()
-    // sessions empty out via onSessionsChanged; close the confirm.
-    set({ confirmNewClearOpen: false })
+    await guarded('new clear', async () => {
+      await window.api.newClear()
+      // sessions empty out via onSessionsChanged; close the confirm.
+      set({ confirmNewClearOpen: false })
+    })
   },
 
   async createSession(input) {
-    const created = await window.api.createSession(input)
-    set({ selectedId: created.id })
-    // sessions list refreshes via onSessionsChanged
+    await guarded('create session', async () => {
+      const created = await window.api.createSession(input)
+      set({ selectedId: created.id })
+      // sessions list refreshes via onSessionsChanged
+    })
   },
 
   async removeSession(id) {
-    await window.api.removeSession(id)
-    if (get().maximizedId === id) set({ maximizedId: null })
+    await guarded('close session', async () => {
+      await window.api.removeSession(id)
+      if (get().maximizedId === id) set({ maximizedId: null })
+    })
   },
 
   async renameSession(id, name) {
-    await window.api.renameSession(id, name)
+    await guarded('rename session', () => window.api.renameSession(id, name))
   },
 
   async setColor(id, color) {
-    await window.api.setSessionColor(id, color)
+    await guarded('set color', () => window.api.setSessionColor(id, color))
   },
 
   async restartSession(id) {
-    await window.api.restartSession(id)
+    await guarded('restart session', () => window.api.restartSession(id))
   },
 
   async setAutoResume(id, enabled) {
-    await window.api.setSessionAutoResume(id, enabled)
     // The updated override arrives via onSessionsChanged (broadcast).
+    await guarded('auto-resume', () => window.api.setSessionAutoResume(id, enabled))
   },
 
   async reorderSessions(ids) {
-    await window.api.reorderSessions(ids)
     // The new order arrives via onSessionsChanged (reorder broadcasts 'changed').
+    await guarded('reorder', () => window.api.reorderSessions(ids))
   },
 
   async updateConfig(patch) {
-    const config = await window.api.setConfig(patch)
-    set({ config })
+    await guarded('save settings', async () => {
+      const config = await window.api.setConfig(patch)
+      set({ config })
+    })
   },
 
   async broadcastAnnounce(text) {
     const body = text.trim()
     if (!body) return
-    const sent = await window.api.announce(body)
-    get().showToast(sent > 0 ? 'toast.announceSent' : 'toast.announceNoPeers', sent > 0 ? 'success' : 'info')
+    await guarded('announce', async () => {
+      const sent = await window.api.announce(body)
+      get().showToast(sent > 0 ? 'toast.announceSent' : 'toast.announceNoPeers', sent > 0 ? 'success' : 'info')
+    })
   },
 
   async refreshWorkspaces() {
-    const workspaces = await window.api.listWorkspaces()
-    set({ workspaces, currentWorkspaceName: workspaces.find((w) => w.current)?.name ?? null })
+    await guarded('list workspaces', async () => {
+      const workspaces = await window.api.listWorkspaces()
+      set({ workspaces, currentWorkspaceName: workspaces.find((w) => w.current)?.name ?? null })
+    })
   },
 
   async saveWorkspace(name) {
@@ -420,20 +505,24 @@ export const useDeck = create<DeckState>((set, get) => ({
   },
 
   async restoreWorkspace(id) {
-    const ok = await window.api.restoreWorkspace(id)
-    // Sessions refresh via onSessionsChanged (restoreFrom broadcasts 'changed').
-    await get().refreshWorkspaces()
-    if (ok) {
-      // Close the selection window once a workspace has been loaded.
-      set({ workspacesOpen: false })
-    } else {
-      // Already owned by another live window (or gone) -> inform, don't restore.
-      get().showToast('toast.alreadyOpen', 'info')
-    }
+    await guarded('restore workspace', async () => {
+      const ok = await window.api.restoreWorkspace(id)
+      // Sessions refresh via onSessionsChanged (restoreFrom broadcasts 'changed').
+      await get().refreshWorkspaces()
+      if (ok) {
+        // Close the selection window once a workspace has been loaded.
+        set({ workspacesOpen: false })
+      } else {
+        // Already owned by another live window (or gone) -> inform, don't restore.
+        get().showToast('toast.alreadyOpen', 'info')
+      }
+    })
   },
 
   async removeWorkspace(id) {
-    await window.api.deleteWorkspace(id)
-    await get().refreshWorkspaces()
+    await guarded('delete workspace', async () => {
+      await window.api.deleteWorkspace(id)
+      await get().refreshWorkspaces()
+    })
   }
 }))

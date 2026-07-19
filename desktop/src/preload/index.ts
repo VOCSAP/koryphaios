@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppConfig,
+  BrokerStatusEvent,
   CreateSessionInput,
   DeckApi,
   DeckView,
@@ -20,7 +21,16 @@ import type {
 } from '@shared/types'
 
 function subscribe<T>(channel: string, cb: (payload: T) => void): () => void {
-  const listener = (_e: Electron.IpcRendererEvent, payload: T): void => cb(payload)
+  const listener = (_e: Electron.IpcRendererEvent, payload: T): void => {
+    try {
+      cb(payload)
+    } catch (err) {
+      // A throwing handler must not break the channel's later deliveries
+      // (PLAN O4); mirror what multiplex() already does for pty channels.
+      console.error(`[preload] ${channel} handler threw:`, err)
+      ipcRenderer.send('app:report-error', 'preload', `${channel} handler threw: ${String(err)}`)
+    }
+  }
   ipcRenderer.on(channel, listener)
   return () => ipcRenderer.removeListener(channel, listener)
 }
@@ -67,6 +77,12 @@ const api: DeckApi = {
   peekNextColor: () => ipcRenderer.invoke('sessions:peek-next-color'),
   reorderSessions: (ids: string[]) => ipcRenderer.invoke('sessions:reorder', ids),
   newClear: () => ipcRenderer.invoke('app:new-clear'),
+
+  reportError: (scope: string, message: string) =>
+    ipcRenderer.send('app:report-error', scope, message),
+
+  getBrokerStatus: () => ipcRenderer.invoke('broker:status'),
+  retryBroker: () => ipcRenderer.invoke('broker:retry'),
 
   ptyInput: (id: string, data: string) => ipcRenderer.send('pty:input', id, data),
   ptyResize: (id: string, cols: number, rows: number) =>
@@ -164,7 +180,8 @@ const api: DeckApi = {
   onMenuExportTemplate: (cb: () => void) => subscribe('menu:export-template', () => cb()),
   onMenuImportTemplate: (cb: () => void) => subscribe('menu:import-template', () => cb()),
   onWorkspaceCurrent: (cb: (ws: WorkspaceSummary | null) => void) =>
-    subscribe('workspace:current', cb)
+    subscribe('workspace:current', cb),
+  onBrokerStatus: (cb: (status: BrokerStatusEvent) => void) => subscribe('broker:status', cb)
 }
 
 contextBridge.exposeInMainWorld('api', api)

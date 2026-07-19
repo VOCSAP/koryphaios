@@ -71,6 +71,61 @@ export function computeGroupSecretHash(secret: string): string {
   return createHash('sha256').update(secret, 'utf-8').digest('hex')
 }
 
+// ----- Broker reachability (PLAN O5) -----
+
+export interface BrokerStatusEvent {
+  up: boolean
+  /** Epoch ms of the last up/down transition. */
+  since: number
+  /** Message of the failure that opened the outage (null while up). */
+  lastError: string | null
+}
+
+/**
+ * Consecutive-failure health tracker fed by the Deck's existing broker polls.
+ * Hysteresis keeps the banner stable: `failureThreshold` consecutive failures
+ * flip to down (one flaky poll is not an outage), a single success flips back
+ * up. onChange fires only on transitions.
+ */
+export class BrokerHealthTracker {
+  private failures = 0
+  private up = true
+  private since: number
+  private lastError: string | null = null
+
+  constructor(
+    private onChange: (status: BrokerStatusEvent) => void,
+    private failureThreshold = 2,
+    private now: () => number = Date.now
+  ) {
+    this.since = this.now()
+  }
+
+  get status(): BrokerStatusEvent {
+    return { up: this.up, since: this.since, lastError: this.lastError }
+  }
+
+  recordSuccess(): void {
+    this.failures = 0
+    if (!this.up) {
+      this.up = true
+      this.since = this.now()
+      this.lastError = null
+      this.onChange(this.status)
+    }
+  }
+
+  recordFailure(error: unknown): void {
+    this.failures++
+    if (this.up && this.failures >= this.failureThreshold) {
+      this.up = false
+      this.since = this.now()
+      this.lastError = error instanceof Error ? error.message : String(error)
+      this.onChange(this.status)
+    }
+  }
+}
+
 export interface SendAnnounceParams {
   /** sha256(secret).slice(0,32) -- the broker group_id (== Scope.groupId). */
   groupId: string
