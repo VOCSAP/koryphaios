@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * claude-peers MCP server (v0.7.0)
+ * claude-peers MCP server (v0.9.0)
  *
  * Runs locally alongside Claude Code. Always uses local context detection --
  * SSH mode is removed in v0.3.1.
@@ -407,7 +407,7 @@ async function pollFallback() {
 // --- MCP server ---
 
 const mcp = new Server(
-  { name: "claude-peers", version: "0.8.0" },
+  { name: "claude-peers", version: "0.9.0" },
   {
     capabilities: {
       experimental: { "claude/channel": {} },

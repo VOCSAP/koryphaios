@@ -1,5 +1,80 @@
 # Changelog
 
+## core v0.9.0 + desktop v0.11.0 -- 2026-07-19
+
+Error observability (PLAN-observabilite-erreurs O1-O6, plan retired into this
+entry): the audit of invisible crashes found ad-hoc `console.error` everywhere,
+no log file on either side, no process-level nets, and an activity journal
+that evaporated at quit. Both sides now own bounded rolling logs, every layer
+has a designated error sink (the "No silent errors" convention in CLAUDE.md +
+the `error-reporting` skill), and the Deck surfaces failures deliberately:
+journal for background errors, throttled toasts for direct actions, a
+persistent red banner for the broker-down state. No Sentry/SaaS: everything
+stays on the operator's machine (local-first decision).
+
+### Added (core, v0.9.0)
+- **Rolling file logger (O1).** `shared/logger.ts` (node-fs only, no deps):
+  size-rotated `<name>.log` (5 MiB × `maxFiles=3`, boot trim, synchronous
+  appends so an uncaughtException handler can flush a last line), console
+  mirror for terminal runs, `coreLogDir()` resolving `<config dir>/logs`
+  (override `CLAUDE_PEERS_LOG_DIR`). The broker writes `broker.log` — it
+  previously spawned with stdout ignored and `unref()`, so once its spawner
+  died its diagnostics went nowhere; `server.log` sits behind server.ts's
+  existing `log()` helper (stdout untouched: it carries the MCP protocol).
+- **Process-level nets + guarded timers (O2).** `uncaughtException`/
+  `unhandledRejection` log-then-exit(1) in broker.ts and server.ts (Bun exits
+  on unhandled rejections — now with a trace). The four broker maintenance
+  timers (`cleanStalePeers`, `sweepInactivePeers`, `releaseStaleLocks`,
+  `purgeOldMessages`) run through `guardedInterval`: they execute outside the
+  HTTP handler's try/catch, so a transient SQLite error (BUSY, disk full) was
+  the most likely invisible-crash vector; it now skips the iteration and logs.
+- **Transactions on multi-statement sequences (O2).** `recordMessageTx`
+  (message insert + activity refresh + heuristic ack) and `purgeDormantPeerTx`
+  (FK-ordered deletes) — an abrupt broker death mid-sequence no longer leaves
+  partial state. Handler 500s keep the stack in broker.log (clients only got
+  the message). A malformed `config.json` is reported (path + parse error)
+  before booting on defaults instead of being silently discarded;
+  `pollFallback` notification failures log once per message.
+
+### Added (desktop, v0.11.0)
+- **main.log + central `reportError` (O3).** `src/main/log.ts`: rolling
+  `main.log` under `app.getPath('logs')`; `reportError(scope, msg, err)` fans
+  out to file + console (dev) + a new journal `error` kind, so the Journal
+  view doubles as the operator's error console. The ~7 log-only catches of
+  index.ts (announce, dispatch, auto-save, design endpoint…) and the silent
+  persistence catches (config/session store, provider keys, worktree init)
+  now route through it. The journal itself flushes to `journal-<date>.log`
+  at quit (pruned after 7 days) instead of evaporating with the process.
+- **Crash nets (O3/O4).** Main: `uncaughtException`/`unhandledRejection`
+  log-and-continue once ready (live PTYs beat a crash), errorbox + exit
+  before; `render-process-gone` journals and offers a reload;
+  `child-process-gone` is logged. Renderer: `ErrorBoundary` at the root and
+  around every top-level view — the views are siblings of one tree, so one
+  view's render crash used to blank the whole window, terminals included;
+  window-level `error`/`unhandledrejection` forward to main.log; `init()`
+  failure shows a bilingual retry splash instead of spinning forever;
+  preload `subscribe()` callbacks are guarded like `multiplex()` already was.
+- **Broker-down banner + toast policy (O5).** `BrokerHealthTracker`
+  (2-consecutive-failure hysteresis, fed by the operator-inbox poll) pushes
+  `broker:status` to a persistent full-width red `StatusBanner` (outage time,
+  last error, Retry forcing an immediate poll), self-dismissing on recovery —
+  an outage is a state, not an event, so it is a banner and never toasts.
+  `showToast` gains an `error` variant with raw-text support, throttled to
+  one per key per 5 s, and is documented as reserved for direct user-action
+  outcomes.
+- **Guarded actions & hardened edges (O6).** Every mutating store action goes
+  through `guarded()`: an IPC rejection logs + toasts instead of silently
+  no-oping the click as an unhandled rejection. `pty.spawn` is wrapped (bad
+  cwd / missing shell used to leave a pushed-but-never-broadcast zombie def;
+  the tile now shows exited and Restart retries) and writes into a dead PTY
+  are reported once per session. Operator-inbox batches whose disk write
+  failed are re-queued for the next poll (the broker drain is destructive —
+  that queue is the only remaining copy). Graph save/list/create/delete
+  failures surface in the in-view notice; the embedded browser paints an
+  in-frame error with Reload on `did-fail-load`/`render-process-gone`; a
+  provider key that fails to decrypt (keychain change) is reported instead of
+  masquerading as "no key stored".
+
 ## desktop v0.10.3 -- 2026-07-17
 
 ### Added (desktop, v0.10.3)
