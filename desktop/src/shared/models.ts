@@ -16,10 +16,17 @@
 // Pure module (no node/electron imports): shared by main and renderer,
 // unit-testable under bun.
 
-import type { GraphCli } from './graph'
+import { GRAPH_CLIS, type GraphCli, type ModelTarget } from './graph'
 
 /** Frontier provider ids double as favorite-key prefixes: keep them stable. */
 export type FrontierProviderId = 'anthropic' | 'openai' | 'gemini'
+
+/** Favorite-key prefix of each frontier CLI (locals key on their config id). */
+export const FRONTIER_ID_BY_CLI: Record<Exclude<GraphCli, 'local'>, FrontierProviderId> = {
+  claude: 'anthropic',
+  codex: 'openai',
+  gemini: 'gemini'
+}
 
 export interface ModelEntry {
   /** Value passed to the CLI's --model / the endpoint's `model` field. */
@@ -117,6 +124,52 @@ export const FRONTIER_IDS: FrontierProviderId[] = ['anthropic', 'openai', 'gemin
 
 export function favKey(providerId: string, modelId: string): string {
   return `${providerId}:${modelId}`
+}
+
+/** The favorite-style key selecting `target` in a picker. */
+export function targetKey(target: ModelTarget): string {
+  const providerId =
+    target.cli === 'local' ? (target.providerId ?? '') : FRONTIER_ID_BY_CLI[target.cli]
+  return favKey(providerId, target.model)
+}
+
+/** Compact operator-facing label for a target ('' model = CLI default). */
+export function targetLabel(target: ModelTarget): string {
+  const provider = target.cli === 'local' ? (target.providerId ?? 'local') : target.cli
+  return target.model ? `${provider} · ${target.model}` : `${provider} (default)`
+}
+
+// ---------------------------------------------------------------------------
+// Utility-inference targets (lot A): help assistant + resume digest share one
+// configured target, the roadmap context wand another. Haiku stays the default
+// on both (cheap + fast — the C9/C21 rationale is unchanged).
+
+export const DEFAULT_HELP_TARGET: ModelTarget = { cli: 'claude', model: 'haiku' }
+export const DEFAULT_WAND_TARGET: ModelTarget = { cli: 'claude', model: 'haiku' }
+
+/**
+ * Validate a stored/incoming target (config files travel through JSON edited
+ * by hand): unknown CLI, missing model, or a 'local' target with no provider
+ * id falls back. Legacy configs carry `helpModel: '<alias>'` instead — map it
+ * with `legacyHelpTarget` before falling back.
+ */
+export function sanitizeTarget(raw: unknown, fallback: ModelTarget): ModelTarget {
+  if (!raw || typeof raw !== 'object') return { ...fallback }
+  const t = raw as Partial<ModelTarget>
+  if (!GRAPH_CLIS.includes(t.cli as GraphCli)) return { ...fallback }
+  if (typeof t.model !== 'string') return { ...fallback }
+  if (t.cli === 'local') {
+    if (typeof t.providerId !== 'string' || !t.providerId) return { ...fallback }
+    return { cli: 'local', model: t.model, providerId: t.providerId }
+  }
+  return { cli: t.cli as GraphCli, model: t.model }
+}
+
+/** Map the pre-lot-A `helpModel` string setting to a target, or null. */
+export function legacyHelpTarget(helpModel: unknown): ModelTarget | null {
+  return typeof helpModel === 'string' && helpModel.trim()
+    ? { cli: 'claude', model: helpModel.trim() }
+    : null
 }
 
 export function parseFavKey(key: string): { providerId: string; modelId: string } | null {

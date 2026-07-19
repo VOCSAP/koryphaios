@@ -1,15 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
 import type { HelpExchange } from '@shared/types'
+import { targetLabel } from '@shared/models'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { ContextMenu } from './ContextMenu'
 
 // Floating "?" help assistant (PLAN C9). Each question is a throwaway
-// `claude -p` invocation, view-aware through an app-generated system prompt --
-// a decisions/comprehension advisor that technically cannot act (no MCP, no
-// mutating tools). Right-click on the button: hide it or switch the model.
+// headless invocation against the configured target (config.helpTarget, any
+// provider of the unified catalog — lot A), view-aware through an
+// app-generated system prompt -- a decisions/comprehension advisor that
+// technically cannot act (no MCP, no mutating tools). Right-click on the
+// button: hide it or quick-switch among the Claude aliases (the full catalog
+// choice lives in Settings > Models).
 
-const MODELS = ['haiku', 'sonnet', 'opus']
+const QUICK_MODELS = ['haiku', 'sonnet', 'opus']
 
 interface Message extends HelpExchange {
   /** Answer pending (question sent, no reply yet). */
@@ -106,7 +110,7 @@ export function HelpAssistant(): React.JSX.Element | null {
             >
               📋
             </button>
-            <span className="help-model">{config.helpModel}</span>
+            <span className="help-model">{targetLabel(config.helpTarget)}</span>
             <button className="icon-btn" title={t('common.close')} onClick={() => setOpen(false)}>
               ✕
             </button>
@@ -161,9 +165,11 @@ export function HelpAssistant(): React.JSX.Element | null {
           y={menuPos.y}
           onClose={() => setMenuPos(null)}
           items={[
-            ...MODELS.map((m) => ({
-              label: `${config.helpModel === m ? '✓ ' : ''}${t('help.model', { model: m })}`,
-              onSelect: () => void updateConfig({ helpModel: m })
+            ...QUICK_MODELS.map((m) => ({
+              label: `${
+                config.helpTarget.cli === 'claude' && config.helpTarget.model === m ? '✓ ' : ''
+              }${t('help.model', { model: m })}`,
+              onSelect: () => void updateConfig({ helpTarget: { cli: 'claude', model: m } })
             })),
             {
               label: t('help.hide'),

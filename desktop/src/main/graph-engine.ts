@@ -288,20 +288,32 @@ export async function runInference(
       node: a
     }))
     const judgeSystem = buildJudgeSystem(compiled, labeled)
-    const content =
-      judgeTarget.cli === 'claude'
-        ? judgeSystem
-        : `${judgeSystem}\n\n## Operator's message (answer this)\n\n${GRAPH_JUDGE_PROMPT}`
-    const contextFile = writeContextFile(
-      filesDir,
-      { nodeId: `${node.id}-judge`, cli: judgeTarget.cli },
-      content
-    )
-    const command = buildAdapterCommand({
-      promptText: GRAPH_JUDGE_PROMPT,
-      contextFile,
-      target: judgeTarget
-    })
+    // Same routing as the answer targets: HTTP for 'local', CLI otherwise.
+    const runJudge = (): Promise<string> => {
+      if (judgeTarget.cli === 'local') {
+        const provider = (deps.localProviders ?? []).find((p) => p.id === judgeTarget.providerId)
+        if (!provider) {
+          return Promise.reject(new Error(`unknown local provider ${judgeTarget.providerId ?? '?'}`))
+        }
+        return http({
+          baseUrl: provider.baseUrl,
+          apiKey: provider.apiKey,
+          model: judgeTarget.model,
+          system: judgeSystem,
+          prompt: GRAPH_JUDGE_PROMPT
+        })
+      }
+      const content =
+        judgeTarget.cli === 'claude'
+          ? judgeSystem
+          : `${judgeSystem}\n\n## Operator's message (answer this)\n\n${GRAPH_JUDGE_PROMPT}`
+      const contextFile = writeContextFile(
+        filesDir,
+        { nodeId: `${node.id}-judge`, cli: judgeTarget.cli },
+        content
+      )
+      return run(buildAdapterCommand({ promptText: GRAPH_JUDGE_PROMPT, contextFile, target: judgeTarget }))
+    }
     const started = Date.now()
     const judgeSpot = findFreeSpot(out.nodes, node.x, node.y + 2 * FAN_Y)
     const judge: GraphNode = {
@@ -313,10 +325,13 @@ export async function runInference(
       y: judgeSpot.y,
       createdAt: Date.now(),
       cli: judgeTarget.cli,
-      model: judgeTarget.model
+      model: judgeTarget.model,
+      ...(judgeTarget.cli === 'local' && judgeTarget.providerId
+        ? { providerId: judgeTarget.providerId }
+        : {})
     }
     try {
-      const text = await run(command)
+      const text = await runJudge()
       // The candidates were judged anonymized (bias); reveal the mapping in
       // the node so the operator knows which model was which.
       const legend = labeled

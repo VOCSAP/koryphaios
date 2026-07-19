@@ -1,23 +1,20 @@
 // Roadmap context wand (PLAN C21): the 🪄 button of the item editor runs one
-// throwaway `claude -p` (haiku) that drafts the item's `context` field -- the
+// throwaway headless inference that drafts the item's `context` field -- the
 // implementation briefing for the agent that will pick the item up later --
 // grounded in the project files. The result only fills the editor textarea;
 // nothing reaches the broker until the operator reviews and saves.
 //
 // Security model (C8 rule, same harness as help-assistant.ts): the system
 // prompt is a CODE CONSTANT that forces the briefing pattern; the invocation
-// is technically read-only (`--strict-mcp-config` + `--disallowedTools`),
-// with Read/Grep/Glob left available so pointers cite real files. The model
-// is pinned to haiku (cheap + fast; the wand drafts, the operator decides).
+// is technically read-only (per-CLI harness in model-adapters.ts), with
+// Read/Grep/Glob left available on claude so pointers cite real files. The
+// target is configurable since lot A (config.wandTarget, haiku default —
+// cheap + fast; the wand drafts, the operator decides); routing lives in
+// utility-inference.ts.
 //
 // Node builtins only; pure builders unit-testable under bun.
 
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import type { RoadmapWandDraft } from '../shared/types'
-
-/** Pinned wand model (validated against HELP_MODELS by buildHelpCommand). */
-export const WAND_MODEL = 'haiku'
 
 export const WAND_SYSTEM_PROMPT = [
   'You are the roadmap CONTEXT WAND of Koryphaios, a desktop app that docks multiple Claude Code sessions ("agents") into one window around a shared per-project roadmap.',
@@ -58,12 +55,4 @@ export function buildWandPrompt(draft: WandDraft): string {
       : 'No context draft yet: start from the item and the project files.'
   ].filter((l) => l !== '')
   return lines.join('\n')
-}
-
-/** Write the (constant) wand system prompt into the app-state dir. */
-export function writeWandSystemPrompt(dir: string): string {
-  mkdirSync(dir, { recursive: true })
-  const file = join(dir, 'wand-system-prompt.md')
-  writeFileSync(file, WAND_SYSTEM_PROMPT, 'utf-8')
-  return file
 }

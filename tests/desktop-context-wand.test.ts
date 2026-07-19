@@ -1,36 +1,13 @@
 // PLAN C21: context wand — the system prompt is a code constant that forces
 // the briefing pattern (C8 rule), the user prompt carries the item as
-// delimited data with per-field caps, and the whole thing composes into the
-// same read-only claude -p harness as the help assistant.
+// delimited data with per-field caps, and the whole thing routes through the
+// unified read-only adapters (utility-inference over model-adapters, lot A).
 
-import { test, expect, afterEach } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { test, expect } from "bun:test";
 
-import {
-  WAND_MODEL,
-  WAND_SYSTEM_PROMPT,
-  buildWandPrompt,
-  writeWandSystemPrompt,
-} from "../desktop/src/main/context-wand.ts";
-import { buildHelpCommand, HELP_DISALLOWED_TOOLS } from "../desktop/src/main/help-assistant.ts";
-
-const tmpDirs: string[] = [];
-function tmp(): string {
-  const d = mkdtempSync(join(tmpdir(), "wand-test-"));
-  tmpDirs.push(d);
-  return d;
-}
-afterEach(() => {
-  for (const d of tmpDirs.splice(0)) {
-    try {
-      rmSync(d, { recursive: true, force: true });
-    } catch {
-      /* best-effort */
-    }
-  }
-});
+import { WAND_SYSTEM_PROMPT, buildWandPrompt } from "../desktop/src/main/context-wand.ts";
+import { HELP_DISALLOWED_TOOLS } from "../desktop/src/main/help-assistant.ts";
+import { buildAdapterCommand } from "../desktop/src/main/model-adapters.ts";
 
 const DRAFT = {
   title: "Fix login",
@@ -67,19 +44,15 @@ test("buildWandPrompt preserves an operator draft and caps oversized fields", ()
   expect(huge.length).toBeLessThan(6_000);
 });
 
-test("writeWandSystemPrompt writes the constant; the command reuses the C9 harness", () => {
-  const dir = tmp();
-  const file = writeWandSystemPrompt(dir);
-  expect(readFileSync(file, "utf-8")).toBe(WAND_SYSTEM_PROMPT);
-
-  const cmd = buildHelpCommand({
+test("the wand's claude target composes into the C9 read-only harness", () => {
+  const cmd = buildAdapterCommand({
     promptText: buildWandPrompt(DRAFT),
-    systemPromptFile: file,
-    model: WAND_MODEL,
+    contextFile: "/state/ctx.md",
+    target: { cli: "claude", model: "haiku" },
     platform: "linux",
   });
   expect(cmd).toContain("--model haiku");
   expect(cmd).toContain("--strict-mcp-config");
   expect(cmd).toContain(`--disallowedTools "${HELP_DISALLOWED_TOOLS}"`);
-  expect(cmd).toContain(`--append-system-prompt-file "${file}"`);
+  expect(cmd).toContain('--append-system-prompt-file "/state/ctx.md"');
 });

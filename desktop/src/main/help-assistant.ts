@@ -1,6 +1,10 @@
 // Floating "?" help assistant (PLAN C9): each question is a throwaway
-// `claude -p` invocation with an app-generated system prompt describing the
+// headless invocation with an app-generated system prompt describing the
 // active view and a snapshot of its data. No supervisor context involved.
+// Since lot A (EXPLORATION-multi-llm) the target is configurable
+// (config.helpTarget) and the command/HTTP routing lives in
+// utility-inference.ts over the C24 adapters; this module keeps the help
+// prompts, the transcript replay, and the shell executor (runHelp).
 //
 // Security model (consistent with the C8 locked-harness decision):
 // - The system prompt is a CODE CONSTANT (+ app-generated context), never an
@@ -8,22 +12,16 @@
 // - The assistant is TECHNICALLY read-only, not just prompt-constrained:
 //   `--strict-mcp-config` with no MCP config loads NO MCP servers (no
 //   claude-peers, no deck-control), and `--disallowedTools` denies every
-//   mutating tool. Read/Grep/Glob stay available so it can ground answers in
+//   mutating tool (codex: --sandbox read-only; gemini: --approval-mode
+//   plan). Read/Grep/Glob stay available so claude can ground answers in
 //   the project files.
 //
 // Node builtins only; the pure builders are unit-testable under bun, and
-// runHelp accepts an injectable binary for tests.
+// runHelp accepts an injectable command for tests.
 
 import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
 import { buildShellInvocation } from './shell-command'
-import { quotePromptArg } from './session-command'
-
-/** Model choices offered for the assistant (Haiku default: cheap + fast). */
-export const HELP_MODELS = ['haiku', 'sonnet', 'opus'] as const
-export const DEFAULT_HELP_MODEL = 'haiku'
 
 /** Mutating tools denied to the assistant (defense in depth over the prompt). */
 export const HELP_DISALLOWED_TOOLS =
@@ -75,40 +73,6 @@ export function buildHelpPrompt(question: string, transcript: HelpExchange[] = [
     .map((e) => `Operator: ${e.question}\nAssistant: ${e.answer}`)
     .join('\n\n')
   return `Earlier in this help conversation:\n\n${history}\n\nOperator's new question: ${question}`
-}
-
-/**
- * Compose the full `claude -p` command string (parsed by the login shell,
- * like session spawns, so the `claude` binary resolves from the user PATH).
- */
-export function buildHelpCommand(opts: {
-  promptText: string
-  systemPromptFile: string
-  model: string
-  /** Test hook: alternate binary path. */
-  claudeBin?: string
-  /** Test hook: shell-quoting flavour. */
-  platform?: NodeJS.Platform
-}): string {
-  const bin = opts.claudeBin?.trim() || 'claude'
-  const model = (HELP_MODELS as readonly string[]).includes(opts.model)
-    ? opts.model
-    : DEFAULT_HELP_MODEL
-  return (
-    `${bin} -p ${quotePromptArg(opts.promptText, opts.platform)}` +
-    ` --append-system-prompt-file "${opts.systemPromptFile}"` +
-    ` --model ${model}` +
-    ` --strict-mcp-config` +
-    ` --disallowedTools "${HELP_DISALLOWED_TOOLS}"`
-  )
-}
-
-/** Write the per-question system prompt into the app-state dir. */
-export function writeHelpSystemPrompt(dir: string, ctx: HelpContext): string {
-  mkdirSync(dir, { recursive: true })
-  const file = join(dir, 'help-system-prompt.md')
-  writeFileSync(file, buildHelpSystemPrompt(ctx), 'utf-8')
-  return file
 }
 
 const HELP_TIMEOUT_MS = 120_000
