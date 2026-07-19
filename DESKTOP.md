@@ -71,6 +71,25 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   the GLOBAL config only (a repo-carried command list would execute arbitrary
   code on clone).
 
+## Error reporting & logs (PLAN-observabilite O3–O6)
+
+- The main process logs to a rolling `main.log` under `app.getPath('logs')`
+  (`desktop/src/main/log.ts`); `reportError(scope, msg, err)` is the single
+  sink (file + console in dev + a journal `error` entry). The renderer reaches
+  it via `window.api.reportError` / the store's `guarded()` wrapper.
+- Process nets live in `index.ts`: `uncaughtException`/`unhandledRejection`
+  (log-and-continue once the app is ready; dialog + exit before),
+  `render-process-gone` (reload offer), `child-process-gone`.
+- Every top-level view is wrapped in an `ErrorBoundary` (App.tsx) — a render
+  crash falls back per-view, terminals survive. Wrap new views the same way.
+- Broker reachability: `BrokerHealthTracker` (broker-client.ts, fed by the
+  inbox poll, 2-failure hysteresis) → `broker:status` → the renderer's red
+  `StatusBanner`. Outages are a banner (state), never toasts (events).
+- Toast policy: `showToast` is reserved for direct user-action outcomes,
+  throttled per key; `error` variant carries raw text (`{ raw: true }`).
+- The activity journal flushes to `logs/journal-<date>.log` at quit (pruned
+  after 7 days). Full conventions: `.claude/skills/error-reporting/`.
+
 ## Renderer view conventions (canvas views especially)
 
 Micro-conventions inferred from the existing views — follow them when

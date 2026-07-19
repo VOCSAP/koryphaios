@@ -46,6 +46,16 @@ Only read the file matching the area you are touching:
   (`bun build --target=bun broker.ts server.ts cli.ts --outdir=/tmp/cp-check`),
   and `npm run typecheck` in `desktop/` if it was touched. Details in
   `TESTING.md`.
+- **No silent errors.** Never write `catch {}` / catch-and-return-default
+  without leaving a trace in the layer's log sink — a `console.error` alone is
+  NOT a trace (invisible in the packaged app, and lost when the broker outlives
+  its spawner's stderr). Route errors to the rolling log files: core
+  (broker/server) via `shared/logger.ts`; Deck main process via
+  `reportError()` from `desktop/src/main/log.ts` (also journals the entry);
+  renderer via `window.api.reportError` or the store's `guarded()` wrapper.
+  Only swallow silently when the fallback is truly equivalent (documented
+  best-effort caches). Full conventions per layer: the `error-reporting`
+  skill (`.claude/skills/error-reporting/SKILL.md`).
 
 ## Running
 
