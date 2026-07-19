@@ -4,6 +4,12 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { AppConfig, SessionDef } from '@shared/types'
 import { DEFAULT_PALETTE } from '@shared/palette'
+import {
+  DEFAULT_HELP_TARGET,
+  DEFAULT_WAND_TARGET,
+  legacyHelpTarget,
+  sanitizeTarget
+} from '@shared/models'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
 import { reportError } from './log'
 
@@ -34,7 +40,8 @@ const DEFAULT_CONFIG: AppConfig = {
   notifyAttention: true,
   // Floating "?" help assistant (PLAN C9): shown by default, Haiku for cost.
   helpButton: true,
-  helpModel: 'haiku',
+  helpTarget: DEFAULT_HELP_TARGET,
+  wandTarget: DEFAULT_WAND_TARGET,
   // Embedded browser view (PLAN D1): the usual local dev-server address.
   browserUrl: 'http://localhost:3000',
   // Unified model pickers (C29): operator-pinned favorites + local endpoints.
@@ -74,7 +81,16 @@ const configPath = (): string => join(dataDir(), 'config.json')
 const sessionsPath = (): string => join(dataDir(), 'sessions.json')
 
 export function loadConfig(): AppConfig {
-  return { ...DEFAULT_CONFIG, ...readJson<Partial<AppConfig>>(configPath(), {}) }
+  // Legacy pre-lot-A configs carry `helpModel: '<alias>'` instead of targets.
+  const raw = readJson<Partial<AppConfig> & { helpModel?: string }>(configPath(), {})
+  const cfg = { ...DEFAULT_CONFIG, ...raw }
+  cfg.helpTarget = sanitizeTarget(
+    raw.helpTarget ?? legacyHelpTarget(raw.helpModel),
+    DEFAULT_HELP_TARGET
+  )
+  cfg.wandTarget = sanitizeTarget(raw.wandTarget, DEFAULT_WAND_TARGET)
+  delete (cfg as { helpModel?: string }).helpModel
+  return cfg
 }
 
 export function saveConfig(cfg: AppConfig): void {

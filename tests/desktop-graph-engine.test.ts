@@ -294,6 +294,32 @@ test("a 'local' target routes over HTTP with the provider's endpoint", async () 
   expect(call.system).toContain("GRAPH CHAT");
 });
 
+test("a 'local' judge routes over HTTP like the answer targets", async () => {
+  const doc = docOf([n("q", [], "user", "hello")]);
+  const out = await runInference(
+    {
+      ...deps(async () => "candidate"),
+      localProviders: [{ id: "oll", name: "Ollama", baseUrl: "http://h" }],
+      http: async (input) => (input.system.includes("BATTLE JUDGE") ? "merged verdict" : "?")
+    },
+    doc,
+    {
+      nodeId: "q",
+      targets: [
+        { cli: "claude", model: "opus" },
+        { cli: "gemini", model: "" }
+      ],
+      battle: true,
+      judge: { cli: "local", model: "qwen3:32b", providerId: "oll" }
+    }
+  );
+  const judge = out.nodes.find((x) => x.type === "judge")!;
+  expect(judge.status).toBe("ok");
+  expect(judge.text).toContain("merged verdict");
+  expect(judge.cli).toBe("local");
+  expect(judge.providerId).toBe("oll");
+});
+
 test("a 'local' target with an unknown provider yields an error node", async () => {
   const doc = docOf([n("q", [], "user", "hello")]);
   const out = await runInference(

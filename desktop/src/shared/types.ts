@@ -173,8 +173,14 @@ export interface AppConfig {
   notifyAttention: boolean
   /** Show the floating "?" help-assistant button (PLAN C9). */
   helpButton: boolean
-  /** Model alias for help invocations (`claude -p --model <x>`); haiku default. */
-  helpModel: string
+  /**
+   * Inference target of the help assistant AND the resume digest (lot A):
+   * any provider of the unified catalog (frontier CLI or local endpoint).
+   * Default: claude/haiku (cheap + fast).
+   */
+  helpTarget: import('./graph').ModelTarget
+  /** Inference target of the roadmap context wand (was pinned haiku, C21). */
+  wandTarget: import('./graph').ModelTarget
   /** Last URL loaded in the embedded browser view (PLAN D1); restored on open. */
   browserUrl: string
   /**

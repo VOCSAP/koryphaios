@@ -42,6 +42,9 @@ const DEFAULT_TARGET_KEY = 'anthropic:sonnet'
 const DEFAULT_TARGETS: Record<string, ModelTarget> = {
   [DEFAULT_TARGET_KEY]: { cli: 'claude', model: 'sonnet' }
 }
+/** Default battle judge (mirrors graph-engine's DEFAULT_JUDGE). */
+const DEFAULT_JUDGE_KEY = DEFAULT_TARGET_KEY
+const DEFAULT_JUDGE_TARGET: ModelTarget = { cli: 'claude', model: 'sonnet' }
 
 type Camera = { x: number; y: number; zoom: number }
 
@@ -75,7 +78,9 @@ export function GraphView(): React.JSX.Element {
   const [targetKeys, setTargetKeys] = useState<string[]>([DEFAULT_TARGET_KEY])
   const [targetMap, setTargetMap] = useState<Record<string, ModelTarget>>(DEFAULT_TARGETS)
   const [battle, setBattle] = useState(false)
-  const [judgeModel, setJudgeModel] = useState('sonnet')
+  // Judge target (C27, multi-provider since lot A): one catalog model.
+  const [judgeKey, setJudgeKey] = useState(DEFAULT_JUDGE_KEY)
+  const [judgeTarget, setJudgeTarget] = useState<ModelTarget>(DEFAULT_JUDGE_TARGET)
   const [showTimeline, setShowTimeline] = useState(false)
 
   const canvasRef = useRef<HTMLDivElement>(null)
@@ -287,7 +292,7 @@ export function GraphView(): React.JSX.Element {
         nodeId: single.id,
         targets: list,
         battle: battle && list.length >= 2,
-        judge: { cli: 'claude', model: judgeModel.trim() }
+        judge: judgeTarget
       })
       setGraphs((gs) => gs.map((g) => (g.id === updated.id ? updated : g)))
     } catch (err) {
@@ -756,10 +761,14 @@ export function GraphView(): React.JSX.Element {
                 {battle && (
                   <div className="graph-target-row">
                     <span>🏆 {t('graph.judge')}</span>
-                    <input
-                      className="graph-model-input"
-                      value={judgeModel}
-                      onChange={(e) => setJudgeModel(e.target.value)}
+                    <ModelPicker
+                      catalogs={catalogs}
+                      selected={[judgeKey]}
+                      multi={false}
+                      onPick={(key, target) => {
+                        setJudgeKey(key)
+                        setJudgeTarget(target)
+                      }}
                     />
                   </div>
                 )}

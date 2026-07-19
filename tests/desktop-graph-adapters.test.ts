@@ -89,21 +89,21 @@ test("codex adapter: read-only sandbox, prompt fed from the file via stdin", () 
   expect(cmd).not.toContain("ignored");
 });
 
-test("gemini adapter: stdin file, optional model, no write flags", () => {
+test("gemini adapter: stdin file, optional model, read-only plan mode", () => {
   const linux = buildAdapterCommand({
     promptText: "q",
     contextFile: "/f.md",
     target: { cli: "gemini", model: "" },
     platform: "linux"
   });
-  expect(linux).toBe('gemini < "/f.md"');
+  expect(linux).toBe('gemini --approval-mode plan < "/f.md"');
   const win = buildAdapterCommand({
     promptText: "q",
     contextFile: "C:\\f.md",
     target: { cli: "gemini", model: "gemini-3-pro" },
     platform: "win32"
   });
-  expect(win).toBe('Get-Content -Raw "C:\\f.md" | gemini -m gemini-3-pro');
+  expect(win).toBe('Get-Content -Raw "C:\\f.md" | gemini -m gemini-3-pro --approval-mode plan');
 });
 
 test("a hostile model string is dropped, never spliced into the command", () => {

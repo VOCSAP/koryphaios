@@ -11,10 +11,10 @@
 //   * codex / gemini: the full composed prompt (system + context + question)
 //     written to a file fed through stdin (`< "file"` POSIX,
 //     `Get-Content -Raw "file" |` PowerShell).
-// - Read-only harness per CLI (decision D6): claude --strict-mcp-config +
-//   --disallowedTools (Read/Grep/Glob stay); codex --sandbox read-only;
-//   gemini has no reliable equivalent — pure inference expected, no write
-//   flag is passed, limitation documented in the plan.
+// - Read-only harness per CLI (decision D6, revised lot A): claude
+//   --strict-mcp-config + --disallowedTools (Read/Grep/Glob stay); codex
+//   --sandbox read-only; gemini --approval-mode plan (documented read-only
+//   mode — supersedes the C24-era "no reliable equivalent" note).
 //
 // Node builtins only; every builder is pure and unit-testable under bun.
 
@@ -86,7 +86,7 @@ export function buildAdapterCommand(input: AdapterInput): string {
     }
     case 'gemini': {
       const bin = input.bin?.trim() || 'gemini'
-      const cmd = `${bin}${model ? ` -m ${model}` : ''}`
+      const cmd = `${bin}${model ? ` -m ${model}` : ''} --approval-mode plan`
       return stdinFromFile(cmd, input.contextFile, plat)
     }
     case 'local':

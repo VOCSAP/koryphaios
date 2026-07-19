@@ -32,6 +32,10 @@ Only read the file matching the area you are touching:
   gates).
 - Writing or running tests, or preparing a commit — read `TESTING.md`
   (test suite layout, smoke check, typecheck, locale parity).
+- Adding a model/provider to the pickers, touching a headless inference
+  point (help, wand, digest, graph, judge), or verifying non-Anthropic
+  CLI/API syntax — the `model-providers` skill
+  (`.claude/skills/model-providers/SKILL.md`).
 - Bun runtime / API conventions (which libs to use or avoid) — read
   `BUN.md`.
 - Building a Bun-served frontend (HTML imports, React) — read

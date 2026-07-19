@@ -15,13 +15,9 @@ import type {
   StopResult
 } from '@shared/types'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
-import {
-  buildHelpCommand,
-  buildHelpPrompt,
-  runHelp,
-  writeHelpSystemPrompt
-} from './help-assistant'
-import { buildWandPrompt, WAND_MODEL, writeWandSystemPrompt, type WandDraft } from './context-wand'
+import { buildHelpPrompt, buildHelpSystemPrompt } from './help-assistant'
+import { buildWandPrompt, WAND_SYSTEM_PROMPT, type WandDraft } from './context-wand'
+import { runUtilityInference, type UtilityDeps } from './utility-inference'
 import { markGraphDraftOpened, resolveBrokerEndpoint } from './broker-client'
 import type { BrokerStatusEvent } from './broker-client'
 import { loadInboxHistory } from './inbox-store'
@@ -316,18 +312,30 @@ export function registerIpc({
   ipcMain.handle('roadmap:assign', (_e, id: string, peerId: string) =>
     assignRoadmapItem(id, peerId)
   )
-  // Context wand (PLAN C21): one read-only `claude -p` (haiku, C9 harness)
-  // drafts the item's context field grounded in the project files. The result
-  // only fills the editor textarea -- saving stays an explicit operator action.
-  ipcMain.handle('roadmap:wand', (_e, draft: WandDraft) => {
-    const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
-    const command = buildHelpCommand({
-      promptText: buildWandPrompt(draft ?? { title: '', kind: '', description: '', rationale: '', context: '' }),
-      systemPromptFile: writeWandSystemPrompt(stateDir),
-      model: WAND_MODEL
-    })
-    return runHelp({ command, shell: getConfig().shell, cwd: getConfig().projectDir })
+  // Utility-inference deps (lot A): the help/wand/digest flows share one
+  // routing (utility-inference.ts) over the configured targets. Local-provider
+  // keys are decrypted in memory here only, like graph:infer.
+  const utilityDeps = (): UtilityDeps => ({
+    stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
+    shell: getConfig().shell,
+    cwd: getConfig().projectDir,
+    localProviders: decryptProviders(getConfig().localProviders ?? [], secretCipher)
   })
+
+  // Context wand (PLAN C21): one read-only inference (config.wandTarget,
+  // haiku default) drafts the item's context field grounded in the project
+  // files. The result only fills the editor textarea -- saving stays an
+  // explicit operator action.
+  ipcMain.handle('roadmap:wand', (_e, draft: WandDraft) =>
+    runUtilityInference(utilityDeps(), {
+      target: getConfig().wandTarget,
+      system: WAND_SYSTEM_PROMPT,
+      prompt: buildWandPrompt(
+        draft ?? { title: '', kind: '', description: '', rationale: '', context: '' }
+      ),
+      kind: 'wand'
+    })
+  )
 
   // ----- worktrees (PLAN C4/C6) -----
   ipcMain.handle('worktree:remove', async (_e, path: string) => {
@@ -513,19 +521,13 @@ export function registerIpc({
   }
   ipcMain.handle(
     'help:ask',
-    async (_e, question: string, view: string, transcript: HelpExchange[]) => {
-      const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
-      const systemPromptFile = writeHelpSystemPrompt(stateDir, {
-        view,
-        data: await helpSnapshot()
+    async (_e, question: string, view: string, transcript: HelpExchange[]) =>
+      runUtilityInference(utilityDeps(), {
+        target: getConfig().helpTarget,
+        system: buildHelpSystemPrompt({ view, data: await helpSnapshot() }),
+        prompt: buildHelpPrompt(question ?? '', transcript ?? []),
+        kind: 'help'
       })
-      const command = buildHelpCommand({
-        promptText: buildHelpPrompt(question ?? '', transcript ?? []),
-        systemPromptFile,
-        model: getConfig().helpModel
-      })
-      return runHelp({ command, shell: getConfig().shell, cwd: getConfig().projectDir })
-    }
   )
 
   // ----- resume digest (PLAN C17) -----
@@ -539,24 +541,16 @@ export function registerIpc({
     const cfg = readDigestConfig()
     const { key } = roadmapCtx()
     const sources = await collectSources(sourcesForProject(cfg, key), projectDir)
-    const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
-    mkdirSync(stateDir, { recursive: true })
-    const systemPromptFile = join(stateDir, 'digest-system-prompt.md')
-    writeFileSync(
-      systemPromptFile,
-      buildDigestSystemPrompt({
+    return runUtilityInference(utilityDeps(), {
+      target: getConfig().helpTarget,
+      system: buildDigestSystemPrompt({
         locale: resolveLocale(getConfig().locale, app.getLocale()),
         data: await helpSnapshot(),
         sources
       }),
-      'utf-8'
-    )
-    const command = buildHelpCommand({
-      promptText: DIGEST_PROMPT,
-      systemPromptFile,
-      model: getConfig().helpModel
+      prompt: DIGEST_PROMPT,
+      kind: 'digest'
     })
-    return runHelp({ command, shell: getConfig().shell, cwd: projectDir })
   })
 
   // ----- create-menu data -----

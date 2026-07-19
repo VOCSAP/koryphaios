@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { AppConfig, DisplayMode, LaunchPreset, ModelOption } from '@shared/types'
-import type { LocalProviderConfig, ProviderCatalog } from '@shared/models'
+import { targetKey, type LocalProviderConfig, type ProviderCatalog } from '@shared/models'
+import { ModelPicker } from './ModelPicker'
 import { DEFAULT_PALETTE } from '@shared/palette'
 import { graphId } from '@shared/graph'
 import { useDeck } from '../store'
@@ -188,20 +189,7 @@ export function SettingsView(): React.JSX.Element {
                 />
                 <span>{t('settings.helpButton')}</span>
               </label>
-              <label className="field">
-                <span>{t('settings.helpModel')}</span>
-                <select
-                  value={config.helpModel}
-                  onChange={(e) => set('helpModel', e.target.value)}
-                >
-                  {['haiku', 'sonnet', 'opus'].map((m) => (
-                    <option key={m} value={m}>
-                      {m}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <small className="field-check-help">{t('settings.helpModelHelp')}</small>
+              <small className="field-check-help">{t('settings.helpModelHint')}</small>
             </>
           )}
 
@@ -370,6 +358,29 @@ export function SettingsView(): React.JSX.Element {
                   </button>
                 </div>
                 <small>{t('settings.modelsDetectionHelp')}</small>
+              </div>
+
+              {/* Utility-inference targets (lot A): help+digest and the
+                  roadmap context wand each pick any catalog model. */}
+              <div className="field">
+                <span>{t('settings.helpModel')}</span>
+                <small>{t('settings.helpModelHelp')}</small>
+                <ModelPicker
+                  catalogs={catalogs ?? []}
+                  selected={[targetKey(config.helpTarget)]}
+                  multi={false}
+                  onPick={(_key, target) => set('helpTarget', target)}
+                />
+              </div>
+              <div className="field">
+                <span>{t('settings.wandModel')}</span>
+                <small>{t('settings.wandModelHelp')}</small>
+                <ModelPicker
+                  catalogs={catalogs ?? []}
+                  selected={[targetKey(config.wandTarget)]}
+                  multi={false}
+                  onPick={(_key, target) => set('wandTarget', target)}
+                />
               </div>
 
               <div className="field">

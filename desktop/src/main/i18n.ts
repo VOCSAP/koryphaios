@@ -273,9 +273,13 @@ export const EN_DEFAULTS: Record<string, string> = {
   'help.model': 'Model: {model}',
   'help.hide': 'Hide the help button (re-enable in Settings)',
   'settings.helpButton': 'Show the floating "?" help button',
-  'settings.helpModel': 'Help assistant model',
+  'settings.helpModel': 'Help assistant & resume digest model',
   'settings.helpModelHelp':
-    "Each question is a one-shot `claude -p` call with the active view's context. Haiku is cheap and usually enough.",
+    "Each question is a one-shot read-only inference with the active view's context — any catalog model (frontier CLI or local endpoint). Haiku is cheap and usually enough; note local endpoints cannot read the project files.",
+  'settings.helpModelHint': "The assistant's model is picked in the Models category.",
+  'settings.wandModel': 'Roadmap context-wand model',
+  'settings.wandModelHelp':
+    "Read-only inference drafting an item's context briefing (the operator reviews before saving). Haiku default.",
   'status.needsAttention': 'waiting for you',
   'attention.badge': 'needs you',
   'settings.notifyAttention': 'System notification when a session waits for your input',
