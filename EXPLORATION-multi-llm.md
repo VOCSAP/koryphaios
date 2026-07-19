@@ -270,6 +270,70 @@ gestion de session sans fork. Recommandation : prototype manuel d'abord
 (lancer à la main un `codex -c mcp_servers…` contre un Deck ouvert et vérifier
 `deck_list_agents`), avant toute intégration `supervisor.ts`.
 
+### 4.4 Feuille de route (à dérouler sur un poste avec Codex CLI installé)
+
+**Étape 1 — prototype manuel (aucun code)**
+
+Deck ouvert (le endpoint deck-control écoute ; URL + token lisibles dans le
+`supervisor-mcp.json` généré sous le dossier d'état de l'app), lancer à la
+main :
+
+```bash
+codex \
+  -c 'mcp_servers.deck-control.command="<electron>"' \
+  -c 'mcp_servers.deck-control.args=["<…>/deck-control-mcp.mjs"]' \
+  -c 'mcp_servers.deck-control.env={ELECTRON_RUN_AS_NODE="1", DECK_CONTROL_URL="http://127.0.0.1:<port>", DECK_CONTROL_TOKEN="<token>"}' \
+  -c 'developer_instructions="<SUPERVISOR_SYSTEM_PROMPT aplati \n>"' \
+  "Present yourself, then run deck_list_agents and report."
+```
+
+- [ ] P1. Le serveur MCP se charge (`/mcp` dans le TUI le liste) et
+      `deck_list_agents` répond.
+- [ ] P2. `developer_instructions` est bien pris en compte (le modèle se
+      présente comme superviseur) et n'écrase pas le harnais (outils toujours
+      là).
+- [ ] P3. Répéter P1-P2 sous PowerShell (quoting `-c` + `\n` échappés).
+- [ ] P4. Actions d'écriture : `deck_spawn_session` / `roadmap_update` depuis
+      Codex — vérifier le comportement d'approbation du TUI
+      (`--ask-for-approval` ?) sur les appels MCP mutants.
+- [ ] P5. Noter la version de Codex testée (les clés `developer_instructions`
+      / `mcp_servers` bougent encore) et l'id de session émis (rollout sous
+      `CODEX_HOME/sessions/`) pour l'étape 3.
+
+**Étape 2 — vérifications de sécurité/robustesse (issues du §4)**
+
+- [ ] V1. Token dans `ps` : mesurer l'exposition réelle (durée de vie du
+      process, visibilité inter-utilisateurs) ; si inacceptable, faire lire
+      `DECK_CONTROL_TOKEN` au bridge depuis un fichier à droits restreints et
+      ne passer que son chemin.
+- [ ] V2. Config utilisateur : décider si les `[mcp_servers.*]` du
+      `~/.codex/config.toml` de l'opérateur qui se chargent en plus sont
+      acceptables pour un superviseur, ou s'il faut remplacer la table
+      entière (`-c 'mcp_servers={deck-control = {…}}'`).
+- [ ] V3. Multi-lignes : figer la stratégie d'aplatissement de
+      `SUPERVISOR_SYSTEM_PROMPT` (`\n` échappés en TOML basic string) et la
+      couvrir d'un test de quoting POSIX + PowerShell.
+- [ ] V4. Résilience : comportement quand le Deck ferme pendant la session
+      (bridge orphelin), et au relancement (token périmé).
+
+**Étape 3 — modifications restantes (code, seulement si P1-P4 passent)**
+
+- [ ] M1. `supervisor.ts` : à côté de `writeSupervisorMcpConfig` (forme
+      claude), un builder `buildCodexSupervisorArgs` (liste de `-c` +
+      `developer_instructions` aplati) — pur, testable sous bun.
+- [ ] M2. `session-command.ts` / spawn : une variante de commande superviseur
+      par CLI (le supervisor n'utilise ni `--session-id` ni
+      `--fork-session` côté Codex — reprise via `codex resume <id>`, id
+      capturé depuis `CODEX_HOME/sessions/`), sans toucher au chemin des
+      tuiles agents (hors périmètre, lot B).
+- [ ] M3. Création : choix du CLI superviseur dans les réglages ou le menu
+      Home (défaut : claude), gating sur la détection `model-registry`.
+- [ ] M4. Journal/i18n/docs : tracer le CLI du superviseur dans le journal,
+      clés i18n, mise à jour DESKTOP.md (§ Supervisor) et de ce plan.
+- [ ] M5. Hors périmètre confirmé à ce stade : back-channel `/clear`
+      (`--plugin-dir` sans équivalent) et quota auto-resume — dégradations
+      assumées et documentées pour un superviseur Codex.
+
 ## 5. Synthèse des décisions à prendre
 
 | # | Question | Recommandation | État |
