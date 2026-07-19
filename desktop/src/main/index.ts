@@ -316,6 +316,9 @@ service.on('attention', ({ id, waiting }: { id: string; waiting: boolean }) => {
 // spawns). Drained batches go to the renderer inbox + a system notification.
 const INBOX_POLL_MS = 10_000
 let inboxTimer: NodeJS.Timeout | null = null
+// Drained batches whose disk write failed, retried on the next poll (O6): the
+// broker already forgot them, this queue is their only copy.
+const pendingInboxWrites: { id: number; from: string; text: string; sentAt: string }[] = []
 
 // Broker reachability (PLAN O5): fed by the inbox poll below (one signal per
 // tick -- pollGraphDrafts runs the same tick, feeding both would collapse the
@@ -354,7 +357,7 @@ const pollOperatorInbox = async (): Promise<void> => {
       { endpoint: resolveBrokerEndpoint() }
     )
     brokerHealth.recordSuccess()
-    if (messages.length === 0) return
+    if (messages.length === 0 && pendingInboxWrites.length === 0) return
     const batch = messages.map((m) => ({
       id: m.id,
       from: m.from_peer_id,
@@ -362,8 +365,16 @@ const pollOperatorInbox = async (): Promise<void> => {
       sentAt: m.sent_at
     }))
     // The broker drain is destructive (delivered=1): journal the batch to
-    // disk BEFORE showing it, so a Deck restart replays the whole inbox.
-    appendInboxHistory(join(app.getPath('userData'), APP_STATE_SUBDIR), batch)
+    // disk BEFORE showing it, so a Deck restart replays the whole inbox. A
+    // failed write re-queues the batch for the next tick (O6) -- these
+    // messages exist nowhere else once drained.
+    const toPersist = [...pendingInboxWrites.splice(0), ...batch]
+    let failed = false
+    appendInboxHistory(join(app.getPath('userData'), APP_STATE_SUBDIR), toPersist, undefined, (e) => {
+      failed = true
+      reportError('inbox', `history write failed (${toPersist.length} message(s) queued for retry)`, e)
+    })
+    if (failed) pendingInboxWrites.push(...toPersist)
     mainWindow?.webContents.send('inbox:new', batch)
     notifyInbox(batch)
   } catch (e) {

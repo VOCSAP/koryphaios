@@ -899,6 +899,20 @@ button {
   background: rgba(255, 255, 255, 0.25);
 }
 
+/* In-frame page failure overlay (PLAN O6): a dead webview is no longer a
+   silent blank frame. */
+.browser-load-error {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  text-align: center;
+  background: var(--bg);
+  color: var(--fg);
+  z-index: 5;
+}
+
 .icon-btn {
   background: var(--bg-3);
   color: var(--fg);

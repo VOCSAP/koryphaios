@@ -95,9 +95,13 @@ export function GraphView(): React.JSX.Element {
   const single = selectedNodes.length === 1 ? selectedNodes[0] : null
 
   const refresh = useCallback(async () => {
-    const list = await window.api.graphList()
-    setGraphs(list)
-    setActiveId((cur) => (cur && list.some((g) => g.id === cur) ? cur : (list[0]?.id ?? null)))
+    try {
+      const list = await window.api.graphList()
+      setGraphs(list)
+      setActiveId((cur) => (cur && list.some((g) => g.id === cur) ? cur : (list[0]?.id ?? null)))
+    } catch (e) {
+      window.api.reportError('graph', `list failed: ${String(e)}`)
+    }
   }, [])
 
   useEffect(() => {
@@ -136,22 +140,35 @@ export function GraphView(): React.JSX.Element {
     (next: GraphDoc, debounce = false): void => {
       setGraphs((gs) => gs.map((g) => (g.id === next.id ? next : g)))
       if (saveTimer.current) clearTimeout(saveTimer.current)
+      // A rejected save is silent data loss (O6): surface it in the in-view
+      // notice + main.log instead of an unhandled rejection.
+      const persist = (): void => {
+        window.api.graphSave(next).catch((e) => {
+          window.api.reportError('graph', `save failed: ${String(e)}`)
+          setNotice(t('graph.saveFailed'))
+        })
+      }
       if (debounce) {
-        saveTimer.current = setTimeout(() => void window.api.graphSave(next), 400)
+        saveTimer.current = setTimeout(persist, 400)
       } else {
-        void window.api.graphSave(next)
+        persist()
       }
     },
-    []
+    [t]
   )
 
   // ----- graph CRUD -----
 
   const createGraph = async (): Promise<void> => {
-    const created = await window.api.graphCreate(t('graph.defaultName'))
-    await refresh()
-    setActiveId(created.id)
-    setSelection([])
+    try {
+      const created = await window.api.graphCreate(t('graph.defaultName'))
+      await refresh()
+      setActiveId(created.id)
+      setSelection([])
+    } catch (e) {
+      window.api.reportError('graph', `create failed: ${String(e)}`)
+      setNotice(t('graph.saveFailed'))
+    }
   }
 
   const renameGraph = (g: GraphDoc, name: string): void => {
@@ -160,7 +177,12 @@ export function GraphView(): React.JSX.Element {
 
   const deleteGraphConfirmed = async (): Promise<void> => {
     if (!confirmDeleteGraph) return
-    await window.api.graphDelete(confirmDeleteGraph)
+    try {
+      await window.api.graphDelete(confirmDeleteGraph)
+    } catch (e) {
+      window.api.reportError('graph', `delete failed: ${String(e)}`)
+      setNotice(t('graph.saveFailed'))
+    }
     setConfirmDeleteGraph(null)
     setSelection([])
     await refresh()

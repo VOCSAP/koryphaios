@@ -145,6 +145,25 @@ let toastToken = 0
 // Last display time per toast key (throttle, PLAN O5).
 const lastToastAt = new Map<string, number>()
 
+/**
+ * Guard a direct user action (PLAN O6): before this, an IPC rejection became
+ * an unhandled promise rejection and the click silently no-oped. Now it lands
+ * in main.log + the journal and surfaces as an error toast (raw message).
+ */
+async function guarded(label: string, fn: () => Promise<unknown>): Promise<void> {
+  try {
+    await fn()
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    try {
+      window.api.reportError('store', `${label} failed: ${msg}`)
+    } catch {
+      // Reporting must never mask the toast.
+    }
+    useDeck.getState().showToast(`${label}: ${msg}`, 'error', { raw: true })
+  }
+}
+
 export const useDeck = create<DeckState>((set, get) => ({
   sessions: [],
   config: null,
@@ -300,13 +319,15 @@ export const useDeck = create<DeckState>((set, get) => ({
   openGraphDraft: async (draft) => {
     // Main creates the pre-filled doc and flips the broker status; the local
     // list is trimmed optimistically (the next poll confirms).
-    const res = await window.api.graphDraftOpen(draft)
-    set((s) => ({
-      graphDrafts: s.graphDrafts.filter((d) => d.id !== draft.id),
-      inboxOpen: false,
-      view: 'graph',
-      graphFocus: { docId: res.docId, nodeId: res.nodeId }
-    }))
+    await guarded('open draft', async () => {
+      const res = await window.api.graphDraftOpen(draft)
+      set((s) => ({
+        graphDrafts: s.graphDrafts.filter((d) => d.id !== draft.id),
+        inboxOpen: false,
+        view: 'graph',
+        graphFocus: { docId: res.docId, nodeId: res.nodeId }
+      }))
+    })
   },
   clearGraphFocus: () => set({ graphFocus: null }),
   openDiff: (target) => set({ diffTarget: target }),
@@ -327,28 +348,36 @@ export const useDeck = create<DeckState>((set, get) => ({
   openExportTemplate: (open) => set({ exportTemplateOpen: open }),
 
   async refreshTemplates() {
-    const templates = await window.api.listTemplates()
-    set({ templates })
+    await guarded('list templates', async () => {
+      const templates = await window.api.listTemplates()
+      set({ templates })
+    })
   },
 
   async exportTemplate(name, local) {
-    const path = await window.api.exportTemplate(name, local)
-    set({ exportTemplateOpen: false })
-    if (path) get().showToast('toast.templateExported')
+    await guarded('export template', async () => {
+      const path = await window.api.exportTemplate(name, local)
+      set({ exportTemplateOpen: false })
+      if (path) get().showToast('toast.templateExported')
+    })
   },
 
   async applyTemplate(path, mode) {
-    await window.api.applyTemplate(path, mode)
-    set({ templatesOpen: false })
-    // Sessions refresh via onSessionsChanged (create/closeAll broadcast).
-    get().showToast('toast.templateApplied')
+    await guarded('apply template', async () => {
+      await window.api.applyTemplate(path, mode)
+      set({ templatesOpen: false })
+      // Sessions refresh via onSessionsChanged (create/closeAll broadcast).
+      get().showToast('toast.templateApplied')
+    })
   },
 
   async removeTemplate(path) {
-    const ok = await window.api.deleteTemplate(path)
-    // Keep the picker open; just refresh the list so the row disappears.
-    await get().refreshTemplates()
-    if (ok) get().showToast('toast.templateDeleted')
+    await guarded('delete template', async () => {
+      const ok = await window.api.deleteTemplate(path)
+      // Keep the picker open; just refresh the list so the row disappears.
+      await get().refreshTemplates()
+      if (ok) get().showToast('toast.templateDeleted')
+    })
   },
 
   setSidebarWidth: (px) => set({ sidebarWidth: Math.min(520, Math.max(180, Math.round(px))) }),
@@ -368,8 +397,10 @@ export const useDeck = create<DeckState>((set, get) => ({
   },
 
   async saveCurrent() {
-    await get().saveWorkspace()
-    get().showToast('toast.workspaceSaved')
+    await guarded('save workspace', async () => {
+      await get().saveWorkspace()
+      get().showToast('toast.workspaceSaved')
+    })
   },
 
   async saveAs(name) {
@@ -401,59 +432,71 @@ export const useDeck = create<DeckState>((set, get) => ({
   cancelRestore: () => set({ restoreLossId: null }),
 
   async newClear() {
-    await window.api.newClear()
-    // sessions empty out via onSessionsChanged; close the confirm.
-    set({ confirmNewClearOpen: false })
+    await guarded('new clear', async () => {
+      await window.api.newClear()
+      // sessions empty out via onSessionsChanged; close the confirm.
+      set({ confirmNewClearOpen: false })
+    })
   },
 
   async createSession(input) {
-    const created = await window.api.createSession(input)
-    set({ selectedId: created.id })
-    // sessions list refreshes via onSessionsChanged
+    await guarded('create session', async () => {
+      const created = await window.api.createSession(input)
+      set({ selectedId: created.id })
+      // sessions list refreshes via onSessionsChanged
+    })
   },
 
   async removeSession(id) {
-    await window.api.removeSession(id)
-    if (get().maximizedId === id) set({ maximizedId: null })
+    await guarded('close session', async () => {
+      await window.api.removeSession(id)
+      if (get().maximizedId === id) set({ maximizedId: null })
+    })
   },
 
   async renameSession(id, name) {
-    await window.api.renameSession(id, name)
+    await guarded('rename session', () => window.api.renameSession(id, name))
   },
 
   async setColor(id, color) {
-    await window.api.setSessionColor(id, color)
+    await guarded('set color', () => window.api.setSessionColor(id, color))
   },
 
   async restartSession(id) {
-    await window.api.restartSession(id)
+    await guarded('restart session', () => window.api.restartSession(id))
   },
 
   async setAutoResume(id, enabled) {
-    await window.api.setSessionAutoResume(id, enabled)
     // The updated override arrives via onSessionsChanged (broadcast).
+    await guarded('auto-resume', () => window.api.setSessionAutoResume(id, enabled))
   },
 
   async reorderSessions(ids) {
-    await window.api.reorderSessions(ids)
     // The new order arrives via onSessionsChanged (reorder broadcasts 'changed').
+    await guarded('reorder', () => window.api.reorderSessions(ids))
   },
 
   async updateConfig(patch) {
-    const config = await window.api.setConfig(patch)
-    set({ config })
+    await guarded('save settings', async () => {
+      const config = await window.api.setConfig(patch)
+      set({ config })
+    })
   },
 
   async broadcastAnnounce(text) {
     const body = text.trim()
     if (!body) return
-    const sent = await window.api.announce(body)
-    get().showToast(sent > 0 ? 'toast.announceSent' : 'toast.announceNoPeers', sent > 0 ? 'success' : 'info')
+    await guarded('announce', async () => {
+      const sent = await window.api.announce(body)
+      get().showToast(sent > 0 ? 'toast.announceSent' : 'toast.announceNoPeers', sent > 0 ? 'success' : 'info')
+    })
   },
 
   async refreshWorkspaces() {
-    const workspaces = await window.api.listWorkspaces()
-    set({ workspaces, currentWorkspaceName: workspaces.find((w) => w.current)?.name ?? null })
+    await guarded('list workspaces', async () => {
+      const workspaces = await window.api.listWorkspaces()
+      set({ workspaces, currentWorkspaceName: workspaces.find((w) => w.current)?.name ?? null })
+    })
   },
 
   async saveWorkspace(name) {
@@ -462,20 +505,24 @@ export const useDeck = create<DeckState>((set, get) => ({
   },
 
   async restoreWorkspace(id) {
-    const ok = await window.api.restoreWorkspace(id)
-    // Sessions refresh via onSessionsChanged (restoreFrom broadcasts 'changed').
-    await get().refreshWorkspaces()
-    if (ok) {
-      // Close the selection window once a workspace has been loaded.
-      set({ workspacesOpen: false })
-    } else {
-      // Already owned by another live window (or gone) -> inform, don't restore.
-      get().showToast('toast.alreadyOpen', 'info')
-    }
+    await guarded('restore workspace', async () => {
+      const ok = await window.api.restoreWorkspace(id)
+      // Sessions refresh via onSessionsChanged (restoreFrom broadcasts 'changed').
+      await get().refreshWorkspaces()
+      if (ok) {
+        // Close the selection window once a workspace has been loaded.
+        set({ workspacesOpen: false })
+      } else {
+        // Already owned by another live window (or gone) -> inform, don't restore.
+        get().showToast('toast.alreadyOpen', 'info')
+      }
+    })
   },
 
   async removeWorkspace(id) {
-    await window.api.deleteWorkspace(id)
-    await get().refreshWorkspaces()
+    await guarded('delete workspace', async () => {
+      await window.api.deleteWorkspace(id)
+      await get().refreshWorkspaces()
+    })
   }
 }))

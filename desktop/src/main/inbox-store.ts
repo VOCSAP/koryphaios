@@ -46,7 +46,8 @@ export function loadInboxHistory(stateDir: string): InboxMessage[] {
 export function appendInboxHistory(
   stateDir: string,
   batch: InboxMessage[],
-  cap = INBOX_HISTORY_CAP
+  cap = INBOX_HISTORY_CAP,
+  onPersistError?: (e: unknown) => void
 ): InboxMessage[] {
   const current = loadInboxHistory(stateDir)
   const known = new Set(current.map((m) => m.id))
@@ -54,8 +55,11 @@ export function appendInboxHistory(
   try {
     mkdirSync(stateDir, { recursive: true })
     writeFileSync(inboxHistoryFile(stateDir), JSON.stringify(merged), 'utf-8')
-  } catch {
-    // Persistence is best-effort: the in-memory inbox still works this run.
+  } catch (e) {
+    // Persistence failure: the in-memory inbox still works this run, but the
+    // broker drain was destructive -- the caller must know (O6) so it can
+    // retry the batch instead of silently losing the only durable copy.
+    onPersistError?.(e)
   }
   return merged
 }
