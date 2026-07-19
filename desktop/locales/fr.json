@@ -55,6 +55,8 @@
   "workspaces.sessions": "{n} sessions",
   "saveas.title": "Enregistrer l'espace sous",
   "saveas.duplicate": "Un espace porte déjà ce nom",
+  "banner.brokerDown": "⚠ Broker injoignable depuis {time}",
+  "banner.retry": "Réessayer",
   "toast.workspaceSaved": "Espace enregistré",
   "toast.alreadyOpen": "Session déjà ouverte",
   "toast.peerIdCopied": "peer id copié",

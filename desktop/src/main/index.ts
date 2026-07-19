@@ -27,6 +27,7 @@ import { globalLaunchCommand, projectLaunchCommand, resolveLaunchConfig } from '
 import { resolveApprovedLaunchCommand } from './launch-approval'
 import { WorkspaceService } from './workspace-service'
 import {
+  BrokerHealthTracker,
   fetchGraphDrafts,
   fetchOperatorInbox,
   resolveBrokerEndpoint,
@@ -316,6 +317,16 @@ service.on('attention', ({ id, waiting }: { id: string; waiting: boolean }) => {
 const INBOX_POLL_MS = 10_000
 let inboxTimer: NodeJS.Timeout | null = null
 
+// Broker reachability (PLAN O5): fed by the inbox poll below (one signal per
+// tick -- pollGraphDrafts runs the same tick, feeding both would collapse the
+// 2-failure hysteresis into a single tick). Transitions drive the renderer's
+// red banner + the log/journal.
+const brokerHealth = new BrokerHealthTracker((status) => {
+  if (status.up) logInfo('broker', 'broker reachable again')
+  else reportError('broker', `broker unreachable: ${status.lastError ?? 'unknown error'}`)
+  mainWindow?.webContents.send('broker:status', status)
+})
+
 const notifyInbox = (batch: { from: string; text: string }[]): void => {
   if (!Notification.isSupported() || batch.length === 0) return
   const isFr = (config.locale || app.getLocale()).toLowerCase().startsWith('fr')
@@ -342,6 +353,7 @@ const pollOperatorInbox = async (): Promise<void> => {
       { groupId: activeScope.groupId, secret: activeScope.secret },
       { endpoint: resolveBrokerEndpoint() }
     )
+    brokerHealth.recordSuccess()
     if (messages.length === 0) return
     const batch = messages.map((m) => ({
       id: m.id,
@@ -354,8 +366,10 @@ const pollOperatorInbox = async (): Promise<void> => {
     appendInboxHistory(join(app.getPath('userData'), APP_STATE_SUBDIR), batch)
     mainWindow?.webContents.send('inbox:new', batch)
     notifyInbox(batch)
-  } catch {
-    // Broker down / unreachable: silent, the next tick retries.
+  } catch (e) {
+    // Broker down / unreachable: the next tick retries; the health tracker
+    // owns the (deduplicated) reporting so this stays quiet per-tick.
+    brokerHealth.recordFailure(e)
   }
 }
 
@@ -904,7 +918,12 @@ app.whenReady().then(() => {
     dispatchNext,
     stopRoadmapItem,
     assignRoadmapItem,
-    checkpoint: checkpointBeforeSpawn
+    checkpoint: checkpointBeforeSpawn,
+    brokerStatus: () => brokerHealth.status,
+    brokerRetry: () => {
+      void pollOperatorInbox()
+      void pollGraphDrafts()
+    }
   })
   service.start()
   // Attach an auto-save workspace capturing whatever the service just restored.

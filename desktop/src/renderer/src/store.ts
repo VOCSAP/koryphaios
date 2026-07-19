@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import type {
   AppConfig,
+  BrokerStatusEvent,
   CreateSessionInput,
   DeckGraphDraft,
   DeckView,
@@ -42,10 +43,12 @@ interface DeckState {
   templates: TemplateSummary[]
   /** Workspace id pending a restore confirm (loss warning), or null. */
   restoreLossId: string | null
-  /** Transient toast message (an i18n key), or null. */
+  /** Transient toast message (an i18n key, or raw text when toastRaw). */
   toast: string | null
   /** Toast colour variant. */
-  toastVariant: 'success' | 'info'
+  toastVariant: 'success' | 'info' | 'error'
+  /** True when `toast` is raw text (an error message), not an i18n key. */
+  toastRaw: boolean
   /** Name of the current workspace, shown in the window title. */
   currentWorkspaceName: string | null
   workspaces: WorkspaceSummary[]
@@ -75,6 +78,8 @@ interface DeckState {
   browserOpened: boolean
   /** Boot failure message (PLAN O4): init() rejected, splash shows a retry. */
   initError: string | null
+  /** Broker reachability (PLAN O5): null until main reports, drives the banner. */
+  brokerStatus: BrokerStatusEvent | null
 
   init(): Promise<void>
   setView(view: DeckView): void
@@ -105,7 +110,12 @@ interface DeckState {
   removeTemplate(path: string): Promise<void>
   setSidebarWidth(px: number): void
 
-  showToast(key: string, variant?: 'success' | 'info'): void
+  /**
+   * Toast policy (PLAN O5): reserved for the outcome of a DIRECT user action.
+   * Background/systemic failures go to the log + journal (+ banner when the
+   * broker is down) -- never toast them. Same key throttled to one per 5 s.
+   */
+  showToast(key: string, variant?: 'success' | 'info' | 'error', opts?: { raw?: boolean }): void
   saveCurrent(): Promise<void>
   saveAs(name: string): Promise<void>
   requestRestore(id: string): void
@@ -132,6 +142,8 @@ interface DeckState {
 
 // Monotonic token so a newer toast cancels the prior auto-clear timer.
 let toastToken = 0
+// Last display time per toast key (throttle, PLAN O5).
+const lastToastAt = new Map<string, number>()
 
 export const useDeck = create<DeckState>((set, get) => ({
   sessions: [],
@@ -154,6 +166,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   restoreLossId: null,
   toast: null,
   toastVariant: 'success',
+  toastRaw: false,
   currentWorkspaceName: null,
   workspaces: [],
   sidebarWidth: 260,
@@ -166,6 +179,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   browserPairedId: null,
   browserOpened: false,
   initError: null,
+  brokerStatus: null,
 
   async init() {
     set({ initError: null })
@@ -260,6 +274,10 @@ export const useDeck = create<DeckState>((set, get) => ({
     window.api.onGraphDrafts((drafts) => set({ graphDrafts: drafts }))
     // Notification click on an inbox message: surface the panel.
     window.api.onInboxOpen(() => get().openInbox(true))
+    // Broker reachability (PLAN O5): transitions pushed by main + the current
+    // state fetched once (covers a reloaded renderer during an outage).
+    window.api.onBrokerStatus((status) => set({ brokerStatus: status }))
+    void window.api.getBrokerStatus().then((status) => set({ brokerStatus: status }))
     window.api.onConfigChanged((next) => {
       const prevLocale = get().config?.locale
       set({ config: next })
@@ -335,8 +353,14 @@ export const useDeck = create<DeckState>((set, get) => ({
 
   setSidebarWidth: (px) => set({ sidebarWidth: Math.min(520, Math.max(180, Math.round(px))) }),
 
-  showToast: (key, variant = 'success') => {
-    set({ toast: key, toastVariant: variant })
+  showToast: (key, variant = 'success', opts) => {
+    // Throttle repeats (PLAN O5): a failing action retried in a loop must not
+    // strobe the UI -- one toast per key per 5 s.
+    const now = Date.now()
+    const last = lastToastAt.get(key) ?? 0
+    if (now - last < 5000) return
+    lastToastAt.set(key, now)
+    set({ toast: key, toastVariant: variant, toastRaw: opts?.raw ?? false })
     const token = ++toastToken
     setTimeout(() => {
       if (toastToken === token) set({ toast: null })

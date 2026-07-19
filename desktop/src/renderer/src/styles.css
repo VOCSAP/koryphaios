@@ -844,6 +844,60 @@ button {
   background: #9a6700;
   border: 1px solid #b9770e;
 }
+/* Red error (failed direct action, PLAN O5). */
+.toast-error {
+  background: #a03030;
+  border: 1px solid #c04545;
+}
+
+/* Persistent top status banner (PLAN O5): a fixed overlay so it never
+   disturbs the .app grid, whatever view is active. */
+.status-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  font-size: 13px;
+  color: #fff;
+  z-index: 60;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}
+
+.status-banner-error {
+  background: #a03030;
+  border-bottom: 1px solid #c04545;
+}
+
+.status-banner-text {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-banner-detail {
+  opacity: 0.85;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.status-banner-action {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  border-radius: 4px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.status-banner-action:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
 
 .icon-btn {
   background: var(--bg-3);

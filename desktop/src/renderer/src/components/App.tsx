@@ -23,6 +23,7 @@ import { SaveAsDialog } from './SaveAsDialog'
 import { TemplatesDialog } from './TemplatesDialog'
 import { ExportTemplateDialog } from './ExportTemplateDialog'
 import { ErrorBoundary } from './ErrorBoundary'
+import { StatusBanner } from './StatusBanner'
 
 export function App(): React.JSX.Element {
   const t = useT()
@@ -147,6 +148,8 @@ export function App(): React.JSX.Element {
 
   return (
     <div className="app" style={{ '--sidebar-w': `${sidebarWidth}px` } as React.CSSProperties}>
+      {/* Fixed overlay (PLAN O5): shown while the broker is unreachable. */}
+      <StatusBanner />
       <NavRail />
       {/* The agents and home views stay MOUNTED under the other views:
           unmounting TerminalTile would tear down the xterm instances and their

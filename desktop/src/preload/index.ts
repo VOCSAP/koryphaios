@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppConfig,
+  BrokerStatusEvent,
   CreateSessionInput,
   DeckApi,
   DeckView,
@@ -79,6 +80,9 @@ const api: DeckApi = {
 
   reportError: (scope: string, message: string) =>
     ipcRenderer.send('app:report-error', scope, message),
+
+  getBrokerStatus: () => ipcRenderer.invoke('broker:status'),
+  retryBroker: () => ipcRenderer.invoke('broker:retry'),
 
   ptyInput: (id: string, data: string) => ipcRenderer.send('pty:input', id, data),
   ptyResize: (id: string, cols: number, rows: number) =>
@@ -176,7 +180,8 @@ const api: DeckApi = {
   onMenuExportTemplate: (cb: () => void) => subscribe('menu:export-template', () => cb()),
   onMenuImportTemplate: (cb: () => void) => subscribe('menu:import-template', () => cb()),
   onWorkspaceCurrent: (cb: (ws: WorkspaceSummary | null) => void) =>
-    subscribe('workspace:current', cb)
+    subscribe('workspace:current', cb),
+  onBrokerStatus: (cb: (status: BrokerStatusEvent) => void) => subscribe('broker:status', cb)
 }
 
 contextBridge.exposeInMainWorld('api', api)
