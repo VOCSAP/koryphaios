@@ -129,7 +129,12 @@ Rien à changer sur cette famille.
 
 ## 3. Ce qu'il faudrait pour « choisir le modèle dans les options »
 
-### 3.1 Lot A — inférences utilitaires (aide, baguette, digest, juge) : faisable à coût raisonnable
+### 3.1 Lot A — inférences utilitaires (aide, baguette, digest, juge) : faisable à coût raisonnable — ✅ LIVRÉ
+
+> Implémenté sur cette branche (`utility-inference.ts`, `config.helpTarget` /
+> `config.wandTarget`, ModelPicker dans Réglages > Modèles, juge
+> multi-provider y compris `local`, gemini `--approval-mode plan`). Le détail
+> ci-dessous est conservé comme trace de conception.
 
 Toute la mécanique existe déjà ; il s'agit de généraliser le type du réglage
 et de router vers les adaptateurs C24/C29 au lieu de `buildHelpCommand` :
@@ -197,18 +202,86 @@ lancer autre chose dans une tuile, mais sans intégration Deck).
   (`llama3.1:8b`) et les ids Gemini/OpenAI. Le suffixe `[1m]` n'y passe pas,
   mais il ne concerne que les sessions (lot B).
 
-## 4. Synthèse des décisions à prendre
+## 4. Superviseur sous Codex CLI — étude de faisabilité (MCP + prompt système)
 
-| # | Question | Recommandation |
+Étude doc officielle (config Codex `config.toml`, tags `rust-v0.36+` du repo
+`openai/codex` — les fichiers `docs/*.md` de `main` sont devenus des stubs vers
+developers.openai.com). Le superviseur actuel repose sur deux injections par
+lancement (`supervisor.ts`) : un `--mcp-config` généré (bridge deck-control)
+et un `--append-system-prompt-file` (ancre de rôle, constante code).
+
+### 4.1 La partie MCP : portable, trois voies d'injection
+
+Le bridge `deck-control-mcp.mjs` est un serveur MCP **stdio standard** — Codex
+sait le charger tel quel. La forme TOML équivalente au fichier `--mcp-config`
+généré :
+
+```toml
+[mcp_servers.deck-control]
+command = "/chemin/vers/electron"        # ELECTRON_RUN_AS_NODE=1 => node
+args = ["/chemin/vers/deck-control-mcp.mjs"]
+env = { ELECTRON_RUN_AS_NODE = "1", DECK_CONTROL_URL = "http://127.0.0.1:<port>", DECK_CONTROL_TOKEN = "<token>" }
+startup_timeout_ms = 20_000
+```
+
+Trois façons de la faire parvenir à UN lancement (le token et le port changent
+à chaque spawn) :
+
+| Voie | Mécanisme | Verdict |
 |---|---|---|
-| 1 | Un réglage par action (aide / baguette / digest / juge) ou un réglage global « modèle utilitaire » ? | Un réglage « aide & digest » + un réglage « baguette » + le juge déjà par-graphe. Défauts actuels conservés (`haiku`) |
-| 2 | Mettre à jour D6 pour Gemini (`--approval-mode plan`) ? | Oui — retirer la mention « no reliable equivalent » et passer le flag dans l'adaptateur |
-| 3 | Utiliser `codex -c model_instructions_file` au lieu du prompt composé stdin ? | Non-bloquant ; le pattern stdin actuel marche. À envisager si les réponses codex régurgitent le contexte |
-| 4 | Agents/superviseur non-Claude ? | Hors périmètre — exploration dédiée si le besoin se confirme (lot B) |
+| **`-c` overrides** | `codex -c 'mcp_servers.deck-control.command="…"' -c 'mcp_servers.deck-control.args=["…"]' -c 'mcp_servers.deck-control.env={ELECTRON_RUN_AS_NODE="1", DECK_CONTROL_URL="…", DECK_CONTROL_TOKEN="…"}'` (valeurs parsées en TOML, notation pointée) | La plus proche du modèle actuel (par-lancement, rien de persisté). ⚠️ le token passe sur la ligne de commande → visible dans `ps` là où le fichier `--mcp-config` de claude ne l'exposait pas. Mitigation : faire lire le token au bridge depuis un fichier/descripteur plutôt que l'env, ou accepter l'exposition locale |
+| **`codex mcp add deck-control -- …`** | Mutation du `~/.codex/config.toml` de l'utilisateur | À écarter : persistant (pollution du config utilisateur), collision entre fenêtres Deck simultanées, token périmé à chaque relance |
+| **`CODEX_HOME` généré** | Pointer `CODEX_HOME` sur un dossier écrit par le Deck contenant un `config.toml` complet | Isolation parfaite (seul NOTRE serveur MCP se charge — l'équivalent du `--strict-mcp-config` inversé), MAIS `auth.json` vit aussi dans `CODEX_HOME` → il faudrait copier/lier les credentials de l'utilisateur ; fragile, à prototyper avant d'en dépendre |
+
+Point d'attention : contrairement à `claude --strict-mcp-config`, un lancement
+`-c` N'ISOLE PAS — les `[mcp_servers.*]` du config.toml utilisateur se
+chargent aussi. Pour un superviseur c'est acceptable (ce sont les serveurs de
+l'opérateur), sinon remplacer la table entière : `-c 'mcp_servers={deck-control = {…}}'`.
+
+### 4.2 Le prompt système : un équivalent additif existe, avec des réserves
+
+| Mécanisme Codex | Sémantique | Compatibilité C8 / superviseur |
+|---|---|---|
+| `developer_instructions` (clé config) | **ADDITIF** — injecté dans la session en plus du harnais builtin ; l'équivalent fonctionnel de `--append-system-prompt-file` | ✅ le bon candidat : `-c developer_instructions="…"`. ⚠️ la constante `SUPERVISOR_SYSTEM_PROMPT` est multi-paragraphe : en TOML basic string les `\n` échappés passent (`"ligne1\nligne2"`), mais bug connu de corruption sur les strings multi-lignes littérales dans config.toml (issue oh-my-codex #1817) → aplatir en une ligne avec `\n` échappés, et quoter différemment POSIX/PowerShell (même problème déjà résolu pour `quotePromptArg`) |
+| `model_instructions_file` / `experimental_instructions_file` | **REMPLACE** les instructions builtin | ❌ à éviter : perd le harnais Codex (outils, sandbox etc.) et notre ancre doit s'AJOUTER, pas se substituer |
+| `AGENTS.md` (repo/cwd, `project_doc_max_bytes` 32 KiB) | Additif mais lu depuis le projet | ❌ contraire à la règle C8 : un dépôt cloné pourrait re-briefer le superviseur (exactement ce que `supervisor.ts` interdit par conception) |
+
+### 4.3 Ce qui ne se transpose PAS directement (rappel lot B)
+
+- **Cycle de vie de session** : pas de `--session-id` imposable au spawn (id
+  généré par Codex, rollouts sous `CODEX_HOME/sessions/`) et la reprise est
+  `codex resume <id> | --last` **sans équivalent de `--fork-session`** — le
+  modèle Deck « fork à chaque reprise, jamais deux process sur le même id »
+  demande une plomberie différente (capturer l'id émis, accepter la reprise
+  mutative).
+- **Briefing initial** : OK — le TUI Codex accepte un prompt positionnel au
+  lancement, comme le mécanisme C2.
+- **Back-channel** : pas d'équivalent de `--plugin-dir`/hook SessionStart pour
+  suivre l'id de session à travers un clear.
+- **claude-peers** : le serveur MCP claude-peers se chargerait aussi via
+  `mcp_servers`, mais tout l'écosystème (groupes, résumés, roadmap_*) est
+  aujourd'hui briefé pour des agents Claude Code — à re-tester.
+
+**Conclusion** : un superviseur Codex est techniquement plausible sur les deux
+axes demandés (MCP : portable ; prompt système : `developer_instructions` en
+additif), avec trois chantiers de validation avant d'écrire du code — le
+quoting cross-shell du prompt aplati, l'exposition du token dans `ps`, et la
+gestion de session sans fork. Recommandation : prototype manuel d'abord
+(lancer à la main un `codex -c mcp_servers…` contre un Deck ouvert et vérifier
+`deck_list_agents`), avant toute intégration `supervisor.ts`.
+
+## 5. Synthèse des décisions à prendre
+
+| # | Question | Recommandation | État |
+|---|---|---|---|
+| 1 | Un réglage par action (aide / baguette / digest / juge) ou un réglage global « modèle utilitaire » ? | Un réglage « aide & digest » + un réglage « baguette » + le juge déjà par-graphe. Défauts actuels conservés (`haiku`) | ✅ livré (lot A) |
+| 2 | Mettre à jour D6 pour Gemini (`--approval-mode plan`) ? | Oui — retirer la mention « no reliable equivalent » et passer le flag dans l'adaptateur | ✅ livré (lot A) |
+| 3 | Utiliser `codex -c model_instructions_file` au lieu du prompt composé stdin ? | Non-bloquant ; le pattern stdin actuel marche. À envisager si les réponses codex régurgitent le contexte | ouvert |
+| 4 | Agents/superviseur non-Claude ? | Étude superviseur-Codex faite (§4) : plausible, 3 validations avant code (quoting du prompt aplati, token dans `ps`, session sans fork). Prototype manuel recommandé | étudié (§4) |
 
 ## Sources
 
-- Codex CLI : `openai/codex` `docs/exec.md` → developers.openai.com/codex/noninteractive ; batterie de tests exec (gist alexfazio, 81 essais vérifiés flag par flag)
+- Codex CLI : `openai/codex` `docs/exec.md` → developers.openai.com/codex/noninteractive ; batterie de tests exec (gist alexfazio, 81 essais vérifiés flag par flag) ; config/MCP/profiles : `docs/config.md` au tag `rust-v0.36.0` (les docs de `main` sont des stubs vers developers.openai.com) ; `developer_instructions` vs `model_instructions_file` : config-reference developers.openai.com + issues openai/codex#11588, oh-my-codex#1817 ; reprise TUI : `docs/getting-started.md` (`codex resume`, `--last`, `<SESSION_ID>`)
 - Gemini CLI : `google-gemini/gemini-cli` `docs/cli/headless.md` (mode headless, `-p`, `--output-format`, codes de sortie) ; README (flags `-m`, `--approval-mode default|auto_edit|yolo|plan`, `--allowed-tools`, `-s`)
 - Ollama : docs.ollama.com/api/openai-compatibility (`/v1/chat/completions`, `/v1/models`, base `:11434/v1`, clé facultative)
 - LiteLLM : proxy OpenAI-compat (`/v1/chat/completions`, `/v1/models`, Bearer) — déjà le contrat implémenté et testé par `model-adapters.ts` / `model-registry.ts`

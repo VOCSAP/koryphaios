@@ -13,8 +13,11 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
 - **Locked harnesses (C8 rule)**: every agent prompt (supervisor, plan import,
   reviewer, dispatch, digest, help assistant, context wand, graph chat/merge/
   judge) is a CODE CONSTANT, never operator- or repo-configurable. One-shot
-  helpers run read-only: `claude -p` with `--strict-mcp-config` +
-  `--disallowedTools` (Read/Grep/Glob stay available).
+  helpers (help, digest, wand — `utility-inference.ts`) target any catalog
+  model (`config.helpTarget` / `config.wandTarget`) and run read-only per
+  CLI: `claude -p --strict-mcp-config --disallowedTools` (Read/Grep/Glob
+  stay), `codex exec --sandbox read-only`, `gemini --approval-mode plan`;
+  local endpoints are pure chat (no tools).
 - **Graph chat (🕸 rail view)**: per-project chat graphs where every exchange
   is a node and the graph is the source of truth — each assistant node is ONE
   stateless headless invocation whose context is recompiled from its
