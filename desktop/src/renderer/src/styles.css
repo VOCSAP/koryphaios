@@ -56,6 +56,31 @@ body {
   color: var(--fg-dim);
 }
 
+/* Startup-failure splash + per-view crash fallback (PLAN O4). */
+.loading-error {
+  align-content: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.error-boundary {
+  display: grid;
+  place-content: center;
+  gap: 12px;
+  height: 100%;
+  padding: 24px;
+  text-align: center;
+  color: var(--fg);
+}
+
+.error-boundary-detail {
+  color: var(--fg-dim);
+  font-family: monospace;
+  font-size: 12px;
+  max-width: 640px;
+  overflow-wrap: anywhere;
+}
+
 .app {
   /* Nav rail + active view (the agents view nests its own sidebar grid). */
   display: grid;

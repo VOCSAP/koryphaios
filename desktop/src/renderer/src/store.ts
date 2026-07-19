@@ -73,6 +73,8 @@ interface DeckState {
    * keep-mounted pattern as the agents/home views.
    */
   browserOpened: boolean
+  /** Boot failure message (PLAN O4): init() rejected, splash shows a retry. */
+  initError: string | null
 
   init(): Promise<void>
   setView(view: DeckView): void
@@ -163,15 +165,31 @@ export const useDeck = create<DeckState>((set, get) => ({
   diffTarget: null,
   browserPairedId: null,
   browserOpened: false,
+  initError: null,
 
   async init() {
-    const [sessions, config, i18n, workspaces, templates] = await Promise.all([
-      window.api.listSessions(),
-      window.api.getConfig(),
-      window.api.getI18n(),
-      window.api.listWorkspaces(),
-      window.api.listTemplates()
-    ])
+    set({ initError: null })
+    let sessions: SessionRuntime[]
+    let config: AppConfig
+    let i18n: Awaited<ReturnType<typeof window.api.getI18n>>
+    let workspaces: WorkspaceSummary[]
+    let templates: TemplateSummary[]
+    try {
+      ;[sessions, config, i18n, workspaces, templates] = await Promise.all([
+        window.api.listSessions(),
+        window.api.getConfig(),
+        window.api.getI18n(),
+        window.api.listWorkspaces(),
+        window.api.listTemplates()
+      ])
+    } catch (e) {
+      // Without this catch a single failed bootstrap invoke left the splash
+      // spinning forever (PLAN O4). Surface it + let the operator retry.
+      const message = e instanceof Error ? e.message : String(e)
+      window.api.reportError('init', `bootstrap failed: ${message}`)
+      set({ initError: message })
+      return
+    }
     set({
       sessions,
       config,

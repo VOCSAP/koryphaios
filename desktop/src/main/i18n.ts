@@ -454,6 +454,8 @@ export const EN_DEFAULTS: Record<string, string> = {
   'journal.kind.dispatch': 'dispatch',
   'journal.kind.review': 'review',
   'journal.kind.checkpoint': 'checkpoint',
+  'journal.kind.graph': 'graph',
+  'journal.kind.error': 'error',
   'toast.journalExported': 'Journal exported',
   'roadmap.queueSection': 'Dispatch queue',
   'roadmap.queueAdd': '⏳ Queue for dispatch',

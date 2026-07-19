@@ -357,6 +357,8 @@
   "journal.kind.dispatch": "dispatch",
   "journal.kind.review": "review",
   "journal.kind.checkpoint": "checkpoint",
+  "journal.kind.graph": "graphe",
+  "journal.kind.error": "erreur",
   "toast.journalExported": "Journal exporté",
   "roadmap.queueSection": "File d'attente",
   "roadmap.queueAdd": "⏳ Mettre en file",

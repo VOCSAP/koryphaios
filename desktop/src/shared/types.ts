@@ -456,6 +456,8 @@ export type JournalKind =
   | 'dispatch'
   | 'review'
   | 'checkpoint'
+  | 'graph'
+  | 'error'
 
 export interface JournalEntry {
   id: number
@@ -651,6 +653,9 @@ export interface DeckApi {
   journalList(kind?: JournalKind | null): Promise<JournalEntry[]>
   /** Save the journal as plain text (save dialog); returns the path or null. */
   journalExport(): Promise<string | null>
+
+  // error reporting (PLAN O4): renderer failures land in main.log + journal.
+  reportError(scope: string, message: string): void
 
   // diff / review (PLAN C13)
   /** Full diff picture of a dir (uncommitted + branch-vs-main for worktrees). */
