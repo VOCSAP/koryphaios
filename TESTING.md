@@ -31,9 +31,12 @@ the workarounds for the known environment quirks below.
 ## Environment quirks (remote/proxied sessions)
 
 - Fresh container: run `bun install` (root) before the smoke check, and
-  `ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm install` in `desktop/` before the
-  typecheck — the Electron postinstall's binary download gets a 403 from the
-  agent proxy, and the typecheck doesn't need the binary anyway.
+  `npm install` in `desktop/` before the typecheck. Since Electron 42 the
+  `electron` package no longer downloads its binary in postinstall (it
+  downloads on first launch; `ELECTRON_SKIP_BINARY_DOWNLOAD` is gone), so a
+  plain install works behind the proxy. The desktop postinstall's
+  `electron-rebuild` still 403s on the Electron headers download — its
+  `|| echo` fallback absorbs that; run `npm run rebuild` on a real machine.
 - `tests/server-stdin-eof.test.ts` is flaky in sandboxed environments: re-run
   it in isolation before treating a failure as a regression.
 
