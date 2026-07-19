@@ -39,12 +39,16 @@ cd desktop && npm run typecheck    # runs tsconfig.node + tsconfig.web
 
 - `TS2688: Cannot find type definition file for 'electron-vite/node'` means
   `desktop/node_modules` is not installed.
-- Plain `npm install` FAILS in remote/proxied environments: the Electron
-  postinstall downloads a binary and gets **HTTP 403** from the agent proxy.
-  The typecheck does not need that binary (nor the node-pty rebuild):
+- Plain `npm install` works, even behind the agent proxy: since Electron 42
+  the `electron` package downloads its binary on first launch, not in
+  postinstall (`ELECTRON_SKIP_BINARY_DOWNLOAD` no longer exists). Expect the
+  desktop postinstall's `electron-rebuild` to print an **HTTP 403** error
+  (Electron headers blocked by the proxy) and be absorbed by its `|| echo`
+  fallback — harmless here; the typecheck needs neither the binary nor the
+  node-pty rebuild. Run `npm run rebuild` on a real machine instead.
 
 ```bash
-cd desktop && ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm install
+cd desktop && npm install
 ```
 
 ## 4. Locale parity (only if UI strings were added)
