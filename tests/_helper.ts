@@ -35,6 +35,8 @@ export async function startBroker(
         ...cleanEnv,
         CLAUDE_PEERS_PORT: String(port),
         CLAUDE_PEERS_DB: dbPath,
+        // Keep the rolling log inside the test sandbox (cleaned with it).
+        CLAUDE_PEERS_LOG_DIR: join(tmpDir, "logs"),
         CLAUDE_PEERS_DORMANT_TTL_HOURS: "24",
         ...envOverrides,
       },

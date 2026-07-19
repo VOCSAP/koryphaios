@@ -53,6 +53,7 @@ import {
   computeGroupSecretHash,
 } from "./shared/config.ts";
 import { writePeerIdCache, writeDeskSessionId } from "./shared/peer-cache.ts";
+import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { DECK_PEER_ID, DECK_INSTANCE_TOKEN } from "./shared/types.ts";
 import type { GraphDraftAddResponse } from "./shared/types.ts";
 import {
@@ -172,9 +173,32 @@ async function ensureBroker(): Promise<void> {
 
 // --- Utility ---
 
+// Rolling file log (PLAN-observabilite-erreurs O1/O2). stdout carries the MCP
+// stdio protocol, so the console mirror is disabled and both helpers keep the
+// historical stderr line themselves.
+const fileLog = createLogger({ dir: coreLogDir(), name: "server", mirrorToConsole: false });
+
 function log(msg: string) {
   console.error(`[claude-peers] ${msg}`);
+  fileLog.info(msg);
 }
+
+function logError(msg: string, e?: unknown) {
+  console.error(`[claude-peers] ${msg}`);
+  fileLog.error(msg, e);
+}
+
+// Last-resort safety nets: Bun exits on unhandled rejections; leave a trace
+// first. Async cleanup (POST /disconnect) is not reliable here -- the broker's
+// stale sweeps will mark the peer dormant.
+process.on("uncaughtException", (e) => {
+  logError("uncaught exception, exiting", e);
+  process.exit(1);
+});
+process.on("unhandledRejection", (e) => {
+  logError("unhandled rejection, exiting", e);
+  process.exit(1);
+});
 
 async function getGitRoot(cwd: string): Promise<string | null> {
   try {
@@ -213,6 +237,9 @@ let wsReconnectDelay: number = WS_RECONNECT_INITIAL_MS;
 // via WS. Cleared on session restart (process exit), so resumed sessions still
 // see unacknowledged messages. Only check_messages marks delivered in the DB.
 const notifiedMessageIds = new Set<number>();
+// Message ids whose pollFallback notification already logged a failure (dedup
+// so a broken transport does not flood the log at every 5s poll).
+const notifyFailedIds = new Set<number>();
 
 function groupNameForId(id: GroupId): string {
   for (const [name, gid] of Object.entries(myGroupsMap)) {
@@ -363,7 +390,16 @@ async function pollFallback() {
           },
         });
         notifiedMessageIds.add(msg.id);
-      } catch { /* fire-and-forget */ }
+        notifyFailedIds.delete(msg.id);
+      } catch (e) {
+        // The message stays delivered=0 and is retried on the next poll; log the
+        // first failure per message so a broken transport leaves a trace without
+        // flooding one line per 5s poll.
+        if (!notifyFailedIds.has(msg.id)) {
+          notifyFailedIds.add(msg.id);
+          logError(`pollFallback: mcp.notification failed for message ${msg.id} (will retry)`, e);
+        }
+      }
     }
   } catch { /* non-fatal */ }
 }
