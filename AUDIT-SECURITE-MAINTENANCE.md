@@ -232,3 +232,64 @@
 4. **Fiabilité des données** (M-LOG-1..4) : écritures atomiques (temp+rename), transactions sur register/unregister, lock `wx`.
 5. **Durcissement transport & secrets** (M-SEC-1..4, 10) : `timingSafeEqual`, TLS imposé en HTTP, ne plus exfiltrer `ANTHROPIC_API_KEY`, valider `base_url`, refuser le stockage clair des clés.
 6. **CI & maintenance** (M-MNT-1..3) : brancher `bun test` cœur en CI, centraliser la config, découper les fonctions géantes, puis résorber les mineurs par lots (duplication, index, docs).
+
+---
+
+# 6. Addendum — vérification approfondie des points critiques (2e passe, modèle Fable)
+
+*Deuxième passe ciblée sur les surfaces critiques : au lieu de repérer des motifs, chaque chaîne d'exploitation a été tracée de la source non fiable jusqu'au sink (shell / usurpation), avec verdict CONFIRMÉ / RÉFUTÉ. Cette passe **confirme tous les bloquants du rapport initial** et ajoute **4 nouveaux bloquants** (`B7`–`B10`) plus plusieurs constats. Les vérifications ont été re-croisées manuellement sur le code (lignes citées vérifiées).*
+
+## 6.1 Bloquants du rapport initial — verdicts
+
+| Réf | Item | Verdict | Précision apportée par la passe profonde |
+|-----|------|:--:|------|
+| B1 | Fuite `instance_token` (`/list-peers`, `/admin/peers`) | **CONFIRMÉ — élargi** | Ce n'est pas 2 mais **4 sites de fuite**. `/poll-messages` (`broker.ts:1070`) et `/peek-messages` (`broker.ts:1080`) font `{ ...r }` sur un `SELECT * FROM messages` ; le type `Message` porte `from_token`/`to_token` → tout message reçu fuite le token de **l'expéditeur** (vérifié). `/operator-inbox` est en revanche correctement projeté (modèle à suivre). |
+| B2 | CSRF / DNS-rebinding (pas d'`Origin`/`Host`) | **CONFIRMÉ** | POST `text/plain` = « simple request » non préflightée : les mutations aveugles passent même sans lecture de réponse. `/admin/purge-messages` en GET reste le CSRF destructif le plus direct. |
+| B3 | Groupe `default` non authentifié + admin GET | **CONFIRMÉ** | La garde non-default est « n'authentifie que si le groupe est déjà connu » (`if (existing && …)`), donc un groupe inexistant passe aussi. |
+| B4 | RCE via `template:apply` (dépôt cloné) | **CONFIRMÉ** | Chaîne complète tracée : fichier template → `readTemplate` → `parseTemplate` (types seulement, jamais le contenu) → `templateToInputs` → `create` → `startPty` où **`def.command` REMPLACE le binaire de lancement approuvé** (`session-service.ts:589`). Aucun gate C19. **Atteignable depuis un téléphone appairé** (`applyTemplate` absent de `REMOTE_BLOCKED_CHANNELS`). |
+| B5 | RCE via `worktreeInit` (config projet) | **CONFIRMÉ** | `resolveLaunchConfig` : « local wins » (`launch-config.ts:127`) ; `runWorktreeInit` → `child_process.exec` (shell). 3 sites de déclenchement, dont `worktree:create` remote-atteignable. |
+| B6 | Injection shell (`agent`/`model`/`args`) | **CONFIRMÉ** | Payload sans breakout de guillemets : `model = "x$(touch /tmp/pwned)"` → `--model "x$(…)"` → la substitution s'exécute dans les guillemets. `quotePromptArg` n'est appliqué **qu'au prompt** ; `sanitizeModel` existe (`model-adapters.ts:37`) mais n'est **jamais** utilisé sur ce chemin (confirmé par grep). |
+
+**Réfutés (bonne nouvelle, pour crédibilité) :** aucune injection SQL (SQL dynamique = fragments constants + valeurs bindées, `ALTER TABLE ${col}` sur tableau constant) ; pas de crash-DoS par JSON/entier (`req.json()`, `JSON.parse` WS et timers sont tous gardés) — seule amplification restante : `deriveDefaultId` peut enchaîner jusqu'à 1000 `SELECT` par register, à combiner avec un flood de `/register` non authentifié.
+
+## 6.2 Nouveaux bloquants découverts en 2e passe
+
+### B7 — [Sécurité] Le flux « resume » = prise d'identité sans aucun secret
+- **Fichier** : `broker.ts:637-741` (chemin resume/résurrection), clé de session `sessionKey(host, cwd, group_id)` (`broker.ts:353-361`).
+- **Constat** : un session retournante est authentifiée **uniquement** par `(host, cwd, group_id)` — trois valeurs fournies par le client et non secrètes. Si un pair correspondant est **dormant**, le broker renvoie au caller son `instance_token` et son `peer_id` existants (`broker.ts:668-689`, vérifié). Or `host` et `cwd` sont précisément fuités par B1 (`/admin/peers`, `/list-peers`), et pour le groupe `default`, `group_id` vaut littéralement `"default"`.
+- **Scénario** : (1) `GET /admin/peers` → `host`/`cwd`/`group_id` de la victime ; (2) attendre qu'elle passe dormante (>120 s sans heartbeat, ou SessionEnd) ; (3) `POST /register` avec ces coordonnées → **réception de l'`instance_token` de la victime**. Aucun secret requis pour un groupe `default` (ni pour un groupe à secret NULL, cf. N-SEC-3). C'est le défaut le plus profond : le token, censé être la capacité, est ré-émis à partir de coordonnées devinables/fuitées.
+- **Reco** : lier le resume à un secret détenu par le client (exiger l'`instance_token` original ou un secret de session), jamais à `(host, cwd, group_id)` seuls ; ne jamais ressusciter à travers une frontière de confiance sans secret ; corriger B1 pour cesser de fuiter host/cwd.
+
+### B8 — [Sécurité] Détournement / interception / rejeu de la socket WebSocket
+- **Fichier** : `broker.ts:1595-1617` (handler d'auth WS), vérifié.
+- **Constat** : l'auth ne vérifie que `SELECT 1 FROM peers WHERE instance_token=? AND status='active'`, puis `wsPool.set(frame.instance_token, ws)` **écrase** toute socket existante et `flushPendingForToken` rejoue immédiatement les messages en attente vers cette socket. Le handler `close` (`if (token && wsPool.get(token) === ws)`) n'évince donc jamais l'attaquant quand la vraie socket de la victime se ferme.
+- **Scénario** : avec un token fuité (B1/NF-A) ou obtenu via B7, ouvrir `/ws`, envoyer `{"type":"auth","instance_token":"<victime>"}` → tous les push futurs vont à l'attaquant, la victime cesse de recevoir, et son courrier en attente est livré à l'attaquant. Trame d'auth statique, rejouable indéfiniment (pas de nonce/expiration).
+- **Reco** : preuve de possession par connexion (challenge/nonce), refuser d'écraser un token déjà connecté (ou fermer l'ancienne socket seulement après vérification), et corriger B1 pour tarir la circulation des tokens.
+
+### B9 — [Sécurité] `config:set { projectDir }` : pivot non authentifié contournant le gate C19
+- **Fichier** : `desktop/src/main/index.ts:177-196` (`setConfig` = `{ ...config, ...patch }`, aucune validation de champ), canal `config:set` (`companion.ts:44`, tier 3 mais **non appliqué**, non remote-bloqué).
+- **Constat** : toutes les surfaces RCE résolvent le dépôt **au moment de l'appel** via `getConfig().projectDir` (`ipc.ts:365-367`, `localTemplatesDir(getConfig().projectDir)`). Un téléphone appairé peut donc `config:set` le `projectDir` vers un dépôt malveillant déjà sur disque, puis déclencher `worktree:create` → le `worktreeInit` de ce dépôt s'exécute — **le gate C19 est court-circuité**, car il ne s'est exécuté qu'une fois au boot pour le `projectDir` d'origine (`index.ts:866`) et n'est jamais réévalué au changement de `projectDir`.
+- **Reco** : valider/whitelister `projectDir` dans `setConfig` ; réexécuter l'approbation C19 au changement de `projectDir` ; garder `worktreeInit` global-only.
+
+### B10 — [Sécurité] `CHANNEL_TIERS` déclarés mais jamais appliqués → un appairage = RCE hôte complet
+- **Fichier** : `desktop/src/shared/companion.ts:187-264` (déclaration), `companion-server.ts:280,297` (seul `REMOTE_BLOCKED_CHANNELS` est appliqué au dispatch). Vérifié par grep : **zéro site d'application** de `CHANNEL_TIERS`.
+- **Constat** : une fois le QR à usage unique consommé, un téléphone obtient un accès équivalent-opérateur sur tout canal non bloqué. Or aucun canal d'exécution n'est bloqué : `sessions:create` (RCE via B6), `template:apply` (B4), `worktree:create` (B5), `config:set` (B9), `pty:input` (frappes arbitraires dans un terminal Claude vivant). Payload : trame WS `{"t":"req","ch":"sessions:create","args":[{"model":"x$(touch /tmp/pwned)"}]}`.
+- **Reco** : appliquer réellement `CHANNEL_TIERS` — refuser en remote les canaux de tier ≥2 (spawn, config, template, worktree) sauf « appareil de confiance » explicite ; bloquer `config:set` en remote.
+
+> **Note** : `B10` est le *multiplicateur* de `B4`/`B5`/`B6`/`B9` — il fait passer ces RCE de « dépôt cloné + action opérateur » à « toute personne ayant scanné le QR sur le LAN/Tailnet ». À traiter en priorité conjointe.
+
+## 6.3 Constats additionnels (majeurs / à reclasser)
+
+- **NF-D — [Majeur] Forgeage de `by:"deck"` → bypass des verrous roadmap & usurpation opérateur** (`broker.ts:1208-1219`, `1355`). L'autorisation d'écriture roadmap repose sur la chaîne client `body.by` ; poser `by:"deck"` (ou le `locked_by` connu) contourne le verrou, et `created_by`/`updated_by` sont forgeables. Combiné à B2 + `project_key` connu (= URL du remote git, souvent publique), toute page web réécrit/verrouille/archive la roadmap en se faisant passer pour l'opérateur. **Reco** : dériver l'auteur/autorité de l'identité authentifiée (token → peer_id), jamais de `body.by` ; réserver `"deck"` au credential du Deck.
+- **NF-E — [Majeur] `/roadmap/import` : écrasement illimité + DoS mémoire** (`broker.ts:1395-1459`). `body.items` non borné, chargé en mémoire, appliqué en `INSERT OR REPLACE (id, …)` : écrasement d'items arbitraires par `id` et bloat DB/mémoire, sans credential en mode local. **Reco** : borner la taille, exiger un credential, traiter l'import en create-only / ownership-checked.
+- **NF-F — [Mineur→Majeur] `pid` client non fiable pour la vivacité** (`broker.ts:399`, `656-666`). `process.kill(pid,0)` sur un `pid` fourni par le client : `pid:1` (jamais reap par le check PID) ou `pid:0` (`process.kill(0,0)` cible le groupe de processus → « vivant »). Aide la persistance de lignes squattées/dormantes qui alimentent B7. **Reco** : ne pas se fier au `pid` client à travers une frontière de confiance.
+- **Desktop N2 — [Majeur] `deck_spawn_session` partage l'injection de B6** (`deck-control.ts:101-110`) et `deck_apply_template` applique un `path` arbitraire sans gate. Reachabilité moindre (bridge loopback + Bearer injecté dans la tuile superviseur), mais un dépôt dont le superviseur lit le contexte peut l'orienter. Corrigé automatiquement par le fix de B6 (sanitisation dans `create`/`spawnSession`).
+- **Desktop N3 — [Majeur, = M-SEC-9] `template:read`/`template:apply` sans containment de chemin** (`template-store.ts:32`, `ipc.ts:573`). Confirmé : contrairement à `deleteTemplate`, aucun `allowedDirs`. Limité à du JSON en forme de template, mais permet de sélectionner un template hors-arbre pour exécuter B4. **Reco** : appliquer le containment de `deleteTemplate`.
+
+## 6.4 Nouvel ordre de priorité consolidé
+
+1. **Tarir la circulation des tokens** — projections publiques sur `peers` **et** `messages` (B1 élargi + NF-A). Ce seul lot ferme la clé primaire de B1, B7 (moitié), B8.
+2. **Lier resume + auth WS à un vrai secret** (B7, B8) — le token ne doit pas être ré-émissible depuis des coordonnées devinables, et le WS doit prouver la possession.
+3. **Neutraliser les RCE desktop + leur multiplicateur** (B4, B5, B6, B9, B10) — appliquer le gate C19 à `template.command/args` et `worktreeInit`, sanitiser `agent`/`model`/`args` (réutiliser `sanitizeModel`/`quotePromptArg`), valider `projectDir`, **appliquer `CHANNEL_TIERS`**.
+4. **Validation `Origin`/`Host`** (B2) — bloque l'atteignabilité navigateur/rebinding qui transforme tout le reste en attaque distante.
+5. **Compares constant-time** (M-SEC-1), **durcissement TOFU register** (N-SEC-3), **autorité roadmap depuis l'identité authentifiée** (NF-D), caps import (NF-E), pid non fiable (NF-F).
