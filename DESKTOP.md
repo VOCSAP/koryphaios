@@ -69,10 +69,19 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   discovered dynamically (`/v1/models`, `/api/tags` fallback); their API keys
   are encrypted at rest via safeStorage (`provider-secrets.ts` — the renderer
   only ever sees a `hasKey` marker).
-- **Security gates**: PROJECT-config `launchCommand` requires a one-time
-  operator approval (sha256 per project_key); resume-digest sources come from
-  the GLOBAL config only (a repo-carried command list would execute arbitrary
-  code on clone).
+- **Security gates**: any value that comes from a CLONED REPO (project
+  `.claude/claude-peers/config.json`, project-local `templates/*.json`) and
+  reaches a shell / spawn is an RCE vector, so it is either GLOBAL-config-only
+  or approval-gated. Reuse `launch-approval.ts` (sha256 per project_key,
+  one-time operator dialog) — never invent a new trust store, and never put the
+  trust decision in the repo. Currently gated: project `launchCommand`, project
+  `worktreeInit`, and a repo-local template's shell-bearing `command`/`args`
+  (`resolveTemplateInputs` in `index.ts`). GLOBAL-only (never read from a repo):
+  resume-digest sources. Separately, `agent`/`model`/`args` interpolated into
+  the login-shell command line are allow-listed + quoted (`sanitizeFlagValue` /
+  `quotePromptArg` in `session-command.ts`) — add new interpolated fields the
+  same way, never raw. `config:set` refuses a `projectDir` override (it would
+  repoint every project-scoped resolver past the boot gate).
 - **Companion LAN access (PLAN-mobile-lan MB1–MB6)**: the 📱 button starts an
   HTTPS+WebSocket server (`main/companion-server.ts`) that serves the built
   renderer bundle to a phone on the LAN and bridges the DeckApi protocol
@@ -81,9 +90,14 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   phone runs the same renderer, flipped to a mobile layout (`.is-mobile`, only
   ever for a remote coarse-pointer client — the desktop window is untouched).
   Ephemeral session model: one-shot QR token → per-run credential, closing the
-  app revokes. When adding a DeckApi method, also add it to `COMPANION_MANIFEST`
-  (a `satisfies` clause makes a miss a compile error) and give its channel a
-  tier in `CHANNEL_TIERS`. State events reaching the phone must go through
+  app revokes; the operator can also list + revoke paired devices (lost-phone
+  kill switch: `companion:devices`/`revoke`/`revoke-all`, `CompanionAuth`
+  device map). When adding a DeckApi method, touch ALL of: the `DeckApi` type
+  (`shared/types.ts`), `COMPANION_MANIFEST` (a `satisfies` clause makes a miss a
+  compile error), `CHANNEL_TIERS` (every invoke/send channel needs a tier), the
+  `preload/index.ts` bridge — and add it to `REMOTE_BLOCKED_CHANNELS` if it is
+  host-only or trust-changing (a paired phone must never call it). State events
+  reaching the phone must go through
   `broadcast()` (not `mainWindow.webContents.send`); window-only events
   (menu:*, design:pick, session:focus, inbox:open) stay on the window. The
   Android shell (`mobile-shell/`) is a documented scaffold — see MB6.

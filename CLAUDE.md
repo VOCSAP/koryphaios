@@ -60,6 +60,19 @@ Only read the file matching the area you are touching:
   Only swallow silently when the fallback is truly equivalent (documented
   best-effort caches). Full conventions per layer: the `error-reporting`
   skill (`.claude/skills/error-reporting/SKILL.md`).
+- **Two hostile inputs, never trusted.** (1) A value from a CLONED REPO
+  (project `.claude/claude-peers/config.json`, project-local `templates/*.json`)
+  that reaches a shell/spawn must be GLOBAL-config-only or approval-gated —
+  reuse `launch-approval.ts`, never put the trust decision in the repo (see the
+  "Security gates" section of `DESKTOP.md`). (2) A message/peer field crossing
+  the broker HTTP boundary must never carry `instance_token`/`from_token`/PIDs —
+  project through `toPublicPeer` / `resolveSenderMeta` in `broker.ts`. When you
+  add a config field, template field, shell-interpolated arg, or broker response
+  field, decide which of these it is BEFORE wiring it.
+- **Naming a scratch/plan/report doc?** `.gitignore` silently excludes
+  `findings.md`, `task_plan.md`, `progress.md`, `progress-archive.md`, `docs/`,
+  and `.claude/session-checkpoint.md`. A deliverable you intend to commit (audit
+  report, plan, notes) must use a different name, or it vanishes from `git add`.
 
 ## Running
 
