@@ -270,10 +270,116 @@ terminal éteint. Le bon découpage :
   c'est en pratique OK avec l'exemption d'optimisation batterie demandée à
   l'installation ; les notifications peuvent au pire arriver par vagues.
 
+### Revue vue par vue (contexte : Samsung S22, ~360×780 px CSS)
+
+Servir l'UI du PC ne suffit pas : chaque vue doit être auditée pour le tactile.
+Grille de lecture utilisée — un S22 en usage réel : une main, pouce, cibles
+tactiles ≥ 48 px, **pas de hover** (39 règles `:hover` dans `styles.css` à
+doubler d'une affordance visible), **pas de clic droit** (5 composants posent
+un `onContextMenu` — mais tous passent par le `ContextMenu.tsx` partagé : UN
+point d'adaptation → long-press + bottom sheet, le patron Android standard),
+**pas de drag HTML5** (l'API `draggable` ne fonctionne pas au doigt), pas de
+touche Échap (toute modale doit avoir sa croix), tooltips `title=` morts, et
+un clavier virtuel qui mange la moitié de l'écran (`visualViewport` à écouter
+pour re-fitter les terminaux).
+
+Trois familles de traitement — c'est la classification qui pilote l'effort :
+
+- **A. CSS seul** : la vue vit telle quelle en une colonne.
+- **B. Recomposition** : mêmes composants, chrome réarrangé (drawer, sheets,
+  pager).
+- **C. Redesign d'interaction** : le modèle d'interaction desktop n'a pas
+  d'équivalent tactile — il faut une présentation alternative.
+
+| Vue | Famille | Usage mobile dominant | Traitement |
+|---|---|---|---|
+| 🖥 Agents | **B** | Surveiller, répondre à un agent | Pager 1×1 + barre de touches |
+| 🏠 Home | **A** | Piloter le deck en langage naturel | Gratuit une fois Agents fait |
+| 🗺 Roadmap | **C** | Consulter, changer un statut, « process now » | Kanban → une colonne + bottom sheet |
+| 🕸 Graph | **C** | Lire une branche, répondre | Canvas → mode fil (thread) |
+| 🌐 Browser | — | Exclu du mode distant (§3) | Masqué de la nav |
+| ⎇ Worktrees | **A** | Consulter, supprimer | Liste + confirmations existantes |
+| 📜 Journal | **A** | Lire | Chips de filtre, scroll |
+| ✉ Inbox | **B** | LE centre de notifications | Écran plein + badge d'onglet |
+| ⚙ Settings | **A/B** | Rare sur mobile | Liste Android groupée |
+| Diff | **A** | Relire un diff | Déjà en rendu **unifié** ✅ — scroll horizontal par bloc |
+| 🔍 Recherche | **B** | Retrouver dans les buffers | Overlay plein écran standard |
+| Dialogues (workspaces, templates, snippets, ModelPicker, CreateMenu) | **B** | Rare | Bottom sheets / formulaires plein écran |
+
+**Navigation générale** : le rail vertical devient une bottom-tab-bar Material
+(5 emplacements max) : 🏠 Home, 🖥 Agents, 🗺 Roadmap, ✉ Inbox (badge
+non-lus — c'est l'onglet le plus « mobile » de l'app), ⋯ Plus (Graph,
+Journal, Worktrees, Settings). Chaque vue gagne une top app bar (titre +
+actions), car sur desktop ces actions vivent dans des tooltips et des menus
+contextuels invisibles au doigt. `StatusBanner` reste un bandeau persistant en
+haut ; les toasts deviennent des snackbars en bas.
+
+Détail des trois vues qui méritent l'analyse :
+
+**🖥 Agents (famille B — la plus simple, confirmé).** `displayMode` forcé
+`1×1` (le mode existe), la grille devient un **pager** : swipe horizontal
+entre sessions + rangée de chips (nom, couleur, badge attention ⚠ / quota)
+comme sélecteur direct — les deux patrons standards en un. La sidebar
+desktop (redimensionnable à la souris — n'a pas de sens au doigt) disparaît
+au profit des chips + d'un bottom sheet « toutes les sessions » (où le
+réordonnancement se fait par poignées de drag, remplaçant le drag desktop).
+La barre de touches xterm (Esc / Tab / Ctrl / ↑↓←→ / C-c / coller) se pose
+au-dessus du clavier, patron Termux/ttyd. Point technique : re-fit du
+terminal sur apparition du clavier et rotation (`visualViewport` +
+l'addon-fit déjà présent).
+
+**🗺 Roadmap (famille C — votre intuition est juste, mais le redesign est
+borné).** Le kanban 4 colonnes + drag & drop HTML5 est intransposable :
+au doigt, le drag inter-colonnes se bat avec le scroll vertical ET le swipe
+horizontal, sur des cibles de 300 px — même Trello et Jira mobile ont
+renoncé. Le patron standard mobile (Trello/Jira/GitHub Projects) :
+**une colonne à la fois** — segmented control ou tabs de statut en haut
+(idea / planned / in_progress / done, avec compteurs ; archived derrière le
+« ⋯ ») + swipe horizontal entre colonnes, cartes pleine largeur. Le
+déplacement devient **explicite** : tap sur la carte ou « ⋮ » → bottom sheet
+« Déplacer vers… / Modifier / File d'attente / Process now / Archiver » —
+exactement le contenu de l'actuel menu clic-droit, plus le changement de
+statut. Rien n'est perdu sémantiquement : le drag desktop N'EST qu'un
+changement de statut ; le tri en colonne est déjà automatique (MoSCoW), donc
+aucun réordonnancement manuel à transposer. La confirmation sur « done »,
+les cartes verrouillées 🔒 (grisées, non déplaçables) et le bouton ⏹ Stop se
+conservent tels quels. La modale de détail devient une page plein écran avec
+actions collantes en bas. Le coût réel est une **présentation alternative de
+la même donnée** : les cinq appels IPC (`roadmapList/Upsert/Archive/Stop/
+Assign`) et le tokenizer markdown sont inchangés.
+
+**🕸 Graph (famille C — le plus gros morceau, à phaser).** Le canvas est
+souris-only aujourd'hui (zoom molette, pan par drag — aucun handler touch,
+vérifié dans `GraphView.tsx`), et même « touchifié » (pinch/pan), brancher
+ou croiser des nœuds au doigt sur 6" est irréaliste. Mais l'architecture
+sauve la mise : **le graphe est la source de vérité et chaque nœud recompile
+son contexte depuis ses ancêtres** — une branche EST un fil de discussion.
+Le mode mobile naturel est donc un **mode fil (thread)** : la branche
+sélectionnée rendue comme une conversation linéaire (l'ordre existe déjà —
+`outlineOrder` dans `shared/graph.ts`), sélecteur de branche aux
+embranchements, composer en bas = UX de chat standard ; les nœuds de merge
+gardent leur rendu documentaire par sections. Le canvas reste accessible en
+lecture (pinch/pan, tap sur un nœud → l'ouvrir dans le fil) comme une
+minimap. Phasage : lire + répondre au bout d'une branche = M-mobile ;
+brancher/croiser/battle mode restent desktop-first sans que rien ne bloque.
+Les action cards « graph draft » de l'inbox débouchent sur le fil, pas sur
+le canvas.
+
+Priorisation par valeur d'usage mobile (le compagnon sert à **surveiller et
+débloquer**, pas à faire de l'authoring profond) : 1. Agents + Home +
+barre de touches ; 2. Inbox ; 3. Roadmap une-colonne ; 4. Journal/Worktrees/
+Diff (quasi gratuits) ; 5. Graph mode fil ; Settings et l'authoring graphe
+avancé restent desktop.
+
 Remarque importante : le mode mobile ne doit PAS être un fork du renderer.
-C'est le même bundle, avec un état `isRemote` (posé par le shim) et des media
-queries. Toute divergence de code UI serait une dette immédiate (i18n, thèmes,
-parité de features).
+C'est le même bundle, avec un état `isMobile` (posé par media query
+`pointer: coarse` + largeur, ou par la coquille) et des media queries. Pour
+les familles A/B, aucune divergence de code — du CSS et du chrome. Pour les
+deux vues de famille C, la règle se précise : **état, données et logique
+partagés, seule la couche de présentation est alternative** (`RoadmapBoard`
+vs `RoadmapList`, `GraphCanvas` vs `GraphThread` — mêmes stores, mêmes appels
+IPC, mêmes helpers `shared/`). Toute duplication de logique serait une dette
+immédiate (i18n, thèmes, parité de features).
 
 ## 5. Sécurité — le vrai sujet
 
@@ -499,7 +605,7 @@ WhatsApp/Signal :
 |---|---|---|---|
 | **M1 — Bridge core** | Serveur HTTP statique (bundle renderer) + WS DeckApi dans le main ; shim `window.api` côté web ; fan-out des 14 `webContents.send` ; feature-gate `<webview>`/dialogues | — | **M** |
 | **M2 — Bouton Compagnon & socle sécurité (5.1 + 5.5)** | Bouton « Compagnon » + QR, token de session éphémère lié au lancement, TLS auto-signé (cert stable persisté), filtre RFC1918, heartbeat + écran « hôte déconnecté », anti-bruteforce, table de tiers DeckApi (5.4), journalisation | M1 | **M** |
-| **M3 — Mode mobile UI** | Media queries (rail→tabs, drawer), `1×1` forcé + sélecteur de session, barre de touches xterm, dialogues d'approbation re-routés en DeckApi (§3) | M1 | **M** |
+| **M3 — Mode mobile UI** (phasé selon la revue §4) | M3a chrome : bottom-tabs, top app bars, ContextMenu→bottom sheet, modales plein écran ; M3b Agents/Home : pager 1×1, chips, barre de touches, re-fit clavier ; M3c Roadmap une-colonne (`RoadmapList`) ; M3d vues famille A (Journal, Worktrees, Diff, Settings, Recherche) ; M3e Graph mode fil (`GraphThread`) ; dialogues d'approbation re-routés en DeckApi (§3) | M1 | **L** (M3e détachable) |
 | **M4 — Coquille Android Capacitor** | Scanner QR natif, WebView sur l'UI servie par l'hôte, pinning du cert auto-signé, service foreground + bascule canal léger/complet (§4), notifications locales (`session:attention`, `inbox:new`), verrou biométrique + `FLAG_SECURE` (5.5 bis), écran « hôte déconnecté » natif | M1–M3 | **M/L** |
 | **M5 — Confort** | mDNS, backpressure `pty:data`, reconnexion WS auto, profil restreint (option), conscience du profil réseau | M1–M4 | **S/M** |
 
