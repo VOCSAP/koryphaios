@@ -16,7 +16,7 @@ import { createServer, type Server } from 'node:https'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { extname, join, normalize } from 'node:path'
+import { extname, join, normalize, sep } from 'node:path'
 import { networkInterfaces } from 'node:os'
 import { WebSocketServer, WebSocket } from 'ws'
 import type { Duplex } from 'node:stream'
@@ -342,8 +342,13 @@ export class CompanionServer {
     }
     const urlPath = (req.url ?? '/').split('?')[0] ?? '/'
     const rel = urlPath === '/' ? 'index.html' : urlPath.replace(/^\/+/, '')
+    const root = normalize(this.deps.staticDir)
     const path = normalize(join(this.deps.staticDir, rel))
-    if (!path.startsWith(normalize(this.deps.staticDir))) {
+    // Containment check WITH the trailing separator: a bare startsWith(root)
+    // would also accept a sibling dir sharing the prefix (out/renderer-x). No
+    // such sibling exists today, but the separator makes the guard correct
+    // regardless of the packaged layout.
+    if (path !== root && !path.startsWith(root + sep)) {
       res.writeHead(403).end()
       return
     }
