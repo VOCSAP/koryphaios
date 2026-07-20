@@ -216,6 +216,28 @@ frustre au plus fini :
    plein écran sans chrome navigateur. Peu de travail une fois v1 acquise ;
    nécessite HTTPS (encore le §5).
 
+### Navigateur (PWA) ou app native Android ?
+
+Question légitime : le client mobile est-il un site LAN ouvert dans le
+navigateur, ou une vraie app Android ? Comparaison honnête :
+
+| Critère | Web / PWA | App native Android |
+|---|---|---|
+| Distribution | Rien à installer — le scan du QR ouvre l'URL dans Chrome | APK à sideloader ou store à maintenir |
+| Version | **Le PC sert l'UI** : le client est toujours exactement à la version de l'hôte, protocole compris | Risque de décalage app ↔ desktop à chaque release |
+| Codebase | Le même bundle renderer (tout l'intérêt de la voie C) | Soit une 2ᵉ UI complète (terminaux, roadmap, graphe — énorme), soit une WebView… qui est le site web déguisé |
+| Cert TLS auto-signé | Avertissement navigateur à la 1ʳᵉ visite (une fois, si le cert est stable) | Pinning propre du cert, zéro avertissement |
+| Notifications hors app | WS tué par Android quand l'onglet passe en arrière-plan | Foreground service qui tient le WS → alerte « un agent demande ton attention » |
+| Clavier terminal | Barre de touches web (pattern Termux/ttyd) | Contrôle total du clavier, IME custom possible |
+
+**Recommandation : v1 = web/PWA.** Le coût marginal est quasi nul (c'est le
+livrable naturel de la voie C) et l'argument version-servie-par-l'hôte est
+structurel. Si à l'usage les trois frictions natives (avertissement cert,
+notifications en arrière-plan, clavier) pèsent vraiment, la réponse n'est PAS
+une UI native from scratch mais un **wrapper fin Capacitor/TWA autour du même
+bundle web** — on gagne le pinning du cert, le foreground service et un
+meilleur clavier sans jamais dupliquer l'UI.
+
 Remarque importante : le mode mobile ne doit PAS être un fork du renderer.
 C'est le même bundle, avec un état `isRemote` (posé par le shim) et des media
 queries. Toute divergence de code UI serait une dette immédiate (i18n, thèmes,
@@ -285,8 +307,9 @@ Les mesures recommandées adressent précisément ça :
    loggent le contenu approuvé (le hash + le texte du `launchCommand`).
 6. **Conscience du réseau.** Avertir (voire refuser de démarrer) si
    l'interface active est classée « réseau public » (Windows network
-   category / absence de passerelle privée) ; option allowlist d'IPs clientes
-   pour les réseaux denses.
+   category / absence de passerelle privée). ~~Allowlist d'IPs clientes~~ —
+   proposée dans une première version, **écartée** (voir 5.5 : apport quasi
+   nul sous le mode éphémère, coût de maintenance réel).
 7. **Option CA locale** (mkcert ou équivalent) pour remplacer l'auto-signé
    chez qui veut faire disparaître l'avertissement navigateur et ancrer la
    confiance TLS proprement.
@@ -359,19 +382,71 @@ granularité du profil « compagnon » et du step-up. La vraie frontière de
 sécurité reste la décision d'appairage (5.3) — le reste est de la défense en
 profondeur.
 
+### 5.5 Décision opérateur : mode « session compagnon éphémère »
+
+Le mode retenu est **plus contraignant** que le niveau recommandé générique —
+et, paradoxalement, plus simple à construire. Flux exact :
+
+1. L'app tourne sur le PC, des agents sont lancés. Avant de s'absenter,
+   l'opérateur clique **« Compagnon »** → la fenêtre affiche un QR code
+   (URL + token à usage unique, **lié à ce lancement de l'app**).
+2. Scan depuis le mobile → accès à la même session : mêmes tuiles, mêmes
+   flux `pty:data`, même roadmap.
+3. **Fermeture de l'app PC = révocation.** Le WS tombe (trame close en arrêt
+   propre ; timeout de heartbeat ping/pong ~5 s en cas de crash) → le mobile
+   affiche « hôte déconnecté » et revient à l'écran d'accueil.
+4. Relance de l'app PC → **séquence complète à refaire** (Compagnon + scan).
+   Aucun credential ne survit au process.
+
+Terminologie : ce bouton « Compagnon » correspond au profil *opérateur* de
+5.3 (accès complet) — le profil restreint homonyme de 5.3 devient une option
+future, hors périmètre.
+
+Conséquences — la liste 5.2 fond considérablement :
+
+| Mesure 5.1/5.2 | Sous le mode éphémère |
+|---|---|
+| Credential d'appareil durable (5.1.2) | **Remplacé** par un token de pure session — plus rien à stocker côté mobile |
+| Registre d'appareils, révocation, kill switch (5.2.1) | **Superflus** — fermer l'app est la révocation ; le kill switch, c'est la croix de la fenêtre |
+| Expiration / ré-appairage 30 j (5.2.3) | **Sans objet** — la durée de vie est celle du process |
+| Step-up biométrique (5.2.2) | **Optionnel** — le scan QR prouve déjà la présence physique au PC à chaque lancement ; ne reste utile que contre le vol du téléphone *pendant* une session active |
+| Verrouillage d'inactivité (5.2.3) | **Conservé** — même raison (téléphone posé, session ouverte) |
+| Anti-bruteforce (5.2.4) | **Conservé** — le token reste devinable par force brute tant que le serveur écoute |
+| TLS (5.1.4) | **Conservé**, avec une nuance importante : le **certificat doit rester stable d'un lancement à l'autre** (généré une fois, persisté) même si les tokens sont éphémères — sinon l'avertissement navigateur revient à chaque session |
+| Journal (5.1.5) | **Conservé** |
+
+**Allowlist IP : écartée.** Deux clarifications sur l'objection (fondée) qui
+l'a tuée :
+
+- Elle n'aurait **jamais** vécu côté broker : le broker ne joue aucun rôle
+  dans l'accès mobile (§1.3 — le serveur compagnon est dans le process main
+  d'Electron, sur le PC). Le stockage aurait été la config locale du Deck
+  (`store.ts`, JSON sur disque), pas une DB, et l'écran de gestion un champ
+  dans Settings. Pas de double maintenance broker/client.
+- « Sans auth, n'importe qui pourrait ajouter une IP » — non : modifier la
+  config exige d'être devant le PC, ce qui est déjà le privilège maximal
+  (l'auth locale n'apporterait rien, cohérent avec le modèle actuel
+  « exécuter le binaire suffit »).
+
+Mais l'objection **maintenance** suffit : sous le mode éphémère, le token par
+lancement gate déjà tout ; une liste d'IPs à entretenir (DHCP qui tourne,
+téléphone qui change d'adresse) pour un gain marginal est du pur coût. Le
+filtre statique « rejeter tout ce qui n'est pas RFC1918 » (5.1.3), lui, reste
+: zéro maintenance, il encode « LAN only » et rien d'autre.
+
 ## 6. Découpage en lots (si la voie C est retenue)
 
 | Lot | Contenu | Dépend de | Taille |
 |---|---|---|---|
 | **M1 — Bridge core** | Serveur HTTP statique (bundle renderer) + WS DeckApi dans le main ; shim `window.api` côté web ; fan-out des 14 `webContents.send` ; feature-gate `<webview>`/dialogues | — | **M** |
-| **M2 — Appairage & socle sécurité (5.1)** | Toggle Settings, QR + échange token→credential d'appareil, TLS auto-signé, filtre RFC1918, table de tiers DeckApi (5.4), registre d'appareils + révocation, journalisation | M1 | **M** |
+| **M2 — Bouton Compagnon & socle sécurité (5.1 + 5.5)** | Bouton « Compagnon » + QR, token de session éphémère lié au lancement, TLS auto-signé (cert stable persisté), filtre RFC1918, heartbeat + écran « hôte déconnecté », anti-bruteforce, table de tiers DeckApi (5.4), journalisation | M1 | **M** |
 | **M3 — Mode mobile UI** | Media queries (rail→tabs, drawer), `1×1` forcé + sélecteur de session, barre de touches xterm, dialogues d'approbation re-routés en DeckApi (§3) | M1 | **M** |
-| **M4 — Sécurité recommandée (5.2)** | Step-up WebAuthn/PIN pour le tier 3, verrouillage d'inactivité, anti-bruteforce, profils opérateur/compagnon, conscience du profil réseau | M2 | **M** |
-| **M5 — Confort** | PWA (manifest, icônes), mDNS, backpressure `pty:data`, reconnexion WS auto | M1–M3 | **S/M** |
+| **M4 — Défense en profondeur (optionnel sous 5.5)** | Verrouillage d'inactivité, step-up biométrique, profil restreint, conscience du profil réseau | M2 | **S/M** |
+| **M5 — Confort** | PWA (manifest, icônes), mDNS, backpressure `pty:data`, reconnexion WS auto, wrapper Capacitor/TWA si les frictions web pèsent (§4) | M1–M3 | **S/M** |
 
-M1+M2 donnent un accès mobile fonctionnel mais spartiate ; M3 tient la
-promesse « mode mobile » ; M4 tient celle de l'autonomie complète (approbations
-tier 3 depuis le téléphone, sous biométrie). Chaque lot est testable avec l'outillage existant
+Sous le mode éphémère retenu (5.5), **M1+M2+M3 couvrent intégralement le
+scénario cible** (Compagnon → scan → autonomie complète → hôte déconnecté à
+la fermeture) ; M4 n'est que de la défense en profondeur. Chaque lot est testable avec l'outillage existant
 (`bun test` sur le bridge et le shim — logique pure dans `desktop/src/shared/`
 conformément aux conventions, cf. DESKTOP.md).
 
