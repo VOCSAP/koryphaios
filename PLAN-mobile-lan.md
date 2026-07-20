@@ -1,5 +1,35 @@
 # PLAN — Accès mobile LAN (chantiers MB1…MB6)
 
+## Statut (mis à jour en fin de session d'implémentation)
+
+| Lot | État | Notes |
+|---|---|---|
+| MB1 Bridge | ✅ livré | `shared/companion.ts`, `api-registry.ts`, `companion-server.ts`, `remote-api.ts` ; typecheck + build OK |
+| MB2 Appairage | ✅ livré | bouton 📱 + `CompanionDialog`, token à usage unique, cert persistant, lockout, journal |
+| MB3 UI mobile | ✅ livré | `MobileNav`/`MobileSheet`/`MobileAgents`/`KeyBar`, refit `visualViewport`, CSS `.is-mobile` |
+| MB4 Roadmap + panier | ✅ livré | `RoadmapList`, `shared/hold-gesture.ts` |
+| MB5 Canal léger | ✅ livré | bascule `mode: light` sur `visibilitychange` + backpressure `bufferedAmount` |
+| MB6 Coquille Android | 🟡 scaffold | `mobile-shell/` documenté ; **non buildé** (pas de SDK Android ici) |
+| M3e Graph mode fil | ⏸ reporté | hors périmètre v1 (vue Graph absente de la nav mobile) |
+
+**Vérifié** : `bun test` (544 pass, dont 17 nouveaux), typecheck node+web, build
+electron-vite de production, parité i18n.
+
+**NON vérifié (limites de l'environnement, à faire côté opérateur)** :
+- End-to-end du pont WS live (lancer l'app Electron demande un affichage ; le
+  serveur compagnon se lie à une interface LAN absente du conteneur CI).
+- La coquille Android et ses capacités natives (service foreground, verrou
+  biométrique + `FLAG_SECURE`, pinning cert) : nécessitent le SDK Android.
+
+**Reste à faire pour une v1 utilisable en production** :
+1. Essai réel « téléphone sur le Wi-Fi » (le premier test à l'usage).
+2. Implémenter les TODOs natifs de `mobile-shell/README.md`.
+3. Décider si M3e (Graph mode fil) rentre en v1.1.
+4. Doc opérateur README (comment démarrer l'accès, avertissement cert).
+
+---
+
+
 Implémentation de `EXPLORATION-mobile-lan.md` (voie C, mode session compagnon
 éphémère, coquille Capacitor). Règle d'or : **zéro changement de comportement
 pour la fenêtre desktop** — tout le mode mobile est dérivé, activé uniquement
