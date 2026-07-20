@@ -4,7 +4,6 @@
 
 import type { CreateSessionInput, SessionRuntime } from '@shared/types'
 import type { SessionService } from './session-service'
-import { resolveLaunchConfig } from './launch-config'
 import { createWorktree, runWorktreeInit } from './worktree-service'
 
 export async function createSessionWithWorktree(
@@ -16,14 +15,20 @@ export async function createSessionWithWorktree(
    * sessions landing in an EXISTING tree (a fresh worktree is clean by
    * construction, so it is skipped). index.ts injects the git checkpoint.
    */
-  beforeSpawn?: (cwd: string) => Promise<void>
+  beforeSpawn?: (cwd: string) => Promise<void>,
+  /**
+   * The APPROVED worktree-init hook (B5). This is resolved once at startup
+   * through the C19 gate (a project-sourced hook only lands after the operator
+   * approves it), so it is passed in rather than re-read from the project config
+   * here — a repo-shipped worktreeInit can no longer reach the shell ungated.
+   */
+  worktreeInit?: string
 ): Promise<SessionRuntime> {
   const req = { ...input }
   const branch = req.worktreeBranch?.trim()
   if (branch) {
     const wt = await createWorktree(projectDir, branch)
-    const init = resolveLaunchConfig(projectDir).worktreeInit
-    if (init) runWorktreeInit(wt.path, init)
+    if (worktreeInit) runWorktreeInit(wt.path, worktreeInit)
     req.cwd = wt.path
     req.worktree = { path: wt.path, branch: wt.branch ?? branch }
   } else if (beforeSpawn) {

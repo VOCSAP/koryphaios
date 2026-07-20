@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import {
   app,
   BrowserWindow,
@@ -23,8 +23,14 @@ import {
   type SecretCipher
 } from './scope-secrets'
 import { applyProviderKeyPatch, sanitizeProviders } from './provider-secrets'
-import { globalLaunchCommand, projectLaunchCommand, resolveLaunchConfig } from './launch-config'
-import { resolveApprovedLaunchCommand } from './launch-approval'
+import {
+  globalLaunchCommand,
+  globalWorktreeInit,
+  projectLaunchCommand,
+  projectWorktreeInit,
+  resolveLaunchConfig
+} from './launch-config'
+import { approve, isApproved, resolveApprovedLaunchCommand } from './launch-approval'
 import { WorkspaceService } from './workspace-service'
 import {
   BrokerHealthTracker,
@@ -66,9 +72,10 @@ import {
   listTemplates,
   localTemplatesDir,
   readTemplate,
+  templateSource,
   writeTemplate
 } from './template-store'
-import { templateToInputs, toTemplate } from '@shared/template'
+import { templateHasShellFields, templateToInputs, toTemplate, type TemplateInput } from '@shared/template'
 
 let mainWindow: BrowserWindow | null = null
 // The desktop window is the first event sink (PLAN MB1): state events emitted
@@ -173,8 +180,30 @@ if (activeScope.scopeKind === 'custom' && config.rememberScopeSecrets) {
 // after the operator approves it once (see the app.whenReady gate below).
 const safeLaunchCommand = globalLaunchCommand()
 
+// Shared C19 approval store (launchCommand + worktreeInit + project templates).
+const approvalsFile = (): string => join(app.getPath('userData'), APP_STATE_SUBDIR, 'launch-approvals.json')
+
+// B5: the operator-approved worktree-init hook for this project, resolved once
+// at whenReady through the C19 gate below. undefined = no hook runs. Passed to
+// every spawn path (createSessionWithWorktree) instead of re-reading the
+// project config, so a repo-shipped worktreeInit cannot reach the shell ungated.
+let approvedWorktreeInit: string | undefined
+const getWorktreeInit = (): string | undefined => approvedWorktreeInit
+
+const isFrLocale = (): boolean => (config.locale || app.getLocale()).toLowerCase().startsWith('fr')
+
 const getConfig = (): AppConfig => config
 const setConfig = (patch: Partial<AppConfig>): AppConfig => {
+  // B9: projectDir is a launch-time, in-memory context (from cliContext), never
+  // a runtime setting — the renderer only ever patches display/settings fields.
+  // A `config:set { projectDir }` would repoint every project-scoped resolver
+  // (worktreeInit, launchCommand, templates) at an attacker-chosen repo AFTER
+  // the C19 boot gate ran, so it is rejected here rather than silently applied.
+  if (patch.projectDir !== undefined && patch.projectDir !== config.projectDir) {
+    reportError('config', `rejected config:set projectDir override (${patch.projectDir})`)
+    const { projectDir: _ignored, ...rest } = patch
+    patch = rest
+  }
   // Local-provider API keys never persist in clear (C29): a renderer patch
   // carries transient `apiKey` fields that are encrypted (safeStorage) into
   // `apiKeyEnc` here, and the renderer echo below only ever sees `hasKey`.
@@ -661,6 +690,61 @@ const watchIdleLocks = async (): Promise<void> => {
 }
 let lockWatchTimer: NodeJS.Timeout | null = null
 
+/**
+ * Containment + approval gate for applying a template (B4 + M-SEC-9). Returns
+ * the inputs to spawn, or null when: the path is outside the allowed template
+ * dirs, the file is malformed, or a REPO-LOCAL template carrying a shell-bearing
+ * `command`/`args` was declined by the operator. Global (operator-owned)
+ * templates are trusted and never prompt. Approval is keyed per project +
+ * template basename + shell-field content hash, so an unchanged approved
+ * template re-applies silently while an edited command re-prompts.
+ */
+const resolveTemplateInputs = (path: string): TemplateInput[] | null => {
+  const projectDir = getConfig().projectDir
+  const source = templateSource(path, projectDir)
+  if (!source) {
+    reportError('template', `refused template path outside the allowed dirs: ${path}`)
+    return null
+  }
+  const tpl = readTemplate(path)
+  if (!tpl) return null
+  if (source === 'local' && templateHasShellFields(tpl)) {
+    const key = `${computeDeckProjectKey(projectDir)}::template::${basename(path)}`
+    const value = JSON.stringify(
+      tpl.sessions.map((s) => ({ command: s.command ?? '', args: s.args ?? '' }))
+    )
+    const file = approvalsFile()
+    if (!isApproved(file, key, value)) {
+      const isFr = isFrLocale()
+      const preview = tpl.sessions
+        .filter((s) => (s.command && s.command.trim()) || (s.args && s.args.trim()))
+        .map((s) => `• ${[s.command, s.args].filter(Boolean).join(' ')}`)
+        .join('\n')
+      const ok =
+        dialog.showMessageBoxSync({
+          type: 'warning',
+          buttons: isFr ? ['Appliquer ce modèle', 'Refuser'] : ['Apply this template', 'Refuse'],
+          defaultId: 1,
+          cancelId: 1,
+          title: 'Koryphaios',
+          message: isFr
+            ? 'Ce modèle (config du projet) exécute des commandes personnalisées.'
+            : 'This project template runs custom commands.',
+          detail: isFr
+            ? `Modèle : ${basename(path)}\n\n${preview}\n\nCes commandes seront exécutées dans un shell. N'accepte que si tu fais confiance à ce dépôt.`
+            : `Template: ${basename(path)}\n\n${preview}\n\nThese commands run in a shell. Accept only if you trust this repository.`
+        }) === 0
+      if (!ok) {
+        journal.add('session', `project template refused: ${basename(path)}`)
+        return null
+      }
+      approve(file, key, value)
+      journal.add('session', `project template approved: ${basename(path)}`)
+    }
+  }
+  return templateToInputs(tpl)
+}
+
 // ----- Supervisor deck-control (PLAN C5) -----
 // The loopback control endpoint the SUPERVISOR session pilots the app through.
 // Started lazily at the first Home visit; the URL/token pair is injected only
@@ -670,13 +754,13 @@ const controlDeps: DeckControlDeps = {
   listModels: () => resolveLaunchConfig(getConfig().projectDir).models,
   listPresets: () => resolveLaunchConfig(getConfig().projectDir).presets,
   spawnSession: (input) =>
-    createSessionWithWorktree(service, getConfig().projectDir, input, checkpointBeforeSpawn),
+    createSessionWithWorktree(service, getConfig().projectDir, input, checkpointBeforeSpawn, getWorktreeInit()),
   listSessions: () => service.list(),
   restartSession: (id) => void service.restart(id),
   closeSession: (id) => service.remove(id),
   createWorktree: async (branch) => {
     const wt = await createWorktree(getConfig().projectDir, branch)
-    const init = resolveLaunchConfig(getConfig().projectDir).worktreeInit
+    const init = getWorktreeInit()
     if (init) runWorktreeInit(wt.path, init)
     journal.add('worktree', `worktree created on ⎇ ${wt.branch} (supervisor)`)
     return wt
@@ -689,9 +773,8 @@ const controlDeps: DeckControlDeps = {
   listTemplates: () => listTemplates(getConfig().projectDir),
   // Append-only by contract (deck-control): never closes existing tiles.
   applyTemplate: async (path) => {
-    const tpl = readTemplate(path)
-    if (!tpl) return 0
-    const inputs = templateToInputs(tpl)
+    const inputs = resolveTemplateInputs(path)
+    if (!inputs) return 0
     // One checkpoint covers the whole batch (all spawn into the project dir).
     if (inputs.length > 0) await checkpointBeforeSpawn(getConfig().projectDir)
     // Template lead only lands when the window has none yet (PLAN C18).
@@ -700,7 +783,9 @@ const controlDeps: DeckControlDeps = {
       await createSessionWithWorktree(
         service,
         getConfig().projectDir,
-        hasLead ? { ...input, lead: undefined } : input
+        hasLead ? { ...input, lead: undefined } : input,
+        undefined,
+        getWorktreeInit()
       )
     }
     return inputs.length
@@ -865,12 +950,12 @@ app.whenReady().then(() => {
   // refusal keeps the global/default command for this run).
   const projCmd = projectLaunchCommand(cliContext.projectDir)
   if (projCmd && projCmd.trim() !== safeLaunchCommand.trim()) {
-    const isFr = (config.locale || app.getLocale()).toLowerCase().startsWith('fr')
+    const isFr = isFrLocale()
     const decision = resolveApprovedLaunchCommand({
       projectKey: computeDeckProjectKey(cliContext.projectDir),
       projectCommand: projCmd,
       fallback: safeLaunchCommand,
-      approvalsFile: join(app.getPath('userData'), APP_STATE_SUBDIR, 'launch-approvals.json'),
+      approvalsFile: approvalsFile(),
       confirm: (command) =>
         dialog.showMessageBoxSync({
           type: 'warning',
@@ -891,6 +976,48 @@ app.whenReady().then(() => {
       if (decision.prompted) journal.add('session', `project launchCommand approved: ${decision.command}`)
     } else {
       journal.add('session', 'project launchCommand refused — using the global command')
+    }
+  }
+  // B5: gate a PROJECT-sourced worktreeInit the same way. A repo-shipped
+  // `.claude/claude-peers/config.json` worktreeInit runs through a shell on
+  // worktree creation, so it only lands after a one-time operator approval;
+  // refusal falls back to the global hook (or none).
+  {
+    const projWti = projectWorktreeInit(cliContext.projectDir)
+    const globalWti = globalWorktreeInit()
+    if (projWti && projWti.trim() && projWti.trim() !== (globalWti ?? '').trim()) {
+      const isFr = isFrLocale()
+      const decision = resolveApprovedLaunchCommand({
+        projectKey: `${computeDeckProjectKey(cliContext.projectDir)}::worktreeInit`,
+        projectCommand: projWti,
+        fallback: globalWti ?? '',
+        approvalsFile: approvalsFile(),
+        confirm: (command) =>
+          dialog.showMessageBoxSync({
+            type: 'warning',
+            buttons: isFr ? ['Exécuter ce hook', 'Refuser'] : ['Run this hook', 'Refuse'],
+            defaultId: 1,
+            cancelId: 1,
+            title: 'Koryphaios',
+            message: isFr
+              ? 'Ce projet définit un hook exécuté à la création de worktree.'
+              : 'This project defines a worktree-creation init hook.',
+            detail: isFr
+              ? `Hook (config du projet) :\n\n${command}\n\nIl sera exécuté dans un shell à chaque création de worktree de ce projet. N'accepte que si tu fais confiance à ce dépôt. Refuser désactive ce hook.`
+              : `Hook (project config):\n\n${command}\n\nIt will run in a shell on every worktree creation for this project. Accept only if you trust this repository. Refusing disables the hook.`
+          }) === 0
+      })
+      approvedWorktreeInit = decision.source === 'project' ? decision.command : globalWti || undefined
+      journal.add(
+        'session',
+        decision.source === 'project'
+          ? `project worktreeInit approved: ${decision.command}`
+          : 'project worktreeInit refused — hook disabled'
+      )
+    } else {
+      // No project override (or it equals the global one): the global hook is
+      // operator-owned and trusted, no prompt.
+      approvedWorktreeInit = (projWti && projWti.trim()) || globalWti || undefined
     }
   }
   // Tailored menu (drops the confusing default Edit roles); no auto-open DevTools.
@@ -954,6 +1081,8 @@ app.whenReady().then(() => {
     stopRoadmapItem,
     assignRoadmapItem,
     checkpoint: checkpointBeforeSpawn,
+    getWorktreeInit,
+    resolveTemplateInputs,
     brokerStatus: () => brokerHealth.status,
     brokerRetry: () => {
       void pollOperatorInbox()

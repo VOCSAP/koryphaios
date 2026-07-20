@@ -50,6 +50,7 @@ import { resolveLaunchConfig, saveGlobalConfig } from './launch-config'
 import {
   listTemplates,
   readTemplate,
+  templateSource,
   writeTemplate,
   deleteTemplate,
   globalTemplatesDir,
@@ -68,7 +69,7 @@ import { decryptProviders, sanitizeProviders } from './provider-secrets'
 import type { SecretCipher } from './scope-secrets'
 import { compileContext, runInference, type InferRequest } from './graph-engine'
 import { graphId as graphDocId, parseGraphDoc, type GraphDoc } from '../shared/graph'
-import { parseTemplate, toTemplate, templateToInputs } from '@shared/template'
+import { parseTemplate, toTemplate, type TemplateInput } from '@shared/template'
 import { availableLocales, loadDict, resolveLocale } from './i18n'
 import { reportError } from './log'
 
@@ -109,6 +110,14 @@ interface IpcDeps {
   assignRoadmapItem: (id: string, peerId: string) => Promise<AssignResult>
   /** Git checkpoint of a dirty tree before an agent spawns there (PLAN C16). */
   checkpoint: (dir: string) => Promise<void>
+  /** Operator-approved worktree-init hook for this project (B5), or undefined. */
+  getWorktreeInit: () => string | undefined
+  /**
+   * Containment + approval gate for a template path (B4 + M-SEC-9): returns the
+   * inputs to spawn, or null when the path is out-of-tree / malformed / a
+   * repo-local shell-bearing template the operator declined.
+   */
+  resolveTemplateInputs: (path: string) => TemplateInput[] | null
   /** Current broker reachability (PLAN O5), owned by index.ts. */
   brokerStatus: () => BrokerStatusEvent
   /** Force an immediate broker poll (banner Retry button). */
@@ -129,6 +138,8 @@ export function registerIpc({
   stopRoadmapItem,
   assignRoadmapItem,
   checkpoint,
+  getWorktreeInit,
+  resolveTemplateInputs,
   brokerStatus,
   brokerRetry
 }: IpcDeps): void {
@@ -137,7 +148,7 @@ export function registerIpc({
   // Worktree handling (PLAN C4) lives in the shared create path, also used by
   // the supervisor's deck-control spawn.
   regHandle('sessions:create', (_e, input: CreateSessionInput) =>
-    createSessionWithWorktree(service, getConfig().projectDir, input ?? {}, checkpoint)
+    createSessionWithWorktree(service, getConfig().projectDir, input ?? {}, checkpoint, getWorktreeInit())
   )
   regHandle('sessions:remove', (_e, id: string) => service.remove(id))
   regHandle('sessions:rename', (_e, id: string, name: string) => service.rename(id, name))
@@ -363,7 +374,7 @@ export function registerIpc({
   })
   regHandle('worktree:create', async (_e, branch: string) => {
     const wt = await createWorktree(getConfig().projectDir, branch ?? '')
-    const init = resolveLaunchConfig(getConfig().projectDir).worktreeInit
+    const init = getWorktreeInit()
     if (init) runWorktreeInit(wt.path, init)
     journal.add('worktree', `worktree created on ⎇ ${wt.branch}`)
   })
@@ -571,9 +582,9 @@ export function registerIpc({
     deleteTemplate(path, getConfig().projectDir)
   )
   regHandle('template:apply', async (_e, path: string, mode: 'append' | 'replace') => {
-    const tpl = readTemplate(path)
-    if (!tpl) return 0
-    const inputs = templateToInputs(tpl)
+    // Containment + repo-local shell-field approval (B4 + M-SEC-9).
+    const inputs = resolveTemplateInputs(path)
+    if (!inputs) return 0
     // One checkpoint covers the batch: every session spawns in the project dir.
     if (inputs.length > 0) await checkpoint(getConfig().projectDir)
     if (mode === 'replace') {
@@ -592,7 +603,9 @@ export function registerIpc({
       await createSessionWithWorktree(
         service,
         getConfig().projectDir,
-        hasLead ? { ...input, lead: undefined } : input
+        hasLead ? { ...input, lead: undefined } : input,
+        undefined,
+        getWorktreeInit()
       )
     }
     return inputs.length
@@ -728,7 +741,10 @@ export function registerIpc({
   )
 
   // ----- template composer (PLAN C18): read/write without spawning -----
-  regHandle('template:read', (_e, path: string) => readTemplate(path))
+  regHandle('template:read', (_e, path: string) =>
+    // M-SEC-9: only read templates that live in an allowed dir.
+    templateSource(path, getConfig().projectDir) ? readTemplate(path) : null
+  )
   regHandle('template:write', (_e, name: string, local: boolean, tpl: unknown) => {
     // parseTemplate validates the shape AND normalizes lead uniqueness.
     const parsed = parseTemplate(tpl)

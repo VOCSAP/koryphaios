@@ -145,6 +145,21 @@ export function globalLaunchCommand(env: NodeJS.ProcessEnv = process.env): strin
   return readConfigFile(globalConfigPath(env))?.launchCommand ?? DEFAULT_LAUNCH_COMMAND
 }
 
+/**
+ * The worktreeInit hook a PROJECT config supplies, or null (B5 gating). A
+ * project-sourced worktreeInit runs through a shell on worktree creation, so —
+ * exactly like `projectLaunchCommand` — it must pass the one-time C19 operator
+ * approval before it is honored.
+ */
+export function projectWorktreeInit(projectDir: string): string | null {
+  return readConfigFile(localConfigPath(projectDir))?.worktreeInit ?? null
+}
+
+/** The worktreeInit ignoring any project config: global file, else undefined. */
+export function globalWorktreeInit(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return readConfigFile(globalConfigPath(env))?.worktreeInit
+}
+
 /** Create the project-local config on demand (UI action). No-op if it exists. */
 export function createLocalConfig(projectDir: string): string {
   const file = localConfigPath(projectDir)
