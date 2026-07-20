@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import qrcode from 'qrcode-generator'
-import type { CompanionInfo } from '@shared/types'
+import type { CompanionDevice, CompanionInfo } from '@shared/types'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 
@@ -22,14 +22,50 @@ export function CompanionDialog(): React.JSX.Element {
   const [info, setInfo] = useState<CompanionInfo | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [devices, setDevices] = useState<CompanionDevice[]>([])
+
+  const refreshDevices = (): void => {
+    void window.api
+      .companionDevices()
+      .then(setDevices)
+      .catch(() => setDevices([]))
+  }
 
   useEffect(() => {
     void window.api
       .companionStatus()
       .then(setInfo)
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
-    return window.api.onCompanionChanged(setInfo)
+    refreshDevices()
+    // onCompanionChanged fires on start/stop/connect/revoke — keep both in sync.
+    const offChanged = window.api.onCompanionChanged((i) => {
+      setInfo(i)
+      refreshDevices()
+    })
+    const offConnected = window.api.onCompanionDeviceConnected(refreshDevices)
+    return () => {
+      offChanged()
+      offConnected()
+    }
   }, [])
+
+  const revoke = async (id: string): Promise<void> => {
+    try {
+      await window.api.companionRevoke(id)
+      refreshDevices()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const revokeAll = async (): Promise<void> => {
+    try {
+      await window.api.companionRevokeAll()
+      refreshDevices()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   const start = async (): Promise<void> => {
     setBusy(true)
@@ -91,6 +127,32 @@ export function CompanionDialog(): React.JSX.Element {
             <p className="companion-hint">
               {t('companion.paired', { count: String(info.clients) })}
             </p>
+          )}
+          {info?.running && (
+            <section className="companion-devices">
+              <div className="companion-devices-head">
+                <h3>{t('companion.devices')}</h3>
+                {devices.length > 0 && (
+                  <button className="link-btn" onClick={() => void revokeAll()}>
+                    {t('companion.revokeAll')}
+                  </button>
+                )}
+              </div>
+              {devices.length === 0 ? (
+                <p className="companion-hint">{t('companion.noDevices')}</p>
+              ) : (
+                <ul className="companion-device-list">
+                  {devices.map((d) => (
+                    <li key={d.id}>
+                      <span className="companion-device-addr">{d.addr}</span>
+                      <button className="link-btn" onClick={() => void revoke(d.id)}>
+                        {t('companion.revoke')}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
           )}
           {info?.running && (
             <button disabled={busy} onClick={() => void stop()}>

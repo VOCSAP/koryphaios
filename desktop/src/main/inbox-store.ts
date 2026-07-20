@@ -7,7 +7,8 @@
 //
 // Node builtins only (injectable dir): unit-testable under bun.
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync } from 'node:fs'
+import { writeFileAtomic } from './atomic-write'
 import { join } from 'node:path'
 import type { InboxMessage } from '../shared/types'
 
@@ -54,7 +55,9 @@ export function appendInboxHistory(
   const merged = [...current, ...batch.filter((m) => !known.has(m.id))].slice(-cap)
   try {
     mkdirSync(stateDir, { recursive: true })
-    writeFileSync(inboxHistoryFile(stateDir), JSON.stringify(merged), 'utf-8')
+    // Atomic (temp + rename): the inbox drain is destructive, so a torn write
+    // would lose the only durable copy of the drained operator messages.
+    writeFileAtomic(inboxHistoryFile(stateDir), JSON.stringify(merged))
   } catch (e) {
     // Persistence failure: the in-memory inbox still works this run, but the
     // broker drain was destructive -- the caller must know (O6) so it can

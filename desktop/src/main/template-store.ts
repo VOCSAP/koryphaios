@@ -29,6 +29,26 @@ export function localTemplatesDir(projectDir: string): string {
   return join(projectDir, '.claude', 'claude-peers', 'templates')
 }
 
+/**
+ * Which allowed templates dir directly contains `path`, or null when it lives
+ * outside both (M-SEC-9 containment). `template:read` / `template:apply` accept
+ * a caller-supplied path (renderer, supervisor, paired phone), so an arbitrary
+ * absolute path must be rejected before it is read/applied. 'local' = the
+ * repo-shipped (untrusted) dir; 'global' = the operator's own app-state dir.
+ * Mirrors the resolve-equality guard already used by `deleteTemplate`.
+ */
+export function templateSource(
+  path: string,
+  projectDir: string,
+  env: NodeJS.ProcessEnv = process.env
+): 'global' | 'local' | null {
+  if (!path.toLowerCase().endsWith('.json')) return null
+  const dir = resolve(dirname(path))
+  if (dir === resolve(globalTemplatesDir(env))) return 'global'
+  if (dir === resolve(localTemplatesDir(projectDir))) return 'local'
+  return null
+}
+
 export function readTemplate(path: string): SessionTemplate | null {
   try {
     if (!existsSync(path)) return null

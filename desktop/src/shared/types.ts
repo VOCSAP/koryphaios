@@ -605,6 +605,18 @@ export interface CompanionInfo {
   clients: number
 }
 
+/** Non-secret metadata for a paired companion device (Lot 2: list + revoke). */
+export interface CompanionDevice {
+  /** Stable, non-secret id for this run — safe to show / pass to revoke. */
+  id: string
+  /** Last address the device connected from. */
+  addr: string
+  /** When the device first paired this run (ms epoch). */
+  pairedAt: number
+  /** Last hello (pair or resume) from this device (ms epoch). */
+  lastSeenAt: number
+}
+
 export interface DeckApi {
   // sessions
   listSessions(): Promise<SessionRuntime[]>
@@ -783,7 +795,15 @@ export interface DeckApi {
   companionStart(): Promise<CompanionInfo>
   companionStop(): Promise<CompanionInfo>
   companionStatus(): Promise<CompanionInfo>
+  /** Paired devices (Lot 2) — desktop window only. */
+  companionDevices(): Promise<CompanionDevice[]>
+  /** Revoke one paired device by id (lost-phone kill switch) — desktop only. */
+  companionRevoke(id: string): Promise<boolean>
+  /** Revoke every paired device; returns the count — desktop only. */
+  companionRevokeAll(): Promise<number>
   onCompanionChanged(cb: (info: CompanionInfo) => void): () => void
+  /** A device authenticated (paired/resumed) — for an operator toast. */
+  onCompanionDeviceConnected(cb: (e: { addr: string; kind: 'paired' | 'resumed' }) => void): () => void
 
   // events (return an unsubscribe fn)
   onPtyData(cb: (e: PtyDataEvent) => void): () => void

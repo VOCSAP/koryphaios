@@ -13,7 +13,7 @@ import { Database } from "bun:sqlite";
 import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import { hostname } from "node:os";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { loadConfig } from "./shared/config.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { validateDraftPayload } from "./shared/graph-draft.ts";
@@ -57,7 +57,9 @@ import type {
   OperatorInboxResponse,
   OperatorInboxMessage,
   Peer,
+  PublicPeer,
   Message,
+  DeliveredMessage,
   GroupId,
   InstanceToken,
 } from "./shared/types.ts";
@@ -136,6 +138,24 @@ process.on("unhandledRejection", (e) => {
  * handler's try/catch, so a transient SQLite error (SQLITE_BUSY, disk full)
  * must skip the iteration -- not kill the daemon.
  */
+/**
+ * Constant-time string comparison (M-SEC-1). The bearer broker_token and every
+ * group_secret_hash are compared with this so a byte-by-byte timing oracle
+ * cannot recover them over the network in HTTP mode. null inputs compare by
+ * identity (both null → equal, the default-group case); differing lengths run a
+ * fixed-cost compare so timing does not leak which byte diverged.
+ */
+function safeEqual(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (a == null || b == null) return a === b;
+  const ab = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
+  if (ab.length !== bb.length) {
+    timingSafeEqual(ab, ab); // keep the cost independent of the length mismatch
+    return false;
+  }
+  return timingSafeEqual(ab, bb);
+}
+
 function guardedInterval(name: string, fn: () => unknown, ms: number): ReturnType<typeof setInterval> {
   return setInterval(() => {
     try {
@@ -622,7 +642,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
     ).get(groupId) as { secret_hash: string | null } | null;
 
     if (existing) {
-      if (existing.secret_hash !== secretHash) {
+      if (!safeEqual(existing.secret_hash, secretHash)) {
         return { error: "group_secret_hash mismatch (TOFU rejected)", status: 401 };
       }
     } else {
@@ -824,7 +844,35 @@ function handleSetId(body: SetIdRequest): SetIdResponse | { error: string; statu
   return { peer_id: body.new_peer_id, previous: me.peer_id };
 }
 
-function handleListPeers(body: ListPeersRequest): Peer[] {
+// B1: strip the routing token + local PIDs before a peer row crosses the HTTP
+// boundary. Only the public columns are serialized to any client.
+function toPublicPeer(p: Peer): PublicPeer {
+  const { instance_token: _t, pid: _p, client_pid: _c, ...pub } = p;
+  return pub;
+}
+
+// NF-A: resolve a message's sender to its public identity (peer_id + meta),
+// server-side, so poll/peek never expose from_token/to_token. Reserved senders
+// (deck/operator) map to their sentinel peer_id; an unresolvable/gone sender
+// yields an empty from_peer_id (the client renders a "<dormant peer>" placeholder).
+function resolveSenderMeta(
+  fromToken: InstanceToken
+): { from_peer_id: string; from_summary: string; from_host: string; from_cwd: string } {
+  if (fromToken === DECK_INSTANCE_TOKEN) {
+    return { from_peer_id: DECK_PEER_ID, from_summary: "", from_host: "", from_cwd: "" };
+  }
+  if (fromToken === OPERATOR_INSTANCE_TOKEN) {
+    return { from_peer_id: OPERATOR_PEER_ID, from_summary: "", from_host: "", from_cwd: "" };
+  }
+  const s = db.query(
+    "SELECT peer_id, summary, host, cwd FROM peers WHERE instance_token = ?"
+  ).get(fromToken) as { peer_id: string; summary: string; host: string; cwd: string } | null;
+  return s
+    ? { from_peer_id: s.peer_id, from_summary: s.summary, from_host: s.host, from_cwd: s.cwd }
+    : { from_peer_id: "", from_summary: "", from_host: "", from_cwd: "" };
+}
+
+function handleListPeers(body: ListPeersRequest): PublicPeer[] {
   // Filter implicitly by the caller's group_id, derived from instance_token.
   const callerRow = db.query(
     "SELECT group_id FROM peers WHERE instance_token = ?"
@@ -867,7 +915,7 @@ function handleListPeers(body: ListPeersRequest): Peer[] {
   const now = Date.now();
   return rows
     .filter((p) => p.instance_token !== body.instance_token)
-    .map((p): Peer => {
+    .map((p): PublicPeer => {
       let activity_status: Peer["activity_status"];
       if (p.status === "dormant") {
         activity_status = "closed";
@@ -876,7 +924,8 @@ function handleListPeers(body: ListPeersRequest): Peer[] {
       } else {
         activity_status = "sleep";
       }
-      return { ...p, activity_status };
+      // Project to the public shape: instance_token / pids never leave the broker.
+      return toPublicPeer({ ...p, activity_status });
     });
 }
 
@@ -986,7 +1035,7 @@ function handleAnnounce(body: AnnounceRequest): AnnounceResponse | { error: stri
     const existing = db.query(
       "SELECT secret_hash FROM groups WHERE group_id = ?"
     ).get(groupId) as { secret_hash: string | null } | null;
-    if (existing && existing.secret_hash !== (body.group_secret_hash ?? null)) {
+    if (existing && !safeEqual(existing.secret_hash, body.group_secret_hash ?? null)) {
       return { error: "group_secret_hash mismatch (TOFU rejected)", status: 401 };
     }
   }
@@ -1061,14 +1110,28 @@ function flushPendingForToken(token: InstanceToken): void {
   }
 }
 
+// NF-A: map an internal message row to the public DeliveredMessage — sender
+// resolved to peer_id + meta server-side, routing tokens dropped.
+function toDeliveredMessage(
+  r: Omit<Message, "delivered"> & { delivered: number }
+): DeliveredMessage {
+  return {
+    id: r.id,
+    ...resolveSenderMeta(r.from_token),
+    group_id: r.group_id,
+    text: r.text,
+    sent_at: r.sent_at,
+    delivered: Boolean(r.delivered),
+  };
+}
+
 function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse {
   type MessageRow = Omit<Message, "delivered"> & { delivered: number };
   const rows = selectUndelivered.all(body.instance_token) as MessageRow[];
   for (const row of rows) {
     markDelivered.run(row.id);
   }
-  const messages: Message[] = rows.map((r) => ({ ...r, delivered: Boolean(r.delivered) }));
-  return { messages };
+  return { messages: rows.map(toDeliveredMessage) };
 }
 
 // Like handlePollMessages but does NOT mark delivered.
@@ -1077,7 +1140,7 @@ function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse {
 function handlePeekMessages(body: PollMessagesRequest): PollMessagesResponse {
   type MessageRow = Omit<Message, "delivered"> & { delivered: number };
   const rows = selectUndelivered.all(body.instance_token) as MessageRow[];
-  return { messages: rows.map((r) => ({ ...r, delivered: Boolean(r.delivered) })) };
+  return { messages: rows.map(toDeliveredMessage) };
 }
 
 // --- Roadmap handlers (v0.4, PLAN C3) ---
@@ -1472,7 +1535,7 @@ function handleOperatorInbox(
     const existing = db.query(
       "SELECT secret_hash FROM groups WHERE group_id = ?"
     ).get(groupId) as { secret_hash: string | null } | null;
-    if (existing && existing.secret_hash !== (body.group_secret_hash ?? null)) {
+    if (existing && !safeEqual(existing.secret_hash, body.group_secret_hash ?? null)) {
       return { error: "group_secret_hash mismatch (TOFU rejected)", status: 401 };
     }
   }
@@ -1577,10 +1640,33 @@ const wsPool = new Map<InstanceToken, import("bun").ServerWebSocket<WsData>>();
 // Returns a 401 Response if BROKER_TOKEN is configured and the request lacks a valid
 // "Authorization: Bearer <token>" header. Returns null when auth passes or is disabled.
 // /health is always exempt so monitoring tools can reach it without credentials.
+// The token is compared in constant time (M-SEC-1) to deny a timing oracle in HTTP mode.
 function unauthorizedIfToken(req: Request): Response | null {
   if (!BROKER_TOKEN) return null;
-  if (req.headers.get("Authorization") === `Bearer ${BROKER_TOKEN}`) return null;
+  const auth = req.headers.get("Authorization") ?? "";
+  const provided = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : "";
+  if (safeEqual(provided, BROKER_TOKEN)) return null;
   return new Response("Unauthorized", { status: 401 });
+}
+
+// B2: reject cross-origin browser requests (CSRF / DNS-rebinding defense). Native
+// clients (server.ts, the CLI) never send an `Origin` header, so this is
+// transparent to them; a browser page always attaches Origin on a cross-origin
+// call, so any request that carries one is refused unless it is an explicit
+// loopback origin. This blocks a malicious web page from driving the broker
+// (announce/admin/roadmap) without needing a Host allow-list that a 0.0.0.0 LAN
+// bind cannot enumerate. Returns a 403 Response when the Origin is disallowed.
+function forbiddenByOrigin(req: Request): Response | null {
+  const origin = req.headers.get("Origin");
+  if (!origin) return null; // non-browser client (server.ts / CLI): no Origin
+  let host: string;
+  try {
+    host = new URL(origin).hostname;
+  } catch {
+    return new Response("Forbidden origin", { status: 403 });
+  }
+  const loopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
+  return loopback ? null : new Response("Forbidden origin", { status: 403 });
 }
 
 const server = Bun.serve<WsData>({
@@ -1621,6 +1707,8 @@ const server = Bun.serve<WsData>({
     const path = url.pathname;
 
     if (path !== "/health") {
+      const forbidden = forbiddenByOrigin(req);
+      if (forbidden) return forbidden;
       const deny = unauthorizedIfToken(req);
       if (deny) return deny;
     }
@@ -1647,7 +1735,8 @@ const server = Bun.serve<WsData>({
           ? "SELECT * FROM peers ORDER BY group_id, peer_id"
           : "SELECT * FROM peers WHERE status = 'active' ORDER BY group_id, peer_id";
         const rows = db.query(sql).all() as Peer[];
-        return Response.json(rows);
+        // B1: even the admin dump never exposes routing tokens / PIDs.
+        return Response.json(rows.map(toPublicPeer));
       }
       if (path === "/roadmap/export") {
         const pk = url.searchParams.get("project_key") ?? "";

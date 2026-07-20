@@ -18,7 +18,8 @@
 // parameters: unit-testable under bun, like snippet-store/template-store.
 
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { writeFileAtomic } from './atomic-write'
 import { join } from 'node:path'
 import { parseGraphDoc, type GraphDoc } from '../shared/graph'
 import type { SecretCipher } from './scope-secrets'
@@ -104,7 +105,8 @@ export function saveGraphs(
         payload: cipher.encrypt(json).toString('base64')
       } satisfies EncryptedEnvelope)
     : json
-  writeFileSync(graphsFile(stateDir, projectKey), body, 'utf-8')
+  // Atomic (temp + rename): a torn write would drop every graph conversation.
+  writeFileAtomic(graphsFile(stateDir, projectKey), body)
 }
 
 /**

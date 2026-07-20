@@ -33,7 +33,7 @@ test("fresh peer reports activity_status 'active' immediately after register", a
   const a = await register("activity-a", "/act-a");
   const b = await register("activity-b", "/act-b");
   const peers = await listPeers(b.body.instance_token, "/act-b");
-  const aRow = peers.find((p) => p.instance_token === a.body.instance_token);
+  const aRow = peers.find((p) => p.peer_id === a.body.peer_id);
   expect(aRow).toBeDefined();
   expect(aRow!.activity_status).toBe("active");
 });
@@ -46,7 +46,7 @@ test("resurrected dormant peer reports activity_status 'active' immediately", as
   const a2 = await register("activity-r-a", "/act-r-a");
   expect(a2.body.instance_token).toBe(a.body.instance_token);
   const peers = await listPeers(b.body.instance_token, "/act-r-b");
-  const aRow = peers.find((p) => p.instance_token === a.body.instance_token);
+  const aRow = peers.find((p) => p.peer_id === a.body.peer_id);
   expect(aRow).toBeDefined();
   expect(aRow!.activity_status).toBe("active");
 });

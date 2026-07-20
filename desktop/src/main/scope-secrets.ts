@@ -7,7 +7,8 @@
 // and the storage dir (userData) are injected by the caller (index.ts), which
 // keeps this module unit-testable under bun with a fake cipher + temp dir.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { writeFileAtomic } from './atomic-write'
 import { join } from 'node:path'
 
 /**
@@ -44,7 +45,8 @@ function readMap(dir: string): Record<string, string> {
 
 function writeMap(dir: string, map: Record<string, string>): void {
   mkdirSync(dir, { recursive: true })
-  writeFileSync(storePath(dir), JSON.stringify(map, null, 2), 'utf8')
+  // Atomic (temp + rename): a torn write would drop the remembered scope secrets.
+  writeFileAtomic(storePath(dir), JSON.stringify(map, null, 2))
 }
 
 /**

@@ -117,6 +117,20 @@ export function templateToInputs(tpl: SessionTemplate): TemplateInput[] {
   })
 }
 
+/**
+ * True when any session in the template carries a shell-bearing field — a
+ * `command` (which replaces the launch binary) or a free-form `args` string
+ * (appended verbatim to the login-shell command line). A repo-local template
+ * with either is treated as untrusted and gated behind operator approval before
+ * it can spawn (B4), mirroring the C19 launchCommand gate. `agent`/`model` are
+ * NOT shell-bearing here: they are allow-listed + quoted at spawn (B6).
+ */
+export function templateHasShellFields(tpl: SessionTemplate): boolean {
+  return tpl.sessions.some(
+    (s) => (s.command && s.command.trim() !== '') || (s.args && s.args.trim() !== '')
+  )
+}
+
 function isTemplateSession(v: unknown): v is TemplateSession {
   if (!v || typeof v !== 'object') return false
   const s = v as Record<string, unknown>

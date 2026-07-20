@@ -12,7 +12,7 @@ import type {
 import { PtyManager } from './pty-manager'
 import { resolvePeerId } from './peer-state'
 import { saveSessions } from './store'
-import { buildSessionCommandLine, type SpawnMode } from './session-command'
+import { buildSessionCommandLine, sanitizeFlagValue, type SpawnMode } from './session-command'
 import { ThinkingDetector, type ThinkingEvent } from './thinking'
 import {
   QuotaDetector,
@@ -225,15 +225,18 @@ export class SessionService extends EventEmitter {
 
   create(input: CreateSessionInput): SessionRuntime {
     const cfg = this.getConfig()
-    const agent = input.agent?.trim() || ''
-    const model = input.model?.trim() || ''
-    // Fold the structured agent/model choices into the persisted args so a fresh
-    // restart re-applies them; --effort is kept separate (re-passed on resume).
-    // The model value is quoted because the 1M-context form carries a `[1m]`
-    // suffix whose brackets would otherwise be glob-expanded by the login shell
-    // on Unix (`opus[1m]` matches a file named `opus1`/`opusm` in the cwd).
+    // B6: agent/model are structured identifiers that get interpolated into the
+    // login-shell command line, so they are allow-listed (sanitizeFlagValue) and
+    // double-quoted — a template- or companion-supplied `model: "x$(cmd)"` can no
+    // longer reach the shell. The double quotes also suppress `[1m]` glob
+    // expansion of the 1M-context model form. `input.args` stays a free-form
+    // shell fragment: after B4 (template approval) / B5 every path that reaches
+    // here is operator-authorized (advanced menu, approved template, trusted
+    // companion cred), so it is not further escaped.
+    const agent = sanitizeFlagValue(input.agent ?? '')
+    const model = sanitizeFlagValue(input.model ?? '')
     const args = [
-      agent ? `--agent ${agent}` : '',
+      agent ? `--agent "${agent}"` : '',
       model ? `--model "${model}"` : '',
       input.args?.trim() || ''
     ]

@@ -11,6 +11,7 @@ import {
   writeTemplate,
   readTemplate,
   deleteTemplate,
+  templateSource,
 } from "../desktop/src/main/template-store.ts";
 import { toTemplate, TEMPLATE_TYPE } from "../desktop/src/shared/template.ts";
 
@@ -106,4 +107,23 @@ test("deleteTemplate refuses a non-.json path and a missing file", () => {
   writeFileSync(notJson, "x", "utf-8");
   expect(deleteTemplate(notJson, proj, env(g))).toBe(false);
   expect(deleteTemplate(join(dir, "absent.json"), proj, env(g))).toBe(false);
+});
+
+// ----- templateSource containment (M-SEC-9) -----
+
+test("templateSource classifies allowed dirs and rejects out-of-tree paths", () => {
+  const g = tmp();
+  const proj = tmp();
+  const e = env(g);
+  const gPath = writeTemplate(globalTemplatesDir(e), "gt", toTemplate([{ name: "a" }], "gt"));
+  const lPath = writeTemplate(localTemplatesDir(proj), "lt", toTemplate([{ name: "b" }], "lt"));
+  expect(templateSource(gPath, proj, e)).toBe("global");
+  expect(templateSource(lPath, proj, e)).toBe("local");
+  // Arbitrary absolute path outside both dirs → rejected.
+  expect(templateSource(join(proj, "evil.json"), proj, e)).toBeNull();
+  expect(templateSource("/etc/passwd", proj, e)).toBeNull();
+  // A traversal that resolves outside the allowed dir → rejected.
+  expect(templateSource(join(globalTemplatesDir(e), "..", "escape.json"), proj, e)).toBeNull();
+  // Non-.json in an allowed dir → rejected.
+  expect(templateSource(join(globalTemplatesDir(e), "x.txt"), proj, e)).toBeNull();
 });

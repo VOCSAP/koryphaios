@@ -159,7 +159,11 @@ const api: DeckApi = {
   companionStart: () => ipcRenderer.invoke('companion:start'),
   companionStop: () => ipcRenderer.invoke('companion:stop'),
   companionStatus: () => ipcRenderer.invoke('companion:status'),
+  companionDevices: () => ipcRenderer.invoke('companion:devices'),
+  companionRevoke: (id: string) => ipcRenderer.invoke('companion:revoke', id),
+  companionRevokeAll: () => ipcRenderer.invoke('companion:revoke-all'),
   onCompanionChanged: (cb) => subscribe('companion:changed', cb),
+  onCompanionDeviceConnected: (cb) => subscribe('companion:device-connected', cb),
 
   onPtyData: (cb: (e: PtyDataEvent) => void) => onPtyDataMux(cb),
   onPtyExit: (cb: (e: PtyExitEvent) => void) => onPtyExitMux(cb),

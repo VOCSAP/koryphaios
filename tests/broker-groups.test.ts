@@ -62,10 +62,20 @@ test("list_peers is isolated by group", async () => {
   });
 
   // a's caller is in gA; should see b (also in gA), not c (in gB).
-  const tokens = list.body.map((p: any) => p.instance_token);
-  expect(tokens).toContain(b.body.instance_token);
-  expect(tokens).not.toContain(c.body.instance_token);
-  expect(tokens).not.toContain(a.body.instance_token); // self excluded
+  // B1: list_peers never exposes instance_token — identify peers by peer_id.
+  const ids = list.body.map((p: any) => p.peer_id);
+  expect(ids).toContain(b.body.peer_id);
+  expect(ids).not.toContain(c.body.peer_id);
+  expect(ids).not.toContain(a.body.peer_id); // self excluded
+  // The routing token AND the local PIDs must never cross the HTTP boundary.
+  expect(
+    list.body.every(
+      (p: any) =>
+        p.instance_token === undefined && p.pid === undefined && p.client_pid === undefined
+    )
+  ).toBe(true);
+  // The public peer_id is still present.
+  expect(list.body.every((p: any) => typeof p.peer_id === "string")).toBe(true);
 });
 
 test("send_message rejects cross-group routing", async () => {

