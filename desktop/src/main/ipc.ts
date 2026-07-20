@@ -1,5 +1,6 @@
 import { join } from 'node:path'
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, webContents } from 'electron'
+import { app, BrowserWindow, desktopCapturer, dialog, webContents } from 'electron'
+import { broadcast, regHandle, regOn } from './api-registry'
 import type {
   AppConfig,
   AssignResult,
@@ -132,46 +133,46 @@ export function registerIpc({
   brokerRetry
 }: IpcDeps): void {
   // ----- sessions -----
-  ipcMain.handle('sessions:list', () => service.list())
+  regHandle('sessions:list', () => service.list())
   // Worktree handling (PLAN C4) lives in the shared create path, also used by
   // the supervisor's deck-control spawn.
-  ipcMain.handle('sessions:create', (_e, input: CreateSessionInput) =>
+  regHandle('sessions:create', (_e, input: CreateSessionInput) =>
     createSessionWithWorktree(service, getConfig().projectDir, input ?? {}, checkpoint)
   )
-  ipcMain.handle('sessions:remove', (_e, id: string) => service.remove(id))
-  ipcMain.handle('sessions:rename', (_e, id: string, name: string) => service.rename(id, name))
-  ipcMain.handle('sessions:set-color', (_e, id: string, color: string) =>
+  regHandle('sessions:remove', (_e, id: string) => service.remove(id))
+  regHandle('sessions:rename', (_e, id: string, name: string) => service.rename(id, name))
+  regHandle('sessions:set-color', (_e, id: string, color: string) =>
     service.setColor(id, color)
   )
-  ipcMain.handle('sessions:restart', (_e, id: string) => service.restart(id))
-  ipcMain.handle('sessions:set-auto-resume', (_e, id: string, enabled: boolean) =>
+  regHandle('sessions:restart', (_e, id: string) => service.restart(id))
+  regHandle('sessions:set-auto-resume', (_e, id: string, enabled: boolean) =>
     service.setAutoResume(id, !!enabled)
   )
-  ipcMain.handle('sessions:set-lead', (_e, id: string) => service.setLead(id))
-  ipcMain.handle('sessions:peek-next-color', () => service.peekNextColor())
-  ipcMain.handle('sessions:reorder', (_e, ids: string[]) => service.reorder(ids ?? []))
+  regHandle('sessions:set-lead', (_e, id: string) => service.setLead(id))
+  regHandle('sessions:peek-next-color', () => service.peekNextColor())
+  regHandle('sessions:reorder', (_e, ids: string[]) => service.reorder(ids ?? []))
   // "New (clear)": save+detach the current workspace (while sessions still
   // exist) THEN close all sessions, returning the window to the empty state.
-  ipcMain.handle('app:new-clear', () => {
+  regHandle('app:new-clear', () => {
     workspaces.startNew()
     service.closeAll()
-    getWindow()?.webContents.send('workspace:current', null)
+    broadcast('workspace:current', null)
   })
 
   // ----- pty io (fire-and-forget) -----
-  ipcMain.on('pty:input', (_e, id: string, data: string) => service.write(id, data))
-  ipcMain.on('pty:resize', (_e, id: string, cols: number, rows: number) =>
+  regOn('pty:input', (_e, id: string, data: string) => service.write(id, data))
+  regOn('pty:resize', (_e, id: string, cols: number, rows: number) =>
     service.resize(id, cols, rows)
   )
 
   // ----- embedded browser (PLAN D1) -----
   // Absolute path of the guest preload injected into the <webview>. Built as a
   // second preload entry (electron.vite.config.ts) next to index.js.
-  ipcMain.handle('browser:preload-path', () => join(__dirname, '../preload/browser-inspect.js'))
+  regHandle('browser:preload-path', () => join(__dirname, '../preload/browser-inspect.js'))
 
   // Screenshot of the browser <webview> (draw mode, D1). The id must belong to
   // a webview hosted by OUR window — never an arbitrary webContents.
-  ipcMain.handle('browser:capture', async (_e, id: number) => {
+  regHandle('browser:capture', async (_e, id: number) => {
     const win = getWindow()
     const wc = typeof id === 'number' ? webContents.fromId(id) : undefined
     if (!win || !wc || wc.hostWebContents !== win.webContents) return null
@@ -186,7 +187,7 @@ export function registerIpc({
   // ----- window mirror (PLAN D2a) -----
   // List capturable OS windows/screens for the browser view's Window mode.
   // Thumbnails small on purpose: the picker only needs recognizable previews.
-  ipcMain.handle('design:list-windows', async () => {
+  regHandle('design:list-windows', async () => {
     const sources = await desktopCapturer.getSources({
       types: ['window', 'screen'],
       thumbnailSize: { width: 320, height: 200 },
@@ -199,7 +200,7 @@ export function registerIpc({
   // requesting a large bounding box yields a native-resolution, aspect-true
   // image without opening a getUserMedia stream (a still is also what the
   // annotation flow wants — the page can't move under the strokes).
-  ipcMain.handle('design:capture-window', async (_e, id: string) => {
+  regHandle('design:capture-window', async (_e, id: string) => {
     if (typeof id !== 'string' || !id) return null
     const sources = await desktopCapturer.getSources({
       types: ['window', 'screen'],
@@ -214,7 +215,7 @@ export function registerIpc({
   // Persist an annotated screenshot (page capture + operator strokes,
   // composited renderer-side) so the docked agent can Read the image file.
   // Kept under app state, pruned after 7 days (same policy as checkpoints).
-  ipcMain.handle('browser:save-annotation', (_e, dataUrl: string) => {
+  regHandle('browser:save-annotation', (_e, dataUrl: string) => {
     const PREFIX = 'data:image/png;base64,'
     if (typeof dataUrl !== 'string' || !dataUrl.startsWith(PREFIX)) return null
     const b64 = dataUrl.slice(PREFIX.length)
@@ -244,15 +245,15 @@ export function registerIpc({
   // The renderer never sees provider secrets: localProviders are sanitized to
   // a `hasKey` marker (C29). setConfig (index.ts) does the mirror encryption,
   // and returns the sanitized echo for the same reason.
-  ipcMain.handle('config:get', () => ({
+  regHandle('config:get', () => ({
     ...getConfig(),
     localProviders: sanitizeProviders(getConfig().localProviders ?? [])
   }))
-  ipcMain.handle('config:set', (_e, patch: Partial<AppConfig>) => ({
+  regHandle('config:set', (_e, patch: Partial<AppConfig>) => ({
     ...setConfig(patch ?? {}),
     localProviders: sanitizeProviders(getConfig().localProviders ?? [])
   }))
-  ipcMain.handle('dialog:pickDirectory', async () => {
+  regHandle('dialog:pickDirectory', async () => {
     const win = getWindow()
     const res = await dialog.showOpenDialog(win ?? undefined!, {
       properties: ['openDirectory', 'createDirectory'],
@@ -262,26 +263,26 @@ export function registerIpc({
   })
 
   // ----- i18n -----
-  ipcMain.handle('i18n:get', () => buildI18n(getConfig()))
+  regHandle('i18n:get', () => buildI18n(getConfig()))
 
   // ----- workspaces (persistence / restore) -----
-  ipcMain.handle('workspace:list', () => workspaces.listForCwd())
-  ipcMain.handle('workspace:save', (_e, name?: string) =>
+  regHandle('workspace:list', () => workspaces.listForCwd())
+  regHandle('workspace:save', (_e, name?: string) =>
     name && name.trim() ? workspaces.saveNamed(name) : workspaces.saveAuto()
   )
-  ipcMain.handle('workspace:restore', (_e, id: string) => {
+  regHandle('workspace:restore', (_e, id: string) => {
     const ok = workspaces.restore(id)
     if (ok) {
       const current = workspaces.listForCwd().find((w) => w.current) ?? null
-      getWindow()?.webContents.send('workspace:current', current)
+      broadcast('workspace:current', current)
     }
     return ok
   })
-  ipcMain.handle('workspace:delete', (_e, id: string) => workspaces.deleteWs(id))
-  ipcMain.handle('workspace:current', () => workspaces.currentWorkspaceId)
+  regHandle('workspace:delete', (_e, id: string) => workspaces.deleteWs(id))
+  regHandle('workspace:current', () => workspaces.currentWorkspaceId)
 
   // ----- announce (outbound megaphone) -----
-  ipcMain.handle('announce:send', (_e, text: string) => announce(text ?? ''))
+  regHandle('announce:send', (_e, text: string) => announce(text ?? ''))
 
   // ----- roadmap (shared per-project backlog, PLAN C3) -----
   // Endpoint + project key are resolved per call: cheap (config file read + one
@@ -291,25 +292,25 @@ export function registerIpc({
     endpoint: resolveBrokerEndpoint(),
     key: computeDeckProjectKey(getConfig().projectDir)
   })
-  ipcMain.handle('roadmap:list', (_e, filters: RoadmapListFilters) => {
+  regHandle('roadmap:list', (_e, filters: RoadmapListFilters) => {
     const { endpoint, key } = roadmapCtx()
     return listRoadmap(endpoint, key, filters ?? {})
   })
-  ipcMain.handle('roadmap:upsert', (_e, fields: RoadmapUpsertFields) => {
+  regHandle('roadmap:upsert', (_e, fields: RoadmapUpsertFields) => {
     const { endpoint, key } = roadmapCtx()
     return upsertRoadmap(endpoint, key, fields ?? {})
   })
-  ipcMain.handle('roadmap:archive', (_e, id: string) => {
+  regHandle('roadmap:archive', (_e, id: string) => {
     const { endpoint } = roadmapCtx()
     return archiveRoadmap(endpoint, id)
   })
   // Queue dispatch (PLAN C15): first queued item -> targeted announce to the
   // team-lead. The renderer greys the button when no lead is designated.
-  ipcMain.handle('roadmap:dispatch', () => dispatchNext())
+  regHandle('roadmap:dispatch', () => dispatchNext())
   // Operator stop (PLAN K3): notify the agents, release the lock.
-  ipcMain.handle('roadmap:stop', (_e, id: string) => stopRoadmapItem(id))
+  regHandle('roadmap:stop', (_e, id: string) => stopRoadmapItem(id))
   // Direct assignment (PLAN K6): "process now" on one chosen live peer.
-  ipcMain.handle('roadmap:assign', (_e, id: string, peerId: string) =>
+  regHandle('roadmap:assign', (_e, id: string, peerId: string) =>
     assignRoadmapItem(id, peerId)
   )
   // Utility-inference deps (lot A): the help/wand/digest flows share one
@@ -326,7 +327,7 @@ export function registerIpc({
   // haiku default) drafts the item's context field grounded in the project
   // files. The result only fills the editor textarea -- saving stays an
   // explicit operator action.
-  ipcMain.handle('roadmap:wand', (_e, draft: WandDraft) =>
+  regHandle('roadmap:wand', (_e, draft: WandDraft) =>
     runUtilityInference(utilityDeps(), {
       target: getConfig().wandTarget,
       system: WAND_SYSTEM_PROMPT,
@@ -338,11 +339,11 @@ export function registerIpc({
   )
 
   // ----- worktrees (PLAN C4/C6) -----
-  ipcMain.handle('worktree:remove', async (_e, path: string) => {
+  regHandle('worktree:remove', async (_e, path: string) => {
     await removeWorktree(getConfig().projectDir, path)
     journal.add('worktree', `worktree removed: ${path}`)
   })
-  ipcMain.handle('worktree:list', async () => {
+  regHandle('worktree:list', async () => {
     const worktrees = await listWorktrees(getConfig().projectDir)
     const sessions = service.list().filter((s) => s.status !== 'exited')
     return Promise.all(
@@ -360,7 +361,7 @@ export function registerIpc({
       })
     )
   })
-  ipcMain.handle('worktree:create', async (_e, branch: string) => {
+  regHandle('worktree:create', async (_e, branch: string) => {
     const wt = await createWorktree(getConfig().projectDir, branch ?? '')
     const init = resolveLaunchConfig(getConfig().projectDir).worktreeInit
     if (init) runWorktreeInit(wt.path, init)
@@ -382,12 +383,12 @@ export function registerIpc({
       return null
     }
   }
-  ipcMain.handle('diff:collect', async (_e, dir: string) =>
+  regHandle('diff:collect', async (_e, dir: string) =>
     collectDiff(dir, await diffBase(dir))
   )
   // One-shot review agent (C7 pattern, code-constant prompt): reads the diff
   // in place and reports to the team-lead peer (C10) when one is live.
-  ipcMain.handle('diff:review', async (_e, dir: string) => {
+  regHandle('diff:review', async (_e, dir: string) => {
     const lead =
       service.list().find((s) => s.lead && s.status !== 'exited' && s.peerId)?.peerId ?? null
     await createSessionWithWorktree(
@@ -406,11 +407,11 @@ export function registerIpc({
   })
 
   // ----- activity journal (PLAN C14) -----
-  ipcMain.handle('journal:list', (_e, kind?: string | null) =>
+  regHandle('journal:list', (_e, kind?: string | null) =>
     journal.list((kind as JournalKind) || null)
   )
   // Plain-text export via a save dialog; returns the written path or null.
-  ipcMain.handle('journal:export', async () => {
+  regHandle('journal:export', async () => {
     const win = getWindow()
     const res = await dialog.showSaveDialog(win ?? undefined!, {
       defaultPath: join(getConfig().projectDir, 'deck-journal.txt'),
@@ -427,13 +428,13 @@ export function registerIpc({
   })
 
   // ----- broker reachability (PLAN O5) -----
-  ipcMain.handle('broker:status', () => brokerStatus())
-  ipcMain.handle('broker:retry', () => brokerRetry())
+  regHandle('broker:status', () => brokerStatus())
+  regHandle('broker:retry', () => brokerRetry())
 
   // ----- renderer error reporting (PLAN O4) -----
   // ErrorBoundaries and the window-level error/unhandledrejection handlers
   // forward here so renderer failures reach main.log + the journal.
-  ipcMain.on('app:report-error', (_e, scope: unknown, message: unknown) => {
+  regOn('app:report-error', (_e, scope: unknown, message: unknown) => {
     reportError(
       typeof scope === 'string' ? `renderer:${scope}` : 'renderer',
       typeof message === 'string' ? message.slice(0, 2000) : String(message)
@@ -441,12 +442,12 @@ export function registerIpc({
   })
 
   // ----- supervisor (PLAN C5) -----
-  ipcMain.handle('supervisor:ensure', () => ensureSupervisor())
+  regHandle('supervisor:ensure', () => ensureSupervisor())
 
   // ----- plan import (PLAN C7) -----
   // File picker + one-shot import agent (code-constant prompt). Returns true
   // when an agent was spawned, false when the picker was cancelled.
-  ipcMain.handle('roadmap:import-plan', async () => {
+  regHandle('roadmap:import-plan', async () => {
     const win = getWindow()
     const res = await dialog.showOpenDialog(win ?? undefined!, {
       properties: ['openFile'],
@@ -519,7 +520,7 @@ export function registerIpc({
     )
     return { roadmap_items: roadmap, sessions, git_worktrees: worktrees }
   }
-  ipcMain.handle(
+  regHandle(
     'help:ask',
     async (_e, question: string, view: string, transcript: HelpExchange[]) =>
       runUtilityInference(utilityDeps(), {
@@ -536,7 +537,7 @@ export function registerIpc({
   // (readDigestConfig has no projectDir input by design — a repo-carried
   // command list would execute arbitrary code on clone); commands still run
   // with cwd = projectDir so generic sources adapt per project.
-  ipcMain.handle('help:digest', async () => {
+  regHandle('help:digest', async () => {
     const projectDir = getConfig().projectDir
     const cfg = readDigestConfig()
     const { key } = roadmapCtx()
@@ -554,22 +555,22 @@ export function registerIpc({
   })
 
   // ----- create-menu data -----
-  ipcMain.handle('agents:list', () => listAgents(getConfig().projectDir))
-  ipcMain.handle('launch:get', () => resolveLaunchConfig(getConfig().projectDir))
-  ipcMain.handle('launch:set-global', (_e, cfg: LaunchConfig) => saveGlobalConfig(cfg))
+  regHandle('agents:list', () => listAgents(getConfig().projectDir))
+  regHandle('launch:get', () => resolveLaunchConfig(getConfig().projectDir))
+  regHandle('launch:set-global', (_e, cfg: LaunchConfig) => saveGlobalConfig(cfg))
 
   // ----- templates (portable team recipes) -----
-  ipcMain.handle('template:list', () => listTemplates(getConfig().projectDir))
-  ipcMain.handle('template:export', (_e, name: string, local: boolean) => {
+  regHandle('template:list', () => listTemplates(getConfig().projectDir))
+  regHandle('template:export', (_e, name: string, local: boolean) => {
     // captureSessions() carries cwd; toTemplate strips it (and id/sessionId).
     const tpl = toTemplate(service.captureSessions(), name)
     const dir = local ? localTemplatesDir(getConfig().projectDir) : globalTemplatesDir()
     return writeTemplate(dir, name || tpl.name || 'template', tpl)
   })
-  ipcMain.handle('template:delete', (_e, path: string) =>
+  regHandle('template:delete', (_e, path: string) =>
     deleteTemplate(path, getConfig().projectDir)
   )
-  ipcMain.handle('template:apply', async (_e, path: string, mode: 'append' | 'replace') => {
+  regHandle('template:apply', async (_e, path: string, mode: 'append' | 'replace') => {
     const tpl = readTemplate(path)
     if (!tpl) return 0
     const inputs = templateToInputs(tpl)
@@ -579,7 +580,7 @@ export function registerIpc({
       // Detach + auto-save the current workspace, then clear (mirrors New clear).
       workspaces.startNew()
       service.closeAll()
-      getWindow()?.webContents.send('workspace:current', null)
+      broadcast('workspace:current', null)
     }
     // The template's lead becomes the window's ONLY when no lead exists yet
     // (PLAN C18) — applying a team must not silently steal the crown.
@@ -600,14 +601,14 @@ export function registerIpc({
   // ----- snippets (reusable prompts, PLAN C22) -----
   // Fill-not-send: the renderer pastes the text into a session's input field;
   // the main process only stores/lists .md files (project > global scope).
-  ipcMain.handle('snippet:list', () => listSnippets(getConfig().projectDir))
-  ipcMain.handle('snippet:save', (_e, name: string, local: boolean, text: string) => {
+  regHandle('snippet:list', () => listSnippets(getConfig().projectDir))
+  regHandle('snippet:save', (_e, name: string, local: boolean, text: string) => {
     if (typeof name !== 'string' || !name.trim()) throw new Error('snippet name is required')
     if (typeof text !== 'string' || !text.trim()) throw new Error('snippet text is required')
     const dir = local ? localSnippetsDir(getConfig().projectDir) : globalSnippetsDir()
     return writeSnippet(dir, name, text)
   })
-  ipcMain.handle('snippet:delete', (_e, path: string) =>
+  regHandle('snippet:delete', (_e, path: string) =>
     deleteSnippet(path, getConfig().projectDir)
   )
 
@@ -622,7 +623,7 @@ export function registerIpc({
   // Model catalogs for the pickers (C29): frontier CLIs detected through the
   // login shell (cached for the app run), local endpoints discovered live.
   // Keys are decrypted in memory here only — the catalog sent back carries none.
-  ipcMain.handle('models:catalog', (_e, refresh?: boolean) =>
+  regHandle('models:catalog', (_e, refresh?: boolean) =>
     getCatalogs(
       decryptProviders(getConfig().localProviders ?? [], secretCipher),
       getConfig().shell,
@@ -630,14 +631,14 @@ export function registerIpc({
     )
   )
 
-  ipcMain.handle('graph:list', () => {
+  regHandle('graph:list', () => {
     const { stateDir, key } = graphCtx()
     // Opportunistic K8 migration: a pre-encryption clear file is rewritten
     // encrypted the first time the view lists it (cheap no-op afterwards).
     migrateGraphsAtRest(stateDir, key, secretCipher)
     return loadGraphs(stateDir, key, secretCipher)
   })
-  ipcMain.handle('graph:create', (_e, name: string) => {
+  regHandle('graph:create', (_e, name: string) => {
     const { stateDir, key } = graphCtx()
     const doc: GraphDoc = {
       id: graphDocId(),
@@ -648,23 +649,23 @@ export function registerIpc({
     }
     return upsertGraph(stateDir, key, doc, secretCipher)
   })
-  ipcMain.handle('graph:delete', (_e, id: string) => {
+  regHandle('graph:delete', (_e, id: string) => {
     const { stateDir, key } = graphCtx()
     return deleteGraph(stateDir, key, id, secretCipher)
   })
-  ipcMain.handle('graph:save', (_e, raw: unknown) => {
+  regHandle('graph:save', (_e, raw: unknown) => {
     const doc = parseGraphDoc(raw)
     if (!doc) return null
     const { stateDir, key } = graphCtx()
     return upsertGraph(stateDir, key, doc, secretCipher)
   })
-  ipcMain.handle('graph:compile', (_e, graphId: string, nodeId: string) => {
+  regHandle('graph:compile', (_e, graphId: string, nodeId: string) => {
     const { stateDir, key } = graphCtx()
     const doc = loadGraphs(stateDir, key, secretCipher).find((d) => d.id === graphId)
     if (!doc) throw new Error('unknown graph')
     return compileContext(doc, nodeId)
   })
-  ipcMain.handle('graph:infer', async (_e, graphId: string, req: InferRequest) => {
+  regHandle('graph:infer', async (_e, graphId: string, req: InferRequest) => {
     const { stateDir, key } = graphCtx()
     // Re-read from disk: the renderer may have saved node moves meanwhile.
     const doc = loadGraphs(stateDir, key, secretCipher).find((d) => d.id === graphId)
@@ -685,7 +686,7 @@ export function registerIpc({
   // Open a pending graph draft (operator click on the inbox card): create a
   // graph doc whose single user node carries the pre-filled prompt — nothing
   // is submitted, inference stays the manual circuit of the graph view.
-  ipcMain.handle('graphDraft:open', async (_e, draft: DeckGraphDraft) => {
+  regHandle('graphDraft:open', async (_e, draft: DeckGraphDraft) => {
     if (!draft || typeof draft.id !== 'string' || typeof draft.prompt !== 'string') {
       throw new Error('invalid draft')
     }
@@ -722,13 +723,13 @@ export function registerIpc({
 
   // Persisted operator-inbox history (startup hydration; drain is destructive
   // broker-side, so this file is the only durable copy).
-  ipcMain.handle('inbox:history', () =>
+  regHandle('inbox:history', () =>
     loadInboxHistory(join(app.getPath('userData'), APP_STATE_SUBDIR))
   )
 
   // ----- template composer (PLAN C18): read/write without spawning -----
-  ipcMain.handle('template:read', (_e, path: string) => readTemplate(path))
-  ipcMain.handle('template:write', (_e, name: string, local: boolean, tpl: unknown) => {
+  regHandle('template:read', (_e, path: string) => readTemplate(path))
+  regHandle('template:write', (_e, name: string, local: boolean, tpl: unknown) => {
     // parseTemplate validates the shape AND normalizes lead uniqueness.
     const parsed = parseTemplate(tpl)
     if (!parsed) throw new Error('invalid template')
@@ -737,14 +738,11 @@ export function registerIpc({
     return writeTemplate(dir, name || parsed.name || 'template', parsed)
   })
 
-  // ----- forward service events to the renderer -----
-  const send = (channel: string, payload: unknown): void => {
-    getWindow()?.webContents.send(channel, payload)
-  }
-  service.on('data', (e) => send('pty:data', e))
-  service.on('exit', (e) => send('pty:exit', e))
-  service.on('changed', (sessions) => send('sessions:changed', sessions))
-  service.on('thinking', (e) => send('session:thinking', e))
-  service.on('quota', (e) => send('session:quota', e))
-  service.on('attention', (e) => send('session:attention', e))
+  // ----- forward service events to every surface (window + companion, MB1) -----
+  service.on('data', (e) => broadcast('pty:data', e))
+  service.on('exit', (e) => broadcast('pty:exit', e))
+  service.on('changed', (sessions) => broadcast('sessions:changed', sessions))
+  service.on('thinking', (e) => broadcast('session:thinking', e))
+  service.on('quota', (e) => broadcast('session:quota', e))
+  service.on('attention', (e) => broadcast('session:attention', e))
 }

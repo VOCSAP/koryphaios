@@ -156,6 +156,11 @@ const api: DeckApi = {
   graphDraftOpen: (draft) => ipcRenderer.invoke('graphDraft:open', draft),
   inboxHistory: () => ipcRenderer.invoke('inbox:history'),
 
+  companionStart: () => ipcRenderer.invoke('companion:start'),
+  companionStop: () => ipcRenderer.invoke('companion:stop'),
+  companionStatus: () => ipcRenderer.invoke('companion:status'),
+  onCompanionChanged: (cb) => subscribe('companion:changed', cb),
+
   onPtyData: (cb: (e: PtyDataEvent) => void) => onPtyDataMux(cb),
   onPtyExit: (cb: (e: PtyExitEvent) => void) => onPtyExitMux(cb),
   onSessionsChanged: (cb: (sessions: SessionRuntime[]) => void) =>

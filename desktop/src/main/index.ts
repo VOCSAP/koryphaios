@@ -47,6 +47,8 @@ import { Journal } from './journal'
 import { flushJournalSnapshot, initDeckLog, logInfo, onDeckError, reportError } from './log'
 import { startDeckControl, type DeckControlDeps, type DeckControlServer } from './deck-control'
 import { startDesignEndpoint, type DesignEndpoint } from './design-endpoint'
+import { addEventSink, broadcast, regHandle } from './api-registry'
+import { CompanionServer } from './companion-server'
 import {
   SUPERVISOR_BRIEFING,
   SUPERVISOR_NAME,
@@ -69,6 +71,10 @@ import {
 import { templateToInputs, toTemplate } from '@shared/template'
 
 let mainWindow: BrowserWindow | null = null
+// The desktop window is the first event sink (PLAN MB1): state events emitted
+// through broadcast() reach it exactly like the old direct sends, plus every
+// authenticated companion client.
+addEventSink((channel, payload) => mainWindow?.webContents.send(channel, payload))
 
 // Pin the app-data folder on the "koryphaios" root (v0.7 rename; previously
 // "claude-peers-desk", and before that userData lived in "claude-peers-deck").
@@ -185,7 +191,7 @@ const setConfig = (patch: Partial<AppConfig>): AppConfig => {
   config = { ...config, ...patch }
   saveConfig(config)
   nativeTheme.themeSource = config.theme
-  mainWindow?.webContents.send('config:changed', sanitizeConfigForRenderer(config))
+  broadcast('config:changed', sanitizeConfigForRenderer(config))
   return config
 }
 
@@ -327,7 +333,7 @@ const pendingInboxWrites: { id: number; from: string; text: string; sentAt: stri
 const brokerHealth = new BrokerHealthTracker((status) => {
   if (status.up) logInfo('broker', 'broker reachable again')
   else reportError('broker', `broker unreachable: ${status.lastError ?? 'unknown error'}`)
-  mainWindow?.webContents.send('broker:status', status)
+  broadcast('broker:status', status)
 })
 
 const notifyInbox = (batch: { from: string; text: string }[]): void => {
@@ -375,7 +381,7 @@ const pollOperatorInbox = async (): Promise<void> => {
       reportError('inbox', `history write failed (${toPersist.length} message(s) queued for retry)`, e)
     })
     if (failed) pendingInboxWrites.push(...toPersist)
-    mainWindow?.webContents.send('inbox:new', batch)
+    broadcast('inbox:new', batch)
     notifyInbox(batch)
   } catch (e) {
     // Broker down / unreachable: the next tick retries; the health tracker
@@ -407,7 +413,7 @@ const pollGraphDrafts = async (): Promise<void> => {
     const signature = list.map((d) => d.id).join(',')
     if (signature !== lastDraftSignature) {
       lastDraftSignature = signature
-      mainWindow?.webContents.send('graphDrafts:update', list)
+      broadcast('graphDrafts:update', list)
     }
     const fresh = list.filter((d) => !notifiedDraftIds.has(d.id))
     for (const d of fresh) notifiedDraftIds.add(d.id)
@@ -708,6 +714,7 @@ const controlDeps: DeckControlDeps = {
 }
 
 let controlServer: DeckControlServer | null = null
+let companionServer: CompanionServer | null = null
 
 /**
  * Return the live supervisor session, resume an exited one, or spawn it:
@@ -798,7 +805,7 @@ service.on('changed', (sessions: unknown[]) => {
     try {
       const summary = workspaces.saveAuto()
       // Keep the renderer's window title in sync with the current workspace.
-      mainWindow?.webContents.send('workspace:current', summary)
+      broadcast('workspace:current', summary)
     } catch (e) {
       reportError('workspace', 'auto-save failed', e)
     }
@@ -916,6 +923,23 @@ app.whenReady().then(() => {
       designServer = srv
     })
     .catch((e) => reportError('design', 'design endpoint failed to start', e))
+  // Companion server (PLAN MB1/MB2): LAN bridge, started only by the operator
+  // via the 📱 button. Ephemeral by design — quitting the app revokes it.
+  companionServer = new CompanionServer({
+    staticDir: join(__dirname, '../renderer'),
+    stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
+    journal: (msg) => journal.add('session', msg),
+    onStatus: (info) => broadcast('companion:changed', info)
+  })
+  regHandle('companion:start', async () => {
+    const info = await companionServer!.start()
+    return info
+  })
+  regHandle('companion:stop', async () => {
+    await companionServer!.stop()
+    return companionServer!.info
+  })
+  regHandle('companion:status', () => companionServer!.info)
   registerIpc({
     service,
     workspaces,
@@ -974,5 +998,8 @@ app.on('before-quit', () => {
   workspaces.releaseOnQuit()
   service.stop()
   controlServer?.close()
+  // Ephemeral companion mode (MB2): closing the app IS the revocation — the
+  // phone sees the socket drop and shows "host disconnected".
+  void companionServer?.stop(true)
   activeScopeEnv.cleanup()
 })

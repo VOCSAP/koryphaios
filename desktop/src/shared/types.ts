@@ -595,6 +595,16 @@ export interface SessionQuotaEvent {
 }
 
 /** The typed surface exposed on `window.api` by the preload script. */
+/** Companion LAN bridge status (PLAN MB1/MB2), main ⇄ renderer. */
+export interface CompanionInfo {
+  running: boolean
+  /** https URL of the served UI (no token — the QR appends `#t=`). */
+  url: string | null
+  /** Pairing token to embed in the QR; null once consumed or stopped. */
+  pairingToken: string | null
+  clients: number
+}
+
 export interface DeckApi {
   // sessions
   listSessions(): Promise<SessionRuntime[]>
@@ -767,6 +777,13 @@ export interface DeckApi {
   graphDraftOpen(draft: DeckGraphDraft): Promise<GraphDraftOpenResult>
   /** Persisted operator-inbox history (oldest first) for startup hydration. */
   inboxHistory(): Promise<InboxMessage[]>
+
+  // companion LAN bridge (PLAN MB1/MB2) — desktop window only; a remote
+  // client gets 'remote-blocked' on all three (physical-presence actions).
+  companionStart(): Promise<CompanionInfo>
+  companionStop(): Promise<CompanionInfo>
+  companionStatus(): Promise<CompanionInfo>
+  onCompanionChanged(cb: (info: CompanionInfo) => void): () => void
 
   // events (return an unsubscribe fn)
   onPtyData(cb: (e: PtyDataEvent) => void): () => void

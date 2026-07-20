@@ -1,5 +1,47 @@
 # Changelog
 
+## desktop v0.12.0 (experimental) — companion LAN access (PLAN-mobile-lan MB1–MB6)
+
+LAN-only mobile access to the desktop window, per `EXPLORATION-mobile-lan.md`
+and `PLAN-mobile-lan.md`. The renderer is web-remoted, not pixel-streamed: the
+main process serves the SAME renderer bundle over HTTPS+WebSocket and a
+generated shim replaces `window.api` on the phone, so terminals, roadmap,
+inbox and the rest run natively in the mobile browser/WebView. **The desktop
+window is behaviorally unchanged** — every mobile behavior is derived and gated
+on a remote coarse-pointer client (`.is-mobile`), never on window width.
+
+### Added (desktop, v0.12.0)
+- **Companion bridge (MB1).** `shared/companion.ts` (pure, bun-tested) declares
+  the DeckApi surface as data (`COMPANION_MANIFEST`, `satisfies` 1:1 with
+  DeckApi), the wire frames, the LAN-only guard (`isPrivateAddress`,
+  RFC1918/ULA/CGNAT), the single-use-token→credential lifecycle
+  (`CompanionAuth`) and the declarative sensitivity tiers (§5.4).
+  `main/api-registry.ts` routes every `ipcMain.handle/on` through one table
+  serving both Electron IPC and the WS bridge, with `broadcast()` fanning
+  state events to the window AND every client. `main/companion-server.ts`
+  is the HTTPS+WS server (persistent self-signed cert, anti-bruteforce
+  lockout, heartbeat). `renderer/src/remote-api.ts` is the WS `window.api`
+  shim (reconnect, host-death watchdog, light/full channel).
+- **Compagnon button + pairing (MB2).** A 📱 rail button (desktop only) opens
+  a QR-code dialog (`CompanionDialog.tsx`); one-shot token bound to the app
+  run, exchanged for a per-run credential; closing the app revokes everything
+  (ephemeral session model, §5.5).
+- **Mobile shell (MB3).** Bottom-tab nav (`MobileNav`), bottom sheets
+  (`MobileSheet`), agents pager with session chips + xterm key bar
+  (`MobileAgents`/`KeyBar`), `visualViewport` refit. Same stores/IPC, CSS
+  gated on `.is-mobile`.
+- **Mobile roadmap + floating basket (MB4).** `RoadmapList.tsx`: one column
+  at a time (status tabs + counters), action sheet mirroring the desktop
+  right-click menu, and the long-press→seize→detach floating basket
+  (`shared/hold-gesture.ts`, bun-tested). Same five roadmap IPC calls.
+- **Light background channel (MB5).** Backgrounded clients drop `pty:data`/
+  `session:thinking`, keep the signal events; `bufferedAmount` backpressure
+  guard on the terminal stream.
+- **Android shell scaffold (MB6).** `mobile-shell/` — thin Capacitor shell
+  (QR scan → WebView on the host URL), with the native TODOs (foreground
+  service, biometric app lock + `FLAG_SECURE`, cert pinning) documented. Not
+  built here (needs Android SDK); never bundled into the desktop package.
+
 ## core v0.9.0 + desktop v0.11.0 -- 2026-07-19
 
 Error observability (PLAN-observabilite-erreurs O1-O6, plan retired into this

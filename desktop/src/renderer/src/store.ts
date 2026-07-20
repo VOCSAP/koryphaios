@@ -11,6 +11,7 @@ import type {
   TemplateSummary,
   WorkspaceSummary
 } from '@shared/types'
+import { onRemoteRefresh, onRemoteState, remoteInstalled, type RemoteState } from './remote-api'
 
 interface DeckState {
   sessions: SessionRuntime[]
@@ -80,9 +81,24 @@ interface DeckState {
   initError: string | null
   /** Broker reachability (PLAN O5): null until main reports, drives the banner. */
   brokerStatus: BrokerStatusEvent | null
+  /** Companion mode (PLAN MB1): window.api is the WebSocket shim, not Electron. */
+  remote: boolean
+  /**
+   * Mobile layout (PLAN MB3): ONLY ever true for a remote client on a coarse
+   * pointer / narrow screen. The Electron window NEVER flips this — desktop
+   * behavior is untouched even at narrow widths (mobile derivation rule).
+   */
+  mobile: boolean
+  /** Remote link health (drives the "host disconnected" overlay). */
+  remoteLink: RemoteState | null
+  /** Compagnon dialog visibility (PLAN MB2, desktop window only). */
+  companionOpen: boolean
+  /** True while the companion LAN server is up (rail glyph glow). */
+  companionRunning: boolean
 
   init(): Promise<void>
   setView(view: DeckView): void
+  openCompanion(open: boolean): void
   /** Open the browser view, optionally docking a session next to it (D1). */
   openBrowser(pairedId?: string | null): void
   /** Change/detach the docked session without leaving the browser view. */
@@ -199,9 +215,29 @@ export const useDeck = create<DeckState>((set, get) => ({
   browserOpened: false,
   initError: null,
   brokerStatus: null,
+  remote: false,
+  mobile: false,
+  remoteLink: null,
+  companionOpen: false,
+  companionRunning: false,
 
   async init() {
-    set({ initError: null })
+    // Companion mode flags (PLAN MB1/MB3): computed once — the desktop window
+    // can never become 'mobile' (remote is the hard precondition).
+    const remote = remoteInstalled()
+    const mobile =
+      remote &&
+      (window.matchMedia?.('(pointer: coarse)').matches === true || window.innerWidth < 700)
+    set({ initError: null, remote, mobile, remoteLink: remote ? 'connected' : null })
+    if (remote) {
+      onRemoteState((s) => set({ remoteLink: s }))
+      // Light→full resume or reconnect (MB5): re-hydrate what push events may
+      // have missed while the stream was down.
+      onRemoteRefresh(() => {
+        void window.api.listSessions().then((sessions) => set({ sessions }))
+        void window.api.getBrokerStatus().then((status) => set({ brokerStatus: status }))
+      })
+    }
     let sessions: SessionRuntime[]
     let config: AppConfig
     let i18n: Awaited<ReturnType<typeof window.api.getI18n>>
@@ -297,6 +333,16 @@ export const useDeck = create<DeckState>((set, get) => ({
     // state fetched once (covers a reloaded renderer during an outage).
     window.api.onBrokerStatus((status) => set({ brokerStatus: status }))
     void window.api.getBrokerStatus().then((status) => set({ brokerStatus: status }))
+    // Companion server status (PLAN MB2): rail glyph glow while it runs. A
+    // remote client is 'remote-blocked' on the status invoke — the event push
+    // still keeps its flag honest (harmlessly unused there).
+    window.api.onCompanionChanged((info) => set({ companionRunning: info.running }))
+    if (!remote) {
+      void window.api
+        .companionStatus()
+        .then((info) => set({ companionRunning: info.running }))
+        .catch(() => undefined)
+    }
     window.api.onConfigChanged((next) => {
       const prevLocale = get().config?.locale
       set({ config: next })
@@ -308,6 +354,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   },
 
   setView: (view) => set({ view, ...(view === 'browser' ? { browserOpened: true } : null) }),
+  openCompanion: (open) => set({ companionOpen: open }),
   openBrowser: (pairedId) =>
     set((s) => ({
       view: 'browser',

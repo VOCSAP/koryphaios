@@ -26,9 +26,19 @@ export function NavRail(): React.JSX.Element {
   // drafts-only (an action is awaited, not just a message to read).
   const badge = inboxUnread + draftCount
 
+  const remote = useDeck((s) => s.remote)
+  const companionOpen = useDeck((s) => s.companionOpen)
+  const openCompanion = useDeck((s) => s.openCompanion)
+  const companionRunning = useDeck((s) => s.companionRunning)
+
+  // The embedded browser is a <webview>, Electron-only — hidden for a remote
+  // client (EXPLORATION §3); the Compagnon button is a physical-presence
+  // action, desktop window only.
+  const views = remote ? VIEWS.filter((v) => v.id !== 'browser') : VIEWS
+
   return (
     <nav className="nav-rail">
-      {VIEWS.map((v) => (
+      {views.map((v) => (
         <button
           key={v.id}
           className={`nav-rail-item${view === v.id ? ' is-active' : ''}`}
@@ -40,6 +50,16 @@ export function NavRail(): React.JSX.Element {
         </button>
       ))}
       <div className="nav-rail-spacer" />
+      {!remote && (
+        <button
+          className={`nav-rail-item${companionOpen ? ' is-active' : ''}${companionRunning ? ' is-glowing' : ''}`}
+          title={t('companion.title')}
+          onClick={() => openCompanion(!companionOpen)}
+        >
+          <span className="nav-rail-icon">📱</span>
+          <span className="nav-rail-label">{t('companion.title')}</span>
+        </button>
+      )}
       {/* Operator inbox (PLAN C12): overlay panel, not a view. */}
       <button
         className={`nav-rail-item${inboxOpen ? ' is-active' : ''}${draftCount > 0 ? ' is-glowing' : ''}`}

@@ -1,6 +1,6 @@
 {
   "name": "koryphaios",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Koryphaios — the chorus leader: a desktop orchestrator docking multiple Claude Code agent sessions (peers, roadmap, worktrees, embedded browser) in a single window",
   "main": "out/main/index.js",
   "author": "vocsap",
@@ -28,13 +28,17 @@
     "package:linux": "npm run build && electron-builder --linux"
   },
   "dependencies": {
-    "node-pty": "1.1.0"
+    "node-pty": "1.1.0",
+    "qrcode-generator": "^2.0.4",
+    "selfsigned": "^5.5.0",
+    "ws": "^8.21.1"
   },
   "devDependencies": {
     "@electron/rebuild": "^4.2.0",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^5.2.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
