@@ -180,9 +180,12 @@ est soit totalement compatible, soit dégradable proprement.
 
 - **Multi-fenêtre implicite** : quelques endroits du main supposent UNE
   `mainWindow` (focus de session, `render-process-gone`, dialogues
-  d'approbation `launch-approval.ts`). L'approbation one-time d'un
-  `launchCommand` projet doit **rester sur le PC** (ne jamais approuver depuis
-  le mobile un code que seul l'écran du PC permet d'auditer) — au minimum en v1.
+  d'approbation `launch-approval.ts`). Les dialogues d'approbation sont
+  aujourd'hui des dialogues natifs attachés à la fenêtre — à re-router en
+  événement DeckApi (question + réponse) pour qu'ils puissent être rendus
+  indifféremment sur le PC ou sur un mobile apparié « opérateur » (§5.3) ;
+  le texte intégral du `launchCommand` à approuver s'affiche aussi bien sur
+  un téléphone que sur le PC.
 - **Backpressure `pty:data`** : sur le LAN Wi-Fi, un `cat` d'un gros fichier
   peut saturer le WS ; prévoir un cap/coalescing par session côté bridge
   (précédent direct : le flush WS cappé du broker, mécanique B de v0.3.3).
@@ -227,17 +230,20 @@ donc, fonctionnellement, un accès shell distant.** Le modèle de menace n'est
 pas « quelqu'un lit ma roadmap », c'est « quelqu'un sur mon Wi-Fi exécute du
 code sur mon PC ».
 
-Exigences minimales (toutes déjà partiellement outillées dans le code) :
+### 5.1 Socle minimal (non négociable)
+
+Toutes ces briques sont déjà partiellement outillées dans le code :
 
 1. **Off par défaut.** Le serveur LAN ne démarre que sur action explicite
    (Settings > « Accès mobile » ou bouton dédié), et l'état est visible en
    permanence dans la fenêtre PC (badge « 📱 accès mobile actif »).
-2. **Appairage par token éphémère + QR code.** Le main mint un token (32
-   octets aléatoires — même primitive que `deck-control.ts`), l'affiche en QR
-   `https://<ip-lan>:<port>/#<token>` dans la fenêtre PC. Le WS refuse tout
-   upgrade sans token (précédent exact : `tests/broker-ws-auth.test.ts`).
-   Optionnel : confirmation à un coup sur le PC à la première connexion d'un
-   appareil (TOFU — le patron TOFU des groupes existe déjà dans le broker).
+2. **Appairage par token éphémère + QR code.** Le main mint un token
+   **à usage unique** (32 octets aléatoires — même primitive que
+   `deck-control.ts`), l'affiche en QR `https://<ip-lan>:<port>/#<token>`
+   dans la fenêtre PC ; le téléphone l'échange à la première connexion contre
+   un **credential d'appareil** durable (stocké côté mobile). Le WS refuse
+   tout upgrade sans credential valide (précédent exact :
+   `tests/broker-ws-auth.test.ts`).
 3. **LAN-only appliqué, pas juste espéré.** Trois ceintures :
    bind sur l'interface privée choisie (pas `0.0.0.0` aveugle) ; rejet des
    adresses source hors RFC1918/ULA ; aucune fonctionnalité de type relais ou
@@ -246,26 +252,126 @@ Exigences minimales (toutes déjà partiellement outillées dans le code) :
 4. **TLS avec certificat auto-signé généré au premier lancement**, dont
    l'empreinte voyage dans le QR. Sans TLS, le token et chaque frappe passent
    en clair sur le Wi-Fi. C'est aussi la clé des APIs navigateur (clipboard,
-   PWA). Le coût (écran d'avertissement navigateur à la première visite) est
-   acceptable en LAN.
-5. **Périmètre dégradé en v1.** Depuis le mobile : pas d'approbation de
-   `launchCommand` (§3), pas d'édition des secrets provider (le renderer ne
-   voit déjà que `hasKey` — garder ça), pas de `pickDirectory` natif.
-6. **Journalisation.** Connexion/déconnexion d'un appareil distant → entrée
+   PWA, **WebAuthn** — cf. 5.2). Le coût (écran d'avertissement navigateur à
+   la première visite) est acceptable en LAN.
+5. **Journalisation.** Connexion/déconnexion d'un appareil distant → entrée
    journal (`journal.ts`) + toast sur le PC. La trame d'observabilité
    (O3–O6) est déjà là.
+
+### 5.2 Niveau recommandé (par-dessus le socle)
+
+Ce que le socle ne couvre pas, c'est la **vie après l'appairage** : téléphone
+perdu/volé, session laissée ouverte, curiosité d'un tiers sur le même Wi-Fi.
+Les mesures recommandées adressent précisément ça :
+
+1. **Registre d'appareils + révocation.** Chaque appairage crée une entrée
+   nommée (« Pixel d'Olivier », date, dernière activité) visible dans
+   Settings ; révocation individuelle en un clic + **kill switch** global
+   (« déconnecter tout et couper le serveur »). C'est la mesure au meilleur
+   ratio coût/valeur de toute la liste.
+2. **Step-up biométrique (WebAuthn plateforme)** pour les actions de tier 3
+   (cf. 5.4) : l'action sensible demande Face ID / empreinte **sur le
+   téléphone**, sans retour au PC. WebAuthn exige un contexte sécurisé —
+   fourni par le TLS du socle. Fallback si WebAuthn indisponible : PIN
+   d'appareil défini à l'appairage.
+3. **Verrouillage d'inactivité.** Session distante verrouillée après N
+   minutes sans interaction (rideau + re-auth step-up) ; borne dure de durée
+   de vie du credential avec ré-appairage QR périodique (ex. 30 jours).
+4. **Anti-bruteforce.** Rate-limit sur l'endpoint d'auth, lockout progressif,
+   et invalidation du QR affiché après quelques minutes ou dès le premier
+   échange réussi.
+5. **Journal enrichi.** Chaque action distante taguée `device_id` dans le
+   journal ; vue « activité distante » filtrable. Les approbations tier 3
+   loggent le contenu approuvé (le hash + le texte du `launchCommand`).
+6. **Conscience du réseau.** Avertir (voire refuser de démarrer) si
+   l'interface active est classée « réseau public » (Windows network
+   category / absence de passerelle privée) ; option allowlist d'IPs clientes
+   pour les réseaux denses.
+7. **Option CA locale** (mkcert ou équivalent) pour remplacer l'auto-signé
+   chez qui veut faire disparaître l'avertissement navigateur et ancrer la
+   confiance TLS proprement.
+
+### 5.3 Autonomie mobile : l'appairage QR EST le transfert de confiance
+
+Position révisée par rapport à une première intuition « les approbations
+sensibles restent sur le PC » — qui ne tient pas à l'examen, pour deux
+raisons :
+
+- **L'argument d'audit est faible** : le texte d'un `launchCommand` à
+  approuver s'affiche aussi lisiblement sur un écran de téléphone que sur un
+  moniteur. Le PC n'a aucun privilège épistémique.
+- **L'argument de confiance est circulaire** : pour scanner le QR
+  d'appairage, il faut être physiquement devant le PC déverrouillé — c'est-à-
+  dire détenir déjà le privilège maximal (l'accès au shell local). La
+  cérémonie d'appairage est donc **le** moment du transfert de confiance ;
+  exiger ensuite des allers-retours vers le PC n'ajoute pas de sécurité, il
+  n'ajoute que de la friction.
+
+Le modèle propre est un **niveau de confiance par appareil, choisi à
+l'appairage** :
+
+| Profil | Capacités | Usage type |
+|---|---|---|
+| **Opérateur** (défaut du flux QR) | Tout, y compris tiers 3 avec step-up biométrique — autonomie complète, zéro retour PC | Le téléphone du propriétaire du PC |
+| **Compagnon** | Tiers 0–1 (lecture + interaction avec l'existant) ; les actions tiers 2–3 génèrent une demande dans l'inbox de l'opérateur | Tablette du salon, appareil secondaire, démo |
+
+Le risque résiduel de l'autonomie complète n'est pas « le mobile approuve »,
+c'est « quelqu'un d'autre tient le mobile ». Il se traite avec les mesures
+5.2 (step-up biométrique par action sensible, verrouillage d'inactivité,
+révocation immédiate depuis le PC) — pas en amputant le profil opérateur.
+
+### 5.4 Détecter le « sensible » : déclaratif, jamais heuristique
+
+Question légitime : comment sait-on qu'une action est « sensible » ? Réponse
+ferme : **on ne le détecte pas, on le déclare.** Aucune inspection de contenu
+à l'exécution n'est fiable (les frappes `pty:input` sont un flux opaque —
+impossible de distinguer `ls` de `rm -rf` sans parser un shell, et c'est une
+course perdue). La sensibilité est une **classification statique de la
+surface DeckApi**, une table constante en code — exactement l'esprit de la
+règle C8 (harnais verrouillés en constantes, jamais configurables) :
+
+| Tier | Nature | Exemples (méthodes DeckApi) |
+|---|---|---|
+| 0 — lecture | Aucun effet | `listSessions`, `roadmapList`, `journalList`, `getConfig`, `inboxHistory` |
+| 1 — interaction | Agit sur l'existant | `ptyInput`/`ptyResize` vers une session ouverte, éditions roadmap/graphe, `announce` |
+| 2 — exécution/structure | Crée ou relance des process, modifie la structure | `createSession`, `restartSession`, `applyTemplate`, `createWorktree`, `roadmapDispatch` |
+| 3 — changement de confiance | Étend ce qui POURRA s'exécuter ou qui a accès | approbation `launch-approval`, `setConfig` sur champs sensibles, `saveLaunchConfig`, secrets provider, gestion des appairages, arrêt/démarrage du serveur mobile |
+
+Trois ancrages montrent que le code réifie déjà ces frontières — le tiering
+ne fait que les nommer :
+
+- **`launch-approval.ts`** : l'app sait déjà *exactement* quand quelque chose
+  de non-encore-approuvé est sur le point de s'exécuter — c'est le miss du
+  cache sha256 par `project_key`. « Sensible » n'est pas une devinette, c'est
+  cet événement-là.
+- **`provider-secrets.ts`** : la frontière secrets existe déjà (le renderer ne
+  voit que `hasKey`) ; le tier 3 la reprend telle quelle.
+- **`setConfig`** : la sensibilité y est **par champ**, pas par appel — une
+  allowlist de champs tier 3 (`launchCommand`, sources de digest, endpoints
+  modèles) contre le reste en tier 1 (displayMode, thème, langue).
+
+Limite à énoncer honnêtement : dès qu'un appareil a le tier 1, il a
+`ptyInput`, donc un shell — donc l'exécution arbitraire *dans les sessions
+ouvertes*. Les tiers ne protègent pas l'opérateur de son propre shell ; ils
+protègent contre l'**escalade silencieuse de capacités** (nouvelle commande
+de lancement, modification de config/secrets, nouvel appairage) et donnent la
+granularité du profil « compagnon » et du step-up. La vraie frontière de
+sécurité reste la décision d'appairage (5.3) — le reste est de la défense en
+profondeur.
 
 ## 6. Découpage en lots (si la voie C est retenue)
 
 | Lot | Contenu | Dépend de | Taille |
 |---|---|---|---|
 | **M1 — Bridge core** | Serveur HTTP statique (bundle renderer) + WS DeckApi dans le main ; shim `window.api` côté web ; fan-out des 14 `webContents.send` ; feature-gate `<webview>`/dialogues | — | **M** |
-| **M2 — Appairage & sécurité** | Toggle Settings, token + QR dans la fenêtre PC, TLS auto-signé, filtre RFC1918, journalisation | M1 | **M** |
-| **M3 — Mode mobile UI** | Media queries (rail→tabs, drawer), `1×1` forcé + sélecteur de session, barre de touches xterm | M1 | **M** |
-| **M4 — Confort** | PWA (manifest, icônes), mDNS, backpressure `pty:data`, reconnexion WS auto | M1–M3 | **S/M** |
+| **M2 — Appairage & socle sécurité (5.1)** | Toggle Settings, QR + échange token→credential d'appareil, TLS auto-signé, filtre RFC1918, table de tiers DeckApi (5.4), registre d'appareils + révocation, journalisation | M1 | **M** |
+| **M3 — Mode mobile UI** | Media queries (rail→tabs, drawer), `1×1` forcé + sélecteur de session, barre de touches xterm, dialogues d'approbation re-routés en DeckApi (§3) | M1 | **M** |
+| **M4 — Sécurité recommandée (5.2)** | Step-up WebAuthn/PIN pour le tier 3, verrouillage d'inactivité, anti-bruteforce, profils opérateur/compagnon, conscience du profil réseau | M2 | **M** |
+| **M5 — Confort** | PWA (manifest, icônes), mDNS, backpressure `pty:data`, reconnexion WS auto | M1–M3 | **S/M** |
 
 M1+M2 donnent un accès mobile fonctionnel mais spartiate ; M3 tient la
-promesse « mode mobile ». Chaque lot est testable avec l'outillage existant
+promesse « mode mobile » ; M4 tient celle de l'autonomie complète (approbations
+tier 3 depuis le téléphone, sous biométrie). Chaque lot est testable avec l'outillage existant
 (`bun test` sur le bridge et le shim — logique pure dans `desktop/src/shared/`
 conformément aux conventions, cf. DESKTOP.md).
 
