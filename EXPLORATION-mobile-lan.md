@@ -348,6 +348,31 @@ actions collantes en bas. Le coût réel est une **présentation alternative de
 la même donnée** : les cinq appels IPC (`roadmapList/Upsert/Archive/Stop/
 Assign`) et le tokenizer markdown sont inchangés.
 
+**Variante Roadmap étudiée — le « panier flottant » (proposition opérateur,
+retenue pour v2).** Idée : saisir une carte pour la « soulever » en vignette
+flottante semi-transparente, naviguer librement (le doigt est rendu au
+scroll), puis la poser sur la colonne cible ; plusieurs cartes peuvent
+flotter en même temps. Analyse : l'idée règle correctement LE problème du
+drag mobile (le conflit drag/scroll pendant le transport) en découplant
+saisir / naviguer / poser — précédents solides : shelf d'iPadOS, piles du
+drag multi-items iOS, et au fond un couper/coller rendu visible. Si
+Trello/Jira n'ont rien de tel, c'est affaire de découvrabilité à l'échelle
+grand public et d'alternative ennuyeuse qui couvre 95 % — pas un verdict
+contre le pattern, surtout dans un outil de pro. Raffinements retenus :
+**saisir = appui long** (standard Android, haptique système ; le double-tap
+initialement envisagé est piégé — zoom WebView + délai de désambiguïsation
+de ~300 ms imposé au tap simple, l'action la plus fréquente) ; **plateau de
+vignettes docké en bas** au-dessus de la tab-bar (zone du pouce — le coin
+haut-gauche est le point le plus inaccessible à une main) ; **pas de
+placement au pixel** : le tri en colonne étant automatique, poser = tap sur
+la vignette une fois sur la colonne cible, ou glisser la vignette sur un tab
+de statut ; **multi-float = déplacement par lot** (son vrai argument).
+Règles de bord à fixer au design : dissolution du panier en quittant la vue
+(snackbar Annuler), carte verrouillée 🔒 par un agent pendant qu'elle flotte
+(vignette marquée, pose refusée), confirmation « done » conservée à la pose,
+undo systématique. Le bottom sheet « Déplacer vers… » reste le chemin v1 et
+le chemin découvrable ; le panier est le chemin rapide, par-dessus.
+
 **🕸 Graph (famille C — le plus gros morceau, à phaser).** Le canvas est
 souris-only aujourd'hui (zoom molette, pan par drag — aucun handler touch,
 vérifié dans `GraphView.tsx`), et même « touchifié » (pinch/pan), brancher
