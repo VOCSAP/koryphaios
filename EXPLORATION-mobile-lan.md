@@ -373,6 +373,29 @@ Règles de bord à fixer au design : dissolution du panier en quittant la vue
 undo systématique. Le bottom sheet « Déplacer vers… » reste le chemin v1 et
 le chemin découvrable ; le panier est le chemin rapide, par-dessus.
 
+*Grammaire gestuelle retenue (itération opérateur) — l'appui long est
+réservé au menu d'options (démarrer, file d'attente, éditer…), le décrochage
+s'y greffe en second temps :*
+
+1. *`pointerdown` + chrono ~450 ms, listener `touchmove` non-passif qui
+   laisse d'abord tout passer : bouger avant l'échéance = scroll normal,
+   geste annulé. (`touch-action` étant figé au début du geste, on ne peut
+   pas couper le scroll a posteriori — mais tant qu'il n'a pas démarré,
+   `preventDefault()` peut encore l'empêcher : c'est la fenêtre exploitée.)*
+2. *Immobile jusqu'à l'échéance = carte **saisie** : haptique + soulèvement
+   visuel ; à partir d'ici les mouvements sont `preventDefault()`és — le
+   doigt appartient à la carte, plus au scroll.*
+3. *Relâcher sans bouger → **bottom sheet d'options** (chemin canonique,
+   avec une entrée « Soulever » — le geste n'est qu'un raccourci).*
+4. *Bouger après la saisie → **décrochage** vers le panier. La métaphore
+   « décoller l'autocollant » (secouer l'item) vit dans l'ANIMATION — la
+   carte frétille, résiste, puis se détache en vignette — pas dans le
+   détecteur : une fois la carte saisie, il ne reste que deux issues
+   (relâcher/bouger), exiger un vrai secouage (2-3 inversions de direction
+   ≥ 12 px en ~500 ms — détectable, ~100 lignes de logique pure testable)
+   n'ajouterait que des ratés (tremblements, marche, seuils par appareil)
+   sans rien désambiguïser.*
+
 **🕸 Graph (famille C — le plus gros morceau, à phaser).** Le canvas est
 souris-only aujourd'hui (zoom molette, pan par drag — aucun handler touch,
 vérifié dans `GraphView.tsx`), et même « touchifié » (pinch/pan), brancher
