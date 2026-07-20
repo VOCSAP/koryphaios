@@ -13,7 +13,7 @@ import { Database } from "bun:sqlite";
 import { dirname } from "node:path";
 import { mkdirSync } from "node:fs";
 import { hostname } from "node:os";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { loadConfig } from "./shared/config.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { validateDraftPayload } from "./shared/graph-draft.ts";
@@ -136,6 +136,24 @@ process.on("unhandledRejection", (e) => {
  * handler's try/catch, so a transient SQLite error (SQLITE_BUSY, disk full)
  * must skip the iteration -- not kill the daemon.
  */
+/**
+ * Constant-time string comparison (M-SEC-1). The bearer broker_token and every
+ * group_secret_hash are compared with this so a byte-by-byte timing oracle
+ * cannot recover them over the network in HTTP mode. null inputs compare by
+ * identity (both null → equal, the default-group case); differing lengths run a
+ * fixed-cost compare so timing does not leak which byte diverged.
+ */
+function safeEqual(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (a == null || b == null) return a === b;
+  const ab = Buffer.from(a, "utf8");
+  const bb = Buffer.from(b, "utf8");
+  if (ab.length !== bb.length) {
+    timingSafeEqual(ab, ab); // keep the cost independent of the length mismatch
+    return false;
+  }
+  return timingSafeEqual(ab, bb);
+}
+
 function guardedInterval(name: string, fn: () => unknown, ms: number): ReturnType<typeof setInterval> {
   return setInterval(() => {
     try {
@@ -622,7 +640,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
     ).get(groupId) as { secret_hash: string | null } | null;
 
     if (existing) {
-      if (existing.secret_hash !== secretHash) {
+      if (!safeEqual(existing.secret_hash, secretHash)) {
         return { error: "group_secret_hash mismatch (TOFU rejected)", status: 401 };
       }
     } else {
@@ -986,7 +1004,7 @@ function handleAnnounce(body: AnnounceRequest): AnnounceResponse | { error: stri
     const existing = db.query(
       "SELECT secret_hash FROM groups WHERE group_id = ?"
     ).get(groupId) as { secret_hash: string | null } | null;
-    if (existing && existing.secret_hash !== (body.group_secret_hash ?? null)) {
+    if (existing && !safeEqual(existing.secret_hash, body.group_secret_hash ?? null)) {
       return { error: "group_secret_hash mismatch (TOFU rejected)", status: 401 };
     }
   }
@@ -1472,7 +1490,7 @@ function handleOperatorInbox(
     const existing = db.query(
       "SELECT secret_hash FROM groups WHERE group_id = ?"
     ).get(groupId) as { secret_hash: string | null } | null;
-    if (existing && existing.secret_hash !== (body.group_secret_hash ?? null)) {
+    if (existing && !safeEqual(existing.secret_hash, body.group_secret_hash ?? null)) {
       return { error: "group_secret_hash mismatch (TOFU rejected)", status: 401 };
     }
   }
@@ -1577,10 +1595,33 @@ const wsPool = new Map<InstanceToken, import("bun").ServerWebSocket<WsData>>();
 // Returns a 401 Response if BROKER_TOKEN is configured and the request lacks a valid
 // "Authorization: Bearer <token>" header. Returns null when auth passes or is disabled.
 // /health is always exempt so monitoring tools can reach it without credentials.
+// The token is compared in constant time (M-SEC-1) to deny a timing oracle in HTTP mode.
 function unauthorizedIfToken(req: Request): Response | null {
   if (!BROKER_TOKEN) return null;
-  if (req.headers.get("Authorization") === `Bearer ${BROKER_TOKEN}`) return null;
+  const auth = req.headers.get("Authorization") ?? "";
+  const provided = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : "";
+  if (safeEqual(provided, BROKER_TOKEN)) return null;
   return new Response("Unauthorized", { status: 401 });
+}
+
+// B2: reject cross-origin browser requests (CSRF / DNS-rebinding defense). Native
+// clients (server.ts, the CLI) never send an `Origin` header, so this is
+// transparent to them; a browser page always attaches Origin on a cross-origin
+// call, so any request that carries one is refused unless it is an explicit
+// loopback origin. This blocks a malicious web page from driving the broker
+// (announce/admin/roadmap) without needing a Host allow-list that a 0.0.0.0 LAN
+// bind cannot enumerate. Returns a 403 Response when the Origin is disallowed.
+function forbiddenByOrigin(req: Request): Response | null {
+  const origin = req.headers.get("Origin");
+  if (!origin) return null; // non-browser client (server.ts / CLI): no Origin
+  let host: string;
+  try {
+    host = new URL(origin).hostname;
+  } catch {
+    return new Response("Forbidden origin", { status: 403 });
+  }
+  const loopback = host === "127.0.0.1" || host === "localhost" || host === "::1";
+  return loopback ? null : new Response("Forbidden origin", { status: 403 });
 }
 
 const server = Bun.serve<WsData>({
@@ -1621,6 +1662,8 @@ const server = Bun.serve<WsData>({
     const path = url.pathname;
 
     if (path !== "/health") {
+      const forbidden = forbiddenByOrigin(req);
+      if (forbidden) return forbidden;
       const deny = unauthorizedIfToken(req);
       if (deny) return deny;
     }

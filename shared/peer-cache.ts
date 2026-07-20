@@ -1,6 +1,16 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
+
+// Atomic cache write (M-LOG-1 / N-MNT-5): write to a per-process temp file then
+// rename, so a torn write or two sessions racing on the shared per-cwd legacy
+// file can never leave a partial id for a reader to pick up. The temp name is
+// pid-scoped so concurrent writers do not clobber each other's temp.
+async function writeCacheAtomic(target: string, data: string): Promise<void> {
+  const tmp = `${target}.${process.pid}.tmp`;
+  await writeFile(tmp, data, "utf-8");
+  await rename(tmp, target);
+}
 
 /**
  * Compute the cwd_key used by ~/.claude/status-line.sh:get_peer_id.
@@ -74,7 +84,7 @@ export async function writeDeskSessionFile(
   try {
     const cacheDir = join(home, ".claude", "peers");
     await mkdir(cacheDir, { recursive: true });
-    await writeFile(join(cacheDir, deskSessionFileName(safeToken)), id, "utf-8");
+    await writeCacheAtomic(join(cacheDir, deskSessionFileName(safeToken)), id);
   } catch {
     // best-effort: the Deck falls back to transcript discovery if absent
   }
@@ -133,7 +143,7 @@ export async function writePeerIdCache(
     const sessionId = sanitizeSessionId(env.CLAUDE_CODE_SESSION_ID);
     const filename = sessionId ? `peer-id-${key}-${sessionId}.txt` : `peer-id-${key}.txt`;
     await mkdir(cacheDir, { recursive: true });
-    await writeFile(join(cacheDir, filename), peerId, "utf-8");
+    await writeCacheAtomic(join(cacheDir, filename), peerId);
   } catch {
     // best-effort: status-line cache is non-critical
   }

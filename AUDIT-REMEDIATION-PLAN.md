@@ -42,11 +42,21 @@ Branche : `claude/security-maintenance-audit-rxakng` (base `experimental`).
 - [ ] Liste d'appareils appairés + révocation manuelle + « déconnecter tous ».
 - [ ] Notification de connexion d'un appareil sur le Deck.
 
-### Lot 3 — Broker transparent
-- [ ] **B1 + NF-A** projections publiques `peers` et `messages` (broker résout `from_peer_id` côté serveur ; client lit `from_peer_id`).
-- [ ] **B2** validation `Origin`/`Host` (allow-list loopback + host LAN configuré).
-- [ ] **M-SEC-1** comparaisons constant-time (`broker_token` + `group_secret_hash`).
-- [ ] **M-LOG-1** écritures atomiques (temp+rename) sur les stores desktop + peer-cache.
+### Lot 3 — Broker transparent (partiel)
+- [x] **B2** garde `Origin` (rejette toute requête portant un `Origin` non-loopback ; les clients natifs server.ts/CLI n'envoient pas d'`Origin` → transparent). Pas de Host allow-list (incompatible avec un bind 0.0.0.0 sans config).
+- [x] **M-SEC-1** comparaisons constant-time (`safeEqual` via `timingSafeEqual`) : `broker_token` + les 3 sites `group_secret_hash`.
+- [x] **M-LOG-1** écritures atomiques (temp+rename) : `store.ts` (config/sessions), `graph-store.ts`, `inbox-store.ts`, `scope-secrets.ts` (helper `atomic-write.ts`) + `shared/peer-cache.ts` (helper pid-scoped).
+- [ ] **B1 + NF-A** projections publiques `peers`/`messages` — **EN ATTENTE DÉCISION OPÉRATEUR** (voir ci-dessous).
+
+## ⚠️ Point à trancher — B1/NF-A (fuite d'`instance_token`)
+
+Le correctif *transparent* de B1 (le broker cesse d'exposer `instance_token`/`from_token`,
+et résout `from_peer_id` côté serveur pour poll/peek) **change le format de fil broker↔server.ts**.
+Dans la topologie de l'opérateur (**broker central + plusieurs postes clients**), une mise à jour
+échelonnée (broker à jour, client pas encore) casserait la résolution des messages.
+→ Décision requise : (a) mise à jour coordonnée broker+clients en une fois, ou (b) rollout en deux
+phases (d'abord ajouter `from_peer_id` sans retirer `from_token`, retrait au release suivant).
+B1 est par ailleurs une menace **d'initié LAN** (basse priorité dans le modèle de confiance).
 
 ## Journal d'implémentation
 
@@ -61,3 +71,11 @@ Branche : `claude/security-maintenance-audit-rxakng` (base `experimental`).
 - `ipc.ts` : `IpcDeps` reçoit `getWorktreeInit` + `resolveTemplateInputs` ; handlers `sessions:create`, `worktree:create`, `template:apply`, `template:read` câblés ; import `templateSource` + type `TemplateInput`.
 - Tests ajoutés : `sanitizeFlagValue` (pass/reject), `templateHasShellFields`, `templateSource` (containment), `projectWorktreeInit`/`globalWorktreeInit`.
 - Vérif : `bun test tests/desktop-*.test.ts` → 388 pass / 0 fail ; `npm run typecheck` (node+web) → clean.
+
+### Lot 3 — Broker transparent (fait, sauf B1)
+- `broker.ts` : `safeEqual` (constant-time) appliqué au bearer + aux 3 compares de `group_secret_hash` (M-SEC-1) ; `forbiddenByOrigin` (B2) branché avant l'auth dans le handler fetch.
+- `atomic-write.ts` (nouveau) : `writeFileAtomic` (temp+rename) ; adopté par `store.ts`, `graph-store.ts`, `inbox-store.ts`, `scope-secrets.ts`.
+- `shared/peer-cache.ts` : `writeCacheAtomic` (temp pid-scopé + rename) sur les 2 sites.
+- Tests ajoutés : garde Origin (403 cross-origin, 200 loopback, 200 sans Origin, 401 mauvais token).
+- Vérif : `bun test` complet → 554 pass / 0 fail ; smoke build `broker/server/cli` OK ; typecheck desktop clean.
+- **B1/NF-A non implémenté** : en attente de la décision de rollout de l'opérateur (cf. section ci-dessus).

@@ -62,3 +62,38 @@ test("WS upgrade succeeds when the client passes a Bearer header", async () => {
   expect(result.ws.readyState).toBe(WebSocket.OPEN);
   result.ws.close();
 });
+
+// ----- B2: Origin guard (CSRF / DNS-rebinding defense) -----
+
+test("a cross-origin browser request is rejected with 403 (before auth)", async () => {
+  const res = await fetch(`${broker.url}/group-stats`, {
+    method: "GET",
+    headers: { Origin: "http://evil.example.com", Authorization: `Bearer ${TOKEN}` },
+  });
+  expect(res.status).toBe(403);
+});
+
+test("a loopback Origin is allowed through the guard", async () => {
+  const res = await fetch(`${broker.url}/group-stats`, {
+    method: "GET",
+    headers: { Origin: "http://127.0.0.1:9999", Authorization: `Bearer ${TOKEN}` },
+  });
+  expect(res.status).toBe(200);
+});
+
+test("a native client (no Origin header) is unaffected by the guard", async () => {
+  // No Origin → passes the guard; the valid Bearer token is still required.
+  const res = await fetch(`${broker.url}/group-stats`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${TOKEN}` },
+  });
+  expect(res.status).toBe(200);
+});
+
+test("a wrong Bearer token is still rejected (constant-time compare)", async () => {
+  const res = await fetch(`${broker.url}/group-stats`, {
+    method: "GET",
+    headers: { Authorization: `Bearer ${TOKEN}xx` },
+  });
+  expect(res.status).toBe(401);
+});

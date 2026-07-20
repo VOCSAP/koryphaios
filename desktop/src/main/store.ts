@@ -1,8 +1,9 @@
 import { app } from 'electron'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { AppConfig, SessionDef } from '@shared/types'
+import { writeFileAtomic } from './atomic-write'
 import { DEFAULT_PALETTE } from '@shared/palette'
 import {
   DEFAULT_HELP_TARGET,
@@ -69,7 +70,9 @@ function readJson<T>(file: string, fallback: T): T {
 
 function writeJson(file: string, value: unknown): void {
   try {
-    writeFileSync(file, JSON.stringify(value, null, 2), 'utf8')
+    // Atomic (temp + rename) so a crash mid-write can't truncate config.json —
+    // which would silently reset every setting + the encrypted provider keys.
+    writeFileAtomic(file, JSON.stringify(value, null, 2))
   } catch (err) {
     // Config/session persistence loss (O6): journal + main.log, not just a
     // console invisible in the packaged app.
