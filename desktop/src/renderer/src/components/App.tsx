@@ -24,6 +24,45 @@ import { TemplatesDialog } from './TemplatesDialog'
 import { ExportTemplateDialog } from './ExportTemplateDialog'
 import { ErrorBoundary } from './ErrorBoundary'
 import { StatusBanner } from './StatusBanner'
+import { CompanionDialog } from './CompanionDialog'
+import { MobileNav } from './MobileNav'
+import { MobileAgents } from './MobileAgents'
+import { RoadmapList } from './RoadmapList'
+import { retryRemoteConnection } from '../remote-api'
+import { KeyBar } from './KeyBar'
+
+/** Thin indirection so the mobile home view shares the agents key bar. */
+function KeyBarForSession({ id }: { id: string }): React.JSX.Element {
+  return <KeyBar sessionId={id} />
+}
+
+/** Companion link overlay (PLAN MB1/MB2): reconnecting curtain, and the
+ * terminal "host disconnected" screen of the ephemeral session model. */
+function RemoteLinkOverlay(): React.JSX.Element | null {
+  const t = useT()
+  const remote = useDeck((s) => s.remote)
+  const remoteLink = useDeck((s) => s.remoteLink)
+  if (!remote || remoteLink === 'connected' || remoteLink === null) return null
+  return (
+    <div className="remote-overlay" role="alert">
+      {remoteLink === 'connecting' ? (
+        <>
+          <div className="remote-overlay-icon">📡</div>
+          <h2>{t('companion.reconnecting')}</h2>
+        </>
+      ) : (
+        <>
+          <div className="remote-overlay-icon">🔌</div>
+          <h2>{t('companion.hostGone')}</h2>
+          <p>{t('companion.hostGoneHint')}</p>
+          <button className="primary" onClick={() => retryRemoteConnection()}>
+            {t('companion.retry')}
+          </button>
+        </>
+      )}
+    </div>
+  )
+}
 
 export function App(): React.JSX.Element {
   const t = useT()
@@ -51,6 +90,10 @@ export function App(): React.JSX.Element {
   const browserOpened = useDeck((s) => s.browserOpened)
   const inboxOpen = useDeck((s) => s.inboxOpen)
   const initError = useDeck((s) => s.initError)
+  const remote = useDeck((s) => s.remote)
+  const mobile = useDeck((s) => s.mobile)
+  const companionOpen = useDeck((s) => s.companionOpen)
+  const supervisorId = useDeck((s) => s.sessions.find((x) => x.supervisor)?.id ?? null)
 
   useEffect(() => {
     void init()
@@ -59,6 +102,27 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     if (config) document.documentElement.dataset.theme = config.theme
   }, [config])
+
+  // Mobile derivation rule (PLAN MB3): the class only ever appears for a
+  // remote coarse-pointer client — the Electron window keeps its exact
+  // desktop rendering, whatever its size.
+  useEffect(() => {
+    document.documentElement.classList.toggle('is-mobile', mobile)
+  }, [mobile])
+
+  // Mobile keyboard/rotation (EXPLORATION §4): track the REAL visible height
+  // so the pager + keybar shrink with the virtual keyboard; TerminalTile's
+  // ResizeObserver then refits xterm for free.
+  useEffect(() => {
+    if (!mobile || !window.visualViewport) return
+    const vv = window.visualViewport
+    const apply = (): void => {
+      document.documentElement.style.setProperty('--vvh', `${Math.round(vv.height)}px`)
+    }
+    apply()
+    vv.addEventListener('resize', apply)
+    return () => vv.removeEventListener('resize', apply)
+  }, [mobile])
 
   // Reflect the current workspace name in the window title.
   useEffect(() => {
@@ -146,10 +210,69 @@ export function App(): React.JSX.Element {
     return <div className="loading" aria-busy="true" />
   }
 
+  // Mobile shell (PLAN MB3): same views/stores/IPC, alternative chrome —
+  // bottom tabs, pager, one-column roadmap. Presentation only, no fork.
+  if (mobile) {
+    return (
+      <div className="app app-mobile">
+        <StatusBanner />
+        <RemoteLinkOverlay />
+        <div className={`mview${view === 'agents' ? '' : ' view-hidden'}`}>
+          <ErrorBoundary scope="agents">
+            <MobileAgents />
+          </ErrorBoundary>
+        </div>
+        <div className={`mview mview-home${view === 'home' ? '' : ' view-hidden'}`}>
+          <ErrorBoundary scope="home">
+            <HomeView active={view === 'home'} />
+          </ErrorBoundary>
+        </div>
+        {view === 'home' && supervisorId && (
+          <div className="mview-homekeys">
+            {/* The supervisor terminal deserves the key bar too. */}
+            <KeyBarForSession id={supervisorId} />
+          </div>
+        )}
+        {view === 'roadmap' && (
+          <ErrorBoundary scope="roadmap">
+            <RoadmapList />
+          </ErrorBoundary>
+        )}
+        {view === 'worktrees' && (
+          <ErrorBoundary scope="worktrees">
+            <WorktreesView />
+          </ErrorBoundary>
+        )}
+        {view === 'journal' && (
+          <ErrorBoundary scope="journal">
+            <JournalView />
+          </ErrorBoundary>
+        )}
+        {settingsOpen && (
+          <ErrorBoundary scope="settings">
+            <SettingsView />
+          </ErrorBoundary>
+        )}
+        {inboxOpen && (
+          <ErrorBoundary scope="inbox">
+            <InboxPanel />
+          </ErrorBoundary>
+        )}
+        <ErrorBoundary scope="diff">
+          <DiffPanel />
+        </ErrorBoundary>
+        <MobileNav />
+        <Toast />
+      </div>
+    )
+  }
+
   return (
     <div className="app" style={{ '--sidebar-w': `${sidebarWidth}px` } as React.CSSProperties}>
       {/* Fixed overlay (PLAN O5): shown while the broker is unreachable. */}
       <StatusBanner />
+      <RemoteLinkOverlay />
+      {companionOpen && !remote && <CompanionDialog />}
       <NavRail />
       {/* The agents and home views stay MOUNTED under the other views:
           unmounting TerminalTile would tear down the xterm instances and their
@@ -174,7 +297,7 @@ export function App(): React.JSX.Element {
       {/* Browser view (PLAN D1): mounted lazily on first open, then kept alive
           like agents/home — unmounting the <webview> would drop the page, and
           unmounting the dock terminal its xterm. */}
-      {browserOpened && (
+      {browserOpened && !remote && (
         <div className={`view-browser${view === 'browser' ? '' : ' view-hidden'}`}>
           <ErrorBoundary scope="browser">
             <BrowserView active={view === 'browser'} />

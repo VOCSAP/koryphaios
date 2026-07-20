@@ -73,6 +73,20 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   operator approval (sha256 per project_key); resume-digest sources come from
   the GLOBAL config only (a repo-carried command list would execute arbitrary
   code on clone).
+- **Companion LAN access (PLAN-mobile-lan MB1–MB6)**: the 📱 button starts an
+  HTTPS+WebSocket server (`main/companion-server.ts`) that serves the built
+  renderer bundle to a phone on the LAN and bridges the DeckApi protocol
+  (`shared/companion.ts` manifest → `main/api-registry.ts` handler table →
+  `renderer/src/remote-api.ts` shim). Web-remoting, NOT pixel streaming: the
+  phone runs the same renderer, flipped to a mobile layout (`.is-mobile`, only
+  ever for a remote coarse-pointer client — the desktop window is untouched).
+  Ephemeral session model: one-shot QR token → per-run credential, closing the
+  app revokes. When adding a DeckApi method, also add it to `COMPANION_MANIFEST`
+  (a `satisfies` clause makes a miss a compile error) and give its channel a
+  tier in `CHANNEL_TIERS`. State events reaching the phone must go through
+  `broadcast()` (not `mainWindow.webContents.send`); window-only events
+  (menu:*, design:pick, session:focus, inbox:open) stay on the window. The
+  Android shell (`mobile-shell/`) is a documented scaffold — see MB6.
 
 ## Error reporting & logs (PLAN-observabilite O3–O6)
 

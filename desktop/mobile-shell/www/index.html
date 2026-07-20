@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Koryphaios Companion</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #181818;
+        color: #e4e4e4;
+        font-family: system-ui, sans-serif;
+      }
+      main {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        padding: 24px;
+        text-align: center;
+      }
+      h1 {
+        font-size: 20px;
+      }
+      p {
+        color: #9a9a9a;
+        max-width: 32ch;
+        line-height: 1.5;
+      }
+      button {
+        padding: 14px 22px;
+        font-size: 16px;
+        border-radius: 10px;
+        border: none;
+        background: #4488ff;
+        color: #fff;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div style="font-size: 56px">📱</div>
+      <h1>Koryphaios Companion</h1>
+      <p>
+        Scan the QR code shown by the desktop app (Companion button) to connect
+        to your session over the local network.
+      </p>
+      <button id="scan">Scan QR code</button>
+    </main>
+    <script>
+      // Bootstrap only. On a real device this calls the native QR scanner
+      // (Capacitor plugin) and then navigates the WebView to the host URL,
+      // which serves the actual Koryphaios renderer. In a plain browser (dev),
+      // it prompts for the URL so the flow can be exercised without hardware.
+      document.getElementById('scan').addEventListener('click', async () => {
+        let url = null
+        try {
+          // Replaced at build time by the Capacitor barcode plugin call.
+          if (window.Capacitor?.Plugins?.BarcodeScanner) {
+            const res = await window.Capacitor.Plugins.BarcodeScanner.scan()
+            url = res?.ScanResult ?? res?.content ?? null
+          }
+        } catch (e) {
+          /* fall through to manual entry */
+        }
+        if (!url) url = prompt('Host URL (https://<lan-ip>:<port>/#t=<token>)')
+        if (url) window.location.href = url
+      })
+    </script>
+  </body>
+</html>
