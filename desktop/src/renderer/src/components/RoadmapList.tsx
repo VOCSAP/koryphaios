@@ -50,6 +50,13 @@ function RoadmapCard({
   const [seized, setSeized] = useState(false)
   const locked = isLocked(item)
 
+  // Latest-ref pattern: the parent re-renders every POLL_MS (5s) with fresh
+  // inline callbacks. Reading them through a ref keeps the listener effect
+  // stable (deps: [locked] only), so a re-render mid-press no longer tears
+  // down the HoldGesture and aborts the seize/drag in progress.
+  const cbRef = useRef({ onSeize, onDetach, onOptions })
+  cbRef.current = { onSeize, onDetach, onOptions }
+
   // Native listeners (not React synthetic): touchmove must be NON-passive so
   // preventDefault can keep the scroll from starting once the card is seized
   // (EXPLORATION §4 grammaire gestuelle — the window exploited is "scroll not
@@ -76,7 +83,7 @@ function RoadmapCard({
           seizedNow = true
           setSeized(true)
           navigator.vibrate?.(15)
-          onSeize()
+          cbRef.current.onSeize()
         }
       }, DEFAULT_HOLD_GESTURE.holdMs + 10)
     }
@@ -89,11 +96,11 @@ function RoadmapCard({
         seizedNow = true
         setSeized(true)
         navigator.vibrate?.(15)
-        onSeize()
+        cbRef.current.onSeize()
       } else if (outcome === 'detach') {
         clear()
         navigator.vibrate?.([10, 30, 20])
-        onDetach()
+        cbRef.current.onDetach()
       } else if (outcome === 'cancel') {
         clear()
       }
@@ -102,7 +109,7 @@ function RoadmapCard({
       const outcome = gesture.up(e.timeStamp)
       const wasSeized = seizedNow
       clear()
-      if (outcome === 'options' && wasSeized) onOptions()
+      if (outcome === 'options' && wasSeized) cbRef.current.onOptions()
     }
     const onCancel = (): void => {
       gesture.cancel()
@@ -122,7 +129,7 @@ function RoadmapCard({
       el.removeEventListener('contextmenu', onCtx)
       clear()
     }
-  }, [locked, onSeize, onDetach, onOptions])
+  }, [locked])
 
   return (
     <div
@@ -302,7 +309,15 @@ export function RoadmapList(): React.JSX.Element {
               className="mrm-basket-chip"
               onClick={() => {
                 if (tab === 'archived') return
-                moveTo(b, tab)
+                // Resolve the LIVE item by id: the snapshot captured at detach
+                // time can be stale after a poll (an agent may have moved or
+                // locked it while it floated). moveTo then sees the real state.
+                const live = items.find((i) => i.id === b.id)
+                if (!live) {
+                  setBasket((cur) => cur.filter((x) => x.id !== b.id))
+                  return
+                }
+                moveTo(live, tab)
               }}
             >
               {KIND_ICONS[b.kind]} {b.title.slice(0, 24)}

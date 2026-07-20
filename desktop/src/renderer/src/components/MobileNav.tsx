@@ -2,17 +2,14 @@ import { useState } from 'react'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { MobileSheet } from './MobileSheet'
+import { MOBILE_MORE, MOBILE_TABS, MOBILE_VIEWS } from '../mobile-views'
 import type { DeckView } from '@shared/types'
 
 // Bottom tab bar (PLAN MB3 — EXPLORATION §4 "Navigation générale"): 5 slots,
 // Inbox promoted to a first-class tab (it IS the mobile notification center),
-// the long tail (Journal, Worktrees, Settings) behind the ⋯ sheet. Browser
-// (webview, Electron-only) and Graph (canvas, desktop-first) are absent in v1.
-const TABS: { id: DeckView; icon: string; key: string }[] = [
-  { id: 'home', icon: '🏠', key: 'nav.home' },
-  { id: 'agents', icon: '🖥', key: 'nav.agents' },
-  { id: 'roadmap', icon: '🗺', key: 'nav.roadmap' }
-]
+// the long tail (Journal, Worktrees, Settings) behind the ⋯ sheet. Which
+// DeckView goes where is the single exhaustive registry in mobile-views.ts —
+// Browser (webview) and Graph (canvas) are declared desktop-only there.
 
 export function MobileNav(): React.JSX.Element {
   const t = useT()
@@ -34,14 +31,14 @@ export function MobileNav(): React.JSX.Element {
   return (
     <>
       <nav className="mnav">
-        {TABS.map(({ id, icon, key }) => (
+        {MOBILE_TABS.map((id) => (
           <button
             key={id}
             className={`mnav-btn${view === id && !inboxOpen ? ' is-active' : ''}`}
             onClick={() => goto(id)}
           >
-            <span className="mnav-icon">{icon}</span>
-            <span className="mnav-label">{t(key)}</span>
+            <span className="mnav-icon">{MOBILE_VIEWS[id].icon}</span>
+            <span className="mnav-label">{t(MOBILE_VIEWS[id].labelKey)}</span>
           </button>
         ))}
         <button
@@ -60,24 +57,19 @@ export function MobileNav(): React.JSX.Element {
       </nav>
       {moreOpen && (
         <MobileSheet onClose={() => setMoreOpen(false)} title={t('mobile.more')}>
-          <button
-            className="msheet-item"
-            onClick={() => {
-              goto('worktrees')
-              setMoreOpen(false)
-            }}
-          >
-            ⎇ {t('nav.worktrees')}
-          </button>
-          <button
-            className="msheet-item"
-            onClick={() => {
-              goto('journal')
-              setMoreOpen(false)
-            }}
-          >
-            📜 {t('nav.journal')}
-          </button>
+          {MOBILE_MORE.map((id) => (
+            <button
+              key={id}
+              className="msheet-item"
+              onClick={() => {
+                goto(id)
+                setMoreOpen(false)
+              }}
+            >
+              {MOBILE_VIEWS[id].icon} {t(MOBILE_VIEWS[id].labelKey)}
+            </button>
+          ))}
+          {/* Settings is an overlay, not a DeckView — kept explicit here. */}
           <button
             className="msheet-item"
             onClick={() => {

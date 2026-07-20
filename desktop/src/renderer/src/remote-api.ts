@@ -83,6 +83,10 @@ function openSocket(auth: { token?: string; cred?: string }): Promise<void> {
     const url = `wss://${window.location.host}/ws`
     const sock = new WebSocket(url)
     ws = sock
+    // Reset the liveness clock for the NEW socket: otherwise the watchdog,
+    // comparing against a lastSeen stale from before the drop, could close a
+    // still-connecting reconnect socket mid-handshake.
+    lastSeen = Date.now()
     let settled = false
     sock.onopen = () => {
       sock.send(JSON.stringify({ t: 'hello', ...auth }))
@@ -260,11 +264,17 @@ export async function connectRemoteApi(): Promise<void> {
   })
 
   // Host-death watchdog (EXPLORATION §5.5): the server heartbeats every 5 s;
-  // 12 s of silence = the host is gone (kill, crash, network drop).
+  // 12 s of silence on an OPEN socket = the host is gone (kill, crash, network
+  // drop). Guarded against double-install (re-entrant connectRemoteApi) and
+  // skips CONNECTING sockets so it never kills an in-flight reconnect.
+  if (watchdog !== null) window.clearInterval(watchdog)
   watchdog = window.setInterval(() => {
-    if (ws && Date.now() - lastSeen > COMPANION_CLIENT_TIMEOUT_MS) {
+    if (
+      ws &&
+      ws.readyState === WebSocket.OPEN &&
+      Date.now() - lastSeen > COMPANION_CLIENT_TIMEOUT_MS
+    ) {
       ws.close()
     }
   }, 2_000)
-  void watchdog
 }

@@ -52,6 +52,10 @@ interface ClientCtx {
   mode: 'full' | 'light'
   removeSink: (() => void) | null
   alive: boolean
+  /** Per-client backpressure latch: true while dropping pty:data for this
+   * client, so the overflow is logged once per episode and re-logged after
+   * the buffer recovers (not muted server-wide by the first slow client). */
+  overflowing: boolean
 }
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -117,7 +121,6 @@ export class CompanionServer {
   private hbTimer: NodeJS.Timeout | null = null
   private url: string | null = null
   private pairingToken: string | null = null
-  private overflowReported = false
 
   constructor(private readonly deps: CompanionDeps) {}
 
@@ -208,7 +211,15 @@ export class CompanionServer {
   // ----- websocket lifecycle -----
 
   private attach(ws: WebSocket, addr: string): void {
-    const ctx: ClientCtx = { ws, addr, authed: false, mode: 'full', removeSink: null, alive: true }
+    const ctx: ClientCtx = {
+      ws,
+      addr,
+      authed: false,
+      mode: 'full',
+      removeSink: null,
+      alive: true,
+      overflowing: false
+    }
     this.clients.add(ctx)
     // Unauthenticated sockets get 5 s to present a hello.
     const authDeadline = setTimeout(() => {
@@ -297,13 +308,15 @@ export class CompanionServer {
     if (ctx.mode === 'light' && LIGHT_MODE_BLOCKED_EVENTS.has(channel)) return
     if (channel === 'pty:data' && ctx.ws.bufferedAmount > MAX_BUFFERED) {
       // Backpressure guard (MB5): drop terminal stream frames rather than
-      // ballooning memory; report once per run.
-      if (!this.overflowReported) {
-        this.overflowReported = true
+      // ballooning memory. Latched per-client, logged once per episode.
+      if (!ctx.overflowing) {
+        ctx.overflowing = true
         reportError('companion', `client ${ctx.addr} slow — dropping pty:data frames`)
       }
       return
     }
+    // Buffer recovered for this client: allow the next episode to log again.
+    if (ctx.overflowing) ctx.overflowing = false
     this.send(ctx, { t: 'ev', ch: channel, payload })
   }
 
