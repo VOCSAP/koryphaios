@@ -1056,7 +1056,10 @@ app.whenReady().then(() => {
     staticDir: join(__dirname, '../renderer'),
     stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
     journal: (msg) => journal.add('session', msg),
-    onStatus: (info) => broadcast('companion:changed', info)
+    onStatus: (info) => broadcast('companion:changed', info),
+    // Lot 2: surface a device connection to the operator (renderer toast) so an
+    // unexpected reconnect from a lost device is visible, not just journaled.
+    onDeviceConnected: (addr, kind) => broadcast('companion:device-connected', { addr, kind })
   })
   regHandle('companion:start', async () => {
     const info = await companionServer!.start()
@@ -1067,6 +1070,10 @@ app.whenReady().then(() => {
     return companionServer!.info
   })
   regHandle('companion:status', () => companionServer!.info)
+  // Lot 2: paired-device management (list + manual revoke = lost-phone kill switch).
+  regHandle('companion:devices', () => companionServer!.listDevices())
+  regHandle('companion:revoke', (_e, id: string) => companionServer!.revokeDevice(id))
+  regHandle('companion:revoke-all', () => companionServer!.revokeAllDevices())
   registerIpc({
     service,
     workspaces,

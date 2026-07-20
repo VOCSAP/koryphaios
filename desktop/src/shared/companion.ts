@@ -4,7 +4,7 @@
 // channel uniqueness and the remote-security tables (EXPLORATION-mobile-lan
 // §5.4: sensitivity is DECLARED, never detected at runtime).
 
-import type { DeckApi } from './types'
+import type { CompanionDevice, DeckApi } from './types'
 
 export type CompanionMethodKind = 'invoke' | 'send' | 'event'
 
@@ -128,7 +128,11 @@ export const COMPANION_MANIFEST = {
   companionStart: { kind: 'invoke', channel: 'companion:start' },
   companionStop: { kind: 'invoke', channel: 'companion:stop' },
   companionStatus: { kind: 'invoke', channel: 'companion:status' },
+  companionDevices: { kind: 'invoke', channel: 'companion:devices' },
+  companionRevoke: { kind: 'invoke', channel: 'companion:revoke' },
+  companionRevokeAll: { kind: 'invoke', channel: 'companion:revoke-all' },
   onCompanionChanged: { kind: 'event', channel: 'companion:changed' },
+  onCompanionDeviceConnected: { kind: 'event', channel: 'companion:device-connected' },
 
   // events
   onPtyData: { kind: 'event', channel: 'pty:data' },
@@ -174,7 +178,12 @@ export const REMOTE_BLOCKED_CHANNELS: ReadonlySet<string> = new Set([
   'design:capture-window',
   'companion:start',
   'companion:stop',
-  'companion:status'
+  'companion:status',
+  // Lot 2: device management is a host-only, trust-changing action — a paired
+  // device must never be able to list or revoke devices (incl. itself/others).
+  'companion:devices',
+  'companion:revoke',
+  'companion:revoke-all'
 ])
 
 /**
@@ -260,7 +269,10 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'config:set': 3,
   'launch:set-global': 3,
   'companion:start': 3,
-  'companion:stop': 3
+  'companion:stop': 3,
+  'companion:devices': 3,
+  'companion:revoke': 3,
+  'companion:revoke-all': 3
 }
 
 // ----- wire protocol -----
@@ -365,24 +377,25 @@ export function isPrivateAddress(addr: string | undefined | null): boolean {
 export interface CompanionAuthState {
   /** One-shot pairing token (QR); consumed by the first successful hello. */
   pairingToken: string | null
-  /** Per-run session credentials handed out at pairing (reconnects). */
-  creds: Set<string>
+  /** Per-run session credentials -> device metadata (reconnects + revoke). */
+  creds: Map<string, CompanionDevice>
 }
 
 export class CompanionAuth {
-  private state: CompanionAuthState = { pairingToken: null, creds: new Set() }
+  private state: CompanionAuthState = { pairingToken: null, creds: new Map() }
   private failures = new Map<string, { count: number; lockedUntil: number }>()
+  private seq = 0
 
   constructor(private readonly now: () => number = () => Date.now()) {}
 
   /** Arm a new pairing token; invalidates the previous one AND all creds. */
   arm(token: string): void {
-    this.state = { pairingToken: token, creds: new Set() }
+    this.state = { pairingToken: token, creds: new Map() }
   }
 
   /** Disarm everything (server stop). */
   disarm(): void {
-    this.state = { pairingToken: null, creds: new Set() }
+    this.state = { pairingToken: null, creds: new Map() }
   }
 
   isLocked(addr: string): boolean {
@@ -402,6 +415,9 @@ export class CompanionAuth {
   ): { result: 'paired'; cred: string } | { result: 'resumed' } | { result: 'denied' } {
     if (this.isLocked(addr)) return { result: 'denied' }
     if (frame.cred && this.state.creds.has(frame.cred)) {
+      const dev = this.state.creds.get(frame.cred)!
+      dev.lastSeenAt = this.now()
+      dev.addr = addr
       this.failures.delete(addr)
       return { result: 'resumed' }
     }
@@ -412,7 +428,8 @@ export class CompanionAuth {
     ) {
       this.state.pairingToken = null // single use
       const cred = mintCred()
-      this.state.creds.add(cred)
+      const t = this.now()
+      this.state.creds.set(cred, { id: `d${++this.seq}`, addr, pairedAt: t, lastSeenAt: t })
       this.failures.delete(addr)
       return { result: 'paired', cred }
     }
@@ -424,6 +441,32 @@ export class CompanionAuth {
     }
     this.failures.set(addr, f)
     return { result: 'denied' }
+  }
+
+  /** Snapshot of the currently-paired devices (non-secret), newest first. */
+  listDevices(): CompanionDevice[] {
+    return [...this.state.creds.values()].sort((a, b) => b.pairedAt - a.pairedAt)
+  }
+
+  /**
+   * Revoke one device by its (non-secret) id. Returns the revoked credential so
+   * the server can close that device's live socket, or null if unknown.
+   */
+  revoke(id: string): string | null {
+    for (const [cred, dev] of this.state.creds) {
+      if (dev.id === id) {
+        this.state.creds.delete(cred)
+        return cred
+      }
+    }
+    return null
+  }
+
+  /** Revoke every device; returns all revoked credentials. */
+  revokeAll(): string[] {
+    const creds = [...this.state.creds.keys()]
+    this.state.creds.clear()
+    return creds
   }
 
   /** Whether a pairing token is still waiting to be consumed. */
@@ -446,4 +489,4 @@ function timingSafeEqualStr(a: string, b: string): boolean {
 
 // ----- shared status shape (main ⇄ renderer) -----
 
-export type { CompanionInfo } from './types'
+export type { CompanionDevice, CompanionInfo } from './types'

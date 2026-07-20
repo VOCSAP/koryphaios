@@ -113,3 +113,57 @@ test('lockout after repeated failures', () => {
   now += 11 * 60_000
   expect(auth.isLocked('10.0.0.9')).toBe(false)
 })
+
+// ----- Lot 2: device list + revoke -----
+
+// Pairing is single-use per arm and re-arming wipes prior creds, so at most one
+// device is paired at a time in the current model — the list/revoke API stays
+// general (supports N) but is exercised here against that reality.
+test('listDevices exposes the paired device with a non-secret id; resume updates lastSeen', () => {
+  let now = 100
+  const auth = new CompanionAuth(() => now)
+  auth.arm('tok-a')
+  const a = auth.hello('10.0.0.2', { token: 'tok-a' }, () => 'cred-1')
+  const credA = a.result === 'paired' ? a.cred : ''
+
+  const devices = auth.listDevices()
+  expect(devices).toHaveLength(1)
+  // The id is non-secret and never equal to the credential.
+  expect(devices[0].id).not.toBe(credA)
+  expect(/^d\d+$/.test(devices[0].id)).toBe(true)
+  expect(devices[0].addr).toBe('10.0.0.2')
+  expect(devices[0].pairedAt).toBe(100)
+
+  // Resume bumps lastSeenAt and updates the address without adding a device.
+  now = 300
+  expect(auth.hello('10.0.0.9', { cred: credA }, () => 'x').result).toBe('resumed')
+  const again = auth.listDevices()
+  expect(again).toHaveLength(1)
+  expect(again[0].lastSeenAt).toBe(300)
+  expect(again[0].addr).toBe('10.0.0.9')
+})
+
+test('revoke removes the device and returns its credential; the cred then fails to resume', () => {
+  const auth = new CompanionAuth(() => 0)
+  auth.arm('tok')
+  const v = auth.hello('10.0.0.2', { token: 'tok' }, () => 'cred-1')
+  const cred = v.result === 'paired' ? v.cred : ''
+  const id = auth.listDevices()[0].id
+
+  expect(auth.revoke(id)).toBe(cred)
+  expect(auth.credCount).toBe(0)
+  // The revoked credential can no longer resume — this is the lost-phone kill switch.
+  expect(auth.hello('10.0.0.2', { cred }, () => 'x').result).toBe('denied')
+  // Revoking an unknown id is a no-op.
+  expect(auth.revoke('nope')).toBeNull()
+})
+
+test('revokeAll clears the device set and returns the revoked credentials', () => {
+  const auth = new CompanionAuth(() => 0)
+  auth.arm('t1')
+  const a = auth.hello('10.0.0.2', { token: 't1' }, () => 'cred-1')
+  const cred = a.result === 'paired' ? a.cred : ''
+  expect(auth.revokeAll()).toEqual([cred])
+  expect(auth.credCount).toBe(0)
+  expect(auth.listDevices()).toEqual([])
+})

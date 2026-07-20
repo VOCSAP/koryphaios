@@ -27,6 +27,7 @@ import {
   REMOTE_BLOCKED_CHANNELS,
   isPrivateAddress,
   parseClientFrame,
+  type CompanionDevice,
   type CompanionInfo,
   type CompanionServerFrame
 } from '../shared/companion'
@@ -43,12 +44,16 @@ export interface CompanionDeps {
   journal: (msg: string) => void
   /** Called whenever the public status changes (start/stop/clients). */
   onStatus: (info: CompanionInfo) => void
+  /** A device authenticated (paired or resumed) — surface it to the operator. */
+  onDeviceConnected?: (addr: string, kind: 'paired' | 'resumed') => void
 }
 
 interface ClientCtx {
   ws: WebSocket
   addr: string
   authed: boolean
+  /** The device credential this socket authed with (Lot 2: targeted revoke). */
+  cred: string | null
   mode: 'full' | 'light'
   removeSink: (() => void) | null
   alive: boolean
@@ -133,6 +138,39 @@ export class CompanionServer {
     }
   }
 
+  /** Currently-paired devices (non-secret metadata) for the operator UI. */
+  listDevices(): CompanionDevice[] {
+    return this.auth.listDevices()
+  }
+
+  /**
+   * Revoke one device by its non-secret id (Lot 2, lost-phone kill switch):
+   * invalidate its credential AND close its live socket so it cannot keep
+   * driving the app. Returns true when a device matched.
+   */
+  revokeDevice(id: string): boolean {
+    const cred = this.auth.revoke(id)
+    if (!cred) return false
+    for (const c of this.clients) {
+      if (c.authed && c.cred === cred) c.ws.close(4403, 'revoked')
+    }
+    this.deps.journal(`companion: device revoked (${id})`)
+    this.deps.onStatus(this.info)
+    return true
+  }
+
+  /** Revoke every paired device and drop their sockets. Returns the count. */
+  revokeAllDevices(): number {
+    const creds = new Set(this.auth.revokeAll())
+    if (creds.size === 0) return 0
+    for (const c of this.clients) {
+      if (c.authed && c.cred && creds.has(c.cred)) c.ws.close(4403, 'revoked')
+    }
+    this.deps.journal(`companion: all devices revoked (${creds.size})`)
+    this.deps.onStatus(this.info)
+    return creds.size
+  }
+
   /** Start (or restart with a fresh token). Throws with an operator-readable
    * message when the environment cannot serve (no LAN, no built bundle). */
   async start(): Promise<CompanionInfo> {
@@ -215,6 +253,7 @@ export class CompanionServer {
       ws,
       addr,
       authed: false,
+      cred: null,
       mode: 'full',
       removeSink: null,
       alive: true,
@@ -247,12 +286,17 @@ export class CompanionServer {
         if (verdict.result === 'paired') {
           // Single-use token consumed — the QR is now dead.
           this.pairingToken = null
+          ctx.cred = verdict.cred
           this.send(ctx, { t: 'welcome', cred: verdict.cred })
           this.deps.journal(`companion: device paired from ${addr}`)
         } else {
+          ctx.cred = frame.cred ?? null
           this.send(ctx, { t: 'welcome', cred: '' })
           this.deps.journal(`companion: device resumed from ${addr}`)
         }
+        // Lot 2: surface the connection to the operator (toast/attention), not
+        // just the activity journal — an unexpected reconnect should be visible.
+        this.deps.onDeviceConnected?.(addr, verdict.result)
         ctx.removeSink = addEventSink((channel, payload) => this.forward(ctx, channel, payload))
         this.deps.onStatus(this.info)
         return

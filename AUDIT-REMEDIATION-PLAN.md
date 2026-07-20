@@ -38,9 +38,15 @@ Branche : `claude/security-maintenance-audit-rxakng` (base `experimental`).
 - [x] **B4** `command`/`args` d'un template **projet (local)** → gate C19 par contenu ; templates globaux (opérateur) non gatés. + **M-SEC-9** containment `templateSource` sur `template:read`/`apply`.
 - [x] **B9** `config:set` rejette tout override de `projectDir` (jamais un réglage runtime). projectDir fixé au boot → pas de re-gate nécessaire.
 
-### Lot 2 — Companion (device management)
-- [ ] Liste d'appareils appairés + révocation manuelle + « déconnecter tous ».
-- [ ] Notification de connexion d'un appareil sur le Deck.
+### Lot 2 — Companion (device management) ✅ FAIT (UI à vérifier visuellement)
+- [x] `CompanionAuth` : suivi des appareils (id non-secret, addr, pairedAt, lastSeenAt), `listDevices` / `revoke(id)` / `revokeAll` (pur, testé).
+- [x] `CompanionServer` : `cred` stocké par client ; `listDevices` / `revokeDevice` (ferme la socket = kill switch) / `revokeAllDevices` ; `onDeviceConnected`.
+- [x] IPC `companion:devices|revoke|revoke-all` + event `companion:device-connected` ; **tous remote-bloqués** (tier 3) — un téléphone ne peut jamais lister/révoquer.
+- [x] Preload + `DeckApi` + manifeste + tiers + parité i18n (en/fr/EN_DEFAULTS).
+- [x] `CompanionDialog` : section liste d'appareils + boutons Révoquer / Tout révoquer + refresh sur connexion/révocation. CSS ajouté.
+- [x] Notification de connexion : entrée journal (déjà) + broadcast `companion:device-connected` pour un toast.
+- Note : modèle **un seul appareil actif à la fois** (le ré-armement du QR invalide les creds précédents — comportement existant, non modifié). Multi-appareils = décision de design séparée.
+- ⚠️ **UI renderer à valider visuellement** par l'opérateur (impossible à lancer/vérifier ici) — logique backend+IPC couverte par tests + typecheck.
 
 ### Lot 3 — Broker transparent (partiel)
 - [x] **B2** garde `Origin` (rejette toute requête portant un `Origin` non-loopback ; les clients natifs server.ts/CLI n'envoient pas d'`Origin` → transparent). Pas de Host allow-list (incompatible avec un bind 0.0.0.0 sans config).
@@ -79,3 +85,13 @@ B1 est par ailleurs une menace **d'initié LAN** (basse priorité dans le modèl
 - Tests ajoutés : garde Origin (403 cross-origin, 200 loopback, 200 sans Origin, 401 mauvais token).
 - Vérif : `bun test` complet → 554 pass / 0 fail ; smoke build `broker/server/cli` OK ; typecheck desktop clean.
 - **B1/NF-A non implémenté** : en attente de la décision de rollout de l'opérateur (cf. section ci-dessus).
+
+### Lot 2 — Companion device management (fait)
+- `shared/companion.ts` : `CompanionAuth` passe de `Set<cred>` à `Map<cred, CompanionDevice>` ; ajout `listDevices`/`revoke`/`revokeAll` ; id d'appareil non-secret (`d<seq>`).
+- `shared/types.ts` : type `CompanionDevice` + 3 méthodes DeckApi + 1 event.
+- `companion-server.ts` : `cred` par `ClientCtx` ; `listDevices`/`revokeDevice`(ferme socket)/`revokeAllDevices` ; dep `onDeviceConnected`.
+- `index.ts` : câblage `onDeviceConnected` (broadcast) + IPC `companion:devices|revoke|revoke-all`.
+- `preload/index.ts` : `companionDevices`/`companionRevoke`/`companionRevokeAll` + `onCompanionDeviceConnected`.
+- Manifeste + `REMOTE_BLOCKED_CHANNELS` (3 nouveaux) + `CHANNEL_TIERS` (tier 3) mis à jour.
+- `CompanionDialog.tsx` + `styles.css` : UI liste + révocation. i18n en/fr/EN_DEFAULTS.
+- Tests : `listDevices`/`revoke`/`revokeAll` (modèle mono-appareil). Suite desktop 391 pass ; typecheck clean ; parité i18n OK.

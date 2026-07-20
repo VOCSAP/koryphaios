@@ -4038,6 +4038,52 @@ code {
   text-align: center;
 }
 
+/* ----- Companion paired-device list (Lot 2: list + revoke) ----- */
+.companion-devices {
+  width: 100%;
+  margin-top: 12px;
+  border-top: 1px solid var(--border, #333);
+  padding-top: 10px;
+}
+.companion-devices-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.companion-devices-head h3 {
+  font-size: 13px;
+  margin: 0;
+}
+.companion-device-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.companion-device-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+}
+.companion-device-addr {
+  font-family: var(--mono, monospace);
+  color: var(--fg-dim);
+}
+.companion-devices .link-btn {
+  background: none;
+  border: none;
+  color: #ff6b6b;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+.companion-devices .link-btn:hover {
+  text-decoration: underline;
+}
+
 /* ----- Remote link overlay (reconnecting / host gone) ----- */
 .remote-overlay {
   position: fixed;
