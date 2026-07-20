@@ -230,13 +230,45 @@ navigateur, ou une vraie app Android ? Comparaison honnête :
 | Notifications hors app | WS tué par Android quand l'onglet passe en arrière-plan | Foreground service qui tient le WS → alerte « un agent demande ton attention » |
 | Clavier terminal | Barre de touches web (pattern Termux/ttyd) | Contrôle total du clavier, IME custom possible |
 
-**Recommandation : v1 = web/PWA.** Le coût marginal est quasi nul (c'est le
-livrable naturel de la voie C) et l'argument version-servie-par-l'hôte est
-structurel. Si à l'usage les trois frictions natives (avertissement cert,
-notifications en arrière-plan, clavier) pèsent vraiment, la réponse n'est PAS
-une UI native from scratch mais un **wrapper fin Capacitor/TWA autour du même
-bundle web** — on gagne le pinning du cert, le foreground service et un
-meilleur clavier sans jamais dupliquer l'UI.
+**Décision opérateur : coquille Capacitor d'emblée** (pas de détour PWA). Le
+critère qui tranche est le scénario réel d'usage : on lance des agents, on
+pose le téléphone, on revient une heure plus tard. Android tue le WebSocket
+d'un onglet en arrière-plan en quelques minutes — un client navigateur ne
+survivrait jamais à une session de dev utile, et maintenir l'écran allumé
+n'est pas une option. Il faut un process natif qui tienne la connexion.
+
+La coquille reste FINE — deux façons de l'architecturer, la seconde retenue :
+
+- ~~(a) Bundle web empaqueté dans l'APK~~ : on perdrait l'avantage structurel
+  « l'hôte sert l'UI » — risque de décalage APK ↔ desktop à chaque release,
+  à gérer par un handshake de version de protocole. À éviter.
+- **(b) APK = pure coquille, l'UI vient toujours de l'hôte.** L'app Android
+  embarque uniquement : le scanner QR natif, une WebView pointée sur l'URL
+  scannée (le PC sert le même bundle renderer qu'en desktop), la confiance
+  du certificat auto-signé de l'hôte (pinning — l'avertissement navigateur
+  disparaît), le service foreground, et le verrou biométrique (5.5). La
+  coquille ne change presque jamais ; l'UI est toujours exactement à la
+  version de l'hôte. C'est la voie C jusqu'au bout.
+
+### Arrière-plan : ne pas streamer, écouter
+
+Tenir le flux complet (`pty:data` de N sessions) pendant une heure d'écran
+éteint serait un gouffre à batterie — et ne sert à rien : personne ne lit un
+terminal éteint. Le bon découpage :
+
+- **Premier plan** : WS complet, tuiles live, comme sur le PC.
+- **Arrière-plan** (service foreground Android, notification persistante
+  « Compagnon connecté ») : le client bascule sur un **canal léger** — il
+  garde le WS mais coupe les abonnements volumineux et ne reçoit plus que
+  les événements de signal : `session:attention` (existe déjà dans DeckApi —
+  c'est précisément « un agent demande ton attention »), `session:quota`,
+  `inbox:new`, `broker:status` → notifications locales Android. Retour au
+  premier plan → verrou biométrique → réabonnement complet + refresh d'état
+  (le store se ré-hydrate par `listSessions`/`getConfig`, déjà le patron).
+- Limite honnête : même un service foreground subit Doze (fenêtres de
+  maintenance réseau, écran éteint longtemps). Pour le scénario « une heure »
+  c'est en pratique OK avec l'exemption d'optimisation batterie demandée à
+  l'installation ; les notifications peuvent au pire arriver par vagues.
 
 Remarque importante : le mode mobile ne doit PAS être un fork du renderer.
 C'est le même bundle, avec un état `isRemote` (posé par le shim) et des media
@@ -409,8 +441,8 @@ Conséquences — la liste 5.2 fond considérablement :
 | Credential d'appareil durable (5.1.2) | **Remplacé** par un token de pure session — plus rien à stocker côté mobile |
 | Registre d'appareils, révocation, kill switch (5.2.1) | **Superflus** — fermer l'app est la révocation ; le kill switch, c'est la croix de la fenêtre |
 | Expiration / ré-appairage 30 j (5.2.3) | **Sans objet** — la durée de vie est celle du process |
-| Step-up biométrique (5.2.2) | **Optionnel** — le scan QR prouve déjà la présence physique au PC à chaque lancement ; ne reste utile que contre le vol du téléphone *pendant* une session active |
-| Verrouillage d'inactivité (5.2.3) | **Conservé** — même raison (téléphone posé, session ouverte) |
+| Step-up biométrique par action (5.2.2) | **Remplacé par mieux** : un **verrou d'app façon WhatsApp** (5.5 bis) — critère fort retenu |
+| Verrouillage d'inactivité (5.2.3) | **Absorbé** par le verrou d'app : passer en arrière-plan/veille verrouille |
 | Anti-bruteforce (5.2.4) | **Conservé** — le token reste devinable par force brute tant que le serveur écoute |
 | TLS (5.1.4) | **Conservé**, avec une nuance importante : le **certificat doit rester stable d'un lancement à l'autre** (généré une fois, persisté) même si les tokens sont éphémères — sinon l'avertissement navigateur revient à chaque session |
 | Journal (5.1.5) | **Conservé** |
@@ -434,6 +466,33 @@ téléphone qui change d'adresse) pour un gain marginal est du pur coût. Le
 filtre statique « rejeter tout ce qui n'est pas RFC1918 » (5.1.3), lui, reste
 : zéro maintenance, il encode « LAN only » et rien d'autre.
 
+### 5.5 bis — Verrou d'app biométrique (façon WhatsApp) : critère fort retenu
+
+Le scénario d'attaque résiduel du mode éphémère est précis : le téléphone
+posé, session compagnon active, quelqu'un le ramasse. Réponse retenue
+(décision opérateur) : **verrouillage écran = verrouillage de l'app**, comme
+WhatsApp/Signal :
+
+- Passage en arrière-plan ou mise en veille de l'écran → l'app se verrouille.
+  À la réouverture, `BiometricPrompt` (empreinte / visage, fallback code de
+  l'appareil) avant de ré-afficher quoi que ce soit. Sans empreinte
+  autorisée, l'UI reste inaccessible.
+- **Le verrou est un rideau, pas une déconnexion** : le service foreground et
+  le canal léger (§4) continuent de tourner derrière — les agents avancent,
+  les notifications arrivent, et au déverrouillage on retrouve la session
+  telle quelle. Verrouiller ne casse jamais le flux de travail.
+- Implémenté dans la **coquille native**, pas dans l'UI web : c'est la
+  WebView entière qui est masquée. À coupler avec `FLAG_SECURE` sur
+  l'activité — l'aperçu de l'app dans le sélecteur de tâches Android est
+  noirci et les captures d'écran bloquées (un terminal affiche des chemins,
+  du code, parfois des secrets ; la vignette des « apps récentes » est une
+  fuite classique).
+- Nuance à connaître : `BiometricPrompt` accepte **toute empreinte enrôlée
+  sur le téléphone** — « personne autorisée » = « personne enrôlée sur
+  l'appareil », c'est l'OS qui définit ce périmètre, pas l'app.
+- Ce verrou **remplace** le step-up par action de 5.2.2 (plus simple, plus
+  systématique) et **absorbe** le verrouillage d'inactivité de 5.2.3.
+
 ## 6. Découpage en lots (si la voie C est retenue)
 
 | Lot | Contenu | Dépend de | Taille |
@@ -441,12 +500,14 @@ filtre statique « rejeter tout ce qui n'est pas RFC1918 » (5.1.3), lui, reste
 | **M1 — Bridge core** | Serveur HTTP statique (bundle renderer) + WS DeckApi dans le main ; shim `window.api` côté web ; fan-out des 14 `webContents.send` ; feature-gate `<webview>`/dialogues | — | **M** |
 | **M2 — Bouton Compagnon & socle sécurité (5.1 + 5.5)** | Bouton « Compagnon » + QR, token de session éphémère lié au lancement, TLS auto-signé (cert stable persisté), filtre RFC1918, heartbeat + écran « hôte déconnecté », anti-bruteforce, table de tiers DeckApi (5.4), journalisation | M1 | **M** |
 | **M3 — Mode mobile UI** | Media queries (rail→tabs, drawer), `1×1` forcé + sélecteur de session, barre de touches xterm, dialogues d'approbation re-routés en DeckApi (§3) | M1 | **M** |
-| **M4 — Défense en profondeur (optionnel sous 5.5)** | Verrouillage d'inactivité, step-up biométrique, profil restreint, conscience du profil réseau | M2 | **S/M** |
-| **M5 — Confort** | PWA (manifest, icônes), mDNS, backpressure `pty:data`, reconnexion WS auto, wrapper Capacitor/TWA si les frictions web pèsent (§4) | M1–M3 | **S/M** |
+| **M4 — Coquille Android Capacitor** | Scanner QR natif, WebView sur l'UI servie par l'hôte, pinning du cert auto-signé, service foreground + bascule canal léger/complet (§4), notifications locales (`session:attention`, `inbox:new`), verrou biométrique + `FLAG_SECURE` (5.5 bis), écran « hôte déconnecté » natif | M1–M3 | **M/L** |
+| **M5 — Confort** | mDNS, backpressure `pty:data`, reconnexion WS auto, profil restreint (option), conscience du profil réseau | M1–M4 | **S/M** |
 
-Sous le mode éphémère retenu (5.5), **M1+M2+M3 couvrent intégralement le
-scénario cible** (Compagnon → scan → autonomie complète → hôte déconnecté à
-la fermeture) ; M4 n'est que de la défense en profondeur. Chaque lot est testable avec l'outillage existant
+M1+M2+M3 donnent un compagnon utilisable au premier plan (testable dans un
+simple navigateur, qui reste le client de debug naturel) ; **M4 est
+indispensable au scénario cible réel** — poser le téléphone une heure pendant
+que les agents travaillent et être notifié — et porte les deux exigences
+fortes retenues : survie en arrière-plan et verrou biométrique. Chaque lot est testable avec l'outillage existant
 (`bun test` sur le bridge et le shim — logique pure dans `desktop/src/shared/`
 conformément aux conventions, cf. DESKTOP.md).
 
