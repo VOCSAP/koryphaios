@@ -35,6 +35,14 @@ export interface Peer {
 export type PeerStatus = "active" | "dormant";
 export type ActivityStatus = "active" | "sleep" | "closed";
 
+/**
+ * The peer shape crossing the broker's HTTP boundary (B1). The routing token
+ * (instance_token) and the local PIDs are the impersonation capability and are
+ * NEVER serialized to a client — only these public columns are. list-peers and
+ * admin/peers both project to this shape.
+ */
+export type PublicPeer = Omit<Peer, "instance_token" | "pid" | "client_pid">;
+
 export interface Message {
   id: number;
   from_token: InstanceToken;
@@ -135,8 +143,27 @@ export interface PollMessagesRequest {
   instance_token: InstanceToken;
 }
 
+/**
+ * A message as delivered to a client (B1/NF-A). The broker resolves the sender
+ * server-side and NEVER exposes the routing tokens (from_token/to_token): the
+ * client receives the already-resolved from_peer_id (+ sender meta), exactly
+ * like the WebSocket push frame. Reserved senders resolve to their sentinel
+ * peer_id ("deck"/"operator"); an unresolvable (gone) sender yields "".
+ */
+export interface DeliveredMessage {
+  id: number;
+  from_peer_id: PeerId;
+  from_summary: string;
+  from_host: string;
+  from_cwd: string;
+  group_id: GroupId;
+  text: string;
+  sent_at: string;
+  delivered: boolean;
+}
+
 export interface PollMessagesResponse {
-  messages: Message[];
+  messages: DeliveredMessage[];
 }
 
 // --- Deck system sender (v0.3.4) ---

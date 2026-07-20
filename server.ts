@@ -21,7 +21,7 @@ import {
 import { hostname } from "node:os";
 import { createHash } from "node:crypto";
 import type {
-  Peer,
+  PublicPeer,
   RegisterResponse,
   PollMessagesResponse,
   GroupId,
@@ -360,31 +360,20 @@ async function pollFallback() {
     });
     const fresh = result.messages.filter((m) => !notifiedMessageIds.has(m.id));
     if (fresh.length === 0) return;
-    // Best-effort resolution of from_token -> Peer for richer notification meta.
-    let tokenToPeer = new Map<string, Peer>();
-    try {
-      const peers = await brokerFetch<Peer[]>("/list-peers", {
-        scope: "machine",
-        instance_token: myInstanceToken,
-        cwd: myCwd,
-        git_root: myGitRoot,
-        project_key: myProjectKey,
-      });
-      tokenToPeer = new Map(peers.map((p) => [p.instance_token, p]));
-    } catch { /* non-fatal */ }
+    // B1/NF-A: the broker already resolved the sender (from_peer_id + meta) and
+    // never exposes routing tokens, so no /list-peers round-trip is needed.
     for (const msg of fresh) {
-      const fromDeck = isDeckSender(msg.from_token);
-      const peer = tokenToPeer.get(msg.from_token);
+      const fromDeck = isDeckSender(msg.from_peer_id);
       try {
         await mcp.notification({
           method: "notifications/claude/channel",
           params: {
             content: fromDeck ? renderDeckAnnouncement(msg.text) : msg.text,
             meta: {
-              from_peer_id: fromDeck ? DECK_PEER_ID : (peer?.peer_id ?? msg.from_token),
-              from_summary: peer?.summary ?? "",
-              from_cwd: peer?.cwd ?? "",
-              from_host: peer?.host ?? "",
+              from_peer_id: fromDeck ? DECK_PEER_ID : (msg.from_peer_id || "<dormant peer>"),
+              from_summary: msg.from_summary,
+              from_cwd: msg.from_cwd,
+              from_host: msg.from_host,
               sent_at: msg.sent_at,
             },
           },
@@ -752,11 +741,10 @@ function formatElapsed(iso: string | null): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
-function formatPeer(p: Peer): string {
+function formatPeer(p: PublicPeer): string {
   const statusLabel = { active: "🟢 active", sleep: "🟡 sleep", closed: "🔴 closed" }[p.activity_status];
-  const idLine = p.host && p.client_pid
-    ? `peer_id: ${p.peer_id}  (${p.host} - PID: ${p.client_pid})`
-    : `peer_id: ${p.peer_id}`;
+  // B1: the client PID is no longer exposed over the wire; show host only.
+  const idLine = p.host ? `peer_id: ${p.peer_id}  (${p.host})` : `peer_id: ${p.peer_id}`;
   const parts = [`${statusLabel}  ${idLine}`, `CWD: ${p.cwd}`];
   if (p.git_root) parts.push(`Repo: ${p.git_root}`);
   if (p.project_key) parts.push(`Project: ${p.project_key}`);
@@ -851,7 +839,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         };
       }
       try {
-        const peers = await brokerFetch<Peer[]>("/list-peers", {
+        const peers = await brokerFetch<PublicPeer[]>("/list-peers", {
           scope,
           instance_token: myInstanceToken,
           cwd: myCwd,
@@ -961,20 +949,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         if (result.messages.length === 0) {
           return { content: [{ type: "text" as const, text: "No new messages." }] };
         }
-        // Resolve from_token -> from_peer_id by listing peers in the group.
-        const peers = await brokerFetch<Peer[]>("/list-peers", {
-          scope: "machine",
-          instance_token: myInstanceToken,
-          cwd: myCwd,
-          git_root: myGitRoot,
-          project_key: myProjectKey,
-        });
-        const tokenToId = new Map(peers.map((p) => [p.instance_token, p.peer_id]));
+        // B1/NF-A: from_peer_id is resolved by the broker; no /list-peers needed.
         const lines = result.messages.map((m) => {
-          if (isDeckSender(m.from_token)) {
+          if (isDeckSender(m.from_peer_id)) {
             return `From ${DECK_PEER_ID} (${m.sent_at}):\n${renderDeckAnnouncement(m.text)}`;
           }
-          const peerId = tokenToId.get(m.from_token) ?? "<dormant peer>";
+          const peerId = m.from_peer_id || "<dormant peer>";
           return `From ${peerId} (${m.sent_at}):\n${m.text}`;
         });
         return {
@@ -1006,7 +986,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       // by re-querying our own row via a lightweight self-lookup.
       let currentSummary = "";
       try {
-        const peers = await brokerFetch<Peer[]>("/list-peers", {
+        const peers = await brokerFetch<PublicPeer[]>("/list-peers", {
           scope: "machine",
           instance_token: myInstanceToken,
           cwd: myCwd,

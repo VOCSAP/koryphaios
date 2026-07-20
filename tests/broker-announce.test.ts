@@ -119,12 +119,14 @@ test("deck announcements are pollable and never auto-delivered", async () => {
 
   await announce(g, "ping all");
 
-  const poll = await post<{ messages: { from_token: string; text: string }[] }>(
-    `${broker.url}/poll-messages`,
-    { instance_token: a.body.instance_token }
-  );
+  const poll = await post<{
+    messages: { from_peer_id: string; from_token?: string; to_token?: string; text: string }[];
+  }>(`${broker.url}/poll-messages`, { instance_token: a.body.instance_token });
   expect(poll.body.messages.length).toBe(1);
-  expect(poll.body.messages[0]!.from_token).toBe("__deck__");
+  // B1/NF-A: the sender is resolved to its peer_id; the tokens are never exposed.
+  expect(poll.body.messages[0]!.from_peer_id).toBe("deck");
+  expect(poll.body.messages[0]!.from_token).toBeUndefined();
+  expect(poll.body.messages[0]!.to_token).toBeUndefined();
   expect(poll.body.messages[0]!.text).toBe("ping all");
 });
 
@@ -154,14 +156,14 @@ test("to_peer_id delivers to ONE active peer only; unknown target -> 404", async
   expect(targeted.status).toBe(200);
   expect(targeted.body.sent).toBe(1);
 
-  const leadPoll = await post<{ messages: { from_token: string; text: string }[] }>(
+  const leadPoll = await post<{ messages: { from_peer_id: string; text: string }[] }>(
     `${broker.url}/poll-messages`,
     { instance_token: lead.body.instance_token }
   );
   expect(leadPoll.body.messages.some((m) => m.text === "next item: fix login")).toBe(true);
   expect(
-    leadPoll.body.messages.find((m) => m.text === "next item: fix login")!.from_token
-  ).toBe("__deck__");
+    leadPoll.body.messages.find((m) => m.text === "next item: fix login")!.from_peer_id
+  ).toBe("deck");
 
   const otherPoll = await post<{ messages: { text: string }[] }>(`${broker.url}/poll-messages`, {
     instance_token: other.body.instance_token,

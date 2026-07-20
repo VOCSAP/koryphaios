@@ -52,17 +52,15 @@ Branche : `claude/security-maintenance-audit-rxakng` (base `experimental`).
 - [x] **B2** garde `Origin` (rejette toute requête portant un `Origin` non-loopback ; les clients natifs server.ts/CLI n'envoient pas d'`Origin` → transparent). Pas de Host allow-list (incompatible avec un bind 0.0.0.0 sans config).
 - [x] **M-SEC-1** comparaisons constant-time (`safeEqual` via `timingSafeEqual`) : `broker_token` + les 3 sites `group_secret_hash`.
 - [x] **M-LOG-1** écritures atomiques (temp+rename) : `store.ts` (config/sessions), `graph-store.ts`, `inbox-store.ts`, `scope-secrets.ts` (helper `atomic-write.ts`) + `shared/peer-cache.ts` (helper pid-scoped).
-- [ ] **B1 + NF-A** projections publiques `peers`/`messages` — **EN ATTENTE DÉCISION OPÉRATEUR** (voir ci-dessous).
+- [x] **B1 + NF-A** projections publiques `peers`/`messages` — **FAIT** (mise à jour coordonnée broker+client validée par l'opérateur).
 
-## ⚠️ Point à trancher — B1/NF-A (fuite d'`instance_token`)
+## ✅ B1/NF-A — traité (mise à jour coordonnée broker + client)
 
-Le correctif *transparent* de B1 (le broker cesse d'exposer `instance_token`/`from_token`,
-et résout `from_peer_id` côté serveur pour poll/peek) **change le format de fil broker↔server.ts**.
-Dans la topologie de l'opérateur (**broker central + plusieurs postes clients**), une mise à jour
-échelonnée (broker à jour, client pas encore) casserait la résolution des messages.
-→ Décision requise : (a) mise à jour coordonnée broker+clients en une fois, ou (b) rollout en deux
-phases (d'abord ajouter `from_peer_id` sans retirer `from_token`, retrait au release suivant).
-B1 est par ailleurs une menace **d'initié LAN** (basse priorité dans le modèle de confiance).
+Décision opérateur : mise à jour **coordonnée** broker + client (option a). Comme broker.ts et
+server.ts sont dans le même paquet, la mise à jour se fait en bloc → pas de skew.
+Le format de fil change (breaking, assumé) : `instance_token`/`pid`/`client_pid` ne sortent plus
+de `list-peers`/`admin/peers` ; `from_token`/`to_token` ne sortent plus de `poll`/`peek` (le broker
+résout `from_peer_id` côté serveur). Le PID client n'est plus affiché dans `list_peers` (info locale).
 
 ## Journal d'implémentation
 
@@ -84,7 +82,11 @@ B1 est par ailleurs une menace **d'initié LAN** (basse priorité dans le modèl
 - `shared/peer-cache.ts` : `writeCacheAtomic` (temp pid-scopé + rename) sur les 2 sites.
 - Tests ajoutés : garde Origin (403 cross-origin, 200 loopback, 200 sans Origin, 401 mauvais token).
 - Vérif : `bun test` complet → 554 pass / 0 fail ; smoke build `broker/server/cli` OK ; typecheck desktop clean.
-- **B1/NF-A non implémenté** : en attente de la décision de rollout de l'opérateur (cf. section ci-dessus).
+### Lot 3 — B1/NF-A (fait)
+- `shared/types.ts` : `PublicPeer` (Omit instance_token/pid/client_pid), `DeliveredMessage` (from_peer_id + meta, sans tokens) ; `PollMessagesResponse.messages` → `DeliveredMessage[]`.
+- `broker.ts` : helpers `toPublicPeer` + `resolveSenderMeta` + `toDeliveredMessage` ; `handleListPeers` → `PublicPeer[]` ; `/admin/peers` projeté ; `poll`/`peek` renvoient `DeliveredMessage[]`.
+- `server.ts` : `pollFallback` + `check_messages` lisent `from_peer_id`/meta (plus de round-trip `/list-peers`) ; `formatPeer` en `PublicPeer` (PID retiré de l'affichage) ; fetches `PublicPeer[]`.
+- Tests broker mis à jour (identification par `peer_id`) + assertions de non-fuite (instance_token/pid/client_pid/from_token/to_token `undefined`). Suite complète 557 pass ; smoke build + typecheck clean.
 
 ### Lot 2 — Companion device management (fait)
 - `shared/companion.ts` : `CompanionAuth` passe de `Set<cred>` à `Map<cred, CompanionDevice>` ; ajout `listDevices`/`revoke`/`revokeAll` ; id d'appareil non-secret (`d<seq>`).

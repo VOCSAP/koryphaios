@@ -57,7 +57,9 @@ import type {
   OperatorInboxResponse,
   OperatorInboxMessage,
   Peer,
+  PublicPeer,
   Message,
+  DeliveredMessage,
   GroupId,
   InstanceToken,
 } from "./shared/types.ts";
@@ -842,7 +844,35 @@ function handleSetId(body: SetIdRequest): SetIdResponse | { error: string; statu
   return { peer_id: body.new_peer_id, previous: me.peer_id };
 }
 
-function handleListPeers(body: ListPeersRequest): Peer[] {
+// B1: strip the routing token + local PIDs before a peer row crosses the HTTP
+// boundary. Only the public columns are serialized to any client.
+function toPublicPeer(p: Peer): PublicPeer {
+  const { instance_token: _t, pid: _p, client_pid: _c, ...pub } = p;
+  return pub;
+}
+
+// NF-A: resolve a message's sender to its public identity (peer_id + meta),
+// server-side, so poll/peek never expose from_token/to_token. Reserved senders
+// (deck/operator) map to their sentinel peer_id; an unresolvable/gone sender
+// yields an empty from_peer_id (the client renders a "<dormant peer>" placeholder).
+function resolveSenderMeta(
+  fromToken: InstanceToken
+): { from_peer_id: string; from_summary: string; from_host: string; from_cwd: string } {
+  if (fromToken === DECK_INSTANCE_TOKEN) {
+    return { from_peer_id: DECK_PEER_ID, from_summary: "", from_host: "", from_cwd: "" };
+  }
+  if (fromToken === OPERATOR_INSTANCE_TOKEN) {
+    return { from_peer_id: OPERATOR_PEER_ID, from_summary: "", from_host: "", from_cwd: "" };
+  }
+  const s = db.query(
+    "SELECT peer_id, summary, host, cwd FROM peers WHERE instance_token = ?"
+  ).get(fromToken) as { peer_id: string; summary: string; host: string; cwd: string } | null;
+  return s
+    ? { from_peer_id: s.peer_id, from_summary: s.summary, from_host: s.host, from_cwd: s.cwd }
+    : { from_peer_id: "", from_summary: "", from_host: "", from_cwd: "" };
+}
+
+function handleListPeers(body: ListPeersRequest): PublicPeer[] {
   // Filter implicitly by the caller's group_id, derived from instance_token.
   const callerRow = db.query(
     "SELECT group_id FROM peers WHERE instance_token = ?"
@@ -885,7 +915,7 @@ function handleListPeers(body: ListPeersRequest): Peer[] {
   const now = Date.now();
   return rows
     .filter((p) => p.instance_token !== body.instance_token)
-    .map((p): Peer => {
+    .map((p): PublicPeer => {
       let activity_status: Peer["activity_status"];
       if (p.status === "dormant") {
         activity_status = "closed";
@@ -894,7 +924,8 @@ function handleListPeers(body: ListPeersRequest): Peer[] {
       } else {
         activity_status = "sleep";
       }
-      return { ...p, activity_status };
+      // Project to the public shape: instance_token / pids never leave the broker.
+      return toPublicPeer({ ...p, activity_status });
     });
 }
 
@@ -1079,14 +1110,28 @@ function flushPendingForToken(token: InstanceToken): void {
   }
 }
 
+// NF-A: map an internal message row to the public DeliveredMessage — sender
+// resolved to peer_id + meta server-side, routing tokens dropped.
+function toDeliveredMessage(
+  r: Omit<Message, "delivered"> & { delivered: number }
+): DeliveredMessage {
+  return {
+    id: r.id,
+    ...resolveSenderMeta(r.from_token),
+    group_id: r.group_id,
+    text: r.text,
+    sent_at: r.sent_at,
+    delivered: Boolean(r.delivered),
+  };
+}
+
 function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse {
   type MessageRow = Omit<Message, "delivered"> & { delivered: number };
   const rows = selectUndelivered.all(body.instance_token) as MessageRow[];
   for (const row of rows) {
     markDelivered.run(row.id);
   }
-  const messages: Message[] = rows.map((r) => ({ ...r, delivered: Boolean(r.delivered) }));
-  return { messages };
+  return { messages: rows.map(toDeliveredMessage) };
 }
 
 // Like handlePollMessages but does NOT mark delivered.
@@ -1095,7 +1140,7 @@ function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse {
 function handlePeekMessages(body: PollMessagesRequest): PollMessagesResponse {
   type MessageRow = Omit<Message, "delivered"> & { delivered: number };
   const rows = selectUndelivered.all(body.instance_token) as MessageRow[];
-  return { messages: rows.map((r) => ({ ...r, delivered: Boolean(r.delivered) })) };
+  return { messages: rows.map(toDeliveredMessage) };
 }
 
 // --- Roadmap handlers (v0.4, PLAN C3) ---
@@ -1690,7 +1735,8 @@ const server = Bun.serve<WsData>({
           ? "SELECT * FROM peers ORDER BY group_id, peer_id"
           : "SELECT * FROM peers WHERE status = 'active' ORDER BY group_id, peer_id";
         const rows = db.query(sql).all() as Peer[];
-        return Response.json(rows);
+        // B1: even the admin dump never exposes routing tokens / PIDs.
+        return Response.json(rows.map(toPublicPeer));
       }
       if (path === "/roadmap/export") {
         const pk = url.searchParams.get("project_key") ?? "";

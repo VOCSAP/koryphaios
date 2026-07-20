@@ -37,10 +37,10 @@ test("admin/peers exposes dormant when ?include_dormant=1", async () => {
   await post(`${broker.url}/disconnect`, { instance_token: a.body.instance_token });
 
   const without = await get<any[]>(`${broker.url}/admin/peers`);
-  expect(without.body.find((p) => p.instance_token === a.body.instance_token)).toBeUndefined();
+  expect(without.body.find((p) => p.peer_id === a.body.peer_id)).toBeUndefined();
 
   const withDormant = await get<any[]>(`${broker.url}/admin/peers?include_dormant=1`);
-  const found = withDormant.body.find((p) => p.instance_token === a.body.instance_token);
+  const found = withDormant.body.find((p) => p.peer_id === a.body.peer_id);
   expect(found).toBeDefined();
   expect(found.status).toBe("dormant");
 });
@@ -68,7 +68,7 @@ test("dormant peers past TTL are purged by cleanStalePeers", async () => {
   for (let i = 0; i < 65 && stillThere; i++) {
     await Bun.sleep(500);
     const peers = await get<any[]>(`${broker.url}/admin/peers?include_dormant=1`);
-    stillThere = !!peers.body.find((p) => p.instance_token === a.body.instance_token);
+    stillThere = !!peers.body.find((p) => p.peer_id === a.body.peer_id);
   }
   expect(stillThere).toBe(false);
 }, 40_000);
