@@ -409,11 +409,12 @@ export interface RoadmapArchiveResponse {
   item: RoadmapItem
 }
 
-/** Navigation rail views: Home (C5), Agents, Browser (D1), Roadmap (C3), Graph (C26), Worktrees (C6), Journal (C14). */
+/** Navigation rail views: Home (C5), Agents, Browser (D1), Git (GX3), Roadmap (C3), Graph (C26), Worktrees (C6), Journal (C14). */
 export type DeckView =
   | 'home'
   | 'agents'
   | 'browser'
+  | 'git'
   | 'roadmap'
   | 'graph'
   | 'worktrees'
@@ -534,6 +535,13 @@ export interface SessionDiff {
   branch: DiffFile[] | null
   base: string | null
   /** Raw unified diff, capped (see truncated). */
+  text: string
+  truncated: boolean
+}
+
+/** Unified diff of a single file (PLAN GX1). */
+export interface FileDiff {
+  path: string
   text: string
   truncated: boolean
 }
@@ -721,6 +729,8 @@ export interface DeckApi {
   // diff / review (PLAN C13)
   /** Full diff picture of a dir (uncommitted + branch-vs-main for worktrees). */
   collectDiff(dir: string): Promise<SessionDiff>
+  /** Diff of ONE repo-relative file of the dir (Git rail view, PLAN GX2). */
+  collectFileDiff(dir: string, path: string): Promise<FileDiff>
   /** Spawn a one-shot review agent on the dir's diff (reports to the lead). */
   reviewDiff(dir: string): Promise<boolean>
 

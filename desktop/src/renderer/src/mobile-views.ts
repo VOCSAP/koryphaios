@@ -30,6 +30,9 @@ export const MOBILE_VIEWS: Record<DeckView, MobileViewMeta> = {
   home: { placement: 'tab', icon: '🏠', labelKey: 'nav.home' },
   agents: { placement: 'tab', icon: '🖥', labelKey: 'nav.agents' },
   roadmap: { placement: 'tab', icon: '🗺', labelKey: 'nav.roadmap' },
+  // Read-only diff browsing is desktop-first (PLAN GX3); the DiffPanel modal
+  // opened from the Worktrees view stays the mobile path to a diff.
+  git: { placement: 'desktop-only', icon: '±', labelKey: 'nav.git' },
   worktrees: { placement: 'more', icon: '⎇', labelKey: 'nav.worktrees' },
   journal: { placement: 'more', icon: '📜', labelKey: 'nav.journal' },
   // <webview>, Electron-only (EXPLORATION §3): absent from the mobile client.

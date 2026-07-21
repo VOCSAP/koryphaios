@@ -32,8 +32,9 @@ function FileList({ title, files }: { title: string; files: DiffFile[] }): React
   )
 }
 
-/** Minimal unified-diff colorizer: one <div> per line, classed by prefix. */
-function DiffText({ text }: { text: string }): React.JSX.Element {
+/** Minimal unified-diff colorizer: one <div> per line, classed by prefix.
+ * Shared with the Git rail view (PLAN GX3). */
+export function DiffText({ text }: { text: string }): React.JSX.Element {
   return (
     <pre className="diff-text">
       {text.split('\n').map((line, i) => {

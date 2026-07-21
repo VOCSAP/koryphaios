@@ -33,7 +33,7 @@ import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } f
 import { archiveRoadmap, computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
 import { createSessionWithWorktree } from './create-session'
 import { composePlanImportPrompt } from './import-plan'
-import { collectDiff, composeDiffReviewPrompt } from './diff-service'
+import { collectDiff, collectFileDiff, composeDiffReviewPrompt } from './diff-service'
 import {
   createWorktree,
   listWorktrees,
@@ -408,6 +408,11 @@ export function registerIpc({
   }
   regHandle('diff:collect', async (_e, dir: string) =>
     collectDiff(dir, await diffBase(dir))
+  )
+  // Per-file diff (PLAN GX2). collectFileDiff rejects paths escaping `dir`
+  // (the path crosses the renderer/companion boundary).
+  regHandle('diff:collect-file', async (_e, dir: string, path: string) =>
+    collectFileDiff(dir, path, await diffBase(dir))
   )
   // One-shot review agent (C7 pattern, code-constant prompt): reads the diff
   // in place and reports to the team-lead peer (C10) when one is live.

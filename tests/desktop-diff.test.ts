@@ -6,7 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   collectDiff,
+  collectFileDiff,
   composeDiffReviewPrompt,
+  isRepoRelative,
   parseNumstat,
   parseUntracked
 } from "../desktop/src/main/diff-service.ts";
@@ -95,6 +97,55 @@ test("collectDiff on a clean tree returns empty sections", async () => {
   expect(diff.uncommitted.length).toBe(0);
   // The feature commit is still there.
   expect(diff.branch!.length).toBe(1);
+});
+
+// ----- PLAN GX1: per-file diff -----
+// Repo state here: branch 'feature' (b.txt committed), clean working tree.
+
+test("isRepoRelative rejects absolute, traversal and empty paths", () => {
+  expect(isRepoRelative(repo, "a.txt")).toBe(true);
+  expect(isRepoRelative(repo, "dir/sub.ts")).toBe(true);
+  expect(isRepoRelative(repo, "../outside.txt")).toBe(false);
+  expect(isRepoRelative(repo, "dir/../../outside.txt")).toBe(false);
+  expect(isRepoRelative(repo, "/etc/passwd")).toBe(false);
+  expect(isRepoRelative(repo, "")).toBe(false);
+  expect(isRepoRelative(repo, ".")).toBe(false);
+});
+
+test("collectFileDiff shows only the asked file's uncommitted changes", async () => {
+  writeFileSync(join(repo, "a.txt"), "one\ntwo\nthree\nfile-diff\n");
+  writeFileSync(join(repo, "other.txt"), "noise\n");
+  await git(["add", "other.txt"]);
+
+  const diff = await collectFileDiff(repo, "a.txt", null);
+  expect(diff.path).toBe("a.txt");
+  expect(diff.text).toContain("+file-diff");
+  expect(diff.text).not.toContain("noise");
+  expect(diff.truncated).toBe(false);
+
+  await git(["reset", "HEAD", "other.txt"]);
+  rmSync(join(repo, "other.txt"));
+  await git(["checkout", "--", "a.txt"]);
+});
+
+test("collectFileDiff includes the branch section when a base is given", async () => {
+  const diff = await collectFileDiff(repo, "b.txt", "main");
+  expect(diff.text).toContain("# --- branch vs main ---");
+  expect(diff.text).toContain("+feature work");
+});
+
+test("collectFileDiff renders an untracked file as additions (--no-index)", async () => {
+  writeFileSync(join(repo, "fresh.txt"), "brand new\n");
+  const diff = await collectFileDiff(repo, "fresh.txt", null);
+  expect(diff.text).toContain("# --- untracked ---");
+  expect(diff.text).toContain("+brand new");
+  rmSync(join(repo, "fresh.txt"));
+});
+
+test("collectFileDiff refuses a path escaping the repo", async () => {
+  await expect(collectFileDiff(repo, "../secret.txt", null)).rejects.toThrow(
+    "not a repo-relative"
+  );
 });
 
 test("composeDiffReviewPrompt targets the lead when given, tile otherwise", () => {
