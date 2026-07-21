@@ -398,6 +398,24 @@ export function registerIpc({
   // a renderer/companion `dir`/`root` argument can never reach an arbitrary
   // path (e.g. /etc via the diff --no-index content dump). Both the diff
   // handlers and the explorer handlers route their path argument through it.
+  // Short-TTL memo of the raw worktree list: within one poll tick the diff
+  // and explorer handlers ask for it several times (requireWorkDir, diffBase,
+  // per-node explorer:list), and each call is a git subprocess. 1.5 s is well
+  // under the views' 10 s/30 s polls; a just-added worktree is briefly absent
+  // from the allow-set, which fails CLOSED (safe). Never caches sessions —
+  // those come live from service.list().
+  let wtMemo: { at: number; key: string; rows: Awaited<ReturnType<typeof listWorktrees>> } | null =
+    null
+  const WT_MEMO_MS = 1500
+  const cachedWorktrees = async (): Promise<Awaited<ReturnType<typeof listWorktrees>>> => {
+    const key = getConfig().projectDir
+    const now = Date.now()
+    if (wtMemo && wtMemo.key === key && now - wtMemo.at < WT_MEMO_MS) return wtMemo.rows
+    const rows = await listWorktrees(key)
+    wtMemo = { at: now, key, rows }
+    return rows
+  }
+
   const workDirRoots = async (): Promise<
     { path: string; label: string; main: boolean }[]
   > => {
@@ -407,7 +425,7 @@ export function registerIpc({
       if (!roots.has(p)) roots.set(p, { path: p, label, main })
     }
     try {
-      for (const w of await listWorktrees(getConfig().projectDir)) {
+      for (const w of await cachedWorktrees()) {
         add(w.path, `⎇ ${w.branch ?? w.path}`, w.main)
       }
     } catch {
@@ -433,7 +451,7 @@ export function registerIpc({
   // cwd) gets uncommitted-only. Never guessed from config.
   const diffBase = async (dir: string): Promise<string | null> => {
     try {
-      const all = await listWorktrees(getConfig().projectDir)
+      const all = await cachedWorktrees()
       const main = all.find((w) => w.main)
       const target = all.find((w) => w.path === resolvePath(dir))
       if (!main?.branch || !target || target.main) return null

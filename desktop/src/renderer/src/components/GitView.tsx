@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { DiffFile, FileDiff, SessionDiff, WorktreeRow } from '@shared/types'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
-import { DiffText } from './DiffPanel'
+import { DiffFileRow, DiffText } from './DiffPanel'
 
 // Git rail view (PLAN GX3): a permanent, READ-ONLY window on what the
 // sessions changed — the SCM-style promotion of the C13 DiffPanel. Left: the
@@ -63,7 +63,9 @@ export function GitView(): React.JSX.Element {
       })
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      const msg = e instanceof Error ? e.message : String(e)
+      window.api.reportError('git', `listWorktrees failed: ${msg}`)
+      setError(msg)
     }
   }, [sessions])
 
@@ -91,7 +93,11 @@ export function GitView(): React.JSX.Element {
           }
         },
         (e) => {
-          if (!stale) setError(e instanceof Error ? e.message : String(e))
+          if (!stale) {
+            const msg = e instanceof Error ? e.message : String(e)
+            window.api.reportError('git', `collectDiff failed: ${msg}`)
+            setError(msg)
+          }
         }
       )
     }
@@ -103,23 +109,34 @@ export function GitView(): React.JSX.Element {
     }
   }, [dir])
 
-  // Per-file narrowing (PLAN GX2 channel).
+  // Per-file narrowing (PLAN GX2 channel): polled on the same cadence as the
+  // full diff so a drilled-into file stays live while an agent edits it (the
+  // numstat on the left already ticks — the text below must follow).
   useEffect(() => {
     if (!dir || !file) {
       setFileDiff(null)
       return
     }
     let stale = false
-    window.api.collectFileDiff(dir, file).then(
-      (d) => {
-        if (!stale) setFileDiff(d)
-      },
-      (e) => {
-        if (!stale) setError(e instanceof Error ? e.message : String(e))
-      }
-    )
+    const collect = (): void => {
+      window.api.collectFileDiff(dir, file).then(
+        (d) => {
+          if (!stale) setFileDiff(d)
+        },
+        (e) => {
+          if (!stale) {
+            const msg = e instanceof Error ? e.message : String(e)
+            window.api.reportError('git', `collectFileDiff failed: ${msg}`)
+            setError(msg)
+          }
+        }
+      )
+    }
+    collect()
+    const timer = setInterval(collect, POLL_MS)
     return () => {
       stale = true
+      clearInterval(timer)
     }
   }, [dir, file])
 
@@ -157,15 +174,7 @@ export function GitView(): React.JSX.Element {
           title={f.path}
           onClick={() => setFile(file === f.path ? null : f.path)}
         >
-          <span className="diff-file-path">{f.path}</span>
-          {f.untracked ? (
-            <span className="diff-file-new">{t('diff.untracked')}</span>
-          ) : (
-            <span className="diff-file-counts">
-              {f.additions !== null ? <span className="diff-add">+{f.additions}</span> : '·'}{' '}
-              {f.deletions !== null ? <span className="diff-del">−{f.deletions}</span> : ''}
-            </span>
-          )}
+          <DiffFileRow file={f} />
         </button>
       ))}
     </div>

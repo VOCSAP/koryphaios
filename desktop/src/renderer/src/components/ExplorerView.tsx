@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ExplorerEntry, ExplorerFile, ExplorerRoot, HelpSelection } from '@shared/types'
+import { selectionLineRange } from '@shared/code-selection'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 
@@ -18,6 +19,10 @@ export function ExplorerView(): React.JSX.Element {
   const t = useT()
   const openHelpAssistant = useDeck((s) => s.openHelpAssistant)
   const openRoadmapDraft = useDeck((s) => s.openRoadmapDraft)
+  // "Explain" routes through the help assistant; when the operator hid it
+  // (config.helpButton === false) the seed would be silently consumed with no
+  // popup, so the action is hidden too. "Create a task" stays available.
+  const helpEnabled = useDeck((s) => s.config?.helpButton !== false)
 
   const [roots, setRoots] = useState<ExplorerRoot[]>([])
   const [root, setRoot] = useState<string | null>(null)
@@ -26,6 +31,8 @@ export function ExplorerView(): React.JSX.Element {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [file, setFile] = useState<string | null>(null)
   const [fileData, setFileData] = useState<ExplorerFile | null>(null)
+  /** Bumped by the Refresh button to force the open file to re-read. */
+  const [reloadNonce, setReloadNonce] = useState(0)
   /** Active text selection inside the viewer (PLAN GX7), lines 1-based. */
   const [selection, setSelection] = useState<HelpSelection | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -35,7 +42,11 @@ export function ExplorerView(): React.JSX.Element {
     (r: string, rel: string): void => {
       window.api.explorerList(r, rel).then(
         (entries) => setDirs((d) => ({ ...d, [rel]: entries })),
-        (e) => setError(e instanceof Error ? e.message : String(e))
+        (e) => {
+          const msg = e instanceof Error ? e.message : String(e)
+          window.api.reportError('files', `explorerList failed: ${msg}`)
+          setError(msg)
+        }
       )
     },
     []
@@ -48,7 +59,9 @@ export function ExplorerView(): React.JSX.Element {
       setRoot((r) => (r && next.some((x) => x.path === r) ? r : (next[0]?.path ?? null)))
       setError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      const msg = e instanceof Error ? e.message : String(e)
+      window.api.reportError('files', `explorerRoots failed: ${msg}`)
+      setError(msg)
     }
   }, [])
 
@@ -78,13 +91,17 @@ export function ExplorerView(): React.JSX.Element {
         if (!stale) setFileData(f)
       },
       (e) => {
-        if (!stale) setError(e instanceof Error ? e.message : String(e))
+        if (!stale) {
+          const msg = e instanceof Error ? e.message : String(e)
+          window.api.reportError('files', `explorerRead failed: ${msg}`)
+          setError(msg)
+        }
       }
     )
     return () => {
       stale = true
     }
-  }, [root, file])
+  }, [root, file, reloadNonce])
 
   const toggleDir = (rel: string): void => {
     setExpanded((prev) => {
@@ -171,8 +188,7 @@ export function ExplorerView(): React.JSX.Element {
     const before = document.createRange()
     before.selectNodeContents(pre)
     before.setEnd(range.startContainer, range.startOffset)
-    const startLine = before.toString().split('\n').length
-    const endLine = startLine + text.split('\n').length - 1
+    const { startLine, endLine } = selectionLineRange(before.toString(), text)
     setSelection({ file, startLine, endLine, text })
   }
 
@@ -235,7 +251,15 @@ export function ExplorerView(): React.JSX.Element {
             ))}
           </select>
         )}
-        <button onClick={() => void refresh().then(() => root && loadDir(root, ''))}>
+        <button
+          onClick={() => {
+            // Reload the roots, every already-loaded directory (expanded nodes
+            // included, so new files surface) and the open file.
+            void refresh()
+            if (root) for (const rel of Object.keys(dirs)) loadDir(root, rel)
+            setReloadNonce((n) => n + 1)
+          }}
+        >
           {t('git.refresh')}
         </button>
       </header>
@@ -260,7 +284,9 @@ export function ExplorerView(): React.JSX.Element {
                         end: selection.endLine
                       })}
                     </span>
-                    <button onClick={explainSelection}>{t('files.explain')}</button>
+                    {helpEnabled && (
+                      <button onClick={explainSelection}>{t('files.explain')}</button>
+                    )}
                     <button onClick={createTaskFromSelection}>{t('files.createTask')}</button>
                   </span>
                 )}
