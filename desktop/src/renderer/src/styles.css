@@ -2643,6 +2643,33 @@ code {
   min-width: 0;
 }
 
+/* Selection action bar (PLAN GX7): appears in the file head on selection. */
+.explorer-sel-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+
+/* Code selection attached to the next help question (PLAN GX7). */
+.help-selection {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-family: var(--mono, monospace);
+  color: var(--fg-dim);
+  border-top: 1px solid var(--border);
+}
+
+.help-selection-ref {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* "Needs you" (PLAN C11): violet pulse takes priority over the other states. */
 .dot-attention {
   background: #b678ff;

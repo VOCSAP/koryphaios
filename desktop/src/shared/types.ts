@@ -580,6 +580,19 @@ export interface HelpExchange {
 }
 
 /**
+ * Code selection attached to a help question or a roadmap draft (PLAN GX7):
+ * what the operator selected in the Files viewer. Travels to the assistant
+ * through the SYSTEM side (context file), never the command line.
+ */
+export interface HelpSelection {
+  /** Root-relative path of the viewed file. */
+  file: string
+  startLine: number
+  endLine: number
+  text: string
+}
+
+/**
  * One message an agent sent to the reserved 'operator' peer (PLAN C12), drained
  * from the broker by the main-process poll and pushed to the renderer inbox.
  */
@@ -784,7 +797,14 @@ export interface DeckApi {
   ensureSupervisor(): Promise<SessionRuntime>
 
   // help assistant (PLAN C9): one throwaway `claude -p` question, view-aware.
-  askHelp(question: string, view: DeckView, transcript: HelpExchange[]): Promise<string>
+  // `selection` (PLAN GX7): optional Files-view snippet, injected into the
+  // app-composed snapshot (system side).
+  askHelp(
+    question: string,
+    view: DeckView,
+    transcript: HelpExchange[],
+    selection?: HelpSelection
+  ): Promise<string>
   /** Resume digest (PLAN C17): fixed prompt + globally-configured sources. */
   askDigest(): Promise<string>
 

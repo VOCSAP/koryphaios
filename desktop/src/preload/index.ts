@@ -7,6 +7,7 @@ import type {
   DeckView,
   DesignPickEvent,
   HelpExchange,
+  HelpSelection,
   InboxMessage,
   LaunchConfig,
   PtyDataEvent,
@@ -132,8 +133,8 @@ const api: DeckApi = {
   listCaptureWindows: () => ipcRenderer.invoke('design:list-windows'),
   captureWindow: (id: string) => ipcRenderer.invoke('design:capture-window', id),
   ensureSupervisor: () => ipcRenderer.invoke('supervisor:ensure'),
-  askHelp: (question: string, view: DeckView, transcript: HelpExchange[]) =>
-    ipcRenderer.invoke('help:ask', question, view, transcript),
+  askHelp: (question: string, view: DeckView, transcript: HelpExchange[], selection?: HelpSelection) =>
+    ipcRenderer.invoke('help:ask', question, view, transcript, selection),
   askDigest: () => ipcRenderer.invoke('help:digest'),
 
   listTemplates: () => ipcRenderer.invoke('template:list'),

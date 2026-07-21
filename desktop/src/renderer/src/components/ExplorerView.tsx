@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ExplorerEntry, ExplorerFile, ExplorerRoot } from '@shared/types'
+import type { ExplorerEntry, ExplorerFile, ExplorerRoot, HelpSelection } from '@shared/types'
+import { useDeck } from '../store'
 import { useT } from '../i18n'
 
 // File explorer rail view (PLAN GX6): VS Code-style READ-ONLY browser over
@@ -10,9 +11,13 @@ import { useT } from '../i18n'
 
 /** Rendering cap: a huge file must not freeze the renderer. */
 const MAX_RENDER_LINES = 5000
+/** Cap on the code snippet carried into a roadmap draft (PLAN GX8). */
+const TASK_SNIPPET_MAX = 4000
 
 export function ExplorerView(): React.JSX.Element {
   const t = useT()
+  const openHelpAssistant = useDeck((s) => s.openHelpAssistant)
+  const openRoadmapDraft = useDeck((s) => s.openRoadmapDraft)
 
   const [roots, setRoots] = useState<ExplorerRoot[]>([])
   const [root, setRoot] = useState<string | null>(null)
@@ -21,6 +26,8 @@ export function ExplorerView(): React.JSX.Element {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [file, setFile] = useState<string | null>(null)
   const [fileData, setFileData] = useState<ExplorerFile | null>(null)
+  /** Active text selection inside the viewer (PLAN GX7), lines 1-based. */
+  const [selection, setSelection] = useState<HelpSelection | null>(null)
   const [error, setError] = useState<string | null>(null)
   const contentRef = useRef<HTMLPreElement>(null)
 
@@ -58,8 +65,9 @@ export function ExplorerView(): React.JSX.Element {
     if (root) loadDir(root, '')
   }, [root, loadDir])
 
-  // File selected: load its content.
+  // File selected: load its content (and drop any previous selection).
   useEffect(() => {
+    setSelection(null)
     if (!root || !file) {
       setFileData(null)
       return
@@ -140,6 +148,70 @@ export function ExplorerView(): React.JSX.Element {
     )
   }
 
+  // Selection capture (PLAN GX7): on mouseup inside the viewer, read the DOM
+  // selection and derive the 1-based line range from the text offset before
+  // the range start (the gutter is user-select:none, so only code is counted).
+  const captureSelection = (): void => {
+    const pre = contentRef.current
+    const sel = window.getSelection()
+    if (!pre || !file || !sel || sel.isCollapsed || sel.rangeCount === 0) {
+      setSelection(null)
+      return
+    }
+    const range = sel.getRangeAt(0)
+    if (!pre.contains(range.startContainer) || !pre.contains(range.endContainer)) {
+      setSelection(null)
+      return
+    }
+    const text = sel.toString()
+    if (!text.trim()) {
+      setSelection(null)
+      return
+    }
+    const before = document.createRange()
+    before.selectNodeContents(pre)
+    before.setEnd(range.startContainer, range.startOffset)
+    const startLine = before.toString().split('\n').length
+    const endLine = startLine + text.split('\n').length - 1
+    setSelection({ file, startLine, endLine, text })
+  }
+
+  const explainSelection = (): void => {
+    if (!selection) return
+    openHelpAssistant({
+      question: t('files.explainQuestion', {
+        file: selection.file,
+        start: selection.startLine,
+        end: selection.endLine
+      }),
+      selection
+    })
+  }
+
+  const createTaskFromSelection = (): void => {
+    if (!selection) return
+    const name = selection.file.split('/').pop() ?? selection.file
+    const snippet =
+      selection.text.length > TASK_SNIPPET_MAX
+        ? `${selection.text.slice(0, TASK_SNIPPET_MAX)}\n…`
+        : selection.text
+    openRoadmapDraft({
+      title: t('files.taskTitle', { file: name }),
+      kind: 'debt',
+      description: [
+        t('files.taskContext', {
+          file: selection.file,
+          start: selection.startLine,
+          end: selection.endLine
+        }),
+        '',
+        '```',
+        snippet,
+        '```'
+      ].join('\n')
+    })
+  }
+
   const lines = fileData && !fileData.binary ? fileData.content.split('\n') : []
   const shown = lines.slice(0, MAX_RENDER_LINES)
   const clipped = !!fileData && (fileData.truncated || lines.length > MAX_RENDER_LINES)
@@ -180,6 +252,18 @@ export function ExplorerView(): React.JSX.Element {
                 <span className="diff-file-path" title={file}>
                   {file}
                 </span>
+                {selection && (
+                  <span className="explorer-sel-actions">
+                    <span className="explorer-size">
+                      {t('files.selLines', {
+                        start: selection.startLine,
+                        end: selection.endLine
+                      })}
+                    </span>
+                    <button onClick={explainSelection}>{t('files.explain')}</button>
+                    <button onClick={createTaskFromSelection}>{t('files.createTask')}</button>
+                  </span>
+                )}
                 {fileData && <span className="explorer-size">{fileData.size} B</span>}
               </div>
               {fileData?.binary && (
@@ -191,7 +275,7 @@ export function ExplorerView(): React.JSX.Element {
                 </div>
               )}
               {fileData && !fileData.binary && (
-                <div className="explorer-code">
+                <div className="explorer-code" onMouseUp={captureSelection}>
                   <div className="explorer-gutter" aria-hidden="true">
                     {shown.map((_, i) => (
                       <div key={i}>{i + 1}</div>

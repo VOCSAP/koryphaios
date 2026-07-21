@@ -16,7 +16,7 @@ import type {
   StopResult
 } from '@shared/types'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
-import { buildHelpPrompt, buildHelpSystemPrompt } from './help-assistant'
+import { buildHelpPrompt, buildHelpSystemPrompt, sanitizeHelpSelection } from './help-assistant'
 import { buildWandPrompt, WAND_SYSTEM_PROMPT, type WandDraft } from './context-wand'
 import { runUtilityInference, type UtilityDeps } from './utility-inference'
 import { markGraphDraftOpened, resolveBrokerEndpoint } from './broker-client'
@@ -591,11 +591,18 @@ export function registerIpc({
   }
   regHandle(
     'help:ask',
-    async (_e, question: string, view: string, transcript: HelpExchange[]) => {
+    async (_e, question: string, view: string, transcript: HelpExchange[], selection?: unknown) => {
       const docsDir = resolveDocsDir()
+      // Files-view selection (PLAN GX7): rides the SYSTEM side (context file),
+      // so the code never touches the command line / its arg cap.
+      const sel = sanitizeHelpSelection(selection)
+      const data = {
+        ...((await helpSnapshot()) as Record<string, unknown>),
+        ...(sel ? { code_selection: sel } : null)
+      }
       return runUtilityInference(utilityDeps(), {
         target: getConfig().helpTarget,
-        system: buildHelpSystemPrompt({ view, data: await helpSnapshot(), docsDir }),
+        system: buildHelpSystemPrompt({ view, data, docsDir }),
         prompt: buildHelpPrompt(question ?? '', transcript ?? []),
         kind: 'help',
         addDir: docsDir || undefined
