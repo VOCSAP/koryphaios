@@ -128,6 +128,20 @@ export interface SnippetSummary {
   text: string
 }
 
+/**
+ * Trust mode for supervisor-initiated spawns (PLAN TS4): 'hands-free' spawns
+ * without app-level confirmation (the consent rule lives in the supervisor's
+ * system prompt), 'team-review' shows ONE recap dialog per plan (all-or-
+ * nothing), 'full-control' confirms each agent individually.
+ */
+export type SupervisorSpawnMode = 'hands-free' | 'team-review' | 'full-control'
+
+export const SUPERVISOR_SPAWN_MODES: SupervisorSpawnMode[] = [
+  'hands-free',
+  'team-review',
+  'full-control'
+]
+
 export interface AppConfig {
   /** Default working directory used as the base for new sessions. */
   projectDir: string
@@ -171,6 +185,8 @@ export interface AppConfig {
   leadPattern: string
   /** System notification when a session waits for the operator (PLAN C11). */
   notifyAttention: boolean
+  /** Confirmation level for supervisor-initiated spawns (PLAN TS4). */
+  supervisorSpawnMode: SupervisorSpawnMode
   /** Show the floating "?" help-assistant button (PLAN C9). */
   helpButton: boolean
   /**

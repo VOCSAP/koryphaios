@@ -10,6 +10,25 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
 - **Supervisor (Home rail)**: a Claude session piloting the app through a
   loopback deck-control endpoint + dependency-free MCP stdio bridge, injected
   only into the supervisor via a generated `--mcp-config`.
+- **Team spawn (PLAN-team-spawn TS1–TS5)**: the supervisor composes and spawns
+  whole agent teams. `deck_team_playbook` serves the hardcoded team-building
+  skill (consent rule, roadmap/prompt decomposition, sizing, briefing/ack
+  contracts) and `deck_team_agents` a 6-role embedded fallback catalog
+  (`team-embedded.ts` — team-lead/developer/reviewer/explorer/debugger/
+  test-engineer, code constants referenced BY ID, injected via
+  `--append-system-prompt-file`, read-only roles hardened with
+  `--disallowedTools`; an embedded team-lead takes the window crown only when
+  none is live). `deck_spawn_session` gains `cli` (contract-frozen, only
+  `claude` accepted until the multi-CLI lot), `embedded_agent` and
+  `wait_for_peer` (default true: the call returns the peer_id);
+  `deck_spawn_team` spawns a whole plan in one call with async acks — the
+  Deck (script, not inference) watches `peer-resolved` and taps the
+  supervisor with a targeted CODE-CONSTANT announce as each session connects
+  or fails to (120 s timer, early-fail on exit). Spawns pass the operator
+  trust-mode gate (`config.supervisorSpawnMode`, Settings > General):
+  `hands-free` (default, consent rule enforced at system-prompt level),
+  `team-review` (one native recap dialog per plan), `full-control` (one
+  dialog per agent).
 - **Locked harnesses (C8 rule)**: every agent prompt (supervisor, plan import,
   reviewer, dispatch, digest, help assistant, context wand, graph chat/merge/
   judge) is a CODE CONSTANT, never operator- or repo-configurable. One-shot
