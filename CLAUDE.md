@@ -34,6 +34,10 @@ Only read the file matching the area you are touching:
 - Working on the desktop app (`desktop/`) — read `DESKTOP.md`
   (Electron stack, sessions, supervisor, graph chat, model picker, security
   gates).
+- Creating or modifying anything VISUAL in `desktop/` (CSS, buttons, colours,
+  badges, a new view's look) — read `DESIGN.md` (design tokens, colour
+  semantics, button archetypes, UI checklist). The `deck-design` skill
+  (`.claude/skills/deck-design/SKILL.md`) wraps the workflow.
 - Writing or running tests, or preparing a commit — read `TESTING.md`
   (test suite layout, smoke check, typecheck, locale parity).
 - Adding a model/provider to the pickers, touching a headless inference
