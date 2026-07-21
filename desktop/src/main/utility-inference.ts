@@ -29,6 +29,8 @@ export interface UtilityInferenceRequest {
   /** Question side (short; rides the command line on the claude adapter). */
   prompt: string
   kind: UtilityKind
+  /** Extra readable directory (claude --add-dir): the shipped reference docs. */
+  addDir?: string
 }
 
 export interface UtilityDeps {
@@ -76,7 +78,12 @@ export async function runUtilityInference(
   const content =
     target.cli === 'claude' ? req.system : composeStdinPrompt(req.system, req.prompt)
   const contextFile = writeContextFile(deps.stateDir, { nodeId: req.kind, cli: target.cli }, content)
-  const command = buildAdapterCommand({ promptText: req.prompt, contextFile, target })
+  const command = buildAdapterCommand({
+    promptText: req.prompt,
+    contextFile,
+    target,
+    addDir: req.addDir
+  })
   const run =
     deps.run ??
     ((cmd: string) =>

@@ -18,6 +18,12 @@ asarUnpack:
 extraResources:
   - from: locales
     to: locales
+  # Reference documentation (docs/): read at runtime by the help assistant and
+  # the supervisor (resolveDocsDir resolves process.resourcesPath/docs when
+  # packaged, the app dir in dev). Without this a packaged app silently loses
+  # the docs grounding.
+  - from: docs
+    to: docs
   # Embedded Claude Code plugin: the SessionStart back-channel hook, loaded into
   # every Deck session via --plugin-dir (resolved from process.resourcesPath when
   # packaged, see index.ts deckPluginDir). The hook bundle (.mjs) is produced by

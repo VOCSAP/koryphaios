@@ -40,15 +40,32 @@ export interface HelpContext {
   view: string
   /** App-composed snapshot of what the view shows (kept compact). */
   data: unknown
+  /**
+   * Absolute path of the shipped reference-documentation directory
+   * (desktop/docs, resolved by the caller: resourcesPath when packaged, app
+   * dir in dev). Empty/undefined when the docs are missing — the section is
+   * then omitted and the assistant falls back to the snapshot alone.
+   */
+  docsDir?: string
 }
 
 /** Cap the generated system prompt (a huge roadmap must not blow the call). */
 const MAX_SYSTEM_PROMPT_CHARS = 60_000
 
+/** App-generated docs pointer (the path is computed by the app, never operator input). */
+export function buildDocsSection(docsDir: string): string {
+  return [
+    '## Reference documentation',
+    `The app ships its full reference documentation (features, views, configurable options, how-tos, FAQ) as markdown files in: ${docsDir}`,
+    'When the question is about the app itself -- what a feature does, where an option lives, how to accomplish something -- and file-reading tools (Read/Grep/Glob) are available, ground your answer in these files: start with README.md (the index) and open the relevant page. Prefer the documentation over recalling from this prompt alone; the context snapshot below reflects live state, the documentation explains the features and options.'
+  ].join('\n')
+}
+
 export function buildHelpSystemPrompt(ctx: HelpContext): string {
   const snapshot = JSON.stringify(ctx.data, null, 2) ?? 'null'
   const text = [
     HELP_SYSTEM_PROMPT,
+    ...(ctx.docsDir ? [buildDocsSection(ctx.docsDir)] : []),
     '## Current app context',
     `Active view: ${ctx.view}`,
     `Data snapshot:\n${snapshot}`

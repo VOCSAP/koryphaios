@@ -16,6 +16,7 @@ import {
 import { EMBEDDED_AGENTS } from "../desktop/src/main/team-embedded.ts";
 import {
   writeSupervisorMcpConfig,
+  buildSupervisorSystemPrompt,
   writeSupervisorSystemPrompt,
   SUPERVISOR_BRIEFING,
   SUPERVISOR_SYSTEM_PROMPT
@@ -409,6 +410,18 @@ test("writeSupervisorSystemPrompt regenerates the role anchor from the code cons
   writeSupervisorSystemPrompt(dir);
   expect(readFileSync(file, "utf-8")).toBe(SUPERVISOR_SYSTEM_PROMPT);
   expect(SUPERVISOR_SYSTEM_PROMPT).toContain("fixed by the application");
+});
+
+test("a docsDir appends the app-generated reference-docs pointer to the anchor", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-sup-docs-"));
+  tmpDirs.push(dir);
+  const file = writeSupervisorSystemPrompt(dir, "/opt/app/resources/docs");
+  const text = readFileSync(file, "utf-8");
+  expect(text.startsWith(SUPERVISOR_SYSTEM_PROMPT)).toBe(true);
+  expect(text).toContain("/opt/app/resources/docs");
+  expect(text).toContain("README.md");
+  expect(buildSupervisorSystemPrompt()).toBe(SUPERVISOR_SYSTEM_PROMPT);
+  expect(buildSupervisorSystemPrompt("")).toBe(SUPERVISOR_SYSTEM_PROMPT);
 });
 
 // ----- MCP stdio bridge, end to end against a real control endpoint -----

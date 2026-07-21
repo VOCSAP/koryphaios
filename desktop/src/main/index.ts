@@ -14,7 +14,7 @@ import type { AppConfig } from '@shared/types'
 import { loadConfig, saveConfig } from './store'
 import { buildAppMenu } from './menu'
 import { SessionService } from './session-service'
-import { registerIpc } from './ipc'
+import { registerIpc, resolveDocsDir } from './ipc'
 import { parseCliContext } from './cli-context'
 import { computeScope, buildScopeEnv, resolveAdoptedScope, type Scope, type ScopeEnv } from './scope'
 import {
@@ -977,7 +977,7 @@ const ensureSupervisor = async (): Promise<SessionRuntime> => {
     controlUrl: controlServer.url,
     controlToken: controlServer.token
   })
-  const appendSystemPromptFile = writeSupervisorSystemPrompt(stateDir)
+  const appendSystemPromptFile = writeSupervisorSystemPrompt(stateDir, resolveDocsDir())
   return service.create({
     name: SUPERVISOR_NAME,
     prompt: SUPERVISOR_BRIEFING,
