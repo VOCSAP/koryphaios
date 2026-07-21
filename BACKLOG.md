@@ -1,0 +1,169 @@
+# Backlog centralisé — reste à faire / à vérifier
+
+Fichier unique regroupant tout ce qui reste **ouvert** (à faire, à valider, à
+décider) dans le repo. Il consolide les fichiers de plan / exploration / audit
+de la racine. Le narratif de ce qui est **livré** vit dans `CHANGELOG.md` (par
+lot) ; ce fichier ne garde que le **résiduel**.
+
+> ⚠️ **Datation.** Les items sécurité viennent de l'audit du **2026-07-20**
+> (base `experimental`). Depuis, plusieurs lots ont été livrés (team-spawn,
+> multi-llm lot A, mobile-lan, Git/Files GX). **Chaque item sécurité ouvert
+> est donc à RE-VÉRIFIER sur le code courant avant traitement** — certains ont
+> pu être corrigés par un lot ultérieur. Les items marqués « différé (décision
+> opérateur) » sont des choix assumés, pas des oublis.
+
+Sources consolidées (fichiers désormais **supprimés** — détail complet des
+chaînes d'exploitation et des alternatives de design dans l'historique git) :
+les anciens `AUDIT-SECURITE-MAINTENANCE.md`, `AUDIT-REMEDIATION-PLAN.md`,
+`PLAN-mobile-lan.md`, `PLAN-team-spawn.md`, `EXPLORATION-multi-llm.md`,
+`EXPLORATION-team-spawn.md`, `EXPLORATION-mobile-lan.md`,
+`PLAN-git-explorer.md`. Le narratif livré vit dans `CHANGELOG.md`.
+
+---
+
+## 1. Sécurité — audit (à re-vérifier avant action)
+
+### 1.1 Déjà traité (rappel, ne rien refaire)
+
+Lots de remédiation livrés (`AUDIT-REMEDIATION-PLAN.md`) : **B1/NF-A** (projections
+publiques peers+messages), **B2** (garde Origin), **B4** (gate templates projet),
+**B5** (gate `worktreeInit`), **B6** (`sanitizeFlagValue` agent/model), **B9**
+(`config:set` rejette `projectDir`), **M-SEC-1** (compares constant-time),
+**M-SEC-9 / Desktop N3** (containment `template:read/apply`), **M-LOG-1**
+(écritures atomiques), **companion device management** (liste + révocation +
+notification). Plus, hors audit : **GX-SEC** (validation `dir` des handlers
+diff/explorer + garde realpath — lot Git/Files).
+
+### 1.2 Différé par décision opérateur (assumé)
+
+- [ ] **B3** — groupe `default` non authentifié + endpoints admin en GET.
+- [ ] **B7** — flux « resume » = prise d'identité sans secret `(host,cwd,group)`.
+- [ ] **B8** — détournement/rejeu de socket WebSocket (auth statique, pas de nonce).
+- [ ] **B10 / M-SEC-5** — `CHANNEL_TIERS` déclarés mais **jamais appliqués**
+      (un appairage = accès équivalent-opérateur). *Multiplicateur des RCE ;
+      différé car « le mobile pilote l'app, son cred est de confiance ».*
+
+> Modèle de menace validé : broker + clients sur **LAN de confiance** ;
+> companion LAN uniquement. Priorité n°1 assumée = **RCE via dépôt cloné**
+> (déjà traité, B4/B5/B6). Le durcissement WAN/initié-LAN est « bienvenu si peu
+> coûteux », jamais prioritaire.
+
+### 1.3 Ouvert — MAJEUR (re-vérifier puis trancher)
+
+- [ ] **M-SEC-2** — mode HTTP : aucun TLS imposé (tokens/messages en clair).
+- [ ] **M-SEC-3** — `ANTHROPIC_API_KEY` exfiltrée vers un endpoint OpenAI-compat tiers (fallback à supprimer).
+- [ ] **M-SEC-4** — `summarize` `base_url` non validée (`http://` + surface SSRF).
+- [ ] **M-SEC-6** — fenêtre principale sans garde `will-navigate` (bridge exposé si navigation hors app).
+- [ ] **M-SEC-7** — handlers IPC sans validation de `senderFrame` alors que `webviewTag` est actif.
+- [ ] **M-SEC-8** — `<webview>` `sandbox=no` sans clamp `will-attach-webview`.
+- [ ] **M-SEC-10** — clés provider persistées en clair sur Linux sans keyring (refuser / opt-in).
+- [ ] **M-SEC-11** — payloads broker non bornés (`maxRequestBodySize`, caps par champ, rate-limit).
+- [ ] **M-SEC-12** — messages de canal injectés comme instructions haute priorité (cadrer en donnée non fiable).
+- [ ] **M-LOG-2** — `handleRegister` non atomique → TOCTOU sur l'unicité `peer_id`.
+- [ ] **M-LOG-3** — `handleUnregister` non transactionnel (suppression partielle possible).
+- [ ] **M-LOG-4** — verrou workspace : TOCTOU + pas de vérif de propriété (`wx`/`O_EXCL`).
+- [ ] **NF-D** — autorité roadmap dérivée du champ client `by:"deck"` (forgeable → usurpation opérateur).
+- [ ] **NF-E** — `/roadmap/import` : `items` non borné + écrasement par id (cap + credential + create-only).
+- [ ] **NF-F** — `pid` client non fiable pour la vivacité (`process.kill(pid,0)` sur pid fourni).
+
+### 1.4 Ouvert — MINEUR (durcissement / robustesse)
+
+Sécurité : N-SEC-1 (500 fuite l'exception brute), N-SEC-2 (perms du fichier secret
+de groupe), N-SEC-3 (validation `group_id` + hash NULL non-default), N-SEC-4 (temp
+graph-draft prévisible), N-SEC-5 (heuristic-ack marque des tiers `delivered`),
+N-SEC-6 (deadline d'auth WS), N-SEC-7 (contenu messages/résumés en clair dans les
+logs), N-SEC-8 (`announce:send` remote-atteignable), N-SEC-9 (whitelist des clés
+`config:set`), **N-SEC-10** (containment `delete*` par `realpath`, pas `resolve` —
+proche de la règle GX-SEC), N-SEC-11 (CORS `*` sur endpoint design), N-SEC-12
+(static serve compagnon fragile si `decodeURIComponent` ajouté).
+
+Logique : N-LOG-1 (gardes NaN sur `parseInt`), N-LOG-2 (timeout HTTP broker au
+boot), N-LOG-3 (réentrance `cleanup` SIGINT+SIGTERM), N-LOG-4 (`whoami.summary`
+toujours vide), N-LOG-5 (`switch_group` incomplet), N-LOG-6 (garde de type sur
+`body` désérialisé).
+
+---
+
+## 2. Validations visuelles / E2E en attente (Electron non lançable en CI)
+
+Tout est couvert par tests + typecheck ; seul le rendu réel reste à valider par
+l'opérateur sur une machine avec affichage.
+
+- [ ] **Vues Git (±) et Files (📁)** — validation visuelle + calcul de plage de
+      lignes de la sélection à l'usage (`PLAN-git-explorer.md`, lot GX).
+- [ ] **UI device-management du companion** — liste + boutons révoquer / tout
+      révoquer (`AUDIT-REMEDIATION-PLAN.md` Lot 2, « ⚠️ UI à valider »).
+- [ ] **Pont mobile LAN de bout en bout** — essai réel « téléphone sur le
+      Wi-Fi » (`PLAN-mobile-lan.md`) : le serveur companion se lie à une
+      interface LAN absente du conteneur.
+
+---
+
+## 3. Fonctionnalités différées (v2 / vNext)
+
+### 3.1 Multi-CLI (agents & superviseur non-Claude)
+
+- [ ] **Tuiles agents Codex / Gemini** (team-spawn palier 1) : le champ `cli`
+      de `deck_spawn_session` existe déjà (seul `claude` accepté). Prérequis :
+      dérouler les validations terrain §4.4 avant tout code
+      (`EXPLORATION-team-spawn.md`, `EXPLORATION-multi-llm.md`).
+- [ ] **Superviseur Codex** (`EXPLORATION-multi-llm.md` §4) — non lancé, gardé
+      derrière des validations :
+  - Étape 1 (prototype manuel) : P1-P4 (bridge MCP over stdio, reprise session, quoting).
+  - Étape 2 (sécurité) : V1 (token dans `ps`), V2 (`mcp_servers` du config opérateur), V3 (aplatissement multi-lignes du prompt + test quoting POSIX/PowerShell), V4 (bridge orphelin / token périmé).
+  - Étape 3 (code, si P1-P4 passent) : M1 `buildCodexSupervisorArgs`, M2 variante de commande superviseur par CLI, M3 choix du CLI superviseur (réglages/menu Home), M4 journal/i18n/docs. M5 = dégradations assumées (back-channel `/clear`, quota auto-resume).
+- [ ] **Décision #3** (`EXPLORATION-multi-llm.md`) : passer codex à
+      `-c model_instructions_file` si les réponses régurgitent le contexte
+      (non-bloquant aujourd'hui).
+
+### 3.2 Mobile LAN
+
+- [ ] **MB6 — coquille Android** : scaffold `mobile-shell/` livré mais **non
+      buildé** (pas de SDK ici). TODOs natifs du `mobile-shell/README.md` :
+      service foreground, verrou biométrique + `FLAG_SECURE`, pinning cert.
+- [ ] **M3e — mode fil de la vue Graph sur mobile** : reporté (Graph absent de
+      la nav mobile v1).
+- [ ] **PWA (v2)** : manifest + icône pour « installation » sur l'écran d'accueil.
+- [ ] **Doc opérateur README** : démarrage de l'accès companion + avertissement cert.
+
+### 3.3 Git / Explorateur de fichiers — Phase D
+
+- [ ] **Coloration syntaxique** du viewer (et des diffs ?) via **shiki** ou
+      **highlight.js** en lazy-load (`PLAN-git-explorer.md` phase D).
+- [ ] **Virtualisation** des très gros fichiers + **recherche dans le fichier**.
+
+### 3.4 Team spawn — confort
+
+- [ ] **Dialog « Revue d'équipe » riche (renderer)** : la v1 utilise le dialog
+      natif ; une vue dédiée pourra suivre si l'usage le réclame
+      (`PLAN-team-spawn.md`).
+
+---
+
+## 4. Maintenance / dette technique
+
+- [ ] **M-MNT-1** — la suite broker/serveur (~76 cas `tests/broker-*`,
+      `server-*`, `config-*`) **ne tourne jamais en CI** (seul `desktop-*` y
+      passe). *Fort ROI, faible coût.* Ajouter un job `bun test` cœur + smoke
+      build sur les chemins cœur.
+- [ ] **M-MNT-2** — config éparpillée : ~20 `parseInt(process.env…)` hors de
+      `config.ts` à rapatrier (env > fichier > défaut, validation centralisée).
+- [ ] **M-MNT-3** — fonctions surdimensionnées (`handleRegister` ~150 l,
+      `handleRoadmapUpsert` ~170 l) à découper.
+- [ ] **Dérive documentaire** (N-MNT-11) : réaligner versions/docs
+      (`package.json` vs mentions de version dans la doc).
+- [ ] **Duplication & perfs** (N-MNT-1..10) : TOFU secret de groupe ×3, DELETE
+      cascade ×2, trames WS ×3, `safeBase`/`normalizeRemoteUrl` dupliqués ;
+      index SQLite manquants (`(delivered, sent_at)`), purge des `delivered=1`,
+      busy-poll `discoverRealId`/`pollPeerIds` → fs-watch, `statSync` par ligne
+      de log. *Détail dans `AUDIT-SECURITE-MAINTENANCE.md` §3.*
+
+---
+
+## Notes d'entretien de ce fichier
+
+- Cocher/retirer un item quand il est livré (et l'ajouter au `CHANGELOG.md`).
+- Réf des ids (B*, M-*, N-*, NF-* côté audit ; MB*, TS*, GX*, P*/V*/M* côté
+  plans/explorations) : le détail des chaînes d'exploitation et des décisions
+  de design est dans l'**historique git** des fichiers supprimés (et le
+  narratif livré dans `CHANGELOG.md`).

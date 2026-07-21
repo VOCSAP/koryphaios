@@ -37,7 +37,7 @@ entries never carry it.
 | Roadmap context wand 🪄 | `config.wandTarget` | `utility-inference.ts` |
 | Graph fan-out + battle judge | per-graph (renderer state) | `graph-engine.ts` |
 | Peer auto-summary (core) | `summary_*` config/env | `shared/summarize.ts` |
-| Agent tiles / supervisor / plan import | Claude Code sessions only (lot B, `EXPLORATION-multi-llm.md` §4) | `session-command.ts` |
+| Agent tiles / supervisor / plan import | Claude Code sessions only (multi-CLI deferred — see `BACKLOG.md` §3.1) | `session-command.ts` |
 
 All one-shot prompts are CODE CONSTANTS (C8) — never operator/repo templates.
 Any new one-shot inference goes through `runUtilityInference` (or imitates
@@ -86,5 +86,5 @@ UI strings: three files (en.json, fr.json, `EN_DEFAULTS`) or
   fork equivalent — the Deck's fork-on-resume model does not transpose.
 - Gemini headless triggers on non-TTY stdin automatically; `-p` text is
   APPENDED after piped stdin.
-- Supervisor-under-Codex feasibility + open checklists: `EXPLORATION-multi-llm.md`
-  §4 (retired into CHANGELOG when the batch ships).
+- Supervisor-under-Codex feasibility + open checklists (P1-P4 / V1-V4 / M1-M5):
+  `BACKLOG.md` §3.1 (full §4 analysis in git history).

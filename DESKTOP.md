@@ -10,7 +10,7 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
 - **Supervisor (Home rail)**: a Claude session piloting the app through a
   loopback deck-control endpoint + dependency-free MCP stdio bridge, injected
   only into the supervisor via a generated `--mcp-config`.
-- **Team spawn (PLAN-team-spawn TS1–TS5)**: the supervisor composes and spawns
+- **Team spawn (TS1–TS5)**: the supervisor composes and spawns
   whole agent teams. `deck_team_playbook` serves the hardcoded team-building
   skill (consent rule, roadmap/prompt decomposition, sizing, briefing/ack
   contracts) and `deck_team_agents` a 6-role embedded fallback catalog
@@ -78,7 +78,7 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   on a card opens a context menu (edit / queue / process-now / delete-as-
   archive); "Process now" targets one live agent with a CODE-CONSTANT
   announce (`composeAssignText`, IPC `roadmap:assign`) or spawns a fresh one.
-- **Files & Git rail views (PLAN-git-explorer GX1–GX8)**: two READ-ONLY rail
+- **Files & Git rail views (GX1–GX9)**: two READ-ONLY rail
   views. 📁 Files: lazy explorer + plain-text viewer (line-number gutter, no
   highlighting in v1 — shiki/highlight.js noted for v2) over roots the main
   process re-validates on EVERY call (project dir, worktrees, live session
@@ -114,7 +114,7 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   `quotePromptArg` in `session-command.ts`) — add new interpolated fields the
   same way, never raw. `config:set` refuses a `projectDir` override (it would
   repoint every project-scoped resolver past the boot gate).
-- **Companion LAN access (PLAN-mobile-lan MB1–MB6)**: the 📱 button starts an
+- **Companion LAN access (MB1–MB6)**: the 📱 button starts an
   HTTPS+WebSocket server (`main/companion-server.ts`) that serves the built
   renderer bundle to a phone on the LAN and bridges the DeckApi protocol
   (`shared/companion.ts` manifest → `main/api-registry.ts` handler table →

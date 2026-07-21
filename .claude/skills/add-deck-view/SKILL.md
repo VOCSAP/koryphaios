@@ -9,7 +9,7 @@ Purely-desktop features (a main-process service exposed to the renderer, a new
 rail view) follow a fixed file chain that is NOT covered by
 `add-broker-feature` (that one is for agent→broker→Deck). Several layers have
 COMPILE-TIME gates that fail the typecheck if you miss them — lean on them.
-Reference implementation: the **Git / Files views (PLAN-git-explorer GX1–GX9)**
+Reference implementation: the **Git / Files views (GX1–GX9 lot)**
 — grep `explorer` / `collectFileDiff` / `'files'` / `'git'` to see the whole
 chain end to end.
 

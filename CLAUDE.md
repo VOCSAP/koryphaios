@@ -15,10 +15,14 @@ Two products in one repo:
   battle mode, and a unified model picker (frontier CLIs + local
   OpenAI-compatible endpoints).
 
-Release history and per-batch narratives live in `CHANGELOG.md`. Code comments
-reference chantier ids (`C1`…`C29`, `D1`…) from past working plans; the
-matching design decisions are summarized in the CHANGELOG entry of the batch
-that shipped them.
+Release history and per-batch narratives live in `CHANGELOG.md`; the remaining
+open work (to-do / to-verify / deferred, incl. the security backlog) is
+centralized in `BACKLOG.md`. Code comments reference chantier ids (`C1`…`C29`,
+`D1`…, `MB1`…, `TS1`…, `GX1`…) from past working plans. Those standalone working
+docs (`PLAN-*`, `EXPLORATION-*`, `AUDIT-*`) were consolidated and removed: the
+shipped design decisions are summarized in the CHANGELOG entry of the batch that
+shipped them, the open residual lives in `BACKLOG.md`, and the full detail
+(exploit chains, design alternatives) stays in git history.
 
 ## Detailed docs (read on demand)
 
@@ -44,6 +48,8 @@ Only read the file matching the area you are touching:
   `BUN.md`.
 - Building a Bun-served frontend (HTML imports, React) — read
   `FRONTEND.md`.
+- Picking up open / deferred work (security backlog, v2 features, pending
+  visual/E2E validations) — `BACKLOG.md` (the single consolidated to-do list).
 
 ## Conventions (always apply)
 
