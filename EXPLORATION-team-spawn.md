@@ -264,7 +264,7 @@ validations §4.4.
 | 1 | Forme du skill | ✅ Outil `deck_team_playbook` — le pattern « constante code servie par un tool deck-control » devient réutilisable pour d'autres skills superviseur |
 | 2 | Ack | ✅ Les deux, choisis par le playbook : **synchrone** (`wait_for_peer`) quand UN seul agent est spawné, **asynchrone** (announce ciblé `deck` à `peer-resolved`) dès que l'équipe compte >1 agent |
 | 3 | Multi-CLI | ✅ v1 Claude-only, MAIS le champ `cli` est présent dans le contrat de `deck_spawn_session` dès la v1 (seule la valeur `claude` acceptée tant que les vérifs §4.4 multi-llm ne sont pas déroulées) — pas de rupture de contrat en v2 |
-| 4 | Confirmation UI | ⏳ ouvert — options reformulées en §8.2 |
+| 4 | Confirmation UI | ✅ Option A par défaut (confiance prompt) + un réglage Deck « mode de confiance » à trois positions exclusives (§8.3) |
 | 5 | Granularité | ✅ Adaptative, encodée dans le playbook (§8.1) ; introduit le catalogue d'agents embarqués `deck_team_agents` |
 
 ### 8.1 Granularité adaptative et catalogue embarqué `deck_team_agents`
@@ -346,3 +346,85 @@ cas de l'autorisation implicite.
 Combinaisons possibles : A seul (v1 minimale) ; A + B en réglage optionnel
 (défaut off) ; A + B′ (le dialog groupé comme UX standard du spawn
 d'équipe, les spawns unitaires restant sous A).
+
+### 8.3 Décision Q4 — réglage « mode de confiance » à trois positions
+
+Option A par défaut, ET un réglage Deck (Settings) laissant chaque
+utilisateur choisir son mode — trois positions **exclusives** (radio) :
+
+| Position | Libellé FR | Libellé EN | Comportement |
+|---|---|---|---|
+| 1 (défaut) | **Mains libres** | **Hands-free** | Aucune confirmation de l'app : le superviseur lance directement (option A). La règle de consentement reste dans son prompt ; tuiles + journal tracent tout. |
+| 2 | **Revue d'équipe** | **Team review** | Avant tout lancement, l'app affiche le plan complet (agents, modèles, worktrees, briefings) dans UN dialog récapitulatif ; un clic valide toute l'équipe (option B′). Un spawn unitaire = un récap d'un agent. |
+| 3 | **Contrôle total** | **Full control** | Chaque agent est confirmé individuellement avant son lancement, même au sein d'un plan d'équipe (option B). |
+
+Descriptifs courts pour l'UI (sous chaque radio) :
+
+- FR : « Le superviseur lance les agents que tu lui demandes, sans
+  confirmation de l'app. Chaque lancement reste visible (tuile + journal). » /
+  « L'app te montre le plan d'équipe complet avant de lancer ; un clic
+  valide tout. » / « Chaque agent est confirmé un par un avant son
+  lancement. Le plus de contrôle, le plus de clics. »
+- EN: "The supervisor spawns the agents you ask for, with no app-level
+  confirmation. Every launch stays visible (tile + journal)." / "The app
+  shows you the full team plan before launching; one click approves it
+  all." / "Each agent is confirmed one by one before it launches. Most
+  control, most clicks."
+
+Conséquence d'architecture : les modes 2 et 3 ont besoin que le plan
+d'équipe transite en UN appel — l'outil `deck_spawn_team(plan)` devient
+une brique de la v1 (en mode 1 il enchaîne les spawns sans dialog ; le
+`deck_spawn_session` unitaire reste disponible). La mécanique de dialog
+réutilise le pattern d'approbation existant (C19, `launch-approval.ts` :
+callback `confirm` injecté par `index.ts`).
+
+### 8.4 Catalogue embarqué — sélection depuis la base de l'opérateur
+
+Base fournie (13 profils `~/.claude/agents`) : architect, debugger,
+developer, doc-writer, explorer, kleos-archivist, recon-specialist,
+release-engineer, reviewer, security-auditor, team-lead, test-engineer,
+web-designer.
+
+**Règles de reformulation pour l'embarqué** (les profils source sont
+personnels, le catalogue doit être générique) :
+
+1. **Retirer l'outillage personnel** : références AiDex (`aidex_*`),
+   crawl4ai-rag (`searxng_*`, `perform_rag_query`…), Kleos / Agent-Forge
+   (`spec_task`, `log_hypothesis`, `verify`, kleos-cli), hooks locaux,
+   skills personnelles (`diagnose`, `interface-design`), protocole
+   MEMORY.md. Aucune de ces briques n'existe sur un poste quelconque.
+2. **Recâbler la coordination sur l'écosystème Deck** : claude-peers
+   (send_message vers team-lead / superviseur / `operator`), contrat
+   roadmap (`roadmap_get`, work-lock `in_progress` → `done`), rapport de
+   fin structuré. Le team-lead embarqué coordonne des SESSIONS PEERS (pas
+   des subagents Agent-tool) et reçoit la file de dispatch C10/C15.
+3. **Pas de modèle imposé dans le profil** : les frontmatters source
+   épinglent des modèles (`fable`, `opus[1m]`, `sonnet`…) propres au poste.
+   Le choix modèle/effort reste au superviseur (`deck_spawn_session`) ; le
+   catalogue porte seulement une RECOMMANDATION indicative par rôle.
+4. **Injection par `--append-system-prompt-file`** (cf. §8.1) : pas de
+   restriction d'outils par frontmatter comme un vrai `--agent`. Pour les
+   rôles read-only (reviewer), l'entrée de catalogue peut porter un
+   `disallowedTools` (ex. `Write,Edit`) appliqué au spawn — durcissement
+   harnais, pas seulement comportemental.
+
+**Sélection proposée — 6 rôles embarqués** (le noyau qui couvre l'arbre de
+décision §8.1, ni plus) :
+
+| Id | Source | Rôle embarqué (une ligne) | Reco modèle |
+|---|---|---|---|
+| `team-lead` | team-lead.md | Décompose, délègue aux peers, synthétise ; ne code que l'insignifiant ; tient la roadmap et rend compte au superviseur/opérateur | frontier fort |
+| `developer` | developer.md | Implémente une tâche scopée : plus petit changement correct, conventions du repo, tests lancés, rapport structuré ; s'arrête et demande si ambigu | standard |
+| `reviewer` | reviewer.md | Revue read-only (correctness, sécu, perf, lisibilité) : constats cités fichier:ligne + fix concret, sévérité honnête | fort |
+| `explorer` | explorer.md | Lit et synthétise sans jamais recracher de contenu brut — l'éclaireur pas cher qui préserve le contexte des autres | léger/standard |
+| `debugger` | debugger.md | Cause racine AVANT tout fix : reproduction, hypothèse, isolation ; propose le fix minimal | fort |
+| `test-engineer` | test-engineer.md | Stratégie et qualité des tests : couverture des comportements qui comptent, chasse aux tests flaky/mensongers | standard |
+
+**Écartés de l'embarqué** (restent parfaitement utilisables via la base
+opérateur `deck_list_agents`) : `kleos-archivist` (100 % stack personnelle),
+`recon-specialist` (spécifique scraping), `web-designer`, `release-engineer`,
+`security-auditor`, `architect`, `doc-writer` — des rôles réels mais trop
+spécialisés pour un catalogue de secours dont le but est de garantir le
+MINIMUM vital (coordination + exécution + qualité) sur un poste nu.
+`architect` et `doc-writer` sont les premiers candidats à un élargissement
+ultérieur si l'usage le réclame.
