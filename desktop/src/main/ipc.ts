@@ -392,54 +392,13 @@ export function registerIpc({
     journal.add('worktree', `worktree created on ⎇ ${wt.branch}`)
   })
 
-  // ----- diff / review (PLAN C13) -----
-  // Base resolution: a NON-MAIN worktree of the project is compared to the
-  // main worktree's branch (merge-base); anything else (main tree, foreign
-  // cwd) gets uncommitted-only. Never guessed from config.
-  const diffBase = async (dir: string): Promise<string | null> => {
-    try {
-      const all = await listWorktrees(getConfig().projectDir)
-      const main = all.find((w) => w.main)
-      const target = all.find((w) => w.path === resolvePath(dir))
-      if (!main?.branch || !target || target.main) return null
-      return main.branch
-    } catch {
-      return null
-    }
-  }
-  regHandle('diff:collect', async (_e, dir: string) =>
-    collectDiff(dir, await diffBase(dir))
-  )
-  // Per-file diff (PLAN GX2). collectFileDiff rejects paths escaping `dir`
-  // (the path crosses the renderer/companion boundary).
-  regHandle('diff:collect-file', async (_e, dir: string, path: string) =>
-    collectFileDiff(dir, path, await diffBase(dir))
-  )
-  // One-shot review agent (C7 pattern, code-constant prompt): reads the diff
-  // in place and reports to the team-lead peer (C10) when one is live.
-  regHandle('diff:review', async (_e, dir: string) => {
-    const lead =
-      service.list().find((s) => s.lead && s.status !== 'exited' && s.peerId)?.peerId ?? null
-    await createSessionWithWorktree(
-      service,
-      getConfig().projectDir,
-      {
-        name: 'reviewer',
-        cwd: dir,
-        prompt: composeDiffReviewPrompt({ dir, base: await diffBase(dir), leadPeerId: lead }),
-        announce: `one-shot reviewer: reviews the diff in "${dir}"`
-      },
-      checkpoint
-    )
-    journal.add('review', `review agent spawned on ${dir}${lead ? ` (reports to ${lead})` : ''}`)
-    return true
-  })
-
-  // ----- file explorer (PLAN GX5): READ-ONLY -----
-  // The browsable roots are recomputed and re-validated on EVERY call: the
-  // renderer/companion can only ever read under the project dir, the project
-  // worktrees, or the cwd of a live session — never an arbitrary path.
-  const explorerRootList = async (): Promise<
+  // ----- working-dir allow-set (PLAN GX5 + M-SEC): the ONLY dirs the
+  // read-only Git/Files views may touch — the project dir, its worktrees and
+  // the cwd of any Deck session. Recomputed and re-validated on EVERY call so
+  // a renderer/companion `dir`/`root` argument can never reach an arbitrary
+  // path (e.g. /etc via the diff --no-index content dump). Both the diff
+  // handlers and the explorer handlers route their path argument through it.
+  const workDirRoots = async (): Promise<
     { path: string; label: string; main: boolean }[]
   > => {
     const roots = new Map<string, { path: string; label: string; main: boolean }>()
@@ -455,19 +414,83 @@ export function registerIpc({
       // Not a git repo: the project dir alone is the root (equivalent fallback).
     }
     add(getConfig().projectDir, getConfig().projectDir, roots.size === 0)
-    for (const s of service.list()) {
-      if (s.status !== 'exited') add(s.cwd, s.name)
-    }
+    // All sessions (exited included): diffing/browsing a finished session's
+    // dir is legitimate, and an exited tile's cwd is still a Deck-managed dir.
+    for (const s of service.list()) add(s.cwd, s.name)
     return [...roots.values()]
   }
+  const requireWorkDir = async (dir: unknown): Promise<string> => {
+    const p = resolvePath(typeof dir === 'string' ? dir : '')
+    if (!(await workDirRoots()).some((r) => r.path === p)) {
+      throw new Error('dir not allowed')
+    }
+    return p
+  }
+
+  // ----- diff / review (PLAN C13) -----
+  // Base resolution: a NON-MAIN worktree of the project is compared to the
+  // main worktree's branch (merge-base); anything else (main tree, foreign
+  // cwd) gets uncommitted-only. Never guessed from config.
+  const diffBase = async (dir: string): Promise<string | null> => {
+    try {
+      const all = await listWorktrees(getConfig().projectDir)
+      const main = all.find((w) => w.main)
+      const target = all.find((w) => w.path === resolvePath(dir))
+      if (!main?.branch || !target || target.main) return null
+      return main.branch
+    } catch {
+      return null
+    }
+  }
+  // `dir` is re-validated against the work-dir allow-set on every call: it
+  // crosses the renderer/companion boundary and otherwise feeds an arbitrary
+  // path to git (the --no-index fallback would dump any readable file).
+  regHandle('diff:collect', async (_e, dir: string) => {
+    const d = await requireWorkDir(dir)
+    return collectDiff(d, await diffBase(d))
+  })
+  // Per-file diff (PLAN GX2). `dir` validated as above; collectFileDiff also
+  // rejects a `path` escaping `dir` (lexical + realpath, see diff-service).
+  regHandle('diff:collect-file', async (_e, dir: string, path: string) => {
+    const d = await requireWorkDir(dir)
+    return collectFileDiff(d, path, await diffBase(d))
+  })
+  // One-shot review agent (C7 pattern, code-constant prompt): reads the diff
+  // in place and reports to the team-lead peer (C10) when one is live. `dir`
+  // becomes the spawned agent's cwd, so it is validated against the allow-set
+  // too (an arbitrary cwd would be worse than the read paths above).
+  regHandle('diff:review', async (_e, dir: string) => {
+    const d = await requireWorkDir(dir)
+    const lead =
+      service.list().find((s) => s.lead && s.status !== 'exited' && s.peerId)?.peerId ?? null
+    await createSessionWithWorktree(
+      service,
+      getConfig().projectDir,
+      {
+        name: 'reviewer',
+        cwd: d,
+        prompt: composeDiffReviewPrompt({ dir: d, base: await diffBase(d), leadPeerId: lead }),
+        announce: `one-shot reviewer: reviews the diff in "${d}"`
+      },
+      checkpoint
+    )
+    journal.add('review', `review agent spawned on ${d}${lead ? ` (reports to ${lead})` : ''}`)
+    return true
+  })
+
+  // ----- file explorer (PLAN GX5): READ-ONLY -----
+  // Shares the work-dir allow-set with the diff handlers (workDirRoots): the
+  // renderer/companion can only ever browse under the project dir, the
+  // worktrees, or a session cwd — never an arbitrary path. resolveWithin adds
+  // realpath containment inside the chosen root (symlink escapes rejected).
   const explorerRoot = async (root: unknown): Promise<string> => {
     const p = resolvePath(typeof root === 'string' ? root : '')
-    if (!(await explorerRootList()).some((r) => r.path === p)) {
+    if (!(await workDirRoots()).some((r) => r.path === p)) {
       throw new Error('explorer: root not allowed')
     }
     return p
   }
-  regHandle('explorer:roots', () => explorerRootList())
+  regHandle('explorer:roots', () => workDirRoots())
   regHandle('explorer:list', async (_e, root: string, rel: string) =>
     listExplorerDir(await explorerRoot(root), typeof rel === 'string' ? rel : '')
   )

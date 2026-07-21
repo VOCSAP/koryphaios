@@ -11,6 +11,7 @@
 // operator/repo template.
 
 import { execFile } from 'node:child_process'
+import { realpath } from 'node:fs/promises'
 import { resolve, sep } from 'node:path'
 
 /** Cap on the raw unified diff shipped to the renderer / review prompt. */
@@ -136,6 +137,25 @@ export function isRepoRelative(dir: string, path: string): boolean {
   return target !== root && target.startsWith(root + sep)
 }
 
+/**
+ * realpath-based containment (PLAN GX2 hardening): the resolved target must
+ * stay inside `dir` even through symlinks. A CLONED REPO is a hostile input
+ * (a committed symlink `x -> /etc/passwd`) — the lexical `isRepoRelative`
+ * alone would let the `--no-index` fallback below dump the link target, so
+ * that content-emitting branch is gated on this stricter check (mirrors the
+ * explorer's resolveWithin). Missing target / broken symlink → false.
+ */
+export async function realpathWithin(dir: string, path: string): Promise<boolean> {
+  if (!isRepoRelative(dir, path)) return false
+  try {
+    const root = await realpath(resolve(dir))
+    const real = await realpath(resolve(root, path))
+    return real !== root && real.startsWith(root + sep)
+  } catch {
+    return false
+  }
+}
+
 /** `git diff --no-index` exits 1 when differences exist — that IS the success case. */
 function gitNoIndex(args: string[], cwd: string): Promise<string> {
   return new Promise((res) => {
@@ -174,8 +194,13 @@ export async function collectFileDiff(
   const uncommitted = await git(['diff', 'HEAD', '--', path], dir).catch(() => '')
   if (uncommitted.trim()) sections.push(`# --- uncommitted ---\n${uncommitted}`)
   if (sections.length === 0) {
-    const untracked = await gitNoIndex(['diff', '--no-index', '--', '/dev/null', path], dir)
-    if (untracked.trim()) sections.push(`# --- untracked ---\n${untracked}`)
+    // The --no-index fallback emits the file's FULL content, so it only runs
+    // when the target really stays inside `dir` (symlinks resolved). The
+    // tracked-diff branches above are bounded by git to repo content already.
+    if (await realpathWithin(dir, path)) {
+      const untracked = await gitNoIndex(['diff', '--no-index', '--', '/dev/null', path], dir)
+      if (untracked.trim()) sections.push(`# --- untracked ---\n${untracked}`)
+    }
   }
   const full = sections.join('\n')
   const truncated = full.length > DIFF_TEXT_MAX

@@ -1,7 +1,7 @@
 // PLAN C13: diff service (desktop/src/main/diff-service) on a throwaway repo.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -146,6 +146,23 @@ test("collectFileDiff refuses a path escaping the repo", async () => {
   await expect(collectFileDiff(repo, "../secret.txt", null)).rejects.toThrow(
     "not a repo-relative"
   );
+});
+
+test("collectFileDiff does not dump a symlink pointing outside the repo", async () => {
+  // Hostile cloned-repo content: a committed symlink to a secret outside.
+  const secret = join(repo, "..", "cp-diff-secret.txt");
+  writeFileSync(secret, "TOP SECRET\n");
+  try {
+    symlinkSync(secret, join(repo, "leak.txt"));
+  } catch {
+    return; // platform without symlink perms
+  }
+  const diff = await collectFileDiff(repo, "leak.txt", null);
+  // isRepoRelative passes (lexically inside), but the realpath gate blocks the
+  // --no-index content dump, so the secret never appears.
+  expect(diff.text).not.toContain("TOP SECRET");
+  rmSync(join(repo, "leak.txt"));
+  rmSync(secret);
 });
 
 test("composeDiffReviewPrompt targets the lead when given, tile otherwise", () => {

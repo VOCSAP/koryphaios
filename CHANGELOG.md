@@ -30,6 +30,16 @@ noted as the v2 candidates, PLAN-git-explorer.md phase D).
   (roadmap create form prefilled: kind debt, status planned, snippet quoted;
   saving stays an explicit operator action). Store seeds: `helpSeed` /
   `roadmapSeed`.
+- **Security hardening (GX-SEC, from the branch's own security review).** The
+  diff handlers (`diff:collect`, `diff:collect-file`, `diff:review`) now
+  re-validate their `dir` argument against the same work-dir allow-set as the
+  explorer (project dir + worktrees + session cwds), factored into one
+  `workDirRoots`/`requireWorkDir` helper shared by both feature areas —
+  closing an arbitrary-file-read the `git diff --no-index` content fallback
+  could otherwise reach with an attacker-chosen `dir` (tier-0 channel,
+  companion-reachable). The `--no-index` fallback is additionally gated on a
+  realpath containment check (`realpathWithin`) so a committed symlink in a
+  cloned repo cannot dump a file outside the tree.
 - Docs: `interface.md` (rail table + two view sections), `DESKTOP.md`
   highlight, `PLAN-git-explorer.md` (status tracked per phase; phase D =
   highlighting, not started). Tests: `desktop-explorer.test.ts`, per-file
