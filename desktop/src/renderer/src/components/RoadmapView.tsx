@@ -486,6 +486,7 @@ export function RoadmapView(): React.JSX.Element {
         </label>
         <span className="roadmap-spacer" />
         <button
+          className="btn"
           onClick={() => {
             void window.api.importPlan().then((spawned) => {
               if (spawned) {

@@ -798,6 +798,56 @@ button {
   filter: none;
 }
 
+/* Generic secondary button (DESIGN.md §3): the neutral counterpart of
+   .primary, and the DEFAULT class for any standard action — a bare native
+   <button> (browser grey) is a bug. Same footprint as .primary so they can
+   sit side by side in a header or dialog. */
+.btn {
+  background: var(--bg-3);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 12px;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 500;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Compact variant for dense rows / inline toolbars. */
+.btn.btn-sm {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+/* Row-level destructive: red text + red-mixed border on the neutral base
+   (generic twin of the scoped .wt-actions/.rm-detail-actions .danger rules). */
+.btn.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+}
+
+/* Restoration semantic (DESIGN.md §2): filled orange, like .restore-prev and
+   the template "Apply". */
+.btn.btn-restore {
+  background: #e08a3c;
+  color: #fff;
+  border: none;
+}
+
+.btn.btn-restore:hover:not(:disabled) {
+  background: #e08a3c;
+  filter: brightness(1.08);
+}
+
 /* Restore-previous + its workspaces arrow: filled orange with white text, same
    shape as the primary "Add peer" action, sitting side by side. */
 .restore-prev {
@@ -2706,6 +2756,20 @@ code {
   font-weight: 700;
   line-height: 15px;
   text-align: center;
+}
+
+/* Broker-offline residual indicator (bottom-left of the inbox glyph, so it
+   never collides with the counter badge top-right): stays while the banner
+   is dismissed, clears when the broker comes back. */
+.nav-rail-offline-dot {
+  position: absolute;
+  bottom: -2px;
+  left: -8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #c04545;
+  box-shadow: 0 0 0 2px var(--bg-2);
 }
 
 .nav-rail-icon {

@@ -95,6 +95,12 @@ interface DeckState {
   initError: string | null
   /** Broker reachability (PLAN O5): null until main reports, drives the banner. */
   brokerStatus: BrokerStatusEvent | null
+  /**
+   * `since` of the outage whose banner the user dismissed. The banner hides
+   * for THAT outage only (a new outage has a new `since`, so it reappears);
+   * while hidden the nav rail keeps a red indicator on the inbox entry.
+   */
+  offlineBannerDismissed: number | null
   /** Companion mode (PLAN MB1): window.api is the WebSocket shim, not Electron. */
   remote: boolean
   /**
@@ -112,6 +118,8 @@ interface DeckState {
 
   init(): Promise<void>
   setView(view: DeckView): void
+  /** Hide the offline banner for the current outage (red rail dot remains). */
+  dismissOfflineBanner(): void
   openCompanion(open: boolean): void
   /** Open the browser view, optionally docking a session next to it (D1). */
   openBrowser(pairedId?: string | null): void
@@ -239,6 +247,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   browserOpened: false,
   initError: null,
   brokerStatus: null,
+  offlineBannerDismissed: null,
   remote: false,
   mobile: false,
   remoteLink: null,
@@ -456,6 +465,11 @@ export const useDeck = create<DeckState>((set, get) => ({
   },
 
   setSidebarWidth: (px) => set({ sidebarWidth: Math.min(520, Math.max(180, Math.round(px))) }),
+
+  dismissOfflineBanner: () => {
+    const status = get().brokerStatus
+    if (status && !status.up) set({ offlineBannerDismissed: status.since })
+  },
 
   showToast: (key, variant = 'success', opts) => {
     // Throttle repeats (PLAN O5): a failing action retried in a loop must not

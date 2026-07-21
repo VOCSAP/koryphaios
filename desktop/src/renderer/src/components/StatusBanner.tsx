@@ -14,7 +14,13 @@ import { useT } from '../i18n'
 export function StatusBanner(): React.JSX.Element | null {
   const t = useT()
   const status = useDeck((s) => s.brokerStatus)
+  const dismissed = useDeck((s) => s.offlineBannerDismissed)
+  const dismiss = useDeck((s) => s.dismissOfflineBanner)
   if (!status || status.up) return null
+  // Dismiss is per-outage: hiding this outage's banner must not hide the next
+  // one's (a new outage carries a new `since`). The NavRail red dot stays as
+  // the residual indicator while hidden.
+  if (dismissed === status.since) return null
   const since = new Date(status.since).toLocaleTimeString()
   return (
     <div className="status-banner status-banner-error" role="alert">
@@ -24,6 +30,9 @@ export function StatusBanner(): React.JSX.Element | null {
       </span>
       <button className="status-banner-action" onClick={() => void window.api.retryBroker()}>
         {t('banner.retry')}
+      </button>
+      <button className="status-banner-action" onClick={dismiss}>
+        {t('banner.dismiss')}
       </button>
     </div>
   )

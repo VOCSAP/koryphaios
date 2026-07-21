@@ -155,7 +155,7 @@ export function CompanionDialog(): React.JSX.Element {
             </section>
           )}
           {info?.running && (
-            <button disabled={busy} onClick={() => void stop()}>
+            <button className="btn danger" disabled={busy} onClick={() => void stop()}>
               {t('companion.stop')}
             </button>
           )}

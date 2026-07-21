@@ -56,6 +56,11 @@ export function NavRail(): React.JSX.Element {
   // drafts-only (an action is awaited, not just a message to read).
   const badge = inboxUnread + draftCount
 
+  // Residual offline indicator: while the broker is down the inbox entry
+  // carries a red dot, so the outage stays visible even once the top banner
+  // is dismissed (the dot clears on its own when the broker comes back).
+  const brokerStatus = useDeck((s) => s.brokerStatus)
+
   const remote = useDeck((s) => s.remote)
   const companionOpen = useDeck((s) => s.companionOpen)
   const openCompanion = useDeck((s) => s.openCompanion)
@@ -104,6 +109,14 @@ export function NavRail(): React.JSX.Element {
         <span className="nav-rail-icon">
           ✉
           {badge > 0 && <span className="nav-rail-badge">{badge}</span>}
+          {brokerStatus && !brokerStatus.up && (
+            <span
+              className="nav-rail-offline-dot"
+              title={t('banner.brokerDown', {
+                time: new Date(brokerStatus.since).toLocaleTimeString()
+              })}
+            />
+          )}
         </span>
         <span className="nav-rail-label">{t('nav.inbox')}</span>
       </button>

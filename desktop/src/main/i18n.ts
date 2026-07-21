@@ -112,6 +112,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'saveas.duplicate': 'A workspace with this name already exists',
   'banner.brokerDown': '⚠ Broker unreachable since {time}',
   'banner.retry': 'Retry',
+  'banner.dismiss': 'Dismiss',
   'toast.workspaceSaved': 'Workspace saved',
   'toast.alreadyOpen': 'Session already open',
   'toast.peerIdCopied': 'peer id copied',

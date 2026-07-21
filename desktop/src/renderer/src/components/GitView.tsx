@@ -186,7 +186,9 @@ export function GitView(): React.JSX.Element {
         <h2>{t('git.title')}</h2>
         <span className="git-readonly">{t('git.readOnly')}</span>
         <span className="roadmap-spacer" />
-        <button onClick={() => void refresh()}>{t('git.refresh')}</button>
+        <button className="btn" onClick={() => void refresh()}>
+          {t('git.refresh')}
+        </button>
         <button className="primary" disabled={!diff || !!empty} onClick={() => void review()}>
           {t('diff.review')}
         </button>

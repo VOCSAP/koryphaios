@@ -246,21 +246,27 @@ export function RoadmapItemModal({
             </button>
           )}
           {stoppable && (
-            <button className="danger" onClick={onStop}>
+            <button className="btn danger" onClick={onStop}>
               {t('roadmap.stop')}
             </button>
           )}
           {item.status !== 'archived' &&
             item.status !== 'done' &&
             (item.queue === null ? (
-              <button onClick={onQueue}>{t('roadmap.queueAdd')}</button>
+              <button className="btn" onClick={onQueue}>
+                {t('roadmap.queueAdd')}
+              </button>
             ) : (
-              <button onClick={onUnqueue}>{t('roadmap.queueRemove')}</button>
+              <button className="btn" onClick={onUnqueue}>
+                {t('roadmap.queueRemove')}
+              </button>
             ))}
           {item.status === 'archived' ? (
-            <button onClick={onRestore}>{t('roadmap.restore')}</button>
+            <button className="btn btn-restore" onClick={onRestore}>
+              {t('roadmap.restore')}
+            </button>
           ) : (
-            <button className="danger" onClick={onArchive} disabled={stoppable}>
+            <button className="btn danger" onClick={onArchive} disabled={stoppable}>
               {t('roadmap.archive')}
             </button>
           )}

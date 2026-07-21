@@ -252,6 +252,7 @@ export function ExplorerView(): React.JSX.Element {
           </select>
         )}
         <button
+          className="btn btn-sm"
           onClick={() => {
             // Reload the roots, every already-loaded directory (expanded nodes
             // included, so new files surface) and the open file.
@@ -285,9 +286,13 @@ export function ExplorerView(): React.JSX.Element {
                       })}
                     </span>
                     {helpEnabled && (
-                      <button onClick={explainSelection}>{t('files.explain')}</button>
+                      <button className="btn btn-sm" onClick={explainSelection}>
+                        {t('files.explain')}
+                      </button>
                     )}
-                    <button onClick={createTaskFromSelection}>{t('files.createTask')}</button>
+                    <button className="btn btn-sm" onClick={createTaskFromSelection}>
+                      {t('files.createTask')}
+                    </button>
                   </span>
                 )}
                 {fileData && <span className="explorer-size">{fileData.size} B</span>}

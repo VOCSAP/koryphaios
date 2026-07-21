@@ -135,16 +135,21 @@ export function WorktreesView(): React.JSX.Element {
               </div>
               <div className="wt-actions">
                 {!w.sessionId && !w.main && (
-                  <button onClick={() => void openSession(w)}>{t('worktrees.openSession')}</button>
+                  <button className="btn" onClick={() => void openSession(w)}>
+                    {t('worktrees.openSession')}
+                  </button>
                 )}
                 <button
+                  className="btn"
                   onClick={() => openDiff({ dir: w.path, title: `⎇ ${w.branch ?? w.path}` })}
                 >
                   {t('worktrees.diff')}
                 </button>
-                <button onClick={() => copyPath(w)}>{t('worktrees.copyPath')}</button>
+                <button className="btn" onClick={() => copyPath(w)}>
+                  {t('worktrees.copyPath')}
+                </button>
                 {!w.main && (
-                  <button className="danger" onClick={() => setConfirmRemove(w)}>
+                  <button className="btn danger" onClick={() => setConfirmRemove(w)}>
                     {t('worktrees.remove')}
                   </button>
                 )}
