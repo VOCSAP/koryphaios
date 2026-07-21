@@ -123,6 +123,9 @@ const api: DeckApi = {
   collectFileDiff: (dir: string, path: string) =>
     ipcRenderer.invoke('diff:collect-file', dir, path),
   reviewDiff: (dir: string) => ipcRenderer.invoke('diff:review', dir),
+  explorerRoots: () => ipcRenderer.invoke('explorer:roots'),
+  explorerList: (root: string, rel: string) => ipcRenderer.invoke('explorer:list', root, rel),
+  explorerRead: (root: string, rel: string) => ipcRenderer.invoke('explorer:read', root, rel),
   getBrowserPreloadPath: () => ipcRenderer.invoke('browser:preload-path'),
   captureBrowser: (webContentsId: number) => ipcRenderer.invoke('browser:capture', webContentsId),
   saveAnnotation: (dataUrl: string) => ipcRenderer.invoke('browser:save-annotation', dataUrl),

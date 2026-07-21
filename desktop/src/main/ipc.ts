@@ -34,6 +34,7 @@ import { archiveRoadmap, computeDeckProjectKey, listRoadmap, upsertRoadmap } fro
 import { createSessionWithWorktree } from './create-session'
 import { composePlanImportPrompt } from './import-plan'
 import { collectDiff, collectFileDiff, composeDiffReviewPrompt } from './diff-service'
+import { listExplorerDir, readExplorerFile } from './explorer-service'
 import {
   createWorktree,
   listWorktrees,
@@ -433,6 +434,46 @@ export function registerIpc({
     journal.add('review', `review agent spawned on ${dir}${lead ? ` (reports to ${lead})` : ''}`)
     return true
   })
+
+  // ----- file explorer (PLAN GX5): READ-ONLY -----
+  // The browsable roots are recomputed and re-validated on EVERY call: the
+  // renderer/companion can only ever read under the project dir, the project
+  // worktrees, or the cwd of a live session — never an arbitrary path.
+  const explorerRootList = async (): Promise<
+    { path: string; label: string; main: boolean }[]
+  > => {
+    const roots = new Map<string, { path: string; label: string; main: boolean }>()
+    const add = (path: string, label: string, main = false): void => {
+      const p = resolvePath(path)
+      if (!roots.has(p)) roots.set(p, { path: p, label, main })
+    }
+    try {
+      for (const w of await listWorktrees(getConfig().projectDir)) {
+        add(w.path, `⎇ ${w.branch ?? w.path}`, w.main)
+      }
+    } catch {
+      // Not a git repo: the project dir alone is the root (equivalent fallback).
+    }
+    add(getConfig().projectDir, getConfig().projectDir, roots.size === 0)
+    for (const s of service.list()) {
+      if (s.status !== 'exited') add(s.cwd, s.name)
+    }
+    return [...roots.values()]
+  }
+  const explorerRoot = async (root: unknown): Promise<string> => {
+    const p = resolvePath(typeof root === 'string' ? root : '')
+    if (!(await explorerRootList()).some((r) => r.path === p)) {
+      throw new Error('explorer: root not allowed')
+    }
+    return p
+  }
+  regHandle('explorer:roots', () => explorerRootList())
+  regHandle('explorer:list', async (_e, root: string, rel: string) =>
+    listExplorerDir(await explorerRoot(root), typeof rel === 'string' ? rel : '')
+  )
+  regHandle('explorer:read', async (_e, root: string, rel: string) =>
+    readExplorerFile(await explorerRoot(root), typeof rel === 'string' ? rel : '')
+  )
 
   // ----- activity journal (PLAN C14) -----
   regHandle('journal:list', (_e, kind?: string | null) =>

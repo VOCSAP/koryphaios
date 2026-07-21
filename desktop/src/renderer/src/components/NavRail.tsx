@@ -8,6 +8,7 @@ const VIEWS: { id: DeckView; icon: string; key: string }[] = [
   { id: 'home', icon: '🏠', key: 'nav.home' },
   { id: 'agents', icon: '🖥', key: 'nav.agents' },
   { id: 'browser', icon: '🌐', key: 'nav.browser' },
+  { id: 'files', icon: '📁', key: 'nav.files' },
   { id: 'git', icon: '±', key: 'nav.git' },
   { id: 'roadmap', icon: '🗺', key: 'nav.roadmap' },
   { id: 'graph', icon: '🕸', key: 'nav.graph' },

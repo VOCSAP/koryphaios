@@ -2512,6 +2512,137 @@ code {
   font-weight: 600;
 }
 
+/* ----- File explorer rail view (PLAN GX6): read-only tree + viewer ----- */
+
+.explorer-view {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  min-width: 0;
+}
+
+.explorer-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  min-height: 0;
+}
+
+.explorer-tree {
+  overflow: auto;
+  padding: 8px 6px;
+  border-right: 1px solid var(--border);
+}
+
+.explorer-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  padding: 2px 8px;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: var(--fg);
+  font-size: 12px;
+  font-family: var(--mono, monospace);
+  cursor: pointer;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.explorer-row:hover {
+  background: var(--bg-1);
+}
+
+.explorer-row.is-active {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.explorer-row-note {
+  color: var(--fg-dim);
+  cursor: default;
+}
+
+.explorer-caret {
+  width: 12px;
+  display: inline-block;
+  color: var(--fg-dim);
+  flex: none;
+}
+
+.explorer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.explorer-root-select {
+  max-width: 300px;
+}
+
+.explorer-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  min-width: 0;
+  min-height: 0;
+}
+
+.explorer-hint {
+  padding-top: 20px;
+  text-align: center;
+}
+
+.explorer-file-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.explorer-size {
+  color: var(--fg-dim);
+  font-weight: 400;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* One scroll container for gutter + content: same font metrics keep the
+   line numbers aligned; the gutter is not selectable (clean copy/paste). */
+.explorer-code {
+  flex: 1;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  overflow: auto;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.explorer-gutter {
+  padding: 8px 8px 8px 10px;
+  text-align: right;
+  color: var(--fg-dim);
+  user-select: none;
+  border-right: 1px solid var(--border);
+  position: sticky;
+  left: 0;
+  background: var(--bg-1);
+}
+
+.explorer-content {
+  margin: 0;
+  padding: 8px 12px;
+  white-space: pre;
+  min-width: 0;
+}
+
 /* "Needs you" (PLAN C11): violet pulse takes priority over the other states. */
 .dot-attention {
   background: #b678ff;

@@ -30,8 +30,9 @@ export const MOBILE_VIEWS: Record<DeckView, MobileViewMeta> = {
   home: { placement: 'tab', icon: '🏠', labelKey: 'nav.home' },
   agents: { placement: 'tab', icon: '🖥', labelKey: 'nav.agents' },
   roadmap: { placement: 'tab', icon: '🗺', labelKey: 'nav.roadmap' },
-  // Read-only diff browsing is desktop-first (PLAN GX3); the DiffPanel modal
-  // opened from the Worktrees view stays the mobile path to a diff.
+  // Read-only diff/file browsing is desktop-first (PLAN GX3/GX6); the
+  // DiffPanel modal opened from the Worktrees view stays the mobile diff path.
+  files: { placement: 'desktop-only', icon: '📁', labelKey: 'nav.files' },
   git: { placement: 'desktop-only', icon: '±', labelKey: 'nav.git' },
   worktrees: { placement: 'more', icon: '⎇', labelKey: 'nav.worktrees' },
   journal: { placement: 'more', icon: '📜', labelKey: 'nav.journal' },
