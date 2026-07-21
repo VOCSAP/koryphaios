@@ -33,7 +33,9 @@ function RemoteBootError(): React.JSX.Element {
           ? 'Relance « Compagnon » sur le PC et scanne le nouveau QR code.'
           : 'Restart “Companion” on the PC and scan the fresh QR code.'}
       </p>
-      <button onClick={() => window.location.reload()}>{fr ? 'Réessayer' : 'Retry'}</button>
+      <button className="primary" onClick={() => window.location.reload()}>
+        {fr ? 'Réessayer' : 'Retry'}
+      </button>
     </div>
   )
 }

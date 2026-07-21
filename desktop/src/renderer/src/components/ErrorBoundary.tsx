@@ -55,7 +55,9 @@ export class ErrorBoundary extends React.Component<Props, State> {
             ? "L'erreur a été enregistrée dans le journal et le fichier de log. Le reste de la fenêtre continue de fonctionner."
             : 'The error was recorded in the journal and the log file. The rest of the window keeps running.'}
         </p>
-        <button onClick={this.retry}>{fr ? 'Réessayer' : 'Retry'}</button>
+        <button className="primary" onClick={this.retry}>
+          {fr ? 'Réessayer' : 'Retry'}
+        </button>
       </div>
     )
   }

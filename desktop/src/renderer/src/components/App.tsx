@@ -205,7 +205,9 @@ export function App(): React.JSX.Element {
         <div className="loading loading-error" role="alert">
           <h2>{fr ? 'Échec du démarrage' : 'Startup failed'}</h2>
           <p className="error-boundary-detail">{initError}</p>
-          <button onClick={() => void init()}>{fr ? 'Réessayer' : 'Retry'}</button>
+          <button className="primary" onClick={() => void init()}>
+            {fr ? 'Réessayer' : 'Retry'}
+          </button>
         </div>
       )
     }

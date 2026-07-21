@@ -61,7 +61,7 @@ export function JournalView(): React.JSX.Element {
             </option>
           ))}
         </select>
-        <button onClick={() => void exportText()} disabled={entries.length === 0}>
+        <button className="btn" onClick={() => void exportText()} disabled={entries.length === 0}>
           {t('journal.export')}
         </button>
       </header>

@@ -227,7 +227,10 @@ export function TemplateComposer({ path, onClose, onSaved }: Props): React.JSX.E
               )
             )}
           </div>
-          <button onClick={() => setSessions((all) => [...all, emptySession(all.length + 1)])}>
+          <button
+            className="btn"
+            onClick={() => setSessions((all) => [...all, emptySession(all.length + 1)])}
+          >
             {t('composer.addSession')}
           </button>
         </div>

@@ -842,6 +842,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                 <p className="error-boundary-detail">{loadError}</p>
                 <button
                   type="button"
+                  className="primary"
                   onClick={() => {
                     setLoadError(null)
                     webviewRef.current?.reload()
