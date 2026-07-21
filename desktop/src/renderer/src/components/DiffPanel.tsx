@@ -7,6 +7,27 @@ import { useT } from '../i18n'
 // Opened from the Worktrees view and the session right-click menu. Read-only;
 // the "review" button spawns a one-shot agent that reports to the team-lead.
 
+/** Path + untracked badge / +add −del counts of one file row. Shared with the
+ * Git rail view (PLAN GX3) so the two never drift. */
+export function DiffFileRow({ file }: { file: DiffFile }): React.JSX.Element {
+  const t = useT()
+  return (
+    <>
+      <span className="diff-file-path" title={file.path}>
+        {file.path}
+      </span>
+      {file.untracked ? (
+        <span className="diff-file-new">{t('diff.untracked')}</span>
+      ) : (
+        <span className="diff-file-counts">
+          {file.additions !== null ? <span className="diff-add">+{file.additions}</span> : '·'}{' '}
+          {file.deletions !== null ? <span className="diff-del">−{file.deletions}</span> : ''}
+        </span>
+      )}
+    </>
+  )
+}
+
 function FileList({ title, files }: { title: string; files: DiffFile[] }): React.JSX.Element {
   const t = useT()
   return (
@@ -15,25 +36,16 @@ function FileList({ title, files }: { title: string; files: DiffFile[] }): React
       {files.length === 0 && <div className="diff-files-empty">{t('diff.noChanges')}</div>}
       {files.map((f) => (
         <div key={f.path} className="diff-file">
-          <span className="diff-file-path" title={f.path}>
-            {f.path}
-          </span>
-          {f.untracked ? (
-            <span className="diff-file-new">{t('diff.untracked')}</span>
-          ) : (
-            <span className="diff-file-counts">
-              {f.additions !== null ? <span className="diff-add">+{f.additions}</span> : '·'}{' '}
-              {f.deletions !== null ? <span className="diff-del">−{f.deletions}</span> : ''}
-            </span>
-          )}
+          <DiffFileRow file={f} />
         </div>
       ))}
     </div>
   )
 }
 
-/** Minimal unified-diff colorizer: one <div> per line, classed by prefix. */
-function DiffText({ text }: { text: string }): React.JSX.Element {
+/** Minimal unified-diff colorizer: one <div> per line, classed by prefix.
+ * Shared with the Git rail view (PLAN GX3). */
+export function DiffText({ text }: { text: string }): React.JSX.Element {
   return (
     <pre className="diff-text">
       {text.split('\n').map((line, i) => {

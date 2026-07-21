@@ -241,6 +241,21 @@ export function RoadmapView(): React.JSX.Element {
     return () => clearInterval(timer)
   }, [refresh])
 
+  // Files-view seed (PLAN GX8): open the create form prefilled with the code
+  // selection. Saving stays an explicit operator action (wand-style contract).
+  const roadmapSeed = useDeck((s) => s.roadmapSeed)
+  const clearRoadmapSeed = useDeck((s) => s.clearRoadmapSeed)
+  useEffect(() => {
+    if (!roadmapSeed) return
+    setDraft({
+      ...EMPTY_DRAFT,
+      status: 'planned',
+      priority: 'should',
+      ...roadmapSeed
+    })
+    clearRoadmapSeed()
+  }, [roadmapSeed, clearRoadmapSeed])
+
   const selected = items.find((i) => i.id === selectedId) ?? null
 
   const save = async (): Promise<void> => {

@@ -11,6 +11,8 @@
 // operator/repo template.
 
 import { execFile } from 'node:child_process'
+import { realpath } from 'node:fs/promises'
+import { resolve, sep } from 'node:path'
 
 /** Cap on the raw unified diff shipped to the renderer / review prompt. */
 export const DIFF_TEXT_MAX = 150_000
@@ -114,6 +116,95 @@ export async function collectDiff(dir: string, base?: string | null): Promise<Se
     text: truncated ? full.slice(0, DIFF_TEXT_MAX) : full,
     truncated
   }
+}
+
+/** Unified diff of a single file (PLAN GX1), same cap/shape idea as SessionDiff. */
+export interface FileDiff {
+  path: string
+  text: string
+  truncated: boolean
+}
+
+/**
+ * True when `path` is a repo-relative path that stays inside `dir`. The path
+ * reaches this module from the renderer/companion boundary, so it must not
+ * escape the diffed tree (`--no-index` below would otherwise read any file).
+ */
+export function isRepoRelative(dir: string, path: string): boolean {
+  if (typeof path !== 'string' || path === '' || path.includes('\0')) return false
+  const root = resolve(dir)
+  const target = resolve(root, path)
+  return target !== root && target.startsWith(root + sep)
+}
+
+/**
+ * realpath-based containment (PLAN GX2 hardening): the resolved target must
+ * stay inside `dir` even through symlinks. A CLONED REPO is a hostile input
+ * (a committed symlink `x -> /etc/passwd`) — the lexical `isRepoRelative`
+ * alone would let the `--no-index` fallback below dump the link target, so
+ * that content-emitting branch is gated on this stricter check (mirrors the
+ * explorer's resolveWithin). Missing target / broken symlink → false.
+ */
+export async function realpathWithin(dir: string, path: string): Promise<boolean> {
+  if (!isRepoRelative(dir, path)) return false
+  try {
+    const root = await realpath(resolve(dir))
+    const real = await realpath(resolve(root, path))
+    return real !== root && real.startsWith(root + sep)
+  } catch {
+    return false
+  }
+}
+
+/** `git diff --no-index` exits 1 when differences exist — that IS the success case. */
+function gitNoIndex(args: string[], cwd: string): Promise<string> {
+  return new Promise((res) => {
+    execFile(
+      'git',
+      args,
+      { cwd, encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 },
+      (err, stdout) => {
+        // Exit 1 with output = diff found; anything else degrades to empty,
+        // like the best-effort catches of collectDiff (unborn HEAD etc.).
+        res(err && !stdout ? '' : stdout)
+      }
+    )
+  })
+}
+
+/**
+ * Diff of ONE file of `dir` (PLAN GX1): branch section when `base` is given,
+ * then uncommitted; an untracked file falls back to a `--no-index` diff
+ * against /dev/null (git maps it to the null device on Windows too) so its
+ * full content shows as additions. Same degradation policy as collectDiff.
+ */
+export async function collectFileDiff(
+  dir: string,
+  path: string,
+  base?: string | null
+): Promise<FileDiff> {
+  if (!isRepoRelative(dir, path)) {
+    throw new Error(`not a repo-relative path: ${path}`)
+  }
+  const sections: string[] = []
+  if (base) {
+    const branch = await git(['diff', `${base}...HEAD`, '--', path], dir).catch(() => '')
+    if (branch.trim()) sections.push(`# --- branch vs ${base} ---\n${branch}`)
+  }
+  const uncommitted = await git(['diff', 'HEAD', '--', path], dir).catch(() => '')
+  if (uncommitted.trim()) sections.push(`# --- uncommitted ---\n${uncommitted}`)
+  if (sections.length === 0) {
+    // The --no-index fallback emits the file's FULL content, so it only runs
+    // when the target really stays inside `dir` (symlinks resolved). The
+    // tracked-diff branches above are bounded by git to repo content already.
+    if (await realpathWithin(dir, path)) {
+      const untracked = await gitNoIndex(['diff', '--no-index', '--', '/dev/null', path], dir)
+      if (untracked.trim()) sections.push(`# --- untracked ---\n${untracked}`)
+    }
+  }
+  const full = sections.join('\n')
+  const truncated = full.length > DIFF_TEXT_MAX
+  return { path, text: truncated ? full.slice(0, DIFF_TEXT_MAX) : full, truncated }
 }
 
 /**

@@ -4,7 +4,7 @@ A **thin Capacitor shell** whose only job is to reach the desktop app's
 companion server over the LAN. It embeds **no UI of its own**: the interface is
 served by the PC (the same renderer bundle as the desktop window), so the phone
 is always exactly at the host's version — the whole point of the web-remoting
-approach (voie C in `EXPLORATION-mobile-lan.md`).
+approach (voie C — ephemeral companion-session mode; see `CHANGELOG.md`).
 
 This directory is a **scaffold**, not a built APK: building requires the
 Android SDK + Gradle, which are not present in the CI/dev container. The web

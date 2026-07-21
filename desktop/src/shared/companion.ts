@@ -85,7 +85,13 @@ export const COMPANION_MANIFEST = {
 
   // diff / review
   collectDiff: { kind: 'invoke', channel: 'diff:collect' },
+  collectFileDiff: { kind: 'invoke', channel: 'diff:collect-file' },
   reviewDiff: { kind: 'invoke', channel: 'diff:review' },
+
+  // file explorer (read-only, roots re-validated main-side)
+  explorerRoots: { kind: 'invoke', channel: 'explorer:roots' },
+  explorerList: { kind: 'invoke', channel: 'explorer:list' },
+  explorerRead: { kind: 'invoke', channel: 'explorer:read' },
 
   // embedded browser + window mirror (desktop-only feature, blocked remotely)
   getBrowserPreloadPath: { kind: 'invoke', channel: 'browser:preload-path' },
@@ -207,6 +213,10 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'journal:list': 0,
   'broker:status': 0,
   'diff:collect': 0,
+  'diff:collect-file': 0,
+  'explorer:roots': 0,
+  'explorer:list': 0,
+  'explorer:read': 0,
   'template:list': 0,
   'template:read': 0,
   'snippet:list': 0,

@@ -16,7 +16,7 @@ import type {
   StopResult
 } from '@shared/types'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
-import { buildHelpPrompt, buildHelpSystemPrompt } from './help-assistant'
+import { buildHelpPrompt, buildHelpSystemPrompt, sanitizeHelpSelection } from './help-assistant'
 import { buildWandPrompt, WAND_SYSTEM_PROMPT, type WandDraft } from './context-wand'
 import { runUtilityInference, type UtilityDeps } from './utility-inference'
 import { markGraphDraftOpened, resolveBrokerEndpoint } from './broker-client'
@@ -33,7 +33,8 @@ import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } f
 import { archiveRoadmap, computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
 import { createSessionWithWorktree } from './create-session'
 import { composePlanImportPrompt } from './import-plan'
-import { collectDiff, composeDiffReviewPrompt } from './diff-service'
+import { collectDiff, collectFileDiff, composeDiffReviewPrompt } from './diff-service'
+import { listExplorerDir, readExplorerFile } from './explorer-service'
 import {
   createWorktree,
   listWorktrees,
@@ -391,13 +392,66 @@ export function registerIpc({
     journal.add('worktree', `worktree created on ⎇ ${wt.branch}`)
   })
 
+  // ----- working-dir allow-set (PLAN GX5 + M-SEC): the ONLY dirs the
+  // read-only Git/Files views may touch — the project dir, its worktrees and
+  // the cwd of any Deck session. Recomputed and re-validated on EVERY call so
+  // a renderer/companion `dir`/`root` argument can never reach an arbitrary
+  // path (e.g. /etc via the diff --no-index content dump). Both the diff
+  // handlers and the explorer handlers route their path argument through it.
+  // Short-TTL memo of the raw worktree list: within one poll tick the diff
+  // and explorer handlers ask for it several times (requireWorkDir, diffBase,
+  // per-node explorer:list), and each call is a git subprocess. 1.5 s is well
+  // under the views' 10 s/30 s polls; a just-added worktree is briefly absent
+  // from the allow-set, which fails CLOSED (safe). Never caches sessions —
+  // those come live from service.list().
+  let wtMemo: { at: number; key: string; rows: Awaited<ReturnType<typeof listWorktrees>> } | null =
+    null
+  const WT_MEMO_MS = 1500
+  const cachedWorktrees = async (): Promise<Awaited<ReturnType<typeof listWorktrees>>> => {
+    const key = getConfig().projectDir
+    const now = Date.now()
+    if (wtMemo && wtMemo.key === key && now - wtMemo.at < WT_MEMO_MS) return wtMemo.rows
+    const rows = await listWorktrees(key)
+    wtMemo = { at: now, key, rows }
+    return rows
+  }
+
+  const workDirRoots = async (): Promise<
+    { path: string; label: string; main: boolean }[]
+  > => {
+    const roots = new Map<string, { path: string; label: string; main: boolean }>()
+    const add = (path: string, label: string, main = false): void => {
+      const p = resolvePath(path)
+      if (!roots.has(p)) roots.set(p, { path: p, label, main })
+    }
+    try {
+      for (const w of await cachedWorktrees()) {
+        add(w.path, `⎇ ${w.branch ?? w.path}`, w.main)
+      }
+    } catch {
+      // Not a git repo: the project dir alone is the root (equivalent fallback).
+    }
+    add(getConfig().projectDir, getConfig().projectDir, roots.size === 0)
+    // All sessions (exited included): diffing/browsing a finished session's
+    // dir is legitimate, and an exited tile's cwd is still a Deck-managed dir.
+    for (const s of service.list()) add(s.cwd, s.name)
+    return [...roots.values()]
+  }
+  const requireWorkDir = async (dir: unknown): Promise<string> => {
+    const p = resolvePath(typeof dir === 'string' ? dir : '')
+    if (!(await workDirRoots()).some((r) => r.path === p)) {
+      throw new Error('dir not allowed')
+    }
+    return p
+  }
+
   // ----- diff / review (PLAN C13) -----
   // Base resolution: a NON-MAIN worktree of the project is compared to the
   // main worktree's branch (merge-base); anything else (main tree, foreign
   // cwd) gets uncommitted-only. Never guessed from config.
   const diffBase = async (dir: string): Promise<string | null> => {
     try {
-      const all = await listWorktrees(getConfig().projectDir)
+      const all = await cachedWorktrees()
       const main = all.find((w) => w.main)
       const target = all.find((w) => w.path === resolvePath(dir))
       if (!main?.branch || !target || target.main) return null
@@ -406,12 +460,25 @@ export function registerIpc({
       return null
     }
   }
-  regHandle('diff:collect', async (_e, dir: string) =>
-    collectDiff(dir, await diffBase(dir))
-  )
+  // `dir` is re-validated against the work-dir allow-set on every call: it
+  // crosses the renderer/companion boundary and otherwise feeds an arbitrary
+  // path to git (the --no-index fallback would dump any readable file).
+  regHandle('diff:collect', async (_e, dir: string) => {
+    const d = await requireWorkDir(dir)
+    return collectDiff(d, await diffBase(d))
+  })
+  // Per-file diff (PLAN GX2). `dir` validated as above; collectFileDiff also
+  // rejects a `path` escaping `dir` (lexical + realpath, see diff-service).
+  regHandle('diff:collect-file', async (_e, dir: string, path: string) => {
+    const d = await requireWorkDir(dir)
+    return collectFileDiff(d, path, await diffBase(d))
+  })
   // One-shot review agent (C7 pattern, code-constant prompt): reads the diff
-  // in place and reports to the team-lead peer (C10) when one is live.
+  // in place and reports to the team-lead peer (C10) when one is live. `dir`
+  // becomes the spawned agent's cwd, so it is validated against the allow-set
+  // too (an arbitrary cwd would be worse than the read paths above).
   regHandle('diff:review', async (_e, dir: string) => {
+    const d = await requireWorkDir(dir)
     const lead =
       service.list().find((s) => s.lead && s.status !== 'exited' && s.peerId)?.peerId ?? null
     await createSessionWithWorktree(
@@ -419,15 +486,35 @@ export function registerIpc({
       getConfig().projectDir,
       {
         name: 'reviewer',
-        cwd: dir,
-        prompt: composeDiffReviewPrompt({ dir, base: await diffBase(dir), leadPeerId: lead }),
-        announce: `one-shot reviewer: reviews the diff in "${dir}"`
+        cwd: d,
+        prompt: composeDiffReviewPrompt({ dir: d, base: await diffBase(d), leadPeerId: lead }),
+        announce: `one-shot reviewer: reviews the diff in "${d}"`
       },
       checkpoint
     )
-    journal.add('review', `review agent spawned on ${dir}${lead ? ` (reports to ${lead})` : ''}`)
+    journal.add('review', `review agent spawned on ${d}${lead ? ` (reports to ${lead})` : ''}`)
     return true
   })
+
+  // ----- file explorer (PLAN GX5): READ-ONLY -----
+  // Shares the work-dir allow-set with the diff handlers (workDirRoots): the
+  // renderer/companion can only ever browse under the project dir, the
+  // worktrees, or a session cwd — never an arbitrary path. resolveWithin adds
+  // realpath containment inside the chosen root (symlink escapes rejected).
+  const explorerRoot = async (root: unknown): Promise<string> => {
+    const p = resolvePath(typeof root === 'string' ? root : '')
+    if (!(await workDirRoots()).some((r) => r.path === p)) {
+      throw new Error('explorer: root not allowed')
+    }
+    return p
+  }
+  regHandle('explorer:roots', () => workDirRoots())
+  regHandle('explorer:list', async (_e, root: string, rel: string) =>
+    listExplorerDir(await explorerRoot(root), typeof rel === 'string' ? rel : '')
+  )
+  regHandle('explorer:read', async (_e, root: string, rel: string) =>
+    readExplorerFile(await explorerRoot(root), typeof rel === 'string' ? rel : '')
+  )
 
   // ----- activity journal (PLAN C14) -----
   regHandle('journal:list', (_e, kind?: string | null) =>
@@ -545,11 +632,18 @@ export function registerIpc({
   }
   regHandle(
     'help:ask',
-    async (_e, question: string, view: string, transcript: HelpExchange[]) => {
+    async (_e, question: string, view: string, transcript: HelpExchange[], selection?: unknown) => {
       const docsDir = resolveDocsDir()
+      // Files-view selection (PLAN GX7): rides the SYSTEM side (context file),
+      // so the code never touches the command line / its arg cap.
+      const sel = sanitizeHelpSelection(selection)
+      const data = {
+        ...((await helpSnapshot()) as Record<string, unknown>),
+        ...(sel ? { code_selection: sel } : null)
+      }
       return runUtilityInference(utilityDeps(), {
         target: getConfig().helpTarget,
-        system: buildHelpSystemPrompt({ view, data: await helpSnapshot(), docsDir }),
+        system: buildHelpSystemPrompt({ view, data, docsDir }),
         prompt: buildHelpPrompt(question ?? '', transcript ?? []),
         kind: 'help',
         addDir: docsDir || undefined

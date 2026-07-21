@@ -15,10 +15,14 @@ Two products in one repo:
   battle mode, and a unified model picker (frontier CLIs + local
   OpenAI-compatible endpoints).
 
-Release history and per-batch narratives live in `CHANGELOG.md`. Code comments
-reference chantier ids (`C1`…`C29`, `D1`…) from past working plans; the
-matching design decisions are summarized in the CHANGELOG entry of the batch
-that shipped them.
+Release history and per-batch narratives live in `CHANGELOG.md`; the remaining
+open work (to-do / to-verify / deferred, incl. the security backlog) is
+centralized in `BACKLOG.md`. Code comments reference chantier ids (`C1`…`C29`,
+`D1`…, `MB1`…, `TS1`…, `GX1`…) from past working plans. Those standalone working
+docs (`PLAN-*`, `EXPLORATION-*`, `AUDIT-*`) were consolidated and removed: the
+shipped design decisions are summarized in the CHANGELOG entry of the batch that
+shipped them, the open residual lives in `BACKLOG.md`, and the full detail
+(exploit chains, design alternatives) stays in git history.
 
 ## Detailed docs (read on demand)
 
@@ -36,10 +40,16 @@ Only read the file matching the area you are touching:
   point (help, wand, digest, graph, judge), or verifying non-Anthropic
   CLI/API syntax — the `model-providers` skill
   (`.claude/skills/model-providers/SKILL.md`).
+- Adding a navigation-rail VIEW and/or a `DeckApi` IPC channel to the desktop
+  app (no broker involved) — the `add-deck-view` skill
+  (`.claude/skills/add-deck-view/SKILL.md`). For an agent→broker→Deck feature
+  instead, use `add-broker-feature`.
 - Bun runtime / API conventions (which libs to use or avoid) — read
   `BUN.md`.
 - Building a Bun-served frontend (HTML imports, React) — read
   `FRONTEND.md`.
+- Picking up open / deferred work (security backlog, v2 features, pending
+  visual/E2E validations) — `BACKLOG.md` (the single consolidated to-do list).
 
 ## Conventions (always apply)
 
@@ -60,15 +70,23 @@ Only read the file matching the area you are touching:
   Only swallow silently when the fallback is truly equivalent (documented
   best-effort caches). Full conventions per layer: the `error-reporting`
   skill (`.claude/skills/error-reporting/SKILL.md`).
-- **Two hostile inputs, never trusted.** (1) A value from a CLONED REPO
+- **Three hostile inputs, never trusted.** (1) A value from a CLONED REPO
   (project `.claude/claude-peers/config.json`, project-local `templates/*.json`)
   that reaches a shell/spawn must be GLOBAL-config-only or approval-gated —
   reuse `launch-approval.ts`, never put the trust decision in the repo (see the
   "Security gates" section of `DESKTOP.md`). (2) A message/peer field crossing
   the broker HTTP boundary must never carry `instance_token`/`from_token`/PIDs —
-  project through `toPublicPeer` / `resolveSenderMeta` in `broker.ts`. When you
-  add a config field, template field, shell-interpolated arg, or broker response
-  field, decide which of these it is BEFORE wiring it.
+  project through `toPublicPeer` / `resolveSenderMeta` in `broker.ts`. (3) An
+  IPC argument from the renderer OR the companion that becomes a FILESYSTEM
+  PATH, a git target, or a spawned cwd must be re-validated MAIN-side against
+  the work-dir allow-set on every call (`workDirRoots` / `requireWorkDir` in
+  `ipc.ts`; realpath containment for the leaf via `resolveWithin` /
+  `realpathWithin`) — the companion `CHANNEL_TIERS` tier is a declaration, NOT
+  an access gate, so a tier-0 "read" channel with an unvalidated `dir` is an
+  arbitrary-file-read (the GX-SEC finding: `git diff --no-index` dumping any
+  file). When you add a config field, template field, shell-interpolated arg,
+  broker response field, or a path/dir IPC arg, decide which of these it is
+  BEFORE wiring it.
 - **Naming a scratch/plan/report doc?** `.gitignore` silently excludes
   `findings.md`, `task_plan.md`, `progress.md`, `progress-archive.md`, `docs/`,
   and `.claude/session-checkpoint.md`. A deliverable you intend to commit (audit

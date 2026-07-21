@@ -30,7 +30,7 @@ export const HELP_DISALLOWED_TOOLS =
 export const HELP_SYSTEM_PROMPT = [
   'You are the built-in HELP ASSISTANT of Koryphaios, a desktop app that docks multiple Claude Code sessions ("agents") into one window.',
   'App overview: a navigation rail with Home (a supervisor session that can pilot the app), Agents (session tiles: real Claude Code terminals sharing an isolated peer group, able to message each other), and Roadmap (a persistent per-project backlog of features/bugs/debt/ideas with MoSCoW priorities, shared with the agents through their roadmap_* tools). Sessions can run in dedicated git worktrees (one branch each). Workspaces save/restore session sets; templates are reusable session recipes.',
-  'Your job: help the operator understand the app and reason about its current state. A context snapshot is provided below with the active view plus the full app state: roadmap_items (the shared backlog), sessions (the tiles and their status), git_worktrees (path/branch/main; a worktree with no session running in it is a leftover the operator may want to resume or clean up). Ground your answers in it -- recommend, compare, explain, prioritize.',
+  'Your job: help the operator understand the app and reason about its current state. A context snapshot is provided below with the active view plus the full app state: roadmap_items (the shared backlog), sessions (the tiles and their status), git_worktrees (path/branch/main; a worktree with no session running in it is a leftover the operator may want to resume or clean up). Ground your answers in it -- recommend, compare, explain, prioritize. When the snapshot carries a code_selection (a snippet the operator selected in the Files view: file, line range, text), the question is about that exact code -- ground your answer in it (and in the surrounding file when the reading tools are available).',
   'You are STRICTLY an advisor and technically read-only: no MCP tools are loaded and mutating tools are disabled. You cannot spawn sessions, edit the roadmap, modify files or run commands. If asked to DO something, say you cannot, and explain how the operator can do it in the UI or delegate it to the supervisor (Home view).',
   'Answer concisely, in the language of the question.'
 ].join('\n\n')
@@ -78,6 +78,33 @@ export function buildHelpSystemPrompt(ctx: HelpContext): string {
 export interface HelpExchange {
   question: string
   answer: string
+}
+
+/** Cap on the selection text injected into the snapshot (PLAN GX7). */
+export const HELP_SELECTION_TEXT_MAX = 20_000
+
+/**
+ * Validate + cap a Files-view selection crossing the renderer boundary
+ * (PLAN GX7). Returns the snake_case shape injected as `code_selection`
+ * in the snapshot, or null when the payload is absent/malformed.
+ */
+export function sanitizeHelpSelection(raw: unknown): {
+  file: string
+  start_line: number
+  end_line: number
+  text: string
+} | null {
+  if (!raw || typeof raw !== 'object') return null
+  const s = raw as Record<string, unknown>
+  if (typeof s.file !== 'string' || typeof s.text !== 'string' || !s.text.trim()) return null
+  const start = Number(s.startLine)
+  const end = Number(s.endLine)
+  return {
+    file: s.file.slice(0, 1024),
+    start_line: Number.isFinite(start) ? Math.max(1, Math.round(start)) : 1,
+    end_line: Number.isFinite(end) ? Math.max(1, Math.round(end)) : 1,
+    text: s.text.slice(0, HELP_SELECTION_TEXT_MAX)
+  }
 }
 
 /** Exchanges replayed into the (stateless) prompt for popup continuity. */

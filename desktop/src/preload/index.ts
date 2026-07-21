@@ -7,6 +7,7 @@ import type {
   DeckView,
   DesignPickEvent,
   HelpExchange,
+  HelpSelection,
   InboxMessage,
   LaunchConfig,
   PtyDataEvent,
@@ -120,15 +121,20 @@ const api: DeckApi = {
   journalList: (kind?: string | null) => ipcRenderer.invoke('journal:list', kind ?? null),
   journalExport: () => ipcRenderer.invoke('journal:export'),
   collectDiff: (dir: string) => ipcRenderer.invoke('diff:collect', dir),
+  collectFileDiff: (dir: string, path: string) =>
+    ipcRenderer.invoke('diff:collect-file', dir, path),
   reviewDiff: (dir: string) => ipcRenderer.invoke('diff:review', dir),
+  explorerRoots: () => ipcRenderer.invoke('explorer:roots'),
+  explorerList: (root: string, rel: string) => ipcRenderer.invoke('explorer:list', root, rel),
+  explorerRead: (root: string, rel: string) => ipcRenderer.invoke('explorer:read', root, rel),
   getBrowserPreloadPath: () => ipcRenderer.invoke('browser:preload-path'),
   captureBrowser: (webContentsId: number) => ipcRenderer.invoke('browser:capture', webContentsId),
   saveAnnotation: (dataUrl: string) => ipcRenderer.invoke('browser:save-annotation', dataUrl),
   listCaptureWindows: () => ipcRenderer.invoke('design:list-windows'),
   captureWindow: (id: string) => ipcRenderer.invoke('design:capture-window', id),
   ensureSupervisor: () => ipcRenderer.invoke('supervisor:ensure'),
-  askHelp: (question: string, view: DeckView, transcript: HelpExchange[]) =>
-    ipcRenderer.invoke('help:ask', question, view, transcript),
+  askHelp: (question: string, view: DeckView, transcript: HelpExchange[], selection?: HelpSelection) =>
+    ipcRenderer.invoke('help:ask', question, view, transcript, selection),
   askDigest: () => ipcRenderer.invoke('help:digest'),
 
   listTemplates: () => ipcRenderer.invoke('template:list'),

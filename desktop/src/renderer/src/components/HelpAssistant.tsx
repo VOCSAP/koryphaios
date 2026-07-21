@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { HelpExchange } from '@shared/types'
+import type { HelpExchange, HelpSelection } from '@shared/types'
 import { targetLabel } from '@shared/models'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
@@ -26,18 +26,32 @@ export function HelpAssistant(): React.JSX.Element | null {
   const config = useDeck((s) => s.config!)
   const view = useDeck((s) => s.view)
   const updateConfig = useDeck((s) => s.updateConfig)
+  const helpSeed = useDeck((s) => s.helpSeed)
+  const clearHelpSeed = useDeck((s) => s.clearHelpSeed)
 
   const [open, setOpen] = useState(false)
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
+  /** Files-view code selection attached to the NEXT question (PLAN GX7). */
+  const [selection, setSelection] = useState<HelpSelection | null>(null)
   const logRef = useRef<HTMLDivElement>(null)
 
   // Keep the transcript pinned to the latest message.
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight })
   }, [messages, open])
+
+  // Seed from the Files view (PLAN GX7): open prefilled, attach the selection.
+  // Sending stays a manual operator action.
+  useEffect(() => {
+    if (!helpSeed) return
+    setOpen(true)
+    setDraft(helpSeed.question)
+    setSelection(helpSeed.selection)
+    clearHelpSeed()
+  }, [helpSeed, clearHelpSeed])
 
   if (config.helpButton === false) return null
 
@@ -75,7 +89,10 @@ export function HelpAssistant(): React.JSX.Element | null {
     setMessages((m) => [...m, { question, answer: '', pending: true }])
     // Replay only completed exchanges for continuity (the CLI is stateless).
     const transcript = messages.filter((m) => !m.pending && !m.error)
-    window.api.askHelp(question, view, transcript).then(
+    // The attached selection is one-shot: it rides this question's snapshot.
+    const attached = selection ?? undefined
+    setSelection(null)
+    window.api.askHelp(question, view, transcript, attached).then(
       (answer) => {
         setBusy(false)
         setMessages((m) =>
@@ -126,6 +143,20 @@ export function HelpAssistant(): React.JSX.Element | null {
               </div>
             ))}
           </div>
+          {selection && (
+            <div className="help-selection">
+              <span className="help-selection-ref" title={selection.text.slice(0, 500)}>
+                📎 {selection.file}:{selection.startLine}–{selection.endLine}
+              </span>
+              <button
+                className="icon-btn"
+                title={t('help.detachSelection')}
+                onClick={() => setSelection(null)}
+              >
+                ✕
+              </button>
+            </div>
+          )}
           <div className="help-input-row">
             <textarea
               className="help-input"

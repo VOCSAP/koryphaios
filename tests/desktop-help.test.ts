@@ -12,6 +12,8 @@ import {
   buildHelpSystemPrompt,
   buildHelpPrompt,
   runHelp,
+  sanitizeHelpSelection,
+  HELP_SELECTION_TEXT_MAX,
   HELP_SYSTEM_PROMPT
 } from "../desktop/src/main/help-assistant.ts";
 import { buildAdapterCommand } from "../desktop/src/main/model-adapters.ts";
@@ -32,6 +34,34 @@ function tmp(): string {
   tmpDirs.push(d);
   return d;
 }
+
+// ----- code selection (PLAN GX7) -----
+
+test("sanitizeHelpSelection validates, snake_cases and caps the payload", () => {
+  const sel = sanitizeHelpSelection({
+    file: "src/app.ts",
+    startLine: 3,
+    endLine: 7,
+    text: "const x = 1"
+  });
+  expect(sel).toEqual({ file: "src/app.ts", start_line: 3, end_line: 7, text: "const x = 1" });
+
+  const capped = sanitizeHelpSelection({
+    file: "a.ts",
+    startLine: 1,
+    endLine: 2,
+    text: "y".repeat(HELP_SELECTION_TEXT_MAX + 50)
+  });
+  expect(capped!.text.length).toBe(HELP_SELECTION_TEXT_MAX);
+
+  // Malformed / hostile payloads degrade to null (question goes out bare).
+  expect(sanitizeHelpSelection(undefined)).toBeNull();
+  expect(sanitizeHelpSelection("nope")).toBeNull();
+  expect(sanitizeHelpSelection({ file: "a", text: "   " })).toBeNull();
+  expect(sanitizeHelpSelection({ file: 42, text: "x" })).toBeNull();
+  // Non-numeric lines degrade to 1, they never break the call.
+  expect(sanitizeHelpSelection({ file: "a", text: "x", startLine: "z" })!.start_line).toBe(1);
+});
 
 // ----- system prompt -----
 

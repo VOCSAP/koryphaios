@@ -5,8 +5,10 @@ import type {
   CreateSessionInput,
   DeckGraphDraft,
   DeckView,
+  HelpSelection,
   InboxMessage,
   LocaleOption,
+  RoadmapKind,
   SessionRuntime,
   TemplateSummary,
   WorkspaceSummary
@@ -67,6 +69,18 @@ interface DeckState {
   /** Diff panel target (PLAN C13): a dir to diff + display title, or null. */
   diffTarget: { dir: string; title: string } | null
   /**
+   * Pending help-assistant seed (PLAN GX7): a prefilled question + the code
+   * selection it is about, set by the Files view. The HelpAssistant consumes
+   * it (opens, prefills, attaches) then clears it; sending stays manual.
+   */
+  helpSeed: { question: string; selection: HelpSelection } | null
+  /**
+   * Pending roadmap-editor seed (PLAN GX8): prefill for the create form, set
+   * by the Files view ("create a task on this code"). RoadmapView consumes it
+   * when it mounts/sees it; saving stays an explicit operator action.
+   */
+  roadmapSeed: { title: string; kind: RoadmapKind; description: string } | null
+  /**
    * Embedded browser (PLAN D1): session docked next to the browser pane, or
    * null for a full-width browser. Set by the tile's 🌐 button.
    */
@@ -111,6 +125,14 @@ interface DeckState {
   clearGraphFocus(): void
   /** Open the diff panel on a dir (null closes it). */
   openDiff(target: { dir: string; title: string } | null): void
+  /** Open the help assistant prefilled with a code-selection question (GX7). */
+  openHelpAssistant(seed: { question: string; selection: HelpSelection }): void
+  /** HelpAssistant consumed the seed. */
+  clearHelpSeed(): void
+  /** Jump to the roadmap view with a prefilled create form (GX8). */
+  openRoadmapDraft(seed: { title: string; kind: RoadmapKind; description: string }): void
+  /** RoadmapView consumed the seed. */
+  clearRoadmapSeed(): void
   setSelected(id: string | null): void
   setMaximized(id: string | null): void
   openSearch(open: boolean): void
@@ -211,6 +233,8 @@ export const useDeck = create<DeckState>((set, get) => ({
   graphDrafts: [],
   graphFocus: null,
   diffTarget: null,
+  helpSeed: null,
+  roadmapSeed: null,
   browserPairedId: null,
   browserOpened: false,
   initError: null,
@@ -378,6 +402,10 @@ export const useDeck = create<DeckState>((set, get) => ({
   },
   clearGraphFocus: () => set({ graphFocus: null }),
   openDiff: (target) => set({ diffTarget: target }),
+  openHelpAssistant: (seed) => set({ helpSeed: seed }),
+  clearHelpSeed: () => set({ helpSeed: null }),
+  openRoadmapDraft: (seed) => set({ roadmapSeed: seed, view: 'roadmap' }),
+  clearRoadmapSeed: () => set({ roadmapSeed: null }),
   setSelected: (id) => set({ selectedId: id }),
   setMaximized: (id) => set({ maximizedId: id }),
   openSearch: (open) => set({ searchOpen: open }),

@@ -6,6 +6,8 @@ import { TileArea } from './TileArea'
 import { DisplayModeBar } from './DisplayModeBar'
 import { NavRail } from './NavRail'
 import { RoadmapView } from './RoadmapView'
+import { ExplorerView } from './ExplorerView'
+import { GitView } from './GitView'
 import { GraphView } from './GraphView'
 import { WorktreesView } from './WorktreesView'
 import { JournalView } from './JournalView'
@@ -303,6 +305,16 @@ export function App(): React.JSX.Element {
             <BrowserView active={view === 'browser'} />
           </ErrorBoundary>
         </div>
+      )}
+      {view === 'files' && (
+        <ErrorBoundary scope="files">
+          <ExplorerView />
+        </ErrorBoundary>
+      )}
+      {view === 'git' && (
+        <ErrorBoundary scope="git">
+          <GitView />
+        </ErrorBoundary>
       )}
       {view === 'roadmap' && (
         <ErrorBoundary scope="roadmap">

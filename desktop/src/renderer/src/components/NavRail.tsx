@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import type { DeckView } from '@shared/types'
@@ -8,16 +9,45 @@ const VIEWS: { id: DeckView; icon: string; key: string }[] = [
   { id: 'home', icon: '🏠', key: 'nav.home' },
   { id: 'agents', icon: '🖥', key: 'nav.agents' },
   { id: 'browser', icon: '🌐', key: 'nav.browser' },
+  { id: 'files', icon: '📁', key: 'nav.files' },
+  { id: 'git', icon: '±', key: 'nav.git' },
   { id: 'roadmap', icon: '🗺', key: 'nav.roadmap' },
   { id: 'graph', icon: '🕸', key: 'nav.graph' },
   { id: 'worktrees', icon: '⎇', key: 'nav.worktrees' },
   { id: 'journal', icon: '📜', key: 'nav.journal' }
 ]
 
+/** Poll cadence of the ± badge (uncommitted-file count, PLAN GX9). */
+const GIT_BADGE_POLL_MS = 30_000
+
 export function NavRail(): React.JSX.Element {
   const t = useT()
   const view = useDeck((s) => s.view)
   const setView = useDeck((s) => s.setView)
+
+  // VSCode-style change counter on the ± entry: sum of the worktrees' dirty
+  // counts (the same numbers the Worktrees view shows). Decorative and
+  // best-effort by design: a failure (projectDir not a git repo, transient
+  // git error) hides the badge — the Git/Worktrees views surface their own
+  // errors when opened.
+  const [gitDirty, setGitDirty] = useState(0)
+  useEffect(() => {
+    let stop = false
+    const tick = async (): Promise<void> => {
+      try {
+        const rows = await window.api.listWorktrees()
+        if (!stop) setGitDirty(rows.reduce((n, w) => n + w.dirty, 0))
+      } catch {
+        if (!stop) setGitDirty(0)
+      }
+    }
+    void tick()
+    const timer = setInterval(() => void tick(), GIT_BADGE_POLL_MS)
+    return () => {
+      stop = true
+      clearInterval(timer)
+    }
+  }, [])
   const inboxOpen = useDeck((s) => s.inboxOpen)
   const inboxUnread = useDeck((s) => s.inboxUnread)
   const openInbox = useDeck((s) => s.openInbox)
@@ -45,7 +75,12 @@ export function NavRail(): React.JSX.Element {
           title={t(v.key)}
           onClick={() => setView(v.id)}
         >
-          <span className="nav-rail-icon">{v.icon}</span>
+          <span className="nav-rail-icon">
+            {v.icon}
+            {v.id === 'git' && gitDirty > 0 && (
+              <span className="nav-rail-badge">{gitDirty > 99 ? '99+' : gitDirty}</span>
+            )}
+          </span>
           <span className="nav-rail-label">{t(v.key)}</span>
         </button>
       ))}

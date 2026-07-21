@@ -1,5 +1,51 @@
 # Changelog
 
+## desktop (experimental) — Files & Git rail views (PLAN-git-explorer GX1–GX8)
+
+Two new READ-ONLY navigation-rail views born from the "VSCode git view"
+brainstorm. Design decisions: the Git view observes but never writes (no
+stage/commit/branch, direct or delegated — the agents own the git workflow);
+the file viewer ships without syntax highlighting in v1 (shiki/highlight.js
+noted as the v2 candidates, PLAN-git-explorer.md phase D).
+
+### Added
+- **± Git view (GX1–GX3).** SCM-style promotion of the C13 DiffPanel: pick a
+  worktree (attached-session badge) or a live session's dir on the left, read
+  its diff on the right — branch-vs-main + uncommitted sections, clickable
+  per-file numstat narrowing to a single file's diff (`collectFileDiff`, new
+  `diff:collect-file` channel, tier 0), 10 s poll, the one-shot review agent
+  button. Untracked files render through `git diff --no-index /dev/null`.
+  Paths crossing the renderer/companion boundary are containment-checked
+  (`isRepoRelative`).
+- **📁 Files view (GX4–GX6).** Lazy read-only explorer + plain-text viewer
+  (line-number gutter, 5 000-line render cap). New pure module
+  `explorer-service.ts`: realpath containment (symlink escapes rejected),
+  `.git` hidden, 512 KB read cap, NUL-sniff binary detection. The browsable
+  roots (`explorer:roots/list/read`, tier 0) are re-validated main-side on
+  every call: project dir + worktrees + live session cwds, nothing else.
+- **Selection → assistant / roadmap (GX7–GX8).** Selecting code in the viewer
+  offers "❓ Explain" (help assistant opens prefilled, the snippet travels as
+  `code_selection` inside the app-composed SYSTEM snapshot — capped 20 KB,
+  `sanitizeHelpSelection`, never on the command line) and "🗺 Create a task"
+  (roadmap create form prefilled: kind debt, status planned, snippet quoted;
+  saving stays an explicit operator action). Store seeds: `helpSeed` /
+  `roadmapSeed`.
+- **Security hardening (GX-SEC, from the branch's own security review).** The
+  diff handlers (`diff:collect`, `diff:collect-file`, `diff:review`) now
+  re-validate their `dir` argument against the same work-dir allow-set as the
+  explorer (project dir + worktrees + session cwds), factored into one
+  `workDirRoots`/`requireWorkDir` helper shared by both feature areas —
+  closing an arbitrary-file-read the `git diff --no-index` content fallback
+  could otherwise reach with an attacker-chosen `dir` (tier-0 channel,
+  companion-reachable). The `--no-index` fallback is additionally gated on a
+  realpath containment check (`realpathWithin`) so a committed symlink in a
+  cloned repo cannot dump a file outside the tree.
+- Docs: `interface.md` (rail table + two view sections), `DESKTOP.md`
+  highlight, `PLAN-git-explorer.md` (status tracked per phase; phase D =
+  highlighting, not started). Tests: `desktop-explorer.test.ts`, per-file
+  diff + selection-sanitizer cases in `desktop-diff.test.ts` /
+  `desktop-help.test.ts`.
+
 ## desktop (experimental) — reference documentation for the assistants
 
 ### Added

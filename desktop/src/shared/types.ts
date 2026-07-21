@@ -409,11 +409,13 @@ export interface RoadmapArchiveResponse {
   item: RoadmapItem
 }
 
-/** Navigation rail views: Home (C5), Agents, Browser (D1), Roadmap (C3), Graph (C26), Worktrees (C6), Journal (C14). */
+/** Navigation rail views: Home (C5), Agents, Browser (D1), Files (GX6), Git (GX3), Roadmap (C3), Graph (C26), Worktrees (C6), Journal (C14). */
 export type DeckView =
   | 'home'
   | 'agents'
   | 'browser'
+  | 'files'
+  | 'git'
   | 'roadmap'
   | 'graph'
   | 'worktrees'
@@ -538,10 +540,56 @@ export interface SessionDiff {
   truncated: boolean
 }
 
+/** Unified diff of a single file (PLAN GX1). */
+export interface FileDiff {
+  path: string
+  text: string
+  truncated: boolean
+}
+
+// ----- File explorer (PLAN GX4/GX5) -----
+// Mirror of main/explorer-service.ts shapes (that module stays import-free
+// for its bun unit tests). Keep in sync.
+
+/** One browsable root of the 📁 view (project dir, worktree or session cwd). */
+export interface ExplorerRoot {
+  path: string
+  label: string
+  main: boolean
+}
+
+export interface ExplorerEntry {
+  name: string
+  dir: boolean
+  /** Byte size (0 for directories). */
+  size: number
+}
+
+export interface ExplorerFile {
+  /** UTF-8 content, '' for binary files, capped main-side. */
+  content: string
+  truncated: boolean
+  binary: boolean
+  size: number
+}
+
 /** One question/answer pair of the help popup (replayed for continuity, C9). */
 export interface HelpExchange {
   question: string
   answer: string
+}
+
+/**
+ * Code selection attached to a help question or a roadmap draft (PLAN GX7):
+ * what the operator selected in the Files viewer. Travels to the assistant
+ * through the SYSTEM side (context file), never the command line.
+ */
+export interface HelpSelection {
+  /** Root-relative path of the viewed file. */
+  file: string
+  startLine: number
+  endLine: number
+  text: string
 }
 
 /**
@@ -721,8 +769,18 @@ export interface DeckApi {
   // diff / review (PLAN C13)
   /** Full diff picture of a dir (uncommitted + branch-vs-main for worktrees). */
   collectDiff(dir: string): Promise<SessionDiff>
+  /** Diff of ONE repo-relative file of the dir (Git rail view, PLAN GX2). */
+  collectFileDiff(dir: string, path: string): Promise<FileDiff>
   /** Spawn a one-shot review agent on the dir's diff (reports to the lead). */
   reviewDiff(dir: string): Promise<boolean>
+
+  // file explorer (PLAN GX5): READ-ONLY, roots re-validated main-side.
+  /** Browsable roots: project dir + worktrees + live session cwds. */
+  explorerRoots(): Promise<ExplorerRoot[]>
+  /** Entries of one directory (lazy tree; `rel` is root-relative). */
+  explorerList(root: string, rel: string): Promise<ExplorerEntry[]>
+  /** Read one file (capped, binary-sniffed). */
+  explorerRead(root: string, rel: string): Promise<ExplorerFile>
 
   // embedded browser (PLAN D1): absolute path of the webview guest preload.
   getBrowserPreloadPath(): Promise<string>
@@ -739,7 +797,14 @@ export interface DeckApi {
   ensureSupervisor(): Promise<SessionRuntime>
 
   // help assistant (PLAN C9): one throwaway `claude -p` question, view-aware.
-  askHelp(question: string, view: DeckView, transcript: HelpExchange[]): Promise<string>
+  // `selection` (PLAN GX7): optional Files-view snippet, injected into the
+  // app-composed snapshot (system side).
+  askHelp(
+    question: string,
+    view: DeckView,
+    transcript: HelpExchange[],
+    selection?: HelpSelection
+  ): Promise<string>
   /** Resume digest (PLAN C17): fixed prompt + globally-configured sources. */
   askDigest(): Promise<string>
 
