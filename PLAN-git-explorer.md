@@ -21,7 +21,39 @@
 | A — Vue Git rail (read-only) | GX1, GX2, GX3 | ✅ implémenté |
 | B — Explorateur (v1 sans coloration) | GX4, GX5, GX6 | ✅ implémenté |
 | C — Sélection → assistant / roadmap | GX7, GX8 | ✅ implémenté |
+| GX9 — Badge de fichiers modifiés sur l'entrée ± | GX9 | ✅ implémenté |
+| GX-SEC — Durcissement (revue de sécurité) | — | ✅ implémenté |
+| GX-Q — Correctifs revue qualité | — | ✅ implémenté |
 | D — Coloration syntaxique (shiki / highlight.js) | — | ⏸ non lancé (v2) |
+
+### GX9 — Badge (comme VSCode)
+
+Somme des compteurs `dirty` des worktrees affichée sur l'entrée `±` du rail
+(`NavRail.tsx`, poll 30 s best-effort, style du badge inbox).
+
+### GX-SEC — Suite à `/security-review`
+
+Lecture de fichier arbitraire fermée : les handlers `diff:collect` /
+`diff:collect-file` / `diff:review` re-valident `dir` contre l'allow-set des
+répertoires de travail (`workDirRoots`/`requireWorkDir`, partagé avec
+l'explorateur) ; le fallback `git diff --no-index` est gardé par une
+containment realpath (`realpathWithin`) contre les symlinks de repo cloné.
+Amendement CLAUDE.md : « troisième entrée hostile » (arg IPC → chemin fs).
+
+### GX-Q — Suite à la revue qualité
+
+Diff fichier pollé (plus figé), off-by-one de plage de lignes corrigé + helper
+pur testable (`shared/code-selection.ts`), `DiffFileRow` dédupliqué,
+mémoïsation courte de `listWorktrees`, `reportError` dans les catches des
+nouvelles vues, garde `helpButton` sur « Expliquer », refresh explorateur
+rechargeant l'arbre ouvert.
+
+### Livrables de session (item 3)
+
+- Nouveau skill `add-deck-view` (chaîne vue rail + canal IPC desktop, gates de
+  compilation, décision de tier compagnon, parité i18n).
+- Amendement CLAUDE.md : conventions « trois entrées hostiles » +
+  référencement du skill.
 
 ## Phase A — Vue Git dans le navigation rail
 
