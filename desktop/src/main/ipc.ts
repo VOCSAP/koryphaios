@@ -29,7 +29,7 @@ import {
   readDigestConfig,
   sourcesForProject
 } from './digest'
-import { mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { archiveRoadmap, computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
 import { createSessionWithWorktree } from './create-session'
 import { composePlanImportPrompt } from './import-plan'
@@ -78,6 +78,18 @@ import { reportError } from './log'
  * files (resources dir when packaged, app dir in dev) plus a user-override dir
  * under userData, then falls back to the embedded English base for any gap.
  */
+/**
+ * Shipped reference-documentation directory (desktop/docs), resolved like the
+ * locales: process.resourcesPath when packaged (extraResources), the app dir
+ * in dev. '' when missing so callers can omit the docs pointer cleanly.
+ */
+export function resolveDocsDir(): string {
+  const dir = app.isPackaged
+    ? join(process.resourcesPath, 'docs')
+    : join(app.getAppPath(), 'docs')
+  return existsSync(dir) ? dir : ''
+}
+
 function buildI18n(config: AppConfig): I18nPayload {
   const locale = resolveLocale(config.locale, app.getLocale())
   const shippedDir = app.isPackaged
@@ -533,13 +545,16 @@ export function registerIpc({
   }
   regHandle(
     'help:ask',
-    async (_e, question: string, view: string, transcript: HelpExchange[]) =>
-      runUtilityInference(utilityDeps(), {
+    async (_e, question: string, view: string, transcript: HelpExchange[]) => {
+      const docsDir = resolveDocsDir()
+      return runUtilityInference(utilityDeps(), {
         target: getConfig().helpTarget,
-        system: buildHelpSystemPrompt({ view, data: await helpSnapshot() }),
+        system: buildHelpSystemPrompt({ view, data: await helpSnapshot(), docsDir }),
         prompt: buildHelpPrompt(question ?? '', transcript ?? []),
-        kind: 'help'
+        kind: 'help',
+        addDir: docsDir || undefined
       })
+    }
   )
 
   // ----- resume digest (PLAN C17) -----

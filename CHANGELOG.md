@@ -1,5 +1,30 @@
 # Changelog
 
+## desktop (experimental) — reference documentation for the assistants
+
+### Added
+- **Reference documentation (`desktop/docs/`).** 14 markdown pages covering
+  the whole app for the end user AND the built-in assistants: overview &
+  concepts, interface tour, sessions, workspaces/templates, supervisor &
+  team spawning, roadmap, browser/design mode, graph chats, communication
+  (megaphone/inbox/journal), help assistant & digest, mobile companion, a
+  full settings/configuration reference, and a troubleshooting FAQ. Shipped
+  in packaged builds via `extraResources` (like `locales/`); integrity
+  (index completeness + link resolution) is guarded by
+  `tests/desktop-docs.test.ts`.
+- **Help assistant grounding.** `buildHelpSystemPrompt` gains an
+  app-computed `docsDir` pointer (`resolveDocsDir`: resourcesPath when
+  packaged, app dir in dev) rendered as a "Reference documentation" section,
+  and the claude utility adapter grants read access to that directory via
+  `--add-dir` (`AdapterInput.addDir`, threaded through
+  `runUtilityInference`). The read-only harness is unchanged; local HTTP
+  endpoints keep answering from the snapshot alone.
+- **Supervisor docs pointer.** `buildSupervisorSystemPrompt(docsDir?)`
+  appends an app-generated paragraph pointing the supervisor at the same
+  directory for "how does the app work / how do I configure it" questions.
+  The role definition stays a code constant (C8 rule): only the PATH is
+  app-computed, and omitting it yields the byte-identical previous anchor.
+
 ## desktop v0.13.0 (experimental) — supervisor team spawn (PLAN-team-spawn TS1–TS7)
 
 The supervisor can now compose and spawn whole agent teams from the roadmap or

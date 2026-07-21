@@ -45,8 +45,10 @@ progress-archive.md
 .claude/settings.local.json
 
 # Design notes, plans, deferred-debt and superpowers artifacts -- local dev
-# notes, not part of the public repo
+# notes, not part of the public repo. desktop/docs is the SHIPPED reference
+# documentation (read by the help assistant / supervisor) and stays tracked.
 docs/
+!desktop/docs/
 
 # Memory / notes directories (auto-memory, kleos exports, etc.)
 **/memory/

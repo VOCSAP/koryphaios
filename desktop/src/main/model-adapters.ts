@@ -61,6 +61,14 @@ export interface AdapterInput {
   platform?: NodeJS.Platform
   /** Test hook: alternate binary path. */
   bin?: string
+  /**
+   * Extra directory the read-only tools may access (claude `--add-dir`), used
+   * to open the shipped reference docs from outside the project cwd. The path
+   * comes from the app, never from operator input. claude-only: codex's
+   * read-only sandbox already reads the whole disk, gemini's plan mode has no
+   * equivalent flag.
+   */
+  addDir?: string
 }
 
 /** Full command line for one target; parsed by the login shell like C9. */
@@ -75,6 +83,7 @@ export function buildAdapterCommand(input: AdapterInput): string {
         `${bin} -p ${quotePromptArg(prompt, plat)}` +
         ` --append-system-prompt-file ${quotedPath(input.contextFile)}` +
         (model ? ` --model ${model}` : '') +
+        (input.addDir ? ` --add-dir ${quotedPath(input.addDir)}` : '') +
         ` --strict-mcp-config` +
         ` --disallowedTools "${HELP_DISALLOWED_TOOLS}"`
       )

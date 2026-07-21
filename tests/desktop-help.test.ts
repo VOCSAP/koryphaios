@@ -43,6 +43,41 @@ test("system prompt embeds the code constant, the view and the snapshot", () => 
   expect(HELP_SYSTEM_PROMPT).toContain("read-only");
 });
 
+test("a docsDir adds the reference-documentation section; absent otherwise", () => {
+  const withDocs = buildHelpSystemPrompt({
+    view: "agents",
+    data: null,
+    docsDir: "/opt/app/resources/docs"
+  });
+  expect(withDocs).toContain("## Reference documentation");
+  expect(withDocs).toContain("/opt/app/resources/docs");
+  expect(withDocs).toContain("README.md");
+
+  const without = buildHelpSystemPrompt({ view: "agents", data: null });
+  expect(without).not.toContain("## Reference documentation");
+  expect(buildHelpSystemPrompt({ view: "agents", data: null, docsDir: "" })).not.toContain(
+    "## Reference documentation"
+  );
+});
+
+test("the claude adapter grants the docs dir via --add-dir (quoted), others unchanged", () => {
+  const cmd = buildAdapterCommand({
+    promptText: "q",
+    contextFile: "/tmp/sys.md",
+    target: { cli: "claude", model: "haiku" },
+    addDir: "/opt/app/resources/docs",
+    platform: "linux"
+  });
+  expect(cmd).toContain('--add-dir "/opt/app/resources/docs"');
+  const bare = buildAdapterCommand({
+    promptText: "q",
+    contextFile: "/tmp/sys.md",
+    target: { cli: "claude", model: "haiku" },
+    platform: "linux"
+  });
+  expect(bare).not.toContain("--add-dir");
+});
+
 test("an oversized snapshot is truncated, never unbounded", () => {
   const text = buildHelpSystemPrompt({ view: "agents", data: { blob: "x".repeat(200_000) } });
   expect(text.length).toBeLessThan(70_000);

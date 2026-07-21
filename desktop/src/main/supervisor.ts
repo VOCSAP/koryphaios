@@ -40,13 +40,27 @@ export const SUPERVISOR_BRIEFING =
   'Start now: introduce yourself in two sentences, run deck_list_agents and roadmap_list, summarize what you see, and ask the operator what to do.'
 
 /**
+ * Full system-prompt anchor: the fixed role definition plus, when the shipped
+ * reference docs are present, an app-generated pointer at them (the PATH is
+ * computed by the app -- resourcesPath/app dir -- never operator or repo
+ * input, so the C8 no-configurable-harness rule holds).
+ */
+export function buildSupervisorSystemPrompt(docsDir?: string): string {
+  if (!docsDir) return SUPERVISOR_SYSTEM_PROMPT
+  return [
+    SUPERVISOR_SYSTEM_PROMPT,
+    `Reference documentation: the app's full user documentation (features, views, configurable options, how-tos, FAQ) is shipped as markdown files in ${docsDir} -- start with README.md, the index. When the operator asks how Koryphaios works or how to configure it, ground your answer by reading the relevant page from there instead of guessing.`
+  ].join('\n\n')
+}
+
+/**
  * Write the supervisor's system-prompt anchor file (from the code constant,
  * overwriting whatever is on disk) and return its path.
  */
-export function writeSupervisorSystemPrompt(dir: string): string {
+export function writeSupervisorSystemPrompt(dir: string, docsDir?: string): string {
   mkdirSync(dir, { recursive: true })
   const file = join(dir, 'supervisor-system-prompt.md')
-  writeFileSync(file, SUPERVISOR_SYSTEM_PROMPT, 'utf-8')
+  writeFileSync(file, buildSupervisorSystemPrompt(docsDir), 'utf-8')
   return file
 }
 

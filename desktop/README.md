@@ -74,6 +74,9 @@ discovery.
   one-shot `claude -p` call carrying the active view's context, technically
   read-only (no MCP, no mutating tools) -- an advisor, never an actor.
   Right-click the button to hide it or switch the model (Haiku by default).
+  Questions about the app itself are grounded in the shipped reference
+  documentation ([`docs/`](docs/README.md)), which the supervisor is pointed
+  at too.
 - **Team-lead 👑.** Designate ONE session per window as the team-lead (create
   checkbox -- suggested by the configurable `leadPattern` -- or the sidebar
   right-click). Targeted Deck notices (queue dispatch, review reports,
@@ -553,6 +556,7 @@ src/
   shared/types.ts         types shared across processes
   shared/announce.ts      compose the join / operator announce text
 locales/                  en.json, fr.json
+docs/                     reference documentation (operator + built-in assistants)
 bin/
   launch.js               dev CLI launcher (npm link) -> spawns electron
   kory.cmd.example  wrapper template for a packaged build on PATH
