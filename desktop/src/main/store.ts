@@ -2,7 +2,7 @@ import { app } from 'electron'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import type { AppConfig, SessionDef } from '@shared/types'
+import { SUPERVISOR_SPAWN_MODES, type AppConfig, type SessionDef } from '@shared/types'
 import { writeFileAtomic } from './atomic-write'
 import { DEFAULT_PALETTE } from '@shared/palette'
 import {
@@ -39,6 +39,10 @@ const DEFAULT_CONFIG: AppConfig = {
   leadPattern: 'team-lead',
   // System notification when a session waits for the operator (PLAN C11).
   notifyAttention: true,
+  // Supervisor spawn trust mode (PLAN TS4): hands-free by default -- the
+  // consent rule lives in the supervisor's system prompt, the app confirms
+  // nothing. 'team-review' / 'full-control' add native approval dialogs.
+  supervisorSpawnMode: 'hands-free',
   // Floating "?" help assistant (PLAN C9): shown by default, Haiku for cost.
   helpButton: true,
   helpTarget: DEFAULT_HELP_TARGET,
@@ -92,6 +96,10 @@ export function loadConfig(): AppConfig {
     DEFAULT_HELP_TARGET
   )
   cfg.wandTarget = sanitizeTarget(raw.wandTarget, DEFAULT_WAND_TARGET)
+  // Unknown/absent trust mode (older config, hand-edited file) -> default.
+  if (!SUPERVISOR_SPAWN_MODES.includes(cfg.supervisorSpawnMode)) {
+    cfg.supervisorSpawnMode = 'hands-free'
+  }
   delete (cfg as { helpModel?: string }).helpModel
   return cfg
 }

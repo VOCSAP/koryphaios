@@ -10,8 +10,10 @@ import {
   startDeckControl,
   SPAWN_CAP,
   type DeckControlDeps,
-  type DeckControlServer
+  type DeckControlServer,
+  type SpawnSummary
 } from "../desktop/src/main/deck-control.ts";
+import { EMBEDDED_AGENTS } from "../desktop/src/main/team-embedded.ts";
 import {
   writeSupervisorMcpConfig,
   writeSupervisorSystemPrompt,
@@ -70,19 +72,30 @@ function fakeSession(id: string, extra: Partial<SessionRuntime> = {}): SessionRu
 function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   closed: string[];
   removedWt: string[];
+  acked: string[];
+  approvals: SpawnSummary[][];
+  spawnInputs: CreateSessionInput[];
 } {
   const closed: string[] = [];
   const removedWt: string[] = [];
+  const acked: string[] = [];
+  const approvals: SpawnSummary[][] = [];
+  const spawnInputs: CreateSessionInput[] = [];
   let n = 0;
   return {
     closed,
     removedWt,
+    acked,
+    approvals,
+    spawnInputs,
     listAgents: () => ["team-lead", "dev", "reviewer"],
     listModels: () => [{ id: "opus", label: "Opus" }],
     listPresets: () => [],
     spawnSession: async (input: CreateSessionInput) => {
+      spawnInputs.push(input);
       const s = fakeSession(`spawned-${++n}`, {
         name: input.name ?? "peer",
+        lead: input.lead,
         worktree: input.worktreeBranch
           ? { path: `/proj/.worktrees/${input.worktreeBranch}`, branch: input.worktreeBranch }
           : undefined
@@ -104,7 +117,17 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
     listTemplates: () => [{ path: "/t.json", name: "team", source: "global", sessionCount: 2 }],
     applyTemplate: async () => 2,
     saveTemplate: (name) => `/templates/${name}.json`,
-    announce: async () => 3
+    announce: async () => 3,
+    // Team-spawn deps (TS2-TS4): hands-free defaults, overridable per test.
+    approveSpawn: async (entries) => {
+      approvals.push(entries);
+      return entries.map(() => true);
+    },
+    waitForPeer: async (id) => `peer-${id}`,
+    armSpawnAck: (id) => {
+      acked.push(id);
+    },
+    writeEmbeddedPrompt: (id) => `/state/embedded-agent-${id}.md`
   };
 }
 
@@ -196,6 +219,156 @@ test("guards: close/remove only touch supervisor-created objects; spawn cap", as
   const capped = await call(srv, "deck_spawn_session", { name: "one-too-many" });
   expect(capped.status).toBe(400);
   expect(capped.body.error).toContain("spawn cap");
+});
+
+// ----- team spawn (TS2): playbook, embedded profiles, acks, trust gate -----
+
+test("deck_team_playbook and deck_team_agents serve the code constants", async () => {
+  const srv = await startDeckControl(makeDeps({ sessions: [] }));
+  servers.push(srv);
+
+  const playbook = await call(srv, "deck_team_playbook");
+  expect((playbook.body.result as { playbook: string }).playbook).toContain("Consent first");
+
+  const agents = await call(srv, "deck_team_agents");
+  const list = (agents.body.result as { agents: { id: string }[] }).agents;
+  expect(list.map((a) => a.id)).toEqual(EMBEDDED_AGENTS.map((a) => a.id));
+});
+
+test("spawn validation: cli gate, embedded exclusivity, unknown embedded id", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const codex = await call(srv, "deck_spawn_session", { name: "x", cli: "codex" });
+  expect(codex.status).toBe(400);
+  expect(codex.body.error).toContain("only 'claude'");
+
+  const both = await call(srv, "deck_spawn_session", { agent: "dev", embedded_agent: "developer" });
+  expect(both.status).toBe(400);
+  expect(both.body.error).toContain("mutually exclusive");
+
+  const unknown = await call(srv, "deck_spawn_session", { embedded_agent: "nope" });
+  expect(unknown.status).toBe(400);
+  expect(unknown.body.error).toContain("unknown embedded agent");
+  // Nothing spawned, no approval asked for invalid entries.
+  expect(deps.spawnInputs).toEqual([]);
+  expect(deps.approvals).toEqual([]);
+});
+
+test("embedded spawn: prompt file, harness disallowedTools, team-lead crown rule", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  // reviewer: read-only role -> --disallowedTools riding the args + prompt file.
+  const reviewer = await call(srv, "deck_spawn_session", { embedded_agent: "reviewer" });
+  expect(reviewer.body.ok).toBe(true);
+  const reviewerInput = deps.spawnInputs[0]!;
+  expect(reviewerInput.appendSystemPromptFile).toBe("/state/embedded-agent-reviewer.md");
+  expect(reviewerInput.args).toContain('--disallowedTools "Write,Edit');
+  expect(reviewerInput.lead).toBeUndefined();
+
+  // team-lead lands as the window lead when none is live...
+  await call(srv, "deck_spawn_session", { embedded_agent: "team-lead" });
+  expect(deps.spawnInputs[1]!.lead).toBe(true);
+
+  // ...but never demotes an existing live lead.
+  await call(srv, "deck_spawn_session", { name: "another", embedded_agent: "team-lead" });
+  expect(deps.spawnInputs[2]!.lead).toBeUndefined();
+});
+
+test("deck_spawn_session acks: sync peer_id by default, async when wait_for_peer=false", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const sync = await call(srv, "deck_spawn_session", { name: "solo" });
+  expect((sync.body.result as { peer_id: string }).peer_id).toBe("peer-spawned-1");
+  expect(deps.acked).toEqual([]);
+
+  const async_ = await call(srv, "deck_spawn_session", { name: "bg", wait_for_peer: false });
+  expect((async_.body.result as { note: string }).note).toContain("async ack");
+  expect(deps.acked).toEqual(["spawned-2"]);
+
+  // Sync wait that times out falls back to the async ack.
+  deps.waitForPeer = async () => null;
+  const timedOut = await call(srv, "deck_spawn_session", { name: "slow" });
+  expect((timedOut.body.result as { peer_id: null }).peer_id).toBeNull();
+  expect(deps.acked).toEqual(["spawned-2", "spawned-3"]);
+});
+
+test("deck_spawn_session: an operator refusal spawns nothing", async () => {
+  const deps = makeDeps({ sessions: [] });
+  deps.approveSpawn = async (entries) => entries.map(() => false);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const refused = await call(srv, "deck_spawn_session", { name: "denied" });
+  expect(refused.status).toBe(400);
+  expect(refused.body.error).toContain("refused by the operator");
+  expect(deps.spawnInputs).toEqual([]);
+});
+
+test("deck_spawn_team: one approval for the plan, async acks, per-entry decisions", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const team = await call(srv, "deck_spawn_team", {
+    team: [
+      { embedded_agent: "team-lead" },
+      { agent: "dev", worktree_branch: "agent/x", prompt: "build X" }
+    ]
+  });
+  expect(team.body.ok).toBe(true);
+  const result = team.body.result as { spawned: unknown[]; refused: number };
+  expect(result.spawned.length).toBe(2);
+  expect(result.refused).toBe(0);
+  // ONE approval call carrying the whole plan; every spawn ack is async.
+  expect(deps.approvals.length).toBe(1);
+  expect(deps.approvals[0]!.length).toBe(2);
+  expect(deps.approvals[0]![0]!.embedded).toBe("team-lead");
+  expect(deps.acked).toEqual(["spawned-1", "spawned-2"]);
+
+  // Per-entry decisions (full-control): only the approved entry spawns.
+  deps.approveSpawn = async (entries) => entries.map((_, i) => i === 1);
+  const partial = await call(srv, "deck_spawn_team", {
+    team: [{ name: "no" }, { name: "yes" }]
+  });
+  const partialResult = partial.body.result as { spawned: { name: string }[]; refused: number };
+  expect(partialResult.spawned.length).toBe(1);
+  expect(partialResult.refused).toBe(1);
+  expect(partialResult.spawned[0]!.name).toBe("yes");
+});
+
+test("deck_spawn_team: batch cap and pre-approval validation", async () => {
+  const state = { sessions: [fakeSession("live-1"), fakeSession("live-2")] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  // 2 live + 7 requested > 8: refused as a whole, approval never asked.
+  const over = await call(srv, "deck_spawn_team", {
+    team: Array.from({ length: SPAWN_CAP - 1 }, (_, i) => ({ name: `a${i}` }))
+  });
+  expect(over.status).toBe(400);
+  expect(over.body.error).toContain("spawn cap");
+  expect(deps.approvals).toEqual([]);
+
+  // One invalid entry poisons the whole plan BEFORE any approval/spawn.
+  const invalid = await call(srv, "deck_spawn_team", {
+    team: [{ name: "ok" }, { name: "bad", cli: "gemini" }]
+  });
+  expect(invalid.status).toBe(400);
+  expect(deps.approvals).toEqual([]);
+  expect(deps.spawnInputs).toEqual([]);
+
+  const empty = await call(srv, "deck_spawn_team", { team: [] });
+  expect(empty.status).toBe(400);
 });
 
 // ----- supervisor mcp-config file -----
@@ -293,6 +466,9 @@ test("deck-control-mcp speaks MCP over stdio and forwards tools/call", async () 
   const names = tools.result.tools.map((t) => t.name);
   expect(names).toContain("deck_spawn_session");
   expect(names).toContain("deck_announce");
+  expect(names).toContain("deck_team_playbook");
+  expect(names).toContain("deck_team_agents");
+  expect(names).toContain("deck_spawn_team");
 
   sendMessage({
     jsonrpc: "2.0",

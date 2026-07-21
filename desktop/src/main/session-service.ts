@@ -719,7 +719,8 @@ export class SessionService extends EventEmitter {
         // for the Deck to broadcast, then consume the intent so it never repeats
         // (a later set_id rename must not re-announce).
         if (next && r.peerId === null && r.announce) {
-          this.emit('peer-resolved', { peerId: next, intent: r.announce })
+          // `id` rides along for the supervisor spawn-ack loop (TS3).
+          this.emit('peer-resolved', { id: def.id, peerId: next, intent: r.announce })
           r.announce = null
         }
         r.peerId = next

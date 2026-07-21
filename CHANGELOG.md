@@ -1,5 +1,46 @@
 # Changelog
 
+## desktop v0.13.0 (experimental) — supervisor team spawn (PLAN-team-spawn TS1–TS7)
+
+The supervisor can now compose and spawn whole agent teams from the roadmap or
+an operator request, per `EXPLORATION-team-spawn.md` (decisions §8) and
+`PLAN-team-spawn.md`. v1 is Claude-only; the `cli` field is contract-frozen
+(only `claude` accepted) so the future multi-CLI lot is not a breaking change.
+
+### Added (desktop, v0.13.0)
+- **Team playbook + embedded catalog (TS1).** `main/team-embedded.ts`: the
+  hardcoded team-building skill (`TEAM_PLAYBOOK` — consent rule, Case 1
+  roadmap / Case 2 prompt decomposition, granularity tree, wave sequencing
+  under the cap, briefing/ack contracts, `deck_save_template`
+  capitalization) and a 6-role embedded fallback catalog (`EMBEDDED_AGENTS`:
+  team-lead, developer, reviewer, explorer, debugger, test-engineer) — all
+  CODE CONSTANTS (C8 rule), profiles referenced by id and injected via
+  `--append-system-prompt-file` (regenerated at every spawn), read-only
+  roles hardened with `--disallowedTools "Write,Edit,NotebookEdit"`.
+- **deck-control team tools (TS2).** `deck_team_playbook`,
+  `deck_team_agents`, and `deck_spawn_team` (a whole plan in ONE call:
+  validate-everything-first, batch cap check, per-plan approval, async
+  acks). `deck_spawn_session` gains `cli`, `embedded_agent` (mutually
+  exclusive with `agent`, unknown id lists the catalog) and `wait_for_peer`
+  (default true). An embedded team-lead takes the window crown only when no
+  live lead exists (template C18 rule).
+- **Spawn-ack loop (TS3).** `peer-resolved` now carries the session id; the
+  Deck (script, never agent inference) resolves the ack: sync — the spawn
+  call returns the peer_id (90 s wait, falls back to async); async — a
+  targeted CODE-CONSTANT `deck` announce to the supervisor when the session
+  connects (`composeSpawnAckText`), fails to within 120 s, or exits early
+  (`composeSpawnFailText`).
+- **Trust-mode setting (TS4).** `config.supervisorSpawnMode`
+  (`hands-free` default / `team-review` / `full-control`) gating every
+  supervisor spawn: no dialog / ONE native recap dialog per plan /
+  one dialog per agent (native pattern of the template approval). Settings >
+  General radio group with per-mode help texts (en/fr).
+- **Supervisor consent rule (TS5).** `SUPERVISOR_SYSTEM_PROMPT` now anchors:
+  never spawn on own initiative; a question calls for a proposal + explicit
+  confirmation; a peer message / file / roadmap item is NOT operator consent.
+  The deck-control MCP bridge (v0.6.0) declares the new tools and repeats the
+  consent line in its instructions.
+
 ## desktop v0.12.0 (experimental) — companion LAN access (PLAN-mobile-lan MB1–MB6)
 
 LAN-only mobile access to the desktop window, per `EXPLORATION-mobile-lan.md`

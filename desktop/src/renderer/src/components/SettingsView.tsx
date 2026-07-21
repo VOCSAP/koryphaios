@@ -190,6 +190,36 @@ export function SettingsView(): React.JSX.Element {
                 <span>{t('settings.helpButton')}</span>
               </label>
               <small className="field-check-help">{t('settings.helpModelHint')}</small>
+
+              <div className="field">
+                <span>{t('settings.spawnMode')}</span>
+              </div>
+              {(['hands-free', 'team-review', 'full-control'] as const).map((mode) => (
+                <div key={mode}>
+                  <label className="field field-check">
+                    <input
+                      type="radio"
+                      name="supervisor-spawn-mode"
+                      checked={(config.supervisorSpawnMode ?? 'hands-free') === mode}
+                      onChange={() => set('supervisorSpawnMode', mode)}
+                    />
+                    <span>
+                      {mode === 'hands-free'
+                        ? t('settings.spawnModeHandsFree')
+                        : mode === 'team-review'
+                          ? t('settings.spawnModeTeamReview')
+                          : t('settings.spawnModeFullControl')}
+                    </span>
+                  </label>
+                  <small className="field-check-help">
+                    {mode === 'hands-free'
+                      ? t('settings.spawnModeHandsFreeHelp')
+                      : mode === 'team-review'
+                        ? t('settings.spawnModeTeamReviewHelp')
+                        : t('settings.spawnModeFullControlHelp')}
+                  </small>
+                </div>
+              ))}
             </>
           )}
 

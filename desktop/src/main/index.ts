@@ -51,7 +51,17 @@ import { listAgents } from './agents'
 import { createSessionWithWorktree } from './create-session'
 import { Journal } from './journal'
 import { flushJournalSnapshot, initDeckLog, logInfo, onDeckError, reportError } from './log'
-import { startDeckControl, type DeckControlDeps, type DeckControlServer } from './deck-control'
+import {
+  startDeckControl,
+  type DeckControlDeps,
+  type DeckControlServer,
+  type SpawnSummary
+} from './deck-control'
+import {
+  composeSpawnAckText,
+  composeSpawnFailText,
+  writeEmbeddedAgentPrompt
+} from './team-embedded'
 import { startDesignEndpoint, type DesignEndpoint } from './design-endpoint'
 import { addEventSink, broadcast, regHandle } from './api-registry'
 import { CompanionServer } from './companion-server'
@@ -287,6 +297,14 @@ service.on('exit', ({ id, exitCode, name }: { id: string; exitCode: number; name
     'session',
     exitCode === 0 ? `session "${label}" exited cleanly` : `session "${label}" exited with code ${exitCode}`
   )
+  // Supervisor-spawned session died before its peer_id resolved (TS3): fail the
+  // ack right away instead of letting the 120 s timer expire.
+  const pending = pendingSpawnAcks.get(id)
+  if (pending) {
+    clearTimeout(pending.timer)
+    pendingSpawnAcks.delete(id)
+    void announceToSupervisor(composeSpawnFailText(pending.name, `exited (code ${exitCode})`))
+  }
 })
 service.on(
   'quota',
@@ -315,12 +333,75 @@ const broadcastAnnounce = async (text: string, excludePeerId?: string): Promise<
   }
 }
 
+// ----- Supervisor spawn-ack loop (PLAN TS3) -----
+// Sessions spawned through deck-control get a script-driven connection ack: the
+// Deck (not the agent) detects the peer_id resolution and taps the supervisor
+// with a targeted announce. A 120 s timer covers the never-connected case.
+const SPAWN_ACK_TIMEOUT_MS = 120_000
+const pendingSpawnAcks = new Map<string, { name: string; timer: NodeJS.Timeout }>()
+
+/** Targeted announce to the live supervisor. Best-effort, never throws. */
+const announceToSupervisor = async (text: string): Promise<void> => {
+  const supervisor = service.list().find((s) => s.supervisor && s.status !== 'exited' && s.peerId)
+  if (!supervisor) {
+    journal.add('announce', `supervisor unreachable, ack dropped: ${text.slice(0, 80)}`)
+    return
+  }
+  try {
+    await sendAnnounce(
+      { groupId: activeScope.groupId, secret: activeScope.secret, text, toPeerId: supervisor.peerId! },
+      { endpoint: resolveBrokerEndpoint() }
+    )
+  } catch (e) {
+    reportError('announce', 'supervisor spawn-ack failed', e)
+  }
+}
+
+const armSpawnAck = (id: string, name: string): void => {
+  const existing = pendingSpawnAcks.get(id)
+  if (existing) clearTimeout(existing.timer)
+  const timer = setTimeout(() => {
+    pendingSpawnAcks.delete(id)
+    const status = service.list().find((s) => s.id === id)?.status ?? 'gone'
+    journal.add('session', `spawn-ack timeout for "${name}" (status ${status})`)
+    void announceToSupervisor(composeSpawnFailText(name, status))
+  }, SPAWN_ACK_TIMEOUT_MS)
+  if (typeof timer.unref === 'function') timer.unref()
+  pendingSpawnAcks.set(id, { name, timer })
+}
+
+/** Resolve a session's peer_id by polling, or null on timeout/exit (TS3). */
+const waitForPeer = (id: string, timeoutMs: number): Promise<string | null> => {
+  const POLL_MS = 500
+  const deadline = Date.now() + timeoutMs
+  return new Promise((resolve) => {
+    const tick = (): void => {
+      const s = service.list().find((r) => r.id === id)
+      if (s?.peerId) return resolve(s.peerId)
+      if (!s || s.status === 'exited' || Date.now() >= deadline) return resolve(null)
+      const t = setTimeout(tick, POLL_MS)
+      if (typeof t.unref === 'function') t.unref()
+    }
+    tick()
+  })
+}
+
 // Auto join announce: when a fresh session's peer_id first resolves, tell the
 // other peers a newcomer joined (excluding the joiner itself). Fire-and-forget,
-// never on the spawn critical path.
-service.on('peer-resolved', ({ peerId, intent }: { peerId: string; intent: JoinAnnounceIntent }) => {
-  void broadcastAnnounce(composeJoinAnnounce(peerId, intent), peerId)
-})
+// never on the spawn critical path. Doubles as the spawn-ack trigger (TS3).
+service.on(
+  'peer-resolved',
+  ({ id, peerId, intent }: { id: string; peerId: string; intent: JoinAnnounceIntent }) => {
+    void broadcastAnnounce(composeJoinAnnounce(peerId, intent), peerId)
+    const pending = pendingSpawnAcks.get(id)
+    if (pending) {
+      clearTimeout(pending.timer)
+      pendingSpawnAcks.delete(id)
+      journal.add('session', `spawn-ack: "${pending.name}" connected as ${peerId}`)
+      void announceToSupervisor(composeSpawnAckText(pending.name, peerId))
+    }
+  }
+)
 
 // "Needs you" system notification (PLAN C11): a session hit a permission /
 // question / plan screen. Clicking brings the window up and selects the tile.
@@ -745,6 +826,67 @@ const resolveTemplateInputs = (path: string): TemplateInput[] | null => {
   return templateToInputs(tpl)
 }
 
+// ----- Supervisor spawn approval (PLAN TS4) -----
+// The trust-mode gate behind deck_spawn_session / deck_spawn_team. hands-free:
+// no UI (the consent rule lives in the supervisor's system prompt); team-review:
+// ONE recap dialog approves/refuses the whole plan; full-control: one dialog per
+// entry. Dialogs reuse the native pattern of the template approval (B4).
+const summaryLine = (s: SpawnSummary): string => {
+  const parts = [
+    `• ${s.name}`,
+    s.embedded ? `[embedded: ${s.embedded}]` : s.agent ? `[agent: ${s.agent}]` : '',
+    s.model ? `model ${s.model}` : '',
+    s.effort ? `effort ${s.effort}` : '',
+    s.worktree_branch ? `⎇ ${s.worktree_branch}` : ''
+  ].filter(Boolean)
+  const head = parts.join('  ')
+  return s.prompt_preview ? `${head}\n   ${s.prompt_preview}` : head
+}
+
+const spawnDialog = (title: string, detail: string): boolean => {
+  const isFr = isFrLocale()
+  return (
+    dialog.showMessageBoxSync({
+      type: 'question',
+      buttons: isFr ? ['Lancer', 'Refuser'] : ['Spawn', 'Refuse'],
+      defaultId: 0,
+      cancelId: 1,
+      title: 'Koryphaios',
+      message: title,
+      detail
+    }) === 0
+  )
+}
+
+const approveSpawn = async (entries: SpawnSummary[]): Promise<boolean[]> => {
+  const mode = getConfig().supervisorSpawnMode
+  if (mode === 'hands-free' || entries.length === 0) return entries.map(() => true)
+  const isFr = isFrLocale()
+  if (mode === 'team-review') {
+    const ok = spawnDialog(
+      isFr
+        ? `Le superviseur veut lancer ${entries.length} session(s) d'agent`
+        : `The supervisor wants to spawn ${entries.length} agent session(s)`,
+      entries.map(summaryLine).join('\n')
+    )
+    journal.add('session', `supervisor spawn plan (${entries.length}) ${ok ? 'approved' : 'refused'}`)
+    return entries.map(() => ok)
+  }
+  // full-control: one decision per entry.
+  const decisions: boolean[] = []
+  for (const entry of entries) {
+    const ok = spawnDialog(
+      isFr
+        ? `Le superviseur veut lancer la session "${entry.name}"`
+        : `The supervisor wants to spawn the session "${entry.name}"`,
+      summaryLine(entry)
+    )
+    if (!ok) journal.add('session', `supervisor spawn refused: "${entry.name}"`)
+    decisions.push(ok)
+  }
+  return decisions
+}
+
 // ----- Supervisor deck-control (PLAN C5) -----
 // The loopback control endpoint the SUPERVISOR session pilots the app through.
 // Started lazily at the first Home visit; the URL/token pair is injected only
@@ -795,7 +937,14 @@ const controlDeps: DeckControlDeps = {
     const dir = local ? localTemplatesDir(getConfig().projectDir) : globalTemplatesDir()
     return writeTemplate(dir, name || tpl.name || 'template', tpl)
   },
-  announce: (text) => broadcastAnnounce(text)
+  announce: (text) => broadcastAnnounce(text),
+  // Team spawn (TS2-TS4): trust-mode gate, sync/async connection acks, and the
+  // embedded profile prompt regenerated from the code constant at every spawn.
+  approveSpawn,
+  waitForPeer,
+  armSpawnAck,
+  writeEmbeddedPrompt: (id) =>
+    writeEmbeddedAgentPrompt(join(app.getPath('userData'), APP_STATE_SUBDIR), id)
 }
 
 let controlServer: DeckControlServer | null = null

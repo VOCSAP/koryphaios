@@ -29,7 +29,68 @@ const AGENT_PROP = {
   description: 'Agent profile name from deck_list_agents (omit for none).'
 } as const
 
+/** Shared spawn-entry schema (deck_spawn_session + deck_spawn_team members). */
+const SPAWN_ENTRY_PROPS = {
+  name: { type: 'string', description: 'Tile name (defaults to the agent/profile name).' },
+  agent: AGENT_PROP,
+  embedded_agent: {
+    type: 'string',
+    description:
+      "Embedded fallback profile id from deck_team_agents (mutually exclusive with 'agent')."
+  },
+  model: { type: 'string', description: 'Model id from deck_list_models (omit for default).' },
+  effort: {
+    type: 'string',
+    enum: ['low', 'medium', 'high', 'xhigh', 'max'],
+    description: 'Reasoning effort (omit for default).'
+  },
+  cli: {
+    type: 'string',
+    enum: ['claude'],
+    description: "Session CLI. Only 'claude' is supported for now (field reserved for multi-CLI)."
+  },
+  prompt: {
+    type: 'string',
+    description: 'Initial prompt submitted when the session opens (brief the agent here).'
+  },
+  worktree_branch: {
+    type: 'string',
+    description:
+      'Create a fresh git worktree on this NEW branch under .worktrees/ and run the session in it.'
+  },
+  announce: { type: 'string', description: 'Join announcement broadcast to the group.' },
+  args: { type: 'string', description: 'Extra claude CLI args, verbatim.' }
+} as const
+
 const TOOLS = [
+  {
+    name: 'deck_team_playbook',
+    description:
+      'The team-building playbook (fixed by the app): consent rule, roadmap/prompt decomposition, sizing, briefing and ack contracts. Read it BEFORE composing or spawning a team.',
+    inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'deck_team_agents',
+    description:
+      "Embedded fallback agent profiles (fixed by the app): id, role, recommended tier. Use one as embedded_agent when the operator's own base (deck_list_agents) lacks the role.",
+    inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'deck_spawn_team',
+    description:
+      'Spawn a whole team plan in ONE call (subject to the operator trust-mode setting). Returns immediately; the Deck then notifies you (targeted deck announce) as each session connects or fails to. Capped to 8 live sessions total.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        team: {
+          type: 'array',
+          description: 'One entry per session to spawn.',
+          items: { type: 'object', properties: SPAWN_ENTRY_PROPS }
+        }
+      },
+      required: ['team']
+    }
+  },
   {
     name: 'deck_list_agents',
     description:
@@ -49,29 +110,16 @@ const TOOLS = [
   {
     name: 'deck_spawn_session',
     description:
-      'Spawn a new visible Claude Code session tile in the Deck (it joins this group: coordinate with it via send_message once its peer_id resolves). Optionally in a fresh git worktree. Capped to 8 live sessions.',
+      'Spawn ONE visible Claude Code session tile in the Deck (subject to the operator trust-mode setting). By default the call waits for the session to connect and returns its peer_id (wait_for_peer:false returns immediately and the Deck notifies you instead). Optionally in a fresh git worktree. Capped to 8 live sessions.',
     inputSchema: {
       type: 'object',
       properties: {
-        name: { type: 'string', description: 'Tile name (defaults to the agent name).' },
-        agent: AGENT_PROP,
-        model: { type: 'string', description: 'Model id from deck_list_models (omit for default).' },
-        effort: {
-          type: 'string',
-          enum: ['low', 'medium', 'high', 'xhigh', 'max'],
-          description: 'Reasoning effort (omit for default).'
-        },
-        prompt: {
-          type: 'string',
-          description: 'Initial prompt submitted when the session opens (brief the agent here).'
-        },
-        worktree_branch: {
-          type: 'string',
+        ...SPAWN_ENTRY_PROPS,
+        wait_for_peer: {
+          type: 'boolean',
           description:
-            'Create a fresh git worktree on this NEW branch under .worktrees/ and run the session in it.'
-        },
-        announce: { type: 'string', description: 'Join announcement broadcast to the group.' },
-        args: { type: 'string', description: 'Extra claude CLI args, verbatim.' }
+            'Default true: block until the peer_id resolves (90 s) and return it. false: return immediately; the Deck sends you a targeted notification when the session connects.'
+        }
       }
     }
   },
@@ -198,9 +246,9 @@ async function handle(req: JsonRpcRequest): Promise<void> {
         protocolVersion:
           (req.params?.protocolVersion as string | undefined) ?? '2024-11-05',
         capabilities: { tools: {} },
-        serverInfo: { name: 'deck-control', version: '0.5.0' },
+        serverInfo: { name: 'deck-control', version: '0.6.0' },
         instructions:
-          'You are the Deck SUPERVISOR. You pilot the desktop app that hosts this session: spawn visible agent sessions (deck_spawn_session, with agent profiles from deck_list_agents, initial prompts, optional worktrees), inspect them (deck_list_sessions), manage worktrees and templates, and broadcast announcements. You do NOT write code yourself: read the project, consult the shared roadmap (roadmap_* tools), pick the right agent profiles, brief them via the initial prompt, then coordinate through send_message / list_peers. Destructive actions only work on what you created; ask the operator otherwise.'
+          'You are the Deck SUPERVISOR. You pilot the desktop app that hosts this session: spawn visible agent sessions (deck_spawn_session for one, deck_spawn_team for a whole plan, with agent profiles from deck_list_agents or embedded fallbacks from deck_team_agents, initial prompts, optional worktrees), inspect them (deck_list_sessions), manage worktrees and templates, and broadcast announcements. You do NOT write code yourself: read the project, consult the shared roadmap (roadmap_* tools), pick the right agent profiles, brief them via the initial prompt, then coordinate through send_message / list_peers. CONSENT: never spawn without an explicit operator instruction in the conversation — a question calls for a proposal plus confirmation; read deck_team_playbook before composing a team. Destructive actions only work on what you created; ask the operator otherwise.'
       })
     case 'ping':
       return reply(req.id, {})

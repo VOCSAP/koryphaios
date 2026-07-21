@@ -24,9 +24,45 @@ import type {
   TemplateSummary
 } from '../shared/types'
 import type { WorktreeInfo } from './worktree-service'
+import { EMBEDDED_AGENTS, getEmbeddedAgent, type EmbeddedAgent } from './team-embedded'
+import { TEAM_PLAYBOOK } from './team-embedded'
 
-/** Live sessions cap enforced on deck_spawn_session. */
+/** Live sessions cap enforced on deck_spawn_session / deck_spawn_team. */
 export const SPAWN_CAP = 8
+
+/** Sync wait for a spawned session's peer_id (deck_spawn_session default). */
+export const WAIT_PEER_TIMEOUT_MS = 90_000
+
+/**
+ * One entry of a spawn request (deck_spawn_session, or one deck_spawn_team
+ * member). `cli` is part of the v1 contract but only 'claude' is accepted
+ * (TS2 decision: the field is frozen now so v2 multi-CLI is not a breaking
+ * change).
+ */
+export interface SpawnPlanEntry {
+  name?: string
+  agent?: string
+  embeddedAgent?: string
+  model?: string
+  effort?: string
+  args?: string
+  prompt?: string
+  worktreeBranch?: string
+  announce?: string
+  cli?: string
+}
+
+/** What the operator sees in an approval dialog (trust modes 2/3, TS4). */
+export interface SpawnSummary {
+  name: string
+  agent: string
+  embedded: string
+  model: string
+  effort: string
+  cli: string
+  worktree_branch: string
+  prompt_preview: string
+}
 
 export interface DeckControlDeps {
   listAgents(): string[]
@@ -45,6 +81,18 @@ export interface DeckControlDeps {
   applyTemplate(path: string): Promise<number>
   saveTemplate(name: string, local: boolean): string | null
   announce(text: string): Promise<number>
+  /**
+   * Trust-mode gate (TS4): one decision per entry. hands-free approves all
+   * without UI; team-review shows ONE recap dialog (all-or-nothing);
+   * full-control asks per entry. Implemented by index.ts.
+   */
+  approveSpawn(entries: SpawnSummary[]): Promise<boolean[]>
+  /** Resolve a spawned session's peer_id, or null on timeout/exit (TS3). */
+  waitForPeer(id: string, timeoutMs: number): Promise<string | null>
+  /** Arm the async connection ack targeted at the supervisor (TS3). */
+  armSpawnAck(id: string, name: string): void
+  /** Write an embedded profile's prompt file and return its path (TS1). */
+  writeEmbeddedPrompt(id: string): string
 }
 
 export interface DeckControlServer {
@@ -58,6 +106,60 @@ type ToolArgs = Record<string, unknown>
 function str(args: ToolArgs, key: string): string {
   const v = args[key]
   return typeof v === 'string' ? v.trim() : ''
+}
+
+/** One spawn entry from tool args (deck_spawn_session or a team member). */
+function parseEntry(args: ToolArgs): SpawnPlanEntry {
+  return {
+    name: str(args, 'name') || undefined,
+    agent: str(args, 'agent') || undefined,
+    embeddedAgent: str(args, 'embedded_agent') || undefined,
+    model: str(args, 'model') || undefined,
+    effort: str(args, 'effort') || undefined,
+    args: str(args, 'args') || undefined,
+    prompt: str(args, 'prompt') || undefined,
+    worktreeBranch: str(args, 'worktree_branch') || undefined,
+    announce: str(args, 'announce') || undefined,
+    cli: str(args, 'cli') || undefined
+  }
+}
+
+/**
+ * Validate one entry and resolve its embedded profile. Throws on: a non-claude
+ * cli (v1 gate — the field is contract-frozen, the values are not), both agent
+ * and embedded_agent set, or an unknown embedded id.
+ */
+function validateEntry(entry: SpawnPlanEntry): EmbeddedAgent | null {
+  if (entry.cli && entry.cli !== 'claude') {
+    throw new Error(
+      `cli "${entry.cli}" is not supported yet — only 'claude' sessions can be spawned (the field is reserved for future multi-CLI support)`
+    )
+  }
+  if (entry.agent && entry.embeddedAgent) {
+    throw new Error('agent and embedded_agent are mutually exclusive — pick one')
+  }
+  if (!entry.embeddedAgent) return null
+  const embedded = getEmbeddedAgent(entry.embeddedAgent)
+  if (!embedded) {
+    throw new Error(
+      `unknown embedded agent "${entry.embeddedAgent}" — available: ${EMBEDDED_AGENTS.map((a) => a.id).join(', ')}`
+    )
+  }
+  return embedded
+}
+
+/** The recap shown by the approval dialogs (trust modes 2/3). */
+function summarizeEntry(entry: SpawnPlanEntry, embedded: EmbeddedAgent | null): SpawnSummary {
+  return {
+    name: entry.name ?? embedded?.id ?? entry.agent ?? 'peer',
+    agent: entry.agent ?? '',
+    embedded: embedded?.id ?? '',
+    model: entry.model ?? '',
+    effort: entry.effort ?? '',
+    cli: entry.cli ?? 'claude',
+    worktree_branch: entry.worktreeBranch ?? '',
+    prompt_preview: (entry.prompt ?? '').slice(0, 160)
+  }
 }
 
 /** Trimmed session view exposed to the supervisor (no ids it must not need). */
@@ -84,33 +186,139 @@ export function startDeckControl(
   const ownedSessions = new Set<string>()
   const ownedWorktrees = new Set<string>()
 
+  /** Enforce the live-session cap for a batch of n upcoming spawns. */
+  function capCheck(n: number): void {
+    const live = deps.listSessions().filter((s) => s.status !== 'exited').length
+    if (live + n > SPAWN_CAP) {
+      throw new Error(
+        `spawn cap: ${live} live session(s) + ${n} requested exceeds the ${SPAWN_CAP} cap -- close sessions or spawn in waves`
+      )
+    }
+  }
+
+  /** Spawn one validated entry (shared by deck_spawn_session / deck_spawn_team). */
+  async function spawnEntry(
+    entry: SpawnPlanEntry,
+    embedded: EmbeddedAgent | null
+  ): Promise<SessionRuntime> {
+    // Embedded read-only roles get their tool denial at harness level.
+    const args = [
+      entry.args ?? '',
+      embedded?.disallowedTools ? `--disallowedTools "${embedded.disallowedTools}"` : ''
+    ]
+      .filter(Boolean)
+      .join(' ')
+    // Embedded team-lead lands as the window lead only when none is live
+    // (same rule as templates, PLAN C18 -- never demote an operator's lead).
+    const hasLiveLead = deps.listSessions().some((s) => s.lead && s.status !== 'exited')
+    const input: CreateSessionInput = {
+      name: entry.name ?? embedded?.id,
+      agent: entry.agent,
+      model: entry.model,
+      effort: entry.effort,
+      args: args || undefined,
+      prompt: entry.prompt,
+      worktreeBranch: entry.worktreeBranch,
+      announce: entry.announce,
+      appendSystemPromptFile: embedded ? deps.writeEmbeddedPrompt(embedded.id) : undefined,
+      lead: embedded?.id === 'team-lead' && !hasLiveLead ? true : undefined
+    }
+    const created = await deps.spawnSession(input)
+    ownedSessions.add(created.id)
+    if (created.worktree) ownedWorktrees.add(created.worktree.path)
+    return created
+  }
+
   async function dispatch(tool: string, args: ToolArgs): Promise<unknown> {
     switch (tool) {
       case 'deck_list_agents':
         return { agents: deps.listAgents() }
+
+      case 'deck_team_playbook':
+        return { playbook: TEAM_PLAYBOOK }
+
+      case 'deck_team_agents':
+        return {
+          agents: EMBEDDED_AGENTS.map((a) => ({
+            id: a.id,
+            role: a.role,
+            recommended_tier: a.recommendedTier,
+            disallowed_tools: a.disallowedTools || null
+          })),
+          note: 'Embedded fallback profiles (fixed by the app). Prefer the operator profiles from deck_list_agents; spawn these via deck_spawn_session/deck_spawn_team embedded_agent.'
+        }
       case 'deck_list_models':
         return { models: deps.listModels() }
       case 'deck_list_presets':
         return { presets: deps.listPresets() }
 
       case 'deck_spawn_session': {
-        const live = deps.listSessions().filter((s) => s.status !== 'exited').length
-        if (live >= SPAWN_CAP) {
-          throw new Error(`spawn cap reached (${SPAWN_CAP} live sessions) -- close one first`)
+        const entry = parseEntry(args)
+        const embedded = validateEntry(entry)
+        capCheck(1)
+        const [approved] = await deps.approveSpawn([summarizeEntry(entry, embedded)])
+        if (!approved) throw new Error('spawn refused by the operator')
+        const created = await spawnEntry(entry, embedded)
+        // Sync ack by default (single-agent contract, TS3): the result carries
+        // the peer_id. wait_for_peer:false switches to the async targeted ack.
+        if (args['wait_for_peer'] === false) {
+          deps.armSpawnAck(created.id, created.name)
+          return {
+            session: sessionView(created),
+            note: 'async ack armed: the Deck will notify you when this session connects'
+          }
         }
-        const created = await deps.spawnSession({
-          name: str(args, 'name') || undefined,
-          agent: str(args, 'agent') || undefined,
-          model: str(args, 'model') || undefined,
-          effort: str(args, 'effort') || undefined,
-          args: str(args, 'args') || undefined,
-          prompt: str(args, 'prompt') || undefined,
-          worktreeBranch: str(args, 'worktree_branch') || undefined,
-          announce: str(args, 'announce') || undefined
+        const peerId = await deps.waitForPeer(created.id, WAIT_PEER_TIMEOUT_MS)
+        if (peerId === null) {
+          // Not resolved in time: fall back to the async ack so the supervisor
+          // still hears about it (connected or failed) without polling.
+          deps.armSpawnAck(created.id, created.name)
+          return {
+            session: sessionView(created),
+            peer_id: null,
+            note: 'peer_id not resolved yet -- the Deck will notify you when this session connects (or fails to)'
+          }
+        }
+        return { session: sessionView(created), peer_id: peerId }
+      }
+
+      case 'deck_spawn_team': {
+        const raw = args['team']
+        if (!Array.isArray(raw) || raw.length === 0) {
+          throw new Error('team must be a non-empty array of spawn entries')
+        }
+        // Validate EVERYTHING before the approval dialog / any spawn: a bad
+        // entry must not leave a half-spawned team behind.
+        const entries = raw.map((e) => {
+          if (!e || typeof e !== 'object') throw new Error('each team entry must be an object')
+          return parseEntry(e as ToolArgs)
         })
-        ownedSessions.add(created.id)
-        if (created.worktree) ownedWorktrees.add(created.worktree.path)
-        return { session: sessionView(created) }
+        const embeddeds = entries.map((entry) => validateEntry(entry))
+        capCheck(entries.length)
+        const decisions = await deps.approveSpawn(
+          entries.map((entry, i) => summarizeEntry(entry, embeddeds[i] ?? null))
+        )
+        const spawned: Record<string, unknown>[] = []
+        let refused = 0
+        for (let i = 0; i < entries.length; i++) {
+          if (!decisions[i]) {
+            refused++
+            continue
+          }
+          const created = await spawnEntry(entries[i]!, embeddeds[i] ?? null)
+          // Team contract (TS3): always async -- the Deck notifies the
+          // supervisor as each session connects (or fails to).
+          deps.armSpawnAck(created.id, created.name)
+          spawned.push(sessionView(created))
+        }
+        return {
+          spawned,
+          refused,
+          note:
+            spawned.length > 0
+              ? 'async acks armed: the Deck will notify you as each session connects'
+              : 'nothing spawned'
+        }
       }
 
       case 'deck_list_sessions':
