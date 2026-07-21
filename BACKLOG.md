@@ -17,7 +17,11 @@ chaînes d'exploitation et des alternatives de design dans l'historique git) :
 les anciens `AUDIT-SECURITE-MAINTENANCE.md`, `AUDIT-REMEDIATION-PLAN.md`,
 `PLAN-mobile-lan.md`, `PLAN-team-spawn.md`, `EXPLORATION-multi-llm.md`,
 `EXPLORATION-team-spawn.md`, `EXPLORATION-mobile-lan.md`,
-`PLAN-git-explorer.md`. Le narratif livré vit dans `CHANGELOG.md`.
+`PLAN-git-explorer.md`, ainsi que les seeds de roadmap différée
+`roadmap-seed-v0.9.json` (items ci-dessous) et `roadmap-seed-v0.6.json`
+(C6/C7/C8, **entièrement livrés** — rien à porter). Le narratif livré vit dans
+`CHANGELOG.md`. Le mécanisme d'import roadmap (`bun cli.ts roadmap-import`)
+reste disponible pour recréer un seed depuis l'historique git au besoin.
 
 ---
 
@@ -96,6 +100,12 @@ l'opérateur sur une machine avec affichage.
 - [ ] **Pont mobile LAN de bout en bout** — essai réel « téléphone sur le
       Wi-Fi » (`PLAN-mobile-lan.md`) : le serveur companion se lie à une
       interface LAN absente du conteneur.
+- [ ] **UI graph chat + picker de modèles (lots C23-C29)** — validations
+      manuelles au premier lancement réel (`roadmap-seed-v0.9.json`) : canvas
+      graphe (pan/zoom/drag, branchement, croisement, inspecteur de contexte),
+      battle avec juge, picker (accordéon providers, favoris ★, détection
+      CLIs), Settings > Modèles avec un endpoint Ollama/LiteLLM réel
+      (découverte + inférence + clé chiffrée safeStorage + bouton ⊘).
 
 ---
 
@@ -137,6 +147,29 @@ l'opérateur sur une machine avec affichage.
 - [ ] **Dialog « Revue d'équipe » riche (renderer)** : la v1 utilise le dialog
       natif ; une vue dédiée pourra suivre si l'usage le réclame
       (`PLAN-team-spawn.md`).
+
+### 3.5 Graph chat — nœuds v-next (seeds `roadmap-seed-v0.9.json`, ex-C28)
+
+- [ ] **Nœuds digest** : au-delà du budget (`GRAPH_MAX_CONTEXT_CHARS`), la
+      compilation élide les échanges anciens ; un nœud digest les remplacerait
+      par un résumé LLM (haiku, harnais C9 lecture seule), recette persistée
+      sur le nœud (rejouable). Insertion dans `renderSection`
+      (`graph-engine.ts`), sans changer le contrat `compileContext`.
+- [ ] **Nœuds artefact = panel de review multi-modèles** : un nœud racine
+      portant un diff/fichier (cap 150 Ko, voyage par fichier de contexte D5,
+      réutilise `collectDiff`) sur lequel lancer un battle → N reviews + juge.
+- [ ] **Export/import JSON d'un graphe + coût par nœud** : round-trip d'un
+      `GraphDoc` (import OBLIGATOIREMENT via `parseGraphDoc`, pas de secrets
+      exportés) ; `meta.cost` par nœud quand dispo (local via `usage`, CLIs via
+      la télémétrie OTEL ci-dessous).
+
+### 3.6 Télémétrie & intégrations (seeds `roadmap-seed-v0.9.json`, reporté v0.4)
+
+- [ ] **Suivi tokens/coût par session (OTEL)** : télémétrie OTEL de Claude Code
+      + collecteur local ; infra plus lourde, à ré-évaluer. Alimente aussi le
+      coût par nœud du graph chat.
+- [ ] **Sync GitHub Issues ↔ roadmap partagée** : le modèle `roadmap_items`
+      garde la porte ouverte (tags + futur champ `external_url`).
 
 ---
 
