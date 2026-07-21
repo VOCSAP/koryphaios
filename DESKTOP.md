@@ -78,6 +78,19 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   on a card opens a context menu (edit / queue / process-now / delete-as-
   archive); "Process now" targets one live agent with a CODE-CONSTANT
   announce (`composeAssignText`, IPC `roadmap:assign`) or spawns a fresh one.
+- **Files & Git rail views (PLAN-git-explorer GX1–GX8)**: two READ-ONLY rail
+  views. 📁 Files: lazy explorer + plain-text viewer (line-number gutter, no
+  highlighting in v1 — shiki/highlight.js noted for v2) over roots the main
+  process re-validates on EVERY call (project dir, worktrees, live session
+  cwds; `explorer-service.ts` — realpath containment incl. symlinks, 512 Ko
+  cap, binary sniff). ± Git: SCM-style diff browser per worktree/session dir
+  (`collectDiff` + per-file `collectFileDiff`, repo-relative path enforced),
+  DiffPanel's colorizer reused, one-shot reviewer button. Viewer selection
+  flows to the help assistant (`HelpSelection` → `code_selection` in the
+  system snapshot, `helpSeed` in the store) or prefills a roadmap draft
+  (`roadmapSeed`, wand-style: saving stays manual). NO stage/commit/branch
+  action, even delegated — operator decision; both views are desktop-only on
+  mobile (`mobile-views.ts`).
 - **Unified model picker** (`ModelPicker.tsx`, `shared/models.ts`,
   `model-registry.ts`): provider accordion + star-pinned favorites, shared by
   the graph fan-out and the agents' create menu. Frontier providers

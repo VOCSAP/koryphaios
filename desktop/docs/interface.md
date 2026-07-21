@@ -9,6 +9,8 @@ The vertical rail switches the main view:
 | 🏠 Home | The **supervisor** session (see [supervisor-team.md](supervisor-team.md)) |
 | Agents | The session tiles (the default working view) |
 | 🌐 Browser | Embedded web browser for web-front work (see [browser-design.md](browser-design.md)) |
+| 📁 Files | Read-only file explorer over the project, its worktrees and session dirs |
+| ± Git | Read-only diff browser: what each session/worktree changed |
 | Roadmap | The shared per-project backlog (see [roadmap.md](roadmap.md)) |
 | Graph | Branching multi-model chats (see [graph.md](graph.md)) |
 | ⎇ Worktrees | Every git worktree of the repo with status and attached session |
@@ -48,6 +50,39 @@ The vertical rail switches the main view:
   with this agent docked, snippet insert (saved prompts).
 - The **empty state** offers `＋ Add peer terminal`, `Restore previous
   session` (when a previous workspace exists) and `Use template`.
+
+## Files view (📁, read-only)
+
+A VS Code-style explorer over the directories the window works in: the
+project directory, its git worktrees and the working dirs of live sessions
+(pick the root in the header when there are several). The left tree loads
+lazily; clicking a file opens a plain-text preview with line numbers (big
+files are truncated, binary files show no preview). Everything is
+**read-only** — the Deck never edits or writes files, that is the agents'
+job.
+
+Selecting text in the preview reveals two actions in the file header:
+
+- **❓ Explain** — opens the help assistant with a prefilled question and the
+  selected snippet attached (file + line range); review the question, then
+  send.
+- **🗺 Create a task** — jumps to the Roadmap view with the create form
+  prefilled (kind *debt*, status *planned*, the snippet quoted in the
+  description); saving stays your explicit action.
+
+## Git view (±, read-only)
+
+An SCM-style view of what changed: pick a target on the left (a worktree of
+the project — badge for the attached session — or the working dir of a live
+session), and read its diff on the right. Worktrees show two sections:
+commits of the branch versus the main branch, and uncommitted changes.
+Clicking a file narrows the diff to that file; ✕ returns to the full diff.
+The 🔎 button spawns the same one-shot review agent as the Worktrees view's
+Diff dialog.
+
+This view is deliberately **read-only**: there is no stage, commit or branch
+action in the Deck (not even delegated) — committing remains the agents'
+workflow.
 
 ## Cross-session search
 
