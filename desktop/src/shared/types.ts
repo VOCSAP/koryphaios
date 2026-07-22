@@ -683,6 +683,54 @@ export interface CompanionDevice {
   lastSeenAt: number
 }
 
+// ----- Usage limits (usage modal) -----
+
+/** Frontier CLIs whose subscription quota gauges the usage modal can show. */
+export type UsageProviderId = 'claude' | 'codex' | 'antigravity'
+
+/**
+ * One quota window gauge. `key` picks the i18n label family; `label` carries
+ * provider-supplied detail (model or pool name) appended to it when present.
+ */
+export interface UsageWindow {
+  key: 'session' | 'week' | 'week-model'
+  label: string | null
+  /** 0–100, already clamped main-side. */
+  usedPercent: number
+  /** Epoch ms of the window reset, or null when the provider omitted it. */
+  resetsAt: number | null
+}
+
+/** Claude extra-usage credit block (null members = not exposed by the plan). */
+export interface UsageCredits {
+  enabled: boolean
+  used: number | null
+  limit: number | null
+  utilization: number | null
+}
+
+export interface UsageProviderReport {
+  provider: UsageProviderId
+  /**
+   * 'ok' = gauges present · 'not-connected' = CLI installed but no usable
+   * credentials · 'error' = fetch failed (detail in `error`). Providers whose
+   * CLI is not installed are simply absent from the snapshot.
+   */
+  status: 'ok' | 'not-connected' | 'error'
+  plan: string | null
+  windows: UsageWindow[]
+  credits: UsageCredits | null
+  /** True when values come from a local fallback snapshot (may be stale). */
+  stale: boolean
+  /** Raw detail for the 'error' status (already user-safe, no tokens). */
+  error: string | null
+}
+
+export interface UsageSnapshot {
+  fetchedAt: number
+  providers: UsageProviderReport[]
+}
+
 export interface DeckApi {
   // sessions
   listSessions(): Promise<SessionRuntime[]>
@@ -854,6 +902,12 @@ export interface DeckApi {
    * `refresh` re-probes the CLIs and endpoints.
    */
   modelCatalogs(refresh?: boolean): Promise<import('./models').ProviderCatalog[]>
+  /**
+   * Subscription usage gauges of the installed frontier CLIs (usage modal):
+   * detected providers only, cached main-side; `refresh` bypasses the cache
+   * and re-probes the binaries.
+   */
+  usageRead(refresh?: boolean): Promise<UsageSnapshot>
   /** Run inference on a user node (fan-out targets + optional battle judge). */
   graphInfer(
     graphId: string,

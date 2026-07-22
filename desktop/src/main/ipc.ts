@@ -66,6 +66,7 @@ import {
 } from './snippet-store'
 import { deleteGraph, loadGraphs, migrateGraphsAtRest, upsertGraph } from './graph-store'
 import { getCatalogs } from './model-registry'
+import { readUsage } from './usage-service'
 import { decryptProviders, sanitizeProviders } from './provider-secrets'
 import type { SecretCipher } from './scope-secrets'
 import { compileContext, runInference, type InferRequest } from './graph-engine'
@@ -751,6 +752,13 @@ export function registerIpc({
       getConfig().shell,
       { refresh: !!refresh }
     )
+  )
+
+  // Usage modal: quota gauges of the detected CLIs. No renderer-controlled
+  // paths/commands cross this boundary (fixed binaries, fixed endpoints) and
+  // the reports carry percentages only — tokens never leave usage-service.
+  regHandle('usage:read', (_e, refresh?: boolean) =>
+    readUsage({ shell: getConfig().shell }, { refresh: !!refresh })
   )
 
   regHandle('graph:list', () => {

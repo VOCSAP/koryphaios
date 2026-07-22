@@ -1,5 +1,24 @@
 # Changelog
 
+## desktop (experimental) — Usage-limits modal (amphora rail button)
+
+One rail button (amphora glyph — the level left in the jar), one foreground
+modal stacking the subscription quota gauges of every DETECTED frontier CLI:
+Claude Code (session 5 h + weekly all-models + weekly per-model + extra-usage
+credits via `api.anthropic.com/api/oauth/usage`), Codex (5 h + weekly via
+`codex app-server` JSON-RPC, local session-rollout fallback flagged stale) and
+Antigravity (gemini/3p pools × 5h/weekly via cloudcode-pa
+`retrieveUserQuotaSummary`, OS-keyring OAuth blob). Design decisions: a single
+unified modal (comparison at a glance) rather than a per-provider submenu or
+brand icons in the Greek-glyph rail; Gemini CLI deliberately excluded
+(individual accounts cut by Google on 2026-06-18, migrated to Antigravity —
+operator decision); all endpoints are reverse-engineered community mechanisms
+(CodexBar / openusage / Usage-Monitor), an operator-approved risk mitigated by
+per-provider degraded states ('not-connected' / 'error' / stale) and a 3-min
+main-side cache (the Anthropic endpoint 429s aggressive polling). Tokens never
+cross the IPC boundary. Chain: `usage-service.ts` → `usage:read` (tier 0) →
+`UsageLimitsModal.tsx`; gauges amber past 70 %, red past 90 %.
+
 ## desktop (experimental) — Greek glyph icon set, attention glow, button-style pass
 
 Full iconography overhaul born from the CSS audit (DESIGN.md): the emoji rails

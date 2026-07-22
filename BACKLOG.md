@@ -126,6 +126,32 @@ l'opérateur sur une machine avec affichage.
       `-c model_instructions_file` si les réponses régurgitent le contexte
       (non-bloquant aujourd'hui).
 
+### 3.1bis Limites d'usage (lot livré — résiduel)
+
+- [ ] **Antigravity comme provider de MODÈLES** (pickers/graph/agents) : la
+      modale des limites couvre déjà le quota Antigravity, mais `agy` n'est
+      branché nulle part comme CLI d'inférence (catalogue, adapters headless).
+      Attention avant de coder : `agy -p` a des bugs ouverts en non-TTY (hang
+      issue #318, stdout muet issue #76) — passer par un PTY + `--add-dir` +
+      `--print-timeout`.
+- [ ] **Windows : lecture du keyring Antigravity** non implémentée (Credential
+      Manager sans lecture scriptable) — le provider s'affiche « non
+      connecté » sous Windows. Piste : addon natif ou `powershell` + DPAPI.
+- [ ] **Refresh token Antigravity** : le client_secret OAuth (public, flow
+      installed-app, mais bloqué par le secret-scanning GitHub) n'est PAS dans
+      le repo — extrait à l'exécution du binaire `agy` (scan `GOCSPX-…`) ou
+      fourni via `KORY_ANTIGRAVITY_CLIENT_SECRET`. Si l'extraction casse
+      (binaire obfusqué/rotation Google), le refresh se désactive et le token
+      stocké est utilisé tel quel — vérifier après chaque mise à jour majeure
+      d'Antigravity.
+- [ ] **Badge d'alerte sur le bouton amphore** (limite > 90 %) : demanderait un
+      polling de fond — différé (décision opérateur : fetch à l'ouverture
+      seulement, l'endpoint Anthropic 429 vite).
+- [ ] **Gemini CLI (comptes orga Code Assist)** : exclu par décision opérateur
+      (compte perso migré Antigravity). Si un besoin orga apparaît, le provider
+      `retrieveUserQuota` de gemini-cli se greffe dans `usage-service.ts` sur
+      le même modèle.
+
 ### 3.2 Mobile LAN
 
 - [ ] **MB6 — coquille Android** : scaffold `mobile-shell/` livré mais **non

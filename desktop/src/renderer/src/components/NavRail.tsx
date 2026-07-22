@@ -64,6 +64,8 @@ export function NavRail(): React.JSX.Element {
   const brokerStatus = useDeck((s) => s.brokerStatus)
 
   const remote = useDeck((s) => s.remote)
+  const usageOpen = useDeck((s) => s.usageOpen)
+  const openUsage = useDeck((s) => s.openUsage)
   const companionOpen = useDeck((s) => s.companionOpen)
   const openCompanion = useDeck((s) => s.openCompanion)
   const companionRunning = useDeck((s) => s.companionRunning)
@@ -92,6 +94,15 @@ export function NavRail(): React.JSX.Element {
         </button>
       ))}
       <div className="nav-rail-spacer" />
+      {/* Usage limits (quota gauges of the detected CLIs): overlay modal. */}
+      <button
+        className={`nav-rail-item${usageOpen ? ' is-active' : ''}`}
+        title={t('nav.usage')}
+        onClick={() => openUsage(!usageOpen)}
+      >
+        <span className="nav-rail-icon">{GLYPHS.usage}</span>
+        <span className="nav-rail-label">{t('nav.usage')}</span>
+      </button>
       {!remote && (
         <button
           className={`nav-rail-item${companionOpen ? ' is-active' : ''}${companionRunning ? ' is-glowing' : ''}`}

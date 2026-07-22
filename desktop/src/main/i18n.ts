@@ -634,7 +634,30 @@ export const EN_DEFAULTS: Record<string, string> = {
   'mobile.moved': 'Card moved',
   'mobile.undo': 'Undo',
   'mobile.moveTo': 'Move to…',
-  'mobile.lift': 'Lift'
+  'mobile.lift': 'Lift',
+  'nav.usage': 'Usage limits',
+  'usage.title': 'Usage limits',
+  'usage.refresh': 'Refresh (bypass the cache)',
+  'usage.loading': 'Reading the CLIs…',
+  'usage.failed': 'Could not read usage data.',
+  'usage.none': 'No supported CLI detected (Claude Code, Codex, Antigravity).',
+  'usage.win.session': 'Current session',
+  'usage.win.sessionOf': 'Session — {name}',
+  'usage.win.week': 'Weekly — all models',
+  'usage.win.weekOf': 'Weekly — {name}',
+  'usage.win.weekModel': 'Weekly — {name} only',
+  'usage.pool3p': 'Other models',
+  'usage.used': '{pct}% used',
+  'usage.resetsIn': 'resets in {time}',
+  'usage.resetsAt': 'resets {time}',
+  'usage.resetsNow': 'resetting…',
+  'usage.credits': 'Extra-usage credits',
+  'usage.creditsOff': 'not enabled',
+  'usage.creditsOn': 'enabled',
+  'usage.notConnected': 'CLI installed, but not signed in.',
+  'usage.error': 'Unavailable',
+  'usage.stale': 'Last known values (local session snapshot).',
+  'usage.updated': 'Updated at {time}'
 }
 
 /**

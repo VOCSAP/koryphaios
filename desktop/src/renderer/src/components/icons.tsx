@@ -13,8 +13,9 @@ import type { DeckView, RoadmapKind } from '@shared/types'
 // agents (the chorus), armillary sphere = browser, sealed scroll = files,
 // labyrinth = roadmap, constellation = graph, olive branch = worktrees,
 // open volumen = journal, winged tablet = companion, caduceus = inbox
-// (Hermes carries the messages). Git keeps the universal branch graph —
-// recognisability wins over lore for SCM.
+// (Hermes carries the messages), amphora = usage limits (the level left in
+// the jar). Git keeps the universal branch graph — recognisability wins over
+// lore for SCM.
 
 /** Shared frame so every glyph renders identically inside the rail spans. */
 function Svg({ children }: { children: React.ReactNode }): React.JSX.Element {
@@ -147,6 +148,17 @@ const IconCaduceus = (
     <path d="M11.2 7.2C9.8 5.8 7.8 5.9 6.8 7.4M12.8 7.2c1.4-1.4 3.4-1.3 4.4.2" />
     <path d="M8.3 9.5c0 1.8 7.4 2.4 7.4 4.3 0 1.9-7.4 2.5-7.4 4.3" />
     <path d="M15.7 9.5c0 1.8-7.4 2.4-7.4 4.3 0 1.9 7.4 2.5 7.4 4.3" />
+  </Svg>
+)
+
+/** Amphora with its fill line: how much is left in the jar (usage limits). */
+const IconAmphora = (
+  <Svg>
+    <path d="M9 4.5h6" />
+    <path d="M10 4.5v2M14 4.5v2" />
+    <path d="M10 6.5c-2.5.8-4 2.6-4 4.9 0 3.3 2.2 5.5 4.5 6.3M14 6.5c2.5.8 4 2.6 4 4.9 0 3.3-2.2 5.5-4.5 6.3" />
+    <path d="M9.5 19.5h5" />
+    <path d="M9.3 13.5h5.4" />
   </Svg>
 )
 
@@ -634,8 +646,8 @@ export const GLYPH_ACTIONS = {
   wand: IconWand
 }
 
-/** Every place a rail glyph can appear: the 9 views + the two rail extras. */
-export type GlyphName = DeckView | 'companion' | 'inbox' | 'more'
+/** Every place a rail glyph can appear: the 9 views + the rail extras. */
+export type GlyphName = DeckView | 'companion' | 'inbox' | 'usage' | 'more'
 
 export const GLYPHS: Record<GlyphName, React.JSX.Element> = {
   home: IconTemple,
@@ -649,5 +661,6 @@ export const GLYPHS: Record<GlyphName, React.JSX.Element> = {
   journal: IconVolumen,
   companion: IconWingedTablet,
   inbox: IconCaduceus,
+  usage: IconAmphora,
   more: IconMore
 }

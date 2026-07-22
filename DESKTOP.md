@@ -101,6 +101,21 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   discovered dynamically (`/v1/models`, `/api/tags` fallback); their API keys
   are encrypted at rest via safeStorage (`provider-secrets.ts` — the renderer
   only ever sees a `hasKey` marker).
+- **Usage limits (amphora rail button)**: a foreground modal
+  (`UsageLimitsModal.tsx`, IPC `usage:read`, `main/usage-service.ts`) stacking
+  the subscription quota gauges of the DETECTED frontier CLIs — Claude Code
+  (`api.anthropic.com/api/oauth/usage` with the token from
+  `~/.claude/.credentials.json`; UA `claude-code/<version>` mandatory), Codex
+  (`codex app-server` JSON-RPC `account/rateLimits/read`, fallback: the
+  rate_limits snapshot persisted in the newest `~/.codex/sessions` rollout,
+  flagged stale) and Antigravity (`cloudcode-pa` `retrieveUserQuotaSummary`
+  pools gemini/3p × 5h/weekly, OAuth blob read from the OS keyring, in-memory
+  refresh). Gemini CLI is intentionally NOT a provider (individual accounts
+  cut 2026-06-18, migrated to Antigravity). All three mechanisms are
+  reverse-engineered (operator-approved risk): every failure degrades to a
+  per-provider status, never a throw; tokens never cross the IPC boundary
+  (reports carry percentages only); snapshot cached 3 min main-side because
+  the Anthropic endpoint rate-limits aggressive polling.
 - **Security gates**: any value that comes from a CLONED REPO (project
   `.claude/claude-peers/config.json`, project-local `templates/*.json`) and
   reaches a shell / spawn is an RCE vector, so it is either GLOBAL-config-only
