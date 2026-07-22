@@ -1,20 +1,22 @@
 import { useEffect, useState } from 'react'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
+import { GLYPHS } from './icons'
 import type { DeckView } from '@shared/types'
 
 // Vertical navigation rail (VS Code activity-bar style), left of everything.
 // Home = the supervisor session (C5), Agents = the session tiles, Roadmap = C3.
-const VIEWS: { id: DeckView; icon: string; key: string }[] = [
-  { id: 'home', icon: '🏠', key: 'nav.home' },
-  { id: 'agents', icon: '🖥', key: 'nav.agents' },
-  { id: 'browser', icon: '🌐', key: 'nav.browser' },
-  { id: 'files', icon: '📁', key: 'nav.files' },
-  { id: 'git', icon: '±', key: 'nav.git' },
-  { id: 'roadmap', icon: '🗺', key: 'nav.roadmap' },
-  { id: 'graph', icon: '🕸', key: 'nav.graph' },
-  { id: 'worktrees', icon: '⎇', key: 'nav.worktrees' },
-  { id: 'journal', icon: '📜', key: 'nav.journal' }
+// Icons are the Greek glyph set (icons.tsx / DESIGN.md "Iconography").
+const VIEWS: { id: DeckView; key: string }[] = [
+  { id: 'home', key: 'nav.home' },
+  { id: 'agents', key: 'nav.agents' },
+  { id: 'browser', key: 'nav.browser' },
+  { id: 'files', key: 'nav.files' },
+  { id: 'git', key: 'nav.git' },
+  { id: 'roadmap', key: 'nav.roadmap' },
+  { id: 'graph', key: 'nav.graph' },
+  { id: 'worktrees', key: 'nav.worktrees' },
+  { id: 'journal', key: 'nav.journal' }
 ]
 
 /** Poll cadence of the ± badge (uncommitted-file count, PLAN GX9). */
@@ -81,7 +83,7 @@ export function NavRail(): React.JSX.Element {
           onClick={() => setView(v.id)}
         >
           <span className="nav-rail-icon">
-            {v.icon}
+            {GLYPHS[v.id]}
             {v.id === 'git' && gitDirty > 0 && (
               <span className="nav-rail-badge">{gitDirty > 99 ? '99+' : gitDirty}</span>
             )}
@@ -96,7 +98,7 @@ export function NavRail(): React.JSX.Element {
           title={t('companion.title')}
           onClick={() => openCompanion(!companionOpen)}
         >
-          <span className="nav-rail-icon">📱</span>
+          <span className="nav-rail-icon">{GLYPHS.companion}</span>
           <span className="nav-rail-label">{t('companion.title')}</span>
         </button>
       )}
@@ -107,7 +109,7 @@ export function NavRail(): React.JSX.Element {
         onClick={() => openInbox(!inboxOpen)}
       >
         <span className="nav-rail-icon">
-          ✉
+          {GLYPHS.inbox}
           {badge > 0 && <span className="nav-rail-badge">{badge}</span>}
           {brokerStatus && !brokerStatus.up && (
             <span

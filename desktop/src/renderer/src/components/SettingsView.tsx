@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { AppConfig, DisplayMode, LaunchPreset, ModelOption } from '@shared/types'
 import { targetKey, type LocalProviderConfig, type ProviderCatalog } from '@shared/models'
 import { ModelPicker } from './ModelPicker'
-import { DEFAULT_PALETTE } from '@shared/palette'
+import { DEFAULT_GLOW, DEFAULT_PALETTE } from '@shared/palette'
 import { graphId } from '@shared/graph'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
@@ -261,6 +261,23 @@ export function SettingsView(): React.JSX.Element {
                     ))}
                   </select>
                 </label>
+              </div>
+
+              <div className="field">
+                <span>{t('settings.glowColor')}</span>
+                <div className="palette-row">
+                  <span className="palette-swatch">
+                    <input
+                      type="color"
+                      value={config.glowColor || DEFAULT_GLOW}
+                      onChange={(e) => set('glowColor', e.target.value)}
+                    />
+                  </span>
+                  <button className="chip" onClick={() => set('glowColor', '')}>
+                    {t('settings.glowReset')}
+                  </button>
+                </div>
+                <small>{t('settings.glowHelp')}</small>
               </div>
 
               <div className="field">

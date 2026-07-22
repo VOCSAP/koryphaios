@@ -169,6 +169,8 @@ export interface AppConfig {
   locale: string
   /** Rotating palette (hex) for auto-assigned session colours; editable in Settings (D12). */
   palette: string[]
+  /** Attention-glow colour (hex) of the rail glyphs; '' = theme default (gold). */
+  glowColor: string
   /** Remember custom (shared) scope secrets on this machine, encrypted (D8). */
   rememberScopeSecrets: boolean
   /**

@@ -26,6 +26,7 @@ use the variables so both themes keep working.
 | `--accent-fg`  | `#fff`    | `#fff`    | Text on accent                         |
 | `--danger`     | `#e05555` | `#c23b3b` | Red — destructive                      |
 | `--selected`   | `#2d3b52` | `#d8e6ff` | Selected row background                |
+| `--glow`       | `#d4a24a` | `#b8860b` | Gold — attention-glow halo (see §5)    |
 
 Layout tokens: `--gap: 8px`, `--radius: 8px` (containers), base font 13px
 (`ui-sans-serif` stack). Controls (buttons, inputs) use radius **6px**; small
@@ -52,6 +53,9 @@ Colour is meaning. Do not repurpose these:
 - **Amber** — transient/warning states: `#e0b341` starting dot & "local"
   badge, `#9a6700` info toast.
 - **Banner red `#a03030`** — full-width outage banner (state, not event).
+- **Gold `var(--glow)`** — the "enchanted glyph" attention halo (§5). User-
+  configurable (AppConfig.glowColor); never reuse it for anything but
+  attention effects.
 
 ## 3. Button archetypes
 
@@ -106,7 +110,41 @@ State rules (apply to every archetype):
   `.settings-head`…): flex row, `h2` 15px, actions right-aligned after a
   flex spacer, bottom border.
 
-## 5. Checklist when adding / modifying UI
+## 5. Iconography — the Greek glyph set
+
+The navigation rails (desktop rail, mobile tabs/sheet) use a custom icon set
+in `desktop/src/renderer/src/components/icons.tsx`, NOT emoji and NOT an icon
+font. Visual language: **VS Code activity-bar contrast, Greek-glyph
+metaphors** (Κορυφαῖος, the chorus leader — temple, theatre mask, armillary
+sphere, scroll, labyrinth, constellation, olive branch, volumen, winged
+tablet, caduceus; git keeps the universal branch graph).
+
+Rules for drawing a NEW glyph (follow them or the set stops looking like one
+hand drew it):
+
+1. Inline `<svg viewBox="0 0 24 24">` through the local `Svg` wrapper:
+   `fill="none" stroke="currentColor"`, `stroke-width 1.5`, round caps/joins.
+   Rendered at 20px by the wrapper; sizing/layout live in CSS, never in the SVG.
+2. **Stroke-only.** The single allowed fill is the small `Dot` accent
+   (constellation stars, ellipsis). Never hardcode a colour — `currentColor`
+   is what makes the dim/active/hover states and the glow work for free.
+3. Keep ~1.5–2px of margin inside the 24-grid, centre optically, prefer
+   primitive shapes (`path`/`circle`/`rect`) with round numbers.
+4. Pick a metaphor consistent with the mythology (when it stays readable —
+   SCM's branch graph beats lore) and register the glyph in `GLYPHS`
+   (`Record<GlyphName, …>`: adding a `DeckView` without a glyph is a compile
+   error).
+
+**Attention glow** ("fantasy glyph"): a rail entry with `.is-glowing` pulses
+its glyph — gold halo `var(--glow)` + a subtle accent-blue inner sheen
+(`glyph-glow` keyframes; static fallback under `prefers-reduced-motion`).
+Semantics: *an agent/the supervisor awaits the operator* (inbox draft,
+running companion). The colour is user-configurable in Settings > Appearance
+(`AppConfig.glowColor`, sanitized to hex by `sanitizeGlowColor`, applied as
+an inline `--glow` on `<html>` by App.tsx; `''` = theme default
+`DEFAULT_GLOW` in `shared/palette.ts`).
+
+## 6. Checklist when adding / modifying UI
 
 1. Reuse an existing archetype/primitive; only add a new CSS class when no
    recipe fits, and derive it from the tokens above.

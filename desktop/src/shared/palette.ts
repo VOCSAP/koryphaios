@@ -18,6 +18,18 @@ export const DEFAULT_PALETTE: string[] = [
 ]
 
 /**
+ * Default halo colour of the attention "glyph glow" (nav-rail glyphs, inbox
+ * draft dot). Shown as the Settings swatch when AppConfig.glowColor is ''
+ * (= theme default; the light theme deepens it in styles.css).
+ */
+export const DEFAULT_GLOW = '#d4a24a'
+
+/** '' (theme default) or a #rgb/#rrggbb colour — anything else is rejected. */
+export function sanitizeGlowColor(value: unknown): string {
+  return typeof value === 'string' && /^(#[0-9a-f]{3}|#[0-9a-f]{6})?$/i.test(value) ? value : ''
+}
+
+/**
  * Colour for the nth session, cycling through `palette`. Falls back to
  * DEFAULT_PALETTE when `palette` is empty (a user who cleared every entry still
  * gets distinct colours). Negative indices are handled by the double-modulo.

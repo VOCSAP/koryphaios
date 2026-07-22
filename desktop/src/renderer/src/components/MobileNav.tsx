@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { MobileSheet } from './MobileSheet'
+import { GLYPHS } from './icons'
 import { MOBILE_MORE, MOBILE_TABS, MOBILE_VIEWS } from '../mobile-views'
 import type { DeckView } from '@shared/types'
 
@@ -37,7 +38,7 @@ export function MobileNav(): React.JSX.Element {
             className={`mnav-btn${view === id && !inboxOpen ? ' is-active' : ''}`}
             onClick={() => goto(id)}
           >
-            <span className="mnav-icon">{MOBILE_VIEWS[id].icon}</span>
+            <span className="mnav-icon">{GLYPHS[id]}</span>
             <span className="mnav-label">{t(MOBILE_VIEWS[id].labelKey)}</span>
           </button>
         ))}
@@ -46,12 +47,13 @@ export function MobileNav(): React.JSX.Element {
           onClick={() => openInbox(!inboxOpen)}
         >
           <span className="mnav-icon">
-            ✉{badge > 0 && <span className="mnav-badge">{badge > 99 ? '99+' : badge}</span>}
+            {GLYPHS.inbox}
+            {badge > 0 && <span className="mnav-badge">{badge > 99 ? '99+' : badge}</span>}
           </span>
           <span className="mnav-label">{t('nav.inbox')}</span>
         </button>
         <button className="mnav-btn" onClick={() => setMoreOpen(true)}>
-          <span className="mnav-icon">⋯</span>
+          <span className="mnav-icon">{GLYPHS.more}</span>
           <span className="mnav-label">{t('mobile.more')}</span>
         </button>
       </nav>
@@ -66,7 +68,7 @@ export function MobileNav(): React.JSX.Element {
                 setMoreOpen(false)
               }}
             >
-              {MOBILE_VIEWS[id].icon} {t(MOBILE_VIEWS[id].labelKey)}
+              <span className="msheet-icon">{GLYPHS[id]}</span> {t(MOBILE_VIEWS[id].labelKey)}
             </button>
           ))}
           {/* Settings is an overlay, not a DeckView — kept explicit here. */}
