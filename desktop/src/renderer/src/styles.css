@@ -763,6 +763,14 @@ body {
   color: var(--fg);
 }
 
+/* Action glyphs (icons.tsx) inside tile-head ghost buttons: sized down from
+   the shared 24-grid, block display so padding is symmetric. */
+.tile-btn svg {
+  display: block;
+  width: 15px;
+  height: 15px;
+}
+
 .tile-btn-danger:hover {
   color: var(--danger);
 }

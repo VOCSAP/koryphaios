@@ -3,6 +3,7 @@ import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import type { SessionRuntime, SnippetSummary } from '@shared/types'
+import { GLYPHS, GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
 import { formatClock, useT } from '../i18n'
 import { registerTerminal, unregisterTerminal } from '../terminal-registry'
@@ -285,7 +286,7 @@ export function TerminalTile({
             void openSnippetMenu(e.currentTarget)
           }}
         >
-          ⚡
+          {GLYPH_ACTIONS.snippets}
         </button>
         <button
           type="button"
@@ -296,7 +297,7 @@ export function TerminalTile({
             openBrowser(id)
           }}
         >
-          🌐
+          {GLYPHS.browser}
         </button>
         <button
           type="button"
@@ -307,7 +308,7 @@ export function TerminalTile({
             setMaximized(isMax ? null : id)
           }}
         >
-          {isMax ? '⤡' : '⤢'}
+          {isMax ? GLYPH_ACTIONS.restore : GLYPH_ACTIONS.expand}
         </button>
         <button
           type="button"
@@ -318,7 +319,7 @@ export function TerminalTile({
             setConfirmingDelete(true)
           }}
         >
-          ✕
+          {GLYPH_ACTIONS.close}
         </button>
       </div>
       <div

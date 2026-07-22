@@ -158,6 +158,48 @@ const IconMore = (
   </Svg>
 )
 
+// ----- Action glyphs (tile-head buttons) -----
+// Same visual language as the rail set; sized down by the container's
+// `.tile-btn svg` rule, so they share the 24-grid untouched.
+
+/** Thunderbolt of Zeus: instant power — the saved-prompts (snippets) menu. */
+const IconBolt = (
+  <Svg>
+    <path d="M13.2 3.5 6.5 13.2h4.3L10.8 20.5l6.7-9.7h-4.3l0-7.3Z" />
+  </Svg>
+)
+
+/** Expand to full area (maximize). */
+const IconExpand = (
+  <Svg>
+    <path d="M14 4.5h5.5V10M19.5 4.5 13 11" />
+    <path d="M10 19.5H4.5V14M4.5 19.5 11 13" />
+  </Svg>
+)
+
+/** Back to the grid (restore). */
+const IconRestore = (
+  <Svg>
+    <path d="M19.5 10H14V4.5M14 10l5.5-5.5" />
+    <path d="M4.5 14H10v5.5M10 14l-5.5 5.5" />
+  </Svg>
+)
+
+/** Close. */
+const IconClose = (
+  <Svg>
+    <path d="m6 6 12 12M18 6 6 18" />
+  </Svg>
+)
+
+/** Tile-head action icons (TerminalTile); the browser dock reuses GLYPHS.browser. */
+export const GLYPH_ACTIONS = {
+  snippets: IconBolt,
+  expand: IconExpand,
+  restore: IconRestore,
+  close: IconClose
+}
+
 /** Every place a rail glyph can appear: the 9 views + the two rail extras. */
 export type GlyphName = DeckView | 'companion' | 'inbox' | 'more'
 
