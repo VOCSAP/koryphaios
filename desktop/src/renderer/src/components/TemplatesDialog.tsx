@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { TemplateSummary } from '@shared/types'
+import { GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -82,7 +83,7 @@ export function TemplatesDialog(): React.JSX.Element {
                         setComposer({ path: tpl.path })
                       }}
                     >
-                      ✎
+                      {GLYPH_ACTIONS.edit}
                     </button>
                     <button
                       className="row-btn template-row-btn"
@@ -92,7 +93,7 @@ export function TemplatesDialog(): React.JSX.Element {
                         void duplicate(tpl)
                       }}
                     >
-                      ⧉
+                      {GLYPH_ACTIONS.copy}
                     </button>
                     <button
                       className="template-del"
@@ -103,12 +104,7 @@ export function TemplatesDialog(): React.JSX.Element {
                         setDeleting(tpl)
                       }}
                     >
-                      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-                        <path
-                          fill="currentColor"
-                          d="M9 3v1H4v2h16V4h-5V3H9zM6 8l1 12h10l1-12H6zm3 2h2v8H9v-8zm4 0h2v8h-2v-8z"
-                        />
-                      </svg>
+                      {GLYPH_ACTIONS.trash}
                     </button>
                   </>
                 )}

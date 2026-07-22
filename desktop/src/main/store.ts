@@ -4,7 +4,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { SUPERVISOR_SPAWN_MODES, type AppConfig, type SessionDef } from '@shared/types'
 import { writeFileAtomic } from './atomic-write'
-import { DEFAULT_PALETTE } from '@shared/palette'
+import { DEFAULT_PALETTE, sanitizeGlowColor } from '@shared/palette'
 import {
   DEFAULT_HELP_TARGET,
   DEFAULT_WAND_TARGET,
@@ -32,6 +32,8 @@ const DEFAULT_CONFIG: AppConfig = {
   // '' = auto: main/i18n.ts derives en/fr from the OS locale.
   locale: '',
   palette: DEFAULT_PALETTE,
+  // '' = theme default (gold): the renderer only overrides --glow when set.
+  glowColor: '',
   rememberScopeSecrets: true,
   // Quota auto-resume is opt-in (PLAN C1): off unless the operator enables it.
   autoResumeQuota: false,
@@ -100,6 +102,8 @@ export function loadConfig(): AppConfig {
   if (!SUPERVISOR_SPAWN_MODES.includes(cfg.supervisorSpawnMode)) {
     cfg.supervisorSpawnMode = 'hands-free'
   }
+  // Hand-edited file: a non-hex glow value becomes a CSS variable, so clamp.
+  cfg.glowColor = sanitizeGlowColor(cfg.glowColor)
   delete (cfg as { helpModel?: string }).helpModel
   return cfg
 }

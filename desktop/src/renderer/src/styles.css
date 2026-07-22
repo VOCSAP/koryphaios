@@ -7,6 +7,9 @@
 }
 
 [data-theme='dark'] {
+  /* Attention-glow halo (glyph-glow). Default = DEFAULT_GLOW (shared/palette.ts);
+     a Settings override lands as an inline --glow on <html> (App.tsx). */
+  --glow: #d4a24a;
   --bg: #181818;
   --bg-2: #202020;
   --bg-3: #2a2a2a;
@@ -20,6 +23,8 @@
 }
 
 [data-theme='light'] {
+  /* Deeper gold: a #d4a24a halo would wash out on the light background. */
+  --glow: #b8860b;
   --bg: #f3f3f3;
   --bg-2: #ffffff;
   --bg-3: #e8e8e8;
@@ -756,6 +761,13 @@ body {
 .tile-btn:hover {
   background: var(--bg);
   color: var(--fg);
+}
+
+/* Tile-head action glyphs: block so the ghost button's padding is symmetric. */
+.tile-btn svg {
+  display: block;
+  width: 15px;
+  height: 15px;
 }
 
 .tile-btn-danger:hover {
@@ -1727,6 +1739,56 @@ code {
 .nav-rail-icon {
   font-size: 18px;
   line-height: 1;
+}
+
+/* Greek-glyph SVGs (icons.tsx): coloured by currentColor so each host's
+   dim/active/hover states and the glow apply with zero SVG changes. Sized at
+   1em — a glyph follows its button's font-size exactly like the text
+   character it replaced. Rails pin an explicit size below. */
+svg.glyph {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.125em;
+}
+
+.nav-rail-icon svg,
+.mnav-icon svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+}
+
+.msheet-icon svg {
+  margin-right: 6px;
+}
+
+/* Glyph inlined in a context-menu item label, before the text. */
+.ctx-icon {
+  display: inline-block;
+}
+
+/* Roadmap kind marks (GLYPH_KINDS): stroke glyphs, but each kind keeps its
+   own colour so the kanban stays scannable at a glance. */
+.kind-glyph {
+  display: inline-block;
+  line-height: 1;
+}
+
+.kind-glyph-feature {
+  color: #4f86ff;
+}
+.kind-glyph-bug {
+  color: #e05555;
+}
+.kind-glyph-debt {
+  color: #e08a3c;
+}
+.kind-glyph-idea {
+  color: #e0b341;
+}
+.kind-glyph-chore {
+  color: #3ec46d;
 }
 
 .nav-rail-label {
@@ -2901,7 +2963,7 @@ code {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--graph-k-whatif);
+  background: var(--glow);
   animation: glyph-glow 2.2s ease-in-out infinite;
 }
 
@@ -2924,20 +2986,26 @@ code {
   font-size: 12px;
 }
 
-/* The "fantasy glyph" glow: the inbox rail icon pulses while a draft awaits
-   the operator. Pure filter/opacity animation (GPU-cheap, no re-layout). */
+/* The "fantasy glyph" glow: a rail glyph pulses like an enchanted inscription
+   while attention is awaited (inbox draft, running companion). Pure
+   filter/opacity animation (GPU-cheap, no re-layout). The halo colour is
+   `--glow` (default gold, DEFAULT_GLOW in shared/palette.ts) — configurable in
+   Settings > Appearance, overridden at the root by App.tsx. The inner sheen
+   stays accent-blue, giving the default its blue-gold shimmer. */
 .nav-rail-item.is-glowing .nav-rail-icon {
+  color: color-mix(in srgb, var(--glow) 45%, var(--fg));
   animation: glyph-glow 2.2s ease-in-out infinite;
 }
 
 @keyframes glyph-glow {
   0%,
   100% {
-    filter: drop-shadow(0 0 2px var(--graph-k-whatif));
+    filter: drop-shadow(0 0 2px var(--glow));
     opacity: 0.85;
   }
   50% {
-    filter: drop-shadow(0 0 9px var(--graph-k-whatif)) drop-shadow(0 0 18px var(--graph-k-whatif));
+    filter: drop-shadow(0 0 2px var(--accent)) drop-shadow(0 0 9px var(--glow))
+      drop-shadow(0 0 18px var(--glow));
     opacity: 1;
   }
 }
@@ -2946,7 +3014,7 @@ code {
   .nav-rail-item.is-glowing .nav-rail-icon,
   .inbox-draft-glyph {
     animation: none;
-    filter: drop-shadow(0 0 4px var(--graph-k-whatif));
+    filter: drop-shadow(0 0 4px var(--glow));
   }
 }
 

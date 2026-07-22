@@ -35,8 +35,10 @@ Only read the file matching the area you are touching:
   (Electron stack, sessions, supervisor, graph chat, model picker, security
   gates).
 - Creating or modifying anything VISUAL in `desktop/` (CSS, buttons, colours,
-  badges, a new view's look) — read `DESIGN.md` (design tokens, colour
-  semantics, button archetypes, UI checklist). The `deck-design` skill
+  badges, icons, a new view's look) — read `DESIGN.md` (design tokens, colour
+  semantics, button archetypes, iconography, UI checklist). Two hard rules
+  travel with it: no bare `<button>`, and NO EMOJI in the UI — every icon is a
+  Greek-styled SVG glyph from `components/icons.tsx`. The `deck-design` skill
   (`.claude/skills/deck-design/SKILL.md`) wraps the workflow.
 - Writing or running tests, or preparing a commit — read `TESTING.md`
   (test suite layout, smoke check, typecheck, locale parity).

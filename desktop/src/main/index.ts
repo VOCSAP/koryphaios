@@ -11,6 +11,7 @@ import {
   shell
 } from 'electron'
 import type { AppConfig } from '@shared/types'
+import { sanitizeGlowColor } from '@shared/palette'
 import { loadConfig, saveConfig } from './store'
 import { buildAppMenu } from './menu'
 import { SessionService } from './session-service'
@@ -213,6 +214,11 @@ const setConfig = (patch: Partial<AppConfig>): AppConfig => {
     reportError('config', `rejected config:set projectDir override (${patch.projectDir})`)
     const { projectDir: _ignored, ...rest } = patch
     patch = rest
+  }
+  // The glow colour lands in a CSS variable renderer-side: clamp to hex/''
+  // here too so a compromised-renderer patch can't persist arbitrary text.
+  if (patch.glowColor !== undefined) {
+    patch = { ...patch, glowColor: sanitizeGlowColor(patch.glowColor) }
   }
   // Local-provider API keys never persist in clear (C29): a renderer patch
   // carries transient `apiKey` fields that are encrypted (safeStorage) into

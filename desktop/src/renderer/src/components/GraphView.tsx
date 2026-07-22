@@ -16,6 +16,7 @@ import {
 } from '@shared/graph'
 import type { ProviderCatalog } from '@shared/models'
 import { useT } from '../i18n'
+import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ModelPicker } from './ModelPicker'
@@ -35,7 +36,9 @@ const ZOOM_MAX = 2
 /** Timeline outline: chars kept per row before the ellipsis. */
 const OUTLINE_CHARS = 46
 
-const CLI_ICONS: Record<GraphCli, string> = { claude: '✴', codex: '◆', gemini: '✦', local: '🖳' }
+// Provider sigils stay typographic characters (abstract, monochrome — already
+// in the glyph tone, and they also live inside string labels).
+const CLI_ICONS: Record<GraphCli, string> = { claude: '✴', codex: '◆', gemini: '✦', local: '⌂' }
 
 /** Default fan-out selection before the operator picks anything. */
 const DEFAULT_TARGET_KEY = 'anthropic:sonnet'
@@ -48,10 +51,10 @@ const DEFAULT_JUDGE_TARGET: ModelTarget = { cli: 'claude', model: 'sonnet' }
 
 type Camera = { x: number; y: number; zoom: number }
 
-function nodeIcon(node: GraphNode): string {
-  if (node.type === 'user') return '👤'
-  if (node.type === 'judge') return '🏆'
-  return CLI_ICONS[node.cli ?? 'claude'] ?? '🤖'
+function nodeIcon(node: GraphNode): React.ReactNode {
+  if (node.type === 'user') return GLYPH_BADGES.profile
+  if (node.type === 'judge') return GLYPH_BADGES.scales
+  return CLI_ICONS[node.cli ?? 'claude'] ?? '◇'
 }
 
 function nodeTitle(node: GraphNode, t: (k: string) => string): string {
@@ -504,7 +507,7 @@ export function GraphView(): React.JSX.Element {
                 setConfirmDeleteGraph(g.id)
               }}
             >
-              🗑
+              {GLYPH_ACTIONS.trash}
             </button>
           </div>
         ))}
@@ -599,24 +602,24 @@ export function GraphView(): React.JSX.Element {
             onClick={(e) => e.stopPropagation()}
           >
             <button className="icon-btn" title={t('graph.zoomIn')} onClick={() => zoomBy(1.2)}>
-              ＋
+              {GLYPH_ACTIONS.plus}
             </button>
             <button className="icon-btn" title={t('graph.zoomOut')} onClick={() => zoomBy(1 / 1.2)}>
-              －
+              {GLYPH_ACTIONS.minus}
             </button>
             <button className="icon-btn" title={t('graph.fitView')} onClick={() => fitView()}>
-              ⛶
+              {GLYPH_ACTIONS.fit}
             </button>
             <span className="graph-zoomctl-sep" />
             <button className="icon-btn" title={t('graph.arrange')} onClick={arrange}>
-              ⊞
+              {GLYPH_ACTIONS.grid}
             </button>
             <button
               className={`icon-btn${showTimeline ? ' is-active' : ''}`}
               title={t('graph.timeline')}
               onClick={() => setShowTimeline((v) => !v)}
             >
-              ☰
+              {GLYPH_ACTIONS.menu}
             </button>
           </div>
         )}
@@ -737,7 +740,7 @@ export function GraphView(): React.JSX.Element {
                             className="graph-chip-x"
                             onClick={() => setTargetKeys((ks) => ks.filter((x) => x !== k))}
                           >
-                            ✕
+                            {GLYPH_ACTIONS.close}
                           </button>
                         </span>
                       )
@@ -756,11 +759,11 @@ export function GraphView(): React.JSX.Element {
                     checked={battle}
                     onChange={(e) => setBattle(e.target.checked)}
                   />
-                  ⚔ {t('graph.battle')}
+                  {GLYPH_BADGES.swords} {t('graph.battle')}
                 </label>
                 {battle && (
                   <div className="graph-target-row">
-                    <span>🏆 {t('graph.judge')}</span>
+                    <span>{GLYPH_BADGES.scales} {t('graph.judge')}</span>
                     <ModelPicker
                       catalogs={catalogs}
                       selected={[judgeKey]}

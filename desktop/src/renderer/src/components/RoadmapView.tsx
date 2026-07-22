@@ -7,6 +7,7 @@ import type {
   RoadmapStatus,
   StopResult
 } from '@shared/types'
+import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { useT, type TFn } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -146,12 +147,12 @@ function BoardCard({
         </span>
         {item.queue !== null && (
           <span className="rm-badge rm-badge-queue" title={t('roadmap.queueSection')}>
-            ⏳ #{item.queue}
+            {GLYPH_BADGES.clepsydra} #{item.queue}
           </span>
         )}
         {locked && (
           <span className="rm-badge rm-badge-locked" title={t('roadmap.lockedHint')}>
-            🔒 {item.locked_by}
+            {GLYPH_BADGES.lock} {item.locked_by}
           </span>
         )}
         {item.tags.map((tag) => (
@@ -508,7 +509,7 @@ export function RoadmapView(): React.JSX.Element {
       {queued.length > 0 && (
         <section className="rm-section rm-section-queue">
           <h3 className="rm-section-head rm-queue-head">
-            ⏳ {t('roadmap.queueSection')}
+            {GLYPH_BADGES.clepsydra} {t('roadmap.queueSection')}
             <span className="rm-count">{queued.length}</span>
             <span className="roadmap-spacer" />
             <button
@@ -532,7 +533,7 @@ export function RoadmapView(): React.JSX.Element {
                 title={t('roadmap.queueRemove')}
                 onClick={() => void setQueue(item, null)}
               >
-                ✕
+                {GLYPH_ACTIONS.close}
               </button>
             </div>
           ))}
@@ -612,7 +613,7 @@ export function RoadmapView(): React.JSX.Element {
             <header className="rm-detail-head">
               <h3>{draft.id ? t('roadmap.editTitle') : t('roadmap.createTitle')}</h3>
               <button className="icon-btn" title={t('common.close')} onClick={() => setDraft(null)}>
-                ✕
+                {GLYPH_ACTIONS.close}
               </button>
             </header>
             <label className="field">
@@ -720,7 +721,7 @@ export function RoadmapView(): React.JSX.Element {
                   disabled={wandBusy || !draft.title.trim()}
                   onClick={() => void wand()}
                 >
-                  {wandBusy ? '⏳' : '🪄'}
+                  {wandBusy ? GLYPH_BADGES.clepsydra : GLYPH_ACTIONS.wand}
                 </button>
               </span>
               <textarea
@@ -870,7 +871,7 @@ export function RoadmapView(): React.JSX.Element {
                 title={t('common.close')}
                 onClick={() => setAssignItem(null)}
               >
-                ✕
+                {GLYPH_ACTIONS.close}
               </button>
             </header>
             <p className="rm-assign-hint">{t('roadmap.assignHint', { title: assignItem.title })}</p>
@@ -886,7 +887,7 @@ export function RoadmapView(): React.JSX.Element {
                 >
                   <span className="rm-assign-dot" style={{ background: s.color }} />
                   <span className="rm-assign-name">{s.name}</span>
-                  {s.lead && <span title={t('sidebar.leadTitle')}>👑</span>}
+                  {s.lead && <span title={t('sidebar.leadTitle')}>{GLYPH_BADGES.laurel}</span>}
                   <span className="rm-assign-peer">{s.peerId}</span>
                 </button>
               ))}

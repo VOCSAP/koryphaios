@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { SessionRuntime } from '@shared/types'
 import { moveBeside } from '@shared/reorder'
+import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { formatClock, useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -136,7 +137,7 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
           <span className="row-name" title={session.cwd} style={{ color: session.color || undefined }}>
             {session.lead && (
               <span title={t('sidebar.leadTitle')} className="row-lead">
-                👑{' '}
+                {GLYPH_BADGES.laurel}{' '}
               </span>
             )}
             {session.name}
@@ -168,7 +169,7 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
             setEditing(true)
           }}
         >
-          ✎
+          {GLYPH_ACTIONS.edit}
         </button>
       )}
       <button
@@ -180,7 +181,7 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
           setMaximized(maximizedId === session.id ? null : session.id)
         }}
       >
-        {maximizedId === session.id ? '⤡' : '⤢'}
+        {maximizedId === session.id ? GLYPH_ACTIONS.restore : GLYPH_ACTIONS.expand}
       </button>
       <button
         className="row-btn row-btn-danger"
@@ -190,7 +191,7 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
           setConfirmingDelete(true)
         }}
       >
-        ✕
+        {GLYPH_ACTIONS.close}
       </button>
       {confirmingDelete && (
         <ConfirmDialog
@@ -243,7 +244,11 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
               onSelect: () => void setAutoResume(session.id, !autoResumeOn)
             },
             {
-              label: `👑 ${t('sidebar.setLead')}`,
+              label: (
+                <>
+                  {GLYPH_BADGES.laurel} {t('sidebar.setLead')}
+                </>
+              ),
               onSelect: () => void window.api.setLead(session.id),
               disabled: !!session.lead
             },
@@ -326,10 +331,10 @@ export function Sidebar(): React.JSX.Element {
           title={t('sidebar.workspaces')}
           onClick={() => openWorkspaces(true)}
         >
-          🗂
+          {GLYPH_BADGES.capsa}
         </button>
         <button className="icon-btn" title={t('sidebar.settings')} onClick={() => openSettings(true)}>
-          ⚙
+          {GLYPH_BADGES.gear}
         </button>
       </header>
 

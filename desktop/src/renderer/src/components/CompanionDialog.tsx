@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import qrcode from 'qrcode-generator'
 import type { CompanionDevice, CompanionInfo } from '@shared/types'
+import { GLYPHS, GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 
@@ -99,9 +100,9 @@ export function CompanionDialog(): React.JSX.Element {
     <div className="modal-backdrop" onMouseDown={() => openCompanion(false)}>
       <div className="modal companion-modal" onMouseDown={(e) => e.stopPropagation()}>
         <header className="modal-head">
-          <h2>📱 {t('companion.title')}</h2>
+          <h2>{GLYPHS.companion} {t('companion.title')}</h2>
           <button className="icon-btn" onClick={() => openCompanion(false)}>
-            ✕
+            {GLYPH_ACTIONS.close}
           </button>
         </header>
         <div className="companion-body">

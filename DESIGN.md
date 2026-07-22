@@ -26,6 +26,7 @@ use the variables so both themes keep working.
 | `--accent-fg`  | `#fff`    | `#fff`    | Text on accent                         |
 | `--danger`     | `#e05555` | `#c23b3b` | Red — destructive                      |
 | `--selected`   | `#2d3b52` | `#d8e6ff` | Selected row background                |
+| `--glow`       | `#d4a24a` | `#b8860b` | Gold — attention-glow halo (see §5)    |
 
 Layout tokens: `--gap: 8px`, `--radius: 8px` (containers), base font 13px
 (`ui-sans-serif` stack). Controls (buttons, inputs) use radius **6px**; small
@@ -52,6 +53,9 @@ Colour is meaning. Do not repurpose these:
 - **Amber** — transient/warning states: `#e0b341` starting dot & "local"
   badge, `#9a6700` info toast.
 - **Banner red `#a03030`** — full-width outage banner (state, not event).
+- **Gold `var(--glow)`** — the "enchanted glyph" attention halo (§5). User-
+  configurable (AppConfig.glowColor); never reuse it for anything but
+  attention effects.
 
 ## 3. Button archetypes
 
@@ -106,7 +110,74 @@ State rules (apply to every archetype):
   `.settings-head`…): flex row, `h2` 15px, actions right-aligned after a
   flex spacer, bottom border.
 
-## 5. Checklist when adding / modifying UI
+## 5. Iconography — the Greek glyph set
+
+**Rule zero: the UI never uses emoji.** Every icon — rail destinations, action
+buttons, badges, kind marks — is a hand-drawn SVG glyph from
+`desktop/src/renderer/src/components/icons.tsx` (no emoji, no icon font, no
+external set). Four registries cover every need; pick from them before drawing
+anything: `GLYPHS` (view destinations), `GLYPH_ACTIONS` (generic actions),
+`GLYPH_BADGES` (identity/state marks), `GLYPH_KINDS` (roadmap types). The only
+tolerated non-SVG icons are abstract typographic characters (`✴ ◆ ✦ ⌂ ◇ ⎇ ›`)
+in contexts where SVG cannot render (see the JSX/string rule below).
+
+Visual language: **VS Code activity-bar contrast, Greek-glyph metaphors**
+(Κορυφαῖος, the chorus leader — temple, theatre mask, armillary sphere,
+scroll, labyrinth, constellation, olive branch, volumen, winged tablet,
+caduceus, laurel, scales of Themis, xiphos, clepsydra, Olympic torch; git
+keeps the universal branch graph). When adding a NEW icon, propose a metaphor
+from this world first, and fall back to the universal shape only when the
+mythological reading would hurt recognition (the SCM branch-graph precedent).
+
+Rules for drawing a NEW glyph (follow them or the set stops looking like one
+hand drew it):
+
+1. Inline `<svg viewBox="0 0 24 24">` through the local `Svg` wrapper:
+   `fill="none" stroke="currentColor"`, `stroke-width 1.5`, round caps/joins.
+   Rendered at 20px by the wrapper; sizing/layout live in CSS, never in the SVG.
+2. **Stroke-only.** The single allowed fill is the small `Dot` accent
+   (constellation stars, ellipsis). Never hardcode a colour — `currentColor`
+   is what makes the dim/active/hover states and the glow work for free.
+3. Keep ~1.5–2px of margin inside the 24-grid, centre optically, prefer
+   primitive shapes (`path`/`circle`/`rect`) with round numbers.
+4. Pick a metaphor consistent with the mythology (when it stays readable —
+   SCM's branch graph beats lore) and register the glyph in `GLYPHS`
+   (`Record<GlyphName, …>`: adding a `DeckView` without a glyph is a compile
+   error).
+
+**Badge glyphs** (`GLYPH_BADGES`) mark identity/state, never actions: laurel
+crown = team lead, scales of Themis = judge, crossed xiphos = battle,
+clepsydra = waiting (rate-limit, queue), head profile = the operator's graph
+node, Olympic torch lit/out = remote link reconnecting/gone, plus universal
+marks (lock, warning, gear, capsa = workspaces, paperclip, archive, star,
+checkboxes). **Kind marks** (`GLYPH_KINDS`) are the roadmap types (4-point
+star, scarab, brick wall, oil lamp, broom), each tinted by a
+`.kind-glyph-*` class so the kanban keeps colour scanning. Provider sigils
+(`✴ ◆ ✦ ⌂ ◇`) stay typographic characters: abstract, monochrome, and they
+must survive string contexts (`<option>`, concatenated labels) where SVG
+cannot go — that is the rule: JSX context → glyph, string context →
+character. `ContextMenu` labels accept JSX for this reason.
+
+**Action glyphs** (`GLYPH_ACTIONS`): generic UI actions (close, edit, trash,
+refresh, search, copy, plus/minus, fit, back/forward, camera, target, code,
+external…) share the same stroke language but stay universal shapes — the
+mythology is reserved for destinations (rail `GLYPHS`) and identity moments
+(the snippets thunderbolt). Sizing: `svg.glyph` renders at **1em**, so a glyph
+inherits its host button's font-size exactly like the text character it
+replaced — set the button's `font-size`, never the SVG's. Never leave a raw
+character (`✕`, `⟳`, emoji) in a button: pick from `GLYPH_ACTIONS` or add one
+following the rules above.
+
+**Attention glow** ("fantasy glyph"): a rail entry with `.is-glowing` pulses
+its glyph — gold halo `var(--glow)` + a subtle accent-blue inner sheen
+(`glyph-glow` keyframes; static fallback under `prefers-reduced-motion`).
+Semantics: *an agent/the supervisor awaits the operator* (inbox draft,
+running companion). The colour is user-configurable in Settings > Appearance
+(`AppConfig.glowColor`, sanitized to hex by `sanitizeGlowColor`, applied as
+an inline `--glow` on `<html>` by App.tsx; `''` = theme default
+`DEFAULT_GLOW` in `shared/palette.ts`).
+
+## 6. Checklist when adding / modifying UI
 
 1. Reuse an existing archetype/primitive; only add a new CSS class when no
    recipe fits, and derive it from the tokens above.
@@ -122,3 +193,6 @@ State rules (apply to every archetype):
 6. New rules go in `desktop/src/renderer/src/styles.css`, in the section
    commented for the component you touch (create a `/* ---------- X */`
    section if needed) — keep the file's comment style.
+7. **Never an emoji.** Any icon need goes through the glyph registries of
+   `icons.tsx` (§5) — reuse first, draw a new Greek-styled glyph second;
+   an emoji character in JSX is a bug, like a bare `<button>`.

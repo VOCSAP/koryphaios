@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { HelpExchange, HelpSelection } from '@shared/types'
 import { targetLabel } from '@shared/models'
+import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { ContextMenu } from './ContextMenu'
@@ -125,11 +126,11 @@ export function HelpAssistant(): React.JSX.Element | null {
               disabled={busy}
               onClick={digest}
             >
-              📋
+              {GLYPH_ACTIONS.copy}
             </button>
             <span className="help-model">{targetLabel(config.helpTarget)}</span>
             <button className="icon-btn" title={t('common.close')} onClick={() => setOpen(false)}>
-              ✕
+              {GLYPH_ACTIONS.close}
             </button>
           </header>
           <div className="help-log" ref={logRef}>
@@ -146,14 +147,14 @@ export function HelpAssistant(): React.JSX.Element | null {
           {selection && (
             <div className="help-selection">
               <span className="help-selection-ref" title={selection.text.slice(0, 500)}>
-                📎 {selection.file}:{selection.startLine}–{selection.endLine}
+                {GLYPH_BADGES.clip} {selection.file}:{selection.startLine}–{selection.endLine}
               </span>
               <button
                 className="icon-btn"
                 title={t('help.detachSelection')}
                 onClick={() => setSelection(null)}
               >
-                ✕
+                {GLYPH_ACTIONS.close}
               </button>
             </div>
           )}
@@ -197,9 +198,14 @@ export function HelpAssistant(): React.JSX.Element | null {
           onClose={() => setMenuPos(null)}
           items={[
             ...QUICK_MODELS.map((m) => ({
-              label: `${
-                config.helpTarget.cli === 'claude' && config.helpTarget.model === m ? '✓ ' : ''
-              }${t('help.model', { model: m })}`,
+              label: (
+                <>
+                  {config.helpTarget.cli === 'claude' && config.helpTarget.model === m ? (
+                    <span className="ctx-icon">{GLYPH_ACTIONS.check}</span>
+                  ) : null}{' '}
+                  {t('help.model', { model: m })}
+                </>
+              ),
               onSelect: () => void updateConfig({ helpTarget: { cli: 'claude', model: m } })
             })),
             {

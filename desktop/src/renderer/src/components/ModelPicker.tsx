@@ -4,6 +4,7 @@ import type { ProviderCatalog } from '@shared/models'
 import { favKey, resolveFavorites, toggleFavorite } from '@shared/models'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
+import { GLYPH_BADGES } from './icons'
 
 // Unified model picker (EXPLORATION-graph-chat C29), shared by the graph
 // chat's target selection and the agents' advanced create menu:
@@ -24,7 +25,7 @@ const PROVIDER_ICONS: Record<string, string> = {
 
 /** Icon for a provider section (locals get a house). */
 export function providerIcon(catalog: ProviderCatalog): string {
-  return PROVIDER_ICONS[catalog.id] ?? (catalog.kind === 'local' ? '🖳' : '◇')
+  return PROVIDER_ICONS[catalog.id] ?? (catalog.kind === 'local' ? '⌂' : '◇')
 }
 
 export interface ModelPickerProps {
@@ -79,7 +80,11 @@ export function ModelPicker({
         className={`mp-model${isSelected ? ' is-selected' : ''}`}
         onClick={() => onPick(key, toTarget(catalog, modelId))}
       >
-        {multi && <span className="mp-check">{isSelected ? '☑' : '☐'}</span>}
+        {multi && (
+          <span className="mp-check">
+            {isSelected ? GLYPH_BADGES.checkboxOn : GLYPH_BADGES.checkboxOff}
+          </span>
+        )}
         <span className="mp-model-name">{label}</span>
         <button
           className={`mp-star${isFav ? ' is-fav' : ''}`}
@@ -89,7 +94,7 @@ export function ModelPicker({
             star(key)
           }}
         >
-          {isFav ? '★' : '☆'}
+          {isFav ? GLYPH_BADGES.starFilled : GLYPH_BADGES.star}
         </button>
       </div>
     )

@@ -1,6 +1,6 @@
 ---
 name: deck-design
-description: Visual/UI work on the desktop app (desktop/) — styling a button or view, picking colours, adding CSS, fixing an unstyled control, building a new dialog/badge/banner. Routes through DESIGN.md (validated tokens, colour semantics, button archetypes) so the Deck keeps one coherent look. Use for any change touching styles.css or a component's visual classes; NOT for broker/server work or non-visual renderer logic.
+description: Visual/UI work on the desktop app (desktop/) — styling a button or view, picking colours, adding CSS, fixing an unstyled control, building a new dialog/badge/banner, or adding/altering a rail icon (the Greek glyph set). Routes through DESIGN.md (validated tokens, colour semantics, button archetypes, iconography) so the Deck keeps one coherent look. Use for any change touching styles.css, icons.tsx or a component's visual classes; NOT for broker/server work or non-visual renderer logic.
 ---
 
 # Deck UI design workflow
@@ -13,7 +13,7 @@ and authoritative (extracted from the user-validated `main` styles).
 ## Workflow
 
 1. **Read `DESIGN.md`.** Identify which archetype/primitive covers your case
-   (button archetypes §3, primitives §4, colour semantics §2).
+   (button archetypes §3, primitives §4, colour semantics §2, iconography §5).
 2. **Reuse before inventing.** Grep `styles.css` for an existing class doing
    the same job (`.btn`, `.primary`, `.chip`, `.rm-badge`, `.modal-actions`…).
    Only mint a new class when no recipe fits, built from the tokens
@@ -27,10 +27,23 @@ and authoritative (extracted from the user-validated `main` styles).
    define hover (`:not(:disabled)`) and disabled (`opacity: 0.4`) states.
 5. **Both themes.** Check dark AND light `data-theme`: no hardcoded greys;
    whites only on filled semantic buttons.
-6. **Labels via i18n.** New user-visible text: key in `desktop/locales/en.json`
+6. **Icons are Greek glyphs — NEVER emoji, anywhere.** Every icon (view,
+   action button, badge, roadmap kind) comes from the registries of
+   `desktop/src/renderer/src/components/icons.tsx`: `GLYPHS` (destinations),
+   `GLYPH_ACTIONS` (actions), `GLYPH_BADGES` (identity/state), `GLYPH_KINDS`
+   (roadmap types) — inline 24-grid SVG, stroke-only `currentColor` 1.5,
+   mythological metaphor first (drawing rules in DESIGN.md §5). Reuse before
+   drawing; an emoji in JSX is a bug. Sole exception: string contexts
+   (`<option>`, concatenated labels) take an abstract typographic character
+   (`✴ ◆ ✦ ⌂ ⎇`) — and `ContextMenu` labels accept JSX, so menus use glyphs.
+   Adding a `DeckView` without registering a glyph is a compile error. The
+   attention glow (`.is-glowing`, `--glow`, `glyph-glow` keyframes) is
+   reserved for "an agent awaits the operator" semantics; its colour is the
+   `glowColor` setting, never a hardcoded hex.
+7. **Labels via i18n.** New user-visible text: key in `desktop/locales/en.json`
    + `fr.json` + `EN_DEFAULTS` (`desktop/src/main/i18n.ts`) — parity is
    test-enforced (`tests/i18n.test.ts`).
-7. **Verify.** `npm run typecheck` in `desktop/`, `bun test` at the root (for
+8. **Verify.** `npm run typecheck` in `desktop/`, `bun test` at the root (for
    locale parity), and eyeball the affected view in both themes if you can
    launch the app.
 

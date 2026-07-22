@@ -1,4 +1,5 @@
 import { useRef } from 'react'
+import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { TerminalTile } from './TerminalTile'
@@ -55,12 +56,12 @@ export function MobileAgents(): React.JSX.Element {
           >
             <span className="mchip-dot" />
             {s.name}
-            {s.needsAttention && <span className="mchip-flag">⚠</span>}
-            {s.rateLimited && <span className="mchip-flag">⏳</span>}
+            {s.needsAttention && <span className="mchip-flag">{GLYPH_BADGES.warning}</span>}
+            {s.rateLimited && <span className="mchip-flag">{GLYPH_BADGES.clepsydra}</span>}
           </button>
         ))}
         <button className="mchip mchip-add" onClick={() => void createSession({})}>
-          ＋
+          {GLYPH_ACTIONS.plus}
         </button>
       </div>
       <div

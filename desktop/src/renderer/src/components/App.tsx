@@ -1,4 +1,6 @@
 import { useEffect, useRef } from 'react'
+import { sanitizeGlowColor } from '@shared/palette'
+import { GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { Sidebar } from './Sidebar'
@@ -49,12 +51,12 @@ function RemoteLinkOverlay(): React.JSX.Element | null {
     <div className="remote-overlay" role="alert">
       {remoteLink === 'connecting' ? (
         <>
-          <div className="remote-overlay-icon">📡</div>
+          <div className="remote-overlay-icon">{GLYPH_BADGES.torchLit}</div>
           <h2>{t('companion.reconnecting')}</h2>
         </>
       ) : (
         <>
-          <div className="remote-overlay-icon">🔌</div>
+          <div className="remote-overlay-icon">{GLYPH_BADGES.torchOut}</div>
           <h2>{t('companion.hostGone')}</h2>
           <p>{t('companion.hostGoneHint')}</p>
           <button className="primary" onClick={() => retryRemoteConnection()}>
@@ -102,7 +104,13 @@ export function App(): React.JSX.Element {
   }, [init])
 
   useEffect(() => {
-    if (config) document.documentElement.dataset.theme = config.theme
+    if (!config) return
+    document.documentElement.dataset.theme = config.theme
+    // Attention-glow colour (DESIGN.md "Iconography"): an inline --glow on
+    // <html> beats the theme default; '' removes it so the theme value shows.
+    const glow = sanitizeGlowColor(config.glowColor)
+    if (glow) document.documentElement.style.setProperty('--glow', glow)
+    else document.documentElement.style.removeProperty('--glow')
   }, [config])
 
   // Mobile derivation rule (PLAN MB3): the class only ever appears for a

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { getTerminal } from '../terminal-registry'
@@ -129,7 +130,7 @@ export function SearchBar(): React.JSX.Element | null {
           title={t('common.close')}
           onClick={() => openSearch(false)}
         >
-          ✕
+          {GLYPH_ACTIONS.close}
         </button>
       </div>
       {active && (

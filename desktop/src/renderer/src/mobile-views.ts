@@ -21,25 +21,27 @@ export type MobilePlacement =
 
 export interface MobileViewMeta {
   placement: MobilePlacement
-  icon: string
   /** i18n key for the label. */
   labelKey: string
 }
 
+// Icons are NOT declared here: every surface renders `GLYPHS[view]` from
+// components/icons.tsx (a Record<GlyphName, …> — its own compile-time
+// exhaustiveness gate), so the registry stays a pure placement table.
 export const MOBILE_VIEWS: Record<DeckView, MobileViewMeta> = {
-  home: { placement: 'tab', icon: '🏠', labelKey: 'nav.home' },
-  agents: { placement: 'tab', icon: '🖥', labelKey: 'nav.agents' },
-  roadmap: { placement: 'tab', icon: '🗺', labelKey: 'nav.roadmap' },
+  home: { placement: 'tab', labelKey: 'nav.home' },
+  agents: { placement: 'tab', labelKey: 'nav.agents' },
+  roadmap: { placement: 'tab', labelKey: 'nav.roadmap' },
   // Read-only diff/file browsing is desktop-first (PLAN GX3/GX6); the
   // DiffPanel modal opened from the Worktrees view stays the mobile diff path.
-  files: { placement: 'desktop-only', icon: '📁', labelKey: 'nav.files' },
-  git: { placement: 'desktop-only', icon: '±', labelKey: 'nav.git' },
-  worktrees: { placement: 'more', icon: '⎇', labelKey: 'nav.worktrees' },
-  journal: { placement: 'more', icon: '📜', labelKey: 'nav.journal' },
+  files: { placement: 'desktop-only', labelKey: 'nav.files' },
+  git: { placement: 'desktop-only', labelKey: 'nav.git' },
+  worktrees: { placement: 'more', labelKey: 'nav.worktrees' },
+  journal: { placement: 'more', labelKey: 'nav.journal' },
   // <webview>, Electron-only (EXPLORATION §3): absent from the mobile client.
-  browser: { placement: 'desktop-only', icon: '🌐', labelKey: 'nav.browser' },
+  browser: { placement: 'desktop-only', labelKey: 'nav.browser' },
   // Canvas authoring is desktop-first; the mobile thread mode is deferred (M3e).
-  graph: { placement: 'desktop-only', icon: '🕸', labelKey: 'nav.graph' }
+  graph: { placement: 'desktop-only', labelKey: 'nav.graph' }
 }
 
 export const MOBILE_TABS: DeckView[] = (Object.keys(MOBILE_VIEWS) as DeckView[]).filter(
