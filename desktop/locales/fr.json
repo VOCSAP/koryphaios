@@ -541,5 +541,6 @@
   "usage.notConnected": "CLI installé, mais non connecté.",
   "usage.error": "Indisponible",
   "usage.stale": "Dernières valeurs connues (instantané local de session).",
-  "usage.updated": "Actualisé à {time}"
+  "usage.updated": "Actualisé à {time}",
+  "usage.remainingTip": "{pct}% de quota session restant"
 }

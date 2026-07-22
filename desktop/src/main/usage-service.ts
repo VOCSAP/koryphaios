@@ -675,6 +675,19 @@ async function readAntigravityUsage(deps: Required<UsageDeps>): Promise<UsagePro
 }
 
 // ---------------------------------------------------------------------------
+// Used-provider tracking (amphora gauge): the rail icon's fill level averages
+// the REMAINING session quota of the providers this app run actually drew
+// down — inference engines mark their targets here, and live Claude tiles are
+// folded in at snapshot time (liveClis dep). Session-lifetime, in-memory.
+
+const usedProviders = new Set<UsageProviderId>()
+
+/** Record that an inference ran through `cli` (unknown/local clis ignored). */
+export function markProviderUsed(cli: string): void {
+  if (cli === 'claude' || cli === 'codex' || cli === 'antigravity') usedProviders.add(cli)
+}
+
+// ---------------------------------------------------------------------------
 // Orchestration: detection, cache, snapshot
 
 export interface UsageDeps {
@@ -690,6 +703,8 @@ export interface UsageDeps {
   claudeUa?: (shell: string) => Promise<string>
   report?: (msg: string, err?: unknown) => void
   now?: () => number
+  /** CLIs of the LIVE session tiles (today always 'claude'), for the gauge. */
+  liveClis?: () => string[]
 }
 
 /** Binaries probed per provider ('agy' is the Antigravity CLI). */
@@ -731,8 +746,18 @@ function fill(deps: UsageDeps): Required<UsageDeps> {
     runCodexRpc: deps.runCodexRpc ?? runCodexAppServer,
     claudeUa: deps.claudeUa ?? claudeUserAgent,
     report: deps.report ?? ((msg, err) => reportError('usage', msg, err)),
-    now: deps.now ?? Date.now
+    now: deps.now ?? Date.now,
+    liveClis: deps.liveClis ?? (() => [])
   }
+}
+
+/** Union of the marked inference targets and the live tiles' CLIs. */
+function currentUsedProviders(deps: Required<UsageDeps>): UsageProviderId[] {
+  const all = new Set(usedProviders)
+  for (const cli of deps.liveClis()) {
+    if (cli === 'claude' || cli === 'codex' || cli === 'antigravity') all.add(cli)
+  }
+  return [...all]
 }
 
 /**
@@ -747,7 +772,8 @@ export async function readUsage(
   const deps = fill(rawDeps)
   const now = deps.now()
   if (!opts.refresh && snapshotCache && now - snapshotCache.at < CACHE_MS) {
-    return snapshotCache.snapshot
+    // usedProviders may have grown since the cached fetch — recompose it.
+    return { ...snapshotCache.snapshot, usedProviders: currentUsedProviders(deps) }
   }
   if (!binCache || opts.refresh) {
     const results = await Promise.all(USAGE_BINS.map(({ bin }) => deps.probe(bin, deps.shell)))
@@ -766,7 +792,11 @@ export async function readUsage(
   }
   const active = USAGE_BINS.filter(({ provider }) => binCache?.[provider])
   const providers = await Promise.all(active.map(({ provider }) => readers[provider](deps)))
-  const snapshot: UsageSnapshot = { fetchedAt: deps.now(), providers }
+  const snapshot: UsageSnapshot = {
+    fetchedAt: deps.now(),
+    providers,
+    usedProviders: currentUsedProviders(deps)
+  }
   snapshotCache = { at: now, snapshot }
   return snapshot
 }
@@ -778,4 +808,5 @@ export function resetUsageCaches(): void {
   claudeUaCache = null
   antigravityRefreshed = null
   antigravitySecretCache = undefined
+  usedProviders.clear()
 }

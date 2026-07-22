@@ -15,7 +15,7 @@ The vertical rail switches the main view:
 | Graph | Branching multi-model chats (see [graph.md](graph.md)) |
 | ⎇ Worktrees | Every git worktree of the repo with status and attached session |
 | 📜 Journal | The window's activity journal |
-| Usage | Foreground modal with the subscription quota gauges of the detected CLIs (Claude Code / Codex / Antigravity): session + weekly windows, % used, reset time, Claude extra-usage credits. Providers whose CLI is absent are hidden; a provider that is installed but signed out shows a "not connected" note. Data is cached 3 min (↻ bypasses); Codex falls back to its last local session snapshot when the app-server is unreachable |
+| Usage | The amphora's liquid level shows the mean remaining session quota of the providers this run uses (green / amber / red tone). Clicking opens a foreground modal with the subscription quota gauges of the detected CLIs (Claude Code / Codex / Antigravity): session + weekly windows, % used, reset time, Claude extra-usage credits. Providers whose CLI is absent are hidden; a provider that is installed but signed out shows a "not connected" note. Data is cached 3 min (↻ bypasses); Codex falls back to its last local session snapshot when the app-server is unreachable |
 | ✉ Inbox | The operator inbox panel (unread bubble on the rail) |
 
 ## Sidebar (left, Agents view)

@@ -20,7 +20,8 @@ import { GLYPH_BADGES } from './icons'
 const PROVIDER_ICONS: Record<string, string> = {
   anthropic: '✴',
   openai: '⬡',
-  gemini: '✦'
+  gemini: '✦',
+  antigravity: '△'
 }
 
 /** Icon for a provider section (locals get a house). */

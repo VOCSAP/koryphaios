@@ -52,6 +52,7 @@ HTTP body, never the command line (D5).
 | claude | `-p` + `--strict-mcp-config --disallowedTools "<HELP_DISALLOWED_TOOLS>"` (Read/Grep/Glob stay) |
 | codex | `codex exec --sandbox read-only -m <model> -` (stdin via `-`) |
 | gemini | `--approval-mode plan` (documented read-only mode), pure stdin, `-m <model>` |
+| antigravity | `agy -p "<read-this-file instruction>" --add-dir <context dir> --model "<display name>" --print-timeout 4m` — no sandbox flag documented; context by FILE via the instruction (stdin behaviour unverified); model names carry spaces/effort suffix (`sanitizeAntigravityModel`, double-quoted). MUST run under a PTY (`pty-run.ts` → `runTty` dep): `agy -p` hangs in non-TTY (agy#318) and drops piped stdout (agy#76) |
 | local | OpenAI-compat `/v1/chat/completions` — no tools at all (can't ground in project files; say so in help texts) |
 
 ## Add a model-choice setting

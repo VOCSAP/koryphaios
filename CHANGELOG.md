@@ -19,6 +19,23 @@ main-side cache (the Anthropic endpoint 429s aggressive polling). Tokens never
 cross the IPC boundary. Chain: `usage-service.ts` → `usage:read` (tier 0) →
 `UsageLimitsModal.tsx`; gauges amber past 70 %, red past 90 %.
 
+Second wave of the lot: (1) **Antigravity as a model provider** — `agy` joins
+the frontier catalog (GraphCli `antigravity`, provider id `antigravity`,
+sigil `△`), executed headless through a "read this context file" instruction
++ `--add-dir` (no system/stdin flag documented) with `--print-timeout`, and
+ALWAYS under a PTY (`pty-run.ts`, injected as `runTty`) because `agy -p`
+hangs without a TTY (agy#318) and drops piped stdout (agy#76); model names
+ship with their effort suffix ("Gemini 3 Pro (High)") through the dedicated
+`sanitizeAntigravityModel` (double-quoted, spaces legal). Gemini CLI stays
+wired unchanged for org accounts. (2) **The amphora becomes a gauge** — its
+liquid level is the mean REMAINING session quota of the providers the app
+run actually draws down (live tiles + marked inference targets,
+`markProviderUsed` / `usedProviders` in the snapshot, math in
+`shared/usage.ts`), polled every 5 min renderer-side through the 3-min main
+cache; tone green / amber (≤30 %) / red (≤10 %) via `.usage-*` classes,
+sanctioned as the one data-fill exception to the stroke-only glyph rule
+(DESIGN.md §5).
+
 ## desktop (experimental) — Greek glyph icon set, attention glow, button-style pass
 
 Full iconography overhaul born from the CSS audit (DESIGN.md): the emoji rails

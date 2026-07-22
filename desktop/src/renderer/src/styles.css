@@ -5059,3 +5059,18 @@ svg.glyph {
   color: var(--fg-dim);
   text-align: right;
 }
+
+/* Amphora tones (nav rail): colour = state — green plenty, amber low,
+   red nearly dry. Same greens/ambers as the status dots (DESIGN.md §2);
+   appended after the rail rules so a tone wins over is-active's accent. */
+.nav-rail-item.usage-ok .nav-rail-icon {
+  color: #3ec46d;
+}
+
+.nav-rail-item.usage-warn .nav-rail-icon {
+  color: #e0b341;
+}
+
+.nav-rail-item.usage-hot .nav-rail-icon {
+  color: var(--danger);
+}

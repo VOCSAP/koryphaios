@@ -276,3 +276,64 @@ test("readUsage: codex falls back to the newest session snapshot (stale)", async
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Amphora gauge (shared/usage.ts) + used-provider tracking
+
+test("sessionRemainingFraction averages the used providers' session windows", async () => {
+  const { sessionRemainingFraction, usageTone } = await import("../desktop/src/shared/usage.ts");
+  const report = (provider: string, pcts: number[], status = "ok"): unknown => ({
+    provider,
+    status,
+    plan: null,
+    windows: pcts.map((p) => ({ key: "session", label: null, usedPercent: p, resetsAt: null })),
+    credits: null,
+    stale: false,
+    error: null
+  });
+  const snap = (providers: unknown[], used: string[]): never =>
+    ({ fetchedAt: 0, providers, usedProviders: used }) as never;
+
+  // Only claude used -> its remaining alone (100-40 = 60%).
+  expect(sessionRemainingFraction(snap([report("claude", [40]), report("codex", [80])], ["claude"]))).toBe(0.6);
+  // claude+codex -> mean of 60% and 20%.
+  expect(
+    sessionRemainingFraction(snap([report("claude", [40]), report("codex", [80])], ["claude", "codex"]))
+  ).toBeCloseTo(0.4);
+  // Nothing marked used -> fall back to every reporting provider.
+  expect(sessionRemainingFraction(snap([report("claude", [50])], []))).toBe(0.5);
+  // Antigravity's two session pools average within the provider first.
+  expect(sessionRemainingFraction(snap([report("antigravity", [20, 60])], ["antigravity"]))).toBeCloseTo(0.6);
+  // Errored providers never count.
+  expect(sessionRemainingFraction(snap([report("claude", [40], "error")], ["claude"]))).toBeNull();
+  expect(usageTone(0.5)).toBe("ok");
+  expect(usageTone(0.2)).toBe("warn");
+  expect(usageTone(0.05)).toBe("hot");
+});
+
+test("readUsage reports usedProviders (marked targets + live tiles)", async () => {
+  const { markProviderUsed } = await import("../desktop/src/main/usage-service.ts");
+  markProviderUsed("codex");
+  markProviderUsed("local"); // ignored: no subscription meter
+  const home = mkdtempSync(join(tmpdir(), "usage-"));
+  try {
+    const snap = await readUsage(
+      {
+        shell: "/bin/bash",
+        home,
+        env: {},
+        probe: async () => false, // no CLI detected: providers list stays empty
+        runCodexRpc: async () => ({}),
+        fetchImpl: (async () => new Response("{}")) as typeof fetch,
+        report: () => {},
+        now: () => 1_000_000,
+        liveClis: () => ["claude"]
+      },
+      {}
+    );
+    expect(snap.providers).toEqual([]);
+    expect([...snap.usedProviders].sort()).toEqual(["claude", "codex"]);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

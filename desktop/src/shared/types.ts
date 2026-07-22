@@ -729,6 +729,12 @@ export interface UsageProviderReport {
 export interface UsageSnapshot {
   fetchedAt: number
   providers: UsageProviderReport[]
+  /**
+   * Providers this app run actually drew down (live tiles + inference
+   * targets) — the amphora gauge averages ITS remaining session quota over
+   * these (falling back to every reporting provider when empty).
+   */
+  usedProviders: UsageProviderId[]
 }
 
 export interface DeckApi {

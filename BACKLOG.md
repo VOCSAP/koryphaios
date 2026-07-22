@@ -128,12 +128,13 @@ l'opérateur sur une machine avec affichage.
 
 ### 3.1bis Limites d'usage (lot livré — résiduel)
 
-- [ ] **Antigravity comme provider de MODÈLES** (pickers/graph/agents) : la
-      modale des limites couvre déjà le quota Antigravity, mais `agy` n'est
-      branché nulle part comme CLI d'inférence (catalogue, adapters headless).
-      Attention avant de coder : `agy -p` a des bugs ouverts en non-TTY (hang
-      issue #318, stdout muet issue #76) — passer par un PTY + `--add-dir` +
-      `--print-timeout`.
+- [x] **Antigravity comme provider de MODÈLES** — livré (2e vague du lot) :
+      catalogue + adapter `agy -p` sous PTY (`pty-run.ts`), cf. CHANGELOG.
+      Résiduel à VALIDER sur un vrai poste : (a) les ids de modèles exacts via
+      `agy models` (liste curatée depuis la reco, non vérifiée terrain) ;
+      (b) que la lecture du fichier de contexte passe sans approbation en
+      mode `-p` (sinon : timeout visible dans le nœud) ; (c) le rendu PTY
+      (artefacts ANSI/CR nettoyés par `pty-run.ts`).
 - [ ] **Windows : lecture du keyring Antigravity** non implémentée (Credential
       Manager sans lecture scriptable) — le provider s'affiche « non
       connecté » sous Windows. Piste : addon natif ou `powershell` + DPAPI.
@@ -144,9 +145,11 @@ l'opérateur sur une machine avec affichage.
       (binaire obfusqué/rotation Google), le refresh se désactive et le token
       stocké est utilisé tel quel — vérifier après chaque mise à jour majeure
       d'Antigravity.
-- [ ] **Badge d'alerte sur le bouton amphore** (limite > 90 %) : demanderait un
-      polling de fond — différé (décision opérateur : fetch à l'ouverture
-      seulement, l'endpoint Anthropic 429 vite).
+- [x] **Badge d'alerte sur le bouton amphore** : remplacé (2e vague, demande
+      opérateur) par la jauge amphore — niveau = quota session restant moyen
+      des providers utilisés, teinte verte/ambre/rouge, poll 5 min à travers
+      le cache 3 min. À VALIDER visuellement (lisibilité du niveau à 20 px,
+      deux thèmes).
 - [ ] **Gemini CLI (comptes orga Code Assist)** : exclu par décision opérateur
       (compte perso migré Antigravity). Si un besoin orga apparaît, le provider
       `retrieveUserQuota` de gemini-cli se greffe dans `usage-service.ts` sur

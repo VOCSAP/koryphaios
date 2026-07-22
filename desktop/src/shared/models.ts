@@ -19,13 +19,14 @@
 import { GRAPH_CLIS, type GraphCli, type ModelTarget } from './graph'
 
 /** Frontier provider ids double as favorite-key prefixes: keep them stable. */
-export type FrontierProviderId = 'anthropic' | 'openai' | 'gemini'
+export type FrontierProviderId = 'anthropic' | 'openai' | 'gemini' | 'antigravity'
 
 /** Favorite-key prefix of each frontier CLI (locals key on their config id). */
 export const FRONTIER_ID_BY_CLI: Record<Exclude<GraphCli, 'local'>, FrontierProviderId> = {
   claude: 'anthropic',
   codex: 'openai',
-  gemini: 'gemini'
+  gemini: 'gemini',
+  antigravity: 'antigravity'
 }
 
 export interface ModelEntry {
@@ -117,10 +118,25 @@ export const FRONTIER_CATALOG: Record<
       { id: 'gemini-3-flash', label: 'Gemini 3 Flash' },
       { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' }
     ]
+  },
+  // Antigravity (`agy`): Google's successor to Gemini CLI for individual
+  // accounts. `--model` takes the DISPLAY name with the effort suffix baked in
+  // ("Gemini 3 Pro (High)") — spaces/parens are legal here, the adapter quotes
+  // them. List curated from the 2026-07 recon; `agy models` on a real machine
+  // is the source of truth when bumping (BACKLOG §3.1bis).
+  antigravity: {
+    name: 'Antigravity',
+    cli: 'antigravity',
+    models: [
+      { id: '', label: 'Antigravity default' },
+      { id: 'Gemini 3 Pro (High)', label: 'Gemini 3 Pro (High)' },
+      { id: 'Gemini 3.5 Flash (High)', label: 'Gemini 3.5 Flash (High)' },
+      { id: 'Claude Opus 4.6 (Thinking)', label: 'Claude Opus 4.6 (Thinking)' }
+    ]
   }
 }
 
-export const FRONTIER_IDS: FrontierProviderId[] = ['anthropic', 'openai', 'gemini']
+export const FRONTIER_IDS: FrontierProviderId[] = ['anthropic', 'openai', 'gemini', 'antigravity']
 
 // ---------------------------------------------------------------------------
 // Favorite keys: `${providerId}:${modelId}` (modelId may itself contain ':',

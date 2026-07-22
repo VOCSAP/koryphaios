@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
-import { GLYPHS } from './icons'
+import { AmphoraGauge, GLYPHS } from './icons'
+import { sessionRemainingFraction, usageTone } from '@shared/usage'
 import type { DeckView } from '@shared/types'
 
 // Vertical navigation rail (VS Code activity-bar style), left of everything.
@@ -21,6 +22,13 @@ const VIEWS: { id: DeckView; key: string }[] = [
 
 /** Poll cadence of the ± badge (uncommitted-file count, PLAN GX9). */
 const GIT_BADGE_POLL_MS = 30_000
+
+/**
+ * Poll cadence of the amphora gauge. Slower than the main-side 3-min cache on
+ * purpose: every tick refetches for real, and the Anthropic usage endpoint
+ * rate-limits sub-3-min polling.
+ */
+const USAGE_POLL_MS = 5 * 60_000
 
 export function NavRail(): React.JSX.Element {
   const t = useT()
@@ -66,6 +74,30 @@ export function NavRail(): React.JSX.Element {
   const remote = useDeck((s) => s.remote)
   const usageOpen = useDeck((s) => s.usageOpen)
   const openUsage = useDeck((s) => s.openUsage)
+
+  // Amphora gauge: remaining session quota averaged over the providers this
+  // run draws down (shared/usage.ts). Decorative and best-effort like the git
+  // badge: a failed poll falls back to the static glyph, the modal surfaces
+  // its own errors when opened.
+  const [usageRemaining, setUsageRemaining] = useState<number | null>(null)
+  useEffect(() => {
+    let stop = false
+    const tick = async (): Promise<void> => {
+      try {
+        const snap = await window.api.usageRead(false)
+        if (!stop) setUsageRemaining(sessionRemainingFraction(snap))
+      } catch {
+        if (!stop) setUsageRemaining(null)
+      }
+    }
+    void tick()
+    const timer = setInterval(() => void tick(), USAGE_POLL_MS)
+    return () => {
+      stop = true
+      clearInterval(timer)
+    }
+  }, [])
+  const tone = usageRemaining === null ? null : usageTone(usageRemaining)
   const companionOpen = useDeck((s) => s.companionOpen)
   const openCompanion = useDeck((s) => s.openCompanion)
   const companionRunning = useDeck((s) => s.companionRunning)
@@ -94,13 +126,22 @@ export function NavRail(): React.JSX.Element {
         </button>
       ))}
       <div className="nav-rail-spacer" />
-      {/* Usage limits (quota gauges of the detected CLIs): overlay modal. */}
+      {/* Usage limits (quota gauges of the detected CLIs): overlay modal.
+          The amphora's liquid level = mean remaining session quota. */}
       <button
-        className={`nav-rail-item${usageOpen ? ' is-active' : ''}`}
-        title={t('nav.usage')}
+        className={`nav-rail-item${usageOpen ? ' is-active' : ''}${tone ? ` usage-${tone}` : ''}`}
+        title={
+          usageRemaining === null
+            ? t('nav.usage')
+            : `${t('nav.usage')} · ${t('usage.remainingTip', {
+                pct: `${Math.round(usageRemaining * 100)}`
+              })}`
+        }
         onClick={() => openUsage(!usageOpen)}
       >
-        <span className="nav-rail-icon">{GLYPHS.usage}</span>
+        <span className="nav-rail-icon">
+          <AmphoraGauge fraction={usageRemaining} />
+        </span>
         <span className="nav-rail-label">{t('nav.usage')}</span>
       </button>
       {!remote && (

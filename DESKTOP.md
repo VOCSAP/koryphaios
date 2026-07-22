@@ -35,8 +35,11 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   helpers (help, digest, wand — `utility-inference.ts`) target any catalog
   model (`config.helpTarget` / `config.wandTarget`) and run read-only per
   CLI: `claude -p --strict-mcp-config --disallowedTools` (Read/Grep/Glob
-  stay), `codex exec --sandbox read-only`, `gemini --approval-mode plan`;
-  local endpoints are pure chat (no tools).
+  stay), `codex exec --sandbox read-only`, `gemini --approval-mode plan`,
+  `agy -p` (Antigravity — context via a "read this file" instruction +
+  `--add-dir`, `--print-timeout` bound, run under a PTY via `pty-run.ts`
+  because agy misbehaves without a TTY); local endpoints are pure chat
+  (no tools).
 - **Graph chat (🕸 rail view)**: per-project chat graphs where every exchange
   is a node and the graph is the source of truth — each assistant node is ONE
   stateless headless invocation whose context is recompiled from its
@@ -94,14 +97,19 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
 - **Unified model picker** (`ModelPicker.tsx`, `shared/models.ts`,
   `model-registry.ts`): provider accordion + star-pinned favorites, shared by
   the graph fan-out and the agents' create menu. Frontier providers
-  (Anthropic/OpenAI/Gemini) appear only when their CLI is detected
+  (Anthropic/OpenAI/Gemini/Antigravity — bins `claude`/`codex`/`gemini`/`agy`)
+  appear only when their CLI is detected
   (login-shell probe, cached); their model lists are curated in code
   (`FRONTIER_CATALOG` is the one constant to bump). Local OpenAI-compatible
   endpoints (Ollama, LiteLLM…) are configured in Settings > Models and
   discovered dynamically (`/v1/models`, `/api/tags` fallback); their API keys
   are encrypted at rest via safeStorage (`provider-secrets.ts` — the renderer
   only ever sees a `hasKey` marker).
-- **Usage limits (amphora rail button)**: a foreground modal
+- **Usage limits (amphora rail button)**: the amphora's liquid level IS the
+  mean remaining session (5 h) quota of the providers this run draws down —
+  live tiles + inference targets marked via `markProviderUsed`, math in
+  `shared/usage.ts`, 5-min renderer poll — and the glyph's tone shifts green /
+  amber (≤30 % left) / red (≤10 %). Clicking opens a foreground modal
   (`UsageLimitsModal.tsx`, IPC `usage:read`, `main/usage-service.ts`) stacking
   the subscription quota gauges of the DETECTED frontier CLIs — Claude Code
   (`api.anthropic.com/api/oauth/usage` with the token from

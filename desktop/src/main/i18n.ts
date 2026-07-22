@@ -657,7 +657,8 @@ export const EN_DEFAULTS: Record<string, string> = {
   'usage.notConnected': 'CLI installed, but not signed in.',
   'usage.error': 'Unavailable',
   'usage.stale': 'Last known values (local session snapshot).',
-  'usage.updated': 'Updated at {time}'
+  'usage.updated': 'Updated at {time}',
+  'usage.remainingTip': '{pct}% session quota remaining'
 }
 
 /**
