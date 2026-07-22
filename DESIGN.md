@@ -135,6 +135,16 @@ hand drew it):
    (`Record<GlyphName, …>`: adding a `DeckView` without a glyph is a compile
    error).
 
+**Action glyphs** (`GLYPH_ACTIONS`): generic UI actions (close, edit, trash,
+refresh, search, copy, plus/minus, fit, back/forward, camera, target, code,
+external…) share the same stroke language but stay universal shapes — the
+mythology is reserved for destinations (rail `GLYPHS`) and identity moments
+(the snippets thunderbolt). Sizing: `svg.glyph` renders at **1em**, so a glyph
+inherits its host button's font-size exactly like the text character it
+replaced — set the button's `font-size`, never the SVG's. Never leave a raw
+character (`✕`, `⟳`, emoji) in a button: pick from `GLYPH_ACTIONS` or add one
+following the rules above.
+
 **Attention glow** ("fantasy glyph"): a rail entry with `.is-glowing` pulses
 its glyph — gold halo `var(--glow)` + a subtle accent-blue inner sheen
 (`glyph-glow` keyframes; static fallback under `prefers-reduced-motion`).

@@ -32,6 +32,7 @@ import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import type { ElementPick, SessionRuntime, WindowSource } from '@shared/types'
 import type { WebviewIpcMessageEvent, WebviewNavigateEvent, WebviewTag } from '../webview-types'
+import { GLYPHS, GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 
@@ -607,7 +608,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                   setView('agents')
                 }}
               >
-                🖥
+                {GLYPH_ACTIONS.screen}
               </button>
               <button
                 type="button"
@@ -615,7 +616,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                 title={t('browser.dockDetach')}
                 onClick={() => setBrowserPaired(null)}
               >
-                ✕
+                {GLYPH_ACTIONS.close}
               </button>
             </div>
             <DockTerminal session={paired} active={active} />
@@ -631,7 +632,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
             title={t('browser.modeWeb')}
             onClick={() => switchMode('web')}
           >
-            🌐
+            {GLYPHS.browser}
           </button>
           <button
             type="button"
@@ -639,7 +640,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
             title={t('browser.modeWindow')}
             onClick={() => switchMode('window')}
           >
-            🪟
+            {GLYPH_ACTIONS.window}
           </button>
           {mode === 'web' && (
             <>
@@ -650,7 +651,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                 disabled={!canBack}
                 onClick={() => webviewRef.current?.goBack()}
               >
-                ←
+                {GLYPH_ACTIONS.back}
               </button>
               <button
                 type="button"
@@ -659,7 +660,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                 disabled={!canFwd}
                 onClick={() => webviewRef.current?.goForward()}
               >
-                →
+                {GLYPH_ACTIONS.forward}
               </button>
               <button
                 type="button"
@@ -672,7 +673,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                   else wv.reload()
                 }}
               >
-                ⟳
+                {GLYPH_ACTIONS.refresh}
               </button>
               <input
                 className="browser-url"
@@ -706,7 +707,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                 title={t('browser.pick')}
                 onClick={togglePick}
               >
-                ⌖
+                {GLYPH_ACTIONS.target}
               </button>
             </>
           )}
@@ -734,7 +735,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                   if (windowId) void captureShot(windowId)
                 }}
               >
-                ⟳
+                {GLYPH_ACTIONS.refresh}
               </button>
             </>
           )}
@@ -745,7 +746,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
             disabled={mode === 'window' && !shot}
             onClick={toggleDraw}
           >
-            ✏
+            {GLYPH_ACTIONS.edit}
           </button>
           {drawing && (
             <>
@@ -756,7 +757,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                 disabled={sendingDraw}
                 onClick={() => void sendAnnotation()}
               >
-                📸
+                {GLYPH_ACTIONS.camera}
               </button>
               <button
                 type="button"
@@ -764,7 +765,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                 title={t('browser.drawClear')}
                 onClick={clearDraw}
               >
-                ⌫
+                {GLYPH_ACTIONS.erase}
               </button>
             </>
           )}
@@ -776,7 +777,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                 title={t('browser.devtools')}
                 onClick={() => webviewRef.current?.openDevTools()}
               >
-                🔧
+                {GLYPH_ACTIONS.code}
               </button>
               <button
                 type="button"
@@ -787,7 +788,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                   if (url) window.open(url)
                 }}
               >
-                ↗
+                {GLYPH_ACTIONS.external}
               </button>
             </>
           )}

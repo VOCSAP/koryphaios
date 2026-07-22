@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { RoadmapItem, RoadmapPriority, RoadmapStatus, StopResult } from '@shared/types'
+import { GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -324,7 +325,7 @@ export function RoadmapList(): React.JSX.Element {
             </button>
           ))}
           <button className="mrm-basket-clear" onClick={() => setBasket([])}>
-            ✕
+            {GLYPH_ACTIONS.close}
           </button>
         </div>
       )}
@@ -378,7 +379,7 @@ export function RoadmapList(): React.JSX.Element {
               setSheetItem(null)
             }}
           >
-            ✎ {t('roadmap.menuEdit')}
+            <span className="msheet-icon">{GLYPH_ACTIONS.edit}</span> {t('roadmap.menuEdit')}
           </button>
           <button
             className="msheet-item"

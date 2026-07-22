@@ -1,6 +1,7 @@
 import { useEffect, useMemo } from 'react'
 import type { RoadmapItem, RoadmapKind } from '@shared/types'
 import { useT, type TFn } from '../i18n'
+import { GLYPH_ACTIONS } from './icons'
 import { parseMarkdown, type BlockToken, type InlineToken } from '../markdown'
 
 // Roadmap item detail modal (PLAN K5): the Trello-style foreground card opened
@@ -186,10 +187,10 @@ export function RoadmapItemModal({
             disabled={stoppable}
             onClick={onEdit}
           >
-            ✏️
+            {GLYPH_ACTIONS.edit}
           </button>
           <button className="icon-btn" title={t('common.close')} onClick={onClose}>
-            ✕
+            {GLYPH_ACTIONS.close}
           </button>
         </header>
 

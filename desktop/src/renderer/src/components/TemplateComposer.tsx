@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { SessionTemplate, TemplateSession } from '@shared/template'
 import { TEMPLATE_TYPE, TEMPLATE_VERSION } from '@shared/template'
 import type { ModelOption } from '@shared/types'
+import { GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
 import { useT, type TFn } from '../i18n'
 
@@ -61,7 +62,7 @@ function EntryCard({
           <span>👑</span>
         </label>
         <button className="row-btn row-btn-danger tc-remove" title={t('common.delete')} onClick={onRemove}>
-          ✕
+          {GLYPH_ACTIONS.close}
         </button>
       </div>
       <div className="tc-grid">

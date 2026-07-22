@@ -3,6 +3,7 @@ import type { AppConfig, DisplayMode, LaunchPreset, ModelOption } from '@shared/
 import { targetKey, type LocalProviderConfig, type ProviderCatalog } from '@shared/models'
 import { ModelPicker } from './ModelPicker'
 import { DEFAULT_GLOW, DEFAULT_PALETTE } from '@shared/palette'
+import { GLYPH_ACTIONS } from './icons'
 import { graphId } from '@shared/graph'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
@@ -111,7 +112,7 @@ export function SettingsView(): React.JSX.Element {
       <header className="settings-head">
         <h2>{t('settings.title')}</h2>
         <button className="icon-btn" title={t('common.close')} onClick={close}>
-          ✕
+          {GLYPH_ACTIONS.close}
         </button>
       </header>
 
@@ -305,7 +306,7 @@ export function SettingsView(): React.JSX.Element {
                           )
                         }
                       >
-                        ✕
+                        {GLYPH_ACTIONS.close}
                       </button>
                     </span>
                   ))}
@@ -401,7 +402,7 @@ export function SettingsView(): React.JSX.Element {
                       void window.api.modelCatalogs(true).then(setCatalogs)
                     }}
                   >
-                    ⟳
+                    {GLYPH_ACTIONS.refresh}
                   </button>
                 </div>
                 <small>{t('settings.modelsDetectionHelp')}</small>
@@ -485,7 +486,7 @@ export function SettingsView(): React.JSX.Element {
                         title={t('common.delete')}
                         onClick={() => commitProviders(providers.filter((x) => x.id !== p.id))}
                       >
-                        🗑
+                        {GLYPH_ACTIONS.trash}
                       </button>
                     </div>
                   )

@@ -16,6 +16,7 @@ import {
 } from '@shared/graph'
 import type { ProviderCatalog } from '@shared/models'
 import { useT } from '../i18n'
+import { GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ModelPicker } from './ModelPicker'
@@ -504,7 +505,7 @@ export function GraphView(): React.JSX.Element {
                 setConfirmDeleteGraph(g.id)
               }}
             >
-              🗑
+              {GLYPH_ACTIONS.trash}
             </button>
           </div>
         ))}
@@ -599,24 +600,24 @@ export function GraphView(): React.JSX.Element {
             onClick={(e) => e.stopPropagation()}
           >
             <button className="icon-btn" title={t('graph.zoomIn')} onClick={() => zoomBy(1.2)}>
-              ＋
+              {GLYPH_ACTIONS.plus}
             </button>
             <button className="icon-btn" title={t('graph.zoomOut')} onClick={() => zoomBy(1 / 1.2)}>
-              －
+              {GLYPH_ACTIONS.minus}
             </button>
             <button className="icon-btn" title={t('graph.fitView')} onClick={() => fitView()}>
-              ⛶
+              {GLYPH_ACTIONS.fit}
             </button>
             <span className="graph-zoomctl-sep" />
             <button className="icon-btn" title={t('graph.arrange')} onClick={arrange}>
-              ⊞
+              {GLYPH_ACTIONS.grid}
             </button>
             <button
               className={`icon-btn${showTimeline ? ' is-active' : ''}`}
               title={t('graph.timeline')}
               onClick={() => setShowTimeline((v) => !v)}
             >
-              ☰
+              {GLYPH_ACTIONS.menu}
             </button>
           </div>
         )}
@@ -737,7 +738,7 @@ export function GraphView(): React.JSX.Element {
                             className="graph-chip-x"
                             onClick={() => setTargetKeys((ks) => ks.filter((x) => x !== k))}
                           >
-                            ✕
+                            {GLYPH_ACTIONS.close}
                           </button>
                         </span>
                       )

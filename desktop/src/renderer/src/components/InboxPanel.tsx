@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 
@@ -26,7 +27,7 @@ export function InboxPanel(): React.JSX.Element {
       <div className="inbox-header">
         <span className="inbox-title">{t('inbox.title')}</span>
         <button className="inbox-close" title={t('inbox.close')} onClick={() => openInbox(false)}>
-          ✕
+          {GLYPH_ACTIONS.close}
         </button>
       </div>
       {drafts.length > 0 && (

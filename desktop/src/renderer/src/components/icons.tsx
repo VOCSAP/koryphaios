@@ -20,6 +20,7 @@ import type { DeckView } from '@shared/types'
 function Svg({ children }: { children: React.ReactNode }): React.JSX.Element {
   return (
     <svg
+      className="glyph"
       viewBox="0 0 24 24"
       width="20"
       height="20"
@@ -158,9 +159,11 @@ const IconMore = (
   </Svg>
 )
 
-// ----- Action glyphs (tile-head buttons) -----
-// Same visual language as the rail set; sized down by the container's
-// `.tile-btn svg` rule, so they share the 24-grid untouched.
+// ----- Action glyphs (buttons everywhere: tile heads, panel closes, toolbars) -----
+// Same visual language as the rail set. Sizing is NOT set here: `svg.glyph`
+// renders at 1em, so each host button keeps its own metrics (rails override
+// to a fixed 20px). Generic actions stay universal shapes — the mythology is
+// reserved for destinations (rail) and identity moments (the bolt).
 
 /** Thunderbolt of Zeus: instant power — the saved-prompts (snippets) menu. */
 const IconBolt = (
@@ -192,12 +195,180 @@ const IconClose = (
   </Svg>
 )
 
-/** Tile-head action icons (TerminalTile); the browser dock reuses GLYPHS.browser. */
+/** Edit / rename / annotate (stylus). */
+const IconEdit = (
+  <Svg>
+    <path d="M4.5 19.5v-4.2L15.3 4.5l4.2 4.2L8.7 19.5H4.5Z" />
+    <path d="m13.2 6.6 4.2 4.2" />
+  </Svg>
+)
+
+/** Delete. */
+const IconTrash = (
+  <Svg>
+    <path d="M4.5 6.5h15" />
+    <path d="M9.5 6.5V5.4c0-.5.4-.9.9-.9h3.2c.5 0 .9.4.9.9v1.1" />
+    <path d="m6.5 6.5.9 12.6c0 .5.45.9 1 .9h7.2c.55 0 1-.4 1-.9l.9-12.6" />
+    <path d="M10 10v6.5M14 10v6.5" />
+  </Svg>
+)
+
+/** Reload / refresh. */
+const IconRefresh = (
+  <Svg>
+    <path d="M19.5 12a7.5 7.5 0 1 1-2.3-5.4" />
+    <path d="M17.5 3v3.8h-3.8" />
+  </Svg>
+)
+
+/** Search (magnifier). */
+const IconSearch = (
+  <Svg>
+    <circle cx="10.8" cy="10.8" r="5.8" />
+    <path d="m15 15 4.8 4.8" />
+  </Svg>
+)
+
+/** Copy / duplicate / digest-to-clipboard (two sheets). */
+const IconCopy = (
+  <Svg>
+    <rect x="4.5" y="8" width="11.5" height="11.5" rx="1.2" />
+    <path d="M8.5 5h9.5c.8 0 1.5.7 1.5 1.5V16" />
+  </Svg>
+)
+
+/** Add. */
+const IconPlus = (
+  <Svg>
+    <path d="M12 5.5v13M5.5 12h13" />
+  </Svg>
+)
+
+/** Remove / zoom out. */
+const IconMinus = (
+  <Svg>
+    <path d="M5.5 12h13" />
+  </Svg>
+)
+
+/** Fit view (frame corners). */
+const IconFit = (
+  <Svg>
+    <path d="M4.5 9V4.5H9M15 4.5h4.5V9M19.5 15v4.5H15M9 19.5H4.5V15" />
+  </Svg>
+)
+
+/** Auto-arrange (grid). */
+const IconGrid = (
+  <Svg>
+    <rect x="4.5" y="4.5" width="15" height="15" rx="1.5" />
+    <path d="M12 4.5v15M4.5 12h15" />
+  </Svg>
+)
+
+/** Timeline / list (bars). */
+const IconMenu = (
+  <Svg>
+    <path d="M4.5 7h15M4.5 12h15M4.5 17h15" />
+  </Svg>
+)
+
+/** Back / forward chevrons. */
+const IconBack = (
+  <Svg>
+    <path d="m14.5 5-7 7 7 7" />
+  </Svg>
+)
+const IconForward = (
+  <Svg>
+    <path d="m9.5 5 7 7-7 7" />
+  </Svg>
+)
+
+/** Terminal screen (dock back to the agents). */
+const IconScreen = (
+  <Svg>
+    <rect x="3.5" y="4.5" width="17" height="11.5" rx="1.5" />
+    <path d="M9.5 19.5h5M12 16v3.5" />
+  </Svg>
+)
+
+/** OS window (window-capture mode). */
+const IconWindow = (
+  <Svg>
+    <rect x="4" y="5" width="16" height="14.5" rx="1.5" />
+    <path d="M4 9h16" />
+    <Dot cx={6.3} cy={7} r={0.8} />
+    <Dot cx={8.7} cy={7} r={0.8} />
+  </Svg>
+)
+
+/** Camera (send the annotated screenshot). */
+const IconCamera = (
+  <Svg>
+    <rect x="3.5" y="7.5" width="17" height="11.5" rx="1.5" />
+    <path d="M8.5 7.5 9.8 5h4.4l1.3 2.5" />
+    <circle cx="12" cy="13" r="3" />
+  </Svg>
+)
+
+/** Element picker (crosshair). */
+const IconTarget = (
+  <Svg>
+    <circle cx="12" cy="12" r="5.5" />
+    <path d="M12 4v3M12 17v3M4 12h3M17 12h3" />
+    <Dot cx={12} cy={12} r={1.2} />
+  </Svg>
+)
+
+/** Clear drawing (backspace). */
+const IconErase = (
+  <Svg>
+    <path d="M8.5 5.5h10c.8 0 1.5.7 1.5 1.5v10c0 .8-.7 1.5-1.5 1.5h-10L3 12l5.5-6.5Z" />
+    <path d="m11 9.5 5 5m0-5-5 5" />
+  </Svg>
+)
+
+/** DevTools (code brackets). */
+const IconCode = (
+  <Svg>
+    <path d="m9 8-4 4 4 4M15 8l4 4-4 4" />
+  </Svg>
+)
+
+/** Open in the system browser (arrow out of the box). */
+const IconExternal = (
+  <Svg>
+    <path d="M19 13.5V18c0 .8-.7 1.5-1.5 1.5h-11C5.7 19.5 5 18.8 5 18V7c0-.8.7-1.5 1.5-1.5H10" />
+    <path d="M14.5 4.5h5v5M19.5 4.5 12 12" />
+  </Svg>
+)
+
+/** Action icons, keyed by intent; view destinations stay in GLYPHS. */
 export const GLYPH_ACTIONS = {
   snippets: IconBolt,
   expand: IconExpand,
   restore: IconRestore,
-  close: IconClose
+  close: IconClose,
+  edit: IconEdit,
+  trash: IconTrash,
+  refresh: IconRefresh,
+  search: IconSearch,
+  copy: IconCopy,
+  plus: IconPlus,
+  minus: IconMinus,
+  fit: IconFit,
+  grid: IconGrid,
+  menu: IconMenu,
+  back: IconBack,
+  forward: IconForward,
+  screen: IconScreen,
+  window: IconWindow,
+  camera: IconCamera,
+  target: IconTarget,
+  erase: IconErase,
+  code: IconCode,
+  external: IconExternal
 }
 
 /** Every place a rail glyph can appear: the 9 views + the two rail extras. */

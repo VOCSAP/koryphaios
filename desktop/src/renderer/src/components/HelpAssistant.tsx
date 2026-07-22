@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { HelpExchange, HelpSelection } from '@shared/types'
 import { targetLabel } from '@shared/models'
+import { GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { ContextMenu } from './ContextMenu'
@@ -125,11 +126,11 @@ export function HelpAssistant(): React.JSX.Element | null {
               disabled={busy}
               onClick={digest}
             >
-              📋
+              {GLYPH_ACTIONS.copy}
             </button>
             <span className="help-model">{targetLabel(config.helpTarget)}</span>
             <button className="icon-btn" title={t('common.close')} onClick={() => setOpen(false)}>
-              ✕
+              {GLYPH_ACTIONS.close}
             </button>
           </header>
           <div className="help-log" ref={logRef}>
@@ -153,7 +154,7 @@ export function HelpAssistant(): React.JSX.Element | null {
                 title={t('help.detachSelection')}
                 onClick={() => setSelection(null)}
               >
-                ✕
+                {GLYPH_ACTIONS.close}
               </button>
             </div>
           )}

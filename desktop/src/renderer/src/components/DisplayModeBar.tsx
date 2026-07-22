@@ -1,4 +1,5 @@
 import type { DisplayMode } from '@shared/types'
+import { GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 
@@ -63,7 +64,7 @@ export function DisplayModeBar(): React.JSX.Element {
         title={t('search.toggleTitle')}
         onClick={() => openSearch(!searchOpen)}
       >
-        🔍
+        {GLYPH_ACTIONS.search}
       </button>
       <span className="modebar-count">
         {t(sessions.length === 1 ? 'modebar.countOne' : 'modebar.countOther', {

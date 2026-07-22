@@ -763,8 +763,7 @@ body {
   color: var(--fg);
 }
 
-/* Action glyphs (icons.tsx) inside tile-head ghost buttons: sized down from
-   the shared 24-grid, block display so padding is symmetric. */
+/* Tile-head action glyphs: block so the ghost button's padding is symmetric. */
 .tile-btn svg {
   display: block;
   width: 15px;
@@ -1742,16 +1741,25 @@ code {
   line-height: 1;
 }
 
-/* Greek-glyph SVGs (icons.tsx): sized here, coloured by currentColor so the
-   item's dim/active/hover states and the glow apply with zero SVG changes. */
+/* Greek-glyph SVGs (icons.tsx): coloured by currentColor so each host's
+   dim/active/hover states and the glow apply with zero SVG changes. Sized at
+   1em — a glyph follows its button's font-size exactly like the text
+   character it replaced. Rails pin an explicit size below. */
+svg.glyph {
+  display: inline-block;
+  width: 1em;
+  height: 1em;
+  vertical-align: -0.125em;
+}
+
 .nav-rail-icon svg,
 .mnav-icon svg {
   display: block;
+  width: 20px;
+  height: 20px;
 }
 
 .msheet-icon svg {
-  display: inline-block;
-  vertical-align: -4px;
   margin-right: 6px;
 }
 

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type { DiffFile, SessionDiff } from '@shared/types'
+import { GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 
@@ -114,7 +115,7 @@ export function DiffPanel(): React.JSX.Element | null {
             {t('diff.title', { name: target.title })}
           </span>
           <button className="inbox-close" title={t('inbox.close')} onClick={() => openDiff(null)}>
-            ✕
+            {GLYPH_ACTIONS.close}
           </button>
         </div>
         <div className="diff-body">

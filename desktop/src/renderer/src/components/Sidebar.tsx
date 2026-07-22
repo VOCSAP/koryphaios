@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { SessionRuntime } from '@shared/types'
 import { moveBeside } from '@shared/reorder'
+import { GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
 import { formatClock, useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -168,7 +169,7 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
             setEditing(true)
           }}
         >
-          ✎
+          {GLYPH_ACTIONS.edit}
         </button>
       )}
       <button
@@ -180,7 +181,7 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
           setMaximized(maximizedId === session.id ? null : session.id)
         }}
       >
-        {maximizedId === session.id ? '⤡' : '⤢'}
+        {maximizedId === session.id ? GLYPH_ACTIONS.restore : GLYPH_ACTIONS.expand}
       </button>
       <button
         className="row-btn row-btn-danger"
@@ -190,7 +191,7 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
           setConfirmingDelete(true)
         }}
       >
-        ✕
+        {GLYPH_ACTIONS.close}
       </button>
       {confirmingDelete && (
         <ConfirmDialog

@@ -1,3 +1,4 @@
+import { GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 
@@ -51,7 +52,7 @@ export function KeyBar({ sessionId }: { sessionId: string | null }): React.JSX.E
           void paste()
         }}
       >
-        📋
+        {GLYPH_ACTIONS.copy}
       </button>
     </div>
   )
