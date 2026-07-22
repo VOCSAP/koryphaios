@@ -1,4 +1,4 @@
-import type { DeckView } from '@shared/types'
+import type { DeckView, RoadmapKind } from '@shared/types'
 
 // Greek-glyph icon set of the navigation rails (desktop rail + mobile tabs).
 // Hand-drawn inline SVGs — no icon font, no CDN — so the packaged app and the
@@ -344,6 +344,266 @@ const IconExternal = (
   </Svg>
 )
 
+/** Folder (browse a directory, local-snippet marker). */
+const IconFolder = (
+  <Svg>
+    <path d="M4 6.5c0-.6.4-1 1-1h4.5l2 2.5H19c.6 0 1 .4 1 1v9c0 .6-.4 1-1 1H5c-.6 0-1-.4-1-1v-11.5Z" />
+  </Svg>
+)
+
+/** Confirmation check. */
+const IconCheck = (
+  <Svg>
+    <path d="m5 12.5 4.5 4.5L19 7" />
+  </Svg>
+)
+
+/** Context wand (the rhabdos): AI-fills the roadmap context field. */
+const IconWand = (
+  <Svg>
+    <path d="M4.5 19.5 14.5 9.5" />
+    <path d="m17 3.5.9 2.6 2.6.9-2.6.9-.9 2.6-.9-2.6-2.6-.9 2.6-.9.9-2.6Z" />
+    <Dot cx={19.5} cy={12.5} r={1} />
+    <Dot cx={12} cy={4.5} r={1} />
+  </Svg>
+)
+
+// ----- Badge glyphs (semantic markers, not clickable actions) -----
+// The mythological register comes back here: these mark WHO/WHAT something
+// is (lead, judge, battle, waiting…), the identity layer of the Deck.
+
+/** Laurel crown: the team lead (the κορυφαῖος wears it). */
+const IconLaurel = (
+  <Svg>
+    <path d="M11.5 20C7 17.5 5 13 5.5 7.5" />
+    <path d="M5.5 7.5C4 7 3.2 5.7 3.2 4M6.3 12.2c-1.7.2-3-.5-3.7-1.9M8.3 16.2c-1.6.6-3 .3-4-.8" />
+    <path d="M12.5 20c4.5-2.5 6.5-7 6-12.5" />
+    <path d="M18.5 7.5c1.5-.5 2.3-1.8 2.3-3.5M17.7 12.2c1.7.2 3-.5 3.7-1.9M15.7 16.2c1.6.6 3 .3 4-.8" />
+  </Svg>
+)
+
+/** Scales of Themis: the judge node / battle verdict. */
+const IconScales = (
+  <Svg>
+    <path d="M12 5v14.5M8.5 19.5h7" />
+    <path d="M5 7h14" />
+    <Dot cx={12} cy={4.4} r={1} />
+    <path d="M5 7.2 2.8 12M5 7.2 7.2 12" />
+    <path d="M2.6 12a2.4 2.4 0 0 0 4.8 0" />
+    <path d="M19 7.2 16.8 12M19 7.2l2.2 4.8" />
+    <path d="M16.6 12a2.4 2.4 0 0 0 4.8 0" />
+  </Svg>
+)
+
+/** Crossed xiphos: battle mode (models duel, the judge decides). */
+const IconSwords = (
+  <Svg>
+    <path d="M5 4.5 19 18.5M19 4.5 5 18.5" />
+    <path d="m14.6 17.4 2.8 2.8M9.4 17.4l-2.8 2.8" />
+  </Svg>
+)
+
+/** Clepsydra (water clock): waiting — rate-limited session, queued item. */
+const IconClepsydra = (
+  <Svg>
+    <path d="M6.5 4.5h11M6.5 19.5h11" />
+    <path d="M7.3 4.5c0 3.8 3.2 5.2 4.7 7 1.5-1.8 4.7-3.2 4.7-7" />
+    <path d="M7.3 19.5c0-3.8 3.2-5.2 4.7-7 1.5 1.8 4.7 3.2 4.7 7" />
+    <Dot cx={12} cy={15.8} r={0.9} />
+  </Svg>
+)
+
+/** Head in profile: the operator's own node in the graph. */
+const IconProfile = (
+  <Svg>
+    <path d="M9.5 20v-2.6C7.4 16.2 6 14 6 11.4 6 7.5 8.7 4.5 12.4 4.5c3.5 0 6.1 2.6 6.1 6 0 1.3-.3 2.4-.9 3.5l1.2 2.2c.3.6-.1 1.3-.8 1.3h-1.5v1.5c0 .6-.4 1-1 1" />
+  </Svg>
+)
+
+/** Olympic torch, lit: the remote link is coming back. */
+const IconTorchLit = (
+  <Svg>
+    <path d="M8 10h8l-1.1 2.4c-.5 1-1.4 1.6-2.9 1.6s-2.4-.6-2.9-1.6L8 10Z" />
+    <path d="M12 14v5.5M9.5 19.5h5" />
+    <path d="M12 8.2c-2-1.4-2.2-3.5 0-5.7 2.2 2.2 2 4.3 0 5.7Z" />
+  </Svg>
+)
+
+/** Olympic torch, extinguished: the host is gone. */
+const IconTorchOut = (
+  <Svg>
+    <path d="M8 10h8l-1.1 2.4c-.5 1-1.4 1.6-2.9 1.6s-2.4-.6-2.9-1.6L8 10Z" />
+    <path d="M12 14v5.5M9.5 19.5h5" />
+    <path d="M10.5 7.5c.5-.7 2.5-.7 3-1.5" />
+  </Svg>
+)
+
+/** Padlock: a roadmap item an agent is working on. */
+const IconLock = (
+  <Svg>
+    <rect x="6.5" y="10.5" width="11" height="9" rx="1.5" />
+    <path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" />
+    <Dot cx={12} cy={15} r={1.1} />
+  </Svg>
+)
+
+/** Warning triangle. */
+const IconWarning = (
+  <Svg>
+    <path d="M10.7 5.2 3.6 17.4c-.6 1 .2 2.1 1.3 2.1h14.2c1.1 0 1.9-1.1 1.3-2.1L13.3 5.2c-.6-1-2-1-2.6 0Z" />
+    <path d="M12 9.5v4" />
+    <Dot cx={12} cy={16.4} r={0.9} />
+  </Svg>
+)
+
+/** Gear: settings. */
+const IconGear = (
+  <Svg>
+    <circle cx="12" cy="12" r="4.2" />
+    <path d="M12 4v2.4M12 17.6V20M4 12h2.4M17.6 12H20M6.3 6.3 8 8M16 16l1.7 1.7M17.7 6.3 16 8M8 16l-1.7 1.7" />
+  </Svg>
+)
+
+/** Capsa (the Roman scroll box): the saved workspaces. */
+const IconCapsa = (
+  <Svg>
+    <ellipse cx="12" cy="6.5" rx="6.5" ry="2" />
+    <path d="M5.5 6.5V17c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5V6.5" />
+    <path d="M5.5 12c0 1.4 2.9 2.5 6.5 2.5s6.5-1.1 6.5-2.5" />
+  </Svg>
+)
+
+/** Paperclip: code selection attached to the next help question. */
+const IconClip = (
+  <Svg>
+    <path d="m8.2 12.3 6-6a3 3 0 0 1 4.3 4.3l-7.5 7.4a4.6 4.6 0 0 1-6.5-6.5l7.3-7.2" />
+  </Svg>
+)
+
+/** Archive box: the archived-items tab. */
+const IconArchive = (
+  <Svg>
+    <rect x="4" y="5" width="16" height="4" rx="1" />
+    <path d="M5.5 9v9.5c0 .6.4 1 1 1h11c.6 0 1-.4 1-1V9" />
+    <path d="M10 12.5h4" />
+  </Svg>
+)
+
+/** Lift back to the surface (detach from the queue/board). */
+const IconLift = (
+  <Svg>
+    <path d="M12 16.5V5M8 8.5 12 5l4 3.5" />
+    <path d="M5.5 19.5h13" />
+  </Svg>
+)
+
+/** Favourite star, outline and pinned (the only full-fill glyph: a lit star). */
+const IconStar = (
+  <Svg>
+    <path d="m12 4.6 2.2 4.6 5 .7-3.6 3.5.9 5L12 16l-4.5 2.4.9-5-3.6-3.5 5-.7L12 4.6Z" />
+  </Svg>
+)
+const IconStarFilled = (
+  <Svg>
+    <path
+      d="m12 4.6 2.2 4.6 5 .7-3.6 3.5.9 5L12 16l-4.5 2.4.9-5-3.6-3.5 5-.7L12 4.6Z"
+      fill="currentColor"
+    />
+  </Svg>
+)
+
+/** Multi-select checkboxes (model picker fan-out). */
+const IconCheckboxOff = (
+  <Svg>
+    <rect x="5" y="5" width="14" height="14" rx="2" />
+  </Svg>
+)
+const IconCheckboxOn = (
+  <Svg>
+    <rect x="5" y="5" width="14" height="14" rx="2" />
+    <path d="m8.5 12.5 2.5 2.5 5-5.5" />
+  </Svg>
+)
+
+// ----- Roadmap kind glyphs (coloured via .kind-glyph-* classes) -----
+
+/** Feature: a four-point star (something new under the sky). */
+const IconKindFeature = (
+  <Svg>
+    <path d="m12 4 1.8 6.2L20 12l-6.2 1.8L12 20l-1.8-6.2L4 12l6.2-1.8L12 4Z" />
+  </Svg>
+)
+
+/** Bug: the scarab. */
+const IconKindBug = (
+  <Svg>
+    <ellipse cx="12" cy="13.5" rx="4.2" ry="5.5" />
+    <circle cx="12" cy="6" r="1.7" />
+    <path d="M12 8.7V19M8 11.2 5 9.7M7.8 14.5H4.6M8 17.5l-3 1.5M16 11.2l3-1.5M16.2 14.5h3.2M16 17.5l3 1.5" />
+  </Svg>
+)
+
+/** Technical debt: the wall of bricks. */
+const IconKindDebt = (
+  <Svg>
+    <rect x="4" y="6" width="16" height="13" />
+    <path d="M4 10.3h16M4 14.7h16M12 6v4.3M8.5 10.3v4.4M15.5 10.3v4.4M12 14.7V19" />
+  </Svg>
+)
+
+/** Idea: the oil lamp (an ampoule would be an anachronism). */
+const IconKindIdea = (
+  <Svg>
+    <path d="M4.5 12.5h9.8c2 0 3.6-.7 4.7-2.2" />
+    <path d="M4.5 12.5c.4 3.4 2.9 5.5 6.3 5.5 2.8 0 4.9-1.4 5.8-3.7" />
+    <path d="M19 9.5c-1-.8-1.1-2.1 0-3.3 1.1 1.2 1 2.5 0 3.3Z" />
+    <Dot cx={8} cy={15} r={0.9} />
+  </Svg>
+)
+
+/** Chore: the broom. */
+const IconKindChore = (
+  <Svg>
+    <path d="M18.5 4.5l-7.6 7.6" />
+    <path d="M10.9 12.1 6 14.6c-1.5.8-2 2.3-1.3 3.8l.4.9c2 .4 3.7 0 5-1.1l3.4-3.5-2.6-2.6Z" />
+    <path d="m7.5 19-1.5-1.5M10 17.5 8.3 15.8" />
+  </Svg>
+)
+
+/**
+ * Roadmap kind marks, coloured per kind (styles.css .kind-glyph-*) so the
+ * kanban keeps its at-a-glance colour scanning despite the stroke style.
+ */
+export const GLYPH_KINDS: Record<RoadmapKind, React.JSX.Element> = {
+  feature: <span className="kind-glyph kind-glyph-feature">{IconKindFeature}</span>,
+  bug: <span className="kind-glyph kind-glyph-bug">{IconKindBug}</span>,
+  debt: <span className="kind-glyph kind-glyph-debt">{IconKindDebt}</span>,
+  idea: <span className="kind-glyph kind-glyph-idea">{IconKindIdea}</span>,
+  chore: <span className="kind-glyph kind-glyph-chore">{IconKindChore}</span>
+}
+
+/** Semantic badge glyphs (identity/state marks, not clickable actions). */
+export const GLYPH_BADGES = {
+  laurel: IconLaurel,
+  scales: IconScales,
+  swords: IconSwords,
+  clepsydra: IconClepsydra,
+  profile: IconProfile,
+  torchLit: IconTorchLit,
+  torchOut: IconTorchOut,
+  lock: IconLock,
+  warning: IconWarning,
+  gear: IconGear,
+  capsa: IconCapsa,
+  clip: IconClip,
+  archive: IconArchive,
+  lift: IconLift,
+  star: IconStar,
+  starFilled: IconStarFilled,
+  checkboxOn: IconCheckboxOn,
+  checkboxOff: IconCheckboxOff
+}
+
 /** Action icons, keyed by intent; view destinations stay in GLYPHS. */
 export const GLYPH_ACTIONS = {
   snippets: IconBolt,
@@ -368,7 +628,10 @@ export const GLYPH_ACTIONS = {
   target: IconTarget,
   erase: IconErase,
   code: IconCode,
-  external: IconExternal
+  external: IconExternal,
+  folder: IconFolder,
+  check: IconCheck,
+  wand: IconWand
 }
 
 /** Every place a rail glyph can appear: the 9 views + the two rail extras. */

@@ -1,7 +1,7 @@
 import { useEffect, useMemo } from 'react'
 import type { RoadmapItem, RoadmapKind } from '@shared/types'
 import { useT, type TFn } from '../i18n'
-import { GLYPH_ACTIONS } from './icons'
+import { GLYPH_ACTIONS, GLYPH_BADGES, GLYPH_KINDS } from './icons'
 import { parseMarkdown, type BlockToken, type InlineToken } from '../markdown'
 
 // Roadmap item detail modal (PLAN K5): the Trello-style foreground card opened
@@ -9,13 +9,8 @@ import { parseMarkdown, type BlockToken, type InlineToken } from '../markdown'
 // owned by RoadmapView. The markdown fields are agent-written, so rendering
 // goes through the token tree of markdown.ts (React escapes every text node).
 
-export const KIND_ICONS: Record<RoadmapKind, string> = {
-  feature: '✨',
-  bug: '🐞',
-  debt: '🧱',
-  idea: '💡',
-  chore: '🧹'
-}
+/** Kind marks: coloured stroke glyphs (GLYPH_KINDS, DESIGN.md §5). */
+export const KIND_ICONS: Record<RoadmapKind, React.JSX.Element> = GLYPH_KINDS
 
 function Inline({ tokens }: { tokens: InlineToken[] }): React.JSX.Element {
   return (
@@ -124,11 +119,11 @@ function badges(item: RoadmapItem, t: TFn): React.JSX.Element {
         {t('roadmap.effort')}: {t(`roadmap.level.${item.effort}`)}
       </span>
       {item.queue !== null && (
-        <span className="rm-badge rm-badge-queue">⏳ #{item.queue}</span>
+        <span className="rm-badge rm-badge-queue">{GLYPH_BADGES.clepsydra} #{item.queue}</span>
       )}
       {item.locked && (
         <span className="rm-badge rm-badge-locked" title={t('roadmap.lockedHint')}>
-          🔒 {item.locked_by}
+          {GLYPH_BADGES.lock} {item.locked_by}
         </span>
       )}
       {item.tags.map((tag) => (

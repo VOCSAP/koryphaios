@@ -336,7 +336,7 @@ export function SettingsView(): React.JSX.Element {
                     onBlur={() => set('projectDir', projectDir)}
                   />
                   <button className="icon-btn" onClick={browse} title={t('common.browse')}>
-                    📁
+                    {GLYPH_ACTIONS.folder}
                   </button>
                 </div>
                 <small>{t('settings.projectDirHelp')}</small>

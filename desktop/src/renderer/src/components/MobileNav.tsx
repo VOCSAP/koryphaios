@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { MobileSheet } from './MobileSheet'
-import { GLYPHS } from './icons'
+import { GLYPHS, GLYPH_BADGES } from './icons'
 import { MOBILE_MORE, MOBILE_TABS, MOBILE_VIEWS } from '../mobile-views'
 import type { DeckView } from '@shared/types'
 
@@ -79,7 +79,7 @@ export function MobileNav(): React.JSX.Element {
               setMoreOpen(false)
             }}
           >
-            ⚙ {t('settings.title')}
+            <span className="msheet-icon">{GLYPH_BADGES.gear}</span> {t('settings.title')}
           </button>
         </MobileSheet>
       )}

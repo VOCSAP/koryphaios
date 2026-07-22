@@ -1,5 +1,26 @@
 # Changelog
 
+## desktop (experimental) — Greek glyph icon set, attention glow, button-style pass
+
+Full iconography overhaul born from the CSS audit (DESIGN.md): the emoji rails
+become a hand-drawn Greek-glyph SVG set (VS Code activity-bar contrast,
+mythological metaphors — temple, theatre mask, labyrinth, caduceus…), extended
+to generic action icons (`GLYPH_ACTIONS`), semantic badges (`GLYPH_BADGES`:
+laurel lead, Themis scales judge, crossed xiphos battle, clepsydra waiting,
+Olympic torch for the remote link) and coloured roadmap kind marks
+(`GLYPH_KINDS`). The `.is-glowing` attention pulse gains a configurable colour
+(Settings > Appearance, `--glow`, gold default). DESIGN.md + the `deck-design`
+skill document the drawing rules; a generic `.btn` archetype closed the
+unstyled-button gaps (Reload, worktree actions, offline-banner Dismiss + red
+rail dot).
+
+### To adjust with the operator (visual pass pending)
+- **Mobile roadmap sheet actions**: provisional glyph choices — archive box
+  (🗃), up-arrow "lift" (🎈), theatre mask for "assign to an agent" (🚀).
+  Review on a real render and re-pick metaphors where they read poorly.
+- Densest glyphs to eyeball at small sizes: caduceus, theatre mask, scales,
+  oil lamp (roadmap "idea"), clepsydra.
+
 ## desktop (experimental) — Files & Git rail views (PLAN-git-explorer GX1–GX8)
 
 Two new READ-ONLY navigation-rail views born from the "VSCode git view"

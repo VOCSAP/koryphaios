@@ -1763,6 +1763,34 @@ svg.glyph {
   margin-right: 6px;
 }
 
+/* Glyph inlined in a context-menu item label, before the text. */
+.ctx-icon {
+  display: inline-block;
+}
+
+/* Roadmap kind marks (GLYPH_KINDS): stroke glyphs, but each kind keeps its
+   own colour so the kanban stays scannable at a glance. */
+.kind-glyph {
+  display: inline-block;
+  line-height: 1;
+}
+
+.kind-glyph-feature {
+  color: #4f86ff;
+}
+.kind-glyph-bug {
+  color: #e05555;
+}
+.kind-glyph-debt {
+  color: #e08a3c;
+}
+.kind-glyph-idea {
+  color: #e0b341;
+}
+.kind-glyph-chore {
+  color: #3ec46d;
+}
+
 .nav-rail-label {
   font-size: 9px;
   letter-spacing: 0.02em;

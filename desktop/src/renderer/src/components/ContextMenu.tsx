@@ -1,7 +1,8 @@
 import { useEffect } from 'react'
 
 export interface ContextMenuItem {
-  label: string
+  /** Item content: plain text or JSX (e.g. a glyph + text, DESIGN.md §5). */
+  label: React.ReactNode
   onSelect: () => void
   /** Greyed out + non-clickable when true. */
   disabled?: boolean
@@ -55,8 +56,8 @@ export function ContextMenu({
         role="menu"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        {items.map((it) => (
-          <li key={it.label} role="none">
+        {items.map((it, i) => (
+          <li key={i} role="none">
             <button
               type="button"
               role="menuitem"

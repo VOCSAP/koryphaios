@@ -7,7 +7,7 @@ import type {
   RoadmapStatus,
   StopResult
 } from '@shared/types'
-import { GLYPH_ACTIONS } from './icons'
+import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { useT, type TFn } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -147,12 +147,12 @@ function BoardCard({
         </span>
         {item.queue !== null && (
           <span className="rm-badge rm-badge-queue" title={t('roadmap.queueSection')}>
-            ⏳ #{item.queue}
+            {GLYPH_BADGES.clepsydra} #{item.queue}
           </span>
         )}
         {locked && (
           <span className="rm-badge rm-badge-locked" title={t('roadmap.lockedHint')}>
-            🔒 {item.locked_by}
+            {GLYPH_BADGES.lock} {item.locked_by}
           </span>
         )}
         {item.tags.map((tag) => (
@@ -509,7 +509,7 @@ export function RoadmapView(): React.JSX.Element {
       {queued.length > 0 && (
         <section className="rm-section rm-section-queue">
           <h3 className="rm-section-head rm-queue-head">
-            ⏳ {t('roadmap.queueSection')}
+            {GLYPH_BADGES.clepsydra} {t('roadmap.queueSection')}
             <span className="rm-count">{queued.length}</span>
             <span className="roadmap-spacer" />
             <button
@@ -721,7 +721,7 @@ export function RoadmapView(): React.JSX.Element {
                   disabled={wandBusy || !draft.title.trim()}
                   onClick={() => void wand()}
                 >
-                  {wandBusy ? '⏳' : '🪄'}
+                  {wandBusy ? GLYPH_BADGES.clepsydra : GLYPH_ACTIONS.wand}
                 </button>
               </span>
               <textarea
@@ -887,7 +887,7 @@ export function RoadmapView(): React.JSX.Element {
                 >
                   <span className="rm-assign-dot" style={{ background: s.color }} />
                   <span className="rm-assign-name">{s.name}</span>
-                  {s.lead && <span title={t('sidebar.leadTitle')}>👑</span>}
+                  {s.lead && <span title={t('sidebar.leadTitle')}>{GLYPH_BADGES.laurel}</span>}
                   <span className="rm-assign-peer">{s.peerId}</span>
                 </button>
               ))}

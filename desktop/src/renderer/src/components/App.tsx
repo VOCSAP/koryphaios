@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { sanitizeGlowColor } from '@shared/palette'
+import { GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { Sidebar } from './Sidebar'
@@ -50,12 +51,12 @@ function RemoteLinkOverlay(): React.JSX.Element | null {
     <div className="remote-overlay" role="alert">
       {remoteLink === 'connecting' ? (
         <>
-          <div className="remote-overlay-icon">📡</div>
+          <div className="remote-overlay-icon">{GLYPH_BADGES.torchLit}</div>
           <h2>{t('companion.reconnecting')}</h2>
         </>
       ) : (
         <>
-          <div className="remote-overlay-icon">🔌</div>
+          <div className="remote-overlay-icon">{GLYPH_BADGES.torchOut}</div>
           <h2>{t('companion.hostGone')}</h2>
           <p>{t('companion.hostGoneHint')}</p>
           <button className="primary" onClick={() => retryRemoteConnection()}>

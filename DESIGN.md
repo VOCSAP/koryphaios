@@ -135,6 +135,19 @@ hand drew it):
    (`Record<GlyphName, …>`: adding a `DeckView` without a glyph is a compile
    error).
 
+**Badge glyphs** (`GLYPH_BADGES`) mark identity/state, never actions: laurel
+crown = team lead, scales of Themis = judge, crossed xiphos = battle,
+clepsydra = waiting (rate-limit, queue), head profile = the operator's graph
+node, Olympic torch lit/out = remote link reconnecting/gone, plus universal
+marks (lock, warning, gear, capsa = workspaces, paperclip, archive, star,
+checkboxes). **Kind marks** (`GLYPH_KINDS`) are the roadmap types (4-point
+star, scarab, brick wall, oil lamp, broom), each tinted by a
+`.kind-glyph-*` class so the kanban keeps colour scanning. Provider sigils
+(`✴ ◆ ✦ ⌂ ◇`) stay typographic characters: abstract, monochrome, and they
+must survive string contexts (`<option>`, concatenated labels) where SVG
+cannot go — that is the rule: JSX context → glyph, string context →
+character. `ContextMenu` labels accept JSX for this reason.
+
 **Action glyphs** (`GLYPH_ACTIONS`): generic UI actions (close, edit, trash,
 refresh, search, copy, plus/minus, fit, back/forward, camera, target, code,
 external…) share the same stroke language but stay universal shapes — the

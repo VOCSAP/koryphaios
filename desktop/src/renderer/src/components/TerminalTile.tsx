@@ -202,7 +202,14 @@ export function TerminalTile({
     ...(snippets.length === 0
       ? [{ label: t('snippets.empty'), onSelect: () => undefined, disabled: true }]
       : snippets.map((s) => ({
-          label: `${s.source === 'local' ? '📁 ' : ''}${s.name}`,
+          label:
+            s.source === 'local' ? (
+              <>
+                <span className="ctx-icon">{GLYPH_ACTIONS.folder}</span> {s.name}
+              </>
+            ) : (
+              s.name
+            ),
           onSelect: () => insertSnippet(s.text)
         }))),
     { label: t('snippets.manage'), onSelect: () => setManageSnippets(true) }

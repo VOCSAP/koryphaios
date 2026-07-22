@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { RoadmapItem, RoadmapPriority, RoadmapStatus, StopResult } from '@shared/types'
-import { GLYPH_ACTIONS } from './icons'
+import { GLYPHS, GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -141,7 +141,7 @@ function RoadmapCard({
       <div className="mrm-card-head">
         <span className="mrm-kind">{KIND_ICONS[item.kind]}</span>
         <span className="mrm-title">{item.title}</span>
-        {locked && <span className="mrm-lock">🔒</span>}
+        {locked && <span className="mrm-lock">{GLYPH_BADGES.lock}</span>}
         {item.queue !== null && <span className="mrm-queue">#{item.queue}</span>}
       </div>
       <div className="mrm-card-meta">
@@ -281,7 +281,7 @@ export function RoadmapList(): React.JSX.Element {
             if (tab === 'archived') setTab('planned')
           }}
         >
-          🗃
+          {GLYPH_BADGES.archive}
         </button>
       </div>
       {error && <div className="mrm-error">{error}</div>}
@@ -364,7 +364,7 @@ export function RoadmapList(): React.JSX.Element {
               setSheetItem(null)
             }}
           >
-            🎈 {t('mobile.lift')}
+            <span className="msheet-icon">{GLYPH_BADGES.lift}</span> {t('mobile.lift')}
           </button>
           <button
             className="msheet-item"
@@ -404,7 +404,7 @@ export function RoadmapList(): React.JSX.Element {
               setSheetItem(null)
             }}
           >
-            🚀 {t('roadmap.menuAssign')}
+            <span className="msheet-icon">{GLYPHS.agents}</span> {t('roadmap.menuAssign')}
           </button>
           {isLocked(sheetItem) && (
             <button

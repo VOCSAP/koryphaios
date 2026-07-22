@@ -4,6 +4,7 @@ import type { ProviderCatalog } from '@shared/models'
 import { defaultAnnounceDraft } from '@shared/announce'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
+import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { ModelPicker } from './ModelPicker'
 
 /**
@@ -264,7 +265,7 @@ export function CreateMenu({
             }}
           />
           <span>
-            👑 {t('create.lead')}
+            {GLYPH_BADGES.laurel} {t('create.lead')}
             {hasLead && !lead ? ` — ${t('create.leadTaken')}` : ''}
           </span>
         </label>
@@ -370,7 +371,7 @@ export function CreateMenu({
                 onChange={(e) => setFolder(e.target.value || null)}
               />
               <button className="icon-btn" onClick={browse} title={t('common.browse')}>
-                📁
+                {GLYPH_ACTIONS.folder}
               </button>
             </div>
             <small>{t('create.workingFolderHelp')}</small>
