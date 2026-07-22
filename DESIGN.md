@@ -112,12 +112,22 @@ State rules (apply to every archetype):
 
 ## 5. Iconography — the Greek glyph set
 
-The navigation rails (desktop rail, mobile tabs/sheet) use a custom icon set
-in `desktop/src/renderer/src/components/icons.tsx`, NOT emoji and NOT an icon
-font. Visual language: **VS Code activity-bar contrast, Greek-glyph
-metaphors** (Κορυφαῖος, the chorus leader — temple, theatre mask, armillary
-sphere, scroll, labyrinth, constellation, olive branch, volumen, winged
-tablet, caduceus; git keeps the universal branch graph).
+**Rule zero: the UI never uses emoji.** Every icon — rail destinations, action
+buttons, badges, kind marks — is a hand-drawn SVG glyph from
+`desktop/src/renderer/src/components/icons.tsx` (no emoji, no icon font, no
+external set). Four registries cover every need; pick from them before drawing
+anything: `GLYPHS` (view destinations), `GLYPH_ACTIONS` (generic actions),
+`GLYPH_BADGES` (identity/state marks), `GLYPH_KINDS` (roadmap types). The only
+tolerated non-SVG icons are abstract typographic characters (`✴ ◆ ✦ ⌂ ◇ ⎇ ›`)
+in contexts where SVG cannot render (see the JSX/string rule below).
+
+Visual language: **VS Code activity-bar contrast, Greek-glyph metaphors**
+(Κορυφαῖος, the chorus leader — temple, theatre mask, armillary sphere,
+scroll, labyrinth, constellation, olive branch, volumen, winged tablet,
+caduceus, laurel, scales of Themis, xiphos, clepsydra, Olympic torch; git
+keeps the universal branch graph). When adding a NEW icon, propose a metaphor
+from this world first, and fall back to the universal shape only when the
+mythological reading would hurt recognition (the SCM branch-graph precedent).
 
 Rules for drawing a NEW glyph (follow them or the set stops looking like one
 hand drew it):
@@ -183,3 +193,6 @@ an inline `--glow` on `<html>` by App.tsx; `''` = theme default
 6. New rules go in `desktop/src/renderer/src/styles.css`, in the section
    commented for the component you touch (create a `/* ---------- X */`
    section if needed) — keep the file's comment style.
+7. **Never an emoji.** Any icon need goes through the glyph registries of
+   `icons.tsx` (§5) — reuse first, draw a new Greek-styled glyph second;
+   an emoji character in JSX is a bug, like a bare `<button>`.

@@ -27,13 +27,19 @@ and authoritative (extracted from the user-validated `main` styles).
    define hover (`:not(:disabled)`) and disabled (`opacity: 0.4`) states.
 5. **Both themes.** Check dark AND light `data-theme`: no hardcoded greys;
    whites only on filled semantic buttons.
-6. **Icons are Greek glyphs, not emoji.** Rail/tab icons come from
-   `desktop/src/renderer/src/components/icons.tsx` (`GLYPHS[view]`): inline
-   24-grid SVG, stroke-only `currentColor` 1.5, mythological metaphor —
-   drawing rules in DESIGN.md §5. Adding a `DeckView` without registering a
-   glyph is a compile error. The attention glow (`.is-glowing`, `--glow`,
-   `glyph-glow` keyframes) is reserved for "an agent awaits the operator"
-   semantics; its colour is the `glowColor` setting, never a hardcoded hex.
+6. **Icons are Greek glyphs — NEVER emoji, anywhere.** Every icon (view,
+   action button, badge, roadmap kind) comes from the registries of
+   `desktop/src/renderer/src/components/icons.tsx`: `GLYPHS` (destinations),
+   `GLYPH_ACTIONS` (actions), `GLYPH_BADGES` (identity/state), `GLYPH_KINDS`
+   (roadmap types) — inline 24-grid SVG, stroke-only `currentColor` 1.5,
+   mythological metaphor first (drawing rules in DESIGN.md §5). Reuse before
+   drawing; an emoji in JSX is a bug. Sole exception: string contexts
+   (`<option>`, concatenated labels) take an abstract typographic character
+   (`✴ ◆ ✦ ⌂ ⎇`) — and `ContextMenu` labels accept JSX, so menus use glyphs.
+   Adding a `DeckView` without registering a glyph is a compile error. The
+   attention glow (`.is-glowing`, `--glow`, `glyph-glow` keyframes) is
+   reserved for "an agent awaits the operator" semantics; its colour is the
+   `glowColor` setting, never a hardcoded hex.
 7. **Labels via i18n.** New user-visible text: key in `desktop/locales/en.json`
    + `fr.json` + `EN_DEFAULTS` (`desktop/src/main/i18n.ts`) — parity is
    test-enforced (`tests/i18n.test.ts`).
