@@ -106,6 +106,34 @@ l'opérateur sur une machine avec affichage.
       battle avec juge, picker (accordéon providers, favoris ★, détection
       CLIs), Settings > Modèles avec un endpoint Ollama/LiteLLM réel
       (découverte + inférence + clé chiffrée safeStorage + bouton ⊘).
+- [ ] **Lot limites d'usage + Antigravity (session 2026-07-22)** — vérifs
+      terrain, aucune n'est couverte par les tests (endpoints et binaires
+      réels inaccessibles en CI) :
+  - **Modale limites** : rendu deux thèmes ; fermeture clic extérieur / croix
+    / Échap ; états dégradés réels (« non connecté », « indisponible »,
+    valeurs « stale » Codex) ; bouton ↻ (contourne bien le cache 3 min).
+  - **Provider Claude** : appel réel de `api.anthropic.com/api/oauth/usage`
+    avec un compte connecté — les 4 blocs s'affichent (session 5 h, hebdo
+    tous modèles, hebdo par modèle : vérifier le nom réel du champ
+    `seven_day_*` renvoyé pour un plan Fable, crédits extra) ; pas de 429 au
+    poll 5 min (le User-Agent vient de `claude --version` : vérifier la
+    valeur sondée) ; token expiré + Claude Code fermé → « non connecté ».
+  - **Provider Codex** : handshake réel `codex app-server`
+    (initialize/initialized puis `account/rateLimits/read`) ; couper
+    l'app-server pour vérifier le repli fichier de session (mention stale).
+  - **Provider Antigravity (quota)** : lecture keyring réelle — macOS
+    (`security`, service `gemini` / compte `antigravity`, blob
+    go-keyring-base64) et Linux (`secret-tool`) ; extraction du
+    client_secret depuis le binaire `agy` (sinon var
+    `KORY_ANTIGRAVITY_CLIENT_SECRET`) puis refresh OAuth ; buckets réels
+    `gemini-5h/weekly` + `3p-*` (le format a déjà changé une fois côté
+    Google).
+  - **Amphore-jauge** : lisibilité du niveau à 20 px (deux thèmes), teintes
+    vert/ambre/rouge, tooltip « X% restant » ; providers « utilisés » : une
+    tuile vivante → quota Claude seul, puis un fan-out graph multi-provider
+    → la moyenne bascule.
+  - **Provider Antigravity (modèles)** : voir §3.1bis (ids `agy models`,
+    approbation lecture fichier en `-p`, rendu PTY).
 
 ---
 
