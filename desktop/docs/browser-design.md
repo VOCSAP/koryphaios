@@ -50,6 +50,24 @@ sketch + the agent's multimodal `Read` answer the "which element" question
 for native targets. The embedded web page keeps its state while in window
 mode.
 
+## Recording (REC)
+
+The toolbar's REC button records a demo-ready video — a modal first asks for
+the capture scope:
+
+- **Browser pane only** — the embedded page (at the active viewport preset if
+  one is set), for a demo of the site under development;
+- **Whole Koryphaios window** — the full Deck, for a demo of Koryphaios
+  itself (tiles, roadmap, supervisor… keep navigating: the recording follows).
+
+While recording, the REC button pulses red with an elapsed-time readout and
+the browser rail entry carries a red dot from every view. Clicking REC again
+stops and saves the clip under the app-state `recordings/` folder (MP4 when
+the runtime can mux it, WebM otherwise — both embed in a GitHub README); the
+saved path is shown in a toast. Capture is served by the main process with
+the Deck's own window only (no OS picker, no arbitrary-source access from the
+renderer); the pane crop is computed renderer-side (`shared/recording.ts`).
+
 ## Design mode inside external apps (Tauri, Electron…)
 
 Any webview-based app can join the element-picking loop **without being

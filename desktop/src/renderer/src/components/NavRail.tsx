@@ -106,6 +106,8 @@ export function NavRail(): React.JSX.Element {
   // client (EXPLORATION §3); the Compagnon button is a physical-presence
   // action, desktop window only.
   const views = remote ? VIEWS.filter((v) => v.id !== 'browser') : VIEWS
+  // REC in progress: red dot on the browser entry, whatever view is active.
+  const recording = useDeck((s) => s.recordingSince) !== null
 
   return (
     <nav className="nav-rail">
@@ -120,6 +122,9 @@ export function NavRail(): React.JSX.Element {
             {GLYPHS[v.id]}
             {v.id === 'git' && gitDirty > 0 && (
               <span className="nav-rail-badge">{gitDirty > 99 ? '99+' : gitDirty}</span>
+            )}
+            {v.id === 'browser' && recording && (
+              <span className="nav-rail-rec-dot" title={t('browser.recordStop')} />
             )}
           </span>
           <span className="nav-rail-label">{t(v.key)}</span>

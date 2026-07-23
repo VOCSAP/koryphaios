@@ -367,6 +367,17 @@ export const EN_DEFAULTS: Record<string, string> = {
     'Pick an OS window to mirror it here — then annotate it with ✏ and send the capture to the docked agent with 📸.',
   'browser.windowDrawPrompt':
     'I annotated a screenshot of the window "{title}": read the image file {path} to see the highlighted areas. ',
+  'browser.record': 'Record a video (browser pane or whole window)',
+  'browser.recordStop': 'Stop the recording and save the video',
+  'browser.recordTitle': 'Record a video',
+  'browser.recordHint':
+    'Captures a demo-ready video (MP4/WebM). The file path is shown when you stop the recording with the same button.',
+  'browser.recordScopeBrowser': 'Browser pane only (the embedded page)',
+  'browser.recordScopeWindow': 'Whole Koryphaios window',
+  'browser.recordStart': 'Start recording',
+  'toast.recordSaved': 'Recording saved: {path}',
+  'toast.recordFailed': 'Recording failed',
+  'toast.recordFallbackWindow': 'Browser pane not capturable — recording the whole window',
   'design.sourcePrefix': '[app: {source}] ',
   'nav.roadmap': 'Roadmap',
   'roadmap.title': 'Roadmap',

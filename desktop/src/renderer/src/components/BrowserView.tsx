@@ -31,6 +31,12 @@ import { useEffect, useRef, useState } from 'react'
 import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import type { ElementPick, SessionRuntime, WindowSource } from '@shared/types'
+import {
+  computeCropRect,
+  formatElapsed,
+  pickRecorderMime,
+  type RecordingScope
+} from '@shared/recording'
 import type { WebviewIpcMessageEvent, WebviewNavigateEvent, WebviewTag } from '../webview-types'
 import { GLYPHS, GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
@@ -233,6 +239,23 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const strokingRef = useRef(false)
   const hasStrokesRef = useRef(false)
+  // Screen recording (REC). recordingSince lives in the store so the nav rail
+  // can show the indicator from any view (this component stays mounted).
+  const recordingSince = useDeck((s) => s.recordingSince)
+  const setRecordingSince = useDeck((s) => s.setRecordingSince)
+  const [recDialog, setRecDialog] = useState(false)
+  const [recScope, setRecScope] = useState<RecordingScope>('browser')
+  const [recElapsed, setRecElapsed] = useState(0)
+  const [recSaving, setRecSaving] = useState(false)
+  const recRef = useRef<{
+    rec: MediaRecorder
+    source: MediaStream
+    stopCrop: (() => void) | null
+    chunks: Blob[]
+    ext: 'mp4' | 'webm'
+    mime: string
+  } | null>(null)
+  const browserFrameRef = useRef<HTMLDivElement | null>(null)
 
   // The preload attribute must be set before src, so the webview renders only
   // once the path is known (vibeyard does the same dance).
@@ -568,6 +591,159 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     }
   }
 
+  // ----- screen recording (REC) -----
+  //
+  // getDisplayMedia is answered main-side with the Deck's own window (no OS
+  // picker — see setDisplayMediaRequestHandler in main/index.ts). Scope
+  // 'browser' pipes that stream through a canvas cropped to the browser frame
+  // (computeCropRect); 'window' records the stream as-is. MediaRecorder
+  // chunks accumulate in memory (demo-length clips) and are saved in one IPC
+  // call when the operator stops.
+
+  /** Ticking m:ss label while recording. */
+  useEffect(() => {
+    if (recordingSince === null) return
+    setRecElapsed(Date.now() - recordingSince)
+    const iv = setInterval(() => setRecElapsed(Date.now() - recordingSince), 500)
+    return () => clearInterval(iv)
+  }, [recordingSince])
+
+  /** rAF pipeline drawing the browser-frame crop of `src` onto a canvas. */
+  async function buildCropStream(
+    src: MediaStream
+  ): Promise<{ stream: MediaStream; stop: () => void } | null> {
+    const frame = browserFrameRef.current
+    if (!frame) return null
+    const video = document.createElement('video')
+    video.muted = true
+    video.srcObject = src
+    try {
+      await video.play()
+    } catch {
+      return null
+    }
+    const crop = computeCropRect(
+      video.videoWidth,
+      video.videoHeight,
+      window.innerWidth,
+      window.innerHeight,
+      frame.getBoundingClientRect()
+    )
+    if (!crop) return null
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.round(crop.sw)
+    canvas.height = Math.round(crop.sh)
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return null
+    let raf = 0
+    const draw = (): void => {
+      // Recompute each frame: the pane can be resized mid-recording (the
+      // output size stays fixed — the crop is scaled into the canvas).
+      const r = computeCropRect(
+        video.videoWidth,
+        video.videoHeight,
+        window.innerWidth,
+        window.innerHeight,
+        frame.getBoundingClientRect()
+      )
+      if (r) ctx.drawImage(video, r.sx, r.sy, r.sw, r.sh, 0, 0, canvas.width, canvas.height)
+      raf = requestAnimationFrame(draw)
+    }
+    raf = requestAnimationFrame(draw)
+    return {
+      stream: canvas.captureStream(30),
+      stop: () => {
+        cancelAnimationFrame(raf)
+        video.srcObject = null
+      }
+    }
+  }
+
+  async function startRecording(scope: RecordingScope): Promise<void> {
+    if (recRef.current) return
+    setRecDialog(false)
+    const pick = pickRecorderMime((m) => MediaRecorder.isTypeSupported(m))
+    if (!pick) {
+      window.api.reportError('browser', 'recording: no supported MediaRecorder container')
+      showToast('toast.recordFailed', 'error')
+      return
+    }
+    let source: MediaStream
+    try {
+      source = await navigator.mediaDevices.getDisplayMedia({
+        audio: false,
+        video: { frameRate: 30 }
+      })
+    } catch (e) {
+      window.api.reportError('browser', `recording: getDisplayMedia failed: ${String(e)}`)
+      showToast('toast.recordFailed', 'error')
+      return
+    }
+    let outStream = source
+    let stopCrop: (() => void) | null = null
+    if (scope === 'browser') {
+      const cropped = await buildCropStream(source)
+      if (cropped) {
+        outStream = cropped.stream
+        stopCrop = cropped.stop
+      } else {
+        // Degenerate frame (hidden pane, zero-size crop): record the whole
+        // window instead of failing, and say so.
+        showToast('toast.recordFallbackWindow', 'info')
+      }
+    }
+    let rec: MediaRecorder
+    try {
+      rec = new MediaRecorder(outStream, { mimeType: pick.mime, videoBitsPerSecond: 6_000_000 })
+    } catch (e) {
+      stopCrop?.()
+      source.getTracks().forEach((t2) => t2.stop())
+      window.api.reportError('browser', `recording: MediaRecorder failed: ${String(e)}`)
+      showToast('toast.recordFailed', 'error')
+      return
+    }
+    const entry = { rec, source, stopCrop, chunks: [] as Blob[], ext: pick.ext, mime: pick.mime }
+    rec.ondataavailable = (e) => {
+      if (e.data.size > 0) entry.chunks.push(e.data)
+    }
+    rec.onstop = () => void finishRecording()
+    // The OS can end the capture from outside (source window closed).
+    source.getVideoTracks()[0]?.addEventListener('ended', () => stopRecording())
+    recRef.current = entry
+    rec.start(1000)
+    setRecordingSince(Date.now())
+  }
+
+  /** Operator stop: triggers MediaRecorder.onstop → finishRecording. */
+  function stopRecording(): void {
+    const r = recRef.current
+    if (!r || r.rec.state === 'inactive') return
+    r.rec.stop()
+  }
+
+  /** Assemble the chunks, persist through IPC, release the streams. */
+  async function finishRecording(): Promise<void> {
+    const r = recRef.current
+    if (!r) return
+    recRef.current = null
+    r.stopCrop?.()
+    r.source.getTracks().forEach((t2) => t2.stop())
+    setRecordingSince(null)
+    setRecSaving(true)
+    try {
+      const blob = new Blob(r.chunks, { type: r.mime })
+      const bytes = new Uint8Array(await blob.arrayBuffer())
+      const path = await window.api.saveRecording(bytes, r.ext)
+      if (path) showToast(tRef.current('toast.recordSaved', { path }), 'success', { raw: true })
+      else showToast('toast.recordFailed', 'error')
+    } catch (e) {
+      window.api.reportError('browser', `recording: save failed: ${String(e)}`)
+      showToast('toast.recordFailed', 'error')
+    } finally {
+      setRecSaving(false)
+    }
+  }
+
   function startDockDrag(e: React.MouseEvent): void {
     e.preventDefault()
     setDragging(true)
@@ -792,6 +968,18 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
               </button>
             </>
           )}
+          <button
+            type="button"
+            className={`browser-btn${recordingSince !== null ? ' browser-btn-rec' : ''}`}
+            title={t(recordingSince !== null ? 'browser.recordStop' : 'browser.record')}
+            disabled={recSaving}
+            onClick={() => (recordingSince !== null ? stopRecording() : setRecDialog(true))}
+          >
+            {GLYPH_ACTIONS.record}
+          </button>
+          {recordingSince !== null && (
+            <span className="browser-rec-time">{formatElapsed(recElapsed)}</span>
+          )}
           <select
             className="browser-dock-select"
             title={t('browser.dockLabel')}
@@ -810,6 +998,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
         <div className="browser-body">
           {/* The webview never unmounts on a mode switch: page state survives. */}
           <div
+            ref={browserFrameRef}
             className={`browser-frame${viewport ? ' browser-frame-device' : ''}${mode === 'window' ? ' view-hidden' : ''}`}
             style={viewport && mode === 'web' ? { width: viewport.w, height: viewport.h } : undefined}
           >
@@ -876,6 +1065,38 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
           {dragging && <div className="browser-drag-shield" />}
         </div>
       </div>
+      {recDialog && (
+        <div className="modal-backdrop" onMouseDown={() => setRecDialog(false)}>
+          <div className="modal record-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <h2>{t('browser.recordTitle')}</h2>
+            <p className="record-hint">{t('browser.recordHint')}</p>
+            <label className="record-scope">
+              <input
+                type="radio"
+                name="rec-scope"
+                checked={recScope === 'browser'}
+                onChange={() => setRecScope('browser')}
+              />
+              {t('browser.recordScopeBrowser')}
+            </label>
+            <label className="record-scope">
+              <input
+                type="radio"
+                name="rec-scope"
+                checked={recScope === 'window'}
+                onChange={() => setRecScope('window')}
+              />
+              {t('browser.recordScopeWindow')}
+            </label>
+            <div className="modal-actions">
+              <button onClick={() => setRecDialog(false)}>{t('common.cancel')}</button>
+              <button className="primary" autoFocus onClick={() => void startRecording(recScope)}>
+                {t('browser.recordStart')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

@@ -91,6 +91,12 @@ interface DeckState {
    * keep-mounted pattern as the agents/home views.
    */
   browserOpened: boolean
+  /**
+   * Epoch ms when the REC screen recording started, null when idle. Owned by
+   * BrowserView (which stays mounted); mirrored here so the nav rail can show
+   * a recording indicator while the operator visits other views.
+   */
+  recordingSince: number | null
   /** Boot failure message (PLAN O4): init() rejected, splash shows a retry. */
   initError: string | null
   /** Broker reachability (PLAN O5): null until main reports, drives the banner. */
@@ -128,6 +134,8 @@ interface DeckState {
   openBrowser(pairedId?: string | null): void
   /** Change/detach the docked session without leaving the browser view. */
   setBrowserPaired(id: string | null): void
+  /** REC start/stop marker (null = idle). */
+  setRecordingSince(at: number | null): void
   /** Open/close the operator inbox panel (opening clears the unread count). */
   openInbox(open: boolean): void
   /** Open a pending draft: create the pre-filled graph and navigate to it. */
@@ -248,6 +256,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   roadmapSeed: null,
   browserPairedId: null,
   browserOpened: false,
+  recordingSince: null,
   initError: null,
   brokerStatus: null,
   offlineBannerDismissed: null,
@@ -400,6 +409,7 @@ export const useDeck = create<DeckState>((set, get) => ({
       browserPairedId: pairedId === undefined ? s.browserPairedId : pairedId
     })),
   setBrowserPaired: (id) => set({ browserPairedId: id }),
+  setRecordingSince: (at) => set({ recordingSince: at }),
   openInbox: (open) => set({ inboxOpen: open, inboxUnread: 0 }),
   openGraphDraft: async (draft) => {
     // Main creates the pre-filled doc and flips the broker status; the local

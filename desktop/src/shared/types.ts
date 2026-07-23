@@ -863,6 +863,8 @@ export interface DeckApi {
   captureBrowser(webContentsId: number): Promise<string | null>
   /** Persist an annotated screenshot; returns the absolute file path. */
   saveAnnotation(dataUrl: string): Promise<string | null>
+  /** Persist a finished REC screen recording; returns the absolute file path. */
+  saveRecording(data: Uint8Array, ext: 'mp4' | 'webm'): Promise<string | null>
   /** Capturable OS windows/screens for the Window mirror mode (D2a). */
   listCaptureWindows(): Promise<WindowSource[]>
   /** Full-size still of one window/screen; null when gone. */

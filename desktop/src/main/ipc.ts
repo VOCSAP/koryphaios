@@ -40,6 +40,7 @@ import {
 import { createSessionWithWorktree } from './create-session'
 import { composePlanImportPrompt } from './import-plan'
 import { collectDiff, collectFileDiff, composeDiffReviewPrompt } from './diff-service'
+import { recordingFileName } from '@shared/recording'
 import { listExplorerDir, readExplorerFile } from './explorer-service'
 import {
   createWorktree,
@@ -270,6 +271,26 @@ export function registerIpc({
       return path
     } catch (err) {
       console.error('[browser] annotation save failed:', err)
+      return null
+    }
+  })
+
+  // Finished screen recording (REC, browser view). The bytes arrive as one
+  // Uint8Array from the renderer's MediaRecorder; unlike annotations there is
+  // no pruning — recordings are deliverables (README demos), the operator
+  // deletes them. 1 GiB cap: far above any demo-length clip, below IPC pain.
+  regHandle('browser:save-recording', (_e, data: Uint8Array, ext: string) => {
+    if (!(data instanceof Uint8Array) || data.byteLength === 0) return null
+    if (data.byteLength > 1024 * 1024 * 1024) return null
+    if (ext !== 'mp4' && ext !== 'webm') return null
+    const dir = join(app.getPath('userData'), APP_STATE_SUBDIR, 'recordings')
+    try {
+      mkdirSync(dir, { recursive: true })
+      const path = join(dir, recordingFileName(ext))
+      writeFileSync(path, data)
+      return path
+    } catch (err) {
+      reportError('browser', 'recording save failed', err)
       return null
     }
   })

@@ -131,6 +131,8 @@ const api: DeckApi = {
   getBrowserPreloadPath: () => ipcRenderer.invoke('browser:preload-path'),
   captureBrowser: (webContentsId: number) => ipcRenderer.invoke('browser:capture', webContentsId),
   saveAnnotation: (dataUrl: string) => ipcRenderer.invoke('browser:save-annotation', dataUrl),
+  saveRecording: (data: Uint8Array, ext: 'mp4' | 'webm') =>
+    ipcRenderer.invoke('browser:save-recording', data, ext),
   listCaptureWindows: () => ipcRenderer.invoke('design:list-windows'),
   captureWindow: (id: string) => ipcRenderer.invoke('design:capture-window', id),
   ensureSupervisor: () => ipcRenderer.invoke('supervisor:ensure'),

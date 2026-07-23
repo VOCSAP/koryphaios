@@ -98,6 +98,7 @@ export const COMPANION_MANIFEST = {
   getBrowserPreloadPath: { kind: 'invoke', channel: 'browser:preload-path' },
   captureBrowser: { kind: 'invoke', channel: 'browser:capture' },
   saveAnnotation: { kind: 'invoke', channel: 'browser:save-annotation' },
+  saveRecording: { kind: 'invoke', channel: 'browser:save-recording' },
   listCaptureWindows: { kind: 'invoke', channel: 'design:list-windows' },
   captureWindow: { kind: 'invoke', channel: 'design:capture-window' },
 
@@ -182,6 +183,7 @@ export const REMOTE_BLOCKED_CHANNELS: ReadonlySet<string> = new Set([
   'browser:preload-path',
   'browser:capture',
   'browser:save-annotation',
+  'browser:save-recording',
   'design:list-windows',
   'design:capture-window',
   'companion:start',
@@ -277,6 +279,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'browser:preload-path': 2,
   'browser:capture': 2,
   'browser:save-annotation': 2,
+  'browser:save-recording': 2,
   'design:list-windows': 2,
   'design:capture-window': 2,
 

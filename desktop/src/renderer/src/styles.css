@@ -2838,6 +2838,20 @@ svg.glyph {
   box-shadow: 0 0 0 2px var(--bg-2);
 }
 
+/* REC in progress: pulsing red dot on the browser glyph (top-right, badge
+   slot) — the recording stays visible from every view. */
+.nav-rail-rec-dot {
+  position: absolute;
+  top: -4px;
+  right: -8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 2px var(--bg-2);
+  animation: rec-pulse 1.6s ease-in-out infinite;
+}
+
 .nav-rail-icon {
   position: relative;
 }
@@ -3817,6 +3831,62 @@ svg.glyph {
 /* Send-annotation: accented so the "do it" action stands out while drawing. */
 .browser-btn-accent {
   color: var(--accent);
+}
+
+/* REC running: red glyph, slow pulse; the same button stops the recording. */
+.browser-btn-rec {
+  color: var(--danger);
+  animation: rec-pulse 1.6s ease-in-out infinite;
+}
+
+.browser-btn-rec:hover:not(:disabled) {
+  background: var(--bg);
+  color: var(--danger);
+}
+
+@keyframes rec-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .browser-btn-rec,
+  .nav-rail-rec-dot {
+    animation: none;
+  }
+}
+
+/* Elapsed-time readout next to the REC button. */
+.browser-rec-time {
+  color: var(--danger);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  padding: 0 2px;
+}
+
+/* REC options dialog: capture-scope radios, then start. */
+.record-modal {
+  width: 400px;
+}
+
+.record-hint {
+  color: var(--fg-dim);
+  line-height: 1.5;
+  margin: 0 0 10px;
+}
+
+.record-scope {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.record-scope input[type='radio'] {
+  accent-color: var(--accent);
+  margin: 0;
 }
 
 /* Window mirror (D2a): shrink-wrapped around the still so the draw canvas

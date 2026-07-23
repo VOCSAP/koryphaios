@@ -3,6 +3,7 @@ import { basename, join } from 'node:path'
 import {
   app,
   BrowserWindow,
+  desktopCapturer,
   dialog,
   Menu,
   nativeTheme,
@@ -1228,6 +1229,26 @@ function createWindow(): void {
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url)
     return { action: 'deny' }
+  })
+
+  // Screen recording (browser view REC): getDisplayMedia is served with the
+  // Deck's OWN window, always — no OS picker, no arbitrary-source access from
+  // the renderer. Cropping to the browser pane happens renderer-side.
+  mainWindow.webContents.session.setDisplayMediaRequestHandler((_req, callback) => {
+    desktopCapturer
+      .getSources({ types: ['window'], thumbnailSize: { width: 0, height: 0 }, fetchWindowIcons: false })
+      .then((sources) => {
+        const own = mainWindow && sources.find((s) => s.id === mainWindow?.getMediaSourceId())
+        if (own) callback({ video: own })
+        else {
+          reportError('browser', 'recording: own window not found among capture sources')
+          callback({})
+        }
+      })
+      .catch((e) => {
+        reportError('browser', 'recording: desktopCapturer.getSources failed', e)
+        callback({})
+      })
   })
 
   // Embedded browser (PLAN D1): pages loaded in the <webview> never open new
