@@ -30,7 +30,13 @@ import {
   sourcesForProject
 } from './digest'
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { archiveRoadmap, computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
+import {
+  archiveRoadmap,
+  computeDeckProjectKey,
+  listRoadmap,
+  reorderRoadmap,
+  upsertRoadmap
+} from './roadmap-service'
 import { createSessionWithWorktree } from './create-session'
 import { composePlanImportPrompt } from './import-plan'
 import { collectDiff, collectFileDiff, composeDiffReviewPrompt } from './diff-service'
@@ -327,6 +333,12 @@ export function registerIpc({
   regHandle('roadmap:archive', (_e, id: string) => {
     const { endpoint } = roadmapCtx()
     return archiveRoadmap(endpoint, id)
+  })
+  // Workflow lane: atomic queue rewrite (insert/reorder in the middle without
+  // N racy per-item upserts). ids come from the renderer's derived lane order.
+  regHandle('roadmap:reorder', (_e, ids: string[]) => {
+    const { endpoint, key } = roadmapCtx()
+    return reorderRoadmap(endpoint, key, Array.isArray(ids) ? ids : [])
   })
   // Queue dispatch (PLAN C15): first queued item -> targeted announce to the
   // team-lead. The renderer greys the button when no lead is designated.

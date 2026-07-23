@@ -3215,66 +3215,323 @@ svg.glyph {
 
 /* ---------- Dispatch queue (PLAN C15) ---------- */
 
-.rm-section-queue {
-  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
-  border-radius: 8px;
-  padding: 8px 10px;
-  /* Sits between the header and the board (K1), outside any padded list. */
-  margin: 12px 14px 0;
-  flex: 0 0 auto;
-}
-
-.rm-queue-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
 .rm-dispatch-btn {
   font-size: 12px;
-}
-
-.rm-queue-hint {
-  margin: 4px 0;
-  font-size: 11px;
-  color: var(--fg-dim);
-}
-
-.rm-queue-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 3px 0;
-}
-
-.rm-queue-pos {
-  font-family: var(--mono, monospace);
-  font-size: 11px;
-  color: var(--fg-dim);
-  min-width: 26px;
-}
-
-.rm-queue-title {
-  flex: 1;
-  text-align: left;
-  background: none;
-  border: none;
-  color: var(--fg);
-  cursor: pointer;
-  font-size: 12px;
-  padding: 2px 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.rm-queue-title:hover {
-  color: var(--accent);
 }
 
 .rm-badge-queue {
   border-color: color-mix(in srgb, var(--accent) 50%, transparent);
   color: var(--accent);
+}
+
+/* ---------- Workflow lane: the dispatch queue as a visual chain. ----------
+   GraphView-style canvas (manual camera, SVG edges, positioned cards) in the
+   bottom half of the roadmap view. Positions derive from queue + depends_on. */
+
+.wf-lane {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  margin: 0 14px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.wf-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.wf-lane.is-collapsed .wf-head {
+  border-bottom: none;
+}
+
+.wf-canvas {
+  position: relative;
+  height: 240px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle, var(--bg-3) 1px, transparent 1px) 0 0 / 26px 26px,
+    var(--bg);
+  cursor: grab;
+  user-select: none;
+}
+
+.wf-canvas:active {
+  cursor: grabbing;
+}
+
+.wf-canvas.is-linking {
+  cursor: crosshair;
+}
+
+.wf-world {
+  position: absolute;
+  transform-origin: 0 0;
+}
+
+.wf-edges {
+  position: absolute;
+  overflow: visible;
+  width: 1px;
+  height: 1px;
+  pointer-events: none;
+}
+
+.wf-edge {
+  fill: none;
+  stroke: var(--fg-dim);
+  stroke-width: 1.5;
+  opacity: 0.8;
+}
+
+.wf-edge.is-violated {
+  stroke: var(--danger);
+  stroke-width: 2;
+  opacity: 1;
+}
+
+.wf-edge.is-ghost {
+  stroke: var(--accent);
+  stroke-dasharray: 5 4;
+}
+
+/* Wide invisible twin of each edge: the click target. */
+.wf-edge-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 12;
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.wf-caret {
+  position: absolute;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--accent);
+  pointer-events: none;
+}
+
+/* Grid-assisted parallel placement: ghost slot above/below the stack target. */
+.wf-stack-slot {
+  position: absolute;
+  border: 2px dashed var(--accent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  pointer-events: none;
+}
+
+/* Fullscreen modal variant: the lane fills the foreground dialog. */
+.wf-modal {
+  width: 92vw;
+  height: 86vh;
+  display: flex;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.wf-lane.is-full {
+  flex: 1;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  min-height: 0;
+}
+
+.wf-lane.is-full .wf-canvas {
+  flex: 1;
+  height: auto;
+}
+
+.wf-node {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 7px 9px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.wf-node:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+}
+
+.wf-node.is-locked {
+  opacity: 0.75;
+  border-left-color: #e0b341;
+  cursor: default;
+}
+
+.wf-node.is-dragging {
+  opacity: 0.85;
+  z-index: 3;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 35%);
+}
+
+/* The hovered insertion would wrong-side a dependency link of this card. */
+.wf-node.is-conflict {
+  border-color: var(--danger);
+  border-left-color: var(--danger);
+}
+
+.wf-node-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.wf-node-title {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-node-badges {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+}
+
+.wf-badge-warn {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  color: var(--danger);
+}
+
+/* Dependency port: grab it to pull a link toward another card / the void. */
+.wf-port {
+  position: absolute;
+  right: -6px;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  margin-top: -6px;
+  border-radius: 50%;
+  background: var(--bg-2);
+  border: 2px solid var(--accent);
+  cursor: crosshair;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.wf-node:hover .wf-port,
+.wf-canvas.is-linking .wf-port {
+  opacity: 1;
+}
+
+.wf-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding: 0 20px;
+  text-align: center;
+  color: var(--fg-dim);
+  font-size: 12px;
+  pointer-events: none;
+}
+
+.wf-link-hint {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 3px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  pointer-events: none;
+}
+
+.wf-zoomctl {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px;
+  background: color-mix(in srgb, var(--bg-2) 88%, transparent);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.wf-zoom-label {
+  font-size: 11px;
+  color: var(--fg-dim);
+  padding: 0 4px;
+  min-width: 34px;
+  text-align: right;
+}
+
+/* Violation / dependency explanation, anchored where the edge was clicked. */
+.wf-edge-panel {
+  position: absolute;
+  z-index: 4;
+  width: 260px;
+  padding: 8px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 30%);
+}
+
+.wf-edge-text {
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+
+.wf-edge-text.is-violated {
+  color: var(--danger);
+}
+
+.wf-edge-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+/* Thin proportional scrollbar once the chain overflows at the zoom floor. */
+.wf-scrollbar {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 3px;
+  height: 7px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+}
+
+.wf-scrollbar-thumb {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--fg) 28%, transparent);
+  cursor: grab;
+}
+
+.wf-scrollbar-thumb:hover,
+.wf-scrollbar-thumb:active {
+  background: color-mix(in srgb, var(--fg) 42%, transparent);
 }
 
 /* ---------- Template composer (PLAN C18) ---------- */

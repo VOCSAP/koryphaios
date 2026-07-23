@@ -106,6 +106,34 @@ l'opérateur sur une machine avec affichage.
       battle avec juge, picker (accordéon providers, favoris ★, détection
       CLIs), Settings > Modèles avec un endpoint Ollama/LiteLLM réel
       (découverte + inférence + clé chiffrée safeStorage + bouton ⊘).
+- [ ] **Workflow lane (roadmap, branche `claude/roadmap-workflow-visual-m3qr0x`)**
+      — canvas dérivé (`WorkflowLane.tsx` + `shared/workflow.ts`), couvert par
+      tests purs + broker, jamais rendu à l'écran. À valider sur une vraie
+      machine :
+  - Lisibilité du losange A→B/A→C→D (fan-in/fan-out empilé dans la même
+    colonne) à densité réelle, en thème clair ET sombre.
+  - Geste de drag : glisser une carte du kanban vers la lane (caret
+    d'insertion), réordonner en glissant dans la lane, empiler une carte
+    au-dessus/en-dessous d'une autre (slot fantôme pointillé) pour créer un
+    parallélisme — vérifier que le slot ne s'affiche JAMAIS entre deux
+    cartes liées par une dépendance (`dependsRelated`) et que la carte
+    glisse alors latéralement.
+  - Preview rouge en direct pendant le drag : lien + bords des deux cartes
+    quand l'insertion survolée mettrait une carte du mauvais côté d'un lien
+    (`slotConflicts`) — l'arête doit suivre le fantôme de la carte déplacée.
+  - Lien tiré depuis le port d'une carte : vers une autre carte (dépendance,
+    cycle refusé avec toast), et dans le vide (modale de création
+    pré-remplie ; Annuler ne doit rien créer).
+  - Clic sur une arête committée (violation de dépendance déjà persistée) :
+    panneau d'explication + bouton « supprimer la dépendance ».
+  - Zoom molette/boutons, auto-fit jusqu'au plancher (0.55×) puis
+    apparition de la scrollbar fine proportionnelle ; bouton plein écran
+    (modale avant-plan 92vw×86vh) et retour.
+  - Carte verrouillée (agent en `in_progress`) : bien figée en tête de
+    chaîne, non déplaçable, non empilable.
+  - Filtre "kind" du kanban : la lane doit continuer à voir/réordonner la
+    file complète (non filtrée) — vérifier qu'aucun item n'est perdu au
+    reorder pendant qu'un filtre est actif.
 
 ---
 

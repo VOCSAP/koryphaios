@@ -1,5 +1,35 @@
 # Changelog
 
+## desktop (experimental) — Workflow lane: the dispatch queue as a visual chain
+
+The roadmap view splits horizontally: kanban on top, a new **Workflow lane**
+below (`WorkflowLane.tsx`) drawing the dispatch queue as a left-to-right chain
+of linked cards. Design decisions: positions are DERIVED, never stored, and
+hierarchy-first — the column is the `depends_on` depth inside a connected
+component (parallel branches of an N:1/1:N fan-in stack vertically in the
+same column, like the graph view's layout transposed), while unrelated
+components chain left-to-right by queue rank so a dependency-free queue stays
+a flat conveyor (`desktop/src/shared/workflow.ts`, pure + bun-tested) — the
+lane and the kanban can never drift, and the shared broker schema needs no
+coordinates. A grid-assisted stack gesture (drop a card clearly above/below
+another: dashed ghost slot) makes it a parallel sibling by adopting the
+target's dependencies (sanitized, cycle-checked) — never offered between
+dependency-related cards (they cannot run in parallel: the card slides
+sideways, and an insertion that would wrong-side a link previews it live in
+red, link and card borders alike); an expand button opens the lane as a
+fullscreen foreground modal. Reorders commit through one new atomic broker route
+(`POST /roadmap/reorder`: ids in order → queue 1..N in a transaction, others
+unqueued, 500-id cap) instead of N racy upserts. Interactions: HTML5 drop from
+the board (insertion caret), in-lane drag to reorder, a port to pull
+`depends_on` links between cards (cycle-checked) or into the void (create-form
+opens pre-wired; cancelling creates nothing), right-click to create at a slot,
+red edges + click-for-why panel when the queue order breaks a dependency, a
+warning badge for dependencies neither scheduled nor done, locked in_progress
+cards shown as frozen chain heads, wheel/button zoom with auto-fit down to a
+floor then a thin proportional scrollbar. The old flat queue list is replaced
+by the lane (same dispatch button); the card context menu now toggles
+queue/unqueue.
+
 ## desktop (experimental) — Greek glyph icon set, attention glow, button-style pass
 
 Full iconography overhaul born from the CSS audit (DESIGN.md): the emoji rails
