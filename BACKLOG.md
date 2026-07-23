@@ -171,6 +171,16 @@ l'opérateur sur une machine avec affichage.
   - **peer_id à travers l'option B** (multi-sessions même cwd+groupe) : seule la
     session canonique du `session_key` récupère son identité — voir résiduel core
     §3.7 (intégrer `CLAUDE_PEERS_DESK_SESSION` dans le `session_key`).
+  - **Carte directive ciblant des peers répartis sur PLUSIEURS Decks** (même
+    broker/projet, cas multi-PC) — correction, pas sécurité : chaque Deck exécute
+    la file partagée. La carte est marquée `done` par le premier Deck qui la
+    traite (injecte SES cibles vivantes), ce qui peut la retirer de la file avant
+    qu'un second Deck ait injecté LES SIENNES → certaines cibles ratent le reset.
+    À vérifier / décider : soit restreindre une carte directive aux peers d'un
+    seul Deck, soit coordonner le `done` (n'archiver qu'une fois toutes les cibles
+    connues traitées, p.ex. via un accusé par peer). Le double-traitement d'une
+    MÊME tuile est impossible (une tuile vit dans un seul Deck), donc pas de
+    double-injection ; le risque est l'inverse (injection manquée).
 
 ---
 
