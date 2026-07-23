@@ -626,12 +626,14 @@ export function WorkflowLane({
               const y = dragged ? ghost.y : p.y
               const locked = item.locked && item.status === 'in_progress'
               const unmet = unmetDeps(item, items, shownIds)
+              const directive = item.kind === 'directive'
               return (
                 <div
                   key={item.id}
                   className={[
                     'wf-node',
                     locked ? 'is-locked' : '',
+                    directive ? 'is-directive' : '',
                     dragged ? 'is-dragging' : '',
                     conflictSet.has(item.id) || (dragged && conflicts.length > 0)
                       ? 'is-conflict'
@@ -651,14 +653,25 @@ export function WorkflowLane({
                   title={locked ? t('roadmap.lockedHint') : undefined}
                 >
                   <div className="wf-node-head">
-                    <span className={`rm-prio-chip rm-prio-${item.priority}`}>
-                      <span className="rm-prio-dot" />
-                    </span>
+                    {!directive && (
+                      <span className={`rm-prio-chip rm-prio-${item.priority}`}>
+                        <span className="rm-prio-dot" />
+                      </span>
+                    )}
                     <span className="rm-kind">{KIND_ICONS[item.kind]}</span>
                     <span className="wf-node-title">{item.title}</span>
                   </div>
                   <div className="wf-node-badges">
-                    {locked ? (
+                    {directive ? (
+                      <>
+                        <span className="rm-badge rm-badge-directive">
+                          {t(`roadmap.directive.${item.directive ?? 'clear'}`)}
+                        </span>
+                        <span className="rm-badge rm-badge-queue">
+                          {GLYPH_BADGES.profile} {item.target_peer_ids.length}
+                        </span>
+                      </>
+                    ) : locked ? (
                       <span className="rm-badge rm-badge-locked">
                         {GLYPH_BADGES.lock} {item.locked_by}
                       </span>

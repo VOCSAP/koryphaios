@@ -91,6 +91,32 @@ Fields:
   one-time approval dialog (sha256 remembered per project; refusal falls
   back to the global command).
 
+### Feature flags (per machine)
+
+An optional `features` block in the config file toggles per-machine behavior
+used by the roadmap's [directive cards](roadmap.md#directive-cards-contexttoken-economy):
+
+```jsonc
+{
+  "features": {
+    "magicCompact": "auto",   // "auto" (use the Magic Compact plugin when present) | "on" | "off"
+    "handoff": "file"          // "file" | "kleos" | "off" (advisory hand-off style)
+  }
+}
+```
+
+- `magicCompact` decides how a `magic_compact` directive behaves: `auto` uses
+  the [Magic Compact plugin](https://github.com/aerovato/Magic-compact) when it
+  is detected under the Claude config's `plugins/` dir (honoring
+  `CLAUDE_CONFIG_DIR`), `on` always tries it, `off` always uses plain
+  `/compact`.
+- `handoff` is advisory only (it influences briefing wording, not any command).
+- **Security**: because `magicCompact` makes the app type a command into an
+  agent's terminal, it is **read from the global config only** — a project-local
+  (cloned-repo) config can only *restrict* it to `off`, never enable it. This
+  mirrors the `launchCommand` / digest-sources gating. `handoff`, being
+  advisory text, follows the normal project-then-global precedence.
+
 ### Resume digest sources
 
 In the **global** config file only (never project-local, by design —

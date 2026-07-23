@@ -1790,6 +1790,10 @@ svg.glyph {
 .kind-glyph-chore {
   color: #3ec46d;
 }
+/* Directive: a control card the app executes, distinct from work kinds. */
+.kind-glyph-directive {
+  color: #a071e8;
+}
 
 .nav-rail-label {
   font-size: 9px;
@@ -3384,6 +3388,59 @@ svg.glyph {
 .wf-node.is-conflict {
   border-color: var(--danger);
   border-left-color: var(--danger);
+}
+
+/* Directive card (CT5): a control card the app executes, visually set apart
+   from work items by a dashed violet frame. */
+.wf-node.is-directive {
+  border-style: dashed;
+  border-left-style: solid;
+  border-left-color: #a071e8;
+  background: color-mix(in srgb, #a071e8 8%, var(--bg-2));
+}
+.wf-node.is-directive:hover {
+  border-color: color-mix(in srgb, #a071e8 55%, var(--border));
+}
+.rm-badge-directive {
+  color: #a071e8;
+  border-color: color-mix(in srgb, #a071e8 45%, var(--border));
+  font-variant-numeric: tabular-nums;
+}
+
+/* Directive editor: the peer target multiselect + hints. */
+.rm-directive-targets {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rm-target-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.rm-target-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.rm-target-chip.is-on {
+  border-color: #a071e8;
+  color: #a071e8;
+}
+.rm-target-name {
+  font-size: 12px;
+}
+.rm-directive-empty,
+.rm-directive-hint {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+.rm-modal-directive .rm-directive-cmd {
+  font-family: var(--mono, monospace);
+  color: #a071e8;
+}
+.rm-badge-target {
+  color: #a071e8;
 }
 
 .wf-node-head {

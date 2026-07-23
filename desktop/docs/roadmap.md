@@ -10,7 +10,8 @@ and agents on the same repo see the same backlog.
 
 Each item has:
 
-- **Kind** — feature, bug, tech debt, idea, chore.
+- **Kind** — feature, bug, tech debt, idea, chore, or **directive** (a control
+  card the app executes, see [Directive cards](#directive-cards-contexttoken-economy)).
 - **Title / Description / Rationale** (why it matters).
 - **Context** — the *agent briefing*: objective, constraints, file pointers,
   acceptance criteria — everything the next agent cannot rediscover alone.
@@ -48,6 +49,47 @@ Queued items are sent **one by one to the team-lead** (👑): the full item
 plus a "keep the status current" contract. When a dispatched item turns
 `done`, the next queued item is dispatched automatically. Requires a
 designated team-lead.
+
+## Directive cards (context/token economy)
+
+A **directive card** (kind `directive`) is not a work item — it is a control
+card the **Deck itself executes** to reset the context window of running
+sessions, saving tokens on long-lived agents. It carries:
+
+- a **command** — `clear` (a free, zero-inference context reset; the system
+  prompt, `CLAUDE.md`, MCP servers and skills all survive), `compact`
+  (summarize the conversation in place, one inference on the target's own
+  model), or `magic_compact` (see below);
+- a set of **target sessions** — the live peers whose terminals receive the
+  command (multiselect in the editor).
+
+When the card reaches the head of the dispatch queue (above), the
+Deck **types the command into the targeted sessions' terminals** the way you
+would (it waits for the tile to be idle so a reset never lands mid-turn), marks
+the card done, and moves on — **agents never run directives themselves**. In
+the Workflow lane a directive card shows a dashed violet frame, its command and
+a target count.
+
+Typical use: queue a `clear` card *between two independent roadmap items*
+(or make it `depends_on` the item it should follow) to wipe a peer's context
+at a clean boundary. If the next item needs a hand-off, put that briefing in
+the **next item's Context field** — not in the directive — so the agent reads
+it with `roadmap_get` after the reset.
+
+The team-lead and the supervisor can queue directive cards too
+(`roadmap_add`/`roadmap_update` with kind `directive`); the app is always the
+one that injects the command.
+
+### magic_compact
+
+`magic_compact` prefers the third-party
+[Magic Compact](https://github.com/aerovato/Magic-compact) plugin
+(deterministic, zero-inference transcript compaction) when it is installed and
+enabled ([Settings > feature flags](settings.md#feature-flags-per-machine)): the
+Deck injects `/magic-compact`, captures the compacted session id the plugin
+prints, and re-enters that session **in place** (the process is not restarted,
+so the peer keeps its identity and launch harness). If the plugin is absent,
+disabled, or does not respond, it falls back to a standard `/compact`.
 
 ## Import a plan (📄)
 
