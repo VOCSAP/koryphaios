@@ -42,6 +42,8 @@ import type {
   RoadmapListRequest,
   RoadmapListResponse,
   RoadmapPriority,
+  RoadmapReorderRequest,
+  RoadmapReorderResponse,
   RoadmapStatus,
   RoadmapUpsertRequest,
   RoadmapUpsertResponse,
@@ -1434,6 +1436,66 @@ function handleRoadmapArchive(
   return { item: getRoadmapItem(body.id)! };
 }
 
+// Workflow lane reorder: hard cap on the queue size a single rewrite may
+// submit (same spirit as the flush caps -- an unbounded ids array is NF-E).
+const ROADMAP_REORDER_MAX = 500;
+
+/**
+ * Atomic queue rewrite (Workflow lane): `ids` becomes the whole dispatch
+ * queue (queue = 1..N in order), every other queued item of the project is
+ * unqueued. One transaction, so the operator's insert-in-the-middle never
+ * interleaves with an agent's writes half-applied.
+ */
+function handleRoadmapReorder(
+  body: RoadmapReorderRequest
+): RoadmapReorderResponse | { error: string; status: number } {
+  const by = typeof body.by === "string" && body.by.trim() ? body.by.trim() : "";
+  if (!by) return { error: "by (author peer_id) is required", status: 400 };
+  const projectKey =
+    typeof body.project_key === "string" && body.project_key.trim() ? body.project_key.trim() : "";
+  if (!projectKey) return { error: "project_key is required", status: 400 };
+  const ids = cleanList(body.ids);
+  if (ids === null) return { error: "ids must be an array of item ids", status: 400 };
+  if (ids.length > ROADMAP_REORDER_MAX) {
+    return { error: `ids exceeds the ${ROADMAP_REORDER_MAX}-item cap`, status: 400 };
+  }
+  if (new Set(ids).size !== ids.length) return { error: "ids contains duplicates", status: 400 };
+
+  for (const id of ids) {
+    const item = getRoadmapItem(id);
+    if (!item || item.project_key !== projectKey) {
+      return { error: `unknown roadmap item '${id}' in this project`, status: 404 };
+    }
+    if (item.status === "done" || item.status === "archived") {
+      return { error: `item '${id}' is ${item.status} and cannot be queued`, status: 400 };
+    }
+  }
+
+  const reorderTx = db.transaction(() => {
+    // Unqueue everything first: the per-id UPDATE below re-stamps the kept ones.
+    db.run(
+      `UPDATE roadmap_items SET queue = NULL, updated_by = ?, updated_at = datetime('now')
+       WHERE project_key = ? AND queue IS NOT NULL`,
+      [by, projectKey]
+    );
+    ids.forEach((id, i) => {
+      db.run(
+        `UPDATE roadmap_items SET queue = ?, updated_by = ?, updated_at = datetime('now')
+         WHERE id = ?`,
+        [i + 1, by, id]
+      );
+    });
+  });
+  reorderTx();
+
+  const rows = db
+    .query(
+      "SELECT * FROM roadmap_items WHERE project_key = ? AND queue IS NOT NULL ORDER BY queue, id"
+    )
+    .all(projectKey) as RoadmapRow[];
+  return { items: rows.map(rowToRoadmapItem) };
+}
+
 /** Full export of a project's roadmap (archived included) for backup/migration. */
 function handleRoadmapExport(projectKey: string): {
   project_key: string;
@@ -1828,6 +1890,13 @@ const server = Bun.serve<WsData>({
         }
         case "/roadmap/archive": {
           const result = handleRoadmapArchive(body as RoadmapArchiveRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/reorder": {
+          const result = handleRoadmapReorder(body as RoadmapReorderRequest);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }

@@ -337,6 +337,25 @@ export interface RoadmapArchiveResponse {
   item: RoadmapItem;
 }
 
+/**
+ * Atomic rewrite of a project's dispatch queue (Workflow lane): `ids` becomes
+ * the full queue in order (queue = 1..N); every other queued item of the
+ * project is unqueued. Replaces N racy per-item upserts when the operator
+ * inserts or reorders in the middle of the queue.
+ */
+export interface RoadmapReorderRequest {
+  project_key: string;
+  /** Author of the write: peer_id or 'deck'. */
+  by: string;
+  /** The complete new queue, in dispatch order. Empty clears the queue. */
+  ids: string[];
+}
+
+export interface RoadmapReorderResponse {
+  /** The queued items after the rewrite, in queue order. */
+  items: RoadmapItem[];
+}
+
 // --- Operator inbox (PLAN C12) ---
 
 export interface OperatorInboxRequest {

@@ -78,9 +78,35 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   (`stopRoadmapItem`, `composeStopText`). An idle-lock watcher releases locks
   held by local tiles whose PTY printed nothing for 2 h; the broker's
   TTL/owner-gone sweep covers everything the Deck cannot observe. Right-click
-  on a card opens a context menu (edit / queue / process-now / delete-as-
-  archive); "Process now" targets one live agent with a CODE-CONSTANT
+  on a card opens a context menu (edit / queue-or-unqueue / process-now /
+  delete-as-archive); "Process now" targets one live agent with a CODE-CONSTANT
   announce (`composeAssignText`, IPC `roadmap:assign`) or spawns a fresh one.
+  Below the board, the **Workflow lane** (`WorkflowLane.tsx`) draws the
+  dispatch queue as a left-to-right chain of cards, GraphView-style (manual
+  camera, SVG edges, no library): every position is DERIVED
+  (`shared/workflow.ts`), hierarchy-first — the column is the `depends_on`
+  DEPTH inside a connected component, so parallel branches (N:1 / 1:N
+  fan-ins) stack vertically in the same column, while unrelated components
+  chain left-to-right by queue rank (a dependency-free queue stays a flat
+  chain). Nothing visual is persisted, so the lane always agrees with the
+  kanban. Cards drag in from the board (HTML5 DnD) or reorder in place
+  (insertion caret between columns); dropping a card clearly above/below
+  another (grid-assisted dashed slot) makes it a PARALLEL SIBLING — it
+  adopts the target's dependencies (`siblingDeps`, sanitized + cycle-checked)
+  — and commits go through ONE atomic `roadmap:reorder` IPC → broker
+  `/roadmap/reorder`. Dependency-RELATED cards can never be parallel: the
+  stack slot is not offered between them (`dependsRelated` — the card slides
+  sideways instead), and while a drag hovers an insertion that would
+  wrong-side a link, the link and both cards' borders turn red live
+  (`slotConflicts`). Dragging a card's port onto another card wires a
+  `depends_on` link (cycle-checked); into the void, it opens the create form
+  pre-wired (nothing exists until Save). Edges turn red when the queue order
+  breaks a dependency — clicking one explains why and offers to drop the
+  link; a warning badge flags dependencies neither scheduled nor done.
+  Locked cards are frozen here too; zoom wheel/buttons + auto-fit down to a
+  floor, then a thin proportional scrollbar takes over; an expand button
+  blows the lane up into a fullscreen foreground modal (same component,
+  `fullscreen` prop).
 - **Files & Git rail views (GX1–GX9)**: two READ-ONLY rail
   views. 📁 Files: lazy explorer + plain-text viewer (line-number gutter, no
   highlighting in v1 — shiki/highlight.js noted for v2) over roots the main
