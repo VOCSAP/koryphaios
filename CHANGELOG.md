@@ -1,5 +1,26 @@
 # Changelog
 
+## desktop (experimental) — Workflow lane: the dispatch queue as a visual chain
+
+The roadmap view splits horizontally: kanban on top, a new **Workflow lane**
+below (`WorkflowLane.tsx`) drawing the dispatch queue as a left-to-right chain
+of linked cards. Design decisions: positions are DERIVED, never stored — X
+follows the queue rank, Y stacks the connected components of `depends_on` as
+parallel stream rows (`desktop/src/shared/workflow.ts`, pure + bun-tested) —
+so the lane and the kanban can never drift, and the shared broker schema needs
+no coordinates. Reorders commit through one new atomic broker route
+(`POST /roadmap/reorder`: ids in order → queue 1..N in a transaction, others
+unqueued, 500-id cap) instead of N racy upserts. Interactions: HTML5 drop from
+the board (insertion caret), in-lane drag to reorder, a port to pull
+`depends_on` links between cards (cycle-checked) or into the void (create-form
+opens pre-wired; cancelling creates nothing), right-click to create at a slot,
+red edges + click-for-why panel when the queue order breaks a dependency, a
+warning badge for dependencies neither scheduled nor done, locked in_progress
+cards shown as frozen chain heads, wheel/button zoom with auto-fit down to a
+floor then a thin proportional scrollbar. The old flat queue list is replaced
+by the lane (same dispatch button); the card context menu now toggles
+queue/unqueue.
+
 ## desktop (experimental) — Greek glyph icon set, attention glow, button-style pass
 
 Full iconography overhaul born from the CSS audit (DESIGN.md): the emoji rails

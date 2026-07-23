@@ -502,6 +502,18 @@ export const EN_DEFAULTS: Record<string, string> = {
   'roadmap.queueSection': 'Dispatch queue',
   'roadmap.queueAdd': '⏳ Queue for dispatch',
   'roadmap.queueRemove': 'Remove from queue',
+  'roadmap.wf.title': 'Workflow',
+  'roadmap.wf.hint': 'Drag roadmap cards here — agents process the chain left to right.',
+  'roadmap.wf.collapse': 'Collapse the workflow lane',
+  'roadmap.wf.expand': 'Expand the workflow lane',
+  'roadmap.wf.linkHint':
+    'Release on a card to make it depend on this one; release on empty space to create a new dependent item.',
+  'roadmap.wf.violationOrder':
+    '"{item}" is scheduled before its dependency "{dep}": reorder the queue or remove the dependency.',
+  'roadmap.wf.violationMissing': 'Dependencies neither scheduled before this item nor done: {list}',
+  'roadmap.wf.depLabel': '"{item}" depends on "{dep}".',
+  'roadmap.wf.removeDep': 'Remove dependency',
+  'roadmap.wf.createHere': 'Create a roadmap item here',
   'roadmap.dispatchFirst': '▶ Send first to team-lead',
   'roadmap.dispatchNoLeadHint':
     'Designate a team-lead (👑 in the Agents sidebar) to dispatch queued items.',

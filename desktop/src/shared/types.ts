@@ -410,6 +410,10 @@ export interface RoadmapUpsertResponse {
 export interface RoadmapArchiveResponse {
   item: RoadmapItem
 }
+/** Atomic queue rewrite (Workflow lane): the queued items after, in order. */
+export interface RoadmapReorderResponse {
+  items: RoadmapItem[]
+}
 
 /** Navigation rail views: Home (C5), Agents, Browser (D1), Files (GX6), Git (GX3), Roadmap (C3), Graph (C26), Worktrees (C6), Journal (C14). */
 export type DeckView =
@@ -734,6 +738,8 @@ export interface DeckApi {
   roadmapList(filters: RoadmapListFilters): Promise<RoadmapItem[]>
   roadmapUpsert(fields: RoadmapUpsertFields): Promise<RoadmapItem>
   roadmapArchive(id: string): Promise<RoadmapItem>
+  /** Workflow lane: atomically rewrite the dispatch queue to this id order. */
+  roadmapReorder(ids: string[]): Promise<RoadmapItem[]>
   /** Send the first queued item to the team-lead (PLAN C15). */
   roadmapDispatch(): Promise<DispatchResult>
   /** Context wand (PLAN C21): read-only haiku pass drafting the context field. */

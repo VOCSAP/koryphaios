@@ -14,6 +14,8 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { CreateMenu } from './CreateMenu'
 import { KIND_ICONS, RoadmapItemModal } from './RoadmapItemModal'
+import { WorkflowLane } from './WorkflowLane'
+import { insertAt } from '@shared/workflow'
 
 // Roadmap view (PLAN C3-M3, reworked as a kanban board in PLAN K1): one column
 // per status, native HTML5 drag & drop between columns, MoSCoW priority as a
@@ -48,6 +50,10 @@ interface Draft {
   rationale: string
   context: string
   tags: string
+  /** Workflow lane seeds: dependencies pre-wired on a lane-born draft. */
+  depends_on?: string[]
+  /** Queue slot the created item is inserted at (lane create flows). */
+  insertAtQueue?: number
 }
 
 const EMPTY_DRAFT: Draft = {
@@ -220,12 +226,12 @@ export function RoadmapView(): React.JSX.Element {
   // Context wand (PLAN C21): one in-flight generation at a time.
   const [wandBusy, setWandBusy] = useState(false)
 
+  // Always fetch UNfiltered (kind narrows the board client-side): the
+  // Workflow lane must always see the whole queue, otherwise a reorder
+  // committed under an active filter would silently unqueue hidden items.
   const refresh = useCallback(async (): Promise<void> => {
     try {
-      const next = await window.api.roadmapList({
-        kind: kindFilter || undefined,
-        include_archived: showArchived
-      })
+      const next = await window.api.roadmapList({ include_archived: showArchived })
       setItems(next)
       setError(null)
     } catch (e) {
@@ -233,7 +239,7 @@ export function RoadmapView(): React.JSX.Element {
     } finally {
       setLoaded(true)
     }
-  }, [kindFilter, showArchived])
+  }, [showArchived])
 
   // Initial load + poll while the view is visible (agents may write any time).
   useEffect(() => {
@@ -278,8 +284,18 @@ export function RoadmapView(): React.JSX.Element {
         description: draft.description,
         rationale: draft.rationale,
         context: draft.context,
-        tags
+        tags,
+        depends_on: draft.depends_on
       })
+      // Lane-born draft: slot the new item into the queue where it was dropped
+      // (nothing was written before Save, so Cancel really created nothing).
+      if (draft.id === undefined && draft.insertAtQueue !== undefined) {
+        const queuedIds = items
+          .filter((i) => i.queue !== null && i.status !== 'done' && i.status !== 'archived')
+          .sort((a, b) => a.queue! - b.queue!)
+          .map((i) => i.id)
+        await window.api.roadmapReorder(insertAt(queuedIds, saved.id, draft.insertAtQueue))
+      }
       setDraft(null)
       setSelectedId(saved.id)
       showToast('toast.roadmapSaved')
@@ -309,11 +325,7 @@ export function RoadmapView(): React.JSX.Element {
     }
   }
 
-  // Dispatch queue (PLAN C15): operator-ordered subset, rendered on top.
-  const queued = items
-    .filter((i) => i.queue !== null && i.status !== 'done' && i.status !== 'archived')
-    .sort((a, b) => a.queue! - b.queue!)
-
+  // Dispatch queue (PLAN C15): the Workflow lane below the board renders it.
   const setQueue = async (item: RoadmapItem, queue: number | null): Promise<void> => {
     try {
       await window.api.roadmapUpsert({ id: item.id, queue })
@@ -325,6 +337,53 @@ export function RoadmapView(): React.JSX.Element {
 
   const queueItem = (item: RoadmapItem): Promise<void> =>
     setQueue(item, Math.max(0, ...items.map((i) => i.queue ?? 0)) + 1)
+
+  // ----- workflow lane (graphical dispatch queue) -----
+
+  const reorderQueue = async (ids: string[]): Promise<void> => {
+    try {
+      await window.api.roadmapReorder(ids)
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const addDep = async (childId: string, parentId: string): Promise<void> => {
+    const child = items.find((i) => i.id === childId)
+    if (!child || child.depends_on.includes(parentId)) return
+    try {
+      await window.api.roadmapUpsert({ id: childId, depends_on: [...child.depends_on, parentId] })
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const removeDep = async (childId: string, parentId: string): Promise<void> => {
+    const child = items.find((i) => i.id === childId)
+    if (!child) return
+    try {
+      await window.api.roadmapUpsert({
+        id: childId,
+        depends_on: child.depends_on.filter((d) => d !== parentId)
+      })
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /** Lane create flows (right-click / link into the void): prefilled draft. */
+  const createAt = (queueIndex: number, dependsOn: string[]): void => {
+    setDraft({
+      ...EMPTY_DRAFT,
+      status: 'planned',
+      priority: 'should',
+      depends_on: dependsOn,
+      insertAtQueue: queueIndex
+    })
+  }
 
   // Context wand (PLAN C21): a read-only haiku pass drafts the briefing from
   // the item + the project files. It only fills the textarea (still editable);
@@ -436,11 +495,17 @@ export function RoadmapView(): React.JSX.Element {
         disabled: locked,
         onSelect: () => setDraft(toDraft(item))
       },
-      {
-        label: t('roadmap.menuQueue'),
-        disabled: locked || closed || item.queue !== null,
-        onSelect: () => void queueItem(item)
-      },
+      item.queue !== null
+        ? {
+            label: t('roadmap.queueRemove'),
+            disabled: locked,
+            onSelect: () => void setQueue(item, null)
+          }
+        : {
+            label: t('roadmap.menuQueue'),
+            disabled: locked || closed,
+            onSelect: () => void queueItem(item)
+          },
       {
         label: t('roadmap.menuAssign'),
         disabled: locked || closed,
@@ -458,7 +523,7 @@ export function RoadmapView(): React.JSX.Element {
   const columns: RoadmapStatus[] = showArchived ? [...BOARD_COLUMNS, 'archived'] : BOARD_COLUMNS
   const columnItems = (status: RoadmapStatus): RoadmapItem[] =>
     items
-      .filter((i) => i.status === status)
+      .filter((i) => i.status === status && (!kindFilter || i.kind === kindFilter))
       .sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority])
 
   return (
@@ -505,40 +570,6 @@ export function RoadmapView(): React.JSX.Element {
       </header>
 
       {error && <div className="roadmap-error">{t('roadmap.error', { error })}</div>}
-
-      {queued.length > 0 && (
-        <section className="rm-section rm-section-queue">
-          <h3 className="rm-section-head rm-queue-head">
-            {GLYPH_BADGES.clepsydra} {t('roadmap.queueSection')}
-            <span className="rm-count">{queued.length}</span>
-            <span className="roadmap-spacer" />
-            <button
-              className="primary rm-dispatch-btn"
-              disabled={!hasLead}
-              title={hasLead ? undefined : t('roadmap.dispatchNoLeadHint')}
-              onClick={() => void dispatch()}
-            >
-              {t('roadmap.dispatchFirst')}
-            </button>
-          </h3>
-          {!hasLead && <p className="rm-queue-hint">{t('roadmap.dispatchNoLeadHint')}</p>}
-          {queued.map((item) => (
-            <div key={item.id} className="rm-queue-row">
-              <span className="rm-queue-pos">#{item.queue}</span>
-              <button className="rm-queue-title" onClick={() => setSelectedId(item.id)}>
-                {KIND_ICONS[item.kind]} {item.title}
-              </button>
-              <button
-                className="row-btn"
-                title={t('roadmap.queueRemove')}
-                onClick={() => void setQueue(item, null)}
-              >
-                {GLYPH_ACTIONS.close}
-              </button>
-            </div>
-          ))}
-        </section>
-      )}
 
       {loaded && items.length === 0 && !error && (
         <p className="roadmap-empty">{t('roadmap.empty')}</p>
@@ -592,6 +623,20 @@ export function RoadmapView(): React.JSX.Element {
           )
         })}
       </div>
+
+      {/* Workflow lane (bottom half): the dispatch queue as a visual chain —
+          cards top, execution order below, per the operator's mental model. */}
+      <WorkflowLane
+        items={items}
+        hasLead={hasLead}
+        onDispatch={() => void dispatch()}
+        onOpen={(id) => setSelectedId(id)}
+        onMenu={(item, x, y) => setMenu({ x, y, item })}
+        onReorder={(ids) => void reorderQueue(ids)}
+        onCreateAt={createAt}
+        onAddDep={(childId, parentId) => void addDep(childId, parentId)}
+        onRemoveDep={(childId, parentId) => void removeDep(childId, parentId)}
+      />
 
       {selected && !draft && (
         <RoadmapItemModal

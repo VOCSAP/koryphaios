@@ -20,6 +20,7 @@ import type {
   RoadmapItem,
   RoadmapListFilters,
   RoadmapListResponse,
+  RoadmapReorderResponse,
   RoadmapUpsertFields,
   RoadmapUpsertResponse
 } from '../shared/types'
@@ -126,6 +127,23 @@ export async function upsertRoadmap(
     ...fields
   })
   return res.item
+}
+
+/**
+ * Atomic queue rewrite (Workflow lane): `ids` becomes the whole dispatch
+ * queue in order; every other queued item of the project is unqueued.
+ */
+export async function reorderRoadmap(
+  endpoint: BrokerEndpoint,
+  projectKey: string,
+  ids: string[]
+): Promise<RoadmapItem[]> {
+  const res = await roadmapPost<RoadmapReorderResponse>(endpoint, '/roadmap/reorder', {
+    project_key: projectKey,
+    by: DECK_AUTHOR,
+    ids
+  })
+  return res.items
 }
 
 export async function archiveRoadmap(endpoint: BrokerEndpoint, id: string): Promise<RoadmapItem> {
