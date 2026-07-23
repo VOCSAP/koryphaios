@@ -106,6 +106,34 @@ l'opérateur sur une machine avec affichage.
       battle avec juge, picker (accordéon providers, favoris ★, détection
       CLIs), Settings > Modèles avec un endpoint Ollama/LiteLLM réel
       (découverte + inférence + clé chiffrée safeStorage + bouton ⊘).
+- [ ] **Lot limites d'usage + Antigravity (session 2026-07-22)** — vérifs
+      terrain, aucune n'est couverte par les tests (endpoints et binaires
+      réels inaccessibles en CI) :
+  - **Modale limites** : rendu deux thèmes ; fermeture clic extérieur / croix
+    / Échap ; états dégradés réels (« non connecté », « indisponible »,
+    valeurs « stale » Codex) ; bouton ↻ (contourne bien le cache 3 min).
+  - **Provider Claude** : appel réel de `api.anthropic.com/api/oauth/usage`
+    avec un compte connecté — les 4 blocs s'affichent (session 5 h, hebdo
+    tous modèles, hebdo par modèle : vérifier le nom réel du champ
+    `seven_day_*` renvoyé pour un plan Fable, crédits extra) ; pas de 429 au
+    poll 5 min (le User-Agent vient de `claude --version` : vérifier la
+    valeur sondée) ; token expiré + Claude Code fermé → « non connecté ».
+  - **Provider Codex** : handshake réel `codex app-server`
+    (initialize/initialized puis `account/rateLimits/read`) ; couper
+    l'app-server pour vérifier le repli fichier de session (mention stale).
+  - **Provider Antigravity (quota)** : lecture keyring réelle — macOS
+    (`security`, service `gemini` / compte `antigravity`, blob
+    go-keyring-base64) et Linux (`secret-tool`) ; extraction du
+    client_secret depuis le binaire `agy` (sinon var
+    `KORY_ANTIGRAVITY_CLIENT_SECRET`) puis refresh OAuth ; buckets réels
+    `gemini-5h/weekly` + `3p-*` (le format a déjà changé une fois côté
+    Google).
+  - **Amphore-jauge** : lisibilité du niveau à 20 px (deux thèmes), teintes
+    vert/ambre/rouge, tooltip « X% restant » ; providers « utilisés » : une
+    tuile vivante → quota Claude seul, puis un fan-out graph multi-provider
+    → la moyenne bascule.
+  - **Provider Antigravity (modèles)** : voir §3.1bis (ids `agy models`,
+    approbation lecture fichier en `-p`, rendu PTY).
 - [ ] **Workflow lane (roadmap, branche `claude/roadmap-workflow-visual-m3qr0x`)**
       — canvas dérivé (`WorkflowLane.tsx` + `shared/workflow.ts`), couvert par
       tests purs + broker, jamais rendu à l'écran. À valider sur une vraie
@@ -200,6 +228,35 @@ l'opérateur sur une machine avec affichage.
 - [ ] **Décision #3** (`EXPLORATION-multi-llm.md`) : passer codex à
       `-c model_instructions_file` si les réponses régurgitent le contexte
       (non-bloquant aujourd'hui).
+
+### 3.1bis Limites d'usage (lot livré — résiduel)
+
+- [x] **Antigravity comme provider de MODÈLES** — livré (2e vague du lot) :
+      catalogue + adapter `agy -p` sous PTY (`pty-run.ts`), cf. CHANGELOG.
+      Résiduel à VALIDER sur un vrai poste : (a) les ids de modèles exacts via
+      `agy models` (liste curatée depuis la reco, non vérifiée terrain) ;
+      (b) que la lecture du fichier de contexte passe sans approbation en
+      mode `-p` (sinon : timeout visible dans le nœud) ; (c) le rendu PTY
+      (artefacts ANSI/CR nettoyés par `pty-run.ts`).
+- [ ] **Windows : lecture du keyring Antigravity** non implémentée (Credential
+      Manager sans lecture scriptable) — le provider s'affiche « non
+      connecté » sous Windows. Piste : addon natif ou `powershell` + DPAPI.
+- [ ] **Refresh token Antigravity** : le client_secret OAuth (public, flow
+      installed-app, mais bloqué par le secret-scanning GitHub) n'est PAS dans
+      le repo — extrait à l'exécution du binaire `agy` (scan `GOCSPX-…`) ou
+      fourni via `KORY_ANTIGRAVITY_CLIENT_SECRET`. Si l'extraction casse
+      (binaire obfusqué/rotation Google), le refresh se désactive et le token
+      stocké est utilisé tel quel — vérifier après chaque mise à jour majeure
+      d'Antigravity.
+- [x] **Badge d'alerte sur le bouton amphore** : remplacé (2e vague, demande
+      opérateur) par la jauge amphore — niveau = quota session restant moyen
+      des providers utilisés, teinte verte/ambre/rouge, poll 5 min à travers
+      le cache 3 min. À VALIDER visuellement (lisibilité du niveau à 20 px,
+      deux thèmes).
+- [ ] **Gemini CLI (comptes orga Code Assist)** : exclu par décision opérateur
+      (compte perso migré Antigravity). Si un besoin orga apparaît, le provider
+      `retrieveUserQuota` de gemini-cli se greffe dans `usage-service.ts` sur
+      le même modèle.
 
 ### 3.2 Mobile LAN
 

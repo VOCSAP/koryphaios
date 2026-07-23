@@ -42,6 +42,42 @@ detail modal, with EN/FR locale parity. Working plan: `PLAN-DIRECTIVES.md`
 (chantiers CT1–CT7); the deferred `clear`+briefing / context-gauge increment
 (CT6) and the option-A empirical checks live in `BACKLOG.md`.
 
+## desktop (experimental) — Usage-limits modal (amphora rail button)
+
+One rail button (amphora glyph — the level left in the jar), one foreground
+modal stacking the subscription quota gauges of every DETECTED frontier CLI:
+Claude Code (session 5 h + weekly all-models + weekly per-model + extra-usage
+credits via `api.anthropic.com/api/oauth/usage`), Codex (5 h + weekly via
+`codex app-server` JSON-RPC, local session-rollout fallback flagged stale) and
+Antigravity (gemini/3p pools × 5h/weekly via cloudcode-pa
+`retrieveUserQuotaSummary`, OS-keyring OAuth blob). Design decisions: a single
+unified modal (comparison at a glance) rather than a per-provider submenu or
+brand icons in the Greek-glyph rail; Gemini CLI deliberately excluded
+(individual accounts cut by Google on 2026-06-18, migrated to Antigravity —
+operator decision); all endpoints are reverse-engineered community mechanisms
+(CodexBar / openusage / Usage-Monitor), an operator-approved risk mitigated by
+per-provider degraded states ('not-connected' / 'error' / stale) and a 3-min
+main-side cache (the Anthropic endpoint 429s aggressive polling). Tokens never
+cross the IPC boundary. Chain: `usage-service.ts` → `usage:read` (tier 0) →
+`UsageLimitsModal.tsx`; gauges amber past 70 %, red past 90 %.
+
+Second wave of the lot: (1) **Antigravity as a model provider** — `agy` joins
+the frontier catalog (GraphCli `antigravity`, provider id `antigravity`,
+sigil `△`), executed headless through a "read this context file" instruction
++ `--add-dir` (no system/stdin flag documented) with `--print-timeout`, and
+ALWAYS under a PTY (`pty-run.ts`, injected as `runTty`) because `agy -p`
+hangs without a TTY (agy#318) and drops piped stdout (agy#76); model names
+ship with their effort suffix ("Gemini 3 Pro (High)") through the dedicated
+`sanitizeAntigravityModel` (double-quoted, spaces legal). Gemini CLI stays
+wired unchanged for org accounts. (2) **The amphora becomes a gauge** — its
+liquid level is the mean REMAINING session quota of the providers the app
+run actually draws down (live tiles + marked inference targets,
+`markProviderUsed` / `usedProviders` in the snapshot, math in
+`shared/usage.ts`), polled every 5 min renderer-side through the 3-min main
+cache; tone green / amber (≤30 %) / red (≤10 %) via `.usage-*` classes,
+sanctioned as the one data-fill exception to the stroke-only glyph rule
+(DESIGN.md §5).
+
 ## desktop (experimental) — Workflow lane: the dispatch queue as a visual chain
 
 The roadmap view splits horizontally: kanban on top, a new **Workflow lane**

@@ -1,3 +1,4 @@
+import { useId } from 'react'
 import type { DeckView, RoadmapKind } from '@shared/types'
 
 // Greek-glyph icon set of the navigation rails (desktop rail + mobile tabs).
@@ -13,8 +14,9 @@ import type { DeckView, RoadmapKind } from '@shared/types'
 // agents (the chorus), armillary sphere = browser, sealed scroll = files,
 // labyrinth = roadmap, constellation = graph, olive branch = worktrees,
 // open volumen = journal, winged tablet = companion, caduceus = inbox
-// (Hermes carries the messages). Git keeps the universal branch graph —
-// recognisability wins over lore for SCM.
+// (Hermes carries the messages), amphora = usage limits (the level left in
+// the jar). Git keeps the universal branch graph — recognisability wins over
+// lore for SCM.
 
 /** Shared frame so every glyph renders identically inside the rail spans. */
 function Svg({ children }: { children: React.ReactNode }): React.JSX.Element {
@@ -149,6 +151,65 @@ const IconCaduceus = (
     <path d="M15.7 9.5c0 1.8-7.4 2.4-7.4 4.3 0 1.9 7.4 2.5 7.4 4.3" />
   </Svg>
 )
+
+/** Amphora with its fill line: how much is left in the jar (usage limits). */
+const IconAmphora = (
+  <Svg>
+    <path d="M9 4.5h6" />
+    <path d="M10 4.5v2M14 4.5v2" />
+    <path d="M10 6.5c-2.5.8-4 2.6-4 4.9 0 3.3 2.2 5.5 4.5 6.3M14 6.5c2.5.8 4 2.6 4 4.9 0 3.3-2.2 5.5-4.5 6.3" />
+    <path d="M9.5 19.5h5" />
+    <path d="M9.3 13.5h5.4" />
+  </Svg>
+)
+
+/** Closed silhouette of the amphora body — the clip region of the gauge. */
+const AMPHORA_BODY =
+  'M10 6.5 C7.5 7.3 6 9.1 6 11.4 c0 3.3 2.2 5.5 4.5 6.3 h3 c2.3 -0.8 4.5 -3 4.5 -6.3 C18 9.1 16.5 7.3 14 6.5 Z'
+
+/**
+ * Data-driven amphora (nav rail): the jar's liquid level IS the remaining
+ * session quota (shared/usage.ts). The liquid is a translucent currentColor
+ * fill clipped to the body — the one sanctioned data-fill exception to the
+ * stroke-only glyph rule (DESIGN.md §5); colour still rides currentColor so
+ * the tone classes (.usage-ok/.usage-warn/.usage-hot) do the tinting.
+ * `fraction` null = no data: render the static fill-line variant.
+ */
+export function AmphoraGauge({ fraction }: { fraction: number | null }): React.JSX.Element {
+  const clipId = useId()
+  // Body vertical range on the 24-grid: shoulders at 6.5, foot line at 17.7.
+  const top = 6.5
+  const bottom = 17.7
+  const level = fraction === null ? null : Math.min(1, Math.max(0, fraction))
+  const y = level === null ? bottom : top + (bottom - top) * (1 - level)
+  return (
+    <Svg>
+      <path d="M9 4.5h6" />
+      <path d="M10 4.5v2M14 4.5v2" />
+      <path d="M10 6.5c-2.5.8-4 2.6-4 4.9 0 3.3 2.2 5.5 4.5 6.3M14 6.5c2.5.8 4 2.6 4 4.9 0 3.3-2.2 5.5-4.5 6.3" />
+      <path d="M9.5 19.5h5" />
+      {level === null ? (
+        <path d="M9.3 13.5h5.4" />
+      ) : (
+        <>
+          <clipPath id={clipId}>
+            <path d={AMPHORA_BODY} />
+          </clipPath>
+          <rect
+            x="5"
+            y={y}
+            width="14"
+            height={bottom - y + 0.6}
+            clipPath={`url(#${clipId})`}
+            fill="currentColor"
+            stroke="none"
+            opacity="0.45"
+          />
+        </>
+      )}
+    </Svg>
+  )
+}
 
 /** Ellipsis: the mobile "More" sheet. */
 const IconMore = (
@@ -647,8 +708,8 @@ export const GLYPH_ACTIONS = {
   wand: IconWand
 }
 
-/** Every place a rail glyph can appear: the 9 views + the two rail extras. */
-export type GlyphName = DeckView | 'companion' | 'inbox' | 'more'
+/** Every place a rail glyph can appear: the 9 views + the rail extras. */
+export type GlyphName = DeckView | 'companion' | 'inbox' | 'usage' | 'more'
 
 export const GLYPHS: Record<GlyphName, React.JSX.Element> = {
   home: IconTemple,
@@ -662,5 +723,6 @@ export const GLYPHS: Record<GlyphName, React.JSX.Element> = {
   journal: IconVolumen,
   companion: IconWingedTablet,
   inbox: IconCaduceus,
+  usage: IconAmphora,
   more: IconMore
 }

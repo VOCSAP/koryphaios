@@ -113,6 +113,8 @@ interface DeckState {
   remoteLink: RemoteState | null
   /** Compagnon dialog visibility (PLAN MB2, desktop window only). */
   companionOpen: boolean
+  /** Usage-limits modal visibility (quota gauges of the detected CLIs). */
+  usageOpen: boolean
   /** True while the companion LAN server is up (rail glyph glow). */
   companionRunning: boolean
 
@@ -121,6 +123,7 @@ interface DeckState {
   /** Hide the offline banner for the current outage (red rail dot remains). */
   dismissOfflineBanner(): void
   openCompanion(open: boolean): void
+  openUsage(open: boolean): void
   /** Open the browser view, optionally docking a session next to it (D1). */
   openBrowser(pairedId?: string | null): void
   /** Change/detach the docked session without leaving the browser view. */
@@ -252,6 +255,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   mobile: false,
   remoteLink: null,
   companionOpen: false,
+  usageOpen: false,
   companionRunning: false,
 
   async init() {
@@ -388,6 +392,7 @@ export const useDeck = create<DeckState>((set, get) => ({
 
   setView: (view) => set({ view, ...(view === 'browser' ? { browserOpened: true } : null) }),
   openCompanion: (open) => set({ companionOpen: open }),
+  openUsage: (open) => set({ usageOpen: open }),
   openBrowser: (pairedId) =>
     set((s) => ({
       view: 'browser',

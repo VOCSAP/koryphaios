@@ -32,6 +32,7 @@ import {
   type HttpInferenceInput
 } from './model-adapters'
 import { runHelp } from './help-assistant'
+import { markProviderUsed } from './usage-service'
 import type { LocalProviderConfig } from '../shared/models'
 
 // ---------------------------------------------------------------------------
@@ -171,6 +172,11 @@ export interface InferDeps {
   cwd: string
   /** Injectable for tests; defaults to runHelp with the graph timeout. */
   run?: (command: string) => Promise<string>
+  /**
+   * PTY-backed runner for CLIs that misbehave without a TTY (antigravity —
+   * agy#318/#76). Optional: absent (tests), those targets use `run`.
+   */
+  runTty?: (command: string) => Promise<string>
   /** Configured local endpoints (C29) for cli 'local' targets. */
   localProviders?: LocalProviderConfig[]
   /** Injectable for tests; defaults to runHttpInference. */
@@ -204,6 +210,10 @@ export async function runInference(
   if (node.type !== 'user') throw new Error('inference target must be a user node')
   const targets = req.targets.slice(0, 4)
   if (targets.length === 0) throw new Error('no inference target')
+  // Feed the amphora gauge: these providers are being drawn down this run.
+  for (const t of [...targets, ...(req.battle ? [req.judge ?? DEFAULT_JUDGE] : [])]) {
+    markProviderUsed(t.cli)
+  }
 
   const run =
     deps.run ??
@@ -230,7 +240,8 @@ export async function runInference(
     }
     const content = target.cli === 'claude' ? compiled.system : composeSinglePrompt(compiled)
     const contextFile = writeContextFile(filesDir, { nodeId: node.id, cli: target.cli }, content)
-    return run(buildAdapterCommand({ promptText: compiled.prompt, contextFile, target }))
+    const exec = target.cli === 'antigravity' && deps.runTty ? deps.runTty : run
+    return exec(buildAdapterCommand({ promptText: compiled.prompt, contextFile, target }))
   }
 
   const settled = await Promise.allSettled(
@@ -312,7 +323,10 @@ export async function runInference(
         { nodeId: `${node.id}-judge`, cli: judgeTarget.cli },
         content
       )
-      return run(buildAdapterCommand({ promptText: GRAPH_JUDGE_PROMPT, contextFile, target: judgeTarget }))
+      const exec = judgeTarget.cli === 'antigravity' && deps.runTty ? deps.runTty : run
+      return exec(
+        buildAdapterCommand({ promptText: GRAPH_JUDGE_PROMPT, contextFile, target: judgeTarget })
+      )
     }
     const started = Date.now()
     const judgeSpot = findFreeSpot(out.nodes, node.x, node.y + 2 * FAN_Y)

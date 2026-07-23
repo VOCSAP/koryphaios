@@ -27,7 +27,8 @@ import type { GraphCli } from '../shared/graph'
 export const FRONTIER_BINS: { cli: Exclude<GraphCli, 'local'>; bin: string }[] = [
   { cli: 'claude', bin: 'claude' },
   { cli: 'codex', bin: 'codex' },
-  { cli: 'gemini', bin: 'gemini' }
+  { cli: 'gemini', bin: 'gemini' },
+  { cli: 'antigravity', bin: 'agy' }
 ]
 
 /** Cross-shell "is this binary on PATH?" probe (exit 0 = present). */
@@ -60,10 +61,13 @@ export async function detectClis(
   if (detectCache && !opts.refresh) return detectCache
   const probe = opts.probe ?? probeBin
   const results = await Promise.all(FRONTIER_BINS.map(({ bin }) => probe(bin, shell)))
-  const detected = { claude: false, codex: false, gemini: false, local: true } as Record<
-    GraphCli,
-    boolean
-  >
+  const detected = {
+    claude: false,
+    codex: false,
+    gemini: false,
+    antigravity: false,
+    local: true
+  } as Record<GraphCli, boolean>
   FRONTIER_BINS.forEach(({ cli }, i) => (detected[cli] = !!results[i]))
   detectCache = detected
   return detected

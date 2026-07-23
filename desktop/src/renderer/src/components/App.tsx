@@ -29,6 +29,7 @@ import { ExportTemplateDialog } from './ExportTemplateDialog'
 import { ErrorBoundary } from './ErrorBoundary'
 import { StatusBanner } from './StatusBanner'
 import { CompanionDialog } from './CompanionDialog'
+import { UsageLimitsModal } from './UsageLimitsModal'
 import { MobileNav } from './MobileNav'
 import { MobileAgents } from './MobileAgents'
 import { RoadmapList } from './RoadmapList'
@@ -97,6 +98,7 @@ export function App(): React.JSX.Element {
   const remote = useDeck((s) => s.remote)
   const mobile = useDeck((s) => s.mobile)
   const companionOpen = useDeck((s) => s.companionOpen)
+  const usageOpen = useDeck((s) => s.usageOpen)
   const supervisorId = useDeck((s) => s.sessions.find((x) => x.supervisor)?.id ?? null)
 
   useEffect(() => {
@@ -285,6 +287,7 @@ export function App(): React.JSX.Element {
       <StatusBanner />
       <RemoteLinkOverlay />
       {companionOpen && !remote && <CompanionDialog />}
+      {usageOpen && <UsageLimitsModal />}
       <NavRail />
       {/* The agents and home views stay MOUNTED under the other views:
           unmounting TerminalTile would tear down the xterm instances and their

@@ -183,3 +183,33 @@ test("runHttpInference: returns the completion, readable errors otherwise", asyn
   const http500 = (async () => new Response("boom", { status: 500 })) as typeof fetch;
   await expect(runHttpInference(input, http500)).rejects.toThrow("HTTP 500");
 });
+
+test("antigravity model sanitizer allows display names, rejects injection", async () => {
+  const { sanitizeAntigravityModel } = await import("../desktop/src/main/model-adapters.ts");
+  expect(sanitizeAntigravityModel("Gemini 3 Pro (High)")).toBe("Gemini 3 Pro (High)");
+  expect(sanitizeAntigravityModel("")).toBe("");
+  expect(sanitizeAntigravityModel('x" ; rm -rf /')).toBe("");
+  expect(sanitizeAntigravityModel("a$(whoami)")).toBe("");
+});
+
+test("antigravity adapter: file instruction, add-dir, quoted model, print-timeout", () => {
+  const cmd = buildAdapterCommand({
+    promptText: "ignored — the context file carries the composed prompt",
+    contextFile: "/state/graphs/graph-context-n1-antigravity.md",
+    target: { cli: "antigravity", model: "Gemini 3 Pro (High)" },
+    platform: "linux"
+  });
+  expect(cmd.startsWith("agy -p ")).toBe(true);
+  expect(cmd).toContain('/state/graphs/graph-context-n1-antigravity.md');
+  expect(cmd).toContain('--add-dir "/state/graphs"');
+  expect(cmd).toContain('--model "Gemini 3 Pro (High)"');
+  expect(cmd).toContain("--print-timeout 4m");
+  // No model flag when empty (CLI default applies).
+  const noModel = buildAdapterCommand({
+    promptText: "x",
+    contextFile: "/state/graphs/f.md",
+    target: { cli: "antigravity", model: "" },
+    platform: "linux"
+  });
+  expect(noModel).not.toContain("--model");
+});

@@ -14,8 +14,8 @@ export type GraphNodeType = 'user' | 'assistant' | 'judge'
  * a direct HTTP call to an OpenAI-compatible endpoint configured in Settings
  * (Ollama, LiteLLM… — C29).
  */
-export type GraphCli = 'claude' | 'codex' | 'gemini' | 'local'
-export const GRAPH_CLIS: GraphCli[] = ['claude', 'codex', 'gemini', 'local']
+export type GraphCli = 'claude' | 'codex' | 'gemini' | 'antigravity' | 'local'
+export const GRAPH_CLIS: GraphCli[] = ['claude', 'codex', 'gemini', 'antigravity', 'local']
 
 /** One inference target of a fan-out. model '' = the CLI's default model. */
 export interface ModelTarget {
