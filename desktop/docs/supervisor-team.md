@@ -83,6 +83,17 @@ Independent of the supervisor, ONE session per window can be designated
 Designating a new lead demotes the previous one. The crown is captured in
 workspaces and templates.
 
+## Context/token economy (directive cards)
+
+To keep long-running agents cheap, the supervisor or the team-lead can queue
+**directive cards** on the shared roadmap (`roadmap_add`/`roadmap_update` with
+kind `directive`): a `clear`, `compact` or `magic_compact` command aimed at
+chosen peers. When the card is dispatched, the **Deck itself** types the command
+into those peers' terminals — the supervisor/lead never injects into a peer's
+terminal, and the agents never run the directive. This keeps a manipulated lead
+from doing anything worse than a spurious `/clear`. Full behavior in
+[roadmap.md](roadmap.md#directive-cards-contexttoken-economy).
+
 ## Deck announcements
 
 System messages from the window (join announcements, operator megaphone
