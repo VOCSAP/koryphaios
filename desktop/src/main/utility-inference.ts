@@ -16,6 +16,7 @@ import {
   type HttpInferenceInput
 } from './model-adapters'
 import { runHelp } from './help-assistant'
+import { markProviderUsed } from './usage-service'
 import type { ModelTarget } from '../shared/graph'
 import type { LocalProviderConfig } from '../shared/models'
 
@@ -42,6 +43,11 @@ export interface UtilityDeps {
   localProviders?: LocalProviderConfig[]
   /** Injectable for tests; defaults to runHelp with the graph timeout. */
   run?: (command: string) => Promise<string>
+  /**
+   * PTY-backed runner for CLIs that misbehave without a TTY (antigravity —
+   * agy#318/#76). Optional: absent (tests), those targets use `run`.
+   */
+  runTty?: (command: string) => Promise<string>
   /** Injectable for tests; defaults to runHttpInference. */
   http?: (input: HttpInferenceInput) => Promise<string>
 }
@@ -61,6 +67,7 @@ export async function runUtilityInference(
   req: UtilityInferenceRequest
 ): Promise<string> {
   const { target } = req
+  markProviderUsed(target.cli) // feed the amphora gauge
   if (target.cli === 'local') {
     const provider = (deps.localProviders ?? []).find((p) => p.id === target.providerId)
     if (!provider) throw new Error(`unknown local provider ${target.providerId ?? '?'}`)
@@ -88,5 +95,6 @@ export async function runUtilityInference(
     deps.run ??
     ((cmd: string) =>
       runHelp({ command: cmd, shell: deps.shell, cwd: deps.cwd, timeoutMs: GRAPH_INFER_TIMEOUT_MS }))
-  return run(command)
+  const exec = target.cli === 'antigravity' && deps.runTty ? deps.runTty : run
+  return exec(command)
 }

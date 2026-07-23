@@ -38,7 +38,13 @@ const OUTLINE_CHARS = 46
 
 // Provider sigils stay typographic characters (abstract, monochrome — already
 // in the glyph tone, and they also live inside string labels).
-const CLI_ICONS: Record<GraphCli, string> = { claude: '✴', codex: '◆', gemini: '✦', local: '⌂' }
+const CLI_ICONS: Record<GraphCli, string> = {
+  claude: '✴',
+  codex: '◆',
+  gemini: '✦',
+  antigravity: '△',
+  local: '⌂'
+}
 
 /** Default fan-out selection before the operator picks anything. */
 const DEFAULT_TARGET_KEY = 'anthropic:sonnet'

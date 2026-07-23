@@ -84,11 +84,12 @@ test("detectClis: injected probe, cached until refresh", async () => {
   expect(first.claude).toBe(true);
   expect(first.codex).toBe(false);
   expect(first.gemini).toBe(false);
-  expect(calls).toBe(3);
+  expect(first.antigravity).toBe(false);
+  expect(calls).toBe(4);
   await detectClis("", { probe });
-  expect(calls).toBe(3); // cached
+  expect(calls).toBe(4); // cached
   await detectClis("", { probe, refresh: true });
-  expect(calls).toBe(6);
+  expect(calls).toBe(8);
 });
 
 test("getCatalogs assembles detection + discovery, skips half-configured locals", async () => {

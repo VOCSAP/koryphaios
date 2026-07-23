@@ -19,7 +19,7 @@
 // Node builtins only; every builder is pure and unit-testable under bun.
 
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { HELP_DISALLOWED_TOOLS } from './help-assistant'
 import { quotePromptArg } from './session-command'
 import type { GraphCli, ModelTarget } from '../shared/graph'
@@ -36,6 +36,16 @@ export const MAX_PROMPT_ARG_CHARS = 8000
  */
 export function sanitizeModel(model: string): string {
   return /^[A-Za-z0-9._:-]{0,128}$/.test(model) ? model : ''
+}
+
+/**
+ * Antigravity variant: `agy --model` takes the DISPLAY name with the effort
+ * suffix ("Gemini 3 Pro (High)"), so spaces and parens are legal — but the
+ * value is double-quoted on the command line, so quotes/backslashes/`$` stay
+ * forbidden ('' = omit the flag).
+ */
+export function sanitizeAntigravityModel(model: string): string {
+  return /^[A-Za-z0-9 ().+_:.-]{0,64}$/.test(model) ? model : ''
 }
 
 /** Windows-safe double-quoted path (paths come from the app, not the user). */
@@ -97,6 +107,26 @@ export function buildAdapterCommand(input: AdapterInput): string {
       const bin = input.bin?.trim() || 'gemini'
       const cmd = `${bin}${model ? ` -m ${model}` : ''} --approval-mode plan`
       return stdinFromFile(cmd, input.contextFile, plat)
+    }
+    case 'antigravity': {
+      // `agy` (Codeium-derived, NOT gemini-cli): no system flag, stdin
+      // behaviour undocumented — the context travels by FILE anyway (D5) via
+      // a constant "read this file" instruction + `--add-dir` on the context
+      // dir so the agent's read tool can open it. `--print-timeout` bounds
+      // the known non-TTY hang (agy#318) under GRAPH_INFER_TIMEOUT_MS; the
+      // stdout-drop bug (agy#76) is countered by running agy under a PTY
+      // (runPtyCommand — see graph-engine/utility-inference routing).
+      const bin = input.bin?.trim() || 'agy'
+      const model = sanitizeAntigravityModel(input.target.model)
+      const instruction =
+        `Read the file "${input.contextFile.replace(/"/g, '')}" and follow the ` +
+        `instructions it contains. Reply with the answer only, no preamble.`
+      return (
+        `${bin} -p ${quotePromptArg(instruction, plat)}` +
+        ` --add-dir ${quotedPath(dirname(input.contextFile))}` +
+        (model ? ` --model "${model}"` : '') +
+        ` --print-timeout 4m`
+      )
     }
     case 'local':
       // Local providers run over HTTP (runHttpInference), never a shell command.

@@ -72,6 +72,9 @@ import {
 } from './snippet-store'
 import { deleteGraph, loadGraphs, migrateGraphsAtRest, upsertGraph } from './graph-store'
 import { getCatalogs } from './model-registry'
+import { readUsage } from './usage-service'
+import { runPtyCommand } from './pty-run'
+import { GRAPH_INFER_TIMEOUT_MS } from './model-adapters'
 import { decryptProviders, sanitizeProviders } from './provider-secrets'
 import type { SecretCipher } from './scope-secrets'
 import { compileContext, runInference, type InferRequest } from './graph-engine'
@@ -352,11 +355,21 @@ export function registerIpc({
   // Utility-inference deps (lot A): the help/wand/digest flows share one
   // routing (utility-inference.ts) over the configured targets. Local-provider
   // keys are decrypted in memory here only, like graph:infer.
+  // PTY-backed runner for the CLIs that misbehave without a TTY (antigravity).
+  const runTty = (command: string): Promise<string> =>
+    runPtyCommand({
+      command,
+      shell: getConfig().shell,
+      cwd: getConfig().projectDir,
+      timeoutMs: GRAPH_INFER_TIMEOUT_MS
+    })
+
   const utilityDeps = (): UtilityDeps => ({
     stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
     shell: getConfig().shell,
     cwd: getConfig().projectDir,
-    localProviders: decryptProviders(getConfig().localProviders ?? [], secretCipher)
+    localProviders: decryptProviders(getConfig().localProviders ?? [], secretCipher),
+    runTty
   })
 
   // Context wand (PLAN C21): one read-only inference (config.wandTarget,
@@ -765,6 +778,22 @@ export function registerIpc({
     )
   )
 
+  // Usage modal: quota gauges of the detected CLIs. No renderer-controlled
+  // paths/commands cross this boundary (fixed binaries, fixed endpoints) and
+  // the reports carry percentages only — tokens never leave usage-service.
+  regHandle('usage:read', (_e, refresh?: boolean) =>
+    readUsage(
+      {
+        shell: getConfig().shell,
+        // Live tiles draw on the Claude subscription (multi-CLI tiles are a
+        // deferred lot — revisit the hardcoded 'claude' with it).
+        liveClis: () =>
+          service.list().some((s) => s.status !== 'exited') ? ['claude'] : []
+      },
+      { refresh: !!refresh }
+    )
+  )
+
   regHandle('graph:list', () => {
     const { stateDir, key } = graphCtx()
     // Opportunistic K8 migration: a pre-encryption clear file is rewritten
@@ -809,7 +838,8 @@ export function registerIpc({
         stateDir,
         shell: getConfig().shell,
         cwd: getConfig().projectDir,
-        localProviders: decryptProviders(getConfig().localProviders ?? [], secretCipher)
+        localProviders: decryptProviders(getConfig().localProviders ?? [], secretCipher),
+        runTty
       },
       doc,
       req ?? ({} as InferRequest)

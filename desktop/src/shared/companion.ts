@@ -126,6 +126,7 @@ export const COMPANION_MANIFEST = {
   graphSave: { kind: 'invoke', channel: 'graph:save' },
   graphCompile: { kind: 'invoke', channel: 'graph:compile' },
   modelCatalogs: { kind: 'invoke', channel: 'models:catalog' },
+  usageRead: { kind: 'invoke', channel: 'usage:read' },
   graphInfer: { kind: 'invoke', channel: 'graph:infer' },
   graphDraftOpen: { kind: 'invoke', channel: 'graphDraft:open' },
   inboxHistory: { kind: 'invoke', channel: 'inbox:history' },
@@ -224,6 +225,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'graph:list': 0,
   'graph:compile': 0,
   'models:catalog': 0,
+  'usage:read': 0,
   'inbox:history': 0,
   'companion:status': 0,
 
