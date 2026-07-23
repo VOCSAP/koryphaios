@@ -1294,8 +1294,18 @@ function handleRoadmapUpsert(
   if (badEnum(body.directive ?? undefined, DIRECTIVE_COMMANDS)) {
     return { error: "invalid directive (clear|compact|magic_compact)", status: 400 };
   }
-  if (body.target_peer_ids !== undefined && !Array.isArray(body.target_peer_ids)) {
-    return { error: "target_peer_ids must be an array", status: 400 };
+  if (body.target_peer_ids !== undefined) {
+    if (!Array.isArray(body.target_peer_ids)) {
+      return { error: "target_peer_ids must be an array", status: 400 };
+    }
+    // Reject over the cap loudly rather than truncating silently (no-silent-
+    // errors): the caller learns instead of some targets vanishing unnoticed.
+    if (body.target_peer_ids.length > MAX_DIRECTIVE_TARGETS) {
+      return {
+        error: `too many target_peer_ids (max ${MAX_DIRECTIVE_TARGETS})`,
+        status: 400,
+      };
+    }
   }
   // Queue position (PLAN C15): positive integer or null (= unqueued).
   if (
@@ -1639,6 +1649,14 @@ function handleRoadmapImport(body: {
       badEnum(it.status, ROADMAP_STATUSES)
     ) {
       return { error: `invalid item at index ${i}`, status: 400 };
+    }
+    // Uphold the same directive coherence as create/patch: a 'directive' row
+    // must carry a valid command (never persist kind='directive' + directive=null).
+    if (it.kind === "directive" && (!it.directive || !DIRECTIVE_COMMANDS.includes(it.directive))) {
+      return {
+        error: `invalid item at index ${i}: kind 'directive' needs a directive (clear|compact|magic_compact)`,
+        status: 400,
+      };
     }
   }
 

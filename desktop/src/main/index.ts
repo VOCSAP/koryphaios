@@ -27,6 +27,7 @@ import { applyProviderKeyPatch, sanitizeProviders } from './provider-secrets'
 import {
   globalLaunchCommand,
   globalWorktreeInit,
+  type MagicCompactMode,
   projectLaunchCommand,
   projectWorktreeInit,
   resolveFeatures,
@@ -640,28 +641,36 @@ const DISPATCH_WATCH_MS = 20_000
  * survives the in-app session switch. Options B (restart fork-resume) and C
  * (kill+respawn) are the documented fallbacks if A regresses.
  */
-const runMagicCompact = async (tileId: string, peerId: string): Promise<void> => {
-  const mode = resolveFeatures(config.projectDir).magicCompact
-  const useMagic = mode === 'on' || (mode === 'auto' && magicCompactPluginPresent(homedir()))
+const runMagicCompact = async (
+  tileId: string,
+  peerId: string,
+  useMagic: boolean,
+  mode: MagicCompactMode
+): Promise<void> => {
   if (!useMagic) {
     const why = mode === 'off' ? 'disabled' : 'plugin absent'
     const o = await service.injectCommand(tileId, '/compact')
     journal.add('dispatch', `magic_compact -> "${peerId}": ${why}, used /compact (${o})`)
     return
   }
-  // Arm the scanner BEFORE injecting so a fast banner is never missed.
-  const scan = service.waitForOutput(tileId, MAGIC_TIMEOUT_MS, (buf) => {
-    const id = parseMagicResume(buf)
-    if (id) return { kind: 'resume' as const, id }
-    if (isMagicShimFailure(buf)) return { kind: 'shim' as const }
-    return null
-  })
+  // Inject FIRST, then arm the scanner. Arming after the command is typed means
+  // the scanner can never capture output that predates it (a stale /resume
+  // banner or unrelated agent text), and the MAGIC_TIMEOUT_MS budget starts at
+  // injection rather than being eaten by injectCommand's idle wait. If injection
+  // never happens (no terminal / busy timeout) no scanner is armed, so no
+  // listeners leak. The banner is a PTY macrotask, so the synchronous
+  // waitForOutput() on the next line always attaches before it can arrive.
   const injected = await service.injectCommand(tileId, '/magic-compact')
   if (injected !== 'sent') {
     journal.add('dispatch', `magic_compact -> "${peerId}": /magic-compact not injected (${injected})`)
     return
   }
-  const res = await scan
+  const res = await service.waitForOutput(tileId, MAGIC_TIMEOUT_MS, (buf) => {
+    const id = parseMagicResume(buf)
+    if (id) return { kind: 'resume' as const, id }
+    if (isMagicShimFailure(buf)) return { kind: 'shim' as const }
+    return null
+  })
   if (res?.kind === 'resume') {
     // Option A: re-enter in place. The id is a strict UUID from the agent's own
     // terminal, typed behind the code-constant /resume prefix.
@@ -704,9 +713,20 @@ const executeDirective = async (item: RoadmapItem): Promise<void> => {
     )
     return
   }
+  // Resolve the magic-compact decision ONCE per card (not per target): both
+  // resolveFeatures (config reads) and the plugin fs scan are invariant across
+  // the card's targets. CLAUDE_CONFIG_DIR is honored so a relocated ~/.claude
+  // is still probed.
+  let magicMode: MagicCompactMode = 'off'
+  let useMagic = false
+  if (cmd === 'magic_compact') {
+    magicMode = resolveFeatures(config.projectDir).magicCompact
+    const claudeConfigDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
+    useMagic = magicMode === 'on' || (magicMode === 'auto' && magicCompactPluginPresent(claudeConfigDir))
+  }
   for (const t of matched) {
     if (cmd === 'magic_compact') {
-      void runMagicCompact(t.id, t.peerId)
+      void runMagicCompact(t.id, t.peerId, useMagic, magicMode)
     } else {
       void service
         .injectCommand(t.id, keys)
@@ -722,7 +742,7 @@ const executeDirective = async (item: RoadmapItem): Promise<void> => {
   }
 }
 
-const dispatchNext = async (): Promise<DispatchResult> => {
+const dispatchNextInner = async (): Promise<DispatchResult> => {
   try {
     const endpoint = resolveBrokerEndpoint()
     const key = computeDeckProjectKey(config.projectDir)
@@ -756,6 +776,20 @@ const dispatchNext = async (): Promise<DispatchResult> => {
     reportError('dispatch', 'dispatch failed', e)
     return { sent: false, reason: 'error' }
   }
+}
+
+// Re-entrancy guard: dispatchNext is reachable both from the watchDispatched
+// timer and the operator's manual dispatch IPC. Two overlapping runs could read
+// the same head-of-queue directive before either marks it done and double-
+// inject it (a duplicate /clear could wipe a freshly re-entered context). A
+// single in-flight run is shared so concurrent callers coalesce onto it.
+let dispatchInFlight: Promise<DispatchResult> | null = null
+const dispatchNext = (): Promise<DispatchResult> => {
+  if (dispatchInFlight) return dispatchInFlight
+  dispatchInFlight = dispatchNextInner().finally(() => {
+    dispatchInFlight = null
+  })
+  return dispatchInFlight
 }
 
 const watchDispatched = async (): Promise<void> => {

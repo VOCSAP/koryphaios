@@ -19,12 +19,27 @@ export const MAGIC_TIMEOUT_MS = 160_000
 const MAGIC_RESUME_RE =
   /to enter the compacted session[\s\S]{0,240}?\/resume\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i
 // The shim fires when the hook did NOT intercept (plugin missing/disabled).
-const MAGIC_SHIM_RE = /magic compact hook failed to intercept|plugin is installed and enabled/i
+// Anchored to a "magic compact" mention so a generic "installed and enabled"
+// line elsewhere in the output can't be mistaken for the shim.
+const MAGIC_SHIM_RE =
+  /magic[- ]?compact[\s\S]{0,200}?(hook failed to intercept|is installed and enabled)/i
 
-/** Strip common ANSI escape sequences so terminal styling can't break a match. */
+/**
+ * Strip ANSI escape sequences so terminal styling can't break a match. Every
+ * pattern is ANCHORED to the ESC byte (\x1b): stripping bare `[`/`(` runs would
+ * eat legitimate text like "[link]" or "(2 messages)". A final pass drops any
+ * orphan ESC left by a partial sequence.
+ */
 export function stripAnsi(s: string): string {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/[()][0-9A-Za-z]/g, '')
+  return (
+    s
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '') // CSI (colours, cursor moves)
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b[()][0-9A-Za-z]/g, '') // charset designation (ESC ( B ...)
+      // eslint-disable-next-line no-control-regex
+      .replace(/\x1b/g, '') // any orphan ESC from a partial sequence
+  )
 }
 
 /** The compacted session id from the plugin's success banner, or null. */
@@ -39,13 +54,15 @@ export function isMagicShimFailure(buf: string): boolean {
 }
 
 /**
- * Best-effort: is a Magic Compact plugin installed under ~/.claude/plugins? The
- * exact on-disk layout is not contractual, so this scans a few levels for any
- * path segment matching magic-compact. A false negative only means 'auto' mode
- * falls back to /compact (safe); 'on' mode attempts regardless.
+ * Best-effort: is a Magic Compact plugin installed under <claudeConfigDir>/plugins?
+ * `claudeConfigDir` is the resolved Claude config root (honors CLAUDE_CONFIG_DIR
+ * upstream, so a relocated ~/.claude is still found). The exact on-disk layout
+ * is not contractual, so this scans a few levels for any path segment matching
+ * magic-compact. A false negative only means 'auto' mode falls back to /compact
+ * (safe); 'on' mode attempts regardless.
  */
-export function magicCompactPluginPresent(home: string): boolean {
-  return dirHasMagic(join(home, '.claude', 'plugins'), 3)
+export function magicCompactPluginPresent(claudeConfigDir: string): boolean {
+  return dirHasMagic(join(claudeConfigDir, 'plugins'), 3)
 }
 
 function dirHasMagic(dir: string, depth: number): boolean {

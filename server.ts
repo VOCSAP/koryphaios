@@ -608,7 +608,7 @@ const TOOLS = [
           type: "array" as const,
           items: { type: "string" as const },
           description:
-            "For kind='directive': the peer_ids (from list_peers) whose terminals receive the command. Only these peers are affected.",
+            "For kind='directive': the peer_ids (from list_peers) whose terminals receive the command. Only these peers are affected. Max 16 per card (split into several cards beyond that).",
         },
         description: { type: "string" as const, description: "Free markdown details." },
         rationale: { type: "string" as const, description: "Why it matters (business value)." },

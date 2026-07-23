@@ -36,6 +36,12 @@ test("parses the banner even when wrapped in ANSI styling", () => {
   expect(parseMagicResume(out)).toBe(UUID);
 });
 
+test("parses the banner when a reset sequence sits right before the id", () => {
+  // ANSI reset between the space and the UUID must not defeat \s+<uuid>.
+  const out = `To enter the compacted session, run:\n/resume \x1b[0m${UUID}`;
+  expect(parseMagicResume(out)).toBe(UUID);
+});
+
 test("returns null when there is no banner", () => {
   expect(parseMagicResume("just some normal terminal output")).toBeNull();
   // a non-UUID after /resume must not match
@@ -48,23 +54,34 @@ test("detects the shim-failure message", () => {
     isMagicShimFailure("verify the claude-magic-compact plugin is installed and enabled")
   ).toBe(true);
   expect(isMagicShimFailure("all good here")).toBe(false);
+  // 'installed and enabled' with NO magic-compact context must NOT trip the shim.
+  expect(isMagicShimFailure("the foobar plugin is installed and enabled")).toBe(false);
 });
 
 test("stripAnsi removes CSI sequences", () => {
   expect(stripAnsi("\x1b[1mbold\x1b[0m text")).toBe("bold text");
 });
 
-test("magicCompactPluginPresent finds a plugin dir under ~/.claude/plugins", () => {
-  const home = tmpHome();
-  expect(magicCompactPluginPresent(home)).toBe(false); // nothing installed
-  mkdirSync(join(home, ".claude", "plugins", "marketplace", "claude-magic-compact"), {
+test("stripAnsi preserves bare brackets and parentheses (ESC-anchored)", () => {
+  // No ESC -> nothing is stripped; legitimate text must survive intact.
+  expect(stripAnsi("[link] (2 messages) [1m]")).toBe("[link] (2 messages) [1m]");
+});
+
+test("stripAnsi drops an orphan ESC from a partial sequence", () => {
+  expect(stripAnsi("a\x1bb")).toBe("ab");
+});
+
+test("magicCompactPluginPresent finds a plugin dir under <config>/plugins", () => {
+  const cfg = join(tmpHome(), ".claude");
+  expect(magicCompactPluginPresent(cfg)).toBe(false); // nothing installed
+  mkdirSync(join(cfg, "plugins", "marketplace", "claude-magic-compact"), {
     recursive: true
   });
-  expect(magicCompactPluginPresent(home)).toBe(true);
+  expect(magicCompactPluginPresent(cfg)).toBe(true);
 });
 
 test("magicCompactPluginPresent is false for an unrelated plugin", () => {
-  const home = tmpHome();
-  mkdirSync(join(home, ".claude", "plugins", "some-other-plugin"), { recursive: true });
-  expect(magicCompactPluginPresent(home)).toBe(false);
+  const cfg = join(tmpHome(), ".claude");
+  mkdirSync(join(cfg, "plugins", "some-other-plugin"), { recursive: true });
+  expect(magicCompactPluginPresent(cfg)).toBe(false);
 });

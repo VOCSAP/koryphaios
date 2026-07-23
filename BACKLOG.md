@@ -150,8 +150,22 @@ l'opérateur sur une machine avec affichage.
     démarrage (`--append-system-prompt-file`, serveurs MCP) survit au switch de
     session in-app. Si A régresse : basculer sur l'option B (`restart` fork-resume,
     même panneau) puis C (kill+respawn), déjà documentées dans `PLAN-DIRECTIVES.md`.
-  - Détection du plugin magic-compact avec / sans installation (`~/.claude/plugins`),
-    et le repli `/compact` sur message de shim ou timeout.
+  - **Fiabilité de la capture de la bannière `/resume <id>`** (surgi de la
+    revue de code) : `parseMagicResume` s'appuie sur `stripAnsi` (ancré ESC) +
+    une regex tolérant un écart de 240 car. entre « to enter the compacted
+    session » et `/resume <uuid>`. À confronter à la **vraie sortie du plugin** :
+    séquences OSC-8 (hyperliens), re-wrap du terminal, sortie fragmentée sur
+    plusieurs chunks PTY (le scanner bufferise 64 Ko glissants — vérifier que la
+    bannière n'est jamais coupée par la troncature du buffer), et layout exact du
+    message. Ajuster la regex / le `stripAnsi` si un cas réel échappe.
+  - **Timing sous cible occupée** : le scanner n'est armé qu'APRÈS l'injection
+    (le budget `MAGIC_TIMEOUT_MS` = 160 s démarre à l'injection, pas pendant
+    l'attente d'inactivité) ; vérifier sur une tuile réellement busy que la
+    bannière est bien capturée dans le budget et qu'aucun repli `/compact`
+    prématuré ne se produit pendant que `/magic-compact` tourne encore.
+  - Détection du plugin magic-compact avec / sans installation
+    (`<CLAUDE_CONFIG_DIR|~/.claude>/plugins`), le layout on-disk réel du plugin
+    (marketplace vs repos), et le repli `/compact` sur message de shim ou timeout.
   - Rendu visuel de la carte directive (cadre pointillé violet, chips cibles,
     badge commande) en thème clair ET sombre ; éditeur (champs work-only masqués).
   - **peer_id à travers l'option B** (multi-sessions même cwd+groupe) : seule la

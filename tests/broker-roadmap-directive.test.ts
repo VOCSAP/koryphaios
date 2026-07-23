@@ -65,8 +65,9 @@ test("an invalid directive command is rejected", async () => {
   expect(res.status).toBe(400);
 });
 
-test("target_peer_ids are sanitized: reserved, malformed, dupes dropped and capped", async () => {
-  const many = Array.from({ length: 20 }, (_, i) => `peer-${i}`);
+test("target_peer_ids are sanitized: reserved, malformed and dupes dropped", async () => {
+  // Raw length stays <= 16 here; the over-cap case is covered by its own test.
+  const some = Array.from({ length: 6 }, (_, i) => `peer-${i}`);
   const res = await add({
     kind: "directive",
     title: "sanitize",
@@ -78,7 +79,7 @@ test("target_peer_ids are sanitized: reserved, malformed, dupes dropped and capp
       "deck", // reserved
       "Bad Peer!", // malformed
       "",
-      ...many,
+      ...some,
     ],
   });
   expect(res.status).toBe(200);
@@ -98,6 +99,17 @@ test("target_peer_ids must be an array", async () => {
     target_peer_ids: "host-dev",
   });
   expect(res.status).toBe(400);
+});
+
+test("more than 16 targets is rejected loudly, not truncated silently", async () => {
+  const res = await add({
+    kind: "directive",
+    title: "too many",
+    directive: "clear",
+    target_peer_ids: Array.from({ length: 17 }, (_, i) => `peer-${i}`),
+  });
+  expect(res.status).toBe(400);
+  expect(res.body.error).toContain("too many");
 });
 
 test("patch: omitted directive/targets keep, set replaces", async () => {
@@ -131,6 +143,23 @@ test("switching a directive card to a work kind clears directive + targets", asy
   expect(switched.body.item.kind).toBe("feature");
   expect(switched.body.item.directive).toBeNull();
   expect(switched.body.item.target_peer_ids).toEqual([]);
+});
+
+test("import rejects an incoherent directive row (kind directive, no command)", async () => {
+  const OTHER = "github.com/vocsap/directive-import-bad";
+  const imp = await post<{ imported: number } & ErrRes>(`${broker.url}/roadmap/import`, {
+    project_key: OTHER,
+    items: [
+      {
+        id: "11111111-1111-1111-1111-111111111111",
+        kind: "directive",
+        title: "no command",
+        // directive missing on purpose
+      },
+    ],
+  });
+  expect(imp.status).toBe(400);
+  expect(imp.body.error).toContain("directive");
 });
 
 test("export/import round-trip preserves directive + targets", async () => {
