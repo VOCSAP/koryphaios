@@ -3317,6 +3317,39 @@ svg.glyph {
   pointer-events: none;
 }
 
+/* Grid-assisted parallel placement: ghost slot above/below the stack target. */
+.wf-stack-slot {
+  position: absolute;
+  border: 2px dashed var(--accent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  pointer-events: none;
+}
+
+/* Fullscreen modal variant: the lane fills the foreground dialog. */
+.wf-modal {
+  width: 92vw;
+  height: 86vh;
+  display: flex;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.wf-lane.is-full {
+  flex: 1;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  min-height: 0;
+}
+
+.wf-lane.is-full .wf-canvas {
+  flex: 1;
+  height: auto;
+}
+
 .wf-node {
   position: absolute;
   display: flex;

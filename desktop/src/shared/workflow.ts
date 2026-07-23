@@ -47,19 +47,26 @@ export interface LanePos {
   y: number
   /** 0-based execution rank (locked heads included). */
   rank: number
-  /** Stream row: items whose depends_on chains touch share a row. */
+  /** Horizontal column: dependency depth, components chained left to right. */
+  col: number
+  /** Vertical slot inside the column (0 = top): parallel siblings stack. */
   row: number
 }
 
 /**
- * Derived placement: X advances with the execution rank, Y groups the
- * connected components of the depends_on graph (restricted to the displayed
- * items) into parallel stream rows -- independent chains stack vertically,
- * which is the "parallel work streams" reading the team-lead uses.
- * Rows are ordered by the first rank that appears in the component.
+ * Derived placement, hierarchy-first: inside a connected component of the
+ * depends_on graph, the column is the dependency DEPTH (longest path from the
+ * component's roots) -- so N:1 / 1:N fan-ins and fan-outs stack their
+ * parallel branches vertically in the same column, like the graph view's
+ * layout transposed. Unrelated items (distinct components) keep the queue
+ * reading: components are chained left to right by their first execution
+ * rank, so a dependency-free queue still renders as the familiar flat chain.
+ * Inside a column, siblings stack top-down by execution rank.
  */
 export function layoutLane(ordered: RoadmapItem[]): Map<string, LanePos> {
   const shown = new Set(ordered.map((i) => i.id))
+  const byId = new Map(ordered.map((i) => [i.id, i]))
+
   // Union-find over displayed items, edges = displayed depends_on pairs.
   const parent = new Map<string, string>()
   const find = (x: string): string => {
@@ -79,19 +86,81 @@ export function layoutLane(ordered: RoadmapItem[]): Map<string, LanePos> {
       if (shown.has(dep)) parent.set(find(dep), find(i.id))
     }
   }
-  const rowOf = new Map<string, number>()
-  let nextRow = 0
-  const pos = new Map<string, LanePos>()
-  ordered.forEach((i, rank) => {
+
+  // Dependency depth (longest path over displayed deps; pre-marked cycles safe).
+  const depths = new Map<string, number>()
+  const depthOf = (id: string): number => {
+    const cached = depths.get(id)
+    if (cached !== undefined) return cached
+    depths.set(id, 0)
+    const item = byId.get(id)!
+    const d = item.depends_on.reduce(
+      (max, dep) => (shown.has(dep) ? Math.max(max, depthOf(dep) + 1) : max),
+      0
+    )
+    depths.set(id, d)
+    return d
+  }
+  for (const i of ordered) depthOf(i.id)
+
+  // Components in first-rank order, each starting after the previous one.
+  const componentOrder: string[] = []
+  const members = new Map<string, RoadmapItem[]>()
+  ordered.forEach((i) => {
     const root = find(i.id)
-    let row = rowOf.get(root)
-    if (row === undefined) {
-      row = nextRow++
-      rowOf.set(root, row)
+    const list = members.get(root)
+    if (list) list.push(i)
+    else {
+      members.set(root, [i])
+      componentOrder.push(root)
     }
-    pos.set(i.id, { x: rank * WF_PITCH_X, y: row * WF_PITCH_Y, rank, row })
   })
+
+  const rank = new Map(ordered.map((i, r) => [i.id, r]))
+  const pos = new Map<string, LanePos>()
+  let colOffset = 0
+  for (const root of componentOrder) {
+    const items = members.get(root)!
+    const rows = new Map<number, number>() // per-column stack cursor
+    let maxDepth = 0
+    // Members arrive in rank order, so per-column stacking follows the queue.
+    for (const i of items) {
+      const depth = depths.get(i.id)!
+      maxDepth = Math.max(maxDepth, depth)
+      const col = colOffset + depth
+      const row = rows.get(depth) ?? 0
+      rows.set(depth, row + 1)
+      pos.set(i.id, {
+        x: col * WF_PITCH_X,
+        y: row * WF_PITCH_Y,
+        rank: rank.get(i.id)!,
+        col,
+        row
+      })
+    }
+    colOffset += maxDepth + 1
+  }
   return pos
+}
+
+/**
+ * Dependencies `dragId` should adopt to become a parallel sibling of
+ * `targetId` (the stack-below/above drop gesture): a sanitized copy of the
+ * target's depends_on (self and cycle-inducing ids removed). Returns null
+ * when the gesture cannot express parallelism -- the target has no usable
+ * dependency to share (draw links, or drag the other card instead).
+ */
+export function siblingDeps(
+  items: RoadmapItem[],
+  dragId: string,
+  targetId: string
+): string[] | null {
+  const target = items.find((i) => i.id === targetId)
+  if (!target || dragId === targetId) return null
+  const deps = target.depends_on.filter(
+    (d) => d !== dragId && !dependsWouldCycle(items, dragId, d)
+  )
+  return deps.length > 0 ? deps : null
 }
 
 export interface LaneEdge {
@@ -164,12 +233,78 @@ export function dependsWouldCycle(
 }
 
 /**
- * Insertion slot for a drop at world-space `worldX` among `count` displayed
- * cards: 0 = before the first card, count = after the last. A drop on a
- * card's origin inserts before it.
+ * Insertion slot (index in the full lane order) for a drop at world-space
+ * `worldX`: the number of displayed cards whose column lies left of the drop.
+ * With a hierarchy layout several cards share a column, so a cut between two
+ * columns inserts after every card of the columns left of it.
  */
-export function insertIndexAt(worldX: number, count: number): number {
-  return Math.min(count, Math.max(0, Math.round(worldX / WF_PITCH_X)))
+export function insertSlotAt(
+  ordered: RoadmapItem[],
+  pos: Map<string, LanePos>,
+  worldX: number
+): number {
+  return ordered.filter((i) => pos.get(i.id)!.x + WF_NODE_W / 2 < worldX).length
+}
+
+/** World X of the insertion caret for a cut at `worldX` (between columns). */
+export function caretXAt(
+  ordered: RoadmapItem[],
+  pos: Map<string, LanePos>,
+  worldX: number
+): number {
+  const xs = [...new Set(ordered.map((i) => pos.get(i.id)!.x))].sort((a, b) => a - b)
+  if (xs.length === 0) return 0
+  const left = xs.filter((x) => x + WF_NODE_W / 2 < worldX)
+  const right = xs.filter((x) => x + WF_NODE_W / 2 >= worldX)
+  const leftEdge = left.length > 0 ? left[left.length - 1]! + WF_NODE_W : right[0]! - WF_PITCH_X + WF_NODE_W
+  const rightEdge = right.length > 0 ? right[0]! : leftEdge + (WF_PITCH_X - WF_NODE_W)
+  return (leftEdge + rightEdge) / 2 - 1.5
+}
+
+export interface StackHit {
+  /** The card the drop stacks against (nearest in the hovered column). */
+  targetId: string
+  /** World coords of the ghost slot shown above/below the target. */
+  x: number
+  y: number
+}
+
+/**
+ * Stack-drop detection: a drop inside a column's horizontal band but clearly
+ * above/below a card reads as "make it a parallel sibling of that card"
+ * (grid-assisted placement). A drop ON a card (or outside any column band)
+ * returns null and stays an insertion.
+ */
+export function stackTargetAt(
+  ordered: RoadmapItem[],
+  pos: Map<string, LanePos>,
+  worldX: number,
+  worldY: number,
+  excludeId?: string
+): StackHit | null {
+  const band = ordered.filter(
+    (i) =>
+      i.id !== excludeId &&
+      Math.abs(pos.get(i.id)!.x + WF_NODE_W / 2 - worldX) < WF_PITCH_X / 2
+  )
+  if (band.length === 0) return null
+  let best = band[0]!
+  let bestDist = Infinity
+  for (const i of band) {
+    const d = Math.abs(pos.get(i.id)!.y + WF_NODE_H / 2 - worldY)
+    if (d < bestDist) {
+      bestDist = d
+      best = i
+    }
+  }
+  const p = pos.get(best.id)!
+  const cy = p.y + WF_NODE_H / 2
+  if (Math.abs(worldY - cy) < WF_NODE_H * 0.6) return null
+  return {
+    targetId: best.id,
+    x: p.x,
+    y: worldY < cy ? p.y - WF_PITCH_Y : p.y + WF_PITCH_Y
+  }
 }
 
 /**

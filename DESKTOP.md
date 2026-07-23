@@ -80,18 +80,26 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   announce (`composeAssignText`, IPC `roadmap:assign`) or spawns a fresh one.
   Below the board, the **Workflow lane** (`WorkflowLane.tsx`) draws the
   dispatch queue as a left-to-right chain of cards, GraphView-style (manual
-  camera, SVG edges, no library): every position is DERIVED from the queue
-  rank and the `depends_on` streams (`shared/workflow.ts` — connected
-  components stack as parallel rows), so nothing visual is persisted and the
-  lane always agrees with the kanban. Cards drag in from the board (HTML5
-  DnD) or reorder in place (insertion caret); commits go through ONE atomic
-  `roadmap:reorder` IPC → broker `/roadmap/reorder`. Dragging a card's port
-  onto another card wires a `depends_on` link (cycle-checked); into the void,
-  it opens the create form pre-wired (nothing exists until Save). Edges turn
-  red when the queue order breaks a dependency — clicking one explains why
-  and offers to drop the link; a warning badge flags dependencies neither
-  scheduled nor done. Locked cards are frozen here too; zoom wheel/buttons +
-  auto-fit down to a floor, then a thin proportional scrollbar takes over.
+  camera, SVG edges, no library): every position is DERIVED
+  (`shared/workflow.ts`), hierarchy-first — the column is the `depends_on`
+  DEPTH inside a connected component, so parallel branches (N:1 / 1:N
+  fan-ins) stack vertically in the same column, while unrelated components
+  chain left-to-right by queue rank (a dependency-free queue stays a flat
+  chain). Nothing visual is persisted, so the lane always agrees with the
+  kanban. Cards drag in from the board (HTML5 DnD) or reorder in place
+  (insertion caret between columns); dropping a card clearly above/below
+  another (grid-assisted dashed slot) makes it a PARALLEL SIBLING — it
+  adopts the target's dependencies (`siblingDeps`, sanitized + cycle-checked)
+  — and commits go through ONE atomic `roadmap:reorder` IPC → broker
+  `/roadmap/reorder`. Dragging a card's port onto another card wires a
+  `depends_on` link (cycle-checked); into the void, it opens the create form
+  pre-wired (nothing exists until Save). Edges turn red when the queue order
+  breaks a dependency — clicking one explains why and offers to drop the
+  link; a warning badge flags dependencies neither scheduled nor done.
+  Locked cards are frozen here too; zoom wheel/buttons + auto-fit down to a
+  floor, then a thin proportional scrollbar takes over; an expand button
+  blows the lane up into a fullscreen foreground modal (same component,
+  `fullscreen` prop).
 - **Files & Git rail views (GX1–GX9)**: two READ-ONLY rail
   views. 📁 Files: lazy explorer + plain-text viewer (line-number gutter, no
   highlighting in v1 — shiki/highlight.js noted for v2) over roots the main

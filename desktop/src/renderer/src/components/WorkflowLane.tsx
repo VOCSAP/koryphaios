@@ -1,18 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
 import type { RoadmapItem } from '@shared/types'
 import {
+  caretXAt,
   dependsWouldCycle,
-  insertIndexAt,
+  insertSlotAt,
   laneEdges,
   laneItems,
   layoutLane,
+  siblingDeps,
+  stackTargetAt,
   unmetDeps,
   WF_FIT_FLOOR,
   WF_NODE_H,
   WF_NODE_W,
   WF_PITCH_X,
   WF_ZOOM_MAX,
-  WF_ZOOM_MIN
+  WF_ZOOM_MIN,
+  type StackHit
 } from '@shared/workflow'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
@@ -22,11 +26,14 @@ import { KIND_ICONS } from './RoadmapItemModal'
 
 // Workflow lane (bottom half of the roadmap view): the dispatch queue drawn as
 // a left-to-right chain of cards, GraphView-style (manual camera, SVG edges,
-// positioned divs — no library). Every position is DERIVED from the queue rank
-// and the depends_on streams (shared/workflow.ts): nothing visual is persisted,
-// so the lane and the kanban always agree. Reordering commits through ONE
-// atomic roadmap:reorder call; depends_on edges are drawn between displayed
-// cards, red when the queue order breaks them (click an edge for the why).
+// positioned divs — no library). Every position is DERIVED from the
+// depends_on hierarchy and the queue rank (shared/workflow.ts): the column is
+// the dependency depth, so parallel branches (N:1 / 1:N fan-ins) stack
+// vertically in the same column, and nothing visual is persisted — the lane
+// and the kanban always agree. Reordering commits through ONE atomic
+// roadmap:reorder call; dropping a card above/below another makes it a
+// parallel sibling (it adopts the target's dependencies); depends_on edges
+// are red when the queue order breaks them (click an edge for the why).
 
 /** Extra padding around the content when framing the camera. */
 const FIT_PAD = 24
@@ -37,6 +44,9 @@ interface WorkflowLaneProps {
   /** Full item list of the view (the lane derives its own subset). */
   items: RoadmapItem[]
   hasLead: boolean
+  /** Rendered inside the fullscreen modal (no collapse, canvas fills). */
+  fullscreen?: boolean
+  onToggleFull: () => void
   onDispatch: () => void
   onOpen: (id: string) => void
   onMenu: (item: RoadmapItem, x: number, y: number) => void
@@ -46,6 +56,8 @@ interface WorkflowLaneProps {
   onCreateAt: (queueIndex: number, dependsOn: string[]) => void
   onAddDep: (childId: string, parentId: string) => void
   onRemoveDep: (childId: string, parentId: string) => void
+  /** Stack gesture: `dragId` becomes a parallel sibling of `targetId`. */
+  onStack: (dragId: string, targetId: string, dependsOn: string[]) => void
 }
 
 function isHead(i: RoadmapItem): boolean {
@@ -55,20 +67,25 @@ function isHead(i: RoadmapItem): boolean {
 export function WorkflowLane({
   items,
   hasLead,
+  fullscreen = false,
+  onToggleFull,
   onDispatch,
   onOpen,
   onMenu,
   onReorder,
   onCreateAt,
   onAddDep,
-  onRemoveDep
+  onRemoveDep,
+  onStack
 }: WorkflowLaneProps): React.JSX.Element {
   const t = useT()
   const showToast = useDeck((s) => s.showToast)
   const [collapsed, setCollapsed] = useState(false)
   const [camera, setCamera] = useState<Camera>({ x: FIT_PAD, y: FIT_PAD, zoom: 1 })
-  // Caret slot (index over the FULL lane) shown during a drag, null otherwise.
-  const [caret, setCaret] = useState<number | null>(null)
+  // Insertion caret shown during a drag (full-lane slot + world x), or null.
+  const [caret, setCaret] = useState<{ slot: number; x: number } | null>(null)
+  // Stack-drop ghost slot (parallel-sibling placement), exclusive with caret.
+  const [stack, setStack] = useState<StackHit | null>(null)
   // Internal card drag ghost (world coords) — the card follows the cursor.
   const [ghost, setGhost] = useState<{ id: string; x: number; y: number } | null>(null)
   // Dependency-link drag ghost: source card + cursor tip (world coords).
@@ -109,6 +126,7 @@ export function WorkflowLane({
   const headCount = lane.filter(isHead).length
   const queuedIds = laneIds.slice(headCount)
   const byId = new Map(items.map((i) => [i.id, i]))
+  const showCanvas = fullscreen || !collapsed
 
   useEffect(() => setMounted(true), [])
 
@@ -154,9 +172,9 @@ export function WorkflowLane({
   // Re-frame when the chain composition changes, while auto-framing is on.
   const laneKey = laneIds.join(',')
   useEffect(() => {
-    if (!collapsed && autoFrame.current) frame()
+    if (showCanvas && autoFrame.current) frame()
     // eslint-disable-next-line react-hooks/exhaustive-deps -- frame() reads freshly derived state
-  }, [laneKey, collapsed])
+  }, [laneKey, showCanvas])
 
   const toWorld = (clientX: number, clientY: number): { x: number; y: number } => {
     const rect = canvasRef.current!.getBoundingClientRect()
@@ -195,7 +213,7 @@ export function WorkflowLane({
     })
   }
 
-  // ----- reorder commits -----
+  // ----- reorder / stack commits -----
 
   /** New queue after dropping `id` at full-lane slot `slot`; null = no-op. */
   const queueAfterDrop = (id: string, slot: number): string[] | null => {
@@ -215,12 +233,31 @@ export function WorkflowLane({
     return next
   }
 
-  const commitDrop = (id: string, slot: number): void => {
+  const droppable = (id: string): RoadmapItem | null => {
     const item = byId.get(id)
-    if (!item || (item.locked && item.status === 'in_progress')) return
-    if (item.status === 'done' || item.status === 'archived') return
+    if (!item || (item.locked && item.status === 'in_progress')) return null
+    if (item.status === 'done' || item.status === 'archived') return null
+    return item
+  }
+
+  const commitDrop = (id: string, slot: number): void => {
+    if (!droppable(id)) return
     const next = queueAfterDrop(id, slot)
     if (next) onReorder(next)
+  }
+
+  /** Parallel-sibling drop: `id` adopts the target's dependencies. */
+  const commitStack = (id: string, targetId: string): void => {
+    const item = droppable(id)
+    if (!item) return
+    const deps = siblingDeps(items, id, targetId)
+    if (!deps) {
+      showToast('roadmap.wf.stackNone', 'info')
+      return
+    }
+    const same =
+      deps.length === item.depends_on.length && deps.every((d) => item.depends_on.includes(d))
+    if (!same || !queuedIds.includes(id)) onStack(id, targetId, deps)
   }
 
   // ----- mouse interactions (GraphView pattern) -----
@@ -284,7 +321,11 @@ export function WorkflowLane({
       const gx = d.origX + dx / camera.zoom
       const gy = d.origY + dy / camera.zoom
       setGhost({ id: d.id, x: gx, y: gy })
-      setCaret(insertIndexAt(gx + WF_NODE_W / 2, lane.length))
+      const cx = gx + WF_NODE_W / 2
+      const cy = gy + WF_NODE_H / 2
+      const hit = stackTargetAt(lane, pos, cx, cy, d.id)
+      setStack(hit)
+      setCaret(hit ? null : { slot: insertSlotAt(lane, pos, cx), x: caretXAt(lane, pos, cx) })
     } else if (d.kind === 'link' && d.id) {
       const w = toWorld(e.clientX, e.clientY)
       setLink({ fromId: d.id, x: w.x, y: w.y })
@@ -297,6 +338,7 @@ export function WorkflowLane({
     drag.current = null
     setGhost(null)
     setCaret(null)
+    setStack(null)
     setLink(null)
     return d
   }
@@ -305,13 +347,16 @@ export function WorkflowLane({
     const d = endDrag()
     if (!d || !d.moved) return
     if (d.kind === 'node' && d.id) {
-      const gx = d.origX + (e.clientX - d.startX) / camera.zoom
-      commitDrop(d.id, insertIndexAt(gx + WF_NODE_W / 2, lane.length))
+      const cx = d.origX + (e.clientX - d.startX) / camera.zoom + WF_NODE_W / 2
+      const cy = d.origY + (e.clientY - d.startY) / camera.zoom + WF_NODE_H / 2
+      const hit = stackTargetAt(lane, pos, cx, cy, d.id)
+      if (hit) commitStack(d.id, hit.targetId)
+      else commitDrop(d.id, insertSlotAt(lane, pos, cx))
     } else if (d.kind === 'link' && d.id) {
       // Released over empty canvas: create a new item depending on the source,
       // inserted where the cursor points. Cancelling the form creates nothing.
       const w = toWorld(e.clientX, e.clientY)
-      const slot = Math.max(headCount, insertIndexAt(w.x, lane.length))
+      const slot = Math.max(headCount, insertSlotAt(lane, pos, w.x))
       onCreateAt(slot - headCount, [d.id])
     }
   }
@@ -347,16 +392,23 @@ export function WorkflowLane({
     e.preventDefault()
     e.dataTransfer.dropEffect = 'move'
     const w = toWorld(e.clientX, e.clientY)
-    setCaret(Math.max(headCount, insertIndexAt(w.x, lane.length)))
+    // The dragged id is unreadable during dragover (DnD protocol), so the
+    // stack preview cannot exclude the card itself — the drop recomputes.
+    const hit = stackTargetAt(lane, pos, w.x, w.y)
+    setStack(hit)
+    setCaret(hit ? null : { slot: insertSlotAt(lane, pos, w.x), x: caretXAt(lane, pos, w.x) })
   }
 
   const onDrop = (e: React.DragEvent): void => {
     e.preventDefault()
     setCaret(null)
+    setStack(null)
     const id = e.dataTransfer.getData('text/plain')
     if (!id) return
     const w = toWorld(e.clientX, e.clientY)
-    commitDrop(id, Math.max(headCount, insertIndexAt(w.x, lane.length)))
+    const hit = stackTargetAt(lane, pos, w.x, w.y, id)
+    if (hit) commitStack(id, hit.targetId)
+    else commitDrop(id, insertSlotAt(lane, pos, w.x))
   }
 
   // ----- scrollbar (visible when the chain overflows at the zoom floor) -----
@@ -365,7 +417,7 @@ export function WorkflowLane({
   const b = bbox()
   const contentW = b ? (b.maxX - b.minX + 2 * FIT_PAD) * camera.zoom : 0
   const viewW = el?.clientWidth ?? 0
-  const overflow = !collapsed && b !== null && contentW > viewW + 1
+  const overflow = showCanvas && b !== null && contentW > viewW + 1
   // camera.x bounds: content left at FIT_PAD (max) .. right edge flush (min).
   const camMax = b ? FIT_PAD - b.minX * camera.zoom : 0
   const camMin = b ? viewW - FIT_PAD - b.maxX * camera.zoom : 0
@@ -395,7 +447,6 @@ export function WorkflowLane({
 
   // ----- rendering -----
 
-  const caretX = caret !== null ? caret * WF_PITCH_X - (WF_PITCH_X - WF_NODE_W) / 2 : 0
   const edgeTitle = (from: string, to: string, violated: boolean): string =>
     violated
       ? t('roadmap.wf.violationOrder', {
@@ -408,7 +459,9 @@ export function WorkflowLane({
         })
 
   return (
-    <section className={`wf-lane${collapsed ? ' is-collapsed' : ''}`}>
+    <section
+      className={`wf-lane${collapsed && !fullscreen ? ' is-collapsed' : ''}${fullscreen ? ' is-full' : ''}`}
+    >
       <h3 className="rm-section-head wf-head">
         {GLYPH_BADGES.clepsydra} {t('roadmap.wf.title')}
         <span className="rm-count">{lane.length}</span>
@@ -423,14 +476,23 @@ export function WorkflowLane({
         </button>
         <button
           className="icon-btn"
-          title={collapsed ? t('roadmap.wf.expand') : t('roadmap.wf.collapse')}
-          onClick={() => setCollapsed((v) => !v)}
+          title={fullscreen ? t('roadmap.wf.exitFullscreen') : t('roadmap.wf.fullscreen')}
+          onClick={onToggleFull}
         >
-          {collapsed ? GLYPH_ACTIONS.expand : GLYPH_ACTIONS.minus}
+          {fullscreen ? GLYPH_ACTIONS.close : GLYPH_ACTIONS.expand}
         </button>
+        {!fullscreen && (
+          <button
+            className="icon-btn"
+            title={collapsed ? t('roadmap.wf.expand') : t('roadmap.wf.collapse')}
+            onClick={() => setCollapsed((v) => !v)}
+          >
+            {collapsed ? GLYPH_ACTIONS.plus : GLYPH_ACTIONS.minus}
+          </button>
+        )}
       </h3>
 
-      {!collapsed && (
+      {showCanvas && (
         <div
           ref={canvasRef}
           className={`wf-canvas${link ? ' is-linking' : ''}`}
@@ -444,12 +506,15 @@ export function WorkflowLane({
           onMouseLeave={() => endDrag()}
           onWheel={onWheel}
           onDragOver={onDragOver}
-          onDragLeave={() => setCaret(null)}
+          onDragLeave={() => {
+            setCaret(null)
+            setStack(null)
+          }}
           onDrop={onDrop}
           onContextMenu={(e) => {
             e.preventDefault()
             const w = toWorld(e.clientX, e.clientY)
-            const slot = Math.max(headCount, insertIndexAt(w.x, lane.length))
+            const slot = Math.max(headCount, insertSlotAt(lane, pos, w.x))
             setCanvasMenu({ x: e.clientX, y: e.clientY, slot: slot - headCount })
           }}
         >
@@ -510,10 +575,17 @@ export function WorkflowLane({
               <div
                 className="wf-caret"
                 style={{
-                  left: caretX,
+                  left: caret.x,
                   top: (b?.minY ?? 0) - 12,
                   height: b ? b.maxY - b.minY + 24 : WF_NODE_H + 24
                 }}
+              />
+            )}
+
+            {stack !== null && (
+              <div
+                className="wf-stack-slot"
+                style={{ left: stack.x, top: stack.y, width: WF_NODE_W, height: WF_NODE_H }}
               />
             )}
 

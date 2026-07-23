@@ -6,11 +6,15 @@ import type { RoadmapItem } from '../desktop/src/shared/types'
 import {
   dependsWouldCycle,
   insertAt,
-  insertIndexAt,
+  insertSlotAt,
   laneEdges,
   laneItems,
   layoutLane,
+  siblingDeps,
+  stackTargetAt,
   unmetDeps,
+  WF_NODE_H,
+  WF_NODE_W,
   WF_PITCH_X,
   WF_PITCH_Y
 } from '../desktop/src/shared/workflow'
@@ -57,31 +61,50 @@ test('laneItems: queue order, locked in_progress heads first, closed items out',
   expect(laneItems(items).map((i) => i.id)).toEqual(['headA', 'headB', 'q1', 'q2'])
 })
 
-test('layoutLane: x follows rank, depends_on components share a stream row', () => {
-  // Two independent chains interleaved in the queue: a1 -> a2 and b1 -> b2.
+test('layoutLane: a dependency-free queue renders as a flat left-to-right chain', () => {
   const ordered = laneItems([
-    item('a1', { queue: 1 }),
-    item('b1', { queue: 2 }),
-    item('a2', { queue: 3, depends_on: ['a1'] }),
-    item('b2', { queue: 4, depends_on: ['b1'] })
+    item('a', { queue: 1 }),
+    item('b', { queue: 2 }),
+    item('c', { queue: 3 }),
+    item('d', { queue: 4 })
   ])
   const pos = layoutLane(ordered)
-  expect(pos.get('a1')).toEqual({ x: 0, y: 0, rank: 0, row: 0 })
-  expect(pos.get('b1')).toEqual({ x: WF_PITCH_X, y: WF_PITCH_Y, rank: 1, row: 1 })
-  expect(pos.get('a2')!.row).toBe(0)
-  expect(pos.get('a2')!.x).toBe(2 * WF_PITCH_X)
-  expect(pos.get('b2')!.row).toBe(1)
+  expect(pos.get('a')).toEqual({ x: 0, y: 0, rank: 0, col: 0, row: 0 })
+  expect(pos.get('b')!.col).toBe(1)
+  expect(pos.get('c')!.col).toBe(2)
+  expect(pos.get('d')!.col).toBe(3)
+  expect([pos.get('b')!.y, pos.get('c')!.y, pos.get('d')!.y]).toEqual([0, 0, 0])
 })
 
-test('layoutLane: a shared dependency merges streams into one row', () => {
+test('layoutLane: the diamond stacks parallel branches in the same column', () => {
+  // A -> B, A -> C, B -> D, C -> D: B and C are parallel siblings.
   const ordered = laneItems([
-    item('base', { queue: 1 }),
-    item('left', { queue: 2, depends_on: ['base'] }),
-    item('right', { queue: 3, depends_on: ['base'] })
+    item('A', { queue: 1 }),
+    item('B', { queue: 2, depends_on: ['A'] }),
+    item('C', { queue: 3, depends_on: ['A'] }),
+    item('D', { queue: 4, depends_on: ['B', 'C'] })
   ])
   const pos = layoutLane(ordered)
-  expect(pos.get('left')!.row).toBe(0)
-  expect(pos.get('right')!.row).toBe(0)
+  expect(pos.get('A')!.col).toBe(0)
+  expect(pos.get('B')!.col).toBe(1)
+  expect(pos.get('C')!.col).toBe(1)
+  expect(pos.get('B')!.y).toBe(0)
+  expect(pos.get('C')!.y).toBe(WF_PITCH_Y) // stacked below B (queue order)
+  expect(pos.get('D')!.col).toBe(2)
+  expect(pos.get('D')!.x).toBe(2 * WF_PITCH_X)
+})
+
+test('layoutLane: unrelated components chain horizontally after each other', () => {
+  const ordered = laneItems([
+    item('a1', { queue: 1 }),
+    item('a2', { queue: 2, depends_on: ['a1'] }),
+    item('solo', { queue: 3 })
+  ])
+  const pos = layoutLane(ordered)
+  // Component {a1, a2} spans columns 0-1; the isolated item continues at 2.
+  expect(pos.get('a2')!.col).toBe(1)
+  expect(pos.get('solo')!.col).toBe(2)
+  expect(pos.get('solo')!.y).toBe(0)
 })
 
 test('laneEdges: flags a dependency queued after its dependent', () => {
@@ -119,11 +142,59 @@ test('dependsWouldCycle walks depends_on transitively', () => {
   expect(dependsWouldCycle(items, 'a', 'c')).toBe(false)
 })
 
-test('insertIndexAt rounds to the nearest slot and clamps', () => {
-  expect(insertIndexAt(-500, 3)).toBe(0)
-  expect(insertIndexAt(0, 3)).toBe(0)
-  expect(insertIndexAt(WF_PITCH_X * 0.6, 3)).toBe(1)
-  expect(insertIndexAt(WF_PITCH_X * 10, 3)).toBe(3)
+test('insertSlotAt counts the cards left of the cut, parallel columns as one', () => {
+  const ordered = laneItems([
+    item('A', { queue: 1 }),
+    item('B', { queue: 2, depends_on: ['A'] }),
+    item('C', { queue: 3, depends_on: ['A'] }),
+    item('D', { queue: 4, depends_on: ['B', 'C'] })
+  ])
+  const pos = layoutLane(ordered)
+  expect(insertSlotAt(ordered, pos, -100)).toBe(0)
+  // Between column 0 (A) and column 1 (B+C): after A only.
+  expect(insertSlotAt(ordered, pos, WF_PITCH_X - 10)).toBe(1)
+  // Between column 1 and column 2 (D): after A, B and C.
+  expect(insertSlotAt(ordered, pos, 2 * WF_PITCH_X - 10)).toBe(3)
+  expect(insertSlotAt(ordered, pos, 99 * WF_PITCH_X)).toBe(4)
+})
+
+test('stackTargetAt: above/below a column card reads as a parallel placement', () => {
+  const ordered = laneItems([
+    item('A', { queue: 1 }),
+    item('B', { queue: 2, depends_on: ['A'] })
+  ])
+  const pos = layoutLane(ordered)
+  const bPos = pos.get('B')!
+  // Clearly below B, in B's column band: stack against B.
+  const below = stackTargetAt(ordered, pos, bPos.x + WF_NODE_W / 2, bPos.y + WF_NODE_H * 2)
+  expect(below?.targetId).toBe('B')
+  expect(below?.x).toBe(bPos.x)
+  expect(below?.y).toBe(bPos.y + WF_PITCH_Y)
+  // Directly ON B: not a stack (stays an insertion).
+  expect(stackTargetAt(ordered, pos, bPos.x + WF_NODE_W / 2, bPos.y + WF_NODE_H / 2)).toBeNull()
+  // Far from any column band: nothing.
+  expect(stackTargetAt(ordered, pos, 99 * WF_PITCH_X, 0)).toBeNull()
+  // The dragged card never targets itself.
+  const self = stackTargetAt(ordered, pos, bPos.x + WF_NODE_W / 2, bPos.y + WF_NODE_H * 2, 'B')
+  expect(self?.targetId).not.toBe('B')
+})
+
+test('siblingDeps copies the target dependencies, sanitized', () => {
+  const chain = [
+    item('A'),
+    item('B', { depends_on: ['A'] }),
+    item('C', { depends_on: ['B'] })
+  ]
+  // Drag C next to B: C adopts B's deps ({A}), dropping its dep on B.
+  expect(siblingDeps(chain, 'C', 'B')).toEqual(['A'])
+  // Drag B next to C: C's only dep is B itself -- nothing shareable.
+  expect(siblingDeps(chain, 'B', 'C')).toBeNull()
+  // Target without dependencies: the gesture cannot express parallelism.
+  expect(siblingDeps(chain, 'C', 'A')).toBeNull()
+  // Cycle-inducing parents are filtered out.
+  const tri = [item('X'), item('Y', { depends_on: ['X'] }), item('Z', { depends_on: ['Y', 'X'] })]
+  expect(siblingDeps(tri, 'X', 'Z')).toBeNull() // Y and X both cycle back to X
+  expect(siblingDeps(tri, 'Y', 'Z')).toEqual(['X']) // Y kept out (self), X fine
 })
 
 test('insertAt moves an already-queued id and clamps the slot', () => {

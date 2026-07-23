@@ -225,6 +225,8 @@ export function RoadmapView(): React.JSX.Element {
   const [launchItem, setLaunchItem] = useState<RoadmapItem | null>(null)
   // Context wand (PLAN C21): one in-flight generation at a time.
   const [wandBusy, setWandBusy] = useState(false)
+  // Workflow lane blown up to a foreground fullscreen modal.
+  const [wfFull, setWfFull] = useState(false)
 
   // Always fetch UNfiltered (kind narrows the board client-side): the
   // Workflow lane must always see the whole queue, otherwise a reorder
@@ -368,6 +370,35 @@ export function RoadmapView(): React.JSX.Element {
         id: childId,
         depends_on: child.depends_on.filter((d) => d !== parentId)
       })
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  /**
+   * Stack gesture (parallel siblings): the dragged card adopts the target's
+   * dependencies; a card stacked in from the board joins the queue right
+   * after its new sibling.
+   */
+  const stackItem = async (
+    dragId: string,
+    targetId: string,
+    dependsOn: string[]
+  ): Promise<void> => {
+    try {
+      await window.api.roadmapUpsert({ id: dragId, depends_on: dependsOn })
+      const item = items.find((i) => i.id === dragId)
+      if (item && item.queue === null) {
+        const queuedIds = items
+          .filter((i) => i.queue !== null && i.status !== 'done' && i.status !== 'archived')
+          .sort((a, b) => a.queue! - b.queue!)
+          .map((i) => i.id)
+        const at = queuedIds.indexOf(targetId)
+        await window.api.roadmapReorder(
+          insertAt(queuedIds, dragId, at >= 0 ? at + 1 : queuedIds.length)
+        )
+      }
       await refresh()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -626,17 +657,42 @@ export function RoadmapView(): React.JSX.Element {
 
       {/* Workflow lane (bottom half): the dispatch queue as a visual chain —
           cards top, execution order below, per the operator's mental model. */}
-      <WorkflowLane
-        items={items}
-        hasLead={hasLead}
-        onDispatch={() => void dispatch()}
-        onOpen={(id) => setSelectedId(id)}
-        onMenu={(item, x, y) => setMenu({ x, y, item })}
-        onReorder={(ids) => void reorderQueue(ids)}
-        onCreateAt={createAt}
-        onAddDep={(childId, parentId) => void addDep(childId, parentId)}
-        onRemoveDep={(childId, parentId) => void removeDep(childId, parentId)}
-      />
+      {!wfFull && (
+        <WorkflowLane
+          items={items}
+          hasLead={hasLead}
+          onToggleFull={() => setWfFull(true)}
+          onDispatch={() => void dispatch()}
+          onOpen={(id) => setSelectedId(id)}
+          onMenu={(item, x, y) => setMenu({ x, y, item })}
+          onReorder={(ids) => void reorderQueue(ids)}
+          onCreateAt={createAt}
+          onAddDep={(childId, parentId) => void addDep(childId, parentId)}
+          onRemoveDep={(childId, parentId) => void removeDep(childId, parentId)}
+          onStack={(dragId, targetId, deps) => void stackItem(dragId, targetId, deps)}
+        />
+      )}
+
+      {wfFull && (
+        <div className="modal-backdrop" onMouseDown={() => setWfFull(false)}>
+          <div className="wf-modal" onMouseDown={(e) => e.stopPropagation()}>
+            <WorkflowLane
+              items={items}
+              hasLead={hasLead}
+              fullscreen
+              onToggleFull={() => setWfFull(false)}
+              onDispatch={() => void dispatch()}
+              onOpen={(id) => setSelectedId(id)}
+              onMenu={(item, x, y) => setMenu({ x, y, item })}
+              onReorder={(ids) => void reorderQueue(ids)}
+              onCreateAt={createAt}
+              onAddDep={(childId, parentId) => void addDep(childId, parentId)}
+              onRemoveDep={(childId, parentId) => void removeDep(childId, parentId)}
+              onStack={(dragId, targetId, deps) => void stackItem(dragId, targetId, deps)}
+            />
+          </div>
+        </div>
+      )}
 
       {selected && !draft && (
         <RoadmapItemModal

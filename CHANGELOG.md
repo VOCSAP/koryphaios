@@ -4,11 +4,17 @@
 
 The roadmap view splits horizontally: kanban on top, a new **Workflow lane**
 below (`WorkflowLane.tsx`) drawing the dispatch queue as a left-to-right chain
-of linked cards. Design decisions: positions are DERIVED, never stored — X
-follows the queue rank, Y stacks the connected components of `depends_on` as
-parallel stream rows (`desktop/src/shared/workflow.ts`, pure + bun-tested) —
-so the lane and the kanban can never drift, and the shared broker schema needs
-no coordinates. Reorders commit through one new atomic broker route
+of linked cards. Design decisions: positions are DERIVED, never stored, and
+hierarchy-first — the column is the `depends_on` depth inside a connected
+component (parallel branches of an N:1/1:N fan-in stack vertically in the
+same column, like the graph view's layout transposed), while unrelated
+components chain left-to-right by queue rank so a dependency-free queue stays
+a flat conveyor (`desktop/src/shared/workflow.ts`, pure + bun-tested) — the
+lane and the kanban can never drift, and the shared broker schema needs no
+coordinates. A grid-assisted stack gesture (drop a card clearly above/below
+another: dashed ghost slot) makes it a parallel sibling by adopting the
+target's dependencies (sanitized, cycle-checked); an expand button opens the
+lane as a fullscreen foreground modal. Reorders commit through one new atomic broker route
 (`POST /roadmap/reorder`: ids in order → queue 1..N in a transaction, others
 unqueued, 500-id cap) instead of N racy upserts. Interactions: HTML5 drop from
 the board (insertion caret), in-lane drag to reorder, a port to pull
