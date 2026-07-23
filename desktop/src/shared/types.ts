@@ -299,10 +299,15 @@ export interface CreateSessionInput {
 // Mirror of the core shared/types.ts roadmap entities (the desktop tree cannot
 // import repo-root shared/, same convention as broker-client.ts). Keep in sync.
 
-export type RoadmapKind = 'feature' | 'bug' | 'debt' | 'idea' | 'chore'
+// 'directive' (CT1): a control card the Deck executes by injecting its
+// `directive` command into `target_peer_ids`' terminals when it reaches the
+// head of the dispatch queue. Not a work item; agents never run directives.
+export type RoadmapKind = 'feature' | 'bug' | 'debt' | 'idea' | 'chore' | 'directive'
 export type RoadmapPriority = 'must' | 'should' | 'could' | 'wont'
 export type RoadmapLevel = 'low' | 'medium' | 'high'
 export type RoadmapStatus = 'idea' | 'planned' | 'in_progress' | 'done' | 'archived'
+/** The context/token-economy command a `directive` card runs (CT1, mirror of core). */
+export type RoadmapDirective = 'clear' | 'compact' | 'magic_compact'
 
 export interface RoadmapItem {
   id: string
@@ -332,6 +337,10 @@ export interface RoadmapItem {
   locked_by: string | null
   /** ISO timestamp of the lock; null when unlocked. */
   locked_at: string | null
+  /** kind 'directive' (CT1): the app-executed command; null otherwise. */
+  directive: RoadmapDirective | null
+  /** kind 'directive' (CT1): peer_ids the command is injected into; [] otherwise. */
+  target_peer_ids: string[]
 }
 
 export interface RoadmapListFilters {
@@ -356,6 +365,10 @@ export interface RoadmapUpsertFields {
   status?: RoadmapStatus
   tags?: string[]
   depends_on?: string[]
+  /** kind 'directive' (CT1): the command to inject (required when kind='directive'). */
+  directive?: RoadmapDirective | null
+  /** kind 'directive' (CT1): the peer_ids to target. */
+  target_peer_ids?: string[]
   /** Queue position (C15): positive integer to queue, null to unqueue. */
   queue?: number | null
   /** Explicit lock control (K2): false releases, true claims for the author. */

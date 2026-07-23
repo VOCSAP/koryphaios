@@ -197,6 +197,26 @@ export function RoadmapItemModal({
         )}
 
         <div className="rm-modal-body">
+          {item.kind === 'directive' && (
+            <section className="rm-modal-section rm-modal-directive">
+              <h4>{t('roadmap.fieldDirective')}</h4>
+              <p className="rm-directive-cmd">
+                {t(`roadmap.directive.${item.directive ?? 'clear'}`)}
+              </p>
+              <h4>{t('roadmap.fieldTargets')}</h4>
+              <div className="rm-detail-badges">
+                {item.target_peer_ids.length === 0 ? (
+                  <span className="rm-badge">{t('roadmap.targetsEmpty')}</span>
+                ) : (
+                  item.target_peer_ids.map((p) => (
+                    <span key={p} className="rm-badge rm-badge-target">
+                      {p}
+                    </span>
+                  ))
+                )}
+              </div>
+            </section>
+          )}
           {item.description && (
             <section className="rm-modal-section">
               <h4>{t('roadmap.fieldDescription')}</h4>

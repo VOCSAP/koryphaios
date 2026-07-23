@@ -571,6 +571,18 @@ const IconKindChore = (
 )
 
 /**
+ * Directive: the herald's baton with a reset arc — a control card the app
+ * carries out (clear/compact the context of the targeted sessions), not a work
+ * item. The circular sweep reads as "reset/economy".
+ */
+const IconKindDirective = (
+  <Svg>
+    <path d="M18.4 8.6A7 7 0 1 0 19 12" />
+    <path d="M18.7 4.8v3.9h-3.9" />
+  </Svg>
+)
+
+/**
  * Roadmap kind marks, coloured per kind (styles.css .kind-glyph-*) so the
  * kanban keeps its at-a-glance colour scanning despite the stroke style.
  */
@@ -579,7 +591,8 @@ export const GLYPH_KINDS: Record<RoadmapKind, React.JSX.Element> = {
   bug: <span className="kind-glyph kind-glyph-bug">{IconKindBug}</span>,
   debt: <span className="kind-glyph kind-glyph-debt">{IconKindDebt}</span>,
   idea: <span className="kind-glyph kind-glyph-idea">{IconKindIdea}</span>,
-  chore: <span className="kind-glyph kind-glyph-chore">{IconKindChore}</span>
+  chore: <span className="kind-glyph kind-glyph-chore">{IconKindChore}</span>,
+  directive: <span className="kind-glyph kind-glyph-directive">{IconKindDirective}</span>
 }
 
 /** Semantic badge glyphs (identity/state marks, not clickable actions). */

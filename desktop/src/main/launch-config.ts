@@ -40,6 +40,35 @@ export interface LaunchPreset {
   prompt?: string
 }
 
+/**
+ * Per-machine feature flags (CT3). `magicCompact` gates a PTY-reaching behavior
+ * (the Deck typing /magic-compact into an agent's terminal), so it follows the
+ * GLOBAL-only trust rule below; `handoff` only influences advisory briefing text
+ * and follows normal precedence.
+ */
+export type MagicCompactMode = 'auto' | 'on' | 'off'
+export type HandoffMode = 'file' | 'kleos' | 'off'
+export interface FeatureFlags {
+  /** magic_compact directive: 'auto' (use plugin when present), 'on', 'off'. */
+  magicCompact: MagicCompactMode
+  /** How agents are told to persist hand-offs: 'file' (plan file), 'kleos', 'off'. */
+  handoff: HandoffMode
+}
+export const DEFAULT_FEATURES: FeatureFlags = { magicCompact: 'auto', handoff: 'file' }
+
+const MAGIC_MODES: readonly MagicCompactMode[] = ['auto', 'on', 'off']
+const HANDOFF_MODES: readonly HandoffMode[] = ['file', 'kleos', 'off']
+function asMagic(v: unknown): MagicCompactMode | undefined {
+  return typeof v === 'string' && (MAGIC_MODES as readonly string[]).includes(v)
+    ? (v as MagicCompactMode)
+    : undefined
+}
+function asHandoff(v: unknown): HandoffMode | undefined {
+  return typeof v === 'string' && (HANDOFF_MODES as readonly string[]).includes(v)
+    ? (v as HandoffMode)
+    : undefined
+}
+
 export interface LaunchConfig {
   launchCommand: string
   presets: LaunchPreset[]
@@ -50,6 +79,8 @@ export interface LaunchConfig {
    * (PLAN C4), e.g. "bun install". Empty = no hook.
    */
   worktreeInit?: string
+  /** Per-machine feature flags (CT3); resolved separately via resolveFeatures. */
+  features?: Partial<FeatureFlags>
 }
 
 export function globalConfigDir(env: NodeJS.ProcessEnv): string {
@@ -108,6 +139,15 @@ function readConfigFile(file: string): Partial<LaunchConfig> | null {
     if (typeof raw.worktreeInit === 'string' && raw.worktreeInit.trim()) {
       out.worktreeInit = raw.worktreeInit.trim()
     }
+    if (raw.features && typeof raw.features === 'object') {
+      const f = raw.features as Record<string, unknown>
+      const feats: Partial<FeatureFlags> = {}
+      const m = asMagic(f.magicCompact)
+      if (m) feats.magicCompact = m
+      const h = asHandoff(f.handoff)
+      if (h) feats.handoff = h
+      if (Object.keys(feats).length > 0) out.features = feats
+    }
     return out
   } catch {
     return null
@@ -158,6 +198,32 @@ export function projectWorktreeInit(projectDir: string): string | null {
 /** The worktreeInit ignoring any project config: global file, else undefined. */
 export function globalWorktreeInit(env: NodeJS.ProcessEnv = process.env): string | undefined {
   return readConfigFile(globalConfigPath(env))?.worktreeInit
+}
+
+/**
+ * Resolve the effective per-machine feature flags (CT3). Trust rules differ per
+ * flag:
+ *  - `handoff` only shapes advisory briefing text (never reaches a shell/PTY),
+ *    so it follows normal precedence: a project-local value wins over global.
+ *  - `magicCompact` gates the Deck typing a command into an agent's terminal, so
+ *    it is decided by the GLOBAL config only; a project-local (clonable, hence
+ *    hostile) value may only RESTRICT it to 'off', never enable it. This mirrors
+ *    the launchCommand / worktreeInit gating (project config can restrict, not
+ *    grant, shell-reaching behavior).
+ */
+export function resolveFeatures(
+  projectDir: string,
+  env: NodeJS.ProcessEnv = process.env
+): FeatureFlags {
+  const global = readConfigFile(globalConfigPath(env))?.features
+  const local = readConfigFile(localConfigPath(projectDir))?.features
+
+  const handoff = local?.handoff ?? global?.handoff ?? DEFAULT_FEATURES.handoff
+
+  let magicCompact = global?.magicCompact ?? DEFAULT_FEATURES.magicCompact
+  if (local?.magicCompact === 'off') magicCompact = 'off' // local may only restrict
+
+  return { magicCompact, handoff }
 }
 
 /** Create the project-local config on demand (UI action). No-op if it exists. */

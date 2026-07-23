@@ -134,6 +134,29 @@ l'opérateur sur une machine avec affichage.
   - Filtre "kind" du kanban : la lane doit continuer à voir/réordonner la
     file complète (non filtrée) — vérifier qu'aucun item n'est perdu au
     reorder pendant qu'un filtre est actif.
+- [ ] **Cartes directives (CT, branche `claude/context-token-optimization-4n7aqh`)**
+      — logique couverte par tests purs (broker directive, `directive.ts`,
+      `resolveFeatures`, parsing magic-compact) + typecheck ; l'injection PTY et
+      le rendu ne sont jamais exercés en CI. À valider sur une vraie machine :
+  - Carte directive de bout en bout : créer une carte kind `directive`
+    (dropdown commande + multi-sélection des peers vivants), la mettre en file,
+    dispatcher, et vérifier que `/clear` (puis `/compact`) est bien saisi dans
+    le terminal de CHAQUE peer ciblé — et d'aucun autre — quand la carte atteint
+    la tête de file ; garde d'inactivité (aucune injection pendant que la tuile
+    est busy).
+  - **Option A magic-compact — vérification empirique CRITIQUE** : que la forme
+    argument `/resume <id>` est honorée dans le TUI des versions CC visées
+    (process non redémarré → peer_id et harness conservés), et que le harness de
+    démarrage (`--append-system-prompt-file`, serveurs MCP) survit au switch de
+    session in-app. Si A régresse : basculer sur l'option B (`restart` fork-resume,
+    même panneau) puis C (kill+respawn), déjà documentées dans `PLAN-DIRECTIVES.md`.
+  - Détection du plugin magic-compact avec / sans installation (`~/.claude/plugins`),
+    et le repli `/compact` sur message de shim ou timeout.
+  - Rendu visuel de la carte directive (cadre pointillé violet, chips cibles,
+    badge commande) en thème clair ET sombre ; éditeur (champs work-only masqués).
+  - **peer_id à travers l'option B** (multi-sessions même cwd+groupe) : seule la
+    session canonique du `session_key` récupère son identité — voir résiduel core
+    §3.7 (intégrer `CLAUDE_PEERS_DESK_SESSION` dans le `session_key`).
 
 ---
 
@@ -198,6 +221,29 @@ l'opérateur sur une machine avec affichage.
       coût par nœud du graph chat.
 - [ ] **Sync GitHub Issues ↔ roadmap partagée** : le modèle `roadmap_items`
       garde la porte ouverte (tags + futur champ `external_url`).
+
+### 3.7 Cartes directives — increments différés (CT6, ex-`PLAN-DIRECTIVES.md`)
+
+- [ ] **Directive `clear_briefing`** : le Deck lance le digest existant
+      (`digest.ts` via `utility-inference.ts`, Haiku par défaut) sur des sources
+      bon marché, injecte `/clear`, puis saisit le briefing comme premier prompt
+      — zéro inférence côté team-lead. Nécessite une variante d'injection
+      « paste-safe » (bracketed-paste / écritures fragmentées) pour un briefing
+      multi-lignes.
+- [ ] **Jauge de contexte par tuile (consultative)** : % de contexte via le
+      canal fichier-cache de la statusline (précédent `CLAUDE_PEERS_STATUS_LINE_CACHE`)
+      + un seuil qui ARME l'insertion d'une directive à la prochaine frontière
+      `done` (jamais un reset en plein milieu de tâche). Vérif empirique des
+      champs JSON statusline (`context_window_used/total`) selon la version CC.
+- [ ] **peer_id stable à travers un fork-resume (core)** : intégrer le token
+      stable `CLAUDE_PEERS_DESK_SESSION` dans le `session_key` claude-peers (ou
+      re-poser le peer_id via `set_id` après restart) pour le cas multi-sessions
+      même cwd+groupe (option B de la chaîne magic-compact). Chantier core séparé.
+- [ ] **`handoff` flag — consommation** : `resolveFeatures().handoff`
+      (`file`|`kleos`|`off`) est résolu mais pas encore consommé par le texte du
+      playbook ; le câbler quand l'increment plan-file/Kleos (CT6) atterrit
+      (le `handoff='file'` ajoute l'instruction de maintien d'un fichier de plan,
+      `kleos`/`off` la retirent).
 
 ---
 

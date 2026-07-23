@@ -36,6 +36,7 @@ import type {
   AnnounceResponse,
   RoadmapArchiveRequest,
   RoadmapArchiveResponse,
+  RoadmapDirective,
   RoadmapItem,
   RoadmapKind,
   RoadmapLevel,
@@ -314,7 +315,9 @@ db.run(`
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     deleted_at TEXT,
-    queue INTEGER
+    queue INTEGER,
+    directive TEXT,
+    target_peer_ids TEXT NOT NULL DEFAULT '[]'
   )
 `);
 
@@ -341,6 +344,17 @@ for (const col of [
   "locked_by TEXT",
   "locked_at TEXT",
 ]) {
+  try {
+    db.run(`ALTER TABLE roadmap_items ADD COLUMN ${col}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+  }
+}
+
+// Migration (CT1): directive cards. `directive` is null for every non-directive
+// item; target_peer_ids is a JSON array of plain-text peer_id snapshots (no FK).
+for (const col of ["directive TEXT", "target_peer_ids TEXT NOT NULL DEFAULT '[]'"]) {
   try {
     db.run(`ALTER TABLE roadmap_items ADD COLUMN ${col}`);
   } catch (e) {
@@ -1147,7 +1161,9 @@ function handlePeekMessages(body: PollMessagesRequest): PollMessagesResponse {
 
 // --- Roadmap handlers (v0.4, PLAN C3) ---
 
-const ROADMAP_KINDS: readonly RoadmapKind[] = ["feature", "bug", "debt", "idea", "chore"];
+const ROADMAP_KINDS: readonly RoadmapKind[] = ["feature", "bug", "debt", "idea", "chore", "directive"];
+const DIRECTIVE_COMMANDS: readonly RoadmapDirective[] = ["clear", "compact", "magic_compact"];
+const MAX_DIRECTIVE_TARGETS = 16;
 const ROADMAP_PRIORITIES: readonly RoadmapPriority[] = ["must", "should", "could", "wont"];
 const ROADMAP_LEVELS: readonly RoadmapLevel[] = ["low", "medium", "high"];
 const ROADMAP_STATUSES: readonly RoadmapStatus[] = [
@@ -1158,10 +1174,11 @@ const ROADMAP_STATUSES: readonly RoadmapStatus[] = [
   "archived",
 ];
 
-type RoadmapRow = Omit<RoadmapItem, "tags" | "depends_on" | "locked"> & {
+type RoadmapRow = Omit<RoadmapItem, "tags" | "depends_on" | "locked" | "target_peer_ids"> & {
   tags: string;
   depends_on: string;
   locked: number;
+  target_peer_ids: string;
 };
 
 function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
@@ -1180,6 +1197,9 @@ function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
     locked: row.locked === 1,
     locked_by: row.locked_by ?? null,
     locked_at: row.locked_at ?? null,
+    directive: row.directive ?? null,
+    // Legacy rows created before the migration have NULL here; default to [].
+    target_peer_ids: row.target_peer_ids ? parseList(row.target_peer_ids) : [],
   };
 }
 
@@ -1187,6 +1207,25 @@ function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
 function cleanList(v: unknown): string[] | null {
   if (!Array.isArray(v)) return null;
   return v.filter((x): x is string => typeof x === "string" && x.trim() !== "").map((x) => x.trim());
+}
+
+/**
+ * Sanitize a directive card's target_peer_ids (CT1): keep only well-formed,
+ * non-reserved peer_ids (same charset as set_id), deduped and capped. A field
+ * crossing the broker HTTP boundary is never trusted verbatim -- the Deck
+ * re-validates it again before it ever reaches a PTY (three-hostile-inputs #2).
+ */
+function cleanPeerIds(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  const out: string[] = [];
+  for (const x of v) {
+    if (typeof x !== "string") continue;
+    const id = x.trim();
+    if (!PEER_ID_REGEX.test(id) || RESERVED_PEER_IDS.includes(id) || out.includes(id)) continue;
+    out.push(id);
+    if (out.length >= MAX_DIRECTIVE_TARGETS) break;
+  }
+  return out;
 }
 
 function badEnum<T extends string>(value: unknown, allowed: readonly T[]): boolean {
@@ -1249,6 +1288,15 @@ function handleRoadmapUpsert(
   ) {
     return { error: "invalid kind/priority/value/effort/status", status: 400 };
   }
+  // Directive card fields (CT1). `directive` may be explicitly cleared (null);
+  // any other non-enum value is rejected. target_peer_ids, when present, must be
+  // an array (individual entries are sanitized by cleanPeerIds).
+  if (badEnum(body.directive ?? undefined, DIRECTIVE_COMMANDS)) {
+    return { error: "invalid directive (clear|compact|magic_compact)", status: 400 };
+  }
+  if (body.target_peer_ids !== undefined && !Array.isArray(body.target_peer_ids)) {
+    return { error: "target_peer_ids must be an array", status: 400 };
+  }
   // Queue position (PLAN C15): positive integer or null (= unqueued).
   if (
     body.queue !== undefined &&
@@ -1283,9 +1331,34 @@ function handleRoadmapUpsert(
       };
     }
 
+    // Directive coherence (CT1): a 'directive' item must carry a valid command;
+    // any other kind must not. Fields resolve against the existing row on patch.
+    const nextKind = body.kind ?? existing.kind;
+    let nextDirective: RoadmapDirective | null;
+    let nextTargets: string[];
+    if (nextKind === "directive") {
+      nextDirective = (body.directive ?? existing.directive) ?? null;
+      if (!nextDirective || !DIRECTIVE_COMMANDS.includes(nextDirective)) {
+        return {
+          error: "kind 'directive' requires a directive (clear|compact|magic_compact)",
+          status: 400,
+        };
+      }
+      nextTargets =
+        body.target_peer_ids !== undefined
+          ? cleanPeerIds(body.target_peer_ids)
+          : existing.target_peer_ids;
+    } else {
+      if (body.directive != null) {
+        return { error: "directive is only valid for kind 'directive'", status: 400 };
+      }
+      nextDirective = null;
+      nextTargets = [];
+    }
+
     const next: RoadmapItem = {
       ...existing,
-      kind: body.kind ?? existing.kind,
+      kind: nextKind,
       title: body.title !== undefined ? body.title.trim() : existing.title,
       description: body.description ?? existing.description,
       rationale: body.rationale ?? existing.rationale,
@@ -1296,6 +1369,8 @@ function handleRoadmapUpsert(
       status: body.status ?? existing.status,
       tags: cleanList(body.tags) ?? existing.tags,
       depends_on: cleanList(body.depends_on) ?? existing.depends_on,
+      directive: nextDirective,
+      target_peer_ids: nextTargets,
       queue: body.queue !== undefined ? body.queue : existing.queue,
       updated_by: by,
     };
@@ -1327,6 +1402,7 @@ function handleRoadmapUpsert(
       `UPDATE roadmap_items SET
          kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
          value = ?, effort = ?, status = ?, tags = ?, depends_on = ?, queue = ?,
+         directive = ?, target_peer_ids = ?,
          locked = ?, locked_by = ?,
          locked_at = CASE WHEN ? = 0 THEN NULL ELSE COALESCE(?, datetime('now')) END,
          updated_by = ?, updated_at = datetime('now'),
@@ -1348,6 +1424,8 @@ function handleRoadmapUpsert(
         JSON.stringify(next.tags),
         JSON.stringify(next.depends_on),
         next.queue,
+        next.directive,
+        JSON.stringify(next.target_peer_ids),
         locked ? 1 : 0,
         lockedBy,
         locked ? 1 : 0,
@@ -1374,18 +1452,35 @@ function handleRoadmapUpsert(
   const createLocked =
     createStatus === "in_progress" && (body.locked === true || (body.locked !== false && by !== "deck"));
 
+  // Directive coherence (CT1), create path.
+  const createKind = body.kind ?? "feature";
+  let createDirective: RoadmapDirective | null = null;
+  let createTargets: string[] = [];
+  if (createKind === "directive") {
+    createDirective = body.directive ?? null;
+    if (!createDirective || !DIRECTIVE_COMMANDS.includes(createDirective)) {
+      return {
+        error: "kind 'directive' requires a directive (clear|compact|magic_compact)",
+        status: 400,
+      };
+    }
+    createTargets = cleanPeerIds(body.target_peer_ids);
+  } else if (body.directive != null) {
+    return { error: "directive is only valid for kind 'directive'", status: 400 };
+  }
+
   const id = randomUUID();
   db.run(
     `INSERT INTO roadmap_items
        (id, project_key, kind, title, description, rationale, context, priority, value,
         effort, status, tags, depends_on, created_by, updated_by,
-        created_at, updated_at, deleted_at, queue, locked, locked_by, locked_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?, ?, ?,
+        created_at, updated_at, deleted_at, queue, directive, target_peer_ids, locked, locked_by, locked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?, ?, ?, ?, ?,
              CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END)`,
     [
       id,
       projectKey,
-      body.kind ?? "feature",
+      createKind,
       title,
       body.description ?? "",
       body.rationale ?? "",
@@ -1399,6 +1494,8 @@ function handleRoadmapUpsert(
       by,
       by,
       body.queue ?? null,
+      createDirective,
+      JSON.stringify(createTargets),
       createLocked ? 1 : 0,
       createLocked ? by : null,
       createLocked ? 1 : 0,
@@ -1549,11 +1646,17 @@ function handleRoadmapImport(body: {
     `INSERT OR REPLACE INTO roadmap_items
        (id, project_key, kind, title, description, rationale, context, priority, value,
         effort, status, tags, depends_on, created_by, updated_by,
-        created_at, updated_at, deleted_at, queue)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        created_at, updated_at, deleted_at, queue, directive, target_peer_ids)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   const importAll = db.transaction((rows: Partial<RoadmapItem>[]) => {
     for (const it of rows) {
+      // Only carry the directive over for a coherent directive card (CT1);
+      // ignore a stray directive on any other kind, matching upsert's rule.
+      const importDirective =
+        it.kind === "directive" && it.directive && DIRECTIVE_COMMANDS.includes(it.directive)
+          ? it.directive
+          : null;
       insert.run(
         it.id!.trim(),
         projectKey,
@@ -1575,7 +1678,9 @@ function handleRoadmapImport(body: {
         it.deleted_at ?? null,
         typeof it.queue === "number" && Number.isInteger(it.queue) && it.queue >= 1
           ? it.queue
-          : null
+          : null,
+        importDirective,
+        JSON.stringify(importDirective ? cleanPeerIds(it.target_peer_ids) : [])
       );
     }
   });

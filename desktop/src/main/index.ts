@@ -29,9 +29,17 @@ import {
   globalWorktreeInit,
   projectLaunchCommand,
   projectWorktreeInit,
+  resolveFeatures,
   resolveLaunchConfig
 } from './launch-config'
+import {
+  MAGIC_TIMEOUT_MS,
+  isMagicShimFailure,
+  magicCompactPluginPresent,
+  parseMagicResume
+} from './magic-compact'
 import { approve, isApproved, resolveApprovedLaunchCommand } from './launch-approval'
+import { homedir } from 'node:os'
 import { WorkspaceService } from './workspace-service'
 import {
   BrokerHealthTracker,
@@ -44,7 +52,8 @@ import { appendInboxHistory } from './inbox-store'
 import { computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
 import { createCheckpoint, purgeCheckpoints, restoreCommand } from './checkpoint-service'
 import { composeAssignText, composeDispatchText, composeStopText, firstQueued } from './dispatch'
-import type { AssignResult, DispatchResult, StopResult } from '@shared/types'
+import { directiveKeys, isDirectiveCommand, resolveDirectiveTargets } from './directive'
+import type { AssignResult, DispatchResult, RoadmapItem, StopResult } from '@shared/types'
 import { composeJoinAnnounce, type JoinAnnounceIntent } from '@shared/announce'
 import { APP_STATE_SUBDIR, runDataMigration } from './migrate-data-dir'
 import type { SessionRuntime } from '@shared/types'
@@ -618,22 +627,131 @@ const checkpointBeforeSpawn = async (dir: string): Promise<void> => {
 const dispatchedIds = new Set<string>()
 const DISPATCH_WATCH_MS = 20_000
 
+/**
+ * Magic-compact chain for one target (CT4). When the plugin is available (flag
+ * 'on', or 'auto' + detected), inject /magic-compact, capture the "/resume <id>"
+ * banner from the tile's output, and re-enter the compacted session IN PLACE
+ * (option A: the process never restarts, so peer_id and the launch harness are
+ * preserved). On the plugin's shim-failure message or a timeout, fall back to a
+ * standard /compact. When the plugin is disabled/absent, go straight to /compact.
+ *
+ * EMPIRICAL CHECKS deferred to BACKLOG (CT4): that argument-form `/resume <id>`
+ * is honored in the TUI on the targeted CC versions, and that the harness
+ * survives the in-app session switch. Options B (restart fork-resume) and C
+ * (kill+respawn) are the documented fallbacks if A regresses.
+ */
+const runMagicCompact = async (tileId: string, peerId: string): Promise<void> => {
+  const mode = resolveFeatures(config.projectDir).magicCompact
+  const useMagic = mode === 'on' || (mode === 'auto' && magicCompactPluginPresent(homedir()))
+  if (!useMagic) {
+    const why = mode === 'off' ? 'disabled' : 'plugin absent'
+    const o = await service.injectCommand(tileId, '/compact')
+    journal.add('dispatch', `magic_compact -> "${peerId}": ${why}, used /compact (${o})`)
+    return
+  }
+  // Arm the scanner BEFORE injecting so a fast banner is never missed.
+  const scan = service.waitForOutput(tileId, MAGIC_TIMEOUT_MS, (buf) => {
+    const id = parseMagicResume(buf)
+    if (id) return { kind: 'resume' as const, id }
+    if (isMagicShimFailure(buf)) return { kind: 'shim' as const }
+    return null
+  })
+  const injected = await service.injectCommand(tileId, '/magic-compact')
+  if (injected !== 'sent') {
+    journal.add('dispatch', `magic_compact -> "${peerId}": /magic-compact not injected (${injected})`)
+    return
+  }
+  const res = await scan
+  if (res?.kind === 'resume') {
+    // Option A: re-enter in place. The id is a strict UUID from the agent's own
+    // terminal, typed behind the code-constant /resume prefix.
+    const o = await service.injectCommand(tileId, `/resume ${res.id}`)
+    journal.add(
+      'dispatch',
+      `magic_compact -> "${peerId}": compacted, re-entered ${res.id.slice(0, 8)} (${o})`
+    )
+    return
+  }
+  const o = await service.injectCommand(tileId, '/compact')
+  const why = res?.kind === 'shim' ? 'plugin shim (not intercepted)' : 'no banner within timeout'
+  journal.add('dispatch', `magic_compact -> "${peerId}": ${why}, fell back to /compact (${o})`)
+}
+
+/**
+ * Execute a directive card (CT3): the Deck itself types the command into the
+ * terminals of the card's live targets. It NEVER announces to the lead. The
+ * command is a code constant (directiveKeys); the card's payload only selects
+ * which constant and which live tiles. Per-target injection is fire-and-forget
+ * (idle-gated inside injectCommand) so the dispatch loop never blocks; each
+ * injection journals its own outcome. No live target / unreachable targets are
+ * journaled, never silently dropped.
+ */
+const executeDirective = async (item: RoadmapItem): Promise<void> => {
+  const cmd = item.directive
+  // Re-validate the enum Deck-side (hostile input #2: broker response field).
+  if (!isDirectiveCommand(cmd)) {
+    reportError('dispatch', `directive card "${item.title}" carries no valid command; skipped`)
+    return
+  }
+  const keys = directiveKeys(cmd)
+  const { matched, missing } = resolveDirectiveTargets(item.target_peer_ids, service.list())
+  if (matched.length === 0) {
+    journal.add(
+      'dispatch',
+      `directive ${keys} "${item.title}": no live target (requested: ${
+        item.target_peer_ids.join(', ') || 'none'
+      })`
+    )
+    return
+  }
+  for (const t of matched) {
+    if (cmd === 'magic_compact') {
+      void runMagicCompact(t.id, t.peerId)
+    } else {
+      void service
+        .injectCommand(t.id, keys)
+        .then((outcome) => journal.add('dispatch', `directive ${keys} -> "${t.peerId}": ${outcome}`))
+        .catch((e) => reportError('dispatch', `directive injection failed for "${t.peerId}"`, e))
+    }
+  }
+  if (missing.length > 0) {
+    journal.add(
+      'dispatch',
+      `directive ${keys} "${item.title}": ${missing.length} target(s) not reachable: ${missing.join(', ')}`
+    )
+  }
+}
+
 const dispatchNext = async (): Promise<DispatchResult> => {
   try {
     const endpoint = resolveBrokerEndpoint()
     const key = computeDeckProjectKey(config.projectDir)
-    const item = firstQueued(await listRoadmap(endpoint, key, {}))
-    if (!item) return { sent: false, reason: 'empty-queue' }
-    const sent = await announceToLead(composeDispatchText(item))
-    if (sent === 0) return { sent: false, reason: 'no-lead' }
-    // Unqueue + hand over as 'planned'; the lead moves it along from there.
-    await upsertRoadmap(endpoint, key, {
-      id: item.id,
-      queue: null,
-      status: item.status === 'idea' ? 'planned' : item.status
-    })
-    dispatchedIds.add(item.id)
-    return { sent: true, title: item.title }
+    // Drain directive cards sitting at the head of the queue first: the Deck
+    // executes them itself (inject + mark done) and advances to the next item.
+    // The guard bounds the loop should a done-write ever fail to advance it.
+    for (let guard = 0; guard < 64; guard++) {
+      const item = firstQueued(await listRoadmap(endpoint, key, {}))
+      if (!item) return { sent: false, reason: 'empty-queue' }
+      if (item.kind !== 'directive') {
+        const sent = await announceToLead(composeDispatchText(item))
+        if (sent === 0) return { sent: false, reason: 'no-lead' }
+        // Unqueue + hand over as 'planned'; the lead moves it along from there.
+        await upsertRoadmap(endpoint, key, {
+          id: item.id,
+          queue: null,
+          status: item.status === 'idea' ? 'planned' : item.status
+        })
+        dispatchedIds.add(item.id)
+        return { sent: true, title: item.title }
+      }
+      // Directive card: fire the injections, then mark it done so the queue
+      // advances (the Deck owns directive completion; agents never do).
+      await executeDirective(item)
+      await upsertRoadmap(endpoint, key, { id: item.id, queue: null, status: 'done' })
+      const label = isDirectiveCommand(item.directive) ? directiveKeys(item.directive) : `${item.directive ?? '?'}`
+      journal.add('dispatch', `directive card dispatched: "${item.title}" (${label})`)
+    }
+    return { sent: false, reason: 'error' }
   } catch (e) {
     reportError('dispatch', 'dispatch failed', e)
     return { sent: false, reason: 'error' }

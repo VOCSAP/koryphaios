@@ -214,10 +214,20 @@ export interface AnnounceResponse {
 // sessions: no cleanup timer ever touches them, deletion is a reversible
 // archive (deleted_at), and rows survive broker restarts like any other table.
 
-export type RoadmapKind = "feature" | "bug" | "debt" | "idea" | "chore";
+// 'directive' (CT1) is a control card, not a work item: it carries a `directive`
+// command the Deck app INJECTS into the terminals of `target_peer_ids` when the
+// card reaches the head of the dispatch queue. Agents never execute directives.
+export type RoadmapKind = "feature" | "bug" | "debt" | "idea" | "chore" | "directive";
 export type RoadmapPriority = "must" | "should" | "could" | "wont"; // MoSCoW
 export type RoadmapLevel = "low" | "medium" | "high";
 export type RoadmapStatus = "idea" | "planned" | "in_progress" | "done" | "archived";
+/**
+ * The context/token-economy command a `directive` card runs (CT1). The Deck
+ * maps each to a CODE-CONSTANT keystroke sequence typed into a target session's
+ * PTY -- never free text. `magic_compact` prefers the Magic Compact plugin and
+ * falls back to `compact` when it is absent (CT4).
+ */
+export type RoadmapDirective = "clear" | "compact" | "magic_compact";
 
 export interface RoadmapItem {
   /** uuid, immutable. */
@@ -274,6 +284,16 @@ export interface RoadmapItem {
   locked_by: string | null;
   /** ISO timestamp of the lock, for the TTL sweep. null when unlocked. */
   locked_at: string | null;
+  /**
+   * kind 'directive' (CT1): the app-executed command; null for every other
+   * kind. Persisted so the card survives broker restarts like any roadmap row.
+   */
+  directive: RoadmapDirective | null;
+  /**
+   * kind 'directive' (CT1): peer_id snapshots the command is injected into
+   * (plain text, no FK -- like created_by). [] for non-directive items.
+   */
+  target_peer_ids: string[];
 }
 
 export interface RoadmapListRequest {
@@ -309,6 +329,13 @@ export interface RoadmapUpsertRequest {
   status?: RoadmapStatus;
   tags?: string[];
   depends_on?: string[];
+  /**
+   * kind 'directive' (CT1): the command to inject. Required when kind is
+   * 'directive'; rejected (must stay null) for every other kind.
+   */
+  directive?: RoadmapDirective | null;
+  /** kind 'directive' (CT1): the peer_ids to target. */
+  target_peer_ids?: string[];
   /** Queue position (C15): a positive integer to queue, null to unqueue. */
   queue?: number | null;
   /**

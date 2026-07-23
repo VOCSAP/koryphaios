@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type {
+  RoadmapDirective,
   RoadmapItem,
   RoadmapKind,
   RoadmapLevel,
@@ -28,7 +29,8 @@ import { insertAt } from '@shared/workflow'
 // works on it) is greyed out and not draggable -- the operator goes through the
 // ⏹ Stop button (K3) to reclaim it.
 
-const KINDS: RoadmapKind[] = ['feature', 'bug', 'debt', 'idea', 'chore']
+const KINDS: RoadmapKind[] = ['feature', 'bug', 'debt', 'idea', 'chore', 'directive']
+const DIRECTIVES: RoadmapDirective[] = ['clear', 'compact', 'magic_compact']
 const PRIORITIES: RoadmapPriority[] = ['must', 'should', 'could', 'wont']
 const LEVELS: RoadmapLevel[] = ['low', 'medium', 'high']
 const STATUSES: RoadmapStatus[] = ['idea', 'planned', 'in_progress', 'done']
@@ -50,6 +52,9 @@ interface Draft {
   rationale: string
   context: string
   tags: string
+  /** kind 'directive' (CT5): the command + the peers it targets. */
+  directive?: RoadmapDirective | null
+  target_peer_ids?: string[]
   /** Workflow lane seeds: dependencies pre-wired on a lane-born draft. */
   depends_on?: string[]
   /** Queue slot the created item is inserted at (lane create flows). */
@@ -81,7 +86,9 @@ function toDraft(i: RoadmapItem): Draft {
     description: i.description,
     rationale: i.rationale,
     context: i.context,
-    tags: i.tags.join(', ')
+    tags: i.tags.join(', '),
+    directive: i.directive,
+    target_peer_ids: i.target_peer_ids
   }
 }
 
@@ -273,6 +280,7 @@ export function RoadmapView(): React.JSX.Element {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean)
+    const isDirective = draft.kind === 'directive'
     try {
       const saved = await window.api.roadmapUpsert({
         id: draft.id,
@@ -287,7 +295,11 @@ export function RoadmapView(): React.JSX.Element {
         rationale: draft.rationale,
         context: draft.context,
         tags,
-        depends_on: draft.depends_on
+        depends_on: draft.depends_on,
+        // Directive card fields (CT5): send only for a directive kind; switching
+        // a card AWAY from directive sends directive:null so the broker clears it.
+        directive: isDirective ? (draft.directive ?? 'clear') : null,
+        target_peer_ids: isDirective ? (draft.target_peer_ids ?? []) : undefined
       })
       // Lane-born draft: slot the new item into the queue where it was dropped
       // (nothing was written before Save, so Cancel really created nothing).
@@ -503,6 +515,22 @@ export function RoadmapView(): React.JSX.Element {
 
   // Live, addressable agents: peer_id resolved, not the supervisor.
   const liveAgents = sessions.filter((s) => !s.supervisor && s.status !== 'exited' && s.peerId)
+  // Directive cards (CT5): a directive card targets peers, not work attributes,
+  // so the form swaps the priority/value/effort/context fields for a directive
+  // dropdown + a peer multiselect. `toggleTarget` flips one peer in the set.
+  const draftIsDirective = draft?.kind === 'directive'
+  const toggleTarget = (peerId: string): void => {
+    setDraft((d) => {
+      if (!d) return d
+      const cur = d.target_peer_ids ?? []
+      return {
+        ...d,
+        target_peer_ids: cur.includes(peerId)
+          ? cur.filter((p) => p !== peerId)
+          : [...cur, peerId]
+      }
+    })
+  }
 
   const assign = async (item: RoadmapItem, peerId: string): Promise<void> => {
     setAssignItem(null)
@@ -730,7 +758,16 @@ export function RoadmapView(): React.JSX.Element {
                 <span>{t('roadmap.fieldKind')}</span>
                 <select
                   value={draft.kind}
-                  onChange={(e) => setDraft({ ...draft, kind: e.target.value as RoadmapKind })}
+                  onChange={(e) => {
+                    const kind = e.target.value as RoadmapKind
+                    // Switching to a directive seeds a default command so the
+                    // card is always coherent (broker requires one).
+                    setDraft({
+                      ...draft,
+                      kind,
+                      directive: kind === 'directive' ? (draft.directive ?? 'clear') : draft.directive
+                    })
+                  }}
                 >
                   {KINDS.map((k) => (
                     <option key={k} value={k}>
@@ -739,48 +776,68 @@ export function RoadmapView(): React.JSX.Element {
                   ))}
                 </select>
               </label>
-              <label className="field">
-                <span>{t('roadmap.fieldPriority')}</span>
-                <select
-                  value={draft.priority}
-                  onChange={(e) =>
-                    setDraft({ ...draft, priority: e.target.value as RoadmapPriority })
-                  }
-                >
-                  {PRIORITIES.map((p) => (
-                    <option key={p} value={p}>
-                      {t(`roadmap.priority.${p}`)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="field">
-                <span>{t('roadmap.value')}</span>
-                <select
-                  value={draft.value}
-                  onChange={(e) => setDraft({ ...draft, value: e.target.value as RoadmapLevel })}
-                >
-                  {LEVELS.map((l) => (
-                    <option key={l} value={l}>
-                      {t(`roadmap.level.${l}`)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="field">
-                <span>{t('roadmap.effort')}</span>
-                <select
-                  value={draft.effort}
-                  onChange={(e) => setDraft({ ...draft, effort: e.target.value as RoadmapLevel })}
-                >
-                  {LEVELS.map((l) => (
-                    <option key={l} value={l}>
-                      {t(`roadmap.level.${l}`)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              {draft.status !== 'archived' && (
+              {draftIsDirective ? (
+                <label className="field">
+                  <span>{t('roadmap.fieldDirective')}</span>
+                  <select
+                    value={draft.directive ?? 'clear'}
+                    onChange={(e) =>
+                      setDraft({ ...draft, directive: e.target.value as RoadmapDirective })
+                    }
+                  >
+                    {DIRECTIVES.map((d) => (
+                      <option key={d} value={d}>
+                        {t(`roadmap.directive.${d}`)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <>
+                  <label className="field">
+                    <span>{t('roadmap.fieldPriority')}</span>
+                    <select
+                      value={draft.priority}
+                      onChange={(e) =>
+                        setDraft({ ...draft, priority: e.target.value as RoadmapPriority })
+                      }
+                    >
+                      {PRIORITIES.map((p) => (
+                        <option key={p} value={p}>
+                          {t(`roadmap.priority.${p}`)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>{t('roadmap.value')}</span>
+                    <select
+                      value={draft.value}
+                      onChange={(e) => setDraft({ ...draft, value: e.target.value as RoadmapLevel })}
+                    >
+                      {LEVELS.map((l) => (
+                        <option key={l} value={l}>
+                          {t(`roadmap.level.${l}`)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="field">
+                    <span>{t('roadmap.effort')}</span>
+                    <select
+                      value={draft.effort}
+                      onChange={(e) => setDraft({ ...draft, effort: e.target.value as RoadmapLevel })}
+                    >
+                      {LEVELS.map((l) => (
+                        <option key={l} value={l}>
+                          {t(`roadmap.level.${l}`)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </>
+              )}
+              {!draftIsDirective && draft.status !== 'archived' && (
                 <label className="field">
                   <span>{t('roadmap.fieldStatus')}</span>
                   <select
@@ -796,52 +853,84 @@ export function RoadmapView(): React.JSX.Element {
                 </label>
               )}
             </div>
+            {draftIsDirective && (
+              <div className="field rm-directive-targets">
+                <span>{t('roadmap.fieldTargets')}</span>
+                {liveAgents.length === 0 ? (
+                  <p className="rm-directive-empty">{t('roadmap.targetsEmpty')}</p>
+                ) : (
+                  <div className="rm-target-list">
+                    {liveAgents.map((s) => {
+                      const on = (draft.target_peer_ids ?? []).includes(s.peerId!)
+                      return (
+                        <button
+                          key={s.id}
+                          type="button"
+                          className={`btn rm-target-chip${on ? ' is-on' : ''}`}
+                          aria-pressed={on}
+                          onClick={() => toggleTarget(s.peerId!)}
+                        >
+                          {on ? GLYPH_ACTIONS.check : GLYPH_BADGES.profile}
+                          <span className="rm-target-name">{s.peerId}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+                <p className="rm-directive-hint">{t('roadmap.directiveHint')}</p>
+              </div>
+            )}
             <label className="field">
               <span>{t('roadmap.fieldDescription')}</span>
               <textarea
-                rows={3}
+                rows={draftIsDirective ? 2 : 3}
                 value={draft.description}
+                placeholder={draftIsDirective ? t('roadmap.directiveNotePlaceholder') : undefined}
                 onChange={(e) => setDraft({ ...draft, description: e.target.value })}
               />
             </label>
-            <label className="field">
-              <span>{t('roadmap.fieldRationale')}</span>
-              <textarea
-                rows={2}
-                value={draft.rationale}
-                onChange={(e) => setDraft({ ...draft, rationale: e.target.value })}
-              />
-            </label>
-            <label className="field rm-context-field">
-              <span className="rm-context-label">
-                {t('roadmap.fieldContext')}
-                <button
-                  type="button"
-                  className="icon-btn rm-wand-btn"
-                  title={t('roadmap.wandTitle')}
-                  disabled={wandBusy || !draft.title.trim()}
-                  onClick={() => void wand()}
-                >
-                  {wandBusy ? GLYPH_BADGES.clepsydra : GLYPH_ACTIONS.wand}
-                </button>
-              </span>
-              <textarea
-                rows={6}
-                value={draft.context}
-                placeholder={t('roadmap.fieldContextPlaceholder')}
-                disabled={wandBusy}
-                onChange={(e) => setDraft({ ...draft, context: e.target.value })}
-              />
-              {wandBusy && <span className="rm-wand-hint">{t('roadmap.wandBusy')}</span>}
-            </label>
-            <label className="field">
-              <span>{t('roadmap.fieldTags')}</span>
-              <input
-                value={draft.tags}
-                placeholder={t('roadmap.fieldTagsPlaceholder')}
-                onChange={(e) => setDraft({ ...draft, tags: e.target.value })}
-              />
-            </label>
+            {!draftIsDirective && (
+              <>
+                <label className="field">
+                  <span>{t('roadmap.fieldRationale')}</span>
+                  <textarea
+                    rows={2}
+                    value={draft.rationale}
+                    onChange={(e) => setDraft({ ...draft, rationale: e.target.value })}
+                  />
+                </label>
+                <label className="field rm-context-field">
+                  <span className="rm-context-label">
+                    {t('roadmap.fieldContext')}
+                    <button
+                      type="button"
+                      className="icon-btn rm-wand-btn"
+                      title={t('roadmap.wandTitle')}
+                      disabled={wandBusy || !draft.title.trim()}
+                      onClick={() => void wand()}
+                    >
+                      {wandBusy ? GLYPH_BADGES.clepsydra : GLYPH_ACTIONS.wand}
+                    </button>
+                  </span>
+                  <textarea
+                    rows={6}
+                    value={draft.context}
+                    placeholder={t('roadmap.fieldContextPlaceholder')}
+                    disabled={wandBusy}
+                    onChange={(e) => setDraft({ ...draft, context: e.target.value })}
+                  />
+                  {wandBusy && <span className="rm-wand-hint">{t('roadmap.wandBusy')}</span>}
+                </label>
+                <label className="field">
+                  <span>{t('roadmap.fieldTags')}</span>
+                  <input
+                    value={draft.tags}
+                    placeholder={t('roadmap.fieldTagsPlaceholder')}
+                    onChange={(e) => setDraft({ ...draft, tags: e.target.value })}
+                  />
+                </label>
+              </>
+            )}
             <div className="modal-actions">
               <button onClick={() => setDraft(null)}>{t('common.cancel')}</button>
               <button className="primary" disabled={!draft.title.trim()} onClick={() => void save()}>

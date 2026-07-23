@@ -57,6 +57,22 @@ const DISCOVERY_POLL_MS = 800
 const DISCOVERY_DEADLINE_MS = 30_000
 
 /**
+ * Directive injection (CT3): a command is only typed into a tile that is idle,
+ * so a /clear or /compact never lands mid-turn. When the tile is busy the
+ * injection waits up to DIRECTIVE_IDLE_WAIT_MS (polling every
+ * DIRECTIVE_IDLE_POLL_MS) for it to fall idle, else reports a skip.
+ * DIRECTIVE_SETTLE_MS mirrors the autoResume settle between Escape and the text.
+ */
+const DIRECTIVE_IDLE_WAIT_MS = 120_000
+const DIRECTIVE_IDLE_POLL_MS = 500
+const DIRECTIVE_SETTLE_MS = 120
+/** Rolling cap for the magic-compact output scanner (CT4). */
+const OUTPUT_SCAN_CAP = 65536
+
+/** Outcome of injectCommand, journaled by the caller (CT3). */
+export type DirectiveOutcome = 'sent' | 'no-terminal' | 'busy-timeout'
+
+/**
  * Coordinates the persisted session list, the live PTYs and the resolved
  * peer_id. Emits `data` / `exit` (forwarded to the renderer verbatim) and
  * `changed` (a fresh SessionRuntime[] whenever status/peer_id moves).
@@ -706,6 +722,89 @@ export class SessionService extends EventEmitter {
     // The episode itself clears via the detector once the new turn's busy cues
     // appear; this event only lets the renderer toast the injection.
     this.emit('quota', { id, limited: true, resetAt: r.resumeAt, resumed: true })
+  }
+
+  /**
+   * Type a slash-command into a session's live terminal the way the operator
+   * would (CT3 directive cards): dismiss any open menu (Escape), a short settle,
+   * the command text, then Enter -- the exact working precedent is autoResume.
+   *
+   * SECURITY: `command` is ALWAYS a CODE CONSTANT chosen by the caller (never a
+   * value from the broker, a repo, or a peer). The tile is resolved by the
+   * caller; nothing from a directive card's payload is written here verbatim.
+   *
+   * Gated on the tile being idle so a directive never interrupts a live turn:
+   * when the tile is busy it waits (bounded) for idle, then injects; if it never
+   * falls idle within the deadline the command is NOT sent (a clear mid-task
+   * would destroy work) and 'busy-timeout' is returned for the caller to log.
+   */
+  async injectCommand(id: string, command: string): Promise<DirectiveOutcome> {
+    if (!this.pty.isAlive(id)) return 'no-terminal'
+    const idle = await this.waitIdle(id, DIRECTIVE_IDLE_WAIT_MS)
+    if (!this.pty.isAlive(id)) return 'no-terminal'
+    if (!idle) return 'busy-timeout'
+    this.pty.write(id, '\x1b')
+    await new Promise((res) => setTimeout(res, DIRECTIVE_SETTLE_MS))
+    if (!this.pty.isAlive(id)) return 'no-terminal'
+    this.pty.write(id, command)
+    this.pty.write(id, '\r')
+    return 'sent'
+  }
+
+  /**
+   * Watch a tile's terminal output until `test` returns a non-null value or the
+   * timeout/PTY-death ends the wait (CT4, magic-compact capture). `test` runs on
+   * a rolling, length-capped buffer of recent output; the first non-null result
+   * resolves the promise. Read-only: it only observes the 'data' stream, never
+   * writes. Returns null on timeout or if the PTY exits first.
+   */
+  async waitForOutput<T>(
+    id: string,
+    timeoutMs: number,
+    test: (buf: string) => T | null
+  ): Promise<T | null> {
+    if (!this.pty.isAlive(id)) return null
+    return new Promise<T | null>((resolve) => {
+      let buf = ''
+      let done = false
+      const finish = (val: T | null): void => {
+        if (done) return
+        done = true
+        this.off('data', onData)
+        this.off('exit', onExit)
+        clearTimeout(timer)
+        resolve(val)
+      }
+      const onData = (e: { id: string; data: string }): void => {
+        if (e.id !== id) return
+        buf += e.data
+        if (buf.length > OUTPUT_SCAN_CAP) buf = buf.slice(-OUTPUT_SCAN_CAP)
+        const r = test(buf)
+        if (r !== null && r !== undefined) finish(r)
+      }
+      const onExit = (e: { id: string }): void => {
+        if (e.id === id) finish(null)
+      }
+      const timer = setTimeout(() => finish(null), timeoutMs)
+      if (typeof timer.unref === 'function') timer.unref()
+      this.on('data', onData)
+      this.on('exit', onExit)
+    })
+  }
+
+  /**
+   * Resolve once the tile reports idle (thinking=false), or false at the
+   * deadline. An already-idle tile resolves on the first tick.
+   */
+  private async waitIdle(id: string, deadlineMs: number): Promise<boolean> {
+    const deadline = Date.now() + deadlineMs
+    for (;;) {
+      const r = this.runtime.get(id)
+      if (!r) return false
+      if (!r.thinking) return true
+      if (Date.now() >= deadline) return false
+      await new Promise((res) => setTimeout(res, DIRECTIVE_IDLE_POLL_MS))
+    }
   }
 
   private pollPeerIds(): void {

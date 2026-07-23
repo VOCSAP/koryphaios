@@ -1,5 +1,47 @@
 # Changelog
 
+## desktop + core (experimental) — Directive cards: supervised context/token economy (CT)
+
+A new roadmap kind **`directive`** turns the shared roadmap into a lever for
+context-window economy across a team of sessions. A directive card carries a
+closed-enum command — `clear` (free, zero-inference context reset; system
+prompt / CLAUDE.md / MCP / skills survive), `compact` (summarize in place, one
+inference on the target's own model), or `magic_compact` — plus an explicit
+`target_peer_ids` list. When the card reaches the head of the operator's
+dispatch queue, the **Deck itself types the command into the targeted
+sessions' terminals** (the autoResume keystroke precedent: Escape → settle →
+command → Enter, gated on the tile being idle so a reset never lands
+mid-turn); agents never execute directives. Decide vs execute is split by
+design: queueing a card is open to the operator (Workflow lane) and to the
+team-lead / supervisor (`roadmap_add`, kind `directive`), but the injected
+text is always a CODE CONSTANT (`directive.ts` DIRECTIVE_KEYS) chosen from the
+re-validated enum — a manipulated lead can at worst trigger a spurious `/clear`
+(C8 / three-hostile-inputs #2: broker fields re-validated Deck-side, never
+typed verbatim). The conveyor belt drains leading directive cards before the
+next work item, so a `clear` placed (or `depends_on`-wired) after an item runs
+at that boundary; hand-off briefings for the next item ride the item's
+`context` field, not the directive.
+
+`magic_compact` prefers the aerovato Magic-compact plugin (deterministic,
+zero-inference transcript compaction): the Deck injects `/magic-compact`,
+captures the `/resume <id>` banner from the tile's own output (ANSI-tolerant,
+strict-UUID), and re-enters the compacted session IN PLACE — option A, the
+process never restarts so the peer_id and the launch harness are preserved —
+falling back to standard `/compact` on the plugin's shim-failure message, a
+timeout, or when the plugin is absent/disabled. Per-machine **feature flags**
+(`resolveFeatures`): `magicCompact` (`auto`|`on`|`off`) reaches a PTY so the
+GLOBAL config decides enablement and a project-local (clonable) config may only
+restrict it to `off`; `handoff` (`file`|`kleos`|`off`) is advisory. Core:
+broker `roadmap_items` gains `directive` + `target_peer_ids` (migration,
+validation, sanitized peer-id list capped at 16, export/import); the
+`roadmap_add`/`roadmap_update`/`roadmap_list` MCP schemas, the team playbook and
+the supervisor briefing all learn the concept. UI: a distinct dashed-violet
+card in the Workflow lane, a generic directive item in the editor (command
+dropdown + live-peer target multiselect, work-only fields hidden), and the
+detail modal, with EN/FR locale parity. Working plan: `PLAN-DIRECTIVES.md`
+(chantiers CT1–CT7); the deferred `clear`+briefing / context-gauge increment
+(CT6) and the option-A empirical checks live in `BACKLOG.md`.
+
 ## desktop (experimental) — Workflow lane: the dispatch queue as a visual chain
 
 The roadmap view splits horizontally: kanban on top, a new **Workflow lane**
