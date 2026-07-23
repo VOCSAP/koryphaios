@@ -91,7 +91,11 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   another (grid-assisted dashed slot) makes it a PARALLEL SIBLING — it
   adopts the target's dependencies (`siblingDeps`, sanitized + cycle-checked)
   — and commits go through ONE atomic `roadmap:reorder` IPC → broker
-  `/roadmap/reorder`. Dragging a card's port onto another card wires a
+  `/roadmap/reorder`. Dependency-RELATED cards can never be parallel: the
+  stack slot is not offered between them (`dependsRelated` — the card slides
+  sideways instead), and while a drag hovers an insertion that would
+  wrong-side a link, the link and both cards' borders turn red live
+  (`slotConflicts`). Dragging a card's port onto another card wires a
   `depends_on` link (cycle-checked); into the void, it opens the create form
   pre-wired (nothing exists until Save). Edges turn red when the queue order
   breaks a dependency — clicking one explains why and offers to drop the

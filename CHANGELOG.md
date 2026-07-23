@@ -13,8 +13,11 @@ a flat conveyor (`desktop/src/shared/workflow.ts`, pure + bun-tested) — the
 lane and the kanban can never drift, and the shared broker schema needs no
 coordinates. A grid-assisted stack gesture (drop a card clearly above/below
 another: dashed ghost slot) makes it a parallel sibling by adopting the
-target's dependencies (sanitized, cycle-checked); an expand button opens the
-lane as a fullscreen foreground modal. Reorders commit through one new atomic broker route
+target's dependencies (sanitized, cycle-checked) — never offered between
+dependency-related cards (they cannot run in parallel: the card slides
+sideways, and an insertion that would wrong-side a link previews it live in
+red, link and card borders alike); an expand button opens the lane as a
+fullscreen foreground modal. Reorders commit through one new atomic broker route
 (`POST /roadmap/reorder`: ids in order → queue 1..N in a transaction, others
 unqueued, 500-id cap) instead of N racy upserts. Interactions: HTML5 drop from
 the board (insertion caret), in-lane drag to reorder, a port to pull

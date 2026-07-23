@@ -3380,6 +3380,12 @@ svg.glyph {
   box-shadow: 0 6px 18px rgb(0 0 0 / 35%);
 }
 
+/* The hovered insertion would wrong-side a dependency link of this card. */
+.wf-node.is-conflict {
+  border-color: var(--danger);
+  border-left-color: var(--danger);
+}
+
 .wf-node-head {
   display: flex;
   align-items: center;

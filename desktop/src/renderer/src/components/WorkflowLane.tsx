@@ -2,12 +2,14 @@ import { useEffect, useRef, useState } from 'react'
 import type { RoadmapItem } from '@shared/types'
 import {
   caretXAt,
+  dependsRelated,
   dependsWouldCycle,
   insertSlotAt,
   laneEdges,
   laneItems,
   layoutLane,
   siblingDeps,
+  slotConflicts,
   stackTargetAt,
   unmetDeps,
   WF_FIT_FLOOR,
@@ -86,6 +88,9 @@ export function WorkflowLane({
   const [caret, setCaret] = useState<{ slot: number; x: number } | null>(null)
   // Stack-drop ghost slot (parallel-sibling placement), exclusive with caret.
   const [stack, setStack] = useState<StackHit | null>(null)
+  // Cards the hovered insertion would wrong-side (dep after / dependent
+  // before): their borders and the links to the dragged card turn red.
+  const [conflicts, setConflicts] = useState<string[]>([])
   // Internal card drag ghost (world coords) — the card follows the cursor.
   const [ghost, setGhost] = useState<{ id: string; x: number; y: number } | null>(null)
   // Dependency-link drag ghost: source card + cursor tip (world coords).
@@ -323,9 +328,20 @@ export function WorkflowLane({
       setGhost({ id: d.id, x: gx, y: gy })
       const cx = gx + WF_NODE_W / 2
       const cy = gy + WF_NODE_H / 2
-      const hit = stackTargetAt(lane, pos, cx, cy, d.id)
+      // Dependency-related cards can never be parallel: no stack slot there,
+      // the card slides sideways and the wronged links/borders turn red.
+      const hit0 = stackTargetAt(lane, pos, cx, cy, d.id)
+      const hit = hit0 && !dependsRelated(items, d.id, hit0.targetId) ? hit0 : null
       setStack(hit)
-      setCaret(hit ? null : { slot: insertSlotAt(lane, pos, cx), x: caretXAt(lane, pos, cx) })
+      if (hit) {
+        setCaret(null)
+        setConflicts([])
+      } else {
+        const slot = insertSlotAt(lane, pos, cx)
+        setCaret({ slot, x: caretXAt(lane, pos, cx) })
+        const dragItem = byId.get(d.id)
+        setConflicts(dragItem ? slotConflicts(lane, dragItem, slot) : [])
+      }
     } else if (d.kind === 'link' && d.id) {
       const w = toWorld(e.clientX, e.clientY)
       setLink({ fromId: d.id, x: w.x, y: w.y })
@@ -339,6 +355,7 @@ export function WorkflowLane({
     setGhost(null)
     setCaret(null)
     setStack(null)
+    setConflicts([])
     setLink(null)
     return d
   }
@@ -349,7 +366,8 @@ export function WorkflowLane({
     if (d.kind === 'node' && d.id) {
       const cx = d.origX + (e.clientX - d.startX) / camera.zoom + WF_NODE_W / 2
       const cy = d.origY + (e.clientY - d.startY) / camera.zoom + WF_NODE_H / 2
-      const hit = stackTargetAt(lane, pos, cx, cy, d.id)
+      const hit0 = stackTargetAt(lane, pos, cx, cy, d.id)
+      const hit = hit0 && !dependsRelated(items, d.id, hit0.targetId) ? hit0 : null
       if (hit) commitStack(d.id, hit.targetId)
       else commitDrop(d.id, insertSlotAt(lane, pos, cx))
     } else if (d.kind === 'link' && d.id) {
@@ -406,7 +424,8 @@ export function WorkflowLane({
     const id = e.dataTransfer.getData('text/plain')
     if (!id) return
     const w = toWorld(e.clientX, e.clientY)
-    const hit = stackTargetAt(lane, pos, w.x, w.y, id)
+    const hit0 = stackTargetAt(lane, pos, w.x, w.y, id)
+    const hit = hit0 && !dependsRelated(items, id, hit0.targetId) ? hit0 : null
     if (hit) commitStack(id, hit.targetId)
     else commitDrop(id, insertSlotAt(lane, pos, w.x))
   }
@@ -446,6 +465,11 @@ export function WorkflowLane({
   }
 
   // ----- rendering -----
+
+  const conflictSet = new Set(conflicts)
+  /** Edge anchor: the dragged card's edges follow its ghost, live. */
+  const nodeXY = (id: string): { x: number; y: number } =>
+    ghost && ghost.id === id ? { x: ghost.x, y: ghost.y } : pos.get(id)!
 
   const edgeTitle = (from: string, to: string, violated: boolean): string =>
     violated
@@ -524,8 +548,8 @@ export function WorkflowLane({
           >
             <svg className="wf-edges">
               {edges.map((edge) => {
-                const from = pos.get(edge.from)!
-                const to = pos.get(edge.to)!
+                const from = nodeXY(edge.from)
+                const to = nodeXY(edge.to)
                 const x1 = from.x + WF_NODE_W
                 const y1 = from.y + WF_NODE_H / 2
                 const x2 = to.x
@@ -533,11 +557,17 @@ export function WorkflowLane({
                 const mx = (x1 + x2) / 2
                 const d = `M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`
                 const key = `${edge.from}-${edge.to}`
+                // Live preview: a link the hovered insertion would wrong-side
+                // turns red while the drag is still in flight.
+                const liveViolated =
+                  ghost !== null &&
+                  ((edge.to === ghost.id && conflictSet.has(edge.from)) ||
+                    (edge.from === ghost.id && conflictSet.has(edge.to)))
                 return (
                   <g key={key}>
                     <path
                       d={d}
-                      className={`wf-edge${edge.violated ? ' is-violated' : ''}`}
+                      className={`wf-edge${edge.violated || liveViolated ? ' is-violated' : ''}`}
                     />
                     <path
                       d={d}
@@ -602,7 +632,10 @@ export function WorkflowLane({
                   className={[
                     'wf-node',
                     locked ? 'is-locked' : '',
-                    dragged ? 'is-dragging' : ''
+                    dragged ? 'is-dragging' : '',
+                    conflictSet.has(item.id) || (dragged && conflicts.length > 0)
+                      ? 'is-conflict'
+                      : ''
                   ]
                     .filter(Boolean)
                     .join(' ')}

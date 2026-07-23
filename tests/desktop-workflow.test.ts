@@ -4,9 +4,11 @@
 import { test, expect } from 'bun:test'
 import type { RoadmapItem } from '../desktop/src/shared/types'
 import {
+  dependsRelated,
   dependsWouldCycle,
   insertAt,
   insertSlotAt,
+  slotConflicts,
   laneEdges,
   laneItems,
   layoutLane,
@@ -195,6 +197,33 @@ test('siblingDeps copies the target dependencies, sanitized', () => {
   const tri = [item('X'), item('Y', { depends_on: ['X'] }), item('Z', { depends_on: ['Y', 'X'] })]
   expect(siblingDeps(tri, 'X', 'Z')).toBeNull() // Y and X both cycle back to X
   expect(siblingDeps(tri, 'Y', 'Z')).toEqual(['X']) // Y kept out (self), X fine
+})
+
+test('dependsRelated: any dependency path (either direction) forbids parallelism', () => {
+  const chain = [
+    item('A'),
+    item('B', { depends_on: ['A'] }),
+    item('C', { depends_on: ['B'] }),
+    item('E')
+  ]
+  expect(dependsRelated(chain, 'B', 'C')).toBe(true) // direct
+  expect(dependsRelated(chain, 'C', 'A')).toBe(true) // transitive, reversed args
+  expect(dependsRelated(chain, 'B', 'E')).toBe(false) // unrelated
+})
+
+test('slotConflicts: flags deps landing after the cut and dependents before it', () => {
+  const ordered = laneItems([
+    item('A', { queue: 1 }),
+    item('B', { queue: 2, depends_on: ['A'] }),
+    item('C', { queue: 3, depends_on: ['B'] })
+  ])
+  const b = ordered.find((i) => i.id === 'B')!
+  // Moving B to the front puts it before its dependency A.
+  expect(slotConflicts(ordered, b, 0)).toEqual(['A'])
+  // Moving B to the end puts it after its dependent C.
+  expect(slotConflicts(ordered, b, 3)).toEqual(['C'])
+  // Keeping B in the middle wrongs nobody.
+  expect(slotConflicts(ordered, b, 1)).toEqual([])
 })
 
 test('insertAt moves an already-queued id and clamps the slot', () => {

@@ -207,6 +207,22 @@ export function unmetDeps(
   return out
 }
 
+/** Does `fromId` transitively depend on `toId` (walking depends_on)? */
+function reachesDep(items: RoadmapItem[], fromId: string, toId: string): boolean {
+  const byId = new Map(items.map((i) => [i.id, i]))
+  const seen = new Set<string>()
+  const queue = [fromId]
+  while (queue.length > 0) {
+    const cur = queue.shift()!
+    if (seen.has(cur)) continue
+    seen.add(cur)
+    if (cur === toId) return true
+    const item = byId.get(cur)
+    if (item) queue.push(...item.depends_on)
+  }
+  return false
+}
+
 /**
  * Would making `childId` depend on `parentId` create a cycle? True when the
  * candidate parent already (transitively) depends on the child. Mirrors
@@ -217,19 +233,39 @@ export function dependsWouldCycle(
   childId: string,
   parentId: string
 ): boolean {
-  if (childId === parentId) return true
-  const byId = new Map(items.map((i) => [i.id, i]))
-  const seen = new Set<string>()
-  const queue = [parentId]
-  while (queue.length > 0) {
-    const cur = queue.shift()!
-    if (seen.has(cur)) continue
-    seen.add(cur)
-    if (cur === childId) return true
-    const item = byId.get(cur)
-    if (item) queue.push(...item.depends_on)
-  }
-  return false
+  return childId === parentId || reachesDep(items, parentId, childId)
+}
+
+/**
+ * Are two items ordered by a dependency path (either direction)? Related
+ * items cannot be parallel siblings: the stack gesture must not offer them,
+ * the card slides sideways instead.
+ */
+export function dependsRelated(items: RoadmapItem[], aId: string, bId: string): boolean {
+  return reachesDep(items, aId, bId) || reachesDep(items, bId, aId)
+}
+
+/**
+ * Displayed items a drop of `drag` at full-lane `slot` would put on the wrong
+ * side of one of its DIRECT dependency links: a dependency scheduled at/after
+ * the insertion point, or a dependent scheduled before it. The renderer turns
+ * these cards' borders and the connecting links red while the drag hovers.
+ */
+export function slotConflicts(
+  ordered: RoadmapItem[],
+  drag: RoadmapItem,
+  slot: number
+): string[] {
+  const without = ordered.filter((i) => i.id !== drag.id)
+  const rank = ordered.findIndex((i) => i.id === drag.id)
+  const adj = rank >= 0 && slot > rank ? slot - 1 : slot
+  const idx = Math.min(without.length, Math.max(0, adj))
+  const out: string[] = []
+  without.forEach((i, j) => {
+    if (drag.depends_on.includes(i.id) && j >= idx) out.push(i.id)
+    if (i.depends_on.includes(drag.id) && j < idx) out.push(i.id)
+  })
+  return out
 }
 
 /**
