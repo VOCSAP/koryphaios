@@ -422,6 +422,13 @@ service.on(
 
 // "Needs you" system notification (PLAN C11): a session hit a permission /
 // question / plan screen. Clicking brings the window up and selects the tile.
+// Auto-ack of the development-channels warning (issue #42486): the Deck typed
+// Enter on the dialog its own launch flag raised. Journaled so the automatic
+// keystroke is never silent (a spurious ack is then diagnosable).
+service.on('startup-ack', ({ name }: { id: string; name?: string }) => {
+  journal.add('session', `auto-acknowledged the dev-channels warning for "${name ?? '?'}"`)
+})
+
 service.on('attention', ({ id, waiting }: { id: string; waiting: boolean }) => {
   if (!waiting) return
   const session = service.list().find((s) => s.id === id)

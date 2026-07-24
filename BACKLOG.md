@@ -106,6 +106,23 @@ l'opérateur sur une machine avec affichage.
       battle avec juge, picker (accordéon providers, favoris ★, détection
       CLIs), Settings > Modèles avec un endpoint Ollama/LiteLLM réel
       (découverte + inférence + clé chiffrée safeStorage + bouton ⊘).
+- [ ] **Auto-ack de l'avertissement dev-channels (session 2026-07-24, issue
+      anthropics/claude-code#42486)** — logique testée
+      (`desktop-startup-ack.test.ts` : détection deux-cues, frontières de chunk,
+      ANSI, ré-armement, non-déclenchement sur le dialogue consent MCP) ; reste
+      le terrain :
+  - Vérifier le **libellé exact** du dialogue « WARNING: Loading development
+    channels » / « I am using this for local development » sur la version CC
+    installée (les regexes sont insensibles à la casse mais supposent ces
+    formulations) — à réajuster si Anthropic modifie le wording ou résout
+    l'issue (flag `--yes` / persistance).
+  - Confirmer qu'un **seul `\r`** valide bien l'option surlignée par défaut
+    (option 1) sur les trois OS, sans avancer par flèche ; que le settle de
+    350 ms suffit au rendu du dialogue plein écran ; et que le dialogue
+    consent MCP (« New MCP server found ») reste bien à la main de l'opérateur
+    (jamais auto-acquitté).
+  - Vérifier le déclenchement pour TOUS les chemins de spawn (create opérateur,
+    superviseur, template, restart/fork-resume) et l'entrée journal 📜.
 - [ ] **Lot Browser REC + scénario démo (session 2026-07-24)** — dispatch,
       escaping, harness et bridge MCP sont testés (`desktop-recording`,
       `desktop-demo-control`, `desktop-browser-drive`, `desktop-demo-driver`) ;
@@ -248,6 +265,32 @@ l'opérateur sur une machine avec affichage.
 - [ ] **Décision #3** (`EXPLORATION-multi-llm.md`) : passer codex à
       `-c model_instructions_file` si les réponses régurgitent le contexte
       (non-bloquant aujourd'hui).
+- [ ] **Étude ACP (Agent Client Protocol) comme socle de la livraison de
+      messages inter-agents pour les tuiles non-Claude** (session 2026-07-24).
+      Problème : le protocole `claude/channel` (injection push d'un message peer
+      dans une session en cours) est **propre à Claude Code**. Codex n'a AUCUN
+      équivalent — MCP y est strictement *pull* (`[mcp_servers.*]`, aucun push /
+      channel documenté ; le seul push est `notify`, SORTANT, sur
+      `agent-turn-complete`). Un peer Codex devrait donc être *instruit*
+      d'appeler `check_messages`, ce qui est fragile. **ACP** (Zed, JSON-RPC sur
+      stdio, v1 stable, Apache-2.0) standardise la relation hôte↔agent-de-code :
+      c'est l'HÔTE qui pilote la boucle de tours, donc le Deck pourrait livrer un
+      message du broker comme un tour, en push, pour n'importe quel CLI, SANS
+      flag channels. Adaptateurs : Claude (`claude-code-acp`), Gemini CLI
+      (`--experimental-acp`), Codex (communautaires — à vérifier). **Trade-off à
+      trancher** : une session ACP est *headless* (l'hôte rend la conversation) —
+      les tuiles Codex/Gemini cesseraient d'être des xterm affichant la TUI
+      native pour devenir des vues de chat rendues par le Deck ; gros chantier
+      UX, mais coexiste avec les tuiles PTF Claude (où channels + TUI marchent).
+      À cadrer AVANT le code du palier 1 multi-CLI ci-dessus : soit PTY-scraping
+      (nudge `/check_messages` tapé dans la tuile, comme les directive cards —
+      voie rapide), soit tuiles ACP (voie propre). Vérifier l'état réel des
+      adaptateurs ACP Codex et le rendu headless attendu.
+- [ ] **A2A (Agent2Agent, Linux Foundation)** : PAS pour les tuiles (conçu pour
+      des agents *servicisés* durables et adressables, endpoint HTTP + Agent
+      Card ; nos sessions sont éphémères et le broker fait déjà le transport). À
+      ne considérer que si le broker doit un jour parler à des agents hébergés
+      hors de la machine/LAN.
 
 ### 3.1bis Limites d'usage (lot livré — résiduel)
 

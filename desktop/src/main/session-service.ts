@@ -21,6 +21,7 @@ import {
   type QuotaResumeDueEvent
 } from './quota'
 import { AttentionDetector, type AttentionEvent } from './attention'
+import { StartupAckDetector, type StartupAckEvent } from './startup-ack'
 import { OpenIdRegistry } from './open-id-registry'
 import { listTranscriptIds, pickDiscoveredId, transcriptExists } from './session-transcript'
 import { clearDeskSessionId, readDeskSessionId } from './desk-session'
@@ -66,6 +67,9 @@ const DISCOVERY_DEADLINE_MS = 30_000
 const DIRECTIVE_IDLE_WAIT_MS = 120_000
 const DIRECTIVE_IDLE_POLL_MS = 500
 const DIRECTIVE_SETTLE_MS = 120
+
+/** Dev-channels warning auto-ack: let the dialog finish painting first. */
+const STARTUP_ACK_SETTLE_MS = 350
 /** Rolling cap for the magic-compact output scanner (CT4). */
 const OUTPUT_SCAN_CAP = 65536
 
@@ -84,6 +88,7 @@ export class SessionService extends EventEmitter {
   private thinkingDetector = new ThinkingDetector()
   private quotaDetector = new QuotaDetector()
   private attentionDetector = new AttentionDetector()
+  private startupAckDetector = new StartupAckDetector()
   private pollTimer: NodeJS.Timeout | null = null
 
   /**
@@ -131,6 +136,7 @@ export class SessionService extends EventEmitter {
       this.thinkingDetector.feed(e.id, e.data)
       this.quotaDetector.feed(e.id, e.data)
       this.attentionDetector.feed(e.id, e.data)
+      this.startupAckDetector.feed(e.id, e.data)
     })
     this.pty.on('exit', ({ id, exitCode }: { id: string; exitCode: number }) => {
       // pty-manager only emits 'exit' for a spontaneous process exit (the user
@@ -143,6 +149,7 @@ export class SessionService extends EventEmitter {
       this.thinkingDetector.clear(id)
       this.quotaDetector.clear(id)
       this.attentionDetector.clear(id)
+      this.startupAckDetector.clear(id)
 
       // A clean exit (/exit -> shell returns 0) auto-closes the tile, the way a
       // terminal tab closes when its shell exits, so it never lingers as a dead,
@@ -205,6 +212,21 @@ export class SessionService extends EventEmitter {
       this.emit('attention', { id, waiting })
       this.broadcast()
     })
+
+    // Development-channels warning auto-ack (issue #42486): one Enter after a
+    // short settle activates the dialog's highlighted accept option, for EVERY
+    // session the Deck spawns (operator create, supervisor, template, restart).
+    // The detector fires once per process run; liveness is re-checked at send
+    // time. 'startup-ack' is journaled by index.ts so each ack leaves a trace.
+    this.startupAckDetector.on('ack', ({ id }: StartupAckEvent) => {
+      setTimeout(() => {
+        const r = this.runtime.get(id)
+        if (!r || r.status === 'exited') return
+        this.pty.write(id, '\r')
+        const name = this.defs.find((d) => d.id === id)?.name
+        this.emit('startup-ack', { id, name })
+      }, STARTUP_ACK_SETTLE_MS)
+    })
   }
 
   /**
@@ -227,6 +249,7 @@ export class SessionService extends EventEmitter {
     this.thinkingDetector.stop()
     this.quotaDetector.stop()
     this.attentionDetector.stop()
+    this.startupAckDetector.stop()
     this.pty.killAll()
   }
 
@@ -318,6 +341,7 @@ export class SessionService extends EventEmitter {
     this.thinkingDetector.clear(id)
     this.quotaDetector.clear(id)
     this.attentionDetector.clear(id)
+    this.startupAckDetector.clear(id)
     this.defs = this.defs.filter((d) => d.id !== id)
     this.runtime.delete(id)
     this.outputAt.delete(id)
@@ -341,6 +365,7 @@ export class SessionService extends EventEmitter {
     this.thinkingDetector.stop()
     this.quotaDetector.stop()
     this.attentionDetector.stop()
+    this.startupAckDetector.stop()
     this.defs = []
     this.runtime.clear()
     this.outputAt.clear()
@@ -393,6 +418,7 @@ export class SessionService extends EventEmitter {
     this.thinkingDetector.stop()
     this.quotaDetector.stop()
     this.attentionDetector.stop()
+    this.startupAckDetector.stop()
     for (const d of this.defs) {
       if (d.sessionId) this.registry.release(d.sessionId)
     }
@@ -653,6 +679,7 @@ export class SessionService extends EventEmitter {
     // Fresh process -> fresh detector state (stale buffers/timers dropped).
     this.quotaDetector.clear(def.id)
     this.attentionDetector.clear(def.id)
+    this.startupAckDetector.clear(def.id)
     // sessionId may have just changed (fork-resume) -> persist before/after spawn.
     this.persist()
     // Drop any stale back-channel file from a previous run so discovery cannot

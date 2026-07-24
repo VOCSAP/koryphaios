@@ -7,6 +7,15 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
 - **Sessions**: PTY tiles wrapped in a login shell (`shell-command.ts`),
   workspaces (save/restore) and portable templates; per-session worktrees
   (`worktree-service.ts`); git checkpoints before spawning into a dirty tree.
+  Per-session PTY-output detectors run on every tile: thinking (`thinking.ts`),
+  usage-limit + auto-resume (`quota.ts`), "needs you" (`attention.ts`), and the
+  dev-channels warning auto-ack (`startup-ack.ts` — issue #42486: the launch
+  command's `--dangerously-load-development-channels` raises a full-screen
+  warning before Claude's UI on EVERY spawn; the Deck acknowledges its OWN flag
+  by typing one Enter on the dialog's default accept option, once per process
+  run, re-armed on restart, journaled via the `startup-ack` event. The
+  project-sourced MCP-server consent dialog is deliberately NOT auto-acked —
+  that trust decision stays with the operator).
 - **Supervisor (Home rail)**: a Claude session piloting the app through a
   loopback deck-control endpoint + dependency-free MCP stdio bridge, injected
   only into the supervisor via a generated `--mcp-config`.
