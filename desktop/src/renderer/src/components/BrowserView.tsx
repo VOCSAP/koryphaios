@@ -37,6 +37,9 @@ import {
   pickRecorderMime,
   type RecordingScope
 } from '@shared/recording'
+import type { ModelTarget } from '@shared/graph'
+import { targetKey, type ProviderCatalog } from '@shared/models'
+import { ModelPicker } from './ModelPicker'
 import type { WebviewIpcMessageEvent, WebviewNavigateEvent, WebviewTag } from '../webview-types'
 import { GLYPHS, GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
@@ -247,6 +250,12 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
   const [recScope, setRecScope] = useState<RecordingScope>('browser')
   const [recElapsed, setRecElapsed] = useState(0)
   const [recSaving, setRecSaving] = useState(false)
+  // Scripted scenario (demo driver): optional prompt + claude-only target.
+  const [recScenario, setRecScenario] = useState('')
+  const [recTarget, setRecTarget] = useState<ModelTarget | null>(null)
+  const [recCatalogs, setRecCatalogs] = useState<ProviderCatalog[] | null>(null)
+  const [demoBusy, setDemoBusy] = useState(false)
+  const demoBusyRef = useRef(false)
   const recRef = useRef<{
     rec: MediaRecorder
     source: MediaStream
@@ -608,6 +617,14 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     return () => clearInterval(iv)
   }, [recordingSince])
 
+  /** Model catalogs for the scenario picker, fetched when the dialog opens. */
+  useEffect(() => {
+    if (recDialog && recCatalogs === null) {
+      void window.api.modelCatalogs().then(setRecCatalogs)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recDialog])
+
   /** rAF pipeline drawing the browser-frame crop of `src` onto a canvas. */
   async function buildCropStream(
     src: MediaStream
@@ -716,9 +733,44 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
 
   /** Operator stop: triggers MediaRecorder.onstop → finishRecording. */
   function stopRecording(): void {
+    // Stopping mid-scenario also cancels the demo agent (its run promise
+    // rejects as cancelled; the video captured so far is still saved).
+    if (demoBusyRef.current) void window.api.cancelDemoScenario()
     const r = recRef.current
     if (!r || r.rec.state === 'inactive') return
     r.rec.stop()
+  }
+
+  /**
+   * Dialog Start: begin recording, then (scenario text present) hand the
+   * scenario to the demo-driver agent and auto-stop when it finishes — the
+   * whole agent-driven demo lands in one clip without operator timing.
+   */
+  async function startFromDialog(): Promise<void> {
+    const scenario = recScenario.trim()
+    const target = recTarget ?? config.demoTarget
+    setRecDialog(false)
+    await startRecording(recScope)
+    if (!scenario || recRef.current === null) return
+    const wv = webviewRef.current
+    if (!wv) return
+    demoBusyRef.current = true
+    setDemoBusy(true)
+    void window.api.setConfig({ demoTarget: target }) // remember the picker choice
+    try {
+      await window.api.runDemoScenario(wv.getWebContentsId(), scenario, target)
+      showToast('toast.demoDone')
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      if (!msg.includes('cancelled')) {
+        window.api.reportError('browser', `demo scenario failed: ${msg}`)
+        showToast('toast.demoFailed', 'error')
+      }
+    } finally {
+      demoBusyRef.current = false
+      setDemoBusy(false)
+      stopRecording()
+    }
   }
 
   /** Assemble the chunks, persist through IPC, release the streams. */
@@ -978,7 +1030,12 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
             {GLYPH_ACTIONS.record}
           </button>
           {recordingSince !== null && (
-            <span className="browser-rec-time">{formatElapsed(recElapsed)}</span>
+            <span
+              className={`browser-rec-time${demoBusy ? ' rec-demo' : ''}`}
+              title={demoBusy ? t('browser.recordDemoRunning') : undefined}
+            >
+              {formatElapsed(recElapsed)}
+            </span>
           )}
           <select
             className="browser-dock-select"
@@ -1088,10 +1145,33 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
               />
               {t('browser.recordScopeWindow')}
             </label>
+            <label className="record-scenario-label" htmlFor="rec-scenario">
+              {t('browser.recordScenario')}
+            </label>
+            <textarea
+              id="rec-scenario"
+              className="record-scenario"
+              rows={3}
+              placeholder={t('browser.recordScenarioPlaceholder')}
+              value={recScenario}
+              onChange={(e) => setRecScenario(e.target.value)}
+            />
+            {recScenario.trim() && (
+              <div className="record-model">
+                <span className="record-scenario-label">{t('browser.recordModel')}</span>
+                <ModelPicker
+                  catalogs={recCatalogs ?? []}
+                  selected={[targetKey(recTarget ?? config.demoTarget)]}
+                  multi={false}
+                  onlyProviders={['anthropic']}
+                  onPick={(_key, target) => setRecTarget(target)}
+                />
+              </div>
+            )}
             <div className="modal-actions">
               <button onClick={() => setRecDialog(false)}>{t('common.cancel')}</button>
-              <button className="primary" autoFocus onClick={() => void startRecording(recScope)}>
-                {t('browser.recordStart')}
+              <button className="primary" autoFocus onClick={() => void startFromDialog()}>
+                {t(recScenario.trim() ? 'browser.recordStartScenario' : 'browser.recordStart')}
               </button>
             </div>
           </div>

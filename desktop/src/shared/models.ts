@@ -166,6 +166,12 @@ export function targetLabel(target: ModelTarget): string {
 
 export const DEFAULT_HELP_TARGET: ModelTarget = { cli: 'claude', model: 'haiku' }
 export const DEFAULT_WAND_TARGET: ModelTarget = { cli: 'claude', model: 'haiku' }
+/**
+ * REC scripted-scenario driver: Sonnet default (tool-use heavy, needs more
+ * than haiku; the modal lets the operator pick bigger for complex sites).
+ * claude-only for now: the demo bridge rides --mcp-config (see demo-driver).
+ */
+export const DEFAULT_DEMO_TARGET: ModelTarget = { cli: 'claude', model: 'sonnet' }
 
 /**
  * Validate a stored/incoming target (config files travel through JSON edited

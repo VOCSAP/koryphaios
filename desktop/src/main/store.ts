@@ -6,6 +6,7 @@ import { SUPERVISOR_SPAWN_MODES, type AppConfig, type SessionDef } from '@shared
 import { writeFileAtomic } from './atomic-write'
 import { DEFAULT_PALETTE, sanitizeGlowColor } from '@shared/palette'
 import {
+  DEFAULT_DEMO_TARGET,
   DEFAULT_HELP_TARGET,
   DEFAULT_WAND_TARGET,
   legacyHelpTarget,
@@ -49,6 +50,7 @@ const DEFAULT_CONFIG: AppConfig = {
   helpButton: true,
   helpTarget: DEFAULT_HELP_TARGET,
   wandTarget: DEFAULT_WAND_TARGET,
+  demoTarget: DEFAULT_DEMO_TARGET,
   // Embedded browser view (PLAN D1): the usual local dev-server address.
   browserUrl: 'http://localhost:3000',
   // Unified model pickers (C29): operator-pinned favorites + local endpoints.
@@ -98,6 +100,10 @@ export function loadConfig(): AppConfig {
     DEFAULT_HELP_TARGET
   )
   cfg.wandTarget = sanitizeTarget(raw.wandTarget, DEFAULT_WAND_TARGET)
+  // The demo bridge is claude-only (--mcp-config): a hand-edited non-claude
+  // target would silently run without browser tools — clamp it back.
+  cfg.demoTarget = sanitizeTarget(raw.demoTarget, DEFAULT_DEMO_TARGET)
+  if (cfg.demoTarget.cli !== 'claude') cfg.demoTarget = { ...DEFAULT_DEMO_TARGET }
   // Unknown/absent trust mode (older config, hand-edited file) -> default.
   if (!SUPERVISOR_SPAWN_MODES.includes(cfg.supervisorSpawnMode)) {
     cfg.supervisorSpawnMode = 'hands-free'

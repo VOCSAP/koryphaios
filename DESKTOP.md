@@ -120,6 +120,21 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   (`roadmapSeed`, wand-style: saving stays manual). NO stage/commit/branch
   action, even delegated — operator decision; both views are desktop-only on
   mobile (`mobile-views.ts`).
+- **Browser REC — screen recording + scripted demo (🌐 toolbar)**: the
+  embedded browser's REC button records a demo-ready video (MP4 when the
+  runtime muxes it, else WebM; saved under app-state `recordings/`) of the
+  browser pane (canvas crop, `shared/recording.ts`) or the whole window —
+  `getDisplayMedia` is answered main-side with the Deck's OWN window only
+  (`setDisplayMediaRequestHandler`, no OS picker). The dialog's optional
+  **scripted scenario** hands the prompt to a one-shot demo-driver agent
+  (`demo-driver.ts`, C8 code-constant harness, `config.demoTarget` — Sonnet
+  default, claude-only: the browser bridge rides `--mcp-config`) that drives
+  the webview through a PER-RUN loopback endpoint + token (`demo-control.ts`,
+  never the supervisor's deck-control token) with five `demo_*` tools
+  (read/navigate/click/type/wait — real `sendInputEvent` clicks/keystrokes,
+  `browser-drive.ts`; agent strings enter page scripts JSON-encoded only,
+  `browser-drive-scripts.ts`); recording auto-stops when the scenario ends.
+  Docs: `desktop/docs/browser-design.md`.
 - **Unified model picker** (`ModelPicker.tsx`, `shared/models.ts`,
   `model-registry.ts`): provider accordion + star-pinned favorites, shared by
   the graph fan-out and the agents' create menu. Frontier providers

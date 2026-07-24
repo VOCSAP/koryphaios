@@ -41,6 +41,19 @@ import { createSessionWithWorktree } from './create-session'
 import { composePlanImportPrompt } from './import-plan'
 import { collectDiff, collectFileDiff, composeDiffReviewPrompt } from './diff-service'
 import { recordingFileName } from '@shared/recording'
+import { DEFAULT_DEMO_TARGET, sanitizeTarget } from '@shared/models'
+import { startDemoControl } from './demo-control'
+import { createBrowserDriver } from './browser-drive'
+import {
+  buildDemoCommand,
+  cancelDemoRun,
+  demoRunning,
+  MAX_SCENARIO_CHARS,
+  runDemoCommand,
+  writeDemoMcpConfig,
+  writeDemoSystemPrompt
+} from './demo-driver'
+import { markProviderUsed } from './usage-service'
 import { listExplorerDir, readExplorerFile } from './explorer-service'
 import {
   createWorktree,
@@ -145,6 +158,8 @@ interface IpcDeps {
   brokerStatus: () => BrokerStatusEvent
   /** Force an immediate broker poll (banner Retry button). */
   brokerRetry: () => void
+  /** deck-plugin dir (built hook/mcp/design assets), '' when the build was skipped. */
+  deckPluginDir: string
 }
 
 export function registerIpc({
@@ -164,7 +179,8 @@ export function registerIpc({
   getWorktreeInit,
   resolveTemplateInputs,
   brokerStatus,
-  brokerRetry
+  brokerRetry,
+  deckPluginDir
 }: IpcDeps): void {
   // ----- sessions -----
   regHandle('sessions:list', () => service.list())
@@ -294,6 +310,65 @@ export function registerIpc({
       return null
     }
   })
+
+  // ----- REC scripted scenario (demo driver) -----
+  // One throwaway demo agent drives the embedded webview through a PER-RUN
+  // loopback endpoint + token (demo-control.ts, least privilege: never the
+  // supervisor's deck-control token) while the renderer records the pane.
+  regHandle(
+    'browser:demo-run',
+    async (_e, webviewId: number, scenario: string, rawTarget: unknown) => {
+      if (typeof webviewId !== 'number') throw new Error('webviewId is required')
+      const wc = webContents.fromId(webviewId)
+      // The id comes from the renderer: accept only a live <webview> guest —
+      // handing the driver any other surface (the Deck window itself) would
+      // let input events land on the app chrome.
+      if (!wc || wc.isDestroyed() || wc.getType() !== 'webview') {
+        throw new Error('embedded browser webview not found')
+      }
+      if (typeof scenario !== 'string' || !scenario.trim()) throw new Error('scenario is required')
+      if (scenario.length > MAX_SCENARIO_CHARS) {
+        throw new Error(`scenario too long (max ${MAX_SCENARIO_CHARS} chars)`)
+      }
+      const target = sanitizeTarget(rawTarget, DEFAULT_DEMO_TARGET)
+      if (target.cli !== 'claude') {
+        throw new Error('only claude targets can run demo scenarios (the browser bridge rides --mcp-config)')
+      }
+      if (demoRunning()) throw new Error('a demo scenario is already running')
+      const mcpScript = join(deckPluginDir, 'mcp', 'demo-browser-mcp.mjs')
+      if (!deckPluginDir || !existsSync(mcpScript)) {
+        throw new Error('demo-browser MCP script missing -- run `npm run build:mcp`')
+      }
+      const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
+      const control = await startDemoControl(createBrowserDriver(wc))
+      try {
+        const mcpConfigPath = writeDemoMcpConfig({
+          dir: stateDir,
+          mcpScriptPath: mcpScript,
+          execPath: process.execPath,
+          controlUrl: control.url,
+          controlToken: control.token
+        })
+        const systemPromptFile = writeDemoSystemPrompt(stateDir)
+        const command = buildDemoCommand({
+          scenario: scenario.trim(),
+          systemPromptFile,
+          mcpConfigPath,
+          model: target.model
+        })
+        markProviderUsed(target.cli) // feed the amphora gauge
+        return await runDemoCommand({
+          command,
+          shell: getConfig().shell,
+          cwd: getConfig().projectDir
+        })
+      } finally {
+        control.close()
+      }
+    }
+  )
+
+  regHandle('browser:demo-cancel', () => cancelDemoRun())
 
   // ----- config -----
   // The renderer never sees provider secrets: localProviders are sanitized to

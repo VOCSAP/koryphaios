@@ -1422,7 +1422,8 @@ app.whenReady().then(() => {
     brokerRetry: () => {
       void pollOperatorInbox()
       void pollGraphDrafts()
-    }
+    },
+    deckPluginDir
   })
   service.start()
   // Attach an auto-save workspace capturing whatever the service just restored.

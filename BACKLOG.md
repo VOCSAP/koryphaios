@@ -106,6 +106,26 @@ l'opérateur sur une machine avec affichage.
       battle avec juge, picker (accordéon providers, favoris ★, détection
       CLIs), Settings > Modèles avec un endpoint Ollama/LiteLLM réel
       (découverte + inférence + clé chiffrée safeStorage + bouton ⊘).
+- [ ] **Lot Browser REC + scénario démo (session 2026-07-24)** — dispatch,
+      escaping, harness et bridge MCP sont testés (`desktop-recording`,
+      `desktop-demo-control`, `desktop-browser-drive`, `desktop-demo-driver`) ;
+      reste tout le runtime réel :
+  - **Enregistrement manuel** : modale + bouton REC + badge rail deux thèmes ;
+    `getDisplayMedia` réellement servi par `setDisplayMediaRequestHandler`
+    (fenêtre propre) ; **crop du panneau** — l'heuristique `computeCropRect`
+    (largeur 1:1, surplus vertical = chrome haut) est à vérifier par OS
+    (barre de titre Windows/Linux, notch macOS) ; MP4 réellement muxé par
+    l'Electron embarqué (sinon repli WebM attendu) ; qualité/taille à 6 Mbps ;
+    arrêt via fermeture de fenêtre en cours d'enregistrement.
+  - **Scénario démo** : run réel `claude -p --mcp-config` (bridge
+    `demo-browser-mcp.mjs` sous `ELECTRON_RUN_AS_NODE`) sur un vrai site ;
+    `sendInputEvent` frappe/clic sur des inputs React contrôlés ; annulation
+    par REC stop pendant le run (kill + sauvegarde du partiel) ; timeout 5 min
+    et cap 120 étapes en conditions réelles ; pacing du DEMO_SYSTEM_PROMPT à
+    ajuster à l'usage (beats trop rapides/lents).
+  - **Démo README Kory** : produire le clip final (scope fenêtre entière +
+    superviseur orchestrant une équipe) sur un poste avec sessions Claude
+    authentifiées, puis l'intégrer au `README.md` (mp4 uploadé via GitHub).
 - [ ] **Lot limites d'usage + Antigravity (session 2026-07-22)** — vérifs
       terrain, aucune n'est couverte par les tests (endpoints et binaires
       réels inaccessibles en CI) :
