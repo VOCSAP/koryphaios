@@ -10,10 +10,7 @@ runtime muxes it) or WebM, path in a toast. `getDisplayMedia` is answered
 main-side with the Deck's OWN window only (`setDisplayMediaRequestHandler` —
 no OS picker, the renderer can never capture another surface); while
 recording, the button pulses red with an elapsed timer and the browser rail
-entry carries a red dot from every view. Born from the README-demo need and a
-look at HoldMyBeer-gg/bad-ass-mcp: the OS-accessibility approach was NOT
-adopted (Kory already pilots itself at app level via deck-control), but its
-recording idea and structured-snapshot-over-screenshots lesson were.
+entry carries a red dot from every view.
 
 The modal's optional **scripted scenario** makes the tool film itself being
 useful: the operator describes what to show, picks a model (claude CLI only,
