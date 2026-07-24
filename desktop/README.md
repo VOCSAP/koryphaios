@@ -366,6 +366,10 @@ Settings language picker is derived from the locale files actually present
 
 ## Develop
 
+> Fresh machine? The consolidated prerequisites checklist (per-OS toolchains,
+> Bun + Node, the Windows Spectre-libs component) is
+> [`BUILDING.md`](../BUILDING.md) at the repo root.
+
 ```bash
 cd desktop
 npm install          # also runs electron-rebuild for node-pty
