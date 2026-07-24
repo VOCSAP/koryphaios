@@ -2838,6 +2838,20 @@ svg.glyph {
   box-shadow: 0 0 0 2px var(--bg-2);
 }
 
+/* REC in progress: pulsing red dot on the browser glyph (top-right, badge
+   slot) — the recording stays visible from every view. */
+.nav-rail-rec-dot {
+  position: absolute;
+  top: -4px;
+  right: -8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 2px var(--bg-2);
+  animation: rec-pulse 1.6s ease-in-out infinite;
+}
+
 .nav-rail-icon {
   position: relative;
 }
@@ -3817,6 +3831,97 @@ svg.glyph {
 /* Send-annotation: accented so the "do it" action stands out while drawing. */
 .browser-btn-accent {
   color: var(--accent);
+}
+
+/* REC running: red glyph, slow pulse; the same button stops the recording. */
+.browser-btn-rec {
+  color: var(--danger);
+  animation: rec-pulse 1.6s ease-in-out infinite;
+}
+
+.browser-btn-rec:hover:not(:disabled) {
+  background: var(--bg);
+  color: var(--danger);
+}
+
+@keyframes rec-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .browser-btn-rec,
+  .nav-rail-rec-dot {
+    animation: none;
+  }
+}
+
+/* Elapsed-time readout next to the REC button. */
+.browser-rec-time {
+  color: var(--danger);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  padding: 0 2px;
+}
+
+/* REC options dialog: capture-scope radios, then start. */
+.record-modal {
+  width: 400px;
+}
+
+.record-hint {
+  color: var(--fg-dim);
+  line-height: 1.5;
+  margin: 0 0 10px;
+}
+
+.record-scope {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.record-scope input[type='radio'] {
+  accent-color: var(--accent);
+  margin: 0;
+}
+
+/* Scripted-scenario section of the REC dialog: optional prompt + model. */
+.record-scenario-label {
+  display: block;
+  color: var(--fg-dim);
+  font-size: 12px;
+  margin: 10px 0 4px;
+}
+
+.record-scenario {
+  width: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  resize: vertical;
+}
+
+.record-scenario:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+/* Bound the embedded picker so a long catalog scrolls inside the dialog. */
+.record-model .model-picker {
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/* Elapsed readout while the demo agent drives: dotted = scripted run. */
+.browser-rec-time.rec-demo {
+  text-decoration: underline dotted;
 }
 
 /* Window mirror (D2a): shrink-wrapped around the still so the draw canvas

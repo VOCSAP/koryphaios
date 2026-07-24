@@ -199,6 +199,12 @@ export interface AppConfig {
   helpTarget: import('./graph').ModelTarget
   /** Inference target of the roadmap context wand (was pinned haiku, C21). */
   wandTarget: import('./graph').ModelTarget
+  /**
+   * Inference target of the REC scripted-scenario driver (claude CLI only —
+   * the demo browser bridge is injected via --mcp-config). Remembered from
+   * the REC modal's picker; default claude/sonnet.
+   */
+  demoTarget: import('./graph').ModelTarget
   /** Last URL loaded in the embedded browser view (PLAN D1); restored on open. */
   browserUrl: string
   /**
@@ -863,6 +869,20 @@ export interface DeckApi {
   captureBrowser(webContentsId: number): Promise<string | null>
   /** Persist an annotated screenshot; returns the absolute file path. */
   saveAnnotation(dataUrl: string): Promise<string | null>
+  /** Persist a finished REC screen recording; returns the absolute file path. */
+  saveRecording(data: Uint8Array, ext: 'mp4' | 'webm'): Promise<string | null>
+  /**
+   * Run a REC scripted scenario: a one-shot demo-driver agent (target.cli
+   * 'claude' only) drives the embedded webview while the renderer records.
+   * Resolves with the agent's closing summary when the scenario ends.
+   */
+  runDemoScenario(
+    webviewId: number,
+    scenario: string,
+    target: import('./graph').ModelTarget
+  ): Promise<string>
+  /** Cancel the running demo scenario (REC stop while a scenario runs). */
+  cancelDemoScenario(): Promise<boolean>
   /** Capturable OS windows/screens for the Window mirror mode (D2a). */
   listCaptureWindows(): Promise<WindowSource[]>
   /** Full-size still of one window/screen; null when gone. */

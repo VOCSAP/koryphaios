@@ -50,6 +50,45 @@ sketch + the agent's multimodal `Read` answer the "which element" question
 for native targets. The embedded web page keeps its state while in window
 mode.
 
+## Recording (REC)
+
+The toolbar's REC button records a demo-ready video — a modal first asks for
+the capture scope:
+
+- **Browser pane only** — the embedded page (at the active viewport preset if
+  one is set), for a demo of the site under development;
+- **Whole Koryphaios window** — the full Deck, for a demo of Koryphaios
+  itself (tiles, roadmap, supervisor… keep navigating: the recording follows).
+
+While recording, the REC button pulses red with an elapsed-time readout and
+the browser rail entry carries a red dot from every view. Clicking REC again
+stops and saves the clip under the app-state `recordings/` folder (MP4 when
+the runtime can mux it, WebM otherwise — both embed in a GitHub README); the
+saved path is shown in a toast. Capture is served by the main process with
+the Deck's own window only (no OS picker, no arbitrary-source access from the
+renderer); the pane crop is computed renderer-side (`shared/recording.ts`).
+
+### Scripted scenario (demo driver)
+
+The dialog's optional **scenario** field turns the recording into an
+agent-driven demo: describe what to show ("open the dashboard, create a
+project named Demo…"), pick the model (Claude CLI targets only, Sonnet
+default — remembered in `config.demoTarget`), and the Deck launches ONE
+throwaway `claude -p` whose only capabilities are five `demo_*` MCP tools on
+the embedded page: `demo_read` (structured snapshot: text excerpt +
+interactive elements with stable selectors), `demo_navigate`, `demo_click`
+and `demo_type` (real input events with human pacing, visible on the video),
+`demo_wait` (viewer-pacing pauses). The recording auto-stops when the agent
+reports the scenario done; stopping the recording cancels the agent.
+
+Security shape: the agent's bridge (`demo-browser-mcp.mjs`) talks to a
+loopback endpoint + Bearer token minted PER RUN (`demo-control.ts`) — never
+the supervisor's deck-control token; the harness is a code constant (C8), the
+scenario text is framed as data; all file/shell/web tools are disallowed; a
+120-step cap bounds runaway loops; selectors and texts coming back from the
+agent enter page scripts JSON-encoded only, and navigation is restricted to
+http(s).
+
 ## Design mode inside external apps (Tauri, Electron…)
 
 Any webview-based app can join the element-picking loop **without being

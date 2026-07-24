@@ -373,6 +373,14 @@ const IconCamera = (
   </Svg>
 )
 
+/** Screen recording (the universal REC ring — an omphalos seen from above). */
+const IconRecord = (
+  <Svg>
+    <circle cx="12" cy="12" r="8.5" />
+    <Dot cx={12} cy={12} r={3} />
+  </Svg>
+)
+
 /** Element picker (crosshair). */
 const IconTarget = (
   <Svg>
@@ -699,6 +707,7 @@ export const GLYPH_ACTIONS = {
   screen: IconScreen,
   window: IconWindow,
   camera: IconCamera,
+  record: IconRecord,
   target: IconTarget,
   erase: IconErase,
   code: IconCode,

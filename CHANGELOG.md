@@ -1,5 +1,38 @@
 # Changelog
 
+## desktop (experimental) — Browser REC: screen recording + agent-driven demo scenarios
+
+The embedded browser's toolbar gains a **REC** button: a modal picks the
+capture scope — browser pane only (canvas-crop pipeline over the window
+stream, pure math in `shared/recording.ts`) or the whole Koryphaios window —
+and the clip lands under app-state `recordings/` as MP4 (when the Chromium
+runtime muxes it) or WebM, path in a toast. `getDisplayMedia` is answered
+main-side with the Deck's OWN window only (`setDisplayMediaRequestHandler` —
+no OS picker, the renderer can never capture another surface); while
+recording, the button pulses red with an elapsed timer and the browser rail
+entry carries a red dot from every view.
+
+The modal's optional **scripted scenario** makes the tool film itself being
+useful: the operator describes what to show, picks a model (claude CLI only,
+Sonnet default, remembered in `config.demoTarget` — the picker is in the
+modal, not a hidden supervisor prompt), and ONE throwaway `claude -p` drives
+the embedded page while the pane records, auto-stopping on completion. The
+agent's whole capability surface is five `demo_*` MCP tools (structured
+`demo_read`, `demo_navigate`, real-input `demo_click`/`demo_type`,
+viewer-pacing `demo_wait`) served by a NEW per-run loopback endpoint + Bearer
+token (`demo-control.ts` + `demo-browser-mcp.mjs`, mirroring deck-control but
+least-privilege: never the supervisor token, 120-step cap, 64 KiB payloads).
+Harness = C8 code constant (`demo-driver.ts`, scenario framed as data, every
+file/shell/web tool disallowed); agent-supplied selectors/texts enter page
+scripts JSON-encoded only (`browser-drive-scripts.ts`, bun-tested against
+breakout payloads) and navigation is http(s)-only. Stopping the recording
+cancels the run (killable child, login-shell PATH). deck-control was NOT
+extended: the demo agent piloting a web page and the supervisor piloting the
+app are different trust domains. Suite: demo-control dispatch/auth/step-cap +
+stdio bridge end-to-end, script-builder escaping, command/harness composition
+(tamper-overwrite included); pending real-runtime validations in
+`BACKLOG.md` §2.
+
 ## desktop + core (experimental) — Directive cards: supervised context/token economy (CT)
 
 A new roadmap kind **`directive`** turns the shared roadmap into a lever for

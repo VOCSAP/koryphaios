@@ -76,7 +76,7 @@ Only read the file matching the area you are touching:
   Only swallow silently when the fallback is truly equivalent (documented
   best-effort caches). Full conventions per layer: the `error-reporting`
   skill (`.claude/skills/error-reporting/SKILL.md`).
-- **Three hostile inputs, never trusted.** (1) A value from a CLONED REPO
+- **Four hostile inputs, never trusted.** (1) A value from a CLONED REPO
   (project `.claude/claude-peers/config.json`, project-local `templates/*.json`)
   that reaches a shell/spawn must be GLOBAL-config-only or approval-gated —
   reuse `launch-approval.ts`, never put the trust decision in the repo (see the
@@ -90,9 +90,14 @@ Only read the file matching the area you are touching:
   `realpathWithin`) — the companion `CHANNEL_TIERS` tier is a declaration, NOT
   an access gate, so a tier-0 "read" channel with an unvalidated `dir` is an
   arbitrary-file-read (the GX-SEC finding: `git diff --no-index` dumping any
-  file). When you add a config field, template field, shell-interpolated arg,
-  broker response field, or a path/dir IPC arg, decide which of these it is
-  BEFORE wiring it.
+  file). (4) A string produced by a SPAWNED AGENT (MCP tool args crossing a
+  loopback control endpoint — deck-control, demo-control) that reaches
+  `executeJavaScript`, a page, a terminal or a command line must be
+  encoded/validated at the boundary, never string-glued (precedent:
+  `browser-drive-scripts.ts` JSON-encodes every agent selector; directive
+  commands are re-validated enums). When you add a config field, template
+  field, shell-interpolated arg, broker response field, a path/dir IPC arg,
+  or an agent-facing tool arg, decide which of these it is BEFORE wiring it.
 - **Naming a scratch/plan/report doc?** `.gitignore` silently excludes
   `findings.md`, `task_plan.md`, `progress.md`, `progress-archive.md`, `docs/`,
   and `.claude/session-checkpoint.md`. A deliverable you intend to commit (audit

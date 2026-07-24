@@ -69,6 +69,10 @@ Broker runs on the same PC as your Claude Code sessions. See [Quick start (local
 
 ## Quick start (local)
 
+> Building the desktop binary yourself, or setting up a fresh machine
+> (toolchains, the Windows Spectre-libs gotcha)? The from-scratch checklist is
+> **[BUILDING.md](BUILDING.md)**.
+
 ### 1. Install
 
 ```bash
