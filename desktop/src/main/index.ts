@@ -41,7 +41,7 @@ import {
   parseMagicResume
 } from './magic-compact'
 import { approve, isApproved, resolveApprovedLaunchCommand } from './launch-approval'
-import { homedir } from 'node:os'
+import { homedir, hostname } from 'node:os'
 import { WorkspaceService } from './workspace-service'
 import {
   BrokerHealthTracker,
@@ -77,6 +77,16 @@ import {
   writeEmbeddedAgentPrompt
 } from './team-embedded'
 import { startDesignEndpoint, type DesignEndpoint } from './design-endpoint'
+import { ApprovalRuntime } from './approval-runtime'
+import { remoteApprovalsEnabled } from './approval-store'
+import {
+  addApproval,
+  buildKeystrokes,
+  canApplyVerdict,
+  claimApproval,
+  fetchUndeliveredVerdicts,
+  markVerdictsDelivered
+} from './approval-service'
 import { addEventSink, broadcast, regHandle } from './api-registry'
 import { CompanionServer } from './companion-server'
 import {
@@ -279,10 +289,31 @@ const deckPluginDir = ((): string => {
 // may be remote/headless: picks are a strictly local loop).
 let designServer: DesignEndpoint | null = null
 
+// Remote approvals (PLAN-notifications-mobiles N2.c). Armed at whenReady only
+// when the operator enabled it; `env()` always emits the key so a value
+// inherited from the parent process can never silently re-enable it.
+const approvals = new ApprovalRuntime({
+  stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
+  cipher: secretCipher,
+  endpoint: () => resolveBrokerEndpoint(),
+  sessionRef: `window-${activeScope.groupId.slice(0, 12)}`,
+  host: hostname()
+})
+
+/** Global switch AND no project opt-out — a project can restrict, never enable. */
+function approvalsEnabled(): boolean {
+  return remoteApprovalsEnabled({
+    globalEnabled: config.mobileApprovals === true,
+    file: join(app.getPath('userData'), APP_STATE_SUBDIR, 'approvals.json'),
+    projectKey: computeDeckProjectKey(cliContext.projectDir)
+  })
+}
+
 const service = new SessionService(
   getConfig,
   () => ({
     ...activeScopeEnv.env,
+    ...approvals.env(),
     ...(designServer
       ? {
           CLAUDE_DECK_DESIGN_URL: designServer.url,
@@ -514,10 +545,84 @@ service.on('startup-ack', ({ name }: { id: string; name?: string }) => {
   journal.add('session', `auto-acknowledged the dev-channels warning for "${name ?? '?'}"`)
 })
 
+// Live approval per waiting tile, so a local answer can settle the remote one.
+const openApprovals = new Map<string, string>()
+
+/**
+ * Apply approvals settled elsewhere (phone) to their session.
+ *
+ * Only the fallback path lands here: a hook or ask_operator verdict returns
+ * through its own call. Guarded twice — the tile must still exist AND still be
+ * waiting — because an answer arriving after the operator dealt with the
+ * prompt locally must be dropped, not typed into whatever is on screen now.
+ */
+const pollApprovalVerdicts = async (): Promise<void> => {
+  const deps = approvals.deps()
+  if (!deps || !approvalsEnabled()) return
+  try {
+    const settled = await fetchUndeliveredVerdicts(deps)
+    if (settled.length === 0) return
+    const applied: string[] = []
+    for (const approval of settled) {
+      const tile = approval.origin.session_ref
+      const live = service.list().find((s) => s.id === tile)
+      const state = live ? { exists: true, waiting: openApprovals.get(tile) === approval.id } : null
+      if (!canApplyVerdict(approval, state)) {
+        // Nothing to type, but it IS settled: mark it so it stops coming back.
+        applied.push(approval.id)
+        continue
+      }
+      const keys = buildKeystrokes(approval)
+      if (!keys) {
+        applied.push(approval.id)
+        continue
+      }
+      service.write(tile, keys)
+      openApprovals.delete(tile)
+      journal.add('attention', `answered "${live?.name ?? tile}" from ${approval.answered_via}`)
+      applied.push(approval.id)
+    }
+    await markVerdictsDelivered(deps, applied)
+  } catch (e) {
+    reportError('approvals', 'verdict poll failed', e)
+  }
+}
+
 service.on('attention', ({ id, waiting }: { id: string; waiting: boolean }) => {
-  if (!waiting) return
   const session = service.list().find((s) => s.id === id)
+  // The operator answered locally: settle the approval so the phone
+  // notification is invalidated (the broker makes the two exclusive).
+  if (!waiting) {
+    const open = openApprovals.get(id)
+    if (open) {
+      openApprovals.delete(id)
+      const deps = approvals.deps()
+      if (deps) {
+        void claimApproval(deps, { id: open, answerKind: 'allow' }).catch((e) =>
+          reportError('approvals', 'could not settle a locally-answered approval', e)
+        )
+      }
+    }
+    return
+  }
   if (session) journal.add('attention', `session "${session.name}" waits for the operator`)
+  // Fallback producer: sessions no hook covers (non-Claude CLIs, and open
+  // questions detected on screen). Best-effort — never block the UI path.
+  if (session && approvalsEnabled()) {
+    const deps = approvals.deps()
+    if (deps) {
+      void addApproval(deps, {
+        kind: 'question',
+        title: session.name,
+        question: `The session "${session.name}" is waiting for an answer on screen.`,
+        sessionRef: id,
+        projectKey: computeDeckProjectKey(cliContext.projectDir),
+        host: hostname()
+      })
+        .then((a) => openApprovals.set(id, a.id))
+        .catch((e) => reportError('approvals', 'could not raise an approval', e))
+    }
+  }
   if (!config.notifyAttention) return
   if (!Notification.isSupported()) return
   if (!session) return
@@ -1372,7 +1477,7 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   nativeTheme.themeSource = config.theme
   // PLAN C19: gate a PROJECT-sourced launchCommand behind a one-time operator
   // approval (hash remembered per project_key; a changed command asks again;
@@ -1523,11 +1628,19 @@ app.whenReady().then(() => {
     brokerRetry: () => {
       void pollOperatorInbox()
       void pollGraphDrafts()
+      void pollApprovalVerdicts()
     },
     deckPluginDir,
     sandbox,
     sandboxGate
   })
+  // Arm remote approvals BEFORE service.start(): restored sessions spawn there,
+  // and a session spawned without the credential path would never produce an
+  // approval. A failure only means the feature stays off; the app starts anyway.
+  if (config.mobileApprovals) {
+    const armed = await approvals.arm()
+    journal.add('session', armed ? 'remote approvals armed' : 'remote approvals unavailable')
+  }
   service.start()
   // Attach an auto-save workspace capturing whatever the service just restored.
   workspaces.start()
@@ -1535,6 +1648,7 @@ app.whenReady().then(() => {
   inboxTimer = setInterval(() => {
     void pollOperatorInbox()
     void pollGraphDrafts()
+    void pollApprovalVerdicts()
   }, INBOX_POLL_MS)
   // Auto-dispatch watcher (PLAN C15): no-op while nothing was dispatched.
   dispatchTimer = setInterval(() => void watchDispatched(), DISPATCH_WATCH_MS)
@@ -1572,5 +1686,8 @@ app.on('before-quit', () => {
   // Ephemeral companion mode (MB2): closing the app IS the revocation — the
   // phone sees the socket drop and shows "host disconnected".
   void companionServer?.stop(true)
+  // Revoke this window's agent credential and delete its file: a stale
+  // credential surviving the app would keep raising approvals nobody applies.
+  void approvals.disarm()
   activeScopeEnv.cleanup()
 })

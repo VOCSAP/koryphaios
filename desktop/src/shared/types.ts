@@ -187,6 +187,9 @@ export interface AppConfig {
   leadPattern: string
   /** System notification when a session waits for the operator (PLAN C11). */
   notifyAttention: boolean
+  /** Remote approvals: notify a phone when a session blocks, and accept the
+   * answer back. Opt-in; a project can only restrict it, never enable it. */
+  mobileApprovals: boolean
   /** Confirmation level for supervisor-initiated spawns (PLAN TS4). */
   supervisorSpawnMode: SupervisorSpawnMode
   /** Show the floating "?" help-assistant button (PLAN C9). */

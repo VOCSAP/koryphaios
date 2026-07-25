@@ -31,6 +31,27 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   `sandbox.json` (operator-owned, never the repo). Design + jalons M2/M3:
   the two "Sandbox mode" CHANGELOG entries; operator docs:
   `desktop/docs/sandbox.md`.
+- **Remote approvals (opt-in, `mobileApprovals`)**: when a session blocks, the
+  question is parked broker-side and can be answered from elsewhere; the Deck
+  holds the ONLY credential able to settle one. Three producers, because the
+  kinds of question differ: the embedded plugin's `PermissionRequest` hook
+  (blocking, structured — it fires only when a permission dialog appears,
+  unlike `PreToolUse` which would fire on every tool call), the `ask_operator`
+  MCP tool (open questions — no hook covers `AskUserQuestion` or plan
+  approval, and the tool's return value IS the answer, so free text reaches
+  the agent with no keystrokes), and `attention.ts` as the fallback for
+  non-Claude CLIs. Answering IN the Deck settles the approval, which
+  invalidates the remote notification (and vice versa — the broker's
+  conditional update makes them exclusive). Verdicts that must be typed go
+  through `buildKeystrokes`, which is deliberately conservative (allow = a
+  bare Enter on the highlighted option, deny = Escape rather than guessing a
+  "no" index that could land on "yes, and don't ask again") and appends the
+  submitting Enter itself — a remote answer can never carry its own.
+  Enabling is `global AND NOT project-opt-out`: a project can restrict, never
+  enable. Identity lives in the app-state dir, which is per OS user, so two
+  Windows accounts on one machine are compartmentalised without a line of code
+  deciding it. Hooks fail CLOSED: no credential, broker down or budget spent
+  yields no decision at all, leaving the native dialog up.
 - **Supervisor (Home rail)**: a Claude session piloting the app through a
   loopback deck-control endpoint + dependency-free MCP stdio bridge, injected
   only into the supervisor via a generated `--mcp-config`.
