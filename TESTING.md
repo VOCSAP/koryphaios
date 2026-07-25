@@ -40,6 +40,17 @@ the workarounds for the known environment quirks below.
 - `tests/server-stdin-eof.test.ts` is flaky in sandboxed environments: re-run
   it in isolation before treating a failure as a regression.
 
+## Time-dependent tests (calendar rot)
+
+A test that injects a FIXED clock must derive every timestamp fixture from
+that clock, never from `Date.now()`. Mixing the two makes the test pass at
+authoring time and fail months later, when the wall clock has drifted past the
+frozen one — a failure that reads like a regression but is pure rot.
+Precedent: `desktop-log.test.ts` aged its "stale snapshot" fixture with
+`Date.now() - 10 days` while the prune compared against a frozen 2026-07-19,
+so it died on 2026-07-22. Same rule for retention/TTL windows: assert the
+BOUNDARY relative to the injected clock, not an absolute date.
+
 ## Adding a UI string (renderer)
 
 Three files must carry the same key, or `desktop-i18n.test.ts` fails:

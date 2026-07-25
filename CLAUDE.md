@@ -50,6 +50,10 @@ Only read the file matching the area you are touching:
   app (no broker involved) — the `add-deck-view` skill
   (`.claude/skills/add-deck-view/SKILL.md`). For an agent→broker→Deck feature
   instead, use `add-broker-feature`.
+- Touching SANDBOX mode (`desktop/src/main/sandbox-*.ts`, the Docker rail
+  view, or anything that decides WHERE a session executes) — read
+  `PLAN-SANDBOX.md` (design + why each decision, incl. the copy-not-mount
+  rule) and `desktop/docs/sandbox.md` (operator-facing behavior).
 - Bun runtime / API conventions (which libs to use or avoid) — read
   `BUN.md`.
 - Building a Bun-served frontend (HTML imports, React) — read
@@ -76,7 +80,7 @@ Only read the file matching the area you are touching:
   Only swallow silently when the fallback is truly equivalent (documented
   best-effort caches). Full conventions per layer: the `error-reporting`
   skill (`.claude/skills/error-reporting/SKILL.md`).
-- **Four hostile inputs, never trusted.** (1) A value from a CLONED REPO
+- **Five hostile inputs, never trusted.** (1) A value from a CLONED REPO
   (project `.claude/claude-peers/config.json`, project-local `templates/*.json`)
   that reaches a shell/spawn must be GLOBAL-config-only or approval-gated —
   reuse `launch-approval.ts`, never put the trust decision in the repo (see the
@@ -95,9 +99,18 @@ Only read the file matching the area you are touching:
   `executeJavaScript`, a page, a terminal or a command line must be
   encoded/validated at the boundary, never string-glued (precedent:
   `browser-drive-scripts.ts` JSON-encodes every agent selector; directive
-  commands are re-validated enums). When you add a config field, template
-  field, shell-interpolated arg, broker response field, a path/dir IPC arg,
-  or an agent-facing tool arg, decide which of these it is BEFORE wiring it.
+  commands are re-validated enums). (5) Anything MOUNTED INTO a sandbox
+  container is a capability granted to code you assume is compromised — the
+  host `~/.claude` is therefore COPIED in, never mounted (a mounted
+  `settings.json` lets a sandboxed agent plant a hook that later executes on
+  the HOST, defeating the sandbox), secrets are excluded from the copy-mode
+  clone by a deny-list that outranks any operator glob, and a container name
+  or command coming back from the renderer/an agent is re-validated
+  main-side before it reaches the engine CLI (`sandbox-command.ts` /
+  `sandbox-projection.ts` / `sandbox-copy.ts`). When you add a config field,
+  template field, shell-interpolated arg, broker response field, a path/dir
+  IPC arg, an agent-facing tool arg, or a new sandbox mount/projection,
+  decide which of these it is BEFORE wiring it.
 - **Naming a scratch/plan/report doc?** `.gitignore` silently excludes
   `findings.md`, `task_plan.md`, `progress.md`, `progress-archive.md`, `docs/`,
   and `.claude/session-checkpoint.md`. A deliverable you intend to commit (audit
