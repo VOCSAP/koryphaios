@@ -37,6 +37,8 @@ export const MOBILE_VIEWS: Record<DeckView, MobileViewMeta> = {
   files: { placement: 'desktop-only', labelKey: 'nav.files' },
   git: { placement: 'desktop-only', labelKey: 'nav.git' },
   worktrees: { placement: 'more', labelKey: 'nav.worktrees' },
+  // Container lifecycle needs the host engine + native confirms: desktop-first.
+  sandbox: { placement: 'desktop-only', labelKey: 'nav.sandbox' },
   journal: { placement: 'more', labelKey: 'nav.journal' },
   // <webview>, Electron-only (EXPLORATION §3): absent from the mobile client.
   browser: { placement: 'desktop-only', labelKey: 'nav.browser' },

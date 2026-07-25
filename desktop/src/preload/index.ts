@@ -14,6 +14,8 @@ import type {
   PtyExitEvent,
   RoadmapListFilters,
   RoadmapUpsertFields,
+  SandboxContainerAction,
+  SandboxStatus,
   SessionAttentionEvent,
   SessionQuotaEvent,
   SessionRuntime,
@@ -95,6 +97,17 @@ const api: DeckApi = {
   pickDirectory: () => ipcRenderer.invoke('dialog:pickDirectory'),
 
   getI18n: () => ipcRenderer.invoke('i18n:get'),
+
+  sandboxStatus: (force?: boolean) => ipcRenderer.invoke('sandbox:status', force),
+  sandboxSetEnabled: (enabled: boolean) => ipcRenderer.invoke('sandbox:set-enabled', enabled),
+  sandboxEnsure: () => ipcRenderer.invoke('sandbox:ensure'),
+  sandboxList: () => ipcRenderer.invoke('sandbox:list'),
+  sandboxContainerAction: (name: string, action: SandboxContainerAction) =>
+    ipcRenderer.invoke('sandbox:container-action', name, action),
+  sandboxAuthStart: () => ipcRenderer.invoke('sandbox:auth-start'),
+  sandboxAuthStop: () => ipcRenderer.invoke('sandbox:auth-stop'),
+  sandboxAuthProbe: () => ipcRenderer.invoke('sandbox:auth-probe'),
+  onSandboxChanged: (cb: (status: SandboxStatus) => void) => subscribe('sandbox:changed', cb),
 
   listWorkspaces: () => ipcRenderer.invoke('workspace:list'),
   saveWorkspace: (name?: string) => ipcRenderer.invoke('workspace:save', name),

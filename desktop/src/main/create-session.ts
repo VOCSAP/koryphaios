@@ -22,8 +22,17 @@ export async function createSessionWithWorktree(
    * approves it), so it is passed in rather than re-read from the project config
    * here — a repo-shipped worktreeInit can no longer reach the shell ungated.
    */
-  worktreeInit?: string
+  worktreeInit?: string,
+  /**
+   * Sandbox readiness gate (PLAN-SANDBOX SBX3): when the sandbox is enabled it
+   * ensures the container is up AND authenticated BEFORE any tile spawns, and
+   * throws 'sandbox-auth-required' otherwise — the renderer maps that to the
+   * login modal. One gate here covers the operator create, the supervisor's
+   * deck-control spawn and template batches (all funnel through this path).
+   */
+  sandboxGate?: () => Promise<void>
 ): Promise<SessionRuntime> {
+  if (sandboxGate && !input.supervisor) await sandboxGate()
   const req = { ...input }
   const branch = req.worktreeBranch?.trim()
   if (branch) {

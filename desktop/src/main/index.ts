@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import {
   app,
@@ -61,6 +61,8 @@ import { APP_STATE_SUBDIR, runDataMigration } from './migrate-data-dir'
 import type { SessionRuntime } from '@shared/types'
 import { listAgents } from './agents'
 import { createSessionWithWorktree } from './create-session'
+import { SandboxService } from './sandbox-service'
+import { mapHostPathToContainer, rewriteLoopbackForContainer, sandboxifyEnv } from './sandbox-command'
 import { Journal } from './journal'
 import { flushJournalSnapshot, initDeckLog, logInfo, onDeckError, reportError } from './log'
 import {
@@ -305,6 +307,70 @@ service.on('created', (r: SessionRuntime) => {
   const branch = r.worktree ? ` on ⎇ ${r.worktree.branch}` : ''
   journal.add('session', `session "${r.name}" spawned${branch}${r.supervisor ? ' (supervisor)' : ''}`)
 })
+// ----- Sandbox mode (PLAN-SANDBOX SBX1–SBX3) -----
+// Per-project container lifecycle. Constructed eagerly (cheap: name hashing
+// only) — every engine call is on-demand. The settings live in the operator's
+// app-state sandbox.json (never a repo file, hostile input #1).
+const sandbox = new SandboxService({
+  projectDir: cliContext.projectDir,
+  projectKey: computeDeckProjectKey(cliContext.projectDir),
+  stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
+  // Same resolution as the transcript readers: the peers back-channel dir.
+  peersDirHost: join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'peers'),
+  journal: (msg) => journal.add('session', msg)
+})
+
+// The broker URL a CONTAINERIZED session must dial: the host endpoint with
+// loopback rewritten to host.docker.internal (server.ts hard-refuses to
+// auto-spawn a broker on a non-loopback URL, so a bad bridge fails loudly
+// instead of forking an isolated broker inside the container).
+const containerBrokerEnv = (): Record<string, string> => {
+  const endpoint = resolveBrokerEndpoint()
+  return {
+    CLAUDE_PEERS_BROKER_URL: rewriteLoopbackForContainer(endpoint.url),
+    ...(endpoint.token ? { CLAUDE_PEERS_BROKER_TOKEN: endpoint.token } : null)
+  }
+}
+
+// SBX1: wrap sandboxed spawns. The scope-secret file is read HERE (host-side,
+// with a trace on failure) so the pure env translator stays fs-free.
+service.setSandboxProvider(() => {
+  const launch = sandbox.launchInfo()
+  if (!launch) return null
+  return {
+    wrap: (sessionId, command, cwdHost, env) => {
+      sandbox.writeLaunchScript(sessionId, {
+        command,
+        cwd: mapHostPathToContainer(cwdHost, launch.projectDir),
+        env: {
+          ...sandboxifyEnv(env, (path) => {
+            try {
+              return readFileSync(path, 'utf8').trim()
+            } catch (e) {
+              reportError('sandbox', `scope secret file unreadable: ${path}`, e)
+              return null
+            }
+          }),
+          ...containerBrokerEnv()
+        }
+      })
+      return sandbox.execCommand(launch, sessionId)
+    }
+  }
+})
+
+// SBX3: pre-spawn gate — container up AND authenticated before ANY tile
+// spawns. 'sandbox-auth-required' routes the renderer to the login modal
+// (one modal, instead of a login prompt in every tile).
+const sandboxGate = async (): Promise<void> => {
+  if (!sandbox.isEnabled()) return
+  const st = await sandbox.ensure()
+  if (!st.engine || st.containerState !== 'running') {
+    throw new Error(st.error ? `sandbox: ${st.error}` : 'sandbox: container not ready')
+  }
+  if (st.authed !== true) throw new Error('sandbox-auth-required')
+}
+
 service.on('removed', ({ name }: { id: string; name: string }) => {
   journal.add('session', `session "${name}" closed`)
 })
@@ -1062,7 +1128,14 @@ const controlDeps: DeckControlDeps = {
   listModels: () => resolveLaunchConfig(getConfig().projectDir).models,
   listPresets: () => resolveLaunchConfig(getConfig().projectDir).presets,
   spawnSession: (input) =>
-    createSessionWithWorktree(service, getConfig().projectDir, input, checkpointBeforeSpawn, getWorktreeInit()),
+    createSessionWithWorktree(
+      service,
+      getConfig().projectDir,
+      input,
+      checkpointBeforeSpawn,
+      getWorktreeInit(),
+      sandboxGate
+    ),
   listSessions: () => service.list(),
   restartSession: (id) => void service.restart(id),
   closeSession: (id) => service.remove(id),
@@ -1093,7 +1166,8 @@ const controlDeps: DeckControlDeps = {
         getConfig().projectDir,
         hasLead ? { ...input, lead: undefined } : input,
         undefined,
-        getWorktreeInit()
+        getWorktreeInit(),
+        sandboxGate
       )
     }
     return inputs.length
@@ -1430,7 +1504,9 @@ app.whenReady().then(() => {
       void pollOperatorInbox()
       void pollGraphDrafts()
     },
-    deckPluginDir
+    deckPluginDir,
+    sandbox,
+    sandboxGate
   })
   service.start()
   // Attach an auto-save workspace capturing whatever the service just restored.
@@ -1469,6 +1545,9 @@ app.on('before-quit', () => {
   if (lockWatchTimer) clearInterval(lockWatchTimer)
   workspaces.releaseOnQuit()
   service.stop()
+  // Persistent-by-design (PLAN-SANDBOX §2): closing the app STOPS the project
+  // container (detached, quit never waits on the engine) — it never removes it.
+  sandbox.stopCurrentDetached()
   controlServer?.close()
   // Ephemeral companion mode (MB2): closing the app IS the revocation — the
   // phone sees the socket drop and shows "host disconnected".

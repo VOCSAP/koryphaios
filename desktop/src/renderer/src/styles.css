@@ -5493,3 +5493,94 @@ svg.glyph {
 .nav-rail-item.usage-hot .nav-rail-icon {
   color: var(--danger);
 }
+
+/* ---------- Sandbox (Docker) view + auth dialog (PLAN-SANDBOX SBX3/SBX4) ---------- */
+
+.sandbox-view {
+  overflow-y: auto;
+}
+
+.sandbox-card {
+  margin: 12px 14px 0;
+  padding: 12px 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.sandbox-card:last-of-type {
+  margin-bottom: 12px;
+}
+
+.sandbox-card-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sandbox-card-head h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.sandbox-line {
+  margin-top: 8px;
+  font-size: 12.5px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.sandbox-dim {
+  color: var(--fg-dim);
+}
+
+/* Amber = transient/warning (DESIGN §2): live sessions block the toggle. */
+.sandbox-warn {
+  color: #e0b341;
+}
+
+.sandbox-mono {
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+/* The container list reuses .worktrees-list row recipes inside a card. */
+.sandbox-card .worktrees-list {
+  padding: 10px 0 0;
+  overflow: visible;
+  flex: none;
+}
+
+.sandbox-auth-modal {
+  width: 760px;
+  max-width: 92vw;
+}
+
+.sandbox-auth-intro {
+  color: var(--fg-dim);
+  line-height: 1.5;
+  max-width: 52ch;
+}
+
+.sandbox-auth-hint {
+  color: var(--fg-dim);
+  font-size: 12px;
+  margin: 8px 0 6px;
+}
+
+/* Terminal background stays the xterm theme's own (both app themes). */
+.sandbox-auth-term {
+  height: 380px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  padding: 4px;
+  background: #1e1e1e;
+}
+
+[data-theme='light'] .sandbox-auth-term {
+  background: #ffffff;
+}

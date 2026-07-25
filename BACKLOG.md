@@ -389,6 +389,40 @@ l'opérateur sur une machine avec affichage.
       (le `handoff='file'` ajoute l'instruction de maintien d'un fichier de plan,
       `kleos`/`off` la retirent).
 
+### 3.8 Sandbox Docker — jalons M2/M3 (PLAN-SANDBOX, M1 livré)
+
+M1 (toggle par projet, conteneur persistant `kory-sbx-<hash>`, volume d'auth
+partagé + modale de login bloquante, vue rail Docker, wrapping `docker exec`
+par script de lancement, pont broker `host.docker.internal`) est livré — le
+design complet et les décisions vivent dans `PLAN-SANDBOX.md`. Résiduel :
+
+- [ ] **M2 — projection de la config opérateur** : copie (jamais un mount rw,
+      vecteur d'évasion) de `~/.claude` CLAUDE.md/agents/skills/hooks dans le
+      volume à chaque démarrage, credentials préservés ; overlay
+      `sandbox-overrides/` pour les hooks Windows→Linux.
+- [ ] **M2 — `deck_sandbox_exec`** (superviseur pilote l'environnement :
+      « ajoute cette dépendance ») : outil MCP deck-control → `docker exec`
+      journalisé, conteneur du projet uniquement (patron dispatch/validation
+      déjà en place dans `deck-control.ts`).
+- [ ] **M2 — broker Linux natif** : générer un `broker_token` + piloter
+      `CLAUDE_PEERS_BIND_HOST` quand le moteur n'est pas Docker Desktop
+      (host.docker.internal → loopback hôte ne marche que sur Desktop).
+- [ ] **M2 — auto-build de l'image** depuis
+      `desktop/resources/sandbox/Dockerfile` (PTY de build dans la vue
+      Docker) + badge de dérive (« créé il y a N semaines, image mise à jour
+      depuis ») + déconnexion du volume d'auth (garde : refusée si un
+      conteneur de travail tourne).
+- [ ] **M2 — resume dans le sandbox** : sonder les transcripts côté conteneur
+      (`docker exec test -f`) pour réactiver le fork-resume (M1 repart fresh).
+- [ ] **M3 — mode « copie éphémère »** : clone local hôte + allowlist de
+      globs gitignorés (`sandbox.copyIgnored`, config opérateur — jamais
+      `.env`/node_modules), le temp dir est ce qui est monté ; sorties
+      push/patch/cherry-pick. Backend distant (SSH / LXC Proxmox) sur le même
+      wrapper.
+- [ ] **Validation poste réel (Windows + Docker Desktop)** : cinématique
+      d'auth de bout en bout, perf bind mount `C:\` (recommandation `\\wsl$`
+      à documenter après mesure), matrice Podman.
+
 ---
 
 ## 4. Maintenance / dette technique

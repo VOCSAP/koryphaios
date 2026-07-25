@@ -17,6 +17,7 @@ const VIEWS: { id: DeckView; key: string }[] = [
   { id: 'roadmap', key: 'nav.roadmap' },
   { id: 'graph', key: 'nav.graph' },
   { id: 'worktrees', key: 'nav.worktrees' },
+  { id: 'sandbox', key: 'nav.sandbox' },
   { id: 'journal', key: 'nav.journal' }
 ]
 

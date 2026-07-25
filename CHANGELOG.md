@@ -1,5 +1,44 @@
 # Changelog
 
+## desktop (experimental) — Sandbox mode M1: sessions in a persistent per-project Docker container (SBX1–SBX5)
+
+New 🏺 **Docker** rail view + per-project toggle: with sandbox mode on, every
+NEW session runs inside a persistent container (`kory-sbx-<sha256(projectDir)
+[0..12]>`, project bind-mounted rw at `/work`, idling on `sleep infinity`) —
+the tile PTY simply runs `docker exec` and every detector (thinking, quota,
+attention) works unchanged. The wrap goes through a per-session launch script
+under a Deck-owned `/kory-run` mount (no PowerShell→bash double-quoting; env
+translated by pure, bun-tested `sandbox-command.ts`: FORCE_GROUP file→inline,
+loopback URLs→`host.docker.internal`). Sessions inside reach the HOST broker
+via an injected `CLAUDE_PEERS_BROKER_URL` (server.ts refuses to auto-spawn on
+non-loopback, so a bad bridge fails loudly); the host `~/.claude/peers` dir is
+bind-mounted so peer-id discovery and the desk-session back-channel keep
+working. The supervisor stays host-side (exempt by design — it pilots the app).
+
+Auth is a shared named volume (`kory-claude-auth` on `~/.claude`): ONE CLI
+login covers every project and survives container removal. First spawn with
+no credentials opens a blocking modal — Next embeds an xterm running `claude`
+in the container, the Deck polls the credentials file, closes the modal and
+toasts on success; agents cannot spawn until then (`sandboxGate` in the
+shared create path throws `sandbox-auth-required`, mapped renderer-side to
+the modal — no login prompt per tile, ever). Re-authenticate lives in the
+Docker view.
+
+Lifecycle is Proxmox-LXC-like on purpose: containers are created lazily,
+**stopped** (detached) at app close, **never** auto-removed; the Docker view
+lists every `kory-sbx-*` container (all projects, labels `kory.sandbox` /
+`kory.project`) with start/stop/rebuild/remove — all gated like the toggle on
+`hasLiveSessions()`, names re-validated main-side against the generated shape
+(hostile input #3). Settings (`enabled`, published dev-server ports for the
+embedded browser) live in operator app-state `sandbox.json` keyed by
+`computeDeckProjectKey` — never the repo. Image built once from
+`desktop/resources/sandbox/Dockerfile` (debian + bash/git/bun + claude CLI,
+user `kory`). Companion is transparent (all channels execute host-side; the
+sandbox trust flips are `REMOTE_BLOCKED`). Design + M2/M3 milestones:
+`PLAN-SANDBOX.md`; operator docs: `desktop/docs/sandbox.md`; residual:
+`BACKLOG.md` §3.8. Also fixes the calendar-rotted `desktop-log` prune test
+(fixture age now anchored on the test's fixed clock).
+
 ## desktop (experimental) — Browser REC: screen recording + agent-driven demo scenarios
 
 The embedded browser's toolbar gains a **REC** button: a modal picks the

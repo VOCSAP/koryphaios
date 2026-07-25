@@ -77,6 +77,19 @@ const OUTPUT_SCAN_CAP = 65536
 export type DirectiveOutcome = 'sent' | 'no-terminal' | 'busy-timeout'
 
 /**
+ * Sandbox wrapper (PLAN-SANDBOX SBX1), injected by index.ts. `wrap` receives
+ * the fully-composed session command line + host cwd + session env and returns
+ * the replacement PTY command (`docker exec … bash /kory-run/cmd-<id>.sh`),
+ * writing the launch script as a side effect. Kept as a narrow interface so
+ * this service never imports the engine service (and stays electron-lean).
+ */
+export interface SandboxWrapper {
+  wrap(sessionId: string, command: string, cwdHost: string, env: Record<string, string>): string
+}
+/** null = sandbox off. MAY THROW when enabled but the container is not ready. */
+export type SandboxProvider = () => SandboxWrapper | null
+
+/**
  * Coordinates the persisted session list, the live PTYs and the resolved
  * peer_id. Emits `data` / `exit` (forwarded to the renderer verbatim) and
  * `changed` (a fresh SessionRuntime[] whenever status/peer_id moves).
@@ -236,6 +249,34 @@ export class SessionService extends EventEmitter {
    */
   setLaunchCommand(command: string): void {
     this.launchCommand = command
+  }
+
+  // ----- sandbox mode (PLAN-SANDBOX SBX1/SBX3) -----
+
+  /** Injected after construction (index.ts) — a setter, like setLaunchCommand. */
+  private getSandboxWrapper: SandboxProvider = () => null
+
+  setSandboxProvider(provider: SandboxProvider): void {
+    this.getSandboxWrapper = provider
+  }
+
+  /**
+   * Utility PTYs (the sandbox auth terminal): same PtyManager, so pty:input /
+   * pty:resize / pty:data route for free through the existing ipc channels,
+   * but the id never enters `defs` — invisible to sessions:list,
+   * hasLiveSessions() and workspace capture. Detector feeds on its output are
+   * inert (no runtime entry for the id).
+   */
+  spawnUtility(id: string, cwd: string, opts: { command: string; shell: string; interactive: boolean }): void {
+    this.pty.spawn(id, cwd, opts, {})
+  }
+
+  killUtility(id: string): void {
+    this.pty.kill(id)
+  }
+
+  isUtilityAlive(id: string): boolean {
+    return this.pty.isAlive(id)
   }
 
   /** Start the peer_id poll. No auto-restore: the app opens empty (see ctor). */
@@ -668,6 +709,33 @@ export class SessionService extends EventEmitter {
     this.registry.add(def.sessionId)
 
     const r = this.runtime.get(def.id)
+
+    // Session env, also handed to the sandbox wrapper (which translates the
+    // host-only transports before exporting them container-side).
+    const sessionEnv = { ...this.getScopeEnv(), CLAUDE_PEERS_DESK_SESSION: def.id }
+
+    // Sandbox mode (SBX1): wrap the composed command in a `docker exec` into
+    // the project container. The supervisor is exempt — it pilots the Deck
+    // from the host and its MCP harness (Electron binary + loopback control
+    // url) does not exist container-side. The gated create path (sandboxGate
+    // in create-session.ts) has already ensured the container + auth; a
+    // throw here only happens on ungated paths (workspace restore with a
+    // cold container) where a visibly-exited tile beats a login prompt in
+    // every tile (SBX3).
+    if (!def.supervisor) {
+      try {
+        const wrapper = this.getSandboxWrapper()
+        if (wrapper) command = wrapper.wrap(def.sessionId, command, def.cwd, sessionEnv)
+      } catch (e) {
+        reportError('sandbox', `sandboxed spawn refused for "${def.name}"`, e)
+        if (r) {
+          r.status = 'exited'
+          r.exitCode = -1
+        }
+        this.persist()
+        return
+      }
+    }
     if (r) {
       r.status = 'running'
       r.exitCode = null
@@ -691,7 +759,7 @@ export class SessionService extends EventEmitter {
         def.cwd,
         { command, shell: cfg.shell, interactive: cfg.interactiveShell },
         // Per-tile token: server.ts writes the real session id keyed by it (D1/D2/D10).
-        { ...this.getScopeEnv(), CLAUDE_PEERS_DESK_SESSION: def.id }
+        sessionEnv
       )
       this.deadWriteReported.delete(def.id)
     } catch (e) {

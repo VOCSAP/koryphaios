@@ -434,7 +434,7 @@ export interface RoadmapReorderResponse {
   items: RoadmapItem[]
 }
 
-/** Navigation rail views: Home (C5), Agents, Browser (D1), Files (GX6), Git (GX3), Roadmap (C3), Graph (C26), Worktrees (C6), Journal (C14). */
+/** Navigation rail views: Home (C5), Agents, Browser (D1), Files (GX6), Git (GX3), Roadmap (C3), Graph (C26), Worktrees (C6), Sandbox (SBX4), Journal (C14). */
 export type DeckView =
   | 'home'
   | 'agents'
@@ -444,7 +444,58 @@ export type DeckView =
   | 'roadmap'
   | 'graph'
   | 'worktrees'
+  | 'sandbox'
   | 'journal'
+
+// ----- Sandbox mode (PLAN-SANDBOX SBX1–SBX5) -----
+
+/** Container engine detected on the host (docker preferred, podman fallback). */
+export type SandboxEngineName = 'docker' | 'podman'
+/** ok = CLI + daemon answer; daemon-down = CLI present, Desktop/VM stopped. */
+export type SandboxEngineState = 'ok' | 'daemon-down' | 'missing'
+/** Rail-view container actions (main re-validates name + label on every call). */
+export type SandboxContainerAction = 'start' | 'stop' | 'remove' | 'rebuild'
+
+/**
+ * Reserved utility-PTY id of the sandbox login terminal (SBX3). Shared so the
+ * auth dialog's xterm and the main-side spawn target the same channel id;
+ * never collides with session ids (those are UUIDs).
+ */
+export const SANDBOX_AUTH_PTY_ID = 'sandbox-auth'
+
+/** Full sandbox state of THIS window's project (Docker rail view + gates). */
+export interface SandboxStatus {
+  engine: SandboxEngineName | null
+  engineState: SandboxEngineState
+  engineVersion: string | null
+  /** Operator toggle for this project (sandbox.json, never a repo file). */
+  enabled: boolean
+  /** Deterministic kory-sbx-<hash12> container of this project. */
+  containerName: string
+  containerState: 'running' | 'stopped' | 'missing'
+  /** Credentials present in the shared auth volume; null = cannot probe. */
+  authed: boolean | null
+  image: string
+  /** Ports published at create (127.0.0.1 only); rebuild to apply changes. */
+  ports: number[]
+  busy: boolean
+  /** Last lifecycle error, operator-readable, or null. */
+  error: string | null
+}
+
+/** One kory-sbx container in the cross-project rail listing. */
+export interface SandboxContainerInfo {
+  name: string
+  /** Raw engine state (running / exited / created…). */
+  state: string
+  image: string
+  /** Engine-reported age ("2 days ago"), display only. */
+  age: string
+  /** Host project dir from the kory.project label. */
+  project: string
+  /** True for THIS window's project container. */
+  current: boolean
+}
 
 // ----- Embedded browser (PLAN D1, experimental) -----
 
@@ -986,6 +1037,29 @@ export interface DeckApi {
   onCompanionChanged(cb: (info: CompanionInfo) => void): () => void
   /** A device authenticated (paired/resumed) — for an operator toast. */
   onCompanionDeviceConnected(cb: (e: { addr: string; kind: 'paired' | 'resumed' }) => void): () => void
+
+  // sandbox mode (PLAN-SANDBOX SBX2–SBX5)
+  /** `force` re-probes the engine (view refresh, after a Docker install). */
+  sandboxStatus(force?: boolean): Promise<SandboxStatus>
+  /** Toggle for this project. Rejected main-side while any session is live. */
+  sandboxSetEnabled(enabled: boolean): Promise<SandboxStatus>
+  /** Create/start the project container (idempotent; never removes anything). */
+  sandboxEnsure(): Promise<SandboxStatus>
+  /** Every kory-sbx container on the machine, current project first. */
+  sandboxList(): Promise<SandboxContainerInfo[]>
+  /** start/stop/remove/rebuild — guarded main-side (live sessions, name shape). */
+  sandboxContainerAction(name: string, action: SandboxContainerAction): Promise<void>
+  /**
+   * First-run login (SBX3): ensures the container, spawns the auth terminal
+   * (`claude` in the container) on a reserved utility PTY and returns its id —
+   * or null when already authenticated.
+   */
+  sandboxAuthStart(): Promise<string | null>
+  /** Kill the auth terminal (login finished or dialog cancelled). */
+  sandboxAuthStop(): Promise<void>
+  /** Poll the credentials probe (auth dialog, every ~2 s). */
+  sandboxAuthProbe(): Promise<boolean | null>
+  onSandboxChanged(cb: (status: SandboxStatus) => void): () => void
 
   // events (return an unsubscribe fn)
   onPtyData(cb: (e: PtyDataEvent) => void): () => void

@@ -9,6 +9,7 @@ import type {
   InboxMessage,
   LocaleOption,
   RoadmapKind,
+  SandboxStatus,
   SessionRuntime,
   TemplateSummary,
   WorkspaceSummary
@@ -123,6 +124,10 @@ interface DeckState {
   usageOpen: boolean
   /** True while the companion LAN server is up (rail glyph glow). */
   companionRunning: boolean
+  /** Sandbox mode (PLAN-SANDBOX): last known status of this project, or null. */
+  sandboxStatus: SandboxStatus | null
+  /** First-run sandbox login modal (SBX3) visibility. */
+  sandboxAuthOpen: boolean
 
   init(): Promise<void>
   setView(view: DeckView): void
@@ -190,6 +195,12 @@ interface DeckState {
   updateConfig(patch: Partial<AppConfig>): Promise<void>
   /** Broadcast a free-text operator message to all peers in the active group. */
   broadcastAnnounce(text: string): Promise<void>
+
+  /** Refresh the sandbox status (`force` re-probes the engine). */
+  refreshSandbox(force?: boolean): Promise<void>
+  /** Flip the sandbox mode for this project (main refuses while sessions run). */
+  setSandboxEnabled(enabled: boolean): Promise<void>
+  openSandboxAuth(open: boolean): void
 
   refreshWorkspaces(): Promise<void>
   saveWorkspace(name?: string): Promise<void>
@@ -266,6 +277,8 @@ export const useDeck = create<DeckState>((set, get) => ({
   companionOpen: false,
   usageOpen: false,
   companionRunning: false,
+  sandboxStatus: null,
+  sandboxAuthOpen: false,
 
   async init() {
     // Companion mode flags (PLAN MB1/MB3): computed once — the desktop window
@@ -378,6 +391,7 @@ export const useDeck = create<DeckState>((set, get) => ({
     // Broker reachability (PLAN O5): transitions pushed by main + the current
     // state fetched once (covers a reloaded renderer during an outage).
     window.api.onBrokerStatus((status) => set({ brokerStatus: status }))
+    window.api.onSandboxChanged((sandboxStatus) => set({ sandboxStatus }))
     void window.api.getBrokerStatus().then((status) => set({ brokerStatus: status }))
     // Companion server status (PLAN MB2): rail glyph glow while it runs. A
     // remote client is 'remote-blocked' on the status invoke — the event push
@@ -545,9 +559,19 @@ export const useDeck = create<DeckState>((set, get) => ({
 
   async createSession(input) {
     await guarded('create session', async () => {
-      const created = await window.api.createSession(input)
-      set({ selectedId: created.id })
-      // sessions list refreshes via onSessionsChanged
+      try {
+        const created = await window.api.createSession(input)
+        set({ selectedId: created.id })
+        // sessions list refreshes via onSessionsChanged
+      } catch (e) {
+        // SBX3: the pre-spawn gate refused because the sandbox is not logged
+        // in — route to the login modal instead of a cryptic error toast.
+        if (String(e instanceof Error ? e.message : e).includes('sandbox-auth-required')) {
+          set({ sandboxAuthOpen: true })
+          return
+        }
+        throw e
+      }
     })
   },
 
@@ -595,6 +619,23 @@ export const useDeck = create<DeckState>((set, get) => ({
       get().showToast(sent > 0 ? 'toast.announceSent' : 'toast.announceNoPeers', sent > 0 ? 'success' : 'info')
     })
   },
+
+  async refreshSandbox(force) {
+    await guarded('sandbox status', async () => {
+      const sandboxStatus = await window.api.sandboxStatus(force)
+      set({ sandboxStatus })
+    })
+  },
+
+  async setSandboxEnabled(enabled) {
+    await guarded('sandbox mode', async () => {
+      const sandboxStatus = await window.api.sandboxSetEnabled(enabled)
+      set({ sandboxStatus })
+      get().showToast(enabled ? 'toast.sandboxOn' : 'toast.sandboxOff')
+    })
+  },
+
+  openSandboxAuth: (open) => set({ sandboxAuthOpen: open }),
 
   async refreshWorkspaces() {
     await guarded('list workspaces', async () => {
