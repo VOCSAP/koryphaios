@@ -10,13 +10,20 @@ import {
   SANDBOX_WORK_DIR,
   buildAuthCommand,
   buildAuthProbeArgs,
+  buildBrokerProbeArgs,
+  buildCopyIntoArgs,
   buildCreateArgs,
   buildExecCommand,
+  buildImageBuildCommand,
+  buildImageProbeArgs,
   buildLaunchScript,
+  buildSupervisorExecArgs,
   containerNameFor,
+  containerTranscriptDir,
   isSandboxContainerName,
   mapHostPathToContainer,
   normalizeProjectDir,
+  parseTranscriptList,
   rewriteLoopbackForContainer,
   sandboxifyEnv,
   shQuote,
@@ -168,6 +175,92 @@ test("sandboxifyEnv drops the group var when the secret file is unreadable", () 
   );
   expect(out.CLAUDE_PEERS_FORCE_GROUP).toBeUndefined();
   expect(out.CLAUDE_PEERS_FORCE_GROUP_FILE).toBeUndefined();
+});
+
+test("containerTranscriptDir encodes the CONTAINER cwd, not the host one", () => {
+  // Claude keys transcripts by cwd; inside the sandbox that cwd is /work/...
+  // so encoding the host path would look in a dir that never exists.
+  expect(containerTranscriptDir("/home/op/proj", "/home/op/proj", "linux")).toBe(
+    `${SANDBOX_HOME}/.claude/projects/-work`
+  );
+  expect(
+    containerTranscriptDir("/home/op/proj/.worktrees/fix", "/home/op/proj", "linux")
+  ).toBe(`${SANDBOX_HOME}/.claude/projects/-work--worktrees-fix`);
+  expect(containerTranscriptDir("C:\\Dev\\Proj", "c:\\dev\\proj", "win32")).toBe(
+    `${SANDBOX_HOME}/.claude/projects/-work`
+  );
+});
+
+test("parseTranscriptList reads find's name/mtime rows and ignores noise", () => {
+  const out = parseTranscriptList("a.jsonl\t1700000000.5\nb.jsonl\t1700000100\nnope.txt\t1\n\n");
+  expect(out).toEqual([
+    { id: "a", mtimeMs: 1700000000500 },
+    { id: "b", mtimeMs: 1700000100000 }
+  ]);
+  expect(parseTranscriptList("")).toEqual([]);
+  // A row without a parsable stamp still yields the id (mtime 0 = oldest).
+  expect(parseTranscriptList("c.jsonl\tx")).toEqual([{ id: "c", mtimeMs: 0 }]);
+});
+
+test("supervisor exec keeps the agent command as ONE argv element", () => {
+  const args = buildSupervisorExecArgs("kory-sbx-0123456789ab", 'bun add zod && echo "$HOME"');
+  // The whole command is a single element: nothing can break out into the
+  // HOST command line (hostile input #4). bash inside the container is the
+  // intended interpreter — that is what a sandbox is for.
+  expect(args).toEqual([
+    "exec",
+    "-w",
+    SANDBOX_WORK_DIR,
+    "kory-sbx-0123456789ab",
+    "bash",
+    "-lc",
+    'bun add zod && echo "$HOME"'
+  ]);
+});
+
+test("image build/probe and docker cp shapes", () => {
+  expect(buildImageBuildCommand("docker", "koryphaios-sandbox", "/res/sandbox")).toBe(
+    "docker build -t 'koryphaios-sandbox' '/res/sandbox'"
+  );
+  // A path with a quote cannot break out of the build command line.
+  expect(buildImageBuildCommand("podman", "img", "/a'b")).toBe(
+    "podman build -t 'img' '/a'\\''b'"
+  );
+  expect(buildImageProbeArgs("img")).toEqual(["image", "inspect", "--format", "{{.Created}}", "img"]);
+  expect(buildCopyIntoArgs("kory-sbx-0123456789ab", "/home/op/.claude/agents", "/home/kory/.claude/")).toEqual([
+    "cp",
+    "/home/op/.claude/agents",
+    "kory-sbx-0123456789ab:/home/kory/.claude/"
+  ]);
+});
+
+test("broker probe curls /health from inside the container", () => {
+  expect(buildBrokerProbeArgs("kory-sbx-0123456789ab", "http://host.docker.internal:7899")).toEqual([
+    "exec",
+    "kory-sbx-0123456789ab",
+    "curl",
+    "-sf",
+    "-m",
+    "4",
+    "-o",
+    "/dev/null",
+    "http://host.docker.internal:7899/health"
+  ]);
+});
+
+test("buildCreateArgs mounts the CLONE in copy mode, labels the real project", () => {
+  const args = buildCreateArgs({
+    name: "kory-sbx-0123456789ab",
+    image: "img",
+    projectDir: "/home/op/proj",
+    workSource: "/state/sandbox-copies/kory-sbx-0123456789ab",
+    runDirHost: "/state/sandbox-run",
+    ports: [3000]
+  });
+  expect(args).toContain(`/state/sandbox-copies/kory-sbx-0123456789ab:${SANDBOX_WORK_DIR}`);
+  expect(args).not.toContain(`/home/op/proj:${SANDBOX_WORK_DIR}`);
+  // Identity still points at the real project (the rail view labels rows by it).
+  expect(args).toContain("kory.project=/home/op/proj");
 });
 
 test("exec/auth/probe command shapes", () => {

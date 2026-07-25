@@ -15,6 +15,7 @@ import type {
   RoadmapListFilters,
   RoadmapUpsertFields,
   SandboxContainerAction,
+  SandboxSettingsPatch,
   SandboxStatus,
   SessionAttentionEvent,
   SessionQuotaEvent,
@@ -99,8 +100,15 @@ const api: DeckApi = {
   getI18n: () => ipcRenderer.invoke('i18n:get'),
 
   sandboxStatus: (force?: boolean) => ipcRenderer.invoke('sandbox:status', force),
-  sandboxSetEnabled: (enabled: boolean) => ipcRenderer.invoke('sandbox:set-enabled', enabled),
+  sandboxPatchSettings: (patch: SandboxSettingsPatch) =>
+    ipcRenderer.invoke('sandbox:patch-settings', patch),
+  sandboxSetImage: (image: string) => ipcRenderer.invoke('sandbox:set-image', image),
   sandboxEnsure: () => ipcRenderer.invoke('sandbox:ensure'),
+  sandboxImageBuild: () => ipcRenderer.invoke('sandbox:image-build'),
+  sandboxBuildStop: () => ipcRenderer.invoke('sandbox:build-stop'),
+  sandboxAuthPurge: () => ipcRenderer.invoke('sandbox:auth-purge'),
+  sandboxResetCopy: () => ipcRenderer.invoke('sandbox:reset-copy'),
+  sandboxProbeBridge: () => ipcRenderer.invoke('sandbox:probe-bridge'),
   sandboxList: () => ipcRenderer.invoke('sandbox:list'),
   sandboxContainerAction: (name: string, action: SandboxContainerAction) =>
     ipcRenderer.invoke('sandbox:container-action', name, action),

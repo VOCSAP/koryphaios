@@ -20,6 +20,7 @@ import type {
   CreateSessionInput,
   LaunchPreset,
   ModelOption,
+  SandboxExecResponse,
   SessionRuntime,
   TemplateSummary
 } from '../shared/types'
@@ -93,6 +94,13 @@ export interface DeckControlDeps {
   armSpawnAck(id: string, name: string): void
   /** Write an embedded profile's prompt file and return its path (TS1). */
   writeEmbeddedPrompt(id: string): string
+  /**
+   * Run a shell command INSIDE this project's sandbox container
+   * (PLAN-SANDBOX M2): "add this dependency to the instance". Rejected when
+   * sandbox mode is off. The command never touches a host shell — the
+   * sandbox service hands it to the container's bash as one argv element.
+   */
+  sandboxExec(command: string): Promise<SandboxExecResponse>
 }
 
 export interface DeckControlServer {
@@ -323,6 +331,15 @@ export function startDeckControl(
 
       case 'deck_list_sessions':
         return { sessions: deps.listSessions().map(sessionView) }
+
+      case 'deck_sandbox_exec': {
+        const command = str(args, 'command')
+        if (!command) throw new Error('command is required')
+        // The Deck owns the boundary: the string is handed to the CONTAINER's
+        // bash as one argv element (never glued into a host command line),
+        // the container is the project's own, and every call is journaled.
+        return deps.sandboxExec(command)
+      }
 
       case 'deck_restart_session': {
         const id = str(args, 'id')

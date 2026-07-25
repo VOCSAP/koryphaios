@@ -457,11 +457,36 @@ export type SandboxEngineState = 'ok' | 'daemon-down' | 'missing'
 export type SandboxContainerAction = 'start' | 'stop' | 'remove' | 'rebuild'
 
 /**
+ * Where the agents' filesystem comes from. `mount` bind-mounts the real
+ * project (work lands on disk directly); `copy` mounts a throwaway host-side
+ * clone instead, so the real tree is untouchable and work leaves through git.
+ */
+export type SandboxWorkMode = 'mount' | 'copy'
+
+/** Operator-editable per-project sandbox settings (app-state, never the repo). */
+export interface SandboxSettingsPatch {
+  enabled?: boolean
+  mode?: SandboxWorkMode
+  ports?: number[]
+  copyIgnored?: string[]
+}
+
+/** Result of a supervisor `deck_sandbox_exec` (output clipped main-side). */
+export interface SandboxExecResponse {
+  code: number
+  stdout: string
+  stderr: string
+}
+
+/**
  * Reserved utility-PTY id of the sandbox login terminal (SBX3). Shared so the
  * auth dialog's xterm and the main-side spawn target the same channel id;
  * never collides with session ids (those are UUIDs).
  */
 export const SANDBOX_AUTH_PTY_ID = 'sandbox-auth'
+
+/** Reserved utility-PTY id of the sandbox image build terminal (M2). */
+export const SANDBOX_BUILD_PTY_ID = 'sandbox-build'
 
 /** Full sandbox state of THIS window's project (Docker rail view + gates). */
 export interface SandboxStatus {
@@ -470,14 +495,32 @@ export interface SandboxStatus {
   engineVersion: string | null
   /** Operator toggle for this project (sandbox.json, never a repo file). */
   enabled: boolean
+  /** Bind-mount the real project, or mount an ephemeral clone (M3). */
+  mode: SandboxWorkMode
   /** Deterministic kory-sbx-<hash12> container of this project. */
   containerName: string
   containerState: 'running' | 'stopped' | 'missing'
   /** Credentials present in the shared auth volume; null = cannot probe. */
   authed: boolean | null
   image: string
+  /** Image found locally; null = not probed yet (engine down). */
+  imagePresent: boolean | null
   /** Ports published at create (127.0.0.1 only); rebuild to apply changes. */
   ports: number[]
+  /** Globs of gitignored files duplicated into the clone (copy mode). */
+  copyIgnored: string[]
+  /** Host path of the ephemeral clone, or null outside copy mode. */
+  copyDir: string | null
+  /** Configured globs that matched no file (typo surfacing). */
+  copyUnmatched: string[]
+  /** Operator-config entries projected into the container, or null. */
+  projection: string | null
+  /** Projected hooks that cannot run in the Linux container + stray overrides. */
+  hookWarnings: string[]
+  /** Broker reachable FROM the container (real curl probe); null = unknown. */
+  brokerBridge: boolean | null
+  /** Days between this container's creation and a NEWER image, else null. */
+  driftDays: number | null
   busy: boolean
   /** Last lifecycle error, operator-readable, or null. */
   error: string | null
@@ -1038,13 +1081,29 @@ export interface DeckApi {
   /** A device authenticated (paired/resumed) — for an operator toast. */
   onCompanionDeviceConnected(cb: (e: { addr: string; kind: 'paired' | 'resumed' }) => void): () => void
 
-  // sandbox mode (PLAN-SANDBOX SBX2–SBX5)
+  // sandbox mode (PLAN-SANDBOX SBX2–SBX5, M2/M3)
   /** `force` re-probes the engine (view refresh, after a Docker install). */
   sandboxStatus(force?: boolean): Promise<SandboxStatus>
-  /** Toggle for this project. Rejected main-side while any session is live. */
-  sandboxSetEnabled(enabled: boolean): Promise<SandboxStatus>
+  /**
+   * Patch this project's sandbox settings (enable, work mode, ports, copied
+   * gitignored globs). Rejected main-side while any session is live — the
+   * whole set decides WHERE agents run and what travels with them.
+   */
+  sandboxPatchSettings(patch: SandboxSettingsPatch): Promise<SandboxStatus>
+  /** Change the image every sandbox container is created from. */
+  sandboxSetImage(image: string): Promise<SandboxStatus>
   /** Create/start the project container (idempotent; never removes anything). */
   sandboxEnsure(): Promise<SandboxStatus>
+  /** Build the shipped Dockerfile in a utility terminal; returns its PTY id. */
+  sandboxImageBuild(): Promise<string>
+  /** Kill the image-build terminal (dialog closed mid-build). */
+  sandboxBuildStop(): Promise<void>
+  /** Wipe the credentials in the shared auth volume ("disconnect"). */
+  sandboxAuthPurge(): Promise<SandboxStatus>
+  /** Delete + re-create the ephemeral clone (copy mode). */
+  sandboxResetCopy(): Promise<SandboxStatus>
+  /** Re-run the container→host broker reachability probe. */
+  sandboxProbeBridge(): Promise<boolean | null>
   /** Every kory-sbx container on the machine, current project first. */
   sandboxList(): Promise<SandboxContainerInfo[]>
   /** start/stop/remove/rebuild — guarded main-side (live sessions, name shape). */

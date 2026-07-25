@@ -23,7 +23,12 @@ import {
 import { AttentionDetector, type AttentionEvent } from './attention'
 import { StartupAckDetector, type StartupAckEvent } from './startup-ack'
 import { OpenIdRegistry } from './open-id-registry'
-import { listTranscriptIds, pickDiscoveredId, transcriptExists } from './session-transcript'
+import {
+  listTranscriptIds,
+  pickDiscoveredId,
+  transcriptExists,
+  type TranscriptEntry
+} from './session-transcript'
 import { clearDeskSessionId, readDeskSessionId } from './desk-session'
 import { reportError } from './log'
 import { DEFAULT_PALETTE, paletteColor } from '@shared/palette'
@@ -88,6 +93,16 @@ export interface SandboxWrapper {
 }
 /** null = sandbox off. MAY THROW when enabled but the container is not ready. */
 export type SandboxProvider = () => SandboxWrapper | null
+
+/**
+ * Container-side transcript lookup (PLAN-SANDBOX M2 resume). In sandbox mode
+ * transcripts live in the auth VOLUME (`~/.claude/projects/...` inside the
+ * container), invisible to the host readers — so resume must consult this
+ * instead. Returns null when the sandbox is off (host files are authoritative)
+ * and NEVER throws: the spawn path stays synchronous, reading a cache the
+ * sandbox service refreshes on ensure / before restore.
+ */
+export type SandboxTranscriptLookup = (cwdHost: string) => TranscriptEntry[] | null
 
 /**
  * Coordinates the persisted session list, the live PTYs and the resolved
@@ -256,8 +271,28 @@ export class SessionService extends EventEmitter {
   /** Injected after construction (index.ts) — a setter, like setLaunchCommand. */
   private getSandboxWrapper: SandboxProvider = () => null
 
-  setSandboxProvider(provider: SandboxProvider): void {
+  /** Container-side transcript lookup; default = "sandbox off, use the host". */
+  private sandboxTranscripts: SandboxTranscriptLookup = () => null
+
+  setSandboxProvider(provider: SandboxProvider, transcripts?: SandboxTranscriptLookup): void {
     this.getSandboxWrapper = provider
+    if (transcripts) this.sandboxTranscripts = transcripts
+  }
+
+  /**
+   * Transcripts visible for a session's cwd: the container's when the sandbox
+   * owns them, the host's otherwise. One accessor so every resume/discovery
+   * site stays consistent (M2).
+   */
+  private transcriptsOf(cwd: string): TranscriptEntry[] {
+    return this.sandboxTranscripts(cwd) ?? listTranscriptIds(this.home, cwd)
+  }
+
+  private hasTranscript(cwd: string, id: string): boolean {
+    if (!id) return false
+    const sandboxed = this.sandboxTranscripts(cwd)
+    if (sandboxed) return sandboxed.some((e) => e.id === id)
+    return transcriptExists(this.home, cwd, id)
   }
 
   /**
@@ -431,7 +466,7 @@ export class SessionService extends EventEmitter {
     for (const def of this.defs) {
       if (!this.pty.isAlive(def.id)) continue
       const back = readDeskSessionId(def.id, this.peersDir())
-      if (back && back !== def.sessionId && transcriptExists(this.home, def.cwd, back)) {
+      if (back && back !== def.sessionId && this.hasTranscript(def.cwd, back)) {
         this.adoptRealId(def, def.sessionId, back)
       }
     }
@@ -610,14 +645,14 @@ export class SessionService extends EventEmitter {
       // was opened but never used leaves no transcript -> there is nothing to
       // resume, so start it FRESH (a working terminal) rather than show a scary
       // "expired" overlay. Claude writes the transcript only after real activity.
-      if (!def.sessionId || !transcriptExists(this.home, def.cwd, def.sessionId)) {
+      if (!def.sessionId || !this.hasTranscript(def.cwd, def.sessionId)) {
         effectiveMode = 'fresh'
         def.sessionId = '' // -> startPty mints a new id
       }
     }
     r.expired = false
 
-    const before = new Set(listTranscriptIds(this.home, def.cwd).map((e) => e.id))
+    const before = new Set(this.transcriptsOf(def.cwd).map((e) => e.id))
     this.startPty(def, effectiveMode) // INSTANT
     // Fire-and-forget: discovery must never block terminal visibility.
     void this.discoverRealId(def, before)
@@ -653,7 +688,7 @@ export class SessionService extends EventEmitter {
       // newest unclaimed transcript that appeared since spawn.
       const claimed = this.registry.snapshot()
       claimed.delete(placeholder) // our own placeholder must not block the match
-      const realId = pickDiscoveredId(listTranscriptIds(this.home, def.cwd), before, claimed)
+      const realId = pickDiscoveredId(this.transcriptsOf(def.cwd), before, claimed)
       if (realId && realId !== def.sessionId) {
         this.adoptRealId(def, placeholder, realId)
         return

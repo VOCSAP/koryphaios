@@ -1,6 +1,7 @@
 # PLAN-SANDBOX — Mode sandbox Docker pour les sessions du Deck
 
-Statut : **M1 en cours** (branche `claude/sandbox-sessions-docker-b3vo47`).
+Statut : **M1 + M2 + M3 livrés** (branche `claude/sandbox-sessions-docker-b3vo47`).
+Seul reliquat : le backend distant SSH / LXC Proxmox (§9 M3, voir BACKLOG §3.8).
 Chantier id : `SBX1`…`SBX9` (référencés dans les commentaires de code).
 
 ## 1. Intention
@@ -189,41 +190,60 @@ credentials préservés ; jetable avec le conteneur.
 
 ## 9. Jalons
 
-### M1 — cette branche (SBX1–SBX5)
+### M1 — livré (SBX1–SBX5)
 - [x] Plan (ce fichier).
-- [ ] `sandbox-command.ts` (pur, testé bun) : nommage, mapping chemins/env,
+- [x] `sandbox-command.ts` (pur, testé bun) : nommage, mapping chemins/env,
   builders d'args docker, script de lancement, wrap exec.
-- [ ] `sandbox-service.ts` (exec DI) : détection moteur, ensure/start/stop/
+- [x] `sandbox-service.ts` (exec DI) : détection moteur, ensure/start/stop/
   rm/rebuild/list, sonde auth, stop à la fermeture.
-- [ ] `sandbox-store.ts` (pur) : `{ [projectKey]: { enabled, ports } }`.
-- [ ] Intégration `SessionService` (getSandbox, garde create, wrap startPty,
+- [x] `sandbox-store.ts` (pur) : réglages par projet.
+- [x] Intégration `SessionService` (getSandbox, garde create, wrap startPty,
   superviseur exclu) + garde toggle main-side.
-- [ ] IPC `sandbox:*` + DeckApi + manifest compagnon + preload.
-- [ ] Renderer : vue Docker, modale d'auth (PTY), ConfirmDialogs, toasts,
+- [x] IPC `sandbox:*` + DeckApi + manifest compagnon + preload.
+- [x] Renderer : vue Docker, modale d'auth (PTY), ConfirmDialogs, toasts,
   glyphe pithos, i18n ×3.
-- [ ] `desktop/resources/sandbox/Dockerfile` + `desktop/docs/sandbox.md` +
-  interface.md + DESKTOP.md + BACKLOG (reliquat M2/M3).
+- [x] `desktop/resources/sandbox/Dockerfile` + `desktop/docs/sandbox.md` +
+  interface.md + DESKTOP.md.
 
-### M2 — confort & intégration profonde
-- Projection de la config Claude opérateur (CLAUDE.md global, agents, skills,
-  hooks avec overlay Linux `sandbox-overrides/`) dans le volume à chaque
-  démarrage, credentials préservés.
-- `deck_sandbox_exec` (superviseur) + journalisation.
-- Broker : génération d'un `broker_token` + `CLAUDE_PEERS_BIND_HOST` piloté
-  pour le moteur Linux natif ; badge de dérive d'image (« créé il y a N
-  semaines ») dans la vue.
-- Podman : détection déjà prévue M1, tests réels + doc.
-- Auto-build de l'image depuis le Dockerfile embarqué (PTY de build dans la
-  vue Docker).
+### M2 — livré
+- [x] **Projection de la config opérateur** (`sandbox-projection.ts`) :
+  allow-list `CLAUDE.md`/`agents`/`skills`/`plugins`/`settings.json` copiée
+  (`docker cp`) dans le volume à chaque `ensure`, overlay
+  `~/.claude/sandbox-overrides/`, détection des hooks Windows-only et des
+  fichiers d'overlay non projetables. Jamais un mount (§8).
+- [x] **`deck_sandbox_exec`** : outil MCP superviseur → `docker exec` dans le
+  conteneur du projet, commande passée en UN argv (jamais un shell hôte),
+  timeout 5 min, sortie clippée, journalisée, refusée si le mode est off.
+- [x] **Pont broker sondé pour de vrai** : `curl /health` DEPUIS le conteneur
+  (au lieu de deviner selon la plateforme) + badge et consigne
+  `CLAUDE_PEERS_BIND_HOST` quand le moteur est un Linux natif.
+- [x] **Auto-build de l'image** depuis le Dockerfile embarqué, dans un PTY
+  utilitaire (le log de build est lisible), + sonde de présence d'image et
+  badge de dérive image/conteneur.
+- [x] **Resume dans le sandbox** : transcripts listés côté conteneur
+  (`find ~/.claude/projects/<cwd conteneur>`) et cache consulté par
+  `SessionService` ; le volume les fait survivre à un rebuild.
+- [x] **Déconnexion du volume d'auth** (gardée : refusée si un conteneur
+  sandbox tourne).
 
-### M3 — mode « copie éphémère »
-- Clone local côté hôte (`git clone --local` → temp dir) + allowlist de
-  globs gitignorés à copier (`sandbox.copyIgnored`, config opérateur — jamais
-  `.env`/node_modules par défaut) ; le temp dir est ce qui est monté.
-- Sorties : push branche, patch, cherry-pick vers le repo réel ; DiffPanel
-  continue de lire le temp dir hôte.
-- Backend distant (hôte SSH / LXC Proxmox via API) sur le même wrapper de
-  commande, modèle clone/push.
+### M3 — mode « copie éphémère » livré ; backend distant NON livré
+- [x] Clone local hôte (`git clone --local --no-hardlinks` → app-state
+  `sandbox-copies/<conteneur>`) monté à la place du projet, allowlist de
+  globs gitignorés (`copyIgnored`) recopiés par-dessus, **deny-list dure**
+  qui gagne toujours (`.env*`, clés/certs, `.ssh`, `.aws`, `node_modules`,
+  `.venv`, `.git`), globs sans correspondance remontés dans l'UI.
+- [x] Racine effective renvoyée par la garde de spawn : cwd des tuiles ET
+  `git worktree add` atterrissent dans le clone monté.
+- [x] Sortie par git : `origin` du clone = le dépôt réel, donc
+  `git push origin <branche>` ramène le travail ; « Réinitialiser le clone »
+  jette la copie.
+- [ ] **Backend distant (hôte SSH / LXC Proxmox)** — NON implémenté.
+  Raison : le wrapper de commande suffirait (`ssh -t host bash script`), mais
+  le reste ne se décide pas sans l'opérateur — gestion des identifiants
+  (token API Proxmox, clés SSH, où les stocker), choix nœud/template LXC, et
+  surtout le modèle de fichiers change (pas de bind mount : clone/push
+  uniquement, ce que le mode copie préfigure). Aucune validation possible
+  sans un hôte réel. Reste ouvert dans BACKLOG §3.8.
 
 ## 10. Questions ouvertes / à valider sur poste réel
 - Perf bind mount `C:\…` → conteneur (9p/virtiofs WSL2) sur gros repos ;

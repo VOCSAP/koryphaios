@@ -377,6 +377,65 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.sandboxOff': 'Sandbox mode disabled',
   'toast.sandboxAuthDone': 'Sandbox signed in',
   'toast.sandboxAction': 'Done',
+  'sandbox.workMode': 'Work mode:',
+  'sandbox.workMode.mount': 'Mount the project',
+  'sandbox.workMode.copy': 'Ephemeral copy',
+  'sandbox.workMode.mountHelp':
+    'Agents edit your real project folder; the sandbox protects the rest of the machine.',
+  'sandbox.workMode.copyHelp':
+    'Agents work in a throwaway clone; your real folder is untouchable and work leaves through git.',
+  'sandbox.bridge': 'Broker bridge:',
+  'sandbox.bridgeOk': 'reachable',
+  'sandbox.bridgeKo': 'unreachable',
+  'sandbox.bridgeUnknown': 'not tested',
+  'sandbox.bridgeRetest': 'Re-test',
+  'sandbox.bridgeHint':
+    'Sessions in the container cannot reach the broker: peer messaging and the roadmap will be offline. On a native Linux engine, bind the broker beyond loopback (CLAUDE_PEERS_BIND_HOST=0.0.0.0 with a broker_token).',
+  'sandbox.drift': 'image is {n} day(s) newer',
+  'sandbox.driftHint':
+    'The image was rebuilt after this container was created — Rebuild to pick it up (everything installed by hand inside is lost).',
+  'sandbox.blockedRunning': 'A sandbox container is running — stop it first.',
+  'sandbox.copy': 'Ephemeral copy',
+  'sandbox.copyHint':
+    'A local git clone of the project, mounted instead of the real folder. Agents commit here and push the branch back to your repo; the clone can be thrown away at any time.',
+  'sandbox.copyDir': 'Clone:',
+  'sandbox.copyIgnored': 'Gitignored files to copy in (one glob per line):',
+  'sandbox.copyIgnoredPlaceholder': 'PLAN-*.md\ntask_plan.md\nnotes/**',
+  'sandbox.copySaveGlobs': 'Save globs',
+  'sandbox.copyDenyHint':
+    'Secrets and bulk are never copied, whatever you list here: .env*, keys/certificates, .ssh, .aws, node_modules, .venv, .git.',
+  'sandbox.copyUnmatched': 'No file matched: {globs}',
+  'sandbox.copyReset': 'Reset clone',
+  'sandbox.imageCard': 'Image',
+  'sandbox.imageBuild': 'Build image',
+  'sandbox.imageSave': 'Save',
+  'sandbox.imageFound': 'present',
+  'sandbox.imageMissing': 'missing',
+  'sandbox.imageMissingHint':
+    'The image is not built yet — Build image runs the Dockerfile shipped with Koryphaios (a few minutes on first run).',
+  'sandbox.disconnect': 'Disconnect',
+  'sandbox.projection': 'Operator config projected',
+  'sandbox.projectionNone': 'nothing projected yet',
+  'sandbox.projectionHint':
+    'Your global CLAUDE.md, agents, skills, plugins and settings.json are COPIED into the container at each start (never mounted: a mounted settings.json would let a sandboxed agent plant a hook that runs on your machine). Drop Linux replacements in ~/.claude/sandbox-overrides/.',
+  'sandbox.hookWarning': 'Hooks that cannot run inside the Linux container:',
+  'sandbox.buildTitle': 'Building the sandbox image',
+  'sandbox.buildHint':
+    'Runs the Dockerfile shipped with Koryphaios. First build downloads a Debian base plus bun and the Claude CLI — a few minutes.',
+  'confirm.sandboxModeTitle': 'Change the work mode?',
+  'confirm.sandboxModeCopy':
+    'Agents will work in a throwaway clone of the project instead of the real folder. The container is recreated to change the mount.',
+  'confirm.sandboxModeMount':
+    'Agents will edit your real project folder again. The container is recreated to change the mount.',
+  'confirm.sandboxModeConfirm': 'Change',
+  'confirm.sandboxDisconnectTitle': 'Disconnect the sandbox?',
+  'confirm.sandboxDisconnectMessage':
+    'Credentials are wiped from the shared volume: the next sandboxed session asks you to sign in again. Your own login on this machine is untouched.',
+  'confirm.sandboxDisconnectConfirm': 'Disconnect',
+  'toast.sandboxSettingsSaved': 'Sandbox settings saved',
+  'toast.sandboxImageBuilt': 'Sandbox image built',
+  'toast.sandboxDisconnected': 'Sandbox disconnected',
+  'toast.sandboxCopyReset': 'Clone reset',
   'nav.home': 'Home',
   'home.starting': 'Starting the supervisor session…',
   'home.body':

@@ -1,5 +1,5 @@
-// PLAN-SANDBOX SBX2: per-project sandbox settings store (operator app-state,
-// never a repo file) — desktop/src/main/sandbox-store.
+// PLAN-SANDBOX SBX2 + M3: per-project sandbox settings store (operator
+// app-state, never a repo file) — desktop/src/main/sandbox-store.
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -7,7 +7,8 @@ import { join } from "node:path";
 import {
   projectSandboxSettings,
   readSandboxStore,
-  writeSandboxEnabled,
+  writeSandboxImage,
+  writeSandboxSettings,
 } from "../desktop/src/main/sandbox-store.ts";
 import { DEFAULT_SANDBOX_PORTS, SANDBOX_IMAGE_DEFAULT } from "../desktop/src/main/sandbox-command.ts";
 
@@ -23,45 +24,64 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("missing file yields defaults (disabled, default image/ports)", () => {
+test("missing file yields defaults (disabled, mount mode, default image/ports)", () => {
   const s = projectSandboxSettings(file, "local:abc");
   expect(s.enabled).toBe(false);
+  expect(s.mode).toBe("mount");
   expect(s.ports).toEqual(DEFAULT_SANDBOX_PORTS);
+  expect(s.copyIgnored).toEqual([]);
   expect(readSandboxStore(file).image).toBe(SANDBOX_IMAGE_DEFAULT);
 });
 
-test("enable/disable round-trips per project and keeps siblings", () => {
-  writeSandboxEnabled(file, "local:aaa", true);
-  writeSandboxEnabled(file, "local:bbb", false);
-  expect(projectSandboxSettings(file, "local:aaa").enabled).toBe(true);
+test("patches round-trip per project and keep siblings", () => {
+  writeSandboxSettings(file, "local:aaa", { enabled: true, mode: "copy" });
+  writeSandboxSettings(file, "local:bbb", { enabled: false });
+  const a = projectSandboxSettings(file, "local:aaa");
+  expect(a.enabled).toBe(true);
+  expect(a.mode).toBe("copy");
   expect(projectSandboxSettings(file, "local:bbb").enabled).toBe(false);
-  writeSandboxEnabled(file, "local:aaa", false);
-  expect(projectSandboxSettings(file, "local:aaa").enabled).toBe(false);
-  expect(Object.keys(readSandboxStore(file).projects).sort()).toEqual([
-    "local:aaa",
-    "local:bbb",
-  ]);
+  // A later partial patch must not reset the untouched fields.
+  writeSandboxSettings(file, "local:aaa", { enabled: false });
+  expect(projectSandboxSettings(file, "local:aaa").mode).toBe("copy");
+  expect(Object.keys(readSandboxStore(file).projects).sort()).toEqual(["local:aaa", "local:bbb"]);
 });
 
 test("malformed file falls back to defaults instead of throwing", () => {
   writeFileSync(file, "{not json");
   expect(projectSandboxSettings(file, "k").enabled).toBe(false);
   // and a subsequent write recovers the file
-  writeSandboxEnabled(file, "k", true);
+  writeSandboxSettings(file, "k", { enabled: true });
   expect(projectSandboxSettings(file, "k").enabled).toBe(true);
 });
 
-test("hand-edited ports are sanitized (bounds, dedup, fallback)", () => {
+test("hand-edited values are sanitized (ports, mode, globs)", () => {
   writeFileSync(
     file,
     JSON.stringify({
       image: "  custom-img  ",
-      projects: { k: { enabled: true, ports: [3000, 3000, 0, 99999, "x"] } },
+      projects: {
+        k: {
+          enabled: true,
+          mode: "remote-lxc",
+          ports: [3000, 3000, 0, 99999, "x"],
+          copyIgnored: ["  PLAN-*.md  ", "", "PLAN-*.md", 42],
+        },
+      },
     })
   );
   const s = projectSandboxSettings(file, "k");
   expect(s.ports).toEqual([3000]);
+  // An unknown work mode falls back to the safe one rather than reaching the
+  // service as an unhandled branch.
+  expect(s.mode).toBe("mount");
+  expect(s.copyIgnored).toEqual(["PLAN-*.md"]);
   expect(readSandboxStore(file).image).toBe("custom-img");
   writeFileSync(file, JSON.stringify({ projects: { k: { enabled: true, ports: [] } } }));
   expect(projectSandboxSettings(file, "k").ports).toEqual(DEFAULT_SANDBOX_PORTS);
+});
+
+test("image write is global and falls back to the default when blanked", () => {
+  expect(writeSandboxImage(file, "my-image")).toBe("my-image");
+  expect(readSandboxStore(file).image).toBe("my-image");
+  expect(writeSandboxImage(file, "   ")).toBe(SANDBOX_IMAGE_DEFAULT);
 });

@@ -12,6 +12,7 @@
 
 import { createHash } from 'node:crypto'
 import { platform } from 'node:os'
+import { encodeProjectDir } from './session-transcript'
 
 export type SandboxEngine = 'docker' | 'podman'
 
@@ -30,7 +31,7 @@ export const SANDBOX_CREDENTIALS_FILE = `${SANDBOX_HOME}/.claude/.credentials.js
 // Re-exported so main-side consumers keep one import; the renderer reads it
 // from @shared/types (this module is main-only). Relative import: this file
 // must stay loadable by bun tests, which do not resolve the @shared alias.
-export { SANDBOX_AUTH_PTY_ID } from '../shared/types'
+export { SANDBOX_AUTH_PTY_ID, SANDBOX_BUILD_PTY_ID } from '../shared/types'
 /** Dev-server ports published (127.0.0.1 only) when none are configured. */
 export const DEFAULT_SANDBOX_PORTS = [3000, 5173, 8080]
 
@@ -103,8 +104,13 @@ export function rewriteLoopbackForContainer(url: string): string {
 export interface SandboxCreateSpec {
   name: string
   image: string
-  /** Host project dir (bind-mounted at /work; also the kory.project label). */
+  /** Host project dir — the kory.project label (identity, not the mount). */
   projectDir: string
+  /**
+   * Host dir actually bind-mounted at /work: the project itself in `mount`
+   * mode, the ephemeral clone in `copy` mode (M3). Defaults to projectDir.
+   */
+  workSource?: string
   /** Host dir holding the generated launch scripts (bind-mounted at /kory-run). */
   runDirHost: string
   /**
@@ -138,7 +144,7 @@ export function buildCreateArgs(spec: SandboxCreateSpec): string[] {
     '--add-host',
     'host.docker.internal:host-gateway',
     '-v',
-    `${spec.projectDir}:${SANDBOX_WORK_DIR}`,
+    `${spec.workSource || spec.projectDir}:${SANDBOX_WORK_DIR}`,
     '-v',
     `${SANDBOX_AUTH_VOLUME}:${SANDBOX_HOME}/.claude`,
     '-v',
@@ -243,4 +249,85 @@ export function buildAuthCommand(engine: SandboxEngine, name: string): string {
 /** Arg vector probing the credentials file (exit 0 = logged in). */
 export function buildAuthProbeArgs(name: string): string[] {
   return ['exec', name, 'test', '-s', SANDBOX_CREDENTIALS_FILE]
+}
+
+/** Arg vector wiping the credentials file ("disconnect", guarded upstream). */
+export function buildAuthPurgeArgs(name: string): string[] {
+  return ['exec', name, 'rm', '-f', SANDBOX_CREDENTIALS_FILE]
+}
+
+/**
+ * Container-side transcript dir for a host cwd (M2 resume): Claude writes
+ * `~/.claude/projects/<encoded cwd>/<id>.jsonl`, and inside the sandbox the
+ * cwd is the CONTAINER path — so the encoding must run on the mapped path,
+ * not the host one. `~/.claude` is the auth volume, so these transcripts
+ * survive a container rebuild.
+ */
+export function containerTranscriptDir(
+  cwdHost: string,
+  projectDir: string,
+  plat: NodeJS.Platform = platform()
+): string {
+  const containerCwd = mapHostPathToContainer(cwdHost, projectDir, plat)
+  return `${SANDBOX_HOME}/.claude/projects/${encodeProjectDir(containerCwd)}`
+}
+
+/**
+ * Arg vector listing a transcript dir as `<name>\t<mtime seconds>` rows.
+ * GNU find (debian base image); a missing dir exits non-zero → empty list.
+ */
+export function buildTranscriptListArgs(name: string, dir: string): string[] {
+  return ['exec', name, 'find', dir, '-maxdepth', '1', '-name', '*.jsonl', '-printf', '%f\\t%T@\\n']
+}
+
+/** Parse `buildTranscriptListArgs` stdout into transcript entries. */
+export function parseTranscriptList(stdout: string): { id: string; mtimeMs: number }[] {
+  const out: { id: string; mtimeMs: number }[] = []
+  for (const line of stdout.split('\n')) {
+    const [file, stamp] = line.split('\t')
+    if (!file || !file.endsWith('.jsonl')) continue
+    const seconds = Number.parseFloat(stamp ?? '')
+    out.push({
+      id: file.slice(0, -'.jsonl'.length),
+      mtimeMs: Number.isFinite(seconds) ? seconds * 1000 : 0
+    })
+  }
+  return out
+}
+
+/** `docker cp <hostPath> <container>:<containerPath>` (config projection, M2). */
+export function buildCopyIntoArgs(name: string, hostPath: string, containerPath: string): string[] {
+  return ['cp', hostPath, `${name}:${containerPath}`]
+}
+
+/** `docker build -t <image> <contextDir>` — the PTY command of the image build. */
+export function buildImageBuildCommand(
+  engine: SandboxEngine,
+  image: string,
+  contextDir: string
+): string {
+  return `${engine} build -t ${shQuote(image)} ${shQuote(contextDir)}`
+}
+
+/** Arg vector testing that the image exists locally. */
+export function buildImageProbeArgs(image: string): string[] {
+  return ['image', 'inspect', '--format', '{{.Created}}', image]
+}
+
+/**
+ * Arg vector probing the broker bridge FROM INSIDE the container: the only
+ * honest test of `host.docker.internal` reachability (it resolves natively on
+ * Docker Desktop, needs --add-host + a non-loopback broker bind elsewhere).
+ */
+export function buildBrokerProbeArgs(name: string, brokerUrl: string): string[] {
+  return ['exec', name, 'curl', '-sf', '-m', '4', '-o', '/dev/null', `${brokerUrl}/health`]
+}
+
+/**
+ * Supervisor-driven exec (M2 `deck_sandbox_exec`): the agent's command line is
+ * ONE argv element handed to the container's bash — it never touches a HOST
+ * shell (hostile input #4). `-lc` gives it the image user's login PATH.
+ */
+export function buildSupervisorExecArgs(name: string, command: string): string[] {
+  return ['exec', '-w', SANDBOX_WORK_DIR, name, 'bash', '-lc', command]
 }

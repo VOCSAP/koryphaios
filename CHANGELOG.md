@@ -1,5 +1,58 @@
 # Changelog
 
+## desktop (experimental) — Sandbox mode M2/M3: operator config projection, supervisor exec, ephemeral copy mode
+
+Second sandbox lot, completing `PLAN-SANDBOX.md` except the remote backend.
+
+**Your workflow travels into the container (M2).** At every container start
+the Deck COPIES the operator's `~/.claude` allow-list — global `CLAUDE.md`,
+`agents/`, `skills/`, `plugins/`, `settings.json` — into the sandbox
+(`sandbox-projection.ts`, `docker cp`), and the Docker view reports exactly
+what landed. Copy, never mount, and the header says why: a mounted
+`settings.json` would let a sandboxed agent write a hook that later executes
+on the HOST, a clean escape. Hooks that cannot run under Linux (PowerShell,
+`.ps1/.bat/.exe`, `C:\…`) are detected and listed, with a
+`~/.claude/sandbox-overrides/` overlay to supply Linux equivalents (a
+same-named entry there wins); overlay files that are not projectable are
+reported instead of silently ignored.
+
+**The supervisor manages the environment (M2).** New `deck_sandbox_exec`
+tool: "add this dependency to the instance" runs inside the project's
+container, in `/work`, with the agent's command line passed as ONE argv
+element to the CONTAINER's bash — it never reaches a host shell (hostile
+input #4). Refused when sandbox mode is off, 5-min cap, clipped output,
+journaled.
+
+**Honest environment reporting (M2).** The broker bridge is no longer guessed
+from the platform: the view curls `/health` FROM inside the container and
+reports what happened, with the `CLAUDE_PEERS_BIND_HOST` fix spelled out when
+a native Linux engine can't reach the host. The image is probed
+(`image inspect`) and buildable in one click — `docker build` on the shipped
+Dockerfile runs in a real utility PTY so the build log is readable — and a
+drift badge appears when the image was rebuilt after the container was
+created. Resume now works inside the sandbox: transcripts live in the auth
+volume, so the Deck lists them container-side (`find …/projects/<container
+cwd>`) and `SessionService` consults that instead of the host's — surviving
+even a container rebuild. Plus auth "Disconnect" (refused while a sandbox
+container runs).
+
+**Ephemeral copy mode (M3).** A per-project work mode: instead of the real
+tree, the Deck mounts a throwaway `git clone --local` of it, so agents cannot
+touch the project at all and work leaves through git (the clone's `origin` IS
+the local repo). Because a clone only carries tracked files, an operator
+allow-list of gitignored globs is copied on top (planning notes, local
+fixtures) — with a hard deny-list that always wins (`.env*`, keys/certs,
+`.ssh`, `.aws`, `node_modules`, `.venv`, `.git`) and unmatched globs surfaced
+so a typo is visible. The pre-spawn gate now returns the EFFECTIVE project
+root, so tile cwds and `git worktree add` land inside the mounted clone.
+
+Settings moved to a single guarded `sandbox:patch-settings` channel (enable,
+work mode, ports, globs — all trust-changing, all refused while sessions
+run, all `REMOTE_BLOCKED`). Docs: `desktop/docs/sandbox.md` rewritten,
+overview/sessions/settings/supervisor-team/faq updated, both READMEs.
+Residual (remote SSH / Proxmox backend, real-machine validation):
+`BACKLOG.md` §3.8.
+
 ## desktop (experimental) — Sandbox mode M1: sessions in a persistent per-project Docker container (SBX1–SBX5)
 
 New 🏺 **Docker** rail view + per-project toggle: with sandbox mode on, every

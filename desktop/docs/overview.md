@@ -32,6 +32,13 @@ One app window is scoped to one **project directory** (the working directory
 new sessions launch in). It is the directory the `kory` command was launched
 from, or the `projectDir` configured in `Settings > Terminal`.
 
+### Sandbox mode (optional)
+
+A project can run its sessions inside a persistent Docker/Podman container
+instead of directly on the machine, with the project folder mounted (or a
+throwaway clone of it). The supervisor stays on the host and can install
+things inside the container on request. See [sandbox.md](sandbox.md).
+
 ### Session = tile = agent = peer
 
 One running Claude Code instance. The four words emphasise different aspects:

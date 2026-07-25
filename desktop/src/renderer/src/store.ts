@@ -9,6 +9,7 @@ import type {
   InboxMessage,
   LocaleOption,
   RoadmapKind,
+  SandboxSettingsPatch,
   SandboxStatus,
   SessionRuntime,
   TemplateSummary,
@@ -128,6 +129,8 @@ interface DeckState {
   sandboxStatus: SandboxStatus | null
   /** First-run sandbox login modal (SBX3) visibility. */
   sandboxAuthOpen: boolean
+  /** Sandbox image-build terminal modal (M2) visibility. */
+  sandboxBuildOpen: boolean
 
   init(): Promise<void>
   setView(view: DeckView): void
@@ -198,9 +201,10 @@ interface DeckState {
 
   /** Refresh the sandbox status (`force` re-probes the engine). */
   refreshSandbox(force?: boolean): Promise<void>
-  /** Flip the sandbox mode for this project (main refuses while sessions run). */
-  setSandboxEnabled(enabled: boolean): Promise<void>
+  /** Patch this project's sandbox settings (main refuses while sessions run). */
+  patchSandbox(patch: SandboxSettingsPatch): Promise<void>
   openSandboxAuth(open: boolean): void
+  openSandboxBuild(open: boolean): void
 
   refreshWorkspaces(): Promise<void>
   saveWorkspace(name?: string): Promise<void>
@@ -279,6 +283,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   companionRunning: false,
   sandboxStatus: null,
   sandboxAuthOpen: false,
+  sandboxBuildOpen: false,
 
   async init() {
     // Companion mode flags (PLAN MB1/MB3): computed once — the desktop window
@@ -627,15 +632,20 @@ export const useDeck = create<DeckState>((set, get) => ({
     })
   },
 
-  async setSandboxEnabled(enabled) {
-    await guarded('sandbox mode', async () => {
-      const sandboxStatus = await window.api.sandboxSetEnabled(enabled)
+  async patchSandbox(patch) {
+    await guarded('sandbox settings', async () => {
+      const sandboxStatus = await window.api.sandboxPatchSettings(patch)
       set({ sandboxStatus })
-      get().showToast(enabled ? 'toast.sandboxOn' : 'toast.sandboxOff')
+      if (patch.enabled !== undefined) {
+        get().showToast(patch.enabled ? 'toast.sandboxOn' : 'toast.sandboxOff')
+      } else {
+        get().showToast('toast.sandboxSettingsSaved')
+      }
     })
   },
 
   openSandboxAuth: (open) => set({ sandboxAuthOpen: open }),
+  openSandboxBuild: (open) => set({ sandboxBuildOpen: open }),
 
   async refreshWorkspaces() {
     await guarded('list workspaces', async () => {

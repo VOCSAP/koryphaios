@@ -5554,11 +5554,6 @@ svg.glyph {
   flex: none;
 }
 
-.sandbox-auth-modal {
-  width: 760px;
-  max-width: 92vw;
-}
-
 .sandbox-auth-intro {
   color: var(--fg-dim);
   line-height: 1.5;
@@ -5583,4 +5578,48 @@ svg.glyph {
 
 [data-theme='light'] .sandbox-auth-term {
   background: #ffffff;
+}
+
+/* Sandbox M2/M3 additions: settings rows, globs editor, build terminal. */
+
+.sandbox-label {
+  color: var(--fg-dim);
+  min-width: 130px;
+}
+
+.sandbox-col {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.sandbox-globs {
+  width: 100%;
+  max-width: 560px;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  resize: vertical;
+}
+
+.sandbox-globs:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* Work-mode chips reuse the chip archetype; the active one reads as selected. */
+.sandbox-view .chip.is-active {
+  background: var(--selected);
+  border-color: var(--accent);
+  color: var(--fg);
+}
+
+.sandbox-term-modal {
+  width: 860px;
+  max-width: 94vw;
 }

@@ -311,12 +311,19 @@ service.on('created', (r: SessionRuntime) => {
 // Per-project container lifecycle. Constructed eagerly (cheap: name hashing
 // only) — every engine call is on-demand. The settings live in the operator's
 // app-state sandbox.json (never a repo file, hostile input #1).
+const claudeHomeDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
 const sandbox = new SandboxService({
   projectDir: cliContext.projectDir,
   projectKey: computeDeckProjectKey(cliContext.projectDir),
   stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
-  // Same resolution as the transcript readers: the peers back-channel dir.
-  peersDirHost: join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'peers'),
+  // Projection source (CLAUDE.md/agents/skills/plugins) + peers back-channel.
+  claudeHomeDir,
+  // Shipped Dockerfile: resources when packaged, the repo dir in dev — same
+  // resolution as deckPluginDir / the docs dir.
+  imageContextDir: app.isPackaged
+    ? join(process.resourcesPath, 'sandbox')
+    : join(app.getAppPath(), 'resources', 'sandbox'),
+  containerBrokerUrl: () => rewriteLoopbackForContainer(resolveBrokerEndpoint().url),
   journal: (msg) => journal.add('session', msg)
 })
 
@@ -334,41 +341,53 @@ const containerBrokerEnv = (): Record<string, string> => {
 
 // SBX1: wrap sandboxed spawns. The scope-secret file is read HERE (host-side,
 // with a trace on failure) so the pure env translator stays fs-free.
-service.setSandboxProvider(() => {
-  const launch = sandbox.launchInfo()
-  if (!launch) return null
-  return {
-    wrap: (sessionId, command, cwdHost, env) => {
-      sandbox.writeLaunchScript(sessionId, {
-        command,
-        cwd: mapHostPathToContainer(cwdHost, launch.projectDir),
-        env: {
-          ...sandboxifyEnv(env, (path) => {
-            try {
-              return readFileSync(path, 'utf8').trim()
-            } catch (e) {
-              reportError('sandbox', `scope secret file unreadable: ${path}`, e)
-              return null
-            }
-          }),
-          ...containerBrokerEnv()
-        }
-      })
-      return sandbox.execCommand(launch, sessionId)
+service.setSandboxProvider(
+  () => {
+    const launch = sandbox.launchInfo()
+    if (!launch) return null
+    return {
+      wrap: (sessionId, command, cwdHost, env) => {
+        sandbox.writeLaunchScript(sessionId, {
+          command,
+          cwd: mapHostPathToContainer(cwdHost, launch.workSource),
+          env: {
+            ...sandboxifyEnv(env, (path) => {
+              try {
+                return readFileSync(path, 'utf8').trim()
+              } catch (e) {
+                reportError('sandbox', `scope secret file unreadable: ${path}`, e)
+                return null
+              }
+            }),
+            ...containerBrokerEnv()
+          }
+        })
+        return sandbox.execCommand(launch, sessionId)
+      }
     }
-  }
-})
+  },
+  // M2 resume: transcripts live in the container's auth volume, so the host
+  // readers would see none and every restore would start fresh.
+  (cwdHost) => sandbox.transcriptsFor(cwdHost)
+)
 
-// SBX3: pre-spawn gate — container up AND authenticated before ANY tile
+// SBX3/M3: pre-spawn gate — container up AND authenticated before ANY tile
 // spawns. 'sandbox-auth-required' routes the renderer to the login modal
-// (one modal, instead of a login prompt in every tile).
-const sandboxGate = async (): Promise<void> => {
-  if (!sandbox.isEnabled()) return
+// (one modal, instead of a login prompt in every tile). Returns the EFFECTIVE
+// PROJECT ROOT so copy mode lands sessions + worktrees inside the clone that
+// is actually mounted at /work.
+const sandboxGate = async (): Promise<string | null> => {
+  if (!sandbox.isEnabled()) return null
   const st = await sandbox.ensure()
   if (!st.engine || st.containerState !== 'running') {
     throw new Error(st.error ? `sandbox: ${st.error}` : 'sandbox: container not ready')
   }
   if (st.authed !== true) throw new Error('sandbox-auth-required')
+  const root = sandbox.effectiveRoot()
+  // Refresh the container-side transcript cache for the tree we are about to
+  // spawn in, so a resume finds its conversation (M2).
+  await sandbox.refreshTranscripts(root)
+  return root
 }
 
 service.on('removed', ({ name }: { id: string; name: string }) => {
@@ -1137,6 +1156,7 @@ const controlDeps: DeckControlDeps = {
       sandboxGate
     ),
   listSessions: () => service.list(),
+  sandboxExec: (command) => sandbox.supervisorExec(command),
   restartSession: (id) => void service.restart(id),
   closeSession: (id) => service.remove(id),
   createWorktree: async (branch) => {

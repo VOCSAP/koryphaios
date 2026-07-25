@@ -42,6 +42,7 @@ session that pilots the app. Additional hard rules:
 | `deck_create_worktree` / `deck_list_worktrees` / `deck_remove_worktree` | Worktree management |
 | `deck_list_templates` / `deck_apply_template` / `deck_save_template` | Team templates |
 | `deck_announce` | Broadcast or targeted no-reply announcement to the group |
+| `deck_sandbox_exec` | Run a command inside the project's sandbox container (sandbox mode only — see [sandbox.md](sandbox.md)) |
 
 ## Trust modes (supervisor spawns)
 
