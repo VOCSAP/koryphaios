@@ -2,7 +2,7 @@
 // into the sandbox container, so agents keep the global CLAUDE.md, agents,
 // skills and plugins that shape the operator's workflow.
 //
-// SECURITY — why a COPY and never a mount (PLAN-SANDBOX §8): the host
+// SECURITY — why a COPY and never a mount (CLAUDE.md hostile input #5): the host
 // `~/.claude` carries `settings.json`, whose hooks execute on the HOST in
 // every non-sandboxed session. A read-write mount would let a compromised
 // agent write a hook inside the sandbox and have it run outside — a clean

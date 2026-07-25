@@ -420,7 +420,7 @@ export function registerIpc({
   regHandle('sandbox:build-stop', () => service.killUtility(SANDBOX_BUILD_PTY_ID))
   regHandle('sandbox:auth-purge', async () => {
     // A running work container holds the volume: disconnecting under it would
-    // strand a live agent mid-turn (PLAN-SANDBOX §3).
+    // strand a live agent mid-turn (docs/sandbox.md, authentication).
     if (await sandbox.anyRunning()) throw new Error('sandbox-container-running')
     return sandbox.purgeAuth()
   })

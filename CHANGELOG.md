@@ -2,7 +2,9 @@
 
 ## desktop (experimental) — Sandbox mode M2/M3: operator config projection, supervisor exec, ephemeral copy mode
 
-Second sandbox lot, completing `PLAN-SANDBOX.md` except the remote backend.
+Second sandbox lot: the remaining design is folded into this entry (the
+working plan file was consolidated away per repo convention). The remote
+SSH/Proxmox backend was ABANDONED — Docker covers the need.
 
 **Your workflow travels into the container (M2).** At every container start
 the Deck COPIES the operator's `~/.claude` allow-list — global `CLAUDE.md`,
@@ -50,8 +52,9 @@ Settings moved to a single guarded `sandbox:patch-settings` channel (enable,
 work mode, ports, globs — all trust-changing, all refused while sessions
 run, all `REMOTE_BLOCKED`). Docs: `desktop/docs/sandbox.md` rewritten,
 overview/sessions/settings/supervisor-team/faq updated, both READMEs.
-Residual (remote SSH / Proxmox backend, real-machine validation):
-`BACKLOG.md` §3.8.
+Residual is field validation only — the checklist lives in `BACKLOG.md`
+§3.8. The remote SSH / Proxmox backend once sketched for M3 is dropped: the
+local engine covers the need.
 
 ## desktop (experimental) — Sandbox mode M1: sessions in a persistent per-project Docker container (SBX1–SBX5)
 
@@ -88,8 +91,8 @@ embedded browser) live in operator app-state `sandbox.json` keyed by
 `desktop/resources/sandbox/Dockerfile` (debian + bash/git/bun + claude CLI,
 user `kory`). Companion is transparent (all channels execute host-side; the
 sandbox trust flips are `REMOTE_BLOCKED`). Design + M2/M3 milestones:
-`PLAN-SANDBOX.md`; operator docs: `desktop/docs/sandbox.md`; residual:
-`BACKLOG.md` §3.8. Also fixes the calendar-rotted `desktop-log` prune test
+this entry; operator docs: `desktop/docs/sandbox.md`; field-validation
+checklist: `BACKLOG.md` §3.8. Also fixes the calendar-rotted `desktop-log` prune test
 (fixture age now anchored on the test's fixed clock).
 
 ## desktop (experimental) — Browser REC: screen recording + agent-driven demo scenarios
@@ -163,7 +166,7 @@ validation, sanitized peer-id list capped at 16, export/import); the
 the supervisor briefing all learn the concept. UI: a distinct dashed-violet
 card in the Workflow lane, a generic directive item in the editor (command
 dropdown + live-peer target multiselect, work-only fields hidden), and the
-detail modal, with EN/FR locale parity. Working plan: `PLAN-DIRECTIVES.md`
+detail modal, with EN/FR locale parity. Chantier ids: `CT1`…`CT7`
 (chantiers CT1–CT7); the deferred `clear`+briefing / context-gauge increment
 (CT6) and the option-A empirical checks live in `BACKLOG.md`.
 

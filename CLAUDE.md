@@ -18,7 +18,7 @@ Two products in one repo:
 Release history and per-batch narratives live in `CHANGELOG.md`; the remaining
 open work (to-do / to-verify / deferred, incl. the security backlog) is
 centralized in `BACKLOG.md`. Code comments reference chantier ids (`C1`…`C29`,
-`D1`…, `MB1`…, `TS1`…, `GX1`…) from past working plans. Those standalone working
+`D1`…, `MB1`…, `TS1`…, `GX1`…, `CT1`…, `SBX1`…) from past working plans. Those standalone working
 docs (`PLAN-*`, `EXPLORATION-*`, `AUDIT-*`) were consolidated and removed: the
 shipped design decisions are summarized in the CHANGELOG entry of the batch that
 shipped them, the open residual lives in `BACKLOG.md`, and the full detail
@@ -52,8 +52,8 @@ Only read the file matching the area you are touching:
   instead, use `add-broker-feature`.
 - Touching SANDBOX mode (`desktop/src/main/sandbox-*.ts`, the Docker rail
   view, or anything that decides WHERE a session executes) — read
-  `PLAN-SANDBOX.md` (design + why each decision, incl. the copy-not-mount
-  rule) and `desktop/docs/sandbox.md` (operator-facing behavior).
+  `desktop/docs/sandbox.md` (behavior, guards, the copy-not-mount rule) and
+  the "Sandbox mode" CHANGELOG entries (why each decision was taken).
 - Bun runtime / API conventions (which libs to use or avoid) — read
   `BUN.md`.
 - Building a Bun-served frontend (HTML imports, React) — read

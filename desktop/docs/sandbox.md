@@ -158,9 +158,10 @@ single argument — it never reaches a shell on your machine.
 
 ## Limits
 
-- The remote backend (running sessions on an SSH host or a Proxmox LXC
-  instead of a local container) is **not implemented** — see `BACKLOG.md`
-  §3.8 for why it is still open.
+- Sessions always run in a LOCAL container. Running them on a remote host
+  (SSH, a Proxmox LXC) was considered and **dropped**: the local engine
+  covers the need, and a remote backend would lose the bind mount that makes
+  the Deck's git/diff/explorer views work.
 - Long-lived containers accumulate hand-installed state that no Dockerfile
   records. That is the point of the persistence, but the drift badge and
   Rebuild are there when you want reproducibility back.

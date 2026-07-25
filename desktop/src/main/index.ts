@@ -1565,7 +1565,7 @@ app.on('before-quit', () => {
   if (lockWatchTimer) clearInterval(lockWatchTimer)
   workspaces.releaseOnQuit()
   service.stop()
-  // Persistent-by-design (PLAN-SANDBOX §2): closing the app STOPS the project
+  // Persistent by design (docs/sandbox.md): closing the app STOPS the project
   // container (detached, quit never waits on the engine) — it never removes it.
   sandbox.stopCurrentDetached()
   controlServer?.close()

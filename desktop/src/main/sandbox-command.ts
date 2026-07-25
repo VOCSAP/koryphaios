@@ -118,7 +118,7 @@ export interface SandboxCreateSpec {
    * container's server.ts writes the peer cache + desk-session back-channel
    * where the Deck's discovery/peer-badge readers look (session-service
    * peersDir()). Narrow data dir only — never the whole host ~/.claude
-   * (PLAN-SANDBOX §8: a mounted settings.json would be a host escape).
+   * (a mounted settings.json would be a host escape — see sandbox-projection).
    */
   peersDirHost?: string
   /** Dev-server ports published as 127.0.0.1:p:p (webview reaches them as localhost). */
