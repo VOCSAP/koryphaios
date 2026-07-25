@@ -461,12 +461,37 @@ depuis une autre machine du même broker.
    sentinelle **`operator`** vers `reply_token`, puis push WS (repli poll
    inchangé). On réutilise intégralement `handleSendMessage` /
    `flushPendingForToken` — aucune nouvelle mécanique de livraison.
-3. Rendu du message : la réponse de l'opérateur, encadrée comme une **réponse à
-   une question posée**, avec l'`id` de l'approbation pour que l'agent puisse
-   la corréler.
-4. **Corriger le blob d'instructions MCP** : il affirme aujourd'hui
-   « *the operator does not reply through this channel* ». C'est précisément ce
-   que ce lot change.
+3. **Rendu par message, pas instruction globale.** Le blob d'instructions
+   reste tel quel : le no-reply y est volontairement global parce que la
+   plupart des messages système n'attendent aucune réponse, et `server.ts`
+   porte déjà la nuance DANS le contenu rendu — c'est exactement ce que dit le
+   commentaire de `DECK_NO_REPLY_NOTE` (« *since that instruction is global
+   (not per-message), the no-reply guarantee is carried inside the rendered
+   content* »). On ajoute donc une **troisième famille de rendu** à côté de
+   `renderDeckAnnouncement`, sélectionnée sur le sentinelle émetteur :
+
+   | Émetteur | Rendu | Attente |
+   |---|---|---|
+   | peer ordinaire | brut | comportement global (répondre) |
+   | sentinelle `deck` | `renderDeckAnnouncement` | **ne pas répondre** (inchangé) |
+   | sentinelle `operator` **(nouveau en émission)** | `renderOperatorAnswer` | **agir**, ne pas accuser réception |
+
+   `renderOperatorAnswer` encadre la réponse comme *la réponse humaine à la
+   question `<id>`*, invite à l'appliquer, et redirige explicitement un
+   éventuel blocage suivant vers `ask_operator` plutôt que vers un
+   `send_message` — sinon chaque approbation réglée remplirait l'inbox
+   opérateur d'accusés de réception, ce que la note `deck` évite déjà.
+
+   Le sentinelle porte donc la sémantique : aucun champ `kind` à ajouter sur
+   `messages`. (Si un jour l'`operator` émet plusieurs natures de message, une
+   colonne `kind` deviendra justifiée — pas avant.)
+4. **Le blob n'est pas réécrit.** Sa phrase « *the operator does not reply
+   through this channel* » reste VRAIE pour ce qu'elle décrit : `send_message`
+   vers `operator` (l'inbox) ne reçoit toujours pas de réponse. La réponse à
+   une approbation n'emprunte pas ce chemin — elle arrive soit comme valeur de
+   retour d'`ask_operator`, soit comme message de l'opérateur. Seule la liste
+   « *expect an answer as a deck announcement or new instructions* » gagne un
+   troisième terme.
 5. Le Deck ne poste plus de frappes pour ces approbations : `pollApprovalVerdicts`
    ignore `reply_route='channel'` (le broker s'en est chargé) et les marque
    délivrées.
