@@ -498,6 +498,22 @@ Docker Desktop en priorité, c'est la cible principale :
       `server-*`, `config-*`) **ne tourne jamais en CI** (seul `desktop-*` y
       passe). *Fort ROI, faible coût.* Ajouter un job `bun test` cœur + smoke
       build sur les chemins cœur.
+- [ ] **M-MNT-4** — **CI rouge de longue date sur macOS/Windows** (workflow
+      `desktop-build`, `bun test tests/desktop-*.test.ts`). Mesuré sur
+      `experimental` @79c931b4 : ubuntu 1 échec, macOS 4, windows 8. Le lot
+      sandbox en a supprimé un partout (`flushJournalSnapshot`, pourriture par
+      horloge — voir `TESTING.md`) ; ubuntu est donc **vert** depuis. Restent,
+      tous **préexistants et sans rapport avec le sandbox** :
+  - **3 tests `desktop-worktree` (macOS + Windows)** — `createWorktree`,
+    `removeWorktree`, « dirty worktree refusé ». Cause : le test compare un
+    chemin `resolve()` au chemin que **git** rapporte, or le tmpdir des
+    runners est un lien symbolique (macOS `/var` → `/private/var`) ou un nom
+    court 8.3 (Windows `C:\Users\RUNNER~1`). C'est un problème de
+    **realpath**, pas de logique worktree : corriger en `realpathSync` des
+    deux côtés de la comparaison (test ou `worktree-service`, à trancher).
+  - **4 tests Windows uniquement** — `collectSources`, `runHelp` ×2,
+    « codex/gemini targets ». Cause : hypothèses de shell POSIX
+    (`bash -lc`, redirections) sur un runner PowerShell.
 - [ ] **M-MNT-2** — config éparpillée : ~20 `parseInt(process.env…)` hors de
       `config.ts` à rapatrier (env > fichier > défaut, validation centralisée).
 - [ ] **M-MNT-3** — fonctions surdimensionnées (`handleRegister` ~150 l,
