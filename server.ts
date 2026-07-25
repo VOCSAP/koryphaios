@@ -56,6 +56,16 @@ import { writePeerIdCache, writeDeskSessionId } from "./shared/peer-cache.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { DECK_PEER_ID, DECK_INSTANCE_TOKEN } from "./shared/types.ts";
 import type { GraphDraftAddResponse } from "./shared/types.ts";
+import type {
+  ApprovalAddResponse,
+  ApprovalWaitResponse,
+} from "./shared/types.ts";
+import {
+  APPROVAL_QUESTION_MAX,
+  APPROVAL_TITLE_MAX,
+  buildAuthProof,
+  loadSessionApprovalCredential,
+} from "./shared/approval-client.ts";
 import {
   buildDraftPrepareArgs,
   composeDraftUserMessage,
@@ -745,6 +755,43 @@ const TOOLS = [
       required: ["title", "prompt"],
     },
   },
+  {
+    name: "ask_operator",
+    description:
+      "Ask the HUMAN operator a blocking question and WAIT for their answer, which may arrive from their phone (Telegram/Discord/the Koryphaios mobile app) or from the Deck. Use this INSTEAD of stopping with an open question on screen whenever you are blocked and the operator may be away: unlike an on-screen question, this one reaches them wherever they are. The answer is returned to you as free text. If nobody has answered yet, you get a ticket — call ask_operator_wait with it to keep waiting (do that rather than assuming an answer). Available only when the operator enabled remote approvals for this project.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        title: {
+          type: "string" as const,
+          description: "Short subject line, shown as the notification title.",
+        },
+        question: {
+          type: "string" as const,
+          description:
+            "The question, self-contained: the operator reads it on a phone with no repo access.",
+        },
+        options: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          description: "Optional suggested answers, offered as one-tap buttons.",
+        },
+      },
+      required: ["title", "question"],
+    },
+  },
+  {
+    name: "ask_operator_wait",
+    description:
+      "Keep waiting for the answer to a previous ask_operator call. Pass the ticket it returned. Returns the operator's answer, or another ticket if they still have not replied.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        ticket: { type: "string" as const, description: "The ticket returned by ask_operator." },
+      },
+      required: ["ticket"],
+    },
+  },
 ];
 
 // --- Tool handlers ---
@@ -1351,6 +1398,115 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           content: [{ type: "text" as const, text: `graph_draft_prepare failed: ${msg}` }],
           isError: true,
         };
+      }
+    }
+
+    case "ask_operator":
+    case "ask_operator_wait": {
+      const cred = loadSessionApprovalCredential();
+      if (!cred) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "Remote approvals are not enabled for this session. Ask the operator directly, on screen.",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      /** Sign + POST an approval route with this session's restricted credential. */
+      const signedPost = async <T>(path: string, payload: Record<string, unknown>): Promise<T> => {
+        const body = { ...payload, public_key: cred.publicKey };
+        const auth = buildAuthProof(cred.privateKey, body, {
+          kind: "session",
+          operator_id: cred.operatorId,
+          token_id: cred.tokenId,
+        });
+        return brokerFetch<T>(path, { ...body, auth });
+      };
+
+      try {
+        let approvalId: string;
+        if (name === "ask_operator") {
+          const title = String((args as { title?: unknown }).title ?? "").trim();
+          const question = String((args as { question?: unknown }).question ?? "").trim();
+          if (!title || !question) {
+            return {
+              content: [{ type: "text" as const, text: "title and question are required" }],
+              isError: true,
+            };
+          }
+          const rawOptions = (args as { options?: unknown }).options;
+          const created = await signedPost<ApprovalAddResponse>("/approval/add", {
+            kind: "question",
+            title: title.slice(0, APPROVAL_TITLE_MAX),
+            question: question.slice(0, APPROVAL_QUESTION_MAX),
+            options: Array.isArray(rawOptions) ? rawOptions.slice(0, 10).map(String) : [],
+            session_ref: cred.sessionRef,
+            origin: {
+              host: myHost,
+              os_user_hash: cred.osUserHash,
+              project_key: roadmapProjectKey(),
+              from_peer: roadmapAuthor(),
+              group_id: "",
+            },
+          });
+          approvalId = created.approval.id;
+        } else {
+          approvalId = String((args as { ticket?: unknown }).ticket ?? "").trim();
+          if (!approvalId) {
+            return { content: [{ type: "text" as const, text: "ticket is required" }], isError: true };
+          }
+        }
+
+        // Bounded leg: never rely on the MCP client's own tool timeout. When it
+        // lapses we hand back a ticket, so waiting is resumable indefinitely
+        // without any single call hanging.
+        const res = await signedPost<ApprovalWaitResponse>("/approval/wait", {
+          id: approvalId,
+          timeout_sec: 90,
+        });
+        const answered = res.approval?.status === "answered" ? res.approval : null;
+        if (answered) {
+          const verdict =
+            answered.answer_kind === "text"
+              ? (answered.answer_text ?? "")
+              : answered.answer_kind === "allow"
+                ? "yes / approved"
+                : "no / rejected";
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `The operator answered (via ${answered.answered_via}): ${verdict}`,
+              },
+            ],
+          };
+        }
+        if (res.approval && res.approval.status !== "pending") {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "That question is no longer awaiting an answer (it expired or was withdrawn). Ask the operator on screen.",
+              },
+            ],
+            isError: true,
+          };
+        }
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `No answer yet. The operator has been notified. Call ask_operator_wait with ticket "${approvalId}" to keep waiting — do not assume an answer.`,
+            },
+          ],
+        };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return { content: [{ type: "text" as const, text: `${name} failed: ${msg}` }], isError: true };
       }
     }
 
