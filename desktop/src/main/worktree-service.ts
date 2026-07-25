@@ -15,10 +15,33 @@
 
 import { exec, execFile } from 'node:child_process'
 import { reportError } from './log'
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 
 export const WORKTREES_DIR = '.worktrees'
+
+/**
+ * Canonical form of a path, for comparison with git's own output.
+ *
+ * git always reports the REAL path (symlinks resolved, Windows long name),
+ * while what reaches us can be a symlinked prefix (macOS `/var` is a symlink
+ * to `/private/var`, so every temp dir and many home setups differ) or an 8.3
+ * short name (`C:\Users\RUNNER~1\…`). Comparing the two forms fails silently:
+ * `removeWorktree` answered "not a worktree of this repo" for a worktree it
+ * had just created, and the Worktrees view could not match a worktree to its
+ * session. `realpathSync.native` also normalizes the Windows short name.
+ *
+ * A path that does not exist cannot be realpath'd — fall back to `resolve` so
+ * callers still get a stable key and the caller's own "not a worktree" error
+ * instead of a throw from here.
+ */
+export function canonicalPath(p: string): string {
+  try {
+    return realpathSync.native(p)
+  } catch {
+    return resolve(p)
+  }
+}
 
 export interface WorktreeInfo {
   /** Absolute path of the worktree directory. */
@@ -59,7 +82,9 @@ export async function createWorktree(projectDir: string, branch: string): Promis
   const path = join(projectDir, WORKTREES_DIR, name)
   if (existsSync(path)) throw new Error(`worktree path already exists: ${path}`)
   await git(['worktree', 'add', path, '-b', branch.trim()], projectDir)
-  return { path: resolve(path), branch: branch.trim(), main: false }
+  // canonical(): the created dir exists now, so this matches what `git worktree
+  // list` will report for it (see canonical's docstring).
+  return { path: canonical(path), branch: branch.trim(), main: false }
 }
 
 /** Parse `git worktree list --porcelain` for the repo owning `projectDir`. */
@@ -70,7 +95,7 @@ export async function listWorktrees(projectDir: string): Promise<WorktreeInfo[]>
   for (const line of out.split('\n')) {
     if (line.startsWith('worktree ')) {
       if (current?.path) infos.push(finishInfo(current, infos.length === 0))
-      current = { path: resolve(line.slice('worktree '.length).trim()) }
+      current = { path: canonical(line.slice('worktree '.length).trim()) }
     } else if (line.startsWith('branch ') && current) {
       current.branch = line.slice('branch '.length).trim().replace(/^refs\/heads\//, '')
     }
@@ -90,15 +115,18 @@ function finishInfo(partial: Partial<WorktreeInfo>, first: boolean): WorktreeInf
  */
 export async function removeWorktree(projectDir: string, path: string): Promise<void> {
   const all = await listWorktrees(projectDir)
-  const target = all.find((w) => w.path === resolve(path))
+  const target = all.find((w) => w.path === canonical(path))
   if (!target) throw new Error(`not a worktree of this repo: ${path}`)
   if (target.main) throw new Error('refusing to remove the main working tree')
   await git(['worktree', 'remove', target.path], projectDir)
 }
 
+/** Internal alias kept short at the call sites below. */
+const canonical = canonicalPath
+
 /** True when `cwd` sits under a `.worktrees/` dir (a Deck-created worktree). */
 export function isDeckWorktreePath(cwd: string): boolean {
-  return resolve(cwd).split(sep).includes(WORKTREES_DIR)
+  return canonical(cwd).split(sep).includes(WORKTREES_DIR)
 }
 
 export interface WorktreeStatus {

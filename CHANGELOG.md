@@ -1,5 +1,43 @@
 # Changelog
 
+## desktop (experimental) — green CI on all three runners (M-MNT-4)
+
+`desktop-build` had been red on macOS and Windows for weeks (8 failing tests
+on Windows, 4 on macOS, 1 on Linux) with no diagnosis written down. All of it
+is fixed; the causes were three distinct things, only one of which was a test
+artifact.
+
+**A real product bug on symlinked paths.** `worktree-service` compared its own
+`resolve()`d paths against the ones **git** reports, and git always reports the
+REAL path. On macOS `/var` is a symlink to `/private/var`, on Windows a path can
+arrive as an 8.3 short name (`C:\Users\RUNNER~1\…`) — so `removeWorktree`
+answered *"not a worktree of this repo"* for a worktree it had just created, and
+the Worktrees view could not attach a session to its worktree. Every comparison
+now goes through `canonicalPath` (`realpathSync.native`, falling back to
+`resolve` for paths that do not exist so a missing path still yields the
+caller's own error). `ipc.ts` uses it on the session side of the
+worktree↔session match too, for the same reason. This was invisible on Linux
+because its tmpdirs are not symlinked — so the suite now creates a symlinked
+repo prefix explicitly and drives create/list/remove through it, a test that
+fails without the fix on any OS.
+
+**Two POSIX-shaped assertions.** The digest suite probed the working directory
+with `pwd` (no such builtin in cmd.exe) and compared with `dir.split("/")`; it
+now prints the cwd through node and compares canonically. The utility-inference
+suite matched the stdin redirection with `/< "file"$/`, which is the POSIX form
+— the PowerShell form (`Get-Content -Raw "file" | …`) is equally correct, so the
+assertion accepts either and asserts the document contract instead of one OS's
+syntax.
+
+**Two tests that are POSIX by construction.** The `runHelp` round-trips pin
+`platform: "linux"` and drive a `#!/bin/sh` fixture through `shell: "/bin/sh"`;
+there is no `/bin/sh` to run them against on Windows and they assert nothing
+about it. They are now skipped there — and rather than leave Windows less
+covered, two new OS-agnostic tests exercise the same executor (marker
+stripping, stdout capture, rejection on a command that cannot run) with
+constructs that behave identically in sh and PowerShell.
+
+
 ## desktop (experimental) — Sandbox mode M2/M3: operator config projection, supervisor exec, ephemeral copy mode
 
 Second sandbox lot: the remaining design is folded into this entry (the

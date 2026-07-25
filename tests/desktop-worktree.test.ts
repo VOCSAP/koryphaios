@@ -5,7 +5,7 @@
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -85,6 +85,39 @@ test("a dirty worktree is refused (never --force): uncommitted work survives", a
   // Still listed: nothing was lost.
   const all = await listWorktrees(repo);
   expect(all.some((w) => w.path === wt.path)).toBe(true);
+});
+
+test("paths survive a symlinked repo prefix (macOS /var, Windows 8.3)", async () => {
+  // The runners' tmpdir is a symlink on macOS (/var -> /private/var) and an 8.3
+  // short name on Windows, while git always reports the REAL path. Comparing
+  // the two forms used to make removeWorktree answer "not a worktree of this
+  // repo" for a worktree it had just created — invisible on Linux, where
+  // tmpdirs are not symlinked, so reproduce the condition explicitly here.
+  const outer = mkdtempSync(join(tmpdir(), "cp-wt-link-"));
+  const real = join(outer, "real-repo");
+  const link = join(outer, "via-link");
+  execFileSync("git", ["init", "-q", "-b", "main", real]);
+  execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", "commit",
+    "--allow-empty", "-m", "init"], { cwd: real });
+  // 'junction' is the dir-symlink flavour Windows allows without privileges;
+  // the type argument is ignored on POSIX.
+  symlinkSync(real, link, "junction");
+  expect(link).not.toBe(realpathSync(link));
+
+  try {
+    // Everything is driven through the SYMLINKED path, as a user's projectDir
+    // would be.
+    const wt = await createWorktree(link, "agent/via-link");
+    const all = await listWorktrees(link);
+    expect(all.some((w) => w.path === wt.path)).toBe(true);
+    // The round-trip that used to fail: remove it by the path we were handed.
+    await removeWorktree(link, wt.path);
+    expect((await listWorktrees(link)).some((w) => w.path === wt.path)).toBe(false);
+    // The main tree is still recognised as such through the symlink.
+    await expect(removeWorktree(link, link)).rejects.toThrow(/main working tree/);
+  } finally {
+    rmSync(outer, { recursive: true, force: true });
+  }
 });
 
 test("worktreeStatus reports dirty count and last commit (PLAN C6)", async () => {

@@ -132,7 +132,14 @@ test("prompt replays only the last 4 completed exchanges", () => {
 
 // ----- runHelp against a fake claude binary -----
 
-test("runHelp resolves the binary through the login shell and returns stdout", async () => {
+// The two tests below pin `platform: "linux"` and drive a `#!/bin/sh` fixture
+// through `shell: "/bin/sh"` — they exercise the POSIX branch BY CONSTRUCTION
+// and there is no /bin/sh to run them against on a Windows runner. The Windows
+// command SHAPE is covered by the pure adapter tests (which pass an explicit
+// platform), and the OS-agnostic runHelp contract by the two tests after them.
+const posixOnly = process.platform === "win32" ? test.skip : test;
+
+posixOnly("runHelp resolves the binary through the login shell and returns stdout", async () => {
   const dir = tmp();
   const fake = join(dir, "claude");
   writeFileSync(fake, '#!/bin/sh\necho "fake answer: $2"\n', "utf-8");
@@ -149,7 +156,7 @@ test("runHelp resolves the binary through the login shell and returns stdout", a
   expect(out).toBe("fake answer: which item next?");
 });
 
-test("runHelp surfaces a failing invocation as a rejected promise", async () => {
+posixOnly("runHelp surfaces a failing invocation as a rejected promise", async () => {
   const dir = tmp();
   const fake = join(dir, "claude");
   writeFileSync(fake, '#!/bin/sh\necho "boom" >&2\nexit 1\n', "utf-8");
@@ -162,6 +169,20 @@ test("runHelp surfaces a failing invocation as a rejected promise", async () => 
     platform: "linux"
   });
   await expect(runHelp({ command: cmd, shell: "/bin/sh", cwd: dir })).rejects.toThrow(/boom/);
+});
+
+// Same executor, no fixture and no shell override: `echo` and a missing binary
+// behave the same in sh and in PowerShell, so these run on every OS and keep
+// Windows covered for the marker-stripping / stdout / rejection contract.
+test("runHelp strips its start marker and returns the command's stdout", async () => {
+  const out = await runHelp({ command: "echo hello-from-help", shell: "", cwd: tmp() });
+  expect(out).toBe("hello-from-help");
+});
+
+test("runHelp rejects when the command cannot run", async () => {
+  await expect(
+    runHelp({ command: "definitely-not-a-command-xyz", shell: "", cwd: tmp() })
+  ).rejects.toThrow();
 });
 
 // ----- plan import prompt (PLAN C7, code constant like the help prompt) -----

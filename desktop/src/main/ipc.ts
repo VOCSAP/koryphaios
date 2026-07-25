@@ -60,6 +60,7 @@ import {
 import { markProviderUsed } from './usage-service'
 import { listExplorerDir, readExplorerFile } from './explorer-service'
 import {
+  canonicalPath,
   createWorktree,
   listWorktrees,
   removeWorktree,
@@ -591,8 +592,11 @@ export function registerIpc({
     return Promise.all(
       worktrees.map(async (w) => {
         const status = await worktreeStatus(w.path)
+        // Both sides canonical: a session spawned in the MAIN tree carries the
+        // projectDir as cwd, which can be the symlinked form (macOS /var) while
+        // git reports the real one — comparing raw would drop the attachment.
         const attached = sessions.find(
-          (s) => s.worktree?.path === w.path || resolvePath(s.cwd) === w.path
+          (s) => s.worktree?.path === w.path || canonicalPath(s.cwd) === w.path
         )
         return {
           ...w,
