@@ -114,6 +114,24 @@ discovery.
   announce/colour and a single-lead crown, rendered hierarchically (lead
   top-center). Applying a template only crowns its lead when the window has
   none.
+- **Sandbox mode (🏺 Docker rail view).** Per-project switch that runs NEW
+  sessions inside a persistent Docker/Podman container (`kory-sbx-<hash>`)
+  instead of on the machine. Two work modes: *mount* (the project itself is
+  bind-mounted at `/work` -- the sandbox protects the rest of the machine) or
+  *ephemeral copy* (a throwaway `git clone --local` is mounted instead, plus
+  an operator allow-list of gitignored globs; secrets and `node_modules` are
+  never copied). The container's Claude login lives in a shared
+  `kory-claude-auth` volume -- one blocking first-run modal with an embedded
+  login terminal, and agents stay blocked until it succeeds, so the prompt
+  never appears per tile. Your global `CLAUDE.md`/agents/skills/plugins/
+  settings are COPIED in at each start (never mounted: a mounted
+  `settings.json` would let a sandboxed agent plant a hook that runs on the
+  host), with a `~/.claude/sandbox-overrides/` overlay for Windows-only
+  hooks. The broker bridge is probed for real from inside the container, dev
+  ports are published to `127.0.0.1`, transcripts live in the volume (so
+  resume survives a rebuild), and containers are stopped -- never removed --
+  on app close. The supervisor stays on the host and gains
+  `deck_sandbox_exec`. Full guide: [docs/sandbox.md](docs/sandbox.md).
 - **Safety nets.** Before an agent spawns into a dirty working tree, the Deck
   anchors a `git stash create` snapshot under `refs/claude-peers/` (restore
   command in the journal; auto-purged after 7 days). A `launchCommand` coming
@@ -536,6 +554,11 @@ src/
     shell-command.ts      pure shell-invocation builder (login vs interactive)
     session-service.ts    session list, runtime state, spawn + background id discovery
     session-transcript.ts encode cwd -> projects dir, transcript existence + discovery
+    sandbox-command.ts    pure sandbox builders (naming, path/env mapping, engine argv)
+    sandbox-service.ts    container lifecycle, auth/image/bridge probes, config projection
+    sandbox-store.ts      per-project sandbox settings (app state, never the repo)
+    sandbox-copy.ts       ephemeral-clone file selection (globs + hard deny list)
+    sandbox-projection.ts operator ~/.claude allow-list + host-only hook detection
     desk-session.ts       read/clear the deterministic per-tile session-id back-channel
     open-id-registry.ts   guard against resuming the same id twice
     peer-state.ts         resolve peer_id from the status-line cache

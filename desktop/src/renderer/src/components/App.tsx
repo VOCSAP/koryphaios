@@ -12,6 +12,9 @@ import { ExplorerView } from './ExplorerView'
 import { GitView } from './GitView'
 import { GraphView } from './GraphView'
 import { WorktreesView } from './WorktreesView'
+import { SandboxView } from './SandboxView'
+import { SandboxAuthDialog } from './SandboxAuthDialog'
+import { SandboxBuildDialog } from './SandboxBuildDialog'
 import { JournalView } from './JournalView'
 import { HomeView } from './HomeView'
 import { BrowserView } from './BrowserView'
@@ -99,6 +102,8 @@ export function App(): React.JSX.Element {
   const mobile = useDeck((s) => s.mobile)
   const companionOpen = useDeck((s) => s.companionOpen)
   const usageOpen = useDeck((s) => s.usageOpen)
+  const sandboxAuthOpen = useDeck((s) => s.sandboxAuthOpen)
+  const sandboxBuildOpen = useDeck((s) => s.sandboxBuildOpen)
   const supervisorId = useDeck((s) => s.sessions.find((x) => x.supervisor)?.id ?? null)
 
   useEffect(() => {
@@ -344,6 +349,11 @@ export function App(): React.JSX.Element {
           <WorktreesView />
         </ErrorBoundary>
       )}
+      {view === 'sandbox' && (
+        <ErrorBoundary scope="sandbox">
+          <SandboxView />
+        </ErrorBoundary>
+      )}
       {view === 'journal' && (
         <ErrorBoundary scope="journal">
           <JournalView />
@@ -355,6 +365,16 @@ export function App(): React.JSX.Element {
         </ErrorBoundary>
       )}
       {workspacesOpen && <WorkspacesDialog />}
+      {sandboxAuthOpen && !remote && (
+        <ErrorBoundary scope="sandbox">
+          <SandboxAuthDialog />
+        </ErrorBoundary>
+      )}
+      {sandboxBuildOpen && !remote && (
+        <ErrorBoundary scope="sandbox">
+          <SandboxBuildDialog />
+        </ErrorBoundary>
+      )}
       {saveAsOpen && <SaveAsDialog />}
       {templatesOpen && <TemplatesDialog />}
       {exportTemplateOpen && <ExportTemplateDialog />}

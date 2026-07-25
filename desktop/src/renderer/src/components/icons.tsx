@@ -13,7 +13,8 @@ import type { DeckView, RoadmapKind } from '@shared/types'
 // (Κορυφαῖος leads the chorus): temple = supervisor's home, theatre mask =
 // agents (the chorus), armillary sphere = browser, sealed scroll = files,
 // labyrinth = roadmap, constellation = graph, olive branch = worktrees,
-// open volumen = journal, winged tablet = companion, caduceus = inbox
+// pithos = the sandbox container (Diogenes lived in his jar), open volumen =
+// journal, winged tablet = companion, caduceus = inbox
 // (Hermes carries the messages), amphora = usage limits (the level left in
 // the jar). Git keeps the universal branch graph — recognisability wins over
 // lore for SCM.
@@ -118,6 +119,16 @@ const IconOlive = (
     <path d="M12.6 12.2C10.6 12.6 8.8 11.8 8 9.9c2.1-.5 3.9.3 4.6 2.3Z" />
     <path d="M14.9 8.9c-.4-2 .4-3.8 2.3-4.6.5 2.1-.3 3.9-2.3 4.6Z" />
     <path d="M10 15.6c-1.9.4-3.6-.3-4.4-2.1 1.9-.5 3.6.2 4.4 2.1Z" />
+  </Svg>
+)
+
+/** Pithos (Diogenes' storage jar, lidded and banded): the sandbox container. */
+const IconPithos = (
+  <Svg>
+    <path d="M8.2 4.5h7.6" />
+    <path d="M9.2 4.5v1.7c-2.5 1-4 3.1-4 5.7 0 3.5 2.1 6.3 4.5 7.6h4.6c2.4-1.3 4.5-4.1 4.5-7.6 0-2.6-1.5-4.7-4-5.7V4.5" />
+    <path d="M6 13.2h12" />
+    <path d="M7.3 16.4h9.4" />
   </Svg>
 )
 
@@ -717,7 +728,7 @@ export const GLYPH_ACTIONS = {
   wand: IconWand
 }
 
-/** Every place a rail glyph can appear: the 9 views + the rail extras. */
+/** Every place a rail glyph can appear: the rail views + the rail extras. */
 export type GlyphName = DeckView | 'companion' | 'inbox' | 'usage' | 'more'
 
 export const GLYPHS: Record<GlyphName, React.JSX.Element> = {
@@ -729,6 +740,7 @@ export const GLYPHS: Record<GlyphName, React.JSX.Element> = {
   roadmap: IconLabyrinth,
   graph: IconConstellation,
   worktrees: IconOlive,
+  sandbox: IconPithos,
   journal: IconVolumen,
   companion: IconWingedTablet,
   inbox: IconCaduceus,

@@ -16,6 +16,21 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   run, re-armed on restart, journaled via the `startup-ack` event. The
   project-sourced MCP-server consent dialog is deliberately NOT auto-acked —
   that trust decision stays with the operator).
+- **Sandbox mode (🏺 Docker rail view, SBX1–SBX5)**: per-project
+  toggle that runs NEW sessions inside a persistent Docker/Podman container
+  (`kory-sbx-<hash12>`, project bind-mounted at `/work`, `sleep infinity` +
+  one `docker exec` per session via a launch script under `/kory-run` — no
+  PowerShell→bash double quoting). Deterministic per-project naming, shared
+  `kory-claude-auth` volume on `~/.claude` (one CLI login for every project,
+  done in a blocking first-run modal with an embedded auth terminal — agents
+  cannot spawn until authenticated, `sandboxGate` in create-session.ts), the
+  broker bridged through `host.docker.internal`, supervisor exempt (host-side
+  pilot). Containers are STOPPED on app close, never removed — lifecycle
+  (start/stop/rebuild/remove) lives in the Docker rail view, guarded by
+  `hasLiveSessions()` exactly like the toggle. Settings in app-state
+  `sandbox.json` (operator-owned, never the repo). Design + jalons M2/M3:
+  the two "Sandbox mode" CHANGELOG entries; operator docs:
+  `desktop/docs/sandbox.md`.
 - **Supervisor (Home rail)**: a Claude session piloting the app through a
   loopback deck-control endpoint + dependency-free MCP stdio bridge, injected
   only into the supervisor via a generated `--mcp-config`.

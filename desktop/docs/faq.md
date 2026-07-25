@@ -101,6 +101,38 @@ Same Wi-Fi network required; the access is LAN-only, HTTPS with a
 self-signed certificate (accept the browser warning). The QR token is
 one-time: restart mobile access to pair again.
 
+## Sandbox (Docker)
+
+**Every session asks me to log in to Claude.**
+It should not: the login happens once, in a dedicated modal, and agents are
+blocked until it succeeds. If you see the prompt inside agent tiles instead,
+the sandbox was likely enabled while sessions were already running — close
+them and reopen. The credentials live in the shared `kory-claude-auth`
+volume; "Disconnect" in the Docker view clears them deliberately.
+
+**The Docker view says the broker bridge is unreachable.**
+Peer messaging, the roadmap and the operator inbox go through the host
+broker. With Docker Desktop it works out of the box; on a native Linux
+engine the broker also has to listen beyond loopback
+(`CLAUDE_PEERS_BIND_HOST=0.0.0.0`, plus a `broker_token`).
+
+**My gitignored planning notes are missing in ephemeral-copy mode.**
+The clone only carries tracked files. List the notes as globs in the Docker
+view ("Gitignored files to copy in"). Secrets (`.env*`, keys, `.ssh`,
+`.aws`) and bulk (`node_modules`, `.venv`) are never copied whatever you
+list — that is deliberate.
+
+**My hooks don't fire inside the sandbox.**
+A PowerShell / `.ps1` / `C:\…` hook cannot run in the Linux container; the
+Docker view lists the ones it detected. Put Linux equivalents in
+`~/.claude/sandbox-overrides/` (a same-named file there replaces the base
+one when projecting).
+
+**I installed something in the container and it vanished.**
+Rebuild recreates the container from the image, dropping hand-installed
+state. Use it when you want reproducibility; otherwise just stop/start (the
+app stops the container on close and never deletes it).
+
 ## Packaged builds (Windows)
 
 **Double-clicking the exe does nothing / ICU error in a console.**

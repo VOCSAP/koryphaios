@@ -35,7 +35,7 @@ workspaces (each tile resumes its Claude conversation). English / French UI.
 
 **AI orchestrator cockpit**:
 
-- **Navigation rail**: Home (supervisor) | Agents (tiles) | Roadmap | Worktrees | Journal.
+- **Navigation rail**: Home (supervisor) | Agents (tiles) | Roadmap | Worktrees | Docker (sandbox) | Journal.
 - **Supervisor session (Home)**: a Claude session that PILOTS the app through a locked, code-constant harness -- it reads the roadmap, spawns briefed agent tiles (14 `deck_*` MCP tools behind a loopback control endpoint) and coordinates them over the peers messaging.
 - **Shared roadmap view**: MoSCoW backlog with operator CRUD, "launch an agent on this item", plan-file import by a one-shot agent, and a **dispatch queue** that sends items one by one to the team-lead (auto-dispatching the next when one turns `done`).
 - **Directive cards (context/token economy)**: a special roadmap card the Deck itself executes — when it reaches the dispatch queue head, the app types `/clear` (a free, zero-inference context reset), `/compact`, or `/magic-compact` into the terminals of the targeted sessions to shrink their context window and save tokens; agents never run it themselves. The operator queues them from the Workflow lane; the team-lead / supervisor can too (`roadmap_add` kind `directive`). `magic_compact` prefers the [Magic Compact](https://github.com/aerovato/Magic-compact) plugin (deterministic, re-enters the compacted session in place) with a `/compact` fallback, gated by a per-machine feature flag.
@@ -46,6 +46,7 @@ workspaces (each tile resumes its Claude conversation). English / French UI.
 - **Awareness**: quota auto-resume (opt-in), "needs you" detection with clickable notifications, per-window activity journal 📜 with text export.
 - **Help assistant "?" and resume digest 📋**: throwaway read-only `claude -p` invocations grounded in the live app state (digest sources are configured in the GLOBAL config only -- never per repo).
 - **Templates**: hierarchical composer (lead top-center) to create/edit team recipes without spawning; applying never steals an existing crown.
+- **Sandbox mode 🏺 (Docker/Podman)**: run a project's sessions inside a persistent per-project container instead of on the machine, with the project bind-mounted -- or, in *ephemeral copy* mode, a throwaway `git clone` of it plus an allow-list of gitignored files (secrets and `node_modules` never travel). One shared Docker volume carries the container's Claude login (a single blocking first-run modal, never a prompt per tile); your global `CLAUDE.md`, agents, skills and hooks are COPIED in at each start (never mounted -- a mounted `settings.json` would let a sandboxed agent plant a host hook). Containers are stopped on app close and removed only on demand, so tomorrow's session resumes where you left it. The supervisor stays on the host and gains `deck_sandbox_exec` ("add this dependency to the instance"). See **[desktop/docs/sandbox.md](desktop/docs/sandbox.md)**.
 - **Safety**: git checkpoint (`git stash create` + `refs/claude-peers/*`) before spawning into a dirty tree, and a first-use approval dialog for any project-provided `launchCommand`. Every agent prompt (supervisor, import, reviewer, dispatch, digest, help) is a code constant -- never operator/repo-configurable.
 
 ```bash

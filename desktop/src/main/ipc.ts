@@ -12,9 +12,13 @@ import type {
   LaunchConfig,
   RoadmapListFilters,
   RoadmapUpsertFields,
+  SandboxContainerAction,
+  SandboxSettingsPatch,
   SessionRuntime,
   StopResult
 } from '@shared/types'
+import type { SandboxService } from './sandbox-service'
+import { buildAuthCommand, SANDBOX_AUTH_PTY_ID, SANDBOX_BUILD_PTY_ID } from './sandbox-command'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
 import { buildHelpPrompt, buildHelpSystemPrompt, sanitizeHelpSelection } from './help-assistant'
 import { buildWandPrompt, WAND_SYSTEM_PROMPT, type WandDraft } from './context-wand'
@@ -160,6 +164,14 @@ interface IpcDeps {
   brokerRetry: () => void
   /** deck-plugin dir (built hook/mcp/design assets), '' when the build was skipped. */
   deckPluginDir: string
+  /** Sandbox container lifecycle for this project (PLAN-SANDBOX). */
+  sandbox: SandboxService
+  /**
+   * Pre-spawn readiness gate handed to createSessionWithWorktree (SBX3/M3):
+   * resolves the EFFECTIVE project root (the ephemeral clone in copy mode),
+   * or null when the sandbox is off.
+   */
+  sandboxGate: () => Promise<string | null>
 }
 
 export function registerIpc({
@@ -180,14 +192,23 @@ export function registerIpc({
   resolveTemplateInputs,
   brokerStatus,
   brokerRetry,
-  deckPluginDir
+  deckPluginDir,
+  sandbox,
+  sandboxGate
 }: IpcDeps): void {
   // ----- sessions -----
   regHandle('sessions:list', () => service.list())
   // Worktree handling (PLAN C4) lives in the shared create path, also used by
   // the supervisor's deck-control spawn.
   regHandle('sessions:create', (_e, input: CreateSessionInput) =>
-    createSessionWithWorktree(service, getConfig().projectDir, input ?? {}, checkpoint, getWorktreeInit())
+    createSessionWithWorktree(
+      service,
+      getConfig().projectDir,
+      input ?? {},
+      checkpoint,
+      getWorktreeInit(),
+      sandboxGate
+    )
   )
   regHandle('sessions:remove', (_e, id: string) => service.remove(id))
   regHandle('sessions:rename', (_e, id: string, name: string) => service.rename(id, name))
@@ -370,6 +391,75 @@ export function registerIpc({
 
   regHandle('browser:demo-cancel', () => cancelDemoRun())
 
+  // ----- sandbox mode (PLAN-SANDBOX SBX2–SBX5, M2/M3) -----
+  regHandle('sandbox:status', (_e, force?: boolean) => sandbox.status(!!force))
+  // The settings guard (SBX2): main-side, not just UI — changing WHERE agents
+  // execute while agents run would strand live PTYs across the boundary.
+  regHandle('sandbox:patch-settings', (_e, patch: SandboxSettingsPatch) => {
+    if (service.hasLiveSessions()) throw new Error('sandbox-live-sessions')
+    return sandbox.patchSettings(patch ?? {})
+  })
+  regHandle('sandbox:set-image', (_e, image: string) => {
+    if (service.hasLiveSessions()) throw new Error('sandbox-live-sessions')
+    sandbox.setImage(typeof image === 'string' ? image : '')
+    return sandbox.status(true)
+  })
+  regHandle('sandbox:ensure', () => sandbox.ensure())
+  // Image build in a utility PTY: a long, log-heavy job belongs in a terminal
+  // the operator can read, not behind a spinner.
+  regHandle('sandbox:image-build', () => {
+    const cfg = getConfig()
+    service.spawnUtility(SANDBOX_BUILD_PTY_ID, cfg.projectDir, {
+      command: sandbox.imageBuildCommand(),
+      shell: cfg.shell,
+      interactive: false
+    })
+    journal.add('session', 'sandbox: image build started')
+    return SANDBOX_BUILD_PTY_ID
+  })
+  regHandle('sandbox:build-stop', () => service.killUtility(SANDBOX_BUILD_PTY_ID))
+  regHandle('sandbox:auth-purge', async () => {
+    // A running work container holds the volume: disconnecting under it would
+    // strand a live agent mid-turn (docs/sandbox.md, authentication).
+    if (await sandbox.anyRunning()) throw new Error('sandbox-container-running')
+    return sandbox.purgeAuth()
+  })
+  regHandle('sandbox:reset-copy', () => {
+    if (service.hasLiveSessions()) throw new Error('sandbox-live-sessions')
+    return sandbox.resetCopy()
+  })
+  regHandle('sandbox:probe-bridge', () => sandbox.probeBrokerBridge())
+  regHandle('sandbox:list', () => sandbox.list())
+  regHandle('sandbox:container-action', async (_e, name: string, action: SandboxContainerAction) => {
+    // Guard the CURRENT project's container while sessions run in it; the
+    // name itself is re-validated (shape + kory.sandbox label) inside the
+    // service before it ever reaches the engine CLI (hostile input #3).
+    if (name === sandbox.containerName && action !== 'start' && service.hasLiveSessions()) {
+      throw new Error('sandbox-live-sessions')
+    }
+    await sandbox.containerAction(name, action)
+  })
+  // First-run login (SBX3): ensure the container, then open the auth terminal
+  // on the reserved utility PTY. Returns null when already authenticated so
+  // the dialog can short-circuit to its success state.
+  regHandle('sandbox:auth-start', async () => {
+    const st = await sandbox.ensure()
+    if (!st.engine || st.containerState !== 'running') {
+      throw new Error(st.error || 'sandbox container not ready')
+    }
+    if (st.authed === true) return null
+    const cfg = getConfig()
+    service.spawnUtility(SANDBOX_AUTH_PTY_ID, cfg.projectDir, {
+      command: buildAuthCommand(st.engine, sandbox.containerName),
+      shell: cfg.shell,
+      interactive: false
+    })
+    journal.add('session', 'sandbox: login terminal opened')
+    return SANDBOX_AUTH_PTY_ID
+  })
+  regHandle('sandbox:auth-stop', () => service.killUtility(SANDBOX_AUTH_PTY_ID))
+  regHandle('sandbox:auth-probe', () => sandbox.probeAuth())
+
   // ----- config -----
   // The renderer never sees provider secrets: localProviders are sanitized to
   // a `hasKey` marker (C29). setConfig (index.ts) does the mirror encryption,
@@ -399,7 +489,14 @@ export function registerIpc({
   regHandle('workspace:save', (_e, name?: string) =>
     name && name.trim() ? workspaces.saveNamed(name) : workspaces.saveAuto()
   )
-  regHandle('workspace:restore', (_e, id: string) => {
+  regHandle('workspace:restore', async (_e, id: string) => {
+    // Restore respawns straight through SessionService (no create gate), so
+    // the container-side transcript cache must be warm here or every restored
+    // tile would look "expired" and start fresh (PLAN-SANDBOX M2).
+    if (sandbox.isEnabled()) {
+      await sandbox.ensure()
+      await sandbox.refreshTranscripts(sandbox.effectiveRoot())
+    }
     const ok = workspaces.restore(id)
     if (ok) {
       const current = workspaces.listForCwd().find((w) => w.current) ?? null
@@ -1008,4 +1105,5 @@ export function registerIpc({
   service.on('thinking', (e) => broadcast('session:thinking', e))
   service.on('quota', (e) => broadcast('session:quota', e))
   service.on('attention', (e) => broadcast('session:attention', e))
+  sandbox.on('changed', (st) => broadcast('sandbox:changed', st))
 }

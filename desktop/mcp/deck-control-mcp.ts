@@ -130,6 +130,18 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {} }
   },
   {
+    name: 'deck_sandbox_exec',
+    description:
+      "Run a shell command inside THIS project's sandbox container (sandbox mode only) — e.g. install a dependency the agents need. Runs as the container user in /work, times out after 5 min, returns {code, stdout, stderr} (clipped). Fails when sandbox mode is off for the project.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        command: { type: 'string', description: 'Shell command, e.g. "bun add zod".' }
+      },
+      required: ['command']
+    }
+  },
+  {
     name: 'deck_restart_session',
     description: 'Restart a session tile by id (fork-resumes its conversation).',
     inputSchema: {

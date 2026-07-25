@@ -14,6 +14,9 @@ import type {
   PtyExitEvent,
   RoadmapListFilters,
   RoadmapUpsertFields,
+  SandboxContainerAction,
+  SandboxSettingsPatch,
+  SandboxStatus,
   SessionAttentionEvent,
   SessionQuotaEvent,
   SessionRuntime,
@@ -95,6 +98,24 @@ const api: DeckApi = {
   pickDirectory: () => ipcRenderer.invoke('dialog:pickDirectory'),
 
   getI18n: () => ipcRenderer.invoke('i18n:get'),
+
+  sandboxStatus: (force?: boolean) => ipcRenderer.invoke('sandbox:status', force),
+  sandboxPatchSettings: (patch: SandboxSettingsPatch) =>
+    ipcRenderer.invoke('sandbox:patch-settings', patch),
+  sandboxSetImage: (image: string) => ipcRenderer.invoke('sandbox:set-image', image),
+  sandboxEnsure: () => ipcRenderer.invoke('sandbox:ensure'),
+  sandboxImageBuild: () => ipcRenderer.invoke('sandbox:image-build'),
+  sandboxBuildStop: () => ipcRenderer.invoke('sandbox:build-stop'),
+  sandboxAuthPurge: () => ipcRenderer.invoke('sandbox:auth-purge'),
+  sandboxResetCopy: () => ipcRenderer.invoke('sandbox:reset-copy'),
+  sandboxProbeBridge: () => ipcRenderer.invoke('sandbox:probe-bridge'),
+  sandboxList: () => ipcRenderer.invoke('sandbox:list'),
+  sandboxContainerAction: (name: string, action: SandboxContainerAction) =>
+    ipcRenderer.invoke('sandbox:container-action', name, action),
+  sandboxAuthStart: () => ipcRenderer.invoke('sandbox:auth-start'),
+  sandboxAuthStop: () => ipcRenderer.invoke('sandbox:auth-stop'),
+  sandboxAuthProbe: () => ipcRenderer.invoke('sandbox:auth-probe'),
+  onSandboxChanged: (cb: (status: SandboxStatus) => void) => subscribe('sandbox:changed', cb),
 
   listWorkspaces: () => ipcRenderer.invoke('workspace:list'),
   saveWorkspace: (name?: string) => ipcRenderer.invoke('workspace:save', name),

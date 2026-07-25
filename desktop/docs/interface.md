@@ -14,6 +14,7 @@ The vertical rail switches the main view:
 | Roadmap | The shared per-project backlog (see [roadmap.md](roadmap.md)) |
 | Graph | Branching multi-model chats (see [graph.md](graph.md)) |
 | ⎇ Worktrees | Every git worktree of the repo with status and attached session |
+| 🏺 Docker | Sandbox mode: run this project's sessions inside a persistent Docker/Podman container (see [sandbox.md](sandbox.md)) |
 | 📜 Journal | The window's activity journal |
 | Usage | The amphora's liquid level shows the mean remaining session quota of the providers this run uses (green / amber / red tone). Clicking opens a foreground modal with the subscription quota gauges of the detected CLIs (Claude Code / Codex / Antigravity): session + weekly windows, % used, reset time, Claude extra-usage credits. Providers whose CLI is absent are hidden; a provider that is installed but signed out shows a "not connected" note. Data is cached 3 min (↻ bypasses); Codex falls back to its last local session snapshot when the app-server is unreachable |
 | ✉ Inbox | The operator inbox panel (unread bubble on the rail) |

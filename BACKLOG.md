@@ -214,7 +214,7 @@ l'opérateur sur une machine avec affichage.
     (process non redémarré → peer_id et harness conservés), et que le harness de
     démarrage (`--append-system-prompt-file`, serveurs MCP) survit au switch de
     session in-app. Si A régresse : basculer sur l'option B (`restart` fork-resume,
-    même panneau) puis C (kill+respawn), déjà documentées dans `PLAN-DIRECTIVES.md`.
+    même panneau) puis C (kill+respawn), détaillées dans l'historique git.
   - **Fiabilité de la capture de la bannière `/resume <id>`** (surgi de la
     revue de code) : `parseMagicResume` s'appuie sur `stripAnsi` (ancré ESC) +
     une regex tolérant un écart de 240 car. entre « to enter the compacted
@@ -366,7 +366,7 @@ l'opérateur sur une machine avec affichage.
 - [ ] **Sync GitHub Issues ↔ roadmap partagée** : le modèle `roadmap_items`
       garde la porte ouverte (tags + futur champ `external_url`).
 
-### 3.7 Cartes directives — increments différés (CT6, ex-`PLAN-DIRECTIVES.md`)
+### 3.7 Cartes directives — increments différés (CT6)
 
 - [ ] **Directive `clear_briefing`** : le Deck lance le digest existant
       (`digest.ts` via `utility-inference.ts`, Haiku par défaut) sur des sources
@@ -389,6 +389,107 @@ l'opérateur sur une machine avec affichage.
       (le `handoff='file'` ajoute l'instruction de maintien d'un fichier de plan,
       `kleos`/`off` la retirent).
 
+### 3.8 Sandbox Docker — validation terrain (implémentation terminée)
+
+Le mode sandbox est **entièrement implémenté** (toggle et mode de travail par
+projet, conteneur persistant `kory-sbx-<hash>`, volume d'auth partagé + modale
+de login bloquante, vue rail Docker, wrapping `docker exec`, projection de la
+config opérateur, `deck_sandbox_exec`, resume côté conteneur, mode copie
+éphémère). Narratif de conception : les deux entrées « Sandbox mode » du
+`CHANGELOG.md`. Doc opérateur : `desktop/docs/sandbox.md`.
+
+> **Backend distant (SSH / LXC Proxmox) : ABANDONNÉ** (décision opérateur,
+> 2026-07-25). Docker couvre le besoin ; la piste Proxmox était une analogie
+> de départ, pas une exigence. Ne pas la rouvrir sans nouveau besoin explicite.
+
+Reste **uniquement de la validation sur poste réel** — rien n'est testable en
+CI (pas de moteur de conteneurs, pas d'affichage). À dérouler sur Windows +
+Docker Desktop en priorité, c'est la cible principale :
+
+**Mise en route**
+- [ ] Détection moteur : Docker Desktop présent / arrêté / absent → les trois
+      libellés de la carte Mode sont-ils justes (et le lien d'installation
+      visible quand rien n'est détecté) ?
+- [ ] **Build de l'image** depuis la vue (`Construire l'image`) : le log
+      défile dans le terminal de la modale, la fin met le badge à « présente »,
+      fermer en cours de build ne laisse pas d'image à moitié construite.
+- [ ] Image absente → un spawn est refusé avec le message explicite (et pas un
+      échec silencieux de conteneur).
+
+**Authentification (le point le plus sensible)**
+- [ ] Premier spawn sandbox → la **modale bloquante** s'ouvre, *Suivant* lance
+      le terminal, le flow OAuth du CLI aboutit (URL ouverte dans le navigateur
+      du poste, code recollé), la modale se ferme seule et le toast apparaît.
+- [ ] **Aucune invitation de login n'apparaît dans les tuiles d'agent** — c'est
+      toute la raison d'être de la garde.
+- [ ] Deuxième projet (autre fenêtre Deck) : démarre **déjà authentifié**
+      (volume partagé), sans repasser par la modale.
+- [ ] `Ré-authentifier` relance la cinématique à tout moment ; `Déconnecter`
+      est refusé tant qu'un conteneur sandbox tourne, accepté sinon.
+- [ ] Simuler l'expiration (déconnecter puis spawner) → même cinématique.
+
+**Cycle de vie**
+- [ ] Fermer l'app → le conteneur est **arrêté, pas supprimé** (`docker ps -a`).
+- [ ] Rouvrir le lendemain → `docker start` et les sessions repartent avec ce
+      qui avait été installé à la main dedans.
+- [ ] Deux projets en parallèle → deux conteneurs, aucun conflit de nom/port.
+- [ ] `Reconstruire` recrée depuis l'image (état manuel perdu, badge de dérive
+      qui disparaît) ; `Supprimer` demande confirmation et ne touche ni au
+      volume d'auth ni au dossier projet.
+- [ ] Toutes les actions sur le conteneur du projet courant sont refusées tant
+      qu'une session tourne (message clair, pas un échec muet).
+
+**Intégration**
+- [ ] **Pont broker** : badge « joignable » sur Docker Desktop ; messagerie
+      entre pairs, inbox opérateur et roadmap fonctionnent depuis une session
+      sandboxée. Sur moteur Linux natif, vérifier que la consigne
+      `CLAUDE_PEERS_BIND_HOST` affichée suffit à passer au vert.
+- [ ] **Resume** : fermer l'app avec des sessions actives, rouvrir, restaurer
+      l'espace → les conversations reprennent (et survivent à un
+      `Reconstruire`, les transcripts étant dans le volume).
+- [ ] **Mode Web** : dev-server lancé par un agent sandboxé sur un port publié
+      → visible dans la vue Browser en `http://localhost:<port>`.
+- [ ] **Compagnon** : appairer un téléphone pendant qu'une session sandboxée
+      tourne → tuiles, diff et git restent corrects ; les canaux `sandbox:*`
+      de confiance sont bien refusés côté distant.
+- [ ] **`deck_sandbox_exec`** : demander au superviseur « installe X dans le
+      sandbox » → exécution dans le conteneur, sortie remontée, entrée journal.
+
+**Projection de la config opérateur**
+- [ ] Le `CLAUDE.md` global, les agents et les skills sont bien actifs dans une
+      session sandboxée (les vérifier depuis l'agent lui-même).
+- [ ] Les hooks Windows sont listés comme non exécutables, et un équivalent
+      déposé dans `~/.claude/sandbox-overrides/` est bien pris à la place.
+- [ ] Vérifier qu'aucun `.credentials.json` hôte n'a été copié dans le
+      conteneur (`docker exec <ctn> ls -la ~/.claude`).
+
+**Mode copie éphémère**
+- [ ] Bascule `Copie éphémère` → conteneur recréé, clone présent, sessions et
+      `git worktree add` atterrissent dans le clone (pas dans le vrai dépôt).
+- [ ] Les globs gitignorés configurés (ex. `PLAN-*.md`) arrivent dans le clone ;
+      un glob sans correspondance est bien signalé.
+- [ ] **Aucun secret ne voyage** : poser un `.env` et un `node_modules` dans le
+      projet, demander `**` en glob, vérifier qu'ils ne sont PAS dans le clone.
+- [ ] Le vrai dossier projet reste intact après une session qui écrit beaucoup.
+- [ ] Sortie du travail : `git push origin <branche>` depuis une session
+      sandboxée ramène bien la branche dans le dépôt réel.
+- [ ] `Réinitialiser le clone` repart d'un clone propre.
+
+**Performance / confort**
+- [ ] Mesurer un `git status` et un build dans un projet monté depuis `C:\…`
+      vs le même projet placé dans le système de fichiers WSL2 — documenter
+      l'écart dans `desktop/docs/sandbox.md` si l'écart est notable.
+- [ ] Matrice moteurs : Podman Desktop, et si possible OrbStack / Colima
+      (résolution de `host.docker.internal`, `--add-host`, `docker cp`).
+
+**Résiduels connus (à trancher à l'usage, pas des bugs)**
+- [ ] Changer la liste des ports publiés impose un « Reconstruire » (limite
+      moteur). Voir si un reverse-proxy hôte ou `--network=host` (Linux)
+      offrirait une UX moins brutale.
+- [ ] `detectHostOnlyHooks` ne scanne que les champs `command` de
+      `settings.json` ; les permissions/env qui référencent des chemins hôte
+      ne sont pas détectées. À élargir si l'usage le montre.
+
 ---
 
 ## 4. Maintenance / dette technique
@@ -397,6 +498,22 @@ l'opérateur sur une machine avec affichage.
       `server-*`, `config-*`) **ne tourne jamais en CI** (seul `desktop-*` y
       passe). *Fort ROI, faible coût.* Ajouter un job `bun test` cœur + smoke
       build sur les chemins cœur.
+- [ ] **M-MNT-4** — **CI rouge de longue date sur macOS/Windows** (workflow
+      `desktop-build`, `bun test tests/desktop-*.test.ts`). Mesuré sur
+      `experimental` @79c931b4 : ubuntu 1 échec, macOS 4, windows 8. Le lot
+      sandbox en a supprimé un partout (`flushJournalSnapshot`, pourriture par
+      horloge — voir `TESTING.md`) ; ubuntu est donc **vert** depuis. Restent,
+      tous **préexistants et sans rapport avec le sandbox** :
+  - **3 tests `desktop-worktree` (macOS + Windows)** — `createWorktree`,
+    `removeWorktree`, « dirty worktree refusé ». Cause : le test compare un
+    chemin `resolve()` au chemin que **git** rapporte, or le tmpdir des
+    runners est un lien symbolique (macOS `/var` → `/private/var`) ou un nom
+    court 8.3 (Windows `C:\Users\RUNNER~1`). C'est un problème de
+    **realpath**, pas de logique worktree : corriger en `realpathSync` des
+    deux côtés de la comparaison (test ou `worktree-service`, à trancher).
+  - **4 tests Windows uniquement** — `collectSources`, `runHelp` ×2,
+    « codex/gemini targets ». Cause : hypothèses de shell POSIX
+    (`bash -lc`, redirections) sur un runner PowerShell.
 - [ ] **M-MNT-2** — config éparpillée : ~20 `parseInt(process.env…)` hors de
       `config.ts` à rapatrier (env > fichier > défaut, validation centralisée).
 - [ ] **M-MNT-3** — fonctions surdimensionnées (`handleRegister` ~150 l,

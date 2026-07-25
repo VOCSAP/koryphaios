@@ -112,3 +112,9 @@ the terminal. If the launch command is a shell alias, enable
 with start-marker noise stripping). A `launchCommand` coming from a
 **project's** config triggers a one-time approval dialog (sha256 remembered
 per project; refusal falls back to the global command).
+
+With **sandbox mode** on ([sandbox.md](sandbox.md)) the same command is
+wrapped: the Deck writes it into a launch script and the PTY runs
+`docker exec -it <container> bash /kory-run/cmd-<id>.sh`, so the session
+executes inside the project's container while the tile behaves identically.
+The supervisor is never wrapped.

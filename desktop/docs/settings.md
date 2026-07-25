@@ -164,6 +164,10 @@ the embedded English base.
 | Annotated screenshots | app state dir (pruned after 7 days) |
 | Roadmap, inbox, graph drafts | the claude-peers broker (SQLite) |
 | Graph chats | app state dir, per project |
+| Sandbox settings (per project) | `sandbox.json` in the app state dir |
+| Sandbox ephemeral clones | `sandbox-copies/<container>/` in the app state dir |
+| Sandbox session launch scripts | `sandbox-run/` in the app state dir |
+| Sandbox Claude login | the `kory-claude-auth` Docker volume (not a file) |
 
 ## Environment variables (advanced)
 
@@ -172,5 +176,8 @@ user-configured): `CLAUDE_PEERS_FORCE_GROUP[_FILE]` / `..._NAME` (group
 pinning), `CLAUDE_PEERS_STATUS_LINE_CACHE=1` and
 `CLAUDE_PEERS_DESK_SESSION` (peer-id / session-id back-channels),
 `CLAUDE_DECK_DESIGN_URL` / `CLAUDE_DECK_DESIGN_TOKEN` (design endpoint).
+In sandbox mode the container additionally receives
+`CLAUDE_PEERS_BROKER_URL` (+ `_TOKEN`) pointed at `host.docker.internal`, so
+the containerized session joins the HOST broker instead of spawning its own.
 The claude-peers server/broker side has its own `CLAUDE_PEERS_*` variables,
 documented in the claude-peers README.

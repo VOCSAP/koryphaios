@@ -23,7 +23,12 @@ import {
 import { AttentionDetector, type AttentionEvent } from './attention'
 import { StartupAckDetector, type StartupAckEvent } from './startup-ack'
 import { OpenIdRegistry } from './open-id-registry'
-import { listTranscriptIds, pickDiscoveredId, transcriptExists } from './session-transcript'
+import {
+  listTranscriptIds,
+  pickDiscoveredId,
+  transcriptExists,
+  type TranscriptEntry
+} from './session-transcript'
 import { clearDeskSessionId, readDeskSessionId } from './desk-session'
 import { reportError } from './log'
 import { DEFAULT_PALETTE, paletteColor } from '@shared/palette'
@@ -75,6 +80,29 @@ const OUTPUT_SCAN_CAP = 65536
 
 /** Outcome of injectCommand, journaled by the caller (CT3). */
 export type DirectiveOutcome = 'sent' | 'no-terminal' | 'busy-timeout'
+
+/**
+ * Sandbox wrapper (PLAN-SANDBOX SBX1), injected by index.ts. `wrap` receives
+ * the fully-composed session command line + host cwd + session env and returns
+ * the replacement PTY command (`docker exec … bash /kory-run/cmd-<id>.sh`),
+ * writing the launch script as a side effect. Kept as a narrow interface so
+ * this service never imports the engine service (and stays electron-lean).
+ */
+export interface SandboxWrapper {
+  wrap(sessionId: string, command: string, cwdHost: string, env: Record<string, string>): string
+}
+/** null = sandbox off. MAY THROW when enabled but the container is not ready. */
+export type SandboxProvider = () => SandboxWrapper | null
+
+/**
+ * Container-side transcript lookup (PLAN-SANDBOX M2 resume). In sandbox mode
+ * transcripts live in the auth VOLUME (`~/.claude/projects/...` inside the
+ * container), invisible to the host readers — so resume must consult this
+ * instead. Returns null when the sandbox is off (host files are authoritative)
+ * and NEVER throws: the spawn path stays synchronous, reading a cache the
+ * sandbox service refreshes on ensure / before restore.
+ */
+export type SandboxTranscriptLookup = (cwdHost: string) => TranscriptEntry[] | null
 
 /**
  * Coordinates the persisted session list, the live PTYs and the resolved
@@ -238,6 +266,54 @@ export class SessionService extends EventEmitter {
     this.launchCommand = command
   }
 
+  // ----- sandbox mode (PLAN-SANDBOX SBX1/SBX3) -----
+
+  /** Injected after construction (index.ts) — a setter, like setLaunchCommand. */
+  private getSandboxWrapper: SandboxProvider = () => null
+
+  /** Container-side transcript lookup; default = "sandbox off, use the host". */
+  private sandboxTranscripts: SandboxTranscriptLookup = () => null
+
+  setSandboxProvider(provider: SandboxProvider, transcripts?: SandboxTranscriptLookup): void {
+    this.getSandboxWrapper = provider
+    if (transcripts) this.sandboxTranscripts = transcripts
+  }
+
+  /**
+   * Transcripts visible for a session's cwd: the container's when the sandbox
+   * owns them, the host's otherwise. One accessor so every resume/discovery
+   * site stays consistent (M2).
+   */
+  private transcriptsOf(cwd: string): TranscriptEntry[] {
+    return this.sandboxTranscripts(cwd) ?? listTranscriptIds(this.home, cwd)
+  }
+
+  private hasTranscript(cwd: string, id: string): boolean {
+    if (!id) return false
+    const sandboxed = this.sandboxTranscripts(cwd)
+    if (sandboxed) return sandboxed.some((e) => e.id === id)
+    return transcriptExists(this.home, cwd, id)
+  }
+
+  /**
+   * Utility PTYs (the sandbox auth terminal): same PtyManager, so pty:input /
+   * pty:resize / pty:data route for free through the existing ipc channels,
+   * but the id never enters `defs` — invisible to sessions:list,
+   * hasLiveSessions() and workspace capture. Detector feeds on its output are
+   * inert (no runtime entry for the id).
+   */
+  spawnUtility(id: string, cwd: string, opts: { command: string; shell: string; interactive: boolean }): void {
+    this.pty.spawn(id, cwd, opts, {})
+  }
+
+  killUtility(id: string): void {
+    this.pty.kill(id)
+  }
+
+  isUtilityAlive(id: string): boolean {
+    return this.pty.isAlive(id)
+  }
+
   /** Start the peer_id poll. No auto-restore: the app opens empty (see ctor). */
   start(): void {
     this.pollTimer = setInterval(() => this.pollPeerIds(), PEER_POLL_MS)
@@ -390,7 +466,7 @@ export class SessionService extends EventEmitter {
     for (const def of this.defs) {
       if (!this.pty.isAlive(def.id)) continue
       const back = readDeskSessionId(def.id, this.peersDir())
-      if (back && back !== def.sessionId && transcriptExists(this.home, def.cwd, back)) {
+      if (back && back !== def.sessionId && this.hasTranscript(def.cwd, back)) {
         this.adoptRealId(def, def.sessionId, back)
       }
     }
@@ -569,14 +645,14 @@ export class SessionService extends EventEmitter {
       // was opened but never used leaves no transcript -> there is nothing to
       // resume, so start it FRESH (a working terminal) rather than show a scary
       // "expired" overlay. Claude writes the transcript only after real activity.
-      if (!def.sessionId || !transcriptExists(this.home, def.cwd, def.sessionId)) {
+      if (!def.sessionId || !this.hasTranscript(def.cwd, def.sessionId)) {
         effectiveMode = 'fresh'
         def.sessionId = '' // -> startPty mints a new id
       }
     }
     r.expired = false
 
-    const before = new Set(listTranscriptIds(this.home, def.cwd).map((e) => e.id))
+    const before = new Set(this.transcriptsOf(def.cwd).map((e) => e.id))
     this.startPty(def, effectiveMode) // INSTANT
     // Fire-and-forget: discovery must never block terminal visibility.
     void this.discoverRealId(def, before)
@@ -612,7 +688,7 @@ export class SessionService extends EventEmitter {
       // newest unclaimed transcript that appeared since spawn.
       const claimed = this.registry.snapshot()
       claimed.delete(placeholder) // our own placeholder must not block the match
-      const realId = pickDiscoveredId(listTranscriptIds(this.home, def.cwd), before, claimed)
+      const realId = pickDiscoveredId(this.transcriptsOf(def.cwd), before, claimed)
       if (realId && realId !== def.sessionId) {
         this.adoptRealId(def, placeholder, realId)
         return
@@ -668,6 +744,33 @@ export class SessionService extends EventEmitter {
     this.registry.add(def.sessionId)
 
     const r = this.runtime.get(def.id)
+
+    // Session env, also handed to the sandbox wrapper (which translates the
+    // host-only transports before exporting them container-side).
+    const sessionEnv = { ...this.getScopeEnv(), CLAUDE_PEERS_DESK_SESSION: def.id }
+
+    // Sandbox mode (SBX1): wrap the composed command in a `docker exec` into
+    // the project container. The supervisor is exempt — it pilots the Deck
+    // from the host and its MCP harness (Electron binary + loopback control
+    // url) does not exist container-side. The gated create path (sandboxGate
+    // in create-session.ts) has already ensured the container + auth; a
+    // throw here only happens on ungated paths (workspace restore with a
+    // cold container) where a visibly-exited tile beats a login prompt in
+    // every tile (SBX3).
+    if (!def.supervisor) {
+      try {
+        const wrapper = this.getSandboxWrapper()
+        if (wrapper) command = wrapper.wrap(def.sessionId, command, def.cwd, sessionEnv)
+      } catch (e) {
+        reportError('sandbox', `sandboxed spawn refused for "${def.name}"`, e)
+        if (r) {
+          r.status = 'exited'
+          r.exitCode = -1
+        }
+        this.persist()
+        return
+      }
+    }
     if (r) {
       r.status = 'running'
       r.exitCode = null
@@ -691,7 +794,7 @@ export class SessionService extends EventEmitter {
         def.cwd,
         { command, shell: cfg.shell, interactive: cfg.interactiveShell },
         // Per-tile token: server.ts writes the real session id keyed by it (D1/D2/D10).
-        { ...this.getScopeEnv(), CLAUDE_PEERS_DESK_SESSION: def.id }
+        sessionEnv
       )
       this.deadWriteReported.delete(def.id)
     } catch (e) {

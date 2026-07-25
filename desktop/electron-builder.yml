@@ -30,6 +30,11 @@ extraResources:
   # `npm run build:hook`, which runs before packaging via the build/package scripts.
   - from: deck-plugin
     to: deck-plugin
+  # Sandbox image recipe: the Docker view builds it from
+  # process.resourcesPath/sandbox when packaged (index.ts imageContextDir).
+  # Without this the packaged app can detect an engine but never build.
+  - from: resources/sandbox
+    to: sandbox
 win:
   # NSIS installer plus a portable .zip (run anywhere, no install).
   target:

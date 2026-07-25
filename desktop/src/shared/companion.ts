@@ -142,11 +142,28 @@ export const COMPANION_MANIFEST = {
   companionDevices: { kind: 'invoke', channel: 'companion:devices' },
   companionRevoke: { kind: 'invoke', channel: 'companion:revoke' },
   companionRevokeAll: { kind: 'invoke', channel: 'companion:revoke-all' },
+
+  // sandbox mode (PLAN-SANDBOX SBX2–SBX5, M2/M3)
+  sandboxStatus: { kind: 'invoke', channel: 'sandbox:status' },
+  sandboxPatchSettings: { kind: 'invoke', channel: 'sandbox:patch-settings' },
+  sandboxSetImage: { kind: 'invoke', channel: 'sandbox:set-image' },
+  sandboxEnsure: { kind: 'invoke', channel: 'sandbox:ensure' },
+  sandboxImageBuild: { kind: 'invoke', channel: 'sandbox:image-build' },
+  sandboxBuildStop: { kind: 'invoke', channel: 'sandbox:build-stop' },
+  sandboxAuthPurge: { kind: 'invoke', channel: 'sandbox:auth-purge' },
+  sandboxResetCopy: { kind: 'invoke', channel: 'sandbox:reset-copy' },
+  sandboxProbeBridge: { kind: 'invoke', channel: 'sandbox:probe-bridge' },
+  sandboxList: { kind: 'invoke', channel: 'sandbox:list' },
+  sandboxContainerAction: { kind: 'invoke', channel: 'sandbox:container-action' },
+  sandboxAuthStart: { kind: 'invoke', channel: 'sandbox:auth-start' },
+  sandboxAuthStop: { kind: 'invoke', channel: 'sandbox:auth-stop' },
+  sandboxAuthProbe: { kind: 'invoke', channel: 'sandbox:auth-probe' },
   onCompanionChanged: { kind: 'event', channel: 'companion:changed' },
   onCompanionDeviceConnected: { kind: 'event', channel: 'companion:device-connected' },
 
   // events
   onPtyData: { kind: 'event', channel: 'pty:data' },
+  onSandboxChanged: { kind: 'event', channel: 'sandbox:changed' },
   onPtyExit: { kind: 'event', channel: 'pty:exit' },
   onSessionsChanged: { kind: 'event', channel: 'sessions:changed' },
   onSessionThinking: { kind: 'event', channel: 'session:thinking' },
@@ -197,7 +214,18 @@ export const REMOTE_BLOCKED_CHANNELS: ReadonlySet<string> = new Set([
   // device must never be able to list or revoke devices (incl. itself/others).
   'companion:devices',
   'companion:revoke',
-  'companion:revoke-all'
+  'companion:revoke-all',
+  // Sandbox trust flips, container lifecycle and the login terminal are
+  // host-presence actions (the OAuth URL opens on the PC's browser anyway).
+  'sandbox:patch-settings',
+  'sandbox:set-image',
+  'sandbox:container-action',
+  'sandbox:auth-start',
+  'sandbox:auth-stop',
+  'sandbox:auth-purge',
+  'sandbox:image-build',
+  'sandbox:build-stop',
+  'sandbox:reset-copy'
 ])
 
 /**
@@ -289,8 +317,25 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'design:list-windows': 2,
   'design:capture-window': 2,
 
+  'sandbox:status': 0,
+  'sandbox:list': 0,
+  'sandbox:auth-probe': 0,
+  'sandbox:probe-bridge': 0,
+  'sandbox:ensure': 2,
+  'sandbox:container-action': 2,
+  'sandbox:auth-start': 2,
+  'sandbox:auth-stop': 2,
+  'sandbox:image-build': 2,
+  'sandbox:build-stop': 2,
+  'sandbox:reset-copy': 2,
+
   'config:set': 3,
   'launch:set-global': 3,
+  // Trust-changing: these decide WHERE agents execute, which image they run
+  // and which gitignored files get duplicated next to them.
+  'sandbox:patch-settings': 3,
+  'sandbox:set-image': 3,
+  'sandbox:auth-purge': 3,
   'companion:start': 3,
   'companion:stop': 3,
   'companion:devices': 3,

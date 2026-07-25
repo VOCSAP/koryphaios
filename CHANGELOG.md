@@ -1,5 +1,100 @@
 # Changelog
 
+## desktop (experimental) — Sandbox mode M2/M3: operator config projection, supervisor exec, ephemeral copy mode
+
+Second sandbox lot: the remaining design is folded into this entry (the
+working plan file was consolidated away per repo convention). The remote
+SSH/Proxmox backend was ABANDONED — Docker covers the need.
+
+**Your workflow travels into the container (M2).** At every container start
+the Deck COPIES the operator's `~/.claude` allow-list — global `CLAUDE.md`,
+`agents/`, `skills/`, `plugins/`, `settings.json` — into the sandbox
+(`sandbox-projection.ts`, `docker cp`), and the Docker view reports exactly
+what landed. Copy, never mount, and the header says why: a mounted
+`settings.json` would let a sandboxed agent write a hook that later executes
+on the HOST, a clean escape. Hooks that cannot run under Linux (PowerShell,
+`.ps1/.bat/.exe`, `C:\…`) are detected and listed, with a
+`~/.claude/sandbox-overrides/` overlay to supply Linux equivalents (a
+same-named entry there wins); overlay files that are not projectable are
+reported instead of silently ignored.
+
+**The supervisor manages the environment (M2).** New `deck_sandbox_exec`
+tool: "add this dependency to the instance" runs inside the project's
+container, in `/work`, with the agent's command line passed as ONE argv
+element to the CONTAINER's bash — it never reaches a host shell (hostile
+input #4). Refused when sandbox mode is off, 5-min cap, clipped output,
+journaled.
+
+**Honest environment reporting (M2).** The broker bridge is no longer guessed
+from the platform: the view curls `/health` FROM inside the container and
+reports what happened, with the `CLAUDE_PEERS_BIND_HOST` fix spelled out when
+a native Linux engine can't reach the host. The image is probed
+(`image inspect`) and buildable in one click — `docker build` on the shipped
+Dockerfile runs in a real utility PTY so the build log is readable — and a
+drift badge appears when the image was rebuilt after the container was
+created. Resume now works inside the sandbox: transcripts live in the auth
+volume, so the Deck lists them container-side (`find …/projects/<container
+cwd>`) and `SessionService` consults that instead of the host's — surviving
+even a container rebuild. Plus auth "Disconnect" (refused while a sandbox
+container runs).
+
+**Ephemeral copy mode (M3).** A per-project work mode: instead of the real
+tree, the Deck mounts a throwaway `git clone --local` of it, so agents cannot
+touch the project at all and work leaves through git (the clone's `origin` IS
+the local repo). Because a clone only carries tracked files, an operator
+allow-list of gitignored globs is copied on top (planning notes, local
+fixtures) — with a hard deny-list that always wins (`.env*`, keys/certs,
+`.ssh`, `.aws`, `node_modules`, `.venv`, `.git`) and unmatched globs surfaced
+so a typo is visible. The pre-spawn gate now returns the EFFECTIVE project
+root, so tile cwds and `git worktree add` land inside the mounted clone.
+
+Settings moved to a single guarded `sandbox:patch-settings` channel (enable,
+work mode, ports, globs — all trust-changing, all refused while sessions
+run, all `REMOTE_BLOCKED`). Docs: `desktop/docs/sandbox.md` rewritten,
+overview/sessions/settings/supervisor-team/faq updated, both READMEs.
+Residual is field validation only — the checklist lives in `BACKLOG.md`
+§3.8. The remote SSH / Proxmox backend once sketched for M3 is dropped: the
+local engine covers the need.
+
+## desktop (experimental) — Sandbox mode M1: sessions in a persistent per-project Docker container (SBX1–SBX5)
+
+New 🏺 **Docker** rail view + per-project toggle: with sandbox mode on, every
+NEW session runs inside a persistent container (`kory-sbx-<sha256(projectDir)
+[0..12]>`, project bind-mounted rw at `/work`, idling on `sleep infinity`) —
+the tile PTY simply runs `docker exec` and every detector (thinking, quota,
+attention) works unchanged. The wrap goes through a per-session launch script
+under a Deck-owned `/kory-run` mount (no PowerShell→bash double-quoting; env
+translated by pure, bun-tested `sandbox-command.ts`: FORCE_GROUP file→inline,
+loopback URLs→`host.docker.internal`). Sessions inside reach the HOST broker
+via an injected `CLAUDE_PEERS_BROKER_URL` (server.ts refuses to auto-spawn on
+non-loopback, so a bad bridge fails loudly); the host `~/.claude/peers` dir is
+bind-mounted so peer-id discovery and the desk-session back-channel keep
+working. The supervisor stays host-side (exempt by design — it pilots the app).
+
+Auth is a shared named volume (`kory-claude-auth` on `~/.claude`): ONE CLI
+login covers every project and survives container removal. First spawn with
+no credentials opens a blocking modal — Next embeds an xterm running `claude`
+in the container, the Deck polls the credentials file, closes the modal and
+toasts on success; agents cannot spawn until then (`sandboxGate` in the
+shared create path throws `sandbox-auth-required`, mapped renderer-side to
+the modal — no login prompt per tile, ever). Re-authenticate lives in the
+Docker view.
+
+Lifecycle is Proxmox-LXC-like on purpose: containers are created lazily,
+**stopped** (detached) at app close, **never** auto-removed; the Docker view
+lists every `kory-sbx-*` container (all projects, labels `kory.sandbox` /
+`kory.project`) with start/stop/rebuild/remove — all gated like the toggle on
+`hasLiveSessions()`, names re-validated main-side against the generated shape
+(hostile input #3). Settings (`enabled`, published dev-server ports for the
+embedded browser) live in operator app-state `sandbox.json` keyed by
+`computeDeckProjectKey` — never the repo. Image built once from
+`desktop/resources/sandbox/Dockerfile` (debian + bash/git/bun + claude CLI,
+user `kory`). Companion is transparent (all channels execute host-side; the
+sandbox trust flips are `REMOTE_BLOCKED`). Design + M2/M3 milestones:
+this entry; operator docs: `desktop/docs/sandbox.md`; field-validation
+checklist: `BACKLOG.md` §3.8. Also fixes the calendar-rotted `desktop-log` prune test
+(fixture age now anchored on the test's fixed clock).
+
 ## desktop (experimental) — Browser REC: screen recording + agent-driven demo scenarios
 
 The embedded browser's toolbar gains a **REC** button: a modal picks the
@@ -71,7 +166,7 @@ validation, sanitized peer-id list capped at 16, export/import); the
 the supervisor briefing all learn the concept. UI: a distinct dashed-violet
 card in the Workflow lane, a generic directive item in the editor (command
 dropdown + live-peer target multiselect, work-only fields hidden), and the
-detail modal, with EN/FR locale parity. Working plan: `PLAN-DIRECTIVES.md`
+detail modal, with EN/FR locale parity. Chantier ids: `CT1`…`CT7`
 (chantiers CT1–CT7); the deferred `clear`+briefing / context-gauge increment
 (CT6) and the option-A empirical checks live in `BACKLOG.md`.
 

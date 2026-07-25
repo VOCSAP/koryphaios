@@ -55,20 +55,41 @@ Two independent sub-chains — do the one(s) you need:
    `graphFocus`/`clearGraphFocus`). One-shot seeds: set the seed AND flip the
    view in the same `set(...)` so the target view mounts with the seed present.
 
+**Need a TERMINAL that is not a session tile** (a login flow, a build log)?
+Use a **utility PTY**: `service.spawnUtility(id, cwd, opts)` /
+`killUtility(id)` (`session-service.ts`) spawns on the shared `PtyManager`, so
+`pty:input`/`pty:resize`/`pty:data`/`pty:exit` route for free — nothing to add
+to the bridge — but the id never enters `defs`, so `sessions:list`,
+`hasLiveSessions()` and workspace capture ignore it. The id must be a
+CODE CONSTANT exported from `shared/types.ts` (never a renderer-supplied
+string reaching a kill), and its stop channel takes no argument. Render it
+with `SandboxTerminal.tsx` (or `DockTerminal` in `BrowserView.tsx`): plain
+xterm, no `registerTerminal` — that registry belongs to real session tiles.
+
 ## B. New navigation-rail view
 
 1. **`DeckView` union — `desktop/src/shared/types.ts`.** Add the id.
-2. **`mobile-views.ts` — EXHAUSTIVE `Record<DeckView, MobileViewMeta>`.** This
+2. **`desktop/src/renderer/src/mobile-views.ts` — EXHAUSTIVE
+   `Record<DeckView, MobileViewMeta>`** (renderer-side, NOT `shared/`). This
    is a compile GATE: the typecheck fails until you declare the new view's
    mobile placement (`'tab'` | `'more'` | `'desktop-only'`). Desktop-first
-   read views → `'desktop-only'` (like graph/browser/git/files).
-3. **`NavRail.tsx`.** Add `{ id, icon, key }` to `VIEWS`. Badges (unread /
-   change counts) mirror the inbox badge (`nav-rail-badge`); a best-effort
-   poll here may swallow its catch (decorative).
-4. **`App.tsx`.** Conditional `{view === 'x' && (…)}` render (or keep-mounted
+   read views → `'desktop-only'` (like graph/browser/git/files/sandbox).
+3. **`icons.tsx` — `GLYPHS: Record<GlyphName, …>` where `GlyphName` extends
+   `DeckView`.** Second compile GATE: the new view does not build until it has
+   a glyph. Draw a Greek-styled, stroke-only one per `DESIGN.md` §5 (the
+   `deck-design` skill wraps that workflow) — never an emoji, never an icon
+   font.
+4. **`NavRail.tsx`.** Add `{ id, key }` to `VIEWS` (the icon is looked up as
+   `GLYPHS[v.id]`, not declared here). Badges (unread / change counts) mirror
+   the inbox badge (`nav-rail-badge`); a best-effort poll here may swallow its
+   catch (decorative). Electron-only views are filtered out for `remote`
+   clients in the same file.
+5. **`App.tsx`.** Conditional `{view === 'x' && (…)}` render (or keep-mounted
    `view-hidden` for views whose DOM/PTY must survive), each wrapped in its own
-   `<ErrorBoundary scope="x">`.
-5. **`styles.css`.** Reuse `btn`/`icon-btn`, the CSS variables (`--bg*`,
+   `<ErrorBoundary scope="x">`. Modals are store-owned open state mounted flat
+   near the end of the same tree (`{fooOpen && <FooDialog />}`), desktop-only
+   ones behind `!remote`.
+6. **`styles.css`.** Reuse `btn`/`icon-btn`, the CSS variables (`--bg*`,
    `--fg*`, `--accent`, `--border`), and existing view-container patterns
    (`.worktrees-view` head, `.diff-*` colorizer). No new render libs.
 
@@ -76,7 +97,10 @@ Two independent sub-chains — do the one(s) you need:
 
 - **Locales — THREE files in lockstep** (`desktop/locales/en.json`,
   `fr.json`, and `EN_DEFAULTS` in `desktop/src/main/i18n.ts`). A parity test
-  fails on any mismatch. Prefix keys by domain (`nav.*`, `files.*`, `git.*`).
+  fails on any mismatch — on KEYS *and* on en.json↔EN_DEFAULTS **values**, so
+  copy the English strings verbatim between the two. Prefix keys by domain
+  (`nav.*`, `files.*`, `git.*`). For a batch of keys, script the JSON edits
+  (`object_pairs_hook=OrderedDict`) rather than hand-editing three files.
 - **Verify — run the `/desktop-precommit` checklist** (bun test + smoke build +
   `npm run typecheck` in `desktop/` + locale parity). Update `DESKTOP.md`
   (one highlight paragraph) and `desktop/docs/interface.md` (rail table + a
