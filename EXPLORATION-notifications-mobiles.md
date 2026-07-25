@@ -23,6 +23,13 @@
 | ✗ | Pushover | Non pour l'envoi, **URL publique pour les callbacks** | ❌ aucun mécanisme | 4,99 $ + enregistrement d'app | Faible | Écarté (pas de réponse libre) |
 | ✗ | LAN pur (WS persistant, sans relais) | Non (LAN only) | ✅ | Faible | Élevé (FGS + exemption batterie + OEM killers) | Écarté comme canal de **validation** (Doze ; et cesse de fonctionner hors du Wi-Fi — contraire au besoin) |
 
+> **Révision du 2026-07-25 (addendum §7–§12)** — après questions sur la
+> topologie réelle (broker = serveur LAN distant, multi-PC, multi-compte OS),
+> deux points de ce tableau sont **amendés** : (1) la passerelle notifications
+> vit dans le **broker**, pas dans le Deck → plus besoin d'« un bot par PC » ;
+> (2) la détection des questions passe d'abord par les **hooks Claude Code**
+> (déterministes), le scraping PTY devenant le filet de secours. Voir §7–§12.
+
 **Réponse à la question réseau** : non, on n'est **pas** obligé d'exposer
 publiquement quoi que ce soit. Les trois canaux retenus fonctionnent derrière
 NAT car le PC n'a que des connexions **sortantes** : long polling HTTPS
@@ -383,3 +390,289 @@ option Tailscale (extension `isPrivateAddress` opt-in).
 *Rapports de recherche détaillés (agents du 2026-07-25) : Telegram Bot API
 10.2, docs Discord (repo officiel discord-api-docs@main), docs
 Android/Firebase/ntfy/Pushover/Tailscale — URLs citées in situ ci-dessus.*
+
+---
+---
+
+# ADDENDUM — Chaîne de communication, détection, cloisonnement
+
+> Rédigé après précisions sur la topologie cible : **le broker est un serveur
+> LAN distant** (pas le loopback auto-spawné), plusieurs PC l'utilisent, et un
+> même PC peut héberger plusieurs comptes OS. Cet addendum amende §1 et §6.
+
+## 7. Comment l'app détecte la question — déterministe ET dynamique
+
+La bonne réponse n'est pas « l'un ou l'autre » : **les deux, sur trois voies
+complémentaires**, parce que les types de questions n'ont ni le même
+déclencheur ni le même chemin de retour. Point clé découvert en vérifiant la
+doc officielle : Claude Code expose des **hooks** qui rendent la détection
+**déterministe**, sans scraper l'écran — et le Deck **embarque déjà un
+plugin à hooks** (`desktop/deck-plugin/hooks/hooks.json`, aujourd'hui un seul
+`SessionStart`), donc le canal d'installation est déjà en place et éprouvé.
+([Hooks reference](https://code.claude.com/docs/en/hooks))
+
+| Type de demande | Détection | Nature | Chemin de retour de la réponse |
+|---|---|---|---|
+| **Permission d'outil** (Bash, Edit, Write, MCP…) | hook **`PermissionRequest`** (se déclenche quand la boîte de permission apparaît ; reçoit `tool_name`, `tool_input`, `tool_use_id`, `cwd`, `session_id`) | déterministe, **structuré**, **bloquant** | le hook **retourne le verdict** : `hookSpecificOutput.decision.behavior` = `allow`/`deny` (+ `updatedInput` optionnel). Aucune injection PTY. |
+| **Permission + consigne texte** | hook **`PreToolUse`** | déterministe, bloquant | `permissionDecision` (`allow`/`deny`/`ask`/`defer`) + **`permissionDecisionReason`, montré à Claude dans le transcript** → un « rejet avec prompt » remonte le texte de l'opérateur directement dans le contexte de l'agent |
+| **Question ouverte de l'agent** (AskUserQuestion, validation de plan, « je fais A ou B ? ») | **outil MCP `ask_operator`** appelé par l'agent | dynamique (décidée par le LLM) | **la valeur de retour de l'appel d'outil EST la réponse** : texte libre injecté nativement dans le contexte, zéro frappe PTY |
+| **Signal générique « l'agent attend »** | hook **`Notification`** (matchers `permission_prompt`, `idle_prompt`, `agent_needs_input`, `agent_completed`…) ; payload `{notification_type, message}` | déterministe, **non bloquant** | — signal seulement (sert à notifier, pas à répondre) |
+| **Tout le reste / CLIs non-Claude** (codex, gemini, agy) | `attention.ts` (scraping PTY existant) | heuristique | injection de frappes dans le PTY (mécanique de `quota.ts`) |
+
+**Pourquoi la voie MCP reste indispensable** : la doc ne documente **aucun
+hook sur `AskUserQuestion` ni sur la validation de plan (ExitPlanMode)**.
+C'est précisément le cas d'usage « réponse par prompt libre » du besoin → il
+faut un outil MCP que l'agent appelle volontairement (harnais système :
+« quand tu as une question bloquante et que le mode notification est actif,
+appelle `ask_operator` au lieu de poser la question à l'écran »). Précédent
+direct dans le repo : `graph_draft_prepare`/`graph_draft_send`, qui font déjà
+« l'agent escalade une question bloquante vers l'opérateur ».
+
+**Pourquoi garder `attention.ts`** : les hooks sont propres à Claude Code. Les
+tuiles codex/gemini/agy n'en ont pas — le scraping reste le seul filet pour
+elles, et il couvre aussi le cas « l'agent n'a pas joué le jeu de l'outil MCP ».
+
+**Sémantique de blocage — le point à valider en prototype.** Le champ
+`timeout` est configurable par hook (défaut **600 s** pour les hooks
+`command`) et **aucun maximum n'est documenté** ; un blocage de plusieurs
+heures est donc possible mais reste du terrain non spécifié. Recommandation :
+**ne pas bloquer 24 h dans le hook**. On bloque une durée bornée
+(10–30 min, configurable), et à l'expiration le hook rend la main → la boîte
+de dialogue native reste affichée → **la session reste en attente et reste
+répondable dans le Deck**. C'est exactement la sémantique demandée
+(« la notif expire, pas la session »), obtenue gratuitement. La notif reste
+par ailleurs vivante côté broker jusqu'à `APPROVAL_NOTIF_TTL_HOURS` : si la
+réponse mobile arrive après la fin du blocage du hook, elle est appliquée par
+le chemin de secours (injection PTY sur la boîte toujours ouverte).
+
+## 8. La chaîne de bout en bout
+
+```
+┌── PC-A / compte OS "olivier" ────────────────────────────┐
+│  Session agent (tuile Deck)                              │
+│    ├─(a) hook PermissionRequest / PreToolUse  [bloquant] │
+│    ├─(b) outil MCP ask_operator               [bloquant] │
+│    ├─(c) hook Notification                    [signal]   │
+│    └─(d) attention.ts (PTY)                   [fallback] │
+│                      │                                   │
+│              Deck main process                           │
+└──────────────────────┼───────────────────────────────────┘
+                       │ POST /approval/add
+                       │ { operator_auth,                      ← QUI
+                       │   origin:{host, os_user_hash,          ← D'OÙ
+                       │           project_key, peer_id},
+                       │   kind, question, options[], ttl }
+                       ▼
+        ┌─────────── BROKER (serveur LAN) ────────────┐
+        │  pending_approvals  ← source de vérité      │
+        │  operator_channels  ← abonnements par       │
+        │                       identité opérateur    │
+        │  SELECT … WHERE operator_id = :op           │
+        └──────────────────────┬──────────────────────┘
+                               │ fan-out (§10)
+              ┌────────────────┼────────────────┐
+              ▼                ▼                ▼
+         Telegram          Discord         ntfy → App Android
+              └────────────────┼────────────────┘
+                               │ réponse (texte libre / bouton)
+                               ▼
+                    POST /approval/claim  ← UPDATE … WHERE status='pending'
+                       200 = gagné  │  409 = « déjà traitée / expirée »
+                                    ▼
+                     push WS vers le peer/Deck d'origine
+                                    ▼
+   (a) verdict rendu au hook · (b) valeur de retour de l'outil MCP ·
+   (c)/(d) frappes injectées dans le PTY après re-vérification de l'état
+```
+
+Deux remarques sur ce schéma :
+
+- **Le broker est le seul arbitre.** Le `claim` est un `UPDATE … WHERE
+  status='pending'` en transaction : premier arrivé gagne, tous les autres
+  canaux (et le Deck lui-même) reçoivent 409. Répondre **dans le Deck** claim
+  aussi (`via='deck'`), ce qui invalide et fait éditer les notifs distantes.
+- **Le Deck n'est plus l'émetteur des notifications**, seulement le producteur
+  d'approbations. C'est ce qui rend le multi-PC trivial (§11).
+
+## 9. Cloisonnement : le modèle d'identité opérateur
+
+**Constat qui impose un nouveau concept : `host` (hostname) ne suffit pas.**
+Deux comptes Windows sur le même PC partagent le même `hostname()` — l'axe
+d'identité actuel du broker (`host`, `cwd`, `group_id`, `peer_id`) ne
+distinguerait donc pas A de B. Aucun des axes existants ne désigne une
+**personne**. Il faut un axe supplémentaire, de première classe :
+
+**`operator_key` / `operator_id`**
+
+- `operator_key` = 32 octets aléatoires, générés au premier lancement,
+  stockés **dans le répertoire app-state par utilisateur OS**
+  (`%APPDATA%` sous Windows, `$XDG_CONFIG_HOME` ailleurs), chiffrés via
+  `safeStorage` (pattern `provider-secrets.ts` / graphes K8).
+- `operator_id` = `sha256(operator_key)[:16]` — la seule chose que le broker
+  stocke et qui circule.
+- **Le cloisonnement A/B sur un même PC est alors automatique et gratuit** :
+  `%APPDATA%` est déjà par compte OS → A et B ont mécaniquement deux
+  `operator_key` distincts, donc deux `operator_id`, donc deux jeux
+  d'abonnements. B ne peut pas recevoir les notifications de A.
+- **Authentification des écritures** : `POST /approval/add` et les routes
+  d'abonnement portent `operator_auth = sha256(operator_key)`, TOFU-validé
+  broker-side — exactement le pattern `group_secret_hash` de `/announce`
+  (`handleAnnounce` valide le secret d'un groupe non-default, 401 sinon).
+  Durcissement souhaitable (et qui traite au passage **B8** du backlog, le
+  rejeu WS) : HMAC du corps + nonce + horodatage plutôt qu'un hash statique.
+  Sans cela, un peer du LAN qui devine/observe un `operator_auth` peut émettre
+  des approbations au nom d'autrui.
+
+**Deux nouvelles tables broker** (mêmes conventions que `roadmap_items` /
+`graph_drafts`) :
+
+```
+operator_channels(operator_id, kind, address, label, enabled,
+                  created_at, last_used)
+   kind ∈ telegram | discord | ntfy    address = chat_id | user_id | topic
+
+operator_devices(operator_id, host, os_user_hash, label, last_seen)
+   ← inventaire des PC autorisés à émettre au nom de l'opérateur
+     (+ révocation « ce PC ne parle plus en mon nom »)
+```
+
+`os_user_hash` = hash salé du nom de compte OS : sert à **étiqueter** l'origine
+sans exposer le nom d'utilisateur dans un message qui transite chez Telegram
+ou Discord.
+
+**Cas « A possède 2 PC, même téléphone / même serveur Discord »** — c'est un
+**enrôlement**, pas un second appairage du téléphone : sur PC #2, « Lier ce PC
+à mon identité » lit un QR affiché par PC #1 contenant l'`operator_key`
+(one-shot, éphémère — le pattern exact du token d'appairage companion). Les
+deux PC partagent alors le même `operator_id`, donc les **mêmes abonnements
+déjà configurés** : rien à réappairer côté mobile, conformément au besoin
+« appairage global une fois par appareil ».
+
+**Émissions simultanées des 2 PC** : aucun conflit. Chaque approbation a son
+`id` propre ; la corrélation de la réponse se fait par
+`reply_to_message`/`callback_data` (Telegram) ou `custom_id` (Discord), jamais
+par « la dernière question posée ». Les deux notifications arrivent sur le
+téléphone et se répondent indépendamment. Le titre porte l'origine :
+
+```
+[bureau · koryphaios] Autoriser  Bash: rm -rf .worktrees/tmp ?
+[portable · api-gateway] L'agent demande : quelle stratégie de migration ?
+```
+
+**Matrice de cloisonnement**
+
+| Scénario | Même `operator_id` ? | Résultat |
+|---|---|---|
+| A et B, comptes OS différents, même PC | Non (app-state distinct) | **Étanche** — B ne voit rien de A |
+| A sur PC #1 et PC #2 (enrôlés) | Oui | Un seul téléphone/Discord, notifs des 2 PC, badge d'origine |
+| A avec 2 projets sur le même PC | Oui | Notifs des 2 projets ; opt-out par projet possible (§3) |
+| Un peer LAN tiers qui bricole | — | Rejeté : `operator_auth` inconnu → 401 |
+
+## 10. Routage : fan-out ou canal unique ?
+
+**Recommandation V1 : fan-out sur tous les canaux actifs de l'opérateur.**
+Le `claim` atomique rend le doublon inoffensif (le second canal reçoit 409),
+et ça maximise la probabilité que la notif soit vue. Dès qu'un canal gagne, le
+broker demande aux autres d'**éditer** leur message (« ✅ traitée via
+Telegram ») — Telegram `editMessageText`, Discord edit de message ; ntfy ne
+sait pas éditer, on y publie un message de clôture.
+
+Variante V2 si le fan-out devient bruyant : **canal préféré + escalade**
+(envoi sur le canal préféré, escalade aux autres après N minutes sans
+réponse). Même schéma de données, juste une politique d'envoi différente.
+
+Le fan-out reste **strictement borné à l'`operator_id`** : il n'y a jamais de
+diffusion à « tous les canaux du broker ».
+
+## 11. Où vit la passerelle : dans le broker (amende §4.1)
+
+L'audit initial plaçait la passerelle dans le Deck, avec pour conséquence
+« un bot Telegram par PC ». **Avec un broker LAN partagé et le besoin explicite
+d'un seul téléphone/Discord pour 2 PC, la passerelle doit vivre dans le
+broker** :
+
+| | Passerelle dans le Deck | **Passerelle dans le broker** |
+|---|---|---|
+| Contrainte Telegram « un seul `getUpdates` par token » | violée si 2 Decks → 409 en boucle → **un bot par PC** | respectée : **un seul consommateur**, quel que soit le nombre de PC |
+| Abonnements mobiles | dupliqués sur chaque PC | **centralisés**, partagés par tous les PC de l'opérateur |
+| Stockage du token de bot | `safeStorage` par PC | fichier de conf broker chmod-600 (c'est **leur** serveur LAN) |
+| PC éteint | notif perdue | le broker relaie quand même ; l'approbation attend |
+| Complexité | passerelle dans un process Electron | **passerelle dans un daemon déjà singleton, déjà multi-host** |
+
+Le broker est déjà un daemon singleton, déjà multi-host en mode HTTP
+(`broker_url` + `broker_token`), avec les timers de balayage, le logger
+rotatif et les patterns de durabilité — c'est son rôle naturel. Le Deck
+redevient un simple producteur d'approbations et consommateur de verdicts.
+
+*Conséquence sur les lots* : le lot **N2 (Telegram)** devient majoritairement
+du travail **core** (`broker.ts` + un module passerelle), pas du travail
+desktop. Le Deck n'y contribue que l'UI de réglages et l'affichage de
+l'appairage (QR).
+
+## 12. Tailscale : côté clients, pas « à côté du broker »
+
+Tailscale est un **maillage** : le client s'installe **sur chaque appareil qui
+doit joindre ou être joint**. Il n'y a pas de « serveur Tailscale » à déployer
+à côté du broker. Pour cette topologie, trois précisions :
+
+1. **Pour le canal de validation (Telegram/Discord/ntfy) : Tailscale est
+   totalement inutile.** Tout passe par les serveurs du fournisseur, en
+   sortant. C'est le point important — l'objectif principal du besoin ne
+   demande aucun VPN.
+2. **Pour le mode compagnon** (le téléphone charge l'UI servie par le Deck),
+   la joignabilité nécessaire est **téléphone ↔ PC**, pas téléphone ↔ broker :
+   le companion server tourne dans le Deck, sur le PC. Il faudrait donc
+   Tailscale sur le téléphone **et sur chaque PC**.
+3. **Variante recommandée pour un LAN avec serveur permanent : un seul
+   *subnet router*.** Le serveur broker (déjà allumé en permanence) annonce le
+   sous-réseau LAN ; le téléphone atteint alors **tous les PC et le broker via
+   ce seul nœud**, sans installer Tailscale sur chaque PC.
+   Détail qui tombe bien : par défaut le subnet router fait du **SNAT
+   (masquerading)** — « a subnet device sees the traffic originating from the
+   subnet router » — donc le Deck voit une adresse source **LAN privée**, et
+   le filtre `isPrivateAddress` (RFC1918/ULA) du companion **passe sans
+   modification de code**. Si on désactivait le SNAT
+   (`--snat-subnet-routes=false`, **Linux uniquement**), la source deviendrait
+   une adresse tailnet `100.64.0.0/10` (CGNAT) → il faudrait alors étendre
+   `isPrivateAddress` (opt-in) **et** ajouter une route de retour côté LAN.
+   ([Subnet routers](https://tailscale.com/docs/features/subnet-routers),
+   [Disable subnet route masquerading](https://tailscale.com/docs/reference/troubleshooting/network-configuration/disable-subnet-route-masquerading))
+4. **Contrepartie sécurité à acter** : avec le SNAT, tout le trafic tailnet
+   arrive sous l'IP LAN du subnet router — le Deck ne peut plus distinguer le
+   téléphone d'une autre machine du LAN par l'adresse. Le filtre IP redevient
+   ce qu'il est déjà en réalité : une défense en profondeur, pas
+   l'authentification. Celle-ci reste le **credential par appareil** délivré à
+   l'appairage. À documenter explicitement si on recommande le subnet router.
+
+## 13. Découpage révisé
+
+**N1 — socle approbations + identité (core/broker)** : `operator_key` /
+`operator_id` et son enrôlement multi-PC ; tables `pending_approvals`,
+`operator_channels`, `operator_devices` ; routes `add`/`claim`/`list` +
+authentification `operator_auth` (HMAC + nonce de préférence) ; sweep TTL
+notif ; push WS du verdict vers le peer d'origine.
+
+**N1b — producteurs d'approbations (desktop + core MCP)** : hooks
+`PermissionRequest`/`PreToolUse`/`Notification` ajoutés au plugin embarqué
+existant ; outil MCP `ask_operator` (bloquant, retour texte libre) ; branchement
+d'`attention.ts` en filet de secours ; claim `via='deck'` quand l'opérateur
+répond localement.
+
+**N2 — passerelle Telegram (broker)** : client `fetch` zéro-dépendance
+(getUpdates single-instance, sendMessage HTML, editMessageText,
+answerCallbackQuery), appairage deep-link `?start=<secret>` liant `chat_id` ↔
+`operator_id`, verrou `chat_id`, fan-out + édition des notifs concurrentes.
+
+**N3 — passerelle Discord (broker)** : même abstraction `NotificationChannel`,
+Gateway (identify/heartbeat/resume), boutons → modale texte libre.
+
+**N4 (V2) — app Android** : mobile-shell + UnifiedPush/ntfy deux-topics,
+multi-hôtes en mode compagnon, option subnet router Tailscale.
+
+**Réglages transverses** : interrupteur global Deck + opt-out par projet
+(`effectif = global && !optOutProjet`), `APPROVAL_NOTIF_TTL_HOURS` (défaut 24)
+en conf **broker** puisque c'est lui qui balaie.
+
+*Sources ajoutées : [Claude Code — Hooks reference](https://code.claude.com/docs/en/hooks),
+[Tailscale — Subnet routers](https://tailscale.com/docs/features/subnet-routers),
+[Tailscale — Disable subnet route masquerading](https://tailscale.com/docs/reference/troubleshooting/network-configuration/disable-subnet-route-masquerading).*
