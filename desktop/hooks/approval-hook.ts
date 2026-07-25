@@ -4,27 +4,36 @@
 // from a phone. Deterministic: no PTY scraping, the payload is structured JSON
 // straight from Claude Code.
 //
+// IT DOES NOT BLOCK. The hook posts the approval and exits immediately. There
+// is nothing to gain from holding the process open: Claude Code is ALREADY
+// waiting on its own dialog, and it keeps waiting until someone answers. The
+// answer is then applied by the Deck, which types it into the tile. Not
+// blocking removes a per-prompt hook process lingering for minutes, and with
+// it the whole question of how long a hook may legally block.
+//
 // WHICH EVENTS, AND WHY THOSE:
-//   PermissionRequest -> BLOCKING. It fires only when a permission dialog
-//     actually appears, which is exactly our trigger. (PreToolUse fires on
-//     EVERY tool call, so wiring it here would raise an approval per tool use.)
-//   Notification      -> SIGNAL ONLY, for `idle_prompt` / `agent_needs_input`:
-//     the open questions no hook can settle (there is no documented hook for
+//   PermissionRequest -> the tool-permission dialog. It fires only when a
+//     dialog actually appears, which is exactly our trigger. (PreToolUse fires
+//     on EVERY tool call, so wiring it here would raise an approval per tool
+//     use.) It carries a structured payload — tool, input, cwd — which is why
+//     it beats scraping the screen.
+//   Notification      -> `idle_prompt` / `agent_needs_input`: the open
+//     questions no hook can settle (there is no documented hook for
 //     AskUserQuestion or plan approval). `permission_prompt` is skipped here
 //     because PermissionRequest already owns it — otherwise one dialog would
 //     raise two notifications.
 //
 // SECURITY: the hook carries a RESTRICTED session credential (PLAN §6.8), read
 // from a chmod-600 file whose path arrives in the environment — the key itself
-// never touches argv or /proc/<pid>/environ. That credential may only `add` and
-// `wait` for THIS session; it can never settle an approval. Only the Deck,
-// holding the operator key, can do that.
+// never touches argv or /proc/<pid>/environ. That credential may only `add`
+// for THIS window; it can never settle an approval. Only the Deck, holding the
+// operator key, can do that.
 //
-// FAIL-CLOSED: any failure (no credential, broker down, timeout, malformed
-// payload) exits 0 with NO decision, so Claude Code falls back to its own
-// dialog. The hook can withhold an answer; it must never invent `allow`.
+// FAIL-SILENT: any failure (no credential, broker down, malformed payload)
+// exits 0 having done nothing. The session is unaffected — it simply waits on
+// its dialog as it would without this feature.
 
-import { buildAuthProof, stripControl, type ApprovalAnswerKind } from "../../shared/approval.ts";
+import { buildAuthProof, stripControl } from "../../shared/approval.ts";
 import {
   APPROVAL_FILE_ENV,
   APPROVAL_HOOK_BLOCK_SEC_DEFAULT,
@@ -35,8 +44,11 @@ import {
 
 export { APPROVAL_FILE_ENV, APPROVAL_HOOK_BLOCK_SEC_DEFAULT };
 
-/** One long-poll leg; the hook loops until its total budget is spent. */
-const WAIT_LEG_SEC = 30;
+/** Ceiling on the single POST the hook makes. It never waits for an answer. */
+const POST_TIMEOUT_SEC = 15;
+
+/** Per-tile handle the Deck injects into every session it spawns. */
+const DESK_SESSION_ENV = "CLAUDE_PEERS_DESK_SESSION";
 
 /** The on-disk shape lives in shared/approval-client.ts so the MCP tool and
  * this hook can never drift apart. */
@@ -66,16 +78,15 @@ export function parseHookPayload(raw: string): HookPayload {
 }
 
 /**
- * Which approvals this payload deserves.
- * `skip` keeps one dialog from raising two notifications.
+ * What KIND of approval this payload deserves — not whether to wait, since the
+ * hook never waits. `skip` keeps one dialog from raising two notifications.
  */
-export function classifyPayload(p: HookPayload): "blocking" | "signal" | "skip" {
-  if (p.hook_event_name === "PermissionRequest") return "blocking";
+export function classifyPayload(p: HookPayload): "permission" | "question" | "skip" {
+  if (p.hook_event_name === "PermissionRequest") return "permission";
   if (p.hook_event_name === "Notification") {
     const t = p.notification_type ?? "";
-    // permission_prompt is PermissionRequest's job; the rest are open questions
-    // that only a human (or the Deck's PTY injection) can answer.
-    return t === "idle_prompt" || t === "agent_needs_input" ? "signal" : "skip";
+    // permission_prompt is PermissionRequest's job; the rest are open questions.
+    return t === "idle_prompt" || t === "agent_needs_input" ? "question" : "skip";
   }
   return "skip";
 }
@@ -101,9 +112,10 @@ export function summarizeToolInput(toolName: string, input: Record<string, unkno
 /** Build the /approval/add body for a payload (without auth). */
 export function buildApprovalRequest(
   p: HookPayload,
-  cfg: ApprovalHookConfig
+  cfg: ApprovalHookConfig,
+  tileRef = ""
 ): Record<string, unknown> {
-  const blocking = classifyPayload(p) === "blocking";
+  const blocking = classifyPayload(p) === "permission";
   const title = blocking
     ? summarizeToolInput(p.tool_name ?? "", p.tool_input)
     : stripControl(p.message ?? "").trim().slice(0, 160) || "The agent is waiting for you";
@@ -124,6 +136,9 @@ export function buildApprovalRequest(
     question,
     options: blocking ? ["Allow", "Deny"] : [],
     session_ref: cfg.sessionRef,
+    // Untrusted routing hint: which tile the Deck should answer into. The
+    // credential authenticates the WINDOW, not this — the Deck re-validates it.
+    tile_ref: tileRef,
     origin: {
       host: cfg.origin?.host ?? "",
       os_user_hash: cfg.origin?.os_user_hash ?? "",
@@ -143,36 +158,6 @@ function safeJson(value: unknown): string {
   }
 }
 
-export interface Verdict {
-  answer_kind: ApprovalAnswerKind;
-  answer_text: string | null;
-}
-
-/**
- * Translate a settled approval into the hook's stdout contract.
- *
- * `text` maps to deny + additionalContext: PermissionRequest's decision object
- * carries no reason field, so the operator's free-form instruction rides on
- * `additionalContext` (shown to Claude) instead of being dropped. A refusal
- * that silently loses the operator's words would be worse than useless.
- */
-export function buildDecisionOutput(verdict: Verdict | null): Record<string, unknown> | null {
-  if (!verdict) return null; // no answer -> no decision -> native dialog stands
-  if (verdict.answer_kind === "allow") {
-    return {
-      hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "allow" } },
-    };
-  }
-  const out: Record<string, unknown> = {
-    hookSpecificOutput: { hookEventName: "PermissionRequest", decision: { behavior: "deny" } },
-  };
-  if (verdict.answer_text) {
-    out.additionalContext = `The operator answered from their phone: ${verdict.answer_text}`;
-    out.systemMessage = `Answered remotely: ${verdict.answer_text}`;
-  }
-  return out;
-}
-
 /** Read + shape the credential file. Returns null when the feature is off. */
 export function loadConfig(path: string | undefined, read?: FileReader): ApprovalHookConfig | null {
   return loadApprovalCredential(path, read);
@@ -180,11 +165,11 @@ export function loadConfig(path: string | undefined, read?: FileReader): Approva
 
 // --- I/O ---
 
-async function signedPost<T>(
+/** One signed POST. Returns false on any failure; the caller just gives up. */
+async function postApproval(
   cfg: ApprovalHookConfig,
-  path: string,
   payload: Record<string, unknown>
-): Promise<T | null> {
+): Promise<boolean> {
   const auth = buildAuthProof(cfg.privateKey, payload, {
     kind: "session",
     operator_id: cfg.operatorId,
@@ -193,40 +178,17 @@ async function signedPost<T>(
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (cfg.brokerToken) headers.authorization = `Bearer ${cfg.brokerToken}`;
   try {
-    const res = await fetch(`${cfg.brokerUrl}${path}`, {
+    const res = await fetch(`${cfg.brokerUrl}/approval/add`, {
       method: "POST",
       headers,
       body: JSON.stringify({ ...payload, auth }),
-      signal: AbortSignal.timeout((WAIT_LEG_SEC + 15) * 1000),
+      signal: AbortSignal.timeout(POST_TIMEOUT_SEC * 1000),
     });
-    if (!res.ok) return null;
-    return (await res.json()) as T;
+    return res.ok;
   } catch {
-    // Broker unreachable: fail closed (no decision), never fail open.
-    return null;
+    // Broker unreachable: the session is unaffected, it just waits on screen.
+    return false;
   }
-}
-
-/** Long-poll until the approval is settled or the budget is spent. */
-async function awaitVerdict(cfg: ApprovalHookConfig, id: string): Promise<Verdict | null> {
-  const deadline = Date.now() + (cfg.blockSec ?? APPROVAL_HOOK_BLOCK_SEC_DEFAULT) * 1000;
-  while (Date.now() < deadline) {
-    const remaining = Math.ceil((deadline - Date.now()) / 1000);
-    const res = await signedPost<{
-      approval?: { status: string; answer_kind: ApprovalAnswerKind | null; answer_text: string | null };
-      pending?: boolean;
-    }>(cfg, "/approval/wait", {
-      id,
-      timeout_sec: Math.min(WAIT_LEG_SEC, remaining),
-      public_key: cfg.publicKey,
-    });
-    if (!res) return null; // broker gone -> hand back to the native dialog
-    if (res.approval && res.approval.status === "answered" && res.approval.answer_kind) {
-      return { answer_kind: res.approval.answer_kind, answer_text: res.approval.answer_text };
-    }
-    if (res.approval && res.approval.status !== "pending") return null; // expired/abandoned
-  }
-  return null;
 }
 
 async function readStdin(): Promise<string> {
@@ -240,23 +202,12 @@ async function main(): Promise<void> {
   if (!cfg) return; // gate: a non-Deck session is a silent no-op
 
   const payload = parseHookPayload(await readStdin());
-  const mode = classifyPayload(payload);
-  if (mode === "skip") return;
+  if (classifyPayload(payload) === "skip") return;
 
-  const created = await signedPost<{ approval: { id: string } }>(
-    cfg,
-    "/approval/add",
-    buildApprovalRequest(payload, cfg)
-  );
-  if (!created?.approval?.id) return;
-
-  // A signal-only event has no return path through the hook: the Deck applies
-  // the answer by typing into the PTY once someone settles it.
-  if (mode === "signal") return;
-
-  const verdict = await awaitVerdict(cfg, created.approval.id);
-  const out = buildDecisionOutput(verdict);
-  if (out) process.stdout.write(JSON.stringify(out));
+  const tileRef = (process.env[DESK_SESSION_ENV] ?? "").trim();
+  await postApproval(cfg, buildApprovalRequest(payload, cfg, tileRef));
+  // Deliberately no stdout: the hook emits NO decision, ever. Claude Code keeps
+  // its own dialog up and the Deck applies whatever the operator answers.
 }
 
 // Only run when executed directly, so tests can import the pure helpers.

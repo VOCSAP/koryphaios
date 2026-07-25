@@ -35,8 +35,9 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   question is parked broker-side and can be answered from elsewhere; the Deck
   holds the ONLY credential able to settle one. Three producers, because the
   kinds of question differ: the embedded plugin's `PermissionRequest` hook
-  (blocking, structured — it fires only when a permission dialog appears,
-  unlike `PreToolUse` which would fire on every tool call), the `ask_operator`
+  (structured detection — it fires only when a permission dialog appears,
+  unlike `PreToolUse` which would fire on every tool call; it does NOT block,
+  since Claude Code is already waiting on its own dialog and keeps waiting), the `ask_operator`
   MCP tool (open questions — no hook covers `AskUserQuestion` or plan
   approval, and the tool's return value IS the answer, so free text reaches
   the agent with no keystrokes), and `attention.ts` as the fallback for

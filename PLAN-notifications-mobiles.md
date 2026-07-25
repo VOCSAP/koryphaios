@@ -625,7 +625,7 @@ sandbox — elles ne sont pas automatisables ici) :
 
 | Id | Risque | Impact | Levée |
 |---|---|---|---|
-| **R1** | Blocage long d'un hook `PermissionRequest` non spécifié (pas de max documenté) | la voie N2.a se dégrade | **Prototype avant N2** : mesurer le comportement réel à 300/900 s. Repli déjà prévu : boîte native + réponse dans le Deck |
+| ~~**R1**~~ | ~~Blocage long d'un hook~~ | — | **CLOS** : le hook ne bloque plus (décision 2026-07-25). Il détecte et sort ; la session attend son dialogue natif comme avant. |
 | **R2** | Timeout d'outil MCP côté client | `ask_operator` coupé | Motif **resumable** (`ticket` + `ask_operator_wait`) dès la conception |
 | **R3** | L'agent n'appelle pas `ask_operator` | questions ouvertes non notifiées | `attention.ts` reste le filet ; consigne en constante de code |
 | **R4** | Fiabilité de l'extraction question/options du buffer PTY | notif pauvre ou fausse | Ne notifier que sur épisode `waiting` confirmé ; tronquer ; ne jamais deviner les options |

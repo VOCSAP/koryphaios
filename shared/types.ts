@@ -553,8 +553,15 @@ export interface ApprovalOrigin {
   group_id: string;
   /** Peer display id snapshot (plain text, survives the peer row). */
   from_peer: string;
-  /** Opaque producer-side session handle (Deck tile id, or ''). */
+  /** Session handle the CREDENTIAL is pinned to (authenticated). */
   session_ref: string;
+  /**
+   * Tile the answer should be applied to. UNTRUSTED routing metadata: it is
+   * declared by the producer, not authenticated, so the Deck re-validates it
+   * against its own live tiles (and their waiting state) before typing
+   * anything — a declaration, never an access gate.
+   */
+  tile_ref: string;
 }
 
 export interface Approval {
@@ -583,6 +590,7 @@ export interface ApprovalAddRequest {
   question?: string;
   options?: string[];
   session_ref?: string;
+  tile_ref?: string;
   ttl_hours?: number;
 }
 

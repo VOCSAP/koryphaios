@@ -231,6 +231,7 @@ export interface ApprovalDraft {
   question: string;
   options: string[];
   session_ref: string;
+  tile_ref: string;
 }
 
 export type ValidationResult<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -250,6 +251,7 @@ export function validateApprovalDraft(body: {
   question?: unknown;
   options?: unknown;
   session_ref?: unknown;
+  tile_ref?: unknown;
 }): ValidationResult<ApprovalDraft> {
   const kind = str(body.kind) as ApprovalKind;
   if (!APPROVAL_KINDS.includes(kind)) return { ok: false, error: "kind must be permission|question|plan" };
@@ -271,8 +273,9 @@ export function validateApprovalDraft(body: {
     .filter((o) => o.length > 0);
 
   const session_ref = stripControl(str(body.session_ref)).trim().slice(0, APPROVAL_SESSION_REF_MAX);
+  const tile_ref = stripControl(str(body.tile_ref)).trim().slice(0, APPROVAL_SESSION_REF_MAX);
 
-  return { ok: true, value: { kind, title, question, options, session_ref } };
+  return { ok: true, value: { kind, title, question, options, session_ref, tile_ref } };
 }
 
 // --- Sanitisers ---

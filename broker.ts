@@ -483,6 +483,7 @@ db.run(`
     group_id       TEXT NOT NULL DEFAULT '',
     from_peer      TEXT NOT NULL DEFAULT '',
     session_ref    TEXT NOT NULL DEFAULT '',
+    tile_ref       TEXT NOT NULL DEFAULT '',
     kind           TEXT NOT NULL,
     title          TEXT NOT NULL,
     question       TEXT NOT NULL,
@@ -503,6 +504,15 @@ db.run(
 db.run(
   `CREATE INDEX IF NOT EXISTS idx_approvals_project ON pending_approvals(project_key, status)`
 );
+
+// Migration: routing hint added once the hook stopped blocking — the verdict is
+// now applied by the Deck, which needs to know WHICH tile to type into.
+try {
+  db.run("ALTER TABLE pending_approvals ADD COLUMN tile_ref TEXT NOT NULL DEFAULT ''");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
 
 // --- Helpers ---
 
@@ -1902,6 +1912,7 @@ type ApprovalRow = {
   group_id: string;
   from_peer: string;
   session_ref: string;
+  tile_ref: string;
   kind: string;
   title: string;
   question: string;
@@ -1941,6 +1952,7 @@ function rowToApproval(row: ApprovalRow): Approval {
       group_id: row.group_id,
       from_peer: row.from_peer,
       session_ref: row.session_ref,
+      tile_ref: row.tile_ref ?? "",
     },
     kind: row.kind as Approval["kind"],
     title: row.title,
@@ -2115,6 +2127,10 @@ function handleApprovalAdd(
       group_id: pick("group_id").slice(0, 64),
       from_peer: pick("from_peer").slice(0, 128),
       session_ref: sessionRef,
+      // Untrusted routing hint (which tile to type into). Authentication pins
+      // session_ref, NOT this: the Deck re-validates it against its own live
+      // tiles before applying anything.
+      tile_ref: draft.value.tile_ref,
     },
     kind: draft.value.kind,
     title: draft.value.title,
@@ -2133,8 +2149,8 @@ function handleApprovalAdd(
   db.run(
     `INSERT INTO pending_approvals
        (id, operator_id, origin_host, origin_user, project_key, group_id, from_peer,
-        session_ref, kind, title, question, options_json, status, created_at, notif_expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+        session_ref, tile_ref, kind, title, question, options_json, status, created_at, notif_expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
     [
       approval.id,
       approval.operator_id,
@@ -2144,6 +2160,7 @@ function handleApprovalAdd(
       approval.origin.group_id,
       approval.origin.from_peer,
       approval.origin.session_ref,
+      approval.origin.tile_ref,
       approval.kind,
       approval.title,
       approval.question,

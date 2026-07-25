@@ -8,8 +8,9 @@
 //     to answer one — including from inside a sandbox container (PLAN §6.8);
 //  2. raise approvals itself for the sessions no hook covers (non-Claude CLIs,
 //     via the attention detector);
-//  3. collect settled approvals and APPLY them — which, for anything that did
-//     not come through a hook, means typing into a PTY.
+//  3. collect settled approvals and APPLY them by typing into the tile. Since
+//     the hooks do not block, this is the only way a verdict reaches a session
+//     (bar ask_operator, whose return value IS the answer).
 //
 // Job 3 is where the danger is: the answer is remote input reaching a
 // terminal. It is sanitised broker-side on claim AND again here, and the
@@ -78,6 +79,7 @@ export async function addApproval(
     question: string
     options?: string[]
     sessionRef: string
+    tileRef?: string
     projectKey: string
     host: string
     fromPeer?: string
@@ -89,6 +91,7 @@ export async function addApproval(
     question: args.question,
     options: args.options ?? [],
     session_ref: args.sessionRef,
+    tile_ref: args.tileRef ?? args.sessionRef,
     origin: {
       host: args.host,
       os_user_hash: deps.identity.osUserHash,
@@ -143,10 +146,10 @@ export async function markVerdictsDelivered(deps: ApprovalDeps, ids: string[]): 
 /**
  * Translate a settled approval into the exact bytes to type into a PTY.
  *
- * ONLY used for the fallback path (sessions whose answer cannot be returned
- * structurally: non-Claude CLIs, and open questions detected on screen). The
- * hook path never comes through here — it returns a verdict to Claude Code
- * directly, which is why it is the preferred producer.
+ * This is the SINGLE return path: the hooks detect but never answer (they do
+ * not block, so Claude Code keeps its own dialog up), which means every verdict
+ * that is not an ask_operator return value lands here. That makes the
+ * conservatism below load-bearing rather than incidental.
  *
  * Conservative on purpose:
  *  - allow -> a bare Enter, accepting the highlighted first option (the

@@ -545,7 +545,15 @@ service.on('startup-ack', ({ name }: { id: string; name?: string }) => {
   journal.add('session', `auto-acknowledged the dev-channels warning for "${name ?? '?'}"`)
 })
 
-// Live approval per waiting tile, so a local answer can settle the remote one.
+// Tiles currently on a waiting screen. This is what authorises typing a remote
+// answer in: it must hold for BOTH producers (a hook-raised approval never
+// passes through openApprovals below, so matching on that alone would silently
+// drop every hook verdict).
+const waitingTiles = new Set<string>()
+
+// Approvals the DECK itself raised, per tile, so a local answer settles the
+// remote one. Hook-raised approvals are not here — they are settled by the
+// operator's channel and applied through the poller.
 const openApprovals = new Map<string, string>()
 
 /**
@@ -564,9 +572,12 @@ const pollApprovalVerdicts = async (): Promise<void> => {
     if (settled.length === 0) return
     const applied: string[] = []
     for (const approval of settled) {
-      const tile = approval.origin.session_ref
+      // tile_ref is a producer DECLARATION, not an authenticated field: it is
+      // only ever used to look up a tile we own, and canApplyVerdict then
+      // demands that tile still be the one waiting on this approval.
+      const tile = approval.origin.tile_ref || approval.origin.session_ref
       const live = service.list().find((s) => s.id === tile)
-      const state = live ? { exists: true, waiting: openApprovals.get(tile) === approval.id } : null
+      const state = live ? { exists: true, waiting: waitingTiles.has(tile) } : null
       if (!canApplyVerdict(approval, state)) {
         // Nothing to type, but it IS settled: mark it so it stops coming back.
         applied.push(approval.id)
@@ -578,6 +589,7 @@ const pollApprovalVerdicts = async (): Promise<void> => {
         continue
       }
       service.write(tile, keys)
+      waitingTiles.delete(tile)
       openApprovals.delete(tile)
       journal.add('attention', `answered "${live?.name ?? tile}" from ${approval.answered_via}`)
       applied.push(approval.id)
@@ -593,6 +605,7 @@ service.on('attention', ({ id, waiting }: { id: string; waiting: boolean }) => {
   // The operator answered locally: settle the approval so the phone
   // notification is invalidated (the broker makes the two exclusive).
   if (!waiting) {
+    waitingTiles.delete(id)
     const open = openApprovals.get(id)
     if (open) {
       openApprovals.delete(id)
@@ -605,6 +618,7 @@ service.on('attention', ({ id, waiting }: { id: string; waiting: boolean }) => {
     }
     return
   }
+  waitingTiles.add(id)
   if (session) journal.add('attention', `session "${session.name}" waits for the operator`)
   // Fallback producer: sessions no hook covers (non-Claude CLIs, and open
   // questions detected on screen). Best-effort — never block the UI path.
@@ -616,6 +630,7 @@ service.on('attention', ({ id, waiting }: { id: string; waiting: boolean }) => {
         title: session.name,
         question: `The session "${session.name}" is waiting for an answer on screen.`,
         sessionRef: id,
+        tileRef: id,
         projectKey: computeDeckProjectKey(cliContext.projectDir),
         host: hostname()
       })

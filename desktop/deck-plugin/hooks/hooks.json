@@ -19,7 +19,7 @@
           {
             "type": "command",
             "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/approval-hook.mjs\"",
-            "timeout": 960
+            "timeout": 20
           }
         ]
       }
@@ -31,7 +31,7 @@
           {
             "type": "command",
             "command": "bun \"${CLAUDE_PLUGIN_ROOT}/hooks/approval-hook.mjs\"",
-            "timeout": 960
+            "timeout": 20
           }
         ]
       }
