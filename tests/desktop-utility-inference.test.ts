@@ -69,7 +69,12 @@ test("codex/gemini targets: composed system+question document fed via stdin", as
   );
   const cmd = commands[0]!;
   expect(cmd).toContain("codex exec --sandbox read-only -m gpt-5.1 -");
-  const file = /< "([^"]+)"$/.exec(cmd)![1]!;
+  // The adapter emits the PLATFORM's stdin form (POSIX `< "file"`, PowerShell
+  // `Get-Content -Raw "file" | …`, see stdinFromFile). Accept either so this
+  // test asserts the document CONTRACT, not one OS's shell syntax — the two
+  // shapes themselves are covered by the pure adapter tests.
+  const m = /(?:< "([^"]+)"$|Get-Content -Raw "([^"]+)" \|)/.exec(cmd)!;
+  const file = (m[1] ?? m[2])!;
   expect(readFileSync(file, "utf-8")).toBe(composeStdinPrompt("SYS", "QUESTION"));
 });
 

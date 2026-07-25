@@ -2,7 +2,7 @@
 // collection caps, prompt composition.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -93,7 +93,10 @@ test("collectSources: file content capped, command executed in projectDir, error
     [
       { file: "big.txt" },
       { file: "no-such-*.md" },
-      { command: "pwd" },
+      // Portable cwd probe: `pwd` is POSIX-only (cmd.exe has no such builtin),
+      // so the command under test prints its own cwd through node — present on
+      // every runner and on any machine that can build the desktop app.
+      { command: 'node -e "process.stdout.write(process.cwd())"' },
       { command: "definitely-not-a-command-xyz" }
     ],
     dir,
@@ -103,7 +106,10 @@ test("collectSources: file content capped, command executed in projectDir, error
   expect(out[0]!.content.length).toBe(100);
   expect(out[0]!.truncated).toBe(true);
   expect(out[1]!.error).toBe("no matching file");
-  expect(out[2]!.content.trim().endsWith(dir.split("/").pop()!)).toBe(true);
+  // Compare canonically: mkdtemp hands back a symlinked prefix on macOS
+  // (/var -> /private/var) and an 8.3 short name on Windows, while the child
+  // process reports the real path.
+  expect(realpathSync(out[2]!.content.trim())).toBe(realpathSync(dir));
   expect(out[2]!.error).toBeUndefined();
   expect(out[3]!.error).toBeTruthy();
 });
