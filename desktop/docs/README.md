@@ -27,6 +27,7 @@ of the question.
 | [communication.md](communication.md) | How everyone talks: peer messaging, outbound megaphone, announcements, operator inbox, activity journal |
 | [help-assistant.md](help-assistant.md) | The floating "?" help assistant and the resume digest |
 | [companion.md](companion.md) | The mobile companion (LAN access from a phone) |
+| [notifications.md](notifications.md) | Remote approvals: answering a waiting session from your phone, and enrolling Telegram / Discord / the mobile app |
 | [sandbox.md](sandbox.md) | Sandbox mode: sessions in a persistent per-project Docker/Podman container, first-run login, the Docker rail view |
 | [settings.md](settings.md) | Every configurable option: the Settings page, config files, launch configuration, data locations |
 | [faq.md](faq.md) | Troubleshooting and frequently asked questions |
