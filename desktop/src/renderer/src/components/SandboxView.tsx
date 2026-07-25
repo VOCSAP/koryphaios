@@ -30,6 +30,7 @@ export function SandboxView(): React.JSX.Element {
   const [confirmDisconnect, setConfirmDisconnect] = useState(false)
   const [actionBusy, setActionBusy] = useState<string | null>(null)
   const [globsDraft, setGlobsDraft] = useState<string | null>(null)
+  const [portsDraft, setPortsDraft] = useState<string | null>(null)
   const [imageDraft, setImageDraft] = useState<string | null>(null)
 
   const hasLive = sessions.some((s) => s.status === 'running' || s.status === 'starting')
@@ -87,6 +88,18 @@ export function SandboxView(): React.JSX.Element {
       .filter(Boolean)
     await patchSandbox({ copyIgnored: globs })
     setGlobsDraft(null)
+    await refresh()
+  }
+
+  const savePorts = async (): Promise<void> => {
+    // An empty field is meaningful: "publish nothing", which is how a second
+    // project avoids colliding with the first on the shared defaults.
+    const ports = (portsDraft ?? '')
+      .split(/[\s,]+/)
+      .map((p) => Number.parseInt(p, 10))
+      .filter((p) => Number.isInteger(p) && p > 0 && p < 65536)
+    await patchSandbox({ ports })
+    setPortsDraft(null)
     await refresh()
   }
 
@@ -216,11 +229,28 @@ export function SandboxView(): React.JSX.Element {
           </div>
         )}
         {status && (
-          <div className="sandbox-line sandbox-dim">
+          <div className="sandbox-line">
             <span className="sandbox-label">{t('sandbox.ports')}</span>
-            <span className="sandbox-mono">{status.ports.join(', ') || '—'}</span>
+            <input
+              className="worktrees-branch-input"
+              value={portsDraft ?? status.ports.join(', ')}
+              placeholder={t('sandbox.portsPlaceholder')}
+              disabled={hasLive}
+              onChange={(e) => setPortsDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') void savePorts()
+              }}
+            />
+            <button
+              className="primary"
+              disabled={portsDraft === null || hasLive}
+              onClick={() => void savePorts()}
+            >
+              {t('sandbox.portsSave')}
+            </button>
           </div>
         )}
+        {status && <div className="sandbox-line sandbox-dim">{t('sandbox.portsHint')}</div>}
         {status && status.containerState === 'running' && (
           <div className="sandbox-line">
             <span className="sandbox-label">{t('sandbox.bridge')}</span>

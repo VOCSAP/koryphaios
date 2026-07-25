@@ -114,10 +114,14 @@ export function buildSessionCommandLine(input: SessionCommandInput): string {
     // No args / --agent / --model: Claude auto-restores them on --fork-session.
     // --effort, --mcp-config and --append-system-prompt-file are the
     // exceptions (not auto-restored).
-    return `${base}${pluginFlag(input.pluginDir)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)} --resume ${input.prevSessionId} --fork-session --session-id ${input.sessionId}${effortFlag(input.effort)}`
+    // Ids are double-quoted even though they are UUID-shaped by construction:
+    // prevSessionId can originate from the desk-session back-channel, whose file
+    // lives in a dir mounted into sandbox containers (validated in
+    // desk-session.ts). Quoting is the second lock on that door.
+    return `${base}${pluginFlag(input.pluginDir)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)} --resume "${input.prevSessionId}" --fork-session --session-id "${input.sessionId}"${effortFlag(input.effort)}`
   }
 
-  let line = `${base}${pluginFlag(input.pluginDir)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)} --session-id ${input.sessionId}`
+  let line = `${base}${pluginFlag(input.pluginDir)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)} --session-id "${input.sessionId}"`
   const extra = input.args?.trim()
   if (extra) line += ` ${extra}`
   line += effortFlag(input.effort)

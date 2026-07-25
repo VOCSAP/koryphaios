@@ -1,7 +1,7 @@
 // PLAN-SANDBOX M3: ephemeral-copy selection (glob matching + the hard deny
 // list that always wins) — desktop/src/main/sandbox-copy.
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -93,4 +93,25 @@ test("planIgnoredCopy reports patterns that matched nothing", () => {
   // `.env` matched a real file but is denied -> reported as unmatched, so the
   // operator sees it never travels instead of assuming it did.
   expect(plan.unmatched.sort()).toEqual([".env", "missing-*.txt"]);
+});
+
+test("walkProjectFiles never follows symlinks (foreign files, and infinite loops)", () => {
+  // Following links let copy-mode globs pull files from OUTSIDE the repo into
+  // the sandbox clone, and a self-referential link made this synchronous walk
+  // spin forever — the file cap could not stop it, a link loop yields no files.
+  const outside = mkdtempSync(join(tmpdir(), "cp-outside-"));
+  writeFileSync(join(outside, "secret.md"), "not yours");
+  try {
+    writeFileSync(join(dir, "own.md"), "mine");
+    symlinkSync(outside, join(dir, "linked-dir"), "junction");
+    symlinkSync(join(outside, "secret.md"), join(dir, "linked-file.md"));
+    symlinkSync(dir, join(dir, "self"), "junction"); // the loop
+
+    const files = walkProjectFiles(dir);
+    expect(files).toEqual(["own.md"]);
+    // Nothing from outside the tree can be selected, even by a greedy glob.
+    expect(selectCopyPaths(files, ["**"])).toEqual(["own.md"]);
+  } finally {
+    rmSync(outside, { recursive: true, force: true });
+  }
 });

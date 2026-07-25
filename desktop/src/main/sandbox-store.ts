@@ -49,10 +49,16 @@ const DEFAULT_SETTINGS: SandboxProjectSettings = {
 
 const WORK_MODES: readonly SandboxWorkMode[] = ['mount', 'copy']
 
+/**
+ * Absent (never configured) => the defaults. An explicitly EMPTY list stays
+ * empty: the defaults are the same for every project, so two projects with
+ * sandboxes could not both start (the second fails on an already-allocated
+ * port). Clearing the list is how the operator resolves that.
+ */
 function sanePorts(raw: unknown): number[] {
+  if (raw === undefined || raw === null) return [...DEFAULT_SANDBOX_PORTS]
   if (!Array.isArray(raw)) return [...DEFAULT_SANDBOX_PORTS]
-  const ports = raw.filter((p): p is number => Number.isInteger(p) && p > 0 && p < 65536)
-  return ports.length > 0 ? [...new Set(ports)] : [...DEFAULT_SANDBOX_PORTS]
+  return [...new Set(raw.filter((p): p is number => Number.isInteger(p) && p > 0 && p < 65536))]
 }
 
 function saneGlobs(raw: unknown): string[] {

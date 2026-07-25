@@ -173,6 +173,8 @@ interface IpcDeps {
    * or null when the sandbox is off.
    */
   sandboxGate: () => Promise<string | null>
+  /** Warm the container-side transcript cache for a session's real cwd (M2). */
+  sandboxWarmTranscripts: (cwd: string) => Promise<void>
 }
 
 export function registerIpc({
@@ -195,7 +197,8 @@ export function registerIpc({
   brokerRetry,
   deckPluginDir,
   sandbox,
-  sandboxGate
+  sandboxGate,
+  sandboxWarmTranscripts
 }: IpcDeps): void {
   // ----- sessions -----
   regHandle('sessions:list', () => service.list())
@@ -208,7 +211,8 @@ export function registerIpc({
       input ?? {},
       checkpoint,
       getWorktreeInit(),
-      sandboxGate
+      sandboxGate,
+      sandboxWarmTranscripts
     )
   )
   regHandle('sessions:remove', (_e, id: string) => service.remove(id))
@@ -419,10 +423,12 @@ export function registerIpc({
     return SANDBOX_BUILD_PTY_ID
   })
   regHandle('sandbox:build-stop', () => service.killUtility(SANDBOX_BUILD_PTY_ID))
-  regHandle('sandbox:auth-purge', async () => {
-    // A running work container holds the volume: disconnecting under it would
-    // strand a live agent mid-turn (docs/sandbox.md, authentication).
-    if (await sandbox.anyRunning()) throw new Error('sandbox-container-running')
+  regHandle('sandbox:auth-purge', () => {
+    // Guard on LIVE SESSIONS, not on a running container: the wipe itself is a
+    // `docker exec` and needs the container UP, so the old check made every
+    // call impossible (guard and operation required opposite states). What
+    // must not happen is disconnecting under a working agent.
+    if (service.hasLiveSessions()) throw new Error('sandbox-live-sessions')
     return sandbox.purgeAuth()
   })
   regHandle('sandbox:reset-copy', () => {
@@ -496,7 +502,9 @@ export function registerIpc({
     // tile would look "expired" and start fresh (PLAN-SANDBOX M2).
     if (sandbox.isEnabled()) {
       await sandbox.ensure()
-      await sandbox.refreshTranscripts(sandbox.effectiveRoot())
+      // Warm EVERY cwd the workspace will respawn into, not just the root:
+      // worktree sessions live elsewhere and would otherwise all start fresh.
+      for (const cwd of workspaces.sessionCwds(id)) await sandbox.refreshTranscripts(cwd)
     }
     const ok = workspaces.restore(id)
     if (ok) {

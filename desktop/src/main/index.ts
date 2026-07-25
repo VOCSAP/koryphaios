@@ -347,9 +347,17 @@ service.setSandboxProvider(
     if (!launch) return null
     return {
       wrap: (sessionId, command, cwdHost, env) => {
+        const cwd = mapHostPathToContainer(cwdHost, launch.workSource)
+        if (cwd === null) {
+          // Never relocate an agent silently: refusing marks the tile exited
+          // with a trace, which the operator can act on.
+          throw new Error(
+            `session cwd is outside the sandbox mount (${cwdHost} not under ${launch.workSource})`
+          )
+        }
         sandbox.writeLaunchScript(sessionId, {
           command,
-          cwd: mapHostPathToContainer(cwdHost, launch.workSource),
+          cwd,
           env: {
             ...sandboxifyEnv(env, (path) => {
               try {
@@ -368,7 +376,10 @@ service.setSandboxProvider(
   },
   // M2 resume: transcripts live in the container's auth volume, so the host
   // readers would see none and every restore would start fresh.
-  (cwdHost) => sandbox.transcriptsFor(cwdHost)
+  (cwdHost) => sandbox.transcriptsFor(cwdHost),
+  // Sandboxed sessions write their back-channel + peer cache into the
+  // Deck-owned dir mounted in the container, never the host ~/.claude/peers.
+  () => (sandbox.isEnabled() ? sandbox.peersDirHost : null)
 )
 
 // SBX3/M3: pre-spawn gate — container up AND authenticated before ANY tile
@@ -376,6 +387,11 @@ service.setSandboxProvider(
 // (one modal, instead of a login prompt in every tile). Returns the EFFECTIVE
 // PROJECT ROOT so copy mode lands sessions + worktrees inside the clone that
 // is actually mounted at /work.
+/** Warm the container-side transcript cache for a session's real cwd (M2). */
+const warmSandboxTranscripts = async (cwd: string): Promise<void> => {
+  if (sandbox.isEnabled()) await sandbox.refreshTranscripts(cwd)
+}
+
 const sandboxGate = async (): Promise<string | null> => {
   if (!sandbox.isEnabled()) return null
   const st = await sandbox.ensure()
@@ -383,11 +399,7 @@ const sandboxGate = async (): Promise<string | null> => {
     throw new Error(st.error ? `sandbox: ${st.error}` : 'sandbox: container not ready')
   }
   if (st.authed !== true) throw new Error('sandbox-auth-required')
-  const root = sandbox.effectiveRoot()
-  // Refresh the container-side transcript cache for the tree we are about to
-  // spawn in, so a resume finds its conversation (M2).
-  await sandbox.refreshTranscripts(root)
-  return root
+  return sandbox.effectiveRoot()
 }
 
 service.on('removed', ({ name }: { id: string; name: string }) => {
@@ -1153,7 +1165,8 @@ const controlDeps: DeckControlDeps = {
       input,
       checkpointBeforeSpawn,
       getWorktreeInit(),
-      sandboxGate
+      sandboxGate,
+      warmSandboxTranscripts
     ),
   listSessions: () => service.list(),
   sandboxExec: (command) => sandbox.supervisorExec(command),
@@ -1187,7 +1200,8 @@ const controlDeps: DeckControlDeps = {
         hasLead ? { ...input, lead: undefined } : input,
         undefined,
         getWorktreeInit(),
-        sandboxGate
+        sandboxGate,
+        warmSandboxTranscripts
       )
     }
     return inputs.length
@@ -1526,7 +1540,8 @@ app.whenReady().then(() => {
     },
     deckPluginDir,
     sandbox,
-    sandboxGate
+    sandboxGate,
+    sandboxWarmTranscripts: warmSandboxTranscripts
   })
   service.start()
   // Attach an auto-save workspace capturing whatever the service just restored.

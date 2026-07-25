@@ -76,7 +76,12 @@ test("hand-edited values are sanitized (ports, mode, globs)", () => {
   expect(s.mode).toBe("mount");
   expect(s.copyIgnored).toEqual(["PLAN-*.md"]);
   expect(readSandboxStore(file).image).toBe("custom-img");
+  // An EXPLICITLY empty list stays empty — the defaults are shared by every
+  // project, so clearing them is how a second sandboxed project avoids a
+  // "port is already allocated" failure. Only an absent key means "defaults".
   writeFileSync(file, JSON.stringify({ projects: { k: { enabled: true, ports: [] } } }));
+  expect(projectSandboxSettings(file, "k").ports).toEqual([]);
+  writeFileSync(file, JSON.stringify({ projects: { k: { enabled: true } } }));
   expect(projectSandboxSettings(file, "k").ports).toEqual(DEFAULT_SANDBOX_PORTS);
 });
 

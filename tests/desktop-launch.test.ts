@@ -120,12 +120,12 @@ test("fresh launch appends --session-id then args", () => {
     args: "--agent reviewer",
     mode: "fresh"
   });
-  expect(line).toBe("claude run --session-id id-new --agent reviewer");
+  expect(line).toBe("claude run --session-id \"id-new\" --agent reviewer");
 });
 
 test("fresh launch without args", () => {
   const line = buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-1", mode: "fresh" });
-  expect(line).toBe("claude run --session-id id-1");
+  expect(line).toBe("claude run --session-id \"id-1\"");
 });
 
 test("resume forks prev into new id and never re-passes args/agent/model", () => {
@@ -136,14 +136,14 @@ test("resume forks prev into new id and never re-passes args/agent/model", () =>
     args: "--agent reviewer --model opus",
     mode: "resume"
   });
-  expect(line).toBe("claude run --resume id-old --fork-session --session-id id-new");
+  expect(line).toBe("claude run --resume \"id-old\" --fork-session --session-id \"id-new\"");
   expect(line).not.toContain("--agent");
   expect(line).not.toContain("--model");
 });
 
 test("resume without a prevSessionId degrades to a fresh launch", () => {
   const line = buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-1", mode: "resume" });
-  expect(line).toBe("claude run --session-id id-1");
+  expect(line).toBe("claude run --session-id \"id-1\"");
 });
 
 test("fresh launch appends --effort last when an effort level is set", () => {
@@ -154,7 +154,7 @@ test("fresh launch appends --effort last when an effort level is set", () => {
     effort: "high",
     mode: "fresh"
   });
-  expect(line).toBe("claude run --session-id id-1 --agent reviewer --effort high");
+  expect(line).toBe("claude run --session-id \"id-1\" --agent reviewer --effort high");
 });
 
 test("resume re-passes --effort (not auto-restored) after the fork", () => {
@@ -165,12 +165,12 @@ test("resume re-passes --effort (not auto-restored) after the fork", () => {
     effort: "xhigh",
     mode: "resume"
   });
-  expect(line).toBe("claude run --resume id-old --fork-session --session-id id-new --effort xhigh");
+  expect(line).toBe("claude run --resume \"id-old\" --fork-session --session-id \"id-new\" --effort xhigh");
 });
 
 test("an empty/whitespace effort never emits the flag (Auto position)", () => {
   const fresh = buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-1", effort: "  ", mode: "fresh" });
-  expect(fresh).toBe("claude run --session-id id-1");
+  expect(fresh).toBe("claude run --session-id \"id-1\"");
   const resume = buildSessionCommandLine({
     baseCommand: "claude run",
     sessionId: "id-new",
@@ -178,7 +178,7 @@ test("an empty/whitespace effort never emits the flag (Auto position)", () => {
     effort: "",
     mode: "resume"
   });
-  expect(resume).toBe("claude run --resume id-old --fork-session --session-id id-new");
+  expect(resume).toBe("claude run --resume \"id-old\" --fork-session --session-id \"id-new\"");
 });
 
 test("fresh launch inserts --plugin-dir right after the base command", () => {
@@ -190,7 +190,7 @@ test("fresh launch inserts --plugin-dir right after the base command", () => {
     effort: "high",
     mode: "fresh"
   });
-  expect(line).toBe('claude run --plugin-dir "C:/res/deck-plugin" --session-id id-1 --agent reviewer --effort high');
+  expect(line).toBe('claude run --plugin-dir "C:/res/deck-plugin" --session-id "id-1" --agent reviewer --effort high');
 });
 
 test("resume inserts --plugin-dir before --resume", () => {
@@ -201,14 +201,14 @@ test("resume inserts --plugin-dir before --resume", () => {
     pluginDir: "/opt/deck-plugin",
     mode: "resume"
   });
-  expect(line).toBe('claude run --plugin-dir "/opt/deck-plugin" --resume id-old --fork-session --session-id id-new');
+  expect(line).toBe('claude run --plugin-dir "/opt/deck-plugin" --resume "id-old" --fork-session --session-id \"id-new\"');
 });
 
 test("an empty/whitespace pluginDir never emits the flag", () => {
   const fresh = buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-1", pluginDir: "  ", mode: "fresh" });
-  expect(fresh).toBe("claude run --session-id id-1");
+  expect(fresh).toBe("claude run --session-id \"id-1\"");
   const none = buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-1", mode: "fresh" });
-  expect(none).toBe("claude run --session-id id-1");
+  expect(none).toBe("claude run --session-id \"id-1\"");
 });
 
 // ----- supervisor flags (PLAN C5/C8): re-passed on fresh AND resume -----
@@ -222,7 +222,7 @@ test("--mcp-config and --append-system-prompt-file are emitted on both modes", (
     mode: "fresh"
   });
   expect(fresh).toBe(
-    'claude run --mcp-config "/state/supervisor-mcp.json" --append-system-prompt-file "/state/supervisor-system-prompt.md" --session-id id-1'
+    'claude run --mcp-config "/state/supervisor-mcp.json" --append-system-prompt-file "/state/supervisor-system-prompt.md" --session-id "id-1"'
   );
 
   const resume = buildSessionCommandLine({
@@ -235,7 +235,7 @@ test("--mcp-config and --append-system-prompt-file are emitted on both modes", (
   });
   expect(resume).toContain('--mcp-config "/state/supervisor-mcp.json"');
   expect(resume).toContain('--append-system-prompt-file "/state/supervisor-system-prompt.md"');
-  expect(resume).toContain("--resume id-old --fork-session");
+  expect(resume).toContain("--resume \"id-old\" --fork-session");
 });
 
 // ----- initial prompt (PLAN C2) -----
@@ -251,7 +251,7 @@ test("fresh launch appends the quoted prompt last (after args and --effort)", ()
     mode: "fresh"
   });
   expect(line).toBe(
-    "claude run --session-id id-1 --agent dev --effort high 'Read PLAN-v0.4.md and start C2'"
+    "claude run --session-id \"id-1\" --agent dev --effort high 'Read PLAN-v0.4.md and start C2'"
   );
 });
 
@@ -274,7 +274,7 @@ test("resume never re-plays the prompt (--resume restores the conversation)", ()
     platform: "linux",
     mode: "resume"
   });
-  expect(line).toBe("claude run --resume id-old --fork-session --session-id id-new");
+  expect(line).toBe("claude run --resume \"id-old\" --fork-session --session-id \"id-new\"");
 });
 
 test("an empty/whitespace prompt never emits a positional arg", () => {
@@ -285,7 +285,7 @@ test("an empty/whitespace prompt never emits a positional arg", () => {
     platform: "linux",
     mode: "fresh"
   });
-  expect(line).toBe("claude run --session-id id-1");
+  expect(line).toBe("claude run --session-id \"id-1\"");
 });
 
 // ----- B5: worktreeInit accessors (gated at startup in index.ts) -----
