@@ -36,7 +36,9 @@ identité opérateur**.
 - Pas de chiffrement de bout en bout du contenu des notifications (le texte
   transite en clair chez Telegram/Discord — voir §6.5, arbitrage assumé).
 - Pas de réponse aux questions des CLIs non-Claude autrement que par
-  injection PTY heuristique (`attention.ts`).
+  injection PTY heuristique (`attention.ts`) : ils n'ont pas de canal de push
+  (§0.4-8). Le chemin `channel` leur sera ouvert si l'étude ACP du
+  `BACKLOG.md` aboutit.
 - Pas de « reprise » d'une session morte : si le PC s'éteint, l'approbation
   reste `pending` mais plus personne ne l'applique (elle expire).
 
@@ -54,6 +56,15 @@ identité opérateur**.
    (entrée hostile, §6.3).
 6. **Le texte de question vient d'un agent** → échappement obligatoire avant
    envoi à Telegram/Discord (§6.4).
+7. **Un dialogue de permission Claude Code ne se referme QUE par une frappe.**
+   Vérifié à l'usage (opérateur, 2026-07-25) : une notification MCP
+   `claude/channel` arrive bien au processus, mais la boucle UI est bloquée sur
+   le dialogue — le message est mis en file, il ne se substitue pas à la
+   touche. Le chemin de retour dépend donc du TYPE de demande (§2 C-9).
+8. **Le canal `claude/channel` est propre à Claude Code.** Codex n'a aucun
+   équivalent (MCP y est strictement *pull*) — l'injection PTY reste
+   obligatoire pour les CLIs tiers tant que l'étude ACP du `BACKLOG.md` n'a
+   pas abouti.
 
 ---
 
@@ -108,6 +119,13 @@ invalide le plan.
   le secret de groupe (`buildScopeEnv` dans `desktop/src/main/scope.ts`).
 - **C-8 — Aucune régression du contrat « le Deck ne lit pas le trafic peer ».**
   Les approbations sont un canal distinct des `messages`.
+- **C-9 — Deux chemins de retour, choisis par le TYPE de demande.** La réponse
+  revient par le **message broker** (`notifications/claude/channel`) quand
+  l'agent est au prompt, et par **frappe PTY** quand il est bloqué sur un
+  dialogue modal. Ce n'est pas une préférence de style : un dialogue de
+  permission n'est pas refermable par un message (contrainte §0.4-7). Le choix
+  est matérialisé par `reply_route` sur l'approbation — explicite et testable,
+  jamais déduit à l'exécution.
 
 ---
 
@@ -168,6 +186,14 @@ CREATE TABLE IF NOT EXISTS pending_approvals (
   question       TEXT NOT NULL,
   options_json   TEXT NOT NULL DEFAULT '[]',
   -- Cycle de vie
+  -- Chemin de retour choisi à la création (C-9). 'channel' = message broker
+  -- vers le peer ; 'pty' = frappes injectées par le Deck.
+  reply_route    TEXT NOT NULL DEFAULT 'pty',
+  -- Clé de routage du peer, pour le chemin 'channel'. PRIVÉE : jamais
+  -- projetée par toPublicApproval (entrée hostile #2), au même titre que
+  -- messages.from_token.
+  reply_token    TEXT NOT NULL DEFAULT '',
+  reply_group    TEXT NOT NULL DEFAULT '',
   status         TEXT NOT NULL DEFAULT 'pending', -- pending|answered|expired_notif|abandoned
   answered_via   TEXT,                     -- deck|telegram|discord|ntfy
   answer_kind    TEXT,                     -- allow|deny|text
@@ -219,9 +245,9 @@ handlers sur le modèle `handleGraphDraftAdd` (`{ result }` ou
 
 | Route | Corps | Réponse | Notes |
 |---|---|---|---|
-| `POST /approval/add` | `auth`, `origin{host,os_user_hash,project_key,peer,session_ref}`, `kind`, `title`, `question`, `options[]`, `ttl_hours?` | `{ approval }` | TOFU de l'opérateur ; déclenche le fan-out (§5.4) |
+| `POST /approval/add` | `auth`, `origin{...}`, `kind`, `title`, `question`, `options[]`, `ttl_hours?`, `reply_route?`, `instance_token?` | `{ approval }` | TOFU de l'opérateur ; déclenche le fan-out. `instance_token` (fourni par `server.ts`, qui est le peer) est stocké en `reply_token` et **jamais renvoyé** |
 | `POST /approval/wait` | `auth`, `id`, `timeout_sec` (≤ 300) | `{ approval }` ou `{ pending: true }` | **Long poll** : la requête est tenue ouverte jusqu'au claim ou au timeout |
-| `POST /approval/claim` | `auth?`, `id`, `via`, `answer_kind`, `answer_text?` | `200 { approval }` / **409** `{ error: 'already-settled' }` | Atomique. `via='deck'` accepté aussi sur `expired_notif` (C-4) |
+| `POST /approval/claim` | `auth?`, `id`, `via`, `answer_kind`, `answer_text?` | `200 { approval }` / **409** `{ error: 'already-settled' }` | Atomique. `via='deck'` accepté aussi sur `expired_notif` (C-4). Sur `reply_route='channel'`, le claim **délivre en plus la réponse au peer** (message du sentinelle `operator`, push WS + repli poll) |
 | `POST /approval/list` | `auth`, `project_key?`, `status?` | `{ approvals[] }` | Non destructif (C-3) |
 | `POST /operator/channel-upsert` | `auth`, `kind`, `address`, `label`, `enabled` | `{ channel }` | Appelé par la passerelle à l'appairage |
 | `POST /operator/channel-list` | `auth` | `{ channels[] }` | UI réglages du Deck |
@@ -397,6 +423,73 @@ CallTool, ligne dans le blob d'instructions), `shared/approval.ts`.
 - L'injection réutilise la mécanique de `quota.ts` (écriture PTY par le
   session service), avec `sanitizeAnswerForPty()` en amont (§6.3).
 
+#### N2.e — Retour par message broker (chemin `channel`)
+
+**Objectif** : livrer la réponse au peer par le canal claude-peers plutôt que
+par des frappes, partout où l'agent est au prompt et non bloqué sur un
+dialogue.
+
+**Ce que ça remplace, et ce que ça ne remplace pas**
+
+| Cas | `reply_route` | Pourquoi |
+|---|---|---|
+| Dialogue de permission (`❯ 1.`) | `pty` | l'UI attend une touche ; un message est mis en file (§0.4-7) |
+| `ask_operator` | *(aucun)* | la valeur de retour de l'outil EST la réponse |
+| Question ouverte, tour terminé | **`channel`** | le message ouvre un nouveau tour avec le texte de l'opérateur |
+| CLI non-Claude (codex/gemini) | `pty` | aucun équivalent de `claude/channel` (§0.4-8) |
+
+C'est donc l'injection PTY **là où elle était la plus fragile** qui disparaît :
+taper du texte libre à l'aveugle. Les frappes se réduisent à Entrée/Échap sur
+un chooser — précisément le cas où elles sont fiables.
+
+**Gain de portée, au-delà de l'élégance.** Aujourd'hui le poller de verdicts
+n'écrit que dans les tuiles de SA fenêtre : une session `claude` lancée dans un
+terminal ordinaire, avec juste le MCP claude-peers, peut lever une approbation
+via `ask_operator` mais personne ne peut la lui répondre. Avec le chemin
+`channel`, **le broker la sert directement** — sans Deck, sans PTY, y compris
+depuis une autre machine du même broker.
+
+**Fichiers** : `broker.ts` (delivery sur claim), `server.ts` (envoi de
+`instance_token` sur `add` + mise à jour du blob d'instructions),
+`shared/types.ts`.
+
+**Étapes**
+1. `/approval/add` accepte `reply_route` et, pour `channel`, l'`instance_token`
+   de l'appelant. `server.ts` le connaît (c'est le peer enregistré) ; il est
+   stocké en `reply_token` et **jamais reprojeté** (§6.2).
+2. Sur claim d'une approbation `reply_route='channel'` : insérer un message du
+   sentinelle **`operator`** vers `reply_token`, puis push WS (repli poll
+   inchangé). On réutilise intégralement `handleSendMessage` /
+   `flushPendingForToken` — aucune nouvelle mécanique de livraison.
+3. Rendu du message : la réponse de l'opérateur, encadrée comme une **réponse à
+   une question posée**, avec l'`id` de l'approbation pour que l'agent puisse
+   la corréler.
+4. **Corriger le blob d'instructions MCP** : il affirme aujourd'hui
+   « *the operator does not reply through this channel* ». C'est précisément ce
+   que ce lot change.
+5. Le Deck ne poste plus de frappes pour ces approbations : `pollApprovalVerdicts`
+   ignore `reply_route='channel'` (le broker s'en est chargé) et les marque
+   délivrées.
+
+**Definition of Done**
+- Une approbation `channel` réglée depuis un canal distant arrive dans la
+  session comme un message peer, sans qu'aucune frappe ne soit injectée.
+- Une approbation `pty` continue de passer par les frappes.
+- Une session NON spawnée par le Deck reçoit sa réponse (le cas qui était
+  impossible avant).
+- `instance_token` n'apparaît dans aucune réponse HTTP ni dans aucun message
+  sortant vers un canal.
+
+**Tests** : `tests/broker-approval-reply.test.ts` — un peer enregistré via
+`/register` + WS, une approbation `channel`, un claim, et l'assertion que la
+trame arrive sur la WebSocket du peer ; plus le contrôle que `reply_token` ne
+fuit dans aucune projection.
+
+**Dépendance assumée** : `--dangerously-load-development-channels` côté
+session. Le Deck le passe déjà ; une session tierce sans le flag ne recevra
+pas le push — repli documenté : elle reste répondable par `check_messages`,
+et `ask_operator` (qui n'utilise pas ce chemin) reste disponible.
+
 #### N2.d — Réglages (global + opt-out projet)
 
 - `AppConfig` (`desktop/src/main/store.ts`, `DEFAULT_CONFIG`) : ajouter
@@ -496,7 +589,7 @@ SNAT par défaut laisse passer `isPrivateAddress` sans changement de code).
 | # | Entrée | Où elle apparaît ici | Traitement |
 |---|---|---|---|
 | **1** | Valeur d'un **dépôt cloné** | l'opt-out projet, le `project_key` | L'activation des notifications et les tokens de bot sont **globaux / app-state uniquement**. Un fichier du dépôt ne peut **jamais** activer un canal, changer une adresse ni fournir un token. |
-| **2** | Champ traversant la **frontière HTTP du broker** | réponses `/approval/*` | `toPublicApproval()` : ni `instance_token`, ni `from_token`, ni PID. `origin_user` est un **hash**, jamais le login. |
+| **2** | Champ traversant la **frontière HTTP du broker** | réponses `/approval/*` | `toPublicApproval()` : ni `instance_token`, ni `from_token`, ni PID. `origin_user` est un **hash**, jamais le login. **`reply_token` (routage du chemin `channel`) est de la même famille : il entre par `add`, vit en base, et ne ressort jamais — ni en HTTP, ni dans un message poussé vers Telegram/Discord.** |
 | **3** | Argument IPC devenant **chemin/cwd** | `operator:enrollApply` | La charge d'enrôlement est validée comme **clé opaque**, jamais interprétée comme chemin. Aucun nouveau chemin filesystem n'entre par cette voie. |
 | **4** | Chaîne produite par un **agent** | `title`/`question` partant vers Telegram/Discord | Échappement HTML systématique côté `notify/format.ts` ; troncature ; jamais de collage dans une commande. |
 | **5** | Élément **monté dans un sandbox** | credential d'approbation en mode sandbox | **Jeton restreint par session** (§6.8), jamais la clé opérateur. |
@@ -611,7 +704,7 @@ sandbox — elles ne sont pas automatisables ici) :
 
 | Fichier | Ajout |
 |---|---|
-| `ARCHITECTURE.md` | section « Approbations distantes » (tables, routes, arbitrage, TTL) + les 4 variables d'env |
+| `ARCHITECTURE.md` | section « Approbations distantes » (tables, routes, arbitrage, TTL) + les 4 variables d'env + **les deux chemins de retour (C-9) et pourquoi un dialogue modal impose la frappe** |
 | `DESKTOP.md` | comportement Deck : réglages global/projet, producteurs, poller de verdicts |
 | `README.md` | tableau des variables d'environnement |
 | `desktop/docs/notifications.md` (nouveau) | doc **opérateur** : appairage, enrôlement d'un 2ᵉ PC, révocation, confidentialité |
@@ -631,7 +724,8 @@ sandbox — elles ne sont pas automatisables ici) :
 | **R4** | Fiabilité de l'extraction question/options du buffer PTY | notif pauvre ou fausse | Ne notifier que sur épisode `waiting` confirmé ; tronquer ; ne jamais deviner les options |
 | **R5** | Purge Telegram des updates > 24 h (PC éteint) | réponses perdues | Cohérent avec le TTL notif ; documenté |
 | **R6** | Le broker devient porteur d'un secret externe | surface nouvelle | chmod-600, hors logs, révocation documentée |
-| **R7** | Deux Decks du **même** opérateur appliquant le même verdict | double injection | `delivered_at` + re-vérification d'état ; le `session_ref` cible une tuile précise |
+| **R7** | Deux Decks du **même** opérateur appliquant le même verdict | double injection | `delivered_at` + re-vérification d'état ; le `tile_ref` cible une tuile précise. Le chemin `channel` est immunisé : la livraison est faite une fois par le broker, pas par les Decks |
+| **R8** | Session sans `--dangerously-load-development-channels` sur le chemin `channel` | réponse jamais poussée | Le Deck passe le flag ; sinon repli `check_messages` et `ask_operator`. À détecter à l'`add` si possible (sinon documenté) |
 
 ---
 
