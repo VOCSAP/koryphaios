@@ -498,3 +498,162 @@ export interface GraphDraftOpenRequest {
 export interface GraphDraftOpenResponse {
   draft: GraphDraft;
 }
+
+// --- Remote approvals (PLAN-notifications-mobiles N0/N1) ---
+// An agent hits a blocking question; the broker parks it here until SOMEONE
+// answers — the Deck, or a notification channel on the operator's phone. Same
+// durability philosophy as graph_drafts (no FK to peers, plain-text author
+// snapshot, status flips, listing is non-destructive): a broker or Deck
+// restart never loses a pending approval.
+//
+// The arbiter contract: exactly one `claim` wins (409 for everyone else), so
+// answering in the Deck invalidates the phone notification and vice versa.
+
+/** What kind of blocking situation produced this approval. */
+export type ApprovalKind = "permission" | "question" | "plan";
+
+/**
+ * pending        -> waiting for an answer, notification live
+ * answered       -> settled; `answered_via` says which channel won the race
+ * expired_notif  -> the NOTIFICATION expired (default 24h). The session is
+ *                   still blocked and the Deck may still claim it.
+ * abandoned      -> the producer gave up (session closed, host gone)
+ */
+export type ApprovalStatus = "pending" | "answered" | "expired_notif" | "abandoned";
+
+/** Shape of the answer. `text` carries a free-form operator prompt. */
+export type ApprovalAnswerKind = "allow" | "deny" | "text";
+
+/** Which channel settled the approval. */
+export type ApprovalVia = "deck" | "telegram" | "discord" | "ntfy";
+
+/** Which credential class signed a request (see shared/approval.ts header). */
+export type ApprovalAuthKind = "operator" | "session";
+
+export interface ApprovalAuthProof {
+  kind: ApprovalAuthKind;
+  /** operator_id for both kinds — a session token is always bound to one. */
+  operator_id: string;
+  /** Session token id (sha256 prefix). Absent for an operator proof. */
+  token_id?: string;
+  nonce: string;
+  /** Unix seconds. */
+  ts: number;
+  /** base64 Ed25519 signature over canonicalize(payload)\n nonce \n ts. */
+  sig: string;
+}
+
+/** Origin metadata: display + audit only, NEVER an authorisation input. */
+export interface ApprovalOrigin {
+  /** Machine hostname. NOT an identity: two OS accounts share it. */
+  host: string;
+  /** Salted hash of the OS username — the login never leaves the machine. */
+  os_user_hash: string;
+  project_key: string;
+  group_id: string;
+  /** Peer display id snapshot (plain text, survives the peer row). */
+  from_peer: string;
+  /** Opaque producer-side session handle (Deck tile id, or ''). */
+  session_ref: string;
+}
+
+export interface Approval {
+  id: string;
+  operator_id: string;
+  origin: ApprovalOrigin;
+  kind: ApprovalKind;
+  title: string;
+  question: string;
+  options: string[];
+  status: ApprovalStatus;
+  answered_via: ApprovalVia | null;
+  answer_kind: ApprovalAnswerKind | null;
+  answer_text: string | null;
+  created_at: string; // ISO timestamp
+  notif_expires_at: string; // ISO timestamp
+  answered_at: string | null;
+  delivered_at: string | null;
+}
+
+export interface ApprovalAddRequest {
+  auth?: ApprovalAuthProof;
+  origin?: Partial<ApprovalOrigin>;
+  kind?: ApprovalKind;
+  title?: string;
+  question?: string;
+  options?: string[];
+  session_ref?: string;
+  ttl_hours?: number;
+}
+
+export interface ApprovalAddResponse {
+  approval: Approval;
+}
+
+export interface ApprovalWaitRequest {
+  auth?: ApprovalAuthProof;
+  id?: string;
+  timeout_sec?: number;
+}
+
+/** Either the settled approval, or `pending: true` when the long poll expired. */
+export interface ApprovalWaitResponse {
+  approval?: Approval;
+  pending?: boolean;
+}
+
+export interface ApprovalClaimRequest {
+  auth?: ApprovalAuthProof;
+  id?: string;
+  via?: ApprovalVia;
+  answer_kind?: ApprovalAnswerKind;
+  answer_text?: string;
+}
+
+export interface ApprovalClaimResponse {
+  approval: Approval;
+}
+
+export interface ApprovalListRequest {
+  auth?: ApprovalAuthProof;
+  project_key?: string;
+  status?: ApprovalStatus;
+  /** Only approvals answered but not yet applied by the producer. */
+  undelivered_only?: boolean;
+}
+
+export interface ApprovalListResponse {
+  approvals: Approval[];
+}
+
+export interface ApprovalDeliveredRequest {
+  auth?: ApprovalAuthProof;
+  ids?: string[];
+}
+
+export interface ApprovalDeliveredResponse {
+  marked: number;
+}
+
+/** Deck mints a restricted per-session token (never the operator key). */
+export interface ApprovalTokenMintRequest {
+  auth?: ApprovalAuthProof;
+  session_ref?: string;
+  token?: string;
+  ttl_hours?: number;
+}
+
+export interface ApprovalTokenMintResponse {
+  token_id: string;
+  expires_at: string;
+}
+
+export interface ApprovalTokenRevokeRequest {
+  auth?: ApprovalAuthProof;
+  session_ref?: string;
+  token_id?: string;
+}
+
+export interface ApprovalTokenRevokeResponse {
+  revoked: number;
+}

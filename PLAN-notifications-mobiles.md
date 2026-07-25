@@ -499,7 +499,37 @@ SNAT par défaut laisse passer `isPrivateAddress` sans changement de code).
 | **2** | Champ traversant la **frontière HTTP du broker** | réponses `/approval/*` | `toPublicApproval()` : ni `instance_token`, ni `from_token`, ni PID. `origin_user` est un **hash**, jamais le login. |
 | **3** | Argument IPC devenant **chemin/cwd** | `operator:enrollApply` | La charge d'enrôlement est validée comme **clé opaque**, jamais interprétée comme chemin. Aucun nouveau chemin filesystem n'entre par cette voie. |
 | **4** | Chaîne produite par un **agent** | `title`/`question` partant vers Telegram/Discord | Échappement HTML systématique côté `notify/format.ts` ; troncature ; jamais de collage dans une commande. |
-| **5** | Élément **monté dans un sandbox** | clé opérateur en mode sandbox | La clé **n'est pas projetée** dans le conteneur par défaut : une session sandboxée émet via le Deck hôte. À trancher explicitement au lot N2 si on veut l'inverse. |
+| **5** | Élément **monté dans un sandbox** | credential d'approbation en mode sandbox | **Jeton restreint par session** (§6.8), jamais la clé opérateur. |
+
+### 6.8 Sandbox : jeton restreint, jamais la clé opérateur (arbitrage tranché)
+
+La clé opérateur donne l'autorité de l'opérateur sur le broker : `claim`
+compris. La projeter dans un conteneur — c'est-à-dire dans du code que le
+sandbox postule compromis — permettrait à l'agent sandboxé de **répondre aux
+approbations des AUTRES sessions**, y compris non sandboxées sur l'hôte
+(auto-approuver un `rm -rf` qui attendait l'opérateur), et de rediriger les
+notifications via `channel-upsert`. C'est une évasion d'autorité.
+
+**Décision** : le Deck frappe un **jeton restreint par session**
+(`approval_session_tokens`), seul élément projeté dans le conteneur. Sa
+portée est close :
+
+| Opération | Clé opérateur | Jeton de session |
+|---|---|---|
+| `add` pour SON `session_ref` | ✅ | ✅ |
+| `add` pour un autre `session_ref` | ✅ | ❌ 403 |
+| `wait` sur SON approbation | ✅ | ✅ |
+| `claim` | ✅ | ❌ **403** |
+| `channel-upsert` / `channel-list` | ✅ | ❌ 403 |
+| `list` (toutes les approbations de l'opérateur) | ✅ | ❌ 403 |
+
+Pire cas d'un agent sandboxé compromis : il inonde son opérateur de
+notifications **émanant de sa propre session**. Nuisance, pas évasion. Le
+jeton est révoqué à la fermeture de la session et expire avec elle.
+
+Le même jeton sert à toutes les sessions (sandbox ou non) : le hook et
+`ask_operator` n'ont jamais besoin de la clé opérateur — seul le Deck la
+détient, et lui seul peut `claim`.
 
 ### 6.3 Entrée hostile supplémentaire, propre à ce lot : la réponse → PTY
 

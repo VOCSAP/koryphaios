@@ -17,6 +17,18 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { loadConfig } from "./shared/config.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { validateDraftPayload } from "./shared/graph-draft.ts";
+import {
+  APPROVAL_ANSWER_KINDS,
+  APPROVAL_VIAS,
+  APPROVAL_WAIT_MAX_SEC,
+  deriveOperatorId,
+  deriveTokenId,
+  isOperationAllowed,
+  sanitizeAnswerForPty,
+  validateApprovalDraft,
+  verifyAuthProof,
+  type ApprovalOperation,
+} from "./shared/approval.ts";
 import type {
   RegisterRequest,
   RegisterResponse,
@@ -56,6 +68,24 @@ import type {
   GraphDraftOpenRequest,
   GraphDraftOpenResponse,
   GraphDraftStatus,
+  Approval,
+  ApprovalAddRequest,
+  ApprovalAddResponse,
+  ApprovalAuthProof,
+  ApprovalClaimRequest,
+  ApprovalClaimResponse,
+  ApprovalDeliveredRequest,
+  ApprovalDeliveredResponse,
+  ApprovalListRequest,
+  ApprovalListResponse,
+  ApprovalStatus,
+  ApprovalTokenMintRequest,
+  ApprovalTokenMintResponse,
+  ApprovalTokenRevokeRequest,
+  ApprovalTokenRevokeResponse,
+  ApprovalVia,
+  ApprovalWaitRequest,
+  ApprovalWaitResponse,
   OperatorInboxRequest,
   OperatorInboxResponse,
   OperatorInboxMessage,
@@ -383,6 +413,96 @@ db.run(`
   )
 `);
 db.run(`CREATE INDEX IF NOT EXISTS idx_graph_drafts_project ON graph_drafts(project_key, status)`);
+
+// --- Remote approvals (PLAN-notifications-mobiles N1) ---
+// An agent hits a blocking question; it is parked here until SOMEONE answers:
+// the Deck, or a notification channel on the operator's phone. Durability is
+// the graph_drafts model (no FK, plain-text snapshots, status flips, listing
+// non-destructive) — a broker or Deck restart never loses a pending approval.
+//
+// IDENTITY: `operator_id` is a NEW axis, orthogonal to peers/groups. It names a
+// PERSON, which `host` cannot: two OS accounts on one machine share a hostname
+// but must never see each other's approvals.
+//
+// Only PUBLIC keys are stored. `operator_id` is a digest of the public key, so
+// the binding is self-certifying: presenting a different key for a known id
+// would require a hash collision, and reading this database grants no ability
+// to impersonate anyone.
+db.run(`
+  CREATE TABLE IF NOT EXISTS approval_operators (
+    operator_id TEXT PRIMARY KEY,
+    public_key  TEXT NOT NULL,
+    label       TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL
+  )
+`);
+
+// Restricted per-session credentials (PLAN §6.8). Handed to spawned agents —
+// including inside a sandbox container — so they may `add`/`wait` for their OWN
+// session and nothing else. Never allowed to `claim`.
+db.run(`
+  CREATE TABLE IF NOT EXISTS approval_session_tokens (
+    token_id    TEXT PRIMARY KEY,
+    operator_id TEXT NOT NULL,
+    public_key  TEXT NOT NULL,
+    session_ref TEXT NOT NULL,
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT NOT NULL,
+    revoked_at  TEXT
+  )
+`);
+db.run(
+  `CREATE INDEX IF NOT EXISTS idx_approval_tokens_operator ON approval_session_tokens(operator_id, session_ref)`
+);
+
+// Notification channels an operator can be reached on (Telegram/Discord/ntfy).
+db.run(`
+  CREATE TABLE IF NOT EXISTS approval_channels (
+    id           TEXT PRIMARY KEY,
+    operator_id  TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    address      TEXT NOT NULL,
+    label        TEXT NOT NULL DEFAULT '',
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    created_at   TEXT NOT NULL,
+    last_used_at TEXT
+  )
+`);
+db.run(
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_channel_uniq ON approval_channels(operator_id, kind, address)`
+);
+
+db.run(`
+  CREATE TABLE IF NOT EXISTS pending_approvals (
+    id             TEXT PRIMARY KEY,
+    operator_id    TEXT NOT NULL,
+    origin_host    TEXT NOT NULL DEFAULT '',
+    origin_user    TEXT NOT NULL DEFAULT '',
+    project_key    TEXT NOT NULL DEFAULT '',
+    group_id       TEXT NOT NULL DEFAULT '',
+    from_peer      TEXT NOT NULL DEFAULT '',
+    session_ref    TEXT NOT NULL DEFAULT '',
+    kind           TEXT NOT NULL,
+    title          TEXT NOT NULL,
+    question       TEXT NOT NULL,
+    options_json   TEXT NOT NULL DEFAULT '[]',
+    status         TEXT NOT NULL DEFAULT 'pending',
+    answered_via   TEXT,
+    answer_kind    TEXT,
+    answer_text    TEXT,
+    created_at     TEXT NOT NULL,
+    notif_expires_at TEXT NOT NULL,
+    answered_at    TEXT,
+    delivered_at   TEXT
+  )
+`);
+db.run(
+  `CREATE INDEX IF NOT EXISTS idx_approvals_operator ON pending_approvals(operator_id, status)`
+);
+db.run(
+  `CREATE INDEX IF NOT EXISTS idx_approvals_project ON pending_approvals(project_key, status)`
+);
 
 // --- Helpers ---
 
@@ -1751,6 +1871,531 @@ function rowToGraphDraft(row: GraphDraftRow): GraphDraft {
   return { ...row };
 }
 
+// --- Remote approvals (PLAN-notifications-mobiles N1) ---
+
+// Notification lifetime. Only the NOTIFICATION expires: the session stays
+// blocked and the Deck can still settle an expired_notif approval.
+const APPROVAL_NOTIF_TTL_HOURS = Math.max(
+  1,
+  parseInt(process.env.CLAUDE_PEERS_APPROVAL_NOTIF_TTL_HOURS ?? "24", 10)
+);
+// Retention of SETTLED rows. Pending ones are never purged (they wait for a
+// human, however long) — same rule as pending graph drafts.
+const APPROVAL_TTL_DAYS = Math.max(
+  1,
+  parseInt(process.env.CLAUDE_PEERS_APPROVAL_TTL_DAYS ?? "30", 10)
+);
+// Anti-flood bound. A compromised sandboxed agent holding a session token can
+// only spam its own operator (PLAN §6.8); this caps even that nuisance, and
+// bounds unbounded DB growth from any producer.
+const APPROVAL_MAX_PENDING = Math.max(
+  1,
+  parseInt(process.env.CLAUDE_PEERS_APPROVAL_MAX_PENDING ?? "200", 10)
+);
+
+type ApprovalRow = {
+  id: string;
+  operator_id: string;
+  origin_host: string;
+  origin_user: string;
+  project_key: string;
+  group_id: string;
+  from_peer: string;
+  session_ref: string;
+  kind: string;
+  title: string;
+  question: string;
+  options_json: string;
+  status: string;
+  answered_via: string | null;
+  answer_kind: string | null;
+  answer_text: string | null;
+  created_at: string;
+  notif_expires_at: string;
+  answered_at: string | null;
+  delivered_at: string | null;
+};
+
+/**
+ * Public projection (hostile input #2): the wire shape carries no
+ * instance_token, no from_token and no pid — only what an operator UI or a
+ * notification channel legitimately needs.
+ */
+function rowToApproval(row: ApprovalRow): Approval {
+  let options: string[] = [];
+  try {
+    const parsed = JSON.parse(row.options_json);
+    if (Array.isArray(parsed)) options = parsed.filter((o): o is string => typeof o === "string");
+  } catch (err) {
+    // A malformed options blob must degrade to "no options", never 500 the
+    // route -- but it is a real anomaly, so it is traced (no-silent-errors).
+    log.error(`approval ${row.id}: unreadable options_json`, err);
+  }
+  return {
+    id: row.id,
+    operator_id: row.operator_id,
+    origin: {
+      host: row.origin_host,
+      os_user_hash: row.origin_user,
+      project_key: row.project_key,
+      group_id: row.group_id,
+      from_peer: row.from_peer,
+      session_ref: row.session_ref,
+    },
+    kind: row.kind as Approval["kind"],
+    title: row.title,
+    question: row.question,
+    options,
+    status: row.status as ApprovalStatus,
+    answered_via: (row.answered_via as ApprovalVia | null) ?? null,
+    answer_kind: (row.answer_kind as Approval["answer_kind"]) ?? null,
+    answer_text: row.answer_text,
+    created_at: row.created_at,
+    notif_expires_at: row.notif_expires_at,
+    answered_at: row.answered_at,
+    delivered_at: row.delivered_at,
+  };
+}
+
+// Bounded nonce cache: a signed proof is single-use, so replaying a captured
+// one inside the skew window is refused. Closes backlog B8 for this family.
+const approvalNonces = new Map<string, number>();
+const APPROVAL_NONCE_MAX = 10_000;
+
+function rememberNonce(nonce: string, nowSec: number): boolean {
+  if (approvalNonces.has(nonce)) return false;
+  if (approvalNonces.size >= APPROVAL_NONCE_MAX) {
+    // Drop everything older than twice the accepted skew; if that frees
+    // nothing (pathological burst), drop the oldest half.
+    const cutoff = nowSec - 2 * 120;
+    for (const [k, ts] of approvalNonces) if (ts < cutoff) approvalNonces.delete(k);
+    if (approvalNonces.size >= APPROVAL_NONCE_MAX) {
+      let drop = Math.floor(approvalNonces.size / 2);
+      for (const k of approvalNonces.keys()) {
+        approvalNonces.delete(k);
+        if (--drop <= 0) break;
+      }
+    }
+  }
+  approvalNonces.set(nonce, nowSec);
+  return true;
+}
+
+interface ResolvedAuth {
+  operator_id: string;
+  kind: "operator" | "session";
+  /** Set for a session credential: the ONLY session_ref it may act on. */
+  session_ref: string | null;
+}
+
+/**
+ * Authenticate a request and decide whether the credential class may perform
+ * `op`. The payload signed is the body WITHOUT its `auth` member.
+ */
+function resolveApprovalAuth(
+  body: { auth?: ApprovalAuthProof } & Record<string, unknown>,
+  op: ApprovalOperation
+): ResolvedAuth | { error: string; status: number } {
+  const proof = body.auth;
+  if (!proof || typeof proof !== "object") return { error: "auth proof required", status: 401 };
+  if (proof.kind !== "operator" && proof.kind !== "session") {
+    return { error: "unknown credential kind", status: 401 };
+  }
+  if (!isOperationAllowed(proof.kind, op)) {
+    // The sandbox guard: a session credential asking to claim lands here.
+    return { error: `credential may not ${op}`, status: 403 };
+  }
+
+  const publicKey = typeof body.public_key === "string" ? body.public_key : "";
+  const { auth: _auth, ...payload } = body;
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  let knownKey: string | null = null;
+  let sessionRef: string | null = null;
+
+  if (proof.kind === "operator") {
+    const row = db
+      .query("SELECT public_key FROM approval_operators WHERE operator_id = ?")
+      .get(proof.operator_id) as { public_key: string } | null;
+    // First contact: the id IS the digest of the key, so the presented key
+    // self-certifies and there is no trust decision to make.
+    knownKey = row?.public_key ?? (publicKey && deriveOperatorId(publicKey) === proof.operator_id ? publicKey : null);
+    if (!knownKey) return { error: "unknown operator", status: 401 };
+  } else {
+    if (!proof.token_id) return { error: "token_id required", status: 401 };
+    const row = db
+      .query(
+        `SELECT public_key, operator_id, session_ref, revoked_at, expires_at
+         FROM approval_session_tokens WHERE token_id = ?`
+      )
+      .get(proof.token_id) as
+      | { public_key: string; operator_id: string; session_ref: string; revoked_at: string | null; expires_at: string }
+      | null;
+    if (!row) return { error: "unknown session token", status: 401 };
+    if (row.revoked_at) return { error: "session token revoked", status: 401 };
+    if (new Date(row.expires_at).getTime() < Date.now()) {
+      return { error: "session token expired", status: 401 };
+    }
+    if (row.operator_id !== proof.operator_id) return { error: "token/operator mismatch", status: 401 };
+    knownKey = row.public_key;
+    sessionRef = row.session_ref;
+  }
+
+  const verdict = verifyAuthProof(knownKey, payload, proof);
+  if (!verdict.ok) return { error: verdict.reason, status: 401 };
+  if (!rememberNonce(proof.nonce, nowSec)) return { error: "replayed-proof", status: 401 };
+
+  if (proof.kind === "operator") {
+    db.run(
+      `INSERT INTO approval_operators (operator_id, public_key, label, created_at, last_seen_at)
+       VALUES (?, ?, '', ?, ?)
+       ON CONFLICT(operator_id) DO UPDATE SET last_seen_at = excluded.last_seen_at`,
+      [proof.operator_id, knownKey, new Date().toISOString(), new Date().toISOString()]
+    );
+  }
+  return { operator_id: proof.operator_id, kind: proof.kind, session_ref: sessionRef };
+}
+
+// Long-poll registry: /approval/wait parks here until a claim resolves it.
+const approvalWaiters = new Map<string, Set<(a: Approval) => void>>();
+
+function resolveApprovalWaiters(approval: Approval): void {
+  const set = approvalWaiters.get(approval.id);
+  if (!set) return;
+  approvalWaiters.delete(approval.id);
+  for (const fn of set) {
+    try {
+      fn(approval);
+    } catch (err) {
+      log.error(`approval waiter for ${approval.id} threw`, err);
+    }
+  }
+}
+
+function handleApprovalAdd(
+  body: ApprovalAddRequest & Record<string, unknown>
+): ApprovalAddResponse | { error: string; status: number } {
+  const auth = resolveApprovalAuth(body, "add");
+  if ("error" in auth) return auth;
+
+  const draft = validateApprovalDraft(body);
+  if (!draft.ok) return { error: draft.error, status: 400 };
+
+  // A session credential is pinned to its own session_ref: it can neither
+  // impersonate another tile nor emit "anonymously".
+  let sessionRef = draft.value.session_ref;
+  if (auth.kind === "session") {
+    if (sessionRef && sessionRef !== auth.session_ref) {
+      return { error: "session_ref does not match credential", status: 403 };
+    }
+    sessionRef = auth.session_ref ?? "";
+  }
+
+  const pending = db
+    .query("SELECT COUNT(*) AS n FROM pending_approvals WHERE operator_id = ? AND status = 'pending'")
+    .get(auth.operator_id) as { n: number };
+  if (pending.n >= APPROVAL_MAX_PENDING) {
+    return { error: "too many pending approvals", status: 429 };
+  }
+
+  const origin = (body.origin ?? {}) as Record<string, unknown>;
+  const pick = (k: string): string => (typeof origin[k] === "string" ? (origin[k] as string) : "");
+  const now = new Date();
+  const ttlHours = Math.max(
+    1,
+    Math.min(24 * 30, Number.isFinite(body.ttl_hours) ? Number(body.ttl_hours) : APPROVAL_NOTIF_TTL_HOURS)
+  );
+  const approval: Approval = {
+    id: randomUUID(),
+    operator_id: auth.operator_id,
+    origin: {
+      host: pick("host").slice(0, 128),
+      os_user_hash: pick("os_user_hash").slice(0, 64),
+      project_key: pick("project_key").slice(0, 256),
+      group_id: pick("group_id").slice(0, 64),
+      from_peer: pick("from_peer").slice(0, 128),
+      session_ref: sessionRef,
+    },
+    kind: draft.value.kind,
+    title: draft.value.title,
+    question: draft.value.question,
+    options: draft.value.options,
+    status: "pending",
+    answered_via: null,
+    answer_kind: null,
+    answer_text: null,
+    created_at: now.toISOString(),
+    notif_expires_at: new Date(now.getTime() + ttlHours * 3600_000).toISOString(),
+    answered_at: null,
+    delivered_at: null,
+  };
+
+  db.run(
+    `INSERT INTO pending_approvals
+       (id, operator_id, origin_host, origin_user, project_key, group_id, from_peer,
+        session_ref, kind, title, question, options_json, status, created_at, notif_expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+    [
+      approval.id,
+      approval.operator_id,
+      approval.origin.host,
+      approval.origin.os_user_hash,
+      approval.origin.project_key,
+      approval.origin.group_id,
+      approval.origin.from_peer,
+      approval.origin.session_ref,
+      approval.kind,
+      approval.title,
+      approval.question,
+      JSON.stringify(approval.options),
+      approval.created_at,
+      approval.notif_expires_at,
+    ]
+  );
+  return { approval };
+}
+
+/**
+ * Settle an approval. THE arbiter of the whole feature: a conditional UPDATE
+ * means exactly one caller wins and everyone else gets 409 — which is what
+ * makes "answered in the Deck" and "answered on the phone" mutually
+ * exclusive.
+ *
+ * `via='deck'` may also settle an expired_notif approval: the notification
+ * expired, the session did not (C-4).
+ */
+function settleApproval(
+  id: string,
+  operatorId: string,
+  via: ApprovalVia,
+  answerKind: Approval["answer_kind"],
+  answerText: string | null
+): { approval: Approval } | { error: string; status: number } {
+  const allowed = via === "deck" ? "('pending','expired_notif')" : "('pending')";
+  const now = new Date().toISOString();
+  const res = db.run(
+    `UPDATE pending_approvals
+        SET status = 'answered', answered_via = ?, answer_kind = ?, answer_text = ?, answered_at = ?
+      WHERE id = ? AND operator_id = ? AND status IN ${allowed}`,
+    [via, answerKind, answerText, now, id, operatorId]
+  );
+  if (res.changes === 0) {
+    const exists = db
+      .query("SELECT id FROM pending_approvals WHERE id = ? AND operator_id = ?")
+      .get(id, operatorId);
+    return exists
+      ? { error: "already-settled", status: 409 }
+      : { error: "unknown approval", status: 404 };
+  }
+  const row = db.query("SELECT * FROM pending_approvals WHERE id = ?").get(id) as ApprovalRow;
+  const approval = rowToApproval(row);
+  resolveApprovalWaiters(approval);
+  return { approval };
+}
+
+function handleApprovalClaim(
+  body: ApprovalClaimRequest & Record<string, unknown>
+): ApprovalClaimResponse | { error: string; status: number } {
+  const auth = resolveApprovalAuth(body, "claim");
+  if ("error" in auth) return auth;
+
+  const id = typeof body.id === "string" ? body.id : "";
+  if (!id) return { error: "id is required", status: 400 };
+  const via = (body.via ?? "deck") as ApprovalVia;
+  if (!APPROVAL_VIAS.includes(via)) return { error: "unknown via", status: 400 };
+  const answerKind = body.answer_kind;
+  if (!answerKind || !APPROVAL_ANSWER_KINDS.includes(answerKind)) {
+    return { error: "answer_kind must be allow|deny|text", status: 400 };
+  }
+
+  let answerText: string | null = null;
+  if (typeof body.answer_text === "string" && body.answer_text.length > 0) {
+    // The answer is remote input that will be typed into a PTY: flatten it
+    // here so no consumer can forget (hostile input, PLAN §6.3).
+    const clean = sanitizeAnswerForPty(body.answer_text);
+    if (!clean.ok) return { error: `answer_text: ${clean.error}`, status: 400 };
+    answerText = clean.value;
+  }
+  if (answerKind === "text" && !answerText) {
+    return { error: "answer_text is required for a text answer", status: 400 };
+  }
+
+  return settleApproval(id, auth.operator_id, via, answerKind, answerText);
+}
+
+async function handleApprovalWait(
+  body: ApprovalWaitRequest & Record<string, unknown>
+): Promise<ApprovalWaitResponse | { error: string; status: number }> {
+  const auth = resolveApprovalAuth(body, "wait");
+  if ("error" in auth) return auth;
+
+  const id = typeof body.id === "string" ? body.id : "";
+  if (!id) return { error: "id is required", status: 400 };
+
+  const row = db
+    .query("SELECT * FROM pending_approvals WHERE id = ? AND operator_id = ?")
+    .get(id, auth.operator_id) as ApprovalRow | null;
+  // Same 404 whether it never existed or belongs to another operator: never
+  // confirm the existence of another operator's approval.
+  if (!row) return { error: "unknown approval", status: 404 };
+  if (auth.kind === "session" && row.session_ref !== auth.session_ref) {
+    return { error: "unknown approval", status: 404 };
+  }
+  if (row.status !== "pending") return { approval: rowToApproval(row) };
+
+  const timeoutSec = Math.max(
+    1,
+    Math.min(APPROVAL_WAIT_MAX_SEC, Number.isFinite(body.timeout_sec) ? Number(body.timeout_sec) : 30)
+  );
+
+  return await new Promise<ApprovalWaitResponse>((resolve) => {
+    let done = false;
+    const settle = (value: ApprovalWaitResponse): void => {
+      if (done) return;
+      done = true;
+      const set = approvalWaiters.get(id);
+      if (set) {
+        set.delete(onClaim);
+        if (set.size === 0) approvalWaiters.delete(id);
+      }
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const onClaim = (approval: Approval): void => settle({ approval });
+    const timer = setTimeout(() => settle({ pending: true }), timeoutSec * 1000);
+    // A long poll must never keep the process alive on its own.
+    timer.unref?.();
+    let set = approvalWaiters.get(id);
+    if (!set) {
+      set = new Set();
+      approvalWaiters.set(id, set);
+    }
+    set.add(onClaim);
+  });
+}
+
+function handleApprovalList(
+  body: ApprovalListRequest & Record<string, unknown>
+): ApprovalListResponse | { error: string; status: number } {
+  const auth = resolveApprovalAuth(body, "list");
+  if ("error" in auth) return auth;
+
+  const clauses = ["operator_id = ?"];
+  const params: unknown[] = [auth.operator_id];
+  if (typeof body.project_key === "string" && body.project_key) {
+    clauses.push("project_key = ?");
+    params.push(body.project_key);
+  }
+  if (typeof body.status === "string" && body.status) {
+    clauses.push("status = ?");
+    params.push(body.status);
+  }
+  if (body.undelivered_only) clauses.push("status = 'answered' AND delivered_at IS NULL");
+  const rows = db
+    .query(`SELECT * FROM pending_approvals WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC LIMIT 500`)
+    .all(...params) as ApprovalRow[];
+  return { approvals: rows.map(rowToApproval) };
+}
+
+function handleApprovalDelivered(
+  body: ApprovalDeliveredRequest & Record<string, unknown>
+): ApprovalDeliveredResponse | { error: string; status: number } {
+  const auth = resolveApprovalAuth(body, "list");
+  if ("error" in auth) return auth;
+  const ids = Array.isArray(body.ids) ? body.ids.filter((i): i is string => typeof i === "string") : [];
+  if (ids.length === 0) return { marked: 0 };
+  const now = new Date().toISOString();
+  let marked = 0;
+  const tx = db.transaction(() => {
+    for (const id of ids.slice(0, 200)) {
+      marked += db.run(
+        `UPDATE pending_approvals SET delivered_at = ?
+          WHERE id = ? AND operator_id = ? AND delivered_at IS NULL`,
+        [now, id, auth.operator_id]
+      ).changes;
+    }
+  });
+  tx();
+  return { marked };
+}
+
+function handleApprovalTokenMint(
+  body: ApprovalTokenMintRequest & Record<string, unknown>
+): ApprovalTokenMintResponse | { error: string; status: number } {
+  const auth = resolveApprovalAuth(body, "mint-token");
+  if ("error" in auth) return auth;
+
+  const sessionPublicKey = typeof body.session_public_key === "string" ? body.session_public_key : "";
+  const sessionRef = typeof body.session_ref === "string" ? body.session_ref.trim().slice(0, 128) : "";
+  if (!sessionPublicKey) return { error: "session_public_key is required", status: 400 };
+  if (!sessionRef) return { error: "session_ref is required", status: 400 };
+
+  const ttlHours = Math.max(
+    1,
+    Math.min(24 * 30, Number.isFinite(body.ttl_hours) ? Number(body.ttl_hours) : 24)
+  );
+  const tokenId = deriveTokenId(sessionPublicKey);
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + ttlHours * 3600_000).toISOString();
+  db.run(
+    `INSERT INTO approval_session_tokens
+       (token_id, operator_id, public_key, session_ref, created_at, expires_at, revoked_at)
+     VALUES (?, ?, ?, ?, ?, ?, NULL)
+     ON CONFLICT(token_id) DO UPDATE SET
+       expires_at = excluded.expires_at, revoked_at = NULL`,
+    [tokenId, auth.operator_id, sessionPublicKey, sessionRef, now.toISOString(), expiresAt]
+  );
+  return { token_id: tokenId, expires_at: expiresAt };
+}
+
+function handleApprovalTokenRevoke(
+  body: ApprovalTokenRevokeRequest & Record<string, unknown>
+): ApprovalTokenRevokeResponse | { error: string; status: number } {
+  const auth = resolveApprovalAuth(body, "mint-token");
+  if ("error" in auth) return auth;
+  const now = new Date().toISOString();
+  if (typeof body.token_id === "string" && body.token_id) {
+    const r = db.run(
+      "UPDATE approval_session_tokens SET revoked_at = ? WHERE token_id = ? AND operator_id = ? AND revoked_at IS NULL",
+      [now, body.token_id, auth.operator_id]
+    );
+    return { revoked: r.changes };
+  }
+  if (typeof body.session_ref === "string" && body.session_ref) {
+    const r = db.run(
+      "UPDATE approval_session_tokens SET revoked_at = ? WHERE session_ref = ? AND operator_id = ? AND revoked_at IS NULL",
+      [now, body.session_ref, auth.operator_id]
+    );
+    return { revoked: r.changes };
+  }
+  return { error: "token_id or session_ref is required", status: 400 };
+}
+
+/**
+ * Expire the NOTIFICATION of overdue pending approvals, and purge settled ones
+ * past the retention window. Pending rows are never deleted.
+ */
+function sweepApprovals(): { expired: number; purged: number } {
+  const expired = db.run(
+    `UPDATE pending_approvals SET status = 'expired_notif'
+      WHERE status = 'pending' AND notif_expires_at < ?`,
+    [new Date().toISOString()]
+  ).changes;
+  const purged = db.run(
+    `DELETE FROM pending_approvals
+      WHERE status IN ('answered','abandoned') AND created_at < datetime('now', ?)`,
+    [`-${APPROVAL_TTL_DAYS} days`]
+  ).changes;
+  if (expired > 0) log.info(`approval notifications expired: ${expired}`);
+  return { expired, purged };
+}
+
+// Own timer rather than a call from purgeOldMessages(): that function is
+// invoked at module load, BEFORE the const tunables above exist (temporal dead
+// zone), so folding the sweep into it would crash the daemon at boot.
+sweepApprovals();
+guardedInterval("sweepApprovals", sweepApprovals, PURGE_INTERVAL_SEC * 1000);
+
 function handleGraphDraftAdd(
   body: GraphDraftAddRequest
 ): GraphDraftAddResponse | { error: string; status: number } {
@@ -1932,11 +2577,15 @@ const server = Bun.serve<WsData>({
         // Manual trigger for the TTL sweep (also runs at boot + every PURGE_INTERVAL_SEC).
         // Returns the number of rows deleted. Used by tests and for ad-hoc cleanup.
         const result = purgeOldMessages();
+        const approvals = sweepApprovals();
         return Response.json({
           purged: result.messages,
           purged_drafts: result.drafts,
+          expired_approvals: approvals.expired,
+          purged_approvals: approvals.purged,
           cutoff_days: MESSAGE_TTL_DAYS,
           draft_cutoff_days: GRAPH_DRAFT_TTL_DAYS,
+          approval_cutoff_days: APPROVAL_TTL_DAYS,
         });
       }
       return new Response("claude-peers broker", { status: 200 });
@@ -2034,6 +2683,55 @@ const server = Bun.serve<WsData>({
         }
         case "/graph-draft/list": {
           const result = handleGraphDraftList(body as GraphDraftListRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/approval/add": {
+          const result = handleApprovalAdd(body as ApprovalAddRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/approval/wait": {
+          const result = await handleApprovalWait(body as ApprovalWaitRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/approval/claim": {
+          const result = handleApprovalClaim(body as ApprovalClaimRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/approval/list": {
+          const result = handleApprovalList(body as ApprovalListRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/approval/delivered": {
+          const result = handleApprovalDelivered(body as ApprovalDeliveredRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/approval/token-mint": {
+          const result = handleApprovalTokenMint(body as ApprovalTokenMintRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/approval/token-revoke": {
+          const result = handleApprovalTokenRevoke(body as ApprovalTokenRevokeRequest);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }
