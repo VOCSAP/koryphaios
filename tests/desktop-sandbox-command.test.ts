@@ -61,14 +61,24 @@ test("mapHostPathToContainer maps project root, worktrees and out-of-tree", () =
   expect(
     mapHostPathToContainer("/home/op/proj/.worktrees/fix-1", "/home/op/proj", "linux")
   ).toBe(`${SANDBOX_WORK_DIR}/.worktrees/fix-1`);
-  // A sibling dir sharing the prefix must NOT map inside /work.
-  expect(mapHostPathToContainer("/home/op/proj-two", "/home/op/proj", "linux")).toBe(
-    SANDBOX_WORK_DIR
-  );
+  // A sibling dir sharing the prefix must NOT map inside /work (null, see the
+  // dedicated test below).
+  expect(mapHostPathToContainer("/home/op/proj-two", "/home/op/proj", "linux")).toBeNull();
   // win32: case-insensitive containment, forward-slash tail, casing preserved.
   expect(
     mapHostPathToContainer("C:\\Dev\\Proj\\.worktrees\\Fix", "c:\\dev\\proj", "win32")
   ).toBe(`${SANDBOX_WORK_DIR}/.worktrees/Fix`);
+});
+
+test("mapHostPathToContainer returns NULL outside the mount, never a /work fallback", () => {
+  // Falling back to /work silently ran the agent in a different directory than
+  // asked. A symlinked project prefix (macOS /var) did exactly that to every
+  // worktree session, so the mapper must refuse instead.
+  expect(mapHostPathToContainer("/home/op/other", "/home/op/proj", "linux")).toBeNull();
+  expect(mapHostPathToContainer("/home/op/proj-two", "/home/op/proj", "linux")).toBeNull();
+  expect(mapHostPathToContainer("/private/var/p/.worktrees/x", "/var/p", "linux")).toBeNull();
+  // …and containerTranscriptDir propagates that as "unknown", not "no transcript".
+  expect(containerTranscriptDir("/home/op/other", "/home/op/proj", "linux")).toBeNull();
 });
 
 test("shQuote survives embedded single quotes", () => {

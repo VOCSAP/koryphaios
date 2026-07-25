@@ -1,5 +1,57 @@
 # Changelog
 
+## desktop (experimental) — sandbox hardening: nine review findings, one of them a sandbox escape
+
+A code review of the sandbox lot found nine real defects. All are fixed, each
+with a regression test — the first round shipped green tests that could not
+have caught any of them, because they covered the pure modules while every bug
+lived in the INTERACTIONS between them.
+
+**The escape (critical).** The host `~/.claude/peers` was bind-mounted
+read-write into every container so the containerized `server.ts` could write
+its session-id back-channel. That let a sandboxed agent overwrite the
+back-channel file of a NON-sandboxed tile: `readDeskSessionId` returned the
+file's content verbatim (only the *token* was sanitized, never the value) and
+`session-command.ts` interpolated it unquoted as `--resume ${id}` — payload
+executing in the HOST shell. Three locks now, because one of them will
+eventually be wrong: containers get a Deck-owned `sandbox-peers/` dir instead
+of the host one (host tiles are simply out of reach), `readDeskSessionId`
+drops anything outside the `[A-Za-z0-9-]{1,64}` shape the core guarantees, and
+both id flags are quoted. `SessionService` resolves the back-channel/peer-cache
+dir per session, so the supervisor keeps the host dir it needs.
+
+**Silent wrongness (high).** `mapHostPathToContainer` fell back to `/work` for
+any path not textually under the mount — combined with the new `canonicalPath`
+on worktrees, a symlinked project prefix (macOS `/var`) ran every worktree
+session in the project ROOT. It now returns null and the spawn is refused with
+a trace, and the mount source is canonicalized so the comparison matches in the
+first place. `walkProjectFiles` followed symlinks (`statSync`, no visited set),
+so copy-mode globs could pull files from outside the repo and a
+self-referential link spun the main process forever — the file cap could not
+help, a link loop yields no files. It now uses `lstatSync`, skips links
+outright and bounds visits. `ensure()` reused a container whose `/work` mount
+belonged to the other work mode, so a failed rebuild after switching to
+*ephemeral copy* left agents writing the real tree while the UI said otherwise;
+the mount is now compared and the container recreated when stale.
+
+**Broken features (medium).** `transcriptsFor` returned `[]` — a positive
+claim of "no transcript" — for any cwd never refreshed, and the cache was only
+warmed for the project root: every worktree resume silently started fresh. It
+returns null (= "ask the host") and the cache is warmed for the cwd each
+session will really use, including on workspace restore. `resetCopy` rm -rf'd
+the live bind-mount source without recreating the container, leaving `/work`
+on a deleted inode; it now recreates. Published ports were a fixed list
+identical for every project with no UI to change them, so a second sandboxed
+project could never start — the ports are now editable in the Docker view, an
+explicitly empty list is honoured, and the collision is named in the error.
+
+**Dead code and noise (low).** Auth "Disconnect" guarded on "no container
+running" while the wipe itself is a `docker exec` needing one — mutually
+exclusive states, so no call could ever succeed; it now guards on live
+sessions. And `[A-Za-z]:[\\/]` matched the `s:/` inside `https://`, flagging
+every hook containing a URL as un-runnable in the container.
+
+
 ## desktop (experimental) — green CI on all three runners (M-MNT-4)
 
 `desktop-build` had been red on macOS and Windows for weeks (8 failing tests

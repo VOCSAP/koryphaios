@@ -24,6 +24,7 @@ import type {
 import {
   SANDBOX_AUTH_VOLUME,
   SANDBOX_HOME,
+  SANDBOX_WORK_DIR,
   buildAuthProbeArgs,
   buildAuthPurgeArgs,
   buildBrokerProbeArgs,
@@ -52,6 +53,7 @@ import {
   type SandboxWorkMode
 } from './sandbox-store'
 import { planIgnoredCopy } from './sandbox-copy'
+import { canonicalPath } from './worktree-service'
 import { describeProjection, planProjection, projectionHookWarnings, unknownOverrides } from './sandbox-projection'
 import { reportError } from './log'
 
@@ -93,7 +95,7 @@ export interface SandboxServiceDeps {
   projectKey: string
   /** App state dir (sandbox.json, sandbox-run/, sandbox-copies/). */
   stateDir: string
-  /** Host ~/.claude (projection source + peers back-channel mount). */
+  /** Host ~/.claude — projection SOURCE only (never mounted, see projection). */
   claudeHomeDir: string
   /** Dir holding the shipped Dockerfile (image auto-build). */
   imageContextDir: string
@@ -147,12 +149,16 @@ export class SandboxService extends EventEmitter {
   private readonly storeFile: string
   private readonly runDirHost: string
   private readonly copyDirHost: string
+  /** Back-channel / peer-cache dir the containers write into (never the host's). */
+  readonly peersDirHost: string
 
   constructor(private readonly deps: SandboxServiceDeps) {
     super()
     this.containerName = containerNameFor(deps.projectDir)
     this.storeFile = join(deps.stateDir, 'sandbox.json')
     this.runDirHost = join(deps.stateDir, 'sandbox-run')
+    // Deck-owned, sandbox-only peers dir (see buildCreateArgs' peersDirHost).
+    this.peersDirHost = join(deps.stateDir, 'sandbox-peers')
     // Short, stable clone dir keyed by the same hash as the container.
     this.copyDirHost = join(deps.stateDir, 'sandbox-copies', this.containerName)
   }
@@ -181,9 +187,15 @@ export class SandboxService extends EventEmitter {
     return this.settings().mode
   }
 
-  /** Host dir mounted at /work: the project, or the ephemeral clone. */
+  /**
+   * Host dir mounted at /work: the project, or the ephemeral clone.
+   *
+   * CANONICAL on purpose: session cwds and worktree paths are canonicalized
+   * (worktree-service), so leaving this one symlinked made every worktree path
+   * look "outside the mount" on macOS and relocated the agent.
+   */
   private workSource(): string {
-    return this.mode() === 'copy' ? this.copyDirHost : this.deps.projectDir
+    return canonicalPath(this.mode() === 'copy' ? this.copyDirHost : this.deps.projectDir)
   }
 
   /**
@@ -242,6 +254,18 @@ export class SandboxService extends EventEmitter {
     const next = writeSandboxImage(this.storeFile, image)
     this.imagePresent = null
     return next
+  }
+
+  /** Host path currently bind-mounted at /work, or null when unknown. */
+  private async mountedWorkSource(): Promise<string | null> {
+    const res = await this.run([
+      'inspect',
+      '--format',
+      `{{range .Mounts}}{{if eq .Destination "${SANDBOX_WORK_DIR}"}}{{.Source}}{{end}}{{end}}`,
+      this.containerName
+    ])
+    if (res.code !== 0) return null
+    return res.stdout.trim() || null
   }
 
   private async inspectState(name: string): Promise<string | null> {
@@ -376,11 +400,22 @@ export class SandboxService extends EventEmitter {
     if (copied > 0) this.deps.journal(`sandbox: ${copied} ignored file(s) copied into the clone`)
   }
 
-  /** Delete and re-create the clone (operator action; container untouched). */
+  /**
+   * Delete and re-create the clone. The container is recreated too: the bind
+   * mount resolves to the directory's INODE, so a running container whose
+   * source was rm -rf'd keeps writing into the deleted one (invisible on
+   * Docker Desktop's VM, plainly broken on a native Linux engine).
+   */
   async resetCopy(): Promise<SandboxStatus> {
+    const existed = (await this.inspectState(this.containerName)) !== null
+    if (existed) {
+      await this.run(['rm', '-f', this.containerName], 30_000)
+      this.lastReady = false
+    }
     rmSync(this.copyDirHost, { recursive: true, force: true })
     this.deps.journal('sandbox: ephemeral clone reset')
     await this.ensureCopyTree()
+    if (existed) return this.ensure() // recreate against the fresh clone
     return this.broadcastStatus()
   }
 
@@ -408,12 +443,26 @@ export class SandboxService extends EventEmitter {
         return this.broadcastStatus()
       }
       mkdirSync(this.runDirHost, { recursive: true })
-      const peersDirHost = join(this.deps.claudeHomeDir, 'peers')
-      mkdirSync(peersDirHost, { recursive: true })
+      mkdirSync(this.peersDirHost, { recursive: true })
       if (this.mode() === 'copy') await this.ensureCopyTree()
       await this.run(['volume', 'create', SANDBOX_AUTH_VOLUME])
 
-      const state = await this.inspectState(this.containerName)
+      let state = await this.inspectState(this.containerName)
+      // A container created in the OTHER work mode still bind-mounts the other
+      // tree: honouring it would let agents write the real repo while the UI
+      // says "ephemeral copy". Recreate rather than trust the renderer's
+      // best-effort rebuild.
+      if (state !== null) {
+        const mounted = await this.mountedWorkSource()
+        if (mounted !== null && canonicalPath(mounted) !== this.workSource()) {
+          this.deps.journal(
+            `sandbox: container mount is stale (${mounted}) — recreating for ${this.workSource()}`
+          )
+          await this.run(['rm', '-f', this.containerName], 30_000)
+          this.lastReady = false
+          state = null
+        }
+      }
       if (state === null) {
         const created = await this.run(
           buildCreateArgs({
@@ -422,13 +471,19 @@ export class SandboxService extends EventEmitter {
             projectDir: this.deps.projectDir,
             workSource: this.workSource(),
             runDirHost: this.runDirHost,
-            peersDirHost,
+            peersDirHost: this.peersDirHost,
             ports: this.settings().ports
           }),
           60_000
         )
         if (created.code !== 0) {
-          this.lastError = created.stderr.trim() || 'container create failed'
+          const raw = created.stderr.trim() || 'container create failed'
+          // The defaults are shared by every project, so this is THE common
+          // failure for a second sandboxed project — say so instead of echoing
+          // the engine's bare "port is already allocated".
+          this.lastError = /port is already allocated|address already in use/i.test(raw)
+            ? `${raw} — another project's sandbox already publishes it; change or clear the ports in the Docker view`
+            : raw
           reportError('sandbox', `create failed for ${this.containerName}: ${this.lastError}`)
           return this.broadcastStatus()
         }
@@ -495,8 +550,21 @@ export class SandboxService extends EventEmitter {
     return null
   }
 
-  /** Wipe the credentials in the shared volume ("disconnect"). Guarded upstream. */
+  /**
+   * Wipe the credentials in the shared volume ("disconnect").
+   *
+   * The wipe is a `docker exec`, so it NEEDS this project's container running —
+   * the guard upstream is therefore "no live sessions", not "no container
+   * running" (which made every call impossible: the guard and the operation
+   * required opposite states). The container is started here if needed.
+   */
   async purgeAuth(): Promise<SandboxStatus> {
+    if (!this.lastReady) {
+      const st = await this.ensure()
+      if (st.containerState !== 'running') {
+        throw new Error(st.error || 'sandbox container not ready')
+      }
+    }
     const res = await this.run(buildAuthPurgeArgs(this.containerName))
     if (res.code !== 0) throw new Error(res.stderr.trim() || 'auth purge failed')
     this.deps.journal('sandbox: credentials volume disconnected')
@@ -529,15 +597,26 @@ export class SandboxService extends EventEmitter {
   async refreshTranscripts(cwdHost: string): Promise<void> {
     if (!this.isEnabled() || !this.lastReady) return
     const dir = containerTranscriptDir(cwdHost, this.workSource())
+    if (dir === null) return // outside the mount: nothing knowable, stay "unknown"
     const res = await this.run(buildTranscriptListArgs(this.containerName, dir), 10_000)
     // A missing dir (never used this cwd) exits non-zero: that IS "no transcript".
-    this.transcripts.set(cwdHost, res.code === 0 ? parseTranscriptList(res.stdout) : [])
+    this.transcripts.set(
+      canonicalPath(cwdHost),
+      res.code === 0 ? parseTranscriptList(res.stdout) : []
+    )
   }
 
-  /** Cached container-side transcripts for a cwd (null = sandbox not in play). */
+  /**
+   * Cached container-side transcripts for a cwd.
+   *
+   * null means "the host files are authoritative" — returned both when the
+   * sandbox is off AND when this cwd was never refreshed. Returning `[]` for an
+   * un-refreshed cwd was a bug: `[]` is a positive claim ("no transcript here")
+   * that silently downgraded every resume to a fresh session.
+   */
   transcriptsFor(cwdHost: string): { id: string; mtimeMs: number }[] | null {
     if (!this.isEnabled()) return null
-    return this.transcripts.get(cwdHost) ?? []
+    return this.transcripts.get(canonicalPath(cwdHost)) ?? null
   }
 
   // ----- listing / actions -----

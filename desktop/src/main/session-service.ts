@@ -273,10 +273,17 @@ export class SessionService extends EventEmitter {
 
   /** Container-side transcript lookup; default = "sandbox off, use the host". */
   private sandboxTranscripts: SandboxTranscriptLookup = () => null
+  /** Peers dir the sandbox containers write into, or null when sandbox is off. */
+  private sandboxPeersDir: () => string | null = () => null
 
-  setSandboxProvider(provider: SandboxProvider, transcripts?: SandboxTranscriptLookup): void {
+  setSandboxProvider(
+    provider: SandboxProvider,
+    transcripts?: SandboxTranscriptLookup,
+    peersDir?: () => string | null
+  ): void {
     this.getSandboxWrapper = provider
     if (transcripts) this.sandboxTranscripts = transcripts
+    if (peersDir) this.sandboxPeersDir = peersDir
   }
 
   /**
@@ -465,7 +472,7 @@ export class SessionService extends EventEmitter {
   refreshLiveSessionIds(): void {
     for (const def of this.defs) {
       if (!this.pty.isAlive(def.id)) continue
-      const back = readDeskSessionId(def.id, this.peersDir())
+      const back = readDeskSessionId(def.id, this.peersDirFor(def))
       if (back && back !== def.sessionId && this.hasTranscript(def.cwd, back)) {
         this.adoptRealId(def, def.sessionId, back)
       }
@@ -668,6 +675,18 @@ export class SessionService extends EventEmitter {
     return join(this.home, '.claude', 'peers')
   }
 
+  /**
+   * Where THIS session's back-channel / peer cache lives. A sandboxed session
+   * writes inside its container, into the Deck-owned dir mounted there — never
+   * the host `~/.claude/peers`, which stays out of every container's reach
+   * (sandbox-command.ts peersDirHost explains why). The supervisor is never
+   * sandboxed, so it keeps the host dir.
+   */
+  private peersDirFor(def: SessionDef): string {
+    if (def.supervisor) return this.peersDir()
+    return this.sandboxPeersDir() ?? this.peersDir()
+  }
+
   private async discoverRealId(def: SessionDef, before: Set<string>): Promise<void> {
     const placeholder = def.sessionId
     const deadline = Date.now() + DISCOVERY_DEADLINE_MS
@@ -678,7 +697,7 @@ export class SessionService extends EventEmitter {
       // Preferred: the deterministic back-channel file keyed by this tile's token
       // (CLAUDE_PEERS_DESK_SESSION = def.id). server.ts writes the real minted id
       // there at /register, so there is no same-cwd ambiguity (D1/D2/D10).
-      const back = readDeskSessionId(def.id, this.peersDir())
+      const back = readDeskSessionId(def.id, this.peersDirFor(def))
       if (back && back !== def.sessionId) {
         this.adoptRealId(def, placeholder, back)
         return
@@ -787,7 +806,7 @@ export class SessionService extends EventEmitter {
     this.persist()
     // Drop any stale back-channel file from a previous run so discovery cannot
     // read an old id; the core rewrites it with the fresh minted id at register.
-    clearDeskSessionId(def.id, this.peersDir())
+    clearDeskSessionId(def.id, this.peersDirFor(def))
     try {
       this.pty.spawn(
         def.id,
@@ -942,7 +961,9 @@ export class SessionService extends EventEmitter {
     for (const def of this.defs) {
       const r = this.runtime.get(def.id)
       if (!r) continue
-      const next = this.pty.isAlive(def.id) ? resolvePeerId(def.cwd, def.sessionId) : null
+      const next = this.pty.isAlive(def.id)
+        ? resolvePeerId(def.cwd, def.sessionId, this.peersDirFor(def))
+        : null
       if (next !== r.peerId) {
         // First resolution of a fresh session -> emit a one-shot join announce
         // for the Deck to broadcast, then consume the intent so it never repeats
