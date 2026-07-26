@@ -72,6 +72,23 @@ Imitate `fetchGraphDrafts` / `markGraphDraftOpened`.
 - Deck-local persistence: pure module with injectable dir — imitate
   `inbox-store.ts` (+ `tests/desktop-<feature>.test.ts`).
 
+> **If the feature exposes a new `DeckApi` method, ALSO follow steps 7-8 of the
+> `add-deck-view` skill before compiling.** Every DeckApi member must appear in
+> `COMPANION_MANIFEST` *and* in `CHANNEL_TIERS` (`desktop/src/shared/companion.ts`)
+> — the first is a typecheck error, the second a test failure, and they fire
+> late (after the renderer work is done). Decide the tier at the same moment:
+> anything that accepts a SECRET or hands one out belongs in
+> `REMOTE_BLOCKED_CHANNELS` too, because a paired phone reaches every channel
+> that is not blocked.
+
+> **Importing repo-root `shared/` from `desktop/src/main/`.** It works (the main
+> build has no `root` restriction) but the file must be listed in
+> `desktop/tsconfig.node.json` `include`, one entry per file — do NOT add
+> `../shared/**/*`, that pulls in Bun-only modules (`config.ts` uses `Bun.file`)
+> and breaks the typecheck. Prefer this over mirroring for anything
+> cryptographic: a one-byte drift in a canonical serialization silently
+> invalidates every signature.
+
 ## 7. Preload — `desktop/src/preload/index.ts`
 
 One `ipcRenderer.invoke` line per handle, one `subscribe('channel', cb)` per

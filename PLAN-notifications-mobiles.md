@@ -68,6 +68,31 @@ identité opérateur**.
 
 ---
 
+## 0.5 État d'avancement (2026-07-26)
+
+| Lot | État | Preuve |
+|---|---|---|
+| **N0** identité opérateur | ✅ livré | `shared/approval.ts`, `operator-identity.ts` — 38 tests unitaires |
+| **N1** socle approbations | ✅ livré | 4 tables + 7 routes + long poll — 25 tests HTTP |
+| **N2.a** hook | ✅ livré | non bloquant ; 22 tests dont 5 en sous-processus |
+| **N2.b** `ask_operator` | ✅ livré | 5 tests en JSON-RPC stdio réel |
+| **N2.c/d** Deck + réglages | ✅ livré | runtime armé/désarmé, poller de verdicts, opt-out projet |
+| **N2.e** retour `channel` | ✅ livré | 8 tests contre un vrai peer WebSocket |
+| **N3** Telegram | ✅ livré | long polling, appairage deep-link + QR |
+| **N4** Discord | ✅ livré | Gateway WSS, modale texte libre, URL d'invitation auto |
+| **UI** enrôlement | ✅ livré | `Settings > Notifications`, 3 canaux + liaison multi-PC |
+| **N5** app mobile | ⛔ non commencé | chantier à part entière (voir §5 lot N5) |
+
+**Total : 886 tests, 0 échec.** Aucun test ne touche le réseau : les
+adaptateurs sont vérifiés avec un canal factice. La validation en conditions
+réelles (vrai bot, vrai téléphone) est portée dans `BACKLOG.md`.
+
+Reste ouvert, hors N5 :
+- **Ligne `ntfy` inerte** dans l'écran (affiche « Bientôt disponible ») — elle
+  n'aura de sens qu'avec le lot N5.
+- **Aucun test E2E réseau**, par construction : voir la liste de validations
+  manuelles du backlog.
+
 ## 1. Lots, dépendances, jalons
 
 ```
