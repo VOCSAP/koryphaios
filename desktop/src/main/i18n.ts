@@ -347,6 +347,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sandbox.reauth': 'Re-authenticate',
   'sandbox.authOk': 'connected',
   'sandbox.authMissing': 'not connected',
+  'sandbox.railNeedsAuth': 'sign-in required',
   'sandbox.authUnknown': 'unknown (container stopped)',
   'sandbox.authVolumeHint':
     'One login covers every sandbox container: credentials live in the kory-claude-auth volume, never on this machine.',

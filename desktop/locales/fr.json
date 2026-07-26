@@ -256,6 +256,7 @@
   "sandbox.reauth": "Ré-authentifier",
   "sandbox.authOk": "connecté",
   "sandbox.authMissing": "non connecté",
+  "sandbox.railNeedsAuth": "connexion requise",
   "sandbox.authUnknown": "inconnu (conteneur arrêté)",
   "sandbox.authVolumeHint": "Une seule connexion couvre tous les conteneurs sandbox : les credentials vivent dans le volume kory-claude-auth, jamais sur le poste.",
   "sandbox.containers": "Conteneurs sandbox (tous projets)",

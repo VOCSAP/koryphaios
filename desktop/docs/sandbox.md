@@ -66,6 +66,11 @@ The container needs its own Claude login, stored in the shared
 container — one login covers all your projects and survives container
 removal; your host login is never copied in).
 
+The rail's 🏺 glyph fills **amber** whenever sandbox mode is on and that
+volume holds no credentials — the state in which nothing can spawn — so the
+Deck says it before you try. Any other case (mode off, signed in, container
+stopped so the state is unknown) draws the jar plain.
+
 Agents are **blocked** until that login exists: spawning opens a modal —
 *Next* starts a terminal inside the container running the CLI's standard login
 flow (open the OAuth URL in your browser, paste the code back). The Deck polls
