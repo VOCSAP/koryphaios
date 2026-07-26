@@ -397,6 +397,13 @@ export const useDeck = create<DeckState>((set, get) => ({
     // state fetched once (covers a reloaded renderer during an outage).
     window.api.onBrokerStatus((status) => set({ brokerStatus: status }))
     window.api.onSandboxChanged((sandboxStatus) => set({ sandboxStatus }))
+    // One hydration at boot so the rail glyph is truthful before the Docker
+    // view has ever been opened. Best-effort: a failure here must not break
+    // startup, and the rail simply renders the glyph plain.
+    void window.api
+      .sandboxStatus()
+      .then((sandboxStatus) => set({ sandboxStatus }))
+      .catch(() => {})
     void window.api.getBrokerStatus().then((status) => set({ brokerStatus: status }))
     // Companion server status (PLAN MB2): rail glyph glow while it runs. A
     // remote client is 'remote-blocked' on the status invoke — the event push

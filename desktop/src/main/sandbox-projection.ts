@@ -73,7 +73,11 @@ export function detectHostOnlyHooks(settingsJson: string): string[] {
     return [] // unreadable settings: the copy still happens, nothing to warn about
   }
   const suspicious: string[] = []
-  const HOST_ONLY = /(^|[\s"'=/\\])(powershell(\.exe)?|pwsh|cmd\.exe)([\s"']|$)|\.(ps1|bat|cmd|exe)([\s"']|$)|[A-Za-z]:[\\/]/i
+  // The drive-letter branch is anchored at a word START. Unanchored,
+  // `[A-Za-z]:[\\/]` also matches the `s:/` inside `https://`, so every hook
+  // containing a URL was falsely reported as un-runnable in the container.
+  const HOST_ONLY =
+    /(^|[\s"'=/\\])(powershell(\.exe)?|pwsh|cmd\.exe)([\s"']|$)|\.(ps1|bat|cmd|exe)([\s"']|$)|(^|[\s"'=])[A-Za-z]:[\\/]/i
   const walk = (node: unknown): void => {
     if (Array.isArray(node)) {
       for (const item of node) walk(item)

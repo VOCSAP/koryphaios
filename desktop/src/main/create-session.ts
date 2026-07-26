@@ -41,7 +41,14 @@ export async function createSessionWithWorktree(
    * covers the operator create, the supervisor's deck-control spawn and
    * template batches (all funnel through this path).
    */
-  sandboxGate?: () => Promise<string | null>
+  sandboxGate?: () => Promise<string | null>,
+  /**
+   * Warm the sandbox's container-side transcript cache for the cwd this session
+   * will actually run in (PLAN-SANDBOX M2 resume). It must happen AFTER the
+   * worktree is created — a worktree session's cwd is not the project root, and
+   * warming only the root left every worktree resume starting fresh.
+   */
+  sandboxWarmTranscripts?: (cwd: string) => Promise<void>
 ): Promise<SessionRuntime> {
   let root = projectDir
   if (sandboxGate && !input.supervisor) {
@@ -68,5 +75,6 @@ export async function createSessionWithWorktree(
     }
     if (beforeSpawn) await beforeSpawn(req.cwd?.trim() || root)
   }
+  if (sandboxWarmTranscripts) await sandboxWarmTranscripts(req.cwd?.trim() || root)
   return service.create(req)
 }

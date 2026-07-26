@@ -184,6 +184,21 @@ export class WorkspaceService {
   }
 
   /**
+   * Distinct cwds the sessions of a saved workspace will respawn into. Used by
+   * the sandbox to warm its container-side transcript cache BEFORE `restore`
+   * spawns them (PLAN-SANDBOX M2): the spawn path is synchronous, so anything
+   * it needs to know must already be cached. Empty when the workspace is gone.
+   */
+  sessionCwds(id: string): string[] {
+    const ws = loadWorkspace(this.deps.projectDir, id)
+    if (!ws) return []
+    const cwds = fromWorkspaceSessions(ws.sessions)
+      .map((d) => d.cwd?.trim())
+      .filter((c): c is string => !!c)
+    return [...new Set(cwds)]
+  }
+
+  /**
    * Restore a workspace: adopt its scope, swap the session set, set the layout.
    * Returns false (no-op) when the workspace is missing or already owned by
    * another live instance; true after a successful restore.

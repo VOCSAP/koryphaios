@@ -142,11 +142,17 @@ hand drew it):
 2. **Stroke-only.** The single allowed fill is the small `Dot` accent
    (constellation stars, ellipsis). Never hardcode a colour — `currentColor`
    is what makes the dim/active/hover states and the glow work for free.
-   One sanctioned data-fill exception: a glyph whose fill LEVEL encodes live
-   data (the amphora gauge, `AmphoraGauge` in icons.tsx) may clip a
-   translucent `currentColor` rect inside its silhouette — the colour still
-   rides `currentColor` (tone classes `.usage-ok/.usage-warn/.usage-hot`),
-   never a hardcoded hex in the SVG.
+   Two sanctioned data-fill exceptions, both clipping a translucent rect
+   inside the glyph's own silhouette:
+   - fill LEVEL encodes live data (the amphora gauge, `AmphoraGauge`) — the
+     colour rides `currentColor` via tone classes
+     (`.usage-ok/.usage-warn/.usage-hot`), never a hex in the SVG;
+   - fill PRESENCE encodes a blocking state (the sandbox pithos,
+     `PithosGlyph`, amber inside when the shared auth volume has no Claude
+     credentials, so agents cannot spawn). Here the strokes must keep the
+     rail's dim/active tone while only the inside changes, so `currentColor`
+     cannot carry it: the rect takes a class the stylesheet colours
+     (`.glyph-fill-warn`, amber `#e0b341` per §2) — still no hex in the SVG.
 3. Keep ~1.5–2px of margin inside the 24-grid, centre optically, prefer
    primitive shapes (`path`/`circle`/`rect`) with round numbers.
 4. Pick a metaphor consistent with the mythology (when it stays readable —

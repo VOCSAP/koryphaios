@@ -66,14 +66,19 @@ The container needs its own Claude login, stored in the shared
 container — one login covers all your projects and survives container
 removal; your host login is never copied in).
 
+The rail's 🏺 glyph fills **amber** whenever sandbox mode is on and that
+volume holds no credentials — the state in which nothing can spawn — so the
+Deck says it before you try. Any other case (mode off, signed in, container
+stopped so the state is unknown) draws the jar plain.
+
 Agents are **blocked** until that login exists: spawning opens a modal —
 *Next* starts a terminal inside the container running the CLI's standard login
 flow (open the OAuth URL in your browser, paste the code back). The Deck polls
 the credentials file; on success the modal closes itself and a toast confirms.
 If the tokens expire later (e.g. weeks of downtime), the same modal reappears
 on the next spawn. **Re-authenticate** runs the flow at any time;
-**Disconnect** wipes the credentials from the volume (refused while a sandbox
-container is running).
+**Disconnect** wipes the credentials from the volume (refused while a session
+is running — the wipe itself needs the container up).
 
 ## Your global Claude config inside the sandbox
 
@@ -113,6 +118,10 @@ silently ignored.
   (confirm dialog; the auth volume and your project folder are never touched).
   Actions on the current project's container are refused while sessions run.
 
+The Deck also recreates the container by itself when its `/work` mount no
+longer matches the work mode — switching to *ephemeral copy* can never leave
+agents writing the real tree because a stale container was reused.
+
 ## How sessions run
 
 Each spawn writes a small launch script into a Deck-owned run dir (mounted at
@@ -120,6 +129,12 @@ Each spawn writes a small launch script into a Deck-owned run dir (mounted at
 /kory-run/cmd-<id>.sh`. Everything terminal-side (thinking detection, quota
 auto-resume, attention, search) behaves exactly as before — the PTY does not
 care what is at the other end.
+
+**Isolation of the peer back-channel.** Containers get a Deck-owned peers
+directory, never the host `~/.claude/peers`. The Deck reads the session-id
+back-channel of sandboxed sessions from there, and validates the value before
+using it — a sandboxed agent must not be able to influence what a
+non-sandboxed tile resumes.
 
 **Peer messaging.** Sessions inside reach the host's claude-peers broker
 through `host.docker.internal` (injected `CLAUDE_PEERS_BROKER_URL`), so
@@ -137,11 +152,16 @@ container-side; the host's own transcripts are ignored while the sandbox owns
 the project.
 
 **Dev servers.** Ports listed in the project's sandbox settings (default 3000,
-5173, 8080) are published to `127.0.0.1` at container create, so a dev server
-started by a sandboxed agent is reachable from the embedded Browser view at
-`http://localhost:<port>` as usual. Changing the port list requires a
-container **rebuild** (engine limitation: ports cannot be added to a live
-container).
+5173, 8080, editable in the Docker view) are published to `127.0.0.1` at
+container create, so a dev server started by a sandboxed agent is reachable
+from the embedded Browser view at `http://localhost:<port>` as usual. Changing
+the list requires a container **rebuild** (engine limitation: ports cannot be
+added to a live container).
+
+Those defaults are the same for **every** project, so a second sandboxed
+project cannot publish them too — its container fails to start on an
+already-allocated port. Give it different ports, or clear the field (an empty
+list publishes nothing).
 
 The supervisor is **exempt** from sandboxing: it pilots the app itself, and
 its MCP bridge points at the host Electron binary and a loopback control port

@@ -95,3 +95,15 @@ test("unknownOverrides surfaces overlay files that would silently do nothing", (
   expect(unknownOverrides(dir)).toEqual(["notes.md"]);
   expect(unknownOverrides(join(dir, "nope"))).toEqual([]);
 });
+
+test("a hook containing a URL is not flagged host-only (review finding #9)", () => {
+  // `[A-Za-z]:[\\/]` unanchored also matches the `s:/` inside `https://`, so
+  // every hook with a URL was reported as un-runnable in the container.
+  expect(detectHostOnlyHooks(JSON.stringify({
+    hooks: { Stop: [{ hooks: [{ command: "curl -s https://example.com/notify" }] }] }
+  }))).toEqual([]);
+  // A genuine Windows path is still caught.
+  expect(detectHostOnlyHooks(JSON.stringify({
+    hooks: { Stop: [{ hooks: [{ command: "node C:/tools/hook.js" }] }] }
+  }))).toHaveLength(1);
+});

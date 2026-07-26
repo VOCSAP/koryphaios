@@ -368,11 +368,16 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sandbox.state.missing': 'not created yet',
   'sandbox.image': 'Image:',
   'sandbox.ports': 'published ports:',
+  'sandbox.portsPlaceholder': '3000, 5173 (empty = publish none)',
+  'sandbox.portsSave': 'Save ports',
+  'sandbox.portsHint':
+    'Published to 127.0.0.1 at container create — a rebuild applies changes. The defaults are the same for every project, so a second sandboxed project must use different ports (or none).',
   'sandbox.blockedLive': 'Sessions are running — close them before changing the sandbox.',
   'sandbox.auth': 'Authentication (shared volume)',
   'sandbox.reauth': 'Re-authenticate',
   'sandbox.authOk': 'connected',
   'sandbox.authMissing': 'not connected',
+  'sandbox.railNeedsAuth': 'sign-in required',
   'sandbox.authUnknown': 'unknown (container stopped)',
   'sandbox.authVolumeHint':
     'One login covers every sandbox container: credentials live in the kory-claude-auth volume, never on this machine.',

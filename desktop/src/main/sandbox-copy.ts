@@ -15,7 +15,7 @@
 //
 // Node builtins only (no electron, no @shared alias) so it is bun-testable.
 
-import { readdirSync, statSync } from 'node:fs'
+import { lstatSync, readdirSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 
 /**
@@ -54,8 +54,14 @@ const SKIP_DIRS = new Set([
   '.worktrees'
 ])
 
-/** Hard cap on the walk so a pathological tree cannot hang the spawn path. */
+/** Hard cap on collected files so a huge tree cannot balloon the copy plan. */
 const MAX_WALK_ENTRIES = 20_000
+/**
+ * Hard cap on VISITED entries. Distinct from the file cap on purpose: a
+ * directory tree with no files at all still costs iterations, and this walk
+ * runs synchronously on the main process during a spawn.
+ */
+const MAX_WALK_VISITS = 200_000
 
 /** True when a repo-relative POSIX path may never be copied into the sandbox. */
 export function isDeniedCopyPath(relPosix: string): boolean {
@@ -121,7 +127,8 @@ export function selectCopyPaths(relPaths: string[], globs: string[]): string[] {
 export function walkProjectFiles(root: string): string[] {
   const out: string[] = []
   const stack: string[] = [root]
-  while (stack.length > 0 && out.length < MAX_WALK_ENTRIES) {
+  let visits = 0
+  while (stack.length > 0 && out.length < MAX_WALK_ENTRIES && visits < MAX_WALK_VISITS) {
     const dir = stack.pop()!
     let names: string[]
     try {
@@ -131,16 +138,22 @@ export function walkProjectFiles(root: string): string[] {
     }
     for (const name of names) {
       if (SKIP_DIRS.has(name)) continue
+      if (++visits >= MAX_WALK_VISITS) break
       const full = join(dir, name)
-      let isDir = false
+      let stat: ReturnType<typeof lstatSync>
       try {
-        isDir = statSync(full).isDirectory()
+        stat = lstatSync(full)
       } catch {
-        continue // raced unlink / broken symlink
+        continue // raced unlink
       }
-      if (isDir) {
+      // SYMLINKS ARE NEVER FOLLOWED (lstat, and links are skipped outright):
+      // a link out of the tree would copy foreign files into the sandbox clone,
+      // and a self-referential one made this synchronous walk spin forever —
+      // the file cap could not stop it because a link loop yields no files.
+      if (stat.isSymbolicLink()) continue
+      if (stat.isDirectory()) {
         stack.push(full)
-      } else {
+      } else if (stat.isFile()) {
         out.push(relative(root, full).split(sep).join('/'))
         if (out.length >= MAX_WALK_ENTRIES) break
       }

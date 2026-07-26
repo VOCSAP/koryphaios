@@ -70,23 +70,29 @@ export function isSandboxContainerName(name: unknown): name is string {
 }
 
 /**
- * Map a host path to its container equivalent. Anything under the project dir
- * (worktrees included: `<project>/.worktrees/x` — worktree-service.ts keeps
- * them inside the tree) lands under /work; anything else falls back to /work
- * itself (the sandbox has no business outside the mount).
+ * Map a host path to its container equivalent, or **null** when it is not
+ * inside the mounted tree (worktrees are: `<project>/.worktrees/x` stays under
+ * the mount by construction).
+ *
+ * null rather than a `/work` fallback ON PURPOSE: falling back means running
+ * the agent in a DIFFERENT directory than the operator asked for, silently.
+ * That happened for real — a symlinked project prefix (macOS `/var`) made
+ * worktree paths canonical while the mount source was not, so every worktree
+ * session landed in the project root. The caller now refuses the spawn with a
+ * trace instead (session-service marks the tile exited).
  */
 export function mapHostPathToContainer(
   hostPath: string,
   projectDir: string,
   plat: NodeJS.Platform = platform()
-): string {
+): string | null {
   const rootKept = canonPath(projectDir)
   const targetKept = canonPath(hostPath)
   const fold = (p: string): string => (plat === 'win32' ? p.toLowerCase() : p)
   const root = fold(rootKept)
   const target = fold(targetKept)
   if (target === root) return SANDBOX_WORK_DIR
-  if (!target.startsWith(root + '/')) return SANDBOX_WORK_DIR
+  if (!target.startsWith(root + '/')) return null
   // Tail from the case-KEPT form so container paths keep their casing.
   return SANDBOX_WORK_DIR + targetKept.slice(rootKept.length)
 }
@@ -114,11 +120,17 @@ export interface SandboxCreateSpec {
   /** Host dir holding the generated launch scripts (bind-mounted at /kory-run). */
   runDirHost: string
   /**
-   * Host ~/.claude/peers, bind-mounted INSIDE the auth volume path so the
-   * container's server.ts writes the peer cache + desk-session back-channel
-   * where the Deck's discovery/peer-badge readers look (session-service
-   * peersDir()). Narrow data dir only — never the whole host ~/.claude
-   * (a mounted settings.json would be a host escape — see sandbox-projection).
+   * DECK-OWNED peers dir (app state), bind-mounted where the container's
+   * server.ts writes the peer cache + desk-session back-channel. The Deck reads
+   * sandboxed sessions' back-channel from here.
+   *
+   * SECURITY (CLAUDE.md hostile input #5): this is deliberately NOT the host
+   * `~/.claude/peers`. Mounting that one read-write let a sandboxed agent
+   * rewrite the back-channel file of a NON-sandboxed tile, whose id the Deck
+   * then adopts and passes to `--resume` on the host shell — a sandbox escape.
+   * Sandboxed containers now share only a dir of their own; host tiles are out
+   * of reach. (desk-session.ts validates the value and session-command.ts
+   * quotes it: three locks, because one of them will eventually be wrong.)
    */
   peersDirHost?: string
   /** Dev-server ports published as 127.0.0.1:p:p (webview reaches them as localhost). */
@@ -267,8 +279,12 @@ export function containerTranscriptDir(
   cwdHost: string,
   projectDir: string,
   plat: NodeJS.Platform = platform()
-): string {
+): string | null {
   const containerCwd = mapHostPathToContainer(cwdHost, projectDir, plat)
+  // Outside the mount there is no container-side transcript dir to look in —
+  // null so the caller reports "unknown", never an empty (= "no transcript")
+  // answer that would silently downgrade a resume to a fresh session.
+  if (containerCwd === null) return null
   return `${SANDBOX_HOME}/.claude/projects/${encodeProjectDir(containerCwd)}`
 }
 

@@ -132,6 +132,52 @@ const IconPithos = (
   </Svg>
 )
 
+/**
+ * Silhouette of the pithos body, reused as the clip for the "not signed in"
+ * fill (mirrors AMPHORA_BODY / AmphoraGauge).
+ */
+const PITHOS_BODY =
+  'M9.2 6.2c-2.5 1-4 3.1-4 5.7 0 3.5 2.1 6.3 4.5 7.6h4.6c2.4-1.3 4.5-4.1 4.5-7.6 0-2.6-1.5-4.7-4-5.7Z'
+
+/**
+ * The rail's sandbox pithos, tinted when the shared auth volume carries NO
+ * Claude credentials — the state in which agents cannot spawn at all, so the
+ * rail says so before the operator tries.
+ *
+ * Same sanctioned data-fill exception as AmphoraGauge (DESIGN.md §5 rule 2):
+ * a translucent rect clipped inside the silhouette. Here the fill is NOT
+ * `currentColor` — the strokes must keep the rail's normal dim/active tone
+ * while only the INSIDE turns amber — so it carries a class the stylesheet
+ * colours (`.glyph-fill-warn`), keeping the hex out of the SVG.
+ */
+export function PithosGlyph({ needsAuth }: { needsAuth: boolean }): React.JSX.Element {
+  const clipId = useId()
+  return (
+    <Svg>
+      <path d="M8.2 4.5h7.6" />
+      <path d="M9.2 4.5v1.7c-2.5 1-4 3.1-4 5.7 0 3.5 2.1 6.3 4.5 7.6h4.6c2.4-1.3 4.5-4.1 4.5-7.6 0-2.6-1.5-4.7-4-5.7V4.5" />
+      <path d="M6 13.2h12" />
+      <path d="M7.3 16.4h9.4" />
+      {needsAuth && (
+        <>
+          <clipPath id={clipId}>
+            <path d={PITHOS_BODY} />
+          </clipPath>
+          <rect
+            x="4"
+            y="5"
+            width="16"
+            height="15"
+            clipPath={`url(#${clipId})`}
+            className="glyph-fill-warn"
+            stroke="none"
+          />
+        </>
+      )}
+    </Svg>
+  )
+}
+
 /** Open volumen (unrolled scroll with written lines): the journal. */
 const IconVolumen = (
   <Svg>
