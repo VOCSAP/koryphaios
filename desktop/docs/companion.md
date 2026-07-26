@@ -3,6 +3,13 @@
 The **Companion** dialog lets the operator access the window from a phone,
 **on the local network only**.
 
+> **Not to be confused with remote approvals.** Companion is a *screen mirror*:
+> it needs the phone on the same Wi-Fi as this Deck, and it shows you the
+> window. Answering a waiting session from anywhere is a different feature with
+> a different pairing — see [notifications.md](notifications.md). The
+> Koryphaios app does both, and pairs for each separately: unpairing one never
+> affects the other.
+
 ## Pairing
 
 1. Open Companion and click **Start mobile access**: the app serves its UI
@@ -16,6 +23,35 @@ The **Companion** dialog lets the operator access the window from a phone,
 Closing the desktop app cuts the access. If the host becomes unreachable the
 phone shows a "Host disconnected" screen with a Retry button; relaunch the
 app, click Companion and re-scan.
+
+The QR also carries the **fingerprint** of the certificate this app serves.
+A browser ignores it; the Koryphaios app uses it to pin the host, so from the
+second visit on it accepts that exact certificate and nothing else — which is
+what makes a self-signed certificate safe on a network you share.
+
+## Several Decks on one phone
+
+The Koryphaios app keeps a **list** of paired Decks with a selector, built up
+by scanning each one's QR. Nothing changes here: every Deck keeps its own
+companion server and does not know the phone knows others.
+
+Two things worth knowing:
+
+- **Re-scanning a Deck you already paired refreshes it**, it does not add a
+  second entry. That is the normal way to get a fresh code after restarting
+  the desktop app.
+- **A pairing code is single use, and starting the access invalidates every
+  previous one.** The phone remembers the address and the certificate, so
+  coming back to a Deck that is still running works without a scan; once you
+  restart the access, every device needs a fresh QR.
+
+## Away from the Wi-Fi
+
+Companion mode is deliberately LAN-only: it never publishes an address. If you
+want the same screen mirror while away, put both machines on a **Tailscale**
+tailnet — the phone then reaches the Deck at its `100.x` address, which the
+app already accepts, with no change on either side. Approvals need none of
+this; they reach you anywhere by design.
 
 ## Device management
 

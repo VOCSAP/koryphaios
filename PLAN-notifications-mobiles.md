@@ -81,17 +81,21 @@ identité opérateur**.
 | **N3** Telegram | ✅ livré | long polling, appairage deep-link + QR |
 | **N4** Discord | ✅ livré | Gateway WSS, modale texte libre, URL d'invitation auto |
 | **UI** enrôlement | ✅ livré | `Settings > Notifications`, 3 canaux + liaison multi-PC |
-| **N5** app mobile | ⛔ non commencé | chantier à part entière (voir §5 lot N5) |
+| **N5** app mobile | ✅ livré | canal ntfy deux-topics, ligne mobile active, shell à deux modes + multi-hôtes |
 
-**Total : 886 tests, 0 échec.** Aucun test ne touche le réseau : les
-adaptateurs sont vérifiés avec un canal factice. La validation en conditions
-réelles (vrai bot, vrai téléphone) est portée dans `BACKLOG.md`.
+**Total : 1017 tests, 0 échec.** Aucun test ne sort de la machine : les
+adaptateurs Telegram/Discord sont vérifiés avec un canal factice, et ntfy —
+dont le protocole est assez petit pour être rejoué — tourne contre un faux
+serveur sur la boucle locale, ce qui couvre le chemin nominal complet
+(appairage, fan-out, réponse gagnante, perdante, cloisonnement C-5).
 
-Reste ouvert, hors N5 :
-- **Ligne `ntfy` inerte** dans l'écran (affiche « Bientôt disponible ») — elle
-  n'aura de sens qu'avec le lot N5.
-- **Aucun test E2E réseau**, par construction : voir la liste de validations
-  manuelles du backlog.
+Reste ouvert :
+- **Le natif Android n'est pas compilé** : `mobile-shell/android-src/` est
+  écrit mais aucun SDK n'existe dans le conteneur, donc pas une ligne de
+  Kotlin n'est vérifiée. Toute la logique de décision vit dans `src/`, sous
+  `bun test`, précisément pour cette raison.
+- **Aucun test contre le vrai ntfy.sh ni un vrai téléphone** : voir les
+  validations manuelles du backlog (§3.1 bis, §3.2).
 
 ## 1. Lots, dépendances, jalons
 
@@ -622,15 +626,34 @@ dépendance. Bouton → **modale** `Text Input` (≤ 4000 car.) pour le texte
 libre. Doc opérateur : laisser « Interactions Endpoint URL » **vide**, créer
 un serveur privé et y inviter le bot (contrainte du serveur mutuel).
 
-### Lot N5 — App Android / ntfy
+### Lot N5 — App Android / ntfy ✅
 
-`desktop/mobile-shell/` : TODOs natifs MB6 (service foreground, biométrie,
-`FLAG_SECURE`, pinning) + UnifiedPush via ntfy, motif **deux topics** (le
-broker publie sur `notif`, s'abonne en sortant sur `replies`), appairage par
-QR `{serveur, topics, token}`. Multi-hôtes en mode compagnon : remplacer
-l'URL unique bootstrapée par une liste d'hôtes appairés + sélecteur.
-Tailscale : **documentation seulement** (subnet router sur le serveur LAN ; le
-SNAT par défaut laisse passer `isPrivateAddress` sans changement de code).
+Livré. Écarts assumés par rapport à la note d'intention ci-dessous :
+
+- **Pas d'UnifiedPush.** L'app tient elle-même l'abonnement (foreground côté
+  WebView, service `connectedDevice` côté natif) plutôt que de passer par un
+  distributeur. Une dépendance de moins, et surtout le distributeur ne
+  résolvait ni le texte libre ni le message de clôture — qu'il fallait écrire
+  de toute façon. UnifiedPush reste ajoutable sans toucher au protocole.
+- **`connectedDevice` et non `dataSync`**, conformément au piège identifié
+  (plafond 6 h/24 h depuis Android 15).
+- **Le credential compagnon est une reprise, pas une clé.** `CompanionAuth.arm()`
+  purge les credentials à chaque démarrage du serveur compagnon : les stocker
+  durablement aurait été mentir. Le shell les garde pour survivre à un kill de
+  l'app, pas à un redémarrage du Deck.
+- **Une seule modification desktop**, celle que le pinning exige :
+  `CompanionInfo.certFingerprint` et le `&f=` du QR. Le multi-hôtes, lui, n'a
+  effectivement rien demandé.
+
+Note d'intention d'origine :
+
+> `desktop/mobile-shell/` : TODOs natifs MB6 (service foreground, biométrie,
+> `FLAG_SECURE`, pinning) + UnifiedPush via ntfy, motif **deux topics** (le
+> broker publie sur `notif`, s'abonne en sortant sur `replies`), appairage par
+> QR `{serveur, topics, token}`. Multi-hôtes en mode compagnon : remplacer
+> l'URL unique bootstrapée par une liste d'hôtes appairés + sélecteur.
+> Tailscale : **documentation seulement** (subnet router sur le serveur LAN ; le
+> SNAT par défaut laisse passer `isPrivateAddress` sans changement de code).
 
 ---
 

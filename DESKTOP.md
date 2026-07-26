@@ -48,6 +48,13 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   bare Enter on the highlighted option, deny = Escape rather than guessing a
   "no" index that could land on "yes, and don't ask again") and appends the
   submitting Enter itself — a remote answer can never carry its own.
+  Three channels are enrolled from `Settings > Notifications`: Telegram and
+  Discord take a bot token, the **Koryphaios mobile** row takes an ntfy relay
+  address (the broker mints the topics) and answers with a QR that is a
+  CREDENTIAL — it carries the topics and the access token, so it is shown
+  under a danger-coloured warning and dropped on Done. `approvals:connect`
+  stays in `REMOTE_BLOCKED_CHANNELS`: a paired phone must never enrol a
+  channel, and now even less so.
   Enabling is `global AND NOT project-opt-out`: a project can restrict, never
   enable. Identity lives in the app-state dir, which is per OS user, so two
   Windows accounts on one machine are compartmentalised without a line of code
@@ -241,8 +248,19 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   host-only or trust-changing (a paired phone must never call it). State events
   reaching the phone must go through
   `broadcast()` (not `mainWindow.webContents.send`); window-only events
-  (menu:*, design:pick, session:focus, inbox:open) stay on the window. The
-  Android shell (`mobile-shell/`) is a documented scaffold — see MB6.
+  (menu:*, design:pick, session:focus, inbox:open) stay on the window.
+  `CompanionInfo.certFingerprint` (SHA-256 of the served certificate) rides in
+  the QR as `&f=` so the Android shell can PIN this host; a browser ignores it.
+- **The Android shell (`mobile-shell/`, N5)** carries TWO features that must
+  not be merged: *companion* (this LAN mirror, now a LIST of paired Decks with
+  a selector — nothing changes here, each Deck keeps its own server) and
+  *approvals* (ntfy, reachable anywhere, tied to an operator identity, and it
+  must work with no Deck reachable at all). Separate storage, separate
+  lifecycles, separate threat models. Its decision logic is pure TypeScript
+  under `bun test`; the Kotlin in `android-src/` is uncompiled here (no SDK)
+  and therefore decides nothing. Resuming a host needs no change on this side:
+  `connectRemoteApi` already boots from a stored credential, so the shell
+  seeds `COMPANION_CRED_STORAGE_KEY` before navigating.
 
 ## Error reporting & logs (PLAN-observabilite O3–O6)
 

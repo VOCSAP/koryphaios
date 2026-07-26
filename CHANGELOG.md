@@ -1,5 +1,87 @@
 # Changelog
 
+## core + desktop (experimental) — the Koryphaios app as a third approval channel
+
+Telegram and Discord already delivered a waiting session's question to a phone.
+Both hand the text to somebody else's servers on the way. The third channel
+does not: the **Koryphaios Android app**, reached through **ntfy** — a relay
+small enough to self-host on a VPS, at which point the question never leaves
+infrastructure the operator controls.
+
+**Why a relay at all, when the phone is often on the same Wi-Fi.** Because
+Doze. With the screen off, Android suspends network access and ignores
+wakelocks, so a LAN socket dies within minutes — and the whole point is
+answering from a train. FCM was the other candidate and is unusable for an
+open-source app: pushing to it requires a Firebase service-account key on the
+sending side, which cannot be shipped in a repository without handing everyone
+the ability to push to every installation. ntfy is the relay that already
+solved that, and it is AGPL.
+
+**Two topics, both legs outgoing.** The broker publishes questions on one
+topic and holds a streaming GET on the other; the phone does the mirror image.
+Nothing anywhere accepts an incoming connection — the same property Telegram's
+long poll and Discord's gateway socket have, kept deliberately. The topics ARE
+the secret (24 random bytes each, and an optional ntfy access token), and they
+are **re-minted on every reconnect**, which is what makes `Disconnect` →
+`Connect` an actual kill switch for a lost phone rather than a gesture.
+
+**The constraint that shaped the design: ntfy cannot edit a delivered
+message.** Telegram and Discord settle a losing copy by rewriting it in place;
+here that is impossible. So `settle` publishes a *closing* message keyed on the
+approval id, at minimum priority, and the app cancels its own notification on
+it. Without that, a question already answered in the Deck would sit on the
+phone looking actionable — precisely the failure the settle rule exists to
+prevent. The second constraint: an ntfy action button carries a **fixed** body.
+Approve and Reject can be buttons; "use the staging bucket instead" cannot.
+That single fact is why the app has a screen of its own instead of leaning on
+the official ntfy client.
+
+**One wire format, not two.** `notify/ntfy-protocol.ts` is used by the broker
+*and* bundled into the Android app, so the two ends cannot drift. Making it
+bundlable meant moving `stripControl`/`truncate` into a dependency-free
+`shared/text.ts` — the protocol no longer drags `node:crypto` into a WebView.
+The app bundle comes out at ~14 KB with no Node builtin in it, which is the
+proof rather than the claim.
+
+**The app carries two features that must not be confused.** *Companion* mirrors
+a Deck's UI over the LAN: it needs proximity, and there is now one entry **per
+Deck**, built up by successive QR scans with a selector — nothing changed on
+the desktop side, each Deck keeps serving its own companion server. *Approvals*
+reaches the operator anywhere through the broker, is tied to an **operator
+identity** rather than a machine, and must work with no Deck reachable at all.
+Separate storage, separate lifecycles, separate threat models; a test holds the
+property directly, because the tempting simplification — one pairing list — is
+exactly the bug.
+
+One desktop change was genuinely required, and only one: pinning needs the
+certificate's fingerprint, so `CompanionInfo` now reports it and the companion
+QR carries it as `&f=`. The certificate is stable across launches and is shown
+to every visitor, so publishing its digest costs nothing and turns "accept any
+self-signed certificate" into "accept exactly this one". Resuming a host needed
+no desktop change at all: `connectRemoteApi` already boots from a stored
+credential alone, so the shell seeds the key it reads — now a shared constant
+instead of two literals in two projects.
+
+**What is honest about the Android half.** `mobile-shell/android-src/` holds
+the Kotlin Capacitor does not generate: the foreground service, notification
+actions, the biometric gate, `FLAG_SECURE`, certificate pinning. **None of it
+is compiled here** — this container has no Android SDK — which is exactly why
+it decides nothing: it moves bytes and manages lifecycles, while every rule
+lives in TypeScript under `bun test`. Expect corrections on the first build on
+a tooled machine. The service declares `connectedDevice` rather than
+`dataSync`, deliberately: the latter is capped at 6 hours per 24 since Android
+15, and would take the channel down overnight, silently, which is when a long
+run is most likely to be waiting.
+
+1017 tests at delivery (+131). ntfy is the first channel whose *nominal* path
+is covered rather than just its failure path: its protocol is small enough to
+stand up locally, so a stub ntfy on loopback exercises pairing, fan-out, a
+phone answer settling an approval, a second answer losing the race, and an
+answer aimed at another operator's approval going nowhere. What no test covers:
+the real ntfy.sh, a real phone, and all of Android. Those checks are listed in
+`BACKLOG.md` §3.1 bis and §3.2. Operator documentation:
+`desktop/docs/notifications.md`; the shell's own README covers the two modes.
+
 ## core + desktop (experimental) — remote approvals: answer a waiting session from your phone
 
 Long sessions stop and wait: a tool-permission dialog, a plan to approve, an
@@ -105,7 +187,7 @@ WebSocket, the hook as a real subprocess and the MCP tool over real JSON-RPC
 stdio. Real-world validation — the two bots, cross-channel arbitration, two OS
 accounts, two linked PCs — is listed in `BACKLOG.md` §3.1 bis. Operator
 documentation: `desktop/docs/notifications.md`. The mobile app as a third
-channel (lot N5) is not started.
+channel (lot N5) is not started. *(It is, now — see the entry above.)*
 
 ## desktop (experimental) — sandbox hardening: nine review findings, one of them a sandbox escape
 

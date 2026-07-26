@@ -365,6 +365,60 @@ Chemins de retour :
 - [ ] PC éteint > 24 h : la notif expire, la session reste répondable dans le
       Deck.
 
+Validation app Koryphaios / ntfy (lot N5) :
+
+> Ce lot est le seul dont le chemin nominal est couvert automatiquement : un
+> faux ntfy tourne sur la boucle locale (`tests/broker-ntfy-channel.test.ts`),
+> et l'appairage, le fan-out, la réponse gagnante, la perdante et le
+> cloisonnement C-5 y passent pour de vrai. Ce qu'aucun test ne couvre : le
+> vrai ntfy.sh, un vrai téléphone, et **tout Android** (pas de SDK ici).
+
+- [ ] `Connect` sur la ligne « Koryphaios mobile » avec `https://ntfy.sh` :
+      le QR s'affiche, la ligne passe « Connecté · ntfy.sh ».
+- [ ] Idem contre un **ntfy auto-hébergé** (le cas qui garde les questions
+      chez soi), avec et sans jeton d'accès `tk_…`.
+- [ ] Une adresse `http://` publique est refusée avec un message lisible ;
+      `http://192.168.x.x:8080` est acceptée.
+- [ ] Un jeton d'accès invalide : la connexion échoue et **ne laisse aucune
+      ligne configurée** derrière elle.
+- [ ] Scan du QR par l'app → la ligne passe « 1 appairé » avec le nom de
+      l'appareil, et l'app affiche « Paired ».
+- [ ] `Disconnect` puis `Connect` : les topics changent, **l'ancien téléphone
+      devient sourd** (c'est le coupe-circuit du téléphone perdu — à vérifier
+      pour de bon avec l'ancienne app encore installée).
+- [ ] Boutons **Approve / Reject** depuis la notification Android, écran
+      verrouillé.
+- [ ] **Texte libre** depuis l'app : parvient à l'agent, assaini.
+- [ ] Réponse dans le Deck d'abord → le message de clôture arrive et
+      **la notification du téléphone disparaît** (ntfy ne sait pas éditer :
+      c'est le mécanisme de remplacement, à voir fonctionner).
+- [ ] Les trois canaux connectés en même temps : une seule question, trois
+      copies, une seule gagne, les deux autres se réécrivent.
+- [ ] Quota ntfy.sh (250 messages/jour) : vérifier le comportement en cas de
+      dépassement — chaque approbation coûte 1 message + 1 clôture.
+
+Validation Android (aucun test possible ici — pas de SDK) :
+- [ ] Le projet **compile** (`cap add android` + copie de `android-src/`).
+- [ ] **Écran éteint 8 h** : une approbation arrive toujours. C'est LE test du
+      choix `connectedDevice` plutôt que `dataSync` (plafonné à 6 h/24 h) ;
+      un échec vers la 6ᵉ heure signerait un mauvais type de service.
+- [ ] Même essai sur un OEM agressif (Xiaomi/Samsung), exemption d'optimisation
+      batterie accordée puis refusée.
+- [ ] Redémarrage du téléphone : le service repart, l'appairage survit.
+- [ ] `FLAG_SECURE` : la vignette des applis récentes est bien noire, la
+      capture d'écran refusée.
+- [ ] Verrou biométrique au retour d'arrière-plan ; refus ⇒ l'app se ferme.
+- [ ] **Pinning** : ouvrir un Deck appairé passe sans avertissement ; le même
+      Deck après effacement de son état applicatif (nouveau certificat) doit
+      être **refusé** et non accepté silencieusement.
+- [ ] Multi-hôtes : deux Decks appairés, le sélecteur ouvre le bon ; re-scan
+      d'un Deck connu ne crée pas de doublon.
+- [ ] Reprise sans QR : quitter l'app puis y revenir alors que le Deck tourne
+      toujours ⇒ pas de re-scan. Après redémarrage du Deck ⇒ re-scan demandé
+      (c'est attendu : `arm()` invalide les credentials).
+- [ ] Les deux appairages sont bien indépendants **sur l'appareil** : oublier
+      tous les Decks n'ôte pas les approbations, et inversement.
+
 Robustesse et exploitation :
 - [ ] Broker redémarré : les passerelles repartent seules (`startConfiguredChannels`).
 - [ ] Redémarrer un second broker avec le même token Telegram → le 409
@@ -374,14 +428,21 @@ Robustesse et exploitation :
 
 ### 3.2 Mobile LAN
 
-- [ ] **N5 — l'app mobile comme canal d'approbation** : la ligne « Koryphaios
-      mobile » de l'écran d'enrôlement est inerte (« Bientôt disponible »).
-      Nécessite le motif ntfy deux-topics + le redécoupage compagnon /
-      approbation + le multi-hôtes. Chantier à part entière, voir
-      `PLAN-notifications-mobiles.md` §5 lot N5.
-- [ ] **MB6 — coquille Android** : scaffold `mobile-shell/` livré mais **non
-      buildé** (pas de SDK ici). TODOs natifs du `mobile-shell/README.md` :
-      service foreground, verrou biométrique + `FLAG_SECURE`, pinning cert.
+- [x] **N5 — l'app mobile comme canal d'approbation** : livré. Canal ntfy
+      deux-topics côté broker, ligne « Koryphaios mobile » active dans
+      l'enrôlement, redécoupage compagnon / approbation et multi-hôtes dans
+      `mobile-shell/`. Validations terrain ci-dessus (§3.1 bis).
+- [ ] **MB6 — coquille Android : reste à BUILDER**. Le code natif est écrit
+      (`mobile-shell/android-src/` : service foreground `connectedDevice`,
+      actions de notification, verrou biométrique + `FLAG_SECURE`, pinning
+      cert) mais **jamais compilé** — pas de SDK dans ce conteneur, donc pas
+      une ligne de Kotlin n'est vérifiée. Premier passage sur une machine
+      outillée : s'attendre à des corrections d'imports/API.
+- [ ] **Icône et identité de l'app** : le service utilise encore les drawables
+      système (`stat_sys_warning`, `stat_notify_sync`). Un glyphe grec au
+      standard `DESIGN.md` §5 est à dessiner, en densités Android.
+- [ ] **Distribution** : aucun listing store. Décider APK signé + F-Droid, ou
+      rester « build depuis les sources ».
 - [ ] **M3e — mode fil de la vue Graph sur mobile** : reporté (Graph absent de
       la nav mobile v1).
 - [ ] **PWA (v2)** : manifest + icône pour « installation » sur l'écran d'accueil.

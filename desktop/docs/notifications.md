@@ -1,9 +1,10 @@
 # Remote approvals (answering an agent from your phone)
 
-> **Status.** Telegram and Discord ship and are connected from
-> `Settings > Notifications`. The **Koryphaios mobile app row is not built yet**
-> and shows "Coming soon". End-to-end testing on a real phone is still pending,
-> so treat the first run as a trial.
+> **Status.** All three channels — Telegram, Discord and the Koryphaios mobile
+> app — are connected from `Settings > Notifications`. The mobile app is built
+> from source (`desktop/mobile-shell/`); there is no store listing yet.
+> End-to-end testing on a real phone is still pending, so treat the first run
+> as a trial.
 
 When a session stops and waits for you — a tool-permission dialog, a plan to
 approve, an open question — Koryphaios can register that as an **approval**
@@ -131,17 +132,48 @@ press the free-text button and a small form opens — up to 4000 characters.
 ## Connecting the Koryphaios mobile app
 
 The mobile app doubles as a notification channel, so you do not need a
-third-party messenger.
+third-party messenger — and it is the only channel where you can answer in
+your own words without a third party reading it.
 
-1. Install the Koryphaios companion app on your phone.
-2. In Koryphaios, click **Connect** on the mobile row.
-3. Scan the QR code with the app.
+It works through **ntfy**, a small relay. Your PC *publishes* to it and
+*subscribes* to it; so does your phone. Neither ever accepts an incoming
+connection, which is why nothing on your machine becomes reachable.
+
+1. Install the Koryphaios app on your phone (built from
+   `desktop/mobile-shell/` — see its README; there is no store listing yet).
+2. In Koryphaios, click **Connect** on the **Koryphaios mobile** row.
+   - **ntfy server** — `https://ntfy.sh` works as it is. Point it at your own
+     server instead if you would rather the questions never touch someone
+     else's infrastructure.
+   - **Access token** — optional, and worth the two minutes on a shared
+     server. See the warning below.
+3. A QR code appears. Scan it with the app. Pairing is done.
 
 That pairing is **global**: it survives app restarts and covers every project
-and every session — you do not re-pair for each session.
+and every session — you do not re-pair for each session. And unlike the
+companion *screen mirror*, which needs the phone on the same Wi-Fi, this
+reaches you anywhere.
 
-Unlike the companion *screen mirror*, which needs the phone to be on the same
-Wi-Fi, approvals reach you anywhere.
+**Answering.** Permission requests carry **Approve** and **Reject**, tappable
+straight from the notification. For anything else, open the app and type: free
+text is the one thing a notification button cannot carry, because its payload
+is fixed when the message is sent.
+
+**The QR is a credential, not a link.** It contains the two topic names and
+your access token. Whoever photographs it can read your questions *and* answer
+them. Scan it and close it, exactly like the multi-PC link code.
+
+**Your topics are your lock.** Koryphaios generates two unguessable topic
+names, one per direction, and mints fresh ones every time you reconnect — so
+**Disconnect** followed by **Connect** is the kill switch for a lost phone.
+On a shared server such as ntfy.sh, an access token is what stops anyone who
+learns a topic name from reading it; without one, the names are the only
+secret. Note that read access to your notification topic implies the ability
+to answer: the questions it carries contain the request identifiers.
+
+**If your PC is off.** Nothing is lost while it is off — the *notification*
+expires after 24 hours, but the session is still waiting and you can answer it
+in the Deck.
 
 ---
 
@@ -169,8 +201,9 @@ are never sent.
 
 That said, a question can legitimately contain a file path or a command line.
 Content sent through Telegram or Discord passes through their servers in the
-clear, as any message would. If a project is sensitive, use the per-project
-opt-out.
+clear, as any message would; the same is true of a shared ntfy server. If a
+project is sensitive, use the per-project opt-out — or run your own ntfy, which
+is the one option here that keeps the text on infrastructure you control.
 
 ## Expiry and stale requests
 
@@ -187,6 +220,19 @@ handled"**. That is the expected behaviour, not an error.
 **Nothing arrives on my phone.** Check, in order: the global switch is on; the
 current project is not opted out; the channel shows as connected; the broker is
 reachable (the status dot in the sidebar).
+
+**Nothing arrives on the app when the screen is off.** Android suspends
+background network access, so the app keeps a foreground service running — it
+shows a permanent low-priority "Listening for approvals" notification. If that
+notification is gone, the system killed it: grant the battery-optimisation
+exemption the app asks for at pairing. Some manufacturers (Xiaomi, Samsung and
+others) are more aggressive than Android itself; `dontkillmyapp.com` lists the
+setting to change per brand.
+
+**The app says a request is already handled.** Someone answered it first —
+most often you, in the Deck. Because ntfy cannot edit a message it has already
+delivered, the app is told by a second, silent message rather than by the
+first one changing; that is why you may briefly see both.
 
 **The Deck says a request was already handled.** Someone or something answered
 it first — most often you, in the tile itself. Answering in the terminal
