@@ -17,8 +17,10 @@ import {
   isValidTopic,
   normalizeNtfyServer,
   NTFY_ANSWER_MAX,
+  NTFY_CLICK_SCHEME,
   NTFY_MESSAGE_MAX,
   NTFY_TITLE_MAX,
+  pairedClickUrl,
   parseClickUrl,
   renderNtfy,
   settledClickUrl,
@@ -59,7 +61,6 @@ const DEPS = {
   server: "https://ntfy.sh",
   topicNotif: "a".repeat(48),
   topicReplies: "b".repeat(48),
-  token: "tk_secret",
 };
 
 describe("normalizeNtfyServer", () => {
@@ -223,9 +224,21 @@ describe("click deep links", () => {
     expect(parseClickUrl(approvalClickUrl("a/b c"))).toEqual({ view: "approval", approvalId: "a/b c" });
   });
 
+  test("round-trips the pairing acknowledgement, both verdicts", () => {
+    expect(parseClickUrl(pairedClickUrl(true))).toEqual({ view: "paired", approvalId: "1" });
+    expect(parseClickUrl(pairedClickUrl(false))).toEqual({ view: "paired", approvalId: "0" });
+  });
+
+  test("the scheme comes from the constant, so a rename cannot half-apply", () => {
+    // Encoding used the constant while parsing hard-coded the literal: renaming
+    // the app would have kept publishing links the phone silently ignored.
+    expect(approvalClickUrl("x").startsWith(`${NTFY_CLICK_SCHEME}://`)).toBe(true);
+    expect(parseClickUrl(`${NTFY_CLICK_SCHEME}://approval/x`)).not.toBeNull();
+  });
+
   test("refuses another scheme, another host and junk", () => {
     expect(parseClickUrl("https://evil.example/approval/x")).toBeNull();
-    expect(parseClickUrl("koryphaios://settings/x")).toBeNull();
+    expect(parseClickUrl(`${NTFY_CLICK_SCHEME}://settings/x`)).toBeNull();
     expect(parseClickUrl("")).toBeNull();
   });
 });
@@ -254,6 +267,14 @@ describe("renderNtfy (hostile input #4: the agent writes these strings)", () => 
 
   test("falls back to a name when the agent sent an empty title", () => {
     expect(renderNtfy(approval({ title: "" }), "bureau").title).toBe("bureau · Koryphaios");
+  });
+
+  test("a huge origin cannot crowd the agent's title out entirely", () => {
+    // Without a share of its own, `host · project` filled all 200 characters
+    // and the operator saw WHICH machine was asking but not WHAT.
+    const r = renderNtfy(approval({ title: "Bash" }), "H".repeat(300));
+    expect(r.title.length).toBeLessThanOrEqual(NTFY_TITLE_MAX);
+    expect(r.title).toContain("Bash");
   });
 });
 
@@ -286,16 +307,12 @@ describe("buildApprovalPublish", () => {
     expect(p.actions).toBeUndefined();
   });
 
-  test("the action carries the token only when one is configured", () => {
-    const withToken = buildApprovalPublish(approval(), "b", DEPS);
-    expect(withToken.actions?.[0]?.headers).toEqual({ Authorization: "Bearer tk_secret" });
-    const anonymous = buildApprovalPublish(approval(), "b", { ...DEPS, token: "" });
-    expect(anonymous.actions?.[0]?.headers).toBeUndefined();
-  });
-
-  test("never exceeds ntfy's three-action limit", () => {
+  test("carries NO credential: the token never rides in a published button", () => {
+    // An ntfy token is an ACCOUNT credential; the relay caches the message, so
+    // embedding it handed the account to anyone who learned the topic.
     const p = buildApprovalPublish(approval(), "b", DEPS);
-    expect((p.actions ?? []).length).toBeLessThanOrEqual(3);
+    expect(JSON.stringify(p)).not.toContain("tk_secret");
+    expect(JSON.stringify(p)).not.toContain("Authorization");
   });
 });
 

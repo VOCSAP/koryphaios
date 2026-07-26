@@ -8,6 +8,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   absorbPendingCredential,
+  absorbPendingPin,
   addHost,
   companionResumeScript,
   defaultLabel,
@@ -20,6 +21,7 @@ import {
   normalizeFingerprint,
   parseCompanionQr,
   PENDING_CRED_KEY,
+  PENDING_PIN_KEY,
   rememberCredential,
   removeHost,
   selectedHost,
@@ -181,6 +183,51 @@ describe("the host list", () => {
 
   test("defaultLabel falls back to the raw string for a bad URL", () => {
     expect(defaultLabel("not a url")).toBe("not a url");
+  });
+});
+
+describe("trust on first use actually pins", () => {
+  test("a digest observed on first connection becomes the pin", () => {
+    // Without this write-back, an entry with no fingerprint accepted ANY
+    // certificate on every later visit — permanently, for every Deck paired
+    // before the QR carried one. That is a MITM window, not a first-second one.
+    const store = new MemoryStore();
+    addHost(store, parseCompanionQr("https://192.168.1.20:8443/#t=tok")!, T0);
+    expect(loadHosts(store).hosts[0]!.fingerprint).toBe("");
+
+    store.set(
+      PENDING_PIN_KEY,
+      JSON.stringify({ url: "https://192.168.1.20:8443", fingerprint: FP })
+    );
+    const state = absorbPendingPin(store, T0 + 1);
+    expect(state.hosts[0]!.fingerprint).toBe(FP);
+    expect(store.get(PENDING_PIN_KEY)).toBeNull();
+  });
+
+  test("an existing pin is never overwritten by whatever was just served", () => {
+    // Re-pinning on sight would make the pin meaningless: an attacker's
+    // certificate would simply replace the real one.
+    const store = new MemoryStore();
+    addHost(store, parseCompanionQr(qr("https://192.168.1.20:8443"))!, T0);
+    store.set(
+      PENDING_PIN_KEY,
+      JSON.stringify({ url: "https://192.168.1.20:8443", fingerprint: "b".repeat(64) })
+    );
+    expect(absorbPendingPin(store, T0 + 1).hosts[0]!.fingerprint).toBe(FP);
+  });
+
+  test("a malformed digest, an unknown host and junk all change nothing", () => {
+    const store = new MemoryStore();
+    addHost(store, parseCompanionQr("https://192.168.1.20:8443/#t=tok")!, T0);
+    for (const junk of [
+      "{oops",
+      JSON.stringify({ url: "https://192.168.1.20:8443", fingerprint: "nothex" }),
+      JSON.stringify({ url: "https://192.168.9.9:8443", fingerprint: FP }),
+    ]) {
+      store.set(PENDING_PIN_KEY, junk);
+      expect(absorbPendingPin(store, T0).hosts[0]!.fingerprint).toBe("");
+      expect(store.get(PENDING_PIN_KEY)).toBeNull();
+    }
   });
 });
 

@@ -7,9 +7,10 @@
 // TWO KINDS OF MESSAGE arrive on the notification topic, told apart by their
 // `click` deep link:
 //
-//   koryphaios://approval/<id>   a session is waiting  -> add to the list
-//   koryphaios://settled/<id>    somebody answered     -> drop it, cancel the
+//   parastates://approval/<id>   a session is waiting  -> add to the list
+//   parastates://settled/<id>    somebody answered     -> drop it, cancel the
 //                                                         Android notification
+//   parastates://paired/<0|1>    the broker answered our pairing handshake
 //
 // The second exists because ntfy CANNOT edit a delivered message (unlike
 // Telegram and Discord, where `settle` rewrites the original). A closing
@@ -51,13 +52,15 @@ export interface NtfyMessage {
 export type InboxEffect =
   | { kind: "add"; approval: PendingApproval }
   | { kind: "settle"; id: string; text: string }
+  /** The broker acknowledged (or refused) this device's pairing. */
+  | { kind: "paired"; ok: boolean; text: string }
   | { kind: "ignore" };
 
 /**
  * Classify one received message.
  *
  * HOSTILE: whoever can publish on the notification topic reaches this. It
- * therefore reads only what it recognises — a well-formed `koryphaios://` deep
+ * therefore reads only what it recognises — a well-formed `parastates://` deep
  * link — and never trusts the title or body for anything but display.
  */
 export function classify(msg: NtfyMessage, now: number): InboxEffect {
@@ -66,6 +69,9 @@ export function classify(msg: NtfyMessage, now: number): InboxEffect {
   if (!click) return { kind: "ignore" };
   if (click.view === "settled") {
     return { kind: "settle", id: click.approvalId, text: String(msg.message ?? "") };
+  }
+  if (click.view === "paired") {
+    return { kind: "paired", ok: click.approvalId === "1", text: String(msg.message ?? "") };
   }
   return {
     kind: "add",
@@ -90,7 +96,7 @@ export function applyEffect(
   effect: InboxEffect,
   now: number
 ): PendingApproval[] {
-  if (effect.kind === "ignore") return pending;
+  if (effect.kind === "ignore" || effect.kind === "paired") return pending;
   if (effect.kind === "settle") return pending.filter((p) => p.id !== effect.id);
   const without = pending.filter((p) => p.id !== effect.approval.id);
   return prune([effect.approval, ...without], now);

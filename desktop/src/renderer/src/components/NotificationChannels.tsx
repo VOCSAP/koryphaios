@@ -30,7 +30,7 @@ const CHANNEL_GLYPH: Record<Kind, keyof typeof GLYPH_BADGES> = {
 const CHANNEL_LABEL: Record<Kind, string> = {
   telegram: 'Telegram',
   discord: 'Discord',
-  ntfy: 'Koryphaios mobile'
+  ntfy: 'Parastatès'
 }
 
 /** The public relay. Self-hosting is a matter of replacing this address. */
@@ -107,10 +107,15 @@ export function NotificationChannels({ t, enabled }: Props): React.JSX.Element {
 
   const disconnect = async (kind: Kind): Promise<void> => {
     setBusy(kind)
+    setError('')
     try {
       await window.api.approvalDisconnect(kind)
       if (pairing?.kind === kind) setPairing(null)
       await refresh()
+    } catch (e) {
+      // The channel is STILL LIVE after a failed disconnect, so silence here
+      // would tell the operator the opposite of the truth.
+      setError(String(e instanceof Error ? e.message : e))
     } finally {
       setBusy(null)
     }
@@ -151,7 +156,13 @@ export function NotificationChannels({ t, enabled }: Props): React.JSX.Element {
                 className="btn"
                 disabled={!!busy || !enabled}
                 onClick={() => {
-                  setEditing(editing === channel.kind ? null : channel.kind)
+                  const next = editing === channel.kind ? null : channel.kind
+                  setEditing(next)
+                  // The form is shared by three channels whose secrets are not
+                  // interchangeable: carrying a half-typed one across would
+                  // submit an ntfy access token as a Telegram bot token.
+                  setToken('')
+                  setServer(DEFAULT_NTFY_SERVER)
                   setError('')
                 }}
               >
@@ -194,7 +205,14 @@ export function NotificationChannels({ t, enabled }: Props): React.JSX.Element {
           </label>
           <small className="field-check-help">{t(`notifications.help.${editing}`)}</small>
           <div className="modal-actions">
-            <button className="btn" onClick={() => setEditing(null)}>
+            <button
+              className="btn"
+              onClick={() => {
+                setEditing(null)
+                setToken('')
+                setServer(DEFAULT_NTFY_SERVER)
+              }}
+            >
               {t('common.cancel')}
             </button>
             <button

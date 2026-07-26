@@ -1,10 +1,10 @@
-package io.koryphaios.shell
+package io.koryphaios.parastates
 
 // The bridge `platform.ts` calls (PLAN N5).
 //
-// Copy to android/app/src/main/java/io/koryphaios/shell/ after `cap add android`.
+// Copy to android/app/src/main/java/io/koryphaios/parastates/ after `cap add android`.
 //
-// Four methods, matching the `KoryphaiosShell` interface declared in
+// Four methods, matching the `ParastatesShell` interface declared in
 // `../src/platform.ts`. Each one is a capability a WebView cannot have; every
 // one of them degrades to a documented no-op when the plugin is absent, which
 // is what keeps the app runnable in a plain browser for development.
@@ -20,8 +20,8 @@ import com.getcapacitor.PluginCall
 import com.getcapacitor.PluginMethod
 import com.getcapacitor.annotation.CapacitorPlugin
 
-@CapacitorPlugin(name = "KoryphaiosShell")
-class KoryphaiosShellPlugin : Plugin() {
+@CapacitorPlugin(name = "ParastatesShell")
+class ParastatesShellPlugin : Plugin() {
 
     @PluginMethod
     fun startApprovalService(call: PluginCall) {
@@ -95,7 +95,7 @@ class KoryphaiosShellPlugin : Plugin() {
         } catch (e: Exception) {
             // Some builds hide the intent; the service still runs, it is just
             // more killable. Traced rather than swallowed.
-            android.util.Log.w("koryphaios", "battery exemption prompt unavailable", e)
+            android.util.Log.w("parastates", "battery exemption prompt unavailable", e)
         }
     }
 }

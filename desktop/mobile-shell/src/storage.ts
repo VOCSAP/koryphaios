@@ -36,11 +36,6 @@ export class MemoryStore implements KeyValueStore {
   remove(key: string): void {
     this.map.delete(key);
   }
-
-  /** Everything currently held, for a write-through implementation to flush. */
-  snapshot(): Record<string, string> {
-    return Object.fromEntries(this.map);
-  }
 }
 
 /**

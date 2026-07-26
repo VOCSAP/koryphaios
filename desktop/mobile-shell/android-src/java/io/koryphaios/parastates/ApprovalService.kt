@@ -1,8 +1,8 @@
-package io.koryphaios.shell
+package io.koryphaios.parastates
 
 // Foreground service holding the ntfy subscription open (PLAN N5).
 //
-// Copy to android/app/src/main/java/io/koryphaios/shell/ after `cap add android`.
+// Copy to android/app/src/main/java/io/koryphaios/parastates/ after `cap add android`.
 //
 // WHY A SERVICE AT ALL. In Doze, Android suspends network access and ignores
 // wakelocks, so the WebView's subscription dies within minutes of the screen
@@ -18,7 +18,7 @@ package io.koryphaios.shell
 // justification string in the manifest.)
 //
 // WHAT IT DOES NOT DO: it never decides anything. It reads bytes, matches the
-// `koryphaios://` deep link, and posts a notification. Every rule about which
+// `parastates://` deep link, and posts a notification. Every rule about which
 // messages count lives in the TypeScript modules under ../src/, which are
 // under test; duplicating them here would be duplicating them wrong.
 
@@ -40,14 +40,14 @@ import kotlin.concurrent.thread
 class ApprovalService : android.app.Service() {
 
     companion object {
-        const val CHANNEL_ID = "koryphaios-approvals"
+        const val CHANNEL_ID = "parastates-approvals"
         const val EXTRA_SERVER = "server"
         const val EXTRA_TOPIC = "topic"
         const val EXTRA_TOKEN = "token"
 
         /** Actions the notification offers; handled by ApprovalActionReceiver. */
-        const val ACTION_ALLOW = "io.koryphaios.shell.ALLOW"
-        const val ACTION_DENY = "io.koryphaios.shell.DENY"
+        const val ACTION_ALLOW = "io.koryphaios.parastates.ALLOW"
+        const val ACTION_DENY = "io.koryphaios.parastates.DENY"
 
         fun start(ctx: Context, server: String, topic: String, token: String) {
             val intent = Intent(ctx, ApprovalService::class.java)
@@ -79,7 +79,7 @@ class ApprovalService : android.app.Service() {
 
         if (!running) {
             running = true
-            worker = thread(name = "koryphaios-ntfy") { listen(server, topic, token) }
+            worker = thread(name = "parastates-ntfy") { listen(server, topic, token) }
         }
         // START_STICKY: an OEM that kills us should bring us back. The extras
         // are re-delivered because the intent is redelivered with them.
@@ -114,7 +114,7 @@ class ApprovalService : android.app.Service() {
             } catch (e: Exception) {
                 // Never silent: a channel that stopped delivering without a
                 // trace is the failure mode this whole feature cannot afford.
-                android.util.Log.w("koryphaios", "ntfy subscription dropped", e)
+                android.util.Log.w("parastates", "ntfy subscription dropped", e)
             } finally {
                 conn?.disconnect()
             }
@@ -164,7 +164,7 @@ class ApprovalService : android.app.Service() {
         }
         if (approvalId == null) return
 
-        val title = json.optString("title").ifEmpty { "Koryphaios" }
+        val title = json.optString("title").ifEmpty { "Parastates" }
         val body = json.optString("message")
         val hasButtons = json.optJSONArray("actions")?.length() ?: 0 > 0
 
@@ -208,9 +208,9 @@ class ApprovalService : android.app.Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-    /** `koryphaios://<view>/<id>` -> id, or null when it is not that view. */
+    /** `parastates://<view>/<id>` -> id, or null when it is not that view. */
     private fun idFrom(click: String, view: String): String? {
-        val prefix = "koryphaios://$view/"
+        val prefix = "parastates://$view/"
         if (!click.startsWith(prefix)) return null
         val raw = click.removePrefix(prefix)
         if (raw.isEmpty() || raw.length > 64) return null
@@ -224,7 +224,7 @@ class ApprovalService : android.app.Service() {
     private fun ongoingNotification(): Notification =
         NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_notify_sync)
-            .setContentTitle("Koryphaios")
+            .setContentTitle("Parastates")
             .setContentText("Listening for approvals")
             // Minimum priority: the ongoing notification is the price Android
             // charges for the service, not something to draw attention to.

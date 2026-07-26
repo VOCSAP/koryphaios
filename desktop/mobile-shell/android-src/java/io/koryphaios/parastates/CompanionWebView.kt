@@ -1,8 +1,8 @@
-package io.koryphaios.shell
+package io.koryphaios.parastates
 
 // The WebView that shows a paired Deck (PLAN N5, companion mode).
 //
-// Copy to android/app/src/main/java/io/koryphaios/shell/ after `cap add android`.
+// Copy to android/app/src/main/java/io/koryphaios/parastates/ after `cap add android`.
 //
 // A separate activity from the shell's own UI on purpose: the shell picks a
 // host, this displays one. Backing out of it returns to the picker, which is
@@ -59,26 +59,62 @@ class CompanionWebView : Activity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
 
         val url = intent.getStringExtra("url") ?: return finish()
-        val expected = intent.getStringExtra("fingerprint").orEmpty()
+        var expected = intent.getStringExtra("fingerprint").orEmpty()
         val seedScript = intent.getStringExtra("seedScript").orEmpty()
+        pinnedOrigin = originOf(url)
 
         val web = WebView(this)
         web.settings.javaScriptEnabled = true
         web.settings.domStorageEnabled = true
         web.webViewClient = object : WebViewClient() {
 
+            override fun shouldOverrideUrlLoading(
+                view: WebView,
+                request: android.webkit.WebResourceRequest
+            ): Boolean {
+                // This WebView is a control channel for ONE host, not a
+                // browser. Anything else goes to the system browser: staying
+                // would carry the seeded credential to a foreign origin, and
+                // the pin only means something for the paired host.
+                if (originOf(request.url.toString()) == pinnedOrigin) return false
+                try {
+                    startActivity(Intent(Intent.ACTION_VIEW, request.url))
+                } catch (e: Exception) {
+                    android.util.Log.w("parastates", "no handler for an off-host link", e)
+                }
+                return true
+            }
+
             override fun onReceivedSslError(view: WebView, handler: SslErrorHandler, error: SslError) {
-                val served = error.certificate
-                    ?.let { fingerprintOf(it) }
-                    .orEmpty()
-                // Empty expectation = trust on first use (a QR from a Deck that
-                // predates the fingerprint). Anything else must match exactly.
-                if (expected.isEmpty() || MessageDigest.isEqual(served.toByteArray(), expected.toByteArray())) {
+                val served = error.certificate?.let { fingerprintOf(it) }.orEmpty()
+                if (served.isEmpty()) {
+                    handler.cancel(); finish(); return
+                }
+                // A certificate error on anything but the paired origin is not
+                // ours to wave through, whatever the pin says.
+                if (originOf(error.url.orEmpty()) != pinnedOrigin) {
+                    handler.cancel()
+                    android.util.Log.w("parastates", "TLS error on a foreign origin — refused")
+                    finish()
+                    return
+                }
+                if (expected.isEmpty()) {
+                    // TRUST ON FIRST USE, and it only bounds the risk because
+                    // the digest is REMEMBERED here. Leaving the entry unpinned
+                    // meant accepting any certificate on every later visit —
+                    // permanently, for every host paired before the QR carried
+                    // a fingerprint at all.
+                    storePendingPin(served)
+                    expected = served
+                    handler.proceed()
+                    return
+                }
+                if (MessageDigest.isEqual(served.toByteArray(), expected.toByteArray())) {
                     handler.proceed()
                     return
                 }
                 handler.cancel()
-                android.util.Log.w("koryphaios", "companion certificate did not match the pin")
+                android.util.Log.w("parastates", "companion certificate did not match the pin")
                 finish()
             }
 
@@ -86,7 +122,15 @@ class CompanionWebView : Activity() {
                 // Fallback for devices without DOCUMENT_START_SCRIPT. Later
                 // than ideal, but `connectRemoteApi` runs after the bundle
                 // parses, so it usually still lands in time.
-                if (seedScript.isNotEmpty() && !supportsDocumentStart()) {
+                //
+                // The origin check is NOT optional here: unlike
+                // addDocumentStartJavaScript, which is scoped to a rule set,
+                // this fires for whatever page began loading — so without it a
+                // redirect or an off-host link handed the companion credential
+                // to the destination page.
+                if (seedScript.isNotEmpty() && !supportsDocumentStart() &&
+                    originOf(url.orEmpty()) == pinnedOrigin
+                ) {
                     view.evaluateJavascript(seedScript, null)
                 }
             }
@@ -131,6 +175,21 @@ class CompanionWebView : Activity() {
             }
             storePendingCredential(cred)
         }
+    }
+
+    /** The one origin this activity may talk to, for every guard below. */
+    private var pinnedOrigin: String = ""
+
+    /** Flat drop box; the shell pins it on resume (never overwriting a pin). */
+    private fun storePendingPin(fingerprint: String) {
+        if (pinnedOrigin.isEmpty()) return
+        getSharedPreferences("CapacitorStorage", Context.MODE_PRIVATE)
+            .edit()
+            .putString(
+                "koryphaios.companion.lastpin",
+                JSONObject().put("url", pinnedOrigin).put("fingerprint", fingerprint).toString()
+            )
+            .apply()
     }
 
     /** Flat drop box; the shell folds it into its host list on resume. */

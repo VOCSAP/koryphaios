@@ -22,6 +22,7 @@
 // app kill, and nothing more. When it is refused, the entry survives (address
 // and pin are still right) and only a fresh scan is needed.
 
+import { isPrivateHost } from "../../../shared/net.ts";
 import { COMPANION_CRED_STORAGE_KEY } from "../../src/shared/companion.ts";
 import { readJson, writeJson, type KeyValueStore } from "./storage.ts";
 
@@ -39,6 +40,16 @@ export const SELECTED_KEY = "koryphaios.companion.selected";
  * instead of restating it in Kotlin that nothing here compiles.
  */
 export const PENDING_CRED_KEY = "koryphaios.companion.lastcred";
+
+/**
+ * Drop box for a certificate digest the native viewer observed.
+ *
+ * Same shape and same reason as the credential one: the viewer learns the
+ * digest during the TLS handshake, and the list rules stay here. It exists
+ * because trust-on-first-use is only safe if the first use is actually
+ * REMEMBERED — otherwise "no fingerprint yet" means "accept anything, forever".
+ */
+export const PENDING_PIN_KEY = "koryphaios.companion.lastpin";
 
 /** A phone that has collected more Decks than this is misconfigured. */
 export const MAX_HOSTS = 12;
@@ -93,7 +104,7 @@ export function parseCompanionQr(raw: string): CompanionQr | null {
   // HTTPS only: the companion server is TLS with a self-signed cert, and a
   // plain-http QR would be a downgrade, not a legacy host.
   if (url.protocol !== "https:") return null;
-  if (!isPrivateHostname(url.hostname)) return null;
+  if (!isPrivateHost(url.hostname)) return null;
 
   // The token rides in the FRAGMENT so it is never sent to the server as part
   // of an HTTP request — keep reading it from there.
@@ -112,21 +123,8 @@ export function normalizeFingerprint(raw: string): string {
   return hex.length === 64 ? hex : "";
 }
 
-/** The address families the companion server binds to (mirrors the desktop). */
-export function isPrivateHostname(hostname: string): boolean {
-  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (h === "localhost" || h.endsWith(".local")) return true;
-  if (/^127\./.test(h) || h === "::1") return true;
-  if (/^10\./.test(h)) return true;
-  if (/^192\.168\./.test(h)) return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
-  if (/^169\.254\./.test(h)) return true;
-  // 100.64/10 — a Tailscale tailnet, so companion mode keeps working in
-  // roaming without a code change (EXPLORATION §4.4).
-  if (/^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(h)) return true;
-  if (/^f[cd][0-9a-f]{2}:/.test(h) || /^fe80:/.test(h)) return true;
-  return false;
-}
+/** Re-exported so the QR parser and the ntfy server check agree by construction. */
+export { isPrivateHost as isPrivateHostname };
 
 export function loadHosts(store: KeyValueStore): HostsState {
   const hosts = readJson<PairedHost[]>(store, HOSTS_KEY, []);
@@ -250,6 +248,40 @@ export function absorbPendingCredential(store: KeyValueStore, now: number): Host
     return loadHosts(store);
   }
   return rememberCredential(store, url, credential, now);
+}
+
+/**
+ * Adopt a certificate digest the viewer observed on first connection.
+ *
+ * Trust-on-first-use is only a bounded risk if the first use PINS. An entry
+ * that keeps an empty fingerprint accepts any certificate on every later
+ * navigation, which is not "a downgrade in the first second" but a permanent
+ * one — and it is the state every host paired before the QR carried `&f=` is
+ * in. Never overwrites an existing pin: that decision belongs to a re-scan,
+ * not to whatever certificate was just served.
+ */
+export function absorbPendingPin(store: KeyValueStore, now: number): HostsState {
+  const raw = store.get(PENDING_PIN_KEY);
+  if (raw === null) return loadHosts(store);
+  store.remove(PENDING_PIN_KEY);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return loadHosts(store);
+  }
+  if (!parsed || typeof parsed !== "object") return loadHosts(store);
+  const { url, fingerprint } = parsed as Record<string, unknown>;
+  if (typeof url !== "string" || typeof fingerprint !== "string") return loadHosts(store);
+  const pin = normalizeFingerprint(fingerprint);
+  if (!pin) return loadHosts(store);
+
+  const state = loadHosts(store);
+  const host = state.hosts.find((h) => h.url === url);
+  if (!host || host.fingerprint) return state;
+  host.fingerprint = pin;
+  host.lastSeenAt = now;
+  return persist(store, state);
 }
 
 /**

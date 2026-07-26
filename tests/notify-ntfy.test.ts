@@ -8,7 +8,7 @@
 
 import { describe, expect, test } from "bun:test";
 import { NtfyChannel, type NtfyConfig } from "../notify/ntfy.ts";
-import { decodeInbound, encodeAnswer, encodePair, parseClickUrl } from "../notify/ntfy-protocol.ts";
+import { encodeAnswer, encodePair, parseClickUrl } from "../notify/ntfy-protocol.ts";
 import type { ChannelBinding, ChannelHost, InboundAnswer } from "../notify/types.ts";
 import type { Approval } from "../shared/types.ts";
 
@@ -192,6 +192,22 @@ describe("describe()", () => {
 });
 
 describe("post / settle / rejectLate", () => {
+  test("post reads BOTH topics from its own config, never from the binding", async () => {
+    const rec = newRecorder();
+    const ch = new NtfyChannel({
+      config: CONFIG,
+      host: makeHost(rec),
+      bindingFor: () => BINDING,
+      fetchImpl: makeFetch(rec),
+    });
+    // A binding whose address disagrees with the gateway's config: half from
+    // each is how a question reached one phone with another's reply address.
+    await ch.post({ ...BINDING, address: "s".repeat(48) }, approval());
+    const body = rec.published[0]!;
+    expect(body.topic).toBe(CONFIG.topic_notif);
+    expect(String((body.actions as Array<{ url: string }>)[0]!.url)).toContain(CONFIG.topic_replies);
+  });
+
   test("post publishes to the notification topic with both buttons", async () => {
     const rec = newRecorder();
     const ch = new NtfyChannel({
@@ -347,22 +363,44 @@ describe("subscription (the inbound leg)", () => {
     const rec = await run([JSON.stringify({ id: "m1", message: encodePair("code-1", "Pixel 8") })]);
     expect(rec.pairs[0]).toEqual({ code: "code-1", address: CONFIG.topic_notif, label: "Pixel 8" });
     expect(String(rec.published[0]!.message)).toContain("Paired.");
+    // ROUTABLE, or the app drops it: the phone routes on the deep link, so an
+    // ack published without one left it waiting for a confirmation already sent.
+    expect(parseClickUrl(String(rec.published[0]!.click))).toEqual({
+      view: "paired",
+      approvalId: "1",
+    });
   });
 
-  test("an unknown pairing code is answered without creating a binding", async () => {
+  test("an unknown pairing code is answered, and the refusal is routable too", async () => {
     const rec = await run([JSON.stringify({ id: "m1", message: encodePair("nope") })], { pair: false });
     expect(String(rec.published[0]!.message)).toContain("unknown or expired");
+    expect(parseClickUrl(String(rec.published[0]!.click))).toEqual({
+      view: "paired",
+      approvalId: "0",
+    });
   });
 
-  test("the first leg carries no `since`, the reconnect resumes from the last id", async () => {
+  test("the cursor follows MESSAGES, never the keepalives around them", async () => {
+    // Keepalives are continuous and answers are rare, so advancing on them
+    // meant `since` almost always named an id the message cache cannot
+    // resolve — i.e. the resume was broken in the common case, not the rare
+    // one. The first leg carries no cursor at all: replaying the retained
+    // backlog at boot would re-answer approvals long settled.
     const rec = await run([
-      JSON.stringify({ id: "m1", message: encodeAnswer("appr-1", "allow") }),
-      JSON.stringify({ id: "m2", event: "keepalive" }),
+      JSON.stringify({ id: "s0", event: "open" }),
+      JSON.stringify({ id: "m1", event: "message", message: encodeAnswer("appr-1", "allow") }),
+      JSON.stringify({ id: "k9", event: "keepalive" }),
     ]);
-    const subs = rec.calls.filter((c) => c.url.includes("/json?") && !c.url.includes("poll=1"));
+    const subs = rec.calls.filter((c) => c.url.includes("/json") && !c.url.includes("poll=1"));
     expect(subs.length).toBeGreaterThanOrEqual(2);
     expect(subs[0]!.url).not.toContain("since=");
-    expect(subs[1]!.url).toContain("since=m2");
+    expect(subs[1]!.url).toContain("since=m1");
+  });
+
+  test("with no message yet, a reconnect still asks for no cursor", async () => {
+    const rec = await run([JSON.stringify({ id: "s0", event: "open" })]);
+    const subs = rec.calls.filter((c) => c.url.includes("/json") && !c.url.includes("poll=1"));
+    expect(subs[1]?.url).not.toContain("since=");
   });
 
   test("a refused subscription is logged and retried, not fatal", async () => {
@@ -416,8 +454,9 @@ describe("C-1: the adapter never decides a verdict", () => {
     ch.start();
     await settleLoop();
     await ch.stop();
-    // The only decision the adapter made was to relay it.
+    // The only decision the adapter made was to relay it: the verdict came
+    // back null (lost race) and it rendered that, rather than settling.
     expect(rec.answers[0]!.answerKind).toBe("deny");
-    expect(decodeInbound(encodeAnswer("appr-1", "deny"))).toMatchObject({ kind: "deny" });
+    expect(String(rec.published.at(-1)!.message)).toContain("already handled");
   });
 });

@@ -1,8 +1,8 @@
-package io.koryphaios.shell
+package io.koryphaios.parastates
 
 // Approve / Reject straight from the notification (PLAN N5).
 //
-// Copy to android/app/src/main/java/io/koryphaios/shell/ after `cap add android`.
+// Copy to android/app/src/main/java/io/koryphaios/parastates/ after `cap add android`.
 //
 // The envelope this publishes is the SAME one `encodeAnswer` produces in
 // `notify/ntfy-protocol.ts` — a tap here and a tap in the app must be
@@ -55,11 +55,11 @@ class ApprovalActionReceiver : BroadcastReceiver() {
         // goAsync() would bound us to ~10 s; a fire-and-forget thread is
         // enough because the broker is the durable side of this exchange.
         val pending = goAsync()
-        thread(name = "koryphaios-answer") {
+        thread(name = "parastates-answer") {
             try {
                 publish(server, topic, token, body(approvalId, kind, device))
             } catch (e: Exception) {
-                android.util.Log.w("koryphaios", "answer could not be published", e)
+                android.util.Log.w("parastates", "answer could not be published", e)
             } finally {
                 pending.finish()
             }
@@ -88,7 +88,7 @@ class ApprovalActionReceiver : BroadcastReceiver() {
         try {
             conn.outputStream.use { it.write(body.toByteArray()) }
             if (conn.responseCode !in 200..299) {
-                android.util.Log.w("koryphaios", "ntfy refused the answer: ${conn.responseCode}")
+                android.util.Log.w("parastates", "ntfy refused the answer: ${conn.responseCode}")
             }
         } finally {
             conn.disconnect()

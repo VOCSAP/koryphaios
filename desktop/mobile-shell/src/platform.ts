@@ -14,11 +14,10 @@ interface CapacitorPlugins {
     get(o: { key: string }): Promise<{ value: string | null }>;
     set(o: { key: string; value: string }): Promise<void>;
     remove(o: { key: string }): Promise<void>;
-    keys(): Promise<{ keys: string[] }>;
   };
   BarcodeScanner?: { scan(): Promise<{ ScanResult?: string; content?: string }> };
   /** Our own plugin — see android-src/. Absent in a browser. */
-  KoryphaiosShell?: {
+  ParastatesShell?: {
     startApprovalService(o: { server: string; topic: string; token: string }): Promise<void>;
     stopApprovalService(): Promise<void>;
     openHost(o: { url: string; fingerprint: string; seedScript: string }): Promise<void>;
@@ -34,10 +33,6 @@ declare global {
 
 function plugins(): CapacitorPlugins {
   return (typeof window !== "undefined" && window.Capacitor?.Plugins) || {};
-}
-
-export function isNative(): boolean {
-  return !!plugins().KoryphaiosShell;
 }
 
 /**
@@ -91,6 +86,7 @@ const KNOWN_KEYS = [
   // Written by the NATIVE viewer between two runs of this code, so it has to
   // be hydrated like the rest — the app reads it on boot and on every resume.
   "koryphaios.companion.lastcred",
+  "koryphaios.companion.lastpin",
   "koryphaios.approvals.pairing",
   "koryphaios.approvals.inbox",
 ];
@@ -173,7 +169,7 @@ export async function scanQr(message: string): Promise<string | null> {
 
 export async function deviceName(): Promise<string> {
   try {
-    const name = await plugins().KoryphaiosShell?.deviceName();
+    const name = await plugins().ParastatesShell?.deviceName();
     if (name?.name) return name.name;
   } catch {
     /* fall through */
@@ -196,7 +192,7 @@ export async function startApprovalService(o: {
   topic: string;
   token: string;
 }): Promise<boolean> {
-  const shell = plugins().KoryphaiosShell;
+  const shell = plugins().ParastatesShell;
   if (!shell) return false;
   try {
     await shell.startApprovalService(o);
@@ -208,7 +204,7 @@ export async function startApprovalService(o: {
 
 export async function stopApprovalService(): Promise<void> {
   try {
-    await plugins().KoryphaiosShell?.stopApprovalService();
+    await plugins().ParastatesShell?.stopApprovalService();
   } catch {
     /* nothing to stop */
   }
@@ -226,7 +222,7 @@ export async function openHost(o: {
   fingerprint: string;
   seedScript: string;
 }): Promise<void> {
-  const shell = plugins().KoryphaiosShell;
+  const shell = plugins().ParastatesShell;
   if (shell) {
     await shell.openHost(o);
     return;

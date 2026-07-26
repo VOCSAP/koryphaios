@@ -167,7 +167,15 @@ them. Scan it and close it, exactly like the multi-PC link code.
 
 **Your topics are your lock.** Koryphaios generates two unguessable topic
 names, one per direction, and mints fresh ones every time you reconnect — so
-**Disconnect** followed by **Connect** is the kill switch for a lost phone.
+**Disconnect** followed by **Connect** stops a lost phone receiving anything
+further.
+
+**But it does not rotate your ntfy token.** If you configured one, the lost
+device still holds a valid credential for your ntfy *account* — re-minting
+topics cannot revoke something ntfy issued. To finish the job, revoke that
+token on the ntfy side (`ntfy token remove`, or the account page on ntfy.sh)
+and paste a fresh one when you reconnect. Treat the two steps as one
+procedure: the topics are the lock, the token is the key to the building.
 On a shared server such as ntfy.sh, an access token is what stops anyone who
 learns a topic name from reading it; without one, the names are the only
 secret. Note that read access to your notification topic implies the ability

@@ -17,6 +17,7 @@
 // message. `settle` therefore publishes a CLOSING message carrying the same
 // approval id, and the app cancels the pending notification itself.
 
+import { isPrivateHost } from "../shared/net.ts";
 import { stripControl, truncate } from "../shared/text.ts";
 import type { Approval } from "../shared/types.ts";
 
@@ -25,20 +26,21 @@ export const NTFY_PROTOCOL_VERSION = 1;
 
 /** ntfy caps a message at 4096 bytes; we stay well under with room for JSON. */
 export const NTFY_TITLE_MAX = 200;
+/** Share of the title the `host · project` badge may take, at most. */
+export const NTFY_ORIGIN_MAX = 60;
 export const NTFY_MESSAGE_MAX = 1800;
 /** A free-text answer is re-capped broker-side by `sanitizeAnswerForPty`. */
 export const NTFY_ANSWER_MAX = 2000;
 /** Device labels are display-only; keep them short and boring. */
 export const NTFY_LABEL_MAX = 64;
-/** ntfy allows at most three action buttons per message. */
-export const NTFY_ACTIONS_MAX = 3;
+// ntfy allows at most three action buttons per message; we publish two.
 
 /** Topics are secrets, not names: 24 random bytes rendered as 48 hex chars. */
 export const NTFY_TOPIC_HEX_LEN = 48;
 const TOPIC_RE = /^[a-z0-9_-]{16,64}$/;
 
 /** Deep link the notification opens. Also how the app recovers the approval. */
-export const NTFY_CLICK_SCHEME = "koryphaios";
+export const NTFY_CLICK_SCHEME = "parastates";
 
 // ---------------------------------------------------------------------------
 // Server URL
@@ -72,18 +74,7 @@ export function normalizeNtfyServer(raw: string): { ok: true; value: string } | 
   return { ok: true, value: `${url.protocol}//${url.host}${path}` };
 }
 
-/** RFC1918 / loopback / ULA / link-local, the same family the companion trusts. */
-export function isPrivateHost(hostname: string): boolean {
-  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local")) return true;
-  if (/^127\./.test(h) || h === "::1") return true;
-  if (/^10\./.test(h)) return true;
-  if (/^192\.168\./.test(h)) return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
-  if (/^169\.254\./.test(h)) return true;
-  if (/^f[cd][0-9a-f]{2}:/.test(h) || /^fe80:/.test(h)) return true;
-  return false;
-}
+export { isPrivateHost };
 
 export function isValidTopic(topic: string): boolean {
   return TOPIC_RE.test(String(topic ?? ""));
@@ -236,7 +227,6 @@ export interface NtfyAction {
   url: string;
   method: "POST";
   body: string;
-  headers?: Record<string, string>;
   /** Dismiss the notification once the request went out. */
   clear: true;
 }
@@ -261,9 +251,31 @@ export function settledClickUrl(approvalId: string): string {
   return `${NTFY_CLICK_SCHEME}://settled/${encodeURIComponent(approvalId)}`;
 }
 
-/** Inverse of the two builders above, for the app. */
-export function parseClickUrl(url: string): { view: "approval" | "settled"; approvalId: string } | null {
-  const m = /^koryphaios:\/\/(approval|settled)\/([^/?#]+)$/.exec(String(url ?? ""));
+/**
+ * Link on the broker's pairing acknowledgement.
+ *
+ * It exists because the app routes on the deep link and drops anything without
+ * one: an ack published with an empty `click` was silently discarded, so the
+ * phone sat on "waiting for confirmation" forever and kept its one-shot code.
+ * `ok=0` carries the refusal, which the operator needs just as much.
+ */
+export function pairedClickUrl(ok: boolean): string {
+  return `${NTFY_CLICK_SCHEME}://paired/${ok ? "1" : "0"}`;
+}
+
+export type ClickView = "approval" | "settled" | "paired";
+
+/**
+ * Inverse of the builders above, for the app.
+ *
+ * The scheme comes from the constant rather than a literal: they used to be
+ * two independent spellings, so renaming the constant would have kept encoding
+ * working while parsing silently stopped matching.
+ */
+export function parseClickUrl(url: string): { view: ClickView; approvalId: string } | null {
+  const m = new RegExp(`^${NTFY_CLICK_SCHEME}://(approval|settled|paired)/([^/?#]+)$`).exec(
+    String(url ?? "")
+  );
   if (!m) return null;
   let id: string;
   try {
@@ -272,7 +284,7 @@ export function parseClickUrl(url: string): { view: "approval" | "settled"; appr
     return null;
   }
   if (!id || id.length > 64) return null;
-  return { view: m[1] as "approval" | "settled", approvalId: id };
+  return { view: m[1] as ClickView, approvalId: id };
 }
 
 /**
@@ -284,33 +296,41 @@ export function parseClickUrl(url: string): { view: "approval" | "settled"; appr
  * in the body because an Android notification renders them.
  */
 export function renderNtfy(approval: Approval, originText: string): { title: string; message: string } {
-  const title = truncate(stripControl(approval.title) || "Koryphaios", NTFY_TITLE_MAX);
+  // The origin gets a fixed share of the budget so it can never crowd the
+  // agent's title out entirely: a long hostname plus a long project key would
+  // otherwise fill 200 characters on its own and the operator would see which
+  // machine is asking but not what it is asking.
+  const origin = truncate(stripControl(originText), NTFY_ORIGIN_MAX);
+  const title = truncate(
+    stripControl(approval.title) || "Koryphaios",
+    NTFY_TITLE_MAX - origin.length - 3
+  );
   const body = truncate(stripControl(approval.question, { keepNewlines: true }).trim(), NTFY_MESSAGE_MAX);
-  return { title: `${stripControl(originText)} · ${title}`.slice(0, NTFY_TITLE_MAX), message: body };
+  return { title: `${origin} · ${title}`, message: body };
 }
 
 export interface BuildPublishDeps {
   topicNotif: string;
   topicReplies: string;
   server: string;
-  /** ntfy access token, embedded in the action headers when present. */
-  token: string;
 }
 
 /**
  * Build the publish body for a pending approval.
  *
- * ACTION BUTTONS carry the Authorization header when a token is configured.
- * That looks like leaking a write credential into a readable message, and it
- * is worth being explicit about why it is not a widening: the same token reads
- * the notification topic, and reading the notification topic already discloses
- * the approval ids needed to answer. Read access to these topics IS answer
- * access — which is exactly why the topics are random secrets and why the
- * pairing QR is treated as a credential. Documented in
- * `desktop/docs/notifications.md`.
+ * ACTION BUTTONS CARRY NO CREDENTIAL. They used to embed the ntfy access token
+ * as an `Authorization` header, on the reasoning that reading the notification
+ * topic already discloses the approval ids needed to answer. That equivalence
+ * does not hold: an ntfy token is an ACCOUNT credential, not a per-topic one,
+ * so it grants strictly more than "answer this operator's approvals" — and the
+ * relay caches a copy of it in the message, where anyone who learns the topic
+ * finds it. Our own app never needed it there anyway: the notification actions
+ * are posted natively and read the token from app-private storage. The only
+ * thing dropping it costs is one-tap answering from the OFFICIAL ntfy app on a
+ * token-protected server, which is a documented fallback, not the product.
  *
- * Free text never travels through a button: ntfy actions carry a FIXED body,
- * so the compose UI lives in our app (EXPLORATION §4.3c).
+ * Free text never travels through a button either: ntfy actions carry a FIXED
+ * body, so the compose UI lives in our app (EXPLORATION §4.3c).
  */
 export function buildApprovalPublish(
   approval: Approval,
@@ -319,14 +339,12 @@ export function buildApprovalPublish(
 ): NtfyPublish {
   const { title, message } = renderNtfy(approval, originText);
   const repliesUrl = `${deps.server}/${deps.topicReplies}`;
-  const headers = deps.token ? { Authorization: `Bearer ${deps.token}` } : undefined;
   const button = (label: string, kind: "allow" | "deny"): NtfyAction => ({
     action: "http",
     label,
     url: repliesUrl,
     method: "POST",
     body: encodeAnswer(approval.id, kind),
-    ...(headers ? { headers } : {}),
     clear: true,
   });
   const actions: NtfyAction[] =
@@ -340,7 +358,7 @@ export function buildApprovalPublish(
     priority: 4,
     tags: approval.kind === "permission" ? ["lock"] : ["question"],
     click: approvalClickUrl(approval.id),
-    ...(actions.length ? { actions: actions.slice(0, NTFY_ACTIONS_MAX) } : {}),
+    ...(actions.length ? { actions } : {}),
   };
 }
 

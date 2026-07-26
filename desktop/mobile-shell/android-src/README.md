@@ -31,11 +31,17 @@ npx cap run android
 
 | File | Covers |
 |---|---|
-| `java/io/koryphaios/shell/MainActivity.kt` | `FLAG_SECURE`, biometric gate on resume |
-| `java/io/koryphaios/shell/KoryphaiosShellPlugin.kt` | the `KoryphaiosShell` bridge `platform.ts` calls |
-| `java/io/koryphaios/shell/ApprovalService.kt` | the foreground service that keeps listening in Doze |
-| `java/io/koryphaios/shell/PinnedTrust.kt` | certificate pinning for companion mode |
+| `java/io/koryphaios/parastates/MainActivity.kt` | `FLAG_SECURE`, biometric gate on resume |
+| `java/io/koryphaios/parastates/ParastatesShellPlugin.kt` | the `ParastatesShell` bridge `platform.ts` calls |
+| `java/io/koryphaios/parastates/ApprovalService.kt` | the foreground service that keeps listening in Doze |
+| `java/io/koryphaios/parastates/CompanionWebView.kt` | the paired-Deck viewer: certificate pinning, credential round trip |
 | `AndroidManifest-additions.xml` | permissions and the service type declaration |
+
+There is no separate pinning class. An earlier draft had one (`PinnedTrust.kt`,
+an `X509TrustManager`) that nothing ever instantiated — dead code claiming a
+security property is worse than none, because it reads as implemented. A
+WebView offers exactly one trust hook, `onReceivedSslError`, so the pin lives
+in `CompanionWebView` where that hook is.
 
 ## The two traps these files exist to avoid
 

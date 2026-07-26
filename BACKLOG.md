@@ -421,6 +421,18 @@ Validation app Koryphaios / ntfy (lot N5) :
       dépassement — chaque approbation coûte 1 message + 1 clôture.
 
 Validation Android (aucun test possible ici — pas de SDK) :
+- [ ] **Le pinning refuse bien un certificat qui change.** Ouvrir un Deck
+      appairé (pin enregistré), puis effacer l'état applicatif du Deck pour
+      qu'il régénère un certificat : la connexion doit être **refusée**, pas
+      acceptée en silence. C'est le test du write-back TOFU — sans lui, une
+      entrée sans empreinte acceptait n'importe quel certificat, indéfiniment.
+- [ ] **Un lien hors hôte quitte la WebView compagnon** (ouverture dans le
+      navigateur système) et n'emporte pas le credential : taper un lien
+      externe depuis le renderer servi par le Deck.
+- [ ] **Le scanner QR ouvre réellement la caméra** — la dépendance
+      `@capacitor/barcode-scanner` est déclarée mais jamais exercée ici ; sans
+      elle, l'app retombait sur un `prompt()` demandant de retaper 250 à 450
+      caractères à la main.
 - [ ] Le projet **compile** (`cap add android` + copie de `android-src/`).
 - [ ] **Écran éteint 8 h** : une approbation arrive toujours. C'est LE test du
       choix `connectedDevice` plutôt que `dataSync` (plafonné à 6 h/24 h) ;

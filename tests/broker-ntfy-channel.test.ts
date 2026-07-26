@@ -107,17 +107,22 @@ function startStubNtfy(opts: { requireToken?: string; unhealthy?: boolean } = {}
       // The subscription: held open, so the adapter reports itself ready
       // instead of hot-looping through reconnects for the whole suite.
       const topic = url.pathname.replace(/^\/+/, "").replace(/\/json$/, "");
+      let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
       return new Response(
         new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(new TextEncoder().encode(`${JSON.stringify({ id: "s0", event: "open" })}\n`));
+          start(c) {
+            controller = c;
+            c.enqueue(new TextEncoder().encode(`${JSON.stringify({ id: "s0", event: "open" })}\n`));
             const set = subscribers.get(topic) ?? new Set();
-            set.add(controller);
+            set.add(c);
             subscribers.set(topic, set);
           },
           cancel(reason) {
             void reason;
-            subscribers.delete(topic);
+            // Drop THIS controller, not every subscriber on the topic: the
+            // blunt delete happens to work with one subscriber and would fail
+            // silently the day a test used two.
+            subscribers.get(topic)?.delete(controller);
           },
         }),
         { status: 200, headers: { "content-type": "application/x-ndjson" } }
@@ -335,6 +340,76 @@ describe("ntfy enrolment", () => {
     );
     expect(list.body.channels.find((c) => c.kind === "ntfy")!.configured).toBe(false);
   }, 60_000);
+
+  test("a failed reconnect PRESERVES the working configuration", async () => {
+    // The destructive order was: overwrite the sealed config, stop the running
+    // gateway, then delete the row on failure. One Connect click with the relay
+    // briefly unreachable therefore destroyed a working, paired channel — and
+    // left `configured: false, paired: 1`, an inconsistency needing a re-scan.
+    const b = await startBroker();
+    brokers.push(b);
+    const ntfy = startStubNtfy();
+    const op = newOperator();
+
+    const first = await signedPost<{ mobile_payload: string }>(
+      b,
+      "/approval/channel-connect",
+      { kind: "ntfy", server: ntfy.url },
+      op
+    );
+    const good = decodePairingPayload(first.body.mobile_payload)!;
+    await ntfy.publishRaw(good.topic_replies, encodePair(good.code, "Pixel 8"));
+    await until(async () => {
+      const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(
+        b,
+        "/approval/channel-list",
+        {},
+        op
+      );
+      return list.body.channels.find((c) => c.kind === "ntfy")!.paired === 1;
+    });
+
+    // Now a Connect that cannot succeed: a private address nothing listens on.
+    const failed = await signedPost<{ error: string }>(
+      b,
+      "/approval/channel-connect",
+      { kind: "ntfy", server: "http://127.0.0.1:9" },
+      op
+    );
+    expect(failed.status).toBe(400);
+
+    // Everything the operator had is still there, and still consistent.
+    const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(
+      b,
+      "/approval/channel-list",
+      {},
+      op
+    );
+    const row = list.body.channels.find((c) => c.kind === "ntfy")!;
+    expect(row.configured).toBe(true);
+    expect(row.connected).toBe(true);
+    expect(row.paired).toBe(1);
+
+    // And the surviving gateway still delivers on the ORIGINAL topics.
+    const added = await signedPost<{ approval: Approval }>(
+      b,
+      "/approval/add",
+      {
+        kind: "permission",
+        title: "Still here",
+        question: "Allow?",
+        origin: { host: "bureau", project_key: "p" },
+      },
+      op
+    );
+    expect(
+      await until(() =>
+        (ntfy.published.get(good.topic_notif) ?? []).some((m) =>
+          String(m.click).includes(added.body.approval.id)
+        )
+      )
+    ).toBe(true);
+  }, 90_000);
 
   test("a server that is not an ntfy is refused", async () => {
     const b = await startBroker();

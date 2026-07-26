@@ -38,10 +38,20 @@ import {
   approvalClickUrl,
   decodeInbound,
   encodePairingPayload,
+  pairedClickUrl,
   settledClickUrl,
 } from "../notify/ntfy-protocol.ts";
 
 const T0 = 1_700_000_000_000;
+
+const request = (id: string, withButtons = true): Record<string, unknown> => ({
+  id: `m-${id}`,
+  event: "message",
+  title: "bureau · koryphaios · Bash",
+  message: "Allow `npm test`?",
+  click: approvalClickUrl(id),
+  ...(withButtons ? { actions: [{}, {}] } : {}),
+});
 const PAYLOAD = encodePairingPayload({
   server: "https://ntfy.example",
   topic_notif: "n".repeat(48),
@@ -112,9 +122,18 @@ describe("the two pairings are independent (the N5 split)", () => {
     expect(loadHosts(store).hosts).toHaveLength(1);
   });
 
-  test("they do not share a storage key", () => {
-    expect(APPROVAL_KEY).not.toBe(HOSTS_KEY);
-    expect(INBOX_KEY).not.toBe(HOSTS_KEY);
+  test("the inbox is emptied with the pairing, not with the Decks", () => {
+    const store = new MemoryStore();
+    addHost(store, parseCompanionQr("https://192.168.1.20:8443/#t=tok")!, T0);
+    adoptPairing(store, PAYLOAD, T0, "Pixel 8");
+    saveInbox(store, applyEffect([], classify(request("appr-1"), T0), T0));
+    expect(loadInbox(store, T0)).toHaveLength(1);
+
+    // Forgetting a Deck must leave the waiting requests alone: they came from
+    // the broker, not from that Deck, and may not concern it at all.
+    store.remove(HOSTS_KEY);
+    expect(loadInbox(store, T0)).toHaveLength(1);
+    expect(loadPairing(store)).not.toBeNull();
   });
 });
 
@@ -156,15 +175,6 @@ describe("what the phone sends", () => {
 });
 
 describe("the inbox", () => {
-  const request = (id: string, withButtons = true): Record<string, unknown> => ({
-    id: `m-${id}`,
-    event: "message",
-    title: "bureau · koryphaios · Bash",
-    message: "Allow `npm test`?",
-    click: approvalClickUrl(id),
-    ...(withButtons ? { actions: [{}, {}] } : {}),
-  });
-
   test("a request becomes a pending row", () => {
     const effect = classify(request("appr-1"), T0);
     expect(effect).toMatchObject({ kind: "add" });
@@ -198,6 +208,23 @@ describe("the inbox", () => {
     pending = applyEffect(pending, classify(request("appr-1"), T0 + 10), T0 + 10);
     expect(pending).toHaveLength(1);
     expect(pending[0]!.receivedAt).toBe(T0 + 10);
+  });
+
+  test("the broker's pairing ack is routed, not swallowed", () => {
+    // It used to be published with an empty `click`, so `classify` dropped it
+    // and the phone waited forever on a confirmation already sent — keeping
+    // its one-shot code on disk for good.
+    expect(classify({ click: pairedClickUrl(true), message: "Paired." }, T0)).toEqual({
+      kind: "paired",
+      ok: true,
+      text: "Paired.",
+    });
+    expect(classify({ click: pairedClickUrl(false), message: "unknown" }, T0)).toMatchObject({
+      kind: "paired",
+      ok: false,
+    });
+    // And it is not a request: it must never appear in the pending list.
+    expect(applyEffect([], classify({ click: pairedClickUrl(true) }, T0), T0)).toEqual([]);
   });
 
   test("keepalives, foreign links and junk are ignored", () => {

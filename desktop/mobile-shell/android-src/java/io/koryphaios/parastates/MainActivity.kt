@@ -1,8 +1,8 @@
-package io.koryphaios.shell
+package io.koryphaios.parastates
 
 // The activity (PLAN MB6 native TODOs).
 //
-// Copy to android/app/src/main/java/io/koryphaios/shell/ after `cap add android`.
+// Copy to android/app/src/main/java/io/koryphaios/parastates/ after `cap add android`.
 //
 // Two protections, both about what is on screen rather than on the wire:
 //
@@ -27,7 +27,7 @@ class MainActivity : BridgeActivity() {
     private var locked = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
-        registerPlugin(KoryphaiosShellPlugin::class.java)
+        registerPlugin(ParastatesShellPlugin::class.java)
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
     }
@@ -73,7 +73,7 @@ class MainActivity : BridgeActivity() {
         )
         prompt.authenticate(
             BiometricPrompt.PromptInfo.Builder()
-                .setTitle("Koryphaios")
+                .setTitle("Parastates")
                 .setSubtitle("Unlock to continue")
                 .setAllowedAuthenticators(
                     BiometricManager.Authenticators.BIOMETRIC_WEAK or

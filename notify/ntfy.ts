@@ -1,4 +1,4 @@
-// ntfy gateway — the Koryphaios Android app's channel (PLAN N5).
+// ntfy gateway — the channel of Parastates, the Koryphaios app (PLAN N5).
 //
 // Third implementation of `NotificationChannel`, and the one whose transport is
 // least like the other two: ntfy is a pub/sub relay, not a messenger.
@@ -32,6 +32,7 @@ import {
   buildApprovalPublish,
   buildSettledPublish,
   decodeInbound,
+  pairedClickUrl,
   type NtfyPublish,
 } from "./ntfy-protocol.ts";
 import type {
@@ -70,7 +71,6 @@ export interface NtfyDeps {
 interface NtfyEvent {
   id?: string;
   event?: string;
-  topic?: string;
   message?: string;
 }
 
@@ -82,6 +82,8 @@ export class NtfyChannel implements NotificationChannel {
   private abort: AbortController | null = null;
   /** Held so stop() can unblock a `read()` that is parked on a live stream. */
   private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  /** Resolves the backoff sleep early, so stop() never waits it out. */
+  private wake: (() => void) | null = null;
   /** Last message id seen, so a reconnect resumes instead of replaying. */
   private since: string | null = null;
 
@@ -168,6 +170,9 @@ export class NtfyChannel implements NotificationChannel {
       /* already released */
     }
     this.reader = null;
+    // Cut short a backoff already in flight, or the await below inherits it.
+    this.wake?.();
+    this.wake = null;
     await this.loop?.catch(() => undefined);
     this.loop = null;
   }
@@ -183,9 +188,9 @@ export class NtfyChannel implements NotificationChannel {
         // No `since` on the very first leg: replaying the retained backlog at
         // boot would re-answer approvals that are long settled. Afterwards the
         // last id resumes exactly where the stream broke.
-        const since = this.since ? `&since=${encodeURIComponent(this.since)}` : "";
+        const since = this.since ? `?since=${encodeURIComponent(this.since)}` : "";
         const res = await f(
-          `${this.deps.config.server}/${this.deps.config.topic_replies}/json?sched=0${since}`,
+          `${this.deps.config.server}/${this.deps.config.topic_replies}/json${since}`,
           { method: "GET", headers: this.auth, signal: abort.signal }
         );
         if (!res.ok || !res.body) {
@@ -201,7 +206,19 @@ export class NtfyChannel implements NotificationChannel {
       this.reader = null;
       this.connected = false;
       if (!this.running) return;
-      await new Promise((r) => setTimeout(r, wait));
+      // Interruptible: `stop()` runs inside an HTTP handler (Disconnect, or a
+      // reconnect), and this loop takes the backoff after EVERY leg — including
+      // a clean close — so a plain sleep would park the operator's request for
+      // the full delay with the button stuck spinning.
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(finish, wait);
+        this.wake = finish;
+        function finish(): void {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+      this.wake = null;
     }
   }
 
@@ -235,10 +252,14 @@ export class NtfyChannel implements NotificationChannel {
     } catch {
       return;
     }
-    if (event.id) this.since = event.id;
-    // `open`, `keepalive` and `poll_request` carry no payload.
+    // `open`, `keepalive` and `poll_request` carry no payload — and, crucially,
+    // their ids name nothing the server can resume from. Advancing the cursor
+    // on them would make `since` point at a keepalive on every reconnect (they
+    // are continuous, real answers are rare), so the resume would ask for a
+    // position the message cache does not know. The filter must come FIRST.
     if (event.event && event.event !== "message") return;
     if (typeof event.message !== "string") return;
+    if (event.id) this.since = event.id;
     try {
       await this.handleInbound(event.message);
     } catch (e) {
@@ -256,15 +277,19 @@ export class NtfyChannel implements NotificationChannel {
 
     if (inbound.t === "pair") {
       const bound = await this.deps.host.onPair("ntfy", inbound.code, address, inbound.device);
+      // The ack MUST carry a deep link: the app routes on it and drops anything
+      // without one, so an empty `click` left the phone waiting for a
+      // confirmation that had in fact already been sent — and a refusal
+      // invisible, which is the half the operator needs most.
       await this.publish({
         topic: this.deps.config.topic_notif,
-        title: "Koryphaios",
+        title: "Parastates",
         message: bound
           ? "Paired. Approvals from your Koryphaios sessions will arrive here."
           : "That pairing code is unknown or expired — show a fresh one in Settings > Notifications.",
         priority: bound ? 3 : 2,
         tags: [bound ? "white_check_mark" : "warning"],
-        click: "",
+        click: pairedClickUrl(!!bound),
       });
       return;
     }
@@ -329,7 +354,6 @@ export class NtfyChannel implements NotificationChannel {
         server: this.deps.config.server,
         topicNotif: this.deps.config.topic_notif,
         topicReplies: this.deps.config.topic_replies,
-        token: this.deps.config.token,
       })
     );
     if (!sent.ok) return null;

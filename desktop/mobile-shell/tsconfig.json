@@ -1,0 +1,23 @@
+{
+  // The shell was in no type-checked project: neither desktop tsconfig covers
+  // it, and `bun build` / `bun test` only transpile. That matters most for the
+  // `../../../notify/ntfy-protocol.ts` import, whose entire justification is
+  // that broker and phone cannot drift — nothing would have told us when they
+  // started to.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "lib": ["ES2022", "DOM"],
+    "types": [],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  // capacitor.config.ts is excluded: it imports @capacitor/cli, a dev
+  // dependency that only exists on a machine with the Android tooling, and it
+  // carries no logic worth checking.
+  "include": ["src/**/*.ts"]
+}

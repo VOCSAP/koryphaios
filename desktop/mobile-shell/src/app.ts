@@ -33,12 +33,14 @@ import {
 import { publish, subscribe, type Subscription } from "./ntfy-client.ts";
 import {
   absorbPendingCredential,
+  absorbPendingPin,
   addHost,
   companionResumeScript,
   loadHosts,
   navigationUrl,
   parseCompanionQr,
   PENDING_CRED_KEY,
+  PENDING_PIN_KEY,
   removeHost,
   selectHost,
   type PairedHost,
@@ -82,7 +84,7 @@ async function scanCompanion(): Promise<void> {
   if (!raw) return;
   const qr = parseCompanionQr(raw);
   if (!qr) {
-    setNotice("That QR is not a Koryphaios companion code.");
+    setNotice("That QR is not a Parastates companion code.");
     return;
   }
   tokens.set(qr.url, qr.token);
@@ -117,7 +119,7 @@ async function scanApprovals(): Promise<void> {
   if (!raw) return;
   const adopted = adoptPairing(store, raw, Date.now(), device);
   if (!adopted) {
-    setNotice("That QR is not a Koryphaios approvals code.");
+    setNotice("That QR is not a Parastates approvals code.");
     return;
   }
   pairing = adopted;
@@ -146,7 +148,18 @@ async function startStream(): Promise<void> {
 function onMessage(msg: Parameters<typeof classify>[0]): void {
   const effect = classify(msg, Date.now());
   if (effect.kind === "ignore") return;
-  // The first thing that arrives after a scan is the broker's acknowledgement.
+
+  // The broker's answer to our handshake. It is its own message kind rather
+  // than "whatever arrives first after a scan": a refusal has to be shown as a
+  // refusal, and a silent one left the operator staring at a spinner.
+  if (effect.kind === "paired") {
+    if (effect.ok && pairing) pairing = confirmPairing(store) ?? pairing;
+    setNotice(effect.ok ? "" : effect.text);
+    return;
+  }
+
+  // An approval arriving at all proves the pairing took, even if the ack was
+  // lost — ntfy has no delivery guarantee, so this is the belt to that brace.
   if (pairing && !pairing.confirmed) {
     pairing = confirmPairing(store) ?? pairing;
     notice = "";
@@ -251,7 +264,7 @@ function renderApprovals(root: HTMLElement): void {
       el(
         "p",
         "hint",
-        "Settings > Notifications on any of your Decks, Connect on the Koryphaios mobile row. This pairing reaches you anywhere — it has nothing to do with Wi-Fi."
+        "Settings > Notifications on any of your Decks, Connect on the Parastatès row. This pairing reaches you anywhere — it has nothing to do with Wi-Fi."
       )
     );
     return;
@@ -328,20 +341,24 @@ function render(): void {
 /**
  * Collect whatever the native viewer harvested while we were backgrounded.
  *
- * This is the step that makes "restarting the app does not ask for a new QR"
- * true: the credential is minted by the host into the WebView's
- * sessionStorage, which does not survive the app, so the viewer copies it out
- * and the shell folds it into the host list here.
+ * Two things travel this way, both learned inside the WebView and both useless
+ * if they die with it: the resume credential (which makes "restarting the app
+ * does not ask for a new QR" true) and the certificate digest observed on a
+ * first connection (which is what turns trust-on-first-use into a real pin).
  */
-async function collectCredential(): Promise<void> {
+async function collectFromViewer(): Promise<void> {
   await reloadKey(store, PENDING_CRED_KEY);
   absorbPendingCredential(store, Date.now());
+  // Trust-on-first-use only bounds the risk if the first use is REMEMBERED;
+  // an entry left without a pin accepts any certificate on every later visit.
+  await reloadKey(store, PENDING_PIN_KEY);
+  absorbPendingPin(store, Date.now());
 }
 
 export async function boot(): Promise<void> {
   store = await openStore();
   device = await deviceName();
-  await collectCredential();
+  await collectFromViewer();
   pairing = loadPairing(store);
   pending = loadInbox(store, Date.now());
   // Approvals is the mode that works everywhere; open on it when it is set up.
@@ -354,7 +371,7 @@ export async function boot(): Promise<void> {
   if (typeof document !== "undefined") {
     document.addEventListener("visibilitychange", () => {
       if (document.hidden) return;
-      void collectCredential().then(render);
+      void collectFromViewer().then(render);
     });
   }
 }

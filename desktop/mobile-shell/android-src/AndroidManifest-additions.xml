@@ -45,8 +45,8 @@
       android:name=".ApprovalActionReceiver"
       android:exported="false">
       <intent-filter>
-        <action android:name="io.koryphaios.shell.ALLOW" />
-        <action android:name="io.koryphaios.shell.DENY" />
+        <action android:name="io.koryphaios.parastates.ALLOW" />
+        <action android:name="io.koryphaios.parastates.DENY" />
       </intent-filter>
     </receiver>
 

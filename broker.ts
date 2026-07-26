@@ -2577,6 +2577,8 @@ async function handleChannelConnect(
 
   let sealed: string;
   let hint: string;
+  /** The candidate secret in the clear, so it can be vetted before storing. */
+  let plain: string;
   let ntfyConfig: NtfyConfig | null = null;
   if (kind === "ntfy") {
     const server = normalizeNtfyServer(typeof body.server === "string" ? body.server : "");
@@ -2591,42 +2593,40 @@ async function handleChannelConnect(
       topic_replies: randomBytes(NTFY_TOPIC_HEX_LEN / 2).toString("hex"),
       token: typeof body.token === "string" ? body.token.trim().slice(0, 256) : "",
     };
-    sealed = sealSecret(secretKey, JSON.stringify(ntfyConfig));
+    plain = JSON.stringify(ntfyConfig);
+    sealed = sealSecret(secretKey, plain);
     // Not a token fragment here: the server is what the operator needs to
     // recognise the row, and it is not a secret.
     hint = new URL(ntfyConfig.server).host.slice(0, 64);
   } else {
     const token = typeof body.token === "string" ? body.token.trim() : "";
     if (!token) return { error: "token is required", status: 400 };
+    plain = token;
     sealed = sealSecret(secretKey, token);
     hint = secretHint(token);
   }
 
-  db.run(
-    `INSERT INTO approval_channel_secrets (operator_id, kind, secret_enc, hint, label, created_at)
-     VALUES (?, ?, ?, ?, '', ?)
-     ON CONFLICT(operator_id, kind) DO UPDATE SET
-       secret_enc = excluded.secret_enc, hint = excluded.hint, created_at = excluded.created_at`,
-    [auth.operator_id, kind, sealed, hint, new Date().toISOString()]
-  );
-
-  const me = await startChannel(auth.operator_id, kind);
+  // VET FIRST, PERSIST SECOND. Writing the new secret up front and deleting it
+  // again on failure destroyed a working, paired channel whenever the operator
+  // hit Connect with the relay briefly unreachable or an address mistyped: the
+  // old sealed config was already overwritten and its gateway already stopped.
+  // `startChannel` with a candidate touches nothing until the provider accepts.
+  const me = await startChannel(auth.operator_id, kind, plain);
   if (!me) {
-    // A secret the provider rejects must not be left behind looking configured.
-    db.run("DELETE FROM approval_channel_secrets WHERE operator_id = ? AND kind = ?", [
-      auth.operator_id,
-      kind,
-    ]);
     return {
       error: kind === "ntfy" ? "the ntfy server refused these settings" : "the provider refused this token",
       status: 400,
     };
   }
-  db.run("UPDATE approval_channel_secrets SET label = ? WHERE operator_id = ? AND kind = ?", [
-    me.label,
-    auth.operator_id,
-    kind,
-  ]);
+
+  db.run(
+    `INSERT INTO approval_channel_secrets (operator_id, kind, secret_enc, hint, label, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(operator_id, kind) DO UPDATE SET
+       secret_enc = excluded.secret_enc, hint = excluded.hint,
+       label = excluded.label, created_at = excluded.created_at`,
+    [auth.operator_id, kind, sealed, hint, me.label, new Date().toISOString()]
+  );
 
   // ntfy only: the topics just changed, so a binding pointing at the old one
   // addresses a topic nobody publishes to any more. Telegram and Discord keep
@@ -2636,8 +2636,10 @@ async function handleChannelConnect(
   }
 
   // One-shot pairing code: the operator sends it to the bot (or scans it into
-  // the app), which binds their address. Short-lived on purpose.
-  const code = randomUUID().slice(0, 8);
+  // the app), which binds their address. Short-lived on purpose, and 96 bits
+  // rather than 32 — it is a primary key with no conflict handling, so a
+  // birthday collision would throw after the topics had already been minted.
+  const code = randomBytes(12).toString("base64url");
   db.run(
     `INSERT INTO approval_pairing_codes (code, operator_id, kind, expires_at) VALUES (?, ?, ?, ?)`,
     [code, auth.operator_id, kind, new Date(Date.now() + 30 * 60_000).toISOString()]
@@ -2784,6 +2786,9 @@ function sweepApprovals(): { expired: number; purged: number } {
       WHERE status IN ('answered','abandoned') AND created_at < datetime('now', ?)`,
     [`-${APPROVAL_TTL_DAYS} days`]
   ).changes;
+  // Pairing codes were only ever deleted when someone tried to redeem one, so
+  // an operator who clicks Connect and never scans left a row behind for good.
+  db.run("DELETE FROM approval_pairing_codes WHERE expires_at < ?", [new Date().toISOString()]);
   if (expired > 0) log.info(`approval notifications expired: ${expired}`);
   return { expired, purged };
 }
@@ -3083,42 +3088,23 @@ async function releaseChannel(operatorId: string, kind: ChannelKind): Promise<vo
   await channel.stop();
 }
 
-/** (Re)build a gateway from its stored secret. Returns the bot identity. */
-async function startChannel(
-  operatorId: string,
-  kind: ChannelKind
-): Promise<{ label: string; appId?: string } | null> {
-  const row = db
-    .query("SELECT secret_enc FROM approval_channel_secrets WHERE operator_id = ? AND kind = ?")
-    .get(operatorId, kind) as { secret_enc: string } | null;
-  if (!row) return null;
-  const token = openSecret(secretKey, row.secret_enc);
-  if (!token) {
-    log.error(`notify: ${kind} secret could not be decrypted — reconnect the channel`);
-    return null;
-  }
+/** A gateway built and vetted, but not yet published to anyone. */
+interface BuiltGateway {
+  channel: NotificationChannel;
+  label: string;
+  appId?: string;
+}
 
-  // Whatever this operator had before is released first: a reconnect with a
-  // NEW token must not leave the old transport running.
-  await releaseChannel(operatorId, kind);
-
-  const key = gatewayKey(kind, token);
-  const shared = liveGateways.get(key);
-  if (shared && shared.channel.isReady()) {
-    // Same transport as another operator: point at it instead of opening a
-    // second consumer. The identity is the one `describe()` already reported —
-    // reading a label back out of the table could pick a different bot's.
-    notifyRegistry.register(operatorId, shared.channel);
-    log.info(`notify: ${kind} gateway shared with another operator`);
-    return shared.appId ? { label: shared.label, appId: shared.appId } : { label: shared.label };
-  }
-
-  const adopt = (channel: NotificationChannel, label: string, appId?: string): { label: string; appId?: string } => {
-    liveGateways.set(key, { channel, label, appId });
-    notifyRegistry.register(operatorId, channel);
-    return appId ? { label, appId } : { label };
-  };
-
+/**
+ * Construct a gateway and ask the provider who we are.
+ *
+ * NO SIDE EFFECT ON FAILURE, and that is the point: the caller can vet a
+ * candidate token while the operator's CURRENT channel keeps running, and only
+ * swap once the new one is known good. Doing it the other way round meant a
+ * typo'd address or a relay that happened to be down destroyed a working,
+ * paired configuration.
+ */
+async function buildGateway(kind: ChannelKind, token: string): Promise<BuiltGateway | null> {
   if (kind === "telegram") {
     const channel = new TelegramChannel({
       token,
@@ -3127,9 +3113,7 @@ async function startChannel(
       approvalForMessage: (address, ref) => approvalForPostedMessage("telegram", address, ref),
     });
     const me = await channel.describe();
-    if (!me) return null;
-    channel.start();
-    return adopt(channel, me.username);
+    return me ? { channel, label: me.username } : null;
   }
   if (kind === "discord") {
     const channel = new DiscordChannel({
@@ -3138,9 +3122,7 @@ async function startChannel(
       bindingFor: (address) => isPairedAddress("discord", address),
     });
     const me = await channel.describe();
-    if (!me) return null;
-    channel.start();
-    return adopt(channel, me.username, me.id);
+    return me ? { channel, label: me.username, appId: me.id } : null;
   }
   if (kind === "ntfy") {
     const config = parseNtfyConfig(token);
@@ -3154,11 +3136,69 @@ async function startChannel(
       bindingFor: (address) => isPairedAddress("ntfy", address),
     });
     const me = await channel.describe();
-    if (!me) return null;
-    channel.start();
-    return adopt(channel, me.label);
+    return me ? { channel, label: me.label } : null;
   }
   return null;
+}
+
+/**
+ * Bring a gateway up for one operator and return the provider identity.
+ *
+ * `candidate` lets the enrolment route vet a token it has NOT yet persisted.
+ * Without it the secret is read from the store, which is the boot path.
+ *
+ * Nothing the operator already has is touched until the new transport is
+ * known good: the old gateway is released only after `buildGateway` succeeds.
+ */
+async function startChannel(
+  operatorId: string,
+  kind: ChannelKind,
+  candidate?: string
+): Promise<{ label: string; appId?: string } | null> {
+  let token = candidate ?? "";
+  if (!token) {
+    const row = db
+      .query("SELECT secret_enc FROM approval_channel_secrets WHERE operator_id = ? AND kind = ?")
+      .get(operatorId, kind) as { secret_enc: string } | null;
+    if (!row) return null;
+    token = openSecret(secretKey, row.secret_enc) ?? "";
+    if (!token) {
+      log.error(`notify: ${kind} secret could not be decrypted — reconnect the channel`);
+      return null;
+    }
+  }
+
+  const key = gatewayKey(kind, token);
+  const shared = liveGateways.get(key);
+  // Presence in the table is the test, NOT `isReady()`. A Discord gateway
+  // reports itself ready only once its socket reaches OPEN, and `start()`
+  // merely kicks off the connect — so gating on readiness opened a SECOND
+  // consumer on the same bot token whenever the first was still connecting or
+  // inside its reconnect backoff, and the new one then overwrote the table
+  // entry, leaving the first unreachable. The entry is removed exactly when the
+  // gateway is stopped (`dropGateway`), which is the invariant that holds.
+  if (shared) {
+    // Already this operator's own gateway (a reconnect with an unchanged
+    // token): releasing it here would stop the very thing we are about to
+    // register, since they are its last holder.
+    if (notifyRegistry.get(operatorId, kind) !== shared.channel) {
+      await releaseChannel(operatorId, kind);
+      notifyRegistry.register(operatorId, shared.channel);
+      log.info(`notify: ${kind} gateway shared with another operator`);
+    }
+    return shared.appId ? { label: shared.label, appId: shared.appId } : { label: shared.label };
+  }
+
+  const built = await buildGateway(kind, token);
+  if (!built) return null;
+
+  // Only now is it safe to drop what the operator had: the replacement exists
+  // and the provider has accepted it.
+  await releaseChannel(operatorId, kind);
+  built.channel.start();
+  liveGateways.set(key, built);
+  notifyRegistry.register(operatorId, built.channel);
+  return built.appId ? { label: built.label, appId: built.appId } : { label: built.label };
 }
 
 /**
