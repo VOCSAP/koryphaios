@@ -22,6 +22,15 @@ bun test          # ~75 s, 480+ tests
   file there (then `git worktree remove --force <scratchpad>/base`). If it
   fails there too, it is pre-existing/environmental — say so, don't "fix" it.
 
+- **Green here is not green in CI.** This run is Linux-only; the matrix also
+  builds on windows/macos. Two bug classes cannot fail locally: path
+  comparisons (Linux tmpdirs are not symlinked, so `/var` → `/private/var` and
+  Windows 8.3 names never bite) and POSIX-shaped assertions (`pwd`,
+  `split("/")`, `< "file"`). If you touched path handling or wrote a test that
+  shells out, read the "Cross-platform tests" section of `TESTING.md` BEFORE
+  pushing — and make the regression test build the symlinked prefix itself, so
+  it fails on every OS rather than only on the runner.
+
 ## 2. Smoke build (core entrypoints)
 
 ```bash
