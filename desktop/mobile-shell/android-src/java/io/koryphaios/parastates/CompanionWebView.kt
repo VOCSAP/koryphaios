@@ -68,6 +68,9 @@ class CompanionWebView : Activity() {
         web.settings.domStorageEnabled = true
         web.webViewClient = object : WebViewClient() {
 
+            // API 24+ overload. Capacitor's floor is 22, so on 22–23 this is
+            // never called and the origin check in `onPageStarted` is what
+            // stops the credential following a navigation off the host.
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 request: android.webkit.WebResourceRequest

@@ -23,9 +23,28 @@ npx cap add android
 cp -r android-src/java/* android/app/src/main/java/
 # then merge android-src/AndroidManifest-additions.xml into
 # android/app/src/main/AndroidManifest.xml (the blocks are annotated)
+# and add the two libraries below to android/app/build.gradle
 npx cap sync
 npx cap run android
 ```
+
+### Gradle dependencies
+
+Capacitor brings `androidx.core`; it does NOT bring these two, and without
+them the first build fails on unresolved references:
+
+```gradle
+dependencies {
+    // MainActivity: the biometric gate on resume.
+    implementation "androidx.biometric:biometric:1.1.0"
+    // CompanionWebView: addDocumentStartJavaScript, which is the only API that
+    // guarantees the resume credential is in place before the page's script.
+    implementation "androidx.webkit:webkit:1.11.0"
+}
+```
+
+Pin whatever versions the toolchain resolves at the time — these are the
+floors, not a lockfile.
 
 ## What each file is for
 

@@ -479,9 +479,23 @@ Robustesse et exploitation :
 - [ ] **MB6 — coquille Android : reste à BUILDER**. Le code natif est écrit
       (`mobile-shell/android-src/` : service foreground `connectedDevice`,
       actions de notification, verrou biométrique + `FLAG_SECURE`, pinning
-      cert) mais **jamais compilé** — pas de SDK dans ce conteneur, donc pas
-      une ligne de Kotlin n'est vérifiée. Premier passage sur une machine
-      outillée : s'attendre à des corrections d'imports/API.
+      cert avec write-back TOFU, gardes d'origine) mais **jamais compilé** —
+      pas de SDK dans ce conteneur, donc pas une ligne de Kotlin n'est
+      vérifiée par la machine, seulement relue.
+
+      Ce n'est pas du travail en attente, c'est un niveau de preuve différent :
+      le TypeScript est prouvé par 1043 tests, le Kotlin l'est par la lecture.
+      À quoi s'attendre au premier `npx cap run android` :
+  - **Dépendances Gradle** : `androidx.biometric` et `androidx.webkit` ne
+    viennent pas avec Capacitor et sont à ajouter (documentées dans
+    `android-src/README.md`). Omission trouvée en re-vérifiant, corrigée.
+  - **Signatures d'API** : les versions d'`androidx.*` bougent ; un
+    `WebViewFeature`/`BiometricPrompt` renommé se verra à la compilation.
+  - **`shouldOverrideUrlLoading(WebView, WebResourceRequest)` est API 24+**
+    alors que le plancher Capacitor est 22 : sur 22–23 c'est la garde
+    d'origine de `onPageStarted` qui porte seule la protection.
+  - **Le paquet `io.koryphaios.parastates`** doit correspondre à l'`appId` du
+    `capacitor.config.ts` dans le projet généré.
 - [ ] **Icône et identité de l'app** : le service utilise encore les drawables
       système (`stat_sys_warning`, `stat_notify_sync`). Un glyphe grec au
       standard `DESIGN.md` §5 est à dessiner, en densités Android.
