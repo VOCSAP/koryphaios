@@ -413,9 +413,18 @@ Validation Android (aucun test possible ici — pas de SDK) :
       être **refusé** et non accepté silencieusement.
 - [ ] Multi-hôtes : deux Decks appairés, le sélecteur ouvre le bon ; re-scan
       d'un Deck connu ne crée pas de doublon.
-- [ ] Reprise sans QR : quitter l'app puis y revenir alors que le Deck tourne
-      toujours ⇒ pas de re-scan. Après redémarrage du Deck ⇒ re-scan demandé
-      (c'est attendu : `arm()` invalide les credentials).
+- [ ] **Reprise sans QR — le tour complet, qui traverse la seule frontière non
+      testée.** Ouvrir un Deck, **tuer l'app**, la relancer, rouvrir le même
+      Deck ⇒ **aucun scan demandé**. C'est le test de la récupération du
+      credential côté natif (`CompanionWebView.harvestCredential`, sondage
+      après la poignée de main WebSocket) et de son réamorçage
+      (`addDocumentStartJavaScript`). En cas d'échec, regarder d'abord si
+      `koryphaios.companion.lastcred` est écrit dans les préférences.
+- [ ] Inversement : **redémarrer le Deck** ⇒ re-scan bien demandé. Attendu,
+      pas un bug : `arm()` invalide tous les credentials, donc fermer le Deck
+      coupe réellement la session distante.
+- [ ] Appareil sans `DOCUMENT_START_SCRIPT` (WebView ancienne) : le repli
+      `onPageStarted` amorce-t-il encore à temps ?
 - [ ] Les deux appairages sont bien indépendants **sur l'appareil** : oublier
       tous les Decks n'ôte pas les approbations, et inversement.
 

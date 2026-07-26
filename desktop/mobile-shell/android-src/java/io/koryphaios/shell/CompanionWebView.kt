@@ -12,16 +12,32 @@ package io.koryphaios.shell
 // self-signed certificate, and its default is to cancel. Proceeding
 // unconditionally is the anti-pattern; proceeding only when the served
 // certificate matches the digest from the QR is the pin.
+//
+// THE CREDENTIAL ROUND TRIP is what makes "restarting the app does not ask for
+// a new QR" true, and it has two halves that are easy to get subtly wrong:
+//
+//  - SEEDING must happen before the page's own script reads the key, which
+//    `onPageStarted` does NOT guarantee. `addDocumentStartJavaScript` exists
+//    precisely for this and is used when available.
+//  - HARVESTING cannot happen at page load: the host mints the credential
+//    during the WebSocket handshake, so it appears a moment later. Hence the
+//    short poll, and the value is left in a flat drop box for the shell to
+//    fold into its list (all list logic stays in the tested TypeScript).
 
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
 import android.net.http.SslError
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.WindowManager
 import android.webkit.SslErrorHandler
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
+import org.json.JSONObject
 import java.security.MessageDigest
 
 class CompanionWebView : Activity() {
@@ -67,14 +83,83 @@ class CompanionWebView : Activity() {
             }
 
             override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
-                // The resume credential goes in BEFORE the page's own script
-                // reads it. `connectRemoteApi` boots from a stored credential
-                // alone, so this is all a resume needs.
-                if (seedScript.isNotEmpty()) view.evaluateJavascript(seedScript, null)
+                // Fallback for devices without DOCUMENT_START_SCRIPT. Later
+                // than ideal, but `connectRemoteApi` runs after the bundle
+                // parses, so it usually still lands in time.
+                if (seedScript.isNotEmpty() && !supportsDocumentStart()) {
+                    view.evaluateJavascript(seedScript, null)
+                }
+            }
+
+            override fun onPageFinished(view: WebView, url: String?) {
+                harvestCredential(view, attempt = 0)
             }
         }
+
+        // The reliable seeding path: runs before ANY script on the page.
+        if (seedScript.isNotEmpty() && supportsDocumentStart()) {
+            WebViewCompat.addDocumentStartJavaScript(web, seedScript, setOf(originOf(url)))
+        }
+
         setContentView(web)
         web.loadUrl(url)
+    }
+
+    private fun supportsDocumentStart(): Boolean =
+        WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+
+    /**
+     * Copy the per-run credential out of the page so it survives the app.
+     *
+     * It is minted during the WebSocket handshake, not at page load, so this
+     * polls briefly and gives up quietly — a missing credential only means the
+     * next visit needs a fresh QR, which is the pre-existing behaviour.
+     */
+    private fun harvestCredential(view: WebView, attempt: Int) {
+        if (attempt > 10) return
+        view.evaluateJavascript(
+            "sessionStorage.getItem('$CRED_KEY')"
+        ) { raw ->
+            // evaluateJavascript hands back a JSON literal: "null" or a quoted
+            // string. Anything else is not a credential.
+            val cred = raw?.takeIf { it.length > 2 && it.startsWith("\"") }
+                ?.let { JSONObject("{\"v\":$it}").optString("v") }
+                .orEmpty()
+            if (cred.isEmpty()) {
+                Handler(Looper.getMainLooper()).postDelayed({ harvestCredential(view, attempt + 1) }, 1_000)
+                return@evaluateJavascript
+            }
+            storePendingCredential(cred)
+        }
+    }
+
+    /** Flat drop box; the shell folds it into its host list on resume. */
+    private fun storePendingCredential(credential: String) {
+        val url = intent.getStringExtra("url").orEmpty()
+        val origin = try {
+            originOf(url)
+        } catch (_: Exception) {
+            return
+        }
+        getSharedPreferences("CapacitorStorage", Context.MODE_PRIVATE)
+            .edit()
+            .putString(
+                "koryphaios.companion.lastcred",
+                JSONObject().put("url", origin).put("credential", credential).toString()
+            )
+            .apply()
+    }
+
+    /** `https://host:port`, the identity the shell keys its host list on. */
+    private fun originOf(url: String): String {
+        val parsed = java.net.URI(url)
+        val port = if (parsed.port == -1) "" else ":${parsed.port}"
+        return "${parsed.scheme}://${parsed.host}$port"
+    }
+
+    private companion object {
+        /** Mirrors COMPANION_CRED_STORAGE_KEY in desktop/src/shared/companion.ts. */
+        const val CRED_KEY = "companion-cred"
     }
 
     /**

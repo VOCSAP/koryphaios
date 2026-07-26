@@ -29,6 +29,17 @@ import { readJson, writeJson, type KeyValueStore } from "./storage.ts";
 export const HOSTS_KEY = "koryphaios.companion.hosts";
 export const SELECTED_KEY = "koryphaios.companion.selected";
 
+/**
+ * Drop box the NATIVE side writes a harvested credential into.
+ *
+ * The credential is minted by the host and lands in the WebView's
+ * sessionStorage, which dies with the app. The native viewer reads it back out
+ * and leaves it here — a single flat value — rather than editing the host list
+ * itself: that keeps every rule about the list in this module, under test,
+ * instead of restating it in Kotlin that nothing here compiles.
+ */
+export const PENDING_CRED_KEY = "koryphaios.companion.lastcred";
+
 /** A phone that has collected more Decks than this is misconfigured. */
 export const MAX_HOSTS = 12;
 
@@ -212,6 +223,33 @@ export function rememberCredential(
   host.credential = String(credential ?? "").slice(0, 512);
   host.lastSeenAt = now;
   return persist(store, state);
+}
+
+/**
+ * Fold a natively-harvested credential into the host list, then clear it.
+ *
+ * This is what makes "restarting the app does not ask for a new QR" true. The
+ * viewer reads the credential out of the WebView once the bridge is up and
+ * leaves it in the drop box; the shell picks it up on its next boot or resume.
+ * A credential for a host that has since been forgotten is discarded, not
+ * resurrected as a new entry.
+ */
+export function absorbPendingCredential(store: KeyValueStore, now: number): HostsState {
+  const raw = store.get(PENDING_CRED_KEY);
+  if (raw === null) return loadHosts(store);
+  store.remove(PENDING_CRED_KEY);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return loadHosts(store);
+  }
+  if (!parsed || typeof parsed !== "object") return loadHosts(store);
+  const { url, credential } = parsed as Record<string, unknown>;
+  if (typeof url !== "string" || typeof credential !== "string" || !credential) {
+    return loadHosts(store);
+  }
+  return rememberCredential(store, url, credential, now);
 }
 
 /**

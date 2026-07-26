@@ -7,6 +7,7 @@
 
 import { describe, expect, test } from "bun:test";
 import {
+  absorbPendingCredential,
   addHost,
   companionResumeScript,
   defaultLabel,
@@ -18,6 +19,7 @@ import {
   navigationUrl,
   normalizeFingerprint,
   parseCompanionQr,
+  PENDING_CRED_KEY,
   rememberCredential,
   removeHost,
   selectedHost,
@@ -183,6 +185,71 @@ describe("the host list", () => {
 });
 
 describe("the resume credential", () => {
+  test("the native drop box is folded into the host list", () => {
+    const store = new MemoryStore();
+    addHost(store, parseCompanionQr(qr("https://192.168.1.20:8443"))!, T0);
+    // What the native viewer leaves behind after harvesting it from the page.
+    store.set(
+      PENDING_CRED_KEY,
+      JSON.stringify({ url: "https://192.168.1.20:8443", credential: "cred-1" })
+    );
+    const state = absorbPendingCredential(store, T0 + 1);
+    expect(state.hosts[0]!.credential).toBe("cred-1");
+    // Consumed: absorbing twice must not resurrect a stale value later.
+    expect(store.get(PENDING_CRED_KEY)).toBeNull();
+  });
+
+  test("restarting the app does not ask for a new QR", () => {
+    // The whole point of the drop box, expressed as the operator sees it.
+    const store = new MemoryStore();
+    addHost(store, parseCompanionQr(qr("https://192.168.1.20:8443"))!, T0);
+    store.set(
+      PENDING_CRED_KEY,
+      JSON.stringify({ url: "https://192.168.1.20:8443", credential: "cred-1" })
+    );
+    absorbPendingCredential(store, T0 + 1);
+
+    // App killed and relaunched: nothing in memory, everything from storage.
+    const afterRestart = loadHosts(store);
+    const host = selectedHost(afterRestart)!;
+    expect(navigationUrl(host)).toBe("https://192.168.1.20:8443/");
+    expect(companionResumeScript(host)).toContain('"cred-1"');
+  });
+
+  test("but a Deck restart does: its credentials are wiped, so the QR is back", () => {
+    const store = new MemoryStore();
+    addHost(store, parseCompanionQr(qr("https://192.168.1.20:8443"))!, T0);
+    rememberCredential(store, "https://192.168.1.20:8443", "cred-1", T0);
+    // The host refused the resume — `CompanionAuth.arm()` cleared it.
+    const state = forgetCredential(store, "https://192.168.1.20:8443");
+    expect(navigationUrl(selectedHost(state)!)).toBeNull();
+  });
+
+  test("a credential for a forgotten host is discarded, not resurrected", () => {
+    const store = new MemoryStore();
+    store.set(
+      PENDING_CRED_KEY,
+      JSON.stringify({ url: "https://192.168.9.9:8443", credential: "cred-1" })
+    );
+    expect(absorbPendingCredential(store, T0).hosts).toHaveLength(0);
+  });
+
+  test("a corrupted or empty drop box changes nothing and is cleared", () => {
+    const store = new MemoryStore();
+    addHost(store, parseCompanionQr(qr("https://192.168.1.20:8443"))!, T0);
+    for (const junk of ["{oops", "[]", JSON.stringify({ url: "https://192.168.1.20:8443" })]) {
+      store.set(PENDING_CRED_KEY, junk);
+      expect(absorbPendingCredential(store, T0).hosts[0]!.credential).toBe("");
+      expect(store.get(PENDING_CRED_KEY)).toBeNull();
+    }
+  });
+
+  test("an absent drop box is not an error", () => {
+    const store = new MemoryStore();
+    addHost(store, parseCompanionQr(qr("https://192.168.1.20:8443"))!, T0);
+    expect(absorbPendingCredential(store, T0).hosts).toHaveLength(1);
+  });
+
   test("a refused credential is dropped but the entry survives", () => {
     const store = new MemoryStore();
     addHost(store, parseCompanionQr(qr("https://192.168.1.20:8443"))!, T0);

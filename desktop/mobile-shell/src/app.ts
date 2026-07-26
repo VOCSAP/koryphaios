@@ -32,16 +32,26 @@ import {
 } from "./approval-pairing.ts";
 import { publish, subscribe, type Subscription } from "./ntfy-client.ts";
 import {
+  absorbPendingCredential,
   addHost,
   companionResumeScript,
   loadHosts,
   navigationUrl,
   parseCompanionQr,
+  PENDING_CRED_KEY,
   removeHost,
   selectHost,
   type PairedHost,
 } from "./paired-hosts.ts";
-import { deviceName, openHost, openStore, scanQr, startApprovalService, stopApprovalService } from "./platform.ts";
+import {
+  deviceName,
+  openHost,
+  openStore,
+  reloadKey,
+  scanQr,
+  startApprovalService,
+  stopApprovalService,
+} from "./platform.ts";
 import type { KeyValueStore } from "./storage.ts";
 
 type Mode = "companion" | "approvals";
@@ -315,15 +325,38 @@ function render(): void {
   else renderApprovals(root);
 }
 
+/**
+ * Collect whatever the native viewer harvested while we were backgrounded.
+ *
+ * This is the step that makes "restarting the app does not ask for a new QR"
+ * true: the credential is minted by the host into the WebView's
+ * sessionStorage, which does not survive the app, so the viewer copies it out
+ * and the shell folds it into the host list here.
+ */
+async function collectCredential(): Promise<void> {
+  await reloadKey(store, PENDING_CRED_KEY);
+  absorbPendingCredential(store, Date.now());
+}
+
 export async function boot(): Promise<void> {
   store = await openStore();
   device = await deviceName();
+  await collectCredential();
   pairing = loadPairing(store);
   pending = loadInbox(store, Date.now());
   // Approvals is the mode that works everywhere; open on it when it is set up.
   mode = pairing ? "approvals" : "companion";
   if (pairing) await startStream();
   render();
+
+  // Backing out of a Deck returns here without reloading the page, so the
+  // boot-time collection alone would miss the credential just harvested.
+  if (typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) return;
+      void collectCredential().then(render);
+    });
+  }
 }
 
 if (typeof document !== "undefined") {

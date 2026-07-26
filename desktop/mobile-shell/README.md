@@ -21,7 +21,7 @@ Building needs the Android SDK + Gradle, which are not present in the CI/dev
 container. What *is* verified here is everything that decides anything:
 
 ```bash
-bun test tests/mobile-shell-*.test.ts       # 62 cases, no device needed
+bun test tests/mobile-shell-*.test.ts       # 68 cases, no device needed
 cd desktop/mobile-shell && npm run build    # proves the bundle builds
 ```
 
@@ -59,12 +59,22 @@ Two details that are easy to get wrong:
 - **Re-scanning a known Deck refreshes it, it does not duplicate it.** The QR
   is how you get a fresh token after the desktop app restarted; that is the
   common case, not a new pairing.
-- **The stored credential is a resume hint, not a permanent key.** The
-  desktop's `CompanionAuth.arm()` wipes every credential each time the
-  companion server starts, and the QR token is single use. So the credential
-  buys back "put the phone down, pick it up an hour later" across an app kill,
-  and nothing more. When it is refused the entry survives — the address and
-  the pin are still right, only a fresh QR is needed.
+- **Restarting the APP does not ask for a new QR; restarting the DECK does.**
+  That asymmetry is not an accident: the desktop's `CompanionAuth.arm()` wipes
+  every credential each time the companion server starts, and the QR token is
+  single use. So closing the Deck genuinely ends the remote session. Killing
+  the app does not — the credential lives on, and the entry keeps its address
+  and its pin.
+
+  Making that true takes a round trip worth knowing about, because it spans
+  the one boundary that is not under test. The credential is minted by the
+  host into the WebView's `sessionStorage`, which dies with the app. The
+  native viewer therefore copies it out (polling briefly — it appears during
+  the WebSocket handshake, not at page load) and leaves it in a flat drop box,
+  `koryphaios.companion.lastcred`. The shell folds it into its list on boot
+  and on every resume (`absorbPendingCredential`). The Kotlin writes one
+  value and knows nothing about the list; every rule about the list stays in
+  TypeScript, under test.
 
 ## Approvals mode: reachable anywhere
 

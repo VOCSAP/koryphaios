@@ -71,11 +71,26 @@ export class WriteThroughStore implements KeyValueStore {
     this.memory.remove(key);
     this.flush(key, null);
   }
+
+  /**
+   * Adopt a value written OUTSIDE this store, without echoing it back.
+   *
+   * The native viewer writes the harvested credential straight to the
+   * preferences while the shell is backgrounded, so the in-memory copy is
+   * stale on resume. Flushing here would just write back what we read.
+   */
+  hydrate(key: string, value: string | null): void {
+    if (value === null) this.memory.remove(key);
+    else this.memory.set(key, value);
+  }
 }
 
 const KNOWN_KEYS = [
   "koryphaios.companion.hosts",
   "koryphaios.companion.selected",
+  // Written by the NATIVE viewer between two runs of this code, so it has to
+  // be hydrated like the rest — the app reads it on boot and on every resume.
+  "koryphaios.companion.lastcred",
   "koryphaios.approvals.pairing",
   "koryphaios.approvals.inbox",
 ];
@@ -114,6 +129,28 @@ export async function openStore(): Promise<KeyValueStore> {
     });
   }
   return new MemoryStore();
+}
+
+/**
+ * Re-read one key that something outside this process may have changed.
+ *
+ * Only the native viewer's credential drop box needs this today; it is written
+ * while the shell is backgrounded, so the shell must go back to the source on
+ * resume rather than trust its snapshot.
+ */
+export async function reloadKey(store: KeyValueStore, key: string): Promise<void> {
+  if (!(store instanceof WriteThroughStore)) return;
+  const prefs = plugins().Preferences;
+  if (prefs) {
+    try {
+      const { value } = await prefs.get({ key });
+      store.hydrate(key, value);
+    } catch {
+      /* a missing key is not an error */
+    }
+    return;
+  }
+  if (typeof localStorage !== "undefined") store.hydrate(key, localStorage.getItem(key));
 }
 
 /**
