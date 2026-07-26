@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { NotificationChannels } from './NotificationChannels'
 import type { AppConfig, DisplayMode, LaunchPreset, ModelOption } from '@shared/types'
 import { targetKey, type LocalProviderConfig, type ProviderCatalog } from '@shared/models'
 import { ModelPicker } from './ModelPicker'
@@ -181,6 +182,20 @@ export function SettingsView(): React.JSX.Element {
                 />
                 <span>{t('settings.notifyAttention')}</span>
               </label>
+
+              <label className="field field-check">
+                <input
+                  type="checkbox"
+                  checked={config.mobileApprovals === true}
+                  onChange={(e) => set('mobileApprovals', e.target.checked)}
+                />
+                <span>{t('settings.mobileApprovals')}</span>
+              </label>
+              <small className="field-check-help">{t('settings.mobileApprovalsHelp')}</small>
+              <div className="field">
+                <span>{t('notifications.title')}</span>
+              </div>
+              <NotificationChannels t={t} enabled={config.mobileApprovals === true} />
 
               <label className="field field-check">
                 <input

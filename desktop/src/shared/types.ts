@@ -142,6 +142,25 @@ export const SUPERVISOR_SPAWN_MODES: SupervisorSpawnMode[] = [
   'full-control'
 ]
 
+/** One notification channel as the Settings screen sees it. */
+export interface ApprovalChannelStatus {
+  kind: 'telegram' | 'discord' | 'ntfy'
+  configured: boolean
+  connected: boolean
+  bot_label: string
+  /** Last 4 characters of the token — never the token itself. */
+  token_hint: string
+  paired: number
+  paired_labels: string[]
+}
+
+export interface ApprovalEnrolmentPayload {
+  v: 1
+  privateKey: string
+  publicKey: string
+  userSalt: string
+}
+
 export interface AppConfig {
   /** Default working directory used as the base for new sessions. */
   projectDir: string
@@ -1074,6 +1093,17 @@ export interface DeckApi {
   companionStart(): Promise<CompanionInfo>
   companionStop(): Promise<CompanionInfo>
   companionStatus(): Promise<CompanionInfo>
+  /** Remote-approval channels (PLAN N3/N4) and their live state. */
+  approvalChannels(): Promise<ApprovalChannelStatus[]>
+  /** Hand a bot token to the broker; returns the pairing code to send the bot. */
+  approvalConnect(
+    kind: 'telegram' | 'discord',
+    token: string
+  ): Promise<{ kind: string; label: string; hint: string; pairing_code: string }>
+  approvalDisconnect(kind: 'telegram' | 'discord' | 'ntfy'): Promise<{ removed: number }>
+  /** One-shot payload for linking another PC to this operator identity. */
+  approvalEnrolmentExport(): Promise<ApprovalEnrolmentPayload | null>
+  approvalEnrolmentApply(payload: unknown): Promise<boolean>
   /** Paired devices (Lot 2) — desktop window only. */
   companionDevices(): Promise<CompanionDevice[]>
   /** Revoke one paired device by id (lost-phone kill switch) — desktop only. */

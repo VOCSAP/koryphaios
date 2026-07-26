@@ -676,6 +676,42 @@ export const GLYPH_KINDS: Record<RoadmapKind, React.JSX.Element> = {
 }
 
 /** Semantic badge glyphs (identity/state marks, not clickable actions). */
+
+// --- Notification channels (PLAN N3/N4) ---
+// Identity marks for the three delivery channels. Deliberately NOT brand
+// logos: the set is one hand-drawn Greek family, and importing three
+// third-party marks would break it (and their trademark rules). Each channel
+// gets the Greek metaphor for how ITS kind of message travels.
+
+/** Talaria — Hermes' winged sandal: the swift personal messenger (Telegram). */
+const IconTalaria = (
+    <Svg>
+      <path d="M6 17h9a3 3 0 0 0 3-3V9" />
+      <path d="M6 17l-2 3h11" />
+      <path d="M18 9c-2.2 0-3.5-1.2-3.5-3 0-1.2.8-2 2-2 1.4 0 2.4 1.1 2.6 2.6L19.5 9z" />
+      <path d="M3 8h5M2 11h6" />
+    </Svg>
+)
+
+/** Salpinx — the herald's trumpet that calls a whole assembly (Discord). */
+const IconSalpinx = (
+    <Svg>
+      <path d="M4 10.5v3a1 1 0 0 0 1 1h2l7 3.5V6L7 9.5H5a1 1 0 0 0-1 1z" />
+      <path d="M17 9.5a4 4 0 0 1 0 5" />
+      <path d="M19.5 7.5a7 7 0 0 1 0 9" />
+    </Svg>
+)
+
+/** Phryktoria — the fire-beacon chain that carried news across Greece (app). */
+const IconBeacon = (
+    <Svg>
+      <path d="M12 3c1.6 2 2.4 3.4 2.4 4.6A2.4 2.4 0 0 1 12 10a2.4 2.4 0 0 1-2.4-2.4C9.6 6.4 10.4 5 12 3z" />
+      <path d="M8 13h8l-1 8H9l-1-8z" />
+      <path d="M6.5 13h11" />
+      <path d="M5 6.5 3.5 5M19 6.5 20.5 5" />
+    </Svg>
+)
+
 export const GLYPH_BADGES = {
   laurel: IconLaurel,
   scales: IconScales,
@@ -694,7 +730,10 @@ export const GLYPH_BADGES = {
   star: IconStar,
   starFilled: IconStarFilled,
   checkboxOn: IconCheckboxOn,
-  checkboxOff: IconCheckboxOff
+  checkboxOff: IconCheckboxOff,
+  talaria: IconTalaria,
+  salpinx: IconSalpinx,
+  beacon: IconBeacon
 }
 
 /** Action icons, keyed by intent; view destinations stay in GLYPHS. */

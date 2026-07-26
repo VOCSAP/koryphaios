@@ -84,9 +84,13 @@ import {
   buildKeystrokes,
   canApplyVerdict,
   claimApproval,
+  connectChannel,
+  disconnectChannel,
   fetchUndeliveredVerdicts,
+  listChannels,
   markVerdictsDelivered
 } from './approval-service'
+import { applyEnrolment, exportEnrolment } from './operator-identity'
 import { addEventSink, broadcast, regHandle } from './api-registry'
 import { CompanionServer } from './companion-server'
 import {
@@ -1628,6 +1632,45 @@ app.whenReady().then(async () => {
   regHandle('companion:devices', () => companionServer!.listDevices())
   regHandle('companion:revoke', (_e, id: string) => companionServer!.revokeDevice(id))
   regHandle('companion:revoke-all', () => companionServer!.revokeAllDevices())
+
+  // ----- Remote-approval channels (PLAN N3/N4) -----
+  // The bot token is handed to the BROKER, which seals it and runs the single
+  // gateway (Telegram allows one getUpdates consumer per token). It never comes
+  // back: only a 4-character hint does.
+  regHandle('approvals:channels', async () => {
+    const deps = approvals.deps()
+    if (!deps) return []
+    return listChannels(deps)
+  })
+  regHandle('approvals:connect', async (_e, kind: 'telegram' | 'discord', token: string) => {
+    // Arm on demand: connecting a channel is itself an opt-in to the feature.
+    if (!approvals.operator) await approvals.arm()
+    const deps = approvals.deps()
+    if (!deps) throw new Error('operator identity unavailable')
+    const out = await connectChannel(deps, { kind, token: String(token ?? '') })
+    journal.add('session', `notification channel connected: ${kind}`)
+    return out
+  })
+  regHandle('approvals:disconnect', async (_e, kind: 'telegram' | 'discord' | 'ntfy') => {
+    const deps = approvals.deps()
+    if (!deps) return { removed: 0 }
+    const out = await disconnectChannel(deps, kind)
+    journal.add('session', `notification channel disconnected: ${kind}`)
+    return out
+  })
+  // Multi-PC enrolment. The payload is opaque KEY MATERIAL and is validated as
+  // a working keypair -- it never becomes a path or a command (hostile input #3).
+  regHandle('approvals:enrolment-export', () =>
+    exportEnrolment(join(app.getPath('userData'), APP_STATE_SUBDIR), secretCipher)
+  )
+  regHandle('approvals:enrolment-apply', async (_e, payload: unknown) => {
+    const adopted = applyEnrolment(join(app.getPath('userData'), APP_STATE_SUBDIR), secretCipher, payload)
+    if (!adopted) return false
+    await approvals.disarm()
+    await approvals.arm()
+    journal.add('session', 'this PC was linked to an existing operator identity')
+    return true
+  })
   registerIpc({
     service,
     workspaces,

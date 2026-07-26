@@ -194,6 +194,14 @@ const api: DeckApi = {
   companionStart: () => ipcRenderer.invoke('companion:start'),
   companionStop: () => ipcRenderer.invoke('companion:stop'),
   companionStatus: () => ipcRenderer.invoke('companion:status'),
+  approvalChannels: () => ipcRenderer.invoke('approvals:channels'),
+  approvalConnect: (kind: 'telegram' | 'discord', token: string) =>
+    ipcRenderer.invoke('approvals:connect', kind, token),
+  approvalDisconnect: (kind: 'telegram' | 'discord' | 'ntfy') =>
+    ipcRenderer.invoke('approvals:disconnect', kind),
+  approvalEnrolmentExport: () => ipcRenderer.invoke('approvals:enrolment-export'),
+  approvalEnrolmentApply: (payload: unknown) =>
+    ipcRenderer.invoke('approvals:enrolment-apply', payload),
   companionDevices: () => ipcRenderer.invoke('companion:devices'),
   companionRevoke: (id: string) => ipcRenderer.invoke('companion:revoke', id),
   companionRevokeAll: () => ipcRenderer.invoke('companion:revoke-all'),

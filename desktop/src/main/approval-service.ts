@@ -137,6 +137,43 @@ export async function claimApproval(
   }
 }
 
+export interface ChannelStatus {
+  kind: 'telegram' | 'discord' | 'ntfy'
+  configured: boolean
+  connected: boolean
+  bot_label: string
+  token_hint: string
+  paired: number
+  paired_labels: string[]
+}
+
+/** Channels this operator has configured, with their live state. */
+export async function listChannels(deps: ApprovalDeps): Promise<ChannelStatus[]> {
+  const res = await signedPost<{ channels: ChannelStatus[] }>(deps, '/approval/channel-list', {})
+  return res.channels ?? []
+}
+
+/**
+ * Hand a bot token to the broker, which seals it and starts the gateway.
+ *
+ * The token travels ONCE, over this operator-signed route, precisely so the
+ * operator never needs shell access to the broker host — many of them do not
+ * have any. It is never read back: only a 4-character hint ever returns.
+ */
+export async function connectChannel(
+  deps: ApprovalDeps,
+  args: { kind: 'telegram' | 'discord'; token: string }
+): Promise<{ kind: string; label: string; hint: string; pairing_code: string }> {
+  return signedPost(deps, '/approval/channel-connect', { kind: args.kind, token: args.token })
+}
+
+export async function disconnectChannel(
+  deps: ApprovalDeps,
+  kind: 'telegram' | 'discord' | 'ntfy'
+): Promise<{ removed: number }> {
+  return signedPost(deps, '/approval/channel-disconnect', { kind })
+}
+
 /** Approvals answered elsewhere and not yet applied to their session. */
 export async function fetchUndeliveredVerdicts(deps: ApprovalDeps): Promise<Approval[]> {
   const res = await signedPost<{ approvals: Approval[] }>(deps, '/approval/list', {

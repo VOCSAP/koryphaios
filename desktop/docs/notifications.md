@@ -1,11 +1,9 @@
 # Remote approvals (answering an agent from your phone)
 
-> **Status.** The approval engine ships and works today: blocking prompts are
-> registered, answered in the Deck, and the answer is applied to the session.
-> The **notification channels below (Telegram, Discord, the Koryphaios mobile
-> app) are being built** — the Channels screen lists them, and a channel that
-> is not connected simply never receives anything. Until a channel is
-> connected, approvals are answered in the Deck as usual.
+> **Status.** Telegram and Discord ship and are connected from
+> `Settings > Notifications`. The **Koryphaios mobile app row is not built yet**
+> and shows "Coming soon". End-to-end testing on a real phone is still pending,
+> so treat the first run as a trial.
 
 When a session stops and waits for you — a tool-permission dialog, a plan to
 approve, an open question — Koryphaios can register that as an **approval**
