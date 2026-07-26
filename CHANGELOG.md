@@ -1,5 +1,112 @@
 # Changelog
 
+## core + desktop (experimental) — remote approvals: answer a waiting session from your phone
+
+Long sessions stop and wait: a tool-permission dialog, a plan to approve, an
+open question. Until now that meant walking back to the machine. An agent's
+blocking question can now reach the operator over **Telegram** or **Discord**,
+and the answer comes back as **free text** — not a yes/no.
+
+**The broker is the sole arbiter.** `POST /approval/claim` is a conditional
+`UPDATE ... WHERE status='pending'`, so exactly one caller wins and every other
+gets 409. That single line is what makes "answered in the Deck" and "answered
+on the phone" mutually exclusive; the losing copies are rewritten to "handled
+via X" and lose their buttons, so nothing stale keeps looking actionable.
+Approvals are parked with the `graph_drafts` durability model (no FK, plain
+snapshots, status flips, non-destructive listing): neither a broker nor a Deck
+restart loses one. Only the NOTIFICATION expires (24 h, tunable) — the session
+stays blocked and the Deck can still settle it.
+
+**A new identity axis, because `hostname()` names a machine, not a person.**
+Two OS accounts on one PC share a hostname, so routing by host would hand
+account B's approvals to account A. `operator_id` is the digest of an Ed25519
+PUBLIC key; the broker stores that half only, so the binding is self-certifying
+(another key for a known id would need a collision) and reading the broker's
+SQLite file lets nobody act as anyone. Proofs carry a nonce and a timestamp and
+are single-use, which closes backlog **B8** (replay) for this endpoint family
+rather than inheriting it. The compartmentalisation itself costs no code: the
+app-state directory is already per OS user, so two accounts mint two
+identities. Two PCs, conversely, can share one identity by scanning a one-shot
+link code — the phone is paired once, for the person.
+
+**Two credential classes, deliberately asymmetric.** The operator key (Deck
+only) is alone in being able to `claim` — the operation that authorises a tool
+call. A per-session token, handed to spawned agents *including inside a sandbox
+container*, may only `add` and `wait`. Worst case for a compromised sandboxed
+agent: it spams its own operator with notifications. Had it held the operator
+key it could have answered OTHER sessions' approvals, including non-sandboxed
+ones on the host — a clean authority escape.
+
+**Three producers, because the kinds of question differ.** The embedded
+plugin's `PermissionRequest` hook fires only when a dialog actually appears
+(`PreToolUse` would fire on every tool call) and carries a structured payload,
+which beats scraping the screen. It does NOT block: Claude Code is already
+waiting on its own dialog and keeps waiting, so holding the hook process open
+for minutes bought nothing and raised a question — how long may a hook legally
+block? — that the documentation does not answer. The `ask_operator` /
+`ask_operator_wait` MCP tools cover open questions, which no hook reaches
+(there is none for `AskUserQuestion` or plan approval); the tool's return value
+IS the answer, and a ticket makes waiting resumable so no single call depends
+on the client's timeout. `attention.ts` remains the net for CLIs without hooks.
+Everything fails CLOSED: no credential, broker down or budget spent yields no
+decision at all, and the native dialog stands.
+
+**Two return paths, and the split is not stylistic.** A permission dialog is
+NOT closed by an incoming message — the UI loop is blocked on a keypress and
+the message merely queues (verified in use). So `reply_route` is an explicit
+field: `channel` hands the answer to the peer as an ordinary claude-peers
+message from the reserved `operator` sentinel when the agent is at its prompt;
+`pty` types it in when the agent sits on a modal, or when the CLI has no push
+channel at all (codex and gemini have no `claude/channel` equivalent). A
+`channel` route whose peer is not active is downgraded to `pty` at creation
+rather than accepting a route that can never deliver. This is what makes the
+feature reach sessions the Deck does not own: a plain `claude` in a terminal,
+or one on another machine sharing the broker. On the agent side the message
+gets its own framing — actionable, but explicitly not to be acknowledged, or
+every settled approval would drop an "ok, doing it" into the operator's inbox.
+The global no-reply instruction is untouched; as the existing
+`DECK_NO_REPLY_NOTE` comment says, the nuance rides in the rendered content.
+
+**Gateways in the broker, tokens enrolled from the app.** Telegram allows
+exactly one `getUpdates` consumer per token, so the gateway must be a singleton
+— the broker, not the N Decks. But requiring shell access to the broker host to
+paste a token was not an experience worth shipping, and many operators do not
+have that access. The token therefore travels once over an operator-signed
+route and is sealed with AES-256-GCM beside the database; it is never read
+back, only a four-character hint of it. Both transports are OUTGOING (long
+polling, Gateway WebSocket): no port is opened, no address published. Telegram
+pairs through a deep link rendered as a QR; for Discord the app reads the
+application id straight from the token to build the invite URL, so the operator
+never copies it from the portal — and that link is shown FIRST, because without
+a mutual server a bot cannot DM anyone (error 50278).
+
+**Hostile inputs, each named.** The question text comes from an AGENT and
+reaches a third-party renderer, so it is escaped (Telegram in HTML mode: three
+characters, against MarkdownV2's eighteen and its silent 400s). The answer comes
+from a remote channel and ends up typed into a terminal, so every CR/LF
+collapses to a space and the submitting Enter is added by the code — a remote
+answer can never submit early nor run a second command. `reply_token` joins
+`instance_token`/`from_token`: it enters by `add`, lives in the database, never
+returns. And four of the five new IPC channels are blocked for a paired phone:
+one of them exports the enrolment payload, which CONTAINS the operator private
+key, and a single companion pairing must not become a permanent identity theft.
+
+**Three defects the tests found on the way.** `deriveOperatorId` and
+`deriveTokenId` shared a hash space (domain separation added). The hook's
+`idle_prompt` and the Deck's attention detector raised TWO approvals for one
+screen, so the phone rang twice (a tile can only wait on one thing at a time —
+a second raise now returns the first). And the verdict poller's "still waiting"
+check only recognised Deck-raised approvals, so every hook verdict would have
+been silently dropped.
+
+886 tests at delivery (+159), none of which touches the network: the gateways
+are exercised with a fake channel, against a real broker, a real peer
+WebSocket, the hook as a real subprocess and the MCP tool over real JSON-RPC
+stdio. Real-world validation — the two bots, cross-channel arbitration, two OS
+accounts, two linked PCs — is listed in `BACKLOG.md` §3.1 bis. Operator
+documentation: `desktop/docs/notifications.md`. The mobile app as a third
+channel (lot N5) is not started.
+
 ## desktop (experimental) — sandbox hardening: nine review findings, one of them a sandbox escape
 
 A code review of the sandbox lot found nine real defects. All are fixed, each
