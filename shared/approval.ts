@@ -30,6 +30,7 @@ import {
   sign,
   verify,
 } from "node:crypto";
+import { stripControl } from "./text.ts";
 import type {
   Approval,
   ApprovalAnswerKind,
@@ -282,17 +283,10 @@ export function validateApprovalDraft(body: {
 
 // --- Sanitisers ---
 
-// eslint-disable-next-line no-control-regex
-const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
-// eslint-disable-next-line no-control-regex
-const CTRL_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
-
-/** Drop ANSI sequences and C0/DEL controls. Newlines optionally survive. */
-export function stripControl(s: string, opts: { keepNewlines?: boolean } = {}): string {
-  const noAnsi = s.replace(ANSI_RE, "");
-  const cleaned = noAnsi.replace(CTRL_RE, "");
-  return opts.keepNewlines ? cleaned.replace(/\r\n?/g, "\n") : cleaned.replace(/[\r\n]+/g, " ");
-}
+// `stripControl` lives in `shared/text.ts` (a dependency-free leaf, so the
+// mobile app can share it without dragging `node:crypto` into a WebView) and
+// is re-exported here: every existing caller imports it from this module.
+export { stripControl };
 
 /**
  * Make a REMOTE answer safe to type into a PTY (hostile input, PLAN §6.3).

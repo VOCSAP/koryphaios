@@ -17,9 +17,8 @@
 // message. `settle` therefore publishes a CLOSING message carrying the same
 // approval id, and the app cancels the pending notification itself.
 
-import { stripControl } from "../shared/approval.ts";
+import { stripControl, truncate } from "../shared/text.ts";
 import type { Approval } from "../shared/types.ts";
-import { truncate } from "./format.ts";
 
 /** Envelope version. Bumped only on a breaking change; the app checks it. */
 export const NTFY_PROTOCOL_VERSION = 1;

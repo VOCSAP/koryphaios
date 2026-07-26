@@ -414,6 +414,16 @@ export function parseClientFrame(raw: unknown): CompanionClientFrame | null {
   }
 }
 
+/**
+ * sessionStorage key holding the per-run companion credential.
+ *
+ * Shared rather than inlined in `remote-api.ts` because the Android shell
+ * (`desktop/mobile-shell/`) seeds this exact key before navigating, which is
+ * how a paired phone resumes a host across an app kill without a fresh QR
+ * (PLAN N5, multi-host). Two literals in two projects would drift silently.
+ */
+export const COMPANION_CRED_STORAGE_KEY = 'companion-cred'
+
 // ----- timing constants (EXPLORATION §5.5: heartbeat host-death detection) -----
 
 /** Server sends an app-level hb frame at this cadence. */

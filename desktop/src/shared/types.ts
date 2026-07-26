@@ -807,6 +807,12 @@ export interface CompanionInfo {
   url: string | null
   /** Pairing token to embed in the QR; null once consumed or stopped. */
   pairingToken: string | null
+  /**
+   * SHA-256 of the served certificate, lowercase hex — travels in the QR as
+   * `&f=` so the Android shell can PIN this host (MB6). Not a secret: it is
+   * the public cert's digest, and the cert is presented to every visitor.
+   */
+  certFingerprint: string
   clients: number
 }
 
