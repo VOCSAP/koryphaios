@@ -54,7 +54,12 @@ import {
 } from "./shared/config.ts";
 import { writePeerIdCache, writeDeskSessionId } from "./shared/peer-cache.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
-import { DECK_PEER_ID, DECK_INSTANCE_TOKEN } from "./shared/types.ts";
+import {
+  DECK_PEER_ID,
+  DECK_INSTANCE_TOKEN,
+  OPERATOR_PEER_ID,
+  OPERATOR_INSTANCE_TOKEN,
+} from "./shared/types.ts";
 import type { GraphDraftAddResponse } from "./shared/types.ts";
 import type {
   ApprovalAddResponse,
@@ -95,6 +100,29 @@ function isDeckSender(idOrToken: string): boolean {
 
 function renderDeckAnnouncement(text: string): string {
   return `[Deck announcement -- operator broadcast]\n${text}${DECK_NO_REPLY_NOTE}`;
+}
+
+// The operator ANSWERING a question they were asked (remote approvals, C-9).
+// A third framing family beside the deck one: this message is actionable --
+// unlike an announcement -- but it still must not draw an acknowledgement, or
+// every settled approval would drop a "ok, doing it" into the operator's
+// desktop inbox. A follow-up question belongs in ask_operator, not here.
+const OPERATOR_ANSWER_NOTE =
+  '\n\n[claude-peers] This is the human operator ANSWERING you. Act on it now and continue your task. Do NOT acknowledge it and do NOT call send_message toward "operator". If it leaves you blocked again, ask a NEW question with the ask_operator tool.';
+
+function isOperatorSender(idOrToken: string): boolean {
+  return idOrToken === OPERATOR_PEER_ID || idOrToken === OPERATOR_INSTANCE_TOKEN;
+}
+
+function renderOperatorAnswer(text: string): string {
+  return `[Operator answer]\n${text}${OPERATOR_ANSWER_NOTE}`;
+}
+
+/** Framing of an inbound message, by sender class. */
+function renderInbound(fromPeerId: string, text: string): string {
+  if (isDeckSender(fromPeerId)) return renderDeckAnnouncement(text);
+  if (isOperatorSender(fromPeerId)) return renderOperatorAnswer(text);
+  return text;
 }
 
 // --- Configuration ---
@@ -325,7 +353,7 @@ function connectWs() {
         await mcp.notification({
           method: "notifications/claude/channel",
           params: {
-            content: fromDeck ? renderDeckAnnouncement(f.text) : f.text,
+            content: renderInbound(f.from_peer_id, f.text),
             meta: {
               from_peer_id: fromDeck ? DECK_PEER_ID : f.from_peer_id,
               from_summary: f.from_summary,
@@ -378,7 +406,7 @@ async function pollFallback() {
         await mcp.notification({
           method: "notifications/claude/channel",
           params: {
-            content: fromDeck ? renderDeckAnnouncement(msg.text) : msg.text,
+            content: renderInbound(msg.from_peer_id, msg.text),
             meta: {
               from_peer_id: fromDeck ? DECK_PEER_ID : (msg.from_peer_id || "<dormant peer>"),
               from_summary: msg.from_summary,
@@ -1024,6 +1052,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         }
         // B1/NF-A: from_peer_id is resolved by the broker; no /list-peers needed.
         const lines = result.messages.map((m) => {
+          if (isOperatorSender(m.from_peer_id)) {
+            return `From ${OPERATOR_PEER_ID} (${m.sent_at}):\n${renderOperatorAnswer(m.text)}`;
+          }
           if (isDeckSender(m.from_peer_id)) {
             return `From ${DECK_PEER_ID} (${m.sent_at}):\n${renderDeckAnnouncement(m.text)}`;
           }
@@ -1445,12 +1476,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             question: question.slice(0, APPROVAL_QUESTION_MAX),
             options: Array.isArray(rawOptions) ? rawOptions.slice(0, 10).map(String) : [],
             session_ref: cred.sessionRef,
+            // Belt and braces: the tool returns the answer directly, but if the
+            // agent stops polling its ticket the broker still hands it over as
+            // a peer message rather than stranding it.
+            reply_route: "channel",
+            reply_peer_id: myPeerId ?? undefined,
             origin: {
               host: myHost,
               os_user_hash: cred.osUserHash,
               project_key: roadmapProjectKey(),
               from_peer: roadmapAuthor(),
-              group_id: "",
+              group_id: myGroupId,
             },
           });
           approvalId = created.approval.id;

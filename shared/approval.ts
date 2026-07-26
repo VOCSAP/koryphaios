@@ -37,6 +37,7 @@ import type {
   ApprovalAuthProof,
   ApprovalKind,
   ApprovalOrigin,
+  ApprovalReplyRoute,
   ApprovalStatus,
   ApprovalVia,
 } from "./types.ts";
@@ -48,6 +49,7 @@ export type {
   ApprovalAuthProof,
   ApprovalKind,
   ApprovalOrigin,
+  ApprovalReplyRoute,
   ApprovalStatus,
   ApprovalVia,
 };

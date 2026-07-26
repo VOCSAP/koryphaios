@@ -78,6 +78,7 @@ import type {
   ApprovalDeliveredResponse,
   ApprovalListRequest,
   ApprovalListResponse,
+  ApprovalReplyRoute,
   ApprovalStatus,
   ApprovalTokenMintRequest,
   ApprovalTokenMintResponse,
@@ -484,6 +485,9 @@ db.run(`
     from_peer      TEXT NOT NULL DEFAULT '',
     session_ref    TEXT NOT NULL DEFAULT '',
     tile_ref       TEXT NOT NULL DEFAULT '',
+    reply_route    TEXT NOT NULL DEFAULT 'pty',
+    reply_token    TEXT NOT NULL DEFAULT '',
+    reply_group    TEXT NOT NULL DEFAULT '',
     kind           TEXT NOT NULL,
     title          TEXT NOT NULL,
     question       TEXT NOT NULL,
@@ -512,6 +516,21 @@ try {
 } catch (e) {
   const msg = e instanceof Error ? e.message : String(e);
   if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
+
+// Migration (C-9): the return path. 'channel' delivers the answer to the peer
+// as a claude-peers message; 'pty' leaves it to the Deck's keystrokes.
+for (const col of [
+  "reply_route TEXT NOT NULL DEFAULT 'pty'",
+  "reply_token TEXT NOT NULL DEFAULT ''",
+  "reply_group TEXT NOT NULL DEFAULT ''",
+]) {
+  try {
+    db.run(`ALTER TABLE pending_approvals ADD COLUMN ${col}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+  }
 }
 
 // --- Helpers ---
@@ -1913,6 +1932,9 @@ type ApprovalRow = {
   from_peer: string;
   session_ref: string;
   tile_ref: string;
+  reply_route: string;
+  reply_token: string;
+  reply_group: string;
   kind: string;
   title: string;
   question: string;
@@ -1954,6 +1976,9 @@ function rowToApproval(row: ApprovalRow): Approval {
       session_ref: row.session_ref,
       tile_ref: row.tile_ref ?? "",
     },
+    // The ROUTE is public (the Deck must know whether to type); the routing
+    // TOKEN never is -- same family as instance_token/from_token.
+    reply_route: (row.reply_route === "channel" ? "channel" : "pty") as ApprovalReplyRoute,
     kind: row.kind as Approval["kind"],
     title: row.title,
     question: row.question,
@@ -2084,6 +2109,87 @@ function resolveApprovalWaiters(approval: Approval): void {
   }
 }
 
+/**
+ * Resolve where the answer should be delivered (C-9).
+ *
+ * `channel` needs a live peer to push to. Only a peer_id crosses the wire; the
+ * instance_token is looked up here and never leaves the broker. If the peer is
+ * unknown or gone, we DOWNGRADE to 'pty' rather than silently accept a route
+ * that can never deliver — the Deck's keystrokes then remain the fallback.
+ */
+function resolveReplyRoute(
+  requested: string | undefined,
+  replyPeerId: string | undefined,
+  groupId: string
+): { route: ApprovalReplyRoute; token: string; group: string } {
+  if (requested !== "channel") return { route: "pty", token: "", group: "" };
+  if (!replyPeerId || !groupId) return { route: "pty", token: "", group: "" };
+  const peer = db
+    .query(
+      "SELECT instance_token FROM peers WHERE peer_id = ? AND group_id = ? AND status = 'active'"
+    )
+    .get(replyPeerId, groupId) as { instance_token: InstanceToken } | null;
+  if (!peer) {
+    log.info(`approval: peer '${replyPeerId}' not active in ${groupId} — falling back to pty`);
+    return { route: "pty", token: "", group: "" };
+  }
+  return { route: "channel", token: peer.instance_token, group: groupId };
+}
+
+/**
+ * Deliver a settled answer to the agent as a claude-peers message, sent from
+ * the reserved `operator` sentinel.
+ *
+ * Reuses the ordinary message path wholesale (insert + WS push + poll
+ * fallback): nothing new is invented, and `resolveSenderMeta` already maps the
+ * sentinel to the `operator` peer_id on every receive path. server.ts renders
+ * it with its own framing so the agent ACTS on it instead of acknowledging it.
+ */
+function deliverApprovalAnswer(row: ApprovalRow): void {
+  if (row.reply_route !== "channel" || !row.reply_token) return;
+  const answer =
+    row.answer_kind === "text"
+      ? (row.answer_text ?? "")
+      : row.answer_kind === "allow"
+        ? "Approved."
+        : "Rejected.";
+  const text = [
+    `[approval ${row.id}] ${row.title}`,
+    "",
+    answer,
+  ].join("\n");
+  const sentAt = new Date().toISOString();
+  try {
+    const messageId = recordMessageTx(
+      OPERATOR_INSTANCE_TOKEN,
+      row.reply_token as InstanceToken,
+      row.reply_group as GroupId,
+      text,
+      sentAt
+    );
+    const ws = wsPool.get(row.reply_token as InstanceToken);
+    if (ws && ws.readyState === 1) {
+      ws.send(
+        JSON.stringify({
+          type: "message",
+          id: messageId,
+          from_peer_id: OPERATOR_PEER_ID,
+          from_summary: "",
+          from_host: "",
+          from_cwd: "",
+          text,
+          sent_at: sentAt,
+        })
+      );
+    }
+    // No markDelivered: same fire-and-forget contract as every other push.
+  } catch (e) {
+    // The answer is still recorded on the approval; losing the push must not
+    // fail the claim (the operator's answer is not undone by a delivery hiccup).
+    log.error(`approval ${row.id}: answer delivery failed`, e);
+  }
+}
+
 function handleApprovalAdd(
   body: ApprovalAddRequest & Record<string, unknown>
 ): ApprovalAddResponse | { error: string; status: number } {
@@ -2103,6 +2209,25 @@ function handleApprovalAdd(
     sessionRef = auth.session_ref ?? "";
   }
 
+  // De-duplication: a tile can only be waiting on ONE thing at a time, so a
+  // second pending approval for the same tile is always a double-raise -- the
+  // hook's `idle_prompt` and the Deck's attention detector both fire on the
+  // same screen. Returning the existing one keeps a single notification per
+  // real event instead of ringing the operator's phone twice.
+  if (draft.value.tile_ref) {
+    const existing = db
+      .query(
+        `SELECT * FROM pending_approvals
+          WHERE operator_id = ? AND tile_ref = ? AND status = 'pending'
+          ORDER BY created_at DESC LIMIT 1`
+      )
+      .get(auth.operator_id, draft.value.tile_ref) as ApprovalRow | null;
+    if (existing) {
+      log.info(`approval: duplicate raise for tile ${draft.value.tile_ref} — reusing ${existing.id}`);
+      return { approval: rowToApproval(existing) };
+    }
+  }
+
   const pending = db
     .query("SELECT COUNT(*) AS n FROM pending_approvals WHERE operator_id = ? AND status = 'pending'")
     .get(auth.operator_id) as { n: number };
@@ -2112,6 +2237,11 @@ function handleApprovalAdd(
 
   const origin = (body.origin ?? {}) as Record<string, unknown>;
   const pick = (k: string): string => (typeof origin[k] === "string" ? (origin[k] as string) : "");
+  const reply = resolveReplyRoute(
+    typeof body.reply_route === "string" ? body.reply_route : undefined,
+    typeof body.reply_peer_id === "string" ? body.reply_peer_id : undefined,
+    pick("group_id")
+  );
   const now = new Date();
   const ttlHours = Math.max(
     1,
@@ -2137,6 +2267,7 @@ function handleApprovalAdd(
     question: draft.value.question,
     options: draft.value.options,
     status: "pending",
+    reply_route: reply.route,
     answered_via: null,
     answer_kind: null,
     answer_text: null,
@@ -2149,8 +2280,9 @@ function handleApprovalAdd(
   db.run(
     `INSERT INTO pending_approvals
        (id, operator_id, origin_host, origin_user, project_key, group_id, from_peer,
-        session_ref, tile_ref, kind, title, question, options_json, status, created_at, notif_expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+        session_ref, tile_ref, reply_route, reply_token, reply_group,
+        kind, title, question, options_json, status, created_at, notif_expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
     [
       approval.id,
       approval.operator_id,
@@ -2161,6 +2293,9 @@ function handleApprovalAdd(
       approval.origin.from_peer,
       approval.origin.session_ref,
       approval.origin.tile_ref,
+      reply.route,
+      reply.token,
+      reply.group,
       approval.kind,
       approval.title,
       approval.question,
@@ -2206,6 +2341,10 @@ function settleApproval(
   }
   const row = db.query("SELECT * FROM pending_approvals WHERE id = ?").get(id) as ApprovalRow;
   const approval = rowToApproval(row);
+  // C-9: when the agent is at its prompt, the broker itself hands the answer
+  // over as a peer message -- no keystrokes, and it works for sessions the
+  // Deck does not own (a plain `claude` in a terminal, or another machine).
+  deliverApprovalAnswer(row);
   resolveApprovalWaiters(approval);
   return { approval };
 }

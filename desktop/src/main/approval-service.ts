@@ -83,6 +83,9 @@ export async function addApproval(
     projectKey: string
     host: string
     fromPeer?: string
+    /** Peer to hand the answer to. Set => 'channel' route (C-9). */
+    replyPeerId?: string | null
+    groupId?: string
   }
 ): Promise<Approval> {
   const res = await signedPost<{ approval: Approval }>(deps, '/approval/add', {
@@ -92,12 +95,17 @@ export async function addApproval(
     options: args.options ?? [],
     session_ref: args.sessionRef,
     tile_ref: args.tileRef ?? args.sessionRef,
+    // A resolved peer means the broker can deliver the answer as a message and
+    // nothing has to be typed. Without one (peer not resolved yet, or a CLI
+    // with no push channel) the broker downgrades to 'pty' on its own.
+    reply_route: args.replyPeerId ? 'channel' : 'pty',
+    reply_peer_id: args.replyPeerId ?? undefined,
     origin: {
       host: args.host,
       os_user_hash: deps.identity.osUserHash,
       project_key: args.projectKey,
       from_peer: args.fromPeer ?? '',
-      group_id: ''
+      group_id: args.groupId ?? ''
     }
   })
   return res.approval
@@ -192,6 +200,9 @@ export function canApplyVerdict(
   approval: Approval,
   session: { exists: boolean; waiting: boolean } | null
 ): boolean {
+  // The broker already handed a 'channel' answer to the peer as a message;
+  // typing it in as well would deliver it twice.
+  if (approval.reply_route === 'channel') return false
   if (!session?.exists || !session.waiting) return false
   return approval.status === 'answered' && approval.answer_kind !== null
 }

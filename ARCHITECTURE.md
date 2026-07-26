@@ -116,6 +116,29 @@ the session stays blocked and the Deck can still settle it),
 `CLAUDE_PEERS_APPROVAL_TTL_DAYS` (30, settled rows; pending ones are never
 purged), `CLAUDE_PEERS_APPROVAL_MAX_PENDING` (200, anti-flood bound).
 
+**Two return paths (C-9).** `reply_route` on the approval says how the answer
+gets back. `channel`: the broker delivers it as an ordinary claude-peers
+message from the reserved `operator` sentinel (insert + WS push + poll
+fallback, `resolveSenderMeta` already maps the sentinel), and `server.ts`
+frames it with `renderOperatorAnswer` — a third framing family beside the deck
+announcement, actionable but explicitly not to be acknowledged. `pty`: the Deck
+types the answer into the tile. The split is not stylistic — a Claude Code
+permission dialog is NOT closed by an incoming message (the UI loop is blocked
+on a keypress, the message just queues), so modal prompts and CLIs without a
+push channel keep the keystrokes. A `channel` route whose peer is not active
+downgrades to `pty` at creation rather than accepting a route that can never
+deliver. The routing token is resolved broker-side from a peer_id and never
+crosses the wire.
+
+Because the broker owns that delivery, a session the Deck does not own — a
+plain `claude` in a terminal, or one on another machine sharing the broker —
+can now be answered too.
+
+**De-duplication.** A tile can only wait on one thing at a time, so a second
+pending approval for the same `tile_ref` returns the first instead of creating
+another: the hook's `idle_prompt` and the Deck's attention detector both fire
+on the same screen, and the operator's phone must ring once.
+
 Agents reach it through the `ask_operator` / `ask_operator_wait` MCP tools
 (resumable by ticket, so no single call depends on the client's tool timeout).
 

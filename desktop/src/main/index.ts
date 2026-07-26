@@ -632,7 +632,12 @@ service.on('attention', ({ id, waiting }: { id: string; waiting: boolean }) => {
         sessionRef: id,
         tileRef: id,
         projectKey: computeDeckProjectKey(cliContext.projectDir),
-        host: hostname()
+        host: hostname(),
+        // When the tile's peer has resolved, the broker delivers the answer as
+        // a message (C-9) and nothing is typed. Non-Claude CLIs and
+        // not-yet-registered tiles fall back to keystrokes.
+        replyPeerId: session.peerId ?? undefined,
+        groupId: activeScope.groupId
       })
         .then((a) => openApprovals.set(id, a.id))
         .catch((e) => reportError('approvals', 'could not raise an approval', e))

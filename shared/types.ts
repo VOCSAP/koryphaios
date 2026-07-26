@@ -527,6 +527,18 @@ export type ApprovalAnswerKind = "allow" | "deny" | "text";
 /** Which channel settled the approval. */
 export type ApprovalVia = "deck" | "telegram" | "discord" | "ntfy";
 
+/**
+ * How the answer gets back to the agent (C-9).
+ *
+ * `channel` — the broker delivers it as a claude-peers message. Only valid
+ *   when the agent is at its prompt: a modal permission dialog is NOT closed
+ *   by an incoming message (the UI loop is blocked on a keypress), so the
+ *   message would simply queue behind it.
+ * `pty` — the Deck types the answer into the tile. Required for permission
+ *   dialogs, and for CLIs that have no push channel at all (codex, gemini).
+ */
+export type ApprovalReplyRoute = "channel" | "pty";
+
 /** Which credential class signed a request (see shared/approval.ts header). */
 export type ApprovalAuthKind = "operator" | "session";
 
@@ -573,6 +585,8 @@ export interface Approval {
   question: string;
   options: string[];
   status: ApprovalStatus;
+  /** Where the answer will be delivered. The routing TOKEN is never exposed. */
+  reply_route: ApprovalReplyRoute;
   answered_via: ApprovalVia | null;
   answer_kind: ApprovalAnswerKind | null;
   answer_text: string | null;
@@ -591,6 +605,13 @@ export interface ApprovalAddRequest {
   options?: string[];
   session_ref?: string;
   tile_ref?: string;
+  /** Defaults to 'pty'. 'channel' additionally needs reply_peer_id. */
+  reply_route?: ApprovalReplyRoute;
+  /**
+   * Peer to deliver the answer to, resolved broker-side against the group in
+   * `origin.group_id`. Only a peer_id travels — never an instance_token.
+   */
+  reply_peer_id?: string;
   ttl_hours?: number;
 }
 
