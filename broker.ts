@@ -13,13 +13,20 @@ import { Database } from "bun:sqlite";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { hostname } from "node:os";
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { loadConfig } from "./shared/config.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { loadOrCreateSecretKey, openSecret, sealSecret, secretHint } from "./shared/secret-box.ts";
 import { NotificationRegistry, type RegistryStore } from "./notify/registry.ts";
 import { TelegramChannel } from "./notify/telegram.ts";
 import { DiscordChannel } from "./notify/discord.ts";
+import { NtfyChannel, type NtfyConfig } from "./notify/ntfy.ts";
+import {
+  encodePairingPayload,
+  isValidTopic,
+  normalizeNtfyServer,
+  NTFY_TOPIC_HEX_LEN,
+} from "./notify/ntfy-protocol.ts";
 import type { ChannelBinding, ChannelHost, ChannelKind } from "./notify/types.ts";
 import { validateDraftPayload } from "./shared/graph-draft.ts";
 import {
@@ -2533,42 +2540,82 @@ function handleApprovalDelivered(
 }
 
 /**
- * Connect a channel: the Deck hands over the bot token (operator-signed), the
- * broker seals it and starts the gateway. This is why the operator never needs
- * shell access to the broker host.
+ * Connect a channel: the Deck hands over the channel's secret (operator-signed),
+ * the broker seals it and starts the gateway. This is why the operator never
+ * needs shell access to the broker host.
+ *
+ * Telegram and Discord are enrolled with a BOT TOKEN. ntfy has no bot: what is
+ * sealed there is a small config object — the server plus the two topics the
+ * broker mints — and the phone is enrolled by scanning it (`mobile_payload`).
  */
 async function handleChannelConnect(
   body: Record<string, unknown>
 ): Promise<
-  | { kind: string; label: string; hint: string; pairing_code: string; deep_link: string; invite_url: string }
+  | {
+      kind: string;
+      label: string;
+      hint: string;
+      pairing_code: string;
+      deep_link: string;
+      invite_url: string;
+      mobile_payload: string;
+    }
   | { error: string; status: number }
 > {
   const auth = resolveApprovalAuth(body, "channels");
   if ("error" in auth) return auth;
 
   const kind = typeof body.kind === "string" ? (body.kind as ChannelKind) : ("" as ChannelKind);
-  if (kind !== "telegram" && kind !== "discord") {
-    return { error: "kind must be telegram|discord", status: 400 };
+  if (kind !== "telegram" && kind !== "discord" && kind !== "ntfy") {
+    return { error: "kind must be telegram|discord|ntfy", status: 400 };
   }
-  const token = typeof body.token === "string" ? body.token.trim() : "";
-  if (!token) return { error: "token is required", status: 400 };
+
+  let sealed: string;
+  let hint: string;
+  let ntfyConfig: NtfyConfig | null = null;
+  if (kind === "ntfy") {
+    const server = normalizeNtfyServer(typeof body.server === "string" ? body.server : "");
+    if (!server.ok) return { error: server.error, status: 400 };
+    // The topics ARE the secret: ntfy has no per-topic identity, so an
+    // unguessable name plus (optionally) an access token is the whole lock.
+    // Reusing the previous ones on a reconnect would keep a revoked phone
+    // subscribed, so a reconnect always mints fresh ones.
+    ntfyConfig = {
+      server: server.value,
+      topic_notif: randomBytes(NTFY_TOPIC_HEX_LEN / 2).toString("hex"),
+      topic_replies: randomBytes(NTFY_TOPIC_HEX_LEN / 2).toString("hex"),
+      token: typeof body.token === "string" ? body.token.trim().slice(0, 256) : "",
+    };
+    sealed = sealSecret(secretKey, JSON.stringify(ntfyConfig));
+    // Not a token fragment here: the server is what the operator needs to
+    // recognise the row, and it is not a secret.
+    hint = new URL(ntfyConfig.server).host.slice(0, 64);
+  } else {
+    const token = typeof body.token === "string" ? body.token.trim() : "";
+    if (!token) return { error: "token is required", status: 400 };
+    sealed = sealSecret(secretKey, token);
+    hint = secretHint(token);
+  }
 
   db.run(
     `INSERT INTO approval_channel_secrets (operator_id, kind, secret_enc, hint, label, created_at)
      VALUES (?, ?, ?, ?, '', ?)
      ON CONFLICT(operator_id, kind) DO UPDATE SET
        secret_enc = excluded.secret_enc, hint = excluded.hint, created_at = excluded.created_at`,
-    [auth.operator_id, kind, sealSecret(secretKey, token), secretHint(token), new Date().toISOString()]
+    [auth.operator_id, kind, sealed, hint, new Date().toISOString()]
   );
 
   const me = await startChannel(auth.operator_id, kind);
   if (!me) {
-    // A token the provider rejects must not be left behind looking configured.
+    // A secret the provider rejects must not be left behind looking configured.
     db.run("DELETE FROM approval_channel_secrets WHERE operator_id = ? AND kind = ?", [
       auth.operator_id,
       kind,
     ]);
-    return { error: "the provider refused this token", status: 400 };
+    return {
+      error: kind === "ntfy" ? "the ntfy server refused these settings" : "the provider refused this token",
+      status: 400,
+    };
   }
   db.run("UPDATE approval_channel_secrets SET label = ? WHERE operator_id = ? AND kind = ?", [
     me.label,
@@ -2576,8 +2623,12 @@ async function handleChannelConnect(
     kind,
   ]);
 
-  // One-shot pairing code: the operator sends it to the bot, which binds their
-  // address. Short-lived on purpose.
+  // Enrolling a channel afresh invalidates the previous pairing: for ntfy the
+  // old topics are gone, and for the others the operator asked to start over.
+  db.run("DELETE FROM approval_channels WHERE operator_id = ? AND kind = ?", [auth.operator_id, kind]);
+
+  // One-shot pairing code: the operator sends it to the bot (or scans it into
+  // the app), which binds their address. Short-lived on purpose.
   const code = randomUUID().slice(0, 8);
   db.run(
     `INSERT INTO approval_pairing_codes (code, operator_id, kind, expires_at) VALUES (?, ?, ?, ?)`,
@@ -2585,17 +2636,20 @@ async function handleChannelConnect(
   );
   // Everything the operator still has to do, handed over ready to use: a deep
   // link they can scan for Telegram, an invite URL for Discord (the bot must
-  // share a server with them before it may DM — error 50278 otherwise).
+  // share a server with them before it may DM — error 50278 otherwise), and for
+  // ntfy the QR payload the app scans.
   return {
     kind,
     label: me.label,
-    hint: secretHint(token),
+    hint,
     pairing_code: code,
     deep_link: kind === "telegram" ? `https://t.me/${me.label}?start=${code}` : "",
     invite_url:
       kind === "discord" && me.appId
         ? `https://discord.com/oauth2/authorize?client_id=${me.appId}&scope=bot&permissions=0`
         : "",
+    // CREDENTIAL, not a link: it carries the topics and the access token.
+    mobile_payload: ntfyConfig ? encodePairingPayload({ ...ntfyConfig, code }) : "",
   };
 }
 
@@ -2913,7 +2967,7 @@ async function startChannel(
   if (!row) return null;
   const token = openSecret(secretKey, row.secret_enc);
   if (!token) {
-    log.error(`notify: ${kind} token could not be decrypted — reconnect the channel`);
+    log.error(`notify: ${kind} secret could not be decrypted — reconnect the channel`);
     return null;
   }
   const existing = notifyRegistry.get(kind);
@@ -2944,7 +2998,51 @@ async function startChannel(
     notifyRegistry.register(channel);
     return { label: me.username, appId: me.id };
   }
+  if (kind === "ntfy") {
+    const config = parseNtfyConfig(token);
+    if (!config) {
+      log.error("notify: ntfy config is unreadable — reconnect the channel");
+      return null;
+    }
+    const channel = new NtfyChannel({
+      config,
+      host: channelHost,
+      bindingFor: (address) => bindingForAddress("ntfy", address),
+    });
+    const me = await channel.describe();
+    if (!me) return null;
+    channel.start();
+    notifyRegistry.register(channel);
+    return { label: me.label };
+  }
   return null;
+}
+
+/**
+ * Re-read a sealed ntfy config. Validated rather than trusted: a config that
+ * survived a schema change or a partial write must fail the channel, not build
+ * a gateway that publishes to a topic named "undefined".
+ */
+function parseNtfyConfig(plain: string): NtfyConfig | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(plain);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const c = parsed as Record<string, unknown>;
+  const server = normalizeNtfyServer(typeof c.server === "string" ? c.server : "");
+  if (!server.ok) return null;
+  const notif = String(c.topic_notif ?? "");
+  const replies = String(c.topic_replies ?? "");
+  if (!isValidTopic(notif) || !isValidTopic(replies) || notif === replies) return null;
+  return {
+    server: server.value,
+    topic_notif: notif,
+    topic_replies: replies,
+    token: typeof c.token === "string" ? c.token : "",
+  };
 }
 
 /** Bring back every configured gateway at boot. */
