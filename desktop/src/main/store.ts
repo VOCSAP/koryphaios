@@ -42,6 +42,9 @@ const DEFAULT_CONFIG: AppConfig = {
   leadPattern: 'team-lead',
   // System notification when a session waits for the operator (PLAN C11).
   notifyAttention: true,
+  // Remote approvals (PLAN-notifications-mobiles): opt-in — it sends the
+  // question outside the machine, so it is never on by default.
+  mobileApprovals: false,
   // Supervisor spawn trust mode (PLAN TS4): hands-free by default -- the
   // consent rule lives in the supervisor's system prompt, the app confirms
   // nothing. 'team-review' / 'full-control' add native approval dialogs.

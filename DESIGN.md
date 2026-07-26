@@ -132,6 +132,10 @@ mythological reading would hurt recognition (the SCM branch-graph precedent).
 Rules for drawing a NEW glyph (follow them or the set stops looking like one
 hand drew it):
 
+0. **A glyph is a JSX ELEMENT, not a component**: `const IconX = (<Svg>…</Svg>)`,
+   registered as `IconX` and rendered `{GLYPH_BADGES[key]}` — never `<Glyph />`.
+   Writing it as a function typechecks in isolation and fails only at the call
+   site, with a misleading "not a valid JSX element type".
 1. Inline `<svg viewBox="0 0 24 24">` through the local `Svg` wrapper:
    `fill="none" stroke="currentColor"`, `stroke-width 1.5`, round caps/joins.
    Rendered at 20px by the wrapper; sizing/layout live in CSS, never in the SVG.

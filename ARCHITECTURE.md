@@ -79,6 +79,69 @@ The desktop Deck is a one-way (outbound-only) broker participant: it broadcasts 
 - **Operator inbox**: the reserved `__operator__`/`operator` sentinel routes `send_message` to the human operator; the Deck drains `POST /operator-inbox` into its ✉ panel (the Deck journals drained batches to disk — the drain is destructive broker-side).
 - **Graph drafts**: an agent invited by the operator escalates a blocking question into the Deck's graph view. `graph_draft_prepare` runs a read-only pinned-haiku one-shot (`shared/graph-draft.ts`: CODE-CONSTANT system prompt, `--strict-mcp-config` + `--disallowedTools`, argv spawn) that compiles the question + strictly relevant context/`file:line` references; the agent reviews the draft and `graph_draft_send` posts it to the broker's `graph_drafts` table (scoped by `project_key`, roadmap-style durability: `POST /graph-draft/add|list|open`, listing is NON-destructive — only the operator's open flips `status`, opened drafts purge after `CLAUDE_PEERS_GRAPH_DRAFT_TTL_DAYS=30`, pending ones never). The Deck polls the pending list, glows its ✉ glyph, and opening a draft creates a graph doc with the pre-filled, unsubmitted prompt node — model choice and inference stay manual.
 
+## Remote approvals (PLAN-notifications-mobiles, lots N0-N2)
+
+A session blocks on a question; the broker parks it as an **approval** until
+someone answers — the Deck, or (lots N3+) a notification channel on the
+operator's phone. Durability follows the `graph_drafts` model: no FK to
+`peers`, plain-text author snapshots, status flips, non-destructive listing.
+
+**The broker is the sole arbiter.** `/approval/claim` is a conditional
+`UPDATE ... WHERE status='pending'`, so exactly one caller wins and every
+other gets **409**. That single line is what makes "answered in the Deck" and
+"answered on the phone" mutually exclusive.
+
+**Operator identity — a new axis.** `operator_id` names a PERSON, which
+`host` cannot: two OS accounts on one machine share a hostname. A credential
+is an **Ed25519 keypair**; the broker stores only the PUBLIC half and
+`operator_id` is its digest, so the binding is self-certifying (presenting
+another key for a known id would need a hash collision) and reading the broker
+database lets nobody impersonate anyone. Proofs carry a nonce + timestamp and
+are single-use — replays are refused, which closes backlog **B8** for this
+endpoint family.
+
+**Two credential classes, deliberately asymmetric.** The *operator key*
+(Deck-only) has full scope and is alone in being able to `claim`. A *session
+token*, minted per window and handed to spawned agents, may only `add` and
+`wait` for its own session — never `claim`, never touch channels. That is what
+makes it safe to project into a sandbox container: a compromised agent can
+spam its own operator with notifications and nothing more.
+
+Tables: `approval_operators`, `approval_session_tokens`, `approval_channels`,
+`pending_approvals`. Routes: `POST /approval/{add,wait,claim,list,delivered,
+token-mint,token-revoke}`. `/approval/wait` is a **long poll** parked in an
+in-memory registry that a claim resolves. Env tunables:
+`CLAUDE_PEERS_APPROVAL_NOTIF_TTL_HOURS` (24 — only the NOTIFICATION expires,
+the session stays blocked and the Deck can still settle it),
+`CLAUDE_PEERS_APPROVAL_TTL_DAYS` (30, settled rows; pending ones are never
+purged), `CLAUDE_PEERS_APPROVAL_MAX_PENDING` (200, anti-flood bound).
+
+**Two return paths (C-9).** `reply_route` on the approval says how the answer
+gets back. `channel`: the broker delivers it as an ordinary claude-peers
+message from the reserved `operator` sentinel (insert + WS push + poll
+fallback, `resolveSenderMeta` already maps the sentinel), and `server.ts`
+frames it with `renderOperatorAnswer` — a third framing family beside the deck
+announcement, actionable but explicitly not to be acknowledged. `pty`: the Deck
+types the answer into the tile. The split is not stylistic — a Claude Code
+permission dialog is NOT closed by an incoming message (the UI loop is blocked
+on a keypress, the message just queues), so modal prompts and CLIs without a
+push channel keep the keystrokes. A `channel` route whose peer is not active
+downgrades to `pty` at creation rather than accepting a route that can never
+deliver. The routing token is resolved broker-side from a peer_id and never
+crosses the wire.
+
+Because the broker owns that delivery, a session the Deck does not own — a
+plain `claude` in a terminal, or one on another machine sharing the broker —
+can now be answered too.
+
+**De-duplication.** A tile can only wait on one thing at a time, so a second
+pending approval for the same `tile_ref` returns the first instead of creating
+another: the hook's `idle_prompt` and the Deck's attention detector both fire
+on the same screen, and the operator's phone must ring once.
+
+Agents reach it through the `ask_operator` / `ask_operator_wait` MCP tools
+(resumable by ticket, so no single call depends on the client's tool timeout).
+
 ## Identity model
 
 - `instance_token` (UUID v4, immutable) -- internal routing key. FK target for `messages`, key of the WebSocket pool, key of `peer_sessions`. Never exposed to Claude.

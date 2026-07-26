@@ -184,7 +184,12 @@ export const COMPANION_MANIFEST = {
   onMenuExportTemplate: { kind: 'event', channel: 'menu:export-template' },
   onMenuImportTemplate: { kind: 'event', channel: 'menu:import-template' },
   onWorkspaceCurrent: { kind: 'event', channel: 'workspace:current' },
-  onBrokerStatus: { kind: 'event', channel: 'broker:status' }
+  onBrokerStatus: { kind: 'event', channel: 'broker:status' },
+  approvalChannels: { kind: 'invoke', channel: 'approvals:channels' },
+  approvalConnect: { kind: 'invoke', channel: 'approvals:connect' },
+  approvalDisconnect: { kind: 'invoke', channel: 'approvals:disconnect' },
+  approvalEnrolmentExport: { kind: 'invoke', channel: 'approvals:enrolment-export' },
+  approvalEnrolmentApply: { kind: 'invoke', channel: 'approvals:enrolment-apply' }
 } as const satisfies Record<keyof DeckApi, CompanionMethodSpec>
 
 export type CompanionMethodName = keyof typeof COMPANION_MANIFEST
@@ -207,6 +212,15 @@ export const REMOTE_BLOCKED_CHANNELS: ReadonlySet<string> = new Set([
   'browser:demo-cancel',
   'design:list-windows',
   'design:capture-window',
+  // Remote approvals: enrolling a channel means pasting a BOT TOKEN, and
+  // exporting an enrolment hands over the operator's PRIVATE KEY. A paired
+  // phone must never be able to pull either over the LAN socket -- that would
+  // turn one companion pairing into a permanent identity theft. Physical
+  // presence at the host, like companion control itself.
+  'approvals:connect',
+  'approvals:disconnect',
+  'approvals:enrolment-export',
+  'approvals:enrolment-apply',
   'companion:start',
   'companion:stop',
   'companion:status',
@@ -262,6 +276,14 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'usage:read': 0,
   'inbox:history': 0,
   'companion:status': 0,
+  // Remote approvals. Reading the channel list is tier 0; everything else is
+  // trust-changing: a bot token grants control of the operator's notification
+  // channel, and an enrolment payload IS the operator identity.
+  'approvals:channels': 0,
+  'approvals:connect': 3,
+  'approvals:disconnect': 3,
+  'approvals:enrolment-export': 3,
+  'approvals:enrolment-apply': 3,
 
   'pty:input': 1,
   'pty:resize': 1,

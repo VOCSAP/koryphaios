@@ -45,6 +45,12 @@ discovery.
   automatically (one shot per episode). Off by default -- enable it in
   Settings > General, or per session via the sidebar right-click menu. The
   status dot turns orange with an "auto-resume at HH:MM" badge while waiting.
+- **Remote approvals (opt-in).** When a session stops and waits for you, the
+  question can reach your phone over Telegram or Discord, and your answer comes
+  back to the agent — free text, not just yes/no. Enrolment is a Connect button
+  in `Settings > Notifications` (scan a QR for Telegram; for Discord the app
+  builds the bot invite URL for you). Answering anywhere settles it everywhere.
+  It never freezes a session: one that is waiting was already waiting.
 - **Shared roadmap.** A navigation rail (Agents | Roadmap) exposes the
   project's persistent backlog (features, bugs, debt, ideas), stored in the
   claude-peers broker and shared with every Claude session working on the same

@@ -321,8 +321,64 @@ l'opérateur sur une machine avec affichage.
       `retrieveUserQuota` de gemini-cli se greffe dans `usage-service.ts` sur
       le même modèle.
 
+### 3.1 bis Approbations distantes (lots N0→N4, livrés 2026-07-26)
+
+> Le code est couvert par 886 tests, mais **aucun ne touche le réseau** : les
+> passerelles sont vérifiées avec un canal factice, et le test « token refusé »
+> passe justement *parce que* `getMe` échoue hors ligne. Tout ce qui suit
+> demande un vrai poste, un vrai bot et un vrai téléphone.
+
+Validation Telegram :
+- [ ] `/newbot` → coller le token → le QR s'affiche → `/start` depuis le
+      téléphone → la ligne passe « Connecté · @bot · 1 appairé ».
+- [ ] Une demande de permission arrive avec ses deux boutons ; Approuver
+      débloque bien la session.
+- [ ] Une réponse en **texte libre** (répondre au message) parvient à l'agent.
+- [ ] Un message SANS reply-to reçoit l'invite « répondez directement au
+      message », et ne règle rien.
+- [ ] Un inconnu qui écrit au bot n'a aucun effet et ne crée aucune ligne.
+
+Validation Discord :
+- [ ] Portail → token → l'URL d'invitation générée ouvre bien l'ajout au
+      serveur privé → code d'appairage en DM → « Connecté ».
+- [ ] Boutons Approuver / Rejeter, et la **modale** de texte libre (≤ 4000 c.).
+- [ ] Vérifier qu'un « Interactions Endpoint URL » rempli casse la réception
+      (le message d'erreur doit être compréhensible).
+- [ ] Sans serveur mutuel : l'erreur 50278 doit être lisible dans les logs.
+
+Arbitrage et cloisonnement :
+- [ ] Répondre dans le Deck → la notif du téléphone devient « traitée via
+      deck » et perd ses boutons ; y répondre ensuite affiche
+      « Validation expirée ou invalide / déjà traitée ».
+- [ ] Les deux canaux connectés simultanément : la copie du perdant est bien
+      réécrite.
+- [ ] **Deux comptes OS sur le même PC** : étanchéité réelle des approbations.
+- [ ] **Deux PC liés** émettant en même temps : deux notifications distinctes,
+      badges d'origine corrects, réponses indépendantes.
+
+Chemins de retour :
+- [ ] Voie `channel` : une question ouverte réglée depuis le téléphone arrive
+      dans la session comme message peer, **sans aucune frappe**.
+- [ ] Voie `pty` : un dialogue de permission est bien refermé par la frappe.
+- [ ] Une session `claude` lancée **hors Deck** (terminal simple + MCP) reçoit
+      sa réponse — c'est le cas que le lot N2.e débloque.
+- [ ] PC éteint > 24 h : la notif expire, la session reste répondable dans le
+      Deck.
+
+Robustesse et exploitation :
+- [ ] Broker redémarré : les passerelles repartent seules (`startConfiguredChannels`).
+- [ ] Redémarrer un second broker avec le même token Telegram → le 409
+      `Conflict` doit apparaître dans les logs comme prévu.
+- [ ] `Déconnecter` arrête bien la passerelle et supprime le secret.
+- [ ] Rendu de l'écran `Settings > Notifications` en thème clair ET sombre.
+
 ### 3.2 Mobile LAN
 
+- [ ] **N5 — l'app mobile comme canal d'approbation** : la ligne « Koryphaios
+      mobile » de l'écran d'enrôlement est inerte (« Bientôt disponible »).
+      Nécessite le motif ntfy deux-topics + le redécoupage compagnon /
+      approbation + le multi-hôtes. Chantier à part entière, voir
+      `PLAN-notifications-mobiles.md` §5 lot N5.
 - [ ] **MB6 — coquille Android** : scaffold `mobile-shell/` livré mais **non
       buildé** (pas de SDK ici). TODOs natifs du `mobile-shell/README.md` :
       service foreground, verrou biométrique + `FLAG_SECURE`, pinning cert.

@@ -10,9 +10,19 @@
 
 import { renameSync, writeFileSync } from 'node:fs'
 
-/** Write `data` to `file` atomically (temp file + rename). */
-export function writeFileAtomic(file: string, data: string | Uint8Array): void {
+/**
+ * Write `data` to `file` atomically (temp file + rename).
+ *
+ * `mode` is applied to the TEMP file, before the rename: applying it after
+ * would leave a window during which a secret (an encrypted operator key, a
+ * session credential) sits on disk with default permissions.
+ */
+export function writeFileAtomic(
+  file: string,
+  data: string | Uint8Array,
+  opts: { mode?: number } = {}
+): void {
   const tmp = `${file}.tmp`
-  writeFileSync(tmp, data)
+  writeFileSync(tmp, data, opts.mode === undefined ? undefined : { mode: opts.mode })
   renameSync(tmp, file)
 }

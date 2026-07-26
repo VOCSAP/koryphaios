@@ -5631,4 +5631,112 @@ svg.glyph {
 .glyph-fill-warn {
   fill: #e0b341;
   opacity: 0.5;
+
+/* ---------- Notification channels (Settings > Notifications) ----------
+   One row per delivery channel: glyph, name + live state, action. The glyph
+   lights up with --accent only when the channel is actually running, so the
+   operator can scan the list without reading it. */
+.notif-channels {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0 10px;
+}
+.notif-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+}
+.notif-glyph {
+  display: inline-flex;
+  font-size: 20px;
+  color: var(--fg-dim);
+}
+.notif-glyph.is-on {
+  color: var(--accent);
+}
+.notif-name {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  gap: 2px;
+}
+.notif-name small {
+  color: var(--fg-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.notif-connect {
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-2);
+}
+.notif-error {
+  margin: 6px 0 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+/* The pairing code is meant to be read aloud or retyped on a phone: give it
+   room and a monospace face rather than burying it in prose. */
+.notif-pairing {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+}
+.notif-pairing code {
+  display: block;
+  margin-top: 6px;
+  font-family: var(--mono, monospace);
+  font-size: 20px;
+  letter-spacing: 2px;
+  text-align: center;
+  color: var(--accent);
+}
+
+/* QR + link payloads inside the notification panel. The QR sits on white in
+   both themes: a dark-on-dark code is unreadable by a phone camera. */
+.notif-qr {
+  width: 180px;
+  margin: 8px auto;
+  padding: 6px;
+  border-radius: 6px;
+  background: #fff;
+}
+.notif-qr svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.notif-link {
+  margin: 0;
+  font-size: 11px;
+  color: var(--fg-dim);
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+/* The link payload IS the operator identity — warn in the danger colour, not
+   as neutral help text. */
+.notif-warn {
+  margin: 0 0 6px;
+  color: var(--danger);
+  font-size: 12px;
+}
+.notif-link-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin: 4px 0;
+}
+.notif-link-row input {
+  flex: 1;
+  min-width: 0;
 }
