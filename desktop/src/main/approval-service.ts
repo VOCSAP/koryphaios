@@ -154,15 +154,19 @@ export async function listChannels(deps: ApprovalDeps): Promise<ChannelStatus[]>
 }
 
 /**
- * Hand a bot token to the broker, which seals it and starts the gateway.
+ * Hand a channel's secret to the broker, which seals it and starts the gateway.
  *
- * The token travels ONCE, over this operator-signed route, precisely so the
+ * The secret travels ONCE, over this operator-signed route, precisely so the
  * operator never needs shell access to the broker host — many of them do not
- * have any. It is never read back: only a 4-character hint ever returns.
+ * have any. It is never read back: only a hint ever returns.
+ *
+ * Telegram and Discord send a bot token. ntfy sends the relay address (and,
+ * optionally, an access token): it has no bot, and the broker mints the two
+ * topics itself (PLAN N5).
  */
 export async function connectChannel(
   deps: ApprovalDeps,
-  args: { kind: 'telegram' | 'discord'; token: string }
+  args: { kind: 'telegram' | 'discord' | 'ntfy'; token?: string; server?: string }
 ): Promise<{
   kind: string
   label: string
@@ -170,8 +174,13 @@ export async function connectChannel(
   pairing_code: string
   deep_link: string
   invite_url: string
+  mobile_payload: string
 }> {
-  return signedPost(deps, '/approval/channel-connect', { kind: args.kind, token: args.token })
+  return signedPost(deps, '/approval/channel-connect', {
+    kind: args.kind,
+    token: args.token ?? '',
+    server: args.server ?? ''
+  })
 }
 
 export async function disconnectChannel(

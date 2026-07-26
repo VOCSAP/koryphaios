@@ -1656,15 +1656,22 @@ app.whenReady().then(async () => {
     if (!deps) return []
     return listChannels(deps)
   })
-  regHandle('approvals:connect', async (_e, kind: 'telegram' | 'discord', token: string) => {
-    // Arm on demand: connecting a channel is itself an opt-in to the feature.
-    if (!approvals.operator) await approvals.arm()
-    const deps = approvals.deps()
-    if (!deps) throw new Error('operator identity unavailable')
-    const out = await connectChannel(deps, { kind, token: String(token ?? '') })
-    journal.add('session', `notification channel connected: ${kind}`)
-    return out
-  })
+  regHandle(
+    'approvals:connect',
+    async (_e, kind: 'telegram' | 'discord' | 'ntfy', args: { token?: string; server?: string }) => {
+      // Arm on demand: connecting a channel is itself an opt-in to the feature.
+      if (!approvals.operator) await approvals.arm()
+      const deps = approvals.deps()
+      if (!deps) throw new Error('operator identity unavailable')
+      const out = await connectChannel(deps, {
+        kind,
+        token: String(args?.token ?? ''),
+        server: String(args?.server ?? '')
+      })
+      journal.add('session', `notification channel connected: ${kind}`)
+      return out
+    }
+  )
   regHandle('approvals:disconnect', async (_e, kind: 'telegram' | 'discord' | 'ntfy') => {
     const deps = approvals.deps()
     if (!deps) return { removed: 0 }

@@ -63,7 +63,6 @@ export const EN_DEFAULTS: Record<string, string> = {
   "notifications.connected": "Connected",
   "notifications.starting": "Configured, starting…",
   "notifications.notConnected": "Not connected",
-  "notifications.soon": "Coming soon",
   "notifications.paired": "paired",
   "notifications.tokenPlaceholder": "Paste the bot token",
   "notifications.token.telegram": "Telegram bot token",
@@ -73,6 +72,14 @@ export const EN_DEFAULTS: Record<string, string> = {
   "notifications.pair.telegram": "Send this code to your bot with /start to finish pairing:",
   "notifications.pair.discord": "Send this code to your bot in a direct message to finish pairing:",
   "notifications.pair.ntfy": "Scan this code with the Koryphaios app.",
+  "notifications.server.ntfy": "ntfy server",
+  "notifications.tokenOptional": "Optional — leave empty for an open server",
+  "notifications.token.ntfy": "ntfy access token",
+  "notifications.help.ntfy":
+    "The relay that carries the notifications. ntfy.sh works as-is; a self-hosted server keeps the questions on your own infrastructure. An access token is what keeps your topics private — strongly recommended on a shared server.",
+  "notifications.mobileWarn":
+    "This code carries your notification topics and access token: whoever photographs it can read your questions and answer them. Scan it with your phone, then close it.",
+  "notifications.pairDone": "Done",
   "notifications.disabledHint": "Enable remote approvals above to connect a channel.",
   'common.cancel': 'Cancel',
   'common.save': 'Save',
