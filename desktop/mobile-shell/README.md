@@ -1,4 +1,7 @@
-# Koryphaios — Android shell
+# Parastatès — the Koryphaios companion app
+
+*παραστάτης*, the chorus member who stands beside the leader: Koryphaios leads
+the chorus, Parastatès stands next to it.
 
 One app, **two features that must not be confused** (PLAN N5).
 
@@ -21,7 +24,8 @@ Building needs the Android SDK + Gradle, which are not present in the CI/dev
 container. What *is* verified here is everything that decides anything:
 
 ```bash
-bun test tests/mobile-shell-*.test.ts       # 68 cases, no device needed
+bun test tests/mobile-shell-*.test.ts       # 71 cases, no device needed
+bunx tsc --noEmit -p desktop/mobile-shell/tsconfig.json
 cd desktop/mobile-shell && npm run build    # proves the bundle builds
 ```
 
@@ -78,7 +82,7 @@ Two details that are easy to get wrong:
 
 ## Approvals mode: reachable anywhere
 
-Scanning the QR from `Settings > Notifications > Koryphaios mobile` stores the
+Scanning the QR from `Settings > Notifications > Parastatès` stores the
 ntfy relay and the two topics, then publishes the pairing code so the broker
 binds the topic to your operator identity. From then on:
 
@@ -111,17 +115,10 @@ can be walked through in a plain browser: `scanQr` falls back to a prompt,
 `startApprovalService` returns false (foreground-only operation),
 `openHost` navigates without pinning.
 
-## Build on a machine with Android tooling
+## Building it
 
-```bash
-cd desktop/mobile-shell
-npm install
-npm run build            # src/ -> www/dist/app.js
-npx cap add android
-cp -r android-src/java/* android/app/src/main/java/
-# merge android-src/AndroidManifest-additions.xml into the generated manifest
-npx cap sync
-npx cap run android
-```
+The toolchain (JDK 17, Android SDK, the two Gradle dependencies Capacitor does
+not bring) and the step-by-step are in **[`BUILDING.md`](../../BUILDING.md) §5**
+— one place, so they cannot drift from the desktop instructions next to them.
 
 Field checks that need a real phone are listed in `BACKLOG.md` §3.2.

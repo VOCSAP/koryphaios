@@ -396,7 +396,7 @@ Validation app Koryphaios / ntfy (lot N5) :
 > cloisonnement C-5 y passent pour de vrai. Ce qu'aucun test ne couvre : le
 > vrai ntfy.sh, un vrai téléphone, et **tout Android** (pas de SDK ici).
 
-- [ ] `Connect` sur la ligne « Koryphaios mobile » avec `https://ntfy.sh` :
+- [ ] `Connect` sur la ligne « Parastatès » avec `https://ntfy.sh` :
       le QR s'affiche, la ligne passe « Connecté · ntfy.sh ».
 - [ ] Idem contre un **ntfy auto-hébergé** (le cas qui garde les questions
       chez soi), avec et sans jeton d'accès `tk_…`.
@@ -473,7 +473,7 @@ Robustesse et exploitation :
 ### 3.2 Mobile LAN
 
 - [x] **N5 — l'app mobile comme canal d'approbation** : livré. Canal ntfy
-      deux-topics côté broker, ligne « Koryphaios mobile » active dans
+      deux-topics côté broker, ligne « Parastatès » active dans
       l'enrôlement, redécoupage compagnon / approbation et multi-hôtes dans
       `mobile-shell/`. Validations terrain ci-dessus (§3.1 bis).
 - [ ] **MB6 — coquille Android : reste à BUILDER**. Le code natif est écrit

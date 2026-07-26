@@ -15,36 +15,13 @@ lifecycles, it does not decide anything.
 
 ## Install
 
-```bash
-cd desktop/mobile-shell
-npm install
-npm run build          # bundles src/ -> www/dist/app.js
-npx cap add android
-cp -r android-src/java/* android/app/src/main/java/
-# then merge android-src/AndroidManifest-additions.xml into
-# android/app/src/main/AndroidManifest.xml (the blocks are annotated)
-# and add the two libraries below to android/app/build.gradle
-npx cap sync
-npx cap run android
-```
+The full toolchain and the step-by-step live in
+**[`BUILDING.md`](../../../BUILDING.md) §5** — including the two Gradle
+dependencies Capacitor does not bring (`androidx.biometric`,
+`androidx.webkit`), without which the build fails on unresolved references.
 
-### Gradle dependencies
-
-Capacitor brings `androidx.core`; it does NOT bring these two, and without
-them the first build fails on unresolved references:
-
-```gradle
-dependencies {
-    // MainActivity: the biometric gate on resume.
-    implementation "androidx.biometric:biometric:1.1.0"
-    // CompanionWebView: addDocumentStartJavaScript, which is the only API that
-    // guarantees the resume credential is in place before the page's script.
-    implementation "androidx.webkit:webkit:1.11.0"
-}
-```
-
-Pin whatever versions the toolchain resolves at the time — these are the
-floors, not a lockfile.
+The short version: `npx cap add android` generates the project, then the files
+here are copied into it and the manifest blocks merged.
 
 ## What each file is for
 
