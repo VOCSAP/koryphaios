@@ -111,6 +111,18 @@ Only read the file matching the area you are touching:
   template field, shell-interpolated arg, broker response field, a path/dir
   IPC arg, an agent-facing tool arg, or a new sandbox mount/projection,
   decide which of these it is BEFORE wiring it.
+- **Comparing two paths? Canonicalize both.** A path YOU built (`join`,
+  `resolve`, an IPC arg, a stored cwd) and a path an EXTERNAL TOOL reports
+  (git, docker, a child process) are not string-comparable: macOS tmpdirs are
+  symlinked (`/var` → `/private/var`) and Windows can hand back an 8.3 short
+  name, and the external tool always answers with the REAL path. Run both
+  sides through `canonicalPath` (`worktree-service.ts` — `realpathSync.native`,
+  falling back to `resolve` when the path does not exist yet) before `===`,
+  `startsWith` or a `Map` key. Precedent: `removeWorktree` denied a worktree it
+  had just created, and the sandbox re-hit it on the mount/transcript lookups.
+  **Linux CI cannot see this class of bug** — its tmpdirs are not symlinked —
+  so the regression test must build the symlinked prefix itself (see
+  `TESTING.md`, "Cross-platform tests").
 - **Naming a scratch/plan/report doc?** `.gitignore` silently excludes
   `findings.md`, `task_plan.md`, `progress.md`, `progress-archive.md`, `docs/`,
   and `.claude/session-checkpoint.md`. A deliverable you intend to commit (audit

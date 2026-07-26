@@ -51,6 +51,44 @@ Precedent: `desktop-log.test.ts` aged its "stale snapshot" fixture with
 so it died on 2026-07-22. Same rule for retention/TTL windows: assert the
 BOUNDARY relative to the injected clock, not an absolute date.
 
+## Cross-platform tests (the CI matrix)
+
+`.github/workflows/desktop-build.yml` runs the suite on **windows / macos /
+ubuntu**. A local `bun test` is Linux-only, so it is structurally blind to two
+things — assume neither is covered until CI says so.
+
+**1. Paths.** macOS tmpdirs are symlinked (`/var` → `/private/var`) and Windows
+hands back 8.3 short names; Linux tmpdirs are neither, so any path-comparison
+bug is invisible locally. Don't settle for a test that only fails on the other
+runner: **reproduce the CONDITION, not the OS.** Build the symlinked prefix in
+the fixture (`symlinkSync(real, link, "junction")` — the type arg is the
+unprivileged dir flavour on Windows, ignored on POSIX) and drive the API
+through the link. That test then fails without the fix on *every* OS, which is
+what makes it a regression test rather than a CI-only tripwire. Compare
+fixture paths with `realpathSync(...)` on both sides. Precedent:
+`desktop-worktree.test.ts`, "paths survive a symlinked repo prefix".
+
+**2. Shell syntax.** Assertions must not hard-code one platform's shell:
+
+| Don't | Do |
+|-------|-----|
+| `{ command: "pwd" }` | `node -e "process.stdout.write(process.cwd())"` |
+| `dir.split("/").pop()` | `realpathSync(out)` vs `realpathSync(dir)` |
+| `/< "([^"]+)"$/` (POSIX stdin) | accept the PowerShell `Get-Content -Raw "…" \|` form too |
+
+Assert the **contract** (this file reaches the process as stdin), not one OS's
+spelling of it — the per-platform command shapes belong in the pure adapter
+tests, which pass an explicit `platform` and run identically everywhere.
+
+**3. Skipping is a debt, pay it in the same commit.** Some tests are POSIX by
+construction — they pin `platform: "linux"` and drive a `#!/bin/sh` fixture,
+and there is nothing to assert on Windows. Skip them
+(`const posixOnly = process.platform === "win32" ? test.skip : test`), but a
+skip trades a red X for a **coverage hole**: add OS-agnostic tests covering the
+same executor with constructs that behave identically in `sh` and PowerShell
+(`echo`, a missing binary). Precedent: `desktop-help.test.ts`, the two
+`runHelp` round-trips plus the two portable ones that replace them on Windows.
+
 ## Adding a UI string (renderer)
 
 Three files must carry the same key, or `desktop-i18n.test.ts` fails:
