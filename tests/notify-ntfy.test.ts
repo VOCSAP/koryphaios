@@ -262,7 +262,7 @@ describe("post / settle / rejectLate", () => {
     expect(parseClickUrl(String(rec.published[0]!.click))?.approvalId).toBe("appr-9");
   });
 
-  test("a publish failure is logged, never thrown (the registry is best-effort)", async () => {
+  test("a failed publish is NOT reported as a post", async () => {
     const rec = newRecorder();
     const ch = new NtfyChannel({
       config: CONFIG,
@@ -270,7 +270,10 @@ describe("post / settle / rejectLate", () => {
       bindingFor: () => BINDING,
       fetchImpl: makeFetch(rec, { publishStatus: 502 }),
     });
-    expect((await ch.post(BINDING, approval()))?.external_ref).toBe("appr-1");
+    // Returning a handle here would make the registry record a copy that does
+    // not exist, and later publish a closing message for a question the phone
+    // never received. Logged, never thrown: the registry is best-effort.
+    expect(await ch.post(BINDING, approval())).toBeNull();
     expect(rec.errors.join(" ")).toContain("publish answered 502");
   });
 });

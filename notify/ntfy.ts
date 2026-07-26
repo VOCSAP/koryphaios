@@ -284,7 +284,15 @@ export class NtfyChannel implements NotificationChannel {
     if (!settled) await this.rejectLate(binding, answer);
   }
 
-  private async publish(body: NtfyPublish): Promise<string | null> {
+  /**
+   * Publish one message.
+   *
+   * `ok` and `id` are separate on purpose: a 2xx with no id in the body is a
+   * success the caller can live with, while a failure must NOT be reported as
+   * a post — the registry would record a copy that does not exist and later
+   * publish a closing message for a question the phone never received.
+   */
+  private async publish(body: NtfyPublish): Promise<{ ok: boolean; id: string | null }> {
     const f = this.deps.fetchImpl ?? fetch;
     try {
       const res = await f(this.deps.config.server, {
@@ -295,18 +303,18 @@ export class NtfyChannel implements NotificationChannel {
       });
       if (!res.ok) {
         this.deps.host.log.error(`ntfy: publish answered ${res.status}`);
-        return null;
+        return { ok: false, id: null };
       }
       const json = (await res.json().catch(() => ({}))) as { id?: string };
-      return json.id ?? null;
+      return { ok: true, id: json.id ?? null };
     } catch (e) {
       this.deps.host.log.error("ntfy: publish threw", e);
-      return null;
+      return { ok: false, id: null };
     }
   }
 
   async post(binding: ChannelBinding, approval: Approval): Promise<PostedMessage | null> {
-    const id = await this.publish(
+    const sent = await this.publish(
       buildApprovalPublish(approval, originLabel(approval), {
         server: this.deps.config.server,
         topicNotif: binding.address,
@@ -314,9 +322,10 @@ export class NtfyChannel implements NotificationChannel {
         token: this.deps.config.token,
       })
     );
-    // ntfy answers with the published message; the approval id is what the
-    // closing message is keyed on, so an absent server id is not fatal.
-    return { external_ref: id ?? approval.id };
+    if (!sent.ok) return null;
+    // The approval id is what the closing message is keyed on, so a server
+    // that answered without one costs nothing.
+    return { external_ref: sent.id ?? approval.id };
   }
 
   async settle(

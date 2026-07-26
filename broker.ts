@@ -2623,9 +2623,12 @@ async function handleChannelConnect(
     kind,
   ]);
 
-  // Enrolling a channel afresh invalidates the previous pairing: for ntfy the
-  // old topics are gone, and for the others the operator asked to start over.
-  db.run("DELETE FROM approval_channels WHERE operator_id = ? AND kind = ?", [auth.operator_id, kind]);
+  // ntfy only: the topics just changed, so a binding pointing at the old one
+  // addresses a topic nobody publishes to any more. Telegram and Discord keep
+  // theirs — an address there is a chat id, which a new token does not move.
+  if (kind === "ntfy") {
+    db.run("DELETE FROM approval_channels WHERE operator_id = ? AND kind = 'ntfy'", [auth.operator_id]);
+  }
 
   // One-shot pairing code: the operator sends it to the bot (or scans it into
   // the app), which binds their address. Short-lived on purpose.

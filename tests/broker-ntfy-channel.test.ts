@@ -235,6 +235,59 @@ describe("ntfy enrolment", () => {
     expect(c.topic_replies).not.toBe(a.topic_replies);
   }, 60_000);
 
+  test("reconnecting drops the old binding — this IS the lost-phone kill switch", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const ntfy = startStubNtfy();
+    const op = newOperator();
+
+    const first = await signedPost<{ mobile_payload: string }>(
+      b,
+      "/approval/channel-connect",
+      { kind: "ntfy", server: ntfy.url },
+      op
+    );
+    const old = decodePairingPayload(first.body.mobile_payload)!;
+    await ntfy.publishRaw(old.topic_replies, encodePair(old.code, "Lost phone"));
+    const paired = await until(async () => {
+      const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(
+        b,
+        "/approval/channel-list",
+        {},
+        op
+      );
+      return list.body.channels.find((c) => c.kind === "ntfy")!.paired === 1;
+    });
+    expect(paired).toBe(true);
+
+    // The operator reconnects after losing the phone.
+    await signedPost(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, op);
+    const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(
+      b,
+      "/approval/channel-list",
+      {},
+      op
+    );
+    expect(list.body.channels.find((c) => c.kind === "ntfy")!.paired).toBe(0);
+
+    // And nothing is published to the old topic any more: the lost phone is
+    // subscribed to a name the broker no longer uses.
+    const before = (ntfy.published.get(old.topic_notif) ?? []).length;
+    await signedPost(
+      b,
+      "/approval/add",
+      {
+        kind: "permission",
+        title: "Run tests",
+        question: "Allow?",
+        origin: { host: "bureau", project_key: "p" },
+      },
+      op
+    );
+    await Bun.sleep(400);
+    expect((ntfy.published.get(old.topic_notif) ?? []).length).toBe(before);
+  }, 60_000);
+
   test("the access token is used and never comes back", async () => {
     const b = await startBroker();
     brokers.push(b);
