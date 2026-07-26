@@ -11,7 +11,36 @@ inventing. Reference implementation: graph drafts (`graph_drafts` table,
 `graph_draft_*` tools, inbox cards) — grep any `graph-draft`/`graphDraft`
 symbol to see the whole chain end to end.
 
-## 0. Decide the durability model FIRST
+## 0.a Decide the KEY first — who can there be two of?
+
+Before the durability model, settle what the feature is keyed by. The broker is
+either local or **on a shared server**, so it serves **several people**; each of
+them runs **several sessions at once on several PCs**. Every silent bug this
+repo has shipped in this area was one singleton keyed by too little:
+
+| Keyed by | Breaks when | Key by instead |
+|---|---|---|
+| channel `kind` | a second operator enrols → replaces AND stops the first | `(operator_id, kind)` |
+| `hostname()` | two OS accounts on one PC share it | `operator_id` (a digest of a public key) |
+| the transport's secret, one instance per operator | two operators share ONE bot token → two `getUpdates` consumers, permanent 409 | one instance per TRANSPORT, reference-counted |
+| an address resolved to "its" owner | one person points two identities at one chat account → `.get()` picks one row | resolve the OBJECT, then "may this caller act on it" |
+
+Concrete rules that follow:
+
+- **A `SELECT … ` you then `.get()` is a decision to ignore the other rows.**
+  Either the column is unique by construction, or you have a bug waiting.
+- **Authorisation is asked in the direction that survives a second identity.**
+  `approval → is this address paired FOR ITS OWNER` holds; `address → its
+  operator → compare` only held while an address belonged to exactly one.
+- **A per-process `Map` of live things needs a stop rule.** Two owners may
+  legitimately point at ONE instance (same token); stopping must be
+  reference-counted or disconnecting one cuts the other.
+- **Test it with two.** A single-operator test passes on all of the above. The
+  suites that caught these run two operators against one broker
+  (`tests/broker-ntfy-channel.test.ts`) or register two slots on one fake
+  channel (`tests/notify-registry.test.ts`).
+
+## 0.b Decide the durability model
 
 - **Drain semantics** (deliver once, destructive): `messages` table style.
   Anything the Deck must not lose on crash needs a desktop journal on top
@@ -37,6 +66,11 @@ Imitate `shared/graph-draft.ts`. Test file: `tests/<feature>.test.ts`.
 - Handlers: imitate `handleGraphDraftAdd/List/Open` (validation → `{ result }`
   or `{ error, status }`).
 - Route cases in the big `switch (path)`.
+- **A route that REPLACES a stored secret/config must vet the candidate
+  BEFORE overwriting.** Writing first and deleting on failure destroys a
+  working configuration whenever the provider is briefly unreachable — and
+  leaves the row and its dependants inconsistent. Imitate `handleChannelConnect`:
+  build and `describe()` the candidate, and only then persist and swap.
 - TTL/tunables: env var pattern
   `Math.max(1, parseInt(process.env.CLAUDE_PEERS_X ?? "default", 10))`, wire
   into `purgeOldMessages()` + the `/admin/purge-messages` response + the
@@ -88,6 +122,17 @@ Imitate `fetchGraphDrafts` / `markGraphDraftOpened`.
 > and breaks the typecheck. Prefer this over mirroring for anything
 > cryptographic: a one-byte drift in a canonical serialization silently
 > invalidates every signature.
+>
+> **The same rule holds for any WIRE FORMAT with two ends**, and it is what
+> decides where a module lives. `notify/ntfy-protocol.ts` is imported by the
+> broker AND bundled into the Android app, so it must stay dependency-free —
+> which is why `stripControl`/`truncate` were moved out of `shared/approval.ts`
+> (it pulls `node:crypto`) into the leaf `shared/text.ts`. When one end cannot
+> import it at all (Kotlin), the restatement is unavoidable: say so at BOTH
+> sites, name the module that is authoritative, and keep the restated part as
+> small as possible. Shared string constants are worth exporting for this
+> alone — `COMPANION_CRED_STORAGE_KEY` exists because the same key was spelled
+> twice in two projects.
 
 ## 7. Preload — `desktop/src/preload/index.ts`
 

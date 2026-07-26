@@ -79,7 +79,7 @@ The desktop Deck is a one-way (outbound-only) broker participant: it broadcasts 
 - **Operator inbox**: the reserved `__operator__`/`operator` sentinel routes `send_message` to the human operator; the Deck drains `POST /operator-inbox` into its ✉ panel (the Deck journals drained batches to disk — the drain is destructive broker-side).
 - **Graph drafts**: an agent invited by the operator escalates a blocking question into the Deck's graph view. `graph_draft_prepare` runs a read-only pinned-haiku one-shot (`shared/graph-draft.ts`: CODE-CONSTANT system prompt, `--strict-mcp-config` + `--disallowedTools`, argv spawn) that compiles the question + strictly relevant context/`file:line` references; the agent reviews the draft and `graph_draft_send` posts it to the broker's `graph_drafts` table (scoped by `project_key`, roadmap-style durability: `POST /graph-draft/add|list|open`, listing is NON-destructive — only the operator's open flips `status`, opened drafts purge after `CLAUDE_PEERS_GRAPH_DRAFT_TTL_DAYS=30`, pending ones never). The Deck polls the pending list, glows its ✉ glyph, and opening a draft creates a graph doc with the pre-filled, unsubmitted prompt node — model choice and inference stay manual.
 
-## Remote approvals (PLAN-notifications-mobiles, lots N0-N5)
+## Remote approvals (lots N0–N5)
 
 A session blocks on a question; the broker parks it as an **approval** until
 someone answers — the Deck, or (lots N3+) a notification channel on the

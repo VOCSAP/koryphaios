@@ -57,6 +57,21 @@ BOUNDARY relative to the injected clock, not an absolute date.
 ubuntu**. A local `bun test` is Linux-only, so it is structurally blind to two
 things — assume neither is covered until CI says so.
 
+**0. Does your file run there at all?** The workflow does NOT run `bun test`;
+it runs an explicit list of globs, because the broker integration suites spawn
+a daemon and bind ports, which is not what that matrix is for:
+
+```
+tests/desktop-*.test.ts   tests/notify-*.test.ts   tests/mobile-shell-*.test.ts
+```
+
+A new suite named outside those prefixes runs **on your machine and nowhere
+else** — green locally, forever unverified on Windows and macOS. Either name it
+to match, or add its glob to the workflow. Check the `paths:` filter too: it
+gates whether the job triggers at all, and it once listed only `desktop/**`
+while the suites it runs cover `notify/`, `shared/` and `broker.ts`. Precedent:
+140 tests shipped that had never executed on any runner.
+
 **1. Paths.** macOS tmpdirs are symlinked (`/var` → `/private/var`) and Windows
 hands back 8.3 short names; Linux tmpdirs are neither, so any path-comparison
 bug is invisible locally. Don't settle for a test that only fails on the other
