@@ -1,15 +1,21 @@
 import type { CapacitorConfig } from '@capacitor/cli'
 
-// Thin companion shell (PLAN MB6). No bundled web UI beyond the QR-bootstrap
-// page in www/: once a host is scanned, the WebView navigates to the
-// PC-served renderer, so the app is always at the host's exact version.
+// Koryphaios mobile shell (PLAN N5, ex-MB6).
+//
+// The app id says `companion` for history's sake — changing it would orphan
+// every already-installed build — but the shell now carries TWO features:
+// companion mode (the Deck-served UI over the LAN) and approvals mode (ntfy,
+// reachable anywhere). Only the shell's own picker/approvals UI is bundled in
+// www/; the companion interface still comes from the host, so the phone is
+// always at that host's exact version.
 const config: CapacitorConfig = {
   appId: 'io.koryphaios.companion',
-  appName: 'Koryphaios Companion',
+  appName: 'Koryphaios',
   webDir: 'www',
   server: {
-    // The host uses a self-signed cert; allow it (pinning is enforced natively
-    // once paired — see README native TODOs). LAN only.
+    // A paired Deck uses a self-signed cert, pinned natively from the
+    // fingerprint in its QR (see android-src/PinnedTrust.kt). Cleartext stays
+    // off: the QR parser refuses a plain-http host in the first place.
     cleartext: false,
     androidScheme: 'https'
   },

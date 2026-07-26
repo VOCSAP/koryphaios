@@ -1,0 +1,61 @@
+<!--
+  Blocks to merge into android/app/src/main/AndroidManifest.xml after
+  `npx cap add android` (PLAN N5 / MB6).
+
+  The one line that matters most is the foreground service TYPE. Since
+  Android 15, `dataSync` is capped at 6 hours per 24 — a cap that would take
+  the approvals channel down overnight, silently, which is exactly when a long
+  agent run is waiting on the operator. `connectedDevice` carries no such cap
+  and is the accurate description of the work: the service maintains a link to
+  the operator's own broker on their behalf.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+  <!-- Approvals reach the phone from anywhere; the network is not optional. -->
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+  <!-- Android 13+: a notification needs a runtime grant. Asked at first pair. -->
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+  <!-- The service and its declared type (Android 14+ requires both). -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+  <!--
+    OEM skins kill beyond AOSP rules. The exemption is REQUESTED at first pair
+    and may be refused; the app then behaves like any other on that phone.
+    Play policy: acceptable for a user-initiated, continuously-running task the
+    user explicitly enabled — which is what enrolling this channel is.
+  -->
+  <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+  <!-- Restart the listener after a reboot: an unpaired-looking phone after a
+       restart would be indistinguishable from a broken channel. -->
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+  <application>
+
+    <service
+      android:name=".ApprovalService"
+      android:exported="false"
+      android:foregroundServiceType="connectedDevice" />
+
+    <receiver
+      android:name=".ApprovalActionReceiver"
+      android:exported="false">
+      <intent-filter>
+        <action android:name="io.koryphaios.shell.ALLOW" />
+        <action android:name="io.koryphaios.shell.DENY" />
+      </intent-filter>
+    </receiver>
+
+    <!-- Companion mode's viewer. Its own task so backing out returns to the
+         host picker rather than leaving the app. -->
+    <activity
+      android:name=".CompanionWebView"
+      android:exported="false"
+      android:configChanges="orientation|screenSize|keyboardHidden" />
+
+  </application>
+</manifest>
