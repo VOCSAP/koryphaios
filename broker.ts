@@ -10,12 +10,17 @@
  */
 
 import { Database } from "bun:sqlite";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { loadConfig } from "./shared/config.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
+import { loadOrCreateSecretKey, openSecret, sealSecret, secretHint } from "./shared/secret-box.ts";
+import { NotificationRegistry, type RegistryStore } from "./notify/registry.ts";
+import { TelegramChannel } from "./notify/telegram.ts";
+import { DiscordChannel } from "./notify/discord.ts";
+import type { ChannelBinding, ChannelHost, ChannelKind } from "./notify/types.ts";
 import { validateDraftPayload } from "./shared/graph-draft.ts";
 import {
   APPROVAL_ANSWER_KINDS,
@@ -473,6 +478,48 @@ db.run(`
 db.run(
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_approval_channel_uniq ON approval_channels(operator_id, kind, address)`
 );
+
+// Bot tokens, encrypted at rest (shared/secret-box.ts). They live here rather
+// than in a server-side config file because the operator enrols from the app:
+// requiring shell access to the broker host to paste a token is not an
+// experience we ship. One row per (operator, kind) -- Telegram allows a single
+// getUpdates consumer per token, so the gateway must be this singleton.
+db.run(`
+  CREATE TABLE IF NOT EXISTS approval_channel_secrets (
+    operator_id TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    secret_enc  TEXT NOT NULL,
+    hint        TEXT NOT NULL DEFAULT '',
+    label       TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (operator_id, kind)
+  )
+`);
+
+// One-shot pairing codes: the Deck shows one, the operator sends it to the bot,
+// the bot binds that address. Short-lived and consumed on first use, exactly
+// like the companion's QR token.
+db.run(`
+  CREATE TABLE IF NOT EXISTS approval_pairing_codes (
+    code        TEXT PRIMARY KEY,
+    operator_id TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    expires_at  TEXT NOT NULL
+  )
+`);
+
+// Where each approval was posted, so every copy can be rewritten once one of
+// them wins the race.
+db.run(`
+  CREATE TABLE IF NOT EXISTS approval_posts (
+    approval_id  TEXT NOT NULL,
+    kind         TEXT NOT NULL,
+    binding_id   TEXT NOT NULL,
+    external_ref TEXT NOT NULL,
+    PRIMARY KEY (approval_id, kind, binding_id)
+  )
+`);
+db.run(`CREATE INDEX IF NOT EXISTS idx_approval_posts_ref ON approval_posts(kind, external_ref)`);
 
 db.run(`
   CREATE TABLE IF NOT EXISTS pending_approvals (
@@ -2304,6 +2351,9 @@ function handleApprovalAdd(
       approval.notif_expires_at,
     ]
   );
+  // Ring the operator's channels. Fire-and-forget: the approval is already
+  // durable, and a dead transport must never fail the producer's call.
+  void notifyRegistry.fanOut(approval).catch((e) => log.error("notify: fan-out failed", e));
   return { approval };
 }
 
@@ -2376,7 +2426,14 @@ function handleApprovalClaim(
     return { error: "answer_text is required for a text answer", status: 400 };
   }
 
-  return settleApproval(id, auth.operator_id, via, answerKind, answerText);
+  const settled = settleApproval(id, auth.operator_id, via, answerKind, answerText);
+  if (!("error" in settled)) {
+    // Answered in the Deck: every phone copy must stop looking actionable.
+    void notifyRegistry.settle(settled.approval, via).catch((e) =>
+      log.error("notify: settle failed", e)
+    );
+  }
+  return settled;
 }
 
 async function handleApprovalWait(
@@ -2475,6 +2532,115 @@ function handleApprovalDelivered(
   return { marked };
 }
 
+/**
+ * Connect a channel: the Deck hands over the bot token (operator-signed), the
+ * broker seals it and starts the gateway. This is why the operator never needs
+ * shell access to the broker host.
+ */
+async function handleChannelConnect(
+  body: Record<string, unknown>
+): Promise<{ kind: string; label: string; hint: string; pairing_code: string } | { error: string; status: number }> {
+  const auth = resolveApprovalAuth(body, "channels");
+  if ("error" in auth) return auth;
+
+  const kind = typeof body.kind === "string" ? (body.kind as ChannelKind) : ("" as ChannelKind);
+  if (kind !== "telegram" && kind !== "discord") {
+    return { error: "kind must be telegram|discord", status: 400 };
+  }
+  const token = typeof body.token === "string" ? body.token.trim() : "";
+  if (!token) return { error: "token is required", status: 400 };
+
+  db.run(
+    `INSERT INTO approval_channel_secrets (operator_id, kind, secret_enc, hint, label, created_at)
+     VALUES (?, ?, ?, ?, '', ?)
+     ON CONFLICT(operator_id, kind) DO UPDATE SET
+       secret_enc = excluded.secret_enc, hint = excluded.hint, created_at = excluded.created_at`,
+    [auth.operator_id, kind, sealSecret(secretKey, token), secretHint(token), new Date().toISOString()]
+  );
+
+  const label = await startChannel(auth.operator_id, kind);
+  if (!label) {
+    // A token the provider rejects must not be left behind looking configured.
+    db.run("DELETE FROM approval_channel_secrets WHERE operator_id = ? AND kind = ?", [
+      auth.operator_id,
+      kind,
+    ]);
+    return { error: "the provider refused this token", status: 400 };
+  }
+  db.run("UPDATE approval_channel_secrets SET label = ? WHERE operator_id = ? AND kind = ?", [
+    label,
+    auth.operator_id,
+    kind,
+  ]);
+
+  // One-shot pairing code: the operator sends it to the bot, which binds their
+  // address. Short-lived on purpose.
+  const code = randomUUID().slice(0, 8);
+  db.run(
+    `INSERT INTO approval_pairing_codes (code, operator_id, kind, expires_at) VALUES (?, ?, ?, ?)`,
+    [code, auth.operator_id, kind, new Date(Date.now() + 30 * 60_000).toISOString()]
+  );
+  return { kind, label, hint: secretHint(token), pairing_code: code };
+}
+
+async function handleChannelDisconnect(
+  body: Record<string, unknown>
+): Promise<{ removed: number } | { error: string; status: number }> {
+  const auth = resolveApprovalAuth(body, "channels");
+  if ("error" in auth) return auth;
+  const kind = typeof body.kind === "string" ? (body.kind as ChannelKind) : ("" as ChannelKind);
+  if (!kind) return { error: "kind is required", status: 400 };
+
+  const channel = notifyRegistry.get(kind);
+  if (channel) await channel.stop();
+  notifyRegistry.unregister(kind);
+  db.run("DELETE FROM approval_channel_secrets WHERE operator_id = ? AND kind = ?", [
+    auth.operator_id,
+    kind,
+  ]);
+  const removed = db.run("DELETE FROM approval_channels WHERE operator_id = ? AND kind = ?", [
+    auth.operator_id,
+    kind,
+  ]).changes;
+  db.run("DELETE FROM approval_pairing_codes WHERE operator_id = ? AND kind = ?", [
+    auth.operator_id,
+    kind,
+  ]);
+  return { removed };
+}
+
+function handleChannelList(
+  body: Record<string, unknown>
+): { channels: Array<Record<string, unknown>> } | { error: string; status: number } {
+  const auth = resolveApprovalAuth(body, "channels");
+  if ("error" in auth) return auth;
+  const secrets = db
+    .query("SELECT kind, hint, label FROM approval_channel_secrets WHERE operator_id = ?")
+    .all(auth.operator_id) as Array<{ kind: string; hint: string; label: string }>;
+  const bindings = db
+    .query("SELECT kind, address, label FROM approval_channels WHERE operator_id = ? AND enabled = 1")
+    .all(auth.operator_id) as Array<{ kind: string; address: string; label: string }>;
+  const ready = new Set(notifyRegistry.readyKinds());
+  // The token NEVER comes back -- only a 4-character hint of it.
+  return {
+    channels: (["telegram", "discord", "ntfy"] as ChannelKind[]).map((kind) => {
+      const secret = secrets.find((x) => x.kind === kind);
+      const bound = bindings.filter((b) => b.kind === kind);
+      return {
+        kind,
+        configured: !!secret,
+        connected: !!secret && ready.has(kind),
+        bot_label: secret?.label ?? "",
+        token_hint: secret?.hint ?? "",
+        paired: bound.length,
+        // Addresses are the operator's own account ids; the labels are enough
+        // for the UI and keep the ids out of the renderer.
+        paired_labels: bound.map((b) => b.label).filter(Boolean),
+      };
+    }),
+  };
+}
+
 function handleApprovalTokenMint(
   body: ApprovalTokenMintRequest & Record<string, unknown>
 ): ApprovalTokenMintResponse | { error: string; status: number } {
@@ -2545,6 +2711,238 @@ function sweepApprovals(): { expired: number; purged: number } {
   if (expired > 0) log.info(`approval notifications expired: ${expired}`);
   return { expired, purged };
 }
+
+// --- Notification gateways (PLAN N3/N4) ---
+
+const secretKey = loadOrCreateSecretKey(join(dirname(DB_PATH), "notify.key"));
+
+/** Bindings, pairing codes and posted copies, backed by SQLite. */
+const registryStore: RegistryStore = {
+  bindingsFor(operatorId) {
+    const rows = db
+      .query(
+        `SELECT id, operator_id, kind, address, label, enabled
+           FROM approval_channels WHERE operator_id = ? AND enabled = 1`
+      )
+      .all(operatorId) as Array<{
+      id: string;
+      operator_id: string;
+      kind: string;
+      address: string;
+      label: string;
+      enabled: number;
+    }>;
+    return rows.map((r) => ({
+      id: r.id,
+      operator_id: r.operator_id,
+      kind: r.kind as ChannelKind,
+      address: r.address,
+      label: r.label,
+      enabled: r.enabled === 1,
+    }));
+  },
+  binding(bindingId) {
+    const r = db
+      .query(`SELECT id, operator_id, kind, address, label, enabled FROM approval_channels WHERE id = ?`)
+      .get(bindingId) as
+      | { id: string; operator_id: string; kind: string; address: string; label: string; enabled: number }
+      | null;
+    return r
+      ? {
+          id: r.id,
+          operator_id: r.operator_id,
+          kind: r.kind as ChannelKind,
+          address: r.address,
+          label: r.label,
+          enabled: r.enabled === 1,
+        }
+      : null;
+  },
+  recordPost(rec) {
+    db.run(
+      `INSERT OR REPLACE INTO approval_posts (approval_id, kind, binding_id, external_ref)
+       VALUES (?, ?, ?, ?)`,
+      [rec.approvalId, rec.kind, rec.bindingId, rec.externalRef]
+    );
+  },
+  postsFor(approvalId) {
+    const rows = db
+      .query("SELECT approval_id, kind, binding_id, external_ref FROM approval_posts WHERE approval_id = ?")
+      .all(approvalId) as Array<{
+      approval_id: string;
+      kind: string;
+      binding_id: string;
+      external_ref: string;
+    }>;
+    return rows.map((r) => ({
+      approvalId: r.approval_id,
+      kind: r.kind as ChannelKind,
+      bindingId: r.binding_id,
+      externalRef: r.external_ref,
+    }));
+  },
+  clearPosts(approvalId) {
+    db.run("DELETE FROM approval_posts WHERE approval_id = ?", [approvalId]);
+  },
+};
+
+const notifyRegistry = new NotificationRegistry(registryStore, {
+  info: (m) => log.info(m),
+  error: (m, e) => log.error(m, e),
+});
+
+/** Address -> binding, for a gateway's authorisation check. */
+function bindingForAddress(kind: ChannelKind, address: string): ChannelBinding | null {
+  const r = db
+    .query(
+      `SELECT id, operator_id, kind, address, label, enabled
+         FROM approval_channels WHERE kind = ? AND address = ? AND enabled = 1`
+    )
+    .get(kind, address) as
+    | { id: string; operator_id: string; kind: string; address: string; label: string; enabled: number }
+    | null;
+  return r
+    ? {
+        id: r.id,
+        operator_id: r.operator_id,
+        kind: r.kind as ChannelKind,
+        address: r.address,
+        label: r.label,
+        enabled: true,
+      }
+    : null;
+}
+
+/**
+ * What a gateway calls when a channel produces an answer or a pairing attempt.
+ * Arbitration stays HERE, never in an adapter (C-1).
+ */
+const channelHost: ChannelHost = {
+  async onAnswer(kind, answer) {
+    const binding = bindingForAddress(kind, answer.fromAddress);
+    // Unknown address: nothing is written, nothing is answered. The bot's
+    // username is public, so strangers WILL message it.
+    if (!binding) return null;
+    const row = db
+      .query("SELECT * FROM pending_approvals WHERE id = ?")
+      .get(answer.approvalId) as ApprovalRow | null;
+    if (!row || row.operator_id !== binding.operator_id) return null;
+
+    let answerText: string | null = null;
+    if (answer.answerText) {
+      const clean = sanitizeAnswerForPty(answer.answerText);
+      if (!clean.ok) return null;
+      answerText = clean.value;
+    }
+    const settled = settleApproval(
+      answer.approvalId,
+      binding.operator_id,
+      kind,
+      answer.answerKind,
+      answerText
+    );
+    if ("error" in settled) return null;
+    // Rewrite the copies on the OTHER channels; the winning one has already
+    // acknowledged its own user.
+    void notifyRegistry.settle(settled.approval, kind, kind);
+    return settled.approval;
+  },
+
+  async onPair(kind, code, address, label) {
+    const row = db
+      .query("SELECT operator_id, kind, expires_at FROM approval_pairing_codes WHERE code = ?")
+      .get(code) as { operator_id: string; kind: string; expires_at: string } | null;
+    if (!row || row.kind !== kind) return null;
+    if (new Date(row.expires_at).getTime() < Date.now()) {
+      db.run("DELETE FROM approval_pairing_codes WHERE code = ?", [code]);
+      return null;
+    }
+    // One-shot: consumed on first use, like the companion's QR token.
+    db.run("DELETE FROM approval_pairing_codes WHERE code = ?", [code]);
+    const id = randomUUID();
+    db.run(
+      `INSERT INTO approval_channels (id, operator_id, kind, address, label, enabled, created_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?)
+       ON CONFLICT(operator_id, kind, address) DO UPDATE SET enabled = 1, label = excluded.label`,
+      [id, row.operator_id, kind, address, label.slice(0, 64), new Date().toISOString()]
+    );
+    log.info(`notify: ${kind} paired for operator ${row.operator_id}`);
+    return bindingForAddress(kind, address);
+  },
+
+  log: { info: (m) => log.info(m), error: (m, e) => log.error(m, e) },
+};
+
+/** Approval a Telegram reply-to refers to. */
+function approvalForPostedMessage(kind: ChannelKind, address: string, externalRef: string): string | null {
+  const binding = bindingForAddress(kind, address);
+  if (!binding) return null;
+  const row = db
+    .query(
+      `SELECT approval_id FROM approval_posts
+        WHERE kind = ? AND external_ref = ? AND binding_id = ?`
+    )
+    .get(kind, externalRef, binding.id) as { approval_id: string } | null;
+  return row?.approval_id ?? null;
+}
+
+/** (Re)build a gateway from its stored token. Returns the bot label, or null. */
+async function startChannel(operatorId: string, kind: ChannelKind): Promise<string | null> {
+  const row = db
+    .query("SELECT secret_enc FROM approval_channel_secrets WHERE operator_id = ? AND kind = ?")
+    .get(operatorId, kind) as { secret_enc: string } | null;
+  if (!row) return null;
+  const token = openSecret(secretKey, row.secret_enc);
+  if (!token) {
+    log.error(`notify: ${kind} token could not be decrypted — reconnect the channel`);
+    return null;
+  }
+  const existing = notifyRegistry.get(kind);
+  if (existing) await existing.stop();
+
+  if (kind === "telegram") {
+    const channel = new TelegramChannel({
+      token,
+      host: channelHost,
+      bindingFor: (address) => bindingForAddress("telegram", address),
+      approvalForMessage: (address, ref) => approvalForPostedMessage("telegram", address, ref),
+    });
+    const me = await channel.describe();
+    if (!me) return null;
+    channel.start();
+    notifyRegistry.register(channel);
+    return me.username;
+  }
+  if (kind === "discord") {
+    const channel = new DiscordChannel({
+      token,
+      host: channelHost,
+      bindingFor: (address) => bindingForAddress("discord", address),
+    });
+    const me = await channel.describe();
+    if (!me) return null;
+    channel.start();
+    notifyRegistry.register(channel);
+    return me.username;
+  }
+  return null;
+}
+
+/** Bring back every configured gateway at boot. */
+async function startConfiguredChannels(): Promise<void> {
+  const rows = db
+    .query("SELECT operator_id, kind FROM approval_channel_secrets")
+    .all() as Array<{ operator_id: string; kind: string }>;
+  for (const r of rows) {
+    try {
+      const label = await startChannel(r.operator_id, r.kind as ChannelKind);
+      log.info(`notify: ${r.kind} ${label ? `started (@${label})` : "could not start"}`);
+    } catch (e) {
+      log.error(`notify: ${r.kind} failed to start`, e);
+    }
+  }
+}
+void startConfiguredChannels();
 
 // Own timer rather than a call from purgeOldMessages(): that function is
 // invoked at module load, BEFORE the const tunables above exist (temporal dead
@@ -2874,6 +3272,27 @@ const server = Bun.serve<WsData>({
         }
         case "/approval/delivered": {
           const result = handleApprovalDelivered(body as ApprovalDeliveredRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/approval/channel-connect": {
+          const result = await handleChannelConnect(body as Record<string, unknown>);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/approval/channel-disconnect": {
+          const result = await handleChannelDisconnect(body as Record<string, unknown>);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/approval/channel-list": {
+          const result = handleChannelList(body as Record<string, unknown>);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }
