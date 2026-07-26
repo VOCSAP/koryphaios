@@ -6,8 +6,17 @@
 // ever shows a 4-character hint of it.
 
 import { useCallback, useEffect, useState } from 'react'
+import qrcode from 'qrcode-generator'
 import type { ApprovalChannelStatus } from '@shared/types'
 import { GLYPH_BADGES } from './icons'
+
+/** Same QR recipe as the companion dialog: a self-contained SVG, no image. */
+function qrSvg(text: string): string {
+  const qr = qrcode(0, 'M')
+  qr.addData(text)
+  qr.make()
+  return qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true })
+}
 
 type Kind = ApprovalChannelStatus['kind']
 
@@ -35,7 +44,17 @@ export function NotificationChannels({ t, enabled }: Props): React.JSX.Element {
   const [editing, setEditing] = useState<Kind | null>(null)
   const [token, setToken] = useState('')
   const [error, setError] = useState('')
-  const [pairing, setPairing] = useState<{ kind: Kind; code: string } | null>(null)
+  const [pairing, setPairing] = useState<{
+    kind: Kind
+    code: string
+    deepLink: string
+    inviteUrl: string
+  } | null>(null)
+  // The link payload carries the operator PRIVATE KEY, so it is never fetched
+  // until the operator asks, and it is dropped as soon as they close it.
+  const [linkCode, setLinkCode] = useState('')
+  const [linkInput, setLinkInput] = useState('')
+  const [linkResult, setLinkResult] = useState<'ok' | 'failed' | null>(null)
 
   const refresh = useCallback(async (): Promise<void> => {
     try {
@@ -56,7 +75,12 @@ export function NotificationChannels({ t, enabled }: Props): React.JSX.Element {
     setError('')
     try {
       const res = await window.api.approvalConnect(kind, token.trim())
-      setPairing({ kind, code: res.pairing_code })
+      setPairing({
+        kind,
+        code: res.pairing_code,
+        deepLink: res.deep_link,
+        inviteUrl: res.invite_url
+      })
       setEditing(null)
       setToken('')
       await refresh()
@@ -160,9 +184,90 @@ export function NotificationChannels({ t, enabled }: Props): React.JSX.Element {
 
       {pairing && (
         <div className="notif-pairing">
-          <p>{t(`notifications.pair.${pairing.kind}`)}</p>
+          {pairing.inviteUrl && (
+            <>
+              <p>{t('notifications.inviteBot')}</p>
+              <p>
+                <a href={pairing.inviteUrl} target="_blank" rel="noreferrer">
+                  {t('notifications.inviteLink')}
+                </a>
+              </p>
+            </>
+          )}
+          <p>{pairing.deepLink ? t('notifications.scanToPair') : t(`notifications.pair.${pairing.kind}`)}</p>
+          {pairing.deepLink && (
+            <>
+              {/* qrcode-generator emits a self-contained <svg>; the payload is
+                  our own deep link, never user input. */}
+              <div className="notif-qr" dangerouslySetInnerHTML={{ __html: qrSvg(pairing.deepLink) }} />
+              <p className="notif-link">{pairing.deepLink}</p>
+            </>
+          )}
           <code>{pairing.code}</code>
         </div>
+      )}
+
+      <div className="field">
+        <span>{t('notifications.linkTitle')}</span>
+      </div>
+      <div className="notif-link-row">
+        <button
+          className="btn"
+          onClick={() => {
+            if (linkCode) {
+              setLinkCode('')
+              return
+            }
+            void window.api.approvalEnrolmentExport().then((payload) => {
+              if (payload) setLinkCode(JSON.stringify(payload))
+            })
+          }}
+        >
+          {linkCode ? t('notifications.linkHide') : t('notifications.linkExport')}
+        </button>
+      </div>
+      {linkCode && (
+        <div className="notif-pairing">
+          <p className="notif-warn">{t('notifications.linkWarn')}</p>
+          <div className="notif-qr" dangerouslySetInnerHTML={{ __html: qrSvg(linkCode) }} />
+        </div>
+      )}
+      <div className="notif-link-row">
+        <input
+          type="password"
+          value={linkInput}
+          autoComplete="off"
+          spellCheck={false}
+          placeholder={t('notifications.linkPaste')}
+          onChange={(e) => setLinkInput(e.target.value)}
+        />
+        <button
+          className="btn"
+          disabled={!linkInput.trim()}
+          onClick={() => {
+            let payload: unknown = null
+            try {
+              payload = JSON.parse(linkInput)
+            } catch {
+              setLinkResult('failed')
+              return
+            }
+            void window.api.approvalEnrolmentApply(payload).then((ok) => {
+              setLinkResult(ok ? 'ok' : 'failed')
+              if (ok) {
+                setLinkInput('')
+                void refresh()
+              }
+            })
+          }}
+        >
+          {t('notifications.linkApply')}
+        </button>
+      </div>
+      {linkResult && (
+        <small className="field-check-help">
+          {t(linkResult === 'ok' ? 'notifications.linkDone' : 'notifications.linkFailed')}
+        </small>
       )}
 
       {!enabled && <small className="field-check-help">{t('notifications.disabledHint')}</small>}

@@ -108,8 +108,9 @@ bot, put it in a server you own, then talk to it in DM*. About five minutes.
    server list → *Create My Own*). One member is enough; it exists only to
    make you and the bot share a server.
 5. In Koryphaios, click **Connect** on the Discord row and paste the token.
-   The app gives you an **invite link** — open it and add the bot to the server
-   you just created.
+   The app builds the **invite link** for you (it reads the application id from
+   the token, so you never copy it by hand) — open it and add the bot to the
+   server you just created.
 6. The app shows a short **pairing code**. Send it to the bot in a direct
    message. That binds the bot to your Discord account.
 
@@ -149,9 +150,11 @@ Wi-Fi, approvals reach you anywhere.
 Your identity belongs to you, not to a machine. To have a second PC reach the
 same phone and the same channels:
 
-1. On the PC that is already set up: `Settings > Notifications > Link another
-   PC`. A QR code appears; it is single-use and short-lived.
-2. On the second PC: `Settings > Notifications > Link this PC` and scan it.
+1. On the PC that is already set up: `Settings > Notifications` → **Show the
+   link code**. A QR code appears. It carries your operator identity, so it is
+   only fetched when you ask for it — hide it again as soon as the other
+   machine has read it.
+2. On the second PC: paste the same code into **Link this PC**.
 
 Both machines now share one identity, so nothing needs re-pairing on the phone.
 Requests are labelled with their origin — `bureau · koryphaios`,

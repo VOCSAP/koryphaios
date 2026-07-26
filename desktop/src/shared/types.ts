@@ -1099,7 +1099,16 @@ export interface DeckApi {
   approvalConnect(
     kind: 'telegram' | 'discord',
     token: string
-  ): Promise<{ kind: string; label: string; hint: string; pairing_code: string }>
+  ): Promise<{
+    kind: string
+    label: string
+    hint: string
+    pairing_code: string
+    /** Telegram deep link (t.me/<bot>?start=<code>) — rendered as a QR. */
+    deep_link: string
+    /** Discord OAuth2 invite URL: the bot must share a server to DM you. */
+    invite_url: string
+  }>
   approvalDisconnect(kind: 'telegram' | 'discord' | 'ntfy'): Promise<{ removed: number }>
   /** One-shot payload for linking another PC to this operator identity. */
   approvalEnrolmentExport(): Promise<ApprovalEnrolmentPayload | null>

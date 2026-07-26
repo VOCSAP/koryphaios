@@ -5693,3 +5693,42 @@ svg.glyph {
   text-align: center;
   color: var(--accent);
 }
+
+/* QR + link payloads inside the notification panel. The QR sits on white in
+   both themes: a dark-on-dark code is unreadable by a phone camera. */
+.notif-qr {
+  width: 180px;
+  margin: 8px auto;
+  padding: 6px;
+  border-radius: 6px;
+  background: #fff;
+}
+.notif-qr svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+.notif-link {
+  margin: 0;
+  font-size: 11px;
+  color: var(--fg-dim);
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+/* The link payload IS the operator identity — warn in the danger colour, not
+   as neutral help text. */
+.notif-warn {
+  margin: 0 0 6px;
+  color: var(--danger);
+  font-size: 12px;
+}
+.notif-link-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin: 4px 0;
+}
+.notif-link-row input {
+  flex: 1;
+  min-width: 0;
+}

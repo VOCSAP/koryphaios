@@ -695,5 +695,16 @@
   "notifications.pair.telegram": "Envoyez ce code à votre bot avec /start pour terminer l'appairage :",
   "notifications.pair.discord": "Envoyez ce code à votre bot en message privé pour terminer l'appairage :",
   "notifications.pair.ntfy": "Scannez ce code avec l'application Koryphaios.",
-  "notifications.disabledHint": "Activez les approbations à distance ci-dessus pour connecter un canal."
+  "notifications.disabledHint": "Activez les approbations à distance ci-dessus pour connecter un canal.",
+  "notifications.scanToPair": "Scannez ceci avec votre téléphone, ou ouvrez le lien et appuyez sur Démarrer :",
+  "notifications.inviteBot": "D'abord, invitez le bot sur un serveur privé qui vous appartient — sans cela il ne peut pas vous écrire :",
+  "notifications.inviteLink": "Ouvrir l'invitation",
+  "notifications.linkTitle": "Utiliser la même identité sur un autre PC",
+  "notifications.linkExport": "Afficher le code de liaison",
+  "notifications.linkHide": "Masquer",
+  "notifications.linkApply": "Lier ce PC",
+  "notifications.linkPaste": "Collez le code affiché sur l'autre PC",
+  "notifications.linkWarn": "Ce code porte votre identité d'opérateur. Ne l'affichez que pour votre seconde machine, et refermez-le juste après.",
+  "notifications.linkDone": "Ce PC partage désormais votre identité — rien à réappairer sur le téléphone.",
+  "notifications.linkFailed": "Ce code n'est pas une identité valide."
 }

@@ -2539,7 +2539,10 @@ function handleApprovalDelivered(
  */
 async function handleChannelConnect(
   body: Record<string, unknown>
-): Promise<{ kind: string; label: string; hint: string; pairing_code: string } | { error: string; status: number }> {
+): Promise<
+  | { kind: string; label: string; hint: string; pairing_code: string; deep_link: string; invite_url: string }
+  | { error: string; status: number }
+> {
   const auth = resolveApprovalAuth(body, "channels");
   if ("error" in auth) return auth;
 
@@ -2558,8 +2561,8 @@ async function handleChannelConnect(
     [auth.operator_id, kind, sealSecret(secretKey, token), secretHint(token), new Date().toISOString()]
   );
 
-  const label = await startChannel(auth.operator_id, kind);
-  if (!label) {
+  const me = await startChannel(auth.operator_id, kind);
+  if (!me) {
     // A token the provider rejects must not be left behind looking configured.
     db.run("DELETE FROM approval_channel_secrets WHERE operator_id = ? AND kind = ?", [
       auth.operator_id,
@@ -2568,7 +2571,7 @@ async function handleChannelConnect(
     return { error: "the provider refused this token", status: 400 };
   }
   db.run("UPDATE approval_channel_secrets SET label = ? WHERE operator_id = ? AND kind = ?", [
-    label,
+    me.label,
     auth.operator_id,
     kind,
   ]);
@@ -2580,7 +2583,20 @@ async function handleChannelConnect(
     `INSERT INTO approval_pairing_codes (code, operator_id, kind, expires_at) VALUES (?, ?, ?, ?)`,
     [code, auth.operator_id, kind, new Date(Date.now() + 30 * 60_000).toISOString()]
   );
-  return { kind, label, hint: secretHint(token), pairing_code: code };
+  // Everything the operator still has to do, handed over ready to use: a deep
+  // link they can scan for Telegram, an invite URL for Discord (the bot must
+  // share a server with them before it may DM — error 50278 otherwise).
+  return {
+    kind,
+    label: me.label,
+    hint: secretHint(token),
+    pairing_code: code,
+    deep_link: kind === "telegram" ? `https://t.me/${me.label}?start=${code}` : "",
+    invite_url:
+      kind === "discord" && me.appId
+        ? `https://discord.com/oauth2/authorize?client_id=${me.appId}&scope=bot&permissions=0`
+        : "",
+  };
 }
 
 async function handleChannelDisconnect(
@@ -2886,8 +2902,11 @@ function approvalForPostedMessage(kind: ChannelKind, address: string, externalRe
   return row?.approval_id ?? null;
 }
 
-/** (Re)build a gateway from its stored token. Returns the bot label, or null. */
-async function startChannel(operatorId: string, kind: ChannelKind): Promise<string | null> {
+/** (Re)build a gateway from its stored token. Returns the bot identity. */
+async function startChannel(
+  operatorId: string,
+  kind: ChannelKind
+): Promise<{ label: string; appId?: string } | null> {
   const row = db
     .query("SELECT secret_enc FROM approval_channel_secrets WHERE operator_id = ? AND kind = ?")
     .get(operatorId, kind) as { secret_enc: string } | null;
@@ -2911,7 +2930,7 @@ async function startChannel(operatorId: string, kind: ChannelKind): Promise<stri
     if (!me) return null;
     channel.start();
     notifyRegistry.register(channel);
-    return me.username;
+    return { label: me.username };
   }
   if (kind === "discord") {
     const channel = new DiscordChannel({
@@ -2923,7 +2942,7 @@ async function startChannel(operatorId: string, kind: ChannelKind): Promise<stri
     if (!me) return null;
     channel.start();
     notifyRegistry.register(channel);
-    return me.username;
+    return { label: me.username, appId: me.id };
   }
   return null;
 }
@@ -2935,8 +2954,8 @@ async function startConfiguredChannels(): Promise<void> {
     .all() as Array<{ operator_id: string; kind: string }>;
   for (const r of rows) {
     try {
-      const label = await startChannel(r.operator_id, r.kind as ChannelKind);
-      log.info(`notify: ${r.kind} ${label ? `started (@${label})` : "could not start"}`);
+      const me = await startChannel(r.operator_id, r.kind as ChannelKind);
+      log.info(`notify: ${r.kind} ${me ? `started (@${me.label})` : "could not start"}`);
     } catch (e) {
       log.error(`notify: ${r.kind} failed to start`, e);
     }

@@ -163,7 +163,14 @@ export async function listChannels(deps: ApprovalDeps): Promise<ChannelStatus[]>
 export async function connectChannel(
   deps: ApprovalDeps,
   args: { kind: 'telegram' | 'discord'; token: string }
-): Promise<{ kind: string; label: string; hint: string; pairing_code: string }> {
+): Promise<{
+  kind: string
+  label: string
+  hint: string
+  pairing_code: string
+  deep_link: string
+  invite_url: string
+}> {
   return signedPost(deps, '/approval/channel-connect', { kind: args.kind, token: args.token })
 }
 

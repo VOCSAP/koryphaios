@@ -44,6 +44,17 @@ export function availableLocales(dirs: string[]): LocaleOption[] {
 
 /** Embedded English base, mirror of locales/en.json (parity-tested). */
 export const EN_DEFAULTS: Record<string, string> = {
+  "notifications.scanToPair": "Scan this with your phone, or open the link and press Start:",
+  "notifications.inviteBot": "First, invite the bot to a private server you own — it cannot message you otherwise:",
+  "notifications.inviteLink": "Open the invite",
+  "notifications.linkTitle": "Use the same identity on another PC",
+  "notifications.linkExport": "Show the link code",
+  "notifications.linkHide": "Hide",
+  "notifications.linkApply": "Link this PC",
+  "notifications.linkPaste": "Paste the code shown on the other PC",
+  "notifications.linkWarn": "This code carries your operator identity. Show it only to your own second machine, and close it right after.",
+  "notifications.linkDone": "This PC now shares your identity — nothing to re-pair on your phone.",
+  "notifications.linkFailed": "That code is not a valid identity.",
   "settings.mobileApprovals": "Remote approvals (answer a waiting session from your phone)",
   "settings.mobileApprovalsHelp": "Off by default: turning it on sends the question outside this machine.",
   "notifications.title": "Notification channels",

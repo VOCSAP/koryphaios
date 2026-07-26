@@ -119,10 +119,14 @@ export class DiscordChannel implements NotificationChannel {
     }
   }
 
-  /** Verify the token and learn the bot's own identity. */
-  async describe(): Promise<{ username: string } | null> {
-    const me = await this.rest<{ username?: string }>("/users/@me", { method: "GET" });
-    return me?.username ? { username: me.username } : null;
+  /**
+   * Verify the token and learn the bot's identity. For a bot user, `id` IS the
+   * application id — which is what builds the invite URL, so the operator never
+   * has to copy it out of the portal by hand.
+   */
+  async describe(): Promise<{ username: string; id: string } | null> {
+    const me = await this.rest<{ username?: string; id?: string }>("/users/@me", { method: "GET" });
+    return me?.username && me.id ? { username: me.username, id: me.id } : null;
   }
 
   private async dmChannelFor(userId: string): Promise<string | null> {
