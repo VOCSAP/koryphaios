@@ -151,6 +151,36 @@ Every transport leg is **outgoing** — Telegram long-polls `getUpdates`,
 Discord holds a gateway socket, ntfy holds a streaming GET — so the broker
 opens no port and publishes no address.
 
+**A broker serves SEVERAL operators, and that shapes two things.**
+
+*The gateway table is keyed by `(operator_id, kind)`.* Keyed by kind alone, the
+second operator to enrol a channel replaced — and stopped — the first one's:
+their notifications stopped, and on ntfy they arrived but their answers vanished,
+because the reply topic came from somebody else's config. Availability only, never
+confidentiality; but silent, which is worse.
+
+*One gateway per TRANSPORT, shared when the transport is.* Two operators may
+enrol the same bot token deliberately (one person, two OS accounts, one bot).
+Telegram allows exactly one `getUpdates` consumer per token, so a gateway each
+would make them fight forever. `broker.ts` therefore digests the sealed config
+(`gatewayKey`) and registers one instance under both slots; stopping is
+reference-counted, so disconnecting one operator never cuts the other. For ntfy
+the digest covers the whole config, so two operators sharing an ntfy account
+still get one subscription each — their topics differ.
+
+**Authorisation is asked in the right direction.** An inbound answer resolves
+the APPROVAL first, then asks "is this address paired *for that approval's
+owner*" (`bindingFor(kind, address, operator_id)`). Resolving the address to
+"its" operator and comparing was equivalent only while an address belonged to
+one operator — which stops being true as soon as one person points two operator
+identities at one chat account: `.get()` picked one row, so roughly half the
+answers were refused as "already handled" in front of a perfectly valid request.
+`isPairedAddress` survives as a cheap pre-filter for adapters dropping
+strangers, and is documented as not being the gate. One ntfy-specific guard
+comes with it: a pairing code is only redeemable on the topic it was issued for,
+because there the address is a secret the broker minted — unlike a chat id,
+which the provider supplies and any chat may legitimately present.
+
 **ntfy, the Koryphaios app's channel (N5).** Two topics, one direction each:
 the broker publishes questions on `topic_notif` and subscribes to
 `topic_replies`; the phone does the mirror image. Both are 24 random bytes,

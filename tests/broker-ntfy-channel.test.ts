@@ -592,6 +592,168 @@ describe("ntfy enrolment", () => {
     expect(msgs.some((m) => String(m.message).includes("already handled"))).toBe(true);
   }, 60_000);
 
+  test("two operators on ONE broker each keep their own channel", async () => {
+    // The shared-broker case: two OS accounts, or a box on the network used by
+    // a team. Before the registry was keyed per operator, the second enrolment
+    // replaced (and stopped) the first: their questions arrived — the topic
+    // came from the binding — but the reply address came from the OTHER
+    // operator's gateway, so their answers vanished in silence.
+    const b = await startBroker();
+    brokers.push(b);
+    const ntfy = startStubNtfy();
+    const alice = newOperator();
+    const bob = newOperator();
+
+    const aConn = await signedPost<{ mobile_payload: string }>(
+      b,
+      "/approval/channel-connect",
+      { kind: "ntfy", server: ntfy.url },
+      alice
+    );
+    const bConn = await signedPost<{ mobile_payload: string }>(
+      b,
+      "/approval/channel-connect",
+      { kind: "ntfy", server: ntfy.url },
+      bob
+    );
+    const a = decodePairingPayload(aConn.body.mobile_payload)!;
+    const c = decodePairingPayload(bConn.body.mobile_payload)!;
+    expect(a.topic_notif).not.toBe(c.topic_notif);
+
+    for (const [op, payload] of [
+      [alice, a],
+      [bob, c],
+    ] as const) {
+      await ntfy.publishRaw(payload.topic_replies, encodePair(payload.code, "phone"));
+      await until(async () => {
+        const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(
+          b,
+          "/approval/channel-list",
+          {},
+          op
+        );
+        return list.body.channels.find((x) => x.kind === "ntfy")!.paired === 1;
+      });
+    }
+
+    // Alice's enrolment is still RUNNING after Bob's — it was not replaced.
+    const aliceList = await signedPost<{ channels: Array<Record<string, unknown>> }>(
+      b,
+      "/approval/channel-list",
+      {},
+      alice
+    );
+    expect(aliceList.body.channels.find((x) => x.kind === "ntfy")!.connected).toBe(true);
+
+    // Alice's question goes to Alice's topic, with ALICE's reply address.
+    const added = await signedPost<{ approval: Approval }>(
+      b,
+      "/approval/add",
+      {
+        kind: "permission",
+        title: "Alice's build",
+        question: "Allow?",
+        origin: { host: "bureau", project_key: "p" },
+      },
+      alice
+    );
+    const id = added.body.approval.id;
+
+    expect(
+      await until(() =>
+        (ntfy.published.get(a.topic_notif) ?? []).some((m) => String(m.click).includes(id))
+      )
+    ).toBe(true);
+    // Nothing of Alice's ever appeared on Bob's topic (C-5).
+    expect(
+      (ntfy.published.get(c.topic_notif) ?? []).some((m) => String(m.click).includes(id))
+    ).toBe(false);
+
+    const request = (ntfy.published.get(a.topic_notif) ?? []).find((m) =>
+      String(m.click).includes(id)
+    )!;
+    const actions = request.actions as Array<{ url: string }>;
+    expect(actions[0]!.url).toContain(a.topic_replies);
+    expect(actions[0]!.url).not.toContain(c.topic_replies);
+
+    // And Alice's answer, published on Alice's reply topic, actually lands.
+    await ntfy.publishRaw(a.topic_replies, encodeAnswer(id, "allow"));
+    expect(
+      await until(async () => {
+        const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", {}, alice);
+        return list.body.approvals.find((x) => x.id === id)?.status === "answered";
+      })
+    ).toBe(true);
+  }, 90_000);
+
+  test("a pairing code presented on ANOTHER operator's topic is refused", async () => {
+    // The topics are secrets the broker mints, so a code can only be redeemed
+    // on the transport it was issued for. Otherwise redeeming Alice's code on
+    // Bob's topic would bind Alice to it — and an answer published there would
+    // then authorise against Alice's approvals.
+    const b = await startBroker();
+    brokers.push(b);
+    const ntfy = startStubNtfy();
+    const alice = newOperator();
+    const bob = newOperator();
+
+    const aConn = await signedPost<{ pairing_code: string; mobile_payload: string }>(
+      b,
+      "/approval/channel-connect",
+      { kind: "ntfy", server: ntfy.url },
+      alice
+    );
+    const bConn = await signedPost<{ mobile_payload: string }>(
+      b,
+      "/approval/channel-connect",
+      { kind: "ntfy", server: ntfy.url },
+      bob
+    );
+    const bobTopics = decodePairingPayload(bConn.body.mobile_payload)!;
+
+    // Alice's code, redeemed on Bob's replies topic.
+    await ntfy.publishRaw(bobTopics.topic_replies, encodePair(aConn.body.pairing_code, "attacker"));
+    await Bun.sleep(500);
+
+    // Alice gained nothing, and Bob's own pairing is untouched.
+    for (const op of [alice, bob]) {
+      const list = await signedPost<{ channels: Array<Record<string, unknown>> }>(
+        b,
+        "/approval/channel-list",
+        {},
+        op
+      );
+      expect(list.body.channels.find((x) => x.kind === "ntfy")!.paired).toBe(0);
+    }
+  }, 90_000);
+
+  test("one operator disconnecting does not cut the other", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const ntfy = startStubNtfy();
+    const alice = newOperator();
+    const bob = newOperator();
+
+    await signedPost(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, alice);
+    await signedPost(b, "/approval/channel-connect", { kind: "ntfy", server: ntfy.url }, bob);
+    await signedPost(b, "/approval/channel-disconnect", { kind: "ntfy" }, bob);
+
+    const aliceList = await signedPost<{ channels: Array<Record<string, unknown>> }>(
+      b,
+      "/approval/channel-list",
+      {},
+      alice
+    );
+    expect(aliceList.body.channels.find((x) => x.kind === "ntfy")!.connected).toBe(true);
+    const bobList = await signedPost<{ channels: Array<Record<string, unknown>> }>(
+      b,
+      "/approval/channel-list",
+      {},
+      bob
+    );
+    expect(bobList.body.channels.find((x) => x.kind === "ntfy")!.configured).toBe(false);
+  }, 90_000);
+
   test("ntfy needs no bot token: an anonymous server connects", async () => {
     const b = await startBroker();
     brokers.push(b);

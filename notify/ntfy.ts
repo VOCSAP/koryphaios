@@ -313,11 +313,21 @@ export class NtfyChannel implements NotificationChannel {
     }
   }
 
+  /**
+   * Publish a pending request.
+   *
+   * BOTH topics come from this gateway's own config, never half from the
+   * binding: the two must belong to the same enrolment or the request lands on
+   * one operator's phone with another's reply address, and the answer
+   * disappears. The registry now guarantees the gateway matches the binding's
+   * operator, and reading a single source of truth is what keeps it guaranteed.
+   */
   async post(binding: ChannelBinding, approval: Approval): Promise<PostedMessage | null> {
+    void binding;
     const sent = await this.publish(
       buildApprovalPublish(approval, originLabel(approval), {
         server: this.deps.config.server,
-        topicNotif: binding.address,
+        topicNotif: this.deps.config.topic_notif,
         topicReplies: this.deps.config.topic_replies,
         token: this.deps.config.token,
       })
@@ -329,21 +339,23 @@ export class NtfyChannel implements NotificationChannel {
   }
 
   async settle(
-    binding: ChannelBinding,
+    _binding: ChannelBinding,
     _posted: PostedMessage,
     approval: Approval,
     viaLabel: string
   ): Promise<void> {
     await this.publish(
       buildSettledPublish(approval.id, renderSettled(approval, viaLabel), {
-        topicNotif: binding.address,
+        topicNotif: this.deps.config.topic_notif,
       })
     );
   }
 
-  async rejectLate(binding: ChannelBinding, answer: InboundAnswer): Promise<void> {
+  async rejectLate(_binding: ChannelBinding, answer: InboundAnswer): Promise<void> {
     await this.publish(
-      buildSettledPublish(answer.approvalId, ALREADY_HANDLED_NOTICE, { topicNotif: binding.address })
+      buildSettledPublish(answer.approvalId, ALREADY_HANDLED_NOTICE, {
+        topicNotif: this.deps.config.topic_notif,
+      })
     );
   }
 }

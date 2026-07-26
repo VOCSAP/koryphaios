@@ -346,6 +346,29 @@ Validation Discord :
       (le message d'erreur doit être compréhensible).
 - [ ] Sans serveur mutuel : l'erreur 50278 doit être lisible dans les logs.
 
+Broker partagé par plusieurs opérateurs (corrigé, à valider avec de vrais bots) :
+
+> Couvert automatiquement pour ntfy (deux opérateurs contre le faux serveur
+> local). Ce qui suit exige de vrais bots, donc le terrain.
+
+- [ ] **Deux tokens de bot DIFFÉRENTS, deux opérateurs** (Telegram, puis
+      Discord) : les deux passerelles tournent **en même temps**, chacun reçoit
+      ses propres demandes. Avant correction, le second enrôlement arrêtait le
+      premier.
+- [ ] **Le MÊME token de bot pour deux opérateurs** (un seul bot, deux comptes
+      OS) : **une seule** passerelle démarre. Sur Telegram, l'ABSENCE de 409
+      `Conflict` dans les logs est le signe que le partage a eu lieu — un 409
+      signifierait deux consommateurs, donc un partage raté.
+- [ ] Même cas, **même compte de messagerie** : les demandes des deux identités
+      arrivent dans la MÊME conversation, distinguées par le badge d'origine
+      (`bureau · projet` vs `portable · projet`), et **répondre à l'une règle
+      bien celle-là**. C'est le cas qui échouait : une réponse sur deux était
+      refusée en « déjà traitée » devant une demande parfaitement valide. Non
+      couvert automatiquement — pour ntfy une adresse est un topic unique par
+      opérateur, la collision n'y est pas constructible.
+- [ ] Toujours même token partagé : **déconnecter un opérateur** ne coupe pas
+      l'autre (arrêt à compteur de références).
+
 Arbitrage et cloisonnement :
 - [ ] Répondre dans le Deck → la notif du téléphone devient « traitée via
       deck » et perd ses boutons ; y répondre ensuite affiche

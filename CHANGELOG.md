@@ -1,5 +1,57 @@
 # Changelog
 
+## core (experimental) — a shared broker really serves several operators
+
+Two defects that only appear when one broker serves more than one operator
+identity — the normal case on a box shared by a team, or on one PC with two OS
+accounts. Both were pre-existing: Telegram and Discord have carried them since
+N3/N4, and ntfy merely inherited them.
+
+**The gateway table was keyed by channel KIND, not by (operator, kind).** So the
+second operator to enrol a channel replaced — and stopped — the first one's
+gateway. Telegram then failed cleanly (their bot never ran, so nothing arrived);
+ntfy failed confusingly, because the notification topic came from the binding
+while the reply topic came from the adapter's config: the question reached the
+phone and the answer went to a topic nobody was subscribed to. Availability
+only, never confidentiality — inbound routing resolves by address and the broker
+still refused to settle another operator's approval — but silent, which is worse
+than loud.
+
+Keying per operator is not enough on its own, though: two operators may enrol
+the **same bot token** deliberately, one person with two OS accounts and one
+bot. Telegram allows exactly one `getUpdates` consumer per token, so a gateway
+each would make them fight over the updates forever. `broker.ts` therefore
+digests the sealed config and shares one instance between the slots that resolve
+to the same transport; stopping is reference-counted, so disconnecting one
+operator never cuts the other. For ntfy the digest covers the whole config, so
+two operators on one ntfy account still get a subscription each — their topics
+differ, and each needs its own.
+
+**The authorisation question was asked in the wrong direction.** An inbound
+answer resolved the sender's address to "its" operator, then compared. That is
+equivalent to the right check only while an address belongs to exactly one
+operator — which stops being true the moment one person points two operator
+identities at one chat account, exactly what sharing a bot means. `SELECT …
+WHERE address = ?` then `.get()` picked one of the two rows, so roughly half the
+answers were refused as "already handled" in front of a perfectly valid request.
+It now resolves the APPROVAL first and asks "is this address paired *for that
+approval's owner*". Same guarantee, stated so it survives a second identity.
+`isPairedAddress` remains as what adapters actually wanted — a cheap pre-filter
+to drop strangers — and says in its own comment that it is not the gate.
+
+One guard came out of writing the test for it: an ntfy pairing code was
+redeemable on **any** topic, including another operator's. Since a topic is a
+secret the broker mints (unlike a chat id, which the provider supplies and any
+chat may legitimately present), a code is now only redeemable on the transport
+it was issued for. Without it, redeeming Alice's code on Bob's topic bound Alice
+to that topic, and an answer published there would have authorised against her
+approvals.
+
+1034 tests. ntfy's two-operator path is covered end to end against the stub on
+loopback; the same-address case is not, and cannot be — an ntfy address is a
+per-operator topic, so the collision is not constructible there. It needs two
+real bots, and is listed in `BACKLOG.md` §3.1 bis.
+
 ## core + desktop (experimental) — the Koryphaios app as a third approval channel
 
 Telegram and Discord already delivered a waiting session's question to a phone.
