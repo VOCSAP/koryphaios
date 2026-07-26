@@ -49,7 +49,7 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   "no" index that could land on "yes, and don't ask again") and appends the
   submitting Enter itself — a remote answer can never carry its own.
   Three channels are enrolled from `Settings > Notifications`: Telegram and
-  Discord take a bot token, the **Koryphaios mobile** row takes an ntfy relay
+  Discord take a bot token, the **Parastatès** row takes an ntfy relay
   address (the broker mints the topics) and answers with a QR that is a
   CREDENTIAL — it carries the topics and the access token, so it is shown
   under a danger-coloured warning and dropped on Done. `approvals:connect`

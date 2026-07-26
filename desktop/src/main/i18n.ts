@@ -71,7 +71,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   "notifications.help.discord": "Developer Portal → your app → Bot → Reset Token. Leave Interactions Endpoint URL empty, and invite the bot to a private server so it can send you a DM.",
   "notifications.pair.telegram": "Send this code to your bot with /start to finish pairing:",
   "notifications.pair.discord": "Send this code to your bot in a direct message to finish pairing:",
-  "notifications.pair.ntfy": "Scan this code with the Koryphaios app.",
+  "notifications.pair.ntfy": "Scan this code with the Parastatès app.",
   "notifications.server.ntfy": "ntfy server",
   "notifications.tokenOptional": "Optional — leave empty for an open server",
   "notifications.token.ntfy": "ntfy access token",

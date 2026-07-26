@@ -189,7 +189,8 @@ documented in the claude-peers README.
 - **Remote approvals** — the global switch. Off by default: turning it on means
   the text of a question leaves this machine.
 - **Channels** — one row per delivery channel (Telegram, Discord, the
-  Koryphaios mobile app) with its state and a Connect / Disconnect button. The
+  Parastatès, the Koryphaios companion app) with its state and a Connect /
+  Disconnect button. The
   bot token is handed to the broker, which runs the single gateway; it is never
   read back, only a 4-character hint of it is shown.
 - **Use the same identity on another PC** — shows a one-shot link code (as a

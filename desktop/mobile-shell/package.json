@@ -1,8 +1,8 @@
 {
-  "name": "koryphaios-mobile-shell",
+  "name": "parastates-shell",
   "version": "0.2.0",
   "private": true,
-  "description": "Capacitor Android shell for Koryphaios: companion mode (LAN screen mirror, multi-host) and approvals mode (ntfy, reachable anywhere). Requires Android SDK + Gradle to build; see README.md.",
+  "description": "Parastates - the Koryphaios companion app (Capacitor/Android): companion mode (LAN screen mirror, multi-host) and approvals mode (ntfy, reachable anywhere). Requires Android SDK + Gradle to build; see README.md.",
   "scripts": {
     "build": "bun build src/app.ts --outdir www/dist --target browser --minify",
     "add:android": "cap add android",

@@ -697,7 +697,7 @@
   "notifications.help.discord": "Portail développeur → votre app → Bot → Reset Token. Laissez « Interactions Endpoint URL » vide, et invitez le bot sur un serveur privé pour qu'il puisse vous écrire en privé.",
   "notifications.pair.telegram": "Envoyez ce code à votre bot avec /start pour terminer l'appairage :",
   "notifications.pair.discord": "Envoyez ce code à votre bot en message privé pour terminer l'appairage :",
-  "notifications.pair.ntfy": "Scannez ce code avec l'application Koryphaios.",
+  "notifications.pair.ntfy": "Scannez ce code avec l'application Parastatès.",
   "notifications.server.ntfy": "Serveur ntfy",
   "notifications.tokenOptional": "Facultatif — laissez vide pour un serveur ouvert",
   "notifications.token.ntfy": "Jeton d'accès ntfy",

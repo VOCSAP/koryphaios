@@ -7,7 +7,7 @@ The **Companion** dialog lets the operator access the window from a phone,
 > it needs the phone on the same Wi-Fi as this Deck, and it shows you the
 > window. Answering a waiting session from anywhere is a different feature with
 > a different pairing — see [notifications.md](notifications.md). The
-> Koryphaios app does both, and pairs for each separately: unpairing one never
+> Parastatès app does both, and pairs for each separately: unpairing one never
 > affects the other.
 
 ## Pairing
@@ -25,13 +25,13 @@ phone shows a "Host disconnected" screen with a Retry button; relaunch the
 app, click Companion and re-scan.
 
 The QR also carries the **fingerprint** of the certificate this app serves.
-A browser ignores it; the Koryphaios app uses it to pin the host, so from the
+A browser ignores it; Parastatès uses it to pin the host, so from the
 second visit on it accepts that exact certificate and nothing else — which is
 what makes a self-signed certificate safe on a network you share.
 
 ## Several Decks on one phone
 
-The Koryphaios app keeps a **list** of paired Decks with a selector, built up
+Parastatès keeps a **list** of paired Decks with a selector, built up
 by scanning each one's QR. Nothing changes here: every Deck keeps its own
 companion server and does not know the phone knows others.
 

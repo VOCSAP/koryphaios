@@ -1,15 +1,16 @@
 # Remote approvals (answering an agent from your phone)
 
-> **Status.** All three channels — Telegram, Discord and the Koryphaios mobile
-> app — are connected from `Settings > Notifications`. The mobile app is built
-> from source (`desktop/mobile-shell/`); there is no store listing yet.
+> **Status.** All three channels — Telegram, Discord and **Parastatès**, the
+> Koryphaios companion app — are connected from `Settings > Notifications`.
+> Parastatès is built from source (`desktop/mobile-shell/`); there is no store
+> listing yet.
 > End-to-end testing on a real phone is still pending, so treat the first run
 > as a trial.
 
 When a session stops and waits for you — a tool-permission dialog, a plan to
 approve, an open question — Koryphaios can register that as an **approval**
 and let you answer it from somewhere other than the machine: your phone, over
-Telegram, Discord, or the Koryphaios mobile app.
+Telegram, Discord, or Parastatès — the Koryphaios companion app.
 
 Answering anywhere settles the question everywhere. If you answer in the Deck,
 the phone notification becomes "already handled"; if you answer on the phone,
@@ -129,19 +130,20 @@ press the free-text button and a small form opens — up to 4000 characters.
 
 ---
 
-## Connecting the Koryphaios mobile app
+## Connecting Parastatès (the Koryphaios app)
 
-The mobile app doubles as a notification channel, so you do not need a
-third-party messenger — and it is the only channel where you can answer in
+**Parastatès** — *παραστάτης*, the chorus member who stands beside the leader —
+is the Koryphaios companion app. It doubles as a notification channel, so you do
+not need a third-party messenger — and it is the only channel where you can answer in
 your own words without a third party reading it.
 
 It works through **ntfy**, a small relay. Your PC *publishes* to it and
 *subscribes* to it; so does your phone. Neither ever accepts an incoming
 connection, which is why nothing on your machine becomes reachable.
 
-1. Install the Koryphaios app on your phone (built from
-   `desktop/mobile-shell/` — see its README; there is no store listing yet).
-2. In Koryphaios, click **Connect** on the **Koryphaios mobile** row.
+1. Install Parastatès on your phone (built from `desktop/mobile-shell/` — see
+   its README; there is no store listing yet).
+2. In Koryphaios, click **Connect** on the **Parastatès** row.
    - **ntfy server** — `https://ntfy.sh` works as it is. Point it at your own
      server instead if you would rather the questions never touch someone
      else's infrastructure.

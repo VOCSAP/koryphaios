@@ -181,7 +181,7 @@ comes with it: a pairing code is only redeemable on the topic it was issued for,
 because there the address is a secret the broker minted — unlike a chat id,
 which the provider supplies and any chat may legitimately present.
 
-**ntfy, the Koryphaios app's channel (N5).** Two topics, one direction each:
+**ntfy, the channel of Parastatès — the Koryphaios companion app (N5).** Two topics, one direction each:
 the broker publishes questions on `topic_notif` and subscribes to
 `topic_replies`; the phone does the mirror image. Both are 24 random bytes,
 minted by the broker at enrolment and **re-minted on every reconnect**, which
