@@ -5623,3 +5623,12 @@ svg.glyph {
   width: 860px;
   max-width: 94vw;
 }
+
+/* Sandbox rail glyph: amber interior when the shared auth volume has no
+   Claude credentials (agents cannot spawn until it is signed in). Amber is
+   the transient/warning tone of DESIGN §2; the strokes keep currentColor so
+   the dim/active/glow states still work. */
+.glyph-fill-warn {
+  fill: #e0b341;
+  opacity: 0.5;
+}

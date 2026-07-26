@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
-import { AmphoraGauge, GLYPHS } from './icons'
+import { AmphoraGauge, GLYPHS, PithosGlyph } from './icons'
 import { sessionRemainingFraction, usageTone } from '@shared/usage'
 import type { DeckView } from '@shared/types'
 
@@ -23,6 +23,16 @@ const VIEWS: { id: DeckView; key: string }[] = [
 
 /** Poll cadence of the ± badge (uncommitted-file count, PLAN GX9). */
 const GIT_BADGE_POLL_MS = 30_000
+
+/**
+ * Poll cadence of the sandbox auth state, and ONLY while sandbox mode is on
+ * for this project: `sandboxStatus` shells out to the engine, so an operator
+ * who never uses the sandbox must not pay a docker call every minute. Most
+ * updates arrive by event anyway (`onSandboxChanged` fires after every
+ * main-side state change) — this is the safety net for a token that expires
+ * with the app open.
+ */
+const SANDBOX_POLL_MS = 60_000
 
 /**
  * Poll cadence of the amphora gauge. Slower than the main-side 3-min cache on
@@ -107,6 +117,20 @@ export function NavRail(): React.JSX.Element {
   // client (EXPLORATION §3); the Compagnon button is a physical-presence
   // action, desktop window only.
   const views = remote ? VIEWS.filter((v) => v.id !== 'browser') : VIEWS
+  // Sandbox: amber inside the pithos when the shared auth volume carries no
+  // credentials — agents cannot spawn in that state, so the rail says it
+  // before the operator tries. Any other case (off, unknown, signed in) is
+  // rendered plain.
+  const sandboxStatus = useDeck((s) => s.sandboxStatus)
+  const refreshSandbox = useDeck((s) => s.refreshSandbox)
+  const sandboxNeedsAuth = sandboxStatus?.enabled === true && sandboxStatus.authed === false
+  const sandboxEnabled = sandboxStatus?.enabled === true
+  useEffect(() => {
+    if (!sandboxEnabled) return
+    const timer = setInterval(() => void refreshSandbox(), SANDBOX_POLL_MS)
+    return () => clearInterval(timer)
+  }, [sandboxEnabled, refreshSandbox])
+
   // REC in progress: red dot on the browser entry, whatever view is active.
   const recording = useDeck((s) => s.recordingSince) !== null
 
@@ -116,11 +140,15 @@ export function NavRail(): React.JSX.Element {
         <button
           key={v.id}
           className={`nav-rail-item${view === v.id ? ' is-active' : ''}`}
-          title={t(v.key)}
+          title={
+            v.id === 'sandbox' && sandboxNeedsAuth
+              ? `${t(v.key)} · ${t('sandbox.railNeedsAuth')}`
+              : t(v.key)
+          }
           onClick={() => setView(v.id)}
         >
           <span className="nav-rail-icon">
-            {GLYPHS[v.id]}
+            {v.id === 'sandbox' ? <PithosGlyph needsAuth={sandboxNeedsAuth} /> : GLYPHS[v.id]}
             {v.id === 'git' && gitDirty > 0 && (
               <span className="nav-rail-badge">{gitDirty > 99 ? '99+' : gitDirty}</span>
             )}
