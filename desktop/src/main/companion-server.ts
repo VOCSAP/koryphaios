@@ -14,7 +14,7 @@
 
 import { createServer, type Server } from 'node:https'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { extname, join, normalize, sep } from 'node:path'
 import { networkInterfaces } from 'node:os'
@@ -118,6 +118,30 @@ async function loadOrCreateCert(stateDir: string): Promise<{ key: string; cert: 
   return material
 }
 
+/**
+ * SHA-256 of the certificate, in the form a pinning TrustManager compares
+ * against: the digest of the DER bytes, lowercase hex.
+ *
+ * It travels in the QR (`&f=`) so the Android shell can pin this host on first
+ * pair (MB6). Publishing it costs nothing — the same certificate is handed to
+ * every visitor of the companion server — and it is what turns "accept any
+ * self-signed cert" into "accept exactly this one".
+ */
+export function certFingerprint(certPem: string): string {
+  const body = certPem
+    .replace(/-----(BEGIN|END) CERTIFICATE-----/g, '')
+    .replace(/\s+/g, '')
+  if (!body) return ''
+  try {
+    return createHash('sha256').update(Buffer.from(body, 'base64')).digest('hex')
+  } catch (err) {
+    // Non-fatal: without a fingerprint the shell simply cannot pin, and falls
+    // back to trust-on-first-use. Traced rather than swallowed.
+    reportError('companion', 'certificate fingerprint could not be computed', err)
+    return ''
+  }
+}
+
 export class CompanionServer {
   private server: Server | null = null
   private wss: WebSocketServer | null = null
@@ -126,6 +150,7 @@ export class CompanionServer {
   private hbTimer: NodeJS.Timeout | null = null
   private url: string | null = null
   private pairingToken: string | null = null
+  private fingerprint = ''
 
   constructor(private readonly deps: CompanionDeps) {}
 
@@ -134,6 +159,7 @@ export class CompanionServer {
       running: this.server !== null,
       url: this.url,
       pairingToken: this.pairingToken,
+      certFingerprint: this.fingerprint,
       clients: [...this.clients].filter((c) => c.authed).length
     }
   }
@@ -181,6 +207,7 @@ export class CompanionServer {
     const lanAddr = detectLanAddress()
     if (!lanAddr) throw new Error('no private LAN interface detected')
     const { key, cert } = await loadOrCreateCert(this.deps.stateDir)
+    this.fingerprint = certFingerprint(cert)
 
     const server = createServer({ key, cert }, (req, res) => this.serveStatic(req, res))
     const wss = new WebSocketServer({ noServer: true })
@@ -235,6 +262,9 @@ export class CompanionServer {
     this.wss = null
     this.url = null
     this.pairingToken = null
+    // Not a secret, but a stopped server serves no certificate: reporting one
+    // would let the dialog build a QR for a host that is not listening.
+    this.fingerprint = ''
     await new Promise<void>((resolve) => {
       wss?.close(() => server.close(() => resolve()))
       // A lingering keep-alive socket must not wedge shutdown.

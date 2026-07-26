@@ -1,4 +1,4 @@
-// Fan-out and settle rules, written once for every channel (PLAN N3/N4).
+// Fan-out and settle rules, written once for every channel (PLAN N3/N4/N5).
 //
 // The registry owns the two behaviours the operator actually feels:
 //
@@ -11,6 +11,25 @@
 //     rewritten to "handled via X" and loses its buttons. Without that, a
 //     stale request would sit on the phone looking actionable, and tapping it
 //     would produce an error instead of an answer.
+//
+// KEYED BY (OPERATOR, KIND), NOT BY KIND. A broker can serve several people —
+// two OS accounts on one PC, or a box on the network shared by a team. Keying
+// the gateway table by kind alone meant the last operator to enrol a Telegram
+// bot silently REPLACED (and stopped) the previous one's: their notifications
+// stopped arriving, and for ntfy they arrived but their answers vanished,
+// because the adapter's reply topic belonged to somebody else. That is an
+// availability bug, never a confidentiality one — inbound routing resolves the
+// binding by address and the broker still refuses to settle another operator's
+// approval — but it is silent, which is worse.
+//
+// ONE GATEWAY PER TRANSPORT, SHARED WHEN IT MUST BE. Two operators may enrol
+// the SAME bot token on purpose (one person, two OS accounts, one bot). Telegram
+// allows exactly one `getUpdates` consumer per token, so giving them a gateway
+// each would make them fight — one would take the updates and the other would
+// see 409 forever. So the same instance is registered under BOTH keys: the
+// caller decides what "the same transport" means (`broker.ts` digests the
+// sealed config) and this table just points at it twice. Stopping is therefore
+// reference-counted — disconnecting one operator must not cut the other's bot.
 //
 // It holds no transport of its own: adapters are injected, so the whole thing
 // is testable with a fake channel and no network.
@@ -35,29 +54,50 @@ export interface RegistryStore {
   clearPosts(approvalId: string): void;
 }
 
+function slot(operatorId: string, kind: ChannelKind): string {
+  return `${operatorId}\0${kind}`;
+}
+
 export class NotificationRegistry {
-  private channels = new Map<ChannelKind, NotificationChannel>();
+  /** (operator, kind) -> gateway. Several slots may share one instance. */
+  private slots = new Map<string, NotificationChannel>();
 
   constructor(
     private readonly store: RegistryStore,
     private readonly log: { info: (m: string) => void; error: (m: string, e?: unknown) => void }
   ) {}
 
-  register(channel: NotificationChannel): void {
-    this.channels.set(channel.kind, channel);
+  register(operatorId: string, channel: NotificationChannel): void {
+    this.slots.set(slot(operatorId, channel.kind), channel);
   }
 
-  unregister(kind: ChannelKind): void {
-    this.channels.delete(kind);
+  /**
+   * Forget one operator's slot and say whether the gateway is now unused.
+   *
+   * The caller stops the transport only on `true`: an instance shared with
+   * another operator (same bot token) must keep running for them.
+   */
+  unregister(operatorId: string, kind: ChannelKind): { channel: NotificationChannel | null; orphaned: boolean } {
+    const key = slot(operatorId, kind);
+    const channel = this.slots.get(key) ?? null;
+    if (!channel) return { channel: null, orphaned: false };
+    this.slots.delete(key);
+    const stillUsed = [...this.slots.values()].includes(channel);
+    return { channel, orphaned: !stillUsed };
   }
 
-  get(kind: ChannelKind): NotificationChannel | undefined {
-    return this.channels.get(kind);
+  get(operatorId: string, kind: ChannelKind): NotificationChannel | undefined {
+    return this.slots.get(slot(operatorId, kind));
   }
 
-  /** Kinds currently configured and running. */
-  readyKinds(): ChannelKind[] {
-    return [...this.channels.values()].filter((c) => c.isReady()).map((c) => c.kind);
+  /** Kinds currently configured and running FOR THIS OPERATOR. */
+  readyKinds(operatorId: string): ChannelKind[] {
+    const out: ChannelKind[] = [];
+    for (const [key, channel] of this.slots) {
+      if (!key.startsWith(`${operatorId}\0`)) continue;
+      if (channel.isReady()) out.push(channel.kind);
+    }
+    return out;
   }
 
   /**
@@ -71,7 +111,9 @@ export class NotificationRegistry {
     const bindings = this.store.bindingsFor(approval.operator_id);
     let sent = 0;
     for (const binding of bindings) {
-      const channel = this.channels.get(binding.kind);
+      // The gateway of THIS operator: another operator's, even of the same
+      // kind, would publish with their credentials and their reply topic.
+      const channel = this.get(binding.operator_id, binding.kind);
       if (!channel || !channel.isReady()) continue;
       try {
         const posted: PostedMessage | null = await channel.post(binding, approval);
@@ -101,9 +143,10 @@ export class NotificationRegistry {
     const posts = this.store.postsFor(approval.id);
     for (const post of posts) {
       if (post.kind === exceptKind) continue;
-      const channel = this.channels.get(post.kind);
       const binding = this.store.binding(post.bindingId);
-      if (!channel || !binding) continue;
+      if (!binding) continue;
+      const channel = this.get(binding.operator_id, post.kind);
+      if (!channel) continue;
       try {
         await channel.settle(binding, { external_ref: post.externalRef }, approval, viaLabel);
       } catch (e) {
@@ -114,13 +157,15 @@ export class NotificationRegistry {
   }
 
   async stopAll(): Promise<void> {
-    for (const channel of this.channels.values()) {
+    // Distinct instances only: a shared gateway must be stopped once, not once
+    // per operator pointing at it.
+    for (const channel of new Set(this.slots.values())) {
       try {
         await channel.stop();
       } catch (e) {
         this.log.error(`notify: ${channel.kind} stop failed`, e);
       }
     }
-    this.channels.clear();
+    this.slots.clear();
   }
 }

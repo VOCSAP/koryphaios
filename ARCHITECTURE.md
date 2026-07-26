@@ -79,7 +79,7 @@ The desktop Deck is a one-way (outbound-only) broker participant: it broadcasts 
 - **Operator inbox**: the reserved `__operator__`/`operator` sentinel routes `send_message` to the human operator; the Deck drains `POST /operator-inbox` into its ✉ panel (the Deck journals drained batches to disk — the drain is destructive broker-side).
 - **Graph drafts**: an agent invited by the operator escalates a blocking question into the Deck's graph view. `graph_draft_prepare` runs a read-only pinned-haiku one-shot (`shared/graph-draft.ts`: CODE-CONSTANT system prompt, `--strict-mcp-config` + `--disallowedTools`, argv spawn) that compiles the question + strictly relevant context/`file:line` references; the agent reviews the draft and `graph_draft_send` posts it to the broker's `graph_drafts` table (scoped by `project_key`, roadmap-style durability: `POST /graph-draft/add|list|open`, listing is NON-destructive — only the operator's open flips `status`, opened drafts purge after `CLAUDE_PEERS_GRAPH_DRAFT_TTL_DAYS=30`, pending ones never). The Deck polls the pending list, glows its ✉ glyph, and opening a draft creates a graph doc with the pre-filled, unsubmitted prompt node — model choice and inference stay manual.
 
-## Remote approvals (PLAN-notifications-mobiles, lots N0-N2)
+## Remote approvals (lots N0–N5)
 
 A session blocks on a question; the broker parks it as an **approval** until
 someone answers — the Deck, or (lots N3+) a notification channel on the
@@ -141,6 +141,64 @@ on the same screen, and the operator's phone must ring once.
 
 Agents reach it through the `ask_operator` / `ask_operator_wait` MCP tools
 (resumable by ticket, so no single call depends on the client's tool timeout).
+
+**Notification channels (N3–N5).** Three gateways implement one interface
+(`notify/types.ts`: `post` / `settle` / `rejectLate`); `notify/registry.ts`
+owns the two rules they share — fan-out **bounded to one `operator_id`**
+(C-5), and rewriting every losing copy once one wins. An adapter never decides
+whether an answer is valid: it calls `onAnswer` and renders the verdict (C-1).
+Every transport leg is **outgoing** — Telegram long-polls `getUpdates`,
+Discord holds a gateway socket, ntfy holds a streaming GET — so the broker
+opens no port and publishes no address.
+
+**A broker serves SEVERAL operators, and that shapes two things.**
+
+*The gateway table is keyed by `(operator_id, kind)`.* Keyed by kind alone, the
+second operator to enrol a channel replaced — and stopped — the first one's:
+their notifications stopped, and on ntfy they arrived but their answers vanished,
+because the reply topic came from somebody else's config. Availability only, never
+confidentiality; but silent, which is worse.
+
+*One gateway per TRANSPORT, shared when the transport is.* Two operators may
+enrol the same bot token deliberately (one person, two OS accounts, one bot).
+Telegram allows exactly one `getUpdates` consumer per token, so a gateway each
+would make them fight forever. `broker.ts` therefore digests the sealed config
+(`gatewayKey`) and registers one instance under both slots; stopping is
+reference-counted, so disconnecting one operator never cuts the other. For ntfy
+the digest covers the whole config, so two operators sharing an ntfy account
+still get one subscription each — their topics differ.
+
+**Authorisation is asked in the right direction.** An inbound answer resolves
+the APPROVAL first, then asks "is this address paired *for that approval's
+owner*" (`bindingFor(kind, address, operator_id)`). Resolving the address to
+"its" operator and comparing was equivalent only while an address belonged to
+one operator — which stops being true as soon as one person points two operator
+identities at one chat account: `.get()` picked one row, so roughly half the
+answers were refused as "already handled" in front of a perfectly valid request.
+`isPairedAddress` survives as a cheap pre-filter for adapters dropping
+strangers, and is documented as not being the gate. One ntfy-specific guard
+comes with it: a pairing code is only redeemable on the topic it was issued for,
+because there the address is a secret the broker minted — unlike a chat id,
+which the provider supplies and any chat may legitimately present.
+
+**ntfy, the channel of Parastatès — the Koryphaios companion app (N5).** Two topics, one direction each:
+the broker publishes questions on `topic_notif` and subscribes to
+`topic_replies`; the phone does the mirror image. Both are 24 random bytes,
+minted by the broker at enrolment and **re-minted on every reconnect**, which
+makes `Disconnect`/`Connect` the kill switch for a lost phone. The sealed
+secret for this channel is a config object rather than a bot token
+(`{server, topic_notif, topic_replies, token}`), and the server URL is vetted:
+plain HTTP is accepted only towards a private address, so a question never
+crosses the internet in the clear.
+
+One behaviour differs from the other two and is visible in the design: **ntfy
+cannot edit a delivered message.** `settle` therefore publishes a *closing*
+message keyed on the approval id, at minimum priority, and the app cancels its
+own notification on it — the equivalent of the rewrite Telegram and Discord
+get. The wire format lives in `notify/ntfy-protocol.ts`, a dependency-free
+module the Android app bundles as-is, so the two ends cannot drift; that is
+also why `stripControl`/`truncate` sit in `shared/text.ts` rather than beside
+`node:crypto`.
 
 ## Identity model
 

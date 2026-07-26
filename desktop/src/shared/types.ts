@@ -807,6 +807,12 @@ export interface CompanionInfo {
   url: string | null
   /** Pairing token to embed in the QR; null once consumed or stopped. */
   pairingToken: string | null
+  /**
+   * SHA-256 of the served certificate, lowercase hex — travels in the QR as
+   * `&f=` so the Android shell can PIN this host (MB6). Not a secret: it is
+   * the public cert's digest, and the cert is presented to every visitor.
+   */
+  certFingerprint: string
   clients: number
 }
 
@@ -1095,10 +1101,16 @@ export interface DeckApi {
   companionStatus(): Promise<CompanionInfo>
   /** Remote-approval channels (PLAN N3/N4) and their live state. */
   approvalChannels(): Promise<ApprovalChannelStatus[]>
-  /** Hand a bot token to the broker; returns the pairing code to send the bot. */
+  /**
+   * Enrol a channel with the broker; returns what the operator still has to do.
+   *
+   * Telegram and Discord are enrolled with a bot token. ntfy has no bot: it
+   * takes the relay's address (`server`) and an optional access token, and the
+   * broker mints the topics — hence one call shape covering both (PLAN N5).
+   */
   approvalConnect(
-    kind: 'telegram' | 'discord',
-    token: string
+    kind: 'telegram' | 'discord' | 'ntfy',
+    args: { token?: string; server?: string }
   ): Promise<{
     kind: string
     label: string
@@ -1108,6 +1120,12 @@ export interface DeckApi {
     deep_link: string
     /** Discord OAuth2 invite URL: the bot must share a server to DM you. */
     invite_url: string
+    /**
+     * ntfy only: the QR payload the Koryphaios app scans. A CREDENTIAL — it
+     * carries the two topics and the access token — so the renderer shows it
+     * on demand and drops it, exactly like the multi-PC link code.
+     */
+    mobile_payload: string
   }>
   approvalDisconnect(kind: 'telegram' | 'discord' | 'ntfy'): Promise<{ removed: number }>
   /** One-shot payload for linking another PC to this operator identity. */

@@ -786,7 +786,7 @@ const TOOLS = [
   {
     name: "ask_operator",
     description:
-      "Ask the HUMAN operator a blocking question and WAIT for their answer, which may arrive from their phone (Telegram/Discord/the Koryphaios mobile app) or from the Deck. Use this INSTEAD of stopping with an open question on screen whenever you are blocked and the operator may be away: unlike an on-screen question, this one reaches them wherever they are. The answer is returned to you as free text. If nobody has answered yet, you get a ticket — call ask_operator_wait with it to keep waiting (do that rather than assuming an answer). Available only when the operator enabled remote approvals for this project.",
+      "Ask the HUMAN operator a blocking question and WAIT for their answer, which may arrive from their phone (Telegram/Discord/the Parastates app) or from the Deck. Use this INSTEAD of stopping with an open question on screen whenever you are blocked and the operator may be away: unlike an on-screen question, this one reaches them wherever they are. The answer is returned to you as free text. If nobody has answered yet, you get a ticket — call ask_operator_wait with it to keep waiting (do that rather than assuming an answer). Available only when the operator enabled remote approvals for this project.",
     inputSchema: {
       type: "object" as const,
       properties: {

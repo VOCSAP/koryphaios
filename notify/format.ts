@@ -8,6 +8,7 @@
 // runs in HTML mode (three characters to escape) rather than MarkdownV2 (which
 // needs eighteen escaped anywhere in the string, and silently 400s on a miss).
 
+import { truncate } from "../shared/text.ts";
 import type { Approval } from "../shared/types.ts";
 
 /** Telegram sendMessage hard limit. */
@@ -22,14 +23,10 @@ export function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-/**
- * Cut to `max` on a character boundary, appending an ellipsis when cut.
- * Length is measured in UTF-16 code units, matching what both APIs count.
- */
-export function truncate(s: string, max: number): string {
-  if (s.length <= max) return s;
-  return `${s.slice(0, Math.max(0, max - 1))}…`;
-}
+// `truncate` lives in `shared/text.ts` (a dependency-free leaf shared with the
+// mobile app); re-exported here because every caller imports it from this
+// module alongside the renderers.
+export { truncate };
 
 /** Human origin badge: `host · project`, the multi-PC disambiguator. */
 export function originLabel(approval: Approval): string {

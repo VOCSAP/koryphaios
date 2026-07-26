@@ -346,6 +346,29 @@ Validation Discord :
       (le message d'erreur doit être compréhensible).
 - [ ] Sans serveur mutuel : l'erreur 50278 doit être lisible dans les logs.
 
+Broker partagé par plusieurs opérateurs (corrigé, à valider avec de vrais bots) :
+
+> Couvert automatiquement pour ntfy (deux opérateurs contre le faux serveur
+> local). Ce qui suit exige de vrais bots, donc le terrain.
+
+- [ ] **Deux tokens de bot DIFFÉRENTS, deux opérateurs** (Telegram, puis
+      Discord) : les deux passerelles tournent **en même temps**, chacun reçoit
+      ses propres demandes. Avant correction, le second enrôlement arrêtait le
+      premier.
+- [ ] **Le MÊME token de bot pour deux opérateurs** (un seul bot, deux comptes
+      OS) : **une seule** passerelle démarre. Sur Telegram, l'ABSENCE de 409
+      `Conflict` dans les logs est le signe que le partage a eu lieu — un 409
+      signifierait deux consommateurs, donc un partage raté.
+- [ ] Même cas, **même compte de messagerie** : les demandes des deux identités
+      arrivent dans la MÊME conversation, distinguées par le badge d'origine
+      (`bureau · projet` vs `portable · projet`), et **répondre à l'une règle
+      bien celle-là**. C'est le cas qui échouait : une réponse sur deux était
+      refusée en « déjà traitée » devant une demande parfaitement valide. Non
+      couvert automatiquement — pour ntfy une adresse est un topic unique par
+      opérateur, la collision n'y est pas constructible.
+- [ ] Toujours même token partagé : **déconnecter un opérateur** ne coupe pas
+      l'autre (arrêt à compteur de références).
+
 Arbitrage et cloisonnement :
 - [ ] Répondre dans le Deck → la notif du téléphone devient « traitée via
       deck » et perd ses boutons ; y répondre ensuite affiche
@@ -365,6 +388,81 @@ Chemins de retour :
 - [ ] PC éteint > 24 h : la notif expire, la session reste répondable dans le
       Deck.
 
+Validation app Koryphaios / ntfy (lot N5) :
+
+> Ce lot est le seul dont le chemin nominal est couvert automatiquement : un
+> faux ntfy tourne sur la boucle locale (`tests/broker-ntfy-channel.test.ts`),
+> et l'appairage, le fan-out, la réponse gagnante, la perdante et le
+> cloisonnement C-5 y passent pour de vrai. Ce qu'aucun test ne couvre : le
+> vrai ntfy.sh, un vrai téléphone, et **tout Android** (pas de SDK ici).
+
+- [ ] `Connect` sur la ligne « Parastatès » avec `https://ntfy.sh` :
+      le QR s'affiche, la ligne passe « Connecté · ntfy.sh ».
+- [ ] Idem contre un **ntfy auto-hébergé** (le cas qui garde les questions
+      chez soi), avec et sans jeton d'accès `tk_…`.
+- [ ] Une adresse `http://` publique est refusée avec un message lisible ;
+      `http://192.168.x.x:8080` est acceptée.
+- [ ] Un jeton d'accès invalide : la connexion échoue et **ne laisse aucune
+      ligne configurée** derrière elle.
+- [ ] Scan du QR par l'app → la ligne passe « 1 appairé » avec le nom de
+      l'appareil, et l'app affiche « Paired ».
+- [ ] `Disconnect` puis `Connect` : les topics changent, **l'ancien téléphone
+      devient sourd** (c'est le coupe-circuit du téléphone perdu — à vérifier
+      pour de bon avec l'ancienne app encore installée).
+- [ ] Boutons **Approve / Reject** depuis la notification Android, écran
+      verrouillé.
+- [ ] **Texte libre** depuis l'app : parvient à l'agent, assaini.
+- [ ] Réponse dans le Deck d'abord → le message de clôture arrive et
+      **la notification du téléphone disparaît** (ntfy ne sait pas éditer :
+      c'est le mécanisme de remplacement, à voir fonctionner).
+- [ ] Les trois canaux connectés en même temps : une seule question, trois
+      copies, une seule gagne, les deux autres se réécrivent.
+- [ ] Quota ntfy.sh (250 messages/jour) : vérifier le comportement en cas de
+      dépassement — chaque approbation coûte 1 message + 1 clôture.
+
+Validation Android (aucun test possible ici — pas de SDK) :
+- [ ] **Le pinning refuse bien un certificat qui change.** Ouvrir un Deck
+      appairé (pin enregistré), puis effacer l'état applicatif du Deck pour
+      qu'il régénère un certificat : la connexion doit être **refusée**, pas
+      acceptée en silence. C'est le test du write-back TOFU — sans lui, une
+      entrée sans empreinte acceptait n'importe quel certificat, indéfiniment.
+- [ ] **Un lien hors hôte quitte la WebView compagnon** (ouverture dans le
+      navigateur système) et n'emporte pas le credential : taper un lien
+      externe depuis le renderer servi par le Deck.
+- [ ] **Le scanner QR ouvre réellement la caméra** — la dépendance
+      `@capacitor/barcode-scanner` est déclarée mais jamais exercée ici ; sans
+      elle, l'app retombait sur un `prompt()` demandant de retaper 250 à 450
+      caractères à la main.
+- [ ] Le projet **compile** (`cap add android` + copie de `android-src/`).
+- [ ] **Écran éteint 8 h** : une approbation arrive toujours. C'est LE test du
+      choix `connectedDevice` plutôt que `dataSync` (plafonné à 6 h/24 h) ;
+      un échec vers la 6ᵉ heure signerait un mauvais type de service.
+- [ ] Même essai sur un OEM agressif (Xiaomi/Samsung), exemption d'optimisation
+      batterie accordée puis refusée.
+- [ ] Redémarrage du téléphone : le service repart, l'appairage survit.
+- [ ] `FLAG_SECURE` : la vignette des applis récentes est bien noire, la
+      capture d'écran refusée.
+- [ ] Verrou biométrique au retour d'arrière-plan ; refus ⇒ l'app se ferme.
+- [ ] **Pinning** : ouvrir un Deck appairé passe sans avertissement ; le même
+      Deck après effacement de son état applicatif (nouveau certificat) doit
+      être **refusé** et non accepté silencieusement.
+- [ ] Multi-hôtes : deux Decks appairés, le sélecteur ouvre le bon ; re-scan
+      d'un Deck connu ne crée pas de doublon.
+- [ ] **Reprise sans QR — le tour complet, qui traverse la seule frontière non
+      testée.** Ouvrir un Deck, **tuer l'app**, la relancer, rouvrir le même
+      Deck ⇒ **aucun scan demandé**. C'est le test de la récupération du
+      credential côté natif (`CompanionWebView.harvestCredential`, sondage
+      après la poignée de main WebSocket) et de son réamorçage
+      (`addDocumentStartJavaScript`). En cas d'échec, regarder d'abord si
+      `koryphaios.companion.lastcred` est écrit dans les préférences.
+- [ ] Inversement : **redémarrer le Deck** ⇒ re-scan bien demandé. Attendu,
+      pas un bug : `arm()` invalide tous les credentials, donc fermer le Deck
+      coupe réellement la session distante.
+- [ ] Appareil sans `DOCUMENT_START_SCRIPT` (WebView ancienne) : le repli
+      `onPageStarted` amorce-t-il encore à temps ?
+- [ ] Les deux appairages sont bien indépendants **sur l'appareil** : oublier
+      tous les Decks n'ôte pas les approbations, et inversement.
+
 Robustesse et exploitation :
 - [ ] Broker redémarré : les passerelles repartent seules (`startConfiguredChannels`).
 - [ ] Redémarrer un second broker avec le même token Telegram → le 409
@@ -374,14 +472,35 @@ Robustesse et exploitation :
 
 ### 3.2 Mobile LAN
 
-- [ ] **N5 — l'app mobile comme canal d'approbation** : la ligne « Koryphaios
-      mobile » de l'écran d'enrôlement est inerte (« Bientôt disponible »).
-      Nécessite le motif ntfy deux-topics + le redécoupage compagnon /
-      approbation + le multi-hôtes. Chantier à part entière, voir
-      `PLAN-notifications-mobiles.md` §5 lot N5.
-- [ ] **MB6 — coquille Android** : scaffold `mobile-shell/` livré mais **non
-      buildé** (pas de SDK ici). TODOs natifs du `mobile-shell/README.md` :
-      service foreground, verrou biométrique + `FLAG_SECURE`, pinning cert.
+- [x] **N5 — l'app mobile comme canal d'approbation** : livré. Canal ntfy
+      deux-topics côté broker, ligne « Parastatès » active dans
+      l'enrôlement, redécoupage compagnon / approbation et multi-hôtes dans
+      `mobile-shell/`. Validations terrain ci-dessus (§3.1 bis).
+- [ ] **MB6 — coquille Android : reste à BUILDER**. Le code natif est écrit
+      (`mobile-shell/android-src/` : service foreground `connectedDevice`,
+      actions de notification, verrou biométrique + `FLAG_SECURE`, pinning
+      cert avec write-back TOFU, gardes d'origine) mais **jamais compilé** —
+      pas de SDK dans ce conteneur, donc pas une ligne de Kotlin n'est
+      vérifiée par la machine, seulement relue.
+
+      Ce n'est pas du travail en attente, c'est un niveau de preuve différent :
+      le TypeScript est prouvé par 1043 tests, le Kotlin l'est par la lecture.
+      À quoi s'attendre au premier `npx cap run android` :
+  - **Dépendances Gradle** : `androidx.biometric` et `androidx.webkit` ne
+    viennent pas avec Capacitor et sont à ajouter (documentées dans
+    `android-src/README.md`). Omission trouvée en re-vérifiant, corrigée.
+  - **Signatures d'API** : les versions d'`androidx.*` bougent ; un
+    `WebViewFeature`/`BiometricPrompt` renommé se verra à la compilation.
+  - **`shouldOverrideUrlLoading(WebView, WebResourceRequest)` est API 24+**
+    alors que le plancher Capacitor est 22 : sur 22–23 c'est la garde
+    d'origine de `onPageStarted` qui porte seule la protection.
+  - **Le paquet `io.koryphaios.parastates`** doit correspondre à l'`appId` du
+    `capacitor.config.ts` dans le projet généré.
+- [ ] **Icône et identité de l'app** : le service utilise encore les drawables
+      système (`stat_sys_warning`, `stat_notify_sync`). Un glyphe grec au
+      standard `DESIGN.md` §5 est à dessiner, en densités Android.
+- [ ] **Distribution** : aucun listing store. Décider APK signé + F-Droid, ou
+      rester « build depuis les sources ».
 - [ ] **M3e — mode fil de la vue Graph sur mobile** : reporté (Graph absent de
       la nav mobile v1).
 - [ ] **PWA (v2)** : manifest + icône pour « installation » sur l'écran d'accueil.

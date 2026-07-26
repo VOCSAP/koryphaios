@@ -30,8 +30,11 @@ const CHANNEL_GLYPH: Record<Kind, keyof typeof GLYPH_BADGES> = {
 const CHANNEL_LABEL: Record<Kind, string> = {
   telegram: 'Telegram',
   discord: 'Discord',
-  ntfy: 'Koryphaios mobile'
+  ntfy: 'Parastatès'
 }
+
+/** The public relay. Self-hosting is a matter of replacing this address. */
+const DEFAULT_NTFY_SERVER = 'https://ntfy.sh'
 
 interface Props {
   t: (key: string) => string
@@ -43,12 +46,17 @@ export function NotificationChannels({ t, enabled }: Props): React.JSX.Element {
   const [busy, setBusy] = useState<Kind | null>(null)
   const [editing, setEditing] = useState<Kind | null>(null)
   const [token, setToken] = useState('')
+  // ntfy is enrolled with a relay address rather than a bot token; the broker
+  // mints the topics, so this is the only field that is strictly required.
+  const [server, setServer] = useState(DEFAULT_NTFY_SERVER)
   const [error, setError] = useState('')
   const [pairing, setPairing] = useState<{
     kind: Kind
     code: string
     deepLink: string
     inviteUrl: string
+    /** ntfy: the QR payload for the app. A CREDENTIAL — see mobileWarn. */
+    mobilePayload: string
   } | null>(null)
   // The link payload carries the operator PRIVATE KEY, so it is never fetched
   // until the operator asks, and it is dropped as soon as they close it.
@@ -70,19 +78,25 @@ export function NotificationChannels({ t, enabled }: Props): React.JSX.Element {
   }, [refresh])
 
   const connect = async (kind: Kind): Promise<void> => {
-    if (kind === 'ntfy') return
     setBusy(kind)
     setError('')
     try {
-      const res = await window.api.approvalConnect(kind, token.trim())
+      const res = await window.api.approvalConnect(
+        kind,
+        kind === 'ntfy' ? { server: server.trim(), token: token.trim() } : { token: token.trim() }
+      )
       setPairing({
         kind,
         code: res.pairing_code,
         deepLink: res.deep_link,
-        inviteUrl: res.invite_url
+        inviteUrl: res.invite_url,
+        mobilePayload: res.mobile_payload
       })
       setEditing(null)
+      // Both fields are secrets in their own right: drop them the moment the
+      // broker has them, exactly like the multi-PC link code below.
       setToken('')
+      setServer(DEFAULT_NTFY_SERVER)
       await refresh()
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e))
@@ -93,10 +107,15 @@ export function NotificationChannels({ t, enabled }: Props): React.JSX.Element {
 
   const disconnect = async (kind: Kind): Promise<void> => {
     setBusy(kind)
+    setError('')
     try {
       await window.api.approvalDisconnect(kind)
       if (pairing?.kind === kind) setPairing(null)
       await refresh()
+    } catch (e) {
+      // The channel is STILL LIVE after a failed disconnect, so silence here
+      // would tell the operator the opposite of the truth.
+      setError(String(e instanceof Error ? e.message : e))
     } finally {
       setBusy(null)
     }
@@ -105,14 +124,11 @@ export function NotificationChannels({ t, enabled }: Props): React.JSX.Element {
   return (
     <div className="notif-channels">
       {channels.map((channel) => {
-        const soon = channel.kind === 'ntfy'
-        const state = soon
-          ? t('notifications.soon')
-          : channel.connected
-            ? t('notifications.connected')
-            : channel.configured
-              ? t('notifications.starting')
-              : t('notifications.notConnected')
+        const state = channel.connected
+          ? t('notifications.connected')
+          : channel.configured
+            ? t('notifications.starting')
+            : t('notifications.notConnected')
         return (
           <div className="notif-row" key={channel.kind}>
             <span className={`notif-glyph${channel.connected ? ' is-on' : ''}`}>
@@ -130,7 +146,7 @@ export function NotificationChannels({ t, enabled }: Props): React.JSX.Element {
             {channel.configured ? (
               <button
                 className="btn danger"
-                disabled={!!busy || soon}
+                disabled={!!busy}
                 onClick={() => void disconnect(channel.kind)}
               >
                 {t('notifications.disconnect')}
@@ -138,9 +154,15 @@ export function NotificationChannels({ t, enabled }: Props): React.JSX.Element {
             ) : (
               <button
                 className="btn"
-                disabled={!!busy || soon || !enabled}
+                disabled={!!busy || !enabled}
                 onClick={() => {
-                  setEditing(editing === channel.kind ? null : channel.kind)
+                  const next = editing === channel.kind ? null : channel.kind
+                  setEditing(next)
+                  // The form is shared by three channels whose secrets are not
+                  // interchangeable: carrying a half-typed one across would
+                  // submit an ntfy access token as a Telegram bot token.
+                  setToken('')
+                  setServer(DEFAULT_NTFY_SERVER)
                   setError('')
                 }}
               >
@@ -153,6 +175,21 @@ export function NotificationChannels({ t, enabled }: Props): React.JSX.Element {
 
       {editing && (
         <div className="notif-connect">
+          {/* ntfy takes an ADDRESS (the relay) plus an optional token; the two
+              bot channels take a token and nothing else. */}
+          {editing === 'ntfy' && (
+            <label className="field">
+              <span>{t('notifications.server.ntfy')}</span>
+              <input
+                type="text"
+                value={server}
+                autoComplete="off"
+                spellCheck={false}
+                placeholder={DEFAULT_NTFY_SERVER}
+                onChange={(e) => setServer(e.target.value)}
+              />
+            </label>
+          )}
           <label className="field">
             <span>{t(`notifications.token.${editing}`)}</span>
             <input
@@ -160,18 +197,27 @@ export function NotificationChannels({ t, enabled }: Props): React.JSX.Element {
               value={token}
               autoComplete="off"
               spellCheck={false}
-              placeholder={t('notifications.tokenPlaceholder')}
+              placeholder={t(
+                editing === 'ntfy' ? 'notifications.tokenOptional' : 'notifications.tokenPlaceholder'
+              )}
               onChange={(e) => setToken(e.target.value)}
             />
           </label>
           <small className="field-check-help">{t(`notifications.help.${editing}`)}</small>
           <div className="modal-actions">
-            <button className="btn" onClick={() => setEditing(null)}>
+            <button
+              className="btn"
+              onClick={() => {
+                setEditing(null)
+                setToken('')
+                setServer(DEFAULT_NTFY_SERVER)
+              }}
+            >
               {t('common.cancel')}
             </button>
             <button
               className="btn primary"
-              disabled={!token.trim() || !!busy}
+              disabled={(editing === 'ntfy' ? !server.trim() : !token.trim()) || !!busy}
               onClick={() => void connect(editing)}
             >
               {t('notifications.connect')}
@@ -203,7 +249,25 @@ export function NotificationChannels({ t, enabled }: Props): React.JSX.Element {
               <p className="notif-link">{pairing.deepLink}</p>
             </>
           )}
+          {/* The mobile payload carries the two topics AND the access token:
+              whoever photographs it can both read the questions and answer
+              them. Warned in the danger colour, like the identity link code,
+              and never printed as text next to the QR. */}
+          {pairing.mobilePayload && (
+            <>
+              <p className="notif-warn">{t('notifications.mobileWarn')}</p>
+              <div
+                className="notif-qr"
+                dangerouslySetInnerHTML={{ __html: qrSvg(pairing.mobilePayload) }}
+              />
+            </>
+          )}
           <code>{pairing.code}</code>
+          <div className="modal-actions">
+            <button className="btn" onClick={() => setPairing(null)}>
+              {t('notifications.pairDone')}
+            </button>
+          </div>
         </div>
       )}
 

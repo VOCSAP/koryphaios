@@ -101,8 +101,8 @@ describe("fan-out", () => {
     const reg = new NotificationRegistry(store, silentLog);
     const tg = new FakeChannel("telegram");
     const dc = new FakeChannel("discord");
-    reg.register(tg);
-    reg.register(dc);
+    reg.register("op-a", tg);
+    reg.register("op-a", dc);
 
     expect(await reg.fanOut(approval())).toBe(2);
     expect(tg.posted).toHaveLength(1);
@@ -114,11 +114,38 @@ describe("fan-out", () => {
     const store = makeStore([binding("b1", "telegram", "op-a"), binding("b2", "telegram", "op-b")]);
     const reg = new NotificationRegistry(store, silentLog);
     const tg = new FakeChannel("telegram");
-    reg.register(tg);
+    reg.register("op-a", tg);
 
     await reg.fanOut(approval({ operator_id: "op-a" }));
     expect(tg.posted).toHaveLength(1);
     expect(tg.posted[0]!.address).toBe("addr-b1");
+  });
+
+  test("each operator is served by THEIR OWN gateway, not the last enrolled", async () => {
+    // The bug this keying exists to prevent: with one slot per kind, op-b's
+    // gateway replaced op-a's, so op-a went silent and — on ntfy — their
+    // questions were published with somebody else's reply topic.
+    const store = makeStore([binding("b1", "telegram", "op-a"), binding("b2", "telegram", "op-b")]);
+    const reg = new NotificationRegistry(store, silentLog);
+    const mine = new FakeChannel("telegram");
+    const theirs = new FakeChannel("telegram");
+    reg.register("op-a", mine);
+    reg.register("op-b", theirs);
+
+    await reg.fanOut(approval({ operator_id: "op-a" }));
+    expect(mine.posted).toHaveLength(1);
+    expect(theirs.posted).toHaveLength(0);
+
+    await reg.fanOut(approval({ id: "appr-2", operator_id: "op-b" }));
+    expect(mine.posted).toHaveLength(1);
+    expect(theirs.posted).toHaveLength(1);
+  });
+
+  test("an operator with no gateway of that kind is simply not posted to", async () => {
+    const store = makeStore([binding("b1", "telegram", "op-a")]);
+    const reg = new NotificationRegistry(store, silentLog);
+    reg.register("op-b", new FakeChannel("telegram"));
+    expect(await reg.fanOut(approval({ operator_id: "op-a" }))).toBe(0);
   });
 
   test("a channel that is not ready is skipped, not awaited", async () => {
@@ -126,7 +153,7 @@ describe("fan-out", () => {
     const reg = new NotificationRegistry(store, silentLog);
     const tg = new FakeChannel("telegram");
     tg.ready = false;
-    reg.register(tg);
+    reg.register("op-a", tg);
     expect(await reg.fanOut(approval())).toBe(0);
   });
 
@@ -136,8 +163,8 @@ describe("fan-out", () => {
     const tg = new FakeChannel("telegram");
     tg.failPost = true;
     const dc = new FakeChannel("discord");
-    reg.register(tg);
-    reg.register(dc);
+    reg.register("op-a", tg);
+    reg.register("op-a", dc);
 
     expect(await reg.fanOut(approval())).toBe(1);
     expect(dc.posted).toHaveLength(1);
@@ -147,7 +174,7 @@ describe("fan-out", () => {
     const off = { ...binding("b1", "telegram"), enabled: false };
     const store = makeStore([off]);
     const reg = new NotificationRegistry(store, silentLog);
-    reg.register(new FakeChannel("telegram"));
+    reg.register("op-a", new FakeChannel("telegram"));
     expect(await reg.fanOut(approval())).toBe(0);
   });
 });
@@ -158,8 +185,8 @@ describe("settle", () => {
     const reg = new NotificationRegistry(store, silentLog);
     const tg = new FakeChannel("telegram");
     const dc = new FakeChannel("discord");
-    reg.register(tg);
-    reg.register(dc);
+    reg.register("op-a", tg);
+    reg.register("op-a", dc);
 
     const a = approval();
     await reg.fanOut(a);
@@ -176,8 +203,8 @@ describe("settle", () => {
     const reg = new NotificationRegistry(store, silentLog);
     const tg = new FakeChannel("telegram");
     const dc = new FakeChannel("discord");
-    reg.register(tg);
-    reg.register(dc);
+    reg.register("op-a", tg);
+    reg.register("op-a", dc);
 
     const a = approval();
     await reg.fanOut(a);
@@ -191,7 +218,7 @@ describe("settle", () => {
     const store = makeStore([binding("b1", "telegram")]);
     const reg = new NotificationRegistry(store, silentLog);
     const tg = new FakeChannel("telegram");
-    reg.register(tg);
+    reg.register("op-a", tg);
 
     const a = approval();
     await reg.fanOut(a);
@@ -209,8 +236,8 @@ describe("settle", () => {
       throw new Error("edit failed");
     };
     const dc = new FakeChannel("discord");
-    reg.register(tg);
-    reg.register(dc);
+    reg.register("op-a", tg);
+    reg.register("op-a", dc);
 
     const a = approval();
     await reg.fanOut(a);
@@ -225,27 +252,85 @@ describe("lifecycle", () => {
     const tg = new FakeChannel("telegram");
     const dc = new FakeChannel("discord");
     dc.ready = false;
-    reg.register(tg);
-    reg.register(dc);
-    expect(reg.readyKinds()).toEqual(["telegram"]);
+    reg.register("op-a", tg);
+    reg.register("op-a", dc);
+    expect(reg.readyKinds("op-a")).toEqual(["telegram"]);
   });
 
   test("stopAll stops and forgets every channel", async () => {
     const reg = new NotificationRegistry(makeStore([]), silentLog);
     const tg = new FakeChannel("telegram");
-    reg.register(tg);
+    reg.register("op-a", tg);
     await reg.stopAll();
     expect(tg.ready).toBe(false);
-    expect(reg.readyKinds()).toEqual([]);
-    expect(reg.get("telegram")).toBeUndefined();
+    expect(reg.readyKinds("op-a")).toEqual([]);
+    expect(reg.get("op-a", "telegram")).toBeUndefined();
   });
 
   test("re-registering a kind replaces it", () => {
     const reg = new NotificationRegistry(makeStore([]), silentLog);
     const first = new FakeChannel("telegram");
     const second = new FakeChannel("telegram");
-    reg.register(first);
-    reg.register(second);
-    expect(reg.get("telegram")).toBe(second);
+    reg.register("op-a", first);
+    reg.register("op-a", second);
+    expect(reg.get("op-a", "telegram")).toBe(second);
+  });
+
+  test("readyKinds is per operator, and an operator prefix cannot bleed", () => {
+    const reg = new NotificationRegistry(makeStore([]), silentLog);
+    reg.register("op-a", new FakeChannel("telegram"));
+    reg.register("op-ab", new FakeChannel("discord"));
+    // "op-a" must not match the slots of "op-ab".
+    expect(reg.readyKinds("op-a")).toEqual(["telegram"]);
+    expect(reg.readyKinds("op-ab")).toEqual(["discord"]);
+  });
+});
+
+describe("a gateway shared by two operators (one bot, two OS accounts)", () => {
+  test("both operators are served by the one instance", async () => {
+    const store = makeStore([binding("b1", "telegram", "op-a"), binding("b2", "telegram", "op-b")]);
+    const reg = new NotificationRegistry(store, silentLog);
+    const shared = new FakeChannel("telegram");
+    reg.register("op-a", shared);
+    reg.register("op-b", shared);
+
+    await reg.fanOut(approval({ operator_id: "op-a" }));
+    await reg.fanOut(approval({ id: "appr-2", operator_id: "op-b" }));
+    // One transport, two recipients — and each got their OWN address.
+    expect(shared.posted.map((p) => p.address)).toEqual(["addr-b1", "addr-b2"]);
+  });
+
+  test("releasing one operator reports the gateway as still in use", () => {
+    const reg = new NotificationRegistry(makeStore([]), silentLog);
+    const shared = new FakeChannel("telegram");
+    reg.register("op-a", shared);
+    reg.register("op-b", shared);
+
+    // Disconnecting op-a must NOT stop the transport: op-b still holds it.
+    const first = reg.unregister("op-a", "telegram");
+    expect(first.channel).toBe(shared);
+    expect(first.orphaned).toBe(false);
+
+    const second = reg.unregister("op-b", "telegram");
+    expect(second.channel).toBe(shared);
+    expect(second.orphaned).toBe(true);
+  });
+
+  test("unregistering an unknown slot is a no-op, never a phantom stop", () => {
+    const reg = new NotificationRegistry(makeStore([]), silentLog);
+    expect(reg.unregister("op-a", "telegram")).toEqual({ channel: null, orphaned: false });
+  });
+
+  test("stopAll stops a shared instance once, not once per operator", async () => {
+    const reg = new NotificationRegistry(makeStore([]), silentLog);
+    const shared = new FakeChannel("telegram");
+    let stops = 0;
+    shared.stop = async (): Promise<void> => {
+      stops++;
+    };
+    reg.register("op-a", shared);
+    reg.register("op-b", shared);
+    await reg.stopAll();
+    expect(stops).toBe(1);
   });
 });

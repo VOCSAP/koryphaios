@@ -10,10 +10,22 @@ on:
   push:
     paths:
       - 'desktop/**'
+      # The desktop no longer owns all the code its tests cover: the notify
+      # channels, the broker and shared/ are exercised by the same matrix, so a
+      # change there must trigger it too — otherwise a cross-platform break in
+      # them lands unseen.
+      - 'notify/**'
+      - 'shared/**'
+      - 'tests/**'
+      - 'broker.ts'
       - '.github/workflows/desktop-build.yml'
   pull_request:
     paths:
       - 'desktop/**'
+      - 'notify/**'
+      - 'shared/**'
+      - 'tests/**'
+      - 'broker.ts'
       - '.github/workflows/desktop-build.yml'
 
 jobs:
@@ -37,14 +49,26 @@ jobs:
         with:
           node-version: '20'
 
-      # Pure main-process modules (scope, launch-config, session-command, i18n,
-      # ...) import under bun with node builtins only -- no node-pty / electron,
-      # no install needed.
-      - name: Bun tests (desktop pure modules)
-        # bash so the glob expands on every runner (pwsh, the Windows default,
+      # Pure modules (desktop main-process helpers, the notify channels and
+      # their wire format, the mobile shell's decision logic) import under bun
+      # with node builtins only -- no node-pty / electron, no install needed.
+      #
+      # The globs are listed rather than replaced by `bun test`: the broker
+      # integration suites spawn a daemon and bind ports, which is not what this
+      # matrix is for. Adding a suite that belongs here means adding it here.
+      - name: Bun tests (pure modules)
+        # bash so the globs expand on every runner (pwsh, the Windows default,
         # does not, and bun would treat the literal pattern as a no-match filter).
         shell: bash
-        run: bun test tests/desktop-*.test.ts
+        run: bun test tests/desktop-*.test.ts tests/notify-*.test.ts tests/mobile-shell-*.test.ts
+
+      # The mobile shell is TypeScript that nothing else type-checks: it is in
+      # neither desktop tsconfig, and `bun build`/`bun test` only transpile. Its
+      # whole point is sharing notify/ntfy-protocol.ts with the broker, so a
+      # silent drift across that import is exactly what must not happen.
+      - name: Typecheck the mobile shell
+        shell: bash
+        run: bunx tsc --noEmit -p desktop/mobile-shell/tsconfig.json
 
       - name: Install desktop deps
         working-directory: desktop

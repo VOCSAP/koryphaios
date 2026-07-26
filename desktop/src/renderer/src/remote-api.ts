@@ -11,6 +11,7 @@
 
 import {
   COMPANION_CLIENT_TIMEOUT_MS,
+  COMPANION_CRED_STORAGE_KEY,
   COMPANION_MANIFEST,
   REMOTE_BLOCKED_CHANNELS,
   type CompanionServerFrame
@@ -19,7 +20,8 @@ import type { DeckApi } from '@shared/types'
 
 export type RemoteState = 'connecting' | 'connected' | 'disconnected'
 
-const CRED_KEY = 'companion-cred'
+// Shared with the Android shell, which seeds this key to resume a host.
+const CRED_KEY = COMPANION_CRED_STORAGE_KEY
 
 let ws: WebSocket | null = null
 let state: RemoteState = 'connecting'

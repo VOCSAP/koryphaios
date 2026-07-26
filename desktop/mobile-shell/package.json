@@ -1,16 +1,19 @@
 {
-  "name": "koryphaios-companion-shell",
-  "version": "0.1.0",
+  "name": "parastates-shell",
+  "version": "0.2.0",
   "private": true,
-  "description": "Thin Capacitor Android shell for Koryphaios companion mode (PLAN MB6). Requires Android SDK + Gradle to build; see README.md.",
+  "description": "Parastates - the Koryphaios companion app (Capacitor/Android): companion mode (LAN screen mirror, multi-host) and approvals mode (ntfy, reachable anywhere). Requires Android SDK + Gradle to build; see README.md.",
   "scripts": {
+    "build": "bun build src/app.ts --outdir www/dist --target browser --minify",
     "add:android": "cap add android",
-    "sync": "cap sync",
-    "run:android": "cap run android"
+    "sync": "npm run build && cap sync",
+    "run:android": "npm run build && cap run android"
   },
   "dependencies": {
     "@capacitor/android": "^6.0.0",
-    "@capacitor/core": "^6.0.0"
+    "@capacitor/barcode-scanner": "^2.0.0",
+    "@capacitor/core": "^6.0.0",
+    "@capacitor/preferences": "^6.0.0"
   },
   "devDependencies": {
     "@capacitor/cli": "^6.0.0"

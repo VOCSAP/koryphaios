@@ -13,14 +13,26 @@ import { Database } from "bun:sqlite";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { hostname } from "node:os";
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { loadConfig } from "./shared/config.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { loadOrCreateSecretKey, openSecret, sealSecret, secretHint } from "./shared/secret-box.ts";
 import { NotificationRegistry, type RegistryStore } from "./notify/registry.ts";
 import { TelegramChannel } from "./notify/telegram.ts";
 import { DiscordChannel } from "./notify/discord.ts";
-import type { ChannelBinding, ChannelHost, ChannelKind } from "./notify/types.ts";
+import { NtfyChannel, type NtfyConfig } from "./notify/ntfy.ts";
+import {
+  encodePairingPayload,
+  isValidTopic,
+  normalizeNtfyServer,
+  NTFY_TOPIC_HEX_LEN,
+} from "./notify/ntfy-protocol.ts";
+import type {
+  ChannelBinding,
+  ChannelHost,
+  ChannelKind,
+  NotificationChannel,
+} from "./notify/types.ts";
 import { validateDraftPayload } from "./shared/graph-draft.ts";
 import {
   APPROVAL_ANSWER_KINDS,
@@ -2533,69 +2545,121 @@ function handleApprovalDelivered(
 }
 
 /**
- * Connect a channel: the Deck hands over the bot token (operator-signed), the
- * broker seals it and starts the gateway. This is why the operator never needs
- * shell access to the broker host.
+ * Connect a channel: the Deck hands over the channel's secret (operator-signed),
+ * the broker seals it and starts the gateway. This is why the operator never
+ * needs shell access to the broker host.
+ *
+ * Telegram and Discord are enrolled with a BOT TOKEN. ntfy has no bot: what is
+ * sealed there is a small config object — the server plus the two topics the
+ * broker mints — and the phone is enrolled by scanning it (`mobile_payload`).
  */
 async function handleChannelConnect(
   body: Record<string, unknown>
 ): Promise<
-  | { kind: string; label: string; hint: string; pairing_code: string; deep_link: string; invite_url: string }
+  | {
+      kind: string;
+      label: string;
+      hint: string;
+      pairing_code: string;
+      deep_link: string;
+      invite_url: string;
+      mobile_payload: string;
+    }
   | { error: string; status: number }
 > {
   const auth = resolveApprovalAuth(body, "channels");
   if ("error" in auth) return auth;
 
   const kind = typeof body.kind === "string" ? (body.kind as ChannelKind) : ("" as ChannelKind);
-  if (kind !== "telegram" && kind !== "discord") {
-    return { error: "kind must be telegram|discord", status: 400 };
+  if (kind !== "telegram" && kind !== "discord" && kind !== "ntfy") {
+    return { error: "kind must be telegram|discord|ntfy", status: 400 };
   }
-  const token = typeof body.token === "string" ? body.token.trim() : "";
-  if (!token) return { error: "token is required", status: 400 };
+
+  let sealed: string;
+  let hint: string;
+  /** The candidate secret in the clear, so it can be vetted before storing. */
+  let plain: string;
+  let ntfyConfig: NtfyConfig | null = null;
+  if (kind === "ntfy") {
+    const server = normalizeNtfyServer(typeof body.server === "string" ? body.server : "");
+    if (!server.ok) return { error: server.error, status: 400 };
+    // The topics ARE the secret: ntfy has no per-topic identity, so an
+    // unguessable name plus (optionally) an access token is the whole lock.
+    // Reusing the previous ones on a reconnect would keep a revoked phone
+    // subscribed, so a reconnect always mints fresh ones.
+    ntfyConfig = {
+      server: server.value,
+      topic_notif: randomBytes(NTFY_TOPIC_HEX_LEN / 2).toString("hex"),
+      topic_replies: randomBytes(NTFY_TOPIC_HEX_LEN / 2).toString("hex"),
+      token: typeof body.token === "string" ? body.token.trim().slice(0, 256) : "",
+    };
+    plain = JSON.stringify(ntfyConfig);
+    sealed = sealSecret(secretKey, plain);
+    // Not a token fragment here: the server is what the operator needs to
+    // recognise the row, and it is not a secret.
+    hint = new URL(ntfyConfig.server).host.slice(0, 64);
+  } else {
+    const token = typeof body.token === "string" ? body.token.trim() : "";
+    if (!token) return { error: "token is required", status: 400 };
+    plain = token;
+    sealed = sealSecret(secretKey, token);
+    hint = secretHint(token);
+  }
+
+  // VET FIRST, PERSIST SECOND. Writing the new secret up front and deleting it
+  // again on failure destroyed a working, paired channel whenever the operator
+  // hit Connect with the relay briefly unreachable or an address mistyped: the
+  // old sealed config was already overwritten and its gateway already stopped.
+  // `startChannel` with a candidate touches nothing until the provider accepts.
+  const me = await startChannel(auth.operator_id, kind, plain);
+  if (!me) {
+    return {
+      error: kind === "ntfy" ? "the ntfy server refused these settings" : "the provider refused this token",
+      status: 400,
+    };
+  }
 
   db.run(
     `INSERT INTO approval_channel_secrets (operator_id, kind, secret_enc, hint, label, created_at)
-     VALUES (?, ?, ?, ?, '', ?)
+     VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(operator_id, kind) DO UPDATE SET
-       secret_enc = excluded.secret_enc, hint = excluded.hint, created_at = excluded.created_at`,
-    [auth.operator_id, kind, sealSecret(secretKey, token), secretHint(token), new Date().toISOString()]
+       secret_enc = excluded.secret_enc, hint = excluded.hint,
+       label = excluded.label, created_at = excluded.created_at`,
+    [auth.operator_id, kind, sealed, hint, me.label, new Date().toISOString()]
   );
 
-  const me = await startChannel(auth.operator_id, kind);
-  if (!me) {
-    // A token the provider rejects must not be left behind looking configured.
-    db.run("DELETE FROM approval_channel_secrets WHERE operator_id = ? AND kind = ?", [
-      auth.operator_id,
-      kind,
-    ]);
-    return { error: "the provider refused this token", status: 400 };
+  // ntfy only: the topics just changed, so a binding pointing at the old one
+  // addresses a topic nobody publishes to any more. Telegram and Discord keep
+  // theirs — an address there is a chat id, which a new token does not move.
+  if (kind === "ntfy") {
+    db.run("DELETE FROM approval_channels WHERE operator_id = ? AND kind = 'ntfy'", [auth.operator_id]);
   }
-  db.run("UPDATE approval_channel_secrets SET label = ? WHERE operator_id = ? AND kind = ?", [
-    me.label,
-    auth.operator_id,
-    kind,
-  ]);
 
-  // One-shot pairing code: the operator sends it to the bot, which binds their
-  // address. Short-lived on purpose.
-  const code = randomUUID().slice(0, 8);
+  // One-shot pairing code: the operator sends it to the bot (or scans it into
+  // the app), which binds their address. Short-lived on purpose, and 96 bits
+  // rather than 32 — it is a primary key with no conflict handling, so a
+  // birthday collision would throw after the topics had already been minted.
+  const code = randomBytes(12).toString("base64url");
   db.run(
     `INSERT INTO approval_pairing_codes (code, operator_id, kind, expires_at) VALUES (?, ?, ?, ?)`,
     [code, auth.operator_id, kind, new Date(Date.now() + 30 * 60_000).toISOString()]
   );
   // Everything the operator still has to do, handed over ready to use: a deep
   // link they can scan for Telegram, an invite URL for Discord (the bot must
-  // share a server with them before it may DM — error 50278 otherwise).
+  // share a server with them before it may DM — error 50278 otherwise), and for
+  // ntfy the QR payload the app scans.
   return {
     kind,
     label: me.label,
-    hint: secretHint(token),
+    hint,
     pairing_code: code,
     deep_link: kind === "telegram" ? `https://t.me/${me.label}?start=${code}` : "",
     invite_url:
       kind === "discord" && me.appId
         ? `https://discord.com/oauth2/authorize?client_id=${me.appId}&scope=bot&permissions=0`
         : "",
+    // CREDENTIAL, not a link: it carries the topics and the access token.
+    mobile_payload: ntfyConfig ? encodePairingPayload({ ...ntfyConfig, code }) : "",
   };
 }
 
@@ -2607,9 +2671,7 @@ async function handleChannelDisconnect(
   const kind = typeof body.kind === "string" ? (body.kind as ChannelKind) : ("" as ChannelKind);
   if (!kind) return { error: "kind is required", status: 400 };
 
-  const channel = notifyRegistry.get(kind);
-  if (channel) await channel.stop();
-  notifyRegistry.unregister(kind);
+  await releaseChannel(auth.operator_id, kind);
   db.run("DELETE FROM approval_channel_secrets WHERE operator_id = ? AND kind = ?", [
     auth.operator_id,
     kind,
@@ -2636,7 +2698,7 @@ function handleChannelList(
   const bindings = db
     .query("SELECT kind, address, label FROM approval_channels WHERE operator_id = ? AND enabled = 1")
     .all(auth.operator_id) as Array<{ kind: string; address: string; label: string }>;
-  const ready = new Set(notifyRegistry.readyKinds());
+  const ready = new Set(notifyRegistry.readyKinds(auth.operator_id));
   // The token NEVER comes back -- only a 4-character hint of it.
   return {
     channels: (["telegram", "discord", "ntfy"] as ChannelKind[]).map((kind) => {
@@ -2724,6 +2786,9 @@ function sweepApprovals(): { expired: number; purged: number } {
       WHERE status IN ('answered','abandoned') AND created_at < datetime('now', ?)`,
     [`-${APPROVAL_TTL_DAYS} days`]
   ).changes;
+  // Pairing codes were only ever deleted when someone tried to redeem one, so
+  // an operator who clicks Connect and never scans left a row behind for good.
+  db.run("DELETE FROM approval_pairing_codes WHERE expires_at < ?", [new Date().toISOString()]);
   if (expired > 0) log.info(`approval notifications expired: ${expired}`);
   return { expired, purged };
 }
@@ -2807,8 +2872,17 @@ const notifyRegistry = new NotificationRegistry(registryStore, {
   error: (m, e) => log.error(m, e),
 });
 
-/** Address -> binding, for a gateway's authorisation check. */
-function bindingForAddress(kind: ChannelKind, address: string): ChannelBinding | null {
+/**
+ * Is this address paired at all? A PRE-FILTER, not the gate.
+ *
+ * Adapters call it to drop a stranger before touching anything — a bot's
+ * username is public, so strangers WILL message it. It deliberately does not
+ * answer "whose address is this", because one address can belong to SEVERAL
+ * operators: one person with two OS accounts, one bot and one chat account
+ * ends up with two bindings on the same chat id. The real authorisation is
+ * `bindingFor(kind, address, operatorId)` below, keyed on the approval's owner.
+ */
+function isPairedAddress(kind: ChannelKind, address: string): ChannelBinding | null {
   const r = db
     .query(
       `SELECT id, operator_id, kind, address, label, enabled
@@ -2817,16 +2891,46 @@ function bindingForAddress(kind: ChannelKind, address: string): ChannelBinding |
     .get(kind, address) as
     | { id: string; operator_id: string; kind: string; address: string; label: string; enabled: number }
     | null;
-  return r
-    ? {
-        id: r.id,
-        operator_id: r.operator_id,
-        kind: r.kind as ChannelKind,
-        address: r.address,
-        label: r.label,
-        enabled: true,
-      }
-    : null;
+  return r ? toBinding(r) : null;
+}
+
+/**
+ * The authorisation check: is this address paired FOR THIS OPERATOR?
+ *
+ * Asking the question in this direction is what lets one chat serve two
+ * operator identities. The other direction — resolve the address to "its"
+ * operator, then compare — silently picked one of the two rows, so roughly
+ * half the answers were refused as "already handled" with the operator
+ * looking at a perfectly valid request.
+ */
+function bindingFor(kind: ChannelKind, address: string, operatorId: string): ChannelBinding | null {
+  const r = db
+    .query(
+      `SELECT id, operator_id, kind, address, label, enabled
+         FROM approval_channels
+        WHERE kind = ? AND address = ? AND operator_id = ? AND enabled = 1`
+    )
+    .get(kind, address, operatorId) as
+    | { id: string; operator_id: string; kind: string; address: string; label: string; enabled: number }
+    | null;
+  return r ? toBinding(r) : null;
+}
+
+function toBinding(r: {
+  id: string;
+  operator_id: string;
+  kind: string;
+  address: string;
+  label: string;
+}): ChannelBinding {
+  return {
+    id: r.id,
+    operator_id: r.operator_id,
+    kind: r.kind as ChannelKind,
+    address: r.address,
+    label: r.label,
+    enabled: true,
+  };
 }
 
 /**
@@ -2835,14 +2939,20 @@ function bindingForAddress(kind: ChannelKind, address: string): ChannelBinding |
  */
 const channelHost: ChannelHost = {
   async onAnswer(kind, answer) {
-    const binding = bindingForAddress(kind, answer.fromAddress);
-    // Unknown address: nothing is written, nothing is answered. The bot's
-    // username is public, so strangers WILL message it.
-    if (!binding) return null;
+    // The approval FIRST (a read by id, nothing written), then "is the sender
+    // paired for THAT approval's owner". Resolving the address to an operator
+    // and comparing was equivalent only while an address belonged to exactly
+    // one operator — which stops being true the moment one person runs two OS
+    // accounts against one bot and one chat account.
     const row = db
       .query("SELECT * FROM pending_approvals WHERE id = ?")
       .get(answer.approvalId) as ApprovalRow | null;
-    if (!row || row.operator_id !== binding.operator_id) return null;
+    if (!row) return null;
+    const binding = bindingFor(kind, answer.fromAddress, row.operator_id);
+    // Not paired for this owner — a stranger, or the operator's own other
+    // account. Nothing is written, and the sender is told no more than
+    // "already handled": never that the id exists but is somebody else's.
+    if (!binding) return null;
 
     let answerText: string | null = null;
     if (answer.answerText) {
@@ -2873,6 +2983,17 @@ const channelHost: ChannelHost = {
       db.run("DELETE FROM approval_pairing_codes WHERE code = ?", [code]);
       return null;
     }
+    // For ntfy the ADDRESS is a topic WE minted, so it must be this operator's
+    // own. Without the check, a pairing code published on somebody else's
+    // replies topic would bind this operator to that topic — and an answer
+    // arriving there would then pass the authorisation check for this
+    // operator's approvals. Telegram and Discord have no equivalent invariant:
+    // there the address is a chat id the provider supplies, and any chat may
+    // legitimately pair.
+    if (kind === "ntfy" && !ntfyAddressBelongsTo(row.operator_id, address)) {
+      log.error(`notify: ntfy pairing refused — the code was presented on a foreign topic`);
+      return null;
+    }
     // One-shot: consumed on first use, like the companion's QR token.
     db.run("DELETE FROM approval_pairing_codes WHERE code = ?", [code]);
     const id = randomUUID();
@@ -2883,68 +3004,228 @@ const channelHost: ChannelHost = {
       [id, row.operator_id, kind, address, label.slice(0, 64), new Date().toISOString()]
     );
     log.info(`notify: ${kind} paired for operator ${row.operator_id}`);
-    return bindingForAddress(kind, address);
+    return bindingFor(kind, address, row.operator_id);
   },
 
   log: { info: (m) => log.info(m), error: (m, e) => log.error(m, e) },
 };
 
-/** Approval a Telegram reply-to refers to. */
+/** Is this ntfy notification topic the one sealed in that operator's config? */
+function ntfyAddressBelongsTo(operatorId: string, address: string): boolean {
+  const row = db
+    .query("SELECT secret_enc FROM approval_channel_secrets WHERE operator_id = ? AND kind = 'ntfy'")
+    .get(operatorId) as { secret_enc: string } | null;
+  if (!row) return false;
+  const plain = openSecret(secretKey, row.secret_enc);
+  if (!plain) return false;
+  const config = parseNtfyConfig(plain);
+  return !!config && config.topic_notif === address;
+}
+
+/**
+ * Approval a Telegram reply-to refers to.
+ *
+ * Joined on the ADDRESS rather than on one resolved binding id: with two
+ * operators sharing a chat, the copy was recorded under whichever of them owns
+ * the request, and pinning a single binding would have found only half of them.
+ * This only says which approval the message is about — whether the sender may
+ * answer it is decided by `onAnswer`.
+ */
 function approvalForPostedMessage(kind: ChannelKind, address: string, externalRef: string): string | null {
-  const binding = bindingForAddress(kind, address);
-  if (!binding) return null;
   const row = db
     .query(
-      `SELECT approval_id FROM approval_posts
-        WHERE kind = ? AND external_ref = ? AND binding_id = ?`
+      `SELECT p.approval_id FROM approval_posts p
+         JOIN approval_channels c ON c.id = p.binding_id
+        WHERE p.kind = ? AND p.external_ref = ? AND c.address = ? AND c.enabled = 1`
     )
-    .get(kind, externalRef, binding.id) as { approval_id: string } | null;
+    .get(kind, externalRef, address) as { approval_id: string } | null;
   return row?.approval_id ?? null;
 }
 
-/** (Re)build a gateway from its stored token. Returns the bot identity. */
-async function startChannel(
-  operatorId: string,
-  kind: ChannelKind
-): Promise<{ label: string; appId?: string } | null> {
-  const row = db
-    .query("SELECT secret_enc FROM approval_channel_secrets WHERE operator_id = ? AND kind = ?")
-    .get(operatorId, kind) as { secret_enc: string } | null;
-  if (!row) return null;
-  const token = openSecret(secretKey, row.secret_enc);
-  if (!token) {
-    log.error(`notify: ${kind} token could not be decrypted — reconnect the channel`);
-    return null;
-  }
-  const existing = notifyRegistry.get(kind);
-  if (existing) await existing.stop();
+/**
+ * Live gateways, keyed by TRANSPORT rather than by operator.
+ *
+ * Two operators on one broker are the normal case (two OS accounts, or a box
+ * shared by a team), and they may legitimately enrol the SAME bot token — one
+ * person with two OS accounts and one bot. Telegram allows exactly one
+ * `getUpdates` consumer per token, so a gateway each would make them fight over
+ * the updates forever. Identical configuration therefore means ONE instance,
+ * registered under both operators' slots.
+ *
+ * The key is a digest of the sealed secret's plaintext, never the plaintext:
+ * for Telegram and Discord that is the bot token (same token = same key), and
+ * for ntfy it is the whole config, so two operators sharing an ntfy account
+ * still get one gateway each — their topics differ, and each needs its own
+ * subscription.
+ */
+interface LiveGateway {
+  channel: NotificationChannel;
+  /** Bot username / relay host, as `describe()` reported it. */
+  label: string;
+  appId?: string;
+}
+const liveGateways = new Map<string, LiveGateway>();
 
+function gatewayKey(kind: ChannelKind, secretPlain: string): string {
+  return `${kind}:${createHash("sha256").update(secretPlain).digest("hex")}`;
+}
+
+/** Forget the gateway table entry, if this instance is the one recorded. */
+function dropGateway(channel: NotificationChannel): void {
+  for (const [key, live] of liveGateways) {
+    if (live.channel === channel) liveGateways.delete(key);
+  }
+}
+
+/**
+ * Release one operator's claim on a gateway, stopping it only when nobody else
+ * holds it. Disconnecting one operator must not cut another operator's bot.
+ */
+async function releaseChannel(operatorId: string, kind: ChannelKind): Promise<void> {
+  const { channel, orphaned } = notifyRegistry.unregister(operatorId, kind);
+  if (!channel || !orphaned) return;
+  dropGateway(channel);
+  await channel.stop();
+}
+
+/** A gateway built and vetted, but not yet published to anyone. */
+interface BuiltGateway {
+  channel: NotificationChannel;
+  label: string;
+  appId?: string;
+}
+
+/**
+ * Construct a gateway and ask the provider who we are.
+ *
+ * NO SIDE EFFECT ON FAILURE, and that is the point: the caller can vet a
+ * candidate token while the operator's CURRENT channel keeps running, and only
+ * swap once the new one is known good. Doing it the other way round meant a
+ * typo'd address or a relay that happened to be down destroyed a working,
+ * paired configuration.
+ */
+async function buildGateway(kind: ChannelKind, token: string): Promise<BuiltGateway | null> {
   if (kind === "telegram") {
     const channel = new TelegramChannel({
       token,
       host: channelHost,
-      bindingFor: (address) => bindingForAddress("telegram", address),
+      bindingFor: (address) => isPairedAddress("telegram", address),
       approvalForMessage: (address, ref) => approvalForPostedMessage("telegram", address, ref),
     });
     const me = await channel.describe();
-    if (!me) return null;
-    channel.start();
-    notifyRegistry.register(channel);
-    return { label: me.username };
+    return me ? { channel, label: me.username } : null;
   }
   if (kind === "discord") {
     const channel = new DiscordChannel({
       token,
       host: channelHost,
-      bindingFor: (address) => bindingForAddress("discord", address),
+      bindingFor: (address) => isPairedAddress("discord", address),
     });
     const me = await channel.describe();
-    if (!me) return null;
-    channel.start();
-    notifyRegistry.register(channel);
-    return { label: me.username, appId: me.id };
+    return me ? { channel, label: me.username, appId: me.id } : null;
+  }
+  if (kind === "ntfy") {
+    const config = parseNtfyConfig(token);
+    if (!config) {
+      log.error("notify: ntfy config is unreadable — reconnect the channel");
+      return null;
+    }
+    const channel = new NtfyChannel({
+      config,
+      host: channelHost,
+      bindingFor: (address) => isPairedAddress("ntfy", address),
+    });
+    const me = await channel.describe();
+    return me ? { channel, label: me.label } : null;
   }
   return null;
+}
+
+/**
+ * Bring a gateway up for one operator and return the provider identity.
+ *
+ * `candidate` lets the enrolment route vet a token it has NOT yet persisted.
+ * Without it the secret is read from the store, which is the boot path.
+ *
+ * Nothing the operator already has is touched until the new transport is
+ * known good: the old gateway is released only after `buildGateway` succeeds.
+ */
+async function startChannel(
+  operatorId: string,
+  kind: ChannelKind,
+  candidate?: string
+): Promise<{ label: string; appId?: string } | null> {
+  let token = candidate ?? "";
+  if (!token) {
+    const row = db
+      .query("SELECT secret_enc FROM approval_channel_secrets WHERE operator_id = ? AND kind = ?")
+      .get(operatorId, kind) as { secret_enc: string } | null;
+    if (!row) return null;
+    token = openSecret(secretKey, row.secret_enc) ?? "";
+    if (!token) {
+      log.error(`notify: ${kind} secret could not be decrypted — reconnect the channel`);
+      return null;
+    }
+  }
+
+  const key = gatewayKey(kind, token);
+  const shared = liveGateways.get(key);
+  // Presence in the table is the test, NOT `isReady()`. A Discord gateway
+  // reports itself ready only once its socket reaches OPEN, and `start()`
+  // merely kicks off the connect — so gating on readiness opened a SECOND
+  // consumer on the same bot token whenever the first was still connecting or
+  // inside its reconnect backoff, and the new one then overwrote the table
+  // entry, leaving the first unreachable. The entry is removed exactly when the
+  // gateway is stopped (`dropGateway`), which is the invariant that holds.
+  if (shared) {
+    // Already this operator's own gateway (a reconnect with an unchanged
+    // token): releasing it here would stop the very thing we are about to
+    // register, since they are its last holder.
+    if (notifyRegistry.get(operatorId, kind) !== shared.channel) {
+      await releaseChannel(operatorId, kind);
+      notifyRegistry.register(operatorId, shared.channel);
+      log.info(`notify: ${kind} gateway shared with another operator`);
+    }
+    return shared.appId ? { label: shared.label, appId: shared.appId } : { label: shared.label };
+  }
+
+  const built = await buildGateway(kind, token);
+  if (!built) return null;
+
+  // Only now is it safe to drop what the operator had: the replacement exists
+  // and the provider has accepted it.
+  await releaseChannel(operatorId, kind);
+  built.channel.start();
+  liveGateways.set(key, built);
+  notifyRegistry.register(operatorId, built.channel);
+  return built.appId ? { label: built.label, appId: built.appId } : { label: built.label };
+}
+
+/**
+ * Re-read a sealed ntfy config. Validated rather than trusted: a config that
+ * survived a schema change or a partial write must fail the channel, not build
+ * a gateway that publishes to a topic named "undefined".
+ */
+function parseNtfyConfig(plain: string): NtfyConfig | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(plain);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const c = parsed as Record<string, unknown>;
+  const server = normalizeNtfyServer(typeof c.server === "string" ? c.server : "");
+  if (!server.ok) return null;
+  const notif = String(c.topic_notif ?? "");
+  const replies = String(c.topic_replies ?? "");
+  if (!isValidTopic(notif) || !isValidTopic(replies) || notif === replies) return null;
+  return {
+    server: server.value,
+    topic_notif: notif,
+    topic_replies: replies,
+    token: typeof c.token === "string" ? c.token : "",
+  };
 }
 
 /** Bring back every configured gateway at boot. */

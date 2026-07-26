@@ -18,7 +18,7 @@ Two products in one repo:
 Release history and per-batch narratives live in `CHANGELOG.md`; the remaining
 open work (to-do / to-verify / deferred, incl. the security backlog) is
 centralized in `BACKLOG.md`. Code comments reference chantier ids (`C1`…`C29`,
-`D1`…, `MB1`…, `TS1`…, `GX1`…, `CT1`…, `SBX1`…) from past working plans. Those standalone working
+`D1`…, `MB1`…, `TS1`…, `GX1`…, `CT1`…, `SBX1`…, `N0`…`N5`) from past working plans. Those standalone working
 docs (`PLAN-*`, `EXPLORATION-*`, `AUDIT-*`) were consolidated and removed: the
 shipped design decisions are summarized in the CHANGELOG entry of the batch that
 shipped them, the open residual lives in `BACKLOG.md`, and the full detail
@@ -63,6 +63,37 @@ Only read the file matching the area you are touching:
 
 ## Conventions (always apply)
 
+- **Who is actually running this.** Every design decision has to hold for the
+  real deployments, not for the single-user single-machine case that is easiest
+  to picture:
+  - the broker is **local** (auto-spawned on the operator's PC) **or on a
+    shared server** reached over HTTP;
+  - a shared broker serves **several people**;
+  - one person runs **several sessions at once**, across **several PCs they
+    own** — usually linked to ONE `operator_id`, but not always (two OS
+    accounts are two identities by construction);
+  - so the same human may hold two identities, and one identity may be reached
+    at the same address twice.
+
+  The failure mode is always the same shape and it is always SILENT: some
+  singleton is keyed by too little. Concretely, this repo has already shipped
+  three of them — a gateway table keyed by channel `kind` (the second operator
+  to enrol replaced and stopped the first one's), an authorisation that
+  resolved an address to "its" operator and compared (`.get()` picked one of
+  two rows, refusing half the answers as "already handled"), and `hostname()`
+  used as an identity (two OS accounts share it). Before adding a `Map`, a
+  cache, a table, a lock or a `SELECT … LIMIT 1`, answer: **keyed by what, and
+  what happens when there are two?** And ask the authorisation question in the
+  direction that survives a second identity — resolve the OBJECT first, then
+  "may this caller act on THAT object", never "who does this caller belong to".
+
+- **No literal control bytes in a source file.** Write `\0`, `\x1b`, `\x07` as
+  escapes. A single embedded NUL makes git classify the file as **binary**: the
+  diff becomes `Bin 4555 -> 7157 bytes`, `git blame` dies, 3-way merge dies,
+  and `grep`/ripgrep refuse to show its contents — a whole module silently
+  drops out of code search. Precedent: `notify/registry.ts` shipped that way
+  and its entire rewrite was unreviewable.
+
 - Default to Bun instead of Node.js: `bun <file>`, `bun test`, `bun install`,
   `bunx`. Exception: `desktop/` builds with electron-vite/npm (native module
   `node-pty` rebuilt for Electron). Details in `BUN.md`.
@@ -80,6 +111,15 @@ Only read the file matching the area you are touching:
   Only swallow silently when the fallback is truly equivalent (documented
   best-effort caches). Full conventions per layer: the `error-reporting`
   skill (`.claude/skills/error-reporting/SKILL.md`).
+- **A comment or a class that ASSERTS a guarantee must be wired to it.** This
+  repo explains itself in prose more than most, which makes the opposite
+  failure cheap to commit and expensive to find: `PinnedTrust.kt` described
+  trust-on-first-use, implemented it correctly, and was instantiated by
+  *nothing* — so certificate pinning read as done for weeks while the app
+  accepted any certificate. Dead code claiming a security property is worse
+  than no code, because it stops anyone looking. When you write "X is
+  enforced", grep that the enforcer is called.
+
 - **Five hostile inputs, never trusted.** (1) A value from a CLONED REPO
   (project `.claude/claude-peers/config.json`, project-local `templates/*.json`)
   that reaches a shell/spawn must be GLOBAL-config-only or approval-gated —

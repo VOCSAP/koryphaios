@@ -93,8 +93,13 @@ export function CompanionDialog(): React.JSX.Element {
     }
   }
 
+  // The token rides in the FRAGMENT (never sent to the server by HTTP); the
+  // certificate fingerprint rides beside it so the Android shell can pin this
+  // host on first pair (MB6). A browser ignores both.
   const pairUrl =
-    info?.running && info.url && info.pairingToken ? `${info.url}/#t=${info.pairingToken}` : null
+    info?.running && info.url && info.pairingToken
+      ? `${info.url}/#t=${info.pairingToken}${info.certFingerprint ? `&f=${info.certFingerprint}` : ''}`
+      : null
 
   return (
     <div className="modal-backdrop" onMouseDown={() => openCompanion(false)}>

@@ -1,5 +1,236 @@
 # Changelog
 
+## core + desktop (experimental) — the app is named Parastatès, and both reviews landed
+
+A code review and a security review ran over the whole N5 lot. Nine of their
+findings were real; the fixes ship here with the naming, in one batch.
+
+**The app is Parastatès** — παραστάτης, the chorus member who stands beside the
+leader. Koryphaios leads the chorus; this one stands next to it. The app id
+becomes `io.koryphaios.parastates` (the family namespace stays: it is a
+satellite, not a separate product) and the deep-link scheme `parastates://`.
+Both are moved now because neither can move after a store listing exists.
+Storage keys keep the `koryphaios.` prefix on purpose — they name the
+ecosystem, not the app, and they are invisible.
+
+### The security findings
+
+**Certificate pinning was documented, not implemented.** The companion viewer
+accepted ANY certificate whenever a host entry had no fingerprint, on every
+navigation, forever. The class that would have implemented trust-on-first-use
+(`PinnedTrust.kt`) was never instantiated by anything — dead code claiming a
+security property, which is worse than none because it reads as done. It is
+deleted, and the write-back it promised now exists: the digest served on a
+first connection is recorded and pinned from then on, never overwriting an
+existing pin. This mattered most for hosts paired before the QR carried `&f=`
+at all — for them, "no fingerprint yet" was a permanent MITM window on the LAN,
+against a channel that is a remote-control socket into the Deck.
+
+**The credential seeding had one guarded path and one unguarded one.** The
+`addDocumentStartJavaScript` path is scoped to the paired origin; the
+`onPageStarted` fallback ran for whatever page had started loading, so a
+redirect or an in-page link handed the companion credential to the destination.
+Both are now origin-checked, and a `shouldOverrideUrlLoading` keeps the viewer
+on its one host — it is a control channel, not a browser.
+
+**The ntfy token rode inside published action buttons.** The inline
+justification was that reading the notification topic already discloses the ids
+needed to answer. That is true of *answering* and false of the token: an ntfy
+`tk_…` is an ACCOUNT credential, so the relay was caching a copy of it in a
+message anyone who learned the topic could read. Our own notification buttons
+never used it — they read the token from app-private storage — so dropping it
+costs only one-tap answering from the official ntfy client on a token-protected
+server. The related documentation lie is corrected too: re-minting topics does
+NOT rotate the token, so `Disconnect`/`Connect` alone never was the whole kill
+switch for a lost phone.
+
+### The code-review findings
+
+**`notify/registry.ts` contained two literal NUL bytes**, so git classified the
+file as binary: the entire multi-operator rewrite was undiffable, unmergeable
+and invisible to `grep`. The separator is right (it mirrors
+`DOMAIN_OPERATOR_ID`); writing it as the escape `\0` instead of an embedded
+byte is the whole fix.
+
+**The phone could never confirm its pairing.** The broker published its
+acknowledgement with an empty `click`, and the app routes on the deep link and
+drops anything without one. So the ack — and, worse, the *refusal* — were
+discarded: the operator watched "waiting for confirmation" forever and the
+one-shot code stayed on the device. There is now a `parastates://paired/<0|1>`
+link and a message kind for it, so a refusal shows as a refusal.
+
+**The `since` cursor advanced on keepalives.** They are continuous and real
+answers are rare, so the last id before a disconnect was almost always a
+keepalive — an id the message cache cannot resolve. The resume was therefore
+broken in the common case, not the rare one. The filter now precedes the
+assignment. The old test asserted the buggy value; it asserts the right one.
+
+**Two operators sharing a Discord bot token got two gateways.** The
+shared-instance guard tested `isReady()`, and a Discord gateway is only ready
+once its socket is OPEN — so during connect or reconnect backoff the guard
+missed, a second consumer opened on the same token, and the first became
+unreachable. Presence in the table is the test; it is removed exactly when the
+gateway stops.
+
+**A failed reconnect destroyed a working channel.** Connect overwrote the
+sealed config, stopped the running gateway, then deleted the row on failure —
+so one click with the relay briefly unreachable cost the operator their paired
+channel and left `configured: false, paired: 1`. It now vets the candidate
+before touching anything, and a test reproduces the old destruction.
+
+Also: `stop()` no longer parks an HTTP handler for the full reconnect backoff;
+`disconnect()` in the renderer surfaces its failure instead of clearing the
+spinner while the channel is still live; the enrolment form no longer carries a
+half-typed ntfy token across to Telegram; the origin badge can no longer eat
+the agent's title; pairing codes went from 32 to 96 bits and stale ones are
+swept; and the two disagreeing private-address predicates became one
+(`shared/net.ts`) — a self-hosted ntfy on a tailnet was refused as "not local"
+while the companion accepted the identical address.
+
+**None of these tests ran in CI.** The matrix only globbed `tests/desktop-*`,
+and its `paths:` filter did not include `notify/`, `shared/` or `broker.ts` —
+so 140 unit tests never executed on any OS. Fixed, and the mobile shell now has
+a tsconfig: it was in no type-checked project at all, which is precisely the
+wrong state for the one module whose justification is that broker and phone
+cannot drift.
+
+Four tests that could not fail were replaced by tests of the invariant they
+named. 1034 -> 1043.
+
+## core (experimental) — a shared broker really serves several operators
+
+Two defects that only appear when one broker serves more than one operator
+identity — the normal case on a box shared by a team, or on one PC with two OS
+accounts. Both were pre-existing: Telegram and Discord have carried them since
+N3/N4, and ntfy merely inherited them.
+
+**The gateway table was keyed by channel KIND, not by (operator, kind).** So the
+second operator to enrol a channel replaced — and stopped — the first one's
+gateway. Telegram then failed cleanly (their bot never ran, so nothing arrived);
+ntfy failed confusingly, because the notification topic came from the binding
+while the reply topic came from the adapter's config: the question reached the
+phone and the answer went to a topic nobody was subscribed to. Availability
+only, never confidentiality — inbound routing resolves by address and the broker
+still refused to settle another operator's approval — but silent, which is worse
+than loud.
+
+Keying per operator is not enough on its own, though: two operators may enrol
+the **same bot token** deliberately, one person with two OS accounts and one
+bot. Telegram allows exactly one `getUpdates` consumer per token, so a gateway
+each would make them fight over the updates forever. `broker.ts` therefore
+digests the sealed config and shares one instance between the slots that resolve
+to the same transport; stopping is reference-counted, so disconnecting one
+operator never cuts the other. For ntfy the digest covers the whole config, so
+two operators on one ntfy account still get a subscription each — their topics
+differ, and each needs its own.
+
+**The authorisation question was asked in the wrong direction.** An inbound
+answer resolved the sender's address to "its" operator, then compared. That is
+equivalent to the right check only while an address belongs to exactly one
+operator — which stops being true the moment one person points two operator
+identities at one chat account, exactly what sharing a bot means. `SELECT …
+WHERE address = ?` then `.get()` picked one of the two rows, so roughly half the
+answers were refused as "already handled" in front of a perfectly valid request.
+It now resolves the APPROVAL first and asks "is this address paired *for that
+approval's owner*". Same guarantee, stated so it survives a second identity.
+`isPairedAddress` remains as what adapters actually wanted — a cheap pre-filter
+to drop strangers — and says in its own comment that it is not the gate.
+
+One guard came out of writing the test for it: an ntfy pairing code was
+redeemable on **any** topic, including another operator's. Since a topic is a
+secret the broker mints (unlike a chat id, which the provider supplies and any
+chat may legitimately present), a code is now only redeemable on the transport
+it was issued for. Without it, redeeming Alice's code on Bob's topic bound Alice
+to that topic, and an answer published there would have authorised against her
+approvals.
+
+1034 tests. ntfy's two-operator path is covered end to end against the stub on
+loopback; the same-address case is not, and cannot be — an ntfy address is a
+per-operator topic, so the collision is not constructible there. It needs two
+real bots, and is listed in `BACKLOG.md` §3.1 bis.
+
+## core + desktop (experimental) — the Koryphaios app as a third approval channel
+
+Telegram and Discord already delivered a waiting session's question to a phone.
+Both hand the text to somebody else's servers on the way. The third channel
+does not: the **Koryphaios Android app**, reached through **ntfy** — a relay
+small enough to self-host on a VPS, at which point the question never leaves
+infrastructure the operator controls.
+
+**Why a relay at all, when the phone is often on the same Wi-Fi.** Because
+Doze. With the screen off, Android suspends network access and ignores
+wakelocks, so a LAN socket dies within minutes — and the whole point is
+answering from a train. FCM was the other candidate and is unusable for an
+open-source app: pushing to it requires a Firebase service-account key on the
+sending side, which cannot be shipped in a repository without handing everyone
+the ability to push to every installation. ntfy is the relay that already
+solved that, and it is AGPL.
+
+**Two topics, both legs outgoing.** The broker publishes questions on one
+topic and holds a streaming GET on the other; the phone does the mirror image.
+Nothing anywhere accepts an incoming connection — the same property Telegram's
+long poll and Discord's gateway socket have, kept deliberately. The topics ARE
+the secret (24 random bytes each, and an optional ntfy access token), and they
+are **re-minted on every reconnect**, which is what makes `Disconnect` →
+`Connect` an actual kill switch for a lost phone rather than a gesture.
+
+**The constraint that shaped the design: ntfy cannot edit a delivered
+message.** Telegram and Discord settle a losing copy by rewriting it in place;
+here that is impossible. So `settle` publishes a *closing* message keyed on the
+approval id, at minimum priority, and the app cancels its own notification on
+it. Without that, a question already answered in the Deck would sit on the
+phone looking actionable — precisely the failure the settle rule exists to
+prevent. The second constraint: an ntfy action button carries a **fixed** body.
+Approve and Reject can be buttons; "use the staging bucket instead" cannot.
+That single fact is why the app has a screen of its own instead of leaning on
+the official ntfy client.
+
+**One wire format, not two.** `notify/ntfy-protocol.ts` is used by the broker
+*and* bundled into the Android app, so the two ends cannot drift. Making it
+bundlable meant moving `stripControl`/`truncate` into a dependency-free
+`shared/text.ts` — the protocol no longer drags `node:crypto` into a WebView.
+The app bundle comes out at ~14 KB with no Node builtin in it, which is the
+proof rather than the claim.
+
+**The app carries two features that must not be confused.** *Companion* mirrors
+a Deck's UI over the LAN: it needs proximity, and there is now one entry **per
+Deck**, built up by successive QR scans with a selector — nothing changed on
+the desktop side, each Deck keeps serving its own companion server. *Approvals*
+reaches the operator anywhere through the broker, is tied to an **operator
+identity** rather than a machine, and must work with no Deck reachable at all.
+Separate storage, separate lifecycles, separate threat models; a test holds the
+property directly, because the tempting simplification — one pairing list — is
+exactly the bug.
+
+One desktop change was genuinely required, and only one: pinning needs the
+certificate's fingerprint, so `CompanionInfo` now reports it and the companion
+QR carries it as `&f=`. The certificate is stable across launches and is shown
+to every visitor, so publishing its digest costs nothing and turns "accept any
+self-signed certificate" into "accept exactly this one". Resuming a host needed
+no desktop change at all: `connectRemoteApi` already boots from a stored
+credential alone, so the shell seeds the key it reads — now a shared constant
+instead of two literals in two projects.
+
+**What is honest about the Android half.** `mobile-shell/android-src/` holds
+the Kotlin Capacitor does not generate: the foreground service, notification
+actions, the biometric gate, `FLAG_SECURE`, certificate pinning. **None of it
+is compiled here** — this container has no Android SDK — which is exactly why
+it decides nothing: it moves bytes and manages lifecycles, while every rule
+lives in TypeScript under `bun test`. Expect corrections on the first build on
+a tooled machine. The service declares `connectedDevice` rather than
+`dataSync`, deliberately: the latter is capped at 6 hours per 24 since Android
+15, and would take the channel down overnight, silently, which is when a long
+run is most likely to be waiting.
+
+1017 tests at delivery (+131). ntfy is the first channel whose *nominal* path
+is covered rather than just its failure path: its protocol is small enough to
+stand up locally, so a stub ntfy on loopback exercises pairing, fan-out, a
+phone answer settling an approval, a second answer losing the race, and an
+answer aimed at another operator's approval going nowhere. What no test covers:
+the real ntfy.sh, a real phone, and all of Android. Those checks are listed in
+`BACKLOG.md` §3.1 bis and §3.2. Operator documentation:
+`desktop/docs/notifications.md`; the shell's own README covers the two modes.
+
 ## core + desktop (experimental) — remote approvals: answer a waiting session from your phone
 
 Long sessions stop and wait: a tool-permission dialog, a plan to approve, an
@@ -105,7 +336,7 @@ WebSocket, the hook as a real subprocess and the MCP tool over real JSON-RPC
 stdio. Real-world validation — the two bots, cross-channel arbitration, two OS
 accounts, two linked PCs — is listed in `BACKLOG.md` §3.1 bis. Operator
 documentation: `desktop/docs/notifications.md`. The mobile app as a third
-channel (lot N5) is not started.
+channel (lot N5) is not started. *(It is, now — see the entry above.)*
 
 ## desktop (experimental) — sandbox hardening: nine review findings, one of them a sandbox escape
 
