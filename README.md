@@ -1,4 +1,13 @@
-# claude-peers
+# Koryphaios
+
+Κορυφαῖος, *the chorus leader*: an Electron deck that docks your Claude Code sessions in one window (worktrees, supervisor, graph chat, sandbox), on top of an MCP channel that lets them discover and message each other.
+
+Two products live in this repo:
+
+- **[Koryphaios](#desktop-app-koryphaios)** ([`desktop/`](desktop/), npm `koryphaios`, bin `kory`) -- the desktop orchestrator.
+- **claude-peers** (repo root) -- the peer discovery and messaging MCP channel the Deck is built on, usable on its own from any terminal.
+
+## claude-peers (the MCP core)
 
 Let your Claude Code instances find each other and talk -- across multiple projects on a single PC, or across multiple PCs sharing a common broker on the LAN. When you're running 5 sessions, any Claude can discover the others and send messages that arrive instantly via the `claude/channel` protocol.
 
@@ -25,7 +34,7 @@ This project started as a fork of [louislva/claude-peers-mcp](https://github.com
 - **Shared roadmap**: a persistent per-project backlog in the broker (`roadmap_items`, scoped by normalized git remote, zero FK to peers/groups so items outlive sessions), driven by 5 new MCP tools (`roadmap_list/get/add/update/archive`) and the Deck's Roadmap view; JSON export/import (`bun cli.ts roadmap-export/import`). Items also carry an optional `directive` command + `target_peer_ids` for the Deck's **directive cards** (see the desktop section).
 - **Orchestrator batch (broker side)**: targeted announces (`POST /announce` with `to_peer_id`, the team-lead notification path), an **operator inbox** (agents `send_message` to the reserved `operator` peer -- the human in front of the Deck -- drained via `POST /operator-inbox`), and a `queue` position on roadmap items (the Deck's dispatch queue).
 - **Remote approvals**: when a session blocks on a question, the broker parks it as an approval and rings the operator's phone over **Telegram** or **Discord** (bot tokens enrolled from the app, sealed at rest broker-side; both transports are OUTGOING, so nothing on the PC is ever exposed). Exactly one answer wins — a conditional `UPDATE` makes "answered in the Deck" and "answered on the phone" mutually exclusive, and every other copy is rewritten to "already handled". Identity is a NEW axis, `operator_id`: an Ed25519 keypair whose PUBLIC half alone is stored, so two OS accounts on one machine are compartmentalised and two PCs can share one identity. Agents reach it through `ask_operator` / `ask_operator_wait`.
-- **Desktop app (Koryphaios, formerly Koryphaios)**: dock several Claude Code peer sessions in one window and orchestrate them as a small agent team (see below).
+- **Desktop app (Koryphaios)**: dock several Claude Code peer sessions in one window and orchestrate them as a small agent team (see below).
 
 ## Desktop app (Koryphaios)
 
