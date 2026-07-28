@@ -257,7 +257,11 @@ export function WorkflowLane({
     if (!item) return
     const deps = siblingDeps(items, id, targetId)
     if (!deps) {
-      showToast('roadmap.wf.stackNone', 'info')
+      // Target has no dependencies to share, so there is nothing to stack
+      // against -- degrade to a plain insertion at the target's slot instead
+      // of refusing the gesture (AUDIT-graph-view-2026-07-28.md §8, step 1).
+      const slot = laneIds.indexOf(targetId)
+      if (slot >= 0) commitDrop(id, slot)
       return
     }
     const same =
