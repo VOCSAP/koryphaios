@@ -240,8 +240,15 @@ export async function runInference(
     }
     const content = target.cli === 'claude' ? compiled.system : composeSinglePrompt(compiled)
     const contextFile = writeContextFile(filesDir, { nodeId: node.id, cli: target.cli }, content)
+    // D5 extended to the prompt (07dc42c0): the operator's question rides a
+    // second file, fed via stdin — never the command line (win32 argv
+    // mangling, see model-adapters.ts header comment).
+    const promptFile =
+      target.cli === 'claude'
+        ? writeContextFile(filesDir, { nodeId: `${node.id}-prompt`, cli: target.cli }, compiled.prompt)
+        : undefined
     const exec = target.cli === 'antigravity' && deps.runTty ? deps.runTty : run
-    return exec(buildAdapterCommand({ promptText: compiled.prompt, contextFile, target }))
+    return exec(buildAdapterCommand({ contextFile, promptFile, target }))
   }
 
   const settled = await Promise.allSettled(
@@ -323,10 +330,18 @@ export async function runInference(
         { nodeId: `${node.id}-judge`, cli: judgeTarget.cli },
         content
       )
+      // GRAPH_JUDGE_PROMPT is a code constant, not operator text, but the
+      // claude branch always reads its question from a file now (D5).
+      const promptFile =
+        judgeTarget.cli === 'claude'
+          ? writeContextFile(
+              filesDir,
+              { nodeId: `${node.id}-judge-prompt`, cli: judgeTarget.cli },
+              GRAPH_JUDGE_PROMPT
+            )
+          : undefined
       const exec = judgeTarget.cli === 'antigravity' && deps.runTty ? deps.runTty : run
-      return exec(
-        buildAdapterCommand({ promptText: GRAPH_JUDGE_PROMPT, contextFile, target: judgeTarget })
-      )
+      return exec(buildAdapterCommand({ contextFile, promptFile, target: judgeTarget }))
     }
     const started = Date.now()
     const judgeSpot = findFreeSpot(out.nodes, node.x, node.y + 2 * FAN_Y)

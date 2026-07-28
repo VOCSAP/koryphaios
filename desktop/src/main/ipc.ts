@@ -55,6 +55,7 @@ import {
   MAX_SCENARIO_CHARS,
   runDemoCommand,
   writeDemoMcpConfig,
+  writeDemoScenarioFile,
   writeDemoSystemPrompt
 } from './demo-driver'
 import { markProviderUsed } from './usage-service'
@@ -376,8 +377,9 @@ export function registerIpc({
           controlToken: control.token
         })
         const systemPromptFile = writeDemoSystemPrompt(stateDir)
+        const scenarioFile = writeDemoScenarioFile(stateDir, scenario.trim())
         const command = buildDemoCommand({
-          scenario: scenario.trim(),
+          scenarioFile,
           systemPromptFile,
           mcpConfigPath,
           model: target.model

@@ -55,9 +55,14 @@ test("claude target: system-only context file, C9 read-only command", async () =
   expect(cmd).toContain("--model haiku");
   expect(cmd).toContain("--strict-mcp-config");
   expect(cmd).toContain(`--disallowedTools "${HELP_DISALLOWED_TOOLS}"`);
-  // The file carries the system side ONLY; the question rides the command.
+  // The system side rides --append-system-prompt-file; the question rides a
+  // second file, fed via stdin (D5 extended — 07dc42c0), never the command.
   const file = /--append-system-prompt-file "([^"]+)"/.exec(cmd)![1]!;
   expect(readFileSync(file, "utf-8")).toBe("SYS");
+  expect(cmd).not.toContain("QUESTION");
+  const m = /(?:< "([^"]+)"$|Get-Content -Raw -Encoding UTF8 "([^"]+)" \|)/.exec(cmd)!;
+  const promptFile = (m[1] ?? m[2])!;
+  expect(readFileSync(promptFile, "utf-8")).toBe("QUESTION");
 });
 
 test("codex/gemini targets: composed system+question document fed via stdin", async () => {
@@ -70,10 +75,10 @@ test("codex/gemini targets: composed system+question document fed via stdin", as
   const cmd = commands[0]!;
   expect(cmd).toContain("codex exec --sandbox read-only -m gpt-5.1 -");
   // The adapter emits the PLATFORM's stdin form (POSIX `< "file"`, PowerShell
-  // `Get-Content -Raw "file" | …`, see stdinFromFile). Accept either so this
-  // test asserts the document CONTRACT, not one OS's shell syntax — the two
-  // shapes themselves are covered by the pure adapter tests.
-  const m = /(?:< "([^"]+)"$|Get-Content -Raw "([^"]+)" \|)/.exec(cmd)!;
+  // `Get-Content -Raw -Encoding UTF8 "file" | …`, see stdinFromFile). Accept
+  // either so this test asserts the document CONTRACT, not one OS's shell
+  // syntax — the two shapes themselves are covered by the pure adapter tests.
+  const m = /(?:< "([^"]+)"$|Get-Content -Raw -Encoding UTF8 "([^"]+)" \|)/.exec(cmd)!;
   const file = (m[1] ?? m[2])!;
   expect(readFileSync(file, "utf-8")).toBe(composeStdinPrompt("SYS", "QUESTION"));
 });

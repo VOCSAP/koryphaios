@@ -1,10 +1,14 @@
 // Demo driver (REC scripted-scenario lot): one throwaway `claude -p`
 // invocation that drives the embedded browser through the demo-browser MCP
 // bridge while the renderer records the pane. Command/harness composition
-// mirrors utility-inference (system by FILE, question positional, D5) but a
-// generated --mcp-config replaces the read-only toolset: the agent gets the
-// five demo_* browser tools and NOTHING else — no file tools, no shell (the
-// operator's scenario text is data, not the harness: C8 rule).
+// mirrors utility-inference (system by FILE, question fed via stdin, D5
+// extended to the prompt — roadmap 07dc42c0: the scenario used to ride the
+// command line as a quoted positional arg, but on win32 the PowerShell shell
+// wrap mangles embedded double quotes when re-invoking the native claude.exe,
+// see model-adapters.ts header comment) but a generated --mcp-config replaces
+// the read-only toolset: the agent gets the five demo_* browser tools and
+// NOTHING else — no file tools, no shell (the operator's scenario text is
+// data, not the harness: C8 rule).
 //
 // Node builtins only (electron-free): the webview binding lives in
 // browser-drive.ts, the wiring in ipc.ts. Everything here is bun-testable.
@@ -13,14 +17,13 @@ import { execFile, type ChildProcess } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
-import { quotePromptArg } from './session-command'
-import { sanitizeModel, MAX_PROMPT_ARG_CHARS } from './model-adapters'
+import { sanitizeModel, stdinFromFile } from './model-adapters'
 import { buildShellInvocation } from './shell-command'
 
 /** Scenario runs get 5 minutes — a demo clip should be way shorter. */
 export const DEMO_RUN_TIMEOUT_MS = 300_000
 
-/** Operator scenario text cap (rides the command line, like help questions). */
+/** Operator scenario text cap (data side, written to a file — see D5). */
 export const MAX_SCENARIO_CHARS = 4000
 
 /**
@@ -90,9 +93,22 @@ export function writeDemoSystemPrompt(dir: string): string {
   return file
 }
 
+/**
+ * Write the operator's scenario to a file (D5 extended to the prompt — see
+ * model-adapters.ts header comment): fed to `claude -p` via stdin, never the
+ * command line. Capped defense-in-depth even though the IPC handler already
+ * rejects an oversized scenario upstream.
+ */
+export function writeDemoScenarioFile(dir: string, scenario: string): string {
+  mkdirSync(dir, { recursive: true })
+  const file = join(dir, 'demo-scenario.md')
+  writeFileSync(file, scenario.slice(0, MAX_SCENARIO_CHARS), 'utf-8')
+  return file
+}
+
 export interface DemoCommandInput {
-  /** Operator's scenario (data side; capped to MAX_SCENARIO_CHARS upstream). */
-  scenario: string
+  /** File carrying the operator's scenario, fed via stdin (see D5). */
+  scenarioFile: string
   systemPromptFile: string
   mcpConfigPath: string
   /** claude model id/alias ('' = CLI default). Multi-CLI is deferred: the
@@ -107,16 +123,15 @@ export interface DemoCommandInput {
 export function buildDemoCommand(input: DemoCommandInput): string {
   const plat = input.platform ?? process.platform
   const model = sanitizeModel(input.model)
-  const scenario = input.scenario.slice(0, Math.min(MAX_SCENARIO_CHARS, MAX_PROMPT_ARG_CHARS))
   const quoted = (p: string): string => `"${p.replace(/"/g, '')}"`
-  return (
-    `${input.bin?.trim() || 'claude'} -p ${quotePromptArg(scenario, plat)}` +
+  const cmd =
+    `${input.bin?.trim() || 'claude'} -p` +
     ` --append-system-prompt-file ${quoted(input.systemPromptFile)}` +
     (model ? ` --model ${model}` : '') +
     ` --mcp-config ${quoted(input.mcpConfigPath)}` +
     ` --strict-mcp-config` +
     ` --disallowedTools "${DEMO_DISALLOWED_TOOLS}"`
-  )
+  return stdinFromFile(cmd, input.scenarioFile, plat)
 }
 
 /**

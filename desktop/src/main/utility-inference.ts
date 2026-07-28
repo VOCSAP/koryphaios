@@ -81,13 +81,18 @@ export async function runUtilityInference(
     })
   }
   // claude keeps system and question separated (--append-system-prompt-file +
-  // positional prompt); codex/gemini read one composed document from stdin.
+  // stdin-fed question, D5 extended — see model-adapters.ts header comment);
+  // codex/gemini read one composed document from stdin instead.
   const content =
     target.cli === 'claude' ? req.system : composeStdinPrompt(req.system, req.prompt)
   const contextFile = writeContextFile(deps.stateDir, { nodeId: req.kind, cli: target.cli }, content)
+  const promptFile =
+    target.cli === 'claude'
+      ? writeContextFile(deps.stateDir, { nodeId: `${req.kind}-prompt`, cli: target.cli }, req.prompt)
+      : undefined
   const command = buildAdapterCommand({
-    promptText: req.prompt,
     contextFile,
+    promptFile,
     target,
     addDir: req.addDir
   })

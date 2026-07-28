@@ -9,7 +9,6 @@ import { join } from "node:path";
 
 import {
   buildAdapterCommand,
-  MAX_PROMPT_ARG_CHARS,
   sanitizeModel,
   stdinFromFile,
   writeContextFile
@@ -41,74 +40,105 @@ test("sanitizeModel allows identifiers, rejects shell metacharacters", () => {
   expect(sanitizeModel("a".repeat(200))).toBe("");
 });
 
-test("stdinFromFile: POSIX redirection vs PowerShell pipe", () => {
+test("stdinFromFile: POSIX redirection vs PowerShell pipe, UTF-8 forced on both win32 stages", () => {
   expect(stdinFromFile("codex exec -", "/tmp/f.md", "linux")).toBe('codex exec - < "/tmp/f.md"');
-  expect(stdinFromFile("gemini", "C:\\f.md", "win32")).toBe('Get-Content -Raw "C:\\f.md" | gemini');
+  // win32: WinPS 5.1's Get-Content defaults to the ANSI codepage on a BOM-less
+  // file, and $OutputEncoding defaults to ASCII when piping to a native
+  // child — both silently mangle non-ASCII operator text unless forced.
+  expect(stdinFromFile("gemini", "C:\\f.md", "win32")).toBe(
+    '$OutputEncoding = [System.Text.UTF8Encoding]::new($false); ' +
+      'Get-Content -Raw -Encoding UTF8 "C:\\f.md" | gemini'
+  );
 });
 
-test("claude adapter: C9 read-only harness, context via --append-system-prompt-file", () => {
+test("claude adapter: C9 read-only harness, context via --append-system-prompt-file, question via stdinFromFile", () => {
   const cmd = buildAdapterCommand({
-    promptText: "why?",
+    promptFile: "/state/q.md",
     contextFile: "/state/ctx.md",
     target: { cli: "claude", model: "opus" },
     platform: "linux"
   });
   expect(cmd).toBe(
-    `claude -p 'why?' --append-system-prompt-file "/state/ctx.md" --model opus` +
-      ` --strict-mcp-config --disallowedTools "${HELP_DISALLOWED_TOOLS}"`
+    `claude -p --append-system-prompt-file "/state/ctx.md" --model opus` +
+      ` --strict-mcp-config --disallowedTools "${HELP_DISALLOWED_TOOLS}"` +
+      ` < "/state/q.md"`
   );
 });
 
-test("claude adapter quotes the prompt per platform and caps its length", () => {
-  const cmd = buildAdapterCommand({
-    promptText: "it's " + "x".repeat(MAX_PROMPT_ARG_CHARS),
-    contextFile: "/f",
+test("claude adapter never puts operator text on argv (07dc42c0): embedded quotes, newlines and non-ASCII stay in the piped file", () => {
+  // The exact reported field failure: an unbalanced double quote before a
+  // space used to truncate the win32 argv-passed prompt mid-sentence. The
+  // fixed command must carry NONE of the operator text — only the promptFile
+  // path, read via stdinFromFile. Accented (é à ç) and non-Latin-1 (œ, φ)
+  // characters are included per the hardened acceptance criteria: an
+  // ASCII-only prompt would stay green even with the WinPS 5.1 encoding traps
+  // wide open (ANSI-codepage Get-Content, ASCII $OutputEncoding).
+  const hostile =
+    'Voici le sujet à étudier : "Explique moi en 50 mots ce qu\'est Docker"\nligne deux \'x\' — φ œuvre';
+  const linux = buildAdapterCommand({
+    promptFile: "/state/graphs/graph-context-n1-prompt-claude.md",
+    contextFile: "/state/graphs/graph-context-n1-claude.md",
     target: { cli: "claude", model: "" },
     platform: "linux"
   });
-  expect(cmd).toContain("'it'\\''s ");
-  expect(cmd.length).toBeLessThan(MAX_PROMPT_ARG_CHARS + 300);
-  expect(cmd).not.toContain("--model"); // '' = CLI default
+  expect(linux).not.toContain(hostile);
+  expect(linux).not.toContain("Explique");
+  expect(linux).not.toContain("--model"); // '' = CLI default
+  expect(linux).toBe(
+    `claude -p --append-system-prompt-file "/state/graphs/graph-context-n1-claude.md"` +
+      ` --strict-mcp-config --disallowedTools "${HELP_DISALLOWED_TOOLS}"` +
+      ` < "/state/graphs/graph-context-n1-prompt-claude.md"`
+  );
   const win = buildAdapterCommand({
-    promptText: "it's",
-    contextFile: "C:\\f",
+    promptFile: "C:\\q.md",
+    contextFile: "C:\\ctx.md",
     target: { cli: "claude", model: "" },
     platform: "win32"
   });
-  expect(win).toContain("'it''s'");
+  expect(win).toContain('$OutputEncoding = [System.Text.UTF8Encoding]::new($false); ');
+  expect(win).toContain('Get-Content -Raw -Encoding UTF8 "C:\\q.md" |');
+  expect(win).not.toContain(hostile);
 });
 
-test("codex adapter: read-only sandbox, prompt fed from the file via stdin", () => {
+test("claude adapter throws when promptFile is missing (D5 contract defended)", () => {
+  expect(() =>
+    buildAdapterCommand({
+      contextFile: "/f",
+      target: { cli: "claude", model: "" },
+      platform: "linux"
+    })
+  ).toThrow(/promptFile/);
+});
+
+test("codex adapter: read-only sandbox, composed prompt fed from the context file via stdin", () => {
   const cmd = buildAdapterCommand({
-    promptText: "ignored on the command line",
     contextFile: "/state/ctx.md",
     target: { cli: "codex", model: "gpt-5" },
     platform: "linux"
   });
   expect(cmd).toBe('codex exec --sandbox read-only -m gpt-5 - < "/state/ctx.md"');
-  expect(cmd).not.toContain("ignored");
 });
 
 test("gemini adapter: stdin file, optional model, read-only plan mode", () => {
   const linux = buildAdapterCommand({
-    promptText: "q",
     contextFile: "/f.md",
     target: { cli: "gemini", model: "" },
     platform: "linux"
   });
   expect(linux).toBe('gemini --approval-mode plan < "/f.md"');
   const win = buildAdapterCommand({
-    promptText: "q",
     contextFile: "C:\\f.md",
     target: { cli: "gemini", model: "gemini-3-pro" },
     platform: "win32"
   });
-  expect(win).toBe('Get-Content -Raw "C:\\f.md" | gemini -m gemini-3-pro --approval-mode plan');
+  expect(win).toBe(
+    '$OutputEncoding = [System.Text.UTF8Encoding]::new($false); ' +
+      'Get-Content -Raw -Encoding UTF8 "C:\\f.md" | gemini -m gemini-3-pro --approval-mode plan'
+  );
 });
 
 test("a hostile model string is dropped, never spliced into the command", () => {
   const cmd = buildAdapterCommand({
-    promptText: "q",
     contextFile: "/f",
     target: { cli: "codex", model: "$(reboot)" },
     platform: "linux"
@@ -194,7 +224,6 @@ test("antigravity model sanitizer allows display names, rejects injection", asyn
 
 test("antigravity adapter: file instruction, add-dir, quoted model, print-timeout", () => {
   const cmd = buildAdapterCommand({
-    promptText: "ignored — the context file carries the composed prompt",
     contextFile: "/state/graphs/graph-context-n1-antigravity.md",
     target: { cli: "antigravity", model: "Gemini 3 Pro (High)" },
     platform: "linux"
@@ -206,7 +235,6 @@ test("antigravity adapter: file instruction, add-dir, quoted model, print-timeou
   expect(cmd).toContain("--print-timeout 4m");
   // No model flag when empty (CLI default applies).
   const noModel = buildAdapterCommand({
-    promptText: "x",
     contextFile: "/state/graphs/f.md",
     target: { cli: "antigravity", model: "" },
     platform: "linux"

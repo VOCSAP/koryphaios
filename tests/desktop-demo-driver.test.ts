@@ -12,6 +12,7 @@ import {
   DEMO_SYSTEM_PROMPT,
   MAX_SCENARIO_CHARS,
   writeDemoMcpConfig,
+  writeDemoScenarioFile,
   writeDemoSystemPrompt
 } from "../desktop/src/main/demo-driver.ts";
 
@@ -26,16 +27,18 @@ afterAll(() => {
   }
 });
 
-test("buildDemoCommand composes the full claude harness", () => {
+test("buildDemoCommand composes the full claude harness, scenario fed via stdinFromFile (D5)", () => {
   const cmd = buildDemoCommand({
-    scenario: "show the dashboard",
+    scenarioFile: "/state/demo-scenario.md",
     systemPromptFile: "/state/demo-system-prompt.md",
     mcpConfigPath: "/state/demo-mcp.json",
     model: "sonnet",
     platform: "linux"
   });
   expect(cmd.startsWith("claude -p ")).toBe(true);
-  expect(cmd).toContain("show the dashboard");
+  // The scenario is never inlined on the command line (07dc42c0): only its
+  // file path, piped in via stdinFromFile.
+  expect(cmd).toContain('< "/state/demo-scenario.md"');
   expect(cmd).toContain('--append-system-prompt-file "/state/demo-system-prompt.md"');
   expect(cmd).toContain("--model sonnet");
   expect(cmd).toContain('--mcp-config "/state/demo-mcp.json"');
@@ -43,9 +46,9 @@ test("buildDemoCommand composes the full claude harness", () => {
   expect(cmd).toContain(`--disallowedTools "${DEMO_DISALLOWED_TOOLS}"`);
 });
 
-test("a bad model id is dropped, an oversized scenario is capped", () => {
+test("a bad model id is dropped, never spliced into the command", () => {
   const cmd = buildDemoCommand({
-    scenario: "x".repeat(MAX_SCENARIO_CHARS + 500),
+    scenarioFile: "/s-scenario.md",
     systemPromptFile: "/s.md",
     mcpConfigPath: "/m.json",
     model: 'sonnet"; rm -rf /',
@@ -53,7 +56,15 @@ test("a bad model id is dropped, an oversized scenario is capped", () => {
   });
   expect(cmd).not.toContain("--model");
   expect(cmd).not.toContain("rm -rf");
-  expect(cmd).not.toContain("x".repeat(MAX_SCENARIO_CHARS + 1));
+});
+
+test("writeDemoScenarioFile caps an oversized scenario and writes it to disk", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-demo-scenario-"));
+  tmpDirs.push(dir);
+  const file = writeDemoScenarioFile(dir, "x".repeat(MAX_SCENARIO_CHARS + 500));
+  const written = readFileSync(file, "utf-8");
+  expect(written.length).toBe(MAX_SCENARIO_CHARS);
+  expect(written).not.toContain("x".repeat(MAX_SCENARIO_CHARS + 1));
 });
 
 test("the demo agent has no file/shell/web tools left", () => {

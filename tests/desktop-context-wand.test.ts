@@ -46,7 +46,7 @@ test("buildWandPrompt preserves an operator draft and caps oversized fields", ()
 
 test("the wand's claude target composes into the C9 read-only harness", () => {
   const cmd = buildAdapterCommand({
-    promptText: buildWandPrompt(DRAFT),
+    promptFile: "/state/wand-prompt.md",
     contextFile: "/state/ctx.md",
     target: { cli: "claude", model: "haiku" },
     platform: "linux",

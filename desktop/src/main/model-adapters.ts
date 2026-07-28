@@ -7,7 +7,16 @@
 // - The compiled context ALWAYS travels by FILE, never on the command line
 //   (decision D5 — a 50k-char context would blow Windows' ~32k limit):
 //   * claude: constant system prompt + context in --append-system-prompt-file,
-//     the (short) question as the positional prompt — the C9 pattern.
+//     the operator's question fed via stdin from a second file (D5 extended
+//     to the prompt, roadmap 07dc42c0: the question used to ride the command
+//     line as a quoted positional arg, but on win32 the PowerShell shell wrap
+//     re-invokes the native claude.exe in legacy argument-passing mode, which
+//     does NOT re-escape embedded double quotes — CommandLineToArgvW then
+//     re-parses one as an argument terminator and truncates the operator's
+//     message mid-sentence, invisibly to the graph inspector which shows the
+//     pre-mangling file side). `claude -p` reads the prompt from stdin when
+//     no positional argument is given, so this reuses the same stdinFromFile
+//     wrapper as codex/gemini below.
 //   * codex / gemini: the full composed prompt (system + context + question)
 //     written to a file fed through stdin (`< "file"` POSIX,
 //     `Get-Content -Raw "file" |` PowerShell).
@@ -26,9 +35,6 @@ import type { GraphCli, ModelTarget } from '../shared/graph'
 
 /** Per-inference timeout: long contexts + reasoning models outlive C9's 120 s. */
 export const GRAPH_INFER_TIMEOUT_MS = 300_000
-
-/** The question rides the command line (claude adapter): keep it bounded. */
-export const MAX_PROMPT_ARG_CHARS = 8000
 
 /**
  * `model` also rides the command line: allow only benign identifier chars
@@ -55,16 +61,36 @@ function quotedPath(p: string): string {
 
 /**
  * Cross-shell "feed this file to stdin" wrapper. POSIX shells support
- * redirection; PowerShell (the win32 shell wrap) needs a Get-Content pipe.
+ * redirection; PowerShell (the win32 shell wrap, shell-command.ts spawns the
+ * legacy `powershell.exe`, not `pwsh`) needs a Get-Content pipe — with the
+ * encoding forced at BOTH stages, or non-ASCII operator text (accents,
+ * non-Latin-1) survives the truncation fix only to get mangled a different
+ * way (reviewer catch, 07dc42c0): (a) `writeContextFile` writes UTF-8
+ * without a BOM, and WinPS 5.1's `Get-Content` without `-Encoding` reads a
+ * BOM-less file as the system ANSI codepage ("é" -> "Ã©"); (b) WinPS 5.1
+ * pipes to a native child through `$OutputEncoding`, which defaults to
+ * ASCII, replacing every non-ASCII byte with a literal `?`.
  */
 export function stdinFromFile(command: string, file: string, plat: NodeJS.Platform): string {
-  if (plat === 'win32') return `Get-Content -Raw ${quotedPath(file)} | ${command}`
+  if (plat === 'win32') {
+    return (
+      `$OutputEncoding = [System.Text.UTF8Encoding]::new($false); ` +
+      `Get-Content -Raw -Encoding UTF8 ${quotedPath(file)} | ${command}`
+    )
+  }
   return `${command} < ${quotedPath(file)}`
 }
 
 export interface AdapterInput {
-  /** Question / instruction of the node being inferred (short side). */
-  promptText: string
+  /**
+   * File carrying the operator's question / instruction, fed to the claude
+   * adapter via stdin (D5 extended to the prompt — see the header comment).
+   * Required when `target.cli === 'claude'`; unused by the other adapters
+   * (codex/gemini already read the fully composed prompt from contextFile via
+   * stdin, antigravity's positional instruction is a fixed non-operator
+   * string).
+   */
+  promptFile?: string
   /** File carrying the compiled context (role depends on the CLI, see D5). */
   contextFile: string
   target: ModelTarget
@@ -85,18 +111,20 @@ export interface AdapterInput {
 export function buildAdapterCommand(input: AdapterInput): string {
   const plat = input.platform ?? process.platform
   const model = sanitizeModel(input.target.model)
-  const prompt = input.promptText.slice(0, MAX_PROMPT_ARG_CHARS)
   switch (input.target.cli) {
     case 'claude': {
+      if (!input.promptFile) {
+        throw new Error('claude adapter requires promptFile (D5: operator text never rides argv)')
+      }
       const bin = input.bin?.trim() || 'claude'
-      return (
-        `${bin} -p ${quotePromptArg(prompt, plat)}` +
+      const cmd =
+        `${bin} -p` +
         ` --append-system-prompt-file ${quotedPath(input.contextFile)}` +
         (model ? ` --model ${model}` : '') +
         (input.addDir ? ` --add-dir ${quotedPath(input.addDir)}` : '') +
         ` --strict-mcp-config` +
         ` --disallowedTools "${HELP_DISALLOWED_TOOLS}"`
-      )
+      return stdinFromFile(cmd, input.promptFile, plat)
     }
     case 'codex': {
       const bin = input.bin?.trim() || 'codex'

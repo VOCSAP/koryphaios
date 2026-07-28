@@ -92,7 +92,7 @@ test("a docsDir adds the reference-documentation section; absent otherwise", () 
 
 test("the claude adapter grants the docs dir via --add-dir (quoted), others unchanged", () => {
   const cmd = buildAdapterCommand({
-    promptText: "q",
+    promptFile: "/tmp/q.md",
     contextFile: "/tmp/sys.md",
     target: { cli: "claude", model: "haiku" },
     addDir: "/opt/app/resources/docs",
@@ -100,7 +100,7 @@ test("the claude adapter grants the docs dir via --add-dir (quoted), others unch
   });
   expect(cmd).toContain('--add-dir "/opt/app/resources/docs"');
   const bare = buildAdapterCommand({
-    promptText: "q",
+    promptFile: "/tmp/q.md",
     contextFile: "/tmp/sys.md",
     target: { cli: "claude", model: "haiku" },
     platform: "linux"
@@ -142,11 +142,15 @@ const posixOnly = process.platform === "win32" ? test.skip : test;
 posixOnly("runHelp resolves the binary through the login shell and returns stdout", async () => {
   const dir = tmp();
   const fake = join(dir, "claude");
-  writeFileSync(fake, '#!/bin/sh\necho "fake answer: $2"\n', "utf-8");
+  // The question now rides stdin (D5 extended — 07dc42c0), never a positional
+  // arg: the fake binary reads it off its own stdin.
+  writeFileSync(fake, '#!/bin/sh\nq="$(cat)"\necho "fake answer: $q"\n', "utf-8");
   chmodSync(fake, 0o755);
+  const promptFile = join(dir, "prompt.md");
+  writeFileSync(promptFile, "which item next?", "utf-8");
 
   const cmd = buildAdapterCommand({
-    promptText: "which item next?",
+    promptFile,
     contextFile: join(dir, "sys.md"),
     target: { cli: "claude", model: "haiku" },
     bin: fake,
@@ -159,10 +163,12 @@ posixOnly("runHelp resolves the binary through the login shell and returns stdou
 posixOnly("runHelp surfaces a failing invocation as a rejected promise", async () => {
   const dir = tmp();
   const fake = join(dir, "claude");
-  writeFileSync(fake, '#!/bin/sh\necho "boom" >&2\nexit 1\n', "utf-8");
+  writeFileSync(fake, '#!/bin/sh\ncat >/dev/null\necho "boom" >&2\nexit 1\n', "utf-8");
   chmodSync(fake, 0o755);
+  const promptFile = join(dir, "prompt.md");
+  writeFileSync(promptFile, "q", "utf-8");
   const cmd = buildAdapterCommand({
-    promptText: "q",
+    promptFile,
     contextFile: join(dir, "sys.md"),
     target: { cli: "claude", model: "haiku" },
     bin: fake,

@@ -13,7 +13,6 @@ import {
   composeSinglePrompt,
   DEFAULT_JUDGE,
   GRAPH_CHAT_SYSTEM_PROMPT,
-  GRAPH_JUDGE_PROMPT,
   GRAPH_JUDGE_SYSTEM_PROMPT,
   GRAPH_MAX_CONTEXT_CHARS,
   GRAPH_MERGE_SYSTEM_PROMPT,
@@ -202,7 +201,10 @@ test("fan-out: one assistant node per target, errors isolated per target", async
 test("battle: judge node arbitrates the ok answers, legend reveals the mapping", async () => {
   const doc = docOf([n("q", [], "user", "hello")]);
   const out = await runInference(
-    deps(async (cmd) => (cmd.includes(GRAPH_JUDGE_PROMPT.slice(0, 20)) ? "merged verdict" : "candidate")),
+    // The judge's system/prompt text no longer rides the command line for the
+    // claude adapter (D5 extended, 07dc42c0) -- only its context/promptFile
+    // paths do, and graph-engine names them `${nodeId}-judge`/`-judge-prompt`.
+    deps(async (cmd) => (cmd.includes("-judge") ? "merged verdict" : "candidate")),
     doc,
     {
       nodeId: "q",
