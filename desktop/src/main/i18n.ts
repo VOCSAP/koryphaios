@@ -704,6 +704,11 @@ export const EN_DEFAULTS: Record<string, string> = {
   'roadmap.wf.createHere': 'Create a roadmap item here',
   'roadmap.wf.fullscreen': 'Open the workflow full screen',
   'roadmap.wf.exitFullscreen': 'Close the full-screen workflow',
+  'roadmap.wf.clearQueue': 'Clear',
+  'roadmap.wf.clearQueueTitle': 'Clear the queue?',
+  'roadmap.wf.clearQueueMessage':
+    'Removes every queued card from the workflow lane. No roadmap item is deleted, and locked in-progress cards keep running untouched -- this only empties the dispatch order.',
+  'roadmap.wf.clearQueueConfirm': 'Clear',
   'roadmap.dispatchFirst': '▶ Send first to team-lead',
   'roadmap.dispatchNoLeadHint':
     'Designate a team-lead (👑 in the Agents sidebar) to dispatch queued items.',

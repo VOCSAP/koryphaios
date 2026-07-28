@@ -23,6 +23,7 @@ import {
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
+import { ConfirmDialog } from './ConfirmDialog'
 import { ContextMenu } from './ContextMenu'
 import { KIND_ICONS } from './RoadmapItemModal'
 
@@ -104,6 +105,8 @@ export function WorkflowLane({
     y: number
   } | null>(null)
   const [canvasMenu, setCanvasMenu] = useState<{ x: number; y: number; slot: number } | null>(null)
+  // "Clear" confirmation: empties the queue only (roadmap items untouched).
+  const [confirmClear, setConfirmClear] = useState(false)
   // Force one re-render post-mount so scrollbar math sees the canvas size.
   const [, setMounted] = useState(false)
 
@@ -504,6 +507,14 @@ export function WorkflowLane({
         <span className="rm-count">{lane.length}</span>
         <span className="roadmap-spacer" />
         <button
+          className="btn btn-sm"
+          disabled={queuedIds.length === 0}
+          title={t('roadmap.wf.clearQueue')}
+          onClick={() => setConfirmClear(true)}
+        >
+          {GLYPH_ACTIONS.erase} {t('roadmap.wf.clearQueue')}
+        </button>
+        <button
           className="primary rm-dispatch-btn"
           disabled={!hasLead || queuedIds.length === 0}
           title={hasLead ? undefined : t('roadmap.dispatchNoLeadHint')}
@@ -800,6 +811,19 @@ export function WorkflowLane({
             }
           ]}
           onClose={() => setCanvasMenu(null)}
+        />
+      )}
+
+      {confirmClear && (
+        <ConfirmDialog
+          title={t('roadmap.wf.clearQueueTitle')}
+          message={t('roadmap.wf.clearQueueMessage')}
+          confirmLabel={t('roadmap.wf.clearQueueConfirm')}
+          onCancel={() => setConfirmClear(false)}
+          onConfirm={() => {
+            setConfirmClear(false)
+            onReorder([])
+          }}
         />
       )}
     </section>
