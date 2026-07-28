@@ -4,6 +4,7 @@
 import { test, expect } from 'bun:test'
 import type { RoadmapItem } from '../desktop/src/shared/types'
 import {
+  clampLaneHeight,
   dependsRelated,
   dependsWouldCycle,
   insertAt,
@@ -15,6 +16,7 @@ import {
   siblingDeps,
   stackTargetAt,
   unmetDeps,
+  WF_LANE_H_MIN,
   WF_NODE_H,
   WF_NODE_W,
   WF_PITCH_X,
@@ -230,4 +232,20 @@ test('insertAt moves an already-queued id and clamps the slot', () => {
   expect(insertAt(['a', 'b', 'c'], 'x', 1)).toEqual(['a', 'x', 'b', 'c'])
   expect(insertAt(['a', 'b', 'c'], 'c', 0)).toEqual(['c', 'a', 'b'])
   expect(insertAt(['a', 'b', 'c'], 'a', 99)).toEqual(['b', 'c', 'a'])
+})
+
+test('clampLaneHeight: floors at WF_LANE_H_MIN regardless of viewport', () => {
+  expect(clampLaneHeight(10, 1080)).toBe(WF_LANE_H_MIN)
+  expect(clampLaneHeight(-500, 200)).toBe(WF_LANE_H_MIN)
+})
+
+test('clampLaneHeight: ceils at 60% of the viewport height', () => {
+  expect(clampLaneHeight(9999, 1000)).toBe(600)
+  expect(clampLaneHeight(500, 1000)).toBe(500)
+})
+
+test('clampLaneHeight: a tiny viewport still leaves the floor as the ceiling', () => {
+  // 60vh of a 200px-tall viewport (120) is below the floor -- the floor wins,
+  // never a ceiling smaller than the minimum usable height.
+  expect(clampLaneHeight(9999, 200)).toBe(WF_LANE_H_MIN)
 })

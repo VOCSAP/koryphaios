@@ -3268,6 +3268,21 @@ svg.glyph {
   border-bottom: none;
 }
 
+/* Drag handle straddling the head/canvas border: 0 extra flow height (negative
+   margins cancel its own height), so it only widens the grabbable hit area. */
+.wf-resize {
+  position: relative;
+  z-index: 2;
+  height: 6px;
+  margin: -3px 0;
+  cursor: row-resize;
+}
+
+.wf-resize:hover {
+  background: var(--accent);
+  opacity: 0.4;
+}
+
 .wf-canvas {
   position: relative;
   height: 240px;

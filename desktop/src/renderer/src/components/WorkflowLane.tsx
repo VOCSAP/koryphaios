@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { RoadmapItem } from '@shared/types'
 import {
   caretXAt,
+  clampLaneHeight,
   dependsRelated,
   dependsWouldCycle,
   insertSlotAt,
@@ -13,6 +14,7 @@ import {
   stackTargetAt,
   unmetDeps,
   WF_FIT_FLOOR,
+  WF_LANE_H_DEFAULT,
   WF_NODE_H,
   WF_NODE_W,
   WF_PITCH_X,
@@ -83,7 +85,12 @@ export function WorkflowLane({
 }: WorkflowLaneProps): React.JSX.Element {
   const t = useT()
   const showToast = useDeck((s) => s.showToast)
+  const config = useDeck((s) => s.config)
+  const updateConfig = useDeck((s) => s.updateConfig)
   const [collapsed, setCollapsed] = useState(false)
+  // Canvas height (px): seeded from the persisted config, live-dragged via the
+  // top-edge handle, committed back to config on pointer-up.
+  const [laneHeight, setLaneHeight] = useState(config?.wfLaneHeight ?? WF_LANE_H_DEFAULT)
   const [camera, setCamera] = useState<Camera>({ x: FIT_PAD, y: FIT_PAD, zoom: 1 })
   // Insertion caret shown during a drag (full-lane slot + world x), or null.
   const [caret, setCaret] = useState<{ slot: number; x: number } | null>(null)
@@ -125,6 +132,7 @@ export function WorkflowLane({
   // A drag's trailing click must not open the detail modal.
   const suppressClick = useRef(false)
   const scrollDrag = useRef<{ startX: number; camX: number; ratio: number } | null>(null)
+  const resizeDrag = useRef<{ startY: number; startH: number } | null>(null)
 
   const lane = laneItems(items)
   const laneIds = lane.map((i) => i.id)
@@ -480,6 +488,23 @@ export function WorkflowLane({
     scrollDrag.current = null
   }
 
+  // Top-edge handle: dragging it down shrinks the canvas, up grows it.
+  const onResizePointerDown = (e: React.PointerEvent): void => {
+    e.stopPropagation()
+    ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
+    resizeDrag.current = { startY: e.clientY, startH: laneHeight }
+  }
+  const onResizePointerMove = (e: React.PointerEvent): void => {
+    const s = resizeDrag.current
+    if (!s) return
+    setLaneHeight(clampLaneHeight(s.startH - (e.clientY - s.startY), window.innerHeight))
+  }
+  const onResizePointerUp = (): void => {
+    if (!resizeDrag.current) return
+    resizeDrag.current = null
+    void updateConfig({ wfLaneHeight: laneHeight })
+  }
+
   // ----- rendering -----
 
   const conflictSet = new Set(conflicts)
@@ -540,11 +565,22 @@ export function WorkflowLane({
         )}
       </h3>
 
+      {showCanvas && !fullscreen && (
+        <div
+          className="wf-resize"
+          title={t('roadmap.wf.resizeTitle')}
+          onPointerDown={onResizePointerDown}
+          onPointerMove={onResizePointerMove}
+          onPointerUp={onResizePointerUp}
+        />
+      )}
+
       {showCanvas && (
         <div
           ref={canvasRef}
           className={`wf-canvas${link ? ' is-linking' : ''}`}
           style={{
+            ...(fullscreen ? {} : { height: laneHeight }),
             backgroundSize: `${26 * camera.zoom}px ${26 * camera.zoom}px`,
             backgroundPosition: `${camera.x}px ${camera.y}px`
           }}

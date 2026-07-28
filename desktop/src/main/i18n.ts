@@ -704,6 +704,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'roadmap.wf.createHere': 'Create a roadmap item here',
   'roadmap.wf.fullscreen': 'Open the workflow full screen',
   'roadmap.wf.exitFullscreen': 'Close the full-screen workflow',
+  'roadmap.wf.resizeTitle': 'Drag to resize the canvas',
   'roadmap.wf.clearQueue': 'Clear',
   'roadmap.wf.clearQueueTitle': 'Clear the queue?',
   'roadmap.wf.clearQueueMessage':

@@ -16,6 +16,17 @@ export const WF_ZOOM_MAX = 1.5
 /** Auto-fit stops shrinking below this zoom; the lane scrolls instead. */
 export const WF_FIT_FLOOR = 0.55
 
+/** Canvas height (px): default/floor, plus the ceiling as a viewport fraction. */
+export const WF_LANE_H_DEFAULT = 240
+export const WF_LANE_H_MIN = 140
+export const WF_LANE_H_MAX_VH = 0.6
+
+/** Clamp a candidate lane height to [WF_LANE_H_MIN, WF_LANE_H_MAX_VH * viewportH]. */
+export function clampLaneHeight(px: number, viewportH: number): number {
+  const max = Math.max(WF_LANE_H_MIN, viewportH * WF_LANE_H_MAX_VH)
+  return Math.round(Math.min(max, Math.max(WF_LANE_H_MIN, px)))
+}
+
 /**
  * Items the lane displays: the dispatch queue plus the locked in_progress
  * heads (what the team is actively working on). Order = execution order:

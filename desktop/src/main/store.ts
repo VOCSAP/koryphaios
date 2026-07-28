@@ -27,6 +27,7 @@ const DEFAULT_CONFIG: AppConfig = {
   gridCols: 2,
   gridRows: 2,
   sidebarWidth: 260,
+  wfLaneHeight: 240,
   theme: 'dark',
   fontSize: 13,
   restoreSessions: true,

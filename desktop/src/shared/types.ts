@@ -180,6 +180,8 @@ export interface AppConfig {
   gridRows: number
   /** Sidebar width in px (resizable, persisted). */
   sidebarWidth: number
+  /** Workflow-lane canvas height in px (resizable via its top-edge handle, persisted). */
+  wfLaneHeight: number
   theme: 'dark' | 'light'
   fontSize: number
   /** Re-spawn persisted sessions on launch. */
