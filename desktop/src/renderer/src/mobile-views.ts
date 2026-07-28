@@ -30,8 +30,12 @@ export interface MobileViewMeta {
 // exhaustiveness gate), so the registry stays a pure placement table.
 export const MOBILE_VIEWS: Record<DeckView, MobileViewMeta> = {
   home: { placement: 'tab', labelKey: 'nav.home' },
-  agents: { placement: 'tab', labelKey: 'nav.agents' },
   roadmap: { placement: 'tab', labelKey: 'nav.roadmap' },
+  agents: { placement: 'tab', labelKey: 'nav.agents' },
+  // Canvas authoring is desktop-first; the mobile thread mode is deferred (M3e).
+  graph: { placement: 'desktop-only', labelKey: 'nav.graph' },
+  // <webview>, Electron-only (EXPLORATION §3): absent from the mobile client.
+  browser: { placement: 'desktop-only', labelKey: 'nav.browser' },
   // Read-only diff/file browsing is desktop-first (PLAN GX3/GX6); the
   // DiffPanel modal opened from the Worktrees view stays the mobile diff path.
   files: { placement: 'desktop-only', labelKey: 'nav.files' },
@@ -39,11 +43,7 @@ export const MOBILE_VIEWS: Record<DeckView, MobileViewMeta> = {
   worktrees: { placement: 'more', labelKey: 'nav.worktrees' },
   // Container lifecycle needs the host engine + native confirms: desktop-first.
   sandbox: { placement: 'desktop-only', labelKey: 'nav.sandbox' },
-  journal: { placement: 'more', labelKey: 'nav.journal' },
-  // <webview>, Electron-only (EXPLORATION §3): absent from the mobile client.
-  browser: { placement: 'desktop-only', labelKey: 'nav.browser' },
-  // Canvas authoring is desktop-first; the mobile thread mode is deferred (M3e).
-  graph: { placement: 'desktop-only', labelKey: 'nav.graph' }
+  journal: { placement: 'more', labelKey: 'nav.journal' }
 }
 
 export const MOBILE_TABS: DeckView[] = (Object.keys(MOBILE_VIEWS) as DeckView[]).filter(

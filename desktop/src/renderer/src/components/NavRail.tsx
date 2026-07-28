@@ -10,12 +10,12 @@ import type { DeckView } from '@shared/types'
 // Icons are the Greek glyph set (icons.tsx / DESIGN.md "Iconography").
 const VIEWS: { id: DeckView; key: string }[] = [
   { id: 'home', key: 'nav.home' },
+  { id: 'roadmap', key: 'nav.roadmap' },
   { id: 'agents', key: 'nav.agents' },
+  { id: 'graph', key: 'nav.graph' },
   { id: 'browser', key: 'nav.browser' },
   { id: 'files', key: 'nav.files' },
   { id: 'git', key: 'nav.git' },
-  { id: 'roadmap', key: 'nav.roadmap' },
-  { id: 'graph', key: 'nav.graph' },
   { id: 'worktrees', key: 'nav.worktrees' },
   { id: 'sandbox', key: 'nav.sandbox' },
   { id: 'journal', key: 'nav.journal' }
