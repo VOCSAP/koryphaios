@@ -788,13 +788,20 @@ const markDelivered = db.prepare(`UPDATE messages SET delivered = 1 WHERE id = ?
 // processed the messages addressed to it in that same group before sent_at.
 // Promoting those to delivered=1 prevents the flushPendingForToken avalanche
 // at the next WS reconnect for bidirectional conversations.
+// Ordered by the AUTOINCREMENT row id, not sent_at: sent_at is a millisecond-
+// resolution ISO string, and two sends on a fast local broker can complete
+// within the same millisecond, tying (or even inverting) their sent_at
+// values -- a strict 'sent_at < ?' then misses a message that was in fact
+// inserted earlier. The row id is assigned strictly in insertion order
+// within the same db.transaction, so it stays a correct ordering key
+// regardless of clock resolution.
 const ackPriorMessagesForSender = db.prepare(
   `UPDATE messages
      SET delivered = 1
    WHERE to_token = ?
      AND group_id = ?
      AND delivered = 0
-     AND sent_at < ?`
+     AND id < ?`
 );
 
 // Message insert + activity refresh + heuristic ack land atomically: an abrupt
@@ -802,10 +809,11 @@ const ackPriorMessagesForSender = db.prepare(
 const recordMessageTx = db.transaction(
   (fromToken: string, toToken: string, groupId: string, text: string, sentAt: string): number => {
     const result = insertMessage.run(fromToken, toToken, groupId, text, sentAt);
+    const messageId = Number(result.lastInsertRowid);
     updateLastActivity.run(sentAt, fromToken);
     updateLastActivity.run(sentAt, toToken);
-    ackPriorMessagesForSender.run(fromToken, groupId, sentAt);
-    return Number(result.lastInsertRowid);
+    ackPriorMessagesForSender.run(fromToken, groupId, messageId);
+    return messageId;
   }
 );
 

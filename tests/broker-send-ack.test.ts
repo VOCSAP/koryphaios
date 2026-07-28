@@ -119,8 +119,12 @@ test("ack ne touche pas les messages posterieurs au reply", async () => {
   // X envoie un autre message a Y APRES le reply
   await send(x.body.instance_token, y.body.peer_id, "after");
 
-  const msgs = readDb<{ delivered: number; text: string; sent_at: string }>(
-    "SELECT delivered, text, sent_at FROM messages WHERE to_token = ? ORDER BY sent_at",
+  // Ordered by id, not sent_at: sent_at is millisecond-resolution and two
+  // sends on a fast local broker can tie within the same millisecond, which
+  // makes ORDER BY sent_at non-deterministic on ties. id is the messages
+  // table's AUTOINCREMENT primary key, assigned strictly in insertion order.
+  const msgs = readDb<{ id: number; delivered: number; text: string; sent_at: string }>(
+    "SELECT id, delivered, text, sent_at FROM messages WHERE to_token = ? ORDER BY id",
     y.body.instance_token
   );
   expect(msgs.length).toBe(2);
