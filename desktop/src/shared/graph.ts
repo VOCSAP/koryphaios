@@ -197,15 +197,34 @@ export function clampNodeSize(w: number, h: number): { w: number; h: number } {
 }
 
 /**
+ * Effective width/height of a node: its own resized w/h (a0f2e983) if set,
+ * else the fixed default. Single choke point for "how big is this node" so
+ * findFreeSpot, fitView and edge anchors (renderer) never diverge on a
+ * resized card.
+ */
+export function nodeW(n: GraphNode): number {
+  return n.w ?? GRAPH_NODE_W
+}
+export function nodeH(n: GraphNode): number {
+  return n.h ?? GRAPH_NODE_H
+}
+
+/**
  * Snap (x, y) to the grid, then scan RIGHT (same hierarchy level) until the
  * card no longer overlaps an existing node. Keeps siblings created one by one
  * on the same horizontal line instead of stacking them.
+ *
+ * Real AABB test (a0f2e983 review): both the existing node's real size AND
+ * the size of the node being placed matter once cards can be resized -- a
+ * distance-between-origins check against one fixed width breaks in both
+ * directions as soon as either card differs from the default.
  */
 export function findFreeSpot(
   nodes: GraphNode[],
   x: number,
   y: number,
-  ignoreIds: string[] = []
+  ignoreIds: string[] = [],
+  size: { w: number; h: number } = { w: GRAPH_NODE_W, h: GRAPH_NODE_H }
 ): { x: number; y: number } {
   let sx = snapToGrid(x)
   const sy = snapToGrid(y)
@@ -214,8 +233,10 @@ export function findFreeSpot(
     nodes.some(
       (n) =>
         !ignore.has(n.id) &&
-        Math.abs(n.x - sx) < GRAPH_NODE_W + GRAPH_GRID &&
-        Math.abs(n.y - sy) < GRAPH_NODE_H + GRAPH_GRID
+        sx < n.x + nodeW(n) + GRAPH_GRID &&
+        n.x < sx + size.w + GRAPH_GRID &&
+        sy < n.y + nodeH(n) + GRAPH_GRID &&
+        n.y < sy + size.h + GRAPH_GRID
     )
   for (let i = 0; i < 500 && overlaps(); i++) sx += GRAPH_GRID * 2
   return { x: sx, y: sy }

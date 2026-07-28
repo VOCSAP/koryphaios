@@ -8,6 +8,8 @@ import {
   graphNodeKind,
   GRAPH_GRID,
   GRAPH_NODE_H,
+  GRAPH_NODE_MAX_W,
+  GRAPH_NODE_MIN_W,
   GRAPH_NODE_W,
   GRAPH_PITCH_X,
   GRAPH_PITCH_Y,
@@ -59,6 +61,46 @@ test("findFreeSpot only cares about card-overlap distance", () => {
   const nodes = [n("a", [], "user", 0, 0)];
   const far = findFreeSpot(nodes, 0, GRAPH_NODE_H + GRAPH_GRID + 20, []);
   expect(far.x).toBe(0); // vertically clear of the card: no shift
+});
+
+// ----- findFreeSpot + resizable nodes (a0f2e983 review, bc72d2c CHANGES) -----
+// The pre-fix test compared distance between ORIGINS against one fixed
+// GRAPH_NODE_W, ignoring any node.w/node.h set by a resize. These must FAIL
+// against that old formula (both a spot that used to read as "free" but
+// isn't, and one that used to get needlessly pushed away).
+
+test("findFreeSpot uses an existing node's REAL (resized) width, not the fixed default", () => {
+  const wide = n("wide", [], "user", 0, 0);
+  wide.w = GRAPH_NODE_MAX_W; // 640: far wider than the old fixed GRAPH_NODE_W=260
+  // Exactly the old threshold (GRAPH_NODE_W + GRAPH_GRID = 280): the old,
+  // fixed-width formula reads this as clear. It is not -- it lands well
+  // inside the resized card's real 640-wide footprint.
+  const spot = findFreeSpot([wide], GRAPH_NODE_W + GRAPH_GRID, 0);
+  expect(spot.x).toBeGreaterThanOrEqual(GRAPH_NODE_MAX_W + GRAPH_GRID);
+});
+
+test("findFreeSpot does not over-push against a node narrowed below the default", () => {
+  const narrow = n("narrow", [], "user", 0, 0);
+  narrow.w = GRAPH_NODE_MIN_W; // 180: narrower than the old fixed GRAPH_NODE_W=260
+  // Already clear of the REAL (narrower) right edge (0 + 180 + 20 = 200).
+  // The old fixed-width formula would still see this as within its 280
+  // threshold and needlessly shift it further right.
+  const spot = findFreeSpot([narrow], GRAPH_NODE_MIN_W + GRAPH_GRID, 0);
+  expect(spot.x).toBe(GRAPH_NODE_MIN_W + GRAPH_GRID);
+});
+
+test("findFreeSpot also accounts for the size of the node BEING placed, not just existing ones", () => {
+  const existing = n("a", [], "user", 300, 0); // default-width card starting at x=300
+  // A default-size (260-wide) probe at x=0 clears it: right edge at 260,
+  // existing starts at 300, 40 >= the GRAPH_GRID gap.
+  const defaultSize = findFreeSpot([existing], 0, 0);
+  expect(defaultSize.x).toBe(0);
+  // The SAME spot overlaps once the node being placed is itself wide enough
+  // to reach into the existing card's footprint -- passing only the
+  // existing node's real width (and ignoring the placed size) would miss
+  // this half of the fix.
+  const widePlaced = findFreeSpot([existing], 0, 0, [], { w: 400, h: GRAPH_NODE_H });
+  expect(widePlaced.x).toBeGreaterThan(0);
 });
 
 // ----- graphNodeKind -----

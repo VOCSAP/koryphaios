@@ -11,6 +11,8 @@ import {
   GRAPH_NODE_W,
   GRAPH_PITCH_Y,
   layoutGraph,
+  nodeH,
+  nodeW,
   outlineOrder,
   snapToGrid,
   wouldCreateCycle
@@ -38,14 +40,10 @@ const ZOOM_MAX = 2
 const OUTLINE_CHARS = 46
 
 // A resized card carries its own w/h (a0f2e983); an untouched one still
-// falls back to the fixed constants. Every place that used to read
-// NODE_W/NODE_H off a specific node now goes through these two.
-function nodeW(n: GraphNode): number {
-  return n.w ?? NODE_W
-}
-function nodeH(n: GraphNode): number {
-  return n.h ?? NODE_H
-}
+// falls back to the fixed constants. nodeW/nodeH now live in shared/graph.ts
+// (single choke point, also used by findFreeSpot's overlap test) --
+// re-exported here under the same names so every existing call site is
+// unchanged.
 
 // Provider sigils stay typographic characters (abstract, monochrome — already
 // in the glyph tone, and they also live inside string labels).
@@ -122,6 +120,12 @@ export function GraphView(): React.JSX.Element {
   // drives the preview path only; the persisted link is created on drop.
   const [wireDrag, setWireDrag] = useState<{ from: string; x: number; y: number } | null>(null)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Set by addNode(parents, at) right after it selects the freshly created
+  // node; consumed by the effect below once the right-panel textarea for
+  // that node has actually mounted, so the operator can type immediately
+  // (cdbf310c review: "select + focus", not just select).
+  const focusDraftPending = useRef(false)
+  const draftRef = useRef<HTMLTextAreaElement>(null)
 
   const doc = graphs.find((g) => g.id === activeId) ?? null
   const selectedNodes = doc ? selection.map((id) => doc.nodes.find((n) => n.id === id)).filter((n): n is GraphNode => !!n) : []
@@ -167,6 +171,15 @@ export function GraphView(): React.JSX.Element {
     const id = setTimeout(() => setNotice(null), 2500)
     return () => clearTimeout(id)
   }, [notice])
+
+  // Consume the "focus the draft textarea" request set by addNode(parents,
+  // at) once the newly selected node's panel has actually re-rendered.
+  useEffect(() => {
+    if (focusDraftPending.current && single) {
+      focusDraftPending.current = false
+      draftRef.current?.focus()
+    }
+  }, [single])
 
   /** Replace the active doc in local state and persist it (optionally debounced). */
   const mutateDoc = useCallback(
@@ -233,7 +246,14 @@ export function GraphView(): React.JSX.Element {
     }
   }
 
-  const addNode = (parents: string[]): void => {
+  /**
+   * `at`, when given, is an explicit world-coordinate placement that
+   * short-circuits the hierarchy-based one below -- used by the wire-drag
+   * drop-on-empty-canvas flow (cdbf310c review) where the new node belongs
+   * right under the cursor, not centered under its parent. It still goes
+   * through findFreeSpot so it never lands on top of an existing card.
+   */
+  const addNode = (parents: string[], at?: { x: number; y: number }): void => {
     if (!doc) return
     // Hierarchy-aware placement: one parent -> the row right below it (a
     // reply/what-if hangs under its parent); several parents (a cross) ->
@@ -243,12 +263,13 @@ export function GraphView(): React.JSX.Element {
       .map((id) => doc.nodes.find((n) => n.id === id))
       .filter((n): n is GraphNode => !!n)
     const want =
-      parentNodes.length > 0
+      at ??
+      (parentNodes.length > 0
         ? {
             x: parentNodes.reduce((s, p) => s + p.x, 0) / parentNodes.length,
             y: Math.max(...parentNodes.map((p) => p.y)) + GRAPH_PITCH_Y
           }
-        : viewportCenter()
+        : viewportCenter())
     const pos = findFreeSpot(doc.nodes, want.x, want.y)
     const node: GraphNode = {
       id: graphId(),
@@ -262,6 +283,7 @@ export function GraphView(): React.JSX.Element {
     mutateDoc({ ...doc, nodes: [...doc.nodes, node] })
     setSelection([node.id])
     setDraftText('')
+    if (at) focusDraftPending.current = true
   }
 
   const updateNodeText = (id: string, text: string): void => {
@@ -442,10 +464,24 @@ export function GraphView(): React.JSX.Element {
       // Resolve the drop target from the DOM instead of tracking hover state
       // through every node: cheap (one lookup, on release only) and immune to
       // stale state if nodes re-render mid-drag.
-      const targetId = document
-        .elementFromPoint(e.clientX, e.clientY)
-        ?.closest<HTMLElement>('[data-node-id]')?.dataset.nodeId
-      if (targetId && targetId !== d.id) connectParent(targetId, d.id)
+      const dropEl = document.elementFromPoint(e.clientX, e.clientY)
+      const targetId = dropEl?.closest<HTMLElement>('[data-node-id]')?.dataset.nodeId
+      if (targetId && targetId !== d.id) {
+        connectParent(targetId, d.id)
+      } else if (
+        e.type === 'mouseup' &&
+        wireDrag &&
+        !dropEl?.closest('.graph-toolbar, .graph-zoomctl, .graph-timeline')
+      ) {
+        // Dropped on empty canvas -- not on a node, and this is a real
+        // release inside the canvas (not the onMouseLeave fallback that
+        // also calls this handler when the drag wanders off the canvas
+        // edge): spin up a fresh child node right there, selected and
+        // focused (cdbf310c review point 2). wireDrag.{x,y} already carry
+        // the same world-space conversion onMouseMove used for the preview
+        // line -- reuse it rather than recompute it a second way.
+        addNode([d.id], { x: wireDrag.x, y: wireDrag.y })
+      }
       setWireDrag(null)
     }
     drag.current = null
@@ -812,6 +848,7 @@ export function GraphView(): React.JSX.Element {
             </div>
             {single.type === 'user' ? (
               <textarea
+                ref={draftRef}
                 className="graph-text"
                 rows={6}
                 placeholder={t('graph.promptPlaceholder')}
