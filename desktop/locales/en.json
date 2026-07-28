@@ -600,6 +600,8 @@
   "graph.reply": "Reply",
   "graph.connect": "Connect parent",
   "graph.connectHint": "Click the node to add as a parent (cycles are refused).",
+  "graph.resize": "Drag to resize",
+  "graph.wireConnect": "Drag onto another node to connect it as a child (cycles are refused).",
   "graph.inspect": "Inspect context",
   "graph.inspectorTitle": "Compiled context (sent as system side)",
   "graph.inspectorPrompt": "Prompt (the node's message)",

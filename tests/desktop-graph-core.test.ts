@@ -6,7 +6,12 @@ import { test, expect } from "bun:test";
 import {
   ancestorsOf,
   childrenOf,
+  clampNodeSize,
   graphId,
+  GRAPH_NODE_MAX_H,
+  GRAPH_NODE_MAX_W,
+  GRAPH_NODE_MIN_H,
+  GRAPH_NODE_MIN_W,
   linearize,
   mergePartition,
   parseGraphDoc,
@@ -157,4 +162,69 @@ test("parseGraphDoc rejects garbage and preserves assistant metadata", () => {
   expect(parsed!.nodes[0].cli).toBe("codex");
   expect(parsed!.nodes[0].model).toBe("gpt-5");
   expect(parsed!.nodes[0].status).toBe("ok");
+});
+
+// ----- resize (a0f2e983): clampNodeSize + parseGraphDoc w/h handling -----
+
+test("clampNodeSize snaps to grid and clamps to [MIN, MAX] on both axes", () => {
+  expect(clampNodeSize(GRAPH_NODE_MIN_W - 500, GRAPH_NODE_MIN_H - 500)).toEqual({
+    w: GRAPH_NODE_MIN_W,
+    h: GRAPH_NODE_MIN_H
+  });
+  expect(clampNodeSize(GRAPH_NODE_MAX_W + 500, GRAPH_NODE_MAX_H + 500)).toEqual({
+    w: GRAPH_NODE_MAX_W,
+    h: GRAPH_NODE_MAX_H
+  });
+  // Mid-range value snaps to the nearest grid multiple (GRAPH_GRID = 20).
+  expect(clampNodeSize(295, 145)).toEqual({ w: 300, h: 140 });
+});
+
+test("parseGraphDoc clamps a present, finite w/h and drops it when absent or non-finite", () => {
+  const withSize = parseGraphDoc({
+    id: "g",
+    name: "g",
+    nodes: [
+      {
+        id: "a",
+        type: "user",
+        parents: [],
+        text: "",
+        x: 0,
+        y: 0,
+        createdAt: 1,
+        w: GRAPH_NODE_MAX_W + 1000,
+        h: GRAPH_NODE_MIN_H - 1000
+      }
+    ]
+  });
+  expect(withSize!.nodes[0].w).toBe(GRAPH_NODE_MAX_W);
+  expect(withSize!.nodes[0].h).toBe(GRAPH_NODE_MIN_H);
+
+  const noSize = parseGraphDoc({
+    id: "g",
+    name: "g",
+    nodes: [{ id: "a", type: "user", parents: [], text: "", x: 0, y: 0, createdAt: 1 }]
+  });
+  expect(noSize!.nodes[0].w).toBeUndefined();
+  expect(noSize!.nodes[0].h).toBeUndefined();
+
+  const garbageSize = parseGraphDoc({
+    id: "g",
+    name: "g",
+    nodes: [
+      {
+        id: "a",
+        type: "user",
+        parents: [],
+        text: "",
+        x: 0,
+        y: 0,
+        createdAt: 1,
+        w: Number.NaN,
+        h: "200"
+      }
+    ]
+  });
+  expect(garbageSize!.nodes[0].w).toBeUndefined();
+  expect(garbageSize!.nodes[0].h).toBeUndefined();
 });

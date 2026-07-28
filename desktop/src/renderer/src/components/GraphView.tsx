@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { GraphCli, GraphDoc, GraphNode, ModelTarget } from '@shared/graph'
 import {
   childrenOf,
+  clampNodeSize,
   findFreeSpot,
   graphId,
   graphNodeKind,
@@ -35,6 +36,16 @@ const ZOOM_MIN = 0.25
 const ZOOM_MAX = 2
 /** Timeline outline: chars kept per row before the ellipsis. */
 const OUTLINE_CHARS = 46
+
+// A resized card carries its own w/h (a0f2e983); an untouched one still
+// falls back to the fixed constants. Every place that used to read
+// NODE_W/NODE_H off a specific node now goes through these two.
+function nodeW(n: GraphNode): number {
+  return n.w ?? NODE_W
+}
+function nodeH(n: GraphNode): number {
+  return n.h ?? NODE_H
+}
 
 // Provider sigils stay typographic characters (abstract, monochrome — already
 // in the glyph tone, and they also live inside string labels).
@@ -93,15 +104,23 @@ export function GraphView(): React.JSX.Element {
   const [showTimeline, setShowTimeline] = useState(false)
 
   const canvasRef = useRef<HTMLDivElement>(null)
+  // Single state machine for every canvas drag: panning the camera, moving a
+  // node, resizing a node (a0f2e983) and drawing a wire to connect two nodes
+  // (cdbf310c). origW/origH are only used by 'resize'.
   const drag = useRef<{
-    kind: 'pan' | 'node'
+    kind: 'pan' | 'node' | 'resize' | 'wire'
     id?: string
     startX: number
     startY: number
     origX: number
     origY: number
+    origW?: number
+    origH?: number
     moved: boolean
   } | null>(null)
+  // Live endpoint of an in-progress wire drag, in world (graph) coordinates —
+  // drives the preview path only; the persisted link is created on drop.
+  const [wireDrag, setWireDrag] = useState<{ from: string; x: number; y: number } | null>(null)
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const doc = graphs.find((g) => g.id === activeId) ?? null
@@ -335,6 +354,41 @@ export function GraphView(): React.JSX.Element {
     }
   }
 
+  /** Bottom-right corner handle (a0f2e983): starts a size drag. */
+  const onResizeMouseDown = (e: React.MouseEvent, node: GraphNode): void => {
+    e.stopPropagation()
+    drag.current = {
+      kind: 'resize',
+      id: node.id,
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: node.x,
+      origY: node.y,
+      origW: nodeW(node),
+      origH: nodeH(node),
+      moved: false
+    }
+  }
+
+  /**
+   * Bottom-center port (cdbf310c): starts a wire drag. The port lives on the
+   * PARENT side — same anchor the edge SVG already draws from — so dropping
+   * on another node makes THAT node the child (connectParent(target, this)).
+   */
+  const onWirePortMouseDown = (e: React.MouseEvent, node: GraphNode): void => {
+    e.stopPropagation()
+    drag.current = {
+      kind: 'wire',
+      id: node.id,
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: node.x,
+      origY: node.y,
+      moved: false
+    }
+    setWireDrag({ from: node.id, x: node.x + nodeW(node) / 2, y: node.y + nodeH(node) })
+  }
+
   const onCanvasMouseDown = (e: React.MouseEvent): void => {
     drag.current = {
       kind: 'pan',
@@ -354,17 +408,46 @@ export function GraphView(): React.JSX.Element {
     if (Math.abs(dx) + Math.abs(dy) > 3) d.moved = true
     if (d.kind === 'pan') {
       setCamera((c) => ({ ...c, x: d.origX + dx, y: d.origY + dy }))
-    } else if (d.id && doc) {
+    } else if (d.kind === 'node' && d.id && doc) {
       const nx = snapToGrid(d.origX + dx / camera.zoom)
       const ny = snapToGrid(d.origY + dy / camera.zoom)
       mutateDoc(
         { ...doc, nodes: doc.nodes.map((n) => (n.id === d.id ? { ...n, x: nx, y: ny } : n)) },
         true
       )
+    } else if (d.kind === 'resize' && d.id && doc) {
+      const { w, h } = clampNodeSize(
+        (d.origW ?? NODE_W) + dx / camera.zoom,
+        (d.origH ?? NODE_H) + dy / camera.zoom
+      )
+      mutateDoc(
+        { ...doc, nodes: doc.nodes.map((n) => (n.id === d.id ? { ...n, w, h } : n)) },
+        true
+      )
+    } else if (d.kind === 'wire' && d.id) {
+      const el = canvasRef.current
+      if (!el) return
+      const rect = el.getBoundingClientRect()
+      setWireDrag({
+        from: d.id,
+        x: (e.clientX - rect.left - camera.x) / camera.zoom,
+        y: (e.clientY - rect.top - camera.y) / camera.zoom
+      })
     }
   }
 
-  const onMouseUp = (): void => {
+  const onMouseUp = (e: React.MouseEvent): void => {
+    const d = drag.current
+    if (d?.kind === 'wire' && d.id) {
+      // Resolve the drop target from the DOM instead of tracking hover state
+      // through every node: cheap (one lookup, on release only) and immune to
+      // stale state if nodes re-render mid-drag.
+      const targetId = document
+        .elementFromPoint(e.clientX, e.clientY)
+        ?.closest<HTMLElement>('[data-node-id]')?.dataset.nodeId
+      if (targetId && targetId !== d.id) connectParent(targetId, d.id)
+      setWireDrag(null)
+    }
     drag.current = null
   }
 
@@ -413,8 +496,8 @@ export function GraphView(): React.JSX.Element {
     const pad = 60
     const minX = Math.min(...list.map((n) => n.x)) - pad
     const minY = Math.min(...list.map((n) => n.y)) - pad
-    const maxX = Math.max(...list.map((n) => n.x + NODE_W)) + pad
-    const maxY = Math.max(...list.map((n) => n.y + NODE_H)) + pad
+    const maxX = Math.max(...list.map((n) => n.x + nodeW(n))) + pad
+    const maxY = Math.max(...list.map((n) => n.y + nodeH(n))) + pad
     const zoom = Math.min(
       ZOOM_MAX,
       Math.max(ZOOM_MIN, Math.min(el.clientWidth / (maxX - minX), el.clientHeight / (maxY - minY), 1))
@@ -442,8 +525,8 @@ export function GraphView(): React.JSX.Element {
     if (node.type === 'user') setDraftText(node.text)
     setCamera((c) => ({
       ...c,
-      x: el.clientWidth / 2 - (node.x + NODE_W / 2) * c.zoom,
-      y: el.clientHeight / 2 - (node.y + NODE_H / 2) * c.zoom
+      x: el.clientWidth / 2 - (node.x + nodeW(node) / 2) * c.zoom,
+      y: el.clientHeight / 2 - (node.y + nodeH(node) / 2) * c.zoom
     }))
   }
 
@@ -545,9 +628,9 @@ export function GraphView(): React.JSX.Element {
           >
             <svg className="graph-edges">
               {edges.map((e, i) => {
-                const x1 = e.from.x + NODE_W / 2
-                const y1 = e.from.y + NODE_H
-                const x2 = e.to.x + NODE_W / 2
+                const x1 = e.from.x + nodeW(e.from) / 2
+                const y1 = e.from.y + nodeH(e.from)
+                const x2 = e.to.x + nodeW(e.to) / 2
                 const y2 = e.to.y
                 const my = (y1 + y2) / 2
                 // Same color code as the timeline bullets: a link takes the
@@ -562,10 +645,24 @@ export function GraphView(): React.JSX.Element {
                   />
                 )
               })}
+              {wireDrag &&
+                (() => {
+                  const src = doc.nodes.find((n) => n.id === wireDrag.from)
+                  if (!src) return null
+                  const x1 = src.x + nodeW(src) / 2
+                  const y1 = src.y + nodeH(src)
+                  return (
+                    <path
+                      className="graph-wire-preview"
+                      d={`M ${x1} ${y1} L ${wireDrag.x} ${wireDrag.y}`}
+                    />
+                  )
+                })()}
             </svg>
             {doc.nodes.map((n) => (
               <div
                 key={n.id}
+                data-node-id={n.id}
                 className={[
                   'graph-node',
                   `is-${n.type}`,
@@ -576,7 +673,7 @@ export function GraphView(): React.JSX.Element {
                 ]
                   .filter(Boolean)
                   .join(' ')}
-                style={{ left: n.x, top: n.y, width: NODE_W, height: NODE_H }}
+                style={{ left: n.x, top: n.y, width: nodeW(n), height: nodeH(n) }}
                 onMouseDown={(e) => onNodeMouseDown(e, n)}
                 onClick={(e) => onNodeClick(e, n)}
               >
@@ -589,6 +686,21 @@ export function GraphView(): React.JSX.Element {
                   {n.status === 'error' ? `⚠ ${n.error ?? t('graph.error')}` : n.text}
                 </div>
                 {running === n.id && <div className="graph-node-spinner">{t('graph.running')}</div>}
+                {/* Bottom-right handle: drag to resize (a0f2e983). */}
+                <div
+                  className="graph-node-resize-handle"
+                  title={t('graph.resize')}
+                  onMouseDown={(e) => onResizeMouseDown(e, n)}
+                  onClick={(e) => e.stopPropagation()}
+                />
+                {/* Bottom-center port: drag onto another node to link them
+                    (cdbf310c) — same anchor the edge SVG draws a link from. */}
+                <div
+                  className="graph-node-wire-port"
+                  title={t('graph.wireConnect')}
+                  onMouseDown={(e) => onWirePortMouseDown(e, n)}
+                  onClick={(e) => e.stopPropagation()}
+                />
               </div>
             ))}
           </div>

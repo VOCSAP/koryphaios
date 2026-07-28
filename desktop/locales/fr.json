@@ -600,6 +600,8 @@
   "graph.reply": "Répondre",
   "graph.connect": "Connecter un parent",
   "graph.connectHint": "Cliquez le nœud à ajouter comme parent (les cycles sont refusés).",
+  "graph.resize": "Glisser pour redimensionner",
+  "graph.wireConnect": "Glissez sur un autre nœud pour le connecter comme enfant (les cycles sont refusés).",
   "graph.inspect": "Inspecter le contexte",
   "graph.inspectorTitle": "Contexte compilé (envoyé côté system)",
   "graph.inspectorPrompt": "Prompt (le message du nœud)",

@@ -4184,6 +4184,16 @@ svg.glyph {
   stroke-dasharray: 5 4;
 }
 
+/* Wire-drag-to-connect (cdbf310c): live preview line, same look as a
+   committed edge but dashed so it reads as "not yet dropped". */
+.graph-wire-preview {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  opacity: 0.85;
+}
+
 /* node cards */
 .graph-node {
   position: absolute;
@@ -4263,6 +4273,54 @@ svg.glyph {
   font-size: 10px;
   color: var(--accent);
   border-top: 1px solid var(--border);
+}
+
+/* Bottom-right resize grip (a0f2e983): a diagonal notch, themed via --border
+   so it reads as structural chrome rather than an accent action. Kept fully
+   inside the card box -- .graph-node clips overflow for its rounded corners,
+   so nothing here may cross the edge. */
+.graph-node-resize-handle {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  width: 12px;
+  height: 12px;
+  cursor: nwse-resize;
+  background: linear-gradient(
+    135deg,
+    transparent 0 40%,
+    var(--border) 40% 46%,
+    transparent 46% 60%,
+    var(--border) 60% 66%,
+    transparent 66% 80%,
+    var(--border) 80% 86%,
+    transparent 86%
+  );
+  opacity: 0.7;
+}
+
+.graph-node-resize-handle:hover {
+  opacity: 1;
+}
+
+/* Bottom-center wire port (cdbf310c): the same anchor the edge SVG already
+   draws links from, made grabbable. Crosshair cursor signals "start a link"
+   the same way .graph-canvas.is-connecting already does for click-to-connect. */
+.graph-node-wire-port {
+  position: absolute;
+  left: 50%;
+  bottom: 0;
+  transform: translate(-50%, -1px);
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.55;
+  cursor: crosshair;
+}
+
+.graph-node-wire-port:hover {
+  opacity: 1;
 }
 
 /* canvas overlays */

@@ -36,6 +36,9 @@ export interface GraphNode {
   /** Canvas position (manual layout, like the demo). */
   x: number
   y: number
+  /** Card size (a0f2e983): operator-resized, in canvas units. Undefined = GRAPH_NODE_W/H. */
+  w?: number
+  h?: number
   createdAt: number
   /** assistant/judge only. */
   cli?: GraphCli
@@ -169,8 +172,28 @@ export const GRAPH_NODE_H = 130
 export const GRAPH_PITCH_X = 340
 export const GRAPH_PITCH_Y = 180
 
+// Resize bounds (a0f2e983): a card must stay legible (min) and never eat the
+// whole canvas (max). Both ends are grid multiples so a resized card still
+// lands on the dot grid like everything else.
+export const GRAPH_NODE_MIN_W = 180
+export const GRAPH_NODE_MIN_H = 90
+export const GRAPH_NODE_MAX_W = 640
+export const GRAPH_NODE_MAX_H = 480
+
 export function snapToGrid(v: number): number {
   return Math.round(v / GRAPH_GRID) * GRAPH_GRID
+}
+
+/**
+ * Snap + clamp a card size to [MIN, MAX]. Single choke point for the resize
+ * drag (renderer) AND parseGraphDoc (main-side persist) so a hostile or
+ * hand-edited doc can never carry a zero/negative/absurd node size.
+ */
+export function clampNodeSize(w: number, h: number): { w: number; h: number } {
+  return {
+    w: Math.min(GRAPH_NODE_MAX_W, Math.max(GRAPH_NODE_MIN_W, snapToGrid(w))),
+    h: Math.min(GRAPH_NODE_MAX_H, Math.max(GRAPH_NODE_MIN_H, snapToGrid(h)))
+  }
 }
 
 /**
@@ -349,6 +372,15 @@ export function parseGraphDoc(raw: unknown): GraphDoc | null {
     if (n.status === 'ok' || n.status === 'error') node.status = n.status
     if (typeof n.error === 'string') node.error = str(n.error, 2000)
     if (typeof n.durationMs === 'number') node.durationMs = num(n.durationMs)
+    // Resize (a0f2e983): optional-field/defaults-are-constants, same as the
+    // rest of this loop -- absent or non-finite stays undefined (renderer
+    // falls back to GRAPH_NODE_W/H), present gets clamped so a hostile or
+    // hand-edited doc can never carry a zero/negative/absurd node size.
+    if (typeof n.w === 'number' && Number.isFinite(n.w) && typeof n.h === 'number' && Number.isFinite(n.h)) {
+      const size = clampNodeSize(n.w, n.h)
+      node.w = size.w
+      node.h = size.h
+    }
     nodes.push(node)
   }
   // Drop dangling parent references, then reject docs where a cycle survived
