@@ -870,6 +870,7 @@ export function WorkflowLane({
           title={t('roadmap.wf.clearQueueTitle')}
           message={t('roadmap.wf.clearQueueMessage')}
           confirmLabel={t('roadmap.wf.clearQueueConfirm')}
+          tone="neutral"
           onCancel={() => setConfirmClear(false)}
           onConfirm={() => {
             setConfirmClear(false)
