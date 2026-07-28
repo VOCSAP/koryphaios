@@ -7,6 +7,7 @@ import {
   clampLaneHeight,
   dependsRelated,
   dependsWouldCycle,
+  initialLaneHeight,
   insertAt,
   insertSlotAt,
   slotConflicts,
@@ -16,6 +17,7 @@ import {
   siblingDeps,
   stackTargetAt,
   unmetDeps,
+  WF_LANE_H_DEFAULT,
   WF_LANE_H_MIN,
   WF_NODE_H,
   WF_NODE_W,
@@ -248,4 +250,25 @@ test('clampLaneHeight: a tiny viewport still leaves the floor as the ceiling', (
   // 60vh of a 200px-tall viewport (120) is below the floor -- the floor wins,
   // never a ceiling smaller than the minimum usable height.
   expect(clampLaneHeight(9999, 200)).toBe(WF_LANE_H_MIN)
+})
+
+test('clampLaneHeight: a non-finite input floors instead of propagating NaN', () => {
+  // NaN and +/-Infinity are all non-finite: none may reach Math.max/min and
+  // propagate into `height: NaN` (or an unusable infinite height) downstream.
+  expect(clampLaneHeight(NaN, 1080)).toBe(WF_LANE_H_MIN)
+  expect(clampLaneHeight(Infinity, 1080)).toBe(WF_LANE_H_MIN)
+  expect(clampLaneHeight(-Infinity, 1080)).toBe(WF_LANE_H_MIN)
+})
+
+test('initialLaneHeight: restore/seed path clamps a persisted value against the CURRENT viewport', () => {
+  // Valid on the 1440px-tall screen it was saved from (60vh = 864)...
+  expect(initialLaneHeight(800, 1440)).toBe(800)
+  // ...but must clamp on restore into a smaller window/screen (60vh = 460.8),
+  // not overflow the lane and push the resize handle off-screen.
+  expect(initialLaneHeight(800, 768)).toBe(461)
+})
+
+test('initialLaneHeight: absent or corrupt config value falls back to the default, then clamps', () => {
+  expect(initialLaneHeight(undefined, 1080)).toBe(WF_LANE_H_DEFAULT)
+  expect(initialLaneHeight(NaN, 1080)).toBe(WF_LANE_H_MIN)
 })

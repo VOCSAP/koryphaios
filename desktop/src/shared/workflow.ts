@@ -23,8 +23,28 @@ export const WF_LANE_H_MAX_VH = 0.6
 
 /** Clamp a candidate lane height to [WF_LANE_H_MIN, WF_LANE_H_MAX_VH * viewportH]. */
 export function clampLaneHeight(px: number, viewportH: number): number {
+  // A corrupted/NaN input (bad config, bad viewport read) must floor, not
+  // propagate: Math.max(min, NaN) is NaN, which would flow into `height: NaN`.
+  const safePx = Number.isFinite(px) ? px : WF_LANE_H_MIN
   const max = Math.max(WF_LANE_H_MIN, viewportH * WF_LANE_H_MAX_VH)
-  return Math.round(Math.min(max, Math.max(WF_LANE_H_MIN, px)))
+  return Math.round(Math.min(max, Math.max(WF_LANE_H_MIN, safePx)))
+}
+
+/**
+ * The height to seed the lane's `useState` from: the persisted config value
+ * (clamped to the CURRENT viewport) or the default when absent/corrupt. A
+ * value valid on the viewport it was saved from can exceed the ceiling of a
+ * smaller one on restore (different window size, different PC) -- this must
+ * clamp on seed, not only on live drag, or the handle itself can end up
+ * pushed off-screen and unrecoverable via the gesture.
+ */
+export function initialLaneHeight(configHeight: number | undefined, viewportH: number): number {
+  return clampLaneHeight(configHeight ?? WF_LANE_H_DEFAULT, viewportH)
+}
+
+/** A locked in_progress item with no queue slot: active work outside the queue. */
+function isHead(i: RoadmapItem): boolean {
+  return i.locked && i.status === 'in_progress' && i.queue === null
 }
 
 /**
@@ -33,8 +53,6 @@ export function clampLaneHeight(px: number, viewportH: number): number {
  * locked heads first (oldest lock first), then the queue by position.
  */
 export function laneItems(items: RoadmapItem[]): RoadmapItem[] {
-  const isHead = (i: RoadmapItem): boolean =>
-    i.locked && i.status === 'in_progress' && i.queue === null
   const shown = items.filter(
     (i) =>
       isHead(i) || (i.queue !== null && i.status !== 'done' && i.status !== 'archived')

@@ -14,6 +14,7 @@ import {
 } from '@shared/models'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
 import { reportError } from './log'
+import { WF_LANE_H_DEFAULT, WF_LANE_H_MIN } from '@shared/workflow'
 
 const DEFAULT_CONFIG: AppConfig = {
   projectDir: homedir(),
@@ -114,6 +115,11 @@ export function loadConfig(): AppConfig {
   }
   // Hand-edited file: a non-hex glow value becomes a CSS variable, so clamp.
   cfg.glowColor = sanitizeGlowColor(cfg.glowColor)
+  // Corrupt/hand-edited value -> floor to the default; the real ceiling is
+  // viewport-relative (renderer-only knowledge), clamped there on seed.
+  if (!Number.isFinite(cfg.wfLaneHeight) || cfg.wfLaneHeight < WF_LANE_H_MIN) {
+    cfg.wfLaneHeight = WF_LANE_H_DEFAULT
+  }
   delete (cfg as { helpModel?: string }).helpModel
   return cfg
 }

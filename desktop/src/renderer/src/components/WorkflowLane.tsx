@@ -5,6 +5,7 @@ import {
   clampLaneHeight,
   dependsRelated,
   dependsWouldCycle,
+  initialLaneHeight,
   insertSlotAt,
   laneEdges,
   laneItems,
@@ -14,7 +15,6 @@ import {
   stackTargetAt,
   unmetDeps,
   WF_FIT_FLOOR,
-  WF_LANE_H_DEFAULT,
   WF_NODE_H,
   WF_NODE_W,
   WF_PITCH_X,
@@ -90,7 +90,9 @@ export function WorkflowLane({
   const [collapsed, setCollapsed] = useState(false)
   // Canvas height (px): seeded from the persisted config, live-dragged via the
   // top-edge handle, committed back to config on pointer-up.
-  const [laneHeight, setLaneHeight] = useState(config?.wfLaneHeight ?? WF_LANE_H_DEFAULT)
+  const [laneHeight, setLaneHeight] = useState(() =>
+    initialLaneHeight(config?.wfLaneHeight, window.innerHeight)
+  )
   const [camera, setCamera] = useState<Camera>({ x: FIT_PAD, y: FIT_PAD, zoom: 1 })
   // Insertion caret shown during a drag (full-lane slot + world x), or null.
   const [caret, setCaret] = useState<{ slot: number; x: number } | null>(null)
@@ -572,6 +574,7 @@ export function WorkflowLane({
           onPointerDown={onResizePointerDown}
           onPointerMove={onResizePointerMove}
           onPointerUp={onResizePointerUp}
+          onPointerCancel={onResizePointerUp}
         />
       )}
 
