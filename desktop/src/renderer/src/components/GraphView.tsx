@@ -42,7 +42,7 @@ const OUTLINE_CHARS = 46
 // A resized card carries its own w/h (a0f2e983); an untouched one still
 // falls back to the fixed constants. nodeW/nodeH now live in shared/graph.ts
 // (single choke point, also used by findFreeSpot's overlap test) --
-// re-exported here under the same names so every existing call site is
+// imported here under the same names so every existing call site is
 // unchanged.
 
 // Provider sigils stay typographic characters (abstract, monochrome — already
