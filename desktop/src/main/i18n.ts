@@ -723,6 +723,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'roadmap.lockedHint': 'An agent is actively working on this item (locked)',
   'roadmap.lockedSince': 'Locked by {name} since {date}',
   'roadmap.dependsOn': 'Depends on',
+  'roadmap.addDep': 'Add dependency',
   'roadmap.stop': '⏹ Stop',
   'roadmap.confirmStopTitle': 'Stop work on this item?',
   'roadmap.confirmStopMessage':

@@ -1,8 +1,10 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { RoadmapItem, RoadmapKind } from '@shared/types'
+import { dependsWouldCycle } from '@shared/workflow'
 import { useT, type TFn } from '../i18n'
 import { GLYPH_ACTIONS, GLYPH_BADGES, GLYPH_KINDS } from './icons'
 import { parseMarkdown, type BlockToken, type InlineToken } from '../markdown'
+import { ContextMenu } from './ContextMenu'
 
 // Roadmap item detail modal (PLAN K5): the Trello-style foreground card opened
 // by clicking a kanban card. Read view only -- editing stays in the form modal
@@ -137,6 +139,7 @@ function badges(item: RoadmapItem, t: TFn): React.JSX.Element {
 
 export function RoadmapItemModal({
   item,
+  items,
   onClose,
   onEdit,
   onLaunch,
@@ -144,9 +147,12 @@ export function RoadmapItemModal({
   onQueue,
   onUnqueue,
   onArchive,
-  onRestore
+  onRestore,
+  onAddDep,
+  onRemoveDep
 }: {
   item: RoadmapItem
+  items: RoadmapItem[]
   onClose: () => void
   onEdit: () => void
   onLaunch: () => void
@@ -155,8 +161,11 @@ export function RoadmapItemModal({
   onUnqueue: () => void
   onArchive: () => void
   onRestore: () => void
+  onAddDep: (parentId: string) => void
+  onRemoveDep: (parentId: string) => void
 }): React.JSX.Element {
   const t = useT()
+  const [depMenu, setDepMenu] = useState<{ x: number; y: number } | null>(null)
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -167,6 +176,15 @@ export function RoadmapItemModal({
   }, [onClose])
 
   const stoppable = item.locked && item.status === 'in_progress'
+
+  const depCandidates = items.filter(
+    (i) =>
+      i.id !== item.id &&
+      !item.depends_on.includes(i.id) &&
+      i.status !== 'done' &&
+      i.status !== 'archived' &&
+      !dependsWouldCycle(items, item.id, i.id)
+  )
 
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
@@ -235,18 +253,36 @@ export function RoadmapItemModal({
               <Markdown source={item.context} />
             </section>
           )}
-          {item.depends_on.length > 0 && (
-            <section className="rm-modal-section">
-              <h4>{t('roadmap.dependsOn')}</h4>
-              <div className="rm-detail-badges">
-                {item.depends_on.map((d) => (
-                  <span key={d} className="rm-badge">
-                    {d.slice(0, 8)}
+          <section className="rm-modal-section">
+            <h4>{t('roadmap.dependsOn')}</h4>
+            <div className="rm-dep-chips">
+              {item.depends_on.map((d) => {
+                const dep = items.find((i) => i.id === d)
+                return (
+                  <span key={d} className="rm-badge rm-dep-chip">
+                    {dep ? dep.title : d.slice(0, 8)}
+                    <button
+                      type="button"
+                      className="rm-dep-chip-x"
+                      title={t('roadmap.wf.removeDep')}
+                      onClick={() => onRemoveDep(d)}
+                    >
+                      {GLYPH_ACTIONS.close}
+                    </button>
                   </span>
-                ))}
-              </div>
-            </section>
-          )}
+                )
+              })}
+              <button
+                type="button"
+                className="icon-btn rm-dep-add"
+                title={t('roadmap.addDep')}
+                disabled={depCandidates.length === 0}
+                onClick={(e) => setDepMenu({ x: e.clientX, y: e.clientY })}
+              >
+                {GLYPH_ACTIONS.plus}
+              </button>
+            </div>
+          </section>
         </div>
 
         <p className="rm-detail-meta">
@@ -288,6 +324,18 @@ export function RoadmapItemModal({
           )}
         </div>
       </div>
+
+      {depMenu && (
+        <ContextMenu
+          x={depMenu.x}
+          y={depMenu.y}
+          items={depCandidates.map((c) => ({
+            label: c.title,
+            onSelect: () => onAddDep(c.id)
+          }))}
+          onClose={() => setDepMenu(null)}
+        />
+      )}
     </div>
   )
 }

@@ -7,6 +7,7 @@ import {
   clampLaneHeight,
   dependsRelated,
   dependsWouldCycle,
+  enqueueClosure,
   initialLaneHeight,
   insertAt,
   insertSlotAt,
@@ -213,6 +214,57 @@ test('dependsRelated: any dependency path (either direction) forbids parallelism
   expect(dependsRelated(chain, 'B', 'C')).toBe(true) // direct
   expect(dependsRelated(chain, 'C', 'A')).toBe(true) // transitive, reversed args
   expect(dependsRelated(chain, 'B', 'E')).toBe(false) // unrelated
+})
+
+test('enqueueClosure: diamond dependencies close once, dependency-first', () => {
+  // D depends on B and C, both depend on A: A must appear exactly once,
+  // before B and C, and D itself is excluded (the caller places it).
+  const items = [
+    item('A'),
+    item('B', { depends_on: ['A'] }),
+    item('C', { depends_on: ['A'] }),
+    item('D', { depends_on: ['B', 'C'] })
+  ]
+  const closure = enqueueClosure(items, 'D')
+  expect(closure).toEqual(['A', 'B', 'C'])
+})
+
+test('enqueueClosure: an already-queued dependency is not re-added', () => {
+  const items = [
+    item('A', { queue: 1 }),
+    item('B', { depends_on: ['A'] })
+  ]
+  expect(enqueueClosure(items, 'B')).toEqual([])
+})
+
+test('enqueueClosure: a done dependency is settled, not re-queued', () => {
+  const items = [item('A', { status: 'done' }), item('B', { depends_on: ['A'] })]
+  expect(enqueueClosure(items, 'B')).toEqual([])
+})
+
+test('enqueueClosure: an archived dependency is settled, not re-queued', () => {
+  const items = [item('A', { status: 'archived' }), item('B', { depends_on: ['A'] })]
+  expect(enqueueClosure(items, 'B')).toEqual([])
+})
+
+test('enqueueClosure: a locked in_progress head is active work, not re-queued', () => {
+  const items = [
+    item('A', { status: 'in_progress', locked: true, locked_by: 'p', locked_at: '2026-01-01' }),
+    item('B', { depends_on: ['A'] })
+  ]
+  expect(enqueueClosure(items, 'B')).toEqual([])
+})
+
+test('enqueueClosure: a dangling dependency id (deleted/absent item) is ignored', () => {
+  const items = [item('B', { depends_on: ['ghost', 'A'] }), item('A')]
+  expect(enqueueClosure(items, 'B')).toEqual(['A'])
+})
+
+test('enqueueClosure: terminates and de-duplicates on a dependency cycle', () => {
+  // A <-> B is a malformed cycle (depends_on should be a DAG, but the data
+  // can still contain one); the closure must terminate, not loop forever.
+  const items = [item('A', { depends_on: ['B'] }), item('B', { depends_on: ['A'] })]
+  expect(enqueueClosure(items, 'A')).toEqual(['B'])
 })
 
 test('slotConflicts: flags deps landing after the cut and dependents before it', () => {

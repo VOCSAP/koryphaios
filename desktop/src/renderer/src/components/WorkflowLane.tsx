@@ -5,8 +5,10 @@ import {
   clampLaneHeight,
   dependsRelated,
   dependsWouldCycle,
+  enqueueClosure,
   initialLaneHeight,
   insertSlotAt,
+  isHead,
   laneEdges,
   laneItems,
   layoutLane,
@@ -63,10 +65,6 @@ interface WorkflowLaneProps {
   onRemoveDep: (childId: string, parentId: string) => void
   /** Stack gesture: `dragId` becomes a parallel sibling of `targetId`. */
   onStack: (dragId: string, targetId: string, dependsOn: string[]) => void
-}
-
-function isHead(i: RoadmapItem): boolean {
-  return i.locked && i.status === 'in_progress' && i.queue === null
 }
 
 export function WorkflowLane({
@@ -261,7 +259,21 @@ export function WorkflowLane({
   const commitDrop = (id: string, slot: number): void => {
     if (!droppable(id)) return
     const next = queueAfterDrop(id, slot)
-    if (next) onReorder(next)
+    if (!next) return
+    // Enqueue id's unmet, unqueued dependencies alongside it -- in the same
+    // reorder commit, spliced dependency-first right before id's own slot
+    // (AUDIT-graph-view-2026-07-28.md §7). Covers both entry points that
+    // funnel through commitDrop: the kanban-to-lane drop and lane-internal
+    // reorders.
+    const closure = enqueueClosure(items, id)
+    if (closure.length === 0) {
+      onReorder(next)
+      return
+    }
+    const idx = next.indexOf(id)
+    const withClosure =
+      idx === -1 ? [...closure, ...next] : [...next.slice(0, idx), ...closure, ...next.slice(idx)]
+    onReorder(withClosure)
   }
 
   /** Parallel-sibling drop: `id` adopts the target's dependencies. */

@@ -2232,6 +2232,57 @@ svg.glyph {
   gap: 5px;
 }
 
+/* Depends-on editor (RoadmapItemModal): removable chips + an add-picker
+   button, replacing the read-only 8-char id badges. Reuses .rm-badge as the
+   chip shell so it matches every other badge in the modal. */
+.rm-dep-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.rm-dep-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.rm-dep-chip-x {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--fg-dim);
+  cursor: pointer;
+  line-height: 0;
+}
+
+.rm-dep-chip-x svg {
+  width: 10px;
+  height: 10px;
+}
+
+.rm-dep-chip-x:hover {
+  color: var(--danger);
+}
+
+.rm-dep-add {
+  padding: 1px 5px;
+  line-height: 0;
+}
+
+.rm-dep-add svg {
+  width: 11px;
+  height: 11px;
+}
+
+.rm-dep-add:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .rm-detail-text {
   margin: 0;
   font-size: 12.5px;

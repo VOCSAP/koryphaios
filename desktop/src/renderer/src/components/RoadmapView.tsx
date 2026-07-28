@@ -16,7 +16,7 @@ import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { CreateMenu } from './CreateMenu'
 import { KIND_ICONS, RoadmapItemModal } from './RoadmapItemModal'
 import { WorkflowLane } from './WorkflowLane'
-import { insertAt } from '@shared/workflow'
+import { enqueueClosure, insertAt } from '@shared/workflow'
 
 // Roadmap view (PLAN C3-M3, reworked as a kanban board in PLAN K1): one column
 // per status, native HTML5 drag & drop between columns, MoSCoW priority as a
@@ -349,9 +349,6 @@ export function RoadmapView(): React.JSX.Element {
     }
   }
 
-  const queueItem = (item: RoadmapItem): Promise<void> =>
-    setQueue(item, Math.max(0, ...items.map((i) => i.queue ?? 0)) + 1)
-
   // ----- workflow lane (graphical dispatch queue) -----
 
   const reorderQueue = async (ids: string[]): Promise<void> => {
@@ -361,6 +358,21 @@ export function RoadmapView(): React.JSX.Element {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     }
+  }
+
+  // Appends item to the end of the queue, pulling its unmet, unqueued
+  // dependencies along with it (dependency-first, right before it) in the
+  // SAME reorder commit -- the modal's "add to queue" entry point, alongside
+  // WorkflowLane's commitDrop, both funnel through enqueueClosure so a card
+  // can never reach the queue without what it depends on.
+  const queueItem = (item: RoadmapItem): Promise<void> => {
+    const queuedIds = items
+      .filter((i) => i.queue !== null && i.status !== 'done' && i.status !== 'archived')
+      .sort((a, b) => (a.queue ?? 0) - (b.queue ?? 0))
+      .map((i) => i.id)
+      .filter((id) => id !== item.id)
+    const closure = enqueueClosure(items, item.id)
+    return reorderQueue([...queuedIds, ...closure, item.id])
   }
 
   const addDep = async (childId: string, parentId: string): Promise<void> => {
@@ -725,6 +737,7 @@ export function RoadmapView(): React.JSX.Element {
       {selected && !draft && (
         <RoadmapItemModal
           item={selected}
+          items={items}
           onClose={() => setSelectedId(null)}
           onEdit={() => setDraft(toDraft(selected))}
           onLaunch={() => setLaunchItem(selected)}
@@ -733,6 +746,8 @@ export function RoadmapView(): React.JSX.Element {
           onUnqueue={() => void setQueue(selected, null)}
           onArchive={() => setConfirmArchive(selected)}
           onRestore={() => void restore(selected)}
+          onAddDep={(parentId) => void addDep(selected.id, parentId)}
+          onRemoveDep={(parentId) => void removeDep(selected.id, parentId)}
         />
       )}
 

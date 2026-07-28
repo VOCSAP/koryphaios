@@ -43,7 +43,7 @@ export function initialLaneHeight(configHeight: number | undefined, viewportH: n
 }
 
 /** A locked in_progress item with no queue slot: active work outside the queue. */
-function isHead(i: RoadmapItem): boolean {
+export function isHead(i: RoadmapItem): boolean {
   return i.locked && i.status === 'in_progress' && i.queue === null
 }
 
@@ -272,6 +272,37 @@ export function dependsWouldCycle(
  */
 export function dependsRelated(items: RoadmapItem[], aId: string, bId: string): boolean {
   return reachesDep(items, aId, bId) || reachesDep(items, bId, aId)
+}
+
+/**
+ * Transitive dependency closure to enqueue alongside `id`: walks `id`'s
+ * depends_on graph and returns, in dependency-first (topological) order, the
+ * ids that must join the queue with it. Filters out items already settled
+ * (done/archived), already queued, locked in_progress heads (active work
+ * outside the queue -- see isHead), and dangling ids (referenced in
+ * depends_on but absent from `items`). `id` itself is never included: the
+ * caller splices this result immediately before `id`'s own slot.
+ */
+export function enqueueClosure(items: RoadmapItem[], id: string): string[] {
+  const byId = new Map(items.map((i) => [i.id, i]))
+  const visited = new Set<string>()
+  const order: string[] = []
+
+  function visit(curId: string): void {
+    if (visited.has(curId)) return
+    visited.add(curId)
+    const cur = byId.get(curId)
+    if (!cur) return // dangling: referenced in depends_on, absent from items
+    for (const depId of cur.depends_on) visit(depId)
+    if (curId === id) return // the dropped/queued item itself: caller places it
+    if (cur.status === 'done' || cur.status === 'archived') return
+    if (cur.queue !== null) return // already queued: nothing to do
+    if (isHead(cur)) return // locked in_progress head: active work, not queueable
+    order.push(curId)
+  }
+
+  visit(id)
+  return order
 }
 
 /**

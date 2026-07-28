@@ -553,6 +553,7 @@
   "roadmap.lockedHint": "Un agent travaille activement sur cet item (verrouillé)",
   "roadmap.lockedSince": "Verrouillé par {name} depuis {date}",
   "roadmap.dependsOn": "Dépend de",
+  "roadmap.addDep": "Ajouter une dépendance",
   "roadmap.stop": "⏹ Stop",
   "roadmap.confirmStopTitle": "Arrêter le travail sur cet item ?",
   "roadmap.confirmStopMessage": "Les agents seront prévenus d'arrêter « {title} ». L'item est déverrouillé et repasse en « planifié ».",

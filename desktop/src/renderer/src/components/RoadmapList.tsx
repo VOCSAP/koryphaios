@@ -7,6 +7,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { MobileSheet } from './MobileSheet'
 import { KIND_ICONS, RoadmapItemModal } from './RoadmapItemModal'
 import { DEFAULT_HOLD_GESTURE, HoldGesture } from '@shared/hold-gesture'
+import { enqueueClosure } from '@shared/workflow'
 
 // Mobile roadmap (PLAN MB4 — EXPLORATION §4): ONE column at a time (status
 // tabs + counters), full-width cards auto-sorted by MoSCoW, explicit moves
@@ -200,6 +201,18 @@ export function RoadmapList(): React.JSX.Element {
     }
   }
 
+  const addDep = async (childId: string, parentId: string): Promise<void> => {
+    const child = items.find((i) => i.id === childId)
+    if (!child || child.depends_on.includes(parentId)) return
+    await upsert({ id: childId, depends_on: [...child.depends_on, parentId] })
+  }
+
+  const removeDep = async (childId: string, parentId: string): Promise<void> => {
+    const child = items.find((i) => i.id === childId)
+    if (!child) return
+    await upsert({ id: childId, depends_on: child.depends_on.filter((d) => d !== parentId) })
+  }
+
   const applyMove = async (item: RoadmapItem, status: RoadmapStatus): Promise<void> => {
     const from = item.status as RoadmapStatus
     await upsert({ id: item.id, status })
@@ -225,8 +238,24 @@ export function RoadmapList(): React.JSX.Element {
     }
   }
 
-  const queueItem = (item: RoadmapItem): Promise<void> =>
-    upsert({ id: item.id, queue: Math.max(0, ...items.map((i) => i.queue ?? 0)) + 1 })
+  // Appends item to the end of the queue, pulling its unmet, unqueued
+  // dependencies along with it (dependency-first, right before it) in the
+  // SAME reorder commit -- mirrors RoadmapView's desktop queueItem so the
+  // mobile "add to queue" entry point can't skip enqueueClosure either.
+  const queueItem = async (item: RoadmapItem): Promise<void> => {
+    const queuedIds = items
+      .filter((i) => i.queue !== null && i.status !== 'done' && i.status !== 'archived')
+      .sort((a, b) => (a.queue ?? 0) - (b.queue ?? 0))
+      .map((i) => i.id)
+      .filter((id) => id !== item.id)
+    const closure = enqueueClosure(items, item.id)
+    try {
+      await window.api.roadmapReorder([...queuedIds, ...closure, item.id])
+      await refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
 
   const assign = async (item: RoadmapItem, peerId: string): Promise<void> => {
     setAssignItem(null)
@@ -519,6 +548,7 @@ export function RoadmapList(): React.JSX.Element {
       {detail && (
         <RoadmapItemModal
           item={items.find((i) => i.id === detail.id) ?? detail}
+          items={items}
           onClose={() => setDetail(null)}
           onEdit={() => {
             setEdit({
@@ -553,6 +583,8 @@ export function RoadmapList(): React.JSX.Element {
             void upsert({ id: detail.id, status: 'planned' })
             setDetail(null)
           }}
+          onAddDep={(parentId) => void addDep(detail.id, parentId)}
+          onRemoveDep={(parentId) => void removeDep(detail.id, parentId)}
         />
       )}
     </div>
