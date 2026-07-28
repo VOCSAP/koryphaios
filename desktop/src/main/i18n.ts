@@ -704,8 +704,6 @@ export const EN_DEFAULTS: Record<string, string> = {
   'roadmap.wf.createHere': 'Create a roadmap item here',
   'roadmap.wf.fullscreen': 'Open the workflow full screen',
   'roadmap.wf.exitFullscreen': 'Close the full-screen workflow',
-  'roadmap.wf.stackNone':
-    'Cannot parallelize: the target card has no dependency to share — drag the other card instead, or draw links.',
   'roadmap.dispatchFirst': '▶ Send first to team-lead',
   'roadmap.dispatchNoLeadHint':
     'Designate a team-lead (👑 in the Agents sidebar) to dispatch queued items.',

@@ -258,10 +258,19 @@ export function WorkflowLane({
     const deps = siblingDeps(items, id, targetId)
     if (!deps) {
       // Target has no dependencies to share, so there is nothing to stack
-      // against -- degrade to a plain insertion at the target's slot instead
-      // of refusing the gesture (AUDIT-graph-view-2026-07-28.md §8, step 1).
-      const slot = laneIds.indexOf(targetId)
-      if (slot >= 0) commitDrop(id, slot)
+      // against -- degrade to a plain insertion right after the target
+      // instead of refusing the gesture (AUDIT-graph-view-2026-07-28.md §8,
+      // step 1), mirroring where the sibling path lands a newly-queued card
+      // (RoadmapView.stackItem inserts at `at + 1`).
+      const targetSlot = laneIds.indexOf(targetId)
+      if (targetSlot >= 0) {
+        commitDrop(id, targetSlot + 1)
+      } else {
+        // targetId always comes from stackTargetAt(lane, ...), so this
+        // should be unreachable; trace it instead of dropping the gesture
+        // silently if that invariant ever breaks.
+        window.api.reportError('roadmap', `commitStack: target ${targetId} not in lane`)
+      }
       return
     }
     const same =
