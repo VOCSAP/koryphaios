@@ -1,7 +1,7 @@
 import { test, expect, afterEach } from "bun:test";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 
 // i18n.ts only imports node builtins (no electron), so it imports cleanly under
 // bun. Covers interpolation, missing-key/param fallbacks, dir layering, OS-locale
@@ -29,6 +29,8 @@ function freshDir(): string {
   tmpDirs.push(d);
   return d;
 }
+
+const DESKTOP_SRC = join(import.meta.dir, "..", "desktop", "src");
 
 // ----- t() interpolation -----
 
@@ -132,7 +134,7 @@ test("fr.json key set is identical to en.json (no missing/extra keys)", async ()
 // quotes/guillemets, or full-width punctuation (e.g. composer.new's "+" --
 // FULLWIDTH PLUS SIGN, a deliberate decorative convention, not an emoji).
 const EMOJI_RANGES: Array<[number, number]> = [
-  [0x1f300, 0x1faff], // misc pictographs, emoticons, transport, supplemental symbols
+  [0x1f000, 0x1faff], // mahjong/domino/playing cards, enclosed alphanumeric supplement (🆕🆗🅰), misc pictographs, emoticons, transport, supplemental symbols
   [0x2600, 0x26ff], // misc symbols (warning triangle, sun, umbrella, ...)
   [0x2700, 0x27bf], // dingbats (checkmarks, scissors, ...)
   [0x2300, 0x23ff], // misc technical (hourglass, stopwatch, playback glyphs)
@@ -185,6 +187,135 @@ test("the emoji gate does not flag legitimate typography (arrows, dashes, full-w
   expect(hasEmoji("« {title} »")).toBe(false); // guillemets
 });
 
+// ----- source-wide pictograph gate: no emoji/pictograph code point anywhere
+// in desktop/src -----
+// Card d5b7d842 CHANGES round (reviewer desktop-7b2civn-koryphaios-11): the
+// gate above only covers the 3 sources that ship TRANSLATED strings -- it
+// says nothing about a pictograph typed directly into a .tsx literal (e.g.
+// ModelPicker's provider glyphs, Sidebar's branch/attention badges) or left
+// in a comment (e.g. RoadmapView.tsx's "⏹ Stop button" note). This gate
+// closes that gap by scanning every .ts/.tsx file's raw text under
+// desktop/src for the same EMOJI_RANGES code points.
+//
+// Scope is desktop/src, NOT desktop/** -- desktop/dist/win-unpacked ships a
+// full copy of built resources (locale JSON, bundled assets) that is not
+// source and would double-count/pollute the baseline with build artefacts.
+// i18n.ts IS included here (unlike collectDesktopSrcFiles's orphan-key scan
+// below, whose skip of i18n.ts is specific to that different check -- a
+// pictograph typed into EN_DEFAULTS belongs in this gate too).
+//
+// The scan is file-TEXT level: it cannot distinguish rendered output from a
+// comment or a string literal, so the baseline is named for what it actually
+// knows (a pictograph found in the source text), not for where it lands
+// on screen.
+
+function collectAllDesktopSrcFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) out.push(...collectAllDesktopSrcFiles(full));
+    else if (entry.isFile() && /\.(ts|tsx)$/.test(entry.name)) out.push(full);
+  }
+  return out;
+}
+
+// Keyed by "relative/path U+XXXX", not file:line: a line number shifts on
+// every unrelated edit to a large file (ModelPicker.tsx, Sidebar.tsx are
+// both several hundred lines), which would fail this gate on pure noise
+// with no pictograph having moved. Path + code point is stable across any
+// edit that doesn't touch the pictograph itself, and still pinpoints
+// exactly which file+character combination is baselined. Deduped: a
+// pictograph repeated several times in one file produces a single entry.
+function findSourcePictographs(root: string, files: string[]): string[] {
+  const hits = new Set<string>();
+  for (const f of files) {
+    const src = readFileSync(f, "utf-8");
+    const rel = f.slice(root.length + 1).split(sep).join("/");
+    for (const ch of src) {
+      const cp = ch.codePointAt(0)!;
+      if (EMOJI_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi)) {
+        hits.add(`${rel} U+${cp.toString(16).toUpperCase().padStart(4, "0")}`);
+      }
+    }
+  }
+  return [...hits];
+}
+
+// Snapshot of the desktop/src tree as of this gate's introduction (card
+// d5b7d842 CHANGES round): universal glyphs used ahead of an SVG equivalent
+// (→/⎇/▸/⏸/...), ModelPicker's 5 provider glyphs (no SVG yet -- carded
+// separately), and a handful of comment-only mentions (SearchBar.tsx,
+// store.ts, types.ts, RoadmapView.tsx's "⏹ Stop button" note). None of these
+// are newly introduced by this commit. Like KNOWN_ORPHAN_KEYS and
+// KNOWN_EMOJI_KEYS above, this baseline may only ever shrink from here,
+// never grow.
+const KNOWN_SOURCE_PICTOGRAPHS: string[] = [
+  "main/approval-service.ts U+276F",
+  "main/attention.ts U+276F",
+  "main/companion-server.ts U+1F4F1",
+  "main/context-wand.ts U+1FA84",
+  "main/explorer-service.ts U+1F4C1",
+  "main/index.ts U+1F4F1",
+  "main/index.ts U+2387",
+  "main/ipc.ts U+2387",
+  "main/startup-ack.ts U+276F",
+  "preload/browser-inspect.ts U+2316",
+  "renderer/src/components/App.tsx U+2316",
+  "renderer/src/components/BrowserView.tsx U+1F310",
+  "renderer/src/components/ExplorerView.tsx U+25B8",
+  "renderer/src/components/ExplorerView.tsx U+25BE",
+  "renderer/src/components/GitView.tsx U+2387",
+  "renderer/src/components/GraphView.tsx U+2302",
+  "renderer/src/components/GraphView.tsx U+25B3",
+  "renderer/src/components/GraphView.tsx U+25C6",
+  "renderer/src/components/GraphView.tsx U+25C7",
+  "renderer/src/components/GraphView.tsx U+26A0",
+  "renderer/src/components/GraphView.tsx U+2726",
+  "renderer/src/components/GraphView.tsx U+2734",
+  "renderer/src/components/ModelPicker.tsx U+2302",
+  "renderer/src/components/ModelPicker.tsx U+25B3",
+  "renderer/src/components/ModelPicker.tsx U+25C7",
+  "renderer/src/components/ModelPicker.tsx U+2605",
+  "renderer/src/components/ModelPicker.tsx U+2726",
+  "renderer/src/components/ModelPicker.tsx U+2734",
+  "renderer/src/components/ModelPicker.tsx U+2B21",
+  "renderer/src/components/RoadmapView.tsx U+23F9",
+  "renderer/src/components/RoadmapView.tsx U+2713",
+  "renderer/src/components/SearchBar.tsx U+1F50D",
+  "renderer/src/components/SettingsView.tsx U+2713",
+  "renderer/src/components/SettingsView.tsx U+2717",
+  "renderer/src/components/Sidebar.tsx U+2387",
+  "renderer/src/components/Sidebar.tsx U+23F8",
+  "renderer/src/components/Sidebar.tsx U+25BE",
+  "renderer/src/components/SnippetsDialog.tsx U+26A1",
+  "renderer/src/components/TerminalTile.tsx U+23F8",
+  "renderer/src/components/TerminalTile.tsx U+26A1",
+  "renderer/src/components/TileArea.tsx U+25B8",
+  "renderer/src/components/UsageLimitsModal.tsx U+2715",
+  "renderer/src/components/WorktreesView.tsx U+2387",
+  "renderer/src/store.ts U+1F310",
+  "shared/types.ts U+1F451",
+  "shared/types.ts U+1F4C1",
+];
+
+test("no NEW pictograph code point anywhere in desktop/src beyond the known baseline", () => {
+  const files = collectAllDesktopSrcFiles(DESKTOP_SRC);
+  // Same sanity-floor rationale as the orphan-key check below: a broken scan
+  // root collapses files towards 0, which would silently pass (an empty hit
+  // list trivially satisfies toEqual against a shrinking baseline) instead
+  // of failing loudly -- guard the file count directly.
+  expect(files.length).toBeGreaterThan(100);
+  const hits = findSourcePictographs(DESKTOP_SRC, files);
+  expect(hits.sort()).toEqual([...KNOWN_SOURCE_PICTOGRAPHS].sort());
+});
+
+test("the source pictograph gate itself flags a NEW code point outside the baseline", () => {
+  const root = freshDir();
+  writeFileSync(join(root, "New.tsx"), "const x = '⏳ Queue'\n");
+  const hits = findSourcePictographs(root, collectAllDesktopSrcFiles(root));
+  expect(hits).toEqual(["New.tsx U+23F3"]);
+});
+
 // ----- orphan-key check: every EN_DEFAULTS key must have a producer -----
 // A "producer" is either a literal 'key'/"key" occurrence found ANYWHERE in
 // desktop/src (covers t('key') directly, a ternary of two literal keys, and
@@ -222,8 +353,6 @@ function findOrphans(keys: string[], files: string[]): string[] {
   });
 }
 
-const DESKTOP_SRC = join(import.meta.dir, "..", "desktop", "src");
-
 // Pre-existing dead keys found by this check (card 69ca2661) were confirmed
 // orphan by hand (grepped + read the would-be consumer, not just the regex)
 // and removed from en.json/fr.json/i18n.ts (card 0b897710) once the sandbox
@@ -236,10 +365,10 @@ test("every EN_DEFAULTS key has a producer somewhere in desktop/src", () => {
   const files = collectDesktopSrcFiles(DESKTOP_SRC);
   // Sanity floor: if the scan root is ever wrong, files collapses towards 0,
   // findOrphans(EN_DEFAULTS keys, []) then reports EVERY key as orphan (no
-  // source text to search), and this test fails LOUDLY against the 5-item
-  // KNOWN_ORPHAN_KEYS baseline -- this assertion turns that failure into an
-  // obvious "scan root is broken" signal instead of a confusing wall of
-  // spurious orphans to chase one by one.
+  // source text to search), and this test fails LOUDLY against the (now
+  // empty) KNOWN_ORPHAN_KEYS baseline -- this assertion turns that failure
+  // into an obvious "scan root is broken" signal instead of a confusing wall
+  // of spurious orphans to chase one by one.
   expect(files.length).toBeGreaterThan(100);
   const orphans = findOrphans(Object.keys(EN_DEFAULTS), files);
   // Any NEW orphan (beyond the known, tracked-for-cleanup baseline) fails

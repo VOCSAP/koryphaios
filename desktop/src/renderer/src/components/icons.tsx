@@ -438,6 +438,13 @@ const IconRecord = (
   </Svg>
 )
 
+/** Stop (halt an active agent) — the transport-control square, paired with the REC ring above. */
+const IconStop = (
+  <Svg>
+    <rect x="7" y="7" width="10" height="10" rx="1.2" />
+  </Svg>
+)
+
 /** Element picker (crosshair). */
 const IconTarget = (
   <Svg>
@@ -804,6 +811,7 @@ export const GLYPH_ACTIONS = {
   window: IconWindow,
   camera: IconCamera,
   record: IconRecord,
+  stop: IconStop,
   target: IconTarget,
   erase: IconErase,
   code: IconCode,

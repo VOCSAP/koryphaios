@@ -445,7 +445,7 @@ export function RoadmapList(): React.JSX.Element {
                 setSheetItem(null)
               }}
             >
-              {t('roadmap.stop')}
+              <span className="msheet-icon">{GLYPH_ACTIONS.stop}</span> {t('roadmap.stop')}
             </button>
           )}
           <button
