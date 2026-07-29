@@ -7,6 +7,7 @@ import {
   composeDispatchText,
   composeStopText,
   firstQueued,
+  nextDispatchedState,
   nextQueuePosition,
   queuedItems
 } from "../desktop/src/main/dispatch.ts";
@@ -179,4 +180,63 @@ test("canAutoDispatchNext: true when the head's dependency is done or archived",
 test("canAutoDispatchNext: a dependency missing from the roadmap counts as resolved", () => {
   const items = [item({ id: "a", queue: 1, depends_on: ["deleted-long-ago"] })];
   expect(canAutoDispatchNext(items, new Set())).toBe(true);
+});
+
+// dispatchedIds lifecycle (card 6f19206e): watchDispatched's only removal
+// paths used to be done/archived/absent, so an operator stop or an
+// idle-lock release reverting a CLAIMED item back to planned never left
+// dispatchedIds, permanently closing the R5 wave barrier above. Sense A is
+// the guard-rail against the naive/wrong fix (delete on planned+unlocked):
+// a freshly dispatched item is planned+unlocked too, before it is claimed.
+
+test("nextDispatchedState: sense A -- a freshly dispatched item (never claimed) stays tracked", () => {
+  const it = item({ status: "planned", locked: false });
+  expect(nextDispatchedState({ claimed: false }, it)).toEqual({ kind: "keep" });
+});
+
+test("nextDispatchedState: claims when the lead locks it in_progress", () => {
+  const it = item({ status: "in_progress", locked: true });
+  expect(nextDispatchedState({ claimed: false }, it)).toEqual({ kind: "claim" });
+});
+
+test("nextDispatchedState: claim is idempotent -- already-claimed stays keep while still in_progress", () => {
+  const it = item({ status: "in_progress", locked: true });
+  expect(nextDispatchedState({ claimed: true }, it)).toEqual({ kind: "keep" });
+  // A momentary lock hiccup (locked flips false) while status is STILL
+  // in_progress must not be misread as an abandonment -- abandonment is
+  // defined on (planned|idea)+unlocked, not merely "not currently locked".
+  const flicker = item({ status: "in_progress", locked: false });
+  expect(nextDispatchedState({ claimed: true }, flicker)).toEqual({ kind: "keep" });
+});
+
+test("nextDispatchedState: a claimed item reverted to planned+unlocked is removed as abandoned", () => {
+  const it = item({ status: "planned", locked: false });
+  expect(nextDispatchedState({ claimed: true }, it)).toEqual({ kind: "remove", reason: "abandoned" });
+});
+
+test("nextDispatchedState: same reverted-abandoned rule applies to idea", () => {
+  const it = item({ status: "idea", locked: false });
+  expect(nextDispatchedState({ claimed: true }, it)).toEqual({ kind: "remove", reason: "abandoned" });
+});
+
+test("nextDispatchedState: done and archived are removed regardless of claimed", () => {
+  expect(nextDispatchedState({ claimed: false }, item({ status: "done" }))).toEqual({
+    kind: "remove",
+    reason: "done"
+  });
+  expect(nextDispatchedState({ claimed: true }, item({ status: "archived" }))).toEqual({
+    kind: "remove",
+    reason: "archived"
+  });
+});
+
+test("nextDispatchedState: an item absent from the roadmap (deleted) is removed", () => {
+  expect(nextDispatchedState({ claimed: true }, undefined)).toEqual({ kind: "remove", reason: "absent" });
+});
+
+test("nextDispatchedState: two sibling wave members diverge -- reverted one removed, untouched one kept", () => {
+  const reverted = item({ id: "a", status: "planned", locked: false });
+  const untouched = item({ id: "b", status: "planned", locked: false });
+  expect(nextDispatchedState({ claimed: true }, reverted)).toEqual({ kind: "remove", reason: "abandoned" });
+  expect(nextDispatchedState({ claimed: false }, untouched)).toEqual({ kind: "keep" });
 });

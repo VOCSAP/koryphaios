@@ -31,12 +31,12 @@ export function nextQueuePosition(items: RoadmapItem[]): number {
 /**
  * R5 wave barrier (roadmap card 42edc88b phase 3): whether watchDispatched
  * may AUTOMATICALLY advance the queue. True only when (a) the previous wave
- * has fully drained -- dispatchedIds empty, the in-memory Set in index.ts
- * that is the SOLE record of wave membership once an item is dispatched (see
- * its own doc comment for the restart caveat this makes load-bearing) -- and
- * (b) the next queued head's own dependencies are all done or archived. A
- * missing dependency (deleted from the roadmap) counts as resolved, matching
- * watchDispatched's own completion check.
+ * has fully drained -- dispatchedIds empty, the in-memory tracking structure
+ * in index.ts that is the SOLE record of wave membership once an item is
+ * dispatched (see its own doc comment for the restart caveat this makes
+ * load-bearing) -- and (b) the next queued head's own dependencies are all
+ * done or archived. A missing dependency (deleted from the roadmap) counts
+ * as resolved, matching watchDispatched's own completion check.
  *
  * (b) exists because dispatchNextInner itself does NOT validate depends_on --
  * an unmet dependency at the head is a DAG violation the lane already flags
@@ -49,8 +49,15 @@ export function nextQueuePosition(items: RoadmapItem[]): number {
  * SEMANTIC HONESTY (audit §8): this is a BARRIER, not parallel dispatch --
  * dispatchNextInner still sends one head at a time. Waves stay informational
  * until 5852c074 lands multi-dispatch.
+ *
+ * The second parameter is intentionally structural (`{ size: number }`, not
+ * a concrete collection type): only the COUNT of ids still tracked as
+ * in-flight-wave-membership matters here, never their identity or the
+ * claimed/unclaimed detail nextDispatchedState tracks below -- a plain Set
+ * still satisfies this shape, so index.ts's Map<string, DispatchedEntry>
+ * does too, with no change needed at this call site.
  */
-export function canAutoDispatchNext(items: RoadmapItem[], dispatchedIds: ReadonlySet<string>): boolean {
+export function canAutoDispatchNext(items: RoadmapItem[], dispatchedIds: { size: number }): boolean {
   if (dispatchedIds.size > 0) return false
   const head = firstQueued(items)
   if (!head) return false
@@ -59,6 +66,76 @@ export function canAutoDispatchNext(items: RoadmapItem[], dispatchedIds: Readonl
     const dep = byId.get(depId)
     return !dep || dep.status === 'done' || dep.status === 'archived'
   })
+}
+
+/**
+ * Per-id tracking record in index.ts's dispatchedIds Map (roadmap card
+ * 6f19206e). `claimed` distinguishes "dispatched but the lead has not yet
+ * set it in_progress" from "the lead actually picked it up" -- the
+ * distinction the naive fix (delete on planned+unlocked) got wrong, since a
+ * freshly dispatched item is ALSO planned+unlocked before it is claimed.
+ */
+export interface DispatchedEntry {
+  claimed: boolean
+}
+
+/** What a watchDispatched tick should do with one tracked (id, entry) pair. */
+export type DispatchedTickAction =
+  | { kind: 'keep' }
+  | { kind: 'claim' }
+  | { kind: 'remove'; reason: 'done' | 'archived' | 'absent' | 'abandoned' }
+
+/**
+ * Pure per-tick transition for one dispatchedIds entry (roadmap card
+ * 6f19206e). Fixes the lifecycle bug where dispatchedIds was only ever
+ * cleaned on done/archived/absent: an operator stop (stopRoadmapItem) or an
+ * idle-lock release (watchIdleLocks) reverts the item to planned/idea
+ * without going through either, permanently closing the R5 wave barrier
+ * (canAutoDispatchNext stays false forever, dispatchedIds.size never drops).
+ *
+ * `item` is `undefined` when the id has left the roadmap entirely (deleted)
+ * -- handled as its own branch here, not left to the caller's loop, so the
+ * exhaustiveness check below only ever narrows a real RoadmapStatus.
+ *
+ * The exhaustive switch on item.status (with a TS never-check default) is
+ * deliberate: a future new status (e.g. "blocked"/"paused") must fail
+ * compilation here instead of silently falling into 'keep' and closing the
+ * barrier forever, the same failure mode this function exists to fix.
+ *
+ * NAMED TRAP, rejected: "remove when planned+unlocked" alone is wrong -- a
+ * freshly dispatched item is planned+unlocked too (the lock only arrives
+ * once the lead sets in_progress). The `claimed` flag is the sole
+ * discriminant: only an entry that WAS claimed (locked+in_progress at some
+ * earlier tick) and has since reverted to planned/idea unlocked counts as an
+ * abandonment. A never-claimed entry seen planned+unlocked is kept as-is.
+ *
+ * `claim` is idempotent: an already-claimed entry is never handed back to
+ * 'keep'-with-claimed-reset by a tick that observes the item momentarily
+ * in_progress-but-unlocked (a lock release/reacquire race) -- that state is
+ * simply 'keep', since the item's status never left in_progress.
+ *
+ * Every 'remove' outcome -- not just 'done' -- must be treated by the caller
+ * as a completed transition (re-arm canAutoDispatchNext / dispatchNext()):
+ * an abandonment frees the barrier exactly like a completion does, only the
+ * journal wording differs.
+ */
+export function nextDispatchedState(entry: DispatchedEntry, item: RoadmapItem | undefined): DispatchedTickAction {
+  if (!item) return { kind: 'remove', reason: 'absent' }
+  switch (item.status) {
+    case 'done':
+      return { kind: 'remove', reason: 'done' }
+    case 'archived':
+      return { kind: 'remove', reason: 'archived' }
+    case 'in_progress':
+      return item.locked && !entry.claimed ? { kind: 'claim' } : { kind: 'keep' }
+    case 'planned':
+    case 'idea':
+      return entry.claimed && !item.locked ? { kind: 'remove', reason: 'abandoned' } : { kind: 'keep' }
+    default: {
+      const _exhaustive: never = item.status
+      return _exhaustive
+    }
+  }
 }
 
 /**

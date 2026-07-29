@@ -59,7 +59,9 @@ import {
   composeAssignText,
   composeDispatchText,
   composeStopText,
-  firstQueued
+  firstQueued,
+  nextDispatchedState,
+  type DispatchedEntry
 } from './dispatch'
 import { directiveKeys, isDirectiveCommand, resolveDirectiveTargets } from './directive'
 import type { AssignResult, DispatchResult, RoadmapItem, StopResult } from '@shared/types'
@@ -882,14 +884,23 @@ const checkpointBeforeSpawn = async (dir: string): Promise<void> => {
 // WAVE BARRIER load-bearing caveat (card 42edc88b phase 3, canAutoDispatchNext
 // in ./dispatch): once an item is dispatched it is unqueued and moved back to
 // planned (see dispatchNextInner below), so firstQueued no longer sees it —
-// its wave membership exists ONLY in this in-memory Set. Before the barrier
-// this Set was informational (a completion journal / conveyor-belt trigger);
-// the barrier makes it load-bearing for CORRECTNESS (it gates whether the
-// next auto-dispatch may fire at all). A Deck restart mid-wave loses it and
-// can over-dispatch past a wave that hadn't actually finished. v1 accepted:
-// deriving wave membership from broker-persisted state instead is deferred to
-// 5852c074 (multi-dispatch).
-const dispatchedIds = new Set<string>()
+// its wave membership exists ONLY in this in-memory Map. Before the barrier
+// this tracking was informational (a completion journal / conveyor-belt
+// trigger); the barrier makes it load-bearing for CORRECTNESS (it gates
+// whether the next auto-dispatch may fire at all). A Deck restart mid-wave
+// loses it and can over-dispatch past a wave that hadn't actually finished.
+// v1 accepted: deriving wave membership from broker-persisted state instead
+// is deferred to 5852c074 (multi-dispatch).
+//
+// LIFECYCLE (card 6f19206e): each entry's `claimed` flag distinguishes
+// "dispatched, lead has not set it in_progress yet" from "lead actually
+// picked it up" — see nextDispatchedState's doc comment in ./dispatch for
+// why a bare Set (deleted on planned+unlocked) is wrong: a freshly
+// dispatched item is planned+unlocked too, before it is claimed. Without
+// this distinction, an operator stop (stopRoadmapItem) or an idle-lock
+// release (watchIdleLocks) reverting a CLAIMED item back to planned never
+// left the Set, permanently closing the barrier above.
+const dispatchedIds = new Map<string, DispatchedEntry>()
 const DISPATCH_WATCH_MS = 20_000
 
 /**
@@ -1025,7 +1036,7 @@ const dispatchNextInner = async (): Promise<DispatchResult> => {
           queue: null,
           status: item.status === 'idea' ? 'planned' : item.status
         })
-        dispatchedIds.add(item.id)
+        dispatchedIds.set(item.id, { claimed: false })
         return { sent: true, title: item.title }
       }
       // Directive card: fire the injections, then mark it done so the queue
@@ -1063,12 +1074,28 @@ const watchDispatched = async (): Promise<void> => {
     const key = computeDeckProjectKey(config.projectDir)
     const items = await listRoadmap(endpoint, key, { include_archived: true })
     let completed = false
-    for (const id of [...dispatchedIds]) {
+    // Per-id lifecycle transition (card 6f19206e, nextDispatchedState in
+    // ./dispatch): EVERY 'remove' outcome -- not just done/archived -- must
+    // flip `completed`, so an abandonment (operator stop, idle-lock release)
+    // re-arms the barrier check below exactly like a real completion does.
+    // Only the journal wording differs by reason.
+    for (const [id, entry] of [...dispatchedIds]) {
       const it = items.find((i) => i.id === id)
-      if (!it || it.status === 'done' || it.status === 'archived') {
-        dispatchedIds.delete(id)
-        completed = true
-        if (it) journal.add('dispatch', `dispatched item done: "${it.title}"`)
+      const action = nextDispatchedState(entry, it)
+      switch (action.kind) {
+        case 'claim':
+          dispatchedIds.set(id, { claimed: true })
+          break
+        case 'remove':
+          dispatchedIds.delete(id)
+          completed = true
+          if (it) {
+            const label = action.reason === 'abandoned' ? 'abandoned (claimed, then reverted before completion)' : action.reason
+            journal.add('dispatch', `dispatched item ${label}: "${it.title}"`)
+          }
+          break
+        case 'keep':
+          break
       }
     }
     // R5 wave barrier (card 42edc88b phase 3, canAutoDispatchNext in
