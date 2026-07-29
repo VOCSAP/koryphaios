@@ -19,7 +19,7 @@ import {
 } from '@shared/graph'
 import type { ProviderCatalog } from '@shared/models'
 import { useT } from '../i18n'
-import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
+import { GLYPH_ACTIONS, GLYPH_BADGES, GLYPH_PROVIDERS } from './icons'
 import { useDeck } from '../store'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ModelPicker } from './ModelPicker'
@@ -45,14 +45,15 @@ const OUTLINE_CHARS = 46
 // imported here under the same names so every existing call site is
 // unchanged.
 
-// Provider sigils stay typographic characters (abstract, monochrome — already
-// in the glyph tone, and they also live inside string labels).
-const CLI_ICONS: Record<GraphCli, string> = {
-  claude: '✴',
-  codex: '◆',
-  gemini: '✦',
-  antigravity: '△',
-  local: '⌂'
+// Same provider-sigil registry as ModelPicker (card b72b82f7) -- GraphCli
+// uses CLI names where ModelPicker uses provider ids, so map onto the shared
+// glyphs rather than keeping a second icon set.
+const CLI_ICONS: Record<GraphCli, React.JSX.Element> = {
+  claude: GLYPH_PROVIDERS.anthropic,
+  codex: GLYPH_PROVIDERS.openai,
+  gemini: GLYPH_PROVIDERS.gemini,
+  antigravity: GLYPH_PROVIDERS.antigravity,
+  local: GLYPH_PROVIDERS.local
 }
 
 /** Default fan-out selection before the operator picks anything. */
@@ -66,10 +67,10 @@ const DEFAULT_JUDGE_TARGET: ModelTarget = { cli: 'claude', model: 'sonnet' }
 
 type Camera = { x: number; y: number; zoom: number }
 
-function nodeIcon(node: GraphNode): React.ReactNode {
+function nodeIcon(node: GraphNode): React.JSX.Element {
   if (node.type === 'user') return GLYPH_BADGES.profile
   if (node.type === 'judge') return GLYPH_BADGES.scales
-  return CLI_ICONS[node.cli ?? 'claude'] ?? '◇'
+  return CLI_ICONS[node.cli ?? 'claude'] ?? GLYPH_PROVIDERS.other
 }
 
 function nodeTitle(node: GraphNode, t: (k: string) => string): string {
@@ -719,7 +720,13 @@ export function GraphView(): React.JSX.Element {
                   <span className="graph-node-id">{n.id.slice(0, 6)}</span>
                 </div>
                 <div className="graph-node-body">
-                  {n.status === 'error' ? `⚠ ${n.error ?? t('graph.error')}` : n.text}
+                  {n.status === 'error' ? (
+                    <>
+                      {GLYPH_BADGES.warning} {n.error ?? t('graph.error')}
+                    </>
+                  ) : (
+                    n.text
+                  )}
                 </div>
                 {running === n.id && <div className="graph-node-spinner">{t('graph.running')}</div>}
                 {/* Bottom-right handle: drag to resize (a0f2e983). */}
@@ -790,7 +797,7 @@ export function GraphView(): React.JSX.Element {
             )}
             {outlineOrder(doc.nodes).map(({ node, depth }) => {
               const kind = graphNodeKind(doc.nodes, node)
-              const raw = (node.status === 'error' ? `⚠ ${node.error ?? ''}` : node.text)
+              const raw = (node.status === 'error' ? (node.error ?? '') : node.text)
                 .replace(/\s+/g, ' ')
                 .trim()
               const label = raw.slice(0, OUTLINE_CHARS) || nodeTitle(node, t)
@@ -810,6 +817,7 @@ export function GraphView(): React.JSX.Element {
                 >
                   <span className="graph-timeline-bullet" />
                   <span className="graph-timeline-text">
+                    {node.status === 'error' && <>{GLYPH_BADGES.warning} </>}
                     {label}
                     {raw.length > OUTLINE_CHARS ? '…' : ''}
                   </span>
@@ -856,7 +864,13 @@ export function GraphView(): React.JSX.Element {
                 onChange={(e) => updateNodeText(single.id, e.target.value)}
               />
             ) : (
-              <div className="graph-answer">{single.text || `⚠ ${single.error ?? ''}`}</div>
+              <div className="graph-answer">
+                {single.text || (
+                  <>
+                    {GLYPH_BADGES.warning} {single.error ?? ''}
+                  </>
+                )}
+              </div>
             )}
             {single.durationMs !== undefined && (
               <div className="graph-panel-note">{(single.durationMs / 1000).toFixed(1)} s</div>

@@ -4,7 +4,7 @@ import type { ProviderCatalog } from '@shared/models'
 import { favKey, resolveFavorites, toggleFavorite } from '@shared/models'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
-import { GLYPH_BADGES } from './icons'
+import { GLYPH_BADGES, GLYPH_PROVIDERS } from './icons'
 
 // Unified model picker (EXPLORATION-graph-chat C29), shared by the graph
 // chat's target selection and the agents' advanced create menu:
@@ -17,16 +17,12 @@ import { GLYPH_BADGES } from './icons'
 // (Ollama / LiteLLM) appear with their dynamically discovered models. The
 // star pins a model into the favorites list (persisted in AppConfig).
 
-const PROVIDER_ICONS: Record<string, string> = {
-  anthropic: '✴',
-  openai: '⬡',
-  gemini: '✦',
-  antigravity: '△'
-}
-
 /** Icon for a provider section (locals get a house). */
-export function providerIcon(catalog: ProviderCatalog): string {
-  return PROVIDER_ICONS[catalog.id] ?? (catalog.kind === 'local' ? '⌂' : '◇')
+export function providerIcon(catalog: ProviderCatalog): React.JSX.Element {
+  return (
+    GLYPH_PROVIDERS[catalog.id as keyof typeof GLYPH_PROVIDERS] ??
+    (catalog.kind === 'local' ? GLYPH_PROVIDERS.local : GLYPH_PROVIDERS.other)
+  )
 }
 
 export interface ModelPickerProps {

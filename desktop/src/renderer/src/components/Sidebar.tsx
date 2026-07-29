@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { SessionRuntime } from '@shared/types'
 import { moveBeside } from '@shared/reorder'
-import { GLYPH_ACTIONS, GLYPH_BADGES, PithosGlyph } from './icons'
+import { GLYPH_ACTIONS, GLYPH_BADGES, GLYPHS, PithosGlyph } from './icons'
 import { useDeck } from '../store'
 import { formatClock, useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -144,12 +144,18 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
           </span>
         )}
         <span className="row-sub" title={session.cwd}>
-          {session.worktree && <span className="row-branch">⎇ {session.worktree.branch} · </span>}
+          {session.worktree && (
+            <span className="row-branch">
+              {GLYPHS.git} {session.worktree.branch} ·{' '}
+            </span>
+          )}
           {session.peerId ??
             t('session.pending', { id: (session.sessionId || session.id).slice(0, 8) })}
         </span>
         {session.needsAttention && (
-          <span className="row-attention">⏸ {t('attention.badge')}</span>
+          <span className="row-attention">
+            {GLYPH_BADGES.warning} {t('attention.badge')}
+          </span>
         )}
         {session.rateLimited && (
           <span className="row-quota">

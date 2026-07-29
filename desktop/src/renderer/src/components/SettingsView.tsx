@@ -405,7 +405,8 @@ export function SettingsView(): React.JSX.Element {
                         key={c.id}
                         className={`settings-detect${c.available ? ' is-ok' : ''}`}
                       >
-                        {c.available ? '✓' : '✗'} {c.name} ({c.cli})
+                        {c.available ? GLYPH_ACTIONS.check : GLYPH_ACTIONS.close} {c.name} (
+                        {c.cli})
                       </span>
                     ))}
                   {catalogs === null && <span>{t('graph.running')}</span>}

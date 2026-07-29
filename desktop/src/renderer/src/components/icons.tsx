@@ -1,5 +1,6 @@
 import { useId } from 'react'
 import type { DeckView, RoadmapKind } from '@shared/types'
+import type { FrontierProviderId } from '@shared/models'
 
 // Greek-glyph icon set of the navigation rails (desktop rail + mobile tabs).
 // Hand-drawn inline SVGs — no icon font, no CDN — so the packaged app and the
@@ -658,6 +659,56 @@ const IconCheckboxOn = (
   </Svg>
 )
 
+// ----- Provider sigils (ModelPicker + graph-chat nodes) -----
+// Abstract, monochrome marks -- deliberately NOT brand logos (same reasoning
+// as the notification-channel glyphs above), redrawn as stroke glyphs so
+// they inherit currentColor/hover/dim like every other icon instead of
+// relying on font-rendered Unicode characters (card b72b82f7).
+
+/** Anthropic: an eight-ray sunburst (Apollo/Helios, the oracle's light). */
+const IconSigilAnthropic = (
+  <Svg>
+    <path d="M12 3v18M3 12h18M5.6 5.6l12.8 12.8M18.4 5.6 5.6 18.4" />
+  </Svg>
+)
+
+/** OpenAI: a plain hexagon (pure geometry beats an approximate logo). */
+const IconSigilOpenAI = (
+  <Svg>
+    <path d="M12 4 19 8v8l-7 4-7-4V8Z" />
+  </Svg>
+)
+
+/** Gemini: two small twin stars (the Dioscuri, Castor and Pollux). */
+const IconSigilGemini = (
+  <Svg>
+    <path d="M8 5.5v5M5.5 8h5" />
+    <path d="M16 13.5v5M13.5 16h5" />
+  </Svg>
+)
+
+/** Antigravity: an upward triangle (ascension, defying the pull down). */
+const IconSigilAntigravity = (
+  <Svg>
+    <path d="M12 5 19 18H5Z" />
+  </Svg>
+)
+
+/** Local model: a house (running on the operator's own machine). */
+const IconSigilLocal = (
+  <Svg>
+    <path d="M4 11.5 12 4.5l8 7" />
+    <path d="M6.5 11v8.5h11V11" />
+  </Svg>
+)
+
+/** Unrecognised provider: a plain outline diamond. */
+const IconSigilOther = (
+  <Svg>
+    <path d="M12 4 19 12 12 20 5 12Z" />
+  </Svg>
+)
+
 // ----- Roadmap kind glyphs (coloured via .kind-glyph-* classes) -----
 
 /** Feature: a four-point star (something new under the sky). */
@@ -819,6 +870,17 @@ export const GLYPH_ACTIONS = {
   folder: IconFolder,
   check: IconCheck,
   wand: IconWand
+}
+
+/** Provider sigils: ModelPicker sections and graph-chat node avatars share
+ *  this one registry (card b72b82f7) so both call sites redraw in sync. */
+export const GLYPH_PROVIDERS: Record<FrontierProviderId | 'local' | 'other', React.JSX.Element> = {
+  anthropic: IconSigilAnthropic,
+  openai: IconSigilOpenAI,
+  gemini: IconSigilGemini,
+  antigravity: IconSigilAntigravity,
+  local: IconSigilLocal,
+  other: IconSigilOther
 }
 
 /** Every place a rail glyph can appear: the rail views + the rail extras. */

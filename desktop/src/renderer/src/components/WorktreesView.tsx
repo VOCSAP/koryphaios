@@ -3,6 +3,7 @@ import type { WorktreeRow } from '@shared/types'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
+import { GLYPHS } from './icons'
 
 // Worktrees view (PLAN C6): see and manage the worktrees the agents use.
 // Orphans (no live session) are the main target -- resume them with a new
@@ -110,7 +111,9 @@ export function WorktreesView(): React.JSX.Element {
           return (
             <div key={w.path} className={`wt-row${orphan ? ' wt-row-orphan' : ''}`}>
               <div className="wt-main">
-                <span className="wt-branch">⎇ {w.branch ?? '(detached)'}</span>
+                <span className="wt-branch">
+                  {GLYPHS.git} {w.branch ?? '(detached)'}
+                </span>
                 {w.main && <span className="rm-badge">{t('worktrees.main')}</span>}
                 {w.sessionName ? (
                   <span className="rm-badge rm-badge-status-in_progress">
@@ -141,7 +144,7 @@ export function WorktreesView(): React.JSX.Element {
                 )}
                 <button
                   className="btn"
-                  onClick={() => openDiff({ dir: w.path, title: `⎇ ${w.branch ?? w.path}` })}
+                  onClick={() => openDiff({ dir: w.path, title: w.branch ?? w.path })}
                 >
                   {t('worktrees.diff')}
                 </button>

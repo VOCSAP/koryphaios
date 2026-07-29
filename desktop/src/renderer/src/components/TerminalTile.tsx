@@ -3,7 +3,7 @@ import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import type { SessionRuntime, SnippetSummary } from '@shared/types'
-import { GLYPHS, GLYPH_ACTIONS } from './icons'
+import { GLYPHS, GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { formatClock, useT } from '../i18n'
 import { registerTerminal, unregisterTerminal } from '../terminal-registry'
@@ -243,7 +243,9 @@ export function TerminalTile({
           </span>
         )}
         {session.needsAttention && (
-          <span className="tile-quota tile-attention">⏸ {t('attention.badge')}</span>
+          <span className="tile-quota tile-attention">
+            {GLYPH_BADGES.warning} {t('attention.badge')}
+          </span>
         )}
         {session.rateLimited && (
           <span className="tile-quota">

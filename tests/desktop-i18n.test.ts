@@ -243,13 +243,15 @@ function findSourcePictographs(root: string, files: string[]): string[] {
 
 // Snapshot of the desktop/src tree as of this gate's introduction (card
 // d5b7d842 CHANGES round): universal glyphs used ahead of an SVG equivalent
-// (→/⎇/▸/⏸/...), ModelPicker's 5 provider glyphs (no SVG yet -- tracked by
-// card b72b82f7, which replaces them and shrinks this baseline as it goes),
-// and a handful of comment-only mentions (SearchBar.tsx, store.ts,
-// types.ts, RoadmapView.tsx's "⏹ Stop button" note). None of these are
-// newly introduced by this commit. Like KNOWN_ORPHAN_KEYS and
-// KNOWN_EMOJI_KEYS above, this baseline may only ever shrink from here,
-// never grow.
+// (→/⎇/▸/⏸/...) and a handful of comment-only mentions (SearchBar.tsx,
+// store.ts, types.ts, RoadmapView.tsx's "⏹ Stop button" note,
+// ModelPicker.tsx's "★ pinned favorites" banner comment). Card b72b82f7
+// (2026-07-29) drew SVG glyphs for ModelPicker's 5 provider sigils, the
+// graph-chat node/timeline provider+warning marks, and the remaining
+// rendered ⎇/⏸/✓/✗ occurrences, shrinking this baseline accordingly. None
+// of the entries left are newly introduced by this commit. Like
+// KNOWN_ORPHAN_KEYS and KNOWN_EMOJI_KEYS above, this baseline may only ever
+// shrink from here, never grow.
 const KNOWN_SOURCE_PICTOGRAPHS: string[] = [
   "main/approval-service.ts U+276F",
   "main/attention.ts U+276F",
@@ -266,34 +268,15 @@ const KNOWN_SOURCE_PICTOGRAPHS: string[] = [
   "renderer/src/components/ExplorerView.tsx U+25B8",
   "renderer/src/components/ExplorerView.tsx U+25BE",
   "renderer/src/components/GitView.tsx U+2387",
-  "renderer/src/components/GraphView.tsx U+2302",
-  "renderer/src/components/GraphView.tsx U+25B3",
-  "renderer/src/components/GraphView.tsx U+25C6",
-  "renderer/src/components/GraphView.tsx U+25C7",
-  "renderer/src/components/GraphView.tsx U+26A0",
-  "renderer/src/components/GraphView.tsx U+2726",
-  "renderer/src/components/GraphView.tsx U+2734",
-  "renderer/src/components/ModelPicker.tsx U+2302",
-  "renderer/src/components/ModelPicker.tsx U+25B3",
-  "renderer/src/components/ModelPicker.tsx U+25C7",
   "renderer/src/components/ModelPicker.tsx U+2605",
-  "renderer/src/components/ModelPicker.tsx U+2726",
-  "renderer/src/components/ModelPicker.tsx U+2734",
-  "renderer/src/components/ModelPicker.tsx U+2B21",
   "renderer/src/components/RoadmapView.tsx U+23F9",
   "renderer/src/components/RoadmapView.tsx U+2713",
   "renderer/src/components/SearchBar.tsx U+1F50D",
-  "renderer/src/components/SettingsView.tsx U+2713",
-  "renderer/src/components/SettingsView.tsx U+2717",
-  "renderer/src/components/Sidebar.tsx U+2387",
-  "renderer/src/components/Sidebar.tsx U+23F8",
   "renderer/src/components/Sidebar.tsx U+25BE",
   "renderer/src/components/SnippetsDialog.tsx U+26A1",
-  "renderer/src/components/TerminalTile.tsx U+23F8",
   "renderer/src/components/TerminalTile.tsx U+26A1",
   "renderer/src/components/TileArea.tsx U+25B8",
   "renderer/src/components/UsageLimitsModal.tsx U+2715",
-  "renderer/src/components/WorktreesView.tsx U+2387",
   "renderer/src/store.ts U+1F310",
   "shared/types.ts U+1F451",
   "shared/types.ts U+1F4C1",
