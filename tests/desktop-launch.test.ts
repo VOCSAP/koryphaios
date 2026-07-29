@@ -17,7 +17,8 @@ import {
   buildSessionCommandLine,
   encodeInitialPromptKeystrokes,
   quotePromptArg,
-  sanitizeFlagValue
+  sanitizeFlagValue,
+  shouldInjectPrompt
 } from "../desktop/src/main/session-command.ts";
 import { buildShellInvocation } from "../desktop/src/main/shell-command.ts";
 
@@ -279,6 +280,32 @@ test("strips every ESC byte, including one shaped like the bracketed-paste closi
 test("preserves accented and non-Latin1 characters unmangled (no ConPTY-specific corruption at the JS-string level)", () => {
   const prompt = "Lis d'abord le résumé\nContinue en 日本語 si besoin, then report.";
   expect(encodeInitialPromptKeystrokes(prompt)).toBe(`\x1b[200~${prompt}\x1b[201~\r`);
+});
+
+test("normalizes CRLF and lone CR to LF (a raw CR can submit early on a TUI that reads it as Enter, same failure class bracketed paste protects \\n from)", () => {
+  const prompt = "line one\r\nline two\rline three";
+  expect(encodeInitialPromptKeystrokes(prompt)).toBe(
+    "\x1b[200~line one\nline two\nline three\x1b[201~\r"
+  );
+});
+
+// shouldInjectPrompt is the pure predicate session-service.ts's startPty
+// calls to gate `pendingPrompt` (150eb188 review: session-service imports
+// node-pty and can't be constructed under bun, so the once-per-spawn
+// invariant has to be testable here instead).
+
+test("resume never re-plays the prompt", () => {
+  expect(shouldInjectPrompt("resume", "should not appear")).toBe(false);
+});
+
+test("an empty/whitespace prompt on a fresh spawn never emits an injection", () => {
+  expect(shouldInjectPrompt("fresh", undefined)).toBe(false);
+  expect(shouldInjectPrompt("fresh", "")).toBe(false);
+  expect(shouldInjectPrompt("fresh", "   \n\t ")).toBe(false);
+});
+
+test("a fresh spawn with a non-empty prompt injects", () => {
+  expect(shouldInjectPrompt("fresh", "hello")).toBe(true);
 });
 
 // ----- B5: worktreeInit accessors (gated at startup in index.ts) -----

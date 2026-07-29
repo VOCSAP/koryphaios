@@ -152,9 +152,27 @@ export function buildSessionCommandLine(input: SessionCommandInput): string {
  * keystrokes (terminal escape-sequence injection). Stripping ALL ESC bytes
  * (not just that one marker) closes the whole class at once -- a prompt has
  * no legitimate use for a raw control byte.
+ *
+ * A bare `\r` (or a `\r\n` pair) is normalized to `\n` for the same reason:
+ * bracketed paste protects against embedded `\n` submitting early on a TUI
+ * that honours it correctly, but not every terminal app treats a raw CR
+ * inside the paste as literal -- some read it as Enter regardless. Folding
+ * both CRLF and lone CR to LF removes the other control byte capable of
+ * submitting early, without touching the prompt's actual content.
  */
 export function encodeInitialPromptKeystrokes(prompt: string): string {
   // eslint-disable-next-line no-control-regex
-  const safe = prompt.replace(/\x1b/g, '')
+  const safe = prompt.replace(/\x1b/g, '').replace(/\r\n?/g, '\n')
   return `\x1b[200~${safe}\x1b[201~\r`
+}
+
+/**
+ * Whether a fresh spawn should record `prompt` for post-startup-ack keystroke
+ * injection (150eb188). Pure predicate so the once-per-spawn invariant (never
+ * on resume, never for an empty/whitespace-only prompt) stays unit-testable
+ * even though the Map it gates (`pendingPrompt` in session-service.ts) lives
+ * on a class that imports node-pty and can't be constructed under bun.
+ */
+export function shouldInjectPrompt(mode: SpawnMode, prompt: string | undefined): boolean {
+  return mode === 'fresh' && !!prompt?.trim()
 }

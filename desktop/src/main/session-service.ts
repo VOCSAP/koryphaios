@@ -16,6 +16,7 @@ import {
   buildSessionCommandLine,
   encodeInitialPromptKeystrokes,
   sanitizeFlagValue,
+  shouldInjectPrompt,
   type SpawnMode
 } from './session-command'
 import { ThinkingDetector, type ThinkingEvent } from './thinking'
@@ -807,13 +808,17 @@ export class SessionService extends EventEmitter {
       })
       // 150eb188: the prompt no longer rides argv (win32 CommandLineToArgvW
       // mangled it past the first embedded quote). Record it here so the
-      // startup-ack handler types it into the tile once it is actually up,
-      // once per spawn -- consumed (deleted) there, so a later restart of a
-      // session that already used its prompt does not retype it. def.prompt
-      // itself stays put (kept for the never-launched-yet case, its own doc
-      // comment), the per-spawn Map entry below is the actual once-guard.
-      const prompt = def.prompt?.trim()
-      if (prompt) this.pendingPrompt.set(def.id, prompt)
+      // startup-ack handler types it into the tile once it is actually up.
+      // The guard is PER SPAWN, not per session: def.prompt itself is never
+      // cleared (kept for the never-launched-yet case, its own doc comment),
+      // so any fresh spawn re-arms injection -- including a resume that has
+      // no transcript yet and degrades to 'fresh' above (spawnSession), which
+      // is exactly what restart()/restoreFrom() do for a session that was
+      // opened but never had real activity recorded. That is intentional (a
+      // fresh launch, degraded or not, still deserves its initial prompt);
+      // what the guard actually prevents is a *resume with a real transcript*
+      // re-playing a prompt the agent already saw.
+      if (shouldInjectPrompt(mode, def.prompt)) this.pendingPrompt.set(def.id, def.prompt!.trim())
     }
 
     // Track the live (post-fork) id for the double-resume guard.
