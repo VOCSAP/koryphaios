@@ -134,6 +134,26 @@ Only read the file matching the area you are touching:
   nothing ever emitted it, so the UI only moved when another view happened to
   poll. When you add or review an `onX`, grep the EMITTER
   (`broadcast('<channel>'` / `send('<channel>'`), not just the listener.
+- **A new validator needs every call path enumerated, not just the one you're
+  looking at.** When adding a validator (clamp, sanitize, parse), enumerate
+  ALL its potential call paths — a live gesture, a persisted-state
+  restore/load, an automatic-placement heuristic, an IPC entry point — and
+  wire or consciously exempt each one; numeric validators must reject `NaN`
+  explicitly (`NaN` passes every comparison-based clamp silently, since every
+  `<`/`>` against `NaN` is `false`). Three instances of exactly this bug
+  shipped in one day: `clampNodeSize` not wired into `findFreeSpot`,
+  `clampLaneHeight` not wired into the restore-time seed, `viewportH` left
+  unguarded despite a comment claiming otherwise.
+- **Review against what a commit SHOULD contain, not just the diff it shows.**
+  The costliest defects are invisible in the diff itself: a commit
+  referencing a file that only ever existed in the working tree; a
+  millisecond-resolution sort key that silently drops rows on a tie; a
+  validator wired to only one of its two callers; a prop default that
+  de-flags a confirmation outside the diff's hunks. The question that catches
+  these: "what should this commit contain, and what does it NOT show?" — the
+  derived git habits (explicit staging by filename, `git show --stat` after
+  every commit, `cat-file -e` on imports touching co-edited files) are
+  consequences of this principle, not the principle itself.
 
 - **Five hostile inputs, never trusted.** (1) A value from a CLONED REPO
   (project `.claude/claude-peers/config.json`, project-local `templates/*.json`)
