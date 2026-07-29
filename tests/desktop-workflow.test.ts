@@ -267,6 +267,21 @@ test('enqueueClosure: terminates and de-duplicates on a dependency cycle', () =>
   expect(enqueueClosure(items, 'A')).toEqual(['B'])
 })
 
+test('enqueueClosure: a done item with an unfinished nested dependency still enqueues that dependency', () => {
+  // C depends on B (done), B depends on A (planned, not queued). This is an
+  // inconsistent state -- B should not have been marked done while its own
+  // dependency A is unfinished -- but the closure does not trust the done
+  // flag to mean "and everything under it is settled too": it still walks
+  // into B's dependencies and surfaces A. Deliberate safe bias, see the
+  // comment in enqueueClosure (shared/workflow.ts).
+  const items = [
+    item('A'),
+    item('B', { status: 'done', depends_on: ['A'] }),
+    item('C', { depends_on: ['B'] })
+  ]
+  expect(enqueueClosure(items, 'C')).toEqual(['A'])
+})
+
 test('slotConflicts: flags deps landing after the cut and dependents before it', () => {
   const ordered = laneItems([
     item('A', { queue: 1 }),

@@ -293,6 +293,14 @@ export function enqueueClosure(items: RoadmapItem[], id: string): string[] {
     visited.add(curId)
     const cur = byId.get(curId)
     if (!cur) return // dangling: referenced in depends_on, absent from items
+    // Deliberate: recursion does NOT stop at a done/archived node. If a done
+    // item still has an unfinished dependency (a possible but inconsistent
+    // state -- it should not have been marked done), the closure leans
+    // toward including that unfinished dependency rather than trusting the
+    // done flag to mean "and everything under it is settled too". Safe bias:
+    // over-include a settled-looking branch rather than silently skip real
+    // unfinished work. See enqueueClosure test "a done item with an
+    // unfinished nested dependency still enqueues that dependency".
     for (const depId of cur.depends_on) visit(depId)
     if (curId === id) return // the dropped/queued item itself: caller places it
     if (cur.status === 'done' || cur.status === 'archived') return
