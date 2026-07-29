@@ -91,7 +91,6 @@ export const EN_DEFAULTS: Record<string, string> = {
   'common.maximize': 'Maximize',
 
   'app.brand': 'Koryphaios',
-  'app.loading': 'Loading…',
 
   'sidebar.workspaces': 'Workspaces',
   'sidebar.addPeer': '＋ Add peer',
@@ -134,8 +133,6 @@ export const EN_DEFAULTS: Record<string, string> = {
     'Delete "{name}"? This removes the saved layout only; Claude session history is untouched.',
 
   'workspaces.title': 'Workspaces',
-  'workspaces.save': 'Save',
-  'workspaces.saveAs': 'Save as…',
   'workspaces.saveAsPrompt': 'Workspace name',
   'workspaces.restore': 'Restore',
   'workspaces.delete': 'Delete',
@@ -373,7 +370,6 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sandbox.state.running': 'running',
   'sandbox.state.stopped': 'stopped',
   'sandbox.state.missing': 'not created yet',
-  'sandbox.image': 'Image:',
   'sandbox.ports': 'published ports:',
   'sandbox.portsPlaceholder': '3000, 5173 (empty = publish none)',
   'sandbox.portsSave': 'Save ports',
@@ -849,7 +845,6 @@ export const EN_DEFAULTS: Record<string, string> = {
   'graph.inspectorPrompt': "Prompt (the node's message)",
   'graph.promptPlaceholder': 'Your message… (what if…? go deeper on…)',
   'graph.targets': 'Inference targets',
-  'graph.modelDefault': 'default model',
   'graph.battle': 'Battle mode (judge node merges the answers)',
   'graph.battleHint':
     'Each checked CLI answers independently, then a judge node compares the anonymized answers and produces the merged one.',

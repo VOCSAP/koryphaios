@@ -224,29 +224,13 @@ function findOrphans(keys: string[], files: string[]): string[] {
 
 const DESKTOP_SRC = join(import.meta.dir, "..", "desktop", "src");
 
-// Pre-existing dead keys found by this check (card 69ca2661), confirmed
-// orphan by hand (grepped + read the would-be consumer, not just the regex):
-//   - app.loading: the loading spinner (App.tsx) renders as a bare
-//     aria-busy div, no text.
-//   - workspaces.save / workspaces.saveAs: superseded by common.save /
-//     saveas.title in SaveAsDialog.tsx; WorkspacesDialog.tsx uses a disjoint
-//     set of workspaces.* keys for its restore/delete UI.
-//   - sandbox.image: only a lexical collision with the unrelated
-//     SandboxService.image() method call in ipc.ts.
-//   - graph.modelDefault: no occurrence anywhere in GraphView.tsx or
-//     elsewhere.
-// Left in place rather than removed here: en.json/fr.json/i18n.ts currently
-// carry large unrelated in-flight WIP from another session (a sandbox i18n
-// feature), and locale files are a coordinate-first shared resource. This
-// baseline keeps the check load-bearing against NEW orphans while the
-// existing 5 are routed to their own cleanup card.
-const KNOWN_ORPHAN_KEYS = [
-  "app.loading",
-  "workspaces.save",
-  "workspaces.saveAs",
-  "sandbox.image",
-  "graph.modelDefault",
-];
+// Pre-existing dead keys found by this check (card 69ca2661) were confirmed
+// orphan by hand (grepped + read the would-be consumer, not just the regex)
+// and removed from en.json/fr.json/i18n.ts (card 0b897710) once the sandbox
+// i18n WIP that made these files contested had landed. This baseline stays
+// empty going forward -- like KNOWN_MISSING_KEYS below, it may only ever
+// shrink from here, never grow.
+const KNOWN_ORPHAN_KEYS: string[] = [];
 
 test("every EN_DEFAULTS key has a producer somewhere in desktop/src", () => {
   const files = collectDesktopSrcFiles(DESKTOP_SRC);
