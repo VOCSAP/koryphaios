@@ -77,6 +77,32 @@ export function queuedItems(items: RoadmapItem[]): RoadmapItem[] {
 }
 
 /**
+ * Wave grouping of an ALREADY-ORDERED queued list (see queuedItems): a run of
+ * consecutive items sharing the same non-null `queue` value is one wave.
+ * Single source of truth for "the wave grouping a WRITE must preserve" --
+ * mirrors queuedItems' earlier role for flat order (phase 0 of 42edc88b).
+ * Any write that sends `ids` to roadmap:reorder without a `waves` argument
+ * built from this (or an equivalent grouping) silently flattens every
+ * existing tie into 1..N, because the broker's legacy no-waves branch stamps
+ * sequential queue numbers -- phase 2's finding: 4 non-lane call sites
+ * (saveDraft, queueItem desktop+mobile, stackItem) wrote ids-only and so
+ * destroyed any tie the lane had just created the moment any of them ran.
+ */
+export function wavesOf(ordered: RoadmapItem[]): string[][] {
+  const waves: string[][] = []
+  let prevQueue: number | null | undefined
+  for (const item of ordered) {
+    if (waves.length > 0 && item.queue !== null && item.queue === prevQueue) {
+      waves[waves.length - 1]!.push(item.id)
+    } else {
+      waves.push([item.id])
+    }
+    prevQueue = item.queue
+  }
+  return waves
+}
+
+/**
  * Items the lane displays: the dispatch queue plus the locked in_progress
  * heads (what the team is actively working on). Order = execution order:
  * locked heads first (oldest lock first), then the queue by position.
@@ -365,12 +391,27 @@ export function insertSlotAt(
   worldX: number
 ): SlotHit {
   const index = ordered.filter((i) => pos.get(i.id)!.x + WF_NODE_W / 2 < worldX).length
-  const join = ordered.some((i) => {
-    if (isHead(i)) return false
-    const x = pos.get(i.id)!.x
-    return Math.abs(x + WF_NODE_W / 2 - worldX) < WF_NODE_W / 2
-  })
-  return { index, join }
+  return { index, join: joinAnchorAt(ordered, pos, worldX) !== null }
+}
+
+/**
+ * The id of a queued (non-head) item whose WAVE `worldX` lands inside (see
+ * SlotHit.join) -- or null when the drop is in a gap between waves. All
+ * members of a wave share layoutLane's x, so the FIRST match identifies the
+ * wave: any of its members works as the key to look it up in a wavesOf(...)
+ * grouping (card 42edc88b phase 2, commitDrop's join wiring).
+ */
+export function joinAnchorAt(
+  ordered: RoadmapItem[],
+  pos: Map<string, LanePos>,
+  worldX: number
+): string | null {
+  for (const item of ordered) {
+    if (isHead(item)) continue
+    const x = pos.get(item.id)!.x
+    if (Math.abs(x + WF_NODE_W / 2 - worldX) < WF_NODE_W / 2) return item.id
+  }
+  return null
 }
 
 /** World X of the insertion caret for a cut at `worldX` (between columns). */
@@ -443,4 +484,42 @@ export function insertAt(ids: string[], id: string, index: number): string[] {
   const next = ids.filter((x) => x !== id)
   next.splice(Math.min(next.length, Math.max(0, index)), 0, id)
   return next
+}
+
+/**
+ * Splice `ids` into `waves` (see wavesOf) at flat index `at`, each as its OWN
+ * singleton wave, in the order given -- never merged into a neighboring wave.
+ * v1/conservative by design (roadmap card 42edc88b phase 2, team-lead
+ * decision 2026-07-29): a newly-queued item (or an enqueueClosure batch
+ * spliced ahead of it in topological order) has no existing tie to join, so
+ * it starts alone. Grouping independent dependency-closure ids into a SHARED
+ * wave (same dep-level = same slot) is a real future improvement, but belongs
+ * with the future multi-dispatch work (roadmap 5852c074), not here: doing it
+ * silently now would let one write invent a concurrency tie the operator
+ * never asked for. Splicing into the MIDDLE of an existing wave correctly
+ * breaks it into two independently-tied runs either side of the insertion --
+ * inserting a foreign, order-only item between two tied members is exactly
+ * what un-ties them positionally, and is unavoidable given a flat insertion
+ * index.
+ */
+export function insertSoloWaves(waves: string[][], at: number, ids: string[]): string[][] {
+  if (ids.length === 0) return waves
+  const solo = ids.map((id) => [id])
+  let count = 0
+  for (let i = 0; i < waves.length; i++) {
+    const wave = waves[i]!
+    if (count + wave.length > at) {
+      const cut = at - count
+      const before = wave.slice(0, cut)
+      const after = wave.slice(cut)
+      const spliced = [
+        ...(before.length > 0 ? [before] : []),
+        ...solo,
+        ...(after.length > 0 ? [after] : [])
+      ]
+      return [...waves.slice(0, i), ...spliced, ...waves.slice(i + 1)]
+    }
+    count += wave.length
+  }
+  return [...waves, ...solo]
 }

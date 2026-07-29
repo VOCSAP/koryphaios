@@ -8,20 +8,25 @@ import {
   enqueueClosure,
   initialLaneHeight,
   insertSlotAt,
+  insertSoloWaves,
   isHead,
+  joinAnchorAt,
   laneEdges,
   laneItems,
   layoutLane,
+  queuedItems,
   siblingDeps,
   slotConflicts,
   stackTargetAt,
   unmetDeps,
+  wavesOf,
   WF_FIT_FLOOR,
   WF_NODE_H,
   WF_NODE_W,
   WF_PITCH_X,
   WF_ZOOM_MAX,
   WF_ZOOM_MIN,
+  type SlotHit,
   type StackHit
 } from '@shared/workflow'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
@@ -33,14 +38,20 @@ import { KIND_ICONS } from './RoadmapItemModal'
 
 // Workflow lane (bottom half of the roadmap view): the dispatch queue drawn as
 // a left-to-right chain of cards, GraphView-style (manual camera, SVG edges,
-// positioned divs — no library). Every position is DERIVED from the
-// depends_on hierarchy and the queue rank (shared/workflow.ts): the column is
-// the dependency depth, so parallel branches (N:1 / 1:N fan-ins) stack
-// vertically in the same column, and nothing visual is persisted — the lane
-// and the kanban always agree. Reordering commits through ONE atomic
-// roadmap:reorder call; dropping a card above/below another makes it a
-// parallel sibling (it adopts the target's dependencies); depends_on edges
-// are red when the queue order breaks them (click an edge for the why).
+// positioned divs — no library). Every position is DERIVED from the queue
+// order and lock state (shared/workflow.ts): the column is the WAVE — a run
+// of items tied for the same execution slot, either by a shared persisted
+// `queue` value (queued items) or, for locked in_progress heads, a single
+// shared column 0 (heads are ACTUAL observed concurrency, not a scheduling
+// intent, so they never lay out as a sequence) — and nothing visual is
+// persisted, the lane and the kanban always agree. Dropping a card INSIDE an
+// existing wave's column band ties it into that wave (same queue number as
+// its new wave-mates); dropping it in the gap between two waves starts a new,
+// one-item wave. Reordering commits through ONE atomic roadmap:reorder call
+// carrying both the flat id order and this wave grouping; dropping a card
+// above/below another makes it a parallel sibling instead (it adopts the
+// target's dependencies); depends_on edges are red when the queue order
+// breaks them (click an edge for the why).
 
 /** Extra padding around the content when framing the camera. */
 const FIT_PAD = 24
@@ -57,8 +68,13 @@ interface WorkflowLaneProps {
   onDispatch: () => void
   onOpen: (id: string) => void
   onMenu: (item: RoadmapItem, x: number, y: number) => void
-  /** Commit a full new queue order (id list of queued items). */
-  onReorder: (ids: string[]) => void
+  /**
+   * Commit a full new queue order (id list of queued items), plus an
+   * optional wave grouping (see shared/workflow.ts SlotHit/layoutLane):
+   * `waves` must flatten to exactly `ids`, in order. Omitted entirely on a
+   * plain reorder that has no wave opinion (e.g. clearing the queue).
+   */
+  onReorder: (ids: string[], waves?: string[][]) => void
   /** Open the create form for a new item inserted at this queue slot. */
   onCreateAt: (queueIndex: number, dependsOn: string[]) => void
   onAddDep: (childId: string, parentId: string) => void
@@ -256,7 +272,14 @@ export function WorkflowLane({
     return item
   }
 
-  const commitDrop = (id: string, slot: number): void => {
+  /**
+   * `joinAnchorId` (from SlotHit.join, resolved to a wave member via
+   * joinAnchorAt) ties `id` into that member's existing wave instead of
+   * giving it its own. Null when the drop lands in a gap (new wave) --
+   * that is also the default for every non-drag caller (commitStack's
+   * degrade path), which has no join position to honor.
+   */
+  const commitDrop = (id: string, slot: number, joinAnchorId: string | null = null): void => {
     if (!droppable(id)) return
     const next = queueAfterDrop(id, slot)
     if (!next) return
@@ -266,14 +289,43 @@ export function WorkflowLane({
     // funnel through commitDrop: the kanban-to-lane drop and lane-internal
     // reorders.
     const closure = enqueueClosure(items, id)
-    if (closure.length === 0) {
-      onReorder(next)
-      return
-    }
     const idx = next.indexOf(id)
     const withClosure =
-      idx === -1 ? [...closure, ...next] : [...next.slice(0, idx), ...closure, ...next.slice(idx)]
-    onReorder(withClosure)
+      closure.length === 0
+        ? next
+        : idx === -1
+          ? [...closure, ...next]
+          : [...next.slice(0, idx), ...closure, ...next.slice(idx)]
+
+    // Wave grouping: start from the existing ties among the items that are
+    // NOT moving (everything but id and its closure -- their relative order
+    // is unaffected by this drop), then splice id (+closure) in. A closure
+    // splice always lands as singleton waves even when join was requested --
+    // joining an existing wave while also inserting brand-new prerequisite
+    // cards immediately before id would either break that wave's required
+    // contiguity (validateReorderWaves) or silently drop the join; v1 keeps
+    // the two mutually exclusive (card 42edc88b phase 2, dev2 design note,
+    // mirrors the team-lead's conservative call on the non-lane insertion
+    // paths in shared/workflow.ts's insertSoloWaves).
+    const rest = queuedItems(items).filter((i) => i.id !== id && !closure.includes(i.id))
+    const baseWaves = wavesOf(rest)
+    const at = withClosure.findIndex((x) => x === id || closure.includes(x))
+    const anchorWave =
+      closure.length === 0 && joinAnchorId
+        ? baseWaves.findIndex((w) => w.includes(joinAnchorId))
+        : -1
+    const waves =
+      anchorWave === -1
+        ? insertSoloWaves(baseWaves, at, [...closure, id])
+        : (() => {
+            const waveStart = baseWaves.slice(0, anchorWave).reduce((n, w) => n + w.length, 0)
+            const merged =
+              at <= waveStart
+                ? [id, ...baseWaves[anchorWave]!]
+                : [...baseWaves[anchorWave]!, id]
+            return [...baseWaves.slice(0, anchorWave), merged, ...baseWaves.slice(anchorWave + 1)]
+          })()
+    onReorder(withClosure, waves)
   }
 
   /** Parallel-sibling drop: `id` adopts the target's dependencies. */
@@ -375,12 +427,10 @@ export function WorkflowLane({
         setCaret(null)
         setConflicts([])
       } else {
-        // .join ignored here for now -- full join-aware wiring (caret visuals,
-        // waves production) lands in the follow-up rendering-integration commit.
-        const { index: slot } = insertSlotAt(lane, pos, cx)
+        const { index: slot, join } = insertSlotAt(lane, pos, cx)
         setCaret({ slot, x: caretXAt(lane, pos, cx) })
         const dragItem = byId.get(d.id)
-        setConflicts(dragItem ? slotConflicts(lane, dragItem, slot) : [])
+        setConflicts(dragItem ? slotConflicts(lane, dragItem, slot, join) : [])
       }
     } else if (d.kind === 'link' && d.id) {
       const w = toWorld(e.clientX, e.clientY)
@@ -409,7 +459,10 @@ export function WorkflowLane({
       const hit0 = stackTargetAt(lane, pos, cx, cy, d.id)
       const hit = hit0 && !dependsRelated(items, d.id, hit0.targetId) ? hit0 : null
       if (hit) commitStack(d.id, hit.targetId)
-      else commitDrop(d.id, insertSlotAt(lane, pos, cx).index)
+      else {
+        const { index, join } = insertSlotAt(lane, pos, cx)
+        commitDrop(d.id, index, join ? joinAnchorAt(lane, pos, cx) : null)
+      }
     } else if (d.kind === 'link' && d.id) {
       // Released over empty canvas: create a new item depending on the source,
       // inserted where the cursor points. Cancelling the form creates nothing.
@@ -467,7 +520,10 @@ export function WorkflowLane({
     const hit0 = stackTargetAt(lane, pos, w.x, w.y, id)
     const hit = hit0 && !dependsRelated(items, id, hit0.targetId) ? hit0 : null
     if (hit) commitStack(id, hit.targetId)
-    else commitDrop(id, insertSlotAt(lane, pos, w.x).index)
+    else {
+      const { index, join } = insertSlotAt(lane, pos, w.x)
+      commitDrop(id, index, join ? joinAnchorAt(lane, pos, w.x) : null)
+    }
   }
 
   // ----- scrollbar (visible when the chain overflows at the zoom floor) -----

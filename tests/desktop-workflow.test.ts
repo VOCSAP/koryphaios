@@ -12,6 +12,8 @@ import {
   initialLaneHeight,
   insertAt,
   insertSlotAt,
+  insertSoloWaves,
+  joinAnchorAt,
   slotConflicts,
   laneEdges,
   laneItems,
@@ -20,6 +22,7 @@ import {
   siblingDeps,
   stackTargetAt,
   unmetDeps,
+  wavesOf,
   WF_LANE_H_DEFAULT,
   WF_LANE_H_MIN,
   WF_NODE_H,
@@ -438,6 +441,89 @@ test('insertAt moves an already-queued id and clamps the slot', () => {
   expect(insertAt(['a', 'b', 'c'], 'x', 1)).toEqual(['a', 'x', 'b', 'c'])
   expect(insertAt(['a', 'b', 'c'], 'c', 0)).toEqual(['c', 'a', 'b'])
   expect(insertAt(['a', 'b', 'c'], 'a', 99)).toEqual(['b', 'c', 'a'])
+})
+
+test('wavesOf: groups consecutive same-queue items into one wave', () => {
+  const queued = queuedItems([
+    item('a', { queue: 1 }),
+    item('b', { queue: 2 }),
+    item('c', { queue: 2 }), // tied with b
+    item('d', { queue: 3 })
+  ])
+  expect(wavesOf(queued)).toEqual([['a'], ['b', 'c'], ['d']])
+})
+
+test('wavesOf: a null queue never groups, even adjacent to another null', () => {
+  const queued = [item('a', { queue: null }), item('b', { queue: null })]
+  expect(wavesOf(queued)).toEqual([['a'], ['b']])
+})
+
+test('wavesOf: an empty list returns an empty grouping', () => {
+  expect(wavesOf([])).toEqual([])
+})
+
+test('insertSoloWaves: appends singleton waves at the tail, in order, when at === total length', () => {
+  const waves = [['a'], ['b', 'c']]
+  expect(insertSoloWaves(waves, 3, ['d', 'e'])).toEqual([['a'], ['b', 'c'], ['d'], ['e']])
+})
+
+test('insertSoloWaves: prepends at index 0 without disturbing the first wave', () => {
+  const waves = [['a', 'b']]
+  expect(insertSoloWaves(waves, 0, ['z'])).toEqual([['z'], ['a', 'b']])
+})
+
+test('insertSoloWaves: splicing into the middle of a wave breaks it into two ties', () => {
+  // A foreign, order-only id landing between two tied members necessarily
+  // un-ties them positionally (see the doc comment on insertSoloWaves).
+  const waves = [['a', 'b', 'c']]
+  expect(insertSoloWaves(waves, 1, ['x'])).toEqual([['a'], ['x'], ['b', 'c']])
+})
+
+test('insertSoloWaves: an empty ids list returns the input unchanged', () => {
+  const waves = [['a'], ['b']]
+  expect(insertSoloWaves(waves, 1, [])).toBe(waves)
+})
+
+test('joinAnchorAt: resolves to a wave member id inside its band, null in the gap', () => {
+  const ordered = laneItems([
+    item('A', { queue: 1 }),
+    item('B', { queue: 2 }),
+    item('C', { queue: 2 }) // tied with B
+  ])
+  const pos = layoutLane(ordered)
+  const bx = pos.get('B')!.x
+  expect(joinAnchorAt(ordered, pos, bx + WF_NODE_W / 2)).toBe('B')
+  const gapMid = WF_PITCH_X - (WF_PITCH_X - WF_NODE_W) / 2
+  expect(joinAnchorAt(ordered, pos, gapMid)).toBeNull()
+})
+
+test('joinAnchorAt: the heads column never resolves to an anchor', () => {
+  const ordered = laneItems([
+    item('head', { status: 'in_progress', locked: true, locked_by: 'p', locked_at: '2026-01-01' }),
+    item('q1', { queue: 1 })
+  ])
+  const pos = layoutLane(ordered)
+  expect(joinAnchorAt(ordered, pos, WF_NODE_W / 2)).toBeNull()
+})
+
+// Roadmap card 42edc88b phase 2, reviewer-flagged wave-preservation gap: a
+// non-lane write (queueItem/saveDraft-style append) must PRESERVE an
+// existing wave tie, not flatten it to 1..N. Regression for exactly the bug
+// the reviewer caught -- RoadmapView.tsx/RoadmapList.tsx call sites that sent
+// `ids` alone to roadmap:reorder (no `waves`) silently destroyed any tie the
+// moment they ran, since the broker's legacy no-waves branch stamps
+// sequential queue numbers (see tests/broker-roadmap-reorder.test.ts "waves
+// omitted keeps the existing flat 1..N stamping"). Composing wavesOf +
+// insertSoloWaves the way every non-lane call site now does is what avoids
+// that: this test fails if either helper is bypassed in favor of `ids` alone.
+test('wavesOf + insertSoloWaves: a non-lane append preserves an existing wave tie', () => {
+  const items = [item('a', { queue: 1 }), item('b', { queue: 1 }), item('c')]
+  const queued = queuedItems(items)
+  const queuedIds = queued.map((i) => i.id)
+  const ids = [...queuedIds, 'c']
+  const waves = insertSoloWaves(wavesOf(queued), queuedIds.length, ['c'])
+  expect(waves).toEqual([['a', 'b'], ['c']])
+  expect(waves.flat()).toEqual(ids)
 })
 
 test('clampLaneHeight: floors at WF_LANE_H_MIN regardless of viewport', () => {

@@ -16,7 +16,7 @@ import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { CreateMenu } from './CreateMenu'
 import { KIND_ICONS, RoadmapItemModal } from './RoadmapItemModal'
 import { WorkflowLane } from './WorkflowLane'
-import { enqueueClosure, insertAt, queuedItems } from '@shared/workflow'
+import { enqueueClosure, insertAt, insertSoloWaves, queuedItems, wavesOf } from '@shared/workflow'
 
 // Roadmap view (PLAN C3-M3, reworked as a kanban board in PLAN K1): one column
 // per status, native HTML5 drag & drop between columns, MoSCoW priority as a
@@ -303,9 +303,15 @@ export function RoadmapView(): React.JSX.Element {
       })
       // Lane-born draft: slot the new item into the queue where it was dropped
       // (nothing was written before Save, so Cancel really created nothing).
+      // Preserve any existing wave ties (wavesOf) instead of the flat id list
+      // alone -- see the wavesOf/insertSoloWaves doc comments in
+      // shared/workflow.ts (card 42edc88b phase 2 wave-preservation finding).
       if (draft.id === undefined && draft.insertAtQueue !== undefined) {
-        const queuedIds = queuedItems(items).map((i) => i.id)
-        await window.api.roadmapReorder(insertAt(queuedIds, saved.id, draft.insertAtQueue))
+        const queued = queuedItems(items)
+        const queuedIds = queued.map((i) => i.id)
+        const ids = insertAt(queuedIds, saved.id, draft.insertAtQueue)
+        const waves = insertSoloWaves(wavesOf(queued), ids.indexOf(saved.id), [saved.id])
+        await window.api.roadmapReorder(ids, waves)
       }
       setDraft(null)
       setSelectedId(saved.id)
@@ -348,9 +354,12 @@ export function RoadmapView(): React.JSX.Element {
 
   // ----- workflow lane (graphical dispatch queue) -----
 
-  const reorderQueue = async (ids: string[]): Promise<void> => {
+  // waves is optional -- WorkflowLane's own onReorder computes its join-aware
+  // grouping and passes it through; callers with no wave opinion (a plain
+  // clear, or a caller that already merged waves into `ids` itself) omit it.
+  const reorderQueue = async (ids: string[], waves?: string[][]): Promise<void> => {
     try {
-      await window.api.roadmapReorder(ids)
+      await window.api.roadmapReorder(ids, waves)
       await refresh()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -361,13 +370,17 @@ export function RoadmapView(): React.JSX.Element {
   // dependencies along with it (dependency-first, right before it) in the
   // SAME reorder commit -- the modal's "add to queue" entry point, alongside
   // WorkflowLane's commitDrop, both funnel through enqueueClosure so a card
-  // can never reach the queue without what it depends on.
+  // can never reach the queue without what it depends on. Preserves any
+  // existing wave ties (wavesOf) instead of flattening the queue to 1..N; the
+  // appended item and its closure each land as their own singleton wave (see
+  // insertSoloWaves).
   const queueItem = (item: RoadmapItem): Promise<void> => {
-    const queuedIds = queuedItems(items)
-      .map((i) => i.id)
-      .filter((id) => id !== item.id)
+    const queued = queuedItems(items).filter((i) => i.id !== item.id)
+    const queuedIds = queued.map((i) => i.id)
     const closure = enqueueClosure(items, item.id)
-    return reorderQueue([...queuedIds, ...closure, item.id])
+    const ids = [...queuedIds, ...closure, item.id]
+    const waves = insertSoloWaves(wavesOf(queued), queuedIds.length, [...closure, item.id])
+    return reorderQueue(ids, waves)
   }
 
   const addDep = async (childId: string, parentId: string): Promise<void> => {
@@ -409,11 +422,14 @@ export function RoadmapView(): React.JSX.Element {
       await window.api.roadmapUpsert({ id: dragId, depends_on: dependsOn })
       const item = items.find((i) => i.id === dragId)
       if (item && item.queue === null) {
-        const queuedIds = queuedItems(items).map((i) => i.id)
+        // Preserve existing wave ties (wavesOf); dragId lands as its own
+        // singleton wave right after targetId (or at the tail).
+        const queued = queuedItems(items)
+        const queuedIds = queued.map((i) => i.id)
         const at = queuedIds.indexOf(targetId)
-        await window.api.roadmapReorder(
-          insertAt(queuedIds, dragId, at >= 0 ? at + 1 : queuedIds.length)
-        )
+        const ids = insertAt(queuedIds, dragId, at >= 0 ? at + 1 : queuedIds.length)
+        const waves = insertSoloWaves(wavesOf(queued), ids.indexOf(dragId), [dragId])
+        await window.api.roadmapReorder(ids, waves)
       }
       await refresh()
     } catch (e) {
@@ -697,7 +713,7 @@ export function RoadmapView(): React.JSX.Element {
           onDispatch={() => void dispatch()}
           onOpen={(id) => setSelectedId(id)}
           onMenu={(item, x, y) => setMenu({ x, y, item })}
-          onReorder={(ids) => void reorderQueue(ids)}
+          onReorder={(ids, waves) => void reorderQueue(ids, waves)}
           onCreateAt={createAt}
           onAddDep={(childId, parentId) => void addDep(childId, parentId)}
           onRemoveDep={(childId, parentId) => void removeDep(childId, parentId)}
@@ -716,7 +732,7 @@ export function RoadmapView(): React.JSX.Element {
               onDispatch={() => void dispatch()}
               onOpen={(id) => setSelectedId(id)}
               onMenu={(item, x, y) => setMenu({ x, y, item })}
-              onReorder={(ids) => void reorderQueue(ids)}
+              onReorder={(ids, waves) => void reorderQueue(ids, waves)}
               onCreateAt={createAt}
               onAddDep={(childId, parentId) => void addDep(childId, parentId)}
               onRemoveDep={(childId, parentId) => void removeDep(childId, parentId)}

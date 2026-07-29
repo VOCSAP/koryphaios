@@ -7,7 +7,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { MobileSheet } from './MobileSheet'
 import { KIND_ICONS, RoadmapItemModal } from './RoadmapItemModal'
 import { DEFAULT_HOLD_GESTURE, HoldGesture } from '@shared/hold-gesture'
-import { enqueueClosure, queuedItems } from '@shared/workflow'
+import { enqueueClosure, insertSoloWaves, queuedItems, wavesOf } from '@shared/workflow'
 
 // Mobile roadmap (PLAN MB4 — EXPLORATION §4): ONE column at a time (status
 // tabs + counters), full-width cards auto-sorted by MoSCoW, explicit moves
@@ -242,13 +242,17 @@ export function RoadmapList(): React.JSX.Element {
   // dependencies along with it (dependency-first, right before it) in the
   // SAME reorder commit -- mirrors RoadmapView's desktop queueItem so the
   // mobile "add to queue" entry point can't skip enqueueClosure either.
+  // Preserves existing wave ties (wavesOf) instead of flattening the queue to
+  // 1..N; the appended item and its closure each land as their own singleton
+  // wave (see insertSoloWaves).
   const queueItem = async (item: RoadmapItem): Promise<void> => {
-    const queuedIds = queuedItems(items)
-      .map((i) => i.id)
-      .filter((id) => id !== item.id)
+    const queued = queuedItems(items).filter((i) => i.id !== item.id)
+    const queuedIds = queued.map((i) => i.id)
     const closure = enqueueClosure(items, item.id)
+    const ids = [...queuedIds, ...closure, item.id]
+    const waves = insertSoloWaves(wavesOf(queued), queuedIds.length, [...closure, item.id])
     try {
-      await window.api.roadmapReorder([...queuedIds, ...closure, item.id])
+      await window.api.roadmapReorder(ids, waves)
       await refresh()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
