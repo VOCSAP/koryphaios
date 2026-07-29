@@ -208,3 +208,150 @@ test("the orphan check covers a key only reachable through a discovered dynamic 
   expect(dynamicKey).toBeDefined();
   expect(findOrphans([dynamicKey!], files)).toEqual([]);
 });
+
+// ----- missing-key check: every literal t('...') call must resolve in EN_DEFAULTS -----
+// The mirror image of the orphan check above (card 4600faed): a key that is
+// CALLED but never DEFINED does not throw or warn -- t() falls back to
+// returning the raw key string (see "t returns the raw key when the key is
+// missing" above), so a typo or a renamed/removed EN_DEFAULTS entry surfaces
+// only as a literal dotted string rendered verbatim in the UI, silently.
+// Extraction reuses the same two ideas as the orphan check's dynamic-prefix
+// scan: parse call sites structurally rather than by naive regex-only
+// matching, and only claim a key is "used" when the call site's own text
+// proves it -- no cross-file indirection tracing (a t(v.key) call with `key`
+// defined elsewhere is out of scope here, same as the dynamic-prefix
+// t(`prefix.${x}`) case, both left to the orphan check's coverage instead).
+
+// Matches the outer '(' of any standalone `t(` call (word-boundary before
+// `t` excludes things like `format(`/`count(`, but still matches `.t(`
+// member-call sites) -- NOT `useT(` (the hook, not the translator).
+const T_CALL_RE = /\bt\(/g;
+const KEY_SHAPE_RE = /^[a-z][a-zA-Z0-9]*(?:\.[a-zA-Z0-9]+)+$/;
+const QUOTED_LITERAL_RE = /'([^'\\]*)'|"([^"\\]*)"/g;
+
+// From `t(` 's own opening paren, walk the call quote-aware and depth-aware
+// to isolate just the FIRST top-level argument (the key position) -- params
+// like t('confirm.text', { detail: 'foo (bar)' }) must never leak literals
+// from the second argument into the key set. Returns null on an unterminated
+// (malformed) call, which the caller skips rather than mis-extracts.
+function extractKeyArgText(src: string, openParenIdx: number): string | null {
+  let depth = 0;
+  let firstArgEnd = -1;
+  let inSingle = false;
+  let inDouble = false;
+  let inTemplate = false;
+  for (let i = openParenIdx; i < src.length; i++) {
+    const c = src[i];
+    const prev = src[i - 1];
+    if (inSingle) {
+      if (c === "'" && prev !== "\\") inSingle = false;
+      continue;
+    }
+    if (inDouble) {
+      if (c === '"' && prev !== "\\") inDouble = false;
+      continue;
+    }
+    if (inTemplate) {
+      if (c === "`" && prev !== "\\") inTemplate = false;
+      continue;
+    }
+    if (c === "'") {
+      inSingle = true;
+      continue;
+    }
+    if (c === '"') {
+      inDouble = true;
+      continue;
+    }
+    if (c === "`") {
+      inTemplate = true;
+      continue;
+    }
+    if (c === "(" || c === "{" || c === "[") {
+      depth++;
+      continue;
+    }
+    if (c === ")") {
+      depth--;
+      if (depth === 0) {
+        const end = firstArgEnd === -1 ? i : firstArgEnd;
+        return src.slice(openParenIdx + 1, end);
+      }
+      continue;
+    }
+    if (c === "}" || c === "]") {
+      depth--;
+      continue;
+    }
+    if (c === "," && depth === 1 && firstArgEnd === -1) firstArgEnd = i;
+  }
+  return null; // unterminated call -- skip rather than guess
+}
+
+// Extracts every dotted-key-shaped quoted literal reachable from `t(`'s key
+// position in one source string. A ternary key selector (t(cond ? 'a.b' :
+// 'c.d')) yields both branches -- there is no single "the" key position to
+// pick, so both count as used. A dynamic-prefix template (t(`prefix.${x}`))
+// yields nothing (backticks never match QUOTED_LITERAL_RE), which is the
+// intended out-of-scope behaviour, not a gap.
+function collectUsedKeysFromSource(src: string): Set<string> {
+  const used = new Set<string>();
+  T_CALL_RE.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = T_CALL_RE.exec(src))) {
+    const openParenIdx = m.index + m[0].length - 1;
+    const keyArgText = extractKeyArgText(src, openParenIdx);
+    if (keyArgText === null) continue;
+    QUOTED_LITERAL_RE.lastIndex = 0;
+    let lm: RegExpExecArray | null;
+    while ((lm = QUOTED_LITERAL_RE.exec(keyArgText))) {
+      const literal = lm[1] ?? lm[2] ?? "";
+      if (KEY_SHAPE_RE.test(literal)) used.add(literal);
+    }
+  }
+  return used;
+}
+
+function collectUsedKeys(files: string[]): Set<string> {
+  const used = new Set<string>();
+  for (const f of files) {
+    for (const k of collectUsedKeysFromSource(readFileSync(f, "utf-8"))) used.add(k);
+  }
+  return used;
+}
+
+// No missing keys are known at the time this check was added -- unlike
+// KNOWN_ORPHAN_KEYS above, this baseline starts empty. If it ever needs an
+// entry, keep the same discipline: exact `toEqual`, never `arrayContaining`,
+// so the list can only shrink and a fixed typo cannot silently regrow it.
+const KNOWN_MISSING_KEYS: string[] = [];
+
+test("every literal t('...') key used in desktop/src exists in EN_DEFAULTS", () => {
+  const files = collectDesktopSrcFiles(DESKTOP_SRC);
+  expect(files.length).toBeGreaterThan(100);
+  const used = collectUsedKeys(files);
+  const missing = [...used].filter((k) => !(k in EN_DEFAULTS));
+  expect(missing.sort()).toEqual([...KNOWN_MISSING_KEYS].sort());
+});
+
+test("the missing-key check itself fails on a literal call to an undefined key -- proves it is load-bearing", () => {
+  const used = collectUsedKeysFromSource("t('definitely.not.a.real.key.anywhere')");
+  expect([...used]).toEqual(["definitely.not.a.real.key.anywhere"]);
+});
+
+test("the missing-key check extracts both branches of a ternary key selector", () => {
+  const used = collectUsedKeysFromSource("t(cond ? 'a.b' : 'c.d')");
+  expect([...used].sort()).toEqual(["a.b", "c.d"]);
+});
+
+test("the missing-key check does not flag a dynamic-prefix template call", () => {
+  // Backtick templates never match QUOTED_LITERAL_RE -- this is the
+  // documented out-of-scope carve-out, not a detection failure.
+  const used = collectUsedKeysFromSource("t(`roadmap.status.${s}`)");
+  expect([...used]).toEqual([]);
+});
+
+test("the missing-key check does not leak a literal from the params argument into the key set", () => {
+  const used = collectUsedKeysFromSource("t('confirm.text', { detail: 'file.ext' })");
+  expect([...used]).toEqual(["confirm.text"]);
+});
