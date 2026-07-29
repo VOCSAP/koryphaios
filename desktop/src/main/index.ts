@@ -1066,6 +1066,15 @@ const watchDispatched = async (): Promise<void> => {
     // whose dependency stalls). Logged only on a real completion transition
     // (this branch), never per-tick, so a stuck item doesn't flood the
     // journal every DISPATCH_WATCH_MS.
+    //
+    // KNOWN GAP (card 0e55a30b, reviewer finding on c9dfcb3): this only
+    // re-evaluates the barrier when dispatchedIds itself changes, but the
+    // queued head's depends_on can reference an item this Deck never
+    // dispatched (e.g. a locked in_progress item, excluded from
+    // enqueueClosure's "active work, not queueable" filter) -- watching
+    // dispatchedIds alone misses that dependency resolving. Deferred:
+    // pending operator decision on whether 5852c074 (multi-dispatch)
+    // absorbs the fix.
     if (completed) {
       if (canAutoDispatchNext(items, dispatchedIds)) {
         const r = await dispatchNext()
