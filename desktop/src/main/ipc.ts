@@ -41,6 +41,7 @@ import {
   reorderRoadmap,
   upsertRoadmap
 } from './roadmap-service'
+import { validateReorderWaves } from './roadmap-reorder-validate'
 import { createSessionWithWorktree } from './create-session'
 import { composePlanImportPrompt } from './import-plan'
 import { collectDiff, collectFileDiff, composeDiffReviewPrompt } from './diff-service'
@@ -543,9 +544,17 @@ export function registerIpc({
   })
   // Workflow lane: atomic queue rewrite (insert/reorder in the middle without
   // N racy per-item upserts). ids come from the renderer's derived lane order.
-  regHandle('roadmap:reorder', (_e, ids: string[]) => {
+  // `waves` (roadmap card 42edc88b phase 1) is optional and re-validated here
+  // -- this channel is companion/MCP-exposed at tier 1, and a tier is a
+  // declaration, not an access gate, so a malformed nested array must never
+  // reach the broker.
+  regHandle('roadmap:reorder', (_e, ids: string[], waves?: string[][]) => {
     const { endpoint, key } = roadmapCtx()
-    return reorderRoadmap(endpoint, key, Array.isArray(ids) ? ids : [])
+    const cleanIds = Array.isArray(ids) ? ids : []
+    if (waves === undefined) return reorderRoadmap(endpoint, key, cleanIds)
+    const validated = validateReorderWaves(cleanIds, waves)
+    if (!validated.ok) throw new Error(validated.error)
+    return reorderRoadmap(endpoint, key, cleanIds, validated.waves)
   })
   // Queue dispatch (PLAN C15): first queued item -> targeted announce to the
   // team-lead. The renderer greys the button when no lead is designated.

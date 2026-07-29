@@ -99,3 +99,79 @@ test("reorder caps the ids array", async () => {
   const ids = Array.from({ length: 501 }, (_, i) => `id-${i}`);
   expect((await reorder({ ids })).status).toBe(400);
 });
+
+// Waves (roadmap card 42edc88b phase 1): additive optional grouping of ids
+// into queue-position ties.
+
+test("waves that flatten to exactly ids stamp same-wave items with a tied queue", async () => {
+  const a = await create("wf wave a");
+  const b = await create("wf wave b");
+  const c = await create("wf wave c");
+
+  const res = await reorder({ ids: [a.id, b.id, c.id], waves: [[a.id], [b.id, c.id]] });
+  expect(res.status).toBe(200);
+  const items = (res.body as { items: RoadmapItem[] }).items;
+  const byId = new Map(items.map((i) => [i.id, i]));
+  expect(byId.get(a.id)?.queue).toBe(1);
+  expect(byId.get(b.id)?.queue).toBe(2);
+  expect(byId.get(c.id)?.queue).toBe(2);
+});
+
+test("waves omitted keeps the existing flat 1..N stamping", async () => {
+  const a = await create("wf noWaves a");
+  const b = await create("wf noWaves b");
+  const res = await reorder({ ids: [a.id, b.id] });
+  expect(res.status).toBe(200);
+  const items = (res.body as { items: RoadmapItem[] }).items;
+  expect(items.map((i) => i.queue)).toEqual([1, 2]);
+});
+
+test("waves rejected when they do not flatten to exactly ids (set mismatch, order mismatch, length mismatch)", async () => {
+  const a = await create("wf mismatch a");
+  const b = await create("wf mismatch b");
+
+  // Order mismatch: same set, wrong order.
+  expect((await reorder({ ids: [a.id, b.id], waves: [[b.id], [a.id]] })).status).toBe(400);
+  // Set mismatch: an id in waves that is not in ids.
+  expect((await reorder({ ids: [a.id], waves: [[a.id, b.id]] })).status).toBe(400);
+  // Length mismatch: waves flattens to fewer ids than ids.
+  expect((await reorder({ ids: [a.id, b.id], waves: [[a.id]] })).status).toBe(400);
+});
+
+test("waves rejects an empty wave", async () => {
+  const a = await create("wf empty wave");
+  expect((await reorder({ ids: [a.id], waves: [[], [a.id]] })).status).toBe(400);
+});
+
+test("a directive-kind item may not share a wave of size > 1, but a singleton wave is fine", async () => {
+  const feature = await create("wf directive peer");
+  const directive = await create("wf directive card", {
+    kind: "directive",
+    directive: "clear",
+  });
+
+  // Grouped with another item: rejected.
+  const grouped = await reorder({
+    ids: [feature.id, directive.id],
+    waves: [[feature.id, directive.id]],
+  });
+  expect(grouped.status).toBe(400);
+
+  // Alone in its own wave: accepted.
+  const singleton = await reorder({
+    ids: [feature.id, directive.id],
+    waves: [[feature.id], [directive.id]],
+  });
+  expect(singleton.status).toBe(200);
+});
+
+test("an empty waves array alongside an empty ids array clears the queue", async () => {
+  const a = await create("wf clear via waves", { queue: 1 });
+  const res = await reorder({ ids: [], waves: [] });
+  expect(res.status).toBe(200);
+  expect((res.body as { items: RoadmapItem[] }).items).toEqual([]);
+  const list = await post<{ items: RoadmapItem[] }>(`${broker.url}/roadmap/list`, {
+    project_key: KEY,
+  });
+  expect(list.body.items.find((i) => i.id === a.id)?.queue).toBeNull();
+});

@@ -136,12 +136,17 @@ export async function upsertRoadmap(
 export async function reorderRoadmap(
   endpoint: BrokerEndpoint,
   projectKey: string,
-  ids: string[]
+  ids: string[],
+  waves?: string[][]
 ): Promise<RoadmapItem[]> {
   const res = await roadmapPost<RoadmapReorderResponse>(endpoint, '/roadmap/reorder', {
     project_key: projectKey,
     by: DECK_AUTHOR,
-    ids
+    ids,
+    // Additive over the wire too (roadmap card 42edc88b phase 1): omit the
+    // field entirely when unset rather than sending `waves: undefined`, so
+    // an older broker sees exactly the request shape it already understands.
+    ...(waves !== undefined ? { waves } : {})
   })
   return res.items
 }

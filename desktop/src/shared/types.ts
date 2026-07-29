@@ -935,8 +935,13 @@ export interface DeckApi {
   roadmapList(filters: RoadmapListFilters): Promise<RoadmapItem[]>
   roadmapUpsert(fields: RoadmapUpsertFields): Promise<RoadmapItem>
   roadmapArchive(id: string): Promise<RoadmapItem>
-  /** Workflow lane: atomically rewrite the dispatch queue to this id order. */
-  roadmapReorder(ids: string[]): Promise<RoadmapItem[]>
+  /**
+   * Workflow lane: atomically rewrite the dispatch queue to this id order.
+   * `waves` (roadmap card 42edc88b phase 1) is optional and additive: groups
+   * of `ids` sharing a queue position (a tie). Omitted by every current
+   * caller -- the lane UI still derives a flat order.
+   */
+  roadmapReorder(ids: string[], waves?: string[][]): Promise<RoadmapItem[]>
   /** Send the first queued item to the team-lead (PLAN C15). */
   roadmapDispatch(): Promise<DispatchResult>
   /** Context wand (PLAN C21): read-only haiku pass drafting the context field. */

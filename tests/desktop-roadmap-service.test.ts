@@ -15,7 +15,8 @@ import {
   computeDeckProjectKey,
   listRoadmap,
   upsertRoadmap,
-  archiveRoadmap
+  archiveRoadmap,
+  reorderRoadmap
 } from "../desktop/src/main/roadmap-service.ts";
 import { normalizeRemoteUrl as coreNormalize } from "../shared/summarize.ts";
 
@@ -124,4 +125,26 @@ test("broker errors surface as thrown messages", async () => {
   const endpoint = { url: broker.url, token: null };
   await expect(upsertRoadmap(endpoint, "k", { title: "" })).rejects.toThrow(/title/);
   await expect(archiveRoadmap(endpoint, "unknown-id")).rejects.toThrow(/unknown/);
+});
+
+// Waves (roadmap card 42edc88b phase 1): the optional param threads through
+// end to end, and omitting it stays byte-identical (no `waves` key on the
+// wire) to the pre-phase-1 request shape.
+test("reorderRoadmap threads an optional waves param through to the broker", async () => {
+  const endpoint = { url: broker.url, token: null };
+  const key = "github.com/acme/deck-waves-test";
+
+  const a = await upsertRoadmap(endpoint, key, { title: "wave a" });
+  const b = await upsertRoadmap(endpoint, key, { title: "wave b" });
+
+  const items = await reorderRoadmap(endpoint, key, [a.id, b.id], [[a.id, b.id]]);
+  const byId = new Map(items.map((i) => [i.id, i]));
+  expect(byId.get(a.id)?.queue).toBe(1);
+  expect(byId.get(b.id)?.queue).toBe(1);
+
+  // Omitting waves keeps the flat 1..N stamping.
+  const flat = await reorderRoadmap(endpoint, key, [a.id, b.id]);
+  const flatById = new Map(flat.map((i) => [i.id, i]));
+  expect(flatById.get(a.id)?.queue).toBe(1);
+  expect(flatById.get(b.id)?.queue).toBe(2);
 });

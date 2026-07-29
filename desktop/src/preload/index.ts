@@ -132,7 +132,8 @@ const api: DeckApi = {
   roadmapList: (filters: RoadmapListFilters) => ipcRenderer.invoke('roadmap:list', filters),
   roadmapUpsert: (fields: RoadmapUpsertFields) => ipcRenderer.invoke('roadmap:upsert', fields),
   roadmapArchive: (id: string) => ipcRenderer.invoke('roadmap:archive', id),
-  roadmapReorder: (ids: string[]) => ipcRenderer.invoke('roadmap:reorder', ids),
+  roadmapReorder: (ids: string[], waves?: string[][]) =>
+    ipcRenderer.invoke('roadmap:reorder', ids, waves),
   roadmapDispatch: () => ipcRenderer.invoke('roadmap:dispatch'),
   roadmapWand: (draft) => ipcRenderer.invoke('roadmap:wand', draft),
   roadmapStop: (id: string) => ipcRenderer.invoke('roadmap:stop', id),

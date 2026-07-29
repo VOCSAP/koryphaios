@@ -1811,6 +1811,7 @@ function handleRoadmapReorder(
   }
   if (new Set(ids).size !== ids.length) return { error: "ids contains duplicates", status: 400 };
 
+  const itemById = new Map<string, RoadmapItem>();
   for (const id of ids) {
     const item = getRoadmapItem(id);
     if (!item || item.project_key !== projectKey) {
@@ -1819,6 +1820,36 @@ function handleRoadmapReorder(
     if (item.status === "done" || item.status === "archived") {
       return { error: `item '${id}' is ${item.status} and cannot be queued`, status: 400 };
     }
+    itemById.set(id, item);
+  }
+
+  // Waves (roadmap card 42edc88b phase 1): additive optional grouping of
+  // `ids` into queue-position ties. `ids` stays the authoritative flat order
+  // -- waves must flatten back to it exactly, so a mismatched or stale
+  // `waves` payload can never desync the queue it groups.
+  let waves: string[][] | null = null;
+  if (body.waves !== undefined) {
+    if (!Array.isArray(body.waves) || !body.waves.every((w) => Array.isArray(w))) {
+      return { error: "waves must be an array of arrays of ids", status: 400 };
+    }
+    if (body.waves.some((w) => w.length === 0)) {
+      return { error: "waves cannot contain an empty wave", status: 400 };
+    }
+    const flat = body.waves.flat();
+    if (flat.length !== ids.length || flat.some((id, i) => id !== ids[i])) {
+      return { error: "waves must flatten to exactly ids, in the same order", status: 400 };
+    }
+    for (const wave of body.waves) {
+      if (wave.length <= 1) continue;
+      const directiveId = wave.find((id) => itemById.get(id)?.kind === "directive");
+      if (directiveId) {
+        return {
+          error: `directive item '${directiveId}' must be in a singleton wave`,
+          status: 400,
+        };
+      }
+    }
+    waves = body.waves;
   }
 
   const reorderTx = db.transaction(() => {
@@ -1828,13 +1859,28 @@ function handleRoadmapReorder(
        WHERE project_key = ? AND queue IS NOT NULL`,
       [by, projectKey]
     );
-    ids.forEach((id, i) => {
-      db.run(
-        `UPDATE roadmap_items SET queue = ?, updated_by = ?, updated_at = datetime('now')
-         WHERE id = ?`,
-        [i + 1, by, id]
-      );
-    });
+    if (waves) {
+      // Every id in wave i shares queue = i+1 (a tie): the lane column
+      // becomes the wave, depends_on stays a VALIDATION concern, not a
+      // derivation of order (see the roadmap card's design note).
+      waves.forEach((wave, i) => {
+        for (const id of wave) {
+          db.run(
+            `UPDATE roadmap_items SET queue = ?, updated_by = ?, updated_at = datetime('now')
+             WHERE id = ?`,
+            [i + 1, by, id]
+          );
+        }
+      });
+    } else {
+      ids.forEach((id, i) => {
+        db.run(
+          `UPDATE roadmap_items SET queue = ?, updated_by = ?, updated_at = datetime('now')
+           WHERE id = ?`,
+          [i + 1, by, id]
+        );
+      });
+    }
   });
   reorderTx();
 

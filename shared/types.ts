@@ -376,6 +376,15 @@ export interface RoadmapReorderRequest {
   by: string;
   /** The complete new queue, in dispatch order. Empty clears the queue. */
   ids: string[];
+  /**
+   * Additive (roadmap card 42edc88b phase 1): optional grouping of `ids`
+   * into queue-tie "waves" -- items in the same wave share one queue
+   * position (parallel, no forced order between them). `ids` stays required
+   * and authoritative so an old Deck (never sends waves) or an old broker
+   * (ignores an unknown field) both keep working across a version-skew.
+   * When present, flat(waves) in order must equal `ids` exactly.
+   */
+  waves?: string[][];
 }
 
 export interface RoadmapReorderResponse {
