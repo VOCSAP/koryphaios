@@ -224,6 +224,15 @@ test("the orphan check covers a key only reachable through a discovered dynamic 
 // proves it -- no cross-file indirection tracing (a t(v.key) call with `key`
 // defined elsewhere is out of scope here, same as the dynamic-prefix
 // t(`prefix.${x}`) case, both left to the orphan check's coverage instead).
+//
+// Known tradeoff (reviewer, card 4600faed): the scan reads raw source text
+// and does NOT strip comments or unrelated strings first. A literal like
+// t('example.not.a.real.key') written inside a // comment, to illustrate
+// something, is indistinguishable from a real call site and WILL fail this
+// check for the whole team -- with a non-intuitive cause the day it happens.
+// Deliberately not fixed here (stripping comments/strings correctly is its
+// own can of worms); this sentence exists so the failure is looked up
+// instead of debugged from scratch.
 
 // Matches the outer '(' of any standalone `t(` call (word-boundary before
 // `t` excludes things like `format(`/`count(`, but still matches `.t(`
