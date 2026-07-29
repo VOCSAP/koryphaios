@@ -175,3 +175,26 @@ test("an empty waves array alongside an empty ids array clears the queue", async
   });
   expect(list.body.items.find((i) => i.id === a.id)?.queue).toBeNull();
 });
+
+// Reviewer NIT (12d9048): the broker trimmed `ids` (via cleanList) but
+// compared it to a raw, untrimmed `waves.flat()`. Symmetric trim fix.
+
+test("wave ids padded the same way as ids are accepted (symmetric trim)", async () => {
+  const a = await create("wf trim a");
+  const b = await create("wf trim b");
+
+  const res = await reorder({ ids: [` ${a.id} `, b.id], waves: [[` ${a.id} `], [b.id]] });
+  expect(res.status).toBe(200);
+  const items = (res.body as { items: RoadmapItem[] }).items;
+  expect(items.map((i) => i.id)).toEqual([a.id, b.id]);
+});
+
+test("a non-string or whitespace-only wave id is rejected explicitly, not silently dropped", async () => {
+  const a = await create("wf bad wave id");
+
+  const nonString = await reorder({ ids: [a.id], waves: [[123 as unknown as string]] });
+  expect(nonString.status).toBe(400);
+
+  const blank = await reorder({ ids: [a.id], waves: [["   "]] });
+  expect(blank.status).toBe(400);
+});

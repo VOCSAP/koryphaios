@@ -1835,11 +1835,30 @@ function handleRoadmapReorder(
     if (body.waves.some((w) => w.length === 0)) {
       return { error: "waves cannot contain an empty wave", status: 400 };
     }
-    const flat = body.waves.flat();
+    // Trim discipline: at both boundaries (here, and desktop's
+    // roadmap-reorder-validate.ts), `ids` and `waves` are trimmed before any
+    // comparison between them. A shared broker also serves clients other
+    // than this Deck (a different Deck version, a script, MCP), and one that
+    // pads ids and waves identically must not be rejected because only one
+    // side got trimmed here. Reject rather than silently drop a malformed
+    // entry, since the wave shape is otherwise structurally validated and a
+    // silent drop would change membership under the caller without a trace.
+    const trimmedWaves: string[][] = [];
+    for (const wave of body.waves) {
+      const trimmed: string[] = [];
+      for (const item of wave) {
+        if (typeof item !== "string" || item.trim() === "") {
+          return { error: "waves must contain only non-empty string ids", status: 400 };
+        }
+        trimmed.push(item.trim());
+      }
+      trimmedWaves.push(trimmed);
+    }
+    const flat = trimmedWaves.flat();
     if (flat.length !== ids.length || flat.some((id, i) => id !== ids[i])) {
       return { error: "waves must flatten to exactly ids, in the same order", status: 400 };
     }
-    for (const wave of body.waves) {
+    for (const wave of trimmedWaves) {
       if (wave.length <= 1) continue;
       const directiveId = wave.find((id) => itemById.get(id)?.kind === "directive");
       if (directiveId) {
@@ -1849,7 +1868,7 @@ function handleRoadmapReorder(
         };
       }
     }
-    waves = body.waves;
+    waves = trimmedWaves;
   }
 
   const reorderTx = db.transaction(() => {

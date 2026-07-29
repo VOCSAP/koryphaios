@@ -31,6 +31,12 @@ const DEFAULT_MAX_WAVE_SIZE = 500
  * is reordering. Rejects (does not silently repair) anything malformed:
  * wrong shape, a duplicate id across waves, an empty wave, or either cap
  * exceeded. Returns the narrowed `string[][]` on success.
+ *
+ * Trim discipline (matches the broker): at both boundaries, `ids` and
+ * `waves` are trimmed before any comparison between them. Trimming only one
+ * side turns "consistently padded" into "rejected" on this side while the
+ * broker (which trims both) would have accepted the same payload -- the
+ * exact asymmetry a shared server serving other clients must not have.
  */
 export function validateReorderWaves(
   ids: string[],
@@ -39,6 +45,7 @@ export function validateReorderWaves(
 ): ValidateReorderWavesResult {
   const maxWaves = opts.maxWaves ?? DEFAULT_MAX_WAVES
   const maxWaveSize = opts.maxWaveSize ?? DEFAULT_MAX_WAVE_SIZE
+  const cleanIds = ids.map((id) => (typeof id === 'string' ? id.trim() : id))
 
   if (!Array.isArray(waves)) return { ok: false, error: 'waves must be an array of arrays of ids' }
   if (waves.length > maxWaves) return { ok: false, error: `waves exceeds the ${maxWaves}-wave cap` }
@@ -68,7 +75,7 @@ export function validateReorderWaves(
   }
 
   const flat = out.flat()
-  if (flat.length !== ids.length || flat.some((id, i) => id !== ids[i])) {
+  if (flat.length !== cleanIds.length || flat.some((id, i) => id !== cleanIds[i])) {
     return { ok: false, error: 'waves must flatten to exactly ids, in the same order' }
   }
 

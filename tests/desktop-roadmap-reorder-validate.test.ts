@@ -69,3 +69,12 @@ test('enforces the per-wave size cap', () => {
   const res = validateReorderWaves(ids, [['a', 'b', 'c']], { maxWaveSize: 2 })
   expect(res.ok).toBe(false)
 })
+
+// Reviewer NIT (12d9048), mirrored on the Deck side: waves were trimmed but
+// ids were not, so a payload the broker now accepts (both sides trimmed
+// there too) would still be rejected here -- a second, client-only
+// asymmetry. ids must be trimmed the same way before the comparison.
+test('accepts ids padded the same way as waves are (symmetric trim, mirrors the broker)', () => {
+  const res = validateReorderWaves([' a ', 'b'], [[' a '], ['b']])
+  expect(res).toEqual({ ok: true, waves: [['a'], ['b']] })
+})
