@@ -13,6 +13,7 @@ import {
   insertAt,
   insertSlotAt,
   insertSoloWaves,
+  isHead,
   joinAnchorAt,
   slotConflicts,
   laneEdges,
@@ -58,6 +59,28 @@ function item(id: string, over: Partial<RoadmapItem> = {}): RoadmapItem {
     ...over
   }
 }
+
+// isHead selects exactly what index.ts's restart-time seed (roadmap card
+// 5852c074, acceptance criterion 5) tracks as pre-claimed on Deck boot: an
+// item the previous process dispatched and the lead already locked
+// in_progress. The two false cases below are the ones the seed must NOT
+// double-track: a queued-but-not-yet-dispatched item (still owned by
+// wavesOf/firstQueued) and a fresh assignRoadmapItem direct-assign (K6),
+// which writes in_progress+queue:null but -- being Deck-authored -- never
+// sets `locked` itself (broker.ts only grants the lock to a non-'deck'
+// author), so it reads identically to "never dispatched" until the assignee
+// claims it with their own roadmap_update.
+test('isHead: true only for a locked in_progress item with queue null', () => {
+  expect(isHead(item('a', { status: 'in_progress', locked: true, queue: null }))).toBe(true)
+})
+
+test('isHead: false for a queued-but-not-yet-dispatched item, even if in_progress', () => {
+  expect(isHead(item('a', { status: 'in_progress', locked: true, queue: 3 }))).toBe(false)
+})
+
+test('isHead: false for a fresh assignRoadmapItem direct-assign (in_progress, unlocked)', () => {
+  expect(isHead(item('a', { status: 'in_progress', locked: false, queue: null }))).toBe(false)
+})
 
 test('laneItems: queue order, locked in_progress heads first, closed items out', () => {
   const items = [

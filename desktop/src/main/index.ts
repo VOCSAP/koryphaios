@@ -57,15 +57,18 @@ import { createCheckpoint, purgeCheckpoints, restoreCommand } from './checkpoint
 import {
   canAutoDispatchNext,
   composeAssignText,
-  composeDispatchText,
   composeStopText,
+  dispatchNormalWave,
   firstQueued,
+  nextBarrierPending,
   nextDispatchedState,
+  splitWave,
   type DispatchedEntry
 } from './dispatch'
 import { directiveKeys, isDirectiveCommand, resolveDirectiveTargets } from './directive'
 import type { AssignResult, DispatchResult, RoadmapItem, StopResult } from '@shared/types'
 import { composeJoinAnnounce, type JoinAnnounceIntent } from '@shared/announce'
+import { isHead, queuedItems, wavesOf } from '@shared/workflow'
 import { APP_STATE_SUBDIR, runDataMigration } from './migrate-data-dir'
 import type { SessionRuntime } from '@shared/types'
 import { listAgents } from './agents'
@@ -889,8 +892,10 @@ const checkpointBeforeSpawn = async (dir: string): Promise<void> => {
 // trigger); the barrier makes it load-bearing for CORRECTNESS (it gates
 // whether the next auto-dispatch may fire at all). A Deck restart mid-wave
 // loses it and can over-dispatch past a wave that hadn't actually finished.
-// v1 accepted: deriving wave membership from broker-persisted state instead
-// is deferred to 5852c074 (multi-dispatch).
+// seedDispatchedFromRoadmap (below, called once at startup) partially
+// mitigates this: an isHead item (locked in_progress, queue null) is
+// re-seeded as claimed:true, but an in_progress-but-UNLOCKED item is not (see
+// that function's own doc comment for why, and its documented blind spot).
 //
 // LIFECYCLE (card 6f19206e): each entry's `claimed` flag distinguishes
 // "dispatched, lead has not set it in_progress yet" from "lead actually
@@ -901,6 +906,18 @@ const checkpointBeforeSpawn = async (dir: string): Promise<void> => {
 // release (watchIdleLocks) reverting a CLAIMED item back to planned never
 // left the Set, permanently closing the barrier above.
 const dispatchedIds = new Map<string, DispatchedEntry>()
+
+// Card 0e55a30b / 5852c074 acceptance criterion 4: canAutoDispatchNext can
+// stay false because the queued head depends on an item this Deck never
+// dispatched (e.g. a locked in_progress item excluded from enqueueClosure's
+// "active work" filter) — dispatchedIds never changes in that case, so
+// watchDispatched's early bail on an empty Map would never retry once that
+// dependency resolves. barrierPending keeps the watcher polling through that
+// gap: armed only when the barrier closes specifically on an unmet
+// dependency at the head (not when the queue is simply empty, which needs no
+// retry), cleared once a dispatch actually fires or the queue empties. The
+// pure transition (bun-testable) is nextBarrierPending in ./dispatch.
+let barrierPending = false
 const DISPATCH_WATCH_MS = 20_000
 
 /**
@@ -1017,34 +1034,50 @@ const executeDirective = async (item: RoadmapItem): Promise<void> => {
   }
 }
 
+// Multi-dispatch (roadmap card 5852c074): sends the WHOLE head wave (all
+// items sharing the queue's head rank, wavesOf in shared/workflow) to the
+// team-lead per call, not just its first member. splitWave/dispatchNormalWave
+// (./dispatch) hold the pure decision/orchestration logic so they stay
+// bun-testable; this function only drives the Electron-coupled network calls
+// and owns the dispatchedIds mutation (single source of truth, as before).
 const dispatchNextInner = async (): Promise<DispatchResult> => {
   try {
     const endpoint = resolveBrokerEndpoint()
     const key = computeDeckProjectKey(config.projectDir)
-    // Drain directive cards sitting at the head of the queue first: the Deck
-    // executes them itself (inject + mark done) and advances to the next item.
-    // The guard bounds the loop should a done-write ever fail to advance it.
+    // Drain directive-only waves first: the Deck executes them itself (inject
+    // + mark done) and pulls the next wave. The guard bounds the loop should a
+    // done-write ever fail to advance it.
     for (let guard = 0; guard < 64; guard++) {
-      const item = firstQueued(await listRoadmap(endpoint, key, {}))
-      if (!item) return { sent: false, reason: 'empty-queue' }
-      if (item.kind !== 'directive') {
-        const sent = await announceToLead(composeDispatchText(item))
-        if (sent === 0) return { sent: false, reason: 'no-lead' }
-        // Unqueue + hand over as 'planned'; the lead moves it along from there.
-        await upsertRoadmap(endpoint, key, {
-          id: item.id,
-          queue: null,
-          status: item.status === 'idea' ? 'planned' : item.status
-        })
-        dispatchedIds.set(item.id, { claimed: false })
-        return { sent: true, title: item.title }
+      const items = await listRoadmap(endpoint, key, {})
+      const waveIds = wavesOf(queuedItems(items))[0]
+      if (!waveIds || waveIds.length === 0) return { sent: false, reason: 'empty-queue' }
+      const byId = new Map(items.map((i) => [i.id, i]))
+      const wave = waveIds.map((id) => byId.get(id)).filter((i): i is RoadmapItem => i !== undefined)
+      const { directives, normal } = splitWave(wave)
+      // Directive members execute immediately, whatever the rest of the wave
+      // holds (CT3 contract, unchanged: the Deck runs them, never announced).
+      for (const item of directives) {
+        await executeDirective(item)
+        await upsertRoadmap(endpoint, key, { id: item.id, queue: null, status: 'done' })
+        const label = isDirectiveCommand(item.directive) ? directiveKeys(item.directive) : `${item.directive ?? '?'}`
+        journal.add('dispatch', `directive card dispatched: "${item.title}" (${label})`)
       }
-      // Directive card: fire the injections, then mark it done so the queue
-      // advances (the Deck owns directive completion; agents never do).
-      await executeDirective(item)
-      await upsertRoadmap(endpoint, key, { id: item.id, queue: null, status: 'done' })
-      const label = isDirectiveCommand(item.directive) ? directiveKeys(item.directive) : `${item.directive ?? '?'}`
-      journal.add('dispatch', `directive card dispatched: "${item.title}" (${label})`)
+      if (normal.length === 0) continue // all-directive wave: pull the next one
+      const { result, dispatched, failed } = await dispatchNormalWave(normal, {
+        announce: (text) => announceToLead(text),
+        upsert: async (item) => {
+          await upsertRoadmap(endpoint, key, {
+            id: item.id,
+            queue: null,
+            status: item.status === 'idea' ? 'planned' : item.status
+          })
+        }
+      })
+      for (const item of dispatched) dispatchedIds.set(item.id, { claimed: false })
+      for (const { item, error } of failed) {
+        reportError('dispatch', `wave member "${item.title}" failed to unqueue, not tracked`, error)
+      }
+      return result
     }
     return { sent: false, reason: 'error' }
   } catch (e) {
@@ -1068,7 +1101,7 @@ const dispatchNext = (): Promise<DispatchResult> => {
 }
 
 const watchDispatched = async (): Promise<void> => {
-  if (dispatchedIds.size === 0) return
+  if (dispatchedIds.size === 0 && !barrierPending) return
   try {
     const endpoint = resolveBrokerEndpoint()
     const key = computeDeckProjectKey(config.projectDir)
@@ -1105,28 +1138,41 @@ const watchDispatched = async (): Promise<void> => {
     // "send first to team-lead" button (ipc.ts roadmap:dispatch) calls
     // dispatchNext() directly, unguarded, and stays the operator's escape
     // hatch when the barrier holds (an abandoned in-flight item, or a head
-    // whose dependency stalls). Logged only on a real completion transition
-    // (this branch), never per-tick, so a stuck item doesn't flood the
-    // journal every DISPATCH_WATCH_MS.
+    // whose dependency stalls).
     //
-    // KNOWN GAP (card 0e55a30b, reviewer finding on c9dfcb3): this only
-    // re-evaluates the barrier when dispatchedIds itself changes, but the
-    // queued head's depends_on can reference an item this Deck never
-    // dispatched (e.g. a locked in_progress item, excluded from
-    // enqueueClosure's "active work, not queueable" filter) -- watching
-    // dispatchedIds alone misses that dependency resolving. Deferred:
-    // pending operator decision on whether 5852c074 (multi-dispatch)
-    // absorbs the fix.
-    if (completed) {
+    // barrierPending (card 0e55a30b, absorbed into 5852c074) closes the gap a
+    // pure dispatchedIds watch has: the queued head's depends_on can
+    // reference an item this Deck never dispatched (e.g. a locked in_progress
+    // item, excluded from enqueueClosure's "active work, not queueable"
+    // filter), so dispatchedIds itself never changes when THAT dependency
+    // resolves. `retry` below runs the check on every tick while a
+    // dependency block is outstanding, not only on a completion transition;
+    // journal lines still only fire on an actual state change (dispatch
+    // success, or first entering/leaving the blocked state), so a stuck item
+    // doesn't flood the journal every DISPATCH_WATCH_MS.
+    const retry = completed || (dispatchedIds.size === 0 && barrierPending)
+    if (retry) {
+      let dispatchSucceeded = false
       if (canAutoDispatchNext(items, dispatchedIds)) {
         const r = await dispatchNext()
-        if (r.sent) journal.add('dispatch', `auto-dispatched next queued item: "${r.title}"`)
-      } else if (dispatchedIds.size > 0) {
+        dispatchSucceeded = r.sent
+        if (r.sent) {
+          journal.add(
+            'dispatch',
+            r.count
+              ? `auto-dispatched next queued wave: ${r.count} items (${(r.titles ?? []).join(', ')})`
+              : `auto-dispatched next queued item: "${r.title}"`
+          )
+        }
+      } else if (dispatchedIds.size > 0 && completed) {
         journal.add(
           'dispatch',
           `wave barrier: waiting on ${dispatchedIds.size} more dispatched item(s) before advancing the queue`
         )
-      } else {
+      }
+      const wasBarrierPending = barrierPending
+      barrierPending = nextBarrierPending(barrierPending, dispatchedIds.size, dispatchSucceeded, firstQueued(items) !== null)
+      if (barrierPending && !wasBarrierPending) {
         journal.add(
           'dispatch',
           'wave barrier: next queued item has unmet dependencies, waiting (use "send first to team-lead" to override)'
@@ -1135,6 +1181,55 @@ const watchDispatched = async (): Promise<void> => {
     }
   } catch {
     // Broker down: the next tick retries.
+  }
+}
+
+/**
+ * Restart-time seed (roadmap card 5852c074, acceptance criterion 5): called
+ * once at startup, before the watcher's first tick. dispatchedIds is
+ * in-memory only (see its own doc comment above) — a Deck restart loses it
+ * entirely, so an item the PREVIOUS process dispatched and the lead already
+ * claimed becomes invisible to nextDispatchedState on the new process: never
+ * tracked, so its eventual completion never re-arms the barrier for the
+ * queue behind it.
+ *
+ * Seeds every isHead item (shared/workflow: locked, in_progress, queue null)
+ * as claimed:true, not claimed:false — isHead REQUIRES status in_progress by
+ * construction, so "claimed" (observed in_progress at least once — see
+ * nextDispatchedState's doc comment on the 6f19206e semantic shift) is a
+ * direct logical consequence here, not an approximation.
+ *
+ * BLIND SPOT, deliberately left open: isHead also REQUIRES `locked`, so an
+ * in_progress-but-UNLOCKED item (e.g. a Deck-authored kanban drag, right
+ * after a restart) is seeded as neither claimed nor tracked — exactly the
+ * case the 6f19206e fix addressed for a LIVE Deck. A freshly restarted Deck
+ * cannot tell that case apart from an item that was never dispatched at all
+ * (both read as unlocked+in_progress from its fresh-boot point of view), so
+ * this seed intentionally leaves it untracked: the manual "send first to
+ * team-lead" button remains the escape hatch.
+ *
+ * Deliberately excludes: queued-but-not-dispatched items (queue non-null —
+ * still visible to wavesOf/firstQueued, seeding them here would double-count
+ * them once they are actually dispatched) and items locked via
+ * assignRoadmapItem's direct-assign path (K6) — that Deck-authored upsert
+ * never sets `locked` itself (broker.ts only grants the lock to a non-'deck'
+ * author), so a fresh assign reads as unlocked and isHead already excludes
+ * it without any extra filtering needed here.
+ */
+const seedDispatchedFromRoadmap = async (): Promise<void> => {
+  try {
+    const endpoint = resolveBrokerEndpoint()
+    const key = computeDeckProjectKey(config.projectDir)
+    const items = await listRoadmap(endpoint, key, {})
+    for (const item of items) {
+      if (isHead(item)) dispatchedIds.set(item.id, { claimed: true })
+    }
+    if (dispatchedIds.size > 0) {
+      journal.add('dispatch', `restart seed: tracking ${dispatchedIds.size} already in-progress item(s)`)
+    }
+  } catch {
+    // Broker unreachable at startup: dispatchedIds simply stays empty, same
+    // as before this seed existed.
   }
 }
 let dispatchTimer: NodeJS.Timeout | null = null
@@ -1831,6 +1926,9 @@ app.whenReady().then(async () => {
     void pollGraphDrafts()
     void pollApprovalVerdicts()
   }, INBOX_POLL_MS)
+  // Restart seed (card 5852c074): re-track already in-progress items BEFORE
+  // the watcher's first tick, see seedDispatchedFromRoadmap's doc comment.
+  await seedDispatchedFromRoadmap()
   // Auto-dispatch watcher (PLAN C15): no-op while nothing was dispatched.
   dispatchTimer = setInterval(() => void watchDispatched(), DISPATCH_WATCH_MS)
   // Idle-lock watcher (PLAN K2): releases locks held by silent local tiles.

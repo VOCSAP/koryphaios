@@ -424,8 +424,16 @@ export interface RoadmapWandDraft {
 /** Result of a queue dispatch to the team-lead (PLAN C15). */
 export interface DispatchResult {
   sent: boolean
-  /** Title of the dispatched item when sent. */
+  /** Title of the dispatched item when sent (single-item dispatch). */
   title?: string
+  /**
+   * Wave dispatch (roadmap card 5852c074): when the sent wave had more than
+   * one non-directive member, `count` is the member count and `titles` its
+   * item titles in wave order. Absent (or count === 1) for the ordinary
+   * single-item dispatch, so existing single-item UI reads stay unchanged.
+   */
+  count?: number
+  titles?: string[]
   /** Failure reason when not sent: 'empty-queue' | 'no-lead' | 'error'. */
   reason?: string
 }

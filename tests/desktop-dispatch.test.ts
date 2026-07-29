@@ -6,10 +6,13 @@ import {
   composeAssignText,
   composeDispatchText,
   composeStopText,
+  dispatchNormalWave,
   firstQueued,
+  nextBarrierPending,
   nextDispatchedState,
   nextQueuePosition,
-  queuedItems
+  queuedItems,
+  splitWave
 } from "../desktop/src/main/dispatch.ts";
 import type { RoadmapItem } from "../desktop/src/shared/types";
 
@@ -252,4 +255,123 @@ test("nextDispatchedState: two sibling wave members diverge -- reverted one remo
   const untouched = item({ id: "b", status: "planned", locked: false });
   expect(nextDispatchedState({ claimed: true }, reverted)).toEqual({ kind: "remove", reason: "abandoned" });
   expect(nextDispatchedState({ claimed: false }, untouched)).toEqual({ kind: "keep" });
+});
+
+// Multi-dispatch (roadmap card 5852c074): a whole head wave sent to the
+// team-lead in one announce instead of one item at a time. splitWave and
+// dispatchNormalWave hold the pure decision/orchestration so dispatchNextInner
+// (index.ts, Electron-coupled) can stay a thin driver over them.
+
+test("splitWave: partitions a wave into directives and normal items, preserving order", () => {
+  const wave = [
+    item({ id: "a", kind: "feature" }),
+    item({ id: "b", kind: "directive" }),
+    item({ id: "c", kind: "feature" }),
+    item({ id: "d", kind: "directive" })
+  ];
+  const { directives, normal } = splitWave(wave);
+  expect(directives.map((i) => i.id)).toEqual(["b", "d"]);
+  expect(normal.map((i) => i.id)).toEqual(["a", "c"]);
+});
+
+test("splitWave: an all-normal or all-directive wave leaves the other bucket empty", () => {
+  expect(splitWave([item({ id: "a" }), item({ id: "b" })]).directives).toEqual([]);
+  expect(splitWave([item({ id: "a", kind: "directive" })]).normal).toEqual([]);
+});
+
+function mockDeps(opts: { announceReturns?: number; failIds?: Set<string> } = {}) {
+  const announced: string[] = [];
+  const upserted: string[] = [];
+  return {
+    announced,
+    upserted,
+    deps: {
+      announce: async (text: string) => {
+        announced.push(text);
+        return opts.announceReturns ?? 1;
+      },
+      upsert: async (it: RoadmapItem) => {
+        if (opts.failIds?.has(it.id)) throw new Error(`upsert failed for ${it.id}`);
+        upserted.push(it.id);
+      }
+    }
+  };
+}
+
+// Acceptance criterion 1: a wave of N>1 non-directive items produces exactly
+// ONE announceToLead call and N upserts/tracked members.
+test("dispatchNormalWave: N>1 members -- one announce, N upserts, count/titles result", async () => {
+  const wave = [item({ id: "a", title: "A" }), item({ id: "b", title: "B" }), item({ id: "c", title: "C" })];
+  const { announced, upserted, deps } = mockDeps();
+  const { result, dispatched, failed } = await dispatchNormalWave(wave, deps);
+  expect(announced.length).toBe(1);
+  expect(upserted).toEqual(["a", "b", "c"]);
+  expect(dispatched.map((i) => i.id)).toEqual(["a", "b", "c"]);
+  expect(failed).toEqual([]);
+  expect(result).toEqual({ sent: true, count: 3, titles: ["A", "B", "C"] });
+});
+
+// N=1 must stay byte-identical to the pre-5852c074 single-item shape (no
+// count/titles), since index.ts's journal line and RoadmapView.tsx read
+// r.title directly and never checked r.count.
+test("dispatchNormalWave: a single member keeps the pre-wave {sent, title} shape", async () => {
+  const { deps } = mockDeps();
+  const { result } = await dispatchNormalWave([item({ id: "a", title: "Solo" })], deps);
+  expect(result).toEqual({ sent: true, title: "Solo" });
+});
+
+test("dispatchNormalWave: no lead connected -- no upserts fire, reason no-lead", async () => {
+  const { upserted, deps } = mockDeps({ announceReturns: 0 });
+  const { result, dispatched } = await dispatchNormalWave([item({ id: "a" })], deps);
+  expect(result).toEqual({ sent: false, reason: "no-lead" });
+  expect(upserted).toEqual([]);
+  expect(dispatched).toEqual([]);
+});
+
+test("dispatchNormalWave: an empty normal list is empty-queue without announcing", async () => {
+  const { announced, deps } = mockDeps();
+  const { result } = await dispatchNormalWave([], deps);
+  expect(result).toEqual({ sent: false, reason: "empty-queue" });
+  expect(announced).toEqual([]);
+});
+
+// Acceptance criterion 3: a throwing member's upsert must not orphan a
+// dispatchedIds entry for THAT member, while siblings still succeed.
+test("dispatchNormalWave: one member's upsert throws -- not dispatched/tracked, siblings still are", async () => {
+  const wave = [item({ id: "a", title: "A" }), item({ id: "b", title: "B" }), item({ id: "c", title: "C" })];
+  const { deps } = mockDeps({ failIds: new Set(["b"]) });
+  const { result, dispatched, failed } = await dispatchNormalWave(wave, deps);
+  expect(dispatched.map((i) => i.id)).toEqual(["a", "c"]);
+  expect(failed.map((f) => f.item.id)).toEqual(["b"]);
+  expect(result).toEqual({ sent: true, count: 2, titles: ["A", "C"] });
+});
+
+test("dispatchNormalWave: every member's upsert throws -- announced but nothing dispatched, reason error", async () => {
+  const wave = [item({ id: "a" }), item({ id: "b" })];
+  const { announced, deps } = mockDeps({ failIds: new Set(["a", "b"]) });
+  const { result, dispatched } = await dispatchNormalWave(wave, deps);
+  expect(announced.length).toBe(1);
+  expect(dispatched).toEqual([]);
+  expect(result).toEqual({ sent: false, reason: "error" });
+});
+
+// Acceptance criterion 4: barrierPending's three transitions (arm,
+// clear-on-dispatch, clear-on-empty-queue), plus the "leave unchanged while a
+// wave is still in flight" case that is neither of the three.
+
+test("nextBarrierPending: arms when nothing just dispatched, dispatchedIds empty, and a head remains", () => {
+  expect(nextBarrierPending(false, 0, false, true)).toBe(true);
+});
+
+test("nextBarrierPending: clears on a successful dispatch regardless of the resulting dispatchedIds size", () => {
+  expect(nextBarrierPending(true, 3, true, true)).toBe(false);
+});
+
+test("nextBarrierPending: clears when the queue empties (no head left to block on)", () => {
+  expect(nextBarrierPending(true, 0, false, false)).toBe(false);
+});
+
+test("nextBarrierPending: left unchanged while a previous wave is still in flight", () => {
+  expect(nextBarrierPending(true, 2, false, true)).toBe(true);
+  expect(nextBarrierPending(false, 2, false, true)).toBe(false);
 });

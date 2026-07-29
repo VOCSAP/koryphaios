@@ -7,7 +7,7 @@
 //
 // No electron imports so it is unit-testable under `bun test`.
 
-import type { RoadmapItem } from '../shared/types'
+import type { DispatchResult, RoadmapItem } from '../shared/types'
 import { queuedItems } from '../shared/workflow'
 
 // queuedItems used to own its own filter+sort here (localeCompare tiebreak,
@@ -46,9 +46,11 @@ export function nextQueuePosition(items: RoadmapItem[]): number {
  * UNGUARDED, the intended escape hatch when the barrier holds indefinitely
  * (e.g. an abandoned in-flight item, or a head whose dependency stalls).
  *
- * SEMANTIC HONESTY (audit §8): this is a BARRIER, not parallel dispatch --
- * dispatchNextInner still sends one head at a time. Waves stay informational
- * until 5852c074 lands multi-dispatch.
+ * SEMANTIC HONESTY (audit §8): this is a BARRIER, not a scheduler --
+ * dispatchNextInner (roadmap card 5852c074) sends one whole head WAVE per
+ * call (splitWave + dispatchNormalWave below), never reaching past it to a
+ * second wave. The barrier still gates only whether that next wave-send may
+ * fire automatically.
  *
  * The second parameter is intentionally structural (`{ size: number }`, not
  * a concrete collection type): only the COUNT of ids still tracked as
@@ -155,6 +157,23 @@ export function nextDispatchedState(entry: DispatchedEntry, item: RoadmapItem | 
 }
 
 /**
+ * Full-detail snapshot lines for one item, shared by the single- and
+ * multi-item dispatch composers below. Conditional fields collapse to ''
+ * (filtered by the caller) when empty, same as the original inline shape.
+ */
+function itemSnapshotLines(item: RoadmapItem): string[] {
+  return [
+    `Title: ${item.title}`,
+    `Kind: ${item.kind} | Priority: ${item.priority} | Value: ${item.value} | Effort: ${item.effort} | Status: ${item.status}`,
+    item.description ? `Description: ${item.description}` : '',
+    item.rationale ? `Rationale: ${item.rationale}` : '',
+    item.context ? `Context (operator briefing): ${item.context}` : '',
+    item.tags.length ? `Tags: ${item.tags.join(', ')}` : '',
+    item.depends_on.length ? `Depends on: ${item.depends_on.map((d) => d.slice(0, 8)).join(', ')}` : ''
+  ]
+}
+
+/**
  * The targeted announce sent to the team-lead when an item is dispatched:
  * the full item plus the workflow contract (assign, keep the status current).
  */
@@ -162,17 +181,139 @@ export function composeDispatchText(item: RoadmapItem): string {
   const lines = [
     `Next roadmap item from the operator's dispatch queue (id ${item.id.slice(0, 8)}):`,
     '',
-    `Title: ${item.title}`,
-    `Kind: ${item.kind} | Priority: ${item.priority} | Value: ${item.value} | Effort: ${item.effort} | Status: ${item.status}`,
-    item.description ? `Description: ${item.description}` : '',
-    item.rationale ? `Rationale: ${item.rationale}` : '',
-    item.context ? `Context (operator briefing): ${item.context}` : '',
-    item.tags.length ? `Tags: ${item.tags.join(', ')}` : '',
-    item.depends_on.length ? `Depends on: ${item.depends_on.map((d) => d.slice(0, 8)).join(', ')}` : '',
+    ...itemSnapshotLines(item),
     '',
     'As team-lead: take it yourself or brief another peer with send_message. Use roadmap_get for full context, set the item in_progress with roadmap_update when the work REALLY starts (this locks it under the working peer), done when complete. Keep its status current — the Deck auto-dispatches the next queued item when this one is done.'
   ].filter((l) => l !== '')
   return lines.join('\n')
+}
+
+/**
+ * R5+ multi-dispatch (roadmap card 5852c074): the targeted announce sent to
+ * the team-lead for a WHOLE head wave (N>=1 items sharing the queue's head
+ * rank, see wavesOf in shared/workflow.ts) in a single message, delegating
+ * the parallelization decision to the lead. N=1 delegates verbatim to
+ * composeDispatchText so the mono-item announce is byte-identical to before
+ * -- this composer only changes shape once there is an actual wave to
+ * describe. CODE CONSTANT (C8 rule): never an operator/repo template.
+ *
+ * SPAWN GATE NOTE: deck-control's spawn tools (deck_spawn_session/team) are
+ * injected only into the SUPERVISOR's --mcp-config (see index.ts, the
+ * "Supervisor deck-control" comment above controlDeps), never into a
+ * team-lead session — so the contract below routes an extra-agent request
+ * through the supervisor
+ * via send_message rather than implying the lead can spawn directly. The
+ * supervisor's own spawn already carries a full operator confirmation gate
+ * (approveSpawn / supervisorSpawnMode in index.ts); nothing new is added
+ * here.
+ */
+export function composeMultiDispatchText(items: RoadmapItem[]): string {
+  if (items.length <= 1) return composeDispatchText(items[0]!)
+  const lines: string[] = [
+    `${items.length} roadmap items from the operator's dispatch queue, to process IN PARALLEL (ids ${items
+      .map((i) => i.id.slice(0, 8))
+      .join(', ')}):`,
+    ''
+  ]
+  items.forEach((item, i) => {
+    if (i > 0) lines.push('---')
+    lines.push(`[${i + 1}/${items.length}] id ${item.id.slice(0, 8)}:`, ...itemSnapshotLines(item))
+  })
+  lines.push(
+    '',
+    "As team-lead: distribute these across your team via send_message, respecting each role — you do NOT need to take them all yourself. If the team cannot absorb the parallelism, ask the SUPERVISOR (send_message) to spawn an additional agent — you have no direct spawn capability. Use roadmap_get for full context on each item, set an item in_progress with roadmap_update when work REALLY starts on it (this locks it under the working peer), done when complete. Keep each item's status current — the Deck auto-dispatches the next queued wave when this one fully completes."
+  )
+  return lines.filter((l) => l !== '').join('\n')
+}
+
+/**
+ * Partitions a head wave (roadmap card 5852c074) into directive cards and
+ * normal (announceable) items. Directive members execute immediately and are
+ * NEVER announced (CT3 contract, preserved for the multi-item wave exactly as
+ * it was for the single-item queue); the caller drives that side effect in
+ * index.ts (Electron-coupled: executeDirective injects into live terminals),
+ * this function only decides the split. Order within each bucket is
+ * preserved from the input wave.
+ */
+export function splitWave(wave: RoadmapItem[]): { directives: RoadmapItem[]; normal: RoadmapItem[] } {
+  const directives: RoadmapItem[] = []
+  const normal: RoadmapItem[] = []
+  for (const item of wave) {
+    ;(item.kind === 'directive' ? directives : normal).push(item)
+  }
+  return { directives, normal }
+}
+
+/** Network calls injected into dispatchNormalWave, so it stays unit-testable. */
+export interface DispatchWaveDeps {
+  announce: (text: string) => Promise<number>
+  upsert: (item: RoadmapItem) => Promise<void>
+}
+
+/**
+ * Orchestrates ONE wave's normal (non-directive) members (roadmap card
+ * 5852c074, acceptance criteria 1 and 3): a single announce carrying
+ * composeMultiDispatchText's output, then a per-member upsert with per-member
+ * atomicity -- a member whose upsert throws is reported in `failed` and is
+ * NOT included in `dispatched`, so the caller never tracks it in
+ * dispatchedIds, while sibling members that succeeded still are.
+ *
+ * N=1 returns the pre-5852c074 single-item DispatchResult shape
+ * ({sent:true, title}) so existing consumers (index.ts's journal line,
+ * RoadmapView.tsx's toast) stay byte-behavior-identical; N>1 additionally
+ * carries count/titles. If every member's upsert throws, the wave is
+ * reported as {sent:false, reason:'error'} even though the announce already
+ * reached the lead -- there is nothing left to track, and 'error' is the
+ * closest existing reason bucket for that (rare) split-brain case.
+ */
+export async function dispatchNormalWave(
+  normal: RoadmapItem[],
+  deps: DispatchWaveDeps
+): Promise<{ result: DispatchResult; dispatched: RoadmapItem[]; failed: { item: RoadmapItem; error: unknown }[] }> {
+  if (normal.length === 0) return { result: { sent: false, reason: 'empty-queue' }, dispatched: [], failed: [] }
+  const sent = await deps.announce(composeMultiDispatchText(normal))
+  if (sent === 0) return { result: { sent: false, reason: 'no-lead' }, dispatched: [], failed: [] }
+  const dispatched: RoadmapItem[] = []
+  const failed: { item: RoadmapItem; error: unknown }[] = []
+  for (const item of normal) {
+    try {
+      await deps.upsert(item)
+      dispatched.push(item)
+    } catch (error) {
+      failed.push({ item, error })
+    }
+  }
+  if (dispatched.length === 0) return { result: { sent: false, reason: 'error' }, dispatched, failed }
+  const result: DispatchResult =
+    dispatched.length === 1
+      ? { sent: true, title: dispatched[0]!.title }
+      : { sent: true, count: dispatched.length, titles: dispatched.map((i) => i.title) }
+  return { result, dispatched, failed }
+}
+
+/**
+ * Pure decision for watchDispatched's barrierPending flag (roadmap card
+ * 0e55a30b, absorbed into 5852c074) -- see its doc comment on the
+ * `barrierPending` declaration in index.ts for the gap this closes. Three
+ * transitions, in priority order:
+ *  1. `dispatchSucceeded` -> always false (an auto-dispatch just fired,
+ *     whatever blocked it before is resolved).
+ *  2. otherwise, `dispatchedSize > 0` -> unchanged (`current`): a previous
+ *     wave is still in flight, which says nothing about a dependency block.
+ *  3. otherwise (dispatchedSize === 0, nothing just dispatched) ->
+ *     `queueHasHead`: true only when the queue still has a head item, so an
+ *     EMPTY queue never arms the barrier (there is nothing to be blocked on),
+ *     while a head stuck on an unmet dependency does.
+ */
+export function nextBarrierPending(
+  current: boolean,
+  dispatchedSize: number,
+  dispatchSucceeded: boolean,
+  queueHasHead: boolean
+): boolean {
+  if (dispatchSucceeded) return false
+  if (dispatchedSize > 0) return current
+  return queueHasHead
 }
 
 /**
