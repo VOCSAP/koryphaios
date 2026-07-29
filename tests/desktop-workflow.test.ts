@@ -526,6 +526,42 @@ test('wavesOf + insertSoloWaves: a non-lane append preserves an existing wave ti
   expect(waves.flat()).toEqual(ids)
 })
 
+// Reviewer finding on e2b0630, narrower-scope sibling of the gap above:
+// stackItem used to splice a stacked card at the target's raw flat index + 1.
+// When the target sits in the MIDDLE of a multi-member wave, that flat index
+// lands INSIDE the wave, and insertSoloWaves correctly (per its own
+// documented mid-wave behavior) breaks it into two ties either side of the
+// insertion -- un-tying wave-mates the operator never touched. The fix rounds
+// the splice point to the flat boundary right AFTER the target's WHOLE wave
+// (team-lead-confirmed 2026-07-29, wave = one execution slot). This models
+// that boundary computation directly on the helpers, the way stackItem now
+// does, and is the regression for "target mid-wave -> the wave stays whole".
+test('wavesOf + insertSoloWaves: rounding to the end of the target wave (stackItem-style) keeps a mid-wave target\'s wave whole', () => {
+  const items = [item('a', { queue: 1 }), item('b', { queue: 1 }), item('c', { queue: 1 })]
+  const queued = queuedItems(items)
+  const queuedIds = queued.map((i) => i.id)
+  const baseWaves = wavesOf(queued)
+  const targetWave = baseWaves.findIndex((w) => w.includes('b'))
+  const boundary = baseWaves.slice(0, targetWave + 1).reduce((n, w) => n + w.length, 0)
+  const ids = insertAt(queuedIds, 'drag', boundary)
+  const waves = insertSoloWaves(baseWaves, ids.indexOf('drag'), ['drag'])
+  expect(waves).toEqual([['a', 'b', 'c'], ['drag']])
+  expect(waves.flat()).toEqual(ids)
+})
+
+test('wavesOf + insertSoloWaves: stacking on the last member of a wave is unchanged (non-regression)', () => {
+  const items = [item('a', { queue: 1 }), item('b', { queue: 1 })]
+  const queued = queuedItems(items)
+  const queuedIds = queued.map((i) => i.id)
+  const baseWaves = wavesOf(queued)
+  const targetWave = baseWaves.findIndex((w) => w.includes('b'))
+  const boundary = baseWaves.slice(0, targetWave + 1).reduce((n, w) => n + w.length, 0)
+  expect(boundary).toBe(queuedIds.indexOf('b') + 1)
+  const ids = insertAt(queuedIds, 'drag', boundary)
+  const waves = insertSoloWaves(baseWaves, ids.indexOf('drag'), ['drag'])
+  expect(waves).toEqual([['a', 'b'], ['drag']])
+})
+
 test('clampLaneHeight: floors at WF_LANE_H_MIN regardless of viewport', () => {
   expect(clampLaneHeight(10, 1080)).toBe(WF_LANE_H_MIN)
   expect(clampLaneHeight(-500, 200)).toBe(WF_LANE_H_MIN)

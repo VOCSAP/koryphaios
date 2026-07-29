@@ -422,13 +422,26 @@ export function RoadmapView(): React.JSX.Element {
       await window.api.roadmapUpsert({ id: dragId, depends_on: dependsOn })
       const item = items.find((i) => i.id === dragId)
       if (item && item.queue === null) {
-        // Preserve existing wave ties (wavesOf); dragId lands as its own
-        // singleton wave right after targetId (or at the tail).
+        // Stacking never lands INSIDE an existing wave: a wave is one
+        // execution slot, so "just after the target" is read at wave
+        // granularity, not at a raw flat index -- reviewer finding on
+        // e2b0630, "just after targetId" could fall mid-wave when targetId
+        // isn't its wave's last member, silently splitting off wave-mates
+        // the operator never touched. Round the insertion index to the
+        // boundary right after the target's WHOLE wave; dragId still lands
+        // as its own singleton wave there (team-lead-confirmed 2026-07-29,
+        // same conservative v1 as every other insertion path).
         const queued = queuedItems(items)
         const queuedIds = queued.map((i) => i.id)
+        const baseWaves = wavesOf(queued)
         const at = queuedIds.indexOf(targetId)
-        const ids = insertAt(queuedIds, dragId, at >= 0 ? at + 1 : queuedIds.length)
-        const waves = insertSoloWaves(wavesOf(queued), ids.indexOf(dragId), [dragId])
+        const targetWave = at >= 0 ? baseWaves.findIndex((w) => w.includes(targetId)) : -1
+        const boundary =
+          targetWave >= 0
+            ? baseWaves.slice(0, targetWave + 1).reduce((n, w) => n + w.length, 0)
+            : queuedIds.length
+        const ids = insertAt(queuedIds, dragId, boundary)
+        const waves = insertSoloWaves(baseWaves, ids.indexOf(dragId), [dragId])
         await window.api.roadmapReorder(ids, waves)
       }
       await refresh()
