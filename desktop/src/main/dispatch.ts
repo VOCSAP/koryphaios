@@ -114,6 +114,22 @@ export type DispatchedTickAction =
  * in_progress-but-unlocked (a lock release/reacquire race) -- that state is
  * simply 'keep', since the item's status never left in_progress.
  *
+ * `in_progress` claims on STATUS ALONE, not on `locked`: broker.ts's lock
+ * resolution only claims the work-lock for a non-'deck' author writing
+ * status=in_progress (`by !== "deck" && !existing.locked`) -- the Deck's own
+ * in_progress writes (e.g. an operator drag on the kanban, itself an
+ * author='deck' upsert) leave `locked: false`. Requiring `item.locked` to
+ * claim would strand exactly this item: claimed stays false through
+ * in_progress, so a later revert to planned/idea reads as
+ * never-claimed-kept instead of abandoned-removed -- the same permanently-
+ * closed-barrier bug this function exists to fix, just reached through a
+ * Deck-authored in_progress instead of a stop/idle-release. Same failure
+ * mode via releaseStaleLocks (broker.ts): it clears locked AND flips
+ * status back to planned in the SAME UPDATE, so an unlocked in_progress
+ * window is not guaranteed to be observed by any given 20s tick either.
+ * Abandonment is what actually needs `!item.locked` (see the planned/idea
+ * branch below); claim does not.
+ *
  * Every 'remove' outcome -- not just 'done' -- must be treated by the caller
  * as a completed transition (re-arm canAutoDispatchNext / dispatchNext()):
  * an abandonment frees the barrier exactly like a completion does, only the
@@ -127,7 +143,7 @@ export function nextDispatchedState(entry: DispatchedEntry, item: RoadmapItem | 
     case 'archived':
       return { kind: 'remove', reason: 'archived' }
     case 'in_progress':
-      return item.locked && !entry.claimed ? { kind: 'claim' } : { kind: 'keep' }
+      return entry.claimed ? { kind: 'keep' } : { kind: 'claim' }
     case 'planned':
     case 'idea':
       return entry.claimed && !item.locked ? { kind: 'remove', reason: 'abandoned' } : { kind: 'keep' }

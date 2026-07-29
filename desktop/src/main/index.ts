@@ -1092,6 +1092,8 @@ const watchDispatched = async (): Promise<void> => {
           if (it) {
             const label = action.reason === 'abandoned' ? 'abandoned (claimed, then reverted before completion)' : action.reason
             journal.add('dispatch', `dispatched item ${label}: "${it.title}"`)
+          } else {
+            journal.add('dispatch', `dispatched item vanished from the roadmap: ${id.slice(0, 8)}`)
           }
           break
         case 'keep':

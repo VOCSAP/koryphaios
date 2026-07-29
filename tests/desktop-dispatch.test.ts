@@ -199,6 +199,19 @@ test("nextDispatchedState: claims when the lead locks it in_progress", () => {
   expect(nextDispatchedState({ claimed: false }, it)).toEqual({ kind: "claim" });
 });
 
+// Reviewer finding on commit 60213f0 (card 6f19206e review): claim must NOT
+// require `locked`. broker.ts only grants the work-lock to a non-'deck'
+// author writing status=in_progress -- the Deck's own in_progress writes
+// (e.g. an operator kanban drag, author='deck') leave locked=false. Gating
+// claim on `locked` stranded exactly that item: claimed never flips true,
+// so a later revert to planned reads as never-claimed-kept instead of
+// abandoned-removed, reproducing the barrier-stuck-forever bug this
+// function exists to fix.
+test("nextDispatchedState: claims on status alone -- a Deck-authored in_progress write (unlocked) still claims", () => {
+  const it = item({ status: "in_progress", locked: false });
+  expect(nextDispatchedState({ claimed: false }, it)).toEqual({ kind: "claim" });
+});
+
 test("nextDispatchedState: claim is idempotent -- already-claimed stays keep while still in_progress", () => {
   const it = item({ status: "in_progress", locked: true });
   expect(nextDispatchedState({ claimed: true }, it)).toEqual({ kind: "keep" });
