@@ -243,10 +243,11 @@ function findSourcePictographs(root: string, files: string[]): string[] {
 
 // Snapshot of the desktop/src tree as of this gate's introduction (card
 // d5b7d842 CHANGES round): universal glyphs used ahead of an SVG equivalent
-// (→/⎇/▸/⏸/...), ModelPicker's 5 provider glyphs (no SVG yet -- carded
-// separately), and a handful of comment-only mentions (SearchBar.tsx,
-// store.ts, types.ts, RoadmapView.tsx's "⏹ Stop button" note). None of these
-// are newly introduced by this commit. Like KNOWN_ORPHAN_KEYS and
+// (→/⎇/▸/⏸/...), ModelPicker's 5 provider glyphs (no SVG yet -- tracked by
+// card b72b82f7, which replaces them and shrinks this baseline as it goes),
+// and a handful of comment-only mentions (SearchBar.tsx, store.ts,
+// types.ts, RoadmapView.tsx's "⏹ Stop button" note). None of these are
+// newly introduced by this commit. Like KNOWN_ORPHAN_KEYS and
 // KNOWN_EMOJI_KEYS above, this baseline may only ever shrink from here,
 // never grow.
 const KNOWN_SOURCE_PICTOGRAPHS: string[] = [
