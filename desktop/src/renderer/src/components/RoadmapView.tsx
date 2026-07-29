@@ -16,7 +16,7 @@ import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { CreateMenu } from './CreateMenu'
 import { KIND_ICONS, RoadmapItemModal } from './RoadmapItemModal'
 import { WorkflowLane } from './WorkflowLane'
-import { enqueueClosure, insertAt } from '@shared/workflow'
+import { enqueueClosure, insertAt, queuedItems } from '@shared/workflow'
 
 // Roadmap view (PLAN C3-M3, reworked as a kanban board in PLAN K1): one column
 // per status, native HTML5 drag & drop between columns, MoSCoW priority as a
@@ -304,10 +304,7 @@ export function RoadmapView(): React.JSX.Element {
       // Lane-born draft: slot the new item into the queue where it was dropped
       // (nothing was written before Save, so Cancel really created nothing).
       if (draft.id === undefined && draft.insertAtQueue !== undefined) {
-        const queuedIds = items
-          .filter((i) => i.queue !== null && i.status !== 'done' && i.status !== 'archived')
-          .sort((a, b) => a.queue! - b.queue!)
-          .map((i) => i.id)
+        const queuedIds = queuedItems(items).map((i) => i.id)
         await window.api.roadmapReorder(insertAt(queuedIds, saved.id, draft.insertAtQueue))
       }
       setDraft(null)
@@ -366,9 +363,7 @@ export function RoadmapView(): React.JSX.Element {
   // WorkflowLane's commitDrop, both funnel through enqueueClosure so a card
   // can never reach the queue without what it depends on.
   const queueItem = (item: RoadmapItem): Promise<void> => {
-    const queuedIds = items
-      .filter((i) => i.queue !== null && i.status !== 'done' && i.status !== 'archived')
-      .sort((a, b) => (a.queue ?? 0) - (b.queue ?? 0))
+    const queuedIds = queuedItems(items)
       .map((i) => i.id)
       .filter((id) => id !== item.id)
     const closure = enqueueClosure(items, item.id)
@@ -414,10 +409,7 @@ export function RoadmapView(): React.JSX.Element {
       await window.api.roadmapUpsert({ id: dragId, depends_on: dependsOn })
       const item = items.find((i) => i.id === dragId)
       if (item && item.queue === null) {
-        const queuedIds = items
-          .filter((i) => i.queue !== null && i.status !== 'done' && i.status !== 'archived')
-          .sort((a, b) => a.queue! - b.queue!)
-          .map((i) => i.id)
+        const queuedIds = queuedItems(items).map((i) => i.id)
         const at = queuedIds.indexOf(targetId)
         await window.api.roadmapReorder(
           insertAt(queuedIds, dragId, at >= 0 ? at + 1 : queuedIds.length)

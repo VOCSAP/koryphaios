@@ -7,7 +7,7 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { MobileSheet } from './MobileSheet'
 import { KIND_ICONS, RoadmapItemModal } from './RoadmapItemModal'
 import { DEFAULT_HOLD_GESTURE, HoldGesture } from '@shared/hold-gesture'
-import { enqueueClosure } from '@shared/workflow'
+import { enqueueClosure, queuedItems } from '@shared/workflow'
 
 // Mobile roadmap (PLAN MB4 — EXPLORATION §4): ONE column at a time (status
 // tabs + counters), full-width cards auto-sorted by MoSCoW, explicit moves
@@ -243,9 +243,7 @@ export function RoadmapList(): React.JSX.Element {
   // SAME reorder commit -- mirrors RoadmapView's desktop queueItem so the
   // mobile "add to queue" entry point can't skip enqueueClosure either.
   const queueItem = async (item: RoadmapItem): Promise<void> => {
-    const queuedIds = items
-      .filter((i) => i.queue !== null && i.status !== 'done' && i.status !== 'archived')
-      .sort((a, b) => (a.queue ?? 0) - (b.queue ?? 0))
+    const queuedIds = queuedItems(items)
       .map((i) => i.id)
       .filter((id) => id !== item.id)
     const closure = enqueueClosure(items, item.id)

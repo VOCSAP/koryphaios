@@ -8,13 +8,15 @@
 // No electron imports so it is unit-testable under `bun test`.
 
 import type { RoadmapItem } from '../shared/types'
+import { queuedItems } from '../shared/workflow'
 
-/** Queued items ordered by position (ties broken by id for stability). */
-export function queuedItems(items: RoadmapItem[]): RoadmapItem[] {
-  return items
-    .filter((i) => i.queue !== null && i.status !== 'done' && i.status !== 'archived')
-    .sort((a, b) => (a.queue! - b.queue!) || a.id.localeCompare(b.id))
-}
+// queuedItems used to own its own filter+sort here (localeCompare tiebreak,
+// diverging from the broker's BINARY-collation `ORDER BY queue, id` the
+// moment an id left lowercase hex). Re-exported from shared/workflow so this
+// module and desktop/src/main/index.ts keep importing it from './dispatch'
+// unchanged, but the queue's actual order is derived in exactly one place
+// (roadmap card 42edc88b phase 0).
+export { queuedItems }
 
 /** The next item to dispatch (lowest queue position), or null. */
 export function firstQueued(items: RoadmapItem[]): RoadmapItem | null {

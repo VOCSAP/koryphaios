@@ -5,6 +5,7 @@ import { test, expect } from 'bun:test'
 import type { RoadmapItem } from '../desktop/src/shared/types'
 import {
   clampLaneHeight,
+  compareById,
   dependsRelated,
   dependsWouldCycle,
   enqueueClosure,
@@ -15,6 +16,7 @@ import {
   laneEdges,
   laneItems,
   layoutLane,
+  queuedItems,
   siblingDeps,
   stackTargetAt,
   unmetDeps,
@@ -66,6 +68,14 @@ test('laneItems: queue order, locked in_progress heads first, closed items out',
     item('limbo', { status: 'in_progress' })
   ]
   expect(laneItems(items).map((i) => i.id)).toEqual(['headA', 'headB', 'q1', 'q2'])
+})
+
+test('laneItems: two locked heads with the same locked_at are broken by id', () => {
+  const items = [
+    item('headZ', { status: 'in_progress', locked: true, locked_by: 'p', locked_at: '2026-01-01' }),
+    item('headA', { status: 'in_progress', locked: true, locked_by: 'p', locked_at: '2026-01-01' })
+  ]
+  expect(laneItems(items).map((i) => i.id)).toEqual(['headA', 'headZ'])
 })
 
 test('layoutLane: a dependency-free queue renders as a flat left-to-right chain', () => {
@@ -280,6 +290,40 @@ test('enqueueClosure: a done item with an unfinished nested dependency still enq
     item('C', { depends_on: ['B'] })
   ]
   expect(enqueueClosure(items, 'C')).toEqual(['A'])
+})
+
+test('compareById: byte compare, single source of truth for id tiebreaks', () => {
+  expect(compareById(item('a'), item('b'))).toBe(-1)
+  expect(compareById(item('b'), item('a'))).toBe(1)
+})
+
+test('queuedItems: orders by queue position, skips done/archived/unqueued/heads', () => {
+  const items = [
+    item('b', { queue: 2 }),
+    item('a', { queue: 1 }),
+    item('c', { queue: null }),
+    item('d', { queue: 3, status: 'done' }),
+    item('e', { queue: 4, status: 'archived' }),
+    item('f', { queue: null, status: 'in_progress', locked: true, locked_at: '2026-01-01' })
+  ]
+  expect(queuedItems(items).map((i) => i.id)).toEqual(['a', 'b'])
+})
+
+test('queuedItems: a queue tie is broken by id, not by the input array order', () => {
+  // Load-bearing regression: the broker's list endpoint returns items
+  // ordered by created_at, id -- NOT by queue. If queuedItems relied on
+  // Array.prototype.sort's stability instead of a real id tiebreak, a tie
+  // on `queue` would silently resolve to created_at order and only LOOK
+  // correct because created_at happens to agree with id today. Build the
+  // input already in created_at order (oldest first) but with created_at
+  // deliberately in the REVERSE order of id, so a missing/wrong tiebreak
+  // and the correct byte-compare tiebreak produce different, observable
+  // results. This must fail if compareById is removed from queuedItems.
+  const items = [
+    item('z', { queue: 5, created_at: '2026-01-01' }), // oldest, highest id
+    item('a', { queue: 5, created_at: '2026-01-02' }) // newest, lowest id
+  ]
+  expect(queuedItems(items).map((i) => i.id)).toEqual(['a', 'z'])
 })
 
 test('slotConflicts: flags deps landing after the cut and dependents before it', () => {

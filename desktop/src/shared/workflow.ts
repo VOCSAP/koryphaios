@@ -48,27 +48,46 @@ export function isHead(i: RoadmapItem): boolean {
 }
 
 /**
+ * Single source of truth for breaking a tie between two roadmap items: byte
+ * compare on id, matching the broker's `ORDER BY queue, id` (SQLite BINARY
+ * collation), NOT `localeCompare` (locale-aware, diverges from BINARY the
+ * moment an id leaves lowercase hex). Every site that orders the queue --
+ * here, dispatch.ts, and any renderer call site -- must import this instead
+ * of re-deriving its own tiebreak: three independent copies is how the
+ * queue order silently drifted across the broker, main and renderer before
+ * this was consolidated (roadmap card 42edc88b phase 0).
+ */
+export function compareById(a: RoadmapItem, b: RoadmapItem): number {
+  return a.id < b.id ? -1 : 1
+}
+
+/**
+ * The dispatch queue only (no locked heads), ordered by queue position then
+ * compareById. Single source of truth for "the current queue order": any
+ * site that needs to read or rebuild the queue id array must call this,
+ * not re-filter/re-sort `items` locally -- two independent derivations of
+ * the same order is the bug class this closes (phase 0 of 42edc88b), not
+ * merely a missing tiebreak. The comparator is what guarantees a stable
+ * result on a tie; nothing here assumes queue positions are unique.
+ */
+export function queuedItems(items: RoadmapItem[]): RoadmapItem[] {
+  return items
+    .filter((i) => i.queue !== null && i.status !== 'done' && i.status !== 'archived')
+    .sort((a, b) => a.queue! - b.queue! || compareById(a, b))
+}
+
+/**
  * Items the lane displays: the dispatch queue plus the locked in_progress
  * heads (what the team is actively working on). Order = execution order:
  * locked heads first (oldest lock first), then the queue by position.
  */
 export function laneItems(items: RoadmapItem[]): RoadmapItem[] {
-  const shown = items.filter(
-    (i) =>
-      isHead(i) || (i.queue !== null && i.status !== 'done' && i.status !== 'archived')
-  )
-  return shown.sort((a, b) => {
-    const ha = isHead(a) ? 0 : 1
-    const hb = isHead(b) ? 0 : 1
-    if (ha !== hb) return ha - hb
-    if (ha === 0) {
-      const la = a.locked_at ?? ''
-      const lb = b.locked_at ?? ''
-      if (la !== lb) return la < lb ? -1 : 1
-      return a.id < b.id ? -1 : 1
-    }
-    return a.queue! - b.queue! || (a.id < b.id ? -1 : 1)
+  const heads = items.filter(isHead).sort((a, b) => {
+    const la = a.locked_at ?? ''
+    const lb = b.locked_at ?? ''
+    return la !== lb ? (la < lb ? -1 : 1) : compareById(a, b)
   })
+  return [...heads, ...queuedItems(items)]
 }
 
 export interface LanePos {

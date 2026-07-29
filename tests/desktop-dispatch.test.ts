@@ -52,6 +52,14 @@ test("queuedItems orders by position and skips done/archived/unqueued", () => {
   expect(firstQueued([item({ queue: null })])).toBeNull();
 });
 
+test("queuedItems delegates to shared/workflow: a queue tie is still broken by id", () => {
+  // dispatch.ts used to own its own localeCompare tiebreak; it now
+  // re-exports shared/workflow's queuedItems. Pin that the delegation kept
+  // the byte-compare id tiebreak (roadmap card 42edc88b phase 0).
+  const items = [item({ id: "z", queue: 1 }), item({ id: "a", queue: 1 })];
+  expect(queuedItems(items).map((i) => i.id)).toEqual(["a", "z"]);
+});
+
 test("nextQueuePosition is max + 1 (1 on an empty queue)", () => {
   expect(nextQueuePosition([])).toBe(1);
   expect(nextQueuePosition([item({ queue: null })])).toBe(1);
