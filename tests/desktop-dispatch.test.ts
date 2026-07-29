@@ -378,6 +378,12 @@ test("runDirectiveWave: markDone throwing is not caught -- it propagates and exe
   expect(order).toEqual([]);
 });
 
+test("runDirectiveWave: an invalid/null directive falls back to the '?' label", async () => {
+  const { journaled, deps } = mockDirectiveDeps();
+  await runDirectiveWave([item({ id: "a", kind: "directive", directive: null, title: "Broken card" })], deps);
+  expect(journaled).toEqual(['directive card dispatched: "Broken card" (?)']);
+});
+
 function mockDeps(opts: { announceReturns?: number; failIds?: Set<string> } = {}) {
   const announced: string[] = [];
   const upserted: string[] = [];

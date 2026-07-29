@@ -308,18 +308,34 @@ export interface DirectiveWaveDeps {
  * a live session is real, non-reversible context loss); mark-then-execute
  * instead risks LOSING the directive when execution fails after the mark
  * already committed (the operator just re-queues it -- near-zero cost). So
- * `deps.markDone` always runs first, uncaught: if IT throws, nothing was
- * marked or executed, and the item stays queued for the next drain pass --
+ * `deps.markDone` always runs first, uncaught: if IT throws, that ITEM is
+ * neither marked nor executed and stays queued for the next drain pass --
  * the same retry behavior the old order already had on an upsert failure.
+ * Earlier siblings already processed in this same loop keep their committed
+ * mark+execute; this is a per-item guarantee, not a wave-level one.
  *
  * That reordering has a cost: once marked, a failure is now INVISIBLE in
  * roadmap state (the card reads done even though nothing was injected). The
- * per-item journal line below is therefore the ONLY witness of that outcome
- * -- LOAD-BEARING since this card, not "verbose logging" to trim later.
- * `deps.execute` throwing (the new failure mode this reorder introduces) is
- * caught HERE, not left to abort the whole wave: the mark already committed,
- * so there is no rollback an abort would protect, and siblings in the same
- * wave must still get their turn.
+ * REAL exposure is the ACCEPTED GAP below, not `deps.execute` throwing:
+ * today's wired `executeDirective` (index.ts) cannot reject -- every branch
+ * either returns synchronously after journaling/reporting, or fires the live
+ * PTY injection fire-and-forget with its own internal `.catch`, precisely so
+ * this drain loop never blocks. The `try`/`catch` here is defense-in-depth at
+ * the deps boundary for a future or alternate `execute` that DOES reject, not
+ * a path production traffic currently takes. Also note `deps.execute`
+ * resolving means its injections were DISPATCHED, not that they completed or
+ * succeeded -- their real per-target outcome ("no live target", "not
+ * reachable", each injection's own success/failure) is journaled
+ * asynchronously INSIDE executeDirective itself, independent of the
+ * "directive card dispatched" line below.
+ *
+ * LOAD-BEARING: that "directive card dispatched" line is the one that
+ * actually fires on every live pass (`deps.execute` resolves in production
+ * today, per the paragraph above) -- it is this function's only witness that
+ * `markDone` committed AND `execute` was invoked for the item, as opposed to
+ * the drain never reaching it. Don't delete it as "just a chatty log line":
+ * paired with the ACCEPTED GAP below, its absence for an item that reads
+ * `done` in the roadmap is the signal something died between the two calls.
  *
  * ACCEPTED GAP: a process death between `markDone` resolving and `execute`
  * starting (or before `execute` reaches its own per-target journal calls)
