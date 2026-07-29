@@ -117,6 +117,74 @@ test("fr.json key set is identical to en.json (no missing/extra keys)", async ()
   expect(Object.keys(fr).sort()).toEqual(Object.keys(en).sort());
 });
 
+// ----- emoji-free gate: no pictograph/emoji code points in any locale source -----
+// Card d5b7d842: DESIGN.md bans emoji in the UI outright (every icon is an SVG
+// glyph from components/icons.tsx) -- this is the regression gate that keeps
+// that rule enforced on the 3 sources that actually ship user-facing strings
+// (EN_DEFAULTS, en.json, fr.json; i18n.ts's EN_DEFAULTS is exercised via the
+// already-imported object rather than re-reading the .ts source as text).
+//
+// This is a BLOCKING gate for the whole team, so the range list is
+// deliberately biased toward false negatives (miss a rare emoji) over false
+// positives (flag legitimate typography and block everyone's commit). It
+// intentionally does NOT cover the arrows block (U+2190-U+21FF, used by
+// notifications.help.discord's "->" navigation prose), em/en dashes, curly
+// quotes/guillemets, or full-width punctuation (e.g. composer.new's "+" --
+// FULLWIDTH PLUS SIGN, a deliberate decorative convention, not an emoji).
+const EMOJI_RANGES: Array<[number, number]> = [
+  [0x1f300, 0x1faff], // misc pictographs, emoticons, transport, supplemental symbols
+  [0x2600, 0x26ff], // misc symbols (warning triangle, sun, umbrella, ...)
+  [0x2700, 0x27bf], // dingbats (checkmarks, scissors, ...)
+  [0x2300, 0x23ff], // misc technical (hourglass, stopwatch, playback glyphs)
+  [0x25a0, 0x25ff], // geometric shapes (play/stop triangles and squares)
+  [0x2b00, 0x2bff], // misc symbols and arrows (stars, NOT the plain arrows block)
+  [0x1f1e6, 0x1f1ff], // regional indicators (flag letters)
+  [0xfe0f, 0xfe0f], // variation selector-16 (forces emoji presentation)
+];
+
+function hasEmoji(value: string): boolean {
+  for (const ch of value) {
+    const cp = ch.codePointAt(0)!;
+    if (EMOJI_RANGES.some(([lo, hi]) => cp >= lo && cp <= hi)) return true;
+  }
+  return false;
+}
+
+function findEmojiKeys(sourceName: string, dict: Record<string, string>): string[] {
+  return Object.entries(dict)
+    .filter(([, v]) => hasEmoji(v))
+    .map(([k]) => `${sourceName}:${k}`);
+}
+
+// Purged in full by card d5b7d842 -- starts empty, and must only ever stay
+// empty: a future emoji re-introduced anywhere in these 3 sources is a UI
+// regression against DESIGN.md, not something to baseline away.
+const KNOWN_EMOJI_KEYS: string[] = [];
+
+test("no locale source (EN_DEFAULTS, en.json, fr.json) contains an emoji/pictograph code point", async () => {
+  const dir = join(import.meta.dir, "..", "desktop", "locales");
+  const en = (await Bun.file(join(dir, "en.json")).json()) as Record<string, string>;
+  const fr = (await Bun.file(join(dir, "fr.json")).json()) as Record<string, string>;
+  const hits = [
+    ...findEmojiKeys("EN_DEFAULTS", EN_DEFAULTS),
+    ...findEmojiKeys("en.json", en),
+    ...findEmojiKeys("fr.json", fr),
+  ];
+  expect(hits.sort()).toEqual([...KNOWN_EMOJI_KEYS].sort());
+});
+
+test("the emoji gate itself flags a pictograph -- proves it is load-bearing", () => {
+  expect(hasEmoji("Queue for dispatch")).toBe(false);
+  expect(hasEmoji("⏳ Queue for dispatch")).toBe(true); // U+23F3 HOURGLASS WITH FLOWING SAND
+});
+
+test("the emoji gate does not flag legitimate typography (arrows, dashes, full-width punctuation)", () => {
+  expect(hasEmoji("Developer Portal → your app → Bot")).toBe(false); // U+2192 RIGHTWARDS ARROW
+  expect(hasEmoji("Working tree clean — nothing to review.")).toBe(false); // U+2014 EM DASH
+  expect(hasEmoji("＋ New template")).toBe(false); // U+FF0B FULLWIDTH PLUS SIGN
+  expect(hasEmoji("« {title} »")).toBe(false); // guillemets
+});
+
 // ----- orphan-key check: every EN_DEFAULTS key must have a producer -----
 // A "producer" is either a literal 'key'/"key" occurrence found ANYWHERE in
 // desktop/src (covers t('key') directly, a ternary of two literal keys, and

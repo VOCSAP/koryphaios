@@ -617,7 +617,7 @@ export function WorkflowLane({
           title={hasLead ? undefined : t('roadmap.dispatchNoLeadHint')}
           onClick={onDispatch}
         >
-          {t('roadmap.dispatchFirst')}
+          {GLYPH_ACTIONS.forward} {t('roadmap.dispatchFirst')}
         </button>
         <button
           className="icon-btn"

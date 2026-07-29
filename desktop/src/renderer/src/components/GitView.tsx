@@ -191,7 +191,7 @@ export function GitView(): React.JSX.Element {
           {t('git.refresh')}
         </button>
         <button className="primary" disabled={!diff || !!empty} onClick={() => void review()}>
-          {t('diff.review')}
+          {GLYPH_ACTIONS.search} {t('diff.review')}
         </button>
       </header>
 

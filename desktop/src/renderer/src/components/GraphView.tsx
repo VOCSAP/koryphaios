@@ -931,7 +931,7 @@ export function GraphView(): React.JSX.Element {
                   </div>
                 )}
                 <button className="btn primary graph-infer-btn" disabled={!canInfer} onClick={() => void infer()}>
-                  {running ? t('graph.running') : t('graph.infer')}
+                  {running ? t('graph.running') : <>{GLYPH_ACTIONS.forward} {t('graph.infer')}</>}
                 </button>
               </div>
             )}

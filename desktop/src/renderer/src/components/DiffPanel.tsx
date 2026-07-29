@@ -139,7 +139,7 @@ export function DiffPanel(): React.JSX.Element | null {
         <div className="modal-actions">
           <button onClick={() => openDiff(null)}>{t('common.close')}</button>
           <button className="primary" disabled={!diff || !!empty} onClick={() => void review()}>
-            {t('diff.review')}
+            {GLYPH_ACTIONS.search} {t('diff.review')}
           </button>
         </div>
       </div>

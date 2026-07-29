@@ -583,7 +583,11 @@ export function RoadmapView(): React.JSX.Element {
     const closed = item.status === 'done' || item.status === 'archived'
     return [
       {
-        label: t('roadmap.menuEdit'),
+        label: (
+          <>
+            {GLYPH_ACTIONS.edit} {t('roadmap.menuEdit')}
+          </>
+        ),
         disabled: locked,
         onSelect: () => setDraft(toDraft(item))
       },
@@ -594,17 +598,29 @@ export function RoadmapView(): React.JSX.Element {
             onSelect: () => void setQueue(item, null)
           }
         : {
-            label: t('roadmap.menuQueue'),
+            label: (
+              <>
+                {GLYPH_BADGES.clepsydra} {t('roadmap.menuQueue')}
+              </>
+            ),
             disabled: locked || closed,
             onSelect: () => void queueItem(item)
           },
       {
-        label: t('roadmap.menuAssign'),
+        label: (
+          <>
+            {GLYPH_ACTIONS.forward} {t('roadmap.menuAssign')}
+          </>
+        ),
         disabled: locked || closed,
         onSelect: () => setAssignItem(item)
       },
       {
-        label: t('roadmap.menuDelete'),
+        label: (
+          <>
+            {GLYPH_ACTIONS.trash} {t('roadmap.menuDelete')}
+          </>
+        ),
         danger: true,
         disabled: locked || item.status === 'archived',
         onSelect: () => setConfirmArchive(item)

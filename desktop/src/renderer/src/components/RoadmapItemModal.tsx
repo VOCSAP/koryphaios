@@ -306,7 +306,7 @@ export function RoadmapItemModal({
             item.status !== 'done' &&
             (item.queue === null ? (
               <button className="btn" onClick={onQueue}>
-                {t('roadmap.queueAdd')}
+                {GLYPH_BADGES.clepsydra} {t('roadmap.queueAdd')}
               </button>
             ) : (
               <button className="btn" onClick={onUnqueue}>

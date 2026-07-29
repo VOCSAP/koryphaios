@@ -425,7 +425,7 @@ export function RoadmapList(): React.JSX.Element {
               setSheetItem(null)
             }}
           >
-            ⏱ {t('roadmap.menuQueue')}
+            <span className="msheet-icon">{GLYPH_BADGES.clepsydra}</span> {t('roadmap.menuQueue')}
           </button>
           <button
             className="msheet-item"
@@ -445,7 +445,7 @@ export function RoadmapList(): React.JSX.Element {
                 setSheetItem(null)
               }}
             >
-              ⏹ {t('roadmap.stop')}
+              {t('roadmap.stop')}
             </button>
           )}
           <button
@@ -456,7 +456,7 @@ export function RoadmapList(): React.JSX.Element {
               setSheetItem(null)
             }}
           >
-            {t('roadmap.menuDelete')}
+            <span className="msheet-icon">{GLYPH_ACTIONS.trash}</span> {t('roadmap.menuDelete')}
           </button>
         </MobileSheet>
       )}

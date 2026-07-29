@@ -1,5 +1,6 @@
 import { useDeck } from '../store'
 import { useT } from '../i18n'
+import { GLYPH_BADGES } from './icons'
 
 /**
  * Persistent full-width red banner at the top of the window (PLAN O5): shown
@@ -25,7 +26,7 @@ export function StatusBanner(): React.JSX.Element | null {
   return (
     <div className="status-banner status-banner-error" role="alert">
       <span className="status-banner-text" title={status.lastError ?? undefined}>
-        {t('banner.brokerDown', { time: since })}
+        {GLYPH_BADGES.warning} {t('banner.brokerDown', { time: since })}
         {status.lastError ? <span className="status-banner-detail"> — {status.lastError}</span> : null}
       </span>
       <button className="status-banner-action" onClick={() => void window.api.retryBroker()}>
