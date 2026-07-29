@@ -182,9 +182,12 @@ const KNOWN_ORPHAN_KEYS = [
 
 test("every EN_DEFAULTS key has a producer somewhere in desktop/src", () => {
   const files = collectDesktopSrcFiles(DESKTOP_SRC);
-  // Sanity floor: if the scan root is ever wrong, files collapses towards 0
-  // and every key would spuriously read as orphan -- or worse, this test
-  // would silently pass on an empty producer set without this assertion.
+  // Sanity floor: if the scan root is ever wrong, files collapses towards 0,
+  // findOrphans(EN_DEFAULTS keys, []) then reports EVERY key as orphan (no
+  // source text to search), and this test fails LOUDLY against the 5-item
+  // KNOWN_ORPHAN_KEYS baseline -- this assertion turns that failure into an
+  // obvious "scan root is broken" signal instead of a confusing wall of
+  // spurious orphans to chase one by one.
   expect(files.length).toBeGreaterThan(100);
   const orphans = findOrphans(Object.keys(EN_DEFAULTS), files);
   // Any NEW orphan (beyond the known, tracked-for-cleanup baseline) fails
@@ -328,6 +331,12 @@ const KNOWN_MISSING_KEYS: string[] = [];
 
 test("every literal t('...') key used in desktop/src exists in EN_DEFAULTS", () => {
   const files = collectDesktopSrcFiles(DESKTOP_SRC);
+  // Sanity floor, mirrored from the orphan check above but with the OPPOSITE
+  // failure mode: if the scan root is ever wrong, files collapses towards 0,
+  // collectUsedKeys([]) then yields an empty used set, so missing stays
+  // empty too -- this test would SILENTLY PASS against the empty
+  // KNOWN_MISSING_KEYS baseline despite having scanned nothing. This
+  // assertion is what turns that silent pass into a loud, obvious failure.
   expect(files.length).toBeGreaterThan(100);
   const used = collectUsedKeys(files);
   const missing = [...used].filter((k) => !(k in EN_DEFAULTS));
