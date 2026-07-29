@@ -980,6 +980,12 @@ const runMagicCompact = async (
 }
 
 /**
+ * CONTRACT (card 722fa003): callers rely on this never rejecting --
+ * runDirectiveWave's catch in dispatch.ts is defense-in-depth, not a live
+ * path. Keep every await in here guarded (try/catch) or fire-and-forget with
+ * its own handler; a bare `void someAsyncCall(...)` with no .catch turns any
+ * rejection into a silent unhandled promise rejection on this live-PTY path.
+ *
  * Execute a directive card (CT3): the Deck itself types the command into the
  * terminals of the card's live targets. It NEVER announces to the lead. The
  * command is a code constant (directiveKeys); the card's payload only selects
@@ -1019,7 +1025,9 @@ const executeDirective = async (item: RoadmapItem): Promise<void> => {
   }
   for (const t of matched) {
     if (cmd === 'magic_compact') {
-      void runMagicCompact(t.id, t.peerId, useMagic, magicMode)
+      void runMagicCompact(t.id, t.peerId, useMagic, magicMode).catch((e) =>
+        reportError('dispatch', `magic_compact failed for "${t.peerId}"`, e)
+      )
     } else {
       void service
         .injectCommand(t.id, keys)
