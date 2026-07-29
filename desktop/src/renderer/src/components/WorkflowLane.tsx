@@ -375,7 +375,9 @@ export function WorkflowLane({
         setCaret(null)
         setConflicts([])
       } else {
-        const slot = insertSlotAt(lane, pos, cx)
+        // .join ignored here for now -- full join-aware wiring (caret visuals,
+        // waves production) lands in the follow-up rendering-integration commit.
+        const { index: slot } = insertSlotAt(lane, pos, cx)
         setCaret({ slot, x: caretXAt(lane, pos, cx) })
         const dragItem = byId.get(d.id)
         setConflicts(dragItem ? slotConflicts(lane, dragItem, slot) : [])
@@ -407,12 +409,12 @@ export function WorkflowLane({
       const hit0 = stackTargetAt(lane, pos, cx, cy, d.id)
       const hit = hit0 && !dependsRelated(items, d.id, hit0.targetId) ? hit0 : null
       if (hit) commitStack(d.id, hit.targetId)
-      else commitDrop(d.id, insertSlotAt(lane, pos, cx))
+      else commitDrop(d.id, insertSlotAt(lane, pos, cx).index)
     } else if (d.kind === 'link' && d.id) {
       // Released over empty canvas: create a new item depending on the source,
       // inserted where the cursor points. Cancelling the form creates nothing.
       const w = toWorld(e.clientX, e.clientY)
-      const slot = Math.max(headCount, insertSlotAt(lane, pos, w.x))
+      const slot = Math.max(headCount, insertSlotAt(lane, pos, w.x).index)
       onCreateAt(slot - headCount, [d.id])
     }
   }
@@ -452,7 +454,7 @@ export function WorkflowLane({
     // stack preview cannot exclude the card itself — the drop recomputes.
     const hit = stackTargetAt(lane, pos, w.x, w.y)
     setStack(hit)
-    setCaret(hit ? null : { slot: insertSlotAt(lane, pos, w.x), x: caretXAt(lane, pos, w.x) })
+    setCaret(hit ? null : { slot: insertSlotAt(lane, pos, w.x).index, x: caretXAt(lane, pos, w.x) })
   }
 
   const onDrop = (e: React.DragEvent): void => {
@@ -465,7 +467,7 @@ export function WorkflowLane({
     const hit0 = stackTargetAt(lane, pos, w.x, w.y, id)
     const hit = hit0 && !dependsRelated(items, id, hit0.targetId) ? hit0 : null
     if (hit) commitStack(id, hit.targetId)
-    else commitDrop(id, insertSlotAt(lane, pos, w.x))
+    else commitDrop(id, insertSlotAt(lane, pos, w.x).index)
   }
 
   // ----- scrollbar (visible when the chain overflows at the zoom floor) -----
@@ -613,7 +615,7 @@ export function WorkflowLane({
           onContextMenu={(e) => {
             e.preventDefault()
             const w = toWorld(e.clientX, e.clientY)
-            const slot = Math.max(headCount, insertSlotAt(lane, pos, w.x))
+            const slot = Math.max(headCount, insertSlotAt(lane, pos, w.x).index)
             setCanvasMenu({ x: e.clientX, y: e.clientY, slot: slot - headCount })
           }}
         >

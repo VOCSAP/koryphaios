@@ -95,99 +95,58 @@ export interface LanePos {
   y: number
   /** 0-based execution rank (locked heads included). */
   rank: number
-  /** Horizontal column: dependency depth, components chained left to right. */
+  /** Horizontal column: the WAVE index (see layoutLane). */
   col: number
-  /** Vertical slot inside the column (0 = top): parallel siblings stack. */
+  /** Vertical slot inside the column (0 = top): wave members stack. */
   row: number
 }
 
 /**
- * Derived placement, hierarchy-first: inside a connected component of the
- * depends_on graph, the column is the dependency DEPTH (longest path from the
- * component's roots) -- so N:1 / 1:N fan-ins and fan-outs stack their
- * parallel branches vertically in the same column, like the graph view's
- * layout transposed. Unrelated items (distinct components) keep the queue
- * reading: components are chained left to right by their first execution
- * rank, so a dependency-free queue still renders as the familiar flat chain.
- * Inside a column, siblings stack top-down by execution rank.
+ * Derived placement, wave-first: the column is the WAVE index -- a run of
+ * items the broker stamps at the SAME execution slot (roadmap card 42edc88b
+ * phase 1's `waves` reorder param ties ids under one `queue` value). Distinct
+ * queue values render as distinct columns via a DENSE rank over the values
+ * actually PRESENT, not the raw value itself: `queue` numbers are not
+ * guaranteed contiguous (a mid-queue removal, or an explicit `queue` write
+ * via roadmap_add/roadmap_update, both leave gaps), so indexing by the raw
+ * value would draw empty columns for the gaps.
+ *
+ * Locked in_progress heads all share column 0 instead of one column each:
+ * heads are the one place the system has ACTUAL, observed concurrency
+ * (several agents genuinely working right now), not a scheduling intent --
+ * laying them out left to right like a queue would draw real parallelism as
+ * sequential, in a view whose whole point in phase 2 is to show
+ * parallelism. laneItems already orders heads oldest-locked-first, so row
+ * order still reflects lock age; queued items stack by queue order
+ * (queuedItems' compareById tiebreak keeps ties stable).
  */
 export function layoutLane(ordered: RoadmapItem[]): Map<string, LanePos> {
-  const shown = new Set(ordered.map((i) => i.id))
-  const byId = new Map(ordered.map((i) => [i.id, i]))
+  const pos = new Map<string, LanePos>()
+  const rankOf = new Map(ordered.map((i, r) => [i.id, r]))
 
-  // Union-find over displayed items, edges = displayed depends_on pairs.
-  const parent = new Map<string, string>()
-  const find = (x: string): string => {
-    let r = x
-    while (parent.get(r) !== r) r = parent.get(r)!
-    let c = x
-    while (parent.get(c) !== c) {
-      const n = parent.get(c)!
-      parent.set(c, r)
-      c = n
-    }
-    return r
-  }
-  for (const i of ordered) parent.set(i.id, i.id)
-  for (const i of ordered) {
-    for (const dep of i.depends_on) {
-      if (shown.has(dep)) parent.set(find(dep), find(i.id))
-    }
-  }
-
-  // Dependency depth (longest path over displayed deps; pre-marked cycles safe).
-  const depths = new Map<string, number>()
-  const depthOf = (id: string): number => {
-    const cached = depths.get(id)
-    if (cached !== undefined) return cached
-    depths.set(id, 0)
-    const item = byId.get(id)!
-    const d = item.depends_on.reduce(
-      (max, dep) => (shown.has(dep) ? Math.max(max, depthOf(dep) + 1) : max),
-      0
-    )
-    depths.set(id, d)
-    return d
-  }
-  for (const i of ordered) depthOf(i.id)
-
-  // Components in first-rank order, each starting after the previous one.
-  const componentOrder: string[] = []
-  const members = new Map<string, RoadmapItem[]>()
-  ordered.forEach((i) => {
-    const root = find(i.id)
-    const list = members.get(root)
-    if (list) list.push(i)
-    else {
-      members.set(root, [i])
-      componentOrder.push(root)
-    }
+  const heads = ordered.filter(isHead)
+  heads.forEach((item, row) => {
+    pos.set(item.id, { x: 0, y: row * WF_PITCH_Y, rank: rankOf.get(item.id)!, col: 0, row })
   })
 
-  const rank = new Map(ordered.map((i, r) => [i.id, r]))
-  const pos = new Map<string, LanePos>()
-  let colOffset = 0
-  for (const root of componentOrder) {
-    const items = members.get(root)!
-    const rows = new Map<number, number>() // per-column stack cursor
-    let maxDepth = 0
-    // Members arrive in rank order, so per-column stacking follows the queue.
-    for (const i of items) {
-      const depth = depths.get(i.id)!
-      maxDepth = Math.max(maxDepth, depth)
-      const col = colOffset + depth
-      const row = rows.get(depth) ?? 0
-      rows.set(depth, row + 1)
-      pos.set(i.id, {
-        x: col * WF_PITCH_X,
-        y: row * WF_PITCH_Y,
-        rank: rank.get(i.id)!,
-        col,
-        row
-      })
-    }
-    colOffset += maxDepth + 1
-  }
+  const queued = ordered.filter((i) => !isHead(i))
+  const distinctQueues = [...new Set(queued.map((i) => i.queue))].sort((a, b) => a! - b!)
+  const colOffset = heads.length > 0 ? 1 : 0
+  const queueCol = new Map(distinctQueues.map((q, i) => [q, i + colOffset]))
+  const rows = new Map<number, number>() // per-column stack cursor
+  queued.forEach((item) => {
+    const col = queueCol.get(item.queue)!
+    const row = rows.get(col) ?? 0
+    rows.set(col, row + 1)
+    pos.set(item.id, {
+      x: col * WF_PITCH_X,
+      y: row * WF_PITCH_Y,
+      rank: rankOf.get(item.id)!,
+      col,
+      row
+    })
+  })
+
   return pos
 }
 
@@ -337,11 +296,26 @@ export function enqueueClosure(items: RoadmapItem[], id: string): string[] {
  * side of one of its DIRECT dependency links: a dependency scheduled at/after
  * the insertion point, or a dependent scheduled before it. The renderer turns
  * these cards' borders and the connecting links red while the drag hovers.
+ * Only DIRECT depends_on links are checked (`drag.depends_on`/`i.depends_on`
+ * membership, never a transitive closure): if A depends on B, B depends on
+ * C, and a drop lands A and C in the same wave, that real violation is NOT
+ * reported here. Catching it would need a full transitive closure computed
+ * on every drag frame; treat this as a known limit of the check, not a
+ * guarantee that any two co-located cards are conflict-free.
+ *
+ * When `join` is true the drop additionally TIES `drag`'s queue with the
+ * wave landed on (see insertSlotAt's `join`): any OTHER member of that wave
+ * directly linked to `drag` is then a conflict too, independent of
+ * before/after order -- two items on either end of a direct dependency can
+ * never share an execution slot, even when their relative position would
+ * otherwise look fine. A wave made only of locked heads is never a join
+ * target (heads are not queue-tied; see layoutLane).
  */
 export function slotConflicts(
   ordered: RoadmapItem[],
   drag: RoadmapItem,
-  slot: number
+  slot: number,
+  join = false
 ): string[] {
   const without = ordered.filter((i) => i.id !== drag.id)
   const rank = ordered.findIndex((i) => i.id === drag.id)
@@ -352,21 +326,51 @@ export function slotConflicts(
     if (drag.depends_on.includes(i.id) && j >= idx) out.push(i.id)
     if (i.depends_on.includes(drag.id) && j < idx) out.push(i.id)
   })
+  if (join) {
+    const anchor = without[idx] ?? without[idx - 1]
+    if (anchor && !isHead(anchor)) {
+      for (const i of without) {
+        if (isHead(i) || i.queue !== anchor.queue || out.includes(i.id)) continue
+        if (drag.depends_on.includes(i.id) || i.depends_on.includes(drag.id)) out.push(i.id)
+      }
+    }
+  }
   return out
+}
+
+export interface SlotHit {
+  /** Insertion index in the full lane order (see insertSlotAt). */
+  index: number
+  /**
+   * True when `worldX` falls inside an existing (non-head) column's
+   * WF_NODE_W-wide band: the drop TIES `drag` into that wave, rather than
+   * starting a new one-item wave in the gap between two columns.
+   */
+  join: boolean
 }
 
 /**
  * Insertion slot (index in the full lane order) for a drop at world-space
  * `worldX`: the number of displayed cards whose column lies left of the drop.
- * With a hierarchy layout several cards share a column, so a cut between two
- * columns inserts after every card of the columns left of it.
+ * With the wave layout several cards share a column, so a cut between two
+ * columns inserts after every card of the columns left of it. `join` is
+ * derived purely from `worldX` against the already-laid-out column x
+ * positions in `pos` (never from queue equality directly), since that is
+ * what the caret/hover math in the renderer actually has at hand; the heads
+ * column never counts toward `join` (see layoutLane and slotConflicts).
  */
 export function insertSlotAt(
   ordered: RoadmapItem[],
   pos: Map<string, LanePos>,
   worldX: number
-): number {
-  return ordered.filter((i) => pos.get(i.id)!.x + WF_NODE_W / 2 < worldX).length
+): SlotHit {
+  const index = ordered.filter((i) => pos.get(i.id)!.x + WF_NODE_W / 2 < worldX).length
+  const join = ordered.some((i) => {
+    if (isHead(i)) return false
+    const x = pos.get(i.id)!.x
+    return Math.abs(x + WF_NODE_W / 2 - worldX) < WF_NODE_W / 2
+  })
+  return { index, join }
 }
 
 /** World X of the insertion caret for a cut at `worldX` (between columns). */

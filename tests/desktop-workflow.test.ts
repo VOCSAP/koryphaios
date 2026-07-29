@@ -93,35 +93,67 @@ test('layoutLane: a dependency-free queue renders as a flat left-to-right chain'
   expect([pos.get('b')!.y, pos.get('c')!.y, pos.get('d')!.y]).toEqual([0, 0, 0])
 })
 
-test('layoutLane: the diamond stacks parallel branches in the same column', () => {
-  // A -> B, A -> C, B -> D, C -> D: B and C are parallel siblings.
+test('layoutLane: items tied on the same queue value share a column (a wave)', () => {
   const ordered = laneItems([
     item('A', { queue: 1 }),
-    item('B', { queue: 2, depends_on: ['A'] }),
-    item('C', { queue: 3, depends_on: ['A'] }),
-    item('D', { queue: 4, depends_on: ['B', 'C'] })
+    item('B', { queue: 2 }),
+    item('C', { queue: 2 }), // tied with B: same broker-stamped wave
+    item('D', { queue: 3 })
   ])
   const pos = layoutLane(ordered)
   expect(pos.get('A')!.col).toBe(0)
   expect(pos.get('B')!.col).toBe(1)
   expect(pos.get('C')!.col).toBe(1)
-  expect(pos.get('B')!.y).toBe(0)
-  expect(pos.get('C')!.y).toBe(WF_PITCH_Y) // stacked below B (queue order)
+  expect(pos.get('B')!.row).toBe(0)
+  expect(pos.get('C')!.row).toBe(1)
+  expect(pos.get('C')!.y).toBe(WF_PITCH_Y) // stacked below B
   expect(pos.get('D')!.col).toBe(2)
   expect(pos.get('D')!.x).toBe(2 * WF_PITCH_X)
 })
 
-test('layoutLane: unrelated components chain horizontally after each other', () => {
+test('layoutLane: a depends_on link does NOT pull items into the same column anymore', () => {
+  // Unlike the old dependency-depth layout, a dependency chain with distinct
+  // queue values now lands in distinct columns -- the wave is defined purely
+  // by the tied queue value, not by the graph shape.
   const ordered = laneItems([
     item('a1', { queue: 1 }),
-    item('a2', { queue: 2, depends_on: ['a1'] }),
-    item('solo', { queue: 3 })
+    item('a2', { queue: 2, depends_on: ['a1'] })
   ])
   const pos = layoutLane(ordered)
-  // Component {a1, a2} spans columns 0-1; the isolated item continues at 2.
+  expect(pos.get('a1')!.col).toBe(0)
   expect(pos.get('a2')!.col).toBe(1)
-  expect(pos.get('solo')!.col).toBe(2)
-  expect(pos.get('solo')!.y).toBe(0)
+})
+
+test('layoutLane: distinct queue values rank densely, a gap does not draw an empty column', () => {
+  // Mirrors tests/broker-roadmap-queue.test.ts:50 (queue: 7 with nothing else
+  // queued is reachable): the column must be the RANK of the distinct queue
+  // values present, not the raw value itself.
+  const ordered = laneItems([item('a', { queue: 1 }), item('b', { queue: 7 })])
+  const pos = layoutLane(ordered)
+  expect(pos.get('a')!.col).toBe(0)
+  expect(pos.get('b')!.col).toBe(1)
+  expect(pos.get('b')!.x).toBe(WF_PITCH_X)
+})
+
+test('layoutLane: locked heads share column 0 -- observed concurrency, not a queue', () => {
+  const ordered = laneItems([
+    item('headA', { status: 'in_progress', locked: true, locked_by: 'p', locked_at: '2026-01-01' }),
+    item('headB', { status: 'in_progress', locked: true, locked_by: 'p', locked_at: '2026-01-02' }),
+    item('q1', { queue: 1 })
+  ])
+  const pos = layoutLane(ordered)
+  expect(pos.get('headA')).toEqual({ x: 0, y: 0, rank: 0, col: 0, row: 0 })
+  expect(pos.get('headB')).toEqual({ x: 0, y: WF_PITCH_Y, rank: 1, col: 0, row: 1 })
+  // Queue columns start after the shared heads column, not at 0.
+  expect(pos.get('q1')!.col).toBe(1)
+  expect(pos.get('q1')!.x).toBe(WF_PITCH_X)
+})
+
+test('layoutLane: with no locked heads, queue columns start at column 0', () => {
+  const ordered = laneItems([item('q1', { queue: 5 })])
+  const pos = layoutLane(ordered)
+  expect(pos.get('q1')!.col).toBe(0)
+  expect(pos.get('q1')!.x).toBe(0)
 })
 
 test('laneEdges: flags a dependency queued after its dependent', () => {
@@ -159,20 +191,49 @@ test('dependsWouldCycle walks depends_on transitively', () => {
   expect(dependsWouldCycle(items, 'a', 'c')).toBe(false)
 })
 
-test('insertSlotAt counts the cards left of the cut, parallel columns as one', () => {
+test('insertSlotAt: index counts the cards left of the cut, a wave counts as one column', () => {
   const ordered = laneItems([
     item('A', { queue: 1 }),
-    item('B', { queue: 2, depends_on: ['A'] }),
-    item('C', { queue: 3, depends_on: ['A'] }),
-    item('D', { queue: 4, depends_on: ['B', 'C'] })
+    item('B', { queue: 2 }),
+    item('C', { queue: 2 }) // tied with B: a two-item wave in column 1
   ])
   const pos = layoutLane(ordered)
-  expect(insertSlotAt(ordered, pos, -100)).toBe(0)
+  expect(insertSlotAt(ordered, pos, -100).index).toBe(0)
   // Between column 0 (A) and column 1 (B+C): after A only.
-  expect(insertSlotAt(ordered, pos, WF_PITCH_X - 10)).toBe(1)
-  // Between column 1 and column 2 (D): after A, B and C.
-  expect(insertSlotAt(ordered, pos, 2 * WF_PITCH_X - 10)).toBe(3)
-  expect(insertSlotAt(ordered, pos, 99 * WF_PITCH_X)).toBe(4)
+  expect(insertSlotAt(ordered, pos, WF_PITCH_X - 10).index).toBe(1)
+  expect(insertSlotAt(ordered, pos, 99 * WF_PITCH_X).index).toBe(3)
+})
+
+test('insertSlotAt: join is true inside an existing wave band, false in the gap or outside', () => {
+  const ordered = laneItems([
+    item('A', { queue: 1 }),
+    item('B', { queue: 2 }),
+    item('C', { queue: 2 }) // tied with B: column 1's band
+  ])
+  const pos = layoutLane(ordered)
+  const bx = pos.get('B')!.x
+  // Squarely inside column 1's band: joins that wave.
+  expect(insertSlotAt(ordered, pos, bx + WF_NODE_W / 2)).toEqual({ index: 1, join: true })
+  // In the gap between column 0 and column 1's bands: a cut, not a join.
+  const gapMid = WF_PITCH_X - (WF_PITCH_X - WF_NODE_W) / 2
+  expect(insertSlotAt(ordered, pos, gapMid)).toEqual({ index: 1, join: false })
+  // Off the far end: neither inside a band nor a join.
+  expect(insertSlotAt(ordered, pos, 99 * WF_PITCH_X)).toEqual({ index: 3, join: false })
+})
+
+test('insertSlotAt: the heads column never counts as a join target', () => {
+  const ordered = laneItems([
+    item('head', { status: 'in_progress', locked: true, locked_by: 'p', locked_at: '2026-01-01' }),
+    item('q1', { queue: 1 })
+  ])
+  const pos = layoutLane(ordered)
+  // Squarely on the heads column (x = 0): still not a join.
+  expect(insertSlotAt(ordered, pos, WF_NODE_W / 2).join).toBe(false)
+})
+
+test('insertSlotAt: an empty lane never throws and reports no join', () => {
+  const pos = layoutLane([])
+  expect(insertSlotAt([], pos, 0)).toEqual({ index: 0, join: false })
 })
 
 test('stackTargetAt: above/below a column card reads as a parallel placement', () => {
@@ -339,6 +400,38 @@ test('slotConflicts: flags deps landing after the cut and dependents before it',
   expect(slotConflicts(ordered, b, 3)).toEqual(['C'])
   // Keeping B in the middle wrongs nobody.
   expect(slotConflicts(ordered, b, 1)).toEqual([])
+  // join omitted (defaults false): identical to the calls above.
+  expect(slotConflicts(ordered, b, 0, false)).toEqual(['A'])
+})
+
+test('slotConflicts: join=true additionally flags a direct dependency link inside the joined wave', () => {
+  const ordered = laneItems([
+    item('A', { queue: 1 }),
+    item('B', { queue: 2 }),
+    item('C', { queue: 2, depends_on: ['A'] }) // tied with B, but depends on A
+  ])
+  const a = ordered.find((i) => i.id === 'A')!
+  // Dropping A to join B/C's wave: the plain before/after check does not
+  // flag C (A lands ahead of C in that slot), but A and C are directly
+  // linked, so join=true must still catch it.
+  expect(slotConflicts(ordered, a, 1, true)).toContain('C')
+  expect(slotConflicts(ordered, a, 1, false)).toEqual([])
+})
+
+test('slotConflicts: join=true against a heads-only column never adds a conflict', () => {
+  const ordered = laneItems([
+    item('head', { status: 'in_progress', locked: true, locked_by: 'p', locked_at: '2026-01-01' }),
+    item('q', { queue: 1 })
+  ])
+  const q = ordered.find((i) => i.id === 'q')!
+  // Dropping q at slot 0 (the heads column): join=true must not treat the
+  // head as a wave partner -- heads are never queue-tied.
+  expect(slotConflicts(ordered, q, 0, true)).toEqual([])
+})
+
+test('slotConflicts: an empty lane or a drag id absent from it never throws', () => {
+  expect(slotConflicts([], item('stray'), 0)).toEqual([])
+  expect(slotConflicts([], item('stray'), 0, true)).toEqual([])
 })
 
 test('insertAt moves an already-queued id and clamps the slot', () => {
