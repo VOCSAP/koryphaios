@@ -765,21 +765,36 @@ const insertMessage = db.prepare(`
   VALUES (?, ?, ?, ?, ?, 0)
 `);
 
+// Ordered by id, not sent_at: same latent bug class as ackPriorMessagesForSender
+// below (sent_at is millisecond-resolution and two sends on a fast local
+// broker regularly tie within the same millisecond). ORDER BY sent_at, id
+// (not id alone): sent_at stays the PRIMARY key so the intended chronological
+// order is preserved -- id only breaks a genuine sent_at TIE. In real traffic
+// the two are always monotonically correlated (recordMessageTx assigns both
+// in the same transaction), so this composite key changes nothing there; it
+// matters for tests that seed historical sent_at values directly (e.g.
+// tests/broker-flush-cap.test.ts's insertMessageAt helper inserts rows with
+// sent_at older than their id to simulate a time window), where a plain
+// ORDER BY id would silently invert the intended recency order. Kleos:
+// koryphaios card 82e3d293, follow-up to cf4af14d/commit 53526ca.
 const selectUndelivered = db.prepare(
-  `SELECT * FROM messages WHERE to_token = ? AND delivered = 0 ORDER BY sent_at ASC`
+  `SELECT * FROM messages WHERE to_token = ? AND delivered = 0 ORDER BY sent_at ASC, id ASC`
 );
 
 // Capped variant used only by flushPendingForToken to avoid replaying the entire
 // backlog at every WS reconnect. /poll-messages and /peek-messages keep using the
 // uncapped selectUndelivered so an explicit check_messages still returns everything.
+// The sent_at > datetime('now', ?) filter is a coarse time WINDOW (like the TTL
+// purge below), not a same-millisecond comparison, so it stays on sent_at --
+// only the ORDER BY clauses gain the id tiebreaker, same reasoning as above.
 const selectUndeliveredCapped = db.prepare(
   `SELECT * FROM (
      SELECT * FROM messages
      WHERE to_token = ? AND delivered = 0
        AND sent_at > datetime('now', ?)
-     ORDER BY sent_at DESC
+     ORDER BY sent_at DESC, id DESC
      LIMIT ?
-   ) ORDER BY sent_at ASC`
+   ) ORDER BY sent_at ASC, id ASC`
 );
 
 const markDelivered = db.prepare(`UPDATE messages SET delivered = 1 WHERE id = ?`);

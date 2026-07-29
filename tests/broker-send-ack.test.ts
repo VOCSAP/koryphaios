@@ -133,3 +133,55 @@ test("ack ne touche pas les messages posterieurs au reply", async () => {
   expect(msgs[1]!.text).toBe("after");
   expect(msgs[1]!.delivered).toBe(0);
 });
+
+// Inserts directly with a FORCED identical sent_at, instead of relying on real
+// sends racing into the same millisecond (broker card 82e3d293, follow-up to
+// cf4af14d/commit 53526ca): this is deterministic on every run rather than
+// depending on how fast the local broker happens to be.
+function insertMessageAtSameMs(
+  from_token: string,
+  to_token: string,
+  text: string,
+  sentAtIso: string
+) {
+  const db = new Database(broker.dbPath);
+  try {
+    db.run("PRAGMA journal_mode = WAL");
+    db.run("PRAGMA busy_timeout = 3000");
+    const group_id = db
+      .query("SELECT group_id FROM peers WHERE instance_token = ?")
+      .get(from_token) as { group_id: string };
+    db.run(
+      `INSERT INTO messages (from_token, to_token, group_id, text, sent_at, delivered)
+       VALUES (?, ?, ?, ?, ?, 0)`,
+      [from_token, to_token, group_id.group_id, text, sentAtIso]
+    );
+  } finally {
+    db.close();
+  }
+}
+
+test("/poll-messages garde l'ordre d'insertion quand sent_at est identique (meme milliseconde)", async () => {
+  const x = await register("hack4x", "/ack4x");
+  const y = await register("hack4y", "/ack4y");
+
+  // 5 messages avec exactement le meme sent_at -- un ORDER BY sent_at seul
+  // serait non-deterministe sur ce lot ; id (AUTOINCREMENT, assigne dans
+  // l'ordre d'insertion) doit departager.
+  const tiedSentAt = new Date().toISOString();
+  for (let i = 0; i < 5; i++) {
+    insertMessageAtSameMs(x.body.instance_token, y.body.instance_token, `TIE#${i}`, tiedSentAt);
+  }
+
+  const poll = await post<{ messages: { text: string }[] }>(`${broker.url}/poll-messages`, {
+    instance_token: y.body.instance_token,
+  });
+  expect(poll.status).toBe(200);
+  expect(poll.body.messages.map((m) => m.text)).toEqual([
+    "TIE#0",
+    "TIE#1",
+    "TIE#2",
+    "TIE#3",
+    "TIE#4",
+  ]);
+});
