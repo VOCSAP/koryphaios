@@ -14,6 +14,21 @@ export interface PtyExitPayload {
 /** Give up stripping the interactive start marker after this many buffered bytes. */
 const MARKER_BUFFER_CAP = 65536
 
+/**
+ * ConPTY (Windows) can WITHHOLD a TUI's first full-screen frame: the child
+ * draws it, ConPTY buffers it, and NOTHING reaches the pipe reader until the
+ * next resize forces a repaint. Field-proven on the dev-channels warning
+ * dialog (2026-07-28 audit): 30 s of silence, then a resize to the SAME
+ * dimensions flushed the whole dialog instantly. The Deck only resizes on a
+ * tile's doFit (mount / view return), which always lands BEFORE claude has
+ * drawn its first screen -- so the dialog stayed invisible and the startup
+ * auto-ack (startup-ack.ts) never fired until the operator navigated away and
+ * back. These delayed same-dims "kicks" force the flush instead. A kick on an
+ * already-flowing PTY is a harmless repaint, so they are unconditional; the
+ * spread covers slow boots (MCP servers, hooks) without kicking forever.
+ */
+const CONPTY_KICK_DELAYS_MS = [1500, 4000, 8000, 15000]
+
 interface Spawned {
   proc: pty.IPty
   cols: number
@@ -22,6 +37,8 @@ interface Spawned {
   marker: string | null
   markerSeen: boolean
   preBuf: string
+  /** Pending ConPTY flush kicks (win32 only, cleared on kill/exit/respawn). */
+  kickTimers: NodeJS.Timeout[]
 }
 
 /** Owns every live PTY. One instance for the whole app. */
@@ -52,8 +69,32 @@ export class PtyManager extends EventEmitter {
       }
     })
 
-    const state: Spawned = { proc, cols: 80, rows: 24, marker, markerSeen: false, preBuf: '' }
+    const state: Spawned = {
+      proc,
+      cols: 80,
+      rows: 24,
+      marker,
+      markerSeen: false,
+      preBuf: '',
+      kickTimers: []
+    }
     this.procs.set(id, state)
+
+    // See CONPTY_KICK_DELAYS_MS: force ConPTY to flush the withheld first
+    // frame. Same-dims resize -- dims may have been updated by resize() by the
+    // time a kick fires, hence state.cols/rows read at fire time.
+    if (process.platform === 'win32') {
+      state.kickTimers = CONPTY_KICK_DELAYS_MS.map((ms) =>
+        setTimeout(() => {
+          if (this.procs.get(id) !== state) return
+          try {
+            state.proc.resize(state.cols, state.rows)
+          } catch {
+            // PTY just exited; onExit owns the cleanup.
+          }
+        }, ms)
+      )
+    }
 
     proc.onData((data) => this.handleData(id, data))
     proc.onExit(({ exitCode }) => {
@@ -66,6 +107,7 @@ export class PtyManager extends EventEmitter {
       // typed /exit, or it crashed).
       if (this.procs.get(id) !== state) return
       this.procs.delete(id)
+      for (const t of state.kickTimers) clearTimeout(t)
       this.emit('exit', { id, exitCode } satisfies PtyExitPayload)
     })
 
@@ -131,6 +173,7 @@ export class PtyManager extends EventEmitter {
     const s = this.procs.get(id)
     if (!s) return
     this.procs.delete(id)
+    for (const t of s.kickTimers) clearTimeout(t)
     try {
       s.proc.kill()
     } catch {

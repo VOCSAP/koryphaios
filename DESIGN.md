@@ -27,6 +27,9 @@ use the variables so both themes keep working.
 | `--danger`     | `#e05555` | `#c23b3b` | Red — destructive                      |
 | `--selected`   | `#2d3b52` | `#d8e6ff` | Selected row background                |
 | `--glow`       | `#d4a24a` | `#b8860b` | Gold — attention-glow halo (see §5)    |
+| `--action-prompt` | `#e0b341` | `#b07d10` | Yellow — "compose / insert a prompt" |
+| `--action-expand` | `#a06bff` | `#7c3aed` | Violet — "maximize / restore a tile" |
+| `--select-arrow` | data URI | data URI | Chevron drawn for `<select>` (see §4)  |
 
 Layout tokens: `--gap: 8px`, `--radius: 8px` (containers), base font 13px
 (`ui-sans-serif` stack). Controls (buttons, inputs) use radius **6px**; small
@@ -57,7 +60,31 @@ Colour is meaning. Do not repurpose these:
   configurable (AppConfig.glowColor); never reuse it for anything but
   attention effects.
 
-## 3. Button archetypes
+**Tile-head action tones.** The four actions that repeat in every terminal head
+(agent AND supervisor) are colour-coded at rest, because four identical grey
+glyphs in a row are unreadable at a glance: yellow `var(--action-prompt)`
+insert a prompt · blue `var(--accent)` open the browser view · violet
+`var(--action-expand)` maximize/restore · red `var(--danger)` close. Hover keeps
+the tone and only brightens it (`filter: brightness(1.15)`) — swapping the
+colour for `--fg` on hover would erase the coding. Classes: `.tile-btn-prompt`,
+`.tile-btn-browser`, `.tile-btn-expand`, `.tile-btn-danger`. Yellow here is
+`--action-prompt`, deliberately NOT `--glow` (which stays the attention halo).
+
+## 3. Controls: nothing keeps its native look
+
+**Rule zero for controls: an element that still looks like the OS drew it is a
+bug**, exactly like an emoji in JSX. This covers EVERY interactive element, not
+just buttons — `<button>`, `<select>`, `<input>`, `<textarea>`, checkboxes,
+range sliders. The native Windows/Chromium defaults (grey button, square white
+dropdown, blue focus ring) ignore `data-theme` entirely, so one unstyled
+control makes a whole view read as unfinished. Two ways to satisfy it: give the
+element an archetype class, or rely on a rule that already targets it (the
+element-level `select` rule, `.modal-actions button:not(.primary)`, `.field
+input`). If you introduce a control type this guide does not cover yet, style
+it at the ELEMENT level in `styles.css` and document it here — a per-instance
+class only fixes the instance you were looking at, and the next one ships bare.
+
+### Button archetypes
 
 Every `<button>` MUST match one of these archetypes — a bare, unstyled
 `<button>` (native grey) is a bug. Either give it an archetype class or place
@@ -106,6 +133,16 @@ State rules (apply to every archetype):
   `h2` + dim paragraph + `.empty-actions` row.
 - **Inputs**: `--bg` fill, 1px `--border`, radius 4–6, padding 6px 8px,
   `font: inherit`; focus = `border-color: var(--accent)` (no outline ring).
+- **Selects / dropdowns**: styled at the ELEMENT level (`select { … }`) so a new
+  dropdown is themed the day it is written — same box as an input, plus
+  `appearance: none` and a hand-drawn chevron (`--select-arrow`, per theme)
+  since the native arrow cannot be themed. Consequences to respect: (a) a
+  scoped rule must NEVER re-declare the `background` shorthand or the chevron
+  disappears — set `background-color` only, or nothing at all; (b) the right
+  padding (24px) reserves the chevron's lane, so a scoped `padding` must keep
+  it; (c) the popup list is OS-drawn — `select option { background: var(--bg-2) }`
+  is what stops it flashing white. Scoped classes should carry SIZE only
+  (`max-width`, `font-size`), never the box.
 - **Headers of full views** (`.worktrees-head`, `.roadmap-head`,
   `.settings-head`…): flex row, `h2` 15px, actions right-aligned after a
   flex spacer, bottom border.
@@ -196,8 +233,11 @@ an inline `--glow` on `<html>` by App.tsx; `''` = theme default
 
 1. Reuse an existing archetype/primitive; only add a new CSS class when no
    recipe fits, and derive it from the tokens above.
-2. No bare `<button>`: archetype class or styled container, always with hover
-   + disabled states.
+2. No control left native — `<button>`, `<select>`, `<input>`, `<textarea>`,
+   checkbox alike (§3). Buttons take an archetype class or a styled container;
+   everything else must be covered by an element-level rule. Always define
+   hover + disabled states. Open the view in the app and look for the tell:
+   a square white box or a grey OS button means the rule is missing.
 3. Blue = validate, orange = restore, red = destroy. Check the colour matches
    the meaning, not the other way round.
 4. Test both themes (`data-theme` dark/light): no hardcoded greys/whites

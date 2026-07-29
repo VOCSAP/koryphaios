@@ -1,6 +1,7 @@
 import { join } from 'node:path'
-import { app, BrowserWindow, desktopCapturer, dialog, webContents } from 'electron'
+import { app, BrowserWindow, desktopCapturer, dialog, shell, webContents } from 'electron'
 import { broadcast, regHandle, regOn } from './api-registry'
+import { safeExternalUrl } from './external-url'
 import type {
   AppConfig,
   AssignResult,
@@ -413,24 +414,60 @@ export function registerIpc({
     return sandbox.status(true)
   })
   regHandle('sandbox:ensure', () => sandbox.ensure())
+  // Explicit, scheme-gated external open. Preferred over window.open + the
+  // window-open handler: the renderer states its intent, main decides, and a
+  // refusal is a visible error instead of the OS being asked to find an app
+  // for `about:` (which is what an unvalidated window.open produced).
+  regHandle('shell:open-external', (_e, url: string) => {
+    const safe = safeExternalUrl(url)
+    if (!safe) throw new Error('only http(s) links can be opened externally')
+    return shell.openExternal(safe)
+  })
   // Image build in a utility PTY: a long, log-heavy job belongs in a terminal
-  // the operator can read, not behind a spinner.
-  regHandle('sandbox:image-build', () => {
+  // the operator can read, not behind a spinner. `variant` is re-validated
+  // main-side (enum, defaulting to base): 'custom' builds the operator's
+  // fragment on top of the base image (f29b1917).
+  regHandle('sandbox:image-build', (_e, variant?: string) => {
+    const custom = variant === 'custom'
     const cfg = getConfig()
     service.spawnUtility(SANDBOX_BUILD_PTY_ID, cfg.projectDir, {
-      command: sandbox.imageBuildCommand(),
+      command: custom ? sandbox.customBuildCommand() : sandbox.imageBuildCommand(),
       shell: cfg.shell,
       interactive: false
     })
-    journal.add('session', 'sandbox: image build started')
+    journal.add('session', `sandbox: ${custom ? 'custom ' : ''}image build started`)
     return SANDBOX_BUILD_PTY_ID
   })
+  // Operator's Dockerfile fragment (app-state). Saving decides what runs in
+  // every sandbox container, hence the trust-changing tier in companion.ts.
+  regHandle('sandbox:custom-get', () => sandbox.customFragment())
+  regHandle('sandbox:custom-save', (_e, fragment: string) => {
+    sandbox.saveCustomFragment(typeof fragment === 'string' ? fragment : '')
+  })
+  // Overlay generation (50ac8683): host settings.json minus host-only hooks,
+  // written to ~/.claude/sandbox-overrides/. `force` is the renderer-confirmed
+  // overwrite of an existing overlay — never implicit.
+  regHandle('sandbox:overlay-generate', (_e, force?: boolean) =>
+    sandbox.generateOverlay(force === true)
+  )
+  // Projection opt-out: scrubs ~/.claude inside the container. Same guard as
+  // the other lifecycle actions -- a live agent is USING that config.
+  regHandle('sandbox:projection-remove', () => {
+    if (service.hasLiveSessions()) throw new Error('sandbox-live-sessions')
+    return sandbox.removeProjection()
+  })
   regHandle('sandbox:build-stop', () => service.killUtility(SANDBOX_BUILD_PTY_ID))
+  regHandle('sandbox:image-remove', () => {
+    // Same guard as the rest of the sandbox lifecycle: an agent mid-task is
+    // running FROM this image.
+    if (service.hasLiveSessions()) throw new Error('sandbox-live-sessions')
+    return sandbox.removeImage()
+  })
   regHandle('sandbox:auth-purge', () => {
-    // Guard on LIVE SESSIONS, not on a running container: the wipe itself is a
-    // `docker exec` and needs the container UP, so the old check made every
-    // call impossible (guard and operation required opposite states). What
-    // must not happen is disconnecting under a working agent.
+    // Guard on LIVE SESSIONS, not on a running container: the wipe targets the
+    // app-wide credentials volume from a throwaway container, so this project's
+    // container state is irrelevant. What must not happen is disconnecting
+    // under a working agent.
     if (service.hasLiveSessions()) throw new Error('sandbox-live-sessions')
     return sandbox.purgeAuth()
   })
@@ -449,18 +486,20 @@ export function registerIpc({
     }
     await sandbox.containerAction(name, action)
   })
-  // First-run login (SBX3): ensure the container, then open the auth terminal
-  // on the reserved utility PTY. Returns null when already authenticated so
-  // the dialog can short-circuit to its success state.
+  // First-run login (SBX3): provision ONLY what the login needs (engine, the
+  // app-wide image, the credentials volume) and open the auth terminal on the
+  // reserved utility PTY. Deliberately not `ensure()`: signing in is app-wide
+  // and must not require this project's container to exist. Returns null when
+  // already authenticated so the dialog short-circuits to its success state.
   regHandle('sandbox:auth-start', async () => {
-    const st = await sandbox.ensure()
-    if (!st.engine || st.containerState !== 'running') {
-      throw new Error(st.error || 'sandbox container not ready')
+    const st = await sandbox.ensureAuthPrereqs()
+    if (!st.engine || st.imagePresent !== true) {
+      throw new Error(st.error || 'sandbox image not ready')
     }
     if (st.authed === true) return null
     const cfg = getConfig()
     service.spawnUtility(SANDBOX_AUTH_PTY_ID, cfg.projectDir, {
-      command: buildAuthCommand(st.engine, sandbox.containerName),
+      command: buildAuthCommand(st.engine, sandbox.image()),
       shell: cfg.shell,
       interactive: false
     })
@@ -468,7 +507,18 @@ export function registerIpc({
     return SANDBOX_AUTH_PTY_ID
   })
   regHandle('sandbox:auth-stop', () => service.killUtility(SANDBOX_AUTH_PTY_ID))
-  regHandle('sandbox:auth-probe', () => sandbox.probeAuth())
+  // Post-build warm-up: create + project the container while the operator is
+  // still looking at the build card, so the first agent spawn skips the ~10 s
+  // projection. Fire-and-forget — the renderer must not wait on it.
+  regHandle('sandbox:warm-up', () => {
+    void sandbox.warmUp().catch((e) => reportError('sandbox', 'warm-up failed', e))
+  })
+  // Forced re-probe: the dialog polls this while the login terminal is up, so
+  // it must bypass the status cache to see the credentials land.
+  regHandle('sandbox:auth-probe', () => {
+    sandbox.invalidateAuth()
+    return sandbox.probeAuth()
+  })
 
   // ----- config -----
   // The renderer never sees provider secrets: localProviders are sanitized to

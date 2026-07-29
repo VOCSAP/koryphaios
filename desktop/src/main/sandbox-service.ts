@@ -13,7 +13,7 @@
 
 import { EventEmitter } from 'node:events'
 import { execFile, spawn } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type {
   SandboxContainerAction,
@@ -24,8 +24,10 @@ import type {
 import {
   SANDBOX_AUTH_VOLUME,
   SANDBOX_HOME,
+  SANDBOX_IMAGE_CUSTOM,
   SANDBOX_WORK_DIR,
   buildAuthProbeArgs,
+  composeCustomDockerfile,
   buildAuthPurgeArgs,
   buildBrokerProbeArgs,
   buildCopyIntoArgs,
@@ -33,7 +35,10 @@ import {
   buildExecCommand,
   buildImageBuildCommand,
   buildImageProbeArgs,
+  buildImageRemoveArgs,
   buildLaunchScript,
+  buildProjectionChownArgs,
+  buildProjectionCleanArgs,
   buildSupervisorExecArgs,
   buildTranscriptListArgs,
   containerNameFor,
@@ -54,7 +59,18 @@ import {
 } from './sandbox-store'
 import { planIgnoredCopy } from './sandbox-copy'
 import { canonicalPath } from './worktree-service'
-import { describeProjection, planProjection, projectionHookWarnings, unknownOverrides } from './sandbox-projection'
+import {
+  PROJECTED_ENTRIES,
+  SANDBOX_OVERRIDES_DIR,
+  describeProjection,
+  parseProjectedMarker,
+  planProjection,
+  projectionHookWarnings,
+  projectionSignature,
+  stripHostOnlyHooks,
+  unknownOverrides,
+  type ProjectedMarker
+} from './sandbox-projection'
 import { reportError } from './log'
 
 export interface SandboxExecResult {
@@ -142,6 +158,28 @@ export class SandboxService extends EventEmitter {
   /** Container-side transcripts, keyed by HOST cwd (M2 resume). */
   private transcripts = new Map<string, { id: string; mtimeMs: number }[]>()
   private imagePresent: boolean | null = null
+  /**
+   * Last credentials verdict. Cached because probing now spins a throwaway
+   * container and `status()` runs on the Docker view's poll timer; keyed by
+   * nothing on purpose — the volume it describes is app-wide, one per machine.
+   */
+  private authedCache: boolean | null = null
+  /** In-flight background auth probe (status() must never stack a second one). */
+  private authProbeInFlight: Promise<void> | null = null
+  /**
+   * PERSISTED marker of what was last projected: the container ID plus a
+   * fingerprint of the operator's config (projectionSignature), written to a
+   * per-container file under the app state dir. Three deliberate choices:
+   *  - keyed by the container ID (not the name): a recreate mints a new ID, so
+   *    a fresh container always gets a fresh copy with no manual invalidation;
+   *  - persisted (not an instance field): the projection copies ~200 MB of
+   *    plugins through `docker cp` (~10 s measured) and an in-memory marker
+   *    made EVERY app start pay it again on the first spawn — the operator's
+   *    "why does the first agent take 15 seconds" bug;
+   *  - stored OUTSIDE any container-mounted dir (hostile input #5): a marker
+   *    inside the run dir would let a sandboxed agent tamper with it.
+   */
+  private readonly projectedMarkerFile: string
   private projectionSummary: string | null = null
   private hookWarnings: string[] = []
   private copyUnmatched: string[] = []
@@ -161,6 +199,143 @@ export class SandboxService extends EventEmitter {
     this.peersDirHost = join(deps.stateDir, 'sandbox-peers')
     // Short, stable clone dir keyed by the same hash as the container.
     this.copyDirHost = join(deps.stateDir, 'sandbox-copies', this.containerName)
+    this.projectedMarkerFile = join(deps.stateDir, `sandbox-projected-${this.containerName}`)
+    // Operator's Dockerfile fragment (app-state, NEVER a repo file — hostile
+    // input #1: what runs in the sandbox image is an operator decision).
+    this.customFragmentFile = join(deps.stateDir, 'sandbox-custom.dockerfile')
+    this.customContextDir = join(deps.stateDir, 'sandbox-custom')
+  }
+
+  private readonly customFragmentFile: string
+  private readonly customContextDir: string
+
+  /** The operator's Dockerfile fragment ('' when none saved yet). */
+  customFragment(): string {
+    try {
+      return readFileSync(this.customFragmentFile, 'utf8')
+    } catch {
+      return '' // never saved: the empty editor is the honest state
+    }
+  }
+
+  /** Persist the fragment (empty string clears it). App-state, app-wide. */
+  saveCustomFragment(fragment: string): void {
+    writeFileSync(this.customFragmentFile, fragment)
+    this.deps.journal(
+      fragment.trim()
+        ? `sandbox: custom image fragment saved (${fragment.trim().split('\n').length} lines)`
+        : 'sandbox: custom image fragment cleared'
+    )
+  }
+
+  /**
+   * PTY command line building the CUSTOM image: writes the composed
+   * `FROM <base>` + fragment Dockerfile into an app-state context dir and
+   * builds it under the SANDBOX_IMAGE_CUSTOM tag. Throws on an empty fragment
+   * or a fragment carrying its own FROM (composeCustomDockerfile).
+   */
+  customBuildCommand(): string {
+    const dockerfile = composeCustomDockerfile(this.customFragment())
+    if (dockerfile === null) throw new Error('custom-fragment-empty')
+    mkdirSync(this.customContextDir, { recursive: true })
+    writeFileSync(join(this.customContextDir, 'Dockerfile'), dockerfile)
+    const engine = this.probe?.engine ?? 'docker'
+    return buildImageBuildCommand(engine, SANDBOX_IMAGE_CUSTOM, this.customContextDir)
+  }
+
+  /**
+   * Generate `~/.claude/sandbox-overrides/settings.json` from the HOST
+   * settings.json with the host-only hooks stripped (50ac8683). Refuses to
+   * overwrite an existing overlay unless `force` — the operator may have
+   * hand-tuned it, and this call can come from the companion path, so the
+   * confirmation lives in a renderer dialog and arrives here as an explicit
+   * boolean. The projection picks the overlay up on its own (planProjection
+   * prefers overlay entries, so the signature changes).
+   */
+  generateOverlay(force: boolean): { path: string; removed: string[] } {
+    const sourcePath = join(this.deps.claudeHomeDir, 'settings.json')
+    let raw: string
+    try {
+      raw = readFileSync(sourcePath, 'utf8')
+    } catch {
+      throw new Error('host-settings-missing')
+    }
+    const stripped = stripHostOnlyHooks(raw)
+    if (stripped === null) throw new Error('host-settings-invalid')
+    const dir = join(this.deps.claudeHomeDir, SANDBOX_OVERRIDES_DIR)
+    const target = join(dir, 'settings.json')
+    if (!force && existsSync(target)) throw new Error('overlay-exists')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(target, JSON.stringify(stripped.settings, null, 2) + '\n')
+    // Generate is the opt-IN gesture: it undoes a prior "Remove" (the marker
+    // key folds the flag in, so the next container start re-projects).
+    if (!this.settings().projectConfig) {
+      writeSandboxSettings(this.storeFile, this.deps.projectKey, { projectConfig: true })
+      this.deps.journal('sandbox: operator config projection re-enabled (overlay generated)')
+      void this.broadcastStatus().catch((e) =>
+        reportError('sandbox', 'projection re-enable broadcast failed', e)
+      )
+    }
+    this.deps.journal(
+      `sandbox: overlay settings.json generated (${stripped.removed.length} host-only hooks removed)`
+    )
+    return { path: target, removed: stripped.removed }
+  }
+
+  /**
+   * Operator opt-out (Docker view "Remove"): stop carrying the global config
+   * into the container and scrub what previous starts projected. The decision
+   * is PERSISTED first (projectConfig=false) so it holds with no engine, no
+   * container, or a stopped one -- those cases are scrubbed by the next
+   * ensure() (the marker key mismatches). Only a RUNNING container is scrubbed
+   * right away (`docker exec` cannot reach a stopped one). generateOverlay()
+   * is the opposite gesture and re-enables.
+   */
+  async removeProjection(): Promise<SandboxStatus> {
+    writeSandboxSettings(this.storeFile, this.deps.projectKey, { projectConfig: false })
+    this.projectionSummary = null
+    this.hookWarnings = []
+    const probe = await this.detectEngine()
+    if (probe.state === 'ok') {
+      const info = await this.inspectIdState(this.containerName)
+      if (info?.state === 'running') {
+        const res = await this.run(
+          buildProjectionCleanArgs(this.containerName, [...PROJECTED_ENTRIES]),
+          30_000
+        )
+        if (res.code !== 0) {
+          reportError('sandbox', `projection remove failed: ${res.stderr.trim().slice(0, 400)}`)
+        } else {
+          // Mark the scrub done so the next ensure() does not redo it.
+          this.writeProjectedMarker(`${info.id}\ndisabled`)
+        }
+      }
+    }
+    this.deps.journal('sandbox: operator config projection disabled by the operator')
+    return this.broadcastStatus()
+  }
+
+  private readProjectedMarker(): ProjectedMarker | null {
+    try {
+      return parseProjectedMarker(readFileSync(this.projectedMarkerFile, 'utf8'))
+    } catch {
+      return null // never projected (or unreadable): re-project, the safe answer
+    }
+  }
+
+  /** Persist the key + WHAT was projected (summary survives app restarts). */
+  private writeProjectedMarker(key: string): void {
+    try {
+      const marker: ProjectedMarker = {
+        key,
+        summary: this.projectionSummary,
+        hookWarnings: this.hookWarnings
+      }
+      writeFileSync(this.projectedMarkerFile, JSON.stringify(marker))
+    } catch (e) {
+      // Best-effort: losing the marker only costs one redundant projection.
+      reportError('sandbox', 'projection marker write failed', e)
+    }
   }
 
   private run(args: string[], timeoutMs?: number): Promise<SandboxExecResult> {
@@ -256,6 +431,24 @@ export class SandboxService extends EventEmitter {
     return next
   }
 
+  /**
+   * Delete the image from the local engine. The `present` badge is driven by
+   * the CACHED probe, so the cache is dropped whatever the outcome — leaving it
+   * would make the badge claim "present" after a successful removal until the
+   * operator hit Refresh, which is exactly the kind of quiet lie this view
+   * exists to avoid. A refusal (a container, even stopped, still references the
+   * image) is raised, not swallowed. The credentials volume is untouched.
+   */
+  async removeImage(): Promise<SandboxStatus> {
+    const probe = await this.detectEngine()
+    if (probe.state !== 'ok') throw new Error('sandbox engine not available')
+    const res = await this.run(buildImageRemoveArgs(this.image()), 60_000)
+    this.imagePresent = null
+    if (res.code !== 0) throw new Error(res.stderr.trim() || 'image removal failed')
+    this.deps.journal(`sandbox: image ${this.image()} removed`)
+    return this.broadcastStatus()
+  }
+
   /** Host path currently bind-mounted at /work, or null when unknown. */
   private async mountedWorkSource(): Promise<string | null> {
     const res = await this.run([
@@ -271,6 +464,18 @@ export class SandboxService extends EventEmitter {
   private async inspectState(name: string): Promise<string | null> {
     const res = await this.run(['inspect', '--format', '{{.State.Status}}', name])
     return res.code === 0 ? res.stdout.trim() : null
+  }
+
+  /**
+   * Identity + state in ONE engine call (ensure() runs on every agent spawn).
+   * The ID is what keys the projection marker — see projectedMarkerFile.
+   */
+  private async inspectIdState(name: string): Promise<{ id: string; state: string } | null> {
+    const res = await this.run(['inspect', '--format', '{{.Id}}\t{{.State.Status}}', name])
+    if (res.code !== 0) return null
+    const [id, state] = res.stdout.trim().split('\t')
+    if (!id || !state) return null
+    return { id, state }
   }
 
   /** Container creation date vs image creation date (drift badge, M2). */
@@ -294,20 +499,44 @@ export class SandboxService extends EventEmitter {
     const probe = await this.detectEngine(forceEngine)
     const settings = this.settings()
     let containerState: SandboxStatus['containerState'] = 'missing'
-    let authed: boolean | null = null
     let drift: number | null = null
     if (probe.state === 'ok') {
       if (this.imagePresent === null || forceEngine) await this.probeImage()
       const state = await this.inspectState(this.containerName)
       if (state === 'running') {
         containerState = 'running'
-        authed = await this.probeAuth()
         drift = await this.driftDays()
       } else if (state !== null) {
         containerState = 'stopped'
         drift = await this.driftDays()
       }
+      // Fresh app run, container carried over from the last one: the summary
+      // is in-memory-null but the marker remembers what an earlier start
+      // projected -- rehydrate so the card does not claim "nothing projected"
+      // until the next ensure(). (A disabled-scrub marker has summary null.)
+      if (this.projectionSummary === null && settings.projectConfig && containerState !== 'missing') {
+        const marker = this.readProjectedMarker()
+        if (marker?.summary) {
+          this.projectionSummary = marker.summary
+          if (this.hookWarnings.length === 0) this.hookWarnings = marker.hookWarnings
+        }
+      }
+      // The credentials volume is app-wide: its state is knowable with no
+      // container of ours at all. Probe once (throwaway container) and reuse
+      // the verdict -- status() runs on the Docker view's poll timer.
+      //
+      // The cold probe is a `docker run --rm` (~0.5-3 s on Docker Desktop):
+      // awaiting it here made the Docker view's FIRST paint hang behind it.
+      // Only the explicit refresh (forceEngine) still blocks on it; the cold
+      // path answers immediately with authed=null ("unknown", a state the UI
+      // already renders) and a background probe broadcasts the real verdict.
+      if (forceEngine) {
+        await this.probeAuth()
+      } else if (this.authedCache === null) {
+        this.scheduleAuthProbe()
+      }
     }
+    const authed = probe.state === 'ok' ? this.authedCache : null
     this.lastReady = containerState === 'running'
     return {
       engine: probe.engine,
@@ -325,6 +554,13 @@ export class SandboxService extends EventEmitter {
       copyDir: settings.mode === 'copy' ? this.copyDirHost : null,
       copyUnmatched: this.copyUnmatched,
       projection: this.projectionSummary,
+      projectionEnabled: settings.projectConfig,
+      // Host-side overlay state (a handful of existsSync): reported separately
+      // from `projection` so generating the overlay is visible IMMEDIATELY,
+      // not only after the next container start picks it up.
+      overlay: planProjection(this.deps.claudeHomeDir)
+        .filter((e) => e.override)
+        .map((e) => e.name),
       hookWarnings: this.hookWarnings,
       brokerBridge: this.bridgeOk,
       driftDays: drift,
@@ -409,6 +645,8 @@ export class SandboxService extends EventEmitter {
   async resetCopy(): Promise<SandboxStatus> {
     const existed = (await this.inspectState(this.containerName)) !== null
     if (existed) {
+      // No projection-marker invalidation needed here or below: the marker is
+      // keyed by the container ID, and a recreate mints a new one.
       await this.run(['rm', '-f', this.containerName], 30_000)
       this.lastReady = false
     }
@@ -421,12 +659,49 @@ export class SandboxService extends EventEmitter {
 
   // ----- lifecycle -----
 
+  /** In-flight ensure(), shared by every concurrent caller. */
+  private ensureInFlight: Promise<SandboxStatus> | null = null
+
   /**
    * Bring the project container up: volume + (copy mode) clone + create
    * (idempotent) + start + config projection. Persistent by design — created
    * once, `stop`ped on app close, removed only by an explicit operator action.
+   *
+   * Concurrent callers COALESCE onto one run: the startup warm-up can race the
+   * first agent spawn (and several tiles can spawn at once), and two
+   * interleaved runs would both see "no container" and both issue
+   * `docker create` — the loser painting a false "name already in use" error.
    */
   async ensure(): Promise<SandboxStatus> {
+    if (this.ensureInFlight) return this.ensureInFlight
+    const run = this.ensureRun().finally(() => {
+      this.ensureInFlight = null
+    })
+    this.ensureInFlight = run
+    return run
+  }
+
+  /**
+   * Pre-flight OFF the spawn path: called when the app opens a sandbox-enabled
+   * project and after an image build succeeds, so the container creation and
+   * the config projection (~10 s measured when plugins/ travels) happen while
+   * the operator is not staring at an agent tile. Quiet by design: no engine /
+   * no image / sandbox disabled are normal states here — the Docker view
+   * already shows them — not errors worth painting.
+   */
+  async warmUp(): Promise<void> {
+    if (!this.isEnabled()) return
+    if ((await this.detectEngine()).state !== 'ok') return
+    if (!(await this.probeImage())) {
+      // Nothing to warm, but the rail/Agents indicators still deserve the
+      // fresh state at boot — only sandbox-enabled projects pay this probe.
+      await this.broadcastStatus()
+      return
+    }
+    await this.ensure()
+  }
+
+  private async ensureRun(): Promise<SandboxStatus> {
     const probe = await this.detectEngine()
     if (probe.state !== 'ok') {
       this.lastError =
@@ -437,22 +712,42 @@ export class SandboxService extends EventEmitter {
     }
     this.busy = true
     this.lastError = null
+    // Broadcast the busy flip NOW: the Docker view's Préparer button greys and
+    // spins off this flag, and the 10 s poll alone would leave it clickable
+    // for most of the pre-flight. Fire-and-forget: status() is read-only.
+    void this.broadcastStatus().catch((e) => reportError('sandbox', 'busy broadcast failed', e))
+    // Per-step timing, journaled only when the whole pre-flight was slow: the
+    // 10-15 s spawns were diagnosed by guessing three times — the journal line
+    // makes the NEXT regression a measurement instead of a guess.
+    const t0 = Date.now()
+    let tStep = t0
+    const marks: string[] = []
+    const mark = (label: string): void => {
+      const now = Date.now()
+      marks.push(`${label}=${now - tStep}ms`)
+      tStep = now
+    }
     try {
       if (!(await this.probeImage())) {
         this.lastError = `image "${this.image()}" not found — build it from the Docker view`
         return this.broadcastStatus()
       }
+      mark('image')
       mkdirSync(this.runDirHost, { recursive: true })
       mkdirSync(this.peersDirHost, { recursive: true })
-      if (this.mode() === 'copy') await this.ensureCopyTree()
+      if (this.mode() === 'copy') {
+        await this.ensureCopyTree()
+        mark('clone')
+      }
       await this.run(['volume', 'create', SANDBOX_AUTH_VOLUME])
+      mark('volume')
 
-      let state = await this.inspectState(this.containerName)
+      let info = await this.inspectIdState(this.containerName)
       // A container created in the OTHER work mode still bind-mounts the other
       // tree: honouring it would let agents write the real repo while the UI
       // says "ephemeral copy". Recreate rather than trust the renderer's
       // best-effort rebuild.
-      if (state !== null) {
+      if (info !== null) {
         const mounted = await this.mountedWorkSource()
         if (mounted !== null && canonicalPath(mounted) !== this.workSource()) {
           this.deps.journal(
@@ -460,10 +755,11 @@ export class SandboxService extends EventEmitter {
           )
           await this.run(['rm', '-f', this.containerName], 30_000)
           this.lastReady = false
-          state = null
+          info = null
         }
       }
-      if (state === null) {
+      mark('inspect')
+      if (info === null) {
         const created = await this.run(
           buildCreateArgs({
             name: this.containerName,
@@ -487,9 +783,15 @@ export class SandboxService extends EventEmitter {
           reportError('sandbox', `create failed for ${this.containerName}: ${this.lastError}`)
           return this.broadcastStatus()
         }
+        // `create` prints the new container's full ID; the inspect fallback
+        // covers an engine that ever stops doing so.
+        const createdId =
+          created.stdout.trim() || ((await this.inspectIdState(this.containerName))?.id ?? '')
+        info = { id: createdId, state: 'created' }
         this.deps.journal(`sandbox: container ${this.containerName} created (${this.image()})`)
+        mark('create')
       }
-      if (state !== 'running') {
+      if (info.state !== 'running') {
         const started = await this.run(['start', this.containerName], 30_000)
         if (started.code !== 0) {
           this.lastError = started.stderr.trim() || 'container start failed'
@@ -497,17 +799,54 @@ export class SandboxService extends EventEmitter {
           return this.broadcastStatus()
         }
         this.deps.journal(`sandbox: container ${this.containerName} started`)
+        mark('start')
       }
       this.lastReady = true
-      await this.projectConfig()
-      await this.probeBrokerBridge()
-      return this.broadcastStatus()
+      // Projection and bridge probe are both off the per-spawn critical path:
+      // the projection runs only when the container ID or the operator's config
+      // fingerprint changed (the marker is PERSISTED — an in-memory flag made
+      // every app start re-copy ~200 MB of plugins, ~10 s measured), and the
+      // bridge probe is a Docker-view diagnostic with no business blocking a
+      // spawn.
+      // The opt-out folds into the marker key: toggling projectConfig either
+      // way mismatches the marker, so the next ensure() re-projects or scrubs
+      // exactly once, then skips again.
+      const signature = this.settings().projectConfig
+        ? `${info.id}\n${projectionSignature(this.deps.claudeHomeDir)}`
+        : `${info.id}\ndisabled`
+      mark('signature')
+      const marker = this.readProjectedMarker()
+      if (marker?.key !== signature) {
+        await this.projectConfig()
+        this.writeProjectedMarker(signature)
+        mark('projection')
+      } else if (this.projectionSummary === null && marker.summary !== null) {
+        // Skipped projection after an app restart: the in-memory summary is
+        // empty but the container still carries the config -- rehydrate from
+        // the marker so status() tells the truth.
+        this.projectionSummary = marker.summary
+        if (this.hookWarnings.length === 0) this.hookWarnings = marker.hookWarnings
+      }
+      void this.probeBrokerBridge().catch((e) =>
+        reportError('sandbox', 'broker bridge probe failed', e)
+      )
+      const st = await this.broadcastStatus()
+      mark('status')
+      const total = Date.now() - t0
+      if (total > 1500) this.deps.journal(`sandbox: ensure took ${total}ms (${marks.join(' ')})`)
+      return st
     } catch (e) {
       this.lastError = e instanceof Error ? e.message : String(e)
       reportError('sandbox', 'ensure failed', e)
       return this.broadcastStatus()
     } finally {
       this.busy = false
+      // Every broadcast above ran while busy was still true (finally executes
+      // after the returns), so without this the view's Préparer spinner only
+      // cleared at the next 10 s poll. Fire-and-forget, like the busy=true one.
+      void this.broadcastStatus().catch((e) =>
+        reportError('sandbox', 'busy-clear broadcast failed', e)
+      )
     }
   }
 
@@ -518,7 +857,47 @@ export class SandboxService extends EventEmitter {
    * for why a mounted settings.json would be a sandbox escape.
    */
   private async projectConfig(): Promise<void> {
+    if (!this.settings().projectConfig) {
+      // Operator opt-out (removeProjection): scrub whatever an earlier start
+      // projected instead of copying. Runs at container start (exec needs a
+      // running container) and only when the marker key changed -- so a
+      // stopped container missed by removeProjection() still gets scrubbed
+      // on its next start.
+      const res = await this.run(
+        buildProjectionCleanArgs(this.containerName, [...PROJECTED_ENTRIES]),
+        30_000
+      )
+      if (res.code !== 0) {
+        reportError('sandbox', `projection scrub failed: ${res.stderr.trim().slice(0, 400)}`)
+      }
+      this.projectionSummary = null
+      this.hookWarnings = []
+      this.deps.journal('sandbox: operator config projection is off -- container scrubbed')
+      return
+    }
     const entries = planProjection(this.deps.claudeHomeDir)
+    if (entries.length > 0) {
+      // Purge the targets first: `docker cp -L` overwrites files but will NOT
+      // replace a directory symlink left in the auth volume by a pre-`-L`
+      // copy — agents/skills then stayed dangling links while the projection
+      // reported success (see buildProjectionCleanArgs). Best-effort: a failed
+      // purge is reported and the copies still run.
+      const cleaned = await this.run(
+        buildProjectionCleanArgs(
+          this.containerName,
+          entries.map((e) => e.name)
+        ),
+        30_000
+      )
+      if (cleaned.code !== 0) {
+        // Clip: a recursive rm can produce hundreds of per-file lines, and
+        // reportError echoes to the dev console.
+        reportError(
+          'sandbox',
+          `config projection pre-clean failed: ${cleaned.stderr.trim().slice(0, 400)}`
+        )
+      }
+    }
     for (const entry of entries) {
       const res = await this.run(
         buildCopyIntoArgs(this.containerName, entry.hostPath, `${SANDBOX_HOME}/.claude/`),
@@ -526,6 +905,23 @@ export class SandboxService extends EventEmitter {
       )
       if (res.code !== 0) {
         reportError('sandbox', `config projection failed for ${entry.name}: ${res.stderr.trim()}`)
+      }
+    }
+    if (entries.length > 0) {
+      // `docker cp` lands the trees as root; hand them to the container user
+      // so the CLI can maintain its own copy (installed_plugins.json…).
+      const owned = await this.run(
+        buildProjectionChownArgs(
+          this.containerName,
+          entries.map((e) => e.name)
+        ),
+        30_000
+      )
+      if (owned.code !== 0) {
+        reportError(
+          'sandbox',
+          `config projection chown failed: ${owned.stderr.trim().slice(0, 400)}`
+        )
       }
     }
     this.projectionSummary = describeProjection(entries)
@@ -542,31 +938,94 @@ export class SandboxService extends EventEmitter {
     }
   }
 
-  /** exit 0 = credentials file present; null when the container cannot answer. */
+  /**
+   * exit 0 = credentials file present; null when nothing could answer.
+   *
+   * Runs in a throwaway container (see buildAuthProbeArgs): the shared volume
+   * is readable whether or not THIS project has a container, so the Docker view
+   * can state "connected / not connected" from a cold start. Costs one short
+   * container run, hence the cache — `status()` polls on a timer.
+   */
   async probeAuth(): Promise<boolean | null> {
-    const res = await this.run(buildAuthProbeArgs(this.containerName), 8000)
-    if (res.code === 0) return true
-    if (res.code === 1) return false
-    return null
+    const hasImage = this.imagePresent ?? (await this.probeImage())
+    if (!hasImage) return null
+    const res = await this.run(buildAuthProbeArgs(this.image()), 20_000)
+    const authed = res.code === 0 ? true : res.code === 1 ? false : null
+    this.authedCache = authed
+    return authed
   }
 
   /**
-   * Wipe the credentials in the shared volume ("disconnect").
-   *
-   * The wipe is a `docker exec`, so it NEEDS this project's container running —
-   * the guard upstream is therefore "no live sessions", not "no container
-   * running" (which made every call impossible: the guard and the operation
-   * required opposite states). The container is started here if needed.
+   * Cold-path auth probe, OFF the status() critical path. Coalesced; when a
+   * real verdict lands, a 'changed' broadcast repaints the view. Deliberately
+   * NO broadcast when the verdict stays null (image missing): broadcastStatus
+   * re-enters status(), which would re-schedule this probe and broadcast
+   * again -- an infinite loop of no-ops.
+   */
+  private scheduleAuthProbe(): void {
+    if (this.authProbeInFlight) return
+    this.authProbeInFlight = this.probeAuth()
+      .then(async (authed) => {
+        if (authed !== null) await this.broadcastStatus()
+      })
+      .catch((e) => reportError('sandbox', 'background auth probe failed', e))
+      .finally(() => {
+        this.authProbeInFlight = null
+      })
+  }
+
+  /** Drop the cached auth verdict: the next status() re-probes for real. */
+  invalidateAuth(): void {
+    this.authedCache = null
+  }
+
+  /**
+   * Provision what the LOGIN needs, and nothing more: an engine, the image
+   * (it carries the CLI) and the credentials volume. Deliberately NOT
+   * `ensure()` — signing in is an app-wide operation and must not drag in this
+   * project's container, its work mount, its clone or its published ports.
+   * `volume create` is idempotent, so this is also how the volume comes to
+   * exist the very first time, before any project container ever has.
+   */
+  async ensureAuthPrereqs(): Promise<SandboxStatus> {
+    const probe = await this.detectEngine()
+    if (probe.state !== 'ok') {
+      this.lastError =
+        probe.state === 'daemon-down'
+          ? 'engine daemon not running (start Docker Desktop / podman machine)'
+          : 'no container engine found (install Docker Desktop or Podman)'
+      return this.broadcastStatus()
+    }
+    this.lastError = null
+    // Volume FIRST, and unconditionally: creating it needs no image at all, so
+    // a missing image must not also stop the credentials store from existing.
+    const vol = await this.run(['volume', 'create', SANDBOX_AUTH_VOLUME])
+    if (vol.code !== 0) {
+      this.lastError = vol.stderr.trim() || 'credentials volume could not be created'
+      return this.broadcastStatus()
+    }
+    if (!(await this.probeImage())) {
+      this.lastError = `image "${this.image()}" not found — build it from the Docker view`
+    }
+    return this.broadcastStatus()
+  }
+
+  /**
+   * Wipe the credentials in the shared volume ("disconnect"). Like the login
+   * and the probe, this runs in a throwaway container: it used to be an `exec`
+   * that needed THIS project's container running, which contradicted the
+   * upstream guard ("no live sessions") and made the button unusable half the
+   * time.
    */
   async purgeAuth(): Promise<SandboxStatus> {
-    if (!this.lastReady) {
-      const st = await this.ensure()
-      if (st.containerState !== 'running') {
-        throw new Error(st.error || 'sandbox container not ready')
-      }
+    const probe = await this.detectEngine()
+    if (probe.state !== 'ok') throw new Error('sandbox engine not available')
+    if (!(await this.probeImage())) {
+      throw new Error(`image "${this.image()}" not found — build it from the Docker view`)
     }
-    const res = await this.run(buildAuthPurgeArgs(this.containerName))
+    const res = await this.run(buildAuthPurgeArgs(this.image()), 20_000)
     if (res.code !== 0) throw new Error(res.stderr.trim() || 'auth purge failed')
+    this.authedCache = false
     this.deps.journal('sandbox: credentials volume disconnected')
     return this.broadcastStatus()
   }

@@ -67,6 +67,21 @@ test("ANSI escapes in the dialog are stripped before matching", () => {
   expect(events).toEqual([{ id: "s1" }]);
 });
 
+test("matches the ConPTY repaint frame where spaces are cursor-forward sequences", () => {
+  // Real Windows capture (2026-07-28 audit): the ConPTY resize repaint encodes
+  // every inter-word space as \x1b[1C, which the ANSI strip removes entirely --
+  // the words arrive JOINED ("WARNING:Loadingdevelopmentchannels"). The
+  // patterns use \s* so this frame still acks.
+  const d = new StartupAckDetector();
+  const events = collect(d);
+  d.feed(
+    "s1",
+    "\x1b[1m\x1b[3;3HWARNING:\x1b[1CLoading\x1b[1Cdevelopment\x1b[1Cchannels\x1b[m" +
+      "\x1b[9;3H\x1b[38;2;177;185;249m❯\x1b[1C1.\x1b[1CI\x1b[1Cam\x1b[1Cusing\x1b[1Cthis\x1b[1Cfor\x1b[1Clocal\x1b[1Cdevelopment"
+  );
+  expect(events).toEqual([{ id: "s1" }]);
+});
+
 test("the MCP-server consent dialog never fires an ack", () => {
   const d = new StartupAckDetector();
   const events = collect(d);

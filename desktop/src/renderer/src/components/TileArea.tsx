@@ -3,6 +3,7 @@ import type { DisplayMode } from '@shared/types'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { TerminalTile } from './TerminalTile'
+import { GLYPH_ACTIONS } from './icons'
 
 /** Visible columns/rows for the grid modes (1x1 is rendered as a carousel). */
 function gridShape(mode: DisplayMode, cols: number, rows: number): { cols: number; rows: number } {
@@ -18,8 +19,28 @@ function gridShape(mode: DisplayMode, cols: number, rows: number): { cols: numbe
   }
 }
 
+/**
+ * Placeholder standing in for an agent whose PTY does not exist yet. In sandbox
+ * mode the spawn waits on the container gate, which used to leave the click
+ * with no visible effect at all for seconds.
+ */
+function PendingTile({ label }: { label: string }): React.JSX.Element {
+  return (
+    <section className="tile tile-pending">
+      <div className="tile-pending-body">
+        <span className="sandbox-spinner">{GLYPH_ACTIONS.refresh}</span>
+        <span>{label}</span>
+      </div>
+    </section>
+  )
+}
+
 export function TileArea(): React.JSX.Element {
   const t = useT()
+  const pending = useDeck((s) => s.pendingSessions)
+  const pendingTiles = Array.from({ length: pending }, (_, i) => (
+    <PendingTile key={`pending-${i}`} label={t('area.spawning')} />
+  ))
   const allSessions = useDeck((s) => s.sessions)
   // The supervisor renders in the Home view, never in the agents grid.
   const sessions = allSessions.filter((s) => !s.supervisor)
@@ -32,6 +53,12 @@ export function TileArea(): React.JSX.Element {
   const openWorkspaces = useDeck((s) => s.openWorkspaces)
   const openTemplates = useDeck((s) => s.openTemplates)
   const carouselRef = useRef<HTMLDivElement>(null)
+
+  // The very first agent has no grid to appear in yet: the placeholder replaces
+  // the empty card, otherwise the operator keeps looking at "add an agent".
+  if (sessions.length === 0 && pending > 0) {
+    return <main className="area area-grid area-grid-single">{pendingTiles}</main>
+  }
 
   if (sessions.length === 0) {
     const previous = workspaces[0]
@@ -98,6 +125,7 @@ export function TileArea(): React.JSX.Element {
         {sessions.map((s) => (
           <TerminalTile key={s.id} session={s} hidden={false} />
         ))}
+        {pendingTiles}
       </main>
     )
   }
@@ -115,6 +143,7 @@ export function TileArea(): React.JSX.Element {
       {sessions.map((s) => (
         <TerminalTile key={s.id} session={s} hidden={false} />
       ))}
+      {pendingTiles}
     </main>
   )
 }

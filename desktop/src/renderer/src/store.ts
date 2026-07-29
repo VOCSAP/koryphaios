@@ -9,6 +9,7 @@ import type {
   InboxMessage,
   LocaleOption,
   RoadmapKind,
+  SandboxContainerInfo,
   SandboxSettingsPatch,
   SandboxStatus,
   SessionRuntime,
@@ -125,12 +126,32 @@ interface DeckState {
   usageOpen: boolean
   /** True while the companion LAN server is up (rail glyph glow). */
   companionRunning: boolean
+  /**
+   * Creates awaiting their PTY. A count, not a flag: several can be in flight
+   * (a template instantiates a whole team at once).
+   */
+  pendingSessions: number
   /** Sandbox mode (PLAN-SANDBOX): last known status of this project, or null. */
   sandboxStatus: SandboxStatus | null
+  /**
+   * Cross-project kory-sbx container list (Docker view). Lives in the store,
+   * not in SandboxView state: the view is unmounted on every navigation, and
+   * re-querying the engine from scratch left it showing "no containers" for
+   * seconds. null = never fetched (the view shows a loading line, not "empty").
+   */
+  sandboxContainers: SandboxContainerInfo[] | null
   /** First-run sandbox login modal (SBX3) visibility. */
   sandboxAuthOpen: boolean
   /** Sandbox image-build terminal modal (M2) visibility. */
   sandboxBuildOpen: boolean
+  /**
+   * A build PTY is alive. Tracked here, not in the dialog: the operator can
+   * HIDE the modal and let a long build finish in the background, so the
+   * dialog is not the owner of the build's lifetime.
+   */
+  sandboxBuilding: boolean
+  /** The build was started from "Re-authenticate": open the login after it. */
+  sandboxAuthAfterBuild: boolean
 
   init(): Promise<void>
   setView(view: DeckView): void
@@ -201,10 +222,16 @@ interface DeckState {
 
   /** Refresh the sandbox status (`force` re-probes the engine). */
   refreshSandbox(force?: boolean): Promise<void>
+  /** Refresh the cross-project container list (independent of the status). */
+  refreshSandboxContainers(): Promise<void>
   /** Patch this project's sandbox settings (main refuses while sessions run). */
   patchSandbox(patch: SandboxSettingsPatch): Promise<void>
   openSandboxAuth(open: boolean): void
   openSandboxBuild(open: boolean): void
+  /** Open the build modal and spawn the build (no-op if one already runs). */
+  startSandboxBuild(thenAuth: boolean, custom?: boolean): Promise<void>
+  /** The build PTY exited: clear the flag, refresh, and chain the login. */
+  finishSandboxBuild(code: number): void
 
   refreshWorkspaces(): Promise<void>
   saveWorkspace(name?: string): Promise<void>
@@ -218,6 +245,18 @@ let toastToken = 0
 const lastToastAt = new Map<string, number>()
 
 /**
+ * Readable text for an error crossing the IPC boundary. Electron wraps every
+ * rejected `invoke` as `Error invoking remote method 'chan': Error: <cause>` —
+ * the channel name means nothing to the operator and buries the actual cause,
+ * so strip the wrapper and keep what the main process actually said.
+ */
+export function errorText(e: unknown): string {
+  const raw = e instanceof Error ? e.message : String(e)
+  const m = /^Error invoking remote method '[^']*':\s*(?:Error:\s*)?([\s\S]+)$/.exec(raw)
+  return m?.[1] ?? raw
+}
+
+/**
  * Guard a direct user action (PLAN O6): before this, an IPC rejection became
  * an unhandled promise rejection and the click silently no-oped. Now it lands
  * in main.log + the journal and surfaces as an error toast (raw message).
@@ -226,7 +265,7 @@ async function guarded(label: string, fn: () => Promise<unknown>): Promise<void>
   try {
     await fn()
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
+    const msg = errorText(e)
     try {
       window.api.reportError('store', `${label} failed: ${msg}`)
     } catch {
@@ -239,7 +278,10 @@ async function guarded(label: string, fn: () => Promise<unknown>): Promise<void>
 export const useDeck = create<DeckState>((set, get) => ({
   sessions: [],
   config: null,
-  view: 'agents',
+  // The Deck opens on Home: the supervisor is the entry point of the app (it
+  // spawns lazily on that view's first visit), so landing there is what starts
+  // the session that pilots everything else.
+  view: 'home',
   dict: {},
   availableLocales: [],
   selectedId: null,
@@ -282,8 +324,12 @@ export const useDeck = create<DeckState>((set, get) => ({
   usageOpen: false,
   companionRunning: false,
   sandboxStatus: null,
+  sandboxContainers: null,
+  pendingSessions: 0,
   sandboxAuthOpen: false,
   sandboxBuildOpen: false,
+  sandboxBuilding: false,
+  sandboxAuthAfterBuild: false,
 
   async init() {
     // Companion mode flags (PLAN MB1/MB3): computed once — the desktop window
@@ -570,6 +616,11 @@ export const useDeck = create<DeckState>((set, get) => ({
   },
 
   async createSession(input) {
+    // A sandboxed spawn goes through the container gate before a PTY exists,
+    // so the click has nothing to show for seconds. Count the pending creates
+    // (several can be in flight, e.g. a template) and let the grid render a
+    // placeholder tile -- an unresponsive button reads as a broken app.
+    set({ pendingSessions: get().pendingSessions + 1 })
     await guarded('create session', async () => {
       try {
         const created = await window.api.createSession(input)
@@ -585,6 +636,9 @@ export const useDeck = create<DeckState>((set, get) => ({
         throw e
       }
     })
+    // Cleared whatever happened: guarded() swallows failures after reporting
+    // them, and a placeholder left behind would outlive the app's patience.
+    set({ pendingSessions: Math.max(0, get().pendingSessions - 1) })
   },
 
   async removeSession(id) {
@@ -639,6 +693,18 @@ export const useDeck = create<DeckState>((set, get) => ({
     })
   },
 
+  async refreshSandboxContainers() {
+    try {
+      const sandboxContainers = await window.api.sandboxList()
+      set({ sandboxContainers })
+    } catch {
+      // Engine missing/down: the Docker view's mode card explains why. An
+      // empty list (not the stale one) keeps the view truthful: no engine
+      // means nothing can be started/stopped from here anyway.
+      set({ sandboxContainers: [] })
+    }
+  },
+
   async patchSandbox(patch) {
     await guarded('sandbox settings', async () => {
       const sandboxStatus = await window.api.sandboxPatchSettings(patch)
@@ -653,6 +719,46 @@ export const useDeck = create<DeckState>((set, get) => ({
 
   openSandboxAuth: (open) => set({ sandboxAuthOpen: open }),
   openSandboxBuild: (open) => set({ sandboxBuildOpen: open }),
+
+  async startSandboxBuild(thenAuth, custom) {
+    // The build keeps running when the modal is HIDDEN, so ownership of its
+    // lifecycle lives here rather than in the dialog: the dialog can be
+    // unmounted while the PTY is still working.
+    const already = get().sandboxBuilding
+    set({ sandboxAuthAfterBuild: thenAuth, sandboxBuildOpen: true })
+    if (already) return
+    // Flip the flag BEFORE awaiting. Opening the modal mounts the dialog
+    // synchronously, and its own effect calls back in here; without the
+    // optimistic flag both calls would see "not building" and spawn twice.
+    set({ sandboxBuilding: true })
+    try {
+      await window.api.sandboxImageBuild(custom ? 'custom' : undefined)
+    } catch (e) {
+      // Roll back: with no PTY there is no exit event to clear the flag, and a
+      // stuck "building" would hide the Build button for the rest of the run.
+      set({ sandboxBuilding: false, sandboxAuthAfterBuild: false })
+      const msg = errorText(e)
+      window.api.reportError('sandbox', `image build failed to start: ${msg}`)
+      get().showToast(msg, 'error')
+    }
+  },
+
+  finishSandboxBuild(code) {
+    const chain = get().sandboxAuthAfterBuild
+    set({ sandboxBuilding: false, sandboxAuthAfterBuild: false })
+    if (code === 0) get().showToast('toast.sandboxImageBuilt')
+    // Fresh image: pre-create + project the container in the background now,
+    // so the first agent spawned on it skips the slow pre-flight.
+    if (code === 0)
+      void window.api
+        .sandboxWarmUp()
+        .catch((e) => window.api.reportError('sandbox', `warm-up dispatch failed: ${String(e)}`))
+    void get().refreshSandbox(true)
+    // Chain into the login the operator originally asked for -- but only on a
+    // successful build, otherwise the auth terminal would open onto a missing
+    // image and fail with the very error we are trying to avoid.
+    if (code === 0 && chain) set({ sandboxBuildOpen: false, sandboxAuthOpen: true })
+  },
 
   async refreshWorkspaces() {
     await guarded('list workspaces', async () => {

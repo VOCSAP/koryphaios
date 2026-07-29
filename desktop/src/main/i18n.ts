@@ -93,7 +93,6 @@ export const EN_DEFAULTS: Record<string, string> = {
   'app.brand': 'Koryphaios',
   'app.loading': 'Loading…',
 
-  'sidebar.settings': 'Settings',
   'sidebar.workspaces': 'Workspaces',
   'sidebar.addPeer': '＋ Add peer',
   'sidebar.addPeerTitle': 'Add in project dir',
@@ -265,6 +264,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'area.emptyBody':
     "Add a Claude Code peer session to dock it here. Each tile runs in a real terminal, scoped to this window's isolated group, so OAuth works normally.",
   'area.addTerminal': '＋ Add peer terminal',
+  'area.spawning': 'The agent is starting…',
   'area.restorePrevious': 'Restore previous session',
   'area.useTemplate': 'Use template',
   'area.openWorkspacesTitle': 'Open workspaces',
@@ -380,15 +380,31 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sandbox.portsHint':
     'Published to 127.0.0.1 at container create — a rebuild applies changes. The defaults are the same for every project, so a second sandboxed project must use different ports (or none).',
   'sandbox.blockedLive': 'Sessions are running — close them before changing the sandbox.',
+  'sandbox.forceClose': 'Force close ({n})',
   'sandbox.auth': 'Authentication (shared volume)',
   'sandbox.reauth': 'Re-authenticate',
+  'sandbox.reauthBuildFirst': 'Build the image and sign in',
+  'sandbox.reauthBlocked':
+    'Signing in runs the CLI in a throwaway container built from the SHARED image: build it once (Image card above) and it serves every project.',
   'sandbox.authOk': 'connected',
   'sandbox.authMissing': 'not connected',
   'sandbox.railNeedsAuth': 'sign-in required',
-  'sandbox.authUnknown': 'unknown (container stopped)',
+  'sandbox.authUnknown': 'unknown (image not built)',
   'sandbox.authVolumeHint':
-    'One login covers every sandbox container: credentials live in the kory-claude-auth volume, never on this machine.',
+    'One login covers every sandbox container, in every project: credentials live in the kory-claude-auth volume, never on this machine. Signing in needs no project container.',
   'sandbox.containers': 'Sandbox containers (all projects)',
+  'sandbox.containerProject': "This project's container",
+  'sidebar.sandboxOff':
+    'Sandbox is off for this project. Click opens the Docker view (enabling is confirmed there).',
+  'sidebar.sandboxStart': 'Sandbox on, container stopped. Click starts the container in the background.',
+  'sidebar.sandboxRunning': 'Agents execute inside the Docker container. Click opens the Docker view.',
+  'sandbox.containerProjectNone':
+    'No container yet: it is created on the first agent, or right now with Prepare.',
+  'sandbox.containerProjectDisabled':
+    'Sandbox mode is off for this project. An existing container would still show here; enable the mode to create one.',
+  'sandbox.containersLoading': 'Querying the container engine…',
+  'sandbox.containerPrepare': 'Prepare the container',
+  'toast.sandboxPreparing': 'Container preparation started in the background',
   'sandbox.empty':
     "No sandbox container on this machine yet. Enable the mode and spawn a session, or use Re-authenticate to create this project's container.",
   'sandbox.current': 'this project',
@@ -402,7 +418,12 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sandbox.authNext': 'Next',
   'sandbox.authStarting': 'Starting…',
   'sandbox.authWait':
-    'Complete the login below — this window closes by itself once the credentials are detected.',
+    "Complete the login below, THEN the CLI's onboarding (theme, confirmations) through to its final screen — this window closes by itself once onboarding is done. Closed too early, every agent would ask to sign in again.",
+  'sandbox.authOpenUrl': 'Open the sign-in link',
+  'sandbox.authCopyUrl': 'Copy the link',
+  'sandbox.authUrlChars': '{n} characters',
+  'sandbox.authClipboardHint':
+    'Ignore the CLI\'s own "press c to copy": it runs inside the container, so its "Copied!" never reaches your clipboard. Use the buttons above, or select the text and press Ctrl+C.',
   'confirm.sandboxOnTitle': 'Enable sandbox mode?',
   'confirm.sandboxOnMessage':
     "New sessions will run inside this project's Docker container (the project folder stays mounted read-write; the rest of this machine is out of reach). Existing terminals are not moved.",
@@ -418,6 +439,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.sandboxOn': 'Sandbox mode enabled',
   'toast.sandboxOff': 'Sandbox mode disabled',
   'toast.sandboxAuthDone': 'Sandbox signed in',
+  'toast.authUrlCopied': 'Sign-in link copied',
   'toast.sandboxAction': 'Done',
   'sandbox.workMode': 'Work mode:',
   'sandbox.workMode.mount': 'Mount the project',
@@ -450,6 +472,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sandbox.copyReset': 'Reset clone',
   'sandbox.imageCard': 'Image',
   'sandbox.imageBuild': 'Build image',
+  'sandbox.imageRemove': 'Remove image',
   'sandbox.imageSave': 'Save',
   'sandbox.imageFound': 'present',
   'sandbox.imageMissing': 'missing',
@@ -457,11 +480,45 @@ export const EN_DEFAULTS: Record<string, string> = {
     'The image is not built yet — Build image runs the Dockerfile shipped with Koryphaios (a few minutes on first run).',
   'sandbox.disconnect': 'Disconnect',
   'sandbox.projection': 'Operator config projected',
-  'sandbox.projectionNone': 'nothing projected yet',
+  'sandbox.projectionNone':
+    'nothing projected yet (the config is copied into the container when it starts)',
+  'sandbox.overlayPresent':
+    'Overlay ~/.claude/sandbox-overrides: {files} (picked up at the next container start)',
+  'sandbox.overlayRegenerate': 'Regenerate sandbox config',
+  'sandbox.projectionRemove': 'Remove',
+  'sandbox.projectionDisabledLine':
+    'projection off: your global config is not carried into the container (Generate re-enables it)',
+  'confirm.sandboxProjectionRemoveTitle': 'Stop projecting the operator config?',
+  'confirm.sandboxProjectionRemoveMessage':
+    'Your global config (CLAUDE.md, agents, skills, plugins, settings.json) is removed from the container and no longer copied at its next starts. The files in ~/.claude/sandbox-overrides stay untouched on this machine. "Generate sandbox config" re-enables the projection.',
+  'confirm.sandboxProjectionRemoveConfirm': 'Remove',
+  'toast.sandboxProjectionRemoved': 'Projection off: config removed from the container',
+  'sandbox.overlayNone':
+    'No overlay: Generate writes settings.json (host-only hooks stripped) into ~/.claude/sandbox-overrides.',
   'sandbox.projectionHint':
     'Your global CLAUDE.md, agents, skills, plugins and settings.json are COPIED into the container at each start (never mounted: a mounted settings.json would let a sandboxed agent plant a hook that runs on your machine). Drop Linux replacements in ~/.claude/sandbox-overrides/.',
   'sandbox.hookWarning': 'Hooks that cannot run inside the Linux container:',
+  'sandbox.hookWarningRemedy':
+    'Generate sandbox config writes an overlay without these hooks; to actually run them in the container, add their Linux dependencies to the custom image and provide Linux versions in ~/.claude/sandbox-overrides/.',
+  'sandbox.overlayGenerate': 'Generate sandbox config',
+  'sandbox.isolationNote':
+    'By design, a sandboxed session shares your global config and Claude login, but NOT: hooks pointing at host paths or Windows binaries, host credentials (kleos, cred...), or MCP servers running on this machine. This is the isolation working, not a bug.',
+  'sandbox.customCard': 'Custom image',
+  'sandbox.customSave': 'Save',
+  'sandbox.customBuild': 'Build custom image',
+  'sandbox.customHint':
+    'Dockerfile lines appended on top of the base image (RUN apt-get install..., ENV...). Built as a separate tag; the base image stays untouched. FROM lines are refused (the base is fixed).',
+  'sandbox.customPlaceholder': 'RUN sudo apt-get update && sudo apt-get install -y postgresql-client',
+  'sandbox.customUse': 'Use for this project',
+  'toast.sandboxOverlayDone': 'Sandbox config generated: {n} host-only hook(s) removed',
+  'confirm.sandboxOverlayTitle': 'Overwrite the existing overlay?',
+  'confirm.sandboxOverlayMessage':
+    '~/.claude/sandbox-overrides/settings.json already exists (possibly hand-edited). Generating replaces it with the host settings minus host-only hooks.',
+  'confirm.sandboxOverlayConfirm': 'Overwrite',
   'sandbox.buildTitle': 'Building the sandbox image',
+  'sandbox.buildHide': 'Hide',
+  'sandbox.buildShowLog': 'Show log',
+  'sandbox.building': 'Build in progress',
   'sandbox.buildHint':
     'Runs the Dockerfile shipped with Koryphaios. First build downloads a Debian base plus bun and the Claude CLI — a few minutes.',
   'confirm.sandboxModeTitle': 'Change the work mode?',
@@ -474,8 +531,17 @@ export const EN_DEFAULTS: Record<string, string> = {
   'confirm.sandboxDisconnectMessage':
     'Credentials are wiped from the shared volume: the next sandboxed session asks you to sign in again. Your own login on this machine is untouched.',
   'confirm.sandboxDisconnectConfirm': 'Disconnect',
+  'confirm.sandboxForceCloseTitle': 'Close every running session?',
+  'confirm.sandboxForceCloseMessage':
+    '{n} session(s) will be closed, the supervisor included. Unsaved terminal work is lost; sandbox settings unlock right after.',
+  'confirm.sandboxForceCloseConfirm': 'Close them all',
   'toast.sandboxSettingsSaved': 'Sandbox settings saved',
   'toast.sandboxImageBuilt': 'Sandbox image built',
+  'toast.sandboxImageRemoved': 'Sandbox image removed',
+  'confirm.sandboxImageRemoveTitle': 'Remove the sandbox image?',
+  'confirm.sandboxImageRemoveMessage':
+    'Sandboxed sessions cannot start until it is rebuilt. The engine refuses while any container still references it, and your sign-in (kory-claude-auth volume) is untouched.',
+  'confirm.sandboxImageRemoveConfirm': 'Remove',
   'toast.sandboxDisconnected': 'Sandbox disconnected',
   'toast.sandboxCopyReset': 'Clone reset',
   'nav.home': 'Home',
@@ -708,7 +774,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'roadmap.wf.clearQueue': 'Clear',
   'roadmap.wf.clearQueueTitle': 'Clear the queue?',
   'roadmap.wf.clearQueueMessage':
-    'Removes every queued card from the workflow lane. No roadmap item is deleted, and locked in-progress cards keep running untouched -- this only empties the dispatch order.',
+    'Removes every queued card from the workflow lane. No roadmap item is deleted, and locked in-progress cards keep running untouched — this only empties the dispatch order.',
   'roadmap.wf.clearQueueConfirm': 'Clear',
   'roadmap.dispatchFirst': '▶ Send first to team-lead',
   'roadmap.dispatchNoLeadHint':

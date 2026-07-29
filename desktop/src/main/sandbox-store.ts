@@ -32,6 +32,13 @@ export interface SandboxProjectSettings {
    * always wins: secrets and dependency dirs are never duplicated.
    */
   copyIgnored: string[]
+  /**
+   * Carry the operator's global Claude config (CLAUDE.md, agents, skills,
+   * plugins, settings.json) into the container at start. Default true; the
+   * Docker view's projection card "Remove" opts out (and scrubs the
+   * container), "Generate" opts back in.
+   */
+  projectConfig: boolean
 }
 
 export interface SandboxStoreData {
@@ -44,7 +51,8 @@ const DEFAULT_SETTINGS: SandboxProjectSettings = {
   enabled: false,
   mode: 'mount',
   ports: DEFAULT_SANDBOX_PORTS,
-  copyIgnored: []
+  copyIgnored: [],
+  projectConfig: true
 }
 
 const WORK_MODES: readonly SandboxWorkMode[] = ['mount', 'copy']
@@ -79,7 +87,9 @@ function saneSettings(raw: unknown): SandboxProjectSettings {
     enabled: v.enabled === true,
     mode: WORK_MODES.includes(v.mode as SandboxWorkMode) ? (v.mode as SandboxWorkMode) : 'mount',
     ports: sanePorts(v.ports),
-    copyIgnored: saneGlobs(v.copyIgnored)
+    copyIgnored: saneGlobs(v.copyIgnored),
+    // Opt-OUT flag: absent (pre-existing stores) means "keep projecting".
+    projectConfig: v.projectConfig !== false
   }
 }
 

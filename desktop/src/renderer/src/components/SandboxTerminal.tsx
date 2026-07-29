@@ -1,7 +1,9 @@
 import { useEffect, useRef } from 'react'
 import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
-import { useDeck } from '../store'
+import { WebLinksAddon } from '@xterm/addon-web-links'
+import { errorText, useDeck } from '../store'
+import { copySelection, pasteFromClipboard } from '../terminal-clipboard'
 
 // Dialog-hosted xterm bound to one of the sandbox UTILITY PTYs (the login
 // terminal and the image build, PLAN-SANDBOX SBX3/M2). Follows the
@@ -38,6 +40,7 @@ export function SandboxTerminal({
 }): React.JSX.Element {
   const config = useDeck((s) => s.config!)
   const hostRef = useRef<HTMLDivElement>(null)
+  const termRef = useRef<Terminal | null>(null)
   // Kept in a ref so a re-render never re-subscribes the PTY listeners.
   const exitRef = useRef(onExit)
   exitRef.current = onExit
@@ -52,7 +55,31 @@ export function SandboxTerminal({
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
+    // Clickable links: the login flow prints an OAuth URL that has to reach the
+    // HOST browser. Scheme-validated main-side. NOTE that a hard-wrapped URL is
+    // several separate links here (one per row) -- that is why the dialog above
+    // rebuilds the whole link from the stream and offers its own button.
+    term.loadAddon(
+      new WebLinksAddon((_e, uri) => {
+        window.api
+          .openExternal(uri)
+          .catch((e: unknown) => window.api.reportError('sandbox', `open link failed: ${errorText(e)}`))
+      })
+    )
     if (hostRef.current) term.open(hostRef.current)
+    termRef.current = term
+
+    // Same clipboard contract as TerminalTile: Ctrl+C copies when there is a
+    // selection, and falls through to the PTY interrupt when there is not.
+    // Without this the login terminal had no copy path at all.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== 'keydown') return true
+      if (e.ctrlKey && !e.altKey && !e.metaKey && e.key.toLowerCase() === 'c') {
+        if (copySelection(term)) return false
+        return !e.shiftKey // plain Ctrl+C interrupts; Ctrl+Shift+C is swallowed
+      }
+      return true
+    })
 
     const onInput = term.onData((d) => window.api.ptyInput(ptyId, d))
     const offData = window.api.onPtyData((e) => {
@@ -85,9 +112,23 @@ export function SandboxTerminal({
       offData()
       offExit()
       term.dispose()
+      termRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ptyId])
 
-  return <div ref={hostRef} className="sandbox-auth-term" />
+  return (
+    <div
+      ref={hostRef}
+      className="sandbox-auth-term"
+      // Terminal convention (same as TerminalTile): right-click copies the
+      // selection, or pastes when there is none.
+      onContextMenu={(e) => {
+        const term = termRef.current
+        if (!term) return
+        e.preventDefault()
+        if (!copySelection(term)) void pasteFromClipboard(term)
+      }}
+    />
+  )
 }

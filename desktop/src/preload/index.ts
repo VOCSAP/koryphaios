@@ -104,7 +104,10 @@ const api: DeckApi = {
     ipcRenderer.invoke('sandbox:patch-settings', patch),
   sandboxSetImage: (image: string) => ipcRenderer.invoke('sandbox:set-image', image),
   sandboxEnsure: () => ipcRenderer.invoke('sandbox:ensure'),
-  sandboxImageBuild: () => ipcRenderer.invoke('sandbox:image-build'),
+  sandboxImageBuild: (variant?: 'base' | 'custom') =>
+    ipcRenderer.invoke('sandbox:image-build', variant),
+  sandboxImageRemove: () => ipcRenderer.invoke('sandbox:image-remove'),
+  openExternal: (url: string) => ipcRenderer.invoke('shell:open-external', url),
   sandboxBuildStop: () => ipcRenderer.invoke('sandbox:build-stop'),
   sandboxAuthPurge: () => ipcRenderer.invoke('sandbox:auth-purge'),
   sandboxResetCopy: () => ipcRenderer.invoke('sandbox:reset-copy'),
@@ -114,6 +117,12 @@ const api: DeckApi = {
     ipcRenderer.invoke('sandbox:container-action', name, action),
   sandboxAuthStart: () => ipcRenderer.invoke('sandbox:auth-start'),
   sandboxAuthStop: () => ipcRenderer.invoke('sandbox:auth-stop'),
+  sandboxWarmUp: () => ipcRenderer.invoke('sandbox:warm-up'),
+  sandboxCustomGet: () => ipcRenderer.invoke('sandbox:custom-get'),
+  sandboxCustomSave: (fragment: string) => ipcRenderer.invoke('sandbox:custom-save', fragment),
+  sandboxOverlayGenerate: (force: boolean) =>
+    ipcRenderer.invoke('sandbox:overlay-generate', force),
+  sandboxProjectionRemove: () => ipcRenderer.invoke('sandbox:projection-remove'),
   sandboxAuthProbe: () => ipcRenderer.invoke('sandbox:auth-probe'),
   onSandboxChanged: (cb: (status: SandboxStatus) => void) => subscribe('sandbox:changed', cb),
 

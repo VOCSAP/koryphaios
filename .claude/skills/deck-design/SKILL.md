@@ -21,10 +21,17 @@ and authoritative (extracted from the user-validated `main` styles).
 3. **Colour = meaning.** Blue `--accent` accept/validate · orange `#e08a3c`
    restore · red `--danger` destroy · purple template · green/amber states.
    Do not repurpose a semantic colour for decoration.
-4. **No bare `<button>`.** Native grey means the control was forgotten: give
-   it an archetype class (`.btn` secondary is the default) or ensure a
-   container rule styles it (`.modal-actions button:not(.primary)`). Always
-   define hover (`:not(:disabled)`) and disabled (`opacity: 0.4`) states.
+4. **No control keeps its native look.** Not just buttons — `<select>`,
+   `<input>`, `<textarea>`, checkboxes too. A grey OS button or a square white
+   dropdown means the control was forgotten. Buttons: give an archetype class
+   (`.btn` secondary is the default) or ensure a container rule styles them
+   (`.modal-actions button:not(.primary)`). Everything else must be covered by
+   an ELEMENT-level rule in `styles.css` (`select { … }`) so the next instance
+   is themed the day it is written — a per-instance class only fixes the one
+   you are looking at. Always define hover (`:not(:disabled)`) and disabled
+   (`opacity: 0.4`) states. Careful with `<select>`: a scoped rule that
+   re-declares the `background` shorthand erases the custom chevron
+   (DESIGN.md §4).
 5. **Both themes.** Check dark AND light `data-theme`: no hardcoded greys;
    whites only on filled semantic buttons.
 6. **Icons are Greek glyphs — NEVER emoji, anywhere.** Every icon (view,

@@ -15,7 +15,7 @@ The repo builds **three products**:
 | --- | --- | --- |
 | `claude-peers` core (repo root: `server.ts`, `broker.ts`, `cli.ts`) | **Bun** only — TypeScript is run directly, nothing to compile | no |
 | Koryphaios desktop (`desktop/`) | **Node.js + npm** (electron-vite / electron-builder) + **Bun** (bundles the deck-plugin assets) | yes — `node-pty`, rebuilt for Electron |
-| Parastatès, the Android app (`desktop/mobile-shell/`) | **JDK 17 + Android SDK** (Capacitor / Gradle) + **Bun** (bundles the shell's web assets) | yes — Kotlin, §5 |
+| Parastatès, the Android app (`desktop/mobile-shell/`) | **JDK 21 + Android SDK** (Capacitor / Gradle) + **Bun** (bundles the shell's web assets) | yes — Kotlin, §5 |
 
 Only the first two are built by CI. **The Android app is not**, and that is a
 deliberate consequence rather than an oversight: no CI runner here carries an
@@ -146,16 +146,30 @@ channel through the bundled deck-plugin, and the supervisor/demo bridges
 Optional: the app is only needed to use the phone as a companion screen or as
 an approval channel. Nothing else in the repo depends on it.
 
+The shell runs on **Capacitor 8** (`@capacitor/core`, `android`, `cli` and
+`preferences` on `^8.0.0`, `@capacitor/barcode-scanner` on `^3.1.0`). Those
+five move as ONE: the scanner's major is pinned to Capacitor's by its peer
+range (1.x → core 6, 2.x → ≥ 7, 3.x → ≥ 8), so a partial bump does not resolve
+at all. The repo shipped exactly that state for a while — scanner `^2` against
+core `^6` — and because `android/` is generated rather than committed (§5.3),
+nothing ever failed until someone ran `npm install`.
+
 ### 5.1 What you need beyond §1
 
 | Tool | Why | Notes |
 | --- | --- | --- |
-| **JDK 17** | the Android Gradle Plugin 8.x requires it — 11 is too old, 21 is not yet supported by every AGP 8.x | Android Studio ships a bundled JBR 17; with a CLI-only setup install a JDK 17 and set `JAVA_HOME` |
+| **JDK 21** | Capacitor 8 compiles its Android sources at `JavaVersion.VERSION_21` (`capacitor/build.gradle`) | Android Studio ships a bundled JBR 21; with a CLI-only setup install a JDK 21 and set `JAVA_HOME`. A newer JDK is NOT a safe substitute — AGP rejects majors it does not know |
+| **Node.js ≥ 22** | the Capacitor 8 CLI declares `engines.node >= 22`, stricter than the ≥ 20 of §1 | only the `cap` commands care; the rest of the repo is unaffected |
 | **Android SDK** | compiles and packages the app | Easiest via **Android Studio**; otherwise the standalone *command-line tools* |
-| **SDK Platform API 34** | Capacitor 6 compiles and targets 34 (`minSdk` 22) | `sdkmanager "platforms;android-34"` |
-| **SDK Build-Tools 34** | dexing and packaging | `sdkmanager "build-tools;34.0.0"` |
+| **SDK Platform API 36** | Capacitor 8 compiles and targets 36 (`minSdk` 24) | `sdkmanager "platforms;android-36"` |
+| **SDK Build-Tools 36** | dexing and packaging | `sdkmanager "build-tools;36.0.0"` |
 | **Platform-Tools** (`adb`) | installs onto the device/emulator | `sdkmanager "platform-tools"` |
 | **`ANDROID_HOME`** | how Capacitor and Gradle find the SDK | e.g. `~/Android/Sdk` (Linux), `~/Library/Android/sdk` (macOS), `%LOCALAPPDATA%\Android\Sdk` (Windows) |
+
+The SDK/JDK numbers above are not folklore: they are the defaults declared in
+`node_modules/@capacitor/android/capacitor/build.gradle` (`compileSdk`,
+`minSdkVersion`, `sourceCompatibility`). When you bump the Capacitor major,
+re-read that file rather than this table — and then fix this table.
 
 **Gradle itself is not installed by hand**: `npx cap add android` generates a
 Gradle *wrapper* (`./gradlew`) that fetches the right version.
@@ -200,6 +214,10 @@ dependencies {
 }
 ```
 
+Both pins were chosen under Capacitor 6 / compileSdk 34 and have **not** been
+revalidated under compileSdk 36; they are the first suspects if the first real
+build fails on an `androidx` signature.
+
 ### 5.3 Why `android/` is copied into rather than committed
 
 `npx cap add android` *generates* the Gradle project, so it is a build artefact
@@ -243,7 +261,9 @@ no signing setup in this repo yet, and no store listing (`BACKLOG.md` §3.2).
 | `deck-control MCP script missing -- run \`npm run build:mcp\`` | The deck-plugin bundles weren't built (Bun missing?): run `npm run build:mcp` |
 | Peers see each other but messages arrive late | Channel flag missing: launch with `--dangerously-load-development-channels server:claude-peers` (§4) |
 | Android build: `Unresolved reference: biometric` / `webkit` | The two Gradle dependencies were not added (§5.2) |
-| Android build: `Unsupported class file major version` / AGP refuses the JDK | Wrong JDK — AGP 8.x wants **17** (§5.1) |
-| `cap add android` or Gradle cannot find the SDK | `ANDROID_HOME` unset, or the API 34 platform not installed (§5.1) |
+| Android build: `Unsupported class file major version` / AGP refuses the JDK | Wrong JDK — Capacitor 8 wants **21** (§5.1). Beware a shell opened BEFORE you changed `JAVA_HOME`: it still carries the old value, and `java -version` in it will lie to you |
+| `cap add android` or Gradle cannot find the SDK | `ANDROID_HOME` unset, or the API 36 platform not installed (§5.1) |
+| `npm install` in `mobile-shell` fails with `ERESOLVE` on `@capacitor/barcode-scanner` | The scanner's major is tied to Capacitor's: 1.x peers on core 6, 2.x on ≥ 7, 3.x on ≥ 8. Bumping one without the other is unsatisfiable, and no lockfile hides it |
+| `cap` refuses to run / `engines` warning about Node | The Capacitor 8 CLI wants Node ≥ 22, above the repo's own ≥ 20 (§5.1) |
 | `npx cap run android` finds no target | Device without USB debugging, or no AVD created |
 | The app runs but the QR scanner opens a text prompt | `@capacitor/barcode-scanner` not installed / not synced: `npm install` then `npx cap sync` |

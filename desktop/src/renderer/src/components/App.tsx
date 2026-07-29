@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { sanitizeGlowColor } from '@shared/palette'
+import { SANDBOX_BUILD_PTY_ID } from '@shared/types'
 import { GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
@@ -109,6 +110,18 @@ export function App(): React.JSX.Element {
   useEffect(() => {
     void init()
   }, [init])
+
+  // The image build survives the modal being HIDDEN, so its completion is
+  // watched here, at app level: leaving this to SandboxBuildDialog would drop
+  // the toast, the status refresh and the login chaining the moment the
+  // operator hid the log.
+  useEffect(
+    () =>
+      window.api.onPtyExit((e) => {
+        if (e.id === SANDBOX_BUILD_PTY_ID) useDeck.getState().finishSandboxBuild(e.exitCode)
+      }),
+    []
+  )
 
   useEffect(() => {
     if (!config) return

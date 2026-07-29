@@ -117,7 +117,7 @@ can be walked through in a plain browser: `scanQr` falls back to a prompt,
 
 ## Building it
 
-The toolchain (JDK 17, Android SDK, the two Gradle dependencies Capacitor does
+The toolchain (JDK 21, Android SDK, the two Gradle dependencies Capacitor does
 not bring) and the step-by-step are in **[`BUILDING.md`](../../BUILDING.md) §5**
 — one place, so they cannot drift from the desktop instructions next to them.
 

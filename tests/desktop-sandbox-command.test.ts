@@ -10,8 +10,15 @@ import {
   SANDBOX_WORK_DIR,
   buildAuthCommand,
   buildAuthProbeArgs,
+  buildAuthPurgeArgs,
   buildBrokerProbeArgs,
+  buildImageRemoveArgs,
   buildCopyIntoArgs,
+  buildProjectionChownArgs,
+  buildProjectionCleanArgs,
+  composeCustomDockerfile,
+  SANDBOX_IMAGE_CUSTOM,
+  SANDBOX_IMAGE_DEFAULT,
   buildCreateArgs,
   buildExecCommand,
   buildImageBuildCommand,
@@ -169,6 +176,101 @@ test("sandboxifyEnv translates the FORCE_GROUP file transport inline", () => {
   expect(out.CLAUDE_PEERS_FORCE_GROUP_NAME).toBe("deck scope");
 });
 
+// The CLI keeps its ONBOARDING state in .claude.json, which by default sits
+// beside the config dir, in $HOME -- outside the shared auth volume. Left
+// alone, a login done in the throwaway auth container dies with it and the
+// agent greets the operator with "Select login method" although the volume
+// holds valid credentials. Forcing the config root onto the mounted dir is
+// what makes one login serve every container.
+test("sandboxifyEnv forces the config root onto the shared volume", () => {
+  expect(sandboxifyEnv({}, () => null).CLAUDE_CONFIG_DIR).toBe("/home/kory/.claude");
+  // A host value is a Windows path here: it must never win.
+  const out = sandboxifyEnv({ CLAUDE_CONFIG_DIR: "C:/Users/x/.claude" }, () => null);
+  expect(out.CLAUDE_CONFIG_DIR).toBe("/home/kory/.claude");
+});
+
+// `docker cp` copies a symlink AS a symlink. Operators commonly keep
+// ~/.claude/CLAUDE.md and friends as links into a config repo, so without -L
+// the container received dangling links to host paths and the global config
+// was silently missing from every sandboxed agent.
+test("config projection follows source symlinks", () => {
+  expect(buildCopyIntoArgs("kory-sbx-0123456789ab", "/host/CLAUDE.md", "/home/kory/.claude/")).toEqual([
+    "cp",
+    "-L",
+    "/host/CLAUDE.md",
+    "kory-sbx-0123456789ab:/home/kory/.claude/",
+  ]);
+});
+
+// Custom image (f29b1917): the operator's fragment rides on top of the fixed
+// base. FROM is refused rather than honoured — the base is the app's contract
+// (user kory, CLAUDE_CONFIG_DIR, the CLI preinstalled).
+test("composeCustomDockerfile pins the base image and refuses FROM lines", () => {
+  const composed = composeCustomDockerfile("RUN sudo apt-get install -y jq\n");
+  expect(composed).toContain(`FROM ${SANDBOX_IMAGE_DEFAULT}\n`);
+  expect(composed!.endsWith("RUN sudo apt-get install -y jq\n")).toBe(true);
+  // Empty/blank fragment: nothing to build.
+  expect(composeCustomDockerfile("")).toBeNull();
+  expect(composeCustomDockerfile("   \n  ")).toBeNull();
+  // A fragment smuggling its own FROM (any case, any line) is refused.
+  expect(() => composeCustomDockerfile("from alpine\nRUN true")).toThrow("custom-fragment-from");
+  expect(() => composeCustomDockerfile("RUN true\nFROM scratch")).toThrow("custom-fragment-from");
+  // The custom tag stays derived from the default one (shared/types is the
+  // canonical copy the Docker view reads).
+  expect(SANDBOX_IMAGE_CUSTOM).toBe(`${SANDBOX_IMAGE_DEFAULT}-custom`);
+});
+
+// `docker cp -L` overwrites destination FILES but will not replace a
+// destination DIRECTORY SYMLINK: the auth volume kept `agents`/`skills` as
+// dangling links from a pre-`-L` copy, and the projection reported success
+// while the operator's global agents/skills stayed absent from every
+// container. The purge that precedes the copies is what makes them land.
+test("projection pre-clean removes exactly the entries about to be copied", () => {
+  // --user root: docker cp lands the trees as root, and kory can unlink the
+  // top-level entries (it owns ~/.claude) but nothing inside a root-owned dir
+  // (the first kory run sprayed "rm: Permission denied" over plugins/).
+  expect(
+    buildProjectionCleanArgs("kory-sbx-0123456789ab", ["CLAUDE.md", "agents", "skills"])
+  ).toEqual([
+    "exec",
+    "--user",
+    "root",
+    "kory-sbx-0123456789ab",
+    "rm",
+    "-rf",
+    "/home/kory/.claude/CLAUDE.md",
+    "/home/kory/.claude/agents",
+    "/home/kory/.claude/skills",
+  ]);
+  // The post-copy chown hands the root-owned copies to the container user, so
+  // the CLI can maintain them (installed_plugins.json was read-only for it).
+  expect(buildProjectionChownArgs("kory-sbx-0123456789ab", ["plugins", "../evil"])).toEqual([
+    "exec",
+    "--user",
+    "root",
+    "kory-sbx-0123456789ab",
+    "chown",
+    "-R",
+    "kory:kory",
+    "/home/kory/.claude/plugins",
+  ]);
+  // Boundary re-check: an entry name carrying a path separator (or a bare
+  // `..`, which the charset alone would accept and turn into
+  // `rm -rf ~/.claude/..`) must never reach the container's rm — the
+  // allow-list is flat names only.
+  expect(
+    buildProjectionCleanArgs("kory-sbx-0123456789ab", ["../peers", "a/b", "..", ".", "ok.md"])
+  ).toEqual([
+    "exec",
+    "--user",
+    "root",
+    "kory-sbx-0123456789ab",
+    "rm",
+    "-rf",
+    "/home/kory/.claude/ok.md",
+  ]);
+});
+
 test("sandboxifyEnv keeps the inline transport when no file is involved", () => {
   const out = sandboxifyEnv(
     { CLAUDE_PEERS_FORCE_GROUP: "inline", CLAUDE_PEERS_FORCE_GROUP_FILE: "" },
@@ -239,6 +341,7 @@ test("image build/probe and docker cp shapes", () => {
   expect(buildImageProbeArgs("img")).toEqual(["image", "inspect", "--format", "{{.Created}}", "img"]);
   expect(buildCopyIntoArgs("kory-sbx-0123456789ab", "/home/op/.claude/agents", "/home/kory/.claude/")).toEqual([
     "cp",
+    "-L",
     "/home/op/.claude/agents",
     "kory-sbx-0123456789ab:/home/kory/.claude/"
   ]);
@@ -273,18 +376,65 @@ test("buildCreateArgs mounts the CLONE in copy mode, labels the real project", (
   expect(args).toContain("kory.project=/home/op/proj");
 });
 
-test("exec/auth/probe command shapes", () => {
+test("exec command shape", () => {
   expect(buildExecCommand("docker", "kory-sbx-0123456789ab", "sid")).toBe(
     `docker exec -it kory-sbx-0123456789ab bash ${SANDBOX_RUN_DIR}/cmd-sid.sh`
   );
-  expect(buildAuthCommand("podman", "kory-sbx-0123456789ab")).toBe(
-    "podman exec -it kory-sbx-0123456789ab bash -lc claude"
+});
+
+// The credentials volume is app-wide: every operation on it runs in a
+// throwaway container built from the (also app-wide) image, mounting NOTHING
+// but kory-claude-auth. No project container is named anywhere -- that coupling
+// is exactly what made "sign in" impossible before a project container existed.
+test("auth commands run in a throwaway container, not the project one", () => {
+  // The config-root env travels with the mount: the login writes .claude.json
+  // into the volume, so the next container sees an account, not an onboarding
+  // screen.
+  const mount = `-v kory-claude-auth:/home/kory/.claude -e CLAUDE_CONFIG_DIR=/home/kory/.claude`;
+  expect(buildAuthCommand("podman", "koryphaios-sandbox")).toBe(
+    `podman run --rm -it ${mount} koryphaios-sandbox bash -lc claude`
   );
-  expect(buildAuthProbeArgs("kory-sbx-0123456789ab")).toEqual([
-    "exec",
-    "kory-sbx-0123456789ab",
-    "test",
-    "-s",
+  // The probe demands credentials AND a finished onboarding: probing the
+  // credentials alone made the login dialog kill the CLI mid-onboarding
+  // (hasCompletedOnboarding never written), so every agent re-ran onboarding
+  // while the Docker view claimed "connected". The if/else keeps the exit
+  // code binary (a bare grep on a missing .claude.json exits 2 = "unknown").
+  expect(buildAuthProbeArgs("koryphaios-sandbox")).toEqual([
+    "run",
+    "--rm",
+    "-v",
+    "kory-claude-auth:/home/kory/.claude",
+    "-e",
+    "CLAUDE_CONFIG_DIR=/home/kory/.claude",
+    "koryphaios-sandbox",
+    "sh",
+    "-c",
+    `if test -s ${SANDBOX_CREDENTIALS_FILE} && grep -qs hasCompletedOnboarding /home/kory/.claude/.claude.json; then exit 0; else exit 1; fi`,
+  ]);
+  expect(buildAuthPurgeArgs("koryphaios-sandbox")).toEqual([
+    "run",
+    "--rm",
+    "-v",
+    "kory-claude-auth:/home/kory/.claude",
+    "-e",
+    "CLAUDE_CONFIG_DIR=/home/kory/.claude",
+    "koryphaios-sandbox",
+    "rm",
+    "-f",
     SANDBOX_CREDENTIALS_FILE,
   ]);
+  // The work mount is the one thing that must never appear here.
+  expect(buildAuthCommand("docker", "koryphaios-sandbox")).not.toContain("/work");
+});
+
+// `image rm` is deliberately unforced: the engine refusing because a container
+// still references the image is the honest answer, where -f would orphan those
+// containers behind an untagged id.
+test("image removal is never forced", () => {
+  expect(buildImageRemoveArgs("koryphaios-sandbox")).toEqual([
+    "image",
+    "rm",
+    "koryphaios-sandbox",
+  ]);
+  expect(buildImageRemoveArgs("koryphaios-sandbox")).not.toContain("-f");
 });

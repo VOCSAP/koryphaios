@@ -7,6 +7,7 @@ import { GLYPHS, GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
 import { formatClock, useT } from '../i18n'
 import { registerTerminal, unregisterTerminal } from '../terminal-registry'
+import { copySelection, pasteFromClipboard } from '../terminal-clipboard'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { SnippetsDialog } from './SnippetsDialog'
@@ -18,25 +19,6 @@ const THEMES: Record<'dark' | 'light', ITheme> = {
 
 const FONT_STACK =
   'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace'
-
-/** Copy the current selection to the clipboard and clear it. No-op if empty. */
-function copySelection(term: Terminal): boolean {
-  const sel = term.getSelection()
-  if (!sel) return false
-  void navigator.clipboard.writeText(sel)
-  term.clearSelection()
-  return true
-}
-
-/** Paste clipboard text through xterm (bracketed-paste aware -> onData -> PTY). */
-async function pasteFromClipboard(term: Terminal): Promise<void> {
-  try {
-    const text = await navigator.clipboard.readText()
-    if (text) term.paste(text)
-  } catch {
-    /* clipboard read denied / unavailable */
-  }
-}
 
 export function TerminalTile({
   session,
@@ -281,12 +263,15 @@ export function TerminalTile({
               void restartSession(id)
             }}
           >
-            ↻
+            {GLYPH_ACTIONS.refresh}
           </button>
         )}
+        {/* The four recurring actions carry a semantic tone (DESIGN.md §2/§3):
+            yellow = insert a prompt, blue = browser view, violet = maximize,
+            red = close. Colour is what tells them apart in a dense tile head. */}
         <button
           type="button"
-          className="tile-btn"
+          className="tile-btn tile-btn-prompt"
           title={t('tile.snippetsTitle')}
           onClick={(e) => {
             e.stopPropagation()
@@ -297,7 +282,7 @@ export function TerminalTile({
         </button>
         <button
           type="button"
-          className="tile-btn"
+          className="tile-btn tile-btn-browser"
           title={t('tile.browserTitle')}
           onClick={(e) => {
             e.stopPropagation()
@@ -308,7 +293,7 @@ export function TerminalTile({
         </button>
         <button
           type="button"
-          className="tile-btn"
+          className="tile-btn tile-btn-expand"
           title={isMax ? t('common.restore') : t('common.maximize')}
           onClick={(e) => {
             e.stopPropagation()

@@ -26,6 +26,13 @@ RUN useradd -m -s /bin/bash kory \
 USER kory
 WORKDIR /work
 ENV HOME=/home/kory
+# The CLI's onboarding state (.claude.json) sits BESIDE its config dir by
+# default, i.e. in $HOME, which the auth volume does NOT cover -- so a login
+# done in one container would not be seen by the next. Pointing the config root
+# at the mounted dir puts that state on the volume with the credentials.
+# sandbox-command.ts exports the same value; this ENV keeps a hand-run
+# `docker run` behaving identically.
+ENV CLAUDE_CONFIG_DIR=/home/kory/.claude
 ENV PATH="/home/kory/.local/bin:/home/kory/.bun/bin:${PATH}"
 
 # Bun (runs server.ts / project tooling) + Claude Code (native installer).

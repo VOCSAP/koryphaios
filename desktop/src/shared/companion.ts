@@ -149,6 +149,8 @@ export const COMPANION_MANIFEST = {
   sandboxSetImage: { kind: 'invoke', channel: 'sandbox:set-image' },
   sandboxEnsure: { kind: 'invoke', channel: 'sandbox:ensure' },
   sandboxImageBuild: { kind: 'invoke', channel: 'sandbox:image-build' },
+  sandboxImageRemove: { kind: 'invoke', channel: 'sandbox:image-remove' },
+  openExternal: { kind: 'invoke', channel: 'shell:open-external' },
   sandboxBuildStop: { kind: 'invoke', channel: 'sandbox:build-stop' },
   sandboxAuthPurge: { kind: 'invoke', channel: 'sandbox:auth-purge' },
   sandboxResetCopy: { kind: 'invoke', channel: 'sandbox:reset-copy' },
@@ -157,6 +159,11 @@ export const COMPANION_MANIFEST = {
   sandboxContainerAction: { kind: 'invoke', channel: 'sandbox:container-action' },
   sandboxAuthStart: { kind: 'invoke', channel: 'sandbox:auth-start' },
   sandboxAuthStop: { kind: 'invoke', channel: 'sandbox:auth-stop' },
+  sandboxWarmUp: { kind: 'invoke', channel: 'sandbox:warm-up' },
+  sandboxCustomGet: { kind: 'invoke', channel: 'sandbox:custom-get' },
+  sandboxCustomSave: { kind: 'invoke', channel: 'sandbox:custom-save' },
+  sandboxOverlayGenerate: { kind: 'invoke', channel: 'sandbox:overlay-generate' },
+  sandboxProjectionRemove: { kind: 'invoke', channel: 'sandbox:projection-remove' },
   sandboxAuthProbe: { kind: 'invoke', channel: 'sandbox:auth-probe' },
   onCompanionChanged: { kind: 'event', channel: 'companion:changed' },
   onCompanionDeviceConnected: { kind: 'event', channel: 'companion:device-connected' },
@@ -238,8 +245,15 @@ export const REMOTE_BLOCKED_CHANNELS: ReadonlySet<string> = new Set([
   'sandbox:auth-stop',
   'sandbox:auth-purge',
   'sandbox:image-build',
+  'sandbox:image-remove',
   'sandbox:build-stop',
-  'sandbox:reset-copy'
+  'sandbox:reset-copy',
+  'sandbox:custom-save',
+  'sandbox:overlay-generate',
+  'sandbox:projection-remove',
+  // Launching a browser is a HOST action: a remote device asking the PC to
+  // open a link is a "make the operator's machine visit this" primitive.
+  'shell:open-external'
 ])
 
 /**
@@ -344,20 +358,31 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'sandbox:auth-probe': 0,
   'sandbox:probe-bridge': 0,
   'sandbox:ensure': 2,
+  // Same act as sandbox:ensure (idempotent pre-flight, no arguments), just
+  // dispatched off the spawn path.
+  'sandbox:warm-up': 2,
   'sandbox:container-action': 2,
   'sandbox:auth-start': 2,
   'sandbox:auth-stop': 2,
   'sandbox:image-build': 2,
+  'sandbox:image-remove': 2,
+  'shell:open-external': 2,
   'sandbox:build-stop': 2,
   'sandbox:reset-copy': 2,
 
   'config:set': 3,
   'launch:set-global': 3,
   // Trust-changing: these decide WHERE agents execute, which image they run
-  // and which gitignored files get duplicated next to them.
+  // and which gitignored files get duplicated next to them. The custom
+  // Dockerfile fragment and the settings overlay both decide what CODE and
+  // CONFIG every sandboxed agent runs with.
   'sandbox:patch-settings': 3,
   'sandbox:set-image': 3,
   'sandbox:auth-purge': 3,
+  'sandbox:custom-get': 0,
+  'sandbox:custom-save': 3,
+  'sandbox:overlay-generate': 3,
+  'sandbox:projection-remove': 3,
   'companion:start': 3,
   'companion:stop': 3,
   'companion:devices': 3,

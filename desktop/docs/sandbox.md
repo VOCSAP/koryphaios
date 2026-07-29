@@ -66,25 +66,70 @@ The container needs its own Claude login, stored in the shared
 container — one login covers all your projects and survives container
 removal; your host login is never copied in).
 
+The volume covers `~/.claude`, but the CLI keeps its **onboarding state** (the
+account, "login done") in `.claude.json`, which by default sits *beside* that
+directory in `$HOME` — outside the volume. Both the container and every session
+therefore export **`CLAUDE_CONFIG_DIR=/home/kory/.claude`**, which moves that
+file onto the volume with the credentials. Without it, a login done in the
+throwaway container dies with it and the agent greets you with "Select login
+method" while the Docker view rightly reports the volume as connected.
+
+Because that volume is app-wide, **every operation on it runs in a throwaway
+`--rm` container that mounts nothing else** — not `/work`, not the run dir, not
+the published ports. Signing in therefore needs **no project container at all**:
+an engine, the image and the volume are the whole prerequisite list, and
+`volume create` is how the volume first comes into existence. (Auth used to be
+a `docker exec` into *this project's* container, which coupled an app-wide
+credential store to per-project state and made "sign in" impossible until a
+project container had been created — and made **Disconnect** contradict its own
+guard, since it required the container up while the guard required no sessions.)
+The **image** stays required: it is what carries the `claude` CLI, and no
+container can run the login without it. It is global too, built once for every
+project — so with no image, **Re-authenticate** builds it first and opens the
+login by itself when the build succeeds, rather than refusing.
+
 The rail's 🏺 glyph fills **amber** whenever sandbox mode is on and that
 volume holds no credentials — the state in which nothing can spawn — so the
-Deck says it before you try. Any other case (mode off, signed in, container
-stopped so the state is unknown) draws the jar plain.
+Deck says it before you try. Any other case (mode off, signed in, image not
+built so the state is unknown) draws the jar plain.
 
 Agents are **blocked** until that login exists: spawning opens a modal —
-*Next* starts a terminal inside the container running the CLI's standard login
-flow (open the OAuth URL in your browser, paste the code back). The Deck polls
-the credentials file; on success the modal closes itself and a toast confirms.
-If the tokens expire later (e.g. weeks of downtime), the same modal reappears
-on the next spawn. **Re-authenticate** runs the flow at any time;
-**Disconnect** wipes the credentials from the volume (refused while a session
-is running — the wipe itself needs the container up).
+*Next* starts a terminal running the CLI's standard login flow. The dialog
+lifts the sign-in URL **out of the PTY stream** (`oauth-url.ts`) and offers
+*Open the sign-in link* / *Copy the link*, because two things conspire against
+copying it by hand: the CLI's own "Copied!" writes to the CONTAINER's
+clipboard, which never reaches the host, and the CLI **hard-wraps** the URL to
+the terminal width with a real newline, mid-token — so a naive read of the
+stream (or an xterm selection, or clicking the link) yields a truncated URL and
+OAuth answers *missing redirect_uri*. `extractAuthUrl` rejoins the continuation
+rows: a match that ends exactly at the end of its row was wrapped, and the rows
+that follow are full-width and whitespace-free until the short last one.
+Opening goes through `openExternal`, which accepts **http(s) only**
+(`external-url.ts`) — these links come from code we assume is compromised, and
+`shell.openExternal` launches any registered protocol handler.
+The Deck polls the credentials file; on success the modal closes itself and a
+toast confirms. If the tokens expire later (e.g. weeks of downtime), the same
+modal reappears on the next spawn. **Re-authenticate** runs the flow at any
+time; **Disconnect** wipes the credentials from the volume (refused while a
+session is running — that guard is about not pulling the rug from under a
+working agent, and is now the only condition).
 
 ## Your global Claude config inside the sandbox
 
-At each container start the Deck **copies** your operator config into the
-container's `~/.claude`: global `CLAUDE.md`, `agents/`, `skills/`, `plugins/`
-and `settings.json`. The Docker view reports exactly what was projected.
+The Deck **copies** your operator config into the container's `~/.claude`:
+global `CLAUDE.md`, `agents/`, `skills/`, `plugins/` and `settings.json`. The
+Docker view reports exactly what was projected.
+
+Two details that were bugs before they were features. The copy uses
+`docker cp -L`, i.e. it FOLLOWS symlinks: keeping `~/.claude/CLAUDE.md` as a
+link into a config repo is common, and copying the link instead of its target
+left the container with a dangling pointer to a host path, so your global
+config was silently absent from every agent. And the copy no longer runs on
+every spawn — it runs when the container is new or when a fingerprint of those
+entries changes (`projectionSignature`, which walks them and folds in sizes and
+mtimes). Re-copying whole trees on each spawn cost about fifteen silent
+seconds per new agent; the fingerprint keeps an edit to your global `CLAUDE.md`
+picked up on the very next one.
 
 It is a copy, never a mount, and the reason matters: `settings.json` carries
 hooks that run on the **host** in your non-sandboxed sessions. A read-write
@@ -93,13 +138,52 @@ sandbox — a clean escape. The agent may wreck its copy; it dies with the
 container. Nothing else travels: `.credentials.json`, transcripts, todos and
 telemetry stay on the host.
 
-**Windows hooks.** A hook calling PowerShell, `cmd`, a `.ps1/.bat/.exe` or a
-`C:\…` path cannot run in the Linux container. The Docker view lists those it
-detected. Supply Linux equivalents by dropping same-named files in
+**Windows hooks.** A hook calling PowerShell, `cmd`, a `.ps1/.bat/.exe`, a
+`C:\…` path or a Windows-only environment variable (`$USERPROFILE`,
+`%APPDATA%`…) cannot run in the Linux container. The Docker view lists those
+it detected. Supply Linux equivalents by dropping same-named files in
 `~/.claude/sandbox-overrides/` — an entry there wins over the base one
 (`sandbox-overrides/settings.json` replaces `settings.json`). Files in that
 folder that are not projectable are reported too, so a misplaced file is not
 silently ignored.
+
+**Generate sandbox config** (Docker view, projection card) writes that
+overlay for you: your host `settings.json` minus every host-only hook, with
+the removed commands listed. It refuses to overwrite an existing overlay
+without confirmation. Removal, not translation, is deliberate: a mechanical
+`$USERPROFILE` → `$HOME` rewrite would make hook SCRIPTS start inside the
+container and then fail on their host-side dependencies (Windows binaries,
+host credential stores), and a failing PreToolUse hook BLOCKS the sandboxed
+agent's edits. A hook you want inside the container is an explicit decision:
+put its Linux dependencies in the custom image and its Linux version in the
+overlay.
+
+**Remove** (same card) is the opposite decision: do not carry the global
+config into the container at all. It persists the opt-out per project,
+scrubs what earlier starts projected (right away on a running container,
+at the next start otherwise -- `docker exec` cannot reach a stopped one),
+and leaves `~/.claude/sandbox-overrides/` untouched on the host. Refused
+while sessions are live: the agents are using that config. "Generate
+sandbox config" is the way back in -- it re-enables the projection along
+with writing the overlay.
+
+## Isolation limits
+
+A sandboxed session is meant to feel like your machine, not to BE it. It
+shares: the global config projected above, and the Claude login (the shared
+auth volume). It deliberately does NOT share:
+
+- **Hooks that point at host paths or host binaries**: detected and listed
+  in the Docker view, stripped by the generated overlay.
+- **Host credential stores and CLIs** (`cred`, `kleos-cli`, corporate
+  tooling): the container never sees them. If an agent workflow depends on
+  one, bake a Linux equivalent into the custom image — consciously.
+- **MCP servers and services running on the host**: loopback inside the
+  container is the container. Only the claude-peers broker is bridged, and
+  the Docker view's bridge probe reports it.
+
+These are properties of the isolation, not gaps in it: every one of them is a
+capability the sandbox would otherwise hand to code assumed compromised.
 
 ## The Docker view
 
@@ -110,7 +194,14 @@ silently ignored.
   hand inside is lost).
 - **Ephemeral copy card** (copy mode only) — clone path, the gitignored-globs
   editor, unmatched globs, Reset clone.
-- **Image card** — image name, presence badge, Build image.
+- **Image card** — image name, presence badge, and one action that follows the
+  state: **Build image** while it is missing, **Remove image** once it exists
+  (removal is unforced, so the engine refuses while any container — even a
+  stopped one — still references it; your sign-in volume is untouched).
+  Deleting a CONTAINER never deletes the IMAGE: they are separate Docker
+  objects, which is why the badge can read "present" right after a container
+  removal. A build can be **hidden** and keeps running: the card then shows a
+  spinner and *Show log* to bring the terminal back.
 - **Authentication card** — volume status, Re-authenticate, Disconnect.
 - **Operator config projected** — what travelled, plus hook warnings.
 - **Containers list** — every `kory-sbx-*` container on the machine (all

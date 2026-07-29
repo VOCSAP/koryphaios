@@ -15,7 +15,12 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   by typing one Enter on the dialog's default accept option, once per process
   run, re-armed on restart, journaled via the `startup-ack` event. The
   project-sourced MCP-server consent dialog is deliberately NOT auto-acked —
-  that trust decision stays with the operator).
+  that trust decision stays with the operator). **Every xterm the Deck hosts
+  must wire `terminal-clipboard.ts`** (Ctrl+C copies a selection, right-click
+  copies-or-pastes) and the `WebLinksAddon`: a terminal without them has NO
+  copy path, and the failure is silent — the sandbox login terminal shipped
+  that way, so the OAuth URL could not be moved to the host browser while the
+  CLI's own "Copied!" (written to the CONTAINER's clipboard) said otherwise.
 - **Sandbox mode (🏺 Docker rail view, SBX1–SBX5)**: per-project
   toggle that runs NEW sessions inside a persistent Docker/Podman container
   (`kory-sbx-<hash12>`, project bind-mounted at `/work`, `sleep infinity` +
@@ -23,9 +28,12 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   PowerShell→bash double quoting). Deterministic per-project naming, shared
   `kory-claude-auth` volume on `~/.claude` (one CLI login for every project,
   done in a blocking first-run modal with an embedded auth terminal — agents
-  cannot spawn until authenticated, `sandboxGate` in create-session.ts), the
-  broker bridged through `host.docker.internal`, supervisor exempt (host-side
-  pilot). Containers are STOPPED on app close, never removed — lifecycle
+  cannot spawn until authenticated, `sandboxGate` in create-session.ts). That
+  volume is app-wide, so the login, its probe and its wipe all run in a
+  THROWAWAY `--rm` container mounting only `kory-claude-auth`: no project
+  container is involved, only the (also app-wide) image that carries the CLI.
+  The broker is bridged through `host.docker.internal`, supervisor exempt
+  (host-side pilot). Containers are STOPPED on app close, never removed — lifecycle
   (start/stop/rebuild/remove) lives in the Docker rail view, guarded by
   `hasLiveSessions()` exactly like the toggle. Settings in app-state
   `sandbox.json` (operator-owned, never the repo). Design + jalons M2/M3:

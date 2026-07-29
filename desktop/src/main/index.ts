@@ -15,6 +15,7 @@ import type { AppConfig } from '@shared/types'
 import { sanitizeGlowColor } from '@shared/palette'
 import { loadConfig, saveConfig } from './store'
 import { buildAppMenu } from './menu'
+import { safeExternalUrl } from './external-url'
 import { SessionService } from './session-service'
 import { registerIpc, resolveDocsDir } from './ipc'
 import { parseCliContext } from './cli-context'
@@ -367,6 +368,18 @@ const sandbox = new SandboxService({
   containerBrokerUrl: () => rewriteLoopbackForContainer(resolveBrokerEndpoint().url),
   journal: (msg) => journal.add('session', msg)
 })
+// The service emits 'changed' after every state transition (ensure, warm-up,
+// container actions); fan it out to the window and companion clients. The
+// renderer store and NavRail were ALREADY subscribed to this channel — the
+// producer side was never wired, so the rail's status only moved when the
+// Docker view polled.
+sandbox.on('changed', (st) => broadcast('sandbox:changed', st))
+// Startup warm-up: when this project already runs sandboxed, create/start the
+// container and project the config NOW, in the background — not during the
+// first agent spawn, where the ~10 s plugins projection read as "the app hangs
+// for fifteen seconds". No-op (and silent) when sandbox is off, the engine is
+// down or the image is not built yet.
+void sandbox.warmUp().catch((e) => reportError('sandbox', 'startup warm-up failed', e))
 
 // The broker URL a CONTAINERIZED session must dial: the host endpoint with
 // loopback rewritten to host.docker.internal (server.ts hard-refuses to
@@ -1516,8 +1529,14 @@ function createWindow(): void {
   mainWindow.on('ready-to-show', () => mainWindow?.show())
 
   // Open external links (e.g. OAuth completion pages) in the system browser.
+  // Scheme-gated: openExternal launches whatever the OS registered for a
+  // scheme, and the links reaching here come from sandboxed CLIs and remote
+  // pages. Anything that is not http(s) -- `about:`, `file:`, a custom
+  // protocol -- is refused with a trace rather than handed to the OS.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url)
+    const safe = safeExternalUrl(url)
+    if (safe) void shell.openExternal(safe)
+    else reportError('deck', `refused to open a non-http(s) external link: ${url}`)
     return { action: 'deny' }
   })
 
@@ -1545,7 +1564,9 @@ function createWindow(): void {
   // Electron windows — window.open/target=_blank goes to the system browser.
   mainWindow.webContents.on('did-attach-webview', (_e, contents) => {
     contents.setWindowOpenHandler(({ url }) => {
-      shell.openExternal(url)
+      const safe = safeExternalUrl(url)
+      if (safe) void shell.openExternal(safe)
+      else reportError('browser', `refused to open a non-http(s) external link: ${url}`)
       return { action: 'deny' }
     })
   })

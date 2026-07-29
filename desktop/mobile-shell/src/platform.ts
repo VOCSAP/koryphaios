@@ -15,7 +15,18 @@ interface CapacitorPlugins {
     set(o: { key: string; value: string }): Promise<void>;
     remove(o: { key: string }): Promise<void>;
   };
-  BarcodeScanner?: { scan(): Promise<{ ScanResult?: string; content?: string }> };
+  /**
+   * `@capacitor/barcode-scanner`.
+   *
+   * The name matters and is not the package name: the plugin calls
+   * `registerPlugin("CapacitorBarcodeScanner", …)`, so that — not
+   * `BarcodeScanner` — is the key it lands under in the registry. Getting it
+   * wrong is silent: the lookup returns `undefined` and `scanQr` falls back to
+   * `prompt()` forever, on a device as in a browser.
+   */
+  CapacitorBarcodeScanner?: {
+    scanBarcode(o: { hint: number }): Promise<{ ScanResult?: string }>;
+  };
   /** Our own plugin — see android-src/. Absent in a browser. */
   ParastatesShell?: {
     startApprovalService(o: { server: string; topic: string; token: string }): Promise<void>;
@@ -150,15 +161,36 @@ export async function reloadKey(store: KeyValueStore, key: string): Promise<void
 }
 
 /**
+ * `CapacitorBarcodeScannerTypeHintALLOption.ALL`, inlined.
+ *
+ * The value is a literal rather than an import on purpose: importing the
+ * plugin's enum pulls `html5-qrcode` (its web implementation) into a bundle
+ * that is 15 KB and deliberately free of dependencies.
+ *
+ * ALL rather than `QR_CODE` (0), even though a pairing QR is all this app ever
+ * scans, because the two degrade differently when the constant is wrong. The
+ * hint crosses to Kotlin as an ordinal into an enum that lives in a prebuilt
+ * AAR (`OSBARCScannerHint.entries.getOrNull(hint)`), which cannot be checked
+ * from this repo. `getOrNull` answers null for an out-of-range ALL, which the
+ * native side reads as "no format constraint" — degrading to scanning
+ * everything. A wrong 0 instead silently selects some OTHER format, and the QR
+ * then never scans, on device only. Note also that 0 is falsy: any
+ * `hint || default` on the way through would erase it. Nothing in the current
+ * chain does that (`call.getInt("hint")?.let` is a null check), but ALL costs
+ * nothing and does not depend on it staying that way.
+ */
+const BARCODE_HINT_ALL = 17;
+
+/**
  * Scan a QR. Falls back to a prompt so both pairing flows can be walked
  * through in a browser with no camera.
  */
 export async function scanQr(message: string): Promise<string | null> {
-  const scanner = plugins().BarcodeScanner;
+  const scanner = plugins().CapacitorBarcodeScanner;
   if (scanner) {
     try {
-      const res = await scanner.scan();
-      return res?.ScanResult ?? res?.content ?? null;
+      const res = await scanner.scanBarcode({ hint: BARCODE_HINT_ALL });
+      return res?.ScanResult ?? null;
     } catch {
       // A cancelled scan is not an error worth surfacing.
       return null;

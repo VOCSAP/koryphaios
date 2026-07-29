@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { SessionRuntime } from '@shared/types'
 import { moveBeside } from '@shared/reorder'
-import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
+import { GLYPH_ACTIONS, GLYPH_BADGES, PithosGlyph } from './icons'
 import { useDeck } from '../store'
 import { formatClock, useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -271,11 +271,13 @@ export function Sidebar(): React.JSX.Element {
   const config = useDeck((s) => s.config!)
   const createSession = useDeck((s) => s.createSession)
   const reorderSessions = useDeck((s) => s.reorderSessions)
-  const openSettings = useDeck((s) => s.openSettings)
   const openWorkspaces = useDeck((s) => s.openWorkspaces)
   const currentWorkspaceName = useDeck((s) => s.currentWorkspaceName)
   const setSidebarWidth = useDeck((s) => s.setSidebarWidth)
   const updateConfig = useDeck((s) => s.updateConfig)
+  const sandboxStatus = useDeck((s) => s.sandboxStatus)
+  const setView = useDeck((s) => s.setView)
+  const showToast = useDeck((s) => s.showToast)
   const [createOpen, setCreateOpen] = useState(false)
   const [dragId, setDragId] = useState<string | null>(null)
   const [overId, setOverId] = useState<string | null>(null)
@@ -333,9 +335,9 @@ export function Sidebar(): React.JSX.Element {
         >
           {GLYPH_BADGES.capsa}
         </button>
-        <button className="icon-btn" title={t('sidebar.settings')} onClick={() => openSettings(true)}>
-          {GLYPH_BADGES.gear}
-        </button>
+        {/* Settings deliberately has NO control here: it lives in the app menu
+            bar (Edit > Settings…, Ctrl/Cmd+,) so configuration is reachable
+            from every view, not only from Agents. */}
       </header>
 
       <div className="sidebar-actions">
@@ -352,6 +354,42 @@ export function Sidebar(): React.JSX.Element {
           onClick={() => setCreateOpen(true)}
         >
           ▾
+        </button>
+        {/* Sandbox pill (operator request 2c, option A): where agents will
+            execute, one glance and one click. Grey = sandbox off (click opens
+            the Docker view — ENABLING stays behind its trust-changing
+            confirms there); amber stroke = enabled but the container is not
+            running (click warms it up in the background); blue stroke = the
+            container is live (click opens the Docker view to manage it). */}
+        <button
+          className={`icon-btn sandbox-pill${
+            sandboxStatus?.enabled === true
+              ? sandboxStatus.containerState === 'running'
+                ? ' pithos-live'
+                : ' pithos-stale'
+              : ''
+          }`}
+          title={
+            sandboxStatus?.enabled === true
+              ? sandboxStatus.containerState === 'running'
+                ? t('sidebar.sandboxRunning')
+                : t('sidebar.sandboxStart')
+              : t('sidebar.sandboxOff')
+          }
+          onClick={() => {
+            if (sandboxStatus?.enabled === true && sandboxStatus.containerState !== 'running') {
+              window.api
+                .sandboxWarmUp()
+                .then(() => showToast('toast.sandboxPreparing'))
+                .catch((e: unknown) =>
+                  window.api.reportError('sandbox', `warm-up dispatch failed: ${String(e)}`)
+                )
+              return
+            }
+            setView('sandbox')
+          }}
+        >
+          <PithosGlyph needsAuth={sandboxStatus?.enabled === true && sandboxStatus.authed === false} />
         </button>
       </div>
       {createOpen && <CreateMenu onClose={() => setCreateOpen(false)} />}

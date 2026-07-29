@@ -1,5 +1,50 @@
 # Changelog
 
+## mobile-shell — Parastatès moves to Capacitor 8, and its QR scanner is wired to a plugin that exists
+
+`desktop/mobile-shell` could not be installed. `package.json` asked for
+`@capacitor/barcode-scanner: ^2.0.0` next to `@capacitor/core: ^6.0.0`, and
+every 2.x of that scanner peers on core `>= 7.0.0` — so `npm install` had never
+resolved, in any version of this file. It went unnoticed because `android/` is
+generated rather than committed and the suite runs on the TypeScript alone: the
+directory was, as its README said, a scaffold.
+
+**Capacitor 6 → 8** (`core`, `android`, `cli`, `preferences` on `^8`, scanner on
+`^3.1.0`). Going to 7 would have cost the same JDK jump and the same
+documentation rewrite while stopping one major short. The five packages move
+together by necessity: the scanner's major is tied to Capacitor's by its peer
+range, so a partial bump is unsatisfiable. What it changes:
+
+- toolchain: JDK 17 → **21**, compileSdk/targetSdk 34 → **36**, minSdk 22 →
+  **24**, Node ≥ 20 → **≥ 22** for the `cap` CLI. `BUILDING.md` §5 now derives
+  those numbers from `@capacitor/android/capacitor/build.gradle` and says so,
+  because that table drifted once already;
+- the 790 lines of Kotlin in `android-src/` are untouched. They reach Capacitor
+  through six symbols (`BridgeActivity`, `Plugin`, `PluginCall`,
+  `PluginMethod`, `JSObject`, `annotation.CapacitorPlugin`), all still present
+  in 8.4.2; the rest is plain Android;
+- `minSdk` 24 closes a gap `BACKLOG.md` §3.2 had recorded as unreachable:
+  `shouldOverrideUrlLoading(WebView, WebResourceRequest)` is API 24+, so on the
+  old 22–23 floor the origin check in `onPageStarted` carried the WebView
+  alone. It no longer does anywhere;
+- `npm audit` goes from 6 findings (5 high, 1 critical) to 0.
+
+**The QR scanner never ran.** `platform.ts` read
+`window.Capacitor.Plugins.BarcodeScanner` and called `.scan()`; the package
+registers as `CapacitorBarcodeScanner` and exposes `scanBarcode(options)`. The
+lookup returned `undefined`, so both pairing flows fell through to the
+`prompt()` fallback meant for a browser — silently, on a device as much as on a
+desktop. Fixed, with the plugin name and the shape of the call spelled out in a
+comment, since nothing in the suite can catch this class of mistake: the tests
+only ever exercise the fallback branch.
+
+The `hint` argument the v3 API requires is inlined as ALL (17) rather than
+`QR_CODE` (0), and the reasoning is in the code: the value crosses into Kotlin
+as an ordinal into an enum that lives in a prebuilt AAR, where an out-of-range
+ALL degrades to "no format constraint" while a wrong 0 would silently select
+another format and never scan — on a device only. Importing the plugin's enum
+instead would pull `html5-qrcode` into a 15 KB dependency-free bundle.
+
 ## core + desktop (experimental) — the app is named Parastatès, and both reviews landed
 
 A code review and a security review ran over the whole N5 lot. Nine of their

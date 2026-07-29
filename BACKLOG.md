@@ -109,20 +109,19 @@ l'opérateur sur une machine avec affichage.
 - [ ] **Auto-ack de l'avertissement dev-channels (session 2026-07-24, issue
       anthropics/claude-code#42486)** — logique testée
       (`desktop-startup-ack.test.ts` : détection deux-cues, frontières de chunk,
-      ANSI, ré-armement, non-déclenchement sur le dialogue consent MCP) ; reste
-      le terrain :
-  - Vérifier le **libellé exact** du dialogue « WARNING: Loading development
-    channels » / « I am using this for local development » sur la version CC
-    installée (les regexes sont insensibles à la casse mais supposent ces
-    formulations) — à réajuster si Anthropic modifie le wording ou résout
-    l'issue (flag `--yes` / persistance).
-  - Confirmer qu'un **seul `\r`** valide bien l'option surlignée par défaut
-    (option 1) sur les trois OS, sans avancer par flèche ; que le settle de
-    350 ms suffit au rendu du dialogue plein écran ; et que le dialogue
-    consent MCP (« New MCP server found ») reste bien à la main de l'opérateur
-    (jamais auto-acquitté).
-  - Vérifier le déclenchement pour TOUS les chemins de spawn (create opérateur,
-    superviseur, template, restart/fork-resume) et l'entrée journal 📜.
+      ANSI, frame repaint ConPTY sans espaces, ré-armement, non-déclenchement
+      sur le dialogue consent MCP). Validation terrain faite par sonde PTY
+      (audit 2026-07-28) : libellés exacts confirmés, un seul `\r` valide
+      l'option 1, settle 350 ms suffisant. Cause du non-déclenchement observé
+      identifiée et corrigée : ConPTY (Windows) retient le premier écran plein
+      jusqu'au resize suivant → kicks resize mêmes-dimensions post-spawn dans
+      `pty-manager.ts`, et regexes tolérantes aux espaces encodés `\x1b[1C`
+      dans `startup-ack.ts`. Reste :
+  - Vérifier dans le Deck réel le déclenchement pour TOUS les chemins de spawn
+    (create opérateur, superviseur, template, restart/fork-resume) et l'entrée
+    journal 📜 — sans aller-retour de vue, désormais.
+  - Réajuster si Anthropic modifie le wording ou résout l'issue (flag `--yes`
+    / persistance).
 - [ ] **Lot Browser REC + scénario démo (session 2026-07-24)** — dispatch,
       escaping, harness et bridge MCP sont testés (`desktop-recording`,
       `desktop-demo-control`, `desktop-browser-drive`, `desktop-demo-driver`) ;
@@ -491,9 +490,21 @@ Robustesse et exploitation :
     `android-src/README.md`). Omission trouvée en re-vérifiant, corrigée.
   - **Signatures d'API** : les versions d'`androidx.*` bougent ; un
     `WebViewFeature`/`BiometricPrompt` renommé se verra à la compilation.
-  - **`shouldOverrideUrlLoading(WebView, WebResourceRequest)` est API 24+**
+  - ~~**`shouldOverrideUrlLoading(WebView, WebResourceRequest)` est API 24+**
     alors que le plancher Capacitor est 22 : sur 22–23 c'est la garde
-    d'origine de `onPageStarted` qui porte seule la protection.
+    d'origine de `onPageStarted` qui porte seule la protection.~~ **Résolu**
+    par le passage à Capacitor 8 : le plancher est désormais 24, donc la
+    garde forte s'applique sur tout le parc supporté et `onPageStarted` n'est
+    plus seul nulle part. Le trou n'était pas colmaté, il était hors de
+    portée.
+  - **Le scan QR natif n'a jamais tourné.** `platform.ts` cherchait le plugin
+    sous `BarcodeScanner` avec une méthode `scan()` ; il s'enregistre sous
+    `CapacitorBarcodeScanner` et expose `scanBarcode(options)`. Le lookup
+    renvoyait `undefined`, donc les DEUX appairages retombaient sur le
+    `prompt()` prévu pour le navigateur — sans erreur, sur device comme
+    ailleurs. Corrigé, mais la correction est du même niveau de preuve que le
+    reste de cette section : relue, pas exécutée. Premier test terrain à
+    faire, avec le `hint` (cf. le commentaire de `BARCODE_HINT_ALL`).
   - **Le paquet `io.koryphaios.parastates`** doit correspondre à l'`appId` du
     `capacitor.config.ts` dans le projet généré.
 - [ ] **Icône et identité de l'app** : le service utilise encore les drawables
@@ -664,6 +675,53 @@ Docker Desktop en priorité, c'est la cible principale :
 - [ ] `detectHostOnlyHooks` ne scanne que les champs `command` de
       `settings.json` ; les permissions/env qui référencent des chemins hôte
       ne sont pas détectées. À élargir si l'usage le montre.
+- [ ] `projectionSignature` sature son budget de 5000 entrées dans `plugins/`
+      (~12k fichiers chez l'opérateur) : un changement profond dans plugins/
+      peut ne pas déclencher de re-projection (contournement : Reconstruire).
+
+**Lot personnalisation & parité de config (2026-07-27) — implémenté, à tester
+sur poste réel** (roadmap broker `f29b1917` / `50ac8683` / `0da2bf11` +
+retours opérateur ; conception : décisions « pas de docker-compose éditable »
+et « pas de traduction auto Windows -> Linux des hooks », voir handoffs Kleos
+#232/#233) :
+- [ ] **Générateur d'overlay** (« Générer la config sandbox », carte
+      projection) : overlay écrit sans les hooks host-only, toast avec le
+      compte, confirm avant écrasement d'un overlay existant, warnings de
+      hooks disparus au spawn suivant.
+- [ ] **Image personnalisée** : éditer le fragment Dockerfile, Construire
+      (tag `koryphaios-sandbox-custom`, FROM refusé dans le fragment),
+      « Utiliser pour ce projet », puis retour à l'image de base via le champ
+      image.
+- [ ] **Encart limites d'isolation** (carte projection) + section
+      « Isolation limits » de `desktop/docs/sandbox.md` : relire, valider le
+      wording.
+- [ ] **Warm-up hors spawn** : au démarrage de l'app (sandbox actif) et après
+      un build d'image, le conteneur est créé/projeté en arrière-plan — le
+      1er agent doit arriver en ~2 s ; si un `ensure()` dépasse 1,5 s, une
+      ligne `sandbox: ensure took …` détaille les étapes dans le journal.
+- [ ] **Purge/chown root** : plus aucun `rm: Permission denied` dans la
+      console dev à la projection ; `plugins/installed_plugins.json` du
+      conteneur appartient à kory (`docker exec <ctn> ls -la ~/.claude/plugins`).
+- [ ] **Carte « Conteneur de ce projet »** (sous la carte Mode) :
+      démarrer/arrêter sans scroller, « Préparer le conteneur » quand il
+      n'existe pas.
+- [ ] **Indicateurs** : pithos du rail en bleu quand le conteneur du projet
+      tourne (événement `sandbox:changed` désormais réellement émis) ;
+      pastille sandbox 3 états dans la barre d'actions de la vue Agents
+      (gris -> vue Docker, ambre -> démarrage 1 clic, bleu -> vue Docker).
+- [ ] **Login onboarding complet** : la modale de connexion ne se ferme plus
+      à l'apparition des credentials mais à la fin de l'onboarding
+      (`hasCompletedOnboarding`) ; vérifier qu'un nouvel agent n'affiche plus
+      « Select login method » après un login mené au bout.
+
+**Encore à implémenter (nice-to-have v2, roadmap broker `4085b661` — ne pas
+démarrer sans besoin confirmé)**
+- [ ] **Sidecars** (DB, redis…) déclarés dans la config GLOBALE de l'app,
+      créés/arrêtés avec le conteneur sandbox et attachés à un réseau docker
+      dédié. Contraintes actées : jamais depuis le repo cloné (hostile input
+      #1), cycle de vie via CLI docker direct (pas de compose), re-validation
+      main-side des noms/images/ports, pas de host network. Prérequis
+      conseillé : l'image personnalisée couvre déjà une partie du besoin.
 
 ---
 

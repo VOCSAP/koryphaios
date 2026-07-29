@@ -85,6 +85,20 @@ test("hand-edited values are sanitized (ports, mode, globs)", () => {
   expect(projectSandboxSettings(file, "k").ports).toEqual(DEFAULT_SANDBOX_PORTS);
 });
 
+test("projectConfig is an opt-OUT: absent/garbage => true, only explicit false sticks", () => {
+  // Pre-existing stores (no key) keep projecting -- the historical behavior.
+  expect(projectSandboxSettings(file, "k").projectConfig).toBe(true);
+  writeFileSync(file, JSON.stringify({ projects: { k: { enabled: true, projectConfig: "no" } } }));
+  expect(projectSandboxSettings(file, "k").projectConfig).toBe(true);
+  writeSandboxSettings(file, "k", { projectConfig: false });
+  expect(projectSandboxSettings(file, "k").projectConfig).toBe(false);
+  // The opt-out survives unrelated patches.
+  writeSandboxSettings(file, "k", { enabled: true });
+  expect(projectSandboxSettings(file, "k").projectConfig).toBe(false);
+  writeSandboxSettings(file, "k", { projectConfig: true });
+  expect(projectSandboxSettings(file, "k").projectConfig).toBe(true);
+});
+
 test("image write is global and falls back to the default when blanked", () => {
   expect(writeSandboxImage(file, "my-image")).toBe("my-image");
   expect(readSandboxStore(file).image).toBe("my-image");

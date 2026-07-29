@@ -125,6 +125,10 @@ export function NavRail(): React.JSX.Element {
   const refreshSandbox = useDeck((s) => s.refreshSandbox)
   const sandboxNeedsAuth = sandboxStatus?.enabled === true && sandboxStatus.authed === false
   const sandboxEnabled = sandboxStatus?.enabled === true
+  // Blue STROKE when this project's container is running: the rail says "your
+  // agents execute in Docker right now" at a glance (operator request 2b).
+  // Composes with the amber needs-auth fill — running-but-unauthed shows both.
+  const sandboxLive = sandboxEnabled && sandboxStatus.containerState === 'running'
   useEffect(() => {
     if (!sandboxEnabled) return
     const timer = setInterval(() => void refreshSandbox(), SANDBOX_POLL_MS)
@@ -147,7 +151,9 @@ export function NavRail(): React.JSX.Element {
           }
           onClick={() => setView(v.id)}
         >
-          <span className="nav-rail-icon">
+          <span
+            className={`nav-rail-icon${v.id === 'sandbox' && sandboxLive ? ' pithos-live' : ''}`}
+          >
             {v.id === 'sandbox' ? <PithosGlyph needsAuth={sandboxNeedsAuth} /> : GLYPHS[v.id]}
             {v.id === 'git' && gitDirty > 0 && (
               <span className="nav-rail-badge">{gitDirty > 99 ? '99+' : gitDirty}</span>

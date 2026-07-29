@@ -512,6 +512,14 @@ export const SANDBOX_AUTH_PTY_ID = 'sandbox-auth'
 /** Reserved utility-PTY id of the sandbox image build terminal (M2). */
 export const SANDBOX_BUILD_PTY_ID = 'sandbox-build'
 
+/**
+ * Sandbox image tags (f29b1917) — they live here (not sandbox-command.ts,
+ * which re-exports them) because the Docker view needs both to offer the
+ * base <-> custom switch without duplicating the strings.
+ */
+export const SANDBOX_IMAGE_DEFAULT_TAG = 'koryphaios-sandbox'
+export const SANDBOX_IMAGE_CUSTOM_TAG = `${SANDBOX_IMAGE_DEFAULT_TAG}-custom`
+
 /** Full sandbox state of THIS window's project (Docker rail view + gates). */
 export interface SandboxStatus {
   engine: SandboxEngineName | null
@@ -539,6 +547,19 @@ export interface SandboxStatus {
   copyUnmatched: string[]
   /** Operator-config entries projected into the container, or null. */
   projection: string | null
+  /**
+   * False after the operator's "Remove" in the projection card: the global
+   * config is scrubbed from the container and no longer copied at start.
+   * Generate re-enables.
+   */
+  projectionEnabled: boolean
+  /**
+   * Entry names present in ~/.claude/sandbox-overrides (the overlay wins over
+   * the host copy at projection time). Host-side state, live even with no
+   * container: this is what tells the Docker view "Generate" actually wrote
+   * something -- `projection` above only changes at the NEXT container start.
+   */
+  overlay: string[]
   /** Projected hooks that cannot run in the Linux container + stray overrides. */
   hookWarnings: string[]
   /** Broker reachable FROM the container (real curl probe); null = unknown. */
@@ -1162,7 +1183,34 @@ export interface DeckApi {
   /** Create/start the project container (idempotent; never removes anything). */
   sandboxEnsure(): Promise<SandboxStatus>
   /** Build the shipped Dockerfile in a utility terminal; returns its PTY id. */
-  sandboxImageBuild(): Promise<string>
+  /** Build the base image, or the operator's custom image ('custom'). */
+  sandboxImageBuild(variant?: 'base' | 'custom'): Promise<string>
+  /** Read the operator's custom-image Dockerfile fragment ('' when unset). */
+  sandboxCustomGet(): Promise<string>
+  /** Persist the custom-image Dockerfile fragment (empty string clears it). */
+  sandboxCustomSave(fragment: string): Promise<void>
+  /**
+   * Write ~/.claude/sandbox-overrides/settings.json from the host settings
+   * with host-only hooks stripped. Throws 'overlay-exists' unless force.
+   */
+  sandboxOverlayGenerate(force: boolean): Promise<{ path: string; removed: string[] }>
+  /**
+   * Stop projecting the operator config and scrub it from the container
+   * (persisted opt-out; Generate re-enables). Rejected while sessions are live.
+   */
+  sandboxProjectionRemove(): Promise<SandboxStatus>
+  /**
+   * Delete the image from the local engine. Refused while sessions are live;
+   * refused by the engine itself while a container still references it. The
+   * shared credentials volume is not affected.
+   */
+  sandboxImageRemove(): Promise<SandboxStatus>
+  /**
+   * Open a link in the operator's system browser. http(s) only -- rejected
+   * main-side otherwise, because these links come from sandboxed CLIs and
+   * remote pages and shell.openExternal launches any registered handler.
+   */
+  openExternal(url: string): Promise<void>
   /** Kill the image-build terminal (dialog closed mid-build). */
   sandboxBuildStop(): Promise<void>
   /** Wipe the credentials in the shared auth volume ("disconnect"). */
@@ -1183,6 +1231,8 @@ export interface DeckApi {
   sandboxAuthStart(): Promise<string | null>
   /** Kill the auth terminal (login finished or dialog cancelled). */
   sandboxAuthStop(): Promise<void>
+  /** Fire-and-forget container pre-flight (create + projection) off the spawn path. */
+  sandboxWarmUp(): Promise<void>
   /** Poll the credentials probe (auth dialog, every ~2 s). */
   sandboxAuthProbe(): Promise<boolean | null>
   onSandboxChanged(cb: (status: SandboxStatus) => void): () => void

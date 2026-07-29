@@ -32,10 +32,19 @@ function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '')
 }
 
-/** Both must match: the dialog title AND its accept option's wording. */
+/**
+ * Both must match: the dialog title AND its accept option's wording.
+ *
+ * `\s*` (zero or more) instead of literal spaces: the Windows ConPTY repaint
+ * frame encodes inter-word spaces as cursor-forward sequences (`\x1b[1C`), so
+ * after ANSI stripping the title reads `WARNING:Loadingdevelopmentchannels` --
+ * space-anchored patterns can never match that frame (field capture,
+ * 2026-07-28 audit). The joined form is specific enough that prose cannot
+ * produce it by accident, and the two-cue requirement still holds.
+ */
 const CHANNELS_WARNING_PATTERNS = [
-  /loading development channels/i,
-  /I am using this for local development/i
+  /loading\s*development\s*channels/i,
+  /I\s*am\s*using\s*this\s*for\s*local\s*development/i
 ]
 
 export function detectChannelsWarning(text: string): boolean {

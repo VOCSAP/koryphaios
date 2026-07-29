@@ -36,10 +36,16 @@ Only read the file matching the area you are touching:
   gates).
 - Creating or modifying anything VISUAL in `desktop/` (CSS, buttons, colours,
   badges, icons, a new view's look) — read `DESIGN.md` (design tokens, colour
-  semantics, button archetypes, iconography, UI checklist). Two hard rules
-  travel with it: no bare `<button>`, and NO EMOJI in the UI — every icon is a
-  Greek-styled SVG glyph from `components/icons.tsx`. The `deck-design` skill
-  (`.claude/skills/deck-design/SKILL.md`) wraps the workflow.
+  semantics, control archetypes, iconography, UI checklist). Two hard rules
+  travel with it: **no control keeps its native look** — that is every
+  `<button>`, `<select>`, `<input>`, `<textarea>` and checkbox, not just
+  buttons (a square white dropdown is the same bug as a grey OS button, and it
+  is the one that keeps shipping) — and NO EMOJI in the UI, every icon being a
+  Greek-styled SVG glyph from `components/icons.tsx`. When a control type has
+  no rule yet, style it at the ELEMENT level in `styles.css` so the NEXT one is
+  themed by default; a per-instance class only fixes the instance in front of
+  you. The `deck-design` skill (`.claude/skills/deck-design/SKILL.md`) wraps
+  the workflow.
 - Writing or running tests, or preparing a commit — read `TESTING.md`
   (test suite layout, smoke check, typecheck, locale parity).
 - Adding a model/provider to the pickers, touching a headless inference
@@ -54,6 +60,9 @@ Only read the file matching the area you are touching:
   view, or anything that decides WHERE a session executes) — read
   `desktop/docs/sandbox.md` (behavior, guards, the copy-not-mount rule) and
   the "Sandbox mode" CHANGELOG entries (why each decision was taken).
+  DEBUGGING it (login loops, missing projected config, slow spawns, volume
+  state) — the `sandbox-debug` skill (`.claude/skills/sandbox-debug/SKILL.md`)
+  holds the field probes and the confirmed root-cause catalogue.
 - Bun runtime / API conventions (which libs to use or avoid) — read
   `BUN.md`.
 - Building a Bun-served frontend (HTML imports, React) — read
@@ -118,7 +127,13 @@ Only read the file matching the area you are touching:
   *nothing* — so certificate pinning read as done for weeks while the app
   accepted any certificate. Dead code claiming a security property is worse
   than no code, because it stops anyone looking. When you write "X is
-  enforced", grep that the enforcer is called.
+  enforced", grep that the enforcer is called. The same check applies to
+  EVENT CHANNELS: a `DeckApi.onX` declared in types, multiplexed in the
+  preload and subscribed in the store compiles and tests green with NO
+  producer — `sandbox:changed` shipped fully wired on the consumer side while
+  nothing ever emitted it, so the UI only moved when another view happened to
+  poll. When you add or review an `onX`, grep the EMITTER
+  (`broadcast('<channel>'` / `send('<channel>'`), not just the listener.
 
 - **Five hostile inputs, never trusted.** (1) A value from a CLONED REPO
   (project `.claude/claude-peers/config.json`, project-local `templates/*.json`)
