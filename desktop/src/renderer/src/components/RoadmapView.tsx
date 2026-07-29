@@ -1086,7 +1086,8 @@ export function RoadmapView(): React.JSX.Element {
               <li key={p} role="none">
                 <button
                   type="button"
-                  role="menuitem"
+                  role="menuitemradio"
+                  aria-checked={p === prioMenu.item.priority}
                   className={`context-menu-item rm-prio-option rm-prio-${p}`}
                   onClick={(e) => {
                     e.stopPropagation()
@@ -1095,7 +1096,9 @@ export function RoadmapView(): React.JSX.Element {
                 >
                   <span className="rm-prio-dot" />
                   <span className="rm-prio-option-label">{t(`roadmap.priority.${p}`)}</span>
-                  {p === prioMenu.item.priority && <span className="rm-prio-check">✓</span>}
+                  {p === prioMenu.item.priority && (
+                    <span className="rm-prio-check">{GLYPH_ACTIONS.check}</span>
+                  )}
                 </button>
               </li>
             ))}

@@ -84,7 +84,7 @@ export function TileArea(): React.JSX.Element {
                 title={t('area.openWorkspacesTitle')}
                 onClick={() => openWorkspaces(true, { loadOnly: true })}
               >
-                ▸
+                {GLYPH_ACTIONS.forward}
               </button>
             )}
             {/* Use-template only when at least one template exists. */}

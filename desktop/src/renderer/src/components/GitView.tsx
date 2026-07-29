@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { DiffFile, FileDiff, SessionDiff, WorktreeRow } from '@shared/types'
-import { GLYPH_ACTIONS } from './icons'
+import { GLYPHS, GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { DiffFileRow, DiffText } from './DiffPanel'
@@ -17,6 +17,7 @@ const POLL_MS = 10_000
 interface GitTarget {
   dir: string
   label: string
+  isWorktree: boolean
   main: boolean
   sessionName: string | null
 }
@@ -24,7 +25,8 @@ interface GitTarget {
 function toTargets(worktrees: WorktreeRow[], sessions: { cwd: string; name: string; status: string; supervisor?: boolean }[]): GitTarget[] {
   const targets: GitTarget[] = worktrees.map((w) => ({
     dir: w.path,
-    label: `⎇ ${w.branch ?? w.path}`,
+    label: w.branch ?? w.path,
+    isWorktree: true,
     main: w.main,
     sessionName: w.sessionName
   }))
@@ -33,7 +35,7 @@ function toTargets(worktrees: WorktreeRow[], sessions: { cwd: string; name: stri
   for (const s of sessions) {
     if (s.status === 'exited' || s.supervisor) continue
     if (!targets.some((t) => t.dir === s.cwd)) {
-      targets.push({ dir: s.cwd, label: s.cwd, main: false, sessionName: s.name })
+      targets.push({ dir: s.cwd, label: s.cwd, isWorktree: false, main: false, sessionName: s.name })
     }
   }
   return targets
@@ -206,7 +208,10 @@ export function GitView(): React.JSX.Element {
               title={tg.dir}
               onClick={() => selectDir(tg.dir)}
             >
-              <span className="git-target-label">{tg.label}</span>
+              <span className="git-target-label">
+                {tg.isWorktree && <>{GLYPHS.git} </>}
+                {tg.label}
+              </span>
               {tg.main && <span className="rm-badge">{t('worktrees.main')}</span>}
               {tg.sessionName && (
                 <span className="rm-badge rm-badge-status-in_progress">

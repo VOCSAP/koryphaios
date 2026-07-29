@@ -300,6 +300,13 @@ body {
   padding: 10px 12px;
 }
 
+/* Reuses the forward chevron rotated 90deg (down) instead of a dedicated
+   glyph -- static equivalent of .explorer-caret.is-open. */
+.sidebar-advanced-caret {
+  display: inline-flex;
+  transform: rotate(90deg);
+}
+
 .rows {
   list-style: none;
   margin: 0;
@@ -2902,9 +2909,14 @@ svg.glyph {
 
 .explorer-caret {
   width: 12px;
-  display: inline-block;
+  display: inline-flex;
   color: var(--fg-dim);
   flex: none;
+  transition: transform 0.12s;
+}
+
+.explorer-caret.is-open {
+  transform: rotate(90deg);
 }
 
 .explorer-name {

@@ -359,7 +359,7 @@ export function Sidebar(): React.JSX.Element {
           title={t('sidebar.advancedTitle')}
           onClick={() => setCreateOpen(true)}
         >
-          ▾
+          <span className="sidebar-advanced-caret">{GLYPH_ACTIONS.forward}</span>
         </button>
         {/* Sandbox pill (operator request 2c, option A): where agents will
             execute, one glance and one click. Grey = sandbox off (click opens

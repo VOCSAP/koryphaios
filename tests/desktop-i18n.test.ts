@@ -242,16 +242,36 @@ function findSourcePictographs(root: string, files: string[]): string[] {
 }
 
 // Snapshot of the desktop/src tree as of this gate's introduction (card
-// d5b7d842 CHANGES round): universal glyphs used ahead of an SVG equivalent
-// (→/⎇/▸/⏸/...) and a handful of comment-only mentions (SearchBar.tsx,
-// store.ts, types.ts, RoadmapView.tsx's "⏹ Stop button" note,
-// ModelPicker.tsx's "★ pinned favorites" banner comment). Card b72b82f7
-// (2026-07-29) drew SVG glyphs for ModelPicker's 5 provider sigils, the
-// graph-chat node/timeline provider+warning marks, and the remaining
-// rendered ⎇/⏸/✓/✗ occurrences, shrinking this baseline accordingly. None
-// of the entries left are newly introduced by this commit. Like
-// KNOWN_ORPHAN_KEYS and KNOWN_EMOJI_KEYS above, this baseline may only ever
-// shrink from here, never grow.
+// d5b7d842 CHANGES round). Card b72b82f7 (2026-07-29) drew SVG glyphs for
+// ModelPicker's 5 provider sigils, the graph-chat node/timeline
+// provider+warning marks, and the remaining rendered ⎇/⏸/✓/✗ occurrences.
+// Card d16a930c (2026-07-29) sorted the 27 entries left after b72b82f7 and
+// closed the 5 that were genuinely RENDERED (ExplorerView's directory-toggle
+// caret carried two code points on one line, so 6 entries drop for 5 fixes):
+// ExplorerView's ▾/▸ and Sidebar/TileArea's static twins swap to
+// GLYPH_ACTIONS.forward (CSS-rotated where the state must show, per the
+// three-case ARIA tree below); RoadmapView's ✓ swaps to GLYPH_ACTIONS.check
+// with the state moved onto the button (menuitemradio/aria-checked) instead
+// of the glyph; GitView's ⎇ prefix moves out of the string field into a
+// GLYPHS.git glyph rendered in the JSX span that already displays it.
+//
+// Every entry still below is EXEMPTED, not merely un-triaged -- named here so
+// the next pass doesn't re-derive the same arbitration:
+//   - 10 are main/preload PROCESS strings (journal lines, prompts, approval
+//     banners): main/approval-service.ts, main/attention.ts,
+//     main/companion-server.ts, main/context-wand.ts,
+//     main/explorer-service.ts, main/index.ts (x2), main/ipc.ts,
+//     main/startup-ack.ts, preload/browser-inspect.ts. DESIGN.md governs
+//     rendered UI; a pictograph in a log/prompt line is not a control that
+//     keeps its native look.
+//   - 11 are COMMENT-ONLY mentions, verified as such (no JSX renders them):
+//     App.tsx, BrowserView.tsx, ModelPicker.tsx ("★ pinned favorites"
+//     banner), RoadmapView.tsx ("⏹ Stop button" note), SearchBar.tsx,
+//     SnippetsDialog.tsx, TerminalTile.tsx, UsageLimitsModal.tsx,
+//     store.ts, and shared/types.ts (both entries -- doc comments on
+//     `lead` and `ExplorerRoot` describing UI drawn elsewhere).
+// Like KNOWN_ORPHAN_KEYS and KNOWN_EMOJI_KEYS above, this baseline may only
+// ever shrink from here, never grow.
 const KNOWN_SOURCE_PICTOGRAPHS: string[] = [
   "main/approval-service.ts U+276F",
   "main/attention.ts U+276F",
@@ -265,17 +285,11 @@ const KNOWN_SOURCE_PICTOGRAPHS: string[] = [
   "preload/browser-inspect.ts U+2316",
   "renderer/src/components/App.tsx U+2316",
   "renderer/src/components/BrowserView.tsx U+1F310",
-  "renderer/src/components/ExplorerView.tsx U+25B8",
-  "renderer/src/components/ExplorerView.tsx U+25BE",
-  "renderer/src/components/GitView.tsx U+2387",
   "renderer/src/components/ModelPicker.tsx U+2605",
   "renderer/src/components/RoadmapView.tsx U+23F9",
-  "renderer/src/components/RoadmapView.tsx U+2713",
   "renderer/src/components/SearchBar.tsx U+1F50D",
-  "renderer/src/components/Sidebar.tsx U+25BE",
   "renderer/src/components/SnippetsDialog.tsx U+26A1",
   "renderer/src/components/TerminalTile.tsx U+26A1",
-  "renderer/src/components/TileArea.tsx U+25B8",
   "renderer/src/components/UsageLimitsModal.tsx U+2715",
   "renderer/src/store.ts U+1F310",
   "shared/types.ts U+1F451",

@@ -3,6 +3,7 @@ import type { ExplorerEntry, ExplorerFile, ExplorerRoot, HelpSelection } from '@
 import { selectionLineRange } from '@shared/code-selection'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
+import { GLYPH_ACTIONS } from './icons'
 
 // File explorer rail view (PLAN GX6): VS Code-style READ-ONLY browser over
 // the roots the main process allows (project dir, worktrees, live session
@@ -140,8 +141,15 @@ export function ExplorerView(): React.JSX.Element {
             const open = expanded.has(rel)
             return (
               <div key={rel}>
-                <button className="explorer-row" style={pad} onClick={() => toggleDir(rel)}>
-                  <span className="explorer-caret">{open ? '▾' : '▸'}</span>
+                <button
+                  className="explorer-row"
+                  style={pad}
+                  aria-expanded={open}
+                  onClick={() => toggleDir(rel)}
+                >
+                  <span className={`explorer-caret${open ? ' is-open' : ''}`}>
+                    {GLYPH_ACTIONS.forward}
+                  </span>
                   <span className="explorer-name">{e.name}</span>
                 </button>
                 {open && renderEntries(rel, depth + 1)}
