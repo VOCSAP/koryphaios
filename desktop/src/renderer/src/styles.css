@@ -2908,7 +2908,6 @@ svg.glyph {
 }
 
 .explorer-caret {
-  width: 12px;
   display: inline-flex;
   color: var(--fg-dim);
   flex: none;
