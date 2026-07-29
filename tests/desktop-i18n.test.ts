@@ -233,6 +233,10 @@ test("the orphan check covers a key only reachable through a discovered dynamic 
 // Deliberately not fixed here (stripping comments/strings correctly is its
 // own can of worms); this sentence exists so the failure is looked up
 // instead of debugged from scratch.
+//
+// The example literal above is safe here ONLY because this file lives in
+// tests/, outside DESKTOP_SRC (desktop/src) -- the same line copied into a
+// file under desktop/src would trip exactly the gate it describes.
 
 // Matches the outer '(' of any standalone `t(` call (word-boundary before
 // `t` excludes things like `format(`/`count(`, but still matches `.t(`
