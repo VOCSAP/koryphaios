@@ -9,6 +9,7 @@
 
 import type { DispatchResult, RoadmapItem } from '../shared/types'
 import { queuedItems } from '../shared/workflow'
+import { directiveKeys, isDirectiveCommand } from './directive'
 
 // queuedItems used to own its own filter+sort here (localeCompare tiebreak,
 // diverging from the broker's BINARY-collation `ORDER BY queue, id` the
@@ -289,6 +290,59 @@ export async function dispatchNormalWave(
       ? { sent: true, title: dispatched[0]!.title }
       : { sent: true, count: dispatched.length, titles: dispatched.map((i) => i.title) }
   return { result, dispatched, failed }
+}
+
+export interface DirectiveWaveDeps {
+  markDone: (item: RoadmapItem) => Promise<void>
+  execute: (item: RoadmapItem) => Promise<void>
+  journal: (line: string) => void
+  reportError: (message: string, error: unknown) => void
+}
+
+/**
+ * Runs one wave's directive members (card b1932a6a): mark-then-execute, the
+ * reverse of the previous execute-then-mark order. RATIONALE (cost asymmetry
+ * verified by reviewer): both orders can fail, at different prices --
+ * execute-then-mark risks REPLAYING the injection on the next drain when the
+ * done-upsert fails right after injection already fired (a doubled /clear on
+ * a live session is real, non-reversible context loss); mark-then-execute
+ * instead risks LOSING the directive when execution fails after the mark
+ * already committed (the operator just re-queues it -- near-zero cost). So
+ * `deps.markDone` always runs first, uncaught: if IT throws, nothing was
+ * marked or executed, and the item stays queued for the next drain pass --
+ * the same retry behavior the old order already had on an upsert failure.
+ *
+ * That reordering has a cost: once marked, a failure is now INVISIBLE in
+ * roadmap state (the card reads done even though nothing was injected). The
+ * per-item journal line below is therefore the ONLY witness of that outcome
+ * -- LOAD-BEARING since this card, not "verbose logging" to trim later.
+ * `deps.execute` throwing (the new failure mode this reorder introduces) is
+ * caught HERE, not left to abort the whole wave: the mark already committed,
+ * so there is no rollback an abort would protect, and siblings in the same
+ * wave must still get their turn.
+ *
+ * ACCEPTED GAP: a process death between `markDone` resolving and `execute`
+ * starting (or before `execute` reaches its own per-target journal calls)
+ * loses the directive with no journal line at all. Accepted per the same
+ * cost analysis: a silently lost directive is cheap to re-queue, a doubled
+ * injection is not.
+ */
+export async function runDirectiveWave(directives: RoadmapItem[], deps: DirectiveWaveDeps): Promise<void> {
+  for (const item of directives) {
+    const label = isDirectiveCommand(item.directive) ? directiveKeys(item.directive) : `${item.directive ?? '?'}`
+    await deps.markDone(item)
+    try {
+      await deps.execute(item)
+      deps.journal(`directive card dispatched: "${item.title}" (${label})`)
+    } catch (e) {
+      deps.journal(
+        `directive card "${item.title}" (${label}) marked done but execution threw: ${
+          e instanceof Error ? e.message : String(e)
+        }`
+      )
+      deps.reportError(`directive execution threw after done-upsert for "${item.title}"`, e)
+    }
+  }
 }
 
 /**

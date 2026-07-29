@@ -62,6 +62,7 @@ import {
   firstQueued,
   nextBarrierPending,
   nextDispatchedState,
+  runDirectiveWave,
   splitWave,
   type DispatchedEntry
 } from './dispatch'
@@ -1056,12 +1057,17 @@ const dispatchNextInner = async (): Promise<DispatchResult> => {
       const { directives, normal } = splitWave(wave)
       // Directive members execute immediately, whatever the rest of the wave
       // holds (CT3 contract, unchanged: the Deck runs them, never announced).
-      for (const item of directives) {
-        await executeDirective(item)
-        await upsertRoadmap(endpoint, key, { id: item.id, queue: null, status: 'done' })
-        const label = isDirectiveCommand(item.directive) ? directiveKeys(item.directive) : `${item.directive ?? '?'}`
-        journal.add('dispatch', `directive card dispatched: "${item.title}" (${label})`)
-      }
+      // Mark-then-execute, not execute-then-mark (card b1932a6a): see
+      // runDirectiveWave's doc comment in dispatch.ts for the cost-asymmetry
+      // rationale and the accepted gap this ordering trades for.
+      await runDirectiveWave(directives, {
+        markDone: async (item) => {
+          await upsertRoadmap(endpoint, key, { id: item.id, queue: null, status: 'done' })
+        },
+        execute: executeDirective,
+        journal: (line) => journal.add('dispatch', line),
+        reportError: (message, error) => reportError('dispatch', message, error)
+      })
       if (normal.length === 0) continue // all-directive wave: pull the next one
       const { result, dispatched, failed } = await dispatchNormalWave(normal, {
         announce: (text) => announceToLead(text),

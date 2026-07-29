@@ -13,6 +13,7 @@ import {
   nextDispatchedState,
   nextQueuePosition,
   queuedItems,
+  runDirectiveWave,
   splitWave
 } from "../desktop/src/main/dispatch.ts";
 import type { RoadmapItem } from "../desktop/src/shared/types";
@@ -302,6 +303,79 @@ test("splitWave: partitions a wave into directives and normal items, preserving 
 test("splitWave: an all-normal or all-directive wave leaves the other bucket empty", () => {
   expect(splitWave([item({ id: "a" }), item({ id: "b" })]).directives).toEqual([]);
   expect(splitWave([item({ id: "a", kind: "directive" })]).normal).toEqual([]);
+});
+
+// Directive drain ordering (roadmap card b1932a6a): mark-then-execute, not
+// execute-then-mark. See runDirectiveWave's doc comment in dispatch.ts.
+
+function mockDirectiveDeps(opts: { throwForIds?: Set<string> } = {}) {
+  const order: string[] = [];
+  const journaled: string[] = [];
+  const reported: { message: string; error: unknown }[] = [];
+  return {
+    order,
+    journaled,
+    reported,
+    deps: {
+      markDone: async (it: RoadmapItem) => {
+        order.push(`mark:${it.id}`);
+      },
+      execute: async (it: RoadmapItem) => {
+        order.push(`execute:${it.id}`);
+        if (opts.throwForIds?.has(it.id)) throw new Error(`inject failed for ${it.id}`);
+      },
+      journal: (line: string) => journaled.push(line),
+      reportError: (message: string, error: unknown) => reported.push({ message, error })
+    }
+  };
+}
+
+test("runDirectiveWave: marks done BEFORE executing (mark-then-execute, not the reverse)", async () => {
+  const { order, deps } = mockDirectiveDeps();
+  await runDirectiveWave([item({ id: "a", kind: "directive", directive: "clear" })], deps);
+  expect(order).toEqual(["mark:a", "execute:a"]);
+});
+
+// The failure-path assertion the card's briefing calls out explicitly: a
+// throwing execute must surface as a JOURNAL LINE, not merely as "markDone
+// was called" or "the card is done" -- a status-only assertion would pass
+// even if the journal call were deleted entirely.
+test("runDirectiveWave: execute throwing after the mark is journaled, not swallowed", async () => {
+  const { order, journaled, reported, deps } = mockDirectiveDeps({ throwForIds: new Set(["a"]) });
+  await runDirectiveWave([item({ id: "a", kind: "directive", directive: "clear", title: "Clear all" })], deps);
+  expect(order).toEqual(["mark:a", "execute:a"]);
+  expect(journaled).toHaveLength(1);
+  expect(journaled[0]).toContain("Clear all");
+  expect(journaled[0]).toContain("marked done but execution threw");
+  expect(journaled[0]).toContain("inject failed for a");
+  expect(reported).toHaveLength(1);
+  expect(reported[0]!.message).toContain("Clear all");
+});
+
+test("runDirectiveWave: one item throwing does not stop siblings in the same wave", async () => {
+  const { order, journaled, deps } = mockDirectiveDeps({ throwForIds: new Set(["a"]) });
+  await runDirectiveWave(
+    [
+      item({ id: "a", kind: "directive", directive: "clear" }),
+      item({ id: "b", kind: "directive", directive: "compact" })
+    ],
+    deps
+  );
+  expect(order).toEqual(["mark:a", "execute:a", "mark:b", "execute:b"]);
+  expect(journaled).toHaveLength(2);
+  expect(journaled[0]).toContain("marked done but execution threw");
+  expect(journaled[1]).toContain("directive card dispatched");
+});
+
+test("runDirectiveWave: markDone throwing is not caught -- it propagates and execute never runs", async () => {
+  const { order, deps } = mockDirectiveDeps();
+  deps.markDone = async () => {
+    throw new Error("upsert failed");
+  };
+  await expect(
+    runDirectiveWave([item({ id: "a", kind: "directive", directive: "clear" })], deps)
+  ).rejects.toThrow("upsert failed");
+  expect(order).toEqual([]);
 });
 
 function mockDeps(opts: { announceReturns?: number; failIds?: Set<string> } = {}) {
