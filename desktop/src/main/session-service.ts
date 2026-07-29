@@ -772,6 +772,17 @@ export class SessionService extends EventEmitter {
     const cfg = this.getConfig()
     const base = def.command.trim() || this.launchCommand
 
+    // Single source of truth for "is this actually a fresh line" (review nit
+    // on 150eb188/ce5aacf): `mode` alone is not enough because a caller could
+    // in principle pass mode='resume' with an empty def.sessionId. Today only
+    // spawnSession calls startPty and it already normalizes to 'fresh' before
+    // doing so, so this can't currently diverge -- but computing it once and
+    // feeding the SAME value to the branch condition, buildSessionCommandLine
+    // and shouldInjectPrompt means a future direct caller can't produce a
+    // fresh line whose prompt injection is silently disarmed by a stale
+    // 'resume' tag.
+    const effective: SpawnMode = mode === 'resume' && def.sessionId ? 'resume' : 'fresh'
+
     // Drop any stale prompt-injection entry from a previous spawn of this id
     // before (maybe) recording a fresh one below (150eb188) -- a resume must
     // never inject one, matching "prompt lives in the transcript, never
@@ -779,7 +790,7 @@ export class SessionService extends EventEmitter {
     this.pendingPrompt.delete(def.id)
 
     let command: string
-    if (mode === 'resume' && def.sessionId) {
+    if (effective === 'resume') {
       // Fork the previous claude session into a fresh id (collision avoidance).
       const prev = def.sessionId
       def.sessionId = randomUUID()
@@ -818,7 +829,7 @@ export class SessionService extends EventEmitter {
       // fresh launch, degraded or not, still deserves its initial prompt);
       // what the guard actually prevents is a *resume with a real transcript*
       // re-playing a prompt the agent already saw.
-      if (shouldInjectPrompt(mode, def.prompt)) this.pendingPrompt.set(def.id, def.prompt!.trim())
+      if (shouldInjectPrompt(effective, def.prompt)) this.pendingPrompt.set(def.id, def.prompt!.trim())
     }
 
     // Track the live (post-fork) id for the double-resume guard.
