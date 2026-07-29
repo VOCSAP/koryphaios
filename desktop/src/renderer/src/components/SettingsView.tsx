@@ -405,8 +405,15 @@ export function SettingsView(): React.JSX.Element {
                         key={c.id}
                         className={`settings-detect${c.available ? ' is-ok' : ''}`}
                       >
-                        {c.available ? GLYPH_ACTIONS.check : GLYPH_ACTIONS.close} {c.name} (
-                        {c.cli})
+                        <span
+                          role="img"
+                          aria-label={t(
+                            c.available ? 'settings.modelsDetected' : 'settings.modelsMissing'
+                          )}
+                        >
+                          {c.available ? GLYPH_ACTIONS.check : GLYPH_ACTIONS.close}
+                        </span>{' '}
+                        {c.name} ({c.cli})
                       </span>
                     ))}
                   {catalogs === null && <span>{t('graph.running')}</span>}

@@ -678,6 +678,8 @@
   "settings.modelsDetection": "Detected CLIs",
   "settings.modelsDetectionHelp": "A provider is offered in the model pickers only when its CLI is installed. Frontier model lists are curated in the app; local endpoints below are discovered dynamically.",
   "settings.modelsRefresh": "Re-detect CLIs and endpoints",
+  "settings.modelsDetected": "detected",
+  "settings.modelsMissing": "not detected",
   "settings.localProviders": "Local model endpoints",
   "settings.localProvidersHelp": "OpenAI-compatible endpoints (Ollama, LiteLLM, vLLM…). Models are listed automatically via /v1/models (or Ollama /api/tags).",
   "settings.providerName": "name",
