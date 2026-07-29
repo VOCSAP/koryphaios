@@ -1148,14 +1148,18 @@ const watchDispatched = async (): Promise<void> => {
     // resolves. `retry` below runs the check on every tick while a
     // dependency block is outstanding, not only on a completion transition;
     // journal lines still only fire on an actual state change (dispatch
-    // success, or first entering/leaving the blocked state), so a stuck item
+    // success, or entering/leaving the blocked state), so a stuck item
     // doesn't flood the journal every DISPATCH_WATCH_MS.
     const retry = completed || (dispatchedIds.size === 0 && barrierPending)
     if (retry) {
       let dispatchSucceeded = false
+      let attempted = false
+      let dispatchReason: DispatchResult['reason'] | undefined
       if (canAutoDispatchNext(items, dispatchedIds)) {
+        attempted = true
         const r = await dispatchNext()
         dispatchSucceeded = r.sent
+        dispatchReason = r.reason
         if (r.sent) {
           journal.add(
             'dispatch',
@@ -1173,10 +1177,25 @@ const watchDispatched = async (): Promise<void> => {
       const wasBarrierPending = barrierPending
       barrierPending = nextBarrierPending(barrierPending, dispatchedIds.size, dispatchSucceeded, firstQueued(items) !== null)
       if (barrierPending && !wasBarrierPending) {
-        journal.add(
-          'dispatch',
-          'wave barrier: next queued item has unmet dependencies, waiting (use "send first to team-lead" to override)'
-        )
+        // Two distinct diagnoses share this arming: canAutoDispatchNext
+        // returning false (the head's dependency hasn't resolved yet) vs.
+        // it returning true but the dispatch itself failing (attempted,
+        // e.g. no team-lead connected). Report whichever actually happened,
+        // not a fixed "unmet dependencies" string that would be wrong for
+        // the second case.
+        const reason =
+          attempted && !dispatchSucceeded
+            ? dispatchReason === 'no-lead'
+              ? 'no team-lead connected, will retry'
+              : `dispatch failed (${dispatchReason ?? 'unknown'}), will retry`
+            : 'next queued item has unmet dependencies, waiting'
+        journal.add('dispatch', `wave barrier: ${reason} (use "send first to team-lead" to override)`)
+      } else if (!barrierPending && wasBarrierPending) {
+        // The only other transition out of "pending": the head cleared from
+        // the queue without going through a successful dispatch on THIS
+        // tick (e.g. it was handled manually via the escape hatch above).
+        // A successful auto-dispatch already journaled its own line above.
+        journal.add('dispatch', 'wave barrier: cleared, queue advancing')
       }
     }
   } catch {
@@ -1227,9 +1246,14 @@ const seedDispatchedFromRoadmap = async (): Promise<void> => {
     if (dispatchedIds.size > 0) {
       journal.add('dispatch', `restart seed: tracking ${dispatchedIds.size} already in-progress item(s)`)
     }
-  } catch {
-    // Broker unreachable at startup: dispatchedIds simply stays empty, same
-    // as before this seed existed.
+  } catch (e) {
+    // Unlike watchDispatched's catch (retried every DISPATCH_WATCH_MS, so
+    // "next tick retries" is literally true), this seed is a ONE-SHOT call at
+    // startup: a broker that is merely slow to come up during the boot
+    // window silently disables the mitigation for the entire process
+    // lifetime, in exactly the case it exists to guard (auto-dispatching
+    // over an unfinished wave). Trace it so that failure is visible.
+    reportError('dispatch', 'restart seed failed; in-progress items not re-tracked', e)
   }
 }
 let dispatchTimer: NodeJS.Timeout | null = null

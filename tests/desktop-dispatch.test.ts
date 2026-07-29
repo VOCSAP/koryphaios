@@ -5,6 +5,7 @@ import {
   canAutoDispatchNext,
   composeAssignText,
   composeDispatchText,
+  composeMultiDispatchText,
   composeStopText,
   dispatchNormalWave,
   firstQueued,
@@ -93,6 +94,30 @@ test("composeDispatchText carries the full item and the status contract", () => 
   expect(text).toContain("Depends on: 87654321");
   expect(text).toContain("roadmap_update");
   expect(text).toContain("auto-dispatches the next queued item");
+});
+
+// Roadmap card 5852c074: composeMultiDispatchText is the CODE CONSTANT sent
+// to the team-lead for a whole head wave (C8 rule) -- pin its byte-identical
+// N=1 delegation and lock the N>1 wording the card specifically revised
+// (parallel framing, per-member numbering, supervisor-routed spawn).
+test("composeMultiDispatchText: N=1 is byte-identical to composeDispatchText", () => {
+  const solo = item({ id: "12345678-0000-0000-0000-000000000000", title: "Solo item" });
+  expect(composeMultiDispatchText([solo])).toBe(composeDispatchText(solo));
+});
+
+test("composeMultiDispatchText: N>1 carries the parallel framing, per-member numbering, and supervisor spawn routing", () => {
+  const a = item({ id: "aaaaaaaa-0000-0000-0000-000000000000", title: "First item" });
+  const b = item({ id: "bbbbbbbb-0000-0000-0000-000000000000", title: "Second item" });
+  const text = composeMultiDispatchText([a, b]);
+  expect(text).toContain("2 roadmap items");
+  expect(text).toContain("IN PARALLEL");
+  expect(text).toContain("ids aaaaaaaa, bbbbbbbb");
+  expect(text).toContain("[1/2] id aaaaaaaa");
+  expect(text).toContain("Title: First item");
+  expect(text).toContain("[2/2] id bbbbbbbb");
+  expect(text).toContain("Title: Second item");
+  expect(text).toContain("ask the SUPERVISOR (send_message) to spawn an additional agent");
+  expect(text).toContain("you have no direct spawn capability");
 });
 
 // PLAN K3: operator stop notice (CODE CONSTANT, C8 rule).
