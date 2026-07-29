@@ -810,6 +810,18 @@ const markDelivered = db.prepare(`UPDATE messages SET delivered = 1 WHERE id = ?
 // inserted earlier. The row id is assigned strictly in insertion order
 // within the same db.transaction, so it stays a correct ordering key
 // regardless of clock resolution.
+// id ALONE here, not the "sent_at, id" composite used by selectUndelivered /
+// selectUndeliveredCapped above: this is a deliberate asymmetry, not a missed
+// harmonization -- do not "fix" it to match. The two queries answer different
+// questions. This one is a CUTOFF on a happens-before/insertion relation
+// ("what was inserted before this message"), which needs a total, tie-free
+// order -- id is exactly that; adding sent_at here would reintroduce this
+// same flaky-ack bug. selectUndelivered is an ORDER BY / recency WINDOW on
+// content time ("present in what order, and which N are most recent"), where
+// sent_at is the business-meaningful key and id only breaks a genuine tie;
+// using plain id there breaks tests/broker-flush-cap.test.ts's recency-cap
+// semantics (its fixture seeds sent_at out of step with id). Kleos: koryphaios
+// card 82e3d293, commit 31fe49b.
 const ackPriorMessagesForSender = db.prepare(
   `UPDATE messages
      SET delivered = 1
