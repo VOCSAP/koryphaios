@@ -13,7 +13,12 @@ import {
   globalWorktreeInit,
   globalConfigDir
 } from "../desktop/src/main/launch-config.ts";
-import { buildSessionCommandLine, quotePromptArg, sanitizeFlagValue } from "../desktop/src/main/session-command.ts";
+import {
+  buildSessionCommandLine,
+  encodeInitialPromptKeystrokes,
+  quotePromptArg,
+  sanitizeFlagValue
+} from "../desktop/src/main/session-command.ts";
 import { buildShellInvocation } from "../desktop/src/main/shell-command.ts";
 
 const tmpDirs: string[] = [];
@@ -238,22 +243,8 @@ test("--mcp-config and --append-system-prompt-file are emitted on both modes", (
   expect(resume).toContain("--resume \"id-old\" --fork-session");
 });
 
-// ----- initial prompt (PLAN C2) -----
-
-test("fresh launch appends the quoted prompt last (after args and --effort)", () => {
-  const line = buildSessionCommandLine({
-    baseCommand: "claude run",
-    sessionId: "id-1",
-    args: "--agent dev",
-    effort: "high",
-    prompt: "Read PLAN-v0.4.md and start C2",
-    platform: "linux",
-    mode: "fresh"
-  });
-  expect(line).toBe(
-    "claude run --session-id \"id-1\" --agent dev --effort high 'Read PLAN-v0.4.md and start C2'"
-  );
-});
+// ----- initial prompt (PLAN C2), quoting helper still used by the headless
+// antigravity adapter (model-adapters.ts) -----
 
 test("posix prompt quoting is inert: apostrophes, $, backticks, newlines", () => {
   expect(quotePromptArg("l'item #12: fix `foo` for $USER\nthen report", "linux")).toBe(
@@ -265,27 +256,29 @@ test("win32 prompt quoting doubles embedded single quotes (PowerShell)", () => {
   expect(quotePromptArg("l'item '12'", "win32")).toBe("'l''item ''12'''");
 });
 
-test("resume never re-plays the prompt (--resume restores the conversation)", () => {
-  const line = buildSessionCommandLine({
-    baseCommand: "claude run",
-    sessionId: "id-new",
-    prevSessionId: "id-old",
-    prompt: "should not appear",
-    platform: "linux",
-    mode: "resume"
-  });
-  expect(line).toBe("claude run --resume \"id-old\" --fork-session --session-id \"id-new\"");
+// ----- post-spawn prompt keystroke injection (150eb188): the initial prompt
+// no longer rides argv (SessionCommandInput has no `prompt` field anymore --
+// session-service injects it as PTY keystrokes once the tile's startup-ack
+// fires) -- encodeInitialPromptKeystrokes is the pure encoder for that path.
+
+test("wraps the prompt in bracketed-paste marks with a trailing submit \\r, embedded newlines and quotes literal", () => {
+  const prompt = 'Read "PLAN-v0.4.md" and start C2\nUse l\'item #12 for context.';
+  expect(encodeInitialPromptKeystrokes(prompt)).toBe(`\x1b[200~${prompt}\x1b[201~\r`);
 });
 
-test("an empty/whitespace prompt never emits a positional arg", () => {
-  const line = buildSessionCommandLine({
-    baseCommand: "claude run",
-    sessionId: "id-1",
-    prompt: "   ",
-    platform: "linux",
-    mode: "fresh"
-  });
-  expect(line).toBe("claude run --session-id \"id-1\"");
+test("strips every ESC byte, including one shaped like the bracketed-paste closing marker", () => {
+  // A prompt (possibly template-sourced, hostile input #1) that tries to
+  // break out of the paste early with its own closing marker plus a trailing
+  // fake command must not survive as a literal ESC sequence.
+  const hostile = "before\x1b[201~rm -rf /\x1b[31mafter";
+  expect(encodeInitialPromptKeystrokes(hostile)).toBe(
+    "\x1b[200~before[201~rm -rf /[31mafter\x1b[201~\r"
+  );
+});
+
+test("preserves accented and non-Latin1 characters unmangled (no ConPTY-specific corruption at the JS-string level)", () => {
+  const prompt = "Lis d'abord le résumé\nContinue en 日本語 si besoin, then report.";
+  expect(encodeInitialPromptKeystrokes(prompt)).toBe(`\x1b[200~${prompt}\x1b[201~\r`);
 });
 
 // ----- B5: worktreeInit accessors (gated at startup in index.ts) -----

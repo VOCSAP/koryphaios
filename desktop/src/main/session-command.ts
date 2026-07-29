@@ -1,11 +1,20 @@
-// Pure builder for the per-session claude command line. No node-pty / electron
-// imports so it is unit-testable under bun.
+// Pure builder for the per-session claude command line, plus the sibling
+// pure encoder for the post-spawn prompt-keystroke path (150eb188). No
+// node-pty / electron imports so both are unit-testable under bun.
 //
 // Fork-on-every-resume (DESIGN §6.2 / §11): a new session is launched with its
 // own --session-id; resuming forks the previous session into a fresh id so two
 // live processes never share a session id. The resume form deliberately omits
 // the stored args and never re-passes --agent / --model, which Claude Code
 // auto-restores on --fork-session (verified CC 2.1.158, DESIGN §14.3).
+//
+// Initial prompt (PLAN C2) does NOT ride argv anymore: 07dc42c0 fixed the
+// headless adapters' win32 CommandLineToArgvW mangling by moving operator
+// text off argv onto stdin/file, but excluded this interactive-PTY path on
+// purpose (stdin redirect would break live keystrokes). 150eb188 closes the
+// remaining exposure the other way: session-service types the prompt into
+// the live terminal once it is up (see encodeInitialPromptKeystrokes below),
+// instead of composing it into the spawned command line.
 
 export type SpawnMode = 'fresh' | 'resume'
 
@@ -32,12 +41,6 @@ export interface SessionCommandInput {
    */
   pluginDir?: string
   /**
-   * Initial prompt submitted as Claude's positional argument on a FRESH launch
-   * only (PLAN C2). Never re-played on resume: --resume restores the previous
-   * conversation, so the prompt already lives in the transcript.
-   */
-  prompt?: string
-  /**
    * Path to a generated .mcp config, emitted as `--mcp-config "<path>"` on
    * BOTH fresh and resume (not restored by --fork-session, like --effort).
    * Used by the supervisor's deck-control bridge (PLAN C5).
@@ -50,8 +53,6 @@ export interface SessionCommandInput {
    * supervisor's role at harness level (PLAN C8).
    */
   appendSystemPromptFile?: string
-  /** Shell-quoting flavour for the prompt (win32 = PowerShell). Test hook. */
-  platform?: NodeJS.Platform
   mode: SpawnMode
 }
 
@@ -125,9 +126,35 @@ export function buildSessionCommandLine(input: SessionCommandInput): string {
   const extra = input.args?.trim()
   if (extra) line += ` ${extra}`
   line += effortFlag(input.effort)
-  // Positional initial prompt, last so it never swallows a flag (fresh only --
-  // the resume branch above returns before reaching here by construction).
-  const prompt = input.prompt?.trim()
-  if (prompt) line += ` ${quotePromptArg(prompt, input.platform)}`
+  // No positional initial prompt here anymore (150eb188): session-service
+  // injects it as post-spawn PTY keystrokes via encodeInitialPromptKeystrokes
+  // below, once the tile is actually up, instead of composing it into argv
+  // (win32's CommandLineToArgvW re-parse corrupted it past the first embedded
+  // quote -- the same class of bug 07dc42c0 fixed for the headless adapters).
   return line
+}
+
+/**
+ * Encode an initial prompt as post-spawn PTY keystrokes (150eb188):
+ * session-service writes this once a fresh tile's startup-ack fires, instead
+ * of composing the prompt into the spawned command line.
+ *
+ * Bracketed paste (xterm `ESC[200~...ESC[201~`, the precedent already used by
+ * BrowserView.tsx's `bracketedPaste()`) keeps embedded newlines literal in
+ * Claude Code's input box instead of each one submitting a partial line; the
+ * trailing `\r` after the closing marker is the actual submit keystroke.
+ *
+ * `prompt` can originate from a project template (`templates/*.json` in a
+ * CLONED repo, hostile input #1 per CLAUDE.md) and this function's output
+ * reaches a LIVE TERMINAL (hostile input #4) -- so every ESC byte is stripped
+ * first. Bracketed paste is not a sanitizer: a literal `ESC[201~` inside the
+ * prompt would close the paste early and let the remainder be interpreted as
+ * keystrokes (terminal escape-sequence injection). Stripping ALL ESC bytes
+ * (not just that one marker) closes the whole class at once -- a prompt has
+ * no legitimate use for a raw control byte.
+ */
+export function encodeInitialPromptKeystrokes(prompt: string): string {
+  // eslint-disable-next-line no-control-regex
+  const safe = prompt.replace(/\x1b/g, '')
+  return `\x1b[200~${safe}\x1b[201~\r`
 }

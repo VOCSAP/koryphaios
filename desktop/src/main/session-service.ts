@@ -12,7 +12,12 @@ import type {
 import { PtyManager } from './pty-manager'
 import { resolvePeerId } from './peer-state'
 import { saveSessions } from './store'
-import { buildSessionCommandLine, sanitizeFlagValue, type SpawnMode } from './session-command'
+import {
+  buildSessionCommandLine,
+  encodeInitialPromptKeystrokes,
+  sanitizeFlagValue,
+  type SpawnMode
+} from './session-command'
 import { ThinkingDetector, type ThinkingEvent } from './thinking'
 import {
   QuotaDetector,
@@ -75,6 +80,12 @@ const DIRECTIVE_SETTLE_MS = 120
 
 /** Dev-channels warning auto-ack: let the dialog finish painting first. */
 const STARTUP_ACK_SETTLE_MS = 350
+/**
+ * Initial-prompt injection (150eb188): let Claude Code's own TUI finish
+ * rendering after the dialog-dismiss Enter before typing into it, mirroring
+ * DIRECTIVE_SETTLE_MS's role between an Escape and the text it precedes.
+ */
+const PROMPT_INJECT_SETTLE_MS = 400
 /** Rolling cap for the magic-compact output scanner (CT4). */
 const OUTPUT_SCAN_CAP = 65536
 
@@ -117,6 +128,14 @@ export class SessionService extends EventEmitter {
   private quotaDetector = new QuotaDetector()
   private attentionDetector = new AttentionDetector()
   private startupAckDetector = new StartupAckDetector()
+  /**
+   * Initial prompt awaiting post-spawn keystroke injection (150eb188), keyed
+   * by session id. Set only for a fresh spawn with a non-empty def.prompt
+   * (startPty); consumed (deleted) by the startup-ack handler below once
+   * injected, so it fires at most once per process run. Cleared alongside
+   * the other per-session detector state whenever that state is cleared.
+   */
+  private pendingPrompt = new Map<string, string>()
   private pollTimer: NodeJS.Timeout | null = null
 
   /**
@@ -178,6 +197,7 @@ export class SessionService extends EventEmitter {
       this.quotaDetector.clear(id)
       this.attentionDetector.clear(id)
       this.startupAckDetector.clear(id)
+      this.pendingPrompt.delete(id)
 
       // A clean exit (/exit -> shell returns 0) auto-closes the tile, the way a
       // terminal tab closes when its shell exits, so it never lingers as a dead,
@@ -246,6 +266,16 @@ export class SessionService extends EventEmitter {
     // session the Deck spawns (operator create, supervisor, template, restart).
     // The detector fires once per process run; liveness is re-checked at send
     // time. 'startup-ack' is journaled by index.ts so each ack leaves a trace.
+    //
+    // Also the sync point for the initial-prompt keystroke injection
+    // (150eb188): a fresh spawn with a pending prompt (session id present in
+    // pendingPrompt, set by startPty) gets it typed in right after, once
+    // Claude Code's own TUI has had a moment to render past the dialog.
+    // Known residual limitation, not handled here: a launch command override
+    // that omits --dangerously-load-development-channels never shows this
+    // dialog, so 'ack' never fires and a pending prompt for that spawn is
+    // never injected (falls back to "type it yourself" -- same as before
+    // this card for that one case).
     this.startupAckDetector.on('ack', ({ id }: StartupAckEvent) => {
       setTimeout(() => {
         const r = this.runtime.get(id)
@@ -253,6 +283,15 @@ export class SessionService extends EventEmitter {
         this.pty.write(id, '\r')
         const name = this.defs.find((d) => d.id === id)?.name
         this.emit('startup-ack', { id, name })
+
+        const prompt = this.pendingPrompt.get(id)
+        if (!prompt) return
+        this.pendingPrompt.delete(id)
+        setTimeout(() => {
+          const r2 = this.runtime.get(id)
+          if (!r2 || r2.status === 'exited') return
+          this.pty.write(id, encodeInitialPromptKeystrokes(prompt))
+        }, PROMPT_INJECT_SETTLE_MS)
       }, STARTUP_ACK_SETTLE_MS)
     })
   }
@@ -333,6 +372,7 @@ export class SessionService extends EventEmitter {
     this.quotaDetector.stop()
     this.attentionDetector.stop()
     this.startupAckDetector.stop()
+    this.pendingPrompt.clear()
     this.pty.killAll()
   }
 
@@ -425,6 +465,7 @@ export class SessionService extends EventEmitter {
     this.quotaDetector.clear(id)
     this.attentionDetector.clear(id)
     this.startupAckDetector.clear(id)
+    this.pendingPrompt.delete(id)
     this.defs = this.defs.filter((d) => d.id !== id)
     this.runtime.delete(id)
     this.outputAt.delete(id)
@@ -449,6 +490,7 @@ export class SessionService extends EventEmitter {
     this.quotaDetector.stop()
     this.attentionDetector.stop()
     this.startupAckDetector.stop()
+    this.pendingPrompt.clear()
     this.defs = []
     this.runtime.clear()
     this.outputAt.clear()
@@ -502,6 +544,7 @@ export class SessionService extends EventEmitter {
     this.quotaDetector.stop()
     this.attentionDetector.stop()
     this.startupAckDetector.stop()
+    this.pendingPrompt.clear()
     for (const d of this.defs) {
       if (d.sessionId) this.registry.release(d.sessionId)
     }
@@ -728,6 +771,12 @@ export class SessionService extends EventEmitter {
     const cfg = this.getConfig()
     const base = def.command.trim() || this.launchCommand
 
+    // Drop any stale prompt-injection entry from a previous spawn of this id
+    // before (maybe) recording a fresh one below (150eb188) -- a resume must
+    // never inject one, matching "prompt lives in the transcript, never
+    // re-played".
+    this.pendingPrompt.delete(def.id)
+
     let command: string
     if (mode === 'resume' && def.sessionId) {
       // Fork the previous claude session into a fresh id (collision avoidance).
@@ -752,11 +801,19 @@ export class SessionService extends EventEmitter {
         args: def.args,
         effort: def.effort,
         pluginDir: this.pluginDir,
-        prompt: def.prompt,
         mcpConfig: def.mcpConfig,
         appendSystemPromptFile: def.appendSystemPromptFile,
         mode: 'fresh'
       })
+      // 150eb188: the prompt no longer rides argv (win32 CommandLineToArgvW
+      // mangled it past the first embedded quote). Record it here so the
+      // startup-ack handler types it into the tile once it is actually up,
+      // once per spawn -- consumed (deleted) there, so a later restart of a
+      // session that already used its prompt does not retype it. def.prompt
+      // itself stays put (kept for the never-launched-yet case, its own doc
+      // comment), the per-spawn Map entry below is the actual once-guard.
+      const prompt = def.prompt?.trim()
+      if (prompt) this.pendingPrompt.set(def.id, prompt)
     }
 
     // Track the live (post-fork) id for the double-resume guard.
