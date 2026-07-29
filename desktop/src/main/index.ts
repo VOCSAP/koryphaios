@@ -1182,19 +1182,26 @@ const watchDispatched = async (): Promise<void> => {
         // it returning true but the dispatch itself failing (attempted,
         // e.g. no team-lead connected). Report whichever actually happened,
         // not a fixed "unmet dependencies" string that would be wrong for
-        // the second case.
+        // the second case. The "send first to team-lead" override is only
+        // valid advice for the dependency case and the generic-failure case
+        // -- it goes through the same announceToLead and would fail
+        // identically when no lead is connected, so that branch gets its
+        // own non-actionable wording instead.
         const reason =
           attempted && !dispatchSucceeded
             ? dispatchReason === 'no-lead'
-              ? 'no team-lead connected, will retry'
-              : `dispatch failed (${dispatchReason ?? 'unknown'}), will retry`
-            : 'next queued item has unmet dependencies, waiting'
-        journal.add('dispatch', `wave barrier: ${reason} (use "send first to team-lead" to override)`)
-      } else if (!barrierPending && wasBarrierPending) {
+              ? 'no team-lead connected, waiting for a lead to connect'
+              : `dispatch failed (${dispatchReason ?? 'unknown'}), will retry (use "send first to team-lead" to override)`
+            : 'next queued item has unmet dependencies, waiting (use "send first to team-lead" to override)'
+        journal.add('dispatch', `wave barrier: ${reason}`)
+      } else if (!barrierPending && wasBarrierPending && !dispatchSucceeded) {
         // The only other transition out of "pending": the head cleared from
         // the queue without going through a successful dispatch on THIS
         // tick (e.g. it was handled manually via the escape hatch above).
-        // A successful auto-dispatch already journaled its own line above.
+        // Excludes dispatchSucceeded on purpose: a successful auto-dispatch
+        // already journaled its own "auto-dispatched next queued ..." line
+        // above, and nextBarrierPending clears on that same success, so
+        // without this guard the resolving tick would log both lines.
         journal.add('dispatch', 'wave barrier: cleared, queue advancing')
       }
     }
