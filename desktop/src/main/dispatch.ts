@@ -29,6 +29,39 @@ export function nextQueuePosition(items: RoadmapItem[]): number {
 }
 
 /**
+ * R5 wave barrier (roadmap card 42edc88b phase 3): whether watchDispatched
+ * may AUTOMATICALLY advance the queue. True only when (a) the previous wave
+ * has fully drained -- dispatchedIds empty, the in-memory Set in index.ts
+ * that is the SOLE record of wave membership once an item is dispatched (see
+ * its own doc comment for the restart caveat this makes load-bearing) -- and
+ * (b) the next queued head's own dependencies are all done or archived. A
+ * missing dependency (deleted from the roadmap) counts as resolved, matching
+ * watchDispatched's own completion check.
+ *
+ * (b) exists because dispatchNextInner itself does NOT validate depends_on --
+ * an unmet dependency at the head is a DAG violation the lane already flags
+ * visually, and auto-dispatch must not race past it. This barrier gates ONLY
+ * the automatic timer path; the operator's manual "send first to team-lead"
+ * button (ipc.ts roadmap:dispatch) calls dispatchNext() directly and stays
+ * UNGUARDED, the intended escape hatch when the barrier holds indefinitely
+ * (e.g. an abandoned in-flight item, or a head whose dependency stalls).
+ *
+ * SEMANTIC HONESTY (audit §8): this is a BARRIER, not parallel dispatch --
+ * dispatchNextInner still sends one head at a time. Waves stay informational
+ * until 5852c074 lands multi-dispatch.
+ */
+export function canAutoDispatchNext(items: RoadmapItem[], dispatchedIds: ReadonlySet<string>): boolean {
+  if (dispatchedIds.size > 0) return false
+  const head = firstQueued(items)
+  if (!head) return false
+  const byId = new Map(items.map((i) => [i.id, i]))
+  return head.depends_on.every((depId) => {
+    const dep = byId.get(depId)
+    return !dep || dep.status === 'done' || dep.status === 'archived'
+  })
+}
+
+/**
  * The targeted announce sent to the team-lead when an item is dispatched:
  * the full item plus the workflow contract (assign, keep the status current).
  */

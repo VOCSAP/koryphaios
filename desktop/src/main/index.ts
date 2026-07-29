@@ -53,7 +53,13 @@ import {
 import { appendInboxHistory } from './inbox-store'
 import { computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
 import { createCheckpoint, purgeCheckpoints, restoreCommand } from './checkpoint-service'
-import { composeAssignText, composeDispatchText, composeStopText, firstQueued } from './dispatch'
+import {
+  canAutoDispatchNext,
+  composeAssignText,
+  composeDispatchText,
+  composeStopText,
+  firstQueued
+} from './dispatch'
 import { directiveKeys, isDirectiveCommand, resolveDirectiveTargets } from './directive'
 import type { AssignResult, DispatchResult, RoadmapItem, StopResult } from '@shared/types'
 import { composeJoinAnnounce, type JoinAnnounceIntent } from '@shared/announce'
@@ -859,6 +865,17 @@ const checkpointBeforeSpawn = async (dir: string): Promise<void> => {
 // team-lead as a targeted announce (C10), unqueues it and remembers its id.
 // A light watcher polls the tracked ids and auto-dispatches the next queued
 // item when a dispatched one turns done — the "conveyor belt" loop.
+//
+// WAVE BARRIER load-bearing caveat (card 42edc88b phase 3, canAutoDispatchNext
+// in ./dispatch): once an item is dispatched it is unqueued and moved back to
+// planned (see dispatchNextInner below), so firstQueued no longer sees it —
+// its wave membership exists ONLY in this in-memory Set. Before the barrier
+// this Set was informational (a completion journal / conveyor-belt trigger);
+// the barrier makes it load-bearing for CORRECTNESS (it gates whether the
+// next auto-dispatch may fire at all). A Deck restart mid-wave loses it and
+// can over-dispatch past a wave that hadn't actually finished. v1 accepted:
+// deriving wave membership from broker-persisted state instead is deferred to
+// 5852c074 (multi-dispatch).
 const dispatchedIds = new Set<string>()
 const DISPATCH_WATCH_MS = 20_000
 
@@ -1041,9 +1058,29 @@ const watchDispatched = async (): Promise<void> => {
         if (it) journal.add('dispatch', `dispatched item done: "${it.title}"`)
       }
     }
+    // R5 wave barrier (card 42edc88b phase 3, canAutoDispatchNext in
+    // ./dispatch): only the AUTOMATIC path is gated here -- the manual
+    // "send first to team-lead" button (ipc.ts roadmap:dispatch) calls
+    // dispatchNext() directly, unguarded, and stays the operator's escape
+    // hatch when the barrier holds (an abandoned in-flight item, or a head
+    // whose dependency stalls). Logged only on a real completion transition
+    // (this branch), never per-tick, so a stuck item doesn't flood the
+    // journal every DISPATCH_WATCH_MS.
     if (completed) {
-      const r = await dispatchNext()
-      if (r.sent) journal.add('dispatch', `auto-dispatched next queued item: "${r.title}"`)
+      if (canAutoDispatchNext(items, dispatchedIds)) {
+        const r = await dispatchNext()
+        if (r.sent) journal.add('dispatch', `auto-dispatched next queued item: "${r.title}"`)
+      } else if (dispatchedIds.size > 0) {
+        journal.add(
+          'dispatch',
+          `wave barrier: waiting on ${dispatchedIds.size} more dispatched item(s) before advancing the queue`
+        )
+      } else {
+        journal.add(
+          'dispatch',
+          'wave barrier: next queued item has unmet dependencies, waiting (use "send first to team-lead" to override)'
+        )
+      }
     }
   } catch {
     // Broker down: the next tick retries.

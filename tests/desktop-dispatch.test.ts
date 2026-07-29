@@ -2,6 +2,7 @@
 
 import { test, expect } from "bun:test";
 import {
+  canAutoDispatchNext,
   composeAssignText,
   composeDispatchText,
   composeStopText,
@@ -129,4 +130,53 @@ test("composeAssignText carries the full item and the take-it-now contract", () 
   expect(text).toContain("locks it under your peer_id");
   // Targeted flow: no team-lead relaying step.
   expect(text).not.toContain("team-lead");
+});
+
+// R5 wave barrier (card 42edc88b phase 3): watchDispatched's policy for
+// whether an AUTOMATIC redispatch may fire. The manual "send first to
+// team-lead" button calls dispatchNext() directly and is untested here on
+// purpose -- it is intentionally unguarded (see canAutoDispatchNext's doc
+// comment in dispatch.ts).
+
+test("canAutoDispatchNext: false while a previous wave is still in flight", () => {
+  const items = [item({ id: "a", queue: 1 })];
+  const dispatchedIds = new Set(["some-in-flight-id"]);
+  expect(canAutoDispatchNext(items, dispatchedIds)).toBe(false);
+});
+
+test("canAutoDispatchNext: false when the queue is empty (nothing to advance to)", () => {
+  const items = [item({ id: "a", status: "done" })];
+  expect(canAutoDispatchNext(items, new Set())).toBe(false);
+});
+
+test("canAutoDispatchNext: true when dispatchedIds is empty and the head has no dependency", () => {
+  const items = [item({ id: "a", queue: 1 })];
+  expect(canAutoDispatchNext(items, new Set())).toBe(true);
+});
+
+test("canAutoDispatchNext: false when the head's dependency is not done or archived", () => {
+  const items = [
+    item({ id: "dep", status: "in_progress" }),
+    item({ id: "a", queue: 1, depends_on: ["dep"] })
+  ];
+  expect(canAutoDispatchNext(items, new Set())).toBe(false);
+});
+
+test("canAutoDispatchNext: true when the head's dependency is done or archived", () => {
+  const doneItems = [
+    item({ id: "dep", status: "done" }),
+    item({ id: "a", queue: 1, depends_on: ["dep"] })
+  ];
+  expect(canAutoDispatchNext(doneItems, new Set())).toBe(true);
+
+  const archivedItems = [
+    item({ id: "dep", status: "archived" }),
+    item({ id: "a", queue: 1, depends_on: ["dep"] })
+  ];
+  expect(canAutoDispatchNext(archivedItems, new Set())).toBe(true);
+});
+
+test("canAutoDispatchNext: a dependency missing from the roadmap counts as resolved", () => {
+  const items = [item({ id: "a", queue: 1, depends_on: ["deleted-long-ago"] })];
+  expect(canAutoDispatchNext(items, new Set())).toBe(true);
 });
