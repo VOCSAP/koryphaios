@@ -72,6 +72,14 @@ gates whether the job triggers at all, and it once listed only `desktop/**`
 while the suites it runs cover `notify/`, `shared/` and `broker.ts`. Precedent:
 140 tests shipped that had never executed on any runner.
 
+The gap is measurable and grows silently: `.github/workflows/desktop-build.yml:63`
+runs that three-glob line against `tests/`, matching **78 files**. `bun test`
+at the repo root collects **116**. A new test must live in `tests/` **and**
+carry one of those three prefixes, or CI never runs it, with no failing check
+to notice. Verify collection by running the CI glob itself, not by running
+`bun test` and counting the files it picked up. Precedent: a guard shipped in
+`desktop/src/main/` passed locally and was never executed by CI.
+
 **1. Paths.** macOS tmpdirs are symlinked (`/var` → `/private/var`) and Windows
 hands back 8.3 short names; Linux tmpdirs are neither, so any path-comparison
 bug is invisible locally. Don't settle for a test that only fails on the other

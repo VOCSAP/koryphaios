@@ -27,8 +27,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .cache
 *.tsbuildinfo
 
-# IntelliJ based IDEs
+# IntelliJ based IDEs. Module descriptors (*.iml) are generated per opened
+# module and land OUTSIDE .idea/, so they need their own rule.
 .idea
+*.iml
 
 # Finder (MacOS) folder config
 .DS_Store
