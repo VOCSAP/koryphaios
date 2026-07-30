@@ -57,3 +57,4 @@ docs/
 .claude/settings.json
 AGENTS.md
 .codex/config.toml
+/.claude/agent-memory
