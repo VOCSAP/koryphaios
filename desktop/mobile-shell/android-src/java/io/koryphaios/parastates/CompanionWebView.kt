@@ -65,6 +65,14 @@ class CompanionWebView : Activity() {
         var expected = intent.getStringExtra("fingerprint").orEmpty()
         val seedScript = intent.getStringExtra("seedScript").orEmpty()
         pinnedOrigin = originOf(url)
+        // Same discipline as the `?: return finish()` two lines above: a
+        // malformed intent URL fails originOf() closed to "", and every guard
+        // below compares by equality to pinnedOrigin. Left unchecked, that ""
+        // would crash addDocumentStartJavaScript's allowedOriginRules (empty
+        // rule) below AND fail every other guard OPEN, not closed, since a
+        // page whose own origin also fails closed to "" would then equal
+        // pinnedOrigin.
+        if (pinnedOrigin.isEmpty()) return finish()
 
         val web = WebView(this)
         web.settings.javaScriptEnabled = true
@@ -149,7 +157,7 @@ class CompanionWebView : Activity() {
 
         // The reliable seeding path: runs before ANY script on the page.
         if (seedScript.isNotEmpty() && supportsDocumentStart()) {
-            WebViewCompat.addDocumentStartJavaScript(web, seedScript, setOf(originOf(url)))
+            WebViewCompat.addDocumentStartJavaScript(web, seedScript, setOf(pinnedOrigin))
         }
 
         setContentView(web)
@@ -234,8 +242,9 @@ class CompanionWebView : Activity() {
     /**
      * SHA-256 of the served certificate.
      *
-     * `SslCertificate` only exposes the parsed fields on older APIs; since
-     * API 29 the original X509 is available, which is what a digest needs.
+     * `SslCertificate.getX509Certificate()` is available unconditionally at
+     * this app's floor (API 29): the null check below exists because the
+     * platform API is still typed nullable, not because of a minSdk gap.
      */
     private fun fingerprintOf(cert: android.net.http.SslCertificate): String {
         val x509 = cert.x509Certificate ?: return ""

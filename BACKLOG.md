@@ -541,8 +541,8 @@ Robustesse et exploitation :
     ajouter, sinon les `.kt` ne sont jamais compilés et le build passe au vert
     avec une app sans aucune capacité native), le `MainActivity.java` généré
     entre en collision avec le `MainActivity.kt` copié, et `minSdk` doit
-    monter à 26 (le barcode-scanner tire `ionbarcode-android`, plancher 26).
-    Les trois sont documentées.
+    monter à 26 (le barcode-scanner tire `ionbarcode-android`, plancher 26 ;
+    porté depuis à 29, cf. `BUILDING.md` §5.2). Les trois sont documentées.
 
       Prédictions d'origine, conservées pour mémoire :
   - **Dépendances Gradle** : `androidx.biometric` et `androidx.webkit` ne

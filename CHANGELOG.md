@@ -80,12 +80,14 @@ together by necessity: the scanner's major is tied to Capacitor's by its peer
 range, so a partial bump is unsatisfiable. What it changes:
 
 - toolchain: JDK 17 → **21**, compileSdk/targetSdk 34 → **36**, minSdk 22 →
-  **26**, Node ≥ 20 → **≥ 22** for the `cap` CLI. `BUILDING.md` §5 now derives
+  **29**, Node ≥ 20 → **≥ 22** for the `cap` CLI. `BUILDING.md` §5 now derives
   those numbers from `@capacitor/android/capacitor/build.gradle` and says so,
-  because that table drifted once already. The floor is 26 rather than the 24
-  Capacitor 8 defaults to, because `@capacitor/barcode-scanner` 3.1.0 pulls
-  `io.ionic.libs:ionbarcode-android`, whose own minSdk is 26 and which the
-  manifest merger refuses to reconcile;
+  because that table drifted once already. The floor is raised from the 24
+  Capacitor 8 defaults to, but not because of `@capacitor/barcode-scanner`
+  3.1.0's `io.ionic.libs:ionbarcode-android` dependency, whose own floor is 26
+  and would already refuse a lower manifest merge: `CompanionWebView`'s
+  certificate pinning calls `SslCertificate.getX509Certificate()`, API 29+,
+  which is what actually determines 29 as the project's real floor;
 - the 790 lines of Kotlin in `android-src/` are untouched. They reach Capacitor
   through six symbols (`BridgeActivity`, `Plugin`, `PluginCall`,
   `PluginMethod`, `JSObject`, `annotation.CapacitorPlugin`), all still present
