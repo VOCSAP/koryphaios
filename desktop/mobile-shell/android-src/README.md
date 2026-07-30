@@ -16,9 +16,12 @@ lifecycles, it does not decide anything.
 ## Install
 
 The full toolchain and the step-by-step live in
-**[`BUILDING.md`](../../../BUILDING.md) §5** — including the two Gradle
-dependencies Capacitor does not bring (`androidx.biometric`,
-`androidx.webkit`), without which the build fails on unresolved references.
+**[`BUILDING.md`](../../../BUILDING.md) §5**, including the four edits §5.2
+walks through on top of `cap add android`'s output: the Kotlin plugin (added
+first, or the `.kt` files here are never compiled and the build goes green
+with none of the app's native capabilities), the `minSdkVersion` bump, the two
+Gradle dependencies Capacitor does not bring (`androidx.biometric`,
+`androidx.webkit`), and the manifest merge.
 
 The short version: `npx cap add android` generates the project, then the files
 here are copied into it and the manifest blocks merged.

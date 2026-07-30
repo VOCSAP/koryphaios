@@ -82,7 +82,6 @@ class ParastatesShellPlugin : Plugin() {
      * behaves like any other app on that phone.
      */
     private fun requestBatteryExemption() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
         val power = context.getSystemService(PowerManager::class.java)
         if (power.isIgnoringBatteryOptimizations(context.packageName)) return
         try {

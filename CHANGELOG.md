@@ -16,14 +16,17 @@ together by necessity: the scanner's major is tied to Capacitor's by its peer
 range, so a partial bump is unsatisfiable. What it changes:
 
 - toolchain: JDK 17 → **21**, compileSdk/targetSdk 34 → **36**, minSdk 22 →
-  **24**, Node ≥ 20 → **≥ 22** for the `cap` CLI. `BUILDING.md` §5 now derives
+  **26**, Node ≥ 20 → **≥ 22** for the `cap` CLI. `BUILDING.md` §5 now derives
   those numbers from `@capacitor/android/capacitor/build.gradle` and says so,
-  because that table drifted once already;
+  because that table drifted once already. The floor is 26 rather than the 24
+  Capacitor 8 defaults to, because `@capacitor/barcode-scanner` 3.1.0 pulls
+  `io.ionic.libs:ionbarcode-android`, whose own minSdk is 26 and which the
+  manifest merger refuses to reconcile;
 - the 790 lines of Kotlin in `android-src/` are untouched. They reach Capacitor
   through six symbols (`BridgeActivity`, `Plugin`, `PluginCall`,
   `PluginMethod`, `JSObject`, `annotation.CapacitorPlugin`), all still present
   in 8.4.2; the rest is plain Android;
-- `minSdk` 24 closes a gap `BACKLOG.md` §3.2 had recorded as unreachable:
+- `minSdk` 29 closes a gap `BACKLOG.md` §3.2 had recorded as unreachable:
   `shouldOverrideUrlLoading(WebView, WebResourceRequest)` is API 24+, so on the
   old 22–23 floor the origin check in `onPageStarted` carried the WebView
   alone. It no longer does anywhere;
@@ -37,6 +40,30 @@ lookup returned `undefined`, so both pairing flows fell through to the
 desktop. Fixed, with the plugin name and the shape of the call spelled out in a
 comment, since nothing in the suite can catch this class of mistake: the tests
 only ever exercise the fallback branch.
+
+**Parastatès has now been compiled.** `MB6` had stood since N5 as the one lot
+whose proof was reading rather than execution: 790 lines of Kotlin, reviewed,
+never once put through a compiler. `assembleDebug` now produces a 55 MB debug
+APK (up from an earlier 35 MB measurement at a lower `minSdk`: AGP stores dex
+uncompressed once `minSdk` >= 28), and getting there cost exactly what that
+entry predicted it would.
+
+Three of the four gaps were in `BUILDING.md` §5.2, which described a procedure
+nobody had executed end to end. The project `cap add android` generates is
+**Java-only**, so the Kotlin plugin has to be added by hand or the `.kt` files
+are copied in and never compiled — the build goes green while the app has none
+of its native capabilities. `cap add android` also generates its own
+`MainActivity.java` beside the `MainActivity.kt` you copy in, and Kotlin stops
+on the `Redeclaration`. And `androidx.webkit` no longer needs a hardcoded
+version at all: Capacitor 8 already carries `androidxWebkitVersion` (1.14.0) in
+`variables.gradle`.
+
+The fourth was a real source bug, of the kind only a compiler finds:
+`CompanionWebView.kt` declared **two** `companion object` in the same class,
+one holding `open()` and one holding `CRED_KEY`. Kotlin allows one. The class
+could never have compiled, in any configuration, since the day it was written.
+`BACKLOG.md` §3.2 said the Kotlin was proven by reading and the TypeScript by
+1043 tests; this is what that distinction is worth in practice.
 
 The `hint` argument the v3 API requires is inlined as ALL (17) rather than
 `QR_CODE` (0), and the reasoning is in the code: the value crosses into Kotlin

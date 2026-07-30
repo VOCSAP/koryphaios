@@ -161,7 +161,7 @@ nothing ever failed until someone ran `npm install`.
 | **JDK 21** | Capacitor 8 compiles its Android sources at `JavaVersion.VERSION_21` (`capacitor/build.gradle`) | Android Studio ships a bundled JBR 21; with a CLI-only setup install a JDK 21 and set `JAVA_HOME`. A newer JDK is NOT a safe substitute — AGP rejects majors it does not know |
 | **Node.js ≥ 22** | the Capacitor 8 CLI declares `engines.node >= 22`, stricter than the ≥ 20 of §1 | only the `cap` commands care; the rest of the repo is unaffected |
 | **Android SDK** | compiles and packages the app | Easiest via **Android Studio**; otherwise the standalone *command-line tools* |
-| **SDK Platform API 36** | Capacitor 8 compiles and targets 36 (`minSdk` 24) | `sdkmanager "platforms;android-36"` |
+| **SDK Platform API 36** | Capacitor 8 compiles and targets 36 (`minSdk` 24, raised to **29** here — §5.2) | `sdkmanager "platforms;android-36"` |
 | **SDK Build-Tools 36** | dexing and packaging | `sdkmanager "build-tools;36.0.0"` |
 | **Platform-Tools** (`adb`) | installs onto the device/emulator | `sdkmanager "platform-tools"` |
 | **`ANDROID_HOME`** | how Capacitor and Gradle find the SDK | e.g. `~/Android/Sdk` (Linux), `~/Library/Android/sdk` (macOS), `%LOCALAPPDATA%\Android\Sdk` (Windows) |
@@ -192,15 +192,52 @@ npm run build                     # Bun bundles src/ -> www/dist/app.js
 npx cap add android               # generates android/ (gitignored: it IS a build artefact)
 
 cp -r android-src/java/* android/app/src/main/java/
-# merge android-src/AndroidManifest-additions.xml into
-# android/app/src/main/AndroidManifest.xml (every block is annotated)
-# and add the two libraries below to android/app/build.gradle
+rm android/app/src/main/java/io/koryphaios/parastates/MainActivity.java
+
+# then the four edits inside android/ described below:
+#   1. the Kotlin plugin        (android/build.gradle + android/app/build.gradle)
+#   2. minSdkVersion = 29       (android/variables.gradle)
+#   3. the two libraries        (android/app/build.gradle)
+#   4. the manifest merge       (android/app/src/main/AndroidManifest.xml)
 
 npx cap sync
-npx cap run android               # builds, installs and launches on the selected target
+npx cap run android --target <id>  # builds, installs and launches
 ```
 
-**The two Gradle dependencies are not optional.** Capacitor brings
+Every edit below lands in `android/`, which is generated and gitignored (§5.3):
+they are lost on the next `cap add android` and have to be redone from here.
+All four were established by an actual build, not by reading.
+
+**1. The Kotlin plugin.** The project Capacitor generates is **Java-only**,
+while all of `android-src/` is Kotlin. Without this, the `.kt` files are copied
+in and simply never compiled — and the app builds "successfully" without a
+single one of its native capabilities. In `android/build.gradle`, next to the
+AGP classpath:
+
+```gradle
+classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.20'
+```
+
+and at the top of `android/app/build.gradle`:
+
+```gradle
+apply plugin: 'org.jetbrains.kotlin.android'
+```
+
+`cap add android` also generates its own `MainActivity.java` in the same
+package as the `MainActivity.kt` you copy in. Two classes, one name: Kotlin
+fails with `Redeclaration`. Delete the generated `.java`, as the `rm` above
+does — the `.kt` is the real one, with the biometric gate and `FLAG_SECURE`.
+
+**2. `minSdkVersion = 29`,** raised from the 24 Capacitor 8 defaults to, in
+`android/variables.gradle`. `@capacitor/barcode-scanner` 3.1.0 pulls
+`io.ionic.libs:ionbarcode-android`, whose own floor is 26 and would already
+refuse a lower manifest merge, but that is not why the floor sits at 29:
+`CompanionWebView`'s certificate pinning calls
+`SslCertificate.getX509Certificate()`, API 29+. 29 is the project's real floor
+for as long as certificate pinning is a feature.
+
+**3. The two Gradle dependencies are not optional.** Capacitor brings
 `androidx.core` and neither of these, so a build without them fails on
 unresolved references — in `android/app/build.gradle`:
 
@@ -210,13 +247,21 @@ dependencies {
     implementation "androidx.biometric:biometric:1.1.0"
     // CompanionWebView: addDocumentStartJavaScript, the only API that
     // guarantees the resume credential is in place before the page's script.
-    implementation "androidx.webkit:webkit:1.11.0"
+    // Capacitor 8 already pins a webkit version in variables.gradle; reuse it
+    // rather than hardcoding a second, older one next to it.
+    implementation "androidx.webkit:webkit:$androidxWebkitVersion"
 }
 ```
 
-Both pins were chosen under Capacitor 6 / compileSdk 34 and have **not** been
-revalidated under compileSdk 36; they are the first suspects if the first real
-build fails on an `androidx` signature.
+Both resolved and compiled under compileSdk 36: `biometric` at the pinned
+1.1.0, `webkit` at the 1.14.0 `androidxWebkitVersion` carries.
+
+**4. The manifest merge**: every block of
+`android-src/AndroidManifest-additions.xml` into
+`android/app/src/main/AndroidManifest.xml`. The `<service>`, `<receiver>` and
+`<activity>` go inside the existing `<application>`; the permissions at
+manifest level, before `<application>`. `INTERNET` is already there — do not
+add it twice.
 
 ### 5.3 Why `android/` is copied into rather than committed
 
@@ -239,6 +284,11 @@ cd desktop/mobile-shell && npm run build                 # proves the bundle bui
 
 What this does **not** cover is every line of `android-src/`. The first real
 build is where an `androidx` signature change or a missing dependency shows up;
+it is also where a plain Kotlin error does. That build has now been run once,
+and it found one: `CompanionWebView.kt` declared **two** `companion object` in
+the same class, which Kotlin forbids and which no amount of reading had caught
+in months. Treat a green TypeScript suite as saying nothing at all about the
+Kotlin;
 `BACKLOG.md` §3.2 lists what to expect and the field checks that need a phone.
 
 ### 5.5 A shareable APK

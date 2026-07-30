@@ -43,6 +43,9 @@ import java.security.MessageDigest
 class CompanionWebView : Activity() {
 
     companion object {
+        /** Mirrors COMPANION_CRED_STORAGE_KEY in desktop/src/shared/companion.ts. */
+        private const val CRED_KEY = "companion-cred"
+
         fun open(ctx: Context, url: String, fingerprint: String, seedScript: String) {
             ctx.startActivity(
                 Intent(ctx, CompanionWebView::class.java)
@@ -68,9 +71,10 @@ class CompanionWebView : Activity() {
         web.settings.domStorageEnabled = true
         web.webViewClient = object : WebViewClient() {
 
-            // API 24+ overload. Capacitor's floor is 22, so on 22–23 this is
-            // never called and the origin check in `onPageStarted` is what
-            // stops the credential following a navigation off the host.
+            // API 24+ overload. minSdk is 29 here, so this is always called;
+            // `onPageStarted` below still runs too and its own origin check
+            // stays in place as the seeding-path guard, not as a fallback for
+            // a floor this app no longer has.
             override fun shouldOverrideUrlLoading(
                 view: WebView,
                 request: android.webkit.WebResourceRequest
@@ -198,11 +202,7 @@ class CompanionWebView : Activity() {
     /** Flat drop box; the shell folds it into its host list on resume. */
     private fun storePendingCredential(credential: String) {
         val url = intent.getStringExtra("url").orEmpty()
-        val origin = try {
-            originOf(url)
-        } catch (_: Exception) {
-            return
-        }
+        val origin = originOf(url)
         getSharedPreferences("CapacitorStorage", Context.MODE_PRIVATE)
             .edit()
             .putString(
@@ -212,16 +212,23 @@ class CompanionWebView : Activity() {
             .apply()
     }
 
-    /** `https://host:port`, the identity the shell keys its host list on. */
+    /**
+     * `https://host:port`, the identity the shell keys its host list on.
+     *
+     * `url` can be attacker-controlled (a page's own navigation target at the
+     * ~85 call site), and `java.net.URI` throws `URISyntaxException` on a
+     * malformed one. Every caller compares the result by equality to
+     * `pinnedOrigin`, so failing closed to "" is safe everywhere: it can never
+     * match a real pinned origin.
+     */
     private fun originOf(url: String): String {
-        val parsed = java.net.URI(url)
-        val port = if (parsed.port == -1) "" else ":${parsed.port}"
-        return "${parsed.scheme}://${parsed.host}$port"
-    }
-
-    private companion object {
-        /** Mirrors COMPANION_CRED_STORAGE_KEY in desktop/src/shared/companion.ts. */
-        const val CRED_KEY = "companion-cred"
+        return try {
+            val parsed = java.net.URI(url)
+            val port = if (parsed.port == -1) "" else ":${parsed.port}"
+            "${parsed.scheme}://${parsed.host}$port"
+        } catch (_: java.net.URISyntaxException) {
+            ""
+        }
     }
 
     /**

@@ -475,16 +475,27 @@ Robustesse et exploitation :
       deux-topics côté broker, ligne « Parastatès » active dans
       l'enrôlement, redécoupage compagnon / approbation et multi-hôtes dans
       `mobile-shell/`. Validations terrain ci-dessus (§3.1 bis).
-- [ ] **MB6 — coquille Android : reste à BUILDER**. Le code natif est écrit
-      (`mobile-shell/android-src/` : service foreground `connectedDevice`,
-      actions de notification, verrou biométrique + `FLAG_SECURE`, pinning
-      cert avec write-back TOFU, gardes d'origine) mais **jamais compilé** —
-      pas de SDK dans ce conteneur, donc pas une ligne de Kotlin n'est
-      vérifiée par la machine, seulement relue.
+- [x] **MB6 — coquille Android : COMPILE** (2026-07-29, poste Windows avec SDK
+      36 + JDK 21). `assembleDebug` produit un APK debug de 55 Mo (35 Mo à un
+      `minSdk` plus bas ; AGP stocke le dex non compressé dès `minSdk` >= 28).
+      Le Kotlin d'`android-src/` est désormais vérifié par la machine, plus
+      seulement relu. Reste à valider : l'exécution sur device (§ ci-dessous).
 
-      Ce n'est pas du travail en attente, c'est un niveau de preuve différent :
-      le TypeScript est prouvé par 1043 tests, le Kotlin l'est par la lecture.
-      À quoi s'attendre au premier `npx cap run android` :
+      Ce que le premier build a effectivement trouvé, à comparer aux
+      prédictions qui suivaient :
+  - **Un vrai bug source** : `CompanionWebView.kt` déclarait **deux**
+    `companion object` dans la même classe (`open()` et `CRED_KEY`). Kotlin
+    n'en autorise qu'un. La classe n'aurait jamais pu compiler, dans aucune
+    configuration, depuis le jour où elle a été écrite. Corrigé.
+  - **Trois lacunes de `BUILDING.md` §5.2**, procédure que personne n'avait
+    exécutée de bout en bout : le projet généré est Java-only (plugin Kotlin à
+    ajouter, sinon les `.kt` ne sont jamais compilés et le build passe au vert
+    avec une app sans aucune capacité native), le `MainActivity.java` généré
+    entre en collision avec le `MainActivity.kt` copié, et `minSdk` doit
+    monter à 26 (le barcode-scanner tire `ionbarcode-android`, plancher 26).
+    Les trois sont documentées.
+
+      Prédictions d'origine, conservées pour mémoire :
   - **Dépendances Gradle** : `androidx.biometric` et `androidx.webkit` ne
     viennent pas avec Capacitor et sont à ajouter (documentées dans
     `android-src/README.md`). Omission trouvée en re-vérifiant, corrigée.
@@ -493,7 +504,7 @@ Robustesse et exploitation :
   - ~~**`shouldOverrideUrlLoading(WebView, WebResourceRequest)` est API 24+**
     alors que le plancher Capacitor est 22 : sur 22–23 c'est la garde
     d'origine de `onPageStarted` qui porte seule la protection.~~ **Résolu**
-    par le passage à Capacitor 8 : le plancher est désormais 24, donc la
+    par le passage à Capacitor 8 : le plancher est désormais 29, donc la
     garde forte s'applique sur tout le parc supporté et `onPageStarted` n'est
     plus seul nulle part. Le trou n'était pas colmaté, il était hors de
     portée.
