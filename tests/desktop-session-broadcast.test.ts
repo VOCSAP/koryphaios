@@ -74,7 +74,7 @@ function findUnbroadcastMutators(src: string, fields: string[]): string[] {
 
 // The only external reference for "how many fields toRuntime() should expose"
 // -- NOT a candidate for a derived cross-check. RuntimeState.announce is
-// assigned at session-service.ts's pty.on('exit', ...) handler but is
+// assigned in session-service.ts's pollPeerIds() (~line 1048) but is
 // deliberately internal, never returned by toRuntime(); a check like "every
 // r.<field> = must appear in toRuntime()'s return" would be red from day one.
 const KNOWN_FIELDS = ["exitCode", "expired", "needsAttention", "peerId", "pid", "rateLimited", "resumeAt", "status", "thinking"];
@@ -110,8 +110,13 @@ function assertNoUnexplainedShrinkage(fields: string[], known: string[]): void {
 
 test("toRuntime()'s renderer-visible field set matches the known RuntimeState shape", () => {
   const fields = extractRuntimeFields(readFileSync(SESSION_SERVICE_PATH, "utf-8"));
-  assertExtractorProducedFields(fields);
+  // Shrinkage guard first: on a zero-field extraction it still has a known
+  // baseline to compare against and prints the full four-cause diagnostic
+  // (shorthand keys degrade to zero too, not just a one-line collapse).
+  // assertExtractorProducedFields runs second and only matters once the
+  // baseline itself has also been emptied to 0 -- independence preserved.
   assertNoUnexplainedShrinkage(fields, KNOWN_FIELDS);
+  assertExtractorProducedFields(fields);
   // Sorted exact match, not arrayContaining: a field renamed/added/removed in
   // toRuntime() must fail this loudly so the guard's own coverage is
   // reviewed, not silently keep scanning a stale field list.
@@ -121,6 +126,7 @@ test("toRuntime()'s renderer-visible field set matches the known RuntimeState sh
 test("every Detector.on handler in session-service.ts that mutates a renderer-visible field calls this.broadcast()", () => {
   const src = readFileSync(SESSION_SERVICE_PATH, "utf-8");
   const fields = extractRuntimeFields(src);
+  assertExtractorProducedFields(fields);
   expect(findUnbroadcastMutators(src, fields)).toEqual([]);
 });
 
