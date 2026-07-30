@@ -106,6 +106,29 @@ l'opérateur sur une machine avec affichage.
       battle avec juge, picker (accordéon providers, favoris ★, détection
       CLIs), Settings > Modèles avec un endpoint Ollama/LiteLLM réel
       (découverte + inférence + clé chiffrée safeStorage + bouton ⊘).
+- [ ] **Nœuds redimensionnables + tirage de fil (vue Graphe, card `a0f2e983` /
+      `cdbf310c`)** — couvert par tests purs (`nodeW`/`nodeH`, clamp
+      `parseGraphDoc`, `findFreeSpot`) ; gestes réels à valider à l'écran :
+  - poignées de redimensionnement visibles au survol sur les bords/coins du
+    nœud, curseurs `ns/ew/nwse/nesw-resize`, snap grille, et non-régression
+    de l'ancrage des arêtes + du fan-out du moteur à une taille custom ;
+  - port de tirage de fil (survol du nœud) : glisser vers le vide ouvre le
+    formulaire de création pré-positionné, glisser vers un nœud existant crée
+    la dépendance (refus de cycle affiché), sans déclencher le drag du nœud
+    sous-jacent.
+- [ ] **Battle -- troncature du prompt sur Windows (fix argv, card
+      `07dc42c0`)** — root cause confirmée et test de régression bun en place
+      (`buildAdapterCommand` ne porte plus de texte opérateur sur argv,
+      `session-command`/`session-service` pour le prompt de tuile fraîche).
+      Reste l'E2E manuel Windows (PowerShell legacy) :
+  - un prompt battle/graphe contenant guillemets doubles, guillemets simples
+    et sauts de ligne doit arriver complet au modèle (plus de troncature au
+    premier `"` non apparié) ;
+  - même vérification pour le prompt initial d'une tuile fraîche (frappé en
+    PTY via bracketed-paste) : le texte arrive complet ET la saisie reste
+    utilisable ensuite dans la tuile ;
+  - vérifier `utility-inference.ts` (question du help « ? » et du wand
+    roadmap) et `demo-driver.ts` (scénario REC) avec un texte contenant `"`.
 - [ ] **Auto-ack de l'avertissement dev-channels (session 2026-07-24, issue
       anthropics/claude-code#42486)** — logique testée
       (`desktop-startup-ack.test.ts` : détection deux-cues, frontières de chunk,
@@ -198,6 +221,32 @@ l'opérateur sur une machine avec affichage.
   - Filtre "kind" du kanban : la lane doit continuer à voir/réordonner la
     file complète (non filtrée) — vérifier qu'aucun item n'est perdu au
     reorder pendant qu'un filtre est actif.
+  - **Poignée de redimensionnement vertical** (bord haut, curseur
+    `ns-resize`, card `14f14ce1`) : tirer vers le haut agrandit la lane,
+    hauteur persistée puis clampée correctement à la restauration, poignée
+    absente en plein écran et replié.
+  - **Bouton « Nettoyer »** (card `204ff198`) : désactivé quand la file est
+    vide, confirmation `ConfirmDialog` dont le libellé dit explicitement
+    qu'aucun item roadmap n'est supprimé (retour au kanban) et que les têtes
+    verrouillées `in_progress` restent affichées.
+  - **Éditeur de dépendances dans le modal de détail** (card `93c0f1cc`) :
+    titres cliquables, croix de retrait, picker d'ajout filtré (pas soi-même,
+    pas done/archived, cycle refusé) ; et **fermeture transitive à
+    l'enqueue** : déposer une carte à dépendances dans la lane (ou la
+    "envoyer en file" depuis le modal) doit amener toute sa chaîne
+    `depends_on` avec elle, dans le bon ordre.
+  - **Vagues de queue / parallélisme sans dépendance partagée** (card
+    `42edc88b`) : empiler sur une cible sans dépendance ne doit plus jamais
+    refuser le geste (dégrade en insertion simple, plus de toast
+    `roadmap.wf.stackNone`) ; les cartes de même rang doivent apparaître
+    comme une colonne (vague) de la lane, une arête intra-vague ou vers une
+    vague antérieure doit s'afficher en violation, et l'auto-dispatch ne doit
+    faire partir la vague suivante que si ses dépendances sont satisfaites.
+  - **Multi-dispatch d'une vague entière au team-lead** (card `5852c074`) :
+    bouton dédié qui envoie tous les ids de la première vague en un seul
+    announce, dé-queue groupé, et vérifier que le spawn d'un agent
+    supplémentaire décidé par le lead passe bien par une confirmation
+    opérateur.
 - [ ] **Cartes directives (CT, branche `claude/context-token-optimization-4n7aqh`)**
       — logique couverte par tests purs (broker directive, `directive.ts`,
       `resolveFeatures`, parsing magic-compact) + typecheck ; l'injection PTY et

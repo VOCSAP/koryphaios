@@ -1,5 +1,69 @@
 # Changelog
 
+## desktop (experimental) — graph-view geometry, workflow-lane parallelism, and the argv-truncation bug
+
+Four operator requests on the Graph view and the Workflow lane, all shipped:
+
+- **Nav rail order** -- Roadmap now sits between Home and Agents, Graph right
+  after Agents and above Browser (`NavRail.tsx`'s `VIEWS` table); the mobile
+  tab order (`mobile-views.ts`) follows the same key order.
+- **Resizable graph nodes** -- `GraphNode` gained optional `w`/`h` (default =
+  the existing `GRAPH_NODE_W`/`GRAPH_NODE_H` constants, so old docs render
+  unchanged); every site that used to read the constants directly now goes
+  through `nodeW(n)`/`nodeH(n)` (rendering, edge anchors, `fitView`,
+  `findFreeSpot`'s overlap check, the engine's fan-out placement). Standard
+  edge/corner handles, visible on hover, extend the existing drag state
+  machine with a `resize` kind instead of relying on native CSS `resize`
+  (which does not survive the canvas's `transform: scale(zoom)`).
+- **Wire-drag to connect** -- a small port on each node, drag to an empty
+  spot opens a pre-wired create-form at that point, drag onto another node
+  adds a `depends_on` link (cycle-checked, same guard the "Accrocher" button
+  already used). Pure renderer change; the connect button stays alongside it.
+- **Battle prompt truncation on Windows (argv, card `07dc42c0`)** -- root
+  cause: the operator's prompt text rode the command line
+  (`claude -p <prompt>`); legacy PowerShell rebuilds that command line for
+  the native binary without re-escaping embedded `"`, so
+  `CommandLineToArgvW` re-parses one of the prompt's own quotes as an
+  argument delimiter and truncates everything after it -- invisible in the
+  inspector, which shows the (correct) file side of the request. Fixed by
+  moving the prompt off argv entirely onto stdin/file, the same path already
+  used for context (`model-adapters.ts`, `utility-inference.ts`,
+  `demo-driver.ts`); the silent 8000-character prompt cap on that path is
+  gone with it. The fresh-tile initial prompt (`session-command.ts`, a PTY
+  path, not a spawned subprocess) got its own follow-up fix: typed as
+  bracketed-paste keystrokes once the tile's startup-ack fires, instead of
+  composed on argv.
+
+The Workflow lane picked up the parallel gestures it was missing:
+
+- a **vertical resize handle** on the lane's top edge (persisted height,
+  clamped, hidden in fullscreen/collapsed), imitating the scrollbar-thumb
+  pointer-capture pattern already in the same file;
+- a **"Nettoyer" button** that empties the dispatch queue in one atomic
+  `roadmap:reorder([])` call -- confirmed via `ConfirmDialog`, wording
+  explicit that it only dequeues (no roadmap item is deleted, locked
+  in-progress heads are untouched);
+- **roadmap dependencies now close transitively at enqueue time**: dropping
+  a card onto the lane (or queuing it from its detail modal) pulls its
+  `depends_on` closure in ahead of it, in topological order, in the same
+  atomic reorder -- and the detail modal's dependency badges became a real
+  editor (clickable titles, remove, cycle-checked add-picker) instead of
+  read-only 8-character ids;
+- **queue waves**: parallelism no longer requires sharing a dependency.
+  Stacking onto a target with nothing to share degrades to a plain
+  insertion instead of refusing the gesture; a full wave mechanic follows
+  (`42edc88b`, phases 1-3) letting several cards share a queue rank as a
+  lane column, with `depends_on` validating that order instead of deriving
+  it (an intra-wave or backward-wave edge shows as a violation, same red
+  edges the lane already had) and auto-dispatch honoring the wave barrier;
+- **multi-dispatch** (`5852c074`) sends a whole head wave to the team-lead
+  in one announce instead of one card at a time, the lead already knowing
+  how to read (`roadmap_get`) and delegate (`send_message`) each id.
+
+Full exploit-chain detail and the design alternatives considered for the
+argv fix live in git history; the one residual (manual Windows end-to-end
+confirmation) is tracked in `BACKLOG.md`.
+
 ## mobile-shell — Parastatès moves to Capacitor 8, and its QR scanner is wired to a plugin that exists
 
 `desktop/mobile-shell` could not be installed. `package.json` asked for

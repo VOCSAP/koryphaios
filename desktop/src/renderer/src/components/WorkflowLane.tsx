@@ -336,9 +336,8 @@ export function WorkflowLane({
     if (!deps) {
       // Target has no dependencies to share, so there is nothing to stack
       // against -- degrade to a plain insertion right after the target
-      // instead of refusing the gesture (AUDIT-graph-view-2026-07-28.md §8,
-      // step 1), mirroring where the sibling path lands a newly-queued card
-      // (RoadmapView.stackItem inserts at `at + 1`).
+      // instead of refusing the gesture, mirroring where the sibling path
+      // lands a newly-queued card (RoadmapView.stackItem inserts at `at + 1`).
       const targetSlot = laneIds.indexOf(targetId)
       if (targetSlot >= 0) {
         commitDrop(id, targetSlot + 1)
