@@ -230,6 +230,7 @@ export class SessionService extends EventEmitter {
       if (!r) return
       r.thinking = busy
       this.emit('thinking', { id, busy })
+      this.broadcast()
     })
 
     // Quota episodes (ipc -> session:quota). The detector observes/schedules;

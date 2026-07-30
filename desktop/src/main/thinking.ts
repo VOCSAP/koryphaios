@@ -15,7 +15,7 @@ export interface ThinkingEvent {
 // Strip ANSI CSI escape sequences (colours, cursor moves) so a marker wrapped
 // in colour codes still matches. Only touches ESC-introduced sequences.
 // eslint-disable-next-line no-control-regex
-const ANSI_RE = /\[[0-9;?]*[ -\/]*[@-~]/g
+const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g
 function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '')
 }
