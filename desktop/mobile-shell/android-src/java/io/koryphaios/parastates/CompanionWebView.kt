@@ -224,10 +224,12 @@ class CompanionWebView : Activity() {
      * `https://host:port`, the identity the shell keys its host list on.
      *
      * `url` can be attacker-controlled (a page's own navigation target at the
-     * ~85 call site), and `java.net.URI` throws `URISyntaxException` on a
-     * malformed one. Every caller compares the result by equality to
-     * `pinnedOrigin`, so failing closed to "" is safe everywhere: it can never
-     * match a real pinned origin.
+     * ~94 call site), and `java.net.URI` throws `URISyntaxException` on a
+     * malformed one, which this fails closed to "". That sentinel is safe
+     * because `pinnedOrigin` itself can never be empty past `onCreate`: the
+     * `pinnedOrigin.isEmpty()` guard right after it is first assigned returns
+     * `finish()` before anything else runs, so a `""` from this function can
+     * never equal `pinnedOrigin` at any later call site.
      */
     private fun originOf(url: String): String {
         return try {
