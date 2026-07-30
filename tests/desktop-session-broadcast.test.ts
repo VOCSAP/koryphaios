@@ -72,14 +72,50 @@ function findUnbroadcastMutators(src: string, fields: string[]): string[] {
     .map((h) => h.header);
 }
 
+// The only external reference for "how many fields toRuntime() should expose"
+// -- NOT a candidate for a derived cross-check. RuntimeState.announce is
+// assigned at session-service.ts's pty.on('exit', ...) handler but is
+// deliberately internal, never returned by toRuntime(); a check like "every
+// r.<field> = must appear in toRuntime()'s return" would be red from day one.
+const KNOWN_FIELDS = ["exitCode", "expired", "needsAttention", "peerId", "pid", "rateLimited", "resumeAt", "status", "thinking"];
+
+// Independent of KNOWN_FIELDS on purpose: a hostile or careless edit that
+// widens the baseline list to match a broken extractor's output (the thing
+// this whole guard exists to catch) cannot silence this one, since it never
+// reads the baseline at all.
+function assertExtractorProducedFields(fields: string[]): void {
+  if (fields.length > 0) return;
+  throw new Error(
+    "extractRuntimeFields() found zero fields -- the extractor is broken, not toRuntime() itself. " +
+      "Most likely cause: the return object literal collapsed onto a single line."
+  );
+}
+
+// A count below the known baseline is ambiguous by construction: it means
+// EITHER the extractor degraded (partial match) OR a field was legitimately
+// removed from toRuntime(). This can't tell which -- but naming both readings
+// in the message, instead of asserting the extractor is at fault, is what
+// keeps a legitimate removal from sending its author chasing a parsing bug
+// that doesn't exist.
+function assertNoUnexplainedShrinkage(fields: string[], known: string[]): void {
+  if (fields.length >= known.length) return;
+  throw new Error(
+    `extractRuntimeFields() found only ${fields.length} field(s) (${JSON.stringify(fields)}), fewer than the ` +
+      `known ${known.length} (${JSON.stringify(known)}). EITHER the extractor degraded -- known causes: the ` +
+      "return object literal collapsed onto one line, shorthand keys (`{ thinking, expired }`), quoted keys " +
+      '(`"thinking":`), or computed keys (`[key]:`) -- OR a field was deliberately removed from toRuntime(), in ' +
+      "which case updating KNOWN_FIELDS below is the right move. Check which one happened before touching anything."
+  );
+}
+
 test("toRuntime()'s renderer-visible field set matches the known RuntimeState shape", () => {
   const fields = extractRuntimeFields(readFileSync(SESSION_SERVICE_PATH, "utf-8"));
+  assertExtractorProducedFields(fields);
+  assertNoUnexplainedShrinkage(fields, KNOWN_FIELDS);
   // Sorted exact match, not arrayContaining: a field renamed/added/removed in
   // toRuntime() must fail this loudly so the guard's own coverage is
   // reviewed, not silently keep scanning a stale field list.
-  expect(fields.sort()).toEqual(
-    ["exitCode", "expired", "needsAttention", "peerId", "pid", "rateLimited", "resumeAt", "status", "thinking"].sort()
-  );
+  expect(fields.sort()).toEqual([...KNOWN_FIELDS].sort());
 });
 
 test("every Detector.on handler in session-service.ts that mutates a renderer-visible field calls this.broadcast()", () => {
@@ -125,4 +161,27 @@ test("the guard does not flag a handler that mutates a guarded field and also br
     })
   `;
   expect(findUnbroadcastMutators(src, FIXTURE_FIELDS)).toEqual([]);
+});
+
+// ----- proof the two shrink guards are load-bearing, and independent -----
+
+test("the zero-fields guard fires on an empty extraction", () => {
+  expect(() => assertExtractorProducedFields([])).toThrow(/found zero fields/);
+});
+
+test("the zero-fields guard cannot be silenced by also shrinking the known baseline", () => {
+  // The failure mode this guard exists for: a broken extractor AND a
+  // baseline edited down to match it. assertNoUnexplainedShrinkage alone
+  // would pass here (0 >= 0) -- assertExtractorProducedFields still fires
+  // because it never reads the baseline at all.
+  expect(() => assertNoUnexplainedShrinkage([], [])).not.toThrow();
+  expect(() => assertExtractorProducedFields([])).toThrow(/found zero fields/);
+});
+
+test("the shrink guard fires when the extractor returns fewer fields than the known baseline", () => {
+  expect(() => assertNoUnexplainedShrinkage(["status", "thinking"], KNOWN_FIELDS)).toThrow(/fewer than the known/);
+});
+
+test("the shrink guard does not fire on growth or a rename (count at or above baseline)", () => {
+  expect(() => assertNoUnexplainedShrinkage([...KNOWN_FIELDS, "newField"], KNOWN_FIELDS)).not.toThrow();
 });
