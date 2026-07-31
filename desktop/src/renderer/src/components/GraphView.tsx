@@ -626,7 +626,7 @@ export function GraphView(): React.JSX.Element {
             />
             <span className="graph-node-count">{g.nodes.length}</span>
             <button
-              className="icon-btn"
+              className="icon-btn danger"
               title={t('common.delete')}
               onClick={(e) => {
                 e.stopPropagation()

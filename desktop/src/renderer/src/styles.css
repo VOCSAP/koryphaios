@@ -1134,8 +1134,24 @@ textarea:disabled {
   cursor: pointer;
 }
 
-.icon-btn:hover {
+.icon-btn:hover:not(:disabled) {
   background: var(--bg);
+}
+
+/* Destructive icon button (DESIGN.md §2/§3): the icon twin of .btn.danger, same
+   red-text + red-mixed-border recipe, for a delete glyph sitting inside a
+   row/list. Red must read AT REST — a trash that only turns red on hover is
+   indistinguishable from the neutral actions beside it. Only colour and
+   border-color are set: re-declaring `background` would drop the archetype's
+   themed --bg-3 fill and its .icon-btn:hover swap. */
+.icon-btn.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+}
+
+.icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 /* ---------- Modal ---------- */
@@ -1161,6 +1177,33 @@ textarea:disabled {
 
 .modal h2 {
   margin: 0 0 16px;
+}
+
+/* Generic modal header row — the recipe .rm-detail-head and .usage-head already
+   spell out, hoisted here so a dialog that just writes <header class="modal-head">
+   gets it. Without a rule, <header> stacks its children as blocks: the title eats
+   the full width and the close glyph drops UNDER it, left-aligned (what happened
+   to the companion dialog, whose .modal-head matched no selector at all). The
+   title takes the free space, so trailing icon buttons land flush against the
+   modal's own 20px padding — no margin-left:auto, no magic offset.
+   The h2 rule must stay AFTER `.modal h2` above: same specificity, source order
+   is what lets it drop the 16px bottom margin the flex row now carries. */
+.modal-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+/* Covers h2 and h3: a dialog copying a twin's h3 markup (like
+   .rm-detail-head/.usage-head above) would otherwise get a flex row whose
+   title has no flex: 1, so the close cross sits glued to the title instead
+   of flush right -- the exact defect this rule exists to prevent, silently. */
+.modal-head h2,
+.modal-head h3 {
+  flex: 1;
+  margin: 0;
+  font-size: 15px;
 }
 
 .field {

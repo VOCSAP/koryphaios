@@ -99,7 +99,8 @@ it in a container whose stylesheet rule styles descendant buttons (e.g.
 | Restore | `.btn-restore` (or legacy `.restore-prev`, `.btn-apply`) | filled `#e08a3c`, white text | restoration actions |
 | Danger (confirm) | `.primary.danger`, `.ws-btn-danger` | filled `--danger`, white text | the confirming button of a destructive dialog |
 | Danger (outline) | `.btn.danger` (scoped variants: `.wt-actions .danger`, `.rm-detail-actions .danger`) | secondary base, red text + red-mixed border | destructive action inside a row/list |
-| Ghost | `.tile-btn`, `.row-btn`, `.mode-btn`, `.icon-btn`, `.context-menu-item`, `.settings-tree-item` | transparent (or `--bg-3` for `.icon-btn`), `--fg-dim`, hover reveals | icon buttons, per-row hover actions, menus |
+| Danger (icon) | `.icon-btn.danger` | `.icon-btn` base, same red text + red-mixed border as `.btn.danger` | a delete/trash GLYPH in a row (graph list…) — red at rest, a hover-only red reads as neutral |
+| Ghost | `.tile-btn`, `.row-btn`, `.mode-btn`, `.icon-btn`, `.context-menu-item`, `.settings-tree-item` | transparent (or `--bg-3` for `.icon-btn`), `--fg`, hover reveals | icon buttons, per-row hover actions, menus |
 | Chip | `.chip` | `--bg-3`, border, radius 12, padding 3px 10px, font 12 | preset/token pickers |
 
 State rules (apply to every archetype):
@@ -128,7 +129,12 @@ State rules (apply to every archetype):
 - **Modals**: `.modal-backdrop` (45% black) + `.modal` (`--bg-2`, radius 8,
   padding 20). Footer = `.modal-actions` right-aligned; its non-`.primary`
   buttons are auto-styled as Secondary — order: neutral Cancel left, coloured
-  action right. Popovers (`.popover`) are the 420px variant.
+  action right. Popovers (`.popover`) are the 420px variant. Header =
+  `.modal-head` (flex row, gap 8, `h2` 15px `flex: 1`), which pushes trailing
+  icon buttons — the close cross — flush against the modal's own 20px padding.
+  Per-modal twins exist (`.rm-detail-head`, `.usage-head`); a new dialog should
+  take `.modal-head` rather than mint a third. Never align that cross with a
+  `margin-left: auto` or an offset: the title's `flex: 1` is the mechanism.
 - **Empty states**: centered `.empty-card` (`--bg-2`, border, radius 8) with
   `h2` + dim paragraph + `.empty-actions` row.
 - **Inputs**: `--bg` fill, 1px `--border`, radius 4–6, padding 6px 8px,

@@ -106,7 +106,7 @@ export function CompanionDialog(): React.JSX.Element {
       <div className="modal companion-modal" onMouseDown={(e) => e.stopPropagation()}>
         <header className="modal-head">
           <h2>{GLYPHS.companion} {t('companion.title')}</h2>
-          <button className="icon-btn" onClick={() => openCompanion(false)}>
+          <button className="icon-btn" title={t('common.close')} onClick={() => openCompanion(false)}>
             {GLYPH_ACTIONS.close}
           </button>
         </header>

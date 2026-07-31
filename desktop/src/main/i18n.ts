@@ -639,7 +639,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'roadmap.level.low': 'low',
   'roadmap.level.medium': 'medium',
   'roadmap.level.high': 'high',
-  'roadmap.status.idea': 'idea',
+  'roadmap.status.idea': 'backlog',
   'roadmap.status.planned': 'planned',
   'roadmap.status.in_progress': 'in progress',
   'roadmap.status.done': 'done',

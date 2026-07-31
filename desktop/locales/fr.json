@@ -465,7 +465,7 @@
   "roadmap.level.low": "faible",
   "roadmap.level.medium": "moyen",
   "roadmap.level.high": "fort",
-  "roadmap.status.idea": "idée",
+  "roadmap.status.idea": "backlog",
   "roadmap.status.planned": "planifié",
   "roadmap.status.in_progress": "en cours",
   "roadmap.status.done": "terminé",
