@@ -93,8 +93,12 @@ to render a real `desktop/src/renderer` component imports react / react-dom
 / zustand ONLY through `desktop/tests-support/react-test-harness.ts` (a
 relative import, physically inside `desktop/`, so its own bare imports walk
 up to whichever `node_modules` is nearest — the same one the component
-resolves against, in every environment). A dedicated hygiene check under
-`tests/` enforces this on every file in the directory.
+resolves against, in every environment). `tests/desktop-test-hygiene.test.ts`
+scans every `.ts`/`.tsx` file under `tests/` for a quoted `react` /
+`react-dom` / `zustand` reference (matching the specifier itself, not one
+particular import syntax shape -- the template-literal variant is
+call-syntax anchored, see that test file for its documented gaps), no
+exemptions.
 
 This is a fail-open-in-reverse trap, not just a style rule: locally, root
 and `desktop/` both have react installed (root as a CI fallback — see
