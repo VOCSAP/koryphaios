@@ -31,6 +31,7 @@ of the question.
 | [sandbox.md](sandbox.md) | Sandbox mode: sessions in a persistent per-project Docker/Podman container, first-run login, the Docker rail view |
 | [settings.md](settings.md) | Every configurable option: the Settings page, config files, launch configuration, data locations |
 | [faq.md](faq.md) | Troubleshooting and frequently asked questions |
+| [streamdeck.md](streamdeck.md) | Stream Deck + integration: not shipped, an intention sketch (bridge design, key list, security note). Read before picking up any `#streamdeck` roadmap card, not as a description of a current feature |
 
 ## Conventions used in these pages
 
