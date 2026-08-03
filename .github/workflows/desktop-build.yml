@@ -87,6 +87,17 @@ jobs:
         # the strict rebuild below is the real ABI gate.
         run: npm install
 
+      # tsconfig.node.json / tsconfig.web.json (main + preload + renderer)
+      # were never type-checked in CI: electron.vite.config.ts has no checker
+      # plugin, so `electron-vite build` below does not catch a type error.
+      # `tsc` only needs desktop/node_modules (just installed above), not the
+      # rebuilt native node-pty binding, so this runs BEFORE the node-pty
+      # rebuild and the build step -- the two slowest steps in this job -- so
+      # a type error actually fails fast instead of waiting behind them.
+      - name: Typecheck desktop (node + web)
+        working-directory: desktop
+        run: npm run typecheck
+
       # Rebuild node-pty against Electron's V8/ABI. Fails loudly if the runner
       # lacks the toolchain -- that is the breakage this workflow exists to
       # catch. Windows additionally needs the MSVC Spectre-mitigated libs,

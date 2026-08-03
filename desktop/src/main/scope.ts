@@ -12,7 +12,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, mkdtempSync, openSync, rmSync, writeSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { join } from 'node:path'
 
 export type ScopeKind = 'custom' | 'ephemeral'
 

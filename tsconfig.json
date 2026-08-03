@@ -25,5 +25,15 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
-  }
+  },
+  // No include/exclude means this config would otherwise nominally cover
+  // desktop/** too, which has its own tsconfig.node.json/tsconfig.web.json
+  // (noUnusedLocals/noUnusedParameters: true) -- this removes desktop from
+  // the include glob. It does NOT zero out desktop's presence in the
+  // program: `exclude` never drops a file that's IMPORTED rather than
+  // globbed in, and tests/*.test.ts imports
+  // desktop/tests-support/react-test-harness.ts, so that file (and whatever
+  // it pulls in) still joins the program. Measured: with this exclude,
+  // desktop file count in the root program goes 193 -> 103, not to 0.
+  "exclude": ["desktop"]
 }

@@ -23,10 +23,8 @@ import {
   WF_FIT_FLOOR,
   WF_NODE_H,
   WF_NODE_W,
-  WF_PITCH_X,
   WF_ZOOM_MAX,
   WF_ZOOM_MIN,
-  type SlotHit,
   type StackHit
 } from '@shared/workflow'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
@@ -273,8 +271,8 @@ export function WorkflowLane({
   }
 
   /**
-   * `joinAnchorId` (from SlotHit.join, resolved to a wave member via
-   * joinAnchorAt) ties `id` into that member's existing wave instead of
+   * `joinAnchorId` (from shared/workflow.ts SlotHit.join, resolved to a wave
+   * member via joinAnchorAt) ties `id` into that member's existing wave instead of
    * giving it its own. Null when the drop lands in a gap (new wave) --
    * that is also the default for every non-drag caller (commitStack's
    * degrade path), which has no join position to honor.
