@@ -49,9 +49,20 @@ jobs:
         with:
           node-version: '20'
 
+      # Root install: most of these suites still import with node builtins
+      # only, but a renderer test harness (happy-dom + React) now also lives
+      # under tests/desktop-*.test.ts, and its deps (@happy-dom/global-registrator,
+      # react, react-dom, zustand) are declared in the root package.json. This
+      # does not pull in node-pty or electron -- neither is a root dependency --
+      # so the ABI rebuild below stays the only native-toolchain gate in this job.
+      - name: Bun install (root)
+        shell: bash
+        run: bun install
+
       # Pure modules (desktop main-process helpers, the notify channels and
-      # their wire format, the mobile shell's decision logic) import under bun
-      # with node builtins only -- no node-pty / electron, no install needed.
+      # their wire format, the mobile shell's decision logic, and now a
+      # happy-dom/React renderer harness) import under bun -- no node-pty /
+      # electron among the root deps, so no native toolchain is needed here.
       #
       # The globs are listed rather than replaced by `bun test`: the broker
       # integration suites spawn a daemon and bind ports, which is not what this

@@ -80,6 +80,44 @@ to notice. Verify collection by running the CI glob itself, not by running
 `bun test` and counting the files it picked up. Precedent: a guard shipped in
 `desktop/src/main/` passed locally and was never executed by CI.
 
+**0b. `tests/` files that need react/react-dom/zustand: go through the
+desktop bridge, never a bare import.** The repo root and `desktop/` are two
+separate npm trees with no workspaces field, each with their own
+`node_modules`. A root-level `tests/*.test.ts` file doing `import 'react'`
+directly resolves against the ROOT's copy; `desktop/src/**` components
+resolve against `desktop/node_modules`'s copy. Mixing the two inside one
+test throws `Invalid hook call... You might have more than one copy of
+React in the same app` the moment a component from `desktop/src` renders
+under a `createRoot`/`act` sourced from the other copy. Any test that needs
+to render a real `desktop/src/renderer` component imports react / react-dom
+/ zustand ONLY through `desktop/tests-support/react-test-harness.ts` (a
+relative import, physically inside `desktop/`, so its own bare imports walk
+up to whichever `node_modules` is nearest — the same one the component
+resolves against, in every environment). A dedicated hygiene check under
+`tests/` enforces this on every file in the directory.
+
+This is a fail-open-in-reverse trap, not just a style rule: locally, root
+and `desktop/` both have react installed (root as a CI fallback — see
+below), and they simply never collide as long as nothing under `tests/`
+imports them directly. The day someone adds that bare import, it breaks
+LOUDLY in local dev ("more than one copy of React") while CI — which never
+has two copies in the first place, since `desktop/node_modules` doesn't
+exist yet at that point in the workflow (see next paragraph) — stays GREEN.
+The signal shows up exactly where nobody is looking and disappears exactly
+where the decision gets made. Don't "fix" a red local run here by removing
+the offending file's real diagnosis; go back to the bridge.
+
+Root also carries `react`, `react-dom` and `zustand` as devDependencies even
+though nothing at the repo root imports them directly — do not delete them
+as dead weight. The CI step `bun test tests/desktop-*...` runs at the repo
+root right after a root `bun install`, but BEFORE `desktop/`'s own `npm
+install`, so `desktop/node_modules` does not exist yet on that runner.
+`TileArea.tsx` (and any other `desktop/src` component under test) does its
+own bare `import 'react'`, unmodified — without a root copy, THAT import
+fails to resolve in CI, before any test code runs. Two environments, two
+different "nearest `node_modules`", same bridge-file convergence logic; see
+the bridge file's own header comment for the full mechanism.
+
 **1. Paths.** macOS tmpdirs are symlinked (`/var` → `/private/var`) and Windows
 hands back 8.3 short names; Linux tmpdirs are neither, so any path-comparison
 bug is invisible locally. Don't settle for a test that only fails on the other
