@@ -27,9 +27,12 @@ export interface SandboxProjectSettings {
   /** Dev-server ports published at container create (rebuild to apply changes). */
   ports: number[]
   /**
-   * Globs of GITIGNORED files copied on top of the clone in `copy` mode
-   * (planning notes, local fixtures). A hard deny-list (sandbox-copy.ts)
-   * always wins: secrets and dependency dirs are never duplicated.
+   * Globs of project files copied on top of the clone in `copy` mode
+   * (planning notes, local fixtures). NOT gitignore-aware: the candidate set
+   * is the whole tree minus SKIP_DIRS (sandbox-copy.ts), so a tracked file
+   * matching a glob is re-copied over the clone that already holds it.
+   * A hard deny-list is applied last and beats any glob, but it is a
+   * DENY-list: it stops known secret shapes, it cannot promise completeness.
    */
   copyIgnored: string[]
   /**
