@@ -70,46 +70,43 @@ urgency.
      happens: the MCP server advertises the tool unconditionally, but a
      session's actual tool set is filtered by its own invocation, independent
      of what the server offers) or the call errors as unavailable: use
-     `POST /roadmap/upsert` on the broker directly, over Bash.
-     - Broker URL: env `CLAUDE_PEERS_BROKER_URL`, else the `broker_url` key in
-       the `claude-peers` config file (`%APPDATA%\claude-peers\config.json` on
-       Windows, `$XDG_CONFIG_HOME/claude-peers/config.json` or
-       `~/.config/claude-peers/config.json` otherwise), else
-       `http://127.0.0.1:<port>` (env `CLAUDE_PEERS_PORT`, config `port`, or
-       default `7899`).
-     - Auth: if env `CLAUDE_PEERS_BROKER_TOKEN` (or the config file's
-       `broker_token`) is set, send `Authorization: Bearer <token>`. Never
-       print the token; only interpolate it straight into the header.
+     `bun cli.ts roadmap-add --input <payload.json>` from the claude-peers
+     repo root, over Bash. The CLI resolves the broker URL and the broker's
+     secret internally, the same way every other `cli.ts` command does --
+     never source that secret or the broker URL yourself, and never
+     construct the HTTP request or a secret-bearing header by hand. Unlike
+     the MCP tool, this verb cannot infer `project_key`/`by` from a live
+     session, so
+     both are required fields in the payload you write.
      - `by`: call `mcp__claude-peers__whoami` for your own peer_id if that
        tool is available; otherwise use a plainly-labelled fallback like
        `"<role>-unregistered"` -- never fabricate a peer_id that looks like a
        real registered one.
-     - Body (create -- omit `id`):
+     - Write the payload to a temp file, then invoke the verb:
        ```bash
-       curl -sS -X POST "$BROKER_URL/roadmap/upsert" \
-         -H "Content-Type: application/json" \
-         -H "Authorization: Bearer $CLAUDE_PEERS_BROKER_TOKEN" \
-         -d '{
-               "project_key": "github.com/OWNER/REPO",
-               "by": "your-peer-id-or-fallback",
-               "title": "...",
-               "kind": "feature|bug|debt|idea|chore",
-               "description": "...",
-               "rationale": "...",
-               "context": "...",
-               "priority": "must|should|could|wont",
-               "value": "low|medium|high",
-               "effort": "low|medium|high",
-               "status": "idea|planned|in_progress|done",
-               "tags": ["..."],
-               "depends_on": ["..."]
-             }'
+       cat > /tmp/roadmap-card.json << 'EOF'
+       {
+         "project_key": "github.com/OWNER/REPO",
+         "by": "your-peer-id-or-fallback",
+         "title": "...",
+         "kind": "feature|bug|debt|idea|chore",
+         "description": "...",
+         "rationale": "...",
+         "context": "...",
+         "priority": "must|should|could|wont",
+         "value": "low|medium|high",
+         "effort": "low|medium|high",
+         "status": "idea|planned|in_progress|done",
+         "tags": ["..."],
+         "depends_on": ["..."]
+       }
+       EOF
+       bun cli.ts roadmap-add --input /tmp/roadmap-card.json
        ```
-       (Drop the `Authorization` line entirely when no token is configured --
-       an empty/garbage header is rejected the same as a wrong one.) A 200
-       response is `{"item": {...the full card, with its "id"...}}`; a 4xx is
-       `{"error": "..."}` -- report that message verbatim, do not retry
-       blindly or silently fall further back.
+       Success prints the created card's JSON (with its `id`) to stdout. A
+       failure prints `roadmap-add failed: ...` to stderr and exits non-zero
+       -- report that message verbatim, do not retry blindly or fall further
+       back.
 
 7. **Report.** Return the created (or colliding) item's id, the title, and a
    one-line echo of the fields you actually sent -- not the whole card back

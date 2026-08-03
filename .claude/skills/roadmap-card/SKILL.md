@@ -89,14 +89,17 @@ Prefer the `roadmap_add` MCP tool (it resolves the project and your author
 identity automatically). Its presence in your tool list is not guaranteed --
 the MCP server can advertise the tool while the invoking session's own tool
 allow-list omits it, independent of the server. When absent or erroring, fall
-back to `POST /roadmap/upsert` on the broker directly. Both paths, the exact
-fallback request shape (broker URL/token discovery, body, response shape),
-and the full step-by-step procedure (project_key resolution, depends_on
-lookup, reporting) are documented in the `roadmap-scribe` agent this skill
-forks into -- follow it end to end and return its result: the created (or
-colliding) item's id, its title, and a one-line echo of what was sent. If the
-write path fails outright, report the exact error rather than working around
-it.
+back to `bun cli.ts roadmap-add --input <payload.json>` (repo root of
+claude-peers) instead of a raw HTTP call: the CLI resolves the broker's
+secret internally (env or the global config file), so it never appears on
+your command line or in the session transcript. Never construct the broker
+request or a secret-bearing header yourself. The payload JSON needs `project_key`,
+`by` (your author identity) and `title` at minimum; the full step-by-step
+procedure (project_key resolution, depends_on lookup, reporting) is
+documented in the `roadmap-scribe` agent this skill forks into -- follow it
+end to end and return its result: the created (or colliding) item's id, its
+title, and a one-line echo of what was sent. If the write path fails
+outright, report the exact error rather than working around it.
 
 ## Language
 

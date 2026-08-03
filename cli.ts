@@ -4,15 +4,19 @@
  *
  * Utility commands for managing the broker and inspecting peers.
  *
- * Note: this CLI talks to the broker on 127.0.0.1:<port>. Run it on the host
- * where the broker lives. For a remote broker, use:
- *   ssh user@broker-host "cd /srv/claude-peers && bun cli.ts status"
+ * Note: talks to loopback (127.0.0.1:<port>) by default. If the global config
+ * file or CLAUDE_PEERS_BROKER_URL/CLAUDE_PEERS_BROKER_TOKEN env vars set a
+ * remote broker_url/broker_token (shared/config.ts), this CLI reaches that
+ * broker directly -- no need to run it on the broker host in that case.
  *
  * Usage:
  *   bun cli.ts status                   -- Show broker status and all peers
  *   bun cli.ts peers [--include-dormant]-- List all peers across groups
  *   bun cli.ts groups                   -- Show active peer counts per group
  *   bun cli.ts kill-broker              -- Stop the broker daemon (Linux/macOS only)
+ *   bun cli.ts roadmap-add --input <payload.json>
+ *                                       -- Create one roadmap item (token stays
+ *                                          in this process, never on argv)
  *
  * Note: 'send' is intentionally absent in v0.3 -- use the MCP send_message tool
  * from inside Claude Code. The broker requires a valid instance_token for
@@ -20,7 +24,7 @@
  */
 
 import { loadConfig, brokerUrl } from "./shared/config.ts";
-import type { Peer, GroupStatsResponse } from "./shared/types.ts";
+import type { Peer, GroupStatsResponse, RoadmapUpsertResponse } from "./shared/types.ts";
 
 const config = await loadConfig();
 const BROKER_URL = brokerUrl(config);
@@ -201,6 +205,37 @@ switch (cmd) {
     break;
   }
 
+  case "roadmap-add": {
+    // File-based by design (agent-forge --input convention), not argv: card
+    // prose is long/multi-line, and quoting it through a shell is fragile.
+    // This is the sanctioned fallback when a session's own tool-list omits
+    // the MCP roadmap_add tool (a harness-side snapshot gap, independent of
+    // the server -- see .claude/skills/roadmap-card/SKILL.md). The broker
+    // token is resolved internally by loadConfig()/authHeaders(); this verb's
+    // argv surface never carries it, so the caller never sees or types it.
+    const inputFlagIdx = flags.indexOf("--input");
+    const file = inputFlagIdx !== -1 ? flags[inputFlagIdx + 1] : undefined;
+    if (!file) {
+      console.error("Usage: bun cli.ts roadmap-add --input <payload.json>");
+      process.exit(1);
+    }
+    try {
+      const payload = JSON.parse(await Bun.file(file).text()) as Record<string, unknown>;
+      for (const field of ["project_key", "by", "title"] as const) {
+        if (!payload[field] || typeof payload[field] !== "string") {
+          console.error(`Payload must include a string '${field}' field.`);
+          process.exit(1);
+        }
+      }
+      const result = await brokerPost<RoadmapUpsertResponse>("/roadmap/upsert", payload);
+      console.log(JSON.stringify(result.item, null, 2));
+    } catch (e) {
+      console.error(`roadmap-add failed: ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(1);
+    }
+    break;
+  }
+
   default:
     console.log(`claude-peers CLI v0.4
 
@@ -212,6 +247,10 @@ Usage:
   bun cli.ts roadmap-export <project_key> Print a project's roadmap as JSON (stdout)
   bun cli.ts roadmap-import <export.json> [--project-key <key>]
                                           Bulk-import a roadmap export (ids kept)
+  bun cli.ts roadmap-add --input <payload.json>
+                                          Create one roadmap item (fallback for
+                                          roadmap_add when the MCP tool is
+                                          absent from a session's tool-list)
 
 Note: 'send' is no longer available -- use the MCP send_message tool from
 within Claude Code (the broker requires a valid instance_token).
