@@ -54,6 +54,28 @@ export function TileArea(): React.JSX.Element {
   const openTemplates = useDeck((s) => s.openTemplates)
   const carouselRef = useRef<HTMLDivElement>(null)
 
+  // Hoisted above the three tile-rendering returns below (maximized/carousel/
+  // grid, 903ee271): all three must pass an IDENTICAL children shape, because
+  // React's implicit key path is derived from a JSX subtree's structural
+  // position, not just each element's own `key`. Building this array once and
+  // reusing it verbatim in `{children}` keeps that shape identical across a
+  // maximize/un-maximize transition, so TerminalTile stays mounted (its PTY
+  // and scrollback survive) instead of unmounting/remounting on every switch.
+  // Maximized never showed pending-spawn placeholders before this hoist (the
+  // old maximized return had no pendingTiles at all) -- keep that behavior by
+  // nulling the slot rather than omitting it: `null` still occupies the
+  // second children position, so the shape (and therefore the reconciliation
+  // path) stays identical across branches; omitting it conditionally would
+  // reintroduce the remount bug this hoist fixes.
+  const children = (
+    <>
+      {sessions.map((s) => (
+        <TerminalTile key={s.id} session={s} hidden={maximizedId ? s.id !== maximizedId : false} />
+      ))}
+      {maximizedId ? null : pendingTiles}
+    </>
+  )
+
   // The very first agent has no grid to appear in yet: the placeholder replaces
   // the empty card, otherwise the operator keeps looking at "add an agent".
   if (sessions.length === 0 && pending > 0) {
@@ -102,11 +124,7 @@ export function TileArea(): React.JSX.Element {
   // Maximized: a single tile fills the area; the rest stay mounted but hidden.
   if (maximizedId) {
     return (
-      <main className="area area-maximized">
-        {sessions.map((s) => (
-          <TerminalTile key={s.id} session={s} hidden={s.id !== maximizedId} />
-        ))}
-      </main>
+      <main className="area area-maximized">{children}</main>
     )
   }
 
@@ -117,15 +135,22 @@ export function TileArea(): React.JSX.Element {
         className="area area-carousel"
         ref={carouselRef}
         onWheel={(e) => {
+          // A wheel over the terminal surface belongs to xterm's own scroll
+          // (scrollback), not the carousel -- xterm can't stop it itself
+          // (cancelEvents stays false: turning it on would stopPropagation()
+          // every mouse/key event, silencing Ctrl+Shift+F / Ctrl+Shift+M in
+          // App.tsx), so the carousel filters at the source instead (1d6abfd2).
+          // `.tile-body` is, as of this fix, the ONLY scrollable descendant a
+          // tile renders -- a new scrollable area added elsewhere in a tile
+          // later would slip past this selector silently. Verifiable, and
+          // meant to be checked by whoever adds the next one.
+          if ((e.target as HTMLElement).closest('.tile-body')) return
           if (carouselRef.current && Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
             carouselRef.current.scrollLeft += e.deltaY
           }
         }}
       >
-        {sessions.map((s) => (
-          <TerminalTile key={s.id} session={s} hidden={false} />
-        ))}
-        {pendingTiles}
+        {children}
       </main>
     )
   }
@@ -140,10 +165,7 @@ export function TileArea(): React.JSX.Element {
         gridAutoRows: `calc((100% - ${rows - 1} * var(--gap)) / ${rows})`
       }}
     >
-      {sessions.map((s) => (
-        <TerminalTile key={s.id} session={s} hidden={false} />
-      ))}
-      {pendingTiles}
+      {children}
     </main>
   )
 }
