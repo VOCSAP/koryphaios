@@ -43,13 +43,31 @@ export async function startBroker(
       stdio: ["ignore", "ignore", "ignore"],
     });
 
+    // A 200 on /health only proves that SOMEBODY listens on this port, never
+    // that it is the process we just spawned. When two concurrent test runs
+    // pick the same port, the other run's broker answers immediately while
+    // ours is still failing to bind and about to exit -- and the caller would
+    // get a handle whose url points at a FOREIGN broker (its db, its peers)
+    // with a dead `proc`, then ECONNREFUSED as soon as that run stops it.
+    // So readiness also requires our own process to still be alive, and not
+    // before it has had time to die. Measured on this machine: a foreign
+    // broker answers at +5 ms, our own at +70..85 ms, and a losing broker's
+    // exitCode becomes observable at +92 ms -- hence the settle window below
+    // (~2.7x the exit latency). A dead process breaks out immediately so the
+    // `attempt` loop moves on to the next port.
+    const SETTLE_MS = 250;
+    const spawnedAt = Date.now();
     let ready = false;
     for (let i = 0; i < 80; i++) {
+      if (proc.exitCode !== null) break;
       try {
         const res = await fetch(`http://127.0.0.1:${port}/health`, {
           signal: AbortSignal.timeout(500),
         });
-        if (res.ok) { ready = true; break; }
+        if (res.ok && Date.now() - spawnedAt >= SETTLE_MS && proc.exitCode === null) {
+          ready = true;
+          break;
+        }
       } catch { /* retry */ }
       await Bun.sleep(50);
     }
