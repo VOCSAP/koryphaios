@@ -78,6 +78,7 @@ const api: DeckApi = {
   restartSession: (id: string) => ipcRenderer.invoke('sessions:restart', id),
   setSessionAutoResume: (id: string, enabled: boolean) =>
     ipcRenderer.invoke('sessions:set-auto-resume', id, enabled),
+  clearAttention: (id: string) => ipcRenderer.invoke('sessions:clear-attention', id),
   setLead: (id: string) => ipcRenderer.invoke('sessions:set-lead', id),
   peekNextColor: () => ipcRenderer.invoke('sessions:peek-next-color'),
   reorderSessions: (ids: string[]) => ipcRenderer.invoke('sessions:reorder', ids),

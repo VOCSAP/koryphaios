@@ -201,6 +201,7 @@
   "settings.wandModelHelp": "Inférence en lecture seule qui rédige le briefing de contexte d'un item (l'opérateur relit avant d'enregistrer). Haiku par défaut.",
   "status.needsAttention": "t'attend",
   "attention.badge": "t'attend",
+  "attention.dismiss": "Ignorer (ne plus considérer comme en attente)",
   "settings.notifyAttention": "Notification système quand une session attend ta réponse",
   "settings.spawnMode": "Spawns d'agents du superviseur",
   "settings.spawnModeHandsFree": "Mains libres",

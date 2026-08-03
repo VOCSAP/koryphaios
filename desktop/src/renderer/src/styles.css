@@ -3066,15 +3066,37 @@ svg.glyph {
   animation: dot-pulse 1.4s ease-in-out infinite;
 }
 
+/* Both are <button> (card 4f0143ff: manual dismiss for a stuck flag), not
+   plain badges -- full native-chrome reset, cursor is the only interactivity
+   cue at rest (DESIGN.md: no control keeps its native look). Hover brightens
+   the existing violet tone rather than swapping backgrounds, same treatment
+   as the colour-coded .tile-btn-* actions above. `font: inherit` is NOT
+   repeated here (review of 4f0143ff, MAJOR 5): the element-level `button`
+   rule above already covers every <button> in the app, this one included --
+   a per-instance copy was dead weight, and the next instance that forgets it
+   would have silently relied on this class existing instead of the element
+   rule, which is exactly the coverage gap DESIGN.md's "style controls at
+   ELEMENT level" convention exists to prevent. */
 .row-attention {
   font-size: 11px;
   color: #b678ff;
   white-space: nowrap;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
 }
 
 .tile-attention {
   color: #b678ff;
   border-color: color-mix(in srgb, #b678ff 45%, transparent);
+  background: none;
+  cursor: pointer;
+}
+
+.row-attention:hover,
+.tile-attention:hover {
+  filter: brightness(1.2);
 }
 
 /* ---------- Operator inbox (PLAN C12) ---------- */

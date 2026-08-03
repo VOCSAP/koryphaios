@@ -215,6 +215,8 @@ interface DeckState {
   restartSession(id: string): Promise<void>
   /** Per-session quota auto-resume override (context menu). */
   setAutoResume(id: string, enabled: boolean): Promise<void>
+  /** Manual dismiss for a stuck "needs you" flag (card 4f0143ff). */
+  clearAttention(id: string): Promise<void>
   reorderSessions(ids: string[]): Promise<void>
   updateConfig(patch: Partial<AppConfig>): Promise<void>
   /** Broadcast a free-text operator message to all peers in the active group. */
@@ -663,6 +665,11 @@ export const useDeck = create<DeckState>((set, get) => ({
   async setAutoResume(id, enabled) {
     // The updated override arrives via onSessionsChanged (broadcast).
     await guarded('auto-resume', () => window.api.setSessionAutoResume(id, enabled))
+  },
+
+  async clearAttention(id) {
+    // The cleared flag arrives via onSessionsChanged (broadcast).
+    await guarded('clear attention', () => window.api.clearAttention(id))
   },
 
   async reorderSessions(ids) {

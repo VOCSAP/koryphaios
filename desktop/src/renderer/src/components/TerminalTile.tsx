@@ -34,6 +34,7 @@ export function TerminalTile({
   const setMaximized = useDeck((s) => s.setMaximized)
   const setSelected = useDeck((s) => s.setSelected)
   const restartSession = useDeck((s) => s.restartSession)
+  const clearAttention = useDeck((s) => s.clearAttention)
   const removeSession = useDeck((s) => s.removeSession)
   const openBrowser = useDeck((s) => s.openBrowser)
   const [confirmingDelete, setConfirmingDelete] = useState(false)
@@ -243,9 +244,17 @@ export function TerminalTile({
           </span>
         )}
         {session.needsAttention && (
-          <span className="tile-quota tile-attention">
+          <button
+            type="button"
+            className="tile-quota tile-attention"
+            title={t('attention.dismiss')}
+            onClick={(e) => {
+              e.stopPropagation()
+              void clearAttention(id)
+            }}
+          >
             {GLYPH_BADGES.warning} {t('attention.badge')}
-          </span>
+          </button>
         )}
         {session.rateLimited && (
           <span className="tile-quota">

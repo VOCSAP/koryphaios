@@ -30,6 +30,7 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
   const renameSession = useDeck((s) => s.renameSession)
   const setColor = useDeck((s) => s.setColor)
   const setAutoResume = useDeck((s) => s.setAutoResume)
+  const clearAttention = useDeck((s) => s.clearAttention)
   const showToast = useDeck((s) => s.showToast)
   const openDiff = useDeck((s) => s.openDiff)
 
@@ -153,9 +154,17 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
             t('session.pending', { id: (session.sessionId || session.id).slice(0, 8) })}
         </span>
         {session.needsAttention && (
-          <span className="row-attention">
+          <button
+            type="button"
+            className="row-attention"
+            title={t('attention.dismiss')}
+            onClick={(e) => {
+              e.stopPropagation()
+              void clearAttention(session.id)
+            }}
+          >
             {GLYPH_BADGES.warning} {t('attention.badge')}
-          </span>
+          </button>
         )}
         {session.rateLimited && (
           <span className="row-quota">

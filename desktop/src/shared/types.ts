@@ -818,6 +818,16 @@ export interface SessionThinkingEvent {
 export interface SessionAttentionEvent {
   id: string
   waiting: boolean
+  /**
+   * Set when the operator dismissed the flag by hand rather than answering
+   * the prompt. Consumers must NOT read `waiting: false` as "the operator
+   * responded" when this is true: the remote approval, if any, is still
+   * open. Mirrors AttentionEvent in main/attention.ts, which is the producer
+   * side; ipc.ts rebroadcasts that same object on `session:attention`, so
+   * this declaration is what carries the distinction to the renderer and to
+   * the companion app.
+   */
+  manual?: boolean
 }
 
 export interface SessionQuotaEvent {
@@ -923,6 +933,12 @@ export interface DeckApi {
   restartSession(id: string): Promise<SessionRuntime>
   /** Per-session quota auto-resume override (true/false); see SessionDef.autoResume. */
   setSessionAutoResume(id: string, enabled: boolean): Promise<void>
+  /**
+   * Manual escape hatch for a stuck "needs you" flag (attention.ts, card
+   * 4f0143ff): clears SessionRuntime.needsAttention and the detector's
+   * per-session buffer. No-op if the session is not currently flagged.
+   */
+  clearAttention(id: string): Promise<void>
   /** Designate a session as the window's team-lead (unique, PLAN C10). */
   setLead(id: string): Promise<void>
   /** The colour the next auto-assigned session would receive (create preview). */

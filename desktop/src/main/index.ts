@@ -641,64 +641,73 @@ const pollApprovalVerdicts = async (): Promise<void> => {
   }
 }
 
-service.on('attention', ({ id, waiting }: { id: string; waiting: boolean }) => {
-  const session = service.list().find((s) => s.id === id)
-  // The operator answered locally: settle the approval so the phone
-  // notification is invalidated (the broker makes the two exclusive).
-  if (!waiting) {
-    waitingTiles.delete(id)
-    const open = openApprovals.get(id)
-    if (open) {
-      openApprovals.delete(id)
+service.on(
+  'attention',
+  ({ id, waiting, manual }: { id: string; waiting: boolean; manual?: boolean }) => {
+    const session = service.list().find((s) => s.id === id)
+    // The operator answered locally: settle the approval so the phone
+    // notification is invalidated (the broker makes the two exclusive).
+    if (!waiting) {
+      waitingTiles.delete(id)
+      // A manual dismiss (card 4f0143ff escape hatch, session-service's
+      // clearAttention) means "this flag was wrong", not "I answered this
+      // via the terminal" -- do NOT read it as an answer, or clicking a
+      // false-positive badge would silently ALLOW a pending remote/phone
+      // approval nobody actually responded to (BLOCKER 2, review).
+      if (manual) return
+      const open = openApprovals.get(id)
+      if (open) {
+        openApprovals.delete(id)
+        const deps = approvals.deps()
+        if (deps) {
+          void claimApproval(deps, { id: open, answerKind: 'allow' }).catch((e) =>
+            reportError('approvals', 'could not settle a locally-answered approval', e)
+          )
+        }
+      }
+      return
+    }
+    waitingTiles.add(id)
+    if (session) journal.add('attention', `session "${session.name}" waits for the operator`)
+    // Fallback producer: sessions no hook covers (non-Claude CLIs, and open
+    // questions detected on screen). Best-effort — never block the UI path.
+    if (session && approvalsEnabled()) {
       const deps = approvals.deps()
       if (deps) {
-        void claimApproval(deps, { id: open, answerKind: 'allow' }).catch((e) =>
-          reportError('approvals', 'could not settle a locally-answered approval', e)
-        )
+        void addApproval(deps, {
+          kind: 'question',
+          title: session.name,
+          question: `The session "${session.name}" is waiting for an answer on screen.`,
+          sessionRef: id,
+          tileRef: id,
+          projectKey: computeDeckProjectKey(cliContext.projectDir),
+          host: hostname(),
+          // When the tile's peer has resolved, the broker delivers the answer as
+          // a message (C-9) and nothing is typed. Non-Claude CLIs and
+          // not-yet-registered tiles fall back to keystrokes.
+          replyPeerId: session.peerId ?? undefined,
+          groupId: activeScope.groupId
+        })
+          .then((a) => openApprovals.set(id, a.id))
+          .catch((e) => reportError('approvals', 'could not raise an approval', e))
       }
     }
-    return
+    if (!config.notifyAttention) return
+    if (!Notification.isSupported()) return
+    if (!session) return
+    const isFr = (config.locale || app.getLocale()).toLowerCase().startsWith('fr')
+    const n = new Notification({
+      title: session.name,
+      body: isFr ? 'attend une réponse de ta part' : 'is waiting for your input'
+    })
+    n.on('click', () => {
+      mainWindow?.show()
+      mainWindow?.focus()
+      mainWindow?.webContents.send('session:focus', id)
+    })
+    n.show()
   }
-  waitingTiles.add(id)
-  if (session) journal.add('attention', `session "${session.name}" waits for the operator`)
-  // Fallback producer: sessions no hook covers (non-Claude CLIs, and open
-  // questions detected on screen). Best-effort — never block the UI path.
-  if (session && approvalsEnabled()) {
-    const deps = approvals.deps()
-    if (deps) {
-      void addApproval(deps, {
-        kind: 'question',
-        title: session.name,
-        question: `The session "${session.name}" is waiting for an answer on screen.`,
-        sessionRef: id,
-        tileRef: id,
-        projectKey: computeDeckProjectKey(cliContext.projectDir),
-        host: hostname(),
-        // When the tile's peer has resolved, the broker delivers the answer as
-        // a message (C-9) and nothing is typed. Non-Claude CLIs and
-        // not-yet-registered tiles fall back to keystrokes.
-        replyPeerId: session.peerId ?? undefined,
-        groupId: activeScope.groupId
-      })
-        .then((a) => openApprovals.set(id, a.id))
-        .catch((e) => reportError('approvals', 'could not raise an approval', e))
-    }
-  }
-  if (!config.notifyAttention) return
-  if (!Notification.isSupported()) return
-  if (!session) return
-  const isFr = (config.locale || app.getLocale()).toLowerCase().startsWith('fr')
-  const n = new Notification({
-    title: session.name,
-    body: isFr ? 'attend une réponse de ta part' : 'is waiting for your input'
-  })
-  n.on('click', () => {
-    mainWindow?.show()
-    mainWindow?.focus()
-    mainWindow?.webContents.send('session:focus', id)
-  })
-  n.show()
-})
+)
 
 // ----- Operator inbox (PLAN C12) -----
 // Agents `send_message` to the reserved 'operator' peer; the broker parks those

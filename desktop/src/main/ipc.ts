@@ -227,6 +227,7 @@ export function registerIpc({
   regHandle('sessions:set-auto-resume', (_e, id: string, enabled: boolean) =>
     service.setAutoResume(id, !!enabled)
   )
+  regHandle('sessions:clear-attention', (_e, id: string) => service.clearAttention(id))
   regHandle('sessions:set-lead', (_e, id: string) => service.setLead(id))
   regHandle('sessions:peek-next-color', () => service.peekNextColor())
   regHandle('sessions:reorder', (_e, ids: string[]) => service.reorder(ids ?? []))

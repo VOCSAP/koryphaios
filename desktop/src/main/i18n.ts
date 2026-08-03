@@ -321,6 +321,7 @@ export const EN_DEFAULTS: Record<string, string> = {
     "Read-only inference drafting an item's context briefing (the operator reviews before saving). Haiku default.",
   'status.needsAttention': 'waiting for you',
   'attention.badge': 'needs you',
+  'attention.dismiss': 'Dismiss (mark as no longer waiting)',
   'settings.notifyAttention': 'System notification when a session waits for your input',
   'settings.spawnMode': 'Supervisor agent spawns',
   'settings.spawnModeHandsFree': 'Hands-free',

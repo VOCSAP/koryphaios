@@ -279,6 +279,14 @@ export class SessionService extends EventEmitter {
     // never injected (falls back to "type it yourself" -- same as before
     // this card for that one case).
     this.startupAckDetector.on('ack', ({ id }: StartupAckEvent) => {
+      // Card 4f0143ff review (MAJOR 3 follow-up): this dialog's text has no
+      // further reason to sit in AttentionDetector's retained buffer once
+      // it's confirmed dismissed -- purge it (buf only, not `waiting`; see
+      // purgeScreenMemory's own comment). Belt-and-suspenders alongside the
+      // tightened raise-side exemption: this event-driven purge ties the
+      // buffer's lifetime to a real fact instead of relying solely on the
+      // sliding MAX_BUF window.
+      this.attentionDetector.purgeScreenMemory(id)
       setTimeout(() => {
         const r = this.runtime.get(id)
         if (!r || r.status === 'exited') return
@@ -632,6 +640,33 @@ export class SessionService extends EventEmitter {
     if (!def) return
     def.autoResume = enabled
     this.persist()
+    this.broadcast()
+  }
+
+  /**
+   * Manual escape hatch for a stuck "needs you" flag (card 4f0143ff): the
+   * auto-clearers (a busy cue, or the re-scan in attention.ts) only fire when
+   * the PTY stream itself moves past the wait screen, which never happens for
+   * a false raise (e.g. the dev-channels dialog before the WAITING_PATTERNS
+   * narrowing) or a wait resolved outside the stream. Also drops the
+   * detector's per-session buffer so a stale partial match cannot instantly
+   * re-raise it. Not persisted (runtime-only, like the rest of RuntimeState).
+   *
+   * `manual: true` on the emitted event (BLOCKER 2, review of 4f0143ff): the
+   * `'attention'` channel had exactly one producer before this method existed
+   * -- the PTY-driven auto-detector -- and index.ts's listener infers from
+   * `waiting:false` that a real turn ran, so it settles any open remote/phone
+   * approval as answered. This method is a SECOND, human-driven producer on
+   * the same channel with a different meaning ("the operator says this flag
+   * is wrong"), which the consumer must not conflate with "the operator
+   * already answered via the terminal" -- see index.ts's `manual` check.
+   */
+  clearAttention(id: string): void {
+    const r = this.runtime.get(id)
+    if (!r || !r.needsAttention) return
+    r.needsAttention = false
+    this.attentionDetector.clear(id)
+    this.emit('attention', { id, waiting: false, manual: true } satisfies AttentionEvent)
     this.broadcast()
   }
 
