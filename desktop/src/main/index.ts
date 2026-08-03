@@ -982,9 +982,24 @@ const runMagicCompact = async (
 /**
  * CONTRACT (card 722fa003): callers rely on this never rejecting --
  * runDirectiveWave's catch in dispatch.ts is defense-in-depth, not a live
- * path. Keep every await in here guarded (try/catch) or fire-and-forget with
- * its own handler; a bare `void someAsyncCall(...)` with no .catch turns any
- * rejection into a silent unhandled promise rejection on this live-PTY path.
+ * path. The danger is NOT an await (this function contains none): it's a
+ * SYNCHRONOUS call that throws inside this async wrapper, which becomes a
+ * rejected promise. Five calls qualify: resolveFeatures,
+ * magicCompactPluginPresent, join(), homedir(), resolveDirectiveTargets.
+ * Only two are actually guarded today: magicCompactPluginPresent ->
+ * dirHasMagic (magic-compact.ts) guards readdirSync/statSync and returns
+ * false; resolveFeatures -> readConfigFile (launch-config.ts) guards
+ * readFileSync+JSON.parse and returns null. The other three -- join(),
+ * homedir(), resolveDirectiveTargets -- have no guard at all; they don't
+ * reject today only because their inputs are well-formed in practice
+ * (env-derived strings for join/homedir; resolveDirectiveTargets given a
+ * malformed item.target_peer_ids -- hostile input #2, a broker response
+ * field -- would throw on `for (const raw of targetPeerIds)` or
+ * `raw.trim()`). That's fragile and non-local -- if either guarded call
+ * stops swallowing, or a malformed target_peer_ids ever arrives, this
+ * rejects with no change here (card 96de33bc). Keep the two `for`-loop
+ * branches fire-and-forget with their own
+ * handler, which stays exact.
  *
  * Execute a directive card (CT3): the Deck itself types the command into the
  * terminals of the card's live targets. It NEVER announces to the lead. The
