@@ -104,7 +104,12 @@ Read only file/skill matching area you touch:
   never ran in CI. Canonical fail-open shape: `broker.ts:1109` rest-spreads
   three fields out and projects the rest, so 17th `Peer` field ships publicly
   with nothing failing -- pick-list would have failed closed. Two bullets
-  below are instances of this.
+  below are instances of this. Corollary on the PROOF: a probe measured
+  red-first and then left out of the commit is not a guard, because nothing
+  will replay it -- a 13-probe matrix proving a comment-stripping scanner bit
+  on each state transition shipped as ONE end-to-end test, green both when the
+  scanner was right and when it silently over-stripped. Ask of any "proved it
+  bites": is that probe in the diff?
 - **A comment or class that ASSERTS a guarantee must be wired to it, and
   point at what actually enforces it** (instance of coverage rule above).
   `PinnedTrust.kt` described trust-on-first-use, implemented it correctly,
