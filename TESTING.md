@@ -53,6 +53,8 @@ test("hello world", () => {
 
 ## Checks before committing
 
+- `bun scripts/check-commit-closure.ts --staged` -- ~2 s. "If I commit right
+  now, does this commit stand on its own?" See "Commit closure check" below.
 - `bun test` -- the full suite (core broker/server + desktop pure modules).
   Broker suites spin up an ephemeral broker on a random port via
   `tests/_helper.ts` (env-scrubbed so developer-side `CLAUDE_PEERS_*` vars do
@@ -68,6 +70,68 @@ test("hello world", () => {
 
 The `desktop-precommit` skill (`.claude/skills/`) walks this checklist with
 the workarounds for the known environment quirks below.
+
+## Commit closure check (import closure + control bytes)
+
+`scripts/check-commit-closure.ts` answers two questions a diff review and
+`bun test` both miss, because both read the WORKING TREE while the thing
+that ships is a TREE OBJECT:
+
+1. **Import closure.** Every relative (`./` `../`) and `@shared/*`-aliased
+   import in a scanned file must resolve, against the tree being checked,
+   to a real file that actually exports the named symbol. Catches "this
+   commit references code that only exists in the working tree" -- it
+   builds for the author and breaks for the next person who checks the
+   commit out clean. `@shared/*`'s target is read from
+   `desktop/tsconfig.web.json` / `desktop/tsconfig.node.json` AT THE REF
+   being checked (not off disk), and the two tsconfigs disagreeing on that
+   target is itself reported.
+2. **Literal control bytes** (NUL, ESC, BEL) in a committed/staged blob --
+   the defect that makes git classify a whole file BINARY: no diff, no
+   blame, no 3-way merge, ripgrep refuses to show it. Every file is scanned
+   EXCEPT a deny-list of known-binary extensions (`BINARY_EXT_RE`: images,
+   fonts, archives, compiled/native artifacts, ...). This was inverted from
+   an allow-list on purpose: an allow-list of what to inspect fails OPEN as
+   the repo's domain grows -- measured on this tree, the allow-list scanned
+   only 391 of 401 tracked files, silently skipping 5 `.kt`, 4 `.gitignore`
+   (the leading dot read as an extension) and 1 `.example`. The deny-list
+   scans 401 of 401 today; a newly added binary format is a loud red
+   finding on the commit that adds it, not a silent coverage gap.
+
+Two modes, same logic underneath:
+
+```bash
+bun scripts/check-commit-closure.ts --staged        # the index: pre-commit
+bun scripts/check-commit-closure.ts <sha> [repo]     # a real commit: audit / CI
+```
+
+`--staged` is the cheap (~2 s), everyday check -- see the `desktop-precommit`
+skill. `<sha>` mode is what CI runs across a PR's commit range, so a commit
+that only ever went through someone's local `--staged` check (or was never
+checked at all) still gets caught before merge.
+
+**The two gaps that decide whether the fast check is enough, or you need the
+slow path instead** (the script's own header comment is the complete,
+current list of every known gap -- restated here only for these two,
+because a duplicated full list drifts out of sync with the code the moment
+either changes; these are singled out because they change what you should
+DO next, not just what the tool cannot see):
+
+1. Only scans files IN the commit/stage being checked -- a commit that
+   renames or deletes an export breaks already-committed importers
+   elsewhere in the tree, and none of those files are in this commit's
+   file list. Not caught.
+2. Checks that a same-NAME export exists, not that its SHAPE still matches
+   -- a signature/type change under the same name stays green. This is
+   exactly when to escalate to the slow path: a full checkout of the
+   commit into a clean tree + `npm run typecheck` (minutes, mostly
+   `desktop/`'s own `npm install`) -- run it when doubt remains after the
+   fast check passes, not on every commit.
+
+Sensitivity and specificity are both proven, against real git repos built
+by `scripts/fixtures/make-closure-sensitivity-repo.ts` (ships in the same
+commit as the checker on purpose -- a proof nobody can replay after the
+next refactor is not a proof), by `tests/desktop-commit-closure-check.test.ts`.
 
 ## Environment quirks (remote/proxied sessions)
 

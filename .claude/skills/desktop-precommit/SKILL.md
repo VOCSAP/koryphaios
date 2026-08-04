@@ -1,14 +1,32 @@
 ---
 name: desktop-precommit
-description: Run the Koryphaios pre-commit checks (bun test, smoke build, desktop typecheck, locale parity) with the known environment workarounds. Use before committing in this repo, or when bun test / npm run typecheck fail with missing-module errors, an Electron 403 download error, or a flaky-looking test failure.
+description: Run the Koryphaios pre-commit checks (commit closure check, bun test, smoke build, desktop typecheck, locale parity) with the known environment workarounds. Use before committing in this repo, or when bun test / npm run typecheck fail with missing-module errors, an Electron 403 download error, or a flaky-looking test failure.
 ---
 
 # Pre-commit checks (with environment workarounds)
 
-Run these from the repo root, in this order. Skip step 3 when `desktop/` was
+Run these from the repo root, in this order. Skip step 4 when `desktop/` was
 not touched. Details on the suite layout live in `TESTING.md`.
 
-## 1. Full test suite
+## 1. Commit closure check (staged)
+
+```bash
+bun scripts/check-commit-closure.ts --staged
+```
+
+~2 s. Answers "if I commit right now, does this commit stand on its own?" --
+resolves every relative and `@shared/*` import against the INDEX (falling
+back to HEAD for files the stage does not touch), and scans staged text
+files for literal control bytes (NUL/ESC/BEL, the defect that silently
+turns a file binary to git). Exit 0 = clean, exit 1 lists the problem(s).
+Run this before every commit on a shared checkout -- it is the cheap check;
+escalate to a full checkout + `npm run typecheck` (step 4) only if this
+passes but doubt remains (it does not catch a signature change under the
+same export name, only a missing/renamed export -- see the gaps documented
+at the top of `scripts/check-commit-closure.ts`). See `TESTING.md` for the
+`<sha>` mode used by CI over a PR's commit range.
+
+## 2. Full test suite
 
 ```bash
 bun test          # ~75 s, 480+ tests
@@ -31,7 +49,7 @@ bun test          # ~75 s, 480+ tests
   pushing — and make the regression test build the symlinked prefix itself, so
   it fails on every OS rather than only on the runner.
 
-## 2. Smoke build (core entrypoints)
+## 3. Smoke build (core entrypoints)
 
 ```bash
 bun build --target=bun broker.ts server.ts cli.ts --outdir=/tmp/cp-check
@@ -40,7 +58,7 @@ bun build --target=bun broker.ts server.ts cli.ts --outdir=/tmp/cp-check
 - `error: Could not resolve: "..."` on a fresh container just means deps are
   not installed: run `bun install` (repo root), then retry.
 
-## 3. Desktop typecheck (only if `desktop/` was touched)
+## 4. Desktop typecheck (only if `desktop/` was touched)
 
 ```bash
 cd desktop && npm run typecheck    # runs tsconfig.node + tsconfig.web
@@ -60,7 +78,7 @@ cd desktop && npm run typecheck    # runs tsconfig.node + tsconfig.web
 cd desktop && npm install
 ```
 
-## 4. Locale parity (only if UI strings were added)
+## 5. Locale parity (only if UI strings were added)
 
 Every renderer string must exist in THREE places with the same key:
 `desktop/locales/en.json`, `desktop/locales/fr.json`, and `EN_DEFAULTS` in
@@ -69,6 +87,6 @@ Every renderer string must exist in THREE places with the same key:
 adding strings, at least run that file. Key prefixes follow the view
 (`graph.*`, `roadmap.*`, `nav.*`, `common.*`).
 
-## 5. Commit
+## 6. Commit
 
 Nothing repo-specific beyond the above; describe the change, not the checks.
