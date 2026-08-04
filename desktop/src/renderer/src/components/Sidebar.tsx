@@ -136,11 +136,6 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
           />
         ) : (
           <span className="row-name" title={session.cwd} style={{ color: session.color || undefined }}>
-            {session.lead && (
-              <span title={t('sidebar.leadTitle')} className="row-lead">
-                {GLYPH_BADGES.laurel}{' '}
-              </span>
-            )}
             {session.name}
           </span>
         )}
@@ -174,6 +169,14 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
           </span>
         )}
       </div>
+      {/* Team-lead mark: a badge of the ROW, anchored right of .row-main, not an
+          ornament of the name -- inside .row-name it pushed lead names right and
+          broke the left alignment of the list. */}
+      {session.lead && (
+        <span className="row-lead" title={t('sidebar.leadTitle')}>
+          {GLYPH_BADGES.laurel}
+        </span>
+      )}
       {!editing && (
         <button
           className="row-btn"

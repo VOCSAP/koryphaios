@@ -375,6 +375,18 @@ body {
   color: var(--accent);
 }
 
+/* Team-lead laurel: a status badge of the ROW, pinned right of the flexible
+   .row-main and ahead of the hover ghost buttons, so its abscissa is stable
+   whether or not the row is hovered and every session name still starts at the
+   same x. Accent tint follows .row-branch (identity meta inside a peer row),
+   which also keeps it apart from the --fg-dim .row-btn glyphs. */
+.row-lead {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
 /* Quota badge under the peer id while a session sits at the limit screen. */
 .row-quota {
   font-size: 11px;
