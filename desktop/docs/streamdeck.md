@@ -34,20 +34,32 @@ Two halves, and the split matters:
    state), commands come in (focus session, start/stop workflow).
 
 The bridge is the real design decision. Three candidates, in order of
-preference:
+preference (**revised 2026-08-03 after reading the code** -- the first two
+swapped places; card `e89f1239` carries the measurements):
 
-- **Reuse `companion-server.ts`.** It already does HTTPS + WebSocket + a
-  pairing token + a per-run credential + an address allow-list, and it already
-  bridges the whole `DeckApi` protocol (`shared/companion.ts`). A Stream Deck
-  plugin is, protocol-wise, a very small companion client. Cost: the companion
-  server is off by default and started by an explicit operator gesture, which
-  is wrong for a peripheral that should work from app launch -- so this needs
-  either a second start mode or a persisted "auto-start for local peripherals"
-  setting, and that setting is a security decision (see below).
-- A dedicated loopback-only WS server. Smaller blast radius, but duplicates the
-  auth/pairing/journalling work that `companion-server.ts` already got right.
+- **A dedicated loopback-only WS server wired into `api-registry.ts`.** That
+  module, not `companion-server.ts`, is the seam built for a second transport:
+  its header says the same handler table serves both Electron IPC and the
+  companion bridge, through `invokeRemote` / `sendRemote` / `addEventSink`. A
+  plugin plugged in there reuses the whole `DeckApi` protocol and duplicates
+  only the authentication.
+- Reuse `companion-server.ts`. It does HTTPS + WebSocket + a pairing token + a
+  per-run credential + an address allow-list, but three properties fight a
+  peripheral: it binds to the LAN interface on an **ephemeral** port
+  (`listen(0, lanAddr)`, so the plugin has nothing to discover), its pairing
+  token travels in a **QR code** consumed by the first hello (no headless
+  enrolment path), and `companion:start` / `stop` / `status` are themselves in
+  `REMOTE_BLOCKED_CHANNELS`. It stays the reference for the security *model*
+  (per-address lockout, journalled connect/deny, per-run credential) rather
+  than code to reuse as-is. One property does help: `isPrivateAddress` already
+  accepts `127.0.0.1` and `::1`, so a loopback client is not refused by the
+  allow-list.
 - Stdio/named pipe. Cleanest trust boundary, worst fit for the Elgato SDK,
   which is itself a WebSocket client by construction.
+
+Naming trap: `desktop/deck-plugin/` **already exists** and means the *Claude
+Code* plugin (hooks + the deck-control / demo-browser MCP servers). The Elgato
+plugin must not live there, nor take a name that reads as the same thing.
 
 Whatever is chosen, hostile-input rule #4 applies: any string arriving from the
 plugin (session id, card id, directive name) is an untrusted agent-facing
@@ -67,9 +79,13 @@ Ranked. The first is the one that justifies the whole thing.
 
 ### 1. Attention key (blinking, with pending count)
 
-Source of truth: `desktop/src/main/attention.ts`. It already tracks which
-sessions raised attention and already drives the in-app badge, so the plugin
-needs a push of `{count, lastSessionId, lastSessionName}`, not a new mechanism.
+Source of truth: `desktop/src/main/attention.ts`. **Corrected 2026-08-03**: it
+detects per-session episodes and emits `{ id, waiting, manual? }` -- there is no
+aggregate count anywhere (`needsAttention` is a per-session boolean each
+renderer component reads on its own) and no timestamp or sequence on the event.
+So `{count, lastSessionId, lastSessionName}` is main-side state to *create*, not
+a relay. Prefer a monotonic event counter over a millisecond timestamp: it gives
+a total order, so the tie below cannot happen at all.
 
 Behaviour:
 - Idle: dark key, Greek glyph, no count.
@@ -78,11 +94,18 @@ Behaviour:
   attention.** This is the feature. A key that only shows a count is a worse
   notification than the taskbar already gives.
 
-Focusing means `BrowserWindow.show()` + `focus()` on the main window, then the
-existing in-app "select session" path. On Windows, `focus()` from a background
-process is unreliable (foreground lock); expect to need
-`setAlwaysOnTop(true)` + immediate `false`, or `app.focus({steal: true})`.
-Verify on the actual OS, do not assume.
+Focusing already exists and ships: `index.ts:702-706` does
+`mainWindow.show()` + `focus()` + `webContents.send('session:focus', id)` when
+an attention notification is clicked. Measure *that* path from a third-party
+process before reaching for `setAlwaysOnTop(true)` + immediate `false` or
+`app.focus({steal: true})` -- the Windows foreground lock may or may not bite
+here, and the existing code is the cheapest way to find out.
+
+The press does need a new registered channel though: `session:focus` is
+deliberately window-only (see the `api-registry.ts` header -- it bypasses
+`broadcast`). Give the new channel a `CHANNEL_TIERS` entry and put it in
+`REMOTE_BLOCKED_CHANNELS`: a LAN-paired phone yanking the host window to the
+foreground is a host action, same class as `shell:open-external`.
 
 Open question: what "the last agent" means when two sessions raise attention
 half a second apart. Resolve the object first (which session) then ask whether
@@ -92,7 +115,7 @@ arbitrarily under a tie.
 
 ### 2. Roadmap workflow play/stop
 
-One key, two states, driven by `dispatch.ts` (the workflow lane's dispatch
+One key, three states, driven by `dispatch.ts` (the workflow lane's dispatch
 loop) and `roadmap-service.ts`.
 
 - Shows `Play` when the lane has queued items and dispatch is idle.
@@ -102,15 +125,25 @@ loop) and `roadmap-service.ts`.
 
 The count of queued cards belongs on this key too (small, corner).
 
-Depends on the existing dispatch pause/resume path actually being reachable
-from main; if interrupting a wave is currently only expressible through the UI,
-that plumbing is part of this card, not a precondition of it.
+**Settled 2026-08-03: that path does not exist.** `roadmap:dispatch`
+(`ipc.ts:612`) covers Play, main-side and argument-free. `roadmap:stop`
+(`ipc.ts:614`) takes a *card id* and stops one card; there is no pause, no wave
+interrupt, no global halt. So this key now depends on card `aaf4537d` (Pause /
+Soft Stop / Hard Stop in the In-progress header), which owns the semantics of
+stopping, and it must consume exactly that path -- a physical key and a header
+button that stop different things is the worst of both worlds. The three levels
+also give the key more than two states; short press for the default level, long
+press for the destructive one, current level readable at 60 cm.
 
 ### 3. Git dirty count
 
-Source: `worktree-service.ts:133` already computes uncommitted-change count via
-`git status --porcelain`, and `diff-service.ts` parses the same output. Reuse,
-do not re-shell.
+Source, **corrected 2026-08-03**: reuse the `worktree:list` channel
+(`ipc.ts:659`), not the service function directly. It already returns, per
+worktree, the `dirty` count from `worktreeStatus()` (`worktree-service.ts:140`
+-- this page said `:133`, which is `isDeckWorktreePath`) *and* the attached
+session, with the `canonicalPath` comparison on both sides already applied and
+commented there. So: no new git shelling, no new canonicalisation, no new read
+channel. `diff-service.ts` stays the reference for parsing untracked files.
 
 Key shows the count for the **active session's** work dir (worktree-aware --
 each agent may sit on its own worktree, so a single repo-wide number is the
