@@ -82,6 +82,13 @@ urgency.
        tool is available; otherwise use a plainly-labelled fallback like
        `"<role>-unregistered"` -- never fabricate a peer_id that looks like a
        real registered one.
+       Note that `cli.ts` REWRITES this field to `cli:<what you sent>` before
+       the broker sees it, so the card is attributed `cli:<peer_id>` and not
+       the bare peer_id you wrote here (roadmap card 39c40571). That is
+       deliberate: a write through this verb carries no proof of identity, and
+       the broker now refuses an unproven write that claims a registered
+       peer's name. Send your real peer_id anyway -- the marker is added for
+       you, and prefixing it yourself would only double it.
      - Write the payload to a temp file, then invoke the verb:
        ```bash
        cat > /tmp/roadmap-card.json << 'EOF'
@@ -112,6 +119,41 @@ urgency.
    one-line echo of the fields you actually sent -- not the whole card back
    verbatim. On a hard failure (both the tool and the HTTP fallback errored),
    report the exact error from whichever path you tried last.
+
+## Prose economy: a card is read by AGENTS, not by a human being convinced
+
+Cards are dense reference material for whoever picks the work up later. Keep
+every measurement -- re-acquiring one costs an audit, which is far more
+expensive than reading a long card. There is NO word limit, and shortening a
+card by dropping a measured fact is the one unacceptable edit.
+
+What to cut is the prose written to CONVINCE, because an agent does not need
+convincing, it needs constraining. Four things never earn their tokens:
+
+1. **Narrative provenance.** "The debugger measured it, then the architect
+   confirmed, then the lead re-verified." Keep the finding, drop the story of
+   who found it.
+2. **Rhetorical emphasis.** SHOUTING CAPS on half a paragraph, the same point
+   restated from three angles, "and this is the important part".
+3. **Meta-commentary on method.** "This is the coverage rule turned against its
+   own instrument." Insight for a human reader, noise for an implementer.
+4. **Design justification.** WHY this approach beat the alternative belongs in
+   the commit message that ships it, not in the card that requests it.
+
+Route by destination before writing:
+
+| Content | Goes to |
+|---|---|
+| What to do, constraints, measured traps, `file:line` pointers | the CARD |
+| A reusable fact that holds outside this project | Kleos |
+| Why this design won over that one | the commit message |
+
+A card that carries all three is the default failure mode, and roadmap writes
+echo the card back to the caller, so every redundant word is paid twice.
+
+Prefer the compact form of each fact: a table row over a paragraph, a bare
+`file:line` over a sentence describing where something is, an imperative over
+an explanation of why the imperative is wise.
 
 ## Hard rules
 

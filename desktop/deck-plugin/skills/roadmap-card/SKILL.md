@@ -35,7 +35,10 @@ calling session only relays the result.
 - `context` -- the briefing for whoever picks the card up later. Carries
   confidence markers, `file:line` pointers, open decisions. Cite `file:line`
   only for code that exists; never fabricate a pointer for a not-yet-built
-  feature.
+  feature. No word limit: keep every measurement, since re-acquiring one costs
+  an audit and reading a long card does not. But it is read by an AGENT, which
+  needs constraining, not convincing -- see "Prose economy" in the
+  `roadmap-scribe` agent for what to cut and where non-card content belongs.
 - `tags` -- track AREA (`desktop`, `broker`, `roadmap`, `sandbox`, `graph`,
   ...), not urgency or confidence -- those live in the confidence marker and
   the `priority`/`value`/`effort` fields instead.
@@ -73,6 +76,14 @@ that pre-empts scope creep on the next pass.
 2. A dependency narrated in prose with `depends_on: []` -- nothing parses
    prose; populate the array.
 3. `tags` used only for UI cards, or used for urgency instead of area.
+4. **Writing the essay instead of the brief.** Narrative provenance ("the
+   debugger measured, then the architect confirmed"), the same point restated
+   from three angles, meta-commentary on method, and the justification of WHY
+   this design beat the alternative. The last one belongs in the commit
+   message; a reusable cross-project fact belongs in Kleos. A card carrying all
+   three is the common failure, and roadmap writes echo the card back to the
+   caller, so every redundant word is paid twice. Cutting a MEASUREMENT to
+   shorten a card is the one unacceptable edit.
 
 ## Duplicate check (mandatory, before writing)
 

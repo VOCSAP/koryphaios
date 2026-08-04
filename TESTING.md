@@ -1,5 +1,46 @@
 # Testing & pre-commit checks
 
+## Who runs what (read this before running anything)
+
+The full gate -- `bun test`, the smoke build, and `npm run typecheck` in
+`desktop/` -- is run **once, by whoever sequences the commits**, immediately
+before committing.
+
+If you are not the one committing, run only the targeted file:
+
+```bash
+bun test tests/<your-file>.test.ts
+```
+
+and report that exact command with its result. The full suite is ~113s over
+1300+ tests with a large output; replaying it after every edit, or to
+re-confirm a green someone else already reported, buys nothing. A targeted run
+does miss cross-file breakage: that is deliberate, and the batch gate restores
+the guarantee before anything lands. If you suspect a cross-file breakage,
+raise it as an open item rather than running the full suite to find out.
+
+A `PreToolUse` hook enforces this. `.claude/hooks/no-full-suite.sh` refuses a
+Bash call that runs the whole suite and allows it as soon as something is
+staged, staged content being the signal that you are the one committing. Do not
+stage merely to unlock it: on a shared checkout that is a louder violation, and
+every other session sees it in `git status`.
+
+The hook is allow-list shaped -- it requires an argument naming a test FILE,
+rather than listing forbidden spellings -- so an invocation it does not
+recognise is refused rather than waved through. Verify it with:
+
+```bash
+bash .claude/hooks/no-full-suite-probe.sh    # 28 cases, ~14s
+```
+
+**After a fresh clone the hook is inert.** The scripts are versioned but its
+registration is not: `.gitignore` excludes `.claude/settings.json`. Re-add a
+`PreToolUse` entry with matcher `Bash` running
+`bash "${CLAUDE_PROJECT_DIR:-.}/.claude/hooks/no-full-suite.sh"`. The probe's
+last block checks exactly this and fails if the hook is unregistered or its
+path does not resolve. Hooks are loaded at session start, so an already-running
+session picks up the change only after a restart.
+
 Use `bun test` to run tests.
 
 ```ts#index.test.ts

@@ -73,10 +73,17 @@ Read only file/skill matching area you touch:
 - Default to Bun instead of Node.js: `bun <file>`, `bun test`, `bun install`,
   `bunx`. Exception: `desktop/` builds with electron-vite/npm (native module
   `node-pty` rebuilt for Electron). Details in `BUN.md`.
-- Before committing: `bun test`, smoke check
+- **Who runs which tests.** The full gate is `bun test`, smoke check
   (`bun build --target=bun broker.ts server.ts cli.ts --outdir=/tmp/cp-check`),
-  and `npm run typecheck` in `desktop/` if touched. Details in
-  `TESTING.md`.
+  and `npm run typecheck` in `desktop/` if touched. Details in `TESTING.md`.
+  It is run ONCE, by whoever sequences the commits, immediately before
+  committing. **If you do not commit, you do not run it**: run only the
+  targeted file (`bun test tests/<file>.test.ts`) and report that exact
+  command. `bun test` is ~113s and its output is large, so replaying it after
+  every edit, or to re-confirm someone else's green, is pure cost. The weaker
+  per-worker guarantee is deliberate and is restored by the batch gate, since
+  nothing lands without it. If you suspect a cross-file breakage, raise it as
+  an open item instead of running the full suite to find out.
 - **No silent errors.** Never write `catch {}` / catch-and-return-default
   without leaving trace in layer's log sink -- `console.error` alone NOT a
   trace (invisible in packaged app, lost when broker outlives its spawner's

@@ -50,6 +50,5 @@ progress-archive.md
 **/memory/
 *.memory.md
 .kleos-space
-.claude/settings.json
 .codex/config.toml
 /.claude/agent-memory
