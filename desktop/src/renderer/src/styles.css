@@ -3782,8 +3782,22 @@ svg.glyph {
   border-color: #a071e8;
   color: #a071e8;
 }
+/* Two-line chip label: the agent NAME is what the operator recognises, the peer
+   id underneath stays the routing key (and the only discriminator when two
+   agents share a name). Same primary/secondary split as the agents list. */
+.rm-target-labels {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.25;
+}
 .rm-target-name {
   font-size: 12px;
+}
+.rm-target-peer {
+  font-family: var(--mono, monospace);
+  font-size: 10px;
+  color: var(--fg-dim);
 }
 .rm-directive-empty,
 .rm-directive-hint {

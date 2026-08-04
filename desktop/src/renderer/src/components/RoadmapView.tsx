@@ -918,6 +918,11 @@ export function RoadmapView(): React.JSX.Element {
                   <div className="rm-target-list">
                     {liveAgents.map((s) => {
                       const on = (draft.target_peer_ids ?? []).includes(s.peerId!)
+                      // The agent NAME is what the operator recognises, but the
+                      // peer id stays visible underneath: it is the routing key
+                      // and the only discriminator when two agents share a
+                      // display name. No name (or name === peer id): id alone.
+                      const named = !!s.name && s.name !== s.peerId
                       return (
                         <button
                           key={s.id}
@@ -927,7 +932,12 @@ export function RoadmapView(): React.JSX.Element {
                           onClick={() => toggleTarget(s.peerId!)}
                         >
                           {on ? GLYPH_ACTIONS.check : GLYPH_BADGES.profile}
-                          <span className="rm-target-name">{s.peerId}</span>
+                          <span className="rm-target-labels">
+                            <span className="rm-target-name">
+                              {named ? s.name : s.peerId}
+                            </span>
+                            {named && <span className="rm-target-peer">{s.peerId}</span>}
+                          </span>
                         </button>
                       )
                     })}
