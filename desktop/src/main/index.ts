@@ -95,8 +95,8 @@ import { remoteApprovalsEnabled } from './approval-store'
 import {
   addApproval,
   buildKeystrokes,
-  canApplyVerdict,
   claimApproval,
+  classifyVerdict,
   connectChannel,
   disconnectChannel,
   fetchUndeliveredVerdicts,
@@ -597,6 +597,11 @@ const waitingTiles = new Set<string>()
 // operator's channel and applied through the poller.
 const openApprovals = new Map<string, string>()
 
+// Verdicts already announced as held (card 9c6de1e1), so the journal carries
+// ONE line per held answer instead of one per poll tick. Pruned below against
+// what the broker still returns, so it cannot outgrow the undelivered list.
+const heldVerdicts = new Set<string>()
+
 /**
  * Apply approvals settled elsewhere (phone) to their session.
  *
@@ -604,37 +609,85 @@ const openApprovals = new Map<string, string>()
  * through its own call. Guarded twice — the tile must still exist AND still be
  * waiting — because an answer arriving after the operator dealt with the
  * prompt locally must be dropped, not typed into whatever is on screen now.
+ *
+ * "Dropped" means HELD, not discarded (card 9c6de1e1): marking a verdict
+ * delivered tells the broker to stop sending it, so doing that for a tile that
+ * is merely un-flagged (the operator dismissed the badge while the agent sat at
+ * the very same prompt) lost the answer for good — phone side said delivered,
+ * terminal side never received a byte, journal said nothing. classifyVerdict
+ * separates the two, and only 'settle'/'abandon' end the verdict's life here.
  */
 const pollApprovalVerdicts = async (): Promise<void> => {
   const deps = approvals.deps()
   if (!deps || !approvalsEnabled()) return
   try {
     const settled = await fetchUndeliveredVerdicts(deps)
-    if (settled.length === 0) return
+    if (settled.length === 0) {
+      heldVerdicts.clear()
+      return
+    }
     const applied: string[] = []
+    const seen = new Set<string>()
     for (const approval of settled) {
+      seen.add(approval.id)
       // tile_ref is a producer DECLARATION, not an authenticated field: it is
-      // only ever used to look up a tile we own, and canApplyVerdict then
+      // only ever used to look up a tile we own, and classifyVerdict then
       // demands that tile still be the one waiting on this approval.
       const tile = approval.origin.tile_ref || approval.origin.session_ref
       const live = service.list().find((s) => s.id === tile)
       const state = live ? { exists: true, waiting: waitingTiles.has(tile) } : null
-      if (!canApplyVerdict(approval, state)) {
-        // Nothing to type, but it IS settled: mark it so it stops coming back.
+      const disposition = classifyVerdict(approval, state)
+      if (disposition === 'settle') {
+        // Nothing to type, and nothing ever will: mark it so it stops coming back.
         applied.push(approval.id)
+        heldVerdicts.delete(approval.id)
+        continue
+      }
+      if (disposition === 'defer') {
+        // Left UNDELIVERED on purpose: the tile is alive, so the same answer is
+        // retried at every poll until the session asks again.
+        if (!heldVerdicts.has(approval.id)) {
+          heldVerdicts.add(approval.id)
+          journal.add(
+            'attention',
+            `holding the answer to "${live?.name ?? tile}" — its "needs you" flag is down; it will be typed in if the session asks again`
+          )
+        }
+        continue
+      }
+      if (disposition === 'abandon') {
+        // The window closed. Give up typing it, but never silently: the
+        // operator answered and must learn that the session did not get it.
+        applied.push(approval.id)
+        heldVerdicts.delete(approval.id)
+        reportError(
+          'approvals',
+          `the answer to "${approval.title}" (from ${approval.answered_via}) was never typed into "${live?.name ?? tile}": the session stopped asking. Answer it in the terminal.`
+        )
         continue
       }
       const keys = buildKeystrokes(approval)
       if (!keys) {
+        // Sanitisation refused the remote text. Settled, but nothing reaches
+        // the session, so this must not be silent either.
         applied.push(approval.id)
+        heldVerdicts.delete(approval.id)
+        reportError(
+          'approvals',
+          `the answer to "${approval.title}" could not be typed into "${live?.name ?? tile}": nothing safe to send for a ${approval.answer_kind} answer`
+        )
         continue
       }
       service.write(tile, keys)
       waitingTiles.delete(tile)
       openApprovals.delete(tile)
+      heldVerdicts.delete(approval.id)
       journal.add('attention', `answered "${live?.name ?? tile}" from ${approval.answered_via}`)
       applied.push(approval.id)
     }
+    // Anything the broker no longer lists is gone (answered elsewhere, expired,
+    // purged): drop our bookkeeping with it.
+    for (const id of heldVerdicts) if (!seen.has(id)) heldVerdicts.delete(id)
     await markVerdictsDelivered(deps, applied)
   } catch (e) {
     reportError('approvals', 'verdict poll failed', e)
@@ -654,7 +707,19 @@ service.on(
       // via the terminal" -- do NOT read it as an answer, or clicking a
       // false-positive badge would silently ALLOW a pending remote/phone
       // approval nobody actually responded to (BLOCKER 2, review).
-      if (manual) return
+      if (manual) {
+        // The approval stays OPEN (the poller can still deliver it, see
+        // classifyVerdict's 'defer'), but the two views have just diverged:
+        // the Deck shows nothing pending while the phone still does. Card
+        // 9c6de1e1: that divergence used to be the one thing nobody could see.
+        const pending = openApprovals.get(id)
+        if (pending)
+          reportError(
+            'approvals',
+            `"${session?.name ?? id}" had its "needs you" flag dismissed while approval ${pending} is still open remotely — an answer sent from a phone cannot be typed in until that session asks again`
+          )
+        return
+      }
       const open = openApprovals.get(id)
       if (open) {
         openApprovals.delete(id)

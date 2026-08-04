@@ -243,19 +243,98 @@ export function buildKeystrokes(approval: Approval): string | null {
 }
 
 /**
- * Decide whether a verdict may still be applied to a session.
+ * How long a verdict may wait for its tile to ask again (card 9c6de1e1).
  *
- * Two guards, both necessary: the tile must still exist, and it must still be
- * waiting. An answer that arrives after the operator already dealt with the
- * prompt locally must be dropped, not typed into whatever is on screen now.
+ * Measured from `answered_at`, not from when this Deck first saw the verdict:
+ * the anchor then survives a Deck restart, and two Decks polling the same
+ * approval reach the same conclusion instead of each starting their own clock.
+ *
+ * The value trades two opposite risks. Too short and the fix does nothing (the
+ * dismissed prompt is still on screen, and a repaint that re-arms the flag
+ * arrives seconds later). Too long and the session may have moved on to a
+ * DIFFERENT question by the time it flags again, and would receive the old
+ * answer -- exactly what the `waiting` guard exists to prevent. 90s is ~9 poll
+ * ticks (INBOX_POLL_MS = 10s) and stays well inside one operator gesture.
+ *
+ * A BET, not a setting: it exists only because no signal distinguishes a
+ * repaint of the same still-blocked prompt from a brand-new question -- both
+ * reach the Deck as a fresh `waiting:true`. The bet is deliberately on the
+ * recoverable side (a lost answer the operator can retype, never an answer
+ * typed into the WRONG question). Should a prompt identity ever travel with an
+ * approval, match on it and DELETE this constant rather than tune it.
+ */
+export const VERDICT_DEFER_MS = 90_000
+
+/**
+ * What the poller must do with one settled verdict.
+ *
+ *  - `apply`   type it into the tile;
+ *  - `settle`  nothing to type and nothing ever will: mark it delivered;
+ *  - `defer`   the tile is alive but not asking right now: leave the verdict
+ *              UNDELIVERED so it comes back at the next poll;
+ *  - `abandon` deferred long enough: mark it delivered, but the caller must
+ *              leave a trace -- the operator answered and nothing was typed.
+ */
+export type VerdictDisposition = 'apply' | 'settle' | 'defer' | 'abandon'
+
+/**
+ * Decide what happens to a verdict that was settled elsewhere (phone).
+ *
+ * The `waiting` guard is the load-bearing one: an answer that arrives after
+ * the operator already dealt with the prompt locally must not be typed into
+ * whatever is on screen now. What card 9c6de1e1 fixed is not that guard but
+ * its OUTCOME -- the poller used to answer a single boolean and treat every
+ * `false` as "settled, stop sending it", which silently BURNED the answer when
+ * the operator had merely dismissed the attention badge (session-service's
+ * `clearAttention` drops the tile from `waitingTiles` by design) while the
+ * agent was still sitting at the very same prompt.
+ *
+ * So a live tile that is not currently flagged is deferred, not settled: the
+ * broker keeps the verdict on its undelivered list, and it is applied the
+ * moment the session asks again -- bounded by VERDICT_DEFER_MS, past which it
+ * is abandoned WITH a trace rather than quietly dropped.
+ */
+export function classifyVerdict(
+  approval: Approval,
+  session: { exists: boolean; waiting: boolean } | null,
+  now: number = Date.now()
+): VerdictDisposition {
+  // The broker already handed a 'channel' answer to the peer as a message;
+  // typing it in as well would deliver it twice.
+  if (approval.reply_route === 'channel') return 'settle'
+  // No tile to type into, and none will appear: this one is genuinely over.
+  // Checked before the 'answered' check below on purpose: an unanswered
+  // approval whose tile has vanished would otherwise fall through to
+  // 'settle' too, but that path is unreachable in practice -- the broker
+  // only lists an approval as undelivered once status='answered' and
+  // answered_at is set (broker.ts undelivered_only filter, ~line 2697).
+  if (!session?.exists) return 'settle'
+  // Not settled at all (the undelivered list should never carry these). Hold
+  // it: marking an unanswered approval delivered would destroy the operator's
+  // only chance to answer it.
+  if (approval.status !== 'answered' || approval.answer_kind === null) return 'defer'
+  if (session.waiting) return 'apply'
+  // Alive, answered, but its flag is down. NaN-safe on purpose: an absent or
+  // malformed answered_at has no deadline to compare against, so it falls to
+  // the traced outcome rather than deferring forever (every comparison against
+  // NaN is false, which would otherwise read as "still inside the window").
+  const answeredAt = Date.parse(approval.answered_at ?? '')
+  if (!Number.isFinite(answeredAt)) return 'abandon'
+  return now - answeredAt < VERDICT_DEFER_MS ? 'defer' : 'abandon'
+}
+
+/**
+ * Whether a verdict may be typed into a session right now.
+ *
+ * One truth (derived from classifyVerdict, never duplicated): today
+ * classifyVerdict is the only production consumer (index.ts, which needs the
+ * full disposition, not just apply/no), and canApplyVerdict itself is
+ * exercised by the test suite, which cross-checks it against classifyVerdict
+ * for every session state.
  */
 export function canApplyVerdict(
   approval: Approval,
   session: { exists: boolean; waiting: boolean } | null
 ): boolean {
-  // The broker already handed a 'channel' answer to the peer as a message;
-  // typing it in as well would deliver it twice.
-  if (approval.reply_route === 'channel') return false
-  if (!session?.exists || !session.waiting) return false
-  return approval.status === 'answered' && approval.answer_kind !== null
+  return classifyVerdict(approval, session) === 'apply'
 }
