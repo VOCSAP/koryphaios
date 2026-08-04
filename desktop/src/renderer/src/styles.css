@@ -2272,6 +2272,24 @@ svg.glyph {
 .rm-badge-status-done { color: #3ec46d; border-color: color-mix(in srgb, #3ec46d 50%, transparent); }
 .rm-badge-tag { color: var(--accent); }
 
+/* Short item id, first in both badge rows (kanban card + detail modal): the
+   handle agents address cards by. Monospace + --fg-dim keeps it metadata, and
+   it deliberately carries NO pill border so it never reads as one more badge
+   competing with .rm-title. Click-to-copy, hence the pointer and hover tone. */
+.rm-id {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono, monospace);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
+.rm-id:hover {
+  color: var(--fg);
+}
+
 /* Detail / edit modal (PLAN K5): the Trello-style foreground card. */
 .rm-modal {
   width: 640px;

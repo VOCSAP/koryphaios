@@ -680,6 +680,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.planImportStarted':
     'Import agent started — it converts the plan into roadmap items, then closes',
   'toast.roadmapSaved': 'Roadmap item saved',
+  'toast.idCopied': 'Item id copied',
   'toast.roadmapArchived': 'Roadmap item archived',
   'tile.snippetsTitle': 'Insert a saved prompt (fills the input, does not send)',
   'snippets.title': 'Saved prompts',
@@ -786,6 +787,7 @@ export const EN_DEFAULTS: Record<string, string> = {
     'Mark "{title}" as done? Agents will no longer pick it up.',
   'roadmap.confirmDone': 'Mark done',
   'roadmap.lockedHint': 'An agent is actively working on this item (locked)',
+  'roadmap.copyId': 'Copy the item id',
   'roadmap.lockedSince': 'Locked by {name} since {date}',
   'roadmap.dependsOn': 'Depends on',
   'roadmap.addDep': 'Add dependency',

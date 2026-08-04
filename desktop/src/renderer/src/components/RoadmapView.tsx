@@ -14,7 +14,7 @@ import { useT, type TFn } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { CreateMenu } from './CreateMenu'
-import { KIND_ICONS, RoadmapItemModal } from './RoadmapItemModal'
+import { KIND_ICONS, RoadmapItemId, RoadmapItemModal } from './RoadmapItemModal'
 import { WorkflowLane } from './WorkflowLane'
 import { enqueueClosure, insertAt, insertSoloWaves, queuedItems, wavesOf } from '@shared/workflow'
 
@@ -152,6 +152,10 @@ function BoardCard({
         <span className="rm-title">{item.title}</span>
       </span>
       <span className="rm-badges">
+        {/* Short id first, Trello card-number position: the operator reads the
+            board but agents address cards by id, so the link has to be on the
+            miniature, not only in the detail modal. */}
+        <RoadmapItemId item={item} t={t} />
         <span className={`rm-badge rm-badge-value-${item.value}`}>
           {t('roadmap.value')}: {t(`roadmap.level.${item.value}`)}
         </span>

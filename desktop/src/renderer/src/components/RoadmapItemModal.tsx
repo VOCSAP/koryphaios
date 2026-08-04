@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { RoadmapItem, RoadmapKind } from '@shared/types'
 import { dependsWouldCycle } from '@shared/workflow'
 import { useT, type TFn } from '../i18n'
+import { useDeck } from '../store'
 import { GLYPH_ACTIONS, GLYPH_BADGES, GLYPH_KINDS } from './icons'
 import { parseMarkdown, type BlockToken, type InlineToken } from '../markdown'
 import { ContextMenu } from './ContextMenu'
@@ -105,9 +106,44 @@ export function Markdown({ source }: { source: string }): React.JSX.Element {
   )
 }
 
+/**
+ * The item's short id, the handle agents actually read and write cards by
+ * (roadmap_get / roadmap_update take the 8-char form the dispatch prompt
+ * inlines). Shown on the kanban card AND here so the operator can quote an id
+ * from the screen instead of going through the CLI.
+ *
+ * A span with role="button", never a <button>: on the board this renders inside
+ * the card, which is itself a <button> (nested buttons are invalid) and is
+ * draggable, so a text-selection gesture would start an HTML5 drag -- hence
+ * click-to-copy rather than plain selectable text. The click is stopped so it
+ * never opens the card underneath.
+ */
+export function RoadmapItemId({ item, t }: { item: RoadmapItem; t: TFn }): React.JSX.Element {
+  const showToast = useDeck((s) => s.showToast)
+  const short = item.id.slice(0, 8)
+  return (
+    <span
+      className="rm-id"
+      role="button"
+      title={t('roadmap.copyId')}
+      onClick={(e) => {
+        e.stopPropagation()
+        navigator.clipboard.writeText(short).then(
+          () => showToast('toast.idCopied'),
+          // Denied permission / non-secure context: never an unhandled rejection.
+          (err: unknown) => window.api.reportError('roadmap', `copy id: ${String(err)}`)
+        )
+      }}
+    >
+      {short}
+    </span>
+  )
+}
+
 function badges(item: RoadmapItem, t: TFn): React.JSX.Element {
   return (
     <div className="rm-detail-badges">
+      <RoadmapItemId item={item} t={t} />
       <span className={`rm-badge rm-prio-${item.priority}`}>
         {t(`roadmap.priority.${item.priority}`)}
       </span>
