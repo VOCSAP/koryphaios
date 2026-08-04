@@ -95,7 +95,7 @@ describe("normalizeNtfyServer", () => {
   });
 
   test("strips control characters before parsing", () => {
-    expect(normalizeNtfyServer("https://ntfy.sh")).toEqual({ ok: true, value: "https://ntfy.sh" });
+    expect(normalizeNtfyServer("https://ntfy.sh\x07")).toEqual({ ok: true, value: "https://ntfy.sh" });
   });
 });
 

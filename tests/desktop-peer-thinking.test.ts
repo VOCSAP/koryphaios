@@ -95,7 +95,7 @@ test("detects the braille spinner and strips ANSI around the marker", () => {
   const events: ThinkingEvent[] = [];
   d.on("thinking", (e: ThinkingEvent) => events.push(e));
   // Spinner frame wrapped in colour codes.
-  d.feed("s1", "[33m⠹[0m thinking");
+  d.feed("s1", "\x1b[33m⠹\x1b[0m thinking");
   expect(events).toEqual([{ id: "s1", busy: true }]);
   d.stop();
 });
