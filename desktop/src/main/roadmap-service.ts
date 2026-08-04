@@ -14,6 +14,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { reportError } from './log'
 import type { BrokerEndpoint } from './broker-client'
 import type {
   RoadmapArchiveResponse,
@@ -103,6 +104,147 @@ async function roadmapPost<T>(endpoint: BrokerEndpoint, path: string, body: unkn
 /** Operator writes are attributed to the reserved 'deck' author. */
 const DECK_AUTHOR = 'deck'
 
+// --- Boundary validation (roadmap card c7ba8ce8) -----------------------------
+//
+// roadmapPost ends with `as T` on a network body, which validates nothing, while
+// a broker response field is hostile input #2 by convention. Measured cost of
+// trusting it: a `target_peer_ids` holding a STRING does NOT throw in
+// resolveDirectiveTargets (directive.ts iterates the CHARACTERS of a string), so
+// executeDirective reaches its `matched.length === 0` branch and rejects on
+// `.join`. The same shape on `depends_on` is worse because it is SILENT: a
+// string HAS `.includes`, so RoadmapList/RoadmapView answer substring matches
+// and report dependencies that do not exist, with no error anywhere.
+//
+// The guard therefore lives at the choke point every response passes through,
+// not at one caller: validating only listRoadmap would leave upsert, reorder and
+// archive open, which is a validator wired to one of its call paths.
+//
+// COERCE, do not drop: an empty `target_peer_ids` routes into the pre-existing
+// "no live target" branch, which already journals. Dropping the item instead
+// would make the operator's board lie by omission.
+
+const KINDS = ['feature', 'bug', 'debt', 'idea', 'chore', 'directive'] as const
+const PRIORITIES = ['must', 'should', 'could', 'wont'] as const
+const LEVELS = ['low', 'medium', 'high'] as const
+const STATUSES = ['idea', 'planned', 'in_progress', 'done', 'archived'] as const
+const DIRECTIVES = ['clear', 'compact', 'magic_compact'] as const
+
+function str(v: unknown): string {
+  return typeof v === 'string' ? v : ''
+}
+
+function nullableStr(v: unknown): string | null {
+  return typeof v === 'string' ? v : null
+}
+
+/** An array of strings, or [] -- wrong ELEMENTS are as dangerous as a wrong shape. */
+function strList(v: unknown): string[] {
+  if (!Array.isArray(v)) return []
+  return v.every((x) => typeof x === 'string') ? (v as string[]) : []
+}
+
+function oneOf<T extends string>(v: unknown, allowed: readonly T[], fallback: T): T {
+  return typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : fallback
+}
+
+/**
+ * A queue position, or null. Rejects NaN explicitly: every comparison against
+ * NaN is false, so a range check would pass it straight through.
+ *
+ * Measured: a JSON body can never carry a bare NaN (`JSON.parse('{"q":NaN}')`
+ * throws), so over the wire the reachable shapes are `"3"`, `"NaN"` and `null`.
+ * The NaN branch guards the DIRECT-call path only -- this function is exported
+ * and a future caller may build the object in code. Note also that coercing
+ * through `Number()` would be wrong here: `Number(null)` is 0, which would turn
+ * "not queued" into queue position 0.
+ */
+function queuePos(v: unknown): number | null {
+  return typeof v === 'number' && Number.isInteger(v) ? v : null
+}
+
+/**
+ * Shape one roadmap item coming off the wire, or null when it is unusable.
+ *
+ * PICK-LIST, NEVER A SPREAD. Do not "simplify" this into `{ ...raw, tags: ... }`:
+ * `RoadmapItem` has 24 fields and the list below covers all 24, so a 25th added
+ * broker-side would travel through unvalidated with nothing failing, which is
+ * the canonical fail-open shape this guard exists to avoid. Naming every field
+ * means a new one simply does not arrive until someone adds it here, and the
+ * compiler asks for it.
+ *
+ * `id` and `project_key` are STRUCTURAL rather than coercible: an item without
+ * them cannot be addressed, updated or matched, so it is dropped and traced.
+ */
+export function sanitizeRoadmapItem(raw: unknown): RoadmapItem | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const r = raw as Record<string, unknown>
+  if (typeof r.id !== 'string' || !r.id) return null
+  if (typeof r.project_key !== 'string' || !r.project_key) return null
+  return {
+    id: r.id,
+    project_key: r.project_key,
+    kind: oneOf(r.kind, KINDS, 'feature'),
+    title: str(r.title),
+    description: str(r.description),
+    rationale: str(r.rationale),
+    context: str(r.context),
+    priority: oneOf(r.priority, PRIORITIES, 'could'),
+    value: oneOf(r.value, LEVELS, 'medium'),
+    effort: oneOf(r.effort, LEVELS, 'medium'),
+    status: oneOf(r.status, STATUSES, 'idea'),
+    tags: strList(r.tags),
+    depends_on: strList(r.depends_on),
+    created_by: str(r.created_by),
+    updated_by: str(r.updated_by),
+    created_at: str(r.created_at),
+    updated_at: str(r.updated_at),
+    deleted_at: nullableStr(r.deleted_at),
+    queue: queuePos(r.queue),
+    locked: r.locked === true,
+    locked_by: nullableStr(r.locked_by),
+    locked_at: nullableStr(r.locked_at),
+    directive: typeof r.directive === 'string' ? oneOfOrNull(r.directive) : null,
+    target_peer_ids: strList(r.target_peer_ids)
+  }
+}
+
+function oneOfOrNull(v: string): RoadmapItem['directive'] {
+  return (DIRECTIVES as readonly string[]).includes(v) ? (v as RoadmapItem['directive']) : null
+}
+
+/** Sanitize a list response, tracing HOW MANY items were unusable and dropped. */
+function sanitizeList(raw: unknown, route: string): RoadmapItem[] {
+  const items = Array.isArray(raw) ? raw : []
+  if (!Array.isArray(raw)) {
+    reportError('roadmap', `${route}: response items was not an array; treated as empty`)
+  }
+  const out: RoadmapItem[] = []
+  let dropped = 0
+  for (const it of items) {
+    const clean = sanitizeRoadmapItem(it)
+    if (clean) out.push(clean)
+    else dropped++
+  }
+  if (dropped > 0) {
+    reportError('roadmap', `${route}: dropped ${dropped} item(s) with no usable id/project_key`)
+  }
+  return out
+}
+
+/**
+ * Sanitize a SINGLE-item response. Unlike a list, there is no meaningful
+ * degraded result here: the caller asked about one card and would otherwise get
+ * a fabricated one, so an unusable item is an error of that call.
+ */
+function sanitizeOne(raw: unknown, route: string): RoadmapItem {
+  const clean = sanitizeRoadmapItem(raw)
+  if (!clean) {
+    reportError('roadmap', `${route}: response item has no usable id/project_key`)
+    throw new Error(`${route}: malformed roadmap item in response`)
+  }
+  return clean
+}
+
 export async function listRoadmap(
   endpoint: BrokerEndpoint,
   projectKey: string,
@@ -112,7 +254,7 @@ export async function listRoadmap(
     project_key: projectKey,
     ...filters
   })
-  return res.items
+  return sanitizeList(res?.items, '/roadmap/list')
 }
 
 export async function upsertRoadmap(
@@ -126,7 +268,7 @@ export async function upsertRoadmap(
     by: DECK_AUTHOR,
     ...fields
   })
-  return res.item
+  return sanitizeOne(res?.item, '/roadmap/upsert')
 }
 
 /**
@@ -148,7 +290,7 @@ export async function reorderRoadmap(
     // an older broker sees exactly the request shape it already understands.
     ...(waves !== undefined ? { waves } : {})
   })
-  return res.items
+  return sanitizeList(res?.items, '/roadmap/reorder')
 }
 
 export async function archiveRoadmap(endpoint: BrokerEndpoint, id: string): Promise<RoadmapItem> {
@@ -156,5 +298,5 @@ export async function archiveRoadmap(endpoint: BrokerEndpoint, id: string): Prom
     id,
     by: DECK_AUTHOR
   })
-  return res.item
+  return sanitizeOne(res?.item, '/roadmap/archive')
 }

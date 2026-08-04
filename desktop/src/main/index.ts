@@ -993,22 +993,30 @@ const runMagicCompact = async (
  * runDirectiveWave's catch in dispatch.ts is defense-in-depth, not a live
  * path. The danger is NOT an await (this function contains none): it's a
  * SYNCHRONOUS call that throws inside this async wrapper, which becomes a
- * rejected promise. Five calls qualify: resolveFeatures,
- * magicCompactPluginPresent, join(), homedir(), resolveDirectiveTargets.
- * Only two are actually guarded today: magicCompactPluginPresent ->
- * dirHasMagic (magic-compact.ts) guards readdirSync/statSync and returns
- * false; resolveFeatures -> readConfigFile (launch-config.ts) guards
- * readFileSync+JSON.parse and returns null. The other three -- join(),
- * homedir(), resolveDirectiveTargets -- have no guard at all; they don't
- * reject today only because their inputs are well-formed in practice
- * (env-derived strings for join/homedir; resolveDirectiveTargets given a
- * malformed item.target_peer_ids -- hostile input #2, a broker response
- * field -- would throw on `for (const raw of targetPeerIds)` or
- * `raw.trim()`). That's fragile and non-local -- if either guarded call
- * stops swallowing, or a malformed target_peer_ids ever arrives, this
- * rejects with no change here (card 96de33bc). Keep the two `for`-loop
- * branches fire-and-forget with their own
- * handler, which stays exact.
+ * rejected promise.
+ *
+ * THE RULE, deliberately not a list (card c7ba8ce8): NO synchronous call in
+ * this prelude may throw. An earlier version of this note enumerated the five
+ * calls that qualified, which read as exhaustive and was not -- a string-valued
+ * `target_peer_ids` slips PAST resolveDirectiveTargets (it iterates the
+ * CHARACTERS of a string) and rejects further down on `.join`, a sixth vector
+ * the list never named. Any enumeration here under-counts again the next time a
+ * call is added; the rule cannot.
+ *
+ * WHAT ENFORCES IT, checkable: `sanitizeRoadmapItem` in
+ * desktop/src/main/roadmap-service.ts, applied by all four wrappers around
+ * `roadmapPost`, so every field of `item` reaching this function already has
+ * its declared type -- `target_peer_ids` is an array of strings or []. That
+ * closes the whole class at the boundary rather than one call at a time, which
+ * is why nothing here validates `item`. The two fs-touching calls keep their
+ * own guards independently: magicCompactPluginPresent -> dirHasMagic
+ * (magic-compact.ts) swallows readdirSync/statSync and returns false;
+ * resolveFeatures -> readConfigFile (launch-config.ts) swallows
+ * readFileSync+JSON.parse and returns null. If either stops swallowing, this
+ * function starts rejecting with no change here.
+ *
+ * Keep the two `for`-loop branches fire-and-forget with their own handler,
+ * which stays exact.
  *
  * Execute a directive card (CT3): the Deck itself types the command into the
  * terminals of the card's live targets. It NEVER announces to the lead. The
