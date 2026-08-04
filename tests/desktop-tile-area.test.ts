@@ -387,3 +387,129 @@ test("toggling displayMode between grid and 1x1 carousel does not remount Termin
   expect(mountCounts.get("s1")).toBe(1);
   expect(mountCounts.get("s2")).toBe(1);
 });
+
+// ---------------------------------------------------------------------------
+// NEGATIVE CONTROL (spec_b0cf2db9, team-lead ask 2026-08-04).
+//
+// Everything above asserts ZERO unmounts. Ten such assertions prove ten true
+// statements and nothing more: a counter that has silently lost the ability to
+// observe a remount passes them all. The red-first measurement that made them
+// meaningful ("1 unmount before the fix, 0 after") was taken once, by hand,
+// and lives in commit 1320be6's MESSAGE -- nothing in this tree replays it. So
+// the day React stops deriving an implicit key path from a JSX subtree's
+// structural position, the guard above becomes vacuous and stays green for the
+// wrong reason, with nobody the wiser.
+//
+// The two tests below are that missing replay. They do not test TileArea: they
+// test THE MECHANISM the guard depends on, on two miniature components that
+// differ only in children shape. The pre-fix shape must remount, the shipped
+// shape must not. If the pre-fix one ever passes WITHOUT unmounts, the
+// mechanism is gone and every zero-unmount assertion above has become
+// unfalsifiable -- that failure is the signal, not a nuisance to silence.
+//
+// TRAP, measured 2026-07-30, and the reason this must not be "simplified":
+// each shape has to be ONE component with THREE returns, exactly like the real
+// TileArea. Writing each branch as its own component makes React remount on
+// the element TYPE change, which produces the expected unmount for a reason
+// that has nothing to do with children shape. A control that passes for the
+// wrong reason is worth less than no control at all.
+const ctlMounts = new Map<string, number>();
+const ctlUnmounts = new Map<string, number>();
+
+function ControlTile({ id }: { id: string }): React.JSX.Element {
+  React.useEffect(() => {
+    ctlMounts.set(id, (ctlMounts.get(id) ?? 0) + 1);
+    return () => {
+      ctlUnmounts.set(id, (ctlUnmounts.get(id) ?? 0) + 1);
+    };
+  }, [id]);
+  return React.createElement("div", { "data-testid": `ctl-${id}` });
+}
+
+interface ShapeProps {
+  ids: string[];
+  pending: number;
+  maximized: boolean;
+  carousel: boolean;
+}
+
+/**
+ * Pre-fix shape: every branch builds its own children, and the maximized one
+ * omits the pending slot entirely -- so its children is a bare array while the
+ * other two are [array, pendingArray]. Reproduced from TileArea.tsx as it
+ * stood before 1320be6.
+ */
+function LegacyShape({ ids, pending, maximized, carousel }: ShapeProps): React.JSX.Element {
+  const tiles = ids.map((id) => React.createElement(ControlTile, { key: id, id }));
+  const pendingTiles = Array.from({ length: pending }, (_, i) =>
+    React.createElement("span", { key: `pending-${i}` }),
+  );
+  if (maximized) return React.createElement("main", { className: "area-maximized" }, tiles);
+  if (carousel) return React.createElement("main", { className: "area-carousel" }, tiles, pendingTiles);
+  return React.createElement("main", { className: "area-grid" }, tiles, pendingTiles);
+}
+
+/**
+ * Shipped shape: one `children` built once above the three returns, with the
+ * pending slot NULLED rather than omitted when maximized so the second child
+ * position stays occupied. Mirrors TileArea.tsx's current hoisted `children`,
+ * and is what makes the "nulled, not omitted" review rule falsifiable here.
+ */
+function FixedShape({ ids, pending, maximized, carousel }: ShapeProps): React.JSX.Element {
+  const tiles = ids.map((id) => React.createElement(ControlTile, { key: id, id }));
+  const pendingTiles = Array.from({ length: pending }, (_, i) =>
+    React.createElement("span", { key: `pending-${i}` }),
+  );
+  const children = React.createElement(React.Fragment, null, tiles, maximized ? null : pendingTiles);
+  if (maximized) return React.createElement("main", { className: "area-maximized" }, children);
+  if (carousel) return React.createElement("main", { className: "area-carousel" }, children);
+  return React.createElement("main", { className: "area-grid" }, children);
+}
+
+function renderShape(Shape: (p: ShapeProps) => React.JSX.Element, props: ShapeProps): void {
+  act(() => {
+    root.render(React.createElement(Shape, props));
+  });
+}
+
+test("negative control: the PRE-FIX children shape really does remount tiles on maximize", () => {
+  ctlMounts.clear();
+  ctlUnmounts.clear();
+  const base: ShapeProps = { ids: ["s1", "s2"], pending: 1, maximized: false, carousel: false };
+
+  renderShape(LegacyShape, base);
+  expect(ctlMounts.get("s1")).toBe(1);
+  expect(ctlMounts.get("s2")).toBe(1);
+  expect(ctlUnmounts.get("s1") ?? 0).toBe(0);
+
+  // Grid -> maximized on the SAME component type: the only thing that changes
+  // is the children shape ([tiles, pending] -> tiles).
+  renderShape(LegacyShape, { ...base, maximized: true });
+  expect(ctlUnmounts.get("s1")).toBe(1);
+  expect(ctlUnmounts.get("s2")).toBe(1);
+  expect(ctlMounts.get("s1")).toBe(2);
+  expect(ctlMounts.get("s2")).toBe(2);
+});
+
+test("negative control twin: the SHIPPED children shape survives the same transition", () => {
+  ctlMounts.clear();
+  ctlUnmounts.clear();
+  const base: ShapeProps = { ids: ["s1", "s2"], pending: 1, maximized: false, carousel: false };
+
+  renderShape(FixedShape, base);
+  expect(ctlMounts.get("s1")).toBe(1);
+  expect(ctlMounts.get("s2")).toBe(1);
+
+  // Identical transitions, identical component type: the ONLY difference from
+  // the test above is the children shape, which is what attributes the remount
+  // to the shape and not to the branch switch itself.
+  renderShape(FixedShape, { ...base, maximized: true });
+  expect(ctlUnmounts.get("s1") ?? 0).toBe(0);
+  expect(ctlUnmounts.get("s2") ?? 0).toBe(0);
+
+  renderShape(FixedShape, { ...base, maximized: false, carousel: true });
+  expect(ctlUnmounts.get("s1") ?? 0).toBe(0);
+  expect(ctlUnmounts.get("s2") ?? 0).toBe(0);
+  expect(ctlMounts.get("s1")).toBe(1);
+  expect(ctlMounts.get("s2")).toBe(1);
+});
