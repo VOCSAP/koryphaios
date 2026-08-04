@@ -210,7 +210,7 @@ switch (cmd) {
     // prose is long/multi-line, and quoting it through a shell is fragile.
     // This is the sanctioned fallback when a session's own tool-list omits
     // the MCP roadmap_add tool (a harness-side snapshot gap, independent of
-    // the server -- see .claude/skills/roadmap-card/SKILL.md). The broker
+    // the server -- see desktop/deck-plugin/skills/roadmap-card/SKILL.md). The broker
     // token is resolved internally by loadConfig()/authHeaders(); this verb's
     // argv surface never carries it, so the caller never sees or types it.
     const inputFlagIdx = flags.indexOf("--input");

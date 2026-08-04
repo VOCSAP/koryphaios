@@ -30,19 +30,19 @@
 //
 // Named tests/cli-*.test.ts, matching the existing tests/broker-*.test.ts /
 // tests/server-*.test.ts convention for root-level (non-desktop) suites.
-// Per TESTING.md ("Cross-platform tests"), the CI matrix in
-// .github/workflows/desktop-build.yml only collects
-// tests/desktop-*.test.ts, tests/notify-*.test.ts and
-// tests/mobile-shell-*.test.ts -- exactly like the pre-existing
-// tests/broker-*.test.ts and tests/server-*.test.ts suites, this one runs
-// via local `bun test` (CLAUDE.md pre-commit convention), not the desktop CI
-// job; it is not desktop/notify/mobile-shell code, so it does not belong in
-// that glob.
+// .github/workflows/desktop-build.yml's CI run line DOES collect
+// tests/cli-*.test.ts (alongside desktop-*, notify-*, mobile-shell-*,
+// config-*, approval-identity, peer-*, graph-* and logger) -- this test runs
+// in CI, not just via local `bun test`. That matters here specifically: this
+// glob is what would catch, on a fresh clone, a commit that deletes the old
+// SKILL.md/roadmap-scribe.md paths without adding the new ones -- the guard
+// only holds if it actually runs somewhere.
 //
 // Team-lead review, 2026-08-03 (round 2): the first version of this test
 // only read cli.ts and SKILL.md, so it passed green while the raw HTTP +
 // `Authorization: Bearer` fallback still sat in
-// .claude/agents/roadmap-scribe.md -- the file SKILL.md forks into and that
+// .claude/agents/roadmap-scribe.md (today desktop/deck-plugin/agents/roadmap-scribe.md)
+// -- the file SKILL.md forks into and that
 // actually EXECUTES when the fallback fires. A guard that checks the
 // document ABOUT the fix but not the file that ACTS on it audits the wrong
 // carrier. AGENT_SOURCE below closes that gap; the two negative assertions
@@ -55,11 +55,11 @@ import { expect, test } from "bun:test";
 const REPO_ROOT = join(import.meta.dir, "..");
 const CLI_SOURCE = readFileSync(join(REPO_ROOT, "cli.ts"), "utf-8");
 const SKILL_SOURCE = readFileSync(
-  join(REPO_ROOT, ".claude", "skills", "roadmap-card", "SKILL.md"),
+  join(REPO_ROOT, "desktop", "deck-plugin", "skills", "roadmap-card", "SKILL.md"),
   "utf-8",
 );
 const AGENT_SOURCE = readFileSync(
-  join(REPO_ROOT, ".claude", "agents", "roadmap-scribe.md"),
+  join(REPO_ROOT, "desktop", "deck-plugin", "agents", "roadmap-scribe.md"),
   "utf-8",
 );
 
