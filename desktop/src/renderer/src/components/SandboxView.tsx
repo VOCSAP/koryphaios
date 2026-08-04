@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { SandboxContainerAction, SandboxContainerInfo, SandboxWorkMode } from '@shared/types'
-import { SANDBOX_IMAGE_CUSTOM_TAG, SANDBOX_IMAGE_DEFAULT_TAG } from '@shared/types'
+import { SANDBOX_IMAGE_CUSTOM_TAG, SANDBOX_IMAGE_DEFAULT_TAG, isUnboundedGlob } from '@shared/types'
 import { errorText, useDeck } from '../store'
 import { useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -40,6 +40,11 @@ export function SandboxView(): React.JSX.Element {
   const [confirmImageRemove, setConfirmImageRemove] = useState(false)
   const [actionBusy, setActionBusy] = useState<string | null>(null)
   const [globsDraft, setGlobsDraft] = useState<string | null>(null)
+  // Client-side mirror of writeSandboxSettings' write-path rejection (card
+  // 4b668844): caught here so the refusal is immediate and localized instead
+  // of round-tripping through the generic `sandbox settings failed: ...`
+  // toast — main still re-checks on save as the fail-closed backstop.
+  const [globsError, setGlobsError] = useState<string | null>(null)
   const [portsDraft, setPortsDraft] = useState<string | null>(null)
   const [imageDraft, setImageDraft] = useState<string | null>(null)
   // Custom image fragment (f29b1917): saved copy + unsaved draft, same
@@ -123,6 +128,12 @@ export function SandboxView(): React.JSX.Element {
       .split(/[\n,]/)
       .map((g) => g.trim())
       .filter(Boolean)
+    const unbounded = globs.filter(isUnboundedGlob)
+    if (unbounded.length > 0) {
+      setGlobsError(t('sandbox.copyIgnoredUnbounded', { globs: unbounded.join(', ') }))
+      return
+    }
+    setGlobsError(null)
     await patchSandbox({ copyIgnored: globs })
     setGlobsDraft(null)
     await refresh()
@@ -520,18 +531,28 @@ export function SandboxView(): React.JSX.Element {
               rows={3}
               value={globsDraft ?? status.copyIgnored.join('\n')}
               placeholder={t('sandbox.copyIgnoredPlaceholder')}
-              onChange={(e) => setGlobsDraft(e.target.value)}
+              onChange={(e) => {
+                setGlobsDraft(e.target.value)
+                setGlobsError(null)
+              }}
             />
             <div className="sandbox-line">
               <button className="primary" disabled={globsDraft === null} onClick={() => void saveGlobs()}>
                 {t('sandbox.copySaveGlobs')}
               </button>
               {globsDraft !== null && (
-                <button className="btn" onClick={() => setGlobsDraft(null)}>
+                <button
+                  className="btn"
+                  onClick={() => {
+                    setGlobsDraft(null)
+                    setGlobsError(null)
+                  }}
+                >
                   {t('common.cancel')}
                 </button>
               )}
             </div>
+            {globsError && <div className="sandbox-line sandbox-warn">{globsError}</div>}
           </div>
           <div className="sandbox-line sandbox-dim">{t('sandbox.copyDenyHint')}</div>
           {status.copyUnmatched.length > 0 && (

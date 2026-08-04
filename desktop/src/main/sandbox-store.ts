@@ -12,6 +12,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { writeFileAtomic } from './atomic-write'
 import { DEFAULT_SANDBOX_PORTS, SANDBOX_IMAGE_DEFAULT } from './sandbox-command'
+import { isUnboundedGlob, SANDBOX_UNBOUNDED_GLOB_ERROR } from '../shared/types'
 
 /**
  * `mount` — the real project dir is bind-mounted: agents edit the operator's
@@ -125,12 +126,26 @@ export function projectSandboxSettings(file: string, projectKey: string): Sandbo
 /**
  * Patch one project's settings (atomic — the file also carries other
  * projects). Unknown/invalid fields are clamped by saneSettings.
+ *
+ * Unbounded globs (`*`, `**`, `**\/*`, `.*` — see isUnboundedGlob) are
+ * rejected here, at the WRITE path only, fail-closed: the whole patch is
+ * refused rather than silently dropping just the offending entries (card
+ * 4b668844). Deliberately NOT enforced in saneGlobs/saneSettings, which also
+ * back the READ path (readSandboxStore) — an already-persisted store that
+ * predates this check keeps loading as-is; only a fresh save that still
+ * contains one of these gets turned away.
  */
 export function writeSandboxSettings(
   file: string,
   projectKey: string,
   patch: Partial<SandboxProjectSettings>
 ): SandboxProjectSettings {
+  if (patch.copyIgnored !== undefined) {
+    const rejected = saneGlobs(patch.copyIgnored).filter(isUnboundedGlob)
+    if (rejected.length > 0) {
+      throw new Error(`${SANDBOX_UNBOUNDED_GLOB_ERROR}${rejected.join(',')}`)
+    }
+  }
   const data = readSandboxStore(file)
   const prev = data.projects[projectKey] ?? { ...DEFAULT_SETTINGS }
   const next = saneSettings({ ...prev, ...patch })

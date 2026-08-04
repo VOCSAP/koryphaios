@@ -1,7 +1,7 @@
 // PLAN-SANDBOX M3: ephemeral-copy selection (glob matching + the hard deny
 // list that always wins) — desktop/src/main/sandbox-copy.
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,6 +12,14 @@ import {
   selectCopyPaths,
   walkProjectFiles,
 } from "../desktop/src/main/sandbox-copy.ts";
+import { onDeckError } from "../desktop/src/main/log.ts";
+
+/** Capture reportError('sandbox', ...) calls via the Journal hook (card 5ff9a432). */
+function captureDeckErrors(): { scope: string; text: string }[] {
+  const captured: { scope: string; text: string }[] = [];
+  onDeckError((scope, text) => captured.push({ scope, text }));
+  return captured;
+}
 
 test("globToRegExp: * stays inside a segment, ** crosses", () => {
   expect(globToRegExp("PLAN-*.md").test("PLAN-A.md")).toBe(true);
@@ -159,6 +167,29 @@ test("deny list: anti-overblock -- legitimate lookalike files stay allowed", () 
   }
 });
 
+test("deny list: card 5ff9a432 build/dependency dirs (target, vendor, Pods, .gradle)", () => {
+  for (const p of [
+    "target/classes/App.class",
+    "vendor/pkg/a.php",
+    "Pods/Alamofire/a.m",
+    ".gradle/caches/x",
+  ]) {
+    expect(isDeniedCopyPath(p)).toBe(true);
+  }
+});
+
+test("deny list: card 5ff9a432 dirs match only an exact path segment, not a substring", () => {
+  for (const p of [
+    "my-target/file.txt",
+    "target-audience.md",
+    "vendors/a.txt",
+    "PodsExtra/a.txt",
+    ".gradlew",
+  ]) {
+    expect(isDeniedCopyPath(p)).toBe(false);
+  }
+});
+
 test("structural: every SKIP_DIRS entry is also denied by DENY_PATTERNS (finding 6)", () => {
   // Enumerated FROM the exported SKIP_DIRS set itself, not a hardcoded copy,
   // so a future addition to SKIP_DIRS that forgets deny coverage fails this
@@ -178,14 +209,18 @@ test("structural: SKIP_DIRS content is pinned (review round 2, card 94f8cc0c)", 
   expect([...SKIP_DIRS].sort()).toEqual([
     ".cache",
     ".git",
+    ".gradle",
     ".next",
     ".venv",
     ".worktrees",
+    "Pods",
     "__pycache__",
     "build",
     "dist",
     "node_modules",
     "out",
+    "target",
+    "vendor",
   ]);
 });
 
@@ -221,6 +256,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
+  onDeckError(() => {}); // don't leak a test-local listener into later tests/files
 });
 
 test("walkProjectFiles skips heavy dirs and returns posix-relative paths", () => {
@@ -265,4 +301,91 @@ test("walkProjectFiles never follows symlinks (foreign files, and infinite loops
   } finally {
     rmSync(outside, { recursive: true, force: true });
   }
+});
+
+// Card 5ff9a432: hitting MAX_WALK_ENTRIES/MAX_WALK_VISITS used to truncate
+// the copy plan with zero trace anywhere. `limits` overrides the caps so the
+// probe stays fast instead of materializing 20k+ real files.
+test("walkProjectFiles: no truncation trace when the tree is well under both caps", () => {
+  const captured = captureDeckErrors();
+  writeFileSync(join(dir, "a.md"), "x");
+  writeFileSync(join(dir, "b.md"), "x");
+  const files = walkProjectFiles(dir, { maxEntries: 10, maxVisits: 10 });
+  expect(files.length).toBe(2);
+  expect(captured).toEqual([]);
+});
+
+test("walkProjectFiles: hitting the cap exactly as the tree naturally ends is NOT reported as truncated", () => {
+  // The false-positive this guards against: checking the cap AFTER pushing a
+  // file (instead of before consuming the next name) flags this case even
+  // though nothing was left unvisited -- exercised red against a prior draft
+  // of this fix before the check was moved to the top of the loop.
+  const captured = captureDeckErrors();
+  writeFileSync(join(dir, "a.md"), "x");
+  writeFileSync(join(dir, "b.md"), "x");
+  const files = walkProjectFiles(dir, { maxEntries: 2 });
+  expect(files.length).toBe(2);
+  expect(captured).toEqual([]);
+});
+
+test("walkProjectFiles: reports a truncation trace via reportError when MAX_WALK_ENTRIES is hit (card 5ff9a432)", () => {
+  for (const name of ["a.md", "b.md", "c.md"]) writeFileSync(join(dir, name), "x");
+  const captured = captureDeckErrors();
+  const files = walkProjectFiles(dir, { maxEntries: 2 });
+  expect(files.length).toBe(2);
+  expect(captured.length).toBe(1);
+  expect(captured[0].scope).toBe("sandbox");
+  expect(captured[0].text).toContain("copy plan truncated");
+  expect(captured[0].text).toContain("2");
+});
+
+test("walkProjectFiles: reports a truncation trace when MAX_WALK_VISITS is hit mid-directory (card 5ff9a432)", () => {
+  for (const name of ["a.md", "b.md", "c.md", "d.md"]) writeFileSync(join(dir, name), "x");
+  const captured = captureDeckErrors();
+  const files = walkProjectFiles(dir, { maxVisits: 2 });
+  // Two names never get visited at all (cut off mid-readdir batch) -- distinct
+  // from the entries cap, and the stack is already empty when it fires (this
+  // was the flat single-directory dual of the "last stack frame" edge case).
+  expect(files.length).toBe(2);
+  expect(captured.length).toBe(1);
+  expect(captured[0].text).toContain("copy plan truncated");
+});
+
+test("walkProjectFiles: reports exactly once when the cap fires while sibling directories are still pending", () => {
+  mkdirSync(join(dir, "dirA"));
+  mkdirSync(join(dir, "dirB"));
+  writeFileSync(join(dir, "dirA", "a.md"), "x");
+  writeFileSync(join(dir, "dirB", "b.md"), "x");
+  const captured = captureDeckErrors();
+  const files = walkProjectFiles(dir, { maxEntries: 1 });
+  // One of the two sibling dirs never gets explored at all -- the LIFO stack
+  // still held it when the cap fired.
+  expect(files.length).toBe(1);
+  expect(captured.length).toBe(1);
+});
+
+// Audit 94f8cc0c round 2 (reviewer): nothing kept globToRegExp/expandCopyGlob
+// in lock-step between this file and shared/types.ts -- the next edit to
+// either copy would diverge in BEHAVIOR, silently, with no test failing.
+// Compare the two bodies verbatim (doc comments excluded on purpose: they
+// already read differently, one main-process-flavored, one renderer-flavored)
+// so a drift fails CLOSED at the exact line it happens, rather than waiting
+// for some future glob idiom to expose it the way this whole audit did.
+function extractFunctionBody(source: string, name: string): string {
+  const match = source.match(
+    new RegExp(`(?:export )?function ${name}\\([^)]*\\)[^{]*\\{\\r?\\n([\\s\\S]*?)\\r?\\n\\}`)
+  );
+  if (!match) throw new Error(`function ${name} not found in source`);
+  return match[1];
+}
+
+test("globToRegExp and expandCopyGlob stay byte-identical across their two duplicated copies", () => {
+  const mainSrc = readFileSync(join(__dirname, "../desktop/src/main/sandbox-copy.ts"), "utf-8");
+  const sharedSrc = readFileSync(join(__dirname, "../desktop/src/shared/types.ts"), "utf-8");
+  expect(extractFunctionBody(sharedSrc, "globToRegExp")).toBe(
+    extractFunctionBody(mainSrc, "globToRegExp")
+  );
+  expect(extractFunctionBody(sharedSrc, "expandCopyGlob")).toBe(
+    extractFunctionBody(mainSrc, "expandCopyGlob")
+  );
 });

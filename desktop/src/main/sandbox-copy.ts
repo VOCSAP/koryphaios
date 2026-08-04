@@ -18,6 +18,7 @@
 
 import { lstatSync, readdirSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
+import { reportError } from './log'
 
 /**
  * A dot-extension counted as a match wherever it occurs as its own path
@@ -47,13 +48,13 @@ function extDeny(ext: string): RegExp {
 
 /**
  * Never copied, whatever the operator configured. `.git` would corrupt the
- * clone; node_modules/.venv/dist/out/build/.next/.cache/.worktrees are
- * re-installable or throwaway bulk (also the SKIP_DIRS traversal prune below
- * -- that prune is a perf optimisation ONLY, this list is the real gate, so
- * it must cover every SKIP_DIRS entry); the rest is secret material an agent
- * with network egress must not be handed. All case-insensitive: Windows and
- * macOS filesystems are case-insensitive, and a bare `re.test` would miss
- * `.ENV` / `ID_RSA` / `server.PEM` on either.
+ * clone; node_modules/.venv/dist/out/build/.next/.cache/.worktrees/
+ * target/vendor/Pods/.gradle are re-installable or throwaway bulk (also the
+ * SKIP_DIRS traversal prune below -- that prune is a perf optimisation ONLY,
+ * this list is the real gate, so it must cover every SKIP_DIRS entry); the
+ * rest is secret material an agent with network egress must not be handed.
+ * All case-insensitive: Windows and macOS filesystems are case-insensitive,
+ * and a bare `re.test` would miss `.ENV` / `ID_RSA` / `server.PEM` on either.
  */
 const DENY_PATTERNS = [
   /(^|\/)\.git(\/|$)/i,
@@ -66,6 +67,17 @@ const DENY_PATTERNS = [
   /(^|\/)\.next(\/|$)/i,
   /(^|\/)\.cache(\/|$)/i,
   /(^|\/)\.worktrees(\/|$)/i,
+  // Card 5ff9a432: Rust/Maven build output, PHP/Go vendored deps, CocoaPods
+  // and Gradle's project-local cache -- same PERFORMANCE-bulk reason as the
+  // node_modules/dist/build group above (large, re-installable/regenerable
+  // trees), not a distinct secret shape. Added here because SKIP_DIRS below
+  // must not gain an entry without deny coverage, defense-in-depth for
+  // whatever reaches isDeniedCopyPath outside the walk (e.g. a future direct
+  // glob check on an unwalked path).
+  /(^|\/)target(\/|$)/i,
+  /(^|\/)vendor(\/|$)/i,
+  /(^|\/)Pods(\/|$)/i,
+  /(^|\/)\.gradle(\/|$)/i,
   // env files: dotfile-prefixed form (.env, .envrc, .env-local, .env.vault,
   // .env.keys, ...) and name-suffixed form (prod.env, dev.env, staging.env).
   // Residual, deliberate: the prefixed form also denies `.envoy.yaml` and
@@ -119,7 +131,16 @@ export const SKIP_DIRS = new Set([
   'build',
   '.next',
   '.cache',
-  '.worktrees'
+  '.worktrees',
+  // Card 5ff9a432: PERFORMANCE prune like the group above (large,
+  // re-installable/regenerable trees) -- Rust/Maven build output, PHP/Go
+  // vendored deps, CocoaPods, Gradle's project-local cache. None hold a
+  // secret shape distinct from what DENY_PATTERNS already covers generally;
+  // still deny-listed above per this comment's own rule.
+  'target',
+  'vendor',
+  'Pods',
+  '.gradle'
 ])
 
 /** Hard cap on collected files so a huge tree cannot balloon the copy plan. */
@@ -178,17 +199,30 @@ export function globToRegExp(pattern: string): RegExp {
 }
 
 /**
+ * Expand one operator-entered glob into the RegExp set a path is tested
+ * against: normalize (trim + backslash-to-slash, so a Windows-typed `**\*`
+ * means the same as `**\/*`), then a pattern with no separator also matches
+ * at any depth (`PLAN-*.md` catches `docs/PLAN-x.md` — the intuitive reading
+ * of a bare filename pattern). Single source of truth for `selectCopyPaths`
+ * below: `isUnboundedGlob` (shared/types.ts) duplicates this exact
+ * normalize+expand so it classifies a glob the same way this function
+ * actually matches it — audit 94f8cc0c found the two had drifted (validation
+ * compared a raw string, matching normalized-then-expanded it first), which
+ * let `*.*`, `**\/**`, `?*`, `**\/*.*` and `**\*` slip past as "not unbounded"
+ * while resolving to a whole-tree match here. Keep both copies in lock-step.
+ */
+function expandCopyGlob(glob: string): RegExp[] {
+  const g = glob.trim().replace(/\\/g, '/')
+  if (!g) return []
+  return (g.includes('/') ? [g] : [g, `**/${g}`]).map(globToRegExp)
+}
+
+/**
  * The repo-relative paths to copy: allow-listed by the operator's globs, then
- * filtered by the deny-list (which always wins). A pattern with no separator
- * also matches at any depth (`PLAN-*.md` catches `docs/PLAN-x.md`) — the
- * intuitive reading of a bare filename pattern.
+ * filtered by the deny-list (which always wins).
  */
 export function selectCopyPaths(relPaths: string[], globs: string[]): string[] {
-  const patterns = globs
-    .map((g) => g.trim().replace(/\\/g, '/'))
-    .filter(Boolean)
-    .flatMap((g) => (g.includes('/') ? [g] : [g, `**/${g}`]))
-    .map(globToRegExp)
+  const patterns = globs.flatMap(expandCopyGlob)
   if (patterns.length === 0) return []
   return relPaths
     .map((p) => p.replace(/\\/g, '/'))
@@ -196,15 +230,38 @@ export function selectCopyPaths(relPaths: string[], globs: string[]): string[] {
     .sort()
 }
 
+/** Cap overrides for tests only -- production call sites take the defaults. */
+export interface WalkLimits {
+  maxEntries?: number
+  maxVisits?: number
+}
+
 /**
  * Collect repo-relative file paths of `root`, skipping heavy/forbidden dirs.
  * Best-effort: an unreadable subtree is skipped rather than failing the spawn.
+ *
+ * Truncation (either cap below stops the walk before the tree is fully
+ * enumerated) used to be silent -- card 5ff9a432 -- so an operator whose
+ * project exceeds either cap got a copy plan quietly missing files with no
+ * signal anywhere. `truncated` is set at the exact break that fires because
+ * of a cap (never inferred from the stack being non-empty afterward: the
+ * stack can legitimately be empty even though the CURRENT directory's
+ * remaining sibling names were cut off mid-batch by the visits cap), and
+ * reportError fires at most once per call, after the loop, with the file
+ * count actually returned.
  */
-export function walkProjectFiles(root: string): string[] {
+export function walkProjectFiles(root: string, limits: WalkLimits = {}): string[] {
+  const maxEntries = limits.maxEntries ?? MAX_WALK_ENTRIES
+  const maxVisits = limits.maxVisits ?? MAX_WALK_VISITS
   const out: string[] = []
   const stack: string[] = [root]
   let visits = 0
-  while (stack.length > 0 && out.length < MAX_WALK_ENTRIES && visits < MAX_WALK_VISITS) {
+  let truncated = false
+  while (stack.length > 0) {
+    if (out.length >= maxEntries || visits >= maxVisits) {
+      truncated = true
+      break
+    }
     const dir = stack.pop()!
     let names: string[]
     try {
@@ -214,7 +271,16 @@ export function walkProjectFiles(root: string): string[] {
     }
     for (const name of names) {
       if (SKIP_DIRS.has(name)) continue
-      if (++visits >= MAX_WALK_VISITS) break
+      // Checked BEFORE consuming this name (not after pushing it) so that
+      // exhausting the last name in the last pending directory exactly as a
+      // cap is reached is never misreported as truncation -- there is
+      // nothing left to visit either way, but only this ordering tells the
+      // two cases apart.
+      if (out.length >= maxEntries || visits >= maxVisits) {
+        truncated = true
+        break
+      }
+      visits++
       const full = join(dir, name)
       let stat: ReturnType<typeof lstatSync>
       try {
@@ -231,9 +297,11 @@ export function walkProjectFiles(root: string): string[] {
         stack.push(full)
       } else if (stat.isFile()) {
         out.push(relative(root, full).split(sep).join('/'))
-        if (out.length >= MAX_WALK_ENTRIES) break
       }
     }
+  }
+  if (truncated) {
+    reportError('sandbox', `copy plan truncated at ${out.length} file(s)`)
   }
   return out
 }

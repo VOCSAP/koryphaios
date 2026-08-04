@@ -320,6 +320,7 @@
   "sandbox.copySaveGlobs": "Enregistrer les globs",
   "sandbox.copyDenyHint": "Les secrets et les gros dossiers ne sont jamais copiés, quoi que vous listiez : .env*, clés/certificats, .ssh, .aws, node_modules, .venv, .git.",
   "sandbox.copyUnmatched": "Aucun fichier ne correspond : {globs}",
+  "sandbox.copyIgnoredUnbounded": "{globs} ne contraint pas le nom de fichier -- il couvre tout le projet. Utilisez plutôt un motif comme *.md, docs/* ou notes/**.",
   "sandbox.copyReset": "Réinitialiser le clone",
   "sandbox.imageCard": "Image",
   "sandbox.imageBuild": "Construire l'image",

@@ -503,6 +503,138 @@ export interface SandboxSettingsPatch {
   copyIgnored?: string[]
 }
 
+/**
+ * Minimal glob → RegExp: `**` crosses separators, `*` and `?` do not.
+ * Deliberately DUPLICATED from `globToRegExp` in
+ * `desktop/src/main/sandbox-copy.ts` rather than imported: that file pulls in
+ * `node:fs`/`node:path` and is main-process only, while this one is bundled
+ * into the renderer too (SandboxView's client-side pre-check). Keep the two
+ * bodies identical — a divergence here is exactly the canonicalization-drift
+ * bug that let `*.*`, `**\/**`, `?*`, `**\/*.*` and `**\\*` slip past
+ * `isUnboundedGlob` while `selectCopyPaths` already treated them as whole-tree
+ * matches (audit 94f8cc0c rework).
+ */
+export function globToRegExp(pattern: string): RegExp {
+  let out = '^'
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i]!
+    if (ch === '*') {
+      if (pattern[i + 1] === '*') {
+        // `**/` should also match zero segments (docs/**/x matches docs/x).
+        if (pattern[i + 2] === '/') {
+          out += '(?:.*/)?'
+          i += 2
+        } else {
+          out += '.*'
+          i += 1
+        }
+      } else {
+        out += '[^/]*'
+      }
+      continue
+    }
+    if (ch === '?') {
+      out += '[^/]'
+      continue
+    }
+    out += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&')
+  }
+  return new RegExp(out + '$')
+}
+
+/**
+ * Expand one operator-entered glob into the RegExp set a path is tested
+ * against — same normalize (trim + backslash-to-slash, so a Windows-typed
+ * `**\*` means the same thing as `**\/*`) and same slash-free-glob expansion
+ * (`PLAN-*.md` also matches at any depth, like `selectCopyPaths` does) that
+ * the actual copy matcher applies. Duplicated in `sandbox-copy.ts` for the
+ * same cross-process-boundary reason as `globToRegExp` above; the two must
+ * stay in lock-step or `isUnboundedGlob` below drifts from what
+ * `selectCopyPaths` actually selects again.
+ */
+function expandCopyGlob(glob: string): RegExp[] {
+  const g = glob.trim().replace(/\\/g, '/')
+  if (!g) return []
+  return (g.includes('/') ? [g] : [g, `**/${g}`]).map(globToRegExp)
+}
+
+/**
+ * Ordinary-file witnesses: a root file, a nested file, a deeply-nested file.
+ * A glob matching ALL of these constrains the file name not at all — it is
+ * equivalent to a whole-tree match.
+ */
+const UNBOUNDED_WITNESS_PATHS: readonly string[] = ['README.md', 'src/app.ts', 'a/b/c/deep.txt']
+
+/**
+ * Dotfile witnesses at the same three depths. `.*` matches none of the
+ * ordinary witnesses above (no ordinary file starts with a literal dot) but
+ * sweeps every one of these — an unconstrained secret-shaped class of its
+ * own (`.env`, `.aws/credentials`, `.ssh/id_rsa`), checked as an alternative
+ * "everything" rather than folded into the ordinary set above.
+ */
+const UNBOUNDED_DOTFILE_WITNESS_PATHS: readonly string[] = ['.hidden', 'src/.env', 'a/b/.secret']
+
+/**
+ * Same two shapes (ordinary / dotfile) but with every FLAT (zero-nesting)
+ * entry dropped. `*\/**` and `**\/*\/*` require at least one path segment of
+ * nesting before they match anything, so they miss `README.md`/`.hidden`
+ * above entirely and read as "bounded" against the flat sets alone --
+ * despite `selectCopyPaths` pulling in every nested file in the tree under
+ * them, `.secret`/`.env` included (round-2 rework, reviewer-measured against
+ * a 20-file corpus: 10 matched, none named by the deny-list). Rooted globs
+ * like `src/**` also require nesting but are anchored to one real directory,
+ * so they correctly stay bounded against these same witnesses.
+ */
+const UNBOUNDED_NESTED_WITNESS_PATHS: readonly string[] = ['src/app.ts', 'a/b/c/deep.txt']
+const UNBOUNDED_NESTED_DOTFILE_WITNESS_PATHS: readonly string[] = ['src/.env', 'a/b/.secret']
+
+/**
+ * True when `glob`, compiled and expanded exactly like `selectCopyPaths`
+ * would, matches every witness in one of the four sets above — i.e. it does
+ * not constrain the file name within whichever of those classes it targets,
+ * and is equivalent to a whole-tree (or whole-dotfile-tree, or
+ * whole-nested-subtree) match (audit 94f8cc0c, card 4b668844). Derived from
+ * the matcher itself rather than a literal list of known-bad strings: a list
+ * can only ever name the forms someone already thought of (`*`, `**`,
+ * `**\/*`, `.*`), and missed `*.*`, `**\/**`, `?*`, `**\/*.*`, the backslash
+ * form `**\*`, and the nesting-floor forms `*\/**`/`**\/*\/*` -- all of which
+ * resolve to a whole-(sub)tree match once expanded the way the real matcher
+ * expands it. RESIDUAL, written down rather than implied: this is a widening
+ * list of witness DEPTHS, not a closed proof -- `*\/*\/**` (nesting floor of
+ * 3) still escapes every set above, and every additional floor will need its
+ * own witness rows. The real invariant this approximates is "the glob names
+ * no secret it doesn't intend to," which is a different, harder question
+ * than "does it match everything" -- tracked as a follow-up card rather than
+ * solved here. Rejected by saneGlobs' write path ONLY (never silently
+ * stripped from an already-persisted store at load time).
+ */
+export function isUnboundedGlob(glob: string): boolean {
+  const patterns = expandCopyGlob(glob)
+  if (patterns.length === 0) return false
+  const matchesAll = (witnesses: readonly string[]): boolean =>
+    witnesses.every((w) => patterns.some((re) => re.test(w)))
+  return (
+    matchesAll(UNBOUNDED_WITNESS_PATHS) ||
+    matchesAll(UNBOUNDED_DOTFILE_WITNESS_PATHS) ||
+    matchesAll(UNBOUNDED_NESTED_WITNESS_PATHS) ||
+    matchesAll(UNBOUNDED_NESTED_DOTFILE_WITNESS_PATHS)
+  )
+}
+
+/**
+ * Prefix of the Error thrown by writeSandboxSettings on an unbounded glob.
+ * SandboxView pre-checks with isUnboundedGlob before ever sending the patch,
+ * so this rarely round-trips — but when it does (a future drift between this
+ * file's copy of the matcher and sandbox-copy.ts's, or any other bypass of
+ * the pre-check), it is NOT translated: patchSandbox goes through the
+ * store's shared `guarded()` helper (store.ts), which reports and toasts the
+ * raw `sandbox-unbounded-glob:<globs>` string before any per-field handler
+ * could intercept it, unlike 'sandbox-live-sessions'/'sandbox-container-running'
+ * which SandboxView's `fail()` does translate (those never go through
+ * `guarded()` in the first place).
+ */
+export const SANDBOX_UNBOUNDED_GLOB_ERROR = 'sandbox-unbounded-glob:'
+
 /** Result of a supervisor `deck_sandbox_exec` (output clipped main-side). */
 export interface SandboxExecResponse {
   code: number

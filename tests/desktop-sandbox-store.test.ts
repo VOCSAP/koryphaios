@@ -11,6 +11,7 @@ import {
   writeSandboxSettings,
 } from "../desktop/src/main/sandbox-store.ts";
 import { DEFAULT_SANDBOX_PORTS, SANDBOX_IMAGE_DEFAULT } from "../desktop/src/main/sandbox-command.ts";
+import { isUnboundedGlob } from "../desktop/src/shared/types.ts";
 
 let dir: string;
 let file: string;
@@ -103,4 +104,95 @@ test("image write is global and falls back to the default when blanked", () => {
   expect(writeSandboxImage(file, "my-image")).toBe("my-image");
   expect(readSandboxStore(file).image).toBe("my-image");
   expect(writeSandboxImage(file, "   ")).toBe(SANDBOX_IMAGE_DEFAULT);
+});
+
+// Card 4b668844: globs that don't constrain the file name (*, **, **/*, .*)
+// are functionally equivalent to a whole-tree match (selectCopyPaths dedupes
+// any slash-free glob into [g, "**/"+g]) and must be refused at the WRITE
+// path, fail-closed -- the whole patch rejected, nothing partially saved.
+test("writeSandboxSettings rejects unbounded globs one at a time", () => {
+  for (const bad of ["*", "**", "**/*", ".*"]) {
+    expect(() => writeSandboxSettings(file, "k", { copyIgnored: [bad] })).toThrow(
+      /sandbox-unbounded-glob:/
+    );
+  }
+  // Fail-closed: nothing from the rejected patch was persisted.
+  expect(projectSandboxSettings(file, "k").copyIgnored).toEqual([]);
+});
+
+test("writeSandboxSettings rejection message names every offending glob, not just the first", () => {
+  expect(() =>
+    writeSandboxSettings(file, "k", { copyIgnored: ["*.md", "**", "docs/*", "*"] })
+  ).toThrow("sandbox-unbounded-glob:**,*");
+});
+
+test("writeSandboxSettings catches an unbounded glob padded with whitespace", () => {
+  expect(() => writeSandboxSettings(file, "k", { copyIgnored: [" * "] })).toThrow(
+    "sandbox-unbounded-glob:*"
+  );
+});
+
+// Audit 94f8cc0c (external review of card 4b668844): isUnboundedGlob compared
+// the raw trimmed string against a literal list, while selectCopyPaths
+// normalizes backslashes to slashes and expands slash-free globs before
+// matching -- a canonicalization mismatch. These 5 forms resolve to the exact
+// same whole-tree RegExp a plain "*" does once expanded that way, but were
+// not in the literal list, so a project's real files were silently copy-able
+// under them. One row per form (not one assertion per form) so the next
+// idiom nobody thought of is a line to add, not a test to rewrite. At least
+// 2 legitimate narrow globs are included as counter-examples so this table
+// measures specificity, not just sensitivity.
+//
+// Rework round 2 (reviewer measurement on the first fix): "*/**" and
+// "**/*/*" require at least one path SEGMENT of nesting -- the flat
+// (unnested) witness paths above never trip that requirement, so both
+// resolved to isUnboundedGlob=false while selectCopyPaths pulled 10/20 files
+// off a real corpus under them, incl. a/b/.secret, app/keys.json,
+// creds/token.txt. Nested-only witness rows below close this one instance;
+// see the "residual" comment on isUnboundedGlob for why this is a widening
+// list, not a closed proof.
+test.each([
+  ["*.*", true],
+  ["**/**", true],
+  ["?*", true],
+  ["**/*.*", true],
+  ["**\\*", true], // literal backslash, as a Windows-typed operator would enter it
+  [".*", true], // sweeps every dotfile at every depth, not literally every file
+  ["*/**", true], // requires >=1 nested segment -- flat witnesses alone miss this
+  ["**/*/*", true], // same nesting-floor shape, two segments deep
+  ["*.md", false],
+  ["docs/*", false],
+  ["*.env", false], // extension-narrowed, even though it targets dotfile-adjacent names
+  ["src/**", false], // nested-looking but rooted at a real dir -- must stay bounded
+])("isUnboundedGlob(%p) === %p", (glob, expected) => {
+  expect(isUnboundedGlob(glob)).toBe(expected);
+});
+
+test("writeSandboxSettings still accepts globs that constrain the file name", () => {
+  const narrow = ["*.md", "PLAN-*.md", "*.local.json", "docs/*", "notes/**", ".claude/agent-memory/**"];
+  writeSandboxSettings(file, "k", { copyIgnored: narrow });
+  expect(projectSandboxSettings(file, "k").copyIgnored).toEqual(narrow);
+});
+
+test("a patch without copyIgnored never triggers the unbounded-glob check", () => {
+  expect(() => writeSandboxSettings(file, "k", { enabled: true })).not.toThrow();
+});
+
+test("migration: a hand-edited store with an unbounded glob still loads, and keeps it until the next explicit copyIgnored save", () => {
+  writeFileSync(
+    file,
+    JSON.stringify({ projects: { k: { enabled: true, copyIgnored: ["**"] } } })
+  );
+  // Load path (readSandboxStore/saneSettings) is untouched by this card --
+  // refusing silently at load would be the "worst of both worlds" the audit
+  // called out. The pre-existing value survives as-is.
+  expect(projectSandboxSettings(file, "k").copyIgnored).toEqual(["**"]);
+  // An unrelated patch that doesn't touch copyIgnored must not be blocked by
+  // -- or silently scrub -- the legacy value.
+  writeSandboxSettings(file, "k", { enabled: false });
+  expect(projectSandboxSettings(file, "k").copyIgnored).toEqual(["**"]);
+  // Only an explicit re-submission of copyIgnored is checked, and rejected.
+  expect(() => writeSandboxSettings(file, "k", { copyIgnored: ["**"] })).toThrow(
+    "sandbox-unbounded-glob:**"
+  );
 });
