@@ -871,6 +871,17 @@ function roadmapAuthor(): string {
 }
 
 /**
+ * Proof that accompanies `by` (roadmap card 39c40571, layer 1). The broker
+ * REQUIRES it as soon as `by` names a registered peer, which is exactly the
+ * case here once registration succeeded -- without it our own writes would be
+ * refused as impersonation of ourselves. Omitted before registration, when the
+ * author is the host fallback and belongs to no peer row.
+ */
+function roadmapProof(): Record<string, string> {
+  return myInstanceToken ? { instance_token: myInstanceToken } : {};
+}
+
+/**
  * Resolve a full id or a UNIQUE id prefix (roadmap_list shows 8-char prefixes)
  * against the project's items, archived included. Throws a descriptive error
  * on no match / ambiguous prefix.
@@ -1324,6 +1335,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         const { item } = await brokerFetch<RoadmapUpsertResponse>("/roadmap/upsert", {
           project_key: roadmapProjectKey(),
           by: roadmapAuthor(),
+          ...roadmapProof(),
           title: a.title,
           kind: a.kind,
           description: a.description,
@@ -1355,6 +1367,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         const { item } = await brokerFetch<RoadmapUpsertResponse>("/roadmap/upsert", {
           id,
           by: roadmapAuthor(),
+          ...roadmapProof(),
           title: a.title,
           kind: a.kind,
           description: a.description,
@@ -1387,6 +1400,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         const { item } = await brokerFetch<RoadmapArchiveResponse>("/roadmap/archive", {
           id,
           by: roadmapAuthor(),
+          ...roadmapProof(),
         });
         return {
           content: [

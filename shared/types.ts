@@ -185,6 +185,24 @@ export const OPERATOR_PEER_ID: PeerId = "operator";
 /** Reserved display ids set_id must refuse, to keep the sentinels unambiguous. */
 export const RESERVED_PEER_IDS: readonly PeerId[] = ["deck", "system", "operator"];
 
+/**
+ * Is this instance_token one of the reserved sentinels?
+ *
+ * The sentinel VALUES above are exported constants, so they are public and any
+ * caller can type one. They are labels the broker writes on its own rows, never
+ * credentials -- so a request PRESENTING one proves nothing and must be refused
+ * wherever a token is used as proof of identity.
+ *
+ * Matching on the SHAPE rather than on an enumeration is deliberate: a third
+ * sentinel added later is caught without anyone remembering to extend a list.
+ * The half that the shape cannot cover -- a future sentinel written WITHOUT the
+ * underscores -- is asserted by tests/broker-roadmap-author-auth.test.ts, which
+ * enumerates every exported `*_INSTANCE_TOKEN` and requires it to match here.
+ */
+export function isSentinelInstanceToken(token: string): boolean {
+  return /^__.+__$/.test(token);
+}
+
 export interface AnnounceRequest {
   group_id: GroupId;
   group_secret_hash: string | null;
@@ -318,6 +336,17 @@ export interface RoadmapUpsertRequest {
   project_key?: string;
   /** Author of the write: peer_id or 'deck'. */
   by: string;
+  /**
+   * Roadmap card 39c40571, layer 1: PROOF that the caller really is `by`.
+   *
+   * Optional over the wire because two legitimate callers have no peer row and
+   * therefore no token -- cli.ts (runs on the broker host and already holds the
+   * broker token) and the Deck (writes as 'deck'). It stops being optional the
+   * moment `by` names an EXISTING peer: the broker then demands the matching
+   * token and refuses the write otherwise, so one agent can no longer write
+   * under another's identity. When present it OVERRIDES `by`.
+   */
+  instance_token?: string;
   kind?: RoadmapKind;
   title?: string;
   description?: string;
@@ -358,6 +387,8 @@ export interface RoadmapUpsertResponse {
 export interface RoadmapArchiveRequest {
   id: string;
   by: string;
+  /** Proof of authorship -- see RoadmapUpsertRequest.instance_token. */
+  instance_token?: string;
 }
 
 export interface RoadmapArchiveResponse {
@@ -374,6 +405,8 @@ export interface RoadmapReorderRequest {
   project_key: string;
   /** Author of the write: peer_id or 'deck'. */
   by: string;
+  /** Proof of authorship -- see RoadmapUpsertRequest.instance_token. */
+  instance_token?: string;
   /** The complete new queue, in dispatch order. Empty clears the queue. */
   ids: string[];
   /**

@@ -120,6 +120,7 @@ import {
   OPERATOR_INSTANCE_TOKEN,
   OPERATOR_PEER_ID,
   RESERVED_PEER_IDS,
+  isSentinelInstanceToken,
 } from "./shared/types.ts";
 
 const config = await loadConfig();
@@ -1480,6 +1481,78 @@ function getRoadmapItem(id: string): RoadmapItem | null {
   return row ? rowToRoadmapItem(row) : null;
 }
 
+/**
+ * Roadmap card 39c40571, layer 1: resolve WHO is writing, instead of believing
+ * the `by` string the body happens to carry.
+ *
+ * Before this, `by` was free text recouped against nothing, while every agent
+ * holds the shared broker token -- so any of them could write under another
+ * peer's identity, or claim the operator's 'deck' author to walk through the
+ * work-lock guard.
+ *
+ * The rule resolves the OBJECT (the claimed author) before asking whether the
+ * caller may act as it:
+ *  - a presented instance_token WINS over `by`, so the recorded author is the
+ *    peer the token actually belongs to;
+ *  - a SENTINEL token is refused: those values are public constants, so
+ *    presenting one is an escalation attempt, not a credential;
+ *  - with no token, the write may only claim a name that belongs to NO real
+ *    peer -- cli.ts, test fixtures, and 'deck' (whose row carries a sentinel
+ *    token, hence is not a real peer). Closing that last case means making the
+ *    Deck sign with the operator credential, which is layer 2.
+ *
+ * `proven` is what a caller-sensitive rule keys on (currently `force`).
+ */
+interface RoadmapAuthor {
+  by: string;
+  proven: boolean;
+}
+
+function resolveRoadmapAuthor(
+  body: { by?: unknown; instance_token?: unknown },
+  route: string
+): RoadmapAuthor | { error: string; status: number } {
+  const by = typeof body.by === "string" && body.by.trim() ? body.by.trim() : "";
+  if (!by) return { error: "by (author peer_id) is required", status: 400 };
+
+  const token = typeof body.instance_token === "string" ? body.instance_token.trim() : "";
+  if (token) {
+    if (isSentinelInstanceToken(token)) {
+      log.warn(
+        `${route}: refused a reserved sentinel instance_token (public constant, not a credential)`,
+        { claimed_by: by }
+      );
+      return { error: "instance_token is a reserved sentinel", status: 403 };
+    }
+    // instance_token is the peers PRIMARY KEY, so this row is unambiguous.
+    const owner = db
+      .query("SELECT peer_id FROM peers WHERE instance_token = ?")
+      .get(token) as { peer_id: string } | null;
+    if (!owner) {
+      log.warn(`${route}: refused an unknown instance_token`, { claimed_by: by });
+      return { error: "unknown instance_token", status: 401 };
+    }
+    return { by: owner.peer_id, proven: true };
+  }
+
+  // No proof. Ask whether the claimed NAME belongs to a real peer -- deliberately
+  // over every row rather than a `.get()`: one peer_id can exist in two groups
+  // (two identities), and picking one of the two rows would answer at random.
+  const rows = db
+    .query("SELECT instance_token FROM peers WHERE peer_id = ?")
+    .all(by) as { instance_token: string }[];
+  if (rows.some((r) => !isSentinelInstanceToken(r.instance_token))) {
+    log.warn(`${route}: refused an unproven write claiming a registered peer`, {
+      claimed_by: by,
+    });
+    return {
+      error: `author '${by}' is a registered peer -- prove it with its instance_token`,
+      status: 401,
+    };
+  }
+  return { by, proven: false };
+}
+
 function handleRoadmapList(
   body: RoadmapListRequest
 ): RoadmapListResponse | { error: string; status: number } {
@@ -1520,8 +1593,9 @@ function handleRoadmapList(
 function handleRoadmapUpsert(
   body: RoadmapUpsertRequest
 ): RoadmapUpsertResponse | { error: string; status: number } {
-  const by = typeof body.by === "string" && body.by.trim() ? body.by.trim() : "";
-  if (!by) return { error: "by (author peer_id) is required", status: 400 };
+  const author = resolveRoadmapAuthor(body, "/roadmap/upsert");
+  if ("error" in author) return author;
+  const by = author.by;
   if (
     badEnum(body.kind, ROADMAP_KINDS) ||
     badEnum(body.priority, ROADMAP_PRIORITIES) ||
@@ -1576,7 +1650,15 @@ function handleRoadmapUpsert(
       (body.status !== undefined || body.locked === true) &&
       by !== existing.locked_by &&
       by !== "deck" &&
-      body.force !== true
+      // Card 39c40571 layer 1: `force` is a claim of certainty, so it is only
+      // honoured for a caller that PROVED who it is -- an anonymous body could
+      // otherwise steal any locked item by adding one field. This closes the
+      // `force` route only: the `by !== "deck"` clause four lines up still lets
+      // an unproven body walk this guard by simply claiming `by: 'deck'`, since
+      // the Deck's row carries a sentinel token and `resolveRoadmapAuthor` lets
+      // any name through that belongs to no real peer. Closing THAT is layer 2
+      // (the Deck signing with the operator credential).
+      !(body.force === true && author.proven)
     ) {
       return {
         error: `item is locked by '${existing.locked_by}' (actively working on it) -- pick another item, or pass force:true if you are certain`,
@@ -1760,8 +1842,9 @@ function handleRoadmapUpsert(
 function handleRoadmapArchive(
   body: RoadmapArchiveRequest
 ): RoadmapArchiveResponse | { error: string; status: number } {
-  const by = typeof body.by === "string" && body.by.trim() ? body.by.trim() : "";
-  if (!by) return { error: "by (author peer_id) is required", status: 400 };
+  const author = resolveRoadmapAuthor(body, "/roadmap/archive");
+  if ("error" in author) return author;
+  const by = author.by;
   if (!body.id) return { error: "id is required", status: 400 };
   const existing = getRoadmapItem(body.id);
   if (!existing) return { error: "unknown roadmap item", status: 404 };
@@ -1799,8 +1882,9 @@ const ROADMAP_REORDER_MAX = 500;
 function handleRoadmapReorder(
   body: RoadmapReorderRequest
 ): RoadmapReorderResponse | { error: string; status: number } {
-  const by = typeof body.by === "string" && body.by.trim() ? body.by.trim() : "";
-  if (!by) return { error: "by (author peer_id) is required", status: 400 };
+  const author = resolveRoadmapAuthor(body, "/roadmap/reorder");
+  if ("error" in author) return author;
+  const by = author.by;
   const projectKey =
     typeof body.project_key === "string" && body.project_key.trim() ? body.project_key.trim() : "";
   if (!projectKey) return { error: "project_key is required", status: 400 };

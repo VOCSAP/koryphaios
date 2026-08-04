@@ -144,8 +144,26 @@ test("owner, deck and force:true bypass the guard", async () => {
   expect(deck.status).toBe(200);
   expect(deck.item!.locked).toBe(false);
 
+  // Card 39c40571 layer 1: `force` is a claim of certainty, so it is now only
+  // honoured for a caller that PROVED who it is. An anonymous body could
+  // otherwise take any locked item by adding a single field.
   const c = await add({ title: "forced", status: "in_progress" });
-  const forced = await patch(c.id, "intruder", { status: "planned", force: true });
+  const anonymous = await patch(c.id, "intruder", { status: "planned", force: true });
+  expect(anonymous.status).toBe(409);
+
+  const reg = await post<{ instance_token: string; peer_id: string }>(`${broker.url}/register`, {
+    pid: livePid(), cwd: "/tmp/forcer", git_root: null, tty: null,
+    summary: "", host: "h-force", client_pid: livePid(), claude_cli_pid: 1,
+    project_key: PK, group_id: "default", group_secret_hash: null,
+  });
+  expect(reg.status).toBe(200);
+  const forced = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    id: c.id,
+    by: reg.body.peer_id,
+    instance_token: reg.body.instance_token,
+    status: "planned",
+    force: true,
+  });
   expect(forced.status).toBe(200);
 });
 
@@ -209,7 +227,10 @@ test("owner-gone sweep releases after grace, but an active owner keeps the lock"
     expect(reg.status).toBe(200);
 
     const held = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
-      project_key: PK, by: reg.body.peer_id, title: "held", status: "in_progress",
+      // Card 39c40571: writing as a REGISTERED peer now requires its token.
+      // ("ghost-peer" below names no peer row, so it stays token-free.)
+      project_key: PK, by: reg.body.peer_id, instance_token: reg.body.instance_token,
+      title: "held", status: "in_progress",
     });
     const ghost = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
       project_key: PK, by: "ghost-peer", title: "abandoned", status: "in_progress",

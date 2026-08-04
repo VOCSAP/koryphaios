@@ -227,7 +227,25 @@ switch (cmd) {
           process.exit(1);
         }
       }
-      const result = await brokerPost<RoadmapUpsertResponse>("/roadmap/upsert", payload);
+      // Roadmap card 39c40571, layer 1. The broker now refuses a write whose
+      // `by` names a REGISTERED peer without that peer's instance_token, and
+      // this fallback has no token to present -- the scribe's documented
+      // payload carries the calling session's peer_id, which would now be
+      // refused as impersonation of itself.
+      //
+      // The honest resolution is not to exempt this verb (any agent can run
+      // it, so exempting it would re-open the very hole the guard closes) but
+      // to stop it CLAIMING a proven identity: a CLI write is unproven by
+      // construction, so it is attributed as such. Attribution stays readable;
+      // only the claim of proof goes away. An instance_token in the payload is
+      // dropped for the same reason -- this verb must never become a way to
+      // launder one.
+      const claimed = String(payload.by);
+      const { instance_token: _dropped, ...safePayload } = payload;
+      const result = await brokerPost<RoadmapUpsertResponse>("/roadmap/upsert", {
+        ...safePayload,
+        by: claimed.startsWith("cli:") ? claimed : `cli:${claimed}`,
+      });
       console.log(JSON.stringify(result.item, null, 2));
     } catch (e) {
       console.error(`roadmap-add failed: ${e instanceof Error ? e.message : String(e)}`);

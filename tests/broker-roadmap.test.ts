@@ -282,7 +282,13 @@ test("items survive their author peer's unregister (no FK, plain-text attributio
   expect(reg.status).toBe(200);
   const authorId = reg.body.peer_id;
 
-  const item = await add({ title: "Outlives its author", by: authorId });
+  // Card 39c40571: writing as a REGISTERED peer now requires its token. The
+  // property under test (items outlive their author) is unchanged.
+  const item = await add({
+    title: "Outlives its author",
+    by: authorId,
+    instance_token: reg.body.instance_token,
+  });
   expect(item.created_by).toBe(authorId);
 
   const unreg = await post(`${broker.url}/unregister`, {
