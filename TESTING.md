@@ -92,6 +92,48 @@ Precedent: `desktop-log.test.ts` aged its "stale snapshot" fixture with
 so it died on 2026-07-22. Same rule for retention/TTL windows: assert the
 BOUNDARY relative to the injected clock, not an absolute date.
 
+## Catch-all sinks in tests (silent-crash camouflage)
+
+A test that exercises code wrapped in a `catch { reportError(...) }` (or any
+other "no silent errors" catch-all -- see the CLAUDE.md rule of the same
+name) and then asserts on that sink firing must also fail loudly if the
+catch-all fires for the WRONG reason. Otherwise the test observes the right
+effect produced by the wrong cause: a `ReferenceError` from a harness that
+forgot to inject some identifier trips the exact same `reportError` call as
+the real behavior under test, and the two are indistinguishable from the
+assertion's point of view. The test goes green on the crash, not on the
+behavior.
+
+This is structural here, not anecdotal: every module that correctly follows
+"no silent errors" is exposed to it -- the more the convention is applied,
+the larger the surface. It bit for real once, on `tests/desktop-approval-defer.test.ts`
+(the poller's `reportError` sink caught a harness `ReferenceError` from a
+missing export the same way it would have caught the real verdict-poll
+failure it was written to test).
+
+**Where it bites, and where it does not** (the boundary matters -- a rule
+that does not say where it does not apply gets applied everywhere and then
+discarded): only a test that FURNISHES the error sink itself (a fake
+`reportError`, a fake journal, a spy on a logger) and then asserts on that
+sink is exposed. A test that never observes the sink fails normally on an
+unrelated crash, same as any other test -- nothing to guard there.
+
+Population measured 2026-08-04: 3 files fit this shape
+(`tests/desktop-approval-defer.test.ts`, `tests/desktop-sandbox-copy.test.ts`,
+`tests/desktop-dispatch.test.ts`) -- a handful of positive assertions
+("the sink fired"), not an audit-sized population, as of that date. This
+count grows with `reportError` ADOPTION, not with time -- every new module
+that correctly routes its errors to a sink, and every new test that verifies
+that routing, is one more candidate. Re-measure when it matters, do not
+assume the 2026-08-04 count still holds.
+
+**The fix, when a test in this shape needs to be touched anyway**: assert on
+the sink's CONTENT, not just its occurrence. `tests/desktop-sandbox-copy.test.ts`
+is the model to follow -- it checks `captured[0].text` for the expected
+message (`"copy plan truncated"`), not just that `captured.length` is 1.
+"The sink fired with THIS message" cannot be satisfied by an unrelated
+`ReferenceError`; "the sink fired" can.
+
 ## Cross-platform tests (the CI matrix)
 
 `.github/workflows/desktop-build.yml` runs the suite on **windows / macos /
