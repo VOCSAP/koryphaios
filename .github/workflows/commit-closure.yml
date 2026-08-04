@@ -1,0 +1,64 @@
+name: commit-closure
+
+# Card 67519e73: no `paths:` filter on purpose. This gate audits import
+# closure + literal control bytes on scripts/check-commit-closure.ts's own
+# terms -- "every commit in this PR" -- which is every commit in the repo,
+# not a subset; scoping it to any path list reopens the same reachability
+# gap this workflow was split out to close (see desktop-build.yml, whose
+# `paths:` stays intentionally narrow to the Electron/native surface).
+
+on:
+  pull_request:
+
+jobs:
+  check:
+    name: commit closure check (PR commit range)
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 (full history), not the default shallow clone -- the
+      # check below walks base.sha..head.sha with `git rev-list`, which needs
+      # those commits (and their parents) actually present locally.
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # No `bun install`: check-commit-closure.ts imports only node:child_process
+      # (spawnSync git) -- no root dependency to install for it to run.
+
+      # Card 67519e73: the fast --staged check (desktop-precommit skill) only
+      # runs when a contributor remembers to run it locally, and only sees
+      # ONE commit-to-be at a time. This is the check that does not depend on
+      # anyone's discipline. `--pr` wires the two halves DIFFERENTLY, on
+      # measurement, not preference (see runPrCheck in check-commit-closure.ts):
+      # import closure runs PER COMMIT over base..head (the only half that
+      # catches a mid-stack commit referencing code that exists nowhere but
+      # the author's working tree), while the control-byte scan runs ONCE
+      # over the PR's net diff (base...head, three dots) read at head --
+      # replaying it per commit instead reddens on real history that cannot
+      # be un-reddened. `--pr` walks base..head itself via `git rev-list`
+      # (this workflow no longer loops over shas) and fails closed with exit
+      # 2 if the checkout turns out shallow, rather than silently auditing a
+      # subset.
+      - name: Commit closure check (PR commit range)
+        shell: bash
+        run: |
+          set -e
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          if bun scripts/check-commit-closure.ts --pr "$base" "$head" .; then
+            rc=0
+          else
+            rc=$?
+          fi
+          # exit 2 is a tool/usage error (shallow clone, bad ref) -- NOTHING
+          # was audited, distinct from exit 1 (a genuine finding). No loop
+          # left to create a precedence question between the two, so the
+          # script's own exit code is propagated as-is.
+          if [ "$rc" -eq 2 ]; then
+            echo "::error::check-commit-closure.ts tool error auditing $base..$head (exit 2) -- not a finding, nothing was audited"
+          fi
+          exit "$rc"

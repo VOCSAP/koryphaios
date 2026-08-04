@@ -147,6 +147,55 @@ const REAL_WORKFLOW_TEXT = readFileSync(WORKFLOW_PATH, "utf-8");
 const REAL_GLOBS = parsePureModuleGlobs(REAL_WORKFLOW_TEXT);
 const REAL_FILES = readdirSync(TESTS_DIR).filter((f) => f.endsWith(".test.ts"));
 
+// Card 67519e73, team-lead review: commit-closure.yml carries a top-of-file
+// comment ASSERTING a guarantee ("no `paths:` filter on purpose ... scoping
+// it to any path list reopens the same reachability gap") that nothing in
+// the repo enforced. A comment that asserts a guarantee must be wired to
+// what applies it (see CLAUDE.md). This audits that workflow the same way
+// the rest of this file audits desktop-build.yml: read the REAL file,
+// extract the relevant block with a bounded parse (never a naive full-text
+// substring search, which the script-path check below specifically guards
+// against -- this workflow's own header comment mentions
+// "scripts/check-commit-closure.ts" in prose, which a naive `.includes()`
+// would wrongly accept even if the actual invoking step vanished).
+const COMMIT_CLOSURE_WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "commit-closure.yml");
+const REAL_COMMIT_CLOSURE_TEXT = readFileSync(COMMIT_CLOSURE_WORKFLOW_PATH, "utf-8");
+
+/**
+ * Bounds the `on:` block to end at the next column-0 (unindented) key line,
+ * mirroring parsePureModuleGlobs' own step-bounding discipline above. Search
+ * starts at offset 1 into the slice so the `on:` line itself (which begins
+ * the slice being bounded) is never mistaken for its own terminator.
+ */
+function extractOnBlock(workflowText: string): string {
+  const onIdx = workflowText.search(/^on:/m);
+  if (onIdx === -1) {
+    throw new Error(`no "on:" block found in ${COMMIT_CLOSURE_WORKFLOW_PATH}`);
+  }
+  const rest = workflowText.slice(onIdx);
+  const nextTopLevelOffset = rest.slice(1).search(/\r?\n[a-zA-Z]/);
+  return nextTopLevelOffset === -1 ? rest : rest.slice(0, nextTopLevelOffset + 1);
+}
+
+/**
+ * Splits the workflow text at every `run:` occurrence and bounds each
+ * resulting slice to the next step-item marker (the same `      - ` pattern
+ * parsePureModuleGlobs bounds against), so a `run:` block cannot absorb a
+ * later step's text. Returns true only if a bounded `run:` slice contains
+ * the actual invocation `bun scripts/check-commit-closure.ts` -- a mention
+ * of the bare path elsewhere (e.g. this workflow's own top-of-file comment)
+ * lives before the first `run:` and is discarded by the `slice(1)` below,
+ * so it can never satisfy this check.
+ */
+function anyStepRunInvokesCommitClosureScript(workflowText: string): boolean {
+  const runBlocks = workflowText.split(/(?=\n\s*run:)/);
+  return runBlocks.slice(1).some((block) => {
+    const nextStepOffset = block.slice(1).search(/\r?\n {6}- /);
+    const bounded = nextStepOffset === -1 ? block : block.slice(0, nextStepOffset + 1);
+    return /bun\s+scripts\/check-commit-closure\.ts/.test(bounded);
+  });
+}
+
 test("bounded parse does not adopt a LATER step's globs (the composition case that failed open)", () => {
   // Team-lead review, round 2: reformat the pure-module step's run line to a
   // YAML block scalar (an ordinary edit -- the step's own single-line regex
@@ -279,4 +328,114 @@ test("mutation proof, shrinkage: removing a glob pattern uncovers the files it u
   for (const f of desktopFiles) {
     expect(uncovered).toContain(f);
   }
+});
+
+// Team-lead/reviewer review, round 2: `/^\s*paths:/m` only fires on BLOCK-style
+// YAML (`paths:` alone on its own line). It is silent on the legal FLOW form
+// of the same key (`on: {pull_request: {paths: [...]}}`), so a reformat (or a
+// tool regenerating this workflow) closes the reachability gap this test
+// exists to make loud, with nothing going red. Unanchored on purpose: the
+// guarantee is "no `paths` key anywhere under `on:`", not "no `paths:` at the
+// start of a line". `paths-ignore` is included deliberately, not excluded:
+// it narrows the same commit domain (audits fewer paths than "every commit"),
+// so it is the same regression under a different key name. `\b` before
+// `paths` keeps this from firing on an unrelated identifier that merely ENDS
+// in "paths" joined by a word character (e.g. `external_paths:`, no boundary
+// between `_` and `p`) -- proven below. A hyphen-joined false positive (e.g.
+// a hypothetical `static-paths:` key) is an accepted residual: no such key
+// exists in GitHub Actions' `on.pull_request` vocabulary today.
+const PATHS_FILTER_RE = /\bpaths(-ignore)?\s*:/;
+
+test("commit-closure.yml's on.pull_request carries no paths: filter, block OR flow style, paths-ignore included (Card 67519e73: a paths filter reopens the reachability gap this workflow exists to close)", () => {
+  const onBlock = extractOnBlock(REAL_COMMIT_CLOSURE_TEXT);
+  expect(onBlock).not.toMatch(PATHS_FILTER_RE);
+});
+
+test("mutation proof: the paths-filter regex catches FLOW-style paths: (not just block-style)", () => {
+  const flowStyle = "on:\n  pull_request: {paths: [\"desktop/**\"]}\n";
+  expect(extractOnBlock(flowStyle)).toMatch(PATHS_FILTER_RE);
+});
+
+test("mutation proof: the paths-filter regex catches paths-ignore: (same domain-narrowing regression under a different key)", () => {
+  const pathsIgnore = "on:\n  pull_request:\n    paths-ignore:\n      - \"docs/**\"\n";
+  expect(extractOnBlock(pathsIgnore)).toMatch(PATHS_FILTER_RE);
+});
+
+test("mutation proof: the paths-filter regex does not false-positive on an unrelated key merely ending in \"paths\" joined by a word character", () => {
+  const unrelated = "on:\n  pull_request:\n    external_paths: [\"not-a-real-key\"]\n";
+  expect(extractOnBlock(unrelated)).not.toMatch(PATHS_FILTER_RE);
+});
+
+test("commit-closure.yml still runs scripts/check-commit-closure.ts from some step (so the no-paths guarantee cannot be paired with a silently removed check step)", () => {
+  expect(anyStepRunInvokesCommitClosureScript(REAL_COMMIT_CLOSURE_TEXT)).toBe(true);
+});
+
+test("mutation proof: extractOnBlock does not leak a paths: string that lives outside the on: block", () => {
+  const synthetic = [
+    "name: fake",
+    "",
+    "on:",
+    "  pull_request:",
+    "",
+    "jobs:",
+    "  check:",
+    "    steps:",
+    "      # unrelated comment mentioning paths: as prose, not a real key",
+    "      - name: paths: this must not be read as part of on:",
+    "        run: echo hi",
+    "",
+  ].join("\n");
+  const onBlock = extractOnBlock(synthetic);
+  expect(onBlock).not.toMatch(/paths:/);
+});
+
+test("mutation proof: extractOnBlock DOES catch a paths: filter actually under on.pull_request", () => {
+  const synthetic = ["name: fake", "", "on:", "  pull_request:", '    paths: ["some/dir/**"]', "", "jobs:", "  check: {}", ""].join(
+    "\n"
+  );
+  const onBlock = extractOnBlock(synthetic);
+  expect(onBlock).toMatch(/^\s*paths:/m);
+});
+
+test("mutation proof: a step whose run: never mentions the script is not counted, even if an earlier comment does", () => {
+  const synthetic = [
+    "name: fake",
+    "",
+    "# comment mentioning scripts/check-commit-closure.ts in prose only",
+    "on:",
+    "  pull_request:",
+    "",
+    "jobs:",
+    "  check:",
+    "    steps:",
+    "      - name: unrelated step",
+    "        run: echo hi",
+    "",
+  ].join("\n");
+  expect(anyStepRunInvokesCommitClosureScript(synthetic)).toBe(false);
+});
+
+test("mutation proof: a step whose run: DOES invoke the script is counted", () => {
+  const synthetic = [
+    "name: fake",
+    "",
+    "on:",
+    "  pull_request:",
+    "",
+    "jobs:",
+    "  check:",
+    "    steps:",
+    "      - name: the real step",
+    "        run: |",
+    '          bun scripts/check-commit-closure.ts "$sha" .',
+    "",
+  ].join("\n");
+  expect(anyStepRunInvokesCommitClosureScript(synthetic)).toBe(true);
+});
+
+test("mutation proof: a workflow with no run: occurrences at all does not throw and reports false", () => {
+  const synthetic = ["name: fake", "", "on:", "  pull_request:", "", "jobs:", "  check:", "    steps:", "      - uses: actions/checkout@v6", ""].join(
+    "\n"
+  );
+  expect(anyStepRunInvokesCommitClosureScript(synthetic)).toBe(false);
 });
