@@ -41,6 +41,8 @@ findings.md
 progress.md
 progress-archive.md
 .planning/
+BACKLOG-ORDER.md
+WORKFLOW-LOTS-DESIGN.md
 
 # Claude Code local-only files (personal, not project-wide)
 .claude/session-checkpoint.md
