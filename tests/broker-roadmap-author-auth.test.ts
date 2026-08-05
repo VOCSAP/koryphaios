@@ -19,6 +19,7 @@
 // presenting one must be refused outright.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
+import { Database } from "bun:sqlite";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
@@ -374,6 +375,29 @@ test("layer 2 bypass: a peer can no longer be MINTED under a reserved name", asy
   expect(asOperator.body.peer_id).not.toBe("operator");
 });
 
+test("layer 2 bypass: suffixing a reserved name does not break session resume", async () => {
+  // deriveDefaultId sits on the /register path, so renaming what it mints is
+  // exactly where a silent regression would land: a peer that reconnects must
+  // still find ITS row rather than accumulate a new one on every restart.
+  //
+  // Measured, and this is why it holds: resume is keyed on the session_key
+  // sha256(host||cwd||group_id), never on the peer_id, and the dormant-resume
+  // branch returns the peer_id READ FROM THE ROW instead of deriving it again.
+  const group = nextGroup();
+  const first = await registerAs("deck", "/", group);
+  expect(first.body.peer_id).toBe("deck-1");
+
+  const gone = await post(`${broker.url}/disconnect`, {
+    instance_token: first.body.instance_token,
+  });
+  expect(gone.status).toBe(200);
+
+  const again = await registerAs("deck", "/", group);
+  expect(again.status).toBe(200);
+  expect(again.body.peer_id).toBe("deck-1"); // same identity, not deck-2
+  expect(again.body.instance_token).toBe(first.body.instance_token);
+});
+
 test("layer 2 bypass: a REAL token cannot buy the 'deck' author, on any route", async () => {
   const reg = await registerAs("deck", "/", nextGroup());
   expect(reg.status).toBe(200);
@@ -390,6 +414,75 @@ test("layer 2 bypass: a REAL token cannot buy the 'deck' author, on any route", 
     expect({ route, status: res.status }).toEqual({ route, status: 401 });
     expect(res.body.error ?? "").toContain("sign the write with the operator credential");
   }
+});
+
+test("layer 2 bypass, MIGRATION: a pre-existing peer row named 'deck' cannot author either", async () => {
+  // The mint-time refusal cannot act backwards, and the operator deploys onto a
+  // database that predates it. A row named after a reserved identity may
+  // therefore already exist, holding a perfectly real token -- so the check has
+  // to run on the RESOLVED name too, not only on the claimed one.
+  //
+  // Seeded straight into the database on purpose: /register can no longer mint
+  // this row, so the only way to reach the branch that guards it is to create
+  // the state a live database already has. Without the seed this probe would be
+  // vacuous -- it would refuse a peer that does not exist.
+  // In a group of its OWN: 'default' already holds the sentinel row named
+  // 'deck', so seeding there hits the UNIQUE (peer_id, group_id) index. That
+  // collision is also the reason the original exploit needed a fresh group.
+  const legacyGroup = nextGroup();
+  await registerAs("legacy-neighbour", "/n", legacyGroup); // creates the group row (FK)
+
+  const legacyToken = `legacy-token-${Date.now()}`;
+  const db = new Database(broker.dbPath);
+  try {
+    db.query(
+      `INSERT INTO peers (instance_token, peer_id, group_id, pid, cwd, git_root, tty,
+                          summary, registered_at, last_seen, host, client_pid, project_key, status)
+       VALUES (?, 'deck', ?, ?, '/legacy', NULL, NULL, '', ?, ?, 'legacy-host', 1, ?, 'active')`
+    ).run(
+      legacyToken,
+      legacyGroup,
+      livePid(),
+      new Date().toISOString(),
+      new Date().toISOString(),
+      PK
+    );
+  } finally {
+    db.close();
+  }
+
+  // The probe SEES: the row is really there and really resolvable, otherwise
+  // the refusal below would prove nothing.
+  const check = new Database(broker.dbPath, { readonly: true });
+  try {
+    const row = check.query("SELECT peer_id FROM peers WHERE instance_token = ?").get(legacyToken);
+    expect(row).toEqual({ peer_id: "deck" });
+  } finally {
+    check.close();
+  }
+
+  const item = await seed("legacy deck target");
+  const res = await post<{ error?: string }>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    id: item.id,
+    by: "deck",
+    instance_token: legacyToken,
+    description: "written by a legacy row",
+  });
+  expect(res.status).toBe(401); // the reserved-author branch answers first
+
+  // And when the claim does NOT name the sentinel, the resolved name is what
+  // refuses -- with a message that names the remedy instead of reading as a
+  // breakage, since this peer is legitimate and is refused for its NAME alone.
+  const viaResolved = await post<{ error?: string }>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    id: item.id,
+    by: "some-other-name",
+    instance_token: legacyToken,
+    description: "same row, different claim",
+  });
+  expect(viaResolved.status).toBe(403);
+  expect(viaResolved.body.error ?? "").toContain("re-register");
 });
 
 test("layer 2 bypass: the lock of another peer survives the attack", async () => {

@@ -1762,7 +1762,12 @@ function resolveRoadmapAuthor(
         peer_id: owner.peer_id,
       });
       return {
-        error: `peer_id '${owner.peer_id}' is reserved: it cannot author a roadmap write through an instance_token`,
+        // Names the REMEDY, not just the refusal. This peer is legitimate (it
+        // holds a real token) and it is being refused for its NAME alone, so a
+        // message that stops at "reserved" reads as a breakage. Re-registering
+        // mints a suffixed id, since deriveDefaultId now refuses to hand out a
+        // reserved base.
+        error: `peer_id '${owner.peer_id}' is a reserved identity and cannot author a roadmap write. This peer was registered before reserved names were refused: re-register (disconnect and reconnect) to be renamed '${owner.peer_id}-1', then retry.`,
         status: 403,
       };
     }
