@@ -24,10 +24,16 @@ extraResources:
   # the docs grounding.
   - from: docs
     to: docs
-  # Embedded Claude Code plugin: the SessionStart back-channel hook, loaded into
-  # every Deck session via --plugin-dir (resolved from process.resourcesPath when
-  # packaged, see index.ts deckPluginDir). The hook bundle (.mjs) is produced by
+  # Embedded Claude Code plugin: the SessionStart back-channel hook, the approval
+  # hook, the deck-control and demo-browser MCP bridges, and the roadmap-card skill
+  # with its roadmap-scribe agent (card a79c7696 volet 3). Dropping this directory
+  # costs all four, not just the hook. Loaded into
+  # every Deck session via --plugin-dir (resolved LIVE from process.resourcesPath
+  # when packaged, see index.ts getDeckPluginDir -- re-checked at every spawn, not
+  # cached at boot, card d02c8e96). The hook bundle (.mjs) is produced by
   # `npm run build:hook`, which runs before packaging via the build/package scripts.
+  # tests/desktop-electron-builder-resources.test.ts reads this extraResources
+  # list to guard against a packaging run silently dropping an entry.
   - from: deck-plugin
     to: deck-plugin
   # Sandbox image recipe: the Docker view builds it from

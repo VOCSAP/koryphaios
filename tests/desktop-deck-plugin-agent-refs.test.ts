@@ -11,7 +11,10 @@
 //
 // Coverage note: it DISCOVERS every SKILL.md under desktop/deck-plugin/ instead of
 // naming roadmap-card, so a third skill added tomorrow with a bare agent name
-// turns it red without anyone remembering to extend the list.
+// turns it red without anyone remembering to extend the list. Same reason a file
+// whose frontmatter cannot be parsed is an OFFENDER and not a skip: it would
+// otherwise leave the audited set in silence while this test still announced
+// full coverage.
 
 import { test, expect } from "bun:test";
 import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";
@@ -30,13 +33,31 @@ function findSkillFiles(dir: string): string[] {
   return found;
 }
 
-/** The frontmatter value of `key`, or null when the field is absent. */
-function frontmatterValue(text: string, key: string): string | null {
+/**
+ * The lines INSIDE the frontmatter block, or null when the file has no readable
+ * one (missing opening `---`, or an unterminated block).
+ *
+ * Kept separate from the field lookup on purpose: a single function returning
+ * null for both "no such field" and "unparseable file" would let the caller
+ * treat an unreadable SKILL.md as a legitimate skill without an `agent:`, and
+ * that file would leave the audited domain in silence.
+ */
+function frontmatterLines(text: string): string[] | null {
   const lines = text.split(/\r?\n/);
-  if (lines[0]?.trim() !== "---") return null;
+  const first = lines[0] ?? "";
+  const opener = (first.charCodeAt(0) === 0xfeff ? first.slice(1) : first).trim();
+  if (opener !== "---") return null;
+  const body: string[] = [];
   for (let i = 1; i < lines.length; i++) {
-    const line = lines[i]!;
-    if (line.trim() === "---") return null; // end of frontmatter, not found
+    if (lines[i]!.trim() === "---") return body;
+    body.push(lines[i]!);
+  }
+  return null; // opening `---` with no closing one
+}
+
+/** The value of `key` among already-extracted frontmatter lines, or null. */
+function frontmatterValue(lines: string[], key: string): string | null {
+  for (const line of lines) {
     const match = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
     if (match && match[1] === key) return match[2]!.trim();
   }
@@ -65,7 +86,15 @@ test("every plugin skill referencing an agent qualifies it with the plugin name"
   let qualifiedRefs = 0;
 
   for (const file of skillFiles) {
-    const agentRef = frontmatterValue(readFileSync(file, "utf8"), "agent");
+    const skillFm = frontmatterLines(readFileSync(file, "utf8"));
+    if (skillFm === null) {
+      // NOT a `continue`: an unreadable file must fail loudly, otherwise it
+      // drops out of the audited set while this test still claims to cover
+      // every skill under the plugin.
+      offenders.push(`${file}: no readable frontmatter block, so its agent: (if any) went unchecked`);
+      continue;
+    }
+    const agentRef = frontmatterValue(skillFm, "agent");
     if (agentRef === null) continue; // a skill with no agent: is legitimate
 
     if (!agentRef.startsWith(`${pluginName}:`)) {
@@ -83,7 +112,12 @@ test("every plugin skill referencing an agent qualifies it with the plugin name"
       offenders.push(`${file}: agent "${agentRef}" has no file at ${agentFile}`);
       continue;
     }
-    const declaredName = frontmatterValue(readFileSync(agentFile, "utf8"), "name");
+    const agentFm = frontmatterLines(readFileSync(agentFile, "utf8"));
+    if (agentFm === null) {
+      offenders.push(`${agentFile}: no readable frontmatter block, so its name: went unchecked`);
+      continue;
+    }
+    const declaredName = frontmatterValue(agentFm, "name");
     if (declaredName !== bare) {
       offenders.push(
         `${agentFile}: frontmatter name "${declaredName}" does not match the ` +
