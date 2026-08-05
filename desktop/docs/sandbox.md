@@ -27,8 +27,8 @@ repo (the clone's `origin` IS your local repo, so `git push origin
 refused by git, so work on a branch). "Reset clone" throws the copy away.
 
 Because a clone only carries *tracked* files, copy mode also takes an
-allow-list of **gitignored globs to copy in** (planning notes, local
-fixtures) — one glob per line in the Docker view. A hard deny-list always
+allow-list of **extra globs to copy in** (planning notes, local
+fixtures — gitignored or not) — one glob per line in the Docker view. A hard deny-list always
 wins over whatever you list: `.env*`, keys/certificates, `.ssh`, `.aws`,
 `node_modules`, `.venv`, `.git`. Globs that matched nothing are reported so a
 typo is visible instead of silent.
@@ -192,7 +192,7 @@ capability the sandbox would otherwise hand to code assumed compromised.
   broker-bridge verdict, and a drift badge when the image was rebuilt after
   this container was created (Rebuild to pick it up — everything installed by
   hand inside is lost).
-- **Ephemeral copy card** (copy mode only) — clone path, the gitignored-globs
+- **Ephemeral copy card** (copy mode only) — clone path, the copy-globs
   editor, unmatched globs, Reset clone.
 - **Image card** — image name, presence badge, and one action that follows the
   state: **Build image** while it is missing, **Remove image** once it exists

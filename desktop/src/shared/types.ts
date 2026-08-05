@@ -679,7 +679,11 @@ export interface SandboxStatus {
   imagePresent: boolean | null
   /** Ports published at create (127.0.0.1 only); rebuild to apply changes. */
   ports: number[]
-  /** Globs of gitignored files duplicated into the clone (copy mode). */
+  /**
+   * Globs selecting extra files duplicated into the clone on top of the
+   * tracked ones (copy mode) -- matches any file under the project root,
+   * not only ones actually gitignored.
+   */
   copyIgnored: string[]
   /** Host path of the ephemeral clone, or null outside copy mode. */
   copyDir: string | null
@@ -1337,7 +1341,7 @@ export interface DeckApi {
   sandboxStatus(force?: boolean): Promise<SandboxStatus>
   /**
    * Patch this project's sandbox settings (enable, work mode, ports, copied
-   * gitignored globs). Rejected main-side while any session is live — the
+   * extra-file globs). Rejected main-side while any session is live — the
    * whole set decides WHERE agents run and what travels with them.
    */
   sandboxPatchSettings(patch: SandboxSettingsPatch): Promise<SandboxStatus>

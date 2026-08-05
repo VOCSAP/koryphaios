@@ -375,7 +375,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'config:set': 3,
   'launch:set-global': 3,
   // Trust-changing: these decide WHERE agents execute, which image they run
-  // and which gitignored files get duplicated next to them. The custom
+  // and which extra files get duplicated next to them. The custom
   // Dockerfile fragment and the settings overlay both decide what CODE and
   // CONFIG every sandboxed agent runs with.
   'sandbox:patch-settings': 3,

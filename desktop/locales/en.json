@@ -315,7 +315,7 @@
   "sandbox.copy": "Ephemeral copy",
   "sandbox.copyHint": "A local git clone of the project, mounted instead of the real folder. Agents commit here and push the branch back to your repo; the clone can be thrown away at any time.",
   "sandbox.copyDir": "Clone:",
-  "sandbox.copyIgnored": "Gitignored files to copy in (one glob per line):",
+  "sandbox.copyIgnored": "Extra files to copy in (one glob per line):",
   "sandbox.copyIgnoredPlaceholder": "PLAN-*.md\ntask_plan.md\nnotes/**",
   "sandbox.copySaveGlobs": "Save globs",
   "sandbox.copyDenyHint": "Secrets and bulk are never copied, whatever you list here: .env*, keys/certificates, .ssh, .aws, node_modules, .venv, .git.",

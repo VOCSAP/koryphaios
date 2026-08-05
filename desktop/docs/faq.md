@@ -118,7 +118,7 @@ engine the broker also has to listen beyond loopback
 
 **My gitignored planning notes are missing in ephemeral-copy mode.**
 The clone only carries tracked files. List the notes as globs in the Docker
-view ("Gitignored files to copy in"). Secrets (`.env*`, keys, `.ssh`,
+view ("Extra files to copy in"). Secrets (`.env*`, keys, `.ssh`,
 `.aws`) and bulk (`node_modules`, `.venv`) are never copied whatever you
 list — that is deliberate.
 
