@@ -773,15 +773,6 @@ function releaseStaleLocks(): void {
       params
     );
   };
-  if (process.env.CP_DIAG_LOCK) {
-    const rows = db
-      .query(`SELECT id, locked, locked_by, locked_at FROM roadmap_items WHERE locked = 1`)
-      .all() as { id: string; locked: number; locked_by: string; locked_at: string }[];
-    const nowRow = db.query(`SELECT datetime('now') AS n`).get() as { n: string };
-    process.stderr.write(
-      `[DIAG ${Date.now()}] sweep tick now=${nowRow.n} locked_rows=${JSON.stringify(rows)}\n`
-    );
-  }
   // TTL: no write at all on the item for LOCK_TTL_SEC (any roadmap_update,
   // e.g. a context enrichment by the working agent, refreshes updated_at).
   release(`datetime(updated_at) < datetime('now', ?)`, [`-${LOCK_TTL_SEC} seconds`]);
