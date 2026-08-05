@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { RoadmapItem, RoadmapKind } from '@shared/types'
+import type { RoadmapItem, RoadmapKind, SessionRuntime } from '@shared/types'
 import { dependsWouldCycle } from '@shared/workflow'
 import { useT, type TFn } from '../i18n'
 import { useDeck } from '../store'
@@ -173,6 +173,27 @@ function badges(item: RoadmapItem, t: TFn): React.JSX.Element {
   )
 }
 
+/**
+ * Display name of a directive target, or null to fall back to the raw peer_id.
+ *
+ * The name is what the operator recognises; the peer_id stays visible next to it
+ * because it is the ROUTING key and the only discriminator when two agents share
+ * a display name -- same primary/secondary split as the directive editor
+ * (`.rm-target-*` in RoadmapView). A card outlives the sessions it targets, so an
+ * id matching nothing (dead or foreign peer) legitimately renders alone.
+ *
+ * peerId is a routing key, not a primary key on THIS list: a resumed session and
+ * its dormant twin can both carry it, so the lookup resolves the OBJECT first
+ * (live wins, then any) instead of a Map keyed by peerId, which would silently
+ * pick one of the two.
+ */
+function targetName(sessions: SessionRuntime[], peerId: string): string | null {
+  const s =
+    sessions.find((x) => x.peerId === peerId && x.status !== 'exited') ??
+    sessions.find((x) => x.peerId === peerId)
+  return s?.name && s.name !== peerId ? s.name : null
+}
+
 export function RoadmapItemModal({
   item,
   items,
@@ -201,6 +222,8 @@ export function RoadmapItemModal({
   onRemoveDep: (parentId: string) => void
 }): React.JSX.Element {
   const t = useT()
+  // Directive targets are stored as peer ids; the sessions list is what names them.
+  const sessions = useDeck((s) => s.sessions)
   const [depMenu, setDepMenu] = useState<{ x: number; y: number } | null>(null)
 
   useEffect(() => {
@@ -262,11 +285,15 @@ export function RoadmapItemModal({
                 {item.target_peer_ids.length === 0 ? (
                   <span className="rm-badge">{t('roadmap.targetsEmpty')}</span>
                 ) : (
-                  item.target_peer_ids.map((p) => (
-                    <span key={p} className="rm-badge rm-badge-target">
-                      {p}
-                    </span>
-                  ))
+                  item.target_peer_ids.map((p) => {
+                    const name = targetName(sessions, p)
+                    return (
+                      <span key={p} className="rm-badge rm-badge-target" title={p}>
+                        {name ?? p}
+                        {name && <span className="rm-badge-target-id">{p}</span>}
+                      </span>
+                    )
+                  })
                 )}
               </div>
             </section>

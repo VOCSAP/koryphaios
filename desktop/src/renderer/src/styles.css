@@ -3808,8 +3808,22 @@ svg.glyph {
   font-family: var(--mono, monospace);
   color: #a071e8;
 }
+/* nowrap is load-bearing, not cosmetic: this pill carries TWO strings (name then
+   peer id) where every other .rm-badge carries one, and neither .rm-badge nor
+   this rule constrains width, so a long pair would otherwise break the line
+   INSIDE the border. .rm-detail-badges already wraps BETWEEN pills. */
 .rm-badge-target {
   color: #a071e8;
+  white-space: nowrap;
+}
+/* Read-only twin of .rm-target-peer: the badge leads with the agent name, the
+   routing peer_id trails it, muted and mono so the name stays the thing the eye
+   lands on. Absent when the id IS the label. */
+.rm-badge-target-id {
+  margin-left: 5px;
+  font-family: var(--mono, monospace);
+  font-size: 9.5px;
+  color: var(--fg-dim);
 }
 
 .wf-node-head {
