@@ -13,18 +13,37 @@ import { startBroker, stopBroker, type TestBroker } from "./_helper.ts";
 import {
   normalizeRemoteUrl,
   computeDeckProjectKey,
+  configureRoadmapSigner,
+  resetRoadmapSigner,
   listRoadmap,
   upsertRoadmap,
   archiveRoadmap,
   reorderRoadmap
 } from "../desktop/src/main/roadmap-service.ts";
 import { normalizeRemoteUrl as coreNormalize } from "../shared/summarize.ts";
+import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
 
 let broker: TestBroker;
 const tmpDirs: string[] = [];
 
+// Card 39c40571 layer 2: these writes are authored by 'deck', so the broker
+// demands an operator signature. Configuring the loader here exercises the same
+// seam index.ts uses in the app, end to end against a real broker: a green
+// round-trip below proves the Deck half and the broker half agree on the proof.
+const deckOperator = generateCredential();
+
 beforeAll(async () => {
   broker = await startBroker();
+  configureRoadmapSigner(() => (payload) => {
+    const signed = { ...payload, public_key: deckOperator.publicKey };
+    return {
+      public_key: deckOperator.publicKey,
+      auth: buildAuthProof(deckOperator.privateKey, signed, {
+        kind: "operator",
+        operator_id: deriveOperatorId(deckOperator.publicKey)
+      })
+    };
+  });
 });
 
 afterAll(async () => {
@@ -147,4 +166,39 @@ test("reorderRoadmap threads an optional waves param through to the broker", asy
   const flatById = new Map(flat.map((i) => [i.id, i]));
   expect(flatById.get(a.id)?.queue).toBe(1);
   expect(flatById.get(b.id)?.queue).toBe(2);
+});
+
+// Card 39c40571 layer 2, DECK-SIDE negative control.
+//
+// Every test above passes BECAUSE a signer is configured, which means they
+// cannot tell a working signature from a broker that stopped asking. Removing
+// the signer must therefore turn the very same call into a refusal, and the
+// message must be specific enough for a reader to tell an ACTIVE guard from an
+// ABSENT one -- the two are indistinguishable from the outside otherwise, and
+// a broker process can be hours older than the code it was started from.
+test("with no signer configured, an operator-authored write is refused, loudly", async () => {
+  const endpoint = { url: broker.url, token: null };
+  const key = "github.com/acme/deck-unsigned-test";
+
+  // First prove the probe SEES: signed, this exact call works.
+  const ok = await upsertRoadmap(endpoint, key, { title: "signed write" });
+  expect(ok.id.length).toBeGreaterThan(10);
+
+  resetRoadmapSigner();
+  try {
+    await expect(
+      upsertRoadmap(endpoint, key, { title: "unsigned write" })
+    ).rejects.toThrow(/sign the write with the operator credential/);
+  } finally {
+    configureRoadmapSigner(() => (payload) => {
+      const signed = { ...payload, public_key: deckOperator.publicKey };
+      return {
+        public_key: deckOperator.publicKey,
+        auth: buildAuthProof(deckOperator.privateKey, signed, {
+          kind: "operator",
+          operator_id: deriveOperatorId(deckOperator.publicKey)
+        })
+      };
+    });
+  }
 });

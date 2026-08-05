@@ -4,7 +4,7 @@
 // in_progress, and the stale-lock sweep (TTL + owner gone).
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, type TestBroker , deckAuthored } from "./_helper.ts";
 import { Database } from "bun:sqlite";
 import type { RoadmapItem } from "../shared/types.ts";
 
@@ -37,11 +37,13 @@ async function patch(
   by: string,
   fields: Record<string, unknown>
 ): Promise<{ status: number; item?: RoadmapItem; error?: string }> {
-  const res = await post<UpsertRes & { error?: string }>(`${broker.url}/roadmap/upsert`, {
-    id,
-    by,
-    ...fields,
-  });
+  // Card 39c40571 layer 2: 'deck' names the operator and its writes must now be
+  // SIGNED. Signed here rather than swapped for another author, because these
+  // tests are precisely about the deck's lock exemptions -- switching the
+  // author would keep them green while they stopped covering that path.
+  const body =
+    by === "deck" ? deckAuthored({ id, ...fields }) : { id, by, ...fields };
+  const res = await post<UpsertRes & { error?: string }>(`${broker.url}/roadmap/upsert`, body);
   return { status: res.status, item: res.body.item, error: res.body.error };
 }
 

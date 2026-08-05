@@ -53,7 +53,12 @@ import {
   sendAnnounce
 } from './broker-client'
 import { appendInboxHistory } from './inbox-store'
-import { computeDeckProjectKey, listRoadmap, upsertRoadmap } from './roadmap-service'
+import {
+  computeDeckProjectKey,
+  configureRoadmapSigner,
+  listRoadmap,
+  upsertRoadmap
+} from './roadmap-service'
 import { createCheckpoint, purgeCheckpoints, restoreCommand } from './checkpoint-service'
 import {
   canAutoDispatchNext,
@@ -104,7 +109,13 @@ import {
   listChannels,
   markVerdictsDelivered
 } from './approval-service'
-import { applyEnrolment, exportEnrolment } from './operator-identity'
+import {
+  applyEnrolment,
+  createOperatorIdentity,
+  exportEnrolment,
+  loadOperatorIdentity
+} from './operator-identity'
+import { buildAuthProof, generateCredential } from './approval-auth'
 import { addEventSink, broadcast, regHandle } from './api-registry'
 import { CompanionServer } from './companion-server'
 import {
@@ -357,6 +368,35 @@ const approvals = new ApprovalRuntime({
   endpoint: () => resolveBrokerEndpoint(),
   sessionRef: `window-${activeScope.groupId.slice(0, 12)}`,
   host: hostname()
+})
+
+// Card 39c40571 layer 2: a roadmap write authored by 'deck' speaks as the
+// HUMAN, so the broker now demands an operator signature on it. The loader is
+// registered here and runs on the FIRST write, never at boot: the identity is
+// deliberately NOT taken from ApprovalRuntime, whose arm() is gated by
+// config.mobileApprovals -- a phone-notification toggle must not decide whether
+// the shared roadmap is writable. A machine that never enrolled has no
+// identity file yet, so the first signature MINTS one; operator_id is the
+// digest of the public key, so the credential self-certifies on first contact
+// and no enrolment step is required for the backlog to work.
+configureRoadmapSigner(() => {
+  const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
+  const identity =
+    loadOperatorIdentity(stateDir, secretCipher) ??
+    createOperatorIdentity(stateDir, secretCipher, generateCredential())
+  return (payload) => {
+    // public_key travels WITH the payload and is therefore covered by the
+    // signature: on first contact the broker has no row for this operator, and
+    // operator_id is the digest of that key, so the pair self-certifies.
+    const signed = { ...payload, public_key: identity.publicKey }
+    return {
+      public_key: identity.publicKey,
+      auth: buildAuthProof(identity.privateKey, signed, {
+        kind: 'operator',
+        operator_id: identity.operatorId
+      })
+    }
+  }
 })
 
 /** Global switch AND no project opt-out — a project can restrict, never enable. */

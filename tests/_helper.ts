@@ -1,6 +1,7 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { mkdtempSync, rmSync } from "node:fs";
+import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
 
 export interface TestBroker {
   url: string;
@@ -141,4 +142,31 @@ export async function sha256Hex(s: string): Promise<string> {
 
 export async function groupId(secret: string): Promise<string> {
   return (await sha256Hex(secret)).slice(0, 32);
+}
+
+/**
+ * Sign a roadmap write as the operator (card 39c40571 layer 2).
+ *
+ * `by: 'deck'` names the HUMAN, so the broker demands an Ed25519 proof on it.
+ * Fixtures that only need SOME author should use a plain name instead (any
+ * string matching no peer row is accepted unproven); this helper is for the
+ * tests that assert DECK-SPECIFIC behaviour -- the lock exemptions, force, the
+ * "submitted, not started" rule -- which would otherwise silently stop testing
+ * the deck path the day they were switched to another author.
+ *
+ * One credential per test process: operator_id is the digest of the public key,
+ * so the broker self-certifies it on first contact and every fixture speaks as
+ * the same operator, which is what a single Deck does.
+ */
+const FIXTURE_OPERATOR = generateCredential();
+
+export function deckAuthored(payload: Record<string, unknown>): Record<string, unknown> {
+  const body = { ...payload, by: "deck", public_key: FIXTURE_OPERATOR.publicKey };
+  return {
+    ...body,
+    auth: buildAuthProof(FIXTURE_OPERATOR.privateKey, body, {
+      kind: "operator",
+      operator_id: deriveOperatorId(FIXTURE_OPERATOR.publicKey),
+    }),
+  };
 }

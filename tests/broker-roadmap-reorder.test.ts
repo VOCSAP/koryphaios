@@ -1,7 +1,7 @@
 // Workflow lane: atomic dispatch-queue rewrite via /roadmap/reorder.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, type TestBroker , deckAuthored } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 
 let broker: TestBroker;
@@ -15,19 +15,18 @@ afterAll(async () => {
 });
 
 async function upsert(fields: Record<string, unknown>) {
-  return post<{ item: RoadmapItem } | { error: string }>(`${broker.url}/roadmap/upsert`, {
-    project_key: KEY,
-    by: "deck",
-    ...fields,
-  });
+  // Card 39c40571 layer 2: by:'deck' carries an operator signature now.
+  return post<{ item: RoadmapItem } | { error: string }>(
+    `${broker.url}/roadmap/upsert`,
+    deckAuthored({ project_key: KEY, ...fields })
+  );
 }
 
 async function reorder(fields: Record<string, unknown>) {
-  return post<{ items: RoadmapItem[] } | { error: string }>(`${broker.url}/roadmap/reorder`, {
-    project_key: KEY,
-    by: "deck",
-    ...fields,
-  });
+  return post<{ items: RoadmapItem[] } | { error: string }>(
+    `${broker.url}/roadmap/reorder`,
+    deckAuthored({ project_key: KEY, ...fields })
+  );
 }
 
 async function create(title: string, extra: Record<string, unknown> = {}): Promise<RoadmapItem> {
@@ -72,7 +71,15 @@ test("reorder validates authorship, project scope, duplicates and closed items",
   const done = await create("wf done");
   await upsert({ id: done.id, status: "done" });
 
-  expect((await reorder({ ids: [a.id], by: "" })).status).toBe(400);
+  // Sent RAW, not through the signing helper: the helper stamps by:'deck' over
+  // whatever the caller passed, so routing this case through it would have
+  // tested the helper instead of the empty-author rule.
+  const noAuthor = await post<{ error: string }>(`${broker.url}/roadmap/reorder`, {
+    project_key: KEY,
+    ids: [a.id],
+    by: "",
+  });
+  expect(noAuthor.status).toBe(400);
   expect((await reorder({ ids: "nope" })).status).toBe(400);
   expect((await reorder({ ids: [a.id, a.id] })).status).toBe(400);
   expect((await reorder({ ids: ["missing-id"] })).status).toBe(404);

@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
 import * as sharedTypes from "../shared/types.ts";
 import type { RegisterResponse, RoadmapItem } from "../shared/types.ts";
+import { buildAuthProof, deriveOperatorId, deriveTokenId, generateCredential } from "../shared/approval.ts";
 
 let broker: TestBroker;
 
@@ -203,14 +204,126 @@ test("an author matching no peer row stays accepted (cli.ts and fixtures)", asyn
   expect(res.body.item.created_by).toBe("some-unregistered-author");
 });
 
-test("the Deck's bare by:'deck' stays accepted in layer 1", async () => {
-  // Deliberate: the Deck has no peer row and no instance_token. Closing this
-  // axis means signing with the operator credential, which is layer 2. What
-  // layer 1 owes here is only that no PUBLIC token opens the same door.
-  const item = await seed("deck target");
-  const res = await upsert({ id: item.id, by: "deck", description: "operator edit" });
-  expect(res.status).toBe(200);
-  expect(res.body.item.updated_by).toBe("deck");
+// ---------------------------------------------------------------------------
+// LAYER 2: the deck axis, the one author layer 1 still took on faith.
+//
+// 'deck' names the OPERATOR. Layer 1 let a bare claim through because the
+// sentinel matches no peer row, so any holder of the shared bearer token could
+// write as the human and, via `proven`, walk the work-lock guard with force.
+// The claim must now carry an Ed25519 operator proof.
+//
+// DOMAIN. The routes below were not copied from the card: they are every call
+// site of resolveRoadmapAuthor, enumerated with
+//   grep -n "resolveRoadmapAuthor(" broker.ts
+// which returns the definition plus four callers (upsert, archive, reorder,
+// import). The card named upsert alone; a guard wired to the cited example
+// rather than to the discovered domain is how three of the four stay open.
+// ---------------------------------------------------------------------------
+
+const DECK_WRITE_ROUTES = [
+  { route: "/roadmap/upsert", body: (id: string) => ({ project_key: PK, id, description: "operator edit" }) },
+  { route: "/roadmap/archive", body: (id: string) => ({ id }) },
+  { route: "/roadmap/reorder", body: (id: string) => ({ project_key: PK, ids: [id] }) },
+  {
+    route: "/roadmap/import",
+    body: (id: string) => ({
+      project_key: PK,
+      items: [{ id, kind: "feature", title: "imported by the deck" }],
+    }),
+  },
+] as const;
+
+function signedBody(
+  payload: Record<string, unknown>,
+  cred: { privateKey: string; publicKey: string }
+): Record<string, unknown> {
+  const body = { ...payload, by: "deck", public_key: cred.publicKey };
+  return {
+    ...body,
+    auth: buildAuthProof(cred.privateKey, body, {
+      kind: "operator",
+      operator_id: deriveOperatorId(cred.publicKey),
+    }),
+  };
+}
+
+test("layer 2: an UNSIGNED by:'deck' write is refused on every route that resolves an author", async () => {
+  for (const { route, body } of DECK_WRITE_ROUTES) {
+    const item = await seed(`deck target for ${route}`);
+    const res = await post<{ error?: string }>(`${broker.url}${route}`, {
+      ...body(item.id),
+      by: "deck",
+    });
+    expect({ route, status: res.status }).toEqual({ route, status: 401 });
+    // The refusal must be readable enough to tell an ACTIVE guard from an
+    // ABSENT one: a running broker can be hours older than this code, and a
+    // silent 401 looks the same as a broker that never had the guard.
+    expect(res.body.error ?? "").toContain("sign the write with the operator credential");
+  }
+});
+
+test("layer 2: the SAME writes signed with the operator credential are accepted", async () => {
+  // Positive control, and it is what makes the refusals above mean something:
+  // only the proof differs, so a red here would say the routes are broken for
+  // everyone rather than closed for the unsigned.
+  const cred = generateCredential();
+  for (const { route, body } of DECK_WRITE_ROUTES) {
+    const item = await seed(`signed deck target for ${route}`);
+    const res = await post<{ error?: string }>(
+      `${broker.url}${route}`,
+      signedBody(body(item.id), cred)
+    );
+    expect({ route, status: res.status }).toEqual({ route, status: 200 });
+  }
+});
+
+test("layer 2: a SESSION credential may not sign a roadmap write", async () => {
+  // roadmap-write is deliberately absent from SESSION_ALLOWED, so a sandboxed
+  // agent holding a session token is refused by the operation table -- 403,
+  // not 401: the signature is fine, the CREDENTIAL KIND is not.
+  const opCred = generateCredential();
+  const sessionCred = generateCredential();
+  const operatorId = deriveOperatorId(opCred.publicKey);
+
+  const mintBody = {
+    session_public_key: sessionCred.publicKey,
+    session_ref: "tile-layer2",
+    public_key: opCred.publicKey,
+  };
+  const mint = await post<{ token_id: string }>(`${broker.url}/approval/token-mint`, {
+    ...mintBody,
+    auth: buildAuthProof(opCred.privateKey, mintBody, {
+      kind: "operator",
+      operator_id: operatorId,
+    }),
+  });
+  expect(mint.status).toBe(200);
+
+  const item = await seed("session-signed target");
+  const payload = { project_key: PK, id: item.id, by: "deck", description: "agent edit" };
+  const res = await post<{ error?: string }>(`${broker.url}/roadmap/upsert`, {
+    ...payload,
+    auth: buildAuthProof(sessionCred.privateKey, payload, {
+      kind: "session",
+      operator_id: operatorId,
+      token_id: deriveTokenId(sessionCred.publicKey),
+    }),
+  });
+  expect(res.status).toBe(403);
+  expect(res.body.error ?? "").toContain("roadmap-write");
+});
+
+test("layer 2: a REPLAYED operator proof is refused, inherited from the nonce guard", async () => {
+  const cred = generateCredential();
+  const item = await seed("replay target");
+  const body = signedBody({ project_key: PK, id: item.id, description: "first" }, cred);
+
+  const first = await post<{ error?: string }>(`${broker.url}/roadmap/upsert`, body);
+  expect(first.status).toBe(200);
+
+  const replay = await post<{ error?: string }>(`${broker.url}/roadmap/upsert`, body);
+  expect(replay.status).toBe(401);
+  expect(replay.body.error ?? "").toContain("replayed-proof");
 });
 
 test("a peer writing with its own token and its own peer_id is accepted", async () => {

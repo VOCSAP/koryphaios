@@ -218,8 +218,26 @@ export function verifyAuthProof(
  * OPERATOR-ONLY: it is the operation that authorises a tool call, so a
  * sandboxed agent must never reach it (PLAN §6.8).
  */
-export type ApprovalOperation = "add" | "wait" | "claim" | "list" | "channels" | "mint-token";
+export type ApprovalOperation =
+  | "add"
+  | "wait"
+  | "claim"
+  | "list"
+  | "channels"
+  | "mint-token"
+  // Card 39c40571 layer 2: a roadmap write claiming the reserved 'deck' author
+  // is an OPERATOR gesture. It is listed here (rather than getting its own
+  // verifier beside this one) so it inherits the signature check, the nonce
+  // replay guard and this very table, and so that leaving it out of
+  // SESSION_ALLOWED below is what refuses a sandboxed agent's session token.
+  | "roadmap-write";
 
+/**
+ * A session credential may only ASK. Every operation absent from this set is
+ * operator-only, which is the point: `claim` authorises a tool call and
+ * `roadmap-write` speaks as the operator on a shared backlog, so a sandboxed
+ * agent holding a session token must reach neither (PLAN §6.8).
+ */
 const SESSION_ALLOWED: ReadonlySet<ApprovalOperation> = new Set<ApprovalOperation>(["add", "wait"]);
 
 export function isOperationAllowed(kind: ApprovalAuthKind, op: ApprovalOperation): boolean {

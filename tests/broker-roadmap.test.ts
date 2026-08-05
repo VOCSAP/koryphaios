@@ -4,7 +4,7 @@
 // peers, so unregistering their author never touches them.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, type TestBroker , deckAuthored } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 
 let broker: TestBroker;
@@ -163,10 +163,11 @@ test("list scopes by project_key and filters by kind/status/priority/tag", async
 test("archive hides the item from default lists; restore via status patch", async () => {
   const item = await add({ title: "To be archived" });
 
-  const arch = await post<UpsertRes>(`${broker.url}/roadmap/archive`, {
-    id: item.id,
-    by: "deck",
-  });
+  // Card 39c40571 layer 2: an operator-authored write is signed.
+  const arch = await post<UpsertRes>(
+    `${broker.url}/roadmap/archive`,
+    deckAuthored({ id: item.id })
+  );
   expect(arch.status).toBe(200);
   expect(arch.body.item.status).toBe("archived");
   expect(arch.body.item.deleted_at).toBeTruthy();
@@ -187,11 +188,10 @@ test("archive hides the item from default lists; restore via status patch", asyn
   expect(filtered.body.items.some((i) => i.id === item.id)).toBe(true);
 
   // Restore: any non-archived status clears the soft delete.
-  const restored = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
-    id: item.id,
-    by: "deck",
-    status: "planned",
-  });
+  const restored = await post<UpsertRes>(
+    `${broker.url}/roadmap/upsert`,
+    deckAuthored({ id: item.id, status: "planned" })
+  );
   expect(restored.body.item.status).toBe("planned");
   expect(restored.body.item.deleted_at).toBeNull();
 
@@ -203,7 +203,7 @@ test("archive hides the item from default lists; restore via status patch", asyn
 
 test("export/import round-trips items with ids, statuses and timestamps intact", async () => {
   const item = await add({ title: "Survives migration", kind: "debt", tags: ["migration"] });
-  await post(`${broker.url}/roadmap/archive`, { id: item.id, by: "deck" });
+  await post(`${broker.url}/roadmap/archive`, deckAuthored({ id: item.id }));
 
   const exportRes = await fetch(
     `${broker.url}/roadmap/export?project_key=${encodeURIComponent(PK)}`

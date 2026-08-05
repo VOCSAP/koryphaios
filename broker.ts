@@ -1699,6 +1699,43 @@ function resolveRoadmapAuthor(
     return { by: owner.peer_id, proven: true };
   }
 
+  // Card 39c40571 LAYER 2: the one author layer 1 still took on faith.
+  //
+  // 'deck' names the operator, and its row carries a sentinel token, so the
+  // check below reads it as "belongs to no real peer" and lets it through.
+  // Any holder of the shared BROKER_TOKEN could therefore write as the human
+  // and, through `proven`, walk the work-lock guard with force. The Deck now
+  // SIGNS with the operator credential (Ed25519, operator_id = digest of the
+  // public key, so it is self-certifying) and an unsigned claim is refused.
+  //
+  // Routed through resolveApprovalAuth rather than verifying here, so this
+  // path inherits the signature check, the nonce REPLAY guard and the
+  // operation table in one move. 'roadmap-write' is deliberately absent from
+  // SESSION_ALLOWED: a sandboxed agent holding a session token gets 403 from
+  // that table, not from a rule re-typed here.
+  if (by === DECK_PEER_ID) {
+    const auth = resolveApprovalAuth(
+      body as { auth?: ApprovalAuthProof } & Record<string, unknown>,
+      "roadmap-write"
+    );
+    if ("error" in auth) {
+      // LOUD, and specific enough to answer the question a silent refusal
+      // cannot: an operator reading this knows the guard EXISTS and fired.
+      // Silence here means the running broker predates this code -- a live
+      // process can be hours older than the commit, and the two cases look
+      // identical from the outside unless the refusal says so itself.
+      log.warn(`${route}: refused an unsigned write claiming the '${DECK_PEER_ID}' author`, {
+        reason: auth.error,
+        status: auth.status,
+      });
+      return {
+        error: `author '${DECK_PEER_ID}' is the operator: sign the write with the operator credential (${auth.error}). A Deck older than this broker does not sign yet -- update it.`,
+        status: auth.status,
+      };
+    }
+    return { by, proven: true };
+  }
+
   // No proof. Ask whether the claimed NAME belongs to a real peer -- deliberately
   // over every row rather than a `.get()`: one peer_id can exist in two groups
   // (two identities), and picking one of the two rows would answer at random.

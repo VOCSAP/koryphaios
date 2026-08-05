@@ -3,7 +3,7 @@
 // patch coherence, target sanitization, kind switching, and export/import.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, get, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, get, type TestBroker , deckAuthored } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 
 let broker: TestBroker;
@@ -22,11 +22,13 @@ type UpsertRes = { item: RoadmapItem };
 type ErrRes = { error: string };
 
 async function add(fields: Record<string, unknown>) {
-  return post<UpsertRes & ErrRes>(`${broker.url}/roadmap/upsert`, {
-    project_key: PK,
-    by: "deck",
-    ...fields,
-  });
+  // Card 39c40571 layer 2: by:'deck' now needs an operator signature. Signed
+  // rather than switched to a plain author, so these tests keep exercising the
+  // deck path they were written for.
+  return post<UpsertRes & ErrRes>(
+    `${broker.url}/roadmap/upsert`,
+    deckAuthored({ project_key: PK, ...fields })
+  );
 }
 
 test("non-directive items default directive=null and target_peer_ids=[]", async () => {

@@ -1,7 +1,7 @@
 // PLAN C15: dispatch-queue position on roadmap items (queue INTEGER NULL).
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, type TestBroker , deckAuthored } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
 
 let broker: TestBroker;
@@ -11,11 +11,11 @@ beforeAll(async () => { broker = await startBroker(); });
 afterAll(async () => { await stopBroker(broker); });
 
 async function upsert(fields: Record<string, unknown>) {
-  return post<{ item: RoadmapItem } | { error: string }>(`${broker.url}/roadmap/upsert`, {
-    project_key: KEY,
-    by: "deck",
-    ...fields,
-  });
+  // Card 39c40571 layer 2: by:'deck' carries an operator signature now.
+  return post<{ item: RoadmapItem } | { error: string }>(
+    `${broker.url}/roadmap/upsert`,
+    deckAuthored({ project_key: KEY, ...fields })
+  );
 }
 
 test("items are created unqueued; queue can be set and cleared via upsert", async () => {

@@ -81,6 +81,78 @@ export function computeDeckProjectKey(projectDir: string): string {
   return `local:${createHash('sha256').update(anchor, 'utf-8').digest('hex').slice(0, 16)}`
 }
 
+// --- Operator signature on operator-authored writes (card 39c40571 layer 2) ---
+//
+// A write claiming `by: 'deck'` speaks as the HUMAN, and the broker now demands
+// an Ed25519 proof for it. The identity lives in the app-state directory and is
+// read through a cipher, both of which are electron-side concerns, so this
+// module never loads it: index.ts injects a LOADER once and the first WRITE
+// calls it. Lazy on purpose -- the identity used to be loaded only inside
+// ApprovalRuntime.arm(), which is gated by the mobileApprovals setting, so
+// wiring the signature there would have made a phone-notification toggle the
+// on/off switch of the shared roadmap.
+//
+// One loader per main process, and that is the right key: the identity file
+// lives in the per-OS-user app-state directory (see operator-identity.ts), so
+// one running Deck is one OS user is one operator. Two OS accounts are two
+// processes with two directories, never two identities racing on this variable.
+/**
+ * The fields a signature ADDS to the body: the proof itself plus the public
+ * key. The key travels because operator_id is its digest, so a broker meeting
+ * this operator for the first time can self-certify the binding instead of
+ * refusing an unknown id -- and the signature must therefore cover the body
+ * WITH the key in it, which is why the signer receives the payload and returns
+ * both fields rather than just a proof.
+ */
+export type RoadmapAuthFields = Record<string, unknown>
+export type RoadmapSigner = (payload: Record<string, unknown>) => RoadmapAuthFields | null
+
+let signerLoader: (() => RoadmapSigner | null) | null = null
+let cachedSigner: RoadmapSigner | null = null
+
+/** Called once at app start with a loader; the loader itself runs on first use. */
+export function configureRoadmapSigner(loader: () => RoadmapSigner | null): void {
+  signerLoader = loader
+  cachedSigner = null
+}
+
+/** Test seam: forget both the loader and what it returned. */
+export function resetRoadmapSigner(): void {
+  signerLoader = null
+  cachedSigner = null
+}
+
+function operatorProof(payload: Record<string, unknown>): RoadmapAuthFields | null {
+  if (!cachedSigner) {
+    if (!signerLoader) {
+      reportError(
+        'roadmap',
+        'no operator signer configured: writes attributed to the operator will be refused by the broker'
+      )
+      return null
+    }
+    cachedSigner = signerLoader()
+    if (!cachedSigner) {
+      reportError(
+        'roadmap',
+        'operator identity unavailable: this Deck cannot sign roadmap writes (re-enrol this machine)'
+      )
+      return null
+    }
+  }
+  return cachedSigner(payload)
+}
+
+/**
+ * Sign an operator-authored body. The proof covers the payload itself, so it
+ * must be built from the FINAL body: adding a field afterwards would invalidate
+ * the signature broker-side (verifyAuthProof hashes the whole payload).
+ */
+function signedAsOperator(body: Record<string, unknown>): Record<string, unknown> {
+  const fields = operatorProof(body)
+  return fields ? { ...body, ...fields } : body
+}
+
 async function roadmapPost<T>(endpoint: BrokerEndpoint, path: string, body: unknown): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (endpoint.token) headers['Authorization'] = `Bearer ${endpoint.token}`
@@ -262,12 +334,16 @@ export async function upsertRoadmap(
   projectKey: string,
   fields: RoadmapUpsertFields
 ): Promise<RoadmapItem> {
-  const res = await roadmapPost<RoadmapUpsertResponse>(endpoint, '/roadmap/upsert', {
-    // project_key is ignored by the broker on patch (id set) and required on create.
-    project_key: projectKey,
-    by: DECK_AUTHOR,
-    ...fields
-  })
+  const res = await roadmapPost<RoadmapUpsertResponse>(
+    endpoint,
+    '/roadmap/upsert',
+    signedAsOperator({
+      // project_key is ignored by the broker on patch (id set) and required on create.
+      project_key: projectKey,
+      by: DECK_AUTHOR,
+      ...fields
+    })
+  )
   return sanitizeOne(res?.item, '/roadmap/upsert')
 }
 
@@ -281,22 +357,30 @@ export async function reorderRoadmap(
   ids: string[],
   waves?: string[][]
 ): Promise<RoadmapItem[]> {
-  const res = await roadmapPost<RoadmapReorderResponse>(endpoint, '/roadmap/reorder', {
-    project_key: projectKey,
-    by: DECK_AUTHOR,
-    ids,
-    // Additive over the wire too (roadmap card 42edc88b phase 1): omit the
-    // field entirely when unset rather than sending `waves: undefined`, so
-    // an older broker sees exactly the request shape it already understands.
-    ...(waves !== undefined ? { waves } : {})
-  })
+  const res = await roadmapPost<RoadmapReorderResponse>(
+    endpoint,
+    '/roadmap/reorder',
+    signedAsOperator({
+      project_key: projectKey,
+      by: DECK_AUTHOR,
+      ids,
+      // Additive over the wire too (roadmap card 42edc88b phase 1): omit the
+      // field entirely when unset rather than sending `waves: undefined`, so
+      // an older broker sees exactly the request shape it already understands.
+      ...(waves !== undefined ? { waves } : {})
+    })
+  )
   return sanitizeList(res?.items, '/roadmap/reorder')
 }
 
 export async function archiveRoadmap(endpoint: BrokerEndpoint, id: string): Promise<RoadmapItem> {
-  const res = await roadmapPost<RoadmapArchiveResponse>(endpoint, '/roadmap/archive', {
-    id,
-    by: DECK_AUTHOR
-  })
+  const res = await roadmapPost<RoadmapArchiveResponse>(
+    endpoint,
+    '/roadmap/archive',
+    signedAsOperator({
+      id,
+      by: DECK_AUTHOR
+    })
+  )
   return sanitizeOne(res?.item, '/roadmap/archive')
 }

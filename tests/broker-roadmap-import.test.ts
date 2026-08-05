@@ -13,7 +13,7 @@
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, type TestBroker , deckAuthored } from "./_helper.ts";
 import {
   ROADMAP_IMPORT_COLUMNS,
   findUncoveredRoadmapColumns,
@@ -94,11 +94,13 @@ test("import of a locked card is skipped even when `by` declares the lock owner 
 
 test("import of a locked card is skipped even when `by` is 'deck' (no exemption on an unproven route)", async () => {
   const card = await lockedCard("owner-peer-2");
-  const res = await post<ImportRes>(`${broker.url}/roadmap/import`, {
-    project_key: PK,
-    by: "deck",
-    items: [importItem(card)],
-  });
+  // Signed (card 39c40571 layer 2): the point of this test is that even a
+  // PROVEN deck author gets no lock exemption on import, so the signature must
+  // be real -- an unsigned 401 would make it pass for the wrong reason.
+  const res = await post<ImportRes>(
+    `${broker.url}/roadmap/import`,
+    deckAuthored({ project_key: PK, items: [importItem(card)] })
+  );
   expect(res.status).toBe(200);
   expect(res.body.imported).toBe(0);
   expect(res.body.skipped).toEqual([card.id]);
