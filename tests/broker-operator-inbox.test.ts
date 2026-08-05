@@ -449,18 +449,40 @@ test("coverage: both exemptions lean on dormant sentinel rows -- pinned here", a
   // tokens and pinning `length === 2`. A third sentinel added to that array is
   // covered here automatically, which is the whole point of the array existing
   // (shared/types.ts) and the coverage question card 37a2b8c7 asks by name.
+  const readStatus = (db: Database, token: string): { peer_id: string; status: string } | null =>
+    db.query("SELECT peer_id, status FROM peers WHERE instance_token = ?").get(token) as
+      | { peer_id: string; status: string }
+      | null;
+
   const db = new Database(broker.dbPath, { readonly: true });
   try {
     expect(SENTINEL_DEFINITIONS.length).toBeGreaterThan(0);
     for (const sentinel of SENTINEL_DEFINITIONS) {
-      const row = db.query(
-        "SELECT peer_id, status FROM peers WHERE instance_token = ?"
-      ).get(sentinel.instanceToken) as { peer_id: string; status: string } | null;
+      const row = readStatus(db, sentinel.instanceToken);
       expect(row).not.toBeNull();
       expect(row!.peer_id).toBe(sentinel.peerId);
       expect(row!.status).toBe("dormant");
     }
   } finally {
     db.close();
+  }
+
+  // NEGATIVE CONTROL. Adding a third entry to SENTINEL_DEFINITIONS canNOT make
+  // the loop above red -- measured: the broker's seed derives from that same
+  // array, so a new entry arrives already seeded and dormant. The guarantee
+  // holds by derivation on BOTH sides, which is why the falsification has to
+  // attack the PROPERTY instead: flip one sentinel to 'active' and prove the
+  // assertion observes it, rather than passing against a constant.
+  const rw = new Database(broker.dbPath);
+  const probe = SENTINEL_DEFINITIONS[0]!;
+  try {
+    rw.query("UPDATE peers SET status = 'active' WHERE instance_token = ?").run(probe.instanceToken);
+    expect(readStatus(rw, probe.instanceToken)!.status).toBe("active");
+  } finally {
+    rw.query("UPDATE peers SET status = 'dormant' WHERE instance_token = ?").run(
+      probe.instanceToken
+    );
+    expect(readStatus(rw, probe.instanceToken)!.status).toBe("dormant");
+    rw.close();
   }
 });
