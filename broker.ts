@@ -2245,10 +2245,25 @@ function handleRoadmapImport(body: {
 
   // Card aad5e954: both the column list and the placeholders are GENERATED from
   // the single ROADMAP_IMPORT_COLUMNS constant, and the values below are bound
-  // through a record keyed by that same union -- so a column can no longer be
-  // listed without a value, or bound in the wrong position. What the constant
-  // cannot do by itself is notice a column added to the TABLE and forgotten in
-  // the list; that is what the PRAGMA comparison in the tests is for.
+  // by mapping that same constant over a record keyed by its union -- so the
+  // count and the ORDER cannot drift apart, which is the failure this handler
+  // was one hand-edit away from.
+  //
+  // What that does NOT buy, measured rather than assumed, so nobody trusts a
+  // net that is not there: a key MISSING from the record binds `undefined`,
+  // and bun:sqlite accepts it as NULL. It throws only for the five columns
+  // that are NOT NULL with no DEFAULT (project_key, kind, title, created_at,
+  // updated_at); on every DEFAULTED column it silently stores the DEFAULT --
+  // exactly the silent reset this card exists to prevent. The Record type is
+  // what requires each key, and this repo has NO gate enforcing it: the root
+  // package.json has no typecheck script (broker/server/test only) and CI
+  // typechecks desktop/ alone, while `bun test` and `bun build` erase types
+  // without checking them. So the type is checked by an editor or a manual
+  // tsc, NOT by a guard, and the real runtime net is the import test suite
+  // asserting that real values survive.
+  //
+  // And the constant cannot notice a column added to the TABLE and forgotten
+  // in the list; that is what the PRAGMA comparison in the tests is for.
   const insert = db.prepare(
     `INSERT OR REPLACE INTO roadmap_items
        (${ROADMAP_IMPORT_COLUMNS.join(", ")})
@@ -2299,14 +2314,24 @@ function handleRoadmapImport(body: {
             ? it.locked_at
             : null
           : (existing?.locked_at ?? null);
-      // Card 8c1effca: every column follows the SAME discipline the three lock
-      // columns already had -- a key PRESENT in the file wins (including an
+      // Card 8c1effca: the columns below follow the SAME discipline the three
+      // lock columns already had -- a key PRESENT in the file wins (including an
       // explicit null, which is a genuine clear in a self-export), a key truly
       // ABSENT falls back to the EXISTING row, and only a brand-new row falls
       // back to the table default. Before this, everything but the lock columns
       // fell back to a literal, so a partial file (the exact gesture an operator
       // makes to fix one field by hand) silently erased description, rationale,
       // context, tags, depends_on, queue and deleted_at.
+      //
+      // TWO EXCEPTIONS, and they are safe only by someone else's rule.
+      // `directive` and `target_peer_ids` do NOT fall back to the existing row:
+      // a partial import of a directive card would blank its command and its
+      // targets, i.e. this very defect surviving in two columns. It cannot
+      // happen TODAY because the validation ~60 lines above refuses (400) any
+      // item with kind 'directive' and no valid directive, so the partial file
+      // that would trigger it never reaches this INSERT. Relax that validation
+      // to allow editing a directive card field by field -- a plausible
+      // request -- and the erasure becomes live with nothing going red.
       const values: Record<RoadmapImportColumn, string | number | null> = {
         id,
         project_key: projectKey,
