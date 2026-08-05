@@ -15,7 +15,7 @@ import {
 // '__operator__' on both sides of a probe keeps seed and assertion agreeing with
 // each other while testing a row that is no longer the operator inbox -- green
 // for a reason foreign to what the probe claims to test.
-import { DECK_INSTANCE_TOKEN, OPERATOR_INSTANCE_TOKEN, type Approval } from "../shared/types.ts";
+import { OPERATOR_INSTANCE_TOKEN, SENTINEL_DEFINITIONS, type Approval } from "../shared/types.ts";
 
 let broker: TestBroker;
 
@@ -266,6 +266,20 @@ const RECIPIENT_ROUTES: Record<string, RecipientClassification> = {
     reason:
       "The targeted-announce resolution filters status='active' and the sentinel rows are seeded permanently dormant, so 'operator' resolves to nothing and the route 404s before any insert. Contingent on BOTH properties -- probed live below, not merely asserted here.",
   },
+  RoadmapItem: {
+    field: "target_peer_ids",
+    route: "/roadmap/import",
+    verdict: "guarded",
+    reason:
+      "Directive targets are laundered through cleanPeerIds (broker.ts:1611-1622) on all three write paths (upsert :1833, create :1951, import :2313), and it drops any id present in RESERVED_PEER_IDS -- which derives from SENTINEL_DEFINITIONS, so 'operator' can never become a directive target.",
+  },
+  RoadmapUpsertRequest: {
+    field: "target_peer_ids",
+    route: "/roadmap/upsert",
+    verdict: "guarded",
+    reason:
+      "Same cleanPeerIds laundering as RoadmapItem: the reserved ids are stripped before the row is written, so a directive can never be aimed at a sentinel.",
+  },
   ApprovalAddRequest: {
     field: "reply_peer_id",
     route: "/approval/add",
@@ -283,6 +297,24 @@ const RECIPIENT_ROUTES: Record<string, RecipientClassification> = {
  * would silently leave the domain. Anything it finds must be classified above,
  * including internal row shapes -- an over-wide scanner costs one entry in the
  * table, an under-wide one costs the whole guarantee.
+ *
+ * Review MAJOR-1: the first draft required a SINGULAR suffix and therefore
+ * matched no plural field, so it silently missed RoadmapItem.target_peer_ids
+ * and RoadmapUpsertRequest.target_peer_ids -- a subset announcing itself as a
+ * total, which is the exact shape this test exists to forbid. Hence
+ * `peer_ids` in the alternation, and a PLURAL variant in the negative control
+ * below: a fix that is only asserted is not proven.
+ *
+ * TWO LIMITS, both inherent to discovery by name, stated so a reader does not
+ * mistake this for a total:
+ *  1. It reads the data CONTRACT. A handler parsing a recipient straight out of
+ *     an untyped body escapes it: broker.ts has 13 `Record<string, unknown>`
+ *     sites, three of them fully untyped handler bodies
+ *     (/approval/channel-connect|disconnect|list).
+ *  2. The domain is NOMINAL. A destination named `chat_id`, `address` or
+ *     `deliver_to` -- a Telegram chat or a Discord guild is a recipient too --
+ *     leaves the domain by its NAME alone.
+ * Widening to untyped bodies is a separate unit, deliberately not done here.
  */
 function findRecipientCarryingInterfaces(source: string): { iface: string; field: string }[] {
   const found: { iface: string; field: string }[] = [];
@@ -296,7 +328,9 @@ function findRecipientCarryingInterfaces(source: string): { iface: string; field
       depth = 0;
     }
     depth += (line.match(/\{/g) ?? []).length - (line.match(/\}/g) ?? []).length;
-    const field = /^\s*(to|reply|target|recipient|dest)_(peer_id|peer|token)\??\s*:/.exec(line);
+    const field = /^\s*(to|reply|target|recipient|dest)_(peer_ids|peer_id|peer|token)\??\s*:/.exec(
+      line
+    );
     if (field) found.push({ iface: current, field: `${field[1]}_${field[2]}` });
     if (depth <= 0 && /\}/.test(line)) current = null;
   }
@@ -324,17 +358,26 @@ test("coverage: every interface carrying a client-supplied recipient is classifi
 
   // Negative control: the scanner must NAME a newly added interface, so an
   // implementation that always returns [] fails here instead of passing.
+  // Both a SINGULAR and a PLURAL carrier: the plural half is what the first
+  // draft of this scanner missed on the real source, so asserting the fix here
+  // is what makes it proven rather than claimed.
   const synthetic = [
     "export interface SupervisorDispatchRequest {",
     "  from_token: InstanceToken;",
     "  target_peer_id: PeerId;",
     "  text: string;",
     "}",
+    "export interface SupervisorFanoutRequest {",
+    "  to_peer_ids: PeerId[];",
+    "  text: string;",
+    "}",
   ].join("\n");
   expect(findRecipientCarryingInterfaces(synthetic)).toEqual([
     { iface: "SupervisorDispatchRequest", field: "target_peer_id" },
+    { iface: "SupervisorFanoutRequest", field: "to_peer_ids" },
   ]);
   expect(RECIPIENT_ROUTES["SupervisorDispatchRequest"]).toBeUndefined();
+  expect(RECIPIENT_ROUTES["SupervisorFanoutRequest"]).toBeUndefined();
 });
 
 test("coverage: the two exemptions hold live -- neither route reaches the inbox", async () => {
@@ -401,13 +444,22 @@ test("coverage: both exemptions lean on dormant sentinel rows -- pinned here", a
   // If a sentinel row ever became 'active', /announce and /approval/add would
   // resolve it and BOTH exemptions above would silently become wrong. Asserted
   // once here rather than restated inside each reason.
+  //
+  // Review MINOR-3: iterate SENTINEL_DEFINITIONS instead of naming the two
+  // tokens and pinning `length === 2`. A third sentinel added to that array is
+  // covered here automatically, which is the whole point of the array existing
+  // (shared/types.ts) and the coverage question card 37a2b8c7 asks by name.
   const db = new Database(broker.dbPath, { readonly: true });
   try {
-    const rows = db.query(
-      "SELECT peer_id, status FROM peers WHERE instance_token IN (?, ?)"
-    ).all(OPERATOR_INSTANCE_TOKEN, DECK_INSTANCE_TOKEN) as { peer_id: string; status: string }[];
-    expect(rows.length).toBe(2);
-    for (const row of rows) expect(row.status).toBe("dormant");
+    expect(SENTINEL_DEFINITIONS.length).toBeGreaterThan(0);
+    for (const sentinel of SENTINEL_DEFINITIONS) {
+      const row = db.query(
+        "SELECT peer_id, status FROM peers WHERE instance_token = ?"
+      ).get(sentinel.instanceToken) as { peer_id: string; status: string } | null;
+      expect(row).not.toBeNull();
+      expect(row!.peer_id).toBe(sentinel.peerId);
+      expect(row!.status).toBe("dormant");
+    }
   } finally {
     db.close();
   }
