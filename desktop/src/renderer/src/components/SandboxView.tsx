@@ -560,6 +560,11 @@ export function SandboxView(): React.JSX.Element {
               {t('sandbox.copyUnmatched', { globs: status.copyUnmatched.join(', ') })}
             </div>
           )}
+          {status.denied.length > 0 && (
+            <div className="sandbox-line sandbox-warn">
+              {t('sandbox.copyDenied', { n: status.denied.length })}
+            </div>
+          )}
         </div>
       )}
 

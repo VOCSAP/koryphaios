@@ -230,6 +230,80 @@ export function selectCopyPaths(relPaths: string[], globs: string[]): string[] {
     .sort()
 }
 
+/**
+ * Same matching as `selectCopyPaths`, WITHOUT the deny filter. Used only to
+ * tell "this glob matched zero real files" (a typo) apart from "this glob
+ * matched real files that the deny-list then removed" (a refusal) --
+ * `selectCopyPaths`'s output alone collapses both to nothing, which is
+ * exactly the ambiguity `planIgnoredCopy` below exists to remove.
+ */
+function selectRawMatches(relPaths: string[], globs: string[]): string[] {
+  const patterns = globs.flatMap(expandCopyGlob)
+  if (patterns.length === 0) return []
+  return relPaths.map((p) => p.replace(/\\/g, '/')).filter((p) => patterns.some((re) => re.test(p)))
+}
+
+/**
+ * True when a `path/x` probe still matches whatever denied the bare
+ * `segment`, i.e. the pattern that fired is SUBTREE-shaped
+ * (`(^|\/)node_modules(\/|$)` and its siblings): its own anchors already
+ * treat "followed by / or end" as equivalent, so an isolated segment and
+ * that same segment embedded mid-path agree on the verdict. The other
+ * DENY_PATTERNS entries -- every `extDeny`, and the `id_rsa`-style
+ * end-anchors -- do NOT deny a directory merely named like their target
+ * (extDeny's own doc comment: excluding `/` from the decoration class is
+ * exactly what keeps `foo.key/bar.txt` copyable), so for those the probe
+ * fails and this returns false. Empirical rather than a hand-classified
+ * list of "which DENY_PATTERNS entries are subtree-shaped": exactly the
+ * kind of second copy that drifts from the source of truth, the failure
+ * mode `expandCopyGlob`'s doc comment warns about (card 94f8cc0c).
+ */
+function isSubtreeDenyMatch(segment: string): boolean {
+  return isDeniedCopyPath(segment) && isDeniedCopyPath(`${segment}/x`)
+}
+
+/**
+ * True when SOME literal (wildcard-free) path segment of `glob` already
+ * falls inside the deny-list, so every real match the glob could ever
+ * produce is refused no matter where the wildcards around it sit --
+ * `node_modules/**`, `**\/node_modules/**` and `*\/node_modules/**` all say
+ * the same thing and must all classify the same way. An earlier version only
+ * checked the literal PREFIX (text before the first wildcard), which
+ * silently missed the last two: a leading `**`/`*` ("at any depth") is a
+ * common, natural way to write this glob, and it makes the prefix the empty
+ * string.
+ *
+ * A non-last segment is only tested via `isSubtreeDenyMatch` (see above) --
+ * NOT the full pattern set -- because a mid-path segment always denotes a
+ * DIRECTORY component, and only subtree-shaped patterns are entitled to deny
+ * a directory's contents. Skipping that distinction was a real bug caught in
+ * review: testing `report.key` (a segment, not a full path) against the raw
+ * pattern set matches via `extDeny('key')`, but `report.key/notes.md` as an
+ * actual candidate path does not -- extDeny deliberately excludes `/` from
+ * its decoration, so `report.key/**` must NOT be denied. The glob's own LAST
+ * segment, when itself literal, additionally gets the full pattern set: it
+ * is the one position where "this text" and "the file a real match would
+ * land on" coincide, so `docs/id_rsa` (no trailing wildcard) is correctly
+ * denied by the `id_rsa` end-anchor even though that pattern is not
+ * subtree-shaped.
+ *
+ * Exists because `walkProjectFiles`'s SKIP_DIRS prune never visits these
+ * trees at all -- a real performance requirement, not a bug -- so a glob
+ * that ONLY targets one of them produces zero raw matches with no walk ever
+ * having looked. Without this check such a glob is indistinguishable from an
+ * honest typo (`unmatched`), even though retyping the same text can never
+ * fix it: only the deny-list itself, which the operator does not control,
+ * could.
+ */
+function globIsDenied(glob: string): boolean {
+  const g = glob.trim().replace(/\\/g, '/')
+  const segments = g.split('/').filter((s) => s.length > 0)
+  return segments.some((segment, i) => {
+    if (/[*?]/.test(segment)) return false
+    return i === segments.length - 1 ? isDeniedCopyPath(segment) : isSubtreeDenyMatch(segment)
+  })
+}
+
 /** Cap overrides for tests only -- production call sites take the defaults. */
 export interface WalkLimits {
   maxEntries?: number
@@ -310,17 +384,51 @@ export function walkProjectFiles(root: string, limits: WalkLimits = {}): string[
 export interface CopyPlan {
   /** Repo-relative paths to duplicate on top of the clone. */
   files: string[]
-  /** Patterns that matched nothing (surfaced so a typo is visible). */
+  /**
+   * Patterns that matched no real file at all. Usually a typo, but the
+   * same bucket also catches a walk truncation (MAX_WALK_ENTRIES /
+   * MAX_WALK_VISITS, card 5ff9a432), an unfollowed symlink, or an
+   * unreadable directory -- none of those are fixable by retyping the
+   * glob either, but they are not surfaced separately here.
+   */
   unmatched: string[]
+  /**
+   * What an allow-listed glob would have copied but the deny-list blocked
+   * (secrets/bulk dirs) -- distinct from `unmatched`: this is not a typo,
+   * it is a refusal, and correcting the glob's spelling can never fix it.
+   * Usually repo-relative file paths; for a glob whose entire target is a
+   * walk-skipped bulk dir (`node_modules/**`) no individual file was ever
+   * visited to name, so the glob's own text is listed instead.
+   */
+  denied: string[]
 }
 
-/** Resolve the copy plan for a project + its configured globs. */
+/**
+ * Resolve the copy plan for a project + its configured globs. Each glob is
+ * classified into exactly one of three buckets: it contributes to `files`
+ * (allowed), `denied` (matched real files, or a walk-skipped bulk dir, that
+ * the deny-list refuses), or `unmatched` (no real file backs it -- typically
+ * a typo, but also possibly a walk truncation, an unfollowed symlink, or an
+ * unreadable directory; see `CopyPlan.unmatched`). A glob that matches some
+ * allowed files AND some denied ones contributes to both `files` and
+ * `denied`, never to `unmatched`.
+ */
 export function planIgnoredCopy(projectDir: string, globs: string[]): CopyPlan {
   const all = walkProjectFiles(projectDir)
   const files = selectCopyPaths(all, globs)
-  const unmatched = globs
-    .map((g) => g.trim())
-    .filter(Boolean)
-    .filter((g) => selectCopyPaths(all, [g]).length === 0)
-  return { files, unmatched }
+  const denied = new Set<string>()
+  const unmatched: string[] = []
+  for (const g of globs.map((g) => g.trim()).filter(Boolean)) {
+    const raw = selectRawMatches(all, [g])
+    if (raw.length > 0) {
+      for (const p of raw) if (isDeniedCopyPath(p)) denied.add(p)
+      continue
+    }
+    if (globIsDenied(g)) {
+      denied.add(g)
+    } else {
+      unmatched.push(g)
+    }
+  }
+  return { files, unmatched, denied: [...denied].sort() }
 }

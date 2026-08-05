@@ -183,6 +183,7 @@ export class SandboxService extends EventEmitter {
   private projectionSummary: string | null = null
   private hookWarnings: string[] = []
   private copyUnmatched: string[] = []
+  private denied: string[] = []
   readonly containerName: string
   private readonly storeFile: string
   private readonly runDirHost: string
@@ -553,6 +554,7 @@ export class SandboxService extends EventEmitter {
       copyIgnored: settings.copyIgnored,
       copyDir: settings.mode === 'copy' ? this.copyDirHost : null,
       copyUnmatched: this.copyUnmatched,
+      denied: this.denied,
       projection: this.projectionSummary,
       projectionEnabled: settings.projectConfig,
       // Host-side overlay state (a handful of existsSync): reported separately
@@ -617,8 +619,9 @@ export class SandboxService extends EventEmitter {
       }
       this.deps.journal(`sandbox: ephemeral clone created at ${this.copyDirHost}`)
     }
-    const { files, unmatched } = planIgnoredCopy(this.deps.projectDir, this.settings().copyIgnored)
+    const { files, unmatched, denied } = planIgnoredCopy(this.deps.projectDir, this.settings().copyIgnored)
     this.copyUnmatched = unmatched
+    this.denied = denied
     let copied = 0
     for (const rel of files) {
       const src = join(this.deps.projectDir, rel)

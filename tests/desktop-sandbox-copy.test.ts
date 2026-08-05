@@ -277,9 +277,111 @@ test("planIgnoredCopy reports patterns that matched nothing", () => {
   writeFileSync(join(dir, ".env"), "SECRET=1");
   const plan = planIgnoredCopy(dir, ["PLAN-*.md", "missing-*.txt", ".env"]);
   expect(plan.files).toEqual(["PLAN-A.md"]);
-  // `.env` matched a real file but is denied -> reported as unmatched, so the
-  // operator sees it never travels instead of assuming it did.
-  expect(plan.unmatched.sort()).toEqual([".env", "missing-*.txt"]);
+  // `.env` matched a real file that the deny-list then blocked -- a refusal,
+  // not a typo, so it belongs in `denied`, not `unmatched` (card 72f0ce22:
+  // both used to collapse to `unmatched`, so the operator could not tell a
+  // typo apart from "everything this glob found was blocked").
+  expect(plan.unmatched).toEqual(["missing-*.txt"]);
+  expect(plan.denied).toEqual([".env"]);
+});
+
+test("planIgnoredCopy: glob partially denied keeps the allowed files AND reports the denied ones, never as unmatched", () => {
+  mkdirSync(join(dir, "docs"), { recursive: true });
+  writeFileSync(join(dir, "docs", "guide.md"), "x");
+  writeFileSync(join(dir, "docs", "id_rsa"), "SECRET");
+  const plan = planIgnoredCopy(dir, ["docs/**"]);
+  expect(plan.files).toEqual(["docs/guide.md"]);
+  expect(plan.unmatched).toEqual([]);
+  expect(plan.denied).toEqual(["docs/id_rsa"]);
+});
+
+test("planIgnoredCopy: a glob whose entire target is a walk-skipped bulk dir is denied, not unmatched", () => {
+  // node_modules is pruned by SKIP_DIRS before the walk ever visits it, so
+  // selectRawMatches sees zero candidates -- indistinguishable from a typo
+  // without globIsDenied reusing the DENY_PATTERNS regex directly.
+  mkdirSync(join(dir, "node_modules", "pkg"), { recursive: true });
+  writeFileSync(join(dir, "node_modules", "pkg", "a.js"), "x");
+  writeFileSync(join(dir, "PLAN-A.md"), "x");
+  const plan = planIgnoredCopy(dir, ["PLAN-*.md", "node_modules/**"]);
+  expect(plan.files).toEqual(["PLAN-A.md"]);
+  expect(plan.unmatched).toEqual([]);
+  expect(plan.denied).toEqual(["node_modules/**"]);
+});
+
+test("planIgnoredCopy: globIsDenied does not false-positive on a name that merely looks like a denied segment", () => {
+  mkdirSync(join(dir, "dist-docs"), { recursive: true });
+  writeFileSync(join(dir, "dist-docs", "guide.md"), "x");
+  const plan = planIgnoredCopy(dir, ["dist-docs/**"]);
+  expect(plan.files).toEqual(["dist-docs/guide.md"]);
+  expect(plan.unmatched).toEqual([]);
+  expect(plan.denied).toEqual([]);
+});
+
+// Probe table below locks in every row a review round raised for
+// globIsDenied against a SKIP_DIRS-pruned glob (zero raw matches, so the
+// verdict comes only from the static segment scan, never from a real walk).
+test.each([
+  ["node_modules/**", true],
+  ["nested/node_modules/**", true],
+  [".git/**", true],
+  // Leading-wildcard forms of "at any depth" -- the MAJOR fix: an earlier
+  // version tested only the literal PREFIX (text before the first
+  // wildcard), which is the empty string for both of these, so both were
+  // wrongly reported `unmatched` (implying a fixable typo) instead of
+  // `denied` (unfixable by retyping).
+  ["**/node_modules/**", true],
+  ["*/node_modules/**", true],
+  // Same name, not a denied segment (segment-bounded matching, unchanged by
+  // the MAJOR fix): must still not trip the `dist` pattern.
+  ["dist-docs/**", false],
+])("planIgnoredCopy: SKIP_DIRS-pruned glob %s classifies as denied=%s", (glob, expectDenied) => {
+  mkdirSync(join(dir, "node_modules", "pkg"), { recursive: true });
+  writeFileSync(join(dir, "node_modules", "pkg", "a.js"), "x");
+  mkdirSync(join(dir, "nested", "node_modules", "pkg"), { recursive: true });
+  writeFileSync(join(dir, "nested", "node_modules", "pkg", "a.js"), "x");
+  mkdirSync(join(dir, ".git"), { recursive: true });
+  writeFileSync(join(dir, ".git", "config"), "x");
+  mkdirSync(join(dir, "dist-docs"), { recursive: true });
+  writeFileSync(join(dir, "dist-docs", "guide.md"), "x");
+
+  const plan = planIgnoredCopy(dir, [glob]);
+  if (expectDenied) {
+    expect(plan.denied).toEqual([glob]);
+    expect(plan.unmatched).toEqual([]);
+  } else {
+    expect(plan.denied).toEqual([]);
+  }
+});
+
+test("planIgnoredCopy: a non-last literal segment only denies via a subtree-shaped pattern, not an extDeny/end-anchored one (false-positive review catch)", () => {
+  // report.key/** must NOT be denied: extDeny('key') matches the isolated
+  // segment "report.key", but a real candidate path "report.key/notes.md"
+  // does not match it (extDeny excludes "/" from its decoration by design,
+  // so a directory merely NAMED like a denied extension stays copyable).
+  // globIsDenied's first pass tested every segment against the full pattern
+  // set unconditionally and would have wrongly denied this.
+  mkdirSync(join(dir, "report.key"), { recursive: true });
+  writeFileSync(join(dir, "report.key", "notes.md"), "x");
+  const plan = planIgnoredCopy(dir, ["report.key/**"]);
+  expect(plan.files).toEqual(["report.key/notes.md"]);
+  expect(plan.denied).toEqual([]);
+  expect(plan.unmatched).toEqual([]);
+});
+
+test("planIgnoredCopy: a bare glob whose LAST segment is itself extDeny-triggered is denied, not unmatched", () => {
+  // Deliberately NOT a "dir/**" subtree glob (see the test above: a real
+  // app.key-mapping/** subtree glob would not be denied, since extDeny does
+  // not deny a directory's contents). This glob's own text is instead the
+  // exact name a matching FILE would have, with no wildcard suffix, so it
+  // is the terminal-segment branch of globIsDenied (the one entitled to use
+  // the full pattern set) that classifies it. No file named exactly
+  // "app.key-mapping" exists in this project, so selectRawMatches sees zero
+  // candidates and the verdict comes from the static segment scan.
+  writeFileSync(join(dir, "PLAN-A.md"), "x");
+  const plan = planIgnoredCopy(dir, ["app.key-mapping"]);
+  expect(plan.files).toEqual([]);
+  expect(plan.unmatched).toEqual([]);
+  expect(plan.denied).toEqual(["app.key-mapping"]);
 });
 
 test("walkProjectFiles never follows symlinks (foreign files, and infinite loops)", () => {

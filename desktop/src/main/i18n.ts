@@ -466,6 +466,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sandbox.copyDenyHint':
     'Secrets and bulk are never copied, whatever you list here: .env*, keys/certificates, .ssh, .aws, node_modules, .venv, .git.',
   'sandbox.copyUnmatched': 'No file matched: {globs}',
+  'sandbox.copyDenied': '{n} matched file(s) blocked by the deny-list (secrets/bulk dirs never copy in).',
   'sandbox.copyIgnoredUnbounded':
     "{globs} doesn't constrain the file name -- it matches the whole project. Use a pattern like *.md, docs/*, or notes/** instead.",
   'sandbox.copyReset': 'Reset clone',

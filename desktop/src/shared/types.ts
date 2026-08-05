@@ -685,6 +685,13 @@ export interface SandboxStatus {
   copyDir: string | null
   /** Configured globs that matched no file (typo surfacing). */
   copyUnmatched: string[]
+  /**
+   * Matched files (or, for a glob whose whole target is a walk-skipped bulk
+   * dir, the glob text itself) blocked by the copy deny-list -- distinct
+   * from copyUnmatched: a refusal, not a typo. Render as a count, not a raw
+   * dump: an unbounded glob can list a very large number of entries.
+   */
+  denied: string[]
   /** Operator-config entries projected into the container, or null. */
   projection: string | null
   /**
