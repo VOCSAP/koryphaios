@@ -173,17 +173,104 @@ export interface PollMessagesResponse {
 // dormant, and active-target resolution misses it). The sentinel from_peer_id is
 // also the server-side suppression key that renders these as "do not reply".
 
-export const DECK_INSTANCE_TOKEN: InstanceToken = "__deck__";
+/**
+ * Card 37a2b8c7 volet 3: single source of truth for every reserved sentinel
+ * identity. isSentinelInstanceToken (below) covers the REFUSAL direction --
+ * catching an unlisted future sentinel at the network edge by shape, so
+ * nobody needs to remember to add it anywhere. This array covers the
+ * opposite, PROCESSING direction, which a shape predicate cannot: the sites
+ * that must know each sentinel individually to act on it one by one (seed a
+ * dormant DB row for it, exempt it from the dormant-TTL purge, map it to a
+ * from_peer_id, refuse it as a set_id target) can only derive from an
+ * enumerable list. Adding a sentinel means adding an entry HERE -- the
+ * *_INSTANCE_TOKEN / *_PEER_ID constants below are meant to be DERIVED FROM
+ * this array (not the reverse), via sentinelToken(peerId) below. That
+ * convention is not self-enforcing: a future constant written as a hardcoded
+ * literal instead of a sentinelToken()/RESERVED_PEER_IDS derivation would
+ * bypass it silently (review finding, card 37a2b8c7). findUnbackedInstance
+ * TokenExports/findUnbackedPeerIdExports (below) make the reciprocity
+ * CHECKABLE, and tests/broker-sentinel-processing.test.ts asserts it holds
+ * over the real module namespace (must be empty) -- so a constant added
+ * without backing it here goes red, instead of only failing open at runtime,
+ * PROVIDED it is declared in THIS module (the check only ever receives this
+ * file's own namespace) and its export name ends in `_INSTANCE_TOKEN` or
+ * `_PEER_ID` (that is how both this check and the pre-existing shape test
+ * discover candidates; a same-purpose constant declared elsewhere, or named
+ * without the conforming suffix, escapes both -- review pass 2, MINOR-1).
+ * The same test file also iterates this array (not a hand-copied list) to
+ * assert every entry is seeded, TTL-exempt, mapped, and set_id-reserved --
+ * so a third entry added here is covered automatically on all four axes.
+ */
+export interface SentinelDefinition {
+  readonly instanceToken: InstanceToken;
+  readonly peerId: PeerId;
+}
+
+export const SENTINEL_DEFINITIONS: readonly SentinelDefinition[] = [
+  { instanceToken: "__deck__", peerId: "deck" },
+  { instanceToken: "__operator__", peerId: "operator" },
+];
+
+export const SENTINEL_INSTANCE_TOKENS: readonly InstanceToken[] = SENTINEL_DEFINITIONS.map(
+  (d) => d.instanceToken
+);
+
+function sentinelToken(peerId: PeerId): InstanceToken {
+  const found = SENTINEL_DEFINITIONS.find((d) => d.peerId === peerId);
+  if (!found) throw new Error(`shared/types.ts: no SENTINEL_DEFINITIONS entry for peerId '${peerId}'`);
+  return found.instanceToken;
+}
+
+export const DECK_INSTANCE_TOKEN: InstanceToken = sentinelToken("deck");
 export const DECK_PEER_ID: PeerId = "deck";
 /**
  * Reserved OPERATOR inbox sentinel (v0.6, PLAN C12): the human in front of the
  * Deck. Agents `send_message` to 'operator'; the Deck polls /operator-inbox.
  * Like the deck row: permanently dormant, never listed, never purged.
  */
-export const OPERATOR_INSTANCE_TOKEN: InstanceToken = "__operator__";
+export const OPERATOR_INSTANCE_TOKEN: InstanceToken = sentinelToken("operator");
 export const OPERATOR_PEER_ID: PeerId = "operator";
-/** Reserved display ids set_id must refuse, to keep the sentinels unambiguous. */
-export const RESERVED_PEER_IDS: readonly PeerId[] = ["deck", "system", "operator"];
+/**
+ * Reserved display ids set_id must refuse. Derived from SENTINEL_DEFINITIONS
+ * plus the literal "system" (system has no instance_token sentinel row, only
+ * a reserved display name) -- previously a hand-written array disjoint from
+ * the *_INSTANCE_TOKEN constants, so a sentinel added to one set silently
+ * never reached the other.
+ */
+export const RESERVED_PEER_IDS: readonly PeerId[] = [
+  ...SENTINEL_DEFINITIONS.map((d) => d.peerId),
+  "system",
+];
+
+/**
+ * Card 37a2b8c7 review follow-up (MAJOR-1): the derivation comment above only
+ * held for the two constants that actually call sentinelToken()/derive from
+ * SENTINEL_DEFINITIONS. Nothing stopped a future `export const
+ * SUPERVISOR_INSTANCE_TOKEN: InstanceToken = "__supervisor__"` hardcoded
+ * literal from bypassing both -- it would pass the existing shape test
+ * (tests/broker-roadmap-author-auth.test.ts) yet have no seed row, no TTL
+ * exemption, no resolveSenderMeta mapping, and no reserved peer_id. This pair
+ * makes that reciprocity checkable: given a module namespace object, return
+ * the names of any `*_INSTANCE_TOKEN`/`*_PEER_ID` export whose VALUE is not
+ * present in the derived array. Both are pure functions over a passed-in
+ * object (not `import.meta`/self-reflection) so a test can feed them the real
+ * `shared/types.ts` namespace (expect empty) AND a synthetic
+ * supervisor-shaped object (expect it caught) in the same assertion --
+ * proving the check discriminates instead of being vacuously green.
+ */
+export function findUnbackedInstanceTokenExports(
+  moduleExports: Record<string, unknown>
+): string[] {
+  return Object.keys(moduleExports)
+    .filter((k) => k.endsWith("_INSTANCE_TOKEN"))
+    .filter((k) => !SENTINEL_INSTANCE_TOKENS.includes(moduleExports[k] as InstanceToken));
+}
+
+export function findUnbackedPeerIdExports(moduleExports: Record<string, unknown>): string[] {
+  return Object.keys(moduleExports)
+    .filter((k) => k.endsWith("_PEER_ID"))
+    .filter((k) => !RESERVED_PEER_IDS.includes(moduleExports[k] as PeerId));
+}
 
 /**
  * Is this instance_token one of the reserved sentinels?

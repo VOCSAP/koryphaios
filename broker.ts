@@ -121,6 +121,8 @@ import {
   OPERATOR_PEER_ID,
   RESERVED_PEER_IDS,
   isSentinelInstanceToken,
+  SENTINEL_DEFINITIONS,
+  SENTINEL_INSTANCE_TOKENS,
 } from "./shared/types.ts";
 
 const config = await loadConfig();
@@ -206,6 +208,44 @@ function safeEqual(a: string | null | undefined, b: string | null | undefined): 
     return false;
   }
   return timingSafeEqual(ab, bb);
+}
+
+// Card 37a2b8c7 volet 4: single place deciding whether a group is exempt from
+// the TOFU secret check. Previously this literal `groupId !== "default"` was
+// copy-pasted in handleRegister, handleAnnounce and handleOperatorInbox --
+// three independent editable copies of the SAME assumption ("'default'
+// carries nothing confidential"). shared/config.ts only reflects that
+// assumption on WELL-BEHAVED clients (it's client-side code the broker never
+// runs); the broker itself imposes nothing, so a hostile POST can still
+// declare group_id "default" with any hash it likes. isTofuExemptGroup's
+// unconditional exemption is a deliberate broker-side choice, not something
+// shared/config.ts enforces. This predicate is a pure extraction, not a
+// behavior change: whichever of the three call sites needs a DIFFERENT rule
+// after the pending arbitration (card
+// 37a2b8c7 volet 1, the operator-inbox exposure) changes THIS ONE FUNCTION,
+// not three call sites.
+function isTofuExemptGroup(groupId: string): boolean {
+  return groupId === "default";
+}
+
+/**
+ * Shared TOFU check for a group that already exists (used by /announce and
+ * /operator-inbox, which only ever READ the pinned secret). /register is the
+ * odd one out -- it also PINS the secret on first sight -- so it keeps its own
+ * inline existing/insert branch but shares isTofuExemptGroup's exemption.
+ */
+function checkGroupSecret(
+  groupId: string,
+  providedHash: string | null
+): { error: string; status: number } | null {
+  if (isTofuExemptGroup(groupId)) return null;
+  const existing = db.query(
+    "SELECT secret_hash FROM groups WHERE group_id = ?"
+  ).get(groupId) as { secret_hash: string | null } | null;
+  if (existing && !safeEqual(existing.secret_hash, providedHash)) {
+    return { error: "group_secret_hash mismatch (TOFU rejected)", status: 401 };
+  }
+  return null;
 }
 
 function guardedInterval(name: string, fn: () => unknown, ms: number): ReturnType<typeof setInterval> {
@@ -301,27 +341,21 @@ db.run(`
   )
 `);
 
-// Reserved system sender for Deck announcements (v0.3.4). messages.from_token has
-// a NOT NULL FK to peers(instance_token), so /announce needs a real row to point
-// at. This row stays 'dormant' forever: it never appears in list_peers/group-stats
-// (both filter status='active') and is never a valid send_message target, so peers
-// cannot reply to the Deck. cleanStalePeers excludes it from the dormant TTL purge.
-db.run(
-  `INSERT OR IGNORE INTO peers
-     (instance_token, peer_id, group_id, pid, cwd, summary, registered_at, last_seen, host, client_pid, status)
-   VALUES (?, ?, 'default', 0, '', '', datetime('now'), datetime('now'), '', 0, 'dormant')`,
-  [DECK_INSTANCE_TOKEN, DECK_PEER_ID]
-);
-
-// Reserved OPERATOR inbox sentinel (PLAN C12): the human in front of the Deck.
-// Agents send_message to 'operator'; the Deck drains /operator-inbox. Same
-// lifecycle rules as the deck row (permanently dormant, never listed/purged).
-db.run(
-  `INSERT OR IGNORE INTO peers
-     (instance_token, peer_id, group_id, pid, cwd, summary, registered_at, last_seen, host, client_pid, status)
-   VALUES (?, ?, 'default', 0, '', '', datetime('now'), datetime('now'), '', 0, 'dormant')`,
-  [OPERATOR_INSTANCE_TOKEN, OPERATOR_PEER_ID]
-);
+// Reserved sentinel senders (v0.3.4 deck, PLAN C12 operator; card 37a2b8c7 volet 3:
+// looped over the single SENTINEL_DEFINITIONS source instead of one copy-pasted
+// INSERT per sentinel). messages.from_token has a NOT NULL FK to peers(instance_token),
+// so /announce and the operator inbox need a real row to point at. These rows stay
+// 'dormant' forever: they never appear in list_peers/group-stats (both filter
+// status='active') and are never a valid send_message target, so peers cannot reply.
+// cleanStalePeers excludes them from the dormant TTL purge (see below).
+for (const sentinel of SENTINEL_DEFINITIONS) {
+  db.run(
+    `INSERT OR IGNORE INTO peers
+       (instance_token, peer_id, group_id, pid, cwd, summary, registered_at, last_seen, host, client_pid, status)
+     VALUES (?, ?, 'default', 0, '', '', datetime('now'), datetime('now'), '', 0, 'dormant')`,
+    [sentinel.instanceToken, sentinel.peerId]
+  );
+}
 
 db.run(`CREATE INDEX IF NOT EXISTS idx_messages_pending ON messages(to_token, delivered)`);
 
@@ -650,15 +684,17 @@ function cleanStalePeers(): void {
     }
   }
 
-  // Phase 2: purge dormants au-dela du TTL. The reserved Deck sender row is
-  // exempt -- it is permanently dormant and must outlive the TTL so /announce's
-  // from_token FK always resolves.
+  // Phase 2: purge dormants au-dela du TTL. Every reserved sentinel row (card
+  // 37a2b8c7 volet 3: derived from SENTINEL_INSTANCE_TOKENS, not one literal
+  // per constant) is exempt -- it is permanently dormant and must outlive the
+  // TTL so /announce's and the operator inbox's from_token FK always resolves.
   const cutoff = `-${DORMANT_TTL_HOURS} hours`;
+  const sentinelPlaceholders = SENTINEL_INSTANCE_TOKENS.map(() => "?").join(", ");
   const expired = db.query(
     `SELECT instance_token FROM peers
      WHERE status = 'dormant' AND last_seen < datetime('now', ?)
-       AND instance_token <> ? AND instance_token <> ?`
-  ).all(cutoff, DECK_INSTANCE_TOKEN, OPERATOR_INSTANCE_TOKEN) as { instance_token: string }[];
+       AND instance_token NOT IN (${sentinelPlaceholders})`
+  ).all(cutoff, ...SENTINEL_INSTANCE_TOKENS) as { instance_token: string }[];
   for (const { instance_token } of expired) {
     purgeDormantPeerTx(instance_token);
   }
@@ -895,8 +931,10 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
   const secretHash = body.group_secret_hash;
   const now = new Date().toISOString();
 
-  // 1) Group authentication / TOFU.
-  if (groupId !== "default") {
+  // 1) Group authentication / TOFU. /register is the one caller that also
+  // PINS the secret on first sight, so it keeps its own existing/insert
+  // branch (card 37a2b8c7 volet 4) but shares the single exemption predicate.
+  if (!isTofuExemptGroup(groupId)) {
     const existing = db.query(
       "SELECT secret_hash FROM groups WHERE group_id = ?"
     ).get(groupId) as { secret_hash: string | null } | null;
@@ -1044,22 +1082,51 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
   return { peer_id: newPeerId, instance_token: newToken };
 }
 
-function handleHeartbeat(body: HeartbeatRequest): void {
+// Card 37a2b8c7 review follow-up (MAJOR-2): the client-declared instance_token
+// is treated as identity proof on 8 routes, not just the 3 volet-2 originally
+// covered (send-message/poll-messages/peek-messages). A sentinel's row is REAL
+// (seeded at boot, group_id 'default'), so these 5 handlers don't merely leak
+// a read -- they let an attacker who guesses/knows the public "__operator__"
+// or "__deck__" string mutate or DESTROY that row directly by declaring it as
+// their own instance_token. Same guard, same shape predicate, at the same
+// refuse-before-lookup point as the original 3.
+function refuseSentinelInstanceToken(route: string, token: string): string | null {
+  if (!isSentinelInstanceToken(token)) return null;
+  log.warn(`${route}: refused a sentinel-shaped instance_token`, {
+    instance_token: token.slice(0, 64),
+  });
+  return "instance_token cannot be a reserved sentinel identity";
+}
+
+function handleHeartbeat(body: HeartbeatRequest): { error: string } | void {
+  const refused = refuseSentinelInstanceToken("heartbeat", body.instance_token);
+  if (refused) return { error: refused };
   updateLastSeen.run(new Date().toISOString(), body.instance_token);
 }
 
-function handleSetSummary(body: SetSummaryRequest): void {
+function handleSetSummary(body: SetSummaryRequest): { error: string } | void {
+  const refused = refuseSentinelInstanceToken("set-summary", body.instance_token);
+  if (refused) return { error: refused };
   updateSummary.run(body.summary, body.instance_token);
 }
 
-function handleDisconnect(body: DisconnectRequest): void {
+function handleDisconnect(body: DisconnectRequest): { error: string } | void {
+  const refused = refuseSentinelInstanceToken("disconnect", body.instance_token);
+  if (refused) return { error: refused };
   db.run(
     "UPDATE peers SET status = 'dormant', last_seen = ? WHERE instance_token = ?",
     [new Date().toISOString(), body.instance_token]
   );
 }
 
-function handleUnregister(body: UnregisterRequest): void {
+function handleUnregister(body: UnregisterRequest): { error: string } | void {
+  // Worst blast radius of the 5: unguarded, this DELETEs every undelivered
+  // operator-inbox message across every group in one call, then the sentinel
+  // row itself -- after which /send-message to 'operator' 404s on the FK
+  // until the next boot reseeds it. Disclosure (volet 2) and destruction
+  // (this route) are the same primitive, same prerequisite, two doors.
+  const refused = refuseSentinelInstanceToken("unregister", body.instance_token);
+  if (refused) return { error: refused };
   db.run("DELETE FROM messages WHERE from_token = ? OR to_token = ?", [body.instance_token, body.instance_token]);
   db.run("DELETE FROM peer_sessions WHERE instance_token = ?", [body.instance_token]);
   db.run("DELETE FROM peers WHERE instance_token = ?", [body.instance_token]);
@@ -1077,6 +1144,11 @@ function handleSetId(body: SetIdRequest): SetIdResponse | { error: string; statu
   if (RESERVED_PEER_IDS.includes(body.new_peer_id)) {
     return { error: `peer_id '${body.new_peer_id}' is reserved`, status: 400 };
   }
+  // The check above only guards the TARGET name. Without also refusing a
+  // sentinel-shaped CALLER instance_token, a request could rename the
+  // '__operator__'/'__deck__' row itself to any non-reserved peer_id.
+  const refused = refuseSentinelInstanceToken("set-id", body.instance_token);
+  if (refused) return { error: refused, status: 403 };
   const me = db.query(
     "SELECT peer_id, group_id FROM peers WHERE instance_token = ?"
   ).get(body.instance_token) as { peer_id: string; group_id: string } | null;
@@ -1118,11 +1190,11 @@ function toPublicPeer(p: Peer): PublicPeer {
 function resolveSenderMeta(
   fromToken: InstanceToken
 ): { from_peer_id: string; from_summary: string; from_host: string; from_cwd: string } {
-  if (fromToken === DECK_INSTANCE_TOKEN) {
-    return { from_peer_id: DECK_PEER_ID, from_summary: "", from_host: "", from_cwd: "" };
-  }
-  if (fromToken === OPERATOR_INSTANCE_TOKEN) {
-    return { from_peer_id: OPERATOR_PEER_ID, from_summary: "", from_host: "", from_cwd: "" };
+  // Card 37a2b8c7 volet 3: loop over SENTINEL_DEFINITIONS instead of one
+  // literal `if` per sentinel, so a third entry is mapped automatically.
+  const sentinel = SENTINEL_DEFINITIONS.find((d) => d.instanceToken === fromToken);
+  if (sentinel) {
+    return { from_peer_id: sentinel.peerId, from_summary: "", from_host: "", from_cwd: "" };
   }
   const s = db.query(
     "SELECT peer_id, summary, host, cwd FROM peers WHERE instance_token = ?"
@@ -1133,6 +1205,16 @@ function resolveSenderMeta(
 }
 
 function handleListPeers(body: ListPeersRequest): PublicPeer[] {
+  // Review pass 2 (card 37a2b8c7): the 9th route trusting a client-declared
+  // instance_token as identity proof -- found by enumerating shared/types.ts
+  // request interfaces carrying the field, not by re-reading handlers. No
+  // live exploit today ('default' has no secret, so the same list is already
+  // visible legitimately), but it holds only by two CONTINGENT properties
+  // (sentinel rows live in 'default'; 'default' has no secret), one of which
+  // volet 1's pending arbitration may change -- guard now rather than
+  // document-and-hope. Empty result on refusal (never [error]) matches
+  // poll/peek's validated "don't confirm to attacker" asymmetry.
+  if (refuseSentinelInstanceToken("list-peers", body.instance_token)) return [];
   // Filter implicitly by the caller's group_id, derived from instance_token.
   const callerRow = db.query(
     "SELECT group_id FROM peers WHERE instance_token = ?"
@@ -1190,6 +1272,14 @@ function handleListPeers(body: ListPeersRequest): PublicPeer[] {
 }
 
 function handleSendMessage(body: SendMessageRequest): SendMessageResponse {
+  // Card 37a2b8c7 volet 2 (Chain A): the sentinel constants are PUBLIC, so a
+  // client declaring one as ITS OWN from_token is an impersonation attempt,
+  // never a legitimate identity -- refuse by shape before the lookup can ever
+  // resolve it. Mirrors resolveRoadmapAuthor's refusal (layer 1, card 39c40571).
+  if (isSentinelInstanceToken(body.from_token)) {
+    log.warn(`send-message: refused sentinel-shaped from_token`, { from_token: body.from_token.slice(0, 64) });
+    return { ok: false, error: "from_token cannot be a reserved sentinel identity" };
+  }
   const sender = db.query(
     "SELECT instance_token, peer_id, group_id, summary, host, cwd FROM peers WHERE instance_token = ?"
   ).get(body.from_token) as
@@ -1289,16 +1379,11 @@ function handleAnnounce(body: AnnounceRequest): AnnounceResponse | { error: stri
   const text = typeof body.text === "string" ? body.text : "";
   if (!text.trim()) return { sent: 0 };
 
-  // Group auth: a non-default group that already exists must present the right
-  // secret. A group no peer has registered yet has no members -> sent:0 below.
-  if (groupId !== "default") {
-    const existing = db.query(
-      "SELECT secret_hash FROM groups WHERE group_id = ?"
-    ).get(groupId) as { secret_hash: string | null } | null;
-    if (existing && !safeEqual(existing.secret_hash, body.group_secret_hash ?? null)) {
-      return { error: "group_secret_hash mismatch (TOFU rejected)", status: 401 };
-    }
-  }
+  // Group auth (card 37a2b8c7 volet 4: shared checkGroupSecret, was its own
+  // copy of the TOFU check). A group no peer has registered yet has no
+  // members -> sent:0 below.
+  const announceSecretError = checkGroupSecret(groupId, body.group_secret_hash ?? null);
+  if (announceSecretError) return announceSecretError;
 
   // Targeted announce (PLAN C10): deliver to ONE active peer (the team-lead
   // notification path). Same sender/no-reply semantics; 404 surfaces a
@@ -1386,6 +1471,15 @@ function toDeliveredMessage(
 }
 
 function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse {
+  // Card 37a2b8c7 volet 2 (Chain A, worst path): selectUndelivered has no
+  // group_id filter, so a client declaring a sentinel instance_token would
+  // drain (and mark delivered, i.e. destroy) every group's messages addressed
+  // to that sentinel -- e.g. every operator inbox on the broker at once.
+  // Refuse by shape before the lookup, mirroring resolveRoadmapAuthor.
+  if (isSentinelInstanceToken(body.instance_token)) {
+    log.warn(`poll-messages: refused sentinel-shaped instance_token`, { instance_token: body.instance_token.slice(0, 64) });
+    return { messages: [] };
+  }
   type MessageRow = Omit<Message, "delivered"> & { delivered: number };
   const rows = selectUndelivered.all(body.instance_token) as MessageRow[];
   for (const row of rows) {
@@ -1398,6 +1492,12 @@ function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse {
 // Used by the server-side fallback poll (WS down) to push mcp.notification()
 // without consuming messages -- only check_messages marks delivered.
 function handlePeekMessages(body: PollMessagesRequest): PollMessagesResponse {
+  // Same refusal as handlePollMessages: peek does not mark delivered, but it
+  // still leaks the content of every group's sentinel-addressed messages.
+  if (isSentinelInstanceToken(body.instance_token)) {
+    log.warn(`peek-messages: refused sentinel-shaped instance_token`, { instance_token: body.instance_token.slice(0, 64) });
+    return { messages: [] };
+  }
   type MessageRow = Omit<Message, "delivered"> & { delivered: number };
   const rows = selectUndelivered.all(body.instance_token) as MessageRow[];
   return { messages: rows.map(toDeliveredMessage) };
@@ -2108,14 +2208,11 @@ function handleOperatorInbox(
 ): OperatorInboxResponse | { error: string; status: number } {
   const groupId = body.group_id;
   if (!groupId) return { error: "group_id is required", status: 400 };
-  if (groupId !== "default") {
-    const existing = db.query(
-      "SELECT secret_hash FROM groups WHERE group_id = ?"
-    ).get(groupId) as { secret_hash: string | null } | null;
-    if (existing && !safeEqual(existing.secret_hash, body.group_secret_hash ?? null)) {
-      return { error: "group_secret_hash mismatch (TOFU rejected)", status: 401 };
-    }
-  }
+  // Card 37a2b8c7 volet 4: shared checkGroupSecret, was its own copy of the
+  // TOFU check (its semantics for group_id === "default" are under
+  // arbitration, card 37a2b8c7 volet 1 -- change isTofuExemptGroup, not here).
+  const inboxSecretError = checkGroupSecret(groupId, body.group_secret_hash ?? null);
+  if (inboxSecretError) return inboxSecretError;
   const rows = db.query(
     `SELECT m.id, m.text, m.sent_at, COALESCE(p.peer_id, '<gone>') AS from_peer_id
      FROM messages m LEFT JOIN peers p ON p.instance_token = m.from_token
@@ -3640,18 +3737,26 @@ const server = Bun.serve<WsData>({
           }
           return Response.json(result);
         }
-        case "/heartbeat":
-          handleHeartbeat(body as HeartbeatRequest);
+        case "/heartbeat": {
+          const result = handleHeartbeat(body as HeartbeatRequest);
+          if (result && "error" in result) return Response.json({ ok: false, error: result.error });
           return Response.json({ ok: true });
-        case "/set-summary":
-          handleSetSummary(body as SetSummaryRequest);
+        }
+        case "/set-summary": {
+          const result = handleSetSummary(body as SetSummaryRequest);
+          if (result && "error" in result) return Response.json({ ok: false, error: result.error });
           return Response.json({ ok: true });
-        case "/disconnect":
-          handleDisconnect(body as DisconnectRequest);
+        }
+        case "/disconnect": {
+          const result = handleDisconnect(body as DisconnectRequest);
+          if (result && "error" in result) return Response.json({ ok: false, error: result.error });
           return Response.json({ ok: true });
-        case "/unregister":
-          handleUnregister(body as UnregisterRequest);
+        }
+        case "/unregister": {
+          const result = handleUnregister(body as UnregisterRequest);
+          if (result && "error" in result) return Response.json({ ok: false, error: result.error });
           return Response.json({ ok: true });
+        }
         case "/set-id": {
           const result = handleSetId(body as SetIdRequest);
           if ("error" in result) {
