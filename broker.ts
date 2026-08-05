@@ -221,11 +221,42 @@ function safeEqual(a: string | null | undefined, b: string | null | undefined): 
 // unconditional exemption is a deliberate broker-side choice, not something
 // shared/config.ts enforces. This predicate is a pure extraction, not a
 // behavior change: whichever of the three call sites needs a DIFFERENT rule
-// after the pending arbitration (card
-// 37a2b8c7 volet 1, the operator-inbox exposure) changes THIS ONE FUNCTION,
-// not three call sites.
+// changes THIS ONE FUNCTION, not three call sites. The arbitration it was
+// waiting for (card 37a2b8c7 volet 1, the operator-inbox exposure) is SETTLED:
+// the inbox is refused in an exempt group rather than authenticated there --
+// see groupMayCarryOperatorInbox below, which derives from this predicate.
 function isTofuExemptGroup(groupId: string): boolean {
   return groupId === "default";
+}
+
+/**
+ * Card 37a2b8c7 volet 1 (operator arbitration of 2026-08-05, option d).
+ *
+ * A TOFU-exempt group pins no secret, so ANY holder of the shared BROKER_TOKEN
+ * can name it and drain it. The operator inbox is the only CONFIDENTIAL payload
+ * such a group can carry, and it cannot be authenticated without pinning a
+ * secret -- which would destroy the zero-config rendezvous that makes the group
+ * exempt in the first place. Exposure and feature are the SAME property here,
+ * so the inbox is refused there instead of being authenticated: the assumption
+ * "an exempt group carries nothing confidential" becomes TRUE BY CONSTRUCTION,
+ * which is what makes handleRegister's and handleAnnounce's exemptions
+ * legitimate rather than copies of a doubtful rule.
+ *
+ * COVERAGE. Both ends are refused (drain in handleOperatorInbox, deposit in
+ * handleSendMessage): refusing only the drain would keep accepting a write
+ * nobody will ever read -- a lying success. The predicate is DERIVED from
+ * isTofuExemptGroup rather than re-testing "default", so a second exempt group
+ * added later inherits both refusals instead of silently re-opening the hole;
+ * the degradation that yields a subset (someone re-typing the literal at one of
+ * the two sites) is what tests/broker-operator-inbox.test.ts pins.
+ *
+ * COST, deliberate: a bare-mode claude-peers user with no group secret loses a
+ * documented capability (send_message to 'operator'). It was already inert
+ * there -- the core ships no consumer for that inbox, so the message sat
+ * delivered=0 forever. The refusal makes the existing silence explicit.
+ */
+function groupMayCarryOperatorInbox(groupId: string): boolean {
+  return !isTofuExemptGroup(groupId);
 }
 
 /**
@@ -1297,6 +1328,24 @@ function handleSendMessage(body: SendMessageRequest): SendMessageResponse {
   // Operator inbox (PLAN C12): 'operator' routes to the reserved sentinel,
   // scoped to the sender's group (the Deck drains it per group). No WS pool
   // entry exists for it, so delivery is purely poll-based.
+  // Card 37a2b8c7 volet 1: the DEPOSIT half. A TOFU-exempt group cannot hold
+  // the operator inbox (see groupMayCarryOperatorInbox), and the drain there is
+  // refused, so accepting the write would store a message nobody can ever read.
+  if (body.to_peer_id === OPERATOR_PEER_ID && !groupMayCarryOperatorInbox(sender.group_id)) {
+    log.warn(`send-message: refused operator deposit in a secret-less group`, {
+      group_id: sender.group_id,
+      from_peer_id: sender.peer_id,
+    });
+    return {
+      ok: false,
+      // Review MINOR-2: the group is INTERPOLATED, not hardcoded as "default".
+      // The refusal derives from isTofuExemptGroup, so a second exempt group
+      // would inherit it -- and a message naming the wrong group would
+      // contradict the very guard that produced it.
+      error: `The operator inbox is unavailable in the '${sender.group_id}' group: it pins no secret, so anyone could read it. Join a group with a secret (a Koryphaios Deck always does) to message the operator.`,
+    };
+  }
+
   const target =
     body.to_peer_id === OPERATOR_PEER_ID
       ? { instance_token: OPERATOR_INSTANCE_TOKEN }
@@ -2283,9 +2332,23 @@ function handleOperatorInbox(
 ): OperatorInboxResponse | { error: string; status: number } {
   const groupId = body.group_id;
   if (!groupId) return { error: "group_id is required", status: 400 };
+  // Card 37a2b8c7 volet 1: the DRAIN half. A TOFU-exempt group skips the secret
+  // check below by design, so draining it would hand the human operator's
+  // undelivered messages -- and MARK THEM DELIVERED, hiding them from the real
+  // Deck -- to any BROKER_TOKEN holder. Refused rather than authenticated (see
+  // groupMayCarryOperatorInbox); the deposit half is refused in
+  // handleSendMessage.
+  if (!groupMayCarryOperatorInbox(groupId)) {
+    log.warn(`operator-inbox: refused drain of a secret-less group`, { group_id: groupId });
+    return {
+      // Review MINOR-2: interpolated for the same reason as the deposit half --
+      // the guard is derived, so the message must name the group it refused.
+      error: `The operator inbox does not exist in the '${groupId}' group: it pins no secret`,
+      status: 403,
+    };
+  }
   // Card 37a2b8c7 volet 4: shared checkGroupSecret, was its own copy of the
-  // TOFU check (its semantics for group_id === "default" are under
-  // arbitration, card 37a2b8c7 volet 1 -- change isTofuExemptGroup, not here).
+  // TOFU check.
   const inboxSecretError = checkGroupSecret(groupId, body.group_secret_hash ?? null);
   if (inboxSecretError) return inboxSecretError;
   const rows = db.query(
