@@ -401,6 +401,82 @@ export interface RoadmapItem {
   target_peer_ids: string[];
 }
 
+/**
+ * Card aad5e954: the column list /roadmap/import writes, as NAMED DATA.
+ *
+ * `INSERT OR REPLACE` deletes the row before reinserting it, so any column of
+ * roadmap_items missing from this list is silently reset to its table DEFAULT
+ * on every import. Card 40ddf1f5 paid that once (locked/locked_by/locked_at
+ * were absent, so an unrelated import erased another card's lock); this
+ * constant exists so the failure mode cannot come back as a NEW column.
+ *
+ * Two properties earn their keep here, and both are the reason this is an
+ * array rather than a hand-written SQL string:
+ *  - the statement text AND the bound values are generated from it in
+ *    broker.ts, so they cannot drift apart positionally, and a column added
+ *    here without a value is a TYPE error rather than a runtime surprise;
+ *  - it is directly comparable to the live schema. tests/broker-roadmap-import
+ *    reads PRAGMA table_info on a broker-spawned database and compares it to
+ *    this list, so a column added to the table and forgotten here fails CLOSED.
+ *    Deliberately NOT extracted from the SQL by regex: that would make the
+ *    regex a link in the guard, and a regex that silently returns a SUBSET
+ *    turns the comparison green exactly when it should scream (measured
+ *    precedent in this repo on 2026-08-04, a comment scanner that desynced on
+ *    a quoted literal and went from 3 findings to 54).
+ */
+export const ROADMAP_IMPORT_COLUMNS = [
+  "id",
+  "project_key",
+  "kind",
+  "title",
+  "description",
+  "rationale",
+  "context",
+  "priority",
+  "value",
+  "effort",
+  "status",
+  "tags",
+  "depends_on",
+  "created_by",
+  "updated_by",
+  "created_at",
+  "updated_at",
+  "deleted_at",
+  "queue",
+  "directive",
+  "target_peer_ids",
+  "locked",
+  "locked_by",
+  "locked_at",
+] as const;
+
+export type RoadmapImportColumn = (typeof ROADMAP_IMPORT_COLUMNS)[number];
+
+/**
+ * Compare the LIVE schema of roadmap_items against ROADMAP_IMPORT_COLUMNS.
+ *
+ * `missing` is the answer that matters: a column the table has and the import
+ * does not write, i.e. a column every import silently resets. `extra` catches
+ * the mirror mistake (a column removed from the table but still written, which
+ * would make the statement throw at runtime).
+ *
+ * Pure and exported so it can be falsified on synthetic input: the integration
+ * halves of this check agree by construction whenever both sides are correct,
+ * so the only way to prove the comparison can NAME a defect is to hand it one.
+ */
+export function findUncoveredRoadmapColumns(
+  schemaColumns: readonly string[],
+  listedColumns: readonly string[]
+): { missing: string[]; extra: string[] } {
+  const listed = new Set(listedColumns);
+  const schema = new Set(schemaColumns);
+  return {
+    missing: schemaColumns.filter((c) => !listed.has(c)),
+    extra: listedColumns.filter((c) => !schema.has(c)),
+  };
+}
+
 export interface RoadmapListRequest {
   project_key: string;
   kind?: RoadmapKind;

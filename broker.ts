@@ -120,6 +120,8 @@ import {
   OPERATOR_INSTANCE_TOKEN,
   OPERATOR_PEER_ID,
   RESERVED_PEER_IDS,
+  ROADMAP_IMPORT_COLUMNS,
+  type RoadmapImportColumn,
   isSentinelInstanceToken,
   SENTINEL_DEFINITIONS,
   SENTINEL_INSTANCE_TOKENS,
@@ -771,6 +773,15 @@ function releaseStaleLocks(): void {
       params
     );
   };
+  if (process.env.CP_DIAG_LOCK) {
+    const rows = db
+      .query(`SELECT id, locked, locked_by, locked_at FROM roadmap_items WHERE locked = 1`)
+      .all() as { id: string; locked: number; locked_by: string; locked_at: string }[];
+    const nowRow = db.query(`SELECT datetime('now') AS n`).get() as { n: string };
+    process.stderr.write(
+      `[DIAG ${Date.now()}] sweep tick now=${nowRow.n} locked_rows=${JSON.stringify(rows)}\n`
+    );
+  }
   // TTL: no write at all on the item for LOCK_TTL_SEC (any roadmap_update,
   // e.g. a context enrichment by the working agent, refreshes updated_at).
   release(`datetime(updated_at) < datetime('now', ?)`, [`-${LOCK_TTL_SEC} seconds`]);
@@ -1608,6 +1619,19 @@ function cleanList(v: unknown): string[] | null {
  * crossing the broker HTTP boundary is never trusted verbatim -- the Deck
  * re-validates it again before it ever reaches a PTY (three-hostile-inputs #2).
  */
+/**
+ * Card 8c1effca: resolve ONE text column of an imported item.
+ *
+ * `undefined` means the file never mentioned the column, so the existing row
+ * wins (or "" for a brand-new card). Anything else means the file DID mention
+ * it: a string is taken as-is, and an explicit null (or any non-string) clears
+ * the column, because a self-export must still be able to blank a field.
+ */
+function importedText(value: unknown, existing: string | undefined): string {
+  if (value === undefined) return existing ?? "";
+  return typeof value === "string" ? value : "";
+}
+
 function cleanPeerIds(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
   const out: string[] = [];
@@ -2228,13 +2252,16 @@ function handleRoadmapImport(body: {
     }
   }
 
+  // Card aad5e954: both the column list and the placeholders are GENERATED from
+  // the single ROADMAP_IMPORT_COLUMNS constant, and the values below are bound
+  // through a record keyed by that same union -- so a column can no longer be
+  // listed without a value, or bound in the wrong position. What the constant
+  // cannot do by itself is notice a column added to the TABLE and forgotten in
+  // the list; that is what the PRAGMA comparison in the tests is for.
   const insert = db.prepare(
     `INSERT OR REPLACE INTO roadmap_items
-       (id, project_key, kind, title, description, rationale, context, priority, value,
-        effort, status, tags, depends_on, created_by, updated_by,
-        created_at, updated_at, deleted_at, queue, directive, target_peer_ids,
-        locked, locked_by, locked_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (${ROADMAP_IMPORT_COLUMNS.join(", ")})
+     VALUES (${ROADMAP_IMPORT_COLUMNS.map(() => "?").join(", ")})`
   );
   const importAll = db.transaction((rows: Partial<RoadmapItem>[]) => {
     const skipped: string[] = [];
@@ -2281,40 +2308,71 @@ function handleRoadmapImport(body: {
             ? it.locked_at
             : null
           : (existing?.locked_at ?? null);
-      insert.run(
+      // Card 8c1effca: every column follows the SAME discipline the three lock
+      // columns already had -- a key PRESENT in the file wins (including an
+      // explicit null, which is a genuine clear in a self-export), a key truly
+      // ABSENT falls back to the EXISTING row, and only a brand-new row falls
+      // back to the table default. Before this, everything but the lock columns
+      // fell back to a literal, so a partial file (the exact gesture an operator
+      // makes to fix one field by hand) silently erased description, rationale,
+      // context, tags, depends_on, queue and deleted_at.
+      const values: Record<RoadmapImportColumn, string | number | null> = {
         id,
-        projectKey,
-        it.kind!,
-        it.title!.trim(),
-        it.description ?? "",
-        it.rationale ?? "",
-        it.context ?? "",
-        it.priority ?? "could",
-        it.value ?? "medium",
-        it.effort ?? "medium",
-        it.status ?? "idea",
-        JSON.stringify(cleanList(it.tags) ?? []),
-        JSON.stringify(cleanList(it.depends_on) ?? []),
+        project_key: projectKey,
+        kind: it.kind!,
+        title: it.title!.trim(),
+        description: importedText(it.description, existing?.description),
+        rationale: importedText(it.rationale, existing?.rationale),
+        context: importedText(it.context, existing?.context),
+        priority: it.priority ?? existing?.priority ?? "could",
+        value: it.value ?? existing?.value ?? "medium",
+        effort: it.effort ?? existing?.effort ?? "medium",
+        status: it.status ?? existing?.status ?? "idea",
+        tags: JSON.stringify(
+          it.tags !== undefined ? (cleanList(it.tags) ?? []) : (existing?.tags ?? [])
+        ),
+        depends_on: JSON.stringify(
+          it.depends_on !== undefined
+            ? (cleanList(it.depends_on) ?? [])
+            : (existing?.depends_on ?? [])
+        ),
         // Card 40ddf1f5 (defect 3): created_by/updated_by come from the
         // resolved, identity-checked author, never straight from the file's
         // own (untrusted) created_by/updated_by fields. created_by is
         // preserved from the existing row when re-importing a known card
         // (immutable attribution, like every other write path), and only
         // falls back to the resolved author for a brand-new row.
-        existing?.created_by ?? by,
-        by,
-        it.created_at ?? new Date().toISOString(),
-        it.updated_at ?? new Date().toISOString(),
-        it.deleted_at ?? null,
-        typeof it.queue === "number" && Number.isInteger(it.queue) && it.queue >= 1
-          ? it.queue
-          : null,
-        importDirective,
-        JSON.stringify(importDirective ? cleanPeerIds(it.target_peer_ids) : []),
-        lockedVal ? 1 : 0,
-        lockedByVal,
-        lockedAtVal
-      );
+        created_by: existing?.created_by ?? by,
+        updated_by: by,
+        created_at: it.created_at ?? existing?.created_at ?? new Date().toISOString(),
+        // updated_at is the one column an import legitimately stamps: the row
+        // WAS just written, so a silent file means "now", not "keep the old".
+        updated_at: it.updated_at ?? new Date().toISOString(),
+        deleted_at:
+          it.deleted_at !== undefined
+            ? typeof it.deleted_at === "string"
+              ? it.deleted_at
+              : null
+            : (existing?.deleted_at ?? null),
+        queue:
+          it.queue !== undefined
+            ? typeof it.queue === "number" && Number.isInteger(it.queue) && it.queue >= 1
+              ? it.queue
+              : null
+            : (existing?.queue ?? null),
+        directive: importDirective,
+        target_peer_ids: JSON.stringify(
+          importDirective
+            ? it.target_peer_ids !== undefined
+              ? cleanPeerIds(it.target_peer_ids)
+              : (existing?.target_peer_ids ?? [])
+            : []
+        ),
+        locked: lockedVal ? 1 : 0,
+        locked_by: lockedByVal,
+        locked_at: lockedAtVal,
+      };
+      insert.run(...ROADMAP_IMPORT_COLUMNS.map((column) => values[column]));
       imported++;
     }
     return { imported, skipped };
