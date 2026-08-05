@@ -1711,7 +1711,16 @@ function resolveRoadmapAuthor(
   // table in one move. 'roadmap-write' is deliberately absent from
   // SESSION_ALLOWED: a sandboxed agent holding a session token gets 403 from
   // that table, not from a rule re-typed here.
-  if (by === DECK_PEER_ID) {
+  // Review follow-up: the branch is keyed on the reserved SET, not on the one
+  // literal that happened to be exploitable. Measured before widening:
+  // `by:'operator'` and `by:'system'` were accepted unsigned, 200, and the card
+  // then displayed `created_by: "operator"`. No privilege rode on them today
+  // (the lock exemption tests `by !== "deck"` and `proven` stayed false), so the
+  // cost was attribution theft rather than escalation -- but all three names
+  // designate the human, so all three now demand the operator signature. Keying
+  // on the set also means a fourth reserved name inherits this without anyone
+  // remembering to come back here.
+  if (RESERVED_PEER_IDS.includes(by)) {
     const auth = resolveApprovalAuth(
       body as { auth?: ApprovalAuthProof } & Record<string, unknown>,
       "roadmap-write"
@@ -1722,12 +1731,12 @@ function resolveRoadmapAuthor(
       // Silence here means the running broker predates this code -- a live
       // process can be hours older than the commit, and the two cases look
       // identical from the outside unless the refusal says so itself.
-      log.warn(`${route}: refused an unsigned write claiming the '${DECK_PEER_ID}' author`, {
+      log.warn(`${route}: refused an unsigned write claiming the reserved '${by}' author`, {
         reason: auth.error,
         status: auth.status,
       });
       return {
-        error: `author '${DECK_PEER_ID}' is the operator: sign the write with the operator credential (${auth.error}). A Deck older than this broker does not sign yet -- update it.`,
+        error: `author '${by}' is a reserved identity naming the operator: sign the write with the operator credential (${auth.error}). A Deck older than this broker does not sign yet -- update it.`,
         status: auth.status,
       };
     }
@@ -1762,12 +1771,17 @@ function resolveRoadmapAuthor(
         peer_id: owner.peer_id,
       });
       return {
-        // Names the REMEDY, not just the refusal. This peer is legitimate (it
-        // holds a real token) and it is being refused for its NAME alone, so a
-        // message that stops at "reserved" reads as a breakage. Re-registering
-        // mints a suffixed id, since deriveDefaultId now refuses to hand out a
-        // reserved base.
-        error: `peer_id '${owner.peer_id}' is a reserved identity and cannot author a roadmap write. This peer was registered before reserved names were refused: re-register (disconnect and reconnect) to be renamed '${owner.peer_id}-1', then retry.`,
+        // Names the REMEDY, not just the refusal: this peer is legitimate (it
+        // holds a real token) and is refused for its NAME alone, so a message
+        // stopping at "reserved" reads as a breakage.
+        //
+        // The remedy is set_id, NOT re-registration, and the difference was
+        // measured rather than assumed. Reconnecting cannot rename this peer:
+        // resume is keyed on session_key and the dormant branch returns the
+        // peer_id READ FROM THE ROW, so a legacy row named 'deck' comes back
+        // named 'deck' with the same token. set_id refuses reserved names as a
+        // TARGET, never as a source, so renaming AWAY from one is allowed.
+        error: `peer_id '${owner.peer_id}' is a reserved identity and cannot author a roadmap write. This peer was registered before reserved names were refused: call set_id with a normal name (reconnecting will NOT rename it, the id is restored from the session row), then retry.`,
         status: 403,
       };
     }

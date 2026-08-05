@@ -375,6 +375,31 @@ test("layer 2 bypass: a peer can no longer be MINTED under a reserved name", asy
   expect(asOperator.body.peer_id).not.toBe("operator");
 });
 
+test("layer 2: EVERY reserved author needs the signature, not just 'deck'", async () => {
+  // Measured before this widening: by:'operator' and by:'system' were accepted
+  // unsigned (200) and the card then displayed created_by:"operator". No
+  // privilege rode on them -- the lock exemption tests `by !== "deck"` and
+  // `proven` stayed false -- so the cost was attribution theft rather than
+  // escalation. All three names designate the human, so all three are gated.
+  //
+  // Iterated over RESERVED_PEER_IDS rather than a hand-typed list, so a fourth
+  // reserved name is covered here the day it is added, without anyone
+  // remembering to come back.
+  expect(sharedTypes.RESERVED_PEER_IDS.length).toBeGreaterThan(1);
+  for (const reserved of sharedTypes.RESERVED_PEER_IDS) {
+    const item = await seed(`reserved-author target ${reserved}`);
+    const res = await upsert({ id: item.id, by: reserved, description: "unsigned" });
+    expect({ reserved, status: res.status }).toEqual({ reserved, status: 401 });
+    expect(res.body.error ?? "").toContain("sign the write with the operator credential");
+  }
+
+  // The probe SEES: an ordinary author is untouched by the widening, so the
+  // refusals above come from the reserved SET and not from a broken route.
+  const ok = await upsert({ by: "ordinary-author", title: "still works" });
+  expect(ok.status).toBe(200);
+  expect(ok.body.item.created_by).toBe("ordinary-author");
+});
+
 test("layer 2 bypass: suffixing a reserved name does not break session resume", async () => {
   // deriveDefaultId sits on the /register path, so renaming what it mints is
   // exactly where a silent regression would land: a peer that reconnects must
@@ -426,27 +451,25 @@ test("layer 2 bypass, MIGRATION: a pre-existing peer row named 'deck' cannot aut
   // this row, so the only way to reach the branch that guards it is to create
   // the state a live database already has. Without the seed this probe would be
   // vacuous -- it would refuse a peer that does not exist.
+  // REGISTER first, then RENAME the row in the database. A hand-written INSERT
+  // was the first attempt and it was NOT the legacy state: it created a peers
+  // row with no peer_sessions row, so reconnecting minted a fresh derived id
+  // ("legacy-host-legacy") instead of restoring the reserved one, and the probe
+  // measured a case that cannot exist. A peer that really carries a reserved
+  // name got it through /register, so it has a session row, and that row is
+  // exactly what makes reconnection restore the name.
+  //
   // In a group of its OWN: 'default' already holds the sentinel row named
-  // 'deck', so seeding there hits the UNIQUE (peer_id, group_id) index. That
-  // collision is also the reason the original exploit needed a fresh group.
+  // 'deck', and the UNIQUE (peer_id, group_id) index would refuse a second one.
+  // That same collision is why the original exploit needed a fresh group.
   const legacyGroup = nextGroup();
-  await registerAs("legacy-neighbour", "/n", legacyGroup); // creates the group row (FK)
+  const legacy = await registerAs("legacy-host", "/legacy", legacyGroup);
+  expect(legacy.status).toBe(200);
+  const legacyToken = legacy.body.instance_token;
 
-  const legacyToken = `legacy-token-${Date.now()}`;
   const db = new Database(broker.dbPath);
   try {
-    db.query(
-      `INSERT INTO peers (instance_token, peer_id, group_id, pid, cwd, git_root, tty,
-                          summary, registered_at, last_seen, host, client_pid, project_key, status)
-       VALUES (?, 'deck', ?, ?, '/legacy', NULL, NULL, '', ?, ?, 'legacy-host', 1, ?, 'active')`
-    ).run(
-      legacyToken,
-      legacyGroup,
-      livePid(),
-      new Date().toISOString(),
-      new Date().toISOString(),
-      PK
-    );
+    db.query("UPDATE peers SET peer_id = 'deck' WHERE instance_token = ?").run(legacyToken);
   } finally {
     db.close();
   }
@@ -482,7 +505,60 @@ test("layer 2 bypass, MIGRATION: a pre-existing peer row named 'deck' cannot aut
     description: "same row, different claim",
   });
   expect(viaResolved.status).toBe(403);
-  expect(viaResolved.body.error ?? "").toContain("re-register");
+
+  // THE PRESCRIPTION IS PART OF THE GUARD, so it is asserted like the rest.
+  // The first version of this message told the peer to re-register, and the
+  // assertion pinned that word -- so the test GUARANTEED a remedy that cannot
+  // work. Measured here, in the order a stranded operator would try them.
+
+  // 1. Reconnecting does NOT rename it. Resume is keyed on the session_key and
+  //    the dormant branch returns the peer_id read FROM THE ROW.
+  //    The DISCONNECT matters: without it the previous row is still active with
+  //    a live pid, so /register treats the call as a SECOND concurrent session
+  //    and mints a fresh derived id -- which measures a different path and would
+  //    make this assertion pass for the wrong reason.
+  const disconnected = await post(`${broker.url}/disconnect`, { instance_token: legacyToken });
+  expect(disconnected.status).toBe(200);
+
+  const reconnect = await post<RegisterResponse>(`${broker.url}/register`, {
+    pid: livePid(),
+    cwd: "/legacy",
+    git_root: null,
+    tty: null,
+    summary: "",
+    host: "legacy-host",
+    client_pid: 1,
+    project_key: PK,
+    group_id: legacyGroup,
+    group_secret_hash: null,
+  });
+  expect(reconnect.status).toBe(200);
+  expect(reconnect.body.peer_id).toBe("deck"); // still reserved: the remedy is elsewhere
+
+  // 2. set_id is what frees it: reserved names are refused as a TARGET, never
+  //    as a source, so renaming AWAY from one is allowed.
+  const renamed = await post<{ peer_id: string; previous: string }>(`${broker.url}/set-id`, {
+    instance_token: legacyToken,
+    new_peer_id: "legacy-renamed",
+  });
+  expect(renamed.status).toBe(200);
+  expect(renamed.body.previous).toBe("deck");
+
+  // 3. ...and the write the guard refused now goes through, which is what makes
+  //    this a remedy rather than a consolation.
+  const afterRemedy = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    id: item.id,
+    by: "legacy-renamed",
+    instance_token: legacyToken,
+    description: "written after the prescribed remedy",
+  });
+  expect(afterRemedy.status).toBe(200);
+  expect(afterRemedy.body.item.updated_by).toBe("legacy-renamed");
+
+  // The message must prescribe THAT, and not the thing step 1 just refuted.
+  expect(viaResolved.body.error ?? "").toContain("set_id");
+  expect(viaResolved.body.error ?? "").not.toContain("re-register");
 });
 
 test("layer 2 bypass: the lock of another peer survives the attack", async () => {
