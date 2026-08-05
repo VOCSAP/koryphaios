@@ -235,23 +235,55 @@ test("owner-gone sweep releases after grace, but an active owner keeps the lock"
     const ghost = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
       project_key: PK, by: "ghost-peer", title: "abandoned", status: "in_progress",
     });
+    // Prove the ghost lock is actually SET before waiting for it to fall --
+    // otherwise a poll for "released" would pass instantly, and for the
+    // wrong reason, the day locking itself breaks (card 365561ba review).
     expect(held.body.item.locked).toBe(true);
     expect(ghost.body.item.locked).toBe(true);
 
-    // Wait past the 2s grace + a sweep tick, heartbeating the live owner.
-    for (let i = 0; i < 3; i++) {
-      await Bun.sleep(1_200);
+    // Card 365561ba: releaseStaleLocks' owner-gone check is
+    // `datetime(locked_at) < datetime('now', -GRACE seconds)`, and SQLite's
+    // datetime() truncates BOTH sides to whole seconds. Combined with the 1s
+    // sweep tick, the release is only guaranteed observable within
+    // grace_sec + sweep_period_sec, plus up to 1s more of truncation
+    // aliasing depending on which second locked_at floors into relative to
+    // the tick schedule -- measured worst case ~4s for this grace=2s/
+    // sweep=1s config (instrumented repro: iter1 still-locked at +3865ms,
+    // the boundary tick's `<` missed by the floor, released only on the
+    // NEXT tick). A single fixed sleep budget close to that worst case
+    // reproduces the flake on a slower/busier machine -- poll the real
+    // condition instead (house pattern: waitForMessage in
+    // broker-approval-reply.test.ts). Budget generous margin over the
+    // measured worst case, not a value that skims it: polling only costs
+    // the wall time actually used, so a wide ceiling is free when things
+    // are fast and honest when they are not.
+    const POLL_BUDGET_MS = 12_000;
+    const POLL_INTERVAL_MS = 300;
+    let heldAfter: RoadmapItem | undefined;
+    let ghostAfter: RoadmapItem | undefined;
+    const deadline = Date.now() + POLL_BUDGET_MS;
+    while (Date.now() < deadline) {
       await post(`${b.url}/heartbeat`, { instance_token: reg.body.instance_token });
+      const after = await post<{ items: RoadmapItem[] }>(`${b.url}/roadmap/list`, {
+        project_key: PK,
+      });
+      heldAfter = after.body.items.find((i) => i.id === held.body.item.id)!;
+      ghostAfter = after.body.items.find((i) => i.id === ghost.body.item.id)!;
+      // The live owner's lock must never be swept away while we wait for the
+      // ghost's -- assert every iteration, not only at the end, so a
+      // regression here can't hide behind "the ghost eventually released".
+      expect(heldAfter.locked).toBe(true);
+      if (ghostAfter.locked === false) break;
+      await Bun.sleep(POLL_INTERVAL_MS);
     }
-
-    const after = await post<{ items: RoadmapItem[] }>(`${b.url}/roadmap/list`, {
-      project_key: PK,
-    });
-    const heldAfter = after.body.items.find((i) => i.id === held.body.item.id)!;
-    const ghostAfter = after.body.items.find((i) => i.id === ghost.body.item.id)!;
-    expect(heldAfter.locked).toBe(true);
-    expect(heldAfter.status).toBe("in_progress");
-    expect(ghostAfter.locked).toBe(false);
+    if (!ghostAfter || ghostAfter.locked !== false) {
+      throw new Error(
+        `timeout after ${POLL_BUDGET_MS}ms waiting for the owner-gone sweep to release the ` +
+          `ghost lock; last observed held=${JSON.stringify(heldAfter)} ` +
+          `ghost=${JSON.stringify(ghostAfter)}`
+      );
+    }
+    expect(heldAfter!.status).toBe("in_progress");
     expect(ghostAfter.status).toBe("planned");
     expect(ghostAfter.updated_by).toBe("lock-sweep");
   } finally {
