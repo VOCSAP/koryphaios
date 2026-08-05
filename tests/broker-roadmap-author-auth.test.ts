@@ -313,6 +313,115 @@ test("layer 2: a SESSION credential may not sign a roadmap write", async () => {
   expect(res.body.error ?? "").toContain("roadmap-write");
 });
 
+// ---------------------------------------------------------------------------
+// LAYER 2, THE BYPASS. Measured end to end on the first attempt (29bff61) and
+// red before this fix: THREE requests, no signature anywhere.
+//
+//   1. /register with host:'deck' and cwd:'/' -> the broker MINTS peer_id
+//      'deck' and hands back a REAL, non-sentinel instance_token.
+//   2. /roadmap/upsert with by:'deck' + that token -> 200, updated_by 'deck'.
+//   3. the target card was locked by another peer: a proven ordinary peer gets
+//      409, this one overwrites the status.
+//
+// Two links, both INSIDE the guard rather than around it, which is why no
+// perimeter sweep could see them: the routes were all wired, the SQL writes all
+// went through resolveRoadmapAuthor, and the defect was the ORDER of evaluation
+// plus a name that should never have been mintable. The pair "real token +
+// reserved name" was covered by no assertion at all -- the existing probes fed
+// SENTINEL tokens, which are refused by shape long before this.
+// ---------------------------------------------------------------------------
+
+async function registerAs(host: string, cwd: string, group: string) {
+  return post<RegisterResponse>(`${broker.url}/register`, {
+    pid: livePid(),
+    cwd,
+    git_root: null,
+    tty: null,
+    summary: "",
+    host,
+    client_pid: 1,
+    project_key: null,
+    group_id: group,
+    group_secret_hash: null,
+  });
+}
+
+// A FRESH group per registration, and that detail is the probe.
+//
+// The sentinel rows live in 'default', so registering there collides with them
+// and the anti-collision loop suffixes the name on its own: the first draft of
+// this probe asserted a suffixed id inside 'default' and stayed GREEN with the
+// mint guard removed, passing for a reason foreign to what it claims to test.
+// The exploit used a NEW group precisely because the collision loop only looks
+// inside the SAME group.
+let freshGroup = 0;
+const nextGroup = (): string => `bypass-group-${++freshGroup}`;
+
+test("layer 2 bypass: a peer can no longer be MINTED under a reserved name", async () => {
+  const reg = await registerAs("deck", "/", nextGroup());
+  expect(reg.status).toBe(200);
+  // The probe SEES: registration still succeeds. A machine whose hostname is
+  // literally 'deck' must keep working -- it is the NAME that is refused, not
+  // the caller.
+  expect(reg.body.instance_token.length).toBeGreaterThan(10);
+  expect(reg.body.peer_id).not.toBe("deck");
+  expect(reg.body.peer_id.startsWith("deck-")).toBe(true);
+
+  // Same for the other reserved identity, so the guard is keyed on the SET and
+  // not on one literal that happened to be the exploited one.
+  const asOperator = await registerAs("operator", "/", nextGroup());
+  expect(asOperator.status).toBe(200);
+  expect(asOperator.body.peer_id).not.toBe("operator");
+});
+
+test("layer 2 bypass: a REAL token cannot buy the 'deck' author, on any route", async () => {
+  const reg = await registerAs("deck", "/", nextGroup());
+  expect(reg.status).toBe(200);
+
+  for (const { route, body } of DECK_WRITE_ROUTES) {
+    const item = await seed(`bypass target for ${route}`);
+    const res = await post<{ error?: string }>(`${broker.url}${route}`, {
+      ...body(item.id),
+      by: "deck",
+      instance_token: reg.body.instance_token,
+    });
+    // 401 from the operator-proof branch, which is now consulted BEFORE the
+    // token branch. Before the fix this was a 200 on every one of them.
+    expect({ route, status: res.status }).toEqual({ route, status: 401 });
+    expect(res.body.error ?? "").toContain("sign the write with the operator credential");
+  }
+});
+
+test("layer 2 bypass: the lock of another peer survives the attack", async () => {
+  // The end of the exploit chain, asserted on the OUTCOME rather than on the
+  // status code: what the attacker wanted was the victim's card.
+  const victim = await seed("locked by its owner");
+  const claim = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    id: victim.id,
+    by: "victim-peer",
+    status: "in_progress",
+  });
+  expect(claim.status).toBe(200);
+  expect(claim.body.item.locked).toBe(true);
+
+  const reg = await registerAs("deck", "/", nextGroup());
+  const attack = await post<{ error?: string }>(`${broker.url}/roadmap/upsert`, {
+    id: victim.id,
+    by: "deck",
+    instance_token: reg.body.instance_token,
+    status: "done",
+  });
+  expect(attack.status).toBe(401);
+
+  const after = await post<{ items: RoadmapItem[] }>(`${broker.url}/roadmap/list`, {
+    project_key: PK,
+  });
+  const card = after.body.items.find((i) => i.id === victim.id)!;
+  expect(card.status).toBe("in_progress");
+  expect(card.locked).toBe(true);
+  expect(card.locked_by).toBe("victim-peer");
+});
+
 test("layer 2: a REPLAYED operator proof is refused, inherited from the nonce guard", async () => {
   const cred = generateCredential();
   const item = await seed("replay target");

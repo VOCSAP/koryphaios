@@ -680,10 +680,20 @@ function deriveDefaultId(host: string, cwd: string, groupId: GroupId): string {
   const base = cwdPart ? `${hostPart}-${cwdPart}` : hostPart;
 
   const exists = db.query("SELECT 1 FROM peers WHERE peer_id = ? AND group_id = ?");
-  let candidate = base;
+  // Card 39c40571 layer 2: this is the THIRD path that mints a peer_id, and it
+  // was the only one not consulting RESERVED_PEER_IDS (set_id refuses them,
+  // cleanPeerIds strips them). `host` and `cwd` come straight from the request
+  // body, and sanitize("deck") is "deck" with an empty cwd basename, so a
+  // caller could register a peer literally NAMED after a reserved identity and
+  // then author writes as it with a perfectly real token. The collision loop
+  // could not catch it either: it only looks inside the SAME group, while the
+  // sentinel rows live in 'default'. Suffixed rather than refused, so a machine
+  // whose hostname happens to be 'deck' still registers instead of being
+  // locked out of the product by its own name.
+  let candidate = RESERVED_PEER_IDS.includes(base) ? `${base}-1` : base;
   let suffix = 1;
   const MAX_SUFFIX = 1000;
-  while (exists.get(candidate, groupId)) {
+  while (exists.get(candidate, groupId) || RESERVED_PEER_IDS.includes(candidate)) {
     suffix += 1;
     if (suffix > MAX_SUFFIX) {
       candidate = `${base}-${Date.now().toString(36)}`;
@@ -1679,38 +1689,26 @@ function resolveRoadmapAuthor(
   const by = typeof body.by === "string" && body.by.trim() ? body.by.trim() : "";
   if (!by) return { error: "by (author peer_id) is required", status: 400 };
 
-  const token = typeof body.instance_token === "string" ? body.instance_token.trim() : "";
-  if (token) {
-    if (isSentinelInstanceToken(token)) {
-      log.warn(
-        `${route}: refused a reserved sentinel instance_token (public constant, not a credential)`,
-        { claimed_by: by }
-      );
-      return { error: "instance_token is a reserved sentinel", status: 403 };
-    }
-    // instance_token is the peers PRIMARY KEY, so this row is unambiguous.
-    const owner = db
-      .query("SELECT peer_id FROM peers WHERE instance_token = ?")
-      .get(token) as { peer_id: string } | null;
-    if (!owner) {
-      log.warn(`${route}: refused an unknown instance_token`, { claimed_by: by });
-      return { error: "unknown instance_token", status: 401 };
-    }
-    return { by: owner.peer_id, proven: true };
-  }
-
   // Card 39c40571 LAYER 2: the one author layer 1 still took on faith.
   //
-  // 'deck' names the operator, and its row carries a sentinel token, so the
-  // check below reads it as "belongs to no real peer" and lets it through.
-  // Any holder of the shared BROKER_TOKEN could therefore write as the human
-  // and, through `proven`, walk the work-lock guard with force. The Deck now
-  // SIGNS with the operator credential (Ed25519, operator_id = digest of the
-  // public key, so it is self-certifying) and an unsigned claim is refused.
+  // 'deck' names the OPERATOR, and `proven` is what walks the work-lock guard,
+  // so an unproven claim to it edits the backlog as the human and takes locks
+  // held by agents. The Deck now SIGNS with the operator credential (Ed25519,
+  // operator_id = digest of the public key, so it is self-certifying).
   //
-  // Routed through resolveApprovalAuth rather than verifying here, so this
-  // path inherits the signature check, the nonce REPLAY guard and the
-  // operation table in one move. 'roadmap-write' is deliberately absent from
+  // FIRST, and that ORDER is the guard, not a style choice. Shipped once with
+  // this block placed after the instance_token branch below, and it was
+  // bypassable in three requests with no signature at all: /register with
+  // host:'deck' mints a peer literally named 'deck' holding a REAL token, the
+  // token branch resolves it to {by:'deck', proven:true} and returns before
+  // this block is ever consulted. The name decides which rule applies, so the
+  // name must be tested before any credential is honoured. The Deck itself is
+  // unaffected: it sends a signature and no token at all (no instance_token
+  // anywhere in desktop/src/main/roadmap-service.ts).
+  //
+  // Routed through resolveApprovalAuth rather than verified here, so this path
+  // inherits the signature check, the nonce REPLAY guard and the operation
+  // table in one move. 'roadmap-write' is deliberately absent from
   // SESSION_ALLOWED: a sandboxed agent holding a session token gets 403 from
   // that table, not from a rule re-typed here.
   if (by === DECK_PEER_ID) {
@@ -1736,6 +1734,50 @@ function resolveRoadmapAuthor(
     return { by, proven: true };
   }
 
+  const token = typeof body.instance_token === "string" ? body.instance_token.trim() : "";
+  if (token) {
+    if (isSentinelInstanceToken(token)) {
+      log.warn(
+        `${route}: refused a reserved sentinel instance_token (public constant, not a credential)`,
+        { claimed_by: by }
+      );
+      return { error: "instance_token is a reserved sentinel", status: 403 };
+    }
+    // instance_token is the peers PRIMARY KEY, so this row is unambiguous.
+    const owner = db
+      .query("SELECT peer_id FROM peers WHERE instance_token = ?")
+      .get(token) as { peer_id: string } | null;
+    if (!owner) {
+      log.warn(`${route}: refused an unknown instance_token`, { claimed_by: by });
+      return { error: "unknown instance_token", status: 401 };
+    }
+    // The RESOLVED name is checked too, not just the claimed one. A row named
+    // after a reserved identity can no longer be minted (deriveDefaultId now
+    // consults RESERVED_PEER_IDS), but rows created BEFORE that fix still exist
+    // in live databases, and this branch would hand one of them a proven
+    // 'deck' authorship on the strength of its own token. Migration case: the
+    // mint-time refusal cannot reach backwards, this can.
+    if (RESERVED_PEER_IDS.includes(owner.peer_id)) {
+      log.warn(`${route}: refused a token whose peer_id is a reserved identity`, {
+        peer_id: owner.peer_id,
+      });
+      return {
+        error: `peer_id '${owner.peer_id}' is reserved: it cannot author a roadmap write through an instance_token`,
+        status: 403,
+      };
+    }
+    return { by: owner.peer_id, proven: true };
+  }
+
+  // Card 39c40571 LAYER 2: the one author layer 1 still took on faith.
+  //
+  // 'deck' names the operator, and its row carries a sentinel token, so the
+  // check below reads it as "belongs to no real peer" and lets it through.
+  // Any holder of the shared BROKER_TOKEN could therefore write as the human
+  // and, through `proven`, walk the work-lock guard with force. The Deck now
+  // SIGNS with the operator credential (Ed25519, operator_id = digest of the
+  // public key, so it is self-certifying) and an unsigned claim is refused.
+  //
   // No proof. Ask whether the claimed NAME belongs to a real peer -- deliberately
   // over every row rather than a `.get()`: one peer_id can exist in two groups
   // (two identities), and picking one of the two rows would answer at random.

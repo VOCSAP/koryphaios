@@ -41,6 +41,13 @@ async function patch(
   // SIGNED. Signed here rather than swapped for another author, because these
   // tests are precisely about the deck's lock exemptions -- switching the
   // author would keep them green while they stopped covering that path.
+  //
+  // READ THIS BEFORE ADDING A TEST. The ternary signs EVERY by:'deck' write
+  // that goes through this helper, silently and without the caller asking. So
+  // an assertion written here to prove that an UNSIGNED deck write is REFUSED
+  // would be signed on its way out and would pass while testing the opposite.
+  // Any layer-2 refusal case must post its body directly, as
+  // broker-roadmap-author-auth.test.ts does.
   const body =
     by === "deck" ? deckAuthored({ id, ...fields }) : { id, by, ...fields };
   const res = await post<UpsertRes & { error?: string }>(`${broker.url}/roadmap/upsert`, body);
