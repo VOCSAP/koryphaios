@@ -240,3 +240,62 @@ test("purgeScreenMemory clears the retained buffer without touching a live waiti
   ]);
   d.stop();
 });
+
+// Card c8d69928, residu 1 (root cause of the missing guard, mutation-measured
+// on the final review of 4f0143ff): the re-scan fallback (feed()'s
+// stillWaiting branch, attention.ts ~184) and purgeScreenMemory each have
+// ZERO sensitivity in this file before the two tests below -- deleting the
+// re-scan branch entirely, or replacing purgeScreenMemory's body with a
+// no-op, leaves the 16 tests above fully green. Every test above that raises
+// then clears does so via the busy-cue branch (attention.ts:168), which is
+// unconditional on buffer content and so proves nothing about either
+// mechanism. Measured 2026-08-05 by neutralizing each mechanism in turn and
+// re-running this file; see the commit message for the exact red-first
+// output of both.
+
+test("card c8d69928 residu 1a: the buffer-slide clearer (path D) actually clears once the raising pattern leaves the MAX_BUF window", () => {
+  const d = new AttentionDetector();
+  const events = collect(d);
+  d.feed("s1", PERMISSION_SCREEN);
+  expect(events).toEqual([{ id: "s1", waiting: true }]);
+
+  // MAX_BUF is 4096 (attention.ts); one feed() chunk over that size, with no
+  // busy cue and no waiting-pattern text of its own, fully evicts the
+  // retained PERMISSION_SCREEN text from st.buf's trailing window regardless
+  // of exactly how many characters the screen fixture itself contributed
+  // (slice(-MAX_BUF) on a chunk already longer than MAX_BUF drops the old
+  // content outright). This is path D of the MAX_BUF comment: no busy cue,
+  // no purge, no manual clear -- only the window sliding past the pattern.
+  const ORDINARY_LINE = "The build compiled successfully; no errors were found in the log.\n";
+  const filler = ORDINARY_LINE.repeat(Math.ceil(4200 / ORDINARY_LINE.length));
+  expect(filler.length).toBeGreaterThan(4096);
+
+  d.feed("s1", filler);
+  expect(events).toEqual([
+    { id: "s1", waiting: true },
+    { id: "s1", waiting: false }
+  ]);
+  d.stop();
+});
+
+test("card c8d69928 residu 1b: purgeScreenMemory actually empties the buffer, observed without a busy cue", () => {
+  const d = new AttentionDetector();
+  const events = collect(d);
+  d.feed("s1", PERMISSION_SCREEN);
+  expect(events).toEqual([{ id: "s1", waiting: true }]);
+
+  d.purgeScreenMemory("s1");
+  // Deliberately NOT a busy cue: the busy-cue branch clears unconditionally
+  // regardless of buffer content (attention.ts:168) and would pass even if
+  // purgeScreenMemory were a no-op -- exactly the false-negative the
+  // pre-existing purge test above has. The bare dev-channels title matches
+  // neither WAITING_PATTERNS entry on its own, so stillWaiting() only
+  // reports "cleared" here if the buffer no longer carries PERMISSION_SCREEN's
+  // "❯ 1." from before the purge -- i.e. only if the purge actually emptied it.
+  d.feed("s1", DEV_CHANNELS_TITLE_ONLY);
+  expect(events).toEqual([
+    { id: "s1", waiting: true },
+    { id: "s1", waiting: false }
+  ]);
+  d.stop();
+});
