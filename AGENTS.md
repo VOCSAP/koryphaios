@@ -101,7 +101,8 @@ Read only file/skill matching area you touch:
   returning 3 of 9 fields with no error if `return` literal reflowed or uses
   shorthand keys; CI glob running 78 of 116 files local runner collects
   (`TESTING.md`, "Cross-platform tests"), so new test passed locally and
-  never ran in CI. Canonical fail-open shape: `broker.ts:1109` rest-spreads
+  never ran in CI. Canonical fail-open shape: `toPublicPeer` in `broker.ts`
+  rest-spreads
   three fields out and projects the rest, so 17th `Peer` field ships publicly
   with nothing failing -- pick-list would have failed closed. Two bullets
   below are instances of this.
@@ -135,6 +136,14 @@ Read only file/skill matching area you touch:
   Derived git habits (explicit staging by filename, `git show --stat` after
   every commit, `cat-file -e` on imports touching co-edited files) are
   consequences of this question, not the question itself.
+
+- **A commit that advances a roadmap card names it, `Card <id8>.`, on the
+  first line of the BODY** (not the subject -- `git log --oneline` misses it).
+  Consultative only, in both directions: a commit may cite the card it FILES
+  rather than closes, and a card need not produce any commit at all (a card
+  can be answered to a human). Closing a card is an agent's discipline, never
+  a fact derived from the tree. A card-to-commit link matches PATH + SYMBOL,
+  never `file:line`, which rots.
 
 - **Five hostile inputs, never trusted.** Decide which of these five a new
   config/template field, shell-interpolated arg, broker response field,

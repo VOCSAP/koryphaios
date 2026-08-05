@@ -108,7 +108,8 @@ Read only file/skill matching area you touch:
   returning 3 of 9 fields with no error if `return` literal reflowed or uses
   shorthand keys; CI glob running 78 of 116 files local runner collects
   (`TESTING.md`, "Cross-platform tests"), so new test passed locally and
-  never ran in CI. Canonical fail-open shape: `broker.ts:1109` rest-spreads
+  never ran in CI. Canonical fail-open shape: `toPublicPeer` in `broker.ts`
+  rest-spreads
   three fields out and projects the rest, so 17th `Peer` field ships publicly
   with nothing failing -- pick-list would have failed closed. Two bullets
   below are instances of this. Corollary on the PROOF: a probe measured
@@ -147,6 +148,26 @@ Read only file/skill matching area you touch:
   Derived git habits (explicit staging by filename, `git show --stat` after
   every commit, `cat-file -e` on imports touching co-edited files) are
   consequences of this question, not the question itself.
+
+- **A commit that advances a roadmap card names it, `Card <id8>.`, on the
+  first line of the BODY** (not the subject). Measured 2026-08-05 over the
+  87 open cards: 45 are already linked to a commit this way, so the
+  convention is half-followed by instinct and pays retroactively -- three
+  cards shipped-but-left-`planned` were found in one morning, and the only
+  one a mechanical scan would have caught alone was the one whose commit
+  body cited it. Two traps this closes: `git log --oneline` alone MISSES
+  the citation, since it lives in the body; and a card cites `file:line`
+  that rots (a laurel badge moved 35 lines while its CSS class stayed put),
+  so a card-to-commit link must match PATH + SYMBOL, never `file:line`. The
+  link stays CONSULTATIVE in both directions -- a commit may cite the card
+  it FILES, not only the one it closes, and 8 cards marked `done` are cited
+  by no commit at all. And the link can NEVER be a closure mechanism, for a
+  reason that has nothing to do with recall: a card need not produce a commit
+  at all. "List the commits since 2026-07-24" is a legitimate card whose whole
+  delivery is an answer to a human. The card domain is strictly larger than the
+  commit domain, so anything git-based is blind by construction over a whole
+  family. Closing a card is an agent's discipline, not a fact derivable from
+  the tree.
 
 - **Five hostile inputs, never trusted.** Decide which of these five a new
   config/template field, shell-interpolated arg, broker response field,
