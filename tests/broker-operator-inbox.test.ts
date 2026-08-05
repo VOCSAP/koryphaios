@@ -308,9 +308,12 @@ const RECIPIENT_ROUTES: Record<string, RecipientClassification> = {
  * TWO LIMITS, both inherent to discovery by name, stated so a reader does not
  * mistake this for a total:
  *  1. It reads the data CONTRACT. A handler parsing a recipient straight out of
- *     an untyped body escapes it: broker.ts has 13 `Record<string, unknown>`
- *     sites, three of them fully untyped handler bodies
- *     (/approval/channel-connect|disconnect|list).
+ *     an untyped body escapes it: handleChannelConnect, handleChannelDisconnect
+ *     and handleChannelList take a `Record<string, unknown>` body
+ *     (/approval/channel-connect|disconnect|list) and read a notification
+ *     DESTINATION out of it. Named rather than counted on purpose: a count
+ *     rots at the next edit and a reader who re-measures it stops trusting the
+ *     whole paragraph, while three route names stay checkable.
  *  2. The domain is NOMINAL. A destination named `chat_id`, `address` or
  *     `deliver_to` -- a Telegram chat or a Discord guild is a recipient too --
  *     leaves the domain by its NAME alone.
@@ -361,6 +364,13 @@ test("coverage: every interface carrying a client-supplied recipient is classifi
   // Both a SINGULAR and a PLURAL carrier: the plural half is what the first
   // draft of this scanner missed on the real source, so asserting the fix here
   // is what makes it proven rather than claimed.
+  //
+  // PROOF BURDEN, do not trim this block. The plural guarantee rests ENTIRELY
+  // on it: measured, reverting the alternation to singular does NOT redden the
+  // real-source half of this test -- the two plural carriers simply vanish from
+  // `found`, so the unclassified filter stays empty and the consistency loop
+  // still passes. Only the toEqual below falls. Lighten this synthetic control
+  // and the singular regression becomes invisible again.
   const synthetic = [
     "export interface SupervisorDispatchRequest {",
     "  from_token: InstanceToken;",
