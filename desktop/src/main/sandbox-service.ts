@@ -597,10 +597,11 @@ export class SandboxService extends EventEmitter {
 
   /**
    * Prepare the ephemeral clone: `git clone --local` (shared object store, so
-   * even a big repo is instant) then the operator's allow-listed gitignored
-   * files on top. Idempotent: an existing clone is kept, only newer host
-   * copies of the allow-listed files are refreshed — an agent's edits inside
-   * the sandbox are never clobbered by a stale host file.
+   * even a big repo is instant) then the operator's allow-listed extra
+   * files on top -- gitignored or not. Idempotent: an existing clone is
+   * kept, only newer host copies of the allow-listed files are refreshed —
+   * an agent's edits inside the sandbox are never clobbered by a stale
+   * host file.
    */
   private async ensureCopyTree(): Promise<void> {
     const exec = this.deps.exec ?? defaultExec

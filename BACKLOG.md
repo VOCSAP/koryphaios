@@ -712,7 +712,7 @@ Docker Desktop en priorité, c'est la cible principale :
 **Mode copie éphémère**
 - [ ] Bascule `Copie éphémère` → conteneur recréé, clone présent, sessions et
       `git worktree add` atterrissent dans le clone (pas dans le vrai dépôt).
-- [ ] Les globs gitignorés configurés (ex. `PLAN-*.md`) arrivent dans le clone ;
+- [ ] Les globs de copie configurés (ex. `PLAN-*.md`) arrivent dans le clone ;
       un glob sans correspondance est bien signalé.
 - [ ] **Aucun secret ne voyage** : poser un `.env` et un `node_modules` dans le
       projet, demander `**` en glob, vérifier qu'ils ne sont PAS dans le clone.

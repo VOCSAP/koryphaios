@@ -3,7 +3,7 @@
 // app-wide config.json is shared by every project window and a bare boolean
 // would leak the trust decision across repos) and NEVER a repo file (hostile
 // input #1: enabling the sandbox, choosing the image and deciding which
-// gitignored files get duplicated are all operator decisions) — the store
+// extra files get duplicated are all operator decisions) — the store
 // lives under the app state dir, keyed by computeDeckProjectKey(projectDir),
 // exactly like launch-approvals.json.
 //

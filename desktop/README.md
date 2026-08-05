@@ -125,7 +125,8 @@ discovery.
   instead of on the machine. Two work modes: *mount* (the project itself is
   bind-mounted at `/work` -- the sandbox protects the rest of the machine) or
   *ephemeral copy* (a throwaway `git clone --local` is mounted instead, plus
-  an operator allow-list of gitignored globs; secrets and `node_modules` are
+  an operator allow-list of extra globs copied on top -- matches any file
+  under the project root, gitignored or not; secrets and `node_modules` are
   never copied). The container's Claude login lives in a shared
   `kory-claude-auth` volume -- one blocking first-run modal with an embedded
   login terminal, and agents stay blocked until it succeeds, so the prompt
