@@ -15,6 +15,7 @@ import {
 } from "../desktop/src/main/launch-config.ts";
 import {
   buildSessionCommandLine,
+  createMissingDirTracker,
   encodeInitialPromptKeystrokes,
   quotePromptArg,
   sanitizeFlagValue,
@@ -375,4 +376,32 @@ test("windows non-interactive uses -NoProfile, interactive loads the profile", (
   expect(on.args).not.toContain("-NoProfile");
   expect(on.marker).toBeTruthy();
   expect(on.args[on.args.length - 1]).toContain(on.marker as string);
+});
+
+// card d02c8e96: the incident this tracker exists for was NOT "dir missing
+// at boot" (that would have been caught by the original module-level const
+// too, once). It was "dir present at boot, deleted 9h into a running
+// process". A tracker that only reports the FIRST-EVER check would never
+// fire on that exact sequence. These probes replay the incident directly.
+test("createMissingDirTracker reports once when the dir is missing from the very first check", () => {
+  const tracker = createMissingDirTracker();
+  expect(tracker.check(false)).toBe(true); // first check, missing -> report
+  expect(tracker.check(false)).toBe(false); // still missing -> no spam
+  expect(tracker.check(false)).toBe(false);
+});
+
+test("createMissingDirTracker reports on a present->absent transition mid-run, not just at boot", () => {
+  const tracker = createMissingDirTracker();
+  expect(tracker.check(true)).toBe(false); // boot: dir present, nothing to report
+  expect(tracker.check(true)).toBe(false); // still present across many spawns
+  expect(tracker.check(false)).toBe(true); // it just got deleted -- must fire NOW
+  expect(tracker.check(false)).toBe(false); // stays missing -> no repeat spam
+});
+
+test("createMissingDirTracker re-arms: a return to present clears the report, a later disappearance reports again", () => {
+  const tracker = createMissingDirTracker();
+  expect(tracker.check(false)).toBe(true); // missing -> reported
+  expect(tracker.check(true)).toBe(false); // repackaged, dir is back
+  expect(tracker.check(true)).toBe(false); // stays present
+  expect(tracker.check(false)).toBe(true); // disappears again -> reports again, not spent
 });

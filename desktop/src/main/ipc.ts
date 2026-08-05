@@ -166,8 +166,14 @@ interface IpcDeps {
   brokerStatus: () => BrokerStatusEvent
   /** Force an immediate broker poll (banner Retry button). */
   brokerRetry: () => void
-  /** deck-plugin dir (built hook/mcp/design assets), '' when the build was skipped. */
-  deckPluginDir: string
+  /**
+   * deck-plugin dir (built hook/mcp/design assets), '' when the build was
+   * skipped or has since gone missing. A GETTER (card d02c8e96 fix c), not a
+   * cached string: index.ts's getDeckPluginDir re-checks existsSync live on
+   * every call, so a dir deleted mid-run (aborted repackage) is caught at the
+   * next demo-browser launch instead of silently reusing a stale path.
+   */
+  deckPluginDir: () => string
   /** Sandbox container lifecycle for this project (PLAN-SANDBOX). */
   sandbox: SandboxService
   /**
@@ -365,8 +371,9 @@ export function registerIpc({
         throw new Error('only claude targets can run demo scenarios (the browser bridge rides --mcp-config)')
       }
       if (demoRunning()) throw new Error('a demo scenario is already running')
-      const mcpScript = join(deckPluginDir, 'mcp', 'demo-browser-mcp.mjs')
-      if (!deckPluginDir || !existsSync(mcpScript)) {
+      const pluginDir = deckPluginDir()
+      const mcpScript = join(pluginDir, 'mcp', 'demo-browser-mcp.mjs')
+      if (!pluginDir || !existsSync(mcpScript)) {
         throw new Error('demo-browser MCP script missing -- run `npm run build:mcp`')
       }
       const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)

@@ -163,12 +163,24 @@ export class SessionService extends EventEmitter {
     /** Resolved base command (launch-config) used when a session has no override. */
     private launchCommand = '',
     /**
-     * Absolute path to the Deck's embedded plugin dir, injected as `--plugin-dir`
-     * on every spawn so the SessionStart back-channel hook keeps each tile's
-     * session id current across /clear. Empty => no plugin flag (resolved by
-     * index.ts; only set when the dir exists).
+     * Getter for the absolute path to the Deck's embedded plugin dir (SessionStart
+     * back-channel hook, approval hook, deck-control/demo-browser MCP bridges,
+     * roadmap-card skill + roadmap-scribe agent), injected as `--plugin-dir` on
+     * every spawn so the whole plugin loads -- the back-channel hook is what
+     * keeps each tile's session id current across /clear. Empty => no plugin
+     * flag (resolved by index.ts's getDeckPluginDir).
+     *
+     * A GETTER, not a cached string (card d02c8e96 fix c): a prior version
+     * took a plain string here, resolved once at construction, which is
+     * exactly what let a mid-run deletion of resources/deck-plugin go
+     * undetected for ~9h -- every spawn for the rest of the process kept
+     * passing --plugin-dir toward a directory that no longer existed. Calling
+     * this fresh in startPty() re-checks existsSync live on every spawn, and
+     * (since index.ts funnels every deckPluginDir consumer through the same
+     * function) is also where the single missing-dir report fires the first
+     * time any consumer discovers it gone.
      */
-    private pluginDir = '',
+    private getPluginDir: () => string = () => '',
     /** Home dir for transcript existence checks (injectable for tests). */
     private home: string = homedir()
   ) {
@@ -835,7 +847,7 @@ export class SessionService extends EventEmitter {
         sessionId: def.sessionId,
         prevSessionId: prev,
         effort: def.effort,
-        pluginDir: this.pluginDir,
+        pluginDir: this.getPluginDir(),
         mcpConfig: def.mcpConfig,
         appendSystemPromptFile: def.appendSystemPromptFile,
         mode: 'resume'
@@ -848,7 +860,7 @@ export class SessionService extends EventEmitter {
         sessionId: def.sessionId,
         args: def.args,
         effort: def.effort,
-        pluginDir: this.pluginDir,
+        pluginDir: this.getPluginDir(),
         mcpConfig: def.mcpConfig,
         appendSystemPromptFile: def.appendSystemPromptFile,
         mode: 'fresh'

@@ -17,6 +17,7 @@ import { loadConfig, saveConfig } from './store'
 import { buildAppMenu } from './menu'
 import { safeExternalUrl } from './external-url'
 import { SessionService } from './session-service'
+import { createMissingDirTracker } from './session-command'
 import { registerIpc, resolveDocsDir } from './ipc'
 import { parseCliContext } from './cli-context'
 import { computeScope, buildScopeEnv, resolveAdoptedScope, type Scope, type ScopeEnv } from './scope'
@@ -286,17 +287,58 @@ const sanitizeConfigForRenderer = (cfg: AppConfig): AppConfig => ({
   localProviders: sanitizeProviders(cfg.localProviders ?? [])
 })
 
-// Embedded plugin shipping the SessionStart back-channel hook, loaded into every
-// Deck session via --plugin-dir so a /clear-minted session id is captured at save
+// Embedded plugin: the SessionStart back-channel hook, the approval hook, the
+// deck-control and demo-browser MCP bridges, and the roadmap-card skill with
+// its roadmap-scribe agent (card a79c7696 volet 3). Loaded into every Deck
+// session via --plugin-dir so a /clear-minted session id is captured at save
 // (see desk-backchannel-hook + SessionService.refreshLiveSessionIds). Resolved
 // like ipc.ts locales: from process.resourcesPath when packaged, the app dir in
 // dev. Empty when the dir is missing (build skipped) so the spawn never breaks.
-const deckPluginDir = ((): string => {
+//
+// Card d02c8e96: this used to be a module-level const, computed ONCE at boot
+// and cached for the life of the process. That is what let a packaging defect
+// go undetected for ~9h -- an aborted `electron-builder` run deleted
+// resources/deck-plugin (and locales/docs/sandbox alongside it) out from under
+// an already-running Deck, which kept passing --plugin-dir toward a directory
+// that no longer existed, silently. Fix (c): re-check existsSync LIVE, at
+// every spawn, instead of once at load. Fix (a) rides the same function: it
+// is the single point every consumer resolves through (ensureSupervisor
+// below, the demo-browser IPC handler in ipc.ts, and every session spawn via
+// SessionService's pluginDir getter), so the ONE reportError()+journal.add()
+// call below fires once per EPISODE of absence -- not once per process (that
+// would arm on the very first, harmless "no plugin dir yet" boot and stay
+// spent forever, never firing again for the mid-run deletion this card is
+// actually about) and not once per spawn (log spam for the ordinary case of
+// a dev checkout with no plugin build at all). createMissingDirTracker is a
+// pure state machine (session-command.ts) so this exact transition semantic
+// is unit-tested under bun independently of this impure module. reportError()
+// already fans into the journal via the onDeckError listener wired further
+// down, so no separate journal.add() call is needed here.
+//
+// LOAD-BEARING: getDeckPluginDir is passed BY REFERENCE to every consumer
+// (SessionService's constructor at the call site below, registerIpc's deps
+// object) -- it is never called and its result stored at module scope. That
+// is precisely what makes its first evaluation happen at SPAWN time, not at
+// boot. If this is ever "optimised" into calling it once here and passing
+// the resulting string instead of the function, that single call both loses
+// the live re-check (fix c) AND spends the tracker's one-time boot report,
+// silently re-creating this card's exact bug in a new form: --plugin-dir
+// would again point at whatever existed at boot, forever, with no signal
+// when it later disappears.
+const deckPluginMissingTracker = createMissingDirTracker()
+const getDeckPluginDir = (): string => {
   const dir = app.isPackaged
     ? join(process.resourcesPath, 'deck-plugin')
     : join(app.getAppPath(), 'deck-plugin')
-  return existsSync(dir) ? dir : ''
-})()
+  const exists = existsSync(dir)
+  if (deckPluginMissingTracker.check(exists)) {
+    reportError(
+      'session',
+      'deck-plugin dir missing (resources/deck-plugin) -- back-channel hook, deck-control and demo-browser MCP servers unavailable until the app is repackaged and the Deck restarted'
+    )
+  }
+  return exists ? dir : ''
+}
 
 // Design endpoint (PLAN D2b): loopback receiver for element picks coming from
 // EXTERNAL apps in design mode (Tauri/Electron dev builds running the
@@ -339,7 +381,7 @@ const service = new SessionService(
       : null)
   }),
   safeLaunchCommand,
-  deckPluginDir
+  getDeckPluginDir
 )
 
 // Activity journal (PLAN C14): per-window narration of spawns, exits, quota
@@ -1691,6 +1733,7 @@ const ensureSupervisor = async (): Promise<SessionRuntime> => {
   if (existing && existing.status !== 'exited') return existing
   if (existing) return service.restart(existing.id)
 
+  const deckPluginDir = getDeckPluginDir()
   if (!deckPluginDir) throw new Error('deck-plugin dir missing (build skipped)')
   const mcpScript = join(deckPluginDir, 'mcp', 'deck-control-mcp.mjs')
   if (!existsSync(mcpScript)) {
@@ -2047,7 +2090,7 @@ app.whenReady().then(async () => {
       void pollGraphDrafts()
       void pollApprovalVerdicts()
     },
-    deckPluginDir,
+    deckPluginDir: getDeckPluginDir,
     sandbox,
     sandboxGate,
     sandboxWarmTranscripts: warmSandboxTranscripts

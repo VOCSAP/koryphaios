@@ -34,10 +34,12 @@ export interface SessionCommandInput {
    */
   effort?: string
   /**
-   * Absolute path to the Deck's embedded plugin dir. When set, prepends
-   * `--plugin-dir "<dir>"` so the SessionStart back-channel hook loads for this
-   * session (keeps the per-tile session id current across /clear). Empty/
-   * undefined => omit the flag (no plugin). Passed on BOTH fresh and resume.
+   * Absolute path to the Deck's embedded plugin dir (SessionStart back-channel
+   * hook, approval hook, deck-control/demo-browser MCP bridges, roadmap-card
+   * skill + roadmap-scribe agent). When set, prepends `--plugin-dir "<dir>"`
+   * so the whole plugin loads for this session (back-channel hook keeps the
+   * per-tile session id current across /clear). Empty/undefined => omit the
+   * flag (no plugin). Passed on BOTH fresh and resume.
    */
   pluginDir?: string
   /**
@@ -78,6 +80,42 @@ function appendSystemPromptFlag(path?: string): string {
 function pluginFlag(pluginDir?: string): string {
   const d = pluginDir?.trim()
   return d ? ` --plugin-dir "${d}"` : ''
+}
+
+/**
+ * Tracks whether a "the dir is missing" report has already fired for the
+ * CURRENT episode of absence, so a caller re-checking the dir on every spawn
+ * (card d02c8e96 fix c) can report the transition exactly once per episode
+ * instead of once per process (too late to ever catch a mid-run deletion,
+ * since the report would already be spent from the very first boot-time
+ * check) or once per spawn (log spam for the long, ordinary window where a
+ * dev checkout simply has no plugin build).
+ *
+ * Pure state machine, no fs/electron import, so the transition semantics --
+ * the exact thing the card's incident hinged on -- are unit-testable under
+ * bun independently of index.ts's impure existsSync/reportError wiring.
+ */
+export function createMissingDirTracker(): { check(exists: boolean): boolean } {
+  let reported = false
+  return {
+    /**
+     * Call with whether the watched dir currently exists. Returns true
+     * exactly once per transition into "missing" -- covers both "already
+     * missing at the very first check" and "was present, just disappeared".
+     * Returns false on every subsequent call while it stays missing (no
+     * spam), and re-arms (next disappearance reports again) as soon as a
+     * call observes the dir present again.
+     */
+    check(exists: boolean): boolean {
+      if (exists) {
+        reported = false
+        return false
+      }
+      if (reported) return false
+      reported = true
+      return true
+    }
+  }
 }
 
 /**
