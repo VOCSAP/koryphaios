@@ -35,6 +35,18 @@ Layout tokens: `--gap: 8px`, `--radius: 8px` (containers), base font 13px
 (`ui-sans-serif` stack). Controls (buttons, inputs) use radius **6px**; small
 inline elements 4px; pills `999px` (badges) or 10–12px (chips, peer tag).
 
+**`--mono`** is THE monospace face — ids, code panes, diffs, logs, terminal
+metadata. It is theme-independent, so it lives on `:root` and not in the two
+colour blocks. Write `font-family: var(--mono)`; never paste a stack. Four
+inconsistent stacks used to coexist in one window while 16 selectors asked for
+a token nobody had declared, so two different monospace faces rendered side by
+side. A dead token is invisible: `var(--x)` with **no fallback** on an
+undeclared `--x` is invalid at computed-value time, the property becomes
+`unset`, and `background: var(--bg-1)` simply paints nothing (that shipped for
+20 days across git, Explorer and diff surfaces). `tests/desktop-css-tokens.test.ts`
+is the guard: every token consumed under `desktop/src` must be declared in a
+stylesheet or listed there as runtime-injected from TypeScript.
+
 ## 2. Colour semantics
 
 Colour is meaning. Do not repurpose these:
@@ -84,7 +96,25 @@ input`). If you introduce a control type this guide does not cover yet, style
 it at the ELEMENT level in `styles.css` and document it here — a per-instance
 class only fixes the instance you were looking at, and the next one ships bare.
 
-### Button archetypes
+### Keyboard focus
+
+The "blue focus ring" half of rule zero is answered ONCE, at element level:
+
+```css
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+```
+
+It names no class on purpose — a control written tomorrow is themed the day it
+is written. `:focus-visible` and not `:focus`, so a mouse click paints nothing.
+The recipe is the same accent outline as `.graph-node.is-selected`: "this is the
+element in play" already looks like that here.
+
+A control may override it, and several text inputs do (they suppress the outline
+and swap `border-color` instead). If you write such an override, give it a
+visible focus affordance of its own — suppressing the outline and swapping
+nothing leaves the control with no keyboard affordance at all. Note the
+specificity: a bare `:focus-visible` is `(0,1,0)`, so any `.class:focus` beats
+it, but a `.class { outline: none }` in a BASE rule only wins by source order.
 
 Every `<button>` MUST match one of these archetypes — a bare, unstyled
 `<button>` (native grey) is a bug. Either give it an archetype class or place

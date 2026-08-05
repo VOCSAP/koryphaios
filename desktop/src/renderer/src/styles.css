@@ -2,6 +2,14 @@
   --sidebar-w: 260px;
   --gap: 8px;
   --radius: 8px;
+  /* THE monospace face of the Deck (card 14c97805). Theme-independent, so it
+     lives here and not in the two colour blocks. It was consumed by 16 selectors
+     as `var(--mono, monospace)` before ever being declared -- all 16 rendered the
+     bare fallback -- while 10 other selectors hardcoded four mutually
+     inconsistent stacks, so two different monospace faces coexisted in one
+     window. This value is the most complete of those four; declaring it here is
+     what makes `var(--mono, …)` mean something. */
+  --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 13px;
 }
@@ -58,6 +66,32 @@
   box-sizing: border-box;
 }
 
+/* Keyboard focus ring, themed, for EVERY focusable thing (DESIGN.md: no control
+   keeps its native look). Written at element level on purpose: nothing here
+   names a class, so a button added tomorrow is themed the day it is written --
+   the attention badge shipped as a focusable <button> and showed Chromium's own
+   ring because the stylesheet had no :focus-visible rule at all.
+
+   Same recipe as .graph-node.is-selected, deliberately: an accent outline is
+   already what "this is the element in play" looks like here.
+
+   :focus-visible and not :focus -- a mouse click must paint nothing.
+
+   Who this rule does NOT reach, checked rather than assumed. Seven text controls
+   suppress the ring in a `:focus` rule and swap border-color instead
+   (.message-input, .search-input, select, textarea, .help-input,
+   .record-scenario, .sandbox-globs): every one of them is more specific than a
+   bare :focus-visible, so they keep their own treatment. Two more suppress it in
+   their BASE rule: .browser-url, which still swaps border-color on :focus, and
+   keeps the win because same specificity plus later source order. .graph-name-input
+   used to be the second one and swapped NOTHING, so it had no keyboard affordance
+   at all; its `outline: none` was removed rather than replaced, since `border: none`
+   makes the neighbours' border-color recipe invisible there. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
 html,
 body,
 #root {
@@ -97,7 +131,7 @@ body {
 
 .error-boundary-detail {
   color: var(--fg-dim);
-  font-family: monospace;
+  font-family: var(--mono);
   font-size: 12px;
   max-width: 640px;
   overflow-wrap: anywhere;
@@ -622,7 +656,7 @@ body {
 }
 
 .search-hit {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 12px;
   padding: 3px 6px 3px 14px;
   border-radius: 4px;
@@ -1106,7 +1140,7 @@ textarea:disabled {
 
 .status-banner-detail {
   opacity: 0.85;
-  font-family: monospace;
+  font-family: var(--mono);
   font-size: 12px;
 }
 
@@ -1601,7 +1635,7 @@ code {
   background: var(--bg-3);
   border-radius: 4px;
   padding: 1px 4px;
-  font-family: ui-monospace, monospace;
+  font-family: var(--mono);
 }
 
 /* ---------- CreateMenu popover ---------- */
@@ -2869,7 +2903,7 @@ svg.glyph {
   align-items: flex-start;
   gap: 4px;
   padding: 8px 10px;
-  background: var(--bg-1);
+  background: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: 8px;
   color: var(--fg);
@@ -2879,7 +2913,7 @@ svg.glyph {
 
 .git-target.is-active {
   border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 8%, var(--bg-1));
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-2));
 }
 
 .git-target-label {
@@ -2912,7 +2946,7 @@ svg.glyph {
 }
 
 .git-file:hover {
-  background: var(--bg-1);
+  background: var(--bg-3);
 }
 
 .git-file.is-active {
@@ -2968,7 +3002,7 @@ svg.glyph {
 }
 
 .explorer-row:hover {
-  background: var(--bg-1);
+  background: var(--bg-3);
 }
 
 .explorer-row.is-active {
@@ -3037,7 +3071,7 @@ svg.glyph {
   display: grid;
   grid-template-columns: auto 1fr;
   overflow: auto;
-  background: var(--bg-1);
+  background: var(--bg-3);
   border: 1px solid var(--border);
   border-radius: 6px;
   font-family: var(--mono, monospace);
@@ -3053,7 +3087,10 @@ svg.glyph {
   border-right: 1px solid var(--border);
   position: sticky;
   left: 0;
-  background: var(--bg-1);
+  /* Load-bearing, not decorative: the gutter is sticky inside the scroller, so
+     an absent background lets the code scroll THROUGH the line numbers. Must
+     stay the same tone as .explorer-code. */
+  background: var(--bg-3);
 }
 
 .explorer-content {
@@ -3458,7 +3495,7 @@ svg.glyph {
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-all;
-  background: var(--bg-1);
+  background: var(--bg-3);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 8px;
@@ -4480,7 +4517,10 @@ svg.glyph {
   border: none;
   color: var(--fg);
   font-size: 12px;
-  outline: none;
+  /* No `outline: none` here on purpose: this input has `border: none`, so the
+     border-color swap its seven text neighbours use would show nothing, and
+     suppressing the outline left it with no keyboard affordance at all. It
+     inherits the global :focus-visible ring instead. */
 }
 
 .graph-node-count {
@@ -4616,7 +4656,7 @@ svg.glyph {
 
 .graph-node-id {
   color: var(--fg-dim);
-  font-family: ui-monospace, monospace;
+  font-family: var(--mono);
   font-size: 10px;
 }
 
@@ -5555,7 +5595,7 @@ svg.glyph {
   border: 1px solid var(--border);
   color: var(--fg);
   font-size: 14px;
-  font-family: monospace;
+  font-family: var(--mono);
 }
 .keybar-btn:active {
   background: var(--accent);
@@ -5967,7 +6007,7 @@ svg.glyph {
 }
 
 .sandbox-mono {
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 12px;
 }
 
@@ -5976,7 +6016,7 @@ svg.glyph {
 .sandbox-custom-editor {
   width: 100%;
   min-height: 96px;
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 12px;
   margin-top: 8px;
 }
@@ -6032,7 +6072,7 @@ svg.glyph {
 .sandbox-auth-url-text {
   flex: 1;
   min-width: 240px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 12px;
   color: var(--fg-dim);
   /* Selectable and wrapped: a long URL must never widen the modal. */
@@ -6076,7 +6116,7 @@ svg.glyph {
   width: 100%;
   max-width: 560px;
   font: inherit;
-  font-family: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 12px;
   background: var(--bg);
   color: var(--fg);
