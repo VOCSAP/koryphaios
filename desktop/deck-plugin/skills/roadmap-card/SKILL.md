@@ -2,7 +2,7 @@
 name: roadmap-card
 description: File ONE new card onto the project's shared claude-peers roadmap (a feature, bug, debt, idea, or chore), richly enriched at creation. Delegates the writing to the cheap Sonnet `roadmap-scribe` subagent so an expensive lead/Opus session never spends its own context on card prose. Use whenever the operator says things like "note this bug", "log this as a card", "add this to the roadmap", "file an idea for X", "this is worth tracking" -- and whenever an agent has just diagnosed a bug, gap, or improvement and needs to hand its findings to the roadmap instead of losing them when the session ends. NOT for updating, re-prioritizing, archiving, or picking up an existing card -- creation only; not for reading the roadmap either (that's a plain `roadmap_list`/`roadmap_get` call, no skill needed).
 context: fork
-agent: roadmap-scribe
+agent: claude-peers-deck-backchannel:roadmap-scribe
 ---
 
 # File a roadmap card (delegated to Sonnet, token-cheap)
