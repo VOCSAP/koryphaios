@@ -143,6 +143,58 @@ function exemptedFiles(exemptions: Exemptions, files: string[]): string[] {
   );
 }
 
+/**
+ * Card b33b1874: computeCoverage above only asserts the EXEMPT-domain half of
+ * the property ("every exempted file actually spawns a broker", tested below
+ * at "every exempted file actually spawns a broker"). It never asserts the
+ * inverse: that a file the CI glob actually COLLECTS carries no daemon
+ * signal. A file with that shape shares its globals and ports with every
+ * other file in the same collected run -- the failure mode is not a red
+ * test but an order-dependent flake, the most expensive kind to diagnose.
+ *
+ * Deliberately NOT the loose `/startBroker|_helper/` text regex used above:
+ * that regex matches this very file's own source (it talks ABOUT
+ * startBroker/_helper in comments and in that regex literal itself), so
+ * applying it to the COLLECTED domain would flag this file as its own
+ * violation on day one. A real import is the "from" keyword followed by a
+ * quoted relative path to the helper module, with an optional .ts
+ * extension, single or double quoted -- a shape prose and regex-literal
+ * mentions never take. (The shape is not spelled out as a literal example
+ * here on purpose: doing so would itself be the contiguous text this
+ * function's own regex matches, tripping the mutation proof below that
+ * checks THIS file's own source carries no real import.)
+ */
+function importsHelperBroker(source: string): boolean {
+  return /from\s+["']\.\/_helper(?:\.ts)?["']/.test(source);
+}
+
+/** Collected by a glob AND not exempted -- the domain the check below audits. */
+function collectedNonExemptFiles(globs: string[], exemptions: Exemptions, files: string[]): string[] {
+  const regexes = globs.map(globToRegex);
+  return files.filter((f) => {
+    const relPath = `tests/${f}`;
+    const collected = regexes.some((r) => r.test(relPath));
+    if (!collected) return false;
+    const familyExempt = Object.keys(exemptions.familyPrefixes).some((prefix) => f.startsWith(prefix));
+    const fileExempt = f in exemptions.exactFiles;
+    return !familyExempt && !fileExempt;
+  });
+}
+
+/**
+ * The missing symmetric half: collected-and-non-exempt files that REALLY
+ * import the broker-spawning helper. Non-empty means a daemon-spawning
+ * integration test is running, unflagged, inside the pure-module CI job.
+ */
+function wronglyCollectedFiles(
+  globs: string[],
+  exemptions: Exemptions,
+  files: string[],
+  readSource: (file: string) => string,
+): string[] {
+  return collectedNonExemptFiles(globs, exemptions, files).filter((f) => importsHelperBroker(readSource(f)));
+}
+
 const REAL_WORKFLOW_TEXT = readFileSync(WORKFLOW_PATH, "utf-8");
 const REAL_GLOBS = parsePureModuleGlobs(REAL_WORKFLOW_TEXT);
 const REAL_FILES = readdirSync(TESTS_DIR).filter((f) => f.endsWith(".test.ts"));
@@ -294,6 +346,64 @@ test("every on-disk tests/*.test.ts file is CI-collected or honestly exempted", 
   expect(uncovered).toEqual([]);
   expect(staleFamilies).toEqual([]);
   expect(staleFiles).toEqual([]);
+});
+
+test("card b33b1874: no CI-collected, non-exempt file real-imports the broker-spawning helper", () => {
+  // The direction the two tests above cannot see: they only ever look at the
+  // EXEMPT domain (is an exempted file honestly exempt) or the UNCOVERED
+  // domain (is an on-disk file collected-or-exempted at all). Neither one
+  // walks the COLLECTED domain looking for a daemon signal that was never
+  // declared. Measured 2026-08-04: this was RED before
+  // broker-desktop-roadmap-service.test.ts was renamed out of the
+  // tests/desktop-*.test.ts family it used to match under the name
+  // desktop-roadmap-service.test.ts -- it real-imported startBroker from
+  // ./_helper.ts, was collected by that glob, and carried no exemption at
+  // all. Renaming it into the already-exempted broker- family (same fate as
+  // its 34 daemon-spawning siblings, none of which run in this CI job on any
+  // platform) is the fix; this assertion is what would have caught it.
+  const files = wronglyCollectedFiles(REAL_GLOBS, EXEMPTIONS, REAL_FILES, (f) =>
+    readFileSync(join(TESTS_DIR, f), "utf-8"),
+  );
+  expect(files).toEqual([]);
+});
+
+test("mutation proof: wronglyCollectedFiles bites on a synthetic collected file with a real helper import", () => {
+  // The fixture import is built by concatenation, not a literal `from
+  // "./_helper.ts"` in this file's own source: a literal copy here would make
+  // THIS file (also tests/desktop-*.test.ts-collected, per the self-coverage
+  // test above) trip its own new "no CI-collected file real-imports the
+  // helper" assertion the moment it landed on disk.
+  const files = [...REAL_FILES, "desktop-planted-daemon.test.ts"];
+  const plantedImport = "import { startBroker } " + 'from "./' + '_helper.ts";\n';
+  const sources: Record<string, string> = {
+    "desktop-planted-daemon.test.ts": plantedImport,
+  };
+  const found = wronglyCollectedFiles(REAL_GLOBS, EXEMPTIONS, files, (f) =>
+    f in sources ? sources[f]! : readFileSync(join(TESTS_DIR, f), "utf-8"),
+  );
+  expect(found).toContain("desktop-planted-daemon.test.ts");
+});
+
+test("mutation proof: the real-import detector does not false-positive on this file's own source", () => {
+  // This file's own prose and regex literals (three lines up, and in the
+  // exempt-domain tests above) mention startBroker/_helper as TEXT, not as a
+  // real import -- exactly the shape that made the loose `/startBroker|_helper/`
+  // regex unusable for the collected-domain check. Confirmed on the actual
+  // file on disk, not a copy: applying the loose regex to this file's own
+  // source is true (self-triggering, the bug this test avoids); the real
+  // detector on the same source is false.
+  const ownSource = readFileSync(join(TESTS_DIR, "desktop-ci-glob-coverage.test.ts"), "utf-8");
+  expect(/startBroker|_helper/.test(ownSource)).toBe(true);
+  expect(importsHelperBroker(ownSource)).toBe(false);
+});
+
+test("mutation proof: the real-import detector matches both quote styles and the extensionless form", () => {
+  const withExt = "import { startBroker } " + 'from "./' + '_helper.ts";';
+  const noExt = "import { startBroker } " + "from './" + "_helper';";
+  const commentOnly = "// mentions ./" + "_helper.ts in a comment, no import";
+  expect(importsHelperBroker(withExt)).toBe(true);
+  expect(importsHelperBroker(noExt)).toBe(true);
+  expect(importsHelperBroker(commentOnly)).toBe(false);
 });
 
 test("mutation proof, growth: a new uncovered file is caught", () => {

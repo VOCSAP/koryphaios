@@ -219,13 +219,26 @@ gates whether the job triggers at all, and it once listed only `desktop/**`
 while the suites it runs cover `notify/`, `shared/` and `broker.ts`. Precedent:
 140 tests shipped that had never executed on any runner.
 
-The gap is measurable and grows silently: `.github/workflows/desktop-build.yml:63`
-runs that three-glob line against `tests/`, matching **78 files**. `bun test`
-at the repo root collects **116**. A new test must live in `tests/` **and**
-carry one of those three prefixes, or CI never runs it, with no failing check
-to notice. Verify collection by running the CI glob itself, not by running
-`bun test` and counting the files it picked up. Precedent: a guard shipped in
-`desktop/src/main/` passed locally and was never executed by CI.
+The gap is measurable and grows silently: `.github/workflows/desktop-build.yml:79`
+runs that glob line (nine prefixes now, not the three it started with) against
+`tests/`, matching **92 files** as of 2026-08-05. `bun test` at the repo root
+collects **130**. A new test must live in `tests/` **and** carry one of those
+prefixes, or CI never runs it, with no failing check to notice. Verify
+collection by running the CI glob itself, not by running `bun test` and
+counting the files it picked up. Precedent: a guard shipped in
+`desktop/src/main/` passed locally and was never executed by CI. A second
+precedent, card b33b1874 (2026-08-05): `desktop-roadmap-service.test.ts`
+matched the `desktop-*` prefix (collected) while genuinely spawning a real
+broker daemon on a bound port (a real `from ".../_helper.ts"` import) --
+`tests/desktop-ci-glob-coverage.test.ts`'s coverage guard only ever checked
+that the EXEMPT family/file list carries the daemon signal, never the
+inverse (a COLLECTED file must not carry it), so an integration suite ran
+unflagged inside the cross-platform pure-module job. Fixed by renaming it
+into the already-exempted `broker-` family (`broker-desktop-roadmap-service.test.ts`)
+and by adding the missing symmetric check. These counts move fast under
+concurrent editing (this repo regularly runs 8-10 parallel sessions); treat
+them as a snapshot for the stated date, not a standing truth -- re-measure
+rather than trust a number without one.
 
 **0b. `tests/` files that need react/react-dom/zustand: go through the
 desktop bridge, never a bare import.** The repo root and `desktop/` are two
