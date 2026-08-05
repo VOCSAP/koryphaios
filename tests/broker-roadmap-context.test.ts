@@ -77,6 +77,7 @@ test("export/import round-trip preserves context", async () => {
   const OTHER = "github.com/vocsap/context-import-target";
   const imp = await post<{ imported: number }>(`${broker.url}/roadmap/import`, {
     project_key: OTHER,
+    by: "test-peer",
     items: exported.body.items,
   });
   expect(imp.status).toBe(200);

@@ -67,20 +67,25 @@ function discoverRoadmapRoutes(source: string): string[] {
 const READ_ROUTES = new Set(["/roadmap/list", "/roadmap/export"]);
 
 /**
- * Consciously exempt, with the reason:
- * /roadmap/import is reachable only from cli.ts:196, which runs on the broker
- * host and already holds the broker token -- that IS the local operator
- * gesture. Its missing lock guard and its INSERT OR REPLACE column loss belong
- * to card 40ddf1f5; half-fixing it here would turn that card's probe green
- * while the column loss stayed open.
+ * Nothing left to exempt: card 40ddf1f5 wired resolveRoadmapAuthor into
+ * /roadmap/import (it used to be exempted here on the grounds that its guard
+ * was that card's job, not this file's -- the exemption's own reasoning said
+ * so). An empty set is kept, not deleted, so the fail-closed default below
+ * (unclassifiedRoutes) still has three buckets to check a future route
+ * against, not two.
  */
-const EXEMPT_ROUTES = new Set(["/roadmap/import"]);
+const EXEMPT_ROUTES = new Set<string>([]);
 
 /** Write routes that must refuse an unproven author, with a well-formed body. */
 const GUARDED_PROBES: Record<string, (ctx: ProbeCtx) => Record<string, unknown>> = {
   "/roadmap/upsert": (c) => ({ project_key: PK, id: c.itemId, by: c.victimPeerId, description: "x" }),
   "/roadmap/archive": (c) => ({ id: c.itemId, by: c.victimPeerId }),
   "/roadmap/reorder": (c) => ({ project_key: PK, by: c.victimPeerId, ids: [c.itemId] }),
+  // items: [] on purpose (well-formed empty array, not omitted): the route
+  // checks project_key and items-is-an-array BEFORE resolveRoadmapAuthor, so
+  // an omitted/malformed items field would 400 for the wrong reason and pass
+  // this probe without ever exercising the identity guard.
+  "/roadmap/import": (c) => ({ project_key: PK, by: c.victimPeerId, items: [] }),
 };
 
 interface ProbeCtx {

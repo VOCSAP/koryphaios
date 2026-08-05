@@ -178,8 +178,16 @@ switch (cmd) {
   case "roadmap-import": {
     // Reads a roadmap-export JSON file and bulk-imports it (ids/timestamps kept).
     const file = flags[0];
-    if (!file) {
-      console.error("Usage: bun cli.ts roadmap-import <export.json> [--project-key <key>]");
+    const byFlagIdx = flags.indexOf("--by");
+    const by = byFlagIdx !== -1 ? flags[byFlagIdx + 1] : undefined;
+    if (!file || !by) {
+      console.error(
+        "Usage: bun cli.ts roadmap-import <export.json> --by <name> [--project-key <key>] [--force]"
+      );
+      // Card 40ddf1f5: --by is required, not optional -- this route's author
+      // is never proven (no instance_token flows through the CLI's
+      // bearer-only auth), so it must be a hand-typed choice, not a silent
+      // default (e.g. 'deck'), same discipline as roadmap-add's own --by.
       process.exit(1);
     }
     try {
@@ -193,11 +201,29 @@ switch (cmd) {
         console.error("No project_key in the file; pass --project-key <key>.");
         process.exit(1);
       }
-      const result = await brokerPost<{ imported: number }>("/roadmap/import", {
-        project_key: projectKey,
-        items: dump.items ?? [],
-      });
+      // --force is a deliberate, hand-typed escape hatch: it overrides the
+      // default skip-every-locked-card behaviour below for the WHOLE import,
+      // for an operator who is certain. Typing it here cannot happen by
+      // accident. But /roadmap/import is a plain bearer-authenticated HTTP
+      // route (broker.ts), so force:true remains as declarative there as
+      // everything else the broker token authorizes -- this CLI verb is the
+      // only caller that sets it in this repo, not the only one that could.
+      // The hole that used to let any bearer-token holder silently overwrite
+      // a locked card AND erase its lock columns has narrowed (defect 1+2,
+      // card 40ddf1f5) to one that still requires declaring force:true out
+      // loud, but has not closed: a real capability check on this route is
+      // card 39c40571's scope, not this one's.
+      const force = flags.includes("--force");
+      const result = await brokerPost<{ imported: number; skipped: string[] }>(
+        "/roadmap/import",
+        { project_key: projectKey, items: dump.items ?? [], by, force }
+      );
       console.log(`Imported ${result.imported} item(s) into ${projectKey}.`);
+      if (result.skipped.length > 0) {
+        console.log(
+          `Skipped ${result.skipped.length} locked card(s) (use --force to override): ${result.skipped.join(", ")}`
+        );
+      }
     } catch (e) {
       console.error(`Import failed: ${e instanceof Error ? e.message : String(e)}`);
       process.exit(1);
@@ -263,8 +289,9 @@ Usage:
   bun cli.ts groups                       Show active peer counts per group
   bun cli.ts kill-broker                  Stop the broker daemon (Linux/macOS only)
   bun cli.ts roadmap-export <project_key> Print a project's roadmap as JSON (stdout)
-  bun cli.ts roadmap-import <export.json> [--project-key <key>]
-                                          Bulk-import a roadmap export (ids kept)
+  bun cli.ts roadmap-import <export.json> --by <name> [--project-key <key>] [--force]
+                                          Bulk-import a roadmap export (ids kept);
+                                          skips locked cards unless --force
   bun cli.ts roadmap-add --input <payload.json>
                                           Create one roadmap item (fallback for
                                           roadmap_add when the MCP tool is

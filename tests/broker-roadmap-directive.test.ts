@@ -149,6 +149,7 @@ test("import rejects an incoherent directive row (kind directive, no command)", 
   const OTHER = "github.com/vocsap/directive-import-bad";
   const imp = await post<{ imported: number } & ErrRes>(`${broker.url}/roadmap/import`, {
     project_key: OTHER,
+    by: "test-peer",
     items: [
       {
         id: "11111111-1111-1111-1111-111111111111",
@@ -177,6 +178,7 @@ test("export/import round-trip preserves directive + targets", async () => {
   const OTHER = "github.com/vocsap/directive-import-target";
   const imp = await post<{ imported: number }>(`${broker.url}/roadmap/import`, {
     project_key: OTHER,
+    by: "test-peer",
     items: exported.body.items,
   });
   expect(imp.status).toBe(200);

@@ -61,6 +61,7 @@ test("queue can be set at creation and survives export/import round-trip", async
   const other = "github.com/test/queue-repo-2";
   const imported = await post<{ imported: number }>(`${broker.url}/roadmap/import`, {
     project_key: other,
+    by: "test-peer",
     items: dump.items,
   });
   expect(imported.status).toBe(200);

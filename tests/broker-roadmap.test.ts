@@ -222,12 +222,21 @@ test("export/import round-trips items with ids, statuses and timestamps intact",
   // Import into a DIFFERENT project key (re-keying) on the same broker: ids,
   // statuses, authors and timestamps must arrive unchanged.
   const targetPk = "github.com/vocsap/migrated";
-  const imp = await post<{ imported: number }>(`${broker.url}/roadmap/import`, {
+  // force:true -- the file's other test ("patch is partial...") left "Fix
+  // flaky reconnect" locked (in_progress, author != 'deck'), so this export
+  // genuinely carries a locked card. Card 40ddf1f5: import skips locked cards
+  // unconditionally unless force is set; this round-trip is exercising a
+  // deliberate, whole-file migration, so force is the correct, honest way to
+  // reach it (not a workaround for the new guard).
+  const imp = await post<{ imported: number; skipped: string[] }>(`${broker.url}/roadmap/import`, {
     project_key: targetPk,
+    by: "importer-peer",
+    force: true,
     items: dump.items,
   });
   expect(imp.status).toBe(200);
   expect(imp.body.imported).toBe(dump.items.length);
+  expect(imp.body.skipped).toEqual([]);
 
   const migrated = await post<ListRes>(`${broker.url}/roadmap/list`, {
     project_key: targetPk,
@@ -238,12 +247,21 @@ test("export/import round-trips items with ids, statuses and timestamps intact",
   expect(twin!.project_key).toBe(targetPk);
   expect(twin!.status).toBe("archived");
   expect(twin!.created_at).toBe(exported!.created_at);
-  expect(twin!.created_by).toBe(exported!.created_by);
+  // Card 40ddf1f5: `roadmap_items` is keyed by id alone (not id+project_key),
+  // so this id already exists (created earlier in this same file, under PK)
+  // -- import re-keys that SAME row rather than creating a new one, and
+  // created_by is preserved from it (immutable attribution, like every other
+  // write path), not re-stamped from the resolved `by` on this request.
+  expect(twin!.created_by).toBe(item.created_by);
+  expect(twin!.updated_by).toBe("importer-peer");
   expect(twin!.tags).toEqual(["migration"]);
 
-  // Re-import is idempotent (INSERT OR REPLACE).
+  // Re-import is idempotent (INSERT OR REPLACE): created_by still comes from
+  // the existing (now targetPk) row, only updated_by moves to the new author.
   const again = await post<{ imported: number }>(`${broker.url}/roadmap/import`, {
     project_key: targetPk,
+    by: "re-importer-peer",
+    force: true,
     items: dump.items,
   });
   expect(again.status).toBe(200);
@@ -252,12 +270,16 @@ test("export/import round-trips items with ids, statuses and timestamps intact",
     include_archived: true,
   });
   expect(after.body.items.length).toBe(migrated.body.items.length);
+  const twinAgain = after.body.items.find((i) => i.id === item.id);
+  expect(twinAgain!.created_by).toBe(item.created_by);
+  expect(twinAgain!.updated_by).toBe("re-importer-peer");
 
   // Validation: bad payloads are rejected.
   const noPk = await fetch(`${broker.url}/roadmap/export`);
   expect(noPk.status).toBe(400);
   const badItem = await post(`${broker.url}/roadmap/import`, {
     project_key: targetPk,
+    by: "importer-peer",
     items: [{ id: "x", title: "ok", kind: "epic" }],
   });
   expect(badItem.status).toBe(400);

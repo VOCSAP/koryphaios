@@ -617,7 +617,8 @@ update every clone's remote, then re-key the items on the broker host:
 # each clone:
 git remote set-url origin https://github.com/vocsap/koryphaios.git
 
-# broker host (old key -> new key; old items stay behind as a backup):
+# broker host (old key -> new key; roadmap_items is keyed by id alone, so this
+# MOVES each item to the new project_key -- it does not leave a copy behind):
 bun cli.ts roadmap-export github.com/vocsap/claude-peers-mcp > roadmap-rename.json
-bun cli.ts roadmap-import roadmap-rename.json --project-key github.com/vocsap/koryphaios
+bun cli.ts roadmap-import roadmap-rename.json --by <your-name> --project-key github.com/vocsap/koryphaios
 ```

@@ -2119,11 +2119,38 @@ function handleRoadmapExport(projectKey: string): {
 function handleRoadmapImport(body: {
   project_key?: string;
   items?: unknown;
-}): { imported: number } | { error: string; status: number } {
+  by?: unknown;
+  instance_token?: unknown;
+  force?: unknown;
+}): { imported: number; skipped: string[] } | { error: string; status: number } {
   const projectKey =
     typeof body.project_key === "string" && body.project_key.trim() ? body.project_key.trim() : "";
   if (!projectKey) return { error: "project_key is required", status: 400 };
   if (!Array.isArray(body.items)) return { error: "items must be an array", status: 400 };
+
+  // Card 40ddf1f5: same identity discipline as upsert/archive/reorder --
+  // resolveRoadmapAuthor refuses a `by` that impersonates a real registered
+  // peer without proof, and binds created_by/updated_by below to something
+  // other than raw, untrusted file content.
+  const author = resolveRoadmapAuthor(body, "/roadmap/import");
+  if ("error" in author) return author;
+  const by = author.by;
+  // The CLI's roadmap-import is the only non-test caller (arbitration: exempt
+  // from card 39c40571's future operator-signature proof, since it already
+  // runs on the broker's own host holding the bearer token -- it IS the local
+  // operator's own gesture). But that means `by` on THIS route is a DECLARED
+  // string, never a proven one (no instance_token flows through the CLI's
+  // bearer-only auth) -- so it must never be compared against a card's
+  // locked_by to decide ownership: an attacker (or a compromised script using
+  // the broker token) could simply declare by:'<lock owner>' or by:'deck' and
+  // walk straight through an ownership check, having the guard politely ask
+  // the attacker if it owns the card. Every locked card is skipped
+  // unconditionally instead -- no author comparison on a path with no proven
+  // author -- with an explicit, hand-typed `force:true` escape hatch for an
+  // operator who is certain (skip-policy (b)+(c): import proceeds for
+  // everything else, skipped cards are counted and named, force overrides
+  // deliberately rather than by accident or by a remote declaration).
+  const force = body.force === true;
 
   const items = body.items as Partial<RoadmapItem>[];
   for (let i = 0; i < items.length; i++) {
@@ -2156,19 +2183,57 @@ function handleRoadmapImport(body: {
     `INSERT OR REPLACE INTO roadmap_items
        (id, project_key, kind, title, description, rationale, context, priority, value,
         effort, status, tags, depends_on, created_by, updated_by,
-        created_at, updated_at, deleted_at, queue, directive, target_peer_ids)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        created_at, updated_at, deleted_at, queue, directive, target_peer_ids,
+        locked, locked_by, locked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   const importAll = db.transaction((rows: Partial<RoadmapItem>[]) => {
+    const skipped: string[] = [];
+    let imported = 0;
     for (const it of rows) {
+      const id = it.id!.trim();
+      // Read fresh on every iteration (not hoisted before the loop): a
+      // duplicate id earlier in the same file already wrote through this same
+      // transaction, and this lookup must see that write, not the pre-import
+      // state, to skip/preserve correctly for the later duplicate too.
+      const existing = getRoadmapItem(id);
+      // Card 40ddf1f5 (defect 1): unconditional skip, no author comparison --
+      // see the note above resolveRoadmapAuthor for why comparing `by`
+      // against locked_by would be a self-declared bypass on this route.
+      if (existing?.locked && !force) {
+        skipped.push(id);
+        continue;
+      }
       // Only carry the directive over for a coherent directive card (CT1);
       // ignore a stray directive on any other kind, matching upsert's rule.
       const importDirective =
         it.kind === "directive" && it.directive && DIRECTIVE_COMMANDS.includes(it.directive)
           ? it.directive
           : null;
+      // Card 40ddf1f5 (defect 2): locked/locked_by/locked_at are now listed
+      // explicitly, and default to the EXISTING row's value (never the table
+      // DEFAULT) whenever the imported item omits the field -- REPLACE
+      // deletes the row before reinserting, so any column left out of this
+      // list used to fall back silently to its DEFAULT (locked=0), erasing
+      // another card's lock state even on a wholly legitimate, unrelated
+      // import. `!== undefined` (not `??`) so an explicit locked_by: null in
+      // the file (a genuine unlock in a self-export) still takes effect,
+      // instead of being masked by the existing-row fallback.
+      const lockedVal = typeof it.locked === "boolean" ? it.locked : (existing?.locked ?? false);
+      const lockedByVal =
+        it.locked_by !== undefined
+          ? typeof it.locked_by === "string"
+            ? it.locked_by
+            : null
+          : (existing?.locked_by ?? null);
+      const lockedAtVal =
+        it.locked_at !== undefined
+          ? typeof it.locked_at === "string"
+            ? it.locked_at
+            : null
+          : (existing?.locked_at ?? null);
       insert.run(
-        it.id!.trim(),
+        id,
         projectKey,
         it.kind!,
         it.title!.trim(),
@@ -2181,8 +2246,14 @@ function handleRoadmapImport(body: {
         it.status ?? "idea",
         JSON.stringify(cleanList(it.tags) ?? []),
         JSON.stringify(cleanList(it.depends_on) ?? []),
-        it.created_by ?? "",
-        it.updated_by ?? "",
+        // Card 40ddf1f5 (defect 3): created_by/updated_by come from the
+        // resolved, identity-checked author, never straight from the file's
+        // own (untrusted) created_by/updated_by fields. created_by is
+        // preserved from the existing row when re-importing a known card
+        // (immutable attribution, like every other write path), and only
+        // falls back to the resolved author for a brand-new row.
+        existing?.created_by ?? by,
+        by,
         it.created_at ?? new Date().toISOString(),
         it.updated_at ?? new Date().toISOString(),
         it.deleted_at ?? null,
@@ -2190,12 +2261,16 @@ function handleRoadmapImport(body: {
           ? it.queue
           : null,
         importDirective,
-        JSON.stringify(importDirective ? cleanPeerIds(it.target_peer_ids) : [])
+        JSON.stringify(importDirective ? cleanPeerIds(it.target_peer_ids) : []),
+        lockedVal ? 1 : 0,
+        lockedByVal,
+        lockedAtVal
       );
+      imported++;
     }
+    return { imported, skipped };
   });
-  importAll(items);
-  return { imported: items.length };
+  return importAll(items);
 }
 
 /**
@@ -3797,7 +3872,9 @@ const server = Bun.serve<WsData>({
           return Response.json(result);
         }
         case "/roadmap/import": {
-          const result = handleRoadmapImport(body as { project_key?: string; items?: unknown });
+          const result = handleRoadmapImport(
+            body as { project_key?: string; items?: unknown; by?: unknown; instance_token?: unknown; force?: unknown }
+          );
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }
