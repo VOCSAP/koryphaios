@@ -1,5 +1,76 @@
 # Changelog
 
+## core (experimental) — an operator-authored roadmap write must prove the operator (card `39c40571`, layer 2)
+
+Four commits, `29bff61` then `6f7b5d3`, `5ceaba3`, `8029eb1`. Layer 1
+(`bbd8f17`) had closed the peer-to-peer axis and said so in its own test
+header: a bare `by: 'deck'` stayed accepted, because the deck sentinel matches
+no peer row and there was nothing to prove against. That was the last unproven
+author, and it was the valuable one -- `'deck'` names the HUMAN, and `proven`
+is what walks the work-lock guard.
+
+**What shipped.** A `'deck'`-authored write now carries an Ed25519 operator
+proof, routed through `resolveApprovalAuth` rather than verified beside it, so
+the path inherits the signature check, the nonce replay guard and the operation
+table in one move. `roadmap-write` joins `ApprovalOperation` and is deliberately
+left OUT of `SESSION_ALLOWED` -- an allow-list, so it fails CLOSED, and a
+sandboxed agent holding a session token is refused by that table (403) instead
+of by a rule re-typed at the call site. Deck side, the identity loads LAZILY at
+the first signature: it could not come from `ApprovalRuntime`, whose `arm()` is
+gated by `config.mobileApprovals`, which would have made a phone-notification
+toggle the on/off switch of the shared roadmap.
+
+**Migration needs no enrolment.** A machine that never enrolled has no identity
+file, so the first signature mints one. `operator_id` is the digest of the
+public key, which travels with the payload and is therefore covered by the
+signature, so first contact self-certifies.
+
+**The domain was swept, not copied from the card.** The card named
+`handleRoadmapUpsert`; `resolveRoadmapAuthor` has FOUR callers (upsert, archive,
+reorder, import) and the guard is wired to all four. A second sweep, from the
+SQL writes rather than from the function, returned the same client domain plus
+`releaseStaleLocks` -- the internal TTL pass, which writes on nobody's behalf
+and is legitimately outside the guard.
+
+**A complete bypass was found in review, and closed.** The first commit was
+defeated in three requests with no signature at all: `POST /register` with
+`host: 'deck'` and `cwd: '/'` in a FRESH group minted a peer literally named
+`deck` holding a real, non-sentinel `instance_token`; an upsert authored
+`by: 'deck'` with that token was accepted 200 and overwrote a card locked by
+someone else. Two links, both fixed:
+
+- **Order was the guard.** The token branch of `resolveRoadmapAuthor` returned
+  `proven: true` BEFORE the new deck branch was reached, so layer 2 was only
+  ever consulted by bodies WITHOUT a token. The name now decides which rule
+  applies, so the name is tested before any credential is honoured.
+- **`deriveDefaultId` never consulted `RESERVED_PEER_IDS`.** Three call sites
+  used it (import, `set_id`, `cleanPeerIds`); the fourth path -- the one that
+  MINTS a name at `/register`, from a caller-supplied `host` and `cwd` -- was
+  not wired. It now suffixes rather than refuses, so a machine whose hostname
+  really is `deck` registers as `deck-1` instead of being excluded from the
+  product by its name.
+
+A third guard was added on the author's own initiative and kept: a token whose
+RESOLVED `peer_id` is reserved is refused too, because the mint fix cannot act
+backwards and a live database may already carry a row named `deck`. That is the
+migration path of the fix, not scope creep.
+
+**The refusal names the remedy, and the remedy is tested.** The first wording
+prescribed re-registering; that does not work, and the commit's own resume probe
+proved it (session resume is keyed on `session_key`, and the dormant branch
+returns the `peer_id` READ FROM THE ROW). Worse, an assertion pinned the wrong
+wording. The message now points at `set_id`, states that reconnecting will NOT
+rename, and the test pins the prescription in both directions
+(`toContain("set_id")` and `not.toContain("re-register")`). The reserved-author
+branch is keyed on `RESERVED_PEER_IDS` rather than on `'deck'` alone, so
+`operator` and `system` are gated by construction, and the probe iterates the
+set instead of a hand-typed list.
+
+Known and left open: `by` is not case-normalised, so `by: 'Deck'` escapes the
+reserved-name check. No privilege follows (the lock exemption compares `'deck'`
+exactly and `proven` stays false), so the cost is attribution spoofing only --
+filed rather than bundled into a batch already reviewed three times.
+
 ## desktop (experimental) — graph-view geometry, workflow-lane parallelism, and the argv-truncation bug
 
 Four operator requests on the Graph view and the Workflow lane, all shipped:
