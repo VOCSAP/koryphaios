@@ -666,6 +666,29 @@ export interface RoadmapUpsertResponse {
   item: RoadmapItem;
 }
 
+/**
+ * Card 562fd9b5: append-only edit to `context`, distinct from RoadmapUpsertRequest
+ * (which REPLACES the field wholesale). `text` is the raw payload the caller wants
+ * appended -- the timestamped attribution header is built server-side (and
+ * pre-validated client-side against the same numbers, see shared/roadmap-append.ts)
+ * from `by`/`instance_token`, never supplied directly by the caller.
+ *
+ * No broker route or MCP tool sends this shape yet -- both are the rest of
+ * card 562fd9b5, not yet written.
+ */
+export interface RoadmapContextAppendRequest {
+  id: string;
+  /** Author of the append: peer_id or 'deck'. See RoadmapUpsertRequest.by. */
+  by: string;
+  /** Proof of authorship -- see RoadmapUpsertRequest.instance_token. */
+  instance_token?: string;
+  text: string;
+}
+
+export interface RoadmapContextAppendResponse {
+  item: RoadmapItem;
+}
+
 export interface RoadmapArchiveRequest {
   id: string;
   by: string;
