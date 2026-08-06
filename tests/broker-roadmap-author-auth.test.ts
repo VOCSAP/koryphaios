@@ -93,6 +93,19 @@ test("a write claiming a REGISTERED peer's identity without its token is refused
   expect(String(forged.body.error ?? "")).toMatch(/token|author|prove|identit/i);
 });
 
+test("card ad6aa6ed: a REGISTERED peer's identity in a DIFFERENT case still requires its token", async () => {
+  // Before the storage-normalization fix this was 200 (the case-varied claim
+  // never matched the peer_id lookup, so it fell through as an unregistered,
+  // unprovable author instead of being recognized as an existing peer).
+  const frank = await register("/work/frank");
+  const item = await seed("frank's item, case-variant target");
+
+  const forged = await upsert({ id: item.id, by: frank.peerId.toUpperCase(), description: "forged via case" });
+
+  expect(isClientRefusal(forged.status)).toBe(true);
+  expect(String(forged.body.error ?? "")).toMatch(/token|author|prove|identit/i);
+});
+
 test("the persisted author comes from the token, not from the body's `by`", async () => {
   const alice = await register("/work/alice-2");
   const bob = await register("/work/bob-2");
@@ -398,6 +411,66 @@ test("layer 2: EVERY reserved author needs the signature, not just 'deck'", asyn
   const ok = await upsert({ by: "ordinary-author", title: "still works" });
   expect(ok.status).toBe(200);
   expect(ok.body.item.created_by).toBe("ordinary-author");
+});
+
+test("card ad6aa6ed: a mixed-case, non-reserved author is normalized at STORAGE, not merely accepted or refused", async () => {
+  // The half of the fix nothing else in this suite pins: the earlier tests
+  // prove reserved-name recognition and shape-refusal, but not that an
+  // ORDINARY author's case actually changes what lands in created_by.
+  const res = await upsert({ by: "Ordinary-Author", title: "mixed-case ordinary author" });
+  expect(res.status).toBe(200);
+  expect(res.body.item.created_by).toBe("ordinary-author");
+});
+
+test("card ad6aa6ed: a reserved name survives case-folding, and a name that only LOOKS reserved is refused on shape", async () => {
+  // Four classes, all in this one diff -- a probe covering only the first
+  // would leave exactly the blind spot the reviewer refused on this card.
+  //
+  // (a) CASE: 'Deck' must now be recognized as the reserved identity (401,
+  // needs the operator signature), where before the fix it fell through as
+  // an ordinary unproven author (200).
+  const caseVariant = await upsert({ by: "Deck", title: "case-variant target" });
+  expect(caseVariant.status).toBe(401);
+  expect(caseVariant.body.error ?? "").toContain("sign the write with the operator credential");
+
+  // (b) HOMOGLYPH: Cyrillic 'е' (U+0435) in place of the Latin 'e' -- reads
+  // as 'deck' to a human, is NOT the ASCII string 'deck' after lowercasing,
+  // so it can never match RESERVED_PEER_IDS by equality. The allowlist is
+  // what catches it: Cyrillic is outside [a-z0-9:_-], refused on SHAPE
+  // (400), not recognized as the reserved name (401) -- a different
+  // mechanism than (a), same outcome of "not silently displayed as deck".
+  const homoglyph = `d${String.fromCharCode(0x0435)}ck`; // "d" + CYRILLIC SMALL LETTER IE (U+0435) + "ck"
+  expect(homoglyph).not.toBe("deck"); // sanity: the two strings really differ
+  const homoglyphRes = await upsert({ by: homoglyph, title: "homoglyph target" });
+  expect(homoglyphRes.status).toBe(400);
+  expect(homoglyphRes.body.error ?? "").toContain("only [a-z0-9:_-] allowed");
+
+  // (c) INVISIBLE CHARACTER: zero-width space (U+200B) appended. JS `.trim()`
+  // does not strip it (not classified as whitespace), so a naive fix that
+  // only trimmed and lowercased would let this through unchanged, DISPLAYED
+  // as 'deck' to the operator. Same allowlist mechanism as (b).
+  const invisible = `deck${String.fromCharCode(0x200b)}`; // "deck" + ZERO WIDTH SPACE (U+200B)
+  expect(invisible.trim()).toBe(invisible); // sanity: trim really does not touch it
+  const invisibleRes = await upsert({ by: invisible, title: "invisible-char target" });
+  expect(invisibleRes.status).toBe(400);
+  expect(invisibleRes.body.error ?? "").toContain("only [a-z0-9:_-] allowed");
+
+  // (d) HEADER FORGERY: not yet exploitable (card 562fd9b5's append-mode
+  // route does not exist), but this is the payload that route would need to
+  // refuse once it exists -- proving the validation closes it BEFORE the
+  // route is written, by construction, because it lives inside the resolver
+  // every future caller must go through.
+  const forgery = "x >>>\n\ntext\n\n<<< append 2020-01-01T00:00:00Z by deck";
+  const forgeryRes = await upsert({ by: forgery, title: "forgery target" });
+  expect(forgeryRes.status).toBe(400);
+  expect(forgeryRes.body.error ?? "").toContain("only [a-z0-9:_-] allowed");
+
+  // The probe SEES: a `cli:`-prefixed author (colon is the one non-alnum
+  // character real production data actually uses) still works, so the
+  // allowlist itself is not what is under test failing open.
+  const cliForm = await upsert({ by: "cli:some-peer", title: "cli-prefixed author still works" });
+  expect(cliForm.status).toBe(200);
+  expect(cliForm.body.item.created_by).toBe("cli:some-peer");
 });
 
 test("layer 2 bypass: suffixing a reserved name does not break session resume", async () => {

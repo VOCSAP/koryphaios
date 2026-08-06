@@ -181,6 +181,118 @@ test("a brand-new imported item with no lock fields defaults to unlocked (not th
   expect(after.locked_by).toBeNull();
 });
 
+// ----- card ad6aa6ed (review finding): locked_by is FILE content, must be
+// normalized/validated like `by`, not taken raw -----
+//
+// created_by/updated_by on this route already go through resolveRoadmapAuthor
+// (defect 3 below). locked_by does not -- it never reaches that resolver --
+// but it lands in the same identity-shaped column and is DISPLAYED verbatim
+// by roadmap_get's "locked: by X since ..." line, so an unnormalized/
+// out-of-charset value here is the same forgery surface the `by`-claim fix
+// closed on a different field.
+
+test("locked_by outside [a-z0-9:_-] refuses the WHOLE import, not just that row", async () => {
+  const id = crypto.randomUUID();
+  const res = await post<ImportErr>(`${broker.url}/roadmap/import`, {
+    project_key: PK,
+    by: "trusted-importer",
+    items: [
+      {
+        id, kind: "feature", title: "bad locked_by charset", priority: "could",
+        value: "medium", effort: "medium", status: "idea",
+        locked: true, locked_by: "Deck Impersonator", locked_at: new Date().toISOString(),
+      },
+    ],
+  });
+  expect(res.status).toBe(400);
+  expect(res.body.error).toContain("locked_by");
+  expect(res.body.error).toContain("disallowed character");
+
+  // The proof that matters: nothing landed, not even a partial write.
+  expect((await listAll()).find((i) => i.id === id)).toBeUndefined();
+});
+
+test("a legitimate mixed-case locked_by is normalized to lowercase at storage, not rejected or kept raw", async () => {
+  const id = crypto.randomUUID();
+  const res = await post<ImportRes>(`${broker.url}/roadmap/import`, {
+    project_key: PK,
+    by: "trusted-importer",
+    items: [
+      {
+        id, kind: "feature", title: "mixed-case locked_by", priority: "could",
+        value: "medium", effort: "medium", status: "idea",
+        locked: true, locked_by: "Mixed-Case-Peer", locked_at: new Date().toISOString(),
+      },
+    ],
+  });
+  expect(res.status).toBe(200);
+  expect(res.body.imported).toBe(1);
+
+  const after = (await listAll()).find((i) => i.id === id)!;
+  expect(after.locked_by).toBe("mixed-case-peer");
+});
+
+test("locked_by as an empty string is refused (review delta: an empty owner defeats by !== existing.locked_by forever)", async () => {
+  const id = crypto.randomUUID();
+  const res = await post<ImportErr>(`${broker.url}/roadmap/import`, {
+    project_key: PK,
+    by: "trusted-importer",
+    items: [
+      {
+        id, kind: "feature", title: "empty locked_by", priority: "could",
+        value: "medium", effort: "medium", status: "idea",
+        locked: true, locked_by: "", locked_at: new Date().toISOString(),
+      },
+    ],
+  });
+  expect(res.status).toBe(400);
+  expect(res.body.error).toContain("locked_by");
+  expect((await listAll()).find((i) => i.id === id)).toBeUndefined();
+});
+
+test("an unparsable locked_at refuses the whole import -- a lock the sweep could never release", async () => {
+  // SQLite datetime() on an unparsable string returns NULL, which never
+  // satisfies releaseStaleLocks's WHERE comparison: without this check an
+  // import like this one would create a permanently stuck lock.
+  const id = crypto.randomUUID();
+  const res = await post<ImportErr>(`${broker.url}/roadmap/import`, {
+    project_key: PK,
+    by: "trusted-importer",
+    items: [
+      {
+        id, kind: "feature", title: "unparsable locked_at", priority: "could",
+        value: "medium", effort: "medium", status: "idea",
+        locked: true, locked_by: "some-peer", locked_at: "nope", updated_at: "nope",
+      },
+    ],
+  });
+  expect(res.status).toBe(400);
+  expect(res.body.error).toContain("timestamp");
+  // The proof that matters: nothing landed, not a partially-applied write.
+  expect((await listAll()).find((i) => i.id === id)).toBeUndefined();
+});
+
+test("a valid ISO timestamp still imports (positive control for the parseability check)", async () => {
+  const id = crypto.randomUUID();
+  const validIso = "2026-01-01T00:00:00.000Z";
+  const res = await post<ImportRes>(`${broker.url}/roadmap/import`, {
+    project_key: PK,
+    by: "trusted-importer",
+    items: [
+      {
+        id, kind: "feature", title: "valid timestamps", priority: "could",
+        value: "medium", effort: "medium", status: "idea",
+        created_at: validIso, updated_at: validIso,
+      },
+    ],
+  });
+  expect(res.status).toBe(200);
+  expect(res.body.imported).toBe(1);
+  const after = (await listAll()).find((i) => i.id === id)!;
+  expect(after.created_at).toBe(validIso);
+  expect(after.updated_at).toBe(validIso);
+});
+
 // ----- defect 3: created_by/updated_by come from the resolved author, not the file -----
 
 test("created_by/updated_by are stamped from the resolved author, ignoring the file's own claim", async () => {

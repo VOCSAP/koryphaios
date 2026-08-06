@@ -1682,12 +1682,136 @@ interface RoadmapAuthor {
   proven: boolean;
 }
 
+/**
+ * Card ad6aa6ed: shared lowercase+charset normalization for any author-
+ * identity FIELD, not just the `by` claim resolveRoadmapAuthor validates
+ * below -- also used for `locked_by` on /roadmap/import
+ * (handleRoadmapImport), the one other place a caller-supplied string
+ * becomes an author-identity column without passing through
+ * resolveRoadmapAuthor itself. Extracted so the two call sites cannot drift:
+ * the [a-z0-9:_-] charset the long comment below justifies (case/homoglyph/
+ * invisible-character/header-forgery closure, measured against live data)
+ * applies here without restating the justification a second time and
+ * risking the two going out of sync.
+ *
+ * Returns the offending CHARACTER on failure, never the value: the caller
+ * already knows what it sent, and the error text a caller receives (via
+ * resolveRoadmapAuthor, and via handleRoadmapImport's per-item validation)
+ * can end up in an LLM-facing tool-error context through roadmapToolError,
+ * where replaying a hostile string back gains nothing (reviewer NIT, card
+ * ad6aa6ed). Server-side logging at each call site keeps the full raw value
+ * for operator audit -- that sink is not LLM-facing.
+ *
+ * REFUSES THE EMPTY STRING (review delta, card ad6aa6ed): the old inline
+ * regex this replaced was `/^[a-z0-9:_-]+$/`, whose `+` already rejected "".
+ * A version that only searches for a DISALLOWED character has none to find
+ * in an empty string and would silently return ok:true, value:"" --
+ * unreachable on the `by` path (empty already refused earlier in
+ * resolveRoadmapAuthor) but real on the `locked_by` import path, where an
+ * empty lock owner would land and then never equal any real `by`, defeating
+ * the `by !== existing.locked_by` lock-owner comparison for that row
+ * permanently. Written here explicitly so a THIRD future call site does not
+ * have to rediscover this the same way.
+ */
+function normalizeAuthorIdentity(
+  raw: string
+): { ok: true; value: string } | { ok: false; code: "empty" } | { ok: false; code: "bad_char"; badChar: string } {
+  if (raw.length === 0) return { ok: false, code: "empty" };
+  const value = raw.toLowerCase();
+  const badCharMatch = value.match(/[^a-z0-9:_-]/);
+  if (badCharMatch) return { ok: false, code: "bad_char", badChar: badCharMatch[0]! };
+  return { ok: true, value };
+}
+
 function resolveRoadmapAuthor(
   body: { by?: unknown; instance_token?: unknown },
   route: string
 ): RoadmapAuthor | { error: string; status: number } {
-  const by = typeof body.by === "string" && body.by.trim() ? body.by.trim() : "";
-  if (!by) return { error: "by (author peer_id) is required", status: 400 };
+  const rawBy = typeof body.by === "string" ? body.by.trim() : "";
+  if (!rawBy) return { error: "by (author peer_id) is required", status: 400 };
+
+  // Card ad6aa6ed: normalize BEFORE any comparison, not just at the reserved-
+  // name check. `by` is free text by design (any agent may claim any
+  // peer_id, proven or not) so it never traversed PEER_ID_REGEX/sanitize()
+  // the way a real peer_id does -- measured to be the ONLY one of
+  // RESERVED_PEER_IDS' five runtime consumers without that shared format
+  // gate (deriveDefaultId, handleSetId, cleanPeerIds and the resolved-
+  // instance_token branch below all inherit lowercase-only as a SIDE EFFECT
+  // of it; this claimed-name branch inherited nothing). A by:'Deck' therefore
+  // fell through the reserved check below as an ordinary unproven author.
+  //
+  // A bare .toLowerCase() would close that CASE bypass and stop there, which
+  // is not enough: measured that sanitize() does far more than fold case
+  // (collapses every char outside [a-z0-9-] to a hyphen), and a fix that
+  // only touched case would still let a homoglyph ('dеck', Cyrillic е) or an
+  // invisible character ('deck​') through, DISPLAYED as 'deck' to the
+  // operator -- the exact attribution-forgery this exists to close. So this
+  // rejects on SHAPE, not just case: lowercase, then anything outside
+  // [a-z0-9:_-] is refused closed (400), never silently stripped.
+  //
+  // Applied to what gets STORED, not only what gets compared here: closes
+  // the unproven-claim registered-peer lookup a few lines below in this same
+  // function (was case-sensitive against the same raw value). The sibling
+  // `by !== existing.locked_by` lock-owner comparison in handleRoadmapUpsert
+  // is closed too, but NOT by this function alone: `locked_by` also reaches
+  // storage through handleRoadmapImport, which normalizes it separately with
+  // the SAME normalizeAuthorIdentity() helper this function calls (review
+  // finding, card ad6aa6ed: `created_by`/`updated_by` went through this
+  // resolver on that route, `locked_by` did not, and it is a field the
+  // rendered `locked: by X since ...` line in roadmap_get DISPLAYS verbatim
+  // -- same forgery class as the header attack below, on a different field).
+  //
+  // Guarantee overall is scoped to authors CLAIMED BY A CALLER, normalized
+  // through normalizeAuthorIdentity() at one of ITS call sites -- 'lock-sweep'
+  // (broker.ts, the lock-expiry sweep) writes `updated_by` directly in SQL, a
+  // hardcoded constant that never reaches either call site; harmless (never
+  // externally influenced) but outside what this validation can promise.
+  // Also NOT covered: handleGraphDraftAdd's `from_peer: body.by.slice(0,128)`
+  // (broker.ts, a different table) -- same class of unvalidated author
+  // identity, named here rather than fixed, out of this card's scope.
+  //
+  // Charset picked from live data, not invented: `bun cli.ts roadmap-export`
+  // on this project's roadmap (107 items, 15 distinct created_by/updated_by/
+  // locked_by values -- 'deck', bare peer_ids, and three 'cli:<peer_id>'
+  // forms) shows zero values outside [a-z0-9:_-] today, so nothing legitimate
+  // in THIS project's corpus is rejected. Scoped measurement, not a global
+  // one: a legitimate author on a DIFFERENT project_key carrying a character
+  // outside this set would now be refused -- fails closed, visible the same
+  // day, remedy is widening the allowlist, but the next reader should not
+  // read "zero legitimate author falls" as verified beyond this one project.
+  //
+  // Also forecloses, by construction, a forgery class for card 562fd9b5
+  // (append-mode context blocks, route not yet written): an append header
+  // built from this same `by` could otherwise embed
+  // "x >>>\n\ntext\n\n<<< append 2020-01-01T00:00:00Z by deck" and fabricate a
+  // complete fake block inside a real one, attributed to the operator, which
+  // a future parser would render as a legitimate entry. Space, '>' and
+  // newline are all outside the allowlist, so that payload is refused before
+  // the append route exists to build it -- and because the check lives
+  // INSIDE this resolver rather than at each call site, that future handler
+  // cannot construct an unvalidated header without explicitly bypassing this
+  // function (CLAUDE.md: a new validator needs every call path enumerated --
+  // the path that does not exist yet is the one a call-site check would have
+  // missed).
+  const normalizedBy = normalizeAuthorIdentity(rawBy);
+  if (!normalizedBy.ok) {
+    log.warn(`${route}: refused an author claim with a character outside [a-z0-9:_-]`, {
+      claimed_by: rawBy,
+    });
+    return {
+      // Names the offending CHARACTER, not the value (reviewer NIT, card
+      // ad6aa6ed): this text can reach an LLM via roadmapToolError, and the
+      // caller already knows what it sent. `code === "empty"` is
+      // unreachable here (rawBy already refused empty above) but handled
+      // for exhaustiveness, not assumed away.
+      error:
+        normalizedBy.code === "empty"
+          ? "author is empty"
+          : `author contains a disallowed character '${normalizedBy.badChar}' -- only [a-z0-9:_-] allowed`,
+      status: 400,
+    };
+  }
+  const by = normalizedBy.value;
 
   // Card 39c40571 LAYER 2: the one author layer 1 still took on faith.
   //
@@ -2339,6 +2463,50 @@ function handleRoadmapImport(body: {
         status: 400,
       };
     }
+    // Card ad6aa6ed (review finding): `created_by`/`updated_by` on this route
+    // already go through resolveRoadmapAuthor above, but `locked_by` is
+    // FILE content, never resolved -- and it is displayed verbatim by
+    // roadmap_get ("locked: by X since ..."), the same forgery surface the
+    // `by`-claim fix closed on a different field. Same helper, same charset,
+    // whole import refused (not just the one row) on a bad character, same
+    // discipline as every other check in this pre-pass.
+    if (typeof it.locked_by === "string") {
+      const normalizedLockedBy = normalizeAuthorIdentity(it.locked_by);
+      if (!normalizedLockedBy.ok) {
+        // `code === "empty"` IS reachable here (unlike the `by` claim, which
+        // is refused earlier): an imported locked_by:"" would otherwise
+        // land as the lock owner, and an empty string never equals any real
+        // `by`, permanently defeating the `by !== existing.locked_by`
+        // comparison for that row (review delta, card ad6aa6ed).
+        return {
+          error:
+            normalizedLockedBy.code === "empty"
+              ? `invalid item at index ${i}: locked_by is an empty string -- omit the field instead`
+              : `invalid item at index ${i}: locked_by contains a disallowed character '${normalizedLockedBy.badChar}' -- only [a-z0-9:_-] allowed`,
+          status: 400,
+        };
+      }
+    }
+    // Card ad6aa6ed (review delta, widened in scope: pre-existing gap,
+    // but it now sits in this same loop and combines with locked_by above).
+    // releaseStaleLocks (below) compares datetime(updated_at)/datetime(
+    // locked_at); SQLite's datetime() on an unparsable string returns NULL,
+    // and NULL never satisfies a WHERE comparison -- measured:
+    // `SELECT datetime('nope') IS NULL, (datetime('nope') < datetime('now','-60 seconds')) IS NULL`
+    // -> `1|1`. An import with locked:true + locked_at:'nope' +
+    // updated_at:'nope' creates a lock NEITHER sweep branch can ever
+    // release: a permanent card freeze, reachable by any bearer-token
+    // holder. Absence stays allowed (no presence requirement); only a
+    // PRESENT, unparsable value is refused.
+    for (const field of ["created_at", "updated_at", "deleted_at", "locked_at"] as const) {
+      const v = it[field];
+      if (v !== undefined && v !== null && Number.isNaN(Date.parse(String(v)))) {
+        return {
+          error: `invalid item at index ${i}: ${field} is not a parsable timestamp`,
+          status: 400,
+        };
+      }
+    }
   }
 
   // Card aad5e954: both the column list and the placeholders are GENERATED from
@@ -2400,10 +2568,14 @@ function handleRoadmapImport(body: {
       // the file (a genuine unlock in a self-export) still takes effect,
       // instead of being masked by the existing-row fallback.
       const lockedVal = typeof it.locked === "boolean" ? it.locked : (existing?.locked ?? false);
+      // Card ad6aa6ed: normalized the same way as `by` (lowercase). The
+      // charset itself was already REFUSED for the whole import, above, if
+      // any row's locked_by fell outside [a-z0-9:_-] -- only the case-fold
+      // is left to do here.
       const lockedByVal =
         it.locked_by !== undefined
           ? typeof it.locked_by === "string"
-            ? it.locked_by
+            ? it.locked_by.toLowerCase()
             : null
           : (existing?.locked_by ?? null);
       const lockedAtVal =
@@ -3852,6 +4024,13 @@ function handleGraphDraftAdd(
   const draft: GraphDraft = {
     id: randomUUID(),
     project_key: body.project_key,
+    // Named, not fixed (card ad6aa6ed review, out of that card's scope):
+    // same class as the `by`/`locked_by` author-identity fields
+    // normalizeAuthorIdentity() closes for the roadmap table -- this one is
+    // a DIFFERENT table (graph_drafts) and goes straight from the caller's
+    // claim to storage/display with no resolveRoadmapAuthor-equivalent, no
+    // lowercase-fold, no charset check. `from_peer: 'deck'` claimed here
+    // would render on the Deck side under that identity, unproven.
     from_peer: typeof body.by === "string" ? body.by.slice(0, 128) : "",
     title: payload.title,
     prompt: payload.prompt,
