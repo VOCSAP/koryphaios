@@ -35,6 +35,7 @@ import type {
   RoadmapListResponse,
   RoadmapUpsertResponse,
   RoadmapArchiveResponse,
+  RoadmapUpsertAckField,
 } from "./shared/types.ts";
 import {
   generateSummary,
@@ -59,6 +60,9 @@ import {
   DECK_INSTANCE_TOKEN,
   OPERATOR_PEER_ID,
   OPERATOR_INSTANCE_TOKEN,
+  ROADMAP_UPSERT_ACK_FIELDS,
+  ROADMAP_ADD_ACK_FIELDS,
+  ROADMAP_UPDATE_ACK_FIELDS,
 } from "./shared/types.ts";
 import type { GraphDraftAddResponse } from "./shared/types.ts";
 import type {
@@ -928,6 +932,63 @@ function formatRoadmapItemDetail(i: RoadmapItem): string {
   return lines.join("\n  ");
 }
 
+/**
+ * Compact ack for roadmap_add/roadmap_update. Reports what the caller
+ * REQUESTED (from `args`, to decide which fields to mention) crossed against
+ * what actually LANDED (from the broker's returned `item`, via
+ * ROADMAP_UPSERT_ACK_FIELDS -- shared/types.ts). Never trust `args` for a
+ * value: broker-side normalization (title trim, cleanList/cleanPeerIds
+ * dropping entries, the lock guard forcing `locked=false` outside
+ * in_progress, target_peer_ids reset to [] outside kind='directive') means
+ * the caller's raw argument is not the truth of what got persisted.
+ *
+ * `domain` is the PER-TOOL field list (ROADMAP_ADD_ACK_FIELDS /
+ * ROADMAP_UPDATE_ACK_FIELDS) -- never a union: roadmap_add does not forward
+ * `locked` to the broker at all, so it must never appear in that path's ack
+ * even if the caller happened to pass it as an extra JSON property.
+ */
+function formatRoadmapUpsertAck(opts: {
+  label: "created" | "updated";
+  item: RoadmapItem;
+  args: Record<string, unknown>;
+  domain: readonly RoadmapUpsertAckField[];
+}): string {
+  const { label, item, args, domain } = opts;
+  const passed: string[] = [];
+  const untouched: string[] = [];
+  for (const field of domain) {
+    if (args[field] === undefined) {
+      untouched.push(field);
+      continue;
+    }
+    const spec = ROADMAP_UPSERT_ACK_FIELDS[field];
+    const landed = spec.landed(item);
+    if (spec.category === "long") {
+      const requestedArg = args[field];
+      const requestedLen = typeof requestedArg === "string" ? requestedArg.length : String(requestedArg).length;
+      const landedLen = typeof landed === "string" ? landed.length : String(landed).length;
+      passed.push(`${field}: requested ${requestedLen} chars, landed ${landedLen} chars`);
+    } else if (spec.category === "list") {
+      const landedCount = Array.isArray(landed) ? landed.length : 0;
+      const requestedArg = args[field];
+      const requestedCount = Array.isArray(requestedArg) ? requestedArg.length : 0;
+      const suffix = requestedCount !== landedCount ? ` (requested ${requestedCount})` : "";
+      passed.push(`${field} -> ${landedCount} item(s)${suffix}`);
+    } else {
+      const landedStr = String(landed);
+      const requestedStr = String(args[field]);
+      const suffix = requestedStr !== landedStr ? ` (requested ${requestedStr})` : "";
+      passed.push(`${field} -> ${landedStr}${suffix}`);
+    }
+  }
+  const passedLabel = label === "created" ? "set" : "changed";
+  const untouchedLabel = label === "created" ? "defaults" : "unchanged";
+  const lines = [`Roadmap item ${label}: ${item.id.slice(0, 8)}`];
+  if (passed.length) lines.push(`  ${passedLabel}: ${passed.join(", ")}`);
+  if (untouched.length) lines.push(`  ${untouchedLabel}: ${untouched.join(", ")}`);
+  return lines.join("\n");
+}
+
 const roadmapToolError = (e: unknown): { content: { type: "text"; text: string }[]; isError: true } => ({
   content: [
     {
@@ -1352,7 +1413,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         });
         return {
           content: [
-            { type: "text" as const, text: `Roadmap item created:\n${formatRoadmapItemDetail(item)}` },
+            {
+              type: "text" as const,
+              text: formatRoadmapUpsertAck({
+                label: "created",
+                item,
+                args: a,
+                domain: ROADMAP_ADD_ACK_FIELDS,
+              }),
+            },
           ],
         };
       } catch (e) {
@@ -1385,7 +1454,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         });
         return {
           content: [
-            { type: "text" as const, text: `Roadmap item updated:\n${formatRoadmapItemDetail(item)}` },
+            {
+              type: "text" as const,
+              text: formatRoadmapUpsertAck({
+                label: "updated",
+                item,
+                args: a,
+                domain: ROADMAP_UPDATE_ACK_FIELDS,
+              }),
+            },
           ],
         };
       } catch (e) {

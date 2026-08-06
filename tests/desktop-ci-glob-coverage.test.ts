@@ -63,6 +63,8 @@ const EXEMPTIONS: Exemptions = {
   exactFiles: {
     "approval-hook.test.ts":
       "spawns a daemon and binds ports (imports startBroker from tests/_helper.ts); the pure-module matrix is not for integration suites",
+    "mcp-roadmap-ack.test.ts":
+      "spawns a daemon and binds ports (imports startBroker from tests/_helper.ts, and Bun.spawn's `bun server.ts` directly); the pure-module matrix is not for integration suites",
   },
 };
 

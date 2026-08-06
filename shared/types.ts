@@ -477,6 +477,125 @@ export function findUncoveredRoadmapColumns(
   };
 }
 
+/**
+ * Card 4dcd4f04: fields the roadmap_add/roadmap_update MCP tools may report in
+ * their compact upsert ack (server.ts formatRoadmapUpsertAck -- never the full
+ * item, nobody consumes that echo and it can carry kilobytes of `context`).
+ *
+ * Reviewer FAIL on the first cut (same card): the ack was built from the
+ * CALLER'S RAW ARGS, so it lied on 5 fields the broker silently changes --
+ * `title` (trimmed), `tags`/`depends_on` (cleanList drops non-string/blank
+ * entries), `target_peer_ids` (cleanPeerIds drops malformed/reserved/dupe
+ * entries, and the broker forces [] outside kind='directive'), and `locked`
+ * (roadmap_add never forwards it to the broker at all -- the field is outside
+ * that path's domain, not merely unreported). Every `landed` extractor below
+ * reads off the RoadmapItem the broker actually returned, never off the
+ * caller's args; args only decide WHICH fields were requested.
+ *
+ * Three report shapes:
+ *  - "long": free text, potentially large (title/description/rationale/
+ *    context). The ack reports character counts only -- REQUESTED (the
+ *    caller's raw arg length) AND LANDED (the persisted length) -- never the
+ *    content, and never just one of the two: a requested field the broker
+ *    silently drops must say so (0 landed chars), not vanish from the ack.
+ *  - "short": an enum/scalar. The ack reports the LANDED value only.
+ *  - "list": an array. The ack reports the LANDED item count only.
+ *
+ * `ROADMAP_UPSERT_ACK_FIELDS` is a `Record` total over the union, so a field
+ * added to `RoadmapItem`/`RoadmapUpsertRequest` without a matching entry here
+ * is a COMPILE error, never a silently-omitted line in the ack (CLAUDE.md
+ * coverage rule, same discipline as `findUncoveredRoadmapColumns` below).
+ */
+export type RoadmapUpsertAckField =
+  | "title"
+  | "description"
+  | "rationale"
+  | "context"
+  | "kind"
+  | "priority"
+  | "value"
+  | "effort"
+  | "status"
+  | "directive"
+  | "locked"
+  | "tags"
+  | "depends_on"
+  | "target_peer_ids";
+
+export interface RoadmapUpsertAckFieldSpec {
+  category: "long" | "short" | "list";
+  /** Reads the LANDED value off the item the broker actually wrote. */
+  landed: (item: RoadmapItem) => unknown;
+}
+
+export const ROADMAP_UPSERT_ACK_FIELDS: Record<RoadmapUpsertAckField, RoadmapUpsertAckFieldSpec> = {
+  title: { category: "long", landed: (i) => i.title },
+  description: { category: "long", landed: (i) => i.description },
+  rationale: { category: "long", landed: (i) => i.rationale },
+  context: { category: "long", landed: (i) => i.context },
+  kind: { category: "short", landed: (i) => i.kind },
+  priority: { category: "short", landed: (i) => i.priority },
+  value: { category: "short", landed: (i) => i.value },
+  effort: { category: "short", landed: (i) => i.effort },
+  status: { category: "short", landed: (i) => i.status },
+  directive: { category: "short", landed: (i) => i.directive },
+  locked: { category: "short", landed: (i) => i.locked },
+  tags: { category: "list", landed: (i) => i.tags },
+  depends_on: { category: "list", landed: (i) => i.depends_on },
+  target_peer_ids: { category: "list", landed: (i) => i.target_peer_ids },
+};
+
+/**
+ * Per-tool DOMAIN of the ack: exactly the fields THAT case block forwards to
+ * the broker. Never a union of the two -- roadmap_add does not forward
+ * `locked` (not in its inputSchema; creating an already-locked card has no
+ * business meaning; and the broker would force it false outside in_progress
+ * anyway), so it is excluded from its domain here, not merely left unreported
+ * downstream. The asymmetry IS the fix for the `locked`-on-create defect.
+ */
+export const ROADMAP_ADD_ACK_FIELDS: readonly RoadmapUpsertAckField[] = [
+  "title",
+  "description",
+  "rationale",
+  "context",
+  "kind",
+  "priority",
+  "value",
+  "effort",
+  "status",
+  "directive",
+  "tags",
+  "depends_on",
+  "target_peer_ids",
+] as const;
+
+export const ROADMAP_UPDATE_ACK_FIELDS: readonly RoadmapUpsertAckField[] = [
+  ...ROADMAP_ADD_ACK_FIELDS,
+  "locked",
+] as const;
+
+/**
+ * Compare a tool's LIVE MCP inputSchema property names (minus plumbing the
+ * ack never reports: `id`) against its ack field domain above. Same shape as
+ * `findUncoveredRoadmapColumns` (card aad5e954): `missing` is a schema field
+ * the domain forgot (would silently vanish from the ack forever the day it is
+ * added), `extra` is a stale domain entry the schema no longer declares.
+ * Call once per tool, never on a union of both tools' schemas -- the
+ * roadmap_add/roadmap_update asymmetry (`locked`) is exactly what a unioned
+ * comparison would hide.
+ */
+export function findUncoveredAckFields(
+  schemaFields: readonly string[],
+  domainFields: readonly string[]
+): { missing: string[]; extra: string[] } {
+  const domain = new Set(domainFields);
+  const schema = new Set(schemaFields);
+  return {
+    missing: schemaFields.filter((f) => !domain.has(f)),
+    extra: domainFields.filter((f) => !schema.has(f)),
+  };
+}
+
 export interface RoadmapListRequest {
   project_key: string;
   kind?: RoadmapKind;
