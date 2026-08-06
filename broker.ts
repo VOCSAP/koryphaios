@@ -34,6 +34,7 @@ import type {
   NotificationChannel,
 } from "./notify/types.ts";
 import { validateDraftPayload } from "./shared/graph-draft.ts";
+import { planRoadmapAppendText, ROADMAP_APPEND_RESULT_MAX_CHARS } from "./shared/roadmap-append.ts";
 import {
   APPROVAL_ANSWER_KINDS,
   APPROVAL_VIAS,
@@ -77,6 +78,8 @@ import type {
   RoadmapStatus,
   RoadmapUpsertRequest,
   RoadmapUpsertResponse,
+  RoadmapContextAppendRequest,
+  RoadmapContextAppendResponse,
   GraphDraft,
   GraphDraftAddRequest,
   GraphDraftAddResponse,
@@ -2255,6 +2258,113 @@ function handleRoadmapArchive(
   return { item: getRoadmapItem(body.id)! };
 }
 
+/**
+ * Card 562fd9b5: append-only edit to `context`. The write is a SINGLE SQL
+ * statement -- no SELECT-then-UPDATE. That is the card's central decision,
+ * not an optimization: a prior SELECT would reintroduce the destructive
+ * read-modify-write this route exists to remove, AND would break atomicity
+ * between two concurrent appenders (both would read the same starting
+ * context, both would compute a result including only their own text, the
+ * second UPDATE would silently overwrite the first's block). One statement,
+ * the result cap enforced in its own WHERE clause, `db.changes` distinguishes
+ * success (1) from a refused-by-cap write (0) -- ambiguous against "id does
+ * not exist" (also 0 changes), so a SELECT-for-EXISTENCE runs AFTER a 0
+ * result to tell the two apart with the right status code. That SELECT is
+ * not part of the write path and does not reintroduce the race: it never
+ * informs what gets written.
+ *
+ * COALESCE(context,'') is not cosmetic: SQLite's `NULL || text` evaluates to
+ * `NULL`, so without it a NULL context would be silently WIPED by an append
+ * instead of appended to. MEASURED: `roadmap_items.context` is declared
+ * `TEXT NOT NULL DEFAULT ''` (both the CREATE TABLE and the ADD COLUMN
+ * migration), and SQLite enforces that unconditionally -- a direct
+ * `UPDATE roadmap_items SET context = NULL` against a scratch table with the
+ * same constraint fails closed with `NOT NULL constraint failed`. So NULL is
+ * NOT reachable through this column today; COALESCE stays as defense in
+ * depth against a future migration or an external tool that relaxes that
+ * constraint, not against a live risk. See tests/broker-roadmap-append.test.ts
+ * for how that is probed given the real column cannot be made NULL to order.
+ *
+ * `length()` on the SQL side counts CHARACTERS (SQLite default for TEXT),
+ * matching ROADMAP_APPEND_RESULT_MAX_CHARS's own unit -- both the existing
+ * context and the new chunk are measured via SQL's own `length(?)`, not a JS
+ * `.length`, so the two never disagree on what a "character" is (JS
+ * UTF-16 code units can diverge from SQLite's count on astral-plane text).
+ *
+ * TWO GUARDS /roadmap/upsert enforces are DELIBERATELY not enforced here:
+ *  - the work-lock does not apply. An append is a single atomic statement,
+ *    so it cannot race the lock holder's own write, and the entire point of
+ *    this tool is to leave a note on ANOTHER agent's card while it works.
+ *    Bound: this route touches ONLY `context` -- never `status`, `locked`,
+ *    or any arbitration field, all of which remain fully guarded by
+ *    /roadmap/upsert's lock check. There is no code path here that could
+ *    even attempt to set them (RoadmapContextAppendRequest carries none).
+ *  - `deleted_at` is not checked. Appending to an ARCHIVED card is
+ *    intentional -- it is how a post-mortem note gets written.
+ *
+ * `updated_by`/`updated_at` are ALSO deliberately not touched by the SET
+ * clause -- review delta on this card: `updated_at` is itself an arbitration
+ * field, not a neutral timestamp. `releaseStaleLocks` frees a stale lock on
+ * `datetime(updated_at) < datetime('now', -LOCK_TTL_SEC)`, so if this route
+ * refreshed it, a THIRD PARTY appending a note to another agent's locked
+ * card would silently extend THAT agent's lock TTL -- exactly the conflict
+ * the lock-exemption bullet above claims cannot happen ("an append is
+ * atomic and cannot conflict with the lock holder"). It can, through
+ * `updated_at`, if this route touches it. Nothing is lost by not touching
+ * it: the append header already carries WHO and WHEN inside `context`
+ * itself -- the recency information just lives in a different place than
+ * the column, not nowhere.
+ */
+function handleRoadmapContextAppend(
+  body: RoadmapContextAppendRequest
+): RoadmapContextAppendResponse | { error: string; status: number } {
+  const author = resolveRoadmapAuthor(body, "/roadmap/append-context");
+  if ("error" in author) return author;
+  const by = author.by;
+
+  if (typeof body.id !== "string" || !body.id) {
+    return { error: "id is required", status: 400 };
+  }
+  if (typeof body.text !== "string") {
+    return { error: "text is required", status: 400 };
+  }
+
+  // Pre-refuse cheaply (delimiter, per-call cap) with the SAME numbers the
+  // WHERE clause below re-derives for the result cap -- shared/roadmap-append.ts
+  // is the single source of truth for both, see its own header comment.
+  const nowIso = new Date().toISOString();
+  const textPlan = planRoadmapAppendText({ text: body.text, author: by, nowIso });
+  if (!textPlan.ok) {
+    return { error: textPlan.message, status: 400 };
+  }
+
+  // Card 562fd9b5 review delta: SET touches `context` ONLY. `updated_by`/
+  // `updated_at` are deliberately left alone -- see the long comment above.
+  const res = db.run(
+    `UPDATE roadmap_items
+        SET context = COALESCE(context,'') || ?
+      WHERE id = ? AND length(COALESCE(context,'')) + length(?) <= ?`,
+    [textPlan.appended, body.id, textPlan.appended, ROADMAP_APPEND_RESULT_MAX_CHARS]
+  );
+
+  if (res.changes === 0) {
+    // Existence check AFTER the failed write, not before it: distinguishes
+    // 404 (no such card) from 409 (cap exceeded) without ever informing
+    // what got written above.
+    const existing = getRoadmapItem(body.id);
+    if (!existing) return { error: "unknown roadmap item", status: 404 };
+    return {
+      error:
+        `append would push context over the ${ROADMAP_APPEND_RESULT_MAX_CHARS}-char cap -- ` +
+        `compact the context first via roadmap_update (if that tool is available to you), ` +
+        `\`bun cli.ts roadmap-import --force\` with a trimmed context, or ask the team lead`,
+      status: 409,
+    };
+  }
+
+  return { item: getRoadmapItem(body.id)! };
+}
+
 // Workflow lane reorder: hard cap on the queue size a single rewrite may
 // submit (same spirit as the flush caps -- an unbounded ids array is NF-E).
 const ROADMAP_REORDER_MAX = 500;
@@ -4296,6 +4406,13 @@ const server = Bun.serve<WsData>({
         }
         case "/roadmap/archive": {
           const result = handleRoadmapArchive(body as RoadmapArchiveRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/append-context": {
+          const result = handleRoadmapContextAppend(body as RoadmapContextAppendRequest);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }

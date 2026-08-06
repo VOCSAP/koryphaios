@@ -35,6 +35,7 @@ import type {
   RoadmapListResponse,
   RoadmapUpsertResponse,
   RoadmapArchiveResponse,
+  RoadmapContextAppendResponse,
   RoadmapUpsertAckField,
 } from "./shared/types.ts";
 import {
@@ -83,6 +84,7 @@ import {
   GRAPH_DRAFT_SYSTEM_PROMPT,
   GRAPH_DRAFT_TIMEOUT_MS,
 } from "./shared/graph-draft.ts";
+import { buildRoadmapAppendHeader } from "./shared/roadmap-append.ts";
 import { tmpdir } from "node:os";
 import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 
@@ -751,6 +753,19 @@ const TOOLS = [
     },
   },
   {
+    name: "roadmap_append_context",
+    description:
+      "Append a note to a roadmap item's context WITHOUT replacing the field (use roadmap_update for that). Meant for leaving a note on ANOTHER agent's card while it works -- the work-lock does not block this, only status/locked changes go through that guard. Four things to know before using it: (1) this call is NOT idempotent -- if the response is lost after the broker already committed and you retry, the block lands TWICE; duplicates are accepted deliberately, the remedy is compacting the context later, not preventing the retry. (2) The timestamped attribution header wrapping every append is not cosmetic: it is what makes a duplicate from (1) visible to whoever reads the card, so it always ships with the text. (3) Appended blocks are not durable structure -- the Deck's context textarea and the wand both replace the WHOLE field on the operator's next explicit Save, so anything that must survive a full rewrite belongs in description/rationale, not here. (4) This call does NOT refresh the item's updated_at, on purpose: updated_at drives the work-lock's stale-lock TTL, and refreshing it from a third party's append would let anyone silently extend another agent's lock indefinitely -- the note's own timestamp lives inside the header instead. A too-large append is refused with a named remedy (compact via roadmap_update, `bun cli.ts roadmap-import --force`, or ask the team lead), not a bare rejection.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        id: { type: "string" as const, description: "Item id, or a unique id prefix." },
+        text: { type: "string" as const, description: "The note to append. Capped per call; see the refusal message for the exact limit if you hit it." },
+      },
+      required: ["id", "text"],
+    },
+  },
+  {
     name: "graph_draft_prepare",
     description:
       "OPERATOR-INVITED ONLY: call this when the human operator explicitly asks you to move a blocking question into the Koryphaios GRAPH view ('open a graph on this', 'passe en mode graphe'). Never call it on your own initiative. Runs a cheap READ-ONLY haiku one-shot in this project that reformulates your question and compiles only the strictly relevant context and file references into one ready-to-send prompt draft. The draft is returned TO YOU for supervision: review it, fix the question or re-run with better hints if needed, then submit it with graph_draft_send. Nothing is sent and no inference runs at this stage.",
@@ -987,6 +1002,39 @@ function formatRoadmapUpsertAck(opts: {
   if (passed.length) lines.push(`  ${passedLabel}: ${passed.join(", ")}`);
   if (untouched.length) lines.push(`  ${untouchedLabel}: ${untouched.join(", ")}`);
   return lines.join("\n");
+}
+
+/**
+ * Compact ack for roadmap_append_context. Never the appended content itself
+ * (card 4dcd4f04, commit fb50266 -- do not regress it), but a DIFFERENT
+ * wording than formatRoadmapUpsertAck's "requested N chars, landed M chars"
+ * (review delta, card 562fd9b5): that phrase describes TWO STATES of the
+ * SAME field on an upsert (before/after a replace). Append is not a
+ * replace -- `requested` would be only the incoming fragment while `landed`
+ * is the ENTIRE resulting context, so reusing the upsert wording here reads
+ * as a massive, false deformation of what was sent ("requested 12 chars,
+ * landed 3400 chars"). Says what actually happened instead: how much was
+ * ADDED (header included, since that is what really left the wire), and
+ * what the field's new total size is.
+ *
+ * Reuses ROADMAP_UPSERT_ACK_FIELDS's "context" landed-extractor for the
+ * total (same discipline as formatRoadmapUpsertAck: never re-derive how to
+ * read a field off an item). The appended length is computed the same way
+ * the broker computed it -- buildRoadmapAppendHeader with the SAME author
+ * this call sent as `by` -- rather than guessed: an ISO-8601 timestamp is
+ * always 24 characters regardless of instant, so the header's length is
+ * deterministic and does not need to match the broker's exact timestamp,
+ * only its shape and author.
+ */
+function formatRoadmapAppendAck(requestedText: string, author: string, item: RoadmapItem): string {
+  const landed = ROADMAP_UPSERT_ACK_FIELDS.context.landed(item);
+  const landedLen = typeof landed === "string" ? landed.length : String(landed).length;
+  const headerLen = buildRoadmapAppendHeader(new Date().toISOString(), author).length;
+  const appendedLen = headerLen + requestedText.length;
+  return [
+    `Roadmap item context appended: ${item.id.slice(0, 8)}`,
+    `  appended ${appendedLen} chars (header included), context now ${landedLen} chars`,
+  ].join("\n");
 }
 
 const roadmapToolError = (e: unknown): { content: { type: "text"; text: string }[]; isError: true } => ({
@@ -1486,6 +1534,25 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
               text: `Roadmap item archived (restorable via roadmap_update status):\n${formatRoadmapItemLine(item)}`,
             },
           ],
+        };
+      } catch (e) {
+        return roadmapToolError(e);
+      }
+    }
+
+    case "roadmap_append_context": {
+      const a = args as { id: string; text: string };
+      try {
+        const id = await resolveRoadmapId(a.id);
+        const by = roadmapAuthor();
+        const { item } = await brokerFetch<RoadmapContextAppendResponse>("/roadmap/append-context", {
+          id,
+          by,
+          ...roadmapProof(),
+          text: a.text,
+        });
+        return {
+          content: [{ type: "text" as const, text: formatRoadmapAppendAck(a.text, by, item) }],
         };
       } catch (e) {
         return roadmapToolError(e);

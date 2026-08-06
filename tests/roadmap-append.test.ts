@@ -109,6 +109,21 @@ test("per-call cap: exactly at the limit is accepted, one char over is refused",
   expect(overCapPlan.code).toBe("too_long_single");
 });
 
+test("card 562fd9b5 review delta: the per-call cap counts CODE POINTS, matching SQLite's length(), not UTF-16 code units", () => {
+  // U+1F600 is a surrogate pair: 2 UTF-16 code units, 1 code point. Repeated
+  // to exactly ROADMAP_APPEND_PER_CALL_MAX_CHARS code points, this string's
+  // JS `.length` is DOUBLE the cap -- a count based on `.length` alone would
+  // wrongly refuse it, contradicting the module's own "unit: characters"
+  // documentation (which means what SQLite's length() counts).
+  const emoji = "\u{1F600}";
+  const atCapCodePoints = emoji.repeat(ROADMAP_APPEND_PER_CALL_MAX_CHARS);
+  expect([...atCapCodePoints].length).toBe(ROADMAP_APPEND_PER_CALL_MAX_CHARS);
+  expect(atCapCodePoints.length).toBeGreaterThan(ROADMAP_APPEND_PER_CALL_MAX_CHARS); // sanity: UTF-16 length really does diverge here
+
+  const plan = planRoadmapAppendText({ text: atCapCodePoints, author: "a", nowIso: NOW });
+  expect(plan.ok).toBe(true);
+});
+
 test("result cap: exactly at the limit is accepted, one char over is refused", () => {
   const header = buildRoadmapAppendHeader(NOW, "a");
   const text = "y";

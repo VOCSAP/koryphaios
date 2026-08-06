@@ -86,6 +86,16 @@ const GUARDED_PROBES: Record<string, (ctx: ProbeCtx) => Record<string, unknown>>
   // an omitted/malformed items field would 400 for the wrong reason and pass
   // this probe without ever exercising the identity guard.
   "/roadmap/import": (c) => ({ project_key: PK, by: c.victimPeerId, items: [] }),
+  // Card 562fd9b5: goes through resolveRoadmapAuthor exactly like the four
+  // above (same function, same order -- checked before id/text validation),
+  // so it belongs HERE, not in EXEMPT_ROUTES. Its only difference from
+  // upsert/archive/reorder/import is a SEPARATE, unrelated exemption from
+  // the work-lock guard (this file tests the AUTHOR guard, card 39c40571 --
+  // not every guard in the system; the lock exemption is card 562fd9b5's own
+  // decision, documented at handleRoadmapContextAppend in broker.ts). Filing
+  // it as EXEMPT here would silently stop testing that its author check
+  // actually refuses impersonation.
+  "/roadmap/append-context": (c) => ({ id: c.itemId, by: c.victimPeerId, text: "x" }),
 };
 
 interface ProbeCtx {
@@ -108,6 +118,7 @@ function unclassifiedRoutes(routes: string[]): string[] {
 // tell "the source has no other roadmap route" apart from "my regex stopped
 // matching". Update it deliberately when a route is added or removed.
 const EXPECTED_ROUTES = [
+  "/roadmap/append-context",
   "/roadmap/archive",
   "/roadmap/export",
   "/roadmap/import",

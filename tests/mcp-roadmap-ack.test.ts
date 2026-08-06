@@ -20,6 +20,23 @@ import {
   findUncoveredAckFields,
 } from "../shared/types.ts";
 
+/**
+ * Every tool name starting with "roadmap_" that server.ts registers, mapped
+ * to its ack FIELD domain (checked via findUncoveredAckFields) or `null`
+ * when its ack is not RoadmapItem-field-pick-list shaped at all (roadmap_get/
+ * list/archive: no per-field ack; roadmap_append_context: reports a byte
+ * count, not a list of RoadmapItem fields). See the test below for how a
+ * 4th tool, or a stale entry, fails this the same day it happens.
+ */
+const ROADMAP_TOOL_ACK_DOMAINS: Record<string, readonly string[] | null> = {
+  roadmap_list: null,
+  roadmap_get: null,
+  roadmap_add: ROADMAP_ADD_ACK_FIELDS,
+  roadmap_update: ROADMAP_UPDATE_ACK_FIELDS,
+  roadmap_archive: null,
+  roadmap_append_context: null,
+};
+
 const brokers: TestBroker[] = [];
 const procs: ReturnType<typeof Bun.spawn>[] = [];
 
@@ -359,34 +376,73 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     expect(line).toContain("target_peer_ids -> 3 item(s)");
   }, 60_000);
 
-  test("each tool's ack domain matches its own live inputSchema, checked separately (not unioned)", async () => {
+  test("every roadmap_ tool in the live tools/list is accounted for in ROADMAP_TOOL_ACK_DOMAINS, and field-pick-list tools stay covered", async () => {
+    // Review delta, card 562fd9b5: this used to be two hand-written find()
+    // calls for roadmap_add/roadmap_update only. A third tool
+    // (roadmap_append_context) shipped with zero test coverage and this
+    // guard did not notice, because its domain wasn't unioned/checked, it
+    // was simply never asked about. A TABLE plus a membership assertion in
+    // BOTH directions closes that: a 4th roadmap_ tool added tomorrow
+    // without a matching entry here fails this test the same day, and a
+    // stale entry for a tool that got removed fails it too.
     const h = await boot();
     h.send({ jsonrpc: "2.0", id: nextRpcId, method: "tools/list", params: {} });
     const res = await readUntil(h.reader, nextRpcId, h.buffer);
     nextRpcId++;
     const tools = res.result?.tools ?? [];
-    const add = tools.find((t) => t.name === "roadmap_add");
-    const update = tools.find((t) => t.name === "roadmap_update");
-    expect(add).toBeDefined();
-    expect(update).toBeDefined();
+    const roadmapTools = tools.filter((t) => t.name.startsWith("roadmap_"));
+    expect(roadmapTools.length).toBeGreaterThan(0); // the probe must SEE tools before its silence means anything
 
-    const addSchemaFields = Object.keys(add!.inputSchema?.properties ?? {});
-    const updateSchemaFields = Object.keys(update!.inputSchema?.properties ?? {}).filter(
-      (f) => f !== "id"
-    );
+    const roadmapToolNames = roadmapTools.map((t) => t.name);
+    for (const name of roadmapToolNames) {
+      expect(Object.keys(ROADMAP_TOOL_ACK_DOMAINS)).toContain(name);
+    }
+    for (const name of Object.keys(ROADMAP_TOOL_ACK_DOMAINS)) {
+      expect(roadmapToolNames).toContain(name); // catches a stale entry for a removed tool
+    }
 
-    const addDiff = findUncoveredAckFields(addSchemaFields, ROADMAP_ADD_ACK_FIELDS);
-    expect(addDiff.missing).toEqual([]);
-    expect(addDiff.extra).toEqual([]);
-
-    const updateDiff = findUncoveredAckFields(updateSchemaFields, ROADMAP_UPDATE_ACK_FIELDS);
-    expect(updateDiff.missing).toEqual([]);
-    expect(updateDiff.extra).toEqual([]);
+    for (const [name, domain] of Object.entries(ROADMAP_TOOL_ACK_DOMAINS)) {
+      if (domain === null) continue; // not a field-pick-list-shaped ack (roadmap_append_context reports a byte count, not RoadmapItem fields; roadmap_get/list/archive have no per-field ack at all)
+      const tool = roadmapTools.find((t) => t.name === name)!;
+      const schemaFields = Object.keys(tool.inputSchema?.properties ?? {}).filter((f) => f !== "id");
+      const diff = findUncoveredAckFields(schemaFields, domain);
+      expect(diff.missing).toEqual([]);
+      expect(diff.extra).toEqual([]);
+    }
 
     // The asymmetry a unioned comparison would hide: `locked` is real on
     // roadmap_update's schema/domain but absent from roadmap_add's.
+    const addSchemaFields = Object.keys(
+      roadmapTools.find((t) => t.name === "roadmap_add")!.inputSchema?.properties ?? {}
+    );
+    const updateSchemaFields = Object.keys(
+      roadmapTools.find((t) => t.name === "roadmap_update")!.inputSchema?.properties ?? {}
+    );
     expect(addSchemaFields).not.toContain("locked");
     expect(updateSchemaFields).toContain("locked");
+  }, 60_000);
+
+  test("roadmap_append_context's ack never contains the appended content, end to end over MCP stdio", async () => {
+    const h = await boot();
+    const created = await callTool(h, "roadmap_add", { title: "append ack target" });
+    expect(created.result?.isError).toBeFalsy();
+    const id = ackText(created).match(/Roadmap item created: ([0-9a-f]{8})/)![1]!;
+
+    const secretNote = "s".repeat(2000);
+    const appended = await callTool(h, "roadmap_append_context", { id, text: secretNote });
+    expect(appended.result?.isError).toBeFalsy();
+    const ack = ackText(appended);
+
+    expect(ack).not.toContain(secretNote);
+    expect(ack.length).toBeLessThan(500);
+    expect(ack).toContain("Roadmap item context appended:");
+    // "appended N chars (header included)" -- N must be strictly more than
+    // the 2000-char note, proving the header is really counted in, not just
+    // claimed to be.
+    const match = ack.match(/appended (\d+) chars \(header included\), context now (\d+) chars/);
+    expect(match).not.toBeNull();
+    expect(Number(match![1])).toBeGreaterThan(secretNote.length);
+    expect(Number(match![2])).toBeGreaterThan(secretNote.length);
   }, 60_000);
 });
 

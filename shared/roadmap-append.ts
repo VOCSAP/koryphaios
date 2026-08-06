@@ -166,11 +166,19 @@ export function planRoadmapAppendText(opts: {
     };
   }
 
-  if (text.length > ROADMAP_APPEND_PER_CALL_MAX_CHARS) {
+  // Card 562fd9b5 review delta: [...text].length counts CODE POINTS, not
+  // UTF-16 code units. `text.length` alone would diverge from SQLite's
+  // length() (what the result cap enforces, char-by-char) by up to 2x on
+  // astral-plane text (emoji etc.), contradicting this module's own "unit
+  // is characters" documentation on the two caps -- fail-closed either way
+  // (a stricter count only refuses MORE), but the two caps must count the
+  // same thing for "unit: characters" to mean what it says everywhere.
+  const textCharLen = [...text].length;
+  if (textCharLen > ROADMAP_APPEND_PER_CALL_MAX_CHARS) {
     return {
       ok: false,
       code: "too_long_single",
-      message: `append text is ${text.length} chars, over the ${ROADMAP_APPEND_PER_CALL_MAX_CHARS}-char per-call cap`,
+      message: `append text is ${textCharLen} chars, over the ${ROADMAP_APPEND_PER_CALL_MAX_CHARS}-char per-call cap`,
     };
   }
 
