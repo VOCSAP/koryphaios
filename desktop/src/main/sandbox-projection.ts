@@ -59,9 +59,15 @@ export function planProjection(claudeHomeDir: string): ProjectionEntry[] {
   return out
 }
 
-/** Bounds for the signature walk: this runs on the agent-spawn path. */
+/**
+ * Bounds for the signature walk: this runs on the agent-spawn path.
+ * SIG_MAX_ENTRIES exported (card a79c7696 volet 1 review) so a regression
+ * test can build a fixture that genuinely exceeds it instead of hardcoding a
+ * guessed magic number that silently stops proving anything once this
+ * constant changes.
+ */
 const SIG_MAX_DEPTH = 6
-const SIG_MAX_ENTRIES = 5000
+export const SIG_MAX_ENTRIES = 5000
 
 /**
  * A cheap fingerprint of what WOULD be projected, so the copy can be skipped
@@ -79,6 +85,20 @@ const SIG_MAX_ENTRIES = 5000
  * costs a copy, one that throws would break spawning.
  */
 export function projectionSignature(claudeHomeDir: string): string {
+  return signatureOfEntries(planProjection(claudeHomeDir))
+}
+
+/**
+ * Same fingerprint walk as projectionSignature, over an explicit entry list
+ * instead of re-deriving it from claudeHomeDir. Lets a caller fold entries
+ * from a DIFFERENT source root into the same signature — sandbox-service's
+ * `ensure()` uses this to include the embedded deck-plugin dir (a sibling of
+ * the app, not of ~/.claude) alongside the operator's projected config, so a
+ * deck-plugin-only change (app update) still triggers a re-project on an
+ * already-running container instead of going unnoticed until the next
+ * unrelated config edit (card a79c7696 volet 1).
+ */
+export function signatureOfEntries(entries: ProjectionEntry[]): string {
   const parts: string[] = []
   let budget = SIG_MAX_ENTRIES
 
@@ -110,8 +130,38 @@ export function projectionSignature(claudeHomeDir: string): string {
     parts.push(`${label}:${stat.size}:${Math.round(stat.mtimeMs)}`)
   }
 
-  for (const entry of planProjection(claudeHomeDir)) visit(entry.hostPath, entry.name, 0)
+  for (const entry of entries) visit(entry.hostPath, entry.name, 0)
   return parts.join('|')
+}
+
+/**
+ * The exact composition sandbox-service.ts's ensure() persists as the
+ * per-container marker key: container id, deck-plugin's OWN signature
+ * (its own SIG_MAX_ENTRIES budget, walked separately -- see signatureOfEntries'
+ * doc), and, only when the operator's config projection is enabled, the
+ * config's own signature via projectionSignature; otherwise the literal
+ * 'disabled' in that slot so toggling the opt-out mismatches the marker and
+ * forces exactly one re-project/scrub.
+ *
+ * Pulled out of ensure() (impure: Docker/Podman lifecycle, not
+ * bun-testable) into this pure module so the composition ensure() ACTUALLY
+ * RUNS is what a regression test exercises. A test that re-implements this
+ * shape independently instead of calling this function only proves its own
+ * copy stays correct if ensure()'s logic changes underneath it -- exactly
+ * the trap this repo's CLAUDE.md coverage rule names (card a79c7696 volet 1
+ * review: the first version of this fix shipped a starvation regression
+ * test that never called production code).
+ */
+export function containerSignature(
+  containerId: string,
+  deckPluginEntries: ProjectionEntry[],
+  claudeHomeDir: string,
+  projectConfig: boolean
+): string {
+  const deckPluginSig = signatureOfEntries(deckPluginEntries)
+  return projectConfig
+    ? `${containerId}\n${deckPluginSig}\n${projectionSignature(claudeHomeDir)}`
+    : `${containerId}\ndisabled\n${deckPluginSig}`
 }
 
 /**

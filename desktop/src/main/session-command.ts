@@ -16,6 +16,37 @@
 // the live terminal once it is up (see encodeInitialPromptKeystrokes below),
 // instead of composing it into the spawned command line.
 
+import { join } from 'node:path'
+
+/**
+ * Basename of the embedded deck-plugin dir, wherever index.ts's
+ * getDeckPluginDir resolves it (packaged: `resourcesPath/deck-plugin`, dev:
+ * `appPath/deck-plugin`). Pulled out as a pure constant, not re-derived by
+ * each caller, so index.ts's host resolution and sandbox-command.ts's
+ * SANDBOX_DECK_PLUGIN_NAME/DIR stay pinned to the SAME string without an
+ * import cycle (index.ts already imports this module for
+ * createMissingDirTracker; sandbox-command.ts cannot import index.ts, an
+ * electron-heavy module). Card a79c7696 volet 1 review: the sandboxed
+ * copy's basename, the ProjectionEntry name driving clean/chown, and this
+ * host-side basename were three unpinned occurrences of the literal
+ * 'deck-plugin' before this constant existed.
+ */
+export const DECK_PLUGIN_DIRNAME = 'deck-plugin'
+
+/**
+ * Pure decision behind index.ts's getDeckPluginDir: a packaged app reads the
+ * plugin from `resourcesPath`, a dev checkout reads it from the repo via
+ * `appPath`. Extracted here instead of left inline in index.ts (an
+ * electron-importing module) so this exact resolution -- and in particular
+ * its basename -- is bun-testable against SANDBOX_DECK_PLUGIN_NAME. Before
+ * this existed, the reviewer measured the invariant "the copy's destination
+ * basename equals what --plugin-dir is rewritten to" as asserted by comment
+ * only, unreachable by any test.
+ */
+export function deckPluginDirFor(isPackaged: boolean, resourcesPath: string, appPath: string): string {
+  return join(isPackaged ? resourcesPath : appPath, DECK_PLUGIN_DIRNAME)
+}
+
 export type SpawnMode = 'fresh' | 'resume'
 
 export interface SessionCommandInput {

@@ -17,7 +17,7 @@ import { loadConfig, saveConfig } from './store'
 import { buildAppMenu } from './menu'
 import { safeExternalUrl } from './external-url'
 import { SessionService } from './session-service'
-import { createMissingDirTracker } from './session-command'
+import { createMissingDirTracker, deckPluginDirFor } from './session-command'
 import { registerIpc, resolveDocsDir } from './ipc'
 import { parseCliContext } from './cli-context'
 import { computeScope, buildScopeEnv, resolveAdoptedScope, type Scope, type ScopeEnv } from './scope'
@@ -81,7 +81,12 @@ import type { SessionRuntime } from '@shared/types'
 import { listAgents } from './agents'
 import { createSessionWithWorktree } from './create-session'
 import { SandboxService } from './sandbox-service'
-import { mapHostPathToContainer, rewriteLoopbackForContainer, sandboxifyEnv } from './sandbox-command'
+import {
+  mapHostPathToContainer,
+  rewriteLoopbackForContainer,
+  rewritePluginDirForContainer,
+  sandboxifyEnv
+} from './sandbox-command'
 import { Journal } from './journal'
 import { flushJournalSnapshot, initDeckLog, logInfo, onDeckError, reportError } from './log'
 import {
@@ -338,9 +343,7 @@ const sanitizeConfigForRenderer = (cfg: AppConfig): AppConfig => ({
 // when it later disappears.
 const deckPluginMissingTracker = createMissingDirTracker()
 const getDeckPluginDir = (): string => {
-  const dir = app.isPackaged
-    ? join(process.resourcesPath, 'deck-plugin')
-    : join(app.getAppPath(), 'deck-plugin')
+  const dir = deckPluginDirFor(app.isPackaged, process.resourcesPath, app.getAppPath())
   const exists = existsSync(dir)
   if (deckPluginMissingTracker.check(exists)) {
     reportError(
@@ -448,6 +451,10 @@ const sandbox = new SandboxService({
   stateDir: join(app.getPath('userData'), APP_STATE_SUBDIR),
   // Projection source (CLAUDE.md/agents/skills/plugins) + peers back-channel.
   claudeHomeDir,
+  // Card a79c7696 volet 1: passed by reference, same live-recheck reason as
+  // getDeckPluginDir's own LOAD-BEARING comment above (SessionService gets
+  // the identical reference).
+  deckPluginDir: getDeckPluginDir,
   // Shipped Dockerfile: resources when packaged, the repo dir in dev — same
   // resolution as deckPluginDir / the docs dir.
   imageContextDir: app.isPackaged
@@ -498,7 +505,12 @@ service.setSandboxProvider(
           )
         }
         sandbox.writeLaunchScript(sessionId, {
-          command,
+          // Card a79c7696 volet 1: `command` still carries --plugin-dir
+          // pointing at the HOST deck-plugin path (session-command.ts's
+          // pluginFlag has no sandbox awareness) -- rewrite it onto the
+          // container path projectDeckPlugin() copied it to. No-op if the
+          // flag is absent (deck-plugin build missing on the host).
+          command: rewritePluginDirForContainer(command),
           cwd,
           env: {
             ...sandboxifyEnv(env, (path) => {

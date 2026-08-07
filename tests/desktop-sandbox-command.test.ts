@@ -32,9 +32,14 @@ import {
   normalizeProjectDir,
   parseTranscriptList,
   rewriteLoopbackForContainer,
+  rewritePluginDirForContainer,
+  SANDBOX_DECK_PLUGIN_DIR,
+  SANDBOX_DECK_PLUGIN_NAME,
   sandboxifyEnv,
   shQuote,
 } from "../desktop/src/main/sandbox-command.ts";
+import { DECK_PLUGIN_DIRNAME, deckPluginDirFor } from "../desktop/src/main/session-command.ts";
+import { basename } from "node:path";
 
 test("containerNameFor is deterministic and shape-valid", () => {
   const a = containerNameFor("/home/op/proj", "linux");
@@ -91,6 +96,40 @@ test("mapHostPathToContainer returns NULL outside the mount, never a /work fallb
 test("shQuote survives embedded single quotes", () => {
   expect(shQuote("it's")).toBe(`'it'\\''s'`);
   expect(shQuote("plain")).toBe("'plain'");
+});
+
+// Card a79c7696 volet 1: wrap() left --plugin-dir pointing at a HOST path
+// inside the container. The coverage trap the card calls out: a test that
+// only checks the flag CHANGED would still pass if it pointed at an empty
+// dir. So this pins the rewritten value against SANDBOX_HOME composed
+// independently, not just against SANDBOX_DECK_PLUGIN_DIR re-imported --
+// proving the flag lands exactly where projectDeckPlugin() (sandbox-service)
+// copies deck-plugin to.
+test("rewritePluginDirForContainer redirects --plugin-dir onto the projected container path", () => {
+  const hostCmd = `claude --plugin-dir "C:\\Users\\op\\AppData\\Local\\Programs\\koryphaios\\resources\\deck-plugin" --session-id "abc"`;
+  expect(rewritePluginDirForContainer(hostCmd)).toBe(
+    `claude --plugin-dir "${SANDBOX_HOME}/.claude/deck-plugin" --session-id "abc"`
+  );
+  expect(SANDBOX_DECK_PLUGIN_DIR).toBe(`${SANDBOX_HOME}/.claude/deck-plugin`);
+});
+
+test("rewritePluginDirForContainer is a no-op when --plugin-dir is absent", () => {
+  const hostCmd = `claude --session-id "abc"`;
+  expect(rewritePluginDirForContainer(hostCmd)).toBe(hostCmd);
+});
+
+// Reviewer (card a79c7696 volet 1 review, correction 2): the invariant has a
+// THIRD corner beyond SANDBOX_DECK_PLUGIN_DIR (what --plugin-dir is rewritten
+// to) -- the literal ProjectionEntry.name driving clean/chown in
+// sandbox-service.ts, and the basename getDeckPluginDir actually resolves on
+// the HOST (what docker cp really copies, so what `basename(src)` really
+// lands as under SANDBOX_CONFIG_DIR/). Before this test, all three were
+// separate 'deck-plugin' literals pinned only by comment; a rename of ONE
+// would leave the other two -- and every existing test here -- green.
+test("SANDBOX_DECK_PLUGIN_NAME matches the host basename deckPluginDirFor actually resolves", () => {
+  expect(SANDBOX_DECK_PLUGIN_NAME).toBe(DECK_PLUGIN_DIRNAME);
+  expect(basename(deckPluginDirFor(true, "/resources", "/repo"))).toBe(SANDBOX_DECK_PLUGIN_NAME);
+  expect(basename(deckPluginDirFor(false, "/resources", "/repo"))).toBe(SANDBOX_DECK_PLUGIN_NAME);
 });
 
 test("rewriteLoopbackForContainer targets only the host part", () => {

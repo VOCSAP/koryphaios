@@ -1,7 +1,7 @@
 import { test, expect, afterEach } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 // All three modules are pure (no node-pty / electron), so they import under bun.
 import {
@@ -16,6 +16,8 @@ import {
 import {
   buildSessionCommandLine,
   createMissingDirTracker,
+  DECK_PLUGIN_DIRNAME,
+  deckPluginDirFor,
   encodeInitialPromptKeystrokes,
   quotePromptArg,
   sanitizeFlagValue,
@@ -216,6 +218,21 @@ test("an empty/whitespace pluginDir never emits the flag", () => {
   expect(fresh).toBe("claude run --session-id \"id-1\"");
   const none = buildSessionCommandLine({ baseCommand: "claude run", sessionId: "id-1", mode: "fresh" });
   expect(none).toBe("claude run --session-id \"id-1\"");
+});
+
+// Card a79c7696 volet 1 review: pins the third corner of the deck-plugin
+// invariant the reviewer measured as unpinned (basename of what
+// getDeckPluginDir resolves on the HOST vs. SANDBOX_DECK_PLUGIN_NAME, the
+// literal driving the container-side copy/clean/chown). deckPluginDirFor is
+// the pure decision index.ts's getDeckPluginDir now delegates to, so this
+// runs the SAME resolution index.ts uses -- not a re-statement of it.
+test("deckPluginDirFor resolves to a dir named DECK_PLUGIN_DIRNAME, packaged and dev alike", () => {
+  const packaged = deckPluginDirFor(true, "C:/res", "C:/repo");
+  const dev = deckPluginDirFor(false, "C:/res", "C:/repo");
+  expect(basename(packaged)).toBe(DECK_PLUGIN_DIRNAME);
+  expect(basename(dev)).toBe(DECK_PLUGIN_DIRNAME);
+  expect(packaged.startsWith("C:/res") || packaged.startsWith("C:\\res")).toBe(true);
+  expect(dev.startsWith("C:/repo") || dev.startsWith("C:\\repo")).toBe(true);
 });
 
 // ----- supervisor flags (PLAN C5/C8): re-passed on fresh AND resume -----

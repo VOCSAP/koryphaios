@@ -45,10 +45,15 @@ import {
   containerTranscriptDir,
   isSandboxContainerName,
   parseTranscriptList,
+  SANDBOX_DECK_PLUGIN_NAME,
   scriptFileName,
   type SandboxEngine,
   type SandboxLaunchScriptSpec
 } from './sandbox-command'
+// Card a79c7696 volet 1: deck-plugin (roadmap-card skill + roadmap-scribe
+// agent) is projected as an extra ProjectionEntry alongside the operator's
+// config, reusing the same clean/copy/chown plumbing and signature walk.
+
 import {
   projectSandboxSettings,
   readSandboxStore,
@@ -62,14 +67,15 @@ import { canonicalPath } from './worktree-service'
 import {
   PROJECTED_ENTRIES,
   SANDBOX_OVERRIDES_DIR,
+  containerSignature,
   describeProjection,
   parseProjectedMarker,
   planProjection,
   projectionHookWarnings,
-  projectionSignature,
   stripHostOnlyHooks,
   unknownOverrides,
-  type ProjectedMarker
+  type ProjectedMarker,
+  type ProjectionEntry
 } from './sandbox-projection'
 import { reportError } from './log'
 
@@ -113,6 +119,15 @@ export interface SandboxServiceDeps {
   stateDir: string
   /** Host ~/.claude — projection SOURCE only (never mounted, see projection). */
   claudeHomeDir: string
+  /**
+   * getDeckPluginDir from index.ts, passed BY REFERENCE (same LOAD-BEARING
+   * reason as index.ts's own comment on that function: calling it once here
+   * and storing the string would lose the live re-check and the missing-dir
+   * report). '' when the plugin build is missing — projectDeckPlugin() then
+   * skips projection instead of copying an empty/nonexistent dir. Card
+   * a79c7696 volet 1.
+   */
+  deckPluginDir: () => string
   /** Dir holding the shipped Dockerfile (image auto-build). */
   imageContextDir: string
   /** Broker endpoint the CONTAINER should reach (already host.docker.internal). */
@@ -795,7 +810,12 @@ export class SandboxService extends EventEmitter {
         this.deps.journal(`sandbox: container ${this.containerName} created (${this.image()})`)
         mark('create')
       }
-      if (info.state !== 'running') {
+      // Captured BEFORE the start attempt: info.state here is either the
+      // freshly-created 'created' or whatever inspectIdState just read, so
+      // this is true exactly on a real start event (fresh create or resume
+      // from stopped) -- never on a poll of an already-running container.
+      const containerJustStarted = info.state !== 'running'
+      if (containerJustStarted) {
         const started = await this.run(['start', this.containerName], 30_000)
         if (started.code !== 0) {
           this.lastError = started.stderr.trim() || 'container start failed'
@@ -815,21 +835,70 @@ export class SandboxService extends EventEmitter {
       // The opt-out folds into the marker key: toggling projectConfig either
       // way mismatches the marker, so the next ensure() re-projects or scrubs
       // exactly once, then skips again.
-      const signature = this.settings().projectConfig
-        ? `${info.id}\n${projectionSignature(this.deps.claudeHomeDir)}`
-        : `${info.id}\ndisabled`
+      // deck-plugin folds into the signature unconditionally (both branches
+      // below) -- it is always projected regardless of the operator's config
+      // opt-out, so a deck-plugin-only change (app update) must still trip a
+      // re-project on an existing container even when projectConfig is off.
+      //
+      // Review (card a79c7696 volet 1, reviewer measured): signatureOfEntries
+      // shares one SIG_MAX_ENTRIES=5000 budget across the entries it walks, IN
+      // ARRAY ORDER. Concatenating deck-plugin AFTER planProjection(...) (as a
+      // single walk) meant an operator config tree bigger than the budget
+      // (an installed plugin with deps reaches that easily) starved
+      // deck-plugin's fingerprint to zero -- it silently stopped moving the
+      // signature, so an app update landed in the container only by
+      // coincidence, on the next unrelated operator-config edit. Computing
+      // deck-plugin's signature as its OWN walk (own 5000-entry budget, order
+      // no longer able to matter) and folding the two strings together fixes
+      // it without depending on which one a future reorder puts first.
+      //
+      // Composition itself lives in sandbox-projection.ts's containerSignature
+      // (pure, bun-testable) instead of being re-typed here: a regression test
+      // that re-implemented this shape independently would only prove its own
+      // copy correct, not that ensure() actually calls it (card a79c7696 volet
+      // 1 review, 2nd pass).
+      const signature = containerSignature(
+        info.id,
+        this.deckPluginProjectionEntries(),
+        this.deps.claudeHomeDir,
+        this.settings().projectConfig
+      )
       mark('signature')
       const marker = this.readProjectedMarker()
       if (marker?.key !== signature) {
         await this.projectConfig()
         this.writeProjectedMarker(signature)
         mark('projection')
-      } else if (this.projectionSummary === null && marker.summary !== null) {
-        // Skipped projection after an app restart: the in-memory summary is
-        // empty but the container still carries the config -- rehydrate from
-        // the marker so status() tells the truth.
-        this.projectionSummary = marker.summary
-        if (this.hookWarnings.length === 0) this.hookWarnings = marker.hookWarnings
+      } else {
+        // Security (card a79c7696 volet 1 review): deck-plugin lands in the
+        // auth volume (SANDBOX_AUTH_VOLUME = 'kory-claude-auth', a bare
+        // constant -- one volume for the WHOLE APP, shared by every
+        // project's container and by the throwaway auth container, not one
+        // per project). The signature above only fingerprints the HOST source
+        // files -- it says nothing about what is currently sitting in that
+        // volume, which a compromised agent in a DIFFERENT container could
+        // have overwritten (it carries executable bundles + hooks.json, not
+        // just markdown). An unchanged signature is therefore not proof of an
+        // unchanged copy. Re-project unconditionally on every real container
+        // start (containerJustStarted, not every ensure() poll of an
+        // already-running container) so any such alteration is overwritten
+        // before this container's agent can be handed a tampered
+        // hook/bridge. This closes PERSISTENCE of a tampered copy across a
+        // restart; it does not close the window while a container stays up
+        // and running (out of scope for this fix, same as the pre-existing
+        // rm-rf-on-shared-volume issue the reviewer carded separately).
+        // No regression test covers this branch specifically: nothing today
+        // imports sandbox-service.ts (Docker/Podman lifecycle, not the pure
+        // sandbox-command.ts/sandbox-projection.ts split) -- that is the gap
+        // to close, not a claim this is untestable in principle.
+        if (containerJustStarted) await this.projectDeckPlugin()
+        if (this.projectionSummary === null && marker.summary !== null) {
+          // Skipped operator-config projection after an app restart: the
+          // in-memory summary is empty but the container still carries the
+          // config -- rehydrate from the marker so status() tells the truth.
+          this.projectionSummary = marker.summary
+          if (this.hookWarnings.length === 0) this.hookWarnings = marker.hookWarnings
+        }
       }
       void this.probeBrokerBridge().catch((e) =>
         reportError('sandbox', 'broker bridge probe failed', e)
@@ -866,7 +935,10 @@ export class SandboxService extends EventEmitter {
       // projected instead of copying. Runs at container start (exec needs a
       // running container) and only when the marker key changed -- so a
       // stopped container missed by removeProjection() still gets scrubbed
-      // on its next start.
+      // on its next start. deck-plugin is NOT in this scrub list: the opt-out
+      // is about the OPERATOR's personal config, not the app's own workflow
+      // tooling -- projectDeckPlugin() below still runs (card a79c7696
+      // volet 1).
       const res = await this.run(
         buildProjectionCleanArgs(this.containerName, [...PROJECTED_ENTRIES]),
         30_000
@@ -877,6 +949,7 @@ export class SandboxService extends EventEmitter {
       this.projectionSummary = null
       this.hookWarnings = []
       this.deps.journal('sandbox: operator config projection is off -- container scrubbed')
+      await this.projectDeckPlugin()
       return
     }
     const entries = planProjection(this.deps.claudeHomeDir)
@@ -940,6 +1013,55 @@ export class SandboxService extends EventEmitter {
     if (entries.length > 0) {
       this.deps.journal(`sandbox: operator config projected (${this.projectionSummary})`)
     }
+    await this.projectDeckPlugin()
+  }
+
+  /**
+   * ProjectionEntry for the embedded deck-plugin, or [] when the build is
+   * missing (index.ts's getDeckPluginDir already reports that once per
+   * episode -- this stays silent so the report doesn't double up). `override`
+   * is always false: deck-plugin has no sandbox-overrides overlay concept.
+   */
+  private deckPluginProjectionEntries(): ProjectionEntry[] {
+    const hostPath = this.deps.deckPluginDir()
+    return hostPath ? [{ name: SANDBOX_DECK_PLUGIN_NAME, hostPath, override: false }] : []
+  }
+
+  /**
+   * Copy the embedded deck-plugin (roadmap-card skill + roadmap-scribe
+   * agent, back-channel/deck-control/demo-browser MCP bridges) into the
+   * container at SANDBOX_DECK_PLUGIN_DIR, so index.ts's wrap() can rewrite
+   * `--plugin-dir` onto a path the container actually has (card a79c7696
+   * volet 1). Runs unconditionally from projectConfig() -- BOTH branches,
+   * regardless of the operator's config-projection opt-out: this is app
+   * tooling, not operator config. No-op when the build is missing.
+   */
+  private async projectDeckPlugin(): Promise<void> {
+    const entries = this.deckPluginProjectionEntries()
+    if (entries.length === 0) return
+    const names = entries.map((e) => e.name)
+    const cleaned = await this.run(buildProjectionCleanArgs(this.containerName, names), 30_000)
+    if (cleaned.code !== 0) {
+      reportError(
+        'sandbox',
+        `deck-plugin projection pre-clean failed: ${cleaned.stderr.trim().slice(0, 400)}`
+      )
+    }
+    for (const entry of entries) {
+      const res = await this.run(
+        buildCopyIntoArgs(this.containerName, entry.hostPath, `${SANDBOX_HOME}/.claude/`),
+        60_000
+      )
+      if (res.code !== 0) {
+        reportError('sandbox', `deck-plugin projection failed: ${res.stderr.trim()}`)
+        return
+      }
+    }
+    const owned = await this.run(buildProjectionChownArgs(this.containerName, names), 30_000)
+    if (owned.code !== 0) {
+      reportError('sandbox', `deck-plugin projection chown failed: ${owned.stderr.trim().slice(0, 400)}`)
+    }
+    this.deps.journal('sandbox: deck-plugin projected (roadmap-card skill + roadmap-scribe agent)')
   }
 
   /**

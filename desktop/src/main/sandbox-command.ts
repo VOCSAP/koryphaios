@@ -13,6 +13,7 @@
 import { createHash } from 'node:crypto'
 import { platform } from 'node:os'
 import { encodeProjectDir } from './session-transcript'
+import { DECK_PLUGIN_DIRNAME } from './session-command'
 
 export type SandboxEngine = 'docker' | 'podman'
 
@@ -75,6 +76,27 @@ export const SANDBOX_CONFIG_DIR_ENV = `CLAUDE_CONFIG_DIR=${SANDBOX_CONFIG_DIR}`
 export const SANDBOX_CREDENTIALS_FILE = `${SANDBOX_HOME}/.claude/.credentials.json`
 /** Onboarding state file — sits in CLAUDE_CONFIG_DIR, so inside the volume. */
 export const SANDBOX_CLAUDE_JSON = `${SANDBOX_CONFIG_DIR}/.claude.json`
+/**
+ * Name the embedded deck-plugin (roadmap-card skill + roadmap-scribe agent,
+ * back-channel/deck-control/demo-browser MCP bridges — desktop/deck-plugin)
+ * lands under inside a sandboxed container. Re-exports DECK_PLUGIN_DIRNAME
+ * (session-command.ts) rather than repeating the literal: reviewer (card
+ * a79c7696 volet 1 review) measured THREE unpinned occurrences of
+ * 'deck-plugin' -- this constant, the ProjectionEntry.name that drives
+ * clean/chown in sandbox-service.ts, and index.ts's getDeckPluginDir host
+ * basename. All three now derive from the one constant.
+ */
+export const SANDBOX_DECK_PLUGIN_NAME = DECK_PLUGIN_DIRNAME
+/**
+ * Where SANDBOX_DECK_PLUGIN_NAME lands inside a sandboxed container. Nested
+ * under SANDBOX_CONFIG_DIR (not a sibling of it) on purpose: it reuses the
+ * same clean/chown plumbing as the operator's projected config
+ * (buildProjectionCleanArgs/ChownArgs are scoped to SANDBOX_CONFIG_DIR), it
+ * is not a mount, and card a79c7696 volet 1's own "always" rule (project it
+ * regardless of the operator's config-projection opt-out) is what
+ * projectDeckPlugin() in sandbox-service.ts enforces.
+ */
+export const SANDBOX_DECK_PLUGIN_DIR = `${SANDBOX_CONFIG_DIR}/${SANDBOX_DECK_PLUGIN_NAME}`
 // Re-exported so main-side consumers keep one import; the renderer reads it
 // from @shared/types (this module is main-only). Relative import: this file
 // must stay loadable by bun tests, which do not resolve the @shared alias.
@@ -147,6 +169,26 @@ export function mapHostPathToContainer(
 /** POSIX single-quote escaping for values embedded in the launch script. */
 export function shQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
+}
+
+/**
+ * Rewrite the `--plugin-dir "<hostDir>"` flag (session-command.ts's
+ * pluginFlag) inside an already-composed session command line so it points at
+ * SANDBOX_DECK_PLUGIN_DIR instead of the host directory index.ts's
+ * getDeckPluginDir resolved it to. Card a79c7696 volet 1: SBX1's wrap()
+ * already translates cwd (mapHostPathToContainer) and env (sandboxifyEnv) but
+ * left this flag untouched, so a sandboxed session's --plugin-dir pointed at
+ * a host path the container cannot see — the skill/agent silently failed to
+ * load, indistinguishable from "not relevant here" (no error either way).
+ *
+ * A single fixed replacement (not a host-path-aware rewrite) is correct here:
+ * there is exactly one deck-plugin per app, always projected to the same
+ * container path by projectDeckPlugin() — no per-call host value to thread
+ * through. No-op when the flag is absent (deck-plugin dir missing on the
+ * host; getDeckPluginDir already reports that once per episode).
+ */
+export function rewritePluginDirForContainer(command: string): string {
+  return command.replace(/--plugin-dir "[^"]*"/, `--plugin-dir "${SANDBOX_DECK_PLUGIN_DIR}"`)
 }
 
 /** Rewrite a host-loopback URL so the container reaches the HOST's loopback. */
