@@ -158,13 +158,17 @@ addEventSink((channel, payload) => mainWindow?.webContents.send(channel, payload
 // App state lives under <userData>/config to avoid colliding with the launch
 // config.json at the root.
 app.setName('koryphaios')
-runDataMigration({ userDataDir: app.getPath('userData') })
 
 // Rolling main.log under the platform logs dir (PLAN O3): in a packaged app
 // console output goes nowhere, this file is the only durable trail. Bound
-// before anything else can fail so even startup errors land in it.
+// before anything else can fail -- INCLUDING the data migration below, whose
+// reportError calls would otherwise fall back to console.error and vanish in a
+// packaged app, exactly when a migration failure matters most (card eda86400).
+// Only setName has to precede it, since the logs path derives from the app name.
 app.setAppLogsPath()
 initDeckLog(app.getPath('logs'))
+
+runDataMigration({ userDataDir: app.getPath('userData') })
 
 // Last-resort safety nets. Steady-state: log + journal and keep running (live
 // PTYs beat a crash). Before the window exists there is nothing to keep alive:
