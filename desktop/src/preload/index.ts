@@ -13,6 +13,7 @@ import type {
   PtyDataEvent,
   PtyExitEvent,
   RoadmapListFilters,
+  RoadmapQuery,
   RoadmapUpsertFields,
   SandboxContainerAction,
   SandboxSettingsPatch,
@@ -140,6 +141,7 @@ const api: DeckApi = {
   announce: (text: string) => ipcRenderer.invoke('announce:send', text),
 
   roadmapList: (filters: RoadmapListFilters) => ipcRenderer.invoke('roadmap:list', filters),
+  roadmapSearch: (query: RoadmapQuery) => ipcRenderer.invoke('roadmap:search', query),
   roadmapUpsert: (fields: RoadmapUpsertFields) => ipcRenderer.invoke('roadmap:upsert', fields),
   roadmapArchive: (id: string) => ipcRenderer.invoke('roadmap:archive', id),
   roadmapReorder: (ids: string[], waves?: string[][]) =>

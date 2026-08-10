@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type {
   RoadmapDirective,
   RoadmapItem,
@@ -10,19 +10,26 @@ import type {
 } from '@shared/types'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
-import { useT, type TFn } from '../i18n'
+import { useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
 import { CreateMenu } from './CreateMenu'
-import { KIND_ICONS, RoadmapItemId, RoadmapItemModal } from './RoadmapItemModal'
+import { KIND_ICONS, RoadmapItemModal } from './RoadmapItemModal'
+import { isLocked, RoadmapBoard } from './RoadmapBoard'
+import { RoadmapFilterPanel } from './RoadmapFilterPanel'
+import { RoadmapFilterChips } from './RoadmapFilterChips'
 import { WorkflowLane } from './WorkflowLane'
-import { enqueueClosure, insertAt, insertSoloWaves, queuedItems, wavesOf } from '@shared/workflow'
+import { hasActiveCriteria, useRoadmapData } from '../roadmap-data'
+import { buildAppendToQueue, buildInsertIntoQueue, buildStackIntoQueue } from '@shared/workflow'
 
-// Roadmap view (PLAN C3-M3, reworked as a kanban board in PLAN K1): one column
-// per status, native HTML5 drag & drop between columns, MoSCoW priority as a
-// colored chip + sort inside each column. Data lives in the broker (roadmap:*
-// IPC); agents write to the same table through their MCP tools, so the view
-// polls while visible to pick up their changes.
+// Roadmap view (PLAN C3-M3, reworked as a kanban board in PLAN K1, split into
+// container + RoadmapBoard/RoadmapFilterPanel/RoadmapFilterChips by card
+// 3b0fda5f): the container keeps mutation logic/modals and the Workflow lane,
+// consumes the ONE shared useRoadmapData() hook (roadmap-data.ts) also used
+// by RoadmapList.tsx's mobile layout, and renders the board/filter pieces as
+// props-driven children. Data lives in the broker (roadmap:* IPC); agents
+// write to the same table through their MCP tools, so the hook polls while
+// the view is mounted to pick up their changes.
 //
 // Movement rules (K1/K2): dropping on "done" asks for confirmation (the item
 // will no longer be picked up); a locked in_progress card (an agent actively
@@ -34,10 +41,6 @@ const DIRECTIVES: RoadmapDirective[] = ['clear', 'compact', 'magic_compact']
 const PRIORITIES: RoadmapPriority[] = ['must', 'should', 'could', 'wont']
 const LEVELS: RoadmapLevel[] = ['low', 'medium', 'high']
 const STATUSES: RoadmapStatus[] = ['idea', 'planned', 'in_progress', 'done']
-/** Column order of the board; 'archived' joins only when the toggle is on. */
-const BOARD_COLUMNS: RoadmapStatus[] = ['idea', 'planned', 'in_progress', 'done']
-const PRIORITY_RANK: Record<RoadmapPriority, number> = { must: 0, should: 1, could: 2, wont: 3 }
-const POLL_MS = 5000
 
 /** Editable subset of an item, buffered in the form. */
 interface Draft {
@@ -92,96 +95,6 @@ function toDraft(i: RoadmapItem): Draft {
   }
 }
 
-/** True when the card is frozen by an agent's work-lock (PLAN K2). */
-function isLocked(item: RoadmapItem): boolean {
-  return item.locked && item.status === 'in_progress'
-}
-
-function BoardCard({
-  item,
-  onOpen,
-  onMenu,
-  onPrio,
-  onDragStart,
-  onDragEnd,
-  t
-}: {
-  item: RoadmapItem
-  onOpen: () => void
-  onMenu: (x: number, y: number) => void
-  onPrio: (x: number, y: number) => void
-  onDragStart: (e: React.DragEvent) => void
-  onDragEnd: () => void
-  t: TFn
-}): React.JSX.Element {
-  const locked = isLocked(item)
-  const draggable = !locked && item.status !== 'archived'
-  return (
-    <button
-      className={`rm-card${locked ? ' rm-card-locked' : ''}${item.status === 'archived' ? ' rm-card-archived' : ''}`}
-      draggable={draggable}
-      onDragStart={draggable ? onDragStart : undefined}
-      onDragEnd={onDragEnd}
-      onClick={onOpen}
-      onContextMenu={(e) => {
-        e.preventDefault()
-        e.stopPropagation()
-        onMenu(e.clientX, e.clientY)
-      }}
-      title={locked ? t('roadmap.lockedHint') : undefined}
-    >
-      <span className="rm-card-head">
-        {/* Priority quick-switch (K7): the chip opens a styled dropdown, no
-            detail view needed. A span, not a button (nested buttons are
-            invalid inside the card button). */}
-        <span
-          className={`rm-prio-chip rm-prio-${item.priority}`}
-          role="button"
-          title={`${t(`roadmap.priority.${item.priority}`)} — ${t('roadmap.prioPick')}`}
-          onClick={(e) => {
-            e.stopPropagation()
-            const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
-            onPrio(r.left, r.bottom + 4)
-          }}
-        >
-          <span className="rm-prio-dot" />
-        </span>
-        <span className="rm-kind" title={t(`roadmap.kind.${item.kind}`)}>
-          {KIND_ICONS[item.kind]}
-        </span>
-        <span className="rm-title">{item.title}</span>
-      </span>
-      <span className="rm-badges">
-        {/* Short id first, Trello card-number position: the operator reads the
-            board but agents address cards by id, so the link has to be on the
-            miniature, not only in the detail modal. */}
-        <RoadmapItemId item={item} t={t} />
-        <span className={`rm-badge rm-badge-value-${item.value}`}>
-          {t('roadmap.value')}: {t(`roadmap.level.${item.value}`)}
-        </span>
-        <span className={`rm-badge rm-badge-effort-${item.effort}`}>
-          {t('roadmap.effort')}: {t(`roadmap.level.${item.effort}`)}
-        </span>
-        {item.queue !== null && (
-          <span className="rm-badge rm-badge-queue" title={t('roadmap.queueSection')}>
-            {GLYPH_BADGES.clepsydra} #{item.queue}
-          </span>
-        )}
-        {locked && (
-          <span className="rm-badge rm-badge-locked" title={t('roadmap.lockedHint')}>
-            {GLYPH_BADGES.lock} {item.locked_by}
-          </span>
-        )}
-        {item.tags.map((tag) => (
-          <span key={tag} className="rm-badge rm-badge-tag">
-            #{tag}
-          </span>
-        ))}
-      </span>
-    </button>
-  )
-}
-
 /**
  * The prompt handed to an agent spawned on an item (PLAN C3-M4). English, like
  * the MCP instructions the agent already reads; it closes the loop by asking
@@ -210,11 +123,24 @@ export function RoadmapView(): React.JSX.Element {
   // Dispatch needs a live team-lead (PLAN C15); the button greys out otherwise.
   const hasLead = sessions.some((s) => s.lead && !s.supervisor && s.status !== 'exited')
 
-  const [items, setItems] = useState<RoadmapItem[]>([])
-  const [error, setError] = useState<string | null>(null)
-  const [loaded, setLoaded] = useState(false)
-  const [kindFilter, setKindFilter] = useState<'' | RoadmapKind>('')
-  const [showArchived, setShowArchived] = useState(false)
+  const {
+    board,
+    facets,
+    queue,
+    criteria,
+    setCriteria,
+    includeArchived,
+    setIncludeArchived,
+    refresh,
+    error: fetchError,
+    loaded
+  } = useRoadmapData()
+  // Mutation failures (upsert/archive/reorder/...) are view-local: the hook's
+  // `error` only ever reflects the last fetch. Either one renders the same
+  // banner (`error` below), a fetch failure just never gets cleared by a
+  // successful mutation and vice versa.
+  const [mutationError, setMutationError] = useState<string | null>(null)
+  const error = fetchError ?? mutationError
   const [selectedId, setSelectedId] = useState<string | null>(null)
   // Form state: null = closed; a Draft without id = create; with id = edit.
   const [draft, setDraft] = useState<Draft | null>(null)
@@ -238,28 +164,11 @@ export function RoadmapView(): React.JSX.Element {
   const [wandBusy, setWandBusy] = useState(false)
   // Workflow lane blown up to a foreground fullscreen modal.
   const [wfFull, setWfFull] = useState(false)
-
-  // Always fetch UNfiltered (kind narrows the board client-side): the
-  // Workflow lane must always see the whole queue, otherwise a reorder
-  // committed under an active filter would silently unqueue hidden items.
-  const refresh = useCallback(async (): Promise<void> => {
-    try {
-      const next = await window.api.roadmapList({ include_archived: showArchived })
-      setItems(next)
-      setError(null)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setLoaded(true)
-    }
-  }, [showArchived])
-
-  // Initial load + poll while the view is visible (agents may write any time).
-  useEffect(() => {
-    void refresh()
-    const timer = setInterval(() => void refresh(), POLL_MS)
-    return () => clearInterval(timer)
-  }, [refresh])
+  // Review round 3 (2026-08-10), MAJOR (A2): the filter panel used to be
+  // mounted unconditionally, no button to show/hide it -- the card requires
+  // it be dismissable. Default open (unchanged behavior for anyone not
+  // touching it).
+  const [filterPanelOpen, setFilterPanelOpen] = useState(true)
 
   // Files-view seed (PLAN GX8): open the create form prefilled with the code
   // selection. Saving stays an explicit operator action (wand-style contract).
@@ -276,7 +185,7 @@ export function RoadmapView(): React.JSX.Element {
     clearRoadmapSeed()
   }, [roadmapSeed, clearRoadmapSeed])
 
-  const selected = items.find((i) => i.id === selectedId) ?? null
+  const selected = queue.all.find((i) => i.id === selectedId) ?? null
 
   const save = async (): Promise<void> => {
     if (!draft || !draft.title.trim()) return
@@ -307,22 +216,18 @@ export function RoadmapView(): React.JSX.Element {
       })
       // Lane-born draft: slot the new item into the queue where it was dropped
       // (nothing was written before Save, so Cancel really created nothing).
-      // Preserve any existing wave ties (wavesOf) instead of the flat id list
-      // alone -- see the wavesOf/insertSoloWaves doc comments in
-      // shared/workflow.ts (card 42edc88b phase 2 wave-preservation finding).
+      // buildInsertIntoQueue preserves existing wave ties -- see its doc
+      // comment in shared/workflow.ts.
       if (draft.id === undefined && draft.insertAtQueue !== undefined) {
-        const queued = queuedItems(items)
-        const queuedIds = queued.map((i) => i.id)
-        const ids = insertAt(queuedIds, saved.id, draft.insertAtQueue)
-        const waves = insertSoloWaves(wavesOf(queued), ids.indexOf(saved.id), [saved.id])
-        await window.api.roadmapReorder(ids, waves)
+        const payload = buildInsertIntoQueue(queue, saved.id, draft.insertAtQueue)
+        await window.api.roadmapReorder(payload.ids, payload.waves)
       }
       setDraft(null)
       setSelectedId(saved.id)
       showToast('toast.roadmapSaved')
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -332,7 +237,7 @@ export function RoadmapView(): React.JSX.Element {
       showToast('toast.roadmapArchived', 'info')
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -342,7 +247,7 @@ export function RoadmapView(): React.JSX.Element {
       showToast('toast.roadmapSaved')
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -352,7 +257,7 @@ export function RoadmapView(): React.JSX.Element {
       await window.api.roadmapUpsert({ id: item.id, queue })
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -366,40 +271,33 @@ export function RoadmapView(): React.JSX.Element {
       await window.api.roadmapReorder(ids, waves)
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
   // Appends item to the end of the queue, pulling its unmet, unqueued
-  // dependencies along with it (dependency-first, right before it) in the
-  // SAME reorder commit -- the modal's "add to queue" entry point, alongside
-  // WorkflowLane's commitDrop, both funnel through enqueueClosure so a card
-  // can never reach the queue without what it depends on. Preserves any
-  // existing wave ties (wavesOf) instead of flattening the queue to 1..N; the
-  // appended item and its closure each land as their own singleton wave (see
-  // insertSoloWaves).
+  // dependencies along with it in the same reorder commit -- the modal's
+  // "add to queue" entry point, alongside WorkflowLane's commitDrop, both
+  // funnel through buildAppendToQueue so a card can never reach the queue
+  // without what it depends on.
   const queueItem = (item: RoadmapItem): Promise<void> => {
-    const queued = queuedItems(items).filter((i) => i.id !== item.id)
-    const queuedIds = queued.map((i) => i.id)
-    const closure = enqueueClosure(items, item.id)
-    const ids = [...queuedIds, ...closure, item.id]
-    const waves = insertSoloWaves(wavesOf(queued), queuedIds.length, [...closure, item.id])
-    return reorderQueue(ids, waves)
+    const payload = buildAppendToQueue(queue, item.id)
+    return reorderQueue(payload.ids, payload.waves)
   }
 
   const addDep = async (childId: string, parentId: string): Promise<void> => {
-    const child = items.find((i) => i.id === childId)
+    const child = queue.all.find((i) => i.id === childId)
     if (!child || child.depends_on.includes(parentId)) return
     try {
       await window.api.roadmapUpsert({ id: childId, depends_on: [...child.depends_on, parentId] })
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
   const removeDep = async (childId: string, parentId: string): Promise<void> => {
-    const child = items.find((i) => i.id === childId)
+    const child = queue.all.find((i) => i.id === childId)
     if (!child) return
     try {
       await window.api.roadmapUpsert({
@@ -408,7 +306,7 @@ export function RoadmapView(): React.JSX.Element {
       })
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -424,33 +322,17 @@ export function RoadmapView(): React.JSX.Element {
   ): Promise<void> => {
     try {
       await window.api.roadmapUpsert({ id: dragId, depends_on: dependsOn })
-      const item = items.find((i) => i.id === dragId)
+      const item = queue.all.find((i) => i.id === dragId)
       if (item && item.queue === null) {
-        // Stacking never lands INSIDE an existing wave: a wave is one
-        // execution slot, so "just after the target" is read at wave
-        // granularity, not at a raw flat index -- reviewer finding on
-        // e2b0630, "just after targetId" could fall mid-wave when targetId
-        // isn't its wave's last member, silently splitting off wave-mates
-        // the operator never touched. Round the insertion index to the
-        // boundary right after the target's WHOLE wave; dragId still lands
-        // as its own singleton wave there (team-lead-confirmed 2026-07-29,
-        // same conservative v1 as every other insertion path).
-        const queued = queuedItems(items)
-        const queuedIds = queued.map((i) => i.id)
-        const baseWaves = wavesOf(queued)
-        const at = queuedIds.indexOf(targetId)
-        const targetWave = at >= 0 ? baseWaves.findIndex((w) => w.includes(targetId)) : -1
-        const boundary =
-          targetWave >= 0
-            ? baseWaves.slice(0, targetWave + 1).reduce((n, w) => n + w.length, 0)
-            : queuedIds.length
-        const ids = insertAt(queuedIds, dragId, boundary)
-        const waves = insertSoloWaves(baseWaves, ids.indexOf(dragId), [dragId])
-        await window.api.roadmapReorder(ids, waves)
+        // Stacking never lands INSIDE an existing wave -- buildStackIntoQueue
+        // rounds to the boundary right after the target's WHOLE wave (see its
+        // doc comment in shared/workflow.ts).
+        const payload = buildStackIntoQueue(queue, dragId, targetId, 'after')
+        await window.api.roadmapReorder(payload.ids, payload.waves)
       }
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -481,9 +363,9 @@ export function RoadmapView(): React.JSX.Element {
       })
       // The draft may have been closed while the wand ran: drop the result.
       setDraft((d) => (d ? { ...d, context: proposed } : d))
-      setError(null)
+      setMutationError(null)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     } finally {
       setWandBusy(false)
     }
@@ -503,7 +385,7 @@ export function RoadmapView(): React.JSX.Element {
       await window.api.roadmapUpsert({ id: item.id, status })
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -514,7 +396,7 @@ export function RoadmapView(): React.JSX.Element {
   }
 
   const dropOn = (status: RoadmapStatus): void => {
-    const item = items.find((i) => i.id === dragId) ?? null
+    const item = queue.all.find((i) => i.id === dragId) ?? null
     setDragId(null)
     setDropCol(null)
     if (item) moveItem(item, status)
@@ -531,7 +413,7 @@ export function RoadmapView(): React.JSX.Element {
       else showToast('toast.stopNoPeers', 'info')
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -544,7 +426,7 @@ export function RoadmapView(): React.JSX.Element {
       await window.api.roadmapUpsert({ id: item.id, priority })
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -576,7 +458,7 @@ export function RoadmapView(): React.JSX.Element {
       showToast(r.sent ? 'toast.assignSent' : 'toast.assignFailed', r.sent ? 'success' : 'info')
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -632,36 +514,10 @@ export function RoadmapView(): React.JSX.Element {
     ]
   }
 
-  const columns: RoadmapStatus[] = showArchived ? [...BOARD_COLUMNS, 'archived'] : BOARD_COLUMNS
-  const columnItems = (status: RoadmapStatus): RoadmapItem[] =>
-    items
-      .filter((i) => i.status === status && (!kindFilter || i.kind === kindFilter))
-      .sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority])
-
   return (
     <div className="roadmap-view">
       <header className="roadmap-head">
         <h2>{t('roadmap.title')}</h2>
-        <select
-          value={kindFilter}
-          onChange={(e) => setKindFilter(e.target.value as '' | RoadmapKind)}
-          title={t('roadmap.filterKind')}
-        >
-          <option value="">{t('roadmap.allKinds')}</option>
-          {KINDS.map((k) => (
-            <option key={k} value={k}>
-              {KIND_ICONS[k]} {t(`roadmap.kind.${k}`)}
-            </option>
-          ))}
-        </select>
-        <label className="roadmap-archived-toggle">
-          <input
-            type="checkbox"
-            checked={showArchived}
-            onChange={(e) => setShowArchived(e.target.checked)}
-          />
-          <span>{t('roadmap.showArchived')}</span>
-        </label>
         <span className="roadmap-spacer" />
         <button
           className="btn"
@@ -676,89 +532,92 @@ export function RoadmapView(): React.JSX.Element {
         >
           {t('roadmap.importPlan')}
         </button>
+        {/* Review round 3 (2026-08-10), MAJOR (A2): show/hide the filter
+            panel. Icon swaps with state so the button also communicates
+            what clicking it will do next (menu = open it, close = dismiss
+            it), same convention as WorkflowLane's collapse toggle. */}
+        <button
+          type="button"
+          className="btn"
+          title={t('roadmap.filter.togglePanel')}
+          onClick={() => setFilterPanelOpen((open) => !open)}
+        >
+          {filterPanelOpen ? GLYPH_ACTIONS.close : GLYPH_ACTIONS.menu}
+        </button>
         <button className="primary" onClick={() => setDraft({ ...EMPTY_DRAFT })}>
           {t('roadmap.add')}
         </button>
       </header>
 
-      {error && <div className="roadmap-error">{t('roadmap.error', { error })}</div>}
+      <RoadmapFilterChips
+        criteria={criteria}
+        setCriteria={setCriteria}
+        includeArchived={includeArchived}
+        setIncludeArchived={setIncludeArchived}
+        t={t}
+      />
 
-      {loaded && items.length === 0 && !error && (
-        <p className="roadmap-empty">{t('roadmap.empty')}</p>
-      )}
+      <div className="roadmap-body">
+        {filterPanelOpen && (
+          <RoadmapFilterPanel
+            criteria={criteria}
+            setCriteria={setCriteria}
+            facets={facets}
+            includeArchived={includeArchived}
+            setIncludeArchived={setIncludeArchived}
+            t={t}
+          />
+        )}
 
-      <div className="rm-board">
-        {columns.map((status) => {
-          const rows = columnItems(status)
-          const droppable = status !== 'archived'
-          return (
-            <section
-              key={status}
-              className={`rm-col rm-col-${status}${dropCol === status && dragId ? ' rm-col-over' : ''}`}
-              onDragOver={
-                droppable
-                  ? (e) => {
-                      e.preventDefault()
-                      setDropCol(status)
-                    }
-                  : undefined
-              }
-              onDragLeave={droppable ? () => setDropCol((c) => (c === status ? null : c)) : undefined}
-              onDrop={droppable ? () => dropOn(status) : undefined}
-            >
-              <h3 className={`rm-col-head rm-col-head-${status}`}>
-                {t(`roadmap.status.${status}`)}
-                <span className="rm-count">{rows.length}</span>
-              </h3>
-              <div className="rm-col-body">
-                {rows.map((item) => (
-                  <BoardCard
-                    key={item.id}
-                    item={item}
-                    onOpen={() => setSelectedId(item.id)}
-                    onMenu={(x, y) => setMenu({ x, y, item })}
-                    onPrio={(x, y) => setPrioMenu({ x, y, item })}
-                    onDragStart={(e) => {
-                      e.dataTransfer.setData('text/plain', item.id)
-                      e.dataTransfer.effectAllowed = 'move'
-                      setDragId(item.id)
-                    }}
-                    onDragEnd={() => {
-                      setDragId(null)
-                      setDropCol(null)
-                    }}
-                    t={t}
-                  />
-                ))}
-              </div>
-            </section>
-          )
-        })}
+        <div className="roadmap-main">
+          <RoadmapBoard
+            items={board}
+            showArchived={includeArchived}
+            hasActiveFilters={hasActiveCriteria(criteria)}
+            onClearFilters={() => setCriteria({})}
+            loaded={loaded}
+            error={error}
+            dragId={dragId}
+            dropCol={dropCol}
+            onDragStartItem={(item) => setDragId(item.id)}
+            onDragEndItem={() => {
+              setDragId(null)
+              setDropCol(null)
+            }}
+            onDragOverCol={(status) => setDropCol(status)}
+            onDragLeaveCol={(status) => setDropCol((c) => (c === status ? null : c))}
+            onDropCol={dropOn}
+            onOpen={(item) => setSelectedId(item.id)}
+            onMenu={(item, x, y) => setMenu({ x, y, item })}
+            onPrio={(item, x, y) => setPrioMenu({ x, y, item })}
+            t={t}
+          />
+
+          {/* Workflow lane (bottom half): the dispatch queue as a visual chain —
+              cards top, execution order below, per the operator's mental model. */}
+          {!wfFull && (
+            <WorkflowLane
+              source={queue}
+              hasLead={hasLead}
+              onToggleFull={() => setWfFull(true)}
+              onDispatch={() => void dispatch()}
+              onOpen={(id) => setSelectedId(id)}
+              onMenu={(item, x, y) => setMenu({ x, y, item })}
+              onReorder={(ids, waves) => void reorderQueue(ids, waves)}
+              onCreateAt={createAt}
+              onAddDep={(childId, parentId) => void addDep(childId, parentId)}
+              onRemoveDep={(childId, parentId) => void removeDep(childId, parentId)}
+              onStack={(dragId, targetId, deps) => void stackItem(dragId, targetId, deps)}
+            />
+          )}
+        </div>
       </div>
-
-      {/* Workflow lane (bottom half): the dispatch queue as a visual chain —
-          cards top, execution order below, per the operator's mental model. */}
-      {!wfFull && (
-        <WorkflowLane
-          items={items}
-          hasLead={hasLead}
-          onToggleFull={() => setWfFull(true)}
-          onDispatch={() => void dispatch()}
-          onOpen={(id) => setSelectedId(id)}
-          onMenu={(item, x, y) => setMenu({ x, y, item })}
-          onReorder={(ids, waves) => void reorderQueue(ids, waves)}
-          onCreateAt={createAt}
-          onAddDep={(childId, parentId) => void addDep(childId, parentId)}
-          onRemoveDep={(childId, parentId) => void removeDep(childId, parentId)}
-          onStack={(dragId, targetId, deps) => void stackItem(dragId, targetId, deps)}
-        />
-      )}
 
       {wfFull && (
         <div className="modal-backdrop" onMouseDown={() => setWfFull(false)}>
           <div className="wf-modal" onMouseDown={(e) => e.stopPropagation()}>
             <WorkflowLane
-              items={items}
+              source={queue}
               hasLead={hasLead}
               fullscreen
               onToggleFull={() => setWfFull(false)}
@@ -778,7 +637,7 @@ export function RoadmapView(): React.JSX.Element {
       {selected && !draft && (
         <RoadmapItemModal
           item={selected}
-          items={items}
+          items={queue.all}
           onClose={() => setSelectedId(null)}
           onEdit={() => setDraft(toDraft(selected))}
           onLaunch={() => setLaunchItem(selected)}

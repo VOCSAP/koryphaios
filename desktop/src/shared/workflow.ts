@@ -523,3 +523,117 @@ export function insertSoloWaves(waves: string[][], at: number, ids: string[]): s
   }
   return [...waves, ...solo]
 }
+
+// ----- reorder-id invariant (card 3b0fda5f) -----
+//
+// The filter/search UI (roadmap-data.ts) hands the two layouts a BOARD that
+// is a subset of the true dispatch queue. Every reorder commit (save's
+// lane-born draft, queueItem, stackItem, WorkflowLane's own drops) must
+// still be computed against the WHOLE unfiltered list -- a reorder built
+// from the filtered board would silently drop every hidden item out of the
+// queue the moment it committed.
+//
+// Review round 2 (2026-08-10), MAJOR: an EARLIER version of this branded
+// exactly `{ ...queue, all: board }` COMPILED against it -- object-literal
+// spread copies a value's own keys (symbols included), so the resulting
+// literal structurally matched the interface, escaping BOTH the type brand
+// and tests/desktop-workflow-queue-source.test.ts's `queueSourceOf(` grep
+// sweep in one motion, which is exactly the silent-unqueue this exists to
+// forbid. A CLASS with a private field closes that hole: TypeScript only
+// treats a value as assignable to a class type with a private member when
+// the value's type is nominally that class (or a subtype) -- a fresh object
+// literal, however many properties it copies at runtime, is never nominally
+// `QueueSource`, so `{ ...queue, all: board }` no longer typechecks as one.
+// `queueSourceOf` is kept as the public constructor function (unchanged call
+// sites everywhere else); the class itself is private-constructed so it can
+// only be minted here. What DOES still survive is a bare `as QueueSource`
+// type assertion -- TypeScript's `as` is looser than plain assignment -- so
+// that spelling is added to the discipline sweep by name, same file.
+class QueueSourceImpl {
+  private readonly brand = true
+  private constructor(readonly all: RoadmapItem[]) {}
+  static mint(unfiltered: RoadmapItem[]): QueueSourceImpl {
+    return new QueueSourceImpl(unfiltered)
+  }
+  /** Runtime companion to the compile-time brand: actually reads `brand`, so
+   * TS's noUnusedLocals does not flag a private field that exists only for
+   * nominal typing. Also a genuine, if so-far-unused, escape hatch for a
+   * caller that receives a `QueueSource` through an `unknown`/IPC boundary
+   * and needs to check it at runtime rather than merely assert the type. */
+  static isQueueSource(v: unknown): v is QueueSourceImpl {
+    return v instanceof QueueSourceImpl && v.brand === true
+  }
+}
+
+export type QueueSource = QueueSourceImpl
+
+/** The one place a QueueSource may be minted: call with the UNFILTERED list. */
+export function queueSourceOf(unfiltered: RoadmapItem[]): QueueSource {
+  return QueueSourceImpl.mint(unfiltered)
+}
+
+export interface ReorderPayload {
+  ids: string[]
+  waves: string[][]
+}
+
+/**
+ * Append `id` to the end of the queue, pulling its unmet, unqueued
+ * dependency closure along with it (dependency-first, right before it) in
+ * the same commit -- mirrors RoadmapView.queueItem / RoadmapList.queueItem,
+ * both of which funnelled this same enqueueClosure composition by hand.
+ */
+export function buildAppendToQueue(src: QueueSource, id: string): ReorderPayload {
+  const queued = queuedItems(src.all).filter((i) => i.id !== id)
+  const queuedIds = queued.map((i) => i.id)
+  const closure = enqueueClosure(src.all, id)
+  const ids = [...queuedIds, ...closure, id]
+  const waves = insertSoloWaves(wavesOf(queued), queuedIds.length, [...closure, id])
+  return { ids, waves }
+}
+
+/**
+ * Insert `id` at queue-flat index `at` (an index into the QUEUE order, not
+ * the full lane) -- mirrors RoadmapView.save's lane-born-draft placement.
+ * No dependency closure: the caller decides whether `id`'s deps need to ride
+ * along (save() never has -- a brand-new draft's depends_on are set by the
+ * upsert that created it, not by this placement step).
+ */
+export function buildInsertIntoQueue(src: QueueSource, id: string, at: number): ReorderPayload {
+  const queued = queuedItems(src.all)
+  const queuedIds = queued.map((i) => i.id)
+  const ids = insertAt(queuedIds, id, at)
+  const waves = insertSoloWaves(wavesOf(queued), ids.indexOf(id), [id])
+  return { ids, waves }
+}
+
+/**
+ * Place `dragId` as a parallel sibling of `targetId`: inserted right at the
+ * boundary before ('before') or after ('after') the target's WHOLE wave --
+ * never mid-wave, see stackTargetAt's caller-side wave-boundary rounding
+ * this mirrors (RoadmapView.stackItem, team-lead-confirmed 2026-07-29
+ * conservative v1). Dependency adoption (dragId adopting targetId's
+ * depends_on) is the caller's job via roadmapUpsert, same as today --
+ * this only computes the id/wave placement.
+ */
+export function buildStackIntoQueue(
+  src: QueueSource,
+  dragId: string,
+  targetId: string,
+  side: 'before' | 'after' = 'after'
+): ReorderPayload {
+  const queued = queuedItems(src.all)
+  const queuedIds = queued.map((i) => i.id)
+  const baseWaves = wavesOf(queued)
+  const at = queuedIds.indexOf(targetId)
+  const targetWave = at >= 0 ? baseWaves.findIndex((w) => w.includes(targetId)) : -1
+  const boundary =
+    targetWave >= 0
+      ? side === 'after'
+        ? baseWaves.slice(0, targetWave + 1).reduce((n, w) => n + w.length, 0)
+        : baseWaves.slice(0, targetWave).reduce((n, w) => n + w.length, 0)
+      : queuedIds.length
+  const ids = insertAt(queuedIds, dragId, boundary)
+  const waves = insertSoloWaves(baseWaves, ids.indexOf(dragId), [dragId])
+  return { ids, waves }
+}

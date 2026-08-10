@@ -12,6 +12,7 @@ import type {
   DeckGraphDraft,
   LaunchConfig,
   RoadmapListFilters,
+  RoadmapQuery,
   RoadmapUpsertFields,
   SandboxContainerAction,
   SandboxSettingsPatch,
@@ -40,6 +41,7 @@ import {
   computeDeckProjectKey,
   listRoadmap,
   reorderRoadmap,
+  searchRoadmap,
   upsertRoadmap
 } from './roadmap-service'
 import { validateReorderWaves } from './roadmap-reorder-validate'
@@ -591,6 +593,10 @@ export function registerIpc({
   regHandle('roadmap:list', (_e, filters: RoadmapListFilters) => {
     const { endpoint, key } = roadmapCtx()
     return listRoadmap(endpoint, key, filters ?? {})
+  })
+  regHandle('roadmap:search', (_e, query: RoadmapQuery) => {
+    const { endpoint, key } = roadmapCtx()
+    return searchRoadmap(endpoint, key, query ?? {})
   })
   regHandle('roadmap:upsert', (_e, fields: RoadmapUpsertFields) => {
     const { endpoint, key } = roadmapCtx()

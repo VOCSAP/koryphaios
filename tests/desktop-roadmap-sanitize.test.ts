@@ -22,7 +22,8 @@ import {
   upsertRoadmap,
   archiveRoadmap,
   reorderRoadmap,
-  sanitizeRoadmapItem
+  sanitizeRoadmapItem,
+  sanitizeFacets
 } from "../desktop/src/main/roadmap-service.ts";
 import type { RoadmapItem } from "../desktop/src/shared/types.ts";
 
@@ -271,4 +272,59 @@ test("an UNUSABLE item makes a single-item response THROW but only shrinks a lis
   } finally {
     stubMode = "coercible";
   }
+});
+
+// ---------------------------------------------------------------------------
+// 5. sanitizeFacets (review round 2, point 2): a malformed dimension must
+//    reject the WHOLE payload, never degrade one dimension to `[]` while
+//    the other five look fine -- that silent partial object is
+//    indistinguishable from "this project has zero of every kind", the
+//    exact false-empty the filter panel cannot recover from on its own.
+// ---------------------------------------------------------------------------
+
+function wellFormedFacets(): Record<string, unknown> {
+  return {
+    kind: [{ value: "feature", count: 3 }],
+    priority: [{ value: "must", count: 1 }],
+    effort: [{ value: "low", count: 2 }],
+    value: [{ value: "high", count: 1 }],
+    status: [{ value: "planned", count: 4 }],
+    tags: [{ value: "urgent", count: 1 }],
+    reference_total: 12
+  };
+}
+
+test("a well-formed facets payload survives unchanged", () => {
+  const facets = sanitizeFacets(wellFormedFacets());
+  expect(facets).toEqual({
+    kind: [{ value: "feature", count: 3 }],
+    priority: [{ value: "must", count: 1 }],
+    effort: [{ value: "low", count: 2 }],
+    value: [{ value: "high", count: 1 }],
+    status: [{ value: "planned", count: 4 }],
+    tags: [{ value: "urgent", count: 1 }],
+    reference_total: 12
+  });
+});
+
+test("ONE malformed dimension rejects the WHOLE facets payload, not just that dimension", () => {
+  const broken = { ...wellFormedFacets(), kind: "not-an-array" };
+  // Measured regression: before the fix this returned a valid-looking object
+  // with `kind: []`, reading as "zero features" instead of "broker sent
+  // garbage" -- both other dimensions being fine does not save it.
+  expect(sanitizeFacets(broken)).toBeNull();
+});
+
+test("a malformed INDIVIDUAL bucket is dropped from its dimension, not the whole payload", () => {
+  const partial = {
+    ...wellFormedFacets(),
+    kind: [{ value: "feature", count: 3 }, { value: 42, count: "nope" }, { count: 1 }]
+  };
+  const facets = sanitizeFacets(partial);
+  expect(facets).not.toBeNull();
+  // The two malformed buckets are dropped; the well-formed one and every
+  // OTHER dimension survive -- this is the case that must NOT reject the
+  // whole payload, distinguishing it from the test above.
+  expect(facets!.kind).toEqual([{ value: "feature", count: 3 }]);
+  expect(facets!.priority).toEqual([{ value: "must", count: 1 }]);
 });

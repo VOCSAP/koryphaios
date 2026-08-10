@@ -454,6 +454,68 @@ export interface StopResult {
 
 export interface RoadmapListResponse {
   items: RoadmapItem[]
+  /**
+   * Present iff the request set `with_facets: true` (card 3b0fda5f). Raw,
+   * unsanitized wire shape -- only searchRoadmap()'s sanitizeFacets() reads
+   * this; listRoadmap() never sets with_facets so this stays undefined there.
+   */
+  facets?: unknown
+}
+
+/**
+ * Mirror of the core shared/types.ts RoadmapListRequest (card 3b0fda5f).
+ * Keep in sync. `project_key` is stamped by the main process, not sent by
+ * the renderer -- same convention as RoadmapListFilters above.
+ */
+export interface RoadmapQuery {
+  kind?: RoadmapKind
+  status?: RoadmapStatus
+  priority?: RoadmapPriority
+  tag?: string
+  include_archived?: boolean
+  kinds?: RoadmapKind[]
+  statuses?: RoadmapStatus[]
+  priorities?: RoadmapPriority[]
+  efforts?: RoadmapLevel[]
+  values?: RoadmapLevel[]
+  tags?: string[]
+  q?: string
+  q_deep?: boolean
+  with_facets?: boolean
+}
+
+/** One value of a facet dimension and how many reference-set items carry it. */
+export interface RoadmapFacetBucket {
+  value: string
+  count: number
+}
+
+/**
+ * Mirror of the core shared/types.ts RoadmapFacets. Keep in sync. Sanitized
+ * main-side (roadmap-service.ts's sanitizeFacets) as a pick-list, never a
+ * spread -- see RoadmapSearchResult's `facets: RoadmapFacets | null` for why
+ * this can never be optional on the wire the Deck actually consumes.
+ */
+export interface RoadmapFacets {
+  kind: RoadmapFacetBucket[]
+  priority: RoadmapFacetBucket[]
+  effort: RoadmapFacetBucket[]
+  value: RoadmapFacetBucket[]
+  status: RoadmapFacetBucket[]
+  tags: RoadmapFacetBucket[]
+  reference_total: number
+}
+
+/**
+ * `facets` is `RoadmapFacets | null`, deliberately never optional/undefined:
+ * a newer Deck talking to an older, not-yet-upgraded broker on a shared
+ * deployment is a real scenario, and the filter panel must be able to tell
+ * "0 cards match" (a real zero-count bucket) apart from "the broker didn't
+ * send counters at all" (render without a counter, never a false "(0)").
+ */
+export interface RoadmapSearchResult {
+  items: RoadmapItem[]
+  facets: RoadmapFacets | null
 }
 export interface RoadmapUpsertResponse {
   item: RoadmapItem
@@ -1121,6 +1183,12 @@ export interface DeckApi {
 
   // roadmap (shared per-project backlog, PLAN C3)
   roadmapList(filters: RoadmapListFilters): Promise<RoadmapItem[]>
+  /**
+   * Card 3b0fda5f: the filter/search UI's plural+FTS5+facets query. Distinct
+   * from roadmapList (never touched by this card -- helpSnapshot() keeps
+   * calling roadmapList with an empty filter, unaffected by this addition).
+   */
+  roadmapSearch(query: RoadmapQuery): Promise<RoadmapSearchResult>
   roadmapUpsert(fields: RoadmapUpsertFields): Promise<RoadmapItem>
   roadmapArchive(id: string): Promise<RoadmapItem>
   /**

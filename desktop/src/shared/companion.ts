@@ -63,6 +63,7 @@ export const COMPANION_MANIFEST = {
 
   // roadmap
   roadmapList: { kind: 'invoke', channel: 'roadmap:list' },
+  roadmapSearch: { kind: 'invoke', channel: 'roadmap:search' },
   roadmapUpsert: { kind: 'invoke', channel: 'roadmap:upsert' },
   roadmapArchive: { kind: 'invoke', channel: 'roadmap:archive' },
   roadmapReorder: { kind: 'invoke', channel: 'roadmap:reorder' },
@@ -274,6 +275,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'agents:list': 0,
   'launch:get': 0,
   'roadmap:list': 0,
+  'roadmap:search': 0,
   'worktree:list': 0,
   'journal:list': 0,
   'broker:status': 0,

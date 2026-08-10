@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { RoadmapItem, RoadmapPriority, RoadmapStatus, StopResult } from '@shared/types'
 import { GLYPHS, GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
+import { useRoadmapData } from '../roadmap-data'
 import { ConfirmDialog } from './ConfirmDialog'
 import { MobileSheet } from './MobileSheet'
 import { KIND_ICONS, RoadmapItemModal } from './RoadmapItemModal'
 import { DEFAULT_HOLD_GESTURE, HoldGesture } from '@shared/hold-gesture'
-import { enqueueClosure, insertSoloWaves, queuedItems, wavesOf } from '@shared/workflow'
+import { buildAppendToQueue } from '@shared/workflow'
 
 // Mobile roadmap (PLAN MB4 — EXPLORATION §4): ONE column at a time (status
 // tabs + counters), full-width cards auto-sorted by MoSCoW, explicit moves
@@ -15,11 +16,19 @@ import { enqueueClosure, insertSoloWaves, queuedItems, wavesOf } from '@shared/w
 // (haptic), moving detaches it into a thumbnail tray docked above the tab
 // bar; navigate to the target column and tap the thumbnail to drop it there.
 // Same five roadmap IPC calls as the desktop kanban — presentation only.
+//
+// Card 3b0fda5f: sources its data from the same useRoadmapData() hook as the
+// desktop kanban (RoadmapView.tsx) instead of its own hand-rolled poll, so
+// the mobile layout's queueItem() also gets the reorder-id invariant for
+// free -- it composes buildAppendToQueue(queue, ...) against the hook's
+// branded QueueSource rather than re-deriving the append-with-closure
+// sequence by hand. This view never sets filter criteria, so `board` from
+// the hook always mirrors the full unfiltered list (no filter/search UI is
+// added here; that is desktop-only per this card's scope).
 
 const STATUSES: RoadmapStatus[] = ['idea', 'planned', 'in_progress', 'done']
 const PRIORITY_RANK: Record<RoadmapPriority, number> = { must: 0, should: 1, could: 2, wont: 3 }
 const PRIORITIES: RoadmapPriority[] = ['must', 'should', 'could', 'wont']
-const POLL_MS = 5000
 
 function isLocked(item: RoadmapItem): boolean {
   return item.locked && item.status === 'in_progress'
@@ -161,10 +170,22 @@ export function RoadmapList(): React.JSX.Element {
   const t = useT()
   const showToast = useDeck((s) => s.showToast)
   const sessions = useDeck((s) => s.sessions)
-  const [items, setItems] = useState<RoadmapItem[]>([])
+  const { queue, includeArchived: showArchived, setIncludeArchived, refresh, error: fetchError } =
+    // facets: false (review round 2, point 8) -- this layout has no filter
+    // panel and renders no facet counter, so it opts out of the broker's
+    // per-poll facet aggregation entirely.
+    useRoadmapData({ facets: false })
+  // The hook never has filter criteria set here (no filter/search UI on
+  // mobile), so `queue.all` always mirrors the full unfiltered list -- kept
+  // as `items` below to minimise the diff against every existing lookup.
+  const items = queue.all
+  const setShowArchived = setIncludeArchived
   const [tab, setTab] = useState<RoadmapStatus | 'archived'>('planned')
-  const [showArchived, setShowArchived] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  // Mutation failures (upsert/stop/queue/assign/archive) are view-local: the
+  // hook's `error` only ever reflects the last fetch. Either one renders the
+  // same banner (`error` below).
+  const [mutationError, setMutationError] = useState<string | null>(null)
+  const error = fetchError ?? mutationError
   const [sheetItem, setSheetItem] = useState<RoadmapItem | null>(null)
   const [moveItemSheet, setMoveItemSheet] = useState<RoadmapItem | null>(null)
   const [assignItem, setAssignItem] = useState<RoadmapItem | null>(null)
@@ -176,28 +197,12 @@ export function RoadmapList(): React.JSX.Element {
   /** Undo snackbar for the last drop: revert to the previous status. */
   const [undo, setUndo] = useState<{ item: RoadmapItem; from: RoadmapStatus } | null>(null)
 
-  const refresh = useCallback(async (): Promise<void> => {
-    try {
-      const next = await window.api.roadmapList({ include_archived: showArchived })
-      setItems(next)
-      setError(null)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
-    }
-  }, [showArchived])
-
-  useEffect(() => {
-    void refresh()
-    const timer = setInterval(() => void refresh(), POLL_MS)
-    return () => clearInterval(timer)
-  }, [refresh])
-
   const upsert = async (patch: Parameters<typeof window.api.roadmapUpsert>[0]): Promise<void> => {
     try {
       await window.api.roadmapUpsert(patch)
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -234,28 +239,22 @@ export function RoadmapList(): React.JSX.Element {
       else showToast(r.via === 'supervisor' ? 'toast.stopSupervisor' : 'toast.stopBroadcast')
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
   // Appends item to the end of the queue, pulling its unmet, unqueued
   // dependencies along with it (dependency-first, right before it) in the
-  // SAME reorder commit -- mirrors RoadmapView's desktop queueItem so the
-  // mobile "add to queue" entry point can't skip enqueueClosure either.
-  // Preserves existing wave ties (wavesOf) instead of flattening the queue to
-  // 1..N; the appended item and its closure each land as their own singleton
-  // wave (see insertSoloWaves).
+  // SAME reorder commit -- delegates to buildAppendToQueue (shared/workflow)
+  // against the hook's branded `queue`, same builder RoadmapView's desktop
+  // queueItem uses, so both layouts stay on the one reorder-id invariant.
   const queueItem = async (item: RoadmapItem): Promise<void> => {
-    const queued = queuedItems(items).filter((i) => i.id !== item.id)
-    const queuedIds = queued.map((i) => i.id)
-    const closure = enqueueClosure(items, item.id)
-    const ids = [...queuedIds, ...closure, item.id]
-    const waves = insertSoloWaves(wavesOf(queued), queuedIds.length, [...closure, item.id])
+    const payload = buildAppendToQueue(queue, item.id)
     try {
-      await window.api.roadmapReorder(ids, waves)
+      await window.api.roadmapReorder(payload.ids, payload.waves)
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -266,7 +265,7 @@ export function RoadmapList(): React.JSX.Element {
       showToast(r.sent ? 'toast.assignSent' : 'toast.assignFailed', r.sent ? 'success' : 'info')
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -276,7 +275,7 @@ export function RoadmapList(): React.JSX.Element {
       showToast('toast.roadmapArchived')
       await refresh()
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setMutationError(e instanceof Error ? e.message : String(e))
     }
   }
 
@@ -308,7 +307,7 @@ export function RoadmapList(): React.JSX.Element {
         <button
           className={`mrm-tab mrm-tab-arch${showArchived ? ' is-active' : ''}`}
           onClick={() => {
-            setShowArchived((v) => !v)
+            setShowArchived(!showArchived)
             if (tab === 'archived') setTab('planned')
           }}
         >

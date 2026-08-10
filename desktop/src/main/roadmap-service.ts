@@ -18,10 +18,14 @@ import { reportError } from './log'
 import type { BrokerEndpoint } from './broker-client'
 import type {
   RoadmapArchiveResponse,
+  RoadmapFacetBucket,
+  RoadmapFacets,
   RoadmapItem,
   RoadmapListFilters,
   RoadmapListResponse,
+  RoadmapQuery,
   RoadmapReorderResponse,
+  RoadmapSearchResult,
   RoadmapUpsertFields,
   RoadmapUpsertResponse
 } from '../shared/types'
@@ -327,6 +331,102 @@ export async function listRoadmap(
     ...filters
   })
   return sanitizeList(res?.items, '/roadmap/list')
+}
+
+const FACET_DIMENSIONS = ['kind', 'priority', 'effort', 'value', 'status', 'tags'] as const
+
+/**
+ * One facet dimension's buckets. Malformed INDIVIDUAL buckets are dropped
+ * and traced (mirrors sanitizeList's dropped-count discipline) -- but this
+ * never manufactures a bucket list out of a dimension that isn't an array at
+ * all; sanitizeFacets checks that shape itself and rejects the whole payload
+ * when it's wrong, per review round 2 point 2.
+ */
+function sanitizeFacetBucketList(raw: unknown[], dim: string, route: string): RoadmapFacetBucket[] {
+  const out: RoadmapFacetBucket[] = []
+  let dropped = 0
+  for (const b of raw) {
+    if (!b || typeof b !== 'object' || Array.isArray(b)) {
+      dropped++
+      continue
+    }
+    const r = b as Record<string, unknown>
+    if (typeof r.value !== 'string') {
+      dropped++
+      continue
+    }
+    if (typeof r.count !== 'number' || !Number.isFinite(r.count)) {
+      dropped++
+      continue
+    }
+    out.push({ value: r.value, count: r.count })
+  }
+  if (dropped > 0) {
+    reportError('roadmap', `${route}: facets.${dim} dropped ${dropped} malformed bucket(s)`)
+  }
+  return out
+}
+
+/**
+ * Shape a `RoadmapFacets` payload, or null when unusable -- PICK-LIST, NEVER
+ * A SPREAD, same discipline as sanitizeRoadmapItem. Returning null (never a
+ * partially-filled object) is deliberate: `RoadmapSearchResult.facets` is
+ * typed `RoadmapFacets | null` precisely so an older broker that never sends
+ * counters is distinguishable from a real zero-count bucket -- a half-built
+ * object here would silently manufacture false zeros in the filter panel.
+ *
+ * Review round 2 (2026-08-10), MAJOR (point 2): this used to return `[]` for
+ * any dimension whose bucket array was malformed, silently, with no trace --
+ * so a broker response where only `kind` was broken shipped a VALID-looking
+ * facets object with `kind: []`, indistinguishable from "this project truly
+ * has zero of every kind", a silent false-empty the filter panel could not
+ * tell apart from a real zero. Fixed: every one of the six expected
+ * dimensions is checked for `Array.isArray` up front; if even one fails, the
+ * WHOLE payload is rejected (traced) and the caller falls back to no
+ * facets at all -- the same "distinguishable from an older broker" contract
+ * the doc above already promises, now actually honoured per-dimension too.
+ */
+export function sanitizeFacets(raw: unknown, route = '/roadmap/list (search)'): RoadmapFacets | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const r = raw as Record<string, unknown>
+  if (typeof r.reference_total !== 'number' || !Number.isFinite(r.reference_total)) return null
+  for (const dim of FACET_DIMENSIONS) {
+    if (!Array.isArray(r[dim])) {
+      reportError('roadmap', `${route}: facets.${dim} was not an array; rejecting whole facets payload`)
+      return null
+    }
+  }
+  return {
+    kind: sanitizeFacetBucketList(r.kind as unknown[], 'kind', route),
+    priority: sanitizeFacetBucketList(r.priority as unknown[], 'priority', route),
+    effort: sanitizeFacetBucketList(r.effort as unknown[], 'effort', route),
+    value: sanitizeFacetBucketList(r.value as unknown[], 'value', route),
+    status: sanitizeFacetBucketList(r.status as unknown[], 'status', route),
+    tags: sanitizeFacetBucketList(r.tags as unknown[], 'tags', route),
+    reference_total: r.reference_total
+  }
+}
+
+/**
+ * Card 3b0fda5f. Same broker endpoint as listRoadmap (`/roadmap/list`,
+ * extended in place by card 15952e09) but with the fuller RoadmapQuery shape
+ * (plural dimensions, `q`/`q_deep`, `with_facets`) and a facets-aware
+ * response. listRoadmap/its `/roadmap:list` IPC channel are untouched --
+ * this is a new, separate call, not a replacement.
+ */
+export async function searchRoadmap(
+  endpoint: BrokerEndpoint,
+  projectKey: string,
+  query: RoadmapQuery = {}
+): Promise<RoadmapSearchResult> {
+  const res = await roadmapPost<RoadmapListResponse>(endpoint, '/roadmap/list', {
+    project_key: projectKey,
+    ...query
+  })
+  return {
+    items: sanitizeList(res?.items, '/roadmap/list (search)'),
+    facets: query.with_facets ? sanitizeFacets(res?.facets) : null
+  }
 }
 
 export async function upsertRoadmap(

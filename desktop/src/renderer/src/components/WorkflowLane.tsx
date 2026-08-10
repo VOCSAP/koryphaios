@@ -25,6 +25,7 @@ import {
   WF_NODE_W,
   WF_ZOOM_MAX,
   WF_ZOOM_MIN,
+  type QueueSource,
   type StackHit
 } from '@shared/workflow'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
@@ -57,8 +58,12 @@ const FIT_PAD = 24
 type Camera = { x: number; y: number; zoom: number }
 
 interface WorkflowLaneProps {
-  /** Full item list of the view (the lane derives its own subset). */
-  items: RoadmapItem[]
+  /**
+   * The TRUE unfiltered queue (card 3b0fda5f) -- branded so a filtered board
+   * can never reach the lane by accident (see shared/workflow.ts's
+   * QueueSource/queueSourceOf doc comment). The lane derives its own subset.
+   */
+  source: QueueSource
   hasLead: boolean
   /** Rendered inside the fullscreen modal (no collapse, canvas fills). */
   fullscreen?: boolean
@@ -82,7 +87,7 @@ interface WorkflowLaneProps {
 }
 
 export function WorkflowLane({
-  items,
+  source,
   hasLead,
   fullscreen = false,
   onToggleFull,
@@ -95,6 +100,9 @@ export function WorkflowLane({
   onRemoveDep,
   onStack
 }: WorkflowLaneProps): React.JSX.Element {
+  // Unwrapped once at the top -- every internal reorder computation below is
+  // unchanged, only the prop that feeds it is now type-guaranteed unfiltered.
+  const items = source.all
   const t = useT()
   const showToast = useDeck((s) => s.showToast)
   const config = useDeck((s) => s.config)
