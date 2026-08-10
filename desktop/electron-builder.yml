@@ -42,16 +42,32 @@ extraResources:
   - from: resources/sandbox
     to: sandbox
 win:
+  # Pre-built, pre-stacked .ico (512/256/128/64 with plate, 32/16 without --
+  # see build/icon-sources/ and build/make-icns.py header for the tier rule).
+  # Points at the file, not build/, so electron-builder's own directory-icon
+  # convention (which would pick only the largest PNG and re-derive the rest)
+  # never kicks in. File already carries the .ico extension so app-builder-lib
+  # returns it as-is (skips conversion) -- see app-builder-lib/out/util/
+  # iconConverter.js doConvertIcon, single-file/target-extension branch.
+  icon: build/icon.ico
   # NSIS installer plus a portable .zip (run anywhere, no install).
   target:
     - nsis
     - zip
 mac:
+  # Pre-built .icns (same per-tier stacking, hand-rolled by build/make-icns.py
+  # since ImageMagick on this box can write an .icns but silently keeps only
+  # the first frame -- see that script's header for the measured proof).
+  # Same skip-conversion mechanism as win.icon above.
+  icon: build/icon.icns
   target:
     - dmg
     - zip
   category: public.app-category.developer-tools
 linux:
+  # Pre-built per-tier PNG set (build/icons/NxN.png) instead of a single
+  # master PNG, for the same tier-rule reason.
+  icon: build/icons
   # AppImage is already a single portable binary.
   target:
     - AppImage
