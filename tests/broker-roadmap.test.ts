@@ -146,11 +146,13 @@ test("list scopes by project_key and filters by kind/status/priority/tag", async
 
   const tagged = await post<ListRes>(`${broker.url}/roadmap/list`, { project_key: PK, tag: "core" });
   expect(tagged.body.items.map((i) => i.id)).toContain(a.id);
-  const tagMiss = await post<ListRes>(`${broker.url}/roadmap/list`, {
+  // Card 15952e09, decision 6: an unknown filter value is a 400, never a
+  // silent empty list (a typo would otherwise read back as "no such card").
+  const tagMiss = await post(`${broker.url}/roadmap/list`, {
     project_key: PK,
     tag: "nope",
   });
-  expect(tagMiss.body.items).toEqual([]);
+  expect(tagMiss.status).toBe(400);
 
   const missingPk = await post(`${broker.url}/roadmap/list`, {});
   expect(missingPk.status).toBe(400);

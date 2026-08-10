@@ -67,6 +67,8 @@ import type {
   RoadmapArchiveRequest,
   RoadmapArchiveResponse,
   RoadmapDirective,
+  RoadmapFacetBucket,
+  RoadmapFacets,
   RoadmapItem,
   RoadmapKind,
   RoadmapLevel,
@@ -483,6 +485,60 @@ for (const col of ["directive TEXT", "target_peer_ids TEXT NOT NULL DEFAULT '[]'
 }
 
 db.run(`CREATE INDEX IF NOT EXISTS idx_roadmap_project ON roadmap_items(project_key, status)`);
+
+// Free-text search index (card 15952e09). External-content table: FTS5 owns
+// no data of its own, it indexes roadmap_items by its rowid (written
+// EXPLICITLY below even though it is the default, so a reader sees at a
+// glance that alignment is on the implicit rowid and NOT on the `id` TEXT
+// primary key). title/description/tags default-searched, rationale/context
+// opt-in via `q_deep` (their `context` bodies run to thousands of characters
+// and would otherwise drown every other match). unicode61 + remove_diacritics
+// gives case/accent-insensitive, non-contiguous-term matching for free.
+db.run(`
+  CREATE VIRTUAL TABLE IF NOT EXISTS roadmap_fts USING fts5(
+    title, description, tags, rationale, context,
+    content='roadmap_items', content_rowid='rowid',
+    tokenize='unicode61 remove_diacritics 2'
+  )
+`);
+
+// Three triggers keep roadmap_fts in sync with every write to roadmap_items,
+// no matter which code path performs it (upsert, import, context-append, a
+// future writer) -- the alternative (reindexing from handleRoadmapUpsert)
+// would make "who else writes roadmap_items" a question whose answer matters;
+// triggers make it not matter. Cheap at this corpus size (~115 cards); worth
+// re-arbitrating past a few tens of thousands of rows.
+//
+// The UPDATE trigger issues a 'delete' using the OLD column values before
+// inserting the NEW ones. Skipping the OLD values (e.g. passing new.* twice)
+// leaves FTS5 unable to find the terms to remove: the index keeps phantom
+// terms from the pre-update text, a silent desync that only shows up as
+// stale search hits much later.
+db.run(`
+  CREATE TRIGGER IF NOT EXISTS roadmap_fts_ai AFTER INSERT ON roadmap_items BEGIN
+    INSERT INTO roadmap_fts(rowid, title, description, tags, rationale, context)
+    VALUES (new.rowid, new.title, new.description, new.tags, new.rationale, new.context);
+  END
+`);
+db.run(`
+  CREATE TRIGGER IF NOT EXISTS roadmap_fts_ad AFTER DELETE ON roadmap_items BEGIN
+    INSERT INTO roadmap_fts(roadmap_fts, rowid, title, description, tags, rationale, context)
+    VALUES ('delete', old.rowid, old.title, old.description, old.tags, old.rationale, old.context);
+  END
+`);
+db.run(`
+  CREATE TRIGGER IF NOT EXISTS roadmap_fts_au AFTER UPDATE ON roadmap_items BEGIN
+    INSERT INTO roadmap_fts(roadmap_fts, rowid, title, description, tags, rationale, context)
+    VALUES ('delete', old.rowid, old.title, old.description, old.tags, old.rationale, old.context);
+    INSERT INTO roadmap_fts(rowid, title, description, tags, rationale, context)
+    VALUES (new.rowid, new.title, new.description, new.tags, new.rationale, new.context);
+  END
+`);
+
+// Rebuild on every startup: makes a desync (e.g. a row written before the
+// triggers existed, or a DB edited outside the broker) impossible to survive
+// a restart. Cheap: ~115 cards.
+db.run(`INSERT INTO roadmap_fts(roadmap_fts) VALUES('rebuild')`);
 
 // Graph drafts: agent-escalated questions waiting to be opened in the Deck's
 // graph view. Same durability philosophy as roadmap_items (no FK, plain-text
@@ -1942,41 +1998,276 @@ function resolveRoadmapAuthor(
   return { by, proven: false };
 }
 
+/**
+ * Card 15952e09: union a legacy singular filter with its plural counterpart,
+ * deduped. `singular` may be `undefined` (no plural counterpart exists yet
+ * for `effort`/`value`, so callers pass `undefined` there).
+ */
+function mergeEnumFilter<T extends string>(singular: T | undefined, plural: T[] | undefined): T[] {
+  const out = new Set<T>();
+  if (singular !== undefined) out.add(singular);
+  if (plural) for (const v of plural) out.add(v);
+  return [...out];
+}
+
+/** Array form of `badEnum`: true if any value in `values` is outside `allowed`. */
+function invalidValues<T extends string>(values: readonly T[], allowed: readonly T[]): boolean {
+  return values.some((v) => !allowed.includes(v));
+}
+
+/**
+ * Card 15952e09, guard #3a: the caller's free-text `q` must never reach the
+ * FTS5 MATCH expression by string concatenation. Split on whitespace, drop
+ * tokens that are pure FTS5 punctuation once stripped of quotes, then wrap
+ * each surviving token as its own quoted phrase (doubling internal `"`,
+ * FTS5's own escaping rule) so it carries no operator meaning of its own
+ * (`:`, `*`, `(`, `)`, `-`, bare AND/OR/NOT). Returns `[]` when nothing
+ * survives, so the caller never emits `MATCH ''`.
+ */
+function tokenizeFtsQuery(raw: string): string[] {
+  return raw
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter((t) => t.replace(/"/g, "").length > 0)
+    .map((t) => `"${t.replace(/"/g, '""')}"`);
+}
+
+/**
+ * `q_deep` toggles the COLUMN FILTER of the query, not the table (decision
+ * 3 on card 15952e09): title+description+tags by default, +rationale+context
+ * when the caller opts in. Returns null when `q` has no searchable token.
+ */
+function buildFtsMatchExpr(q: string, deep: boolean): string | null {
+  const tokens = tokenizeFtsQuery(q);
+  if (tokens.length === 0) return null;
+  const cols = deep ? "title description tags rationale context" : "title description tags";
+  return `{${cols}} : (${tokens.join(" ")})`;
+}
+
+/**
+ * Dynamic values (unlike the fixed kind/status/priority/effort/value enums):
+ * the tags that actually occur ANYWHERE in this project, archived cards
+ * included -- unconditionally, no `includeArchived` parameter, on purpose
+ * (review round 2, point 3). This backs ONLY the "unknown tag" 400 error's
+ * actionable listing (the tags facet's own counts are computed separately in
+ * computeRoadmapFacets, which does respect `include_archived` since a facet
+ * count is meant to describe the current view). Validation must not: a tag
+ * that survives only on cards archived in a later pass would otherwise 400
+ * for a caller whose `include_archived` happens to be false that request --
+ * a routine occurrence, not a rare edge case, the moment `done` cards get
+ * archived en masse and take their only tags with them.
+ */
+function projectExistingTags(projectKey: string): string[] {
+  const rows = db
+    .query(
+      `SELECT DISTINCT je.value AS value FROM roadmap_items t, json_each(t.tags) je
+        WHERE t.project_key = ? ORDER BY value`
+    )
+    .all(projectKey) as { value: string }[];
+  return rows.map((r) => r.value);
+}
+
+/**
+ * Card 15952e09, decision 5: facets are counted over the REFERENCE set --
+ * this project's items after `include_archived` alone, no other filter --
+ * never over the caller's filtered result (a counter calculated on the
+ * filtered result would fall to zero or to itself the moment a filter is
+ * active). Fixed-enum dimensions always emit every enum value, zero-count
+ * buckets included; `tags` is dynamic and lists only tags that occur.
+ * `project_key` is repeated in every query below (guard #3b): none of these
+ * queries touch the FTS table, but they must each re-assert project_key on
+ * their own, the same discipline the FTS-joined query in handleRoadmapList
+ * needs for the same reason.
+ */
+function computeRoadmapFacets(projectKey: string, includeArchived: boolean): RoadmapFacets {
+  const archived = (prefix: string) => (includeArchived ? "" : ` AND ${prefix}status != 'archived'`);
+
+  const referenceTotal = (
+    db.query(`SELECT COUNT(*) AS n FROM roadmap_items WHERE project_key = ?${archived("")}`).get(projectKey) as {
+      n: number;
+    }
+  ).n;
+
+  function fixedFacet<T extends string>(column: string, allowed: readonly T[]): RoadmapFacetBucket[] {
+    const rows = db
+      .query(
+        `SELECT ${column} AS value, COUNT(*) AS count FROM roadmap_items
+          WHERE project_key = ?${archived("")} GROUP BY ${column}`
+      )
+      .all(projectKey) as { value: string; count: number }[];
+    const counts = new Map(rows.map((r) => [r.value, r.count]));
+    return allowed.map((value) => ({ value, count: counts.get(value) ?? 0 }));
+  }
+
+  const tags = (
+    db
+      .query(
+        `SELECT je.value AS value, COUNT(DISTINCT t.id) AS count
+           FROM roadmap_items t, json_each(t.tags) je
+          WHERE t.project_key = ?${archived("t.")}
+          GROUP BY je.value
+         HAVING COUNT(DISTINCT t.id) >= 1
+          ORDER BY value`
+      )
+      .all(projectKey) as { value: string; count: number }[]
+  ).map((r) => ({ value: r.value, count: r.count }));
+
+  return {
+    kind: fixedFacet("kind", ROADMAP_KINDS),
+    priority: fixedFacet("priority", ROADMAP_PRIORITIES),
+    effort: fixedFacet("effort", ROADMAP_LEVELS),
+    value: fixedFacet("value", ROADMAP_LEVELS),
+    status: fixedFacet("status", ROADMAP_STATUSES),
+    tags,
+    reference_total: referenceTotal,
+  };
+}
+
 function handleRoadmapList(
   body: RoadmapListRequest
 ): RoadmapListResponse | { error: string; status: number } {
   if (!body.project_key || typeof body.project_key !== "string") {
     return { error: "project_key is required", status: 400 };
   }
+
+  const kindsEff = mergeEnumFilter(body.kind, body.kinds);
+  const statusesEff = mergeEnumFilter(body.status, body.statuses);
+  const prioritiesEff = mergeEnumFilter(body.priority, body.priorities);
+  const effortsEff = mergeEnumFilter<RoadmapLevel>(undefined, body.efforts);
+  const valuesEff = mergeEnumFilter<RoadmapLevel>(undefined, body.values);
+  const tagsEff = mergeEnumFilter(body.tag, body.tags);
+
   if (
-    badEnum(body.kind, ROADMAP_KINDS) ||
-    badEnum(body.status, ROADMAP_STATUSES) ||
-    badEnum(body.priority, ROADMAP_PRIORITIES)
+    invalidValues(kindsEff, ROADMAP_KINDS) ||
+    invalidValues(statusesEff, ROADMAP_STATUSES) ||
+    invalidValues(prioritiesEff, ROADMAP_PRIORITIES) ||
+    invalidValues(effortsEff, ROADMAP_LEVELS) ||
+    invalidValues(valuesEff, ROADMAP_LEVELS)
   ) {
-    return { error: "invalid kind/status/priority filter", status: 400 };
+    return { error: "invalid kind/status/priority/effort/value filter", status: 400 };
   }
 
-  let sql = "SELECT * FROM roadmap_items WHERE project_key = ?";
-  const params: string[] = [body.project_key];
-  if (body.status) {
-    sql += " AND status = ?";
-    params.push(body.status);
-  } else if (!body.include_archived) {
-    sql += " AND status != 'archived'";
-  }
-  if (body.kind) {
-    sql += " AND kind = ?";
-    params.push(body.kind);
-  }
-  if (body.priority) {
-    sql += " AND priority = ?";
-    params.push(body.priority);
-  }
-  sql += " ORDER BY created_at, id";
+  const includeArchived = !!body.include_archived;
 
-  let items = (db.query(sql).all(...params) as RoadmapRow[]).map(rowToRoadmapItem);
-  if (body.tag) items = items.filter((i) => i.tags.includes(body.tag as string));
-  return { items };
+  // Unknown filter value = error, never zero results (decision 6): a typo in
+  // a free-form tag must not read back as "no such card", a silent false
+  // negative. Enums are validated above against a fixed list; tags are
+  // dynamic, so the actionable list in the error is computed here.
+  //
+  // Review round 2 (2026-08-10), MAJOR (point 3): the reference set here is
+  // ALWAYS the full project, archived included, independent of this
+  // request's own `include_archived` -- validating against the (possibly
+  // narrower) filtered reference set turned a tag that only survives on
+  // archived cards into a false-positive 400 the moment `include_archived`
+  // was false, and this goes from a rare edge case to routine the moment a
+  // pass of `done` cards gets archived and takes their only tags with them.
+  // Team-lead's explicit call: legacy singular `tag` gets the same 400 as
+  // plural `tags` (one engine, one semantics, no external users pre-1.0) --
+  // this fix is about WHICH reference set validates both, not about
+  // softening either.
+  if (tagsEff.length > 0) {
+    const existing = projectExistingTags(body.project_key);
+    const unknown = tagsEff.filter((t) => !existing.includes(t));
+    if (unknown.length > 0) {
+      const known = existing.length > 0 ? existing.join(", ") : "(this project has no tags yet)";
+      return {
+        error: `unknown tag(s) ${unknown.map((t) => `'${t}'`).join(", ")} -- this project's tags are: ${known}`,
+        status: 400,
+      };
+    }
+  }
+
+  const matchExpr = body.q ? buildFtsMatchExpr(body.q, !!body.q_deep) : null;
+
+  // Review round 2 (2026-08-10), MAJOR (point A1): the card's short id (shown
+  // on every board tile, RoadmapItemId) is in NO FTS column -- title,
+  // description, tags, rationale, context. Typing it into the search box
+  // (the operator's obvious move, since that id is what the screen shows)
+  // measured a false positive: the query rewards a card that merely MENTIONS
+  // the id in its text over the card whose id it actually IS, because only
+  // the mention lives in an indexed column. Do NOT index `id` into
+  // roadmap_fts either -- FTS5's tokenizer would split a hex/uuid string into
+  // fragments and return unrelated partial matches, an even worse failure
+  // mode. Instead: an exact, bounded `id LIKE '<prefix>%'` predicate, ORed
+  // with the FTS branch so neither can mask the other's hit. Threshold >= 4
+  // hex characters (team-lead's call) -- short enough to catch the 8-char
+  // short id, long enough that an ordinary word rarely qualifies by accident,
+  // and a false-positive OR only ever ADDS a row, never hides one.
+  const qTrimmed = body.q?.trim();
+  const idPrefix = qTrimmed && /^[0-9a-f]{4,}$/i.test(qTrimmed) ? qTrimmed : null;
+
+  // Guard #3b: every FTS-joined query re-asserts project_key itself -- the
+  // roadmap_fts table has no project scoping of its own (one row per card
+  // across ALL projects), so a MATCH without this join+filter leaks cards
+  // from other projects (measured, see tests/broker-roadmap-search.test.ts).
+  let sql: string;
+  const params: (string | number)[] = [];
+  if (matchExpr && idPrefix) {
+    // Both branches present: a text query that also happens to look like a
+    // hex id prefix. bm25() ranking is dropped here (it requires the FTS
+    // table joined directly, not via subquery) -- see the ORDER BY below.
+    sql =
+      "SELECT t.* FROM roadmap_items t WHERE t.project_key = ? AND (t.id LIKE ? OR t.rowid IN (SELECT rowid FROM roadmap_fts WHERE roadmap_fts MATCH ?))";
+    params.push(body.project_key, `${idPrefix}%`, matchExpr);
+  } else if (matchExpr) {
+    sql =
+      "SELECT t.* FROM roadmap_items t, roadmap_fts WHERE t.rowid = roadmap_fts.rowid AND roadmap_fts MATCH ? AND t.project_key = ?";
+    params.push(matchExpr, body.project_key);
+  } else if (idPrefix) {
+    sql = "SELECT t.* FROM roadmap_items t WHERE t.project_key = ? AND t.id LIKE ?";
+    params.push(body.project_key, `${idPrefix}%`);
+  } else {
+    sql = "SELECT t.* FROM roadmap_items t WHERE t.project_key = ?";
+    params.push(body.project_key);
+  }
+
+  if (statusesEff.length > 0) {
+    sql += ` AND t.status IN (${statusesEff.map(() => "?").join(", ")})`;
+    params.push(...statusesEff);
+  } else if (!includeArchived) {
+    sql += " AND t.status != 'archived'";
+  }
+  if (kindsEff.length > 0) {
+    sql += ` AND t.kind IN (${kindsEff.map(() => "?").join(", ")})`;
+    params.push(...kindsEff);
+  }
+  if (prioritiesEff.length > 0) {
+    sql += ` AND t.priority IN (${prioritiesEff.map(() => "?").join(", ")})`;
+    params.push(...prioritiesEff);
+  }
+  if (effortsEff.length > 0) {
+    sql += ` AND t.effort IN (${effortsEff.map(() => "?").join(", ")})`;
+    params.push(...effortsEff);
+  }
+  if (valuesEff.length > 0) {
+    sql += ` AND t.value IN (${valuesEff.map(() => "?").join(", ")})`;
+    params.push(...valuesEff);
+  }
+  if (tagsEff.length > 0) {
+    // Decision 4: tag lives in SQL (json_each), not a JS post-fetch filter --
+    // one predicate engine, so bm25 ordering and every other filter compose
+    // with it instead of a second engine silently dropping rows after the
+    // fact.
+    sql += ` AND EXISTS (SELECT 1 FROM json_each(t.tags) je WHERE je.value IN (${tagsEff
+      .map(() => "?")
+      .join(", ")}))`;
+    params.push(...tagsEff);
+  }
+
+  // Only order by relevance when a text query was actually present -- never
+  // change the existing order as a side effect of an unrelated filter.
+  // bm25() ranking only holds when roadmap_fts is joined directly in FROM
+  // (the matchExpr-only branch above); the combined branch queries it via a
+  // subquery, so it falls back to the same stable order as the no-query case.
+  sql += matchExpr && !idPrefix ? " ORDER BY bm25(roadmap_fts)" : " ORDER BY t.created_at, t.id";
+
+  const items = (db.query(sql).all(...params) as RoadmapRow[]).map(rowToRoadmapItem);
+
+  const response: RoadmapListResponse = { items };
+  if (body.with_facets) {
+    response.facets = computeRoadmapFacets(body.project_key, includeArchived);
+  }
+  return response;
 }
 
 function handleRoadmapUpsert(
@@ -2770,6 +3061,23 @@ function handleRoadmapImport(body: {
       };
       insert.run(...ROADMAP_IMPORT_COLUMNS.map((column) => values[column]));
       imported++;
+    }
+    // Review round 2 (2026-08-10), MINOR (point 6): `INSERT OR REPLACE` on a
+    // re-imported id deletes-then-reinserts the row, but roadmap_fts's own
+    // DELETE trigger only fires on a REPLACE conflict when
+    // `PRAGMA recursive_triggers` is ON -- OFF by default in SQLite, and not
+    // set anywhere in this codebase. Measured: the old rowid's FTS row
+    // survives, orphaned; the JOIN in handleRoadmapList masks it today (no
+    // false positive, since the join keys on a rowid that no longer exists
+    // in roadmap_items), but the FTS index still grows by one dead row on
+    // every re-import of an existing card. Fixed LOCALLY, at this one write
+    // path, rather than flipping the PRAGMA globally: that would change
+    // trigger semantics for every table in the database to fix a single
+    // route, a wider remedy than the defect. `rebuild` re-derives the whole
+    // FTS index from roadmap_items inside this same transaction, so a
+    // crash/rollback mid-import cannot leave it half-rebuilt.
+    if (imported > 0) {
+      db.run(`INSERT INTO roadmap_fts(roadmap_fts) VALUES('rebuild')`);
     }
     return { imported, skipped };
   });

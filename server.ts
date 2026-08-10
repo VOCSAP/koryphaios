@@ -614,6 +614,45 @@ const TOOLS = [
           type: "boolean" as const,
           description: "Include archived items (default false).",
         },
+        kinds: {
+          type: "array" as const,
+          items: { type: "string" as const, enum: ["feature", "bug", "debt", "idea", "chore", "directive"] },
+          description: "Only items whose kind is one of these (OR'd with `kind` if both are set).",
+        },
+        statuses: {
+          type: "array" as const,
+          items: { type: "string" as const, enum: ["idea", "planned", "in_progress", "done", "archived"] },
+          description: "Only items whose status is one of these (OR'd with `status` if both are set).",
+        },
+        priorities: {
+          type: "array" as const,
+          items: { type: "string" as const, enum: ["must", "should", "could", "wont"] },
+          description: "Only items whose priority is one of these (OR'd with `priority` if both are set).",
+        },
+        efforts: {
+          type: "array" as const,
+          items: { type: "string" as const, enum: ["low", "medium", "high"] },
+          description: "Only items whose effort is one of these.",
+        },
+        values: {
+          type: "array" as const,
+          items: { type: "string" as const, enum: ["low", "medium", "high"] },
+          description: "Only items whose value is one of these.",
+        },
+        tags: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          description: "Only items carrying at least one of these tags (OR'd with `tag` if both are set).",
+        },
+        q: {
+          type: "string" as const,
+          description:
+            "Free-text search over title, description and tags. Non-contiguous terms, case and accents are ignored.",
+        },
+        q_deep: {
+          type: "boolean" as const,
+          description: "Widen `q` to also search rationale and context (default false).",
+        },
       },
     },
   },
@@ -1378,6 +1417,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         priority?: string;
         tag?: string;
         include_archived?: boolean;
+        kinds?: string[];
+        statuses?: string[];
+        priorities?: string[];
+        efforts?: string[];
+        values?: string[];
+        tags?: string[];
+        q?: string;
+        q_deep?: boolean;
       };
       try {
         const { items } = await brokerFetch<RoadmapListResponse>("/roadmap/list", {
@@ -1387,6 +1434,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           priority: a.priority,
           tag: a.tag,
           include_archived: a.include_archived ?? false,
+          kinds: a.kinds,
+          statuses: a.statuses,
+          priorities: a.priorities,
+          efforts: a.efforts,
+          values: a.values,
+          tags: a.tags,
+          q: a.q,
+          q_deep: a.q_deep,
         });
         if (items.length === 0) {
           return {

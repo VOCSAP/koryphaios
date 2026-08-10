@@ -605,10 +605,64 @@ export interface RoadmapListRequest {
   tag?: string;
   /** Include archived items (excluded by default). */
   include_archived?: boolean;
+  /**
+   * Card 15952e09. Plural counterparts of `kind`/`status`/`priority`/`tag`,
+   * coexisting rather than replacing them: the broker takes the UNION of the
+   * singular field (if set) and this array. An empty or absent array is no
+   * constraint. Within one dimension the semantics are OR (any listed value
+   * matches); across dimensions they are AND.
+   */
+  kinds?: RoadmapKind[];
+  statuses?: RoadmapStatus[];
+  priorities?: RoadmapPriority[];
+  /** No singular counterpart -- roadmap_list never had one for effort/value. */
+  efforts?: RoadmapLevel[];
+  values?: RoadmapLevel[];
+  tags?: string[];
+  /**
+   * Free-text search over title+description+tags (and, when `q_deep` is
+   * true, also rationale+context). FTS5-backed; blank/whitespace-only is
+   * treated as "no search text", not an error and not a zero-result MATCH.
+   */
+  q?: string;
+  /** Widen `q` to also search rationale+context. Ignored when `q` is absent. */
+  q_deep?: boolean;
+  /**
+   * Also compute `RoadmapFacets` over the project's reference set (this
+   * project's items after `include_archived` alone -- no other filter
+   * applied). Not exposed on the `roadmap_list` MCP tool in v1.
+   */
+  with_facets?: boolean;
+}
+
+/** One value of a facet dimension and how many reference-set items carry it. */
+export interface RoadmapFacetBucket {
+  value: string;
+  count: number;
+}
+
+/**
+ * Flat (non drill-down) counts over the project's reference set: this
+ * project's items after `include_archived` alone, nothing else. Fixed-enum
+ * dimensions (kind/priority/effort/value/status) always list every enum
+ * value, zero-count buckets included; `tags` is dynamic and lists only tags
+ * that occur at least once.
+ */
+export interface RoadmapFacets {
+  kind: RoadmapFacetBucket[];
+  priority: RoadmapFacetBucket[];
+  effort: RoadmapFacetBucket[];
+  value: RoadmapFacetBucket[];
+  status: RoadmapFacetBucket[];
+  tags: RoadmapFacetBucket[];
+  /** Size of the reference set the counts above were computed over. */
+  reference_total: number;
 }
 
 export interface RoadmapListResponse {
   items: RoadmapItem[];
+  /** Present iff the request set `with_facets: true`. */
+  facets?: RoadmapFacets;
 }
 
 /** Create (no id) or partially patch (id set) an item. Omitted fields keep. */
