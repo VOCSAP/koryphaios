@@ -184,8 +184,6 @@ export interface AppConfig {
   wfLaneHeight: number
   theme: 'dark' | 'light'
   fontSize: number
-  /** Re-spawn persisted sessions on launch. */
-  restoreSessions: boolean
   /** UI language: '' = auto (OS), 'en' or 'fr'. Resolved by main/i18n.ts. */
   locale: string
   /** Rotating palette (hex) for auto-assigned session colours; editable in Settings (D12). */

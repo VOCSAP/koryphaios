@@ -31,7 +31,6 @@ const DEFAULT_CONFIG: AppConfig = {
   wfLaneHeight: 240,
   theme: 'dark',
   fontSize: 13,
-  restoreSessions: true,
   // '' = auto: main/i18n.ts derives en/fr from the OS locale.
   locale: '',
   palette: DEFAULT_PALETTE,
@@ -126,11 +125,6 @@ export function loadConfig(): AppConfig {
 
 export function saveConfig(cfg: AppConfig): void {
   writeJson(configPath(), cfg)
-}
-
-export function loadSessions(): SessionDef[] {
-  const raw = readJson<SessionDef[]>(sessionsPath(), [])
-  return Array.isArray(raw) ? raw : []
 }
 
 export function saveSessions(sessions: SessionDef[]): void {

@@ -174,7 +174,6 @@ export const EN_DEFAULTS: Record<string, string> = {
   'settings.theme': 'Theme',
   'settings.themeDark': 'Dark',
   'settings.themeLight': 'Light',
-  'settings.restoreSessions': 'Re-open saved sessions on launch',
   'settings.rememberScope': 'Remember shared scope secrets on this machine',
   'settings.rememberScopeHelp':
     'Stores a custom (shared) group secret encrypted via the OS keystore so its workspace can be restored without re-supplying the secret. Off = supply it via the launch argument each time.',

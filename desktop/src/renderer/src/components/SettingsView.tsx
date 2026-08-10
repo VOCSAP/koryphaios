@@ -148,15 +148,6 @@ export function SettingsView(): React.JSX.Element {
               <label className="field field-check">
                 <input
                   type="checkbox"
-                  checked={config.restoreSessions}
-                  onChange={(e) => set('restoreSessions', e.target.checked)}
-                />
-                <span>{t('settings.restoreSessions')}</span>
-              </label>
-
-              <label className="field field-check">
-                <input
-                  type="checkbox"
                   checked={config.rememberScopeSecrets}
                   onChange={(e) => set('rememberScopeSecrets', e.target.checked)}
                 />

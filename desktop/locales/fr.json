@@ -79,7 +79,6 @@
   "settings.theme": "Thème",
   "settings.themeDark": "Sombre",
   "settings.themeLight": "Clair",
-  "settings.restoreSessions": "Rouvrir les sessions enregistrées au lancement",
   "settings.rememberScope": "Mémoriser les secrets de scope partagé sur cette machine",
   "settings.rememberScopeHelp": "Stocke le secret d'un groupe custom (partagé) chiffré via le coffre de l'OS pour pouvoir restaurer son espace sans re-fournir le secret. Désactivé = le fournir via l'argument de lancement à chaque fois.",
   "settings.autoResumeQuota": "Relancer automatiquement les sessions au reset de la limite d'usage",
