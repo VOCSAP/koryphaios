@@ -2577,6 +2577,14 @@ svg.glyph {
 .rm-badge-value-high { color: #3ec46d; border-color: color-mix(in srgb, #3ec46d 50%, transparent); }
 .rm-badge-value-medium { color: #4f86ff; border-color: color-mix(in srgb, #4f86ff 50%, transparent); }
 .rm-badge-effort-high { color: #e05a5a; border-color: color-mix(in srgb, #e05a5a 50%, transparent); }
+/* The middle of the EFFORT scale, in the restore orange of DESIGN.md section 2
+   rather than in var(--glow): the glow is user configurable (AppConfig.glowColor)
+   and repainting an ordered scale from a preference would be a bug, and the
+   amber #e0b341 next door is already spoken for by status in_progress, which
+   would put two identical pills side by side on an in-progress medium card.
+   Colouring EFFORT medium leaves VALUE medium alone: the two scales share their
+   level names but not their class names (rm-badge-value-* vs rm-badge-effort-*). */
+.rm-badge-effort-medium { color: #e08a3c; border-color: color-mix(in srgb, #e08a3c 50%, transparent); }
 .rm-badge-effort-low { color: #3ec46d; border-color: color-mix(in srgb, #3ec46d 50%, transparent); }
 .rm-badge-status-in_progress { color: #e0b341; border-color: color-mix(in srgb, #e0b341 50%, transparent); }
 .rm-badge-status-done { color: #3ec46d; border-color: color-mix(in srgb, #3ec46d 50%, transparent); }
