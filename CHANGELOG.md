@@ -1,5 +1,89 @@
 # Changelog
 
+## core + desktop (experimental) — filtrage et recherche de la roadmap, et trois regressions desktop closes au passage
+
+Six commits : `872d951`, `5d50c86`, `eb0b62a`, `cef321e`, `fdf53ca`, `bcfb463`.
+Cartes closes : `15952e09`, `3b0fda5f`, `b8d65b24`. Cartes ouvertes par la
+session : `438c15e3`, `019f7b37`, `77682683`.
+
+**Filtrage broker (card `15952e09`).** `roadmap_list` n'exposait que 5 filtres
+sur 15 champs ; un agent rapatriait 115 cartes pour en garder une. Le filtrage
+vit desormais cote broker, seul moteur SQL possible, donc aucune divergence
+entre la surface agent et la surface operateur. FTS5 en contenu externe (le
+`content_rowid` est ecrit explicitement, car l'alignement porte sur le rowid
+implicite et non sur l'id TEXT), trois triggers, et un rebuild au demarrage
+qui rend la desynchronisation impossible a travers un redemarrage ; l'import
+fait son propre rebuild en fin de transaction, un `INSERT OR REPLACE` ne
+declenchant pas le trigger `DELETE` sans `recursive_triggers`. La recherche par
+prefixe d'id passe volontairement A COTE de FTS5 : un tokenizer decoupe un
+uuid et rend des correspondances partielles absurdes, une clause `LIKE` bornee
+suffit. Une valeur de filtre inconnue rend une erreur, jamais zero resultat
+(zero sur une faute de frappe serait un faux negatif silencieux) ; la
+validation des tags porte sur l'ensemble du projet, archives comprises. Les
+compteurs de facettes se calculent sur l'ensemble de reference et non sur le
+resultat deja filtre, sans quoi un compteur retombe a lui-meme des qu'un
+filtre est actif.
+
+**Recherche et panneau de filtres desktop (card `3b0fda5f`).** La vue Roadmap
+gagne une recherche texte, un panneau lateral de filtres a facettes et des
+jetons de criteres actifs, sans implementer de moteur : tout le predicat vit
+dans le broker ci-dessus. Le danger n'etait pas le filtrage mais le
+reordonnancement de la queue, qui n'envoie pas l'item deplace mais recalcule
+la liste COMPLETE des ids depuis le state React ; une source filtree aurait
+donc desenfile silencieusement toutes les cartes masquees. `QueueSource` isole
+cette source non filtree. Une premiere tentative avait marque ce type par une
+`interface` a `unique symbol` : elle laissait passer un spread
+(`{ ...source, all: filtre }` compile), et ce meme spread echappait AUSSI a un
+balayage de discipline puisqu'il ne nomme pas la fabrique -- garde et
+surveillance partageaient l'angle mort. Une classe a membre prive refuse le
+litteral ET le spread ; seul un cast subsiste, et lui est greppable.
+`RoadmapList` n'est pas une seconde vue mais la mise en page mobile de la
+meme vue de rail, et consomme desormais le meme hook.
+
+**Auto-save de workspace (card `b8d65b24`).** La restauration de session ne
+fonctionnait plus : l'auto-save gardait sur `SessionService.list()` (qui
+inclut le supervisor) et serialisait `captureSessions()` (qui l'exclut), donc
+tout instant supervisor-seul ecrivait `sessions: []`, detruisant le snapshot
+que l'auto-save etait cense proteger. La garde vit dans `saveAuto` plutot
+qu'au call site, car `saveAuto` a cinq appelants et un seul comptait la bonne
+population -- sur la mauvaise liste.
+
+**Icone de l'application.** Kory etait packagee avec l'icone Electron par
+defaut. La serie change de traitement par PALIER DE TAILLE et non par
+plateforme (le plateau jusqu'a 64 inclus, une silhouette nue en dessous) :
+un critere par plateforme aurait de toute facon livre les deux traitements
+sur les deux plateformes, un meme OS affichant l'icone a plusieurs tailles.
+Pointer un DOSSIER comme source aurait tout annule : la lecture de
+`doConvertIcon` dans `app-builder-lib` montre qu'une entree repertoire fait
+deriver toutes les tailles du plus grand PNG. Le `.icns` est construit a la
+main plutot que par ImageMagick, qui ecrit le fichier avec un code de sortie
+0 en ne conservant SILENCIEUSEMENT qu'une seule frame -- empiler six PNG y
+donne le meme resultat qu'en empiler un. Le verificateur re-parse le fichier
+produit sans reutiliser la logique d'ecriture, sans quoi il validerait sa
+propre erreur.
+
+**Echelle EFFORT, cran du milieu.** `medium` heritait de la couleur de texte
+par defaut, seul cran sans couleur sur une echelle sinon rouge/vert. L'orange
+retenu evite deux pieges : `var(--glow)` est configurable par l'operateur et
+reserve au halo d'attention (une echelle ORDONNEE dont un cran suit une
+preference n'est pas un theme, c'est un bug), et l'ambre voisin est deja
+porte par le statut `in_progress`.
+
+**Trouve seulement a l'ecran, apres typecheck, tests et revue tous verts.**
+Trois defauts de ce lot : une regle CSS du bouton d'effacement du champ de
+recherche qui debordait geometriquement la boite de clip du panneau (invisible
+et incliquable des qu'on saisissait du texte) ; un etat vide de la vue
+Roadmap qui annoncait "la roadmap est vide, ajoutez des cartes" alors que
+cent quinze cartes existaient ; et, exhume au passage sans etre corrige, les
+trois echelles de pilules (effort, valeur, statut) qui tombent sous le seuil
+de lisibilite WCAG en theme clair -- suivi en card `77682683`.
+
+Deux defauts ouverts par la session : `438c15e3` (`WorkspaceService.own()`
+ignore le booleen rendu par `acquireLock()`, donc un Deck peut entretenir le
+verrou d'un autre en croyant le posseder) et `019f7b37` (`sessions.json` est
+ecrit a chaque changement de session et lu par personne depuis le retrait de
+la restauration automatique).
+
 ## core (experimental) — an operator-authored roadmap write must prove the operator (card `39c40571`, layer 2)
 
 Four commits, `29bff61` then `6f7b5d3`, `5ceaba3`, `8029eb1`. Layer 1
