@@ -147,6 +147,8 @@ export const EN_DEFAULTS: Record<string, string> = {
   'banner.retry': 'Retry',
   'banner.dismiss': 'Dismiss',
   'toast.workspaceSaved': 'Workspace saved',
+  'toast.nothingToSave': 'Nothing to save',
+  'toast.nothingToRestore': 'This workspace has no sessions to restore',
   'toast.alreadyOpen': 'Session already open',
   'toast.peerIdCopied': 'peer id copied',
 

@@ -31,9 +31,27 @@ function makeService(projectDir: string): WorkspaceService {
   // Minimal fakes: saveAuto only reaches service.refreshLiveSessionIds() +
   // captureSessions(), getConfig (display mode) and getScope
   // (name/groupId/scopeName/scopeKind).
+  // captureSessions() must return a real session: this test targets the ENOENT
+  // guard in own(), which is orthogonal to the empty-snapshot guard saveAuto()
+  // now has (b8d65b24) -- an empty capture here would exercise THAT guard
+  // instead and never reach the dir-creation path this test is pinning.
   const deps = {
     projectDir,
-    service: { captureSessions: () => [], refreshLiveSessionIds: () => {} },
+    service: {
+      captureSessions: () => [
+        {
+          id: "local-fresh",
+          name: "fresh",
+          cwd: "/abs/project",
+          command: "",
+          args: "",
+          sessionId: "sid-fresh",
+          color: "#4488ff",
+          createdAt: 1
+        }
+      ],
+      refreshLiveSessionIds: () => {}
+    },
     getConfig: () => ({ displayMode: "2x2", gridCols: 2, gridRows: 2 }),
     setConfig: () => {},
     getScope: () => ({

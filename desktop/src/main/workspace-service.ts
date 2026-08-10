@@ -23,6 +23,7 @@ import {
 } from './workspace-store'
 import { acquireLock, isLockLive, readLock, refreshLock, releaseLock } from './workspace-lock'
 import { fromWorkspaceSessions, toWorkspaceSessions } from './workspace-session-map'
+import { logWarn } from './log'
 
 const HEARTBEAT_MS = 30_000
 /** Cross-host lock is stale after this without a heartbeat (best-effort, DESIGN 15). */
@@ -161,8 +162,18 @@ export class WorkspaceService {
     this.own(newWorkspaceId())
   }
 
-  /** Persist the live state under the current workspace id (auto name kept). */
-  saveAuto(): WorkspaceSummary {
+  /**
+   * Persist the live state under the current workspace id (auto name kept).
+   * Returns null and does NOTHING -- no mint, no overwrite -- when
+   * captureSessions() is empty (e.g. the supervisor is the only session
+   * alive): an empty snapshot is never a legitimate auto-save, and covering
+   * this here (not at each call site) is what protects all three callers
+   * (index.ts's debounced 'changed' handler, startNew, releaseOnQuit) with
+   * one guard. saveNamed (explicit Save As) is NOT guarded: the operator
+   * asking to save an empty workspace by name is a deliberate act.
+   */
+  saveAuto(): WorkspaceSummary | null {
+    if (this.deps.service.captureSessions().length === 0) return null
     return this.persist(undefined, false)
   }
 
@@ -206,12 +217,28 @@ export class WorkspaceService {
   restore(id: string): boolean {
     const ws = loadWorkspace(this.deps.projectDir, id)
     if (!ws) return false
+    // A workspace persisted with zero sessions (a legacy empty snapshot minted
+    // before saveAuto()'s empty-capture guard existed, or any future writer
+    // that bypasses it) must never reach restoreFrom: restoreFrom starts with
+    // pty.killAll(), so "restoring nothing" would kill every live session for
+    // no replacement (b8d65b24 follow-up, mutation-tested review). The picker
+    // (WorkspacesDialog.tsx) also disables Restore on sessionCount === 0; this
+    // is the service-side line of defense for every other caller.
+    if (ws.sessions.length === 0) return false
     // Refuse to restore a workspace another live instance already owns -- two
-    // windows must not drive the same Claude sessions (the UI also disables it).
+    // windows must not drive the same Claude sessions (the UI also disables
+    // it). Exemption is by LOCK IDENTITY (the pid+host actually stamped in the
+    // lock file), not by comparing `id` to `this.currentId`: currentId is only
+    // this instance's own belief about what it owns, and refreshLock()
+    // re-stamps whatever identity the file already holds, so a second Deck
+    // could keep alive a lock this instance no longer truly matches. Resolve
+    // the object (the lock) first, then ask whether THIS caller (pid+host) is
+    // the one holding it.
     const lock = readLock(this.deps.projectDir, id)
     if (
       lock &&
-      isLockLive(lock, { host: this.host, now: Date.now(), isPidAlive: pidAlive, staleMs: LOCK_STALE_MS })
+      isLockLive(lock, { host: this.host, now: Date.now(), isPidAlive: pidAlive, staleMs: LOCK_STALE_MS }) &&
+      !(lock.pid === this.pid && lock.host === this.host)
     ) {
       return false
     }
@@ -219,7 +246,17 @@ export class WorkspaceService {
     this.deps.setConfig(fromDisplayMode(ws.displayMode))
     this.deps.service.restoreFrom(fromWorkspaceSessions(ws.sessions))
     this.own(id) // hand the lock from the old workspace to this one + heartbeat
-    this.saveAuto()
+    // Recapture right after restoring a non-empty workspace (ws.sessions.length
+    // > 0, guarded above) must not itself come back empty -- that would mean
+    // restoreFrom silently produced nothing, exactly the defect this card
+    // fixes elsewhere. saveAuto()'s own empty-guard would otherwise swallow it
+    // without a trace.
+    if (this.saveAuto() === null) {
+      logWarn(
+        'workspace',
+        `restore(${id}) recaptured 0 sessions right after restoring ${ws.sessions.length}`
+      )
+    }
     return true
   }
 

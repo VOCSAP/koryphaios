@@ -55,6 +55,8 @@
   "banner.retry": "Réessayer",
   "banner.dismiss": "Masquer",
   "toast.workspaceSaved": "Espace enregistré",
+  "toast.nothingToSave": "Rien à enregistrer",
+  "toast.nothingToRestore": "Cet espace de travail n'a aucune session à restaurer",
   "toast.alreadyOpen": "Session déjà ouverte",
   "toast.peerIdCopied": "peer id copié",
   "tile.expiredTitle": "Session expirée",

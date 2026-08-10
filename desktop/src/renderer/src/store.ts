@@ -236,7 +236,13 @@ interface DeckState {
   finishSandboxBuild(code: number): void
 
   refreshWorkspaces(): Promise<void>
-  saveWorkspace(name?: string): Promise<void>
+  /**
+   * null iff nothing was captured (saveAuto's empty-snapshot guard, b8d65b24):
+   * the caller decides whether that is worth surfacing (an explicit gesture
+   * must not report success on a no-op; an automatic save stays silent either
+   * way).
+   */
+  saveWorkspace(name?: string): Promise<WorkspaceSummary | null>
   restoreWorkspace(id: string): Promise<void>
   removeWorkspace(id: string): Promise<void>
 }
@@ -576,8 +582,16 @@ export const useDeck = create<DeckState>((set, get) => ({
 
   async saveCurrent() {
     await guarded('save workspace', async () => {
-      await get().saveWorkspace()
-      get().showToast('toast.workspaceSaved')
+      const summary = await get().saveWorkspace()
+      // null: the explicit gesture had nothing to capture (only the
+      // supervisor alive, or a fresh launch) -- report that, not a false
+      // "saved" (b8d65b24 follow-up: the same guard silently protecting
+      // auto-save must not silently lie to an explicit click too).
+      if (summary) {
+        get().showToast('toast.workspaceSaved')
+      } else {
+        get().showToast('toast.nothingToSave', 'info')
+      }
     })
   },
 
@@ -586,9 +600,11 @@ export const useDeck = create<DeckState>((set, get) => ({
     if (!n) return
     try {
       await get().saveWorkspace(n)
-    } catch {
+    } catch (e) {
       // Main rejected (e.g. duplicate name) -> keep the dialog open, no toast.
-      // The dialog already prevents duplicates; this is a safety net.
+      // The dialog already prevents duplicates; this is a safety net, but a
+      // real main-side failure must still leave a trace (no silent errors).
+      window.api.reportError('workspace', `saveAs(${n}) failed: ${errorText(e)}`)
       return
     }
     set({ saveAsOpen: false })
@@ -775,18 +791,29 @@ export const useDeck = create<DeckState>((set, get) => ({
   },
 
   async saveWorkspace(name) {
-    await window.api.saveWorkspace(name)
+    const summary = await window.api.saveWorkspace(name)
     await get().refreshWorkspaces()
+    return summary
   },
 
   async restoreWorkspace(id) {
     await guarded('restore workspace', async () => {
+      // Captured before the call: distinguishes WHY a `false` came back
+      // without widening the IPC contract (workspace:restore stays a plain
+      // boolean). The list is already loaded whenever a caller can reach this
+      // (picker or "restore previous"), so the cached summary is current.
+      const target = get().workspaces.find((w) => w.id === id)
       const ok = await window.api.restoreWorkspace(id)
       // Sessions refresh via onSessionsChanged (restoreFrom broadcasts 'changed').
       await get().refreshWorkspaces()
       if (ok) {
         // Close the selection window once a workspace has been loaded.
         set({ workspacesOpen: false })
+      } else if (target && target.sessionCount === 0) {
+        // Distinct from "already open": this workspace never had a live
+        // session to restore in the first place (a legacy empty snapshot) --
+        // toast.alreadyOpen would lie here (b8d65b24 follow-up).
+        get().showToast('toast.nothingToRestore', 'info')
       } else {
         // Already owned by another live window (or gone) -> inform, don't restore.
         get().showToast('toast.alreadyOpen', 'info')

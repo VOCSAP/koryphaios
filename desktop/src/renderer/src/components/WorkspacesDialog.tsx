@@ -53,7 +53,7 @@ export function WorkspacesDialog(): React.JSX.Element {
               </div>
               <button
                 className="ws-btn primary"
-                disabled={ws.current || ws.locked}
+                disabled={ws.current || ws.locked || ws.sessionCount === 0}
                 onClick={() => requestRestore(ws.id)}
               >
                 {t('workspaces.restore')}

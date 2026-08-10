@@ -236,7 +236,7 @@ mock.module("../desktop/src/renderer/src/components/TerminalTile.tsx", () => {
 // from '../store'` (transitively, via its own `useT()` -> `../i18n` ->
 // `./store` chain) bind to the mocks, never to the real heavy modules
 // (xterm.js, window.api, the companion remote-api shim).
-const { TileArea } = await import("../desktop/src/renderer/src/components/TileArea");
+const { TileArea, pickRestorable } = await import("../desktop/src/renderer/src/components/TileArea");
 
 let container: HTMLDivElement;
 let root: Root;
@@ -512,4 +512,65 @@ test("negative control twin: the SHIPPED children shape survives the same transi
   expect(ctlUnmounts.get("s2") ?? 0).toBe(0);
   expect(ctlMounts.get("s1")).toBe(1);
   expect(ctlMounts.get("s2")).toBe(1);
+});
+
+// pickRestorable (b8d65b24 follow-up + operator arbitration): the "restore
+// previous" tile must offer a workspace that is actually restorable (has
+// sessions, not locked elsewhere), and `current` is only eligible once the
+// deck has zero live agent sessions -- see the doc comment on the function
+// itself for the full rationale. `liveAgentCount` is a plain parameter here,
+// never a store read, so these cases need no store/DOM mocking at all.
+let wsSeq = 0;
+function ws(overrides: Partial<{
+  id: string;
+  name: string;
+  pinned: boolean;
+  scopeName: string;
+  sessionCount: number;
+  updatedAt: number;
+  locked: boolean;
+  current: boolean;
+}>) {
+  wsSeq += 1;
+  return {
+    id: `ws-${wsSeq}`,
+    name: `workspace ${wsSeq}`,
+    pinned: false,
+    scopeName: "scope",
+    sessionCount: 1,
+    updatedAt: 1,
+    locked: false,
+    current: false,
+    ...overrides
+  };
+}
+
+test("pickRestorable: an empty list has nothing to offer", () => {
+  expect(pickRestorable([], 0)).toBeUndefined();
+});
+
+test("pickRestorable: all entries are `current` with a live agent -- nothing restorable", () => {
+  const list = [ws({ current: true, sessionCount: 2 }), ws({ current: true, sessionCount: 3 })];
+  expect(pickRestorable(list, 1)).toBeUndefined();
+});
+
+test("pickRestorable: all entries locked by another instance -- nothing restorable", () => {
+  const list = [ws({ locked: true }), ws({ locked: true })];
+  expect(pickRestorable(list, 0)).toBeUndefined();
+});
+
+test("pickRestorable: a zero-session entry is skipped in favor of the next valid one", () => {
+  const empty = ws({ sessionCount: 0 });
+  const valid = ws({ sessionCount: 4 });
+  expect(pickRestorable([empty, valid], 0)).toBe(valid);
+});
+
+test("pickRestorable: `current` with zero live agents and sessions IS chosen (empty-deck restore)", () => {
+  const current = ws({ current: true, sessionCount: 2 });
+  expect(pickRestorable([current], 0)).toBe(current);
+});
+
+test("pickRestorable: `current` with a live agent still running is EXCLUDED", () => {
+  const current = ws({ current: true, sessionCount: 2 });
+  expect(pickRestorable([current], 1)).toBeUndefined();
 });

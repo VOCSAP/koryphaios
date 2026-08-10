@@ -1,9 +1,36 @@
 import { useRef } from 'react'
-import type { DisplayMode } from '@shared/types'
+import type { DisplayMode, WorkspaceSummary } from '@shared/types'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { TerminalTile } from './TerminalTile'
 import { GLYPH_ACTIONS } from './icons'
+
+/**
+ * The workspace the "restore previous" button/chevron should offer: not
+ * locked by another live instance, and actually has sessions to respawn
+ * (`workspaces[0]` alone, the previous behavior, could pick a locked or
+ * empty/dead entry, leaving the button clickable and functionally dead --
+ * b8d65b24). The CURRENT workspace is only a candidate when the deck has no
+ * live agent session left: an empty deck is itself a fresh start, so
+ * "restore what I just had" is exactly the operator's main use case there
+ * (b8d65b24 follow-up, operator arbitration); with any agent still running,
+ * restoring `current` would kill it for no replacement, so it stays excluded
+ * exactly like `locked`. `liveAgentCount` is a PARAMETER, not a store read,
+ * so this stays pure and testable without mounting the store -- pass the
+ * caller's own supervisor-excluded count (same population `captureSessions()`
+ * uses), never a second definition of "live" computed here. Pure and
+ * exported so the rule is pinned by a unit test instead of only exercised
+ * via JSX.
+ */
+export function pickRestorable(
+  workspaces: WorkspaceSummary[],
+  liveAgentCount: number
+): WorkspaceSummary | undefined {
+  return workspaces.find((w) => {
+    if (w.locked || w.sessionCount === 0) return false
+    return w.current ? liveAgentCount === 0 : true
+  })
+}
 
 /** Visible columns/rows for the grid modes (1x1 is rendered as a carousel). */
 function gridShape(mode: DisplayMode, cols: number, rows: number): { cols: number; rows: number } {
@@ -83,7 +110,7 @@ export function TileArea(): React.JSX.Element {
   }
 
   if (sessions.length === 0) {
-    const previous = workspaces[0]
+    const previous = pickRestorable(workspaces, sessions.length)
     return (
       <main className="area area-empty">
         <div className="empty-card">

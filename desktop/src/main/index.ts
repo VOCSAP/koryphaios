@@ -1845,28 +1845,36 @@ const workspaces = new WorkspaceService({
   adoptScope
 })
 
-// Grey out File > Export template... when there is nothing to export. Kept in
-// sync with the live session list (separate from the auto-save handler below,
-// which early-returns on the empty list -- exactly when we must DISABLE).
+// Grey out File > Export template... when there is nothing to export. Must
+// count the same population saveTemplate() itself serializes
+// (service.captureSessions(), which excludes the supervisor): service.list()
+// alone (includes it) left the item enabled on a supervisor-only moment for
+// an export that would come back empty -- same root cause as the auto-save
+// guard below, in this same file (b8d65b24, mutation-tested review).
 const syncExportTemplateEnabled = (): void => {
   const item = Menu.getApplicationMenu()?.getMenuItemById('export-template')
-  if (item) item.enabled = service.list().length > 0
+  if (item) item.enabled = service.list().some((s) => !s.supervisor)
 }
 service.on('changed', syncExportTemplateEnabled)
 
 // Continuously auto-save the live workspace (debounced) as sessions change, but
-// only once there ARE sessions -- launching empty must not mint/clobber a
-// workspace (the previous run stays restorable until the user acts).
+// only once there are non-supervisor sessions -- launching supervisor-only must
+// not mint/clobber a workspace (the previous run stays restorable until the
+// user acts). Must count the same population WorkspaceService.saveAuto() itself
+// snapshots (captureSessions(), which excludes the supervisor): list() here
+// includes it, so a naive length check would pass on a supervisor-only moment
+// and race the guard now living in saveAuto() -- redundant with it, but this is
+// the site whose own comment used to claim the opposite.
 let autoSaveTimer: NodeJS.Timeout | null = null
-service.on('changed', (sessions: unknown[]) => {
-  if (!Array.isArray(sessions) || sessions.length === 0) return
+service.on('changed', (sessions: SessionRuntime[]) => {
+  if (!Array.isArray(sessions) || !sessions.some((s) => !s.supervisor)) return
   if (autoSaveTimer) clearTimeout(autoSaveTimer)
   autoSaveTimer = setTimeout(() => {
     // A workspace I/O error must never take down the main process.
     try {
       const summary = workspaces.saveAuto()
-      // Keep the renderer's window title in sync with the current workspace.
-      broadcast('workspace:current', summary)
+      // null: saveAuto() itself declined (nothing captured) -- no title update.
+      if (summary) broadcast('workspace:current', summary)
     } catch (e) {
       reportError('workspace', 'auto-save failed', e)
     }
