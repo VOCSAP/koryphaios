@@ -16,18 +16,78 @@ import { join } from 'node:path'
 export interface Lock {
   pid: number
   host: string
+  /**
+   * The OWNING PROCESS's own actual start time (epoch ms, rounded to the
+   * nearest second to absorb clock-read drift) -- NOT when this lock file
+   * was written. Combined with a stale heartbeat (see `isLockLive`), this is
+   * a reclaim signal for a same-host owner: no process survives a reboot, so
+   * a lock whose `startedAt` predates this machine's last boot AND whose
+   * heartbeat has gone quiet is provably dead, even if its pid was later
+   * recycled by an unrelated process (card 438c15e3, review round 3). The
+   * `startedAt` half alone is NOT sufficient (review round 5): it is a
+   * wall-clock-derived estimate, sampled once at acquire time, and an NTP
+   * correction occurring later can shift a FRESH `bootInstant` estimate away
+   * from a STALE `startedAt` by more than any fixed tolerance, wrongly
+   * declaring a live owner dead -- structural to comparing two wall-clock+
+   * uptime estimates sampled at different real times, not specific to this
+   * pair of fields. The heartbeat half is what closes that gap: a live
+   * owner's NEXT beat lands on the corrected clock and is fresh again,
+   * regardless of how large the `startedAt` gap now looks. When either half
+   * is inconclusive (startedAt at/after boot, OR heartbeat still fresh),
+   * same-host liveness falls back to a bare pid-alive check -- see
+   * `isLockLive`. KNOWN LIMITATION, deliberately not addressed here: a jump
+   * FORWARD larger than `staleMs`, landing in the window before the owner's
+   * next heartbeat (at most one heartbeat interval wide), can still steal a
+   * live lock -- narrow and requires an unusually large single correction,
+   * see `isLockLive`. Locks written before this field carried real meaning
+   * still parse (same shape, `number`), but their value is an acquisition
+   * timestamp, not a launch time -- harmless for the one-way check (an
+   * acquisition timestamp is never earlier than the process's own actual
+   * start), so no migration is needed.
+   */
   startedAt: number
   heartbeat: number
 }
+
+/**
+ * Worst-case rounding error on the boot-instant comparison: both
+ * `Lock.startedAt` and the caller's `bootInstant` are independently rounded
+ * to the nearest second (~1s each), so a margin smaller than this risks a
+ * false reclaim from rounding alone, not a real reboot. The comparison
+ * SUBTRACTS this tolerance from `bootInstant` (never adds it to
+ * `startedAt`), so the only effect of the margin is to make the rule harder
+ * to satisfy -- on ambiguity it fails toward "cannot conclude" (fall back to
+ * `isPidAlive`), never toward "provably dead" (review round 4: a wall-clock
+ * NTP correction that shifts `bootInstant` must never be able to make this
+ * rule declare a live owner dead).
+ */
+export const BOOT_RECLAIM_TOLERANCE_MS = 2_000
 
 export interface LivenessOpts {
   /** Hostname of THIS machine (to tell same-host from cross-host). */
   host: string
   /** Current epoch ms. */
   now: number
-  /** True if `pid` is a live process on this machine (real: process.kill(pid,0)). */
+  /**
+   * This machine's boot instant (epoch ms, rounded to the nearest second --
+   * see `BOOT_RECLAIM_TOLERANCE_MS`). Used only for the one-way reclaim
+   * check on `Lock.startedAt` (same-host path of `isLockLive`); cheap and
+   * dependency-free (`Date.now() - os.uptime()*1000`), never a subprocess.
+   */
+  bootInstant: number
+  /**
+   * Same-host liveness: is `pid` a live process on this machine? Plain
+   * pid-alive check (`process.kill(pid, 0)`), the pre-card guarantee --
+   * `isLockLive` only calls this once the boot-instant check above is
+   * inconclusive.
+   */
   isPidAlive: (pid: number) => boolean
-  /** Cross-host: a heartbeat older-or-equal to now-staleMs is considered stale. */
+  /**
+   * A heartbeat older-or-equal to `now - staleMs` is considered stale.
+   * Cross-host: the sole liveness signal. Same-host: the SECOND half of the
+   * boot-instant reclaim check (review round 6) -- both must hold for a
+   * same-host lock to be declared dead without consulting `isPidAlive`.
+   */
   staleMs: number
 }
 
@@ -56,12 +116,26 @@ export function readLock(projectDir: string, id: string): Lock | null {
 
 /**
  * Is a lock held by a LIVE owner?
- * - Same host: trust the OS process table via `isPidAlive`.
+ * - Same host: dead (without consulting `isPidAlive`) only if BOTH hold --
+ *   `startedAt` provably predates this machine's last boot (no process
+ *   survives a reboot) AND the heartbeat is stale. The `startedAt` half
+ *   alone is not enough: it is a wall-clock estimate sampled once, and an
+ *   NTP correction can make a FRESH `bootInstant` outrun a STALE
+ *   `startedAt` by more than any fixed tolerance, wrongly declaring a live
+ *   owner dead (review round 5). The heartbeat half absorbs that: a live
+ *   owner's next beat lands on the corrected clock and is fresh again, so
+ *   the AND blocks the false reclaim while a genuinely dead (or
+ *   pid-recycled) owner's heartbeat stays stale and the reclaim still
+ *   fires. When either half is inconclusive, fall back to the OS process
+ *   table via `isPidAlive` (pre-card guarantee).
  * - Cross host: trust heartbeat freshness only (best-effort). A heartbeat
  *   older-or-equal to `now - staleMs` is stale (boundary treated as stale).
  */
 export function isLockLive(lock: Lock, opts: LivenessOpts): boolean {
   if (lock.host === opts.host) {
+    const precedesBoot = lock.startedAt < opts.bootInstant - BOOT_RECLAIM_TOLERANCE_MS
+    const heartbeatStale = lock.heartbeat <= opts.now - opts.staleMs
+    if (precedesBoot && heartbeatStale) return false
     return opts.isPidAlive(lock.pid)
   }
   return lock.heartbeat > opts.now - opts.staleMs
@@ -71,39 +145,84 @@ function writeLock(projectDir: string, id: string, lock: Lock): void {
   writeFileSync(lockPath(projectDir, id), JSON.stringify(lock), 'utf8')
 }
 
+/** A caller's own identity, as stamped in a `Lock` (pid+host, never a
+ *  caller-side memory field -- see the repo's "who is actually running
+ *  this" convention). */
+export interface LockIdentity {
+  pid: number
+  host: string
+}
+
+/**
+ * Does `identity` (the pid+host of THIS caller) match the pid+host actually
+ * stamped in `lock`? The single source of truth for "do I own this lock",
+ * consumed by both `refreshLock` and `releaseLock` so the comparison is
+ * written once (card 438c15e3 -- mirrors `resolveRoadmapLock` in
+ * shared/roadmap-lock.ts: resolve the object, then ask if this caller owns
+ * it, never trust a caller-side belief like `this.currentId`).
+ */
+export function ownsLock(lock: Lock, identity: LockIdentity): boolean {
+  return lock.pid === identity.pid && lock.host === identity.host
+}
+
 /**
  * Try to acquire the lock for `id`. Refuses if an existing lock is held by a
- * live owner; otherwise writes a fresh lock (reclaiming a stale one) and returns
- * true. `pid`/`host`/`now` describe THIS owner.
+ * live owner; otherwise writes a fresh lock (reclaiming a stale one) and
+ * returns true. `pid`/`host` describe THIS owner; `startedAt` is THIS
+ * owner's OWN actual process start time (not the acquisition timestamp --
+ * see `Lock.startedAt` and `isLockLive`, which need a real launch time to
+ * compare against this machine's boot instant on the NEXT liveness check,
+ * not merely "when this lock was last written").
  */
 export function acquireLock(
   projectDir: string,
   id: string,
-  opts: LivenessOpts & { pid: number }
+  opts: LivenessOpts & { pid: number; startedAt: number }
 ): boolean {
   const existing = readLock(projectDir, id)
   if (existing && isLockLive(existing, opts)) return false
   writeLock(projectDir, id, {
     pid: opts.pid,
     host: opts.host,
-    startedAt: opts.now,
+    startedAt: opts.startedAt,
     heartbeat: opts.now
   })
   return true
 }
 
-/** Refresh the heartbeat of an owned lock (no-op if the file vanished). */
-export function refreshLock(projectDir: string, id: string, now: number): void {
+/**
+ * Refresh the heartbeat of a lock OWNED BY `identity`. No-op (returns false)
+ * if the file vanished, or if it now belongs to a different pid+host -- a
+ * caller must never re-stamp an identity it does not hold, or it can keep
+ * another instance's lock alive forever through its own heartbeat.
+ */
+export function refreshLock(
+  projectDir: string,
+  id: string,
+  now: number,
+  identity: LockIdentity
+): boolean {
   const lock = readLock(projectDir, id)
-  if (!lock) return
+  if (!lock || !ownsLock(lock, identity)) return false
   writeLock(projectDir, id, { ...lock, heartbeat: now })
+  return true
 }
 
-/** Release (delete) the lock file. Best-effort. */
-export function releaseLock(projectDir: string, id: string): void {
+/**
+ * Release (delete) the lock file, but ONLY if it is currently owned by
+ * `identity` (or already gone). Refuses to delete a lock stamped with a
+ * different pid+host -- an instance that lost the acquire race must not be
+ * able to destroy a live instance's lock on its own way out. Returns false
+ * when a foreign lock blocked the release, true otherwise (deleted, or
+ * nothing to delete).
+ */
+export function releaseLock(projectDir: string, id: string, identity: LockIdentity): boolean {
+  const lock = readLock(projectDir, id)
+  if (lock && !ownsLock(lock, identity)) return false
   try {
     rmSync(lockPath(projectDir, id), { force: true })
   } catch {
     // already gone -> nothing to do
   }
+  return true
 }

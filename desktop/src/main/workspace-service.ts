@@ -1,11 +1,13 @@
 // Orchestrates workspace persistence/restore on top of the pure store + lock
-// modules and the SessionService. Lives in the main process (consumes electron-
-// adjacent singletons via injected deps), so it is not bun-tested directly --
-// its pure pieces (store, lock, session-map, scope adoption) are tested
-// separately. Owns: the current workspace, its lock + heartbeat, auto-save, and
-// scope adoption on restore.
+// modules and the SessionService. Its own runtime imports (node:os + the pure
+// modules below) carry no electron/node-pty -- SessionService/Scope are
+// `import type` only, erased at build time -- so WorkspaceService itself is
+// bun-testable directly with a stubbed `deps` object (tests/desktop-
+// workspace.test.ts), not just its pure pieces (store, lock, session-map)
+// in isolation. Owns: the current workspace, its lock + heartbeat, auto-save,
+// and scope adoption on restore.
 
-import { hostname } from 'node:os'
+import { hostname, uptime as osUptime } from 'node:os'
 import type { AppConfig, DisplayMode, WorkspaceSummary } from '@shared/types'
 import type { Scope } from './scope'
 import type { SessionService } from './session-service'
@@ -21,9 +23,16 @@ import {
   saveWorkspace,
   selectPrunableWorkspaces
 } from './workspace-store'
-import { acquireLock, isLockLive, readLock, refreshLock, releaseLock } from './workspace-lock'
+import {
+  acquireLock,
+  isLockLive,
+  ownsLock,
+  readLock,
+  refreshLock,
+  releaseLock
+} from './workspace-lock'
 import { fromWorkspaceSessions, toWorkspaceSessions } from './workspace-session-map'
-import { logWarn } from './log'
+import { logWarn, reportError } from './log'
 
 const HEARTBEAT_MS = 30_000
 /** Cross-host lock is stale after this without a heartbeat (best-effort, DESIGN 15). */
@@ -41,6 +50,38 @@ function pidAlive(pid: number): boolean {
   } catch (e) {
     return (e as NodeJS.ErrnoException).code === 'EPERM'
   }
+}
+
+/**
+ * THIS process's own actual start time (epoch ms, rounded to the nearest
+ * second to absorb clock-read drift between two calls). Computed once at
+ * construction and stamped into every lock this instance writes, so a LATER
+ * liveness check can rule a lock provably dead across a reboot regardless of
+ * pid recycling (card 438c15e3, review round 3) -- see `initialBootInstant`
+ * for the other half of that comparison.
+ */
+function ownProcessStartedAt(): number {
+  return Math.round((Date.now() - process.uptime() * 1000) / 1000) * 1000
+}
+
+/**
+ * THIS machine's boot instant (epoch ms, rounded to the nearest second).
+ * `os.uptime()` is monotonic seconds since boot, independent of wall-clock
+ * adjustments, so this is free (no subprocess, works in a minimal container)
+ * and available on every platform -- unlike querying a DIFFERENT pid's start
+ * time (review round 4: that approach was dropped, see `isLockLive`'s
+ * same-host boot check in workspace-lock.ts for how this value is used as a
+ * one-way "no process survives a reboot" reclaim signal, combined with
+ * heartbeat freshness, falling back to a bare pid-alive check when
+ * inconclusive). Sampled ONCE (`WorkspaceService.bootAnchorInstant`) and
+ * advanced afterward via monotonic process uptime deltas rather than
+ * re-reading `Date.now()` on every call -- see
+ * `WorkspaceService.currentBootInstant` (review round 5: a long-lived
+ * process re-deriving this from `Date.now()` on every check straddles any
+ * NTP correction that occurs during its lifetime).
+ */
+function initialBootInstant(): number {
+  return Math.round((Date.now() - osUptime() * 1000) / 1000) * 1000
 }
 
 function toDisplayMode(cfg: AppConfig): WorkspaceDisplayMode {
@@ -74,11 +115,20 @@ export interface WorkspaceDeps {
   adoptScope: (ws: { groupId: string; scopeKind: 'ephemeral' | 'custom' }) => void
   pid?: number
   host?: string
+  /** THIS process's own actual start time (epoch ms). Test-injectable like
+   *  `pid`/`host`; production default is `ownProcessStartedAt()`. */
+  startedAt?: number
 }
 
 export class WorkspaceService {
   private readonly host: string
   private readonly pid: number
+  private readonly startedAt: number
+  /** `initialBootInstant()` sampled ONCE at construction -- see `currentBootInstant`. */
+  private readonly bootAnchorInstant: number
+  /** `process.uptime()` at the SAME instant as `bootAnchorInstant`, the monotonic
+   *  reference `currentBootInstant` advances from afterward. */
+  private readonly bootAnchorProcessUptime: number
   private currentId: string | null = null
   private heartbeatTimer: NodeJS.Timeout | null = null
   private pruneTimer: NodeJS.Timeout | null = null
@@ -86,6 +136,23 @@ export class WorkspaceService {
   constructor(private deps: WorkspaceDeps) {
     this.host = deps.host ?? hostname()
     this.pid = deps.pid ?? process.pid
+    this.startedAt = deps.startedAt ?? ownProcessStartedAt()
+    this.bootAnchorInstant = initialBootInstant()
+    this.bootAnchorProcessUptime = process.uptime()
+  }
+
+  /**
+   * This machine's boot instant, advanced from the one-time construction
+   * sample via a monotonic PROCESS uptime delta rather than by re-reading
+   * `Date.now()` -- immune to any wall-clock (NTP) correction that occurs
+   * during this long-running instance's own lifetime (review round 5).
+   * Residual, deliberately not addressed: if the wall clock was ALREADY
+   * wrong at construction (before this instance's own first sample), the
+   * anchor stays off for its whole lifetime; `isLockLive`'s heartbeat
+   * condition is what bounds the damage in that case, not this method.
+   */
+  private currentBootInstant(): number {
+    return this.bootAnchorInstant + Math.round((process.uptime() - this.bootAnchorProcessUptime) * 1000)
   }
 
   get currentWorkspaceId(): string | null {
@@ -124,7 +191,14 @@ export class WorkspaceService {
     for (const id of candidates) {
       const lock = readLock(this.deps.projectDir, id)
       const liveElsewhere =
-        !!lock && isLockLive(lock, { host: this.host, now, isPidAlive: pidAlive, staleMs: LOCK_STALE_MS })
+        !!lock &&
+        isLockLive(lock, {
+          host: this.host,
+          now,
+          bootInstant: this.currentBootInstant(),
+          isPidAlive: pidAlive,
+          staleMs: LOCK_STALE_MS
+        })
       if (liveElsewhere) continue
       deleteWorkspace(this.deps.projectDir, id)
       pruned.push(id)
@@ -132,34 +206,116 @@ export class WorkspaceService {
     return pruned
   }
 
-  /** Own a workspace id: acquire its lock + (re)start the heartbeat. */
-  private own(id: string): void {
+  /**
+   * Own a workspace id: acquire its lock + (re)start the heartbeat. Returns
+   * whether the lock was actually acquired -- `this.currentId` and the
+   * heartbeat are only committed on success, never on the strength of the
+   * caller's intent alone (card 438c15e3: the previous ordering stamped
+   * `this.currentId = id` BEFORE knowing acquireLock()'s result, so a lost
+   * race was invisible).
+   */
+  private own(id: string): boolean {
+    // Already own this id -- do NOT call acquireLock() again: it refuses
+    // whenever the existing lock is live (isLockLive checks pid-alive, not
+    // identity), so re-acquiring our own live lock would spuriously fail,
+    // turning a self-restore (restore() called on the already-current
+    // workspace) into a reported error over nothing (flagged before landing
+    // any code: card 438c15e3, "own(x) when currentId already x"). Nothing
+    // to acquire or release: the on-disk lock already reflects this
+    // instance, untouched either way. `this.currentId` alone is an
+    // IN-MEMORY belief, not proof (review round 7): re-read the on-disk
+    // lock and confirm it is still stamped with THIS identity via ownsLock
+    // before taking the shortcut -- if a third party has since reclaimed
+    // the file, fall through to the normal acquire path instead of writing
+    // under a lock we no longer hold.
+    if (this.currentId === id) {
+      const lock = readLock(this.deps.projectDir, id)
+      if (lock && ownsLock(lock, { pid: this.pid, host: this.host })) {
+        if (!this.heartbeatTimer) {
+          this.heartbeatTimer = setInterval(() => this.heartbeatTick(), HEARTBEAT_MS)
+        }
+        return true
+      }
+      // Lock is gone or now foreign -- our own heartbeat should already have
+      // self-ejected (heartbeatTick, above) and cleared the timer on the
+      // same discovery; do NOT restart it here, or a self-eject would be
+      // undone by the very shortcut it was meant to guard.
+    }
     // The lock is written before saveWorkspace would create the tree, so a
     // fresh project dir (no .claude/claude-peers/workspaces yet) would ENOENT.
     // Create it up front -- own() is the first writer of any workspace file.
     ensureWorkspacesDir(this.deps.projectDir)
-    if (this.currentId && this.currentId !== id) {
-      releaseLock(this.deps.projectDir, this.currentId)
-    }
-    this.currentId = id
-    acquireLock(this.deps.projectDir, id, {
+    const acquired = acquireLock(this.deps.projectDir, id, {
       pid: this.pid,
       host: this.host,
+      startedAt: this.startedAt,
       now: Date.now(),
+      bootInstant: this.currentBootInstant(),
       isPidAlive: pidAlive,
       staleMs: LOCK_STALE_MS
     })
+    if (!acquired) return false
+    // Only release the PREVIOUS workspace's lock once the new one is
+    // actually ours -- releasing it first (the old ordering) would strand
+    // this instance owning neither workspace if the new acquire then failed.
+    if (this.currentId && this.currentId !== id) {
+      releaseLock(this.deps.projectDir, this.currentId, { pid: this.pid, host: this.host })
+    }
+    this.currentId = id
     if (!this.heartbeatTimer) {
-      this.heartbeatTimer = setInterval(() => {
-        if (this.currentId) refreshLock(this.deps.projectDir, this.currentId, Date.now())
-      }, HEARTBEAT_MS)
+      this.heartbeatTimer = setInterval(() => this.heartbeatTick(), HEARTBEAT_MS)
+    }
+    return true
+  }
+
+  /**
+   * Body of the heartbeat timer, extracted to a named method so a test can
+   * call it directly and prove the two things that matter -- it passes THIS
+   * instance's own identity (pid+host) to refreshLock(), and it self-ejects
+   * once on a mismatch rather than re-tracing every tick (card 438c15e3: a
+   * bare `setInterval(() => {...})` closure is unreachable from a test, so
+   * the wiring between the timer and `this.pid`/`this.host` would stay
+   * unproven -- exactly the "correct consumer nothing calls, or calls with
+   * the wrong argument" failure family). The remaining unproven surface is
+   * the one-line `setInterval(() => this.heartbeatTick(), ...)` above, which
+   * is greppable.
+   */
+  private heartbeatTick(): void {
+    // heartbeatTimer null means either never started, or already stopped by
+    // a prior mismatch (below). Guarding on it here -- not only on the
+    // clearInterval call at the bottom -- is what makes "self-eject ONCE"
+    // true for a caller that invokes heartbeatTick() directly (a test, or
+    // any future non-timer caller), not merely for the real setInterval
+    // (which by construction can't fire again once cleared): without this
+    // guard, a second direct call after ejection would refreshLock() and
+    // reportError() again, since clearing the timer does not, on its own,
+    // stop the METHOD from running.
+    if (!this.currentId || !this.heartbeatTimer) return
+    const refreshed = refreshLock(this.deps.projectDir, this.currentId, Date.now(), {
+      pid: this.pid,
+      host: this.host
+    })
+    if (!refreshed) {
+      // Another instance now holds this lock (or it vanished) -- keeping
+      // this timer alive would just re-stamp a foreign identity every
+      // tick. Log ONCE at the transition, then stop.
+      reportError('workspace', `heartbeat lost ownership of workspace ${this.currentId}, stopping`)
+      if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
+      this.heartbeatTimer = null
     }
   }
 
-  /** Mint + own a fresh workspace if none is current yet. */
-  private ensureCurrent(): void {
-    if (this.currentId) return
-    this.own(newWorkspaceId())
+  /** Mint + own a fresh workspace if none is current yet, or reconfirm
+   *  ownership of the current one. Returns whether a workspace is current
+   *  AND still actually ours afterwards. `this.currentId` alone is an
+   *  IN-MEMORY belief (review round 7): every persist() call (saveAuto,
+   *  saveNamed) reaches this method, so an early `if (this.currentId) return
+   *  true` here -- not just in own()'s own fast path -- is exactly the gap a
+   *  third-party reclaim of the on-disk lock file would walk through
+   *  unnoticed. Route through own(), which re-reads the lock and confirms
+   *  identity via ownsLock before writing. */
+  private ensureCurrent(): boolean {
+    return this.own(this.currentId ?? newWorkspaceId())
   }
 
   /**
@@ -191,7 +347,13 @@ export class WorkspaceService {
       )
       if (clash) throw new Error('duplicate-workspace-name')
     }
-    return this.persist(trimmed || undefined, true)
+    const result = this.persist(trimmed || undefined, true)
+    // persist() only returns null when the workspace lock could not be
+    // acquired (reportError() already traced it there) -- saveNamed's
+    // contract is a non-null WorkspaceSummary or a thrown error, same shape
+    // as the duplicate-name rejection above.
+    if (!result) throw new Error('workspace-lock-unavailable')
+    return result
   }
 
   /**
@@ -237,15 +399,33 @@ export class WorkspaceService {
     const lock = readLock(this.deps.projectDir, id)
     if (
       lock &&
-      isLockLive(lock, { host: this.host, now: Date.now(), isPidAlive: pidAlive, staleMs: LOCK_STALE_MS }) &&
-      !(lock.pid === this.pid && lock.host === this.host)
+      isLockLive(lock, {
+        host: this.host,
+        now: Date.now(),
+        bootInstant: this.currentBootInstant(),
+        isPidAlive: pidAlive,
+        staleMs: LOCK_STALE_MS
+      }) &&
+      !ownsLock(lock, { pid: this.pid, host: this.host })
     ) {
       return false
     }
     this.deps.adoptScope({ groupId: ws.groupId, scopeKind: ws.scopeKind })
     this.deps.setConfig(fromDisplayMode(ws.displayMode))
     this.deps.service.restoreFrom(fromWorkspaceSessions(ws.sessions))
-    this.own(id) // hand the lock from the old workspace to this one + heartbeat
+    // Hand the lock from the old workspace to this one + (re)start the
+    // heartbeat. The check above is not atomic with this call (TOCTOU): by
+    // the time own() runs, another instance may have grabbed `id` first.
+    // Sessions are already swapped at this point (restoreFrom above already
+    // ran) -- this fix does not attempt to roll that back, it only makes the
+    // lock-ownership OUTCOME honest instead of silently assumed.
+    if (!this.own(id)) {
+      reportError(
+        'workspace',
+        `restore(${id}) lost the lock race after swapping sessions -- ownership unresolved`
+      )
+      return false
+    }
     // Recapture right after restoring a non-empty workspace (ws.sessions.length
     // > 0, guarded above) must not itself come back empty -- that would mean
     // restoreFrom silently produced nothing, exactly the defect this card
@@ -274,7 +454,12 @@ export class WorkspaceService {
   startNew(): void {
     if (!this.currentId) return
     this.saveAuto()
-    releaseLock(this.deps.projectDir, this.currentId)
+    if (!releaseLock(this.deps.projectDir, this.currentId, { pid: this.pid, host: this.host })) {
+      reportError(
+        'workspace',
+        `startNew() skipped releaseLock for ${this.currentId}: on-disk lock owned by another identity`
+      )
+    }
     this.currentId = null
   }
 
@@ -286,7 +471,13 @@ export class WorkspaceService {
       const lockedByOther =
         ws.id !== this.currentId &&
         !!lock &&
-        isLockLive(lock, { host: this.host, now, isPidAlive: pidAlive, staleMs: LOCK_STALE_MS })
+        isLockLive(lock, {
+          host: this.host,
+          now,
+          bootInstant: this.currentBootInstant(),
+          isPidAlive: pidAlive,
+          staleMs: LOCK_STALE_MS
+        })
       return {
         id: ws.id,
         name: ws.name,
@@ -308,13 +499,26 @@ export class WorkspaceService {
     this.pruneTimer = null
     if (!this.currentId) return
     this.saveAuto()
-    releaseLock(this.deps.projectDir, this.currentId)
+    if (!releaseLock(this.deps.projectDir, this.currentId, { pid: this.pid, host: this.host })) {
+      // Lost the acquire race earlier without this instance noticing (or a
+      // second Deck reclaimed after this one went stale) -- deleting the
+      // lock file here would tear down a LIVE instance's ownership. This is
+      // the "destruction croisee" gap the card flags as the most severe of
+      // the three: releaseLock() now refuses instead of rmSync'ing blindly.
+      reportError(
+        'workspace',
+        `releaseOnQuit skipped releaseLock for ${this.currentId}: on-disk lock owned by another identity`
+      )
+    }
   }
 
   // ----- internals -----
 
-  private persist(name: string | undefined, pin: boolean): WorkspaceSummary {
-    this.ensureCurrent()
+  private persist(name: string | undefined, pin: boolean): WorkspaceSummary | null {
+    if (!this.ensureCurrent()) {
+      reportError('workspace', 'persist() skipped: could not acquire the workspace lock')
+      return null
+    }
     // Adopt any post-discovery session-id rotation (e.g. a /clear) before
     // snapshotting, so the saved workspace resumes the current transcript.
     this.deps.service.refreshLiveSessionIds()
