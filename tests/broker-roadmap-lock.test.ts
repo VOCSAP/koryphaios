@@ -54,6 +54,33 @@ async function patch(
   return { status: res.status, item: res.body.item, error: res.body.error };
 }
 
+// House pattern for every sweep-timing assertion in this file (card fc444eda
+// review finding, then reused for the TTL-sweep test below on the same
+// finding: a fixed `Bun.sleep` grounds the assertion in elapsed wall-clock
+// time instead of the real condition, so it either wakes before the async
+// sweep interval has ticked -- a flake, not a bug -- or, if padded to the
+// worst case, wastes that margin on every fast run). Poll the real condition
+// with a generous deadline instead: `check()` reports whether it's done and
+// what it last observed; polling costs only the wall time actually used, so
+// a wide ceiling is free when things are fast and honest when they are not.
+async function pollUntil<T>(
+  budgetMs: number,
+  intervalMs: number,
+  check: () => Promise<{ done: boolean; value: T }>
+): Promise<T> {
+  const deadline = Date.now() + budgetMs;
+  let last: T | undefined;
+  while (Date.now() < deadline) {
+    const { done, value } = await check();
+    last = value;
+    if (done) return value;
+    await Bun.sleep(intervalMs);
+  }
+  throw new Error(
+    `pollUntil timed out after ${budgetMs}ms; last observed: ${JSON.stringify(last)}`
+  );
+}
+
 // ----- implicit lock / unlock -----
 
 test("agent write of status=in_progress locks the item under its peer_id", async () => {
@@ -272,18 +299,28 @@ test("TTL sweep releases a lock with no recent write and drops status to planned
     });
     expect(res.body.item.locked).toBe(true);
 
-    // Backdate updated_at past the 2s TTL, then wait for a sweep tick.
+    // Backdate updated_at well past the 2s TTL, then poll for the next sweep
+    // tick to observe it -- was a fixed `await Bun.sleep(2_500)` (card
+    // fc444eda review finding). The TTL condition is already true from t=0
+    // here (backdated -60s, well past the -2s threshold), so the only real
+    // wait is for guardedInterval's 1s tick to fire and run the sweep -- an
+    // unsynchronized setInterval a fixed sleep has no guarantee of catching.
+    // Poll the real condition instead (pollUntil above, same discipline as
+    // the owner-gone tests below): costs only the wall time actually used,
+    // so a generous budget is free when the tick lands promptly.
     const db = new Database(b.dbPath);
     db.run("UPDATE roadmap_items SET updated_at = datetime('now', '-60 seconds') WHERE id = ?", [
       res.body.item.id,
     ]);
     db.close();
-    await Bun.sleep(2_500);
 
-    const after = await post<{ items: RoadmapItem[] }>(`${b.url}/roadmap/list`, {
-      project_key: PK,
+    const item = await pollUntil(12_000, 300, async () => {
+      const after = await post<{ items: RoadmapItem[] }>(`${b.url}/roadmap/list`, {
+        project_key: PK,
+      });
+      const found = after.body.items.find((i) => i.id === res.body.item.id)!;
+      return { done: found.locked === false, value: found };
     });
-    const item = after.body.items.find((i) => i.id === res.body.item.id)!;
     expect(item.locked).toBe(false);
     expect(item.locked_by).toBeNull();
     expect(item.status).toBe("planned");
@@ -334,40 +371,81 @@ test("owner-gone sweep releases after grace, but an active owner keeps the lock"
     // the boundary tick's `<` missed by the floor, released only on the
     // NEXT tick). A single fixed sleep budget close to that worst case
     // reproduces the flake on a slower/busier machine -- poll the real
-    // condition instead (house pattern: waitForMessage in
-    // broker-approval-reply.test.ts). Budget generous margin over the
+    // condition instead (pollUntil above). Budget generous margin over the
     // measured worst case, not a value that skims it: polling only costs
     // the wall time actually used, so a wide ceiling is free when things
     // are fast and honest when they are not.
-    const POLL_BUDGET_MS = 12_000;
-    const POLL_INTERVAL_MS = 300;
     let heldAfter: RoadmapItem | undefined;
-    let ghostAfter: RoadmapItem | undefined;
-    const deadline = Date.now() + POLL_BUDGET_MS;
-    while (Date.now() < deadline) {
+    const ghostAfter = await pollUntil(12_000, 300, async () => {
       await post(`${b.url}/heartbeat`, { instance_token: reg.body.instance_token });
       const after = await post<{ items: RoadmapItem[] }>(`${b.url}/roadmap/list`, {
         project_key: PK,
       });
       heldAfter = after.body.items.find((i) => i.id === held.body.item.id)!;
-      ghostAfter = after.body.items.find((i) => i.id === ghost.body.item.id)!;
+      const ghostItem = after.body.items.find((i) => i.id === ghost.body.item.id)!;
       // The live owner's lock must never be swept away while we wait for the
       // ghost's -- assert every iteration, not only at the end, so a
       // regression here can't hide behind "the ghost eventually released".
       expect(heldAfter.locked).toBe(true);
-      if (ghostAfter.locked === false) break;
-      await Bun.sleep(POLL_INTERVAL_MS);
-    }
-    if (!ghostAfter || ghostAfter.locked !== false) {
-      throw new Error(
-        `timeout after ${POLL_BUDGET_MS}ms waiting for the owner-gone sweep to release the ` +
-          `ghost lock; last observed held=${JSON.stringify(heldAfter)} ` +
-          `ghost=${JSON.stringify(ghostAfter)}`
-      );
-    }
+      return { done: ghostItem.locked === false, value: ghostItem };
+    });
     expect(heldAfter!.status).toBe("in_progress");
     expect(ghostAfter.status).toBe("planned");
     expect(ghostAfter.updated_by).toBe("lock-sweep");
+  } finally {
+    await stopBroker(b);
+  }
+}, 20_000);
+
+test("owner-gone sweep releases a NULL-project_key peer's lock on a DIFFERENT project's card, even while that peer stays active", async () => {
+  // Card fc444eda (operator ruling, 2026-08-11): the owner-gone liveness
+  // check is scoped on project_key alone, and a NULL project_key is a value
+  // in its own right, not a wildcard -- a project-less peer only "counts as
+  // live" for project-less cards, never for a real project's. Before the
+  // fix, `(p.project_key IS NULL OR p.project_key = roadmap_items.project_key)`
+  // let a NULL-project peer squat locks on ANY project forever, as long as
+  // it kept heartbeating -- regardless of whether that project was actually
+  // its own. This proves the opposite of the sibling "owner-gone" test
+  // above: there the SAME-project owner stays active and keeps its lock;
+  // here a MISMATCHED-project owner stays active and still LOSES it.
+  const b = await startBroker({
+    CLAUDE_PEERS_LOCK_TTL_SEC: "3600",
+    CLAUDE_PEERS_LOCK_GRACE_SEC: "2",
+    CLAUDE_PEERS_LOCK_SWEEP_SEC: "1",
+  });
+  try {
+    // Registers with project_key: null (e.g. a cwd with no git remote
+    // configured -- shared/summarize.ts computeProjectKey() returns null in
+    // that case, and server.ts /register forwards it unchanged, no fallback).
+    const reg = await post<{ instance_token: string; peer_id: string }>(`${b.url}/register`, {
+      pid: livePid(), cwd: "/tmp/no-remote", git_root: null, tty: null,
+      summary: "", host: "h-nullproj", client_pid: livePid(), claude_cli_pid: 1,
+      project_key: null, group_id: "default", group_secret_hash: null,
+    });
+    expect(reg.status).toBe(200);
+
+    // Same peer authors and locks a card under an UNRELATED real project (PK).
+    const orphan = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK, by: reg.body.peer_id, instance_token: reg.body.instance_token,
+      title: "squatted by null-project peer", status: "in_progress",
+    });
+    expect(orphan.body.item.locked).toBe(true);
+
+    // Poll past the grace period while heartbeating the whole time -- proves
+    // the release happens BECAUSE of the project mismatch, not because the
+    // peer went stale (same polling discipline as card 365561ba, see the
+    // sibling test above for the truncation-aliasing rationale; pollUntil
+    // defined above).
+    const orphanAfter = await pollUntil(12_000, 300, async () => {
+      await post(`${b.url}/heartbeat`, { instance_token: reg.body.instance_token });
+      const after = await post<{ items: RoadmapItem[] }>(`${b.url}/roadmap/list`, {
+        project_key: PK,
+      });
+      const found = after.body.items.find((i) => i.id === orphan.body.item.id)!;
+      return { done: found.locked === false, value: found };
+    });
+    expect(orphanAfter.status).toBe("planned");
+    expect(orphanAfter.updated_by).toBe("lock-sweep");
   } finally {
     await stopBroker(b);
   }

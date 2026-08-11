@@ -849,13 +849,20 @@ function releaseStaleLocks(): void {
   // Owner gone: no ACTIVE peer carries the lock owner's peer_id for this
   // project. The grace period keeps a reconnecting session (server.ts restart,
   // brief network drop) from being stripped of its lock mid-flight.
+  // Operator ruling (Card fc444eda, 2026-08-11): project_key alone scopes
+  // liveness (group_id stays out by design, decision of e7b364dc), and a
+  // NULL project_key is a value in its own right, not a wildcard -- a
+  // project-less peer is only "live" for project-less cards. `IS` is
+  // SQLite's NULL-safe equality (column-to-column too): `NULL IS NULL` is
+  // true, unlike `=` where `NULL = NULL` is NULL/false, which would have
+  // stripped a project-less peer of even its own project-less locks.
   release(
     `datetime(locked_at) < datetime('now', ?)
      AND NOT EXISTS (
        SELECT 1 FROM peers p
        WHERE p.peer_id = roadmap_items.locked_by
          AND p.status = 'active'
-         AND (p.project_key IS NULL OR p.project_key = roadmap_items.project_key)
+         AND p.project_key IS roadmap_items.project_key
      )`,
     [`-${LOCK_GRACE_SEC} seconds`]
   );
