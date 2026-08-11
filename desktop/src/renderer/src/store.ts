@@ -412,7 +412,18 @@ export const useDeck = create<DeckState>((set, get) => ({
     window.api.onMenuListWorkspaces(() => get().openWorkspaces(true))
     window.api.onMenuExportTemplate(() => get().openExportTemplate(true))
     window.api.onMenuImportTemplate(() => get().openTemplates(true, { manage: true }))
-    window.api.onWorkspaceCurrent((ws) => set({ currentWorkspaceName: ws?.name ?? null }))
+    window.api.onWorkspaceCurrent((ws) => {
+      set({ currentWorkspaceName: ws?.name ?? null })
+      // `workspaces` is a bootstrap snapshot never repushed after mount --
+      // the current run's own workspace is minted AFTER bootstrap, so it
+      // never enters the list on its own. Refresh on every emission of
+      // `workspace:current`, summary or null alike (null still means the
+      // list changed): the autosave timer callback in
+      // desktop/src/main/index.ts (service.on('changed', ...)), and the
+      // `app:new-clear`, `workspace:restore`, `template:apply` handlers in
+      // desktop/src/main/ipc.ts.
+      void get().refreshWorkspaces()
+    })
     // rateLimited/resumeAt state flows through onSessionsChanged (the service
     // broadcasts on every episode transition); this listener only surfaces the
     // injection moment as a toast.
