@@ -15,7 +15,17 @@ import { TemplateComposer } from './TemplateComposer'
 export function TemplatesDialog(): React.JSX.Element {
   const t = useT()
   const templates = useDeck((s) => s.templates)
-  const sessions = useDeck((s) => s.sessions)
+  // Selector returns the store's array reference unfiltered (stable across
+  // renders while the store is unchanged) -- filtering here would build a
+  // new array every render and, on zustand v5's useSyncExternalStore,
+  // fail the Object.is snapshot comparison every time, looping renders.
+  // The supervisor is never an agent tile: HomeView.tsx renders it directly
+  // (`sessions.find((s) => s.supervisor)`), and TileArea.tsx filters it out
+  // of the grid the same way (`allSessions.filter((s) => !s.supervisor)`).
+  // Apply/confirm must count agent sessions
+  // only, or an empty window with just the supervisor open still shows Apply.
+  const allSessions = useDeck((s) => s.sessions)
+  const sessions = allSessions.filter((s) => !s.supervisor)
   const manage = useDeck((s) => s.templatesManage)
   const applyTemplate = useDeck((s) => s.applyTemplate)
   const removeTemplate = useDeck((s) => s.removeTemplate)

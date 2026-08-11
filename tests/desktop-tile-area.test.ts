@@ -165,11 +165,16 @@ interface FakeDeckState {
   pendingSessions: number;
   workspaces: unknown[];
   templates: unknown[];
+  templatesManage: boolean;
   dict: Record<string, string>;
   createSession: () => Promise<void>;
   restoreWorkspace: () => Promise<void>;
   openWorkspaces: () => void;
-  openTemplates: () => void;
+  openTemplates: (manage?: boolean) => void;
+  applyTemplate: (path: string, mode: "append" | "replace") => Promise<void>;
+  removeTemplate: (path: string) => Promise<void>;
+  refreshTemplates: () => Promise<void>;
+  showToast: (key: string) => void;
 }
 
 function initialFakeState(): FakeDeckState {
@@ -180,11 +185,16 @@ function initialFakeState(): FakeDeckState {
     pendingSessions: 0,
     workspaces: [],
     templates: [],
+    templatesManage: false,
     dict: {},
     createSession: async () => {},
     restoreWorkspace: async () => {},
     openWorkspaces: () => {},
-    openTemplates: () => {}
+    openTemplates: () => {},
+    applyTemplate: async () => {},
+    removeTemplate: async () => {},
+    refreshTemplates: async () => {},
+    showToast: () => {}
   };
 }
 
@@ -237,6 +247,17 @@ mock.module("../desktop/src/renderer/src/components/TerminalTile.tsx", () => {
 // `./store` chain) bind to the mocks, never to the real heavy modules
 // (xterm.js, window.api, the companion remote-api shim).
 const { TileArea, pickRestorable } = await import("../desktop/src/renderer/src/components/TileArea");
+// TemplatesDialog.tsx pulls in ConfirmDialog (no @shared import, resolves
+// fine) and TemplateComposer (imports `@shared/template`, an alias mapped
+// only in desktop/tsconfig.web.json -- which bun test, run from the repo
+// root, never reads -- so its real module fails to resolve here the same
+// way `@shared/companion` does for store.ts, per this file's header note).
+// Neither dialog is ever rendered in the tests below (confirmReplace /
+// composer state stay null), so a bare stub is enough to satisfy the import.
+mock.module("../desktop/src/renderer/src/components/TemplateComposer.tsx", () => ({
+  TemplateComposer: () => null
+}));
+const { TemplatesDialog } = await import("../desktop/src/renderer/src/components/TemplatesDialog");
 
 let container: HTMLDivElement;
 let root: Root;
@@ -573,4 +594,42 @@ test("pickRestorable: `current` with zero live agents and sessions IS chosen (em
 test("pickRestorable: `current` with a live agent still running is EXCLUDED", () => {
   const current = ws({ current: true, sessionCount: 2 });
   expect(pickRestorable([current], 1)).toBeUndefined();
+});
+
+// ---------------------------------------------------------------------------
+// TemplatesDialog "Apply" button population regression (third occurrence in
+// two days of "filter on one population, act on another"). The component
+// used to read `useDeck((s) => s.sessions)` directly -- a population that
+// INCLUDES the supervisor tile -- and gate `.btn-apply` on that raw list's
+// length, so a deck with nothing open but the supervisor still showed Apply.
+// It now reads the raw selector and filters `!s.supervisor` in the component
+// body before every session-count check. These two tests exercise the real
+// TemplatesDialog component (unmodified) through both directions of that
+// filter, so a regression back to the raw `sessions` population fails one of
+// them instead of passing silently.
+test("TemplatesDialog: supervisor-only deck (no agent sessions) shows no Apply button", () => {
+  act(() => {
+    fakeUseDeck.setState({
+      sessions: [{ id: "sup", supervisor: true }],
+      templates: []
+    });
+    root.render(React.createElement(TemplatesDialog));
+  });
+
+  expect(container.querySelector(".btn-apply")).toBeNull();
+});
+
+test("TemplatesDialog: at least one agent session shows the Apply button", () => {
+  act(() => {
+    fakeUseDeck.setState({
+      sessions: [
+        { id: "sup", supervisor: true },
+        { id: "agent1", supervisor: false }
+      ],
+      templates: []
+    });
+    root.render(React.createElement(TemplatesDialog));
+  });
+
+  expect(container.querySelector(".btn-apply")).not.toBeNull();
 });
