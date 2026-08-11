@@ -15,7 +15,12 @@ export function DisplayModeBar(): React.JSX.Element {
   const t = useT()
   const config = useDeck((s) => s.config!)
   const updateConfig = useDeck((s) => s.updateConfig)
-  const sessions = useDeck((s) => s.sessions)
+  // The supervisor is never an agent tile: HomeView.tsx renders it directly
+  // (`sessions.find((s) => s.supervisor)`), and TileArea.tsx filters it out
+  // of the grid the same way (`allSessions.filter((s) => !s.supervisor)`) --
+  // this count must match the grid it labels.
+  const allSessions = useDeck((s) => s.sessions)
+  const sessions = allSessions.filter((s) => !s.supervisor)
   const searchOpen = useDeck((s) => s.searchOpen)
   const openSearch = useDeck((s) => s.openSearch)
 
