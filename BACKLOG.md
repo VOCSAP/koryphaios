@@ -614,21 +614,83 @@ Robustesse et exploitation :
 
 ### 3.7 Cartes directives — increments différés (CT6)
 
-- [ ] **Directive `clear_briefing`** : le Deck lance le digest existant
-      (`digest.ts` via `utility-inference.ts`, Haiku par défaut) sur des sources
-      bon marché, injecte `/clear`, puis saisit le briefing comme premier prompt
-      — zéro inférence côté team-lead. Nécessite une variante d'injection
-      « paste-safe » (bracketed-paste / écritures fragmentées) pour un briefing
-      multi-lignes.
-- [ ] **Jauge de contexte par tuile (consultative)** : % de contexte via le
-      canal fichier-cache de la statusline (précédent `CLAUDE_PEERS_STATUS_LINE_CACHE`)
-      + un seuil qui ARME l'insertion d'une directive à la prochaine frontière
-      `done` (jamais un reset en plein milieu de tâche). Vérif empirique des
-      champs JSON statusline (`context_window_used/total`) selon la version CC.
+Étude d'ensemble (2026-08-11, branche `experimental`) : les quatre entrées
+ci-dessous sont les morceaux d'un même chantier — mesurer la fenêtre de chaque
+tuile, enchaîner plusieurs actions au lieu d'une, et n'armer un reset qu'à une
+frontière sûre. Ordre de livraison proposé : mesure (consultative) → runner
+d'étapes déclenché à la main → store de playbooks → armement automatique →
+surcouche statusline. L'automatisme vient EN DERNIER : c'est le seul lot dont
+une erreur détruit du travail.
+
+- [ ] **Jauge de contexte par tuile (consultative)** : deux sources possibles,
+      même structure de sortie (`{ usedPercent, windowSize, tokens, at, source }`).
+      (a) **Queue du transcript JSONL** — socle recommandé : le Deck connaît déjà
+      le chemin (`transcriptPath` + l'id réel via `desk-session-<token>.txt`), la
+      dernière entrée assistant porte son `usage`, on relit les derniers Ko depuis
+      la fin. Zéro config opérateur, marche sur toute tuile.
+      (b) **Statusline** — surcouche opt-in : le JSON stdin porte bien
+      `context_window.used_percentage` / `context_window_size` (200k ou 1M) /
+      `current_usage{input,output,cache_creation,cache_read}` / `exceeds_200k_tokens`,
+      et au passage `rate_limits` (que `usage-service` paie aujourd'hui en OAuth).
+      Champs DOCUMENTÉS, la vérif empirique demandée ici est faite. MAIS un plugin
+      ne peut pas embarquer de `statusLine` (le `settings.json` d'un plugin
+      n'honore que `agent` et `subagentStatusLine`) : passer par
+      `--settings '<json inline>'` au spawn, en CHAÎNANT vers le script d'origine
+      de l'opérateur pour ne pas écraser son affichage.
+      Pièges communs : `current_usage` est `null` avant le 1er appel API et juste
+      après `/compact` (ne JAMAIS lire ce null comme 0 %, un seuil qui se ré-arme
+      dessus boucle) ; le % porte sur la fenêtre, pas sur le seuil d'auto-compact ;
+      les sous-agents ont un contexte distinct, invisible ici ; aucun hook ne
+      transporte de compteur de tokens (ils ne donnent que `transcript_path`).
+- [ ] **Carte directive multi-étapes (playbook)** : une carte ne porte qu'un mot-clé
+      aujourd'hui, et empiler des cartes NE séquence PAS — `runDirectiveWave` attend
+      bien `execute()` carte par carte, mais `executeDirective` lance chaque cible en
+      fire-and-forget et rend la main tout de suite, donc deux cartes consécutives se
+      chevauchent. Il faut un runner d'étapes séquentiel par cible (parallèle entre
+      cibles), chaque étape journalisée, budget borné, abandon si la tuile meurt :
+      `command` (constante code) | `prompt` | `wait_idle` | `wait_output`.
+      Briques déjà écrites à réutiliser : `injectCommand` (idle-gated),
+      `encodeInitialPromptKeystrokes` (**l'injection paste-safe multi-lignes existe
+      déjà** depuis 150eb188 — il manque juste un `injectPrompt()` qui l'appelle hors
+      spawn), `waitForOutput`, `waitIdle`.
+      **Provenance du texte des prompts — le point dur** : la roadmap est partagée et
+      écrite par les agents, et le Deck n'est pas encore un auteur prouvé
+      (`by='deck'` porte un token sentinelle, couche 2 différée), donc du texte libre
+      dans une carte = injection de prompt inter-agents. Trois options :
+      P1 templates i18n + slots typés (zéro texte libre sur le fil) ;
+      P2 playbook stocké côté Deck (extension `snippet-store`), la carte ne porte
+      qu'un `playbook_id` — un agent DÉCLENCHE, n'ÉCRIT jamais (cible recommandée,
+      mais rompt la règle « fill-not-send » des snippets, à assumer) ;
+      P3 texte libre dans la carte — seulement après la couche 2 ET une restriction
+      aux cartes dont l'auteur prouvé est l'opérateur.
+      Absorbe l'ancienne entrée `clear_briefing` (digest `digest.ts` → `/clear` →
+      briefing en premier prompt) qui n'est qu'un playbook parmi d'autres.
+- [ ] **Seuil qui ARME, jamais qui déclenche** : franchissement (ex. 80 %) → la tuile
+      passe « armée » (état local, visible) ; exécution seulement à une frontière sûre
+      (item `done` / lock relâché, ou tuile idle sans lock, ou clic opérateur) ;
+      hystérésis (désarmement à la redescente sous seuil−10 pts, sur une mesure RÉELLE
+      et non un `null`) ; une seule exécution par époque de session. Pas de seuil
+      d'urgence qui interrompt : au-delà de ~95 % l'auto-compact CC fait déjà le
+      travail. Seuil par projet dans les `features` de `launch-config` + override par
+      tuile (schéma `autoResume`/`magicCompact`). Câblage : le Deck arme et exécute
+      lui-même pour l'automatique (pas de carte fantôme dans la roadmap partagée) ;
+      la carte insérée en tête de queue reste pour le déclenchement manuel planifié.
+      À arbitrer aussi : la chaîne handoff coûte un tour complet sur ~160k tokens
+      d'entrée au seuil, contre zéro pour le `clear` + briefing dans le champ
+      `context` de la carte suivante (déjà prescrit par `TEAM_PLAYBOOK`) — le seuil
+      ne doit pas déclencher automatiquement le plus cher des deux.
 - [ ] **peer_id stable à travers un fork-resume (core)** : intégrer le token
       stable `CLAUDE_PEERS_DESK_SESSION` dans le `session_key` claude-peers (ou
       re-poser le peer_id via `set_id` après restart) pour le cas multi-sessions
       même cwd+groupe (option B de la chaîne magic-compact). Chantier core séparé.
+      Précisions relevées pendant l'étude : la chaîne magic-compact CT4 ne ferme PAS
+      la session (elle tape `/resume <uuid>` dans le MÊME PTY, le token de tuile ne
+      bouge pas), et `session_key = sha256(host‖cwd‖group_id)` ignore l'id de session
+      Claude — une tuile seule sur son cwd retrouve donc exactement son peer_id. Le
+      vrai désalignement est N tuiles sur un même cwd+groupe : les suffixes `-2`/`-3`
+      sont attribués par ordre d'arrivée et peuvent permuter au redémarrage. Remède
+      immédiat sans code : un worktree par agent, ce que `TEAM_PLAYBOOK` prescrit
+      déjà.
 - [ ] **`handoff` flag — consommation** : `resolveFeatures().handoff`
       (`file`|`kleos`|`off`) est résolu mais pas encore consommé par le texte du
       playbook ; le câbler quand l'increment plan-file/Kleos (CT6) atterrit
