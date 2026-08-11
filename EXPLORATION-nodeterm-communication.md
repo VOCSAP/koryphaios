@@ -262,3 +262,113 @@ Le modèle broker de Kory est plus riche en messagerie ; le modèle nodeterm
 est plus riche en hétérogénéité de CLIs. Les deux sont composables : rien
 dans le broker n'est propre à Claude *sauf* la livraison push finale — et
 c'est exactement le maillon que le nudge PTY remplace.
+
+---
+
+## 4. Annexe (2026-08-11) — la voie inverse : un seul harness, N modèles
+
+Revue complémentaire de deux projets qui prennent le problème multi-modèle à
+l'envers de nodeterm : au lieu de N CLIs natifs côte à côte, **garder Claude
+Code comme frontal unique et changer le moteur derrière**. Rapportée au
+palier 1 multi-CLI (§3.1 du backlog), c'est une **troisième option** : des
+tuiles « Claude Code sur modèle tiers » hériteraient de TOUT l'écosystème qui
+bloque les tuiles non-Claude — push `claude/channel` de claude-peers, MCP,
+hooks, skills, agents, supervisor — puisque le CLI reste Claude Code.
+
+**Réserve transverse assumée d'entrée** : quand les comptes amont sont des
+abonnements OAuth (Claude Pro/Max, ChatGPT, Gemini…), les utiliser hors de
+leur client officiel est contraire aux CGU des fournisseurs (risque de ban de
+compte). Le montage est par contre légitime avec de vraies clés API ou un
+endpoint local (Ollama/LiteLLM — que le Deck sait déjà adresser en headless).
+
+### 4.1 CLIProxyAPI ([router-for-me/CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI))
+
+Proxy local en Go (port 8317) qui fait du pontage de protocoles :
+
+- **Amont** : comptes fournisseurs par OAuth (`--claude-login`,
+  `--codex-login`, `--antigravity-login` (Gemini), `--kimi-login`,
+  `--xai-login`, + Gemini CLI/Qwen/iFlow ; tokens dans `~/.cli-proxy-api`),
+  ou clés API / n'importe quel endpoint OpenAI-compatible déclaré en YAML.
+  Multi-comptes, load-balancing, retry/failover.
+- **Aval** : il expose les dialectes d'API de chaque écosystème
+  (`internal/api/server_routes.go`) — Anthropic **`POST /v1/messages`** +
+  `/v1/messages/count_tokens` (handler `ClaudeCodeAPIHandler` : c'est ce qui
+  sert Claude Code), OpenAI `/v1/chat/completions` + `/v1/responses` (et
+  l'alias `/backend-api/codex` pour brancher le CLI Codex tel quel), Gemini
+  `/v1beta/models/*`, catalogue unifié `/v1/models`.
+- **Au milieu** : des **translators bidirectionnels**
+  OpenAI↔Gemini↔Claude↔Codex (`sdk/translator`, doc `docs/sdk-advanced.md`),
+  streaming SSE et tool-calling compris. Routage **par nom de modèle**, alias
+  configurables par provider, mapping des niveaux de thinking.
+
+Branchement Claude Code : `ANTHROPIC_BASE_URL=http://127.0.0.1:8317` +
+`ANTHROPIC_AUTH_TOKEN=<api-key du config.yaml>` ; le nom de modèle demandé
+décide du backend (modèle claude → passthrough ; `gpt-*`/`gemini-*`/`glm-*` →
+traduction). Signaux de zone grise à garder en tête : option
+`identity-confuse` (brouille les identifiants de tracking Codex), README
+annuaire de revendeurs de comptes/relais à -90 %.
+
+### 4.2 CCS ([kaitranntt/ccs](https://github.com/kaitranntt/ccs), « Claude Codex Switch »)
+
+Sur-couche npm (`@kaitranntt/ccs`, TypeScript/Bun) au-dessus de CLIProxyAPI :
+un **gestionnaire de profils + runtimes**. `ccs glm`, `ccs codex`, `ccs
+ollama`… lancent Claude Code (ou un autre runtime cible : Codex CLI, Droid)
+avec l'environnement du profil. Ce qu'il documente utilement :
+
+- **La recette exacte de l'override modèle** (`config/base-*.settings.json`,
+  ~20 presets) : `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` +
+  `ANTHROPIC_MODEL` + **`ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL`** —
+  les trois derniers pour que les alias internes de Claude Code pointent tous
+  vers le modèle tiers. Deux familles de profils : API directe (ex. GLM →
+  `https://api.z.ai/api/anthropic`, endpoints Anthropic-compatibles des
+  vendeurs, AUCUN proxy) et OAuth via le CLIProxy local (routes scopées
+  `/api/provider/<x>` de leur fork `CLIProxyAPIPlus`).
+- **Gestion du binaire** : CCS télécharge et pilote lui-même le binaire Go
+  CLIProxyAPI (release GitHub, `src/cliproxy/binary-manager.ts` +
+  `service-manager.ts`), dashboard web localhost:3000, suivi de quotas.
+- **Hygiène d'env** : `stripAnthropicEnv` avant de lancer un profil compte
+  natif (une `ANTHROPIC_BASE_URL` héritée d'un shell précédent détournerait
+  silencieusement la session officielle vers le proxy) ; isolation
+  multi-comptes Claude par `CLAUDE_CONFIG_DIR` par instance
+  (`claude-extension-setup.ts`) — même besoin que les managed accounts de
+  nodeterm.
+- **Le plus instructif — la compensation des trous de capacité**
+  (`src/utils/websearch-manager.ts`) : **WebSearch est un outil server-side
+  Anthropic** — derrière un backend tiers, il disparaît. CCS provisionne pour
+  ces profils un serveur MCP WebSearch **local** (Exa/Tavily/Brave/DuckDuckGo,
+  fallback via les CLIs gemini/grok/opencode) dans `~/.claude.json`, idem
+  analyse d'images et outillage navigateur. Preuve concrète que « le harness
+  hérite » a des exceptions qu'il faut combler une à une.
+
+À noter aussi : [claude-code-router](https://github.com/musistudio/claude-code-router)
+(musistudio), routeur standalone du même genre, cité par CCS comme source de
+son architecture de transformation SSE.
+
+### 4.3 Lecture pour Kory
+
+- **Ce que l'option 3 apporte** : multi-*modèle* sans multi-*CLI*. La tuile
+  reste une session Claude Code — claude-peers (channel push compris), le
+  deck-plugin, les skills/agents/hooks, le supervisor marchent sans un seul
+  chantier de livraison. Le Deck contrôle déjà l'env au spawn
+  (`create-session.ts`/`pty-run.ts`) : injecter les 6 variables du preset CCS
+  par session suffit ; CCS lui-même (switcher interactif mono-terminal)
+  n'apporte rien au Deck, ce sont ses *recettes* qui comptent.
+- **Ce qu'elle ne règle pas** : la qualité effective du harness sur un modèle
+  tiers. Les prompts système et l'outillage de Claude Code sont réglés pour
+  Claude ; la parité tool-calling/thinking des translators est du best-effort ;
+  les outils server-side (WebSearch, et le prompt caching dont la sémantique
+  `cache_control` diffère chez les tiers) doivent être compensés
+  (le WebSearch MCP local de CCS est la pièce à imiter). **À valider
+  empiriquement avant tout code** : une tuile GLM/Kimi/Gemini exécute-t-elle
+  correctement les tools MCP claude-peers, les hooks du deck-plugin, un
+  dispatch du team-lead ? (Même esprit que les probes P1-P4 du superviseur
+  Codex, §3.1.)
+- **Positionnement vs les autres options du §3.1** : le nudge PTY reste la
+  voie pour des tuiles *CLI natifs* (TUI codex/gemini authentiques, ToS
+  propres) ; l'option 3 est la voie basse-friction pour du multi-*modèle*
+  homogène ; ACP reste la voie propre long-terme. Elles ne s'excluent pas.
+- **Périmètre sain pour Kory** : viser d'abord les backends à clé API ou
+  locaux (GLM/Kimi/OpenRouter/Ollama — zéro problème de CGU, et pour les
+  endpoints Anthropic-compatibles des vendeurs, même pas besoin de proxy :
+  l'env suffit). Le montage « abonnements OAuth via CLIProxyAPI » reste un
+  choix d'opérateur, pas un défaut de l'app.
