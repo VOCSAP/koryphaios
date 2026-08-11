@@ -679,18 +679,73 @@ une erreur détruit du travail.
       d'entrée au seuil, contre zéro pour le `clear` + briefing dans le champ
       `context` de la carte suivante (déjà prescrit par `TEAM_PLAYBOOK`) — le seuil
       ne doit pas déclencher automatiquement le plus cher des deux.
-- [ ] **peer_id stable à travers un fork-resume (core)** : intégrer le token
-      stable `CLAUDE_PEERS_DESK_SESSION` dans le `session_key` claude-peers (ou
-      re-poser le peer_id via `set_id` après restart) pour le cas multi-sessions
-      même cwd+groupe (option B de la chaîne magic-compact). Chantier core séparé.
-      Précisions relevées pendant l'étude : la chaîne magic-compact CT4 ne ferme PAS
-      la session (elle tape `/resume <uuid>` dans le MÊME PTY, le token de tuile ne
-      bouge pas), et `session_key = sha256(host‖cwd‖group_id)` ignore l'id de session
-      Claude — une tuile seule sur son cwd retrouve donc exactement son peer_id. Le
-      vrai désalignement est N tuiles sur un même cwd+groupe : les suffixes `-2`/`-3`
-      sont attribués par ordre d'arrivée et peuvent permuter au redémarrage. Remède
-      immédiat sans code : un worktree par agent, ce que `TEAM_PLAYBOOK` prescrit
-      déjà.
+- [ ] **peer_id stable pour N tuiles sur un même cwd (core, PRÉALABLE)** :
+      `peer_sessions.session_key` est PRIMARY KEY sur `sha256(host‖cwd‖group_id)`,
+      donc **une seule ligne de mémoire d'identité par répertoire**, alors qu'une
+      équipe y pose délibérément plusieurs agents. La branche de collision de
+      `/register` le dit noir sur blanc : « do NOT touch peer_sessions ». Les tuiles
+      2..N n'écrivent donc JAMAIS leur identité, et la voie dormant→résurrection leur
+      est structurellement inaccessible : elles ne *peuvent* pas changer de peer_id au
+      redémarrage, elles en changent **systématiquement**. Et l'échelle grimpe au lieu
+      de se recycler, parce que `deriveDefaultId` cherche le premier suffixe libre
+      **sans filtrer le statut** : les lignes dormantes gardent leur nom 24 h, donc
+      chaque relance prend le cran suivant (`-6` → `-12`, observé). Conséquence
+      opérationnelle : le team-lead continue d'écrire à l'ancien id et l'équipe cesse
+      de dialoguer, sans erreur nulle part.
+      **Ce n'est pas un verrou de noms qu'il faut** (cela changerait le modèle
+      d'attribution et ouvrirait une surface d'usurpation) : c'est la convention n°1
+      du dépôt, « keyed by what, and what happens when there are two? ». Le mémo est
+      indexé sur trop peu. Correctif : `session_key = sha256(host‖cwd‖group_id‖slot)`
+      avec `slot = CLAUDE_PEERS_DESK_SESSION` (vide hors Deck → hash identique à
+      aujourd'hui). Une ligne par tuile, la résurrection déjà écrite rend son peer_id à
+      chaque agent, la branche de collision ne se déclenche plus que sur un vrai
+      doublon. Usurpation **réduite** (connaître `(host,cwd,group)` suffit DÉJÀ à se
+      faire remettre un `instance_token` mémorisé ; le slot rend ce tir plus difficile,
+      et n'accorde aucune capacité que `set_id` ne donne déjà), collisions **réduites**.
+      Migration : ne PAS prévoir de repli sur la clé courte — il rendrait à la tuile B
+      la ligne de la tuile A ; assumer une dernière rotation d'ids et la journaliser.
+      Mitigation immédiate sans toucher au core : `pollPeerIds` émet déjà
+      `peer-resolved` avec une intention d'annonce à la PREMIÈRE résolution — l'étendre
+      au CHANGEMENT suffit à ce que le lead réapprenne le nouvel id par le canal
+      d'annonces qu'il écoute déjà.
+      Étape suivante facultative : laisser le Deck nommer ses tuiles par leur rôle
+      (`CLAUDE_PEERS_PEER_ID` proposé au `/register`, honoré si libre dans le groupe),
+      avec un échec FERMÉ (nom tenu par un peer actif → refus + journal, jamais un vol).
+      Ne concerne PAS magic-compact : la chaîne CT4 ne ferme pas la session (elle tape
+      `/resume <uuid>` dans le MÊME PTY, le token de tuile ne bouge pas). Contournement
+      sans code : un worktree par agent, ce que `TEAM_PLAYBOOK` prescrit déjà.
+- [ ] **Macros sur événements (souscription + enregistrement d'actions)** : la carte
+      directive n'est qu'un des trois déclencheurs visés ; l'intention est
+      `Événement → Macro`, par exemple `contexte 80 % → handoff + clear + rechargement
+      du handoff`. Trois objets, **aucune vue de rail dédiée** : une *macro* (un fichier
+      par macro, global + projet, patron `template-store.ts`/`snippet-store.ts`, corps
+      jamais transmis au broker) ; une *souscription* (`événement → cible → macro →
+      garde-fous`, dans les features du projet, schéma `autoResume`) ; une *exécution*
+      (le journal existant EST le log d'événements). Édition dans Settings,
+      déclenchement manuel depuis le menu contextuel de tuile.
+      **Le bus d'événements existe déjà** : `SessionService` émet `thinking`,
+      `attention`, `quota`, `exit`, `startup-ack`, `peer-resolved`, `created`,
+      `removed`, `changed`, et `watchDispatched` suit les transitions de roadmap. Seule
+      source manquante : le seuil de contexte. Rien d'autre à instrumenter.
+      **Reprise après reset** — deux formes à couvrir sans que l'app connaisse le
+      système mémoriel employé (Kleos chez l'opérateur, via son `CLAUDE.md` global) :
+      soit une CAPTURE (« termine par HANDOFF-OK <id> » puis `await idle` + regex, le
+      mécanisme exact de `runMagicCompact`, avec la même revalidation stricte de la
+      valeur avant interpolation — elle vient d'un modèle et repart dans un terminal),
+      soit une CONVENTION de chemin imposée par la macro, qui supprime la capture.
+      **Garde-fou n°1** : `waitIdle` renvoie `true` dès que `thinking` retombe, Y
+      COMPRIS quand l'agent s'est arrêté sur une demande de permission — enchaîner sur
+      `/clear` détruirait le travail. `await idle` doit exiger
+      `idle ET NON needsAttention ET NON rateLimited` et AVORTER si l'attention se
+      lève. Les deux états sont déjà dans le runtime et déjà émis.
+      Autres invariants : un seul run par tuile (verrou indexé sur la TUILE, pas sur la
+      macro, sinon deux souscriptions sur le même événement lancent deux séquences
+      concurrentes dans le même terminal) ; jamais pendant un lock roadmap sauf macro
+      marquée sûre ; durée bornée, abandon à la mort du PTY ; prévisualisation de ce
+      qui sera tapé avant tout armement.
+      Le packaging en carte roadmap (`macro_id`) suppose l'entrée peer_id ci-dessus
+      réglée : une carte visant `dev1-6` devient un no-op silencieux (`missing`) après
+      une relance.
 - [ ] **`handoff` flag — consommation** : `resolveFeatures().handoff`
       (`file`|`kleos`|`off`) est résolu mais pas encore consommé par le texte du
       playbook ; le câbler quand l'increment plan-file/Kleos (CT6) atterrit
