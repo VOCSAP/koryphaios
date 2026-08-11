@@ -35,6 +35,7 @@ import type {
 } from "./notify/types.ts";
 import { validateDraftPayload } from "./shared/graph-draft.ts";
 import { planRoadmapAppendText, ROADMAP_APPEND_RESULT_MAX_CHARS } from "./shared/roadmap-append.ts";
+import { resolveRoadmapLock } from "./shared/roadmap-lock.ts";
 import {
   APPROVAL_ANSWER_KINDS,
   APPROVAL_VIAS,
@@ -2321,13 +2322,40 @@ function handleRoadmapUpsert(
     const existing = getRoadmapItem(body.id);
     if (!existing) return { error: "unknown roadmap item", status: 404 };
 
+    // Work-lock resolution (PLAN K2), resolved ONCE, before the guard, so the
+    // guard and the DB write below read the same answer instead of two
+    // independent computations that can drift (card e7b364dc's original bug
+    // shape). Pure function: shared/roadmap-lock.ts, no I/O, no Date.now().
+    const nextStatus: RoadmapStatus = body.status ?? existing.status;
+    const resolvedLock = resolveRoadmapLock(existing, nextStatus, body, by);
+
     // Lock guard (PLAN K2): while an agent holds the work-lock, only the owner
     // or the operator ('deck') may write the item's status or claim the lock
     // (a same-status in_progress write IS a claim attempt). Other writes
-    // (context enrichment, tags...) stay open to everyone.
+    // (context enrichment, tags...) stay open to everyone -- EXCEPT when the
+    // write would drop the lock as a side effect, which the delta clause
+    // below refuses too: a locked item whose stored status is already not
+    // in_progress resolves `nextStatus !== "in_progress"` to true even from a
+    // body with neither `status` nor `locked` set, so an unrelated-field
+    // write from a third party would otherwise silently clear the lock.
     if (
       existing.locked &&
-      (body.status !== undefined || body.locked === true) &&
+      // Card e7b364dc Part B: this used to be an enumerated OR-list of body
+      // FIELD NAMES (`body.status !== undefined || body.locked !== undefined`)
+      // -- structurally fail-open, since any future RoadmapUpsertRequest field
+      // that also moves the lock would need manual addition here or slip
+      // through unguarded (the exact defect family that produced this card's
+      // original bug: the guard checked `body.locked === true` while the
+      // resolution below honoured `body.locked !== undefined`, two readings of
+      // the same body drifting apart). Replaced by an EFFECT check: does the
+      // already-resolved lock outcome actually differ from `existing`? Plus
+      // `body.status !== undefined` MUST survive on its own -- a same-status
+      // in_progress write from an intruder resolves to zero delta (the lock
+      // was already theirs to keep) yet is still an attempted claim and must
+      // still 409.
+      (body.status !== undefined ||
+        resolvedLock.locked !== existing.locked ||
+        resolvedLock.lockedBy !== existing.locked_by) &&
       by !== existing.locked_by &&
       by !== "deck" &&
       // Card 39c40571 layer 1: `force` is a claim of certainty, so it is only
@@ -2381,7 +2409,7 @@ function handleRoadmapUpsert(
       priority: body.priority ?? existing.priority,
       value: body.value ?? existing.value,
       effort: body.effort ?? existing.effort,
-      status: body.status ?? existing.status,
+      status: nextStatus,
       tags: cleanList(body.tags) ?? existing.tags,
       depends_on: cleanList(body.depends_on) ?? existing.depends_on,
       directive: nextDirective,
@@ -2391,25 +2419,14 @@ function handleRoadmapUpsert(
     };
     if (!next.title) return { error: "title cannot be empty", status: 400 };
 
-    // Work-lock resolution (PLAN K2). Leaving in_progress always releases the
-    // lock. While in_progress: an explicit `locked` wins; otherwise a non-'deck'
-    // author WRITING status=in_progress claims the lock (the Deck's own
-    // in_progress writes never lock -- the item is "submitted", the lock arrives
-    // when the agent actually starts). A same-owner re-claim keeps locked_at.
-    let locked = existing.locked;
-    let lockedBy = existing.locked_by;
-    if (next.status !== "in_progress") {
-      locked = false;
-    } else if (body.locked !== undefined) {
-      locked = body.locked;
-      if (body.locked) lockedBy = by;
-    } else if (body.status === "in_progress" && by !== "deck" && !existing.locked) {
-      locked = true;
-      lockedBy = by;
-    }
-    if (!locked) lockedBy = null;
+    // resolvedLock was already computed above, before the guard -- this write
+    // consumes that SAME object rather than resolving the lock a second time
+    // (the two-readings-of-the-body drift is exactly what produced card
+    // e7b364dc's original bug). A same-owner re-claim keeps locked_at.
     const keptLockedAt =
-      locked && existing.locked && existing.locked_by === lockedBy ? existing.locked_at : null;
+      resolvedLock.locked && existing.locked && existing.locked_by === resolvedLock.lockedBy
+        ? existing.locked_at
+        : null;
 
     // A status change away from 'archived' restores the item (clears the soft
     // delete); archiving through upsert stamps it like /roadmap/archive does.
@@ -2441,9 +2458,9 @@ function handleRoadmapUpsert(
         next.queue,
         next.directive,
         JSON.stringify(next.target_peer_ids),
-        locked ? 1 : 0,
-        lockedBy,
-        locked ? 1 : 0,
+        resolvedLock.locked ? 1 : 0,
+        resolvedLock.lockedBy,
+        resolvedLock.locked ? 1 : 0,
         keptLockedAt,
         next.updated_by,
         next.status,

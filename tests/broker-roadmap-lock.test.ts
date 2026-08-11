@@ -143,6 +143,79 @@ test("another peer's status write on a locked item is refused with 409", async (
   expect(enrich.item!.locked_by).toBe("test-peer");
 });
 
+test("a bare locked:false from a non-owner is refused with 409 (release-only steal, card e7b364dc)", async () => {
+  // The guard used to gate on `body.locked === true` (claim) while the
+  // resolution below honoured `body.locked !== undefined` (claim AND
+  // release): an intruder could send {locked:false} ALONE -- no status
+  // field -- walk past the guard, and clear locked_by. A second request
+  // then claims the now-unlocked item. Proven by mutation: revert the
+  // guard's `body.locked !== undefined` back to `body.locked === true` and
+  // this assertion is the one that flips from 409 to 200.
+  const item = await add({ title: "release-steal target", status: "in_progress" });
+  expect(item.locked).toBe(true);
+  expect(item.locked_by).toBe("test-peer");
+
+  const bareRelease = await patch(item.id, "intruder", { locked: false });
+  expect(bareRelease.status).toBe(409);
+  expect(bareRelease.error).toContain("locked by 'test-peer'");
+
+  // The lock must still be intact -- the whole point is that this single
+  // field can no longer silently clear it.
+  const listed = await post<{ items: RoadmapItem[] }>(`${broker.url}/roadmap/list`, {
+    project_key: PK,
+  });
+  const after = listed.body.items.find((i) => i.id === item.id)!;
+  expect(after.locked).toBe(true);
+  expect(after.locked_by).toBe("test-peer");
+});
+
+test("a bare locked:false with force:true from an unproven author is still refused with 409", async () => {
+  // Same release-steal shape as the test above, but with `force: true` added.
+  // Card 39c40571 layer 1 only honours `force` for a PROVEN author (a real
+  // registered peer, not a self-declared `by` string) -- an anonymous body
+  // cannot use `force` to launder the release-steal either. This cell's
+  // outcome flipped 200 -> 409 as a side effect of the e7b364dc guard fix
+  // above (the guard now also gates on `body.locked !== undefined`), but
+  // nothing asserted it until now.
+  const item = await add({ title: "release-steal target, forced", status: "in_progress" });
+  expect(item.locked).toBe(true);
+
+  const bareRelease = await patch(item.id, "intruder", { locked: false, force: true });
+  expect(bareRelease.status).toBe(409);
+});
+
+// The domain here is six fields across two endpoints (measured by walking
+// the request interfaces, not the handlers): /roadmap/upsert's `locked`,
+// `status` (an in_progress write implicitly claims/releases) and `force`
+// (claims-of-certainty, honoured only for a proven author -- see the next
+// test); /roadmap/import's `locked`, `locked_by`, `locked_at` (whole-row
+// restore, EXEMPTED BY ARBITRATION, not by an oversight: card 39c40571 rules
+// that a --force import is allowed to write the three lock columns straight
+// from file content with no proven author at all, because import skips a
+// locked row outright unless force -- see tests/broker-roadmap-import.test.ts
+// card 40ddf1f5, which already carries the negative controls for it; this is
+// a pointer, not a duplicate). /roadmap/archive releases the lock with no
+// body field at all, but is already gated by an owner/deck-only check
+// (see "another peer's status write on a locked item is refused with 409"
+// above, which asserts the archive-by-intruder 409 case) -- nothing to fix
+// there, card e7b364dc's own text describing it as open predates that guard.
+//
+// Growth-of-domain answer (Part B, card e7b364dc): the guard used to be an
+// enumerated OR-list of body FIELD NAMES -- fails open the instant a new
+// request field also moves the lock, until someone adds it by hand. It is
+// now an EFFECT check: shared/roadmap-lock.ts's resolveRoadmapLock is called
+// once, before the guard, and the guard fires when its resolved
+// {locked, lockedBy} actually differs from `existing` (OR body.status is set
+// at all, which must survive on its own -- see the truth table in
+// tests/roadmap-lock.test.ts for the same-status-already-locked cell that
+// resolves to zero delta yet must still 409). A hypothetical 7th field that
+// feeds resolveRoadmapLock is covered automatically, by construction, as
+// long as it flows through that one function -- the guard no longer needs to
+// name it. A 7th field that bypasses resolveRoadmapLock entirely (writes lock
+// state through some other path) is not covered by this and would need the
+// same audit this card just did; that limit is structural, not a gap in this
+// fix.
+
 test("owner, deck and force:true bypass the guard", async () => {
   const a = await add({ title: "owner moves", status: "in_progress" });
   const owner = await patch(a.id, "test-peer", { status: "done" });
