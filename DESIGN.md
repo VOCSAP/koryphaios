@@ -179,6 +179,25 @@ State rules (apply to every archetype):
   it; (c) the popup list is OS-drawn — `select option { background: var(--bg-2) }`
   is what stops it flashing white. Scoped classes should carry SIZE only
   (`max-width`, `font-size`), never the box.
+- **Collapsible side panels** (roadmap filter panel, graph conversation list):
+  the collapse control lives ON THE PANEL, in the panel's own header, never in
+  a distant toolbar. Three consequences, none optional. (a) The panel is
+  rendered PERMANENTLY with a modifier class, never mounted/unmounted
+  conditionally: a panel that disappears takes its control with it and leaves
+  nothing to click to bring it back. (b) Collapsed, it keeps a narrow rail
+  (~36px) carrying the GLYPH ALONE; expanded, the label reappears beside the
+  SAME control, at the SAME screen position. One control, one position, two
+  states, one gesture to learn. (c) Corollary: two controls for one state is
+  an affordance defect, not a convenience. Genesis, worth more than the bare
+  rule: the roadmap filter panel already had a fully wired toggle, but parked
+  at the far end of the top bar and showing a CROSS while the panel was open.
+  Next to an "Add" button, a cross reads "close the view", not "hide the
+  filters", so the operator, who uses that panel daily, asked for a feature
+  that already existed. A misplaced affordance is not merely discreet, it is
+  misleading. The sign itself stays an SVG glyph of the house family (§5),
+  never an emoji. This section states the RULE, not a shipped state: neither
+  surface implements it yet, both are open cards (`6aef4c54` roadmap filters,
+  `67c21dd5` graph conversations).
 - **Headers of full views** (`.worktrees-head`, `.roadmap-head`,
   `.settings-head`…): flex row, `h2` 15px, actions right-aligned after a
   flex spacer, bottom border.

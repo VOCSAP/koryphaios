@@ -32,9 +32,19 @@ and authoritative (extracted from the user-validated `main` styles).
    (`opacity: 0.4`) states. Careful with `<select>`: a scoped rule that
    re-declares the `background` shorthand erases the custom chevron
    (DESIGN.md §4).
-5. **Both themes.** Check dark AND light `data-theme`: no hardcoded greys;
+5. **A collapsible panel carries its OWN collapse control.** Never a toggle in
+   a distant toolbar (a cross next to "Add" reads "close the view", so the
+   operator asked for a feature that already existed). The control sits in the
+   panel's header; the panel is rendered PERMANENTLY with a modifier class,
+   never mounted/unmounted, otherwise collapsing removes the control too;
+   collapsed it leaves a narrow rail with the GLYPH ALONE, at the same screen
+   position the expanded control occupies. Two controls for one state is an
+   affordance defect (DESIGN.md §4). Stated as a rule, implemented NOWHERE
+   yet: cards `6aef4c54` (roadmap filters) and `67c21dd5` (graph
+   conversations) are the first two instances, not the rule itself.
+6. **Both themes.** Check dark AND light `data-theme`: no hardcoded greys;
    whites only on filled semantic buttons.
-6. **Icons are Greek glyphs — NEVER emoji, anywhere.** Every icon (view,
+7. **Icons are Greek glyphs — NEVER emoji, anywhere.** Every icon (view,
    action button, badge, roadmap kind) comes from the registries of
    `desktop/src/renderer/src/components/icons.tsx`: `GLYPHS` (destinations),
    `GLYPH_ACTIONS` (actions), `GLYPH_BADGES` (identity/state), `GLYPH_KINDS`
@@ -47,10 +57,10 @@ and authoritative (extracted from the user-validated `main` styles).
    attention glow (`.is-glowing`, `--glow`, `glyph-glow` keyframes) is
    reserved for "an agent awaits the operator" semantics; its colour is the
    `glowColor` setting, never a hardcoded hex.
-7. **Labels via i18n.** New user-visible text: key in `desktop/locales/en.json`
+8. **Labels via i18n.** New user-visible text: key in `desktop/locales/en.json`
    + `fr.json` + `EN_DEFAULTS` (`desktop/src/main/i18n.ts`) — parity is
    test-enforced (`tests/i18n.test.ts`).
-8. **Verify.** `npm run typecheck` in `desktop/`, `bun test` at the root (for
+9. **Verify.** `npm run typecheck` in `desktop/`, `bun test` at the root (for
    locale parity), and eyeball the affected view in both themes if you can
    launch the app.
 
