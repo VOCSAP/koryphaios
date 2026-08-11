@@ -8,13 +8,24 @@
 //
 // The project key MUST match what server.ts computes for the sessions spawned
 // in the same directory, otherwise the Deck and its agents would see two
-// different roadmaps: normalized git remote when there is one (mirror of
-// shared/summarize.ts normalizeRemoteUrl + computeProjectKey), else the same
-// stable `local:<sha256(gitRoot ?? dir)[:16]>` fallback as server.ts.
+// different roadmaps. Card 6aa32af4, 2nd review round: this file used to
+// keep its own copy of normalizeRemoteUrl -- since resolveProjectKey()
+// returns a non-empty remote key AS-IS, that copy alone determined the
+// whole derivation whenever a repo has a remote (the majority case), so an
+// earlier pass that unified only the local:<hash> fallback branch left the
+// real divergence risk in place. Fixed by importing both normalizeRemoteUrl
+// and resolveProjectKey from shared/project-key.ts -- single source, zero
+// duplication. The git shelling itself (execFileSync) stays local to this
+// file: it is Node-native, and shared/summarize.ts (which also re-exports
+// normalizeRemoteUrl for its own callers) references the Bun global
+// directly in computeProjectKey(), which desktop/tsconfig.node.json's
+// `"types": ["node", "electron-vite/node"]` (no bun-types) can't resolve --
+// importing it here would fail `npm run typecheck` with "Cannot find name
+// 'Bun'", not a runtime problem.
 
 import { execFileSync } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import { reportError } from './log'
+import { normalizeRemoteUrl, resolveProjectKey } from '../../../shared/project-key'
 import type { BrokerEndpoint } from './broker-client'
 import type {
   RoadmapArchiveResponse,
@@ -30,38 +41,10 @@ import type {
   RoadmapUpsertResponse
 } from '../shared/types'
 
-/** Mirror of shared/summarize.ts normalizeRemoteUrl (kept in sync manually). */
-export function normalizeRemoteUrl(url: string): string | null {
-  let s = url.trim()
-  if (!s) return null
-  s = s.replace(/\.git$/i, '')
-
-  const scpMatch = s.match(/^([^@\s:/]+)@([^:\s/]+):(?!\/)(.+)$/)
-  if (scpMatch && !s.includes('://')) {
-    const host = (scpMatch[2] ?? '').toLowerCase()
-    const path = (scpMatch[3] ?? '').replace(/^\/+/, '')
-    return `${host}/${path}`
-  }
-
-  const protoMatch = s.match(/^[a-z+]+:\/\/(.+)$/i)
-  if (protoMatch) {
-    let rest = protoMatch[1] ?? ''
-    const atIdx = rest.indexOf('@')
-    const slashIdx = rest.indexOf('/')
-    if (atIdx !== -1 && (slashIdx === -1 || atIdx < slashIdx)) {
-      rest = rest.slice(atIdx + 1)
-    }
-    const firstSlash = rest.indexOf('/')
-    if (firstSlash === -1) return rest.toLowerCase()
-    let host = rest.slice(0, firstSlash)
-    const path = rest.slice(firstSlash + 1)
-    const colonIdx = host.indexOf(':')
-    if (colonIdx !== -1) host = host.slice(0, colonIdx)
-    return `${host.toLowerCase()}/${path}`
-  }
-
-  return s.toLowerCase()
-}
+// Card 6aa32af4: re-exported so existing `from "./roadmap-service.ts"`
+// imports (tests/broker-desktop-roadmap-service.test.ts) keep working now
+// that the implementation lives in shared/project-key.ts.
+export { normalizeRemoteUrl }
 
 function gitOutput(args: string[], cwd: string): string | null {
   try {
@@ -72,17 +55,17 @@ function gitOutput(args: string[], cwd: string): string | null {
 }
 
 /**
- * The roadmap scope for a project directory. Same resolution as server.ts:
- * normalized `origin` remote, else `local:` + sha256(gitRoot ?? dir)[:16].
+ * The roadmap scope for a project directory. Git shelling (remote lookup,
+ * git root) stays local to this file; the combine step -- normalized
+ * `origin` remote wins, else `local:<hash>` -- is shared/project-key.ts's
+ * resolveProjectKey(), the same function server.ts's roadmapProjectKey()
+ * calls, so the two can no longer silently diverge.
  */
 export function computeDeckProjectKey(projectDir: string): string {
   const remote = gitOutput(['remote', 'get-url', 'origin'], projectDir)
-  if (remote) {
-    const normalized = normalizeRemoteUrl(remote)
-    if (normalized) return normalized
-  }
-  const anchor = gitOutput(['rev-parse', '--show-toplevel'], projectDir) ?? projectDir
-  return `local:${createHash('sha256').update(anchor, 'utf-8').digest('hex').slice(0, 16)}`
+  const normalized = remote ? normalizeRemoteUrl(remote) : null
+  const gitRoot = gitOutput(['rev-parse', '--show-toplevel'], projectDir)
+  return resolveProjectKey(normalized, gitRoot, projectDir)
 }
 
 // --- Operator signature on operator-authored writes (card 39c40571 layer 2) ---

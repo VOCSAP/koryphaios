@@ -36,6 +36,7 @@
     "electron.vite.config.ts",
     "../shared/approval.ts",
     "../shared/text.ts",
-    "../shared/types.ts"
+    "../shared/types.ts",
+    "../shared/project-key.ts"
   ]
 }

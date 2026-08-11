@@ -15,6 +15,13 @@
  */
 
 import { basename } from "node:path";
+import { normalizeRemoteUrl } from "./project-key";
+
+// Card 6aa32af4 (2nd review round): normalizeRemoteUrl used to be defined
+// here; moved to shared/project-key.ts (single source, imported by
+// desktop/src/main/roadmap-service.ts too) and re-exported below so
+// existing `from "./summarize.ts"` imports keep working.
+export { normalizeRemoteUrl };
 
 export interface SummaryContext {
   cwd: string;
@@ -249,42 +256,4 @@ export async function computeProjectKey(cwd: string): Promise<string | null> {
   if (!remoteUrl) return null;
 
   return normalizeRemoteUrl(remoteUrl);
-}
-
-export function normalizeRemoteUrl(url: string): string | null {
-  let s = url.trim();
-  if (!s) return null;
-
-  // Strip .git suffix
-  s = s.replace(/\.git$/i, "");
-
-  // SCP-like: git@host:owner/repo (no scheme, no slash before colon)
-  const scpMatch = s.match(/^([^@\s:/]+)@([^:\s/]+):(?!\/)(.+)$/);
-  if (scpMatch && !s.includes("://")) {
-    const host = scpMatch[2].toLowerCase();
-    const path = scpMatch[3].replace(/^\/+/, "");
-    return `${host}/${path}`;
-  }
-
-  // Protocol URLs: ssh://, git://, http://, https://
-  const protoMatch = s.match(/^[a-z+]+:\/\/(.+)$/i);
-  if (protoMatch) {
-    let rest = protoMatch[1];
-    const atIdx = rest.indexOf("@");
-    const slashIdx = rest.indexOf("/");
-    if (atIdx !== -1 && (slashIdx === -1 || atIdx < slashIdx)) {
-      rest = rest.slice(atIdx + 1);
-    }
-    const firstSlash = rest.indexOf("/");
-    if (firstSlash === -1) {
-      return rest.toLowerCase();
-    }
-    let host = rest.slice(0, firstSlash);
-    const path = rest.slice(firstSlash + 1);
-    const colonIdx = host.indexOf(":");
-    if (colonIdx !== -1) host = host.slice(0, colonIdx);
-    return `${host.toLowerCase()}/${path}`;
-  }
-
-  return s.toLowerCase();
 }

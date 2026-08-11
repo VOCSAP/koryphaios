@@ -19,7 +19,6 @@ import {
   CallToolRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { hostname } from "node:os";
-import { createHash } from "node:crypto";
 import type {
   PublicPeer,
   RegisterResponse,
@@ -85,6 +84,7 @@ import {
   GRAPH_DRAFT_TIMEOUT_MS,
 } from "./shared/graph-draft.ts";
 import { buildRoadmapAppendHeader } from "./shared/roadmap-append.ts";
+import { resolveProjectKey } from "./shared/project-key.ts";
 import { tmpdir } from "node:os";
 import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 
@@ -918,9 +918,7 @@ function formatPeer(p: PublicPeer): string {
  * git root / cwd so repos without a remote still get a per-project roadmap.
  */
 function roadmapProjectKey(): string {
-  if (myProjectKey) return myProjectKey;
-  const anchor = myGitRoot ?? myCwd;
-  return `local:${createHash("sha256").update(anchor, "utf-8").digest("hex").slice(0, 16)}`;
+  return resolveProjectKey(myProjectKey, myGitRoot, myCwd);
 }
 
 /** Author stamp for roadmap writes: the resolved peer_id, else a host fallback. */
@@ -1267,7 +1265,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         client_pid: myClientPid,
         cwd: myCwd,
         git_root: myGitRoot,
-        project_key: myProjectKey,
+        // Resolved, not the raw myProjectKey: /register and roadmap_list
+        // already store/scope on roadmapProjectKey()'s value (card 6aa32af4),
+        // so a no-remote repo whose peers-table row carries the local:<hash>
+        // fallback must show that same value here, not null -- otherwise
+        // whoami contradicts what list_peers reports for this exact session.
+        // Pinned by tests/roadmap-register-body.test.ts's whoami round trip.
+        // Today this field is pure DISPLAY; the day something consumes it as
+        // an input (the Deck, a script, an agent feeding it into roadmap_list)
+        // a regression here stops being visible the way it is today -- keep
+        // it wired to roadmapProjectKey(), never a locally recomputed value.
+        project_key: roadmapProjectKey(),
         group_name: groupNameForId(myGroupId),
         summary: currentSummary,
         registered_at: myRegisteredAt,
@@ -1341,7 +1349,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           summary: "",
           host: myHost,
           client_pid: myClientPid,
-          project_key: myProjectKey,
+          // Card 6aa32af4: same resolved value as the initial /register --
+          // see resolveProjectKey in shared/project-key.ts.
+          project_key: roadmapProjectKey(),
           group_id: newGroupId,
           group_secret_hash: newSecretHash,
         });
@@ -1877,7 +1887,10 @@ async function main() {
     host,
     client_pid: clientPid,
     claude_cli_pid: process.ppid,
-    project_key: myProjectKey,
+    // Card 6aa32af4: same resolved value roadmap cards are scoped under
+    // (never the raw, possibly-null myProjectKey) -- see resolveProjectKey
+    // in shared/project-key.ts for why the two must never diverge.
+    project_key: roadmapProjectKey(),
     group_id: groupId,
     group_secret_hash: groupSecretHash,
   });
