@@ -2514,6 +2514,172 @@ svg.glyph {
   padding: 0 7px;
 }
 
+/* ---------- Fleet stop controls (card aaf4537d) ----------
+   The three fleet gestures (pause / soft stop / hard stop) sit IN the head of
+   the "in progress" column: the operator halts what they are looking at, not
+   something named in a distant toolbar. Pushed right by margin-left:auto --
+   allowed here, DESIGN.md's ban on it is scoped to the .modal-head close cross,
+   whose mechanism is `h2 { flex: 1 }`. A column is 210px minimum, so these stay
+   glyph-only; the wording lives in the confirmation, which also carries the
+   count. */
+.rm-stop-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+/* Scoped class carries SIZE only (DESIGN.md §4): the .icon-btn archetype keeps
+   its fill, border, hover swap and disabled opacity. font-size 12px matches the
+   head's own, and svg.glyph renders at 1em, so the glyph lands on the label's
+   optical size instead of towering over it. */
+.rm-stop-btn {
+  padding: 2px 6px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--fg-dim);
+}
+
+.rm-stop-btn:hover:not(:disabled) {
+  color: var(--fg);
+}
+
+/* Split button: two <button>s that must READ as one control. The divider is the
+   flip half's own left border, pulled onto the main half's right border. */
+.rm-stop-split {
+  display: inline-flex;
+}
+
+.rm-stop-split > .rm-stop-btn {
+  border-radius: 0;
+}
+
+.rm-stop-main {
+  border-radius: 6px 0 0 6px;
+}
+
+/* Hard mode wears .icon-btn.danger (red text + red-mixed border, at rest). Hover
+   must KEEP the tone -- swapping it for --fg would erase the mode's colour
+   coding, the same rule the tile-head actions follow (DESIGN.md §2). */
+.rm-stop-main.danger:hover:not(:disabled) {
+  color: var(--danger);
+}
+
+/* The flip half never fires the action, only swaps the face: it stays neutral so
+   it does not read as part of the destructive gesture. */
+.rm-stop-flip {
+  border-radius: 0 6px 6px 0;
+  margin-left: -1px;
+  padding: 2px 4px;
+}
+
+/* Post-action report. Amber is the "still busy" tone (DESIGN.md §2, transient
+   state): those agents did NOT take the stop, and they are the reason the
+   operator clicked in the first place -- so they get a framed block of their
+   own, not a line lost in a tally.
+
+   The explicit `color` is the load-bearing line, not decoration: this modal is
+   rendered INSIDE the "in progress" column head, and `.rm-col-head-in_progress`
+   sets amber -- so without it EVERY unstyled string here (title, peer ids, any
+   block added later) inherits the alarm. Measured 2026-08-12: the neutral
+   "transmitted" block declared --border/--bg-2/--fg-dim and its peer id still
+   computed rgb(224,179,65). Neutralising at the root instead of per child means
+   amber below is always a DELIBERATE opt-in, where it actually accuses. */
+.rm-stop-report {
+  width: 420px;
+  max-width: 90vw;
+  color: var(--fg);
+}
+
+.rm-stop-tally {
+  list-style: none;
+  margin: 0 0 10px;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  font-size: 12.5px;
+}
+
+.rm-stop-took { color: var(--fg); }
+.rm-stop-stuck { color: #e0b341; }
+.rm-stop-lost { color: var(--danger); }
+.rm-stop-locks { color: var(--fg-dim); }
+
+.rm-stop-failure {
+  margin: 0 0 10px;
+  color: var(--danger);
+}
+
+/* The one block that opts INTO the alarm, now that the modal root neutralises
+   it: a straggler is a measured refusal, so its ids are amber on purpose. */
+.rm-stop-stragglers {
+  border: 1px solid color-mix(in srgb, #e0b341 45%, transparent);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: color-mix(in srgb, #e0b341 7%, transparent);
+  color: #e0b341;
+}
+
+.rm-stop-stragglers h3 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #e0b341;
+}
+
+.rm-stop-stragglers ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.rm-stop-stragglers li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+/* Transmitted-without-confirmation is neither a success nor a refusal, so it
+   takes neither the plain foreground of the tally nor the amber of a straggler:
+   the count and the block stay dim, the way an unanswered question looks. */
+.rm-stop-written { color: var(--fg-dim); }
+
+.rm-stop-written-box {
+  margin-top: 8px;
+  border-color: var(--border);
+  background: var(--bg-2);
+  color: var(--fg-dim);
+}
+
+.rm-stop-written-box h3 { color: var(--fg-dim); }
+
+/* Targets that no longer exist are NOT stragglers: the amber "still running"
+   warning would be a lie, so the block keeps the shape and loses the alarm --
+   neutral border, dimmed ids, and the note carries the distinction in words. */
+.rm-stop-missing {
+  margin-top: 8px;
+  border-color: var(--border);
+  background: var(--bg-2);
+  color: var(--fg-dim);
+}
+
+.rm-stop-peer { font-size: 12.5px; }
+
+.rm-stop-tile {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-dim);
+}
+
+.rm-stop-note {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+
 /* MoSCoW section colours (also used as priority badges). */
 .rm-prio-must { color: #e05a5a; }
 .rm-prio-should { color: #e0b341; }

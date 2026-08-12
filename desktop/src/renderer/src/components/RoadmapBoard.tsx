@@ -1,4 +1,5 @@
 import type { RoadmapItem, RoadmapPriority, RoadmapStatus } from '@shared/types'
+import { AgentStopControls } from './AgentStopControls'
 import { GLYPH_BADGES } from './icons'
 import { KIND_ICONS, RoadmapItemId } from './RoadmapItemModal'
 import { type TFn } from '../i18n'
@@ -195,6 +196,10 @@ export function RoadmapBoard({
               <h3 className={`rm-col-head rm-col-head-${status}`}>
                 {t(`roadmap.status.${status}`)}
                 <span className="rm-count">{rows.length}</span>
+                {/* Card aaf4537d: the fleet stop controls belong to the column
+                    that shows what is running, not to the view's top bar --
+                    the operator halts what they are looking at. */}
+                {status === 'in_progress' && <AgentStopControls t={t} />}
               </h3>
               <div className="rm-col-body">
                 {rows.map((item) => (

@@ -79,6 +79,14 @@ const DIRECTIVE_IDLE_WAIT_MS = 120_000
 const DIRECTIVE_IDLE_POLL_MS = 500
 const DIRECTIVE_SETTLE_MS = 120
 
+/**
+ * Soft-stop's idle wait (aaf4537d lot 3), kept separate from
+ * DIRECTIVE_IDLE_WAIT_MS on purpose: tuning one must never detune the other,
+ * since a global stop is expected to give up on an unresponsive tile much
+ * sooner than a routine /clear or /compact would.
+ */
+export const STOP_IDLE_WAIT_MS = 15_000
+
 /** Dev-channels warning auto-ack: let the dialog finish painting first. */
 const STARTUP_ACK_SETTLE_MS = 350
 /**
@@ -91,7 +99,7 @@ const PROMPT_INJECT_SETTLE_MS = 400
 const OUTPUT_SCAN_CAP = 65536
 
 /** Outcome of injectCommand, journaled by the caller (CT3). */
-export type DirectiveOutcome = 'sent' | 'no-terminal' | 'busy-timeout'
+export type DirectiveOutcome = 'written' | 'no-terminal' | 'busy-timeout'
 
 /**
  * Sandbox wrapper (PLAN-SANDBOX SBX1), injected by index.ts. `wrap` receives
@@ -1008,17 +1016,57 @@ export class SessionService extends EventEmitter {
    * falls idle within the deadline the command is NOT sent (a clear mid-task
    * would destroy work) and 'busy-timeout' is returned for the caller to log.
    */
-  async injectCommand(id: string, command: string): Promise<DirectiveOutcome> {
+  async injectCommand(
+    id: string,
+    command: string,
+    idleWaitMs: number = DIRECTIVE_IDLE_WAIT_MS
+  ): Promise<DirectiveOutcome> {
     if (!this.pty.isAlive(id)) return 'no-terminal'
-    const idle = await this.waitIdle(id, DIRECTIVE_IDLE_WAIT_MS)
+    const idle = await this.waitIdle(id, idleWaitMs)
     if (!this.pty.isAlive(id)) return 'no-terminal'
     if (!idle) return 'busy-timeout'
     this.pty.write(id, '\x1b')
     await new Promise((res) => setTimeout(res, DIRECTIVE_SETTLE_MS))
     if (!this.pty.isAlive(id)) return 'no-terminal'
-    this.pty.write(id, command)
-    this.pty.write(id, '\r')
-    return 'sent'
+    // write() itself reports write-silently-dropped (pty-manager.ts's own
+    // doc: "Returns false when no live PTY carries this id") -- the isAlive
+    // check just above only proves liveness at that instant, not that the
+    // pty was still alive for THESE two writes. Consulting the boolean here
+    // (not just the pre-check) is what actually closes that gap.
+    if (!this.pty.write(id, command)) return 'no-terminal'
+    if (!this.pty.write(id, '\r')) return 'no-terminal'
+    // 'written' guarantees only that pty.write() returned true for both
+    // writes above. It does NOT guarantee the terminal submitted the line --
+    // measured false at least once (card 6168b7f4): text appeared at the
+    // prompt and stayed there, unsubmitted, 12s later on an idle tile with a
+    // live pty; a manually-sent '\r' submitted it immediately. Nor is it
+    // guaranteed, by nature, that the agent received the line, understood
+    // it, or will act on it. Closing the submission gap needs echo
+    // verification on the caller side -- waitForOutput (already in this
+    // file, reads the pty's data stream) -- deferred to its own card.
+    return 'written'
+  }
+
+  /**
+   * Bare, non-idle-gated ESC write (aaf4537d lot 3: Pause/Hard Stop). Extracted
+   * from autoResume's existing raw ESC write below -- same primitive, now
+   * reusable outside the auto-resume flow. Unlike injectCommand this never
+   * waits for idle: Pause/Hard act on the process immediately, they do not
+   * ask the agent to wrap up (that's Soft Stop's job, via injectCommand).
+   *
+   * EXACTLY ONE '\x1b', never doubled -- do not "retry with a second ESC" if
+   * this doesn't seem to bite. Measured 2026-08-12 in the installed Claude
+   * Code CLI binary: it contains the string "esc to close · esc again quits",
+   * i.e. at least one UI state exists where a SECOND escape QUITS the session
+   * instead of interrupting it. A blind double-ESC can therefore kill a
+   * session where Hard Stop only meant to interrupt it. If a single ESC
+   * proves insufficient in some state, that is a real observation to make
+   * later, with a different remedy -- not a reason to double this write.
+   */
+  interrupt(id: string): 'interrupted' | 'no-terminal' {
+    if (!this.pty.isAlive(id)) return 'no-terminal'
+    this.pty.write(id, '\x1b')
+    return 'interrupted'
   }
 
   /**

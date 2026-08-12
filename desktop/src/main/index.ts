@@ -1126,7 +1126,7 @@ const runMagicCompact = async (
   // listeners leak. The banner is a PTY macrotask, so the synchronous
   // waitForOutput() on the next line always attaches before it can arrive.
   const injected = await service.injectCommand(tileId, '/magic-compact')
-  if (injected !== 'sent') {
+  if (injected !== 'written') {
     journal.add('dispatch', `magic_compact -> "${peerId}": /magic-compact not injected (${injected})`)
     return
   }

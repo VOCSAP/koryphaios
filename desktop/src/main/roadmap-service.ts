@@ -478,3 +478,58 @@ export async function archiveRoadmap(endpoint: BrokerEndpoint, id: string): Prom
   )
   return sanitizeOne(res?.item, '/roadmap/archive')
 }
+
+export interface RoadmapLockPeerResult {
+  parked: string[]
+  /** Only populated by lock-release's route ({released:[...]}); [] on lock-park. */
+  released: string[]
+  failed: string[]
+}
+
+async function roadmapLockPeers(
+  endpoint: BrokerEndpoint,
+  path: string,
+  projectKey: string,
+  peerIds: string[]
+): Promise<RoadmapLockPeerResult> {
+  const res = await roadmapPost<{ parked?: unknown; released?: unknown; failed?: unknown }>(
+    endpoint,
+    path,
+    signedAsOperator({
+      project_key: projectKey,
+      peer_ids: peerIds,
+      by: DECK_AUTHOR
+    })
+  )
+  return { parked: strList(res?.parked), released: strList(res?.released), failed: strList(res?.failed) }
+}
+
+/**
+ * Card aaf4537d lot 3, Pause: parks the roadmap lock(s) held by `peerIds` so
+ * dispatch skips them while their tiles are paused. Targets PEER_IDS, never
+ * card ids -- a peer may hold zero, one or several locked cards.
+ *
+ * NOT YET IMPLEMENTED broker-side (POST /roadmap/lock-park doesn't exist as
+ * of this lot): this call is cabled ahead of the route landing and WILL
+ * throw (roadmapPost rejects on a non-ok response) until it does. Callers
+ * must catch and report, never let this block the stop primitive itself.
+ */
+export async function lockPark(
+  endpoint: BrokerEndpoint,
+  projectKey: string,
+  peerIds: string[]
+): Promise<RoadmapLockPeerResult> {
+  return roadmapLockPeers(endpoint, '/roadmap/lock-park', projectKey, peerIds)
+}
+
+/**
+ * Card aaf4537d lot 3, Hard Stop's counterpart of lockPark: releases the
+ * park instead of setting it. Same not-yet-implemented-broker-side caveat.
+ */
+export async function lockRelease(
+  endpoint: BrokerEndpoint,
+  projectKey: string,
+  peerIds: string[]
+): Promise<RoadmapLockPeerResult> {
+  return roadmapLockPeers(endpoint, '/roadmap/lock-release', projectKey, peerIds)
+}

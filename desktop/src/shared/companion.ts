@@ -73,6 +73,11 @@ export const COMPANION_MANIFEST = {
   roadmapAssign: { kind: 'invoke', channel: 'roadmap:assign' },
   importPlan: { kind: 'invoke', channel: 'roadmap:import-plan' },
 
+  // agent stop broadcast (aaf4537d lot 3): stopping every tile at once is
+  // trust-changing (agents:stop), reading the current stop state is not.
+  agentsStop: { kind: 'invoke', channel: 'agents:stop' },
+  agentsStopState: { kind: 'invoke', channel: 'agents:stop-state' },
+
   // worktrees
   removeWorktree: { kind: 'invoke', channel: 'worktree:remove' },
   listWorktrees: { kind: 'invoke', channel: 'worktree:list' },
@@ -208,8 +213,15 @@ export type CompanionMethodName = keyof typeof COMPANION_MANIFEST
  * native dialogs open on the PC screen, browser/design captures are a desktop
  * workflow, and companion control requires physical presence at the host.
  * Enforced server-side (defense) AND stubbed shim-side (clean errors).
+ *
+ * This is the manually-curated FLOOR, not the whole answer -- it also
+ * carries entries below tier 3 (e.g. 'shell:open-external' is tier 2) that
+ * still must never be remote-callable. The exported REMOTE_BLOCKED_CHANNELS
+ * below unions this list with every tier>=3 channel, so a new trust-changing
+ * channel is blocked the moment it's tiered 3, with no separate deny-list
+ * edit to remember. See the completeness test in tests/desktop-companion.test.ts.
  */
-export const REMOTE_BLOCKED_CHANNELS: ReadonlySet<string> = new Set([
+const EXPLICIT_REMOTE_BLOCKED_CHANNELS: readonly string[] = [
   'dialog:pickDirectory',
   'journal:export',
   'roadmap:import-plan',
@@ -256,7 +268,7 @@ export const REMOTE_BLOCKED_CHANNELS: ReadonlySet<string> = new Set([
   // Launching a browser is a HOST action: a remote device asking the PC to
   // open a link is a "make the operator's machine visit this" primitive.
   'shell:open-external'
-])
+]
 
 /**
  * Declarative sensitivity tiers (EXPLORATION §5.4) — 0 read, 1 interact,
@@ -276,6 +288,9 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'launch:get': 0,
   'roadmap:list': 0,
   'roadmap:search': 0,
+  // Reading whether any tile is currently paused is a read, same tier as
+  // sessions:list -- a Stream Deck key needs this to render its own state.
+  'agents:stop-state': 0,
   'worktree:list': 0,
   'journal:list': 0,
   'broker:status': 0,
@@ -376,6 +391,9 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
 
   'config:set': 3,
   'launch:set-global': 3,
+  // Trust-changing: stops every live tile at once (pause/soft/hard), the
+  // remote-companion equivalent of pulling the plug on the whole session.
+  'agents:stop': 3,
   // Trust-changing: these decide WHERE agents execute, which image they run
   // and which extra files get duplicated next to them. The custom
   // Dockerfile fragment and the settings overlay both decide what CODE and
@@ -393,6 +411,21 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'companion:revoke': 3,
   'companion:revoke-all': 3
 }
+
+/**
+ * DERIVED (aaf4537d lot 3): explicit floor above ∪ every channel whose
+ * CHANNEL_TIERS entry is >= 3. Before this, CHANNEL_TIERS was purely
+ * declarative/informational -- a channel could be tiered 3 and still be
+ * missing from the hand-written deny-list above with nothing failing
+ * (measured: 'config:set' and 'launch:set-global' were exactly that gap).
+ * tests/desktop-companion.test.ts asserts every tier>=3 channel is a member.
+ */
+export const REMOTE_BLOCKED_CHANNELS: ReadonlySet<string> = new Set([
+  ...EXPLICIT_REMOTE_BLOCKED_CHANNELS,
+  ...Object.entries(CHANNEL_TIERS)
+    .filter(([, tier]) => tier >= 3)
+    .map(([channel]) => channel)
+])
 
 // ----- wire protocol -----
 

@@ -446,6 +446,31 @@ const IconStop = (
   </Svg>
 )
 
+/** Pause (hold the chorus without dismissing it) — the transport-control pair of
+    bars, deliberately the twin of IconStop's square so the fleet controls read as
+    one family: same 10x10 optical box, same 1.2 radius, only the silhouette
+    changes. Shape, not colour, is what tells the three fleet actions apart when
+    the head is skimmed or rendered monochrome. */
+const IconPause = (
+  <Svg>
+    <rect x="8" y="6.5" width="2.6" height="11" rx="1.2" />
+    <rect x="13.4" y="6.5" width="2.6" height="11" rx="1.2" />
+  </Svg>
+)
+
+/** Hard stop — the shears of Atropos, the Fate who CUTS the thread. Chosen over a
+    second square because a hard stop is not "a stronger stop": it severs the
+    agent's hold on its cards and hands them back. The cutting metaphor is the
+    only one in the set that says "the link is gone", and it survives the squint
+    test next to IconStop's square. */
+const IconShears = (
+  <Svg>
+    <circle cx="7" cy="18" r="2.2" />
+    <circle cx="17" cy="18" r="2.2" />
+    <path d="M8.6 16.4 17.5 5M15.4 16.4 6.5 5" />
+  </Svg>
+)
+
 /** Element picker (crosshair). */
 const IconTarget = (
   <Svg>
@@ -863,6 +888,8 @@ export const GLYPH_ACTIONS = {
   camera: IconCamera,
   record: IconRecord,
   stop: IconStop,
+  pause: IconPause,
+  shears: IconShears,
   target: IconTarget,
   erase: IconErase,
   code: IconCode,

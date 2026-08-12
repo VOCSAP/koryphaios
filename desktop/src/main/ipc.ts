@@ -17,8 +17,11 @@ import type {
   SandboxContainerAction,
   SandboxSettingsPatch,
   SessionRuntime,
+  StopMode,
+  StopReport,
   StopResult
 } from '@shared/types'
+import { broadcastStop, lockTargets, STOP_MODES, stopTouchesLocks } from './agent-stop'
 import type { SandboxService } from './sandbox-service'
 import { buildAuthCommand, SANDBOX_AUTH_PTY_ID, SANDBOX_BUILD_PTY_ID } from './sandbox-command'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
@@ -40,6 +43,8 @@ import {
   archiveRoadmap,
   computeDeckProjectKey,
   listRoadmap,
+  lockPark,
+  lockRelease,
   reorderRoadmap,
   searchRoadmap,
   upsertRoadmap
@@ -74,6 +79,7 @@ import {
 } from './worktree-service'
 import { resolve as resolvePath } from 'node:path'
 import type { SessionService } from './session-service'
+import { STOP_IDLE_WAIT_MS } from './session-service'
 import type { WorkspaceService } from './workspace-service'
 import type { Journal, JournalKind } from './journal'
 import { listAgents } from './agents'
@@ -885,6 +891,84 @@ export function registerIpc({
       checkpoint
     )
     return true
+  })
+
+  // ----- multi-tile stop broadcast (card aaf4537d, lot 3) -----
+  regHandle('agents:stop', async (_e, arg: { mode?: unknown; peerIds?: unknown }) => {
+    const mode = arg?.mode
+    // Allow-list, not an if/else that falls through to the most destructive
+    // branch: an unknown mode (stale renderer build, fuzzed companion
+    // payload) is refused before dispatch, never coerced to 'hard'.
+    if (!STOP_MODES.includes(mode as StopMode)) {
+      throw new Error(`agents:stop: unknown mode "${String(mode)}"`)
+    }
+    const stopMode = mode as StopMode
+    // Renderer-supplied array, re-validated main-side (five hostile inputs,
+    // #4): shape only here (array of non-empty strings) -- the empty-array
+    // "never means everyone" business rule lives once, in broadcastStop.
+    let peerIds: string[] | undefined
+    if (arg?.peerIds !== undefined) {
+      const raw = arg.peerIds
+      if (!Array.isArray(raw) || !raw.every((p): p is string => typeof p === 'string' && p.length > 0)) {
+        throw new Error('agents:stop: peerIds must be an array of non-empty strings when provided')
+      }
+      peerIds = raw
+    }
+    const { outcomes, missing } = await broadcastStop(
+      stopMode,
+      {
+        list: () => service.list(),
+        interrupt: (id) => service.interrupt(id),
+        injectCommand: (id, command) => service.injectCommand(id, command, STOP_IDLE_WAIT_MS),
+        journal: (line) => journal.add('dispatch', line)
+      },
+      peerIds
+    )
+    const report: StopReport = { mode: stopMode, outcomes, locks: {} }
+    if (missing.length > 0) report.missing = missing
+    if (stopTouchesLocks(stopMode)) {
+      // Derived from `outcomes` (what was actually dispatched to), never from
+      // a fresh service.list() -- see lockTargets's doc comment (review round,
+      // correction 1/2/3).
+      const targetPeerIds = lockTargets(outcomes)
+      if (targetPeerIds.length > 0) {
+        try {
+          const { endpoint, key } = roadmapCtx()
+          const result = await (stopMode === 'pause'
+            ? lockPark(endpoint, key, targetPeerIds)
+            : lockRelease(endpoint, key, targetPeerIds))
+          if (stopMode === 'pause') report.locks.parked = result.parked.length
+          else report.locks.released = result.released.length
+          // `failed` was parsed and never surfaced (correction 5b): a partial
+          // lock-park silently reported only the successes.
+          if (result.failed.length > 0) {
+            report.locks.error = `${result.failed.length} peer(s) failed: ${result.failed.join(', ')}`
+          }
+        } catch (e) {
+          // Not yet implemented broker-side (POST /roadmap/lock-park|lock-release):
+          // report the failure, never let it block the stop primitive itself.
+          const msg = e instanceof Error ? e.message : String(e)
+          report.locks.error = msg
+          reportError('dispatch', `agents:stop ${stopMode}: lock call failed`, e)
+        }
+      } else {
+        // NIT (correction 5c): explicit 0, not `{}` -- otherwise indistinguishable
+        // from soft stop's intentionally-untouched lock table.
+        if (stopMode === 'pause') report.locks.parked = 0
+        else report.locks.released = 0
+      }
+    }
+    return report
+  })
+  regHandle('agents:stop-state', () => {
+    const tiles = service.list()
+    const live = tiles.filter((r) => r.status !== 'exited')
+    const busy = live.filter((r) => r.thinking)
+    // paused/parkedCards stay 0 until POST /roadmap/lock-park exists broker-side
+    // (another developer's lot on this same card) -- honest placeholder rather
+    // than a fabricated count, and DERIVED (not a stored flag) once it lands:
+    // a tile is paused iff its peerId holds >=1 non-expired parked lock.
+    return { live: live.length, busy: busy.length, paused: 0, parkedCards: 0 }
   })
 
   // ----- help assistant (PLAN C9) -----

@@ -469,6 +469,45 @@ export interface StopResult {
   via: 'supervisor' | 'broadcast' | 'none'
 }
 
+// ----- multi-tile stop broadcast (card aaf4537d, lot 3) -----
+// Wire contract shared with agent-stop.ts (main) and AgentStopControls.tsx
+// (renderer, lot 4) BY VALUE -- duplicated here rather than imported from
+// main/agent-stop.ts, same convention as the rest of this file (shared/
+// stays free of a dependency on main/, see BUN.md "pure module" rule).
+// Renaming a field here means checking both those files too.
+
+/** pause/hard: bare ESC on the process, not idle-gated. soft: idle-gated conversation-turn injection. */
+export type StopMode = 'pause' | 'soft' | 'hard'
+
+export interface StopOutcome {
+  /** Tile id. Always present -- unlike peerId, which is null until the peer registers. */
+  id: string
+  peerId: string | null
+  /**
+   * 'written' guarantees only that the pty write succeeded -- not that the
+   * terminal submitted it, that the agent received it, or that it will act
+   * on it (measured false at least once: card 6168b7f4). Soft stop is a
+   * request, not a guarantee (only pause/hard are); this value is why.
+   */
+  result: 'interrupted' | 'written' | 'busy-timeout' | 'no-terminal' | 'error'
+}
+
+export interface StopReport {
+  mode: StopMode
+  outcomes: StopOutcome[]
+  /** Requested peerIds with no live, peer-resolved tile to stop. Omitted when empty. */
+  missing?: string[]
+  /** Absent/partial in 'soft' mode: a soft stop asks, it does not touch the lock table. */
+  locks: { parked?: number; released?: number; error?: string }
+}
+
+export interface StopState {
+  live: number
+  busy: number
+  paused: number
+  parkedCards: number
+}
+
 export interface RoadmapListResponse {
   items: RoadmapItem[]
   /**
@@ -1225,6 +1264,18 @@ export interface DeckApi {
   roadmapAssign(id: string, peerId: string): Promise<AssignResult>
   /** Pick a plan file and spawn a one-shot import agent (PLAN C7). */
   importPlan(): Promise<boolean>
+  /**
+   * Fleet-wide stop broadcast (card aaf4537d lot 3): pause/soft/hard every
+   * live tile at once. Companion-tier 3 (trust-changing, remote-blocked).
+   *
+   * `peerIds` absent targets every live tile (header button); present and
+   * non-empty targets only those peers (e.g. escalating soft-stop
+   * stragglers to hard without also releasing cards of agents who already
+   * complied); present-and-empty is refused main-side, never "everyone".
+   */
+  agentsStop(mode: StopMode, peerIds?: string[]): Promise<StopReport>
+  /** Live/busy/paused tile counts (card aaf4537d lot 3). Companion-tier 0. */
+  agentsStopState(): Promise<StopState>
 
   // worktrees (PLAN C4/C6)
   /** Remove a worktree dir (branch is kept; git refuses dirty trees). */

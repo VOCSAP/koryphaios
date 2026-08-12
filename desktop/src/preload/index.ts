@@ -22,6 +22,7 @@ import type {
   SessionQuotaEvent,
   SessionRuntime,
   SessionThinkingEvent,
+  StopMode,
   WorkspaceSummary
 } from '@shared/types'
 import type { ModelTarget } from '@shared/graph'
@@ -151,6 +152,8 @@ const api: DeckApi = {
   roadmapStop: (id: string) => ipcRenderer.invoke('roadmap:stop', id),
   roadmapAssign: (id: string, peerId: string) => ipcRenderer.invoke('roadmap:assign', id, peerId),
   importPlan: () => ipcRenderer.invoke('roadmap:import-plan'),
+  agentsStop: (mode: StopMode, peerIds?: string[]) => ipcRenderer.invoke('agents:stop', { mode, peerIds }),
+  agentsStopState: () => ipcRenderer.invoke('agents:stop-state'),
   removeWorktree: (path: string) => ipcRenderer.invoke('worktree:remove', path),
   listWorktrees: () => ipcRenderer.invoke('worktree:list'),
   createWorktree: (branch: string) => ipcRenderer.invoke('worktree:create', branch),
