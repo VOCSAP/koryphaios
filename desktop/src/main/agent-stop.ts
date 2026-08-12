@@ -103,10 +103,17 @@ export function lockTargets(outcomes: StopOutcome[]): string[] {
 /**
  * Soft-stop is a request TO THE AGENT, not a verb on the process (unlike
  * pause/hard, which act on the PTY directly via interrupt) -- so it injects
- * a conversation turn, not a CLI command. Single line, no embedded '\n':
- * SessionService.injectCommand writes this text in one pty.write then a
- * separate '\r' to submit, so an internal newline would submit early and
- * truncate the rest as a second, never-submitted line.
+ * a conversation turn, not a CLI command.
+ *
+ * Kept to a single line with no embedded '\n'. That used to be a hard
+ * requirement (injectCommand wrote the text then a bare '\r', so an internal
+ * newline submitted early and truncated the rest). Since card 6168b7f4 the
+ * injection goes through `encodeSubmittedKeystrokes` -- bracketed paste, one
+ * write -- which keeps embedded newlines literal, so a multi-line message
+ * would no longer be truncated. Single-line is now a readability preference
+ * for the terminal it lands in, not a correctness constraint. Do NOT reason
+ * from this comment about how submission works: the encoder in
+ * session-command.ts is where that is measured and explained.
  */
 export const SOFT_STOP_MESSAGE =
   'Operator soft stop: finish the current turn, then stop. Do not start new work. ' +

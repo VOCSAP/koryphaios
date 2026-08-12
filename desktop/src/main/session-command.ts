@@ -204,35 +204,69 @@ export function buildSessionCommandLine(input: SessionCommandInput): string {
 }
 
 /**
- * Encode an initial prompt as post-spawn PTY keystrokes (150eb188):
- * session-service writes this once a fresh tile's startup-ack fires, instead
- * of composing the prompt into the spawned command line.
+ * Encode arbitrary text as ONE pty write that Claude Code's TUI actually
+ * SUBMITS: bracketed paste (xterm `ESC[200~...ESC[201~`, the precedent already
+ * used by BrowserView.tsx's `bracketedPaste()`) with the `\r` submit keystroke
+ * appended, all in a single string.
  *
- * Bracketed paste (xterm `ESC[200~...ESC[201~`, the precedent already used by
- * BrowserView.tsx's `bracketedPaste()`) keeps embedded newlines literal in
- * Claude Code's input box instead of each one submitting a partial line; the
- * trailing `\r` after the closing marker is the actual submit keystroke.
+ * The single-write, marker-wrapped shape is load-bearing. Splitting it back
+ * into "write the text, then write `\r`" reintroduces a measured defect (card
+ * 6168b7f4, measured 2026-08-13 against CLI v2.1.229). Two facts, both measured
+ * on this platform, that only bite together:
  *
- * `prompt` can originate from a project template (`templates/*.json` in a
- * CLONED repo, hostile input #1 per CLAUDE.md) and this function's output
- * reaches a LIVE TERMINAL (hostile input #4) -- so every ESC byte is stripped
- * first. Bracketed paste is not a sanitizer: a literal `ESC[201~` inside the
- * prompt would close the paste early and let the remainder be interpreted as
+ *  1. Windows/ConPTY COALESCES back-to-back `pty.write()` calls into a single
+ *     read on the child: `write(text)` then `write('\r')` with no await arrives
+ *     as ONE chunk (239 chars + CR measured as a single 240-byte read; the same
+ *     pair 120 ms apart arrives as 240 then 1).
+ *  2. Claude Code's ANSI tokenizer only emits a control character as its OWN
+ *     token when the whole read is UNDER 64 characters. At or above that the CR
+ *     is absorbed into the surrounding text run and never becomes a `return`
+ *     key, so the text lands at the prompt and sits there, unsubmitted, with no
+ *     error anywhere. Measured against the real CLI: a 63-byte coalesced chunk
+ *     submits, a 64-byte one does not, and a lone `\r` sent afterwards submits
+ *     it instantly.
+ *
+ * The closing `ESC[201~` is what makes this deterministic instead of a race: it
+ * is a sequence token, so it CLOSES the text run inside the tokenizer and the
+ * trailing `\r` is a separate token whatever the read size (measured: 252 bytes
+ * in one write submits). A delay between two writes would also work on a quiet
+ * machine and silently stop working on a loaded one.
+ *
+ * `text` can originate from a project template (`templates/*.json` in a CLONED
+ * repo, hostile input #1 per CLAUDE.md) and this function's output reaches a
+ * LIVE TERMINAL (hostile input #4) -- so every ESC byte is stripped first.
+ * Bracketed paste is not a sanitizer: a literal `ESC[201~` inside the text
+ * would close the paste early and let the remainder be interpreted as
  * keystrokes (terminal escape-sequence injection). Stripping ALL ESC bytes
- * (not just that one marker) closes the whole class at once -- a prompt has
- * no legitimate use for a raw control byte.
+ * (not just that one marker) closes the whole class at once -- neither a prompt
+ * nor an injected command has a legitimate use for a raw control byte.
  *
  * A bare `\r` (or a `\r\n` pair) is normalized to `\n` for the same reason:
  * bracketed paste protects against embedded `\n` submitting early on a TUI
  * that honours it correctly, but not every terminal app treats a raw CR
  * inside the paste as literal -- some read it as Enter regardless. Folding
  * both CRLF and lone CR to LF removes the other control byte capable of
- * submitting early, without touching the prompt's actual content.
+ * submitting early, without touching the text's actual content.
+ */
+export function encodeSubmittedKeystrokes(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  const safe = text.replace(/\x1b/g, '').replace(/\r\n?/g, '\n')
+  return `\x1b[200~${safe}\x1b[201~\r`
+}
+
+/**
+ * Encode an initial prompt as post-spawn PTY keystrokes (150eb188):
+ * session-service writes this once a fresh tile's startup-ack fires, instead
+ * of composing the prompt into the spawned command line.
+ *
+ * Thin alias over `encodeSubmittedKeystrokes` above, which carries the whole
+ * rationale. Kept under its own name because this is where the encoding was
+ * introduced; card 6168b7f4 generalized the SAME encoding to
+ * `SessionService.injectCommand` rather than growing a second, subtly
+ * different one next to it.
  */
 export function encodeInitialPromptKeystrokes(prompt: string): string {
-  // eslint-disable-next-line no-control-regex
-  const safe = prompt.replace(/\x1b/g, '').replace(/\r\n?/g, '\n')
-  return `\x1b[200~${safe}\x1b[201~\r`
+  return encodeSubmittedKeystrokes(prompt)
 }
 
 /**

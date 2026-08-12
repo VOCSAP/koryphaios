@@ -471,17 +471,18 @@ function listTestFiles(dir: string): string[] {
   for (const entry of entries) {
     const full = join(dir, entry);
     const stat = statSync(full);
-    // Full-coverage guard: tests/ is flat today. If a subdirectory ever
-    // appears, fail loudly instead of silently skipping whatever it
-    // contains -- a hardcoded "no subdirs" assumption is exactly the kind
-    // of partial-coverage gate this test exists to avoid becoming.
+    // Full-coverage guard, recursive: tests/ is no longer flat (e.g.
+    // tests/pty-harness/). A subdirectory is walked, not skipped -- silently
+    // ignoring it would be exactly the partial-coverage failure mode this
+    // test exists to avoid. Downstream, only .ts/.tsx entries are scanned
+    // (see the filter below), so a subdirectory of .cjs/.json fixtures adds
+    // nothing to `violations` today; this recursion exists so a future .ts
+    // file under any subdirectory is not silently exempted by its path.
     if (stat.isDirectory()) {
-      throw new Error(
-        `tests/${entry} is a directory: desktop-test-hygiene.test.ts assumes tests/ is flat and ` +
-          `does not currently recurse. Update listTestFiles() to recurse before adding subdirectories.`
-      );
+      files.push(...listTestFiles(full));
+    } else {
+      files.push(full);
     }
-    files.push(full);
   }
   return files;
 }

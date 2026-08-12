@@ -15,6 +15,7 @@ import { saveSessions } from './store'
 import {
   buildSessionCommandLine,
   encodeInitialPromptKeystrokes,
+  encodeSubmittedKeystrokes,
   sanitizeFlagValue,
   shouldInjectPrompt,
   type SpawnMode
@@ -1003,18 +1004,35 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Type a slash-command into a session's live terminal the way the operator
-   * would (CT3 directive cards): dismiss any open menu (Escape), a short settle,
-   * the command text, then Enter -- the exact working precedent is autoResume.
+   * Type a command (or a whole conversation turn) into a session's live
+   * terminal the way the operator would (CT3 directive cards, aaf4537d soft
+   * stop): dismiss any open menu (Escape), a short settle, then ONE write
+   * carrying the text and its submit keystroke, encoded by
+   * `encodeSubmittedKeystrokes` (session-command.ts).
+   *
+   * That single write is not a style choice, see the comment at the write
+   * itself and the encoder's own: the previous two-write shape (text, then a
+   * bare '\r') did not submit at all past ~64 bytes, which is card 6168b7f4.
+   * autoResume, further up this file, still writes 'continue' then '\r'
+   * separately -- that is NOT a contradiction and NOT a precedent to copy
+   * from: its coalesced chunk measures 9 bytes, comfortably under the 64
+   * threshold, so it submits. It is left alone deliberately (its own gap is
+   * observability, diagnosed under the quota family).
    *
    * SECURITY: `command` is ALWAYS a CODE CONSTANT chosen by the caller (never a
    * value from the broker, a repo, or a peer). The tile is resolved by the
    * caller; nothing from a directive card's payload is written here verbatim.
+   * The encoder strips every ESC byte anyway, so a hostile string could not
+   * break out of the bracketed paste into keystrokes.
    *
-   * Gated on the tile being idle so a directive never interrupts a live turn:
-   * when the tile is busy it waits (bounded) for idle, then injects; if it never
-   * falls idle within the deadline the command is NOT sent (a clear mid-task
-   * would destroy work) and 'busy-timeout' is returned for the caller to log.
+   * Meant to be gated on the tile being idle so a directive never interrupts a
+   * live turn: when the tile is busy it waits (bounded) for idle, then injects;
+   * if it never falls idle within the deadline the command is NOT sent (a clear
+   * mid-task would destroy work) and 'busy-timeout' is returned for the caller
+   * to log. CAVEAT measured 2026-08-13, do not read the paragraph above as a
+   * guarantee: `waitIdle` reads `r.thinking`, whose detector is currently
+   * unreliable, so in practice this gate can open on a busy tile. That is a
+   * separate defect on the detector, not on this method.
    */
   async injectCommand(
     id: string,
@@ -1028,22 +1046,49 @@ export class SessionService extends EventEmitter {
     this.pty.write(id, '\x1b')
     await new Promise((res) => setTimeout(res, DIRECTIVE_SETTLE_MS))
     if (!this.pty.isAlive(id)) return 'no-terminal'
+    // ONE write, bracketed-paste wrapped, CR inside the same string (card
+    // 6168b7f4). This used to be two writes -- the command, then a bare '\r'
+    // -- and that shape did not SUBMIT: measured 2026-08-12 on a live tile,
+    // the text appeared at the prompt and stayed there 12s later, and again
+    // in a pty harness, where the mechanism was pinned. ConPTY coalesces two
+    // back-to-back writes into one read, and Claude Code's tokenizer only
+    // turns a control byte into its own token (hence into a `return` key)
+    // when the whole read is under 64 characters; above that the CR is
+    // swallowed into the text run. encodeSubmittedKeystrokes' own comment
+    // (session-command.ts) carries the full measurement and the reason the
+    // closing ESC[201~ makes this deterministic rather than timing-dependent.
+    // Do NOT "simplify" this back into two writes, and do not add a delay:
+    // a delay is a race that passes on an idle machine.
+    //
     // write() itself reports write-silently-dropped (pty-manager.ts's own
     // doc: "Returns false when no live PTY carries this id") -- the isAlive
     // check just above only proves liveness at that instant, not that the
-    // pty was still alive for THESE two writes. Consulting the boolean here
-    // (not just the pre-check) is what actually closes that gap.
-    if (!this.pty.write(id, command)) return 'no-terminal'
-    if (!this.pty.write(id, '\r')) return 'no-terminal'
-    // 'written' guarantees only that pty.write() returned true for both
-    // writes above. It does NOT guarantee the terminal submitted the line --
-    // measured false at least once (card 6168b7f4): text appeared at the
-    // prompt and stayed there, unsubmitted, 12s later on an idle tile with a
-    // live pty; a manually-sent '\r' submitted it immediately. Nor is it
-    // guaranteed, by nature, that the agent received the line, understood
-    // it, or will act on it. Closing the submission gap needs echo
-    // verification on the caller side -- waitForOutput (already in this
-    // file, reads the pty's data stream) -- deferred to its own card.
+    // pty was still alive for THIS write. Consulting the boolean here (not
+    // just the pre-check) is what actually closes that gap.
+    if (!this.pty.write(id, encodeSubmittedKeystrokes(command))) return 'no-terminal'
+    // 'written' guarantees that pty.write() returned true and that the bytes
+    // sent are the shape the CLI submits AT THE MAIN PROMPT. It does NOT
+    // guarantee the terminal accepted them in every UI state. One non-nominal
+    // state was measured (2026-08-13, trust/confirm dialog open -- the cheapest
+    // one reachable without spending an API turn): the paste is SILENTLY
+    // SWALLOWED. Nothing is submitted, and no bracketed-paste marker leaks onto
+    // the screen as literal text, so the failure mode is a lost command, not a
+    // corrupted terminal. Two related facts from the same capture: the CLI
+    // turns bracketed paste ON at startup (`CSI ?2004h`) and OFF on exit
+    // (`CSI ?2004l`), and the bare ESC above -- which PREDATES this card --
+    // quits the CLI outright when that dialog is what is on screen. Other
+    // non-nominal states (tool-permission prompt, open selection list) are NOT
+    // measured.
+    //
+    // `waitIdle`'s own idleness signal is currently unreliable
+    // (its `thinking` predicate is under separate diagnosis), so a directive
+    // can land mid-turn. Nor is it guaranteed, by nature, that the agent read
+    // the line, understood it, or will act on it. Turning 'written' into a
+    // proof of submission needs output-side confirmation AFTER the CR --
+    // waitForOutput (below in this file) is the instrument, but the activity
+    // cue it would look for is itself unreliable today (the interrupt hint is
+    // never emitted during a turn, and the activity label rotates), so that
+    // work is deliberately a separate card, not a half-measure here.
     return 'written'
   }
 
