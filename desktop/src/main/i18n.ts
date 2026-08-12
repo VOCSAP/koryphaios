@@ -103,6 +103,8 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sidebar.renameTitle': 'Rename',
   'sidebar.removeTitle': 'Remove',
   'sidebar.copyPeerId': 'Copy peer id',
+  'sidebar.copyPeerTable': 'Copy peer table',
+  'sidebar.peerTableYou': '(you)',
   'sidebar.autoResumeOn': 'Enable quota auto-resume',
   'sidebar.autoResumeOff': 'Disable quota auto-resume',
 
@@ -151,6 +153,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.nothingToRestore': 'This workspace has no sessions to restore',
   'toast.alreadyOpen': 'Session already open',
   'toast.peerIdCopied': 'peer id copied',
+  'toast.peerTableCopied': 'peer table copied',
 
   'tile.expiredTitle': 'Session expired',
   'tile.expiredBody': 'Its transcript is gone. Start a new session with the same setup.',

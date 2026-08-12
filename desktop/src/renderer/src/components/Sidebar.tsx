@@ -3,6 +3,7 @@ import type { SessionRuntime } from '@shared/types'
 import { moveBeside } from '@shared/reorder'
 import { GLYPH_ACTIONS, GLYPH_BADGES, GLYPHS, PithosGlyph } from './icons'
 import { useDeck } from '../store'
+import { formatPeerTable } from '../peer-table'
 import { formatClock, useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ContextMenu } from './ContextMenu'
@@ -19,7 +20,20 @@ interface RowDnd {
   onDragEnd: () => void
 }
 
-function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }): React.JSX.Element {
+function SessionRow({
+  session,
+  dnd,
+  roster
+}: {
+  // The whole Agents list, in display order. The row's context menu offers a
+  // LIST-scoped action (copy the peer table) next to its row-scoped ones, and
+  // taking the roster as a prop means it is the SAME list the sidebar renders
+  // -- reading the store again here would duplicate the `!supervisor` filter
+  // and let the two drift.
+  session: SessionRuntime
+  dnd: RowDnd
+  roster: readonly SessionRuntime[]
+}): React.JSX.Element {
   const t = useT()
   const config = useDeck((s) => s.config!)
   const selectedId = useDeck((s) => s.selectedId)
@@ -52,6 +66,16 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
     if (!session.peerId) return
     void navigator.clipboard.writeText(session.peerId)
     showToast('toast.peerIdCopied')
+  }
+
+  // Card c8ee5732: LIST-scoped, unlike copyPeerId -- the clicked row does not
+  // matter, the whole roster is copied so a freshly spawned team-lead can be
+  // handed its directory in one gesture. Empty when no peer has an id yet.
+  const peerTable = formatPeerTable(roster, t('sidebar.peerTableYou'))
+  const copyPeerTable = (): void => {
+    if (!peerTable) return
+    void navigator.clipboard.writeText(peerTable)
+    showToast('toast.peerTableCopied')
   }
 
   const commit = (): void => {
@@ -258,6 +282,11 @@ function SessionRow({ session, dnd }: { session: SessionRuntime; dnd: RowDnd }):
               disabled: !session.peerId
             },
             {
+              label: t('sidebar.copyPeerTable'),
+              onSelect: copyPeerTable,
+              disabled: !peerTable
+            },
+            {
               label: autoResumeOn ? t('sidebar.autoResumeOff') : t('sidebar.autoResumeOn'),
               onSelect: () => void setAutoResume(session.id, !autoResumeOn)
             },
@@ -414,7 +443,7 @@ export function Sidebar(): React.JSX.Element {
 
       <ul className="rows">
         {sessions.map((s) => (
-          <SessionRow key={s.id} session={s} dnd={dnd} />
+          <SessionRow key={s.id} session={s} dnd={dnd} roster={sessions} />
         ))}
         {sessions.length === 0 && <li className="rows-empty">{t('sidebar.noSessions')}</li>}
       </ul>
