@@ -4577,15 +4577,45 @@ const server = Bun.serve<WsData>({
     message(ws, raw) {
       const text = typeof raw === "string" ? raw : new TextDecoder().decode(raw);
       let frame: { type?: string; instance_token?: string };
-      try { frame = JSON.parse(text); } catch { ws.close(1003, "invalid frame"); return; }
+      try { frame = JSON.parse(text); } catch {
+        log.warn(`ws-auth: closed for an invalid (non-JSON) frame`);
+        ws.close(1003, "invalid frame");
+        return;
+      }
       if (frame.type !== "auth" || !frame.instance_token) {
+        log.warn(`ws-auth: closed for a missing or malformed auth frame`, { type: frame.type });
         ws.close(1008, "expected auth frame");
+        return;
+      }
+      // Card 78bf378d: this handshake used to trust frame.instance_token with
+      // only a DB existence+status='active' check -- the only thing standing
+      // between a sentinel-shaped token and wsPool.set()/flushPendingForToken
+      // (whose selectUndeliveredCapped has no group_id filter, so an
+      // authenticated __operator__ socket would drain every group's operator
+      // inbox at once) was the sentinel rows being seeded permanently
+      // 'dormant', an accident of DB state, not a rule. Reuse the SAME
+      // predicate+trace the 14 HTTP routes already apply
+      // (refuseSentinelInstanceToken), rather than a parallel WS-specific
+      // guard. Client-visible outcome is IDENTICAL to the unknown-token
+      // branch below (same close code, same reason, no differentiation) --
+      // matching the established HTTP-side precedent of never confirming to
+      // the caller which refusal fired (poll/peek return an empty list
+      // either way). Only the server-side log (inside the helper) tells the
+      // two apart. Compare against `!== null`, not truthiness: the helper's
+      // contract is string-or-null, and a future refactor returning `""`
+      // must still refuse here exactly like it would break all 14 HTTP call
+      // sites visibly, not silently flip this one's meaning.
+      if (refuseSentinelInstanceToken("ws-auth", frame.instance_token) !== null) {
+        ws.close(1008, "unknown or inactive instance_token");
         return;
       }
       const ok = db.query(
         "SELECT 1 FROM peers WHERE instance_token = ? AND status = 'active'"
       ).get(frame.instance_token);
       if (!ok) {
+        log.warn(`ws-auth: closed for an unknown or inactive instance_token`, {
+          instance_token: frame.instance_token.slice(0, 64),
+        });
         ws.close(1008, "unknown or inactive instance_token");
         return;
       }
