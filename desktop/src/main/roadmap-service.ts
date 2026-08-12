@@ -225,11 +225,15 @@ function queuePos(v: unknown): number | null {
  * Shape one roadmap item coming off the wire, or null when it is unusable.
  *
  * PICK-LIST, NEVER A SPREAD. Do not "simplify" this into `{ ...raw, tags: ... }`:
- * `RoadmapItem` has 24 fields and the list below covers all 24, so a 25th added
+ * `RoadmapItem` has 25 fields and the list below covers all 25, so a 26th added
  * broker-side would travel through unvalidated with nothing failing, which is
  * the canonical fail-open shape this guard exists to avoid. Naming every field
- * means a new one simply does not arrive until someone adds it here, and the
- * compiler asks for it.
+ * means a new one simply does not arrive until someone adds it here. The
+ * compiler only catches a REQUIRED field left out; an OPTIONAL field (like
+ * `operator_id`) omitted from this pick-list compiles clean and produces no
+ * error, so what actually retains the guarantee is the field count asserted
+ * in `tests/desktop-roadmap-sanitize.test.ts` -- a new field must be added
+ * here AND that count updated, or the omission ships silent.
  *
  * `id` and `project_key` are STRUCTURAL rather than coercible: an item without
  * them cannot be addressed, updated or matched, so it is dropped and traced.
@@ -263,7 +267,11 @@ export function sanitizeRoadmapItem(raw: unknown): RoadmapItem | null {
     locked_by: nullableStr(r.locked_by),
     locked_at: nullableStr(r.locked_at),
     directive: typeof r.directive === 'string' ? oneOfOrNull(r.directive) : null,
-    target_peer_ids: strList(r.target_peer_ids)
+    target_peer_ids: strList(r.target_peer_ids),
+    // Card edefff05: optional (undefined, never null) -- unlike the
+    // nullableStr fields above, the broker omits this key entirely rather
+    // than sending null when no operator has ever signed a write.
+    operator_id: typeof r.operator_id === 'string' ? r.operator_id : undefined
   }
 }
 

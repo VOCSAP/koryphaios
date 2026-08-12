@@ -485,6 +485,17 @@ for (const col of ["directive TEXT", "target_peer_ids TEXT NOT NULL DEFAULT '[]'
   }
 }
 
+// Migration (card edefff05): last-operator-signed snapshot on pre-existing
+// tables. NULLable, no DEFAULT -- see RoadmapAuthor/resolveRoadmapAuthor for
+// what it records (a proven operator signature, not ownership; `locked_by`
+// stays the ownership field).
+try {
+  db.run("ALTER TABLE roadmap_items ADD COLUMN operator_id TEXT");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
+
 db.run(`CREATE INDEX IF NOT EXISTS idx_roadmap_project ON roadmap_items(project_key, status)`);
 
 // Free-text search index (card 15952e09). External-content table: FTS5 owns
@@ -836,7 +847,7 @@ function releaseStaleLocks(): void {
   const release = (where: string, params: string[]): void => {
     db.run(
       `UPDATE roadmap_items SET
-         locked = 0, locked_by = NULL, locked_at = NULL,
+         locked = 0, locked_by = NULL, locked_at = NULL, operator_id = NULL,
          status = CASE WHEN status = 'in_progress' THEN 'planned' ELSE status END,
          updated_by = 'lock-sweep', updated_at = datetime('now')
        WHERE locked = 1 AND ${where}`,
@@ -1646,11 +1657,17 @@ const ROADMAP_STATUSES: readonly RoadmapStatus[] = [
   "archived",
 ];
 
-type RoadmapRow = Omit<RoadmapItem, "tags" | "depends_on" | "locked" | "target_peer_ids"> & {
+type RoadmapRow = Omit<
+  RoadmapItem,
+  "tags" | "depends_on" | "locked" | "target_peer_ids" | "operator_id"
+> & {
   tags: string;
   depends_on: string;
   locked: number;
   target_peer_ids: string;
+  // NULLable column (no DEFAULT), unlike RoadmapItem.operator_id?: string --
+  // bun:sqlite hands back NULL as null, not undefined.
+  operator_id: string | null;
 };
 
 function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
@@ -1672,6 +1689,8 @@ function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
     directive: row.directive ?? null,
     // Legacy rows created before the migration have NULL here; default to [].
     target_peer_ids: row.target_peer_ids ? parseList(row.target_peer_ids) : [],
+    // string|null (SQLite) -> string|undefined (RoadmapItem's optional field).
+    operator_id: row.operator_id ?? undefined,
   };
 }
 
@@ -1747,6 +1766,15 @@ function getRoadmapItem(id: string): RoadmapItem | null {
 interface RoadmapAuthor {
   by: string;
   proven: boolean;
+  /**
+   * Card edefff05: the operator credential's digest (auth.operator_id), set
+   * ONLY in the reserved-peer-name branch below (a signed 'deck'/'operator'/
+   * 'system' write) -- an ordinary agent's `by` is already its peer_id, so
+   * there is no operator to name. Callers persist this onto
+   * RoadmapItem.operator_id; see that field's doc for the ownership-vs-
+   * attribution distinction.
+   */
+  operator_id?: string;
 }
 
 /**
@@ -1931,7 +1959,7 @@ function resolveRoadmapAuthor(
         status: auth.status,
       };
     }
-    return { by, proven: true };
+    return { by, proven: true, operator_id: auth.operator_id };
   }
 
   const token = typeof body.instance_token === "string" ? body.instance_token.trim() : "";
@@ -2437,6 +2465,12 @@ function handleRoadmapUpsert(
 
     // A status change away from 'archived' restores the item (clears the soft
     // delete); archiving through upsert stamps it like /roadmap/archive does.
+    //
+    // operator_id (card edefff05): COALESCE(?, operator_id) so a write NOT
+    // signed by the operator (author.operator_id undefined -> bound NULL)
+    // preserves whatever the last SIGNED write recorded, instead of erasing
+    // it -- the column means "last operator to sign a write", and an
+    // ordinary agent's write does not un-happen that fact.
     db.run(
       `UPDATE roadmap_items SET
          kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
@@ -2444,6 +2478,7 @@ function handleRoadmapUpsert(
          directive = ?, target_peer_ids = ?,
          locked = ?, locked_by = ?,
          locked_at = CASE WHEN ? = 0 THEN NULL ELSE COALESCE(?, datetime('now')) END,
+         operator_id = COALESCE(?, operator_id),
          updated_by = ?, updated_at = datetime('now'),
          deleted_at = CASE
            WHEN ? = 'archived' THEN COALESCE(deleted_at, datetime('now'))
@@ -2469,6 +2504,7 @@ function handleRoadmapUpsert(
         resolvedLock.lockedBy,
         resolvedLock.locked ? 1 : 0,
         keptLockedAt,
+        author.operator_id ?? null,
         next.updated_by,
         next.status,
         body.id,
@@ -2513,9 +2549,10 @@ function handleRoadmapUpsert(
     `INSERT INTO roadmap_items
        (id, project_key, kind, title, description, rationale, context, priority, value,
         effort, status, tags, depends_on, created_by, updated_by,
-        created_at, updated_at, deleted_at, queue, directive, target_peer_ids, locked, locked_by, locked_at)
+        created_at, updated_at, deleted_at, queue, directive, target_peer_ids, locked, locked_by, locked_at,
+        operator_id)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?, ?, ?, ?, ?,
-             CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END)`,
+             CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?)`,
     [
       id,
       projectKey,
@@ -2538,6 +2575,7 @@ function handleRoadmapUpsert(
       createLocked ? 1 : 0,
       createLocked ? by : null,
       createLocked ? 1 : 0,
+      author.operator_id ?? null,
     ]
   );
   return { item: getRoadmapItem(id)! };
@@ -2566,9 +2604,10 @@ function handleRoadmapArchive(
        status = 'archived',
        deleted_at = COALESCE(deleted_at, datetime('now')),
        locked = 0, locked_by = NULL, locked_at = NULL,
+       operator_id = COALESCE(?, operator_id),
        updated_by = ?, updated_at = datetime('now')
      WHERE id = ?`,
-    [by, body.id]
+    [author.operator_id ?? null, by, body.id]
   );
   return { item: getRoadmapItem(body.id)! };
 }
@@ -2610,10 +2649,14 @@ function handleRoadmapArchive(
  *  - the work-lock does not apply. An append is a single atomic statement,
  *    so it cannot race the lock holder's own write, and the entire point of
  *    this tool is to leave a note on ANOTHER agent's card while it works.
- *    Bound: this route touches ONLY `context` -- never `status`, `locked`,
- *    or any arbitration field, all of which remain fully guarded by
- *    /roadmap/upsert's lock check. There is no code path here that could
- *    even attempt to set them (RoadmapContextAppendRequest carries none).
+ *    Bound: this route touches ONLY `context` and `operator_id` -- never
+ *    `status`, `locked`, or any other arbitration field, all of which remain
+ *    fully guarded by /roadmap/upsert's lock check. There is no code path
+ *    here that could even attempt to set them (RoadmapContextAppendRequest
+ *    carries none). `operator_id` (card edefff05) is not an arbitration
+ *    field itself -- nothing gates on it, `releaseStaleLocks` keys its TTL
+ *    off `updated_at` alone -- so writing it here does not reopen the
+ *    lock-TTL hazard the next bullet describes for `updated_at`.
  *  - `deleted_at` is not checked. Appending to an ARCHIVED card is
  *    intentional -- it is how a post-mortem note gets written.
  *
@@ -2653,13 +2696,22 @@ function handleRoadmapContextAppend(
     return { error: textPlan.message, status: 400 };
   }
 
-  // Card 562fd9b5 review delta: SET touches `context` ONLY. `updated_by`/
-  // `updated_at` are deliberately left alone -- see the long comment above.
+  // Card 562fd9b5 review delta: SET touches `context` ONLY (plus, since card
+  // edefff05, `operator_id` -- see the long comment above for why that
+  // addition does not reopen the lock-TTL hazard). `updated_by`/`updated_at`
+  // are deliberately left alone.
   const res = db.run(
     `UPDATE roadmap_items
-        SET context = COALESCE(context,'') || ?
+        SET context = COALESCE(context,'') || ?,
+            operator_id = COALESCE(?, operator_id)
       WHERE id = ? AND length(COALESCE(context,'')) + length(?) <= ?`,
-    [textPlan.appended, body.id, textPlan.appended, ROADMAP_APPEND_RESULT_MAX_CHARS]
+    [
+      textPlan.appended,
+      author.operator_id ?? null,
+      body.id,
+      textPlan.appended,
+      ROADMAP_APPEND_RESULT_MAX_CHARS,
+    ]
   );
 
   if (res.changes === 0) {
@@ -2766,6 +2818,14 @@ function handleRoadmapReorder(
     waves = trimmedWaves;
   }
 
+  // Card edefff05: none of the three UPDATEs below touch operator_id, and
+  // that is deliberate, not an oversight. A reorder is a signed write, but
+  // it is a write on the QUEUE, not an authorship event on a card -- each
+  // UPDATE here moves N rows at once (unqueue, waves, or flat order), and
+  // stamping operator_id on all of them would mark dozens of cards the
+  // operator never opened with "last operator who signed a write", which
+  // stops meaning anything once everyone carries it. The field tracks the
+  // write that moves a card FORWARD, not its position in a list.
   const reorderTx = db.transaction(() => {
     // Unqueue everything first: the per-id UPDATE below re-stamps the kept ones.
     db.run(
@@ -3082,6 +3142,15 @@ function handleRoadmapImport(body: {
         locked: lockedVal ? 1 : 0,
         locked_by: lockedByVal,
         locked_at: lockedAtVal,
+        // Card edefff05: same discipline as created_by/updated_by above, not
+        // the file-wins discipline the content fields use just above --
+        // `it.operator_id` is UNTRUSTED file content, and this column exists
+        // to prove which operator signed a write, so honouring a file-
+        // declared value would let any import forge that proof for free.
+        // COALESCE-equivalent of the SQL used on every other write path: a
+        // freshly signed import (author.operator_id set) wins, otherwise the
+        // existing row's value survives unchanged.
+        operator_id: author.operator_id ?? existing?.operator_id ?? null,
       };
       insert.run(...ROADMAP_IMPORT_COLUMNS.map((column) => values[column]));
       imported++;

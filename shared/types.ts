@@ -399,6 +399,23 @@ export interface RoadmapItem {
    * (plain text, no FK -- like created_by). [] for non-directive items.
    */
   target_peer_ids: string[];
+  /**
+   * Card edefff05: the last OPERATOR (human, via the Ed25519 credential --
+   * see resolveApprovalAuth) who SIGNED a write on this card. Set only when
+   * that write's `by` was a reserved name (RESERVED_PEER_IDS) proven by that
+   * signature. Undefined until an operator signs a write on this card, and
+   * again after a stale-lock sweep (releaseStaleLocks), which resets this
+   * column to NULL the same way it resets locked_by. An ordinary agent's
+   * write PRESERVES the existing value. A signed reorder does not stamp it
+   * (queue write, not an authorship event on the card -- see
+   * handleRoadmapReorder).
+   *
+   * This is attribution, NOT ownership -- ownership of an active work-lock
+   * stays `locked_by`/`locked_at` on this same interface. A future "reserve
+   * this object to one operator" feature belongs on the OBJECT the operator
+   * is reserving, not on this card.
+   */
+  operator_id?: string;
 }
 
 /**
@@ -449,6 +466,7 @@ export const ROADMAP_IMPORT_COLUMNS = [
   "locked",
   "locked_by",
   "locked_at",
+  "operator_id",
 ] as const;
 
 export type RoadmapImportColumn = (typeof ROADMAP_IMPORT_COLUMNS)[number];

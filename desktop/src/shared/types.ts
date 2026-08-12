@@ -369,6 +369,17 @@ export interface RoadmapItem {
   directive: RoadmapDirective | null
   /** kind 'directive' (CT1): peer_ids the command is injected into; [] otherwise. */
   target_peer_ids: string[]
+  /**
+   * Card edefff05: the last OPERATOR (human, via the Ed25519 credential) who
+   * SIGNED a write on this card. Attribution, NOT ownership -- ownership of
+   * an active work-lock stays `locked_by`/`locked_at` above. Undefined until
+   * an operator signs a write on this card, and again after a stale-lock
+   * sweep (releaseStaleLocks), which resets this column to NULL the same way
+   * it resets locked_by. An ordinary agent's write PRESERVES the existing
+   * value. A signed reorder does not stamp it (queue write, not an
+   * authorship event on the card -- see handleRoadmapReorder).
+   */
+  operator_id?: string
 }
 
 export interface RoadmapListFilters {

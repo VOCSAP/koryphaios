@@ -160,6 +160,13 @@ export async function groupId(secret: string): Promise<string> {
  */
 const FIXTURE_OPERATOR = generateCredential();
 
+/**
+ * The operator_id digest `deckAuthored` writes stamp on a card (card
+ * edefff05). Exported so tests can assert the exact value a signed write
+ * persisted, not just that some truthy string landed.
+ */
+export const FIXTURE_OPERATOR_ID = deriveOperatorId(FIXTURE_OPERATOR.publicKey);
+
 export function deckAuthored(payload: Record<string, unknown>): Record<string, unknown> {
   const body = { ...payload, by: "deck", public_key: FIXTURE_OPERATOR.publicKey };
   return {

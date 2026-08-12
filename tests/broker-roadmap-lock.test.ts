@@ -7,6 +7,7 @@ import { test, expect, beforeAll, afterAll } from "bun:test";
 import { startBroker, stopBroker, post, livePid, type TestBroker , deckAuthored } from "./_helper.ts";
 import { Database } from "bun:sqlite";
 import type { RoadmapItem } from "../shared/types.ts";
+import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
 
 let broker: TestBroker;
 
@@ -325,6 +326,68 @@ test("TTL sweep releases a lock with no recent write and drops status to planned
     expect(item.locked_by).toBeNull();
     expect(item.status).toBe("planned");
     expect(item.updated_by).toBe("lock-sweep");
+  } finally {
+    await stopBroker(b);
+  }
+}, 20_000);
+
+// Card edefff05: releaseStaleLocks' shared release() helper clears
+// operator_id to NULL alongside locked_by/locked_at -- an arbitration (the
+// sweep erases attribution the same way it erases ownership), not an
+// accident, so it needs its own pinned proof. Same false-coverage trap as
+// the upsert-PATCH and archive cells found on this card: a cell that only
+// asserts operator_id is NULL after the sweep is indistinguishable from
+// "the column was never written in the first place" unless a signed write
+// stamped a real value on the row BEFORE the sweep fires.
+test("TTL sweep clears operator_id alongside locked_by, but only after a signed write stamped one", async () => {
+  const b = await startBroker({
+    CLAUDE_PEERS_LOCK_TTL_SEC: "2",
+    CLAUDE_PEERS_LOCK_GRACE_SEC: "3600",
+    CLAUDE_PEERS_LOCK_SWEEP_SEC: "1",
+  });
+  try {
+    // resolveRoadmapLock (shared/roadmap-lock.ts) exempts `by === "deck"`
+    // from ever claiming the lock (its own writes are "submitted, not
+    // started"), so deckAuthored() can't be used to get locked=true here.
+    // `by: "operator"` is also a RESERVED_PEER_IDS name -- goes through the
+    // same signed reserved-author branch of resolveRoadmapAuthor as "deck"
+    // does, so operator_id still gets stamped -- but it isn't exempted from
+    // claiming the lock, so it actually stays locked to poll a real release.
+    const credential = generateCredential();
+    const operatorId = deriveOperatorId(credential.publicKey);
+    const body = {
+      project_key: PK,
+      title: "stale-signed",
+      status: "in_progress",
+      by: "operator",
+      public_key: credential.publicKey,
+    };
+    const res = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      ...body,
+      auth: buildAuthProof(credential.privateKey, body, {
+        kind: "operator",
+        operator_id: operatorId,
+      }),
+    });
+    expect(res.body.item.locked).toBe(true);
+    expect(res.body.item.operator_id).toBe(operatorId);
+
+    const db = new Database(b.dbPath);
+    db.run("UPDATE roadmap_items SET updated_at = datetime('now', '-60 seconds') WHERE id = ?", [
+      res.body.item.id,
+    ]);
+    db.close();
+
+    const item = await pollUntil(12_000, 300, async () => {
+      const after = await post<{ items: RoadmapItem[] }>(`${b.url}/roadmap/list`, {
+        project_key: PK,
+      });
+      const found = after.body.items.find((i) => i.id === res.body.item.id)!;
+      return { done: found.locked === false, value: found };
+    });
+    expect(item.locked).toBe(false);
+    expect(item.locked_by).toBeNull();
+    expect(item.operator_id).toBeUndefined();
   } finally {
     await stopBroker(b);
   }

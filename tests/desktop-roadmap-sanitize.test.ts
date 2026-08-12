@@ -178,12 +178,39 @@ test("id and project_key are STRUCTURAL: the item is dropped, not coerced", () =
 });
 
 test("PICK-LIST, not spread: an unknown broker field does not travel through", () => {
-  // RoadmapItem has 24 fields and the pick-list covers all 24 (measured), so the
-  // next one broker-side is the 25th.
-  const item = sanitizeRoadmapItem({ ...wellFormed(), surprise_25th_field: "x" }) as RoadmapItem;
+  // RoadmapItem has 25 fields (card edefff05 added operator_id) and the
+  // pick-list covers all 25 (measured), so the next one broker-side is the
+  // 26th.
+  const item = sanitizeRoadmapItem({ ...wellFormed(), surprise_26th_field: "x" }) as RoadmapItem;
   expect(item).not.toBeNull();
-  expect(Object.keys(item)).not.toContain("surprise_25th_field");
-  expect(Object.keys(item)).toHaveLength(24);
+  expect(Object.keys(item)).not.toContain("surprise_26th_field");
+  expect(Object.keys(item)).toHaveLength(25);
+});
+
+// Card edefff05: the existing pick-list coverage above proves REJECTION of an
+// extra field, not RETENTION of an expected one -- a validator can pass that
+// test while still dropping a legitimate field on the floor (the coverage
+// convention's "growth of domain" half). This proves operator_id specifically
+// survives when the broker sends it.
+test("operator_id survives sanitizeRoadmapItem when the broker sends it", () => {
+  const item = sanitizeRoadmapItem({
+    ...wellFormed(),
+    operator_id: "abc123def456"
+  }) as RoadmapItem;
+  expect(item.operator_id).toBe("abc123def456");
+});
+
+test("operator_id is undefined (not null, not dropped) when the broker omits it", () => {
+  const item = sanitizeRoadmapItem(wellFormed()) as RoadmapItem;
+  expect(item.operator_id).toBeUndefined();
+  expect("operator_id" in item).toBe(true);
+});
+
+test("a non-string operator_id falls back to undefined", () => {
+  const withNumber = sanitizeRoadmapItem({ ...wellFormed(), operator_id: 42 }) as RoadmapItem;
+  expect(withNumber.operator_id).toBeUndefined();
+  const withNull = sanitizeRoadmapItem({ ...wellFormed(), operator_id: null }) as RoadmapItem;
+  expect(withNull.operator_id).toBeUndefined();
 });
 
 // ---------------------------------------------------------------------------
