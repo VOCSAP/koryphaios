@@ -430,6 +430,33 @@ export interface RoadmapItem {
    * roadmap_update MCP tool schema so an ordinary agent cannot self-unblock.
    */
   inactive: boolean;
+  /**
+   * Card aaf4537d (Pause stop): set when an operator PAUSES the agent that
+   * holds this card's work-lock, instead of hard-stopping it -- the lock
+   * itself (`locked`/`locked_by`/`locked_at`) is left untouched, this column
+   * only makes the card immune to `releaseStaleLocks`'s ordinary TTL/owner-
+   * gone sweep for `LOCK_PARK_TTL_SEC` (default 24h; see
+   * `shared/roadmap-lock.ts`'s `isParked`). Nullity IS the state -- no
+   * separate boolean, so the two can never desync. Cleared (both this and
+   * `lock_parked_by`) the moment the lock itself is cleared, by any of: the
+   * park's own TTL expiring (sweep clause 3), a hard-release
+   * (`/roadmap/lock-release`), or an ordinary write moving the card out of
+   * `in_progress`.
+   */
+  lock_parked_at: string | null;
+  /**
+   * Card aaf4537d: the `operator_id` (never a client-declared `by`) of the
+   * operator who parked this card -- distinct from `operator_id` above,
+   * which means "last operator to sign ANY write on this card" and gets
+   * overwritten by any subsequent signed write, and distinct from
+   * `locked_by`, which is the AGENT holding the work-lock, not the operator
+   * who paused it. A dedicated field, not a reuse of either: two different
+   * operators on a shared broker could each sign a write as `by='deck'`, and
+   * without this field a later unrelated signed write from operator B would
+   * silently steal operator A's park in `refusesParkedArchive`'s comparison.
+   * null when unparked.
+   */
+  lock_parked_by: string | null;
 }
 
 /**
@@ -482,6 +509,8 @@ export const ROADMAP_IMPORT_COLUMNS = [
   "locked_at",
   "operator_id",
   "inactive",
+  "lock_parked_at",
+  "lock_parked_by",
 ] as const;
 
 export type RoadmapImportColumn = (typeof ROADMAP_IMPORT_COLUMNS)[number];
@@ -791,6 +820,45 @@ export interface RoadmapArchiveRequest {
 
 export interface RoadmapArchiveResponse {
   item: RoadmapItem;
+}
+
+/**
+ * Card aaf4537d, lots 1+2: shared request shape for /roadmap/lock-park and
+ * /roadmap/lock-release. Wire contract pinned by the desktop-side caller
+ * (desktop/src/main/roadmap-service.ts's `roadmapLockPeers`, ahead of this
+ * landing) -- do not rename a field here without checking that file. Both
+ * routes are operator-gated (resolveRoadmapAuthor's `operator_id` required),
+ * so `by`/`instance_token` follow the same proof discipline as every other
+ * signed roadmap write.
+ */
+export interface RoadmapLockPeersRequest {
+  project_key: string;
+  by: string;
+  /** Proof of authorship -- see RoadmapUpsertRequest.instance_token. */
+  instance_token?: string;
+  /** Never empty -- an empty array is refused (400), never treated as "every peer". */
+  peer_ids: string[];
+}
+
+export type RoadmapLockParkRequest = RoadmapLockPeersRequest;
+export type RoadmapLockReleaseRequest = RoadmapLockPeersRequest;
+
+/**
+ * A peer_id absent from BOTH arrays is a silent no-op: it held no
+ * currently-locked card under `project_key`, the ordinary case for most
+ * pause/hard-stop targets. `failed` is reserved for a genuine per-row write
+ * exception, never for "nothing to do" -- the desktop caller surfaces a
+ * non-empty `failed` as an operator-visible error string, so an over-
+ * inclusive definition would spam the operator on every ordinary stop.
+ */
+export interface RoadmapLockParkResponse {
+  parked: string[];
+  failed: string[];
+}
+
+export interface RoadmapLockReleaseResponse {
+  released: string[];
+  failed: string[];
 }
 
 /**

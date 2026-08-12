@@ -39,6 +39,7 @@ import {
   resolveRoadmapLock,
   refusesInactiveClaim,
   refusesInactiveToggle,
+  refusesParkedArchive,
 } from "./shared/roadmap-lock.ts";
 import {
   APPROVAL_ANSWER_KINDS,
@@ -166,6 +167,14 @@ const CLEAN_INTERVAL_MS = Math.max(
 const LOCK_TTL_SEC = Math.max(1, parseInt(process.env.CLAUDE_PEERS_LOCK_TTL_SEC ?? "21600", 10));
 const LOCK_GRACE_SEC = Math.max(1, parseInt(process.env.CLAUDE_PEERS_LOCK_GRACE_SEC ?? "600", 10));
 const LOCK_SWEEP_SEC = Math.max(1, parseInt(process.env.CLAUDE_PEERS_LOCK_SWEEP_SEC ?? "60", 10));
+// Card aaf4537d: a PARKED card (Pause stop) is immune to the two clauses
+// above for up to this long -- its own, dedicated env var, never mixed with
+// LOCK_TTL_SEC/LOCK_GRACE_SEC (a park is an operator's 24h decision, not an
+// ordinary staleness timeout). Default 86400s (24h).
+const LOCK_PARK_TTL_SEC = Math.max(
+  1,
+  parseInt(process.env.CLAUDE_PEERS_LOCK_PARK_TTL_SEC ?? "86400", 10)
+);
 const FLUSH_MAX_COUNT = Math.max(
   1,
   parseInt(process.env.CLAUDE_PEERS_FLUSH_MAX_COUNT ?? "20", 10)
@@ -504,6 +513,22 @@ try {
 // RoadmapItem.inactive in shared/types.ts for the full write-path contract.
 try {
   db.run("ALTER TABLE roadmap_items ADD COLUMN inactive INTEGER NOT NULL DEFAULT 0");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
+
+// Migration (card aaf4537d, lots 1+2): PARKED lock state. Both NULLable, no
+// DEFAULT -- nullity IS the state, see RoadmapItem.lock_parked_at/
+// lock_parked_by in shared/types.ts for the full write-path contract.
+try {
+  db.run("ALTER TABLE roadmap_items ADD COLUMN lock_parked_at TEXT");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
+try {
+  db.run("ALTER TABLE roadmap_items ADD COLUMN lock_parked_by TEXT");
 } catch (e) {
   const msg = e instanceof Error ? e.message : String(e);
   if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
@@ -860,10 +885,16 @@ guardedInterval("sweepInactivePeers", sweepInactivePeers, SWEEP_INTERVAL_SEC * 1
 // RELEASES (locked -> 0, in_progress -> planned), it never claims a card, so
 // it cannot violate the "inactive card can't become in_progress/locked" rule.
 function releaseStaleLocks(): void {
+  // Card aaf4537d: `lock_parked_at`/`lock_parked_by` are nulled
+  // unconditionally by every clause below -- harmless on clauses 1/2 (they
+  // only ever match a row where `lock_parked_at IS NULL` to begin with, see
+  // their prefix) and required on clause 3 (the sweep that actually clears
+  // an expired park). One SET list shared by all three keeps that in sync.
   const release = (where: string, params: string[]): void => {
     db.run(
       `UPDATE roadmap_items SET
          locked = 0, locked_by = NULL, locked_at = NULL, operator_id = NULL,
+         lock_parked_at = NULL, lock_parked_by = NULL,
          status = CASE WHEN status = 'in_progress' THEN 'planned' ELSE status END,
          updated_by = 'lock-sweep', updated_at = datetime('now')
        WHERE locked = 1 AND ${where}`,
@@ -872,7 +903,14 @@ function releaseStaleLocks(): void {
   };
   // TTL: no write at all on the item for LOCK_TTL_SEC (any roadmap_update,
   // e.g. a context enrichment by the working agent, refreshes updated_at).
-  release(`datetime(updated_at) < datetime('now', ?)`, [`-${LOCK_TTL_SEC} seconds`]);
+  // Card aaf4537d: prefixed with the park-immunity guard -- a PARKED card
+  // (Pause stop) is exempt from this ordinary staleness timeout; clause 3
+  // below is the only clause that may release it, and only once the park
+  // itself expires (LOCK_PARK_TTL_SEC), or the park would defeat the sweep
+  // that a paused agent's owner-gone silence would otherwise trigger.
+  release(`lock_parked_at IS NULL AND datetime(updated_at) < datetime('now', ?)`, [
+    `-${LOCK_TTL_SEC} seconds`,
+  ]);
   // Owner gone: no ACTIVE peer carries the lock owner's peer_id for this
   // project. The grace period keeps a reconnecting session (server.ts restart,
   // brief network drop) from being stripped of its lock mid-flight.
@@ -883,8 +921,11 @@ function releaseStaleLocks(): void {
   // SQLite's NULL-safe equality (column-to-column too): `NULL IS NULL` is
   // true, unlike `=` where `NULL = NULL` is NULL/false, which would have
   // stripped a project-less peer of even its own project-less locks.
+  // Card aaf4537d: same park-immunity prefix as clause 1 -- a paused agent's
+  // peer legitimately going inactive (or its session exiting) must not
+  // strip a park the operator deliberately granted.
   release(
-    `datetime(locked_at) < datetime('now', ?)
+    `lock_parked_at IS NULL AND datetime(locked_at) < datetime('now', ?)
      AND NOT EXISTS (
        SELECT 1 FROM peers p
        WHERE p.peer_id = roadmap_items.locked_by
@@ -893,6 +934,15 @@ function releaseStaleLocks(): void {
      )`,
     [`-${LOCK_GRACE_SEC} seconds`]
   );
+  // Card aaf4537d, clause 3 (team-lead correction, 2026-08-12): the park
+  // itself expires -- a card parked more than LOCK_PARK_TTL_SEC ago is swept
+  // like any other stale lock, even if its `updated_at` was refreshed by a
+  // permitted ordinary edit in the meantime and its owner peer is still
+  // alive (neither clause 1 nor clause 2 above would ever catch that row on
+  // their own; this is the exact hole the arbitration exists to close).
+  release(`lock_parked_at IS NOT NULL AND datetime(lock_parked_at) < datetime('now', ?)`, [
+    `-${LOCK_PARK_TTL_SEC} seconds`,
+  ]);
 }
 guardedInterval("releaseStaleLocks", releaseStaleLocks, LOCK_SWEEP_SEC * 1000);
 
@@ -2539,10 +2589,17 @@ function handleRoadmapUpsert(
     // consumes that SAME object rather than resolving the lock a second time
     // (the two-readings-of-the-body drift is exactly what produced card
     // e7b364dc's original bug). A same-owner re-claim keeps locked_at.
-    const keptLockedAt =
-      resolvedLock.locked && existing.locked && existing.locked_by === resolvedLock.lockedBy
-        ? existing.locked_at
-        : null;
+    const isSameOwnerReclaim =
+      resolvedLock.locked && existing.locked && existing.locked_by === resolvedLock.lockedBy;
+    const keptLockedAt = isSameOwnerReclaim ? existing.locked_at : null;
+    // Card aaf4537d: the park survives an ordinary edit made while the SAME
+    // owner still holds the lock (the exact case releaseStaleLocks's clause 1
+    // prefix already protects -- a context enrichment refreshing updated_at
+    // must not silently un-park the card). Any write that actually changes
+    // who holds the lock, or drops it, clears the park: a park is scoped to
+    // one specific owner's one specific claim, not to the card in general.
+    const keptParkedAt = isSameOwnerReclaim ? existing.lock_parked_at : null;
+    const keptParkedBy = isSameOwnerReclaim ? existing.lock_parked_by : null;
 
     // A status change away from 'archived' restores the item (clears the soft
     // delete); archiving through upsert stamps it like /roadmap/archive does.
@@ -2561,6 +2618,7 @@ function handleRoadmapUpsert(
          locked_at = CASE WHEN ? = 0 THEN NULL ELSE COALESCE(?, datetime('now')) END,
          operator_id = COALESCE(?, operator_id),
          inactive = ?,
+         lock_parked_at = ?, lock_parked_by = ?,
          updated_by = ?, updated_at = datetime('now'),
          deleted_at = CASE
            WHEN ? = 'archived' THEN COALESCE(deleted_at, datetime('now'))
@@ -2588,6 +2646,8 @@ function handleRoadmapUpsert(
         keptLockedAt,
         author.operator_id ?? null,
         next.inactive ? 1 : 0,
+        keptParkedAt,
+        keptParkedBy,
         next.updated_by,
         next.status,
         body.id,
@@ -2652,9 +2712,9 @@ function handleRoadmapUpsert(
        (id, project_key, kind, title, description, rationale, context, priority, value,
         effort, status, tags, depends_on, created_by, updated_by,
         created_at, updated_at, deleted_at, queue, directive, target_peer_ids, locked, locked_by, locked_at,
-        operator_id, inactive)
+        operator_id, inactive, lock_parked_at, lock_parked_by)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?, ?, ?, ?, ?,
-             CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?, ?)`,
+             CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?, ?, NULL, NULL)`,
     [
       id,
       projectKey,
@@ -2706,12 +2766,33 @@ function handleRoadmapArchive(
     };
   }
 
+  // Card aaf4537d: a parked card is the pause-stop operator's own decision --
+  // refuse an archive coming from anyone else (or from an unproven write)
+  // while the park is still live. See refusesParkedArchive's doc comment in
+  // shared/roadmap-lock.ts for why this compares author.operator_id, never
+  // `by`.
+  if (
+    refusesParkedArchive(
+      existing.lock_parked_by,
+      existing.lock_parked_at,
+      new Date().toISOString(),
+      LOCK_PARK_TTL_SEC,
+      author.operator_id
+    )
+  ) {
+    return {
+      error: `item is parked by '${existing.lock_parked_by}' -- cannot archive`,
+      status: 409,
+    };
+  }
+
   db.run(
     `UPDATE roadmap_items SET
        status = 'archived',
        deleted_at = COALESCE(deleted_at, datetime('now')),
        locked = 0, locked_by = NULL, locked_at = NULL,
        operator_id = COALESCE(?, operator_id),
+       lock_parked_at = NULL, lock_parked_by = NULL,
        updated_by = ?, updated_at = datetime('now')
      WHERE id = ?`,
     [author.operator_id ?? null, by, body.id]
@@ -3183,6 +3264,22 @@ function handleRoadmapImport(body: {
             ? it.locked_at
             : null
           : (existing?.locked_at ?? null);
+      // Card aaf4537d: same file-wins/existing-wins discipline as the three
+      // lock columns just above (a re-import of a parked card must not
+      // silently unpark it, and a file that WAS built from a parked export
+      // must faithfully restore the park).
+      const lockParkedAtVal =
+        it.lock_parked_at !== undefined
+          ? typeof it.lock_parked_at === "string"
+            ? it.lock_parked_at
+            : null
+          : (existing?.lock_parked_at ?? null);
+      const lockParkedByVal =
+        it.lock_parked_by !== undefined
+          ? typeof it.lock_parked_by === "string"
+            ? it.lock_parked_by.toLowerCase()
+            : null
+          : (existing?.lock_parked_by ?? null);
       // Card c33a5968: inactive follows the SAME file-wins/existing-wins
       // discipline as the ordinary content fields below (state restoration is
       // a legitimate reason for a file to carry inactive, UNLIKE operator_id
@@ -3296,6 +3393,8 @@ function handleRoadmapImport(body: {
         // existing row's value survives unchanged.
         operator_id: author.operator_id ?? existing?.operator_id ?? null,
         inactive: nextInactiveVal ? 1 : 0,
+        lock_parked_at: lockParkedAtVal,
+        lock_parked_by: lockParkedByVal,
       };
       insert.run(...ROADMAP_IMPORT_COLUMNS.map((column) => values[column]));
       imported++;

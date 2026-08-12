@@ -103,3 +103,49 @@ export function refusesInactiveToggle(
 ): boolean {
   return storedInactive !== nextInactive && !hasOperatorProof;
 }
+
+/**
+ * Card aaf4537d (lots 1+2): a PARKED card (Pause stop) is immune to
+ * releaseStaleLocks's ordinary TTL/owner-gone sweep -- but only for
+ * `ttlSec` (LOCK_PARK_TTL_SEC), never forever. `parkedAt === null` means
+ * unparked (false). A parked-but-EXPIRED row also reads as unparked here,
+ * deliberately: the team-lead's arbitration for this card is that the park
+ * itself must carry an expiration inside the shared prefix, or an operator's
+ * 24h decision exists nowhere and the park becomes eternal. broker.ts's
+ * releaseStaleLocks clause 3 is what actually SWEEPS an expired park (clears
+ * the lock and both park columns); this predicate is what every OTHER guard
+ * (refusesParkedArchive below, any future TS-side "is this card parked"
+ * check) must agree with on the exact same threshold, so the SQL sweep and
+ * the TS guards cannot silently drift onto different cutoffs.
+ */
+export function isParked(parkedAt: string | null, nowIso: string, ttlSec: number): boolean {
+  if (parkedAt === null) return false;
+  const parkedMs = Date.parse(parkedAt);
+  const nowMs = Date.parse(nowIso);
+  if (Number.isNaN(parkedMs) || Number.isNaN(nowMs)) return false;
+  return nowMs - parkedMs < ttlSec * 1000;
+}
+
+/**
+ * Card aaf4537d, DELTA form (team-lead correction, 2026-08-12): a card
+ * parked by one operator must not be archived out from under them by a
+ * different write -- but the SAME operator who parked it may still archive
+ * it (the park is their own decision to reverse, not a lock on themselves).
+ * Keyed on `actorOperatorId` (resolveRoadmapAuthor's cryptographically-
+ * resolved `operator_id`), NEVER on the free-text `by` field: on a shared
+ * broker two different operators can each sign a write with `by='deck'`,
+ * so comparing `by` would let operator B silently archive a card operator A
+ * just parked. `actorOperatorId === undefined` (an ordinary agent write, no
+ * operator signature at all) always refuses while the card is parked --
+ * `undefined !== parkedBy` holds for every real `parkedBy` string, so this
+ * is fail-closed by construction, not by an extra null check.
+ */
+export function refusesParkedArchive(
+  parkedBy: string | null,
+  parkedAt: string | null,
+  nowIso: string,
+  ttlSec: number,
+  actorOperatorId: string | undefined
+): boolean {
+  return isParked(parkedAt, nowIso, ttlSec) && actorOperatorId !== parkedBy;
+}

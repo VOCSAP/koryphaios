@@ -460,6 +460,128 @@ test("owner-gone sweep releases after grace, but an active owner keeps the lock"
   }
 }, 20_000);
 
+// ----- park (card aaf4537d, lots 1+2) -----
+
+// releaseStaleLocks has no route to PARK a card yet (lock-park/lock-release
+// HTTP routes are lot 3, out of scope for this cell) -- these tests set
+// lock_parked_at/lock_parked_by directly via sqlite, same discipline the TTL
+// and owner-gone tests above already use to backdate updated_at/locked_at.
+test("park TTL sweep (clause 3): releases an EXPIRED park (T-(ttl+1s)) but leaves one still within TTL (T-(ttl-1s)) alone", async () => {
+  const b = await startBroker({
+    CLAUDE_PEERS_LOCK_TTL_SEC: "3600",
+    CLAUDE_PEERS_LOCK_GRACE_SEC: "3600",
+    CLAUDE_PEERS_LOCK_PARK_TTL_SEC: "4",
+    CLAUDE_PEERS_LOCK_SWEEP_SEC: "1",
+  });
+  try {
+    const inside = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK, by: "agent-park-inside", title: "parked, still fresh", status: "in_progress",
+    });
+    const outside = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK, by: "agent-park-outside", title: "parked, expired", status: "in_progress",
+    });
+    expect(inside.body.item.locked).toBe(true);
+    expect(outside.body.item.locked).toBe(true);
+
+    const db = new Database(b.dbPath);
+    // T-(ttl-1s): parked 3s ago against a 4s TTL -- 1s still remains, must
+    // stay parked/locked.
+    db.run(
+      "UPDATE roadmap_items SET lock_parked_at = datetime('now', '-3 seconds'), lock_parked_by = 'operator-x' WHERE id = ?",
+      [inside.body.item.id]
+    );
+    // T-(ttl+1s): parked 5s ago against the same 4s TTL -- 1s past expiry,
+    // clause 3 must release it.
+    db.run(
+      "UPDATE roadmap_items SET lock_parked_at = datetime('now', '-5 seconds'), lock_parked_by = 'operator-x' WHERE id = ?",
+      [outside.body.item.id]
+    );
+    db.close();
+
+    const outsideAfter = await pollUntil(12_000, 300, async () => {
+      const after = await post<{ items: RoadmapItem[] }>(`${b.url}/roadmap/list`, {
+        project_key: PK,
+      });
+      const insideItem = after.body.items.find((i) => i.id === inside.body.item.id)!;
+      const outsideItem = after.body.items.find((i) => i.id === outside.body.item.id)!;
+      // The still-within-TTL park must never be swept while we wait for the
+      // expired one's release -- assert every iteration (same discipline as
+      // the owner-gone "active owner keeps the lock" test above).
+      expect(insideItem.locked).toBe(true);
+      expect(insideItem.lock_parked_at).toBeTruthy();
+      return { done: outsideItem.locked === false, value: outsideItem };
+    });
+    expect(outsideAfter.status).toBe("planned");
+    expect(outsideAfter.lock_parked_at).toBeNull();
+    expect(outsideAfter.lock_parked_by).toBeNull();
+    expect(outsideAfter.updated_by).toBe("lock-sweep");
+  } finally {
+    await stopBroker(b);
+  }
+}, 20_000);
+
+test("park immunity: clauses 1/2 (TTL, owner-gone) do not release a parked card even when otherwise stale, until the park itself expires", async () => {
+  const b = await startBroker({
+    CLAUDE_PEERS_LOCK_TTL_SEC: "1",
+    CLAUDE_PEERS_LOCK_GRACE_SEC: "1",
+    CLAUDE_PEERS_LOCK_PARK_TTL_SEC: "4",
+    CLAUDE_PEERS_LOCK_SWEEP_SEC: "1",
+  });
+  try {
+    // ghost-peer names no registered peer row, so clause 2's owner-gone
+    // condition is met from the very first sweep tick.
+    const item = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK, by: "ghost-peer", title: "parked and stale", status: "in_progress",
+    });
+    expect(item.body.item.locked).toBe(true);
+
+    const db = new Database(b.dbPath);
+    // Both updated_at and locked_at pushed well past LOCK_TTL_SEC/
+    // LOCK_GRACE_SEC=1s -- clauses 1 and 2 would release this on the very
+    // next tick if the park-immunity prefix were not there.
+    db.run(
+      `UPDATE roadmap_items SET
+         updated_at = datetime('now', '-60 seconds'),
+         locked_at = datetime('now', '-60 seconds'),
+         lock_parked_at = datetime('now'), lock_parked_by = 'operator-x'
+       WHERE id = ?`,
+      [item.body.item.id]
+    );
+    db.close();
+
+    // Poll a window comfortably inside the 4s park TTL and comfortably past
+    // several 1s sweep ticks -- if the immunity prefix were missing, clause 1
+    // or 2 would have released this already.
+    await Bun.sleep(2_500);
+    const stillParked = await post<{ items: RoadmapItem[] }>(`${b.url}/roadmap/list`, {
+      project_key: PK,
+    });
+    const found = stillParked.body.items.find((i) => i.id === item.body.item.id)!;
+    expect(found.locked).toBe(true);
+    expect(found.lock_parked_at).toBeTruthy();
+
+    // Now expire the park itself and confirm clause 3 (the ONLY clause that
+    // may release a parked row) takes over.
+    const db2 = new Database(b.dbPath);
+    db2.run("UPDATE roadmap_items SET lock_parked_at = datetime('now', '-5 seconds') WHERE id = ?", [
+      item.body.item.id,
+    ]);
+    db2.close();
+
+    const released = await pollUntil(12_000, 300, async () => {
+      const after = await post<{ items: RoadmapItem[] }>(`${b.url}/roadmap/list`, {
+        project_key: PK,
+      });
+      const found2 = after.body.items.find((i) => i.id === item.body.item.id)!;
+      return { done: found2.locked === false, value: found2 };
+    });
+    expect(released.status).toBe("planned");
+    expect(released.lock_parked_at).toBeNull();
+  } finally {
+    await stopBroker(b);
+  }
+}, 20_000);
+
 test("owner-gone sweep releases a NULL-project_key peer's lock on a DIFFERENT project's card, even while that peer stays active", async () => {
   // Card fc444eda (operator ruling, 2026-08-11): the owner-gone liveness
   // check is scoped on project_key alone, and a NULL project_key is a value
