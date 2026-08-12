@@ -945,10 +945,27 @@ const selectUndelivered = db.prepare(
 // The sent_at > datetime('now', ?) filter is a coarse time WINDOW (like the TTL
 // purge below), not a same-millisecond comparison, so it stays on sent_at --
 // only the ORDER BY clauses gain the id tiebreaker, same reasoning as above.
+//
+// Card 1d9f25e5: takes group_id, unlike selectUndelivered above. Both queries
+// answer the same "pending messages for a to_token" question handleOperatorInbox
+// answers too, and that handler filters `m.group_id = ?` -- this one did not,
+// which is the defect this card fixes. Today the gap is inert (to_token
+// references peers.instance_token, which IS the PRIMARY KEY there, and
+// ordinary tokens are randomUUID(), so no ordinary token is ever shared
+// across two groups; the only shared to_token values are
+// the sentinel constants, and card 78bf378d already refuses a sentinel-shaped
+// token at the ws-auth handshake before flushPendingForToken ever runs) -- but
+// that is a precondition of DB state and WS-auth code elsewhere, not a rule
+// this query itself enforces, so it stays a defense-in-depth fix rather than a
+// "leave it, it's unreachable" no-op. selectUndelivered above is NOT given the
+// same treatment: its two callers (handlePollMessages, handlePeekMessages)
+// already refuse a sentinel-shaped instance_token by shape (card 37a2b8c7)
+// before the query runs, which closes the same gap the same way, so adding an
+// unused parameter there would be scope creep with nothing left to guard.
 const selectUndeliveredCapped = db.prepare(
   `SELECT * FROM (
      SELECT * FROM messages
-     WHERE to_token = ? AND delivered = 0
+     WHERE to_token = ? AND group_id = ? AND delivered = 0
        AND sent_at > datetime('now', ?)
      ORDER BY sent_at DESC, id DESC
      LIMIT ?
@@ -1559,14 +1576,26 @@ function handleAnnounce(body: AnnounceRequest): AnnounceResponse | { error: stri
   return { sent };
 }
 
-function flushPendingForToken(token: InstanceToken): void {
+// Card 1d9f25e5: group_id comes from the CALLER, not from a lookup here.
+// The single caller (ws-auth handshake, ~line 4715) already reads it off the
+// same peers row it just used to confirm `status = 'active'`, one query
+// earlier -- passing it through makes "this token's group is known" a
+// STRUCTURAL guarantee (one read, no second query that could diverge or need
+// its own early-return branch), not a comment asserting an execution-order
+// fact about a second, separate lookup.
+function flushPendingForToken(token: InstanceToken, group_id: string): void {
   const ws = wsPool.get(token);
   if (!ws || ws.readyState !== 1) return;
   type MessageRow = Omit<Message, "delivered"> & { delivered: number };
   // Capped replay: only the last FLUSH_MAX_COUNT messages within FLUSH_MAX_AGE_HOURS.
   // Beyond that, the LLM can still pull the full backlog via check_messages.
   const cutoff = `-${FLUSH_MAX_AGE_HOURS} hours`;
-  const rows = selectUndeliveredCapped.all(token, cutoff, FLUSH_MAX_COUNT) as MessageRow[];
+  const rows = selectUndeliveredCapped.all(
+    token,
+    group_id,
+    cutoff,
+    FLUSH_MAX_COUNT
+  ) as MessageRow[];
   for (const row of rows) {
     const sender = db.query(
       "SELECT peer_id, summary, host, cwd FROM peers WHERE instance_token = ?"
@@ -4659,11 +4688,13 @@ const server = Bun.serve<WsData>({
       // Card 78bf378d: this handshake used to trust frame.instance_token with
       // only a DB existence+status='active' check -- the only thing standing
       // between a sentinel-shaped token and wsPool.set()/flushPendingForToken
-      // (whose selectUndeliveredCapped has no group_id filter, so an
-      // authenticated __operator__ socket would drain every group's operator
-      // inbox at once) was the sentinel rows being seeded permanently
-      // 'dormant', an accident of DB state, not a rule. Reuse the SAME
-      // predicate+trace the 14 HTTP routes already apply
+      // (whose selectUndeliveredCapped had no group_id filter at the time, so
+      // an authenticated __operator__ socket would drain every group's
+      // operator inbox at once -- selectUndeliveredCapped itself gained that
+      // filter under card 1d9f25e5, as defense in depth, so this shape guard
+      // is no longer the ONLY thing standing between them) was the sentinel
+      // rows being seeded permanently 'dormant', an accident of DB state, not
+      // a rule. Reuse the SAME predicate+trace the 14 HTTP routes already apply
       // (refuseSentinelInstanceToken), rather than a parallel WS-specific
       // guard. Client-visible outcome is IDENTICAL to the unknown-token
       // branch below (same close code, same reason, no differentiation) --
@@ -4679,8 +4710,8 @@ const server = Bun.serve<WsData>({
         return;
       }
       const ok = db.query(
-        "SELECT 1 FROM peers WHERE instance_token = ? AND status = 'active'"
-      ).get(frame.instance_token);
+        "SELECT group_id FROM peers WHERE instance_token = ? AND status = 'active'"
+      ).get(frame.instance_token) as { group_id: string } | null;
       if (!ok) {
         log.warn(`ws-auth: closed for an unknown or inactive instance_token`, {
           instance_token: frame.instance_token.slice(0, 64),
@@ -4690,7 +4721,7 @@ const server = Bun.serve<WsData>({
       }
       ws.data.instance_token = frame.instance_token;
       wsPool.set(frame.instance_token, ws);
-      flushPendingForToken(frame.instance_token);
+      flushPendingForToken(frame.instance_token, ok.group_id);
     },
     close(ws) {
       const token = ws.data.instance_token;

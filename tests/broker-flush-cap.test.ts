@@ -1,6 +1,6 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, groupId, sha256Hex, type TestBroker } from "./_helper.ts";
 
 let broker: TestBroker;
 
@@ -36,6 +36,14 @@ function insertMessageAt(from_token: string, to_token: string, text: string, sen
   } finally {
     db.close();
   }
+}
+
+async function registerInGroup(group_id: string, secret: string, host: string, cwd: string) {
+  const group_secret_hash = await sha256Hex(secret);
+  return post<{ peer_id: string; instance_token: string }>(`${broker.url}/register`, {
+    pid: livePid(), cwd, git_root: null, tty: null, summary: "", host, client_pid: 1,
+    project_key: null, group_id, group_secret_hash,
+  });
 }
 
 async function openAuthedWs(token: string): Promise<{ ws: WebSocket; messages: any[] }> {
@@ -135,6 +143,55 @@ test("/peek-messages also returns the full backlog without marking delivered", a
     const rows = db.query("SELECT delivered FROM messages WHERE to_token = ?").all(y.body.instance_token) as { delivered: number }[];
     expect(rows.length).toBe(7);
     expect(rows.every((r) => r.delivered === 0)).toBe(true);
+  } finally {
+    db.close();
+  }
+});
+
+// ----- Card 1d9f25e5: selectUndeliveredCapped / flushPendingForToken cross-group isolation -----
+//
+// x lives in group A, y and z live in group B. A cross-group message x->y is
+// built by direct DB insert, not /send-message: the real send route resolves
+// an ordinary to_peer_id scoped to the SENDER's own group_id ("Peer '...' not
+// found in your group" otherwise), so it can never itself produce a
+// cross-group-addressed row for an ordinary token. The row this cell
+// simulates is the SHAPE of the one real shared-to_token surface in the
+// schema: 'operator' routes every group's /send-message to the single
+// OPERATOR_INSTANCE_TOKEN sentinel, tagged with the sender's own group_id, so
+// that one to_token legitimately accumulates rows from every group -- the
+// case selectUndeliveredCapped's group_id filter exists to keep separated
+// once/if a WS ever authenticates as it. z->y is the same-group positive
+// control, proving flush isn't just broken outright.
+test("flush WS withholds a cross-group message and still delivers a same-group one (selectUndeliveredCapped group_id filter)", async () => {
+  const seed = crypto.randomUUID();
+  const groupA = await groupId(`${seed}-A`);
+  const groupB = await groupId(`${seed}-B`);
+  const x = await registerInGroup(groupA, `${seed}-A`, "hcap4x", "/cap4x");
+  const y = await registerInGroup(groupB, `${seed}-B`, "hcap4y", "/cap4y");
+  const z = await registerInGroup(groupB, `${seed}-B`, "hcap4z", "/cap4z");
+
+  const now = Date.now();
+  insertMessageAt(x.body.instance_token, y.body.instance_token, "CROSS-GROUP", new Date(now).toISOString());
+  insertMessageAt(z.body.instance_token, y.body.instance_token, "SAME-GROUP", new Date(now).toISOString());
+
+  const { ws, messages } = await openAuthedWs(y.body.instance_token);
+  for (let i = 0; i < 30 && messages.length < 1; i++) await Bun.sleep(50);
+  await Bun.sleep(150); // extra guard against late frames
+
+  const texts = messages.map((m) => m.text as string);
+  expect(texts).toContain("SAME-GROUP");
+  expect(texts).not.toContain("CROSS-GROUP");
+  ws.close();
+
+  // The withheld row must still exist, undelivered -- proof it was correctly
+  // scoped out, not silently dropped/deleted.
+  const db = new Database(broker.dbPath, { readonly: true });
+  try {
+    const row = db
+      .query("SELECT delivered FROM messages WHERE to_token = ? AND text = ?")
+      .get(y.body.instance_token, "CROSS-GROUP") as { delivered: number } | null;
+    expect(row).not.toBeNull();
+    expect(row!.delivered).toBe(0);
   } finally {
     db.close();
   }
