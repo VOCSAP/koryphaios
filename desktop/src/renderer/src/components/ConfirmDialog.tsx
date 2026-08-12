@@ -27,11 +27,12 @@ export function ConfirmDialog({
         <h2>{title}</h2>
         <p className="confirm-msg">{message}</p>
         <div className="modal-actions">
-          <button onClick={onCancel}>{t('common.cancel')}</button>
+          <button onClick={onCancel} autoFocus>
+            {t('common.cancel')}
+          </button>
           <button
             className={tone === 'neutral' ? 'primary' : 'primary danger'}
             onClick={onConfirm}
-            autoFocus
           >
             {confirmLabel ?? t('common.delete')}
           </button>
