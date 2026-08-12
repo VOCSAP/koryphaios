@@ -1,5 +1,104 @@
 # Changelog
 
+## core + desktop (experimental) -- la vague 1 du backlog, le verrou de carte et l'identite de l'operateur, integralement livree
+
+Douze commits sur deux journees, 2026-08-11 et 2026-08-12 : `664081a`,
+`0ff6e8d`, `b07199f` (trois regressions desktop, aucune cartee), `1e5cd1f`
+(carte `e7b364dc`), `f32a86d` (documentation du design system), `26d0cf5`
+(carte `6aa32af4`), `d838333` (carte `fc444eda`), `681cc03` (carte `438c15e3`),
+`626974d` (carte `c8ee5732`), `d75fcf8` (carte `78bf378d`), `5ba88d3` (carte
+`edefff05`), `a79d30b` (carte `1d9f25e5`).
+Cartes closes : `e7b364dc`, `6aa32af4`, `fc444eda`, `438c15e3`, `c8ee5732`,
+`78bf378d`, `edefff05`, `1d9f25e5`. Cartes ouvertes par ces deux journees :
+`7dde9434`, `c787fd07`, `6aef4c54`, `b2fdb93f`, `c374c332`, `89e313bc`,
+`0955abf9`, `ba58fb12`, `40a1cea9`, `9722ea04`, `f44b5227`, `a583c908`,
+`7fabbd10`.
+
+**La vague 1 est close et le chemin critique est debloque (card `edefff05`).**
+La garde de signature livree precedemment authentifiait QU'UN operateur
+signe, jamais LEQUEL : `resolveRoadmapAuthor` verifiait `auth.operator_id`
+puis le jetait, et la ligne n'enregistrait que `updated_by = 'deck'`. Trois
+cartes du chantier workflow (`011d3547`, `c33a5968`, `aaf4537d`) attendaient
+de savoir LEQUEL ; les construire sur l'etat precedent aurait ete les
+construire sur une identite absente de la ligne. La colonne
+`roadmap_items.operator_id` existe desormais, TEXT nullable. Consequence a
+retenir : la vague 3 n'est plus bloquee.
+
+**La semantique est arbitree, parce qu'elle contraint les cartes suivantes.**
+La colonne enregistre le DERNIER OPERATEUR AYANT SIGNE UNE ECRITURE, ce
+n'est PAS une revendication de propriete : la propriete reste `locked_by` et
+`locked_at`. Corollaire ecrit pour la suite : la carte des lots (`011d3547`)
+devra stocker la reservation sur le LOT et non sur la carte. Une ecriture
+d'agent ordinaire PRESERVE la valeur via `COALESCE(?, operator_id)` ; le
+balayage de verrou perime l'efface, comme il efface deja `locked_by`, parce
+qu'un balayage TTL n'est signe par personne. Et `handleRoadmapReorder`
+N'ESTAMPILLE PAS, exclusion desormais ecrite dans le code : ses trois UPDATE
+portent sur N lignes d'un coup, donc estampiller ferait porter a des
+dizaines de cartes jamais ouvertes la marque du dernier signataire, et une
+attribution que tout le monde porte n'attribue plus rien.
+
+**Le resultat de methode du batch vaut plus que le code : le faux-vert
+`COALESCE`.** Sur un `UPDATE ... SET col = COALESCE(?, col)`, une cellule de
+test qui verifie seulement la PRESERVATION par une ecriture qui ne fournit
+pas la valeur reste VERTE meme si la colonne n'est jamais ecrite,
+`COALESCE(NULL, x) = x` etant indistinguable de "ne rien ecrire". Mesure :
+deux chemins couverts par une telle cellule rendaient zero echec au retrait
+de la production. Seule une cellule qui STAMPE sur une ligne VIERGE mord.
+C'est en generalisant cette forme que la revue a trouve le trou de
+`handleRoadmapReorder`, qu'aucun diff ne montrait.
+
+**La lecon jumelle du 2026-08-11**, deja dans les corps de commit mais a
+redire ici : garder sur l'EFFET d'une ecriture trouve ce que garder sur ses
+CHAMPS ne peut pas trouver. Le vrai defaut de la carte `e7b364dc` a ete
+trouve par une enumeration exhaustive du produit croise du predicat, 540
+cellules, ancienne forme contre nouvelle, resultat `regressions=0
+widened=4`. Les quatre cellules refermees etaient une ecriture
+d'enrichissement de contexte par un tiers, sans `status` ni `locked` dans le
+corps, qui effacait le verrou en ecrivant un champ sans rapport. Septieme
+chemin de liberation.
+
+**Trois fonctions pures extraites, meme patron.** `shared/roadmap-lock.ts`
+(`e7b364dc`), `shared/project-key.ts` (`6aa32af4`), et `ownsLock()` cote Deck
+(`438c15e3`). La raison structurelle est la meme a chaque fois et merite
+d'etre dite une fois : `broker.ts` n'est pas importable en test, il n'exporte
+rien et lance `Bun.serve` au niveau module, donc toute logique qu'on veut
+prouver unitairement doit sortir en module pur.
+
+**`438c15e3`, annoncee basse gravite, a coute sept rondes**, et la lecon est
+que la profondeur d'une carte est proportionnelle au risque que son
+CORRECTIF introduit, pas au defaut d'origine. Le geste decisif : `own()`
+etait la porte apparente mais `ensureCurrent()` la court-circuitait, `own()`
+n'etant jamais atteint quand `currentId` est deja pose ; le remede prescrit
+par la revue sur `own()` seul n'aurait donc rien ferme.
+
+**`1d9f25e5` et la forme du correctif.** `selectUndeliveredCapped` filtrait
+sur `to_token` seul. Plutot que de relire la ligne `peers` et de tracer une
+branche "introuvable", le handshake, qui faisait DEJA cette lecture pour
+verifier `status = 'active'`, rend desormais `group_id` et le passe : une
+seule lecture, plus de branche morte, et une garantie portee par la
+signature a deux arguments au lieu d'un commentaire affirmant l'ordre
+d'execution.
+
+**Le volet desktop du 2026-08-12 (card `c8ee5732`).** Entree de menu de
+portee LISTE qui copie le tableau `peer_id = role` de tous les agents, la ou
+l'operateur retapait onze lignes a chaque deploiement de template et ou une
+transcription fautive cassait le routage de `send_message` en silence.
+
+**Un fait d'environnement a inscrire, parce qu'il reapparaitra a chaque
+gate** (card `ba58fb12`). `tests/desktop-commit-closure-check.test.ts` echoue
+sur les postes portant un `core.hooksPath` global. Ce n'est pas git qui
+refuse le commit, c'est bun qui TUE le process git au timeout de hook de
+5000 ms pendant le `beforeEach`, le hook global (scan gitleaks) faisant
+passer le build du fixture de 1,632 s a 9,472 s. `spawnSync` rend alors
+`status != 0` avec stdout et stderr VIDES, et le message accuse un commit
+innocent qui varie d'un run a l'autre. Neutralise, le fichier rend 57 pass.
+
+Gate passe deux fois le 2026-08-11 (1605 puis 1617 pass / 2 skip / 0 fail sur
+138 fichiers), une fois a la sequence de fin de journee (1649 pass / 2 skip /
+0 fail sur 142 fichiers), et le 2026-08-12 **1686 pass / 2 skip / 0 fail sur
+146 fichiers**, smoke build propre, typecheck desktop vert sur les deux
+tsconfig, `check-commit-closure` vert.
+
 ## core + desktop (experimental) — filtrage et recherche de la roadmap, et trois regressions desktop closes au passage
 
 Six commits : `872d951`, `5d50c86`, `eb0b62a`, `cef321e`, `fdf53ca`, `bcfb463`.
