@@ -911,9 +911,18 @@ function releaseStaleLocks(): void {
   release(`lock_parked_at IS NULL AND datetime(updated_at) < datetime('now', ?)`, [
     `-${LOCK_TTL_SEC} seconds`,
   ]);
-  // Owner gone: no ACTIVE peer carries the lock owner's peer_id for this
-  // project. The grace period keeps a reconnecting session (server.ts restart,
-  // brief network drop) from being stripped of its lock mid-flight.
+  // Owner gone: no peer for this locked_by/project_key has been seen (an
+  // active row, OR a dormant row whose `peers.last_seen` is still within
+  // LOCK_GRACE_SEC) for this project. Card 399aa31a (team-lead arbitration,
+  // 2026-08-12): grace is anchored on `peers.last_seen` -- the owner's last
+  // real heartbeat/activity -- not on `locked_at` (when the lock was TAKEN).
+  // The old anchor gave zero effective grace to any lock held longer than
+  // LOCK_GRACE_SEC (the common case): the instant the owner's row left
+  // 'active', the very next sweep stripped it. `sweepInactivePeers` only
+  // ever rewrites `status`, never `last_seen`, so this anchor can only ever
+  // ADD grace versus wall-clock disconnect time (bounded by
+  // ACTIVE_STALE_SEC + the sweep's own cadence), never subtract it -- the
+  // safe failure direction for a mechanism that strips work from an agent.
   // Operator ruling (Card fc444eda, 2026-08-11): project_key alone scopes
   // liveness (group_id stays out by design, decision of e7b364dc), and a
   // NULL project_key is a value in its own right, not a wildcard -- a
@@ -925,12 +934,12 @@ function releaseStaleLocks(): void {
   // peer legitimately going inactive (or its session exiting) must not
   // strip a park the operator deliberately granted.
   release(
-    `lock_parked_at IS NULL AND datetime(locked_at) < datetime('now', ?)
+    `lock_parked_at IS NULL
      AND NOT EXISTS (
        SELECT 1 FROM peers p
        WHERE p.peer_id = roadmap_items.locked_by
-         AND p.status = 'active'
          AND p.project_key IS roadmap_items.project_key
+         AND (p.status = 'active' OR datetime(p.last_seen) >= datetime('now', ?))
      )`,
     [`-${LOCK_GRACE_SEC} seconds`]
   );
