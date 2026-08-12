@@ -35,7 +35,11 @@ import type {
 } from "./notify/types.ts";
 import { validateDraftPayload } from "./shared/graph-draft.ts";
 import { planRoadmapAppendText, ROADMAP_APPEND_RESULT_MAX_CHARS } from "./shared/roadmap-append.ts";
-import { resolveRoadmapLock } from "./shared/roadmap-lock.ts";
+import {
+  resolveRoadmapLock,
+  refusesInactiveClaim,
+  refusesInactiveToggle,
+} from "./shared/roadmap-lock.ts";
 import {
   APPROVAL_ANSWER_KINDS,
   APPROVAL_VIAS,
@@ -496,6 +500,15 @@ try {
   if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
 }
 
+// Migration (card c33a5968): operator-only "inactive" flag, see
+// RoadmapItem.inactive in shared/types.ts for the full write-path contract.
+try {
+  db.run("ALTER TABLE roadmap_items ADD COLUMN inactive INTEGER NOT NULL DEFAULT 0");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
+
 db.run(`CREATE INDEX IF NOT EXISTS idx_roadmap_project ON roadmap_items(project_key, status)`);
 
 // Free-text search index (card 15952e09). External-content table: FTS5 owns
@@ -843,6 +856,9 @@ guardedInterval("sweepInactivePeers", sweepInactivePeers, SWEEP_INTERVAL_SEC * 1
 // drops back to 'planned': visibly up for grabs again. `datetime(...)` wraps
 // the stored values because locked_at/updated_at may mix SQLite and ISO-8601
 // formats depending on the writer.
+// Card c33a5968: no inactive guard here, deliberately -- this sweep only
+// RELEASES (locked -> 0, in_progress -> planned), it never claims a card, so
+// it cannot violate the "inactive card can't become in_progress/locked" rule.
 function releaseStaleLocks(): void {
   const release = (where: string, params: string[]): void => {
     db.run(
@@ -1688,7 +1704,7 @@ const ROADMAP_STATUSES: readonly RoadmapStatus[] = [
 
 type RoadmapRow = Omit<
   RoadmapItem,
-  "tags" | "depends_on" | "locked" | "target_peer_ids" | "operator_id"
+  "tags" | "depends_on" | "locked" | "target_peer_ids" | "operator_id" | "inactive"
 > & {
   tags: string;
   depends_on: string;
@@ -1697,6 +1713,7 @@ type RoadmapRow = Omit<
   // NULLable column (no DEFAULT), unlike RoadmapItem.operator_id?: string --
   // bun:sqlite hands back NULL as null, not undefined.
   operator_id: string | null;
+  inactive: number;
 };
 
 function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
@@ -1720,6 +1737,7 @@ function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
     target_peer_ids: row.target_peer_ids ? parseList(row.target_peer_ids) : [],
     // string|null (SQLite) -> string|undefined (RoadmapItem's optional field).
     operator_id: row.operator_id ?? undefined,
+    inactive: row.inactive === 1,
   };
 }
 
@@ -2380,6 +2398,9 @@ function handleRoadmapUpsert(
   if (body.locked !== undefined && typeof body.locked !== "boolean") {
     return { error: "locked must be a boolean", status: 400 };
   }
+  if (body.inactive !== undefined && typeof body.inactive !== "boolean") {
+    return { error: "inactive must be a boolean", status: 400 };
+  }
 
   if (body.id) {
     // Partial patch: omitted fields keep their value; project_key never moves.
@@ -2392,6 +2413,36 @@ function handleRoadmapUpsert(
     // shape). Pure function: shared/roadmap-lock.ts, no I/O, no Date.now().
     const nextStatus: RoadmapStatus = body.status ?? existing.status;
     const resolvedLock = resolveRoadmapLock(existing, nextStatus, body, by);
+
+    // Inactive guards (card c33a5968), resolved right after the lock so both
+    // read the same `resolvedLock`/`nextStatus` the write below will use.
+    // `existing.inactive`/`existing.status`/`existing.locked` (the STORED,
+    // pre-write values) are deliberately used for the arbitration guard
+    // below, never the `next*` counterparts -- a single request that both
+    // clears `inactive` and claims the card in the same call must still be
+    // refused (see refusesInactiveClaim's doc comment, delta form).
+    const nextInactive = body.inactive !== undefined ? body.inactive : existing.inactive;
+    // `author.operator_id !== undefined` (mirrored at the create/import call
+    // sites below) is deliberately NOT `by === "deck"`: today the two are
+    // equivalent in practice (operator_id is only ever produced by the
+    // reserved-peer-name branch of resolveRoadmapAuthor, and an unsigned
+    // `by: "deck"` is refused 401 upstream, so no test currently
+    // distinguishes them -- confirmed by mutation, 2026-08-12). The
+    // `operator_id` form is the one that stays correct if a future
+    // deck-signed path is ever added that does NOT populate operator_id: the
+    // `by === "deck"` form would silently start accepting an unsigned toggle
+    // that day, with nothing here turning red to say so.
+    if (refusesInactiveToggle(existing.inactive, nextInactive, author.operator_id !== undefined)) {
+      return { error: "toggling inactive requires an operator-signed write", status: 403 };
+    }
+    if (
+      refusesInactiveClaim(existing.inactive, existing.status, existing.locked, nextStatus, resolvedLock.locked)
+    ) {
+      return {
+        error: "item is inactive -- clear inactive before moving it to in_progress",
+        status: 403,
+      };
+    }
 
     // Lock guard (PLAN K2): while an agent holds the work-lock, only the owner
     // or the operator ('deck') may write the item's status or claim the lock
@@ -2480,6 +2531,7 @@ function handleRoadmapUpsert(
       target_peer_ids: nextTargets,
       queue: body.queue !== undefined ? body.queue : existing.queue,
       updated_by: by,
+      inactive: nextInactive,
     };
     if (!next.title) return { error: "title cannot be empty", status: 400 };
 
@@ -2508,6 +2560,7 @@ function handleRoadmapUpsert(
          locked = ?, locked_by = ?,
          locked_at = CASE WHEN ? = 0 THEN NULL ELSE COALESCE(?, datetime('now')) END,
          operator_id = COALESCE(?, operator_id),
+         inactive = ?,
          updated_by = ?, updated_at = datetime('now'),
          deleted_at = CASE
            WHEN ? = 'archived' THEN COALESCE(deleted_at, datetime('now'))
@@ -2534,6 +2587,7 @@ function handleRoadmapUpsert(
         resolvedLock.locked ? 1 : 0,
         keptLockedAt,
         author.operator_id ?? null,
+        next.inactive ? 1 : 0,
         next.updated_by,
         next.status,
         body.id,
@@ -2555,6 +2609,25 @@ function handleRoadmapUpsert(
   const createStatus = body.status ?? "idea";
   const createLocked =
     createStatus === "in_progress" && (body.locked === true || (body.locked !== false && by !== "deck"));
+
+  // Inactive guards (card c33a5968): a row can be BORN locked=1 (above), so it
+  // can equally be born inactive -- reuse the same predicates as the patch
+  // path, with `false` standing in for "no prior stored value" (a virgin
+  // row). `"idea"`/`false` stand in for `existingStatus`/`existingLocked` in
+  // the delta form: any non-in_progress status works as the sentinel, since
+  // a virgin row never had a prior in_progress/locked claim to delta against
+  // -- so the delta collapses to the same absolute check the create path
+  // always needed.
+  const createInactive = body.inactive === true;
+  if (refusesInactiveToggle(false, createInactive, author.operator_id !== undefined)) {
+    return { error: "toggling inactive requires an operator-signed write", status: 403 };
+  }
+  if (refusesInactiveClaim(createInactive, "idea", false, createStatus, createLocked)) {
+    return {
+      error: "item is inactive -- clear inactive before creating it in_progress",
+      status: 403,
+    };
+  }
 
   // Directive coherence (CT1), create path.
   const createKind = body.kind ?? "feature";
@@ -2579,9 +2652,9 @@ function handleRoadmapUpsert(
        (id, project_key, kind, title, description, rationale, context, priority, value,
         effort, status, tags, depends_on, created_by, updated_by,
         created_at, updated_at, deleted_at, queue, directive, target_peer_ids, locked, locked_by, locked_at,
-        operator_id)
+        operator_id, inactive)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?, ?, ?, ?, ?,
-             CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?)`,
+             CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?, ?)`,
     [
       id,
       projectKey,
@@ -2605,11 +2678,16 @@ function handleRoadmapUpsert(
       createLocked ? by : null,
       createLocked ? 1 : 0,
       author.operator_id ?? null,
+      createInactive ? 1 : 0,
     ]
   );
   return { item: getRoadmapItem(id)! };
 }
 
+// Card c33a5968: no inactive guard here, deliberately -- this handler forces
+// status='archived' and clears `locked`, so it structurally never moves a
+// card toward in_progress/locked; archiving an inactive card is a legitimate
+// operation, not a claim.
 function handleRoadmapArchive(
   body: RoadmapArchiveRequest
 ): RoadmapArchiveResponse | { error: string; status: number } {
@@ -2702,6 +2780,9 @@ function handleRoadmapArchive(
  * itself -- the recency information just lives in a different place than
  * the column, not nowhere.
  */
+// Card c33a5968: no inactive guard here, deliberately -- this handler touches
+// only `context` and `operator_id`, never `status`/`locked`, so it cannot
+// claim a card regardless of its `inactive` value.
 function handleRoadmapContextAppend(
   body: RoadmapContextAppendRequest
 ): RoadmapContextAppendResponse | { error: string; status: number } {
@@ -2771,6 +2852,9 @@ const ROADMAP_REORDER_MAX = 500;
  * unqueued. One transaction, so the operator's insert-in-the-middle never
  * interleaves with an agent's writes half-applied.
  */
+// Card c33a5968: no inactive guard here, deliberately -- this handler writes
+// `queue`/`updated_by`/`updated_at`, never `status`/`locked`, so it cannot
+// claim a card either.
 function handleRoadmapReorder(
   body: RoadmapReorderRequest
 ): RoadmapReorderResponse | { error: string; status: number } {
@@ -2965,7 +3049,8 @@ function handleRoadmapImport(body: {
       badEnum(it.priority, ROADMAP_PRIORITIES) ||
       badEnum(it.value, ROADMAP_LEVELS) ||
       badEnum(it.effort, ROADMAP_LEVELS) ||
-      badEnum(it.status, ROADMAP_STATUSES)
+      badEnum(it.status, ROADMAP_STATUSES) ||
+      (it.inactive !== undefined && typeof it.inactive !== "boolean")
     ) {
       return { error: `invalid item at index ${i}`, status: 400 };
     }
@@ -3098,6 +3183,36 @@ function handleRoadmapImport(body: {
             ? it.locked_at
             : null
           : (existing?.locked_at ?? null);
+      // Card c33a5968: inactive follows the SAME file-wins/existing-wins
+      // discipline as the ordinary content fields below (state restoration is
+      // a legitimate reason for a file to carry inactive, UNLIKE operator_id
+      // further below, which never trusts the file). Guards mirror the upsert
+      // path's predicates, but skip THIS ROW (not the whole batch) on refusal,
+      // same granularity as the existing locked-and-!force skip above.
+      //
+      // `existingStatusVal`/`existingLockedVal` (team-lead review 2026-08-12,
+      // delta form -- see refusesInactiveClaim's doc comment): a force-import
+      // that faithfully re-carries an inactive-and-in_progress row's OWN stored
+      // status/lock must not be refused by comparing against itself. Reading
+      // the pre-write row here, deliberately NOT `nextStatusVal`/`lockedVal`,
+      // is what makes that round-trip possible while still refusing an actual
+      // upward claim (existingStatus not already in_progress, or not already
+      // locked) in the same call.
+      const existingInactive = existing?.inactive ?? false;
+      const existingStatusVal = existing?.status ?? "idea";
+      const existingLockedVal = existing?.locked ?? false;
+      const nextInactiveVal = typeof it.inactive === "boolean" ? it.inactive : existingInactive;
+      const nextStatusVal = it.status ?? existing?.status ?? "idea";
+      if (refusesInactiveToggle(existingInactive, nextInactiveVal, author.operator_id !== undefined)) {
+        skipped.push(id);
+        continue;
+      }
+      if (
+        refusesInactiveClaim(existingInactive, existingStatusVal, existingLockedVal, nextStatusVal, lockedVal)
+      ) {
+        skipped.push(id);
+        continue;
+      }
       // Card 8c1effca: the columns below follow the SAME discipline the three
       // lock columns already had -- a key PRESENT in the file wins (including an
       // explicit null, which is a genuine clear in a self-export), a key truly
@@ -3127,7 +3242,7 @@ function handleRoadmapImport(body: {
         priority: it.priority ?? existing?.priority ?? "could",
         value: it.value ?? existing?.value ?? "medium",
         effort: it.effort ?? existing?.effort ?? "medium",
-        status: it.status ?? existing?.status ?? "idea",
+        status: nextStatusVal,
         tags: JSON.stringify(
           it.tags !== undefined ? (cleanList(it.tags) ?? []) : (existing?.tags ?? [])
         ),
@@ -3180,6 +3295,7 @@ function handleRoadmapImport(body: {
         // freshly signed import (author.operator_id set) wins, otherwise the
         // existing row's value survives unchanged.
         operator_id: author.operator_id ?? existing?.operator_id ?? null,
+        inactive: nextInactiveVal ? 1 : 0,
       };
       insert.run(...ROADMAP_IMPORT_COLUMNS.map((column) => values[column]));
       imported++;

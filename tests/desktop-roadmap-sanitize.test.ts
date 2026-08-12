@@ -92,7 +92,8 @@ function wellFormed(): Record<string, unknown> {
     locked_by: null,
     locked_at: null,
     directive: null,
-    target_peer_ids: []
+    target_peer_ids: [],
+    inactive: false
   };
 }
 
@@ -144,6 +145,13 @@ test("NaN is rejected on the DIRECT-call path, which JSON can never reach", () =
   expect(sanitized({ queue: NaN }).queue).toBeNull();
 });
 
+test("inactive survives true and coerces non-boolean to false (card c33a5968)", () => {
+  expect(sanitized({ inactive: true }).inactive).toBe(true);
+  expect(sanitized({ inactive: "yes" }).inactive).toBe(false);
+  expect(sanitized({ inactive: 1 }).inactive).toBe(false);
+  expect(sanitized({}).inactive).toBe(false);
+});
+
 test("locked, the enums and the nullable strings fall back to their declared default", () => {
   expect(sanitized({ locked: "yes" }).locked).toBe(false);
   expect(sanitized({ locked: 1 }).locked).toBe(false);
@@ -178,13 +186,13 @@ test("id and project_key are STRUCTURAL: the item is dropped, not coerced", () =
 });
 
 test("PICK-LIST, not spread: an unknown broker field does not travel through", () => {
-  // RoadmapItem has 25 fields (card edefff05 added operator_id) and the
-  // pick-list covers all 25 (measured), so the next one broker-side is the
-  // 26th.
-  const item = sanitizeRoadmapItem({ ...wellFormed(), surprise_26th_field: "x" }) as RoadmapItem;
+  // RoadmapItem has 26 fields (card c33a5968 added inactive, after edefff05's
+  // operator_id) and the pick-list covers all 26 (measured), so the next one
+  // broker-side is the 27th.
+  const item = sanitizeRoadmapItem({ ...wellFormed(), surprise_27th_field: "x" }) as RoadmapItem;
   expect(item).not.toBeNull();
-  expect(Object.keys(item)).not.toContain("surprise_26th_field");
-  expect(Object.keys(item)).toHaveLength(25);
+  expect(Object.keys(item)).not.toContain("surprise_27th_field");
+  expect(Object.keys(item)).toHaveLength(26);
 });
 
 // Card edefff05: the existing pick-list coverage above proves REJECTION of an

@@ -416,6 +416,20 @@ export interface RoadmapItem {
    * is reserving, not on this card.
    */
   operator_id?: string;
+  /**
+   * Card c33a5968: operator-only "inactive" flag. An inactive card stays
+   * VISIBLE and ordinary edits (retitle, tags, description, context) stay
+   * permitted, but every write path that would move it toward status='in_progress' or
+   * locked=true is refused (403) while this is true -- see
+   * `refusesInactiveClaim`/`refusesInactiveToggle` in `shared/roadmap-lock.ts`.
+   * Never a `RoadmapStatus` enum value: status feeds the MCP tool schema,
+   * board filters and the stale-lock sweep, and this flag must stay
+   * orthogonal to (and distinct from) `wont`. Toggling it requires
+   * `author.operator_id` (resolveRoadmapAuthor's cryptographically-resolved
+   * field, never client-declared) -- deliberately absent from the
+   * roadmap_update MCP tool schema so an ordinary agent cannot self-unblock.
+   */
+  inactive: boolean;
 }
 
 /**
@@ -467,6 +481,7 @@ export const ROADMAP_IMPORT_COLUMNS = [
   "locked_by",
   "locked_at",
   "operator_id",
+  "inactive",
 ] as const;
 
 export type RoadmapImportColumn = (typeof ROADMAP_IMPORT_COLUMNS)[number];
@@ -732,6 +747,12 @@ export interface RoadmapUpsertRequest {
    * by someone else. 'deck' never needs it (the operator always bypasses).
    */
   force?: boolean;
+  /**
+   * Card c33a5968: set/clear the operator-only "inactive" flag. Requires
+   * `author.operator_id` (resolved from `instance_token`, never trusted from
+   * this field) -- refused 403 otherwise. See `RoadmapItem.inactive`.
+   */
+  inactive?: boolean;
 }
 
 export interface RoadmapUpsertResponse {

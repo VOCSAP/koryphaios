@@ -380,6 +380,14 @@ export interface RoadmapItem {
    * authorship event on the card -- see handleRoadmapReorder).
    */
   operator_id?: string
+  /**
+   * Card c33a5968: operator-only "park" flag. Stays visible on the board;
+   * every write path that would move the card toward status='in_progress' or
+   * locked=true is refused broker-side while this is true. Toggling it
+   * requires a signed operator write (broker-enforced) -- no Deck UI action
+   * to set/clear it exists yet, this is the read-direction field only.
+   */
+  inactive: boolean
 }
 
 export interface RoadmapListFilters {

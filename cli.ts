@@ -221,7 +221,7 @@ switch (cmd) {
       console.log(`Imported ${result.imported} item(s) into ${projectKey}.`);
       if (result.skipped.length > 0) {
         console.log(
-          `Skipped ${result.skipped.length} locked card(s) (use --force to override): ${result.skipped.join(", ")}`
+          `Skipped ${result.skipped.length} card(s) (locked, or inactive -- --force only overrides the lock): ${result.skipped.join(", ")}`
         );
       }
     } catch (e) {

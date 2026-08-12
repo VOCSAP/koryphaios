@@ -225,7 +225,7 @@ function queuePos(v: unknown): number | null {
  * Shape one roadmap item coming off the wire, or null when it is unusable.
  *
  * PICK-LIST, NEVER A SPREAD. Do not "simplify" this into `{ ...raw, tags: ... }`:
- * `RoadmapItem` has 25 fields and the list below covers all 25, so a 26th added
+ * `RoadmapItem` has 26 fields and the list below covers all 26, so a 27th added
  * broker-side would travel through unvalidated with nothing failing, which is
  * the canonical fail-open shape this guard exists to avoid. Naming every field
  * means a new one simply does not arrive until someone adds it here. The
@@ -271,7 +271,10 @@ export function sanitizeRoadmapItem(raw: unknown): RoadmapItem | null {
     // Card edefff05: optional (undefined, never null) -- unlike the
     // nullableStr fields above, the broker omits this key entirely rather
     // than sending null when no operator has ever signed a write.
-    operator_id: typeof r.operator_id === 'string' ? r.operator_id : undefined
+    operator_id: typeof r.operator_id === 'string' ? r.operator_id : undefined,
+    // Card c33a5968: NOT NULL DEFAULT 0 broker-side, so this is always a
+    // boolean on the wire -- coerced defensively like `locked` above.
+    inactive: r.inactive === true
   }
 }
 

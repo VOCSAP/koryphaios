@@ -550,10 +550,15 @@ test("card aad5e954: the comparison NAMES an uncovered column (negative control)
   // The integration halves above agree by construction whenever both sides are
   // right, so they can never demonstrate that the comparison would speak up.
   // Hand it the exact future it exists for: a column added to the table and
-  // forgotten in the list.
-  const grown = [...ROADMAP_IMPORT_COLUMNS, "inactive"];
+  // forgotten in the list. The synthetic column name must be one that can
+  // NEVER become a real column -- team-lead review, 2026-08-12, blocker 1:
+  // this used to be the literal `"inactive"`, which WAS a fictional future
+  // column when written but became real the same day (card c33a5968), so
+  // `grown` contained it twice and `missing` silently went empty. `bun test
+  // tests/broker-roadmap-import.test.ts` caught it: 17 pass, 1 fail.
+  const grown = [...ROADMAP_IMPORT_COLUMNS, "__never_a_real_column__"];
   const uncovered = findUncoveredRoadmapColumns(grown, ROADMAP_IMPORT_COLUMNS);
-  expect(uncovered.missing).toEqual(["inactive"]);
+  expect(uncovered.missing).toEqual(["__never_a_real_column__"]);
   expect(uncovered.extra).toEqual([]);
 
   // ...and the mirror mistake, a column dropped from the table but still

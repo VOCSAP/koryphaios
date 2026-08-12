@@ -203,3 +203,198 @@ test("every guarded write route refuses an author it cannot prove", async () => 
     expect([route, res.status]).toEqual([route, 401]);
   }
 });
+
+// ---------------------------------------------------------------------------
+// SECOND AXIS (card c33a5968): the guard above proves resolveRoadmapAuthor is
+// called on every write route -- it says nothing about whether a HANDLER
+// touches status/locked (and therefore needs the inactive-claim guard).
+// Without this, a future handler could write `locked = 1` unguarded and
+// nothing here would break: this file's first axis is keyed on ROUTES, this
+// one is keyed on HANDLER FUNCTION NAMES, discovered the same way (regex over
+// broker.ts, explicit expected-set shrink detection, fixture-bites negative
+// control) so a new handler cannot silently land unclassified either.
+//
+// Known limitation, stated rather than hidden: this axis only classifies
+// handlers named `handleRoadmap*`/`releaseStaleLocks` and only checks that a
+// GUARDED handler's body contains a call to the two guard predicates. It does
+// NOT prove the guard is reachable on every code path inside that handler,
+// and it cannot catch a rewrite INSIDE an already-EXEMPT handler that later
+// starts writing status/locked -- the same structural limitation the route
+// axis above has (it proves a call exists, not that every branch reaches it).
+// ---------------------------------------------------------------------------
+
+/**
+ * Handler function names discovered from broker.ts. Column-0-closing-brace
+ * convention (see extractFunctionBody below) means these are always
+ * top-level `function` declarations, never nested helpers.
+ */
+function discoverRoadmapHandlers(source: string): string[] {
+  const found = new Set<string>();
+  for (const m of source.matchAll(/^function (handleRoadmap\w+|releaseStaleLocks)\(/gm)) {
+    found.add(m[1]!);
+  }
+  return [...found].sort();
+}
+
+/**
+ * Same closing-brace convention as tests/desktop-sandbox-copy.test.ts's
+ * extractFunctionBody (a top-level function's closing brace sits alone at
+ * column 0, never a nested block's), adapted for this file's handlers: their
+ * return type is routinely a union with an INLINE object
+ * (`RoadmapUpsertResponse | { error: string; status: number }`), whose own
+ * `{` is not followed by a newline -- unlike the real body-opening brace, so
+ * matching the first `{...\n` (not just the first `{`) is what tells them
+ * apart and keeps this from grabbing the return-type's braces instead.
+ */
+function extractFunctionBody(source: string, name: string): string {
+  const match = source.match(
+    new RegExp(`(?:export )?function ${name}\\([\\s\\S]*?\\)[\\s\\S]*?\\{\\r?\\n([\\s\\S]*?)\\r?\\n\\}`)
+  );
+  if (!match) throw new Error(`function ${name} not found in source`);
+  return match[1]!;
+}
+
+/** Handlers that must refuse a claim on an inactive card. */
+const GUARDED_INACTIVE_HANDLERS = new Set(["handleRoadmapUpsert", "handleRoadmapImport"]);
+
+/**
+ * Handlers that structurally cannot claim a card (verified by reading each
+ * one, not asserted on faith) -- each carries a one-line "why" comment in
+ * broker.ts citing this card, checked below.
+ */
+const EXEMPT_INACTIVE_HANDLERS = new Set([
+  "handleRoadmapArchive",
+  "handleRoadmapContextAppend",
+  "handleRoadmapReorder",
+  "releaseStaleLocks",
+]);
+
+/**
+ * `discoverRoadmapHandlers`'s regex is deliberately over-inclusive (same
+ * philosophy as discoverRoadmapRoutes above), so it also finds the two
+ * read-only handlers -- neither cited in the write-path table this card was
+ * scoped against. Classified here as a THIRD bucket, checked MECHANICALLY
+ * (no `UPDATE roadmap_items`/`INSERT INTO roadmap_items` anywhere in the
+ * body) rather than by a comment, since that is a strictly stronger
+ * guarantee than a comment for a handler that does no write at all.
+ */
+const READ_ONLY_INACTIVE_HANDLERS = new Set(["handleRoadmapList", "handleRoadmapExport"]);
+
+function unclassifiedInactiveHandlers(handlers: string[]): string[] {
+  return handlers.filter(
+    (h) =>
+      !GUARDED_INACTIVE_HANDLERS.has(h) &&
+      !EXEMPT_INACTIVE_HANDLERS.has(h) &&
+      !READ_ONLY_INACTIVE_HANDLERS.has(h)
+  );
+}
+
+const EXPECTED_INACTIVE_HANDLERS = [
+  "handleRoadmapArchive",
+  "handleRoadmapContextAppend",
+  "handleRoadmapExport",
+  "handleRoadmapImport",
+  "handleRoadmapList",
+  "handleRoadmapReorder",
+  "handleRoadmapUpsert",
+  "releaseStaleLocks",
+];
+
+test("the handler extractor bites: it finds a handler that exists only in a fixture", () => {
+  const fixture =
+    "function handleRoadmapList(body) { return []; }\n" +
+    "function handleRoadmapFixtureOnly(body) { return null; }\n";
+  const found = discoverRoadmapHandlers(fixture);
+  expect(found).toContain("handleRoadmapFixtureOnly");
+});
+
+test("a fixture-only handler is reported unclassified", () => {
+  const fixture = `function handleRoadmapFixtureOnly(body) { return null; }`;
+  const found = discoverRoadmapHandlers(fixture);
+  expect(unclassifiedInactiveHandlers(found)).toEqual(["handleRoadmapFixtureOnly"]);
+});
+
+test("handler extraction has not shrunk: broker.ts exposes exactly the expected handlers", () => {
+  const handlers = discoverRoadmapHandlers(readFileSync(BROKER_SRC, "utf8"));
+  expect(handlers).toEqual(EXPECTED_INACTIVE_HANDLERS);
+});
+
+test("every discovered handler is classified: guarded or consciously exempt", () => {
+  const handlers = discoverRoadmapHandlers(readFileSync(BROKER_SRC, "utf8"));
+  expect(unclassifiedInactiveHandlers(handlers)).toEqual([]);
+});
+
+/**
+ * Team-lead review (2026-08-12), upgrading the previous `.includes()` check:
+ * a substring check only proves ONE call site exists in the whole function,
+ * not that EVERY branch has one -- measured by mutation, removing the call
+ * from only one of `handleRoadmapUpsert`'s two branches (patch, create) left
+ * `body.includes(...)` still true. Pinning the exact COUNT makes removing
+ * either branch's call go red immediately, and makes adding a third branch
+ * force a conscious update of this table instead of silently landing
+ * uncovered -- the same fail-closed shape as EXPECTED_ROUTES/
+ * EXPECTED_INACTIVE_HANDLERS above.
+ */
+const EXPECTED_INACTIVE_GUARD_CALL_COUNTS: Record<string, { claim: number; toggle: number }> = {
+  handleRoadmapUpsert: { claim: 2, toggle: 2 }, // patch branch + create branch
+  handleRoadmapImport: { claim: 1, toggle: 1 }, // one per-row call site
+};
+
+function countOccurrences(haystack: string, needle: string): number {
+  let count = 0;
+  let idx = 0;
+  while ((idx = haystack.indexOf(needle, idx)) !== -1) {
+    count++;
+    idx += needle.length;
+  }
+  return count;
+}
+
+/**
+ * Card c33a5968, mineur 1 (team-lead review, 2026-08-12): the exact-count
+ * guard above counted the RAW body text, comments and strings included. The
+ * reviewer's probe removed the create branch's real
+ * `refusesInactiveClaim(...)` call and refunded the count with nothing more
+ * than `// NOTE: the create path relies on refusesInactiveClaim(...)
+ * upstream.` -- still 12 pass, 0 fail, because the substring sits in a
+ * comment just as validly as in a live call. Stripping comments before
+ * counting is what makes the count mean "this many CALLS", not "this many
+ * mentions of the name" -- doesn't touch string literals (the guard's error
+ * messages happen not to repeat these two identifiers), only `//...` and
+ * `/*...*\/`.
+ */
+function stripComments(code: string): string {
+  return code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
+
+test("every GUARDED handler's body calls both inactive predicates the expected number of times (one per branch)", () => {
+  const source = readFileSync(BROKER_SRC, "utf8");
+  for (const name of GUARDED_INACTIVE_HANDLERS) {
+    const body = stripComments(extractFunctionBody(source, name));
+    const expected = EXPECTED_INACTIVE_GUARD_CALL_COUNTS[name]!;
+    expect([name, countOccurrences(body, "refusesInactiveClaim(")]).toEqual([name, expected.claim]);
+    expect([name, countOccurrences(body, "refusesInactiveToggle(")]).toEqual([name, expected.toggle]);
+  }
+});
+
+test("every READ-ONLY handler's body writes neither UPDATE nor INSERT on roadmap_items", () => {
+  const source = readFileSync(BROKER_SRC, "utf8");
+  for (const name of READ_ONLY_INACTIVE_HANDLERS) {
+    const body = extractFunctionBody(source, name);
+    expect([name, body.includes("UPDATE roadmap_items")]).toEqual([name, false]);
+    expect([name, body.includes("INSERT INTO roadmap_items")]).toEqual([name, false]);
+  }
+});
+
+test("every EXEMPT handler carries a one-line justification citing this card", () => {
+  const source = readFileSync(BROKER_SRC, "utf8");
+  for (const name of EXEMPT_INACTIVE_HANDLERS) {
+    const idx = source.search(new RegExp(`(?:export )?function ${name}\\(`));
+    expect([name, idx]).not.toEqual([name, -1]);
+    // The exemption comment sits directly above the function declaration, not
+    // inside its body -- extractFunctionBody would miss it entirely, so this
+    // reads the window of source immediately BEFORE the signature instead.
+    const before = source.slice(Math.max(0, idx - 500), idx);
+    expect([name, before.includes("c33a5968")]).toEqual([name, true]);
+  }
+});

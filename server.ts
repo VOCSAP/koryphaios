@@ -737,7 +737,7 @@ const TOOLS = [
   {
     name: "roadmap_update",
     description:
-      "Partially update a roadmap item: only the fields you pass change. Use it to move status (planned -> in_progress -> done), reprioritize, retag or rewrite. Accepts a full id or a unique prefix. Setting status=archived archives; any other status restores an archived item. Moving an item to in_progress LOCKS it under your peer_id (you are actively working on it); leaving in_progress releases the lock. A status write on an item locked by another peer is refused (409) -- pick another item. For a kind='directive' card (see roadmap_add) you may retarget it (target_peer_ids) or change its command (directive) before it is dispatched.",
+      "Partially update a roadmap item: only the fields you pass change. Use it to move status (planned -> in_progress -> done), reprioritize, retag or rewrite. Accepts a full id or a unique prefix. Setting status=archived archives; any other status restores an archived item. Moving an item to in_progress LOCKS it under your peer_id (you are actively working on it); leaving in_progress releases the lock. A status write on an item locked by another peer is refused (409) -- pick another item. For a kind='directive' card (see roadmap_add) you may retarget it (target_peer_ids) or change its command (directive) before it is dispatched. A card marked [INACTIVE] in a listing is made INACTIVE by an operator: it stays out of your reach on purpose -- this tool has no field to clear that flag, and claiming it (in_progress, or locked=true) is refused (403) regardless of what else the write changes.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -962,7 +962,12 @@ async function resolveRoadmapId(idOrPrefix: string): Promise<string> {
 function formatRoadmapItemLine(i: RoadmapItem): string {
   const tags = i.tags.length ? `  #${i.tags.join(" #")}` : "";
   const lock = i.locked ? ` 🔒${i.locked_by ?? ""}` : "";
-  return `[${i.id.slice(0, 8)}] ${i.kind} · ${i.priority} · value:${i.value} effort:${i.effort} · ${i.status}${lock} — ${i.title}${tags}`;
+  // Card c33a5968, major 2 (team-lead review, 2026-08-12): the population a
+  // parked card is meant to keep OUT (any agent listing cards to pick one
+  // up) previously had no way to see the flag before hitting a 403 that
+  // tells it to do the one thing it is structurally forbidden from doing.
+  const inactive = i.inactive ? " [INACTIVE -- do not claim]" : "";
+  return `[${i.id.slice(0, 8)}] ${i.kind} · ${i.priority} · value:${i.value} effort:${i.effort} · ${i.status}${lock}${inactive} — ${i.title}${tags}`;
 }
 
 function formatRoadmapItemDetail(i: RoadmapItem): string {
@@ -977,6 +982,7 @@ function formatRoadmapItemDetail(i: RoadmapItem): string {
       : "",
     i.depends_on.length ? `depends_on: ${i.depends_on.map((d) => d.slice(0, 8)).join(", ")}` : "",
     i.locked ? `locked: by ${i.locked_by} since ${i.locked_at} (actively being worked on)` : "",
+    i.inactive ? `inactive: this card is inactive -- do not claim it or move it to in_progress; only an operator-signed write can clear this` : "",
     `created: ${i.created_at} by ${i.created_by}`,
     `updated: ${i.updated_at} by ${i.updated_by}`,
     i.deleted_at ? `archived: ${i.deleted_at}` : "",
