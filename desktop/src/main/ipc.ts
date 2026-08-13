@@ -3,6 +3,7 @@ import { app, BrowserWindow, desktopCapturer, dialog, shell, webContents } from 
 import { broadcast, regHandle, regOn } from './api-registry'
 import { safeExternalUrl } from './external-url'
 import type {
+  AckableInboxEntry,
   AppConfig,
   AssignResult,
   CreateSessionInput,
@@ -21,6 +22,7 @@ import type {
   StopReport,
   StopResult
 } from '@shared/types'
+import { inboxEntryKey } from '@shared/types'
 import { broadcastStop, lockTargets, STOP_MODES, stopTouchesLocks } from './agent-stop'
 import type { SandboxService } from './sandbox-service'
 import { buildAuthCommand, SANDBOX_AUTH_PTY_ID, SANDBOX_BUILD_PTY_ID } from './sandbox-command'
@@ -30,7 +32,12 @@ import { buildWandPrompt, WAND_SYSTEM_PROMPT, type WandDraft } from './context-w
 import { runUtilityInference, type UtilityDeps } from './utility-inference'
 import { markGraphDraftOpened, resolveBrokerEndpoint } from './broker-client'
 import type { BrokerStatusEvent } from './broker-client'
-import { loadInboxHistory } from './inbox-store'
+import {
+  appendAckedKey,
+  appendSeenKey,
+  loadAckStateWithMigrationSeed,
+  loadInboxHistory
+} from './inbox-store'
 import {
   buildDigestSystemPrompt,
   collectSources,
@@ -192,6 +199,20 @@ interface IpcDeps {
   sandboxGate: () => Promise<string | null>
   /** Warm the container-side transcript cache for a session's real cwd (M2). */
   sandboxWarmTranscripts: (cwd: string) => Promise<void>
+  /**
+   * Answer a pending/expired_notif blocking question as the operator
+   * (Courrier family 3): claims it broker-side and delivers to the waiting
+   * agent. `false` means another channel (phone/telegram/discord) won the
+   * race, not a failure -- mirrors index.ts's existing local-claim path.
+   */
+  approvalReply: (id: string, text: string) => Promise<boolean>
+  /**
+   * Decline a pending/expired_notif blocking question. This IS an answer
+   * (settles the ticket, unblocks the agent with a refusal) -- never an ack.
+   */
+  approvalDecline: (id: string) => Promise<boolean>
+  /** Reply to an ordinary (family 1) inbox message: a plain targeted announce, not correlated to anything broker-side. */
+  announceTo: (toPeerId: string, text: string) => Promise<number>
 }
 
 export function registerIpc({
@@ -215,7 +236,10 @@ export function registerIpc({
   deckPluginDir,
   sandbox,
   sandboxGate,
-  sandboxWarmTranscripts
+  sandboxWarmTranscripts,
+  approvalReply,
+  approvalDecline,
+  announceTo
 }: IpcDeps): void {
   // ----- sessions -----
   regHandle('sessions:list', () => service.list())
@@ -1266,6 +1290,43 @@ export function registerIpc({
   // broker-side, so this file is the only durable copy).
   regHandle('inbox:history', () =>
     loadInboxHistory(join(app.getPath('userData'), APP_STATE_SUBDIR))
+  )
+
+  // ask_operator lot (Etape A): the three unified Courrier actions. `id` /
+  // `toPeerId` / `text` all originate in the renderer (hostile input #3) --
+  // coerced to string here and re-validated broker-side by the resolve of
+  // approvalReply/approvalDecline/announceTo, which scope by the CURRENT
+  // operator's own credential rather than trusting anything in the payload.
+  regHandle('approvals:reply', (_e, id: string, text: string) =>
+    approvalReply(String(id ?? ''), String(text ?? ''))
+  )
+  regHandle('approvals:decline', (_e, id: string) => approvalDecline(String(id ?? '')))
+  regHandle('inbox:reply', (_e, toPeerId: string, text: string) =>
+    announceTo(String(toPeerId ?? ''), String(text ?? ''))
+  )
+
+  // Local Courrier read-state (family 1/2 only -- see AckableInboxEntry).
+  // `entry` is typed to exclude 'approval' at compile time; inboxEntryKey
+  // (the SINGLE key producer, also importable by the renderer) re-validates
+  // `kind` at runtime because the wire (structured-clone IPC) has no type
+  // system of its own, so a hand-built payload bypassing TS could still
+  // arrive shaped like an approval -- rejected there, never silently
+  // coerced into a key.
+  const ackedStateDir = (): string => join(app.getPath('userData'), APP_STATE_SUBDIR)
+  regHandle('inbox:ack-state', () =>
+    loadAckStateWithMigrationSeed(ackedStateDir(), (e) =>
+      journal.add('error', `inbox ack migration-seed persist failed: ${e instanceof Error ? e.message : String(e)}`)
+    )
+  )
+  regHandle('inbox:mark-seen', (_e, entry: AckableInboxEntry) =>
+    appendSeenKey(ackedStateDir(), inboxEntryKey(entry), undefined, (e) =>
+      journal.add('error', `inbox seen persist failed: ${e instanceof Error ? e.message : String(e)}`)
+    )
+  )
+  regHandle('inbox:ack', (_e, entry: AckableInboxEntry) =>
+    appendAckedKey(ackedStateDir(), inboxEntryKey(entry), undefined, (e) =>
+      journal.add('error', `inbox ack persist failed: ${e instanceof Error ? e.message : String(e)}`)
+    )
   )
 
   // ----- template composer (PLAN C18): read/write without spawning -----

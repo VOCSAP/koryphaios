@@ -1,5 +1,126 @@
 # Changelog
 
+## desktop + broker (experimental) -- le pair declare un BESOIN, plus jamais un transport : `ask_operator` cesse de refuser, et le Courrier devient l'outil qui traite
+
+Deux cartes formant un lot indissociable : `469f3176` (`ask_operator` devient la
+voie unique de question bloquante) et `8fdac3dd` (refonte du Courrier : liste
+pair/heure/chevron, modale, Ack distinct de la fermeture). Elles partagent le
+chemin de reponse vers le pair et la semantique de drain ; les traiter separement
+aurait fait ecrire deux fois la meme plomberie.
+
+**Le gate etait a l'envers.** `ask_operator` refusait avec « Remote approvals
+are not enabled for this session » precisement quand il n'y avait PAS de canal
+distant, c'est-a-dire dans le cas le plus favorable : l'operateur devant son
+ecran. L'absence de mobile doit DEGRADER vers le Courrier local, jamais refuser.
+L'axe retenu est BLOQUANT contre NON BLOQUANT, jamais local contre mobile : le
+pair declare qu'il a besoin de l'humain, Kory seul decide ou la question
+s'affiche et si elle part sur un telephone. `send_message('operator')` est
+conserve tel quel comme voie non bloquante, par decision explicite.
+
+**Le verrou n'etait pas une architecture, c'etait un `if`.** Le broker acceptait
+deja un claim signe operateur sans aucun mobile (`/approval/claim` exige
+`auth.kind === 'operator'` verifie contre `approval_operators`, sans secret de
+groupe ni canal distant), et `SESSION_ALLOWED` autorisait deja `add`+`wait` pour
+une identite de session. Le seul blocage etait
+`if (config.mobileApprovals) { approvals.arm() }` dans le demarrage du Deck :
+`arm()` est le seul endroit qui pose l'identite, dont depend `deps()`, dont
+depend tout claim local. `mobileApprovals` redevient donc ce qu'il aurait
+toujours du etre, un choix de TRANSPORT duplique, et cesse d'etre une condition
+d'EXISTENCE. L'armement est extrait dans `armApprovalsAtStartup(approvals)`,
+dont la signature ne prend aucun parametre de forme `mobileApprovals` : la
+signature ne peut plus porter la condition. Il reste UN site d'appel dans le
+demarrage du Deck ou un `if` enveloppant la rebrancherait, garde par un scan de
+texte dont la portee est de 200 caracteres -- residu connu, mesure, et accepte
+comme tel.
+
+**Et l'armement inconditionnel a d'abord ouvert un trou avant de le fermer.**
+Rendre l'armement systematique a mis un chemin de regeneration d'identite sur le
+demarrage de TOUT operateur, y compris ceux qui n'ont jamais active la moindre
+notification mobile. Une identite illisible n'est donc regeneree QUE si le
+trousseau repond ; s'il est seulement indisponible -- session verrouillee, DPAPI
+en vrac, profil OS migre -- l'armement abandonne ce run et l'identite reste
+intacte, car un `null` de dechiffrement ne prouve pas une corruption. Et toute
+regeneration renomme d'abord l'ancien fichier en `.bak-<horodatage>`, avec un
+suffixe incremente qui rend la collision impossible plutot qu'improbable : la
+cle privee precedente n'est jamais detruite. Sans quoi une indisponibilite
+passagere du trousseau aurait suffi a orpheliner les appairages telephone et a
+rendre non reclamables les questions bloquantes en attente -- des agents arretes
+pour de bon, par le lot cense les debloquer.
+
+**Deux stocks separes, fusionnes seulement a l'ecran.** Les questions bloquantes
+vivent dans `pending_approvals` (table persistee, correlation par UUID,
+`reply_route`/`reply_token` deja cables vers le pair exact) ; le Courrier vit
+dans `messages` via `/operator-inbox`. Ils ne se croisent jamais. La fusion est
+purement visuelle, ce qui evite toute migration de schema et decouple la voie
+bloquante du drain destructif de l'inbox -- defaut reel, preexistant, laisse
+hors perimetre et carde a part (`54b1c71a`).
+
+**Trois familles d'entrees, et Ack n'a pas le meme sens sur les trois.** Message
+d'un pair (repondable, non correle, reponse par `inboxReply`), evenement sans
+destinataire (non repondable, aucun champ de reponse affiche), et question
+bloquante (repondable ET correlee, sa reponse debloque un agent arrete). Sur
+cette derniere, **Ack est absent, pas grise** : `AckableInboxEntry` l'exclut a
+la compilation, parce qu'acquitter une question bloquante laisserait un agent
+en attente indefinie. Le geste equivalent est DECLINER, qui est une reponse :
+il resout le ticket et signifie a l'agent qu'il n'aura rien. Un message dont le
+pair emetteur a disparu est acquittable mais pas repondable.
+
+**Fermer n'acquitte pas**, et les trois etats (non lu / vu en attente /
+acquitte) sont persistes cote Deck, donc verifiables apres un redemarrage : si
+la fermeture acquittait, l'operateur perdrait tout message ouvert sans avoir le
+temps de le traiter, et le bouton Ack n'aurait aucune raison d'exister. La cle
+d'ack porte l'horodatage et pas seulement l'identifiant broker, pour qu'une base
+recreee ne fasse pas masquer un message neuf par un ack ancien.
+
+**Le badge du rail cesse d'etre un compteur de session.** Il derive desormais de
+l'etat persiste, via un producteur unique que les deux barres APPELLENT au lieu
+de resommer chacune de leur cote : il n'y a plus qu'UN SEUL endroit ou lire le
+compte. Consequence directe et voulue : ouvrir
+le volet ne remet plus rien a zero, une entree quitte le badge quand elle est
+ACQUITTEE, et dix entrees non lues en base donnent bien un badge non nul au
+demarrage a froid, la ou l'ancien compteur affichait zero. Dans le meme esprit
+que « fermer n'acquitte pas » : ouvrir non plus. Un futur « tout marquer comme
+lu » devra etre un acquittement de masse explicite, jamais un effet de bord de
+l'ouverture.
+
+**Et le passe a du etre repris**, sinon le premier lancement apres ce lot aurait
+affiche un badge a plusieurs centaines : l'historique persiste va jusqu'a 500
+entrees, dont aucune n'avait d'etat d'acquittement puisque celui-ci n'existait
+pas. A la PREMIERE hydratation seulement -- condition testee sur l'ABSENCE du
+fichier d'etat, jamais deduite d'une lecture qui echoue -- les entrees deja
+presentes sont donc seedees comme acquittees : elles precedent la
+fonctionnalite, et sous le modele precedent l'ouverture du volet les avait deja
+toutes remises a zero. Un fichier d'etat CORROMPU, lui, existe : le seed ne s'y
+declenche pas, et un incident disque ne peut donc pas se transformer en
+acquittement de masse de tout ce que l'operateur n'avait pas traite.
+
+**`approvals:reply` et `approvals:decline` sont bloques pour un compagnon
+distant**, alors que `inbox:reply` reste au meme palier que `roadmap:assign`.
+La distinction n'est pas la cible mais la nature de ce qui transite : ces deux
+canaux ne transmettent pas un message, ils rendent un VERDICT HUMAIN qu'un agent
+arrete consomme pour agir. Le risque deja accepte dans ce depot (un compagnon
+appaire agit avec l'autorite de l'operateur envers un pair nomme) avait ete pris
+sur des actions dont le destinataire garde son jugement ; ici il ne l'a plus,
+par construction. Consequence assumee : un operateur absent de son Deck ne
+debloque un agent que par le canal mobile enrole, dont l'authentification passe
+par le credential d'approbation signe et non par l'appairage compagnon.
+
+**Le plancher interdit de REPONDRE a distance, pas de LIRE.** Le flux des
+questions en attente part vers tout compagnon authentifie : le texte de la
+question, l'hote, le `project_key` et le `session_ref` traversent donc le LAN,
+alors que le geste de reponse, lui, est refuse. L'asymetrie est volontaire --
+lire n'est pas consentir, et un operateur qui consulte depuis son telephone doit
+pouvoir juger de l'urgence avant de rejoindre son Deck -- mais elle est ecrite
+ici pour qu'elle ne soit pas prise plus tard pour un oubli et « corrigee » dans
+un sens ou dans l'autre.
+
+**Deux residus connus, ecrits plutot que decouverts.** La famille EVENEMENT est
+rendue par l'interface mais **aucun canal ne l'emet aujourd'hui** : elle attend
+la carte `3817a84f` (verrou abandonne). Et le credential de session etant herite
+AU SPAWN, une session ouverte AVANT l'armement reste refusee jusqu'a sa
+relance ; le texte de refus nomme desormais cette cause reelle et sa remediation,
+au lieu d'annoncer une absence d'approbations distantes qui n'est plus le sujet.
+
 ## desktop (experimental) -- le volet Agents se replie, et ce repli devient l'implementation de reference du patron
 
 Deux cartes formant un lot : `079f034d` (controle de repli du volet Agents) et

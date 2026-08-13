@@ -101,7 +101,7 @@ import {
   writeEmbeddedAgentPrompt
 } from './team-embedded'
 import { startDesignEndpoint, type DesignEndpoint } from './design-endpoint'
-import { ApprovalRuntime } from './approval-runtime'
+import { ApprovalRuntime, armApprovalsAtStartup } from './approval-runtime'
 import { remoteApprovalsEnabled } from './approval-store'
 import {
   addApproval,
@@ -110,6 +110,7 @@ import {
   classifyVerdict,
   connectChannel,
   disconnectChannel,
+  fetchPendingApprovals,
   fetchUndeliveredVerdicts,
   listChannels,
   markVerdictsDelivered
@@ -380,12 +381,24 @@ const approvals = new ApprovalRuntime({
 // Card 39c40571 layer 2: a roadmap write authored by 'deck' speaks as the
 // HUMAN, so the broker now demands an operator signature on it. The loader is
 // registered here and runs on the FIRST write, never at boot: the identity is
-// deliberately NOT taken from ApprovalRuntime, whose arm() is gated by
-// config.mobileApprovals -- a phone-notification toggle must not decide whether
-// the shared roadmap is writable. A machine that never enrolled has no
+// deliberately NOT read from ApprovalRuntime -- roadmap signing must keep
+// working even when approvals.arm() never runs or fails for a reason that has
+// nothing to do with the roadmap (broker unreachable at boot, a token mint
+// failure), and resolving lazily means the first write is never blocked on
+// arm() having already finished. A machine that never enrolled has no
 // identity file yet, so the first signature MINTS one; operator_id is the
 // digest of the public key, so the credential self-certifies on first contact
 // and no enrolment step is required for the backlog to work.
+//
+// KNOWN GAP, carded not patched here (be4ae042): this loader runs the same
+// `loadOperatorIdentity(...) ?? createOperatorIdentity(...)` shape
+// ApprovalRuntime.arm() used to, without arm()'s cipher.isAvailable() guard
+// (card 469f3176). Reviewer measurement: with the cipher unavailable, THIS
+// call site still swaps the live identity (old b479dd85ecdf2bdc -> now-live
+// c347b5b6b7a2d7f4) seconds after arm() correctly refused to, in the same
+// process. createOperatorIdentity's backup-before-overwrite means nothing is
+// destroyed, but the substitution still happens: the roadmap ends up signed
+// under a new operator_id nobody asked for.
 configureRoadmapSigner(() => {
   const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
   const identity =
@@ -987,6 +1000,29 @@ const pollGraphDrafts = async (): Promise<void> => {
         mainWindow?.webContents.send('inbox:open')
       })
       n.show()
+    }
+  } catch {
+    // Broker down / unreachable: silent, the next tick retries.
+  }
+}
+
+// ----- Pending approvals poll (card 469f3176: the local Courrier) -----
+// Producer for 'approvals:pending' -- the questions ask_operator (or the
+// on-screen fallback) has raised and the Deck can still answer locally.
+// Non-destructive (fetchPendingApprovals lists, it does not drain), same
+// dedupe-by-signature shape as pollGraphDrafts above so a quiet tick does not
+// re-render the renderer's list for nothing.
+let lastPendingApprovalSignature = ''
+
+const pollPendingApprovals = async (): Promise<void> => {
+  const deps = approvals.deps()
+  if (!deps) return
+  try {
+    const list = await fetchPendingApprovals(deps)
+    const signature = list.map((a) => `${a.id}:${a.status}`).join(',')
+    if (signature !== lastPendingApprovalSignature) {
+      lastPendingApprovalSignature = signature
+      broadcast('approvals:pending', list)
     }
   } catch {
     // Broker down / unreachable: silent, the next tick retries.
@@ -2153,6 +2189,36 @@ app.whenReady().then(async () => {
       void pollOperatorInbox()
       void pollGraphDrafts()
       void pollApprovalVerdicts()
+      void pollPendingApprovals()
+    },
+    approvalReply: async (id: string, text: string): Promise<boolean> => {
+      const deps = approvals.deps()
+      if (!deps) return false
+      const res = await claimApproval(deps, { id, answerKind: 'text', answerText: text })
+      return res !== null
+    },
+    approvalDecline: async (id: string): Promise<boolean> => {
+      const deps = approvals.deps()
+      if (!deps) return false
+      const res = await claimApproval(deps, { id, answerKind: 'deny' })
+      return res !== null
+    },
+    // Unified Courrier's reply-to-a-peer-message action: same sendAnnounce
+    // primitive as the existing team-lead/supervisor/assignment announces
+    // above, just addressed by the caller's own toPeerId instead of a role
+    // this process already knows.
+    announceTo: async (toPeerId: string, text: string): Promise<number> => {
+      try {
+        const { sent } = await sendAnnounce(
+          { groupId: activeScope.groupId, secret: activeScope.secret, text, toPeerId },
+          { endpoint: resolveBrokerEndpoint() }
+        )
+        if (sent > 0) journal.add('announce', `announce to ${toPeerId}: ${text.slice(0, 120)}`)
+        return sent
+      } catch (e) {
+        reportError('announce', 'targeted announce failed', e)
+        return 0
+      }
     },
     deckPluginDir: getDeckPluginDir,
     sandbox,
@@ -2161,11 +2227,13 @@ app.whenReady().then(async () => {
   })
   // Arm remote approvals BEFORE service.start(): restored sessions spawn there,
   // and a session spawned without the credential path would never produce an
-  // approval. A failure only means the feature stays off; the app starts anyway.
-  if (config.mobileApprovals) {
-    const armed = await approvals.arm()
-    journal.add('session', armed ? 'remote approvals armed' : 'remote approvals unavailable')
-  }
+  // approval. Unconditional (card 469f3176): the blocking channel (ask_operator
+  // + the local Courrier) must exist whether or not the operator ever wired a
+  // phone transport -- config.mobileApprovals only decides whether a question
+  // is ALSO relayed to Telegram/Discord/ntfy, never whether it can be asked at
+  // all. A failure only means the feature stays off; the app starts anyway.
+  const armed = await armApprovalsAtStartup(approvals)
+  journal.add('session', armed ? 'remote approvals armed' : 'remote approvals unavailable')
   service.start()
   // Attach an auto-save workspace capturing whatever the service just restored.
   workspaces.start()
@@ -2174,6 +2242,7 @@ app.whenReady().then(async () => {
     void pollOperatorInbox()
     void pollGraphDrafts()
     void pollApprovalVerdicts()
+    void pollPendingApprovals()
   }, INBOX_POLL_MS)
   // Restart seed (card 5852c074): re-track already in-progress items BEFORE
   // the watcher's first tick, see seedDispatchedFromRoadmap's doc comment.

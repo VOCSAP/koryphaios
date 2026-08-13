@@ -142,6 +142,62 @@ export const SUPERVISOR_SPAWN_MODES: SupervisorSpawnMode[] = [
   'full-control'
 ]
 
+/**
+ * Hand-kept mirror of TWO interfaces declared in repo-root shared/types.ts
+ * (NOT this file): `Approval` and `ApprovalOrigin`. Verify by reading
+ * `export interface Approval` and `export interface ApprovalOrigin` there —
+ * repo-root shared/approval.ts imports both from that same file and
+ * re-exports them for the main process (see approval-auth.ts). NOT an
+ * import here: MEASURED, not assumed (team-lead's own review round, ask_operator
+ * lot, 2026-08-13) — `import type { Approval } from '../../../shared/approval'`
+ * in this file makes `npm run typecheck:web` fail with:
+ *   src/shared/types.ts(N,M): error TS6307: File '.../shared/approval.ts' is
+ *   not listed within the file list of project '.../desktop/tsconfig.web.json'.
+ *   Projects must list all files or use an 'include' pattern.
+ * (cascades into shared/approval.ts's own imports of shared/text.ts and
+ * shared/types.ts, same TS6307). `npm run typecheck:node` passes with the
+ * SAME import — this is a web-project-only `include` boundary, not a
+ * cross-desktop-wide constraint. If tsconfig.web.json's `include`/`files`
+ * setup changes, retry the import — see the file/commit that closes this
+ * comment's premise before assuming it still holds. Until then: keep the
+ * fields in sync by hand if the broker's shape moves; nothing enforces that
+ * automatically.
+ */
+export type ApprovalStatus = 'pending' | 'answered' | 'expired_notif' | 'abandoned'
+export type ApprovalKind = 'permission' | 'question' | 'plan'
+export type ApprovalVia = 'deck' | 'telegram' | 'discord' | 'ntfy'
+export type ApprovalReplyRoute = 'channel' | 'pty'
+export type ApprovalAnswerKind = 'allow' | 'deny' | 'text'
+
+export interface ApprovalOrigin {
+  host: string
+  os_user_hash: string
+  project_key: string
+  group_id: string
+  from_peer: string
+  session_ref: string
+  tile_ref: string
+}
+
+export interface Approval {
+  id: string
+  operator_id: string
+  origin: ApprovalOrigin
+  kind: ApprovalKind
+  title: string
+  question: string
+  options: string[]
+  status: ApprovalStatus
+  reply_route: ApprovalReplyRoute
+  answered_via: ApprovalVia | null
+  answer_kind: ApprovalAnswerKind | null
+  answer_text: string | null
+  created_at: string
+  notif_expires_at: string
+  answered_at: string | null
+  delivered_at: string | null
+}
+
 /** One notification channel as the Settings screen sees it. */
 export interface ApprovalChannelStatus {
   kind: 'telegram' | 'discord' | 'ntfy'
@@ -1045,6 +1101,64 @@ export interface InboxMessage {
 }
 
 /**
+ * Unified Courrier entry (ask_operator lot, Etape A): the three families the
+ * inbox panel renders are STRUCTURALLY distinct, not flagged by a boolean —
+ * `kind` discriminates a plain peer message (repliable, uncorrelated,
+ * `onInboxMessages`/'inbox:new'), a non-repliable event (no recipient, no
+ * current producer yet), and a correlated blocking question whose answer
+ * unblocks a waiting agent (`onPendingApprovals`/'approvals:pending'). The
+ * union is a client-side (renderer) merge of two independent wire channels —
+ * neither channel carries this shape itself.
+ */
+export type InboxEntry =
+  | { kind: 'message'; message: InboxMessage }
+  | { kind: 'event'; id: string; text: string; at: string }
+  | { kind: 'approval'; approval: Approval }
+
+/**
+ * The subset of InboxEntry an ACK is meaningful for. Acknowledging a
+ * blocking question would leave its agent waiting forever without ever
+ * answering it, so `inboxAck` is typed to make that call SITE unrepresentable
+ * (a TS error, not a runtime guard) rather than merely absent from the UI.
+ */
+export type AckableInboxEntry = Extract<InboxEntry, { kind: 'message' | 'event' }>
+
+/**
+ * The three Courrier read-states (card 8fdac3dd: "trois etats, a ne surtout
+ * pas fondre en deux"). All three are durable across a Deck restart: an
+ * entry absent from `inboxAckState()`'s map is 'unread' by construction (no
+ * explicit 'unread' key is ever written), 'seen' means opened but not yet
+ * resolved, 'acked' means dismissed. Never valid for a family-3 entry — see
+ * `AckableInboxEntry`.
+ */
+export type InboxAckStatus = 'seen' | 'acked'
+
+/**
+ * THE single producer of the ack-state storage key (main's ipc.ts and
+ * inbox-store.ts, and the renderer reading `inboxAckState()`'s map, must all
+ * call this — not reimplement it). Widened past the bare broker id on
+ * review: `InboxMessage.id` is an integer minted by the BROKER's own DB,
+ * which can be wiped/reinstalled/swapped independently of this Deck's local
+ * ack file. A key of just the id would then silently let a stale ack mask a
+ * brand new message reusing a low id after a reset. `sentAt` is the
+ * broker's own timestamp and is not reissued on a DB reset, so it
+ * disambiguates a replayed id.
+ */
+export function inboxEntryKey(entry: AckableInboxEntry): string {
+  // Runtime-validated, not just TS-narrowed: IPC's structured clone has no
+  // type system of its own, so a hand-built payload bypassing the compiler
+  // could still arrive shaped like an approval. Reject rather than fall
+  // through to a garbage `evt:undefined:undefined` key.
+  if (entry && entry.kind === 'message' && typeof entry.message?.id === 'number') {
+    return `msg:${entry.message.sentAt}:${entry.message.id}`
+  }
+  if (entry && entry.kind === 'event' && typeof entry.id === 'string') {
+    return `evt:${entry.at}:${entry.id}`
+  }
+  throw new Error('inboxEntryKey: unrecognized entry shape')
+}
+
+/**
  * One pending graph draft: an agent-escalated question parked durably on the
  * broker, waiting for the operator to open it in the graph view. Unlike the
  * inbox drain, the poll is non-destructive — a Deck restart loses nothing.
@@ -1429,6 +1543,47 @@ export interface DeckApi {
   graphDraftOpen(draft: DeckGraphDraft): Promise<GraphDraftOpenResult>
   /** Persisted operator-inbox history (oldest first) for startup hydration. */
   inboxHistory(): Promise<InboxMessage[]>
+  /**
+   * Answer a pending/expired_notif blocking question as the operator (family
+   * 3): claims it broker-side and delivers to the waiting agent. `false`
+   * means another channel (phone/telegram/discord) won the race, not a
+   * failure — mirrors the existing local-claim semantics in index.ts.
+   */
+  approvalReply(id: string, text: string): Promise<boolean>
+  /**
+   * Decline a pending/expired_notif blocking question. This IS an answer
+   * (settles the ticket, unblocks the agent with a refusal) — never an ack,
+   * which would leave the agent waiting indefinitely.
+   */
+  approvalDecline(id: string): Promise<boolean>
+  /**
+   * Reply to an ordinary (family 1) inbox message: not correlated, not a
+   * resolution — a plain targeted announce. Resolves to the recipient
+   * count from the underlying /announce call (0 or 1 for a single named
+   * peer in practice), not a boolean: "sent to nobody" (the peer went
+   * offline between the list refresh and the reply) is real information a
+   * boolean would destroy.
+   */
+  inboxReply(toPeerId: string, text: string): Promise<number>
+  /**
+   * Persisted local state of every family 1/2 Courrier entry, keyed by the
+   * same synthetic key `inboxMarkSeen`/`inboxAck` derive (see
+   * `InboxAckStatus`). Read once at startup; an absent key means unread. The
+   * THIRD state (seen-but-not-acked) is durable on purpose — the acceptance
+   * criterion is "survives a Deck restart", not just "survives a re-render".
+   */
+  inboxAckState(): Promise<Record<string, InboxAckStatus>>
+  /**
+   * Mark a family 1/2 Courrier entry seen (viewed, still pending an ack).
+   * Never downgrades an already-acked entry back to seen.
+   */
+  inboxMarkSeen(entry: AckableInboxEntry): Promise<void>
+  /**
+   * Acknowledge a family 1/2 Courrier entry. Typed to `AckableInboxEntry` so
+   * a family-3 (blocking question) entry cannot even be PASSED here — see
+   * that type's doc comment.
+   */
+  inboxAck(entry: AckableInboxEntry): Promise<void>
 
   // companion LAN bridge (PLAN MB1/MB2) — desktop window only; a remote
   // client gets 'remote-blocked' on all three (physical-presence actions).
@@ -1554,6 +1709,12 @@ export interface DeckApi {
   onSessionAttention(cb: (e: SessionAttentionEvent) => void): () => void
   /** Operator-inbox batch drained from the broker (PLAN C12), oldest first. */
   onInboxMessages(cb: (messages: InboxMessage[]) => void): () => void
+  /**
+   * Full pending/expired_notif approval list for this operator (family 3,
+   * non-destructive broker poll — same replace-whole-state contract as
+   * onGraphDrafts, including an empty array being a valid full state).
+   */
+  onPendingApprovals(cb: (approvals: Approval[]) => void): () => void
   /** Full pending graph-draft list (non-destructive broker poll). */
   onGraphDrafts(cb: (drafts: DeckGraphDraft[]) => void): () => void
   /** Notification click on an inbox message: open the inbox panel. */

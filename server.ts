@@ -1669,7 +1669,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           content: [
             {
               type: "text" as const,
-              text: "Remote approvals are not enabled for this session. Ask the operator directly, on screen.",
+              // Card 469f3176: the credential is armed unconditionally at Deck
+              // startup and inherited by every session spawned AFTER that (the
+              // env var travels at spawn time only). This refusal therefore no
+              // longer means "no remote channel configured" -- it means THIS
+              // session predates the arming, so it never inherited
+              // CLAUDE_PEERS_APPROVAL_FILE. Naming the real cause here, not a
+              // stale one, since a wrong-but-plausible reason is worse than none.
+              text: "This session started before remote approvals were armed, so it never inherited the credential. Restart the session to pick it up, or ask the operator directly, on screen.",
             },
           ],
           isError: true,

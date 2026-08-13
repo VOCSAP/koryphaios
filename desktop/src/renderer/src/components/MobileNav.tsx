@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useDeck } from '../store'
+import { inboxBadgeCount, useDeck } from '../store'
 import { useT } from '../i18n'
 import { MobileSheet } from './MobileSheet'
 import { GLYPHS, GLYPH_BADGES } from './icons'
@@ -17,17 +17,19 @@ export function MobileNav(): React.JSX.Element {
   const view = useDeck((s) => s.view)
   const setView = useDeck((s) => s.setView)
   const inboxOpen = useDeck((s) => s.inboxOpen)
-  const inboxUnread = useDeck((s) => s.inboxUnread)
   const openInbox = useDeck((s) => s.openInbox)
   const openSettings = useDeck((s) => s.openSettings)
-  const draftCount = useDeck((s) => s.graphDrafts.length)
   const [moreOpen, setMoreOpen] = useState(false)
 
   const goto = (v: DeckView): void => {
     openInbox(false)
     setView(v)
   }
-  const badge = inboxUnread + draftCount
+  // Same single producer as NavRail: this bar summed its own terms and so
+  // missed the blocking-question count when NavRail gained it (card 8fdac3dd
+  // review). A blocking question is the one family where an agent is stopped
+  // waiting, so a mobile zero here was a confident lie.
+  const badge = useDeck(inboxBadgeCount)
 
   return (
     <>

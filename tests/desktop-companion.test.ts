@@ -140,6 +140,32 @@ test('agents:stop (trust-changing) is remote-blocked; agents:stop-state (read) i
   expect(REMOTE_BLOCKED_CHANNELS.has('agents:stop-state')).toBe(false)
 })
 
+// ask_operator lot (mutation review, trou 1): 'approvals:reply' and
+// 'approvals:decline' render a HUMAN VERDICT that a stopped agent consumes
+// and acts on directly -- unlike inbox:reply (a message; the recipient keeps
+// judgement) a remote companion answering here MANUFACTURES the human
+// consent that was the only thing stopping the agent (companion.ts's own
+// comment above EXPLICIT_REMOTE_BLOCKED_CHANNELS, 'ask_operator lot' section).
+// Both channels are tier 2 in CHANNEL_TIERS, BELOW the tier>=3 threshold that
+// REMOTE_BLOCKED_CHANNELS auto-unions -- so nothing derives their presence on
+// the floor; they are only blocked because EXPLICIT_REMOTE_BLOCKED_CHANNELS
+// hand-lists them. Measured (mutation review): removing either from that
+// list leaves desktop-companion.test.ts, desktop-approvals.test.ts and
+// mobile-shell-approvals.test.ts all green (70/70) -- nothing else in the
+// suite exercises this specific pair.
+//
+// This is a deliberately NAMED PAIR, not a derived rule: CHANNEL_TIERS has no
+// field encoding "renders a human verdict an agent consumes" (only the
+// numeric 0-3 sensitivity tier), and inventing one that doesn't exist in the
+// code to make this "derivable" would be exactly the fabricated taxonomy
+// this repo's conventions warn against. If a third channel gains this same
+// property later, it must be added to EXPLICIT_REMOTE_BLOCKED_CHANNELS AND
+// to this list by hand -- neither happens automatically.
+test('approvals:reply and approvals:decline (render a human verdict a stopped agent consumes) stay on the remote-block floor', () => {
+  expect(REMOTE_BLOCKED_CHANNELS.has('approvals:reply')).toBe(true)
+  expect(REMOTE_BLOCKED_CHANNELS.has('approvals:decline')).toBe(true)
+})
+
 test('companion control + native dialogs are remote-blocked', () => {
   for (const ch of [
     'companion:start',

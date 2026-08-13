@@ -140,6 +140,12 @@ export const COMPANION_MANIFEST = {
   graphInfer: { kind: 'invoke', channel: 'graph:infer' },
   graphDraftOpen: { kind: 'invoke', channel: 'graphDraft:open' },
   inboxHistory: { kind: 'invoke', channel: 'inbox:history' },
+  approvalReply: { kind: 'invoke', channel: 'approvals:reply' },
+  approvalDecline: { kind: 'invoke', channel: 'approvals:decline' },
+  inboxReply: { kind: 'invoke', channel: 'inbox:reply' },
+  inboxAckState: { kind: 'invoke', channel: 'inbox:ack-state' },
+  inboxMarkSeen: { kind: 'invoke', channel: 'inbox:mark-seen' },
+  inboxAck: { kind: 'invoke', channel: 'inbox:ack' },
 
   // companion control (desktop window only — a remote must never manage its
   // own bridge: starting/stopping the server is a physical-presence action)
@@ -184,6 +190,7 @@ export const COMPANION_MANIFEST = {
   onSessionQuota: { kind: 'event', channel: 'session:quota' },
   onSessionAttention: { kind: 'event', channel: 'session:attention' },
   onInboxMessages: { kind: 'event', channel: 'inbox:new' },
+  onPendingApprovals: { kind: 'event', channel: 'approvals:pending' },
   onGraphDrafts: { kind: 'event', channel: 'graphDrafts:update' },
   onInboxOpen: { kind: 'event', channel: 'inbox:open' },
   onFocusSession: { kind: 'event', channel: 'session:focus' },
@@ -267,7 +274,18 @@ const EXPLICIT_REMOTE_BLOCKED_CHANNELS: readonly string[] = [
   'sandbox:projection-remove',
   // Launching a browser is a HOST action: a remote device asking the PC to
   // open a link is a "make the operator's machine visit this" primitive.
-  'shell:open-external'
+  'shell:open-external',
+  // ask_operator lot: these two don't relay a message, they RENDER A HUMAN
+  // VERDICT. An agent is stopped, doing nothing, specifically because its
+  // safety model requires a human to decide -- what comes back is consumed
+  // as the operator's own decision and acted on directly. Unlike inbox:reply
+  // (a message; the recipient keeps judgement) or roadmap:assign (an
+  // existing accepted risk class), a remote companion answering here
+  // MANUFACTURES the human consent that was the only thing stopping the
+  // agent. Tier 2 alone (see CHANNEL_TIERS) does not block remote access,
+  // so this floor is what actually does.
+  'approvals:reply',
+  'approvals:decline'
 ]
 
 /**
@@ -307,6 +325,19 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'models:catalog': 0,
   'usage:read': 0,
   'inbox:history': 0,
+  'inbox:ack-state': 0,
+  'inbox:mark-seen': 1,
+  'inbox:ack': 1,
+  // Targeted, operator-authority actions reaching one NAMED peer/agent --
+  // same class as roadmap:assign (2), not announce:send's group broadcast
+  // (1). 'inbox:reply' stays here (a message; the recipient keeps
+  // judgement, matching roadmap:assign's already-accepted risk). The two
+  // approval channels below carry a stricter risk (they render a human
+  // VERDICT an agent acts on directly) and are additionally on the explicit
+  // remote-block floor -- see EXPLICIT_REMOTE_BLOCKED_CHANNELS' comment.
+  'inbox:reply': 2,
+  'approvals:reply': 2,
+  'approvals:decline': 2,
   'companion:status': 0,
   // Remote approvals. Reading the channel list is tier 0; everything else is
   // trust-changing: a bot token grants control of the operator's notification

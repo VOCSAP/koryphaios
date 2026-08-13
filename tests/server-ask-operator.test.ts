@@ -185,7 +185,7 @@ describe("ask_operator over MCP stdio", () => {
     expect(names).toContain("ask_operator_wait");
   }, 60_000);
 
-  test("without a credential the tool refuses instead of hanging", async () => {
+  test("without a credential the tool refuses instead of hanging, naming the real cause", async () => {
     const h = await boot(false);
     h.send({
       jsonrpc: "2.0",
@@ -195,7 +195,16 @@ describe("ask_operator over MCP stdio", () => {
     });
     const res = await readUntil(h.reader, 1, h.buffer);
     expect(res.result?.isError).toBe(true);
-    expect(res.result?.content?.[0]?.text).toContain("not enabled");
+    const text = res.result?.content?.[0]?.text ?? "";
+    // Card 469f3176 review: this refusal used to be worded "not enabled",
+    // which became FALSE once arming stopped being gated on mobileApprovals
+    // -- the only way left to hit this path is a session that predates the
+    // arming. Anchored on the two facts that carry the meaning (the cause
+    // named, the remediation given) rather than a loose fragment that would
+    // pass with any refusal text: this must still catch a regression back to
+    // the stale wording, or to a message that stops naming either one.
+    expect(text).toContain("before remote approvals were armed");
+    expect(text).toContain("Restart the session");
   }, 60_000);
 
   test("the operator's free text comes back as the tool result", async () => {

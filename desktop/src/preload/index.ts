@@ -206,6 +206,12 @@ const api: DeckApi = {
   graphInfer: (graphId, req) => ipcRenderer.invoke('graph:infer', graphId, req),
   graphDraftOpen: (draft) => ipcRenderer.invoke('graphDraft:open', draft),
   inboxHistory: () => ipcRenderer.invoke('inbox:history'),
+  approvalReply: (id, text) => ipcRenderer.invoke('approvals:reply', id, text),
+  approvalDecline: (id) => ipcRenderer.invoke('approvals:decline', id),
+  inboxReply: (toPeerId, text) => ipcRenderer.invoke('inbox:reply', toPeerId, text),
+  inboxAckState: () => ipcRenderer.invoke('inbox:ack-state'),
+  inboxMarkSeen: (entry) => ipcRenderer.invoke('inbox:mark-seen', entry),
+  inboxAck: (entry) => ipcRenderer.invoke('inbox:ack', entry),
 
   companionStart: () => ipcRenderer.invoke('companion:start'),
   companionStop: () => ipcRenderer.invoke('companion:stop'),
@@ -234,6 +240,7 @@ const api: DeckApi = {
   onSessionAttention: (cb: (e: SessionAttentionEvent) => void) =>
     subscribe('session:attention', cb),
   onInboxMessages: (cb: (messages: InboxMessage[]) => void) => subscribe('inbox:new', cb),
+  onPendingApprovals: (cb) => subscribe('approvals:pending', cb),
   onGraphDrafts: (cb) => subscribe('graphDrafts:update', cb),
   onInboxOpen: (cb: () => void) => subscribe('inbox:open', () => cb()),
   onFocusSession: (cb: (id: string) => void) => subscribe('session:focus', cb),

@@ -198,6 +198,28 @@ export async function fetchUndeliveredVerdicts(deps: ApprovalDeps): Promise<Appr
   return res.approvals ?? []
 }
 
+/**
+ * Approvals the Deck can still answer locally (card 469f3176: the local
+ * Courrier). Non-destructive, like the graph-drafts poll -- nothing is
+ * consumed by listing.
+ *
+ * 'pending' and 'expired_notif' are exactly the statuses settleApproval
+ * accepts for `via: 'deck'` (an expired NOTIFICATION does not mean the
+ * session stopped waiting, see broker.ts's settleApproval doc comment).
+ * `/approval/list`'s `status` field takes a single value, so this issues two
+ * requests rather than inventing a multi-status filter server-side for one
+ * caller.
+ */
+export async function fetchPendingApprovals(deps: ApprovalDeps): Promise<Approval[]> {
+  const [pending, expired] = await Promise.all([
+    signedPost<{ approvals: Approval[] }>(deps, '/approval/list', { status: 'pending' }),
+    signedPost<{ approvals: Approval[] }>(deps, '/approval/list', { status: 'expired_notif' })
+  ])
+  return [...(pending.approvals ?? []), ...(expired.approvals ?? [])].sort((a, b) =>
+    b.created_at.localeCompare(a.created_at)
+  )
+}
+
 export async function markVerdictsDelivered(deps: ApprovalDeps, ids: string[]): Promise<number> {
   if (ids.length === 0) return 0
   const res = await signedPost<{ marked: number }>(deps, '/approval/delivered', { ids })

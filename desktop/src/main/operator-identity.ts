@@ -23,7 +23,7 @@
 // Pure module: no electron import, directory and cipher injected, so it is
 // unit-testable under bun (inbox-store pattern).
 
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
 import { hostname, userInfo } from 'node:os'
 import { join } from 'node:path'
@@ -56,6 +56,23 @@ export interface OperatorIdentity {
 
 function identityPath(dir: string): string {
   return join(dir, FILE)
+}
+
+/**
+ * A backup path guaranteed free, not merely unlikely to collide (card
+ * 469f3176 review, D1): a millisecond timestamp alone can repeat across two
+ * restarts close together, and this repo has already paid for a sort key
+ * that lost rows on exactly that kind of tie. Probing existsSync and
+ * incrementing a suffix until a free name is found makes a second backup
+ * from the same millisecond land NEXT TO the first one, never over it.
+ */
+function uniqueBackupPath(file: string): string {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  let candidate = `${file}.bak-${stamp}`
+  for (let n = 1; existsSync(candidate); n++) {
+    candidate = `${file}.bak-${stamp}-${n}`
+  }
+  return candidate
 }
 
 function encrypt(cipher: SecretCipher, plain: string): string {
@@ -99,9 +116,22 @@ function computeOsUserHash(salt: string): string {
 }
 
 /**
- * Load the operator identity, creating one on first run. Returns null only
- * when the identity exists but cannot be decrypted — the caller must then
- * surface a re-enrolment prompt rather than silently starting a new identity.
+ * Load the operator identity, creating one on first run. Returns null when
+ * the identity file exists but its content could not be decrypted -- which
+ * is NOT proof the identity is gone: a null here is exactly as likely to
+ * mean the OS keychain is merely unavailable right now (locked, mid
+ * migration) as it is to mean real corruption, and this function cannot
+ * tell the two apart from in here (card 469f3176 review, mutation Q1: a
+ * caller that treated null as "corrupt, regenerate" without checking which
+ * one it was destroyed a live private key over a transient outage).
+ *
+ * Every caller except ONE must treat a null return the conservative way:
+ * surface a re-enrolment prompt, never silently start a new identity. The
+ * one exception is ApprovalRuntime.arm() (approval-runtime.ts), which
+ * self-heals on a GENUINE corruption -- gated on `cipher.isAvailable()` so a
+ * transient outage never reaches it, and backed by
+ * createOperatorIdentity's mandatory backup-before-overwrite as the second
+ * line of defense should that gate ever be wrong.
  */
 export function loadOperatorIdentity(dir: string, cipher: SecretCipher): OperatorIdentity | null {
   const file = identityPath(dir)
@@ -124,7 +154,18 @@ export function loadOperatorIdentity(dir: string, cipher: SecretCipher): Operato
   return createOperatorIdentity(dir, cipher, generateCredential())
 }
 
-/** Write a credential to app-state and return the resolved identity. */
+/**
+ * Write a credential to app-state and return the resolved identity.
+ *
+ * NEVER OVERWRITES an existing identity file in place (card 469f3176 review
+ * finding, mutation Q1): a caller that reaches here to self-heal after a
+ * decrypt failure may be looking at a merely UNAVAILABLE keychain rather than
+ * a genuinely corrupt identity (see arm()'s cipher.isAvailable() check in
+ * approval-runtime.ts). If that call is wrong, or a caller with no such guard
+ * arrives here anyway, the old private key must still be recoverable rather
+ * than destroyed: an existing file is renamed to a timestamped `.bak-*`
+ * sibling before the new one is written, never deleted, never merged.
+ */
 export function createOperatorIdentity(
   dir: string,
   cipher: SecretCipher,
@@ -132,6 +173,8 @@ export function createOperatorIdentity(
   salt = randomBytes(16).toString('base64url')
 ): OperatorIdentity {
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
+  const file = identityPath(dir)
+  if (existsSync(file)) renameSync(file, uniqueBackupPath(file))
   const stored: StoredIdentity = {
     publicKey: cred.publicKey,
     privateKeyEnc: encrypt(cipher, cred.privateKey),

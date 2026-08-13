@@ -3783,7 +3783,10 @@ svg.glyph {
   z-index: 60;
   width: 380px;
   max-width: calc(100vw - 90px);
-  height: 460px;
+  /* The operator runs eleven peers, so a scrolling list is the NOMINAL case,
+     not an edge one: 460px showed five entries out of twelve. 560 shows
+     seven and still fits the max-height clamp on the line below. */
+  height: 560px;
   max-height: calc(100vh - 90px);
   display: flex;
   flex-direction: column;
@@ -3837,6 +3840,273 @@ svg.glyph {
   display: flex;
   flex-direction: column;
   gap: 3px;
+}
+
+/* ---------- Courrier entries (card 8fdac3dd) ----------
+   One row per entry, three families kept distinct by a LEFT BAR + a glyph:
+   blue accent = a peer message (repliable), dim = an event (no recipient at
+   all), violet #b678ff = a blocking question (the "needs you" tone already
+   used by .dot-attention/.row-attention — an agent is stopped on it). The row
+   is a div[role=button], never a <button>, because it hosts a real <button>
+   for the ack: nesting one inside the other is invalid HTML and kills the
+   inner click. */
+.inbox-entry {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--fg-dim);
+  border-radius: 8px;
+  background: var(--bg-3);
+  cursor: pointer;
+}
+
+.inbox-entry:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
+.inbox-entry-message {
+  border-left-color: var(--accent);
+}
+
+.inbox-entry-event {
+  border-left-color: var(--fg-dim);
+}
+
+.inbox-entry-approval {
+  border-left-color: #b678ff;
+}
+
+/* Acked: still listed (the operator can re-open it), visibly out of the way.
+   The dimming is the LAST cue, never the only one — the check glyph in the
+   actions is what reads in monochrome. */
+.inbox-entry.is-acked {
+  opacity: 0.55;
+  background: transparent;
+}
+
+.inbox-entry-mark {
+  display: inline-flex;
+  align-items: center;
+  color: inherit;
+  opacity: 0.85;
+}
+
+.inbox-entry-message .inbox-entry-mark {
+  color: var(--accent);
+}
+
+.inbox-entry-approval .inbox-entry-mark {
+  color: #b678ff;
+}
+
+.inbox-entry-event .inbox-entry-mark {
+  color: var(--fg-dim);
+}
+
+/* min-width: 0 is load-bearing — without it the excerpt's long unbroken text
+   refuses to shrink and pushes the chevron out of the panel's clip box. */
+.inbox-entry-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.inbox-entry-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The three read-states differ by SHAPE first: filled disc (unread), hollow
+   ring (seen), no dot at all (acked — its check glyph sits in the actions).
+   Colour alone would vanish in the light theme and for a colour-blind eye. */
+.inbox-entry-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid currentColor;
+  color: var(--accent);
+}
+
+.inbox-entry-approval .inbox-entry-dot {
+  color: #b678ff;
+}
+
+.inbox-entry-dot.is-unread {
+  background: currentColor;
+}
+
+.inbox-entry-dot.is-seen {
+  background: transparent;
+}
+
+.inbox-entry-dot.is-acked {
+  display: none;
+}
+
+.inbox-entry-from {
+  font-weight: 600;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inbox-entry.is-unread .inbox-entry-from {
+  color: var(--fg);
+}
+
+.inbox-entry.is-seen .inbox-entry-from,
+.inbox-entry.is-acked .inbox-entry-from {
+  font-weight: 500;
+  color: var(--fg-dim);
+}
+
+.inbox-entry-time {
+  margin-left: auto;
+  flex: none;
+  font-size: 10px;
+  color: var(--fg-dim);
+}
+
+/* Two lines max: the list must let the operator TELL two pending messages
+   apart (peer + hour) without opening anything; the rest is the modal's job. */
+.inbox-entry-excerpt {
+  font-size: 12px;
+  color: var(--fg-dim);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+
+.inbox-entry-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.inbox-ack-btn {
+  padding: 4px;
+  color: var(--fg-dim);
+}
+
+.inbox-ack-btn:hover:not(:disabled) {
+  color: #3ec46d;
+}
+
+.inbox-entry-done {
+  display: inline-flex;
+  padding: 4px;
+  color: #3ec46d;
+}
+
+.inbox-entry-chevron {
+  display: inline-flex;
+  color: var(--fg-dim);
+}
+
+.inbox-entry:hover .inbox-entry-chevron {
+  color: var(--fg);
+}
+
+/* ---------- Courrier detail modal ---------- */
+
+.inbox-modal {
+  width: 560px;
+}
+
+.inbox-modal-family {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.inbox-modal-time {
+  font-size: 11px;
+  color: var(--fg-dim);
+  margin-bottom: 10px;
+}
+
+.inbox-modal-subject {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.inbox-modal-text {
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-3);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Suggested answers of a blocking question: one click answers and releases
+   the agent, so they are chips, not a select. */
+.inbox-modal-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.inbox-option {
+  cursor: pointer;
+}
+
+.inbox-option:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  color: var(--fg);
+}
+
+.inbox-option:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.inbox-modal-reply {
+  width: 100%;
+  margin-top: 10px;
+  resize: vertical;
+}
+
+.inbox-modal-actions {
+  margin-top: 12px;
+}
+
+/* Scoped danger-outline, exactly like .wt-actions .danger and
+   .rm-detail-actions .danger: `.modal-actions button:not(.primary)` re-paints
+   every non-primary footer button in neutral, so a bare `.btn.danger` here
+   computes rgb(228,228,228) — the class is present, correct, and DEAD.
+   Measured on the Decline button before this rule existed. The selector must
+   OUT-SPECIFY that one: `.modal-actions button:not(.primary)` scores (0,2,1),
+   so a plain `.inbox-modal-actions .danger` at (0,2,0) still lost — measured
+   too, red text and all, on the first attempt. */
+.modal-actions.inbox-modal-actions button.danger {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+}
+
+/* Says out loud what the buttons cannot: closing does NOT acknowledge, and a
+   blocking question has no ack because acking one would leave its agent
+   waiting for an answer that never comes. */
+.inbox-modal-note {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--fg-dim);
 }
 
 .inbox-msg-meta {

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useDeck } from '../store'
+import { inboxAwaitsAction, inboxBadgeCount, useDeck } from '../store'
 import { useT } from '../i18n'
 import { AmphoraGauge, GLYPHS, PithosGlyph } from './icons'
 import { sessionRemainingFraction, usageTone } from '@shared/usage'
@@ -70,12 +70,12 @@ export function NavRail(): React.JSX.Element {
     }
   }, [])
   const inboxOpen = useDeck((s) => s.inboxOpen)
-  const inboxUnread = useDeck((s) => s.inboxUnread)
   const openInbox = useDeck((s) => s.openInbox)
-  const draftCount = useDeck((s) => s.graphDrafts.length)
-  // Attention badge = unread messages + pending drafts; the glyph GLOW is
-  // drafts-only (an action is awaited, not just a message to read).
-  const badge = inboxUnread + draftCount
+  // Badge and glow come from the STORE's single producers, shared with
+  // MobileNav: re-summing the terms here is what let the blocking-question
+  // count reach one bar and not the other (card 8fdac3dd review).
+  const badge = useDeck(inboxBadgeCount)
+  const awaitsAction = useDeck(inboxAwaitsAction)
 
   // Residual offline indicator: while the broker is down the inbox entry
   // carries a red dot, so the outage stays visible even once the top banner
@@ -196,7 +196,7 @@ export function NavRail(): React.JSX.Element {
       )}
       {/* Operator inbox (PLAN C12): overlay panel, not a view. */}
       <button
-        className={`nav-rail-item${inboxOpen ? ' is-active' : ''}${draftCount > 0 ? ' is-glowing' : ''}`}
+        className={`nav-rail-item${inboxOpen ? ' is-active' : ''}${awaitsAction ? ' is-glowing' : ''}`}
         title={t('nav.inbox')}
         onClick={() => openInbox(!inboxOpen)}
       >

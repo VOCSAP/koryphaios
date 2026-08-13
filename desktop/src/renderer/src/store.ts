@@ -1,11 +1,15 @@
 import { create } from 'zustand'
+import { inboxEntryKey } from '@shared/types'
 import type {
+  AckableInboxEntry,
   AppConfig,
   BrokerStatusEvent,
   CreateSessionInput,
   DeckGraphDraft,
   DeckView,
   HelpSelection,
+  InboxAckStatus,
+  InboxEntry,
   InboxMessage,
   LocaleOption,
   RoadmapKind,
@@ -17,6 +21,15 @@ import type {
   WorkspaceSummary
 } from '@shared/types'
 import { onRemoteRefresh, onRemoteState, remoteInstalled, type RemoteState } from './remote-api'
+
+/**
+ * The blocking-question payload, DERIVED from the Courrier union instead of
+ * re-imported: `Approval` is a repo-root wire type that `@shared/types` pulls
+ * in for its own declaration but does not re-export. Deriving it keeps a
+ * single source of truth — a change to the union's third arm lands here as a
+ * type error, never as a silently diverging local mirror.
+ */
+export type InboxApproval = Extract<InboxEntry, { kind: 'approval' }>['approval']
 
 interface DeckState {
   sessions: SessionRuntime[]
@@ -64,9 +77,26 @@ interface DeckState {
   sidebarCollapsed: boolean
   /** Operator inbox (PLAN C12): drained agent messages, newest LAST. */
   inboxMessages: InboxMessage[]
-  /** Messages arrived while the panel was closed. */
-  inboxUnread: number
   inboxOpen: boolean
+  /**
+   * Family-3 Courrier entries: blocking questions an agent is STOPPED on,
+   * pushed whole by 'approvals:pending' (a full list, not a delta). Held in
+   * the store and not locally in the panel because the rail badge must count
+   * them even while the panel is closed — the one family where someone waits.
+   */
+  pendingApprovals: InboxApproval[]
+  /**
+   * Durable read-state of the family 1/2 entries, keyed by `inboxEntryKey()`.
+   * An ABSENT key is the third state ('unread') and is never written.
+   */
+  inboxAckState: Record<string, InboxAckStatus>
+  /**
+   * Reply drafts in flight, keyed by the same entry key. Lives in the store
+   * and not in the panel: `InboxPanel` is unmounted when the Courrier is
+   * folded, so a component-local draft would be destroyed by an accidental
+   * close — the operator would lose what they typed.
+   */
+  inboxReplyDrafts: Record<string, string>
   /** Pending graph drafts (agent-escalated questions): drive the rail glyph. */
   graphDrafts: DeckGraphDraft[]
   /** Graph view navigation request: open this doc and select this node. */
@@ -169,6 +199,18 @@ interface DeckState {
   setRecordingSince(at: number | null): void
   /** Open/close the operator inbox panel (opening clears the unread count). */
   openInbox(open: boolean): void
+  /**
+   * Mark a family 1/2 entry as seen (opened, still to be handled). Never
+   * downgrades an acked entry — closing a modal must not undo an ack, and
+   * opening one must not acknowledge anything.
+   */
+  markInboxSeen(entry: AckableInboxEntry): void
+  /** Acknowledge a family 1/2 entry (typed so a blocking question cannot be passed). */
+  ackInboxEntry(entry: AckableInboxEntry): void
+  /** Store/clear a reply draft for an entry key ('' drops the key). */
+  setInboxReplyDraft(key: string, text: string): void
+  /** Drop a resolved blocking question from the pending list (optimistic). */
+  clearPendingApproval(id: string): void
   /** Open a pending draft: create the pre-filled graph and navigate to it. */
   openGraphDraft(draft: DeckGraphDraft): Promise<void>
   /** GraphView consumed the navigation request. */
@@ -287,6 +329,47 @@ async function guarded(label: string, fn: () => Promise<unknown>): Promise<void>
   }
 }
 
+/**
+ * Courrier entries still in the operator's way: family 1/2 entries whose
+ * DURABLE state is anything but 'acked' (absent from the map = unread).
+ *
+ * This REPLACED a session counter (`inboxUnread`, now deleted rather than
+ * left dead beside its successor): it started at 0 on every boot and was
+ * zeroed the moment the panel opened, so ten unhandled messages showed a
+ * badge of zero after a Deck restart — a confident zero over things nobody
+ * had handled. The card's promise is that nothing leaves the operator's path
+ * until acknowledged, and only the persisted state holds that across a
+ * restart.
+ */
+export function inboxPendingCount(s: DeckState): number {
+  return s.inboxMessages.reduce(
+    (n, message) => (s.inboxAckState[inboxEntryKey({ kind: 'message', message })] === 'acked' ? n : n + 1),
+    0
+  )
+}
+
+/**
+ * THE single producer of the Courrier attention badge, shared by every
+ * navigation bar (`NavRail` desktop, `MobileNav` remote). Two twin sums that
+ * must agree is exactly the defect this lot already shipped once — the
+ * blocking-question term was added to one bar and not the other — so the
+ * bars must CALL this, never re-add three terms of their own.
+ *
+ * Blocking questions count until they are RESOLVED (an agent is stopped on
+ * each one), drafts until they are opened.
+ */
+export function inboxBadgeCount(s: DeckState): number {
+  return inboxPendingCount(s) + s.pendingApprovals.length + s.graphDrafts.length
+}
+
+/**
+ * Whether an ACTION is awaited (drives the rail glyph's attention glow), as
+ * opposed to something merely unread. Same single-producer rule as above.
+ */
+export function inboxAwaitsAction(s: DeckState): boolean {
+  return s.pendingApprovals.length + s.graphDrafts.length > 0
+}
+
 export const useDeck = create<DeckState>((set, get) => ({
   sessions: [],
   config: null,
@@ -317,8 +400,10 @@ export const useDeck = create<DeckState>((set, get) => ({
   sidebarWidth: 260,
   sidebarCollapsed: false,
   inboxMessages: [],
-  inboxUnread: 0,
   inboxOpen: false,
+  pendingApprovals: [],
+  inboxAckState: {},
+  inboxReplyDrafts: {},
   graphDrafts: [],
   graphFocus: null,
   diffTarget: null,
@@ -442,15 +527,14 @@ export const useDeck = create<DeckState>((set, get) => ({
     })
     // Operator inbox (PLAN C12): batches drained by the main-process poll.
     window.api.onInboxMessages((batch) => {
-      const { inboxMessages, inboxUnread, inboxOpen } = get()
+      const { inboxMessages } = get()
       // Dedupe by broker id: the disk-history hydration below and the live
       // stream can race on the same batch after a restart.
       const fresh = batch.filter((m) => !inboxMessages.some((x) => x.id === m.id))
-      const messages = [...inboxMessages, ...fresh].slice(-500)
-      set({
-        inboxMessages: messages,
-        inboxUnread: inboxOpen ? 0 : inboxUnread + fresh.length
-      })
+      // No unread COUNTER is kept: the badge is derived from the persisted
+      // ack state (`inboxBadgeCount`), which is the only version that
+      // survives a Deck restart.
+      set({ inboxMessages: [...inboxMessages, ...fresh].slice(-500) })
     })
     // Hydrate the persisted inbox history (the broker drain is destructive:
     // this file is the only durable copy across Deck restarts/crashes).
@@ -460,6 +544,17 @@ export const useDeck = create<DeckState>((set, get) => ({
       const merged = [...history.filter((m) => !known.has(m.id)), ...inboxMessages]
       set({ inboxMessages: merged.slice(-500) })
     })
+    // Family 3: the broker's pending blocking questions, pushed as a WHOLE
+    // list. Replacing (not merging) is what makes a question answered from
+    // the phone disappear here without any local bookkeeping.
+    window.api.onPendingApprovals((approvals) => set({ pendingApprovals: approvals }))
+    // Durable read-state of the family 1/2 entries, read once at startup: the
+    // three Courrier states must survive a Deck restart, so 'seen' is not a
+    // render-time flag.
+    void window.api
+      .inboxAckState()
+      .then((inboxAckState) => set({ inboxAckState }))
+      .catch((e) => window.api.reportError('store', `inbox ack state: ${errorText(e)}`))
     // Pending graph drafts: full list pushed by the main-process poll.
     window.api.onGraphDrafts((drafts) => set({ graphDrafts: drafts }))
     // Notification click on an inbox message: surface the panel.
@@ -507,7 +602,34 @@ export const useDeck = create<DeckState>((set, get) => ({
     })),
   setBrowserPaired: (id) => set({ browserPairedId: id }),
   setRecordingSince: (at) => set({ recordingSince: at }),
-  openInbox: (open) => set({ inboxOpen: open, inboxUnread: 0 }),
+  // Opening the panel no longer zeroes anything: an entry leaves the badge
+  // when it is ACKED, not when it is glanced at (card 8fdac3dd).
+  openInbox: (open) => set({ inboxOpen: open }),
+  // Opening an entry is NOT acknowledging it: 'seen' is the middle state, and
+  // it must never overwrite an 'acked' one (a re-opened acked entry stays
+  // acked). Optimistic locally, durable main-side.
+  markInboxSeen: (entry) => {
+    const key = inboxEntryKey(entry)
+    if (get().inboxAckState[key]) return
+    set((s) => ({ inboxAckState: { ...s.inboxAckState, [key]: 'seen' } }))
+    void guarded('inbox seen', () => window.api.inboxMarkSeen(entry))
+  },
+  ackInboxEntry: (entry) => {
+    const key = inboxEntryKey(entry)
+    set((s) => ({ inboxAckState: { ...s.inboxAckState, [key]: 'acked' } }))
+    void guarded('inbox ack', () => window.api.inboxAck(entry))
+  },
+  // A cleared draft DROPS its key rather than storing '': the map is keyed by
+  // entries that rotate out of the list, so empty strings would accumulate.
+  setInboxReplyDraft: (key, text) =>
+    set((s) => {
+      const next = { ...s.inboxReplyDrafts }
+      if (text) next[key] = text
+      else delete next[key]
+      return { inboxReplyDrafts: next }
+    }),
+  clearPendingApproval: (id) =>
+    set((s) => ({ pendingApprovals: s.pendingApprovals.filter((a) => a.id !== id) })),
   openGraphDraft: async (draft) => {
     // Main creates the pre-filled doc and flips the broker status; the local
     // list is trimmed optimistically (the next poll confirms).

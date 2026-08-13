@@ -22,7 +22,7 @@ import { existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { generateCredential, deriveTokenId } from './approval-auth'
 import { writeFileAtomic } from './atomic-write'
-import { loadOperatorIdentity, type OperatorIdentity } from './operator-identity'
+import { loadOperatorIdentity, createOperatorIdentity, type OperatorIdentity } from './operator-identity'
 import { mintSessionToken, revokeSessionToken, type ApprovalDeps } from './approval-service'
 import type { SecretCipher } from './scope-secrets'
 import type { BrokerEndpoint } from './broker-client'
@@ -74,13 +74,33 @@ export class ApprovalRuntime {
     if (this.armed) return true
     try {
       if (!existsSync(this.opts.stateDir)) mkdirSync(this.opts.stateDir, { recursive: true })
-      const identity = loadOperatorIdentity(this.opts.stateDir, this.opts.cipher)
+      // loadOperatorIdentity already mints an identity on first run (no file
+      // yet); it returns null only when a file EXISTS but could not be
+      // decrypted. That null is NOT proof of corruption on its own -- a
+      // locked/unavailable OS keychain produces the exact same null (card
+      // 469f3176 review, mutation Q1: a transiently unavailable keychain got
+      // treated as "corrupt", destroying the real identity the moment the
+      // keychain would otherwise have come back). `cipher.isAvailable()` is
+      // the only signal that tells the two apart: only regenerate when the
+      // cipher itself is working right now, so the decrypt failure can only
+      // be the data, never the keychain being asleep. When it is NOT
+      // available, give up arming THIS run rather than guess -- the identity
+      // is untouched, and the next arm() (next restart, or a live keychain
+      // recheck) gets a clean shot at it.
+      let identity = loadOperatorIdentity(this.opts.stateDir, this.opts.cipher)
       if (!identity) {
+        if (!this.opts.cipher.isAvailable()) {
+          reportError(
+            'approvals',
+            'operator identity unreadable because the keychain is unavailable right now — remote approvals stay off until it returns (not regenerating: that would destroy the real identity and orphan pending approvals / phone pairings under the old operator id)'
+          )
+          return false
+        }
         reportError(
           'approvals',
-          'operator identity unavailable — remote approvals stay off (re-enrol this machine)'
+          'operator identity was unreadable — regenerating (this machine will re-enrol under a new operator id; the old identity file is kept as a .bak, never deleted)'
         )
-        return false
+        identity = createOperatorIdentity(this.opts.stateDir, this.opts.cipher, generateCredential())
       }
       this.identity = identity
 
@@ -140,4 +160,24 @@ export class ApprovalRuntime {
       reportError('approvals', 'could not revoke the session credential', e)
     }
   }
+}
+
+/**
+ * Arm approvals at Deck startup (card 469f3176). Deliberately its own
+ * function, and deliberately taking NO mobileApprovals-shaped argument: the
+ * bug this card fixes was index.ts's startup call site being wrapped in
+ * `if (config.mobileApprovals)`. A text scan of index.ts only catches the
+ * LITERAL spelling of that guard -- rewritten as `=== true`, a ternary, or an
+ * inverted early-return, it stays invisible to a scan while the bug is back.
+ * This function's signature makes that whole family of rewrites impossible
+ * to hide from a test: nothing here CAN branch on mobileApprovals, because
+ * mobileApprovals never reaches it. index.ts's whenReady handler must call
+ * this directly (see the sibling call site there) with nothing wrapped
+ * around it -- the only way left to reintroduce the bug is at that one call
+ * site, which desktop-approval-arm-unconditional.test.ts still scans as a
+ * second-rung check, per team-lead ruling (this function is the primary
+ * proof).
+ */
+export async function armApprovalsAtStartup(approvals: ApprovalRuntime): Promise<boolean> {
+  return approvals.arm()
 }
