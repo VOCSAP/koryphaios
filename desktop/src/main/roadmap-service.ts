@@ -509,10 +509,11 @@ async function roadmapLockPeers(
  * dispatch skips them while their tiles are paused. Targets PEER_IDS, never
  * card ids -- a peer may hold zero, one or several locked cards.
  *
- * NOT YET IMPLEMENTED broker-side (POST /roadmap/lock-park doesn't exist as
- * of this lot): this call is cabled ahead of the route landing and WILL
- * throw (roadmapPost rejects on a non-ok response) until it does. Callers
- * must catch and report, never let this block the stop primitive itself.
+ * POST /roadmap/lock-park is implemented broker-side (round-3 mutation
+ * review, card aaf4537d) -- this call reaches a real route, not a stub. It
+ * can still throw (roadmapPost rejects on a non-ok response: missing
+ * operator proof, an over-cap batch, a network error), so callers must catch
+ * and report, never let this block the stop primitive itself.
  */
 export async function lockPark(
   endpoint: BrokerEndpoint,
@@ -524,7 +525,8 @@ export async function lockPark(
 
 /**
  * Card aaf4537d lot 3, Hard Stop's counterpart of lockPark: releases the
- * park instead of setting it. Same not-yet-implemented-broker-side caveat.
+ * park instead of setting it. Same "call the real broker route, catch and
+ * report on failure" contract as lockPark above.
  */
 export async function lockRelease(
   endpoint: BrokerEndpoint,

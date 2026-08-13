@@ -945,8 +945,13 @@ export function registerIpc({
             report.locks.error = `${result.failed.length} peer(s) failed: ${result.failed.join(', ')}`
           }
         } catch (e) {
-          // Not yet implemented broker-side (POST /roadmap/lock-park|lock-release):
-          // report the failure, never let it block the stop primitive itself.
+          // Round-4 mutation review (card aaf4537d): a foreign-owned park is
+          // NOT a throw cause -- the route still answers 200 with that
+          // peer_id in `result.failed`, handled a few lines above, never an
+          // exception. What actually lands here: a network error, or a
+          // 401/403/400 from the route itself (unregistered reserved
+          // identity, missing operator proof, an over-cap batch). Report it,
+          // never let it block the stop primitive itself.
           const msg = e instanceof Error ? e.message : String(e)
           report.locks.error = msg
           reportError('dispatch', `agents:stop ${stopMode}: lock call failed`, e)
@@ -964,10 +969,18 @@ export function registerIpc({
     const tiles = service.list()
     const live = tiles.filter((r) => r.status !== 'exited')
     const busy = live.filter((r) => r.thinking)
-    // paused/parkedCards stay 0 until POST /roadmap/lock-park exists broker-side
-    // (another developer's lot on this same card) -- honest placeholder rather
-    // than a fabricated count, and DERIVED (not a stored flag) once it lands:
-    // a tile is paused iff its peerId holds >=1 non-expired parked lock.
+    // Round-3 mutation review (card aaf4537d, item 6): paused/parkedCards are
+    // still hardcoded 0 -- STALE justification corrected here. POST
+    // /roadmap/lock-park is implemented broker-side now (this same card), so
+    // "stay 0 until the route exists" no longer holds. What is still missing
+    // is the DERIVATION itself: a tile is paused iff its peerId holds >=1
+    // non-expired parked lock (per LOCK_PARK_TTL_SEC), and computing that
+    // here needs a roadmap read scoped to this project's live peerIds --
+    // `service.list()` above has no roadmap access at all. That is a real
+    // feature addition (a new broker read + wiring), out of scope for a
+    // comment-only fix; left as 0 deliberately (an honest "not computed",
+    // not a fabricated count) and escalated to the team-lead rather than
+    // implemented inline.
     return { live: live.length, busy: busy.length, paused: 0, parkedCards: 0 }
   })
 

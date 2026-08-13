@@ -118,10 +118,29 @@ export function refusesInactiveToggle(
  * check) must agree with on the exact same threshold, so the SQL sweep and
  * the TS guards cannot silently drift onto different cutoffs.
  */
+// Round-3 mutation review (card aaf4537d): a bare SQLite `datetime('now')`
+// string ("YYYY-MM-DD HH:MM:SS") carries no timezone marker at all, and
+// `Date.parse()` reads a marker-less string as LOCAL time (V8 behaviour) --
+// on a non-UTC host that silently shifts the instant by the host's UTC
+// offset, expiring a fresh park immediately under a short TTL and shrinking
+// every park by up to ~14h at the default TTL. `bun test` forces TZ=UTC, so
+// a suite that never sets TZ explicitly is structurally blind to this.
+// broker.ts's lock-park route now writes an ISO string (with 'Z'), but this
+// is a pure module with more than one producer over time (a restored/
+// imported row, a future write path) -- normalize here rather than trust
+// the producer: a string with no 'Z' and no `+HH:MM`/`-HH:MM` offset is
+// treated as UTC, by swapping SQLite's space separator for 'T' (which
+// `Date.parse` requires) and appending 'Z'.
+function parseAsUtcMs(value: string): number {
+  const hasTimezone = /Z$|[+-]\d{2}:\d{2}$/.test(value);
+  if (hasTimezone) return Date.parse(value);
+  return Date.parse(`${value.replace(" ", "T")}Z`);
+}
+
 export function isParked(parkedAt: string | null, nowIso: string, ttlSec: number): boolean {
   if (parkedAt === null) return false;
-  const parkedMs = Date.parse(parkedAt);
-  const nowMs = Date.parse(nowIso);
+  const parkedMs = parseAsUtcMs(parkedAt);
+  const nowMs = parseAsUtcMs(nowIso);
   if (Number.isNaN(parkedMs) || Number.isNaN(nowMs)) return false;
   return nowMs - parkedMs < ttlSec * 1000;
 }

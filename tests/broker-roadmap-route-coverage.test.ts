@@ -98,6 +98,23 @@ const GUARDED_PROBES: Record<string, (ctx: ProbeCtx) => Record<string, unknown>>
   "/roadmap/append-context": (c) => ({ id: c.itemId, by: c.victimPeerId, text: "x" }),
 };
 
+/**
+ * Card aaf4537d (team-lead arbitration): routes that DO resolve a provable
+ * identity (resolveRoadmapAuthor succeeds for an ordinary, unreserved `by`)
+ * but still refuse the write because operator PRIVILEGE, not identity, is
+ * missing -- 403, not 401. A route that belongs here can never sit in
+ * GUARDED_PROBES: that dict's own test asserts exactly 401, so folding a
+ * 403-shaped route in there would either force a wrong status through the
+ * shared assertion or silently stop testing the 401 case for everyone else.
+ * A new operator-gated route must be added HERE explicitly (or to
+ * GUARDED_PROBES, or to READ_ROUTES/EXEMPT_ROUTES) -- unclassifiedRoutes
+ * below still fails closed on anything left out of all four.
+ */
+const OPERATOR_GUARDED_PROBES: Record<string, (ctx: ProbeCtx) => Record<string, unknown>> = {
+  "/roadmap/lock-park": (c) => ({ project_key: PK, by: c.victimPeerId, peer_ids: [c.victimPeerId] }),
+  "/roadmap/lock-release": (c) => ({ project_key: PK, by: c.victimPeerId, peer_ids: [c.victimPeerId] }),
+};
+
 interface ProbeCtx {
   itemId: string;
   victimPeerId: string;
@@ -110,7 +127,11 @@ interface ProbeCtx {
  */
 function unclassifiedRoutes(routes: string[]): string[] {
   return routes.filter(
-    (r) => !READ_ROUTES.has(r) && !EXEMPT_ROUTES.has(r) && !(r in GUARDED_PROBES)
+    (r) =>
+      !READ_ROUTES.has(r) &&
+      !EXEMPT_ROUTES.has(r) &&
+      !(r in GUARDED_PROBES) &&
+      !(r in OPERATOR_GUARDED_PROBES)
   );
 }
 
@@ -123,6 +144,8 @@ const EXPECTED_ROUTES = [
   "/roadmap/export",
   "/roadmap/import",
   "/roadmap/list",
+  "/roadmap/lock-park",
+  "/roadmap/lock-release",
   "/roadmap/reorder",
   "/roadmap/upsert",
 ];
@@ -204,6 +227,71 @@ test("every guarded write route refuses an author it cannot prove", async () => 
   }
 });
 
+// Card aaf4537d (round-3 mutation review, C7a): the 401 loop above cannot by
+// itself catch a route MISCLASSIFIED into GUARDED_PROBES that actually
+// belongs in OPERATOR_GUARDED_PROBES (e.g. /roadmap/lock-park) -- its probe's
+// `by` is a REGISTERED peer_id, so resolveRoadmapAuthor's own impersonation
+// gate 401s BEFORE any route-specific logic runs, for every route without
+// exception. Moving lock-park into GUARDED_PROBES stayed fully green under
+// that probe alone: the assertion is blind to which bucket a route sits in.
+// This is the same discipline the OPERATOR_GUARDED_PROBES probe below already
+// uses (an UNREGISTERED, unreserved `by`), applied here as a SECOND, additive
+// check -- not a replacement, since the five real GUARDED_PROBES members
+// (upsert/archive/reorder/import/append-context) legitimately SUCCEED for an
+// ordinary unregistered author on an unlocked/unparked item (measured by
+// reading each handler: none of them requires `author.proven` or
+// `author.operator_id` outside of privileged sub-paths like `force`). So
+// replacing the registered-peer probe with an unregistered one, as the
+// review's wording could be read literally, would turn those five green
+// assertions red for the wrong reason. What actually distinguishes a
+// GUARDED_PROBES route from an OPERATOR_GUARDED_PROBES one is the 403 gate
+// itself: only the latter checks `author.operator_id === undefined`. Sending
+// an unregistered `by` and asserting the response is NEVER 403 catches
+// exactly that -- if lock-park sat here, this probe would 403 (it requires
+// operator proof) where "not 403" is expected, going red.
+test("no guarded write route silently requires operator proof (that gate belongs to OPERATOR_GUARDED_PROBES only)", async () => {
+  const seeded = await post<{ item: RoadmapItem }>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    by: "unregistered-fixture-2",
+    title: "coverage target (unregistered-author probe)",
+  });
+  expect(seeded.status).toBe(200);
+
+  const ctx: ProbeCtx = {
+    itemId: seeded.body.item.id,
+    victimPeerId: "unregistered-guarded-probe-fixture",
+  };
+
+  for (const [route, makeBody] of Object.entries(GUARDED_PROBES)) {
+    const res = await post<{ error?: string }>(`${broker.url}${route}`, makeBody(ctx));
+    expect([route, res.status]).not.toEqual([route, 403]);
+  }
+});
+
+test("every operator-guarded write route refuses a well-formed write with no operator proof, with 403 (identity is provable, privilege is not)", async () => {
+  // `by` is deliberately an UNREGISTERED name here, unlike the 401 probe
+  // above: a `by` matching a real registered peer_id would trip
+  // resolveRoadmapAuthor's OWN peer-identity-proof branch first (401),
+  // masking this route's separate operator-privilege gate entirely --
+  // measured (RED before this fix: 401 received where 403 was expected).
+  // An unregistered, unreserved name resolves as an ordinary unproven claim
+  // (author.operator_id === undefined, no error), which is exactly the
+  // shape that isolates the 403 gate under test.
+  const seeded = await post<{ item: RoadmapItem }>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    by: "unregistered-fixture-operator",
+    title: "operator coverage target",
+  });
+  expect(seeded.status).toBe(200);
+
+  const ctx: ProbeCtx = { itemId: seeded.body.item.id, victimPeerId: "unregistered-fixture-operator" };
+
+  for (const [route, makeBody] of Object.entries(OPERATOR_GUARDED_PROBES)) {
+    const res = await post<{ error?: string }>(`${broker.url}${route}`, makeBody(ctx));
+    expect([route, res.status]).toEqual([route, 403]);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // SECOND AXIS (card c33a5968): the guard above proves resolveRoadmapAuthor is
 // called on every write route -- it says nothing about whether a HANDLER
@@ -265,6 +353,8 @@ const GUARDED_INACTIVE_HANDLERS = new Set(["handleRoadmapUpsert", "handleRoadmap
 const EXEMPT_INACTIVE_HANDLERS = new Set([
   "handleRoadmapArchive",
   "handleRoadmapContextAppend",
+  "handleRoadmapLockPark",
+  "handleRoadmapLockRelease",
   "handleRoadmapReorder",
   "releaseStaleLocks",
 ]);
@@ -295,6 +385,8 @@ const EXPECTED_INACTIVE_HANDLERS = [
   "handleRoadmapExport",
   "handleRoadmapImport",
   "handleRoadmapList",
+  "handleRoadmapLockPark",
+  "handleRoadmapLockRelease",
   "handleRoadmapReorder",
   "handleRoadmapUpsert",
   "releaseStaleLocks",

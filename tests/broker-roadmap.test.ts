@@ -105,6 +105,32 @@ test("patch is partial: only sent fields move, updated_by/updated_at stamp", asy
   expect(item.updated_by).toBe("dev-2");
 });
 
+// Card aaf4537d, round-3 mutation review, extra cell (b): handleRoadmapUpsert
+// resolves `nextStatus` as `body.status ?? existing.status` (broker.ts
+// ~2498) -- a partial upsert that never sends `status` at all must inherit
+// whatever status the row already carries, not silently reset to a
+// hardcoded default. Distinct from the "patch is partial" test above, which
+// always sends `status` explicitly and so never exercises the `??` fallback
+// itself.
+test("partial upsert that sends no `status` field at all inherits the item's current status, not a hardcoded default", async () => {
+  const created = await add({ title: "Status shape inheritance" });
+  const claimed = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    id: created.id,
+    by: "dev-3",
+    status: "in_progress",
+  });
+  expect(claimed.body.item.status).toBe("in_progress");
+
+  const res = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    id: created.id,
+    by: "dev-3",
+    tags: ["reshaped"],
+  });
+  expect(res.status).toBe(200);
+  expect(res.body.item.status).toBe("in_progress");
+  expect(res.body.item.tags).toEqual(["reshaped"]);
+});
+
 test("patch of an unknown id -> 404; empty title -> 400", async () => {
   const missing = await post(`${broker.url}/roadmap/upsert`, {
     id: "00000000-0000-0000-0000-000000000000",

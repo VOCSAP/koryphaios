@@ -40,6 +40,7 @@ import {
   refusesInactiveClaim,
   refusesInactiveToggle,
   refusesParkedArchive,
+  isParked,
 } from "./shared/roadmap-lock.ts";
 import {
   APPROVAL_ANSWER_KINDS,
@@ -80,6 +81,10 @@ import type {
   RoadmapLevel,
   RoadmapListRequest,
   RoadmapListResponse,
+  RoadmapLockParkRequest,
+  RoadmapLockParkResponse,
+  RoadmapLockReleaseRequest,
+  RoadmapLockReleaseResponse,
   RoadmapPriority,
   RoadmapReorderRequest,
   RoadmapReorderResponse,
@@ -1751,6 +1756,20 @@ function handlePeekMessages(body: PollMessagesRequest): PollMessagesResponse {
 const ROADMAP_KINDS: readonly RoadmapKind[] = ["feature", "bug", "debt", "idea", "chore", "directive"];
 const DIRECTIVE_COMMANDS: readonly RoadmapDirective[] = ["clear", "compact", "magic_compact"];
 const MAX_DIRECTIVE_TARGETS = 16;
+// Round-3 mutation review (card aaf4537d): lock-park/lock-release must not
+// share MAX_DIRECTIVE_TARGETS -- their batch is Hard Stop's "every live tile
+// in this Deck", a materially different population from a directive card's
+// hand-picked target list, and cleanPeerIds's own truncation silently
+// dropped the tail with no signal (measured: 20 peer_ids in, 16 parked, 0
+// failed, the remaining 4 read by the caller as "nothing to do"). Sized
+// against a MEASURED real fleet, not guessed: this exact broker, right now,
+// carries 12 concurrently-registered peers in the koryphaios group alone
+// (`bun cli.ts peers`, one operator's own heavy multi-session dev workflow)
+// and 24 total across every group it serves -- a single Deck's tile count is
+// bounded further still by one PTY + one webContents per tile, so 64 stays
+// generous above any observed real batch while remaining a real, enforced
+// ceiling rather than no bound at all.
+const LOCK_BATCH_MAX_TARGETS = 64;
 const ROADMAP_PRIORITIES: readonly RoadmapPriority[] = ["must", "should", "could", "wont"];
 const ROADMAP_LEVELS: readonly RoadmapLevel[] = ["low", "medium", "high"];
 const ROADMAP_STATUSES: readonly RoadmapStatus[] = [
@@ -1825,7 +1844,13 @@ function importedText(value: unknown, existing: string | undefined): string {
   return typeof value === "string" ? value : "";
 }
 
-function cleanPeerIds(v: unknown): string[] {
+// `maxLen` defaults to MAX_DIRECTIVE_TARGETS for directive callers; lock-park/
+// lock-release pass LOCK_BATCH_MAX_TARGETS instead (round-3 review, card
+// aaf4537d) precisely so a truncation here can never again read as "nothing
+// to do" for the tail -- both call sites now reject loudly BEFORE this
+// function runs when the raw array exceeds their own cap, so this break is
+// a defense-in-depth backstop, not the enforcement point.
+function cleanPeerIds(v: unknown, maxLen: number = MAX_DIRECTIVE_TARGETS): string[] {
   if (!Array.isArray(v)) return [];
   const out: string[] = [];
   for (const x of v) {
@@ -1833,7 +1858,7 @@ function cleanPeerIds(v: unknown): string[] {
     const id = x.trim();
     if (!PEER_ID_REGEX.test(id) || RESERVED_PEER_IDS.includes(id) || out.includes(id)) continue;
     out.push(id);
-    if (out.length >= MAX_DIRECTIVE_TARGETS) break;
+    if (out.length >= maxLen) break;
   }
   return out;
 }
@@ -2548,6 +2573,30 @@ function handleRoadmapUpsert(
       };
     }
 
+    // Card bc0ccb17: same parked-archive guard as handleRoadmapArchive. Upsert
+    // can also drive a card to status='archived' directly (RoadmapStatus
+    // enum includes it, and the write below stamps deleted_at exactly like
+    // /roadmap/archive does) -- without this check that second path bypassed
+    // the guard entirely, a disguised fail-open of the same protection
+    // archive() already enforces. Checked on `nextStatus`, not on a
+    // from-not-archived transition, so a parked card re-saved with
+    // status='archived' stays refused on every call, not only the first.
+    if (
+      nextStatus === "archived" &&
+      refusesParkedArchive(
+        existing.lock_parked_by,
+        existing.lock_parked_at,
+        new Date().toISOString(),
+        LOCK_PARK_TTL_SEC,
+        author.operator_id
+      )
+    ) {
+      return {
+        error: `item is parked by '${existing.lock_parked_by}' -- cannot archive`,
+        status: 409,
+      };
+    }
+
     // Directive coherence (CT1): a 'directive' item must carry a valid command;
     // any other kind must not. Fields resolve against the existing row on patch.
     const nextKind = body.kind ?? existing.kind;
@@ -2601,14 +2650,26 @@ function handleRoadmapUpsert(
     const isSameOwnerReclaim =
       resolvedLock.locked && existing.locked && existing.locked_by === resolvedLock.lockedBy;
     const keptLockedAt = isSameOwnerReclaim ? existing.locked_at : null;
-    // Card aaf4537d: the park survives an ordinary edit made while the SAME
-    // owner still holds the lock (the exact case releaseStaleLocks's clause 1
-    // prefix already protects -- a context enrichment refreshing updated_at
-    // must not silently un-park the card). Any write that actually changes
-    // who holds the lock, or drops it, clears the park: a park is scoped to
-    // one specific owner's one specific claim, not to the card in general.
-    const keptParkedAt = isSameOwnerReclaim ? existing.lock_parked_at : null;
-    const keptParkedBy = isSameOwnerReclaim ? existing.lock_parked_by : null;
+    // Card aaf4537d, DELTA (round-3 mutation review): the park is scoped to
+    // the OPERATOR who parked it, never to the peer-lock reclaim question
+    // above (isSameOwnerReclaim compares locked_by, a different actor
+    // entirely). Conflating the two was the two-upsert service door: a
+    // foreign, non-archiving write (nextStatus !== 'in_progress', so
+    // isSameOwnerReclaim is false) silently nulled the park, and a SECOND
+    // upsert with status='archived' then sailed through refusesParkedArchive
+    // -- that guard only ever sees THIS call's own row state, it has no
+    // memory of a park a prior write already erased. The park now survives
+    // every write except two: the SAME operator who parked it touching the
+    // card again (their own decision to reverse, same as a self-archive), or
+    // a park that has already expired past LOCK_PARK_TTL_SEC (this only has
+    // to agree with isParked's verdict for a row a write happens to touch;
+    // releaseStaleLocks's SQL sweep is what clears an expired park on a row
+    // nothing ever touches again).
+    const parkOwnerIsAuthor =
+      existing.lock_parked_by !== null && author.operator_id === existing.lock_parked_by;
+    const parkStillLive = isParked(existing.lock_parked_at, new Date().toISOString(), LOCK_PARK_TTL_SEC);
+    const keptParkedAt = parkOwnerIsAuthor || !parkStillLive ? null : existing.lock_parked_at;
+    const keptParkedBy = parkOwnerIsAuthor || !parkStillLive ? null : existing.lock_parked_by;
 
     // A status change away from 'archived' restores the item (clears the soft
     // delete); archiving through upsert stamps it like /roadmap/archive does.
@@ -2807,6 +2868,228 @@ function handleRoadmapArchive(
     [author.operator_id ?? null, by, body.id]
   );
   return { item: getRoadmapItem(body.id)! };
+}
+
+/**
+ * Card aaf4537d, lot 1: parks the work-lock(s) currently held by each of
+ * `peer_ids` under `project_key` -- the broker-side counterpart of the
+ * desktop's Pause stop (`lockPark` in desktop/src/main/roadmap-service.ts,
+ * wired ahead of this route landing). Operator-gated UNCONDITIONALLY, not
+ * just when `by` happens to be a reserved name: this route acts on OTHER
+ * agents' locks by construction (a peer never parks its own lock; the
+ * operator does it on their behalf while pausing that agent's tile), so an
+ * ordinary unproven agent write must be refused even though most other
+ * roadmap routes would accept one. `lock_parked_by` is stamped with the
+ * OPERATOR's `operator_id` (never `by`, never the target peer_id) -- see
+ * `refusesParkedArchive`'s doc comment in shared/roadmap-lock.ts for why
+ * that distinction matters.
+ *
+ * A peer_id with no currently-locked card under this project is a silent
+ * no-op (absent from both `parked` and `failed`) -- team-lead arbitration:
+ * `failed` is reserved for a genuine per-row write exception, since most
+ * pause targets simply hold no lock and that must not read as an error.
+ */
+// Card c33a5968: no inactive guard here, deliberately -- this handler only
+// ever writes lock_parked_at/lock_parked_by, never status or locked, so it
+// structurally cannot claim a card toward in_progress/locked.
+function handleRoadmapLockPark(
+  body: RoadmapLockParkRequest
+): RoadmapLockParkResponse | { error: string; status: number } {
+  const author = resolveRoadmapAuthor(body, "/roadmap/lock-park");
+  if ("error" in author) return author;
+  if (author.operator_id === undefined) {
+    return { error: "lock-park requires an operator-signed write", status: 403 };
+  }
+  const projectKey =
+    typeof body.project_key === "string" && body.project_key.trim() ? body.project_key.trim() : "";
+  if (!projectKey) return { error: "project_key is required", status: 400 };
+  if (!Array.isArray(body.peer_ids) || body.peer_ids.length === 0) {
+    return { error: "peer_ids must be a non-empty array", status: 400 };
+  }
+  if (body.peer_ids.length > LOCK_BATCH_MAX_TARGETS) {
+    return { error: `too many peer_ids (max ${LOCK_BATCH_MAX_TARGETS})`, status: 400 };
+  }
+
+  const parked: string[] = [];
+  const failed: string[] = [];
+  for (const peerId of cleanPeerIds(body.peer_ids, LOCK_BATCH_MAX_TARGETS)) {
+    try {
+      // Round-4 mutation review (card aaf4537d): a row already parked by a
+      // DIFFERENT operator must land in `failed`, not be silently overwritten
+      // -- the exact mirror of lock-release's own foreign-park refusal a few
+      // lines down this file. Without this SELECT, an unconditional WHERE
+      // (locked = 1 AND project_key = ? AND locked_by = ?) let operator B
+      // re-park a card operator A already parked: `lock_parked_by` flips to
+      // B, and B can then archive straight through refusesParkedArchive,
+      // which only ever compares against the CURRENT `lock_parked_by` -- the
+      // same two-upsert-shaped bypass item 1 closed on the upsert side,
+      // reopened here on the park route itself. Read FIRST, same reasoning
+      // as lock-release: `changes === 0` alone can't distinguish "nothing to
+      // park" from "refused, foreign park" and this route's contract (like
+      // release's) requires telling them apart.
+      const row = db
+        .query(
+          `SELECT lock_parked_by FROM roadmap_items WHERE locked = 1 AND project_key = ? AND locked_by = ?`
+        )
+        .get(projectKey, peerId) as { lock_parked_by: string | null } | null;
+      if (!row) continue;
+      if (row.lock_parked_by !== null && row.lock_parked_by !== author.operator_id) {
+        failed.push(peerId);
+        continue;
+      }
+      // Card aaf4537d, round-3 review: write an ISO timestamp (with 'Z'),
+      // not SQLite's bare datetime('now') -- a naive "YYYY-MM-DD HH:MM:SS"
+      // string has no timezone marker, and isParked's Date.parse() then
+      // reads it as LOCAL time (V8 behaviour), silently shrinking the park
+      // by the host's UTC offset. releaseStaleLocks's SQL sweep (clause 3)
+      // bites on this ISO form exactly as it did on the bare form -- SQLite
+      // datetime() comparisons parse both.
+      const parkedAtIso = new Date().toISOString();
+      // The UPDATE's WHERE repeats the same park-owner condition as the
+      // SELECT above, for the same reason lock-release's own repeated
+      // predicate does (see that route's comment): this function is
+      // synchronous end to end (no `await` in its body, bun:sqlite bindings
+      // are sync), so the repeat is not a live defense against a race that
+      // exists today, only a guard against a future regression that adds one.
+      const res = db.run(
+        `UPDATE roadmap_items SET
+           lock_parked_at = ?, lock_parked_by = ?,
+           updated_by = ?, updated_at = datetime('now')
+         WHERE locked = 1 AND project_key = ? AND locked_by = ?
+           AND (lock_parked_by IS NULL OR lock_parked_by = ?)`,
+        [parkedAtIso, author.operator_id, author.by, projectKey, peerId, author.operator_id]
+      );
+      if (res.changes > 0) parked.push(peerId);
+    } catch (e) {
+      failed.push(peerId);
+      log.error(`/roadmap/lock-park: park failed for peer '${peerId}'`, e);
+    }
+  }
+  return { parked, failed };
+}
+
+/**
+ * Card aaf4537d, lot 2: Hard Stop's counterpart of lock-park. Releases the
+ * work-lock(s) held by each of `peer_ids` under `project_key` OUTRIGHT --
+ * same end state as `releaseStaleLocks`'s sweep (locked cleared, park
+ * cleared, `in_progress` reverts to `planned`), not merely a de-park. Hard
+ * Stop's promise to the operator is that the agent's cards come back to the
+ * board free for someone else to pick up; a lock-release that only cleared
+ * `lock_parked_at`/`lock_parked_by` and left `locked`/`locked_by` standing
+ * would silently break that promise (the card would stay claimed by an
+ * agent Hard Stop just killed). Same unconditional operator gate as
+ * lock-park, same peer_id-with-nothing-to-release-is-not-a-failure rule.
+ *
+ * Team-lead arbitration (aaf4537d, after bc0ccb17 landed): a row parked by a
+ * DIFFERENT operator is refused, landing in `failed`, never released -- an
+ * unrestricted release would otherwise be a service door around
+ * refusesParkedArchive: operator B releases operator A's park (clearing
+ * lock_parked_by), and the card is no longer parked at all by the time B's
+ * upsert tries to archive it, so bc0ccb17's guard never engages. The
+ * restriction is scoped to PARKED rows ONLY (`lock_parked_by` non-NULL and
+ * different from `author.operator_id`) -- a row that is merely locked, never
+ * parked, stays releasable by any operator-proven write, Hard Stop keeps its
+ * admin-wide reach there. A row parked by the SAME operator releasing it, or
+ * not parked at all, still releases normally. One peer_id's foreign-park
+ * refusal never fails the whole request: each peer_id is independent, same
+ * `released`/`failed` partial-result contract as lock-park.
+ */
+// Card c33a5968: no inactive guard here, deliberately -- this handler only
+// ever DECREASES a claim (locked -> 0, in_progress -> planned), so it
+// structurally never moves a card toward in_progress/locked; releasing a
+// lock on an inactive card is a legitimate operation, not a claim.
+function handleRoadmapLockRelease(
+  body: RoadmapLockReleaseRequest
+): RoadmapLockReleaseResponse | { error: string; status: number } {
+  const author = resolveRoadmapAuthor(body, "/roadmap/lock-release");
+  if ("error" in author) return author;
+  if (author.operator_id === undefined) {
+    return { error: "lock-release requires an operator-signed write", status: 403 };
+  }
+  const projectKey =
+    typeof body.project_key === "string" && body.project_key.trim() ? body.project_key.trim() : "";
+  if (!projectKey) return { error: "project_key is required", status: 400 };
+  if (!Array.isArray(body.peer_ids) || body.peer_ids.length === 0) {
+    return { error: "peer_ids must be a non-empty array", status: 400 };
+  }
+  if (body.peer_ids.length > LOCK_BATCH_MAX_TARGETS) {
+    return { error: `too many peer_ids (max ${LOCK_BATCH_MAX_TARGETS})`, status: 400 };
+  }
+
+  const released: string[] = [];
+  const failed: string[] = [];
+  for (const peerId of cleanPeerIds(body.peer_ids, LOCK_BATCH_MAX_TARGETS)) {
+    try {
+      // Read the current park owner FIRST: a row with no lock at all under
+      // this project/peer is a silent no-op (unchanged from lot 1), but a
+      // row parked by a DIFFERENT operator must land in `failed`, not just
+      // be skipped by the UPDATE's own WHERE below -- the two are
+      // indistinguishable from `changes === 0` alone, and this route's
+      // response contract requires telling them apart (arbitration above).
+      const row = db
+        .query(
+          `SELECT lock_parked_at, lock_parked_by FROM roadmap_items WHERE locked = 1 AND project_key = ? AND locked_by = ?`
+        )
+        .get(projectKey, peerId) as { lock_parked_at: string | null; lock_parked_by: string | null } | null;
+      if (!row) continue;
+      // Round-4 mutation review (card aaf4537d): an EXPIRED park must be
+      // treated as absent, the same threshold every other consumer of this
+      // column already agrees on (refusesParkedArchive via isParked, the
+      // upsert-path keptParkedAt/parkStillLive pair, releaseStaleLocks's own
+      // SQL sweep clause). Checking only `lock_parked_by !== null` here
+      // would let a park that died days ago still block a Hard Stop from a
+      // DIFFERENT operator until the next sweep tick -- self-healing within
+      // LOCK_SWEEP_SEC, but a live contradiction of shared/roadmap-lock.ts's
+      // own doc comment that isParked is the threshold every other guard
+      // must agree with.
+      const parkStillLive = isParked(row.lock_parked_at, new Date().toISOString(), LOCK_PARK_TTL_SEC);
+      if (row.lock_parked_by !== null && row.lock_parked_by !== author.operator_id && parkStillLive) {
+        failed.push(peerId);
+        continue;
+      }
+      // The UPDATE's WHERE repeats the same park-owner condition as the
+      // SELECT above (now including the same expiration threshold, via
+      // LOCK_PARK_TTL_SEC's cutoff expressed in SQL -- releaseStaleLocks's
+      // clause 3 already needed the identical cutoff for its own sweep, so
+      // this reuses that shape rather than inventing a second one). Round-3
+      // mutation review (card aaf4537d, item 5): this used to be documented
+      // as "defense in depth against a park landing between the SELECT above
+      // and this write" -- MEASURED that this race window does not
+      // currently exist. `handleRoadmapLockRelease` is a synchronous
+      // function (no `await` anywhere in its body; bun:sqlite's
+      // `db.query`/`db.run` are synchronous bindings, confirmed by grepping
+      // the whole file for `await db.` -- zero matches), so once this loop
+      // starts running for a request, JS run-to-completion guarantees
+      // nothing else -- not a concurrent lock-park call, not another
+      // request's own write -- can execute between this SELECT and this
+      // UPDATE, for any peer_id in the batch. The repeated predicate is
+      // therefore currently REDUNDANT with the SELECT-based check above, not
+      // a live defense: kept as a guard against a FUTURE regression (an
+      // `await` introduced into this loop -- a slower store, an added
+      // network call -- would reopen exactly this window), not something a
+      // test can pin today. There is no way to land a foreign park inside a
+      // gap that does not exist without mocking bun:sqlite's own
+      // synchronicity, which would test the mock, not this code.
+      const res = db.run(
+        `UPDATE roadmap_items SET
+           locked = 0, locked_by = NULL, locked_at = NULL, operator_id = NULL,
+           lock_parked_at = NULL, lock_parked_by = NULL,
+           status = CASE WHEN status = 'in_progress' THEN 'planned' ELSE status END,
+           updated_by = ?, updated_at = datetime('now')
+         WHERE locked = 1 AND project_key = ? AND locked_by = ?
+           AND (
+             lock_parked_by IS NULL OR lock_parked_by = ?
+             OR datetime(lock_parked_at) < datetime('now', ?)
+           )`,
+        [author.by, projectKey, peerId, author.operator_id, `-${LOCK_PARK_TTL_SEC} seconds`]
+      );
+      if (res.changes > 0) released.push(peerId);
+    } catch (e) {
+      failed.push(peerId);
+      log.error(`/roadmap/lock-release: release failed for peer '${peerId}'`, e);
+    }
+  }
+  return { released, failed };
 }
 
 /**
@@ -3237,6 +3520,18 @@ function handleRoadmapImport(body: {
       // Card 40ddf1f5 (defect 1): unconditional skip, no author comparison --
       // see the note above resolveRoadmapAuthor for why comparing `by`
       // against locked_by would be a self-declared bypass on this route.
+      //
+      // Card bc0ccb17: this is also this route's ENTIRE answer to
+      // refusesParkedArchive -- a parked card is, by construction, a locked
+      // one (parking only ever happens to a card an agent already holds
+      // in_progress), so this same skip already refuses an import row that
+      // would otherwise archive-in-place a parked card. handleRoadmapImport
+      // deliberately does NOT call refusesParkedArchive itself: doing so
+      // would leave `force:true` as the one path that still bypasses it,
+      // silently reintroducing the hole this skip closes for every other
+      // row. `force` is a CONSCIOUS exemption instead (restoring a self-
+      // export, an operator's own gesture), tracked by card 40ddf1f5, not a
+      // silent gap.
       if (existing?.locked && !force) {
         skipped.push(id);
         continue;
@@ -5092,6 +5387,20 @@ const server = Bun.serve<WsData>({
         }
         case "/roadmap/archive": {
           const result = handleRoadmapArchive(body as RoadmapArchiveRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/lock-park": {
+          const result = handleRoadmapLockPark(body as RoadmapLockParkRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/lock-release": {
+          const result = handleRoadmapLockRelease(body as RoadmapLockReleaseRequest);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }
