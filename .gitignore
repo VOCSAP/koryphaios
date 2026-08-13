@@ -54,3 +54,16 @@ WORKFLOW-LOTS-DESIGN.md
 .kleos-space
 .codex/config.toml
 /.claude/agent-memory
+
+# Third-party repos vendored ONLY as reading material for design comparison.
+# Kept out of history so a public repo never ships someone else's tree (and
+# its licence obligations) by accident through a broad `git add`.
+#
+# CAUTION, measured 2026-08-13: being gitignored keeps it out of git, NOT out
+# of the tools. A bare `bun test` scans the whole tree and RUNS the 63 test
+# files under sandbox-runtime-main, which crashes Bun on Windows
+# ("panic: integer does not fit in destination type"), and the tsconfig
+# discipline walker picks up its tsconfig.json too. Hence the gate is
+# `bun test tests`, never a bare `bun test`. Nothing enforces this exclusion
+# beyond that convention -- do not read this comment as a guarantee.
+desktop/docs/reference/
