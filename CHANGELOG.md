@@ -54,6 +54,68 @@ sur l'en-tete du volet) ; un point d'activite qui se decalait de 9 px sur la
 seule ligne portant un laurier ; et la jarre sandbox qui peignait hors du volet
 a la largeur minimale.
 
+## core + desktop (experimental) -- le parcage et la liberation des verrous gagnent leurs routes, l'archivage d'une carte parquee est refuse partout
+
+Deux cartes livrees ensemble, `aaf4537d` et `bc0ccb17`, parce que l'une ne
+peut pas partir sans l'autre : `aaf4537d` donne enfin un producteur au
+parcage, `bc0ccb17` ferme la garde d'archivage sur ce producteur.
+
+**Les routes POST /roadmap/lock-park et /roadmap/lock-release manquaient.**
+`lock_parked_at` n'etait pose a une valeur non nulle par aucun chemin, et les
+moities Pause et Hard Stop de l'en-tete appelaient des routes absentes. Le
+contrat n'est pas invente ici, il est repris de l'appelant deja livre
+(`roadmap-service.ts` `lockPark`/`lockRelease`) : meme corps `{project_key,
+peer_ids, by}` signe operateur, meme reponse `{parked|released, failed}` de
+peer_ids.
+
+**La garde `refusesParkedArchive` n'etait cablee que sur la route archive,
+pas sur l'upsert dont le statut cible est `archived`.** Elle l'est desormais,
+avec le meme refus 409 et non un no-op silencieux sur `deleted_at`, qui
+aurait ete du fail-open deguise. Les deux cartes partaient ensemble parce que
+la faille etait latente faute de producteur : livrer le parc sans la garde
+l'aurait armee dans le commit meme qui livrait le parc.
+
+**Trois portes de service fermees, toutes mesurees avant correction :**
+- deux upserts successifs par un tiers -- le premier, non archivant,
+  nullifiait le parc sans jamais consulter la garde, le second archivait
+  librement, y compris depuis une ecriture non signee se declarant avec le
+  champ libre `by` valant le peer_id du proprietaire du verrou. Le parc n'est
+  plus efface que par son proprietaire ou par son expiration.
+- `lock-park` volait un parc etranger -- re-parquer a son nom puis archiver
+  donnait le meme resultat net. La route est desormais symetrique de
+  `lock-release`, qui refusait deja.
+- `lock-release` cassait le parc d'un autre operateur, ce qui contournait en
+  deux appels la garde livree ici. La restriction ne mord que sur les lignes
+  parquees : une carte simplement verrouillee reste liberable par tout geste
+  operateur prouve, Hard Stop garde sa largeur.
+
+**Un decalage de fuseau a ete introduit puis retire pendant la livraison
+elle-meme.** La route ecrivait `datetime('now')`, un UTC naif que
+`Date.parse` lit comme heure locale ; avec un TTL de parc inferieur a
+l'offset, le parc mourait a la seconde ou il etait pose. La route ecrit
+maintenant l'ISO, et `isParked` normalise une chaine sans marqueur de zone,
+parce que la route n'est pas le seul producteur possible : l'import restaure
+des valeurs venues d'ailleurs. Fait structurant, `bun test` force `TZ=UTC`,
+donc la suite est aveugle par construction a cette classe de defaut : la
+sonde de non-regression passe un `TZ` non-UTC explicite au processus enfant
+et devient vacante si on le retire.
+
+**Troncature silencieuse remplacee par un refus bruyant.** Les deux routes
+empruntaient `MAX_DIRECTIVE_TARGETS=16` et rendaient la liste coupee, si bien
+que les peer_ids au-dela n'apparaissaient ni dans `parked` ni dans `failed`
+et se lisaient comme "rien a faire". Cap dedie `LOCK_BATCH_MAX_TARGETS=64`,
+refus 400 au-dela, verifie avant `cleanPeerIds` sur les deux routes.
+
+**La garde de couverture des routes est etendue** avec un bucket
+`OPERATOR_GUARDED_PROBES` distinct, attendu a 403 et jamais fondu dans les
+sondes 401 : une route identite-prouvee mais privilege-operateur-manquant
+rend 403, pas 401.
+
+Les preuves HTTP vivent dans des fichiers prefixes `broker-`, exclus
+deliberement du glob de collecte de la CI : elles ne sont rejouees que par le
+gate local, tout comme la normalisation de fuseau, qu'une cellule pure ne
+peut pas prouver puisque `bun test` force `TZ=UTC`.
+
 ## core + desktop (experimental) -- la vague 1 du backlog, le verrou de carte et l'identite de l'operateur, integralement livree
 
 Douze commits sur deux journees, 2026-08-11 et 2026-08-12 : `664081a`,
