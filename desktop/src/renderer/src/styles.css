@@ -1,5 +1,19 @@
 :root {
   --sidebar-w: 260px;
+  /* Width of the persistent rail the Agents sidebar leaves behind when folded.
+     Both occupants measured, border-box, at the app's 13px base font:
+       header  12 (padding-left) + 33 (fold button: glyph 13 at 1em + padding
+               9+9 + border 1+1 -- the SVG's width="20" attribute is overridden
+               by `svg.glyph { width: 1em }`, so 20 is NOT the number to use)
+               = 45
+       row     1 (panel border) + 4 (.rows padding) + 7 (row padding) + 9 (dot)
+               + 6 (gap) + 13 (laurel) + 7 (row padding) + 4 = 51
+     58 therefore leaves 7px of true slack on the row, the tighter of the two.
+     It was 52, which left ONE pixel, and one pixel is a coincidence rather than
+     a margin: any future badge, or the role glyph of card b5ba8cac, overflows a
+     rail sized that way. The scrollbar is a third occupant and is dealt with
+     where the rows are styled, not by this number. */
+  --sidebar-rail-w: 58px;
   --gap: 8px;
   --radius: 8px;
   /* THE monospace face of the Deck (card 14c97805). Theme-independent, so it
@@ -145,10 +159,14 @@ body {
 }
 
 /* Agents view wrapper: the pre-rail layout, kept mounted (PTYs alive) and
-   hidden with display:none when another rail view is active. */
+   hidden with display:none when another rail view is active.
+   The first track is `auto` and NOT `var(--sidebar-w)`: the sidebar owns its
+   own width so that folding it (a modifier class on the aside itself) shrinks
+   the track too. Reading the width from the parent would have left a 260px
+   hole beside a 52px rail. */
 .view-agents {
   display: grid;
-  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-columns: auto 1fr;
   height: 100vh;
   min-width: 0;
 }
@@ -274,6 +292,60 @@ body {
   border-right: 1px solid var(--border);
   min-width: 0;
   position: relative;
+  /* The panel carries its own width (the grid track above is `auto`), which is
+     what lets the fold modifier below change it. */
+  width: var(--sidebar-w);
+}
+
+/* Folded state (DESIGN.md, "Collapsible side panels"). One modifier class on
+   the panel itself -- the element is NEVER unmounted, or the fold would remove
+   the control that undoes it. Everything the rail cannot carry is dropped in
+   Sidebar.tsx rather than hidden here, so nothing stays reachable by keyboard
+   behind a `display: none`. Keep this selector explicit and shallow: it is the
+   half of this pattern a shared component would inherit if the three folding
+   panels are ever unified. */
+.sidebar-collapsed {
+  width: var(--sidebar-rail-w);
+}
+
+/* Rows become a strip of signals: left-aligned (see the rule below, and its
+   comment for why NOT centred), no name, no hover actions.
+   The scrollbar is hidden HERE and only here, because in a rail it is not a
+   decoration but a width thief: the operator runs eleven peers, so the list
+   scrolls in the nominal case, and a native Chromium bar (~15px) eats a third
+   of the rail and pushes the laurel out of it. Hiding the BAR does not disable
+   the SCROLLING -- `overflow-y: auto` still applies, wheel and trackpad still
+   work (verified on screen with eleven rows) -- and the panel unfolds to a
+   normal scrollbar. */
+.sidebar-collapsed .rows {
+  padding: 4px 4px;
+  scrollbar-width: none;
+}
+
+.sidebar-collapsed .rows::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* The message bar is the one block kept mounted and merely hidden (see the
+   comment at its call site in Sidebar.tsx): its draft lives in local state. */
+.sidebar-collapsed .message-bar {
+  display: none;
+}
+
+.sidebar-collapsed .row {
+  /* Left-aligned, NOT centred: centring re-flows the strip every time a row
+     gains a badge, so the activity dot -- the one signal read by scanning a
+     column -- slid sideways on the team-lead row. Fixed left edge keeps the dot
+     column straight and lets the badges grow to its right (the role glyph of
+     card b5ba8cac only widens --sidebar-rail-w). */
+  justify-content: flex-start;
+  gap: 6px;
+  padding: 7px 7px;
+  /* Equal-height rows: measured folded, a row carrying the laurel came out 4px
+     taller than a dot-only row (an inline SVG is 1em tall, a dot is 9px), which
+     turned the strip into a ragged column. */
+  min-height: 28px;
 }
 
 /* Drag handle on the sidebar's right edge. */
@@ -318,20 +390,55 @@ body {
 .sidebar-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 8px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--border);
 }
 
-.brand {
-  font-weight: 600;
-  font-size: 13px;
+/* Fold control: sole occupant of the header (card 19f5ab5b), so it is what
+   gives that row its height. `inline-flex` is load-bearing here and not a
+   detail of taste: an inline SVG reserves a descender line box, which made a
+   header holding the workspaces button 52px tall against 48px without it, and
+   the fold control slid 2px the day that button left. Any control added to
+   this header later must keep the same treatment -- hence the descendant rule
+   below rather than a rule on this class alone. Scoped to the header and NOT
+   to `.icon-btn` at large: the same 4px lives in every other icon button of
+   the app and unifying them is its own card. */
+.sidebar-fold,
+.sidebar-head .icon-btn {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
 }
 
+/* Four controls since the workspaces button moved out of the header (card
+   19f5ab5b), and four do not fit the 260px default at the previous spacing.
+   Measured at 260: the row overflowed its 235px of content, so the primary
+   shrank to its min-content width and its label broke onto a second line,
+   making every button 48px tall (52px bar -> 68px). The two lines below buy
+   back the 16px that costs: a 4px gap and a slightly tighter box on the three
+   ICON buttons of this bar only -- geometry, never the label, which is the
+   operator's call and not a stylesheet's. At 260 the bar is back to its
+   original 52px with the label on one line; dragged to the 180px minimum the
+   row wraps instead of overflowing the panel (measured: 23px of the sandbox jar
+   used to spill past the sidebar's right edge). */
 .sidebar-actions {
   display: flex;
-  gap: 6px;
+  gap: 4px;
   padding: 10px 12px;
+  flex-wrap: wrap;
+}
+
+/* 4px narrower than every other .icon-btn of the app, ON PURPOSE. This is the
+   line that pays for the row above: three icon buttons beside an EXTENSIBLE
+   primary, inside a 260px-by-default panel. Restore the standard `6px 9px` and
+   the row asks for 251px of the 235px it has, so the primary shrinks to its
+   min-content width and "Ajouter un pair" breaks onto a second line -- a defect
+   visible permanently, against an inconsistency nothing sits next to (these
+   three have no other icon-btn in their row to be compared with). If the label
+   or the default width ever changes, re-measure before aligning this back. */
+.sidebar-actions .icon-btn {
+  padding: 6px 7px;
 }
 
 /* Reuses the forward chevron rotated 90deg (down) instead of a dedicated

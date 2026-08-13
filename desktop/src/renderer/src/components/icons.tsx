@@ -404,6 +404,30 @@ const IconForward = (
   </Svg>
 )
 
+/** Folding side panel — the δέλτος πτυκτή, the hinged wax diptych: the frame is
+ *  the panel, the vertical line is its hinge (the narrow rail that SURVIVES the
+ *  fold, which is why it is drawn inside the frame and not at its edge), the
+ *  chevron is the leaf swinging toward the hinge or away from it. Two glyphs
+ *  rather than one mirrored by CSS: the frame and hinge must stay put across the
+ *  two states so the eye reads one constant object whose sign changes direction
+ *  — mirroring would slide the hinge to the other side and read as a different
+ *  panel. Deliberately NOT `GLYPH_ACTIONS.menu` (bare hamburger): that says
+ *  "a list", not "this panel folds". */
+const IconPanelFold = (
+  <Svg>
+    <rect x="3.5" y="4.5" width="17" height="15" rx="1.5" />
+    <path d="M9.5 4.5v15" />
+    <path d="m16.5 9.5-2.5 2.5 2.5 2.5" />
+  </Svg>
+)
+const IconPanelUnfold = (
+  <Svg>
+    <rect x="3.5" y="4.5" width="17" height="15" rx="1.5" />
+    <path d="M9.5 4.5v15" />
+    <path d="m14 9.5 2.5 2.5-2.5 2.5" />
+  </Svg>
+)
+
 /** Terminal screen (dock back to the agents). */
 const IconScreen = (
   <Svg>
@@ -883,6 +907,8 @@ export const GLYPH_ACTIONS = {
   menu: IconMenu,
   back: IconBack,
   forward: IconForward,
+  panelFold: IconPanelFold,
+  panelUnfold: IconPanelUnfold,
   screen: IconScreen,
   window: IconWindow,
   camera: IconCamera,

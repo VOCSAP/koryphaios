@@ -90,7 +90,6 @@ export const EN_DEFAULTS: Record<string, string> = {
   'common.restore': 'Restore',
   'common.maximize': 'Maximize',
 
-  'app.brand': 'Koryphaios',
 
   'sidebar.workspaces': 'Workspaces',
   'sidebar.addPeer': '＋ Add peer',
@@ -99,6 +98,8 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sidebar.noSessions': 'No sessions',
   'sidebar.project': 'project',
   'sidebar.resizeTitle': 'Drag to resize',
+  'sidebar.foldTitle': 'Fold the panel to its rail',
+  'sidebar.unfoldTitle': 'Unfold the panel',
   'sidebar.sessionColour': 'Session colour',
   'sidebar.renameTitle': 'Rename',
   'sidebar.removeTitle': 'Remove',

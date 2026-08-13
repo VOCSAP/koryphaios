@@ -179,25 +179,39 @@ State rules (apply to every archetype):
   it; (c) the popup list is OS-drawn — `select option { background: var(--bg-2) }`
   is what stops it flashing white. Scoped classes should carry SIZE only
   (`max-width`, `font-size`), never the box.
-- **Collapsible side panels** (roadmap filter panel, graph conversation list):
-  the collapse control lives ON THE PANEL, in the panel's own header, never in
-  a distant toolbar. Three consequences, none optional. (a) The panel is
+- **Collapsible side panels.** The reference implementation is the **Agents
+  sidebar** (`.sidebar` / `.sidebar-collapsed`, `Sidebar.tsx`, card
+  `079f034d`) — copy that one. The roadmap filter panel (`6aef4c54`) and the
+  graph conversation list (`67c21dd5`) are still open cards, and their current
+  `filterPanelOpen` / `showTimeline` code is the PRE-standard pattern this rule
+  replaces: they unmount their panel conditionally, which is exactly what (a)
+  forbids. The collapse control lives ON THE PANEL, in the panel's own header,
+  never in a distant toolbar. Four consequences, none optional. (a) The panel is
   rendered PERMANENTLY with a modifier class, never mounted/unmounted
   conditionally: a panel that disappears takes its control with it and leaves
-  nothing to click to bring it back. (b) Collapsed, it keeps a narrow rail
-  (~36px) carrying the GLYPH ALONE; expanded, the label reappears beside the
-  SAME control, at the SAME screen position. One control, one position, two
-  states, one gesture to learn. (c) Corollary: two controls for one state is
-  an affordance defect, not a convenience. Genesis, worth more than the bare
+  nothing to click to bring it back. (b) Collapsed, it keeps a narrow rail;
+  expanded, the label reappears beside the SAME control, at the SAME screen
+  position. One control, one position, two states, one gesture to learn.
+  (c) The rail's width is not a constant to copy but a SUM to recompute:
+  the Agents rail is **58px** because it carries two per-row signals (status
+  dot + team-lead laurel) and not a lone glyph, and because a rail that leaves
+  one pixel of slack overflows the day a scrollbar appears. Size it on its
+  widest row, then leave real margin; suppress the scrollbar inside the rail
+  (`scrollbar-width: none` + `::-webkit-scrollbar`) since a native bar steals a
+  third of it — hiding the bar does not disable wheel scrolling. Anything that
+  keeps LOCAL state (a draft in a `useState`) must be hidden with `display:
+  none` rather than dropped from the tree, or collapsing silently destroys what
+  the operator typed. (d) Corollary: two controls for one state is an
+  affordance defect, not a convenience. Genesis, worth more than the bare
   rule: the roadmap filter panel already had a fully wired toggle, but parked
   at the far end of the top bar and showing a CROSS while the panel was open.
   Next to an "Add" button, a cross reads "close the view", not "hide the
   filters", so the operator, who uses that panel daily, asked for a feature
   that already existed. A misplaced affordance is not merely discreet, it is
   misleading. The sign itself stays an SVG glyph of the house family (§5),
-  never an emoji. This section states the RULE, not a shipped state: neither
-  surface implements it yet, both are open cards (`6aef4c54` roadmap filters,
-  `67c21dd5` graph conversations).
+  never an emoji — here the diptych pair `GLYPH_ACTIONS.panelFold` /
+  `panelUnfold`, drawn as two mirrored entries so the frame and its hinge stay
+  put while only the chevron changes direction.
 - **Headers of full views** (`.worktrees-head`, `.roadmap-head`,
   `.settings-head`…): flex row, `h2` 15px, actions right-aligned after a
   flex spacer, bottom border.

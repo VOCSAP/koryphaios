@@ -28,6 +28,9 @@ const DEFAULT_CONFIG: AppConfig = {
   gridCols: 2,
   gridRows: 2,
   sidebarWidth: 260,
+  // Agents sidebar starts unfolded; a config written before this field existed
+  // gets `false` from the DEFAULT_CONFIG spread below, never `undefined`.
+  sidebarCollapsed: false,
   wfLaneHeight: 240,
   theme: 'dark',
   fontSize: 13,

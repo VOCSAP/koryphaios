@@ -23,7 +23,8 @@ interface RowDnd {
 function SessionRow({
   session,
   dnd,
-  roster
+  roster,
+  collapsed
 }: {
   // The whole Agents list, in display order. The row's context menu offers a
   // LIST-scoped action (copy the peer table) next to its row-scoped ones, and
@@ -33,6 +34,11 @@ function SessionRow({
   session: SessionRuntime
   dnd: RowDnd
   roster: readonly SessionRuntime[]
+  // Sidebar folded to its rail: the row keeps its live signals (status dot,
+  // team-lead laurel) and drops everything that needs width. The row is NOT
+  // unmounted -- an unmounted row would take the operator's selection and the
+  // in-flight confirm dialogs with it.
+  collapsed: boolean
 }): React.JSX.Element {
   const t = useT()
   const config = useDeck((s) => s.config!)
@@ -96,9 +102,11 @@ function SessionRow({
   return (
     <li
       className={className}
+      // Folded, the name is gone from the strip, so the row itself carries it.
+      title={collapsed ? session.name : undefined}
       // Draggable to reorder; disabled while renaming so the text input keeps
       // its normal selection/caret behaviour.
-      draggable={!editing}
+      draggable={!editing && !collapsed}
       onDragStart={(e) => {
         e.dataTransfer.effectAllowed = 'move'
         dnd.onDragStart(session.id)
@@ -108,8 +116,12 @@ function SessionRow({
       onDrop={(e) => dnd.onDrop(e, session.id)}
       onDragEnd={dnd.onDragEnd}
       onClick={() => setSelected(session.id)}
+      // Folded, the row is a signal strip, not a command surface: the menu it
+      // would open acts on things the rail cannot show (rename, peer table,
+      // diff), so it stays behind the unfold.
       onContextMenu={(e) => {
         e.preventDefault()
+        if (collapsed) return
         setSelected(session.id)
         setMenuPos({ x: e.clientX, y: e.clientY })
       }}
@@ -121,14 +133,16 @@ function SessionRow({
         setMaximized(maximizedId === session.id ? null : session.id)
       }}
     >
-      <input
-        type="color"
-        className="swatch"
-        value={session.color || '#4f86ff'}
-        title={t('sidebar.sessionColour')}
-        onClick={(e) => e.stopPropagation()}
-        onChange={(e) => void setColor(session.id, e.target.value)}
-      />
+      {!collapsed && (
+        <input
+          type="color"
+          className="swatch"
+          value={session.color || '#4f86ff'}
+          title={t('sidebar.sessionColour')}
+          onClick={(e) => e.stopPropagation()}
+          onChange={(e) => void setColor(session.id, e.target.value)}
+        />
+      )}
       <span
         className={`dot dot-${session.status}${session.needsAttention ? ' dot-attention' : session.rateLimited ? ' dot-limited' : session.thinking ? ' dot-thinking' : ''}`}
         title={
@@ -141,58 +155,67 @@ function SessionRow({
                 : t(`status.${session.status}`)
         }
       />
-      <div className="row-main">
-        {editing ? (
-          <input
-            className="row-edit"
-            value={draft}
-            autoFocus
-            onChange={(e) => setDraft(e.target.value)}
-            onBlur={commit}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') commit()
-              if (e.key === 'Escape') {
-                setDraft(session.name)
-                setEditing(false)
-              }
-            }}
-            onClick={(e) => e.stopPropagation()}
-          />
-        ) : (
-          <span className="row-name" title={session.cwd} style={{ color: session.color || undefined }}>
-            {session.name}
-          </span>
-        )}
-        <span className="row-sub" title={session.cwd}>
-          {session.worktree && (
-            <span className="row-branch">
-              {GLYPHS.git} {session.worktree.branch} ·{' '}
+      {/* Slot kept free between the status dot and the laurel: the per-peer ROLE
+          glyph (card b5ba8cac) lands here, in both states, without reopening
+          this layout. */}
+      {!collapsed && (
+        <div className="row-main">
+          {editing ? (
+            <input
+              className="row-edit"
+              value={draft}
+              autoFocus
+              onChange={(e) => setDraft(e.target.value)}
+              onBlur={commit}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commit()
+                if (e.key === 'Escape') {
+                  setDraft(session.name)
+                  setEditing(false)
+                }
+              }}
+              onClick={(e) => e.stopPropagation()}
+            />
+          ) : (
+            <span
+              className="row-name"
+              title={session.cwd}
+              style={{ color: session.color || undefined }}
+            >
+              {session.name}
             </span>
           )}
-          {session.peerId ??
-            t('session.pending', { id: (session.sessionId || session.id).slice(0, 8) })}
-        </span>
-        {session.needsAttention && (
-          <button
-            type="button"
-            className="row-attention"
-            title={t('attention.dismiss')}
-            onClick={(e) => {
-              e.stopPropagation()
-              void clearAttention(session.id)
-            }}
-          >
-            {GLYPH_BADGES.warning} {t('attention.badge')}
-          </button>
-        )}
-        {session.rateLimited && (
-          <span className="row-quota">
-            {autoResumeOn && session.resumeAt
-              ? t('quota.resumeAt', { time: formatClock(session.resumeAt) })
-              : t('quota.limited')}
+          <span className="row-sub" title={session.cwd}>
+            {session.worktree && (
+              <span className="row-branch">
+                {GLYPHS.git} {session.worktree.branch} ·{' '}
+              </span>
+            )}
+            {session.peerId ??
+              t('session.pending', { id: (session.sessionId || session.id).slice(0, 8) })}
           </span>
-        )}
-      </div>
+          {session.needsAttention && (
+            <button
+              type="button"
+              className="row-attention"
+              title={t('attention.dismiss')}
+              onClick={(e) => {
+                e.stopPropagation()
+                void clearAttention(session.id)
+              }}
+            >
+              {GLYPH_BADGES.warning} {t('attention.badge')}
+            </button>
+          )}
+          {session.rateLimited && (
+            <span className="row-quota">
+              {autoResumeOn && session.resumeAt
+                ? t('quota.resumeAt', { time: formatClock(session.resumeAt) })
+                : t('quota.limited')}
+            </span>
+          )}
+        </div>
+      )}
       {/* Team-lead mark: a badge of the ROW, anchored right of .row-main, not an
           ornament of the name -- inside .row-name it pushed lead names right and
           broke the left alignment of the list. */}
@@ -201,7 +224,11 @@ function SessionRow({
           {GLYPH_BADGES.laurel}
         </span>
       )}
-      {!editing && (
+      {/* Row actions: dropped folded rather than shrunk. They are hover-revealed
+          affordances acting on a row the rail no longer names; not rendering
+          them also keeps them out of the tab order, which hiding them with
+          `visibility` would not. */}
+      {!collapsed && !editing && (
         <button
           className="row-btn"
           title={t('sidebar.renameTitle')}
@@ -214,27 +241,31 @@ function SessionRow({
           {GLYPH_ACTIONS.edit}
         </button>
       )}
-      <button
-        className="row-btn"
-        title={maximizedId === session.id ? t('common.restore') : t('common.maximize')}
-        onClick={(e) => {
-          e.stopPropagation()
-          setSelected(session.id)
-          setMaximized(maximizedId === session.id ? null : session.id)
-        }}
-      >
-        {maximizedId === session.id ? GLYPH_ACTIONS.restore : GLYPH_ACTIONS.expand}
-      </button>
-      <button
-        className="row-btn row-btn-danger"
-        title={t('sidebar.removeTitle')}
-        onClick={(e) => {
-          e.stopPropagation()
-          setConfirmingDelete(true)
-        }}
-      >
-        {GLYPH_ACTIONS.close}
-      </button>
+      {!collapsed && (
+        <button
+          className="row-btn"
+          title={maximizedId === session.id ? t('common.restore') : t('common.maximize')}
+          onClick={(e) => {
+            e.stopPropagation()
+            setSelected(session.id)
+            setMaximized(maximizedId === session.id ? null : session.id)
+          }}
+        >
+          {maximizedId === session.id ? GLYPH_ACTIONS.restore : GLYPH_ACTIONS.expand}
+        </button>
+      )}
+      {!collapsed && (
+        <button
+          className="row-btn row-btn-danger"
+          title={t('sidebar.removeTitle')}
+          onClick={(e) => {
+            e.stopPropagation()
+            setConfirmingDelete(true)
+          }}
+        >
+          {GLYPH_ACTIONS.close}
+        </button>
+      )}
       {confirmingDelete && (
         <ConfirmDialog
           title={t('confirm.deleteTitle')}
@@ -319,8 +350,9 @@ export function Sidebar(): React.JSX.Element {
   const createSession = useDeck((s) => s.createSession)
   const reorderSessions = useDeck((s) => s.reorderSessions)
   const openWorkspaces = useDeck((s) => s.openWorkspaces)
-  const currentWorkspaceName = useDeck((s) => s.currentWorkspaceName)
   const setSidebarWidth = useDeck((s) => s.setSidebarWidth)
+  const collapsed = useDeck((s) => s.sidebarCollapsed)
+  const setSidebarCollapsed = useDeck((s) => s.setSidebarCollapsed)
   const updateConfig = useDeck((s) => s.updateConfig)
   const sandboxStatus = useDeck((s) => s.sandboxStatus)
   const setView = useDeck((s) => s.setView)
@@ -368,94 +400,136 @@ export function Sidebar(): React.JSX.Element {
   }
 
   return (
-    <aside className="sidebar">
+    // Never mounted conditionally: folding is a width modifier on the SAME
+    // element, otherwise the fold would take its own control away with it.
+    <aside className={`sidebar${collapsed ? ' sidebar-collapsed' : ''}`}>
       <header className="sidebar-head">
-        {/* Show the current workspace name next to the workspaces icon; fall
-            back to the app brand when no workspace is active. */}
-        <span className="brand" title={t('app.brand')}>
-          {currentWorkspaceName || t('app.brand')}
-        </span>
+        {/* The fold control comes FIRST and keeps the header's own left padding,
+            so it sits at the same pixel in both states -- it is the one thing
+            this header is guaranteed to hold. */}
         <button
-          className="icon-btn"
-          title={t('sidebar.workspaces')}
-          onClick={() => openWorkspaces(true)}
+          className="icon-btn sidebar-fold"
+          aria-expanded={!collapsed}
+          title={collapsed ? t('sidebar.unfoldTitle') : t('sidebar.foldTitle')}
+          aria-label={collapsed ? t('sidebar.unfoldTitle') : t('sidebar.foldTitle')}
+          onClick={() => setSidebarCollapsed(!collapsed)}
         >
-          {GLYPH_BADGES.capsa}
+          {collapsed ? GLYPH_ACTIONS.panelUnfold : GLYPH_ACTIONS.panelFold}
         </button>
-        {/* Settings deliberately has NO control here: it lives in the app menu
-            bar (Edit > Settings…, Ctrl/Cmd+,) so configuration is reachable
-            from every view, not only from Agents. */}
+        {/* The header carries the fold control and NOTHING else (card 19f5ab5b).
+            The workspace name it used to print was one composed string
+            ("auto · <space> · <launch time>") already shown in full by the OS
+            window title (App.tsx), so printing it here spent the panel's whole
+            top row on a duplicate. Settings likewise has no control here: it
+            lives in the app menu bar (Edit > Settings…, Ctrl/Cmd+,) so
+            configuration is reachable from every view, not only from Agents. */}
       </header>
 
-      <div className="sidebar-actions">
-        <button
-          className="primary"
-          onClick={() => void createSession({})}
-          title={t('sidebar.addPeerTitle')}
-        >
-          {t('sidebar.addPeer')}
-        </button>
-        <button
-          className="icon-btn"
-          title={t('sidebar.advancedTitle')}
-          onClick={() => setCreateOpen(true)}
-        >
-          <span className="sidebar-advanced-caret">{GLYPH_ACTIONS.forward}</span>
-        </button>
-        {/* Sandbox pill (operator request 2c, option A): where agents will
-            execute, one glance and one click. Grey = sandbox off (click opens
-            the Docker view — ENABLING stays behind its trust-changing
-            confirms there); amber stroke = enabled but the container is not
-            running (click warms it up in the background); blue stroke = the
-            container is live (click opens the Docker view to manage it). */}
-        <button
-          className={`icon-btn sandbox-pill${
-            sandboxStatus?.enabled === true
-              ? sandboxStatus.containerState === 'running'
-                ? ' pithos-live'
-                : ' pithos-stale'
-              : ''
-          }`}
-          title={
-            sandboxStatus?.enabled === true
-              ? sandboxStatus.containerState === 'running'
-                ? t('sidebar.sandboxRunning')
-                : t('sidebar.sandboxStart')
-              : t('sidebar.sandboxOff')
-          }
-          onClick={() => {
-            if (sandboxStatus?.enabled === true && sandboxStatus.containerState !== 'running') {
-              window.api
-                .sandboxWarmUp()
-                .then(() => showToast('toast.sandboxPreparing'))
-                .catch((e: unknown) =>
-                  window.api.reportError('sandbox', `warm-up dispatch failed: ${String(e)}`)
-                )
-              return
+      {/* Creation + sandbox are decisions, not signals: they need their labels
+          and their confirmations, so the rail drops them entirely. */}
+      {!collapsed && (
+        <div className="sidebar-actions">
+          <button
+            className="primary"
+            onClick={() => void createSession({})}
+            title={t('sidebar.addPeerTitle')}
+          >
+            {t('sidebar.addPeer')}
+          </button>
+          <button
+            className="icon-btn"
+            title={t('sidebar.advancedTitle')}
+            onClick={() => setCreateOpen(true)}
+          >
+            <span className="sidebar-advanced-caret">{GLYPH_ACTIONS.forward}</span>
+          </button>
+          {/* Workspaces: an ACTION, so it belongs with the other actions rather
+              than in the header, and it sits next to the sandbox jar because
+              both answer "which environment am I in". */}
+          <button
+            className="icon-btn"
+            title={t('sidebar.workspaces')}
+            onClick={() => openWorkspaces(true)}
+          >
+            {GLYPH_BADGES.capsa}
+          </button>
+          {/* Sandbox pill (operator request 2c, option A): where agents will
+              execute, one glance and one click. Grey = sandbox off (click opens
+              the Docker view — ENABLING stays behind its trust-changing
+              confirms there); amber stroke = enabled but the container is not
+              running (click warms it up in the background); blue stroke = the
+              container is live (click opens the Docker view to manage it). */}
+          <button
+            className={`icon-btn sandbox-pill${
+              sandboxStatus?.enabled === true
+                ? sandboxStatus.containerState === 'running'
+                  ? ' pithos-live'
+                  : ' pithos-stale'
+                : ''
+            }`}
+            title={
+              sandboxStatus?.enabled === true
+                ? sandboxStatus.containerState === 'running'
+                  ? t('sidebar.sandboxRunning')
+                  : t('sidebar.sandboxStart')
+                : t('sidebar.sandboxOff')
             }
-            setView('sandbox')
-          }}
-        >
-          <PithosGlyph needsAuth={sandboxStatus?.enabled === true && sandboxStatus.authed === false} />
-        </button>
-      </div>
+            onClick={() => {
+              if (sandboxStatus?.enabled === true && sandboxStatus.containerState !== 'running') {
+                window.api
+                  .sandboxWarmUp()
+                  .then(() => showToast('toast.sandboxPreparing'))
+                  .catch((e: unknown) =>
+                    window.api.reportError('sandbox', `warm-up dispatch failed: ${String(e)}`)
+                  )
+                return
+              }
+              setView('sandbox')
+            }}
+          >
+            <PithosGlyph needsAuth={sandboxStatus?.enabled === true && sandboxStatus.authed === false} />
+          </button>
+        </div>
+      )}
+      {/* The one child NOT guarded by `collapsed`, deliberately. CreateMenu
+          opens from the advanced caret, which only exists unfolded, and it
+          renders inside `.popover-backdrop` (`position: fixed; inset: 0`,
+          z-index 60, `onMouseDown={onClose}` in CreateMenu.tsx) -- so it covers
+          the fold button and any click that would fold the panel closes the
+          popover first. `createOpen` and `collapsed` therefore cannot both be
+          true; a guard here would be a condition that never fires, hiding this
+          reasoning instead of stating it. */}
       {createOpen && <CreateMenu onClose={() => setCreateOpen(false)} />}
 
       <ul className="rows">
         {sessions.map((s) => (
-          <SessionRow key={s.id} session={s} dnd={dnd} roster={sessions} />
+          <SessionRow key={s.id} session={s} dnd={dnd} roster={sessions} collapsed={collapsed} />
         ))}
-        {sessions.length === 0 && <li className="rows-empty">{t('sidebar.noSessions')}</li>}
+        {sessions.length === 0 && !collapsed && (
+          <li className="rows-empty">{t('sidebar.noSessions')}</li>
+        )}
       </ul>
 
+      {/* Rendered ALWAYS and hidden by CSS when folded, unlike every other
+          block above: MessageBar keeps its draft in a local `useState`, so
+          unmounting it would throw away text the operator had typed, with no
+          warning and nothing to undo. `display: none` keeps the component
+          mounted (draft intact) and still takes its textarea out of the tab
+          order. */}
       <MessageBar />
 
-      <footer className="sidebar-foot" title={config.projectDir}>
-        <span className="foot-label">{t('sidebar.project')}</span>
-        <span className="foot-path">{config.projectDir}</span>
-      </footer>
+      {!collapsed && (
+        <footer className="sidebar-foot" title={config.projectDir}>
+          <span className="foot-label">{t('sidebar.project')}</span>
+          <span className="foot-path">{config.projectDir}</span>
+        </footer>
+      )}
 
-      <div className="sidebar-resize" onMouseDown={startResize} title={t('sidebar.resizeTitle')} />
+      {/* No resize handle on the rail: its width is a constant, and dragging it
+          would overwrite the persisted open width with the rail's. */}
+      {!collapsed && (
+        <div className="sidebar-resize" onMouseDown={startResize} title={t('sidebar.resizeTitle')} />
+      )}
     </aside>
   )
 }

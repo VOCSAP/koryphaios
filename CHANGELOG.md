@@ -1,5 +1,59 @@
 # Changelog
 
+## desktop (experimental) -- le volet Agents se replie, et ce repli devient l'implementation de reference du patron
+
+Deux cartes formant un lot : `079f034d` (controle de repli du volet Agents) et
+`19f5ab5b` (nettoyage du bandeau de ce meme volet).
+
+**Le patron du volet repliable existait comme REGLE dans `DESIGN.md` sans
+aucune implementation.** Les deux surfaces qu'il citait, le panneau de filtres
+de la Roadmap et la liste de conversations du Graphe, montent et demontent leur
+panneau conditionnellement, c'est-a-dire exactement ce que la regle interdit :
+un panneau qui disparait emporte le controle qui le ferait revenir. Le volet
+Agents est donc la premiere mise en oeuvre, et `DESIGN.md` la designe desormais
+comme celle a copier. `<aside className="sidebar">` reste monte en permanence ;
+seule une classe modificatrice change sa largeur. Le controle occupe le meme
+pixel dans les deux etats, seul son glyphe change de sens : un diptyque a
+charniere (`GLYPH_ACTIONS.panelFold` / `panelUnfold`), deux entrees plutot
+qu'un miroir CSS, pour que le cadre et sa charniere ne bougent pas.
+
+**L'etat replie est persiste**, sur le meme canal que `sidebarWidth`
+(`AppConfig.sidebarCollapsed`, `updateConfig`) : faire survivre la largeur d'un
+volet mais pas son repli scinderait le cycle de vie d'une meme geometrie. Une
+configuration ecrite avant ce champ le recoit a `false` par le spread de
+`DEFAULT_CONFIG`, il n'y a aucune migration a jouer.
+
+**Replie, chaque ligne ne garde que ses signaux vivants** : le point d'activite
+et le laurier team-lead, alignes a gauche et non centres, pour que la colonne
+de points reste droite quand une ligne porte un badge. La bande fait 58 px,
+somme mesuree de sa ligne la plus large, pas un chiffre repris d'ailleurs, et
+la barre de defilement y est supprimee : une barre native de 15 px vole un
+tiers d'une bande de cette largeur, alors que l'operateur travaille a onze
+pairs, donc la liste defile dans le cas nominal. Masquer la barre ne desactive
+pas la molette. Le composant d'envoi de message est le seul bloc conserve monte
+et simplement masque : son brouillon vit dans un `useState`, le demonter
+detruisait en silence le texte deja tape.
+
+**Le bandeau survit vide.** Le nom d'espace qu'il imprimait etait une chaine
+unique deja portee integralement par le titre de la fenetre ; le bouton Espaces
+rejoint la barre d'actions a cote de la jarre sandbox, ou il a le sens d'une
+action et non d'un titre. Quatre controles ne tenant plus dans les 260 px par
+defaut, l'espacement de cette barre a ete resserre de 16 px sur la geometrie,
+jamais sur le libelle, et la rangee peut se replier a la largeur minimale
+plutot que de peindre hors du volet. La cle i18n `app.brand`, devenue sans
+producteur, a ete supprimee des trois fichiers de locale plutot qu'ajoutee a la
+liste des orphelines toleree par `tests/desktop-i18n.test.ts` : cette liste ne
+peut que retrecir, et une assertion materialise desormais cette phrase qui
+n'etait qu'un commentaire.
+
+**Trois defauts que ni le typecheck ni la suite ne voient** ont ete trouves en
+lancant l'application et en mesurant des positions a l'ecran : un bandeau qui
+passait de 52 a 48 px selon la presence d'un bouton, donc un controle de repli
+qui glissait de 2 px (un SVG inline reserve une ligne avec descente, corrige
+sur l'en-tete du volet) ; un point d'activite qui se decalait de 9 px sur la
+seule ligne portant un laurier ; et la jarre sandbox qui peignait hors du volet
+a la largeur minimale.
+
 ## core + desktop (experimental) -- la vague 1 du backlog, le verrou de carte et l'identite de l'operateur, integralement livree
 
 Douze commits sur deux journees, 2026-08-11 et 2026-08-12 : `664081a`,

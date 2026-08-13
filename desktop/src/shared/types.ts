@@ -180,6 +180,11 @@ export interface AppConfig {
   gridRows: number
   /** Sidebar width in px (resizable, persisted). */
   sidebarWidth: number
+  /** Agents sidebar collapsed to its narrow rail. Persisted on the same channel
+   *  as `sidebarWidth`: both describe the SAME geometry, so splitting their
+   *  lifecycle (width remembered, fold forgotten) would reopen the panel the
+   *  operator had folded. */
+  sidebarCollapsed: boolean
   /** Workflow-lane canvas height in px (resizable via its top-edge handle, persisted). */
   wfLaneHeight: number
   theme: 'dark' | 'light'

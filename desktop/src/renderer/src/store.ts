@@ -60,6 +60,8 @@ interface DeckState {
   workspaces: WorkspaceSummary[]
   /** Live sidebar width (px); seeded from config, persisted on drag end. */
   sidebarWidth: number
+  /** Agents sidebar folded to its rail; seeded from config, persisted on toggle. */
+  sidebarCollapsed: boolean
   /** Operator inbox (PLAN C12): drained agent messages, newest LAST. */
   inboxMessages: InboxMessage[]
   /** Messages arrived while the panel was closed. */
@@ -195,6 +197,8 @@ interface DeckState {
   applyTemplate(path: string, mode: 'append' | 'replace'): Promise<void>
   removeTemplate(path: string): Promise<void>
   setSidebarWidth(px: number): void
+  /** Fold/unfold the Agents sidebar and persist it (same channel as the width). */
+  setSidebarCollapsed(collapsed: boolean): void
 
   /**
    * Toast policy (PLAN O5): reserved for the outcome of a DIRECT user action.
@@ -311,6 +315,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   currentWorkspaceName: null,
   workspaces: [],
   sidebarWidth: 260,
+  sidebarCollapsed: false,
   inboxMessages: [],
   inboxUnread: 0,
   inboxOpen: false,
@@ -385,6 +390,7 @@ export const useDeck = create<DeckState>((set, get) => ({
       workspaces,
       templates,
       sidebarWidth: config.sidebarWidth,
+      sidebarCollapsed: config.sidebarCollapsed,
       selectedId: get().selectedId ?? sessions[0]?.id ?? null
     })
 
@@ -571,6 +577,14 @@ export const useDeck = create<DeckState>((set, get) => ({
   },
 
   setSidebarWidth: (px) => set({ sidebarWidth: Math.min(520, Math.max(180, Math.round(px))) }),
+
+  // Folded state is written through on the toggle itself: unlike the width,
+  // there is no drag end to hang the persistence on, and the rail width is a
+  // constant, so nothing needs to be measured before saving.
+  setSidebarCollapsed: (collapsed) => {
+    set({ sidebarCollapsed: collapsed })
+    void get().updateConfig({ sidebarCollapsed: collapsed })
+  },
 
   dismissOfflineBanner: () => {
     const status = get().brokerStatus

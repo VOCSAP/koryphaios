@@ -359,6 +359,18 @@ function findOrphans(keys: string[], files: string[]): string[] {
 // shrink from here, never grow.
 const KNOWN_ORPHAN_KEYS: string[] = [];
 
+// KNOWN HOLE, named here so nobody reads this guard as stronger than it is:
+// findOrphans() searches the RAW FILE TEXT (`src.includes('<key>')`, see
+// above), so a key merely MENTIONED IN A COMMENT counts as produced and is not
+// reported. The guard is therefore fail-open on that one axis; closing it may
+// surface pre-existing orphans and is tracked as its own card.
+test("the orphan baseline may only ever shrink -- growing it must be an explicit act", () => {
+  // Materialises the sentence above the baseline, which was a comment only.
+  // Adding an entry now fails HERE, so it takes deleting this assertion on
+  // purpose -- it can no longer happen as a side effect of "making it green".
+  expect(KNOWN_ORPHAN_KEYS).toHaveLength(0);
+});
+
 test("every EN_DEFAULTS key has a producer somewhere in desktop/src", () => {
   const files = collectDesktopSrcFiles(DESKTOP_SRC);
   // Sanity floor: if the scan root is ever wrong, files collapses towards 0,
