@@ -167,6 +167,102 @@ while sessions are live: the agents are using that config. "Generate
 sandbox config" is the way back in -- it re-enables the projection along
 with writing the overlay.
 
+## Protecting the mounted project itself (mount mode only)
+
+Before this sub-policy existed, **mount** mode bind-mounted the operator's real
+tree read-write at `/work` with no further restriction. A sandboxed agent --
+which our doctrine assumes COMPROMISED -- could write `/work/.git/hooks/pre-commit`,
+`.mcp.json` or `.claude/settings.json`. Those paths are then executed or
+trusted by the HOST the next time the operator commits, or the Deck's own Git
+view runs `git commit`. That is exactly the evasion class `copy-not-mount`
+already closes for the operator's GLOBAL config (see above) -- mounting the
+project itself reopened it at the project level.
+
+**This is a deliberate exception to the mount-is-a-capability rule**, and it is
+written here as one on purpose so a future reader does not mistake it for a
+mistake and strip it out. Everywhere else in this app, anything MOUNTED into a
+sandbox is a capability GRANTED to code assumed compromised (see CLAUDE.md's
+"hostile inputs" table, item 5). Here the mount REMOVES a capability instead of
+granting one: nested `:ro` binds make specific host-executed paths read-only
+from inside the container, on top of the read-write project mount. No new READ
+exposure is created either way -- these paths were already readable in mount
+mode; only the write path is closed.
+
+**The criterion, and the list is a dated instance of it.** The rule is: any
+project path whose content is EXECUTED or INTERPRETED AS A COMMAND by the HOST
+when the host opens or manipulates this project (git hooks, editor/MCP config,
+a submodule's recorded fetch URL). The list of paths currently covered lives in
+code (`PROTECTED_PATHS`, `desktop/src/main/sandbox-protect.ts`) -- it is not
+reproduced here, since a duplicated list in the docs would drift from the one
+in code. A future host-executed path belongs there, under the same test.
+
+**Directories and files are treated differently**, for reasons measured
+against Docker Desktop on Windows (server: Linux 29.6.2, 2026-08-13/14):
+
+- a `:ro` bind nested under a read-write parent HOLDS: a write inside it is
+  refused ("Read-only file system") and removing the mount point itself is
+  refused ("Resource busy").
+- Docker CREATES missing intermediate path components recursively for a bind,
+  so a DIRECTORY bind can stay UNCONDITIONAL -- it never becomes fail-open as
+  the set of protected directories grows.
+- a bind on an ABSENT file instead fabricates a DIRECTORY of that name in the
+  operator's real project -- corruption, not protection -- so file entries are
+  bound only when they already exist as a file.
+- `docker create` FAILS outright when a path component already exists as a
+  FILE, which is the shape of a git worktree's or a submodule's `.git` (a file
+  pointing elsewhere, not a directory). The guard against this is written on
+  that STRUCTURAL shape, never on the intention "this is a worktree" -- a
+  worktree and a submodule produce the same shape, and an intention-based guard
+  would cover strictly less than the real domain.
+
+**Three accepted costs**, each a choice, not an oversight:
+
+- Docker creates the protected directories that were absent in the operator's
+  real project. They land empty, invisible to git, owned by the operator at
+  mode 755. Making this conditional on existence would reopen the fail-open
+  case the day one of those directories is created for the first time.
+- A read-only `.git/config` breaks `git push -u origin <branch>` and
+  `git remote add`, the two most frequent of the SEVEN operations measured to
+  write that file (the others: `git config --local`,
+  `git branch --set-upstream-to`, `git lfs install`, `git sparse-checkout init`,
+  `git maintenance start`). Measured NOT to write it: `commit`, `checkout -b`,
+  `tag`, `stash`, `worktree add`, `gc`, `fetch` -- so an agent's daily loop
+  (edit, add, commit, switch branch) never touches it. No escape hatch is
+  provided, deliberately: a way to disarm the guard is not added ahead of a
+  measured need. The notice below deliberately names only the two frequent
+  ones to the agent: it aims at the common case, not at exhaustivity.
+- Temporal residue: binds are fixed at container creation, so a PROTECTED FILE
+  created AFTER that point is not covered until the next rebuild (directories
+  do not have this gap, since their bind is unconditional). A placeholder-file
+  approach was considered and dropped -- it would write an untracked file into
+  the operator's real project, visible in `git status` and committable by
+  accident. The residue is instead made VISIBLE to the operator, through the
+  drift/rebuild signal in the Docker view (see below).
+
+**Asymmetry between agent and operator, and it is a security rule, not an
+ergonomics one.** The agent is told what IS protected, never what was skipped.
+Only the operator sees what was skipped. Our doctrine assumes the agent is
+compromised: a map of the gaps is useless for its legitimate work and useful
+to an attacker mapping the remaining write surface.
+
+**The notice is predictive, not reactive**, for a structural reason: nothing on
+the host can observe a write refused INSIDE the container. The reference
+`@anthropic-ai/sandbox-runtime` project can attach a block of violations to the
+output of a command because it IS the launcher of every command the agent
+runs; Koryphaios launches the CLI once and nothing more after that. The notice
+is therefore delivered BEFORE the first prompt, through a composed prompt file
+(see "How sessions run" above for the launch script mechanism). There is
+deliberately no equivalent of an operator-side exclusion list for violations --
+that would be a fail-open surface by construction.
+
+**A container already running when this sub-policy shipped** carries no
+protection bind at all, and stays that way until it is rebuilt. The Docker
+view detects this and flags it as needing a rebuild. One associated trap: under
+Docker Desktop on Windows, the Source field of a bind can come back in TWO
+different forms for binds on the SAME container (a `C:\...` host path for one,
+a `/run/desktop/mnt/host/c/...` path for another), so the comparison that
+detects a stale container is done on Destination and RW only, never on Source.
+
 ## Isolation limits
 
 A sandboxed session is meant to feel like your machine, not to BE it. It

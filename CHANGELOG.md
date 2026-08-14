@@ -1,5 +1,56 @@
 # Changelog
 
+## desktop (experimental) -- le mode mount protege son propre projet, et le preavis atteint l'agent avant son premier prompt
+
+Deux cartes livrees ensemble, `6e3863ef` (sous-politique de protection du
+montage) et `9e529177` (audit securite + preavis lisible) : poser une garde
+sans retour lisible aurait produit un agent qui perd son temps a contourner un
+`EPERM` muet, et un operateur recevant un rapport de protection faux.
+
+**L'evasion fermee.** En mode mount (le mode par defaut), le projet de
+l'operateur etait monte en lecture-ecriture sans aucune sous-politique : un
+agent sandboxe pouvait ecrire `.git/hooks/pre-commit`, `.mcp.json` ou
+`.claude/settings.json`, executes ou fait confiance par l'HOTE au prochain
+commit ou a la prochaine ouverture du projet. La liste des chemins desormais
+proteges recoit un bind `:ro` imbrique par-dessus le montage read-write ;
+`.git/hooks`, `.claude/agents`, `.vscode`, `.idea` (entre autres repertoires)
+sont montes en lecture seule de facon INCONDITIONNELLE -- Docker fabrique les
+niveaux intermediaires manquants, donc un bind repertoire ne devient jamais
+fail-open quand la liste grandit -- tandis que les fichiers (`.mcp.json`,
+`.git/config`, `.gitmodules`...) ne le sont que s'ils existent deja comme
+fichier, un bind sur un fichier absent fabriquant sinon un repertoire
+parasite dans le projet reel de l'operateur.
+
+**Le preavis est predictif, jamais reactif.** Rien cote hote ne peut observer
+un refus subi a l'interieur du conteneur, donc l'agent recoit la liste des
+chemins proteges (jamais celle des chemins sautes -- asymetrie deliberee :
+notre doctrine suppose l'agent compromis, une carte des trous ne lui sert a
+rien et sert beaucoup a un attaquant) AVANT son premier prompt, via un fichier
+de prompt compose. Le preavis nomme explicitement la consequence la plus
+frequente : `.git/config` en lecture seule casse `git push -u origin
+<branche>` et `git remote add`.
+
+**Un bug exhume au passage.** Le flag `--append-system-prompt-file` traversait
+`wrap()` intact en portant un chemin HOTE que le conteneur ne peut pas ouvrir :
+un role d'equipe embarque et sandboxe (`deck-control.ts`) tournait donc sans
+son ancrage de role, sans que rien ne le signale. La composition du prompt et
+du preavis en UN seul fichier (le flag est singulier) corrige ce bug au
+passage.
+
+**Trois durcissements issus de l'audit de securite (carte `9e529177`) :**
+controle de containment (`isWithinDir`, symlinks inclus) avant toute lecture
+du fichier de prompt hote -- ce chemin devient un vecteur d'exfiltration
+potentiel des lors que `wrap()` en lit desormais le contenu ; inversion du
+defaut de `parseMounts`, qui coercait silencieusement toute valeur non
+booleenne (chaine, champ absent) vers "protege" au lieu de "lecture-ecriture",
+un fail-open qui aurait supprime le signal de rebuild sur un bind pourtant
+inscriptible ; et validation de forme du `sessionId` avant son interpolation
+dans une ligne de commande, en defense en profondeur.
+
+**Les conteneurs deja en vol** crees avant cette sous-politique ne portent
+aucun bind de protection et le restent jusqu'a un rebuild explicite -- la vue
+Docker le detecte et le signale.
+
 ## desktop + broker (experimental) -- le pair declare un BESOIN, plus jamais un transport : `ask_operator` cesse de refuser, et le Courrier devient l'outil qui traite
 
 Deux cartes formant un lot indissociable : `469f3176` (`ask_operator` devient la

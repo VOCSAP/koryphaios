@@ -14,6 +14,7 @@ import { createHash } from 'node:crypto'
 import { platform } from 'node:os'
 import { encodeProjectDir } from './session-transcript'
 import { DECK_PLUGIN_DIRNAME } from './session-command'
+import type { ProtectionPlan } from './sandbox-protect'
 
 export type SandboxEngine = 'docker' | 'podman'
 
@@ -224,6 +225,23 @@ export interface SandboxCreateSpec {
   peersDirHost?: string
   /** Dev-server ports published as 127.0.0.1:p:p (webview reaches them as localhost). */
   ports: number[]
+  /**
+   * Mount-mode sub-policy (card 6e3863ef): nested `:ro` binds computed by
+   * `planProtectedBinds` (sandbox-protect.ts), which is the only place that
+   * touches disk in this family. Absent/`'not-applicable'` emits nothing.
+   */
+  protection?: ProtectionPlan
+}
+
+/**
+ * Renders a `ProtectionPlan` into `-v <host>:<container>:ro` pairs, sorted by
+ * ascending containerPath length for deterministic, testable output. Pure —
+ * no disk access, mirrors the rest of this file.
+ */
+function protectionArgs(plan: ProtectionPlan | undefined): string[] {
+  if (!plan || plan.status !== 'applied') return []
+  const sorted = [...plan.applied].sort((a, b) => a.containerPath.length - b.containerPath.length)
+  return sorted.flatMap((b) => ['-v', `${b.hostPath}:${b.containerPath}:ro`])
 }
 
 /**
@@ -246,6 +264,7 @@ export function buildCreateArgs(spec: SandboxCreateSpec): string[] {
     'host.docker.internal:host-gateway',
     '-v',
     `${spec.workSource || spec.projectDir}:${SANDBOX_WORK_DIR}`,
+    ...protectionArgs(spec.protection),
     '-v',
     `${SANDBOX_AUTH_VOLUME}:${SANDBOX_HOME}/.claude`,
     '-v',

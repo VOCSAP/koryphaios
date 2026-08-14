@@ -180,6 +180,66 @@ test("buildCreateArgs skips the peers mount when unset and falls back on ports",
   expect(args.filter((a) => a === "-p")).toHaveLength(DEFAULT_SANDBOX_PORTS.length);
 });
 
+test("buildCreateArgs renders protection.applied as :ro binds, sorted by containerPath length, after /work", () => {
+  const args = buildCreateArgs({
+    name: "kory-sbx-0123456789ab",
+    image: "img",
+    projectDir: "/home/op/proj",
+    runDirHost: "/r",
+    ports: [],
+    protection: {
+      status: "applied",
+      applied: [
+        {
+          rel: ".claude/agents",
+          kind: "dir",
+          hostPath: "/home/op/proj/.claude/agents",
+          containerPath: `${SANDBOX_WORK_DIR}/.claude/agents`
+        },
+        {
+          rel: ".mcp.json",
+          kind: "file",
+          hostPath: "/home/op/proj/.mcp.json",
+          containerPath: `${SANDBOX_WORK_DIR}/.mcp.json`
+        }
+      ],
+      skipped: []
+    }
+  });
+
+  const workIdx = args.indexOf(`/home/op/proj:${SANDBOX_WORK_DIR}`);
+  const mcpIdx = args.indexOf(`/home/op/proj/.mcp.json:${SANDBOX_WORK_DIR}/.mcp.json:ro`);
+  const agentsIdx = args.indexOf(`/home/op/proj/.claude/agents:${SANDBOX_WORK_DIR}/.claude/agents:ro`);
+  expect(workIdx).toBeGreaterThanOrEqual(0);
+  expect(mcpIdx).toBeGreaterThan(workIdx);
+  // .mcp.json's containerPath is shorter than .claude/agents's -> emitted first.
+  expect(mcpIdx).toBeLessThan(agentsIdx);
+  // Every protection bind must be read-only, never rw.
+  for (const idx of [mcpIdx, agentsIdx]) {
+    expect(args[idx]?.endsWith(":ro")).toBe(true);
+  }
+});
+
+test("buildCreateArgs emits nothing extra when protection is not-applicable or absent", () => {
+  const withoutProtection = buildCreateArgs({
+    name: "kory-sbx-0123456789ab",
+    image: "img",
+    projectDir: "/p",
+    runDirHost: "/r",
+    ports: []
+  });
+  const notApplicable = buildCreateArgs({
+    name: "kory-sbx-0123456789ab",
+    image: "img",
+    projectDir: "/p",
+    runDirHost: "/r",
+    ports: [],
+    protection: { status: "not-applicable", reason: "copy-mode", applied: [], skipped: [] }
+  });
+  expect(withoutProtection.filter((a) => a === "-v")).toHaveLength(3);
+  expect(notApplicable.filter((a) => a === "-v")).toHaveLength(3);
+});
+
 test("buildLaunchScript exports env, cds and execs — hostile keys dropped", () => {
   const script = buildLaunchScript({
     command: 'claude --session-id "abc"',

@@ -460,6 +460,15 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sandbox.drift': 'image is {n} day(s) newer',
   'sandbox.driftHint':
     'The image was rebuilt after this container was created — Rebuild to pick it up (everything installed by hand inside is lost).',
+  'sandbox.protectionNotApplicable':
+    'Not applicable in copy mode (the mounted tree is an ephemeral clone, not host-executed).',
+  'sandbox.protection': 'protected paths:',
+  'sandbox.protectionApplied': '{n} path(s) mounted read-only',
+  'sandbox.protectionSkipped': '{n} not protected',
+  'sandbox.protectionSkippedHint':
+    'Paths this policy would normally protect but did not find on disk (a fresh .git, no .vscode, etc.) — not shown to the agent, by design.',
+  'sandbox.protectionRebuildHint':
+    'This container predates the read-only path protection (or the policy grew since it was created) — Rebuild to apply it.',
   'sandbox.blockedRunning': 'A sandbox container is running — stop it first.',
   'sandbox.copy': 'Ephemeral copy',
   'sandbox.copyHint':

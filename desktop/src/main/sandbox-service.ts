@@ -19,6 +19,7 @@ import type {
   SandboxContainerAction,
   SandboxContainerInfo,
   SandboxExecResponse,
+  SandboxProtectionStatus,
   SandboxStatus
 } from '@shared/types'
 import {
@@ -50,6 +51,88 @@ import {
   type SandboxEngine,
   type SandboxLaunchScriptSpec
 } from './sandbox-command'
+// Card 9e529177: the mount-mode protection plan (6e3863ef) is computed HERE
+// (planProtectedBinds is the only disk-touching function in that module) and
+// carried through buildCreateArgs' `protection` field, SandboxLaunch (for
+// index.ts's wrap() to compose the agent-facing notice) and SandboxStatus
+// (for the operator view) -- three consumers, one plan, computed once per
+// call site rather than cached: it is a pure fs stat walk, not worth the
+// invalidation complexity a cache would need across ensure()/status()/spawn.
+import { planProtectedBinds, type ProtectionPlan } from './sandbox-protect'
+
+/** `docker inspect` Mounts entry, reduced to what the rebuild check needs. */
+export interface SandboxMountInfo {
+  destination: string
+  rw: boolean
+}
+
+/**
+ * Parses `{{json .Mounts}}` output. Compared on Destination + RW ONLY, never
+ * Source (CLAUDE.md "canonicalize both paths"): measured under Docker
+ * Desktop Windows, the SAME container reports Source in two different forms
+ * across its own binds within one inspect call (a `C:\...` host path for one
+ * mount, `/run/desktop/mnt/host/c/...` for another) — Source is not a stable
+ * comparison key here, only Destination/RW are.
+ *
+ * `rw: m.RW !== false` (audit fix, card 9e529177): the FAIL-SAFE direction is
+ * "assume read-write" (not protected -> flags a rebuild), never "assume
+ * read-only". `=== true` failed OPEN on anything but a literal JSON boolean
+ * `true` -- a string `"true"`, an omitted field, or podman (the OTHER
+ * supported SandboxEngine) reporting RW differently would all coerce to
+ * `false` i.e. "protected", silently suppressing the rebuild signal for a
+ * bind that is, in fact, writable. The wrong-direction failure mode here is
+ * a superfluous rebuild warning, never a phantom protection.
+ */
+export function parseMounts(raw: string | undefined): SandboxMountInfo[] {
+  if (!raw) return []
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter((m): m is Record<string, unknown> => typeof m === 'object' && m !== null)
+      .map((m) => ({ destination: String(m.Destination ?? ''), rw: m.RW !== false }))
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Card 9e529177 arbitrage A10: 'not-applicable' (copy mode) and 'applied'
+ * with zero skips are DISTINCT states, modeled in SandboxProtectionStatus
+ * itself rather than left to a comment -- the renderer must be able to show
+ * "sans objet en mode copie" and never conflate it with "0 chemin sauté".
+ */
+export function toProtectionStatus(plan: ProtectionPlan): SandboxProtectionStatus {
+  if (plan.status === 'not-applicable') return { status: 'not-applicable' }
+  return {
+    status: 'applied',
+    appliedCount: plan.applied.length,
+    skipped: plan.skipped.map((s) => ({ rel: s.rel, reason: s.reason }))
+  }
+}
+
+/**
+ * Card 9e529177 point 3: true when a RUNNING/STOPPED container is missing at
+ * least one `:ro` bind the CURRENT plan expects -- either it predates this
+ * feature, or the plan grew new protected paths since it was created. Only a
+ * rebuild (new `-v` args via buildCreateArgs) picks that up. Compared on
+ * Destination + RW only, never Source (see parseMounts). Always false
+ * outside mount mode (plan.status is 'not-applicable' by construction there)
+ * and when no container exists yet (nothing to be stale about: the next
+ * ensure() creates it with the current plan already applied).
+ */
+export function isProtectionRebuildNeeded(
+  plan: ProtectionPlan,
+  containerState: SandboxStatus['containerState'],
+  mounts: readonly SandboxMountInfo[]
+): boolean {
+  return (
+    plan.status === 'applied' &&
+    plan.applied.length > 0 &&
+    containerState !== 'missing' &&
+    plan.applied.some((b) => !mounts.some((m) => m.destination === b.containerPath && m.rw === false))
+  )
+}
 // Card a79c7696 volet 1: deck-plugin (roadmap-card skill + roadmap-scribe
 // agent) is projected as an extra ProjectionEntry alongside the operator's
 // config, reusing the same clean/copy/chown plumbing and signature walk.
@@ -109,6 +192,13 @@ export interface SandboxLaunch {
   runDirHost: string
   /** Host dir mounted at /work — the project, or the clone in copy mode. */
   workSource: string
+  /**
+   * Card 9e529177: the mount-mode protection plan for THIS launch, so
+   * index.ts's wrap() can compose renderProtectionNotice(plan) into the
+   * agent-facing --append-system-prompt-file without recomputing it (and
+   * without importing planProtectedBinds itself — index.ts only consumes).
+   */
+  protection: ProtectionPlan
 }
 
 export interface SandboxServiceDeps {
@@ -398,6 +488,17 @@ export class SandboxService extends EventEmitter {
     return this.isEnabled() ? this.workSource() : this.deps.projectDir
   }
 
+  /**
+   * Card 9e529177: the mount-mode protection plan for the CURRENT settings
+   * (workSource + mode). Deterministic and side-effect-free beyond the
+   * fs.stat walk planProtectedBinds already does, so every caller
+   * (buildCreateArgs, launchInfo, status) recomputes rather than shares a
+   * cached value — no invalidation to get wrong across ensure()/spawn/poll.
+   */
+  private protectionPlan(): ProtectionPlan {
+    return planProtectedBinds({ workSource: this.workSource(), mode: this.mode() })
+  }
+
   // ----- engine / image -----
 
   /** Detect docker, then podman. Cached (TTL) — `force` for the view's refresh. */
@@ -485,13 +586,28 @@ export class SandboxService extends EventEmitter {
   /**
    * Identity + state in ONE engine call (ensure() runs on every agent spawn).
    * The ID is what keys the projection marker — see projectedMarkerFile.
+   *
+   * Card 9e529177 point 3: `{{json .Mounts}}` added as a third tabbed field
+   * so the SAME call also answers "does this already-created container carry
+   * the protection binds the CURRENT plan expects" (a container created
+   * before this feature shipped has none, silently, until rebuilt). Measured
+   * cost: nil — `docker inspect` already deserializes the whole object
+   * (0.114s vs 0.132s for the old two-field format, in the noise), so this is
+   * zero extra engine calls, not one more.
    */
-  private async inspectIdState(name: string): Promise<{ id: string; state: string } | null> {
-    const res = await this.run(['inspect', '--format', '{{.Id}}\t{{.State.Status}}', name])
+  private async inspectIdState(
+    name: string
+  ): Promise<{ id: string; state: string; mounts: SandboxMountInfo[] } | null> {
+    const res = await this.run([
+      'inspect',
+      '--format',
+      '{{.Id}}\t{{.State.Status}}\t{{json .Mounts}}',
+      name
+    ])
     if (res.code !== 0) return null
-    const [id, state] = res.stdout.trim().split('\t')
+    const [id, state, mountsJson] = res.stdout.trim().split('\t')
     if (!id || !state) return null
-    return { id, state }
+    return { id, state, mounts: parseMounts(mountsJson) }
   }
 
   /** Container creation date vs image creation date (drift badge, M2). */
@@ -516,13 +632,18 @@ export class SandboxService extends EventEmitter {
     const settings = this.settings()
     let containerState: SandboxStatus['containerState'] = 'missing'
     let drift: number | null = null
+    // Card 9e529177 point 3: reused for the rebuild-needed check below too --
+    // one inspect call, not one more (Mounts is already part of the object
+    // `docker inspect` deserializes for the id/state pair).
+    let mounts: SandboxMountInfo[] = []
     if (probe.state === 'ok') {
       if (this.imagePresent === null || forceEngine) await this.probeImage()
-      const state = await this.inspectState(this.containerName)
-      if (state === 'running') {
+      const info = await this.inspectIdState(this.containerName)
+      mounts = info?.mounts ?? []
+      if (info?.state === 'running') {
         containerState = 'running'
         drift = await this.driftDays()
-      } else if (state !== null) {
+      } else if (info !== null) {
         containerState = 'stopped'
         drift = await this.driftDays()
       }
@@ -554,6 +675,8 @@ export class SandboxService extends EventEmitter {
     }
     const authed = probe.state === 'ok' ? this.authedCache : null
     this.lastReady = containerState === 'running'
+    const plan = this.protectionPlan()
+    const protectionRebuildNeeded = isProtectionRebuildNeeded(plan, containerState, mounts)
     return {
       engine: probe.engine,
       engineState: probe.state,
@@ -582,6 +705,8 @@ export class SandboxService extends EventEmitter {
       brokerBridge: this.bridgeOk,
       driftDays: drift,
       busy: this.busy,
+      protection: toProtectionStatus(plan),
+      protectionRebuildNeeded,
       error: this.lastError
     }
   }
@@ -787,7 +912,8 @@ export class SandboxService extends EventEmitter {
             workSource: this.workSource(),
             runDirHost: this.runDirHost,
             peersDirHost: this.peersDirHost,
-            ports: this.settings().ports
+            ports: this.settings().ports,
+            protection: this.protectionPlan()
           }),
           60_000
         )
@@ -806,7 +932,7 @@ export class SandboxService extends EventEmitter {
         // covers an engine that ever stops doing so.
         const createdId =
           created.stdout.trim() || ((await this.inspectIdState(this.containerName))?.id ?? '')
-        info = { id: createdId, state: 'created' }
+        info = { id: createdId, state: 'created', mounts: [] }
         this.deps.journal(`sandbox: container ${this.containerName} created (${this.image()})`)
         mark('create')
       }
@@ -1337,7 +1463,8 @@ export class SandboxService extends EventEmitter {
       engine,
       container: this.containerName,
       runDirHost: this.runDirHost,
-      workSource: this.workSource()
+      workSource: this.workSource(),
+      protection: this.protectionPlan()
     }
   }
 

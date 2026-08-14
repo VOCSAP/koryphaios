@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import {
   app,
@@ -80,13 +80,24 @@ import { APP_STATE_SUBDIR, runDataMigration } from './migrate-data-dir'
 import type { SessionRuntime } from '@shared/types'
 import { listAgents } from './agents'
 import { createSessionWithWorktree } from './create-session'
-import { SandboxService } from './sandbox-service'
+import { SandboxService, type SandboxLaunch } from './sandbox-service'
 import {
   mapHostPathToContainer,
   rewriteLoopbackForContainer,
   rewritePluginDirForContainer,
-  sandboxifyEnv
+  sandboxifyEnv,
+  SANDBOX_RUN_DIR
 } from './sandbox-command'
+// Card 9e529177: consumed, not rewritten -- see sandbox-protect.ts's own
+// header for why this is the ONLY module allowed to compute/render the plan.
+import { renderProtectionNotice } from './sandbox-protect'
+import {
+  composeAppendSystemPrompt,
+  extractAppendSystemPromptFile,
+  isValidSandboxSessionId,
+  isWithinDir,
+  sandboxPromptRoot
+} from './sandbox-prompt'
 import { Journal } from './journal'
 import { flushJournalSnapshot, initDeckLog, logInfo, onDeckError, reportError } from './log'
 import {
@@ -233,7 +244,11 @@ const secretCipher: SecretCipher = {
   encrypt: (plain) => safeStorage.encryptString(plain),
   decrypt: (buf) => safeStorage.decryptString(buf)
 }
-const secretsDir = (): string => join(app.getPath('userData'), APP_STATE_SUBDIR)
+// Delegates to sandbox-prompt.ts's sandboxPromptRoot so the value
+// composeSandboxAppendPrompt's containment check anchors on is PROVABLY the
+// same expression every other call site here uses -- not a parallel one
+// that could silently diverge (card 9e529177 audit round 2).
+const secretsDir = (): string => sandboxPromptRoot(app.getPath('userData'))
 
 // If this window was launched with a custom scope, remember its secret (opt-out
 // via the rememberScopeSecrets setting). The plaintext never hits disk -- only
@@ -505,6 +520,70 @@ const containerBrokerEnv = (): Record<string, string> => {
   }
 }
 
+/**
+ * Card 9e529177: `--append-system-prompt-file "<hostPath>"` (session-command.ts's
+ * appendSystemPromptFlag) carries a HOST path that does not exist inside the
+ * container -- wrap() already rewrites --plugin-dir the same way just below
+ * (rewritePluginDirForContainer), this is the sandbox-only companion for the
+ * system-prompt flag, AND the sole delivery vehicle for the mount-mode
+ * protection notice (sandbox-protect.ts's renderProtectionNotice): the field
+ * is singular (session-command.ts), so composing into ONE file is what
+ * avoids a collision between a role's prompt and the notice, never posing
+ * the flag twice.
+ *
+ * Composes, in order: (1) the existing role prompt's CONTENT if the flag was
+ * present, (2) the protection notice if the plan is 'applied'. Either piece
+ * missing degrades to the other. Both missing: the command line is returned
+ * UNCHANGED -- no file written, no flag touched. This also fixes a latent
+ * bug the same mechanism exhumed: an embedded team role spawned sandboxed
+ * (deck-control.ts) used to carry --append-system-prompt-file straight
+ * through wrap() untouched, pointing at a path invisible in the container --
+ * its role anchor silently never reached the agent.
+ */
+function composeSandboxAppendPrompt(sessionId: string, command: string, launch: SandboxLaunch): string {
+  if (!isValidSandboxSessionId(sessionId)) {
+    // Defense in depth (card 9e529177 audit), not a live-exploit fix: see
+    // isValidSandboxSessionId's own comment (sandbox-prompt.ts) for why.
+    reportError('sandbox', `refusing to compose append-system-prompt file: sessionId is not a uuid (${sessionId})`)
+    return command
+  }
+  const hostPromptPath = extractAppendSystemPromptFile(command)
+  let roleContent = ''
+  if (hostPromptPath) {
+    if (isWithinDir(secretsDir(), hostPromptPath)) {
+      try {
+        roleContent = readFileSync(hostPromptPath, 'utf8')
+      } catch (e) {
+        reportError('sandbox', `append-system-prompt-file unreadable: ${hostPromptPath}`, e)
+      }
+    } else {
+      // Card 9e529177 audit: before this card, this flag's host path was
+      // never readable from inside the container, so a path outside
+      // secretsDir() was harmless dead weight. wrap() now reads it host-side
+      // and injects the content into the sandboxed agent's prompt -- an
+      // uncontained path would newly become an exfiltration vector. Compose
+      // the notice alone; the spawn must not block on this.
+      reportError('sandbox', `append-system-prompt-file outside state dir, refusing to read: ${hostPromptPath}`)
+    }
+  }
+  const notice = renderProtectionNotice(launch.protection)
+  const containerPath = `${SANDBOX_RUN_DIR}/prompt-${sessionId}.txt`
+  const rewrite = composeAppendSystemPrompt(command, roleContent, notice, containerPath)
+  if (rewrite.composed === null) return command
+  try {
+    writeFileSync(join(launch.runDirHost, `prompt-${sessionId}.txt`), rewrite.composed + '\n', {
+      mode: 0o600
+    })
+  } catch (e) {
+    // A missing notice is an inconvenience (the :ro binds themselves stand
+    // regardless -- see buildCreateArgs), not a failure: the spawn must
+    // proceed, but the miss must leave a trace (CLAUDE.md "no silent errors").
+    reportError('sandbox', `failed to write composed append-system-prompt file for ${sessionId}`, e)
+    return command
+  }
+  return rewrite.command
+}
+
 // SBX1: wrap sandboxed spawns. The scope-secret file is read HERE (host-side,
 // with a trace on failure) so the pure env translator stays fs-free.
 service.setSandboxProvider(
@@ -527,7 +606,7 @@ service.setSandboxProvider(
           // pluginFlag has no sandbox awareness) -- rewrite it onto the
           // container path projectDeckPlugin() copied it to. No-op if the
           // flag is absent (deck-plugin build missing on the host).
-          command: rewritePluginDirForContainer(command),
+          command: composeSandboxAppendPrompt(sessionId, rewritePluginDirForContainer(command), launch),
           cwd,
           env: {
             ...sandboxifyEnv(env, (path) => {

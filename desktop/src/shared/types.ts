@@ -839,6 +839,20 @@ export const SANDBOX_BUILD_PTY_ID = 'sandbox-build'
 export const SANDBOX_IMAGE_DEFAULT_TAG = 'koryphaios-sandbox'
 export const SANDBOX_IMAGE_CUSTOM_TAG = `${SANDBOX_IMAGE_DEFAULT_TAG}-custom`
 
+/**
+ * Card 9e529177 arbitrage A10: mount-mode protection sub-policy (6e3863ef)
+ * surfaced for the operator. 'not-applicable' (copy mode -- the sub-policy
+ * has no meaning, workSource is an ephemeral clone) is a DISTINCT state from
+ * 'applied' with `appliedCount: 0` (mount mode, nothing matched) -- modeled
+ * here so the renderer can never conflate "sans objet en mode copie" with
+ * "0 chemin protégé". `skipped` is operator-only (paths NOT protected): the
+ * agent-facing renderProtectionNotice() text must never carry this, by
+ * design (sandbox-protect.ts) -- only the human sees what was skipped.
+ */
+export type SandboxProtectionStatus =
+  | { status: 'not-applicable' }
+  | { status: 'applied'; appliedCount: number; skipped: { rel: string; reason: string }[] }
+
 /** Full sandbox state of THIS window's project (Docker rail view + gates). */
 export interface SandboxStatus {
   engine: SandboxEngineName | null
@@ -897,6 +911,15 @@ export interface SandboxStatus {
   /** Days between this container's creation and a NEWER image, else null. */
   driftDays: number | null
   busy: boolean
+  /** Card 9e529177: mount-mode protection sub-policy state, see SandboxProtectionStatus. */
+  protection: SandboxProtectionStatus
+  /**
+   * True when the RUNNING/STOPPED container predates this feature (or the
+   * plan grew new paths since it was created) and is missing at least one
+   * `:ro` bind the CURRENT plan expects -- only a rebuild picks up the new
+   * `-v` args. Always false in copy mode or when no container exists yet.
+   */
+  protectionRebuildNeeded: boolean
   /** Last lifecycle error, operator-readable, or null. */
   error: string | null
 }

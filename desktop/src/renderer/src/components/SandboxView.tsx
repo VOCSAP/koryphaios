@@ -452,6 +452,34 @@ export function SandboxView(): React.JSX.Element {
             )}
           </div>
         )}
+        {/* ---- mount-mode protection (card 9e529177/6e3863ef): 'not-applicable'
+            (copy mode) and 'applied' are two DISTINCT states from
+            SandboxProtectionStatus, never conflated -- copy mode reads "sans
+            objet en mode copie", never "0 chemin protégé". `skipped` is
+            rendered as a COUNT, same archetype as `denied` above: an
+            unbounded list of paths would blow up the UI, and per
+            sandbox-protect.ts's renderProtectionNotice comment, only the
+            OPERATOR sees what was skipped -- the agent-facing notice never
+            does. ---- */}
+        {status?.protection.status === 'not-applicable' && (
+          <div className="sandbox-line sandbox-dim">{t('sandbox.protectionNotApplicable')}</div>
+        )}
+        {status?.protection.status === 'applied' && (
+          <div className="sandbox-line">
+            <span className="sandbox-label">{t('sandbox.protection')}</span>
+            <span className="rm-badge rm-badge-value-high">
+              {t('sandbox.protectionApplied', { n: status.protection.appliedCount })}
+            </span>
+            {status.protection.skipped.length > 0 && (
+              <span className="rm-badge rm-badge-effort-high" title={t('sandbox.protectionSkippedHint')}>
+                {t('sandbox.protectionSkipped', { n: status.protection.skipped.length })}
+              </span>
+            )}
+          </div>
+        )}
+        {status?.protectionRebuildNeeded === true && (
+          <div className="sandbox-line sandbox-warn">{t('sandbox.protectionRebuildHint')}</div>
+        )}
         {status && (
           <div className="sandbox-line">
             <span className="sandbox-label">{t('sandbox.ports')}</span>
