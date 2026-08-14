@@ -263,6 +263,112 @@ different forms for binds on the SAME container (a `C:\...` host path for one,
 a `/run/desktop/mnt/host/c/...` path for another), so the comparison that
 detects a stale container is done on Destination and RW only, never on Source.
 
+## Isolation between projects and containers (the run/peers dirs)
+
+Every sandboxed container needs a small host-side directory for two things
+that never belong in the auth volume or the project mount: the per-session
+launch script the PTY runs (`cmd-<sessionId>.sh`, mounted at `/kory-run`),
+and the peer back-channel cache the container's `server.ts` writes into
+(mounted at `~/.claude/peers`). Both are keyed by the container name
+(`kory-sbx-<hash>`) under the app state dir — `sandbox-run/<containerName>`
+and `sandbox-peers/<containerName>` — exactly like `sandbox-copies/<containerName>`,
+the clone directory used in ephemeral-copy mode.
+
+**Why keying matters here specifically.** The Deck has no single-instance
+lock and opens exactly one window per process, so two windows on two
+different projects are two separate processes resolving the *same*
+per-operator app-state directory. Any path built under that root with no
+distinguishing segment is therefore shared across every project the operator
+runs, not just conceptually but in practice — every container binds it
+read-write, and every container's agent runs as the same container user. The
+rule this generalizes to: before writing a new directory under the app-state
+root, ask what it is keyed by; if the answer is "nothing", it inherits that
+sharing by default, whether or not the content it holds looks sensitive.
+
+Before both dirs carried the container name, this is exactly what happened
+to the run dir: one `sandbox-run` directory served every project, mounted
+read-write into every container under the same uid. A compromised agent in
+one container could overwrite another *session's* — potentially another
+*project's* — `cmd-<sessionId>.sh`, and get its own code executed there at
+that session's next launch. The peers dir had the identical construction
+defect, with a smaller blast radius: it carries the peer-cache/back-channel
+data the container's `server.ts` writes, not a script the PTY executes, so a
+compromised write there does not by itself get code run.
+
+**The keying grain is the container, not the session or the process, and
+that is not an oversight.** Keying finer than the container would close
+nothing further: inside one container, isolation between the sessions it
+runs is already nil by construction — same user, same filesystem, no
+container boundary between them. Two sessions of the same project therefore
+still share their run dir and their peers dir; that sharing is a deliberate
+consequence of the isolation boundary being the container, not a residual
+gap.
+
+**Purge is asymmetric between the two keyed dirs and the clone directory, on
+purpose.** The container-name-keyed run and peers dirs are purged when their
+container is removed or rebuilt: their content regenerates for free (launch
+scripts are rewritten on every start, the peer cache repopulates on
+connect), so deleting them costs nothing. The ephemeral-copy clone
+(`sandbox-copies/<containerName>`) is never purged this way — it is kept
+across a remove/rebuild specifically so the next container does not pay for
+a re-clone. Purging both the same way would look like uniform hardening
+while actually regressing the one directory whose persistence is the
+feature, not a leftover.
+
+**The purge itself is fail-closed against a live container from another
+window.** A "remove" or "rebuild" action can target a container belonging to
+a *different* project (the cross-project containers list), which another
+Deck window may currently be running a session against — mid-flight,
+executing exactly the script this purge would delete. The container is
+always removed either way; only the directory purge is gated, and it is
+skipped whenever the container was observed running immediately before the
+removal.
+
+**Detecting a container still on the old, shared run-dir mount.** A
+container created before this keying shipped keeps its old shared bind
+until it is rebuilt — the fix only changes what a *new* `docker create` is
+given, never an existing container's live mount. The Docker view surfaces
+this as one of two independent rebuild reasons carried on
+`SandboxStatus.rebuildReasons` (`missing-protection-binds`, the mount-mode
+`:ro` protection check described above, and `shared-run-dir`, this one),
+rendered as two separate lines rather than folded into one generic "rebuild
+needed" message. They are kept apart because a wrong cause is worse than no
+signal at all: an operator reading the protection-binds wording during an
+actual cross-project run-dir sharing incident would file it under routine
+policy drift instead of the security incident it actually is.
+
+The detection itself has a measured trap. `docker inspect` on a real
+container can report the Source of two different binds in two different
+path *representations* within the same call (a `C:\...` host path for one
+mount, a `/run/desktop/mnt/host/c/...` path for another — measured live
+against Docker Desktop on Windows, 2026-08-14), so no single expected string
+can be built and compared by equality; the destination
+(`/kory-run`) never changes and is not useful here either, since it is
+identical whether the mount is shared or per-container. The check instead
+tests that the bind's Source *contains* the container name as a substring:
+`kory-sbx-<hash>` is a plain token with no separators, so it survives either
+path representation unchanged, and containment is decided independent of
+which form this engine/OS combination happens to produce.
+
+**Three accepted residues**, each a choice with a stated cost, not a gap
+discovered later:
+
+- Per-session files inside a live project's run/peers dirs still accumulate
+  over that project's lifetime — bounded now by *one project*, against the
+  previous unbounded, whole-machine, lives-forever accumulation.
+- Files left behind under the pre-fix flat directories (`sandbox-run` and
+  `sandbox-peers` directly under the app state dir, with no container-name
+  subdirectory) are not deleted automatically. Nothing mounts those flat
+  paths any more, so they are inert, but erasing files inside the
+  operator's application data to reclaim a few kilobytes is not a trade this
+  fix makes on the operator's behalf — clear them by hand if you want the
+  space back.
+- The substring-containment detection is written generically enough to
+  apply to podman, the other supported `SandboxEngine`, but it has only been
+  measured against Docker Desktop on Windows; podman was not available on
+  the machine used for this measurement. Treat podman coverage as an
+  assumed, unverified extrapolation, not a tested guarantee.
+
 ## Isolation limits
 
 A sandboxed session is meant to feel like your machine, not to BE it. It

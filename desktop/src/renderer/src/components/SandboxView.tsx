@@ -477,8 +477,17 @@ export function SandboxView(): React.JSX.Element {
             )}
           </div>
         )}
-        {status?.protectionRebuildNeeded === true && (
+        {/* Card e35b2791 round 2: two INDEPENDENT lines, one per
+            SandboxRebuildReason present, never merged into one generic
+            "rebuild needed" message -- a container can carry both reasons
+            at once, and an operator reading the protection-binds wording
+            during an actual cross-project run-dir sharing incident would
+            read a FALSE cause off text written for the other reason. */}
+        {status?.rebuildReasons.includes('missing-protection-binds') && (
           <div className="sandbox-line sandbox-warn">{t('sandbox.protectionRebuildHint')}</div>
+        )}
+        {status?.rebuildReasons.includes('shared-run-dir') && (
+          <div className="sandbox-line sandbox-warn">{t('sandbox.sharedRunDirRebuildHint')}</div>
         )}
         {status && (
           <div className="sandbox-line">

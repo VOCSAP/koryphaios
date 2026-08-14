@@ -322,6 +322,7 @@
   "sandbox.protectionSkipped": "{n} not protected",
   "sandbox.protectionSkippedHint": "Paths this policy would normally protect but did not find on disk (a fresh .git, no .vscode, etc.) — not shown to the agent, by design.",
   "sandbox.protectionRebuildHint": "This container predates the read-only path protection (or the policy grew since it was created) — Rebuild to apply it.",
+  "sandbox.sharedRunDirRebuildHint": "This container predates the per-project isolation fix and still shares its launch-script directory with other projects — Rebuild to apply it.",
   "sandbox.blockedRunning": "A sandbox container is running — stop it first.",
   "sandbox.copy": "Ephemeral copy",
   "sandbox.copyHint": "A local git clone of the project, mounted instead of the real folder. Agents commit here and push the branch back to your repo; the clone can be thrown away at any time.",

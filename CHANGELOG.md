@@ -1,5 +1,60 @@
 # Changelog
 
+## desktop (experimental) -- le repertoire de lancement du sandbox cesse d'etre partage entre projets
+
+Carte `e35b2791`. Ce lot prolonge celui juste dessous (commit `18aebc4`,
+cartes `6e3863ef` et `9e529177`), qui avait ferme l'evasion du sandbox vers
+l'HOTE : celui-ci ferme l'evasion entre CONTENEURS d'un meme operateur.
+
+**L'evasion cross-projet fermee.** Le repertoire de lancement (`/kory-run`,
+qui porte `cmd-<sessionId>.sh`, le script que le pty execute via `docker exec`)
+n'etait keye par rien, alors que le repertoire de copie voisin, `sandbox-copies`,
+inclut deja le nom du conteneur. Il existait donc UN SEUL repertoire pour
+toutes les sessions et tous les projets sandboxes d'un operateur, bind-monte
+en LECTURE-ECRITURE dans CHAQUE conteneur. Comme tous les conteneurs tournent
+sous le meme utilisateur, un agent sandboxe compromis pouvait reecrire le
+script de lancement d'une session d'un AUTRE PROJET et obtenir l'execution de
+code dans son conteneur au prochain demarrage. Le repertoire du back-channel
+des pairs portait la meme construction, avec un vecteur moindre puisqu'il ne
+porte que de la donnee, jamais un script execute. Les deux repertoires sont
+desormais keyes par le nom du conteneur, sur le modele deja correct de
+`sandbox-copies`.
+
+**L'asymetrie de purge est un choix, pas un oubli.** Les deux repertoires
+nouvellement keyes sont purges a la suppression ou au rebuild de leur
+conteneur -- leur contenu se regenere sans cout (script rejoue a chaque
+demarrage, cache pairs repeuple a la connexion). Le repertoire de copie,
+lui, n'est jamais purge par ce geste : le clone y est conserve EXPRES pour
+eviter un re-clone au conteneur suivant. Purger les deux de la meme facon
+serait une regression deguisee en durcissement.
+
+**La purge elle-meme est fail-closed.** Une suppression ou un rebuild peut
+viser le conteneur d'un AUTRE projet, dont une autre fenetre du Deck peut
+faire tourner une session en ce moment meme -- le Deck n'a pas de verrou
+d'instance unique, donc deux fenetres sur deux projets sont deux processus
+qui partagent le meme repertoire de donnees applicatives. Le conteneur est
+supprime dans tous les cas ; seule la purge du repertoire est conditionnee
+a ce que le conteneur ne tournait pas au moment de l'action.
+
+**Le signal de rebuild porte desormais sa raison.** Un conteneur cree avant
+ce correctif garde son ancien montage partage jusqu'a un rebuild explicite.
+La vue Docker le detecte et affiche desormais deux lignes distinctes selon
+la cause -- protection binds manquants (`missing-protection-binds`, deja
+existant) et repertoire de lancement partage (`shared-run-dir`, nouveau) --
+jamais fondues en un message generique : un operateur lisant le libelle de
+protection pendant un incident de partage cross-projet le classerait a tort
+dans le confort plutot que dans l'incident de securite.
+
+**La detection contourne un piege mesure sur les representations de
+chemin.** La destination du bind ne change pas entre l'ancien et le nouveau
+montage, seule la source change, et le meme `docker inspect` peut rendre
+DEUX representations differentes du meme chemin dans UN SEUL appel (une
+forme `C:\...` et une forme `/run/desktop/mnt/host/c/...`, mesure sur Docker
+Desktop Windows, 2026-08-14). Une egalite de chemin est donc impossible ; la
+detection teste que la source CONTIENT le nom du conteneur, un jeton
+hexadecimal sans separateur qui survit a l'identique dans les deux
+representations.
+
 ## desktop (experimental) -- le mode mount protege son propre projet, et le preavis atteint l'agent avant son premier prompt
 
 Deux cartes livrees ensemble, `6e3863ef` (sous-politique de protection du

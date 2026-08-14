@@ -322,6 +322,7 @@
   "sandbox.protectionSkipped": "{n} non protégé(s)",
   "sandbox.protectionSkippedHint": "Chemins que cette politique protégerait normalement mais introuvables sur le disque (.git tout neuf, pas de .vscode, etc.) — jamais montrés à l'agent, par conception.",
   "sandbox.protectionRebuildHint": "Ce conteneur est antérieur à la protection en lecture seule des chemins (ou la politique s'est étendue depuis sa création) — Reconstruire pour l'appliquer.",
+  "sandbox.sharedRunDirRebuildHint": "Ce conteneur est antérieur au correctif d'isolation par projet et partage encore son répertoire de lancement avec d'autres projets — Reconstruire pour l'appliquer.",
   "sandbox.blockedRunning": "Un conteneur sandbox est démarré — arrêtez-le d'abord.",
   "sandbox.copy": "Copie éphémère",
   "sandbox.copyHint": "Un clone git local du projet, monté à la place du vrai dossier. Les agents committent ici et poussent la branche vers votre dépôt ; le clone peut être jeté à tout moment.",

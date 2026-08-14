@@ -469,6 +469,8 @@ export const EN_DEFAULTS: Record<string, string> = {
     'Paths this policy would normally protect but did not find on disk (a fresh .git, no .vscode, etc.) — not shown to the agent, by design.',
   'sandbox.protectionRebuildHint':
     'This container predates the read-only path protection (or the policy grew since it was created) — Rebuild to apply it.',
+  'sandbox.sharedRunDirRebuildHint':
+    'This container predates the per-project isolation fix and still shares its launch-script directory with other projects — Rebuild to apply it.',
   'sandbox.blockedRunning': 'A sandbox container is running — stop it first.',
   'sandbox.copy': 'Ephemeral copy',
   'sandbox.copyHint':

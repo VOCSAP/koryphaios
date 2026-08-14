@@ -8,9 +8,9 @@
 //   toProtectionStatus (operator-facing not-applicable/applied split, A10),
 //   isProtectionRebuildNeeded (container-already-in-flight detection).
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import {
   composeAppendSystemPrompt,
   extractAppendSystemPromptFile,
@@ -21,12 +21,68 @@ import {
 import { writeSupervisorSystemPrompt } from "../desktop/src/main/supervisor.ts";
 import { writeEmbeddedAgentPrompt } from "../desktop/src/main/team-embedded.ts";
 import {
+  computeRebuildReasons,
   isProtectionRebuildNeeded,
+  isRunDirMountShared,
   parseMounts,
   toProtectionStatus,
+  SandboxService,
+  type SandboxExecResult,
   type SandboxMountInfo,
+  type SandboxServiceDeps,
 } from "../desktop/src/main/sandbox-service.ts";
+import { containerNameFor, isSandboxContainerName } from "../desktop/src/main/sandbox-command.ts";
 import type { ProtectionPlan } from "../desktop/src/main/sandbox-protect.ts";
+
+/** Minimal SandboxServiceDeps for constructor/keying-level tests -- no exec calls unless provided. */
+function makeDeps(
+  projectDir: string,
+  stateDir: string,
+  exec?: SandboxServiceDeps["exec"]
+): SandboxServiceDeps {
+  return {
+    projectDir,
+    projectKey: "k",
+    stateDir,
+    claudeHomeDir: join(stateDir, "claude-home"),
+    deckPluginDir: () => "",
+    imageContextDir: join(stateDir, "image-ctx"),
+    containerBrokerUrl: () => "http://127.0.0.1:0",
+    journal: () => {},
+    exec,
+  };
+}
+
+/**
+ * Answers every `run()` call containerAction's happy path makes: the engine
+ * probe `run()` itself requires before ANY other call succeeds (private
+ * `run()` returns `{code: -1}` unconditionally until `detectEngine()` has
+ * set `this.probe`), the sandbox-label probe, then the actual command.
+ */
+async function fakeExecOk(file: string, args: string[]): Promise<SandboxExecResult> {
+  if (args[0] === "version") return { code: 0, stdout: "1.2.3", stderr: "" };
+  if (args[0] === "inspect" && args.some((a) => a.includes("kory.sandbox"))) {
+    return { code: 0, stdout: "1\n", stderr: "" };
+  }
+  return { code: 0, stdout: "", stderr: "" };
+}
+
+/**
+ * Same happy path as fakeExecOk, but also answers inspectIdState's
+ * `{{.Id}}\t{{.State.Status}}\t{{json .Mounts}}` format with a controlled
+ * State.Status -- used to prove the fail-closed purge guard (card e35b2791
+ * audit round 3).
+ */
+function makeFakeExecWithState(state: string): (file: string, args: string[]) => Promise<SandboxExecResult> {
+  return async (file, args) => {
+    if (args[0] === "version") return { code: 0, stdout: "1.2.3", stderr: "" };
+    if (args[0] === "inspect" && args.some((a) => a.includes("kory.sandbox"))) {
+      return { code: 0, stdout: "1\n", stderr: "" };
+    }
+    if (args[0] === "inspect") return { code: 0, stdout: `abc123\t${state}\t[]`, stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+}
 
 const CONTAINER_PATH = "/kory-run/prompt-sess-1.txt";
 
@@ -143,16 +199,16 @@ test("N-f: a container with none of the expected :ro binds needs a rebuild", () 
 
 test("N-f bis: a container carrying all expected ro binds does not need a rebuild", () => {
   const mounts: SandboxMountInfo[] = [
-    { destination: "/work/.git/hooks", rw: false },
-    { destination: "/work/.mcp.json", rw: false },
+    { destination: "/work/.git/hooks", source: "/host/.git/hooks", rw: false },
+    { destination: "/work/.mcp.json", source: "/host/.mcp.json", rw: false },
   ];
   expect(isProtectionRebuildNeeded(APPLIED_PLAN, "running", mounts)).toBe(false);
 });
 
 test("N-f ter: a matching Destination that is NOT read-only still needs a rebuild (RW compared, not just presence)", () => {
   const mounts: SandboxMountInfo[] = [
-    { destination: "/work/.git/hooks", rw: true }, // present, but read-write -- not the protection bind
-    { destination: "/work/.mcp.json", rw: false },
+    { destination: "/work/.git/hooks", source: "/host/.git/hooks", rw: true }, // present, but read-write -- not the protection bind
+    { destination: "/work/.mcp.json", source: "/host/.mcp.json", rw: false },
   ];
   expect(isProtectionRebuildNeeded(APPLIED_PLAN, "running", mounts)).toBe(true);
 });
@@ -171,8 +227,8 @@ test("parseMounts reduces docker inspect JSON to destination/rw, tolerating malf
     { Destination: "/work", RW: true, Source: "/run/desktop/mnt/host/c/proj" },
   ]);
   expect(parseMounts(raw)).toEqual([
-    { destination: "/work/.git/hooks", rw: false },
-    { destination: "/work", rw: true },
+    { destination: "/work/.git/hooks", source: "C:\\proj\\.git\\hooks", rw: false },
+    { destination: "/work", source: "/run/desktop/mnt/host/c/proj", rw: true },
   ]);
   expect(parseMounts(undefined)).toEqual([]);
   expect(parseMounts("{not json")).toEqual([]);
@@ -189,10 +245,10 @@ test("audit fix 2: parseMounts treats string/omitted/numeric RW as NOT protected
     { Destination: "/work/d", RW: false }, // nominal Docker case, unaffected
   ]);
   expect(parseMounts(raw)).toEqual([
-    { destination: "/work/a", rw: true },
-    { destination: "/work/b", rw: true },
-    { destination: "/work/c", rw: true },
-    { destination: "/work/d", rw: false },
+    { destination: "/work/a", source: "", rw: true },
+    { destination: "/work/b", source: "", rw: true },
+    { destination: "/work/c", source: "", rw: true },
+    { destination: "/work/d", source: "", rw: false },
   ]);
 });
 
@@ -332,4 +388,282 @@ test("audit fix 1 sexies: writeEmbeddedAgentPrompt's real output (team-role anch
   expect(result.composed).toBe(roleContent);
 
   rmSync(userDataDir, { recursive: true, force: true });
+});
+
+// Card e35b2791: runDirHost/peersDirHost keying by containerName (previously
+// ONE directory shared read-write by every sandboxed project on the
+// machine), purge on remove/rebuild, and the shared-mount drift signal.
+
+test("P-a: two projects' writeLaunchScript land in DIFFERENT, containerName-keyed run dirs", () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "cp-sandbox-svc-keying-"));
+  const svcA = new SandboxService(makeDeps("/project/a", stateDir));
+  const svcB = new SandboxService(makeDeps("/project/b", stateDir));
+  const idA = "11111111-1111-1111-1111-111111111111";
+  const idB = "22222222-2222-2222-2222-222222222222";
+
+  svcA.writeLaunchScript(idA, { command: "echo a", cwd: "/work", env: {} });
+  svcB.writeLaunchScript(idB, { command: "echo b", cwd: "/work", env: {} });
+
+  const nameA = containerNameFor("/project/a");
+  const nameB = containerNameFor("/project/b");
+  expect(nameA).not.toBe(nameB);
+  expect(existsSync(join(stateDir, "sandbox-run", nameA, `cmd-${idA}.sh`))).toBe(true);
+  expect(existsSync(join(stateDir, "sandbox-run", nameB, `cmd-${idB}.sh`))).toBe(true);
+  // The OLD unkeyed shared location must receive NEITHER script.
+  expect(existsSync(join(stateDir, "sandbox-run", `cmd-${idA}.sh`))).toBe(false);
+
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+test("P-b: two projects get different peersDirHost, each keyed by its own containerName", () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "cp-sandbox-svc-keying2-"));
+  const svcA = new SandboxService(makeDeps("/project/a", stateDir));
+  const svcB = new SandboxService(makeDeps("/project/b", stateDir));
+
+  expect(svcA.peersDirHost).not.toBe(svcB.peersDirHost);
+  expect(svcA.peersDirHost).toBe(join(stateDir, "sandbox-peers", containerNameFor("/project/a")));
+  expect(svcB.peersDirHost).toBe(join(stateDir, "sandbox-peers", containerNameFor("/project/b")));
+
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+test("P-c: containerAction('remove') purges the containerName-keyed run/peers dirs", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "cp-sandbox-svc-purge-"));
+  const projectDir = "/project/c";
+  const name = containerNameFor(projectDir);
+  const svc = new SandboxService(makeDeps(projectDir, stateDir, fakeExecOk));
+
+  const runDir = join(stateDir, "sandbox-run", name);
+  const peersDir = join(stateDir, "sandbox-peers", name);
+  mkdirSync(runDir, { recursive: true });
+  mkdirSync(peersDir, { recursive: true });
+  writeFileSync(join(runDir, "cmd-x.sh"), "#!/bin/bash");
+
+  await svc.detectEngine();
+  await svc.containerAction(name, "remove");
+
+  expect(existsSync(runDir)).toBe(false);
+  expect(existsSync(peersDir)).toBe(false);
+
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+test("P-c bis: containerAction('remove') on a DIFFERENT project's container purges THAT project's dirs, not this.containerName's", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "cp-sandbox-svc-purge2-"));
+  const svc = new SandboxService(makeDeps("/project/mine", stateDir, fakeExecOk));
+  const otherName = containerNameFor("/project/other");
+  const otherRunDir = join(stateDir, "sandbox-run", otherName);
+  mkdirSync(otherRunDir, { recursive: true });
+
+  await svc.detectEngine();
+  await svc.containerAction(otherName, "remove");
+
+  expect(existsSync(otherRunDir)).toBe(false);
+
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+test("P-d: containerAction('remove') does NOT purge copyDirHost (asymmetry is intentional, A4)", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "cp-sandbox-svc-purge3-"));
+  const projectDir = "/project/d";
+  const name = containerNameFor(projectDir);
+  const svc = new SandboxService(makeDeps(projectDir, stateDir, fakeExecOk));
+
+  const copyDir = join(stateDir, "sandbox-copies", name);
+  mkdirSync(copyDir, { recursive: true });
+  writeFileSync(join(copyDir, "marker.txt"), "keep me");
+
+  await svc.detectEngine();
+  await svc.containerAction(name, "remove");
+
+  expect(existsSync(copyDir)).toBe(true);
+
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+// Card e35b2791 audit round 3: fail-closed against a race with a live
+// session in ANOTHER Deck window (no requestSingleInstanceLock in this app).
+test("P-h: containerAction('remove') skips the purge (fail-closed) when the target container was RUNNING", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "cp-sandbox-svc-purge4-"));
+  const projectDir = "/project/h";
+  const name = containerNameFor(projectDir);
+  const svc = new SandboxService(makeDeps(projectDir, stateDir, makeFakeExecWithState("running")));
+
+  const runDir = join(stateDir, "sandbox-run", name);
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, "cmd-live.sh"), "#!/bin/bash");
+
+  await svc.detectEngine();
+  await svc.containerAction(name, "remove");
+
+  // The container is still force-removed either way (docker rm -f runs
+  // regardless) -- only the directory purge is gated on the running check.
+  expect(existsSync(runDir)).toBe(true);
+
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+test("P-h bis: containerAction('remove') DOES purge when the target container was NOT running", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "cp-sandbox-svc-purge5-"));
+  const projectDir = "/project/h2";
+  const name = containerNameFor(projectDir);
+  const svc = new SandboxService(makeDeps(projectDir, stateDir, makeFakeExecWithState("exited")));
+
+  const runDir = join(stateDir, "sandbox-run", name);
+  mkdirSync(runDir, { recursive: true });
+
+  await svc.detectEngine();
+  await svc.containerAction(name, "remove");
+
+  expect(existsSync(runDir)).toBe(false);
+
+  rmSync(stateDir, { recursive: true, force: true });
+});
+
+// P-e: the shared-run-dir drift signal (isRunDirMountShared).
+test("P-e: flags a container whose /kory-run source is the OLD shared dir (containerName absent from Source)", () => {
+  const containerName = "kory-sbx-abcdef123456";
+  const mounts: SandboxMountInfo[] = [
+    {
+      destination: "/kory-run",
+      source: "/run/desktop/mnt/host/c/Users/x/AppData/Roaming/koryphaios/config/sandbox-run",
+      rw: true,
+    },
+  ];
+  expect(isRunDirMountShared(mounts, containerName, "running")).toBe(true);
+});
+
+test("P-e bis: accepts a /kory-run source keyed to the current containerName, in EITHER path representation", () => {
+  const containerName = "kory-sbx-abcdef123456";
+  const winForm: SandboxMountInfo[] = [
+    {
+      destination: "/kory-run",
+      source: `C:\\Users\\x\\AppData\\Roaming\\koryphaios\\config\\sandbox-run\\${containerName}`,
+      rw: true,
+    },
+  ];
+  const wslForm: SandboxMountInfo[] = [
+    {
+      destination: "/kory-run",
+      source: `/run/desktop/mnt/host/c/Users/x/AppData/Roaming/koryphaios/config/sandbox-run/${containerName}`,
+      rw: true,
+    },
+  ];
+  expect(isRunDirMountShared(winForm, containerName, "running")).toBe(false);
+  expect(isRunDirMountShared(wslForm, containerName, "running")).toBe(false);
+});
+
+test("P-e ter: a missing /kory-run mount is drift (fail-safe); 'missing' containerState is never drift", () => {
+  expect(isRunDirMountShared([], "kory-sbx-abcdef123456", "running")).toBe(true);
+  expect(isRunDirMountShared([], "kory-sbx-abcdef123456", "missing")).toBe(false);
+});
+
+// P-f: the containerName key can never escape its parent directory.
+test("P-f: isSandboxContainerName rejects path-traversal-shaped names before they ever reach a join()", () => {
+  expect(isSandboxContainerName("../../etc")).toBe(false);
+  expect(isSandboxContainerName("kory-sbx-" + "a".repeat(12) + "/../x")).toBe(false);
+  expect(isSandboxContainerName("kory-sbx-ABCDEF123456")).toBe(false); // uppercase hex rejected
+  const valid = containerNameFor("/some/project"); // always matches NAME_RE by construction
+  expect(isSandboxContainerName(valid)).toBe(true);
+});
+
+test("P-f bis: a valid containerName can never make join(root, 'sandbox-run', name) escape root", () => {
+  const root = join(tmpdir(), "cp-sandbox-svc-root-check");
+  for (const projectDir of ["/a", "/b/c", "/weird spaces/dir"]) {
+    const name = containerNameFor(projectDir);
+    const built = join(root, "sandbox-run", name);
+    expect(built.startsWith(root + sep)).toBe(true);
+    expect(built).not.toContain("..");
+  }
+});
+
+// Team-lead round 2: a single "rebuild needed" boolean is actively
+// misleading when the two possible causes need two different responses --
+// this proves the closed, cumulable reason set stays DISTINCT across three
+// container profiles, never merged into one.
+test("P-g: three container profiles (only missing-protection-binds, only shared-run-dir, both) produce three DISTINCT rebuildReasons", () => {
+  const containerName = "kory-sbx-abcdef123456";
+  const keyedRunMount: SandboxMountInfo = {
+    destination: "/kory-run",
+    source: `/run/desktop/mnt/host/c/state/sandbox-run/${containerName}`,
+    rw: true,
+  };
+  const sharedRunMount: SandboxMountInfo = {
+    destination: "/kory-run",
+    source: "/run/desktop/mnt/host/c/state/sandbox-run", // old, unkeyed
+    rw: true,
+  };
+  const protectedBinds: SandboxMountInfo[] = [
+    { destination: "/work/.git/hooks", source: "/host/.git/hooks", rw: false },
+    { destination: "/work/.mcp.json", source: "/host/.mcp.json", rw: false },
+  ];
+
+  const onlyProtection = computeRebuildReasons(APPLIED_PLAN, [keyedRunMount], containerName, "running");
+  const onlySharedRunDir = computeRebuildReasons(
+    APPLIED_PLAN,
+    [...protectedBinds, sharedRunMount],
+    containerName,
+    "running"
+  );
+  const both = computeRebuildReasons(APPLIED_PLAN, [sharedRunMount], containerName, "running");
+  const neither = computeRebuildReasons(APPLIED_PLAN, [...protectedBinds, keyedRunMount], containerName, "running");
+
+  expect(onlyProtection).toEqual(["missing-protection-binds"]);
+  expect(onlySharedRunDir).toEqual(["shared-run-dir"]);
+  expect(both).toEqual(["missing-protection-binds", "shared-run-dir"]);
+  expect(neither).toEqual([]);
+
+  // Three non-empty results, pairwise DISTINCT -- never silently merged.
+  expect(onlyProtection).not.toEqual(onlySharedRunDir);
+  expect(onlyProtection).not.toEqual(both);
+  expect(onlySharedRunDir).not.toEqual(both);
+});
+
+test("P-g bis: rebuildReasons is always empty when the container is 'missing', regardless of plan/mounts", () => {
+  expect(computeRebuildReasons(APPLIED_PLAN, [], "kory-sbx-abcdef123456", "missing")).toEqual([]);
+});
+
+// Card e35b2791 audit round 3, point 3: the P-e/P-e bis/P-g tests above all
+// start from a HAND-BUILT SandboxMountInfo (source already a parsed string),
+// which is structurally blind to whatever `docker/podman inspect --format
+// {{json .Mounts}}` actually emits. This test instead runs the REAL
+// parseMounts on realistic raw JSON, using the exact field names and BOTH
+// Source representations measured live on a real container this session
+// (see the round-1 report: kory-sbx-0e0a7a172d92, 2026-08-14).
+//
+// PODMAN RESIDUAL, DOCUMENTED NOT ASSUMED COVERED: podman is not installed
+// on this machine (`podman --version` -> command not found, measured just
+// now) -- its actual `inspect --format {{json .Mounts}}` output was NOT
+// captured, so this test proves the Docker Desktop Windows case only. The
+// containment approach (containerName substring in Source) is BELIEVED to
+// generalize because podman targets Docker CLI/API compatibility for this
+// exact command shape, but that is an unverified assumption, not a
+// measurement -- flag as open with whoever next has a podman engine to test.
+test("P-i: computeRebuildReasons through the REAL parseMounts on realistic docker-inspect JSON (both measured Source forms)", () => {
+  const containerName = "kory-sbx-abcdef123456";
+  const rawKeyedWsl = JSON.stringify([
+    {
+      Type: "bind",
+      Source: `/run/desktop/mnt/host/c/Users/x/AppData/Roaming/koryphaios/config/sandbox-run/${containerName}`,
+      Destination: "/kory-run",
+      Mode: "",
+      RW: true,
+      Propagation: "rprivate",
+    },
+  ]);
+  const rawSharedWin = JSON.stringify([
+    {
+      Type: "bind",
+      Source: "C:\\Users\\x\\AppData\\Roaming\\koryphaios\\config\\sandbox-run",
+      Destination: "/kory-run",
+      Mode: "",
+      RW: true,
+      Propagation: "rprivate",
+    },
+  ]);
+
+  expect(computeRebuildReasons(NOT_APPLICABLE_PLAN, parseMounts(rawKeyedWsl), containerName, "running")).toEqual([]);
+  expect(
+    computeRebuildReasons(NOT_APPLICABLE_PLAN, parseMounts(rawSharedWin), containerName, "running")
+  ).toEqual(["shared-run-dir"]);
 });

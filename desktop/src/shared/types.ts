@@ -914,15 +914,33 @@ export interface SandboxStatus {
   /** Card 9e529177: mount-mode protection sub-policy state, see SandboxProtectionStatus. */
   protection: SandboxProtectionStatus
   /**
-   * True when the RUNNING/STOPPED container predates this feature (or the
-   * plan grew new paths since it was created) and is missing at least one
-   * `:ro` bind the CURRENT plan expects -- only a rebuild picks up the new
-   * `-v` args. Always false in copy mode or when no container exists yet.
+   * Card e35b2791 round 2: a CLOSED, CUMULABLE set of reasons this
+   * RUNNING/STOPPED container needs a rebuild to pick up a security fix.
+   * Deliberately NOT a single boolean or a free-form string: an operator
+   * reading one generic "rebuild needed" message during an actual
+   * cross-project run-dir sharing incident would read a FALSE cause off a
+   * message written for a different reason (missing `:ro` protection
+   * binds) -- worse than no signal, because it reads as low-urgency comfort
+   * text instead of the security incident it actually is. Both reasons can
+   * be true at once on the same old container; SandboxView.tsx renders one
+   * line per reason present, each with its own i18n key. Empty array = no
+   * rebuild needed. Always empty when no container exists yet.
    */
-  protectionRebuildNeeded: boolean
+  rebuildReasons: SandboxRebuildReason[]
   /** Last lifecycle error, operator-readable, or null. */
   error: string | null
 }
+
+/**
+ * Card e35b2791 round 2: 'missing-protection-binds' = the mount-mode `:ro`
+ * protection plan (card 9e529177) has paths the container's Mounts don't
+ * carry read-only yet. 'shared-run-dir' = the container's `/kory-run` mount
+ * still points at the pre-e35b2791 directory shared read-write by every
+ * sandboxed project on the machine (card e35b2791's own fix). A closed union
+ * on purpose -- a free-form string would end up constructed at one call site
+ * and read/compared at another, drifting silently.
+ */
+export type SandboxRebuildReason = 'missing-protection-binds' | 'shared-run-dir'
 
 /** One kory-sbx container in the cross-project rail listing. */
 export interface SandboxContainerInfo {

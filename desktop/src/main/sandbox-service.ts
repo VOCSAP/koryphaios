@@ -20,12 +20,14 @@ import type {
   SandboxContainerInfo,
   SandboxExecResponse,
   SandboxProtectionStatus,
+  SandboxRebuildReason,
   SandboxStatus
 } from '@shared/types'
 import {
   SANDBOX_AUTH_VOLUME,
   SANDBOX_HOME,
   SANDBOX_IMAGE_CUSTOM,
+  SANDBOX_RUN_DIR,
   SANDBOX_WORK_DIR,
   buildAuthProbeArgs,
   composeCustomDockerfile,
@@ -63,16 +65,23 @@ import { planProtectedBinds, type ProtectionPlan } from './sandbox-protect'
 /** `docker inspect` Mounts entry, reduced to what the rebuild check needs. */
 export interface SandboxMountInfo {
   destination: string
+  /**
+   * Card e35b2791: carried ONLY for isRunDirMountShared's containerName
+   * CONTAINMENT check (a token comparison, immune to representation).
+   * isProtectionRebuildNeeded still compares Destination + RW ONLY, never
+   * Source by EQUALITY (CLAUDE.md "canonicalize both paths"): measured
+   * live via `docker inspect` on a real kory-sbx-* container (2026-08-14),
+   * the SAME container reports Source in two different forms across its own
+   * binds within one inspect call (a `C:\...` host path for one mount,
+   * `/run/desktop/mnt/host/c/...` for another) -- no single expected string
+   * can be built and compared by equality.
+   */
+  source: string
   rw: boolean
 }
 
 /**
- * Parses `{{json .Mounts}}` output. Compared on Destination + RW ONLY, never
- * Source (CLAUDE.md "canonicalize both paths"): measured under Docker
- * Desktop Windows, the SAME container reports Source in two different forms
- * across its own binds within one inspect call (a `C:\...` host path for one
- * mount, `/run/desktop/mnt/host/c/...` for another) — Source is not a stable
- * comparison key here, only Destination/RW are.
+ * Parses `{{json .Mounts}}` output.
  *
  * `rw: m.RW !== false` (audit fix, card 9e529177): the FAIL-SAFE direction is
  * "assume read-write" (not protected -> flags a rebuild), never "assume
@@ -90,7 +99,11 @@ export function parseMounts(raw: string | undefined): SandboxMountInfo[] {
     if (!Array.isArray(parsed)) return []
     return parsed
       .filter((m): m is Record<string, unknown> => typeof m === 'object' && m !== null)
-      .map((m) => ({ destination: String(m.Destination ?? ''), rw: m.RW !== false }))
+      .map((m) => ({
+        destination: String(m.Destination ?? ''),
+        source: String(m.Source ?? ''),
+        rw: m.RW !== false
+      }))
   } catch {
     return []
   }
@@ -132,6 +145,59 @@ export function isProtectionRebuildNeeded(
     containerState !== 'missing' &&
     plan.applied.some((b) => !mounts.some((m) => m.destination === b.containerPath && m.rw === false))
   )
+}
+
+/**
+ * Card e35b2791 point 3: `/kory-run` (SANDBOX_RUN_DIR) used to be ONE
+ * directory shared by every project (runDirHost had no per-container
+ * keying) -- a container created before that fix has the OLD shared Source
+ * baked into its bind and keeps it until rebuilt, regardless of what the
+ * current code would create today. `isProtectionRebuildNeeded` above can't
+ * see this: its Destination (`/kory-run`) never changes, only Source does.
+ *
+ * Compared by SUBSTRING containment of `containerName` in Source, never by
+ * equality on the full Source: see SandboxMountInfo's own comment for the
+ * measured two-representation problem this sidesteps. `containerName`
+ * (`kory-sbx-<hex12>`, validated by NAME_RE, no separators) is a plain
+ * directory-name TOKEN that survives either representation unchanged --
+ * substring containment exploits that without needing to know which form
+ * this engine/OS combination happens to use.
+ *
+ * A missing `/kory-run` mount entirely is ALSO treated as drift (fail-safe,
+ * same direction as parseMounts' RW default): a container this broken needs
+ * a rebuild regardless of the specific reason. Always false when no
+ * container exists yet, same as isProtectionRebuildNeeded.
+ */
+export function isRunDirMountShared(
+  mounts: readonly SandboxMountInfo[],
+  containerName: string,
+  containerState: SandboxStatus['containerState']
+): boolean {
+  if (containerState === 'missing') return false
+  const runMount = mounts.find((m) => m.destination === SANDBOX_RUN_DIR)
+  if (!runMount) return true
+  return !runMount.source.includes(containerName)
+}
+
+/**
+ * Card e35b2791 round 2: combines isProtectionRebuildNeeded and
+ * isRunDirMountShared into the CLOSED, CUMULABLE set SandboxStatus exposes.
+ * Deliberately a plain array built from two independent boolean checks, not
+ * a merged/first-wins boolean or a free-form string -- see
+ * SandboxRebuildReason's own comment (shared/types.ts) for why a single
+ * "rebuild needed" signal is actively misleading when the real cause is a
+ * cross-project security incident, not a stale protection policy.
+ */
+export function computeRebuildReasons(
+  plan: ProtectionPlan,
+  mounts: readonly SandboxMountInfo[],
+  containerName: string,
+  containerState: SandboxStatus['containerState']
+): SandboxRebuildReason[] {
+  const reasons: SandboxRebuildReason[] = []
+  if (isProtectionRebuildNeeded(plan, containerState, mounts)) reasons.push('missing-protection-binds')
+  if (isRunDirMountShared(mounts, containerName, containerState)) reasons.push('shared-run-dir')
+  return reasons
 }
 // Card a79c7696 volet 1: deck-plugin (roadmap-card skill + roadmap-scribe
 // agent) is projected as an extra ProjectionEntry alongside the operator's
@@ -300,9 +366,17 @@ export class SandboxService extends EventEmitter {
     super()
     this.containerName = containerNameFor(deps.projectDir)
     this.storeFile = join(deps.stateDir, 'sandbox.json')
-    this.runDirHost = join(deps.stateDir, 'sandbox-run')
+    // Card e35b2791: keyed by containerName, like copyDirHost just below --
+    // unkeyed, this was ONE directory shared by every sandboxed project on
+    // the machine, bind-mounted read-write into EVERY container under the
+    // SAME uid. A compromised agent in any one container could overwrite
+    // cmd-<sessionId>.sh for a DIFFERENT session (any project's), and get
+    // code execution there at its next launch.
+    this.runDirHost = join(deps.stateDir, 'sandbox-run', this.containerName)
     // Deck-owned, sandbox-only peers dir (see buildCreateArgs' peersDirHost).
-    this.peersDirHost = join(deps.stateDir, 'sandbox-peers')
+    // Same construction defect as runDirHost above, lesser vector (presence
+    // data, not an executed script) -- keyed for the same reason, same commit.
+    this.peersDirHost = join(deps.stateDir, 'sandbox-peers', this.containerName)
     // Short, stable clone dir keyed by the same hash as the container.
     this.copyDirHost = join(deps.stateDir, 'sandbox-copies', this.containerName)
     this.projectedMarkerFile = join(deps.stateDir, `sandbox-projected-${this.containerName}`)
@@ -676,7 +750,7 @@ export class SandboxService extends EventEmitter {
     const authed = probe.state === 'ok' ? this.authedCache : null
     this.lastReady = containerState === 'running'
     const plan = this.protectionPlan()
-    const protectionRebuildNeeded = isProtectionRebuildNeeded(plan, containerState, mounts)
+    const rebuildReasons = computeRebuildReasons(plan, mounts, this.containerName, containerState)
     return {
       engine: probe.engine,
       engineState: probe.state,
@@ -706,7 +780,7 @@ export class SandboxService extends EventEmitter {
       driftDays: drift,
       busy: this.busy,
       protection: toProtectionStatus(plan),
-      protectionRebuildNeeded,
+      rebuildReasons,
       error: this.lastError
     }
   }
@@ -1367,6 +1441,29 @@ export class SandboxService extends EventEmitter {
    * generated shape + the kory.sandbox label before reaching the CLI. `remove`
    * / `rebuild` never run implicitly — operator-invoked, ConfirmDialog'd.
    */
+  /**
+   * Card e35b2791 (A4): purges the containerName-keyed run/peers dirs when a
+   * container is removed or rebuilt. Side-effect-free to purge: launch
+   * scripts are regenerated on every start (writeLaunchScript), peer-cache
+   * files regenerate on connect. Deliberately NEVER touches copyDirHost --
+   * that clone is kept ACROSS a remove/rebuild on purpose, to avoid a
+   * re-clone on the next container; purging it here would be a regression
+   * dressed up as a hardening.
+   *
+   * Targets `name`'s OWN dirs, not necessarily `this.containerName`'s:
+   * containerAction's 'remove' case can act on a DIFFERENT project's
+   * container from the cross-project list view, and `deps.stateDir` is the
+   * shared Deck app-state dir (not per-project), so that project's leftover
+   * dir is computable and purgeable from here without a second instance.
+   * Safe by construction: containerAction validates `name` against
+   * isSandboxContainerName (NAME_RE, no separators) before any case runs, so
+   * `join(..., name)` can never escape its parent directory.
+   */
+  private purgeRunDirsFor(name: string): void {
+    rmSync(join(this.deps.stateDir, 'sandbox-run', name), { recursive: true, force: true })
+    rmSync(join(this.deps.stateDir, 'sandbox-peers', name), { recursive: true, force: true })
+  }
+
   async containerAction(name: unknown, action: SandboxContainerAction): Promise<void> {
     if (!isSandboxContainerName(name)) throw new Error('invalid container name')
     const label = await this.run([
@@ -1393,9 +1490,23 @@ export class SandboxService extends EventEmitter {
         break
       }
       case 'remove': {
+        // Card e35b2791 audit round 3: fail-CLOSED against a race with a LIVE
+        // session in THIS container from a DIFFERENT Deck window -- there is
+        // no requestSingleInstanceLock anywhere in the Deck, so two windows on
+        // two projects are two separate PROCESSES sharing the same stateDir;
+        // that is the norm, not an edge case. `name` here can name ANOTHER
+        // project's container (the cross-project list view), whose
+        // cmd-<sessionId>.sh a live session elsewhere may be executing right
+        // now via `docker exec`. Capture the running state BEFORE the force
+        // remove (state is gone right after); skip the purge entirely when it
+        // was running rather than risk deleting scripts out from under a
+        // session mid-flight. The container itself is still removed either
+        // way -- only the directory purge is gated.
+        const wasRunning = (await this.inspectIdState(name))?.state === 'running'
         const r = await this.run(['rm', '-f', name], 30_000)
         if (r.code !== 0) fail(r, 'remove')
         if (name === this.containerName) this.lastReady = false
+        if (!wasRunning) this.purgeRunDirsFor(name)
         break
       }
       case 'rebuild': {
@@ -1403,9 +1514,14 @@ export class SandboxService extends EventEmitter {
         // project (mounts/ports derive from this window's settings); other
         // projects rebuild from their own window.
         if (name !== this.containerName) throw new Error('rebuild only applies to this project')
+        // Same fail-closed reasoning as 'remove' above: a SECOND window on
+        // THIS SAME project is possible (nothing prevents it), so guard here
+        // too even though the cross-project case cannot occur for rebuild.
+        const wasRunning = (await this.inspectIdState(name))?.state === 'running'
         const rm = await this.run(['rm', '-f', name], 30_000)
         if (rm.code !== 0 && !rm.stderr.includes('No such container')) fail(rm, 'remove')
         this.lastReady = false
+        if (!wasRunning) this.purgeRunDirsFor(name)
         await this.ensure()
         break
       }
