@@ -530,6 +530,63 @@ découplage « courrier au broker, pointeur dans le PTY » est aussi la bonne
 réponse au risque d'injection : le contenu d'un message ne transite jamais
 par une frappe clavier.
 
+### 5.2ter Arbitrages opérateur (revue du 2026-08-15)
+
+Verdicts sur les idées du §5.2, décidés en revue :
+
+- **1. Sidecar reverse-proxy — RETENU** (voie d'observation pour le §3.1).
+  Compréhension validée : le CLI lit son URL d'API dans une variable d'env,
+  on la pointe sur un proxy loopback, toutes les inférences le traversent, et
+  l'état se dérive de façon déterministe (requête en vol = working, fin de
+  réponse sans nouvelle requête = fin de tour synthétisée, `tool_calls` = les
+  actions, `usage` = tokens). Limites à garder en tête : il voit le trafic
+  API, pas la TUI (un prompt de permission clavier ressemble à de l'idle —
+  d'où leur filet de quiescence PTY en complément) ; il est pull-only (rien
+  ne peut être réinjecté dans le tour — le courrier passe quand même par le
+  terminal) ; une forme de wire à la fois (OpenAI ou Anthropic).
+- **2. Drain au Stop hook — NOTÉ, PAS RETENU.** Inbox vide = zéro coût (le
+  hook rend la main sans tour supplémentaire) ; le tour payé n'existe que
+  quand il y a du courrier, et c'est le traitement du message, payé aussi via
+  un nudge. Mais le drain force le traitement immédiat en fin de CHAQUE tour
+  (contexte complet re-facturé, cache aidant), là où le nudge laisse batcher
+  à l'idle — et le nudge est multi-CLI par construction. Kory reste sur la
+  voie nudge.
+- **3. Garde picker/brouillon + durcissement de l'injection — À PRENDRE**
+  (bugs réels vécus chez eux ; complète notre garde busy).
+- **4. Circuit breaker de coût — MIS DE CÔTÉ** : Kory ne mesure aujourd'hui
+  ni tokens ni coût ; sans cette télémétrie le breaker n'a pas d'entrées.
+- **5. Closing Time — équivalent Kory existant** via la restauration de
+  sessions Claude (`--fork-session`), qui remet l'agent exactement dans son
+  état. Claude-only : à re-noter le jour des tuiles d'autres familles LLM.
+- **6. Mémoire par agent — idem** : gérée nativement par Claude ; la valeur
+  n'apparaît qu'avec d'autres familles de modèles.
+- **7. Anti-livelock — RETENU comme pièce importante** (voir ci-dessous).
+  Jamais de ping-pong incessant constaté en sessions longues réelles ; le
+  vrai coût est la QUEUE de politesse, pas la boucle infinie.
+- **8. Courrier jamais perdu (rebond `[undeliverable]` au lead) — À NOTER.**
+
+**Anti-livelock, formulation retenue.** Le livelock n'est pas le deadlock :
+personne n'est bloqué, les messages circulent, rien n'avance. Le scénario
+concret : A envoie son résultat à B ; B répond « bien reçu, merci » ; or les
+instructions serveur disent « RESPOND IMMEDIATELY […] reply using
+send_message » — chaque message reçu OBLIGE une réponse, y compris une
+réponse à une réponse, donc A répond « parfait, n'hésite pas », etc. Claude
+a le jugement de s'arrêter après un ou deux tours, donc pas de boucle infinie
+observée — mais chaque « bien reçu » est un tour LLM à contexte complet :
+le coût réel est les 2-3 accusés de réception polis après chaque vraie
+interaction. L'anti-livelock = des freins DÉTERMINISTES dans le transport,
+pour que la terminaison ne dépende pas du jugement du modèle :
+seuls `request`/`query`/`propose` appellent une réponse (`inform`/`done`
+terminaux — le destinataire est explicitement autorisé à ne pas répondre) ;
+compteur de `hops` par fil avec cap → escalade au lead ; idempotence par id.
+Kory a déjà l'outil pour un cas (megaphone `deck` rendu « informational only
+-- do not reply », réponse structurellement impossible) ; la généralisation
+est un champ optionnel `expects_reply` sur `send_message`, rendu côté
+`server.ts` en « no reply expected — do not acknowledge » quand il est faux,
+plus un cap de hops broker-side. Précédent externe : le cross-session
+messaging natif de Claude Code embarque les mêmes freins (rate-limit par
+émetteur, drop des répétitions identiques, cap de file).
+
 ### 5.3 À ne pas prendre
 
 - **Le hive-par-fichiers lui-même** : mono-machine, pas d'auth, pas de
