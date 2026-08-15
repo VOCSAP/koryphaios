@@ -465,6 +465,71 @@ groupes, auth) ; ce qui suit est ce qu'ils ont et pas nous.
    « which nothing else exposes ») — plus simple et plus juste que le parsing
    de transcript de nodeterm pour le futur context-meter des tuiles.
 
+### 5.2bis Zoom communication — le cycle de vie complet d'un message
+
+Lecture de code ciblée (`hive.ts` routeur, `hooks.ts`, renderer
+`useHive.ts`/`terminalAutomation.ts`), en ignorant tout le volet avatars.
+
+**Émission** : l'agent écrit UN fichier JSON dans son `outbox/` (protocole
+injecté au spawn : « NEVER write into another agent's folder — the
+orchestrator delivers your outbox »). **Routage** : le main process **poll**
+les outboxes (interval assumé, fs.watch jugé peu fiable sur macOS), déplace
+vers les `inbox/` cibles, journalise, committe. Sémantique : `to` = agentId |
+`god` | `broadcast` ; `to:"human"` → routé au god (proxy de l'humain) ;
+jamais de livraison à soi-même ; un agent send-only ou un CLI sans étage de
+réception → rebond au god avec sujet réécrit `[undeliverable — relay this]`.
+Piège vécu : après une mise en veille, le timer du routeur n'était jamais
+réarmé — god→worker et worker↔worker s'empilaient silencieusement ;
+le resume ré-arme le poll ET flush le backlog immédiatement.
+
+**Livraison dans la boucle de l'agent — l'étage clé.** Le principe :
+**le terminal ne reçoit jamais le courrier, seulement un pointeur.** Le
+message reste en fichier ; ce qui est éventuellement tapé dans le PTY est un
+nudge court et constant (« You have new hive inbox message(s) — read your
+inbox, act on them now… »). Trois mécanismes empilés :
+
+1. **Drain au Stop hook** (claude ; codex réutilise le shim tel quel — payload
+   « Claude-shaped » ; agy via shim traducteur ; opencode via plugin
+   `session.idle` ; pi via extension) : fin de tour → POST sur la socket UDS →
+   messages non lus → `{"decision":"block","reason":…}` → l'agent enchaîne.
+2. **Nudge de réveil des idle** (renderer, poll) : dédup par **id du message
+   le plus récent, pas par compteur** (un compteur oscille pendant un drain
+   et re-nudge pour le même lot). Le nudge n'est PAS tapé directement : il
+   est **mis en file** comme n'importe quel message opérateur.
+3. **Un seul écrivain de PTY** (leur effect #4, la spec la plus aboutie du
+   « nudge PTY » de notre §3.1) : la file d'un agent est drainée UN message à
+   la fois, sous conditions cumulatives — idle ; hors pause de livraison
+   (sauf « send now » manuel) ; hors grâce de boot (35 s après spawn, le
+   temps de `/remote-control` + prompt d'orientation) ; **aucun brouillon
+   utilisateur ni menu TUI ouvert** (pickers slash nus détectés, blocages
+   expirant après 30 min — l'automation ne supprime jamais le texte de
+   l'humain) ; cooldown 4,5 s par agent (le temps que les hooks re-flippent
+   `working`) ; chaîne d'écriture par PTY (deux écrivains ne peuvent jamais
+   entrelacer texte + Enter) ; bracketed paste **seulement multi-ligne**
+   (agy traite les marqueurs comme du texte littéral sur une ligne) ;
+   ack du message **après** succès des DEUX writes (texte puis `\r`), retries
+   bornés à 3 puis drop AVEC warn (jamais de destruction silencieuse).
+4. **Filet universel** : un agent `working` dont le PTY n'émet **aucun octet
+   pendant 12 s** est basculé idle (un CLI ponté dont le signal de fin de
+   tour ne tire jamais bloquerait sinon le nudge pour toujours ; un tour qui
+   stream continue d'émettre et reste `working`).
+
+**Discipline d'orchestration** (prompt du god, transposable au team-lead
+Kory) : dispatch en contrat 4 volets — OBJECTIVE / OUTPUT / TOOLS /
+BOUNDARIES — et « pass references (file paths, message ids, board sections),
+not pasted content » ; vérifier le roster vivant AVANT de spawner et
+préférer réutiliser un agent idle qui colle au rôle. Le heartbeat relance un
+god silencieux **par son inbox**, jamais en tapant dans son PTY (« if he's
+busy that would jam mid-step »).
+
+**Lecture Kory** : c'est la validation en production de l'option « pull MCP +
+nudge » du §3.1, avec le durcissement exact du chemin d'injection que nos
+directive cards n'ont qu'en partie (garde brouillon/menu, dédup par id,
+cooldown, chaîne mono-écrivain, ack après write, quiescence fallback). Le
+découplage « courrier au broker, pointeur dans le PTY » est aussi la bonne
+réponse au risque d'injection : le contenu d'un message ne transite jamais
+par une frappe clavier.
+
 ### 5.3 À ne pas prendre
 
 - **Le hive-par-fichiers lui-même** : mono-machine, pas d'auth, pas de
