@@ -372,3 +372,109 @@ son architecture de transformation SSE.
   endpoints Anthropic-compatibles des vendeurs, même pas besoin de proxy :
   l'env suffit). Le montage « abonnements OAuth via CLIProxyAPI » reste un
   choix d'opérateur, pas un défaut de l'app.
+
+---
+
+## 5. Annexe (2026-08-15) — Munder Difflin : hive multi-CLI par fichiers
+
+Revue de [chaitanyagiri/munder-difflin](https://github.com/chaitanyagiri/munder-difflin)
+(v0.4.3, MIT) — concurrent direct du Deck : Electron + PTY/xterm enveloppant
+**10 CLIs** (claude, agy, codex, grok, kimi, qwen, opencode, crush, pi,
+copilot + custom), agents visualisés en avatars sur un plateau de bureau
+Pixi.js, orchestrateur « god » (Michael), messagerie inter-agents et mémoire
+persistante. Design source of truth : `HIVE.md` ; spec mémoire :
+`MEMORY_GRAPH_SPEC.md`.
+
+### 5.1 Leur architecture de communication (vs broker Kory)
+
+Le « hive » est **un répertoire de fichiers plats sous git** — pas de broker :
+`hive/agents/<id>/{identity.md, memory.md, inbox/, outbox/, cursor.json}` +
+`registry.json` (roster), `board.md` (blackboard, scribe unique = god),
+`tasks.json`, `log.jsonl`. Règles de robustesse : un JSON par message écrit en
+temp+rename atomique, **single-writer-per-file** (un agent n'écrit que chez
+lui ; le routeur du main process déplace outbox→inbox), **git commis par le
+seul main process** (jamais par un agent — anti `.git/index.lock`).
+Le broker SQLite de Kory couvre déjà tout ça en mieux (multi-machines,
+groupes, auth) ; ce qui suit est ce qu'ils ont et pas nous.
+
+### 5.2 Idées à prendre
+
+1. **Trois étages d'observation par CLI, avec un plancher universel**
+   (`shared/agentProvider.ts`, `BridgeDescriptor`) : hooks natifs (claude) →
+   **shim de hooks** installé dans la config du CLI (agy/codex/pi/opencode/
+   grok) → **sidecar reverse-proxy loopback** pour les CLIs SANS surface de
+   hooks (qwen, crush) : la variable d'env `base_url` du CLI est pointée sur
+   le sidecar, qui observe le trafic LLM et **synthétise** les mêmes
+   événements (status/Stop/coût) que les shims. C'est le chaînon manquant du
+   tableau nodeterm (§2.1) : une 3e voie d'observation pour le §3.1, qui rend
+   « quand la tuile est-elle idle ? » répondable pour n'importe quel CLI.
+2. **Le Stop hook comme point de livraison du courrier** (`HIVE.md` §5) : à
+   la fin de chaque tour, le Stop hook POste sur la socket du harness ; s'il
+   y a des messages non lus, la réponse est `{"decision":"block","reason":
+   <messages>}` — l'agent continue de travailler et traite son courrier.
+   Gardes : `stop_hook_active` (anti-boucle infinie), cap de `hops`.
+   Pour Kory : un Stop hook du deck-plugin qui interroge le broker
+   (`delivered=0`) ferait une **livraison de secours garantie fin-de-tour**
+   sous le push `claude/channel` — et c'est le seul push « at-lifecycle »
+   portable vers tout CLI à hooks bloquants.
+3. **Garde d'injection « picker ouvert »**
+   (`renderer/components/terminalAutomation.ts`) : ne jamais injecter dans un
+   terminal dont la TUI affiche un picker slash-command (`/model`, `/mcp`,
+   `/resume`… **nus** — `/model sonnet` avec argument ne bloque pas ; ils ont
+   eu le bug du match sur premier token qui gelait la file à vie). Raffine
+   directement la garde busy des directive cards / du nudge PTY (§3.1) :
+   notre garde d'inactivité ne couvre pas ce cas.
+4. **Circuit breaker coût/runaway** (`main/breaker.ts`) : Claude Code n'a pas
+   de plafond en dollars (`--max-turns` seulement) ; ils imposent le leur —
+   échelle **steer → constrain → stop**, une marche par battement, jamais de
+   saut direct au kill, désescalade par battement sain, `hardStop` off par
+   défaut ; signaux = coût/vélocité de tokens (diff d'échantillons cumulés,
+   jamais un échantillon isolé), tempêtes d'erreurs/outils répétés, mtime
+   sans progrès. Politique pure, séparée de l'enforcement. À rapprocher de
+   notre suivi de quota : Kory n'a pas de garde-fou de dépense par agent avec
+   escalade par messages correctifs.
+5. **« Closing Time »** (`main/closingTime.ts`) : protocole d'arrêt sans
+   perte — le lead broadcast la fermeture, chaque agent committe/parque son
+   WIP, écrit état + prochaines étapes dans sa mémoire, répond
+   `CLOSING-TIME-ACK` ; le lead envoie `CLOSING-TIME-COMPLETE` et l'app se
+   ferme. Tout roule sur les rails existants (messagerie + réveil des idle) —
+   le module n'injecte que le kickoff. Transposable quasi tel quel au Deck
+   (megaphone + attente d'ACKs broker + close), là où notre fermeture de
+   fenêtre perd le contexte de travail non committé.
+6. **Mémoire par agent, markdown-first** : `memory.md` lu au démarrage,
+   enrichi en continu, borné par réflexion/synthèse ; index sémantique
+   **optionnel** en detect-and-degrade (CLI MemPalace ; no-op silencieux si
+   absent — la mémoire markdown marche seule) ; panneau de recherche + graphe
+   mémoire pour l'humain. Kory a la roadmap partagée mais rien de persistant
+   par agent entre sessions ; la version minimale (fichier par peer_id +
+   injection au spawn) serait peu coûteuse.
+7. **Anti-livelock sémantique** (`HIVE.md` §4, FIPA-lite) : actes de parole
+   (`request|inform|propose|query|agree|refuse|done`), seuls
+   request/query/propose **obligent** une réponse, `hops` incrémenté à chaque
+   réponse avec cap → escalade à l'orchestrateur au lieu de laisser deux
+   agents boucler. Le broker Kory n'a aucun cap de ping-pong entre peers ;
+   un champ `hops` + cap broker-side serait une piste (cf. le throttling
+   natif du cross-session messaging, §rapport CC).
+8. **Courrier jamais perdu en silence** : un message vers un agent
+   non-livrable (CLI sans étage de réception, renderer indisponible) est
+   **réadressé au god avec un sujet `[undeliverable — …relay this]`**
+   (`hive.ts`) plutôt que droppé. Même philosophie que notre downgrade
+   `channel`→`pty` des approbations, généralisée à tout le courrier.
+9. **`context_window` réel via le statusLine hook** (`main/hooks.ts`) : le
+   payload statusLine porte tokens ET taille réelle de fenêtre (200k vs 1M,
+   « which nothing else exposes ») — plus simple et plus juste que le parsing
+   de transcript de nodeterm pour le futur context-meter des tuiles.
+
+### 5.3 À ne pas prendre
+
+- **Le hive-par-fichiers lui-même** : mono-machine, pas d'auth, pas de
+  groupes ; notre broker le domine sur tout sauf la simplicité.
+- **Le god agent comme guichet HITL** : leur choix assumé (« pas de file
+  d'approbations séparée », les prompts de permission dans la session du god
+  sont la porte) est plus faible que notre broker arbitre unique
+  (`/approval/claim` conditionnel) + inbox opérateur + canaux téléphone.
+- **Avatars Pixi.js** : parti-pris esthétique opposé à `DESIGN.md` (et un
+  moteur de rendu de plus à maintenir).
+- **Dépendance MemPalace** : leur propre doc note des benchmarks surestimés
+  (audit indépendant) — d'où leur detect-and-degrade, la seule partie à
+  imiter.
