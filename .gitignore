@@ -67,3 +67,4 @@ WORKFLOW-LOTS-DESIGN.md
 # `bun test tests`, never a bare `bun test`. Nothing enforces this exclusion
 # beyond that convention -- do not read this comment as a guarantee.
 desktop/docs/reference/
+docs/exploration/
