@@ -614,21 +614,138 @@ Robustesse et exploitation :
 
 ### 3.7 Cartes directives — increments différés (CT6)
 
-- [ ] **Directive `clear_briefing`** : le Deck lance le digest existant
-      (`digest.ts` via `utility-inference.ts`, Haiku par défaut) sur des sources
-      bon marché, injecte `/clear`, puis saisit le briefing comme premier prompt
-      — zéro inférence côté team-lead. Nécessite une variante d'injection
-      « paste-safe » (bracketed-paste / écritures fragmentées) pour un briefing
-      multi-lignes.
-- [ ] **Jauge de contexte par tuile (consultative)** : % de contexte via le
-      canal fichier-cache de la statusline (précédent `CLAUDE_PEERS_STATUS_LINE_CACHE`)
-      + un seuil qui ARME l'insertion d'une directive à la prochaine frontière
-      `done` (jamais un reset en plein milieu de tâche). Vérif empirique des
-      champs JSON statusline (`context_window_used/total`) selon la version CC.
-- [ ] **peer_id stable à travers un fork-resume (core)** : intégrer le token
-      stable `CLAUDE_PEERS_DESK_SESSION` dans le `session_key` claude-peers (ou
-      re-poser le peer_id via `set_id` après restart) pour le cas multi-sessions
-      même cwd+groupe (option B de la chaîne magic-compact). Chantier core séparé.
+Étude d'ensemble (2026-08-11, branche `experimental`) : les quatre entrées
+ci-dessous sont les morceaux d'un même chantier — mesurer la fenêtre de chaque
+tuile, enchaîner plusieurs actions au lieu d'une, et n'armer un reset qu'à une
+frontière sûre. Ordre de livraison proposé : mesure (consultative) → runner
+d'étapes déclenché à la main → store de playbooks → armement automatique →
+surcouche statusline. L'automatisme vient EN DERNIER : c'est le seul lot dont
+une erreur détruit du travail.
+
+- [ ] **Jauge de contexte par tuile (consultative)** : deux sources possibles,
+      même structure de sortie (`{ usedPercent, windowSize, tokens, at, source }`).
+      (a) **Queue du transcript JSONL** — socle recommandé : le Deck connaît déjà
+      le chemin (`transcriptPath` + l'id réel via `desk-session-<token>.txt`), la
+      dernière entrée assistant porte son `usage`, on relit les derniers Ko depuis
+      la fin. Zéro config opérateur, marche sur toute tuile.
+      (b) **Statusline** — surcouche opt-in : le JSON stdin porte bien
+      `context_window.used_percentage` / `context_window_size` (200k ou 1M) /
+      `current_usage{input,output,cache_creation,cache_read}` / `exceeds_200k_tokens`,
+      et au passage `rate_limits` (que `usage-service` paie aujourd'hui en OAuth).
+      Champs DOCUMENTÉS, la vérif empirique demandée ici est faite. MAIS un plugin
+      ne peut pas embarquer de `statusLine` (le `settings.json` d'un plugin
+      n'honore que `agent` et `subagentStatusLine`) : passer par
+      `--settings '<json inline>'` au spawn, en CHAÎNANT vers le script d'origine
+      de l'opérateur pour ne pas écraser son affichage.
+      Pièges communs : `current_usage` est `null` avant le 1er appel API et juste
+      après `/compact` (ne JAMAIS lire ce null comme 0 %, un seuil qui se ré-arme
+      dessus boucle) ; le % porte sur la fenêtre, pas sur le seuil d'auto-compact ;
+      les sous-agents ont un contexte distinct, invisible ici ; aucun hook ne
+      transporte de compteur de tokens (ils ne donnent que `transcript_path`).
+- [ ] **Carte directive multi-étapes (playbook)** : une carte ne porte qu'un mot-clé
+      aujourd'hui, et empiler des cartes NE séquence PAS — `runDirectiveWave` attend
+      bien `execute()` carte par carte, mais `executeDirective` lance chaque cible en
+      fire-and-forget et rend la main tout de suite, donc deux cartes consécutives se
+      chevauchent. Il faut un runner d'étapes séquentiel par cible (parallèle entre
+      cibles), chaque étape journalisée, budget borné, abandon si la tuile meurt :
+      `command` (constante code) | `prompt` | `wait_idle` | `wait_output`.
+      Briques déjà écrites à réutiliser : `injectCommand` (idle-gated),
+      `encodeInitialPromptKeystrokes` (**l'injection paste-safe multi-lignes existe
+      déjà** depuis 150eb188 — il manque juste un `injectPrompt()` qui l'appelle hors
+      spawn), `waitForOutput`, `waitIdle`.
+      **Provenance du texte des prompts — le point dur** : la roadmap est partagée et
+      écrite par les agents, et le Deck n'est pas encore un auteur prouvé
+      (`by='deck'` porte un token sentinelle, couche 2 différée), donc du texte libre
+      dans une carte = injection de prompt inter-agents. Trois options :
+      P1 templates i18n + slots typés (zéro texte libre sur le fil) ;
+      P2 playbook stocké côté Deck (extension `snippet-store`), la carte ne porte
+      qu'un `playbook_id` — un agent DÉCLENCHE, n'ÉCRIT jamais (cible recommandée,
+      mais rompt la règle « fill-not-send » des snippets, à assumer) ;
+      P3 texte libre dans la carte — seulement après la couche 2 ET une restriction
+      aux cartes dont l'auteur prouvé est l'opérateur.
+      Absorbe l'ancienne entrée `clear_briefing` (digest `digest.ts` → `/clear` →
+      briefing en premier prompt) qui n'est qu'un playbook parmi d'autres.
+- [ ] **Seuil qui ARME, jamais qui déclenche** : franchissement (ex. 80 %) → la tuile
+      passe « armée » (état local, visible) ; exécution seulement à une frontière sûre
+      (item `done` / lock relâché, ou tuile idle sans lock, ou clic opérateur) ;
+      hystérésis (désarmement à la redescente sous seuil−10 pts, sur une mesure RÉELLE
+      et non un `null`) ; une seule exécution par époque de session. Pas de seuil
+      d'urgence qui interrompt : au-delà de ~95 % l'auto-compact CC fait déjà le
+      travail. Seuil par projet dans les `features` de `launch-config` + override par
+      tuile (schéma `autoResume`/`magicCompact`). Câblage : le Deck arme et exécute
+      lui-même pour l'automatique (pas de carte fantôme dans la roadmap partagée) ;
+      la carte insérée en tête de queue reste pour le déclenchement manuel planifié.
+      À arbitrer aussi : la chaîne handoff coûte un tour complet sur ~160k tokens
+      d'entrée au seuil, contre zéro pour le `clear` + briefing dans le champ
+      `context` de la carte suivante (déjà prescrit par `TEAM_PLAYBOOK`) — le seuil
+      ne doit pas déclencher automatiquement le plus cher des deux.
+- [ ] **peer_id stable pour N tuiles sur un même cwd (core, PRÉALABLE)** :
+      `peer_sessions.session_key` est PRIMARY KEY sur `sha256(host‖cwd‖group_id)`,
+      donc **une seule ligne de mémoire d'identité par répertoire**, alors qu'une
+      équipe y pose délibérément plusieurs agents. La branche de collision de
+      `/register` le dit noir sur blanc : « do NOT touch peer_sessions ». Les tuiles
+      2..N n'écrivent donc JAMAIS leur identité, et la voie dormant→résurrection leur
+      est structurellement inaccessible : elles ne *peuvent* pas changer de peer_id au
+      redémarrage, elles en changent **systématiquement**. Et l'échelle grimpe au lieu
+      de se recycler, parce que `deriveDefaultId` cherche le premier suffixe libre
+      **sans filtrer le statut** : les lignes dormantes gardent leur nom 24 h, donc
+      chaque relance prend le cran suivant (`-6` → `-12`, observé). Conséquence
+      opérationnelle : le team-lead continue d'écrire à l'ancien id et l'équipe cesse
+      de dialoguer, sans erreur nulle part.
+      **Ce n'est pas un verrou de noms qu'il faut** (cela changerait le modèle
+      d'attribution et ouvrirait une surface d'usurpation) : c'est la convention n°1
+      du dépôt, « keyed by what, and what happens when there are two? ». Le mémo est
+      indexé sur trop peu. Correctif : `session_key = sha256(host‖cwd‖group_id‖slot)`
+      avec `slot = CLAUDE_PEERS_DESK_SESSION` (vide hors Deck → hash identique à
+      aujourd'hui). Une ligne par tuile, la résurrection déjà écrite rend son peer_id à
+      chaque agent, la branche de collision ne se déclenche plus que sur un vrai
+      doublon. Usurpation **réduite** (connaître `(host,cwd,group)` suffit DÉJÀ à se
+      faire remettre un `instance_token` mémorisé ; le slot rend ce tir plus difficile,
+      et n'accorde aucune capacité que `set_id` ne donne déjà), collisions **réduites**.
+      Migration : ne PAS prévoir de repli sur la clé courte — il rendrait à la tuile B
+      la ligne de la tuile A ; assumer une dernière rotation d'ids et la journaliser.
+      Mitigation immédiate sans toucher au core : `pollPeerIds` émet déjà
+      `peer-resolved` avec une intention d'annonce à la PREMIÈRE résolution — l'étendre
+      au CHANGEMENT suffit à ce que le lead réapprenne le nouvel id par le canal
+      d'annonces qu'il écoute déjà.
+      Étape suivante facultative : laisser le Deck nommer ses tuiles par leur rôle
+      (`CLAUDE_PEERS_PEER_ID` proposé au `/register`, honoré si libre dans le groupe),
+      avec un échec FERMÉ (nom tenu par un peer actif → refus + journal, jamais un vol).
+      Ne concerne PAS magic-compact : la chaîne CT4 ne ferme pas la session (elle tape
+      `/resume <uuid>` dans le MÊME PTY, le token de tuile ne bouge pas). Contournement
+      sans code : un worktree par agent, ce que `TEAM_PLAYBOOK` prescrit déjà.
+- [ ] **Macros sur événements (souscription + enregistrement d'actions)** : la carte
+      directive n'est qu'un des trois déclencheurs visés ; l'intention est
+      `Événement → Macro`, par exemple `contexte 80 % → handoff + clear + rechargement
+      du handoff`. Trois objets, **aucune vue de rail dédiée** : une *macro* (un fichier
+      par macro, global + projet, patron `template-store.ts`/`snippet-store.ts`, corps
+      jamais transmis au broker) ; une *souscription* (`événement → cible → macro →
+      garde-fous`, dans les features du projet, schéma `autoResume`) ; une *exécution*
+      (le journal existant EST le log d'événements). Édition dans Settings,
+      déclenchement manuel depuis le menu contextuel de tuile.
+      **Le bus d'événements existe déjà** : `SessionService` émet `thinking`,
+      `attention`, `quota`, `exit`, `startup-ack`, `peer-resolved`, `created`,
+      `removed`, `changed`, et `watchDispatched` suit les transitions de roadmap. Seule
+      source manquante : le seuil de contexte. Rien d'autre à instrumenter.
+      **Reprise après reset** — deux formes à couvrir sans que l'app connaisse le
+      système mémoriel employé (Kleos chez l'opérateur, via son `CLAUDE.md` global) :
+      soit une CAPTURE (« termine par HANDOFF-OK <id> » puis `await idle` + regex, le
+      mécanisme exact de `runMagicCompact`, avec la même revalidation stricte de la
+      valeur avant interpolation — elle vient d'un modèle et repart dans un terminal),
+      soit une CONVENTION de chemin imposée par la macro, qui supprime la capture.
+      **Garde-fou n°1** : `waitIdle` renvoie `true` dès que `thinking` retombe, Y
+      COMPRIS quand l'agent s'est arrêté sur une demande de permission — enchaîner sur
+      `/clear` détruirait le travail. `await idle` doit exiger
+      `idle ET NON needsAttention ET NON rateLimited` et AVORTER si l'attention se
+      lève. Les deux états sont déjà dans le runtime et déjà émis.
+      Autres invariants : un seul run par tuile (verrou indexé sur la TUILE, pas sur la
+      macro, sinon deux souscriptions sur le même événement lancent deux séquences
+      concurrentes dans le même terminal) ; jamais pendant un lock roadmap sauf macro
+      marquée sûre ; durée bornée, abandon à la mort du PTY ; prévisualisation de ce
+      qui sera tapé avant tout armement.
+      Le packaging en carte roadmap (`macro_id`) suppose l'entrée peer_id ci-dessus
+      réglée : une carte visant `dev1-6` devient un no-op silencieux (`missing`) après
+      une relance.
 - [ ] **`handoff` flag — consommation** : `resolveFeatures().handoff`
       (`file`|`kleos`|`off`) est résolu mais pas encore consommé par le texte du
       playbook ; le câbler quand l'increment plan-file/Kleos (CT6) atterrit
