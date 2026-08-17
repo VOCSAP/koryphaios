@@ -123,6 +123,8 @@ import type {
   OperatorInboxRequest,
   OperatorInboxResponse,
   OperatorInboxMessage,
+  OperatorInboxPurgeRequest,
+  OperatorInboxPurgeResponse,
   Peer,
   PublicPeer,
   Message,
@@ -191,6 +193,18 @@ const FLUSH_MAX_AGE_HOURS = Math.max(
 const MESSAGE_TTL_DAYS = Math.max(
   1,
   parseInt(process.env.CLAUDE_PEERS_MESSAGE_TTL_DAYS ?? "7", 10)
+);
+// A dead-session cutoff for operator_inbox_sessions GC (Courrier lot 1C, card
+// 1e81ee7b). 5 minutes (30 missed polls at the Deck's INBOX_POLL_MS = 10_000,
+// desktop/src/main/index.ts) turned out too short: a SLEEPING (not dead)
+// machine misses it in minutes while its Deck and agents are still alive,
+// and a reaped session re-seeds at MAX(id), losing its own unread backlog on
+// its next poll. 24h aligns with the dormant-peer retention window instead
+// -- long enough for sleep/suspend, short enough to still reap Decks that
+// are actually gone.
+const OPERATOR_INBOX_SESSION_TTL_MIN = Math.max(
+  1,
+  parseInt(process.env.CLAUDE_PEERS_OPERATOR_INBOX_SESSION_TTL_MIN ?? "1440", 10)
 );
 const PURGE_INTERVAL_SEC = Math.max(
   60,
@@ -303,6 +317,28 @@ function checkGroupSecret(
     return { error: "group_secret_hash mismatch (TOFU rejected)", status: 401 };
   }
   return null;
+}
+
+/**
+ * Whether `groupId` has ever registered (a row in `groups`, pinned by the
+ * `INSERT INTO groups` in the /register handler on first sight).
+ * checkGroupSecret authorises an ACTION inside a group;
+ * it never attests the group EXISTS -- for a never-seen group `existing` is
+ * null above, so there is nothing to compare and TOFU accepts the unknown.
+ *
+ * Every older caller of checkGroupSecret (/announce, /operator-inbox's
+ * legacy drain) got away without this because their writes/reads sit behind
+ * `WHERE group_id = ?` on `peers` or `messages` -- tables an unknown group
+ * can never have populated, so it is always the empty set there. Courrier's
+ * operator_inbox_sessions is the first table where a caller-supplied
+ * group_id is the write's ONLY anchor (INSERT on /operator-inbox's cursor
+ * path, DELETE with no other scoping column on /operator-inbox/purge's GC).
+ * Any route in that shape must call this BEFORE writing (card 1e81ee7b
+ * MAJOR 5 / part 4) -- see its two call sites in handleOperatorInbox and
+ * handleOperatorInboxPurge, which are what actually enforce this.
+ */
+function groupExists(groupId: string): boolean {
+  return db.query("SELECT 1 FROM groups WHERE group_id = ?").get(groupId) != null;
 }
 
 function guardedInterval(name: string, fn: () => unknown, ms: number): ReturnType<typeof setInterval> {
@@ -429,6 +465,33 @@ db.run(`
 `);
 
 db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_lookup ON peer_sessions(group_id, host, cwd)`);
+
+// Courrier lot 1A (desktop/docs/design-courrier-lot1.md section 6.1, card
+// 54b1c71a). One row per Deck LAUNCH, minted in-memory and never persisted
+// Deck-side (that's the whole point: the cursor's lifetime IS the session's
+// lifetime). Keyed by session_id, NOT group_id or operator_id -- see the
+// design doc section 3 for why those two are the wrong axis (operator_id is
+// deliberately copied across a person's machines, so it would let two Decks
+// of the same human steal each other's Courrier, exactly the bug this closes).
+// Composite PK (session_id, group_id): a session_id that later polls under a
+// DIFFERENT group_id gets its OWN row instead of silently keeping the
+// original group on an ON CONFLICT update (card 1e81ee7b MAJOR 1). This
+// removes the "group changed" case rather than tracking it -- there is no
+// branch left that needs one. It does NOT by itself scope reads/writes to
+// the CALLER's group: every statement below still carries its own explicit
+// `group_id = ?`, which is what actually stops a cross-group cursor bump or
+// GC (see the blockers this table's statements fix, further down).
+db.run(`
+  CREATE TABLE IF NOT EXISTS operator_inbox_sessions (
+    session_id TEXT NOT NULL,
+    group_id TEXT NOT NULL,
+    last_id INTEGER NOT NULL DEFAULT 0,
+    started_at TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    PRIMARY KEY (session_id, group_id)
+  )
+`);
+db.run(`CREATE INDEX IF NOT EXISTS idx_operator_inbox_sessions_group ON operator_inbox_sessions(group_id, last_seen_at)`);
 
 // Roadmap items (v0.4, PLAN C3). Scoped by project_key, NOT group_id, and with
 // deliberately NO foreign key to peers/groups: created_by/updated_by are plain
@@ -1053,6 +1116,82 @@ const selectUndeliveredCapped = db.prepare(
 );
 
 const markDelivered = db.prepare(`UPDATE messages SET delivered = 1 WHERE id = ?`);
+
+// --- Courrier lot 1A/1C: operator_inbox_sessions cursor + purge statements ---
+// (design doc desktop/docs/design-courrier-lot1.md section 6.1, cards
+// 54b1c71a and 1e81ee7b broker half)
+
+// A brand-new session_id seeds its cursor at the box's CURRENT MAX(id), not 0
+// -- the design doc's explicit "starts empty" rule (section 6.1): a message
+// sent while no Deck is attached is never retroactively shown to a session
+// that mints later. Re-registering an EXISTING session_id only refreshes
+// last_seen_at (keeps it alive for the purge GC below) and must NOT reset
+// last_id back to MAX(id), or every poll would silently re-seed the cursor
+// and the drain would never advance past "empty".
+const upsertOperatorInboxSession = db.prepare(`
+  INSERT INTO operator_inbox_sessions (session_id, group_id, last_id, started_at, last_seen_at)
+  VALUES (
+    ?, ?,
+    COALESCE((SELECT MAX(id) FROM messages WHERE to_token = ? AND group_id = ?), 0),
+    ?, ?
+  )
+  ON CONFLICT (session_id, group_id) DO UPDATE SET last_seen_at = excluded.last_seen_at
+`);
+
+const selectOperatorInboxSession = db.prepare(
+  `SELECT session_id, group_id, last_id FROM operator_inbox_sessions WHERE session_id = ? AND group_id = ?`
+);
+
+const selectOperatorInboxByCursor = db.prepare(
+  `SELECT m.id, m.text, m.sent_at, COALESCE(p.peer_id, '<gone>') AS from_peer_id
+   FROM messages m LEFT JOIN peers p ON p.instance_token = m.from_token
+   WHERE m.to_token = ? AND m.group_id = ? AND m.id > ?
+   ORDER BY m.id`
+);
+
+// `AND group_id = ?` is load-bearing (card 1e81ee7b BLOCKER 1): without it,
+// a caller who only holds group A's secret can advance group B's session
+// cursor by NAMING its session_id, permanently and silently hiding B's
+// unread mail from its own Deck (messages.id is a GLOBAL autoincrement, so
+// jumping to group A's MAX(id) jumps past B's pending ids too).
+const advanceOperatorInboxCursor = db.prepare(
+  `UPDATE operator_inbox_sessions SET last_id = ? WHERE session_id = ? AND group_id = ?`
+);
+
+// GC of dead sessions. Must run BEFORE computing MIN(last_id) for a 'session'
+// scope purge: a session that stopped polling would otherwise pin the deletion
+// floor forever, since a dead session's last_id never advances again.
+// `group_id = ?` is load-bearing (card 1e81ee7b BLOCKER 2): without it this
+// reaps every group's sessions, and it is reachable by an UNAUTHENTICATED
+// caller naming a never-registered group (checkGroupSecret accepts an
+// unknown group by construction, TOFU) -- see groupExists() and its two
+// call sites, which are the actual gate against that.
+const gcDeadOperatorInboxSessions = db.prepare(
+  `DELETE FROM operator_inbox_sessions WHERE group_id = ? AND last_seen_at < datetime('now', ?)`
+);
+
+const minLiveOperatorInboxCursor = db.prepare(
+  `SELECT MIN(last_id) AS floor FROM operator_inbox_sessions WHERE group_id = ?`
+);
+
+// `WHERE session_id = ? AND group_id = ?` (card 1e81ee7b BLOCKER 1, same
+// reasoning as advanceOperatorInboxCursor above): this is the purge route's
+// own cursor-bump, the second of the two places the cross-group hijack was
+// reachable from.
+const bumpOperatorInboxCursorToMax = db.prepare(
+  `UPDATE operator_inbox_sessions
+     SET last_id = COALESCE((SELECT MAX(id) FROM messages WHERE to_token = ? AND group_id = ?), last_id)
+   WHERE session_id = ? AND group_id = ?`
+);
+
+const purgeOperatorInboxUpToId = db.prepare(
+  `DELETE FROM messages WHERE to_token = ? AND group_id = ? AND id <= ?`
+);
+
+const purgeOperatorInboxByIds = (ids: number[]) =>
+  db.prepare(
+    `DELETE FROM messages WHERE to_token = ? AND group_id = ? AND id IN (${ids.map(() => "?").join(",")})`
+  );
 
 // Heuristic ack: when a peer sends a message in a group, it has necessarily
 // processed the messages addressed to it in that same group before sent_at.
@@ -3727,8 +3866,35 @@ function handleRoadmapImport(body: {
 
 /**
  * Drain the operator inbox of a group (PLAN C12): messages agents sent to the
- * reserved 'operator' sentinel. Same TOFU group auth as /announce. Returned
- * messages are marked delivered (the Deck displays and keeps them locally).
+ * reserved 'operator' sentinel. Same TOFU group auth as /announce.
+ *
+ * Courrail lot 1A (card 54b1c71a): `body.session_id` branches the read.
+ * - Absent (or not a non-empty string -- see EDGE CASE below): LEGACY path,
+ *   byte-identical to before this card -- delivered=0 selected and marked
+ *   delivered, no operator_inbox_sessions row touched. Keeps an old Deck
+ *   against a new broker, and a bare send_message-only caller, working.
+ * - A non-empty string: NON-DESTRUCTIVE cursor path. The session's own
+ *   operator_inbox_sessions row gates what IT has already read (id > last_id),
+ *   so two Decks draining the same group_id each see everything and neither
+ *   consumes for the other -- see design doc section 3 for why the key is the
+ *   session_id and not group_id or operator_id.
+ *
+ * EDGE CASE (empty string / non-string session_id): treated as absent rather
+ * than rejected with 400 or used as-is. Used as-is it would upsert a garbage
+ * PRIMARY KEY row (e.g. every caller sharing session_id="" would collide on
+ * one cursor, reintroducing the group_id-keyed bug this card fixes); a hard
+ * 400 would break a legacy Deck that sends `session_id: ""` instead of
+ * omitting the field. Falling back to legacy is the one option that is both
+ * safe and backward-compatible.
+ *
+ * `markDelivered` is still called on EVERY row read by either path (see the
+ * doc comment on the operator_inbox_sessions statements block above for why
+ * this must not be dropped): `delivered` no longer means "visible" once any
+ * session has drained by cursor -- it now means "at least one session has
+ * seen it" -- but it must stay 1 so purgeOldUndeliveredStmt's 7-day TTL sweep
+ * (broker.ts, "TTL purge of undelivered messages") does not silently claim
+ * Courrier rows nobody asked it to purge. Visibility is now governed by each
+ * session's own cursor, not by this column.
  */
 function handleOperatorInbox(
   body: OperatorInboxRequest
@@ -3754,14 +3920,164 @@ function handleOperatorInbox(
   // TOFU check.
   const inboxSecretError = checkGroupSecret(groupId, body.group_secret_hash ?? null);
   if (inboxSecretError) return inboxSecretError;
-  const rows = db.query(
-    `SELECT m.id, m.text, m.sent_at, COALESCE(p.peer_id, '<gone>') AS from_peer_id
-     FROM messages m LEFT JOIN peers p ON p.instance_token = m.from_token
-     WHERE m.to_token = ? AND m.group_id = ? AND m.delivered = 0
-     ORDER BY m.id`
-  ).all(OPERATOR_INSTANCE_TOKEN, groupId) as OperatorInboxMessage[];
+
+  // Card 1e81ee7b MAJOR 4: absent/'' stays the legacy drain (assumed,
+  // documented retro-compat for an old Deck or a bare send_message caller);
+  // any OTHER type is refused rather than silently falling back to legacy --
+  // a Deck that serialised session_id as a number would otherwise recover
+  // the destructive drain this lot exists to replace, with no error at all.
+  if (
+    body.session_id !== undefined &&
+    body.session_id !== null &&
+    typeof body.session_id !== "string"
+  ) {
+    return { error: "session_id must be a string", status: 400 };
+  }
+  const sessionId = typeof body.session_id === "string" && body.session_id.length > 0
+    ? body.session_id
+    : null;
+
+  if (!sessionId) {
+    // Legacy path, unchanged.
+    const rows = db.query(
+      `SELECT m.id, m.text, m.sent_at, COALESCE(p.peer_id, '<gone>') AS from_peer_id
+       FROM messages m LEFT JOIN peers p ON p.instance_token = m.from_token
+       WHERE m.to_token = ? AND m.group_id = ? AND m.delivered = 0
+       ORDER BY m.id`
+    ).all(OPERATOR_INSTANCE_TOKEN, groupId) as OperatorInboxMessage[];
+    for (const row of rows) markDelivered.run(row.id);
+    return { messages: rows };
+  }
+
+  // Card 1e81ee7b MAJOR 5 / part 4: the cursor path below INSERTs a row
+  // carrying the caller-supplied group_id -- checkGroupSecret above does not
+  // attest this group has ever registered (see groupExists doc comment), so
+  // an unauthenticated caller naming a fictitious group_id could otherwise
+  // grow this table without bound. Refused BEFORE the upsert, not after.
+  if (!groupExists(groupId)) {
+    log.warn(`operator-inbox: refused cursor session for a never-registered group`, {
+      group_id: groupId,
+    });
+    return {
+      error: `The '${groupId}' group has never registered a session`,
+      status: 403,
+    };
+  }
+
+  const now = new Date().toISOString();
+  // ON CONFLICT branch only refreshes last_seen_at (keeps the session alive
+  // against the purge GC) -- an UNKNOWN session_id (first sight, OR one the
+  // purge GC just reaped for being stale) seeds last_id at the box's current
+  // MAX(id), so it starts with an EMPTY Courrier per the design doc's rule,
+  // rather than replaying everything sent before this Deck ever attached.
+  upsertOperatorInboxSession.run(sessionId, groupId, OPERATOR_INSTANCE_TOKEN, groupId, now, now);
+  const sessionRow = selectOperatorInboxSession.get(sessionId, groupId) as { last_id: number } | null;
+  const lastId = sessionRow?.last_id ?? 0;
+  const rows = selectOperatorInboxByCursor.all(
+    OPERATOR_INSTANCE_TOKEN,
+    groupId,
+    lastId
+  ) as OperatorInboxMessage[];
   for (const row of rows) markDelivered.run(row.id);
+  if (rows.length > 0) {
+    // ORDER BY m.id ASC in the statement above guarantees the last row is the
+    // batch's MAX(id).
+    advanceOperatorInboxCursor.run(rows[rows.length - 1]!.id, sessionId, groupId);
+  }
   return { messages: rows };
+}
+
+/**
+ * Purge the operator inbox of a group (Courrier lot 1C, card 1e81ee7b broker
+ * half). Same guard order as the drain: groupMayCarryOperatorInbox THEN
+ * checkGroupSecret -- the group_secret_hash proves the right to act on the
+ * GROUP'S box, never resolved through "the caller's own" identity.
+ *
+ * scope='session': this session's cursor jumps to the box's MAX(id) (so it
+ * behaves like "I've seen everything, including what I'm about to delete"),
+ * then rows with id <= MIN(last_id) across the group's LIVE sessions are
+ * deleted. Dead sessions are GC'd FIRST, or a session that stopped polling
+ * would pin the floor forever and this purge would never delete anything.
+ *
+ * scope='ids': immediate, global delete of the named ids for this group --
+ * an explicit human "delete this one" gesture, independent of any cursor.
+ * The group_id filter is ANDed into the delete so a caller cannot name an id
+ * that belongs to a different group and reach across the boundary.
+ */
+function handleOperatorInboxPurge(
+  body: OperatorInboxPurgeRequest
+): OperatorInboxPurgeResponse | { error: string; status: number } {
+  const groupId = body.group_id;
+  if (!groupId) return { error: "group_id is required", status: 400 };
+  if (typeof body.session_id !== "string" || body.session_id.length === 0) {
+    return { error: "session_id is required", status: 400 };
+  }
+  if (!groupMayCarryOperatorInbox(groupId)) {
+    log.warn(`operator-inbox/purge: refused purge of a secret-less group`, { group_id: groupId });
+    return {
+      error: `The operator inbox does not exist in the '${groupId}' group: it pins no secret`,
+      status: 403,
+    };
+  }
+  const secretError = checkGroupSecret(groupId, body.group_secret_hash ?? null);
+  if (secretError) return secretError;
+
+  // Card 1e81ee7b BLOCKER 2 / MAJOR 5 part 4: checkGroupSecret above does not
+  // attest this group has ever registered (see groupExists doc comment).
+  // Reachable UNAUTHENTICATED, since a never-seen group has no secret to
+  // check against (TOFU accepts the unknown) -- refused here, before either
+  // scope branch below can write.
+  if (!groupExists(groupId)) {
+    log.warn(`operator-inbox/purge: refused purge for a never-registered group`, {
+      group_id: groupId,
+    });
+    return {
+      error: `The '${groupId}' group has never registered a session`,
+      status: 403,
+    };
+  }
+
+  if (body.scope === "ids") {
+    const rawIds = body.ids ?? [];
+    const ids = rawIds.filter((id) => Number.isInteger(id));
+    // Card 1e81ee7b MINOR: a caller whose ids serialised as strings ("1") or
+    // floats (1.5) got a silent 200 {"deleted":0} -- indistinguishable from
+    // "already gone". Non-empty input with nothing usable is now a 400
+    // instead of a no-op that looks like success.
+    if (rawIds.length > 0 && ids.length === 0) {
+      return { error: "ids must contain at least one integer", status: 400 };
+    }
+    if (ids.length === 0) return { deleted: 0 };
+    const result = purgeOperatorInboxByIds(ids).run(OPERATOR_INSTANCE_TOKEN, groupId, ...ids);
+    return { deleted: result.changes };
+  }
+
+  if (body.scope !== "session") {
+    return { error: `unknown scope '${body.scope}'`, status: 400 };
+  }
+
+  // GC dead sessions BEFORE computing the floor, so a session that stopped
+  // polling cannot pin it forever. Scoped to THIS group (card 1e81ee7b
+  // BLOCKER 2): the statement itself now carries `group_id = ?`, and
+  // groupExists above additionally guarantees this group is real.
+  gcDeadOperatorInboxSessions.run(groupId, `-${OPERATOR_INBOX_SESSION_TTL_MIN} minutes`);
+
+  // Bump the caller's own cursor to MAX(id) first: "purge my session" means
+  // "I've seen everything up to now, including what this call deletes". If
+  // the session_id is unknown (never drained, or reaped by the GC line
+  // above), this bump is a harmless no-op (0 rows affected) rather than an
+  // error -- the MIN() below simply does not include it.
+  bumpOperatorInboxCursorToMax.run(OPERATOR_INSTANCE_TOKEN, groupId, body.session_id, groupId);
+
+  const floorRow = minLiveOperatorInboxCursor.get(groupId) as { floor: number | null } | null;
+  const floor = floorRow?.floor;
+  // No live session at all (including the caller's, if it was never
+  // registered by a prior drain): nothing is provably read by anyone, so
+  // there is no safe floor to delete up to. Decided as a no-op, not an error.
+  if (floor === null || floor === undefined) return { deleted: 0 };
+
+  const result = purgeOperatorInboxUpToId.run(OPERATOR_INSTANCE_TOKEN, groupId, floor);
+  return { deleted: result.changes };
 }
 
 // --- Graph drafts (agent-escalated questions for the Deck's graph view) ---
@@ -5357,6 +5673,13 @@ const server = Bun.serve<WsData>({
         }
         case "/operator-inbox": {
           const result = handleOperatorInbox(body as OperatorInboxRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/operator-inbox/purge": {
+          const result = handleOperatorInboxPurge(body as OperatorInboxPurgeRequest);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }

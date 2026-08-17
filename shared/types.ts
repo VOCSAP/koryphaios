@@ -896,6 +896,16 @@ export interface RoadmapReorderResponse {
 export interface OperatorInboxRequest {
   group_id: GroupId;
   group_secret_hash: string | null;
+  /**
+   * Courrier lot 1A (card 54b1c71a). Minted in-memory by the Deck process at
+   * launch, never persisted -- absent means the LEGACY drain (delivered=0 +
+   * markDelivered, byte-identical to pre-lot-1A behavior, for an old Deck
+   * against a new broker or a bare send_message caller). Present means the
+   * NON-DESTRUCTIVE cursor read: this session's own operator_inbox_sessions
+   * row gates what it has already seen, so two Decks on the same group_id
+   * each see everything and neither one consumes for the other.
+   */
+  session_id?: string;
 }
 
 export interface OperatorInboxMessage {
@@ -907,6 +917,27 @@ export interface OperatorInboxMessage {
 
 export interface OperatorInboxResponse {
   messages: OperatorInboxMessage[];
+}
+
+// --- Operator inbox purge (Courrier lot 1C, card 1e81ee7b broker half) ---
+
+export interface OperatorInboxPurgeRequest {
+  group_id: GroupId;
+  group_secret_hash: string | null;
+  session_id: string;
+  /**
+   * 'session': this session's cursor jumps to the box's MAX(id), then rows
+   * with id <= MIN(last_id) across the group's LIVE sessions are deleted --
+   * bounded by the slowest other session, never eats another Deck's unread.
+   * 'ids': immediate, global delete of the named ids (explicit human gesture
+   * on a shared object), independent of any session cursor.
+   */
+  scope: "session" | "ids";
+  ids?: number[];
+}
+
+export interface OperatorInboxPurgeResponse {
+  deleted: number;
 }
 
 // --- Broker API: groups and identity introspection ---
