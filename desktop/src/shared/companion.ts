@@ -142,10 +142,12 @@ export const COMPANION_MANIFEST = {
   inboxHistory: { kind: 'invoke', channel: 'inbox:history' },
   approvalReply: { kind: 'invoke', channel: 'approvals:reply' },
   approvalDecline: { kind: 'invoke', channel: 'approvals:decline' },
+  approvalAllow: { kind: 'invoke', channel: 'approvals:allow' },
   inboxReply: { kind: 'invoke', channel: 'inbox:reply' },
   inboxAckState: { kind: 'invoke', channel: 'inbox:ack-state' },
   inboxMarkSeen: { kind: 'invoke', channel: 'inbox:mark-seen' },
   inboxAck: { kind: 'invoke', channel: 'inbox:ack' },
+  inboxDelete: { kind: 'invoke', channel: 'inbox:delete' },
 
   // companion control (desktop window only — a remote must never manage its
   // own bridge: starting/stopping the server is a physical-presence action)
@@ -190,6 +192,7 @@ export const COMPANION_MANIFEST = {
   onSessionQuota: { kind: 'event', channel: 'session:quota' },
   onSessionAttention: { kind: 'event', channel: 'session:attention' },
   onInboxMessages: { kind: 'event', channel: 'inbox:new' },
+  onInboxCleared: { kind: 'event', channel: 'inbox:cleared' },
   onPendingApprovals: { kind: 'event', channel: 'approvals:pending' },
   onGraphDrafts: { kind: 'event', channel: 'graphDrafts:update' },
   onInboxOpen: { kind: 'event', channel: 'inbox:open' },
@@ -275,7 +278,7 @@ const EXPLICIT_REMOTE_BLOCKED_CHANNELS: readonly string[] = [
   // Launching a browser is a HOST action: a remote device asking the PC to
   // open a link is a "make the operator's machine visit this" primitive.
   'shell:open-external',
-  // ask_operator lot: these two don't relay a message, they RENDER A HUMAN
+  // ask_operator lot: these three don't relay a message, they RENDER A HUMAN
   // VERDICT. An agent is stopped, doing nothing, specifically because its
   // safety model requires a human to decide -- what comes back is consumed
   // as the operator's own decision and acted on directly. Unlike inbox:reply
@@ -283,9 +286,12 @@ const EXPLICIT_REMOTE_BLOCKED_CHANNELS: readonly string[] = [
   // existing accepted risk class), a remote companion answering here
   // MANUFACTURES the human consent that was the only thing stopping the
   // agent. Tier 2 alone (see CHANNEL_TIERS) does not block remote access,
-  // so this floor is what actually does.
+  // so this floor is what actually does. approvals:allow is the same
+  // verdict-rendering primitive as approvals:decline, just the other
+  // outcome (card c7df3781) -- same floor, same reasoning.
   'approvals:reply',
-  'approvals:decline'
+  'approvals:decline',
+  'approvals:allow'
 ]
 
 /**
@@ -328,16 +334,24 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'inbox:ack-state': 0,
   'inbox:mark-seen': 1,
   'inbox:ack': 1,
+  // Deletes SHARED broker state (any Deck attached to the group, not just
+  // this window) -- worse blast radius than a local read-state flag, but it
+  // is a destructive MANAGEMENT action, not a verdict an agent consumes and
+  // acts on (unlike the approvals:* floor below): closer to workspace:delete
+  // (2, destructive-but-not-verdict-rendering) than to approvals:decline (2 +
+  // explicit remote-block). Not added to EXPLICIT_REMOTE_BLOCKED_CHANNELS.
+  'inbox:delete': 2,
   // Targeted, operator-authority actions reaching one NAMED peer/agent --
   // same class as roadmap:assign (2), not announce:send's group broadcast
   // (1). 'inbox:reply' stays here (a message; the recipient keeps
-  // judgement, matching roadmap:assign's already-accepted risk). The two
+  // judgement, matching roadmap:assign's already-accepted risk). The three
   // approval channels below carry a stricter risk (they render a human
   // VERDICT an agent acts on directly) and are additionally on the explicit
   // remote-block floor -- see EXPLICIT_REMOTE_BLOCKED_CHANNELS' comment.
   'inbox:reply': 2,
   'approvals:reply': 2,
   'approvals:decline': 2,
+  'approvals:allow': 2,
   'companion:status': 0,
   // Remote approvals. Reading the channel list is tier 0; everything else is
   // trust-changing: a bot token grants control of the operator's notification

@@ -1,6 +1,11 @@
-// Operator-inbox disk persistence (desktop/src/main/inbox-store): the broker
-// drain is destructive, so this journal is the only durable copy across Deck
-// restarts. Covers load/append round-trip, dedupe by id, cap, corruption.
+// Operator-inbox disk persistence (desktop/src/main/inbox-store). Covers
+// load/append round-trip, dedupe by id, cap, corruption, and (Courrier lot
+// 1D/1E, card 1e81ee7b) the two purge-side writers: clearInboxHistory (full
+// truncate, session-scope purge) and deleteInboxHistoryEntries (by-id manual
+// delete). This journal is the only durable copy across Deck restarts for a
+// reason that has nothing to do with the broker drain being destructive
+// anymore (it is not, since lot 1A) -- see inbox-store.ts's header comment:
+// session_id is minted in-memory and never survives a restart either.
 
 import { test, expect } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -8,6 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   appendInboxHistory,
+  clearInboxHistory,
+  deleteInboxHistoryEntries,
   inboxHistoryFile,
   loadInboxHistory,
 } from "../desktop/src/main/inbox-store.ts";
@@ -74,4 +81,46 @@ test("a failed persist invokes onPersistError instead of swallowing (PLAN O6)", 
   // The in-memory merge still works; the failure is reported, not hidden.
   expect(merged.map((m) => m.id)).toEqual([1]);
   expect(errors.length).toBe(1);
+});
+
+// --- Courrier lot 1D: clearInboxHistory (session-scope purge) ---------------
+
+test("clearInboxHistory truncates the whole journal to empty", () => {
+  const d = dir();
+  appendInboxHistory(d, [msg(1), msg(2), msg(3)]);
+  clearInboxHistory(d);
+  expect(loadInboxHistory(d)).toEqual([]);
+});
+
+test("clearInboxHistory on a never-written dir leaves it empty, not an error", () => {
+  const d = dir();
+  clearInboxHistory(d);
+  expect(loadInboxHistory(d)).toEqual([]);
+});
+
+test("clearInboxHistory reports a failed persist via onPersistError, same contract as appendInboxHistory", () => {
+  const d = dir();
+  const blocked = join(d, "not-a-dir");
+  writeFileSync(blocked, "occupied");
+  const errors: unknown[] = [];
+  clearInboxHistory(join(blocked, "state"), (e) => errors.push(e));
+  expect(errors.length).toBe(1);
+});
+
+// --- Courrier lot 1E: deleteInboxHistoryEntries (manual delete) -------------
+
+test("deleteInboxHistoryEntries removes only the named ids, oldest-first remainder", () => {
+  const d = dir();
+  appendInboxHistory(d, [msg(1), msg(2), msg(3)]);
+  const remaining = deleteInboxHistoryEntries(d, [2]);
+  expect(remaining.map((m) => m.id)).toEqual([1, 3]);
+  expect(loadInboxHistory(d).map((m) => m.id)).toEqual([1, 3]);
+});
+
+test("deleteInboxHistoryEntries with an empty or unknown-id list is a 0-effect no-op", () => {
+  const d = dir();
+  appendInboxHistory(d, [msg(1), msg(2)]);
+  expect(deleteInboxHistoryEntries(d, []).map((m) => m.id)).toEqual([1, 2]);
+  expect(deleteInboxHistoryEntries(d, [999]).map((m) => m.id)).toEqual([1, 2]);
+  expect(loadInboxHistory(d).map((m) => m.id)).toEqual([1, 2]);
 });

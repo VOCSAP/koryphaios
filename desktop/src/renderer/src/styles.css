@@ -4002,6 +4002,13 @@ svg.glyph {
   color: #3ec46d;
 }
 
+/* Courrier lot 1E (card 1e81ee7b): a THIRD state, distinct from Ack above and
+   from Close in the modal footer -- reuses .icon-btn.danger's "red AT REST"
+   recipe so a manual delete never reads as another neutral row action. */
+.inbox-delete-btn {
+  padding: 4px;
+}
+
 .inbox-entry-done {
   display: inline-flex;
   padding: 4px;

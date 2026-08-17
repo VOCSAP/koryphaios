@@ -49,10 +49,12 @@ import {
   BrokerHealthTracker,
   fetchGraphDrafts,
   fetchOperatorInbox,
+  purgeOperatorInbox,
   resolveBrokerEndpoint,
   sendAnnounce
 } from './broker-client'
-import { appendInboxHistory } from './inbox-store'
+import { appendInboxHistory, clearInboxHistory, deleteInboxHistoryEntries } from './inbox-store'
+import { createInboxSessionTracker, purgeInboxSessionCore } from './inbox-session'
 import {
   computeDeckProjectKey,
   configureRoadmapSigner,
@@ -975,6 +977,14 @@ let inboxTimer: NodeJS.Timeout | null = null
 // broker already forgot them, this queue is their only copy.
 const pendingInboxWrites: { id: number; from: string; text: string; sentAt: string }[] = []
 
+// Courrier lot 1B (card 54b1c71a): session_id lifecycle, extracted to
+// inbox-session.ts (pure, bun-testable -- this file imports electron and
+// cannot be unit-tested directly) after mutation review found the re-mint
+// rule was previously pinned only by a comment. See that module's doc
+// comment for the full rationale (activeScope.groupId is mutable at
+// runtime, the frozen broker's session upsert does not migrate group_id).
+const currentInboxSessionId = createInboxSessionTracker(() => activeScope.groupId)
+
 // Broker reachability (PLAN O5): fed by the inbox poll below (one signal per
 // tick -- pollGraphDrafts runs the same tick, feeding both would collapse the
 // 2-failure hysteresis into a single tick). Transitions drive the renderer's
@@ -1008,7 +1018,11 @@ const notifyInbox = (batch: { from: string; text: string }[]): void => {
 const pollOperatorInbox = async (): Promise<void> => {
   try {
     const messages = await fetchOperatorInbox(
-      { groupId: activeScope.groupId, secret: activeScope.secret },
+      {
+        groupId: activeScope.groupId,
+        secret: activeScope.secret,
+        sessionId: currentInboxSessionId()
+      },
       { endpoint: resolveBrokerEndpoint() }
     )
     brokerHealth.recordSuccess()
@@ -1019,10 +1033,11 @@ const pollOperatorInbox = async (): Promise<void> => {
       text: m.text,
       sentAt: m.sent_at
     }))
-    // The broker drain is destructive (delivered=1): journal the batch to
-    // disk BEFORE showing it, so a Deck restart replays the whole inbox. A
-    // failed write re-queues the batch for the next tick (O6) -- these
-    // messages exist nowhere else once drained.
+    // Courrier lot 1B: the broker read is now non-destructive (cursor by
+    // session_id, broker.ts), but this journal stays load-bearing for a
+    // DIFFERENT reason -- see inbox-store.ts's header comment. Journal to
+    // disk BEFORE showing it; a failed write re-queues the batch for the next
+    // tick (O6) -- these messages exist nowhere else on this Deck once read.
     const toPersist = [...pendingInboxWrites.splice(0), ...batch]
     let failed = false
     appendInboxHistory(join(app.getPath('userData'), APP_STATE_SUBDIR), toPersist, undefined, (e) => {
@@ -1037,6 +1052,78 @@ const pollOperatorInbox = async (): Promise<void> => {
     // owns the (deduplicated) reporting so this stays quiet per-tick.
     brokerHealth.recordFailure(e)
   }
+}
+
+/**
+ * Courrier lot 1D (card 1e81ee7b): the session-scope purge triggered by the
+ * three classifying gestures (app:new-clear, a SUCCESSFUL workspace:restore,
+ * template:apply mode='replace' -- wired at their ipc.ts call sites). Bumps
+ * this session's broker cursor to MAX(id) and deletes everything <= the
+ * group's slowest live session (broker.ts's handleOperatorInboxPurge), then
+ * truncates the local journal at the SAME instant -- skipping either half
+ * leaves the bug looking unfixed (broker-only: local journal still shows
+ * dead entries; local-only: broker keeps growing for other Decks that
+ * already read past them).
+ *
+ * Best-effort by design: a purge failure must never block the gesture it
+ * rides on (new/restore/apply-replace all complete regardless). The
+ * broker-purge-then-always-truncate control flow is delegated to
+ * purgeInboxSessionCore (inbox-session.ts, pure/bun-testable) after mutation
+ * review found nothing pinned the "truncate even when the broker call
+ * throws" guarantee this doc comment names -- only broadcast('inbox:cleared')
+ * stays here (a side effect, not pure).
+ */
+async function purgeInboxSession(): Promise<void> {
+  await purgeInboxSessionCore({
+    purgeBroker: async () => {
+      await purgeOperatorInbox(
+        {
+          groupId: activeScope.groupId,
+          secret: activeScope.secret,
+          sessionId: currentInboxSessionId(),
+          scope: 'session'
+        },
+        { endpoint: resolveBrokerEndpoint() }
+      )
+    },
+    clearLocal: () =>
+      clearInboxHistory(join(app.getPath('userData'), APP_STATE_SUBDIR), (e) =>
+        reportError('inbox', 'local history truncate failed after session purge', e)
+      ),
+    onPurgeError: (e) =>
+      reportError('inbox', 'session purge failed (broker-side Courrier may keep stale rows)', e)
+  })
+  broadcast('inbox:cleared')
+}
+
+/**
+ * Courrier lot 1E (card 1e81ee7b): manual "delete this one" gesture, a third
+ * state distinct from Close and Ack -- never a reinterpretation of either.
+ * Global broker-side delete (any session, any group member sees it gone) +
+ * local journal removal. Empty/unknown ids are a 0-effect no-op, matching the
+ * broker's own scope='ids' semantics -- never an error.
+ */
+async function inboxDelete(ids: number[]): Promise<number> {
+  let deleted = 0
+  try {
+    deleted = await purgeOperatorInbox(
+      {
+        groupId: activeScope.groupId,
+        secret: activeScope.secret,
+        sessionId: currentInboxSessionId(),
+        scope: 'ids',
+        ids
+      },
+      { endpoint: resolveBrokerEndpoint() }
+    )
+  } catch (e) {
+    reportError('inbox', `manual delete failed for ${ids.length} id(s)`, e)
+  }
+  deleteInboxHistoryEntries(join(app.getPath('userData'), APP_STATE_SUBDIR), ids, (e) =>
+    reportError('inbox', 'local history entry removal failed after manual delete', e)
+  )
+  broadcast('inbox:cleared')
+  return deleted
 }
 
 // ----- Graph drafts poll -----
@@ -2282,6 +2369,12 @@ app.whenReady().then(async () => {
       const res = await claimApproval(deps, { id, answerKind: 'deny' })
       return res !== null
     },
+    approvalAllow: async (id: string): Promise<boolean> => {
+      const deps = approvals.deps()
+      if (!deps) return false
+      const res = await claimApproval(deps, { id, answerKind: 'allow' })
+      return res !== null
+    },
     // Unified Courrier's reply-to-a-peer-message action: same sendAnnounce
     // primitive as the existing team-lead/supervisor/assignment announces
     // above, just addressed by the caller's own toPeerId instead of a role
@@ -2302,7 +2395,9 @@ app.whenReady().then(async () => {
     deckPluginDir: getDeckPluginDir,
     sandbox,
     sandboxGate,
-    sandboxWarmTranscripts: warmSandboxTranscripts
+    sandboxWarmTranscripts: warmSandboxTranscripts,
+    purgeInboxSession,
+    inboxDelete
   })
   // Arm remote approvals BEFORE service.start(): restored sessions spawn there,
   // and a session spawned without the credential path would never produce an

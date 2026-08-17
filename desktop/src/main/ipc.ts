@@ -38,6 +38,7 @@ import {
   loadAckStateWithMigrationSeed,
   loadInboxHistory
 } from './inbox-store'
+import { classifyInboxDeleteIds } from './inbox-session'
 import {
   buildDigestSystemPrompt,
   collectSources,
@@ -211,8 +212,23 @@ interface IpcDeps {
    * (settles the ticket, unblocks the agent with a refusal) -- never an ack.
    */
   approvalDecline: (id: string) => Promise<boolean>
+  /**
+   * Allow a pending/expired_notif 'permission' approval. Mirrors
+   * approvalDecline exactly (card c7df3781) -- same claim primitive, other
+   * verdict (`answerKind: 'allow'`).
+   */
+  approvalAllow: (id: string) => Promise<boolean>
   /** Reply to an ordinary (family 1) inbox message: a plain targeted announce, not correlated to anything broker-side. */
   announceTo: (toPeerId: string, text: string) => Promise<number>
+  /**
+   * Courrier lot 1D (card 1e81ee7b): session-scope purge, called after each
+   * of the three classifying gestures (app:new-clear, a successful
+   * workspace:restore, template:apply mode='replace'). Best-effort -- never
+   * throws, never blocks the gesture it rides on.
+   */
+  purgeInboxSession: () => Promise<void>
+  /** Courrier lot 1E (card 1e81ee7b): manual delete, see inbox-store.ts. */
+  inboxDelete: (ids: number[]) => Promise<number>
 }
 
 export function registerIpc({
@@ -239,7 +255,10 @@ export function registerIpc({
   sandboxWarmTranscripts,
   approvalReply,
   approvalDecline,
-  announceTo
+  approvalAllow,
+  announceTo,
+  purgeInboxSession,
+  inboxDelete
 }: IpcDeps): void {
   // ----- sessions -----
   regHandle('sessions:list', () => service.list())
@@ -275,6 +294,10 @@ export function registerIpc({
     workspaces.startNew()
     service.closeAll()
     broadcast('workspace:current', null)
+    // Courrier lot 1D (card 1e81ee7b): "this session starts over" -- one of
+    // the three classifying gestures. Fire-and-forget: purgeInboxSession is
+    // itself best-effort and must never delay this handler's return.
+    void purgeInboxSession()
   })
 
   // ----- pty io (fire-and-forget) -----
@@ -603,6 +626,10 @@ export function registerIpc({
     if (ok) {
       const current = workspaces.listForCwd().find((w) => w.current) ?? null
       broadcast('workspace:current', current)
+      // Courrier lot 1D: only a SUCCESSFUL restore counts as "this session
+      // starts over" -- a failed restore (ok===false) changed nothing, so it
+      // must not purge either.
+      void purgeInboxSession()
     }
     return ok
   })
@@ -1127,6 +1154,11 @@ export function registerIpc({
       workspaces.startNew()
       service.closeAll()
       broadcast('workspace:current', null)
+      // Courrier lot 1D: this branch mirrors app:new-clear verbatim (comment
+      // above), so it purges the same way -- the fifth path the design doc
+      // names explicitly (measured: absent from the original three-gesture
+      // enumeration, but it does the same startNew()+closeAll()).
+      void purgeInboxSession()
     }
     // The template's lead becomes the window's ONLY when no lead exists yet
     // (PLAN C18) — applying a team must not silently steal the crown.
@@ -1286,21 +1318,46 @@ export function registerIpc({
     return { docId: doc.id, nodeId }
   })
 
-  // Persisted operator-inbox history (startup hydration; drain is destructive
-  // broker-side, so this file is the only durable copy).
+  // Persisted operator-inbox history (startup hydration). Courrier lot 1B:
+  // the broker drain is no longer destructive (cursor by session_id,
+  // broker.ts), but this file stays the only durable copy for a different
+  // reason -- see inbox-store.ts's header comment (session_id is minted
+  // in-memory and never survives a restart either).
   regHandle('inbox:history', () =>
     loadInboxHistory(join(app.getPath('userData'), APP_STATE_SUBDIR))
   )
+  regHandle('inbox:delete', (_e, rawIds: unknown) => {
+    // Hostile IPC arg (renderer/companion input): checking Array.isArray
+    // alone left the ELEMENTS unvalidated, so string-shaped ids used to
+    // silently no-op both broker-side (deleted:0) and locally (Set
+    // membership never matches). classifyInboxDeleteIds filters to integers
+    // and separately reports the all-invalid-but-non-empty shape --
+    // DECISION (team-lead ask, card 1e81ee7b hardening follow-up): main
+    // answers that case itself (reject here) rather than forwarding an
+    // emptied array that would race the broker's own separately-patched 400
+    // for the same shape -- exactly one layer answers, not two silently
+    // agreeing to a no-op. reportError is the LOG trace; the rejection is
+    // the user-facing signal InboxPanel.tsx's deleteEntry() catch already
+    // surfaces as a toast.
+    const { valid, rejected } = classifyInboxDeleteIds(rawIds)
+    if (rejected) {
+      reportError('inbox', 'inbox:delete received only invalid (non-integer) ids', rawIds)
+      return Promise.reject(new Error('inbox:delete: no valid ids'))
+    }
+    return inboxDelete(valid)
+  })
 
-  // ask_operator lot (Etape A): the three unified Courrier actions. `id` /
+  // ask_operator lot (Etape A): the unified Courrier actions. `id` /
   // `toPeerId` / `text` all originate in the renderer (hostile input #3) --
   // coerced to string here and re-validated broker-side by the resolve of
-  // approvalReply/approvalDecline/announceTo, which scope by the CURRENT
-  // operator's own credential rather than trusting anything in the payload.
+  // approvalReply/approvalDecline/approvalAllow/announceTo, which scope by
+  // the CURRENT operator's own credential rather than trusting anything in
+  // the payload.
   regHandle('approvals:reply', (_e, id: string, text: string) =>
     approvalReply(String(id ?? ''), String(text ?? ''))
   )
   regHandle('approvals:decline', (_e, id: string) => approvalDecline(String(id ?? '')))
+  regHandle('approvals:allow', (_e, id: string) => approvalAllow(String(id ?? '')))
   regHandle('inbox:reply', (_e, toPeerId: string, text: string) =>
     announceTo(String(toPeerId ?? ''), String(text ?? ''))
   )

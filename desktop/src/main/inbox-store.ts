@@ -1,9 +1,19 @@
-// Operator-inbox persistence: the broker drain is DESTRUCTIVE (messages are
-// marked delivered and never returned again), so before this store a Deck
-// restart lost the whole inbox. Drained batches are now journaled to one JSON
-// file in the app-state dir and reloaded at startup. Plain JSON on purpose:
-// these messages transit the broker's unencrypted SQLite anyway, so cipher
-// here would protect nothing (unlike graph docs, which exist only Deck-side).
+// Operator-inbox persistence. Drained batches are journaled to one JSON file
+// in the app-state dir and reloaded at startup. Plain JSON on purpose: these
+// messages transit the broker's unencrypted SQLite anyway, so cipher here
+// would protect nothing (unlike graph docs, which exist only Deck-side).
+//
+// Courrier lot 1B/1D (card 54b1c71a/1e81ee7b): the broker drain used to be
+// unconditionally DESTRUCTIVE (delivered=1, never returned again), which is
+// why this journal exists at all -- a Deck restart would otherwise lose the
+// whole inbox. It is now cursor-based per session_id (broker.ts), but the
+// journal stays load-bearing for a DIFFERENT reason: a session_id is minted
+// in-memory and never persisted, so on restart the Deck starts a BRAND NEW
+// session whose cursor seeds at the box's current MAX(id) -- it can no longer
+// replay anything from the broker either. This file remains the only durable
+// copy of what was already shown. clearInboxHistory/deleteInboxHistoryEntries
+// below are this journal's half of the two purge gestures (lot 1D session
+// purge, lot 1E manual delete) -- see their own doc comments.
 //
 // Node builtins only (injectable dir): unit-testable under bun.
 
@@ -65,6 +75,46 @@ export function appendInboxHistory(
     onPersistError?.(e)
   }
   return merged
+}
+
+/**
+ * Courrier lot 1D (card 1e81ee7b, design doc section 6.1/8): truncate the
+ * WHOLE local journal to empty, at the SAME instant as the broker-side
+ * session-scope purge (ipc.ts's app:new-clear / workspace:restore /
+ * template:apply-replace handlers). Skipping this half is the exact trap the
+ * design doc names: deleting broker-side without truncating here leaves the
+ * dead entries ON SCREEN, so the bug would read as unfixed.
+ */
+export function clearInboxHistory(stateDir: string, onPersistError?: (e: unknown) => void): void {
+  try {
+    mkdirSync(stateDir, { recursive: true })
+    writeFileAtomic(inboxHistoryFile(stateDir), JSON.stringify([]))
+  } catch (e) {
+    onPersistError?.(e)
+  }
+}
+
+/**
+ * Courrier lot 1E (card 1e81ee7b): remove specific entries by broker message
+ * id -- the manual "delete this one" gesture, distinct from clearInboxHistory
+ * above (a session-scope reset) and from ack (a read-state change that never
+ * removes the entry). Returns the remaining history (oldest first) so the
+ * caller can re-broadcast it without a second disk read.
+ */
+export function deleteInboxHistoryEntries(
+  stateDir: string,
+  ids: number[],
+  onPersistError?: (e: unknown) => void
+): InboxMessage[] {
+  const idSet = new Set(ids)
+  const remaining = loadInboxHistory(stateDir).filter((m) => !idSet.has(m.id))
+  try {
+    mkdirSync(stateDir, { recursive: true })
+    writeFileAtomic(inboxHistoryFile(stateDir), JSON.stringify(remaining))
+  } catch (e) {
+    onPersistError?.(e)
+  }
+  return remaining
 }
 
 // ----- ack state (ask_operator lot, Etape A) -----

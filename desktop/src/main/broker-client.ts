@@ -177,9 +177,16 @@ export interface OperatorInboxMessage {
  * POST /operator-inbox (PLAN C12): drain the messages agents sent to the
  * reserved 'operator' peer of this window's group. Throws on failure so the
  * polling caller can swallow it.
+ *
+ * Courrier lot 1B (card 54b1c71a, design doc section 6.2): `params.sessionId`
+ * is OPTIONAL here only so this function's own unit tests stay simple without
+ * one -- the real caller (index.ts's pollOperatorInbox) always supplies it.
+ * Present -> the broker's NON-DESTRUCTIVE cursor read (this window's own
+ * in-memory session_id gates what IT has already seen); absent -> the
+ * broker's legacy delivered=0 drain.
  */
 export async function fetchOperatorInbox(
-  params: { groupId: string; secret: string },
+  params: { groupId: string; secret: string; sessionId?: string },
   deps: AnnounceDeps
 ): Promise<OperatorInboxMessage[]> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
@@ -190,11 +197,43 @@ export async function fetchOperatorInbox(
     headers,
     body: JSON.stringify({
       group_id: params.groupId,
-      group_secret_hash: computeGroupSecretHash(params.secret)
+      group_secret_hash: computeGroupSecretHash(params.secret),
+      ...(params.sessionId ? { session_id: params.sessionId } : {})
     })
   })
   if (!res.ok) throw new Error(`operator-inbox failed: ${res.status}`)
   return ((await res.json()) as { messages: OperatorInboxMessage[] }).messages
+}
+
+/**
+ * POST /operator-inbox/purge (Courrier lot 1C/1D/1E, card 1e81ee7b). Same
+ * guard order broker-side as the drain -- see broker.ts's
+ * handleOperatorInboxPurge. Throws on failure so callers decide their own
+ * best-effort policy (index.ts wraps both call sites with reportError).
+ */
+export async function purgeOperatorInbox(
+  params: { groupId: string; secret: string; sessionId: string } & (
+    | { scope: 'session' }
+    | { scope: 'ids'; ids: number[] }
+  ),
+  deps: AnnounceDeps
+): Promise<number> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (deps.endpoint.token) headers['Authorization'] = `Bearer ${deps.endpoint.token}`
+  const f = deps.fetchFn ?? fetch
+  const res = await f(`${deps.endpoint.url}/operator-inbox/purge`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      group_id: params.groupId,
+      group_secret_hash: computeGroupSecretHash(params.secret),
+      session_id: params.sessionId,
+      scope: params.scope,
+      ...(params.scope === 'ids' ? { ids: params.ids } : {})
+    })
+  })
+  if (!res.ok) throw new Error(`operator-inbox/purge failed: ${res.status}`)
+  return ((await res.json()) as { deleted: number }).deleted
 }
 
 /** One pending graph draft parked on the broker (agent-escalated question). */

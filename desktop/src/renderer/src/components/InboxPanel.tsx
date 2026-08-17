@@ -5,6 +5,7 @@ import { useT } from '../i18n'
 import { inboxEntryKey } from '@shared/types'
 import type { AckableInboxEntry, InboxEntry } from '@shared/types'
 import { COMPANION_MANIFEST, REMOTE_BLOCKED_CHANNELS } from '@shared/companion'
+import { verdictAnswerKindFor } from './approval-verdict'
 
 /**
  * Operator Courrier (PLAN C12, refonte card 8fdac3dd): the entries addressed
@@ -67,7 +68,8 @@ const GONE_PEER = '<gone>'
  */
 const VERDICT_BLOCKED_REMOTELY =
   REMOTE_BLOCKED_CHANNELS.has(COMPANION_MANIFEST.approvalReply.channel) ||
-  REMOTE_BLOCKED_CHANNELS.has(COMPANION_MANIFEST.approvalDecline.channel)
+  REMOTE_BLOCKED_CHANNELS.has(COMPANION_MANIFEST.approvalDecline.channel) ||
+  REMOTE_BLOCKED_CHANNELS.has(COMPANION_MANIFEST.approvalAllow.channel)
 
 export function InboxPanel(): React.JSX.Element {
   const t = useT()
@@ -145,6 +147,26 @@ export function InboxPanel(): React.JSX.Element {
   const draftKey = open ? reactKey(open) : ''
   const draft = replyDrafts[draftKey] ?? ''
 
+  /**
+   * Courrier lot 1E (card 1e81ee7b) — the manual "delete this one" gesture, a
+   * THIRD state distinct from Close (leaves it, unread stays unread) and Ack
+   * (a local read-state flag, never removes the entry). Global: every Deck
+   * attached to the group sees it gone, not just this window. Scoped to
+   * family-1 MESSAGES only — a family-2 event has no broker-side row to
+   * delete (its `id` is a locally-synthesized string, not a `messages.id`),
+   * and a family-3 blocking QUESTION must never be silently discarded out
+   * from under an agent waiting on it.
+   */
+  const deleteEntry = async (id: number): Promise<void> => {
+    try {
+      await window.api.inboxDelete([id])
+      showToast('toast.inboxDeleted')
+      if (openKey && open && open.kind === 'message' && open.message.id === id) setOpenKey(null)
+    } catch (e) {
+      showToast(`${t('inbox.delete')}: ${errorText(e)}`, 'error', { raw: true })
+    }
+  }
+
   /** Family 1 — a plain targeted announce back to the sender. */
   const sendReply = async (toPeerId: string): Promise<void> => {
     if (!draft.trim() || sending) return
@@ -165,14 +187,27 @@ export function InboxPanel(): React.JSX.Element {
     }
   }
 
-  /** Family 3 — answering (or declining) RESOLVES the ticket and releases the agent. */
-  const answerApproval = async (id: string, text: string | null): Promise<void> => {
+  /**
+   * Family 3 — answering (allow/deny/text) RESOLVES the ticket and releases
+   * the agent. Three DISTINCT IPC primitives, never interchangeable (card
+   * c7df3781): 'allow'/'deny' render a human VERDICT the CLI's Ink chooser
+   * consumes as a keystroke, 'text' relays a free-text answer as a peer
+   * message (ask_operator). See approval-verdict.ts for which one a given
+   * chip must use.
+   */
+  const answerApproval = async (
+    id: string,
+    action: { kind: 'allow' } | { kind: 'deny' } | { kind: 'text'; text: string }
+  ): Promise<void> => {
     if (sending) return
     setSending(true)
     try {
-      const ok = text === null
-        ? await window.api.approvalDecline(id)
-        : await window.api.approvalReply(id, text)
+      const ok =
+        action.kind === 'deny'
+          ? await window.api.approvalDecline(id)
+          : action.kind === 'allow'
+            ? await window.api.approvalAllow(id)
+            : await window.api.approvalReply(id, action.text)
       // `false` is not a failure: another channel (phone, Telegram…) won the
       // race and the agent is already released.
       showToast(
@@ -276,6 +311,18 @@ export function InboxPanel(): React.JSX.Element {
                     {GLYPH_ACTIONS.check}
                   </span>
                 )}
+                {e.kind === 'message' && (
+                  <button
+                    className="icon-btn danger inbox-delete-btn"
+                    title={t('inbox.delete')}
+                    onClick={(ev) => {
+                      ev.stopPropagation()
+                      void deleteEntry(e.message.id)
+                    }}
+                  >
+                    {GLYPH_ACTIONS.trash}
+                  </button>
+                )}
                 <span className="inbox-entry-chevron">{GLYPH_ACTIONS.forward}</span>
               </span>
             </div>
@@ -313,16 +360,28 @@ export function InboxPanel(): React.JSX.Element {
 
             {open.kind === 'approval' && canAnswerVerdict && open.approval.options.length > 0 && (
               <div className="inbox-modal-options">
-                {open.approval.options.map((opt) => (
-                  <button
-                    key={opt}
-                    className="chip inbox-option"
-                    disabled={sending}
-                    onClick={() => void answerApproval(open.approval.id, opt)}
-                  >
-                    {opt}
-                  </button>
-                ))}
+                {open.approval.options.map((opt, idx) => {
+                  // Discriminate on `kind`, never on the label string
+                  // (see approval-verdict.ts): a 'permission' chip renders
+                  // an allow/deny VERDICT, a 'question' chip relays its
+                  // label as free text.
+                  const answerKind = verdictAnswerKindFor(open.approval.kind, idx)
+                  return (
+                    <button
+                      key={opt}
+                      className="chip inbox-option"
+                      disabled={sending}
+                      onClick={() =>
+                        void answerApproval(
+                          open.approval.id,
+                          answerKind === 'text' ? { kind: 'text', text: opt } : { kind: answerKind }
+                        )
+                      }
+                    >
+                      {opt}
+                    </button>
+                  )
+                })}
               </div>
             )}
 
@@ -354,7 +413,7 @@ export function InboxPanel(): React.JSX.Element {
                     <button
                       className="btn danger"
                       disabled={sending}
-                      onClick={() => void answerApproval(open.approval.id, null)}
+                      onClick={() => void answerApproval(open.approval.id, { kind: 'deny' })}
                     >
                       {t('inbox.decline')}
                     </button>
@@ -366,7 +425,9 @@ export function InboxPanel(): React.JSX.Element {
                     <button
                       className="primary"
                       disabled={sending || !draft.trim()}
-                      onClick={() => void answerApproval(open.approval.id, draft.trim())}
+                      onClick={() =>
+                        void answerApproval(open.approval.id, { kind: 'text', text: draft.trim() })
+                      }
                     >
                       {t('inbox.reply')}
                     </button>
@@ -388,6 +449,14 @@ export function InboxPanel(): React.JSX.Element {
                   <button className="btn" onClick={() => setOpenKey(null)}>
                     {t('inbox.close')}
                   </button>
+                  {open.kind === 'message' && (
+                    <button
+                      className="btn danger"
+                      onClick={() => void deleteEntry(open.message.id)}
+                    >
+                      {t('inbox.delete')}
+                    </button>
+                  )}
                   {open.kind === 'message' && open.message.from !== GONE_PEER && (
                     <button
                       className="primary"

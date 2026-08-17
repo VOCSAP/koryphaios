@@ -7,7 +7,9 @@ import {
   resolveBrokerEndpoint,
   computeGroupSecretHash,
   buildAnnouncePayload,
-  sendAnnounce
+  sendAnnounce,
+  fetchOperatorInbox,
+  purgeOperatorInbox
 } from "../desktop/src/main/broker-client.ts";
 
 const dirs: string[] = [];
@@ -110,4 +112,92 @@ test("sendAnnounce throws on a non-2xx response", async () => {
   await expect(
     sendAnnounce({ groupId: "g", secret: "s", text: "t" }, { endpoint: { url: "http://x", token: null }, fetchFn })
   ).rejects.toThrow("announce failed: 401");
+});
+
+// --- Courrier lot 1B (card 54b1c71a): fetchOperatorInbox's session_id -------
+
+test("fetchOperatorInbox includes session_id in the body when supplied", async () => {
+  let body: Record<string, unknown> = {};
+  const fetchFn = (async (_url: string | URL | Request, init?: RequestInit) => {
+    body = JSON.parse(init!.body as string);
+    return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  await fetchOperatorInbox(
+    { groupId: "g1", secret: "s1", sessionId: "sess-abc" },
+    { endpoint: { url: "http://x", token: null }, fetchFn }
+  );
+  expect(body.session_id).toBe("sess-abc");
+  expect(body.group_id).toBe("g1");
+});
+
+test("fetchOperatorInbox omits session_id from the body when absent -- legacy shape preserved", async () => {
+  let body: Record<string, unknown> = {};
+  const fetchFn = (async (_url: string | URL | Request, init?: RequestInit) => {
+    body = JSON.parse(init!.body as string);
+    return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  await fetchOperatorInbox(
+    { groupId: "g1", secret: "s1" },
+    { endpoint: { url: "http://x", token: null }, fetchFn }
+  );
+  expect("session_id" in body).toBe(false);
+});
+
+test("fetchOperatorInbox throws on a non-2xx response", async () => {
+  const fetchFn = (async () => new Response("nope", { status: 403 })) as unknown as typeof fetch;
+  await expect(
+    fetchOperatorInbox(
+      { groupId: "g", secret: "s" },
+      { endpoint: { url: "http://x", token: null }, fetchFn }
+    )
+  ).rejects.toThrow("operator-inbox failed: 403");
+});
+
+// --- Courrier lot 1C/1D/1E (card 1e81ee7b): purgeOperatorInbox --------------
+
+test("purgeOperatorInbox POSTs /operator-inbox/purge with scope='session' and no ids field", async () => {
+  let url = "";
+  let body: Record<string, unknown> = {};
+  const fetchFn = (async (u: string | URL | Request, init?: RequestInit) => {
+    url = String(u);
+    body = JSON.parse(init!.body as string);
+    return new Response(JSON.stringify({ deleted: 3 }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const deleted = await purgeOperatorInbox(
+    { groupId: "g1", secret: "s1", sessionId: "sess-abc", scope: "session" },
+    { endpoint: { url: "http://broker:7899", token: null }, fetchFn }
+  );
+  expect(deleted).toBe(3);
+  expect(url).toBe("http://broker:7899/operator-inbox/purge");
+  expect(body.scope).toBe("session");
+  expect(body.session_id).toBe("sess-abc");
+  expect("ids" in body).toBe(false);
+});
+
+test("purgeOperatorInbox POSTs scope='ids' with the ids array included", async () => {
+  let body: Record<string, unknown> = {};
+  const fetchFn = (async (_url: string | URL | Request, init?: RequestInit) => {
+    body = JSON.parse(init!.body as string);
+    return new Response(JSON.stringify({ deleted: 2 }), { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const deleted = await purgeOperatorInbox(
+    { groupId: "g1", secret: "s1", sessionId: "sess-abc", scope: "ids", ids: [5, 7] },
+    { endpoint: { url: "http://x", token: null }, fetchFn }
+  );
+  expect(deleted).toBe(2);
+  expect(body.ids).toEqual([5, 7]);
+});
+
+test("purgeOperatorInbox throws on a non-2xx response", async () => {
+  const fetchFn = (async () => new Response("nope", { status: 403 })) as unknown as typeof fetch;
+  await expect(
+    purgeOperatorInbox(
+      { groupId: "g", secret: "s", sessionId: "x", scope: "session" },
+      { endpoint: { url: "http://x", token: null }, fetchFn }
+    )
+  ).rejects.toThrow("operator-inbox/purge failed: 403");
 });

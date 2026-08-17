@@ -1598,6 +1598,14 @@ export interface DeckApi {
    */
   approvalDecline(id: string): Promise<boolean>
   /**
+   * Allow a pending/expired_notif 'permission' approval: mirrors
+   * approvalDecline exactly (card c7df3781), the other verdict. Distinct
+   * from approvalReply — the CLI's Ink chooser at a permission prompt does
+   * not accept free text, so the answer must be `answerKind: 'allow'`
+   * (a bare Enter, see buildKeystrokes), never the option's label text.
+   */
+  approvalAllow(id: string): Promise<boolean>
+  /**
    * Reply to an ordinary (family 1) inbox message: not correlated, not a
    * resolution — a plain targeted announce. Resolves to the recipient
    * count from the underlying /announce call (0 or 1 for a single named
@@ -1625,6 +1633,17 @@ export interface DeckApi {
    * that type's doc comment.
    */
   inboxAck(entry: AckableInboxEntry): Promise<void>
+  /**
+   * Manual "delete this one" gesture (Courrier lot 1E, card 1e81ee7b): a
+   * THIRD state distinct from Close (inboxMarkSeen/inboxAck's local
+   * read-state) and Ack — never a reinterpretation of either. Deletes
+   * broker-side (global: every Deck attached to the group sees it gone, not
+   * just this window) and from the local journal. Returns the broker's
+   * reported deleted count; an empty or unknown-id `ids` is a 0-effect
+   * no-op, never an error. Fires `onInboxCleared` so every subscriber
+   * (including this window) re-hydrates from `inboxHistory()`.
+   */
+  inboxDelete(ids: number[]): Promise<number>
 
   // companion LAN bridge (PLAN MB1/MB2) — desktop window only; a remote
   // client gets 'remote-blocked' on all three (physical-presence actions).
@@ -1750,6 +1769,13 @@ export interface DeckApi {
   onSessionAttention(cb: (e: SessionAttentionEvent) => void): () => void
   /** Operator-inbox batch drained from the broker (PLAN C12), oldest first. */
   onInboxMessages(cb: (messages: InboxMessage[]) => void): () => void
+  /**
+   * The local Courrier journal was truncated or had entries removed by
+   * `main` itself (Courrier lot 1D session purge on new/restore/apply-
+   * replace, or lot 1E's inboxDelete) -- carries no payload, subscribers
+   * re-hydrate via `inboxHistory()` rather than reconciling a diff.
+   */
+  onInboxCleared(cb: () => void): () => void
   /**
    * Full pending/expired_notif approval list for this operator (family 3,
    * non-destructive broker poll — same replace-whole-state contract as

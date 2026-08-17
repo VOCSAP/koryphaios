@@ -1,5 +1,134 @@
 # Changelog
 
+## broker (experimental) -- la lecture du Courrier operateur cesse d'etre destructive
+
+Fichiers : `broker.ts`, `tests/broker-operator-inbox.test.ts`. Le mecanisme
+de lecture non destructive (curseur par session, cle primaire composite,
+branchement retro-compatible) porte la carte `54b1c71a` ; la route de purge
+et les deux correctifs de securite qui l'accompagnent portent, d'apres les
+commentaires du code lui-meme, la carte `1e81ee7b` (son volet broker) --
+les deux avancent dans le meme commit, sur les memes tables.
+
+**Le drain n'efface plus le courrier d'un autre Deck.** Avant ce lot,
+`/operator-inbox` selectionnait par jeton de destinataire et identifiant de
+groupe SEULEMENT, puis marquait tout comme delivre : avec deux Deck ouverts
+sur le meme groupe, le premier a interroger mangeait tout, sans que rien ne
+le signale. Une nouvelle table `operator_inbox_sessions` porte desormais un
+curseur de lecture PAR SESSION de Deck (cle primaire composite identifiant
+de session + identifiant de groupe). Le champ d'identifiant de session est
+OPTIONNEL sur la route de drain : absent, le comportement legacy est
+STRICTEMENT inchange, ce qui preserve la compatibilite avec un broker
+partage interroge par un Deck plus ancien, ou par un simple appelant
+`send_message`. Un identifiant de session d'un type autre que chaine est
+desormais refuse explicitement (erreur), plutot que de retomber
+SILENCIEUSEMENT sur le comportement destructif legacy.
+
+**Une nouvelle route de purge, a deux portees.** La portee session fait
+d'abord avancer le curseur de l'appelant jusqu'au dernier message connu du
+groupe, puis supprime tout ce qui est en-dessous du curseur le PLUS BAS
+parmi les sessions VIVANTES du groupe : elle ne peut donc jamais manger le
+non-lu d'un autre Deck. La portee "ids" est une suppression immediate et
+ciblee, independante de tout curseur ; une liste d'identifiants non vide
+mais sans aucun entier est desormais refusee (erreur explicite) au lieu de
+rendre un succes vide indiscernable d'un "deja supprime".
+
+**Deux correctifs de securite**, la partie la plus importante de ce lot.
+D'abord : un detenteur du secret d'un groupe A pouvait, en nommant
+simplement l'identifiant de session d'un groupe B, faire avancer
+DEFINITIVEMENT et SILENCIEUSEMENT le curseur de lecture de ce groupe B --
+et donc rendre aveugle sa session Deck a son propre courrier non lu --
+parce que les deux instructions SQL qui deplacent un curseur ne portaient
+pas l'identifiant de groupe dans leur clause de restriction, alors que les
+identifiants de message vivent dans un espace numerique GLOBAL unique.
+Ensuite : le ramasse-miettes qui reap les sessions mortes avant de calculer
+le plancher de purge n'avait, lui, AUCUNE cle de groupe -- il supprimait
+donc dans TOUS les groupes a la fois -- et il etait atteignable SANS AUCUNE
+PREUVE d'appartenance a un groupe existant, parce qu'un secret de groupe
+valide pour un groupe JAMAIS VU est accepte par construction (le modele
+TOFU du broker autorise une action DANS un groupe, il n'atteste jamais que
+ce groupe EXISTE). Les deux instructions portent maintenant l'identifiant
+de groupe dans leur clause de restriction, et la route de purge refuse
+d'agir sur un groupe qui ne s'est jamais enregistre.
+
+**La regle generale qui en decoule**, pour tout futur contributeur : toute
+route qui INSERE une ligne portant un identifiant de groupe fourni par
+l'appelant, ou qui SUPPRIME sans identifiant de groupe dans sa clause de
+restriction, doit apporter sa PROPRE preuve que ce groupe existe. Les
+routes anterieures a ce lot sont sures STRUCTURELLEMENT et non par
+vigilance : toutes leurs ecritures sont derriere une lecture deja
+restreinte au groupe, sur des tables qu'un groupe inexistant ne peut pas
+peupler.
+
+**Le delai de peremption des sessions mortes passe de 5 minutes a 24
+heures.** Cinq minutes reapait un Deck simplement ENDORMI (veille,
+suspension) comme s'il etait mort, lui faisant perdre son propre curseur
+et donc son propre non-lu au reveil.
+
+## desktop (experimental) -- le Courrier vit desormais le temps d'une session du Deck, et l'autorisation atteint enfin l'agent
+
+Deux cartes avancees dans un seul commit, parce qu'elles touchent les memes
+fichiers aux memes endroits : `c7df3781` (un bug visible d'autorisation) et
+`1e81ee7b` (volet Deck du meme lot Courrier que l'entree broker ci-dessus).
+Fichiers principaux : `desktop/src/main/index.ts`, `desktop/src/main/ipc.ts`,
+`desktop/src/main/inbox-session.ts` (nouveau), `desktop/src/main/inbox-store.ts`,
+`desktop/src/renderer/src/components/InboxPanel.tsx`,
+`desktop/src/renderer/src/components/approval-verdict.ts` (nouveau).
+
+**Un bug visible corrige : autoriser ou refuser une approbation depuis le
+Courrier n'atteignait pas la tuile de l'agent**, qui continuait d'attendre
+une validation deja donnee du point de vue de l'operateur. Cause reelle :
+le Courrier routait TOUT clic d'option comme du TEXTE LIBRE -- un clic sur
+l'option d'autorisation tapait litteralement le mot "Allow" dans le
+terminal, la ou le menu interactif du CLI attend une simple validation de
+touche. Le bouton de refus dedie etait le seul controle correct de la
+modale. Un module pur (`approval-verdict.ts`) decide desormais du type de
+verdict a partir du GENRE de l'approbation (`permission` contre
+`question`), jamais de l'etiquette de son bouton -- une etiquette en
+anglais n'est pas un identifiant de verdict stable. Les questions posees
+par un agent (`ask_operator`) gardent le comportement texte, qui est
+CORRECT pour elles : leur reponse repart en message vers l'agent et n'est
+jamais tapee dans un terminal ; un correctif uniforme les aurait cassees.
+
+**Le Courrier vit desormais le temps d'une session du Deck.** Un
+identifiant de session est mint EN MEMOIRE au demarrage et jamais persiste
+sur disque -- le persister collisionnerait entre deux fenetres du meme
+compte ouvrant le meme Deck, un cas nominal ici -- et il est REMINT a
+chaque changement de groupe actif, parce que le curseur cote broker ne
+migre jamais son groupe sur un identifiant de session reutilise. La purge
+est cablee sur les TROIS gestes qui remettent le plan de travail a zero :
+nouveau plan de travail, restauration reussie d'un plan de travail, et
+application d'un modele en mode remplacement -- ce troisieme chemin avait
+ete oublie de l'enonce de conception initial et a du etre retrouve
+separement. Le journal local est tronque au MEME instant que la purge
+distante cote broker, y compris quand l'appel broker echoue : sauter l'une
+des deux moities laisse le defaut lisible comme non corrige, soit par des
+entrees mortes qui restent a l'ecran, soit par un broker qui continue de
+grossir pour d'autres Deck ayant deja lu au-dela.
+
+**Une suppression manuelle**, troisieme etat distinct de Fermer (laisse
+l'entree, le non-lu reste non-lu) et d'Acquitter (un simple drapeau d'etat
+local, ne supprime jamais rien) : restreinte aux messages d'un pair
+uniquement -- une question bloquante ne peut pas etre supprimee sous
+l'agent qui l'attend, et cette restriction est garantie par le TYPE des
+entrees plutot que par une garde d'execution.
+
+**Le prix assume, et sa raison** : un message envoye pendant que le Deck
+etait FERME ne sera pas affiche. Ce n'est pas considere comme une perte,
+parce que les agents ne vivent pas en arriere-plan mais AVEC le Deck : si
+le Deck meurt, les sessions meurent avec lui, donc une reponse tardive
+n'aurait de toute facon jamais atteint son emetteur -- et apres redemarrage
+elle aurait meme ete reattribuee au mauvais destinataire, puisque
+l'identifiant de session change a chaque lancement.
+
+**Les gardes ajoutees sont le vrai livrable de ce second volet.** Un test
+scanne le code source de `ipc.ts` pour DECOUVRIR tout gestionnaire qui
+remet le plan de travail a zero et exige qu'il appelle la purge -- le
+domaine est trouve par balayage du fichier reel, jamais liste en dur,
+sans quoi il serait aveugle par construction au prochain chemin de reset
+ajoute. La logique de session et de purge a par ailleurs ete extraite dans
+des modules purs (`inbox-session.ts`) pour devenir testable sous Bun sans
+dependre d'Electron.
+
 ## desktop (experimental) -- le repertoire de lancement du sandbox cesse d'etre partage entre projets
 
 Carte `e35b2791`. Ce lot prolonge celui juste dessous (commit `18aebc4`,

@@ -536,13 +536,23 @@ export const useDeck = create<DeckState>((set, get) => ({
       // survives a Deck restart.
       set({ inboxMessages: [...inboxMessages, ...fresh].slice(-500) })
     })
-    // Hydrate the persisted inbox history (the broker drain is destructive:
-    // this file is the only durable copy across Deck restarts/crashes).
+    // Hydrate the persisted inbox history: the durable copy across Deck
+    // restarts/crashes (Courrier lot 1B -- session_id is minted in-memory and
+    // never survives a restart either, so this journal is load-bearing for a
+    // different reason now; see desktop/src/main/inbox-store.ts).
     void window.api.inboxHistory().then((history) => {
       const { inboxMessages } = get()
       const known = new Set(inboxMessages.map((m) => m.id))
       const merged = [...history.filter((m) => !known.has(m.id)), ...inboxMessages]
       set({ inboxMessages: merged.slice(-500) })
+    })
+    // Courrier lot 1D/1E (card 1e81ee7b): main truncated or removed entries
+    // from the journal (session purge, or a manual inboxDelete) -- the
+    // journal is now the source of truth for what remains, so this is a full
+    // REPLACE, not a merge (unlike the two listeners above, which only ever
+    // ADD).
+    window.api.onInboxCleared(() => {
+      void window.api.inboxHistory().then((history) => set({ inboxMessages: history }))
     })
     // Family 3: the broker's pending blocking questions, pushed as a WHOLE
     // list. Replacing (not merging) is what makes a question answered from
