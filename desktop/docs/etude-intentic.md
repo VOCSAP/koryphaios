@@ -156,6 +156,32 @@ Recette concrète (fichiers de référence chez eux) :
 Coût estimé : une dépendance légère lazy-loadée (`shiki/core` + grammaires à la
 demande), aucun changement d'architecture, aucune entorse à la position lecture seule.
 
+### 2.3 Monaco : validé UNIQUEMENT si l'on ouvre l'édition
+
+Le choix ci-dessus (shiki seul) tient tant que le Deck reste **lecture seule**. Le jour
+où une décision opérateur ouvrirait l'**édition** de fichiers dans le Deck, alors la
+coloration seule ne suffit plus et l'implémentation d'intentic devient la référence à
+suivre — validée, pas juste observée :
+
+- **`monaco-editor-core`, pas `monaco-editor`** : on n'embarque QUE la surface
+  d'édition/diff, zéro service de langage, zéro IntelliSense.
+- **UN seul web worker** (l'editor worker, qui porte l'algo de diff). Pas de workers
+  TS/JSON/CSS/HTML — c'est ce qui garde les Mo de services de langage hors du bundle.
+- **La coloration reste Shiki**, injectée dans Monaco via `@shikijs/monaco` : le même
+  highlighter singleton sert le viewer lecture seule, l'éditeur et les diffs → rien ne
+  peut diverger. Autrement dit, l'étape 2.2 n'est pas jetée si on passe à l'édition,
+  elle est réutilisée.
+- **Diff plein écran = `createDiffEditor` de Monaco** ; mais les diffs inline légers
+  (cartes de chat) restent un diff maison borné — Monaco par carte est trop lourd.
+- **Import dynamique de Monaco au premier fichier code ouvert** (mémoïsé) : les vues
+  image/pdf/binaire ne le tirent jamais dans le bundle.
+- Override sécurité à ne pas oublier : `monaco-editor-core>dompurify` forcé à une
+  version corrigée (c'est le sanitizer que l'éditeur passe sur le markdown rendu).
+
+Tant que l'édition n'est pas décidée, ce paragraphe reste **conditionnel** : on ne tire
+pas Monaco pour de la lecture seule. La carte de backlog correspondante (voir
+`backlog-intentic.md`) porte cette condition explicitement.
+
 ---
 
 ## 3. Autres features observées, candidates à adaptation
