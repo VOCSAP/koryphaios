@@ -1,90 +1,90 @@
-// Card 526665f7. Bun runs every test file in ONE process. A file that calls
-// `GlobalRegistrator.register()` therefore hands its happy-dom globals to every
-// file that runs after it, and the one that bites is `fetch`: happy-dom's
-// applies the same-origin policy, Bun's native fetch does not. Every later
-// suite that talks to a server it spawned on 127.0.0.1 is then refused with
-// "Cross-Origin Request Blocked" and times out at 30 s or 60 s.
+// Card 526665f7. Un fichier de test qui appelle `GlobalRegistrator.register()`
+// prend DEUX choses au processus, et doit rendre les deux :
 //
-// This is a COVERAGE guard, not an illustration. It was written after the
-// unpaired shape shipped once and cost three full-suite runs to attribute: the
-// suite went from 1 fail / 166 s to 19 fail / 11 errors / 961 s, 20404 CORS
-// lines, and NOT ONE of the extra red was in a file the batch had touched --
-// which is precisely why it read as environmental for three runs and was
-// blamed on live MCP servers. The pair
-// tests/desktop-explorer-selection-dom.test.ts + tests/server-ask-operator.test.ts
-// reproduces it alone: 5 fail / 4 errors / 7109 CORS lines / 300 s unpaired,
-// against 10 pass / 0 CORS / 3.6 s paired.
+//  1. les GLOBALS. bun execute tous les fichiers de test dans un seul
+//     processus, donc `globalThis.fetch` reste celui de happy-dom pour tous
+//     les fichiers suivants. Ce fetch la applique la politique de meme
+//     origine, celui de bun ne l'applique pas : chaque suite ulterieure qui
+//     parle a un serveur qu'elle vient de lancer sur 127.0.0.1 est refusee en
+//     "Cross-Origin Request Blocked" puis expire a 30 ou 60 s. Mesure : la
+//     suite complete passait de 1 echec en 166 s a 19 echecs, 11 erreurs et
+//     961 s, avec 20 404 lignes de refus, sans qu'AUCUN des echecs
+//     supplementaires ne soit dans un fichier du lot fautif.
 //
-// Discovery walks the tree instead of naming files, because the failure this
-// guards against arrives with a file that does not exist yet. The two floor
-// assertions below exist because a walk that silently returns nothing is the
-// way this class of guard fails OPEN: it would stay green over an empty set.
+//  2. le SLOT. Le registrator garde un drapeau interne : tant qu'il est a
+//     true, tout autre `register()` leve "Happy DOM has already been globally
+//     registered". Restaurer les globals a la main ne rend PAS le slot, et
+//     c'est pourquoi la restauration de descripteurs n'est pas acceptee ici
+//     comme teardown. Mesure : `tests/desktop-tile-area.test.ts` restaurait
+//     ses globals sans rendre le slot, ce qui etait invisible tant que l'ordre
+//     etait alphabetique et le faisait passer apres les autres. La CI ne trie
+//     pas les fichiers de la meme facon (ordre releve : desktop-journal,
+//     desktop-tile-area, desktop-graph-adapters, desktop-digest), tile-area y
+//     passait donc en deuxieme et faisait echouer AU CHARGEMENT les deux
+//     autres fichiers qui montent un DOM.
+//
+// La lecon de forme, et la raison d'etre de cette garde : L'ORDRE D'EXECUTION
+// DES FICHIERS DE TEST N'EST PAS GARANTI. Toute propriete qui tient parce
+// qu'un fichier passe avant un autre tient par accident.
+//
+// Cette garde parcourt l'arbre au lieu de nommer des fichiers, parce que le
+// prochain fautif n'existe pas encore. Les deux assertions plancher sont la
+// contre la maniere dont ce genre de garde echoue OUVERT : un parcours qui ne
+// trouve plus rien reste vert sur l'ensemble vide.
 import { expect, test } from "bun:test"
 import { readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 
 const TESTS_DIR = import.meta.dir
+const REPO_ROOT = join(TESTS_DIR, "..")
 
-/** This file itself: it quotes both markers in prose and would flag itself. */
+/** Ce fichier : il cite les deux marqueurs et se signalerait lui-meme. */
 const SELF = "desktop-happy-dom-teardown.test.ts"
 
-/**
- * The two shapes that legitimately pair a `register()`.
- *
- * `unregister()` is the registrator's own API and restores on the way out.
- * The descriptor-restore shape (`Object.defineProperty(globalThis`, fed by a
- * snapshot taken before registering) restores DURING the file instead, which
- * tests/desktop-tile-area.test.ts needs because it asserts against Bun-native
- * globals while happy-dom is still mounted for react-dom. Either discharges
- * the obligation; neither is preferred here.
- */
-const TEARDOWN_MARKERS = ["GlobalRegistrator.unregister(", "Object.defineProperty(globalThis"]
+/** Sonde rejouee par le dernier test, dans un processus neuf. */
+const PROBE = "happy-dom-restore-probe.ts"
 
-const testFiles = readdirSync(TESTS_DIR).filter((f) => f.endsWith(".test.ts") && f !== SELF)
+// Tous les `.ts` du repertoire, pas seulement les `.test.ts` : un helper
+// partage qui enregistrerait happy-dom prendrait le slot exactement pareil.
+const sources = readdirSync(TESTS_DIR).filter((f) => f.endsWith(".ts") && f !== SELF)
 
-test("the walk that feeds this guard actually sees the suite", () => {
-  // Floor, not a count: if readdirSync ever returns a subset (renamed dir,
-  // moved file, changed extension), every assertion below passes over nothing.
-  expect(testFiles.length).toBeGreaterThan(100)
+test("le parcours qui alimente cette garde voit reellement la suite", () => {
+  // Plancher et non compte exact : si readdirSync rend un jour un
+  // sous-ensemble (repertoire renomme, extension changee), toutes les
+  // assertions ci-dessous passeraient sur rien.
+  expect(sources.length).toBeGreaterThan(100)
 })
 
-test("every test file that registers happy-dom globally also tears it down", () => {
+test("tout fichier qui enregistre happy-dom rend le slot global", () => {
   const registrants: string[] = []
   const unpaired: string[] = []
 
-  for (const file of testFiles) {
+  for (const file of sources) {
     const source = readFileSync(join(TESTS_DIR, file), "utf8")
     if (!source.includes("GlobalRegistrator.register(")) continue
     registrants.push(file)
-    if (!TEARDOWN_MARKERS.some((marker) => source.includes(marker))) unpaired.push(file)
+    if (!source.includes("GlobalRegistrator.unregister(")) unpaired.push(file)
   }
 
-  // Second floor: the set of registrants must not be empty. An empty set makes
-  // the real assertion below vacuously true, which is the same fail-open shape
-  // the floor above closes one level up.
+  // Second plancher : un ensemble de registrants vide rendrait l'assertion
+  // reelle vraie a vide, meme forme d'echec ouvert que le plancher ci-dessus.
   expect(registrants.length).toBeGreaterThanOrEqual(2)
 
   expect(unpaired).toEqual([])
 })
 
-// The two tests above scan SOURCE TEXT: they see the NAME `unregister(`, never
-// its effect, so they would stay green against a call that is present but inert
-// (unawaited, dead-coded, or a registrator whose restore silently stopped
-// working). This one exercises the real thing on the real globals. It is also
-// why this file may register happy-dom at all: it discharges the very
-// obligation it polices, in the same test, and the walk above skips it by name.
-test("unregister() actually restores the global fetch that register() replaced", async () => {
-  const { GlobalRegistrator } = await import("@happy-dom/global-registrator")
-  const nativeFetch = globalThis.fetch
-  expect(GlobalRegistrator.isRegistered).toBe(false)
-
-  GlobalRegistrator.register()
-  // Load-bearing, not a warm-up: if happy-dom ever stops replacing `fetch`,
-  // the restore assertion below becomes vacuously true and this whole guard
-  // silently stops meaning anything. This line goes red first instead.
-  expect(globalThis.fetch).not.toBe(nativeFetch)
-
-  await GlobalRegistrator.unregister()
-  expect(globalThis.fetch).toBe(nativeFetch)
-  expect(GlobalRegistrator.isRegistered).toBe(false)
+test("register() remplace globalThis.fetch et unregister() le rend", () => {
+  // Les deux tests ci-dessus lisent du TEXTE SOURCE : ils voient le NOM
+  // `unregister(`, jamais son effet, et resteraient verts devant un appel
+  // present mais inerte (non attendu, en code mort, ou dont la restauration a
+  // silencieusement cesse de fonctionner). Celui-ci exerce la vraie chose sur
+  // les vrais globals, dans un processus neuf pour ne dependre d'aucun ordre.
+  const run = Bun.spawnSync(["bun", join(TESTS_DIR, PROBE)], {
+    cwd: REPO_ROOT,
+    stdout: "pipe",
+    stderr: "pipe",
+  })
+  const output = `${run.stdout.toString()}${run.stderr.toString()}`
+  expect(output).toContain("PROBE ok")
+  expect(run.exitCode).toBe(0)
 })

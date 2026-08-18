@@ -143,7 +143,24 @@ for (const [name, nativeDescriptor] of globalsBeforeRegister) {
   }
 }
 
-import { afterEach, beforeEach, expect, mock, test } from "bun:test";
+// La restauration ci-dessus rend les GLOBALS natifs, mais elle ne rend pas le
+// SLOT: le registrator garde son drapeau interne a true, donc tout autre
+// fichier qui appelle register() ensuite leve "Happy DOM has already been
+// globally registered". Ce n'est pas theorique. L'ordre d'execution des
+// fichiers de test n'est PAS garanti: bun 1.3.13 les trie alphabetiquement,
+// la CI sur bun 1.3.14 ne les trie pas (ordre mesure: desktop-journal,
+// desktop-tile-area, desktop-graph-adapters, desktop-digest). Ce fichier
+// passant en deuxieme en CI, il verrouillait desktop-explorer-selection-dom
+// et desktop-happy-dom-teardown, qui echouaient tous deux au chargement alors
+// que la meme commande rendait zero conflit en local. Rendre le slot est donc
+// une obligation de tout enregistrant, distincte de la restauration ci-dessus
+// et non couverte par elle. tests/desktop-happy-dom-teardown.test.ts est la
+// garde qui l'exige de tout fichier futur.
+afterAll(async () => {
+  await GlobalRegistrator.unregister();
+});
+
+import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased, no runtime resolution; sourced via the bridge, not a bare "react-dom/client" import -- the quoted mention here IS caught by the swallow check (scanfile-swallow-ok: prose example), confirming the gate actually looks, not merely asserting it doesn't need to
 
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
