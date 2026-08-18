@@ -69,3 +69,8 @@ WORKFLOW-LOTS-DESIGN.md
 desktop/docs/reference/
 docs/
 docs/exploration/
+
+# Tooling scratch: agent-forge diagnostics and per-session scratchpads.
+# Artifacts of local agent tooling, never part of the product.
+.af-diag/
+.claude/scratch/
