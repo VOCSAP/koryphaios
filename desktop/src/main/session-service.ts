@@ -37,6 +37,7 @@ import {
   type TranscriptEntry
 } from './session-transcript'
 import { clearDeskSessionId, readDeskSessionId } from './desk-session'
+import { ScreenGuard } from './screen-model'
 import { reportError } from './log'
 import { DEFAULT_PALETTE, paletteColor } from '@shared/palette'
 import { reconcileOrder } from '@shared/reorder'
@@ -99,8 +100,15 @@ const PROMPT_INJECT_SETTLE_MS = 400
 /** Rolling cap for the magic-compact output scanner (CT4). */
 const OUTPUT_SCAN_CAP = 65536
 
-/** Outcome of injectCommand, journaled by the caller (CT3). */
-export type DirectiveOutcome = 'written' | 'no-terminal' | 'busy-timeout'
+/**
+ * Outcome of injectCommand, journaled by the caller (CT3). 'refused-modal'
+ * (Vague 10 A2-1, cards 5dbf3255/63ca372f) means the screen-state guard
+ * refused the WHOLE sequence -- neither the pre-paste Escape nor the paste
+ * itself was written -- because the tile looked like a modal dialog where
+ * both gestures are destructive. Mirrored in agent-stop.ts's InjectOutcome;
+ * update both together.
+ */
+export type DirectiveOutcome = 'written' | 'no-terminal' | 'busy-timeout' | 'refused-modal'
 
 /**
  * Sandbox wrapper (PLAN-SANDBOX SBX1), injected by index.ts. `wrap` receives
@@ -138,6 +146,11 @@ export class SessionService extends EventEmitter {
   private quotaDetector = new QuotaDetector()
   private attentionDetector = new AttentionDetector()
   private startupAckDetector = new StartupAckDetector()
+  /**
+   * Screen-state guard for injectCommand (Vague 10 A2-1, screen-model.ts).
+   * Fed and cleared alongside the four detectors above, same convention.
+   */
+  private screenGuard = new ScreenGuard()
   /**
    * Initial prompt awaiting post-spawn keystroke injection (150eb188), keyed
    * by session id. Set only for a fresh spawn with a non-empty def.prompt
@@ -206,6 +219,7 @@ export class SessionService extends EventEmitter {
       this.quotaDetector.feed(e.id, e.data)
       this.attentionDetector.feed(e.id, e.data)
       this.startupAckDetector.feed(e.id, e.data)
+      this.screenGuard.feed(e.id, e.data)
     })
     this.pty.on('exit', ({ id, exitCode }: { id: string; exitCode: number }) => {
       // pty-manager only emits 'exit' for a spontaneous process exit (the user
@@ -219,6 +233,7 @@ export class SessionService extends EventEmitter {
       this.quotaDetector.clear(id)
       this.attentionDetector.clear(id)
       this.startupAckDetector.clear(id)
+      this.screenGuard.clear(id)
       this.pendingPrompt.delete(id)
 
       // A clean exit (/exit -> shell returns 0) auto-closes the tile, the way a
@@ -403,6 +418,7 @@ export class SessionService extends EventEmitter {
     this.quotaDetector.stop()
     this.attentionDetector.stop()
     this.startupAckDetector.stop()
+    this.screenGuard.stop()
     this.pendingPrompt.clear()
     this.pty.killAll()
   }
@@ -496,6 +512,7 @@ export class SessionService extends EventEmitter {
     this.quotaDetector.clear(id)
     this.attentionDetector.clear(id)
     this.startupAckDetector.clear(id)
+    this.screenGuard.clear(id)
     this.pendingPrompt.delete(id)
     this.defs = this.defs.filter((d) => d.id !== id)
     this.runtime.delete(id)
@@ -521,6 +538,7 @@ export class SessionService extends EventEmitter {
     this.quotaDetector.stop()
     this.attentionDetector.stop()
     this.startupAckDetector.stop()
+    this.screenGuard.stop()
     this.pendingPrompt.clear()
     this.defs = []
     this.runtime.clear()
@@ -575,6 +593,7 @@ export class SessionService extends EventEmitter {
     this.quotaDetector.stop()
     this.attentionDetector.stop()
     this.startupAckDetector.stop()
+    this.screenGuard.stop()
     this.pendingPrompt.clear()
     for (const d of this.defs) {
       if (d.sessionId) this.registry.release(d.sessionId)
@@ -730,6 +749,12 @@ export class SessionService extends EventEmitter {
 
   resize(id: string, cols: number, rows: number): void {
     this.pty.resize(id, cols, rows)
+    // Card 63ca372f/120148eb review finding: ScreenGuard's own Screen was
+    // never told about a real resize, so it stayed frozen at makeScreen's
+    // default forever -- a tile taller than that froze classifyInjectGuard
+    // at 'modal' permanently. ScreenGuard.resize rejects NaN/invalid dims
+    // itself (cols/rows are IPC-sourced, see that method's own doc).
+    this.screenGuard.resize(id, cols, rows)
   }
 
   // ----- internals -----
@@ -932,6 +957,7 @@ export class SessionService extends EventEmitter {
     this.quotaDetector.clear(def.id)
     this.attentionDetector.clear(def.id)
     this.startupAckDetector.clear(def.id)
+    this.screenGuard.clear(def.id)
     // sessionId may have just changed (fork-resume) -> persist before/after spawn.
     this.persist()
     // Drop any stale back-channel file from a previous run so discovery cannot
@@ -1043,6 +1069,54 @@ export class SessionService extends EventEmitter {
     const idle = await this.waitIdle(id, idleWaitMs)
     if (!this.pty.isAlive(id)) return 'no-terminal'
     if (!idle) return 'busy-timeout'
+    // Screen-state guard (Vague 10 A2-1, cards 5dbf3255/63ca372f): refuse the
+    // WHOLE sequence -- neither the Escape below nor the paste -- when the
+    // tile looks like a modal dialog. Measured (2026-08-13, see the comment
+    // further down): on the trust/confirm dialog, the bare Escape quits the
+    // CLI outright, and the paste alone silently confirms whatever option is
+    // highlighted. Both gestures destroy; guessing which one is "safer" is
+    // not an option, so this refuses instead (D2, team-lead's brief).
+    //
+    // UNION of two independently-sourced signals, neither trusted alone:
+    //  - screenGuard (screen-model.ts): a GEOMETRIC read of the tile's
+    //    current screen -- does the live cursor sit where the composer's
+    //    content row puts it. MESURE against five real byte fixtures
+    //    (tests/pty-harness/fixtures/), but DEDUIT (not measured) on two
+    //    screens outside that set (the @-mention picker, the tool-permission
+    //    prompt) -- see that function's own doc for what it actually covers.
+    //  - RuntimeState.needsAttention: the text-pattern "needs you" detector
+    //    already shipped and tested in attention.ts (WAITING_PATTERNS +
+    //    detectWaiting, wired via the attentionDetector.on('attention')
+    //    handler below in this constructor, which is what keeps this field
+    //    current). Consulted read-only -- this file does not modify
+    //    attention.ts. Its own doc claims coverage of tool-permission
+    //    prompts, plan approvals and AskUserQuestion menus in addition to
+    //    the trust prompt; that broader claim has not been independently
+    //    re-verified here, which is exactly why it is not trusted alone
+    //    either.
+    // Team-lead's instruction (claude-peers, 2026-08-17): if EITHER signal
+    // says modal, refuse -- only write when BOTH say non-modal. A closing
+    // union can only ever ADD refusals relative to either signal running
+    // alone, never remove one: the two false-positive surfaces are additive,
+    // but there is no way for the union to produce a false NEGATIVE that a
+    // single signal would have caught, since a 'modal' from either side is
+    // final. That is the asymmetry that makes composing two
+    // partially-verified signals safe even though neither is fully proven on
+    // its own: a false refusal costs a directive that waits one more idle
+    // cycle (visible in the journal, replayable); a false pass on either
+    // side alone could cost a killed session or a blind accept.
+    if (this.screenGuard.classify(id) === 'modal') return 'refused-modal'
+    if (this.runtime.get(id)?.needsAttention) return 'refused-modal'
+    // Third refusal signal (card 63ca372f's own contract: idle AND NOT
+    // needsAttention AND NOT rateLimited), closing the gap the other two
+    // never covered. autoResume (this same file) writes a bare Escape then,
+    // 100ms later via its own setTimeout, 'continue' + '\r' on a rateLimited
+    // tile with no coordination with this method -- a directive injected
+    // into that same tile during that window would interleave two
+    // independent writers on one PTY. Refusing here (reusing 'refused-modal':
+    // this is still "do not write into this tile right now", not a new
+    // outcome) closes the window by never starting the second writer.
+    if (this.runtime.get(id)?.rateLimited) return 'refused-modal'
     this.pty.write(id, '\x1b')
     await new Promise((res) => setTimeout(res, DIRECTIVE_SETTLE_MS))
     if (!this.pty.isAlive(id)) return 'no-terminal'
@@ -1069,16 +1143,19 @@ export class SessionService extends EventEmitter {
     // 'written' guarantees that pty.write() returned true and that the bytes
     // sent are the shape the CLI submits AT THE MAIN PROMPT. It does NOT
     // guarantee the terminal accepted them in every UI state. One non-nominal
-    // state was measured (2026-08-13, trust/confirm dialog open -- the cheapest
-    // one reachable without spending an API turn): the paste is SILENTLY
-    // SWALLOWED. Nothing is submitted, and no bracketed-paste marker leaks onto
-    // the screen as literal text, so the failure mode is a lost command, not a
-    // corrupted terminal. Two related facts from the same capture: the CLI
+    // state was measured (2026-08-13, trust/confirm dialog open -- the
+    // cheapest one reachable without spending an API turn) and RE-MEASURED
+    // 2026-08-17 (an earlier version of this paragraph said the paste was
+    // silently swallowed -- WRONG, corrected here): with the bare ESC below
+    // sent first, the CLI quits outright; with the ESC skipped and only the
+    // paste sent, the paste CONFIRMS whichever option the dialog has
+    // highlighted -- not a lost command, a blind accept typed in the
+    // operator's name. Two related facts from the same capture: the CLI
     // turns bracketed paste ON at startup (`CSI ?2004h`) and OFF on exit
-    // (`CSI ?2004l`), and the bare ESC above -- which PREDATES this card --
-    // quits the CLI outright when that dialog is what is on screen. Other
-    // non-nominal states (tool-permission prompt, open selection list) are NOT
-    // measured.
+    // (`CSI ?2004l`). The screen-state guard above this point is what now
+    // stops both branches from reaching this dialog at all; see its own
+    // comment for what it does and does not cover (tool-permission prompt,
+    // open selection list -- DEDUIT, not measured, treated as modal).
     //
     // `waitIdle`'s own idleness signal is currently unreliable
     // (its `thinking` predicate is under separate diagnosis), so a directive
@@ -1108,8 +1185,46 @@ export class SessionService extends EventEmitter {
    * proves insufficient in some state, that is a real observation to make
    * later, with a different remedy -- not a reason to double this write.
    */
-  interrupt(id: string): 'interrupted' | 'no-terminal' {
+  /**
+   * `mode` (card 120148eb): 'pause' routes through the SAME screen-state
+   * refusal injectCommand uses (ScreenGuard.classify()==='modal' OR
+   * needsAttention), because Pause's own contract (this method's doc above,
+   * and the roadmap.stop.pauseHint i18n copy) is explicitly reversible -- a
+   * bare Escape that quits the CLI on a modal-showing tile breaks that
+   * promise silently: the operator believes the session paused, it is dead,
+   * and the roadmap card stays locked to nothing. 'hard' deliberately skips
+   * the gate: its own contract is to end the session by force, right now, so
+   * the same worst case (CLI exit) is in-contract there, not a bug
+   * (team-lead's read on roadmap card 120148eb, confirmed against both
+   * texts before this was written). `mode` has NO default, DELIBERATELY
+   * (team-lead's call, claude-peers 2026-08-18): a default would be a
+   * fail-open -- a future caller added without thinking about it would
+   * silently get the ungated path. That is a convention this signature
+   * expresses, not a guarantee anything currently enforces: nothing stops
+   * a future edit from adding `= 'hard'` back, and a source-scan test built
+   * only to catch that one string is the same weak family the mutation
+   * review (this same card) already flagged elsewhere -- so none exists
+   * here. The asymmetry itself (pause gated, hard not) IS pinned
+   * behaviorally, see the test asserting both directions on a
+   * modal-classified tile.
+   */
+  interrupt(id: string, mode: 'pause' | 'hard'): 'interrupted' | 'no-terminal' | 'refused-modal' {
     if (!this.pty.isAlive(id)) return 'no-terminal'
+    if (mode === 'pause') {
+      if (this.screenGuard.classify(id) === 'modal') return 'refused-modal'
+      if (this.runtime.get(id)?.needsAttention) return 'refused-modal'
+      // Third signal, same as injectCommand's own (mutation review, second
+      // pass on 120148eb): without it, a Pause landing during a quota-resume
+      // window races autoResume's own raw ESC write (this file, autoResume)
+      // -- autoResume writes '\x1b', then 100ms later via its own setTimeout
+      // writes 'continue' + '\r'. A second bare ESC from Pause inside that
+      // window is not just noise: the installed CLI binary contains the
+      // string "esc to close, esc again quits" (measured 2026-08-12, see
+      // this method's own doc above), so a second ESC can KILL the session
+      // -- the exact 120148eb contract violation, reached through the door
+      // this branch itself exists to close.
+      if (this.runtime.get(id)?.rateLimited) return 'refused-modal'
+    }
     this.pty.write(id, '\x1b')
     return 'interrupted'
   }

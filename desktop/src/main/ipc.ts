@@ -23,7 +23,7 @@ import type {
   StopResult
 } from '@shared/types'
 import { inboxEntryKey } from '@shared/types'
-import { broadcastStop, lockTargets, STOP_MODES, stopTouchesLocks } from './agent-stop'
+import { broadcastStop, lockTargets, STOP_MODES, stopTouchesLocks, toInterruptMode } from './agent-stop'
 import type { SandboxService } from './sandbox-service'
 import { buildAuthCommand, SANDBOX_AUTH_PTY_ID, SANDBOX_BUILD_PTY_ID } from './sandbox-command'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
@@ -969,7 +969,7 @@ export function registerIpc({
       stopMode,
       {
         list: () => service.list(),
-        interrupt: (id) => service.interrupt(id),
+        interrupt: (id, mode) => service.interrupt(id, toInterruptMode(mode)),
         injectCommand: (id, command) => service.injectCommand(id, command, STOP_IDLE_WAIT_MS),
         journal: (line) => journal.add('dispatch', line)
       },

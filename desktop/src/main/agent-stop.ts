@@ -24,15 +24,43 @@
 import type { SessionRuntime } from '@shared/types'
 import { resolveDirectiveTargets } from './directive'
 
-/** pause/hard: bare ESC, not idle-gated. soft: idle-gated conversation-turn injection. */
+/**
+ * pause: bare ESC, not idle-gated, but GATED on screen-state (card 120148eb)
+ * -- its own contract is reversible, so it refuses ('refused-modal') rather
+ * than risk quitting the CLI on a modal-showing tile.
+ * hard: bare ESC, not idle-gated, NOT gated -- its contract is to end the
+ * session by force, right now, so the same worst case is in-contract.
+ * soft: idle-gated conversation-turn injection.
+ */
 export type StopMode = 'pause' | 'soft' | 'hard'
 
 export const STOP_MODES: readonly StopMode[] = ['pause', 'soft', 'hard']
 
+/**
+ * Maps a StopMode onto the two-value shape SessionService.interrupt's own
+ * `mode` param takes (card 120148eb, mutation review round 2, D3+D4).
+ *
+ * FAIL-CLOSED, not a deny-list: only the literal 'hard' skips the gate,
+ * everything else -- 'pause', 'soft' (never actually reaches interrupt()
+ * today, see broadcastStop below), and any FUTURE StopMode this union
+ * grows to -- maps to 'pause', i.e. gated. The pre-fix shape at the one
+ * real call site (ipc.ts) was `mode === 'pause' ? 'pause' : 'hard'`: an
+ * allow-list that defaults UNKNOWN input to the ungated path, wrong
+ * polarity per this repo's own convention (unknown must fail closed, not
+ * open). Extracted as a pure, exported function (not inlined at the call
+ * site) specifically so its behavior has a real behavioral pin -- see its
+ * own test, which iterates STOP_MODES rather than hand-copying it, so a
+ * fourth mode added later is covered automatically instead of silently
+ * shrinking this function's proven domain.
+ */
+export function toInterruptMode(mode: StopMode): 'pause' | 'hard' {
+  return mode === 'hard' ? 'hard' : 'pause'
+}
+
 export type InterruptResult = 'interrupted' | 'no-terminal'
 
 /** Mirrors SessionService.injectCommand's DirectiveOutcome (session-service.ts). */
-export type InjectOutcome = 'written' | 'no-terminal' | 'busy-timeout'
+export type InjectOutcome = 'written' | 'no-terminal' | 'busy-timeout' | 'refused-modal'
 
 export interface StopOutcome {
   /** Tile id. Always present -- unlike peerId, which is null until the peer registers. */
@@ -75,7 +103,14 @@ export interface StopDeps {
    * exited tiles the same way executeDirective's live sessions already do.
    */
   list(): SessionRuntime[]
-  interrupt(id: string): InterruptResult
+  /**
+   * `mode` (card 120148eb) so the real implementation (SessionService.interrupt,
+   * session-service.ts) can gate Pause on the same screen-state guard
+   * injectCommand uses while leaving Hard unguarded -- see that method's own
+   * doc for why. broadcastStop below always passes its own `mode` through
+   * verbatim; there is no separate un-gated overload to fall back to.
+   */
+  interrupt(id: string, mode: StopMode): InterruptResult | 'refused-modal'
   injectCommand(id: string, command: string): Promise<InjectOutcome>
   journal(line: string): void
 }
@@ -185,7 +220,7 @@ export async function broadcastStop(
         const result = await deps.injectCommand(t.id, SOFT_STOP_MESSAGE)
         return { id: t.id, peerId: t.peerId, result }
       }
-      const result = deps.interrupt(t.id)
+      const result = deps.interrupt(t.id, mode)
       return { id: t.id, peerId: t.peerId, result }
     })
   )

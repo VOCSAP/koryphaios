@@ -549,8 +549,23 @@ export interface StopOutcome {
    * terminal submitted it, that the agent received it, or that it will act
    * on it (measured false at least once: card 6168b7f4). Soft stop is a
    * request, not a guarantee (only pause/hard are); this value is why.
+   *
+   * 'refused-modal' (Vague 10 A2-1/A2-2 follow-up, cards 5dbf3255/63ca372f;
+   * card 120148eb added the second source below): the tile's own
+   * screen-state guard refused to write anything at all. Reachable in
+   * TWO modes, from two different guards: 'soft' (SessionService.
+   * injectCommand's own guard) and 'pause' (SessionService.interrupt's
+   * own gate on the same union, added by 120148eb -- interrupt() is no
+   * longer unconditional for 'pause'). 'hard' is deliberately left
+   * ungated (interrupt() skips the check for that mode), so 'hard' never
+   * produces this value. Mirrors DirectiveOutcome
+   * (session-service.ts) and InjectOutcome (agent-stop.ts); this is the
+   * THIRD hand-maintained mirror of the same union with no compile-time
+   * link between them -- adding a member here does not fail the other two's
+   * build, which is exactly how this value went missing the first time
+   * (roadmap debt card filed for the duplication itself, not fixed here).
    */
-  result: 'interrupted' | 'written' | 'busy-timeout' | 'no-terminal' | 'error'
+  result: 'interrupted' | 'written' | 'busy-timeout' | 'no-terminal' | 'error' | 'refused-modal'
 }
 
 export interface StopReport {

@@ -74,6 +74,26 @@ function unreachable(r: StopReport): StopOutcome[] {
 }
 
 /**
+ * The screen-state guard (Vague 10 A2-1/A2-2 follow-up, session-service.ts)
+ * refused to write anything at all -- not busy, not unreachable, not a
+ * confirmed write: the tile's screen looked like an open dialog where either
+ * gesture could have quit the session or accepted something in the
+ * operator's name, so nothing was sent. Reachable in TWO modes, from two
+ * different guards: 'soft' (SessionService.injectCommand's own guard) and
+ * 'pause' (SessionService.interrupt's own gate on the same union, card
+ * 120148eb -- interrupt() is no longer unconditional for 'pause'). 'hard'
+ * is deliberately left ungated, so it never lands in this bucket. Its own
+ * bucket on purpose (team-lead, 2026-08-17): folding it into `stragglers`
+ * would claim the agent is "still busy" (false -- it may be sitting idle at
+ * a dialog), and folding it into `unreachable` would claim the tile could
+ * not be reached at all (also false -- the Deck reached it and chose not to
+ * write).
+ */
+function refusedModal(r: StopReport): StopOutcome[] {
+  return r.outcomes.filter((o) => o.result === 'refused-modal')
+}
+
+/**
  * The stragglers an escalation can actually reach. A straggler whose `peerId`
  * is null owns a tile but no peer, so no `peerIds` entry can name it: it is
  * excluded from the subset and reported to the operator rather than silently
@@ -285,11 +305,20 @@ function StopReportModal({
   const written = report ? transmitted(report) : []
   const stuck = report ? stragglers(report) : []
   const lost = report ? unreachable(report) : []
-  /* Escalation targets BOTH unconfirmed transmissions and busy refusals. The
-     asymmetry is deliberate: `busy-timeout` proves nothing was sent, while a
-     write only proves a write -- neither is an observed stop, so both deserve
-     the hard-stop offer. */
-  const escalatable = [...written, ...stuck]
+  const refused = report ? refusedModal(report) : []
+  /* Escalation targets unconfirmed transmissions, busy refusals, AND
+     screen-guard refusals. The asymmetry is deliberate: `busy-timeout`
+     proves nothing was sent, a write only proves a write, and
+     `refused-modal` proves the Deck chose not to touch the tile at all --
+     none of the three is an observed stop, so all three deserve the
+     hard-stop offer. A refused tile in particular has NO other lever: the
+     soft path structurally cannot write into it (that is the whole point of
+     the guard), so hard stop is its only recourse. Hard stop's own
+     interrupt() already sends an unconditional bare Escape to every tile
+     regardless of screen state (session-service.ts, `interrupt()`'s own
+     doc) -- escalating a refused tile exposes it to a risk hard stop
+     already accepts for every OTHER tile, not a new one. */
+  const escalatable = [...written, ...stuck, ...refused]
   const targets = escalable(escalatable)
   const locks = report?.locks ?? {}
   const title = report ? t(`roadmap.stop.report.${report.mode}`) : t('roadmap.stop.report.failed')
@@ -317,6 +346,9 @@ function StopReportModal({
               )}
               {stuck.length > 0 && (
                 <li className="rm-stop-stuck">{t('roadmap.stop.notTook', { count: stuck.length })}</li>
+              )}
+              {refused.length > 0 && (
+                <li className="rm-stop-stuck">{t('roadmap.stop.refused', { count: refused.length })}</li>
               )}
               {lost.length > 0 && (
                 <li className="rm-stop-lost">{t('roadmap.stop.unreachable', { count: lost.length })}</li>
@@ -372,6 +404,27 @@ function StopReportModal({
               </div>
             )}
 
+            {/* Own box, own honest label (team-lead, 2026-08-17): a screen-guard
+                refusal is neither a straggler ("still busy" would be false --
+                the tile may be sitting idle at a dialog) nor written-unconfirmed
+                (nothing was sent at all). Reuses the stragglers box archetype
+                (amber, same shape) rather than inventing new CSS -- the copy
+                below is what carries the actual distinction. */}
+            {refused.length > 0 && (
+              <div className="rm-stop-stragglers">
+                <h3>{t('roadmap.stop.refusedTitle')}</h3>
+                <ul>
+                  {refused.map((o) => (
+                    <li key={o.id}>
+                      <span className="rm-stop-peer">{o.peerId ?? t('roadmap.stop.noPeer')}</span>
+                      <span className="rm-stop-tile">{o.id.slice(0, 8)}</span>
+                    </li>
+                  ))}
+                </ul>
+                <p className="rm-stop-note">{t('roadmap.stop.refusedNote')}</p>
+              </div>
+            )}
+
             {/* Requested peer ids that matched NO live tile. Distinct from a
                 straggler, and rendered even when there is none of those: a
                 straggler refused the stop, a missing target was never asked.
@@ -391,13 +444,21 @@ function StopReportModal({
               </div>
             )}
 
-            {/* Escalation copy sits with the BUTTON, not inside one of the two
-                blocks, because it now speaks for both of them. */}
+            {/* Escalation copy sits with the BUTTON, not inside one of the
+                blocks, because it now speaks for all three of them. Priority
+                mirrors the pre-existing written-vs-stuck choice (neither is
+                exhaustively enumerated for every combination, same as
+                before): written wins when present, then a refused-only
+                report gets its own honest hint ("nothing was sent" is a
+                different fact from "still running"), else the generic
+                still-busy hint. */}
             {report.mode !== 'hard' && targets.length > 0 && (
               <p className="rm-stop-note">
                 {written.length > 0
                   ? t('roadmap.stop.escalateUnconfirmed', { count: targets.length })
-                  : t('roadmap.stop.escalateHint', { count: targets.length })}
+                  : refused.length > 0
+                    ? t('roadmap.stop.escalateRefused', { count: targets.length })
+                    : t('roadmap.stop.escalateHint', { count: targets.length })}
               </p>
             )}
             {/* A target with no peer id cannot be named in `peerIds`. Saying so

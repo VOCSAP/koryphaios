@@ -2,13 +2,17 @@
 // no electron/node-pty -- broadcastStop is exercised against a fake StopDeps.
 
 import { test, expect } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   broadcastStop,
   lockTargets,
   SOFT_STOP_MESSAGE,
   STOP_MODES,
   stopTouchesLocks,
+  toInterruptMode,
   type StopDeps,
+  type StopMode,
   type StopOutcome
 } from '../desktop/src/main/agent-stop.ts'
 import type { SessionRuntime } from '../desktop/src/shared/types'
@@ -29,7 +33,11 @@ function fakeDeps(overrides: Partial<StopDeps> = {}): StopDeps {
       tile({ id: 'b', peerId: 'peer-b' }),
       tile({ id: 'c', peerId: null })
     ],
-    interrupt: () => 'interrupted',
+    // (id, mode) typed explicitly, not left to fewer-params bivariance --
+    // card 120148eb made `mode` required on the real StopDeps.interrupt
+    // precisely so a caller can't silently drop it; this fake mirrors that
+    // strictness instead of loosening it to compile.
+    interrupt: (_id: string, _mode) => 'interrupted',
     injectCommand: async () => 'written',
     journal: () => {},
     ...overrides
@@ -38,6 +46,29 @@ function fakeDeps(overrides: Partial<StopDeps> = {}): StopDeps {
 
 test('STOP_MODES is exactly pause/soft/hard', () => {
   expect(STOP_MODES).toEqual(['pause', 'soft', 'hard'])
+})
+
+// ----- toInterruptMode (card 120148eb, mutation review D3+D4): the ONE
+// production call site (ipc.ts's `interrupt: (id, mode) => service.
+// interrupt(id, toInterruptMode(mode))`) is not exercised by anything in
+// this file (StopDeps.interrupt is a fake here) -- this pins the pure
+// mapping function itself, real behavior, no double, no Electron. Iterates
+// STOP_MODES rather than hand-copying it: a fourth mode added later is
+// covered automatically instead of silently narrowing what this test proves.
+
+test('toInterruptMode maps every current StopMode: only "hard" stays ungated, everything else gates', () => {
+  for (const mode of STOP_MODES) {
+    expect(toInterruptMode(mode)).toBe(mode === 'hard' ? 'hard' : 'pause')
+  }
+})
+
+test('toInterruptMode fails CLOSED on a value outside the StopMode union (a future/unknown mode maps to the GATED path, not the ungated one)', () => {
+  // Simulates a stale renderer build or a fuzzed IPC payload reaching main
+  // with a StopMode this union has not been extended to yet -- the pre-fix
+  // ternary (`mode === 'pause' ? 'pause' : 'hard'`) would default THIS to
+  // 'hard' (ungated, wrong polarity). toInterruptMode must default it to
+  // 'pause' (gated) instead.
+  expect(toInterruptMode('future-mode' as unknown as StopMode)).toBe('pause')
 })
 
 test('SOFT_STOP_MESSAGE is a single line -- injectCommand submits via a separate \\r write, so an embedded newline would submit/truncate early', () => {
@@ -61,6 +92,23 @@ test('pause/hard call interrupt per tile, not injectCommand', async () => {
     { id: 'a', peerId: 'peer-a', result: 'interrupted' },
     { id: 'b', peerId: 'peer-b', result: 'interrupted' },
     { id: 'c', peerId: null, result: 'interrupted' }
+  ])
+})
+
+test("pause and hard each forward their OWN mode to interrupt, not a shared/hardcoded one (card 120148eb: interrupt(id, mode) gates pause only, so a dropped mode would silently leave it ungated)", async () => {
+  const seen: Array<{ id: string; mode: string }> = []
+  const deps = fakeDeps({
+    list: () => [tile({ id: 'a', peerId: 'peer-a' })],
+    interrupt: (id, mode) => {
+      seen.push({ id, mode })
+      return 'interrupted'
+    }
+  })
+  await broadcastStop('pause', deps)
+  await broadcastStop('hard', deps)
+  expect(seen).toEqual([
+    { id: 'a', mode: 'pause' },
+    { id: 'a', mode: 'hard' }
   ])
 })
 
@@ -224,4 +272,66 @@ test('lockTargets ignores tiles never dispatched to -- reading service.list() in
   // all, since it only ever reads `outcomes`.
   const outcomes: StopOutcome[] = [{ id: 'a', peerId: 'peer-a', result: 'interrupted' }]
   expect(lockTargets(outcomes)).toEqual(['peer-a'])
+})
+
+// ----- Third mutation review round: ipc.ts's `agents:stop` handler is the
+// ONE production call site that actually wires StopDeps.interrupt to
+// SessionService.interrupt via toInterruptMode -- nothing pinned it.
+// Reviewer measured: reverting it to the pre-D3/D4 inline ternary
+// (`mode === 'pause' ? 'pause' : 'hard'`) still yields a clean run across
+// the four targeted test files. ipc.ts imports electron/session-service and
+// is not bun-test-importable, so this reuses this morning's D6 technique
+// (extract the real source text, compile it with `new Function`, EXECUTE
+// it) rather than a source-scan -- extraction is intentionally LOOSE (it
+// does not require the literal substring `toInterruptMode(mode)`), so a
+// mutation that removes that call still extracts and RUNS; the behavioral
+// comparison against the REAL `toInterruptMode` (imported, never
+// re-implemented here) is what catches the divergence, specifically on
+// 'soft' -- the one StopMode where the correct function and the old
+// ternary disagree (soft -> 'pause' vs soft -> 'hard').
+
+const IPC_PATH = join(import.meta.dir, '..', 'desktop', 'src', 'main', 'ipc.ts')
+
+/**
+ * Extracts the arrow-function expression assigned to the `interrupt:`
+ * property of the StopDeps object literal built inside the `agents:stop`
+ * IPC handler -- whatever that expression currently is, not anchored to
+ * `toInterruptMode` specifically (a mutation removing that call must still
+ * extract successfully, so the BEHAVIORAL comparison below is what catches
+ * it, not a failed extraction). Throws, naming what it looked for, if the
+ * `interrupt:` property or its followed-by-`injectCommand:` boundary is not
+ * found -- same "refuse to execute on nothing" property as
+ * extractInterruptBody (session-service.ts tests).
+ */
+function extractIpcInterruptAdapter(src: string): string {
+  const m = /interrupt:\s*(\([^)]*\)\s*=>[^\n]+),\s*\n\s*injectCommand:/.exec(src)
+  if (!m) {
+    throw new Error(
+      "ipc.ts: StopDeps.interrupt adapter not found (expected an `interrupt: (...) => ...,` property " +
+        'immediately followed by `injectCommand:` inside the agents:stop handler) -- has it been renamed or restructured?'
+    )
+  }
+  return m[1]
+}
+
+test("ipc.ts's real interrupt adapter forwards service.interrupt(id, toInterruptMode(mode)) for EVERY StopMode -- extracted from the real file and executed, real toInterruptMode injected (not re-implemented)", () => {
+  const adapterText = extractIpcInterruptAdapter(readFileSync(IPC_PATH, 'utf-8'))
+  // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
+  const makeAdapter = new Function('service', 'toInterruptMode', `return ${adapterText}`) as (
+    service: { interrupt: (id: string, mode: string) => string },
+    toInterruptModeFn: (mode: StopMode) => 'pause' | 'hard'
+  ) => (id: string, mode: StopMode) => string
+
+  for (const mode of STOP_MODES) {
+    const calls: Array<{ id: string; mode: string }> = []
+    const stubService = {
+      interrupt: (id: string, m: string) => {
+        calls.push({ id, mode: m })
+        return 'interrupted'
+      }
+    }
+    const adapter = makeAdapter(stubService, toInterruptMode)
+    adapter('tile-a', mode)
+    expect(calls).toEqual([{ id: 'tile-a', mode: toInterruptMode(mode) }])
+  }
 })
