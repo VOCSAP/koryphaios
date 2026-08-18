@@ -23,7 +23,7 @@
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -46,7 +46,6 @@ const INDEX =
 // index.ts is CRLF on disk; normalise line endings only (no other rewriting)
 // so a \n-based indexOf finds the anchors and the slice stays stable.
 const SRC = readFileSync(INDEX, "utf8").replace(/\r\n/g, "\n");
-const SCRATCH = mkdtempSync(join(tmpdir(), "kory-slice-"));
 
 /**
  * Cut one top-level statement out of index.ts, from `anchor` to the first
@@ -69,9 +68,32 @@ function slice(anchor: string, terminators: string[], label: string): string {
   );
   return body;
 }
-
+// Un repertoire NEUF par tranche, et son chemin canonicalise. Les deux moities
+// repondent au meme echec de CI, rouge sur le seul job macos-latest depuis le
+// 2026-08-13 (carte c1849cf9) :
+//
+//   error: Cannot find module '/private/var/folders/.../kory-slice-XXXXXX/
+//                              listener-b6342d05.ts' from ''
+//
+// Le fait discriminant est que le PREMIER import de tranche REUSSIT et que
+// seul le SECOND echoue. Si la cause etait la seule canonicalisation macOS de
+// /var vers /private/var, le premier echouerait aussi ; le /private/var du
+// message est donc la forme sous laquelle bun rapporte, pas la cause. Reste
+// que le second fichier est ecrit APRES que le premier import a fait lister ce
+// repertoire, d'ou un repertoire par tranche : aucun listing n'est reutilise.
+//
+// `realpathSync.native` traite l'autre moitie, celle que CLAUDE.md nomme
+// (« Comparing two paths? Canonicalize both ») : sur macOS `tmpdir()` rend
+// /var/folders/... quand tout outil externe repond /private/var/folders/...,
+// et sur Windows un nom court 8.3. Le chemin ecrit et le chemin resolu sont
+// alors le meme.
+//
+// Aucune des deux moities n'est verifiable ailleurs que sur le runner macOS :
+// ni Linux ni Windows ne symlinkent leur repertoire temporaire, ce qui est
+// exactement la remarque « Cross-platform tests » de TESTING.md.
 async function evaluate<T>(wrapper: string, name: string): Promise<(env: Record<string, unknown>) => T> {
-  const file = join(SCRATCH, `${name}-${createHash("sha256").update(wrapper).digest("hex").slice(0, 8)}.ts`);
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "kory-slice-")));
+  const file = join(dir, `${name}-${createHash("sha256").update(wrapper).digest("hex").slice(0, 8)}.ts`);
   writeFileSync(file, wrapper);
   const mod = (await import(pathToFileURL(file).href)) as { register: (env: Record<string, unknown>) => T };
   return mod.register;
