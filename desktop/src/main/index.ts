@@ -392,7 +392,8 @@ const approvals = new ApprovalRuntime({
   cipher: secretCipher,
   endpoint: () => resolveBrokerEndpoint(),
   sessionRef: `window-${activeScope.groupId.slice(0, 12)}`,
-  host: hostname()
+  host: hostname(),
+  projectKey: () => computeDeckProjectKey(cliContext.projectDir)
 })
 
 // Card 39c40571 layer 2: a roadmap write authored by 'deck' speaks as the

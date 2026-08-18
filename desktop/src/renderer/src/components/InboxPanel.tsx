@@ -6,6 +6,7 @@ import { inboxEntryKey } from '@shared/types'
 import type { AckableInboxEntry, InboxEntry } from '@shared/types'
 import { COMPANION_MANIFEST, REMOTE_BLOCKED_CHANNELS } from '@shared/companion'
 import { verdictAnswerKindFor } from './approval-verdict'
+import { resolveApprovalSender } from '../inbox-sender'
 
 /**
  * Operator Courrier (PLAN C12, refonte card 8fdac3dd): the entries addressed
@@ -75,6 +76,7 @@ export function InboxPanel(): React.JSX.Element {
   const t = useT()
   const messages = useDeck((s) => s.inboxMessages)
   const approvals = useDeck((s) => s.pendingApprovals)
+  const sessions = useDeck((s) => s.sessions)
   const ackState = useDeck((s) => s.inboxAckState)
   const replyDrafts = useDeck((s) => s.inboxReplyDrafts)
   const drafts = useDeck((s) => s.graphDrafts)
@@ -125,9 +127,23 @@ export function InboxPanel(): React.JSX.Element {
     setOpenKey(reactKey(e))
   }
 
-  const senderOf = (e: InboxEntry): string => {
+  const senderOf = (e: InboxEntry): React.ReactNode => {
     if (e.kind === 'message') return e.message.from
-    if (e.kind === 'approval') return e.approval.origin.from_peer || '?'
+    if (e.kind === 'approval') {
+      // ALL resolution logic (re-validation against live tiles, sanitizing
+      // the unresolved fallback) lives in inbox-sender.ts, on purpose: this
+      // must be the only place that decides what counts as a resolved
+      // sender, so no inline branch here can quietly skip it (card 55c5470e).
+      const res = resolveApprovalSender(e.approval.origin.tile_ref, sessions)
+      if (res.resolved) return res.name
+      return res.raw ? (
+        <>
+          {t('inbox.senderUnresolved')} <code>{res.raw}</code>
+        </>
+      ) : (
+        t('inbox.senderUnresolvedEmpty')
+      )
+    }
     return t('inbox.familyEvent')
   }
 

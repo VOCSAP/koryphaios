@@ -37,6 +37,16 @@ export interface ApprovalRuntimeOptions {
   /** Stable handle for this window's agents. */
   sessionRef: string
   host: string
+  /**
+   * The WINDOW's project key (computeDeckProjectKey on its cwd) -- unlike
+   * `from_peer`/a tile identity, this is correctly scoped at credential level
+   * (card 55c5470e): one window has one project, so writing it here does not
+   * mint a singleton keyed by too little the way a per-tile field would.
+   * Injected as a function (same shape as `endpoint`) so this module never
+   * needs to shell out to git itself. Optional so existing callers/tests that
+   * predate card 55c5470e keep compiling; arm() falls back to '' when absent.
+   */
+  projectKey?: () => string
 }
 
 export class ApprovalRuntime {
@@ -111,6 +121,29 @@ export class ApprovalRuntime {
         sessionRef: this.opts.sessionRef
       })
 
+      // project_key is a WINDOW property (one window, one project) so it
+      // belongs at credential level. from_peer/a tile identity does NOT: a
+      // window carries N tiles, so writing one here would be a singleton
+      // keyed by too little (card 55c5470e) -- that resolution happens
+      // per-approval, renderer-side, against the live tile that actually
+      // raised it. Resolution failure degrades to an empty string, but the
+      // two causes are NOT symmetric: an absent projectKey() (existing
+      // callers/tests) short-circuits to '' silently, no trace -- that is
+      // benign, nothing went wrong. A SUPPLIED projectKey() that throws also
+      // degrades to '', but leaves a trace, because that is abnormal and
+      // worth knowing about. Neither path ever touches the identity repair
+      // above: an absent or failed project_key is benign for the window's
+      // approvals, an unwarranted identity rewrite is not.
+      let projectKey = ''
+      try {
+        projectKey = this.opts.projectKey?.() ?? ''
+      } catch (e) {
+        reportError(
+          'approvals',
+          `arm(): project_key resolution failed, leaving it empty — ${e instanceof Error ? e.message : String(e)}`
+        )
+      }
+
       const path = join(this.opts.stateDir, CRED_FILE)
       writeFileAtomic(
         path,
@@ -123,7 +156,7 @@ export class ApprovalRuntime {
           privateKey: cred.privateKey,
           publicKey: cred.publicKey,
           osUserHash: identity.osUserHash,
-          origin: { host: this.opts.host, os_user_hash: identity.osUserHash }
+          origin: { host: this.opts.host, os_user_hash: identity.osUserHash, project_key: projectKey }
         }),
         { mode: 0o600 }
       )

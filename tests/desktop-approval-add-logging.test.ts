@@ -1,0 +1,177 @@
+// Card 55c5470e: handleApprovalAdd (broker.ts) logged its DUPLICATE-raise
+// branch but never its ordinary, successful, NEW-insert path -- which is
+// exactly what made two reported occurrences of an unattributed blocking
+// question ("Claude is waiting for your input", sender "?") untraceable by
+// timestamp in broker.log. This proves the nominal path now leaves a trace
+// too, and that the duplicate path still logs its own (different) message
+// exactly once, never both.
+//
+// broker.ts cannot be imported directly under bun: it calls Bun.serve(...)
+// unconditionally at module scope (no `import.meta.main` guard), so any file
+// that imports it becomes -- by TESTING.md's own rule (`0. Does your file
+// run there at all?`) -- a daemon-spawning integration suite that belongs in
+// the `broker-*` family EXCLUDED from the cross-platform CI glob. Team-lead
+// ruling 2026-08-17 (card 55c5470e): this fix must stay verifiable under the
+// `desktop-*` prefix, so it must not import broker.ts.
+//
+// Technique: identical to tests/desktop-approval-defer.test.ts's `slice()` --
+// cut the REAL function verbatim out of the CURRENT broker.ts (re-read on
+// every run, not a frozen copy) by anchor + first column-0 terminator, eval
+// it with a handful of fakes for its free variables, and assert on what it
+// actually calls. Anti-drift property (measured, not assumed -- team-lead
+// asked for this explicitly): if broker.ts ever renames/moves this function,
+// `slice()` throws "anchor not found" at test-collection time; if a future
+// edit adds a free variable this env object does not provide, the eval
+// throws a ReferenceError at call time. Either way this test fails LOUDLY
+// rather than silently passing against stale bytes -- it can only stay green
+// while exercising broker.ts's CURRENT handleApprovalAdd, verbatim. The one
+// gap this cannot catch: a behavior change that keeps the same anchor, the
+// same free variables, AND produces the same log calls my assertions check
+// for. That residual is accepted, matching the existing precedent.
+import { test, expect, describe } from "bun:test";
+import { readFileSync } from "node:fs";
+import { writeFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { createHash, randomUUID } from "node:crypto";
+import { validateApprovalDraft } from "../shared/approval.ts";
+
+const BROKER = process.env.KORY_BROKER_TS || join(import.meta.dir, "..", "broker.ts");
+// broker.ts is CRLF on disk (same note as desktop-approval-defer.test.ts);
+// normalise line endings only, so a \n-based indexOf finds the anchors.
+const SRC = readFileSync(BROKER, "utf8").replace(/\r\n/g, "\n");
+const SCRATCH = mkdtempSync(join(tmpdir(), "kory-broker-slice-"));
+
+function slice(anchor: string, terminators: string[], label: string): string {
+  const start = SRC.indexOf(anchor);
+  if (start < 0) throw new Error(`${label}: anchor not found -- broker.ts changed shape`);
+  const ends = terminators
+    .map((t) => ({ t, i: SRC.indexOf(t, start) }))
+    .filter((c) => c.i >= 0)
+    .sort((a, b) => a.i - b.i);
+  if (ends.length === 0) throw new Error(`${label}: no column-0 terminator after the anchor`);
+  const body = SRC.slice(start, ends[0].i + ends[0].t.length - 1);
+  const lineOf = (idx: number) => SRC.slice(0, idx).split("\n").length;
+  console.log(
+    `[${label}] broker.ts lines ${lineOf(start)}..${lineOf(ends[0].i)} ` +
+      `(${body.length} bytes, sha256 ${createHash("sha256").update(body).digest("hex").slice(0, 16)})`,
+  );
+  return body;
+}
+
+async function evaluate<T>(wrapper: string, name: string): Promise<(env: Record<string, unknown>) => T> {
+  const file = join(SCRATCH, `${name}-${createHash("sha256").update(wrapper).digest("hex").slice(0, 8)}.ts`);
+  writeFileSync(file, wrapper);
+  const mod = (await import(pathToFileURL(file).href)) as { register: (env: Record<string, unknown>) => T };
+  return mod.register;
+}
+
+const HANDLE_APPROVAL_ADD = slice("function handleApprovalAdd(", ["\n}\n"], "handleApprovalAdd");
+
+const registerHandleApprovalAdd = await evaluate<{
+  handleApprovalAdd: (body: Record<string, unknown>) => unknown;
+}>(
+  `export function register(env) {
+  const { resolveApprovalAuth, validateApprovalDraft, db, rowToApproval, APPROVAL_MAX_PENDING,
+          resolveReplyRoute, APPROVAL_NOTIF_TTL_HOURS, randomUUID, notifyRegistry, log } = env
+${HANDLE_APPROVAL_ADD}
+  return { handleApprovalAdd }
+}
+`,
+  "handleApprovalAdd",
+);
+
+interface LogCall {
+  level: "info" | "error";
+  message: string;
+}
+
+/** `existingRow` non-null simulates a pending duplicate for the same tile. */
+function makeDb(existingRow: unknown) {
+  const queries: string[] = [];
+  return {
+    query(sql: string) {
+      queries.push(sql);
+      return {
+        get() {
+          if (sql.includes("WHERE operator_id = ? AND tile_ref = ?")) return existingRow;
+          if (sql.includes("SELECT COUNT(*) AS n")) return { n: 0 };
+          return null;
+        },
+      };
+    },
+    run() {
+      /* no-op: the fresh-insert path's INSERT, not under test here */
+    },
+    queries,
+  };
+}
+
+function env(overrides: { existingRow?: unknown } = {}) {
+  const calls: LogCall[] = [];
+  const db = makeDb(overrides.existingRow ?? null);
+  return {
+    env: {
+      resolveApprovalAuth: () => ({ operator_id: "op1", kind: "operator" as const, session_ref: null }),
+      validateApprovalDraft,
+      db,
+      rowToApproval: (row: unknown) => row,
+      APPROVAL_MAX_PENDING: 50,
+      resolveReplyRoute: () => ({ route: "pty" as const, token: "", group: "" }),
+      APPROVAL_NOTIF_TTL_HOURS: 24,
+      randomUUID,
+      notifyRegistry: { fanOut: async () => {} },
+      log: {
+        info: (msg: string) => calls.push({ level: "info", message: msg }),
+        error: (msg: string) => calls.push({ level: "error", message: msg }),
+      },
+    },
+    calls,
+  };
+}
+
+function draftBody(overrides: Record<string, unknown> = {}) {
+  return {
+    kind: "question",
+    title: "t",
+    question: "q",
+    tile_ref: "tile-42",
+    ...overrides,
+  };
+}
+
+describe("handleApprovalAdd (broker.ts, sliced verbatim) -- nominal-path logging", () => {
+  test("RED PROOF -- a fresh, non-duplicate add logs an 'approval: new' line naming kind/id/tile", async () => {
+    const { env: e, calls } = env();
+    const { handleApprovalAdd } = registerHandleApprovalAdd(e);
+    const result = handleApprovalAdd(draftBody()) as { approval: { id: string } };
+
+    const nominal = calls.filter((c) => c.message.startsWith("approval: new "));
+    expect(nominal.length).toBe(1);
+    expect(nominal[0]!.level).toBe("info");
+    expect(nominal[0]!.message).toContain("question");
+    expect(nominal[0]!.message).toContain(result.approval.id);
+    expect(nominal[0]!.message).toContain("tile=tile-42");
+  });
+
+  test("an empty tile_ref renders as 'tile=-', never a blank/undefined-looking segment", async () => {
+    const { env: e, calls } = env();
+    const { handleApprovalAdd } = registerHandleApprovalAdd(e);
+    handleApprovalAdd(draftBody({ tile_ref: "" }));
+
+    const nominal = calls.find((c) => c.message.startsWith("approval: new "));
+    expect(nominal?.message).toContain("tile=-");
+  });
+
+  test("a duplicate raise logs ONLY its own message, never the nominal 'approval: new' one", async () => {
+    const { env: e, calls } = env({ existingRow: { id: "existing-id" } });
+    const { handleApprovalAdd } = registerHandleApprovalAdd(e);
+    const result = handleApprovalAdd(draftBody()) as { approval: unknown };
+
+    expect(result.approval).toEqual({ id: "existing-id" });
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.message).toContain("duplicate raise");
+    expect(calls.some((c) => c.message.startsWith("approval: new "))).toBe(false);
+  });
+});

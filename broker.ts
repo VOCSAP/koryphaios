@@ -4501,6 +4501,12 @@ function handleApprovalAdd(
       approval.notif_expires_at,
     ]
   );
+  // The duplicate-raise branch above already logs its own reuse; this is the
+  // nominal path's own line, and its absence was exactly what made two
+  // reported occurrences of an unattributed blocking question untraceable
+  // (card 55c5470e) -- a route that only journals its exceptional branch is
+  // blind precisely when someone needs to find an ordinary one by timestamp.
+  log.info(`approval: new ${approval.kind} raised (${approval.id}) tile=${approval.origin.tile_ref || "-"}`);
   // Ring the operator's channels. Fire-and-forget: the approval is already
   // durable, and a dead transport must never fail the producer's call.
   void notifyRegistry.fanOut(approval).catch((e) => log.error("notify: fan-out failed", e));

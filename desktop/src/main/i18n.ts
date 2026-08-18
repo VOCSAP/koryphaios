@@ -752,6 +752,8 @@ export const EN_DEFAULTS: Record<string, string> = {
   'inbox.state.acked': 'Acknowledged',
   'inbox.noteClose': 'Closing does not acknowledge: the entry stays in the list.',
   'inbox.senderGone': 'This peer no longer exists: the message can be acknowledged, not answered.',
+  'inbox.senderUnresolved': 'Unresolved sender —',
+  'inbox.senderUnresolvedEmpty': 'Unresolved sender',
   'inbox.verdictRemoteBlocked':
     'Answering a blocking question requires the desktop app: a remote companion cannot render the human verdict an agent is waiting for.',
   'inbox.noteBlocking':
@@ -915,6 +917,12 @@ export const EN_DEFAULTS: Record<string, string> = {
     'Transmitted is not stopped: the Deck wrote the message into their terminal, nothing came back. A soft stop is a request, not a guarantee — check the tile, or escalate.',
   'roadmap.stop.escalateUnconfirmed':
     'None of these {count} agent(s) is a confirmed stop: transmitted without an answer, or still busy. Escalate to a hard stop to get their cards back.',
+  'roadmap.stop.refused': '{count} agent(s) refused: their screen looked like an open dialog, nothing was sent',
+  'roadmap.stop.refusedTitle': 'Refused: dialog looked open',
+  'roadmap.stop.refusedNote':
+    'The Deck would not type into these tiles: their screen looked like an open dialog (a trust or confirm prompt), where either keystroke could have quit the session or accepted something in your name. Nothing was sent -- escalate to a hard stop if you need this tile back.',
+  'roadmap.stop.escalateRefused':
+    'None of these {count} agent(s) took the stop: their screen looked like an open dialog, so nothing was sent. Escalate to a hard stop to get their cards back.',
   'toast.assignSent': 'Item sent to the agent (moved to in progress)',
   'toast.assignFailed': 'Assignment failed (peer unreachable or broker down)',
   'toast.stopSupervisor': 'Stop routed through the supervisor — it will report back to your inbox',
