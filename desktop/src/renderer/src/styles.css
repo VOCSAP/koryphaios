@@ -4359,6 +4359,36 @@ svg.glyph {
   font-weight: 600;
 }
 
+/* ---------- Syntax highlighting (card 526665f7) ---------- */
+
+/* Worn by every READ-ONLY code surface (Files viewer, diff colorizer). Shiki
+   tokenises ONCE and emits both themes at once: the light colour lands inline
+   on the token, the dark one in the --shiki-dark custom property. The theme
+   toggle is therefore a pure CSS flip: no second highlighter, no re-tokenise,
+   no flash. The !important is load-bearing, not sloppiness: an inline style
+   outranks any stylesheet selector, so this is the only way the dark variant
+   can win. `inherit` keeps unstyled tokens (plain text inside a grammar) on
+   the surface's own --fg. */
+.shiki-code {
+  /* Declared, not phantom: Shiki overwrites this per token via an inline
+     style, and this base value is what a span it left unstyled falls back to
+     (the surface's own colour). Without the declaration the token would exist
+     only inside a var() fallback, which is how --mono spread to 16 selectors
+     unnoticed -- see tests/desktop-css-tokens.test.ts. */
+  --shiki-dark: inherit;
+}
+
+[data-theme='dark'] .shiki-code span {
+  color: var(--shiki-dark, inherit) !important;
+}
+
+/* Structure over syntax in a diff: the +/- marker and the tinted background
+   keep saying "added/removed" (they are NOT spans, so the rule above leaves
+   them alone), while the code after the marker carries the syntax colours. */
+.diff-text.shiki-code span {
+  background: none;
+}
+
 /* ---------- Activity journal (PLAN C14) ---------- */
 
 .journal-view {

@@ -82,6 +82,33 @@ colour for `--fg` on hover would erase the coding. Classes: `.tile-btn-prompt`,
 `.tile-btn-browser`, `.tile-btn-expand`, `.tile-btn-danger`. Yellow here is
 `--action-prompt`, deliberately NOT `--glow` (which stays the attention halo).
 
+**Syntax colours are OUTSIDE this system** (card `526665f7`). Exactly two
+surfaces wear `.shiki-code`: the Files viewer (`ExplorerView.tsx`) and the diff
+colorizer (`DiffText` in `DiffPanel.tsx`). A THIRD read-only code surface
+exists and is deliberately untouched, the fenced code blocks of a roadmap card
+description (`RoadmapItemModal.tsx`): they stay plain text. On the two coloured
+surfaces, the token colours come from the VS Code `light-plus` / `dark-plus`
+palettes, not from the tokens above. That is deliberate: those colours describe
+a GRAMMAR (keyword, string, comment), not a product meaning, so they never
+carry a Deck semantic and must never be reused as decoration elsewhere. Two
+consequences worth knowing before touching them:
+
+- **The theme switch is a pure CSS flip.** Shiki emits the light colour inline
+  on each token and the dark one in the `--shiki-dark` custom property; the
+  rule `[data-theme='dark'] .shiki-code span` swaps them. Its `!important` is
+  load-bearing, not sloppiness: an inline style outranks every selector, so
+  nothing else can win. Nothing re-tokenises on a theme change.
+- **In a diff, structure and syntax are two independent layers.** The `+`/`-`
+  marker and the tinted background keep saying added/removed (they are not
+  spans, so the flip rule leaves them alone), while the code after the marker
+  carries the syntax colours. A file whose language is unknown keeps the
+  structural layer alone and renders as plain text, never an empty view.
+- **Colour has a main-thread price, and it is capped.** Tokenising is
+  synchronous (~4.2 ms per KB, measured in the renderer), so a big file freezes
+  the whole window. Two caps in `@shared/code-lang` bound it, 64 KB per block
+  and 256 KB per request; above them the surface stays plain text. Never widen
+  a cap to colour one stubborn file.
+
 ## 3. Controls: nothing keeps its native look
 
 **Rule zero for controls: an element that still looks like the OS drew it is a

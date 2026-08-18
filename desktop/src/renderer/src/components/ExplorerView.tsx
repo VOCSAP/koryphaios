@@ -1,15 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ExplorerEntry, ExplorerFile, ExplorerRoot, HelpSelection } from '@shared/types'
 import { selectionLineRange } from '@shared/code-selection'
+import { resolveCodeLang } from '@shared/code-lang'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { GLYPH_ACTIONS } from './icons'
+import { highlightCode, type HlLine } from '../highlight'
+import { HighlightedLines } from './CodeTokens'
 
 // File explorer rail view (PLAN GX6): VS Code-style READ-ONLY browser over
 // the roots the main process allows (project dir, worktrees, live session
 // cwds — re-validated server-side on every call). Left: lazy tree; right:
-// plain-text viewer with a line-number gutter (v1 has no syntax highlighting
-// by operator decision — v2 notes shiki/highlight.js, see PLAN phase D).
+// viewer with a line-number gutter, syntax-coloured through Shiki when the
+// file's language is known (card 526665f7) and plain text otherwise — an
+// unmapped language, an oversized file or a grammar that fails to load all
+// land on the same plain-text fallback, never on an empty viewer.
 
 /** Rendering cap: a huge file must not freeze the renderer. */
 const MAX_RENDER_LINES = 5000
@@ -36,6 +41,8 @@ export function ExplorerView(): React.JSX.Element {
   const [reloadNonce, setReloadNonce] = useState(0)
   /** Active text selection inside the viewer (PLAN GX7), lines 1-based. */
   const [selection, setSelection] = useState<HelpSelection | null>(null)
+  /** Shiki tokens of the rendered slice, `null` while plain text is shown. */
+  const [hl, setHl] = useState<HlLine[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const contentRef = useRef<HTMLPreElement>(null)
 
@@ -103,6 +110,37 @@ export function ExplorerView(): React.JSX.Element {
       stale = true
     }
   }, [root, file, reloadNonce])
+
+  // Syntax colouring (card 526665f7). Only the GRAMMAR LOAD is async here: the
+  // tokenising itself is SYNCHRONOUS and freezes the whole window, tiles and
+  // terminals included, for ~4.2 ms per KB (measured in the renderer). This
+  // effect is off React's render path, which is NOT the same as off the thread.
+  // What actually bounds the freeze is the per-block cap in `planHighlight`,
+  // and this viewer always submits the file as ONE block, so that cap is its
+  // only protection: above it the file stays plain text on purpose.
+  // A stale flag drops the result when the operator has already clicked another
+  // file. Anything that does not produce a token grid for EVERY rendered line
+  // leaves `hl` null and the plain-text branch below draws the file, unchanged.
+  useEffect(() => {
+    setHl(null)
+    if (!file || !fileData || fileData.binary) return
+    const rows = fileData.content.split('\n').slice(0, MAX_RENDER_LINES)
+    const lang = resolveCodeLang(file, rows[0])
+    if (!lang) return
+    let stale = false
+    void highlightCode(rows.join('\n'), lang)
+      .then((lines) => {
+        if (!stale && lines && lines.length === rows.length) setHl(lines)
+      })
+      .catch((e: unknown) => {
+        // Never a silent rejection: the viewer keeps its plain text, but the
+        // reason lands in the layer's log sink.
+        window.api.reportError('explorer', `syntax highlighting failed: ${String(e)}`)
+      })
+    return () => {
+      stale = true
+    }
+  }, [file, fileData])
 
   const toggleDir = (rel: string): void => {
     setExpanded((prev) => {
@@ -320,8 +358,12 @@ export function ExplorerView(): React.JSX.Element {
                       <div key={i}>{i + 1}</div>
                     ))}
                   </div>
-                  <pre className="explorer-content" ref={contentRef}>
-                    {shown.join('\n')}
+                  {/* The newlines stay REAL text nodes between the token
+                      spans: `captureSelection` derives its line numbers from
+                      the range text, and block elements per line would make
+                      `Range.toString()` drop every line break. */}
+                  <pre className="explorer-content shiki-code" ref={contentRef}>
+                    {hl ? <HighlightedLines lines={hl} /> : shown.join('\n')}
                   </pre>
                 </div>
               )}
