@@ -167,6 +167,20 @@ const FIXTURE_OPERATOR = generateCredential();
  */
 export const FIXTURE_OPERATOR_ID = deriveOperatorId(FIXTURE_OPERATOR.publicKey);
 
+/**
+ * Body fragment for a `/approval/list` request (card 4df14b5b: project_key
+ * is now mandatory broker-side, or the request is refused with a 400).
+ * Centralised so a future mandatory field on this endpoint is one edit
+ * across five test files, not sixteen hand-copied call sites (the exact
+ * debt card 230ffb02 already documents on this repo).
+ */
+export function approvalListBody(
+  projectKey: string,
+  extra: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return { project_key: projectKey, ...extra };
+}
+
 export function deckAuthored(payload: Record<string, unknown>): Record<string, unknown> {
   const body = { ...payload, by: "deck", public_key: FIXTURE_OPERATOR.publicKey };
   return {

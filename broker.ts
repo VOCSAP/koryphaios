@@ -4651,10 +4651,19 @@ function handleApprovalList(
 
   const clauses = ["operator_id = ?"];
   const params: unknown[] = [auth.operator_id];
-  if (typeof body.project_key === "string" && body.project_key) {
-    clauses.push("project_key = ?");
-    params.push(body.project_key);
+  // project_key is MANDATORY (card 4df14b5b): two Deck windows on two
+  // different repos share the same operator_id, so operator_id alone lets
+  // one window's blocking questions leak into the other's Courrier. Refusing
+  // loudly here is the fail-CLOSED direction on purpose -- an omitted or
+  // empty project_key used to mean "see everything", which is exactly the
+  // leak. A caller that forgets it now gets an explicit 400 the same day
+  // instead of a silent cross-project union that nobody notices for weeks.
+  if (typeof body.project_key !== "string" || !body.project_key) {
+    log.warn(`approval/list refused: missing project_key (operator ${auth.operator_id})`);
+    return { error: "project_key is required", status: 400 };
   }
+  clauses.push("project_key = ?");
+  params.push(body.project_key);
   if (typeof body.status === "string" && body.status) {
     clauses.push("status = ?");
     params.push(body.status);

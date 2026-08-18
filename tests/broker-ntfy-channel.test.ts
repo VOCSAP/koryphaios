@@ -7,7 +7,7 @@
 // back the QR payload — without ever leaving 127.0.0.1.
 
 import { afterAll, describe, expect, test } from "bun:test";
-import { post, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
+import { post, startBroker, stopBroker, approvalListBody, type TestBroker } from "./_helper.ts";
 import {
   buildAuthProof,
   deriveOperatorId,
@@ -538,13 +538,23 @@ describe("ntfy enrolment", () => {
     await ntfy.publishRaw(payload.topic_replies, encodeAnswer(approvalId, "allow"));
 
     const settled = await until(async () => {
-      const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", {}, op);
+      const list = await signedPost<{ approvals: Approval[] }>(
+        b,
+        "/approval/list",
+        approvalListBody("github.com/vocsap/koryphaios"),
+        op
+      );
       const found = list.body.approvals.find((a) => a.id === approvalId);
       return found?.status === "answered";
     });
     expect(settled).toBe(true);
 
-    const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", {}, op);
+    const list = await signedPost<{ approvals: Approval[] }>(
+      b,
+      "/approval/list",
+      approvalListBody("github.com/vocsap/koryphaios"),
+      op
+    );
     const found = list.body.approvals.find((a) => a.id === approvalId)!;
     expect(found.answered_via).toBe("ntfy");
     expect(found.answer_kind).toBe("allow");
@@ -606,7 +616,7 @@ describe("ntfy enrolment", () => {
     expect(told).toBe(true);
 
     // The verdict did NOT flip: arbitration stayed in the broker.
-    const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", {}, op);
+    const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody("p"), op);
     const found = list.body.approvals.find((a) => a.id === id)!;
     expect(found.answered_via).toBe("deck");
     expect(found.answer_kind).toBe("deny");
@@ -655,7 +665,7 @@ describe("ntfy enrolment", () => {
     await ntfy.publishRaw(payload.topic_replies, encodeAnswer(foreignId, "allow"));
     await Bun.sleep(400);
 
-    const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", {}, theirs);
+    const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody("p"), theirs);
     expect(list.body.approvals.find((a) => a.id === foreignId)!.status).toBe("pending");
 
     // The fan-out is bounded by operator_id, so their question was never even
@@ -755,7 +765,7 @@ describe("ntfy enrolment", () => {
     await ntfy.publishRaw(a.topic_replies, encodeAnswer(id, "allow"));
     expect(
       await until(async () => {
-        const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", {}, alice);
+        const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody("p"), alice);
         return list.body.approvals.find((x) => x.id === id)?.status === "answered";
       })
     ).toBe(true);

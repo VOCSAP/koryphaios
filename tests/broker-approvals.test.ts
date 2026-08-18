@@ -1,6 +1,6 @@
 import { test, expect, describe, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, approvalListBody, type TestBroker } from "./_helper.ts";
 import {
   buildAuthProof,
   deriveOperatorId,
@@ -47,6 +47,9 @@ async function signedPost<T>(
   return post<T>(`${b.url}${path}`, { ...body, auth });
 }
 
+/** Matches addApproval's default origin.project_key below (card 4df14b5b). */
+const DEFAULT_PROJECT_KEY = "github.com/vocsap/koryphaios";
+
 async function addApproval(
   b: TestBroker,
   op: { cred: ApprovalCredential; id: string },
@@ -60,7 +63,7 @@ async function addApproval(
       title: "Run tests",
       question: "Allow `npm test`?",
       options: ["Yes", "No"],
-      origin: { host: "bureau", project_key: "github.com/vocsap/koryphaios" },
+      origin: { host: "bureau", project_key: DEFAULT_PROJECT_KEY },
       ...overrides,
     },
     { cred: op.cred, operator_id: op.id }
@@ -219,7 +222,7 @@ describe("long poll (/approval/wait)", () => {
     const list = await signedPost<{ approvals: Approval[] }>(
       b,
       "/approval/list",
-      {},
+      approvalListBody(DEFAULT_PROJECT_KEY),
       { cred: op.cred, operator_id: op.id }
     );
     expect(list.body.approvals[0]?.status).toBe("pending");
@@ -252,7 +255,7 @@ describe("operator compartmentalisation", () => {
     const list = await signedPost<{ approvals: Approval[] }>(
       b,
       "/approval/list",
-      {},
+      approvalListBody(DEFAULT_PROJECT_KEY),
       { cred: other.cred, operator_id: other.id }
     );
     expect(list.status).toBe(200);
@@ -286,13 +289,76 @@ describe("operator compartmentalisation", () => {
     const list = await signedPost<{ approvals: Approval[] }>(
       b,
       "/approval/list",
-      {},
+      approvalListBody("p"),
       { cred: op.cred, operator_id: op.id }
     );
     expect(list.body.approvals).toHaveLength(2);
     expect(new Set(list.body.approvals.map((a) => a.origin.host))).toEqual(
       new Set(["bureau", "portable"])
     );
+  });
+});
+
+// Card 4df14b5b: two Deck windows on two different repos were sharing the
+// same operator_id and therefore the same Courrier, because project_key was
+// write-only -- accepted on /approval/add, never demanded by /approval/list.
+describe("project scoping (card 4df14b5b)", () => {
+  // NOT a red-then-green proof of this card's fix by itself: the broker
+  // already filtered correctly on project_key WHEN a caller supplied one --
+  // that half of handleApprovalList predates this card and was never broken.
+  // Kept as a regression guard for the mechanism the fix now depends on
+  // (fetchPendingApprovals/fetchUndeliveredVerdicts always supplying it).
+  test("two project_keys under the SAME operator do not see each other's approvals", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const a = await addApproval(b, op, { origin: { host: "bureau", project_key: "repo-a" } });
+    const c = await addApproval(b, op, { origin: { host: "bureau", project_key: "repo-b" } });
+
+    const listA = await signedPost<{ approvals: Approval[] }>(
+      b,
+      "/approval/list",
+      approvalListBody("repo-a"),
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(listA.body.approvals.map((x) => x.id)).toEqual([a.id]);
+
+    const listB = await signedPost<{ approvals: Approval[] }>(
+      b,
+      "/approval/list",
+      approvalListBody("repo-b"),
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(listB.body.approvals.map((x) => x.id)).toEqual([c.id]);
+  });
+
+  // THIS is the red-then-green proof of the fix. Before this card, a request
+  // with no project_key (exactly what fetchPendingApprovals used to send)
+  // returned 200 with BOTH approvals below -- the leak the card exists to
+  // close. Measured red on the pre-fix broker.ts (git stash push -- broker.ts):
+  // `missing.status` was 200 and `missing.body.approvals` held both ids.
+  test("a request without project_key is refused, not silently unioned across projects", async () => {
+    const b = await boot();
+    const op = newOperator();
+    await addApproval(b, op, { origin: { host: "bureau", project_key: "repo-a" } });
+    await addApproval(b, op, { origin: { host: "bureau", project_key: "repo-b" } });
+
+    const missing = await signedPost<{ error: string }>(
+      b,
+      "/approval/list",
+      {},
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(missing.status).toBe(400);
+    expect(missing.body.error).toBe("project_key is required");
+
+    const empty = await signedPost<{ error: string }>(
+      b,
+      "/approval/list",
+      { project_key: "" },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(empty.status).toBe(400);
+    expect(empty.body.error).toBe("project_key is required");
   });
 });
 
@@ -493,7 +559,7 @@ describe("notification expiry (C-4: the notif expires, the session does not)", (
     const list = await signedPost<{ approvals: Approval[] }>(
       b,
       "/approval/list",
-      {},
+      approvalListBody(DEFAULT_PROJECT_KEY),
       { cred: op.cred, operator_id: op.id }
     );
     expect(list.body.approvals[0]?.status).toBe("expired_notif");
@@ -538,7 +604,7 @@ describe("delivery bookkeeping", () => {
     const pending = await signedPost<{ approvals: Approval[] }>(
       b,
       "/approval/list",
-      { undelivered_only: true },
+      approvalListBody(DEFAULT_PROJECT_KEY, { undelivered_only: true }),
       signer
     );
     expect(pending.body.approvals).toHaveLength(1);
@@ -554,7 +620,7 @@ describe("delivery bookkeeping", () => {
     const after = await signedPost<{ approvals: Approval[] }>(
       b,
       "/approval/list",
-      { undelivered_only: true },
+      approvalListBody(DEFAULT_PROJECT_KEY, { undelivered_only: true }),
       signer
     );
     expect(after.body.approvals).toHaveLength(0);

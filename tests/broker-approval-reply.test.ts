@@ -4,7 +4,7 @@
 // real WebSocket.
 
 import { test, expect, describe, afterAll } from "bun:test";
-import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, approvalListBody, type TestBroker } from "./_helper.ts";
 import {
   buildAuthProof,
   deriveOperatorId,
@@ -177,7 +177,7 @@ describe("channel return path", () => {
       reply_peer_id: peer.peerId,
       tile_ref: "tile-3",
     });
-    const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", {}, op);
+    const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody("p"), op);
     const wire = JSON.stringify({ approval, list: list.body });
     expect(wire).not.toContain(peer.token);
     expect(wire).not.toContain("reply_token");
@@ -233,7 +233,7 @@ describe("de-duplication", () => {
     const second = await raise(b, op, { tile_ref: "tile-dup", title: "Something else" });
     expect(second.id).toBe(first.id);
 
-    const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", {}, op);
+    const list = await signedPost<{ approvals: Approval[] }>(b, "/approval/list", approvalListBody("p"), op);
     expect(list.body.approvals).toHaveLength(1);
   }, 30_000);
 

@@ -2,7 +2,7 @@ import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, approvalListBody, type TestBroker } from "./_helper.ts";
 import {
   buildAuthProof,
   deriveOperatorId,
@@ -259,7 +259,9 @@ describe("hook subprocess", () => {
     op: { privateKey: string; publicKey: string; id: string }
   ): Promise<Approval | null> {
     for (let i = 0; i < 60; i++) {
-      const body = { public_key: op.publicKey };
+      // "koryphaios" matches the origin.project_key setup() writes into the
+      // session credential the hook raises approvals with (card 4df14b5b).
+      const body = approvalListBody("koryphaios", { public_key: op.publicKey });
       const auth = buildAuthProof(op.privateKey, body, { kind: "operator", operator_id: op.id });
       const res = await post<{ approvals: Approval[] }>(`${b.url}/approval/list`, { ...body, auth });
       const found = res.body.approvals?.[0];
@@ -336,7 +338,7 @@ describe("hook subprocess", () => {
     );
     expect(await proc.exited).toBe(0);
 
-    const body = { public_key: op.publicKey };
+    const body = approvalListBody("koryphaios", { public_key: op.publicKey });
     const auth = buildAuthProof(op.privateKey, body, { kind: "operator", operator_id: op.id });
     const res = await post<{ approvals: Approval[] }>(`${b.url}/approval/list`, { ...body, auth });
     expect(res.body.approvals).toHaveLength(0);

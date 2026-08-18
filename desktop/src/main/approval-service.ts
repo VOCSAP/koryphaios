@@ -26,6 +26,15 @@ import type { BrokerEndpoint } from './broker-client'
 export interface ApprovalDeps {
   endpoint: BrokerEndpoint
   identity: OperatorIdentity
+  /**
+   * The WINDOW's project key (card 4df14b5b). Required, not optional: the
+   * broker's /approval/list now refuses a request that omits it (or sends an
+   * empty string), because operator_id alone does not distinguish two Deck
+   * windows on two different repos -- an absent field here must fail at
+   * COMPILE time, not surface as a silent cross-project leak or a runtime
+   * 400 discovered by an operator instead of a typecheck.
+   */
+  projectKey: string
   fetchImpl?: typeof fetch
 }
 
@@ -193,6 +202,7 @@ export async function disconnectChannel(
 /** Approvals answered elsewhere and not yet applied to their session. */
 export async function fetchUndeliveredVerdicts(deps: ApprovalDeps): Promise<Approval[]> {
   const res = await signedPost<{ approvals: Approval[] }>(deps, '/approval/list', {
+    project_key: deps.projectKey,
     undelivered_only: true
   })
   return res.approvals ?? []
@@ -212,8 +222,14 @@ export async function fetchUndeliveredVerdicts(deps: ApprovalDeps): Promise<Appr
  */
 export async function fetchPendingApprovals(deps: ApprovalDeps): Promise<Approval[]> {
   const [pending, expired] = await Promise.all([
-    signedPost<{ approvals: Approval[] }>(deps, '/approval/list', { status: 'pending' }),
-    signedPost<{ approvals: Approval[] }>(deps, '/approval/list', { status: 'expired_notif' })
+    signedPost<{ approvals: Approval[] }>(deps, '/approval/list', {
+      project_key: deps.projectKey,
+      status: 'pending'
+    }),
+    signedPost<{ approvals: Approval[] }>(deps, '/approval/list', {
+      project_key: deps.projectKey,
+      status: 'expired_notif'
+    })
   ])
   return [...(pending.approvals ?? []), ...(expired.approvals ?? [])].sort((a, b) =>
     b.created_at.localeCompare(a.created_at)

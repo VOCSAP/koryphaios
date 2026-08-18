@@ -6,7 +6,7 @@ import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, approvalListBody, type TestBroker } from "./_helper.ts";
 import {
   buildAuthProof,
   deriveOperatorId,
@@ -14,6 +14,50 @@ import {
   generateCredential,
 } from "../shared/approval.ts";
 import type { Approval } from "../shared/types.ts";
+import { resolveProjectKey } from "../shared/project-key.ts";
+import { computeProjectKey } from "../shared/summarize.ts";
+
+// Card 4df14b5b: /approval/list now requires project_key. boot() spawns
+// `bun server.ts` with no explicit `cwd` (Bun.spawn inherits this test
+// runner's cwd), so the spawned process raises its ask_operator approval
+// with origin.project_key: roadmapProjectKey() resolved from that SAME cwd
+// -- server.ts:920's private roadmapProjectKey() combines resolveProjectKey
+// (shared/project-key.ts) with computeProjectKey (shared/summarize.ts) and a
+// git-root lookup. server.ts has zero exports and runs main() unconditionally
+// at module scope, so it cannot be imported here; this mirrors its inputs
+// instead of guessing a literal. A wrong-but-non-empty literal would be
+// WORSE than an empty one: the broker returns 200 with a silently empty
+// list, indistinguishable from "not raised yet" (measured against this
+// repo's real remote: normalizeRemoteUrl lowercases the host but not the
+// path, so the derived key here is "github.com/VOCSAP/koryphaios" --
+// capital VOCSAP, not the lowercase fixture literal used elsewhere in
+// tests/broker-approvals.test.ts, which is a synthetic value never derived
+// from a real remote). Computed once at module scope, since it shells out to
+// git and cannot change within this test run.
+
+/** Mirrors server.ts's private, unexported getGitRoot() -- same command,
+ * same shape, kept local since server.ts cannot be imported (see above). */
+async function getGitRoot(cwd: string): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(["git", "rev-parse", "--show-toplevel"], {
+      cwd,
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const text = await new Response(proc.stdout).text();
+    const code = await proc.exited;
+    if (code === 0) return text.trim();
+  } catch {
+    // not a git repo
+  }
+  return null;
+}
+
+const SPAWNED_SERVER_PROJECT_KEY = await (async () => {
+  const cwd = process.cwd();
+  const [remote, root] = await Promise.all([computeProjectKey(cwd), getGitRoot(cwd)]);
+  return resolveProjectKey(remote, root, cwd);
+})();
 
 const brokers: TestBroker[] = [];
 const procs: ReturnType<typeof Bun.spawn>[] = [];
@@ -145,7 +189,7 @@ async function boot(withCredential: boolean): Promise<Harness> {
 
 async function firstApproval(h: Harness): Promise<Approval | null> {
   for (let i = 0; i < 80; i++) {
-    const body = { public_key: h.op.publicKey };
+    const body = approvalListBody(SPAWNED_SERVER_PROJECT_KEY, { public_key: h.op.publicKey });
     const auth = buildAuthProof(h.op.privateKey, body, {
       kind: "operator",
       operator_id: h.op.id,

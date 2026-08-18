@@ -61,10 +61,41 @@ export class ApprovalRuntime {
     return this.identity
   }
 
+  /**
+   * Resolve `opts.projectKey()` without ever throwing (card 4df14b5b review):
+   * an absent resolver is benign (existing callers/tests predate project_key
+   * and degrade to '' silently), but a SUPPLIED resolver that throws is
+   * abnormal and must leave a trace, not propagate past whichever unrelated
+   * try/catch happens to be the next one up the stack -- that used to be
+   * `arm()`'s OUTER catch (state-dir/keychain failures), which turned a
+   * project_key resolution failure into arm() itself returning false. The
+   * single accessor is what makes that impossible to reintroduce at either
+   * of its two call sites below (arm() resolves it once and reuses the
+   * result for both the ApprovalDeps literal and origin.project_key; deps()
+   * resolves it separately since it runs at a different time).
+   */
+  private safeProjectKey(): string {
+    try {
+      return this.opts.projectKey?.() ?? ''
+    } catch (e) {
+      reportError(
+        'approvals',
+        `project_key resolution failed, leaving it empty — ${e instanceof Error ? e.message : String(e)}`
+      )
+      return ''
+    }
+  }
+
   /** Dependencies for the operator-signed broker calls. */
   deps(): ApprovalDeps | null {
     if (!this.identity) return null
-    return { endpoint: this.opts.endpoint(), identity: this.identity }
+    // Same resolver as arm()'s origin.project_key below (card 4df14b5b):
+    // ApprovalDeps.projectKey is what fetchPendingApprovals/
+    // fetchUndeliveredVerdicts now send on every /approval/list call, so this
+    // window reads back only the approvals it could have raised. An absent
+    // resolver degrades to '', same as arm() -- the broker is what then
+    // refuses it loudly, not this getter.
+    return { endpoint: this.opts.endpoint(), identity: this.identity, projectKey: this.safeProjectKey() }
   }
 
   /** Env vars merged into every spawned session. Empty when disarmed. */
@@ -115,12 +146,12 @@ export class ApprovalRuntime {
       this.identity = identity
 
       const cred = generateCredential()
-      const deps: ApprovalDeps = { endpoint: this.opts.endpoint(), identity }
-      await mintSessionToken(deps, {
-        sessionPublicKey: cred.publicKey,
-        sessionRef: this.opts.sessionRef
-      })
-
+      // Resolved ONCE and reused below for both the ApprovalDeps literal and
+      // the credential file's origin.project_key -- safeProjectKey() never
+      // throws (card 4df14b5b review): this line runs BEFORE it used to be
+      // guarded, so an unprotected call here would have let a throwing
+      // resolver escape to arm()'s OUTER catch (state-dir/keychain failures)
+      // and turn a project_key failure into arm() itself returning false.
       // project_key is a WINDOW property (one window, one project) so it
       // belongs at credential level. from_peer/a tile identity does NOT: a
       // window carries N tiles, so writing one here would be a singleton
@@ -134,15 +165,14 @@ export class ApprovalRuntime {
       // worth knowing about. Neither path ever touches the identity repair
       // above: an absent or failed project_key is benign for the window's
       // approvals, an unwarranted identity rewrite is not.
-      let projectKey = ''
-      try {
-        projectKey = this.opts.projectKey?.() ?? ''
-      } catch (e) {
-        reportError(
-          'approvals',
-          `arm(): project_key resolution failed, leaving it empty — ${e instanceof Error ? e.message : String(e)}`
-        )
-      }
+      const projectKey = this.safeProjectKey()
+      // mintSessionToken never lists, so this projectKey never reaches the
+      // wire -- required purely to satisfy ApprovalDeps at compile time.
+      const deps: ApprovalDeps = { endpoint: this.opts.endpoint(), identity, projectKey }
+      await mintSessionToken(deps, {
+        sessionPublicKey: cred.publicKey,
+        sessionRef: this.opts.sessionRef
+      })
 
       const path = join(this.opts.stateDir, CRED_FILE)
       writeFileAtomic(
