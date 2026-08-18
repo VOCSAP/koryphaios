@@ -1,5 +1,17 @@
 # Changelog
 
+## desktop -- un test guard sur DOM reel prouve enfin ce que le docstring de l'emetteur du Courrier promettait
+
+Fichiers : `tests/desktop-inbox-sender-dom.test.ts` (nouveau), `desktop/src/renderer/src/inbox-sender.ts`. Carte `5bffb7b9`.
+
+**Le contrat de rendu de l'emetteur d'une question du Courrier n'etait garde que par un balayage de source, et ce balayage ne mordait pas.** `tests/desktop-inbox-sender.test.ts` verifiait que `InboxPanel.tsx` mentionne bien `resolveApprovalSender()` dans son texte source ; il ne verifiait jamais que ce que cette fonction renvoie finit reellement dans le DOM affiche. La mutation temoin le prouve : inserer `return res.raw || '?'` en premiere ligne du bloc `if (e.kind === 'approval')` de `senderOf()` rend tout le JSX en-dessous inatteignable, et la suite reste 12 reussites sur 12, zero echec.
+
+**Le nouveau test monte le vrai composant et lit le DOM reel**, sur les trois formes que `senderOf()` peut produire pour un emetteur d'approbation : resolu (le nom seul, sans `<code>`), non resolu avec une valeur brute non vide (texte de repli plus la valeur brute dans un vrai element `<code>`), et non resolu avec une valeur vide (texte de repli seul, sans `<code>`). Mesure rouge sous deux mutations independantes avant d'etre livre vert.
+
+**Le docstring de `resolveApprovalSender()` pointe desormais ce qui applique et ce qui garde son contrat**, au lieu d'affirmer une garantie sans dire ou elle est tenue : il nomme `senderOf()` dans `InboxPanel.tsx` comme seul point qui transforme l'union renvoyee en DOM, et ce nouveau test comme sa garde.
+
+**Deux formes restent non couvertes, a dessein plutot que par oubli.** Le titre de la modale de reponse rend le meme emetteur par la meme fonction, donc seul un refactor qui les ferait diverger romprait la couverture actuelle sans qu'aucun test ne le voie. Et l'echappement HTML d'une valeur brute hostile a l'interieur du `<code>` n'est pas exerce par ce lot.
+
 ## broker + desktop -- deux fenetres du Deck sur deux depots differents ne se recoivent plus les questions bloquantes l'une de l'autre
 
 Fichiers : `broker.ts`, `desktop/src/main/approval-runtime.ts`, `desktop/src/main/approval-service.ts`, `tests/_helper.ts`, `tests/approval-hook.test.ts`, `tests/broker-approval-reply.test.ts`, `tests/broker-approvals.test.ts`, `tests/broker-ntfy-channel.test.ts`, `tests/server-ask-operator.test.ts`. Carte `4df14b5b`.

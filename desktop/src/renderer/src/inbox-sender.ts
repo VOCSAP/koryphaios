@@ -51,6 +51,11 @@ export function sanitizeUnresolvedTileRef(raw: string): string {
  * tile_ref, a hostile/oversized value) returns the sanitized raw value
  * tagged `resolved: false` -- callers must render the two shapes visibly
  * differently and must never fall back to fabricating a name.
+ *
+ * Enforced by InboxPanel.tsx's `senderOf()`, the only place this
+ * discriminated union is turned into DOM (name only vs a wrapped `<code>`
+ * element); guarded by tests/desktop-inbox-sender-dom.test.ts, which mounts
+ * the real component and asserts on the rendered DOM for all three shapes.
  */
 export function resolveApprovalSender(
   tileRef: string | undefined | null,
