@@ -64,7 +64,22 @@ COMMAND=$(printf '%s' "$PARSED" | sed -n '2p')
 SEGMENTS=$(printf '%s' "$COMMAND" | sed 's/&&/\n/g; s/||/\n/g; s/;/\n/g; s/|/\n/g')
 
 is_test_file() {
-  case "$1" in
+  # `for tok in $seg` below is plain IFS word-splitting on an already-
+  # extracted string, never a real shell re-parse -- a quoted path like
+  # "tests/x.test.ts" therefore arrives here with its quote characters still
+  # attached, and a trailing quote after the extension used to break the
+  # suffix match below (a caller who quoted its path got refused as a
+  # full-suite invocation; card 4602d79e). Strip one layer of a MATCHING
+  # pair of surrounding quotes first, so a quoted and an unquoted spelling
+  # of the same file behave identically. Only a token whose first AND last
+  # character are the same quote char is touched -- an unquoted directory
+  # token, or a bare `bun test` with no token at all, is unaffected.
+  local t="$1"
+  case "$t" in
+    \"*\") t="${t#\"}"; t="${t%\"}" ;;
+    \'*\') t="${t#\'}"; t="${t%\'}" ;;
+  esac
+  case "$t" in
     *.test.ts|*.test.tsx|*.spec.ts|*.spec.tsx) return 0 ;;
     *) return 1 ;;
   esac
