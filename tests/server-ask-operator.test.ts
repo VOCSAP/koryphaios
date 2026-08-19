@@ -131,6 +131,21 @@ async function boot(withCredential: boolean): Promise<Harness> {
   const mintBody = {
     session_public_key: sessionCred.publicKey,
     session_ref: "tile-1",
+    // Card 1def56da: the Deck PINS the window's project into the credential at
+    // mint time, so the agent holding it cannot choose the project its blocking
+    // questions are filed under. Required, and it must sit in the object BEFORE
+    // buildAuthProof below -- the proof covers the body minus its own `auth`,
+    // so a field appended afterwards yields 401 rather than the 200 asserted.
+    //
+    // THE VALUE MATTERS, and it is the same constant `firstApproval` lists by.
+    // The card creates an AGREEMENT the code did not need before: an approval
+    // raised by this session is now filed under the TOKEN's project, so a
+    // window that minted with one value and lists with another sees nothing at
+    // all. Hardcoding a different literal here made three tests fail with an
+    // empty list and no error, which is precisely the shape that agreement can
+    // fail in. In production both ends come from `safeProjectKey()`
+    // (approval-runtime.ts), so they agree by construction.
+    project_key: SPAWNED_SERVER_PROJECT_KEY,
     public_key: opCred.publicKey,
   };
   const auth = buildAuthProof(opCred.privateKey, mintBody, {
@@ -210,6 +225,10 @@ async function claim(
 ): Promise<number> {
   const body: Record<string, unknown> = {
     id,
+    // Card 1def56da: an OPERATOR credential declares the project it acts on, on
+    // /approval/claim as on the other three routes. Same value the approval was
+    // filed under, or the claim resolves nothing and returns 404.
+    project_key: SPAWNED_SERVER_PROJECT_KEY,
     via: "telegram",
     answer_kind,
     public_key: h.op.publicKey,

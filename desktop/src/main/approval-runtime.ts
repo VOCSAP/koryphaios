@@ -166,8 +166,14 @@ export class ApprovalRuntime {
       // above: an absent or failed project_key is benign for the window's
       // approvals, an unwarranted identity rewrite is not.
       const projectKey = this.safeProjectKey()
-      // mintSessionToken never lists, so this projectKey never reaches the
-      // wire -- required purely to satisfy ApprovalDeps at compile time.
+      // Card 1def56da: this projectKey NOW REACHES THE WIRE. It used to be
+      // required purely to satisfy ApprovalDeps at compile time, since
+      // mintSessionToken never listed; the mint pins it into the credential, so
+      // it is the value every approval this session raises will be scoped by.
+      // A resolution failure therefore stops being harmless: '' produces a
+      // credential the broker refuses at mint time, loudly, which is the
+      // fail-closed direction and preferable to a token that silently files
+      // questions nobody's window can see.
       const deps: ApprovalDeps = { endpoint: this.opts.endpoint(), identity, projectKey }
       await mintSessionToken(deps, {
         sessionPublicKey: cred.publicKey,

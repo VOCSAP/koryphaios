@@ -209,6 +209,13 @@ describe("hook subprocess", () => {
     const mintBody = {
       session_public_key: sessionCred.publicKey,
       session_ref: "window-1",
+      // Card 1def56da: the Deck PINS the window's project into the credential
+      // at mint time, exactly as it already pinned session_ref. This is what
+      // lets the broker stop reading origin.project_key out of the agent's own
+      // request body -- and the value below is deliberately the same string the
+      // credential file's origin carries, so that the two agreeing is what the
+      // suite exercises rather than a coincidence of defaults.
+      project_key: "koryphaios",
       public_key: opCred.publicKey,
     };
     const auth = buildAuthProof(opCred.privateKey, mintBody, {

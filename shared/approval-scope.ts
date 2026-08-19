@@ -1,0 +1,475 @@
+// spec_67d0b267 -- card 1def56da. Authorization shape for the approval
+// subsystem. Design brief: DESIGN-APPROVAL-SCOPE.md (commit 11c81e4), plus two
+// team-lead arbitrations of 2026-08-19 recorded below where they apply.
+//
+// WHAT WAS WRONG, AND WHY THREE MISSING CLAUSES WERE NOT THE FIX.
+// `resolveApprovalAuth` returned an IDENTITY (`operator_id`, `kind`,
+// `session_ref`) and left every caller to finish the job by hand. Measured on
+// 2026-08-19: of its ELEVEN call sites, only `/approval/list` carried a
+// `project_key` clause; `wait`, `claim` and `delivered` filtered on
+// `operator_id` alone, which is per OS ACCOUNT and therefore shared by two Deck
+// windows on two different repos. Worse, `project_key` was read from the
+// REQUEST BODY (`origin.project_key`), so the filter introduced by card
+// 4df14b5b applied to a dimension DECLARED BY THE PARTY BEING FILTERED. Adding
+// the three clauses would have produced a green lot and an absent guarantee.
+//
+// THE SHAPE, AND THE ONE PROPERTY THAT DOES ALL THE WORK.
+// Two families, kept apart BY THE TYPE rather than by a list of blessed
+// callers (a hardcoded caller allow-list is the "four of eight" defect of
+// CLAUDE.md and fails OPEN: the twelfth site is simply not on it):
+//
+//   authenticateOperator -> ApprovalIdentity   (the SIX non-approval sites)
+//   authorizeTarget / authorizeQuery / authorizeCreate -> ApprovalScope
+//
+// HOW MUCH OF THAT THE TYPE ACTUALLY DOES, measured rather than claimed. This
+// paragraph used to say an `ApprovalScope` "cannot be constructed outside this
+// file". THAT WAS FALSE, and the probe is cheap: review fed nine forgeries to
+// `tsc`, and it flagged exactly TWO -- the empty literal and an
+// `ApprovalIdentity` passed where a scope was expected. `{...real}`,
+// `Object.assign({}, real)`, `Object.create(real)`, `{} as ApprovalScope` and
+// `JSON.parse("{}") as ApprovalScope` all COMPILE, with no cast and no error.
+//
+// What is true is narrower and still worth having: the guarantee is FALSIFIABLE
+// AT THE TYPE LEVEL and FAIL-CLOSED AT RUNTIME, by a WeakMap lookup keyed on
+// OBJECT IDENTITY. No copy carries the key, so all five forgeries above throw in
+// `approvalWhere` -- measured, all five. The type turns away the two honest
+// mistakes (forgetting the scope, passing an identity instead); the runtime
+// turns away the deliberate ones. It is the WeakMap that protects the table, not
+// the brand, and saying otherwise would leave a reader trusting a compiler check
+// that does not exist.
+//
+// What follows from that is the real property, and it is the one to claim:
+// a handler holding only an `ApprovalIdentity` has NOTHING it can hand to
+// `approvalWhere` that will not throw, so it cannot address `pending_approvals`
+// -- by construction for the honest path, loudly for the dishonest one.
+//
+// The guarantee is therefore exact, and it is the one to claim, no more:
+// NO HANDLER THAT TOUCHES `pending_approvals` EVER HOLDS AN `operator_id`.
+// The five notification-channel and session-token handlers keep theirs, because
+// a channel and a token BELONG to an operator -- that is their business key,
+// not a scope they could delegate. They simply cannot address the approvals
+// table with it.
+//
+// WHAT THIS DOES NOT CLOSE, said plainly rather than discovered later:
+//   - Raw SQL written against `pending_approvals` without going through here.
+//     A module boundary is not a language boundary. Guarded by the discipline
+//     scan in tests/desktop-approval-scope-discipline.test.ts, which is named
+//     to fall inside the CI glob on purpose.
+//   - A future NEIGHBOURING table (approval notes, history) gets no protection
+//     from this helper, which is typed for one table. Named, not closed
+//     (DESIGN-APPROVAL-SCOPE.md G3).
+//
+// WHY A FACTORY WITH INJECTED DEPS RATHER THAN A DIRECT `bun:sqlite` IMPORT.
+// Two reasons, and the second is the one that matters. It keeps this file out
+// of the broker's module graph, so importing it spawns no daemon; and it makes
+// the whole decision layer unit-testable against a fake database, which is what
+// lets part of this guarantee run in CI at all -- the four broker suites that
+// cover approvals (1409 lines) match NONE of the ten globs in
+// .github/workflows/desktop-build.yml, measured glob by glob.
+
+import {
+  isOperationAllowed,
+  verifyAuthProof,
+  deriveOperatorId,
+  type ApprovalOperation,
+} from "./approval.ts";
+import type { ApprovalAuthProof } from "./types.ts";
+
+/** Uniform refusal shape, identical to what the broker's routes already return. */
+export interface AuthError {
+  error: string;
+  status: number;
+}
+
+export type AuthResult<T> = T | AuthError;
+
+export function isAuthError(v: unknown): v is AuthError {
+  return typeof v === "object" && v !== null && "error" in v;
+}
+
+/**
+ * The raw result of authentication: WHO is calling, nothing more.
+ *
+ * Deliberately a plain, readable object: the six non-approval call sites need
+ * `operator_id` as a business key. What makes the design work is not that this
+ * is hidden, it is that it is USELESS against `pending_approvals` -- there is no
+ * function here that turns one into a scope.
+ */
+export interface ApprovalIdentity {
+  readonly operator_id: string;
+  readonly kind: "operator" | "session";
+  /** Set for a session credential: the ONLY session_ref it may act on. */
+  readonly session_ref: string | null;
+  /** Set for a session credential: the project its Deck window minted it for. */
+  readonly project_key: string | null;
+}
+
+declare const SCOPE_BRAND: unique symbol;
+declare const STAMP_BRAND: unique symbol;
+
+/**
+ * An authorization to act on `pending_approvals`, already narrowed to every
+ * dimension in force. OPAQUE: a handler can hold one and pass it back, and can
+ * do nothing else with it. Adding a fourth dimension tomorrow
+ * (`deck_session_id`) changes this file and nothing else, because no other site
+ * holds the pieces -- so no other site can forget one.
+ */
+export interface ApprovalScope {
+  readonly [SCOPE_BRAND]: "pending_approvals";
+}
+
+/**
+ * The credential-derived columns of a NEW approval. Opaque for the same reason:
+ * `handleApprovalAdd` must be unable to read `project_key` and then decide to
+ * use the body's value instead, which is precisely the defect being closed.
+ */
+export interface OriginStamp {
+  readonly [STAMP_BRAND]: "pending_approvals";
+}
+
+interface ScopeFields {
+  operator_id: string;
+  /**
+   * ALWAYS a string, NEVER null and never absent. The empty string is an
+   * ORDINARY VALUE here, not a wildcard (team-lead arbitration, 2026-08-19): a
+   * wildcard would be the cross-project leak, written by our own hand. Rows
+   * that predate project scoping carry '' and are migrated to `abandoned` by an
+   * explicit migration rather than left silently unreachable.
+   */
+  project_key: string;
+  /** Non-null only for a session credential, which may act on its own tile. */
+  session_ref: string | null;
+}
+
+// Module-private, and THIS is the enforcement -- not the brand on the type.
+// Nothing outside this file can reach a scope's contents or add an entry, so a
+// forged or copied object simply has no entry: `approvalWhere` throws on it
+// rather than composing a shorter clause. Keyed on OBJECT IDENTITY, which is
+// what makes `{...real}` and `Object.assign({}, real)` fail even though they
+// carry every visible property and compile without complaint.
+const scopeFields = new WeakMap<object, ScopeFields>();
+const stampFields = new WeakMap<object, ScopeFields>();
+
+function mintScope(f: ScopeFields): ApprovalScope {
+  // A FRESH object per mint, and the freshness is load-bearing rather than
+  // incidental: the field store is keyed on OBJECT IDENTITY, so returning a
+  // shared instance would alias every scope in the process and let the last
+  // mint answer for all of them. Review measured that exact mutation leaving
+  // the pure suite, the broker suite and the reply suite entirely green; the
+  // guard is now the "two scopes are two OBJECTS" test.
+  const s = Object.freeze({}) as ApprovalScope;
+  scopeFields.set(s, f);
+  return s;
+}
+
+function mintStamp(f: ScopeFields): OriginStamp {
+  const s = Object.freeze({}) as OriginStamp;
+  stampFields.set(s, f);
+  return s;
+}
+
+/**
+ * THE SINGLE PRODUCER of an identity clause on `pending_approvals`.
+ *
+ * NO OPTIONAL PARAMETER, EVER (DESIGN-APPROVAL-SCOPE.md D2, classed Fatal). An
+ * optional dimension would let a caller omit it and receive a SHORTER clause
+ * with no error -- fail-open and silent. A new dimension is added INSIDE this
+ * function and applies to every caller at once.
+ */
+export function approvalWhere(scope: ApprovalScope): { sql: string; params: unknown[] } {
+  const f = scopeFields.get(scope);
+  // Unreachable through the public surface: a scope can only come from a mint
+  // in this file. Kept as a throw rather than a silent empty clause, because an
+  // empty clause is the fail-OPEN direction and would be invisible.
+  if (!f) throw new Error("approvalWhere: not a scope minted by this module");
+  const sql = ["operator_id = ?", "project_key = ?"];
+  const params: unknown[] = [f.operator_id, f.project_key];
+  if (f.session_ref !== null) {
+    sql.push("session_ref = ?");
+    params.push(f.session_ref);
+  }
+  return { sql: sql.join(" AND "), params };
+}
+
+/**
+ * The credential-derived columns of an INSERT, as columns and values the caller
+ * splices into its own statement without ever seeing them.
+ */
+export function stampInsert(stamp: OriginStamp): { columns: string[]; values: string[] } {
+  const f = stampFields.get(stamp);
+  if (!f) throw new Error("stampInsert: not a stamp minted by this module");
+  return {
+    columns: ["operator_id", "project_key", "session_ref"],
+    values: [f.operator_id, f.project_key, f.session_ref ?? ""],
+  };
+}
+
+/* `scopeForOwnedRow` USED TO BE EXPORTED HERE and is gone; see
+ * `scopeForAnsweredRow` on the factory's surface below. It took a row as an
+ * ARGUMENT, and its safety rested on a sentence in this comment ("pass a row
+ * you have already read, never assemble it from a request body"). Review put
+ * the obvious probe to it: a handler that authenticates, then builds that
+ * argument from `body`, compiles and passes every guard in the lot. A rule that
+ * lives in prose is a rule a caller can decline. The replacement reads the row
+ * itself, so the provenance is a fact of construction rather than a promise. */
+
+/** Everything this module needs from the broker, so it imports no database. */
+export interface ApprovalAuthDeps {
+  queryOne<T>(sql: string, params: unknown[]): T | null;
+  queryAll<T>(sql: string, params: unknown[]): T[];
+  run(sql: string, params: unknown[]): void;
+  /** The broker owns the bounded replay cache; skew alone would not stop one. */
+  rememberNonce(nonce: string, nowSec: number): boolean;
+}
+
+type Body = { auth?: ApprovalAuthProof } & Record<string, unknown>;
+
+interface TokenRow {
+  public_key: string;
+  operator_id: string;
+  session_ref: string;
+  project_key: string;
+  revoked_at: string | null;
+  expires_at: string;
+}
+
+export interface ApprovalAuth {
+  authenticateOperator(body: Body, op: ApprovalOperation): AuthResult<ApprovalIdentity>;
+  authorizeTarget<R>(
+    body: Body,
+    op: ApprovalOperation,
+    ids: string[]
+  ): AuthResult<{ scope: ApprovalScope; rows: R[] }>;
+  authorizeQuery(body: Body, op: ApprovalOperation): AuthResult<{ scope: ApprovalScope }>;
+  authorizeCreate(body: Body): AuthResult<{ scope: ApprovalScope; stamp: OriginStamp }>;
+  scopeForAnsweredRow<R extends { operator_id: string; project_key: string }>(
+    approvalId: string
+  ): { scope: ApprovalScope; row: R } | null;
+}
+
+export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
+  /**
+   * Signature, nonce and operation table. This is the ONLY place a credential
+   * is verified, so the six non-approval sites inherit the replay guard and the
+   * operation table by construction rather than by re-typing a rule.
+   */
+  function authenticateOperator(body: Body, op: ApprovalOperation): AuthResult<ApprovalIdentity> {
+    const proof = body.auth;
+    if (!proof || typeof proof !== "object") return { error: "auth proof required", status: 401 };
+    if (proof.kind !== "operator" && proof.kind !== "session") {
+      return { error: "unknown credential kind", status: 401 };
+    }
+    if (!isOperationAllowed(proof.kind, op)) {
+      // The sandbox guard: a session credential asking to claim lands here.
+      return { error: `credential may not ${op}`, status: 403 };
+    }
+
+    const publicKey = typeof body.public_key === "string" ? body.public_key : "";
+    const { auth: _auth, ...payload } = body;
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    let knownKey: string | null = null;
+    let sessionRef: string | null = null;
+    let tokenProjectKey: string | null = null;
+
+    if (proof.kind === "operator") {
+      const row = deps.queryOne<{ public_key: string }>(
+        "SELECT public_key FROM approval_operators WHERE operator_id = ?",
+        [proof.operator_id]
+      );
+      // First contact: the id IS the digest of the key, so the presented key
+      // self-certifies and there is no trust decision to make.
+      knownKey =
+        row?.public_key ??
+        (publicKey && deriveOperatorId(publicKey) === proof.operator_id ? publicKey : null);
+      if (!knownKey) return { error: "unknown operator", status: 401 };
+    } else {
+      if (!proof.token_id) return { error: "token_id required", status: 401 };
+      const row = deps.queryOne<TokenRow>(
+        `SELECT public_key, operator_id, session_ref, project_key, revoked_at, expires_at
+           FROM approval_session_tokens WHERE token_id = ?`,
+        [proof.token_id]
+      );
+      if (!row) return { error: "unknown session token", status: 401 };
+      if (row.revoked_at) return { error: "session token revoked", status: 401 };
+      if (new Date(row.expires_at).getTime() < Date.now()) {
+        return { error: "session token expired", status: 401 };
+      }
+      if (row.operator_id !== proof.operator_id) return { error: "token/operator mismatch", status: 401 };
+      knownKey = row.public_key;
+      sessionRef = row.session_ref;
+      // '' for a token minted before this card. Kept as '' rather than
+      // normalised to null: the two mean different things downstream, and the
+      // refusal that names the cause lives at the point of use, not here.
+      tokenProjectKey = typeof row.project_key === "string" ? row.project_key : "";
+    }
+
+    const verdict = verifyAuthProof(knownKey, payload, proof);
+    if (!verdict.ok) return { error: verdict.reason, status: 401 };
+    if (!deps.rememberNonce(proof.nonce, nowSec)) return { error: "replayed-proof", status: 401 };
+
+    if (proof.kind === "operator") {
+      const at = new Date().toISOString();
+      deps.run(
+        `INSERT INTO approval_operators (operator_id, public_key, label, created_at, last_seen_at)
+         VALUES (?, ?, '', ?, ?)
+         ON CONFLICT(operator_id) DO UPDATE SET last_seen_at = excluded.last_seen_at`,
+        [proof.operator_id, knownKey, at, at]
+      );
+    }
+    return {
+      operator_id: proof.operator_id,
+      kind: proof.kind,
+      session_ref: sessionRef,
+      project_key: tokenProjectKey,
+    };
+  }
+
+  /**
+   * Where a scope's `project_key` comes from, and why it differs by credential.
+   *
+   * SESSION credential: from the TOKEN, never from the body. That is the whole
+   * point of card 1def56da -- a sandboxed agent must not choose the project its
+   * question is filed under. A token minted before this card carries '' and is
+   * refused here, naming the cause, on the model of `handleApprovalList`'s
+   * existing 400. Falling back on the body would reintroduce the defect under
+   * cover of compatibility, which DESIGN-APPROVAL-SCOPE.md §4 forbids in terms.
+   *
+   * OPERATOR credential: DECLARED in the body, and mandatory. The operator is
+   * the trusted party, so declaration is not a hole; but they own several
+   * projects under one `operator_id`, so without a declaration there is no
+   * project dimension at all -- which is exactly the leak card 4df14b5b exists
+   * to close. Refusing loudly is the fail-CLOSED direction, and it is the same
+   * refusal `/approval/list` has already shipped.
+   */
+  function resolveProjectKey(id: ApprovalIdentity, body: Body): AuthResult<string> {
+    if (id.kind === "session") {
+      if (!id.project_key) {
+        return {
+          error: "this session token predates project scoping; restart the session to mint a new one",
+          status: 400,
+        };
+      }
+      return id.project_key;
+    }
+    const declared = typeof body.project_key === "string" ? body.project_key : "";
+    if (!declared) return { error: "project_key is required", status: 400 };
+    return declared;
+  }
+
+  function scopeFor(body: Body, op: ApprovalOperation): AuthResult<{ scope: ApprovalScope; id: ApprovalIdentity }> {
+    const id = authenticateOperator(body, op);
+    if (isAuthError(id)) return id;
+    const pk = resolveProjectKey(id, body);
+    if (typeof pk !== "string") return pk;
+    return {
+      scope: mintScope({ operator_id: id.operator_id, project_key: pk, session_ref: id.session_ref }),
+      id,
+    };
+  }
+
+  return {
+    authenticateOperator,
+
+    /**
+     * Resolve the rows a targeted operation names, ALREADY under scope.
+     *
+     * Returning the rows is not a convenience: it removes the reason a handler
+     * had to re-query the table after authorising (D3 of the brief, whose
+     * precedent `SELECT * FROM pending_approvals WHERE id = ?` carried no
+     * identity clause at all and was safe only because of what ran before it).
+     *
+     * A row that exists but falls outside the scope is INDISTINGUISHABLE from
+     * one that never existed: both simply do not come back. That is deliberate
+     * and pre-existing -- confirming the existence of another operator's
+     * approval would be its own leak.
+     */
+    authorizeTarget<R>(body: Body, op: ApprovalOperation, ids: string[]): AuthResult<{ scope: ApprovalScope; rows: R[] }> {
+      const got = scopeFor(body, op);
+      if (isAuthError(got)) return got;
+      if (ids.length === 0) return { scope: got.scope, rows: [] };
+      const where = approvalWhere(got.scope);
+      const placeholders = ids.map(() => "?").join(",");
+      const rows = deps.queryAll<R>(
+        `SELECT * FROM pending_approvals WHERE id IN (${placeholders}) AND ${where.sql}`,
+        [...ids, ...where.params]
+      );
+      return { scope: got.scope, rows };
+    },
+
+    authorizeQuery(body: Body, op: ApprovalOperation): AuthResult<{ scope: ApprovalScope }> {
+      const got = scopeFor(body, op);
+      if (isAuthError(got)) return got;
+      return { scope: got.scope };
+    },
+
+    authorizeCreate(body: Body): AuthResult<{ scope: ApprovalScope; stamp: OriginStamp }> {
+      const got = scopeFor(body, "add");
+      if (isAuthError(got)) return got;
+      const f = scopeFields.get(got.scope);
+      if (!f) throw new Error("authorizeCreate: scope lost its fields");
+      return { scope: got.scope, stamp: mintStamp({ ...f }) };
+    },
+
+    /**
+     * The ONE scope not derived from a credential, for the ONE path that has
+     * none: an answer arriving on a notification gateway (Telegram, Discord,
+     * ntfy). Ownership there is proved by a channel PAIRING, not by a signature.
+     *
+     * IT READS THE ROW ITSELF, and that is the whole difference from the
+     * `scopeForOwnedRow(row)` it replaces. The previous form took the row as an
+     * argument and relied on a comment telling callers where to get it; review
+     * measured that a handler assembling that argument from a request body
+     * compiles and passes every guard in this lot. Now the provenance is not a
+     * rule a caller may decline, it is the only thing that can happen: the
+     * caller supplies an id, the module supplies the values.
+     *
+     * Returns the ROW as well, so the caller has no reason to re-query -- and
+     * so the pairing check that follows runs against the same bytes the scope
+     * was minted from, rather than a second read that could have moved.
+     *
+     * `session_ref` is deliberately absent from the scope: the operator answers
+     * from their phone, and pinning the tile's session would refuse exactly the
+     * case this feature exists for.
+     */
+    scopeForAnsweredRow<R extends { operator_id: string; project_key: string }>(
+      approvalId: string
+    ): { scope: ApprovalScope; row: R } | null {
+      const row = deps.queryOne<R>("SELECT * FROM pending_approvals WHERE id = ?", [approvalId]);
+      if (!row) return null;
+      return {
+        scope: mintScope({
+          operator_id: row.operator_id,
+          project_key: typeof row.project_key === "string" ? row.project_key : "",
+          session_ref: null,
+        }),
+        row,
+      };
+    },
+  };
+}
+
+/**
+ * A session credential is pinned to its own `session_ref`: it can neither
+ * impersonate another tile nor emit "anonymously". Pre-existing rule, preserved
+ * verbatim; only its location moved.
+ *
+ * It lives here rather than in the handler for the reason that is the whole
+ * design: the check needs the credential's `session_ref`, and handing that to
+ * `handleApprovalAdd` would hand it a credential field it has no other use for.
+ * So the comparison happens inside and only a VERDICT comes out.
+ *
+ * `declared` must be the value AFTER `validateApprovalDraft` normalised it
+ * (control bytes stripped, trimmed, truncated); comparing against the raw body
+ * would refuse a caller whose only sin was a trailing space. An operator
+ * credential pins nothing here, which is correct: it has no session.
+ */
+export function assertStampSessionRef(stamp: OriginStamp, declared: string): AuthError | null {
+  const f = stampFields.get(stamp);
+  if (!f) throw new Error("assertStampSessionRef: not a stamp minted by this module");
+  if (f.session_ref === null) return null;
+  if (declared && declared !== f.session_ref) {
+    return { error: "session_ref does not match credential", status: 403 };
+  }
+  return null;
+}

@@ -37,7 +37,12 @@ async function signedPost<T>(
   payload: Record<string, unknown>,
   op: { cred: ApprovalCredential; id: string }
 ): Promise<{ status: number; body: T }> {
-  const body = { ...payload, public_key: op.cred.publicKey };
+  // Card 1def56da: an operator credential DECLARES the project it acts on, on
+  // all four approval handlers now, not on /approval/list alone. Injected
+  // before the spread so a test can override it, and inside the object that
+  // gets signed -- appending it after buildAuthProof would yield a 401
+  // bad-signature instead of the behaviour under test.
+  const body = { project_key: "p", ...payload, public_key: op.cred.publicKey };
   const auth = buildAuthProof(op.cred.privateKey, body, {
     kind: "operator",
     operator_id: op.id,

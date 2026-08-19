@@ -475,6 +475,12 @@ test("coverage: the two exemptions hold live -- neither route reaches the inbox"
     title: "coverage probe",
     question: "does reply_peer_id reach the sentinel?",
     origin: { host: "test-host", project_key: "p", group_id: g.id },
+    // Card 1def56da: an OPERATOR credential declares its project TOP LEVEL.
+    // `origin.project_key` above is now descriptive only, since the broker
+    // stopped reading the dimension the caller is filtered on from a field the
+    // caller supplies. In the object before buildAuthProof, or the proof and
+    // the body disagree and the 200 asserted below becomes a 401.
+    project_key: "p",
     reply_route: "channel",
     reply_peer_id: "operator",
     public_key: cred.publicKey,

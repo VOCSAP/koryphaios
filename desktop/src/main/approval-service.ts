@@ -68,6 +68,12 @@ export async function mintSessionToken(
   return signedPost(deps, '/approval/token-mint', {
     session_public_key: args.sessionPublicKey,
     session_ref: args.sessionRef,
+    // Card 1def56da: the window's project is PINNED into the credential here,
+    // by the operator, so the agent that later holds the token cannot choose
+    // the project its blocking questions are filed under. Same discipline as
+    // session_ref, extended to the dimension that became a scope with card
+    // 4df14b5b. The broker refuses a mint without it.
+    project_key: deps.projectKey,
     ttl_hours: args.ttlHours ?? 24
   })
 }
@@ -102,6 +108,14 @@ export async function addApproval(
     title: args.title,
     question: args.question,
     options: args.options ?? [],
+    // Card 1def56da, hyp_17ec1784. TOP-LEVEL and mandatory for an OPERATOR
+    // credential, on all four approval routes and no longer on /approval/list
+    // alone. `origin.project_key` below is now DESCRIPTIVE only: the broker
+    // stopped reading it, because a field the caller declares cannot be the
+    // dimension the caller is filtered on. This call sent it only inside
+    // `origin` and took a 400 in the gate -- the Deck could no longer raise an
+    // approval at all.
+    project_key: deps.projectKey,
     session_ref: args.sessionRef,
     tile_ref: args.tileRef ?? args.sessionRef,
     // A resolved peer means the broker can deliver the answer as a message and
@@ -135,6 +149,11 @@ export async function claimApproval(
   try {
     const res = await signedPost<{ approval: Approval }>(deps, '/approval/claim', {
       id: args.id,
+      // Card 1def56da, hyp_17ec1784. Without it the broker answers 400 and the
+      // Deck can no longer settle ANY approval -- the single most visible
+      // breakage of the lot, and the one no suite covered, since the Deck's own
+      // callers are never run against a real broker.
+      project_key: deps.projectKey,
       via: 'deck',
       answer_kind: args.answerKind,
       answer_text: args.answerText
@@ -238,7 +257,13 @@ export async function fetchPendingApprovals(deps: ApprovalDeps): Promise<Approva
 
 export async function markVerdictsDelivered(deps: ApprovalDeps, ids: string[]): Promise<number> {
   if (ids.length === 0) return 0
-  const res = await signedPost<{ marked: number }>(deps, '/approval/delivered', { ids })
+  // Card 1def56da, hyp_17ec1784. Third and last of the Deck calls that took a
+  // 400: without it the verdicts stay marked undelivered forever and the Deck
+  // re-offers answers it has already applied.
+  const res = await signedPost<{ marked: number }>(deps, '/approval/delivered', {
+    project_key: deps.projectKey,
+    ids
+  })
   return res.marked
 }
 

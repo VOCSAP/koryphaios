@@ -1207,6 +1207,15 @@ export interface ApprovalDeliveredResponse {
 export interface ApprovalTokenMintRequest {
   auth?: ApprovalAuthProof;
   session_ref?: string;
+  /**
+   * Card 1def56da: the project the minting Deck window works on, PINNED into
+   * the credential. Required. It is what lets `handleApprovalAdd` stop reading
+   * `origin.project_key` out of the agent's own request body -- a session
+   * credential must no more choose its project than it may choose its
+   * `session_ref`. A token minted without it is refused at mint time rather
+   * than silently issued and refused at every later `add`.
+   */
+  project_key?: string;
   token?: string;
   ttl_hours?: number;
 }

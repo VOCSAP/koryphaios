@@ -302,6 +302,10 @@ test("layer 2: a SESSION credential may not sign a roadmap write", async () => {
   const mintBody = {
     session_public_key: sessionCred.publicKey,
     session_ref: "tile-layer2",
+    // Card 1def56da: mint now pins the project into the credential, and refuses
+    // without it. Irrelevant to what this test proves (a session credential may
+    // not sign a roadmap write) but required to obtain the credential at all.
+    project_key: "github.com/vocsap/koryphaios",
     public_key: opCred.publicKey,
   };
   const mint = await post<{ token_id: string }>(`${broker.url}/approval/token-mint`, {

@@ -36,9 +36,27 @@ async function signedPost<T>(
 ): Promise<{ status: number; body: T }> {
   const kind = signer.kind ?? "operator";
   const body = {
+    // Card 1def56da: an OPERATOR credential must DECLARE the project it is
+    // acting on, for all four approval handlers and no longer for /approval/list
+    // alone. Injected here as a default rather than at each of the ~30 call
+    // sites, and injected BEFORE the spread so a test can still override it or
+    // set it to "" -- which several below do on purpose, since the refusal is
+    // half of what this suite proves.
+    //
+    // The position matters twice over: this object is what gets SIGNED, so a
+    // field appended after buildAuthProof would produce a 401 bad-signature
+    // rather than the 400 the test is looking for.
+    project_key: DEFAULT_PROJECT_KEY,
     ...payload,
     public_key: signer.cred.publicKey,
-  };
+  } as Record<string, unknown>;
+  // Passing `{ project_key: undefined }` is how a test asks for a body with NO
+  // project_key at all, which is the case the mandatory-field refusal exists
+  // for. Deleting rather than leaving `undefined`: the key has to be absent
+  // from the object that gets CANONICALISED for the signature, not merely
+  // absent from its JSON rendering, or the proof and the received body would
+  // disagree and the test would measure a 401 instead of the 400 it means to.
+  if (body.project_key === undefined) delete body.project_key;
   const auth = buildAuthProof(signer.cred.privateKey, body, {
     kind,
     operator_id: signer.operator_id,
@@ -283,8 +301,10 @@ describe("operator compartmentalisation", () => {
     // The multi-PC case: PC#2 enrolled with the same credential.
     const b = await boot();
     const op = newOperator();
-    await addApproval(b, op, { origin: { host: "bureau", project_key: "p" } });
-    await addApproval(b, op, { origin: { host: "portable", project_key: "p" } });
+    // `origin.host` still travels in the body (it is descriptive, not a scope);
+    // `project_key` no longer does (card 1def56da), it is declared top level.
+    await addApproval(b, op, { origin: { host: "bureau" }, project_key: "p" });
+    await addApproval(b, op, { origin: { host: "portable" }, project_key: "p" });
 
     const list = await signedPost<{ approvals: Approval[] }>(
       b,
@@ -311,8 +331,8 @@ describe("project scoping (card 4df14b5b)", () => {
   test("two project_keys under the SAME operator do not see each other's approvals", async () => {
     const b = await boot();
     const op = newOperator();
-    const a = await addApproval(b, op, { origin: { host: "bureau", project_key: "repo-a" } });
-    const c = await addApproval(b, op, { origin: { host: "bureau", project_key: "repo-b" } });
+    const a = await addApproval(b, op, { origin: { host: "bureau" }, project_key: "repo-a" });
+    const c = await addApproval(b, op, { origin: { host: "bureau" }, project_key: "repo-b" });
 
     const listA = await signedPost<{ approvals: Approval[] }>(
       b,
@@ -339,13 +359,18 @@ describe("project scoping (card 4df14b5b)", () => {
   test("a request without project_key is refused, not silently unioned across projects", async () => {
     const b = await boot();
     const op = newOperator();
-    await addApproval(b, op, { origin: { host: "bureau", project_key: "repo-a" } });
-    await addApproval(b, op, { origin: { host: "bureau", project_key: "repo-b" } });
+    // Card 1def56da: the project of a NEW approval comes from the credential,
+    // not from `origin.project_key` in the body -- that field was the defect,
+    // since the party being filtered declared the dimension it was filtered on.
+    // For an operator credential the declaration is the top-level `project_key`,
+    // which is legitimate (the operator is the trusted party) and mandatory.
+    await addApproval(b, op, { project_key: "repo-a" });
+    await addApproval(b, op, { project_key: "repo-b" });
 
     const missing = await signedPost<{ error: string }>(
       b,
       "/approval/list",
-      {},
+      { project_key: undefined },
       { cred: op.cred, operator_id: op.id }
     );
     expect(missing.status).toBe(400);
@@ -392,6 +417,11 @@ describe("authentication", () => {
       kind: "permission",
       title: "replay me",
       question: "q",
+      // Card 1def56da: mandatory for an operator credential, and it must be in
+      // the object BEFORE buildAuthProof below -- the proof covers the body
+      // minus its own `auth`, so a field appended afterwards produces a 401
+      // bad-signature and this test would measure the wrong refusal.
+      project_key: DEFAULT_PROJECT_KEY,
       public_key: op.cred.publicKey,
     };
     const auth = buildAuthProof(op.cred.privateKey, body, {
@@ -640,5 +670,212 @@ describe("flood bound", () => {
       { cred: op.cred, operator_id: op.id }
     );
     expect(overflow.status).toBe(429);
+  });
+});
+
+/**
+ * Card 1def56da. Before this lot, project scoping existed on `/approval/list`
+ * and NOWHERE ELSE: `wait`, `claim` and `delivered` filtered on `operator_id`
+ * alone, which is per OS ACCOUNT and therefore shared by two Deck windows on
+ * two different repos. Measured before writing these: ZERO test exercised
+ * `project_key` on any of the three, so the three clauses could have been
+ * removed with the whole suite staying green.
+ *
+ * Each test below is written so that removing ITS handler's scope turns THIS
+ * test red and leaves the others alone -- that is what makes the four of them a
+ * coverage matrix rather than four ways of proving the same thing once.
+ */
+describe("project scoping reaches every handler (card 1def56da)", () => {
+  /** One operator, one approval filed under `repo-a`. The intruder is `repo-b`. */
+  async function twoProjects(): Promise<{
+    b: TestBroker;
+    op: { cred: ApprovalCredential; id: string };
+    mine: Approval;
+  }> {
+    const b = await boot();
+    const op = newOperator();
+    const mine = await addApproval(b, op, { project_key: "repo-a" });
+    return { b, op, mine };
+  }
+
+  test("WAIT: another project's window cannot even observe the approval", async () => {
+    const { b, op, mine } = await twoProjects();
+    const foreign = await signedPost<{ error: string }>(
+      b,
+      "/approval/wait",
+      { id: mine.id, project_key: "repo-b", timeout_sec: 1 },
+      { cred: op.cred, operator_id: op.id }
+    );
+    // 404 and not 403: telling the other window "that exists but is not yours"
+    // would itself confirm the existence of another project's question.
+    expect(foreign.status).toBe(404);
+    expect(foreign.body.error).toBe("unknown approval");
+
+    // Negative control. Without it, a handler that 404s on EVERYTHING would
+    // satisfy the assertion above, and the test would prove nothing at all.
+    const own = await signedPost<{ approval?: Approval; pending?: boolean }>(
+      b,
+      "/approval/wait",
+      { id: mine.id, project_key: "repo-a", timeout_sec: 1 },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(own.status).toBe(200);
+  });
+
+  test("CLAIM: another project's window cannot settle it", async () => {
+    const { b, op, mine } = await twoProjects();
+    const foreign = await signedPost<{ error: string }>(
+      b,
+      "/approval/claim",
+      { id: mine.id, project_key: "repo-b", answer_kind: "allow" },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(foreign.status).toBe(404);
+
+    // The approval must still be settle-ABLE by its owner: a scope that refused
+    // everyone would pass the line above and break the feature.
+    const own = await signedPost<{ approval: Approval }>(
+      b,
+      "/approval/claim",
+      { id: mine.id, project_key: "repo-a", answer_kind: "allow" },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(own.status).toBe(200);
+    expect(own.body.approval.status).toBe("answered");
+  });
+
+  test("CLAIM: an already-settled approval still says 409, not 404, to its owner", async () => {
+    // The existence probe after a zero-row UPDATE gained the same clause. If it
+    // had been left unscoped it would answer 409 for a FOREIGN row (leaking its
+    // existence); if it had been dropped, the owner's second claim would
+    // degrade from 409 to 404 and the Deck would report the wrong thing.
+    const { b, op, mine } = await twoProjects();
+    const first = await signedPost(
+      b,
+      "/approval/claim",
+      { id: mine.id, project_key: "repo-a", answer_kind: "allow" },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(first.status).toBe(200);
+    const again = await signedPost<{ error: string }>(
+      b,
+      "/approval/claim",
+      { id: mine.id, project_key: "repo-a", answer_kind: "allow" },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(again.status).toBe(409);
+    expect(again.body.error).toBe("already-settled");
+  });
+
+  test("DELIVERED: another project's window marks nothing", async () => {
+    const { b, op, mine } = await twoProjects();
+    await signedPost(
+      b,
+      "/approval/claim",
+      { id: mine.id, project_key: "repo-a", answer_kind: "allow" },
+      { cred: op.cred, operator_id: op.id }
+    );
+    const foreign = await signedPost<{ marked: number }>(
+      b,
+      "/approval/delivered",
+      { ids: [mine.id], project_key: "repo-b" },
+      { cred: op.cred, operator_id: op.id }
+    );
+    // `marked: 0` rather than an error: the batch endpoint reports what it did,
+    // and doing nothing is the correct answer to a foreign id.
+    expect(foreign.body.marked).toBe(0);
+
+    const own = await signedPost<{ marked: number }>(
+      b,
+      "/approval/delivered",
+      { ids: [mine.id], project_key: "repo-a" },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(own.body.marked).toBe(1);
+  });
+
+  test("DELIVERED: one foreign id inside a legitimate batch is dropped, not carried", async () => {
+    // The batch case the brief called out: scoping only the first id would let
+    // a caller smuggle another project's approval into an otherwise valid call.
+    const b = await boot();
+    const op = newOperator();
+    const a = await addApproval(b, op, { project_key: "repo-a" });
+    const foreign = await addApproval(b, op, { project_key: "repo-b" });
+    for (const [id, pk] of [
+      [a.id, "repo-a"],
+      [foreign.id, "repo-b"],
+    ] as const) {
+      await signedPost(
+        b,
+        "/approval/claim",
+        { id, project_key: pk, answer_kind: "allow" },
+        { cred: op.cred, operator_id: op.id }
+      );
+    }
+    const mixed = await signedPost<{ marked: number }>(
+      b,
+      "/approval/delivered",
+      { ids: [a.id, foreign.id], project_key: "repo-a" },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(mixed.body.marked).toBe(1);
+  });
+
+  test("CLAIM settles exactly ONE approval, not every sibling in the same scope", async () => {
+    // Review probe S4, and the reason it exists: dropping `id = ?` from
+    // settleApproval's UPDATE while KEEPING the scope clause left broker 33/33,
+    // reply 8/8 and the discipline scan 4/4 green. One claim would then have
+    // answered every pending approval of the same operator AND project at once
+    // -- an agent receiving an "allow" it never asked for, which is worse than
+    // any leak of visibility.
+    //
+    // Measured before writing this: 19 calls to /approval/claim in this suite,
+    // and not one of them raised TWO approvals to check the second survives.
+    // The scope tests above cannot see it either, since they differ by project
+    // and this defect strikes WITHIN one.
+    const b = await boot();
+    const op = newOperator();
+    const first = await addApproval(b, op, { project_key: "repo-a", title: "first" });
+    const second = await addApproval(b, op, { project_key: "repo-a", title: "second" });
+    expect(second.id).not.toBe(first.id);
+
+    const claimed = await signedPost<{ approval: Approval }>(
+      b,
+      "/approval/claim",
+      { id: first.id, project_key: "repo-a", answer_kind: "allow" },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(claimed.status).toBe(200);
+    expect(claimed.body.approval.id).toBe(first.id);
+
+    // THE assertion. Read through /approval/list rather than trusting the claim
+    // response: what matters is the state of the OTHER row in the database.
+    const listed = await signedPost<{ approvals: Approval[] }>(
+      b,
+      "/approval/list",
+      approvalListBody("repo-a"),
+      { cred: op.cred, operator_id: op.id }
+    );
+    const survivor = listed.body.approvals.find((a) => a.id === second.id);
+    expect(survivor?.status).toBe("pending");
+    expect(survivor?.answer_kind).toBeNull();
+  });
+
+  test("ADD: the de-duplication key is per project, not per operator", async () => {
+    // `tile_ref` is a window-local handle, so two Deck windows can legitimately
+    // use the same one. Scoped on operator_id alone, the second window's raise
+    // would have RETURNED THE FIRST WINDOW'S APPROVAL as its own -- a
+    // cross-project answer delivered to the wrong agent, which is worse than a
+    // leak of visibility.
+    const b = await boot();
+    const op = newOperator();
+    const a = await addApproval(b, op, { project_key: "repo-a", session_ref: "tile-1", tile_ref: "tile-1" });
+    const c = await addApproval(b, op, { project_key: "repo-b", session_ref: "tile-1", tile_ref: "tile-1" });
+    expect(c.id).not.toBe(a.id);
+
+    // Negative control: within ONE project the de-duplication must still fire,
+    // or this test would pass on a broker that had simply lost the feature.
+    const again = await addApproval(b, op, { project_key: "repo-a", session_ref: "tile-1", tile_ref: "tile-1" });
+    expect(again.id).toBe(a.id);
   });
 });

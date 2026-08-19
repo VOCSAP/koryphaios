@@ -35,7 +35,48 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
-import { validateApprovalDraft } from "../shared/approval.ts";
+import { validateApprovalDraft, generateCredential, deriveOperatorId, buildAuthProof } from "../shared/approval.ts";
+import {
+  createApprovalAuth,
+  approvalWhere as sliceApprovalWhere,
+  stampInsert as sliceStampInsert,
+  isAuthError as sliceIsAuthError,
+} from "../shared/approval-scope.ts";
+
+/**
+ * Card 1def56da. The slice authorises through shared/approval-scope.ts now, so
+ * the injected scope has to provide that surface.
+ *
+ * A REAL auth over a fake database, not a fabricated scope object: an
+ * `ApprovalScope` is opaque and its fields live in a WeakMap keyed on object
+ * identity, so a hand-made one is refused at runtime -- which is the guarantee
+ * the card exists for. Faking it here would have meant either weakening that
+ * guarantee or testing something the broker never runs.
+ */
+function sliceAuth(): ReturnType<typeof createApprovalAuth> {
+  const op = generateCredential();
+  const operatorId = deriveOperatorId(op.publicKey);
+  const real = createApprovalAuth({
+    queryOne: <T,>(): T => ({ public_key: op.publicKey }) as T,
+    queryAll: <T,>(): T[] => [],
+    run: (): void => {},
+    rememberNonce: (): boolean => true,
+  });
+  // The slice calls `authorizeCreate(body)` with the test's own draft body,
+  // which carries no credential. Wrap it so the signature and the mandatory
+  // project declaration are supplied here rather than by every draftBody().
+  return {
+    ...real,
+    authorizeCreate: (body: Record<string, unknown>) => {
+      const signedBody = { ...body, project_key: "p", public_key: op.publicKey };
+      const auth = buildAuthProof(op.privateKey, signedBody, {
+        kind: "operator",
+        operator_id: operatorId,
+      });
+      return real.authorizeCreate({ ...signedBody, auth });
+    },
+  } as ReturnType<typeof createApprovalAuth>;
+}
 
 const BROKER = process.env.KORY_BROKER_TS || join(import.meta.dir, "..", "broker.ts");
 // broker.ts is CRLF on disk (same note as desktop-approval-defer.test.ts);
@@ -72,8 +113,15 @@ const HANDLE_APPROVAL_ADD = slice("function handleApprovalAdd(", ["\n}\n"], "han
 const registerHandleApprovalAdd = await evaluate<{
   handleApprovalAdd: (body: Record<string, unknown>) => unknown;
 }>(
+  // Card 1def56da: `resolveApprovalAuth` is gone from this destructuring
+  // because it is gone from broker.ts. The five names that replace it are the
+  // authorization surface the sliced body now closes over. If a future edit
+  // adds another free variable, the eval throws a ReferenceError at call time
+  // and this suite fails LOUDLY -- which is exactly how the refactor was
+  // caught, and the property the file's header promises.
   `export function register(env) {
-  const { resolveApprovalAuth, validateApprovalDraft, db, rowToApproval, APPROVAL_MAX_PENDING,
+  const { approvalAuth, approvalWhere, stampInsert, assertStampSessionRef, isAuthError,
+          validateApprovalDraft, db, rowToApproval, APPROVAL_MAX_PENDING,
           resolveReplyRoute, APPROVAL_NOTIF_TTL_HOURS, randomUUID, notifyRegistry, log } = env
 ${HANDLE_APPROVAL_ADD}
   return { handleApprovalAdd }
@@ -90,19 +138,40 @@ interface LogCall {
 /** `existingRow` non-null simulates a pending duplicate for the same tile. */
 function makeDb(existingRow: unknown) {
   const queries: string[] = [];
+  // Card 1def56da. Two things changed in the sliced body and both land here.
+  // The de-duplication SELECT no longer spells its identity clause inline (it
+  // interpolates `${where.sql}`), so it is recognised by `tile_ref = ?`; and
+  // the handler now READS THE ROW BACK after inserting, instead of assembling
+  // its response from values it holds. The read-back therefore has to return
+  // something, or the handler takes its "vanished between insert and read-back"
+  // branch and logs an error rather than the nominal line under test.
+  let inserted: Record<string, unknown> | null = null;
   return {
     query(sql: string) {
       queries.push(sql);
       return {
-        get() {
-          if (sql.includes("WHERE operator_id = ? AND tile_ref = ?")) return existingRow;
+        get(...params: unknown[]) {
           if (sql.includes("SELECT COUNT(*) AS n")) return { n: 0 };
+          if (sql.includes("tile_ref = ?") && sql.includes("status = 'pending'")) return existingRow;
+          // The read-back. `rowToApproval` is the identity in this harness, so
+          // the shape returned is what the log line reads: kind, id, and the
+          // tile_ref that must render as `tile=-` when empty.
+          if (sql.includes("WHERE id = ?")) {
+            return inserted ? { ...inserted, id: params[0] } : null;
+          }
           return null;
         },
       };
     },
-    run() {
-      /* no-op: the fresh-insert path's INSERT, not under test here */
+    run(_sql: string, values: unknown[]) {
+      // Mirror just enough of the INSERT for the read-back above. The column
+      // order is the handler's own: id, then the three stamp columns, then
+      // origin_host / origin_user / group_id / from_peer, then tile_ref.
+      inserted = {
+        id: values[0],
+        kind: "question",
+        origin: { tile_ref: values[8] ?? "" },
+      };
     },
     queries,
   };
@@ -113,7 +182,26 @@ function env(overrides: { existingRow?: unknown } = {}) {
   const db = makeDb(overrides.existingRow ?? null);
   return {
     env: {
-      resolveApprovalAuth: () => ({ operator_id: "op1", kind: "operator" as const, session_ref: null }),
+      // Card 1def56da. `resolveApprovalAuth` USED TO BE STUBBED HERE and no
+      // longer exists: the sliced function now authorises through
+      // shared/approval-scope.ts, so the slice needs that surface instead.
+      //
+      // This suite executes the body of `handleApprovalAdd` VERBATIM in an
+      // injected scope, which is exactly why it broke on a refactor that
+      // changed no behaviour it asserts: it depends on the function's internal
+      // vocabulary, not on its contract. The contract IS preserved and is what
+      // the tests below still check, unchanged -- one 'approval: new' line on
+      // the nominal path, `tile=-` for an empty tile_ref, and no nominal line
+      // on a duplicate raise.
+      //
+      // The stubs return real opaque values by building a genuine auth against
+      // a fake db, rather than fabricating a scope object: a hand-made one is
+      // refused at runtime by the WeakMap, which is the guarantee itself.
+      approvalAuth: sliceAuth(),
+      approvalWhere: sliceApprovalWhere,
+      stampInsert: sliceStampInsert,
+      assertStampSessionRef: () => null,
+      isAuthError: sliceIsAuthError,
       validateApprovalDraft,
       db,
       rowToApproval: (row: unknown) => row,

@@ -35,7 +35,28 @@ async function signedPost<T>(
   payload: Record<string, unknown>,
   op: { cred: ApprovalCredential; id: string }
 ): Promise<{ status: number; body: T }> {
-  const body = { ...payload, public_key: op.cred.publicKey };
+  // Card 1def56da: an OPERATOR credential DECLARES the project it acts on, on
+  // all four approval routes and no longer on /approval/list alone.
+  //
+  // The default MIRRORS the payload's own `origin.project_key` rather than
+  // being a fixed literal, and that is not a shortcut: `origin.project_key` is
+  // exactly where these tests used to declare the project, and the file uses
+  // two different values ("p" and the repo url) whose matching `/approval/list`
+  // calls both had to keep working. A single hardcoded default silently made
+  // three of them list an empty set -- no error, just nothing found, which is
+  // the failure mode this whole card is about.
+  // The fallback is "p" because that is what the majority of this file's
+  // approvals are filed under, and because a /approval/claim carries no
+  // `origin` to mirror: a claim that defaulted to the other value resolved
+  // nothing and returned 404, leaving the verdict unflipped and the assertion
+  // pointing at the wrong cause. Calls that mean the other project pass it
+  // explicitly (approvalListBody supplies it, and the payload wins the spread).
+  const originKey = (payload.origin as { project_key?: string } | undefined)?.project_key;
+  const body = {
+    project_key: originKey ?? "p",
+    ...payload,
+    public_key: op.cred.publicKey,
+  };
   const auth = buildAuthProof(op.cred.privateKey, body, { kind: "operator", operator_id: op.id });
   return post<T>(`${b.url}${path}`, { ...body, auth });
 }

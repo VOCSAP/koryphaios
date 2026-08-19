@@ -54,6 +54,14 @@ import {
   verifyAuthProof,
   type ApprovalOperation,
 } from "./shared/approval.ts";
+import {
+  createApprovalAuth,
+  approvalWhere,
+  stampInsert,
+  assertStampSessionRef,
+  isAuthError,
+  type ApprovalScope,
+} from "./shared/approval-scope.ts";
 import type {
   RegisterRequest,
   RegisterResponse,
@@ -719,6 +727,23 @@ db.run(
   `CREATE INDEX IF NOT EXISTS idx_approval_tokens_operator ON approval_session_tokens(operator_id, session_ref)`
 );
 
+// Card 1def56da. `project_key` becomes a CREDENTIAL-derived field, like
+// `session_ref` already was: before this, an agent chose it in the request body,
+// so the scope filter card 4df14b5b made mandatory applied to a dimension
+// declared by the party being filtered. The Deck stamps it at mint time.
+//
+// Idempotent, and the DEFAULT is load-bearing: a token minted before this
+// column existed gets '', and `resolveProjectKey` in shared/approval-scope.ts
+// refuses it by NAME ("this session token predates project scoping") instead of
+// falling back on the body -- the fallback would be the defect reintroduced
+// under cover of compatibility.
+try {
+  db.run("ALTER TABLE approval_session_tokens ADD COLUMN project_key TEXT NOT NULL DEFAULT ''");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
+
 // Notification channels an operator can be reached on (Telegram/Discord/ntfy).
 db.run(`
   CREATE TABLE IF NOT EXISTS approval_channels (
@@ -809,6 +834,44 @@ db.run(`
 db.run(
   `CREATE INDEX IF NOT EXISTS idx_approvals_operator ON pending_approvals(operator_id, status)`
 );
+
+// Card 1def56da, and this migration is a DECISION rather than a cleanup.
+//
+// `project_key` is `NOT NULL DEFAULT ''`, so every row written before card
+// 4df14b5b carries the empty string. Once the scope clause becomes mandatory on
+// all four handlers, '' compares as an ORDINARY VALUE -- never as a wildcard,
+// because a wildcard would be the cross-project leak written by our own hand.
+// The consequence is that those rows become addressable by nobody: no live
+// caller can present '' as its project, so they could never again be answered
+// nor marked delivered, and they would sit `pending` forever with nothing
+// saying why.
+//
+// `abandoned` is the honest status for them, and it is the status's own
+// definition (shared/types.ts: "the producer gave up, session closed, host
+// gone"): a question raised before project scoping has no living producer that
+// can claim its project. Both reader sides were VERIFIED rather than assumed,
+// because this is the FIRST producer of `abandoned` in the codebase -- the Deck
+// asks /approval/list for `pending` and `expired_notif` by name
+// (desktop/src/main/approval-service.ts, fetchPendingApprovals), so these rows
+// stop being offered; and `sweepApprovals` below already collects `abandoned`
+// alongside `answered` after APPROVAL_TTL_DAYS, so they are reclaimed rather
+// than accumulating.
+//
+// Idempotent by its own WHERE: rows already moved no longer match `pending`.
+// Measured on the machine this shipped from: 0 rows in `pending_approvals`
+// total, so this migration is a no-op here and its proof lives in a seeded
+// fixture, not in the live database.
+{
+  const stranded = db.run(
+    `UPDATE pending_approvals SET status = 'abandoned'
+      WHERE project_key = '' AND status IN ('pending','expired_notif')`
+  ).changes;
+  if (stranded > 0) {
+    log.info(
+      `migration: ${stranded} approval(s) predating project scoping marked abandoned (card 1def56da)`
+    );
+  }
+}
 db.run(
   `CREATE INDEX IF NOT EXISTS idx_approvals_project ON pending_approvals(project_key, status)`
 );
@@ -2210,11 +2273,15 @@ function resolveRoadmapAuthor(
   // on the set also means a fourth reserved name inherits this without anyone
   // remembering to come back here.
   if (RESERVED_PEER_IDS.includes(by)) {
-    const auth = resolveApprovalAuth(
+    // Card 1def56da: identity, not scope. This is a ROADMAP write; it does not
+    // touch `pending_approvals` at all, and it needs only the signature check,
+    // the nonce replay guard and the operation table -- which is exactly why it
+    // was routed through the approval authenticator in the first place.
+    const auth = approvalAuth.authenticateOperator(
       body as { auth?: ApprovalAuthProof } & Record<string, unknown>,
       "roadmap-write"
     );
-    if ("error" in auth) {
+    if (isAuthError(auth)) {
       // LOUD, and specific enough to answer the question a silent refusal
       // cannot: an operator reading this knows the guard EXISTS and fired.
       // Silence here means the running broker predates this code -- a live
@@ -4215,80 +4282,32 @@ function rememberNonce(nonce: string, nowSec: number): boolean {
   return true;
 }
 
-interface ResolvedAuth {
-  operator_id: string;
-  kind: "operator" | "session";
-  /** Set for a session credential: the ONLY session_ref it may act on. */
-  session_ref: string | null;
-}
-
 /**
- * Authenticate a request and decide whether the credential class may perform
- * `op`. The payload signed is the body WITHOUT its `auth` member.
+ * Card 1def56da: `resolveApprovalAuth` USED TO LIVE HERE and is DELETED, not
+ * deprecated. It returned an identity and left each of its eleven call sites to
+ * finish the scoping by hand, which is why three of the four approval handlers
+ * had no project dimension at all. Keeping it "for the transition" would have
+ * made the whole lot pointless: a fail-closed mechanism that cohabits with its
+ * fail-open predecessor IS fail-open, since the twelfth site can still call the
+ * old one.
+ *
+ * Its replacement is shared/approval-scope.ts, whose header carries the full
+ * reasoning. The single instance below is the ONLY authenticator in this
+ * process; the database and the nonce cache are injected so the decision layer
+ * imports no `bun:sqlite` and can be unit-tested against a fake -- which is how
+ * part of this guarantee reaches CI, the four broker approval suites matching
+ * none of the workflow's globs.
  */
-function resolveApprovalAuth(
-  body: { auth?: ApprovalAuthProof } & Record<string, unknown>,
-  op: ApprovalOperation
-): ResolvedAuth | { error: string; status: number } {
-  const proof = body.auth;
-  if (!proof || typeof proof !== "object") return { error: "auth proof required", status: 401 };
-  if (proof.kind !== "operator" && proof.kind !== "session") {
-    return { error: "unknown credential kind", status: 401 };
-  }
-  if (!isOperationAllowed(proof.kind, op)) {
-    // The sandbox guard: a session credential asking to claim lands here.
-    return { error: `credential may not ${op}`, status: 403 };
-  }
-
-  const publicKey = typeof body.public_key === "string" ? body.public_key : "";
-  const { auth: _auth, ...payload } = body;
-  const nowSec = Math.floor(Date.now() / 1000);
-
-  let knownKey: string | null = null;
-  let sessionRef: string | null = null;
-
-  if (proof.kind === "operator") {
-    const row = db
-      .query("SELECT public_key FROM approval_operators WHERE operator_id = ?")
-      .get(proof.operator_id) as { public_key: string } | null;
-    // First contact: the id IS the digest of the key, so the presented key
-    // self-certifies and there is no trust decision to make.
-    knownKey = row?.public_key ?? (publicKey && deriveOperatorId(publicKey) === proof.operator_id ? publicKey : null);
-    if (!knownKey) return { error: "unknown operator", status: 401 };
-  } else {
-    if (!proof.token_id) return { error: "token_id required", status: 401 };
-    const row = db
-      .query(
-        `SELECT public_key, operator_id, session_ref, revoked_at, expires_at
-         FROM approval_session_tokens WHERE token_id = ?`
-      )
-      .get(proof.token_id) as
-      | { public_key: string; operator_id: string; session_ref: string; revoked_at: string | null; expires_at: string }
-      | null;
-    if (!row) return { error: "unknown session token", status: 401 };
-    if (row.revoked_at) return { error: "session token revoked", status: 401 };
-    if (new Date(row.expires_at).getTime() < Date.now()) {
-      return { error: "session token expired", status: 401 };
-    }
-    if (row.operator_id !== proof.operator_id) return { error: "token/operator mismatch", status: 401 };
-    knownKey = row.public_key;
-    sessionRef = row.session_ref;
-  }
-
-  const verdict = verifyAuthProof(knownKey, payload, proof);
-  if (!verdict.ok) return { error: verdict.reason, status: 401 };
-  if (!rememberNonce(proof.nonce, nowSec)) return { error: "replayed-proof", status: 401 };
-
-  if (proof.kind === "operator") {
-    db.run(
-      `INSERT INTO approval_operators (operator_id, public_key, label, created_at, last_seen_at)
-       VALUES (?, ?, '', ?, ?)
-       ON CONFLICT(operator_id) DO UPDATE SET last_seen_at = excluded.last_seen_at`,
-      [proof.operator_id, knownKey, new Date().toISOString(), new Date().toISOString()]
-    );
-  }
-  return { operator_id: proof.operator_id, kind: proof.kind, session_ref: sessionRef };
-}
+const approvalAuth = createApprovalAuth({
+  queryOne: <T,>(sql: string, params: unknown[]): T | null =>
+    db.query(sql).get(...(params as never[])) as T | null,
+  queryAll: <T,>(sql: string, params: unknown[]): T[] =>
+    db.query(sql).all(...(params as never[])) as T[],
+  run: (sql: string, params: unknown[]): void => {
+    db.run(sql, params as never[]);
+  },
+  rememberNonce,
+});
 
 // Long-poll registry: /approval/wait parks here until a claim resolves it.
 const approvalWaiters = new Map<string, Set<(a: Approval) => void>>();
@@ -4390,35 +4409,49 @@ function deliverApprovalAnswer(row: ApprovalRow): void {
 function handleApprovalAdd(
   body: ApprovalAddRequest & Record<string, unknown>
 ): ApprovalAddResponse | { error: string; status: number } {
-  const auth = resolveApprovalAuth(body, "add");
-  if ("error" in auth) return auth;
+  // Card 1def56da. `authorizeCreate` returns a SCOPE (for the two reads below)
+  // and a STAMP (for the INSERT). Neither is readable here, and that is the
+  // point: this handler can no longer decide what `project_key` the new row
+  // carries, because it cannot see the value. Before this card it read
+  // `origin.project_key` out of the request body, so a sandboxed agent could
+  // file its question under another project.
+  const authorized = approvalAuth.authorizeCreate(body);
+  if (isAuthError(authorized)) return authorized;
+  const { scope, stamp } = authorized;
 
   const draft = validateApprovalDraft(body);
   if (!draft.ok) return { error: draft.error, status: 400 };
 
   // A session credential is pinned to its own session_ref: it can neither
-  // impersonate another tile nor emit "anonymously".
-  let sessionRef = draft.value.session_ref;
-  if (auth.kind === "session") {
-    if (sessionRef && sessionRef !== auth.session_ref) {
-      return { error: "session_ref does not match credential", status: 403 };
-    }
-    sessionRef = auth.session_ref ?? "";
-  }
+  // impersonate another tile nor emit "anonymously". The comparison happens
+  // inside the module (see assertStampSessionRef) so that this handler never
+  // holds the credential's session_ref either -- only the verdict comes back.
+  // The DRAFT's value is passed, not the raw body's: the validator strips
+  // control bytes and trims, and comparing the raw form would refuse a caller
+  // whose only sin was a trailing space.
+  const pinned = assertStampSessionRef(stamp, draft.value.session_ref);
+  if (pinned) return pinned;
 
   // De-duplication: a tile can only be waiting on ONE thing at a time, so a
   // second pending approval for the same tile is always a double-raise -- the
   // hook's `idle_prompt` and the Deck's attention detector both fire on the
   // same screen. Returning the existing one keeps a single notification per
   // real event instead of ringing the operator's phone twice.
+  // Both reads below go through `approvalWhere`, so they gained the project
+  // dimension without anyone deciding to add it here -- which is the whole
+  // return on the shape. The de-duplication one MATTERS: scoped on operator_id
+  // alone, two Deck windows using the same tile_ref would have collapsed two
+  // different projects' questions into one, and the second window would have
+  // received the FIRST window's approval as its own.
+  const where = approvalWhere(scope);
   if (draft.value.tile_ref) {
     const existing = db
       .query(
         `SELECT * FROM pending_approvals
-          WHERE operator_id = ? AND tile_ref = ? AND status = 'pending'
+          WHERE ${where.sql} AND tile_ref = ? AND status = 'pending'
           ORDER BY created_at DESC LIMIT 1`
       )
-      .get(auth.operator_id, draft.value.tile_ref) as ApprovalRow | null;
+      .get(...(where.params as never[]), draft.value.tile_ref) as ApprovalRow | null;
     if (existing) {
       log.info(`approval: duplicate raise for tile ${draft.value.tile_ref} — reusing ${existing.id}`);
       return { approval: rowToApproval(existing) };
@@ -4426,8 +4459,8 @@ function handleApprovalAdd(
   }
 
   const pending = db
-    .query("SELECT COUNT(*) AS n FROM pending_approvals WHERE operator_id = ? AND status = 'pending'")
-    .get(auth.operator_id) as { n: number };
+    .query(`SELECT COUNT(*) AS n FROM pending_approvals WHERE ${where.sql} AND status = 'pending'`)
+    .get(...(where.params as never[])) as { n: number };
   if (pending.n >= APPROVAL_MAX_PENDING) {
     return { error: "too many pending approvals", status: 429 };
   }
@@ -4444,63 +4477,64 @@ function handleApprovalAdd(
     1,
     Math.min(24 * 30, Number.isFinite(body.ttl_hours) ? Number(body.ttl_hours) : APPROVAL_NOTIF_TTL_HOURS)
   );
-  const approval: Approval = {
-    id: randomUUID(),
-    operator_id: auth.operator_id,
-    origin: {
-      host: pick("host").slice(0, 128),
-      os_user_hash: pick("os_user_hash").slice(0, 64),
-      project_key: pick("project_key").slice(0, 256),
-      group_id: pick("group_id").slice(0, 64),
-      from_peer: pick("from_peer").slice(0, 128),
-      session_ref: sessionRef,
-      // Untrusted routing hint (which tile to type into). Authentication pins
-      // session_ref, NOT this: the Deck re-validates it against its own live
-      // tiles before applying anything.
-      tile_ref: draft.value.tile_ref,
-    },
-    kind: draft.value.kind,
-    title: draft.value.title,
-    question: draft.value.question,
-    options: draft.value.options,
-    status: "pending",
-    reply_route: reply.route,
-    answered_via: null,
-    answer_kind: null,
-    answer_text: null,
-    created_at: now.toISOString(),
-    notif_expires_at: new Date(now.getTime() + ttlHours * 3600_000).toISOString(),
-    answered_at: null,
-    delivered_at: null,
-  };
+  // The three credential-derived columns come from the STAMP, as columns and
+  // values this handler splices without ever reading. `operator_id`,
+  // `project_key` and `session_ref` therefore cannot be chosen here, and the
+  // absence of `pick("project_key")` below is the fix card 1def56da exists for.
+  //
+  // `tile_ref` stays OUT of the stamp on purpose, and is not hardened by
+  // symmetry: the code already declares it an untrusted routing hint that the
+  // Deck re-validates against its own live tiles. Widening the credential to
+  // cover it would be scope creep with no threat behind it.
+  const stamped = stampInsert(stamp);
+  const id = randomUUID();
+  const createdAt = now.toISOString();
+  const notifExpiresAt = new Date(now.getTime() + ttlHours * 3600_000).toISOString();
 
   db.run(
     `INSERT INTO pending_approvals
-       (id, operator_id, origin_host, origin_user, project_key, group_id, from_peer,
-        session_ref, tile_ref, reply_route, reply_token, reply_group,
+       (id, ${stamped.columns.join(", ")}, origin_host, origin_user, group_id, from_peer,
+        tile_ref, reply_route, reply_token, reply_group,
         kind, title, question, options_json, status, created_at, notif_expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+     VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
     [
-      approval.id,
-      approval.operator_id,
-      approval.origin.host,
-      approval.origin.os_user_hash,
-      approval.origin.project_key,
-      approval.origin.group_id,
-      approval.origin.from_peer,
-      approval.origin.session_ref,
-      approval.origin.tile_ref,
+      id,
+      ...stamped.values,
+      pick("host").slice(0, 128),
+      pick("os_user_hash").slice(0, 64),
+      pick("group_id").slice(0, 64),
+      pick("from_peer").slice(0, 128),
+      draft.value.tile_ref,
       reply.route,
       reply.token,
       reply.group,
-      approval.kind,
-      approval.title,
-      approval.question,
-      JSON.stringify(approval.options),
-      approval.created_at,
-      approval.notif_expires_at,
+      draft.value.kind,
+      draft.value.title,
+      draft.value.question,
+      JSON.stringify(draft.value.options),
+      createdAt,
+      notifExpiresAt,
     ]
   );
+
+  // Read the row back UNDER SCOPE rather than assembling the response from the
+  // values that were just written. Two reasons, and the second is the one that
+  // matters: the response has to carry `operator_id` and `origin.project_key`,
+  // and building it by hand would mean holding those values in this handler
+  // again -- the exact thing the stamp exists to prevent. Coming back through
+  // the row makes the response a READ of what was stored, which is also what a
+  // caller actually wants to be told.
+  const row = db
+    .query(`SELECT * FROM pending_approvals WHERE id = ? AND ${where.sql}`)
+    .get(id, ...(where.params as never[])) as ApprovalRow | null;
+  // Unreachable barring a concurrent DELETE between the two statements: the
+  // INSERT above used this very scope's values, so the row matches it by
+  // construction. Loud rather than a silent 500 from a null dereference.
+  if (!row) {
+    log.error(`approval ${id} vanished between insert and read-back`);
+    return { error: "approval could not be stored", status: 500 };
+  }
+  const approval = rowToApproval(row);
   // The duplicate-raise branch above already logs its own reuse; this is the
   // nominal path's own line, and its absence was exactly what made two
   // reported occurrences of an unattributed blocking question untraceable
@@ -4524,28 +4558,44 @@ function handleApprovalAdd(
  */
 function settleApproval(
   id: string,
-  operatorId: string,
+  // Card 1def56da: was `operatorId: string`. THE point of the change is that
+  // the arity stops growing with the dimensions -- adding `deck_session_id`
+  // tomorrow changes shared/approval-scope.ts and nothing here, whereas the
+  // scalar form would have needed a parameter, a placeholder and a call-site
+  // edit in every caller, each of which can be forgotten independently.
+  scope: ApprovalScope,
   via: ApprovalVia,
   answerKind: Approval["answer_kind"],
   answerText: string | null
 ): { approval: Approval } | { error: string; status: number } {
   const allowed = via === "deck" ? "('pending','expired_notif')" : "('pending')";
   const now = new Date().toISOString();
+  const where = approvalWhere(scope);
   const res = db.run(
     `UPDATE pending_approvals
         SET status = 'answered', answered_via = ?, answer_kind = ?, answer_text = ?, answered_at = ?
-      WHERE id = ? AND operator_id = ? AND status IN ${allowed}`,
-    [via, answerKind, answerText, now, id, operatorId]
+      WHERE id = ? AND ${where.sql} AND status IN ${allowed}`,
+    [via, answerKind, answerText, now, id, ...(where.params as never[])]
   );
   if (res.changes === 0) {
+    // The existence probe is scoped TOO. Unscoped it would answer 409 for a row
+    // belonging to another project, which both leaks its existence and tells
+    // the caller a lie: from where it stands, that approval is not settled, it
+    // is not theirs.
     const exists = db
-      .query("SELECT id FROM pending_approvals WHERE id = ? AND operator_id = ?")
-      .get(id, operatorId);
+      .query(`SELECT id FROM pending_approvals WHERE id = ? AND ${where.sql}`)
+      .get(id, ...(where.params as never[]));
     return exists
       ? { error: "already-settled", status: 409 }
       : { error: "unknown approval", status: 404 };
   }
-  const row = db.query("SELECT * FROM pending_approvals WHERE id = ?").get(id) as ApprovalRow;
+  // Scoped as well, though the UPDATE above has just proved ownership: an
+  // unscoped read here was safe only BECAUSE of what ran before it, which is
+  // exactly the pattern that lets a later reorder become a leak with no diff to
+  // point at (DESIGN-APPROVAL-SCOPE.md §1.1).
+  const row = db
+    .query(`SELECT * FROM pending_approvals WHERE id = ? AND ${where.sql}`)
+    .get(id, ...(where.params as never[])) as ApprovalRow;
   const approval = rowToApproval(row);
   // C-9: when the agent is at its prompt, the broker itself hands the answer
   // over as a peer message -- no keystrokes, and it works for sessions the
@@ -4558,10 +4608,14 @@ function settleApproval(
 function handleApprovalClaim(
   body: ApprovalClaimRequest & Record<string, unknown>
 ): ApprovalClaimResponse | { error: string; status: number } {
-  const auth = resolveApprovalAuth(body, "claim");
-  if ("error" in auth) return auth;
-
   const id = typeof body.id === "string" ? body.id : "";
+  // Card 1def56da: the id is read BEFORE authorization because authorizeTarget
+  // resolves the object first and answers about THAT object, which is the whole
+  // reason the targeted family gets its own function. An empty id still has to
+  // be refused as a 400 rather than silently resolving nothing.
+  const authorized = approvalAuth.authorizeTarget<ApprovalRow>(body, "claim", id ? [id] : []);
+  if (isAuthError(authorized)) return authorized;
+  const { scope } = authorized;
   if (!id) return { error: "id is required", status: 400 };
   const via = (body.via ?? "deck") as ApprovalVia;
   if (!APPROVAL_VIAS.includes(via)) return { error: "unknown via", status: 400 };
@@ -4582,7 +4636,7 @@ function handleApprovalClaim(
     return { error: "answer_text is required for a text answer", status: 400 };
   }
 
-  const settled = settleApproval(id, auth.operator_id, via, answerKind, answerText);
+  const settled = settleApproval(id, scope, via, answerKind, answerText);
   if (!("error" in settled)) {
     // Answered in the Deck: every phone copy must stop looking actionable.
     void notifyRegistry.settle(settled.approval, via).catch((e) =>
@@ -4595,21 +4649,22 @@ function handleApprovalClaim(
 async function handleApprovalWait(
   body: ApprovalWaitRequest & Record<string, unknown>
 ): Promise<ApprovalWaitResponse | { error: string; status: number }> {
-  const auth = resolveApprovalAuth(body, "wait");
-  if ("error" in auth) return auth;
-
   const id = typeof body.id === "string" ? body.id : "";
+  // Card 1def56da. `authorizeTarget` resolves the row under scope and hands it
+  // back, so the separate `SELECT ... WHERE id = ? AND operator_id = ?` that
+  // used to stand here is gone along with the round-trip. The session pin that
+  // used to be a second `if` on `row.session_ref` is now INSIDE approvalWhere,
+  // which is why it cannot be forgotten by the next handler that needs it.
+  const authorized = approvalAuth.authorizeTarget<ApprovalRow>(body, "wait", id ? [id] : []);
+  if (isAuthError(authorized)) return authorized;
   if (!id) return { error: "id is required", status: 400 };
 
-  const row = db
-    .query("SELECT * FROM pending_approvals WHERE id = ? AND operator_id = ?")
-    .get(id, auth.operator_id) as ApprovalRow | null;
-  // Same 404 whether it never existed or belongs to another operator: never
-  // confirm the existence of another operator's approval.
+  const row = authorized.rows[0] ?? null;
+  // Same 404 whether it never existed or falls outside the caller's scope:
+  // never confirm the existence of another operator's -- or another project's
+  // -- approval. The scoping preserves that indistinguishability by
+  // construction, since an out-of-scope row simply does not come back.
   if (!row) return { error: "unknown approval", status: 404 };
-  if (auth.kind === "session" && row.session_ref !== auth.session_ref) {
-    return { error: "unknown approval", status: 404 };
-  }
   if (row.status !== "pending") return { approval: rowToApproval(row) };
 
   const timeoutSec = Math.max(
@@ -4646,31 +4701,38 @@ async function handleApprovalWait(
 function handleApprovalList(
   body: ApprovalListRequest & Record<string, unknown>
 ): ApprovalListResponse | { error: string; status: number } {
-  const auth = resolveApprovalAuth(body, "list");
-  if ("error" in auth) return auth;
+  // Card 1def56da: `authorizeQuery`, because this handler resolves no object --
+  // it IS the query. The mandatory-project_key refusal that card 4df14b5b
+  // shipped here has moved INTO the module (resolveProjectKey), where it now
+  // covers all four handlers instead of this one. Its reason is unchanged and
+  // worth keeping in sight: two Deck windows on two different repos share one
+  // operator_id, so operator_id alone lets one window's blocking questions leak
+  // into the other's Courrier, and an omitted project_key used to mean "see
+  // everything" -- which is the leak itself.
+  const authorized = approvalAuth.authorizeQuery(body, "list");
+  if (isAuthError(authorized)) return authorized;
 
-  const clauses = ["operator_id = ?"];
-  const params: unknown[] = [auth.operator_id];
-  // project_key is MANDATORY (card 4df14b5b): two Deck windows on two
-  // different repos share the same operator_id, so operator_id alone lets
-  // one window's blocking questions leak into the other's Courrier. Refusing
-  // loudly here is the fail-CLOSED direction on purpose -- an omitted or
-  // empty project_key used to mean "see everything", which is exactly the
-  // leak. A caller that forgets it now gets an explicit 400 the same day
-  // instead of a silent cross-project union that nobody notices for weeks.
-  if (typeof body.project_key !== "string" || !body.project_key) {
-    log.warn(`approval/list refused: missing project_key (operator ${auth.operator_id})`);
-    return { error: "project_key is required", status: 400 };
-  }
-  clauses.push("project_key = ?");
-  params.push(body.project_key);
+  const where = approvalWhere(authorized.scope);
+  // The identity clause is INTERPOLATED FIRST and literally, rather than pushed
+  // into the `clauses` array it used to head. The behaviour is identical; the
+  // difference is that a reader -- and the discipline scan in
+  // tests/desktop-approval-scope-discipline.test.ts -- can see the scope in the
+  // statement itself. Hidden behind `clauses.join(...)`, a later edit that
+  // seeded the array from somewhere else would have dropped the scope with
+  // nothing to point at.
+  const filters: string[] = [];
+  const params: unknown[] = [...where.params];
   if (typeof body.status === "string" && body.status) {
-    clauses.push("status = ?");
+    filters.push("status = ?");
     params.push(body.status);
   }
-  if (body.undelivered_only) clauses.push("status = 'answered' AND delivered_at IS NULL");
+  if (body.undelivered_only) filters.push("status = 'answered' AND delivered_at IS NULL");
   const rows = db
-    .query(`SELECT * FROM pending_approvals WHERE ${clauses.join(" AND ")} ORDER BY created_at DESC LIMIT 500`)
+    .query(
+      `SELECT * FROM pending_approvals WHERE ${where.sql}` +
+        filters.map((c) => ` AND ${c}`).join("") +
+        ` ORDER BY created_at DESC LIMIT 500`
+    )
     .all(...params) as ApprovalRow[];
   return { approvals: rows.map(rowToApproval) };
 }
@@ -4678,18 +4740,22 @@ function handleApprovalList(
 function handleApprovalDelivered(
   body: ApprovalDeliveredRequest & Record<string, unknown>
 ): ApprovalDeliveredResponse | { error: string; status: number } {
-  const auth = resolveApprovalAuth(body, "list");
-  if ("error" in auth) return auth;
   const ids = Array.isArray(body.ids) ? body.ids.filter((i): i is string => typeof i === "string") : [];
+  // Card 1def56da. A BATCH: every id must be scoped, not just the first. The
+  // loop below composes the same clause for each, so a caller cannot slip one
+  // foreign id into an otherwise legitimate batch and have it marked delivered.
+  const authorized = approvalAuth.authorizeTarget<ApprovalRow>(body, "list", ids.slice(0, 200));
+  if (isAuthError(authorized)) return authorized;
   if (ids.length === 0) return { marked: 0 };
+  const where = approvalWhere(authorized.scope);
   const now = new Date().toISOString();
   let marked = 0;
   const tx = db.transaction(() => {
     for (const id of ids.slice(0, 200)) {
       marked += db.run(
         `UPDATE pending_approvals SET delivered_at = ?
-          WHERE id = ? AND operator_id = ? AND delivered_at IS NULL`,
-        [now, id, auth.operator_id]
+          WHERE id = ? AND ${where.sql} AND delivered_at IS NULL`,
+        [now, id, ...(where.params as never[])]
       ).changes;
     }
   });
@@ -4720,8 +4786,14 @@ async function handleChannelConnect(
     }
   | { error: string; status: number }
 > {
-  const auth = resolveApprovalAuth(body, "channels");
-  if ("error" in auth) return auth;
+  // Card 1def56da: `authenticateOperator`, not one of the `authorize*` family.
+  // A notification channel BELONGS to an operator, so `operator_id` here is the
+  // business key and not a scope this handler could delegate. What the split
+  // buys is the other direction: holding an identity, this handler cannot build
+  // a clause on `pending_approvals` -- `approvalWhere` takes a scope, and no
+  // exported function turns an identity into one.
+  const auth = approvalAuth.authenticateOperator(body, "channels");
+  if (isAuthError(auth)) return auth;
 
   const kind = typeof body.kind === "string" ? (body.kind as ChannelKind) : ("" as ChannelKind);
   if (kind !== "telegram" && kind !== "discord" && kind !== "ntfy") {
@@ -4819,8 +4891,14 @@ async function handleChannelConnect(
 async function handleChannelDisconnect(
   body: Record<string, unknown>
 ): Promise<{ removed: number } | { error: string; status: number }> {
-  const auth = resolveApprovalAuth(body, "channels");
-  if ("error" in auth) return auth;
+  // Card 1def56da: `authenticateOperator`, not one of the `authorize*` family.
+  // A notification channel BELONGS to an operator, so `operator_id` here is the
+  // business key and not a scope this handler could delegate. What the split
+  // buys is the other direction: holding an identity, this handler cannot build
+  // a clause on `pending_approvals` -- `approvalWhere` takes a scope, and no
+  // exported function turns an identity into one.
+  const auth = approvalAuth.authenticateOperator(body, "channels");
+  if (isAuthError(auth)) return auth;
   const kind = typeof body.kind === "string" ? (body.kind as ChannelKind) : ("" as ChannelKind);
   if (!kind) return { error: "kind is required", status: 400 };
 
@@ -4843,8 +4921,14 @@ async function handleChannelDisconnect(
 function handleChannelList(
   body: Record<string, unknown>
 ): { channels: Array<Record<string, unknown>> } | { error: string; status: number } {
-  const auth = resolveApprovalAuth(body, "channels");
-  if ("error" in auth) return auth;
+  // Card 1def56da: `authenticateOperator`, not one of the `authorize*` family.
+  // A notification channel BELONGS to an operator, so `operator_id` here is the
+  // business key and not a scope this handler could delegate. What the split
+  // buys is the other direction: holding an identity, this handler cannot build
+  // a clause on `pending_approvals` -- `approvalWhere` takes a scope, and no
+  // exported function turns an identity into one.
+  const auth = approvalAuth.authenticateOperator(body, "channels");
+  if (isAuthError(auth)) return auth;
   const secrets = db
     .query("SELECT kind, hint, label FROM approval_channel_secrets WHERE operator_id = ?")
     .all(auth.operator_id) as Array<{ kind: string; hint: string; label: string }>;
@@ -4875,8 +4959,11 @@ function handleChannelList(
 function handleApprovalTokenMint(
   body: ApprovalTokenMintRequest & Record<string, unknown>
 ): ApprovalTokenMintResponse | { error: string; status: number } {
-  const auth = resolveApprovalAuth(body, "mint-token");
-  if ("error" in auth) return auth;
+  // Card 1def56da: identity, not scope. A session token belongs to an operator
+  // and this handler writes `approval_session_tokens`, a different table that
+  // `approvalWhere` deliberately does not cover.
+  const auth = approvalAuth.authenticateOperator(body, "mint-token");
+  if (isAuthError(auth)) return auth;
 
   const sessionPublicKey = typeof body.session_public_key === "string" ? body.session_public_key : "";
   const sessionRef = typeof body.session_ref === "string" ? body.session_ref.trim().slice(0, 128) : "";
@@ -4887,16 +4974,27 @@ function handleApprovalTokenMint(
     1,
     Math.min(24 * 30, Number.isFinite(body.ttl_hours) ? Number(body.ttl_hours) : 24)
   );
+  // Card 1def56da: the project the Deck window minting this credential works
+  // on. It is pinned HERE, once, by the operator, so that the agent holding the
+  // token can never choose it later -- the same discipline `session_ref` has
+  // always had. Required: a mint without it would produce a credential that
+  // every `add` then refuses, which is a worse failure than refusing the mint.
+  const projectKey = typeof body.project_key === "string" ? body.project_key.slice(0, 256) : "";
+  if (!projectKey) return { error: "project_key is required", status: 400 };
   const tokenId = deriveTokenId(sessionPublicKey);
   const now = new Date();
   const expiresAt = new Date(now.getTime() + ttlHours * 3600_000).toISOString();
   db.run(
     `INSERT INTO approval_session_tokens
-       (token_id, operator_id, public_key, session_ref, created_at, expires_at, revoked_at)
-     VALUES (?, ?, ?, ?, ?, ?, NULL)
+       (token_id, operator_id, public_key, session_ref, project_key, created_at, expires_at, revoked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
      ON CONFLICT(token_id) DO UPDATE SET
-       expires_at = excluded.expires_at, revoked_at = NULL`,
-    [tokenId, auth.operator_id, sessionPublicKey, sessionRef, now.toISOString(), expiresAt]
+       expires_at = excluded.expires_at, revoked_at = NULL,
+       -- Re-minting must REFRESH the project: a tile reused for another repo
+       -- keeps its token_id (derived from the key) but must not keep the old
+       -- project, or the scope would silently lag one window behind.
+       project_key = excluded.project_key`,
+    [tokenId, auth.operator_id, sessionPublicKey, sessionRef, projectKey, now.toISOString(), expiresAt]
   );
   return { token_id: tokenId, expires_at: expiresAt };
 }
@@ -4904,8 +5002,11 @@ function handleApprovalTokenMint(
 function handleApprovalTokenRevoke(
   body: ApprovalTokenRevokeRequest & Record<string, unknown>
 ): ApprovalTokenRevokeResponse | { error: string; status: number } {
-  const auth = resolveApprovalAuth(body, "mint-token");
-  if ("error" in auth) return auth;
+  // Card 1def56da: identity, not scope. A session token belongs to an operator
+  // and this handler writes `approval_session_tokens`, a different table that
+  // `approvalWhere` deliberately does not cover.
+  const auth = approvalAuth.authenticateOperator(body, "mint-token");
+  if (isAuthError(auth)) return auth;
   const now = new Date().toISOString();
   if (typeof body.token_id === "string" && body.token_id) {
     const r = db.run(
@@ -5097,10 +5198,14 @@ const channelHost: ChannelHost = {
     // and comparing was equivalent only while an address belonged to exactly
     // one operator — which stops being true the moment one person runs two OS
     // accounts against one bot and one chat account.
-    const row = db
-      .query("SELECT * FROM pending_approvals WHERE id = ?")
-      .get(answer.approvalId) as ApprovalRow | null;
-    if (!row) return null;
+    // Card 1def56da, review round 2. The row AND its scope come back together
+    // from the module, which read the row itself. Two consequences worth the
+    // line: this handler no longer performs raw SQL on the protected table at
+    // all, and the scope cannot be assembled from anything the sender supplied
+    // -- the only thing crossing in is an id.
+    const resolved = approvalAuth.scopeForAnsweredRow<ApprovalRow>(answer.approvalId);
+    if (!resolved) return null;
+    const row = resolved.row;
     const binding = bindingFor(kind, answer.fromAddress, row.operator_id);
     // Not paired for this owner — a stranger, or the operator's own other
     // account. Nothing is written, and the sender is told no more than
@@ -5113,9 +5218,16 @@ const channelHost: ChannelHost = {
       if (!clean.ok) return null;
       answerText = clean.value;
     }
+    // Card 1def56da. The TWELFTH authorization path, and the only one with no
+    // credential: the sender proved nothing by signature, the PAIRING above is
+    // what proves ownership. The scope was minted by the module from the row it
+    // read, so it matches that one row and can widen nothing. Nothing here
+    // chooses it: review measured that when this call passed a scope BUILT from
+    // local values, swapping `binding.operator_id` for `answer.fromAddress`
+    // left every suite green.
     const settled = settleApproval(
       answer.approvalId,
-      binding.operator_id,
+      resolved.scope,
       kind,
       answer.answerKind,
       answerText
