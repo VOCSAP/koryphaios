@@ -84,6 +84,7 @@ import {
   GRAPH_DRAFT_TIMEOUT_MS,
 } from "./shared/graph-draft.ts";
 import { buildRoadmapAppendHeader } from "./shared/roadmap-append.ts";
+import { composeOutboundMessage } from "./shared/message-framing.ts";
 import { resolveProjectKey } from "./shared/project-key.ts";
 import { tmpdir } from "node:os";
 import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
@@ -510,6 +511,11 @@ const TOOLS = [
         message: {
           type: "string" as const,
           description: "The message to send",
+        },
+        expects_reply: {
+          type: "boolean" as const,
+          description:
+            "Optional. Set to false for a message that INFORMS rather than asks: the recipient is then explicitly told not to acknowledge it, which saves them a whole inference turn. Omit it (or pass true) when you genuinely need an answer. Use false for results, status updates and hand-offs; use the default for questions and requests.",
         },
       },
       required: ["to_peer_id", "message"],
@@ -1141,7 +1147,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
     case "send_message": {
       // Accept both new (to_peer_id) and legacy (to_id) for robustness.
-      const a = args as { to_peer_id?: string; to_id?: string; message: string };
+      // expects_reply is typed `unknown`, not `boolean`, deliberately: this is
+      // an MCP tool argument, so the declared inputSchema describes what the
+      // caller was ASKED for, never what arrived. composeOutboundMessage does
+      // the strict-boolean check (see shared/message-framing.ts, which also
+      // explains why the framing happens here at emission rather than on the
+      // receiving side).
+      const a = args as {
+        to_peer_id?: string;
+        to_id?: string;
+        message: string;
+        expects_reply?: unknown;
+      };
       const target = a.to_peer_id ?? a.to_id;
       if (!target) {
         return {
@@ -1159,7 +1176,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         const result = await brokerFetch<{ ok: boolean; error?: string }>("/send-message", {
           from_token: myInstanceToken,
           to_peer_id: target,
-          text: a.message,
+          // `target` is passed so the operator inbox is never framed: this tool
+          // accepts to_peer_id 'operator', which reaches a PERSON. See
+          // composeOutboundMessage's own doc; the exclusion lives there, not
+          // here, so a test can pin it.
+          text: composeOutboundMessage(a.message, a.expects_reply, target),
         });
         if (!result.ok) {
           return {

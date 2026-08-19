@@ -308,7 +308,7 @@ The current peer is parked as `dormant` (resume-able), and a fresh registration 
 | Tool             | What it does                                                                                                  |
 | ---------------- | ------------------------------------------------------------------------------------------------------------- |
 | `list_peers`     | Find other Claude Code instances in your group -- scoped to `machine`, `directory`, or `repo` (cross-PC)      |
-| `send_message`   | Send a message to another peer in your group by `peer_id` (push via WebSocket, fallback queues to poll)       |
+| `send_message`   | Send a message to another peer in your group by `peer_id` (push via WebSocket, fallback queues to poll); optional `expects_reply: false` waives the acknowledgement |
 | `set_summary`    | Describe what you're working on (visible to peers in your group)                                              |
 | `check_messages` | Manual poll fallback (rarely needed; messages normally arrive via WS push)                                    |
 | `whoami`         | Show your `peer_id`, host, cwd, current group, summary, and `ws_connected` status                             |
@@ -326,6 +326,14 @@ HUMAN in front of the desktop Deck (questions, results, blockers -- drained
 into the Deck's inbox panel, no reply comes back through this channel), and
 `deck` is the non-routable sender of Deck announcements (never a valid
 target). `set_id` refuses the reserved names `deck`, `system` and `operator`.
+
+`send_message` also takes an optional `expects_reply: false`. Use it when the
+message INFORMS rather than asks -- a result, a status update, a hand-off --
+so the recipient is told not to acknowledge it and skips a whole inference
+turn; omit it (or pass `true`) for anything that genuinely needs an answer.
+Omitting the field is byte-for-byte identical to today's behaviour. The
+waiver is never applied when the target is `operator`, since a reply is the
+whole point of that channel.
 
 ---
 
