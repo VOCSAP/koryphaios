@@ -193,9 +193,13 @@ Read only file/skill matching area you touch:
   bug** (its tmpdirs aren't symlinked), so regression test must build
   symlinked prefix itself (`TESTING.md`, "Cross-platform tests").
 - **Naming a scratch/plan/report doc?** `.gitignore` silently excludes
-  `findings.md`, `task_plan.md`, `progress.md`, `progress-archive.md`, `docs/`,
-  and `.claude/session-checkpoint.md`. Deliverable you intend to commit (audit
-  report, plan, notes) must use different name, or it vanishes from `git add`.
+  `findings.md`, `task_plan.md`, `progress.md`, `progress-archive.md`,
+  `/docs/` (root only -- `desktop/docs/` is a real, tracked docs tree and is
+  NOT excluded), and `.claude/session-checkpoint.md`. Deliverable you intend
+  to commit (audit report, plan, notes) must use different name, or it
+  vanishes from `git add`. `git check-ignore -v <path>` only tells the truth
+  on a path NOT already tracked -- a tracked neighbour always reports "not
+  ignored" regardless of the rule, since git skips indexed paths.
 
 ## Running
 
