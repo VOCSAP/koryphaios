@@ -21,6 +21,7 @@ import {
   type SpawnMode
 } from './session-command'
 import { ThinkingDetector, type ThinkingEvent } from './thinking'
+import { isClaudeLaunch } from './session-kind'
 import {
   QuotaDetector,
   type QuotaClearEvent,
@@ -56,6 +57,21 @@ interface RuntimeState {
   resumeAt: number | null
   /** True while the session waits for the operator (attention.ts, PLAN C11). */
   needsAttention: boolean
+  /**
+   * True when this session runs the Claude Code CLI itself (session-kind.ts).
+   * FROZEN at spawn time (startPty) from the command actually used to build
+   * that spawn's command line -- never recomputed afterward. Card fd1914cc
+   * correction: `this.launchCommand` can change while a session stays alive
+   * (setLaunchCommand's own doc comment: "Affects future spawns only; live
+   * PTYs keep running what they started with"), so a live recompute would
+   * let an already-running claude session flip to "non-claude" out from
+   * under itself and silently re-arm the Deck's own double injector.
+   * restart() re-spawns and so recomputes this for the new instance; the
+   * def itself has no live-edit path for `command` (verified: no
+   * `def.command =` / `session.command =` assignment anywhere under
+   * desktop/src).
+   */
+  claudeLaunch: boolean
   /**
    * One-shot join-announce intent for a FRESH session. Set on create(), null on
    * restore (a resumed peer was already announced). Consumed (cleared) the first
@@ -216,7 +232,7 @@ export class SessionService extends EventEmitter {
       this.emit('data', e)
       this.outputAt.set(e.id, Date.now())
       this.thinkingDetector.feed(e.id, e.data)
-      this.quotaDetector.feed(e.id, e.data)
+      if (!this.quotaGateActive(e.id)) this.quotaDetector.feed(e.id, e.data)
       this.attentionDetector.feed(e.id, e.data)
       this.startupAckDetector.feed(e.id, e.data)
       this.screenGuard.feed(e.id, e.data)
@@ -486,6 +502,11 @@ export class SessionService extends EventEmitter {
       rateLimited: false,
       resumeAt: null,
       needsAttention: false,
+      // Initial value; startPty() (called synchronously below via
+      // spawnSession) overwrites it with the authoritative frozen-at-spawn
+      // read, so this only avoids a structurally-missing field in the
+      // window before that call.
+      claudeLaunch: this.resolveClaudeLaunch(def),
       // Fresh session -> announce its arrival once the peer_id resolves. The
       // advanced menu may supply a custom note; otherwise the agent/model/effort
       // default is composed downstream.
@@ -620,6 +641,10 @@ export class SessionService extends EventEmitter {
         rateLimited: false,
         resumeAt: null,
         needsAttention: false,
+        // Initial value; the spawnSession()->startPty() loop right below
+        // overwrites it with the authoritative frozen-at-spawn read for
+        // every def, same as create() above.
+        claudeLaunch: this.resolveClaudeLaunch(d),
         // Restored peers were already announced on their original join -> no
         // re-announce on restore.
         announce: null
@@ -952,6 +977,12 @@ export class SessionService extends EventEmitter {
       r.rateLimited = false
       r.resumeAt = null
       r.needsAttention = false
+      // Frozen-at-spawn (card fd1914cc correction): `base` above is the
+      // command THIS instance actually starts on -- set here, not
+      // recomputed by isClaudeSession/toRuntime afterward, so a later
+      // this.launchCommand change (setLaunchCommand) cannot flip an
+      // already-live session's claude/non-claude answer out from under it.
+      r.claudeLaunch = isClaudeLaunch(base)
     }
     // Fresh process -> fresh detector state (stale buffers/timers dropped).
     this.quotaDetector.clear(def.id)
@@ -998,22 +1029,90 @@ export class SessionService extends EventEmitter {
       expired: r?.expired ?? false,
       rateLimited: r?.rateLimited ?? false,
       resumeAt: r?.resumeAt ?? null,
-      needsAttention: r?.needsAttention ?? false
+      needsAttention: r?.needsAttention ?? false,
+      // Read from RuntimeState, never recomputed here (card fd1914cc
+      // correction) -- single source of truth, frozen at spawn by startPty.
+      // No runtime yet: leans "it's claude" (see isClaudeSession's doc).
+      claudeLaunch: r?.claudeLaunch ?? true
     }
+  }
+
+  /**
+   * Resolves whether `def` runs the Claude Code CLI itself, from its OWN
+   * command (falling back to the resolved base `this.launchCommand`, same
+   * precedence as startPty's `base`). Used ONLY to seed the initial
+   * RuntimeState.claudeLaunch at create()/restoreFrom() and by startPty to
+   * set the authoritative frozen-at-spawn value -- never called afterward
+   * to re-derive a live session's answer (see RuntimeState.claudeLaunch).
+   */
+  private resolveClaudeLaunch(def: SessionDef): boolean {
+    return isClaudeLaunch(def.command.trim() || this.launchCommand)
+  }
+
+  /**
+   * True when `id`'s live session runs the Claude Code CLI itself, read
+   * from the value RuntimeState.claudeLaunch froze at spawn time (card
+   * fd1914cc correction) -- never recomputed from the CURRENT
+   * `this.launchCommand`/`def.command`, which could answer differently
+   * than what this session's own PTY actually started on. No runtime state
+   * yet (not spawned, or already removed): leans "it's claude, don't
+   * inject" per the asymmetry documented on quotaGateActive below -- a
+   * silently-skipped non-claude resume is safer than a silent double
+   * injection.
+   */
+  private isClaudeSession(id: string): boolean {
+    const r = this.runtime.get(id)
+    return r ? r.claudeLaunch : true
+  }
+
+  /**
+   * True when the Deck's OWN quota detector+injector must stay off for
+   * `id` (card fd1914cc). Gates ONLY the DEFAULT path -- `def.autoResume`
+   * left `undefined`, i.e. the session follows the global setting -- never
+   * an EXPLICIT per-session override. Claude Code 2.1.235+ ships its own
+   * `autoContinueAtUsageLimit` resume, but that is NOT provable active from
+   * here: the /config toggle is shown only conditionally, is
+   * `consentGated`, and its state is partly server-side (not present in
+   * this machine's settings.json even when the CLI is current). Silencing
+   * the default path without an escape hatch would trade a visible doubled
+   * injection for a SILENT non-resume, which is worse -- so an operator who
+   * explicitly sets `autoResume` (true OR false) on a claude session always
+   * wins, restoring the pre-fd1914cc behaviour for that tile: `true` keeps
+   * `quotaDetector.feed` running (it needs a trigger) and lets `autoResume`
+   * below inject; `false` also keeps `feed` running (so the rate-limited
+   * badge still shows) but `autoResume` no-ops on `enabled === false`, same
+   * as any other explicitly-disabled session.
+   */
+  private quotaGateActive(id: string): boolean {
+    const def = this.defs.find((d) => d.id === id)
+    // No def (already removed, or a race on a dying PTY's trailing data):
+    // lean gate-ACTIVE, the same "unknown -> assume claude" direction
+    // isClaudeSession documents above. Functionally inert either way here
+    // (autoResume() and the 'limit'/'resume-due' handlers already no-op on
+    // a missing def/runtime), but kept coherent on purpose rather than
+    // silently pointing the opposite way (team-lead mutation review).
+    if (!def) return true
+    return def.autoResume === undefined && this.isClaudeSession(id)
   }
 
   /**
    * Inject the resume keystrokes when a quota episode's reset time passes:
    * Escape (dismisses the /rate-limit-options menu), a 100 ms settle, then the
    * literal prompt "continue" + Enter -- exactly what a human would type. Only
-   * fires when auto-resume is enabled for this session (per-session override,
-   * else the global setting), the PTY is alive and the episode is still open
-   * (the user may have resumed manually in the meantime).
+   * fires when `quotaGateActive(id)` is false (this session is not on the
+   * claude-default gate -- either it is not a claude launch, or the operator
+   * set an explicit per-session override), auto-resume is enabled (per-session
+   * override, else the global setting), the PTY is alive and the episode is
+   * still open (the user may have resumed manually in the meantime). In
+   * practice `quotaGateActive` guards `quotaDetector.feed` too (the pty
+   * 'data' handler above), so a gated session never reaches this method at
+   * all -- the check here is defense-in-depth, not the load-bearing gate.
    */
   private autoResume(id: string): void {
     const def = this.defs.find((d) => d.id === id)
     const r = this.runtime.get(id)
     if (!def || !r) return
+    if (this.quotaGateActive(id)) return
     const enabled = def.autoResume ?? this.getConfig().autoResumeQuota
     if (!enabled || !r.rateLimited || !this.pty.isAlive(id)) return
 

@@ -92,6 +92,20 @@ export interface SessionRuntime extends SessionDef {
   resumeAt: number | null
   /** True while the session waits for the operator (permission/question, C11). */
   needsAttention: boolean
+  /**
+   * True when this session runs the Claude Code CLI itself (session-kind.ts,
+   * card fd1914cc). FROZEN AT SPAWN (main's RuntimeState.claudeLaunch, set
+   * by startPty from the command actually used for that spawn) -- never
+   * recomputed afterward, so it cannot flip out from under an already-live
+   * session if the global launch command changes while it runs. Claude Code
+   * 2.1.235+ owns its own quota resume by default, but that is not provable
+   * active from here, so the Deck's detector only stays off for such a
+   * session while it follows the global default (`autoResume === undefined`
+   * -- see `quotaGateActive` in session-service.ts); an explicit per-session
+   * override always wins and restores normal detection+injection. Never
+   * persisted.
+   */
+  claudeLaunch: boolean
 }
 
 /** Lightweight workspace row for the restore picker (no sessions payload). */

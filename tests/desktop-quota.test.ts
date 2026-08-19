@@ -1,6 +1,18 @@
 // PLAN-v0.4 C1: quota (usage-limit) detection + auto-resume scheduling.
 // Fixtures mirror the real Claude Code screens the regexes were derived from
 // (via henryaj/autoclaude's verified pattern families).
+//
+// Scope note (koryphaios card fd1914cc audit, 2026-08-19): this file tests
+// ONLY quota.ts's own units (detectRateLimit/parseResetClock/QuotaDetector)
+// -- it never touches session-service.ts. The double-injection bug that
+// fd1914cc fixed lived one layer up, in SessionService's unconditional
+// `quotaDetector.feed()` call, which nothing here exercises. So this file
+// was already green before that fix landed, but that was never informative
+// about the bug: it was never the relevant guard for it. The gating
+// behaviour (isClaudeSession/quotaGateActive) is covered by
+// tests/desktop-quota-gate.test.ts instead. Keep that split -- this file
+// stays scoped to quota.ts's own parsing/detector contract, which is still
+// genuinely exercised (conditionally) by session-service.ts today.
 
 import { test, expect } from "bun:test";
 

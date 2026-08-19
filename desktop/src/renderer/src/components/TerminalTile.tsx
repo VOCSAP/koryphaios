@@ -256,6 +256,12 @@ export function TerminalTile({
             {GLYPH_BADGES.warning} {t('attention.badge')}
           </button>
         )}
+        {/* Consciously exempt from the claudeLaunch gate (card fd1914cc):
+            main-side detection only stays off for a claude session while it
+            follows the global default (session-service.ts quotaGateActive);
+            an explicit per-session override still feeds the detector, so
+            rateLimited/resumeAt are real for this branch either way -- it
+            just displays whatever state the tile is actually in. */}
         {session.rateLimited && (
           <span className="tile-quota">
             {(session.autoResume ?? config.autoResumeQuota) && session.resumeAt

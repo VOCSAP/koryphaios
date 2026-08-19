@@ -11,7 +11,7 @@ import { CreateMenu } from './CreateMenu'
 import { MessageBar } from './MessageBar'
 
 /** Drag-and-drop wiring passed from the Sidebar down to each row. */
-interface RowDnd {
+export interface RowDnd {
   dragId: string | null
   overId: string | null
   onDragStart: (id: string) => void
@@ -20,7 +20,13 @@ interface RowDnd {
   onDragEnd: () => void
 }
 
-function SessionRow({
+// Exported (was file-local) so tests/desktop-sidebar-autoresume-dom.test.ts
+// can mount ONE row directly with a minimal store surface, instead of the
+// whole Sidebar tree (which would drag in createSession/reorderSessions/
+// workspaces/sandbox/etc. for no added bite -- same reasoning as
+// tests/desktop-explorer-selection-dom.test.ts's scope note on mounting
+// HighlightedLines instead of the whole ExplorerView).
+export function SessionRow({
   session,
   dnd,
   roster,
@@ -317,10 +323,22 @@ function SessionRow({
               onSelect: copyPeerTable,
               disabled: !peerTable
             },
-            {
-              label: autoResumeOn ? t('sidebar.autoResumeOff') : t('sidebar.autoResumeOn'),
-              onSelect: () => void setAutoResume(session.id, !autoResumeOn)
-            },
+            // Claude Code 2.1.235+ *may* own its own quota resume (card
+            // fd1914cc), but that is not provable from here (the /config
+            // toggle is conditional, consentGated, server-tracked) -- so the
+            // global default is only gated OFF for this session while it
+            // follows that default (`session.autoResume === undefined`);
+            // this stays ACTIONABLE (never disabled) so the operator can
+            // force it back on for this tile without restarting the app.
+            session.claudeLaunch && session.autoResume === undefined
+              ? {
+                  label: t('sidebar.autoResumeNative'),
+                  onSelect: () => void setAutoResume(session.id, true)
+                }
+              : {
+                  label: autoResumeOn ? t('sidebar.autoResumeOff') : t('sidebar.autoResumeOn'),
+                  onSelect: () => void setAutoResume(session.id, !autoResumeOn)
+                },
             {
               label: (
                 <>

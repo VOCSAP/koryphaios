@@ -77,7 +77,7 @@ function findUnbroadcastMutators(src: string, fields: string[]): string[] {
 // assigned in session-service.ts's pollPeerIds() (~line 1048) but is
 // deliberately internal, never returned by toRuntime(); a check like "every
 // r.<field> = must appear in toRuntime()'s return" would be red from day one.
-const KNOWN_FIELDS = ["exitCode", "expired", "needsAttention", "peerId", "pid", "rateLimited", "resumeAt", "status", "thinking"];
+const KNOWN_FIELDS = ["claudeLaunch", "exitCode", "expired", "needsAttention", "peerId", "pid", "rateLimited", "resumeAt", "status", "thinking"];
 
 // Independent of KNOWN_FIELDS on purpose: a hostile or careless edit that
 // widens the baseline list to match a broken extractor's output (the thing

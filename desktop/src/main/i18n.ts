@@ -108,6 +108,8 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sidebar.peerTableYou': '(you)',
   'sidebar.autoResumeOn': 'Enable quota auto-resume',
   'sidebar.autoResumeOff': 'Disable quota auto-resume',
+  'sidebar.autoResumeNative':
+    "Force quota auto-resume (the global setting doesn't apply to this Claude session)",
 
   'status.running': 'running',
   'status.starting': 'starting',
@@ -183,7 +185,7 @@ export const EN_DEFAULTS: Record<string, string> = {
     'Stores a custom (shared) group secret encrypted via the OS keystore so its workspace can be restored without re-supplying the secret. Off = supply it via the launch argument each time.',
   'settings.autoResumeQuota': 'Auto-resume sessions when the usage limit resets',
   'settings.autoResumeQuotaHelp':
-    'When a session hits Claude\'s usage limit, wait for the reset time printed on screen, then submit "continue" automatically. Overridable per session via its right-click menu.',
+    'Does not apply to Claude Code sessions -- their resume is handled by the CLI itself, not this setting, and on the default path the Deck also stops showing their quota status anywhere (limit reached / resume time, including on mobile). Still applies to other CLIs: waits for the reset time printed on screen, then submits "continue" automatically. Overridable per session via its right-click menu, including forcing it back on for a Claude Code tile.',
   'settings.language': 'Language',
   'settings.languageAuto': 'Auto (system)',
   'settings.glowColor': 'Glyph glow colour',
