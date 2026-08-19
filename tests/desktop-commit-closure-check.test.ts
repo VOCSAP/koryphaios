@@ -280,6 +280,20 @@ describe("--staged mode", () => {
 });
 
 describe("--pr mode (import closure per commit, control bytes over the net diff)", () => {
+  // The three tests below (this one, "import closure is still judged per
+  // commit...", "a non-ASCII path is carried through the NET diff too...")
+  // are the only ones in this file that call runPrCheck over the FULL
+  // shas.base..HEAD range (~20 commits, each read via its own git
+  // subprocess) rather than a single sha or a same-ref empty range. Card
+  // ba58fb12: measured 5.2-5.5s each, in-process, even with the fixture's
+  // own commits made hermetic to the host's git hooks (see HOOKS_OFF in
+  // scripts/fixtures/make-closure-sensitivity-repo.ts) -- this cost is the
+  // range walk itself, a different and unrelated budget from the
+  // beforeAll fixture build. An explicit per-test timeout, not a raised
+  // file- or suite-wide default, keeps the other 54 tests (most well under
+  // 100ms) honest about their own budget; 30_000ms matches the timeout
+  // already used a few tests below for the shallow/partial clone probes,
+  // the other git-subprocess-heavy tests in this same file.
   test("a control byte introduced and healed INSIDE the range is not reported, while one still present at head is", () => {
     // The whole point of the split, in one call. Per commit the range still
     // holds a real red on ansi.ts (shas.controlByte, correct history), but
@@ -296,7 +310,7 @@ describe("--pr mode (import closure per commit, control bytes over the net diff)
         (p) => p.kind === "control-byte" && p.file === "desktop/src/ansi.ts",
       ),
     ).toBe(true);
-  });
+  }, 30_000);
 
   test("import closure is still judged per commit inside the range, at each commit's own tree", () => {
     const result = runPrCheck(MAIN_REPO, shas.base, "HEAD");
@@ -308,7 +322,7 @@ describe("--pr mode (import closure per commit, control bytes over the net diff)
       ),
     ).toBe(true);
     expect(result.problems.every((p) => p.kind !== "tool-error")).toBe(true);
-  });
+  }, 30_000);
 
   test("an empty range is a legitimate 0, distinguishable from a range that could not be listed", () => {
     const result = runPrCheck(MAIN_REPO, "HEAD", "HEAD");
@@ -349,7 +363,7 @@ describe("--pr mode (import closure per commit, control bytes over the net diff)
     // the two domains are reported separately and never summed
     expect(result.filesInCommits).not.toBe(undefined);
     expect(result.filesInNetDiff).not.toBe(undefined);
-  });
+  }, 30_000);
 
   test("FAILS CLOSED on a PARTIAL clone, which the shallow question answers false for", () => {
     // A blob-less clone has the whole history and none of the content: every

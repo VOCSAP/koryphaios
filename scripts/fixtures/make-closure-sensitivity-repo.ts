@@ -126,10 +126,33 @@ export interface SensitivityRepoShas {
   mergeCommit: string;
 }
 
+// `-c core.hooksPath=` isolates every commit this fixture makes from the
+// HOST's global git hooks (a `~/.gitconfig` with `core.hooksPath` set runs
+// against ANY repo, including a throwaway one under os.tmpdir()). Card
+// ba58fb12: this machine's global hook runs a secret scanner on every commit
+// (~200-450ms each), which can push ~20 commits past Bun's 5s test timeout
+// and gets the commit itself killed -- not refused, just never finished, so
+// `r.stderr` comes back empty and the thrown message below used to blame the
+// wrong (innocent) commit. The empty value scopes to exactly `-c`'s process,
+// never the host's `~/.gitconfig` itself, so it cannot affect anything else
+// git does on this machine.
+const HOOKS_OFF = ["-c", "core.hooksPath="];
+
 function git(repo: string, args: string[]) {
-  const r = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+  const r = spawnSync("git", [...HOOKS_OFF, "-C", repo, ...args], { encoding: "utf8" });
   if (r.status !== 0) {
-    throw new Error(`git ${args.join(" ")} failed in ${repo}: ${r.stderr}`);
+    // A process bun kills for exceeding its timeout reports `status` (SIGTERM
+    // maps to a synthetic non-zero code on Windows spawnSync) with `stderr`
+    // EMPTY -- git never got to write anything. Reporting only `stderr` (the
+    // previous shape) surfaces nothing about THAT failure mode and instead
+    // reads as if git rejected the command over its own content, which sent
+    // more than one reader chasing the wrong commit. `status`/`signal`/`error`
+    // are the fields that actually distinguish "git refused" from "git was
+    // killed" or "the binary could not even be spawned".
+    throw new Error(
+      `git ${args.join(" ")} failed in ${repo}: status=${r.status} signal=${r.signal} ` +
+        `error=${r.error ?? "none"} stderr=${JSON.stringify(r.stderr)} stdout=${JSON.stringify(r.stdout)}`,
+    );
   }
   return r.stdout.trim();
 }
@@ -521,7 +544,12 @@ export function stageOnlyDefect(dir: string): void {
 export function buildShallowClone(sourceDir: string, dir: string): boolean {
   rmSync(dir, { recursive: true, force: true });
   const url = `file:///${sourceDir.replace(/\\/g, "/").replace(/^\/+/, "")}`;
-  const r = spawnSync("git", ["clone", "--quiet", "--depth", "1", url, dir], { encoding: "utf8" });
+  // `clone` ends with an implicit checkout, which DOES run the host's
+  // post-checkout hook if one is configured (unlike the two read-only git
+  // calls below, `rev-parse`/`config --get`, which have no hook of their
+  // own) -- see HOOKS_OFF's comment on `git()` above for why this must never
+  // depend on the host's config.
+  const r = spawnSync("git", [...HOOKS_OFF, "clone", "--quiet", "--depth", "1", url, dir], { encoding: "utf8" });
   if (r.status !== 0) return false;
   const shallow = spawnSync("git", ["-C", dir, "rev-parse", "--is-shallow-repository"], { encoding: "utf8" });
   return shallow.stdout.trim() === "true";
@@ -538,7 +566,11 @@ export function buildShallowClone(sourceDir: string, dir: string): boolean {
 export function buildPartialClone(sourceDir: string, dir: string): boolean {
   rmSync(dir, { recursive: true, force: true });
   const url = `file:///${sourceDir.replace(/\\/g, "/").replace(/^\/+/, "")}`;
-  const r = spawnSync("git", ["clone", "--quiet", "--filter=blob:none", url, dir], { encoding: "utf8" });
+  // Same reasoning as buildShallowClone's `clone` call: this one also ends
+  // in an implicit checkout.
+  const r = spawnSync("git", [...HOOKS_OFF, "clone", "--quiet", "--filter=blob:none", url, dir], {
+    encoding: "utf8",
+  });
   if (r.status !== 0) return false;
   const key = spawnSync("git", ["-C", dir, "config", "--get", "remote.origin.partialclonefilter"], {
     encoding: "utf8",
