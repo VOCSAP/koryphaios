@@ -53,6 +53,11 @@ import {
   computeGroupId,
   computeGroupSecretHash,
 } from "./shared/config.ts";
+import {
+  isDeckSender,
+  isOperatorSender,
+  renderInbound,
+} from "./shared/inbound-framing.ts";
 import { writePeerIdCache, writeDeskSessionId } from "./shared/peer-cache.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
 import {
@@ -92,45 +97,12 @@ import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 const PEER_ID_REGEX = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/;
 
 // --- Deck announcements (v0.3.4) ---
-// Messages whose sender is the reserved 'deck' sentinel are one-way operator
-// broadcasts. They must NOT trigger the default channel behaviour ("RESPOND
-// IMMEDIATELY / reply with send_message"). Since that instruction is global (not
-// per-message), the no-reply guarantee is carried inside the rendered content,
-// and reinforced by the sender being non-routable (send_message to 'deck' fails).
-// English wording for maximum model compatibility.
-const DECK_NO_REPLY_NOTE =
-  '\n\n[claude-peers] Informational only -- do NOT reply, do NOT call send_message toward "deck", and do NOT message any other peer about this announcement (no greetings, no acknowledgements). Take it into account in your work if relevant, then continue your current task.';
-
-function isDeckSender(idOrToken: string): boolean {
-  return idOrToken === DECK_PEER_ID || idOrToken === DECK_INSTANCE_TOKEN;
-}
-
-function renderDeckAnnouncement(text: string): string {
-  return `[Deck announcement -- operator broadcast]\n${text}${DECK_NO_REPLY_NOTE}`;
-}
-
-// The operator ANSWERING a question they were asked (remote approvals, C-9).
-// A third framing family beside the deck one: this message is actionable --
-// unlike an announcement -- but it still must not draw an acknowledgement, or
-// every settled approval would drop a "ok, doing it" into the operator's
-// desktop inbox. A follow-up question belongs in ask_operator, not here.
-const OPERATOR_ANSWER_NOTE =
-  '\n\n[claude-peers] This is the human operator ANSWERING you. Act on it now and continue your task. Do NOT acknowledge it and do NOT call send_message toward "operator". If it leaves you blocked again, ask a NEW question with the ask_operator tool.';
-
-function isOperatorSender(idOrToken: string): boolean {
-  return idOrToken === OPERATOR_PEER_ID || idOrToken === OPERATOR_INSTANCE_TOKEN;
-}
-
-function renderOperatorAnswer(text: string): string {
-  return `[Operator answer]\n${text}${OPERATOR_ANSWER_NOTE}`;
-}
-
-/** Framing of an inbound message, by sender class. */
-function renderInbound(fromPeerId: string, text: string): string {
-  if (isDeckSender(fromPeerId)) return renderDeckAnnouncement(text);
-  if (isOperatorSender(fromPeerId)) return renderOperatorAnswer(text);
-  return text;
-}
+// Card e3f8065d: the two note constants and the five framing functions used to
+// be DEFINED here. They now live in shared/inbound-framing.ts so that the third
+// receive path (check_messages, below) consumes the SAME renderInbound as the WS
+// push and the fallback poll, instead of re-implementing the branching inline.
+// The module's header carries the full reasoning, including why the framing
+// stays at reception rather than moving to emission.
 
 // --- Configuration ---
 
@@ -1235,15 +1207,22 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           return { content: [{ type: "text" as const, text: "No new messages." }] };
         }
         // B1/NF-A: from_peer_id is resolved by the broker; no /list-peers needed.
+        // Card e3f8065d: this path used to re-implement the sender-class
+        // branching of renderInbound, renderer by renderer. It now consumes the
+        // shared enforcer, and keeps only what is genuinely its own -- the
+        // "From <name> (<date>):" PREFIX. The split matters: the prefix
+        // substitutes a DISPLAY name (a sentinel's public id, or the literal
+        // "<dormant peer>" when the broker resolved none), whereas the framing
+        // must key on the real sender identity. Passing the display fallback to
+        // renderInbound would classify a dormant sender on a string that matches
+        // no sentinel.
         const lines = result.messages.map((m) => {
-          if (isOperatorSender(m.from_peer_id)) {
-            return `From ${OPERATOR_PEER_ID} (${m.sent_at}):\n${renderOperatorAnswer(m.text)}`;
-          }
-          if (isDeckSender(m.from_peer_id)) {
-            return `From ${DECK_PEER_ID} (${m.sent_at}):\n${renderDeckAnnouncement(m.text)}`;
-          }
-          const peerId = m.from_peer_id || "<dormant peer>";
-          return `From ${peerId} (${m.sent_at}):\n${m.text}`;
+          const label = isOperatorSender(m.from_peer_id)
+            ? OPERATOR_PEER_ID
+            : isDeckSender(m.from_peer_id)
+              ? DECK_PEER_ID
+              : m.from_peer_id || "<dormant peer>";
+          return `From ${label} (${m.sent_at}):\n${renderInbound(m.from_peer_id, m.text)}`;
         });
         return {
           content: [

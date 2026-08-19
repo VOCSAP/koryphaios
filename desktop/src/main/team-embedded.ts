@@ -173,6 +173,21 @@ export function writeEmbeddedAgentPrompt(dir: string, id: string): string {
 }
 
 /**
+ * Card e3f8065d. The two spawn composers below used to carry SEPARATE copies of
+ * this sentence, eleven lines apart, both ending their own last line with it.
+ * That is why a 2026-08-19 sweep of "every no-reply wording in production"
+ * counted four and there were six: the enumeration counted one per FILE, and
+ * this file held two. One editable copy per composer is one chance per composer
+ * of drifting -- and a drift here is invisible, since neither string is ever
+ * compared to the other.
+ *
+ * The extraction is byte-preserving on purpose: both returned strings are
+ * unchanged, down to the leading space this constant does NOT carry (the
+ * callers keep their own separator) and the trailing period it DOES.
+ */
+const SPAWN_NO_REPLY_SUFFIX = 'Notification only: do not reply to this message.'
+
+/**
  * Targeted "deck" announce to the supervisor when a session it spawned gets its
  * peer_id (TS3 ack loop). CODE CONSTANT (C8 rule), no-reply by construction
  * (the broker-side deck note + the explicit line below).
@@ -180,7 +195,7 @@ export function writeEmbeddedAgentPrompt(dir: string, id: string): string {
 export function composeSpawnAckText(name: string, peerId: string): string {
   return [
     `Deck notification: the session "${name}" you spawned is now connected as peer "${peerId}".`,
-    'You can reach it with send_message. Notification only: do not reply to this message.'
+    `You can reach it with send_message. ${SPAWN_NO_REPLY_SUFFIX}`
   ].join('\n')
 }
 
@@ -191,6 +206,6 @@ export function composeSpawnAckText(name: string, peerId: string): string {
 export function composeSpawnFailText(name: string, status: string): string {
   return [
     `Deck notification: the session "${name}" you spawned did not join the group (status: ${status}).`,
-    'Check deck_list_sessions and restart or respawn it if still needed. Notification only: do not reply to this message.'
+    `Check deck_list_sessions and restart or respawn it if still needed. ${SPAWN_NO_REPLY_SUFFIX}`
   ].join('\n')
 }

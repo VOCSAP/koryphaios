@@ -92,12 +92,19 @@ test("the note opens with a blank line, asserted literally", () => {
 
 test("the waiver does not restrict whom the recipient may contact", () => {
   // The arbitrage that made this a NEW constant instead of a reuse of
-  // server.ts's DECK_NO_REPLY_NOTE. That one also forbids messaging any other
-  // peer about the message, which is wrong for a peer-to-peer inform -- and
-  // already contradicts the Deck's own dispatch text, which tells the
-  // team-lead to brief another peer with send_message. Reusing it would have
-  // imported that contradiction; this test is what stops a later
-  // "harmonisation" from doing so silently.
+  // DECK_NO_REPLY_NOTE. At the time (card 3d3c7d40) that note ALSO forbade
+  // messaging any other peer about the message, which is wrong for a
+  // peer-to-peer inform -- and already contradicted the Deck's own dispatch
+  // text, which tells the team-lead to brief another peer with send_message.
+  //
+  // UPDATED, cards e3f8065d + dd388182: that note has since moved to
+  // shared/inbound-framing.ts AND lost the offending clause, so the
+  // contradiction described above no longer exists there. The assertions below
+  // are unchanged and keep their point: they pin THIS constant's own property,
+  // so that a later "harmonisation" collapsing the three notes -- now that they
+  // agree on it -- cannot silently re-key one mechanism on another's identity.
+  // The counterpart assertion on the deck note lives in
+  // tests/peer-inbound-framing.test.ts.
   expect(PEER_NO_REPLY_NOTE).not.toContain("do NOT message any other peer");
   expect(PEER_NO_REPLY_NOTE).toContain("free to message any peer");
 });
