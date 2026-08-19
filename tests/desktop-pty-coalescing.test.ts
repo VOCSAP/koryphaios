@@ -3,7 +3,30 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-// Card 6168b7f4. Two kinds of guard live here, on purpose:
+// Card 6168b7f4. THIS FILE IS NOT A GUARD ON ANY PRODUCTION LINE. It
+// characterizes ConPTY's own write-coalescing behaviour, the field evidence
+// that justified 90c2a8e's single glued write in session-service.ts's
+// injectCommand. Verified directly (flaky-repair, 2026-08-19): neither this
+// file nor coalescing-probe.cjs imports anything under desktop/src; a
+// deliberate mutation of session-service.ts:1241 back to the pre-fix
+// two-write shape left every test here unchanged (10/10 green, before and
+// after). Read every test below as "what ConPTY does on this machine", never
+// as "what the product still does".
+//
+// The property this file's field evidence justifies IS guarded, by two OTHER
+// files, both proven (mutation-tested) to redden on the exact regression:
+//  - tests/desktop-inject-command-write-check.test.ts extracts the REAL
+//    injectCommand body from session-service.ts and asserts it submits in
+//    ONE gated, bracketed-paste-encoded write with no bare '\r' write of its
+//    own (a source-scan, not a live invocation: SessionService is not
+//    bun-test-importable, see that file's own header).
+//  - tests/desktop-launch.test.ts exercises `encodeInitialPromptKeystrokes`
+//    (a one-line alias over `encodeSubmittedKeystrokes`, session-command.ts)
+//    for real and pins its exact output shape, `\x1b[200~<text>\x1b[201~\r`.
+// Together those two guard both halves (the call site, and the encoding it
+// calls) of the property 90c2a8e delivered. This file guards neither.
+//
+// Two kinds of measurement live here:
 //
 //  1. FIXTURE assertions (always run, every platform). They read the raw pty
 //     journals captured from real Claude Code turns on 2026-08-13 and assert
@@ -129,6 +152,48 @@ test("the bare ESC that PREDATES this card quits the CLI when that dialog is on 
     .toEqual({ turnedPasteOff: true, echoedRawAfter: true });
 });
 
+// ------------------------------------------------------- probe classifier
+
+// Cross-platform, deterministic, no ConPTY/Electron/node-pty required: pins
+// the flaky-repair fix to coalescing-probe.cjs's chunk classification.
+//
+// Before this fix, COALESCED/SEPARATED were read off ONE flat array by
+// position (lens[0]/lens[1]/lens[2]). Measured 2026-08-19 (debugger report,
+// card 6168b7f4 follow-up): on the real ~13% miss draw, phase A produces TWO
+// chunks instead of one ([239,1] rather than [240]), which shifts every index
+// after it -- so the position-based read reported SEPARATED false, falsely
+// accusing phase B of failing when phase B is not racy at all and separated
+// cleanly on every measured trial (13/15 direct, 12/14 via `bun test`; the
+// two red draws were always this same accusation, phase B never actually
+// failed). classify() now takes phase A and phase B as SEPARATE buffers
+// (coalescing-probe.cjs splits its pty output by wall-clock arrival time
+// against the phase-B write, not by chunk count), so a phase-A miss can never
+// shift phase B's reading.
+const probeModule = require(PROBE) as {
+  classify: (outA: string, outB: string) => { lensA: number[]; lensB: number[]; coalesced: boolean; separated: boolean };
+};
+const { classify } = probeModule;
+
+test("classify() does not blame phase B for a phase-A miss (the false-accusation bug this file used to have)", () => {
+  // The exact captured miss shape: phase A's 240-byte write arrived as two
+  // reads (239 then 1) instead of coalescing into one, while phase B (writes
+  // 120ms apart) separated cleanly as always.
+  const missedPhaseA = 'CHUNK len=239 "x"\nCHUNK len=1 "\\r"\n';
+  const cleanPhaseB = 'CHUNK len=240 "Bx"\nCHUNK len=1 "\\r"\n';
+  const { coalesced, separated } = classify(missedPhaseA, cleanPhaseB);
+  // coalesced=false is the CORRECT read of a genuine race miss -- this test
+  // is not asserting the race away, only that phase B's own, unrelated,
+  // deterministic result is read correctly regardless of what phase A did.
+  expect({ coalesced, separated }).toEqual({ coalesced: false, separated: true });
+});
+
+test("classify() still reports a real phase-B failure (not swallowed by the fix above)", () => {
+  const coalescedPhaseA = 'CHUNK len=240 "x"\n';
+  const brokenPhaseB = 'CHUNK len=241 "Bx"\n'; // did not separate at all: one read, wrong length
+  const { coalesced, separated } = classify(coalescedPhaseA, brokenPhaseB);
+  expect({ coalesced, separated }).toEqual({ coalesced: true, separated: false });
+});
+
 // --------------------------------------------------------------- live probe
 
 const canProbe = process.platform === "win32" && existsSync(ELECTRON) && existsSync(PROBE);
@@ -141,30 +206,62 @@ const skipReason =
 
 const probeTest = canProbe ? test : test.skip;
 
+// Card 6168b7f4 flaky-repair (2026-08-19). Phase A (write coalescing) is a
+// genuine, non-deterministic ConPTY property: measured ~13% single-trial miss
+// rate (13/15 direct probe runs, 12/14 via `bun test` on this same file, both
+// concordant). A single spawnSync draw asserting COALESCED true was therefore
+// asserting a coin flip, not a regression guard -- it flaked this file ~1 run
+// in 7. The property itself is real and worth guarding (it is the whole
+// reason session-service.ts's injectCommand had to move to a single glued
+// write, see 90c2a8e): what was wrong was proving it on ONE draw.
+//
+// Reformulated claim: coalescing must be OBSERVED within a bounded number of
+// independent trials (still goes red if the mechanism regresses to "never
+// coalesces" -- P(5 consecutive misses | true ~13% rate) is ~1 in 24 000, a
+// false red this test will essentially never produce by chance alone) while
+// phase B (writes 120ms apart) is checked on EVERY attempt and never retried
+// past, because it is measured deterministic: a single SEPARATED false is
+// real, not a race, per the classifier tests above.
 probeTest(
   canProbe
-    ? "ConPTY coalesces back-to-back pty writes into one read, and separates them when they are apart"
+    ? "ConPTY coalesces back-to-back pty writes into one read within a bounded number of trials, and separates delayed writes on every trial"
     : `SKIPPED (${skipReason}): ConPTY write-coalescing probe`,
   () => {
-    const r = spawnSync(ELECTRON, [PROBE], {
-      // PROBE_NODE: the runtime the probe spawns INSIDE the pty. Bun's own
-      // binary is the one guaranteed to exist here (it is running this test),
-      // and it works as a console child; Electron-as-Node does not.
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", PROBE_NODE: process.execPath },
-      encoding: "utf-8",
-      timeout: 60_000,
-    });
-    const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
-    // Assert on the probe's OUTPUT first: when this fails, the diff then shows
-    // what the probe actually said (which runtime it used, whether node-pty
-    // loaded, what chunk lengths it saw) instead of a bare exit code.
-    expect(out).toContain("COALESCED true");
-    expect(out).toContain("SEPARATED true");
-    // exit 2 = node-pty unavailable, exit 3 = the probe measured nothing at all.
-    // Neither may be swallowed into a green: that is the failure mode this file
-    // exists to prevent.
-    expect({ code: r.status, sawLengths: /CHUNK_LENGTHS \[/.test(out) })
-      .toEqual({ code: 0, sawLengths: true });
+    const MAX_ATTEMPTS = 5;
+    let coalescedSeen = false;
+    let attemptsRun = 0;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      attemptsRun = attempt;
+      const r = spawnSync(ELECTRON, [PROBE], {
+        // PROBE_NODE: the runtime the probe spawns INSIDE the pty. Bun's own
+        // binary is the one guaranteed to exist here (it is running this test),
+        // and it works as a console child; Electron-as-Node does not.
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: "1", PROBE_NODE: process.execPath },
+        encoding: "utf-8",
+        timeout: 60_000,
+      });
+      const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+      // exit 2 = node-pty unavailable, exit 3 = the probe measured nothing at
+      // all. Neither is a race outcome: fail hard here, on the first attempt
+      // it happens, rather than retrying past it into a false green.
+      expect(out).not.toContain("PROBE-UNAVAILABLE");
+      expect(out).not.toContain("PROBE-MEASURED-NOTHING");
+      expect(out).toContain("CHUNK_LENGTHS [");
+      // Phase B is not racy (classifier tests above pin why a miss can never
+      // land here by accident): any false is a real regression on THIS
+      // attempt and must not be masked by a later successful attempt.
+      expect(out).toContain("SEPARATED true");
+      if (out.includes("COALESCED true")) {
+        coalescedSeen = true;
+        break;
+      }
+      // A single-trial miss of the coalescing race: expected ~13% of the
+      // time, logged so a run's actual retry cost is visible in CI output
+      // rather than only inferable from timing.
+      console.log(`[pty-coalescing] attempt ${attempt}/${MAX_ATTEMPTS}: phase-A did not coalesce this trial, retrying`);
+    }
+    expect({ coalescedWithinAttempts: coalescedSeen, attemptsRun })
+      .toEqual({ coalescedWithinAttempts: true, attemptsRun });
   },
-  90_000
+  120_000
 );
