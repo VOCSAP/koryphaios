@@ -1,5 +1,35 @@
 # Changelog
 
+## desktop -- la reprise automatique de quota du Deck se desactive pour une session Claude Code sur le chemin par defaut
+
+Fichiers : `desktop/src/main/session-kind.ts` (nouveau), `desktop/src/main/session-service.ts`, `desktop/src/shared/types.ts`, `desktop/src/renderer/src/components/Sidebar.tsx`, `desktop/src/renderer/src/components/TerminalTile.tsx` (commentaire seul), `desktop/src/main/i18n.ts`, `desktop/locales/en.json`, `desktop/locales/fr.json`, plusieurs `tests/desktop-*.test.ts`. Carte `fd1914cc`.
+
+**Le CLI Claude Code possede desormais sa propre reprise automatique de quota** (reglage `autoContinueAtUsageLimit`, mesure a `true` par defaut en v2.1.235). La propre relance du Deck devenait alors un second relanceur, injectant dans le meme prompt que le premier.
+
+**Pour une session Claude Code qui suit le reglage global (aucune surcharge par session), le Deck desactive maintenant ses deux moities** : il arrete d'alimenter son detecteur de quota ET d'injecter la reprise. Les autres CLIs (codex, gemini, agents personnalises) restent inchanges. Une surcharge explicite par session, posee depuis le menu contextuel de la barre laterale, l'emporte toujours et retablit les deux moities pour cette tuile.
+
+**Le predicat qui decide si une session lance le CLI `claude`, `isClaudeLaunch` dans `session-kind.ts`, est deliberement genereux plutot qu'etroit.** Il reconnait n'importe quel jeton de la ligne de commande, pas seulement le premier, ce qui couvre `npx claude`, `wsl claude` ou `docker exec ... claude`. Un faux positif se degrade de facon VISIBLE (la tuile reste simplement arretee, l'operateur le remarque et bascule la surcharge) ; un faux negatif double l'injection en SILENCE dans un terminal actif. Le predicat penche donc du cote du faux positif.
+
+**Le resultat est fige au demarrage du processus (spawn), jamais recalcule en direct** : changer la commande de lancement globale pendant qu'une session Claude Code tourne deja ne peut pas la faire basculer de camp sous elle-meme.
+
+**Consequence a connaitre : sur le chemin par defaut, une tuile Claude Code n'affiche plus aucun statut de quota** (limite atteinte / heure de reprise), y compris dans la vue mobile -- c'est le prix accepte pour desactiver la detection et pas seulement l'injection.
+
+## core -- `send_message` gagne un champ optionnel `expects_reply`, pour ne plus obliger un accuse de reception
+
+Fichiers : `server.ts`, `shared/message-framing.ts` (nouveau), `tests/peer-message-framing.test.ts` (nouveau), `tests/broker-expects-reply-delivery.test.ts` (nouveau). Carte `3d3c7d40`. `broker.ts` n'est pas touche.
+
+**Une vraie interaction entre deux pairs se prolongeait de deux a trois tours d'accuse de reception, chacun un tour d'inference complet a pleine longueur de contexte.** Le nouveau champ booleen optionnel `expects_reply` sur l'outil MCP `send_message` laisse l'emetteur dispenser explicitement le destinataire de cet accuse.
+
+**Absent (ou `true`), rien ne change : le texte envoye est identique, octet pour octet, au comportement d'avant ce lot.** Passe a `false`, l'EMETTEUR (jamais le destinataire) ajoute au texte une note de code constante, `PEER_NO_REPLY_NOTE`, qui dit au destinataire qu'il peut agir sur le message mais ne doit envoyer ni confirmation, ni remerciement, ni accuse de reception.
+
+**La composition se fait a l'emission, pas a la reception, ce qui explique que `broker.ts` et le schema de sa table `messages` restent intacts.** Le broker continue de transporter une chaine opaque, sans migration. Cela offre trois proprietes par construction plutot que par vigilance : aucune migration de schema ; une retro-compatibilite structurelle (un destinataire sur un build plus ancien recoit un texte ordinaire, puisque la note EST le texte) ; et la note atteint les trois chemins de reception du destinataire (le push WebSocket et le scrutin de repli, qui passent tous deux par `renderInbound`, et l'outil `check_messages`, qui re-implemente ce branchement separement).
+
+**Le champ est valide par identite booleenne stricte (`expectsReply !== false`), jamais par verite (truthiness).** Un modele qui serialise ses arguments envoie parfois la chaine litterale `"false"`, que tout test de veracite lit comme VRAI -- une coercion aurait pu inverser le sens du champ dans un sens ou dans l'autre.
+
+**La note n'est jamais appliquee quand la cible est l'operateur.** Le canal `operator` existe precisement pour recevoir une reponse humaine ; y attacher "ne repondez pas" contredirait l'objet meme du canal.
+
+**`PEER_NO_REPLY_NOTE` est un libelle NOUVEAU, pas une reprise d'un des libelles deja livres** (`DECK_NO_REPLY_NOTE`, `OPERATOR_ANSWER_NOTE`), decision validee en revue : le candidat le plus proche, `DECK_NO_REPLY_NOTE`, interdit aussi de contacter tout autre pair, ce qui serait faux ici -- l'emetteur n'a pas a restreindre a qui le destinataire peut parler.
+
 ## desktop -- un test guard sur DOM reel prouve enfin ce que le docstring de l'emetteur du Courrier promettait
 
 Fichiers : `tests/desktop-inbox-sender-dom.test.ts` (nouveau), `desktop/src/renderer/src/inbox-sender.ts`. Carte `5bffb7b9`.
