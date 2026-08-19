@@ -713,6 +713,9 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.planImportStarted':
     'Import agent started — it converts the plan into roadmap items, then closes',
   'toast.roadmapSaved': 'Roadmap item saved',
+  // Card f11e9e6a: creation does not open the detail modal, so this toast is
+  // the whole acknowledgement -- it names the card on purpose.
+  'toast.roadmapCreated': 'Card “{title}” created',
   'toast.idCopied': 'Item id copied',
   'toast.roadmapArchived': 'Roadmap item archived',
   'tile.snippetsTitle': 'Insert a saved prompt (fills the input, does not send)',

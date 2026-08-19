@@ -529,6 +529,7 @@
   "roadmap.importPlan": "Import a plan…",
   "toast.planImportStarted": "Import agent started — it converts the plan into roadmap items, then closes",
   "toast.roadmapSaved": "Roadmap item saved",
+  "toast.roadmapCreated": "Card “{title}” created",
   "toast.idCopied": "Item id copied",
   "toast.roadmapArchived": "Roadmap item archived",
   "tile.snippetsTitle": "Insert a saved prompt (fills the input, does not send)",

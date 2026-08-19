@@ -1196,6 +1196,14 @@ textarea:disabled {
   border-radius: 6px;
   padding: 8px 14px;
   font-size: 13px;
+  /* Card f11e9e6a: toasts used to carry fixed sentences only, so an unbounded
+     width was harmless. The creation toast now quotes a card TITLE, which is
+     operator-authored and routinely longer than the window -- centred by
+     translateX(-50%), an over-wide toast bleeds off BOTH edges and loses its
+     own ends. Bound it and let a long title wrap instead. */
+  max-width: min(560px, calc(100vw - 48px));
+  overflow-wrap: anywhere;
+  text-align: center;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
   z-index: 50;
 }

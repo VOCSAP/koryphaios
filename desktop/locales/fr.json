@@ -529,6 +529,7 @@
   "roadmap.importPlan": "Importer un plan…",
   "toast.planImportStarted": "Agent d'import lancé — il convertit le plan en items roadmap puis se ferme",
   "toast.roadmapSaved": "Item roadmap enregistré",
+  "toast.roadmapCreated": "Carte « {title} » créée",
   "toast.idCopied": "Id de l'item copié",
   "toast.roadmapArchived": "Item roadmap archivé",
   "tile.snippetsTitle": "Insérer un prompt enregistré (remplit la saisie, n'envoie pas)",

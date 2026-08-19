@@ -223,8 +223,25 @@ export function RoadmapView(): React.JSX.Element {
         await window.api.roadmapReorder(payload.ids, payload.waves)
       }
       setDraft(null)
-      setSelectedId(saved.id)
-      showToast('toast.roadmapSaved')
+      // Card f11e9e6a: a CREATION never opens the detail modal -- the operator
+      // just wrote the card, printing it back to them costs a click to dismiss.
+      // The rule is uniform across the three creation paths (Add button,
+      // lane-born draft, roadmapSeed), so no branch per path is needed: the
+      // `draft.id` discriminant already separates creation from edition, and an
+      // EDIT still returns to the detail it was opened from.
+      // The toast is what REPLACES the detail as the acknowledgement, so it may
+      // not stay generic: it names the card, which is also what keeps a
+      // freshly created card findable when it lands off-screen or under a
+      // filter. `showToast` carries a bare i18n key with no params channel, so
+      // the interpolated text goes through its existing raw-text path.
+      if (draft.id === undefined) {
+        showToast(t('toast.roadmapCreated', { title: draft.title.trim() }), 'success', {
+          raw: true
+        })
+      } else {
+        setSelectedId(saved.id)
+        showToast('toast.roadmapSaved')
+      }
       await refresh()
     } catch (e) {
       setMutationError(e instanceof Error ? e.message : String(e))
