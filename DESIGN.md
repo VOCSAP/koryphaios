@@ -242,6 +242,19 @@ State rules (apply to every archetype):
 - **Headers of full views** (`.worktrees-head`, `.roadmap-head`,
   `.settings-head`…): flex row, `h2` 15px, actions right-aligned after a
   flex spacer, bottom border.
+- **Frame resize handle.** A handle for dragging a panel's edge (e.g. the
+  top edge of a stacked panel): the panel is `position: relative`, the handle
+  `position: absolute; top/left/right: 0`, 6px thick, `cursor: row-resize` (or
+  `col-resize` for a vertical edge), background `var(--accent)` at 0.4 opacity
+  on hover. The panel's `overflow: hidden` (needed for its `border-radius: 8px`)
+  is why the handle sits flush at `top: 0` rather than straddling the edge with
+  a negative margin: a negative-margin handle would be clipped in half by that
+  `overflow: hidden`, while a flush absolute box stays entirely inside the clip
+  box, so the header does not shift by a pixel — and the clip rounds the
+  handle's own ends to the frame's radius, so it reads as part of the frame,
+  not as a rectangle glued on top. Moving a handle changes which element owns
+  pointer events at that edge: check the header's own controls stay clickable
+  along their top edge, not only at their center.
 
 ## 5. Iconography — the Greek glyph set
 

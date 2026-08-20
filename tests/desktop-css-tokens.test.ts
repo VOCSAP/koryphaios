@@ -148,6 +148,37 @@ test("the monospace face is declared once and nothing hardcodes a stack", () => 
   expect(/--mono:\s*ui-monospace/.test(text)).toBe(true);
 });
 
+/**
+ * Exact-selector block extractor, keyed on the SELECTOR STRING, not on a
+ * containing/token search: `.wf-lane.is-collapsed` or `.wf-resize:hover`
+ * must never match a lookup for `.wf-lane` / `.wf-resize`. Fails LOUD (throws)
+ * when the selector isn't found rather than matching an empty string, so a
+ * rename or a moved rule breaks this test instead of silently degrading the
+ * guard to "nothing to check" (same fail-closed discipline as `injects()`
+ * above).
+ */
+function ruleBlock(css: string, selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const m = css.match(new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`));
+  if (!m) throw new Error(`selector not found: ${selector}`);
+  return m[1]!;
+}
+
+test("the workflow lane resize handle (card ba3d2456) stays positioned on the frame's top edge", () => {
+  // ba3d2456 was found fully, silently revertible: reverting both files of
+  // the lot to HEAD left tests/desktop-workflow.test.ts at 55/55, because
+  // that suite only imports desktop/src/shared/workflow.ts and never reads
+  // JSX or CSS. Without `.wf-lane { position: relative }`, `.wf-resize`'s
+  // `position: absolute` promotes to the nearest ANCESTOR containing block
+  // instead -- a 6px `row-resize` band across the top of the whole window,
+  // not the panel's own top frame bar.
+  const { text } = readCss();
+  expect(ruleBlock(text, ".wf-lane")).toMatch(/position:\s*relative/);
+  const resize = ruleBlock(text, ".wf-resize");
+  expect(resize).toMatch(/position:\s*absolute/);
+  expect(resize).toMatch(/top:\s*0/);
+});
+
 test("a themed :focus-visible ring exists at element level, not per class", () => {
   const { text } = readCss();
   // Element-level so a control written tomorrow inherits it; a per-class fix

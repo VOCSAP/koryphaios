@@ -4482,6 +4482,10 @@ svg.glyph {
    bottom half of the roadmap view. Positions derive from queue + depends_on. */
 
 .wf-lane {
+  /* Containing block for .wf-resize, which rides the frame's own top edge.
+     Harmless for the canvas' absolutely positioned children (.wf-world,
+     .wf-node, .wf-port...): .wf-canvas is itself positioned and anchors them. */
+  position: relative;
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
@@ -4503,13 +4507,19 @@ svg.glyph {
   border-bottom: none;
 }
 
-/* Drag handle straddling the head/canvas border: 0 extra flow height (negative
-   margins cancel its own height), so it only widens the grabbable hit area. */
+/* Drag handle on the panel's top frame bar (card ba3d2456): taken OUT of the
+   flow rather than pulled back by negative margins, because .wf-lane clips its
+   overflow -- an overhanging handle would be cut in half and stay grabbable on
+   3px, which nothing but the eye would catch. Out of flow = the head row keeps
+   its exact position, and the band overlays only the head's 6px top padding,
+   above the buttons' own box. */
 .wf-resize {
-  position: relative;
-  z-index: 2;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 3;
   height: 6px;
-  margin: -3px 0;
   cursor: row-resize;
 }
 

@@ -604,6 +604,22 @@ export function WorkflowLane({
     <section
       className={`wf-lane${collapsed && !fullscreen ? ' is-collapsed' : ''}${fullscreen ? ' is-full' : ''}`}
     >
+      {/* Card ba3d2456: the grab band rides the panel's OWN top edge, not the
+          inner head/canvas separator. It is absolutely positioned rather than
+          negative-margined, because .wf-lane clips (overflow: hidden, for its
+          radius) and a handle overhanging the frame would lose half its height
+          silently -- no test and no typecheck sees a clipped hit area. */}
+      {showCanvas && !fullscreen && (
+        <div
+          className="wf-resize"
+          title={t('roadmap.wf.resizeTitle')}
+          onPointerDown={onResizePointerDown}
+          onPointerMove={onResizePointerMove}
+          onPointerUp={onResizePointerUp}
+          onPointerCancel={onResizePointerUp}
+        />
+      )}
+
       <h3 className="rm-section-head wf-head">
         {GLYPH_BADGES.clepsydra} {t('roadmap.wf.title')}
         <span className="rm-count">{lane.length}</span>
@@ -641,17 +657,6 @@ export function WorkflowLane({
           </button>
         )}
       </h3>
-
-      {showCanvas && !fullscreen && (
-        <div
-          className="wf-resize"
-          title={t('roadmap.wf.resizeTitle')}
-          onPointerDown={onResizePointerDown}
-          onPointerMove={onResizePointerMove}
-          onPointerUp={onResizePointerUp}
-          onPointerCancel={onResizePointerUp}
-        />
-      )}
 
       {showCanvas && (
         <div
