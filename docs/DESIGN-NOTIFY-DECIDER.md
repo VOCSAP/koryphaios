@@ -5,9 +5,12 @@ Conception, 2026-08-19. Carte `63d73bde`. Complement de `DESIGN-NOTIFY-EVENTS.md
 
 Lecture seule sur le code. Aucun code de production ecrit, rien de stage, rien
 touche dans `server.ts`.
-MESURE : `git check-ignore -v DESIGN-NOTIFY-DECIDER.md` -> code de sortie 1,
-donc non ignore. Racine du depot, comme la specification, pour la raison inscrite
-sur la carte `70e29bc6`.
+MESURE (2026-08-20, apres deplacement dans `docs/`) :
+`git check-ignore -v docs/DESIGN-NOTIFY-DECIDER.md` -> code de sortie 1, donc
+non ignore. Le document vivait a la racine jusqu'au 2026-08-20, precisement
+parce que `docs/` etait alors exclu par `.gitignore` (carte `70e29bc6`). Cette
+exclusion a ete levee, et `docs/` est desormais l'emplacement voulu pour les
+briefs de conception que le code cite par chemin.
 
 ---
 

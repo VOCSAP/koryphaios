@@ -67,7 +67,6 @@ WORKFLOW-LOTS-DESIGN.md
 # `bun test tests`, never a bare `bun test`. Nothing enforces this exclusion
 # beyond that convention -- do not read this comment as a guarantee.
 desktop/docs/reference/
-/docs/
 
 # Tooling scratch: agent-forge diagnostics and per-session scratchpads.
 # Artifacts of local agent tooling, never part of the product.

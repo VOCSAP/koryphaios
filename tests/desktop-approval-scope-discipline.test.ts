@@ -1,4 +1,4 @@
-// spec_67d0b267 -- card 1def56da, DESIGN-APPROVAL-SCOPE.md D4.
+// spec_67d0b267 -- card 1def56da, docs/DESIGN-APPROVAL-SCOPE.md D4.
 //
 // WHAT THE TYPE CANNOT DO, AND THEREFORE WHAT THIS FILE IS FOR.
 // shared/approval-scope.ts makes it impossible to build an identity clause on
@@ -18,7 +18,7 @@
 // collects it. That is not decoration: measured 2026-08-19, the four suites
 // covering approvals (1409 lines) match none of the ten globs, so without a
 // deliberate name this guard would run on one developer's machine and nowhere
-// else -- the exact failure DESIGN-NOTIFY-DECIDER.md §5.4 describes for the
+// else -- the exact failure docs/DESIGN-NOTIFY-DECIDER.md §5.4 describes for the
 // sibling guard.
 
 import { test, expect, describe } from "bun:test";

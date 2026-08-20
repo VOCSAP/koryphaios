@@ -24,7 +24,11 @@ spec ids -- do not add new ones. Those standalone working docs (`PLAN-*`,
 `EXPLORATION-*`, `AUDIT-*`) consolidated + removed: shipped design decisions
 summarized in CHANGELOG entry of the batch that shipped them, open residual
 lives in `BACKLOG.md`, full detail (exploit chains, design alternatives)
-stays in git history.
+stays in git history. Two tracked trees survive that consolidation and are
+NOT scratch: `docs/` holds the design briefs that production comments cite by
+path (so deleting one breaks a pointer in `broker.ts` or `shared/`), and
+`runbooks/` holds operational procedures for acting on the deployed broker.
+Neither is a place to park a working note.
 
 ## Detailed docs (read on demand)
 
@@ -194,12 +198,22 @@ Read only file/skill matching area you touch:
   symlinked prefix itself (`TESTING.md`, "Cross-platform tests").
 - **Naming a scratch/plan/report doc?** `.gitignore` silently excludes
   `findings.md`, `task_plan.md`, `progress.md`, `progress-archive.md`,
-  `/docs/` (root only -- `desktop/docs/` is a real, tracked docs tree and is
-  NOT excluded), and `.claude/session-checkpoint.md`. Deliverable you intend
-  to commit (audit report, plan, notes) must use different name, or it
-  vanishes from `git add`. `git check-ignore -v <path>` only tells the truth
-  on a path NOT already tracked -- a tracked neighbour always reports "not
-  ignored" regardless of the rule, since git skips indexed paths.
+  `BACKLOG-ORDER.md`, `WORKFLOW-LOTS-DESIGN.md`, and
+  `.claude/session-checkpoint.md`. Deliverable you intend to commit (audit
+  report, plan, notes) must use a different name, or it vanishes from
+  `git add`. Those are BARE patterns, with no slash anywhere, so per
+  gitignore(5) they are UNANCHORED and match at every depth, not only at the
+  root -- naming a file `findings.md` three directories down excludes it just
+  the same. `git check-ignore -v <path>` only tells the truth on a path NOT
+  already tracked -- a tracked neighbour always reports "not ignored"
+  regardless of the rule, since git skips indexed paths.
+  **`/docs/` was on this list until 2026-08-20 and no longer is**: it is now a
+  TRACKED tree holding the design briefs that production comments cite, next
+  to `runbooks/` for operational procedures. `desktop/docs/` is the product's
+  own docs tree and was never excluded; only `desktop/docs/reference/` is, and
+  that pattern is anchored by its middle slash (card `70e29bc6`: the bare
+  `docs/` that preceded it silently swallowed `desktop/docs/` and lost a real
+  design doc).
 
 ## Running
 

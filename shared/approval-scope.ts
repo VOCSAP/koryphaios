@@ -1,5 +1,5 @@
 // spec_67d0b267 -- card 1def56da. Authorization shape for the approval
-// subsystem. Design brief: DESIGN-APPROVAL-SCOPE.md (commit 11c81e4), plus two
+// subsystem. Design brief: docs/DESIGN-APPROVAL-SCOPE.md (commit 11c81e4), plus two
 // team-lead arbitrations of 2026-08-19 recorded below where they apply.
 //
 // WHAT WAS WRONG, AND WHY THREE MISSING CLAUSES WERE NOT THE FIX.
@@ -57,7 +57,7 @@
 //     to fall inside the CI glob on purpose.
 //   - A future NEIGHBOURING table (approval notes, history) gets no protection
 //     from this helper, which is typed for one table. Named, not closed
-//     (DESIGN-APPROVAL-SCOPE.md G3).
+//     (docs/DESIGN-APPROVAL-SCOPE.md G3).
 //
 // WHY A FACTORY WITH INJECTED DEPS RATHER THAN A DIRECT `bun:sqlite` IMPORT.
 // Two reasons, and the second is the one that matters. It keeps this file out
@@ -171,7 +171,7 @@ function mintStamp(f: ScopeFields): OriginStamp {
 /**
  * THE SINGLE PRODUCER of an identity clause on `pending_approvals`.
  *
- * NO OPTIONAL PARAMETER, EVER (DESIGN-APPROVAL-SCOPE.md D2, classed Fatal). An
+ * NO OPTIONAL PARAMETER, EVER (docs/DESIGN-APPROVAL-SCOPE.md D2, classed Fatal). An
  * optional dimension would let a caller omit it and receive a SHORTER clause
  * with no error -- fail-open and silent. A new dimension is added INSIDE this
  * function and applies to every caller at once.
@@ -333,7 +333,7 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
    * question is filed under. A token minted before this card carries '' and is
    * refused here, naming the cause, on the model of `handleApprovalList`'s
    * existing 400. Falling back on the body would reintroduce the defect under
-   * cover of compatibility, which DESIGN-APPROVAL-SCOPE.md §4 forbids in terms.
+   * cover of compatibility, which docs/DESIGN-APPROVAL-SCOPE.md §4 forbids in terms.
    *
    * OPERATOR credential: DECLARED in the body, and mandatory. The operator is
    * the trusted party, so declaration is not a hole; but they own several

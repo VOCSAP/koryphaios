@@ -274,7 +274,7 @@ describe("card 1def56da: where project_key comes from", () => {
   });
 
   test("that refusal does NOT fall back on the body, even when the body offers one", () => {
-    // DESIGN-APPROVAL-SCOPE.md §4 forbids this in terms: falling back would be
+    // docs/DESIGN-APPROVAL-SCOPE.md §4 forbids this in terms: falling back would be
     // the defect reintroduced under cover of compatibility, and it would be
     // invisible -- everything would work, scoped to whatever the agent chose.
     const s = sessionSetup("");

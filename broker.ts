@@ -4592,7 +4592,7 @@ function settleApproval(
   // Scoped as well, though the UPDATE above has just proved ownership: an
   // unscoped read here was safe only BECAUSE of what ran before it, which is
   // exactly the pattern that lets a later reorder become a leak with no diff to
-  // point at (DESIGN-APPROVAL-SCOPE.md §1.1).
+  // point at (docs/DESIGN-APPROVAL-SCOPE.md §1.1).
   const row = db
     .query(`SELECT * FROM pending_approvals WHERE id = ? AND ${where.sql}`)
     .get(id, ...(where.params as never[])) as ApprovalRow;

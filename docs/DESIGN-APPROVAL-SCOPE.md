@@ -6,8 +6,10 @@ d'autorisation, compatibilite traitee en §5.
 
 Lecture seule. Aucun code de production, aucun test lance, rien de stage, rien
 ecrit dans `broker.ts` ni `server.ts`.
-MESURE : `git check-ignore -v DESIGN-APPROVAL-SCOPE.md` -> code de sortie 1,
-donc non ignore.
+MESURE (2026-08-20, apres deplacement dans `docs/`) :
+`git check-ignore -v docs/DESIGN-APPROVAL-SCOPE.md` -> code de sortie 1, donc
+non ignore. Le document vivait a la racine jusqu'au 2026-08-20 ; `docs/` etait
+alors exclu par `.gitignore` et ne l'est plus.
 
 ---
 
