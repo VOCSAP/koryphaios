@@ -27,13 +27,14 @@ import { computeProjectKey } from "../shared/summarize.ts";
 // at module scope, so it cannot be imported here; this mirrors its inputs
 // instead of guessing a literal. A wrong-but-non-empty literal would be
 // WORSE than an empty one: the broker returns 200 with a silently empty
-// list, indistinguishable from "not raised yet" (measured against this
-// repo's real remote: normalizeRemoteUrl lowercases the host but not the
-// path, so the derived key here is "github.com/VOCSAP/koryphaios" --
-// capital VOCSAP, not the lowercase fixture literal used elsewhere in
-// tests/broker-approvals.test.ts, which is a synthetic value never derived
-// from a real remote). Computed once at module scope, since it shells out to
-// git and cannot change within this test run.
+// list, indistinguishable from "not raised yet" (this repo's real remote
+// derives to "github.com/vocsap/koryphaios" since card 69e5a3e0 lowercases
+// the whole normalizeRemoteUrl output, host AND path -- before that fix it
+// was "github.com/VOCSAP/koryphaios", capital VOCSAP; either way this is
+// computed dynamically below, not the lowercase fixture literal used
+// elsewhere in tests/broker-approvals.test.ts, which is a synthetic value
+// never derived from a real remote). Computed once at module scope, since it
+// shells out to git and cannot change within this test run.
 
 /** Mirrors server.ts's private, unexported getGitRoot() -- same command,
  * same shape, kept local since server.ts cannot be imported (see above). */

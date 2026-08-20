@@ -42,6 +42,21 @@ const ALLOWED_FILES = new Set([
   join("tests", "broker-approvals.test.ts"),
   join("tests", "desktop-approval-scope.test.ts"),
   join("tests", "desktop-approval-scope-discipline.test.ts"),
+  // Card 69e5a3e0: tests/migrate-project-key-case.test.ts replays broker.ts's
+  // OWN CREATE TABLE / ALTER TABLE statements (source-text extraction, not a
+  // hand copy) to build an in-memory mirror of the real schema, then inserts
+  // one fixture row per table via explicit column lists -- including
+  // pending_approvals, since the migration script under test discovers and
+  // migrates that table like the other four. This is DDL replay and a raw
+  // fixture insert, not application logic reading or writing an approval on
+  // behalf of a caller -- there is no operator, no session, no request to
+  // scope BY, the same shape `UNSCOPED_BY_DESIGN`'s DDL/migration entries
+  // above already argue for inside broker.ts itself. It does NOT authorise
+  // this file to add unscoped queries that impersonate a caller (list,
+  // claim, wait, answer): those would need to go through
+  // shared/approval-scope.ts like everywhere else, and this exemption grants
+  // nothing beyond being NAMED in this scan without being flagged.
+  join("tests", "migrate-project-key-case.test.ts"),
 ]);
 
 /**

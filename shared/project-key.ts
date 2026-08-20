@@ -24,6 +24,13 @@ import { createHash } from "node:crypto";
  *   https://github.com/vocsap/koryphaios.git -> github.com/vocsap/koryphaios
  *   ssh://git@gitlab.com:2222/group/proj.git -> gitlab.com/group/proj
  *
+ * Card 69e5a3e0: the whole key is lowercased, host AND owner/repo path.
+ * GitHub (and most hosts) accept cloning a repo under several casings of its
+ * path, so two clones of the same logical repo used to compute two distinct
+ * keys, silently splitting a shared roadmap/graph/approval scope in two. The
+ * one-shot cold migration for rows written under the pre-fix casing lives in
+ * scripts/migrate-project-key-case.ts.
+ *
  * Card 6aa32af4 (2nd review round): this used to be duplicated verbatim in
  * shared/summarize.ts and desktop/src/main/roadmap-service.ts. Since
  * resolveProjectKey() below returns a non-empty remote key AS-IS (no
@@ -56,7 +63,7 @@ export function normalizeRemoteUrl(url: string): string | null {
     const rawHost = scpMatch[2];
     const rawPath = scpMatch[3];
     if (rawHost !== undefined && rawPath !== undefined) {
-      return `${rawHost.toLowerCase()}/${rawPath.replace(/^\/+/, "")}`;
+      return `${rawHost.toLowerCase()}/${rawPath.replace(/^\/+/, "").toLowerCase()}`;
     }
   }
 
@@ -79,7 +86,7 @@ export function normalizeRemoteUrl(url: string): string | null {
     const path = rest.slice(firstSlash + 1);
     const colonIdx = host.indexOf(":");
     if (colonIdx !== -1) host = host.slice(0, colonIdx);
-    return `${host.toLowerCase()}/${path}`;
+    return `${host.toLowerCase()}/${path.toLowerCase()}`;
   }
 
   return s.toLowerCase();

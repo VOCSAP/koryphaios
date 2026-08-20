@@ -76,7 +76,7 @@ jobs:
         # (spawns a daemon via tests/_helper.ts startBroker -- not for this
         # pure-module step, same reason as the broker-*/server-* exclusion above),
         # and logger.test.ts has no dash so no prefix-glob would ever catch it.
-        run: bun test tests/desktop-*.test.ts tests/notify-*.test.ts tests/mobile-shell-*.test.ts tests/cli-*.test.ts tests/config-*.test.ts tests/approval-identity.test.ts tests/peer-*.test.ts tests/graph-*.test.ts tests/logger.test.ts tests/roadmap-*.test.ts
+        run: bun test tests/desktop-*.test.ts tests/notify-*.test.ts tests/mobile-shell-*.test.ts tests/cli-*.test.ts tests/config-*.test.ts tests/approval-identity.test.ts tests/peer-*.test.ts tests/graph-*.test.ts tests/logger.test.ts tests/roadmap-*.test.ts tests/migrate-project-key-case.test.ts tests/project-key-normalize.test.ts
 
       # The mobile shell is TypeScript that nothing else type-checks: it is in
       # neither desktop tsconfig, and `bun build`/`bun test` only transpile. Its
