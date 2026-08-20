@@ -113,9 +113,15 @@ describe("roadmap_list: the singular filters left the schema, not the handler", 
 describe("the measure bites", () => {
   test("an inflated description pushes the total over the cap, a comment does not", () => {
     const filler = "x".repeat(CEILING_CHARS);
-    const inflated = SRC.replace('name: "whoami",', `name: "whoami",\n    description: "${filler}",`);
+    // server.ts is CRLF throughout (measured: 1975 "\r\n", 0 bare "\n"). Inserting
+    // a bare "\n" here splits the pre-existing "\r\n" pair across two lines: the
+    // "\r" ends up trailing the inserted line instead of the "whoami" line, so
+    // when that line is a comment and gets stripped, the "\r" is lost with it --
+    // a 1-char artifact of the insertion itself, not of stripCommentLines against
+    // real file content (every genuine comment line owns its own "\r\n" pair).
+    const inflated = SRC.replace('name: "whoami",', `name: "whoami",\r\n    description: "${filler}",`);
     expect(measureInstructions(inflated) + measureTools(inflated)).toBeGreaterThan(CEILING_CHARS);
-    const commented = SRC.replace('name: "whoami",', `name: "whoami",\n    // ${filler}`);
+    const commented = SRC.replace('name: "whoami",', `name: "whoami",\r\n    // ${filler}`);
     expect(measureTools(commented)).toBe(measureTools(SRC));
   });
 
