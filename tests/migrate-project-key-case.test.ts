@@ -398,7 +398,7 @@ test("openForMode(dbPath, false) truly opens the database readonly -- a write at
 });
 
 test("a nonexistent --db path refuses rather than silently creating an empty db", () => {
-  // The exact failure the runbook (RUNBOOK-PROJECT-KEY-MIGRATION.md) names
+  // The exact failure the playbook (runbooks/broker-db-migration.md) names
   // as the worst possible outcome of this script: a mistyped/wrong path
   // that creates an empty database and reports a false "nothing to
   // migrate" success, while the real, mixed-case data sits untouched
