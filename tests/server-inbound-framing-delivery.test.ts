@@ -289,6 +289,29 @@ describe("deck framing survives to the recipient, through check_messages", () =>
     expect(content).toContain("free to message any peer");
   }, 90_000);
 
+  test("the WS PUSH delivers the PEER note on a plain peer message (spec_ec5cf671)", async () => {
+    // Same reason as the test above: the pull-shaped control further down
+    // cannot see a push that hands the raw text to the notification. Hardcoded
+    // literals, not the constant.
+    const b = await startBroker();
+    brokers.push(b);
+    const sender = await spawnPeer(b);
+    const recipient = await spawnPeer(b);
+    const recipientId = await peerIdOf(recipient);
+    await peerIdOf(sender);
+
+    const body = "Plain peer traffic over the WebSocket push.";
+    const sent = await callTool(sender, "send_message", { to_peer_id: recipientId, message: body });
+    expect(sent.result?.isError).toBeFalsy();
+
+    const pushed = await readNotification(recipient, "notifications/claude/channel");
+    const content = pushed.params?.content ?? "";
+    expect(content).toContain(body);
+    expect(content).toContain("[claude-peers] Peer message: handle it, then continue your task.");
+    expect(content).not.toContain("[Deck announcement");
+    expect(content).not.toContain("[Operator answer]");
+  }, 90_000);
+
   test("a targeted announce is framed too, and it is the case the note was rewritten for", async () => {
     // The dispatch path (broker.ts handleAnnounce, `to_peer_id` branch): this is
     // how an operator hands ONE peer a task. It is the case where the old
@@ -315,12 +338,14 @@ describe("deck framing survives to the recipient, through check_messages", () =>
     expect(received).toContain("free to message any peer");
   }, 90_000);
 
-  test("an ordinary peer-to-peer message arrives UNFRAMED, byte for byte", async () => {
-    // THE NEGATIVE CONTROL. Without it, a check_messages that framed EVERY
-    // message would satisfy both tests above. It also pins the half of the
-    // extraction that must not have changed: for a non-sentinel sender,
-    // renderInbound returns the text unchanged, so this path's output is
-    // identical to what it printed before the rewrite.
+  test("an ordinary peer-to-peer message arrives with the PEER note and neither sentinel framing", async () => {
+    // THE NEGATIVE CONTROL, re-aimed by spec_ec5cf671. Without it, a
+    // check_messages that applied the DECK framing to every message would
+    // satisfy both tests above. A plain peer now carries its own note (what to
+    // tell the operator), so the control pins: body present, peer note
+    // present, and neither the deck nor the operator header. Asserted on a
+    // hardcoded literal, not on the constant, for the reason stated on the
+    // WS-push test.
     const b = await startBroker();
     brokers.push(b);
     const sender = await spawnPeer(b);
@@ -341,6 +366,8 @@ describe("deck framing survives to the recipient, through check_messages", () =>
     expect(received).toContain(`From ${senderId} (`);
     expect(received).not.toContain("[Deck announcement");
     expect(received).not.toContain("[Operator answer]");
-    expect(received).not.toContain("[claude-peers]");
+    expect(received).toContain("[claude-peers] Peer message: handle it, then continue your task.");
+    expect(received).toContain("Do NOT report this exchange to the operator");
+    expect(received.indexOf(body)).toBeLessThan(received.indexOf("[claude-peers] Peer message"));
   }, 90_000);
 });

@@ -99,14 +99,38 @@ export function renderOperatorAnswer(text: string): string {
   return `[Operator answer]\n${text}${OPERATOR_ANSWER_NOTE}`;
 }
 
+// An ORDINARY peer message, spec_ec5cf671 (2026-08-20). Fourth note, and the
+// only one that says nothing about replying. Measured on the operator's side:
+// after every peer exchange the receiving agent wrote a paragraph to the
+// operator ("the peer confirms, I am asking it about X, still waiting on Y"),
+// which the operator never needed. None of the three existing framings could
+// carry the rule: the MCP `instructions` block is read once at session start
+// and loses against the most recent turn, PEER_NO_REPLY_NOTE
+// (shared/message-framing.ts) only travels when the SENDER waives a reply, and
+// nothing framed a plain peer message at all.
+//
+// The note is deliberately SILENT on whether to reply. Replying is settled
+// elsewhere -- by the instructions block (reply, then resume) and by the
+// emission-side waiver (do not acknowledge). A message can carry BOTH the
+// waiver and this note, so this note must not contain a third opinion on the
+// same question; the suite pins that it names neither "reply" nor
+// "acknowledge". What it governs is the OTHER audience: what the agent tells
+// the human about the exchange.
+export const PEER_INBOUND_NOTE =
+  "\n\n[claude-peers] Peer message: handle it, then continue your task. Do NOT report this exchange to the operator unless it needs a human decision, blocks you, or changes your plan or result; then state the conclusion in one or two sentences, never the message.";
+
+export function renderPeerMessage(text: string): string {
+  return `${text}${PEER_INBOUND_NOTE}`;
+}
+
 /**
  * Framing of an inbound message, by sender class. THE single enforcer: all
  * three receive paths in server.ts call this, so a fourth sender class is added
  * here once instead of being added here and forgotten in check_messages.
  *
- * An ordinary peer-to-peer message is returned UNCHANGED, byte for byte. That
- * is load-bearing for check_messages, whose output for a plain peer must stay
- * identical to what it printed before this extraction.
+ * An ordinary peer-to-peer message keeps its body intact and gains
+ * PEER_INBOUND_NOTE as a suffix (it was returned byte-identical until
+ * spec_ec5cf671). The dormant-sender case (empty id) is an ordinary peer.
  *
  * `fromPeerId` must be the sender identity, never a display fallback:
  * check_messages substitutes the literal "<dormant peer>" when the broker
@@ -126,5 +150,5 @@ export function renderOperatorAnswer(text: string): string {
 export function renderInbound(fromPeerId: string, text: string): string {
   if (isDeckSender(fromPeerId)) return renderDeckAnnouncement(text);
   if (isOperatorSender(fromPeerId)) return renderOperatorAnswer(text);
-  return text;
+  return renderPeerMessage(text);
 }

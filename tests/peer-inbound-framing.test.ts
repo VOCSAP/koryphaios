@@ -20,6 +20,8 @@ import { test, expect, describe } from "bun:test";
 import {
   DECK_NO_REPLY_NOTE,
   OPERATOR_ANSWER_NOTE,
+  PEER_INBOUND_NOTE,
+  renderPeerMessage,
   isDeckSender,
   isOperatorSender,
   renderDeckAnnouncement,
@@ -84,30 +86,65 @@ describe("renderInbound, the single enforcer", () => {
     }
   });
 
-  test("an ordinary peer message is returned BYTE-IDENTICAL", () => {
-    // The negative control, and the load-bearing one for the extraction: this
-    // is what makes check_messages' output for a plain peer unchanged by the
-    // rewrite. A blanket framing would pass every assertion above and fail
-    // only here.
-    expect(renderInbound("desktop-7b2civn-koryphaios-15", BODY)).toBe(BODY);
-    expect(renderInbound("some-peer", "")).toBe("");
+  test("an ordinary peer message keeps its body intact and gains the peer note as a suffix", () => {
+    // Until spec_ec5cf671 this was the byte-identical negative control. The
+    // peer class now has a note of its own, so the control becomes: body
+    // first, untouched, then PEER_INBOUND_NOTE, and NOT one of the two
+    // sentinel framings (a blanket deck framing would fail here).
+    const out = renderInbound("desktop-7b2civn-koryphaios-15", BODY);
+    expect(out).toBe(`${BODY}${PEER_INBOUND_NOTE}`);
+    expect(out).toBe(renderPeerMessage(BODY));
+    expect(out.startsWith(BODY)).toBe(true);
+    expect(out).not.toContain("[Deck announcement");
+    expect(out).not.toContain("[Operator answer]");
+    expect(renderInbound("some-peer", "")).toBe(PEER_INBOUND_NOTE);
   });
 
-  test("a dormant sender (empty id) is not framed, and no display fallback leaks in", () => {
+  test("a dormant sender (empty id) is an ordinary peer, and no display fallback leaks in", () => {
     // check_messages substitutes the literal "<dormant peer>" for its own
     // PREFIX when the broker resolved no peer_id. That substitution must never
     // reach renderInbound: the framing keys on the real sender identity.
     //
-    // CORRECTED AFTER REVIEW. This comment used to claim that asserting both
-    // spellings CATCHES the swap. It does not, and the claim was measured false:
-    // "" and "<dormant peer>" both match no sentinel, so both return the text
-    // unchanged and a mutation exchanging them stays green. What the two cases
-    // below actually pin is narrower and still worth having -- neither spelling
-    // is accidentally classified as a sentinel -- and the un-guarded half is
-    // documented as such on renderInbound itself rather than pretended away
-    // here.
-    expect(renderInbound("", BODY)).toBe(BODY);
-    expect(renderInbound("<dormant peer>", BODY)).toBe(BODY);
+    // "" and "<dormant peer>" both match no sentinel, so both take the peer
+    // branch and a mutation exchanging them stays green. What the two cases
+    // pin is narrower and still worth having -- neither spelling is
+    // accidentally classified as a sentinel -- and the un-guarded half is
+    // documented on renderInbound itself rather than pretended away here.
+    expect(renderInbound("", BODY)).toBe(`${BODY}${PEER_INBOUND_NOTE}`);
+    expect(renderInbound("<dormant peer>", BODY)).toBe(`${BODY}${PEER_INBOUND_NOTE}`);
+  });
+});
+
+describe("spec_ec5cf671: the peer note governs what the agent tells the OPERATOR, nothing else", () => {
+  test("the note is pinned literally", () => {
+    // Same discipline as OPERATOR_ANSWER_NOTE below: an assertion that
+    // re-injects the constant is blind to its own shape.
+    expect(PEER_INBOUND_NOTE).toBe(
+      "\n\n[claude-peers] Peer message: handle it, then continue your task. Do NOT report this exchange to the operator unless it needs a human decision, blocks you, or changes your plan or result; then state the conclusion in one or two sentences, never the message."
+    );
+  });
+
+  test("it says nothing about replying, so it can stack with the emission-side waiver", () => {
+    // A message sent with expects_reply=false arrives carrying BOTH
+    // PEER_NO_REPLY_NOTE (emission) and PEER_INBOUND_NOTE (reception). The
+    // first says "do not acknowledge"; the instructions block says "reply".
+    // A third opinion here would contradict one of them, so the reception
+    // note must not hold one. Asserted on the words, case-insensitively.
+    const lower = PEER_INBOUND_NOTE.toLowerCase();
+    expect(lower).not.toContain("reply");
+    expect(lower).not.toContain("acknowledge");
+    expect(lower).not.toContain("send_message");
+    const stacked = renderInbound("some-peer", `${BODY}${PEER_NO_REPLY_NOTE}`);
+    expect(stacked).toBe(`${BODY}${PEER_NO_REPLY_NOTE}${PEER_INBOUND_NOTE}`);
+  });
+
+  test("it names the three cases that DO reach the operator", () => {
+    // The ban alone would teach silence on a real blocker. Both halves are
+    // asserted, as for the deck note.
+    expect(PEER_INBOUND_NOTE).toContain("Do NOT report this exchange to the operator");
+    expect(PEER_INBOUND_NOTE).toContain("human decision");
+    expect(PEER_INBOUND_NOTE).toContain("blocks you");
+    expect(PEER_INBOUND_NOTE).toContain("changes your plan or result");
   });
 });
 
@@ -128,7 +165,7 @@ describe("the framing is additive: the sender's own words survive", () => {
     expect(out.endsWith(OPERATOR_ANSWER_NOTE)).toBe(true);
   });
 
-  test("both notes are separated from the body by a literal blank line", () => {
+  test("every reception note is separated from the body by a literal blank line", () => {
     // Asserted on the bytes rather than on a "contains": a note glued to the
     // last word of the message reads as part of it, which is exactly the
     // failure mode a `toContain` cannot see.
@@ -184,7 +221,7 @@ describe("card dd388182: the deck note stops forbidding what a dispatch asks for
     );
   });
 
-  test("the three notes stay three distinct constants", () => {
+  test("the four notes stay four distinct constants", () => {
     // PEER_NO_REPLY_NOTE (shared/message-framing.ts, commit 138fa6f) frames a
     // peer-to-peer waiver at EMISSION; the two here frame a sender class at
     // RECEPTION. Now that all three share the "free to message any peer"
@@ -192,7 +229,7 @@ describe("card dd388182: the deck note stops forbidding what a dispatch asks for
     // would re-key one mechanism on the other's identity, which is the shape
     // CLAUDE.md warns about. They agree on a property; they are not the same
     // thing.
-    const notes = [DECK_NO_REPLY_NOTE, OPERATOR_ANSWER_NOTE, PEER_NO_REPLY_NOTE];
-    expect(new Set(notes).size).toBe(3);
+    const notes = [DECK_NO_REPLY_NOTE, OPERATOR_ANSWER_NOTE, PEER_NO_REPLY_NOTE, PEER_INBOUND_NOTE];
+    expect(new Set(notes).size).toBe(4);
   });
 });

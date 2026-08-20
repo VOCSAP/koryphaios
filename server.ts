@@ -419,33 +419,21 @@ const mcp = new Server(
       experimental: { "claude/channel": {} },
       tools: {},
     },
-    instructions: `You are connected to the claude-peers network. Other Claude Code instances on this machine and on other PCs sharing the same broker can see you and send you messages, scoped to your current group.
+    instructions: `You are connected to the claude-peers network: other Claude Code instances on this machine and on other PCs sharing the same broker can see you and message you, scoped to your current group.
 
-IMPORTANT: When you receive a <channel source="claude-peers" ...> message, RESPOND IMMEDIATELY. Do not wait until your current task is finished. Pause what you are doing, reply to the message using send_message with the from_peer_id, then resume your work. Treat incoming peer messages like a coworker tapping you on the shoulder -- answer right away, even if you're in the middle of something.
+When a <channel source="claude-peers"> message arrives, reply now with send_message to its from_peer_id, then resume your work. Peer traffic is background work: do not narrate it to the operator. Tell the operator only when a human decision is needed, you are blocked, or the outcome changes your plan or result, and then in one or two sentences.
 
-Available tools:
-- list_peers: Discover other Claude Code instances in your group (scope: machine/directory/repo).
-- send_message: Send a message to another instance by peer_id.
-- set_summary: Set a 1-2 sentence summary of what you're working on (visible to other peers in your group).
-- check_messages: Manually check for new messages (polling fallback; messages normally arrive via WebSocket push).
-- whoami: Show your current peer_id, group, host, cwd, and WebSocket status.
-- list_groups: Show available groups defined in user config and how many active peers each has.
-- switch_group: Move this session to another group (disconnect + re-register).
-- set_id: Rename your peer_id within the current group (display name only; routing is unchanged).
-- roadmap_list / roadmap_get / roadmap_add / roadmap_update / roadmap_archive: the project's shared roadmap (see below).
-- graph_draft_prepare / graph_draft_send: ONLY when the operator explicitly invites you to move a blocking question into the Koryphaios graph view — a cheap read-only haiku pass compiles the question plus the strictly relevant context/references into a prompt draft; you review it, then send it to the operator's Deck where it opens as a pre-filled, unsubmitted graph node (the operator picks the models and launches the inference).
+Tools: list_peers, send_message (expects_reply=false for pure information), set_summary, check_messages (polling fallback), whoami, list_groups, switch_group, set_id, the roadmap_* family, ask_operator / ask_operator_wait (blocking question to the human, answer may come from their phone), graph_draft_prepare / graph_draft_send (ONLY when the operator explicitly asks to move a question into the Koryphaios graph view).
 
-Special recipient 'operator': send_message with to_peer_id 'operator' reaches the HUMAN operator's desktop inbox (works even though 'operator' is not in list_peers). Use it for blocking questions or important findings that need a human decision. The operator does not reply through this channel -- expect an answer as a deck announcement or new instructions. It requires a group that pins a secret (a Koryphaios Deck always does): in the secret-less 'default' group the inbox does not exist -- anyone sharing the broker could read it -- and the send is refused, so ask the operator on screen there instead.
+Special recipient 'operator': send_message with to_peer_id 'operator' reaches the HUMAN operator's desktop inbox. Use it for blocking questions or findings that need a human decision; the answer comes back as a Deck announcement or new instructions, not through this channel. It needs a group that pins a secret (a Koryphaios Deck always does); in the secret-less 'default' group the send is refused, ask on screen instead.
 
-This project also has a SHARED ROADMAP: a persistent backlog of features, bugs, tech debt and ideas, scoped to this repository (not to your group or session) and shared with every Claude instance working on it, now and in future sessions. Use it actively:
-- At the start of a task, call roadmap_list to see what is planned and in progress.
-- When you discover a bug, tech debt or a good idea outside your current task, record it with roadmap_add instead of letting it vanish with the session.
-- ALWAYS fill the 'context' field when you add an item: it is the implementation briefing for the agent that will pick the item up later, in a fresh session with none of your current knowledge. Cover the objective, constraints / scope boundaries, pointers to the relevant files/modules/tests, acceptance criteria, and decisions already made -- especially what a fresh session cannot rediscover by exploring the repo (e.g. "the bug is in flushPendingForToken, cross-host reconnect case, see broker-flush-cap.test.ts").
-- Keep the status of items you work on up to date (roadmap_update: planned -> in_progress -> done), and enrich an item's context with roadmap_update when you learn something the next agent will need.
-- WORK-LOCK: setting an item to in_progress locks it under your peer_id -- it marks you as ACTIVELY working on it and blocks other sessions (and the operator's board) from moving it. Only flip an item to in_progress when you are really starting the work, not to "reserve" it. When you stop working on an item without finishing it, set it back to 'planned' (this releases the lock). If roadmap_update returns "item is locked by ...", pick another item instead of forcing.
-- CONTEXT/TOKEN ECONOMY (directive cards): if you coordinate a team, you can queue a kind='directive' card (roadmap_add) to make the Deck reset a peer's context between items -- 'clear' (free), 'compact' or 'magic_compact'. The Deck injects the command into the target terminals when the card is dispatched; agents never run it themselves. This is an app control lever, not something you execute in your own session.
+SHARED ROADMAP: a persistent backlog (features, bugs, debt, ideas) scoped to this repository and shared with every Claude instance working on it, now and later.
+- Start of a task: roadmap_list with a filter, to see what is planned and in progress.
+- Bug, debt or idea outside your task: roadmap_add, with the 'context' field filled (the briefing a fresh session cannot rediscover from the repo).
+- Keep the status of items you work on current (roadmap_update: planned -> in_progress -> done). in_progress LOCKS the item under your peer_id: set it only when you really start, set it back to planned if you stop before finishing.
+- Team leads: a kind='directive' card (roadmap_add) lets the Deck reset a peer's context between items; you never run it yourself.
 
-When you start, proactively call set_summary to describe what you're working on. This helps other instances understand your context.`,
+When you start, call set_summary to say what you are working on.`,
   }
 );
 
@@ -567,70 +555,50 @@ const TOOLS = [
   },
   {
     name: "roadmap_list",
+    // The singular filters (kind, status, priority, tag) left the SCHEMA in
+    // spec_ec5cf671 but not the handler nor the broker: `kinds: ["bug"]` is
+    // the same query, the broker takes the UNION of both forms
+    // (mergeEnumFilter), and an agent still sending `kind` is served. Four
+    // fewer properties read on every turn; no filter lost.
     description:
-      "List the project's shared roadmap items (persistent backlog scoped to this repository, shared across sessions and groups). Optional filters. Archived items are hidden unless requested.",
+      "List the project's shared roadmap (persistent backlog scoped to this repository, shared across sessions). Always pass a filter (statuses, kinds, q ...) so you do not load the whole board. Within a filter: OR; between filters: AND. Archived items hidden unless include_archived.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        kind: {
-          type: "string" as const,
-          enum: ["feature", "bug", "debt", "idea", "chore", "directive"],
-          description: "Only items of this kind.",
-        },
-        status: {
-          type: "string" as const,
-          enum: ["idea", "planned", "in_progress", "done", "archived"],
-          description: "Only items in this status.",
-        },
-        priority: {
-          type: "string" as const,
-          enum: ["must", "should", "could", "wont"],
-          description: "Only items with this MoSCoW priority.",
-        },
-        tag: { type: "string" as const, description: "Only items carrying this tag." },
-        include_archived: {
-          type: "boolean" as const,
-          description: "Include archived items (default false).",
-        },
         kinds: {
           type: "array" as const,
           items: { type: "string" as const, enum: ["feature", "bug", "debt", "idea", "chore", "directive"] },
-          description: "Only items whose kind is one of these (OR'd with `kind` if both are set).",
         },
         statuses: {
           type: "array" as const,
           items: { type: "string" as const, enum: ["idea", "planned", "in_progress", "done", "archived"] },
-          description: "Only items whose status is one of these (OR'd with `status` if both are set).",
         },
         priorities: {
           type: "array" as const,
           items: { type: "string" as const, enum: ["must", "should", "could", "wont"] },
-          description: "Only items whose priority is one of these (OR'd with `priority` if both are set).",
         },
         efforts: {
           type: "array" as const,
           items: { type: "string" as const, enum: ["low", "medium", "high"] },
-          description: "Only items whose effort is one of these.",
         },
         values: {
           type: "array" as const,
           items: { type: "string" as const, enum: ["low", "medium", "high"] },
-          description: "Only items whose value is one of these.",
         },
         tags: {
           type: "array" as const,
           items: { type: "string" as const },
-          description: "Only items carrying at least one of these tags (OR'd with `tag` if both are set).",
+          description: "Items carrying at least one of these tags.",
         },
         q: {
           type: "string" as const,
-          description:
-            "Free-text search over title, description and tags. Non-contiguous terms, case and accents are ignored.",
+          description: "Free-text search over title, description and tags (order, case and accents ignored).",
         },
         q_deep: {
           type: "boolean" as const,
-          description: "Widen `q` to also search rationale and context (default false).",
+          description: "Widen `q` to rationale and context.",
         },
+        include_archived: { type: "boolean" as const, description: "Default false." },
       },
     },
   },
@@ -646,10 +614,26 @@ const TOOLS = [
       required: ["id"],
     },
   },
+  // DESCRIPTION BUDGET (spec_ec5cf671). Every tool description below is read by
+  // the model on EVERY turn of EVERY session, so a sentence here costs its
+  // length times the turn count, while an error message costs once and only
+  // when it fires. Keep in a description what changes the CALL (when to use
+  // it, a parameter required by another, a lock, an irreversible effect, a
+  // 409/403). Put the WHY in a comment like this one, and the remedy in the
+  // refusal text. tests/server-mcp-surface-budget.test.ts caps the total.
+  //
+  // Directive cards (kind='directive'): the Deck itself types the command
+  // (clear | compact | magic_compact) into the terminals of target_peer_ids
+  // when the card reaches the head of the operator's dispatch queue; agents
+  // never run it. A 'clear' between two independent items resets a peer's
+  // context for free; the briefing for the NEXT item goes in that item's
+  // `context`, not in the directive. 'clear' keeps system prompt, CLAUDE.md
+  // and MCP; 'compact' costs one inference on the target's model;
+  // 'magic_compact' is the deterministic plugin and falls back to compact.
   {
     name: "roadmap_add",
     description:
-      "Add an item to the project's shared roadmap. Use it to record features, bugs, tech debt or ideas so they survive this session. Only title is required; sensible defaults apply (kind=feature, priority=could, value/effort=medium, status=idea). A special kind='directive' creates a CONTROL card (context/token economy): the Koryphaios Deck app itself types the `directive` command (clear | compact | magic_compact) into the terminals of `target_peer_ids` when the card reaches the head of the operator's dispatch queue — agents never run directives themselves. Queue a 'clear' directive between two independent items to reset a peer's context window for free; put the re-work briefing for the NEXT item in that item's `context` field, not in the directive.",
+      "Add an item to the project's shared roadmap: a feature, bug, tech debt or idea you want to survive this session. Only title is required (defaults: kind=feature, priority=could, value/effort=medium, status=idea). Always fill `context`. kind='directive' is a control card the Deck executes on target_peer_ids (team leads only).",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -657,52 +641,39 @@ const TOOLS = [
         kind: {
           type: "string" as const,
           enum: ["feature", "bug", "debt", "idea", "chore", "directive"],
-          description: "Item kind (default feature). 'directive' = an app-executed control card.",
+          description: "Default feature.",
         },
         directive: {
           type: "string" as const,
           enum: ["clear", "compact", "magic_compact"],
           description:
-            "REQUIRED when kind='directive'. The command the Deck injects into the target terminals: 'clear' (zero-cost context reset, system prompt/CLAUDE.md/MCP survive), 'compact' (summarize in place, costs one inference on the target's own model), 'magic_compact' (deterministic plugin compaction, falls back to compact when the plugin is absent).",
+            "REQUIRED when kind='directive': clear (free context reset), compact (one inference), magic_compact (plugin, falls back to compact).",
         },
         target_peer_ids: {
           type: "array" as const,
           items: { type: "string" as const },
-          description:
-            "For kind='directive': the peer_ids (from list_peers) whose terminals receive the command. Only these peers are affected. Max 16 per card (split into several cards beyond that).",
+          description: "kind='directive' only: peer_ids (from list_peers) that receive the command. Max 16 per card.",
         },
         description: { type: "string" as const, description: "Free markdown details." },
-        rationale: { type: "string" as const, description: "Why it matters (business value)." },
+        rationale: { type: "string" as const, description: "Why it matters." },
         context: {
           type: "string" as const,
           description:
-            "Implementation briefing for the agent that will pick this item up later, in a FUTURE session with none of your current context. Cover: objective, constraints / scope boundaries (what NOT to touch), pointers to the relevant files/modules/tests, acceptance criteria, and decisions already made. Write what a fresh session cannot rediscover by exploring the repo.",
+            "Briefing for the agent that picks this up in a FUTURE session with none of your context: objective, scope boundaries, relevant files/tests, acceptance criteria, decisions made. Write what a fresh session cannot rediscover from the repo.",
         },
         priority: {
           type: "string" as const,
           enum: ["must", "should", "could", "wont"],
-          description: "MoSCoW priority (default could).",
+          description: "MoSCoW, default could.",
         },
-        value: {
-          type: "string" as const,
-          enum: ["low", "medium", "high"],
-          description: "Impact / value (default medium).",
-        },
-        effort: {
-          type: "string" as const,
-          enum: ["low", "medium", "high"],
-          description: "Complexity / effort (default medium).",
-        },
+        value: { type: "string" as const, enum: ["low", "medium", "high"], description: "Default medium." },
+        effort: { type: "string" as const, enum: ["low", "medium", "high"], description: "Default medium." },
         status: {
           type: "string" as const,
           enum: ["idea", "planned", "in_progress", "done"],
-          description: "Initial status (default idea).",
+          description: "Default idea.",
         },
-        tags: {
-          type: "array" as const,
-          items: { type: "string" as const },
-          description: "Free tags (e.g. component, milestone).",
-        },
+        tags: { type: "array" as const, items: { type: "string" as const } },
         depends_on: {
           type: "array" as const,
           items: { type: "string" as const },
@@ -712,10 +683,14 @@ const TOOLS = [
       required: ["title"],
     },
   },
+  // [INACTIVE] is an operator flag with no agent-side field on purpose: it
+  // takes a card out of every agent's reach until the operator lifts it. The
+  // 403 fires on the CLAIM (in_progress or locked=true) whatever else the write
+  // changes, so a retry with extra fields does not help.
   {
     name: "roadmap_update",
     description:
-      "Partially update a roadmap item: only the fields you pass change. Use it to move status (planned -> in_progress -> done), reprioritize, retag or rewrite. Accepts a full id or a unique prefix. Setting status=archived archives; any other status restores an archived item. Moving an item to in_progress LOCKS it under your peer_id (you are actively working on it); leaving in_progress releases the lock. A status write on an item locked by another peer is refused (409) -- pick another item. For a kind='directive' card (see roadmap_add) you may retarget it (target_peer_ids) or change its command (directive) before it is dispatched. A card marked [INACTIVE] in a listing is made INACTIVE by an operator: it stays out of your reach on purpose -- this tool has no field to clear that flag, and claiming it (in_progress, or locked=true) is refused (403) regardless of what else the write changes.",
+      "Partially update a roadmap item (only the fields you pass change): move status (planned -> in_progress -> done), reprioritize, retag, rewrite. id or unique prefix. status=archived archives, any other status restores. in_progress LOCKS the item under your peer_id, leaving it releases the lock; a status write on an item locked by another peer is refused (409): pick another item. Claiming a card marked [INACTIVE] is refused (403).",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -725,19 +700,18 @@ const TOOLS = [
         directive: {
           type: "string" as const,
           enum: ["clear", "compact", "magic_compact"],
-          description: "kind='directive' only: the command the Deck injects into the targets.",
+          description: "kind='directive' only.",
         },
         target_peer_ids: {
           type: "array" as const,
           items: { type: "string" as const },
-          description: "kind='directive' only: the peer_ids whose terminals receive the command.",
+          description: "kind='directive' only.",
         },
         description: { type: "string" as const },
         rationale: { type: "string" as const },
         context: {
           type: "string" as const,
-          description:
-            "Implementation briefing for the agent that will pick this item up later (objective, constraints, file pointers, acceptance criteria, decisions made). Replaces the whole field.",
+          description: "Briefing for a future agent (see roadmap_add). Replaces the whole field.",
         },
         priority: { type: "string" as const, enum: ["must", "should", "could", "wont"] },
         value: { type: "string" as const, enum: ["low", "medium", "high"] },
@@ -750,8 +724,7 @@ const TOOLS = [
         depends_on: { type: "array" as const, items: { type: "string" as const } },
         locked: {
           type: "boolean" as const,
-          description:
-            "Explicit work-lock control. Usually implicit (in_progress locks, leaving it unlocks); pass false to release your lock while staying in_progress, true to re-claim.",
+          description: "Usually implicit. false releases your lock while staying in_progress, true re-claims.",
         },
       },
       required: ["id"],
@@ -769,15 +742,26 @@ const TOOLS = [
       required: ["id"],
     },
   },
+  // Four design facts the description used to spell out, kept here because
+  // they explain the shape without changing the call: (1) the call is NOT
+  // idempotent -- a retry after a lost response lands the block twice, and
+  // duplicates are accepted on purpose (compact later rather than block the
+  // retry); (2) the timestamped attribution header around every append is
+  // what makes such a duplicate visible, so it always ships; (3) the Deck's
+  // context textarea and the wand replace the WHOLE field on the operator's
+  // next Save, so appended blocks are not durable structure; (4) the call does
+  // not refresh updated_at, because updated_at drives the stale-lock TTL and a
+  // third party's append must not extend another agent's lock. A too-large
+  // append is refused with the remedies named in the refusal text.
   {
     name: "roadmap_append_context",
     description:
-      "Append a note to a roadmap item's context WITHOUT replacing the field (use roadmap_update for that). Meant for leaving a note on ANOTHER agent's card while it works -- the work-lock does not block this, only status/locked changes go through that guard. Four things to know before using it: (1) this call is NOT idempotent -- if the response is lost after the broker already committed and you retry, the block lands TWICE; duplicates are accepted deliberately, the remedy is compacting the context later, not preventing the retry. (2) The timestamped attribution header wrapping every append is not cosmetic: it is what makes a duplicate from (1) visible to whoever reads the card, so it always ships with the text. (3) Appended blocks are not durable structure -- the Deck's context textarea and the wand both replace the WHOLE field on the operator's next explicit Save, so anything that must survive a full rewrite belongs in description/rationale, not here. (4) This call does NOT refresh the item's updated_at, on purpose: updated_at drives the work-lock's stale-lock TTL, and refreshing it from a third party's append would let anyone silently extend another agent's lock indefinitely -- the note's own timestamp lives inside the header instead. A too-large append is refused with a named remedy (compact via roadmap_update, `bun cli.ts roadmap-import --force`, or ask the team lead), not a bare rejection.",
+      "Append a note to a roadmap item's context without replacing it (roadmap_update replaces). Use it to leave a note on ANOTHER agent's card: the work-lock does not block it. Not idempotent (a retry may land twice, accepted). The operator's next Save may overwrite appended text: durable facts go in description/rationale. Does not refresh updated_at.",
     inputSchema: {
       type: "object" as const,
       properties: {
         id: { type: "string" as const, description: "Item id, or a unique id prefix." },
-        text: { type: "string" as const, description: "The note to append. Capped per call; see the refusal message for the exact limit if you hit it." },
+        text: { type: "string" as const, description: "The note. Capped per call; the refusal names the limit." },
       },
       required: ["id", "text"],
     },
@@ -785,19 +769,17 @@ const TOOLS = [
   {
     name: "graph_draft_prepare",
     description:
-      "OPERATOR-INVITED ONLY: call this when the human operator explicitly asks you to move a blocking question into the Koryphaios GRAPH view ('open a graph on this', 'passe en mode graphe'). Never call it on your own initiative. Runs a cheap READ-ONLY haiku one-shot in this project that reformulates your question and compiles only the strictly relevant context and file references into one ready-to-send prompt draft. The draft is returned TO YOU for supervision: review it, fix the question or re-run with better hints if needed, then submit it with graph_draft_send. Nothing is sent and no inference runs at this stage.",
+      "OPERATOR-INVITED ONLY: call it when the human operator explicitly asks to move a blocking question into the Koryphaios GRAPH view ('open a graph on this', 'passe en mode graphe'), never on your own initiative. Returns a prompt draft (question + relevant context and file references) for you to review, then submit with graph_draft_send. Nothing is sent at this stage.",
     inputSchema: {
       type: "object" as const,
       properties: {
         question: {
           type: "string" as const,
-          description:
-            "The blocking question, as raw as you like — the compiler reformulates it self-contained.",
+          description: "The blocking question, as raw as you like.",
         },
         hints: {
           type: "string" as const,
-          description:
-            "Optional: files, symbols or areas you already identified as relevant (saves the compiler exploration).",
+          description: "Optional: files, symbols or areas you already identified as relevant.",
         },
       },
       required: ["question"],
@@ -822,7 +804,7 @@ const TOOLS = [
   {
     name: "ask_operator",
     description:
-      "Ask the HUMAN operator a blocking question and WAIT for their answer, which may arrive from their phone (Telegram/Discord/the Parastates app) or from the Deck. Use this INSTEAD of stopping with an open question on screen whenever you are blocked and the operator may be away: unlike an on-screen question, this one reaches them wherever they are. The answer is returned to you as free text. If nobody has answered yet, you get a ticket — call ask_operator_wait with it to keep waiting (do that rather than assuming an answer). Available only when the operator enabled remote approvals for this project.",
+      "Ask the HUMAN operator a blocking question and WAIT for the answer (it reaches them on their phone or the Deck, so use it instead of an on-screen question when they may be away). Returns the answer as free text, or a ticket: then call ask_operator_wait rather than assuming an answer. Available only when remote approvals are enabled for this project.",
     inputSchema: {
       type: "object" as const,
       properties: {
