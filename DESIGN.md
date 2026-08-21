@@ -208,11 +208,20 @@ State rules (apply to every archetype):
   (`max-width`, `font-size`), never the box.
 - **Collapsible side panels.** The reference implementation is the **Agents
   sidebar** (`.sidebar` / `.sidebar-collapsed`, `Sidebar.tsx`, card
-  `079f034d`) — copy that one. The roadmap filter panel (`6aef4c54`) and the
-  graph conversation list (`67c21dd5`) are still open cards, and their current
-  `filterPanelOpen` / `showTimeline` code is the PRE-standard pattern this rule
-  replaces: they unmount their panel conditionally, which is exactly what (a)
-  forbids. The collapse control lives ON THE PANEL, in the panel's own header,
+  `079f034d`) — copy that one. It now has two siblings, both built on it: the
+  roadmap filter panel (card `7a2e76c6`) and the graph conversation list (card
+  `67c21dd5`), which share the rail token `--panel-rail-w` (58px, a sum
+  recomputed for a lone control, not a copy of the sidebar's). The filter
+  panel's `filterPanelOpen` WAS the PRE-standard pattern this rule replaces —
+  it unmounted the panel conditionally, which is exactly what (a) forbids — and
+  it is gone from the tree; the history is kept here because it is the clearest
+  illustration of why (a) exists. One instance of that pattern is still LIVE and
+  is not a sibling of the two above: the graph TIMELINE (`showTimeline` /
+  `.graph-timeline` in `GraphView.tsx`), a different panel from the conversation
+  list, still mounts conditionally and is still toggled from the floating
+  `.graph-zoomctl` toolbar rather than from itself. It is out of scope of the
+  cards named here; treat it as the last conversion left, not as a precedent.
+  The collapse control lives ON THE PANEL, in the panel's own header,
   never in a distant toolbar. Four consequences, none optional. (a) The panel is
   rendered PERMANENTLY with a modifier class, never mounted/unmounted
   conditionally: a panel that disappears takes its control with it and leaves

@@ -198,6 +198,37 @@ message (`"copy plan truncated"`), not just that `captured.length` is 1.
 "The sink fired with THIS message" cannot be satisfied by an unrelated
 `ReferenceError`; "the sink fired" can.
 
+## Computed-layout defects (no layout engine in this suite)
+
+Neither jsdom nor happy-dom (the two DOM harnesses this suite uses) ships a
+real layout engine: `getBoundingClientRect`, `offsetHeight`, `offsetTop` and
+`offsetParent` are stubbed (zero / `null`) in both, confirmed 2026-08-21 by
+`grep -rn "getBoundingClientRect\|offsetTop\|offsetHeight\|clientHeight" tests/`
+returning zero hits across the whole suite -- nobody has ever been able to
+rely on them here. A defect whose repro depends on the RESOLVED, COMPUTED box
+(e.g. a flex row with `align-items: center` centering on its tallest child,
+producing a few px of vertical offset that depends on the font actually
+resolved) cannot be caught by an assertion on the CSS rule text or on any
+`getComputedStyle` value that doesn't require box geometry -- the code
+correctly follows the rule either way, so such an assertion would pass
+whether the visual bug is present or not (the exact false-witness shape the
+CLAUDE.md coverage rule warns about).
+
+This class stays a **manual validation step**, not an automated guard: drive
+a real Koryphaios instance over CDP (screenshot or computed-style read on a
+live, laid-out page, not jsdom/happy-dom) and read the actual pixel/computed
+values. Three real defects were caught this way in one review pass
+(2026-08-21): a stale composer-reopen seed (now guarded automatically, see
+`tests/desktop-templates-composer-seed.test.ts`), a ~7.5px flex-centering
+offset (this class -- visual-only), and a focusable-element count inflated by
+`querySelectorAll` matching under `display: none` (a probe defect, filed as
+roadmap debt for the collapsed-panel accessibility invariant it pointed at,
+not a product regression). Introducing a real-browser runner (e.g.
+Playwright) would close this gap with an automated guard, at the cost of a
+new dependency, a new CI job and a maintainer for it -- not decided in this
+lot; flag it as its own proposal if the manual-review cost becomes the
+bottleneck.
+
 ## Cross-platform tests (the CI matrix)
 
 `.github/workflows/desktop-build.yml` runs the suite on **windows / macos /
