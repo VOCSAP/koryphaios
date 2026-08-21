@@ -183,6 +183,14 @@ interface FakeDeckState {
   workspaces: unknown[];
   templates: unknown[];
   templatesManage: boolean;
+  // Team-lead review 2026-08-21 (reviewer-caught): missing here, `composerSeed`
+  // read `undefined` in tests/desktop-templates-composer-seed.test.ts's earlier
+  // sibling scenarios, `undefined > 0` is false, so TemplatesDialog's seed
+  // effect never ran and `clearTemplatesComposerSeed` was never called --
+  // every test exercising TemplatesDialog in this file passed without ever
+  // touching that code path. Added to stop that silent no-op, not because any
+  // test below needs the composer to open.
+  templatesComposerSeed: number;
   dict: Record<string, string>;
   createSession: () => Promise<void>;
   restoreWorkspace: () => Promise<void>;
@@ -192,6 +200,7 @@ interface FakeDeckState {
   removeTemplate: (path: string) => Promise<void>;
   refreshTemplates: () => Promise<void>;
   showToast: (key: string) => void;
+  clearTemplatesComposerSeed: () => void;
 }
 
 function initialFakeState(): FakeDeckState {
@@ -203,6 +212,7 @@ function initialFakeState(): FakeDeckState {
     workspaces: [],
     templates: [],
     templatesManage: false,
+    templatesComposerSeed: 0,
     dict: {},
     createSession: async () => {},
     restoreWorkspace: async () => {},
@@ -211,7 +221,8 @@ function initialFakeState(): FakeDeckState {
     applyTemplate: async () => {},
     removeTemplate: async () => {},
     refreshTemplates: async () => {},
-    showToast: () => {}
+    showToast: () => {},
+    clearTemplatesComposerSeed: () => fakeUseDeck.setState({ templatesComposerSeed: 0 })
   };
 }
 

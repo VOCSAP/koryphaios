@@ -56,6 +56,28 @@ interface DeckState {
   templatesOpen: boolean
   /** Picker opened in manage mode (File > Import template): shows per-row Delete. */
   templatesManage: boolean
+  /**
+   * One-shot seed (card 290a14e2, same pattern as `helpSeed`/`roadmapSeed`):
+   * bumped by `openTemplates(open, { composer: true })` (File > New
+   * template…), consumed and cleared back to 0 by TemplatesDialog the
+   * instant it opens the blank composer, and forced back to 0 unconditionally
+   * on close (see `openTemplates` below). SELF-CLEARING is what closes the
+   * bug this seed was introduced for: closing the whole dialog then
+   * reopening it later via an UNRELATED path (e.g. the home "Use template"
+   * button) must NOT resurrect a stale request -- a first cut compared an
+   * ever-increasing counter against a component-local `useRef` instead of
+   * clearing the store's own copy, and that broke exactly this case on every
+   * remount (the ref reinitialised, the counter didn't).
+   * With self-clearing in place, a plain boolean would behave identically
+   * across two SEPARATE trigger events (true -> false -> true is a real
+   * change either way) -- the counter, rather than a boolean, only earns its
+   * keep for two requests landing in the same React batch, where re-setting
+   * `true` a second time before the first clear has flushed would otherwise
+   * collapse to one edge. Do not read this field's existence as evidence
+   * that boolean-vs-batch was the hard part; it wasn't -- the remount case
+   * above was.
+   */
+  templatesComposerSeed: number
   /** Export-template dialog (name + local checkbox) visibility. */
   exportTemplateOpen: boolean
   /** Discovered templates (global + local), refreshed when the picker opens. */
@@ -75,6 +97,10 @@ interface DeckState {
   sidebarWidth: number
   /** Agents sidebar folded to its rail; seeded from config, persisted on toggle. */
   sidebarCollapsed: boolean
+  /** Roadmap filter panel folded to its rail; same lifecycle as the one above. */
+  roadmapFiltersCollapsed: boolean
+  /** Graph chats panel folded to its rail; same lifecycle as the one above. */
+  graphListCollapsed: boolean
   /** Operator inbox (PLAN C12): drained agent messages, newest LAST. */
   inboxMessages: InboxMessage[]
   inboxOpen: boolean
@@ -232,7 +258,10 @@ interface DeckState {
   openWorkspaces(open: boolean, opts?: { loadOnly?: boolean }): void
   openNewClearConfirm(open: boolean): void
   openSaveAs(open: boolean): void
-  openTemplates(open: boolean, opts?: { manage?: boolean }): void
+  openTemplates(open: boolean, opts?: { manage?: boolean; composer?: boolean }): void
+  /** TemplatesDialog consumed the composer seed (card 290a14e2, same one-shot
+   *  pattern as clearHelpSeed/clearRoadmapSeed below). */
+  clearTemplatesComposerSeed(): void
   openExportTemplate(open: boolean): void
   refreshTemplates(): Promise<void>
   exportTemplate(name: string, local: boolean): Promise<void>
@@ -241,6 +270,10 @@ interface DeckState {
   setSidebarWidth(px: number): void
   /** Fold/unfold the Agents sidebar and persist it (same channel as the width). */
   setSidebarCollapsed(collapsed: boolean): void
+  /** Fold/unfold the Roadmap filter panel and persist it (card 7a2e76c6). */
+  setRoadmapFiltersCollapsed(collapsed: boolean): void
+  /** Fold/unfold the Graph chats panel and persist it (card 67c21dd5). */
+  setGraphListCollapsed(collapsed: boolean): void
 
   /**
    * Toast policy (PLAN O5): reserved for the outcome of a DIRECT user action.
@@ -389,6 +422,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   saveAsOpen: false,
   templatesOpen: false,
   templatesManage: false,
+  templatesComposerSeed: 0,
   exportTemplateOpen: false,
   templates: [],
   restoreLossId: null,
@@ -399,6 +433,8 @@ export const useDeck = create<DeckState>((set, get) => ({
   workspaces: [],
   sidebarWidth: 260,
   sidebarCollapsed: false,
+  roadmapFiltersCollapsed: false,
+  graphListCollapsed: false,
   inboxMessages: [],
   inboxOpen: false,
   pendingApprovals: [],
@@ -476,6 +512,8 @@ export const useDeck = create<DeckState>((set, get) => ({
       templates,
       sidebarWidth: config.sidebarWidth,
       sidebarCollapsed: config.sidebarCollapsed,
+      roadmapFiltersCollapsed: config.roadmapFiltersCollapsed,
+      graphListCollapsed: config.graphListCollapsed,
       selectedId: get().selectedId ?? sessions[0]?.id ?? null
     })
 
@@ -502,6 +540,7 @@ export const useDeck = create<DeckState>((set, get) => ({
     window.api.onMenuRestore(() => get().openWorkspaces(true))
     window.api.onMenuListWorkspaces(() => get().openWorkspaces(true))
     window.api.onMenuExportTemplate(() => get().openExportTemplate(true))
+    window.api.onMenuNewTemplate(() => get().openTemplates(true, { manage: true, composer: true }))
     window.api.onMenuImportTemplate(() => get().openTemplates(true, { manage: true }))
     window.api.onWorkspaceCurrent((ws) => {
       set({ currentWorkspaceName: ws?.name ?? null })
@@ -670,9 +709,21 @@ export const useDeck = create<DeckState>((set, get) => ({
   openNewClearConfirm: (open) => set({ confirmNewClearOpen: open }),
   openSaveAs: (open) => set({ saveAsOpen: open }),
   openTemplates: (open, opts) => {
-    set({ templatesOpen: open, templatesManage: open ? !!opts?.manage : false })
+    set((s) => ({
+      templatesOpen: open,
+      templatesManage: open ? !!opts?.manage : false,
+      // Only bumped when a blank composer is actually requested, so a plain
+      // "Use template" / "Manage templates" open never re-triggers it. On
+      // CLOSE, forced back to 0 unconditionally (card 290a14e2 review round
+      // 2): TemplatesDialog already self-clears it after consuming it, so no
+      // open path leaves a stray non-zero value today -- but that was an
+      // invariant held by consumer diligence, not guaranteed at the source.
+      // Zeroing it here on every close makes it true by construction.
+      templatesComposerSeed: open ? (opts?.composer ? s.templatesComposerSeed + 1 : s.templatesComposerSeed) : 0
+    }))
     if (open) void get().refreshTemplates()
   },
+  clearTemplatesComposerSeed: () => set({ templatesComposerSeed: 0 }),
   openExportTemplate: (open) => set({ exportTemplateOpen: open }),
 
   async refreshTemplates() {
@@ -716,6 +767,18 @@ export const useDeck = create<DeckState>((set, get) => ({
   setSidebarCollapsed: (collapsed) => {
     set({ sidebarCollapsed: collapsed })
     void get().updateConfig({ sidebarCollapsed: collapsed })
+  },
+
+  // Same write-through as the sidebar above: one toggle, one persisted flag.
+  setRoadmapFiltersCollapsed: (collapsed) => {
+    set({ roadmapFiltersCollapsed: collapsed })
+    void get().updateConfig({ roadmapFiltersCollapsed: collapsed })
+  },
+
+  // Same write-through as the two above (card 67c21dd5).
+  setGraphListCollapsed: (collapsed) => {
+    set({ graphListCollapsed: collapsed })
+    void get().updateConfig({ graphListCollapsed: collapsed })
   },
 
   dismissOfflineBanner: () => {

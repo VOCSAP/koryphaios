@@ -101,6 +101,11 @@ export function GraphView(): React.JSX.Element {
   const [judgeKey, setJudgeKey] = useState(DEFAULT_JUDGE_KEY)
   const [judgeTarget, setJudgeTarget] = useState<ModelTarget>(DEFAULT_JUDGE_TARGET)
   const [showTimeline, setShowTimeline] = useState(false)
+  // Card 67c21dd5: fold state for the left "Chats graphe" panel, persisted
+  // the same way as sidebarCollapsed/roadmapFiltersCollapsed (survives close
+  // + relaunch via desktop/src/shared/types.ts + main/store.ts).
+  const listCollapsed = useDeck((s) => s.graphListCollapsed)
+  const setListCollapsed = useDeck((s) => s.setGraphListCollapsed)
 
   const canvasRef = useRef<HTMLDivElement>(null)
   // Single state machine for every canvas drag: panning the camera, moving a
@@ -600,43 +605,77 @@ export function GraphView(): React.JSX.Element {
 
   return (
     <div className="graph-view">
-      {/* left column: graphs of the project */}
-      <aside className="graph-list">
+      {/* left column: graphs of the project. Never unmounted -- folding is a
+          width modifier on the SAME element (card 67c21dd5), otherwise the
+          fold would take its own control away with it (same reasoning as
+          Sidebar.tsx's sidebar-collapsed). */}
+      <aside className={`graph-list${listCollapsed ? ' graph-list-collapsed' : ''}`}>
         <div className="graph-list-head">
-          <span className="graph-list-title">{t('graph.title')}</span>
-          <button className="btn" onClick={() => void createGraph()}>
-            {t('graph.newGraph')}
-          </button>
-        </div>
-        {graphs.length === 0 && <div className="graph-empty">{t('graph.empty')}</div>}
-        {graphs.map((g) => (
-          <div
-            key={g.id}
-            className={`graph-list-item${g.id === activeId ? ' is-active' : ''}`}
-            onClick={() => {
-              setActiveId(g.id)
-              setSelection([])
-            }}
+          {/* Fold control comes FIRST and keeps the head's own left padding,
+              so it sits at the same pixel in both states. panelFold/panelUnfold
+              only -- GLYPH_ACTIONS.menu is already the timeline toggle below. */}
+          <button
+            className="icon-btn graph-list-fold"
+            aria-expanded={!listCollapsed}
+            title={listCollapsed ? t('graph.unfoldTitle') : t('graph.foldTitle')}
+            aria-label={listCollapsed ? t('graph.unfoldTitle') : t('graph.foldTitle')}
+            onClick={() => setListCollapsed(!listCollapsed)}
           >
-            <input
-              className="graph-name-input"
-              value={g.name}
-              onChange={(e) => renameGraph(g, e.target.value)}
-              onClick={(e) => e.stopPropagation()}
-            />
-            <span className="graph-node-count">{g.nodes.length}</span>
-            <button
-              className="icon-btn danger"
-              title={t('common.delete')}
-              onClick={(e) => {
-                e.stopPropagation()
-                setConfirmDeleteGraph(g.id)
-              }}
-            >
-              {GLYPH_ACTIONS.trash}
+            {listCollapsed ? GLYPH_ACTIONS.panelUnfold : GLYPH_ACTIONS.panelFold}
+          </button>
+          {/* Always mounted, hidden via CSS (.graph-list-collapsed) rather
+              than `{!listCollapsed && ...}`: a conditional render would
+              unmount/remount this on every fold, and `display:none` also
+              drops it out of tab order so nothing focusable hides behind
+              the rail. Holds the title alone -- "+ Nouveau" moved to its
+              own row below (Sidebar precedent, card 19f5ab5b: "a create
+              action needs its label", it does not share the header). */}
+          <span className="graph-list-title">{t('graph.title')}</span>
+        </div>
+        {/* Sole occupant of its own row, same pattern as .sidebar-actions:
+            an action keeps its label, so it does not fight the header for
+            width. Conditionally rendered (unlike graph-list-body below) --
+            it is stateless (one onClick, nothing to preserve across a
+            fold), same as .sidebar-actions unmounting on collapse while
+            .rows stays mounted. */}
+        {!listCollapsed && (
+          <div className="graph-list-actions">
+            <button className="btn" onClick={() => void createGraph()}>
+              {t('graph.newGraph')}
             </button>
           </div>
-        ))}
+        )}
+        <div className="graph-list-body">
+          {graphs.length === 0 && <div className="graph-empty">{t('graph.empty')}</div>}
+          {graphs.map((g) => (
+            <div
+              key={g.id}
+              className={`graph-list-item${g.id === activeId ? ' is-active' : ''}`}
+              onClick={() => {
+                setActiveId(g.id)
+                setSelection([])
+              }}
+            >
+              <input
+                className="graph-name-input"
+                value={g.name}
+                onChange={(e) => renameGraph(g, e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+              />
+              <span className="graph-node-count">{g.nodes.length}</span>
+              <button
+                className="icon-btn danger"
+                title={t('common.delete')}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setConfirmDeleteGraph(g.id)
+                }}
+              >
+                {GLYPH_ACTIONS.trash}
+              </button>
+            </div>
+          ))}
+        </div>
       </aside>
 
       {/* canvas */}

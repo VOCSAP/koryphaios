@@ -31,6 +31,10 @@ const DEFAULT_CONFIG: AppConfig = {
   // Agents sidebar starts unfolded; a config written before this field existed
   // gets `false` from the DEFAULT_CONFIG spread below, never `undefined`.
   sidebarCollapsed: false,
+  // Roadmap filter panel starts unfolded, same spread guarantee as above.
+  roadmapFiltersCollapsed: false,
+  // Graph chats panel starts unfolded, same spread guarantee as above.
+  graphListCollapsed: false,
   wfLaneHeight: 240,
   theme: 'dark',
   fontSize: 13,

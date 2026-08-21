@@ -206,6 +206,7 @@ export const COMPANION_MANIFEST = {
   onMenuRestore: { kind: 'event', channel: 'menu:restore' },
   onMenuListWorkspaces: { kind: 'event', channel: 'menu:list' },
   onMenuExportTemplate: { kind: 'event', channel: 'menu:export-template' },
+  onMenuNewTemplate: { kind: 'event', channel: 'menu:new-template' },
   onMenuImportTemplate: { kind: 'event', channel: 'menu:import-template' },
   onWorkspaceCurrent: { kind: 'event', channel: 'workspace:current' },
   onBrokerStatus: { kind: 'event', channel: 'broker:status' },

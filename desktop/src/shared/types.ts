@@ -255,6 +255,14 @@ export interface AppConfig {
    *  lifecycle (width remembered, fold forgotten) would reopen the panel the
    *  operator had folded. */
   sidebarCollapsed: boolean
+  /** Roadmap filter panel folded to its rail (card 7a2e76c6). Persisted for the
+   *  same reason as `sidebarCollapsed`: a fold that forgets itself at every
+   *  launch re-opens the panel the operator had deliberately closed. */
+  roadmapFiltersCollapsed: boolean
+  /** Graph chats panel folded to its rail (card 67c21dd5). Same lifecycle as
+   *  `roadmapFiltersCollapsed`: a fold that resets at every launch is the
+   *  defect this field exists to avoid. */
+  graphListCollapsed: boolean
   /** Workflow-lane canvas height in px (resizable via its top-edge handle, persisted). */
   wfLaneHeight: number
   theme: 'dark' | 'light'
@@ -1830,6 +1838,8 @@ export interface DeckApi {
   onMenuRestore(cb: () => void): () => void
   onMenuListWorkspaces(cb: () => void): () => void
   onMenuExportTemplate(cb: () => void): () => void
+  /** File > New template… (card 290a14e2): opens the composer on a blank template. */
+  onMenuNewTemplate(cb: () => void): () => void
   onMenuImportTemplate(cb: () => void): () => void
   /** Current workspace summary (or null after New clear) for the window title. */
   onWorkspaceCurrent(cb: (ws: WorkspaceSummary | null) => void): () => void

@@ -21,6 +21,8 @@ export interface AppMenuActions {
   onListWorkspaces: () => void
   /** Export the current sessions as a portable team template. */
   onExportTemplate: () => void
+  /** Open the composer directly on a blank template (card 290a14e2). */
+  onNewTemplate: () => void
   /** Open the template picker to instantiate a saved team. */
   onImportTemplate: () => void
 }
@@ -33,6 +35,7 @@ export function buildAppMenu({
   onRestore,
   onListWorkspaces,
   onExportTemplate,
+  onNewTemplate,
   onImportTemplate
 }: AppMenuActions): Menu {
   const isMac = process.platform === 'darwin'
@@ -68,6 +71,7 @@ export function buildAppMenu({
       // Disabled until the Deck has at least one peer to export (toggled live
       // from index.ts on the session list changing).
       { id: 'export-template', label: 'Export template…', enabled: false, click: onExportTemplate },
+      { label: 'New template…', click: onNewTemplate },
       { label: 'Import template…', click: onImportTemplate },
       { type: 'separator' },
       isMac ? { role: 'close' } : { role: 'quit' }

@@ -164,11 +164,13 @@ export function RoadmapView(): React.JSX.Element {
   const [wandBusy, setWandBusy] = useState(false)
   // Workflow lane blown up to a foreground fullscreen modal.
   const [wfFull, setWfFull] = useState(false)
-  // Review round 3 (2026-08-10), MAJOR (A2): the filter panel used to be
-  // mounted unconditionally, no button to show/hide it -- the card requires
-  // it be dismissable. Default open (unchanged behavior for anyone not
-  // touching it).
-  const [filterPanelOpen, setFilterPanelOpen] = useState(true)
+  // Card 7a2e76c6: the fold state is no longer local `useState`. It lives in
+  // AppConfig, for the same reason the Agents sidebar's does -- a fold that
+  // resets at every launch re-opens the panel the operator had closed. The
+  // panel itself owns the control now, so this view holds the state and
+  // nothing else.
+  const filtersFolded = useDeck((s) => s.roadmapFiltersCollapsed)
+  const setFiltersFolded = useDeck((s) => s.setRoadmapFiltersCollapsed)
 
   // Files-view seed (PLAN GX8): open the create form prefilled with the code
   // selection. Saving stays an explicit operator action (wand-style contract).
@@ -549,18 +551,12 @@ export function RoadmapView(): React.JSX.Element {
         >
           {t('roadmap.importPlan')}
         </button>
-        {/* Review round 3 (2026-08-10), MAJOR (A2): show/hide the filter
-            panel. Icon swaps with state so the button also communicates
-            what clicking it will do next (menu = open it, close = dismiss
-            it), same convention as WorkflowLane's collapse toggle. */}
-        <button
-          type="button"
-          className="btn"
-          title={t('roadmap.filter.togglePanel')}
-          onClick={() => setFilterPanelOpen((open) => !open)}
-        >
-          {filterPanelOpen ? GLYPH_ACTIONS.close : GLYPH_ACTIONS.menu}
-        </button>
+        {/* Card 7a2e76c6: the fold control used to sit HERE, between "Import a
+            plan" and "Add" -- a display setting filed among actions on the
+            data, which is what made it read as "close the view" and made it
+            something to hunt for. It now lives on the panel it commands
+            (RoadmapFilterPanel's head), the shipped pattern of the Agents
+            sidebar. This row carries actions only. */}
         <button className="primary" onClick={() => setDraft({ ...EMPTY_DRAFT })}>
           {t('roadmap.add')}
         </button>
@@ -575,16 +571,16 @@ export function RoadmapView(): React.JSX.Element {
       />
 
       <div className="roadmap-body">
-        {filterPanelOpen && (
-          <RoadmapFilterPanel
-            criteria={criteria}
-            setCriteria={setCriteria}
-            facets={facets}
-            includeArchived={includeArchived}
-            setIncludeArchived={setIncludeArchived}
-            t={t}
-          />
-        )}
+        <RoadmapFilterPanel
+          criteria={criteria}
+          setCriteria={setCriteria}
+          facets={facets}
+          includeArchived={includeArchived}
+          setIncludeArchived={setIncludeArchived}
+          folded={filtersFolded}
+          onToggleFold={() => setFiltersFolded(!filtersFolded)}
+          t={t}
+        />
 
         <div className="roadmap-main">
           <RoadmapBoard

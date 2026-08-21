@@ -14,6 +14,39 @@
      rail sized that way. The scrollbar is a third occupant and is dealt with
      where the rows are styled, not by this number. */
   --sidebar-rail-w: 58px;
+  /* Width of the rail left by a CONTENT panel folded to its lone control
+     (roadmap filters, card 7a2e76c6; graph conversations, card 67c21dd5).
+     Recomputed from its own occupants rather than copied from the rail above
+     (DESIGN.md, "Collapsible side panels": the number is a sum, not a
+     constant), border-box, at the app's 13px base font:
+       1 (panel border-right) + 12 (head padding-left) + 33 (fold button:
+       glyph 1em = 13 + padding 9+9 + border 1+1) + 12 (head padding-right)
+       = 58
+     It lands on the same value as --sidebar-rail-w, and that is arithmetic,
+     not a copy: same 12px gutter, same `.icon-btn`. They stay TWO tokens
+     because they have two drivers -- the one above is sized by its ROWS (the
+     role glyph of card b5ba8cac widens it), this one by a single control that
+     cannot grow. Merged, the roadmap rail would fatten the day a sidebar
+     badge does.
+     WHAT THE GUTTER GOVERNS IS SLACK, NOT POSITION. The "same pixel in both
+     states" promise is kept by the folded rule NOT overriding the head's
+     horizontal padding, whatever its value -- an unchanged padding cannot
+     shift anything between two states. So a panel is free to adopt this token
+     with its own gutter; it only changes how much room is left over. Measured
+     on the two consumers, both with the same 33px control: 12px gutters
+     (roadmap filters) leave 58 - 1 - 12 - 33 - 12 = 0, and 10px gutters
+     (graph conversations) leave 4. The visible trace is that the two controls
+     do not sit at the same x from one view to the other, which costs nothing
+     since those views never show together.
+     THE ROADMAP SIDE THEREFORE HAS ZERO SLACK, and that is the number to know
+     before adding anything to its folded head. Nothing bites today, for two
+     measured reasons -- the folded rule sets `overflow: hidden`, so a second
+     control would be CLIPPED rather
+     than pushed into a sideways scroll, and `:root`'s font-size is fixed
+     (`config.fontSize` feeds the terminals only, never the UI), so the `1em`
+     glyph cannot drift under the operator's hand. But a second control added
+     to one of these heads disappears in silence. Widen this token first. */
+  --panel-rail-w: 58px;
   --gap: 8px;
   --radius: 8px;
   /* THE monospace face of the Deck (card 14c97805). Theme-independent, so it
@@ -2315,11 +2348,39 @@ svg.glyph {
   border-right: 1px solid var(--border);
 }
 
+/* Folded to its rail (card 7a2e76c6, DESIGN.md "Collapsible side panels").
+   One modifier class on the panel itself, which is NEVER unmounted -- the
+   reason is in RoadmapFilterPanel.tsx, and it is why the control that undoes
+   the fold used to live in the view's action row. `flex-basis` and not
+   `width`, because this panel is a flex ITEM of `.roadmap-body`: the basis is
+   the number that track actually reads. Everything the rail cannot carry is
+   dropped in JSX, not hidden here, so no filter stays reachable by keyboard
+   behind a `display: none`. */
+.rm-filter-panel-collapsed {
+  flex: 0 0 var(--panel-rail-w);
+  /* Folded there is nothing left to scroll, and the `overflow-y: auto` above
+     silently implies `overflow-x: auto`: kept, a control one pixel too wide
+     would not be clipped but pushed into a sideways scroll of the rail --
+     invisible and unclickable, exactly the defect the search-clear button hit
+     in this same panel (see its comment below). */
+  overflow: hidden;
+}
+
 .rm-filter-panel-head {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 8px;
+}
+
+/* Fold control: same treatment as the Agents sidebar's (`.sidebar-fold`), and
+   for the same non-obvious reason -- an inline SVG reserves a descender line
+   box, so without `inline-flex` the button grows taller than its glyph and the
+   control drifts down the head. */
+.rm-filter-fold {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
 }
 
 .rm-filter-panel-title {
@@ -5359,17 +5420,87 @@ svg.glyph {
   padding: 10px;
 }
 
+/* Card 67c21dd5: folded state is a width modifier on the SAME aside (never
+   unmounted), same mechanic as .sidebar-collapsed. Shares --panel-rail-w
+   with the Roadmap filter panel (card 7a2e76c6) -- deliberately not merged
+   with --sidebar-rail-w, see that token's own comment for why. Horizontal
+   padding is left UNCHANGED from .graph-list's base 10px on purpose (the
+   "same pixel in both states" acceptance criterion). What actually keeps
+   the fold control's left edge fixed is NOT its being the header's only
+   child when collapsed -- .graph-list-head has no `justify-content`, so it
+   sits at the initial `flex-start`, which packs its FIRST flex child
+   (the fold button) at main-start regardless of how many siblings follow
+   it. Combined with .graph-list's padding being identical (10px) in both
+   states, the button's left edge cannot move -- an invariant that holds
+   for 1, 2 or N header children, unlike an explanation resting on it
+   being alone (reviewed 2026-08-21, measured against a second flex
+   child under `space-between`: even there the first item was already at
+   main-start -- `space-between` was never what threatened the control,
+   only the siblings after it). The leftover width the 58px token's
+   12px-gutter math assumes just becomes slack after the button instead of
+   an explicit right-padding number. */
+.graph-list-collapsed {
+  width: var(--panel-rail-w);
+  overflow: hidden;
+}
+
+/* Hidden, not unmounted (card 67c21dd5 acceptance criterion: folding must
+   not remount the aside's children). display:none also drops these out of
+   tab order, so nothing focusable hides behind the folded rail. The
+   actions row (below) needs no such rule -- it is conditionally rendered
+   in JSX instead, same as .sidebar-actions, because it is stateless. */
+.graph-list-collapsed .graph-list-title,
+.graph-list-collapsed .graph-list-body {
+  display: none;
+}
+
 .graph-list-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
   margin-bottom: 10px;
 }
 
+/* Fold control: same treatment as the Agents sidebar's (`.sidebar-fold`) and
+   the Roadmap filter panel's (`.rm-filter-fold`), and for the same
+   non-obvious reason -- an inline SVG reserves a descender line box, so
+   without `inline-flex` the button grows taller than its glyph and the
+   control drifts down the head. MEASURED, not assumed: reviewer flagged
+   this class had no rule at all; `.graph-list-fold.offsetHeight` was 31px
+   against `.rm-filter-fold`'s 27px before this rule, 27px (equal) after. */
+.graph-list-fold {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Card 67c21dd5, MEASURED regression and its fix (team-lead arbitration):
+   an earlier version kept "+ Nouveau" IN this header, squeezed beside the
+   title once the fold button took its own share of the row -- the button
+   text wrapped to two lines (confirmed via Range.getClientRects(),
+   textLineCount:2), which inflated the row's height and was the real
+   driver of a 7.5px vertical drift on the fold button (an align-self
+   override "fixed" that symptom and was later measured a no-op once this
+   wrap was gone -- removed, see git history/commit). Truncating the title
+   with ellipsis "fixed" the wrap but ceded TEXT to a width squeeze; the
+   house rule this depot already lives by (Sidebar.tsx, card 19f5ab5b:
+   "the header carries the fold control and NOTHING else", its actions get
+   their own row so a create action never loses its label) says a
+   stylesheet cedes GEOMETRY under space pressure, never text. "+ Nouveau"
+   moved to its own row (.graph-list-actions below); the title again gets
+   the header's full remaining width and needs no truncation. */
 .graph-list-title {
   font-weight: 600;
   font-size: 13px;
+}
+
+/* Own row for the create action, same pattern as .sidebar-actions: an
+   action keeps its label, so it does not fight the header for width.
+   Conditionally rendered in JSX (unmounted, not display:none) since it
+   holds no state to preserve across a fold -- .sidebar-actions does the
+   same while .rows stays mounted. */
+.graph-list-actions {
+  margin-bottom: 10px;
 }
 
 .graph-empty {

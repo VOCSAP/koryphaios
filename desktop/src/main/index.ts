@@ -2248,6 +2248,7 @@ app.whenReady().then(async () => {
       onRestore: () => toRenderer('menu:restore'),
       onListWorkspaces: () => toRenderer('menu:list'),
       onExportTemplate: () => toRenderer('menu:export-template'),
+      onNewTemplate: () => toRenderer('menu:new-template'),
       onImportTemplate: () => toRenderer('menu:import-template')
     })
   )
