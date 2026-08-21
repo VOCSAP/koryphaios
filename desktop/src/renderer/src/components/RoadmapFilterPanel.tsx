@@ -180,7 +180,7 @@ export function RoadmapFilterPanel({
           aria-label={folded ? t('roadmap.filter.unfoldTitle') : t('roadmap.filter.foldTitle')}
           onClick={onToggleFold}
         >
-          {folded ? GLYPH_ACTIONS.panelUnfold : GLYPH_ACTIONS.panelFold}
+          {folded ? GLYPH_ACTIONS.filterUnfold : GLYPH_ACTIONS.filterFold}
         </button>
         {!folded && (
           <span className="rm-filter-panel-title">

@@ -428,6 +428,37 @@ const IconPanelUnfold = (
   </Svg>
 )
 
+/** Folding FILTER panel — the ἠθμός, the strainer, fused with the bar stack.
+ *  Operator's ruling (card `6aef4c54`, 2026-08-11): one sign carrying both
+ *  ideas, the funnel for "filter" and the hamburger for "show/hide a panel",
+ *  so the association needs no learning. The fusion costs nothing, because the
+ *  two are the SAME primitive: `IconMenu` is three equal `h` bars, and a funnel
+ *  is those same three bars with a taper (10 → 6 → 2 here). The taper must stay
+ *  FRANK — halve it and the sign falls back to a bare hamburger, which the pair
+ *  above warns says "a list", not "this panel folds".
+ *  Two glyphs rather than one mirrored, and the constant/variable split is the
+ *  pair's above: the funnel is the constant OBJECT (what folds), the chevron is
+ *  the sign that changes direction (the gesture). That chevron is the pair's
+ *  own, same shape, same size, same direction, translated +4 in x for the one
+ *  reason that there is no frame here for it to sit inside — so the gesture
+ *  reads identically in the roadmap filters and in the graph list (card
+ *  `67c21dd5`, which keeps `panelFold`/`panelUnfold`), while the object
+ *  differs, as it must: a conversation list is not a filter. Both spans are
+ *  3.5 → 20.5 in x and centred on y 12, so this reads at the same optical
+ *  weight as its neighbours. */
+const IconFilterFold = (
+  <Svg>
+    <path d="M3.5 6.5h10M5.5 12h6M7.5 17.5h2" />
+    <path d="m20.5 9.5-2.5 2.5 2.5 2.5" />
+  </Svg>
+)
+const IconFilterUnfold = (
+  <Svg>
+    <path d="M3.5 6.5h10M5.5 12h6M7.5 17.5h2" />
+    <path d="m18 9.5 2.5 2.5-2.5 2.5" />
+  </Svg>
+)
+
 /** Terminal screen (dock back to the agents). */
 const IconScreen = (
   <Svg>
@@ -909,6 +940,8 @@ export const GLYPH_ACTIONS = {
   forward: IconForward,
   panelFold: IconPanelFold,
   panelUnfold: IconPanelUnfold,
+  filterFold: IconFilterFold,
+  filterUnfold: IconFilterUnfold,
   screen: IconScreen,
   window: IconWindow,
   camera: IconCamera,
