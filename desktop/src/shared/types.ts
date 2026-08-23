@@ -1023,6 +1023,30 @@ export interface ElementPick {
   width: number
   height: number
   pageUrl: string
+  // ----- Enriched context (Chantier OD1, DESIGN-ORCA-DOOP-ADOPTION.md §3.1).
+  // All OPTIONAL: an older external deck-design.js bundle (pre-OD1) posts a
+  // pick without these, and both consumers (BrowserView/App prompt
+  // composition, design-endpoint's sanitizePick) must keep working on their
+  // absence -- never defaulted to an empty object/array, stays undefined.
+  /** Viewport CSS px at pick time, rounded. */
+  x?: number
+  y?: number
+  /** True when `position: fixed|sticky` anywhere in the element's ancestry. */
+  isFixed?: boolean
+  /** Explicit `role` attribute; omitted (not '') when absent. */
+  role?: string
+  /** aria-label > aria-labelledby (resolved) > alt > title, first non-empty, trimmed, capped. */
+  accessibleName?: string
+  /** Allowlisted attributes only (PICK_ATTRIBUTE_ALLOWLIST + aria-*), values capped/redacted. */
+  attributes?: Record<string, string>
+  /** Computed styles, filtered of their default values -- signal only. */
+  styles?: Record<string, string>
+  /** outerHTML, capped; omitted entirely (not truncated) when it contains a secret. */
+  html?: string
+  /** Trimmed text of nearby sibling elements. */
+  nearbyText?: string[]
+  /** Readable ancestor labels, outermost first. */
+  ancestors?: string[]
 }
 
 /** An external-app pick forwarded by the design endpoint (PLAN D2b). */

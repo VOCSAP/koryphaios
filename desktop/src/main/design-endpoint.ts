@@ -21,7 +21,14 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { randomBytes } from 'node:crypto'
-import type { DesignPickEvent, ElementPick } from '../shared/types'
+import type { DesignPickEvent, ElementPick, ElementSelector } from '../shared/types'
+import {
+  containsSecret,
+  isAriaAttributeName,
+  PICK_ATTRIBUTE_ALLOWLIST,
+  PICK_BUDGET,
+  sanitizePickUrl
+} from '../shared/pick-security'
 
 export interface DesignEndpoint {
   url: string
@@ -48,38 +55,131 @@ function str(v: unknown, cap: number): string {
   return typeof v === 'string' ? v.slice(0, cap) : ''
 }
 
+/** Redact a string in place if it matches a secret pattern; otherwise pass through. */
+function redactIfSecret(v: string): string {
+  return containsSecret(v) ? '[redacted]' : v
+}
+
+/** Coerce an untrusted attributes-shaped value: allowlist, cap, redact, sanitize URLs. */
+function sanitizeAttributes(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const out: Record<string, string> = {}
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (Object.keys(out).length >= PICK_BUDGET.attributesMaxEntries) break
+    if (typeof value !== 'string') continue
+    if (!PICK_ATTRIBUTE_ALLOWLIST.includes(name) && !isAriaAttributeName(name)) continue
+    if (containsSecret(value)) {
+      out[name] = '[redacted]'
+      continue
+    }
+    if (name === 'href' || name === 'src') {
+      const sanitized = sanitizePickUrl(value)
+      if (!sanitized) continue // drop rather than emit an empty href/src
+      out[name] = sanitized
+      continue
+    }
+    out[name] = value.slice(0, PICK_BUDGET.attributeValueMaxLength)
+  }
+  return Object.keys(out).length ? out : undefined
+}
+
+/** Coerce an untrusted styles-shaped value: cap entries and value length, redact secrets. */
+function sanitizeStyles(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
+  const out: Record<string, string> = {}
+  for (const [name, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (Object.keys(out).length >= PICK_BUDGET.stylesMaxEntries) break
+    if (typeof value !== 'string') continue
+    // Keys are attacker-controlled too (no allowlist here, unlike attributes):
+    // an oversized key would ride into the prompt uncapped. Drop, don't slice --
+    // a truncated CSS property name is noise, not signal.
+    if (!name || name.length > PICK_BUDGET.styleNameMaxLength) continue
+    out[name] = redactIfSecret(value).slice(0, PICK_BUDGET.styleValueMaxLength)
+  }
+  return Object.keys(out).length ? out : undefined
+}
+
+/** Coerce an untrusted array-of-strings value: cap entry count and length, skip secret entries. */
+function sanitizeStringArray(raw: unknown, maxEntries: number, entryCap: number): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined
+  const out: string[] = []
+  for (const item of raw) {
+    if (out.length >= maxEntries) break
+    if (typeof item !== 'string') continue
+    const v = item.slice(0, entryCap)
+    if (!v || containsSecret(v)) continue
+    out.push(v)
+  }
+  return out.length ? out : undefined
+}
+
 /** Coerce an untrusted body into a clean ElementPick; null when hopeless. */
 export function sanitizePick(raw: unknown): ElementPick | null {
   if (!raw || typeof raw !== 'object') return null
   const p = raw as Record<string, unknown>
   const tagName = str(p.tagName, 64)
   if (!tagName) return null
-  const selectors = Array.isArray(p.selectors)
+  const selectors: ElementSelector[] = Array.isArray(p.selectors)
     ? p.selectors
         .filter((s): s is { type: string; value: string } => {
           const o = s as Record<string, unknown>
           return !!o && typeof o.type === 'string' && typeof o.value === 'string'
         })
-        .slice(0, 8)
+        .slice(0, PICK_BUDGET.selectorsMaxEntries)
         .map((s) => ({
           type: (['qa', 'attr', 'id', 'css'].includes(s.type) ? s.type : 'css') as
             | 'qa'
             | 'attr'
             | 'id'
             | 'css',
-          value: s.value.slice(0, 512)
+          value: s.value.slice(0, PICK_BUDGET.selectorValueMaxLength)
         }))
+        .filter((s) => !containsSecret(s.value))
     : []
-  return {
+
+  const rawId = str(p.id, PICK_BUDGET.idMaxLength)
+  const id = rawId && !containsSecret(rawId) ? rawId : ''
+  const rawText = str(p.text, PICK_BUDGET.textMaxLength)
+  const text = rawText && containsSecret(rawText) ? '[redacted]' : rawText
+
+  const pick: ElementPick = {
     tagName,
-    id: str(p.id, 128),
-    classes: Array.isArray(p.classes) ? p.classes.filter((c) => typeof c === 'string').slice(0, 8) : [],
-    text: str(p.text, 200),
+    id,
+    classes: Array.isArray(p.classes)
+      ? p.classes.filter((c) => typeof c === 'string').slice(0, PICK_BUDGET.classesMaxEntries)
+      : [],
+    text,
     selectors,
     width: typeof p.width === 'number' && isFinite(p.width) ? Math.round(p.width) : 0,
     height: typeof p.height === 'number' && isFinite(p.height) ? Math.round(p.height) : 0,
-    pageUrl: str(p.pageUrl, 1024)
+    pageUrl: typeof p.pageUrl === 'string' ? sanitizePickUrl(p.pageUrl.slice(0, PICK_BUDGET.pageUrlMaxLength)) : ''
   }
+
+  // ----- Optional OD1 fields: absent on the untrusted body stays absent on
+  // the sanitized pick (never defaulted to '' / {} / []), so an older
+  // deck-design.js bundle that never sent them behaves exactly as before.
+  if (typeof p.x === 'number' && isFinite(p.x)) pick.x = Math.round(p.x)
+  if (typeof p.y === 'number' && isFinite(p.y)) pick.y = Math.round(p.y)
+  if (typeof p.isFixed === 'boolean') pick.isFixed = p.isFixed
+  if (typeof p.role === 'string' && p.role) pick.role = redactIfSecret(p.role.slice(0, PICK_BUDGET.roleMaxLength))
+  if (typeof p.accessibleName === 'string' && p.accessibleName) {
+    pick.accessibleName = redactIfSecret(p.accessibleName.slice(0, PICK_BUDGET.accessibleNameMaxLength))
+  }
+  const attributes = sanitizeAttributes(p.attributes)
+  if (attributes) pick.attributes = attributes
+  const styles = sanitizeStyles(p.styles)
+  if (styles) pick.styles = styles
+  if (typeof p.html === 'string' && p.html) {
+    const truncated = p.html.length > PICK_BUDGET.htmlMaxLength
+    const html = truncated ? p.html.slice(0, PICK_BUDGET.htmlMaxLength) + ' …' : p.html
+    if (!containsSecret(html)) pick.html = html
+  }
+  const nearbyText = sanitizeStringArray(p.nearbyText, PICK_BUDGET.nearbyTextMaxEntries, PICK_BUDGET.nearbyTextEntryMaxLength)
+  if (nearbyText) pick.nearbyText = nearbyText
+  const ancestors = sanitizeStringArray(p.ancestors, PICK_BUDGET.ancestorsMaxEntries, PICK_BUDGET.ancestorEntryMaxLength)
+  if (ancestors) pick.ancestors = ancestors
+
+  return pick
 }
 
 function readBody(req: IncomingMessage): Promise<string | null> {

@@ -24,6 +24,21 @@ paths — and visible text) is pasted into the docked agent's prompt
 Enter. With no docked agent the description is copied to the clipboard.
 `Esc` cancels.
 
+The pasted description carries an `[element context]` block beyond the base
+sentence: role/accessible name, allowlisted attributes, computed styles
+(filtered of their default values so only signal remains), nearby sibling
+text, a readable ancestor path, and a capped `outerHTML` snippet — the agent
+usually has enough to locate and restyle the element without a follow-up
+screenshot. Every field is optional and best-effort; an older external
+deck-design client still works with none of them. Secrets never reach the
+prompt: attribute/id/text/HTML values matching a credential-like pattern
+(`api_key`, `csrf`, `password`, …) are redacted or the field is dropped
+outright, and every URL (page URL, `href`/`src`) has its query string and
+fragment stripped. This is applied twice — once in-page as the pick is built,
+once again at the design endpoint on the untrusted POST body from an external
+app — so a compromised or malicious page cannot smuggle a token past a single
+check.
+
 ## Viewport presets
 
 Render the page at a device size (iPhone SE, iPad, laptop…) centred in the

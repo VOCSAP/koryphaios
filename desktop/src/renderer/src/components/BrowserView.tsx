@@ -31,6 +31,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import type { ElementPick, SessionRuntime, WindowSource } from '@shared/types'
+import { formatPickDetails } from '@shared/pick-prompt'
 import {
   computeCropRect,
   formatElapsed,
@@ -344,6 +345,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
         h: pick.height
       })
       if (pick.text) prompt += tt('browser.elementPromptText', { text: pick.text })
+      prompt += formatPickDetails(pick)
       prompt += viewportContext()
       deliverPrompt(prompt, 'toast.pickSent', 'toast.pickCopied')
     }
