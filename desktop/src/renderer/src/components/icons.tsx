@@ -582,6 +582,24 @@ const IconWand = (
   </Svg>
 )
 
+/** Annotate review (Chantier OD5): a punch list, universal shape like its
+ *  GLYPH_ACTIONS neighbours (target, edit, camera) rather than a mythological
+ *  one -- §5 reserves the lore for destinations/identity, not generic
+ *  actions. A clipboard body (the pinned batch) with two check+line rows
+ *  (each pinned element gets its own comment/intent/priority) reads as "review
+ *  a list of items", distinct from the single confirmation of IconCheck and
+ *  from GLYPH_BADGES.checkboxOn/Off, which mark STATE, not this action. */
+const IconChecklist = (
+  <Svg>
+    <rect x="5" y="4.5" width="14" height="16" rx="1.5" />
+    <path d="M9.5 4.5V4a1 1 0 0 1 1-1h3a1 1 0 0 1 1 1v.5" />
+    <path d="m8 10.5 1.3 1.3L11.5 9.5" />
+    <path d="M13.5 10.5h3.5" />
+    <path d="m8 15.5 1.3 1.3 2.2-2.3" />
+    <path d="M13.5 15.5h3.5" />
+  </Svg>
+)
+
 // ----- Badge glyphs (semantic markers, not clickable actions) -----
 // The mythological register comes back here: these mark WHO/WHAT something
 // is (lead, judge, battle, waiting…), the identity layer of the Deck.
@@ -955,7 +973,8 @@ export const GLYPH_ACTIONS = {
   external: IconExternal,
   folder: IconFolder,
   check: IconCheck,
-  wand: IconWand
+  wand: IconWand,
+  checklist: IconChecklist
 }
 
 /** Provider sigils: ModelPicker sections and graph-chat node avatars share

@@ -452,15 +452,27 @@ export function buildPick(el: HTMLElement): ElementPick {
  * still shows that state. `S` is the same idea for a screenshot; it is
  * optional (`onShot`) because the external deck-design client (which has no
  * capture capability) does not pass it, and the key is then simply inert.
+ *
+ * Multi-shot review mode (Chantier OD5, DESIGN-ORCA-DOOP-ADOPTION.md §3.5):
+ * `opts.multi` keeps inspect mode ARMED after a delivered pick (click, `C`
+ * or `S`) instead of tearing down -- the operator pins several elements in
+ * a row, and only Escape (or the host explicitly calling `exit()`) ends the
+ * session. Default (`opts` omitted or `multi` falsy) is the original
+ * single-shot behaviour, unchanged -- this keeps every existing caller
+ * (single-pick preload, external deck-design client) source-compatible.
  */
-export function createInspectMode(handlers: {
-  onPick: (pick: ElementPick) => void
-  onExit: () => void
-  onShot?: (pick: ElementPick) => void
-}): { enter: () => void; exit: () => void } {
+export function createInspectMode(
+  handlers: {
+    onPick: (pick: ElementPick) => void
+    onExit: () => void
+    onShot?: (pick: ElementPick) => void
+  },
+  opts?: { multi?: boolean }
+): { enter: () => void; exit: () => void } {
   let inspecting = false
   let hovered: HTMLElement | null = null
   let savedShadow = ''
+  const multi = opts?.multi === true
 
   function setHovered(el: HTMLElement | null): void {
     if (hovered === el) return
@@ -483,6 +495,7 @@ export function createInspectMode(handlers: {
     e.stopPropagation()
     const target = e.target instanceof HTMLElement ? e.target : hovered
     if (target) handlers.onPick(buildPick(target))
+    if (multi) return // review mode: stays armed for the next pick.
     // Single-shot: one pick per activation.
     exit()
     handlers.onExit()
@@ -508,6 +521,7 @@ export function createInspectMode(handlers: {
       // Same order as onClick: build + deliver the pick, THEN teardown --
       // no click event is ever dispatched at the page, which is the point.
       handlers.onPick(buildPick(hovered))
+      if (multi) return
       exit()
       handlers.onExit()
       return
@@ -517,6 +531,7 @@ export function createInspectMode(handlers: {
       e.preventDefault()
       e.stopPropagation()
       handlers.onShot(buildPick(hovered))
+      if (multi) return
       exit()
       handlers.onExit()
     }

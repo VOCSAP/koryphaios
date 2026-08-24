@@ -118,5 +118,9 @@ export const PICK_BUDGET = {
   /** `sourceFile` cap: "path/to/Component.tsx:42:7" (OD3). */
   sourceFileMaxLength: 300,
   /** Unique component names collected walking the fiber tree (OD3). */
-  reactComponentsMaxEntries: 6
+  reactComponentsMaxEntries: 6,
+  /** Annotate review (OD5): comment textarea cap, mirrors orca's GRAB_BUDGET. */
+  annotationCommentMaxLength: 2000,
+  /** Annotate review (OD5): pinned-elements cap per review; further picks are refused with a toast. */
+  annotationsMaxPerPage: 20
 } as const

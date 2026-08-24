@@ -1066,6 +1066,32 @@ export interface DesignPickEvent {
   pick: ElementPick
 }
 
+// ----- Annotate review (Chantier OD5, DESIGN-ORCA-DOOP-ADOPTION.md §3.5) -----
+// One pick = one prompt, generalized to a REVIEW: the operator pins up to
+// PICK_BUDGET.annotationsMaxPerPage elements, each with its own comment +
+// intent + priority, then sends ONE structured Design Feedback message
+// (shared/pick-prompt.ts's formatAnnotationsReport). Mirror of orca's
+// BrowserAnnotationIntent/Priority (MIT, shared/browser-grab-types.ts) --
+// values travel in the report text verbatim (agent-facing), only their UI
+// labels go through i18n.
+
+/** What the operator wants done with the pinned element. */
+export type PickAnnotationIntent = 'fix' | 'change' | 'question' | 'approve'
+
+/** How urgent the annotation is. */
+export type PickAnnotationPriority = 'blocking' | 'important' | 'suggestion'
+
+/** One pinned element of an in-progress design review, editable in the panel until sent or discarded. */
+export interface PickAnnotation {
+  id: string
+  comment: string
+  intent: PickAnnotationIntent
+  priority: PickAnnotationPriority
+  pick: ElementPick
+  /** Best-effort auto screenshot path (captureElementShot, same as the single-pick flow); absent on failure. */
+  screenshotPath?: string
+}
+
 /** One capturable OS window/screen for the browser view's Window mode (D2a). */
 export interface WindowSource {
   id: string

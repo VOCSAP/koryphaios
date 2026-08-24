@@ -521,3 +521,86 @@ test("buildPick: carries reactComponents + sourceFile end-to-end from a fake fib
   expect(pick.reactComponents).toBe("<App> > <ProductList> > <ProductCard>");
   expect(pick.sourceFile).toBe("src/components/ProductCard.tsx:42:7");
 });
+
+// ----- Multi-shot review mode (Chantier OD5, DESIGN-ORCA-DOOP-ADOPTION.md
+// §3.5): createInspectMode({ ... }, { multi: true }) stays armed after a
+// delivered pick -- only Escape (or the host calling exit() itself) tears
+// down. Single-shot default (opts omitted) is asserted unchanged by every
+// test ABOVE this section, which pass no second argument at all.
+
+test("createInspectMode multi: two clicks each deliver a pick, onExit is never called", () => {
+  document.body.innerHTML = "";
+  document.body.innerHTML = `<div id="one">One</div><div id="two">Two</div>`;
+  const one = document.getElementById("one") as HTMLElement;
+  const two = document.getElementById("two") as HTMLElement;
+
+  const picks: ElementPick[] = [];
+  let exited = 0;
+  const mode = createInspectMode(
+    {
+      onPick: (pick) => picks.push(pick),
+      onExit: () => exited++,
+    },
+    { multi: true },
+  );
+  mode.enter();
+  one.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  two.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+  expect(picks).toHaveLength(2);
+  expect(picks[0]!.id).toBe("one");
+  expect(picks[1]!.id).toBe("two");
+  expect(exited).toBe(0);
+
+  mode.exit();
+});
+
+test("createInspectMode multi: Escape tears down and calls onExit exactly once", () => {
+  document.body.innerHTML = "";
+  document.body.innerHTML = `<div id="only">Only</div>`;
+  const only = document.getElementById("only") as HTMLElement;
+
+  const picks: ElementPick[] = [];
+  let exited = 0;
+  const mode = createInspectMode(
+    {
+      onPick: (pick) => picks.push(pick),
+      onExit: () => exited++,
+    },
+    { multi: true },
+  );
+  mode.enter();
+  only.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  key("Escape");
+
+  expect(picks).toHaveLength(1);
+  expect(exited).toBe(1);
+
+  // Idempotent: a second exit() (e.g. the host's own cleanup) is a no-op.
+  mode.exit();
+});
+
+test("createInspectMode multi: C hover-shortcut also stays armed across repeated picks", () => {
+  document.body.innerHTML = "";
+  document.body.innerHTML = `<div id="hv">Hover me</div>`;
+  const div = document.getElementById("hv") as HTMLElement;
+
+  const picks: ElementPick[] = [];
+  let exited = 0;
+  const mode = createInspectMode(
+    {
+      onPick: (pick) => picks.push(pick),
+      onExit: () => exited++,
+    },
+    { multi: true },
+  );
+  mode.enter();
+  hover(div);
+  key("c");
+  key("c");
+
+  expect(picks).toHaveLength(2);
+  expect(exited).toBe(0);
+
+  mode.exit();
+});

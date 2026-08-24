@@ -59,6 +59,25 @@ hovered element, no page-context prompt. `S` needs the embedded browser's
 capture pipeline — the external deck-design client simply ignores the key
 and stays armed.
 
+### Review mode (Chantier OD5)
+
+A second toolbar toggle turns the one-pick-one-prompt flow above into a
+batch review: arm it and every pick (click or `C`) pins a new annotation
+instead of exiting inspect mode, up to 20 per page — further picks are
+refused with a toast until one is sent or removed. Each pinned element gets
+its own comment, an intent (`fix` / `change` / `question` / `approve`) and a
+priority (`blocking` / `important` / `suggestion`), edited in a right-hand
+panel over the webview that never covers the docked terminal. `Esc` in the
+guest disarms picking but leaves the panel and its drafts untouched — the
+toggle re-arms picking to keep adding elements. "Send review" folds every
+pinned element (selector, source/react context, bounds, styles, HTML,
+auto-screenshot when captured, and the operator's comment) into ONE
+structured `## Design Feedback` message, pasted or copied exactly like a
+single pick; "Discard" clears the batch without sending anything. Switching
+away from the Browser view (unmounting `BrowserView`) loses any pending
+draft — accepted for this first version, same as any other unsaved-in-memory
+UI state in the Deck.
+
 ## Viewport presets
 
 Render the page at a device size (iPhone SE, iPad, laptop…) centred in the
