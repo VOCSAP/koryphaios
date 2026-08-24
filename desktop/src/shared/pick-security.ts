@@ -74,14 +74,52 @@ export function sanitizePickUrl(raw: string): string {
 }
 
 /**
- * Attribute names captured in the pick payload by default. Safe, low-entropy
- * names plus every `aria-*` (checked separately, see isAriaAttribute-style
- * callers in element-pick.ts). Shared so main-side re-validation filters
- * against the exact same set the guest used.
+ * True when `raw` parses as an absolute URL, regardless of protocol --
+ * deliberately does NOT check ALLOWED_URL_PROTOCOLS. Lets a caller of
+ * sanitizePickUrl tell apart its two failure modes, which callers must NOT
+ * treat the same way: "not a URL at all" (parse failure -- safe to fall back
+ * to the raw string, since something that never parsed cannot carry a query)
+ * from "a URL that exists but is disallowed" (data:, javascript:, … --
+ * exactly the class of input that CAN carry an embedded query/token, so a
+ * caller falling back to the raw string here would leak the very thing
+ * sanitizePickUrl exists to strip). See pick-prompt.ts's formatAnnotationsReport.
  */
-export const PICK_ATTRIBUTE_ALLOWLIST = [
-  'href',
-  'src',
+export function isParseableUrl(raw: string): boolean {
+  if (raw === 'about:blank') return true
+  try {
+    new URL(raw)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** True for any `aria-*` attribute name. */
+export function isAriaAttributeName(name: string): boolean {
+  return name.startsWith('aria-')
+}
+
+/**
+ * Full domain of attribute names whose value is a URL and must go through
+ * sanitizePickUrl rather than the generic cap-and-keep branch -- single
+ * source of truth for both re-validation points (element-pick.ts guest side,
+ * design-endpoint.ts main side), which used to each hardcode
+ * `name === 'href' || name === 'src'` independently. Not every name here
+ * ships in PICK_ATTRIBUTE_ALLOWLIST today (poster/action/formaction/srcset
+ * are pre-classified for future growth) -- URL_ATTRS is the set of names
+ * pick-security.ts knows how to sanitize as a URL; URL_ATTRS_ALLOWED below
+ * decides which of them are actually captured.
+ */
+const URL_ATTR_NAMES = ['href', 'src', 'poster', 'action', 'formaction', 'srcset'] as const
+export const URL_ATTRS: Set<string> = new Set(URL_ATTR_NAMES)
+type UrlAttrName = (typeof URL_ATTR_NAMES)[number]
+
+/**
+ * Attribute names captured in the pick payload that are NOT URLs -- the
+ * generic cap-and-keep branch. Safe, low-entropy names; every `aria-*` is
+ * checked separately (isAriaAttributeName).
+ */
+const NON_URL_ATTRS = [
   'alt',
   'title',
   'placeholder',
@@ -93,20 +131,26 @@ export const PICK_ATTRIBUTE_ALLOWLIST = [
   'selected'
 ]
 
-/** True for any `aria-*` attribute name. */
-export function isAriaAttributeName(name: string): boolean {
-  return name.startsWith('aria-')
-}
+/**
+ * URL-bearing attributes actually captured by the pick payload today --
+ * typed as a subset of URL_ATTR_NAMES, so TypeScript rejects any entry here
+ * that isn't already a member of URL_ATTRS. This is what makes the defect
+ * measured in review structurally impossible to reintroduce: growing
+ * PICK_ATTRIBUTE_ALLOWLIST with a new URL-bearing attribute can no longer be
+ * done by editing PICK_ATTRIBUTE_ALLOWLIST itself (it is derived, not a
+ * literal), and adding the attribute here without first adding it to
+ * URL_ATTR_NAMES above is a compile error.
+ */
+const URL_ATTRS_ALLOWED: UrlAttrName[] = ['href', 'src']
 
 /**
- * Attribute names whose value is a URL and must go through sanitizePickUrl
- * rather than the generic cap-and-keep branch -- single source of truth for
- * both re-validation points (element-pick.ts guest side, design-endpoint.ts
- * main side), which used to each hardcode `name === 'href' || name === 'src'`
- * independently. Growing PICK_ATTRIBUTE_ALLOWLIST with a new URL-bearing
- * attribute now only needs adding it here, not editing both branches.
+ * Attribute names captured in the pick payload by default -- PARTITIONED by
+ * construction into NON_URL_ATTRS and URL_ATTRS_ALLOWED (plus every
+ * `aria-*`, checked separately, see isAriaAttribute-style callers in
+ * element-pick.ts). Shared so main-side re-validation filters against the
+ * exact same set the guest used.
  */
-export const URL_ATTRS = new Set(['href', 'src', 'poster', 'action', 'formaction', 'srcset'])
+export const PICK_ATTRIBUTE_ALLOWLIST: string[] = [...NON_URL_ATTRS, ...URL_ATTRS_ALLOWED]
 
 /**
  * Every size/count cap used by the pick payload. Single source of truth:

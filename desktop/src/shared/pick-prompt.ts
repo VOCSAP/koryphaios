@@ -8,7 +8,7 @@
 // suffix, not operator-facing copy -- no i18n keys here.
 
 import type { ElementPick, PickAnnotation } from './types'
-import { sanitizePickUrl } from './pick-security'
+import { isParseableUrl, sanitizePickUrl } from './pick-security'
 
 /** role + accessibleName combined onto one line, whichever is present. */
 function roleLine(pick: ElementPick): string | null {
@@ -154,10 +154,15 @@ export function formatAnnotationsReport(
   // Defense in depth, same posture as element-pick.ts/design-endpoint.ts
   // (both re-sanitize independently): strip query/fragment here too, not
   // only at the BrowserView.tsx call site, so this module's own guarantee
-  // holds even if a future caller forgets to sanitize. Falls back to the
-  // raw url on parse failure/disallowed protocol -- pathnameOf has the same
-  // fallback, and an unparsable string carries no query to strip anyway.
-  const safeUrl = sanitizePickUrl(page.url) || page.url
+  // holds even if a future caller forgets to sanitize. sanitizePickUrl fails
+  // two different ways and they must NOT be handled the same: a parse
+  // failure carries no query (nothing to leak, safe to show the raw
+  // string -- pathnameOf has its own identical fallback for this case), but
+  // a disallowed protocol (data:, javascript:, …) is exactly the class of
+  // input that CAN carry an embedded query/token, so falling back to the
+  // raw string there would re-open the leak this function exists to close.
+  const sanitized = sanitizePickUrl(page.url)
+  const safeUrl = sanitized || (isParseableUrl(page.url) ? 'current page' : page.url)
 
   const lines: string[] = [`## Design Feedback: ${pathnameOf(safeUrl)}`, '', `URL: ${safeUrl}`]
   if (page.viewport) lines.push(`Viewport: ${page.viewport}`)

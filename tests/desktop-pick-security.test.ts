@@ -31,52 +31,58 @@ test("containsSecret misses: ordinary strings and near-miss substrings", () => {
   expect(containsSecret("Product Name")).toBe(false);
 });
 
-// Fixed example per pattern, NOT a loop over PICK_SECRET_PATTERNS itself:
-// iterating the list under test means removing an entry removes its own
-// check and the suite stays green (measured: dropping "auth_token" or
-// the credential-field pattern from the array left the old version of this
-// test 101/101 pass). Every entry needs its own hard assertion here so
-// deleting any one of them (other than "client_secret", subsumed by the
-// generic "secret" pattern -- an accepted equivalent mutant) turns exactly
-// this test red.
-test("containsSecret detects a concrete example of every PICK_SECRET_PATTERNS entry", () => {
-  expect(containsSecret("access_token=abc123")).toBe(true);
-  expect(containsSecret("x-auth_token-y")).toBe(true);
-  expect(containsSecret("api_key=xyz")).toBe(true);
-  expect(containsSecret("apikey=xyz")).toBe(true);
-  expect(containsSecret("client_secret=xyz")).toBe(true); // subsumed by "secret", kept for documentation
-  expect(containsSecret("oauth_state=1")).toBe(true);
-  expect(containsSecret("X-Amz-Signature")).toBe(true);
-  expect(containsSecret("session_id=abc")).toBe(true);
-  expect(containsSecret("sessionid=abc")).toBe(true);
-  expect(containsSecret("CSRF_TOKEN")).toBe(true);
-  expect(containsSecret("top-secret-value")).toBe(true);
-  expect(containsSecret("user_password")).toBe(true);
-  expect(containsSecret("old-passwd-field")).toBe(true);
-  // Coverage guard: this list must name every pattern currently in
-  // PICK_SECRET_PATTERNS (minus the documented "client_secret" equivalent
-  // mutant), so growing the array without growing this test fails loudly
-  // instead of silently under-covering the next added pattern. Built as
-  // tuples rather than an object literal keyed by pattern name so a
-  // credential-shaped `password: "..."` property never appears verbatim.
-  const coveredPatterns = [
-    "access_token",
-    "auth_token",
-    "api_key",
-    "apikey",
-    "client_secret",
-    "oauth_state",
-    "x-amz-",
-    "session_id",
-    "sessionid",
-    "csrf",
-    "secret",
-    "password",
-    "passwd",
-  ];
-  for (const pattern of PICK_SECRET_PATTERNS) {
-    expect(coveredPatterns).toContain(pattern);
+// ONE table drives every check, not two parallel lists matched by name: the
+// prior version paired 13 flat `expect()` calls against a separate
+// `coveredPatterns` array via `toContain`, which only asserted "this name
+// appears somewhere" -- it did not tie a specific example to a specific
+// pattern, and the coverage loop iterated PICK_SECRET_PATTERNS itself, so
+// three independent edits each stayed green: deleting one example
+// assertion (its name-only reference in `coveredPatterns` still counted as
+// "covered"), adding a pattern to PICK_SECRET_PATTERNS without adding an
+// example (the loop only checked names already present in an unrelated
+// list), and removing a pattern from PICK_SECRET_PATTERNS while leaving its
+// example untouched (the loop no longer visited it at all). This table
+// closes all three: every row is checked against containsSecret AND against
+// which pattern(s) actually match it, and a final two-way set-equality
+// between the table's pattern column and PICK_SECRET_PATTERNS itself means
+// the table can neither omit a live pattern nor keep a dead one.
+const SECRET_EXAMPLES: [pattern: string, example: string][] = [
+  ["access_token", "access_token=abc123"],
+  ["auth_token", "x-auth_token-y"],
+  ["api_key", "api_key=xyz"],
+  ["apikey", "apikey=xyz"],
+  ["client_secret", "client_secret=xyz"],
+  ["oauth_state", "oauth_state=1"],
+  ["x-amz-", "X-Amz-Signature"],
+  ["session_id", "session_id=abc"],
+  ["sessionid", "sessionid=abc"],
+  ["csrf", "CSRF_TOKEN"],
+  ["secret", "top-secret-value"],
+  ["password", "user_password"],
+  ["passwd", "old-passwd-field"],
+];
+
+// "client_secret" is the one pattern whose own example also matches another
+// pattern ("client_secret=xyz" contains the substring "secret") -- a
+// documented, intentional overlap (client_secret is subsumed by the generic
+// "secret" pattern), not a leak in this table. Every other example must
+// match ONLY its own pattern, verified explicitly below rather than by
+// comment alone.
+const KNOWN_PATTERN_OVERLAPS: Record<string, string[]> = { client_secret: ["secret"] };
+
+test("containsSecret detects a concrete, uniquely-matching example of every PICK_SECRET_PATTERNS entry", () => {
+  for (const [pattern, example] of SECRET_EXAMPLES) {
+    expect(containsSecret(example)).toBe(true);
+    const lower = example.toLowerCase();
+    const matchedPatterns = PICK_SECRET_PATTERNS.filter((p) => lower.includes(p)).sort();
+    const expectedMatches = [pattern, ...(KNOWN_PATTERN_OVERLAPS[pattern] ?? [])].sort();
+    expect(matchedPatterns).toEqual(expectedMatches);
   }
+  // Two-way: every pattern currently in PICK_SECRET_PATTERNS has exactly one
+  // row above, and the table names nothing that isn't currently a pattern.
+  expect(SECRET_EXAMPLES.map(([pattern]) => pattern).sort()).toEqual(
+    [...PICK_SECRET_PATTERNS].sort()
+  );
 });
 
 test("sanitizePickUrl: strips query and hash from an allowed protocol", () => {

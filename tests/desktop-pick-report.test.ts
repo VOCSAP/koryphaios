@@ -66,6 +66,21 @@ test("formatAnnotationsReport: an unparsable url falls back to the raw string in
   expect(out.split("\n")[0]).toBe("## Design Feedback: not-a-url");
 });
 
+// A disallowed-protocol url (unlike an unparsable string) DOES parse -- it
+// is simply rejected by sanitizePickUrl's protocol allowlist -- so it can
+// carry a genuine embedded query, exactly the class of input the query-
+// stripping guarantee exists to close. Falling back to the raw string here
+// (as the parse-failure case correctly does) would re-leak it.
+test("formatAnnotationsReport: a disallowed-protocol url falls back to a neutral label, never the raw string", () => {
+  const out = formatAnnotationsReport([annotation()], {
+    url: "data:text/html,x?access_token=leaked-abc",
+  });
+  const lines = out.split("\n");
+  expect(lines[0]).toBe("## Design Feedback: current page");
+  expect(lines[2]).toBe("URL: current page");
+  expect(out).not.toContain("access_token=leaked-abc");
+});
+
 test("formatAnnotationsReport: sections are numbered in order, one per annotation", () => {
   const out = formatAnnotationsReport(
     [
