@@ -93,6 +93,14 @@ import { composeOutboundMessage } from "./shared/message-framing.ts";
 import { resolveProjectKey } from "./shared/project-key.ts";
 import { tmpdir } from "node:os";
 import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
+// Cross-boundary import (server.ts lives at repo root, workflow.ts under
+// desktop/): verified legal card 7defe381 LOT 1 -- `bunx tsc --noEmit -p
+// tsconfig.json` produces the identical error count (338) with and without
+// this import, because root tsconfig.json's `exclude: ["desktop"]` only
+// drops desktop from the default glob, not from files reached by an explicit
+// import (see the comment on that exclude). Single source of truth for
+// "dispatch queue order" per CLAUDE.md: do not re-derive this sort locally.
+import { queuedItems, wavesOf } from "./desktop/src/shared/workflow.ts";
 
 const PEER_ID_REGEX = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/;
 
@@ -599,6 +607,11 @@ const TOOLS = [
           description: "Widen `q` to rationale and context.",
         },
         include_archived: { type: "boolean" as const, description: "Default false." },
+        order: {
+          type: "string" as const,
+          enum: ["queue"],
+          description: "queue: real dispatch order (queue ascending, waves grouped) instead of MoSCoW groups.",
+        },
       },
     },
   },
@@ -927,7 +940,43 @@ function formatRoadmapItemLine(i: RoadmapItem): string {
   // up) previously had no way to see the flag before hitting a 403 that
   // tells it to do the one thing it is structurally forbidden from doing.
   const inactive = i.inactive ? " [INACTIVE -- do not claim]" : "";
-  return `[${i.id.slice(0, 8)}] ${i.kind} · ${i.priority} · value:${i.value} effort:${i.effort} · ${i.status}${lock}${inactive} — ${i.title}${tags}`;
+  // Card 7defe381 LOT 1: a marker present ONLY when the card is enqueued, so
+  // the vast majority of unenqueued cards pay zero extra chars per turn.
+  const queueRank = i.queue !== null ? ` queue:${i.queue}` : "";
+  return `[${i.id.slice(0, 8)}] ${i.kind} · ${i.priority} · value:${i.value} effort:${i.effort} · ${i.status}${queueRank}${lock}${inactive} — ${i.title}${tags}`;
+}
+
+/**
+ * Card 7defe381 LOT 1: the roadmap in its REAL dispatch order, for
+ * `roadmap_list({ order: "queue" })`. Delegates the ordering/grouping to
+ * `queuedItems`/`wavesOf` (desktop/src/shared/workflow.ts) rather than
+ * re-deriving a sort here -- that module is already the single source of
+ * truth the Deck's own workflow lane draws from (see the import comment
+ * above), so this view can never silently diverge from what the Deck shows.
+ * `queuedItems` excludes done/archived rows even when they still carry a
+ * stale `queue` value, so a finished card never resurfaces as pending.
+ */
+function formatRoadmapQueueOrder(items: RoadmapItem[]): string {
+  const byId = new Map(items.map((i) => [i.id, i] as const));
+  const ordered = queuedItems(items);
+  const waves = wavesOf(ordered);
+  const waveBlocks = waves.map((waveIds, idx) => {
+    const rows = waveIds.map((id) => formatRoadmapItemLine(byId.get(id)!));
+    return `WAVE ${idx + 1} (${rows.length} card${rows.length > 1 ? "s" : ""}, dispatched together):\n${rows.join("\n")}`;
+  });
+  const queuedIds = new Set(ordered.map((i) => i.id));
+  const rest = items.filter((i) => !queuedIds.has(i.id));
+
+  const parts: string[] = [];
+  parts.push(
+    waveBlocks.length
+      ? `DISPATCH QUEUE (${ordered.length} card(s) in ${waves.length} wave(s)):\n\n${waveBlocks.join("\n\n")}`
+      : "DISPATCH QUEUE: empty."
+  );
+  if (rest.length) {
+    parts.push(`NOT QUEUED (${rest.length}):\n${rest.map(formatRoadmapItemLine).join("\n")}`);
+  }
+  return parts.join("\n\n");
 }
 
 function formatRoadmapItemDetail(i: RoadmapItem): string {
@@ -1423,6 +1472,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         tags?: string[];
         q?: string;
         q_deep?: boolean;
+        order?: string;
       };
       try {
         const { items } = await brokerFetch<RoadmapListResponse>("/roadmap/list", {
@@ -1451,20 +1501,30 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             ],
           };
         }
-        // Group by MoSCoW priority for a scannable overview.
-        const order = ["must", "should", "could", "wont"] as const;
-        const blocks = order
-          .map((p) => {
-            const rows = items.filter((i) => i.priority === p);
-            if (rows.length === 0) return "";
-            return `${p.toUpperCase()} (${rows.length}):\n${rows.map(formatRoadmapItemLine).join("\n")}`;
-          })
-          .filter(Boolean);
+        // Card 7defe381 LOT 1: `order: "queue"` renders the real dispatch
+        // order instead of the MoSCoW grouping below -- the default view is
+        // untouched so every other agent's habitual reading of this tool
+        // does not change shape.
+        const body =
+          a.order === "queue"
+            ? formatRoadmapQueueOrder(items)
+            : (() => {
+                // Group by MoSCoW priority for a scannable overview.
+                const moscow = ["must", "should", "could", "wont"] as const;
+                return moscow
+                  .map((p) => {
+                    const rows = items.filter((i) => i.priority === p);
+                    if (rows.length === 0) return "";
+                    return `${p.toUpperCase()} (${rows.length}):\n${rows.map(formatRoadmapItemLine).join("\n")}`;
+                  })
+                  .filter(Boolean)
+                  .join("\n\n");
+              })();
         return {
           content: [
             {
               type: "text" as const,
-              text: `${items.length} roadmap item(s):\n\n${blocks.join("\n\n")}\n\nUse roadmap_get <id> for details, roadmap_update to change status.`,
+              text: `${items.length} roadmap item(s):\n\n${body}\n\nUse roadmap_get <id> for details, roadmap_update to change status.`,
             },
           ],
         };
