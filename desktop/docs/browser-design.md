@@ -24,6 +24,60 @@ paths — and visible text) is pasted into the docked agent's prompt
 Enter. With no docked agent the description is copied to the clipboard.
 `Esc` cancels.
 
+The pasted description carries an `[element context]` block beyond the base
+sentence: role/accessible name, allowlisted attributes, computed styles
+(filtered of their default values so only signal remains), nearby sibling
+text, a readable ancestor path, and a capped `outerHTML` snippet — the agent
+usually has enough to locate and restyle the element without a follow-up
+screenshot. Every field is optional and best-effort; an older external
+deck-design client still works with none of them. Secrets never reach the
+prompt: attribute/id/text/HTML values matching a credential-like pattern
+(`api_key`, `csrf`, `password`, …) are redacted or the field is dropped
+outright, and every URL (page URL, `href`/`src`) has its query string and
+fragment stripped. This is applied twice — once in-page as the pick is built,
+once again at the design endpoint on the untrusted POST body from an external
+app — so a compromised or malicious page cannot smuggle a token past a single
+check. When the picked element belongs to a React app in a DEV build, the
+block also carries the surrounding component stack (`react: <App> >
+<ProductCard>`) and the JSX source location (`source:
+src/ProductCard.tsx:42:7`) pulled from React's dev-only debug metadata — both
+absent in production builds and on React 19+, which removed that metadata.
+
+A cropped screenshot of the picked element is captured automatically and
+appended to the prompt as a saved path for the agent to `Read` — same
+`annotations/` folder under app state and 7-day pruning as draw mode below.
+It is absent for picks made through an external design-endpoint app (no
+capture capability there) and whenever the capture, crop, or save step fails
+for any reason (a busy or torn-down page): the base description is still
+delivered, silently, without a screenshot.
+
+While inspect mode is armed, two hover shortcuts skip the click entirely: `C`
+picks the currently hovered element without ever dispatching a click at the
+page, so a state that collapses on click (an open dropdown, a hover menu)
+survives into the captured description; `S` sends just a screenshot of the
+hovered element, no page-context prompt. `S` needs the embedded browser's
+capture pipeline — the external deck-design client simply ignores the key
+and stays armed.
+
+### Review mode (Chantier OD5)
+
+A second toolbar toggle turns the one-pick-one-prompt flow above into a
+batch review: arm it and every pick (click or `C`) pins a new annotation
+instead of exiting inspect mode, up to 20 per page — further picks are
+refused with a toast until one is sent or removed. Each pinned element gets
+its own comment, an intent (`fix` / `change` / `question` / `approve`) and a
+priority (`blocking` / `important` / `suggestion`), edited in a right-hand
+panel over the webview that never covers the docked terminal. `Esc` in the
+guest disarms picking but leaves the panel and its drafts untouched — the
+toggle re-arms picking to keep adding elements. "Send review" folds every
+pinned element (selector, source/react context, bounds, styles, HTML,
+auto-screenshot when captured, and the operator's comment) into ONE
+structured `## Design Feedback` message, pasted or copied exactly like a
+single pick; "Discard" clears the batch without sending anything. Switching
+away from the Browser view (unmounting `BrowserView`) loses any pending
+draft — accepted for this first version, same as any other unsaved-in-memory
+UI state in the Deck.
+
 ## Viewport presets
 
 Render the page at a device size (iPhone SE, iPad, laptop…) centred in the
@@ -80,6 +134,11 @@ interactive elements with stable selectors), `demo_navigate`, `demo_click`
 and `demo_type` (real input events with human pacing, visible on the video),
 `demo_wait` (viewer-pacing pauses). The recording auto-stops when the agent
 reports the scenario done; stopping the recording cancels the agent.
+`demo_navigate`/`demo_click`/`demo_type` results carry a self-review
+`reminder` field once the agent has gone too long without a `demo_read`
+(always after a navigation, or after 3 actions since the last read) — a
+result-level nudge re-asserting the system prompt's contract at the moment
+the agent actually drifts from it.
 
 Security shape: the agent's bridge (`demo-browser-mcp.mjs`) talks to a
 loopback endpoint + Bearer token minted PER RUN (`demo-control.ts`) — never

@@ -130,6 +130,93 @@ test("step cap: beyond DEMO_STEP_CAP every call errors", async () => {
   expect(log.reads).toBe(DEMO_STEP_CAP);
 });
 
+// ----- Self-review nudges (Chantier OD6, DESIGN-ORCA-DOOP-ADOPTION.md §4.1) -----
+
+test("demo_navigate: result always carries the read-again reminder", async () => {
+  const log = emptyLog();
+  const srv = await startDemoControl(makeDeps(log));
+  servers.push(srv);
+  const res = await call(srv, "demo_navigate", { url: "http://localhost:3000/" });
+  const body = res.body.result as { url: string; reminder?: string };
+  expect(body.url).toBe("http://localhost:3000/");
+  expect(body.reminder).toContain("call demo_read before your next action");
+});
+
+test("demo_click: no reminder on the first two clicks, reminder from the third (stale-read threshold)", async () => {
+  const log = emptyLog();
+  const srv = await startDemoControl(makeDeps(log));
+  servers.push(srv);
+
+  const first = (await call(srv, "demo_click", { selector: "#a" })).body.result as {
+    reminder?: string;
+  };
+  expect(first.reminder).toBeUndefined();
+
+  const second = (await call(srv, "demo_click", { selector: "#b" })).body.result as {
+    reminder?: string;
+  };
+  expect(second.reminder).toBeUndefined();
+
+  const third = (await call(srv, "demo_click", { selector: "#c" })).body.result as {
+    reminder?: string;
+  };
+  expect(third.reminder).toContain("3 actions since your last demo_read");
+});
+
+test("demo_read resets the stale-action counter: click, click, read, click -> last click carries none", async () => {
+  const log = emptyLog();
+  const srv = await startDemoControl(makeDeps(log));
+  servers.push(srv);
+
+  await call(srv, "demo_click", { selector: "#a" });
+  await call(srv, "demo_click", { selector: "#b" });
+  await call(srv, "demo_read");
+  const afterRead = (await call(srv, "demo_click", { selector: "#c" })).body.result as {
+    reminder?: string;
+  };
+  expect(afterRead.reminder).toBeUndefined();
+});
+
+test("demo_read and demo_wait never carry a reminder", async () => {
+  const log = emptyLog();
+  const srv = await startDemoControl(makeDeps(log));
+  servers.push(srv);
+
+  // Push well past the stale-read threshold first.
+  await call(srv, "demo_click", { selector: "#a" });
+  await call(srv, "demo_click", { selector: "#b" });
+  await call(srv, "demo_click", { selector: "#c" });
+
+  const read = (await call(srv, "demo_read")).body.result as Record<string, unknown>;
+  expect(read).not.toHaveProperty("reminder");
+
+  const wait = (await call(srv, "demo_wait", { ms: 1 })).body.result as Record<string, unknown>;
+  expect(wait).not.toHaveProperty("reminder");
+});
+
+test("a non-object dep result is wrapped as { result, reminder } rather than spread", async () => {
+  const log = emptyLog();
+  const deps = makeDeps(log);
+  deps.navigate = async (url) => {
+    log.navigations.push(url);
+    return url; // a plain string, not an object
+  };
+  const srv = await startDemoControl(deps);
+  servers.push(srv);
+  const res = await call(srv, "demo_navigate", { url: "http://localhost:3000/" });
+  const body = res.body.result as { result: string; reminder?: string };
+  expect(body.result).toBe("http://localhost:3000/");
+  expect(body.reminder).toContain("call demo_read before your next action");
+});
+
+test("a result with no reminder attached is returned bit-identical (not re-wrapped)", async () => {
+  const log = emptyLog();
+  const srv = await startDemoControl(makeDeps(log));
+  servers.push(srv);
+  const res = await call(srv, "demo_read");
+  expect(res.body.result).toEqual({ url: "http://x/", title: "t", text: "", interactive: [] });
+});
+
 test("demo-browser-mcp speaks MCP over stdio and forwards tools/call", async () => {
   const log = emptyLog();
   const srv = await startDemoControl(makeDeps(log));

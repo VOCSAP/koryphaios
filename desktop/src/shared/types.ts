@@ -1023,6 +1023,40 @@ export interface ElementPick {
   width: number
   height: number
   pageUrl: string
+  // ----- Enriched context (Chantier OD1, DESIGN-ORCA-DOOP-ADOPTION.md §3.1).
+  // All OPTIONAL: an older external deck-design.js bundle (pre-OD1) posts a
+  // pick without these, and both consumers (BrowserView/App prompt
+  // composition, design-endpoint's sanitizePick) must keep working on their
+  // absence -- never defaulted to an empty object/array, stays undefined.
+  /** Viewport CSS px at pick time, rounded. */
+  x?: number
+  y?: number
+  /** True when `position: fixed|sticky` anywhere in the element's ancestry. */
+  isFixed?: boolean
+  /** Explicit `role` attribute; omitted (not '') when absent. */
+  role?: string
+  /** aria-label > aria-labelledby (resolved) > alt > title, first non-empty, trimmed, capped. */
+  accessibleName?: string
+  /** Allowlisted attributes only (PICK_ATTRIBUTE_ALLOWLIST + aria-*), values capped/redacted. */
+  attributes?: Record<string, string>
+  /** Computed styles, filtered of their default values -- signal only. */
+  styles?: Record<string, string>
+  /** outerHTML, capped; omitted entirely (not truncated) when it contains a secret. */
+  html?: string
+  /** Trimmed text of nearby sibling elements. */
+  nearbyText?: string[]
+  /** Readable ancestor labels, outermost first. */
+  ancestors?: string[]
+  // ----- React context (Chantier OD3, DESIGN-ORCA-DOOP-ADOPTION.md §3.2).
+  // Both OPTIONAL for the same reasons as the OD1 block above, plus a THIRD:
+  // React's dev-only fiber debug metadata (`_debugSource`) was removed in
+  // React 19, so even a DEV build of a React-19+ app yields neither field.
+  // Absent outside React, in a PRODUCTION build, or on React 19+ -- never an
+  // error, this is the expected common case.
+  /** Surrounding component stack, outermost first, e.g. `<App> > <ProductCard>`. */
+  reactComponents?: string
+  /** `path/to/Component.tsx:42:7`, from React's dev-only debug source metadata. */
+  sourceFile?: string
 }
 
 /** An external-app pick forwarded by the design endpoint (PLAN D2b). */
@@ -1030,6 +1064,32 @@ export interface DesignPickEvent {
   /** Free-text app label sent by the client script ('' when omitted). */
   source: string
   pick: ElementPick
+}
+
+// ----- Annotate review (Chantier OD5, DESIGN-ORCA-DOOP-ADOPTION.md §3.5) -----
+// One pick = one prompt, generalized to a REVIEW: the operator pins up to
+// PICK_BUDGET.annotationsMaxPerPage elements, each with its own comment +
+// intent + priority, then sends ONE structured Design Feedback message
+// (shared/pick-prompt.ts's formatAnnotationsReport). Mirror of orca's
+// BrowserAnnotationIntent/Priority (MIT, shared/browser-grab-types.ts) --
+// values travel in the report text verbatim (agent-facing), only their UI
+// labels go through i18n.
+
+/** What the operator wants done with the pinned element. */
+export type PickAnnotationIntent = 'fix' | 'change' | 'question' | 'approve'
+
+/** How urgent the annotation is. */
+export type PickAnnotationPriority = 'blocking' | 'important' | 'suggestion'
+
+/** One pinned element of an in-progress design review, editable in the panel until sent or discarded. */
+export interface PickAnnotation {
+  id: string
+  comment: string
+  intent: PickAnnotationIntent
+  priority: PickAnnotationPriority
+  pick: ElementPick
+  /** Best-effort auto screenshot path (captureElementShot, same as the single-pick flow); absent on failure. */
+  screenshotPath?: string
 }
 
 /** One capturable OS window/screen for the browser view's Window mode (D2a). */

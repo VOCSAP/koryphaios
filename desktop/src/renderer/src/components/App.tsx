@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { sanitizeGlowColor } from '@shared/palette'
 import { SANDBOX_BUILD_PTY_ID } from '@shared/types'
+import { formatPickDetails } from '@shared/pick-prompt'
 import { GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
@@ -195,6 +196,7 @@ export function App(): React.JSX.Element {
         h: pick.height
       })
       if (pick.text) prompt += tt('browser.elementPromptText', { text: pick.text })
+      prompt += formatPickDetails(pick)
       const target = [browserPairedId, selectedId]
         .map((id) => sessions.find((s) => s.id === id))
         .find((s) => s && s.status === 'running' && !s.supervisor)

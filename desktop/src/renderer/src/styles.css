@@ -5365,6 +5365,150 @@ svg.glyph {
   cursor: col-resize;
 }
 
+/* Annotate review (Chantier OD5, DESIGN-ORCA-DOOP-ADOPTION.md §3.5): fixed-
+   width right-hand panel over the webview side of .browser-body (which is
+   already `position: relative`) — never covers the docked terminal, which is
+   a flex sibling of .browser-pane, entirely to the LEFT of this panel.
+   Conditionally rendered (reviewArmed || pendingAnnotations.length), same
+   pattern as .browser-dock above in this file — NOT the DESIGN.md §4
+   collapsible-rail family (Agents sidebar/roadmap filters/graph list): there
+   is no folded-rail state here, the panel simply appears while there is
+   something to review and disappears once sent/discarded. z-index above the
+   draw canvas (4) and the drag shield (5): drawing/dragging the divider are
+   both disarmed before this panel can be armed, but the stacking still has
+   to say so explicitly. */
+.annotate-panel {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-2);
+  border-left: 1px solid var(--border);
+  border-radius: 8px 0 0 8px;
+  box-shadow: -4px 0 16px rgba(0, 0, 0, 0.25);
+}
+
+.annotate-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.annotate-panel-title {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+/* Pending count: same pill recipe as the nav-rail counter badge, filled accent. */
+.annotate-panel-count {
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  border-radius: 999px;
+  padding: 3px 7px;
+}
+
+.annotate-panel-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 12px;
+  /* Own scrollbar hidden the same way the Agents sidebar rail hides its —
+     wheel scrolling still works, only the native bar is suppressed. */
+  scrollbar-width: none;
+}
+
+.annotate-panel-list::-webkit-scrollbar {
+  display: none;
+}
+
+.annotate-panel-empty {
+  color: var(--fg-dim);
+  font-size: 12px;
+  text-align: center;
+  padding: 16px 4px;
+}
+
+.annotate-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.annotate-row + .annotate-row {
+  margin-top: 8px;
+}
+
+.annotate-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Tag + comment first words (the running summary this row's own fields feed
+   live) — truncate rather than wrap, the panel is narrow on purpose. */
+.annotate-row-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Compact icon-btn.danger instance (DESIGN.md §3): smaller padding for a
+   dense per-row action, same red-at-rest recipe otherwise. */
+.annotate-row-remove {
+  flex: none;
+  padding: 3px 6px;
+}
+
+/* Size/behaviour only — the box, border and focus ring come from the
+   element-level `textarea` rule. */
+.annotate-comment {
+  width: 100%;
+  resize: none;
+  font-size: 12px;
+  min-height: 44px;
+}
+
+.annotate-row-selects {
+  display: flex;
+  gap: 6px;
+}
+
+/* Size only — the box and chevron come from the element-level `select` rule.
+   Right padding stays 24px: that is the chevron's reserved lane (DESIGN.md §4),
+   a scoped padding may tighten the other sides but never that one. */
+.annotate-select {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  padding: 4px 24px 4px 6px;
+}
+
+.annotate-panel-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+
 /* ---------------------------------------------------------------------------
    Graph chat view (EXPLORATION-graph-chat C26): dependency-free canvas —
    SVG bezier edges under absolutely-positioned node cards, manual layout. */

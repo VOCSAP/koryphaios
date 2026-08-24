@@ -30,7 +30,17 @@
 import { useEffect, useRef, useState } from 'react'
 import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
-import type { ElementPick, SessionRuntime, WindowSource } from '@shared/types'
+import type {
+  ElementPick,
+  PickAnnotation,
+  PickAnnotationIntent,
+  PickAnnotationPriority,
+  SessionRuntime,
+  WindowSource
+} from '@shared/types'
+import { formatAnnotationsReport, formatPickDetails } from '@shared/pick-prompt'
+import { PICK_BUDGET, sanitizePickUrl } from '@shared/pick-security'
+import { computeElementCropRect, PICK_SHOT_MAX_BYTES } from '@shared/pick-shot'
 import {
   computeCropRect,
   formatElapsed,
@@ -89,6 +99,13 @@ function normalizeUrl(input: string): string {
 function toFileUrl(p: string): string {
   const norm = p.replace(/\\/g, '/')
   return `file://${norm.startsWith('/') ? '' : '/'}${norm}`
+}
+
+/** First `n` words of `text`, ellipsised when truncated -- the annotate-panel row label (Chantier OD5). */
+function firstWords(text: string, n: number): string {
+  const words = text.trim().split(/\s+/).filter(Boolean)
+  if (!words.length) return ''
+  return words.slice(0, n).join(' ') + (words.length > n ? '…' : '')
 }
 
 /**
@@ -227,6 +244,12 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
   /** Last page-level failure (did-fail-load / renderer gone), or null (O6). */
   const [loadError, setLoadError] = useState<string | null>(null)
   const [picking, setPicking] = useState(false)
+  // Annotate review (Chantier OD5): multi-pick armed state + the pinned
+  // batch. `pendingAnnotations` deliberately OUTLIVES `reviewArmed` going
+  // false (Escape only disarms picking, per DESIGN.md's collapsing-must-not-
+  // destroy-drafts rule) -- cleared only by Send or Discard.
+  const [reviewArmed, setReviewArmed] = useState(false)
+  const [pendingAnnotations, setPendingAnnotations] = useState<PickAnnotation[]>([])
   const [viewport, setViewport] = useState<ViewportPreset | null>(null)
   const [drawing, setDrawing] = useState(false)
   const [sendingDraw, setSendingDraw] = useState(false)
@@ -279,6 +302,11 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
   tRef.current = t
   const viewportRef = useRef(viewport)
   viewportRef.current = viewport
+  // Read fresh inside the stable webview ipc-message listener (same reason as
+  // the refs above): the cap check on a new annotation must see the latest
+  // list, not the one captured when the effect was set up.
+  const pendingAnnotationsRef = useRef(pendingAnnotations)
+  pendingAnnotationsRef.current = pendingAnnotations
 
   /** '[viewport: 375x667 – iPhone SE] ' when a device preset is active. */
   function viewportContext(): string {
@@ -295,6 +323,48 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     } else {
       void navigator.clipboard.writeText(prompt)
       showToast(copiedKey, 'info')
+    }
+  }
+
+  /**
+   * Capture -> decode -> crop -> byte-cap -> save a screenshot of a picked
+   * element (Chantier OD4 body). Shared by two callers: the auto-shot fired
+   * on every pick below, and the S hover-shortcut's screenshot-only pick
+   * (Chantier OD6, `deck:element-shot`). Reads webviewRef.current fresh at
+   * call time rather than taking the webview as a parameter, so both callers
+   * stay simple. ANY failure at any step degrades silently to null here --
+   * what each caller does with that null differs (see their own comments),
+   * so this helper itself makes no toast/UI decision.
+   */
+  async function captureElementShot(pick: ElementPick): Promise<string | null> {
+    const wv = webviewRef.current
+    if (!wv) return null
+    try {
+      const dataUrl = await window.api.captureBrowser(wv.getWebContentsId())
+      if (!dataUrl) throw new Error('capture: empty')
+      const img = new Image()
+      await new Promise<void>((res, rej) => {
+        img.onload = () => res()
+        img.onerror = () => rej(new Error('capture: decode failed'))
+        img.src = dataUrl
+      })
+      const crop = computeElementCropRect(pick, img.naturalWidth, img.naturalHeight, wv.clientWidth)
+      if (!crop) throw new Error('capture: no crop rect')
+      const out = document.createElement('canvas')
+      out.width = crop.sw
+      out.height = crop.sh
+      const ctx = out.getContext('2d')
+      if (!ctx) throw new Error('capture: no 2d context')
+      ctx.drawImage(img, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, crop.sw, crop.sh)
+      const shotDataUrl = out.toDataURL('image/png')
+      // base64 inflates raw bytes by 4/3 (3 bytes -> 4 chars): cap the
+      // STRING length at that ratio of the byte budget rather than
+      // decoding first, so an oversized crop never reaches saveAnnotation.
+      const base64Len = shotDataUrl.length - (shotDataUrl.indexOf(',') + 1)
+      if (base64Len > (PICK_SHOT_MAX_BYTES * 4) / 3) throw new Error('capture: over budget')
+      return await window.api.saveAnnotation(shotDataUrl)
+    } catch {
+      return null
     }
   }
 
@@ -332,6 +402,72 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
         setPicking(false)
         return
       }
+      if (ev.channel === 'deck:review-inspect-ended') {
+        // Escape (or the host itself) disarmed the multi-pick guest listener.
+        // The pending batch is untouched -- only Send/Discard clear it.
+        setReviewArmed(false)
+        return
+      }
+      if (ev.channel === 'deck:annotation-picked') {
+        // Annotate review (Chantier OD5): pin the pick, best-effort auto
+        // screenshot (same helper as the single-pick path below), refuse
+        // past the per-page cap with a toast rather than silently dropping.
+        const pick = ev.args[0] as ElementPick
+        if (pendingAnnotationsRef.current.length >= PICK_BUDGET.annotationsMaxPerPage) {
+          showToast('toast.annotationCapReached', 'info')
+          return
+        }
+        const id = crypto.randomUUID()
+        const annotation: PickAnnotation = {
+          id,
+          comment: '',
+          intent: 'change',
+          priority: 'suggestion',
+          pick
+        }
+        setPendingAnnotations((prev) => [...prev, annotation])
+        void (async () => {
+          const shotPath = await captureElementShot(pick)
+          if (shotPath) {
+            setPendingAnnotations((prev) =>
+              prev.map((a) => (a.id === id ? { ...a, screenshotPath: shotPath } : a))
+            )
+          }
+        })()
+        return
+      }
+      if (ev.channel === 'deck:element-shot') {
+        // S hover-shortcut (Chantier OD6, DESIGN-ORCA-DOOP-ADOPTION.md §3.6):
+        // screenshot the hovered element without ever clicking it. The guest
+        // exits inspect mode on S exactly like on a pick (createInspectMode's
+        // onShot -> exit() -> onExit() -> a separate 'deck:inspect-ended'
+        // message), same as deck:element-selected below -- unpress the pick
+        // button here too rather than waiting on that second message.
+        setPicking(false)
+        const pick = ev.args[0] as ElementPick
+        const tt = tRef.current
+        void (async () => {
+          const shotPath = await captureElementShot(pick)
+          if (shotPath) {
+            const prompt =
+              tt('browser.elementShotOnly', {
+                url: pick.pageUrl,
+                tag: pick.tagName,
+                w: pick.width,
+                h: pick.height,
+                selector: pick.selectors[0]?.value ?? pick.tagName,
+                path: shotPath
+              }) + viewportContext()
+            deliverPrompt(prompt, 'toast.pickSent', 'toast.pickCopied')
+          } else {
+            // Unlike the OD4 auto-shot below, here the screenshot IS the
+            // deliverable -- a silent failure would leave the operator
+            // waiting on nothing, so this one surfaces.
+            showToast('toast.shotFailed', 'info')
+          }
+        })()
+        return
+      }
       if (ev.channel !== 'deck:element-selected') return
       const pick = ev.args[0] as ElementPick
       const tt = tRef.current
@@ -344,7 +480,38 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
         h: pick.height
       })
       if (pick.text) prompt += tt('browser.elementPromptText', { text: pick.text })
+      prompt += formatPickDetails(pick)
       prompt += viewportContext()
+
+      // Best-effort auto screenshot (Chantier OD4, webview path only -- the
+      // external design-endpoint pick path in App.tsx has no capture
+      // capability and is untouched). ANY failure at any step degrades
+      // silently to delivering the prompt unchanged: the pick itself already
+      // succeeded, and a missing screenshot here is a normal state (the
+      // capture can race a navigation or the webview tearing down mid-flight),
+      // not an error worth a toast -- per the repo's best-effort-cache
+      // exception to "no silent errors". deliverPrompt is called exactly once
+      // per pick, from whichever branch runs.
+      //
+      // Highlight-free by construction, not by luck: shared/element-pick.ts's
+      // onClick calls handlers.onPick(pick) (which is what posts this very
+      // IPC message) and THEN calls exit() synchronously in the same
+      // handler, before returning to the event loop. exit() calls
+      // setHovered(null), which restores the element's saved boxShadow right
+      // there. So by the time this ipc-message listener runs at all -- let
+      // alone the async capture below -- the highlight is already gone from
+      // the guest page.
+      if (webviewRef.current && pick.x !== undefined && pick.y !== undefined) {
+        // Keep this handler itself synchronous (no `async` on onIpc): the
+        // capture is fired as a detached IIFE so the ipc-message listener
+        // returns immediately, matching every other listener in this effect.
+        void (async () => {
+          const shotPath = await captureElementShot(pick)
+          const delivered = shotPath ? prompt + tt('browser.elementShotPrompt', { path: shotPath }) : prompt
+          deliverPrompt(delivered, 'toast.pickSent', 'toast.pickCopied')
+        })()
+        return
+      }
       deliverPrompt(prompt, 'toast.pickSent', 'toast.pickCopied')
     }
 
@@ -400,12 +567,80 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     const wv = webviewRef.current
     if (!wv) return
     if (drawing) exitDraw()
+    // Single-pick and review-pick share the same guest document listeners
+    // (shared/element-pick.ts) -- never arm both at once.
+    if (!picking && reviewArmed) exitReview()
     try {
       wv.send(picking ? 'deck:exit-inspect' : 'deck:enter-inspect')
       setPicking(!picking)
     } catch {
       /* webview not attached yet (page still loading) */
     }
+  }
+
+  /** Send 'deck:exit-inspect-multi' and clear the armed flag; the pending batch survives. */
+  function exitReview(): void {
+    try {
+      webviewRef.current?.send('deck:exit-inspect-multi')
+    } catch {
+      /* not attached */
+    }
+    setReviewArmed(false)
+  }
+
+  /** Annotate review toggle (Chantier OD5): arms/disarms the multi-pick guest listener. */
+  function toggleAnnotate(): void {
+    const wv = webviewRef.current
+    if (!wv) return
+    if (drawing) exitDraw()
+    if (reviewArmed) {
+      exitReview()
+      return
+    }
+    if (picking) {
+      try {
+        wv.send('deck:exit-inspect')
+      } catch {
+        /* not attached */
+      }
+      setPicking(false)
+    }
+    try {
+      wv.send('deck:enter-inspect-multi')
+      setReviewArmed(true)
+    } catch {
+      /* webview not attached yet (page still loading) */
+    }
+  }
+
+  function updateAnnotation(id: string, patch: Partial<Pick<PickAnnotation, 'comment' | 'intent' | 'priority'>>): void {
+    setPendingAnnotations((prev) => prev.map((a) => (a.id === id ? { ...a, ...patch } : a)))
+  }
+
+  function removeAnnotation(id: string): void {
+    setPendingAnnotations((prev) => prev.filter((a) => a.id !== id))
+  }
+
+  /** Footer "Send review (N)": one structured message, then clear + disarm. */
+  function sendReview(): void {
+    if (!pendingAnnotations.length) return
+    const wv = webviewRef.current
+    const report = formatAnnotationsReport(pendingAnnotations, {
+      // sanitizePickUrl strips query/fragment (pick-security.ts's written
+      // guarantee) -- a review sent from an OAuth callback page must never
+      // carry its token into the agent prompt via the page URL.
+      url: sanitizePickUrl(wv?.getURL() || urlText),
+      viewport: viewport ? `${viewport.w}x${viewport.h} – ${viewport.name}` : undefined
+    })
+    deliverPrompt(report, 'toast.reviewSent', 'toast.reviewCopied')
+    setPendingAnnotations([])
+    if (reviewArmed) exitReview()
+  }
+
+  /** Footer "Discard": clears the batch without sending anything. */
+  function discardReview(): void {
+    setPendingAnnotations([])
+    if (reviewArmed) exitReview()
   }
 
   // ----- window mirror (D2a) -----
@@ -419,6 +654,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
       }
       setPicking(false)
     }
+    if (reviewArmed) exitReview()
     if (drawing) exitDraw()
   }
 
@@ -477,6 +713,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
       }
       setPicking(false)
     }
+    if (reviewArmed) exitReview()
     setDrawing(true)
   }
 
@@ -937,6 +1174,14 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
               >
                 {GLYPH_ACTIONS.target}
               </button>
+              <button
+                type="button"
+                className={`browser-btn${reviewArmed ? ' browser-btn-active' : ''}`}
+                title={t('browser.annotateReview')}
+                onClick={toggleAnnotate}
+              >
+                {GLYPH_ACTIONS.checklist}
+              </button>
             </>
           )}
           {mode === 'window' && (
@@ -1120,6 +1365,88 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
             ))}
           {/* Webviews swallow mouse events; shield them while dragging the divider. */}
           {dragging && <div className="browser-drag-shield" />}
+          {(reviewArmed || pendingAnnotations.length > 0) && (
+            <div className="annotate-panel">
+              <div className="annotate-panel-head">
+                <span className="annotate-panel-title">{t('browser.annotatePanelTitle')}</span>
+                <span className="annotate-panel-count">{pendingAnnotations.length}</span>
+              </div>
+              <div className="annotate-panel-list">
+                {pendingAnnotations.length === 0 ? (
+                  <p className="annotate-panel-empty">{t('browser.annotateEmpty')}</p>
+                ) : (
+                  pendingAnnotations.map((a) => (
+                    <div key={a.id} className="annotate-row">
+                      <div className="annotate-row-head">
+                        <span className="annotate-row-label">
+                          {a.pick.tagName}
+                          {a.comment.trim() ? ` — ${firstWords(a.comment, 6)}` : ''}
+                        </span>
+                        <button
+                          type="button"
+                          className="icon-btn danger annotate-row-remove"
+                          title={t('browser.annotateRemove')}
+                          onClick={() => removeAnnotation(a.id)}
+                        >
+                          {GLYPH_ACTIONS.trash}
+                        </button>
+                      </div>
+                      <textarea
+                        className="annotate-comment"
+                        rows={2}
+                        maxLength={PICK_BUDGET.annotationCommentMaxLength}
+                        placeholder={t('browser.annotateCommentPlaceholder')}
+                        value={a.comment}
+                        onChange={(e) => updateAnnotation(a.id, { comment: e.target.value })}
+                      />
+                      <div className="annotate-row-selects">
+                        <select
+                          className="annotate-select"
+                          title={t('browser.annotateIntentLabel')}
+                          value={a.intent}
+                          onChange={(e) =>
+                            updateAnnotation(a.id, { intent: e.target.value as PickAnnotationIntent })
+                          }
+                        >
+                          <option value="fix">{t('browser.annotateIntentFix')}</option>
+                          <option value="change">{t('browser.annotateIntentChange')}</option>
+                          <option value="question">{t('browser.annotateIntentQuestion')}</option>
+                          <option value="approve">{t('browser.annotateIntentApprove')}</option>
+                        </select>
+                        <select
+                          className="annotate-select"
+                          title={t('browser.annotatePriorityLabel')}
+                          value={a.priority}
+                          onChange={(e) =>
+                            updateAnnotation(a.id, {
+                              priority: e.target.value as PickAnnotationPriority
+                            })
+                          }
+                        >
+                          <option value="blocking">{t('browser.annotatePriorityBlocking')}</option>
+                          <option value="important">{t('browser.annotatePriorityImportant')}</option>
+                          <option value="suggestion">{t('browser.annotatePrioritySuggestion')}</option>
+                        </select>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+              <div className="annotate-panel-footer">
+                <button type="button" className="btn" onClick={discardReview}>
+                  {t('browser.annotateDiscard')}
+                </button>
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={pendingAnnotations.length === 0}
+                  onClick={sendReview}
+                >
+                  {t('browser.annotateSend', { n: pendingAnnotations.length })}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
       {recDialog && (
