@@ -72,8 +72,8 @@ if (__require.main == __require.module) {
   main().catch(() => {}).finally(() => process.exit(0));
 }
 export {
-  parseHookPayload,
-  detectSerializationAccident,
+  buildDecision,
   buildRefusalReason,
-  buildDecision
+  detectSerializationAccident,
+  parseHookPayload
 };

@@ -189,16 +189,55 @@ test(
 
 // --- Build freshness: catches a .ts edit that was never rebuilt into the .mjs ---
 //
-// This is a BYTE pin on bun build's bundling output, so it also depends on
-// the bun VERSION that produced it, not only the source content (release-
-// engineer, 2026-08-24). CI is deterministic (.bun-version pinned, commit
-// 81d931d), but a developer on a different local bun version can see this
-// test fail with no real source drift -- rebuild with `bun build
-// hooks/roadmap-guard-hook.ts --target=node
-// --outfile=deck-plugin/hooks/roadmap-guard-hook.mjs` from desktop/ before
-// concluding it is a real bug.
+// CORRECTED PREMISE (team lead + debugger, 2026-08-24, after this test broke
+// CI on all 3 OS legs): this is a BYTE pin on bun build's bundling output,
+// which depends on the bun VERSION that produced it, not only on the source
+// content -- measured live: bun 1.4.0 alphabetizes the `export {}` list,
+// 1.3.13 does not, so the SAME source produces two different byte sequences
+// depending on which bun built it. The first version of this comment got
+// the consequence backwards: it said ".bun-version being pinned makes CI
+// deterministic", which is true of the RUNNER, but says nothing about
+// whether the COMMITTED ARTIFACT was itself produced by that pinned
+// version. When it wasn't (as happened here: the checked-in .mjs was a
+// 1.3.13 product, CI runs 1.4.0), the pin does not protect this test -- it
+// makes it deterministically WRONG on every CI run, not deterministically
+// right. What actually determines whether this comparison is meaningful is
+// whether THIS PROCESS's own `Bun.version` matches `.bun-version`, checked
+// below, not assumed.
+//
+// Consequence: this test SKIPS (visibly -- the local/pinned versions are
+// baked into the test NAME itself, printed by bun test whether the test
+// runs or is skipped) when the running bun does not match the repo's
+// pinned `.bun-version`. On a match (always true in CI, since .bun-version
+// IS what CI installs) the byte comparison runs exactly as before.
+const PINNED_BUN_VERSION = readFileSync(
+  join(import.meta.dir, "..", ".bun-version"),
+  "utf-8"
+).trim();
+const BUN_VERSION_MATCHES_PIN = Bun.version === PINNED_BUN_VERSION;
 
-test("the checked-in .mjs is byte-identical to a fresh rebuild of the .ts (same command as build:hook)", async () => {
+// Belt-and-suspenders on visibility: measured live (bun 1.3.13) that
+// `bun test`'s default reporter does NOT print a per-test "» <name>" line
+// for a skipped test when the file also has passing tests -- only the
+// aggregate "1 skip" count shows, which flags that SOMETHING was skipped
+// but not why. The test NAME below still carries the reason for anyone who
+// greps/opens the report, but a bare test count is not visible enough on
+// its own, so this also unconditionally logs the reason at MODULE LOAD
+// TIME (always runs, skipIf only skips the test BODY) -- printed regardless
+// of bun version or reporter verbosity.
+if (!BUN_VERSION_MATCHES_PIN) {
+  console.warn(
+    `[roadmap-guard-hook.test.ts] SKIPPING the .mjs freshness/byte-diff test: ` +
+      `running Bun.version=${Bun.version} does not match pinned .bun-version=${PINNED_BUN_VERSION}. ` +
+      `This is expected on a dev machine running a different local bun; it is not evidence of source drift.`
+  );
+}
+
+test.skipIf(!BUN_VERSION_MATCHES_PIN)(
+  `the checked-in .mjs is byte-identical to a fresh rebuild of the .ts (same command as build:hook)` +
+    ` [pinned .bun-version=${PINNED_BUN_VERSION}, running Bun.version=${Bun.version}` +
+    `${BUN_VERSION_MATCHES_PIN ? "" : " -- SKIPPED, versions differ, this comparison is meaningless here"}]`,
+  async () => {
   const scratchDir = mkdtempSync(join(tmpdir(), "cp-roadmap-guard-rebuild-"));
   tmpDirs.push(scratchDir);
   const rebuiltPath = join(scratchDir, "roadmap-guard-hook.rebuild.mjs");
