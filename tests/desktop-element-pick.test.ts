@@ -23,6 +23,7 @@ import { afterAll, expect, test } from "bun:test";
 import {
   accessibleName,
   buildPick,
+  createInspectMode,
   pickAncestors,
   pickAttributes,
   pickNearbyText,
@@ -30,6 +31,7 @@ import {
   pickStyles,
 } from "../desktop/src/shared/element-pick.ts";
 import { PICK_BUDGET } from "../desktop/src/shared/pick-security.ts";
+import type { ElementPick } from "../desktop/src/shared/types.ts";
 
 /**
  * A realistic small fixture: #app > main.checkout > form > button, with two
@@ -353,6 +355,144 @@ test("pickReactContext: depth cap (35) stops the walk on a 100-deep chain", () =
   }
   (el as any)["__reactFiber$deep"] = fiber;
   expect(pickReactContext(el)).toBeUndefined();
+});
+
+// ----- Hover shortcuts C/S (Chantier OD6, DESIGN-ORCA-DOOP-ADOPTION.md §3.6) -----
+// createInspectMode installs document-level capture-phase listeners on
+// enter() and removes them on exit(); every test below calls mode.exit()
+// itself (even when the code under test is also expected to have exited)
+// so a forgotten listener can never leak into a later test in this file.
+
+function hover(el: HTMLElement): void {
+  el.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+}
+
+function key(k: string, opts: Partial<KeyboardEventInit> = {}): void {
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true, ...opts }));
+}
+
+test("createInspectMode: C picks the hovered element without ever dispatching a click", () => {
+  document.body.innerHTML = "";
+  document.body.innerHTML = `<button id="hoverable">Menu</button>`;
+  const btn = document.getElementById("hoverable") as HTMLButtonElement;
+  let clicked = false;
+  btn.addEventListener("click", () => {
+    clicked = true;
+  });
+
+  const picks: ElementPick[] = [];
+  let exited = 0;
+  const mode = createInspectMode({
+    onPick: (pick) => picks.push(pick),
+    onExit: () => exited++,
+  });
+  mode.enter();
+  hover(btn);
+  key("c");
+
+  expect(picks).toHaveLength(1);
+  expect(picks[0]!.tagName).toBe("button");
+  expect(exited).toBe(1);
+  expect(clicked).toBe(false);
+
+  mode.exit();
+});
+
+test("createInspectMode: S screenshots the hovered element via onShot, when provided", () => {
+  document.body.innerHTML = "";
+  document.body.innerHTML = `<div id="shootable">Card</div>`;
+  const div = document.getElementById("shootable") as HTMLElement;
+
+  const shots: ElementPick[] = [];
+  const picks: ElementPick[] = [];
+  let exited = 0;
+  const mode = createInspectMode({
+    onPick: (pick) => picks.push(pick),
+    onExit: () => exited++,
+    onShot: (pick) => shots.push(pick),
+  });
+  mode.enter();
+  hover(div);
+  key("s");
+
+  expect(shots).toHaveLength(1);
+  expect(shots[0]!.tagName).toBe("div");
+  expect(picks).toHaveLength(0);
+  expect(exited).toBe(1);
+
+  mode.exit();
+});
+
+test("createInspectMode: S with no onShot handler does nothing -- stays armed, a later click still picks", () => {
+  document.body.innerHTML = "";
+  document.body.innerHTML = `<div id="noshot">Card</div>`;
+  const div = document.getElementById("noshot") as HTMLElement;
+
+  const picks: ElementPick[] = [];
+  let exited = 0;
+  const mode = createInspectMode({
+    onPick: (pick) => picks.push(pick),
+    onExit: () => exited++,
+    // onShot intentionally omitted -- mirrors the external deck-design client.
+  });
+  mode.enter();
+  hover(div);
+  key("s");
+
+  expect(picks).toHaveLength(0);
+  expect(exited).toBe(0);
+
+  // Still armed: a plain click keeps working exactly as before.
+  div.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  expect(picks).toHaveLength(1);
+  expect(exited).toBe(1);
+
+  mode.exit();
+});
+
+test("createInspectMode: C with ctrlKey is ignored -- stays armed", () => {
+  document.body.innerHTML = "";
+  document.body.innerHTML = `<div id="modified">Card</div>`;
+  const div = document.getElementById("modified") as HTMLElement;
+
+  const picks: ElementPick[] = [];
+  let exited = 0;
+  const mode = createInspectMode({
+    onPick: (pick) => picks.push(pick),
+    onExit: () => exited++,
+  });
+  mode.enter();
+  hover(div);
+  key("c", { ctrlKey: true });
+
+  expect(picks).toHaveLength(0);
+  expect(exited).toBe(0);
+
+  // Still armed: the same key without the modifier now picks.
+  key("c");
+  expect(picks).toHaveLength(1);
+  expect(exited).toBe(1);
+
+  mode.exit();
+});
+
+test("createInspectMode: C with no hovered element is ignored -- stays armed", () => {
+  document.body.innerHTML = "";
+  document.body.innerHTML = `<div id="unhovered">Card</div>`;
+
+  const picks: ElementPick[] = [];
+  let exited = 0;
+  const mode = createInspectMode({
+    onPick: (pick) => picks.push(pick),
+    onExit: () => exited++,
+  });
+  mode.enter();
+  key("c"); // nothing hovered yet
+
+  expect(picks).toHaveLength(0);
+  expect(exited).toBe(0);
+
+  mode.exit();
 });
 
 test("buildPick: carries reactComponents + sourceFile end-to-end from a fake fiber chain", () => {

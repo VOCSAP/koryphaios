@@ -444,10 +444,19 @@ export function buildPick(el: HTMLElement): ElementPick {
  * Install inspect mode on the current document: crosshair cursor, hover
  * highlight, capture-phase click -> onPick(payload), Escape or one pick ->
  * teardown + onExit. Returns the enter/exit pair; enter is idempotent.
+ *
+ * Hover shortcuts (Chantier OD6, DESIGN-ORCA-DOOP-ADOPTION.md §3.6): a click
+ * collapses whatever state produced it (an open dropdown, a hover menu)
+ * before the pick can describe it. `C` picks the currently hovered element
+ * without ever dispatching a click at the page, so the captured description
+ * still shows that state. `S` is the same idea for a screenshot; it is
+ * optional (`onShot`) because the external deck-design client (which has no
+ * capture capability) does not pass it, and the key is then simply inert.
  */
 export function createInspectMode(handlers: {
   onPick: (pick: ElementPick) => void
   onExit: () => void
+  onShot?: (pick: ElementPick) => void
 }): { enter: () => void; exit: () => void } {
   let inspecting = false
   let hovered: HTMLElement | null = null
@@ -480,11 +489,37 @@ export function createInspectMode(handlers: {
   }
 
   function onKeyDown(e: KeyboardEvent): void {
-    if (!inspecting || e.key !== 'Escape') return
-    e.preventDefault()
-    e.stopPropagation()
-    exit()
-    handlers.onExit()
+    if (!inspecting) return
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      e.stopPropagation()
+      exit()
+      handlers.onExit()
+      return
+    }
+    // Modified keys are left alone (e.g. browser/OS shortcuts sharing the
+    // same letter) -- only a plain, unmodified keypress picks/shoots.
+    if (e.ctrlKey || e.metaKey || e.altKey) return
+    const key = e.key.toLowerCase()
+    if (key === 'c') {
+      if (!hovered) return // nothing to pick yet: stay armed
+      e.preventDefault()
+      e.stopPropagation()
+      // Same order as onClick: build + deliver the pick, THEN teardown --
+      // no click event is ever dispatched at the page, which is the point.
+      handlers.onPick(buildPick(hovered))
+      exit()
+      handlers.onExit()
+      return
+    }
+    if (key === 's') {
+      if (!hovered || !handlers.onShot) return // no hover, or transport has no shot support: stay armed
+      e.preventDefault()
+      e.stopPropagation()
+      handlers.onShot(buildPick(hovered))
+      exit()
+      handlers.onExit()
+    }
   }
 
   function enter(): void {

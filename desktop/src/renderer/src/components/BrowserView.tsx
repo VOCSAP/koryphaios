@@ -300,6 +300,48 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     }
   }
 
+  /**
+   * Capture -> decode -> crop -> byte-cap -> save a screenshot of a picked
+   * element (Chantier OD4 body). Shared by two callers: the auto-shot fired
+   * on every pick below, and the S hover-shortcut's screenshot-only pick
+   * (Chantier OD6, `deck:element-shot`). Reads webviewRef.current fresh at
+   * call time rather than taking the webview as a parameter, so both callers
+   * stay simple. ANY failure at any step degrades silently to null here --
+   * what each caller does with that null differs (see their own comments),
+   * so this helper itself makes no toast/UI decision.
+   */
+  async function captureElementShot(pick: ElementPick): Promise<string | null> {
+    const wv = webviewRef.current
+    if (!wv) return null
+    try {
+      const dataUrl = await window.api.captureBrowser(wv.getWebContentsId())
+      if (!dataUrl) throw new Error('capture: empty')
+      const img = new Image()
+      await new Promise<void>((res, rej) => {
+        img.onload = () => res()
+        img.onerror = () => rej(new Error('capture: decode failed'))
+        img.src = dataUrl
+      })
+      const crop = computeElementCropRect(pick, img.naturalWidth, img.naturalHeight, wv.clientWidth)
+      if (!crop) throw new Error('capture: no crop rect')
+      const out = document.createElement('canvas')
+      out.width = crop.sw
+      out.height = crop.sh
+      const ctx = out.getContext('2d')
+      if (!ctx) throw new Error('capture: no 2d context')
+      ctx.drawImage(img, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, crop.sw, crop.sh)
+      const shotDataUrl = out.toDataURL('image/png')
+      // base64 inflates raw bytes by 4/3 (3 bytes -> 4 chars): cap the
+      // STRING length at that ratio of the byte budget rather than
+      // decoding first, so an oversized crop never reaches saveAnnotation.
+      const base64Len = shotDataUrl.length - (shotDataUrl.indexOf(',') + 1)
+      if (base64Len > (PICK_SHOT_MAX_BYTES * 4) / 3) throw new Error('capture: over budget')
+      return await window.api.saveAnnotation(shotDataUrl)
+    } catch {
+      return null
+    }
+  }
+
   useEffect(() => {
     const wv = webviewRef.current
     if (!wv || !preloadPath) return
@@ -332,6 +374,38 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
       const ev = e as WebviewIpcMessageEvent
       if (ev.channel === 'deck:inspect-ended') {
         setPicking(false)
+        return
+      }
+      if (ev.channel === 'deck:element-shot') {
+        // S hover-shortcut (Chantier OD6, DESIGN-ORCA-DOOP-ADOPTION.md §3.6):
+        // screenshot the hovered element without ever clicking it. The guest
+        // exits inspect mode on S exactly like on a pick (createInspectMode's
+        // onShot -> exit() -> onExit() -> a separate 'deck:inspect-ended'
+        // message), same as deck:element-selected below -- unpress the pick
+        // button here too rather than waiting on that second message.
+        setPicking(false)
+        const pick = ev.args[0] as ElementPick
+        const tt = tRef.current
+        void (async () => {
+          const shotPath = await captureElementShot(pick)
+          if (shotPath) {
+            const prompt =
+              tt('browser.elementShotOnly', {
+                url: pick.pageUrl,
+                tag: pick.tagName,
+                w: pick.width,
+                h: pick.height,
+                selector: pick.selectors[0]?.value ?? pick.tagName,
+                path: shotPath
+              }) + viewportContext()
+            deliverPrompt(prompt, 'toast.pickSent', 'toast.pickCopied')
+          } else {
+            // Unlike the OD4 auto-shot below, here the screenshot IS the
+            // deliverable -- a silent failure would leave the operator
+            // waiting on nothing, so this one surfaces.
+            showToast('toast.shotFailed', 'info')
+          }
+        })()
         return
       }
       if (ev.channel !== 'deck:element-selected') return
@@ -367,40 +441,12 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
       // there. So by the time this ipc-message listener runs at all -- let
       // alone the async capture below -- the highlight is already gone from
       // the guest page.
-      const wv = webviewRef.current
-      if (wv && pick.x !== undefined && pick.y !== undefined) {
+      if (webviewRef.current && pick.x !== undefined && pick.y !== undefined) {
         // Keep this handler itself synchronous (no `async` on onIpc): the
         // capture is fired as a detached IIFE so the ipc-message listener
         // returns immediately, matching every other listener in this effect.
         void (async () => {
-          let shotPath: string | null = null
-          try {
-            const dataUrl = await window.api.captureBrowser(wv.getWebContentsId())
-            if (!dataUrl) throw new Error('capture: empty')
-            const img = new Image()
-            await new Promise<void>((res, rej) => {
-              img.onload = () => res()
-              img.onerror = () => rej(new Error('capture: decode failed'))
-              img.src = dataUrl
-            })
-            const crop = computeElementCropRect(pick, img.naturalWidth, img.naturalHeight, wv.clientWidth)
-            if (!crop) throw new Error('capture: no crop rect')
-            const out = document.createElement('canvas')
-            out.width = crop.sw
-            out.height = crop.sh
-            const ctx = out.getContext('2d')
-            if (!ctx) throw new Error('capture: no 2d context')
-            ctx.drawImage(img, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, crop.sw, crop.sh)
-            const shotDataUrl = out.toDataURL('image/png')
-            // base64 inflates raw bytes by 4/3 (3 bytes -> 4 chars): cap the
-            // STRING length at that ratio of the byte budget rather than
-            // decoding first, so an oversized crop never reaches saveAnnotation.
-            const base64Len = shotDataUrl.length - (shotDataUrl.indexOf(',') + 1)
-            if (base64Len > (PICK_SHOT_MAX_BYTES * 4) / 3) throw new Error('capture: over budget')
-            shotPath = await window.api.saveAnnotation(shotDataUrl)
-          } catch {
-            shotPath = null
-          }
+          const shotPath = await captureElementShot(pick)
           const delivered = shotPath ? prompt + tt('browser.elementShotPrompt', { path: shotPath }) : prompt
           deliverPrompt(delivered, 'toast.pickSent', 'toast.pickCopied')
         })()

@@ -51,6 +51,14 @@ capture capability there) and whenever the capture, crop, or save step fails
 for any reason (a busy or torn-down page): the base description is still
 delivered, silently, without a screenshot.
 
+While inspect mode is armed, two hover shortcuts skip the click entirely: `C`
+picks the currently hovered element without ever dispatching a click at the
+page, so a state that collapses on click (an open dropdown, a hover menu)
+survives into the captured description; `S` sends just a screenshot of the
+hovered element, no page-context prompt. `S` needs the embedded browser's
+capture pipeline — the external deck-design client simply ignores the key
+and stays armed.
+
 ## Viewport presets
 
 Render the page at a device size (iPhone SE, iPad, laptop…) centred in the
@@ -107,6 +115,11 @@ interactive elements with stable selectors), `demo_navigate`, `demo_click`
 and `demo_type` (real input events with human pacing, visible on the video),
 `demo_wait` (viewer-pacing pauses). The recording auto-stops when the agent
 reports the scenario done; stopping the recording cancels the agent.
+`demo_navigate`/`demo_click`/`demo_type` results carry a self-review
+`reminder` field once the agent has gone too long without a `demo_read`
+(always after a navigation, or after 3 actions since the last read) — a
+result-level nudge re-asserting the system prompt's contract at the moment
+the agent actually drifts from it.
 
 Security shape: the agent's bridge (`demo-browser-mcp.mjs`) talks to a
 loopback endpoint + Bearer token minted PER RUN (`demo-control.ts`) — never

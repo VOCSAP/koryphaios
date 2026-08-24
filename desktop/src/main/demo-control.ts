@@ -45,12 +45,44 @@ function str(args: ToolArgs, key: string): string {
   return typeof v === 'string' ? v.trim() : ''
 }
 
+/** Reminder text attached once `actionsSinceRead` reaches this many blind actions. */
+const STALE_READ_THRESHOLD = 3
+
+/** undefined below the threshold; otherwise the "N actions since your last demo_read" nudge. */
+function staleReadReminder(actionsSinceRead: number): string | undefined {
+  if (actionsSinceRead < STALE_READ_THRESHOLD) return undefined
+  return `${actionsSinceRead} actions since your last demo_read — read the page before continuing so the recording shows real state, not guesses.`
+}
+
+/**
+ * Wrap a raw dep result with a reminder string, or return it untouched when
+ * there is none to attach. A plain object gets the reminder spread in (so it
+ * still reads naturally alongside the tool's own fields); anything else
+ * (string, number, array, null) is wrapped as { result, reminder } since
+ * there is no object to extend. Bit-identical passthrough when no reminder.
+ */
+function withReminder(result: unknown, reminder: string | undefined): unknown {
+  if (!reminder) return result
+  if (result !== null && typeof result === 'object' && !Array.isArray(result)) {
+    return { ...(result as Record<string, unknown>), reminder }
+  }
+  return { result, reminder }
+}
+
 export function startDemoControl(
   deps: DemoControlDeps,
   opts: { port?: number } = {}
 ): Promise<DemoControlServer> {
   const token = randomBytes(24).toString('hex')
   let steps = 0
+  // doop §4.1's "result nudge" layer: DEMO_SYSTEM_PROMPT already tells the
+  // agent to read the page after every navigation, but nothing re-asserted
+  // that contract at the moment the agent actually deviates from it. Track
+  // how many navigate/click/type calls have happened since the last
+  // demo_read and fold a short reminder into the tool RESULT itself (surfaced
+  // verbatim to the agent via demo-browser-mcp.ts's JSON.stringify) so the
+  // nudge lands exactly when it is needed instead of only once at the start.
+  let actionsSinceRead = 0
 
   async function dispatch(tool: string, args: ToolArgs): Promise<unknown> {
     if (++steps > DEMO_STEP_CAP) {
@@ -62,22 +94,32 @@ export function startDemoControl(
       case 'demo_navigate': {
         const url = str(args, 'url')
         if (!url) throw new Error('url is required')
-        return deps.navigate(url)
+        const result = await deps.navigate(url)
+        actionsSinceRead++
+        return withReminder(
+          result,
+          'The page just changed — call demo_read before your next action so your selectors describe what is actually there.'
+        )
       }
       case 'demo_click': {
         const selector = str(args, 'selector')
         if (!selector) throw new Error('selector is required')
-        return deps.click(selector)
+        const result = await deps.click(selector)
+        actionsSinceRead++
+        return withReminder(result, staleReadReminder(actionsSinceRead))
       }
       case 'demo_type': {
         const text = typeof args['text'] === 'string' ? (args['text'] as string) : ''
         if (!text) throw new Error('text is required')
-        return deps.type(text, {
+        const result = await deps.type(text, {
           selector: str(args, 'selector') || undefined,
           pressEnter: args['press_enter'] === true
         })
+        actionsSinceRead++
+        return withReminder(result, staleReadReminder(actionsSinceRead))
       }
       case 'demo_read':
+        actionsSinceRead = 0
         return deps.read()
       case 'demo_wait': {
         const ms = typeof args['ms'] === 'number' ? (args['ms'] as number) : undefined

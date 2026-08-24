@@ -12,6 +12,9 @@ import { createInspectMode } from '@shared/element-pick'
 
 const mode = createInspectMode({
   onPick: (pick) => ipcRenderer.sendToHost('deck:element-selected', pick),
+  // S hover-shortcut (Chantier OD6): screenshot the hovered element without
+  // ever clicking it, so a hover-dependent state (menu, dropdown) survives.
+  onShot: (pick) => ipcRenderer.sendToHost('deck:element-shot', pick),
   // Tell the host to unpress the ⌖ button (single-shot / Escape).
   onExit: () => ipcRenderer.sendToHost('deck:inspect-ended')
 })
