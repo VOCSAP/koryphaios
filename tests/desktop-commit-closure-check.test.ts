@@ -57,6 +57,7 @@ import {
   stageOnlyDefect,
   type SensitivityRepoShas,
 } from "../scripts/fixtures/make-closure-sensitivity-repo";
+import { isExempt, parsePureModuleStepRun, PARTITION_SCRIPT_COMMAND, WORKFLOW_PATH } from "../scripts/pure-module-partition.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const SCRIPT_PATH = join(REPO_ROOT, "scripts", "check-commit-closure.ts");
@@ -659,14 +660,13 @@ describe("CLI smoke test (subprocess, exit code contract)", () => {
   });
 });
 
-test("collected by the real CI glob (tests/desktop-*.test.ts, the same one desktop-ci-glob-coverage.test.ts audits)", () => {
-  const workflowPath = join(REPO_ROOT, ".github", "workflows", "desktop-build.yml");
-  const workflowText = readFileSync(workflowPath, "utf-8");
-  const stepMarker = "name: Bun tests (pure modules)";
-  const stepIdx = workflowText.indexOf(stepMarker);
-  expect(stepIdx).toBeGreaterThan(-1);
-  const runLine = workflowText.slice(stepIdx).match(/run:\s*bun test\s+(.+)/);
-  expect(runLine).not.toBeNull();
-  const globs = runLine![1].trim().split(/\s+/);
-  expect(globs).toContain("tests/desktop-*.test.ts");
+test("collected by the CI partition (this file is not exempt, so scripts/partition-pure-tests.ts runs it by default) -- the same mechanism desktop-ci-glob-coverage.test.ts audits", () => {
+  // Card 0bbac537: this used to re-derive `run: bun test <globs>` and assert
+  // this file's own glob was in the list -- a second, independent copy of
+  // the exact bounded parse desktop-ci-glob-coverage.test.ts also did. Both
+  // now import the single parsePureModuleStepRun (scripts/pure-module-partition.ts),
+  // so there is one parser, not two disciplines that can silently diverge.
+  expect(isExempt("desktop-commit-closure-check.test.ts")).toBe(false);
+  const workflowText = readFileSync(WORKFLOW_PATH, "utf-8");
+  expect(parsePureModuleStepRun(workflowText)).toBe(PARTITION_SCRIPT_COMMAND);
 });

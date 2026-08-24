@@ -60,23 +60,25 @@ jobs:
         run: bun install
 
       # Pure modules (desktop main-process helpers, the notify channels and
-      # their wire format, the mobile shell's decision logic, and now a
+      # their wire format, the mobile shell's decision logic, and a
       # happy-dom/React renderer harness) import under bun -- no node-pty /
       # electron among the root deps, so no native toolchain is needed here.
       #
-      # The globs are listed rather than replaced by `bun test`: the broker
-      # integration suites spawn a daemon and bind ports, which is not what this
-      # matrix is for. Adding a suite that belongs here means adding it here.
+      # Card 0bbac537: this used to be an explicit `bun test <globs...>` line,
+      # an allow-list that silently drops any new file matching none of its
+      # patterns. scripts/partition-pure-tests.ts replaces it with a deny-list
+      # (a new file runs by default; scripts/pure-module-partition.ts's
+      # EXEMPTIONS table is what has to justify skipping one -- daemon-
+      # spawning integration suites, same broker-/server- families as before)
+      # AND fixes the process-global test pollution that made the previous
+      # bare `bun test` unsafe here in the first place (GlobalRegistrator.
+      # register() / bun's mock.module() both leak across files in a shared
+      # process -- see that script's header for the measured chain). Single
+      # call, single step, tests/desktop-ci-glob-coverage.test.ts's coverage
+      # audit is anchored on this step keeping this exact name.
       - name: Bun tests (pure modules)
-        # bash so the globs expand on every runner (pwsh, the Windows default,
-        # does not, and bun would treat the literal pattern as a no-match filter).
         shell: bash
-        # approval-identity.test.ts and logger.test.ts are listed by exact name
-        # rather than a wildcard: approval-* would also match approval-hook.test.ts
-        # (spawns a daemon via tests/_helper.ts startBroker -- not for this
-        # pure-module step, same reason as the broker-*/server-* exclusion above),
-        # and logger.test.ts has no dash so no prefix-glob would ever catch it.
-        run: bun test tests/desktop-*.test.ts tests/notify-*.test.ts tests/mobile-shell-*.test.ts tests/cli-*.test.ts tests/config-*.test.ts tests/approval-identity.test.ts tests/peer-*.test.ts tests/graph-*.test.ts tests/logger.test.ts tests/roadmap-*.test.ts tests/migrate-project-key-case.test.ts tests/project-key-normalize.test.ts
+        run: bun scripts/partition-pure-tests.ts
 
       # The mobile shell is TypeScript that nothing else type-checks: it is in
       # neither desktop tsconfig, and `bun build`/`bun test` only transpile. Its

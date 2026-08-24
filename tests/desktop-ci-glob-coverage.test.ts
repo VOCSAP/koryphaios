@@ -1,205 +1,130 @@
 // spec_f731f289 (amended): card 01c82fdf follow-up. The token-safe
 // roadmap-add fallback (cli-roadmap-add-no-token.test.ts) shipped uncovered
 // by CI: .github/workflows/desktop-build.yml's "Bun tests (pure modules)"
-// step lists an explicit glob set rather than running `bun test` bare, and
+// step listed an explicit glob set rather than running `bun test` bare, and
 // that set had never been checked against the real tests/*.test.ts
 // inventory. Team-lead review, 2026-08-03: a one-line fix for the single
 // missed file would have left the same gap open for the next new suite.
 //
-// This test is the coverage audit for that gap, not a fixed file list:
-//   - the CI glob patterns are PARSED out of the workflow YAML text itself
-//     (parsePureModuleGlobs), not hardcoded here;
-//   - the test inventory is ENUMERATED from tests/ via readdirSync, not
-//     hardcoded either;
-//   - every real *.test.ts file must be covered by a parsed glob OR an
-//     exemption below, and every exemption must name something that still
-//     exists on disk (a stale exemption is exactly as wrong as a coverage
-//     gap: both mean the map no longer describes reality).
+// Card 0bbac537 (2026-08-24): the glob allow-list itself is gone. The step
+// now runs `bun scripts/partition-pure-tests.ts`, which enumerates every
+// tests/*.test.ts file and runs all of it EXCEPT what
+// scripts/pure-module-partition.ts's EXEMPTIONS names -- a deny-list that
+// fails CLOSED (a new file is run by default; an exemption must justify
+// itself), replacing the allow-list that failed OPEN. This file now audits:
+//   - the workflow step's `run:` line invokes exactly that script (bounded
+//     parse, same discipline as the retired glob parser had);
+//   - EXEMPTIONS is honest in both directions (every exempted file really
+//     spawns a daemon; no non-exempt file quietly does);
+//   - EXEMPTIONS has no stale entry (names something that still exists);
+//   - a brand-new, non-exempt file is run by default (the deny-list's
+//     defining property, and the mutation proof for it);
+//   - the migration was NEUTRAL the day it landed: the deny-list's domain
+//     (all files minus EXEMPTIONS) is EXACTLY the domain the retired
+//     allow-list used to collect, measured against a frozen snapshot of
+//     that allow-list's glob patterns (frozen because the live workflow no
+//     longer contains them to parse -- see FROZEN_PRE_MIGRATION_GLOBS).
 //
-// Two exemption shapes, deliberately: a whole PREFIX FAMILY (broker-,
-// server- -- both spawn a daemon and bind ports, and a future sibling test
-// in either family arrives already covered without another edit here), and
-// a single FILE (approval-hook.test.ts also spawns a daemon via
-// tests/_helper.ts's startBroker, but sits outside the approval-* family's
-// otherwise-honest pure-module story -- approval-identity.test.ts, the
-// other member, is pure and IS CI-collected, so a family-wide exemption
-// would wrongly also excuse a file that has no daemon in it).
-// logger.test.ts has no dash in its name, so it is listed in the workflow's
-// glob line by exact filename, not a prefix wildcard -- see that file's own
-// comment for why.
+// EXEMPTIONS itself is NOT redefined here: it is imported from
+// scripts/pure-module-partition.ts, the single module partition-pure-tests.ts
+// (the script that actually runs the tests) also imports it from. Two
+// copies of a gating table is exactly the divergence CLAUDE.md's shared-table
+// rule warns about.
 //
-// Fails closed in three directions, each proven below by mutating REAL
-// parsed data in memory (never by editing the workflow file on disk, which
-// would leave the shared checkout dirty for other concurrent sessions):
-//   1. GROWTH -- a new test file matching no glob and no exemption.
-//   2. STALENESS -- an exemption naming a family/file with zero matches.
-//   3. SHRINKAGE -- a glob pattern removed from the workflow, which must
-//      uncover every file that pattern used to be the only thing covering.
-//      ("the shrinkage direction we have missed three times today" --
-//      team-lead review.)
-//
-// Named tests/desktop-*.test.ts so it is collected by the very glob it
+// Named tests/desktop-*.test.ts so it is collected by the very partition it
 // audits (mirrors tests/desktop-test-hygiene.test.ts's own self-coverage
 // note) -- checked explicitly by a test below, not assumed from the name.
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
+import {
+  EXEMPTIONS,
+  isExempt,
+  listTestFiles,
+  partitionTests,
+  staleExemptions,
+  PARTITION_SCRIPT_COMMAND,
+  parsePureModuleStepRun,
+  WORKFLOW_PATH,
+  type Exemptions,
+} from "../scripts/pure-module-partition.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..");
-const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "desktop-build.yml");
 const TESTS_DIR = join(REPO_ROOT, "tests");
 
-interface Exemptions {
-  familyPrefixes: Record<string, string>;
-  exactFiles: Record<string, string>;
-}
-
-const EXEMPTIONS: Exemptions = {
-  familyPrefixes: {
-    "broker-": "spawns a daemon and binds ports; the pure-module matrix is not for integration suites",
-    "server-": "spawns a daemon and binds ports; the pure-module matrix is not for integration suites",
-  },
-  exactFiles: {
-    "approval-hook.test.ts":
-      "spawns a daemon and binds ports (imports startBroker from tests/_helper.ts); the pure-module matrix is not for integration suites",
-    "mcp-roadmap-ack.test.ts":
-      "spawns a daemon and binds ports (imports startBroker from tests/_helper.ts, and Bun.spawn's `bun server.ts` directly); the pure-module matrix is not for integration suites",
-  },
-};
-
-/**
- * Pulls the space-separated `bun test <globs...>` tokens out of the
- * "Bun tests (pure modules)" step's `run:` line. Anchored on the step's own
- * `name:`, AND bounded to end at the next step item (a line starting
- * `      - ` at the steps list's own indent) -- not just to end of file.
- * Team-lead review, round 2: the first version searched from stepIdx to
- * end-of-file, so the step marker fixed where the search STARTS but not
- * where it STOPS. Measured false-open composition: reformat this step's
- * `run:` to a YAML block scalar (so this step's own regex stops matching)
- * while a LATER step runs a bare `bun test`, and the unbounded version
- * silently adopted that later step's globs instead of throwing. Bounding
- * the slice to the next `      - ` step-item line closes that: the block
- * scalar reformat now correctly fails to match anything inside THIS step's
- * bounded text and throws, rather than reading past the step into whatever
- * comes next. Throws (not expect()) so this stays usable at module scope,
- * where a broken parse should abort loudly rather than silently produce an
- * empty (or wrong-step) glob list.
- */
-function parsePureModuleGlobs(workflowText: string): string[] {
-  const stepMarker = "name: Bun tests (pure modules)";
-  const stepIdx = workflowText.indexOf(stepMarker);
-  if (stepIdx === -1) {
-    throw new Error(`"${stepMarker}" step not found in ${WORKFLOW_PATH}`);
-  }
-  const rest = workflowText.slice(stepIdx);
-  // Search from offset 1 so the step's OWN leading "      - name:" line
-  // (which starts the very slice we are bounding) is never mistaken for the
-  // next step's boundary.
-  const nextStepOffset = rest.slice(1).search(/\r?\n {6}- /);
-  const stepText = nextStepOffset === -1 ? rest : rest.slice(0, nextStepOffset + 1);
-  const runMatch = stepText.match(/run:\s*bun test\s+(.+)/);
-  if (!runMatch) {
-    throw new Error(`no "run: bun test <globs>" line found inside the "${stepMarker}" step`);
-  }
-  return runMatch[1]
-    .trim()
-    .split(/\s+/)
-    .filter((tok) => tok.length > 0);
-}
-
-/**
- * Globs here are always `tests/<literal>.test.ts` with at most one `*`
- * (prefix wildcard, e.g. tests/desktop-*.test.ts) or none (exact file, e.g.
- * tests/logger.test.ts). Escapes regex metachars first, then turns `*` into
- * `.*`, so this stays correct even if a future pattern's literal segment
- * contains a regex-special character.
- */
-function globToRegex(glob: string): RegExp {
-  const escaped = glob.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^${escaped.replace(/\*/g, ".*")}$`);
-}
-
-function computeCoverage(globs: string[], exemptions: Exemptions, files: string[]) {
-  const regexes = globs.map(globToRegex);
-  const uncovered: string[] = [];
-  for (const file of files) {
-    const relPath = `tests/${file}`;
-    if (regexes.some((r) => r.test(relPath))) continue;
-    const familyExempt = Object.keys(exemptions.familyPrefixes).some((prefix) => file.startsWith(prefix));
-    const fileExempt = file in exemptions.exactFiles;
-    if (!familyExempt && !fileExempt) uncovered.push(file);
-  }
-  const staleFamilies = Object.keys(exemptions.familyPrefixes).filter(
-    (prefix) => !files.some((f) => f.startsWith(prefix)),
-  );
-  const staleFiles = Object.keys(exemptions.exactFiles).filter((f) => !files.includes(f));
-  return { uncovered, staleFamilies, staleFiles };
-}
-
 function exemptedFiles(exemptions: Exemptions, files: string[]): string[] {
-  return files.filter(
-    (f) =>
-      Object.keys(exemptions.familyPrefixes).some((prefix) => f.startsWith(prefix)) ||
-      f in exemptions.exactFiles,
-  );
+  return files.filter((f) => isExempt(f, exemptions));
 }
 
 /**
- * Card b33b1874: computeCoverage above only asserts the EXEMPT-domain half of
- * the property ("every exempted file actually spawns a broker", tested below
- * at "every exempted file actually spawns a broker"). It never asserts the
- * inverse: that a file the CI glob actually COLLECTS carries no daemon
- * signal. A file with that shape shares its globals and ports with every
- * other file in the same collected run -- the failure mode is not a red
- * test but an order-dependent flake, the most expensive kind to diagnose.
- *
- * Deliberately NOT the loose `/startBroker|_helper/` text regex used above:
- * that regex matches this very file's own source (it talks ABOUT
- * startBroker/_helper in comments and in that regex literal itself), so
- * applying it to the COLLECTED domain would flag this file as its own
- * violation on day one. A real import is the "from" keyword followed by a
- * quoted relative path to the helper module, with an optional .ts
- * extension, single or double quoted -- a shape prose and regex-literal
- * mentions never take. (The shape is not spelled out as a literal example
- * here on purpose: doing so would itself be the contiguous text this
- * function's own regex matches, tripping the mutation proof below that
- * checks THIS file's own source carries no real import.)
+ * Card b33b1874's inverse audit, carried over: a file that is NOT exempt but
+ * really imports the broker-spawning helper is a daemon-spawning integration
+ * test running unflagged inside the pure-module partition. "Collected" is
+ * now "non-exempt" (clean + contaminated), not "matched by a glob".
  */
 function importsHelperBroker(source: string): boolean {
   return /from\s+["']\.\/_helper(?:\.ts)?["']/.test(source);
 }
 
-/** Collected by a glob AND not exempted -- the domain the check below audits. */
-function collectedNonExemptFiles(globs: string[], exemptions: Exemptions, files: string[]): string[] {
-  const regexes = globs.map(globToRegex);
-  return files.filter((f) => {
-    const relPath = `tests/${f}`;
-    const collected = regexes.some((r) => r.test(relPath));
-    if (!collected) return false;
-    const familyExempt = Object.keys(exemptions.familyPrefixes).some((prefix) => f.startsWith(prefix));
-    const fileExempt = f in exemptions.exactFiles;
-    return !familyExempt && !fileExempt;
-  });
+function nonExemptFiles(exemptions: Exemptions, files: string[]): string[] {
+  return files.filter((f) => !isExempt(f, exemptions));
 }
 
-/**
- * The missing symmetric half: collected-and-non-exempt files that REALLY
- * import the broker-spawning helper. Non-empty means a daemon-spawning
- * integration test is running, unflagged, inside the pure-module CI job.
- */
-function wronglyCollectedFiles(
-  globs: string[],
-  exemptions: Exemptions,
-  files: string[],
-  readSource: (file: string) => string,
-): string[] {
-  return collectedNonExemptFiles(globs, exemptions, files).filter((f) => importsHelperBroker(readSource(f)));
+function wronglyIncludedFiles(exemptions: Exemptions, files: string[], readSource: (file: string) => string): string[] {
+  return nonExemptFiles(exemptions, files).filter((f) => importsHelperBroker(readSource(f)));
 }
 
 const REAL_WORKFLOW_TEXT = readFileSync(WORKFLOW_PATH, "utf-8");
-const REAL_GLOBS = parsePureModuleGlobs(REAL_WORKFLOW_TEXT);
+const REAL_STEP_RUN = parsePureModuleStepRun(REAL_WORKFLOW_TEXT);
 const REAL_FILES = readdirSync(TESTS_DIR).filter((f) => f.endsWith(".test.ts"));
+
+// Frozen snapshot of the allow-list this partition replaced, measured
+// 2026-08-24 straight out of the pre-migration workflow text (parsed with
+// the retired parsePureModuleGlobs, before this commit removed it). NOT
+// re-derived from the live workflow: the whole point of this constant is to
+// survive the migration that deletes the thing it describes, so the
+// neutrality test below stays meaningful after that line is gone from
+// desktop-build.yml.
+const FROZEN_PRE_MIGRATION_GLOBS = [
+  "tests/desktop-*.test.ts",
+  "tests/notify-*.test.ts",
+  "tests/mobile-shell-*.test.ts",
+  "tests/cli-*.test.ts",
+  "tests/config-*.test.ts",
+  "tests/approval-identity.test.ts",
+  "tests/peer-*.test.ts",
+  "tests/graph-*.test.ts",
+  "tests/logger.test.ts",
+  "tests/roadmap-*.test.ts",
+  "tests/migrate-project-key-case.test.ts",
+  "tests/project-key-normalize.test.ts",
+];
+
+// N3, reviewer 2026-08-24: comparing FROZEN_PRE_MIGRATION_GLOBS against the
+// LIVE tests/ tree turned a one-day neutrality proof into a permanent naming
+// constraint -- any future file whose name matched none of the 12 inherited
+// glob patterns (a legitimate, correctly-run file under the deny-list) would
+// make the equality test below fail forever, for a reason that has nothing
+// to do with a regression. Frozen alongside the globs: the exact 199
+// tests/*.test.ts filenames on disk the day this migration landed. The
+// neutrality test intersects this snapshot with whatever REAL_FILES is
+// today, so a file outside the snapshot (new OR deleted) never enters either
+// side of the comparison -- the proof stays about the day-J domain only, and
+// is inert for anything that came after.
+const SNAPSHOT_FILES_2026_08_24 = [
+  "approval-hook.test.ts","approval-identity.test.ts","broker-activity-status.test.ts","broker-announce.test.ts","broker-approval-reply.test.ts","broker-approvals.test.ts","broker-channels.test.ts","broker-cross-host-cleanup.test.ts","broker-cross-host-register.test.ts","broker-desktop-roadmap-service.test.ts","broker-expects-reply-delivery.test.ts","broker-fk-cleanup.test.ts","broker-flush-cap.test.ts","broker-graph-drafts.test.ts","broker-groups.test.ts","broker-logging.test.ts","broker-message-ttl.test.ts","broker-migration.test.ts","broker-ntfy-channel.test.ts","broker-operator-inbox.test.ts","broker-project-key-alignment.test.ts","broker-register-body.test.ts","broker-resume.test.ts","broker-roadmap-append.test.ts","broker-roadmap-author-auth.test.ts","broker-roadmap-context.test.ts","broker-roadmap-directive.test.ts","broker-roadmap-import.test.ts","broker-roadmap-inactive.test.ts","broker-roadmap-lock-grace.test.ts","broker-roadmap-lock-park-release.test.ts","broker-roadmap-lock-park-tz.test.ts","broker-roadmap-lock.test.ts","broker-roadmap-operator-id.test.ts","broker-roadmap-parked-archive.test.ts","broker-roadmap-queue.test.ts","broker-roadmap-reorder.test.ts","broker-roadmap-route-coverage.test.ts","broker-roadmap-search.test.ts","broker-roadmap.test.ts","broker-send-ack.test.ts","broker-sentinel-processing.test.ts","broker-set-id.test.ts","broker-status.test.ts","broker-sweep-inactive.test.ts","broker-websocket.test.ts","broker-ws-auth.test.ts","broker-ws-sentinel-auth.test.ts","cli-roadmap-add-no-token.test.ts","config-force-group.test.ts","config-loopback.test.ts","desktop-agent-stop-visibility.test.ts","desktop-agent-stop.test.ts","desktop-announce.test.ts","desktop-approval-add-logging.test.ts","desktop-approval-arm-unconditional.test.ts","desktop-approval-defer.test.ts","desktop-approval-parity.test.ts","desktop-approval-runtime-project-key.test.ts","desktop-approval-runtime.test.ts","desktop-approval-scope-discipline.test.ts","desktop-approval-scope.test.ts","desktop-approval-service-project-key.test.ts","desktop-approval-verdict.test.ts","desktop-approvals.test.ts","desktop-attention.test.ts","desktop-broker-client.test.ts","desktop-broker-health.test.ts","desktop-browser-drive.test.ts","desktop-checkpoint.test.ts","desktop-ci-glob-coverage.test.ts","desktop-clear-backchannel.test.ts","desktop-code-lang.test.ts","desktop-code-selection.test.ts","desktop-commit-closure-check.test.ts","desktop-companion.test.ts","desktop-confirm-dialog-autofocus.test.ts","desktop-context-wand.test.ts","desktop-css-tokens.test.ts","desktop-data-migration.test.ts","desktop-deck-control.test.ts","desktop-deck-plugin-agent-refs.test.ts","desktop-deckapi-producer-coverage.test.ts","desktop-demo-control.test.ts","desktop-demo-driver.test.ts","desktop-design-endpoint-sanitize.test.ts","desktop-desk-session.test.ts","desktop-diff.test.ts","desktop-digest.test.ts","desktop-directive.test.ts","desktop-discovery.test.ts","desktop-dispatch.test.ts","desktop-docs.test.ts","desktop-electron-builder-resources.test.ts","desktop-element-pick.test.ts","desktop-explorer-selection-dom.test.ts","desktop-explorer.test.ts","desktop-external-url.test.ts","desktop-features.test.ts","desktop-graph-adapters.test.ts","desktop-graph-core.test.ts","desktop-graph-engine.test.ts","desktop-graph-layout.test.ts","desktop-graph-store.test.ts","desktop-happy-dom-teardown.test.ts","desktop-help.test.ts","desktop-hold-gesture.test.ts","desktop-i18n.test.ts","desktop-inbox-ack.test.ts","desktop-inbox-migration-seed.test.ts","desktop-inbox-purge-coverage.test.ts","desktop-inbox-sender-dom.test.ts","desktop-inbox-sender.test.ts","desktop-inbox-session.test.ts","desktop-inbox-store.test.ts","desktop-inject-command-modal-guard.test.ts","desktop-inject-command-write-check.test.ts","desktop-journal.test.ts","desktop-launch-approval.test.ts","desktop-launch.test.ts","desktop-log.test.ts","desktop-magic-compact.test.ts","desktop-markdown.test.ts","desktop-model-registry.test.ts","desktop-models-catalog.test.ts","desktop-nav-badge-producer.test.ts","desktop-oauth-url.test.ts","desktop-palette.test.ts","desktop-peer-table.test.ts","desktop-peer-thinking.test.ts","desktop-pick-report.test.ts","desktop-pick-security.test.ts","desktop-pick-shot.test.ts","desktop-provider-secrets.test.ts","desktop-pty-coalescing.test.ts","desktop-quota-gate.test.ts","desktop-quota.test.ts","desktop-recording.test.ts","desktop-reorder.test.ts","desktop-roadmap-project-key.test.ts","desktop-roadmap-reorder-validate.test.ts","desktop-roadmap-sanitize.test.ts","desktop-sandbox-command.test.ts","desktop-sandbox-copy.test.ts","desktop-sandbox-projection.test.ts","desktop-sandbox-protect.test.ts","desktop-sandbox-service.test.ts","desktop-sandbox-store.test.ts","desktop-scope-secrets.test.ts","desktop-scope.test.ts","desktop-screen-model.test.ts","desktop-search-core.test.ts","desktop-session-broadcast.test.ts","desktop-session-kind.test.ts","desktop-sidebar-autoresume-dom.test.ts","desktop-snippet-store.test.ts","desktop-startup-ack.test.ts","desktop-team-embedded.test.ts","desktop-template-store.test.ts","desktop-template.test.ts","desktop-templates-composer-draft-reset.test.ts","desktop-templates-composer-seed.test.ts","desktop-test-hygiene.test.ts","desktop-tile-area.test.ts","desktop-tsconfig-flags.test.ts","desktop-usage.test.ts","desktop-utility-inference.test.ts","desktop-workflow-queue-source.test.ts","desktop-workflow.test.ts","desktop-workspace-empty-snapshot.test.ts","desktop-workspace-freshdir.test.ts","desktop-workspace-runtime.test.ts","desktop-workspace.test.ts","desktop-worktree.test.ts","graph-draft.test.ts","logger.test.ts","mcp-roadmap-ack.test.ts","migrate-project-key-case.test.ts","mobile-shell-approvals.test.ts","mobile-shell-hosts.test.ts","mobile-shell-ntfy-client.test.ts","notify-format.test.ts","notify-ntfy-protocol.test.ts","notify-ntfy.test.ts","notify-registry.test.ts","peer-cache.test.ts","peer-inbound-framing.test.ts","peer-mcp-surface-budget.test.ts","peer-message-framing.test.ts","peer-sentinel-auth.test.ts","project-key-normalize.test.ts","roadmap-append.test.ts","roadmap-lock.test.ts","roadmap-parked-archive-predicate.test.ts","roadmap-project-key.test.ts","server-ask-operator.test.ts","server-inbound-framing-delivery.test.ts","server-roadmap-inactive-marker.test.ts","server-stdin-eof.test.ts",
+];
+
+function globToRegex(glob: string): RegExp {
+  const escaped = glob.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped.replace(/\*/g, ".*")}$`);
+}
+
+function matchesAnyGlob(file: string, globs: string[]): boolean {
+  const regexes = globs.map(globToRegex);
+  return regexes.some((r) => r.test(`tests/${file}`));
+}
 
 // Card 67519e73, team-lead review: commit-closure.yml carries a top-of-file
 // comment ASSERTING a guarantee ("no `paths:` filter on purpose ... scoping
@@ -217,9 +142,9 @@ const REAL_COMMIT_CLOSURE_TEXT = readFileSync(COMMIT_CLOSURE_WORKFLOW_PATH, "utf
 
 /**
  * Bounds the `on:` block to end at the next column-0 (unindented) key line,
- * mirroring parsePureModuleGlobs' own step-bounding discipline above. Search
- * starts at offset 1 into the slice so the `on:` line itself (which begins
- * the slice being bounded) is never mistaken for its own terminator.
+ * mirroring parsePureModuleStepRun's own step-bounding discipline above.
+ * Search starts at offset 1 into the slice so the `on:` line itself (which
+ * begins the slice being bounded) is never mistaken for its own terminator.
  */
 function extractOnBlock(workflowText: string): string {
   const onIdx = workflowText.search(/^on:/m);
@@ -234,7 +159,7 @@ function extractOnBlock(workflowText: string): string {
 /**
  * Splits the workflow text at every `run:` occurrence and bounds each
  * resulting slice to the next step-item marker (the same `      - ` pattern
- * parsePureModuleGlobs bounds against), so a `run:` block cannot absorb a
+ * parsePureModuleStepRun bounds against), so a `run:` block cannot absorb a
  * later step's text. Returns true only if a bounded `run:` slice contains
  * the actual invocation `bun scripts/check-commit-closure.ts` -- a mention
  * of the bare path elsewhere (e.g. this workflow's own top-of-file comment)
@@ -250,47 +175,62 @@ function anyStepRunInvokesCommitClosureScript(workflowText: string): boolean {
   });
 }
 
-test("bounded parse does not adopt a LATER step's globs (the composition case that failed open)", () => {
-  // Team-lead review, round 2: reformat the pure-module step's run line to a
-  // YAML block scalar (an ordinary edit -- the step's own single-line regex
-  // then legitimately stops matching) while a LATER step runs a bare
-  // `bun test <globs>`. The unbounded version of this parser kept scanning
-  // past the pure-module step and silently adopted the later step's globs
-  // instead of failing. This constructs that exact composition and asserts
-  // the bounded parser does NOT read into the later step: either it throws
-  // (no run:-bun-test line found within the bounded step text), or if it
-  // matches, the result must never contain the later step's glob.
+test("the pure-module step's run: line invokes exactly the partition script (bounded parse, fails closed if the step is renamed/removed)", () => {
+  expect(REAL_STEP_RUN).toBe(PARTITION_SCRIPT_COMMAND);
+});
+
+test("bounded parse does not adopt a LATER step's run: line (the composition case that failed open under the retired glob parser)", () => {
+  // Reformat this step's run to a YAML block scalar (an ordinary edit -- the
+  // step's own single-line match then legitimately changes) while a LATER
+  // step runs something else. This constructs that exact composition and
+  // asserts the bounded parser does NOT read into the later step.
   const synthetic = `
     steps:
       - name: Bun tests (pure modules)
         shell: bash
         run: |
-          bun test tests/desktop-*.test.ts tests/notify-*.test.ts
-      - name: Some later full-suite step
+          bun scripts/partition-pure-tests.ts
+      - name: Some later step
         shell: bash
-        run: bun test tests/should-not-leak-*.test.ts
+        run: bun run should-not-leak-into-the-parsed-result.ts
 `;
-  let result: string[] | undefined;
-  let threw = false;
-  try {
-    result = parsePureModuleGlobs(synthetic);
-  } catch {
-    threw = true;
-  }
-  if (!threw) {
-    expect(result).not.toContain("tests/should-not-leak-*.test.ts");
-  }
+  const result = parsePureModuleStepRun(synthetic);
+  expect(result).not.toContain("should-not-leak-into-the-parsed-result.ts");
 });
 
-test("the pure-module step still declares glob tokens (fails closed if the step is renamed/removed)", () => {
-  expect(REAL_GLOBS.length).toBeGreaterThan(0);
-  expect(REAL_GLOBS).toContain("tests/desktop-*.test.ts");
+test("mutation proof, N2: the bounded parse derives its step-item indentation instead of hardcoding it -- correct at a DIFFERENT indent level too", () => {
+  // Reviewer 2026-08-24: the retired hardcoded-6-spaces version of
+  // parsePureModuleStepRun would silently adopt the later step's run: line
+  // at 4-space indentation (the boundary regex simply never matched). This
+  // constructs that exact indentation and asserts the current, derived-
+  // indentation parser still bounds correctly.
+  const fourSpaceIndent = `
+  steps:
+    - name: Bun tests (pure modules)
+      shell: bash
+      run: bun scripts/partition-pure-tests.ts
+    - name: Some later step
+      shell: bash
+      run: bun run should-not-leak-at-four-space-indent.ts
+`;
+  expect(parsePureModuleStepRun(fourSpaceIndent)).not.toContain("should-not-leak-at-four-space-indent.ts");
+  expect(parsePureModuleStepRun(fourSpaceIndent)).toBe(PARTITION_SCRIPT_COMMAND);
 });
 
-test("this file itself is collected by the CI glob it audits", () => {
-  const regexes = REAL_GLOBS.map(globToRegex);
-  const ownRelPath = "tests/desktop-ci-glob-coverage.test.ts";
-  expect(regexes.some((r) => r.test(ownRelPath))).toBe(true);
+test("D1: listTestFiles(TESTS_DIR) -- the production enumeration scripts/partition-pure-tests.ts and partitionTests both consume -- matches this guard's own independent readdirSync count", () => {
+  // Reviewer 2026-08-24: this file's REAL_FILES and desktop-happy-dom-teardown.test.ts's
+  // `sources` both do their OWN readdirSync, entirely independent of
+  // listTestFiles(). A truncation in the PRODUCTION enumeration (measured:
+  // `.slice(0, 100)` inside listTestFiles) is invisible to either guard --
+  // both keep computing their own full count and stay green -- while the
+  // runner would silently play 53 of 147 files at exit 0. This equality
+  // between the production function's output and an independent oracle
+  // (REAL_FILES, already computed above) is what makes that mutation loud.
+  expect(listTestFiles(TESTS_DIR).length).toBe(REAL_FILES.length);
+});
+
+test("this file itself is not exempted (so it is part of the enforced partition)", () => {
+  expect(isExempt("desktop-ci-glob-coverage.test.ts", EXEMPTIONS)).toBe(false);
 });
 
 test("every exemption reason is a real, non-trivial explanation (not a placeholder)", () => {
@@ -303,12 +243,12 @@ test("every exemption reason is a real, non-trivial explanation (not a placehold
 });
 
 test("every exempted file actually spawns a broker (measured property, not the family label)", () => {
-  // N2, team-lead review round 2: `file.startsWith(prefix)` only checks the
-  // NAME. A future pure file that happens to get named broker-something
-  // would be silently exempted forever with nothing going red -- growth of
-  // the EXEMPT domain, not the covered one. This asserts the actual
-  // property the exemption claims (imports startBroker, or otherwise pulls
-  // in tests/_helper.ts) rather than trusting the filename pattern.
+  // N2, carried over from the glob-era review: `file.startsWith(prefix)`
+  // only checks the NAME. A future pure file that happens to get named
+  // broker-something would be silently exempted forever with nothing going
+  // red -- growth of the EXEMPT domain, not the run one. This asserts the
+  // actual property the exemption claims (imports startBroker, or otherwise
+  // pulls in tests/_helper.ts) rather than trusting the filename pattern.
   const files = exemptedFiles(EXEMPTIONS, REAL_FILES);
   expect(files.length).toBeGreaterThan(0);
   for (const f of files) {
@@ -318,17 +258,9 @@ test("every exempted file actually spawns a broker (measured property, not the f
 });
 
 test("mutation proof, N2: an exempted file that does NOT spawn a broker is caught", () => {
-  // A real, genuinely pure file (no startBroker/_helper import, and no
-  // mention of either string even in comments -- confirmed, unlike this
-  // file's own source, which talks ABOUT startBroker/_helper in its
-  // comments and would give a false positive here).
   const noBrokerFile = "logger.test.ts";
   const source = readFileSync(join(TESTS_DIR, noBrokerFile), "utf-8");
   expect(source).not.toMatch(/startBroker|_helper/);
-  // If this file were (wrongly) added to EXEMPTIONS, the property test above
-  // would fail on it -- demonstrated directly rather than by mutating the
-  // shared EXEMPTIONS map (which would risk a real assertion never running
-  // if the mutation were undone incorrectly).
   const mutatedExemptions: Exemptions = {
     familyPrefixes: EXEMPTIONS.familyPrefixes,
     exactFiles: { ...EXEMPTIONS.exactFiles, [noBrokerFile]: "placeholder reason, long enough" },
@@ -342,58 +274,77 @@ test("mutation proof, N2: an exempted file that does NOT spawn a broker is caugh
   expect(wronglyExempted).toContain(noBrokerFile);
 });
 
-test("every on-disk tests/*.test.ts file is CI-collected or honestly exempted", () => {
+test("every on-disk tests/*.test.ts file is either exempt or included in the computed partition (clean + contaminated)", () => {
   expect(REAL_FILES.length).toBeGreaterThan(0);
-  const { uncovered, staleFamilies, staleFiles } = computeCoverage(REAL_GLOBS, EXEMPTIONS, REAL_FILES);
-  expect(uncovered).toEqual([]);
+  const { clean, contaminated } = partitionTests(REAL_FILES, EXEMPTIONS);
+  const included = new Set([...clean, ...contaminated]);
+  const dropped = REAL_FILES.filter((f) => !isExempt(f, EXEMPTIONS) && !included.has(f));
+  expect(dropped).toEqual([]);
+});
+
+test("mutation proof, growth (the deny-list's defining property): a brand-new, non-exempt file is included by default", () => {
+  // The property the allow-list-era "uncovered" test used to check for the
+  // opposite reason (a glob had to be added by hand for a new file to run).
+  // Under the deny-list, the default is inverted: nothing has to be added
+  // for a new file to run, an exemption has to be added for it NOT to.
+  const mutatedFiles = [...REAL_FILES, "a-brand-new-untriaged-file.test.ts"];
+  expect(isExempt("a-brand-new-untriaged-file.test.ts", EXEMPTIONS)).toBe(false);
+  const { clean, contaminated } = partitionTests(mutatedFiles, EXEMPTIONS, (f) =>
+    f === "a-brand-new-untriaged-file.test.ts" ? "" : readFileSync(join(TESTS_DIR, f), "utf-8"),
+  );
+  expect([...clean, ...contaminated]).toContain("a-brand-new-untriaged-file.test.ts");
+});
+
+test("mutation proof, staleness: an exemption naming a vanished family is caught", () => {
+  const mutatedExemptions: Exemptions = {
+    familyPrefixes: { ...EXEMPTIONS.familyPrefixes, "nonexistent-family-": "placeholder reason, long enough" },
+    exactFiles: EXEMPTIONS.exactFiles,
+  };
+  const { staleFamilies } = staleExemptions(mutatedExemptions, REAL_FILES);
+  expect(staleFamilies).toContain("nonexistent-family-");
+});
+
+test("mutation proof, staleness: a per-file exemption naming a vanished file is caught", () => {
+  const mutatedExemptions: Exemptions = {
+    familyPrefixes: EXEMPTIONS.familyPrefixes,
+    exactFiles: { ...EXEMPTIONS.exactFiles, "this-file-does-not-exist.test.ts": "placeholder reason, long enough" },
+  };
+  const { staleFiles } = staleExemptions(mutatedExemptions, REAL_FILES);
+  expect(staleFiles).toContain("this-file-does-not-exist.test.ts");
+});
+
+test("EXEMPTIONS itself carries no stale entry today", () => {
+  const { staleFamilies, staleFiles } = staleExemptions(EXEMPTIONS, REAL_FILES);
   expect(staleFamilies).toEqual([]);
   expect(staleFiles).toEqual([]);
 });
 
-test("card b33b1874: no CI-collected, non-exempt file real-imports the broker-spawning helper", () => {
-  // The direction the two tests above cannot see: they only ever look at the
-  // EXEMPT domain (is an exempted file honestly exempt) or the UNCOVERED
-  // domain (is an on-disk file collected-or-exempted at all). Neither one
-  // walks the COLLECTED domain looking for a daemon signal that was never
-  // declared. Measured 2026-08-04: this was RED before
-  // broker-desktop-roadmap-service.test.ts was renamed out of the
-  // tests/desktop-*.test.ts family it used to match under the name
-  // desktop-roadmap-service.test.ts -- it real-imported startBroker from
-  // ./_helper.ts, was collected by that glob, and carried no exemption at
-  // all. Renaming it into the already-exempted broker- family (same fate as
-  // its 34 daemon-spawning siblings, none of which run in this CI job on any
-  // platform) is the fix; this assertion is what would have caught it.
-  const files = wronglyCollectedFiles(REAL_GLOBS, EXEMPTIONS, REAL_FILES, (f) =>
-    readFileSync(join(TESTS_DIR, f), "utf-8"),
-  );
+test("card b33b1874: no non-exempt file real-imports the broker-spawning helper", () => {
+  // Measured 2026-08-04 in the glob-era version of this test: this was RED
+  // before broker-desktop-roadmap-service.test.ts was renamed out of the
+  // tests/desktop-*.test.ts family it used to match -- it real-imported
+  // startBroker from ./_helper.ts, was collected, and carried no exemption
+  // at all. Renaming it into the already-exempted broker- family is what
+  // fixed it; this assertion is what would have caught it. Still meaningful
+  // under the deny-list: "non-exempt" now IS the run domain (no glob to
+  // intersect with), so this walks the whole thing.
+  const files = wronglyIncludedFiles(EXEMPTIONS, REAL_FILES, (f) => readFileSync(join(TESTS_DIR, f), "utf-8"));
   expect(files).toEqual([]);
 });
 
-test("mutation proof: wronglyCollectedFiles bites on a synthetic collected file with a real helper import", () => {
-  // The fixture import is built by concatenation, not a literal `from
-  // "./_helper.ts"` in this file's own source: a literal copy here would make
-  // THIS file (also tests/desktop-*.test.ts-collected, per the self-coverage
-  // test above) trip its own new "no CI-collected file real-imports the
-  // helper" assertion the moment it landed on disk.
+test("mutation proof: wronglyIncludedFiles bites on a synthetic non-exempt file with a real helper import", () => {
   const files = [...REAL_FILES, "desktop-planted-daemon.test.ts"];
   const plantedImport = "import { startBroker } " + 'from "./' + '_helper.ts";\n';
   const sources: Record<string, string> = {
     "desktop-planted-daemon.test.ts": plantedImport,
   };
-  const found = wronglyCollectedFiles(REAL_GLOBS, EXEMPTIONS, files, (f) =>
-    f in sources ? sources[f]! : readFileSync(join(TESTS_DIR, f), "utf-8"),
-  );
+  const found = wronglyIncludedFiles(EXEMPTIONS, files, (f) => (f in sources ? sources[f]! : readFileSync(join(TESTS_DIR, f), "utf-8")));
   expect(found).toContain("desktop-planted-daemon.test.ts");
 });
 
 test("mutation proof: the real-import detector does not false-positive on this file's own source", () => {
-  // This file's own prose and regex literals (three lines up, and in the
-  // exempt-domain tests above) mention startBroker/_helper as TEXT, not as a
-  // real import -- exactly the shape that made the loose `/startBroker|_helper/`
-  // regex unusable for the collected-domain check. Confirmed on the actual
-  // file on disk, not a copy: applying the loose regex to this file's own
-  // source is true (self-triggering, the bug this test avoids); the real
-  // detector on the same source is false.
+  // This file's own prose (three lines up, and in the exempt-domain tests
+  // above) mentions startBroker/_helper as TEXT, not as a real import.
   const ownSource = readFileSync(join(TESTS_DIR, "desktop-ci-glob-coverage.test.ts"), "utf-8");
   expect(/startBroker|_helper/.test(ownSource)).toBe(true);
   expect(importsHelperBroker(ownSource)).toBe(false);
@@ -408,38 +359,54 @@ test("mutation proof: the real-import detector matches both quote styles and the
   expect(importsHelperBroker(commentOnly)).toBe(false);
 });
 
-test("mutation proof, growth: a new uncovered file is caught", () => {
-  const mutatedFiles = [...REAL_FILES, "a-brand-new-untriaged-file.test.ts"];
-  const { uncovered } = computeCoverage(REAL_GLOBS, EXEMPTIONS, mutatedFiles);
-  expect(uncovered).toContain("a-brand-new-untriaged-file.test.ts");
+/** Restricts a filename list to the frozen day-J snapshot, dropping anything added or deleted since. */
+function onSnapshot(files: string[]): string[] {
+  return files.filter((f) => SNAPSHOT_FILES_2026_08_24.includes(f));
+}
+
+test("switchover neutrality: on the frozen day-J snapshot, the deny-list's run domain is EXACTLY the retired allow-list's covered domain (measured 2026-08-24: 199 files, 147 glob-covered, 52 uncovered, residue after the 4 exemptions is 0)", () => {
+  // N3, reviewer 2026-08-24: both sides are intersected with
+  // SNAPSHOT_FILES_2026_08_24 before comparing, so a file added or removed
+  // after the snapshot was taken never enters this comparison. This is
+  // deliberately narrower than "REAL_FILES today" -- see the two mutation
+  // proofs below for why.
+  const newDomain = onSnapshot(REAL_FILES.filter((f) => !isExempt(f, EXEMPTIONS))).sort();
+  const oldDomain = onSnapshot(REAL_FILES.filter((f) => matchesAnyGlob(f, FROZEN_PRE_MIGRATION_GLOBS))).sort();
+  expect(newDomain).toEqual(oldDomain);
 });
 
-test("mutation proof, staleness: an exemption naming a vanished family is caught", () => {
-  const mutatedExemptions: Exemptions = {
-    familyPrefixes: { ...EXEMPTIONS.familyPrefixes, "nonexistent-family-": "placeholder reason, long enough" },
-    exactFiles: EXEMPTIONS.exactFiles,
-  };
-  const { staleFamilies } = computeCoverage(REAL_GLOBS, mutatedExemptions, REAL_FILES);
-  expect(staleFamilies).toContain("nonexistent-family-");
+test("mutation proof, N3: a brand-new, non-exempt file matching none of the frozen globs no longer breaks switchover neutrality", () => {
+  // Before N3, comparing against the LIVE tree meant this exact scenario
+  // made the neutrality test above fail forever: a legitimately non-exempt
+  // file (correctly run by the deny-list) whose name happens to match none
+  // of the 12 inherited glob patterns. That turned a one-day proof into a
+  // permanent naming constraint on every future test file. Intersecting
+  // with the frozen snapshot removes it from the comparison entirely --
+  // this file is still correctly RUN (see the "growth" mutation proof
+  // above), just not part of this particular historical proof.
+  const futureFile = "widget-something-nobody-has-named-yet.test.ts";
+  expect(isExempt(futureFile, EXEMPTIONS)).toBe(false);
+  expect(matchesAnyGlob(futureFile, FROZEN_PRE_MIGRATION_GLOBS)).toBe(false);
+  expect(SNAPSHOT_FILES_2026_08_24).not.toContain(futureFile);
+  const mutatedFiles = [...REAL_FILES, futureFile];
+  const newDomain = onSnapshot(mutatedFiles.filter((f) => !isExempt(f, EXEMPTIONS))).sort();
+  const oldDomain = onSnapshot(mutatedFiles.filter((f) => matchesAnyGlob(f, FROZEN_PRE_MIGRATION_GLOBS))).sort();
+  expect(newDomain).toEqual(oldDomain);
 });
 
-test("mutation proof, staleness: a per-file exemption naming a vanished file is caught", () => {
+test("mutation proof: the (now intersected) switchover-neutrality check still catches a real regression on the day-J snapshot", () => {
+  // The intersection makes the test inert for the FUTURE, not for the
+  // PRESENT: a snapshot file whose exemption status silently drifts away
+  // from its old-glob classification still breaks the equality. logger.test.ts
+  // is in FROZEN_PRE_MIGRATION_GLOBS's exact-file list (so oldDomain has it);
+  // exempting it moves it out of newDomain, and the two sides diverge.
   const mutatedExemptions: Exemptions = {
     familyPrefixes: EXEMPTIONS.familyPrefixes,
-    exactFiles: { ...EXEMPTIONS.exactFiles, "this-file-does-not-exist.test.ts": "placeholder reason, long enough" },
+    exactFiles: { ...EXEMPTIONS.exactFiles, "logger.test.ts": "placeholder reason, long enough" },
   };
-  const { staleFiles } = computeCoverage(REAL_GLOBS, mutatedExemptions, REAL_FILES);
-  expect(staleFiles).toContain("this-file-does-not-exist.test.ts");
-});
-
-test("mutation proof, shrinkage: removing a glob pattern uncovers the files it used to collect", () => {
-  const shrunkGlobs = REAL_GLOBS.filter((g) => g !== "tests/desktop-*.test.ts");
-  const { uncovered } = computeCoverage(shrunkGlobs, EXEMPTIONS, REAL_FILES);
-  const desktopFiles = REAL_FILES.filter((f) => f.startsWith("desktop-"));
-  expect(desktopFiles.length).toBeGreaterThan(0);
-  for (const f of desktopFiles) {
-    expect(uncovered).toContain(f);
-  }
+  const newDomain = onSnapshot(REAL_FILES.filter((f) => !isExempt(f, mutatedExemptions))).sort();
+  const oldDomain = onSnapshot(REAL_FILES.filter((f) => matchesAnyGlob(f, FROZEN_PRE_MIGRATION_GLOBS))).sort();
+  expect(newDomain).not.toEqual(oldDomain);
 });
 
 // Team-lead/reviewer review, round 2: `/^\s*paths:/m` only fires on BLOCK-style
