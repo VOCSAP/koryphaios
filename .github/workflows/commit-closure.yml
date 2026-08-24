@@ -22,9 +22,13 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Pinned via .bun-version (repo root, shared with desktop-build.yml and
+      # desktop-release.yml) instead of "latest": a floating runtime here
+      # means this gate's verdict floats too. Bump the shared file, not a
+      # literal in this workflow (card 8acf72be).
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: .bun-version
 
       # No `bun install`: check-commit-closure.ts imports only node:child_process
       # (spawnSync git) -- no root dependency to install for it to run.

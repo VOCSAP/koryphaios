@@ -25,9 +25,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Pinned via .bun-version (repo root, shared with desktop-build.yml and
+      # commit-closure.yml) instead of "latest": this is the release
+      # artifact's toolchain, so a floating runtime here means the shipped
+      # build is not reproducible. Bump the shared file, not a literal in
+      # this workflow (card 8acf72be).
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: .bun-version
 
       - uses: actions/setup-node@v6
         with:

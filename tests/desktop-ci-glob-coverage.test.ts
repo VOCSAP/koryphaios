@@ -35,7 +35,7 @@
 // audits (mirrors tests/desktop-test-hygiene.test.ts's own self-coverage
 // note) -- checked explicitly by a test below, not assumed from the name.
 
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test } from "bun:test";
 import {
@@ -517,4 +517,105 @@ test("mutation proof: a workflow with no run: occurrences at all does not throw 
     "\n"
   );
   expect(anyStepRunInvokesCommitClosureScript(synthetic)).toBe(false);
+});
+
+// Card 8acf72be: three workflows (commit-closure.yml, desktop-build.yml,
+// desktop-release.yml) used to each carry their own literal `bun-version:
+// latest` on oven-sh/setup-bun@v2 -- a runtime that could (and measurably
+// did, same day, no commit in between) resolve to a different bun version on
+// every run, on top of three copies of the same literal to hand-sync once
+// pinned. Both are fixed by routing every setup-bun step through a single
+// root .bun-version file (bun-version-file: .bun-version). This block
+// enforces that neither regression comes back:
+//   - no workflow that installs bun via setup-bun carries a literal
+//     bun-version: again (the copies-to-sync failure mode);
+//   - .bun-version itself exists and is non-empty (the silent-404 failure
+//     mode a bun-version-file pointing at nothing would be).
+//
+// DISCOVERS its targets (readdirSync(WORKFLOWS_DIR)), never names the three
+// files: CLAUDE.md's coverage rule, growth-of-domain half -- a fourth
+// workflow added later with `uses: oven-sh/setup-bun` and a literal
+// bun-version: must be caught the same way the first three would be, with
+// nothing to edit in this file for that to hold. The two floor assertions
+// below exist so a broken/renamed WORKFLOWS_DIR or a broken usesSetupBun
+// detector reads as "0 offenders" (a vacuous pass), not as a red.
+const WORKFLOWS_DIR = join(REPO_ROOT, ".github", "workflows");
+const BUN_VERSION_FILE_PATH = join(REPO_ROOT, ".bun-version");
+
+function listWorkflowFiles(dir: string): string[] {
+  return readdirSync(dir).filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"));
+}
+
+function usesSetupBun(workflowText: string): boolean {
+  return /uses:\s*oven-sh\/setup-bun@/.test(workflowText);
+}
+
+/**
+ * A literal `bun-version:` key, anchored to the start of a (possibly
+ * indented) line so this cannot fire on the substring appearing inside prose
+ * or a comment. Distinct from `bun-version-file:` by construction: that key
+ * has "-file" between "bun-version" and the colon, so the exact substring
+ * "bun-version:" this regex requires never occurs inside it -- proven by the
+ * mutation-proof test below, no negative lookahead needed.
+ */
+function hasLiteralBunVersion(workflowText: string): boolean {
+  return /^[ \t]*bun-version:\s*\S/m.test(workflowText);
+}
+
+function workflowsWithLiteralBunVersion(dir: string, files: string[]): string[] {
+  return files.filter((f) => {
+    const text = readFileSync(join(dir, f), "utf-8");
+    return usesSetupBun(text) && hasLiteralBunVersion(text);
+  });
+}
+
+const REAL_WORKFLOW_FILES = listWorkflowFiles(WORKFLOWS_DIR);
+const REAL_SETUP_BUN_FILES = REAL_WORKFLOW_FILES.filter((f) =>
+  usesSetupBun(readFileSync(join(WORKFLOWS_DIR, f), "utf-8")),
+);
+
+test("floor: at least 3 workflow files are discovered under .github/workflows (a renamed/collapsed directory must not read as a vacuous pass)", () => {
+  expect(REAL_WORKFLOW_FILES.length).toBeGreaterThanOrEqual(3);
+});
+
+test("floor: at least 3 discovered workflows install bun via oven-sh/setup-bun (a broken usesSetupBun detector must not read as 0 offenders)", () => {
+  expect(REAL_SETUP_BUN_FILES.length).toBeGreaterThanOrEqual(3);
+});
+
+test("no workflow installing bun via setup-bun carries a literal bun-version: -- all route through bun-version-file: .bun-version (card 8acf72be)", () => {
+  const offenders = workflowsWithLiteralBunVersion(WORKFLOWS_DIR, REAL_SETUP_BUN_FILES);
+  expect(offenders).toEqual([]);
+});
+
+test(".bun-version exists and is non-empty (a bun-version-file pointing at a missing/empty file is a silent action-level failure mode)", () => {
+  expect(existsSync(BUN_VERSION_FILE_PATH)).toBe(true);
+  expect(readFileSync(BUN_VERSION_FILE_PATH, "utf-8").trim().length).toBeGreaterThan(0);
+});
+
+test("mutation proof: a workflow snippet with a literal bun-version: is detected by both primitives (usesSetupBun and hasLiteralBunVersion)", () => {
+  const text = "uses: oven-sh/setup-bun@v2\nwith:\n  bun-version: latest\n";
+  expect(usesSetupBun(text)).toBe(true);
+  expect(hasLiteralBunVersion(text)).toBe(true);
+});
+
+test("mutation proof: bun-version-file: is never mistaken for a literal bun-version: (the string 'bun-version:' does not occur inside it)", () => {
+  const text = "uses: oven-sh/setup-bun@v2\nwith:\n  bun-version-file: .bun-version\n";
+  expect(usesSetupBun(text)).toBe(true);
+  expect(hasLiteralBunVersion(text)).toBe(false);
+});
+
+test("mutation proof: a step that does not use setup-bun at all is never flagged even if it happens to mention bun-version: in prose", () => {
+  const text = "uses: actions/checkout@v6\n# note: bun-version: latest used to live here\n";
+  expect(usesSetupBun(text)).toBe(false);
+});
+
+test("mutation proof: the floor rejects a collapsed or truncated directory listing (0 or fewer-than-3 files), instead of the offenders check silently reading it as 0 offenders", () => {
+  const collapsed: string[] = [];
+  const truncated = ["desktop-build.yml"];
+  expect(workflowsWithLiteralBunVersion(WORKFLOWS_DIR, collapsed)).toEqual([]);
+  expect(workflowsWithLiteralBunVersion(WORKFLOWS_DIR, truncated)).toEqual([]);
+  // The offenders check alone is vacuously green on both degraded inputs --
+  // this is exactly why the floor tests above assert length independently.
+  expect(collapsed.length).toBeLessThan(3);
+  expect(truncated.length).toBeLessThan(3);
 });

@@ -41,9 +41,20 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Pinned via .bun-version (repo root), not "latest": this same step ran
+      # bun 1.3.14 at 09:36 and bun 1.4.0 at 14:25 on 2026-08-24 with no
+      # commit in between -- a floating runtime silently changes what CI
+      # executes. This matters here because bun's test-file execution order
+      # is undocumented and NOT guaranteed by this pin (see card 0bbac537): a
+      # floating version made that class of defect appear/disappear between
+      # two runs of the SAME commit, which is what made a bisection
+      # non-reproducible. Pinning only removes runtime drift as a variable;
+      # it does not make ordering deterministic. commit-closure.yml and
+      # desktop-release.yml read the SAME .bun-version file -- bump it there,
+      # deliberately (card 8acf72be), never a literal here and not "latest".
       - uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version-file: .bun-version
 
       - uses: actions/setup-node@v6
         with:
