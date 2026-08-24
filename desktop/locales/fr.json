@@ -416,6 +416,7 @@
   "browser.backToAgents": "Revenir à la vue Agents",
   "browser.elementPrompt": "Sur {url}, à propos de l'élément <{tag}> ({w}x{h}px, sélecteur : {selector}). ",
   "browser.elementPromptText": "Texte visible : \"{text}\". ",
+  "browser.elementShotPrompt": " Une capture recadrée de l'élément est enregistrée dans {path} — lis-la (Read) pour voir l'élément en contexte.",
   "toast.pickSent": "Description de l'élément collée dans le prompt de l'agent accosté",
   "toast.pickCopied": "Aucun agent accosté actif — description de l'élément copiée",
   "tile.browserTitle": "Ouvrir la vue navigateur avec cet agent",

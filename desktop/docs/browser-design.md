@@ -43,6 +43,14 @@ block also carries the surrounding component stack (`react: <App> >
 src/ProductCard.tsx:42:7`) pulled from React's dev-only debug metadata — both
 absent in production builds and on React 19+, which removed that metadata.
 
+A cropped screenshot of the picked element is captured automatically and
+appended to the prompt as a saved path for the agent to `Read` — same
+`annotations/` folder under app state and 7-day pruning as draw mode below.
+It is absent for picks made through an external design-endpoint app (no
+capture capability there) and whenever the capture, crop, or save step fails
+for any reason (a busy or torn-down page): the base description is still
+delivered, silently, without a screenshot.
+
 ## Viewport presets
 
 Render the page at a device size (iPhone SE, iPad, laptop…) centred in the

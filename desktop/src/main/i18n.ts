@@ -586,6 +586,8 @@ export const EN_DEFAULTS: Record<string, string> = {
   'browser.backToAgents': 'Back to the Agents view',
   'browser.elementPrompt': 'On {url}, about the <{tag}> element ({w}x{h}px, selector: {selector}). ',
   'browser.elementPromptText': 'Visible text: "{text}". ',
+  'browser.elementShotPrompt':
+    ' A cropped screenshot of the element is saved at {path} — Read it to see the element in context.',
   'toast.pickSent': "Element description pasted into the docked agent's prompt",
   'toast.pickCopied': 'No running docked agent — element description copied',
   'tile.browserTitle': 'Open the browser view with this agent',

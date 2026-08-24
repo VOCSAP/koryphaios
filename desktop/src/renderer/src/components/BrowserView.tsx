@@ -32,6 +32,7 @@ import { Terminal, type ITheme } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import type { ElementPick, SessionRuntime, WindowSource } from '@shared/types'
 import { formatPickDetails } from '@shared/pick-prompt'
+import { computeElementCropRect, PICK_SHOT_MAX_BYTES } from '@shared/pick-shot'
 import {
   computeCropRect,
   formatElapsed,
@@ -347,6 +348,64 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
       if (pick.text) prompt += tt('browser.elementPromptText', { text: pick.text })
       prompt += formatPickDetails(pick)
       prompt += viewportContext()
+
+      // Best-effort auto screenshot (Chantier OD4, webview path only -- the
+      // external design-endpoint pick path in App.tsx has no capture
+      // capability and is untouched). ANY failure at any step degrades
+      // silently to delivering the prompt unchanged: the pick itself already
+      // succeeded, and a missing screenshot here is a normal state (the
+      // capture can race a navigation or the webview tearing down mid-flight),
+      // not an error worth a toast -- per the repo's best-effort-cache
+      // exception to "no silent errors". deliverPrompt is called exactly once
+      // per pick, from whichever branch runs.
+      //
+      // Highlight-free by construction, not by luck: shared/element-pick.ts's
+      // onClick calls handlers.onPick(pick) (which is what posts this very
+      // IPC message) and THEN calls exit() synchronously in the same
+      // handler, before returning to the event loop. exit() calls
+      // setHovered(null), which restores the element's saved boxShadow right
+      // there. So by the time this ipc-message listener runs at all -- let
+      // alone the async capture below -- the highlight is already gone from
+      // the guest page.
+      const wv = webviewRef.current
+      if (wv && pick.x !== undefined && pick.y !== undefined) {
+        // Keep this handler itself synchronous (no `async` on onIpc): the
+        // capture is fired as a detached IIFE so the ipc-message listener
+        // returns immediately, matching every other listener in this effect.
+        void (async () => {
+          let shotPath: string | null = null
+          try {
+            const dataUrl = await window.api.captureBrowser(wv.getWebContentsId())
+            if (!dataUrl) throw new Error('capture: empty')
+            const img = new Image()
+            await new Promise<void>((res, rej) => {
+              img.onload = () => res()
+              img.onerror = () => rej(new Error('capture: decode failed'))
+              img.src = dataUrl
+            })
+            const crop = computeElementCropRect(pick, img.naturalWidth, img.naturalHeight, wv.clientWidth)
+            if (!crop) throw new Error('capture: no crop rect')
+            const out = document.createElement('canvas')
+            out.width = crop.sw
+            out.height = crop.sh
+            const ctx = out.getContext('2d')
+            if (!ctx) throw new Error('capture: no 2d context')
+            ctx.drawImage(img, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, crop.sw, crop.sh)
+            const shotDataUrl = out.toDataURL('image/png')
+            // base64 inflates raw bytes by 4/3 (3 bytes -> 4 chars): cap the
+            // STRING length at that ratio of the byte budget rather than
+            // decoding first, so an oversized crop never reaches saveAnnotation.
+            const base64Len = shotDataUrl.length - (shotDataUrl.indexOf(',') + 1)
+            if (base64Len > (PICK_SHOT_MAX_BYTES * 4) / 3) throw new Error('capture: over budget')
+            shotPath = await window.api.saveAnnotation(shotDataUrl)
+          } catch {
+            shotPath = null
+          }
+          const delivered = shotPath ? prompt + tt('browser.elementShotPrompt', { path: shotPath }) : prompt
+          deliverPrompt(delivered, 'toast.pickSent', 'toast.pickCopied')
+        })()
+        return
+      }
       deliverPrompt(prompt, 'toast.pickSent', 'toast.pickCopied')
     }
 
