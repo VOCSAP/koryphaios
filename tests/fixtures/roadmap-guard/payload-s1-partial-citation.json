@@ -1,0 +1,8 @@
+{
+  "hook_event_name": "PreToolUse",
+  "tool_name": "mcp__claude-peers__roadmap_update",
+  "tool_input": {
+    "id": "b313f0c3",
+    "description": "Citing the syntax for docs: agents sometimes emit `<parameter name=\"context\">` by mistake mid-field."
+  }
+}

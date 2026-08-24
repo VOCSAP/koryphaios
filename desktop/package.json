@@ -11,7 +11,7 @@
     "claude-peers-desk": "./bin/launch.js"
   },
   "scripts": {
-    "build:hook": "bun build hooks/desk-backchannel-hook.ts --target=node --outfile=deck-plugin/hooks/desk-backchannel-hook.mjs && bun build hooks/approval-hook.ts --target=node --outfile=deck-plugin/hooks/approval-hook.mjs",
+    "build:hook": "bun build hooks/desk-backchannel-hook.ts --target=node --outfile=deck-plugin/hooks/desk-backchannel-hook.mjs && bun build hooks/approval-hook.ts --target=node --outfile=deck-plugin/hooks/approval-hook.mjs && bun build hooks/roadmap-guard-hook.ts --target=node --outfile=deck-plugin/hooks/roadmap-guard-hook.mjs",
     "build:mcp": "bun build mcp/deck-control-mcp.ts --target=node --outfile=deck-plugin/mcp/deck-control-mcp.mjs && bun build mcp/demo-browser-mcp.ts --target=node --outfile=deck-plugin/mcp/demo-browser-mcp.mjs",
     "build:design": "bun build design-client/deck-design.ts --target=browser --outfile=deck-plugin/design/deck-design.js",
     "dev": "npm run build:hook && npm run build:mcp && npm run build:design && electron-vite dev",
