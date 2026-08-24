@@ -39,7 +39,7 @@ import type {
   WindowSource
 } from '@shared/types'
 import { formatAnnotationsReport, formatPickDetails } from '@shared/pick-prompt'
-import { PICK_BUDGET } from '@shared/pick-security'
+import { PICK_BUDGET, sanitizePickUrl } from '@shared/pick-security'
 import { computeElementCropRect, PICK_SHOT_MAX_BYTES } from '@shared/pick-shot'
 import {
   computeCropRect,
@@ -626,7 +626,10 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     if (!pendingAnnotations.length) return
     const wv = webviewRef.current
     const report = formatAnnotationsReport(pendingAnnotations, {
-      url: wv?.getURL() || urlText,
+      // sanitizePickUrl strips query/fragment (pick-security.ts's written
+      // guarantee) -- a review sent from an OAuth callback page must never
+      // carry its token into the agent prompt via the page URL.
+      url: sanitizePickUrl(wv?.getURL() || urlText),
       viewport: viewport ? `${viewport.w}x${viewport.h} – ${viewport.name}` : undefined
     })
     deliverPrompt(report, 'toast.reviewSent', 'toast.reviewCopied')

@@ -38,6 +38,18 @@ export function containsSecret(v: string): boolean {
   return PICK_SECRET_PATTERNS.some((p) => lower.includes(p))
 }
 
+/**
+ * Redact a string in place if it matches a secret pattern; otherwise pass
+ * through unchanged. Single source of truth for both re-validation points
+ * (guest-side element-pick.ts and main-side design-endpoint.ts) so a field
+ * redacted on one side is redacted on the other -- moved here from
+ * design-endpoint.ts, which had this as a private helper the guest twin
+ * never saw.
+ */
+export function redactIfSecret(v: string): string {
+  return containsSecret(v) ? '[redacted]' : v
+}
+
 /** Protocols allowed through a pick URL; everything else (javascript:, data:, …) is dropped. */
 const ALLOWED_URL_PROTOCOLS = new Set(['http:', 'https:', 'file:'])
 
@@ -85,6 +97,16 @@ export const PICK_ATTRIBUTE_ALLOWLIST = [
 export function isAriaAttributeName(name: string): boolean {
   return name.startsWith('aria-')
 }
+
+/**
+ * Attribute names whose value is a URL and must go through sanitizePickUrl
+ * rather than the generic cap-and-keep branch -- single source of truth for
+ * both re-validation points (element-pick.ts guest side, design-endpoint.ts
+ * main side), which used to each hardcode `name === 'href' || name === 'src'`
+ * independently. Growing PICK_ATTRIBUTE_ALLOWLIST with a new URL-bearing
+ * attribute now only needs adding it here, not editing both branches.
+ */
+export const URL_ATTRS = new Set(['href', 'src', 'poster', 'action', 'formaction', 'srcset'])
 
 /**
  * Every size/count cap used by the pick payload. Single source of truth:

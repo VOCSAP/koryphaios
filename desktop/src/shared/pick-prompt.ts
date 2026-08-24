@@ -8,6 +8,7 @@
 // suffix, not operator-facing copy -- no i18n keys here.
 
 import type { ElementPick, PickAnnotation } from './types'
+import { sanitizePickUrl } from './pick-security'
 
 /** role + accessibleName combined onto one line, whichever is present. */
 function roleLine(pick: ElementPick): string | null {
@@ -115,11 +116,16 @@ function fence(language: string, content: string): string[] {
   return [`${marker}${language}`, content, marker]
 }
 
-/** Path (+ query, if any) of a page URL, for the report's heading; the raw URL on parse failure. */
+/**
+ * Path only (no query, no fragment) of a page URL, for the report's heading;
+ * the raw string on parse failure. A query string can carry an OAuth token
+ * or session id -- pick-security.ts's sanitizePickUrl strips it everywhere
+ * else, this heading must not be the one place it survives.
+ */
 function pathnameOf(url: string): string {
   try {
     const u = new URL(url)
-    return `${u.pathname}${u.search}`
+    return u.pathname
   } catch {
     return url || 'current page'
   }
@@ -145,7 +151,15 @@ export function formatAnnotationsReport(
 ): string {
   if (!annotations.length) return ''
 
-  const lines: string[] = [`## Design Feedback: ${pathnameOf(page.url)}`, '', `URL: ${page.url}`]
+  // Defense in depth, same posture as element-pick.ts/design-endpoint.ts
+  // (both re-sanitize independently): strip query/fragment here too, not
+  // only at the BrowserView.tsx call site, so this module's own guarantee
+  // holds even if a future caller forgets to sanitize. Falls back to the
+  // raw url on parse failure/disallowed protocol -- pathnameOf has the same
+  // fallback, and an unparsable string carries no query to strip anyway.
+  const safeUrl = sanitizePickUrl(page.url) || page.url
+
+  const lines: string[] = [`## Design Feedback: ${pathnameOf(safeUrl)}`, '', `URL: ${safeUrl}`]
   if (page.viewport) lines.push(`Viewport: ${page.viewport}`)
   lines.push('')
 

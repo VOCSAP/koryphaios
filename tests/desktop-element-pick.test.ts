@@ -30,7 +30,7 @@ import {
   pickReactContext,
   pickStyles,
 } from "../desktop/src/shared/element-pick.ts";
-import { PICK_BUDGET } from "../desktop/src/shared/pick-security.ts";
+import { PICK_ATTRIBUTE_ALLOWLIST, PICK_BUDGET } from "../desktop/src/shared/pick-security.ts";
 import type { ElementPick } from "../desktop/src/shared/types.ts";
 
 /**
@@ -72,6 +72,49 @@ test("buildPick: role and accessibleName captured", () => {
   const pick = buildPick(btn);
   expect(pick.role).toBe("button");
   expect(pick.accessibleName).toBe("Add to cart");
+});
+
+// Guest-side twin of design-endpoint.ts's `redactIfSecret(p.role.slice(...))`
+// (main-side re-validation). The top-level `pick.role` field is built
+// straight off `el.getAttribute('role')`, NOT through pickAttributes -- so
+// it needs its own redaction/cap, or a page can smuggle a secret through
+// this one field on the webview path, which never crosses design-endpoint.ts.
+test("buildPick: a role carrying a secret pattern is redacted", () => {
+  document.body.innerHTML = "";
+  document.body.innerHTML = `<div id="x" role="access_token=abc123-leaked"></div>`;
+  const el = document.getElementById("x") as HTMLElement;
+  const pick = buildPick(el);
+  expect(pick.role).toBe("[redacted]");
+});
+
+test("buildPick: an overlong role is capped to PICK_BUDGET.roleMaxLength", () => {
+  document.body.innerHTML = "";
+  const longRole = "x".repeat(PICK_BUDGET.roleMaxLength + 50);
+  document.body.innerHTML = `<div id="x" role="${longRole}"></div>`;
+  const el = document.getElementById("x") as HTMLElement;
+  const pick = buildPick(el);
+  expect(pick.role).toBe("x".repeat(PICK_BUDGET.roleMaxLength));
+  expect(pick.role!.length).toBe(PICK_BUDGET.roleMaxLength);
+});
+
+// Guest-side twin of the design-endpoint.ts test with the same name:
+// simulates PICK_ATTRIBUTE_ALLOWLIST growing to include a new URL-bearing
+// attribute (poster). Without URL_ATTRS as the single source of truth
+// (element-pick.ts used to hardcode `name === 'href' || name === 'src'`
+// independently of design-endpoint.ts), a newly allowlisted URL attribute
+// falls through to the generic cap-and-keep branch and its query leaks.
+test("pickAttributes: a URL-bearing attribute added to the allowlist is sanitized via URL_ATTRS, not the generic branch", () => {
+  PICK_ATTRIBUTE_ALLOWLIST.push("poster");
+  try {
+    document.body.innerHTML = "";
+    document.body.innerHTML = `<video id="v" poster="https://example.com/thumb.jpg?token=leaked-abc"></video>`;
+    const el = document.getElementById("v") as HTMLElement;
+    const pick = buildPick(el);
+    expect(pick.attributes).toBeDefined();
+    expect(pick.attributes!.poster).toBe("https://example.com/thumb.jpg");
+  } finally {
+    PICK_ATTRIBUTE_ALLOWLIST.pop();
+  }
 });
 
 test("buildPick: attributes are allowlisted and capped; onclick is NOT kept", () => {

@@ -27,7 +27,9 @@ import {
   isAriaAttributeName,
   PICK_ATTRIBUTE_ALLOWLIST,
   PICK_BUDGET,
-  sanitizePickUrl
+  redactIfSecret,
+  sanitizePickUrl,
+  URL_ATTRS
 } from '../shared/pick-security'
 
 export interface DesignEndpoint {
@@ -55,11 +57,6 @@ function str(v: unknown, cap: number): string {
   return typeof v === 'string' ? v.slice(0, cap) : ''
 }
 
-/** Redact a string in place if it matches a secret pattern; otherwise pass through. */
-function redactIfSecret(v: string): string {
-  return containsSecret(v) ? '[redacted]' : v
-}
-
 /** Coerce an untrusted attributes-shaped value: allowlist, cap, redact, sanitize URLs. */
 function sanitizeAttributes(raw: unknown): Record<string, string> | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined
@@ -72,7 +69,7 @@ function sanitizeAttributes(raw: unknown): Record<string, string> | undefined {
       out[name] = '[redacted]'
       continue
     }
-    if (name === 'href' || name === 'src') {
+    if (URL_ATTRS.has(name)) {
       const sanitized = sanitizePickUrl(value)
       if (!sanitized) continue // drop rather than emit an empty href/src
       out[name] = sanitized

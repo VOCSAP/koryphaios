@@ -45,8 +45,14 @@ test("formatAnnotationsReport: header carries the URL pathname, URL and (when pr
     viewport: "375x667 – iPhone SE",
   });
   const lines = out.split("\n");
-  expect(lines[0]).toBe("## Design Feedback: /settings?tab=billing");
-  expect(out).toContain("URL: https://example.com/settings?tab=billing");
+  // Query stripped everywhere (pick-security.ts's sanitizePickUrl
+  // guarantee): an exact-line match, not `toContain`, because a substring
+  // check would still pass if the query survived (it would just be a
+  // longer string containing the same prefix) -- exact equality is what
+  // actually proves the query is gone.
+  expect(lines[0]).toBe("## Design Feedback: /settings");
+  expect(lines[2]).toBe("URL: https://example.com/settings");
+  expect(out).not.toContain("tab=billing");
   expect(out).toContain("Viewport: 375x667 – iPhone SE");
 });
 

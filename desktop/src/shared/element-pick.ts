@@ -15,7 +15,9 @@ import {
   isAriaAttributeName,
   PICK_ATTRIBUTE_ALLOWLIST,
   PICK_BUDGET,
-  sanitizePickUrl
+  redactIfSecret,
+  sanitizePickUrl,
+  URL_ATTRS
 } from './pick-security'
 
 /** Test-automation attributes, best source of a stable selector (vibeyard). */
@@ -141,7 +143,7 @@ export function pickAttributes(el: Element): Record<string, string> | undefined 
       count++
       continue
     }
-    if (name === 'href' || name === 'src') {
+    if (URL_ATTRS.has(name)) {
       const sanitized = sanitizePickUrl(raw)
       if (!sanitized) continue // drop rather than emit an empty href/src
       out[name] = sanitized
@@ -428,7 +430,7 @@ export function buildPick(el: HTMLElement): ElementPick {
     y: Math.round(rect.y),
     isFixed: isElementFixed(el)
   }
-  if (role) pick.role = role
+  if (role) pick.role = redactIfSecret(role.slice(0, PICK_BUDGET.roleMaxLength))
   if (name) pick.accessibleName = name
   if (attributes) pick.attributes = attributes
   if (styles) pick.styles = styles

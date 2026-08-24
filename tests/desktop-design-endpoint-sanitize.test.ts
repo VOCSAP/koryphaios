@@ -7,7 +7,7 @@
 
 import { expect, test } from "bun:test";
 import { sanitizePick } from "../desktop/src/main/design-endpoint.ts";
-import { PICK_BUDGET } from "../desktop/src/shared/pick-security.ts";
+import { PICK_ATTRIBUTE_ALLOWLIST, PICK_BUDGET } from "../desktop/src/shared/pick-security.ts";
 
 test("null/non-object/missing tagName all yield null", () => {
   expect(sanitizePick(null)).toBeNull();
@@ -128,6 +128,26 @@ test("attribute values containing a secret are redacted, not dropped", () => {
     attributes: { title: "your api_key is exposed here" },
   });
   expect(pick!.attributes!.title).toBe("[redacted]");
+});
+
+// Simulates PICK_ATTRIBUTE_ALLOWLIST growing to include a new URL-bearing
+// attribute (poster) -- the failure mode measured in review: without a
+// shared URL_ATTRS set as the single source of truth (this file's
+// sanitizeAttributes and element-pick.ts's pickAttributes both used to
+// hardcode `name === 'href' || name === 'src'` independently), a newly
+// allowlisted URL attribute silently falls through to the generic
+// cap-and-keep branch and its query string leaks.
+test("a URL-bearing attribute added to the allowlist is sanitized via URL_ATTRS, not the generic branch", () => {
+  PICK_ATTRIBUTE_ALLOWLIST.push("poster");
+  try {
+    const pick = sanitizePick({
+      tagName: "video",
+      attributes: { poster: "https://example.com/thumb.jpg?token=leaked-abc" },
+    });
+    expect(pick!.attributes!.poster).toBe("https://example.com/thumb.jpg");
+  } finally {
+    PICK_ATTRIBUTE_ALLOWLIST.pop();
+  }
 });
 
 test("href/src attribute values with a disallowed protocol are dropped entirely", () => {
