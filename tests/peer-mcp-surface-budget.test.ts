@@ -113,15 +113,23 @@ describe("roadmap_list: the singular filters left the schema, not the handler", 
 describe("the measure bites", () => {
   test("an inflated description pushes the total over the cap, a comment does not", () => {
     const filler = "x".repeat(CEILING_CHARS);
-    // server.ts is CRLF throughout (measured: 1975 "\r\n", 0 bare "\n"). Inserting
-    // a bare "\n" here splits the pre-existing "\r\n" pair across two lines: the
-    // "\r" ends up trailing the inserted line instead of the "whoami" line, so
-    // when that line is a comment and gets stripped, the "\r" is lost with it --
-    // a 1-char artifact of the insertion itself, not of stripCommentLines against
-    // real file content (every genuine comment line owns its own "\r\n" pair).
-    const inflated = SRC.replace('name: "whoami",', `name: "whoami",\r\n    description: "${filler}",`);
+    // server.ts's line ending is NOT fixed across checkouts: the blob committed
+    // to git is LF-only (measured: 0 CR, 1975 bare "\n"), and a Windows checkout
+    // with core.autocrlf=true smudges it to CRLF locally (1975 "\r\n", 0 bare
+    // "\n") -- ubuntu-latest/macos-latest CI check out the LF blob as-is. A
+    // hardcoded "\r\n" insertion is therefore right on a Windows working copy
+    // and wrong on a Linux/macOS one: on the LF blob it splits SRC's own "\n"
+    // pair into two lines, so the trailing bare "\n" survives as an extra
+    // character when its line is a comment and gets stripped -- a 1-char
+    // artifact of the insertion mismatching SRC's own line ending, not of
+    // stripCommentLines against real file content. Deriving the separator from
+    // SRC itself (rather than branching on process.platform, which would hide
+    // the defect behind a platform check instead of closing it) keeps the
+    // insertion consistent with SRC on every checkout.
+    const NL = SRC.includes("\r\n") ? "\r\n" : "\n";
+    const inflated = SRC.replace('name: "whoami",', `name: "whoami",${NL}    description: "${filler}",`);
     expect(measureInstructions(inflated) + measureTools(inflated)).toBeGreaterThan(CEILING_CHARS);
-    const commented = SRC.replace('name: "whoami",', `name: "whoami",\r\n    // ${filler}`);
+    const commented = SRC.replace('name: "whoami",', `name: "whoami",${NL}    // ${filler}`);
     expect(measureTools(commented)).toBe(measureTools(SRC));
   });
 
