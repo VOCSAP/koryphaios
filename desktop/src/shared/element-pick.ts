@@ -254,6 +254,142 @@ export function isElementFixed(el: Element): boolean {
   return false
 }
 
+// ---------------------------------------------------------------------------
+// React dev-metadata helpers (Chantier OD3). React attaches its internal
+// fiber node to a DOM element as an own property keyed `__reactFiber$<random>`
+// (React 16+) or `__reactInternalInstance$<random>` (older, kept for
+// completeness). Walking `fiber.return` upward gives the enclosing component
+// stack; `_debugSource` (dev builds only, removed in React 19) gives the JSX
+// call site. All undocumented React internals reached through a dynamic
+// property key on an untrusted page -- absence (React 19, production build,
+// non-React page) is the expected common case, not a failure.
+// ---------------------------------------------------------------------------
+
+/** Minimal structural shape of a React fiber node -- no `react` dependency. */
+interface ReactFiberLike {
+  type?: unknown
+  elementType?: unknown
+  return?: ReactFiberLike | null
+  _debugSource?: { fileName?: unknown; lineNumber?: unknown; columnNumber?: unknown } | null
+  _debugOwner?: ReactFiberLike | null
+}
+
+/** The element's own property React stashes its fiber under, across versions. */
+function getFiberFromElement(el: Element): ReactFiberLike | null {
+  for (const key of Object.keys(el)) {
+    if (key.startsWith('__reactFiber$') || key.startsWith('__reactInternalInstance$')) {
+      return (el as unknown as Record<string, ReactFiberLike | null>)[key] || null
+    }
+  }
+  return null
+}
+
+/** function/class/forwardRef/memo type -> display name; host components (string type) yield null. */
+function getComponentNameFromFiber(fiber: ReactFiberLike | null | undefined): string | null {
+  if (!fiber) return null
+  const type = (fiber.type ?? fiber.elementType) as
+    | {
+        displayName?: string
+        name?: string
+        render?: { displayName?: string; name?: string }
+        type?: { displayName?: string; name?: string }
+      }
+    | string
+    | undefined
+  if (!type || typeof type === 'string') return null
+  if (type.displayName || type.name) return type.displayName || type.name || null
+  if (type.render && (type.render.displayName || type.render.name)) {
+    return type.render.displayName || type.render.name || null
+  }
+  if (type.type && (type.type.displayName || type.type.name)) {
+    return type.type.displayName || type.type.name || null
+  }
+  return null
+}
+
+/** Framework plumbing (Fragment, Provider, Router boundaries, …) -- not useful in a component stack. */
+function shouldSkipReactName(name: string | null): boolean {
+  if (!name || name.length <= 2) return true
+  return (
+    /^(Fragment|Root|Routes|Route|Outlet|Provider|Consumer|Profiler|Suspense)$/.test(name) ||
+    /(?:Boundary|BoundaryHandler|Router|Provider|Consumer|Context|Wrapper)$/.test(name) ||
+    /^(Inner|Outer|Client|Server|RSC|Dev|React|Hot)/.test(name)
+  )
+}
+
+/** Strips bundler/protocol prefixes and query/hash from a fiber's `_debugSource.fileName`. */
+function cleanSourcePath(path: string): string {
+  if (!path) return ''
+  return path
+    .replace(/[?#].*$/, '')
+    .replace(/^turbopack:\/\/\/\[project\]\//, '')
+    .replace(/^webpack-internal:\/\/\/\.\//, '')
+    .replace(/^webpack-internal:\/\/\//, '')
+    .replace(/^webpack:\/\/\/\.\//, '')
+    .replace(/^webpack:\/\/\//, '')
+    .replace(/^turbopack:\/\/\//, '')
+    .replace(/^https?:\/\/[^/]+\//, '')
+    .replace(/^file:\/\/\//, '/')
+    .replace(/^\([^)]+\)\/\.\//, '')
+    .replace(/^\.\//, '')
+}
+
+/**
+ * Surrounding React component stack + JSX source location for a picked
+ * element, or undefined outside React, in a production build, or on React
+ * 19+ (which removed `_debugSource`). The whole walk is wrapped in try/catch
+ * as a DOCUMENTED best-effort, not a swallowed error per the repo's
+ * no-silent-errors rule: the fiber tree is undocumented React internals
+ * reached through a dynamic property key on an untrusted page, so a hostile
+ * getter or an unexpected shape can throw at any step, and the absence of
+ * React metadata this produces is a normal state, not a failure to report.
+ */
+export function pickReactContext(el: Element): { components?: string; sourceFile?: string } | undefined {
+  try {
+    let fiber = getFiberFromElement(el)
+    const components: string[] = []
+    let sourceFile: string | null = null
+    let depth = 0
+    while (fiber && depth < 35) {
+      const name = getComponentNameFromFiber(fiber)
+      if (
+        name &&
+        !shouldSkipReactName(name) &&
+        !components.includes(name) &&
+        components.length < PICK_BUDGET.reactComponentsMaxEntries
+      ) {
+        components.push(name)
+      }
+      const source = fiber._debugSource ?? fiber._debugOwner?._debugSource
+      if (!sourceFile && source && typeof source.fileName === 'string' && typeof source.lineNumber === 'number') {
+        const clean = cleanSourcePath(source.fileName)
+        const candidate = `${clean}:${source.lineNumber}${
+          typeof source.columnNumber === 'number' ? `:${source.columnNumber}` : ''
+        }`
+        // A query string is already stripped by cleanSourcePath, but the path
+        // itself could carry a token-bearing directory/file name.
+        sourceFile = containsSecret(candidate) ? null : candidate
+      }
+      fiber = fiber.return ?? null
+      depth++
+    }
+    const out: { components?: string; sourceFile?: string } = {}
+    if (components.length) {
+      out.components = components
+        .slice()
+        .reverse()
+        .map((c) => `<${c}>`)
+        .join(' > ')
+        .slice(0, PICK_BUDGET.reactComponentsMaxLength)
+    }
+    if (sourceFile) out.sourceFile = sourceFile.slice(0, PICK_BUDGET.sourceFileMaxLength)
+    return out.components || out.sourceFile ? out : undefined
+  } catch {
+    // Best-effort: see doc comment above -- absence is normal, not an error.
+    return undefined
+  }
+}
+
 /** outerHTML, capped; undefined (never truncated-and-kept) when it contains a secret. */
 function pickHtml(el: Element): string | undefined {
   const raw = (el as HTMLElement).outerHTML || ''
@@ -277,6 +413,7 @@ export function buildPick(el: HTMLElement): ElementPick {
   const html = pickHtml(el)
   const nearbyText = pickNearbyText(el)
   const ancestors = pickAncestors(el)
+  const reactContext = pickReactContext(el)
 
   const pick: ElementPick = {
     tagName: el.tagName.toLowerCase(),
@@ -298,6 +435,8 @@ export function buildPick(el: HTMLElement): ElementPick {
   if (html) pick.html = html
   if (nearbyText) pick.nearbyText = nearbyText
   if (ancestors) pick.ancestors = ancestors
+  if (reactContext?.components) pick.reactComponents = reactContext.components
+  if (reactContext?.sourceFile) pick.sourceFile = reactContext.sourceFile
   return pick
 }
 

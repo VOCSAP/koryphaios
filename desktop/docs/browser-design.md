@@ -37,7 +37,11 @@ outright, and every URL (page URL, `href`/`src`) has its query string and
 fragment stripped. This is applied twice — once in-page as the pick is built,
 once again at the design endpoint on the untrusted POST body from an external
 app — so a compromised or malicious page cannot smuggle a token past a single
-check.
+check. When the picked element belongs to a React app in a DEV build, the
+block also carries the surrounding component stack (`react: <App> >
+<ProductCard>`) and the JSX source location (`source:
+src/ProductCard.tsx:42:7`) pulled from React's dev-only debug metadata — both
+absent in production builds and on React 19+, which removed that metadata.
 
 ## Viewport presets
 

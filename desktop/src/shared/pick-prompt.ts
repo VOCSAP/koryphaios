@@ -18,6 +18,16 @@ function roleLine(pick: ElementPick): string | null {
   return line
 }
 
+/** Chantier OD3: React dev-metadata source location, when present. */
+function sourceLine(pick: ElementPick): string | null {
+  return pick.sourceFile ? `source: ${pick.sourceFile}` : null
+}
+
+/** Chantier OD3: surrounding React component stack, when present. */
+function reactLine(pick: ElementPick): string | null {
+  return pick.reactComponents ? `react: ${pick.reactComponents}` : null
+}
+
 function attrsLine(pick: ElementPick): string | null {
   if (!pick.attributes) return null
   const entries = Object.entries(pick.attributes)
@@ -51,6 +61,8 @@ function nearbyLine(pick: ElementPick): string | null {
 export function formatPickDetails(pick: ElementPick): string {
   const lines = [
     roleLine(pick),
+    sourceLine(pick),
+    reactLine(pick),
     pick.isFixed ? 'fixed: yes' : null,
     attrsLine(pick),
     stylesLine(pick),

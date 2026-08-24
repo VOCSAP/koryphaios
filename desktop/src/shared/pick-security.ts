@@ -112,5 +112,11 @@ export const PICK_BUDGET = {
   nearbyTextEntryMaxLength: 120,
   nearbyTextMaxEntries: 4,
   htmlMaxLength: 2048,
-  roleMaxLength: 64
+  roleMaxLength: 64,
+  /** Whole `reactComponents` string cap (formatted "<App> > <Card>", OD3). */
+  reactComponentsMaxLength: 200,
+  /** `sourceFile` cap: "path/to/Component.tsx:42:7" (OD3). */
+  sourceFileMaxLength: 300,
+  /** Unique component names collected walking the fiber tree (OD3). */
+  reactComponentsMaxEntries: 6
 } as const

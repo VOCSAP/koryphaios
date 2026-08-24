@@ -218,3 +218,64 @@ test("styles: oversized or empty KEYS are dropped (attacker-controlled, no allow
   expect(pick!.styles).toBeDefined();
   expect(Object.keys(pick!.styles!)).toEqual(["color"]);
 });
+
+// ----- OD3 fields: reactComponents / sourceFile -----
+
+test("reactComponents/sourceFile round-trip when well-typed", () => {
+  const pick = sanitizePick({
+    tagName: "button",
+    reactComponents: "<App> > <ProductList> > <ProductCard>",
+    sourceFile: "src/components/ProductCard.tsx:42:7",
+  });
+  expect(pick).not.toBeNull();
+  expect(pick!.reactComponents).toBe("<App> > <ProductList> > <ProductCard>");
+  expect(pick!.sourceFile).toBe("src/components/ProductCard.tsx:42:7");
+});
+
+test("reactComponents/sourceFile: oversized values are capped to their PICK_BUDGET length", () => {
+  const pick = sanitizePick({
+    tagName: "div",
+    reactComponents: "<Comp>".repeat(100),
+    sourceFile: "src/" + "x".repeat(1000) + ".tsx:1:1",
+  });
+  expect(pick!.reactComponents!.length).toBe(PICK_BUDGET.reactComponentsMaxLength);
+  expect(pick!.sourceFile!.length).toBe(PICK_BUDGET.sourceFileMaxLength);
+});
+
+test("sourceFile carrying a secret pattern is dropped entirely, not redacted", () => {
+  const pick = sanitizePick({
+    tagName: "div",
+    reactComponents: "<App> > <Widget>",
+    sourceFile: "src/api_key/Widget.tsx:10:3",
+  });
+  expect(pick).not.toBeNull();
+  expect(pick!.sourceFile).toBeUndefined();
+  // A secret in sourceFile does not take reactComponents down with it.
+  expect(pick!.reactComponents).toBe("<App> > <Widget>");
+});
+
+test("reactComponents carrying a secret pattern is dropped entirely", () => {
+  const pick = sanitizePick({
+    tagName: "div",
+    reactComponents: "<App> > <ApiKeyDisplay password=\"x\">",
+  });
+  expect(pick!.reactComponents).toBeUndefined();
+});
+
+test("reactComponents/sourceFile: non-string values are ignored", () => {
+  const pick = sanitizePick({
+    tagName: "div",
+    reactComponents: 42,
+    sourceFile: { fileName: "x.tsx" },
+  });
+  expect(pick).not.toBeNull();
+  expect(pick!.reactComponents).toBeUndefined();
+  expect(pick!.sourceFile).toBeUndefined();
+});
+
+test("a legacy pick without reactComponents/sourceFile leaves both absent", () => {
+  const pick = sanitizePick({ tagName: "div" });
+  expect(pick).not.toBeNull();
+  expect(pick!.reactComponents).toBeUndefined();
+  expect(pick!.sourceFile).toBeUndefined();
+});

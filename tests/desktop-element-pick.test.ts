@@ -26,6 +26,7 @@ import {
   pickAncestors,
   pickAttributes,
   pickNearbyText,
+  pickReactContext,
   pickStyles,
 } from "../desktop/src/shared/element-pick.ts";
 import { PICK_BUDGET } from "../desktop/src/shared/pick-security.ts";
@@ -244,4 +245,139 @@ test("pickAncestors: an arbitrarily long ancestor id is capped to the whole-entr
   for (const label of ancestors!) {
     expect(label.length).toBeLessThanOrEqual(PICK_BUDGET.ancestorEntryMaxLength);
   }
+});
+
+// ----- pickReactContext (Chantier OD3, DESIGN-ORCA-DOOP-ADOPTION.md §3.2) -----
+// React attaches its fiber node to a DOM element under a `__reactFiber$<id>`
+// (or legacy `__reactInternalInstance$<id>`) own property. These tests plant
+// a FAKE fiber chain (plain objects -- no react dependency) to exercise the
+// walk without a real React runtime.
+
+test("pickReactContext: component stack outermost-first, sourceFile from _debugSource", () => {
+  document.body.innerHTML = "";
+  document.body.innerHTML = `<div id="react-target"></div>`;
+  const el = document.getElementById("react-target") as HTMLElement;
+  (el as any)["__reactFiber$abc"] = {
+    type: "button",
+    return: {
+      type: function ProductCard() {},
+      _debugSource: {
+        fileName: "webpack:///./src/components/ProductCard.tsx",
+        lineNumber: 42,
+        columnNumber: 7,
+      },
+      return: {
+        type: { displayName: "ProductList" },
+        return: {
+          type: function App() {},
+          return: null,
+        },
+      },
+    },
+  };
+  const ctx = pickReactContext(el);
+  expect(ctx).toBeDefined();
+  expect(ctx!.components).toBe("<App> > <ProductList> > <ProductCard>");
+  expect(ctx!.sourceFile).toBe("src/components/ProductCard.tsx:42:7");
+});
+
+test("pickReactContext: no fiber key on the element yields undefined", () => {
+  document.body.innerHTML = "";
+  document.body.innerHTML = `<div id="no-react"></div>`;
+  const el = document.getElementById("no-react") as HTMLElement;
+  expect(pickReactContext(el)).toBeUndefined();
+});
+
+test("pickReactContext: skip-list names (Provider, Fragment) are excluded from the stack", () => {
+  document.body.innerHTML = "";
+  document.body.innerHTML = `<div id="skip-target"></div>`;
+  const el = document.getElementById("skip-target") as HTMLElement;
+  (el as any)["__reactFiber$xyz"] = {
+    type: function Provider() {},
+    return: {
+      type: function Fragment() {},
+      return: {
+        type: function RealComponent() {},
+        return: null,
+      },
+    },
+  };
+  const ctx = pickReactContext(el);
+  expect(ctx).toBeDefined();
+  expect(ctx!.components).toBe("<RealComponent>");
+});
+
+test("pickReactContext: a fiber property access that throws yields undefined, not an exception", () => {
+  document.body.innerHTML = "";
+  document.body.innerHTML = `<div id="throwing"></div>`;
+  const el = document.getElementById("throwing") as HTMLElement;
+  Object.defineProperty(el, "__reactFiber$boom", {
+    enumerable: true,
+    configurable: true,
+    get() {
+      throw new Error("hostile getter");
+    },
+  });
+  expect(() => pickReactContext(el)).not.toThrow();
+  expect(pickReactContext(el)).toBeUndefined();
+});
+
+test("pickReactContext: sourceFile whose cleaned path contains a secret pattern is dropped, components survive", () => {
+  document.body.innerHTML = "";
+  document.body.innerHTML = `<div id="secret-source"></div>`;
+  const el = document.getElementById("secret-source") as HTMLElement;
+  (el as any)["__reactFiber$sec"] = {
+    type: function Widget() {},
+    _debugSource: { fileName: "src/api_key/Widget.tsx", lineNumber: 10, columnNumber: 3 },
+    return: null,
+  };
+  const ctx = pickReactContext(el);
+  expect(ctx).toBeDefined();
+  expect(ctx!.sourceFile).toBeUndefined();
+  expect(ctx!.components).toBe("<Widget>");
+});
+
+test("pickReactContext: depth cap (35) stops the walk on a 100-deep chain", () => {
+  document.body.innerHTML = "";
+  document.body.innerHTML = `<div id="deep-chain"></div>`;
+  const el = document.getElementById("deep-chain") as HTMLElement;
+  function DeepComponent() {}
+  function XWrapper() {}
+  // Build a 100-fiber-deep return chain. Every node uses a skip-listed name
+  // ("XWrapper" ends in the skipped "Wrapper" suffix) except one, 49 hops up
+  // the chain -- well past the 35-deep walk cap -- so it must never be
+  // collected and no sourceFile exists anywhere in the chain either.
+  let fiber: any = null;
+  for (let i = 0; i < 100; i++) {
+    fiber = { type: i === 50 ? DeepComponent : XWrapper, return: fiber };
+  }
+  (el as any)["__reactFiber$deep"] = fiber;
+  expect(pickReactContext(el)).toBeUndefined();
+});
+
+test("buildPick: carries reactComponents + sourceFile end-to-end from a fake fiber chain", () => {
+  document.body.innerHTML = "";
+  document.body.innerHTML = `<button id="react-btn">Buy</button>`;
+  const btn = document.getElementById("react-btn") as HTMLButtonElement;
+  (btn as any)["__reactFiber$e2e"] = {
+    type: "button",
+    return: {
+      type: function ProductCard() {},
+      _debugSource: {
+        fileName: "webpack:///./src/components/ProductCard.tsx",
+        lineNumber: 42,
+        columnNumber: 7,
+      },
+      return: {
+        type: { displayName: "ProductList" },
+        return: {
+          type: function App() {},
+          return: null,
+        },
+      },
+    },
+  };
+  const pick = buildPick(btn);
+  expect(pick.reactComponents).toBe("<App> > <ProductList> > <ProductCard>");
+  expect(pick.sourceFile).toBe("src/components/ProductCard.tsx:42:7");
 });

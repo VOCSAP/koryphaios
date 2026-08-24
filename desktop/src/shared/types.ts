@@ -1047,6 +1047,16 @@ export interface ElementPick {
   nearbyText?: string[]
   /** Readable ancestor labels, outermost first. */
   ancestors?: string[]
+  // ----- React context (Chantier OD3, DESIGN-ORCA-DOOP-ADOPTION.md §3.2).
+  // Both OPTIONAL for the same reasons as the OD1 block above, plus a THIRD:
+  // React's dev-only fiber debug metadata (`_debugSource`) was removed in
+  // React 19, so even a DEV build of a React-19+ app yields neither field.
+  // Absent outside React, in a PRODUCTION build, or on React 19+ -- never an
+  // error, this is the expected common case.
+  /** Surrounding component stack, outermost first, e.g. `<App> > <ProductCard>`. */
+  reactComponents?: string
+  /** `path/to/Component.tsx:42:7`, from React's dev-only debug source metadata. */
+  sourceFile?: string
 }
 
 /** An external-app pick forwarded by the design endpoint (PLAN D2b). */

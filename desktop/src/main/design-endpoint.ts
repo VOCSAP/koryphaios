@@ -179,6 +179,19 @@ export function sanitizePick(raw: unknown): ElementPick | null {
   const ancestors = sanitizeStringArray(p.ancestors, PICK_BUDGET.ancestorsMaxEntries, PICK_BUDGET.ancestorEntryMaxLength)
   if (ancestors) pick.ancestors = ancestors
 
+  // ----- OD3 fields (React dev metadata): a redacted path helps nobody, so a
+  // secret-bearing sourceFile is dropped entirely rather than kept as
+  // '[redacted]' -- unlike role/accessibleName/attributes/styles above, which
+  // still carry useful signal even redacted.
+  if (typeof p.reactComponents === 'string' && p.reactComponents) {
+    const reactComponents = p.reactComponents.slice(0, PICK_BUDGET.reactComponentsMaxLength)
+    if (!containsSecret(reactComponents)) pick.reactComponents = reactComponents
+  }
+  if (typeof p.sourceFile === 'string' && p.sourceFile) {
+    const sourceFile = p.sourceFile.slice(0, PICK_BUDGET.sourceFileMaxLength)
+    if (!containsSecret(sourceFile)) pick.sourceFile = sourceFile
+  }
+
   return pick
 }
 
