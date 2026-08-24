@@ -30,6 +30,14 @@ export interface Peer {
   status: PeerStatus;
   last_activity_at: string | null; // ISO timestamp of last message sent or received
   activity_status: ActivityStatus;  // computed by broker, not stored
+  // A LAUNCH property, not persisted identity: the transport (CLAUDE_PEERS_ROLE,
+  // process env set by the Deck at spawn) wins on every /register, dormant
+  // resume included -- an empty/absent transport is a declaration of "no
+  // role" and overwrites whatever was stored (broker.ts handleRegister,
+  // normalized via trim/lowercase/ROLE_REGEX, NULL when absent or malformed).
+  // Read-only to the agent: reserved by role, not resistant to a deliberately
+  // hostile agent -- never call this "secure".
+  role: string | null;
 }
 
 export type PeerStatus = "active" | "dormant";
@@ -85,11 +93,20 @@ export interface RegisterRequest {
   group_id: GroupId;
   group_secret_hash: string | null;
   claude_cli_pid?: number; // PID of the Claude Code CLI process (process.ppid of server.ts)
+  // From CLAUDE_PEERS_ROLE env var, a launch property -- wins on every
+  // /register, dormant resume included (see Peer.role). Normalized
+  // broker-side. Never trust this field as authorization proof.
+  role?: string;
 }
 
 export interface RegisterResponse {
   peer_id: PeerId;
   instance_token: InstanceToken;
+  // Always normalizeRole(body.role) -- the transport wins unconditionally,
+  // so this only ever differs from the request body by NORMALIZATION (trim/
+  // lowercase/ROLE_REGEX validation), never by a stored value winning over
+  // it. This is what whoami surfaces as "my own role".
+  role: string | null;
 }
 
 export interface HeartbeatRequest {
@@ -962,6 +979,7 @@ export interface WhoamiResponse {
   summary: string;
   registered_at: string;
   ws_connected: boolean;
+  role: string | null;
 }
 
 export interface ListGroupsEntry {

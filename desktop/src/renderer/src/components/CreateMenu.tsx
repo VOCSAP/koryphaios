@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { LaunchPreset, ModelOption } from '@shared/types'
 import type { ProviderCatalog } from '@shared/models'
 import { defaultAnnounceDraft } from '@shared/announce'
+import { mergeRoleChoices, sanitizeRole } from '@shared/role'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
@@ -15,6 +16,12 @@ import { ModelPicker } from './ModelPicker'
 
 /** Effort slider stops. Index 0 = Auto (omit --effort), then the CLI levels. */
 const EFFORT_LEVELS = ['', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/**
+ * Sentinel <option> value opening the free-text role entry. Not a role itself:
+ * it can never collide with one, since sanitizeRole() strips the dots.
+ */
+const ROLE_OTHER = '...other'
 
 /**
  * A model id can take the `[1m]` (1M context window) suffix when it is a
@@ -83,6 +90,16 @@ export function CreateMenu({
   const hasLead = sessions.some((s) => s.lead)
   const [lead, setLead] = useState(false)
   const [leadTouched, setLeadTouched] = useState(false)
+
+  // Peer role (card a2f61172): what this agent DOES. Independent of the laurel
+  // above -- checking it only SUGGESTS 'team-lead' below, until the operator
+  // touches the dropdown themselves.
+  const updateConfig = useDeck((s) => s.updateConfig)
+  const roleChoices = mergeRoleChoices(config.roleChoices ?? [])
+  const [role, setRole] = useState('')
+  const [roleTouched, setRoleTouched] = useState(false)
+  const [roleOther, setRoleOther] = useState(false)
+  const [roleDraft, setRoleDraft] = useState('')
 
   const [agents, setAgents] = useState<string[]>([])
   const [presets, setPresets] = useState<LaunchPreset[]>([])
@@ -172,12 +189,39 @@ export function CreateMenu({
     setLead(!hasLead && pattern !== '' && candidate.includes(pattern))
   }, [agent, name, hasLead, leadTouched, config.leadPattern])
 
+  // The laurel SUGGESTS the 'team-lead' role while the dropdown is untouched
+  // (card a2f61172): one gesture, two values that stay independent -- nothing
+  // downstream derives one from the other, and the operator can change or
+  // clear either. Also covers the leadPattern pre-check above, which sets
+  // `lead` programmatically.
+  useEffect(() => {
+    if (roleTouched || roleOther) return
+    setRole(lead ? 'team-lead' : '')
+  }, [lead, roleTouched, roleOther])
+
+  /** Commit the free-text role: normalise, remember it for next time, select it. */
+  const addRole = (): void => {
+    const value = sanitizeRole(roleDraft)
+    setRoleOther(false)
+    setRoleDraft('')
+    if (!value) return
+    setRole(value)
+    setRoleTouched(true)
+    // Persisted in the operator-GLOBAL config, like modelFavorites. Built-ins
+    // and already-known roles are filtered by mergeRoleChoices on read, but
+    // guard here too so the stored list does not grow duplicates.
+    if (!roleChoices.includes(value)) {
+      void updateConfig({ roleChoices: [...(config.roleChoices ?? []), value] })
+    }
+  }
+
   const submit = (): void => {
     void createSession({
       name: name.trim() || undefined,
       agent: agent || undefined,
       model: effectiveModel || undefined,
       effort: effortLevel || undefined,
+      role: role || undefined,
       args: extraArgs.trim() || undefined,
       prompt: prompt.trim() || undefined,
       worktreeBranch: worktreeBranch.trim() || undefined,
@@ -230,6 +274,56 @@ export function CreateMenu({
               }}
             />
           </label>
+        </div>
+
+        {/* Peer role (card a2f61172): what this agent DOES, exported to the
+            session as CLAUDE_PEERS_ROLE. An OPERATOR gesture only -- no agent
+            path sets it. Optional: "no role" is the default and leaves the
+            launch strictly as it was before this control existed. */}
+        <div className="field" title={t('create.roleHelp')}>
+          <span>{t('create.role')}</span>
+          <select
+            value={roleOther ? ROLE_OTHER : role}
+            onChange={(e) => {
+              const picked = e.target.value
+              setRoleTouched(true)
+              if (picked === ROLE_OTHER) {
+                setRoleOther(true)
+                setRole('')
+                return
+              }
+              setRoleOther(false)
+              setRole(picked)
+            }}
+          >
+            <option value="">{t('create.roleNone')}</option>
+            {roleChoices.map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+            <option value={ROLE_OTHER}>{t('create.roleOther')}</option>
+          </select>
+          {roleOther && (
+            <div className="field-row">
+              <input
+                autoFocus
+                value={roleDraft}
+                placeholder={t('create.rolePlaceholder')}
+                onChange={(e) => setRoleDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') addRole()
+                }}
+              />
+              <button className="icon-btn" onClick={addRole} title={t('create.roleAdd')}>
+                {GLYPH_ACTIONS.plus}
+              </button>
+            </div>
+          )}
+          {/* One line only: this field sits high in the form, and a 3-line
+              note here pushed the whole model block down. The full nuance
+              (independence from the laurel) lives in the field's title. */}
+          <small>{t('create.roleShort')}</small>
         </div>
 
         <div className="field">

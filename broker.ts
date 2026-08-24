@@ -163,6 +163,11 @@ const DORMANT_TTL_HOURS = parseInt(
   10
 );
 const PEER_ID_REGEX = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/;
+// Card a2f61172: deliberately a SEPARATE constant from PEER_ID_REGEX even
+// though the pattern is identical today -- widening one must never widen
+// the other, since peer_id and role are different fields with different
+// authorization consequences.
+const ROLE_REGEX = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/;
 const ACTIVITY_TIMEOUT_MS = parseInt(process.env.CLAUDE_PEERS_ACTIVITY_TIMEOUT_SEC ?? "1800", 10) * 1000;
 const WS_IDLE_TIMEOUT_SEC = parseInt(process.env.CLAUDE_PEERS_WS_IDLE_TIMEOUT_SEC ?? "600", 10);
 const ACTIVE_STALE_SEC = Math.max(
@@ -423,6 +428,16 @@ try {
 // the SessionEnd hook to mark a peer dormant without an instance_token.
 try {
   db.run("ALTER TABLE peers ADD COLUMN claude_cli_pid INTEGER");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
+
+// Migration: add role column (idempotent). Card a2f61172: a launch property
+// set from the transport (CLAUDE_PEERS_ROLE) on every /register, normalized
+// in handleRegister. Existing rows are NULL.
+try {
+  db.run("ALTER TABLE peers ADD COLUMN role TEXT");
 } catch (e) {
   const msg = e instanceof Error ? e.message : String(e);
   if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
@@ -1091,8 +1106,8 @@ guardedInterval("releaseStaleLocks", releaseStaleLocks, LOCK_SWEEP_SEC * 1000);
 const insertPeer = db.prepare(`
   INSERT INTO peers (
     instance_token, peer_id, group_id, pid, cwd, git_root, tty, summary,
-    registered_at, last_seen, last_activity_at, host, client_pid, project_key, claude_cli_pid, status
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
+    registered_at, last_seen, last_activity_at, host, client_pid, project_key, claude_cli_pid, role, status
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')
 `);
 
 const updateLastSeen = db.prepare(
@@ -1107,6 +1122,12 @@ const updateLastActivity = db.prepare(
   `UPDATE peers SET last_activity_at = ? WHERE instance_token = ?`
 );
 
+// Card a2f61172 (operator-arbitrated design reversal): `role` IS in this SET
+// list, deliberately -- role is a property of the LAUNCH, not persisted
+// state. The transport (CLAUDE_PEERS_ROLE, process env set by the Deck at
+// spawn, unreachable by any MCP tool or route) wins on every /register,
+// dormant resume included. An empty/absent transport is a declaration of
+// "no role" and overwrites a previously-stored one, not a no-op.
 const updateActiveOnRegister = db.prepare(`
   UPDATE peers
   SET status = 'active',
@@ -1120,7 +1141,8 @@ const updateActiveOnRegister = db.prepare(`
       host = ?,
       client_pid = ?,
       project_key = ?,
-      claude_cli_pid = ?
+      claude_cli_pid = ?,
+      role = ?
   WHERE instance_token = ?
 `);
 
@@ -1346,10 +1368,34 @@ guardedInterval("purgeOldMessages", purgeOldMessages, PURGE_INTERVAL_SEC * 1000)
 
 // --- /register: TOFU + resume ---
 
+// Card a2f61172: the ONE normalization point for `role` (trim -> lowercase ->
+// validate). Empty/absent/malformed all collapse to NULL, never ''. /register
+// must never fail because of a malformed role -- reject-to-null + log.warn
+// instead of an error response, so a typo in CLAUDE_PEERS_ROLE can never kill
+// a session's registration.
+function normalizeRole(raw: unknown): string | null {
+  // Card a2f61172 review fix: the router casts the parsed JSON body with a
+  // bare `as RegisterRequest` (no runtime shape validation), so a hostile or
+  // buggy HTTP client can send role: null / 42 / {} straight through. Without
+  // this guard raw.trim() throws and /register 500s -- exactly the failure
+  // mode this function's own comment above promises never happens.
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim().toLowerCase();
+  if (trimmed === "") return null;
+  if (!ROLE_REGEX.test(trimmed)) {
+    log.warn(`register: rejected malformed role (falling back to null)`, {
+      role: trimmed.slice(0, 64),
+    });
+    return null;
+  }
+  return trimmed;
+}
+
 function handleRegister(body: RegisterRequest): RegisterResponse | { error: string; status: number } {
   const groupId = body.group_id;
   const secretHash = body.group_secret_hash;
   const now = new Date().toISOString();
+  const normalizedRole = normalizeRole(body.role);
 
   // 1) Group authentication / TOFU. /register is the one caller that also
   // PINS the secret on first sight, so it keeps its own existing/insert
@@ -1380,9 +1426,9 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
 
   if (session) {
     const existingPeer = db.query(
-      "SELECT instance_token, peer_id, status, pid, host FROM peers WHERE instance_token = ?"
+      "SELECT instance_token, peer_id, status, pid, host, role FROM peers WHERE instance_token = ?"
     ).get(session.instance_token) as
-      | { instance_token: string; peer_id: string; status: "active" | "dormant"; pid: number; host: string }
+      | { instance_token: string; peer_id: string; status: "active" | "dormant"; pid: number; host: string; role: string | null }
       | null;
 
     // If marked active but the bun server.ts pid is dead, treat as dormant.
@@ -1405,6 +1451,10 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
 
     if (existingPeer && existingPeer.status === "dormant") {
       // Resurrect dormant.
+      // Card a2f61172 (operator-arbitrated design reversal): role is a
+      // property of the LAUNCH, not persistent identity like peer_id/
+      // instance_token -- the transport's normalizedRole wins unconditionally
+      // here too, overwriting whatever was stored. No comparison, no refusal.
       updateActiveOnRegister.run(
         body.pid,
         body.cwd,
@@ -1417,12 +1467,14 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
         body.client_pid,
         body.project_key,
         body.claude_cli_pid ?? null,
+        normalizedRole,
         existingPeer.instance_token
       );
       upsertPeerSession.run(sk, existingPeer.instance_token, groupId, body.host, body.cwd, now);
       return {
         peer_id: existingPeer.peer_id,
         instance_token: existingPeer.instance_token,
+        role: normalizedRole,
       };
     }
 
@@ -1435,6 +1487,8 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
       );
       const freshToken = randomUUID();
       const freshId = deriveDefaultId(body.host, body.cwd, groupId);
+      // Card a2f61172: same rule as every other branch -- the transport's
+      // normalizedRole applies.
       insertPeer.run(
         freshToken,
         freshId,
@@ -1450,12 +1504,15 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
         body.host,
         body.client_pid,
         body.project_key,
-        body.claude_cli_pid ?? null
+        body.claude_cli_pid ?? null,
+        normalizedRole
       );
-      return { peer_id: freshId, instance_token: freshToken };
+      return { peer_id: freshId, instance_token: freshToken, role: normalizedRole };
     }
 
     // peer row purged but the session_key remembered the token: reinsert reusing it.
+    // Card a2f61172: same rule as every other branch -- the transport's
+    // normalizedRole applies.
     const reusedId = deriveDefaultId(body.host, body.cwd, groupId);
     insertPeer.run(
       session.instance_token,
@@ -1472,10 +1529,11 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
       body.host,
       body.client_pid,
       body.project_key,
-      body.claude_cli_pid ?? null
+      body.claude_cli_pid ?? null,
+      normalizedRole
     );
     upsertPeerSession.run(sk, session.instance_token, groupId, body.host, body.cwd, now);
-    return { peer_id: reusedId, instance_token: session.instance_token };
+    return { peer_id: reusedId, instance_token: session.instance_token, role: normalizedRole };
   }
 
   // 3) Fresh registration.
@@ -1496,10 +1554,11 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
     body.host,
     body.client_pid,
     body.project_key,
-    body.claude_cli_pid ?? null
+    body.claude_cli_pid ?? null,
+    normalizedRole
   );
   upsertPeerSession.run(sk, newToken, groupId, body.host, body.cwd, now);
-  return { peer_id: newPeerId, instance_token: newToken };
+  return { peer_id: newPeerId, instance_token: newToken, role: normalizedRole };
 }
 
 // Card 37a2b8c7 review follow-up (MAJOR-2): the client-declared instance_token

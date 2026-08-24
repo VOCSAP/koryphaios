@@ -41,6 +41,7 @@ import { clearDeskSessionId, readDeskSessionId } from './desk-session'
 import { ScreenGuard } from './screen-model'
 import { reportError } from './log'
 import { DEFAULT_PALETTE, paletteColor } from '@shared/palette'
+import { sanitizeRole } from '@shared/role'
 import { reconcileOrder } from '@shared/reorder'
 import type { JoinAnnounceIntent } from '@shared/announce'
 
@@ -477,6 +478,10 @@ export class SessionService extends EventEmitter {
       sessionId: '',
       color: input.color?.trim() || paletteColor(cfg.palette ?? DEFAULT_PALETTE, this.defs.length),
       effort: input.effort?.trim() || '',
+      // Re-normalised here, not only in the popover: this is the last main-side
+      // point before the value becomes an exported env var, and the renderer's
+      // sanitizer is typing assistance, not a guarantee.
+      role: sanitizeRole(input.role ?? '') || '',
       prompt: input.prompt?.trim() || '',
       // Filled by the ipc layer after `git worktree add` (PLAN C4).
       worktree: input.worktree,
@@ -946,7 +951,17 @@ export class SessionService extends EventEmitter {
 
     // Session env, also handed to the sandbox wrapper (which translates the
     // host-only transports before exporting them container-side).
-    const sessionEnv = { ...this.getScopeEnv(), CLAUDE_PEERS_DESK_SESSION: def.id }
+    // CLAUDE_PEERS_ROLE is ALWAYS exported, empty string included (card
+    // a2f61172): same neutralisation rule as the scope env, since a value
+    // inherited from the process that launched the Deck would otherwise
+    // re-activate a role on a session that has none. This spawn path serves
+    // BOTH 'fresh' and 'resume', which is why the role lives in def rather
+    // than in def.args -- a fork-resume re-exports it here for free.
+    const sessionEnv = {
+      ...this.getScopeEnv(),
+      CLAUDE_PEERS_DESK_SESSION: def.id,
+      CLAUDE_PEERS_ROLE: def.role ?? ''
+    }
 
     // Sandbox mode (SBX1): wrap the composed command in a `docker exec` into
     // the project container. The supervisor is exempt — it pilots the Deck

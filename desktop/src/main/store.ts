@@ -66,7 +66,10 @@ const DEFAULT_CONFIG: AppConfig = {
   browserUrl: 'http://localhost:3000',
   // Unified model pickers (C29): operator-pinned favorites + local endpoints.
   modelFavorites: [],
-  localProviders: []
+  localProviders: [],
+  // Operator-added peer roles (card a2f61172): the built-in list lives in
+  // shared/role.ts, this only carries what the operator typed via "Other…".
+  roleChoices: []
 }
 
 function dataDir(): string {

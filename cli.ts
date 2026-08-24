@@ -83,6 +83,7 @@ switch (cmd) {
         console.log("\nActive peers:");
         for (const p of peers) {
           console.log(`  ${formatPeerLine(p)}`);
+          if (p.role) console.log(`         Role: ${p.role}`);
           if (p.summary) console.log(`         ${p.summary}`);
           if (p.project_key) console.log(`         Project: ${p.project_key}`);
           if (p.tty) console.log(`         TTY: ${p.tty}`);
@@ -105,6 +106,7 @@ switch (cmd) {
       } else {
         for (const p of peers) {
           console.log(formatPeerLine(p));
+          if (p.role) console.log(`  Role: ${p.role}`);
           if (p.summary) console.log(`  Summary: ${p.summary}`);
           if (p.project_key) console.log(`  Project: ${p.project_key}`);
         }

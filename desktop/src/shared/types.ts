@@ -27,6 +27,22 @@ export interface SessionDef {
    */
   effort?: string
   /**
+   * What this agent DOES (card a2f61172), e.g. 'developer' | 'reviewer' |
+   * 'team-lead'. Kebab, `^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`; empty/undefined
+   * => no role. Its OWN field (not folded into `args`) for the same reason as
+   * `effort` above: it must be re-emitted on every spawn, fresh AND fork-resume
+   * -- spawnSession() exports it as CLAUDE_PEERS_ROLE on both paths. Operator
+   * input only: no agent-facing path sets it, and it is deliberately absent
+   * from template/workspace capture so a cloned repo can never place a role
+   * (a workspace file lives in `<projectDir>/.claude/claude-peers/workspaces/`,
+   * i.e. hostile input #1). COST OF THAT EXCLUSION, accepted knowingly:
+   * `toWorkspaceSessions` is a 6-field pick-list, so restoring a workspace
+   * respawns every tile with no role, and since an empty CLAUDE_PEERS_ROLE is
+   * now a DECLARATION of absence, that restore ERASES the role broker-side --
+   * where `model`/`effort`/`agent` are merely forgotten.
+   */
+  role?: string
+  /**
    * Per-session override for quota auto-resume (PLAN C1). undefined = follow
    * the global `AppConfig.autoResumeQuota`; true/false forces it for this tile.
    */
@@ -317,6 +333,13 @@ export interface AppConfig {
    * in pin order. Favorites of vanished providers are kept (they come back).
    */
   modelFavorites: string[]
+  /**
+   * Roles the operator added through the create menu's "Other…" entry (card
+   * a2f61172), on top of the app's built-in list (shared/role.ts). Lives in the
+   * operator-GLOBAL config, never in a project file: a role is an operator
+   * gesture, and a cloned repo must not be able to suggest one.
+   */
+  roleChoices: string[]
   /** OpenAI-compatible local endpoints (Ollama, LiteLLM…) added in Settings (C29). */
   localProviders: import('./models').LocalProviderConfig[]
 }
@@ -376,6 +399,8 @@ export interface CreateSessionInput {
   model?: string
   /** Reasoning effort (`--effort <level>`); empty => unspecified. */
   effort?: string
+  /** Operator-chosen role (SessionDef.role); empty/undefined => no role. */
+  role?: string
   /** Extra free-form launch args appended verbatim. */
   args?: string
   /** Initial prompt submitted on the fresh launch (positional arg, PLAN C2). */

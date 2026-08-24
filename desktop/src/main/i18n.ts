@@ -348,6 +348,14 @@ export const EN_DEFAULTS: Record<string, string> = {
   'create.leadHelp':
     'Targeted app notices (queue dispatch, integration notices) go to the team-lead. One per window; designating a new one demotes the previous.',
   'create.leadTaken': 'a team-lead already exists (checking moves the crown)',
+  'create.role': 'Role',
+  'create.roleNone': 'no role',
+  'create.roleOther': 'Other…',
+  'create.rolePlaceholder': 'e.g. data-engineer',
+  'create.roleAdd': 'Add this role to the list',
+  'create.roleShort': 'Optional. Remembered for next time.',
+  'create.roleHelp':
+    'What this agent does. Optional, visible to the other peers, and remembered for next time. Checking the team-lead box above suggests "team-lead" here; the two stay independent.',
   'nav.worktrees': 'Worktrees',
   'worktrees.title': 'Git worktrees',
   'worktrees.create': '＋ Create worktree',

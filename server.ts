@@ -253,6 +253,10 @@ let myProjectKey: string | null = null;
 let myHost: string = hostname();
 let myClientPid: number = process.pid;
 let myRegisteredAt: string = "";
+// Card a2f61172: the role echoed back by /register -- a launch property, the
+// transport wins on every register call, dormant resume included. Only
+// whoami reads this -- it is not otherwise consumed by this process.
+let myRole: string | null = null;
 let wsConnected: boolean = false;
 let wsSocket: WebSocket | null = null;
 let wsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -451,7 +455,7 @@ const TOOLS = [
   {
     name: "list_peers",
     description:
-      "List other Claude Code instances connected to the same broker, in your current group. Returns peer_id, host, working directory, git repo, and summary.",
+      "List other Claude Code instances connected to the same broker, in your current group. Returns peer_id, host, working directory, git repo, role, and summary.",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -875,6 +879,7 @@ function formatPeer(p: PublicPeer): string {
   // B1: the client PID is no longer exposed over the wire; show host only.
   const idLine = p.host ? `peer_id: ${p.peer_id}  (${p.host})` : `peer_id: ${p.peer_id}`;
   const parts = [`${statusLabel}  ${idLine}`, `CWD: ${p.cwd}`];
+  if (p.role) parts.push(`Role: ${p.role}`);
   if (p.git_root) parts.push(`Repo: ${p.git_root}`);
   if (p.project_key) parts.push(`Project: ${p.project_key}`);
   if (p.tty) parts.push(`TTY: ${p.tty}`);
@@ -1317,6 +1322,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         summary: currentSummary,
         registered_at: myRegisteredAt,
         ws_connected: wsConnected,
+        role: myRole,
       };
       return {
         content: [
@@ -1391,11 +1397,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           project_key: roadmapProjectKey(),
           group_id: newGroupId,
           group_secret_hash: newSecretHash,
+          // Card a2f61172: same source as the boot /register below -- both
+          // sites must carry this or the role silently disappears on
+          // switch_group (their bodies already diverge on claude_cli_pid).
+          role: process.env.CLAUDE_PEERS_ROLE,
         });
         myInstanceToken = reg.instance_token;
         myPeerId = reg.peer_id;
         myGroupId = newGroupId;
         myRegisteredAt = new Date().toISOString();
+        // Card a2f61172 review fix: an OLDER broker (pre-lot-A) omits `role` from
+        // its /register response entirely, so reg.role is `undefined` at runtime
+        // despite the `string | null` type. JSON.stringify DROPS an undefined key,
+        // so whoami's role field would vanish instead of rendering `null` -- an
+        // agent could no longer tell "no role" from "field absent".
+        myRole = reg.role ?? null;
         await writePeerIdCache(myCwd, myPeerId);
         await writeDeskSessionId();
         connectWs();
@@ -1948,10 +1964,18 @@ async function main() {
     project_key: roadmapProjectKey(),
     group_id: groupId,
     group_secret_hash: groupSecretHash,
+    // Card a2f61172: same source as the switch_group /register above.
+    role: process.env.CLAUDE_PEERS_ROLE,
   });
   myInstanceToken = reg.instance_token;
   myPeerId = reg.peer_id;
   myRegisteredAt = new Date().toISOString();
+  // Card a2f61172 review fix: an OLDER broker (pre-lot-A) omits `role` from
+  // its /register response entirely, so reg.role is `undefined` at runtime
+  // despite the `string | null` type. JSON.stringify DROPS an undefined key,
+  // so whoami's role field would vanish instead of rendering `null` -- an
+  // agent could no longer tell "no role" from "field absent".
+  myRole = reg.role ?? null;
   await writePeerIdCache(myCwd, myPeerId);
   // Deck back-channel: hand the real minted session id to the per-tile token file
   // so the Deck maps tile -> session id deterministically (no-op outside the Deck).
