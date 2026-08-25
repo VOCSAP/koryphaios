@@ -6,7 +6,7 @@
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { startBroker, stopBroker, post, livePid, type TestBroker , deckAuthored } from "./_helper.ts";
 import { Database } from "bun:sqlite";
-import type { RoadmapItem } from "../shared/types.ts";
+import { ROADMAP_IMPORT_COLUMNS, findUncoveredRoadmapColumns, type RoadmapItem } from "../shared/types.ts";
 import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
 
 let broker: TestBroker;
@@ -460,6 +460,183 @@ test("owner-gone sweep releases after grace, but an active owner keeps the lock"
   }
 }, 20_000);
 
+// Card e344fa79, site (c): the fail-open INVERSE of the sibling test above.
+// There, the SAME peer that holds the lock stays active and keeps it. Here,
+// the TRUE owner goes silent (never heartbeats again) while a peer sharing
+// its EXACT peer_id string, but registered in a DIFFERENT group, stays
+// alive -- before this card, releaseStaleLocks' owner-gone check
+// (`NOT EXISTS ... WHERE p.peer_id = roadmap_items.locked_by AND
+// p.project_key IS roadmap_items.project_key AND ...`) had no group term at
+// all, so the homonym's mere existence (same peer_id, same project) read as
+// "the owner is still here" and the abandoned lock was NEVER released.
+test("owner-gone sweep (site c): a live homonym peer in a DIFFERENT group does not keep a dead true owner's lock alive", async () => {
+  const b = await startBroker({
+    CLAUDE_PEERS_LOCK_TTL_SEC: "3600",
+    CLAUDE_PEERS_LOCK_GRACE_SEC: "2",
+    CLAUDE_PEERS_LOCK_SWEEP_SEC: "1",
+  });
+  try {
+    const host = "h-e344fa79-sweep";
+    const cwd = "/tmp/e344fa79-sweep-repo";
+
+    const trueOwner = await post<{ instance_token: string; peer_id: string }>(`${b.url}/register`, {
+      pid: livePid(), cwd, git_root: null, tty: null,
+      summary: "", host, client_pid: livePid(), claude_cli_pid: 1,
+      project_key: PK, group_id: "e344fa79-sweep-group-a", group_secret_hash: null,
+    });
+    const homonym = await post<{ instance_token: string; peer_id: string }>(`${b.url}/register`, {
+      pid: livePid(), cwd, git_root: null, tty: null,
+      summary: "", host, client_pid: livePid(), claude_cli_pid: 1,
+      project_key: PK, group_id: "e344fa79-sweep-group-b", group_secret_hash: null,
+    });
+    expect(homonym.body.peer_id).toBe(trueOwner.body.peer_id);
+
+    const item = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: trueOwner.body.peer_id,
+      instance_token: trueOwner.body.instance_token,
+      title: "owned by the true owner, abandoned",
+      status: "in_progress",
+    });
+    expect(item.body.item.locked).toBe(true);
+
+    // Force the true owner's OWN peer row dormant and stale, directly via
+    // sqlite -- the real dormancy path (sweepInactivePeers) floors both its
+    // own interval and ACTIVE_STALE_SEC at 10s (broker.ts), which would make
+    // this test slow and couple it to a second, unrelated sweep's timing.
+    // Same discipline as the TTL/park tests above backdating columns no HTTP
+    // route lets a caller set directly -- this test is about the OWNER-GONE
+    // check alone, not about how a peer eventually becomes dormant.
+    const db = new Database(b.dbPath);
+    db.run(
+      "UPDATE peers SET status = 'dormant', last_seen = datetime('now', '-3600 seconds') WHERE instance_token = ?",
+      [trueOwner.body.instance_token]
+    );
+    db.close();
+
+    // Only the homonym (different group, same peer_id) stays alive, polled
+    // the same way the sibling "active owner keeps the lock" test keeps its
+    // owner alive. Before this card's fix, that alone kept the lock forever.
+    const after = await pollUntil(12_000, 300, async () => {
+      await post(`${b.url}/heartbeat`, { instance_token: homonym.body.instance_token });
+      const listed = await post<{ items: RoadmapItem[] }>(`${b.url}/roadmap/list`, {
+        project_key: PK,
+      });
+      const found = listed.body.items.find((i) => i.id === item.body.item.id)!;
+      return { done: found.locked === false, value: found };
+    });
+    expect(after.status).toBe("planned");
+    expect(after.locked_by).toBeNull();
+    expect(after.updated_by).toBe("lock-sweep");
+  } finally {
+    await stopBroker(b);
+  }
+}, 20_000);
+
+// Card e344fa79: the migration's fail-open guarantee, exercised for real
+// rather than only asserted by `matchesLockOwner`'s truth table. A row
+// locked BEFORE this card shipped has `locked_group IS NULL` (no ALTER
+// TABLE backfills it), and the owner-gone sweep's new group term is written
+// to degrade to the OLD peer_id-only check on such a row -- this proves the
+// degrade actually releases a truly-abandoned legacy lock, not just that it
+// declines to crash on NULL.
+test("owner-gone sweep (site c): a legacy row (locked_group NULL, pre-migration) still releases normally once its owner is gone", async () => {
+  const b = await startBroker({
+    CLAUDE_PEERS_LOCK_TTL_SEC: "3600",
+    CLAUDE_PEERS_LOCK_GRACE_SEC: "2",
+    CLAUDE_PEERS_LOCK_SWEEP_SEC: "1",
+  });
+  try {
+    const item = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK, by: "legacy-ghost-peer", title: "locked pre-migration", status: "in_progress",
+    });
+    expect(item.body.item.locked).toBe(true);
+
+    // Simulate a row written before locked_group existed: force it back to
+    // NULL directly, the same way the TTL/park tests above backdate columns
+    // no HTTP route lets a caller set directly.
+    const db = new Database(b.dbPath);
+    db.run("UPDATE roadmap_items SET locked_group = NULL WHERE id = ?", [item.body.item.id]);
+    db.close();
+
+    // "legacy-ghost-peer" names no registered peer row at all, so it is
+    // owner-gone from the very first sweep tick, exactly like the "ghost"
+    // half of the sibling test above.
+    const after = await pollUntil(12_000, 300, async () => {
+      const listed = await post<{ items: RoadmapItem[] }>(`${b.url}/roadmap/list`, {
+        project_key: PK,
+      });
+      const found = listed.body.items.find((i) => i.id === item.body.item.id)!;
+      return { done: found.locked === false, value: found };
+    });
+    expect(after.status).toBe("planned");
+    expect(after.updated_by).toBe("lock-sweep");
+  } finally {
+    await stopBroker(b);
+  }
+}, 20_000);
+
+// Card e344fa79: the CORE of this lot. broker.ts's rowToRoadmapItem used to
+// be a `...row` rest-spread -- the fail-open shape CLAUDE.md names
+// (`toPublicPeer` letting a 17th `Peer` field ship publicly with nothing
+// failing) -- and is now an explicit pick-list, precisely so a future column
+// is invisible until named instead of public the moment its migration runs.
+// An incomplete pick-list is the exact SILENT bug that trade protects
+// against: it drops a real column from every response with nothing failing,
+// so this needs its own proof, same pattern as ROADMAP_IMPORT_COLUMNS'
+// coverage test above it in tests/broker-roadmap-import.test.ts -- compare
+// the LIVE schema (PRAGMA table_info, read off the broker's own db) against
+// what the function ACTUALLY emits, not a second hand-maintained list that
+// could drift from the real object literal the same way the first one did.
+//
+// The response is read off a REAL round trip (not a call into broker.ts,
+// which exports nothing) from a card signed by an operator, specifically so
+// `operator_id` -- RoadmapItem's one truly OPTIONAL field -- is a real
+// string rather than `undefined`: JSON.stringify DROPS a key whose value is
+// `undefined`, which would otherwise make this test read "operator_id is
+// missing" as a false positive on every ordinary agent-authored card,
+// indistinguishable from the real defect this test exists to catch.
+test("card e344fa79: rowToRoadmapItem's response covers every roadmap_items column (pick-list coverage, not a rest-spread)", async () => {
+  const db = new Database(broker.dbPath, { readonly: true });
+  let schemaColumns: string[];
+  try {
+    schemaColumns = (
+      db.query("PRAGMA table_info(roadmap_items)").all() as { name: string }[]
+    ).map((c) => c.name);
+  } finally {
+    db.close();
+  }
+  // The probe must SEE the schema before its silence can mean anything.
+  expect(schemaColumns.length).toBeGreaterThan(10);
+  expect(schemaColumns).toContain("locked_group"); // the column this card added
+
+  const credential = generateCredential();
+  const operatorId = deriveOperatorId(credential.publicKey);
+  const createBody = {
+    project_key: PK,
+    title: "pick-list coverage probe",
+    by: "deck",
+    public_key: credential.publicKey,
+  };
+  const res = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    ...createBody,
+    auth: buildAuthProof(credential.privateKey, createBody, { kind: "operator", operator_id: operatorId }),
+  });
+  expect(res.status).toBe(200);
+  expect(res.body.item.operator_id).toBe(operatorId); // proves it round-tripped as a real string
+
+  const emittedColumns = Object.keys(res.body.item);
+  const { missing, extra } = findUncoveredRoadmapColumns(schemaColumns, emittedColumns);
+  expect(missing).toEqual([]); // a column the table has that the response silently drops
+  expect(extra).toEqual([]); // a key in the response with no backing column
+
+  // Sanity companion, not a substitute for the two checks above: the schema
+  // and ROADMAP_IMPORT_COLUMNS (a list maintained independently, for a
+  // different route) name the same 29 columns today. If they ever diverge,
+  // that is itself worth knowing, but it is not what this test polices.
+  expect(findUncoveredRoadmapColumns(schemaColumns, ROADMAP_IMPORT_COLUMNS).missing).toEqual([]);
+});
+
 // ----- park (card aaf4537d, lots 1+2) -----
 
 // releaseStaleLocks has no route to PARK a card yet (lock-park/lock-release
@@ -635,3 +812,250 @@ test("owner-gone sweep releases a NULL-project_key peer's lock on a DIFFERENT pr
     await stopBroker(b);
   }
 }, 20_000);
+
+// ----- group-aware lock ownership (card e344fa79) -----
+
+// peers.UNIQUE(peer_id, group_id): a peer_id is unique only PER GROUP, but
+// the roadmap is shared ACROSS every group on the same broker (same
+// project_key, no group term in its scope -- operator ruling fc444eda).
+// deriveDefaultId (broker.ts) derives its candidate from host+cwd alone and
+// only consults the OTHER rows of the SAME group for collision, so the SAME
+// host+cwd registered under two different group_ids mints the SAME peer_id
+// in both -- measured on the live roadmap card, reproduced here.
+test("a same-peer_id homonym registered in a DIFFERENT group cannot satisfy another group's lock (the accident measured on card e344fa79)", async () => {
+  const host = "h-e344fa79";
+  const cwd = "/tmp/e344fa79-lock-repo";
+
+  const trueOwner = await post<{ instance_token: string; peer_id: string }>(`${broker.url}/register`, {
+    pid: livePid(), cwd, git_root: null, tty: null,
+    summary: "", host, client_pid: livePid(), claude_cli_pid: 1,
+    project_key: PK, group_id: "e344fa79-group-a", group_secret_hash: null,
+  });
+  expect(trueOwner.status).toBe(200);
+
+  const homonym = await post<{ instance_token: string; peer_id: string }>(`${broker.url}/register`, {
+    pid: livePid(), cwd, git_root: null, tty: null,
+    summary: "", host, client_pid: livePid(), claude_cli_pid: 1,
+    project_key: PK, group_id: "e344fa79-group-b", group_secret_hash: null,
+  });
+  expect(homonym.status).toBe(200);
+
+  // The whole premise of this test: two DIFFERENT, legitimately-registered
+  // peers (different group_id, so a different row each) share the SAME
+  // peer_id string.
+  expect(homonym.body.peer_id).toBe(trueOwner.body.peer_id);
+
+  const item = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    by: trueOwner.body.peer_id,
+    instance_token: trueOwner.body.instance_token,
+    title: "owned by group-a's peer",
+    status: "in_progress",
+  });
+  expect(item.body.item.locked).toBe(true);
+  expect(item.body.item.locked_by).toBe(trueOwner.body.peer_id);
+
+  // The homonym, PROVEN (its own real instance_token, not a bare `by`
+  // claim), attempts to move the card as if it were the owner. Before this
+  // card, `by !== existing.locked_by` was the whole guard: same string,
+  // so it read as the SAME owner and this would have been a 200.
+  const stolen = await post<{ status?: number; error?: string }>(`${broker.url}/roadmap/upsert`, {
+    id: item.body.item.id,
+    by: homonym.body.peer_id,
+    instance_token: homonym.body.instance_token,
+    status: "done",
+  });
+  expect(stolen.status).toBe(409);
+  expect(stolen.body.error).toContain(`locked by '${trueOwner.body.peer_id}'`);
+
+  // The true owner, from its own group, is unaffected and can still move it.
+  const legit = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    id: item.body.item.id,
+    by: trueOwner.body.peer_id,
+    instance_token: trueOwner.body.instance_token,
+    status: "done",
+  });
+  expect(legit.status).toBe(200);
+  expect(legit.body.item.locked).toBe(false);
+});
+
+test("the same accident, on /roadmap/archive: a same-peer_id homonym in a different group cannot archive another group's locked card", async () => {
+  const host = "h-e344fa79-archive";
+  const cwd = "/tmp/e344fa79-archive-repo";
+
+  const trueOwner = await post<{ instance_token: string; peer_id: string }>(`${broker.url}/register`, {
+    pid: livePid(), cwd, git_root: null, tty: null,
+    summary: "", host, client_pid: livePid(), claude_cli_pid: 1,
+    project_key: PK, group_id: "e344fa79-archive-group-a", group_secret_hash: null,
+  });
+  const homonym = await post<{ instance_token: string; peer_id: string }>(`${broker.url}/register`, {
+    pid: livePid(), cwd, git_root: null, tty: null,
+    summary: "", host, client_pid: livePid(), claude_cli_pid: 1,
+    project_key: PK, group_id: "e344fa79-archive-group-b", group_secret_hash: null,
+  });
+  expect(homonym.body.peer_id).toBe(trueOwner.body.peer_id);
+
+  const item = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    by: trueOwner.body.peer_id,
+    instance_token: trueOwner.body.instance_token,
+    title: "owned by archive group-a's peer",
+    status: "in_progress",
+  });
+  expect(item.body.item.locked).toBe(true);
+
+  const stolen = await post<{ status?: number; error?: string }>(`${broker.url}/roadmap/archive`, {
+    id: item.body.item.id,
+    by: homonym.body.peer_id,
+    instance_token: homonym.body.instance_token,
+  });
+  expect(stolen.status).toBe(409);
+});
+
+// Card e344fa79, review finding (EIGHTH site, in this same file): a bare
+// `existing.locked_by === resolvedLock.lockedBy` in isSameOwnerReclaim
+// (handleRoadmapUpsert) does not itself let anyone steal a card -- the
+// upsert guard already decided that, separately -- but it DOES decide
+// whether `locked_group` is preserved from the row's PRIOR owner or
+// stamped fresh from the write's actual author. A `force:true` steal by a
+// PROVEN homonym in a different group legitimately passes the guard (that
+// is what `force` is for), then hits this bare comparison: same peer_id
+// string, so the old code read it as the SAME owner reclaiming and kept
+// the VICTIM's locked_group on a row now actually held by the intruder --
+// inert as an escalation (the guard already 200'd this write on its own
+// terms), but WRONG as stored metadata, and that metadata is compared
+// again on the very next write.
+test("force:true steal by a proven homonym in a DIFFERENT group stamps the NEW owner's locked_group, not the victim's (card e344fa79, isSameOwnerReclaim)", async () => {
+  const host = "h-e344fa79-force";
+  const cwd = "/tmp/e344fa79-force-repo";
+
+  const victim = await post<{ instance_token: string; peer_id: string }>(`${broker.url}/register`, {
+    pid: livePid(), cwd, git_root: null, tty: null,
+    summary: "", host, client_pid: livePid(), claude_cli_pid: 1,
+    project_key: PK, group_id: "e344fa79-force-group-victim", group_secret_hash: null,
+  });
+  const intruder = await post<{ instance_token: string; peer_id: string }>(`${broker.url}/register`, {
+    pid: livePid(), cwd, git_root: null, tty: null,
+    summary: "", host, client_pid: livePid(), claude_cli_pid: 1,
+    project_key: PK, group_id: "e344fa79-force-group-intruder", group_secret_hash: null,
+  });
+  expect(intruder.body.peer_id).toBe(victim.body.peer_id); // the homonym setup
+
+  const item = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    by: victim.body.peer_id,
+    instance_token: victim.body.instance_token,
+    title: "victim's card, about to be force-stolen by its own homonym",
+    status: "in_progress",
+  });
+  expect(item.body.item.locked).toBe(true);
+  expect(item.body.item.locked_group).toBe("e344fa79-force-group-victim");
+
+  // force:true + a PROVEN author (real instance_token) legitimately passes
+  // the guard -- this is exactly what force exists for, and is not itself
+  // the defect. `locked: true` makes resolveRoadmapLock set
+  // lockedBy = intruder.peer_id (== victim.peer_id, same string).
+  const forced = await post<UpsertRes & { error?: string }>(`${broker.url}/roadmap/upsert`, {
+    id: item.body.item.id,
+    by: intruder.body.peer_id,
+    instance_token: intruder.body.instance_token,
+    locked: true,
+    force: true,
+  });
+  expect(forced.status).toBe(200);
+  expect(forced.body.item.locked).toBe(true);
+  expect(forced.body.item.locked_by).toBe(intruder.body.peer_id);
+
+  // THE ASSERTION THAT MATTERS: locked_group must follow the intruder (the
+  // actual new holder), never stay the victim's. Red without the fix
+  // (isSameOwnerReclaim wrongly true on the bare peer_id match, preserving
+  // "e344fa79-force-group-victim"); green with matchesLockOwner in place.
+  expect(forced.body.item.locked_group).toBe("e344fa79-force-group-intruder");
+});
+
+// Card e344fa79, review round 3: the round-2 fix (resolveRoadmapLock's
+// `claimed` field, resolveLockedGroup/resolveKeptLockedAt) was proven at the
+// PURE-FUNCTION level (tests/roadmap-lock.test.ts) but never asserted at the
+// ROUTE level -- `locked_group` was only ever checked twice in this whole
+// file, both in the force-steal test above. This is the wiring proof: an
+// ORDINARY write (no `status`, no `locked` -- that absence is what makes it
+// ordinary) must PRESERVE the true owner's locked_by/locked_group, never
+// reassign or null them, however the write is authored.
+test("card e344fa79, review round 3 (ROUTE-LEVEL): the Deck's ORDINARY signed write on a locked card preserves locked_by/locked_group -- the routine path, and the one review measured most expensive to break", async () => {
+  const host = "h-e344fa79-ordinary-deck";
+  const cwd = "/tmp/e344fa79-ordinary-deck-repo";
+
+  const owner = await post<{ instance_token: string; peer_id: string }>(`${broker.url}/register`, {
+    pid: livePid(), cwd, git_root: null, tty: null,
+    summary: "", host, client_pid: livePid(), claude_cli_pid: 1,
+    project_key: PK, group_id: "e344fa79-ordinary-deck-group", group_secret_hash: null,
+  });
+
+  const item = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    by: owner.body.peer_id,
+    instance_token: owner.body.instance_token,
+    title: "locked by its owner, about to receive an ordinary Deck save",
+    status: "in_progress",
+  });
+  expect(item.body.item.locked).toBe(true);
+  expect(item.body.item.locked_group).toBe("e344fa79-ordinary-deck-group");
+
+  // Neither `status` nor `locked` in this body -- THAT is what makes it
+  // ORDINARY (no lock-relevant field moves, so resolveRoadmapLock's claim
+  // branches never fire and `claimed` resolves to false).
+  const credential = generateCredential();
+  const operatorId = deriveOperatorId(credential.publicKey);
+  const ordinaryBody = {
+    id: item.body.item.id,
+    by: "deck",
+    context: "an unrelated edit, saved by the Deck while the card stays locked",
+    public_key: credential.publicKey,
+  };
+  const saved = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    ...ordinaryBody,
+    auth: buildAuthProof(credential.privateKey, ordinaryBody, { kind: "operator", operator_id: operatorId }),
+  });
+  expect(saved.status).toBe(200);
+  expect(saved.body.item.locked).toBe(true);
+  expect(saved.body.item.locked_by).toBe(owner.body.peer_id);
+  expect(saved.body.item.locked_group).toBe("e344fa79-ordinary-deck-group");
+});
+
+test("card e344fa79, review round 3 (ROUTE-LEVEL): an ORDINARY write from a peer in a DIFFERENT group, on a card it does not own, preserves the true owner's locked_by/locked_group", async () => {
+  const owner = await post<{ instance_token: string; peer_id: string }>(`${broker.url}/register`, {
+    pid: livePid(), cwd: "/tmp/repo", git_root: null, tty: null,
+    summary: "", host: "h-e344fa79-ord-owner", client_pid: livePid(), claude_cli_pid: 1,
+    project_key: PK, group_id: "e344fa79-ordinary-tp-group-owner", group_secret_hash: null,
+  });
+  const thirdParty = await post<{ instance_token: string; peer_id: string }>(`${broker.url}/register`, {
+    pid: livePid(), cwd: "/tmp/repo", git_root: null, tty: null,
+    summary: "", host: "h-e344fa79-ord-third", client_pid: livePid(), claude_cli_pid: 1,
+    project_key: PK, group_id: "e344fa79-ordinary-tp-group-third", group_secret_hash: null,
+  });
+  expect(thirdParty.body.peer_id).not.toBe(owner.body.peer_id); // a genuine third party, not a homonym
+
+  const item = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    by: owner.body.peer_id,
+    instance_token: owner.body.instance_token,
+    title: "locked by its owner, about to receive an ordinary third-party save",
+    status: "in_progress",
+  });
+  expect(item.body.item.locked).toBe(true);
+  expect(item.body.item.locked_group).toBe("e344fa79-ordinary-tp-group-owner");
+
+  // Neither `status` nor `locked` -- the guard lets this through (nothing
+  // lock-relevant moves), and it must not reassign locked_by/locked_group
+  // to the third party's own identity.
+  const saved = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    id: item.body.item.id,
+    by: thirdParty.body.peer_id,
+    instance_token: thirdParty.body.instance_token,
+    context: "an unrelated edit from a third party while the card stays locked",
+  });
+  expect(saved.status).toBe(200);
+  expect(saved.body.item.locked).toBe(true);
+  expect(saved.body.item.locked_by).toBe(owner.body.peer_id);
+  expect(saved.body.item.locked_group).toBe("e344fa79-ordinary-tp-group-owner");
+});

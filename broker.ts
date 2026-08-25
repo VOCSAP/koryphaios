@@ -41,6 +41,9 @@ import {
   refusesInactiveToggle,
   refusesParkedArchive,
   isParked,
+  matchesLockOwner,
+  resolveLockedGroup,
+  resolveKeptLockedAt,
 } from "./shared/roadmap-lock.ts";
 import {
   APPROVAL_ANSWER_KINDS,
@@ -578,6 +581,25 @@ for (const col of [
   }
 }
 
+// Migration (card e344fa79): the missing half of the lock-owner composite
+// key. `locked_by` alone is unique only PER GROUP (peers.UNIQUE(peer_id,
+// group_id) above), so this column completes it -- the owning group_id,
+// stored RAW (see RoadmapItem.locked_group's doc comment for why, and why
+// that is safe now that rowToRoadmapItem is a pick-list, not a rest-spread).
+// NULL on every pre-existing row is a deliberate fail-OPEN migration state
+// (matchesLockOwner degrades to the old peer_id-only comparison for a NULL).
+// Self-heals specifically on the row's next CLAIM (resolvedLock.claimed,
+// see shared/roadmap-lock.ts), not on every write from the real owner --
+// see RoadmapLockResolution.claimed's doc comment for why that distinction
+// matters (an earlier version of this comment overclaimed the broader
+// form, corrected in review).
+try {
+  db.run("ALTER TABLE roadmap_items ADD COLUMN locked_group TEXT");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
+
 // Migration (CT1): directive cards. `directive` is null for every non-directive
 // item; target_peer_ids is a JSON array of plain-text peer_id snapshots (no FK).
 for (const col of ["directive TEXT", "target_peer_ids TEXT NOT NULL DEFAULT '[]'"]) {
@@ -1039,7 +1061,7 @@ function releaseStaleLocks(): void {
   const release = (where: string, params: string[]): void => {
     db.run(
       `UPDATE roadmap_items SET
-         locked = 0, locked_by = NULL, locked_at = NULL, operator_id = NULL,
+         locked = 0, locked_by = NULL, locked_group = NULL, locked_at = NULL, operator_id = NULL,
          lock_parked_at = NULL, lock_parked_by = NULL,
          status = CASE WHEN status = 'in_progress' THEN 'planned' ELSE status END,
          updated_by = 'lock-sweep', updated_at = datetime('now')
@@ -1079,12 +1101,32 @@ function releaseStaleLocks(): void {
   // Card aaf4537d: same park-immunity prefix as clause 1 -- a paused agent's
   // peer legitimately going inactive (or its session exiting) must not
   // strip a park the operator deliberately granted.
+  //
+  // Card e344fa79: the `p.group_id IS roadmap_items.locked_group` term below
+  // is NOT a reversal of fc444eda's ruling above -- that ruling decides
+  // whether a peer's mere EXISTENCE counts as "live" for a project
+  // (deliberately group-blind, so a peer's own liveness never depends on
+  // which group asks). This term answers a different question: is the peer
+  // row this EXISTS just found the SAME peer the lock recorded, or merely
+  // one that happens to share its peer_id string in a different group. The
+  // fail-open half matters as much as the term itself: `roadmap_items.
+  // locked_group IS NULL` is a migration-era row (see RoadmapItem.
+  // locked_group's doc comment), and `peers.group_id` is `NOT NULL DEFAULT
+  // 'default'` (never actually NULL) -- an unconditional `p.group_id IS
+  // roadmap_items.locked_group` would therefore make EVERY legacy locked row
+  // read as "no live owner" on the very first sweep after this ships (no
+  // peer row can ever satisfy `p.group_id IS NULL`), releasing every
+  // pre-migration lock out from under its real, still-active owner. The `OR
+  // roadmap_items.locked_group IS NULL` clause is what keeps this
+  // self-healing rather than a one-time mass release, same discipline as
+  // `matchesLockOwner`'s own NULL branch.
   release(
     `lock_parked_at IS NULL
      AND NOT EXISTS (
        SELECT 1 FROM peers p
        WHERE p.peer_id = roadmap_items.locked_by
          AND p.project_key IS roadmap_items.project_key
+         AND (roadmap_items.locked_group IS NULL OR p.group_id IS roadmap_items.locked_group)
          AND (p.status = 'active' OR datetime(p.last_seen) >= datetime('now', ?))
      )`,
     [`-${LOCK_GRACE_SEC} seconds`]
@@ -2055,6 +2097,23 @@ type RoadmapRow = Omit<
   inactive: number;
 };
 
+/**
+ * Card e344fa79: an explicit pick-list, not a `...row` rest-spread -- the
+ * canonical fail-open shape CLAUDE.md names (`toPublicPeer`'s old rest-
+ * spread let a 17th `Peer` field ship publicly with nothing failing). A row
+ * from `roadmap_items` reaches every group that lists the roadmap; a field
+ * added to the table (as `locked_group` itself just was) used to reach every
+ * one of them automatically, whether or not that was ever decided. Naming
+ * every field here means a FUTURE column is invisible to callers until a
+ * line is added for it (fails CLOSED: a legitimate new field is silently
+ * absent from the response, loud the moment anyone checks for it) instead of
+ * public the moment the migration runs (failed OPEN: silent, and the only
+ * way to notice is to already suspect it). `tests/broker-roadmap-lock.test.ts`
+ * pins this list against `PRAGMA table_info(roadmap_items)` in both
+ * directions (same pattern as `ROADMAP_IMPORT_COLUMNS`'s own coverage test),
+ * so a column added to the schema and forgotten here fails a test, not a
+ * silent audit.
+ */
 function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
   const parseList = (s: string): string[] => {
     try {
@@ -2065,18 +2124,37 @@ function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
     }
   };
   return {
-    ...row,
+    id: row.id,
+    project_key: row.project_key,
+    kind: row.kind,
+    title: row.title,
+    description: row.description,
+    rationale: row.rationale,
+    context: row.context,
+    priority: row.priority,
+    value: row.value,
+    effort: row.effort,
+    status: row.status,
     tags: parseList(row.tags),
     depends_on: parseList(row.depends_on),
-    locked: row.locked === 1,
-    locked_by: row.locked_by ?? null,
-    locked_at: row.locked_at ?? null,
+    created_by: row.created_by,
+    updated_by: row.updated_by,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    deleted_at: row.deleted_at,
+    queue: row.queue,
     directive: row.directive ?? null,
     // Legacy rows created before the migration have NULL here; default to [].
     target_peer_ids: row.target_peer_ids ? parseList(row.target_peer_ids) : [],
+    locked: row.locked === 1,
+    locked_by: row.locked_by ?? null,
+    locked_at: row.locked_at ?? null,
+    locked_group: row.locked_group ?? null,
     // string|null (SQLite) -> string|undefined (RoadmapItem's optional field).
     operator_id: row.operator_id ?? undefined,
     inactive: row.inactive === 1,
+    lock_parked_at: row.lock_parked_at,
+    lock_parked_by: row.lock_parked_by,
   };
 }
 
@@ -2167,6 +2245,17 @@ interface RoadmapAuthor {
    * attribution distinction.
    */
   operator_id?: string;
+  /**
+   * Card e344fa79: the resolved author's OWN group_id -- set ONLY on the
+   * instance_token branch below, the one branch that reads a real `peers`
+   * row (peer_id alone is not enough to know a peer's group; the row is).
+   * `undefined` on the reserved-name/operator branch (a signature proves a
+   * human, not a peer row -- there is no group to name) and on the unproven
+   * fallback (no token means no row to read). Callers compare and persist
+   * this value RAW against `locked_group` (see RoadmapItem.locked_group's
+   * doc comment for why storing it raw is safe here).
+   */
+  group_id?: string;
 }
 
 /**
@@ -2368,9 +2457,11 @@ function resolveRoadmapAuthor(
       return { error: "instance_token is a reserved sentinel", status: 403 };
     }
     // instance_token is the peers PRIMARY KEY, so this row is unambiguous.
+    // group_id read alongside peer_id (card e344fa79): this is the one
+    // lookup that can name the caller's OWN group unambiguously.
     const owner = db
-      .query("SELECT peer_id FROM peers WHERE instance_token = ?")
-      .get(token) as { peer_id: string } | null;
+      .query("SELECT peer_id, group_id FROM peers WHERE instance_token = ?")
+      .get(token) as { peer_id: string; group_id: string } | null;
     if (!owner) {
       log.warn(`${route}: refused an unknown instance_token`, { claimed_by: by });
       return { error: "unknown instance_token", status: 401 };
@@ -2400,7 +2491,7 @@ function resolveRoadmapAuthor(
         status: 403,
       };
     }
-    return { by: owner.peer_id, proven: true };
+    return { by: owner.peer_id, proven: true, group_id: owner.group_id };
   }
 
   // Card 39c40571 LAYER 2: the one author layer 1 still took on faith.
@@ -2756,6 +2847,12 @@ function handleRoadmapUpsert(
     const existing = getRoadmapItem(body.id);
     if (!existing) return { error: "unknown roadmap item", status: 404 };
 
+    // Card e344fa79: the caller's OWN group -- `undefined` (author.group_id
+    // unresolved: an operator/deck-signed write, or an unproven claim with
+    // no instance_token) compares as `null`, never as a wildcard match. See
+    // matchesLockOwner's doc comment in shared/roadmap-lock.ts.
+    const authorLockedGroup = author.group_id ?? null;
+
     // Work-lock resolution (PLAN K2), resolved ONCE, before the guard, so the
     // guard and the DB write below read the same answer instead of two
     // independent computations that can drift (card e7b364dc's original bug
@@ -2820,7 +2917,11 @@ function handleRoadmapUpsert(
       (body.status !== undefined ||
         resolvedLock.locked !== existing.locked ||
         resolvedLock.lockedBy !== existing.locked_by) &&
-      by !== existing.locked_by &&
+      // Card e344fa79: the OWNER check is a (peer_id, group) pair, not a bare
+      // peer_id -- `by !== existing.locked_by` alone let a legitimately-
+      // registered homonym peer in a DIFFERENT group satisfy this guard,
+      // since peer_id is unique only per group. See matchesLockOwner.
+      !matchesLockOwner(existing.locked_by, existing.locked_group, by, authorLockedGroup) &&
       by !== "deck" &&
       // Card 39c40571 layer 1: `force` is a claim of certainty, so it is only
       // honoured for a caller that PROVED who it is -- an anonymous body could
@@ -2911,17 +3012,49 @@ function handleRoadmapUpsert(
     // resolvedLock was already computed above, before the guard -- this write
     // consumes that SAME object rather than resolving the lock a second time
     // (the two-readings-of-the-body drift is exactly what produced card
-    // e7b364dc's original bug). A same-owner re-claim keeps locked_at.
-    const isSameOwnerReclaim =
-      resolvedLock.locked && existing.locked && existing.locked_by === resolvedLock.lockedBy;
-    const keptLockedAt = isSameOwnerReclaim ? existing.locked_at : null;
+    // e7b364dc's original bug).
+    //
+    // Card e344fa79, review round 2 (EIGHTH site, corrected twice): the
+    // first fix here used `existing.locked_by === resolvedLock.lockedBy`
+    // (a same-OWNER-NAME check) to decide whether keptLockedAt/
+    // nextLockedGroup preserve the row's existing values or stamp the
+    // CURRENT WRITER's own. That mixes two different identities: the NAME
+    // comes from `resolvedLock` (which only changes on an actual claim --
+    // see below), the GROUP came from `authorLockedGroup` (always the
+    // CURRENT caller's own group, claim or not). On an ORDINARY write from
+    // a third party (no status/locked field, guard correctly lets it
+    // through because nothing lock-relevant moved), `resolvedLock.lockedBy`
+    // reads back UNCHANGED (still the true owner's name, per
+    // resolveRoadmapLock's own no-op branch), so the name-based check read
+    // "same owner" -- and then stamped the ACTUAL WRITER's own group onto
+    // the card regardless, corrupting `locked_group` on a lock nobody
+    // reclaimed. Worst case (measured by review): the Deck's own routine
+    // signed writes (`by:'deck'`, no peer row, `authorLockedGroup` null)
+    // would NULL a locked card's `locked_group` on every ordinary save,
+    // silently reopening the bare-peer_id comparison this whole card exists
+    // to close.
+    //
+    // The real question a caller needs is not "does the name match" but
+    // "did THIS write actually claim the lock" -- resolveRoadmapLock is the
+    // only place that knows, so it now says so directly via `claimed` (see
+    // RoadmapLockResolution.claimed's doc comment in shared/roadmap-lock.ts).
+    // Both helpers below preserve the existing value on any NON-claiming
+    // write (an ordinary edit, a re-sent status from the owner that does not
+    // re-trigger a claim) and stamp fresh only when `claimed` is true --
+    // which is also the one and only place `locked_group` self-heals a
+    // legacy NULL row (see the migration comment above, and
+    // matchesLockOwner's doc comment). Pulled into shared/roadmap-lock.ts,
+    // truth-tabled in tests/roadmap-lock.test.ts, same reason
+    // resolveRoadmapLock itself is a pure function and not inlined here.
+    const keptLockedAt = resolveKeptLockedAt(resolvedLock, existing.locked_at);
+    const nextLockedGroup = resolveLockedGroup(resolvedLock, existing.locked_group, authorLockedGroup);
     // Card aaf4537d, DELTA (round-3 mutation review): the park is scoped to
     // the OPERATOR who parked it, never to the peer-lock reclaim question
-    // above (isSameOwnerReclaim compares locked_by, a different actor
-    // entirely). Conflating the two was the two-upsert service door: a
-    // foreign, non-archiving write (nextStatus !== 'in_progress', so
-    // isSameOwnerReclaim is false) silently nulled the park, and a SECOND
-    // upsert with status='archived' then sailed through refusesParkedArchive
+    // above (keptLockedAt/nextLockedGroup key on `resolvedLock.claimed`, a
+    // different actor entirely). Conflating the two was the two-upsert
+    // service door: a foreign, non-archiving write (nextStatus !== 'in_progress',
+    // so `resolvedLock.locked` is false) silently nulled the park, and a
+    // SECOND upsert with status='archived' then sailed through refusesParkedArchive
     // -- that guard only ever sees THIS call's own row state, it has no
     // memory of a park a prior write already erased. The park now survives
     // every write except two: the SAME operator who parked it touching the
@@ -2949,7 +3082,7 @@ function handleRoadmapUpsert(
          kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
          value = ?, effort = ?, status = ?, tags = ?, depends_on = ?, queue = ?,
          directive = ?, target_peer_ids = ?,
-         locked = ?, locked_by = ?,
+         locked = ?, locked_by = ?, locked_group = ?,
          locked_at = CASE WHEN ? = 0 THEN NULL ELSE COALESCE(?, datetime('now')) END,
          operator_id = COALESCE(?, operator_id),
          inactive = ?,
@@ -2977,6 +3110,7 @@ function handleRoadmapUpsert(
         JSON.stringify(next.target_peer_ids),
         resolvedLock.locked ? 1 : 0,
         resolvedLock.lockedBy,
+        nextLockedGroup,
         resolvedLock.locked ? 1 : 0,
         keptLockedAt,
         author.operator_id ?? null,
@@ -3041,14 +3175,18 @@ function handleRoadmapUpsert(
     return { error: "directive is only valid for kind 'directive'", status: 400 };
   }
 
+  // Card e344fa79: a card born locked stamps the creating author's own
+  // group alongside locked_by, the same value every claim site stores.
+  const createLockedGroup = createLocked ? (author.group_id ?? null) : null;
+
   const id = randomUUID();
   db.run(
     `INSERT INTO roadmap_items
        (id, project_key, kind, title, description, rationale, context, priority, value,
         effort, status, tags, depends_on, created_by, updated_by,
-        created_at, updated_at, deleted_at, queue, directive, target_peer_ids, locked, locked_by, locked_at,
-        operator_id, inactive, lock_parked_at, lock_parked_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?, ?, ?, ?, ?,
+        created_at, updated_at, deleted_at, queue, directive, target_peer_ids, locked, locked_by, locked_group,
+        locked_at, operator_id, inactive, lock_parked_at, lock_parked_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?, ?, ?, ?, ?, ?,
              CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?, ?, NULL, NULL)`,
     [
       id,
@@ -3071,6 +3209,7 @@ function handleRoadmapUpsert(
       JSON.stringify(createTargets),
       createLocked ? 1 : 0,
       createLocked ? by : null,
+      createLockedGroup,
       createLocked ? 1 : 0,
       author.operator_id ?? null,
       createInactive ? 1 : 0,
@@ -3093,8 +3232,15 @@ function handleRoadmapArchive(
   const existing = getRoadmapItem(body.id);
   if (!existing) return { error: "unknown roadmap item", status: 404 };
 
+  // Card e344fa79: same discipline as handleRoadmapUpsert's guard.
+  const authorLockedGroup = author.group_id ?? null;
+
   // Same lock guard as upsert (PLAN K2): archiving is a status change.
-  if (existing.locked && by !== existing.locked_by && by !== "deck") {
+  if (
+    existing.locked &&
+    !matchesLockOwner(existing.locked_by, existing.locked_group, by, authorLockedGroup) &&
+    by !== "deck"
+  ) {
     return {
       error: `item is locked by '${existing.locked_by}' (actively working on it) -- cannot archive`,
       status: 409,
@@ -3125,7 +3271,7 @@ function handleRoadmapArchive(
     `UPDATE roadmap_items SET
        status = 'archived',
        deleted_at = COALESCE(deleted_at, datetime('now')),
-       locked = 0, locked_by = NULL, locked_at = NULL,
+       locked = 0, locked_by = NULL, locked_group = NULL, locked_at = NULL,
        operator_id = COALESCE(?, operator_id),
        lock_parked_at = NULL, lock_parked_by = NULL,
        updated_by = ?, updated_at = datetime('now')
@@ -3833,6 +3979,28 @@ function handleRoadmapImport(body: {
             ? it.locked_at
             : null
           : (existing?.locked_at ?? null);
+      // Card e344fa79: same file-wins/existing-wins discipline as
+      // locked_by/locked_at -- no charset check needed, unlike locked_by.
+      // Not because the value is a digest (it is the RAW group_id, per this
+      // card's final design -- see RoadmapItem.locked_group's doc comment),
+      // but because of what it is COMPARED against: on every route that
+      // acts on a lock (upsert, archive, the owner-gone sweep),
+      // authorLockedGroup/`p.group_id` comes ONLY from resolveRoadmapAuthor's
+      // instance_token-resolved SELECT on `peers`, never from request-body
+      // content -- so a caller can never present a locked_group string that
+      // then gets compared as if it were an identity claim, the forgery
+      // class normalizeAuthorIdentity exists to close for `by`/`locked_by`.
+      // On THIS route specifically, `by` is never proven either way (see the
+      // note above resolveRoadmapAuthor), so a file-declared locked_group
+      // here is only ever as trustworthy as this whole route already treats
+      // locked_by, which the existing unconditional locked-and-!force skip
+      // above already covers.
+      const lockedGroupVal =
+        it.locked_group !== undefined
+          ? typeof it.locked_group === "string"
+            ? it.locked_group
+            : null
+          : (existing?.locked_group ?? null);
       // Card aaf4537d: same file-wins/existing-wins discipline as the three
       // lock columns just above (a re-import of a parked card must not
       // silently unpark it, and a file that WAS built from a parked export
@@ -3951,6 +4119,7 @@ function handleRoadmapImport(body: {
         ),
         locked: lockedVal ? 1 : 0,
         locked_by: lockedByVal,
+        locked_group: lockedGroupVal,
         locked_at: lockedAtVal,
         // Card edefff05: same discipline as created_by/updated_by above, not
         // the file-wins discipline the content fields use just above --

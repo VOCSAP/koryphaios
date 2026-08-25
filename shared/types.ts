@@ -407,6 +407,32 @@ export interface RoadmapItem {
   /** ISO timestamp of the lock, for the TTL sweep. null when unlocked. */
   locked_at: string | null;
   /**
+   * Card e344fa79: the lock owner's OWN group_id -- `locked_by` alone is
+   * only unique PER GROUP (peers.UNIQUE(peer_id, group_id)), so on a broker
+   * shared by several groups a legitimate homonym peer in another group can
+   * satisfy a bare `locked_by` comparison. This is the missing half of that
+   * composite key, not a new SCOPE column: the roadmap's scope stays
+   * `project_key` alone (operator arbitration fc444eda), this column answers
+   * "who holds the lock", not "which group may see this card".
+   *
+   * Stored RAW (team-lead arbitration, reversing an initial digest-based
+   * design once bun:sqlite was measured to have no SQL scalar-function
+   * registration -- a digest would have made the owner-gone sweep's
+   * correlated `peers` join uncomputable in pure SQL). Leaving this
+   * interface publicly exposed to every group listing the roadmap was
+   * judged the smaller risk than leaving locked_group's SQL comparison
+   * split across a JS pre-pass: `rowToRoadmapItem` (broker.ts) is now an
+   * explicit pick-list rather than a `...row` rest-spread, which closes the
+   * fail-open for every column, present and future, not just this one --
+   * see `ROADMAP_IMPORT_COLUMNS`'s doc comment above for the same
+   * discipline already applied to the import path.
+   *
+   * null when unlocked, or when the row predates this column (fail-open
+   * migration state -- see `matchesLockOwner`'s doc comment in
+   * shared/roadmap-lock.ts).
+   */
+  locked_group: string | null;
+  /**
    * kind 'directive' (CT1): the app-executed command; null for every other
    * kind. Persisted so the card survives broker restarts like any roadmap row.
    */
@@ -524,6 +550,7 @@ export const ROADMAP_IMPORT_COLUMNS = [
   "locked",
   "locked_by",
   "locked_at",
+  "locked_group",
   "operator_id",
   "inactive",
   "lock_parked_at",
