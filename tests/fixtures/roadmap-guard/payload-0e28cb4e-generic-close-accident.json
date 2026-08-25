@@ -1,0 +1,8 @@
+{
+  "hook_event_name": "PreToolUse",
+  "tool_name": "mcp__claude-peers__roadmap_add",
+  "tool_input": {
+    "title": "t",
+    "description": "Some real description text that ends abruptly.</parameter>\n<parameter name=\"rationale\">rest of the content that should have gone to rationale, swallowed here instead"
+  }
+}

@@ -1,4 +1,4 @@
-import { test, expect, afterAll } from "bun:test";
+import { test, expect, beforeAll, afterAll } from "bun:test";
 import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -31,8 +31,8 @@ import {
 // source's own header for the measurement trail).
 //
 // WHICH ARTIFACT: the plugin executes the .mjs, not the .ts, so a source
-// edit with no rebuild is invisible to any test that only imports the .ts.
-// This file tests BOTH, deliberately, for different reasons:
+// edit with no rebuild would be invisible to any test that only imports the
+// .ts. This file tests BOTH, deliberately, for different reasons:
 //   - unit-level edge cases (no-preceding-close, no-known-field condition
 //     on the target) import the .ts directly -- fast, precise, and these
 //     are pure-function properties that do not depend on which artifact
@@ -40,17 +40,23 @@ import {
 //     (imports the sibling hook's .ts directly), per the team lead's
 //     explicit call on this exact question.
 //   - the FIVE real roadmap-sample payloads (the ones that actually decide
-//     whether this hook is correct) are piped into the BUILT .mjs via a
+//     whether this hook is correct) are piped into a REAL BUILT .mjs via a
 //     real spawned process -- that is what a live Claude Code session
 //     actually runs, so these are the only tests that can be wrong in the
 //     way that matters.
-//   - a dedicated FRESHNESS test rebuilds the .ts with the exact command
-//     desktop/package.json's build:hook script uses and byte-diffs the
-//     result against the checked-in .mjs, so a future source edit without
-//     a rebuild is caught by name, not by accident (the team lead noted CI
-//     itself always rebuilds and would never catch this drift locally --
-//     tracked separately as its own roadmap card, not this file's job to
-//     solve, only to detect for a developer running tests before pushing).
+//
+// THE BUNDLE IS NOT COMMITTED (card 7e5c0f08, 2026-08-25): it was tracked by
+// oversight (never added to desktop/.gitignore next to its two siblings
+// desk-backchannel-hook.mjs and approval-hook.mjs), and committing it forced
+// a byte-exact freshness test whose result depended on the bun VERSION and
+// the checkout's line-ending conversion, not just on the source -- it went
+// red on all 3 CI legs the same day it shipped, then red again on Windows
+// alone from a second, unrelated cause (CRLF). This file now BUILDS ITS OWN
+// throwaway copy in a `beforeAll` (see `builtMjsPath` below) instead of
+// reading a checked-in file, which removes the freshness test entirely (a
+// self-built copy cannot go stale) and also closes the build-cwd pin (card
+// 6781c2a8's M1): the build always runs from `DESKTOP_DIR`, never from
+// whatever directory `bun test` happened to be invoked from.
 //
 // FIXTURES: tests/fixtures/roadmap-guard/*.json are BYTE COPIES (md5-
 // verified against the release-engineer's own probe files under
@@ -92,7 +98,6 @@ import {
 
 const DESKTOP_DIR = resolve(import.meta.dir, "..", "desktop");
 const HOOK_TS = join(DESKTOP_DIR, "hooks", "roadmap-guard-hook.ts");
-const HOOK_MJS = join(DESKTOP_DIR, "deck-plugin", "hooks", "roadmap-guard-hook.mjs");
 const HOOKS_JSON = join(DESKTOP_DIR, "deck-plugin", "hooks", "hooks.json");
 const FIXTURES_DIR = join(import.meta.dir, "fixtures", "roadmap-guard");
 
@@ -107,6 +112,29 @@ afterAll(() => {
   }
 });
 
+// Card 7e5c0f08: the .mjs this file exercises is no longer committed, and CI
+// runs this test BEFORE `npm run build:hook` (`.github/workflows/desktop-
+// build.yml` installs+tests desktop/ before its own build step), so the
+// checked-out tree has no bundle to read at test time. Build a throwaway
+// copy once, into a scratch dir cleaned up by the `afterAll` above, using
+// the exact command desktop/package.json's build:hook script uses for this
+// file -- same source, same target, same cwd (DESKTOP_DIR) as a real build.
+let builtMjsPath: string;
+beforeAll(async () => {
+  const scratchDir = mkdtempSync(join(tmpdir(), "cp-roadmap-guard-selfbuild-"));
+  tmpDirs.push(scratchDir);
+  builtMjsPath = join(scratchDir, "roadmap-guard-hook.mjs");
+  const proc = Bun.spawn(
+    ["bun", "build", "hooks/roadmap-guard-hook.ts", "--target=node", `--outfile=${builtMjsPath}`],
+    { cwd: DESKTOP_DIR, stdout: "ignore", stderr: "pipe" }
+  );
+  const exitCode = await proc.exited;
+  if (exitCode !== 0) {
+    const stderr = await new Response(proc.stderr).text();
+    throw new Error(`self-build of roadmap-guard-hook.mjs failed (exit ${exitCode}): ${stderr}`);
+  }
+});
+
 interface DecisionOutput {
   hookSpecificOutput?: {
     hookEventName?: string;
@@ -115,8 +143,9 @@ interface DecisionOutput {
   };
 }
 
-/** Spawns the REAL built .mjs with `stdinText` on stdin, returns its raw stdout. */
-async function runHookMjs(stdinText: string, mjsPath: string = HOOK_MJS): Promise<string> {
+/** Spawns the self-built .mjs (see `builtMjsPath` above) with `stdinText` on
+ * stdin, returns its raw stdout. */
+async function runHookMjs(stdinText: string, mjsPath: string = builtMjsPath): Promise<string> {
   const proc = Bun.spawn(["bun", mjsPath], {
     stdin: "pipe",
     stdout: "pipe",
@@ -187,79 +216,39 @@ test(
   15_000
 );
 
-// --- Build freshness: catches a .ts edit that was never rebuilt into the .mjs ---
-//
-// CORRECTED PREMISE (team lead + debugger, 2026-08-24, after this test broke
-// CI on all 3 OS legs): this is a BYTE pin on bun build's bundling output,
-// which depends on the bun VERSION that produced it, not only on the source
-// content -- measured live: bun 1.4.0 alphabetizes the `export {}` list,
-// 1.3.13 does not, so the SAME source produces two different byte sequences
-// depending on which bun built it. The first version of this comment got
-// the consequence backwards: it said ".bun-version being pinned makes CI
-// deterministic", which is true of the RUNNER, but says nothing about
-// whether the COMMITTED ARTIFACT was itself produced by that pinned
-// version. When it wasn't (as happened here: the checked-in .mjs was a
-// 1.3.13 product, CI runs 1.4.0), the pin does not protect this test -- it
-// makes it deterministically WRONG on every CI run, not deterministically
-// right. What actually determines whether this comparison is meaningful is
-// whether THIS PROCESS's own `Bun.version` matches `.bun-version`, checked
-// below, not assumed.
-//
-// Consequence: this test SKIPS (visibly -- the local/pinned versions are
-// baked into the test NAME itself, printed by bun test whether the test
-// runs or is skipped) when the running bun does not match the repo's
-// pinned `.bun-version`. On a match (always true in CI, since .bun-version
-// IS what CI installs) the byte comparison runs exactly as before.
-const PINNED_BUN_VERSION = readFileSync(
-  join(import.meta.dir, "..", ".bun-version"),
-  "utf-8"
-).trim();
-const BUN_VERSION_MATCHES_PIN = Bun.version === PINNED_BUN_VERSION;
+// --- Card 0e28cb4e: the SECOND real closing-tag spelling (generic
+// `</parameter>`, not field-named). Measured 2026-08-25: this form is what
+// Claude Code's own tool-call serialization always emits, and the
+// b313f0c3/800b0fe3 rule above only ever matched the semantic `</field>`
+// spelling, so this payload passed straight through (empty stdout, exit 0,
+// no deny) before the fix that added the `</parameter>` alternative to
+// `detectSerializationAccident`'s regex. Mutation-tested below: removing
+// that alternative reproduces the exact red this test showed pre-fix.
 
-// Belt-and-suspenders on visibility: measured live (bun 1.3.13) that
-// `bun test`'s default reporter does NOT print a per-test "» <name>" line
-// for a skipped test when the file also has passing tests -- only the
-// aggregate "1 skip" count shows, which flags that SOMETHING was skipped
-// but not why. The test NAME below still carries the reason for anyone who
-// greps/opens the report, but a bare test count is not visible enough on
-// its own, so this also unconditionally logs the reason at MODULE LOAD
-// TIME (always runs, skipIf only skips the test BODY) -- printed regardless
-// of bun version or reporter verbosity.
-if (!BUN_VERSION_MATCHES_PIN) {
-  console.warn(
-    `[roadmap-guard-hook.test.ts] SKIPPING the .mjs freshness/byte-diff test: ` +
-      `running Bun.version=${Bun.version} does not match pinned .bun-version=${PINNED_BUN_VERSION}. ` +
-      `This is expected on a dev machine running a different local bun; it is not evidence of source drift.`
-  );
-}
-
-test.skipIf(!BUN_VERSION_MATCHES_PIN)(
-  `the checked-in .mjs is byte-identical to a fresh rebuild of the .ts (same command as build:hook)` +
-    ` [pinned .bun-version=${PINNED_BUN_VERSION}, running Bun.version=${Bun.version}` +
-    `${BUN_VERSION_MATCHES_PIN ? "" : " -- SKIPPED, versions differ, this comparison is meaningless here"}]`,
+test(
+  "card 0e28cb4e: accident with the GENERIC closing spelling (`</parameter>` instead of `</description>`) -> DENY",
   async () => {
-  const scratchDir = mkdtempSync(join(tmpdir(), "cp-roadmap-guard-rebuild-"));
-  tmpDirs.push(scratchDir);
-  const rebuiltPath = join(scratchDir, "roadmap-guard-hook.rebuild.mjs");
+    const out = await runHookMjs(loadFixture("payload-0e28cb4e-generic-close-accident.json"));
+    expect(out.trim().length).toBeGreaterThan(0);
+    const decision = JSON.parse(out) as DecisionOutput;
+    expect(decision.hookSpecificOutput?.permissionDecision).toBe("deny");
+    expect(decision.hookSpecificOutput?.permissionDecisionReason).toContain('"description"');
+    // The remedy must name the tag spelling actually present in the
+    // caller's text (the generic form here), not an assumed `</description>`
+    // that never appeared -- see buildRefusalReason's closingTag use.
+    expect(decision.hookSpecificOutput?.permissionDecisionReason).toContain("</parameter>");
+  },
+  15_000
+);
 
-  // Exact same invocation as desktop/package.json's build:hook script for
-  // this file (verified by reading that script, not assumed): `bun build
-  // hooks/roadmap-guard-hook.ts --target=node --outfile=...`, run from
-  // desktop/ as cwd (the relative `hooks/...` source path depends on it).
-  const proc = Bun.spawn(
-    ["bun", "build", "hooks/roadmap-guard-hook.ts", "--target=node", `--outfile=${rebuiltPath}`],
-    { cwd: DESKTOP_DIR, stdout: "ignore", stderr: "pipe" }
-  );
-  const exitCode = await proc.exited;
-  if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text();
-    throw new Error(`rebuild failed (exit ${exitCode}): ${stderr}`);
-  }
-
-  const rebuilt = readFileSync(rebuiltPath, "utf-8");
-  const checkedIn = readFileSync(HOOK_MJS, "utf-8");
-  expect(rebuilt).toBe(checkedIn);
-});
+test(
+  "card 0e28cb4e negative control: a partial roadmap_update citing the GENERIC spelling as an incomplete fragment -> PASS",
+  async () => {
+    const out = await runHookMjs(loadFixture("payload-0e28cb4e-generic-close-citation.json"));
+    expect(out).toBe("");
+  },
+  15_000
+);
 
 // --- Fail-open, verified on the REAL spawned process, not just buildDecision ---
 // Already independently confirmed by the reviewer on 4 inputs (non-JSON

@@ -8,16 +8,31 @@
 //   real accident leaves `rationale` ending in its own genuine content,
 //   immediately followed by `</rationale>\n<parameter name="context">` and
 //   then the ENTIRE content meant for `context`. The discriminating part is
-//   the CLOSING TAG OF THE FIELD ITSELF (`</rationale>`) immediately
-//   followed by an opening tag: a citation never carries the closing tag of
-//   the field that contains it, because that would require quoting the
-//   markup AND simultaneously having it swallow the rest of the value --
-//   which is exactly the accident, not a description of it.
+//   the CLOSING TAG OF THE FIELD ITSELF immediately followed by an opening
+//   tag: a citation never carries the closing tag of the field that
+//   contains it, because that would require quoting the markup AND
+//   simultaneously having it swallow the rest of the value -- which is
+//   exactly the accident, not a description of it.
+//
+//   TWO real spellings of "the field's own closing tag" exist, both
+//   measured live (card 0e28cb4e, 2026-08-25, by replay against the built
+//   .mjs -- the b313f0c3 rule had covered only the first for a full day):
+//     - SEMANTIC: `</rationale>`, field-named. b313f0c3's own accident.
+//     - GENERIC: `</parameter>`, not field-named. This is the form Claude
+//       Code's tool-call serialization always emits (every
+//       `<parameter name="X">...</parameter>` pair closes generically), so
+//       it is the more common of the two, not an edge case. A synthetic
+//       payload using this spelling passed straight through the
+//       semantic-only regex (exit 0, empty stdout, no deny) before this
+//       fix. Both spellings answer the same invariant above; the regex
+//       accepts either as "this field's own closing tag" (see
+//       `detectSerializationAccident` below).
 //
 //   The negative control is real too (card 800b0fe3.context): a deliberate
 //   citation of the same syntax, but as an INCOMPLETE fragment
 //   (`` `<parameter name=` `` inside backticks, no closing quote/bracket,
-//   mid-sentence, and critically no preceding `</context>`).
+//   mid-sentence, and critically no preceding closing tag of either
+//   spelling).
 //
 //   Reviewed 2026-08-24 (desktop-7b2civn-koryphaios-2): an earlier version
 //   used "opening tag naming another field, AND that field empty" as the
@@ -66,6 +81,11 @@ export interface AccidentMatch {
    * non-text field (tags, priority, ...) or a name this tool doesn't even
    * have. The pair alone is the signal; the target's identity is not. */
   targetField: string;
+  /** The literal closing-tag spelling that actually matched: either the
+   * semantic `</field>` form or the generic `</parameter>` form (card
+   * 0e28cb4e). Used verbatim in the refusal message's remedy so it names
+   * the tag actually present in the caller's text, not an assumed one. */
+  closingTag: string;
   /** The exact matched text (closing tag + opening tag), verbatim, for the
    * refusal message. */
   matchedTag: string;
@@ -93,12 +113,28 @@ export function detectSerializationAccident(
 
     // Field names here are our own static list (no operator input), so
     // interpolating into a RegExp is safe -- nothing to escape.
+    //
+    // TWO closing spellings for "this field's own closing tag", both
+    // measured live against the real .mjs (card 0e28cb4e, 2026-08-25):
+    //   - `</${field}>` -- the SEMANTIC form, field-named. Confirmed real
+    //     (card b313f0c3's own accident: `</rationale>` then
+    //     `<parameter name="context">`).
+    //   - `</parameter>` -- the GENERIC form. This is the form Claude
+    //     Code's own tool-call serialization always emits (every
+    //     `<parameter name="X">...</parameter>` pair closes generically,
+    //     never with `</X>`), so it is the MORE common of the two, not an
+    //     edge case. A synthetic replay confirmed the semantic-only regex
+    //     let this form straight through: exit 0, empty stdout, no deny.
+    // Both spellings answer the SAME invariant the file header already
+    // states (this field's own closing tag immediately followed by
+    // another parameter's opening tag) -- this is not a third enumerated
+    // case, just the second real spelling of the first case.
     const closeThenOpenRe = new RegExp(
-      `</${field}>\\s*<parameter\\s+name\\s*=\\s*"([a-zA-Z0-9_]+)"\\s*>`
+      `(</${field}>|</parameter>)\\s*<parameter\\s+name\\s*=\\s*"([a-zA-Z0-9_]+)"\\s*>`
     );
     const match = closeThenOpenRe.exec(value);
     if (match) {
-      return { field, targetField: match[1]!, matchedTag: match[0] };
+      return { field, targetField: match[2]!, closingTag: match[1]!, matchedTag: match[0] };
     }
   }
   return null;
@@ -115,11 +151,16 @@ export function detectSerializationAccident(
  * `context` replacement is exactly why `roadmap_append_context` exists.
  * Never tell the caller to fill fields it did not intend to touch. */
 export function buildRefusalReason(m: AccidentMatch): string {
+  // The remedy names the tag SPELLING that actually matched (`</field>` or
+  // the generic `</parameter>`, card 0e28cb4e) -- not an assumed
+  // `</${field}>`, which would be a wrong instruction on the generic form
+  // (the caller's text does not contain that literal tag to break).
+  const brokenClosingTag = `< ${m.closingTag.slice(1)}`;
   return [
     `roadmap-guard: field "${m.field}" contains ${m.matchedTag}, right where "${m.field}" itself should have ended.`,
     `That is this field's own closing tag followed by another parameter's opening tag -- content for two parameters landed in one.`,
     `If this is accidental: split the content of "${m.field}" back into the parameters it was meant for, and resend.`,
-    `If you are quoting this markup on purpose: break the closing tag itself, e.g. write "< /${m.field}>" with a space, then resend.`,
+    `If you are quoting this markup on purpose: break the closing tag itself, e.g. write "${brokenClosingTag}" with a space, then resend.`,
   ].join(" ");
 }
 
