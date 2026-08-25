@@ -98,7 +98,7 @@ export function detectSerializationAccident(
     );
     const match = closeThenOpenRe.exec(value);
     if (match) {
-      return { field, targetField: match[1], matchedTag: match[0] };
+      return { field, targetField: match[1]!, matchedTag: match[0] };
     }
   }
   return null;

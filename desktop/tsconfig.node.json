@@ -37,6 +37,9 @@
     "../shared/approval.ts",
     "../shared/text.ts",
     "../shared/types.ts",
-    "../shared/project-key.ts"
+    "../shared/project-key.ts",
+    "../shared/approval-client.ts",
+    "../shared/peer-cache.ts",
+    "hooks/**/*.ts"
   ]
 }
