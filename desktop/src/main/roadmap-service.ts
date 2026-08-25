@@ -225,7 +225,7 @@ function queuePos(v: unknown): number | null {
  * Shape one roadmap item coming off the wire, or null when it is unusable.
  *
  * PICK-LIST, NEVER A SPREAD. Do not "simplify" this into `{ ...raw, tags: ... }`:
- * `RoadmapItem` has 26 fields and the list below covers all 26, so a 27th added
+ * `RoadmapItem` has 27 fields and the list below covers all 27, so a 28th added
  * broker-side would travel through unvalidated with nothing failing, which is
  * the canonical fail-open shape this guard exists to avoid. Naming every field
  * means a new one simply does not arrive until someone adds it here. The
@@ -266,6 +266,10 @@ export function sanitizeRoadmapItem(raw: unknown): RoadmapItem | null {
     locked: r.locked === true,
     locked_by: nullableStr(r.locked_by),
     locked_at: nullableStr(r.locked_at),
+    // Card e344fa79 lineage: the lock owner's group_id, consumed by
+    // idle-lock.ts's ownsIdleLock so watchIdleLocks can no longer match a
+    // homonym peer_id in a different group.
+    locked_group: nullableStr(r.locked_group),
     directive: typeof r.directive === 'string' ? oneOfOrNull(r.directive) : null,
     target_peer_ids: strList(r.target_peer_ids),
     // Card edefff05: optional (undefined, never null) -- unlike the

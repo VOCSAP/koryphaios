@@ -91,6 +91,7 @@ function wellFormed(): Record<string, unknown> {
     locked: false,
     locked_by: null,
     locked_at: null,
+    locked_group: null,
     directive: null,
     target_peer_ids: [],
     inactive: false
@@ -186,13 +187,19 @@ test("id and project_key are STRUCTURAL: the item is dropped, not coerced", () =
 });
 
 test("PICK-LIST, not spread: an unknown broker field does not travel through", () => {
-  // RoadmapItem has 26 fields (card c33a5968 added inactive, after edefff05's
-  // operator_id) and the pick-list covers all 26 (measured), so the next one
-  // broker-side is the 27th.
-  const item = sanitizeRoadmapItem({ ...wellFormed(), surprise_27th_field: "x" }) as RoadmapItem;
+  // RoadmapItem has 27 fields (card e344fa79 lineage added locked_group,
+  // after c33a5968's inactive and edefff05's operator_id) and the pick-list
+  // covers all 27 (measured), so the next one broker-side is the 28th.
+  const item = sanitizeRoadmapItem({ ...wellFormed(), surprise_28th_field: "x" }) as RoadmapItem;
   expect(item).not.toBeNull();
-  expect(Object.keys(item)).not.toContain("surprise_27th_field");
-  expect(Object.keys(item)).toHaveLength(26);
+  expect(Object.keys(item)).not.toContain("surprise_28th_field");
+  expect(Object.keys(item)).toHaveLength(27);
+});
+
+test("locked_group survives when the broker sends it, and coerces non-string to null", () => {
+  expect(sanitized({ locked_group: "a1b2c3" }).locked_group).toBe("a1b2c3");
+  expect(sanitized({ locked_group: 42 }).locked_group).toBeNull();
+  expect(sanitized({}).locked_group).toBeNull();
 });
 
 // Card edefff05: the existing pick-list coverage above proves REJECTION of an

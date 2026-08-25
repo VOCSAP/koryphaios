@@ -247,12 +247,27 @@ export function refusesParkedArchive(
 // digest-based design once bun:sqlite was measured to have no SQL scalar-
 // function registration -- a digest is not computable inline by the owner-
 // gone sweep's correlated `peers` join, which needs a plain SQL comparison
-// across many rows, not a value already resolved in JS for one). The
-// leak this once guarded against (a raw group_id reaching every group that
-// lists the roadmap, via broker.ts's rowToRoadmapItem) is now closed at its
-// own root instead: that function is an explicit pick-list, not a `...row`
-// rest-spread, so a value is only ever public because a line here names it,
-// not because nothing yet stopped a spread from carrying it.
+// across many rows, not a value already resolved in JS for one). The leak
+// this once guarded against (a raw group_id reaching every group that lists
+// the roadmap, via broker.ts's rowToRoadmapItem) is not CLOSED by the
+// pick-list -- it is AUTHORIZED by it: the pick-list explicitly NAMES
+// `locked_group`, and `/roadmap/list` requires only `project_key`, no group
+// membership or instance_token. What the pick-list closes is the accidental
+// half (a value public only because nothing yet stopped a `...row` spread
+// from carrying it) -- it does not make this field non-public. Measured
+// (shared/config.ts): `locked_group` IS `computeGroupId(secret)`, the first
+// 32 hex chars (128 bits) of the same sha256 digest `computeGroupSecretHash`
+// returns in full (64 hex chars) for the broker's own TOFU validation --
+// half of a group's auth secret hash, not an opaque id, EXCEPT for the
+// 'default' group, whose id is the literal string "default" and whose
+// secret_hash is NULL (both functions special-case a null secret), so there
+// is no hash for this to be half of in that one case. Reviewed and accepted
+// as pre-existing (shipped in 09bccfd): a truncated 128-bit residual is not
+// exploitable. Deck-side, the only two current consumers of this field are
+// `sanitizeRoadmapItem` (desktop/src/main/roadmap-service.ts) and
+// `ownsIdleLock` (desktop/src/main/idle-lock.ts) -- re-measure this list
+// rather than trusting it, since a future consumer widening the field's
+// exposure would not fail anything here.
 
 /**
  * True when `by` (the claimed author of THIS write) is the same peer that

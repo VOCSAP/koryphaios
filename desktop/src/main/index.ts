@@ -76,6 +76,7 @@ import {
   type DispatchedEntry
 } from './dispatch'
 import { directiveKeys, isDirectiveCommand, resolveDirectiveTargets } from './directive'
+import { ownsIdleLock } from './idle-lock'
 import type { AssignResult, DispatchResult, RoadmapItem, StopResult } from '@shared/types'
 import { composeJoinAnnounce, type JoinAnnounceIntent } from '@shared/announce'
 import { isHead, queuedItems, wavesOf } from '@shared/workflow'
@@ -1766,6 +1767,15 @@ const stopRoadmapItem = async (id: string): Promise<StopResult> => {
 // sweep -- the heartbeat keeps a peer 'active' even when Claude sits idle --
 // but only covers sessions this Deck can observe; remote/CLI sessions rely on
 // the broker's TTL + owner-gone sweep.
+//
+// Card e344fa79 lineage: the owner lookup below used to compare
+// `item.locked_by` against a bare `s.peerId`, which is only unique PER GROUP
+// -- a homonym peer_id locked by a peer in a DIFFERENT group on the same
+// broker would match one of this Deck's own idle tiles and get its lock
+// silently released. `ownsIdleLock` (idle-lock.ts) also requires
+// `item.locked_group` to match this Deck's OWN `activeScope.groupId`,
+// fail-closed when `locked_group` is null (see that module's doc comment for
+// the fail-closed/fail-open asymmetry with the broker's own sweep).
 const LOCK_IDLE_MS = 2 * 3600_000
 const LOCK_WATCH_MS = 60_000
 const watchIdleLocks = async (): Promise<void> => {
@@ -1777,7 +1787,11 @@ const watchIdleLocks = async (): Promise<void> => {
       if (!item.locked || !item.locked_by) continue
       const owner = service
         .list()
-        .find((s) => s.peerId === item.locked_by && s.status !== 'exited')
+        .find(
+          (s) =>
+            s.status !== 'exited' &&
+            ownsIdleLock(item.locked_by, item.locked_group, s.peerId, activeScope.groupId)
+        )
       if (!owner) continue // not one of our tiles: the broker sweep owns it
       const last = service.lastOutputAt(owner.id)
       if (last === null || Date.now() - last < LOCK_IDLE_MS) continue

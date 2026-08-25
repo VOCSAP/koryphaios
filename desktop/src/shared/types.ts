@@ -473,6 +473,19 @@ export interface RoadmapItem {
   locked_by: string | null
   /** ISO timestamp of the lock; null when unlocked. */
   locked_at: string | null
+  /**
+   * Card e344fa79 lineage: the lock owner's OWN group_id -- `locked_by` alone
+   * is only unique PER GROUP (peers.UNIQUE(peer_id, group_id)), so a
+   * legitimate homonym peer_id registered in a different group can satisfy a
+   * bare `locked_by` comparison. Mirrors root shared/types.ts's field of the
+   * same name (broker.ts's rowToRoadmapItem pick-list). null when unlocked,
+   * or when the row predates this column (fail-open migration state on the
+   * broker's own sweep -- see matchesLockOwner in shared/roadmap-lock.ts).
+   * The Deck-side consumer is desktop/src/main/idle-lock.ts's ownsIdleLock,
+   * which -- unlike the broker -- fails CLOSED on null: never auto-releases
+   * a lock it cannot positively attribute to its own group.
+   */
+  locked_group: string | null
   /** kind 'directive' (CT1): the app-executed command; null otherwise. */
   directive: RoadmapDirective | null
   /** kind 'directive' (CT1): peer_ids the command is injected into; [] otherwise. */
