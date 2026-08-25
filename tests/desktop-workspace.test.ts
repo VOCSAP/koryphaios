@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -504,6 +504,17 @@ function fakeDeps(
     setConfig: () => {},
     getScope: () => fakeScope(),
     adoptScope: () => {},
+    // Card 09d54a29: benign default so the ~10 pre-existing restore() tests
+    // above (whose sampleWorkspace() sessions carry non-empty `args` by
+    // default) keep exercising what they actually test, not this gate --
+    // the gate itself is covered by the dedicated tests below that override
+    // this to a spy.
+    confirmShellFields: () => true,
+    // Card 09d54a29 follow-up (GX-SEC, auditor finding): same reasoning --
+    // sampleWorkspace()'s default session cwd ("/abs/project") never equals
+    // the real tmpdir `proj` fakeDeps is constructed with, so it would trip
+    // this gate too on every pre-existing test unless defaulted benign here.
+    confirmUntrustedCwd: () => true,
     pid: 4242,
     host: "this-host",
     ...overrides,
@@ -560,6 +571,193 @@ test("WorkspaceService.restore(): succeeds and owns the lock when nothing conten
   expect(lock).not.toBeNull();
   expect(lock!.pid).toBe(4242);
   expect(lock!.host).toBe("this-host");
+});
+
+// Card 09d54a29: a repo-hostile workspace file's `args` is joined and
+// appended VERBATIM to the login-shell command line (session-command.ts:195-
+// 196), no escaping, once restoreFrom() reaches startPty. restore() must gate
+// that on the same operator approval templates already require for their own
+// command/args (B4, templateHasShellFields + launch-approval), BEFORE
+// restoreFrom() ever runs -- not merely before the mode is decided, since
+// session-service.ts's spawnSession (811-813) silently downgrades a `resume`
+// with no matching transcript to `fresh` (re-attaching args), which an
+// attacker gets for free by supplying a claudeSessionId that never had one.
+test("WorkspaceService.restore(): refuses when args are shell-bearing and confirmShellFields declines (card 09d54a29)", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = sampleWorkspace({
+    id: "wsp_hostile",
+    sessions: [
+      {
+        // No transcript exists anywhere for this id -- irrelevant to this
+        // gate, which fires on `args` content alone, independent of mode.
+        claudeSessionId: "bogus-no-transcript",
+        name: "reviewer",
+        cwd: "/abs/project",
+        args: ["--dangerously-skip-permissions", ";", "id", ">", "/tmp/PWNED"],
+        color: "#4488ff",
+        position: 0,
+      },
+    ],
+  });
+  saveWorkspace(proj, ws);
+  let confirmCalls = 0;
+  const deps = fakeDeps(proj, {
+    confirmShellFields: () => {
+      confirmCalls++;
+      return false;
+    },
+  });
+  const svc = new WorkspaceService(deps);
+  const ok = svc.restore("wsp_hostile");
+  expect(ok).toBe(false);
+  // The exact shape of the vulnerability: restoreFrom() (-> startPty ->
+  // buildSessionCommandLine) must never run. Proven here by the stub's
+  // captured session defs being untouched from before the call.
+  expect(deps.sessions).toEqual([fakeSession()]);
+  expect(confirmCalls).toBe(1);
+});
+
+test("WorkspaceService.restore(): proceeds when args are shell-bearing and confirmShellFields approves", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  // sampleWorkspace()'s default session already carries non-empty args.
+  const ws = sampleWorkspace({ id: "wsp_approved" });
+  saveWorkspace(proj, ws);
+  const deps = fakeDeps(proj, { confirmShellFields: () => true });
+  const svc = new WorkspaceService(deps);
+  const ok = svc.restore("wsp_approved");
+  expect(ok).toBe(true);
+});
+
+test("WorkspaceService.restore(): never asks for approval when no session carries args", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = sampleWorkspace({
+    id: "wsp_benign",
+    sessions: [
+      {
+        claudeSessionId: "sid-1",
+        name: "reviewer",
+        cwd: "/abs/project",
+        args: [],
+        color: "#4488ff",
+        position: 0,
+      },
+    ],
+  });
+  saveWorkspace(proj, ws);
+  let confirmCalls = 0;
+  const deps = fakeDeps(proj, {
+    confirmShellFields: () => {
+      confirmCalls++;
+      return false;
+    },
+  });
+  const svc = new WorkspaceService(deps);
+  const ok = svc.restore("wsp_benign");
+  expect(ok).toBe(true);
+  expect(confirmCalls).toBe(0);
+});
+
+// Card 09d54a29 follow-up (auditor finding, GX-SEC class): a hostile
+// workspace with EMPTY args does not trip the shell-fields gate above, but
+// its `cwd` is copied verbatim by fromWorkspaceSessions with zero
+// containment. Once the restored session is live, ipc.ts's workDirRoots()
+// (line 799) adds every live session's cwd to the allow-set requireWorkDir
+// checks by exact match, so the attacker-chosen directory becomes readable
+// via the diff/explorer IPC channels -- a SEPARATE vulnerability class
+// (arbitrary file read, not command execution) from the args gate, hence a
+// SEPARATE named predicate/callback rather than folded into the same one.
+test("WorkspaceService.restore(): refuses when a session's cwd is outside the project tree and confirmUntrustedCwd declines (card 09d54a29 follow-up, GX-SEC)", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const outside = mkdtempSync(join(tmpdir(), "cp-wsp-outside-"));
+  tmpDirs.push(outside);
+  const ws = sampleWorkspace({
+    id: "wsp_hostile_cwd",
+    cwd: proj,
+    sessions: [
+      {
+        claudeSessionId: "sid-1",
+        name: "reviewer",
+        cwd: outside, // attacker-chosen read target, NOT inside `proj`
+        args: [], // empty -- proves this is independent of the args gate
+        color: "#4488ff",
+        position: 0,
+      },
+    ],
+  });
+  saveWorkspace(proj, ws);
+  let confirmCalls = 0;
+  const deps = fakeDeps(proj, {
+    confirmUntrustedCwd: () => {
+      confirmCalls++;
+      return false;
+    },
+  });
+  const svc = new WorkspaceService(deps);
+  const ok = svc.restore("wsp_hostile_cwd");
+  expect(ok).toBe(false);
+  expect(deps.sessions).toEqual([fakeSession()]);
+  expect(confirmCalls).toBe(1);
+});
+
+test("WorkspaceService.restore(): proceeds when cwd is outside the project tree and confirmUntrustedCwd approves", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const outside = mkdtempSync(join(tmpdir(), "cp-wsp-outside-"));
+  tmpDirs.push(outside);
+  const ws = sampleWorkspace({
+    id: "wsp_approved_cwd",
+    cwd: proj,
+    sessions: [
+      {
+        claudeSessionId: "sid-1",
+        name: "reviewer",
+        cwd: outside,
+        args: [],
+        color: "#4488ff",
+        position: 0,
+      },
+    ],
+  });
+  saveWorkspace(proj, ws);
+  const deps = fakeDeps(proj, { confirmUntrustedCwd: () => true });
+  const svc = new WorkspaceService(deps);
+  const ok = svc.restore("wsp_approved_cwd");
+  expect(ok).toBe(true);
+});
+
+// No false positive on the common case: a saved multi-worktree workspace
+// (sessions living under <projectDir>/.worktrees/<name>, the ONLY place
+// createWorktree ever places them, worktree-service.ts) must restore
+// without prompting, or every ordinary restore would nag the operator.
+test("WorkspaceService.restore(): never asks about cwd for the project root or a .worktrees/ path under it", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const wt = join(proj, ".worktrees", "feature-x");
+  mkdirSync(wt, { recursive: true });
+  const ws = sampleWorkspace({
+    id: "wsp_worktrees",
+    cwd: proj,
+    sessions: [
+      { claudeSessionId: "sid-1", name: "root", cwd: proj, args: [], color: "#4488ff", position: 0 },
+      { claudeSessionId: "sid-2", name: "wt", cwd: wt, args: [], color: "#4488ff", position: 1 },
+    ],
+  });
+  saveWorkspace(proj, ws);
+  let confirmCalls = 0;
+  const deps = fakeDeps(proj, {
+    confirmUntrustedCwd: () => {
+      confirmCalls++;
+      return false;
+    },
+  });
+  const svc = new WorkspaceService(deps);
+  const ok = svc.restore("wsp_worktrees");
+  expect(ok).toBe(true);
+  expect(confirmCalls).toBe(0);
 });
 
 // heartbeatTick() is the extracted body of own()'s setInterval callback

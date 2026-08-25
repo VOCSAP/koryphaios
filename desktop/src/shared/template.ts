@@ -118,6 +118,24 @@ export function templateToInputs(tpl: SessionTemplate): TemplateInput[] {
 }
 
 /**
+ * True when any session-like object carries a shell-bearing field — a
+ * `command` (which replaces the launch binary) or a free-form `args` string
+ * (appended verbatim to the login-shell command line, session-command.ts).
+ * The core predicate behind `templateHasShellFields`, factored out so a
+ * second untrusted-file source of sessions (workspace restore, card
+ * 09d54a29: `workspaceHasShellFields` in workspace-store.ts) can reuse the
+ * exact same rule instead of reimplementing it and drifting apart, the way
+ * the two already had on the `lead` field.
+ */
+export function sessionsHaveShellFields(
+  sessions: readonly { command?: string; args?: string }[]
+): boolean {
+  return sessions.some(
+    (s) => (s.command && s.command.trim() !== '') || (s.args && s.args.trim() !== '')
+  )
+}
+
+/**
  * True when any session in the template carries a shell-bearing field — a
  * `command` (which replaces the launch binary) or a free-form `args` string
  * (appended verbatim to the login-shell command line). A repo-local template
@@ -126,9 +144,7 @@ export function templateToInputs(tpl: SessionTemplate): TemplateInput[] {
  * NOT shell-bearing here: they are allow-listed + quoted at spawn (B6).
  */
 export function templateHasShellFields(tpl: SessionTemplate): boolean {
-  return tpl.sessions.some(
-    (s) => (s.command && s.command.trim() !== '') || (s.args && s.args.trim() !== '')
-  )
+  return sessionsHaveShellFields(tpl.sessions)
 }
 
 function isTemplateSession(v: unknown): v is TemplateSession {

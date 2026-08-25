@@ -18,7 +18,17 @@ import {
   rmSync,
   writeFileSync
 } from 'node:fs'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
+// Relative import (not the @shared alias), like workspace-session-map.ts: this
+// pulls in only the pure predicate, keeping this module resolvable under
+// `bun test` without an alias tsconfig.
+import { sessionsHaveShellFields } from '../shared/template'
+// worktree-service.ts is itself node-builtins-only (no electron/@shared), so
+// this stays a pure-module import: canonicalPath is the project's own answer
+// to "comparing two paths? canonicalize both" (CLAUDE.md) -- a bare
+// resolve()+startsWith comparison misses macOS symlinked tmpdirs and Windows
+// 8.3 short names (worktree-service.ts's own docstring on canonicalPath).
+import { canonicalPath } from './worktree-service'
 
 /** "ephemeral" scopes mint a fresh secret on restore; "custom" ones are re-supplied via the launch arg. */
 export type ScopeKind = 'ephemeral' | 'custom'
@@ -95,13 +105,82 @@ export function newWorkspaceId(): string {
   return `wsp_${randomUUID().replace(/-/g, '')}`
 }
 
+/**
+ * Structural validation of a persisted session entry, mirroring
+ * `isTemplateSession` (shared/template.ts) -- before this (card 09d54a29
+ * review point), `isWorkspace` checked only that `sessions` was an array,
+ * not the type of anything inside it, so a malformed `args` (e.g. a bare
+ * string instead of string[]) would sail through and only fail later, deep
+ * in `joinArgs`/`workspace-session-map.ts`.
+ */
+function isWorkspaceSession(value: unknown): value is WorkspaceSession {
+  if (typeof value !== 'object' || value === null) return false
+  const s = value as Record<string, unknown>
+  return (
+    typeof s.claudeSessionId === 'string' &&
+    typeof s.name === 'string' &&
+    typeof s.cwd === 'string' &&
+    typeof s.color === 'string' &&
+    typeof s.position === 'number' &&
+    Array.isArray(s.args) &&
+    s.args.every((a) => typeof a === 'string')
+  )
+}
+
 function isWorkspace(value: unknown): value is Workspace {
   return (
     typeof value === 'object' &&
     value !== null &&
     typeof (value as Workspace).id === 'string' &&
-    Array.isArray((value as Workspace).sessions)
+    Array.isArray((value as Workspace).sessions) &&
+    (value as Workspace).sessions.every(isWorkspaceSession)
   )
+}
+
+/**
+ * True when any session in a workspace carries a shell-bearing `args` field
+ * -- same predicate templates use for `command`/`args` (`templateHasShellFields`,
+ * shared/template.ts, B4), reused via `sessionsHaveShellFields` rather than
+ * reimplemented so the two gates cannot drift apart (card 09d54a29: they
+ * already had, on the `lead` field). Workspaces never persist `command`
+ * (workspace-session-map.ts always rebuilds it as `''`); `args` is stored as
+ * string[] (`joinArgs`-shaped) and joined back into the free-form string
+ * `sessionsHaveShellFields` expects.
+ */
+export function workspaceHasShellFields(ws: Pick<Workspace, 'sessions'>): boolean {
+  return sessionsHaveShellFields(ws.sessions.map((s) => ({ args: s.args.join(' ') })))
+}
+
+/** True when `cwd` is `projectDir` itself or a path nested under it. */
+function isInsideProject(cwd: string, projectDir: string): boolean {
+  const root = canonicalPath(projectDir)
+  const target = canonicalPath(cwd)
+  return target === root || target.startsWith(root + sep)
+}
+
+/**
+ * True when a workspace has a session whose `cwd` falls OUTSIDE the given
+ * project tree (card 09d54a29 follow-up, auditor finding, GX-SEC class).
+ * `cwd` is a SEPARATE vulnerability class from `workspaceHasShellFields`
+ * above -- arbitrary file read (via ipc.ts's workDirRoots, which trusts every
+ * live session's cwd for the explorer/diff channels) rather than command
+ * execution -- so it gets its OWN named predicate rather than being folded
+ * into the shell-fields check: conflating unrelated risks into one flag is
+ * exactly the "enumeration of dangerous fields" fragility this card's own
+ * review round flagged. Git worktrees always live under
+ * `<projectDir>/.worktrees/<name>` (worktree-service.ts createWorktree), so
+ * this single containment check also clears the common multi-worktree
+ * restore case without a false positive -- see the "no false positive"
+ * tests in tests/desktop-workspace.test.ts.
+ */
+export function workspaceHasUntrustedCwd(
+  ws: Pick<Workspace, 'sessions'>,
+  projectDir: string
+): boolean {
+  return ws.sessions.some((s) => {
+    const cwd = s.cwd?.trim()
+    return !!cwd && !isInsideProject(cwd, projectDir)
+  })
 }
 
 /** List workspaces for a project, newest first. Malformed files are skipped. */

@@ -41,11 +41,15 @@ interface Def {
   createdAt: number;
 }
 
-function def(name: string): Def {
+// `cwd` is the real project dir (threaded in by each caller, all of which
+// have it in scope as `proj`) rather than a placeholder: this file's fixtures
+// must be genuinely IN-TREE so confirmUntrustedCwd (card 09d54a29 follow-up)
+// has no legitimate reason to fire here -- see makeService below.
+function def(name: string, cwd: string): Def {
   return {
     id: `local-${name}`,
     name,
-    cwd: "/abs/project",
+    cwd,
     command: "",
     args: "",
     sessionId: `sid-${name}`,
@@ -75,6 +79,18 @@ function makeService(projectDir: string, capture: () => Def[], restored: Def[][]
       root: "test",
     }),
     adoptScope: () => {},
+    // Card 09d54a29 (+ follow-up): NONE of this file's fixtures carry
+    // shell-bearing args or an out-of-project cwd (def() above always uses
+    // the real `proj`), so restore() must never even ask. Throwing here
+    // (rather than returning a fixed value) turns an unexpected call into a
+    // visible test failure instead of silently rubber-stamping the gate --
+    // the team-lead's explicit ask when this mock was found incomplete.
+    confirmShellFields: () => {
+      throw new Error("confirmShellFields must not be called: no fixture in this file carries args");
+    },
+    confirmUntrustedCwd: () => {
+      throw new Error("confirmUntrustedCwd must not be called: no fixture in this file has an out-of-project cwd");
+    },
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return new WorkspaceService(deps as any);
@@ -98,7 +114,7 @@ test("saveAuto on an empty captureSessions() mints nothing", () => {
 test("restoring a workspace is not a silent no-op success", () => {
   const proj = freshProject();
   const restored: Def[][] = [];
-  let live: Def[] = [def("team-lead")];
+  let live: Def[] = [def("team-lead", proj)];
   const svc = makeService(proj, () => live, restored);
 
   svc.saveAuto();
@@ -122,7 +138,7 @@ test("restoring a workspace is not a silent no-op success", () => {
 test("a real snapshot is NOT clobbered by a later supervisor-only saveAuto", () => {
   const proj = freshProject();
   const restored: Def[][] = [];
-  let live: Def[] = [def("team-lead"), def("reviewer")];
+  let live: Def[] = [def("team-lead", proj), def("reviewer", proj)];
   const svc = makeService(proj, () => live, restored);
 
   svc.saveAuto();
@@ -144,7 +160,7 @@ test("a real snapshot is NOT clobbered by a later supervisor-only saveAuto", () 
 test("restoring the workspace this instance already owns succeeds (lock self-exemption)", () => {
   const proj = freshProject();
   const restored: Def[][] = [];
-  const live: Def[] = [def("team-lead")];
+  const live: Def[] = [def("team-lead", proj)];
   const svc = makeService(proj, () => live, restored);
 
   svc.saveAuto(); // mints + owns + locks the workspace
@@ -161,7 +177,7 @@ test("restoring the workspace this instance already owns succeeds (lock self-exe
 test("restore() refuses a workspace persisted with zero sessions, never touching restoreFrom", () => {
   const proj = freshProject();
   const restored: Def[][] = [];
-  const live: Def[] = [def("team-lead")];
+  const live: Def[] = [def("team-lead", proj)];
   const svc = makeService(proj, () => live, restored);
 
   // A legacy empty snapshot on disk (minted before saveAuto()'s empty-capture
@@ -195,7 +211,7 @@ test("restore() refuses a workspace persisted with zero sessions, never touching
 test("empty deck + a non-empty current workspace is NOT caught by the zero-session refusal (b8d65b24 interaction)", () => {
   const proj = freshProject();
   const restored: Def[][] = [];
-  const live: Def[] = [def("team-lead")];
+  const live: Def[] = [def("team-lead", proj)];
   const svc = makeService(proj, () => live, restored);
 
   svc.saveAuto(); // mints + owns + locks a 1-session workspace

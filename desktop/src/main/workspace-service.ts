@@ -21,7 +21,9 @@ import {
   loadWorkspace,
   newWorkspaceId,
   saveWorkspace,
-  selectPrunableWorkspaces
+  selectPrunableWorkspaces,
+  workspaceHasShellFields,
+  workspaceHasUntrustedCwd
 } from './workspace-store'
 import {
   acquireLock,
@@ -113,6 +115,29 @@ export interface WorkspaceDeps {
   getScope: () => Scope
   /** Adopt a workspace's scope (no-op if a session is already running). */
   adoptScope: (ws: { groupId: string; scopeKind: 'ephemeral' | 'custom' }) => void
+  /**
+   * Operator approval gate for a workspace whose sessions carry shell-bearing
+   * `args` (card 09d54a29, mirroring the template B4 gate): called by
+   * `restore()` ONLY when `workspaceHasShellFields(ws)` is true, BEFORE
+   * `service.restoreFrom()` ever runs. Returning false refuses the restore.
+   * Production default (index.ts) reuses the same launch-approval.ts
+   * isApproved/approve mechanism and dialog copy the template gate already
+   * uses, so the two cannot drift apart the way they already had (the `lead`
+   * field capture gap).
+   */
+  confirmShellFields: (ws: Workspace) => boolean
+  /**
+   * Operator approval gate for a workspace whose sessions carry a `cwd`
+   * OUTSIDE the project tree (card 09d54a29 follow-up, GX-SEC class): called
+   * by `restore()` ONLY when `workspaceHasUntrustedCwd(ws, projectDir)` is
+   * true, BEFORE `service.restoreFrom()` ever runs -- a live session's cwd
+   * becomes a readable root for the explorer/diff channels (ipc.ts
+   * workDirRoots), so an attacker-chosen `cwd` is a file-read primitive, a
+   * SEPARATE risk from `confirmShellFields` above. Kept as its own callback
+   * (not folded into confirmShellFields) so the two vulnerability classes
+   * are never silently conflated.
+   */
+  confirmUntrustedCwd: (ws: Workspace) => boolean
   pid?: number
   host?: string
   /** THIS process's own actual start time (epoch ms). Test-injectable like
@@ -407,6 +432,30 @@ export class WorkspaceService {
         staleMs: LOCK_STALE_MS
       }) &&
       !ownsLock(lock, { pid: this.pid, host: this.host })
+    ) {
+      return false
+    }
+    // Card 09d54a29: a workspace is read from a REPO-CLONED file
+    // (<projectDir>/.claude/claude-peers/workspaces/*.json), exactly like a
+    // template. `args` is appended verbatim to the login-shell command line
+    // (session-command.ts) once restoreFrom() below reaches startPty, with no
+    // escaping -- so a shell-bearing workspace gets the SAME operator
+    // approval a shell-bearing template already requires (B4), checked here
+    // BEFORE restoreFrom() runs. This fires on `args` content alone,
+    // independent of resume/fresh mode: spawnSession (session-service.ts)
+    // silently downgrades resume to fresh (re-attaching args) whenever the
+    // stored claudeSessionId has no matching transcript, which a hostile
+    // workspace file gets for free by supplying one that never had one.
+    if (workspaceHasShellFields(ws) && !this.deps.confirmShellFields(ws)) {
+      return false
+    }
+    // Card 09d54a29 follow-up: a session `cwd` outside the project tree
+    // becomes a readable root for the explorer/diff channels the moment it
+    // is live (ipc.ts workDirRoots trusts every live session's cwd) -- a
+    // separate approval from the args gate above, see workspaceHasUntrustedCwd.
+    if (
+      workspaceHasUntrustedCwd(ws, this.deps.projectDir) &&
+      !this.deps.confirmUntrustedCwd(ws)
     ) {
       return false
     }

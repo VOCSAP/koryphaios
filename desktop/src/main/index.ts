@@ -45,6 +45,7 @@ import {
 import { approve, isApproved, resolveApprovedLaunchCommand } from './launch-approval'
 import { homedir, hostname } from 'node:os'
 import { WorkspaceService } from './workspace-service'
+import type { WorkspaceSession } from './workspace-store'
 import {
   BrokerHealthTracker,
   fetchGraphDrafts,
@@ -1790,13 +1791,68 @@ const watchIdleLocks = async (): Promise<void> => {
 let lockWatchTimer: NodeJS.Timeout | null = null
 
 /**
+ * Shared operator-approval core (B4) for a repo-cloned file carrying content
+ * that lands in a sensitive sink -- originally inline in
+ * `resolveTemplateInputs` (shell-bearing `command`/`args`, appended verbatim
+ * to the login-shell command line, session-command.ts); factored out (card
+ * 09d54a29) and generalized (card 09d54a29 follow-up: a SECOND, unrelated
+ * vulnerability class -- an untrusted `cwd` widening the explorer/diff
+ * read allow-set, see workspaceHasUntrustedCwd -- needed the SAME mechanism
+ * but different copy/hash content) so every caller reuses the EXACT SAME
+ * approval bookkeeping (isApproved/approve, keyed per project + `keyPart` +
+ * content hash, so an unchanged approved file re-applies silently while an
+ * edited one re-prompts) instead of a second, divergence-prone copy.
+ * `hashPayload`/`previewLines` are supplied by the caller rather than
+ * derived here, so this stays agnostic to WHICH field is dangerous --
+ * each caller names its own vulnerability class instead of this function
+ * silently enumerating fields.
+ */
+const confirmShellFieldApproval = (opts: {
+  keyPart: string
+  basename: string
+  hashPayload: unknown
+  previewLines: string[]
+  labelEn: string
+  labelFr: string
+  messageEn: string
+  messageFr: string
+  buttonsEn: [string, string]
+  buttonsFr: [string, string]
+}): boolean => {
+  const projectDir = getConfig().projectDir
+  const key = `${computeDeckProjectKey(projectDir)}::${opts.keyPart}::${opts.basename}`
+  const value = JSON.stringify(opts.hashPayload)
+  const file = approvalsFile()
+  if (isApproved(file, key, value)) return true
+  const isFr = isFrLocale()
+  const preview = opts.previewLines.join('\n')
+  const ok =
+    dialog.showMessageBoxSync({
+      type: 'warning',
+      buttons: isFr ? opts.buttonsFr : opts.buttonsEn,
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Koryphaios',
+      message: isFr ? opts.messageFr : opts.messageEn,
+      detail: isFr
+        ? `${opts.labelFr} : ${opts.basename}\n\n${preview}\n\nAccepte uniquement si tu fais confiance à ce dépôt.`
+        : `${opts.labelEn}: ${opts.basename}\n\n${preview}\n\nAccept only if you trust this repository.`
+    }) === 0
+  if (!ok) {
+    journal.add('session', `${opts.keyPart} refused: ${opts.basename}`)
+    return false
+  }
+  approve(file, key, value)
+  journal.add('session', `${opts.keyPart} approved: ${opts.basename}`)
+  return true
+}
+
+/**
  * Containment + approval gate for applying a template (B4 + M-SEC-9). Returns
  * the inputs to spawn, or null when: the path is outside the allowed template
  * dirs, the file is malformed, or a REPO-LOCAL template carrying a shell-bearing
  * `command`/`args` was declined by the operator. Global (operator-owned)
- * templates are trusted and never prompt. Approval is keyed per project +
- * template basename + shell-field content hash, so an unchanged approved
- * template re-applies silently while an edited command re-prompts.
+ * templates are trusted and never prompt.
  */
 const resolveTemplateInputs = (path: string): TemplateInput[] | null => {
   const projectDir = getConfig().projectDir
@@ -1807,42 +1863,81 @@ const resolveTemplateInputs = (path: string): TemplateInput[] | null => {
   }
   const tpl = readTemplate(path)
   if (!tpl) return null
-  if (source === 'local' && templateHasShellFields(tpl)) {
-    const key = `${computeDeckProjectKey(projectDir)}::template::${basename(path)}`
-    const value = JSON.stringify(
-      tpl.sessions.map((s) => ({ command: s.command ?? '', args: s.args ?? '' }))
-    )
-    const file = approvalsFile()
-    if (!isApproved(file, key, value)) {
-      const isFr = isFrLocale()
-      const preview = tpl.sessions
+  if (
+    source === 'local' &&
+    templateHasShellFields(tpl) &&
+    !confirmShellFieldApproval({
+      keyPart: 'template',
+      basename: basename(path),
+      hashPayload: tpl.sessions.map((s) => ({ command: s.command ?? '', args: s.args ?? '' })),
+      previewLines: tpl.sessions
         .filter((s) => (s.command && s.command.trim()) || (s.args && s.args.trim()))
-        .map((s) => `• ${[s.command, s.args].filter(Boolean).join(' ')}`)
-        .join('\n')
-      const ok =
-        dialog.showMessageBoxSync({
-          type: 'warning',
-          buttons: isFr ? ['Appliquer ce modèle', 'Refuser'] : ['Apply this template', 'Refuse'],
-          defaultId: 1,
-          cancelId: 1,
-          title: 'Koryphaios',
-          message: isFr
-            ? 'Ce modèle (config du projet) exécute des commandes personnalisées.'
-            : 'This project template runs custom commands.',
-          detail: isFr
-            ? `Modèle : ${basename(path)}\n\n${preview}\n\nCes commandes seront exécutées dans un shell. N'accepte que si tu fais confiance à ce dépôt.`
-            : `Template: ${basename(path)}\n\n${preview}\n\nThese commands run in a shell. Accept only if you trust this repository.`
-        }) === 0
-      if (!ok) {
-        journal.add('session', `project template refused: ${basename(path)}`)
-        return null
-      }
-      approve(file, key, value)
-      journal.add('session', `project template approved: ${basename(path)}`)
-    }
+        .map((s) => `• ${[s.command, s.args].filter(Boolean).join(' ')}`),
+      labelEn: 'Template',
+      labelFr: 'Modèle',
+      messageEn: 'This project template runs custom commands, executed in a shell.',
+      messageFr: 'Ce modèle (config du projet) exécute des commandes personnalisées dans un shell.',
+      buttonsEn: ['Apply this template', 'Refuse'],
+      buttonsFr: ['Appliquer ce modèle', 'Refuser']
+    })
+  ) {
+    return null
   }
   return templateToInputs(tpl)
 }
+
+/**
+ * Operator approval gate for workspace restore, shell-bearing `args` (card
+ * 09d54a29): a workspace is read from the same repo-cloned dir as a template
+ * (<projectDir>/.claude/claude-peers/workspaces/*.json) and its `args` lands
+ * in the exact same shell sink, so it is gated the exact same way. Called by
+ * WorkspaceService.restore() ONLY when workspaceHasShellFields(ws) is true.
+ */
+const confirmWorkspaceShellFields = (ws: { id: string; name: string; sessions: WorkspaceSession[] }): boolean =>
+  confirmShellFieldApproval({
+    keyPart: 'workspace',
+    basename: ws.name && ws.name.trim() ? ws.name : ws.id,
+    hashPayload: ws.sessions.map((s) => ({ args: s.args.join(' ') })),
+    previewLines: ws.sessions
+      .filter((s) => s.args.length > 0)
+      .map((s) => `• ${s.name}: ${s.args.join(' ')}`),
+    labelEn: 'Workspace',
+    labelFr: 'Espace de travail',
+    messageEn: 'This project workspace runs custom launch args, executed in a shell.',
+    messageFr: 'Cet espace de travail (config du projet) exécute des arguments de lancement personnalisés dans un shell.',
+    buttonsEn: ['Restore this workspace', 'Refuse'],
+    buttonsFr: ['Restaurer cet espace de travail', 'Refuser']
+  })
+
+/**
+ * Operator approval gate for workspace restore, untrusted `cwd` (card
+ * 09d54a29 follow-up, GX-SEC class): called by WorkspaceService.restore()
+ * ONLY when workspaceHasUntrustedCwd(ws, projectDir) is true. A SEPARATE
+ * vulnerability class from confirmWorkspaceShellFields above -- arbitrary
+ * file read (the cwd becomes a readable root for the explorer/diff channels,
+ * ipc.ts workDirRoots) rather than command execution -- kept as its own
+ * keyPart/copy so the two are never silently conflated into one approval.
+ */
+const confirmWorkspaceUntrustedCwd = (ws: {
+  id: string
+  name: string
+  sessions: WorkspaceSession[]
+}): boolean =>
+  confirmShellFieldApproval({
+    keyPart: 'workspace-cwd',
+    basename: ws.name && ws.name.trim() ? ws.name : ws.id,
+    hashPayload: ws.sessions.map((s) => ({ cwd: s.cwd ?? '' })),
+    previewLines: ws.sessions
+      .filter((s) => s.cwd && s.cwd.trim())
+      .map((s) => `• ${s.name}: ${s.cwd}`),
+    labelEn: 'Workspace',
+    labelFr: 'Espace de travail',
+    messageEn: 'This project workspace opens a session outside your project folder.',
+    messageFr:
+      'Cet espace de travail (config du projet) ouvre une session en dehors de votre dossier de projet.',
+    buttonsEn: ['Restore this workspace', 'Refuse'],
+    buttonsFr: ['Restaurer cet espace de travail', 'Refuser']
+  })
 
 // ----- Supervisor spawn approval (PLAN TS4) -----
 // The trust-mode gate behind deck_spawn_session / deck_spawn_team. hands-free:
@@ -2045,7 +2140,9 @@ const workspaces = new WorkspaceService({
   getConfig,
   setConfig: (patch) => void setConfig(patch),
   getScope: () => activeScope,
-  adoptScope
+  adoptScope,
+  confirmShellFields: confirmWorkspaceShellFields,
+  confirmUntrustedCwd: confirmWorkspaceUntrustedCwd
 })
 
 // Grey out File > Export template... when there is nothing to export. Must
