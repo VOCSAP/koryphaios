@@ -1,5 +1,95 @@
 # Changelog
 
+## desktop -- le balayage d'inactivite du Deck liberait un verrou roadmap sur la seule egalite de peer_id, silencieusement, sans geste humain
+
+Fichiers : `desktop/src/main/index.ts`, `desktop/src/main/idle-lock.ts`, `desktop/src/main/roadmap-service.ts`, `desktop/src/shared/types.ts`, `shared/roadmap-lock.ts`, `tests/desktop-idle-lock.test.ts`, `tests/desktop-idle-lock-wiring-sweep.test.ts`, `tests/desktop-roadmap-sanitize.test.ts`. Carte `e344fa79`.
+
+**Le commit `09bccfd` avait ferme quatre sites du broker qui comparaient le detenteur d'un verrou de carte par la moitie de sa cle ; `watchIdleLocks` cote Deck n'en faisait pas partie.** Ce timer de 60 secondes libere le verrou d'une carte dont la session detentrice est inactive depuis 2 heures, et identifiait ce detenteur par egalite de `peerId` NUE, alors que l'unicite d'un peer_id est PAR GROUPE. Un Deck d'un groupe pouvait donc liberer le verrou d'un pair d'un autre groupe, en silence. C'est le seul des cinq sites qui agit sans geste humain.
+
+**`locked_group` etait deja projete par le broker mais jete au bord du Deck par une pick-list ; le correctif est local, il ne touche pas le broker.**
+
+**La doctrine : on restreint le TARGET SET d'une action automatique, jamais son AUTORITE.** Aucune autorisation n'est modifiee.
+
+**Sur `locked_group` NULL (ligne anterieure a la migration) le predicat est fail-CLOSED, il ne libere pas.** L'asymetrie de cout est l'inverse de celle du broker : sauter un balayage ne coute rien, un verrou vole en silence coute cher.
+
+**`computeGroupId` est DUPLIQUE entre `shared/config.ts` et `desktop/src/main/scope.ts` ; l'egalite des deux implementations est desormais epinglee par deux tests,** car une derive rendrait le balayage silencieusement inoperant.
+
+**`desktop/src/main/index.ts` importe electron et n'est pas testable directement : le cablage est donc prouve par un test de BALAYAGE DU SOURCE** (precedent `tests/role-domain-sweep.test.ts`), en deux moities, presence du bon appel et absence du motif d'avant le correctif. Ce detecteur porte son propre controle positif et negatif.
+
+**La promesse du balayage est volontairement etroite : il attrape les egalites TEXTUELLEMENT ADJACENTES, et une variable intermediaire y echappe** (quatre formes mesurees). Elargir en ferait un analyseur de flot.
+
+**Une phrase de `shared/roadmap-lock.ts` disait que la fuite du champ etait fermee a sa racine : elle est en realite AUTORISEE, la pick-list nomme le champ.** Corrigee. La question de fond est cardee sous `9a433128`.
+
+Onze tests sur les deux nouveaux fichiers.
+
+## desktop -- supprimer les globs `mcp/**/*.ts` et `hooks/**/*.ts` du typecheck aurait rouvert un trou de couverture reel, suite verte et CI verte
+
+Fichier : `tests/desktop-tsconfig-flags.test.ts` uniquement. Carte `d07ab3f0`.
+
+**Rien n'epinglait ces deux globs de l'include de `desktop/tsconfig.node.json`.** Les retirer rouvrait la regression fermee la veille par la carte `a7822bc4` (deux serveurs MCP de production livres sans typecheck), avec la suite verte ET la CI verte.
+
+**Le test balaie desormais tout `desktop/` via `git ls-files --cached` et exige que chaque source `.ts`/`.tsx`/`.mts`/`.cts` soit couverte par au moins un des tsconfigs decouverts, sauf entree explicite dans une liste d'exemptions.**
+
+**Le domaine des tsconfigs est DECOUVERT, pas enumere en dur : une garde qui nomme son domaine est le defaut meme qu'elle pretend fermer.**
+
+**La lecture porte sur `exclude` autant que sur `include` : ajouter un `exclude` couvrant `mcp/` rouvrait la regression exacte avec la suite verte, par la cle voisine.**
+
+**Deux exemptions seulement, portant chacune une raison ecrite et une NATURE verifiee a l'execution.** `desktop/tests-support/` en `undeclared-gap` (doit citer un id de carte, ici `f4125a11`, et doit disparaitre) et `desktop/mobile-shell/capacitor.config.ts` en `deliberate` (doit nommer un fichier reel dont le contenu mentionne le fichier exempte). Une exemption devenue inutile rougit, donc la liste ne peut pas grossir sans justification.
+
+**Le domaine est `--cached` et non les fichiers non suivis : l'index contient les fichiers stages, donc "sur le point d'atterrir" reste couvert, sans qu'un fichier de travail rende la suite rouge chez les autres sessions ni cree de divergence CI/local.** Ce choix est lui-meme epingle par un test.
+
+Vingt et un tests, cinquante-six assertions.
+
+## broker -- la cle du detenteur d'un verrou roadmap portait la moitie de l'identite, et se faisait usurper par un jumeau d'un autre groupe
+
+Fichiers : `broker.ts`, `shared/roadmap-lock.ts`, `shared/types.ts`, `tests/broker-roadmap-lock.test.ts`, `tests/roadmap-lock.test.ts`. Carte `e344fa79`.
+
+**Le nom d'un pair est un couple, la cle du verrou n'en stockait qu'une moitie.** La table `peers` declare `UNIQUE (peer_id, group_id)`, et `roadmap_items.locked_by` ne portait que `peer_id`. La roadmap est partagee entre groupes du meme depot, donc deux sessions distinctes de la meme machine peuvent porter le meme `peer_id` et satisfaire mutuellement le verrou l'une de l'autre, en silence. Mesure a l'origine de la carte : deux enfants reels du serveur MCP, meme `peer_id`, meme `project_key`, `group_id` differents.
+
+**Modele de menace explicite : l'accident, pas l'attaque distante.** Toute ecriture roadmap porte deja un `instance_token` verifie, un auteur non prouve est refuse en 401 avant d'atteindre ce code. Le seul exploitant possible est le jumeau legitimement enregistre dans un autre groupe.
+
+**Huit sites comparaient cette demi-cle, quatre sont fermes ici : la garde de vol de `handleRoadmapUpsert`, la garde d'archive, le balayage owner-gone, et `isSameOwnerReclaim`.** Les quatre restants (lecture/ecriture de lock-park et lock-release) restent ouverts et sont cardes en `6cd01490`, pour une raison structurelle : cette route n'a jamais fourni d'`instance_token`. Un neuvieme site, `watchIdleLocks` cote desktop, n'a jamais fait partie de ce lot.
+
+**La nouvelle colonne s'appelle `locked_group`, jamais `group_id` : ce n'est pas une portee, c'est la moitie manquante de la cle qui nomme le detenteur.** Sa valeur vient toujours de la ligne du pair resolue par `instance_token`, jamais du corps de la requete.
+
+**`rowToRoadmapItem` passe d'un rest-spread a une pick-list explicite de 29 champs**, prouvee par un test de couverture derive du schema (`PRAGMA table_info`) : sans elle, la nouvelle colonne aurait fuite vers tous les groupes listant la roadmap.
+
+**Deploiement : migration `ALTER TABLE` au demarrage, donc un redemarrage du broker est requis pour que la colonne existe.**
+
+## plugin -- la garde anti-injection du hook roadmap ne couvrait qu'une des deux orthographes de balise fermante
+
+Fichiers : `desktop/hooks/roadmap-guard-hook.ts`, `tests/roadmap-guard-hook.test.ts`. Carte `0e28cb4e`.
+
+**La garde PreToolUse livree par un commit anterieur (`5315647`) n'etait pas inerte, mais ne couvrait qu'une forme de faute sur deux.** Elle cherchait la fermante semantique propre au champ, alors que le format d'appel d'outil emet toujours la fermante generique. Rejoue sur la machine reelle avant correction : payload accidente accepte, exit 0, stdout vide. L'invariant ne change pas -- fermante d'un champ immediatement suivie de l'ouvrante d'un autre -- il gagne une alternation sur les deux orthographes.
+
+**Le message de refus cite desormais la balise reellement presente au lieu d'une balise supposee.**
+
+**Les deux sondes vivent dans le diff, avec leur controle negatif** : une carte citant la forme en fragment incomplet reste acceptee dans les deux etats. Alternation retiree puis rebuild : 1 echec. Restauree : 2 succes.
+
+## plugin -- le bundle du hook roadmap cesse d'etre versionne, source d'une regression CI recurrente
+
+Fichiers : `desktop/.gitignore`, `desktop/deck-plugin/hooks/roadmap-guard-hook.mjs` (supprime), `tests/roadmap-guard-hook.test.ts`. Carte `7e5c0f08`.
+
+**La CI de `experimental` etait rouge depuis `5315647` sur ce meme fichier : le test comparait octet pour octet l'artefact `.mjs` commite a un rebuild frais.** Deux causes empilees : la premiere fermee par `f494090` (bun 1.4.0 trie la liste des exports, 1.3.13 non), la seconde encore ouverte sur Windows seul (`core.autocrlf` convertit au checkout, meme blob mais 2697 octets dans git contre 2776 sur le disque). Le diff d'ensembles des tests en echec donne une intersection vide avec le rouge chronique d'avant le 2026-08-24 : regression neuve, pas rechute.
+
+**Le bundle cesse d'etre versionne, plutot que d'etre epingle une troisieme fois.** Il l'etait par oubli et non par choix : `git log --follow` ne rend que deux commits, et le corps de `f494090` le qualifiait deja d'exception. Ses cinq freres generes sont deja gitignores, et la livraison n'en depend pas -- `extraResources` embarque le repertoire `deck-plugin` entier.
+
+**Le test construit desormais lui-meme son bundle dans un repertoire temporaire de l'OS, nettoye en `afterAll`,** ce qui supprime trois pins d'un coup : version de bun, fins de ligne, repertoire courant du build.
+
+**Laisse ouvert : la carte `6781c2a8` promet de couvrir cinq artefacts generes, or git n'en voit plus aucun, donc son domaine est vide.** Note versee dans la carte, arbitrage operateur en attente.
+
+## desktop -- les deux serveurs MCP du plugin entrent a leur tour dans le typecheck
+
+Fichiers : `desktop/tsconfig.node.json`. Carte `a7822bc4`.
+
+**`desktop/mcp/` n'etait couvert par aucun tsconfig : `deck-control-mcp.ts` et `demo-browser-mcp.ts` etaient construits et livres sans avoir jamais ete typechecks.** `deck-control-mcp.ts` est la surface par laquelle un agent pilote le Deck. Jumeau exact du trou ferme sur `desktop/hooks/` par le commit `ae4a575`, et corrige de la meme facon : un glob ajoute a l'include de `tsconfig.node.json`.
+
+**Le trou a ete mesure par un ensemble et non par lecture** : union de `tsc --listFilesOnly` sur les deux projets, comparee a `git ls-files` sous `desktop/`. Seuls ces deux fichiers manquaient ; `mobile-shell/` a son propre tsconfig et `tests-support/` est hors glob par design.
+
+**Aucune erreur de type reelle n'est revelee, les deux fichiers n'important que `node:readline`.** La couverture est donc prouvee par mutation et non par le vert : une annotation fausse injectee dans chacun des deux fichiers rend `TS2322` et exit 2.
+
+**Bord connu a la livraison, laisse ouvert et carde en `d07ab3f0`** : un glob `*.ts` litteral est muet sur `.mts`/`.cts`/`.tsx`, et rien n'epinglait alors la ligne d'include elle-meme. Les deux moities ont ete fermees depuis, voir l'entree `d07ab3f0` plus haut.
+
 ## desktop -- restaurer un espace de travail passe desormais par la meme porte d'approbation que les templates, sur deux classes distinctes
 
 Fichiers : `desktop/src/main/index.ts`, `desktop/src/main/workspace-service.ts`, `desktop/src/main/workspace-store.ts`, `desktop/src/shared/template.ts`, `tests/desktop-workspace.test.ts`, `tests/desktop-workspace-empty-snapshot.test.ts`. Carte `09d54a29`.
