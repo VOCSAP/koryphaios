@@ -1,5 +1,21 @@
 # Changelog
 
+## broker/ci -- un commentaire perime avait a lui seul fabrique une carte entiere sur une premisse fausse, et une garde neuve epingle le typecheck CI qu'un swallow pouvait rendre decoratif
+
+Fichiers : `broker.ts`, `tests/broker-roadmap-author-auth.test.ts`, `tests/desktop-ci-typecheck-coverage.test.ts`, `tests/desktop-ci-glob-coverage.test.ts`, `tests/desktop-commit-closure-check.test.ts`, `docs/DESIGN-HERDR-ADOPTION.md`. Cartes `da94b508`, `9ef6f513`, `7f92d1ea`, `1aa69066`.
+
+**Un commentaire de `broker.ts` affirmait qu'un corps de requete non prouve pouvait encore franchir la garde en se declarant d'une identite reservee, et designait la fermeture de ce trou comme un travail restant.** Faux depuis `29bff61` : la branche `RESERVED_PEER_IDS` exige une preuve operateur signee sur les 7 routes roadmap mutantes, et ne consulte pas le parametre de route, donc aucune ne peut y echapper. Ce commentaire avait a lui seul produit une carte entiere en bug/should/value:high, batie sur une premisse fausse, avec un critere d'acceptation insatisfiable ; la carte `da94b508` est requalifiee en dette. Le sujet n'est pas clos pour autant : le defaut d'autorisation qui SURVIT a cette mesure, un agent companion expose en tier 1 qui ecrit avec la signature operateur du Deck et franchit donc toutes les gardes de proprietaire, part en carte neuve `2c629fd6`. Aucune correction de la famille "verifier que l'auteur est l'operateur" ne le ferme, par construction. Aucun changement de comportement dans ce lot, `broker.ts` ne porte qu'un commentaire corrige.
+
+**Le test qui s'annoncait couvrir "toutes les routes" resolvant un auteur n'en couvrait que 4 sur 7, sur une liste codee en dur.** Sensibilite bonne, couverture jamais auditee. Le domaine passe a 7 et un test de parite derive desormais la liste depuis le source au lieu de l'enumerer : retirer une route rend la parite rouge.
+
+**Une nouvelle garde epingle les etapes de verification de types du workflow CI, que rien n'empechait de supprimer avant.** Le domaine est derive et non enumere : l'arbre `desktop/` est parcouru et tout programme portant sa propre cle de compilation est retenu. La revue par mutation a trouve neuf formes de neutralisation qui laissaient la garde verte, dont une au cran au-dessus de l'etape ou une seule ligne rendait tout le fichier decoratif sans qu'aucune cle d'etape ne bouge. Les trois formes qui pesaient sont fermees, chacune avec sa mutation rejouee et gardee dans le diff ; quatre residuels relevant du controle de flux du shell sont assumes et laisses ouverts.
+
+**Le brief `docs/DESIGN-HERDR-ADOPTION.md` est amende de plusieurs faits mesures qui changent la conception de deux chantiers.** La detection de blocage de la source repose sur deux regles de RANG oppose sur la meme region (titre-vers-working au plus haut, titre-vers-idle presque au plus bas), et c'est ce rang, pas l'evitement du contenu, qui protege le mecanisme. La source n'a aucune notification OSC, toute sa detection est du grattage d'ecran textuel. Son catalogue est derive de manifests embarques et a fait passer la version de moteur exigee de 2 a 3. Deux pointeurs perimes du brief sont aussi corriges.
+
+**Six cartes de roadmap deposees pour couvrir ce brief : `1aa69066`, `7f92d1ea`, `f16987e4`, `a21f1303`, `49776dfa`, `fda382b3`.**
+
+**Deux en-tetes de tests corriges au passage, meme famille de defaut : ils attribuaient la collecte CI au prefixe du nom de fichier, alors que la collecte enumere tout le repertoire et que l'exemption est une deny-list ou ce prefixe ne joue aucun role.** Trouve en corrigeant le meme faux pointeur dans le fichier voisin livre par la garde CI ci-dessus. Aucun changement de comportement, en-tetes uniquement.
+
 ## desktop -- le balayage d'inactivite du Deck liberait un verrou roadmap sur la seule egalite de peer_id, silencieusement, sans geste humain
 
 Fichiers : `desktop/src/main/index.ts`, `desktop/src/main/idle-lock.ts`, `desktop/src/main/roadmap-service.ts`, `desktop/src/shared/types.ts`, `shared/roadmap-lock.ts`, `tests/desktop-idle-lock.test.ts`, `tests/desktop-idle-lock-wiring-sweep.test.ts`, `tests/desktop-roadmap-sanitize.test.ts`. Carte `e344fa79`.
