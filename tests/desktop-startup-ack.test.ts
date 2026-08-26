@@ -3,6 +3,8 @@
 // the MCP-server consent dialog and prose must NOT trigger it.
 
 import { test, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   StartupAckDetector,
   detectChannelsWarning,
@@ -164,4 +166,101 @@ test("the warning still acks when its OSC title update is FRAGMENTED across chun
   noOsc.feed("s1", "WARNING: Loading development channels\n❯ 1. I am using this for local dev");
   noOsc.feed("s1", "elopment\n");
   expect(noOscEvents).toEqual([{ id: "s1" }]);
+});
+
+// ---------------------------------------------------------------------------
+// FIELD CAPTURE, card 00588e6c. spec_17343687.
+//
+// tests/pty-harness/fixtures/channels-warning-conpty-win.json is a REAL
+// Windows ConPTY stream, not a hand-built frame: the 26 first chunks of one
+// PTY session (850cd834), captured 2026-08-26 through KORY_PTY_RAW_CAPTURE in
+// desktop/src/main/pty-manager.ts, whose hook sits in proc.onData BEFORE
+// handleData -- the most UPSTREAM point our own code can reach, so what it
+// records is ConPTY's encoding and not our pipeline's. Everything after
+// node-pty's UTF-8 decode is untouched; the fixture was rebuilt from that
+// capture's hex dump, byte for byte.
+//
+// It settles the question card 00588e6c was filed to settle, and it corrects
+// the answer everyone had assumed. The FIRST paint of the screen is indeed
+// `\x1b[1C` throughout, exactly as startup-ack.ts's comment claimed on the
+// strength of a 2026-07-28 capture that was never kept -- but the stream does
+// not stay that way. Measured here: chunk 8 paints both cues compressed,
+// then ~130 ms later chunks 10 and 12 REPAINT the same screen with LITERAL
+// spaces. Both encodings are real, in one session, seconds apart. So a
+// space-anchored pattern would not "never match" as the old comment said; it
+// would miss the first frame and match the repaint, which is worse than
+// either, because the failure would be a two-frame delay that nobody sees
+// until a version stops repainting.
+//
+// The three tests below replace the lost log as the thing the claim rests on:
+// they go red if the fixture is deleted (readFileSync throws) and they go red
+// if a future CLI changes the encoding, which is precisely the day production
+// would break while the rest of this suite stayed green.
+//
+// Deliberately NOT extended past the channels screen (the card's own scope
+// limit), and Windows-only: this repaint behaviour is ConPTY's.
+
+type FieldChunk = { t: number; data: string };
+const CHANNELS_FIELD_CAPTURE: FieldChunk[] = JSON.parse(
+  readFileSync(
+    join(import.meta.dir, "pty-harness", "fixtures", "channels-warning-conpty-win.json"),
+    "utf-8"
+  )
+);
+
+/** Index of the first recorded chunk that paints either warning cue. */
+const FIRST_PAINT = CHANNELS_FIELD_CAPTURE.findIndex((c) =>
+  /Loading|I.{0,8}am.{0,8}using/.test(stripAnsi(c.data))
+);
+
+test("field capture: the real ConPTY channels screen acks on its FIRST paint, fed chunk by chunk as the PTY delivered it", () => {
+  const d = new StartupAckDetector();
+  const events = collect(d);
+  // One feed() per recorded chunk, in order: a pre-joined string would
+  // silently skip the accumulation the detector depends on in production,
+  // and would hide WHICH frame decided.
+  let ackedAfter = -1;
+  CHANNELS_FIELD_CAPTURE.forEach((c, i) => {
+    d.feed("s1", c.data);
+    if (ackedAfter === -1 && events.length > 0) ackedAfter = i;
+  });
+  expect(events).toEqual([{ id: "s1" }]);
+  // The `\s*` earns its keep here and nowhere else: the ack fires on the
+  // COMPRESSED first paint, not two repaints later. Pin the index, not just
+  // the event -- an ack that slipped to the repaint would still be green
+  // above while the detector had silently lost the frame it is written for.
+  expect(ackedAfter).toBe(FIRST_PAINT);
+});
+
+test("field capture: the FIRST paint encodes inter-word spaces as \\x1b[1C, so a space-anchored pattern misses it", () => {
+  const first = CHANNELS_FIELD_CAPTURE[FIRST_PAINT]!.data;
+  // The encoding itself, measured on the wire, both cues in one chunk.
+  expect(first).toContain("WARNING:\x1b[1CLoading\x1b[1Cdevelopment\x1b[1Cchannels");
+  expect(first).toContain("I\x1b[1Cam\x1b[1Cusing\x1b[1Cthis\x1b[1Cfor\x1b[1Clocal\x1b[1Cdevelopment");
+
+  // NEGATIVE CONTROL, and the whole point of the `\s*` in
+  // CHANNELS_WARNING_PATTERNS: once stripped, the words are GLUED. A pattern
+  // written with literal spaces -- the obvious way to write it -- sees
+  // nothing on this frame, while the shipped one matches.
+  const stripped = stripAnsi(first);
+  expect(stripped).toContain("WARNING:Loadingdevelopmentchannels");
+  expect(/loading development channels/i.test(stripped)).toBe(false);
+  expect(detectChannelsWarning(stripped)).toBe(true);
+});
+
+test("field capture: the LATER repaints of the same screen use literal spaces -- both encodings are real", () => {
+  // The fact the lost 2026-07-28 capture could not tell anyone, and the
+  // reason `\s*` (zero or more) is the right quantifier rather than a
+  // hardcoded `\x1b[1C`: the CLI repaints the very same dialog in plain
+  // spaces a fraction of a second later.
+  const later = CHANNELS_FIELD_CAPTURE.slice(FIRST_PAINT + 1)
+    .map((c) => stripAnsi(c.data))
+    .filter((s) => /WARNING: Loading development channels/.test(s));
+  expect(later.length).toBeGreaterThan(0);
+  // And a detector fed ONLY the repaints still acks: the two cues survive
+  // the alternate spacing.
+  const d = new StartupAckDetector();
+  const events = collect(d);
+  for (const c of CHANNELS_FIELD_CAPTURE.slice(FIRST_PAINT + 1)) d.feed("s2", c.data);
+  expect(events).toEqual([{ id: "s2" }]);
 });

@@ -51,12 +51,25 @@ export function stripAnsi(s: string): string {
 /**
  * Both must match: the dialog title AND its accept option's wording.
  *
- * `\s*` (zero or more) instead of literal spaces: the Windows ConPTY repaint
- * frame encodes inter-word spaces as cursor-forward sequences (`\x1b[1C`), so
- * after ANSI stripping the title reads `WARNING:Loadingdevelopmentchannels` --
- * space-anchored patterns can never match that frame (field capture,
- * 2026-07-28 audit). The joined form is specific enough that prose cannot
- * produce it by accident, and the two-cue requirement still holds.
+ * `\s*` (zero or more) instead of literal spaces, because the CLI paints this
+ * one dialog in TWO different spacings within the same second, and only the
+ * first of them is what a reader expects. The Windows ConPTY frame that paints
+ * it FIRST encodes every inter-word space as a cursor-forward sequence
+ * (`\x1b[1C`), so after ANSI stripping the title reads
+ * `WARNING:Loadingdevelopmentchannels` and a space-anchored pattern sees
+ * nothing; the repaints that follow ~130 ms later carry LITERAL spaces. A
+ * pattern written the obvious way would therefore not fail outright -- worse,
+ * it would miss the first frame and ack on a repaint, a delay nobody notices
+ * until a CLI version stops repainting. `\s*` covers both. The joined form is
+ * specific enough that prose cannot produce it by accident, and the two-cue
+ * requirement still holds.
+ *
+ * Field-measured 2026-08-26 on a real Windows session and KEPT, which the
+ * 2026-07-28 audit this comment used to cite was not: the bytes are in
+ * tests/pty-harness/fixtures/channels-warning-conpty-win.json, recorded
+ * upstream of every detector by pty-manager.ts's KORY_PTY_RAW_CAPTURE hook,
+ * and both spacings are asserted in tests/desktop-startup-ack.test.ts (its
+ * FIELD CAPTURE block) and tests/desktop-attention.test.ts.
  */
 const CHANNELS_WARNING_PATTERNS = [
   /loading\s*development\s*channels/i,

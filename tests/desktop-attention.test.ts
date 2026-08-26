@@ -3,6 +3,8 @@
 // prompt); prose/code containing question-like text must NOT trigger.
 
 import { test, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   AttentionDetector,
   detectWaiting,
@@ -210,19 +212,61 @@ test("streamed prose mentioning the exempted wording does not clear a raised fla
   d.stop();
 });
 
-// SYNTHETIC frame (no field capture available for this fix -- see
-// startup-ack.ts's "field capture, 2026-07-28 audit" comment, which predates
-// this card; that capture itself was not retrievable). Built from the
-// pattern the comment describes (ConPTY inter-word spacing as \x1b[1C cursor
-// moves), not from a captured PTY log -- do not read this as terrain proof.
-test("the ConPTY repaint frame of the channels screen is still exempted", () => {
-  const conpty =
-    "\x1b[2J\x1b[H" +
-    "WARNING:\x1b[1CLoading\x1b[1Cdevelopment\x1b[1Cchannels\r\n" +
-    "❯\x1b[1C1.\x1b[1CI\x1b[1Cam\x1b[1Cusing\x1b[1Cthis\x1b[1Cfor\x1b[1Clocal\x1b[1Cdevelopment\r\n";
+// FIELD CAPTURE, card 00588e6c phase 2. spec_17343687. This frame was
+// SYNTHETIC until 2026-08-26 -- built from the pattern startup-ack.ts's
+// comment described, on the strength of a 2026-07-28 capture nobody kept.
+// It is now the real thing: tests/pty-harness/fixtures/channels-warning-
+// conpty-win.json holds 26 real chunks of one Windows PTY session, recorded
+// upstream of every detector by KORY_PTY_RAW_CAPTURE (pty-manager.ts,
+// proc.onData before handleData). The encoding the old fixture guessed was
+// right -- \x1b[1C between words -- but the guess was incomplete: the CLI
+// repaints the same dialog in LITERAL spaces ~130 ms later. Both forms must
+// stay exempted, so both are asserted below. Provenance and the measurement
+// itself live in tests/desktop-startup-ack.test.ts's field-capture block.
+type ChannelsChunk = { t: number; data: string };
+const CHANNELS_FIELD_CAPTURE: ChannelsChunk[] = JSON.parse(
+  readFileSync(
+    join(import.meta.dir, "pty-harness", "fixtures", "channels-warning-conpty-win.json"),
+    "utf-8"
+  )
+);
+
+/**
+ * The recorded chunks that belong to the channels screen itself, first paint
+ * through last repaint. SCOPED DELIBERATELY, and the bound is load-bearing:
+ * the capture runs on past the auto-Enter into Claude Code's own welcome
+ * screen, whose arrival (chunk 23, the banner plus supervisor.ts's `Start
+ * now:` starter prompt) DOES raise attention for ~7 s before clearing itself
+ * -- not because that screen matches (it does not, fed alone) but because the
+ * channels screen is still in the accumulated buffer and recombines with it.
+ * Measured and filed as card d3a4021a; feeding those chunks here would
+ * silently turn this exemption test into a red assertion about that bug
+ * instead.
+ */
+const CHANNELS_SCREEN_CHUNKS = (() => {
+  const hasCue = (c: ChannelsChunk) =>
+    /Loading.{0,8}development.{0,8}channels/.test(stripAnsi(c.data));
+  const first = CHANNELS_FIELD_CAPTURE.findIndex(hasCue);
+  let last = first;
+  CHANNELS_FIELD_CAPTURE.forEach((c, i) => {
+    if (hasCue(c)) last = i;
+  });
+  return CHANNELS_FIELD_CAPTURE.slice(first, last + 1);
+})();
+
+test("the ConPTY repaint frame of the channels screen is still exempted (real capture, both spacings)", () => {
+  // Guard the slice itself: an empty or one-chunk window would make the
+  // assertion below pass while proving nothing. Both spacings must be in it.
+  expect(CHANNELS_SCREEN_CHUNKS.length).toBeGreaterThan(1);
+  const joined = CHANNELS_SCREEN_CHUNKS.map((c) => c.data).join("");
+  expect(joined).toContain("WARNING:\x1b[1CLoading\x1b[1Cdevelopment\x1b[1Cchannels");
+  expect(stripAnsi(joined)).toContain("WARNING: Loading development channels");
+
   const d = new AttentionDetector();
   const events = collect(d);
-  d.feed("s1", conpty);
+  // Replayed chunk by chunk, exactly as node-pty delivered them: the
+  // compressed first paint AND the literal-space repaints go through.
+  for (const c of CHANNELS_SCREEN_CHUNKS) d.feed("s1", c.data);
   expect(events).toEqual([]);
   d.stop();
 });
