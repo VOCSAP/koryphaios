@@ -699,6 +699,22 @@ body {
   animation: dot-pulse 1s ease-in-out infinite;
 }
 
+/*
+ * 'unknown' activity (card f8082208): an agent-kind whose OSC 0 emission is
+ * unmeasured (codex, gemini, a bare shell, sandbox), so frequency alone
+ * cannot say working or idle. No colour in DESIGN.md's closed semantic list
+ * (§2) means "no signal" -- this is deliberately a FORM change, not a new
+ * hue: a hollow ring (transparent fill, dim border) instead of a filled
+ * dot, so it never collapses visually into solid-green idle or
+ * accent-pulsing working, and never claims a colour meaning it does not
+ * have. Flagged for deck-design/team-lead sign-off, no 3-state dot
+ * precedent existed to reuse.
+ */
+.dot-unknown {
+  background: transparent;
+  border: 1.5px solid var(--fg-dim);
+}
+
 /* Rate-limited (quota) overrides both: steady slow orange pulse while waiting. */
 .dot-limited {
   background: #e08a2e;

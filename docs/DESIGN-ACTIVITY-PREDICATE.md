@@ -365,10 +365,19 @@ Par puissance decroissante, ce que le lot doit livrer :
 2. **Sonde comportementale sur une fixture REELLE, qui est le critere
    d'acceptation.** Rejouer `tests/pty-harness/fixtures/turn-chunks-inherited-env.json`
    avec ses horodatages enregistres, dans le vrai chemin de traitement de
-   chunk, horloge simulee, et exiger la SEQUENCE : `unknown|idle` jusqu'a
-   t=11051, `working` a partir de t=11051, `idle` a t=19776 (derniere emission
-   16776 + 3000) et pas avant. Les deux fixtures de tour sont deja au depot ;
-   il n'y a pas de capture a refaire.
+   chunk, horloge simulee, et exiger la SEQUENCE : `unknown` avant t=297,
+   `working` a t=297 (le titre isole n'est pas supprime, section 2.4 :
+   suppresseur optionnel, hors perimetre), `idle` a t=4487 (le vrai creux
+   entre les deux titres isoles et l'alternance soutenue), `working` a
+   partir de t=11051. CORRIGE 2026-08-26 par le lot d'implementation
+   (`spec_1449bb52`), qui a mesure une DIXIEME emission de titre a t=17769
+   ("Compter lentement de 1 a 30", 993ms apres 16776, donc a l'interieur de
+   la meme cadence soutenue) absente de l'illustration ci-dessus : elle
+   reporte l'extinction a t=17769+3000=20769, apres le dernier octet capture
+   par la fixture (t=19879). La sequence reste `working` jusqu'a la fin de
+   la fenetre capturee ; l'extinction n'est prouvee qu'en extrapolant
+   l'horloge simulee au-dela (`tests/desktop-activity.test.ts`). Les deux
+   fixtures de tour sont deja au depot ; il n'y a pas de capture a refaire.
 3. **Controle negatif, et il doit SHIPPER dans le commit.** La meme sonde
    nourrie d'un flux sans aucun OSC 0 (par exemple une fixture filtree, ou le
    retour a l'ancien producteur `BUSY_RE`) doit ROUGIR. Une sonde mesuree rouge

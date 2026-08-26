@@ -77,6 +77,32 @@ test("OSC 2 also sets title, same as OSC 0", () => {
   expect(snap.title).toBe("window title via OSC 2");
 });
 
+// Card f8082208 correction 3 (team-lead mutation review, 2026-08-26):
+// titleSeq must increment on OSC 2 exactly like OSC 0 -- mutating
+// applyPayload's guard to `if (ps === '0')` (dropping the '2' branch)
+// stayed green until this probe existed, since no prior test read
+// titleSeq off an OSC-2-only feed.
+test("titleSeq increments on OSC 2 exactly like OSC 0, not just OSC 0", () => {
+  const p = createOscParser();
+  const snap = p.feed(osc("2", "window title via OSC 2"));
+  expect(snap.titleSeq).toBe(1);
+});
+
+// N13 (team-lead mutation review round 3, 2026-08-26): the probe above only
+// proves the POSITIVE half (0 and 2 count). Moving `titleSeq++` before the
+// `ps` check in applyPayload -- so EVERY OSC family increments it, not just
+// title -- stayed green against every prior test, since none of them read
+// titleSeq off a non-title feed. This is not theoretical: the CLI emits
+// OSC 9;4 (progress) and OSC 777 (notify) for real, so a progress bar alone
+// would paint 'working' forever with not a single title ever painted.
+test("titleSeq does NOT increment on OSC 9;4 (progress) or OSC 777 (notify) -- only title (0/2) counts", () => {
+  const progress = createOscParser();
+  expect(progress.feed(osc("9", "4;42")).titleSeq).toBe(0);
+
+  const notify = createOscParser();
+  expect(notify.feed(osc("777", "notify;Claude Code;Claude needs your permission")).titleSeq).toBe(0);
+});
+
 test("OSC 777 notify body is surfaced -- the quadruplet extension over the original title/progress pair (card 1aa69066, 2026-08-26 amendment, unblocks f8082208)", () => {
   const p = createOscParser();
   const snap = p.feed(osc("777", "notify;Claude Code;Claude needs your permission"));
@@ -113,7 +139,8 @@ test("nothing seen yet -> all three fields null", () => {
   expect(p.feed("plain text, no escapes at all")).toEqual({
     title: null,
     progress: null,
-    notify: null
+    notify: null,
+    titleSeq: 0
   } satisfies OscSnapshot);
 });
 
@@ -149,7 +176,7 @@ test("fragmented mid-terminator: ESC of the ST in one chunk, backslash in the ne
 test("a byte-at-a-time feed reconstructs the same payload as one whole feed()", () => {
   const whole = osc("777", "notify;Claude Code;byte at a time");
   const p = createOscParser();
-  let snap: OscSnapshot = { title: null, progress: null, notify: null };
+  let snap: OscSnapshot = { title: null, progress: null, notify: null, titleSeq: 0 };
   for (const ch of whole) snap = p.feed(ch);
   expect(snap.notify?.body).toBe("byte at a time");
 });
@@ -315,10 +342,20 @@ test("SessionService.oscSnapshot(id): returns null for an unknown session, and f
   const parser = createOscParser();
   parser.feed(`${ESC}]0;a real title${BEL}`);
   const self = { oscParsers: new Map([["s1", parser]]) };
-  expect(fn.call(self, "s1")).toEqual({ title: "a real title", progress: null, notify: null });
+  expect(fn.call(self, "s1")).toEqual({
+    title: "a real title",
+    progress: null,
+    notify: null,
+    titleSeq: 1
+  });
   // Reading again must not have mutated anything -- same snapshot, not null
   // or altered by the read itself.
-  expect(fn.call(self, "s1")).toEqual({ title: "a real title", progress: null, notify: null });
+  expect(fn.call(self, "s1")).toEqual({
+    title: "a real title",
+    progress: null,
+    notify: null,
+    titleSeq: 1
+  });
 });
 
 // ----- 4. Discovery-based coverage: no live PTY-data consumer left --------

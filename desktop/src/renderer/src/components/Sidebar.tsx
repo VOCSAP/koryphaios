@@ -150,15 +150,17 @@ export function SessionRow({
         />
       )}
       <span
-        className={`dot dot-${session.status}${session.needsAttention ? ' dot-attention' : session.rateLimited ? ' dot-limited' : session.thinking ? ' dot-thinking' : ''}`}
+        className={`dot dot-${session.status}${session.needsAttention ? ' dot-attention' : session.rateLimited ? ' dot-limited' : session.activity === 'working' ? ' dot-thinking' : session.activity === 'unknown' ? ' dot-unknown' : ''}`}
         title={
           session.needsAttention
             ? t('status.needsAttention')
             : session.rateLimited
               ? t('status.rateLimited')
-              : session.thinking
+              : session.activity === 'working'
                 ? t('status.thinking')
-                : t(`status.${session.status}`)
+                : session.activity === 'unknown'
+                  ? t('status.unknown')
+                  : t(`status.${session.status}`)
         }
       />
       {/* Slot kept free between the status dot and the laurel: the per-peer ROLE

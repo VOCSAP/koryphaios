@@ -229,8 +229,13 @@ function makeDataHandler(gateActive: boolean) {
     // this.oscParserFor(e.id).feed(e.data) -- stubbed directly, same
     // reasoning as quotaGateActive above (this test targets only the gate
     // condition, not the OSC parser's own behaviour, covered by
-    // tests/desktop-osc.test.ts).
-    oscParserFor: () => ({ feed: () => {} })
+    // tests/desktop-osc.test.ts). Returns a real-shaped snapshot (not `{}`)
+    // because the handler now reads `.titleSeq` off it unconditionally.
+    oscParserFor: () => ({ feed: () => ({ title: null, progress: null, notify: null, titleSeq: 0 }) }),
+    // Card f8082208: the handler also routes titleSeq into
+    // this.activityTrackerFor(e.id).observe(...) -- stubbed directly, same
+    // reasoning (covered for real by tests/desktop-activity.test.ts).
+    activityTrackerFor: () => ({ observe: () => {} })
   };
   return {
     run: (e: { id: string; data: string }): void => fn.call(self, e),

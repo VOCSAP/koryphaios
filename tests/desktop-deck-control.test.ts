@@ -62,7 +62,7 @@ function fakeSession(id: string, extra: Partial<SessionRuntime> = {}): SessionRu
     exitCode: null,
     pid: 1,
     peerId: `peer-${id}`,
-    thinking: false,
+    activity: "idle",
     expired: false,
     rateLimited: false,
     resumeAt: null,
@@ -504,4 +504,27 @@ test("deck-control-mcp speaks MCP over stdio and forwards tools/call", async () 
   });
   const refused = (await readMessage()) as { result: { isError?: boolean } };
   expect(refused.result.isError).toBe(true);
+});
+
+// Card f8082208, correction 1: pins that sessionView's `thinking` field
+// carries the REAL ternary activity value over the wire -- 'unknown' must
+// never be folded into 'idle' (or into 'working') in this projection.
+// Mutating sessionView to `thinking: s.activity === 'working'` (silently
+// collapsing back to a boolean, folding 'unknown' into false/idle) is
+// exactly the regression this probe exists to catch.
+test("deck_list_sessions: sessionView's `thinking` field carries 'working'/'idle'/'unknown' verbatim, never folded into idle", async () => {
+  const state = {
+    sessions: [
+      fakeSession("a", { activity: "working" }),
+      fakeSession("b", { activity: "idle" }),
+      fakeSession("c", { activity: "unknown" })
+    ]
+  };
+  const srv = await startDeckControl(makeDeps(state));
+  servers.push(srv);
+
+  const listed = await call(srv, "deck_list_sessions");
+  const sessions = (listed.body.result as { sessions: { id: string; thinking: string }[] }).sessions;
+  const byId = Object.fromEntries(sessions.map((s) => [s.id, s.thinking]));
+  expect(byId).toEqual({ a: "working", b: "idle", c: "unknown" });
 });

@@ -1058,7 +1058,9 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
               className="browser-dock-head"
               style={{ '--tile-color': paired.color || 'transparent' } as React.CSSProperties}
             >
-              <span className={`dot dot-${paired.status}${paired.thinking ? ' dot-thinking' : ''}`} />
+              <span
+                className={`dot dot-${paired.status}${paired.activity === 'working' ? ' dot-thinking' : paired.activity === 'unknown' ? ' dot-unknown' : ''}`}
+              />
               <span className="tile-title" style={{ color: paired.color || undefined }}>
                 {paired.name}
               </span>

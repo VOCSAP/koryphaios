@@ -55,6 +55,18 @@ export interface OscSnapshot {
   progress: string | null
   /** Last OSC 777 notification, or null. */
   notify: OscNotify | null
+  /**
+   * Monotone count of applied OSC 0/2 payloads (card f8082208 / docs/
+   * DESIGN-ACTIVITY-PREDICATE.md section 4). Increments once per
+   * applyPayload() call for ps==='0'||'2', REGARDLESS of whether the title
+   * text differs from the previous one -- a burst of identical titles (the
+   * M4 case measured on that card: six identical emissions then silence)
+   * must still register as six observations, not one, or a caller building
+   * an activity predicate on this count would see no signal at all. Still
+   * no clock, no rate: this module counts what it extracted, nothing more
+   * (the module's own FREQUENCY DOES NOT ENTER header contract, unchanged).
+   */
+  titleSeq: number
 }
 
 /**
@@ -95,6 +107,7 @@ export function createOscParser(): { feed(chunk: string): OscSnapshot } {
   let title: string | null = null
   let progress: string | null = null
   let notify: OscNotify | null = null
+  let titleSeq = 0
 
   let mode: Mode = 'idle'
   let buf = ''
@@ -106,6 +119,7 @@ export function createOscParser(): { feed(chunk: string): OscSnapshot } {
     const rest = firstSemi === -1 ? '' : payload.slice(firstSemi + 1)
     if (ps === '0' || ps === '2') {
       title = rest
+      titleSeq++
       return
     }
     if (ps === '9') {
@@ -217,7 +231,7 @@ export function createOscParser(): { feed(chunk: string): OscSnapshot } {
           break
       }
     }
-    return { title, progress, notify }
+    return { title, progress, notify, titleSeq }
   }
 
   return { feed }

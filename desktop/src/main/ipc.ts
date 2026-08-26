@@ -1019,7 +1019,10 @@ export function registerIpc({
   regHandle('agents:stop-state', () => {
     const tiles = service.list()
     const live = tiles.filter((r) => r.status !== 'exited')
-    const busy = live.filter((r) => r.thinking)
+    // Card f8082208: counted separately, never folded into idle (nor into
+    // busy) -- see docs/DESIGN-ACTIVITY-PREDICATE.md section 5.
+    const busy = live.filter((r) => r.activity === 'working')
+    const unknown = live.filter((r) => r.activity === 'unknown')
     // Round-3 mutation review (card aaf4537d, item 6): paused/parkedCards are
     // still hardcoded 0 -- STALE justification corrected here. POST
     // /roadmap/lock-park is implemented broker-side now (this same card), so
@@ -1032,7 +1035,7 @@ export function registerIpc({
     // comment-only fix; left as 0 deliberately (an honest "not computed",
     // not a fabricated count) and escalated to the team-lead rather than
     // implemented inline.
-    return { live: live.length, busy: busy.length, paused: 0, parkedCards: 0 }
+    return { live: live.length, busy: busy.length, unknown: unknown.length, paused: 0, parkedCards: 0 }
   })
 
   // ----- help assistant (PLAN C9) -----
@@ -1074,7 +1077,7 @@ export function registerIpc({
         name: s.name,
         peer_id: s.peerId,
         status: s.status,
-        thinking: s.thinking,
+        activity: s.activity,
         rate_limited: s.rateLimited,
         cwd: s.cwd,
         worktree_branch: s.worktree?.branch ?? null,

@@ -1,9 +1,20 @@
-// PLACEHOLDER thinking heuristic (DESIGN §10). Deliberately temporary and
-// non-deterministic: it scrapes the PTY output for Claude Code's "busy" cues
-// (the "esc to interrupt" hint and the braille spinner) and debounces back to
-// idle once the output stops changing. A hook-based, deterministic detector
-// replaces this in Phase 2. Isolated in its own module so the rules can be
-// tuned per Claude version or swapped out wholesale.
+// SUPERSEDED (card f8082208, 2026-08-26) by the frequency-based activity
+// predicate in detect/activity.ts -- its transitions no longer feed
+// RuntimeState or any consumer. Kept wired ONLY because two tests still
+// anchor on it directly: tests/desktop-osc.test.ts's pinned pty.on('data')
+// detector-field list, and tests/desktop-inject-command-modal-guard.test.ts's
+// screenGuard-ordering probe. Real cost still paid for zero effect: BUSY_RE
+// against every chunk (ANSI-stripped, OSC left untouched -- see
+// EXEMPT_DETECTORS in desktop-osc.test.ts) and a re-armed 1500ms idle timer
+// per session, on the hot PTY path.
+//
+// PLACEHOLDER thinking heuristic (DESIGN §10), history kept for context:
+// deliberately temporary and non-deterministic, it scrapes the PTY output
+// for Claude Code's "busy" cues (the "esc to interrupt" hint and the
+// braille spinner) and debounces back to idle once the output stops
+// changing. Isolated in its own module so the rules could be tuned per
+// Claude version or swapped out wholesale -- which is exactly what
+// happened, see above.
 
 import { EventEmitter } from 'node:events'
 
@@ -34,7 +45,9 @@ const DEFAULT_IDLE_MS = 1500
  * Tracks per-session busy/idle state from PTY output. Emits `thinking`
  * (ThinkingEvent) only on transitions. While busy markers keep arriving the
  * idle timer is re-armed, so a continuously redrawn spinner stays "busy" until
- * output stops, then flips idle after `idleMs`.
+ * output stops, then flips idle after `idleMs`. SUPERSEDED (see module
+ * header): still fed real bytes, but its emitted event has no listener in
+ * production anymore.
  */
 export class ThinkingDetector extends EventEmitter {
   private busy = new Map<string, boolean>()

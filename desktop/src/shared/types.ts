@@ -94,8 +94,14 @@ export interface SessionRuntime extends SessionDef {
   pid: number | null
   /** Display peer_id resolved from the claude-peers status-line cache, if any. */
   peerId: string | null
-  /** Heuristic busy/idle state (placeholder detector, see thinking.ts). */
-  thinking: boolean
+  /**
+   * FREQUENCY-based activity predicate (card f8082208 / docs/
+   * DESIGN-ACTIVITY-PREDICATE.md), ternary and never a boolean: 'unknown'
+   * is the honest default for an agent-kind whose OSC 0 emission is
+   * unmeasured (codex, gemini, a bare shell, sandbox) rather than a
+   * silent 'idle'. See desktop/src/main/detect/activity.ts.
+   */
+  activity: 'working' | 'idle' | 'unknown'
   /**
    * Restore-time flag: the persisted claude session id has no transcript on disk
    * (expired / pruned), so it was not resumed. The tile shows a "start new"
@@ -640,6 +646,12 @@ export interface StopReport {
 export interface StopState {
   live: number
   busy: number
+  /**
+   * Live tiles whose activity is 'unknown' (card f8082208): counted
+   * separately from both `busy` and idle, never folded into either -- see
+   * docs/DESIGN-ACTIVITY-PREDICATE.md section 5.
+   */
+  unknown: number
   paused: number
   parkedCards: number
 }
@@ -1368,7 +1380,8 @@ export interface PtyExitEvent {
 
 export interface SessionThinkingEvent {
   id: string
-  busy: boolean
+  /** Ternary activity state (card f8082208) -- see SessionRuntime.activity. */
+  state: 'working' | 'idle' | 'unknown'
 }
 
 export interface SessionAttentionEvent {

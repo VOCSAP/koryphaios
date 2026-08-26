@@ -177,7 +177,13 @@ function sessionView(s: SessionRuntime): Record<string, unknown> {
     name: s.name,
     peer_id: s.peerId,
     status: s.status,
-    thinking: s.thinking,
+    // Card f8082208: WIRE-CONTRACT CHANGE for third-party MCP agents -- was
+    // a boolean ("is this tile busy"), now the ternary activity predicate
+    // ('working' | 'idle' | 'unknown'), see docs/DESIGN-ACTIVITY-PREDICATE.md.
+    // A supervisor agent reading `thinking` as a boolean truthy/falsy check
+    // will now see 'idle'/'unknown' both as truthy strings -- flagged here
+    // for the team-lead to announce, per that doc's own consumer table.
+    thinking: s.activity,
     rate_limited: s.rateLimited,
     cwd: s.cwd,
     worktree_branch: s.worktree?.branch ?? null,

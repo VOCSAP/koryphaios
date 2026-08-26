@@ -29,6 +29,7 @@
   "status.starting": "démarrage",
   "status.exited": "terminé",
   "status.thinking": "réflexion…",
+  "status.unknown": "activité inconnue",
   "status.rateLimited": "limite d'usage atteinte",
   "session.pending": "Session {id}",
   "quota.limited": "limite d'usage atteinte",

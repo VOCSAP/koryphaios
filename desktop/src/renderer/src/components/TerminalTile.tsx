@@ -222,15 +222,17 @@ export function TerminalTile({
         title={t('tile.fullscreenTitle')}
       >
         <span
-          className={`dot dot-${session.status}${session.needsAttention ? ' dot-attention' : session.rateLimited ? ' dot-limited' : session.thinking ? ' dot-thinking' : ''}`}
+          className={`dot dot-${session.status}${session.needsAttention ? ' dot-attention' : session.rateLimited ? ' dot-limited' : session.activity === 'working' ? ' dot-thinking' : session.activity === 'unknown' ? ' dot-unknown' : ''}`}
           title={
             session.needsAttention
               ? t('status.needsAttention')
               : session.rateLimited
                 ? t('status.rateLimited')
-                : session.thinking
+                : session.activity === 'working'
                   ? t('status.thinking')
-                  : t(`status.${session.status}`)
+                  : session.activity === 'unknown'
+                    ? t('status.unknown')
+                    : t(`status.${session.status}`)
           }
         />
         <span className="tile-title" style={{ color: session.color || undefined }}>

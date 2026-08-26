@@ -20,7 +20,7 @@ import {
   shouldInjectPrompt,
   type SpawnMode
 } from './session-command'
-import { ThinkingDetector, type ThinkingEvent } from './thinking'
+import { ThinkingDetector } from './thinking'
 import { isClaudeLaunch } from './session-kind'
 import {
   QuotaDetector,
@@ -40,6 +40,7 @@ import {
 import { clearDeskSessionId, readDeskSessionId } from './desk-session'
 import { ScreenGuard } from './screen-model'
 import { createOscParser, type OscSnapshot } from './detect/osc'
+import { createActivityTracker, ACTIVITY_IDLE_MS, type Activity } from './detect/activity'
 import { reportError } from './log'
 import { DEFAULT_PALETTE, paletteColor } from '@shared/palette'
 import { sanitizeRole } from '@shared/role'
@@ -50,7 +51,19 @@ interface RuntimeState {
   status: SessionStatus
   exitCode: number | null
   peerId: string | null
-  thinking: boolean
+  /**
+   * FREQUENCY-based, ternary (card f8082208 / docs/DESIGN-ACTIVITY-PREDICATE.md):
+   * 'working' | 'idle' | 'unknown', driven by the activity tracker
+   * (detect/activity.ts) fed with OSC 0/2's titleSeq counter (detect/osc.ts).
+   * RENAMED from the old `thinking: boolean` (placeholder BUSY_RE detector,
+   * thinking.ts, measured dead in production since the CLI's 2026-08-11
+   * update) so every stale consumer fails to compile instead of silently
+   * reading a field that is no longer written the same way. 'unknown' is
+   * the default and stays there forever for a session whose agent-kind
+   * never paints an OSC 0 title -- never collapsed into 'idle', which is
+   * exactly the silent-degradation shape this rename exists to prevent.
+   */
+  activity: Activity
   /** Restore-time: persisted id had no transcript, so it was not resumed. */
   expired: boolean
   /** True while the session sits at a usage-limit screen (quota.ts). */
@@ -180,6 +193,14 @@ export class SessionService extends EventEmitter {
    */
   private oscParsers = new Map<string, ReturnType<typeof createOscParser>>()
   /**
+   * Activity predicate (card f8082208 / docs/DESIGN-ACTIVITY-PREDICATE.md),
+   * one createActivityTracker() instance per session id, same session-keyed
+   * Map<string, T> shape as oscParsers/the four detectors above. Fed with
+   * osc.ts's own titleSeq counter, never a title string -- see that
+   * module's own header for why frequency, not content, decides.
+   */
+  private activityTrackers = new Map<string, ReturnType<typeof createActivityTracker<NodeJS.Timeout>>>()
+  /**
    * Initial prompt awaiting post-spawn keystroke injection (150eb188), keyed
    * by session id. Set only for a fresh spawn with a non-empty def.prompt
    * (startPty); consumed (deleted) by the startup-ack handler below once
@@ -248,7 +269,10 @@ export class SessionService extends EventEmitter {
       this.attentionDetector.feed(e.id, e.data)
       this.startupAckDetector.feed(e.id, e.data)
       this.screenGuard.feed(e.id, e.data)
-      this.oscParserFor(e.id).feed(e.data)
+      // Card f8082208: the activity tracker reads the SAME snapshot's
+      // titleSeq, never the title text -- see detect/activity.ts's header.
+      const oscSnap = this.oscParserFor(e.id).feed(e.data)
+      this.activityTrackerFor(e.id).observe(oscSnap.titleSeq)
     })
     this.pty.on('exit', ({ id, exitCode }: { id: string; exitCode: number }) => {
       // pty-manager only emits 'exit' for a spontaneous process exit (the user
@@ -264,6 +288,8 @@ export class SessionService extends EventEmitter {
       this.startupAckDetector.clear(id)
       this.screenGuard.clear(id)
       this.oscParsers.delete(id)
+      this.activityTrackers.get(id)?.stop()
+      this.activityTrackers.delete(id)
       this.pendingPrompt.delete(id)
 
       // A clean exit (/exit -> shell returns 0) auto-closes the tile, the way a
@@ -284,20 +310,26 @@ export class SessionService extends EventEmitter {
       if (r) {
         r.status = 'exited'
         r.exitCode = exitCode
-        r.thinking = false
+        // Never CREATE an idle observation the tracker never made (card
+        // f8082208, B1 review, 2026-08-26): a session whose agent-kind
+        // never painted a title stays 'unknown' straight through exit --
+        // it must not collapse to 'idle' just because the process died,
+        // that is exactly the silent-degradation shape this lot exists to
+        // prevent. A session that WAS 'working'/'idle' at exit legitimately
+        // becomes 'idle': it is certainly no longer producing.
+        if (r.activity !== 'unknown') r.activity = 'idle'
       }
       this.emit('exit', { id, exitCode, name: def?.name })
       this.broadcast()
     })
 
-    // Forward busy/idle transitions as `thinking` (ipc -> session:thinking).
-    this.thinkingDetector.on('thinking', ({ id, busy }: ThinkingEvent) => {
-      const r = this.runtime.get(id)
-      if (!r) return
-      r.thinking = busy
-      this.emit('thinking', { id, busy })
-      this.broadcast()
-    })
+    // thinkingDetector.feed()/.clear()/.stop() above stays wired (BUSY_RE is
+    // measured dead in production, see thinking.ts's own header and card
+    // 1aa69066's EXEMPT_DETECTORS reasoning in tests/desktop-osc.test.ts) but
+    // its transitions are no longer forwarded anywhere: RuntimeState.activity
+    // is driven exclusively by the activity tracker below (card f8082208).
+    // Deliberately NOT touching the thinkingDetector wiring itself keeps that
+    // placeholder's coverage exemption valid unchanged.
 
     // Quota episodes (ipc -> session:quota). The detector observes/schedules;
     // the injection decision (enabled? alive? still limited?) is made here.
@@ -515,7 +547,7 @@ export class SessionService extends EventEmitter {
       status: 'starting',
       exitCode: null,
       peerId: null,
-      thinking: false,
+      activity: 'unknown',
       expired: false,
       rateLimited: false,
       resumeAt: null,
@@ -553,6 +585,8 @@ export class SessionService extends EventEmitter {
     this.startupAckDetector.clear(id)
     this.screenGuard.clear(id)
     this.oscParsers.delete(id)
+    this.activityTrackers.get(id)?.stop()
+    this.activityTrackers.delete(id)
     this.pendingPrompt.delete(id)
     this.defs = this.defs.filter((d) => d.id !== id)
     this.runtime.delete(id)
@@ -655,7 +689,7 @@ export class SessionService extends EventEmitter {
         status: 'exited',
         exitCode: null,
         peerId: null,
-        thinking: false,
+        activity: 'unknown',
         expired: false,
         rateLimited: false,
         resumeAt: null,
@@ -744,6 +778,42 @@ export class SessionService extends EventEmitter {
       this.oscParsers.set(id, p)
     }
     return p
+  }
+
+  /**
+   * Get-or-create the activity tracker for a session (card f8082208), same
+   * lazy-mint convention as oscParserFor. Its `on()` transition callback is
+   * wired here, once, at creation: writes RuntimeState.activity, forwards
+   * `session:thinking` (unchanged channel name -- see shared/types.ts's
+   * SessionThinkingEvent, now carrying the ternary `state` instead of the
+   * old `busy` boolean) and broadcasts, mirroring the old ThinkingDetector
+   * forwarding this replaces.
+   */
+  private activityTrackerFor(id: string): ReturnType<typeof createActivityTracker<NodeJS.Timeout>> {
+    let t = this.activityTrackers.get(id)
+    if (!t) {
+      t = createActivityTracker<NodeJS.Timeout>({
+        idleMs: ACTIVITY_IDLE_MS,
+        now: Date.now,
+        setTimer: (fn, ms) => {
+          const timer = setTimeout(fn, ms)
+          // Do not keep the event loop alive just for the idle flip (same
+          // posture as ThinkingDetector.armIdle).
+          if (typeof timer.unref === 'function') timer.unref()
+          return timer
+        },
+        clearTimer: (timer) => clearTimeout(timer)
+      })
+      t.on((state) => {
+        const r = this.runtime.get(id)
+        if (!r) return
+        r.activity = state
+        this.emit('thinking', { id, state })
+        this.broadcast()
+      })
+      this.activityTrackers.set(id, t)
+    }
+    return t
   }
 
   /** Per-session quota auto-resume override (context menu). Persisted. */
@@ -1048,8 +1118,12 @@ export class SessionService extends EventEmitter {
     this.screenGuard.clear(def.id)
     // A respawn (restart/resume) mints a fresh OSC continuation state too --
     // an unterminated fragment from the previous process must never bleed
-    // into the new one's first chunk.
+    // into the new one's first chunk. Same reasoning for the activity
+    // tracker: a stale titleSeq/timer from the previous process must not
+    // bleed into the new one either.
     this.oscParsers.delete(def.id)
+    this.activityTrackers.get(def.id)?.stop()
+    this.activityTrackers.delete(def.id)
     // sessionId may have just changed (fork-resume) -> persist before/after spawn.
     this.persist()
     // Drop any stale back-channel file from a previous run so discovery cannot
@@ -1086,7 +1160,7 @@ export class SessionService extends EventEmitter {
       exitCode: r?.exitCode ?? null,
       pid: this.pty.pid(def.id),
       peerId: r?.peerId ?? null,
-      thinking: r?.thinking ?? false,
+      activity: r?.activity ?? 'unknown',
       expired: r?.expired ?? false,
       rateLimited: r?.rateLimited ?? false,
       resumeAt: r?.resumeAt ?? null,
@@ -1215,10 +1289,11 @@ export class SessionService extends EventEmitter {
    * live turn: when the tile is busy it waits (bounded) for idle, then injects;
    * if it never falls idle within the deadline the command is NOT sent (a clear
    * mid-task would destroy work) and 'busy-timeout' is returned for the caller
-   * to log. CAVEAT measured 2026-08-13, do not read the paragraph above as a
-   * guarantee: `waitIdle` reads `r.thinking`, whose detector is currently
-   * unreliable, so in practice this gate can open on a busy tile. That is a
-   * separate defect on the detector, not on this method.
+   * to log. `waitIdle` is deliberately driven by byte-recency (lastOutputAt),
+   * NOT by RuntimeState.activity -- see waitIdle's own doc comment for why
+   * (docs/DESIGN-ACTIVITY-PREDICATE.md section 5: the activity predicate is
+   * silent while the operator types, which would make this gate open exactly
+   * when it must not).
    */
   async injectCommand(
     id: string,
@@ -1317,9 +1392,9 @@ export class SessionService extends EventEmitter {
     // comment for what it does and does not cover (tool-permission prompt,
     // open selection list -- DEDUIT, not measured, treated as modal).
     //
-    // `waitIdle`'s own idleness signal is currently unreliable
-    // (its `thinking` predicate is under separate diagnosis), so a directive
-    // can land mid-turn. Nor is it guaranteed, by nature, that the agent read
+    // `waitIdle`'s own idleness signal is byte-recency (lastOutputAt), not
+    // RuntimeState.activity (card f8082208) -- see waitIdle's own doc
+    // comment for why. Nor is it guaranteed, by nature, that the agent read
     // the line, understood it, or will act on it. Turning 'written' into a
     // proof of submission needs output-side confirmation AFTER the CR --
     // waitForOutput (below in this file) is the instrument, but the activity
@@ -1431,15 +1506,25 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Resolve once the tile reports idle (thinking=false), or false at the
-   * deadline. An already-idle tile resolves on the first tick.
+   * Resolve once the PTY has been quiet (no output byte) for at least
+   * ACTIVITY_IDLE_MS, or false at the deadline. Deliberately driven by
+   * `lastOutputAt` (byte recency), NOT `RuntimeState.activity` (card
+   * f8082208 / docs/DESIGN-ACTIVITY-PREDICATE.md section 5): OSC 0 is
+   * SILENT while the operator types (measured -- ~20s of typing produced
+   * zero OSC 0 emissions while output bytes kept echoing), so gating this
+   * on the activity field would open the write gate exactly while a human
+   * is mid-keystroke, the one moment an injected directive must not land.
+   * A session that has never produced any output yet (`lastOutputAt` ===
+   * null) is treated as idle -- nothing is mid-turn to interrupt. An
+   * already-quiet tile resolves on the first tick.
    */
   private async waitIdle(id: string, deadlineMs: number): Promise<boolean> {
     const deadline = Date.now() + deadlineMs
     for (;;) {
       const r = this.runtime.get(id)
       if (!r) return false
-      if (!r.thinking) return true
+      const last = this.lastOutputAt(id)
+      if (last === null || Date.now() - last >= ACTIVITY_IDLE_MS) return true
       if (Date.now() >= deadline) return false
       await new Promise((res) => setTimeout(res, DIRECTIVE_IDLE_POLL_MS))
     }

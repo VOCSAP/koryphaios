@@ -115,6 +115,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'status.starting': 'starting',
   'status.exited': 'exited',
   'status.thinking': 'thinking…',
+  'status.unknown': 'activity unknown',
   'status.rateLimited': 'usage limit reached',
   'session.pending': 'Session {id}',
   'quota.limited': 'usage limit reached',
