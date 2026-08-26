@@ -27,10 +27,15 @@
 // fix they cover (the over-strip probes, the merge path, the import-grammar
 // forms, the path lexing, the net-diff split).
 //
-// Named tests/desktop-*.test.ts so it is collected by the same CI glob
-// audited by tests/desktop-ci-glob-coverage.test.ts (that file's own
-// enumeration test picks this one up automatically -- verified directly in
-// "collected by the real CI glob" below, not just assumed from the name).
+// Team-lead audit 2026-08-26: doubly stale. This file lives directly under
+// tests/ as *.test.ts, collected by scripts/pure-module-partition.ts's
+// listTestFiles regardless of name; it RUNS because isExempt's deny-list
+// names the broker-/server- prefixes and two exact filenames, none of which
+// name this file -- "desktop-" plays no role in either function. It is also
+// no longer a "CI glob": card 0bbac537 replaced the workflow's glob-based
+// `bun test <globs>` line with that same deny-list partition script, which is
+// what the test below (and tests/desktop-ci-glob-coverage.test.ts) actually
+// verifies -- not assumed from the name.
 
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";

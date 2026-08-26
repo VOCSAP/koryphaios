@@ -31,9 +31,13 @@
 // copies of a gating table is exactly the divergence CLAUDE.md's shared-table
 // rule warns about.
 //
-// Named tests/desktop-*.test.ts so it is collected by the very partition it
-// audits (mirrors tests/desktop-test-hygiene.test.ts's own self-coverage
-// note) -- checked explicitly by a test below, not assumed from the name.
+// Team-lead audit 2026-08-26: this file lives directly under tests/ as
+// *.test.ts, which is what scripts/pure-module-partition.ts's listTestFiles
+// collects by default; it RUNS because isExempt's deny-list is keyed on the
+// broker-/server- prefixes and two exact filenames, none of which name this
+// file -- the "desktop-" prefix plays no role in either function (mirrors
+// tests/desktop-test-hygiene.test.ts's own self-coverage note) -- checked
+// explicitly by a test below, not assumed from the name.
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
