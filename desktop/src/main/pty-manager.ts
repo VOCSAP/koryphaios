@@ -1,6 +1,29 @@
 import { EventEmitter } from 'node:events'
+import { appendFileSync } from 'node:fs'
 import * as pty from 'node-pty'
 import { buildShellInvocation, type SpawnOpts } from './shell-command'
+import { reportError } from './log'
+
+/**
+ * Diagnostic-only raw PTY capture (card 00588e6c, phase 1: instrumentation).
+ * Set KORY_PTY_RAW_CAPTURE to an absolute file path OUTSIDE this repo (e.g.
+ * under os.tmpdir()) to hex-dump the first RAW_CAPTURE_LIMIT chunks node-pty
+ * hands us -- before marker stripping, before stripAnsi, before any
+ * detection heuristic. This is the most upstream point reachable from our
+ * code: node-pty itself already UTF-8-decodes the raw bytes into `data`
+ * before onData fires, and that decode is outside our control. Unset (the
+ * default) -> zero fs calls, inert. Counter is module-level (shared across
+ * every spawned session), matching this task's single-session manual
+ * capture use case, not a per-id budget.
+ *
+ * MUST be set in the environment BEFORE the kory/Electron main process
+ * launches (`process.env` is read once, at module load, into the constant
+ * below) -- exporting it in a terminal AFTER kory is already running has no
+ * effect on that already-running process.
+ */
+const RAW_CAPTURE_FILE = process.env.KORY_PTY_RAW_CAPTURE ?? null
+const RAW_CAPTURE_LIMIT = 30
+let rawCaptureCount = 0
 
 export interface PtyDataPayload {
   id: string
@@ -96,7 +119,10 @@ export class PtyManager extends EventEmitter {
       )
     }
 
-    proc.onData((data) => this.handleData(id, data))
+    proc.onData((data) => {
+      if (RAW_CAPTURE_FILE && rawCaptureCount < RAW_CAPTURE_LIMIT) this.captureRawChunk(id, data)
+      this.handleData(id, data)
+    })
     proc.onExit(({ exitCode }) => {
       // Only react if THIS proc is still the one registered for `id`. A kill()
       // (remove/closeAll) deletes procs[id] before killing, and a spawn() during
@@ -112,6 +138,25 @@ export class PtyManager extends EventEmitter {
     })
 
     return proc.pid
+  }
+
+  /**
+   * Append one hex-dumped raw chunk to RAW_CAPTURE_FILE (see the constant's
+   * doc comment). Never allowed to break the PTY pipeline: a write failure
+   * is routed through reportError() and swallowed, never thrown.
+   */
+  private captureRawChunk(id: string, data: string): void {
+    rawCaptureCount++
+    try {
+      const hex = Buffer.from(data, 'utf8').toString('hex')
+      const entry =
+        `--- chunk ${rawCaptureCount}/${RAW_CAPTURE_LIMIT} id=${id} len=${data.length} t=${new Date().toISOString()} ---\n` +
+        `hex: ${hex}\n` +
+        `str: ${JSON.stringify(data)}\n\n`
+      appendFileSync(RAW_CAPTURE_FILE as string, entry)
+    } catch (err) {
+      reportError('pty-capture', 'failed to write raw PTY capture chunk', err)
+    }
   }
 
   /** Emit PTY output, stripping everything up to and including the start marker. */
