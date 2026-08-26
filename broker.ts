@@ -2926,11 +2926,16 @@ function handleRoadmapUpsert(
       // Card 39c40571 layer 1: `force` is a claim of certainty, so it is only
       // honoured for a caller that PROVED who it is -- an anonymous body could
       // otherwise steal any locked item by adding one field. This closes the
-      // `force` route only: the `by !== "deck"` clause four lines up still lets
-      // an unproven body walk this guard by simply claiming `by: 'deck'`, since
-      // the Deck's row carries a sentinel token and `resolveRoadmapAuthor` lets
-      // any name through that belongs to no real peer. Closing THAT is layer 2
-      // (the Deck signing with the operator credential).
+      // `force` route; the `by !== "deck"` clause four lines up is closed by a
+      // different mechanism, upstream of this whole guard: resolveRoadmapAuthor's
+      // RESERVED_PEER_IDS branch already requires approvalAuth.authenticateOperator
+      // for any write claiming `by: 'deck'` (or 'operator'/'system'), refusing an
+      // unsigned one with 401 before this lock guard is ever reached -- on
+      // /roadmap/upsert and /roadmap/archive alike (card 1def56da, shipped
+      // 2026-08-05). So an unproven `by: 'deck'` cannot walk this guard: it never
+      // gets this far. See tests/broker-roadmap-author-auth.test.ts, "layer 2: an
+      // UNSIGNED by:'deck' write is refused on every route that resolves an
+      // author", for the mutation-tested coverage.
       !(body.force === true && author.proven)
     ) {
       return {

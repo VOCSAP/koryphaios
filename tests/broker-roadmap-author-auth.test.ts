@@ -229,9 +229,55 @@ test("an author matching no peer row stays accepted (cli.ts and fixtures)", asyn
 // DOMAIN. The routes below were not copied from the card: they are every call
 // site of resolveRoadmapAuthor, enumerated with
 //   grep -n "resolveRoadmapAuthor(" broker.ts
-// which returns the definition plus four callers (upsert, archive, reorder,
-// import). The card named upsert alone; a guard wired to the cited example
-// rather than to the discovered domain is how three of the four stay open.
+// which returns the definition plus SEVEN callers (upsert, archive, reorder,
+// import, lock-park, lock-release, append-context). The card named upsert
+// alone; a guard wired to the cited example rather than to the discovered
+// domain is how three of the seven stayed open until this diff (team-lead
+// audit, 2026-08-26: this list originally enumerated 4 of 7, while its own
+// test name claimed "every route" -- lock-park, lock-release and
+// append-context all propagate resolveRoadmapAuthor's error the same way as
+// the original four (`if ("error" in author) return author;`) and are all
+// wired live in broker.ts's HTTP dispatch table, so none is a legitimate
+// exemption).
+//
+// The list is no longer trusted on its own: "DECK_WRITE_ROUTES matches every
+// route broker.ts actually resolves an author for" below DERIVES the real
+// domain from broker.ts source and fails if this list ever again falls
+// behind it, instead of silently under-covering like this one did.
+//
+// REUSE DECISION (team-lead review, 2026-08-26, measured before hardening):
+// tests/broker-roadmap-route-coverage.test.ts's discoverRoadmapRoutes parses
+// the SAME broker.ts and already extracts route strings quote-agnostically.
+// Its domain is not ours, though: it finds every "/roadmap/..." literal
+// mentioned anywhere (9 today, including the two read-only routes), not
+// specifically the routes that resolve an author -- that classification
+// lives in that file's own hand-maintained GUARDED_PROBES/
+// OPERATOR_GUARDED_PROBES dicts. Importing those to feed DECK_WRITE_ROUTES
+// would swap this file's structural guarantee ("resolveRoadmapAuthor really
+// is called here") for a differently-sourced one ("a human classified this
+// route as needing proof, verified by its runtime status code") and couple
+// this file to edits made in that one for unrelated reasons (e.g. adding a
+// new read-only route). Decision: keep a separate, local detector.
+//
+// DETECTOR SHAPE, widened (team-lead review, 2026-08-26). Mutation-measured
+// (disposable script, never this repo) that the previous regex
+// (`resolveRoadmapAuthor\(\s*body\s*,\s*"([^"]+)"\s*\)`) stayed SILENT --
+// the parity test below stayed green -- on a genuine new call site written
+// with a different first-argument identifier than the literal `body` (e.g.
+// an intermediate variable), or with a single-quoted route string, because
+// BOTH sides of the equality stayed unchanged together. discoverRoadmapAuthorRoutes
+// below now accepts any first-argument expression up to the comma and either
+// quote style, closing both. What it STILL cannot see, by construction: a
+// local alias/rebinding of the resolveRoadmapAuthor function reference
+// itself (`const resolveAuthor = resolveRoadmapAuthor;` then calling
+// `resolveAuthor(...)`) -- a regex over call sites cannot resolve a binding.
+// hasAliasOfResolveRoadmapAuthor below closes that one differently: it
+// asserts no such alias exists in broker.ts at all, rather than trying to
+// see through one. Residual, stated rather than hidden: a route string built
+// from a runtime constant or template literal (never appearing as a literal
+// double/single-quoted string in source) escapes both detectors -- no static
+// regex over source text can resolve that, the same structural limit
+// discoverRoadmapRoutes in the sibling file accepts for its own domain.
 // ---------------------------------------------------------------------------
 
 const DECK_WRITE_ROUTES = [
@@ -245,7 +291,57 @@ const DECK_WRITE_ROUTES = [
       items: [{ id, kind: "feature", title: "imported by the deck" }],
     }),
   },
+  // Card 1def56da/team-lead audit 2026-08-26: same operator-signature gate as
+  // the four above, via resolveRoadmapAuthor -- these three were the ones the
+  // original list left uncovered. `id` here is repurposed as a peer_id: lock-
+  // park/lock-release only need a non-empty peer_ids array to reach the
+  // author check (any string works, since the 401 fires before the array's
+  // contents are ever consulted).
+  { route: "/roadmap/lock-park", body: (id: string) => ({ project_key: PK, peer_ids: [id] }) },
+  { route: "/roadmap/lock-release", body: (id: string) => ({ project_key: PK, peer_ids: [id] }) },
+  { route: "/roadmap/append-context", body: (id: string) => ({ id, text: "appended by the deck" }) },
 ] as const;
+
+/**
+ * Team-lead audit 2026-08-26: parses broker.ts to derive the REAL set of
+ * routes that resolve an author, so DECK_WRITE_ROUTES above is checked
+ * against the domain instead of being trusted as the domain. Matches the
+ * call shape `resolveRoadmapAuthor(<any first arg>, '...'|"...")`, which
+ * excludes the function's own definition line (`function resolveRoadmapAuthor(`)
+ * by construction -- that line has no comma-separated second argument at
+ * all, let alone a quoted one. Widened (team-lead review, 2026-08-26,
+ * mutation-measured against the previous `\s*body\s*` + double-quote-only
+ * form -- see the header comment above DECK_WRITE_ROUTES) to accept ANY
+ * first-argument expression up to the comma (not just the literal
+ * identifier `body`) and EITHER quote style, so a genuine new call site
+ * written through an intermediate variable or with single quotes is still
+ * discovered instead of silently agreeing with a stale DECK_WRITE_ROUTES.
+ * What this still cannot see: a local alias of the function reference
+ * itself -- hasAliasOfResolveRoadmapAuthor below closes that separately.
+ */
+function discoverRoadmapAuthorRoutes(source: string): string[] {
+  const matches = [...source.matchAll(/resolveRoadmapAuthor\(\s*[^,]+\s*,\s*['"]([^'"]+)['"]\s*\)/g)];
+  return matches.map((m) => m[1]).sort();
+}
+
+/**
+ * Team-lead review, 2026-08-26: discoverRoadmapAuthorRoutes above matches
+ * CALL SITES, so it is structurally blind to a call reached through a local
+ * alias/rebinding of the function reference (`const resolveAuthor =
+ * resolveRoadmapAuthor;` then calling `resolveAuthor(...)`) -- mutation-
+ * measured (disposable script) that such a call is genuinely invisible to
+ * the regex above, regardless of how it is widened. Rather than trying to
+ * resolve bindings, this asserts no such alias exists at all: an assignment
+ * of the bare function reference (`= resolveRoadmapAuthor` followed by `;`,
+ * `,` or `)`) or an import-alias form (`resolveRoadmapAuthor as <name>`,
+ * defensive even though the function is locally defined today, not
+ * imported). Excludes the function's own `function resolveRoadmapAuthor(`
+ * definition line by construction -- there is no `=` immediately before the
+ * name there, so neither alternative matches it.
+ */
+function hasAliasOfResolveRoadmapAuthor(source: string): boolean {
+  return /(?:=\s*resolveRoadmapAuthor\s*[;,)])|resolveRoadmapAuthor\s+as\s+\w+/.test(source);
+}
 
 function signedBody(
   payload: Record<string, unknown>,
@@ -261,6 +357,99 @@ function signedBody(
   };
 }
 
+test("DECK_WRITE_ROUTES matches every route broker.ts actually resolves an author for (parity, not enumeration)", () => {
+  const broker = readFileSync(join(import.meta.dir, "..", "broker.ts"), "utf8");
+  const discovered = discoverRoadmapAuthorRoutes(broker);
+
+  // POSITIVE control: a detector that silently returns an empty (or trivial)
+  // set would make the equality below vacuously informative about nothing --
+  // this is what a broken regex looks like, and it must fail loudly instead
+  // of passing by finding nothing to compare against.
+  expect(discovered.length).toBeGreaterThanOrEqual(7);
+
+  const declared = DECK_WRITE_ROUTES.map((r) => r.route).slice().sort();
+  expect(declared).toEqual(discovered);
+});
+
+// ---------------------------------------------------------------------------
+// discoverRoadmapAuthorRoutes / hasAliasOfResolveRoadmapAuthor: mutation
+// coverage for the widened detector (team-lead review, 2026-08-26). Each
+// fixture below reproduces, in isolation, ONE of the forms measured to slip
+// past the previous regex silently -- three separate tests, not one shared
+// probe, so a regression in any single form stays attributable.
+// ---------------------------------------------------------------------------
+
+test("discoverRoadmapAuthorRoutes sees a new call site written through an intermediate variable, not just the literal identifier `body`", () => {
+  const fixture = `
+    const author = resolveRoadmapAuthor(body, "/roadmap/upsert");
+    const b = body;
+    const other = resolveRoadmapAuthor(b, "/roadmap/eighth-route");
+  `;
+  expect(discoverRoadmapAuthorRoutes(fixture)).toEqual(["/roadmap/eighth-route", "/roadmap/upsert"]);
+});
+
+test("discoverRoadmapAuthorRoutes sees a new call site written with single quotes, not just double quotes", () => {
+  const fixture = `
+    const author = resolveRoadmapAuthor(body, "/roadmap/upsert");
+    const other = resolveRoadmapAuthor(body, '/roadmap/eighth-route');
+  `;
+  expect(discoverRoadmapAuthorRoutes(fixture)).toEqual(["/roadmap/eighth-route", "/roadmap/upsert"]);
+});
+
+test("discoverRoadmapAuthorRoutes still does not leak a decoy call-shaped mention living inside a // comment into an unrelated later call (bounded, not a full-file scan of one giant match)", () => {
+  const fixture = `
+    // example: resolveRoadmapAuthor(body, "/roadmap/documented-in-comment")
+    const author = resolveRoadmapAuthor(body, "/roadmap/upsert");
+  `;
+  // The comment mention IS discovered (matchAll has no notion of comments) --
+  // this is not a leak, it is the detector correctly seeing text that is
+  // there. What matters is that it does NOT disappear, i.e. the mutation
+  // that adds it stays loud rather than being silently absorbed.
+  expect(discoverRoadmapAuthorRoutes(fixture)).toEqual(["/roadmap/documented-in-comment", "/roadmap/upsert"]);
+});
+
+test("a decoy call-shaped mention inside a // comment still turns the DECK_WRITE_ROUTES parity red after widening (re-verified, not assumed to still hold from before the regex change)", () => {
+  const fixtureBroker = `
+    function resolveRoadmapAuthor(body, route) { return { by: "x", proven: false }; }
+    const a1 = resolveRoadmapAuthor(body, "/roadmap/upsert");
+    const a2 = resolveRoadmapAuthor(body, "/roadmap/archive");
+    const a3 = resolveRoadmapAuthor(body, "/roadmap/reorder");
+    const a4 = resolveRoadmapAuthor(body, "/roadmap/import");
+    const a5 = resolveRoadmapAuthor(body, "/roadmap/lock-park");
+    const a6 = resolveRoadmapAuthor(body, "/roadmap/lock-release");
+    const a7 = resolveRoadmapAuthor(body, "/roadmap/append-context");
+    // decoy: resolveRoadmapAuthor(body, "/roadmap/example-in-comment")
+  `;
+  const discovered = discoverRoadmapAuthorRoutes(fixtureBroker);
+  const declared = DECK_WRITE_ROUTES.map((r) => r.route).slice().sort();
+  expect(declared).not.toEqual(discovered);
+});
+
+test("discoverRoadmapAuthorRoutes cannot see a call reached through a local alias of resolveRoadmapAuthor (structural limit, closed separately by hasAliasOfResolveRoadmapAuthor)", () => {
+  const fixture = `
+    const author = resolveRoadmapAuthor(body, "/roadmap/upsert");
+    const resolveAuthor = resolveRoadmapAuthor;
+    const other = resolveAuthor(body, "/roadmap/eighth-route");
+  `;
+  expect(discoverRoadmapAuthorRoutes(fixture)).toEqual(["/roadmap/upsert"]);
+  expect(hasAliasOfResolveRoadmapAuthor(fixture)).toBe(true);
+});
+
+test("hasAliasOfResolveRoadmapAuthor is false against the REAL broker.ts today (no alias exists, so this assertion is a live floor, not a fixture-only claim)", () => {
+  const broker = readFileSync(join(import.meta.dir, "..", "broker.ts"), "utf8");
+  expect(hasAliasOfResolveRoadmapAuthor(broker)).toBe(false);
+});
+
+test("hasAliasOfResolveRoadmapAuthor does not mistake the function's own definition line for an alias", () => {
+  const fixture = `function resolveRoadmapAuthor(body, route) { return { by: "x", proven: false }; }`;
+  expect(hasAliasOfResolveRoadmapAuthor(fixture)).toBe(false);
+});
+
+test("hasAliasOfResolveRoadmapAuthor catches an import-alias form too (defensive: the function is locally defined today, not imported, but the check does not assume that stays true forever)", () => {
+  const fixture = `import { resolveRoadmapAuthor as resolveAuthor } from "./roadmap-helpers";`;
+  expect(hasAliasOfResolveRoadmapAuthor(fixture)).toBe(true);
+});
+
 test("layer 2: an UNSIGNED by:'deck' write is refused on every route that resolves an author", async () => {
   for (const { route, body } of DECK_WRITE_ROUTES) {
     const item = await seed(`deck target for ${route}`);
@@ -269,6 +458,21 @@ test("layer 2: an UNSIGNED by:'deck' write is refused on every route that resolv
       by: "deck",
     });
     expect({ route, status: res.status }).toEqual({ route, status: 401 });
+    // Team-lead audit 2026-08-26: /roadmap/lock-park and /roadmap/lock-release
+    // carry a SECOND, independent gate beyond the RESERVED_PEER_IDS branch this
+    // assertion exercises -- their own handlers (handleRoadmapLockPark,
+    // handleRoadmapLockRelease) refuse any write where `author.operator_id` is
+    // undefined, unconditionally, regardless of what `by` names. Mutation-
+    // measured: neutralizing only the RESERVED_PEER_IDS branch does NOT open
+    // these two routes to 200 -- they fall through to a 403 from that second
+    // gate instead of the 401 asserted here, so the strict assertion above
+    // still rightly reddens on that mutation, just via a different status and
+    // message than the other five routes in this loop.
+    // This asymmetry is deliberate, not an oversight on the other five: these
+    // two routes accept no instance_token at all, so no peer row is ever
+    // resolvable to compare a work-lock's owner GROUP against, and they are
+    // operator-only by construction as a result -- see card 6cd01490.
+    //
     // The refusal must be readable enough to tell an ACTIVE guard from an
     // ABSENT one: a running broker can be hours older than this code, and a
     // silent 401 looks the same as a broker that never had the guard.
