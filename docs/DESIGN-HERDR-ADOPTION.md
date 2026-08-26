@@ -34,11 +34,27 @@ au LLM. Mécanismes, avec leurs sources :
   (`https://herdr.dev/agent-detection/index.toml`,
   `src/detect/manifest_update.rs`) avec override local, et un mode `explain`
   (`DetectionExplain`) qui dit quelle règle a matché et pourquoi.
-- **OSC comme signal prioritaire** : la règle la plus haute priorité du
-  manifest claude lit le **titre OSC** (spinner braille/demi-cercles) et
-  l'OSC progress (`4;0` = idle). L'entrée du moteur est un triplet
+- **OSC comme signal prioritaire, mais de façon ASYMÉTRIQUE** (formulation
+  corrigée le 2026-08-26 après lecture du manifest ; la version précédente de
+  cette puce disait « la règle la plus haute priorité lit le titre OSC », ce
+  qui est vrai et incomplet, et c'est l'omission qui a failli faire porter le
+  moteur de travers -- voir §2 bis). Dans `src/detect/manifests/claude.toml`,
+  DEUX règles lisent la même région `osc_title` à des rangs opposés :
+  `osc_title_working` (spinner braille/demi-cercles) est à `priority = 1100`,
+  le rang le plus haut du fichier ; `osc_title_idle` (glyphe `✳`) est à
+  `priority = 250`, sous **toutes** les règles `blocked` du même manifest
+  (`live_blocked_form` et `dynamic_workflow_prompt` à 980,
+  `bash_permission_prompt` à 850, `generic_permission_prompt` à 840,
+  `legacy_no_prompt_blocker` à 300). Herdr ne se sert donc jamais du titre
+  pour trancher `idle` contre `blocked` : il ne s'en sert comme signal d'idle
+  que si rien d'autre n'a matché. L'entrée du moteur est un triplet
   `{ screen, osc_title, osc_progress }` (`DetectionInput`,
-  `src/detect/manifest.rs`) ; chaînes vides = comportement pré-OSC.
+  `src/detect/manifest.rs`), **trois chaînes, aucun horodatage ni compteur** :
+  herdr classe par CONTENU seul, jamais par fréquence d'émission. Chaînes
+  vides = comportement pré-OSC. Le seul usage du temps dans tout herdr est un
+  anti-rebond de la transition `working -> idle`
+  (`should_hold_working_to_idle`, `src/pane/agent_detection.rs`), pas un
+  prédicat d'activité.
 - **Prompt inter-agents = injection terminal encadrée**
   (`herdr agent prompt <name> "..." --wait`, skill `skills/herdr/SKILL.md`) :
   collage bracketed-paste + Enter différé, avec trois garde-fous :
@@ -92,6 +108,110 @@ en §5 (hors périmètre immédiat, recouvre partiellement
   tile ne participe pas au réseau.
 - `check_messages` est le seul mode pull ; aucun outil bloquant « attendre une
   réponse ».
+
+## 2 bis. Mesures locales du 2026-08-26 (à lire avant H1 et H2)
+
+Section ajoutée après arbitrage du team-lead, sur la copie locale de herdr
+(`kory-spike/herdr-master`, pas de `.git`, manifest claude `version =
+"2026.08.21.1"`). Elle ne réorganise rien : elle inscrit quatre faits que le
+corps du brief ne portait pas et qui changent la conception de H1 et de H2.
+
+### 2 bis.1 Les trois OSC ne sont pas le même objet, ni la même caution
+
+Le mot « OSC » recouvre trois séquences distinctes, et les deux documents de
+conception de ce dépôt n'en couvrent pas les mêmes. Table de correspondance,
+à garder sous les yeux en lisant H1 et H2 :
+
+| Séquence | Ce qu'elle porte | Mesurée par | Statut chez nous |
+|---|---|---|---|
+| `OSC 0` / `OSC 2` (titre) | le glyphe de spinner, réécrit pendant le travail | herdr (contenu) **et** `DESIGN-NOTIFY-EVENTS.md` (fréquence **et** contenu) | seul objet où les deux lectures se rencontrent |
+| `OSC 9;4` (progress) | un état de progression standard | herdr seul | **aucune mesure locale**, zéro occurrence dans `DESIGN-NOTIFY-EVENTS.md` |
+| `OSC 777` (notification) | « quelque chose te réclame », avec un corps qui précise quoi | `DESIGN-NOTIFY-EVENTS.md` seul (21 kinds vers 11 corps) | capteur mécanique de levée, **absent de herdr** |
+
+Conséquence à ne pas laisser passer : la liste des régions v1 de H1 met
+`osc_title` et `osc_progress` **au même rang de confiance**, alors que le
+second n'a **aucune** mesure locale derrière lui. Il est repris sur la foi de
+herdr seul. À traiter comme une hypothèse à vérifier au premier manifest qui
+s'en sert, pas comme un acquis.
+
+Ce que la mesure locale invalide, et seulement cela : `DESIGN-NOTIFY-EVENTS.md`
+établit que pendant une invite de permission affichée, le titre portait le
+**même glyphe qu'au repos**. Donc `absence de spinner => idle` est mort comme
+règle de haut rang. Rien n'y contredit `spinner => working`. C'est exactement
+le partage que les rangs 1100 / 250 de herdr encodent déjà (§1), et c'est
+pourquoi le portage doit conserver ces rangs plutôt que d'éviter le contenu.
+
+### 2 bis.2 herdr n'a aucun OSC 777 : sa détection de `blocked` est textuelle
+
+Mesuré sur la copie locale : les seules occurrences de `777` dans les sources
+Rust sont des masques de permissions `0o777` et une séquence CSI de taille de
+fenêtre ; **zéro** dans `src/detect/manifests/`. Toute la détection de
+`blocked` de herdr repose donc sur du grattage d'écran textuel
+(`contains = ["do you want to proceed?"]`, `["esc to cancel"]`,
+`["waiting for permission"]`...).
+
+Or nous disposons d'un capteur que herdr n'a pas : `OSC 777`, mécanique,
+spécifié dans `DESIGN-NOTIFY-EVENTS.md`. **Importer les règles `blocked` des
+manifests telles quelles serait une régression de classe de capteur**, et ce
+dépôt a déjà payé deux fois cette classe (une regex morte par changement de
+vocabulaire du CLI ; le motif `do you trust the files` de
+`desktop/src/main/attention.ts`, `detectWaiting`, mort depuis au moins trois
+versions du binaire).
+
+**Décision (team-lead, 2026-08-26) : repli strict.** `OSC 777` est
+l'AUTORITÉ pour lever `blocked`. Les règles `blocked` portées depuis les
+manifests sont un repli de rang inférieur, jamais l'autorité.
+
+**Nuance obligatoire, sans laquelle « repli » se lit « accessoire ».** Pour
+les agent-kinds qui n'émettent pas d'`OSC 777` -- vraisemblablement tous sauf
+claude, non mesuré -- le grattage textuel est le SEUL capteur disponible : le
+repli y devient l'unique source. Le manifest doit donc porter la CONFIANCE du
+capteur et pas seulement sa priorité, et les consommateurs doivent traiter les
+deux directions différemment. C'est l'asymétrie déjà documentée dans
+`desktop/src/main/attention.ts` : le prédicat de LEVÉE (`detectWaiting`) est
+délibérément conservateur dans la direction du non-déclenchement, parce qu'une
+levée manquée est bornée et une fausse levée n'est qu'un scintillement ; le
+prédicat d'EXTINCTION (`stillWaiting`) ne réutilise PAS ce prédicat, parce que
+« lever et éteindre sont des décisions opposées sous incertitude » et
+qu'éteindre sous incertitude **perd un opérateur qui attend vraiment**.
+Transposée ici : une garde d'injection peut refuser sur un `blocked` de
+confiance basse ; un affichage qui EFFACE un état ne doit jamais s'y fier.
+Reprendre cette formulation, ne pas en inventer une autre.
+
+Corroboration indépendante, mesurée sur `grok.toml` : le commentaire de la
+règle `background_work_chip_working` dit que Grok **éteint** ses signaux OSC
+busy pendant que du travail de fond tourne, et la règle existe précisément
+pour rattraper ce trou par l'écran. Un capteur OSC seul est donc
+structurellement insuffisant, et le repli écran est une nécessité, pas une
+commodité.
+
+### 2 bis.3 Le prix mesuré de l'abandon du catalogue distant
+
+H1 écarte le catalogue distant de manifests, et cette décision tient (surface
+réseau, entrée hostile). Ce qui manquait, c'est son PRIX, et la copie locale
+le donne : le dépôt herdr embarque ses manifests dans
+`src/detect/manifests/` **et** sert les mêmes sous `website/agent-detection/`.
+Comparés répertoire à répertoire au même instantané, ils divergent déjà :
+20 manifests de chaque côté, un seul fichier différent (`grok.toml`) plus un
+`index.toml` présent uniquement côté servi.
+
+Sur ce fichier, la copie SERVIE est en retard : `version 2026.07.16.1` contre
+`.2` embarquée, et il lui manque une règle entière,
+`background_work_chip_working`, à la priorité la plus haute du fichier. Une
+règle sur vingt manifests a donc dérivé à l'intérieur d'une seule release, et
+la règle en cause n'est pas cosmétique.
+
+Deux conséquences pour nous :
+
+- l'override local dans le répertoire de config utilisateur est la **seule**
+  soupape quand un CLI change d'UI entre deux de nos releases. À traiter comme
+  un chemin de première classe (documenté, testé), pas comme une commodité de
+  dépannage ;
+- la dérive a fait passer `min_engine_version` de `2` à `3` : une règle
+  nouvelle a exigé un moteur nouveau. Notre format de manifest doit donc
+  porter la même notion de version de moteur, et un manifest exigeant un
+  moteur plus récent que le nôtre doit être **refusé bruyamment**. Sans cela,
+  un override local trop récent charge à moitié, en silence.
 
 ## 3. Les six chantiers
 
@@ -158,6 +278,69 @@ code.
   domaine sans le toucher (nouvel agent-kind ajouté à `FRONTIER_BINS` sans
   manifest ⇒ test de parité entre les deux listes).
 
+**Contraintes de portage -- mesures du 2026-08-26.** Quatre contraintes qui ne
+sont pas des préférences de style : chacune ferme un chemin où le moteur se
+dégrade en silence.
+
+1. **Le portage TOML vers JSON conserve les priorités À LA RÈGLE PRÈS.** Ce
+   n'est PAS l'évitement du contenu du titre qui rend le mécanisme herdr
+   valide, c'est le RANG : `osc_title -> working` en tête (1100 dans
+   `src/detect/manifests/claude.toml`), `osc_title -> idle` en queue (250),
+   sous toutes les règles `blocked` (980 / 850 / 840 / 300). Voir §2 bis.1
+   pour la mesure locale qui l'exige. Un porteur qui renumérote « pour
+   simplifier », ou qui range les deux règles `osc_title` côte à côte parce
+   qu'elles partagent une région, casse la détection **sans qu'aucun test ne
+   bouge** : la règle idle remonterait au-dessus des règles blocked et une
+   session bloquée s'afficherait au repos. Le test de portage doit donc
+   comparer les priorités règle par règle avec la source, pas seulement
+   vérifier que le manifest charge.
+2. **La FRÉQUENCE n'entre pas dans le moteur (v1, étanchéité totale).** Une
+   région est une projection PURE d'un instantané ; une fréquence d'émission
+   est un état TEMPOREL PAR SESSION. Faire entrer le second dans le premier
+   introduirait un état keyé par session dans un moteur qui n'en a pas, et la
+   question de `CLAUDE.md` (« keyé par quoi, et que se passe-t-il quand il y
+   en a deux ? ») n'aurait aucune réponse propre ici. La testabilité pure est
+   l'argument numéro un de ce chantier ; on ne l'échange pas contre une
+   commodité. Le prédicat d'activité par fréquence reste où
+   `DESIGN-NOTIFY-EVENTS.md` le met : en amont, séparé. Un pont reste possible
+   plus tard sous forme d'une région SYNTHÉTIQUE booléenne calculée HORS
+   moteur et passée en entrée, jamais d'une région native qui lirait une
+   horloge.
+3. **Un fichier de manifest par agent-kind, nommé par le kind, et rien d'autre
+   dans ce fichier** (découpage validé par l'opérateur le 2026-08-26, calqué
+   sur `src/detect/manifests/*.toml`). Conséquence de couverture, qui est la
+   règle de `CLAUDE.md` appliquée telle quelle : un agent-kind lançable sans
+   fichier correspondant doit rendre `unknown` EXPLICITE et **jamais `idle`
+   par défaut**. Le test de parité doit valoir dans les DEUX directions --
+   un kind lançable sans manifest (le moteur est aveugle sur une tuile réelle)
+   ET un manifest sans kind lançable (règles mortes que personne ne remarquera
+   plus jamais). La liste des kinds lançables se lit dans `FRONTIER_BINS`
+   (`desktop/src/main/model-registry.ts`) et `desktop/src/main/session-kind.ts`.
+   L'en-tête d'attribution Apache-2.0 est par fichier (§6).
+4. **La liste des régions v1 ci-dessus est INSUFFISANTE, mesuré.** L'inventaire
+   des `region =` sur les 20 manifests herdr donne : `whole_recent` 43 usages,
+   `bottom_non_empty_lines(N)` 42, `osc_title` 16, `osc_progress` 4,
+   `top_non_empty_lines(N)` 2, `after_last_prompt_marker` 2,
+   `after_last_horizontal_rule` 2, `prompt_box_body` 1,
+   `last_non_empty_above_prompt_box` 1. L'affirmation « sous-ensemble
+   suffisant pour les manifests claude, codex, gemini » est fausse pour deux
+   des trois : `claude.toml` porte quatre règles hors v1
+   (`last_non_empty_above_prompt_box`, `prompt_box_body`,
+   `after_last_horizontal_rule` deux fois), et parmi elles **sa seule règle
+   `idle` et deux de ses règles `blocked`** ; `codex.toml` en porte trois
+   (`after_last_prompt_marker` deux fois, `top_non_empty_lines(20)`), et ces
+   deux noms de région ne figurent **nulle part** dans ce brief, ni en v1 ni
+   en v2. Seul `gemini.toml` tient en v1 (deux règles, `whole_recent`
+   uniquement). Le chiffrage de H1 doit donc inclure l'extension du moteur aux
+   régions manquantes avant tout portage de `claude` ou `codex`, et
+   **le chargement d'un manifest citant une région inconnue doit ÉCHOUER
+   BRUYAMMENT** : une région absente ne produit pas d'erreur naturelle, elle
+   produit une règle qui ne matche jamais, donc un manifest silencieusement
+   dégradé. Bonne nouvelle en regard : le balayage ouvert des clés d'expression
+   réellement utilisées par les 20 manifests (sans liste blanche) ne rend rien
+   d'autre que ce que ce brief énumère déjà, plus deux clés de niveau fichier,
+   `aliases` et `updated_at`.
+
 **Fichiers.** Nouveaux : `desktop/src/main/detect/engine.ts`,
 `detect/regions.ts`, `detect/manifests/*.json`,
 `desktop/tests/detect-*.test.ts` + fixtures. Modifiés : `session-service.ts`
@@ -189,6 +372,35 @@ CSI — les OSC doivent être capturées AVANT strip, dans un module partagé,
 et le strip étendu pour les retirer du buffer texte. Sortie : le triplet
 `DetectionInput` de H1. Livrable avant H1 (même seul, il fiabilise `BUSY_RE` :
 titre-spinner ⇒ busy).
+
+**Le parseur doit sortir un triplet ÉTENDU, incluant `OSC 777` (ajouté le
+2026-08-26).** Tel qu'écrit ci-dessus, ce chantier ne suit que `0/2` et `9;4`,
+c'est-à-dire les deux séquences que herdr consomme -- et herdr n'a aucun
+`OSC 777` (§2 bis.2). Or `OSC 777` est le capteur mécanique de levée spécifié
+par `DESIGN-NOTIFY-EVENTS.md`, et c'est lui qui débloque la carte `f8082208`.
+Conséquence chiffrée : **livrer H2 sans `777` laisse `f8082208` bloquée et
+impose de rouvrir le parseur, donc de livrer deux fois.** Le coût marginal est
+d'une branche dans un parseur qu'on écrit de toute façon.
+
+**Ce chantier est de l'INGÉNIERIE, pas de la mesure (vérifié le 2026-08-26).**
+Le `context` de la carte `f8082208` porte déjà les mesures : corps `OSC 777`
+par famille et table de 21 kinds vers 11 corps ; cadence de réécriture du
+titre d'environ 960 ms, gap maximal 1028 ms sur quatre profils de charge,
+contre zéro émission sur 190 secondes de repos ; seuil retenu 3 s ; et le
+piège « extinction SUR FRONT, jamais SUR NIVEAU », parce qu'une réponse à une
+invite produit une salve de six émissions puis le silence. Lire cette carte
+AVANT de démarrer, et ne pas refaire la campagne. Réserve à reprendre telle
+quelle : la valeur `auto` de `preferredNotifChannel` n'émet aucun octet de
+notification, donc Kory doit forcer le canal via `--settings` au lancement, ce
+qui est un argument de ligne de commande construit côté Deck, donc l'entrée
+hostile n°4 du tableau de `CLAUDE.md`.
+
+Deux sites JETTENT aujourd'hui les OSC au lieu de les capturer, et ce sont les
+deux points d'entrée du chantier : `desktop/src/main/screen-model.ts` les
+saute explicitement dans sa boucle d'échappement, et `ANSI_RE`
+(`desktop/src/main/attention.ts` et `desktop/src/main/quota.ts`) ne couvre que
+le CSI, donc les OSC survivent telles quelles dans le buffer texte de ces deux
+détecteurs.
 
 **Fichiers.** Nouveau `desktop/src/main/detect/osc.ts` (pur, testable bun).
 Modifiés : `session-service.ts` (brancher sur handleData), `attention.ts` /
@@ -299,9 +511,18 @@ sans MCP.
   var > défaut par cwd+pid), pour que deux tiles du même repo soient deux
   pairs (règle multi-identité CLAUDE.md).
 - Côté Deck : au spawn d'un tile non-claude, injecter l'env nécessaire
-  (`CLAUDE_PEERS_*`, groupe du workspace) — même mécanique que l'injection
-  d'env existante de `create-session.ts` (à vérifier au démarrage du
-  chantier).
+  (`CLAUDE_PEERS_*`, groupe du workspace). **La vérification annoncée ici a
+  été faite le 2026-08-17 et son résultat est négatif** (détail et symboles
+  dans l'append de la carte `1a7792b9`, re-vérifié le 2026-08-26) : la
+  mécanique supposée n'existe pas sous cette forme, `SessionDef`
+  (`desktop/src/shared/types.ts`) ne porte aucun champ d'environnement et
+  `create-session.ts` n'en manipule aucun ; le seul point d'injection réel
+  est `sessionEnv`, construit en dur dans `SessionService.startPty`
+  (`desktop/src/main/session-service.ts`) et passé à `PtyManager.spawn`
+  (`desktop/src/main/pty-manager.ts`) comme unique source de son `extraEnv`.
+  Le volet Deck de ce chantier n'est donc PAS nul : il faut porter les
+  variables jusqu'à `sessionEnv`, ce que la formulation précédente laissait
+  croire acquis.
 - Un skill façon `skills/herdr/SKILL.md` (garde d'env, « la CLI installée est
   l'autorité », IDs lus dans les réponses JSON) publié pour les agents qui
   savent charger des skills ; pour les autres, une ligne dans le prompt
@@ -312,7 +533,7 @@ sans MCP.
   comme opaque (pas d'interpolation shell — args exec-style).
 
 **Fichiers.** `cli.ts`, `shared/config.ts` (si un helper manque),
-`desktop/src/main/create-session.ts` (env), nouveau skill
+`desktop/src/main/session-service.ts` (`sessionEnv`), nouveau skill
 `.claude/skills/kory-peer/`. Tests : bun sur les sous-commandes contre un
 broker de test (pattern des tests broker existants).
 
