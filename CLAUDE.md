@@ -144,6 +144,27 @@ Read only file/skill matching area you touch:
   `NaN` is `false`). Three shipped in one day: `clampNodeSize` not wired into
   `findFreeSpot`, `clampLaneHeight` not wired into restore-time seed,
   `viewportH` unguarded despite comment claiming otherwise.
+- **Extracting logic into a pure module makes its CALL SITE invisible.**
+  The tests prove the function; nothing proves it is CALLED, with which
+  arguments, in which order. Coverage of the extracted body rises while
+  coverage of the decision drops to zero, so the suite gets GREENER as the
+  guarantee gets weaker. Measured 2026-08-26 on two independent lots the
+  same day: 7 mutations of a wiring `case` were all green against 33 passing
+  tests of its pure module, and 12 of 13 were STILL green after the
+  extraction, because extraction moves the hole along with the boundary.
+  Three remedies, by increasing power. A SOURCE SCAN (`toContain("fn(")`) is
+  the weakest and routinely fails open: it passes when the call is present
+  but its result is DISCARDED, and when an argument is swapped for a literal.
+  Presence is not contract. A BEHAVIOURAL probe (feed real input to the real
+  exported function, require the real effect) is immune to text games and is
+  the right default. DEPENDENCY INJECTION is the only one that closes by
+  construction: make the wiring itself pure and executable, and timers,
+  cancellation and alternate paths stop being an assumed residue and become
+  provable. Corollary already paid twice here: when two call sites of one
+  module carry different disciplines (one calls unconditionally, one under a
+  branch), the exception is the bug, and an incremental state machine fed a
+  SUBSAMPLED stream is no longer incremental.
+
 - **Review against what a commit SHOULD contain, not just the diff it
   shows.** Costliest defects invisible in diff itself: commit referencing
   file that only ever existed in working tree; millisecond-resolution sort
