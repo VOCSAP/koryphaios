@@ -27,12 +27,22 @@
 // Harness (boot/readUntil/callTool) mirrors tests/mcp-roadmap-ack.test.ts and
 // tests/server-ask-operator.test.ts, adapted on one point: TWO server.ts peers
 // share ONE broker, which is the whole point -- a sender and a recipient.
+//
+// GROUP ISOLATION. spawnPeer forces CLAUDE_PEERS_FORCE_GROUP, same pattern as
+// tests/server-inbound-framing-delivery.test.ts:145. Without it, spawnPeer
+// inherited process.env with no group pinned, so resolveGroup() fell back to
+// 'default' -- a group broker.ts's groupMayCarryOperatorInbox refuses for the
+// operator-inbox deposit this file's waived-message case asserts on. That made
+// the test pass only from inside a Koryphaios Deck tile (which exports
+// CLAUDE_PEERS_FORCE_GROUP_FILE itself) and fail from any other shell.
 
 import { test, expect, describe, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
 import { startBroker, stopBroker, type TestBroker } from "./_helper.ts";
 import { OPERATOR_INSTANCE_TOKEN, OPERATOR_PEER_ID } from "../shared/types.ts";
 import { PEER_NO_REPLY_NOTE } from "../shared/message-framing.ts";
+
+const FORCED_GROUP = "expects-reply-delivery-e2e-spec-258af6eb";
 
 const brokers: TestBroker[] = [];
 const procs: ReturnType<typeof Bun.spawn>[] = [];
@@ -103,6 +113,7 @@ async function spawnPeer(b: TestBroker): Promise<Peer> {
     ...(process.env as Record<string, string>),
     CLAUDE_PEERS_BROKER_URL: b.url,
     CLAUDE_PEERS_PORT: String(b.port),
+    CLAUDE_PEERS_FORCE_GROUP: FORCED_GROUP,
   };
   delete env.CLAUDE_PEERS_APPROVAL_FILE;
 
