@@ -144,6 +144,42 @@ next refactor is not a proof), by `tests/desktop-commit-closure-check.test.ts`.
   `|| echo` fallback absorbs that; run `npm run rebuild` on a real machine.
 - `tests/server-stdin-eof.test.ts` is flaky in sandboxed environments: re-run
   it in isolation before treating a failure as a regression.
+- A test that spawns `bun server.ts` AND depends on the group secret (an
+  operator-inbox deposit, group isolation) must pin `CLAUDE_PEERS_FORCE_GROUP`
+  in the spawn's env, or `resolveGroup()` falls back to `default`, which
+  `groupMayCarryOperatorInbox` refuses because that group pins no secret. The
+  symptom to recognize: the test is green from inside a Koryphaios Deck tile
+  (the Deck exports `CLAUDE_PEERS_FORCE_GROUP_FILE` in the ambient env) and red
+  from any other shell. Verify with the same env the tile does not set:
+  `env -u CLAUDE_PEERS_FORCE_GROUP -u CLAUDE_PEERS_FORCE_GROUP_FILE -u CLAUDE_PEERS_FORCE_GROUP_NAME bun test tests/<file>`.
+  The trigger is semantic, not syntactic: not every `server.ts` spawn needs to
+  pin a group, some deliberately exercise `default`-group behavior. Model to
+  copy: `tests/server-inbound-framing-delivery.test.ts`.
+- A test that reads a file VERSIONED in this repo (`readFileSync` on a real
+  path, not a synthetic fixture) and then parses it with a regex or `split`
+  anchored on a bare `\n` CAN be green on macos-latest and ubuntu-latest, red on
+  windows-latest CI, and still green in a local Windows `bun test`. Cause:
+  `actions/checkout` on windows-latest applies git's default
+  `core.autocrlf=true` and smudges the checked-out blob to CRLF on that
+  runner only; the repo's committed blob and a local working copy are
+  usually LF. NARROWER than it looks, and this was measured on 2026-08-26
+  against a second candidate that turned out to be immune: only a pattern
+  whose `\n` immediately precedes a token it expects actually breaks, because
+  the `\r` sits before the `\n` at end of line and never between the `\n` and
+  the text that follows. `pull_request:\n` in a strict string equality broke;
+  a `split(/(?=\n\s*run:)/)` feeding a tolerant `.some()` did not. Do not
+  normalize every reader on sight, and do not assume a reader is affected
+  without replaying it. Remedy: normalize to LF ONCE at the read site
+  (`readFileSync(path, "utf-8").replace(/\r\n/g, "\n")`), never make the
+  regex itself tolerant with `\r?\n` -- fixing one regex leaves every other
+  regex reading the same text unfixed, and the next one written against that
+  same read site will not know to repeat the trick. To prove it before
+  trusting a fix: replay the SAME content normalized to CRLF
+  (`text.replace(/\n/g, "\r\n")`) through the parser and require it to
+  behave identically to the LF original; a green local run proves nothing
+  here; only the CRLF replay does. Precedent:
+  `tests/desktop-ci-typecheck-coverage.test.ts:104` and
+  `tests/desktop-ci-glob-coverage.test.ts:145`.
 
 ## Time-dependent tests (calendar rot)
 
