@@ -235,40 +235,47 @@ bottleneck.
 ubuntu**. A local `bun test` is Linux-only, so it is structurally blind to two
 things — assume neither is covered until CI says so.
 
-**0. Does your file run there at all?** The workflow does NOT run `bun test`;
-it runs an explicit list of globs, because the broker integration suites spawn
-a daemon and bind ports, which is not what that matrix is for:
+**0. Does your file run there at all?** The workflow does NOT run a bare
+`bun test` for this job; its "Bun tests (pure modules)" step runs
+`bun scripts/partition-pure-tests.ts`, which walks `tests/` and runs every
+file EXCEPT the ones `scripts/pure-module-partition.ts`'s `EXEMPTIONS` denies
+-- currently just the `broker-`/`server-` filename prefixes (they spawn a
+daemon and bind ports, which this job is not for) plus two exact files
+carrying the same signal. This is a DENY-list: a new file runs by default,
+and an exemption has to justify itself in that table. It replaced an earlier
+explicit glob-based ALLOW-list (nine prefixes by the end) that failed OPEN --
+a new file matching none of them was silently never collected, with no
+failing check to notice (card ed110556) -- fixed by card 0bbac537 (commit
+8f3d9d6, 2026-08-24), which also fixed a second, unrelated bug the old
+allow-list's single shared bun process had been masking: two happy-dom/bun
+process-global mutations (`GlobalRegistrator.register()`, `mock.module()`)
+leaking across files with no in-process teardown available (see that
+commit's own message for the full chain). A new suite whose logic genuinely
+needs a broker/daemon must be named with one of the two exempt prefixes, or
+it runs unflagged inside this cross-platform pure-module job (card b33b1874,
+below); one that doesn't should avoid those prefixes so it stays collected.
+Verify collection against the real `isExempt()` in
+`scripts/pure-module-partition.ts` (imported directly in a test, or checked
+via a throwaway `bun -` one-liner), not assumed from the filename convention
+alone. Check the job's `paths:` filter too: it gates whether the job
+triggers at all, and it once listed only `desktop/**` while the suites it
+runs cover `notify/`, `shared/` and `broker.ts`. Precedent: 140 tests shipped
+that had never executed on any runner.
 
-```
-tests/desktop-*.test.ts   tests/notify-*.test.ts   tests/mobile-shell-*.test.ts
-```
-
-A new suite named outside those prefixes runs **on your machine and nowhere
-else** — green locally, forever unverified on Windows and macOS. Either name it
-to match, or add its glob to the workflow. Check the `paths:` filter too: it
-gates whether the job triggers at all, and it once listed only `desktop/**`
-while the suites it runs cover `notify/`, `shared/` and `broker.ts`. Precedent:
-140 tests shipped that had never executed on any runner.
-
-The gap is measurable and grows silently: `.github/workflows/desktop-build.yml:79`
-runs that glob line (nine prefixes now, not the three it started with) against
-`tests/`, matching **92 files** as of 2026-08-05. `bun test` at the repo root
-collects **130**. A new test must live in `tests/` **and** carry one of those
-prefixes, or CI never runs it, with no failing check to notice. Verify
-collection by running the CI glob itself, not by running `bun test` and
-counting the files it picked up. Precedent: a guard shipped in
-`desktop/src/main/` passed locally and was never executed by CI. A second
-precedent, card b33b1874 (2026-08-05): `desktop-roadmap-service.test.ts`
-matched the `desktop-*` prefix (collected) while genuinely spawning a real
-broker daemon on a bound port (a real `from ".../_helper.ts"` import) --
+Precedent, card b33b1874 (2026-08-05, predates the deny-list migration):
+`desktop-roadmap-service.test.ts` matched the `desktop-*` allow-list prefix
+of the day (collected) while genuinely spawning a real broker daemon on a
+bound port (a real `from ".../_helper.ts"` import) --
 `tests/desktop-ci-glob-coverage.test.ts`'s coverage guard only ever checked
 that the EXEMPT family/file list carries the daemon signal, never the
 inverse (a COLLECTED file must not carry it), so an integration suite ran
 unflagged inside the cross-platform pure-module job. Fixed by renaming it
 into the already-exempted `broker-` family (`broker-desktop-roadmap-service.test.ts`)
-and by adding the missing symmetric check. These counts move fast under
-concurrent editing (this repo regularly runs 8-10 parallel sessions); treat
-them as a snapshot for the stated date, not a standing truth -- re-measure
+and by adding the missing symmetric check; that symmetric check, and the
+`familyPrefixes`/`exactFiles` table it audits, are what the deny-list above
+now is. File counts under either mechanism move fast under concurrent
+editing (this repo regularly runs 8-10 parallel sessions); treat any given
+count as a snapshot for its stated date, not a standing truth -- re-measure
 rather than trust a number without one.
 
 **0b. `tests/` files that need react/react-dom/zustand: go through the

@@ -89,6 +89,16 @@ import {
   GRAPH_DRAFT_TIMEOUT_MS,
 } from "./shared/graph-draft.ts";
 import { buildRoadmapAppendHeader } from "./shared/roadmap-append.ts";
+import {
+  runWaitForMessage,
+  buildWaiter,
+  selectFreshWaitCandidates,
+  WAIT_FOR_MESSAGE_HARD_CAP_SEC,
+  tryResolveWaiters,
+  removeWaiter,
+  type MessageWaiter,
+  type WaitCandidateMessage,
+} from "./shared/wait-for-message.ts";
 import { composeOutboundMessage } from "./shared/message-framing.ts";
 import { resolveProjectKey } from "./shared/project-key.ts";
 import { tmpdir } from "node:os";
@@ -133,11 +143,21 @@ function brokerHeaders(extra?: Record<string, string>): Record<string, string> {
   return h;
 }
 
-async function brokerFetch<T>(path: string, body: unknown): Promise<T> {
+// `signal` is optional and defaults to undefined -- every existing caller is
+// unaffected (fetch() treats an undefined signal exactly like no signal at
+// all). Card a21f1303 R2 (team-lead review, 2026-08-26): wait_for_message's
+// own opportunistic peek is the one call site that supplies it, so that
+// specific fetch is bounded by the tool's own cap instead of hanging with no
+// timeout at all when a broker accepts the TCP connection and never replies
+// (measured: `after 20024 ms -> still hanging`, no default timeout on plain
+// fetch()). Not a global default: imposing one here would change behaviour
+// for every OTHER caller of brokerFetch, outside this card's scope.
+async function brokerFetch<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${BROKER_URL}${path}`, {
     method: "POST",
     headers: brokerHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
+    signal,
   });
   if (!res.ok) {
     const err = await res.text();
@@ -269,6 +289,12 @@ const notifiedMessageIds = new Set<number>();
 // Message ids whose pollFallback notification already logged a failure (dedup
 // so a broken transport does not flood the log at every 5s poll).
 const notifyFailedIds = new Set<number>();
+// Card a21f1303 (H4 volet 3): pending wait_for_message calls. Fed by the two
+// EXISTING message-delivery paths below (connectWs's WS handler, pollFallback)
+// via tryResolveWaiters -- no third transport, no polling loop of its own.
+// Never touched by anything that marks delivered: see shared/wait-for-message.ts
+// header for why (zero-message-lost, no broker.ts changes in this card).
+let pendingWaiters: MessageWaiter[] = [];
 
 function groupNameForId(id: GroupId): string {
   for (const [name, gid] of Object.entries(myGroupsMap)) {
@@ -339,6 +365,21 @@ function connectWs() {
         text: string;
         sent_at: string;
       };
+      // Card a21f1303: a pending wait_for_message call is resolved here
+      // FIRST, before the ordinary mcp.notification() push -- this is the
+      // "attend la frame WS deja poussee" path the design brief asks for,
+      // not a new transport. Neither this nor tryResolveWaiters() itself
+      // ever marks the message delivered (see shared/wait-for-message.ts),
+      // so a waiter that does NOT match still leaves the message exactly as
+      // untouched as it would be with zero waiters registered.
+      const { remaining, resolved } = tryResolveWaiters(pendingWaiters, f as WaitCandidateMessage);
+      pendingWaiters = remaining;
+      if (resolved.length > 0) {
+        for (const w of resolved) w.resolve(f as WaitCandidateMessage);
+        notifiedMessageIds.add(f.id); // already handed to its waiter -- don't also notify it
+        log(`Resolved ${resolved.length} wait_for_message call(s) from ${f.from_peer_id}`);
+        return;
+      }
       const fromDeck = isDeckSender(f.from_peer_id);
       try {
         await mcp.notification({
@@ -387,11 +428,25 @@ async function pollFallback() {
     const result = await brokerFetch<PollMessagesResponse>("/peek-messages", {
       instance_token: myInstanceToken,
     });
-    const fresh = result.messages.filter((m) => !notifiedMessageIds.has(m.id));
+    // Card a21f1303: same shared predicate as wait_for_message's opportunistic
+    // peek (selectFreshWaitCandidates) -- one discipline, not two.
+    const fresh = selectFreshWaitCandidates(result.messages, notifiedMessageIds);
     if (fresh.length === 0) return;
     // B1/NF-A: the broker already resolved the sender (from_peer_id + meta) and
     // never exposes routing tokens, so no /list-peers round-trip is needed.
     for (const msg of fresh) {
+      // Card a21f1303: same waiter-resolution step as connectWs's WS handler
+      // above -- this IS "le repli sur poll periodique /peek-messages" the
+      // design brief asks for, not a second implementation of the idea.
+      // /peek-messages never marks delivered, so a non-matching waiter (or
+      // zero waiters) leaves `msg` exactly as untouched as it is today.
+      const { remaining, resolved } = tryResolveWaiters(pendingWaiters, msg as WaitCandidateMessage);
+      pendingWaiters = remaining;
+      if (resolved.length > 0) {
+        for (const w of resolved) w.resolve(msg as WaitCandidateMessage);
+        notifiedMessageIds.add(msg.id);
+        continue;
+      }
       const fromDeck = isDeckSender(msg.from_peer_id);
       try {
         await mcp.notification({
@@ -435,7 +490,7 @@ const mcp = new Server(
 
 When a <channel source="claude-peers"> message arrives, reply now with send_message to its from_peer_id, then resume your work. Peer traffic is background work: do not narrate it to the operator. Tell the operator only when a human decision is needed, you are blocked, or the outcome changes your plan or result, and then in one or two sentences.
 
-Tools: list_peers, send_message (expects_reply=false for pure information), set_summary, check_messages (polling fallback), whoami, list_groups, switch_group, set_id, the roadmap_* family, ask_operator / ask_operator_wait (blocking question to the human, answer may come from their phone), graph_draft_prepare / graph_draft_send (ONLY when the operator explicitly asks to move a question into the Koryphaios graph view).
+Tools: list_peers, send_message (expects_reply=false for pure information), set_summary, wait_for_message, check_messages (polling fallback), whoami, list_groups, switch_group, set_id, the roadmap_* family, ask_operator / ask_operator_wait (blocking question to the human, answer may come from their phone), graph_draft_prepare / graph_draft_send (ONLY when the operator explicitly asks to move a question into the Koryphaios graph view).
 
 Special recipient 'operator': send_message with to_peer_id 'operator' reaches the HUMAN operator's desktop inbox. Use it for blocking questions or findings that need a human decision; the answer comes back as a Deck announcement or new instructions, not through this channel. It needs a group that pins a secret (a Koryphaios Deck always does); in the secret-less 'default' group the send is refused, ask on screen instead.
 
@@ -515,6 +570,24 @@ const TOOLS = [
     inputSchema: {
       type: "object" as const,
       properties: {},
+    },
+  },
+  {
+    name: "wait_for_message",
+    description:
+      `Blocks until a peer message arrives (prefer over polling check_messages), resolving with it (from from_peer_id if given, else anyone) or { timed_out: true } after up to ${WAIT_FOR_MESSAGE_HARD_CAP_SEC}s (longer requests clamp). Not marked read: it reappears in check_messages too -- don't call that right after a match or you'll act twice.`,
+    inputSchema: {
+      type: "object" as const,
+      properties: {
+        timeout_sec: {
+          type: "number" as const,
+          description: `Seconds to wait, capped at ${WAIT_FOR_MESSAGE_HARD_CAP_SEC} (omit for the default).`,
+        },
+        from_peer_id: {
+          type: "string" as const,
+          description: "Only from this peer_id; omit for any sender.",
+        },
+      },
     },
   },
   {
@@ -1104,7 +1177,22 @@ const roadmapToolError = (e: unknown): { content: { type: "text"; text: string }
   isError: true,
 });
 
-mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
+// Shared by check_messages and wait_for_message (card a21f1303): the
+// "From <name> (<date>):" prefix over the same renderInbound() framing.
+// Card e3f8065d already established that the label substitutes a DISPLAY
+// name (a sentinel's public id, or "<dormant peer>") while renderInbound
+// itself must key on the real sender identity -- see the longer comment
+// this replaces at the check_messages case for the full reasoning.
+function formatInboundLine(fromPeerId: string, text: string, sentAt: string): string {
+  const label = isOperatorSender(fromPeerId)
+    ? OPERATOR_PEER_ID
+    : isDeckSender(fromPeerId)
+      ? DECK_PEER_ID
+      : fromPeerId || "<dormant peer>";
+  return `From ${label} (${sentAt}):\n${renderInbound(fromPeerId, text)}`;
+}
+
+mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
   const { name, arguments: args } = req.params;
 
   switch (name) {
@@ -1243,23 +1331,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           return { content: [{ type: "text" as const, text: "No new messages." }] };
         }
         // B1/NF-A: from_peer_id is resolved by the broker; no /list-peers needed.
-        // Card e3f8065d: this path used to re-implement the sender-class
-        // branching of renderInbound, renderer by renderer. It now consumes the
-        // shared enforcer, and keeps only what is genuinely its own -- the
-        // "From <name> (<date>):" PREFIX. The split matters: the prefix
-        // substitutes a DISPLAY name (a sentinel's public id, or the literal
-        // "<dormant peer>" when the broker resolved none), whereas the framing
-        // must key on the real sender identity. Passing the display fallback to
-        // renderInbound would classify a dormant sender on a string that matches
-        // no sentinel.
-        const lines = result.messages.map((m) => {
-          const label = isOperatorSender(m.from_peer_id)
-            ? OPERATOR_PEER_ID
-            : isDeckSender(m.from_peer_id)
-              ? DECK_PEER_ID
-              : m.from_peer_id || "<dormant peer>";
-          return `From ${label} (${m.sent_at}):\n${renderInbound(m.from_peer_id, m.text)}`;
-        });
+        // Card e3f8065d / a21f1303: formatInboundLine (above) is the shared
+        // enforcer for the "From <name> (<date>):" prefix over renderInbound,
+        // now reused by wait_for_message too.
+        const lines = result.messages.map((m) => formatInboundLine(m.from_peer_id, m.text, m.sent_at));
         return {
           content: [
             {
@@ -1274,6 +1349,97 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           isError: true,
         };
       }
+    }
+
+    case "wait_for_message": {
+      if (!myInstanceToken) {
+        return {
+          content: [{ type: "text" as const, text: "Not registered with broker yet" }],
+          isError: true,
+        };
+      }
+
+      // Card a21f1303 U1 (team-lead review round 3, 2026-08-26): the whole
+      // decision -- clamp/trim, the opportunistic peek's freshness filter,
+      // timer arming, and cancellation forwarding -- lives in
+      // runWaitForMessage (shared/wait-for-message.ts), executed by direct
+      // unit tests with injected fakes for peek/timers/cancellation. This
+      // case only wires the REAL implementations of those five dependencies
+      // and formats the returned outcome; it decides nothing itself. A
+      // mutation battery on an earlier version of this case (which moved
+      // only the VALUE transforms, not the control flow, into the pure
+      // module) found 12 of 13 mutations invisible to any test -- see that
+      // module's header for the reasoning this closes.
+      //
+      // One AbortController, shared by every dependency below, bounds the
+      // opportunistic peek's fetch end-to-end: brokerFetch has no signal by
+      // default (shared by 17 other callers, all unaffected -- signal stays
+      // an optional 3rd argument); this site supplies its own, aborted by
+      // EITHER the timer firing OR extra.signal (client cancellation).
+      // Measured: a broker that accepts the TCP connection and never
+      // replies leaves a signal-less fetch() hanging with no default
+      // timeout at all (`after 20024 ms -> still hanging`).
+      const controller = new AbortController();
+      const outcome = await runWaitForMessage(args, {
+        peek: async () => {
+          try {
+            const already = await brokerFetch<PollMessagesResponse>(
+              "/peek-messages",
+              { instance_token: myInstanceToken },
+              controller.signal
+            );
+            return already.messages;
+          } catch (e) {
+            // Card a21f1303 U4: a real (non-abort) peek failure must leave a
+            // trace -- console.error alone does not count (CLAUDE.md). An
+            // abort is expected control flow (the cap or a cancellation),
+            // not an error, so it stays silent here.
+            if (!controller.signal.aborted) {
+              logError("wait_for_message: opportunistic peek failed (falling through to the waiter path)", e);
+            }
+            throw e;
+          }
+        },
+        notifiedIds: notifiedMessageIds,
+        markNotified: (id) => notifiedMessageIds.add(id),
+        registerWaiter: (plan, onMatch) => {
+          const waiter = buildWaiter(plan, onMatch);
+          pendingWaiters.push(waiter);
+          return () => {
+            pendingWaiters = removeWaiter(pendingWaiters, waiter);
+          };
+        },
+        scheduleTimeout: (ms, onExpire) => {
+          const timer = setTimeout(() => {
+            controller.abort();
+            onExpire();
+          }, ms);
+          return () => clearTimeout(timer);
+        },
+        onCancelled: (onCancel) => {
+          const handler = () => {
+            controller.abort();
+            onCancel();
+          };
+          extra.signal.addEventListener("abort", handler);
+          return () => extra.signal.removeEventListener("abort", handler);
+        },
+      });
+
+      if (outcome.kind === "matched") {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: formatInboundLine(outcome.message.from_peer_id, outcome.message.text, outcome.message.sent_at),
+            },
+          ],
+        };
+      }
+      if (outcome.kind === "cancelled") {
+        return { content: [{ type: "text" as const, text: "wait_for_message cancelled." }], isError: true };
+      }
+      return { content: [{ type: "text" as const, text: JSON.stringify({ timed_out: true }) }] };
     }
 
     case "whoami": {
