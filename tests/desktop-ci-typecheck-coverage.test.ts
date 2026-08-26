@@ -101,7 +101,21 @@ import { expect, test } from "bun:test";
 const REPO_ROOT = join(import.meta.dir, "..");
 const DESKTOP_ROOT = join(REPO_ROOT, "desktop");
 const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "desktop-build.yml");
-const REAL_WORKFLOW_TEXT = readFileSync(WORKFLOW_PATH, "utf-8");
+// Normalized to LF at the read site, once, for every regex below that is
+// anchored on a bare "\n" (line 214's markerRe, the split()s further down,
+// and the pull_request: removal at line 660): the blob committed to git is
+// LF-only, but actions/checkout on windows-latest applies git's default
+// core.autocrlf=true and smudges it to CRLF on that runner alone -- macOS
+// and Linux check out the LF blob as-is, and a local Windows working copy
+// commonly still is LF too (autocrlf only bites on a fresh checkout), which
+// is why this went red on windows-latest CI specifically while staying
+// green everywhere else including a local Windows `bun test`. Normalizing
+// here closes the gap for every regex in this file at once, instead of
+// re-adding a `\r?` to each one and leaving the next one written here to
+// rediscover the same trap (measured: tests/desktop-ci-glob-coverage.test.ts
+// has the same unguarded pattern, not fixed here, out of scope for this
+// change).
+const REAL_WORKFLOW_TEXT = readFileSync(WORKFLOW_PATH, "utf-8").replace(/\r\n/g, "\n");
 
 function toRepoRelative(absPath: string): string {
   return relative(REPO_ROOT, absPath).split(sep).join("/");

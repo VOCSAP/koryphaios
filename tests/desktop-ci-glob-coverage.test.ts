@@ -142,7 +142,17 @@ function matchesAnyGlob(file: string, globs: string[]): boolean {
 // "scripts/check-commit-closure.ts" in prose, which a naive `.includes()`
 // would wrongly accept even if the actual invoking step vanished).
 const COMMIT_CLOSURE_WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "commit-closure.yml");
-const REAL_COMMIT_CLOSURE_TEXT = readFileSync(COMMIT_CLOSURE_WORKFLOW_PATH, "utf-8");
+// This file is NOT affected today (measured): anyStepRunInvokesCommitClosureScript
+// below splits on a bare "\n\s*run:" lookahead, and a CRLF checkout never
+// interposes "\r" between that "\n" and the token it looks for, while its
+// own final assertion is a tolerant boolean, not a strict equality.
+// The normalization below is preventive hardening, not a fix to an active
+// defect: it keeps a future tightening of that assertion into a strict
+// equality from silently reopening the same trap.
+// See tests/desktop-ci-typecheck-coverage.test.ts:104 for the real,
+// measured defect and its cause (windows-latest checkout smudges the
+// LF-committed blob to CRLF via git core.autocrlf=true).
+const REAL_COMMIT_CLOSURE_TEXT = readFileSync(COMMIT_CLOSURE_WORKFLOW_PATH, "utf-8").replace(/\r\n/g, "\n");
 
 /**
  * Bounds the `on:` block to end at the next column-0 (unindented) key line,
