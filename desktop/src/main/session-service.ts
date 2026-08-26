@@ -39,6 +39,7 @@ import {
 } from './session-transcript'
 import { clearDeskSessionId, readDeskSessionId } from './desk-session'
 import { ScreenGuard } from './screen-model'
+import { createOscParser, type OscSnapshot } from './detect/osc'
 import { reportError } from './log'
 import { DEFAULT_PALETTE, paletteColor } from '@shared/palette'
 import { sanitizeRole } from '@shared/role'
@@ -169,6 +170,16 @@ export class SessionService extends EventEmitter {
    */
   private screenGuard = new ScreenGuard()
   /**
+   * OSC 0/2/9;4/777 extraction (card 1aa69066/H2, desktop/src/main/detect/osc.ts).
+   * One createOscParser() instance per session id -- same session-keyed
+   * Map<string, T> shape as ScreenGuard/the four detectors above, so two
+   * sessions' continuation state can never collide (multi-identity question,
+   * CLAUDE.md). No consumer wired yet (H1/H3/f8082208 are separate chantiers
+   * that read oscSnapshot() later); this parser only extracts and retains
+   * the last-seen snapshot per session.
+   */
+  private oscParsers = new Map<string, ReturnType<typeof createOscParser>>()
+  /**
    * Initial prompt awaiting post-spawn keystroke injection (150eb188), keyed
    * by session id. Set only for a fresh spawn with a non-empty def.prompt
    * (startPty); consumed (deleted) by the startup-ack handler below once
@@ -237,6 +248,7 @@ export class SessionService extends EventEmitter {
       this.attentionDetector.feed(e.id, e.data)
       this.startupAckDetector.feed(e.id, e.data)
       this.screenGuard.feed(e.id, e.data)
+      this.oscParserFor(e.id).feed(e.data)
     })
     this.pty.on('exit', ({ id, exitCode }: { id: string; exitCode: number }) => {
       // pty-manager only emits 'exit' for a spontaneous process exit (the user
@@ -251,6 +263,7 @@ export class SessionService extends EventEmitter {
       this.attentionDetector.clear(id)
       this.startupAckDetector.clear(id)
       this.screenGuard.clear(id)
+      this.oscParsers.delete(id)
       this.pendingPrompt.delete(id)
 
       // A clean exit (/exit -> shell returns 0) auto-closes the tile, the way a
@@ -539,6 +552,7 @@ export class SessionService extends EventEmitter {
     this.attentionDetector.clear(id)
     this.startupAckDetector.clear(id)
     this.screenGuard.clear(id)
+    this.oscParsers.delete(id)
     this.pendingPrompt.delete(id)
     this.defs = this.defs.filter((d) => d.id !== id)
     this.runtime.delete(id)
@@ -702,6 +716,34 @@ export class SessionService extends EventEmitter {
    */
   lastOutputAt(id: string): number | null {
     return this.outputAt.get(id) ?? null
+  }
+
+  /**
+   * Last-seen OSC title/progress/notify snapshot for a session, or null if
+   * the session has no live parser (never spawned, or already cleared).
+   * Feeding an empty chunk reads the current snapshot without mutating any
+   * in-progress continuation state.
+   */
+  oscSnapshot(id: string): OscSnapshot | null {
+    return this.oscParsers.get(id)?.feed('') ?? null
+  }
+
+  /**
+   * Get-or-create the OSC parser for a session, minted at first PTY data
+   * (never module-level state -- see the field's own doc comment). Kept as
+   * its own `this.`-prefixed method, not a bare `createOscParser()` call
+   * inlined in the pty.on('data') handler, so the handler's own extracted-
+   * and-executed test (tests/desktop-quota-gate.test.ts, which runs the real
+   * handler body against a stubbed `this`) can stub this one call instead of
+   * needing `createOscParser` in scope.
+   */
+  private oscParserFor(id: string): ReturnType<typeof createOscParser> {
+    let p = this.oscParsers.get(id)
+    if (!p) {
+      p = createOscParser()
+      this.oscParsers.set(id, p)
+    }
+    return p
   }
 
   /** Per-session quota auto-resume override (context menu). Persisted. */
@@ -1004,6 +1046,10 @@ export class SessionService extends EventEmitter {
     this.attentionDetector.clear(def.id)
     this.startupAckDetector.clear(def.id)
     this.screenGuard.clear(def.id)
+    // A respawn (restart/resume) mints a fresh OSC continuation state too --
+    // an unterminated fragment from the previous process must never bleed
+    // into the new one's first chunk.
+    this.oscParsers.delete(def.id)
     // sessionId may have just changed (fork-resume) -> persist before/after spawn.
     this.persist()
     // Drop any stale back-channel file from a previous run so discovery cannot

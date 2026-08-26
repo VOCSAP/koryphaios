@@ -210,3 +210,51 @@ test("clear() drops state and cancels pending timers", async () => {
   expect(ev.dues).toEqual([]);
   d.stop();
 });
+
+// Card 1aa69066 (H2): OSC sequences must be stripped, closing the FALLBACK_PATTERNS
+// false-positive an OSC-carried literal phrase could otherwise cause. Direction 1
+// (presence): stripAnsi actually removes an OSC 777 body. Direction 2 (regression):
+// the fixed stripAnsi output no longer matches "limit reached" that only ever
+// existed inside the OSC payload -- distinguishing this from a real limit screen,
+// which spells the phrase in plain PTY text with no OSC wrapper at all.
+test("stripAnsi removes an OSC 777 sequence, not just CSI", () => {
+  const withOsc = "\x1b]777;notify;Claude Code;limit reached\x07plain screen text";
+  expect(stripAnsi(withOsc)).toBe("plain screen text");
+});
+
+test("an OSC-carried 'limit reached' phrase does not spuriously trigger detectRateLimit (it is not a real limit screen)", () => {
+  const chunk = "\x1b]777;notify;Claude Code;limit reached\x07plain screen text, no real limit here";
+  expect(detectRateLimit(stripAnsi(chunk), Date.now())).toBeNull();
+});
+
+test("a real limit screen (plain text, no OSC wrapper) still triggers detectRateLimit after the OSC fix", () => {
+  const chunk = "You've hit your limit · resets 8pm";
+  expect(detectRateLimit(stripAnsi(chunk), Date.now())).not.toBeNull();
+});
+
+// Card 1aa69066 (H2) review, blocker F3: BUSY_RE's fast path (the
+// `st.limited` branch in feed()) tests the raw per-chunk delta immediately,
+// before the accumulated-buffer re-strip runs -- a stateless per-chunk regex
+// cannot remove an escape sequence whose terminator has not arrived yet, so
+// a braille glyph fragmented across two chunks leaked into BUSY_RE's input
+// and falsely ended an OPEN rate-limit episode (which then disarms the
+// auto-resume timer for real). MEASURED (reviewer, mutation review):
+// reverting BUSY_RE to read raw `stripped` left this file's tests green --
+// none of them fragment the OSC that carries the glyph.
+test("an OSC-carried braille glyph FRAGMENTED across two chunks does not falsely end an open limit episode", () => {
+  const d = new QuotaDetector();
+  const limitEv: unknown[] = [];
+  const clearEv: unknown[] = [];
+  d.on("limit", (e: QuotaLimitEvent) => limitEv.push(e));
+  d.on("clear", () => clearEv.push(true));
+
+  d.feed("s1", "5-hour limit reached · resets 2pm\n");
+  expect(limitEv.length).toBe(1);
+
+  const osc = "\x1b]0;⣋ Claude is thinking\x07";
+  d.feed("s1", osc.slice(0, 12)); // carries the glyph, no terminator yet
+  d.feed("s1", osc.slice(12)); // the terminator
+  expect(clearEv.length).toBe(0); // still limited, no false clear
+
+  d.stop();
+});

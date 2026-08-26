@@ -6,6 +6,7 @@ import { test, expect } from "bun:test";
 import {
   StartupAckDetector,
   detectChannelsWarning,
+  stripAnsi,
   type StartupAckEvent
 } from "../desktop/src/main/startup-ack.ts";
 
@@ -106,4 +107,61 @@ test("sessions are independent", () => {
   d.feed("s1", CHANNELS_WARNING);
   d.feed("s2", "just some normal output\n");
   expect(events).toEqual([{ id: "s1" }]);
+});
+
+// Card 1aa69066 (H2): OSC sequences must be stripped, same fix as
+// attention.ts/quota.ts. Direction 1 (presence): stripAnsi actually removes
+// an OSC sequence. Direction 2 (the strip must not remove signal this
+// detector still needs): the two-cue warning dialog still acks when an OSC
+// title update happens to be interleaved with it -- proving the fix strips
+// OSC bytes specifically, not the surrounding plain text the detector reads.
+test("stripAnsi removes an OSC sequence, not just CSI", () => {
+  const withOsc = "\x1b]0;busy\x07plain screen text";
+  expect(stripAnsi(withOsc)).toBe("plain screen text");
+});
+
+test("the dev-channels warning still acks when an OSC title update is interleaved with it", () => {
+  const d = new StartupAckDetector();
+  const events = collect(d);
+  d.feed(
+    "s1",
+    `\x1b]0;busy\x07WARNING: Loading development channels\n` +
+      `\x1b]0;still busy\x07❯ 1. I am using this for local development\n`
+  );
+  expect(events).toEqual([{ id: "s1" }]);
+});
+
+// Card 1aa69066 (H2) review, blocker F2: the test above only exercises an OSC
+// sequence that arrives WHOLE within one feed() call -- a per-chunk-only
+// strip already handles that case, so it does not distinguish the fix (the
+// accumulated-buffer re-strip) from the bug it closes. MEASURED (reviewer,
+// mutation review): removing the accumulated-buffer re-strip left EVERY
+// existing test in this suite green -- the fragmentation-across-chunks
+// mechanism this file's own header comment describes was covered by
+// nothing. This is the POSITIVE CONTROL: an OSC 0 title split across two PTY
+// chunks, landing in the MIDDLE of the second warning cue. Only the
+// accumulated-buffer re-strip can remove it -- a per-chunk strip cannot,
+// because chunk 1's OSC half has no terminator yet, so nothing matches
+// within that single chunk string. Two witnesses alongside it: the same OSC
+// whole in one chunk (already covered above, repeated here for direct
+// comparison) and no OSC at all (baseline) -- both must still ack.
+test("the warning still acks when its OSC title update is FRAGMENTED across chunks, landing mid-cue", () => {
+  const fragmented = new StartupAckDetector();
+  const fragmentedEvents = collect(fragmented);
+  fragmented.feed("s1", "WARNING: Loading development channels\n❯ 1. I am using this for local dev");
+  fragmented.feed("s1", "\x1b]0;✳ Claude");
+  fragmented.feed("s1", " Code\x07elopment\n");
+  expect(fragmentedEvents).toEqual([{ id: "s1" }]);
+
+  const whole = new StartupAckDetector();
+  const wholeEvents = collect(whole);
+  whole.feed("s1", "WARNING: Loading development channels\n❯ 1. I am using this for local dev");
+  whole.feed("s1", "\x1b]0;✳ Claude Code\x07elopment\n");
+  expect(wholeEvents).toEqual([{ id: "s1" }]);
+
+  const noOsc = new StartupAckDetector();
+  const noOscEvents = collect(noOsc);
+  noOsc.feed("s1", "WARNING: Loading development channels\n❯ 1. I am using this for local dev");
+  noOsc.feed("s1", "elopment\n");
+  expect(noOscEvents).toEqual([{ id: "s1" }]);
 });

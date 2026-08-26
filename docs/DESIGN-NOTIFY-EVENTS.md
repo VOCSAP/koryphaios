@@ -81,7 +81,7 @@ MECANIQUE (processus, octets, appel d'outil declare) ne le peut pas.
 |---|---|---|
 | `AttentionDetector` (bras de LEVEE) | `desktop/src/main/attention.ts`, `WAITING_PATTERNS` | deux motifs : `/❯\s*1\./` (glyphe, plausiblement vivant) et `/\bdo you trust the files\b/i` (**mort par vocabulaire depuis >= 3 versions**, releve carte bbc849f7) |
 | `AttentionDetector` (bras d'EXTINCTION) | `attention.ts`, `BUSY_RE = /esc to interrupt\|[⠀-⣿]/i` | **litteral identique a `thinking.ts:BUSY_RE`**, le predicat que les cartes bbc849f7 / 8691dea3 declarent mort en production. L'arme `esc to interrupt` est composee a l'execution par Ink, donc absente du binaire ; l'arme braille n'a jamais ete mesuree independamment (voir U1). |
-| `ThinkingDetector` / `r.thinking` | `thinking.ts` | **MORT en effet.** Ne pas construire dessus (consigne explicite du dispatch). Defaut supplementaire : son handler dans `session-service.ts` ne rappelle jamais `broadcast()`, seul handler de detecteur mutant `RuntimeState` a ne pas le faire. |
+| `ThinkingDetector` / `r.thinking` | `thinking.ts` | **MORT en effet.** Ne pas construire dessus (consigne explicite du dispatch). Correction 2026-08-26 (carte 1aa69066) : son handler dans `session-service.ts` appelle bien `broadcast()`, mesure directement sur le code. |
 | `QuotaDetector` / `rateLimited` | `quota.ts` | SUSPECT : motifs jamais confrontes au binaire installe (carte fd1914cc) ; le libelle reste affiche apres reinitialisation (faux positif collant). |
 
 ### Affichages / consommateurs -- PAS des producteurs

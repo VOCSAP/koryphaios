@@ -26,9 +26,25 @@ export interface StartupAckEvent {
   id: string
 }
 
+// Strips CSI (colours, cursor moves) AND OSC (title, progress, notify --
+// card 1aa69066/H2) sequences so a marker wrapped in colour codes still
+// matches. One combined regex rather than two, deliberately: a per-chunk
+// strip alone cannot remove an OSC sequence fragmented across two PTY
+// chunks (its first half has no terminator yet, so nothing matches), which
+// is why `feed()` below re-runs this same function on the ACCUMULATED
+// buffer after concatenation, not only on the incoming per-chunk delta.
+//
+// OSC branch's class EXCLUDES ESC (not just BEL) -- that exclusion, not
+// the `{0,4096}` bound alongside it, is what prevents the quadratic blowup
+// on an adversarial buffer full of unterminated "ESC ]" heads on the main
+// process's hot PTY path. Corrected false pointer, card 1aa69066 review
+// round 3 (T5): the bound ALONE, without the ESC exclusion, measured
+// WORSE than the original unfixed regex. Full measurement + rationale on
+// attention.ts's own ANSI_RE comment; tests/desktop-osc-perf.test.ts pins
+// both properties, separately, for all four files that carry this class.
 // eslint-disable-next-line no-control-regex
-const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g
-function stripAnsi(s: string): string {
+const ANSI_RE = /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b\n]{0,4096}(?:\x07|\x1b\\))/g
+export function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '')
 }
 
@@ -74,7 +90,10 @@ export class StartupAckDetector extends EventEmitter {
       this.sessions.set(id, st)
     }
     if (st.done) return
-    st.buf = (st.buf + stripAnsi(data)).slice(-MAX_BUF)
+    // Re-strip the accumulated buffer (not just the incoming per-chunk
+    // delta): closes the cross-chunk OSC fragmentation gap, see the comment
+    // on `stripAnsi` above.
+    st.buf = stripAnsi((st.buf + stripAnsi(data)).slice(-MAX_BUF))
     if (detectChannelsWarning(st.buf)) {
       st.done = true
       st.buf = ''

@@ -224,7 +224,13 @@ function makeDataHandler(gateActive: boolean) {
     quotaDetector: { feed: (id: string) => feedCalls.push(id) },
     attentionDetector: { feed: () => {} },
     startupAckDetector: { feed: () => {} },
-    screenGuard: { feed: () => {} }
+    screenGuard: { feed: () => {} },
+    // Card 1aa69066/H2: the real handler now also routes through
+    // this.oscParserFor(e.id).feed(e.data) -- stubbed directly, same
+    // reasoning as quotaGateActive above (this test targets only the gate
+    // condition, not the OSC parser's own behaviour, covered by
+    // tests/desktop-osc.test.ts).
+    oscParserFor: () => ({ feed: () => {} })
   };
   return {
     run: (e: { id: string; data: string }): void => fn.call(self, e),

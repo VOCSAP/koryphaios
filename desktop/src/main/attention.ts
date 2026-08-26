@@ -7,6 +7,7 @@
 
 import { EventEmitter } from 'node:events'
 import { detectChannelsWarning } from './startup-ack'
+import { createSafeStripper } from './detect/safe-strip'
 
 export interface AttentionEvent {
   id: string
@@ -27,9 +28,43 @@ export interface AttentionEvent {
   manual?: boolean
 }
 
+// Strips CSI (colours, cursor moves) AND OSC (title, progress, notify --
+// card 1aa69066/H2) sequences. Combined into ONE regex rather than two
+// separate ones so the fix is atomic in the source: a per-chunk strip alone
+// cannot remove an OSC sequence fragmented across two PTY chunks (its first
+// half has no terminator yet, so nothing matches), which is why `feed()`
+// below re-runs this same function on the ACCUMULATED buffer after
+// concatenation, not only on the incoming per-chunk delta -- by then both
+// halves of a previously-split sequence sit adjacent and the OSC branch
+// matches.
+//
+// THE OSC BRANCH'S CHARACTER CLASS EXCLUDES ESC (not just BEL) --
+// measured regression, card 1aa69066 review round 2: `[^\x07]*?` (lazy,
+// unbounded, BEL-only exclusion) is quadratic on an adversarial
+// MAX_BUF-sized buffer full of unterminated "ESC ]" heads (each restarts a
+// full lazy backtracking scan), 0.04ms at n=512 to 2.34ms at n=4096 -- a
+// `cat` of a binary file into a tile hits this on the Electron main
+// process's hot PTY-data path, x3 detectors x N sessions.
+//
+// FALSE POINTER, CORRECTED (review round 3, blocker T5): the FIRST fix
+// attributed this to the `{0,4096}` bound. MEASURED WRONG: the same class
+// made UNBOUNDED but with ESC still excluded, `[^\x07\x1b\n]*?`, is
+// FASTER (0.0035ms) than the shipped bounded one (0.0216ms); a class that
+// IS bounded but does NOT exclude ESC, `[^\x07]{0,4096}`, is 3.5507ms --
+// WORSE than the ORIGINAL unfixed regex (2.6813ms). The bound is not what
+// closes the hole. EXCLUDING ESC is: once ESC is excluded from the class,
+// the next "ESC ]" head immediately halts that match attempt (backtracking
+// has nowhere to grow), which is self-limiting on this adversarial shape
+// regardless of any explicit cap. `{0,4096}` still matters, separately, for
+// MEMORY on a pathological run containing neither ESC nor a terminator (a
+// giant plain-text OSC body) -- but it is not the perf fix, and crediting
+// it as one is exactly the false-pointer failure mode CLAUDE.md warns
+// about: correct code, wrong stated reason, and the reason is what the
+// next person trusts when they touch this line.
+// tests/desktop-osc-perf.test.ts pins BOTH properties, separately.
 // eslint-disable-next-line no-control-regex
-const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g
-function stripAnsi(s: string): string {
+const ANSI_RE = /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b\n]{0,4096}(?:\x07|\x1b\\))/g
+export function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '')
 }
 
@@ -146,6 +181,18 @@ const MAX_BUF = 4096
 interface SessionState {
   buf: string
   waiting: boolean
+  /**
+   * Card 1aa69066 review, blocker F3: BUSY_RE's fast path tests the RAW
+   * per-chunk delta, immediately, before the accumulated-buffer re-strip
+   * (F2) even runs -- deliberately, for responsiveness. A stateless regex
+   * strip on that single chunk cannot remove an escape sequence whose
+   * terminator has not arrived yet, so its raw bytes (including any glyph
+   * it carries, e.g. Claude Code's own OSC 0 title spinner) would otherwise
+   * leak straight into BUSY_RE's input. This per-session incremental
+   * stripper holds back any not-yet-resolved sequence instead -- see
+   * detect/safe-strip.ts's own header comment.
+   */
+  safe: ReturnType<typeof createSafeStripper>
 }
 
 /**
@@ -159,13 +206,16 @@ export class AttentionDetector extends EventEmitter {
   feed(id: string, data: string): void {
     let st = this.sessions.get(id)
     if (!st) {
-      st = { buf: '', waiting: false }
+      st = { buf: '', waiting: false, safe: createSafeStripper() }
       this.sessions.set(id, st)
     }
     const stripped = stripAnsi(data)
+    // See SessionState.safe's doc comment: BUSY_RE must never read raw
+    // bytes from an escape sequence that has not resolved yet.
+    const busySafe = st.safe.feed(data)
 
     if (st.waiting) {
-      if (BUSY_RE.test(stripped)) {
+      if (BUSY_RE.test(busySafe)) {
         st.waiting = false
         st.buf = ''
         this.emit('attention', { id, waiting: false } satisfies AttentionEvent)
@@ -180,7 +230,10 @@ export class AttentionDetector extends EventEmitter {
       // through positive evidence the raising pattern is gone. See
       // `stillWaiting`'s own comment for the measured reverse-order bug this
       // avoids.
-      st.buf = (st.buf + stripped).slice(-MAX_BUF)
+      // Re-strip the accumulated buffer (not just `stripped`, the per-chunk
+      // delta): closes the cross-chunk OSC fragmentation gap, see the
+      // comment on `stripAnsi` above.
+      st.buf = stripAnsi((st.buf + stripped).slice(-MAX_BUF))
       if (!stillWaiting(st.buf)) {
         st.waiting = false
         st.buf = ''
@@ -192,8 +245,9 @@ export class AttentionDetector extends EventEmitter {
     // A busy cue invalidates the accumulated context (a wait screen never
     // coexists with a running turn) but the SAME chunk may already carry the
     // prompt that follows the turn's end -- so reset FIRST, then append.
-    if (BUSY_RE.test(stripped)) st.buf = ''
-    st.buf = (st.buf + stripped).slice(-MAX_BUF)
+    if (BUSY_RE.test(busySafe)) st.buf = ''
+    // Re-strip the accumulated buffer, same reasoning as the branch above.
+    st.buf = stripAnsi((st.buf + stripped).slice(-MAX_BUF))
     if (detectWaiting(st.buf)) {
       st.waiting = true
       // Do NOT reset buf here (BLOCKER 1, review of 4f0143ff): the re-scan

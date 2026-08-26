@@ -71,6 +71,30 @@ test("stripAnsi drops an orphan ESC from a partial sequence", () => {
   expect(stripAnsi("a\x1bb")).toBe("ab");
 });
 
+// Card 1aa69066 (H2) review, blocker F5: without a dedicated OSC pass, an
+// OSC sequence's ESC byte fell through to the orphan-ESC catch-all (which
+// strips only that ONE byte), leaving the payload text and its BEL
+// terminator sitting in the output as ordinary visible text -- WORSE than
+// no strip at all, since a downstream MAGIC_RESUME_RE/MAGIC_SHIM_RE match
+// against that leaked text has nothing marking it as escape-sequence
+// content anymore. MEASURED (reviewer): before this pass existed,
+// `stripAnsi("A" + ESC + "]0;* Claude is working" + BEL + "B")` produced
+// `"A]0;* Claude is workingB"`, not `"AB"`.
+test("stripAnsi removes a complete OSC sequence (title/progress/notify), not just its leading ESC", () => {
+  const withOsc = "A\x1b]0;* Claude is working\x07B";
+  expect(stripAnsi(withOsc)).toBe("AB");
+});
+
+test("stripAnsi removes an OSC sequence terminated by ST (ESC \\\\), same as BEL", () => {
+  const withOsc = "A\x1b]0;title\x1b\\B";
+  expect(stripAnsi(withOsc)).toBe("AB");
+});
+
+test("an OSC-carried word does not survive to spuriously match the shim/resume patterns", () => {
+  const out = "\x1b]777;notify;Claude Code;hook failed to intercept\x07just some normal terminal output";
+  expect(isMagicShimFailure(out)).toBe(false);
+});
+
 test("magicCompactPluginPresent finds a plugin dir under <config>/plugins", () => {
   const cfg = join(tmpHome(), ".claude");
   expect(magicCompactPluginPresent(cfg)).toBe(false); // nothing installed
