@@ -2017,6 +2017,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           by: roadmapAuthor(),
           title: payload.title,
           prompt: payload.prompt,
+          ...roadmapProof(),
         });
         return {
           content: [

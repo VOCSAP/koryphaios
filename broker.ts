@@ -34,6 +34,12 @@ import type {
   NotificationChannel,
 } from "./notify/types.ts";
 import { validateDraftPayload } from "./shared/graph-draft.ts";
+import {
+  resolveProvenGraphDraftPeer,
+  isGraphDraftAuthError,
+  type GraphDraftScopeDeps,
+  type GraphDraftPeerRow,
+} from "./shared/graph-draft-scope.ts";
 import { planRoadmapAppendText, ROADMAP_APPEND_RESULT_MAX_CHARS } from "./shared/roadmap-append.ts";
 import {
   resolveRoadmapLock,
@@ -2342,9 +2348,13 @@ function resolveRoadmapAuthor(
   // (broker.ts, the lock-expiry sweep) writes `updated_by` directly in SQL, a
   // hardcoded constant that never reaches either call site; harmless (never
   // externally influenced) but outside what this validation can promise.
-  // Also NOT covered: handleGraphDraftAdd's `from_peer: body.by.slice(0,128)`
-  // (broker.ts, a different table) -- same class of unvalidated author
-  // identity, named here rather than fixed, out of this card's scope.
+  // handleGraphDraftAdd's from_peer (broker.ts, a different table) used to be
+  // this same class of unvalidated author identity (a caller-claimed
+  // `body.by`, out of this function's coverage). Card 3781b033 closed it, but
+  // NOT by routing that handler through this function: resolveProvenGraphDraftPeer
+  // (shared/graph-draft-scope.ts) derives from_peer straight from the matched
+  // `peers` row instead, which sidesteps this normalizer entirely rather than
+  // extending its coverage -- see that module's doc comment for why.
   //
   // Charset picked from live data, not invented: `bun cli.ts roadmap-export`
   // on this project's roadmap (107 items, 15 distinct created_by/updated_by/
@@ -5748,25 +5758,68 @@ void startConfiguredChannels();
 sweepApprovals();
 guardedInterval("sweepApprovals", sweepApprovals, PURGE_INTERVAL_SEC * 1000);
 
+/**
+ * Card 3781b033, team-lead ruling: deliberately NOT a resolveRoadmapAuthor
+ * call site. That helper answers "who is the author of this write", which
+ * legitimately includes an operator-signed reserved identity (RESERVED_PEER_IDS,
+ * e.g. 'deck') carrying no `peers` row and therefore no project_key --
+ * correct for the roadmap, where a signed operator write is a real, supported
+ * caller. handleGraphDraftAdd asks a narrower question this handler alone
+ * needs answered: "which REGISTERED peer presents this instance_token, and
+ * what is ITS OWN project_key". A signed-but-tokenless caller has no answer
+ * to that question by construction, not by omission, so routing this handler
+ * through resolveRoadmapAuthor would either wrongly refuse every legitimately
+ * signed write (if this handler kept requiring project_key) or wrongly
+ * accept an operator-signed write with no verifiable project (if it did
+ * not) -- neither is a fix. Keeping the two resolvers separate is also what
+ * keeps tests/broker-roadmap-author-auth.test.ts's DECK_WRITE_ROUTES parity
+ * check green without adding an exemption to it: that check enumerates
+ * resolveRoadmapAuthor's call sites specifically, and this route is
+ * deliberately not one of them -- an exemption list fails OPEN at the next
+ * route, which is exactly what this card exists to stop doing.
+ *
+ * Card 3781b033, lot 2: the DECISION lives in shared/graph-draft-scope.ts
+ * (resolveProvenGraphDraftPeer, pure, DB-free) so it can be unit-tested in CI
+ * against a fake row source; this is the thin, database-backed injection --
+ * see that module's header for the "two proofs, not one" reasoning and for
+ * the exact ATTRIBUTION-vs-SCOPE boundary of what it closes.
+ */
+const graphDraftScopeDeps: GraphDraftScopeDeps = {
+  findPeerByInstanceToken(token: string) {
+    return db
+      .query("SELECT peer_id, project_key FROM peers WHERE instance_token = ?")
+      .get(token) as GraphDraftPeerRow | null;
+  },
+};
+
+// Card 3781b033: closes the ROUTE, not the FAMILY. handleGraphDraftList,
+// handleGraphDraftOpen and handleRoadmapList still trust their body's claims
+// unproven -- see card c92614ed for the type-level closure across the
+// family. This handler alone now derives project_key and from_peer from a
+// proven instance_token via resolveProvenGraphDraftPeer (shared/graph-draft-
+// scope.ts), instead of trusting the request body.
 function handleGraphDraftAdd(
   body: GraphDraftAddRequest
 ): GraphDraftAddResponse | { error: string; status: number } {
-  if (!body.project_key || typeof body.project_key !== "string") {
-    return { error: "project_key is required", status: 400 };
+  const peer = resolveProvenGraphDraftPeer(
+    graphDraftScopeDeps,
+    body,
+    "/graph-draft/add",
+    (message, meta) => log.warn(message, meta)
+  );
+  if (isGraphDraftAuthError(peer)) return peer;
+  if (!peer.projectKey) {
+    return {
+      error: "this peer has no project_key on record; re-register with one before filing a graph draft",
+      status: 401,
+    };
   }
   const payload = validateDraftPayload(body);
   if ("error" in payload) return { error: payload.error, status: 400 };
   const draft: GraphDraft = {
     id: randomUUID(),
-    project_key: body.project_key,
-    // Named, not fixed (card ad6aa6ed review, out of that card's scope):
-    // same class as the `by`/`locked_by` author-identity fields
-    // normalizeAuthorIdentity() closes for the roadmap table -- this one is
-    // a DIFFERENT table (graph_drafts) and goes straight from the caller's
-    // claim to storage/display with no resolveRoadmapAuthor-equivalent, no
-    // lowercase-fold, no charset check. `from_peer: 'deck'` claimed here
-    // would render on the Deck side under that identity, unproven.
-    from_peer: typeof body.by === "string" ? body.by.slice(0, 128) : "",
+    project_key: peer.projectKey,
+    from_peer: peer.peerId,
     title: payload.title,
     prompt: payload.prompt,
     status: "pending",

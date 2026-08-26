@@ -15,10 +15,10 @@ beforeAll(async () => {
 });
 afterAll(async () => { await stopBroker(broker); });
 
-async function register(host: string, cwd: string) {
+async function register(host: string, cwd: string, projectKey: string | null = null) {
   return post<{ peer_id: string; instance_token: string }>(`${broker.url}/register`, {
     pid: livePid(), cwd, git_root: null, tty: null, summary: "", host, client_pid: 1,
-    project_key: null, group_id: "default", group_secret_hash: null,
+    project_key: projectKey, group_id: "default", group_secret_hash: null,
   });
 }
 
@@ -108,11 +108,14 @@ test("purge ne touche PAS les messages delivered=1 meme s'ils sont anciens", asy
 });
 
 test("purge des graph drafts : opened au-dela du TTL supprime, pending jamais", async () => {
+  // Card 3781b033: /graph-draft/add derives project_key/by from a proven
+  // instance_token now, not from the body -- register a real peer first.
+  const author = await register("httl-graph", "/ttl-graph", "github.com/vocsap/ttl-test");
   // Deux drafts via l'API, backdates directement en SQLite (comme les messages).
   const mk = async (title: string) => {
     const res = await post<{ draft: { id: string } }>(`${broker.url}/graph-draft/add`, {
-      project_key: "github.com/vocsap/ttl-test",
-      by: "coder-1",
+      instance_token: author.body.instance_token,
+      by: author.body.peer_id,
       title,
       prompt: "p",
     });
