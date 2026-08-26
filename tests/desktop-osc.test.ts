@@ -174,8 +174,8 @@ test("a never-terminated OSC sequence stops accumulating past the cap and does n
 
 test("after a capped sequence is finally terminated, the NEXT real OSC sequence is parsed normally (not swallowed)", () => {
   const p = createOscParser();
-  p.feed(`${ESC}]0;${"x".repeat(20_000)}`); // never terminated here
-  p.feed(BEL); // terminates and drops the capped one
+  p.feed(`${ESC}]0;${"x".repeat(20_000)}`); // never terminated here -- abandons to 'idle' as soon as the cap is exceeded
+  p.feed(BEL); // arrives in 'idle' now -- a no-op, nothing left to terminate
   const snap = p.feed(osc("0", "after the cap"));
   expect(snap.title).toBe("after the cap");
 });
@@ -186,6 +186,62 @@ test("feeding a capped sequence's overflow across MANY small chunks still bounds
   for (let i = 0; i < 50; i++) p.feed("x".repeat(1000)); // 50,000 chars total, well over the cap
   const snap = p.feed(BEL);
   expect(snap.title).toBeNull();
+});
+
+// Review round 2 (independent mutation review, 2026-08-26): the cap can
+// also be exceeded from 'in-osc-esc-seen' -- a held-back, not-yet-decided
+// ESC that turns out NOT to be a real ST is appended to buf via
+// appendAndCheckCap(ESC), which can itself push buf past OSC_MAX_LEN. buf
+// reaches exactly OSC_MAX_LEN (4096: "0;" + 4094 'x's) in the first feed(),
+// leaving a trailing ESC held pending; the SECOND feed()'s first character
+// (an ordinary 'A', not '\\') is what triggers appendAndCheckCap(ESC) to
+// overflow. Caught a real, previously-uncovered mutant:
+// `} else if ((appendAndCheckCap(ESC), true)) {` (return value ignored,
+// always re-enters 'in-osc') -- measured RED against that exact mutant,
+// GREEN against the real code (see PR/commit report for the exact output).
+test("cap overflow triggered from 'in-osc-esc-seen' (a pending held-back ESC pushes buf past the cap) abandons to idle -- the next well-formed OSC sequence is parsed normally, not merged with the abandoned one's bytes", () => {
+  const p = createOscParser();
+  p.feed(`${ESC}]0;${"x".repeat(4094)}${ESC}`); // buf = "0;" + 4094 x's = exactly 4096 (at, not over, the cap); trailing ESC held pending
+  const snap = p.feed(`A${osc("0", "after")}`); // 'A' triggers the pending-ESC append, overflowing buf by one
+  expect(snap.title).toBe("after");
+});
+
+// Review round 2: a deliberate, now-documented tradeoff (see OSC_MAX_LEN's
+// own doc comment) -- resuming 'idle' immediately on abandon means a
+// well-formed OSC sequence EMBEDDED inside the abandoned over-length
+// payload is parsed fresh and its payload APPLIED, not discarded along
+// with the rest of the hostile/oversized payload. This test both PINS that
+// behavior (a future change to it must be a conscious edit here) and
+// documents it as intentional, same purpose as safe-strip.ts's own
+// abandon-posture tests.
+test("a well-formed OSC sequence embedded inside an abandoned over-length payload is applied, not discarded (documented tradeoff, same posture as safe-strip.ts)", () => {
+  const p = createOscParser();
+  const snap = p.feed(`${ESC}]0;${"y".repeat(9000)}${osc("0", "EVIL")}`);
+  expect(snap.title).toBe("EVIL");
+});
+
+// Card 5b324e11 (roadmap): unlike safe-strip.ts's CSI/OSC abandon branches
+// (card 1aa69066 review round 3, blocker T2), osc.ts's cap-overflow handling
+// only set a `capped` flag and left `mode` stuck in 'in-osc'/'in-osc-esc-seen'
+// -- so a wholly separate, well-formed OSC sequence arriving with NO explicit
+// terminator ever sent for the abandoned head got consumed as if it were
+// still part of that head's search for a terminator, and its own terminator
+// then failed to apply (capped was still true). Behavioural probe, not a
+// text-scan: feeds the real exported createOscParser(), requires the real
+// title to come through.
+test("a never-terminated, over-cap OSC head does NOT swallow the next well-formed OSC sequence that follows with no terminator sent for the abandoned one", () => {
+  const p = createOscParser();
+  p.feed(`${ESC}]0;${"x".repeat(20_000)}`); // never terminated, well past OSC_MAX_LEN
+  // No BEL/ST sent for the abandoned head -- straight into a brand-new,
+  // complete, well-formed OSC sequence in the very next feed() call.
+  const snap = p.feed(osc("0", "real title"));
+  expect(snap.title).toBe("real title");
+});
+
+test("the 8-bit ST (0x9C single byte) terminates an OSC sequence in osc.ts exactly like BEL", () => {
+  const p = createOscParser();
+  const snap = p.feed(osc("0", "st8-terminated", String.fromCharCode(0x9c)));
+  expect(snap.title).toBe("st8-terminated");
 });
 
 // ----- 5. No shared state between two concurrent sessions -----------------
