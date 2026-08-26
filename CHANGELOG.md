@@ -1,5 +1,47 @@
 # Changelog
 
+## desktop -- le nettoyage ANSI de plusieurs detecteurs ne couvrait que la famille CSI, la charge OSC survivait en texte visible dans trois detecteurs vivants
+
+Fichiers : `desktop/src/main/detect/osc.ts` (nouveau), `desktop/src/main/detect/safe-strip.ts` (nouveau), `desktop/src/main/attention.ts`, `desktop/src/main/quota.ts`, `desktop/src/main/startup-ack.ts`, `desktop/src/main/magic-compact.ts`, `desktop/src/main/session-service.ts`, `desktop/src/main/thinking.ts`, `docs/DESIGN-NOTIFY-EVENTS.md`, `tests/desktop-osc.test.ts`, `tests/desktop-osc-perf.test.ts`, `tests/desktop-safe-strip.test.ts`, `tests/desktop-attention.test.ts`, `tests/desktop-quota.test.ts`, `tests/desktop-quota-gate.test.ts`, `tests/desktop-startup-ack.test.ts`, `tests/desktop-magic-compact.test.ts`. Carte `1aa69066`.
+
+**Un module pur extrait desormais les sequences OSC du flux pseudo-terminal (titre, progression, notifications 777), avec un parseur incremental a etat de continuation, une instance par session, et un plafond de longueur.** La sortie est un quadruplet et non un triplet : les notifications 777 y figurent, sans elles la carte `f8082208` restait bloquee et il aurait fallu rouvrir le parseur.
+
+**Le defaut d'origine : le nettoyage ANSI de plusieurs detecteurs ne couvrait que la famille CSI, la charge OSC survivait donc dans leur texte matche.** Le balayage a trouve trois detecteurs vivants concernes la ou la carte n'en nommait que deux, plus un quatrieme consommateur hors du domaine de la sonde dont le propre nettoyage laissait la charge OSC en texte visible. Faux positif de production epingle par un test : une notification OSC contenant litteralement le libelle de limite declenchait le detecteur de quota.
+
+**Second module, `safe-strip.ts` : il retient en etat interne les octets d'une sequence non resolue,** parce que re-nettoyer un buffer accumule ne pouvait rien changer au premier morceau, le terminateur n'arrivant qu'au suivant. Sans lui, une sequence fragmentee produisait un faux clear qui effacait un episode d'attente reel et desarmait la reprise automatique du quota.
+
+**Trois defauts trouves par revue par mutation et corriges, chacun mesure.** La regex combinee etait quadratique sur le chemin chaud du process principal : 2,56 ms par appel a 4096 caracteres contre 0,0005 ms pour la forme d'origine, facteur d'environ 5000 sur entree hostile, et elle tournait a chaque morceau du flux. Ce n'est pas la borne de longueur qui protege, c'est l'exclusion du caractere d'echappement dans la classe -- la meme regex non bornee mais avec l'echappement exclu est plus rapide que la version bornee, et une version bornee sans cette exclusion est pire que le defaut d'origine. Le mecanisme central du lot n'etait couvert par aucune sonde : le retirer laissait la suite entierement verte. Une tete de sequence jamais resolue faisait avaler definitivement le reste du flux, ce qui bloquait un episode de quota pour la session entiere.
+
+**La sonde de couverture a traverse trois formes successives, les deux premieres mesurees fail-open.** Un scan negatif cherchant un motif connu, puis une preuve positive a deux marqueurs decouples qu'un simple bloc de commentaire suffisait a satisfaire. La forme livree est comportementale : elle donne une vraie sequence a la vraie fonction et exige que la charge disparaisse et que le texte ordinaire survive. Un consommateur nouvellement decouvert sans adaptateur fait echouer la suite avec un message nomme, jamais saute en silence.
+
+**Ce qui reste ouvert part en cartes.** La decouverte est ancree sur une forme d'appel et rate deja un consommateur vivant present dans l'arbre, et l'adaptateur prouve l'aide exportee et non le chemin de production. Cartes `d1b5f612` et `5b324e11`.
+
+**Une clause fausse de `docs/DESIGN-NOTIFY-EVENTS.md` est corrigee au passage** : elle affirmait qu'un handler ne rappelait jamais la diffusion, ce que le code contredit.
+
+Etat : 124 tests passants sur les huit fichiers du lot, plus les corrections de sonde.
+
+## core -- l'outil MCP wait_for_message remplace la scrutation check_messages, et son cablage a la resolution d'endpoint etait entierement non garde
+
+Fichiers : `server.ts`, `shared/wait-for-message.ts` (nouveau), `tests/wait-for-message-logic.test.ts` (nouveau), `TESTING.md`. Carte `a21f1303`.
+
+**Un outil MCP bloquant `wait_for_message` remplace la boucle de scrutation `check_messages`, dont chaque tour coutait un tour d'inference a contexte complet.** Aucun transport neuf : les deux chemins d'arrivee, la trame WebSocket et le repli par scrutation, existaient deja.
+
+**Le plafond est a 115 secondes, et la raison a ecrire est celle-ci : le seuil qui mord en premier n'est pas le delai d'outil ni le delai d'inactivite, c'est le basculement automatique en tache de fond a 120 secondes.** Au-dela, l'appel rend un identifiant de tache au lieu de resoudre ; un plafond superieur aurait livre un outil dont le contrat depend du mode d'execution.
+
+**Un defaut fonctionnel trouve par audit : la lecture d'ouverture ne filtrait pas les messages deja notifies,** donc l'outil pouvait resoudre instantanement avec un vieux message, precisement dans son cas nominal, un agent qui vient d'ecrire a un pair et attend la reponse. Corrige.
+
+**Audit d'acces : aucune fuite.** La boite est celle de l'appelant seul, meme filtre et meme requete que `check_messages`, l'argument de filtrage n'etant qu'un selecteur interne et jamais une autorisation.
+
+**Le point de conception a retenir, et c'est la lecon du lot : le module pur etait solidement teste alors que son cablage ne l'etait pas du tout.** Deux rounds de revue par mutation ont mesure sept mutations du cablage toutes vertes, puis douze sur treize encore vertes apres une premiere extraction -- l'extraction avait deplace le trou avec la frontiere. La reponse retenue n'a pas ete d'ajouter des scans de source mais de faire descendre le cablage lui-meme dans le pur, avec ses dependances injectees. Resultat mesure : neuf mutations sur dix rougissent desormais dans le module pur, dont les trois defauts bloquants precedents, et l'expiration comme l'annulation sont passees de prouvees par simulation a prouvees par execution. Corollaire retenu comme lecon transposable, mesure deux fois dans la journee sur ce lot et sur celui des detecteurs OSC ci-dessus : extraire une logique dans un module pur rend son site d'appel invisible aux tests, la couverture du corps extrait montant pendant que celle de la decision tombe a zero -- et quand deux sites d'appel d'un meme module portent des disciplines differentes, l'exception est le bug.
+
+**Ce qui reste assume, sans euphemisme : 21 mutations de cablage sur 23 restent non gardees dans `server.ts`,** pour une raison structurelle, le fichier execute son entree a l'import donc aucun test ne peut l'importer. Carte `265dc463`. Une garde a ete ajoutee sur le point le plus couteux, le choix de l'endpoint : un seul caractere de difference transformait l'outil non consommant en consommateur, et une attente qui expire aurait alors detruit les messages qu'elle venait de lire.
+
+**Un trou pre-existant, decouvert au passage et non corrige ici, part en carte `74c8520d`.**
+
+**Un paragraphe de `TESTING.md` est corrige** : il decrivait encore l'ancienne liste blanche de collecte CI alors que l'arbre porte une liste noire.
+
+Etat : 58 tests passants.
+
 ## broker/ci -- un commentaire perime avait a lui seul fabrique une carte entiere sur une premisse fausse, et une garde neuve epingle le typecheck CI qu'un swallow pouvait rendre decoratif
 
 Fichiers : `broker.ts`, `tests/broker-roadmap-author-auth.test.ts`, `tests/desktop-ci-typecheck-coverage.test.ts`, `tests/desktop-ci-glob-coverage.test.ts`, `tests/desktop-commit-closure-check.test.ts`, `docs/DESIGN-HERDR-ADOPTION.md`. Cartes `da94b508`, `9ef6f513`, `7f92d1ea`, `1aa69066`.
