@@ -5,8 +5,17 @@
 // runs BEFORE mock.module is ever called, but avoided on the success path
 // too so this file never has an opinion on what other test files see).
 import { expect, test } from "bun:test";
-import { findDirectStoreMocks, missingStoreKeys, mockStore, storeMockStubs } from "./_store-mock";
-import { listTestFiles } from "../scripts/pure-module-partition.ts";
+import { readdirSync, readFileSync } from "node:fs";
+import {
+  countStoreMockSpecifiers,
+  findDirectStoreMocks,
+  listTestsDirFiles,
+  missingStoreKeys,
+  mockStore,
+  storeMockStubs
+} from "./_store-mock";
+import { TESTS_DIR } from "../scripts/pure-module-partition.ts";
+import { join } from "node:path";
 
 // The real value-export names of store.ts as of this writing (errorText,
 // inboxPendingCount, inboxBadgeCount, inboxAwaitsAction, useDeck). Not
@@ -98,18 +107,45 @@ test("findDirectStoreMocks: canonicalizes paths instead of comparing text -- a n
   );
 });
 
-test("findDirectStoreMocks: the scan that feeds it sees the real suite (floor, not an exact count)", () => {
-  expect(listTestFiles().length).toBeGreaterThan(100);
+test("listTestsDirFiles: matches an independent readdirSync scan, not a narrowed copy of it", () => {
+  // Reviewer-measured (card a688748b, mutation M5): a floor check
+  // (`length > 100`) against the SAME function it is meant to guard stayed
+  // green when that function's own implementation was truncated to 101 of
+  // 218 -- a floor only catches an absurd value, not a plausible-looking
+  // narrowing. Recomputing the scan INDEPENDENTLY here and requiring EXACT
+  // equality (not just a floor) makes a narrowed production implementation
+  // mismatch immediately, whatever the narrowed count happens to be.
+  const independent = readdirSync(TESTS_DIR).filter((f) => f.endsWith(".ts"));
+  expect(independent.length).toBeGreaterThan(180); // sanity: still a real, non-trivial domain
+  expect(listTestsDirFiles().sort()).toEqual(independent.sort());
 });
 
 test("findDirectStoreMocks: no file in the real tests/ directory mocks store.ts outside _store-mock.ts", () => {
-  // This file itself is excluded from the result it asserts on: the
-  // synthetic fixtures a few tests up embed the literal text
+  // This file itself is excluded from THIS assertion: its synthetic
+  // fixtures a few tests up embed the literal text
   // `mock.module("../desktop/src/renderer/src/store.ts", ...)` as PLAIN
-  // STRING DATA (never executed, never a real call), and the scan below
-  // reads source TEXT -- it cannot distinguish that from a real violation
-  // in this one file. Same self-citation exemption
-  // tests/desktop-happy-dom-teardown.test.ts already applies to itself.
+  // STRING DATA (never executed, never a real call), and the scan reads
+  // source TEXT -- it cannot tell that apart from a real violation in this
+  // one file. That gap is not left open: the pinned-count self-check right
+  // below is a fail-closed check on exactly this file.
   const SELF = "store-mock-guard.test.ts";
   expect(findDirectStoreMocks().filter((file) => file !== SELF)).toEqual([]);
+});
+
+test("this file's own real source: exactly the store.ts-aimed specifiers its synthetic fixtures account for (fail-closed self-check)", () => {
+  // Stronger than exempting this file by NAME (which would stay blind to a
+  // real mock.module(store.ts, ...) call added directly to this file
+  // later): pins the COUNT of literal specifiers in this file's own on-disk
+  // text that resolve to store.ts, as if all written flat in tests/ (this
+  // file's real location) -- measured, not hand-derived, since resolution
+  // depends on which fixture strings happen to be text-adjacent to
+  // `mock.module(` and how each one's relative path resolves from THIS
+  // file's real position (not from whatever synthetic key a test above
+  // attaches it to). Adding a real, executable mock.module(store.ts, ...)
+  // call to this file -- or a new fixture literal that happens to resolve
+  // to store.ts from here -- moves this number, and this test is what makes
+  // that a visible signal instead of a silent pass-through.
+  const SELF = "store-mock-guard.test.ts";
+  const source = readFileSync(join(TESTS_DIR, SELF), "utf-8");
+  expect(countStoreMockSpecifiers(source, SELF)).toBe(6);
 });
