@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 
 import type { GroupId } from "./types.ts";
+import { createLogger, coreLogDir } from "./logger.ts";
 
 export type SummaryProvider = "auto" | "anthropic" | "openai-compat" | "none";
 
@@ -229,8 +230,18 @@ const FORCE_GROUP_NAME_ENV = "CLAUDE_PEERS_FORCE_GROUP_NAME";
  * Resolve the forced group secret, if any. Reads CLAUDE_PEERS_FORCE_GROUP (env)
  * first; if unset or empty, reads the trimmed content of the file pointed at by
  * CLAUDE_PEERS_FORCE_GROUP_FILE. Returns null when neither yields a non-empty
- * secret. A missing or unreadable file is logged to stderr and treated as unset
- * so resolution falls through to the normal group sources.
+ * secret. The three cases that fall through silently -- missing file, empty
+ * file, or a read exception (e.g. EPERM) -- are traced at warn/error level via
+ * shared/logger.ts's coreLogDir()-rooted "config.log". (The case where
+ * CLAUDE_PEERS_FORCE_GROUP_FILE itself is unset falls through to null with no
+ * trace at all: there is no path to read, so nothing to report.) This logger
+ * is created with mirrorToConsole: false and each traced branch pairs its
+ * log.warn/log.error call with its own explicit console.error -- the same
+ * split server.ts uses for its own fileLog -- because an untouched logger's
+ * console mirror would also carry a future log.info onto stdout, which
+ * carries the MCP stdio protocol for stdio-mode callers. A session landing in
+ * the wrong group leaves a record instead of a silent fallback to normal
+ * group resolution.
  */
 function resolveForcedGroupSecret(): string | null {
   const envSecret = process.env[FORCE_GROUP_ENV];
@@ -238,14 +249,30 @@ function resolveForcedGroupSecret(): string | null {
 
   const filePath = process.env[FORCE_GROUP_FILE_ENV];
   if (filePath && filePath.length > 0) {
+    const log = createLogger({ dir: coreLogDir(), name: "config", mirrorToConsole: false }).child(
+      "config"
+    );
     try {
-      if (existsSync(filePath)) {
-        const content = readFileSync(filePath, "utf-8").trim();
-        if (content.length > 0) return content;
+      if (!existsSync(filePath)) {
+        const msg = `${FORCE_GROUP_FILE_ENV} points at a missing file, falling through to normal group resolution: ${filePath}`;
+        console.error(`[claude-peers] ${msg}`);
+        log.warn(msg);
+        return null;
       }
+      const content = readFileSync(filePath, "utf-8").trim();
+      if (content.length === 0) {
+        const msg = `${FORCE_GROUP_FILE_ENV} file is empty, falling through to normal group resolution: ${filePath}`;
+        console.error(`[claude-peers] ${msg}`);
+        log.warn(msg);
+        return null;
+      }
+      return content;
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.error(`[claude-peers] failed to read ${FORCE_GROUP_FILE_ENV} ${filePath}: ${msg}`);
+      const errMsg = e instanceof Error ? e.message : String(e);
+      const msg = `failed to read ${FORCE_GROUP_FILE_ENV} ${filePath}: ${errMsg}`;
+      console.error(`[claude-peers] ${msg}`);
+      log.error(msg);
+      return null;
     }
   }
   return null;

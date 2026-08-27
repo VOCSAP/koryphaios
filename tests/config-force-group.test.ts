@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -27,10 +27,14 @@ const ENV_KEYS = [
   "CLAUDE_PEERS_FORCE_GROUP_FILE",
   "CLAUDE_PEERS_FORCE_GROUP_NAME",
   "CLAUDE_PEERS_GROUP",
+  "CLAUDE_PEERS_LOG_DIR",
 ] as const;
 
 let envSnapshot: Record<string, string | undefined> = {};
 let tmpDir: string;
+// Fresh per-test log dir so the trace tests below never see a line left by
+// a previous test (shared/logger.ts appends, it never truncates).
+let logDir: string;
 
 beforeEach(() => {
   envSnapshot = {};
@@ -39,6 +43,8 @@ beforeEach(() => {
     delete process.env[k];
   }
   tmpDir = mkdtempSync(join(tmpdir(), "cp-force-"));
+  logDir = join(tmpDir, "logs");
+  process.env.CLAUDE_PEERS_LOG_DIR = logDir;
 });
 
 afterEach(() => {
@@ -173,6 +179,82 @@ test("missing forced file falls through to normal resolution", () => {
 
   // Default_group wins because the forced file is unreadable.
   expect(resolved.name).toBe("team");
+});
+
+// Card lot B: the missing-file and empty-file branches used to fall back to
+// null in total silence (only the exception/EPERM branch logged). These three
+// tests pin the trace shared/logger.ts now writes to <CLAUDE_PEERS_LOG_DIR>/config.log,
+// including the negative control that the valid-file path stays silent.
+function configLogPath(): string {
+  return join(logDir, "config.log");
+}
+
+test("missing forced file leaves a warn trace in config.log", () => {
+  const missing = join(tmpDir, "does-not-exist.txt");
+  process.env.CLAUDE_PEERS_FORCE_GROUP_FILE = missing;
+
+  const resolved = resolveGroup(tmpDir, null, { groups: {}, default_group: "team" });
+
+  expect(existsSync(configLogPath())).toBe(true);
+  const content = readFileSync(configLogPath(), "utf-8");
+  expect(content).toContain("WARN");
+  expect(content).toContain("missing file");
+  expect(content).toContain(missing);
+  // Pin the return-value contract alongside the trace: default_group wins,
+  // proving the missing-file branch actually returned null (not some truthy
+  // placeholder) up through resolveForcedGroupSecret / resolveGroup.
+  expect(resolved.name).toBe("team");
+});
+
+test("empty forced file leaves a warn trace in config.log", () => {
+  const passFile = join(tmpDir, "empty.txt");
+  writeFileSync(passFile, "   \n", "utf-8"); // trims to empty
+  process.env.CLAUDE_PEERS_FORCE_GROUP_FILE = passFile;
+
+  const resolved = resolveGroup(tmpDir, null, { groups: {}, default_group: "team" });
+
+  expect(existsSync(configLogPath())).toBe(true);
+  const content = readFileSync(configLogPath(), "utf-8");
+  expect(content).toContain("WARN");
+  expect(content).toContain("is empty");
+  expect(content).toContain(passFile);
+  // Pin the return-value contract: default_group ("team") must win, which
+  // only holds if the empty-file branch returned null rather than the
+  // (empty-string, non-null) `content` it just computed. Returning `content`
+  // there would make every empty-file session land in the same deterministic
+  // forced group across machines, silently.
+  expect(resolved.name).toBe("team");
+});
+
+test("unreadable forced file (directory) leaves an error trace in config.log", () => {
+  const dirPath = join(tmpDir, "not-a-file");
+  mkdirSync(dirPath);
+  process.env.CLAUDE_PEERS_FORCE_GROUP_FILE = dirPath;
+
+  const resolved = resolveGroup(tmpDir, null, { groups: {}, default_group: "team" });
+
+  expect(existsSync(configLogPath())).toBe(true);
+  const content = readFileSync(configLogPath(), "utf-8");
+  expect(content).toContain("ERROR");
+  expect(content).toContain("failed to read");
+  expect(content).toContain(dirPath);
+  // Same return-value contract as the other two traced branches: the read
+  // exception must fall through to null, not leak a truthy value.
+  expect(resolved.name).toBe("team");
+});
+
+test("valid forced file produces no trace (negative control)", () => {
+  const passFile = join(tmpDir, "pass.txt");
+  writeFileSync(passFile, FORCED, "utf-8");
+  process.env.CLAUDE_PEERS_FORCE_GROUP_FILE = passFile;
+
+  const resolved = resolveGroup(tmpDir, null, { groups: {}, default_group: null });
+
+  expect(resolved.group_id).toBe(computeGroupId(FORCED));
+  // No trace FILE created: the logger is lazy (ensureDir only runs on a
+  // write), so the nominal path must not touch the filesystem. This only
+  // asserts the file, not the containing log dir.
+  expect(existsSync(configLogPath())).toBe(false);
 });
 
 test("file content is trimmed: trailing newline equals the bare env passphrase", () => {
