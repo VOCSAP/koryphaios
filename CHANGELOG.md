@@ -1,5 +1,35 @@
 # Changelog
 
+## core -- une carte roadmap inactive ne peut plus etre mise en file de dispatch, sur aucun chemin d'ecriture
+
+Fichiers : `broker.ts`, `tests/broker-roadmap-inactive.test.ts`, `tests/broker-roadmap-reorder.test.ts`. Carte `c33a5968`.
+
+**Le garde `refusesInactiveClaim` ne verifiait que `status`/`locked`, et une ecriture qui ne posait QUE `queue` sur une carte `inactive` passait sans etre refusee.** Sa signature ne prend meme pas `queue` en parametre, et une carte en file reste dispatchable independamment de son flag `inactive` (`queuedItems`/`wavesOf` cote desktop ne le filtrent pas). Un agent pouvait donc lever son propre blocage par cette seule route, exactement ce que la carte `c33a5968` interdit -- une route qui n'existait pas encore quand ce garde a ete ecrit.
+
+**Nouveau garde `refusesInactiveQueue`, en forme DELTA et non absolue, comme `refusesInactiveClaim` avant lui.** Seule une ecriture qui DEPLACE `queue` vers une nouvelle valeur est refusee. Un garde absolu aurait refuse pour toujours un client qui re-envoie sa position de file inchangee a chaque sauvegarde, sur un edit de champ sans rapport -- le meme defaut que `refusesInactiveClaim` corrigeait deja pour `status`/`locked`. Defiler (`queue: null`) n'est jamais refuse : sens sur, au meme titre que liberer un verrou n'est pas le revendiquer. Lever `inactive` et enfiler dans le meme appel reste refuse.
+
+**Ferme sur `/roadmap/upsert` ET sur `/roadmap/reorder`, qui refuse desormais tout le lot si un seul id est `inactive` (403, une porte de permission, pas une validation d'etat terminal).** Le commentaire d'en-tete de `handleRoadmapReorder`, qui declarait cette exemption deliberee, est devenu faux et a ete reecrit.
+
+**Ce qui justifiait l'urgence : `/roadmap/reorder` accepte la meme largeur d'appelants que `/roadmap/upsert`.** Tout peer authentifie pouvait deja atteindre cette route en HTTP direct, sans passer par le moindre outil MCP -- ce n'etait pas un trou futur.
+
+**Non ferme, a suivre : `handleRoadmapImport` porte le meme angle mort.** Carte `a5617acf`.
+
+## core -- le rang de file de dispatch (`queue`) est expose aux agents via `roadmap_update`
+
+Fichiers : `server.ts`, `shared/types.ts`, `tests/mcp-roadmap-ack.test.ts`, `tests/server-roadmap-queue-order.test.ts`. Carte `7defe381`, lot 2a.
+
+**L'outil MCP `roadmap_update` accepte desormais un argument `queue` : un entier enfile la carte, `null` la defile.** Un team-lead pouvait deja creer et modifier une carte mais pas la mettre en file, alors que le broker savait deja le faire.
+
+**Zero nouvel outil, deliberement.** Le broker portait deja le champ (`RoadmapUpsertRequest.queue`, `handleRoadmapUpsert`) ; il ne manquait que le transport, la pick-list de champs du forward cote `server.ts`, qui echouait proprement FERME.
+
+**Poser un rang deja pris cree une VAGUE, deux cartes dispatchees ensemble -- et ce n'est plus une deduction.** Le test assert desormais le texte litteral rendu par `roadmap_list({ order: "queue" })`.
+
+**Ce que le lot ne fait pas : poser un rang ne DECALE pas les autres.** Le reordonnancement GLOBAL par un agent reste non livre et depend de la carte `f12e34f1`, dont la route `/roadmap/reorder` aplatit silencieusement les vagues. Le chemin livre ici passe par l'upsert et n'appelle jamais cette route : il en est immunise par construction.
+
+**Arbitrage operateur du 27 aout 2026 : aucune garde d'autorite cote broker.** Motif : dans une session hors Kory, un agent ne s'enregistre pas comme team-lead, et rien ne doit l'empecher de creer des cartes ni le workflow pour les traiter. Une restriction eventuelle vivra cote Kory. Carte `1c4b1026` en `idea`.
+
+**La description du champ tient en 39 caracteres, deliberement : la surface MCP est relue a chaque tour, dans chaque session du groupe.** Le budget (`tests/peer-mcp-surface-budget.test.ts`) termine a 18992 pour un plafond de 19000, marge de HUIT caracteres -- carte `4658b614` pour la recuperer. Le prochain champ expose ajoute a cette meme surface fera rougir la porte.
+
 ## desktop -- le role d'une session voyage desormais dans les templates, et un template a plusieurs leads n'est plus repare en silence
 
 Fichiers : `desktop/src/shared/template.ts`, `desktop/src/main/template-store.ts`, `desktop/src/main/ipc.ts`, `desktop/src/renderer/src/components/TemplateComposer.tsx`, `tests/desktop-template.test.ts`, `tests/desktop-template-store.test.ts`, `tests/desktop-templates-composer-draft-reset.test.ts`, `tests/desktop-templates-composer-role.test.ts`. Cartes `0b9e0b07` et `240d6efd`, un meme commit : le bloc de tests de la premiere appelle une forme (`.template`) qui n'existe que parce que la seconde a elargi le retour de `parseTemplate`.
