@@ -816,6 +816,16 @@ const TOOLS = [
           type: "boolean" as const,
           description: "Usually implicit. false releases your lock while staying in_progress, true re-claims.",
         },
+        // MCP SURFACE BUDGET (tests/peer-mcp-surface-budget.test.ts): the WHY
+        // lives here, never in the exposed description below, which is
+        // reread every turn of every session in the group. Card 7defe381 lot
+        // 2a: a wave is a run of cards sharing one queue rank, dispatched
+        // together (shared/workflow.ts wavesOf); posing a rank via this arg
+        // only sets THIS card's own rank and never reorders/renumbers the
+        // rest of the queue (that global-reorder path is /roadmap/reorder,
+        // deliberately not exposed here -- its known wave-flattening defect,
+        // card f12e34f1, does not apply to this single-card write).
+        queue: { type: "number" as const, description: "Rank; null dequeues; ties share a wave." },
       },
       required: ["id"],
     },
@@ -1794,6 +1804,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           directive: a.directive,
           target_peer_ids: a.target_peer_ids,
           locked: typeof a.locked === "boolean" ? a.locked : undefined,
+          queue: a.queue,
         });
         return {
           content: [

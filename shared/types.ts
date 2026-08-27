@@ -624,6 +624,7 @@ export type RoadmapUpsertAckField =
   | "status"
   | "directive"
   | "locked"
+  | "queue"
   | "tags"
   | "depends_on"
   | "target_peer_ids";
@@ -646,6 +647,7 @@ export const ROADMAP_UPSERT_ACK_FIELDS: Record<RoadmapUpsertAckField, RoadmapUps
   status: { category: "short", landed: (i) => i.status },
   directive: { category: "short", landed: (i) => i.directive },
   locked: { category: "short", landed: (i) => i.locked },
+  queue: { category: "short", landed: (i) => i.queue },
   tags: { category: "list", landed: (i) => i.tags },
   depends_on: { category: "list", landed: (i) => i.depends_on },
   target_peer_ids: { category: "list", landed: (i) => i.target_peer_ids },
@@ -678,6 +680,7 @@ export const ROADMAP_ADD_ACK_FIELDS: readonly RoadmapUpsertAckField[] = [
 export const ROADMAP_UPDATE_ACK_FIELDS: readonly RoadmapUpsertAckField[] = [
   ...ROADMAP_ADD_ACK_FIELDS,
   "locked",
+  "queue",
 ] as const;
 
 /**

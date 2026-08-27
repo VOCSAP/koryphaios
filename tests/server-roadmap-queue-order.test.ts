@@ -154,9 +154,11 @@ test("roadmap_list order:queue renders real dispatch order with waves, queue mar
   const fullB = await fullId(idB);
   const fullC = await fullId(idC);
 
-  // queue is a Deck-managed field (no MCP write surface per this card's own
-  // arbitration -- see roadmap card 7defe381's authority ruling) -- set it
-  // direct-broker, deck-signed, same pattern as the inactive-marker test.
+  // queue now HAS an MCP write surface (roadmap_update's `queue` arg, card
+  // 7defe381 lot 2a) -- this fixture predates that lot and still sets it
+  // direct-broker, deck-signed, same pattern as the inactive-marker test;
+  // that stays a legitimate second path (the Deck itself has no MCP tools),
+  // not the only one.
   const patchA = await post<ItemRes>(`${h.b.url}/roadmap/upsert`, deckAuthored({ id: fullA, queue: 2 }));
   expect(patchA.status).toBe(200);
   expect(patchA.body.item.queue).toBe(2);
@@ -189,6 +191,13 @@ test("roadmap_list order:queue renders real dispatch order with waves, queue mar
   expect(posC).toBeLessThan(posA);
   const waveHeaderBetweenBandC = queueText.slice(Math.min(posB, posC), Math.max(posB, posC)).includes("WAVE");
   expect(waveHeaderBetweenBandC).toBe(false);
+
+  // Literal rendered text, not just relative position: this is the exact
+  // promise roadmap_update's `queue` field description makes to an agent
+  // ("same rank as another card forms one wave, dispatched together") --
+  // measured here rather than assumed from reading wavesOf/formatRoadmapQueueOrder.
+  expect(queueText).toContain("WAVE 1 (2 cards, dispatched together):");
+  expect(queueText).toContain("WAVE 2 (1 card, dispatched together):");
 
   // D (never queued) must appear in the NOT QUEUED section, after the
   // dispatch queue section entirely.

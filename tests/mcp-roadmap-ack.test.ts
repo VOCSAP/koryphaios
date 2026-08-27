@@ -327,7 +327,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     expect(line).toContain("target_peer_ids -> 3 item(s)");
   }, 60_000);
 
-  test("roadmap_update's ack names all 14 fields in its domain, each with its own distinct value", async () => {
+  test("roadmap_update's ack names all 15 fields in its domain, each with its own distinct value", async () => {
     const h = await boot();
     const created = await callTool(h, "roadmap_add", { title: "base card for update coverage" });
     const id = ackText(created).match(/Roadmap item created: ([0-9a-f]{8})/)![1]!;
@@ -349,13 +349,14 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
       depends_on: ["33333333-3333-3333-3333-333333333333", "44444444-4444-4444-4444-444444444444"], // 2
       target_peer_ids: ["probe-upd-a", "probe-upd-b", "probe-upd-c"], // 3
       locked: true,
+      queue: 5,
     });
     expect(updated.result?.isError).toBeFalsy();
     const text = ackText(updated);
     const line = passedFieldsLine(text);
     expect(line).not.toBe("");
 
-    expect(ROADMAP_UPDATE_ACK_FIELDS.length).toBe(14);
+    expect(ROADMAP_UPDATE_ACK_FIELDS.length).toBe(15);
     for (const field of ROADMAP_UPDATE_ACK_FIELDS) {
       expect(line).toContain(field);
     }
@@ -371,6 +372,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     expect(line).toContain("status -> in_progress");
     expect(line).toContain("directive -> compact");
     expect(line).toContain("locked -> true");
+    expect(line).toContain("queue -> 5");
     expect(line).toContain("tags -> 1 item(s)");
     expect(line).toContain("depends_on -> 2 item(s)");
     expect(line).toContain("target_peer_ids -> 3 item(s)");
