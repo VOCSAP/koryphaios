@@ -12,8 +12,23 @@ export interface TestBroker {
   tmpDir: string;
 }
 
-// Each test file picks a port from a wide window so parallel suites don't collide.
-let nextPort = 17900 + Math.floor(Math.random() * 5000);
+// Ask the OS for a free ephemeral port instead of guessing inside a fixed
+// window (17900 + random(5000)). The old scheme let two concurrent test
+// runs draw the same port, so one run's broker answered health checks meant
+// for the other's -- the settle/liveness check below caught it, but only
+// after burning the SETTLE_MS budget on a doomed attempt. Binding with
+// port 0 lets the kernel hand out a currently-unused port; closing
+// immediately frees it for the broker we are about to spawn. A TOCTOU gap
+// remains between that close and the broker's own bind (another process
+// could grab the exact same port in between), but it is now the rare case
+// instead of the common one, and is still covered by the settle/liveness
+// check as a safety net.
+async function reserveEphemeralPort(): Promise<number> {
+  const probe = Bun.serve({ port: 0, fetch: () => new Response(null, { status: 404 }) });
+  const port = probe.port;
+  probe.stop(true);
+  return port;
+}
 
 export async function startBroker(
   envOverrides: Record<string, string> = {}
@@ -29,8 +44,13 @@ export async function startBroker(
     Object.entries(process.env).filter(([k]) => !k.startsWith("CLAUDE_PEERS_"))
   ) as Record<string, string>;
 
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const port = nextPort++;
+  // 20 attempts existed to burn through the random window's collisions.
+  // With an OS-reserved port the systematic collision is gone, so this now
+  // only needs to cover the residual TOCTOU race (rare) and genuine spawn
+  // failures (e.g. a transient exec error) -- 3 is enough headroom for
+  // that, without reintroducing multi-minute dead loops under contention.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const port = await reserveEphemeralPort();
     const proc = Bun.spawn(["bun", "broker.ts"], {
       env: {
         ...cleanEnv,
