@@ -64,6 +64,41 @@ and authoritative (extracted from the user-validated `main` styles).
    locale parity), and eyeball the affected view in both themes if you can
    launch the app.
 
+## Looking at a glyph you just drew
+
+The drawing LAWS are DESIGN.md §5 (rules 5 to 8: the three 13px failure modes,
+the shared-primitive fusion, the no-mirror two-state family, the paw-print
+trap). This is the procedure for actually seeing them, which no stylesheet audit
+and no test can replace.
+
+1. **Judge at real size first, then zoomed.** Private Electron instance on its
+   OWN CDP port, never the operator's window:
+   `./node_modules/electron/dist/electron.exe . --user-data-dir=<temp>
+   --remote-debugging-port=<port>`. Then `Page.captureScreenshot` with
+   `clip: {x, y, width, height, scale: 8}` over the rail. A glyph approved only
+   at x8 has not been judged.
+2. **Capture stalls forever, with no error**, when the window stops producing
+   frames. `Page.bringToFront` alone is NOT enough: send
+   `Emulation.setDeviceMetricsOverride {width,height,deviceScaleFactor}`
+   immediately before the capture. That override CHANGES the viewport, so
+   re-measure every `getBoundingClientRect()` taken after it.
+3. **Measure the box after any glyph swap**: the rendered glyph must stay 13x13
+   and its `.icon-btn` 33x27, or a rail sum breaks. `--panel-rail-w` has ZERO
+   slack on the roadmap side, and its folded rule is `overflow: hidden`, so a
+   control one pixel too wide is CLIPPED in silence rather than pushed.
+4. **Both themes, both states.** A diptych pair is only proved by capturing
+   folded AND unfolded.
+5. **Kill it by PID**, resolved from the port you opened:
+   `netstat -ano | grep '127.0.0.1:<port>' | grep -i listening`, then
+   `taskkill //PID <pid> //T //F`. Never `taskkill //IM electron.exe` on a
+   shared checkout, or another agent's review instance dies with it. `//T` does
+   not reliably take PTY children: count stray `cmd.exe` before launching, or
+   you cannot tell your leftovers from a colleague's shell.
+
+Your renderer edit is NOT on anyone's screen until `npm run build` runs: the
+running Deck serves `app.asar`. Check `ls -la desktop/out/main/index.js` against
+your edit before believing a report of "no effect".
+
 ## Where things go
 
 - CSS rules: `styles.css`, inside the `/* ---------- Section */` matching the
