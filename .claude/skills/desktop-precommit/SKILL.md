@@ -49,6 +49,31 @@ bun test          # ~75 s, 480+ tests
   pushing — and make the regression test build the symlinked prefix itself, so
   it fails on every OS rather than only on the runner.
 
+- **The gate hook cuts BOTH ways: stage FIRST, then gate.**
+  `.claude/hooks/no-full-suite.sh` refuses a full `bun test` while the index is
+  empty, and opens as soon as a single file is staged. The consequence people
+  hit is the other one: **once the last lot is committed, the index is empty
+  again and the full suite becomes UNRUNNABLE**, by you and by any subagent. So
+  sequence the batch to gate against the FINAL tree -- hold the last lot staged
+  until every worker has reported, gate once, then commit them all. Staging is
+  explicit, by filename, never `git add -A` (a deliberate `.mcp.json` deletion
+  must stay out of the index).
+- **If commits land after your green gate anyway**, do not fake an index to
+  reopen the hook, and above all never stage a file you do not own: on a shared
+  checkout another session's uncommitted work would be handed to whoever runs
+  `git commit` with no pathspec next. The honest fallback is a TARGETED run of
+  the delta plus canaries, and saying that the full gate was not replayed:
+  ```bash
+  bun test $(git diff --name-only <gate-sha>..HEAD -- tests/ | tr '\n' ' ') \
+           tests/desktop-happy-dom-teardown.test.ts tests/server-stdin-eof.test.ts
+  ```
+  The two canaries are deliberate: one registers happy-dom, one spawns a broker.
+  A contamination of process globals only shows when both classes run together.
+- **Adding a test FILE? `tests/desktop-ci-glob-coverage.test.ts` belongs in the
+  measurement set.** A three-file targeted run misses it, and it is the guard
+  that decides whether the new file is collected by CI at all
+  (`TESTING.md`, "Cross-platform tests").
+
 ## 3. Smoke build (core entrypoints)
 
 ```bash
