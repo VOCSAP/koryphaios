@@ -16,6 +16,7 @@ import { hostname } from "node:os";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { loadConfig } from "./shared/config.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
+import { validateProjectKey } from "./shared/project-key.ts";
 import { loadOrCreateSecretKey, openSecret, sealSecret, secretHint } from "./shared/secret-box.ts";
 import { NotificationRegistry, type RegistryStore } from "./notify/registry.ts";
 import { TelegramChannel } from "./notify/telegram.ts";
@@ -1439,11 +1440,53 @@ function normalizeRole(raw: unknown): string | null {
   return trimmed;
 }
 
+// Card c92614ed lot L0: single normalization point for project_key at
+// register, same shape as normalizeRole above -- register must never fail
+// because of a malformed project_key (a session still needs to come up), so
+// an invalid value collapses to null (not stored) with a warn trace, exactly
+// like a malformed role collapses to null instead of erroring. Presence is
+// checked here (not just in validateProjectKey, whose contract requires an
+// already-non-null string): a legacy/no-remote peer with no project_key at
+// all is a valid state and must pass through as null untouched.
+//
+// The counterpart this collapse carries (MAJOR 1, team-lead review): a peer
+// stored with project_key=NULL is a live owner of ZERO roadmap cards as far
+// as releaseStaleLocks is concerned (roadmap_items.project_key is NOT NULL,
+// compared via `IS`, so NULL never matches any row) -- its locks WILL be
+// swept as owner-gone on the next sweep, even while the peer keeps
+// heartbeating. This collapse trades "the session can still start" for "it
+// starts with no lock ownership", never the reverse; shared/project-key.ts's
+// resolveProjectKey guards the one LEGITIMATE trigger (an over-length remote
+// key) by falling back to a valid local:<hash> before this function ever
+// sees it, so what reaches here as genuinely invalid is a hostile/malformed
+// client, for whom losing lock ownership is the correct outcome.
+function normalizeIncomingProjectKey(
+  raw: unknown,
+  context: { host: string; client_pid: number }
+): string | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
+  const result = validateProjectKey(raw);
+  if (!result.ok) {
+    log.warn(`register: rejected invalid project_key, storing null instead`, {
+      reason: result.reason,
+      length: raw.length,
+      host: context.host,
+      client_pid: context.client_pid,
+    });
+    return null;
+  }
+  return raw;
+}
+
 function handleRegister(body: RegisterRequest): RegisterResponse | { error: string; status: number } {
   const groupId = body.group_id;
   const secretHash = body.group_secret_hash;
   const now = new Date().toISOString();
   const normalizedRole = normalizeRole(body.role);
+  const projectKey = normalizeIncomingProjectKey(body.project_key, {
+    host: body.host,
+    client_pid: body.client_pid,
+  });
 
   // 1) Group authentication / TOFU. /register is the one caller that also
   // PINS the secret on first sight, so it keeps its own existing/insert
@@ -1513,7 +1556,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
         now,
         body.host,
         body.client_pid,
-        body.project_key,
+        projectKey,
         body.claude_cli_pid ?? null,
         normalizedRole,
         existingPeer.instance_token
@@ -1551,7 +1594,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
         now,
         body.host,
         body.client_pid,
-        body.project_key,
+        projectKey,
         body.claude_cli_pid ?? null,
         normalizedRole
       );
@@ -1576,7 +1619,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
       now,
       body.host,
       body.client_pid,
-      body.project_key,
+      projectKey,
       body.claude_cli_pid ?? null,
       normalizedRole
     );
@@ -1601,7 +1644,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
     now,
     body.host,
     body.client_pid,
-    body.project_key,
+    projectKey,
     body.claude_cli_pid ?? null,
     normalizedRole
   );
@@ -3141,8 +3184,17 @@ function handleRoadmapUpsert(
   }
 
   // Create.
-  const projectKey = typeof body.project_key === "string" ? body.project_key.trim() : "";
-  if (!projectKey) return { error: "project_key is required", status: 400 };
+  const rawCreateProjectKey = typeof body.project_key === "string" ? body.project_key : "";
+  if (!rawCreateProjectKey) return { error: "project_key is required", status: 400 };
+  // Card c92614ed lot L0: a refusal, not the .trim() this replaces -- silently
+  // trimming surrounding whitespace off a caller-declared value would store a
+  // DIFFERENT key than the one the caller believes it used, the same
+  // scope-splitting risk this lot exists to close.
+  const createProjectKeyCheck = validateProjectKey(rawCreateProjectKey);
+  if (!createProjectKeyCheck.ok) {
+    return { error: `project_key is invalid (${createProjectKeyCheck.reason})`, status: 400 };
+  }
+  const projectKey = rawCreateProjectKey;
   const title = typeof body.title === "string" ? body.title.trim() : "";
   if (!title) return { error: "title is required", status: 400 };
   if (body.status === "archived") {
@@ -3326,9 +3378,17 @@ function handleRoadmapLockPark(
   if (author.operator_id === undefined) {
     return { error: "lock-park requires an operator-signed write", status: 403 };
   }
-  const projectKey =
-    typeof body.project_key === "string" && body.project_key.trim() ? body.project_key.trim() : "";
-  if (!projectKey) return { error: "project_key is required", status: 400 };
+  const rawLockParkProjectKey = typeof body.project_key === "string" ? body.project_key : "";
+  if (!rawLockParkProjectKey) return { error: "project_key is required", status: 400 };
+  // Card c92614ed lot L0 (MAJOR 3, team-lead review): this handler scopes an
+  // UPDATE, not a read filter -- a silent .trim() here would let the same
+  // caller-declared string be accepted here and refused at /roadmap/upsert,
+  // exactly the discipline gap this lot exists to close.
+  const lockParkProjectKeyCheck = validateProjectKey(rawLockParkProjectKey);
+  if (!lockParkProjectKeyCheck.ok) {
+    return { error: `project_key is invalid (${lockParkProjectKeyCheck.reason})`, status: 400 };
+  }
+  const projectKey = rawLockParkProjectKey;
   if (!Array.isArray(body.peer_ids) || body.peer_ids.length === 0) {
     return { error: "peer_ids must be a non-empty array", status: 400 };
   }
@@ -3432,9 +3492,15 @@ function handleRoadmapLockRelease(
   if (author.operator_id === undefined) {
     return { error: "lock-release requires an operator-signed write", status: 403 };
   }
-  const projectKey =
-    typeof body.project_key === "string" && body.project_key.trim() ? body.project_key.trim() : "";
-  if (!projectKey) return { error: "project_key is required", status: 400 };
+  const rawLockReleaseProjectKey = typeof body.project_key === "string" ? body.project_key : "";
+  if (!rawLockReleaseProjectKey) return { error: "project_key is required", status: 400 };
+  // Card c92614ed lot L0 (MAJOR 3, team-lead review): same refuse-not-trim
+  // discipline as lock-park above -- this handler scopes an UPDATE.
+  const lockReleaseProjectKeyCheck = validateProjectKey(rawLockReleaseProjectKey);
+  if (!lockReleaseProjectKeyCheck.ok) {
+    return { error: `project_key is invalid (${lockReleaseProjectKeyCheck.reason})`, status: 400 };
+  }
+  const projectKey = rawLockReleaseProjectKey;
   if (!Array.isArray(body.peer_ids) || body.peer_ids.length === 0) {
     return { error: "peer_ids must be a non-empty array", status: 400 };
   }
@@ -3660,9 +3726,16 @@ function handleRoadmapReorder(
   const author = resolveRoadmapAuthor(body, "/roadmap/reorder");
   if ("error" in author) return author;
   const by = author.by;
-  const projectKey =
-    typeof body.project_key === "string" && body.project_key.trim() ? body.project_key.trim() : "";
-  if (!projectKey) return { error: "project_key is required", status: 400 };
+  const rawReorderProjectKey = typeof body.project_key === "string" ? body.project_key : "";
+  if (!rawReorderProjectKey) return { error: "project_key is required", status: 400 };
+  // Card c92614ed lot L0 (MAJOR 3, team-lead review): this handler selects
+  // items by project_key and then writes their `queue` -- not a read-only
+  // filter -- so it gets the same refuse-not-trim discipline as create/import.
+  const reorderProjectKeyCheck = validateProjectKey(rawReorderProjectKey);
+  if (!reorderProjectKeyCheck.ok) {
+    return { error: `project_key is invalid (${reorderProjectKeyCheck.reason})`, status: 400 };
+  }
+  const projectKey = rawReorderProjectKey;
   const ids = cleanList(body.ids);
   if (ids === null) return { error: "ids must be an array of item ids", status: 400 };
   if (ids.length > ROADMAP_REORDER_MAX) {
@@ -3806,9 +3879,17 @@ function handleRoadmapImport(body: {
   instance_token?: unknown;
   force?: unknown;
 }): { imported: number; skipped: string[] } | { error: string; status: number } {
-  const projectKey =
-    typeof body.project_key === "string" && body.project_key.trim() ? body.project_key.trim() : "";
-  if (!projectKey) return { error: "project_key is required", status: 400 };
+  const rawImportProjectKey = typeof body.project_key === "string" ? body.project_key : "";
+  if (!rawImportProjectKey) return { error: "project_key is required", status: 400 };
+  // Card c92614ed lot L0: same refuse-don't-trim discipline as the create
+  // branch above -- one project_key value re-keys the WHOLE batch, so a
+  // silently-trimmed value here would move every imported item to a
+  // different key than the caller declared.
+  const importProjectKeyCheck = validateProjectKey(rawImportProjectKey);
+  if (!importProjectKeyCheck.ok) {
+    return { error: `project_key is invalid (${importProjectKeyCheck.reason})`, status: 400 };
+  }
+  const projectKey = rawImportProjectKey;
   if (!Array.isArray(body.items)) return { error: "items must be an array", status: 400 };
 
   // Card 40ddf1f5: same identity discipline as upsert/archive/reorder --
@@ -4677,7 +4758,7 @@ function handleApprovalAdd(
 
   // De-duplication: a tile can only be waiting on ONE thing at a time, so a
   // second pending approval for the same tile is always a double-raise -- the
-  // hook's `idle_prompt` and the Deck's attention detector both fire on the
+  // hook's `agent_needs_input` and the Deck's attention detector both fire on the
   // same screen. Returning the existing one keeps a single notification per
   // real event instead of ringing the operator's phone twice.
   // Both reads below go through `approvalWhere`, so they gained the project
@@ -5222,8 +5303,16 @@ function handleApprovalTokenMint(
   // token can never choose it later -- the same discipline `session_ref` has
   // always had. Required: a mint without it would produce a credential that
   // every `add` then refuses, which is a worse failure than refusing the mint.
-  const projectKey = typeof body.project_key === "string" ? body.project_key.slice(0, 256) : "";
-  if (!projectKey) return { error: "project_key is required", status: 400 };
+  const rawProjectKey = typeof body.project_key === "string" ? body.project_key : "";
+  if (!rawProjectKey) return { error: "project_key is required", status: 400 };
+  // Card c92614ed lot L0: a refusal, not the slice(0,256) this replaces -- a
+  // silently truncated value would mint a second, colliding project_key for
+  // the same project instead of surfacing the oversized/malformed input.
+  const projectKeyCheck = validateProjectKey(rawProjectKey);
+  if (!projectKeyCheck.ok) {
+    return { error: `project_key is invalid (${projectKeyCheck.reason})`, status: 400 };
+  }
+  const projectKey = rawProjectKey;
   const tokenId = deriveTokenId(sessionPublicKey);
   const now = new Date();
   const expiresAt = new Date(now.getTime() + ttlHours * 3600_000).toISOString();

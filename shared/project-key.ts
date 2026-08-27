@@ -92,6 +92,74 @@ export function normalizeRemoteUrl(url: string): string | null {
   return s.toLowerCase();
 }
 
+const PROJECT_KEY_MAX_LENGTH = 256;
+// C0 (U+0000-001F, covers NUL/\n/\r/\t), DEL (U+007F), C1 (U+0080-009F).
+const PROJECT_KEY_CONTROL_CHAR_RE = /[\u0000-\u001F\u007F\u0080-\u009F]/;
+
+export type ProjectKeyValidation =
+  | { ok: true }
+  | { ok: false; reason: "empty" | "too_long" | "surrounding_whitespace" | "control_char" };
+
+/**
+ * Card c92614ed lot L0: deny-list validation of a project_key VALUE already
+ * extracted from a request body -- control/framing characters and a length
+ * cap, never a charset allow-list. An ASCII allow-list was the first draft
+ * and is measurably wrong against this file's own contract: normalizeRemoteUrl
+ * legitimately produces non-ASCII (tests/project-key-normalize.test.ts's
+ * "non-ASCII owner/repo path lowercases via Unicode-aware JS toLowerCase(),
+ * never SQLite's ASCII-only LOWER()" pins "github.com/vocsap/été" as the
+ * correct output of an accented remote,
+ * since SQLite's LOWER() is ASCII-only and a downstream ASCII-fold would
+ * fork a third, colliding key), and its no-scheme/no-scp fallback branch
+ * (plain `s.toLowerCase()` above) legitimately produces backslashes, colons
+ * and internal spaces for local-path remotes (/srv/git/foo.git,
+ * C:\repos\foo, ../sibling). An allow-list derived from a sample already in
+ * the peers table can only under-represent this producer's real codomain,
+ * so it fails CLOSED on the next legitimate remote shape not yet seen --
+ * the deny-list below is derived from the producer's contract, never from
+ * what happens to be stored today.
+ *
+ * Rejects: C0 controls, DEL, C1 controls, leading/trailing whitespace, the
+ * empty string, and anything over 256 chars -- a REFUSAL, not a silent
+ * slice(): a truncated value quietly mints a second, colliding key for the
+ * same project instead of surfacing the oversized input to its caller.
+ *
+ * Deliberately does NOT reject: non-ASCII, backslash, internal whitespace,
+ * or colons (the `local:` prefix depends on the colon surviving). Homoglyphs
+ * (a Cyrillic 'o' indistinguishable from a legitimate IDN path) are NOT
+ * closed by this or any deny-list -- the absence of a rejection for them is
+ * not a claim that they are handled, and no other mechanism in this repo
+ * closes that vector for project_key today either (resolveRoadmapAuthor's
+ * `[a-z0-9:_-]` allow-list closes the homoglyph class for the AUTHOR field
+ * only, a different value with a different, much narrower legitimate
+ * codomain -- it is not evidence of coverage here).
+ *
+ * Presence is the caller's concern, not this function's: a project_key-less
+ * peer (e.g. a legacy row predating this field) is a valid state, so a
+ * caller must check for null/absent BEFORE calling this, then only call it
+ * once an actual string is in hand.
+ *
+ * WIRING CRITERION for every call site that takes a project_key from a
+ * request body (card c92614ed lot L0, MAJOR 3 + MAJOR 4, team-lead review):
+ * any handler that uses the value to WRITE -- storing it, or selecting the
+ * rows of an UPDATE -- must call this and refuse on rejection. Only a pure
+ * READ filter (`WHERE project_key = ?` with no downstream write) may skip
+ * it, and only because a malformed value there can do nothing but fail to
+ * match. This criterion lives here, not as an enumerated list at a call
+ * site, because a list is already stale the day it ships (measured: a
+ * decommented sweep at review time found an eighth `project_key`-reading
+ * site this file's own test comments had not named) and a list in a TEST
+ * file is invisible to whoever adds the next handler while working in
+ * broker.ts.
+ */
+export function validateProjectKey(value: string): ProjectKeyValidation {
+  if (value.length === 0) return { ok: false, reason: "empty" };
+  if (value.length > PROJECT_KEY_MAX_LENGTH) return { ok: false, reason: "too_long" };
+  if (value.trim() !== value) return { ok: false, reason: "surrounding_whitespace" };
+  if (PROJECT_KEY_CONTROL_CHAR_RE.test(value)) return { ok: false, reason: "control_char" };
+  return { ok: true };
+}
+
 /**
  * Resolve the project key a session uses to scope both peer registration
  * and roadmap cards. Always non-null: the normalized git remote when there
@@ -99,13 +167,26 @@ export function normalizeRemoteUrl(url: string): string | null {
  * when there is no git root either) so repos without a remote still get a
  * per-project, per-machine scope. Deterministic for the same inputs -- two
  * calls with the same (remoteProjectKey, gitRoot, cwd) always agree.
+ *
+ * Card c92614ed lot L0 (MAJOR 1, team-lead review): a remote-derived key has
+ * no length cap of its own -- normalizeRemoteUrl performs no truncation, so a
+ * deeply nested GitLab path or a long `file://` remote can legitimately
+ * normalize past PROJECT_KEY_MAX_LENGTH. Without this guard that value would
+ * reach /register, collapse to NULL there (broker.ts's
+ * normalizeIncomingProjectKey), and reopen the exact owner-gone regression
+ * card 69e5a3e0/6aa32af4 exists to prevent: a NULL peers.project_key never
+ * matches roadmap_items.project_key (a NOT NULL column, compared via
+ * releaseStaleLocks' `IS`), so a perfectly legitimate, actively-heartbeating
+ * session would have every one of its own locks swept as owner-gone.
+ * Falling back to the deterministic local:<hash> below keeps the key valid
+ * and the peer's own locks correctly attributed.
  */
 export function resolveProjectKey(
   remoteProjectKey: string | null,
   gitRoot: string | null,
   cwd: string
 ): string {
-  if (remoteProjectKey) return remoteProjectKey;
+  if (remoteProjectKey && remoteProjectKey.length <= PROJECT_KEY_MAX_LENGTH) return remoteProjectKey;
   const anchor = gitRoot ?? cwd;
   return `local:${createHash("sha256").update(anchor, "utf-8").digest("hex").slice(0, 16)}`;
 }
