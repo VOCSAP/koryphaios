@@ -30,6 +30,7 @@ afterAll(async () => {
 
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased before bun resolves it
+import { mockStore, storeMockStubs } from "./_store-mock";
 
 // Dynamic import: must run AFTER GlobalRegistrator.register() above (react-dom
 // inspects window/document at import time).
@@ -144,20 +145,16 @@ function initialFakeDeckState(): FakeDeckState {
 
 const fakeDeck = create<FakeDeckState>(() => initialFakeDeckState());
 
-// `errorText` must exist as an export even though SessionRow/Sidebar.tsx
-// never call it: mock.module freezes the module record for this specifier
-// process-wide on first materialization (line 165 below), so any OTHER test
-// file re-mocking the same specifier with a richer shape (e.g.
-// desktop-inbox-sender-dom.test.ts, which needs errorText for InboxPanel.tsx)
-// hits a frozen record missing the key and dies with
-// `SyntaxError: Export named 'errorText' not found in module store.ts`
-// (card a688748b). Stub matches the sibling file's convention, not the real
-// strip-Electron-wrapper logic in store.ts -- this file never exercises the
-// error path.
-mock.module("../desktop/src/renderer/src/store.ts", () => ({
-  useDeck: fakeDeck,
-  errorText: (e: unknown) => String(e)
-}));
+// Every value export store.ts currently has must be present here (card
+// a688748b): Bun's module registry is process-global, so whichever test
+// file mocks this specifier first freezes the surface for the rest of the
+// `bun test` run, and a later file needing a key this one omitted dies with
+// `SyntaxError: Export named '...' not found in module store.ts`. mockStore
+// (tests/_store-mock.ts) derives the required key set from store.ts itself
+// and throws here instead, rather than leaving it to whichever sibling file
+// happens to load next. `storeMockStubs` are harmless stand-ins, not the
+// real implementation -- SessionRow/Sidebar.tsx never call any of them.
+mockStore({ useDeck: fakeDeck, ...storeMockStubs });
 
 mock.module("@shared/reorder", () => ({
   moveBeside: (ids: string[]) => ids

@@ -43,6 +43,7 @@ afterAll(async () => {
 
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased, no runtime resolution
+import { mockStore, storeMockStubs } from "./_store-mock";
 
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
 
@@ -100,7 +101,7 @@ function resetFakeStore(): void {
   fakeUseDeck.setState(initialFakeState(), true);
 }
 
-mock.module("../desktop/src/renderer/src/store.ts", () => ({ useDeck: fakeUseDeck }));
+mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 
 // Stub: renders one observable marker, data-testid="composer-stub", exactly
 // while TemplatesDialog's local `composer` state is non-null. No internal

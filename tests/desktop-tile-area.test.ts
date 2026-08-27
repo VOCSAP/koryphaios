@@ -162,6 +162,7 @@ afterAll(async () => {
 
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased, no runtime resolution; sourced via the bridge, not a bare "react-dom/client" import -- the quoted mention here IS caught by the swallow check (scanfile-swallow-ok: prose example), confirming the gate actually looks, not merely asserting it doesn't need to
+import { mockStore, storeMockStubs } from "./_store-mock";
 
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
 
@@ -240,7 +241,7 @@ function resetFakeStore(): void {
   fakeUseDeck.setState(initialFakeState(), true);
 }
 
-mock.module("../desktop/src/renderer/src/store.ts", () => ({ useDeck: fakeUseDeck }));
+mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 
 // ---------------------------------------------------------------------------
 // Probe TerminalTile: records one mount-count bump and one unmount-count bump

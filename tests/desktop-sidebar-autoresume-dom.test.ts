@@ -31,6 +31,7 @@ afterAll(async () => {
 
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased before bun resolves it
+import { mockStore, storeMockStubs } from "./_store-mock";
 
 // Dynamic import: must run AFTER GlobalRegistrator.register() above (react-dom
 // inspects window/document at import time).
@@ -109,9 +110,7 @@ function resetFakeStore(): void {
   fakeUseDeck.setState(initialFakeState(), true);
 }
 
-mock.module("../desktop/src/renderer/src/store.ts", () => ({
-  useDeck: fakeUseDeck
-}));
+mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 
 // SessionRow's own imports resolve through this mock too (moveBeside is a
 // real, pure helper -- only Sidebar()'s own onDrop calls it, not SessionRow).
