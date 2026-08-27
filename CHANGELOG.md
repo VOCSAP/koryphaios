@@ -1,5 +1,17 @@
 # Changelog
 
+## core -- un message de pair rappelle desormais au team-lead qu'il peut forcer un `/clear`, et a lui seul
+
+Fichiers : `shared/inbound-framing.ts`, `server.ts`, `tests/peer-inbound-framing.test.ts`. Lot B1, sans carte.
+
+**La note ajoutee est conditionnee par le ROLE DU DESTINATAIRE, et non par la classe de l'expediteur comme les quatre notes qui la precedent.** A la reception d'un message de pair, une session dont le role est `team-lead` recoit en plus un rappel : envisager un `/clear` chez un agent dont la tache est finie et dont le contexte n'est plus pertinent. La note vit dans une constante SEPAREE de 131 caracteres plutot que d'etre fondue dans celle de tous les pairs : cette derniere est epinglee par egalite exacte dans les tests, et les deux garanties -- ce que tout message dit, ce que seul un team-lead lit -- doivent rester editables independamment.
+
+**Elle n'est posee que sur la branche des messages de pair ordinaires.** Les branches deck et operateur restent octet pour octet identiques a l'etat d'avant ce lot, quel que soit le role : une annonce du Deck ou une reponse de l'operateur n'est pas "un pair qui vient de repondre" et dont un team-lead pourrait sensement effacer le contexte.
+
+**Le role compare est celui que le broker renvoie a l'enregistrement, jamais la variable d'environnement, qui n'est pas normalisee.** La comparaison est une egalite stricte contre `team-lead`, si bien que `null`, la chaine vide (le defaut quand l'operateur n'a rien pose) et tout autre role prennent le meme chemin sans directive, sans branche separee a oublier. Le cout est paye par le destinataire une fois par message recu, jamais par tour.
+
+**LIMITE CONNUE, et elle vide le lot de son effet sur la flotte actuelle : aucune session ne porte de role quand l'equipe est spawnee depuis un template**, les templates ne transportant pas ce champ. La note est donc INERTE pour ces flottes tant que le role n'est pas pose autrement.
+
 ## desktop -- la resolution du peer_id d'une tuile empruntait le fichier de cache du voisin, et un `/clear` rendait cet emprunt certain
 
 Fichiers : `desktop/src/main/peer-state.ts`, `tests/desktop-peer-thinking.test.ts`. Carte `aa8d6b5f`.

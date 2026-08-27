@@ -21,6 +21,7 @@ import {
   DECK_NO_REPLY_NOTE,
   OPERATOR_ANSWER_NOTE,
   PEER_INBOUND_NOTE,
+  LEAD_DIRECTIVE_NOTE,
   renderPeerMessage,
   isDeckSender,
   isOperatorSender,
@@ -171,6 +172,47 @@ describe("the framing is additive: the sender's own words survive", () => {
     // failure mode a `toContain` cannot see.
     expect(DECK_NO_REPLY_NOTE.startsWith("\n\n[claude-peers] ")).toBe(true);
     expect(OPERATOR_ANSWER_NOTE.startsWith("\n\n[claude-peers] ")).toBe(true);
+  });
+});
+
+describe("card 7defe381 lot B1: LEAD_DIRECTIVE_NOTE, gated on recipientRole === 'team-lead'", () => {
+  // spec_6037ee5f. renderInbound's third argument is the RECIPIENT's own
+  // normalized role (broker's `myRole`, never the sender's), so a team-lead
+  // session reading its inbox gets one extra short instruction the other
+  // roles never see. Restricted to the ordinary-peer branch only: a deck
+  // announcement or an operator answer is not "an agent that just responded"
+  // whose session a team-lead could sensibly /clear, so those two branches
+  // stay byte-identical to today regardless of recipientRole.
+  test("LEAD_DIRECTIVE_NOTE is its own constant: short, distinct from PEER_INBOUND_NOTE, blank-line separated", () => {
+    expect(typeof LEAD_DIRECTIVE_NOTE).toBe("string");
+    expect(LEAD_DIRECTIVE_NOTE).not.toBe(PEER_INBOUND_NOTE);
+    expect(LEAD_DIRECTIVE_NOTE.length).toBeLessThan(PEER_INBOUND_NOTE.length);
+    expect(LEAD_DIRECTIVE_NOTE.startsWith("\n\n[claude-peers] ")).toBe(true);
+  });
+
+  test("recipientRole 'team-lead' appends LEAD_DIRECTIVE_NOTE after PEER_INBOUND_NOTE on an ordinary peer message", () => {
+    const out = renderInbound("some-peer", BODY, "team-lead");
+    expect(out).toBe(`${BODY}${PEER_INBOUND_NOTE}${LEAD_DIRECTIVE_NOTE}`);
+  });
+
+  test("any other non-empty role does not receive the directive", () => {
+    for (const role of ["developer", "reviewer", "release-engineer"]) {
+      expect(renderInbound("some-peer", BODY, role)).toBe(`${BODY}${PEER_INBOUND_NOTE}`);
+    }
+  });
+
+  test("an empty string role -- the operator-unset default (session-service.ts:529), the majority case measured live -- does not receive the directive", () => {
+    expect(renderInbound("some-peer", BODY, "")).toBe(`${BODY}${PEER_INBOUND_NOTE}`);
+  });
+
+  test("a null or omitted role does not receive the directive, and omitting the argument entirely is byte-identical to before this lot", () => {
+    expect(renderInbound("some-peer", BODY, null)).toBe(`${BODY}${PEER_INBOUND_NOTE}`);
+    expect(renderInbound("some-peer", BODY)).toBe(`${BODY}${PEER_INBOUND_NOTE}`);
+  });
+
+  test("a deck announcement or an operator answer to a team-lead recipient is untouched: the directive is scoped to the ordinary-peer branch only", () => {
+    expect(renderInbound(DECK_PEER_ID, BODY, "team-lead")).toBe(renderDeckAnnouncement(BODY));
+    expect(renderInbound(OPERATOR_PEER_ID, BODY, "team-lead")).toBe(renderOperatorAnswer(BODY));
   });
 });
 

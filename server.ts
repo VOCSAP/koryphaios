@@ -385,7 +385,7 @@ function connectWs() {
         await mcp.notification({
           method: "notifications/claude/channel",
           params: {
-            content: renderInbound(f.from_peer_id, f.text),
+            content: renderInbound(f.from_peer_id, f.text, myRole),
             meta: {
               from_peer_id: fromDeck ? DECK_PEER_ID : f.from_peer_id,
               from_summary: f.from_summary,
@@ -452,7 +452,7 @@ async function pollFallback() {
         await mcp.notification({
           method: "notifications/claude/channel",
           params: {
-            content: renderInbound(msg.from_peer_id, msg.text),
+            content: renderInbound(msg.from_peer_id, msg.text, myRole),
             meta: {
               from_peer_id: fromDeck ? DECK_PEER_ID : (msg.from_peer_id || "<dormant peer>"),
               from_summary: msg.from_summary,
@@ -1183,13 +1183,13 @@ const roadmapToolError = (e: unknown): { content: { type: "text"; text: string }
 // name (a sentinel's public id, or "<dormant peer>") while renderInbound
 // itself must key on the real sender identity -- see the longer comment
 // this replaces at the check_messages case for the full reasoning.
-function formatInboundLine(fromPeerId: string, text: string, sentAt: string): string {
+function formatInboundLine(fromPeerId: string, text: string, sentAt: string, recipientRole: string | null): string {
   const label = isOperatorSender(fromPeerId)
     ? OPERATOR_PEER_ID
     : isDeckSender(fromPeerId)
       ? DECK_PEER_ID
       : fromPeerId || "<dormant peer>";
-  return `From ${label} (${sentAt}):\n${renderInbound(fromPeerId, text)}`;
+  return `From ${label} (${sentAt}):\n${renderInbound(fromPeerId, text, recipientRole)}`;
 }
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
@@ -1334,7 +1334,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         // Card e3f8065d / a21f1303: formatInboundLine (above) is the shared
         // enforcer for the "From <name> (<date>):" prefix over renderInbound,
         // now reused by wait_for_message too.
-        const lines = result.messages.map((m) => formatInboundLine(m.from_peer_id, m.text, m.sent_at));
+        const lines = result.messages.map((m) => formatInboundLine(m.from_peer_id, m.text, m.sent_at, myRole));
         return {
           content: [
             {
@@ -1431,7 +1431,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           content: [
             {
               type: "text" as const,
-              text: formatInboundLine(outcome.message.from_peer_id, outcome.message.text, outcome.message.sent_at),
+              text: formatInboundLine(outcome.message.from_peer_id, outcome.message.text, outcome.message.sent_at, myRole),
             },
           ],
         };

@@ -43,7 +43,7 @@ import { test, expect, describe, afterAll } from "bun:test";
 import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
 import { computeGroupId, computeGroupSecretHash } from "../shared/config.ts";
 import { DECK_PEER_ID } from "../shared/types.ts";
-import { DECK_NO_REPLY_NOTE } from "../shared/inbound-framing.ts";
+import { DECK_NO_REPLY_NOTE, LEAD_DIRECTIVE_NOTE } from "../shared/inbound-framing.ts";
 
 const FORCED_GROUP = "inbound-framing-e2e-spec-c599a9c5";
 const GROUP_ID = computeGroupId(FORCED_GROUP);
@@ -136,8 +136,21 @@ async function readNotification(p: Peer, method: string): Promise<JsonRpcRespons
   throw new Error(`no JSON-RPC notification with method ${method}`);
 }
 
-/** Spawn one `bun server.ts` MCP peer into the forced, isolated group. */
-async function spawnPeer(b: TestBroker): Promise<Peer> {
+/**
+ * Spawn one `bun server.ts` MCP peer into the forced, isolated group.
+ *
+ * `extraEnv` (spec_e028bad2, card 7defe381 lot B1) lets a caller set
+ * CLAUDE_PEERS_ROLE (myRole -> the recipientRole argument of
+ * renderInbound/formatInboundLine) and CLAUDE_PEERS_POLL_FALLBACK_SEC (the
+ * fallback-poll test below needs a near-zero interval to catch a message
+ * within the narrow window the WS is actually down). CLAUDE_PEERS_ROLE is
+ * explicitly deleted from the inherited shell env first: unlike
+ * startBroker's cleanEnv scrub, this function otherwise spreads the whole
+ * process.env, so a developer's own shell setting would silently leak into
+ * every test that does not pass its own role and corrupt the negative
+ * control.
+ */
+async function spawnPeer(b: TestBroker, extraEnv: Record<string, string> = {}): Promise<Peer> {
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     CLAUDE_PEERS_BROKER_URL: b.url,
@@ -145,6 +158,8 @@ async function spawnPeer(b: TestBroker): Promise<Peer> {
     CLAUDE_PEERS_FORCE_GROUP: FORCED_GROUP,
   };
   delete env.CLAUDE_PEERS_APPROVAL_FILE;
+  delete env.CLAUDE_PEERS_ROLE;
+  Object.assign(env, extraEnv);
 
   const proc = Bun.spawn(["bun", "server.ts"], { env, stdio: ["pipe", "pipe", "pipe"] });
   procs.push(proc);
@@ -168,6 +183,73 @@ async function spawnPeer(b: TestBroker): Promise<Peer> {
   });
   await readUntil(reader, id, buffer);
   return peer;
+}
+
+/**
+ * Kill `b`'s broker and respawn a fresh one on the SAME port, reusing the
+ * SAME sqlite db file (so every already-registered peer row survives), then
+ * mutate `b.proc` in place. spec_e028bad2 (card 7defe381 lot B1), PATH 2/4.
+ *
+ * WHY THIS EXISTS, AND WHY THE IDLE-TIMEOUT KNOB DID NOT WORK. The first
+ * version of this file's fallback-poll test tried to force server.ts's
+ * private `wsConnected` false via the documented
+ * CLAUDE_PEERS_WS_IDLE_TIMEOUT_SEC broker knob. MEASURED by a swap-mutation
+ * diagnostic (mutate the WS-push call site instead of the fallback-poll
+ * call site, in the same test): that test turned RED, meaning it was
+ * silently exercising the WS PUSH path the whole time, not the fallback
+ * poll -- Bun's websocket server evidently keeps the connection alive
+ * across the configured idle window regardless (no `sendPings` knob is set
+ * in broker.ts to rule this out), so the socket never actually went down.
+ * A source scan of the mutated line would have said nothing about this; only
+ * the swap caught it, which is why a "which mutation makes this go red"
+ * matrix belongs in the record, not just "it went red once".
+ *
+ * A hard process kill sidesteps that uncertainty entirely: it closes the
+ * OS-level TCP connection unconditionally, and the recipient's `ws.close()`
+ * handler fires within milliseconds on loopback -- no dependency on any
+ * broker-internal idle/ping behaviour. WS_RECONNECT_INITIAL_MS (1000ms,
+ * hardcoded in server.ts) only starts counting from that close event, so
+ * bringing the replacement broker up and sending the probe message within a
+ * couple hundred ms leaves a wide, controlled margin before the peer's own
+ * reconnect can possibly win the race.
+ */
+async function killAndRestartBroker(b: TestBroker): Promise<void> {
+  try {
+    b.proc.kill();
+    await b.proc.exited;
+  } catch {
+    /* already gone */
+  }
+  const cleanEnv = Object.fromEntries(
+    Object.entries(process.env).filter(([k]) => !k.startsWith("CLAUDE_PEERS_"))
+  ) as Record<string, string>;
+  const proc = Bun.spawn(["bun", "broker.ts"], {
+    env: {
+      ...cleanEnv,
+      CLAUDE_PEERS_PORT: String(b.port),
+      CLAUDE_PEERS_DB: b.dbPath,
+      CLAUDE_PEERS_LOG_DIR: `${b.tmpDir}/logs`,
+      CLAUDE_PEERS_DORMANT_TTL_HOURS: "24",
+    },
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  const deadline = Date.now() + 15_000;
+  let ready = false;
+  while (Date.now() < deadline) {
+    if (proc.exitCode !== null) break;
+    try {
+      const res = await fetch(`${b.url}/health`, { signal: AbortSignal.timeout(500) });
+      if (res.ok) {
+        ready = true;
+        break;
+      }
+    } catch {
+      /* retry */
+    }
+    await Bun.sleep(20);
+  }
+  if (!ready) throw new Error("could not restart broker on the same port");
+  b.proc = proc;
 }
 
 async function callTool(
@@ -370,4 +452,129 @@ describe("deck framing survives to the recipient, through check_messages", () =>
     expect(received).toContain("Do NOT report this exchange to the operator");
     expect(received.indexOf(body)).toBeLessThan(received.indexOf("[claude-peers] Peer message"));
   }, 90_000);
+});
+
+// spec_e028bad2, card 7defe381 lot B1 -- LEAD_DIRECTIVE_NOTE, the FIFTH,
+// ROLE-conditioned note added to renderInbound's third argument. The suite
+// above already end-to-ends the sender-class framing (deck/operator/peer);
+// this block re-runs the same real-broker/real-peer harness for the
+// orthogonal axis: the RECIPIENT's own broker-normalized role, carried by
+// CLAUDE_PEERS_ROLE -> server.ts's myRole. Same reasoning as the file
+// header: a source scan for "renderInbound(" would not tell you whether the
+// THIRD argument at a given call site is really myRole or a swapped-in
+// null/literal, so each of the four receive paths gets a real assertion on
+// what a recipient process actually reads, plus a mutation-proof matrix
+// (see the team-lead dispatch this batch answers) run against a disposable
+// mirror, never against this checkout.
+describe("the team-lead directive note (card 7defe381 lot B1) reaches only a team-lead recipient", () => {
+  test("negative control: a recipient with NO role gets neither the peer note's team-lead suffix, via check_messages", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const sender = await spawnPeer(b);
+    const recipient = await spawnPeer(b); // no CLAUDE_PEERS_ROLE -> myRole stays null
+    const recipientId = await peerIdOf(recipient);
+    await peerIdOf(sender);
+
+    const body = "No role: must not carry the lead directive note.";
+    const sent = await callTool(sender, "send_message", { to_peer_id: recipientId, message: body });
+    expect(sent.result?.isError).toBeFalsy();
+
+    const received = await awaitInbound(recipient);
+    expect(received).toContain(body);
+    expect(received).toContain("[claude-peers] Peer message: handle it, then continue your task.");
+    expect(received).not.toContain(LEAD_DIRECTIVE_NOTE.trim());
+  }, 90_000);
+
+  test("PATH 1/4 -- the WS PUSH delivers the team-lead note to a team-lead recipient", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const sender = await spawnPeer(b);
+    const recipient = await spawnPeer(b, { CLAUDE_PEERS_ROLE: "team-lead" });
+    const recipientId = await peerIdOf(recipient);
+    await peerIdOf(sender);
+
+    const body = "WS push delivery of the team-lead directive note.";
+    const sent = await callTool(sender, "send_message", { to_peer_id: recipientId, message: body });
+    expect(sent.result?.isError).toBeFalsy();
+
+    const pushed = await readNotification(recipient, "notifications/claude/channel");
+    const content = pushed.params?.content ?? "";
+    expect(content).toContain(body);
+    expect(content).toContain("[claude-peers] Peer message: handle it, then continue your task.");
+    expect(content).toContain(LEAD_DIRECTIVE_NOTE.trim());
+  }, 90_000);
+
+  test("PATH 2/4 -- the FALLBACK POLL delivers the team-lead note while the recipient's WS is down", async () => {
+    // No test seam exists for server.ts's private `wsConnected` variable.
+    // A first version of this test tried CLAUDE_PEERS_WS_IDLE_TIMEOUT_SEC to
+    // force-close the idle socket; a swap-mutation diagnostic (mutating the
+    // WS-push call site instead of this one, in the same test) proved that
+    // version was silently exercising WS push the whole time -- see
+    // killAndRestartBroker's header for the measurement and the reasoning.
+    // A hard broker-process kill sidesteps the uncertainty: it drops the
+    // recipient's TCP connection unconditionally, independent of any
+    // broker-internal idle/ping behaviour.
+    const b = await startBroker();
+    brokers.push(b);
+    const sender = await spawnPeer(b);
+    const recipient = await spawnPeer(b, {
+      CLAUDE_PEERS_ROLE: "team-lead",
+      CLAUDE_PEERS_POLL_FALLBACK_SEC: "0",
+    });
+    const recipientId = await peerIdOf(recipient);
+    await peerIdOf(sender);
+
+    await killAndRestartBroker(b);
+
+    const body = "Fallback-poll delivery of the team-lead directive note.";
+    const sent = await callTool(sender, "send_message", { to_peer_id: recipientId, message: body });
+    expect(sent.result?.isError).toBeFalsy();
+
+    const pushed = await readNotification(recipient, "notifications/claude/channel");
+    const content = pushed.params?.content ?? "";
+    expect(content).toContain(body);
+    expect(content).toContain(LEAD_DIRECTIVE_NOTE.trim());
+  }, 90_000);
+
+  test("PATH 3/4 -- check_messages delivers the team-lead note (formatInboundLine)", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const sender = await spawnPeer(b);
+    const recipient = await spawnPeer(b, { CLAUDE_PEERS_ROLE: "team-lead" });
+    const recipientId = await peerIdOf(recipient);
+    await peerIdOf(sender);
+
+    const body = "check_messages delivery of the team-lead directive note.";
+    const sent = await callTool(sender, "send_message", { to_peer_id: recipientId, message: body });
+    expect(sent.result?.isError).toBeFalsy();
+
+    const received = await awaitInbound(recipient);
+    expect(received).toContain(body);
+    expect(received).toContain(LEAD_DIRECTIVE_NOTE.trim());
+  }, 90_000);
+
+  test("PATH 4/4 -- wait_for_message's MATCHED branch delivers the team-lead note (formatInboundLine)", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const sender = await spawnPeer(b);
+    const recipient = await spawnPeer(b, { CLAUDE_PEERS_ROLE: "team-lead" });
+    const recipientId = await peerIdOf(recipient);
+    await peerIdOf(sender);
+
+    const body = "wait_for_message matched delivery of the team-lead directive note.";
+    const waitPromise = callTool(recipient, "wait_for_message", { timeout_sec: 20 });
+    // Let the tool call actually register its waiter before the message is
+    // sent -- otherwise the send can race registerWaiter and the message
+    // gets picked up by the opportunistic peek's non-matched path instead of
+    // the waiter this test targets.
+    await Bun.sleep(500);
+
+    const sent = await callTool(sender, "send_message", { to_peer_id: recipientId, message: body });
+    expect(sent.result?.isError).toBeFalsy();
+
+    const res = await waitPromise;
+    const text = toolText(res);
+    expect(text).toContain(body);
+    expect(text).toContain(LEAD_DIRECTIVE_NOTE.trim());
+  }, 30_000);
 });

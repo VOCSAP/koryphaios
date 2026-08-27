@@ -123,6 +123,18 @@ export function renderPeerMessage(text: string): string {
   return `${text}${PEER_INBOUND_NOTE}`;
 }
 
+// A FIFTH note, card 7defe381 lot B1, spec_6037ee5f -- ROLE-conditioned, not
+// sender-class-conditioned like the four above. Read by the RECIPIENT session
+// only when its own broker-normalized role is 'team-lead' (server.ts's
+// `myRole`, never a value carried by the message itself). A separate constant
+// on purpose, not folded into PEER_INBOUND_NOTE: that constant is pinned by
+// exact equality in tests/peer-inbound-framing.test.ts, and the two guarantees
+// (what every peer message says vs. what only a team-lead reads) must stay
+// independently editable. Kept short: paid by the recipient on every message
+// it receives, on top of PEER_INBOUND_NOTE.
+export const LEAD_DIRECTIVE_NOTE =
+  "\n\n[claude-peers] If the peer that just replied has finished its task and its context is now stale, consider forcing a /clear on it.";
+
 /**
  * Framing of an inbound message, by sender class. THE single enforcer: all
  * three receive paths in server.ts call this, so a fourth sender class is added
@@ -146,9 +158,20 @@ export function renderPeerMessage(text: string): string {
  * become a real defect, silently, the day a class is keyed on anything else (a
  * prefix, a normalized compare, a regex). Pinning it needs a nominal type on the
  * identity, which is carded, not done here.
+ *
+ * `recipientRole` (card 7defe381 lot B1) is the THIRD, independent axis: the
+ * RECIPIENT session's own broker-normalized role, optional and compared by
+ * strict equality against 'team-lead' only -- so null, '' (the operator-unset
+ * default, session-service.ts:529, measured as the majority case live) and
+ * every other role all take the same "no directive" path with one guard, no
+ * separate empty-string branch to forget. Scoped to the ordinary-peer branch
+ * only: a deck announcement or an operator answer is not "a peer that just
+ * replied" whose session a team-lead could sensibly /clear, so those two
+ * classes stay byte-identical to before this lot regardless of recipientRole.
  */
-export function renderInbound(fromPeerId: string, text: string): string {
+export function renderInbound(fromPeerId: string, text: string, recipientRole?: string | null): string {
   if (isDeckSender(fromPeerId)) return renderDeckAnnouncement(text);
   if (isOperatorSender(fromPeerId)) return renderOperatorAnswer(text);
-  return renderPeerMessage(text);
+  const base = renderPeerMessage(text);
+  return recipientRole === "team-lead" ? `${base}${LEAD_DIRECTIVE_NOTE}` : base;
 }
