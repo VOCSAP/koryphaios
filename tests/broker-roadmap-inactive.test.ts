@@ -154,6 +154,116 @@ test("upsert-patch: claiming an inactive card (status=in_progress) is refused 40
   expect(after.locked).toBe(false);
 });
 
+// ---------------------------------------------------------------------------
+// Gap closed 2026-08-27 (measured by the architect, ahead of exposing `queue`
+// writes to agents via roadmap_update): refusesInactiveClaim only checked
+// status/locked, never queue. A queued item is dispatchable regardless of
+// inactive (desktop/src/shared/workflow.ts does not filter it), so enqueuing
+// an inactive card is the same self-unblock c33a5968 forbids on the claim
+// path, via a write path that did not exist when that card's guards were
+// written. See refusesInactiveQueue's doc comment in broker.ts.
+// ---------------------------------------------------------------------------
+
+test("upsert-patch: queuing an inactive card (queue set) is refused 403", async () => {
+  const created = await post<ItemRes>(
+    `${broker.url}/roadmap/upsert`,
+    deckAuthored({ project_key: PK, title: "parked, queue attempt", inactive: true })
+  );
+  const id = created.body.item.id;
+
+  const queued = await post<ErrRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    id,
+    by: "plain-agent",
+    queue: 1,
+  });
+  expect(queued.status).toBe(403);
+
+  const after = (await listAll()).find((i) => i.id === id)!;
+  expect(after.queue).toBeNull();
+});
+
+test("upsert-patch: queuing a NON-inactive card succeeds (negative control)", async () => {
+  const created = await post<ItemRes>(
+    `${broker.url}/roadmap/upsert`,
+    deckAuthored({ project_key: PK, title: "active, queue attempt" })
+  );
+  const id = created.body.item.id;
+
+  const queued = await post<ItemRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    id,
+    by: "plain-agent",
+    queue: 1,
+  });
+  expect(queued.status).toBe(200);
+  expect(queued.body.item.queue).toBe(1);
+});
+
+test("upsert-patch: un-queuing (queue: null) an inactive card stays permitted -- the safe direction", async () => {
+  // Queue it first while still active, THEN park it -- inactive never blocks
+  // an ordinary field edit, only a claim-adjacent one (see the "ordinary
+  // edit... stays permitted" test above).
+  const created = await post<ItemRes>(
+    `${broker.url}/roadmap/upsert`,
+    deckAuthored({ project_key: PK, title: "queued then parked", queue: 1 })
+  );
+  const id = created.body.item.id;
+  const parked = await post<ItemRes>(
+    `${broker.url}/roadmap/upsert`,
+    deckAuthored({ project_key: PK, id, inactive: true })
+  );
+  expect(parked.body.item.queue).toBe(1);
+
+  const unqueued = await post<ItemRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    id,
+    by: "plain-agent",
+    queue: null,
+  });
+  expect(unqueued.status).toBe(200);
+  expect(unqueued.body.item.queue).toBeNull();
+});
+
+test("upsert-patch: an inactive card already queued can be edited on unrelated fields without re-sending the same queue value tripping the guard (delta form)", async () => {
+  const created = await post<ItemRes>(
+    `${broker.url}/roadmap/upsert`,
+    deckAuthored({ project_key: PK, title: "queued then parked, re-save", queue: 2, inactive: true })
+  );
+  const id = created.body.item.id;
+
+  // Client echoes the unchanged queue value back alongside an unrelated edit
+  // -- an absolute (non-delta) check would refuse this forever.
+  const resaved = await post<ItemRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    id,
+    by: "plain-agent",
+    queue: 2,
+    tags: ["resaved"],
+  });
+  expect(resaved.status).toBe(200);
+  expect(resaved.body.item.queue).toBe(2);
+  expect(resaved.body.item.tags).toEqual(["resaved"]);
+});
+
+test("upsert-patch: same-request bypass is closed -- a signed write that clears inactive AND queues in one call is still refused", async () => {
+  const created = await post<ItemRes>(
+    `${broker.url}/roadmap/upsert`,
+    deckAuthored({ project_key: PK, title: "parked, queue bypass attempt", inactive: true })
+  );
+  const id = created.body.item.id;
+
+  const bypass = await post<ErrRes>(
+    `${broker.url}/roadmap/upsert`,
+    deckAuthored({ project_key: PK, id, inactive: false, queue: 1 })
+  );
+  expect(bypass.status).toBe(403);
+
+  const after = (await listAll()).find((i) => i.id === id)!;
+  expect(after.inactive).toBe(true);
+  expect(after.queue).toBeNull();
+});
+
 test("upsert-patch: same-request bypass is closed -- a signed write that clears inactive AND claims in one call is still refused", async () => {
   const created = await post<ItemRes>(
     `${broker.url}/roadmap/upsert`,

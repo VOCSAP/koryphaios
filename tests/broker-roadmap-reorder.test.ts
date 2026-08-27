@@ -102,6 +102,37 @@ test("reorder validates authorship, project scope, duplicates and closed items",
   expect(after.body.items.find((i) => i.id === a.id)?.queue).toBe(1);
 });
 
+// Gap closed 2026-08-27 (card c33a5968 family): resolveRoadmapAuthor accepts
+// the same breadth of callers on /roadmap/reorder as on /roadmap/upsert, so
+// this handler needs the same inactive guard on the queue-adjacent write it
+// performs -- see refusesInactiveQueue's doc comment in broker.ts.
+
+test("reorder refuses the WHOLE batch, naming the offending id, when any item is inactive (403)", async () => {
+  const a = await create("wf inactive a");
+  const parked = await create("wf inactive parked", { inactive: true });
+
+  const res = await reorder({ ids: [a.id, parked.id] });
+  expect(res.status).toBe(403);
+  expect((res.body as { error: string }).error).toContain(parked.id);
+
+  // Whole-batch refusal: `a`'s queue must be untouched too (transaction).
+  const list = await post<{ items: RoadmapItem[] }>(`${broker.url}/roadmap/list`, {
+    project_key: KEY,
+  });
+  expect(list.body.items.find((i) => i.id === a.id)?.queue).toBeNull();
+  expect(list.body.items.find((i) => i.id === parked.id)?.queue).toBeNull();
+});
+
+test("NEGATIVE CONTROL: a batch with no inactive item reorders normally", async () => {
+  const a = await create("wf active a");
+  const b = await create("wf active b");
+
+  const res = await reorder({ ids: [a.id, b.id] });
+  expect(res.status).toBe(200);
+  const items = (res.body as { items: RoadmapItem[] }).items;
+  expect(items.map((i) => i.queue)).toEqual([1, 2]);
+});
+
 test("reorder caps the ids array", async () => {
   const ids = Array.from({ length: 501 }, (_, i) => `id-${i}`);
   expect((await reorder({ ids })).status).toBe(400);

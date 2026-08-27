@@ -2846,6 +2846,37 @@ function handleRoadmapList(
   return response;
 }
 
+/**
+ * Card c33a5968 gap closed 2026-08-27: `refusesInactiveClaim` only ever
+ * checked `status`/`locked` -- a write that ONLY sets `queue` (dispatch
+ * queue position) on an inactive card sailed through untouched, and a
+ * queued item is dispatchable regardless of `inactive`
+ * (`desktop/src/shared/workflow.ts`'s `queuedItems`/`wavesOf` do not filter
+ * it, confirmed by measurement, and no file under `desktop/src/main/*.ts`
+ * other than `roadmap-service.ts` references `inactive` either). An agent
+ * enqueuing its own inactive card is the exact self-unblock c33a5968
+ * forbids ("must not be able to lift its own block"), just via a write path
+ * that did not exist when that card's guards were written.
+ *
+ * DELTA form, same reasoning as `refusesInactiveClaim`'s own doc comment:
+ * only a write that actually MOVES `queue` to a new value may be refused.
+ * An absolute check (`storedInactive && nextQueue != null`) would refuse a
+ * client that round-trips its already-queued position on every save (the
+ * exact "punishes a write that claims NOTHING" bug `refusesInactiveClaim`'s
+ * delta form was built to avoid) -- once an inactive card is queued, every
+ * later edit of an unrelated field would 403 forever if the client happens
+ * to echo the unchanged `queue` value back. Un-queuing (`nextQueue ===
+ * null`) is never refused: it is the SAFE direction, same as clearing a
+ * lock is not a claim.
+ */
+function refusesInactiveQueue(
+  storedInactive: boolean,
+  storedQueue: number | null,
+  nextQueue: number | null | undefined
+): boolean {
+  return storedInactive && nextQueue != null && nextQueue !== storedQueue;
+}
+
 function handleRoadmapUpsert(
   body: RoadmapUpsertRequest
 ): RoadmapUpsertResponse | { error: string; status: number } {
@@ -2939,6 +2970,18 @@ function handleRoadmapUpsert(
     ) {
       return {
         error: "item is inactive -- clear inactive before moving it to in_progress",
+        status: 403,
+      };
+    }
+    // Card c33a5968 gap closed 2026-08-27: queuing (not just claiming) an
+    // inactive item is refused the same way -- see refusesInactiveQueue's
+    // doc comment. Uses `existing.queue` (the STORED, pre-write value), same
+    // discipline as the claim guard above, so a single request that both
+    // clears `inactive` AND sets `queue` still reads the stored inactive=true
+    // and is still refused.
+    if (refusesInactiveQueue(existing.inactive, existing.queue, body.queue)) {
+      return {
+        error: "item is inactive -- clear inactive before queuing it",
         status: 403,
       };
     }
@@ -3717,9 +3760,13 @@ const ROADMAP_REORDER_MAX = 500;
  * unqueued. One transaction, so the operator's insert-in-the-middle never
  * interleaves with an agent's writes half-applied.
  */
-// Card c33a5968: no inactive guard here, deliberately -- this handler writes
-// `queue`/`updated_by`/`updated_at`, never `status`/`locked`, so it cannot
-// claim a card either.
+// Card c33a5968 gap closed 2026-08-27: this handler writes `queue` (never
+// `status`/`locked`), which was the exact reasoning that USED to exempt it
+// here -- true until `queue` itself became a claim-adjacent field (see
+// `refusesInactiveQueue`'s doc comment in `handleRoadmapUpsert` above). This
+// handler now refuses the WHOLE batch if any id is `inactive`, in the id-
+// validation loop below, same mechanism as the existing done/archived check
+// it sits next to.
 function handleRoadmapReorder(
   body: RoadmapReorderRequest
 ): RoadmapReorderResponse | { error: string; status: number } {
@@ -3751,6 +3798,17 @@ function handleRoadmapReorder(
     }
     if (item.status === "done" || item.status === "archived") {
       return { error: `item '${id}' is ${item.status} and cannot be queued`, status: 400 };
+    }
+    // Card c33a5968 gap closed 2026-08-27: same reasoning/status code as
+    // refusesInactiveQueue's guard on /roadmap/upsert (403, the inactive-
+    // guard family's own convention -- distinct from the 400 above, which is
+    // a terminal-state validation, not a "clear the flag first" permission
+    // gate). Whole-batch refusal, not a partial skip: RoadmapReorderResponse
+    // has no field to report a skip (unlike ImportRes's `skipped`), and this
+    // handler already refuses the whole batch for the done/archived case
+    // right above -- same mechanism, not a new response-shape category.
+    if (item.inactive) {
+      return { error: `item '${id}' is inactive -- clear inactive before queuing it`, status: 403 };
     }
     itemById.set(id, item);
   }
