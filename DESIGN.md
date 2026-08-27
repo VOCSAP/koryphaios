@@ -169,6 +169,25 @@ State rules (apply to every archetype):
   hover filter.
 - Buttons never keep the native border/background: set both explicitly.
 
+**The scoped danger variants in the table above are NOT portable, and this is
+the one trap that kills a correct archetype class silently.** `.wt-actions
+.danger` and `.rm-detail-actions .danger` score `(0,2,0)`; they work only
+because those rows are not inside a `.modal-actions` footer. `.modal-actions
+button:not(.primary)` scores `(0,2,1)`, two classes plus one element, so it
+repaints every non-primary footer button neutral and BEATS the copied recipe.
+Measured twice on the Courrier decline button (2026-08-13): the `(0,2,0)`
+attempt still computed `rgb(228,228,228)`; `.modal-actions.inbox-modal-actions
+button.danger` at `(0,3,1)` computes `rgb(224,85,85)` = `--danger`. The
+recipe itself is `color: var(--danger); border-color: color-mix(in srgb,
+var(--danger) 50%, transparent);` with **no** danger-specific `:hover`, since
+the archetype's base hover carries it.
+
+**How to check:** after adding ANY semantic colour to a button sitting in a
+container that has its own `button` rule, read `getComputedStyle(el).color` on a
+real render. Reading the stylesheet proves the rule EXISTS, never that it
+APPLIES, and a typecheck, a test and a diff review are all blind to it. Same
+failure shape as a className matching no selector at all, different cause.
+
 ## 4. Recurring primitives
 
 - **Status dots** (`.dot`): 9px circle — green running, amber starting, grey
@@ -229,8 +248,12 @@ State rules (apply to every archetype):
   expanded, the label reappears beside the SAME control, at the SAME screen
   position. One control, one position, two states, one gesture to learn.
   (c) The rail's width is not a constant to copy but a SUM to recompute:
-  the Agents rail is **58px** because it carries two per-row signals (status
-  dot + team-lead laurel) and not a lone glyph, and because a rail that leaves
+  the Agents rail is **70px** (`--sidebar-rail-w`, and it was 58 until the role
+  glyph of card `b5ba8cac` added an occupant) because it carries per-row signals
+  (status dot, role glyph, team-lead laurel) and not a lone glyph. That
+  divergence from `--panel-rail-w`'s 58 is exactly why the two stayed two
+  tokens. Read the sum from the token's own comment in `styles.css`, never from
+  this paragraph. A rail that leaves
   one pixel of slack overflows the day a scrollbar appears. Size it on its
   widest row, then leave real margin; suppress the scrollbar inside the rail
   (`scrollbar-width: none` + `::-webkit-scrollbar`) since a native bar steals a
@@ -248,6 +271,14 @@ State rules (apply to every archetype):
   never an emoji — here the diptych pair `GLYPH_ACTIONS.panelFold` /
   `panelUnfold`, drawn as two mirrored entries so the frame and its hinge stay
   put while only the chevron changes direction.
+- **Split button** (`.rm-stop-split`, first instance, card `aaf4537d`): two
+  `.icon-btn`s in an `inline-flex` span, left face `border-radius: 6px 0 0 6px`,
+  right face `0 6px 6px 0` plus `margin-left: -1px` so the two borders merge
+  into one control. The right face only FLIPS the mode, it never fires; the
+  action that fires is always the glyph currently shown on the LEFT face, so
+  the control never asks the operator to remember a hidden state. The modes
+  must differ by SHAPE (square stop vs shears), not by colour alone, or the
+  control stops being readable in monochrome and for a colour-blind operator.
 - **Headers of full views** (`.worktrees-head`, `.roadmap-head`,
   `.settings-head`…): flex row, `h2` 15px, actions right-aligned after a
   flex spacer, bottom border.
@@ -293,7 +324,12 @@ hand drew it):
    site, with a misleading "not a valid JSX element type".
 1. Inline `<svg viewBox="0 0 24 24">` through the local `Svg` wrapper:
    `fill="none" stroke="currentColor"`, `stroke-width 1.5`, round caps/joins.
-   Rendered at 20px by the wrapper; sizing/layout live in CSS, never in the SVG.
+   Sizing/layout live in CSS, never in the SVG. **The `width="20"` on the
+   wrapper is NOT the rendered size and never the number to use in width
+   arithmetic**: `svg.glyph { width: 1em }` (`styles.css`) wins, and `:root` is
+   fixed at 13px, so a glyph renders **13x13** and an `.icon-btn` holding one
+   measures 33px border-box (13 + padding 9+9 + border 1+1). Reading the
+   attribute instead inflates every rail sum by 7px.
 2. **Stroke-only.** The single allowed fill is the small `Dot` accent
    (constellation stars, ellipsis). Never hardcode a colour — `currentColor`
    is what makes the dim/active/hover states and the glow work for free.
@@ -314,6 +350,46 @@ hand drew it):
    SCM's branch graph beats lore) and register the glyph in `GLYPHS`
    (`Record<GlyphName, …>`: adding a `DeckView` without a glyph is a compile
    error).
+5. **A glyph is judged at 13px or not at all.** It is drawn on a 24 grid and
+   rendered at 13 (rule 1), and a drawing that reads at 24 fails at 13 in three
+   measured ways that no amount of tuning at full size reveals. Measured
+   2026-08-27 on card `b5ba8cac`: 3 of 6 new glyphs failed the first pass and
+   were redrawn.
+   - **It becomes a LETTER.** An upright hammer (head bar + shaft) reads as a
+     capital **T**; dividers with a hinge bar read as a capital **A**. This is
+     the worst failure in an icon set, because the eye parses it as text. Fix by
+     breaking the symmetry (tilt the object 45°) or by changing metaphor.
+   - **Concave curves fill in.** Strands sagging toward an anchor (quadratic `Q`
+     with an inward control point) merge into a blob. Use circular `A` arcs
+     bulging AWAY from the anchor; they keep their gap.
+   - **Two glyphs converge.** Circle plus tail (Ariadne's clew) reads as the
+     search magnifier. Fix by adding the convention the metaphor owns (winding
+     arcs inside the ball) and by mirroring the composition.
+6. **Fusing two ideas: find the shared primitive, do not compromise.** Asked
+   for a funnel ("filter") fused with a hamburger ("fold this panel"),
+   `IconMenu` was already `M4.5 7h15 M4.5 12h15 M4.5 17h15`, three equal bars,
+   and a funnel IS those bars with a taper. The compromise did not exist; it was
+   one drawing all along. Keep the taper FRANK (10 → 6 → 2): halved, it falls
+   back to a bare hamburger, which says "a list", not "this panel folds".
+7. **Two states = one constant OBJECT + one directional SIGN, drawn as two
+   glyphs, never `transform: scaleX(-1)`.** Mirroring slides the hinge to the
+   other side, so the eye reads a DIFFERENT panel instead of the same one
+   changing direction. The object says WHAT folds, the chevron says the
+   GESTURE, which is why reusing the pair's chevron keeps the gesture identical
+   across panels while the object legitimately differs. Reusing that chevron
+   means the same relative segments TRANSLATED, not the literal path string: the
+   `panelFold` chevron sits inside a frame reaching x=20.5, so pasted into a
+   frameless glyph it ends the composition at 16.5 in a 24 box and renders
+   visibly small and left-heavy beside its rail neighbours.
+8. **A "one leader + N followers" mark drawn FRONTALLY reads as a PAW PRINT**,
+   and no amount of tuning removes it (discs to capsules, arc widened,
+   flattened, gaps increased: four attempts, all refused). Two properties
+   produce the signal and breaking either is enough: N small shapes ABOVE a
+   large one centred at the bottom, and the small ones on a curve convex upward.
+   Turn the axis instead: profile view, leader LEFT, followers on a vertical arc
+   RIGHT opening toward him. **Render monochrome, flat fill, on mid-grey FIRST.**
+   Colour hides this class of defect entirely at large sizes, and the mono
+   pass is what delivers the verdict.
 
 **Badge glyphs** (`GLYPH_BADGES`) mark identity/state, never actions: laurel
 crown = team lead, scales of Themis = judge, crossed xiphos = battle,
