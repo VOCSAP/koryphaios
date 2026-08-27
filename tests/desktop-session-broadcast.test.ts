@@ -2,11 +2,37 @@ import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// A `*Detector.on(...)` handler that mutates a RuntimeState field surfaced by
-// toRuntime() but skips this.broadcast() leaves the renderer's snapshot stale
-// (2026-07-30: the thinking badge froze this way). This is a static/textual
-// guard on the whole handler family, deliberately not a pure extracted
-// module: the source it scans is session-service.ts itself.
+// A handler wired via `<receiver>.on(...)` that mutates a RuntimeState field
+// surfaced by toRuntime() but skips this.broadcast() leaves the renderer's
+// snapshot stale (2026-07-30: the thinking badge froze this way). This is a
+// static/textual guard on the whole handler family, deliberately not a pure
+// extracted module: the source it scans is session-service.ts itself.
+//
+// Card 581a0d56 (2026-08-26 mutation review, measured 2026-08-27): the prior
+// version of this guard anchored its handler discovery on a REGEX with two
+// filters -- the receiver's NAME had to match `\w+Detector`, and the
+// callback's parameter had to be a destructured object literal `({...})`.
+// Both filters are accidental, not semantic: `this.pty.on('exit', ...)`
+// mutates `status`/`exitCode`/`activity` and was invisible only because "pty"
+// doesn't end in "Detector"; the activity tracker's `t.on((state) => ...)`
+// mutates `activity` and was invisible on BOTH counts (name "t", positional
+// param). Measured real-domain coverage that day: 5 mutating `.on(...)` call
+// sites in session-service.ts, only 3 seen by the old regex. Worse than
+// stagnant, coverage was REGRESSIVE by construction: any lot that introduces
+// a differently-named or differently-shaped event emitter silently shrinks
+// what this guard can see, with nothing turning red.
+//
+// This version discovers its domain the way toRuntime()'s own field list is
+// discovered -- by SCANNING the real source, not by matching a name or a
+// shape. `findOnCallSites` finds every `<expr>.on(` call in the file, full
+// stop; `resolveCallbackBody` then extracts that call's callback body
+// regardless of whether it is a destructured-object arrow, a positional-arg
+// arrow, an `async` arrow, or a *named reference* to a method/const-arrow
+// defined elsewhere in the same file (resolved by scanning for that
+// definition; an UNRESOLVABLE reference throws rather than being silently
+// treated as safe -- an unresolved callback is a guard blind spot, not a
+// passing case, same principle as `extractRuntimeFields`'s own "not found"
+// throws below).
 //
 // Lives in tests/ (not desktop/src/main/) so it can use bun:test directly --
 // desktop/tsconfig.node.json's ambient types don't include bun-types, and
@@ -16,17 +42,75 @@ import { join } from "node:path";
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
 
-// Balances braces from just after `openIdx` (which must point at an opening
-// `{`) and returns the slice up to (not including) its matching `}`.
-function extractBracedBody(src: string, openIdx: number): string {
-  let depth = 1;
-  let i = openIdx + 1;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") depth--;
+// Comments must be stripped BEFORE the general `.on(` domain scan below, or
+// the scan lies: a doc comment that mentions a call shape in prose (this
+// file has one -- "inlined in the pty.on('data') handler" a few lines above
+// oscParserFor) reads as a real call site once the name/shape filters that
+// used to narrow the match are gone. A flat "strings|comments" alternation
+// regex is unsound here (an English contraction like "doesn't" in a comment
+// is an unpaired `'` that swallows real code up to the next unrelated quote)
+// -- this is a single left-to-right character-state scanner instead, so a
+// comment's own characters (including its apostrophes) are consumed inside
+// the `line`/`block` states and never reach the string-matching logic at
+// all. No regex-literal state: session-service.ts has no regex literals
+// (checked), so that transition is not needed here.
+function stripComments(s: string): string {
+  let out = "";
+  let i = 0;
+  const n = s.length;
+  let state: "code" | "line" | "block" | "str" | "tmpl" = "code";
+  let strCh = "";
+  while (i < n) {
+    const c = s[i];
+    const c2 = s[i + 1];
+    if (state === "code") {
+      if (c === "/" && c2 === "/") { state = "line"; i += 2; continue; }
+      if (c === "/" && c2 === "*") { state = "block"; i += 2; continue; }
+      if (c === "'" || c === '"') { strCh = c; state = "str"; out += c; i++; continue; }
+      if (c === "`") { strCh = "`"; state = "tmpl"; out += c; i++; continue; }
+      out += c; i++; continue;
+    }
+    if (state === "line") {
+      if (c === "\n") { state = "code"; out += c; }
+      i++; continue;
+    }
+    if (state === "block") {
+      if (c === "*" && c2 === "/") { state = "code"; i += 2; continue; }
+      if (c === "\n") out += c;
+      i++; continue;
+    }
+    // "str" and "tmpl": copy verbatim, respect backslash escapes, close on
+    // the matching quote.
+    out += c;
+    if (c === "\\") { out += s[i + 1] ?? ""; i += 2; continue; }
+    if (c === strCh) state = "code";
     i++;
   }
-  return src.slice(openIdx + 1, i - 1);
+  return out;
+}
+
+// Balances delimiters from just after `openIdx` (which must point at an
+// opening `openCh`) and returns the index just PAST the matching `closeCh`.
+// Shared by brace and paren matching below -- string/regex-literal contents
+// are not excluded (accepted pre-existing limitation of this file's whole
+// regex-based approach, same as the original extractBracedBody).
+function findMatchingClose(s: string, openIdx: number, openCh: string, closeCh: string): number {
+  let depth = 1;
+  let i = openIdx + 1;
+  while (depth > 0 && i < s.length) {
+    if (s[i] === openCh) depth++;
+    else if (s[i] === closeCh) depth--;
+    i++;
+  }
+  return i;
+}
+
+function extractBracedBody(src: string, openIdx: number): string {
+  return src.slice(openIdx + 1, findMatchingClose(src, openIdx, "{", "}") - 1);
+}
+
+function extractParenBody(src: string, openIdx: number): string {
+  return src.slice(openIdx + 1, findMatchingClose(src, openIdx, "(", ")") - 1);
 }
 
 // toRuntime() is the source of truth for which RuntimeState fields the
@@ -45,17 +129,77 @@ function extractRuntimeFields(src: string): string[] {
   return [...returnBody.matchAll(/^\s*(\w+):/gm)].map((m) => m[1]!);
 }
 
-const DETECTOR_HANDLER_RE = /\w+Detector\.on\(\s*'[^']+',\s*\(\{[^}]*\}[^)]*\)\s*=>\s*\{/g;
+// ----- general `.on(...)` domain discovery (card 581a0d56) -----
 
-function findDetectorHandlers(src: string): Array<{ header: string; body: string }> {
-  const handlers: Array<{ header: string; body: string }> = [];
-  DETECTOR_HANDLER_RE.lastIndex = 0;
+interface OnCallSite {
+  line: number;
+  receiver: string;
+  argsText: string;
+}
+
+// Every `<expr>.on(` call site, independent of receiver NAME (no `Detector`
+// anchor) and of callback SHAPE (no destructured-object anchor) -- that
+// independence is the whole point of this rewrite.
+const ON_CALL_RE = /([\w.]+)\.on\(/g;
+
+function findOnCallSites(src: string): OnCallSite[] {
+  const sites: OnCallSite[] = [];
+  ON_CALL_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
-  while ((m = DETECTOR_HANDLER_RE.exec(src))) {
-    const body = extractBracedBody(src, m.index + m[0].length - 1);
-    handlers.push({ header: m[0], body });
+  while ((m = ON_CALL_RE.exec(src))) {
+    const openParenIdx = m.index + m[0].length - 1;
+    const argsText = extractParenBody(src, openParenIdx);
+    const line = src.slice(0, m.index).split("\n").length;
+    sites.push({ line, receiver: m[1]!, argsText });
   }
-  return handlers;
+  return sites;
+}
+
+// Resolves a `.on(...)` call's callback argument to its body TEXT, regardless
+// of shape: inline arrow with a destructured-object param, a positional
+// param, no param, `async`, or a single-expression body with no braces at
+// all (`(id) => this.autoResume(id)`) -- or a NAMED REFERENCE to a class
+// method / class-field arrow / local `const` arrow defined elsewhere in
+// `fullSrc`, resolved by name. Throws on a reference it cannot resolve,
+// rather than treating the unknown as non-mutating: a silently-skipped
+// reference is exactly the kind of blind spot this rewrite exists to close.
+function resolveCallbackBody(argsText: string, fullSrc: string, siteLabel: string): string {
+  let rest = argsText.replace(/^\s*'[^']*'\s*,\s*/, "").trim();
+  rest = rest.replace(/^async\s+/, "");
+
+  if (rest.startsWith("(")) {
+    const paramsEnd = findMatchingClose(rest, 0, "(", ")");
+    const afterParams = rest.slice(paramsEnd);
+    const arrowMatch = /^\s*(?::[^=]+)?=>\s*/.exec(afterParams);
+    if (!arrowMatch) {
+      throw new Error(`${siteLabel}: inline callback has no arrow after its parameter list -- unexpected shape`);
+    }
+    const bodyRest = afterParams.slice(arrowMatch[0].length);
+    if (bodyRest.trimStart().startsWith("{")) {
+      const braceIdx = bodyRest.indexOf("{");
+      return extractBracedBody(bodyRest, braceIdx);
+    }
+    return bodyRest; // single-expression arrow body, e.g. `this.autoResume(id)`
+  }
+
+  // Not an inline function -- a named reference (`this.handleFoo`, `handleFoo`).
+  // Resolve it against a class method, a class-field arrow, or a local `const`
+  // arrow defined anywhere else in the same source.
+  const name = rest.split(".").pop()?.trim();
+  if (!name) throw new Error(`${siteLabel}: could not parse callback reference "${rest}"`);
+  const defRe = new RegExp(
+    `\\b(?:private\\s+|public\\s+|protected\\s+)?(?:const\\s+)?${name}\\s*` +
+      `(?::[^=(]+)?=?\\s*(?:async\\s*)?\\(([^)]*)\\)[^{=]*(?:=>)?\\s*\\{`
+  );
+  const defMatch = defRe.exec(fullSrc);
+  if (!defMatch) {
+    throw new Error(
+      `${siteLabel}: passes a named reference ("${rest}") this guard cannot resolve to a definition. ` +
+        "Either convert the handler to an inline arrow, or extend resolveCallbackBody()'s definition " +
+        "patterns -- an unresolved reference is a guard blind spot, not a safe default."
+    );
+  }
+  return extractBracedBody(fullSrc, defMatch.index + defMatch[0].length - 1);
 }
 
 // A handler body ASSIGNS (not compares) a field if it contains `r.<field> =`
@@ -67,9 +211,15 @@ function mutatesField(body: string, field: string): boolean {
 }
 
 function findUnbroadcastMutators(src: string, fields: string[]): string[] {
-  return findDetectorHandlers(src)
-    .filter((h) => fields.some((f) => mutatesField(h.body, f)) && !h.body.includes("this.broadcast()"))
-    .map((h) => h.header);
+  return findOnCallSites(src)
+    .map((site) => {
+      const label = `L${site.line} ${site.receiver}.on(...)`;
+      const body = resolveCallbackBody(site.argsText, src, label);
+      const mutated = fields.filter((f) => mutatesField(body, f));
+      return { label, mutated, broadcasts: body.includes("this.broadcast()") };
+    })
+    .filter((s) => s.mutated.length > 0 && !s.broadcasts)
+    .map((s) => s.label);
 }
 
 // The only external reference for "how many fields toRuntime() should expose"
@@ -109,7 +259,7 @@ function assertNoUnexplainedShrinkage(fields: string[], known: string[]): void {
 }
 
 test("toRuntime()'s renderer-visible field set matches the known RuntimeState shape", () => {
-  const fields = extractRuntimeFields(readFileSync(SESSION_SERVICE_PATH, "utf-8"));
+  const fields = extractRuntimeFields(stripComments(readFileSync(SESSION_SERVICE_PATH, "utf-8")));
   // Shrinkage guard first: on a zero-field extraction it still has a known
   // baseline to compare against and prints the full four-cause diagnostic
   // (shorthand keys degrade to zero too, not just a one-line collapse).
@@ -123,10 +273,17 @@ test("toRuntime()'s renderer-visible field set matches the known RuntimeState sh
   expect(fields.sort()).toEqual([...KNOWN_FIELDS].sort());
 });
 
-test("every Detector.on handler in session-service.ts that mutates a renderer-visible field calls this.broadcast()", () => {
-  const src = readFileSync(SESSION_SERVICE_PATH, "utf-8");
+test("every `.on(...)` handler in session-service.ts that mutates a renderer-visible field calls this.broadcast()", () => {
+  const src = stripComments(readFileSync(SESSION_SERVICE_PATH, "utf-8"));
   const fields = extractRuntimeFields(src);
   assertExtractorProducedFields(fields);
+  // As of card 581a0d56's fix this sees all 5 real mutating sites (previously
+  // 3 of 5): quotaDetector.on('limit'/'clear'), attentionDetector.on('attention'),
+  // this.pty.on('exit') and the activity tracker's t.on((state) => ...) --
+  // the last two were the guard's own blind spot, not a real bug (both do
+  // call this.broadcast()). Negative control: startupAckDetector.on('ack')
+  // matches the domain (it's a real `.on(...)` site) but mutates nothing, so
+  // it must NOT appear here even though it's now in-scope.
   expect(findUnbroadcastMutators(src, fields)).toEqual([]);
 });
 
@@ -135,7 +292,7 @@ test("every Detector.on handler in session-service.ts that mutates a renderer-vi
 
 const FIXTURE_FIELDS = ["status", "thinking"];
 
-test("the guard flags an unknown handler that mutates a guarded field with no broadcast", () => {
+test("the guard flags a handler that mutates a guarded field with no broadcast (baseline, Detector-named + destructured)", () => {
   const src = `
     this.someNewDetector.on('event', ({ id }: any) => {
       const r = this.runtime.get(id)
@@ -165,6 +322,93 @@ test("the guard does not flag a handler that mutates a guarded field and also br
       r.thinking = busy
       this.broadcast()
     })
+  `;
+  expect(findUnbroadcastMutators(src, FIXTURE_FIELDS)).toEqual([]);
+});
+
+// ----- the four domain-growth vectors the OLD name+shape regex could never
+// see (card 581a0d56, point 3): each is fed alone, each must be flagged. -----
+
+test("vector (a) -- receiver name does NOT end in 'Detector'", () => {
+  const src = `
+    this.activityTracker.on('change', ({ id }: any) => {
+      const r = this.runtime.get(id)
+      if (!r) return
+      r.status = 'exited'
+    })
+  `;
+  expect(findUnbroadcastMutators(src, FIXTURE_FIELDS)).toHaveLength(1);
+});
+
+test("vector (b) -- handler passed by named reference, not an inline arrow", () => {
+  const src = `
+    class Foo {
+      wire(): void {
+        this.someDetector.on('event', this.handleSomeEvent)
+      }
+      private handleSomeEvent = ({ id }: any) => {
+        const r = this.runtime.get(id)
+        if (!r) return
+        r.status = 'exited'
+      }
+    }
+  `;
+  expect(findUnbroadcastMutators(src, FIXTURE_FIELDS)).toHaveLength(1);
+});
+
+test("vector (c) -- async inline callback", () => {
+  const src = `
+    this.someDetector.on('event', async ({ id }: any) => {
+      const r = this.runtime.get(id)
+      if (!r) return
+      r.status = 'exited'
+    })
+  `;
+  expect(findUnbroadcastMutators(src, FIXTURE_FIELDS)).toHaveLength(1);
+});
+
+test("vector (d) -- positional (non-destructured) param on a Detector-named receiver", () => {
+  const src = `
+    this.someDetector.on('event', (payload: any) => {
+      const r = this.runtime.get(payload.id)
+      if (!r) return
+      r.status = 'exited'
+    })
+  `;
+  expect(findUnbroadcastMutators(src, FIXTURE_FIELDS)).toHaveLength(1);
+});
+
+test("negative control -- all four vectors also broadcasting are NOT flagged (no false positives introduced by the rewrite)", () => {
+  const src = `
+    class Foo {
+      wireAll(): void {
+        this.activityTracker.on('change', ({ id }: any) => {
+          const r = this.runtime.get(id)
+          if (!r) return
+          r.status = 'exited'
+          this.broadcast()
+        })
+        this.someDetector.on('ref-event', this.handleRefEvent)
+        this.someDetector.on('async-event', async ({ id }: any) => {
+          const r = this.runtime.get(id)
+          if (!r) return
+          r.status = 'exited'
+          this.broadcast()
+        })
+        this.someDetector.on('positional-event', (payload: any) => {
+          const r = this.runtime.get(payload.id)
+          if (!r) return
+          r.status = 'exited'
+          this.broadcast()
+        })
+      }
+      private handleRefEvent = ({ id }: any) => {
+        const r = this.runtime.get(id)
+        if (!r) return
+        r.status = 'exited'
+        this.broadcast()
+      }
+    }
   `;
   expect(findUnbroadcastMutators(src, FIXTURE_FIELDS)).toEqual([]);
 });
