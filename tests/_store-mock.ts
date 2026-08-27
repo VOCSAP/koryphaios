@@ -12,7 +12,7 @@
 // store.ts ITSELF, so it also catches export #6 nobody has mocked yet.
 import { mock } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { TESTS_DIR } from "../scripts/pure-module-partition.ts";
 
 // Read as TEXT, never imported/executed: an actual `import` of store.ts
@@ -48,7 +48,25 @@ const STORE_SOURCE_PATH = join(import.meta.dir, "../desktop/src/renderer/src/sto
  * failure instead of a quietly dropped key. `export type` lines are
  * excluded on purpose -- erased at runtime, never a key a `mock.module`
  * factory needs.
+ *
+ * A RECOGNIZED line can still drop a key: reviewer-measured (card a688748b,
+ * mutation N1) that `export const tone = 1, badge = 2` matched the const
+ * regex, captured only the FIRST declarator ("tone"), and silently threw
+ * "badge" away with no error -- the same failure class as M6, one level
+ * lower (an incomplete EXTRACTION of a recognized line, not an unrecognized
+ * line). `hasTopLevelComma` below rejects any const line with more than one
+ * declarator instead of silently taking the first.
  */
+function hasTopLevelComma(text: string): boolean {
+  let depth = 0;
+  for (const ch of text) {
+    if (ch === "(" || ch === "{" || ch === "[") depth++;
+    else if (ch === ")" || ch === "}" || ch === "]") depth--;
+    else if (ch === "," && depth <= 0) return true;
+  }
+  return false;
+}
+
 function readRealStoreKeys(): string[] {
   const source = readFileSync(STORE_SOURCE_PATH, "utf-8");
   const keys = new Set<string>();
@@ -74,6 +92,13 @@ function readRealStoreKeys(): string[] {
     // the exact regex that produced the false positive.
     const constMatch = /^export\s+const\s+(?!enum\b)(\w+)/.exec(line);
     if (constMatch) {
+      // Reject multi-declarator lines instead of silently keeping only the
+      // first name (mutation N1, see this function's own docstring above).
+      if (hasTopLevelComma(line.slice(constMatch.index + constMatch[0].length))) {
+        throw new Error(
+          `readRealStoreKeys(): multi-declarator "export const" line not supported, cannot safely enumerate every declared name: ${JSON.stringify(line)}`
+        );
+      }
       keys.add(constMatch[1]!);
       continue;
     }
@@ -160,20 +185,37 @@ export const storeMockStubs = {
 // enters the swept set for free, without anyone adding its name anywhere.
 
 /**
- * All `.ts` files living directly under tests/ -- deliberately NOT
- * `scripts/pure-module-partition.ts`'s `listTestFiles()`, which filters to
- * `*.test.ts` for a DIFFERENT purpose (which files bun actually runs as a
- * suite). Reviewer-measured (card a688748b, mutation M1): scoping this
- * scan's domain to `*.test.ts` left a synthetic `_evil-helper.ts` --
- * exactly the shape of the two real, non-`.test.ts` helper files this
- * directory already has (`_helper.ts`, `_store-mock.ts` itself) --
- * completely invisible, since a helper never runs as a test file itself but
- * its `mock.module` call still lands in the same process the moment
- * anything imports it. Confirmed the only layout tests/ has today: every
- * file lives flat, none nested, so a plain `readdirSync` is exhaustive.
+ * Every TypeScript file under tests/, at any depth, as a path relative to
+ * tests/ (e.g. "desktop-tile-area.test.ts", or "fixtures/x.ts" for a
+ * nested one) -- deliberately NOT `scripts/pure-module-partition.ts`'s
+ * `listTestFiles()`, which filters to top-level `*.test.ts` for a DIFFERENT
+ * purpose (which files bun actually runs as a suite). Reviewer-measured
+ * (card a688748b, mutation M1): scoping this scan's domain to `*.test.ts`
+ * left a synthetic `_evil-helper.ts` -- exactly the shape of the two real,
+ * non-`.test.ts` helper files this directory already has (`_helper.ts`,
+ * `_store-mock.ts` itself) -- completely invisible, since a helper never
+ * runs as a test file itself but its `mock.module` call still lands in the
+ * same process the moment anything imports it.
+ *
+ * Extension pattern matches `.ts`/`.tsx`/`.mts`/`.cts` (mutation N3,
+ * reviewer-measured): a bare `f.endsWith(".ts")` let a `.tsx` helper --
+ * plausible in a directory that mounts React components with happy-dom --
+ * through undetected.
+ *
+ * RECURSIVE (mutation N2, reviewer-measured): tests/ already has real
+ * subdirectories today (`fixtures/`, `pty-harness/`, both non-TypeScript
+ * fixture data) -- an earlier draft of this function THREW on any
+ * subdirectory's mere existence, which would have made it fail against
+ * this very repo. `readdirSync(..., { recursive: true })` closes the
+ * domain-growth gap by construction instead: any `.ts` file added under a
+ * subdirectory later is swept for free, the same way a new top-level file
+ * already is, rather than requiring the assumption "still flat" to be
+ * re-verified by hand.
  */
 export function listTestsDirFiles(): string[] {
-  return readdirSync(TESTS_DIR).filter((f) => f.endsWith(".ts"));
+  return readdirSync(TESTS_DIR, { recursive: true, withFileTypes: true })
+    .filter((e) => e.isFile() && /\.[cm]?tsx?$/.test(e.name))
+    .map((e) => join(relative(TESTS_DIR, e.parentPath), e.name));
 }
 
 const CANONICAL_STORE_MOCK_FILE = "_store-mock.ts";

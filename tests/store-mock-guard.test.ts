@@ -107,16 +107,26 @@ test("findDirectStoreMocks: canonicalizes paths instead of comparing text -- a n
   );
 });
 
-test("listTestsDirFiles: matches an independent readdirSync scan, not a narrowed copy of it", () => {
+test("listTestsDirFiles: matches an independent readdirSync scan, and both it and the floor below are load-bearing", () => {
   // Reviewer-measured (card a688748b, mutation M5): a floor check
   // (`length > 100`) against the SAME function it is meant to guard stayed
   // green when that function's own implementation was truncated to 101 of
   // 218 -- a floor only catches an absurd value, not a plausible-looking
-  // narrowing. Recomputing the scan INDEPENDENTLY here and requiring EXACT
-  // equality (not just a floor) makes a narrowed production implementation
-  // mismatch immediately, whatever the narrowed count happens to be.
-  const independent = readdirSync(TESTS_DIR).filter((f) => f.endsWith(".ts"));
-  expect(independent.length).toBeGreaterThan(180); // sanity: still a real, non-trivial domain
+  // narrowing. The equality check below catches that: recomputing the scan
+  // independently and requiring EXACT equality makes a narrowed production
+  // implementation mismatch immediately, whatever the narrowed count is.
+  //
+  // But the floor is NOT subsumed by that equality, and dropping it would
+  // be a real regression (reviewer-measured, mutation N4): both this test's
+  // "independent" recomputation and the production function read the SAME
+  // `TESTS_DIR` constant. If `TESTS_DIR` itself drifted (e.g. toward
+  // `desktop/src/main`), the two sides would still agree with each other --
+  // equality holds VACUOUSLY on a small, wrong directory -- and only an
+  // absolute floor on the resulting size catches that a domain this small
+  // cannot be the real tests/. Floor catches a DOMAIN drift; equality
+  // catches an IMPLEMENTATION drift. Neither stands in for the other.
+  const independent = readdirSync(TESTS_DIR).filter((f) => /\.[cm]?tsx?$/.test(f));
+  expect(independent.length).toBeGreaterThan(180);
   expect(listTestsDirFiles().sort()).toEqual(independent.sort());
 });
 
