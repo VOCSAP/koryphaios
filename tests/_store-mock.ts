@@ -12,7 +12,8 @@
 // store.ts ITSELF, so it also catches export #6 nobody has mocked yet.
 import { mock } from "bun:test";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { listTestFiles, TESTS_DIR } from "../scripts/pure-module-partition.ts";
 
 const STORE_SPECIFIER = "../desktop/src/renderer/src/store.ts";
 
@@ -104,3 +105,85 @@ export const storeMockStubs = {
   inboxBadgeCount: (): number => 0,
   inboxAwaitsAction: (): boolean => false
 };
+
+// ---------------------------------------------------------------------------
+// Closing the residual `mockStore` itself declared above ("only guards a
+// call site that adopts it"): that phrasing is exactly the coverage failure
+// this repo's conventions single out -- sensitivity proven, coverage never
+// measured. `findDirectStoreMocks` below turns the domain into the whole
+// tests/ directory (via listTestFiles(), the same real on-disk inventory
+// scripts/pure-module-partition.ts and its own guard use -- not a copy of
+// that scan, an import of it), so a 6th file that hand-writes
+// `mock.module(".../store.ts", ...)` enters the swept set for free, without
+// anyone adding its name anywhere.
+
+const CANONICAL_STORE_MOCK_FILE = "_store-mock.ts";
+
+const REAL_STORE_ABS_PATH = resolve(TESTS_DIR, "../desktop/src/renderer/src/store.ts");
+
+/**
+ * Extracts every `mock.module(<specifier>, ...)` call's specifier argument
+ * from `source`, but ONLY when it is a plain string/template literal with
+ * no interpolation.
+ *
+ * COVERAGE, stated in code rather than left to be found the day it bites:
+ * a specifier built in a variable (`const s = "..."; mock.module(s, ...)`)
+ * or reached through a path alias instead of a relative path is INVISIBLE
+ * to this regex by construction -- an AST walk or a real Bun.plugin-level
+ * intercept of `mock.module` itself would be needed to see those, and
+ * neither exists here. `scripts/pure-module-partition.ts`'s own
+ * CONTAMINATION_MARKERS scan (which this file's OWN presence in `tests/`
+ * legitimately trips, since it contains the literal text `mock.module(`)
+ * makes the identical trade-off for the same reason. Degradation check: a
+ * regex NARROWED to double-quotes only would silently drop every
+ * single-quoted or template-literal specifier into the same blind spot --
+ * covered below by testing all three forms, not just the one the current 6
+ * adopters happen to use.
+ */
+function extractMockModuleSpecifiers(source: string): string[] {
+  const specifiers: string[] = [];
+  for (const m of source.matchAll(/mock\.module\(\s*(?:"([^"]*)"|'([^']*)'|`([^`]*)`)/g)) {
+    const specifier = m[1] ?? m[2] ?? m[3];
+    if (specifier !== undefined) specifiers.push(specifier);
+  }
+  return specifiers;
+}
+
+/**
+ * True if `specifier`, resolved as an import written inside `fromFile` (a
+ * bare filename directly under tests/ -- confirmed the only layout tests/
+ * has today: every *.test.ts lives flat, none nested), points at the real
+ * store.ts. Resolution is done with node:path, not string comparison, so a
+ * different relative depth (a specifier written from a hypothetical nested
+ * subdirectory) or a differently-spelled-but-equivalent path both resolve
+ * correctly -- CLAUDE.md's "comparing two paths, canonicalize both" applies
+ * here as much as it does to a live filesystem path. Extension-optional:
+ * Bun accepts a specifier without ".ts", so the comparison retries with it
+ * appended rather than treating that form as a non-match.
+ */
+function resolvesToStore(specifier: string, fromFile: string): boolean {
+  const fromDir = dirname(resolve(TESTS_DIR, fromFile));
+  const candidate = resolve(fromDir, specifier);
+  return candidate === REAL_STORE_ABS_PATH || `${candidate}.ts` === REAL_STORE_ABS_PATH;
+}
+
+/**
+ * Bare filenames (under tests/) that call `mock.module` against store.ts
+ * DIRECTLY, bypassing `mockStore`'s completeness check entirely. Domain is
+ * `listTestFiles()` -- the real inventory on disk -- not an enumerated
+ * list, so a brand new file enters the swept set the moment it exists.
+ * `_store-mock.ts` itself is exempt by name: it is the one file whose
+ * `mock.module(store.ts, ...)` call (inside `mockStore` above) IS the
+ * canonical, checked one -- everything else finding its way here is a
+ * second, unchecked path to the same specifier.
+ */
+export function findDirectStoreMocks(
+  files: string[] = listTestFiles(),
+  readSource: (file: string) => string = (f) => readFileSync(resolve(TESTS_DIR, f), "utf-8")
+): string[] {
+  return files.filter((file) => {
+    if (file === CANONICAL_STORE_MOCK_FILE) return false;
+    const source = readSource(file);
+    return extractMockModuleSpecifiers(source).some((specifier) => resolvesToStore(specifier, file));
+  });
+}

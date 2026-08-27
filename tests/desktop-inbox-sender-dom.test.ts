@@ -55,6 +55,7 @@ afterAll(async () => {
 
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased before bun resolves it
+import { mockStore, storeMockStubs } from "./_store-mock";
 
 // Dynamic import: must run AFTER GlobalRegistrator.register() above, because
 // react-dom inspects `window`/`document` at import time and a static import
@@ -125,11 +126,9 @@ function resetFakeStore(): void {
 // `errorText` is InboxPanel.tsx's other named import from '../store' (used
 // only inside catch blocks of deleteEntry/sendReply/answerApproval, none of
 // which this file's render-only tests exercise) -- must still exist as an
-// export or the module fails to load.
-mock.module("../desktop/src/renderer/src/store.ts", () => ({
-  useDeck: fakeUseDeck,
-  errorText: (e: unknown) => String(e)
-}));
+// export or the module fails to load. mockStore (tests/_store-mock.ts,
+// card a688748b) requires every real store.ts export, not just this one.
+mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 
 // '@shared/types': only `inboxEntryKey` is a real (value) import in
 // InboxPanel.tsx; every other named import from this specifier there is
