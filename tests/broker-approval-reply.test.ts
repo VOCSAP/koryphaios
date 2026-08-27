@@ -228,7 +228,7 @@ describe("channel return path", () => {
 
 describe("de-duplication", () => {
   test("a second raise for the same waiting tile reuses the first approval", async () => {
-    // The hook's idle_prompt and the Deck's attention detector both fire on the
+    // The hook's agent_needs_input and the Deck's attention detector both fire on the
     // same screen; the operator's phone must ring once, not twice.
     const b = await startBroker();
     brokers.push(b);

@@ -139,7 +139,7 @@ can now be answered too.
 
 **De-duplication.** A tile can only wait on one thing at a time, so a second
 pending approval for the same `tile_ref` returns the first instead of creating
-another: the hook's `idle_prompt` and the Deck's attention detector both fire
+another: the hook's `agent_needs_input` and the Deck's attention detector both fire
 on the same screen, and the operator's phone must ring once.
 
 Agents reach it through the `ask_operator` / `ask_operator_wait` MCP tools
