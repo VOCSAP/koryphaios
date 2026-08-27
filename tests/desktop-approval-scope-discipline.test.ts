@@ -171,6 +171,44 @@ function codeOnly(line: string): string {
 }
 
 /**
+ * Does this LINE reach the table in code, as opposed to naming it in prose?
+ *
+ * MEASURED 2026-08-27, card 47baf25a: the file-level audit below carried its
+ * OWN naive `source.includes(TABLE)`, with none of the comment discipline the
+ * statement-level audit had already been forced to learn (defect B3, argued in
+ * `codeOnly` above). It therefore refused `tests/approval-hook.test.ts`, a file
+ * that reaches approvals exclusively through `POST /approval/list` with the
+ * operator credential and names the table ONCE, in a doc block explaining what
+ * the hook's early return prevents. A guard that punishes DOCUMENTATION of
+ * the thing it protects trains people to stop writing the documentation.
+ *
+ * This is A1 one level up, and the file said so itself: "sharing the parser was
+ * not sharing the predicate". Both audits now share this one body, so the
+ * file-level half cannot drift from the statement-level half again. Note the
+ * direction of the change is NOT a weakening: it drops prose, and in exchange
+ * the file scan gains the case-insensitivity and the split-name detection
+ * (D2a/D2b) that it never had -- a file writing `PENDING_APPROVALS` or
+ * `"pending_" + "approvals"` used to read, to that scan, as a file that does
+ * not mention the table at all.
+ */
+function namesTableInCode(line: string): boolean {
+  const trimmed = line.trimStart();
+  if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) return false;
+  // D2, MEASURED: matched case-sensitively and as a whole word, so
+  // `PENDING_APPROVALS` and `"pending_" + "approvals"` both slipped through.
+  // Lower-casing closes the first; looking for the HALVES closes the second,
+  // since a scan that only knows the assembled name cannot see a name the
+  // source never assembles.
+  const lower = codeOnly(line).toLowerCase();
+  return lower.includes(TABLE) || (lower.includes("pending_") && lower.includes("approvals"));
+}
+
+/** Whole-file form of the predicate above. Used by the audit AND by its probes. */
+function fileNamesTable(source: string): boolean {
+  return source.split("\n").some(namesTableInCode);
+}
+
+/**
  * THE predicate. One body, used by the real audit AND by the bite probes.
  *
  * A1, MEASURED, and the worst defect of the three: the audit and the probes
@@ -187,16 +225,10 @@ function offendersIn(source: string, label: string): string[] {
   const found: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i] ?? "";
-    // D2, MEASURED: matched case-sensitively and as a whole word, so
-    // `PENDING_APPROVALS` and `"pending_" + "approvals"` both slipped through.
-    // Lower-casing closes the first; looking for the HALVES closes the second,
-    // since a scan that only knows the assembled name cannot see a name the
-    // source never assembles.
-    const lower = codeOnly(line).toLowerCase();
-    const names = lower.includes(TABLE) || (lower.includes("pending_") && lower.includes("approvals"));
-    if (!names) continue;
-    const trimmed = line.trimStart();
-    if (trimmed.startsWith("//") || trimmed.startsWith("*") || trimmed.startsWith("/*")) continue;
+    // The naming test lives in `namesTableInCode` so this audit and the
+    // file-level one below cannot disagree about what "reaches the table"
+    // means. Merging them is the fix for the false positive documented there.
+    if (!namesTableInCode(line)) continue;
     const window = statementAt(lines, i)
       .split("\n")
       .map(codeOnly)
@@ -214,7 +246,7 @@ describe("no unscoped SQL reaches pending_approvals", () => {
     for (const file of walk(REPO_ROOT)) {
       const rel = relative(REPO_ROOT, file);
       if (ALLOWED_FILES.has(rel) || ALLOWED_FILES.has(rel.split("/").join(sep))) continue;
-      if (readFileSync(file, "utf-8").includes(TABLE)) offenders.push(rel);
+      if (fileNamesTable(readFileSync(file, "utf-8"))) offenders.push(rel);
     }
     expect(
       offenders,
@@ -300,6 +332,47 @@ describe("no unscoped SQL reaches pending_approvals", () => {
     ];
     for (const [label, src, expected] of cases) {
       expect(clean(src), `probe "${label}"`).toBe(expected);
+    }
+  });
+
+  test("the FILE scan ignores prose and still refuses a new file that reaches the table", () => {
+    // The file-level half used to be a bare `includes(TABLE)`, so it had no
+    // probes at all and nothing would have caught it drifting from the
+    // statement-level half. These call `fileNamesTable`, the function the audit
+    // itself calls -- not a copy of its logic (A1).
+    //
+    // The first case alone would be satisfied by `fileNamesTable = () => false`,
+    // which is exactly how an absence assertion accepts the destruction of the
+    // thing it guards. The four that follow are its negative control: they are
+    // what makes the relaxation a REFINEMENT rather than a hole, and three of
+    // them are forms the old `includes(TABLE)` did NOT catch.
+    const cases: Array<[string, string, boolean]> = [
+      [
+        "prose in a doc block, the false positive this refinement fixes",
+        ["/**", ` * ... between an idle session and a row in \`${TABLE}\`.`, " */", "const x = 1;"].join("\n"),
+        false,
+      ],
+      ["a line comment naming the table", [`// we never insert into ${TABLE} here`].join("\n"), false],
+      [
+        "real SQL in a file nobody sanctioned",
+        [`const r = db.query("SELECT * FROM ${TABLE} WHERE id = ?").get(x);`].join("\n"),
+        true,
+      ],
+      [
+        // Was invisible to the old file scan: case-sensitive whole-name match.
+        "the table named in upper case",
+        [`db.query("DELETE FROM ${TABLE.toUpperCase()}").run();`].join("\n"),
+        true,
+      ],
+      [
+        // Also invisible: the source never assembles the name.
+        "the table name built by concatenation",
+        [`db.query("SELECT * FROM " + "pending_" + "approvals").all();`].join("\n"),
+        true,
+      ],
+    ];
+    for (const [label, src, expected] of cases) {
+      expect(fileNamesTable(src), `file probe "${label}"`).toBe(expected);
     }
   });
 
