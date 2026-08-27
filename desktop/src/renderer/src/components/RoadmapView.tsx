@@ -8,7 +8,7 @@ import type {
   RoadmapStatus,
   StopResult
 } from '@shared/types'
-import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
+import { GLYPH_ACTIONS, GLYPH_BADGES, roleGlyph } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
@@ -1018,6 +1018,15 @@ export function RoadmapView(): React.JSX.Element {
                 >
                   <span className="rm-assign-dot" style={{ background: s.color }} />
                   <span className="rm-assign-name">{s.name}</span>
+                  {/* Role glyph (card b5ba8cac): this dialog is where the
+                      operator picks WHO to dispatch an item to, so what the
+                      agent DOES is the deciding information, next to the
+                      laurel that already qualifies the row. */}
+                  {roleGlyph(s.role) && (
+                    <span title={t('sidebar.roleTitle', { role: s.role ?? '' })}>
+                      {roleGlyph(s.role)}
+                    </span>
+                  )}
                   {s.lead && <span title={t('sidebar.leadTitle')}>{GLYPH_BADGES.laurel}</span>}
                   <span className="rm-assign-peer">{s.peerId}</span>
                 </button>

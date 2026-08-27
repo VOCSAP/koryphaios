@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import type { SessionRuntime } from '@shared/types'
 import { moveBeside } from '@shared/reorder'
-import { GLYPH_ACTIONS, GLYPH_BADGES, GLYPHS, PithosGlyph } from './icons'
+import { GLYPH_ACTIONS, GLYPH_BADGES, GLYPHS, PithosGlyph, roleGlyph } from './icons'
 import { useDeck } from '../store'
 import { formatPeerTable } from '../peer-table'
 import { formatClock, useT } from '../i18n'
@@ -163,9 +163,14 @@ export function SessionRow({
                   : t(`status.${session.status}`)
         }
       />
-      {/* Slot kept free between the status dot and the laurel: the per-peer ROLE
-          glyph (card b5ba8cac) lands here, in both states, without reopening
-          this layout. */}
+      {/* The ROLE glyph (card b5ba8cac) does NOT land here, although a comment
+          in this spot used to reserve the slot: measured on screen, a badge
+          inserted between the dot and .row-main pushes the session name from
+          x=111 to x=132 on role-bearing rows ONLY, which is the very ragged
+          left edge card b0042a27 removed by pulling the laurel out of
+          .row-name. It is rendered after .row-main instead, next to the
+          laurel — see there for why that placement also serves the folded
+          rail without a second rule. */}
       {!collapsed && (
         <div className="row-main">
           {editing ? (
@@ -223,6 +228,20 @@ export function SessionRow({
             </span>
           )}
         </div>
+      )}
+      {/* Role mark (card b5ba8cac): what this agent DOES, read straight from
+          the local SessionDef (no broker round-trip -- SessionRuntime extends
+          SessionDef). It sits in the SAME right-hand badge column as the
+          laurel, ahead of it, for one reason that covers both panel states:
+          folded, .row-main is not rendered at all, so this exact DOM order
+          collapses to dot -> role -> laurel with no conditional rule, while
+          unfolded every name still starts at the same x. The two marks are
+          independent dimensions -- a lead that also carries a role shows both,
+          side by side. No role => nothing rendered, row unchanged. */}
+      {roleGlyph(session.role) && (
+        <span className="row-role" title={t('sidebar.roleTitle', { role: session.role ?? '' })}>
+          {roleGlyph(session.role)}
+        </span>
       )}
       {/* Team-lead mark: a badge of the ROW, anchored right of .row-main, not an
           ornament of the name -- inside .row-name it pushed lead names right and

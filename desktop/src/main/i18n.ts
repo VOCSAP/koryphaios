@@ -345,6 +345,12 @@ export const EN_DEFAULTS: Record<string, string> = {
   'sidebar.setLead': 'Designate as team-lead',
   'sidebar.leadTitle':
     'Team-lead: targeted app notices (dispatch, integrations) go to this session',
+  // ONE parameterised key rather than one label per role (card b5ba8cac): the
+  // role is a free-text kebab identifier the create dialog already shows RAW,
+  // and an operator-typed role through "Other…" could never have a key at all.
+  // Translating six of them and leaving the seventh untranslated would be the
+  // inconsistency; the tooltip names the role exactly as it was chosen.
+  'sidebar.roleTitle': 'Role: {role}',
   'create.lead': 'Team-lead of this window',
   'create.leadHelp':
     'Targeted app notices (queue dispatch, integration notices) go to the team-lead. One per window; designating a new one demotes the previous.',

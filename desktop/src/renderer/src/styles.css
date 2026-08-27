@@ -7,13 +7,22 @@
                by `svg.glyph { width: 1em }`, so 20 is NOT the number to use)
                = 45
        row     1 (panel border) + 4 (.rows padding) + 7 (row padding) + 9 (dot)
-               + 6 (gap) + 13 (laurel) + 7 (row padding) + 4 = 51
-     58 therefore leaves 7px of true slack on the row, the tighter of the two.
-     It was 52, which left ONE pixel, and one pixel is a coincidence rather than
-     a margin: any future badge, or the role glyph of card b5ba8cac, overflows a
-     rail sized that way. The scrollbar is a third occupant and is dealt with
-     where the rows are styled, not by this number. */
-  --sidebar-rail-w: 58px;
+               + 6 (gap) + 13 (role glyph, card b5ba8cac) + 6 (gap)
+               + 13 (laurel) + 7 (row padding) + 4 = 70
+     70 is therefore the row's own sum with its right padding intact, and the
+     row is again the tighter of the two occupants. It was 58 when the row
+     carried the laurel alone (and 52 before that, which left ONE pixel — a
+     coincidence rather than a margin). MEASURED on screen before the role
+     glyph shipped: keeping 58 made the laurel end at x=116, exactly the
+     panel's right edge, with li.scrollWidth 54 > li.offsetWidth 49 — clipped,
+     and no build, test or stylesheet audit shows that. The clip threshold sits
+     at ~63, so 70 keeps 7px between this value and the coupe.
+     NO SPARE IS BUILT IN, deliberately: a reserve is a promise nobody
+     recomputes, and it costs the tile area that width permanently. The next
+     occupant re-adds its own term to the sum above, exactly as this one did.
+     The scrollbar is a third occupant and is dealt with where the rows are
+     styled, not by this number. */
+  --sidebar-rail-w: 70px;
   /* Width of the rail left by a CONTENT panel folded to its lone control
      (roadmap filters, card 7a2e76c6; graph conversations, card 67c21dd5).
      Recomputed from its own occupants rather than copied from the rail above
@@ -22,12 +31,13 @@
        1 (panel border-right) + 12 (head padding-left) + 33 (fold button:
        glyph 1em = 13 + padding 9+9 + border 1+1) + 12 (head padding-right)
        = 58
-     It lands on the same value as --sidebar-rail-w, and that is arithmetic,
-     not a copy: same 12px gutter, same `.icon-btn`. They stay TWO tokens
-     because they have two drivers -- the one above is sized by its ROWS (the
-     role glyph of card b5ba8cac widens it), this one by a single control that
-     cannot grow. Merged, the roadmap rail would fatten the day a sidebar
-     badge does.
+     It used to land on the same value as --sidebar-rail-w, and that was
+     arithmetic, not a copy: same 12px gutter, same `.icon-btn`. They stayed
+     TWO tokens because they have two drivers -- the one above is sized by its
+     ROWS, this one by a single control that cannot grow. The split has now
+     PAID: the role glyph of card b5ba8cac took the sidebar rail to 70 while
+     this one, whose occupant did not change, stays at 58. Merged, the roadmap
+     rail would have fattened for a badge it does not display.
      WHAT THE GUTTER GOVERNS IS SLACK, NOT POSITION. The "same pixel in both
      states" promise is kept by the folded rule NOT overriding the head's
      horizontal padding, whatever its value -- an unchanged padding cannot
@@ -370,8 +380,9 @@ body {
   /* Left-aligned, NOT centred: centring re-flows the strip every time a row
      gains a badge, so the activity dot -- the one signal read by scanning a
      column -- slid sideways on the team-lead row. Fixed left edge keeps the dot
-     column straight and lets the badges grow to its right (the role glyph of
-     card b5ba8cac only widens --sidebar-rail-w). */
+     column straight and lets the badges grow to its right -- which is exactly
+     what the role glyph of card b5ba8cac did: it cost one term in the
+     --sidebar-rail-w sum and not one line of this layout. */
   justify-content: flex-start;
   gap: 6px;
   padding: 7px 7px;
@@ -559,6 +570,22 @@ body {
   align-items: center;
   flex: 0 0 auto;
   color: var(--accent);
+}
+
+/* Peer ROLE mark (card b5ba8cac), the laurel's neighbour in the same badge
+   column: same box, same `flex: 0 0 auto` so it never shrinks under a long
+   name, and the glyph renders at 1em like every other (13px at the app's base
+   font -- the value the rail token is sized from).
+   TONE, and it is the one difference from .row-lead: --fg-dim, not --accent.
+   The row already spends the accent on identity (.row-branch, the laurel), and
+   a second accent-coloured badge would make lead and role compete for the same
+   "this row is special" reading. The role qualifies EVERY session that has
+   one, so it is meta, not a distinction -- dim is what says that. */
+.row-role {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  color: var(--fg-dim);
 }
 
 /* Quota badge under the peer id while a session sits at the limit screen. */

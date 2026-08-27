@@ -220,6 +220,7 @@
   "settings.spawnModeFullControlHelp": "Each agent is confirmed one by one before it launches. Most control, most clicks.",
   "sidebar.setLead": "Designate as team-lead",
   "sidebar.leadTitle": "Team-lead: targeted app notices (dispatch, integrations) go to this session",
+  "sidebar.roleTitle": "Role: {role}",
   "create.lead": "Team-lead of this window",
   "create.leadHelp": "Targeted app notices (queue dispatch, integration notices) go to the team-lead. One per window; designating a new one demotes the previous.",
   "create.leadTaken": "a team-lead already exists (checking moves the crown)",

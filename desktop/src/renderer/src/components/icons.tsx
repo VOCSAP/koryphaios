@@ -914,6 +914,130 @@ const IconBeacon = (
     </Svg>
 )
 
+// --- Role glyphs (card b5ba8cac) ---
+// What a peer DOES, one mark per role, sitting in the SAME badge column as the
+// team-lead laurel and receiving the same treatment (24-grid, stroke 1.5,
+// currentColor) — the two are independent dimensions, so a peer can wear both.
+// DRAWN FOR 13 PIXELS, not for 24: `svg.glyph { width: 1em }` renders these at
+// the row's font-size (measured 13×13 on screen), where anything thinner than
+// ~2 grid units disappears. Each metaphor was therefore chosen for its
+// SILHOUETTE — hammer, lens, dividers, clew, web, ship — because at that size
+// the outline is the only thing that survives; internal detail is noise.
+
+/**
+ * Hephaestus' hammer, held at an angle: the one who forges the thing
+ * (developer). The tilt is not decoration — drawn upright, at 13px the head
+ * and the shaft collapse into a capital T (measured on screen, first pass).
+ */
+const IconRoleHammer = (
+  <Svg>
+    <path d="M12.6 3.3 20 10.7l-3.2 3.2-7.4-7.4z" />
+    <path d="M10.2 8.9 4 19.8" />
+  </Svg>
+)
+
+/** Eye of Argus Panoptes, who watched with a hundred eyes (reviewer). */
+const IconRoleEye = (
+  <Svg>
+    <path d="M2.8 12S6.4 6.5 12 6.5 21.2 12 21.2 12 17.6 17.5 12 17.5 2.8 12 2.8 12z" />
+    <circle cx="12" cy="12" r="2.6" />
+  </Svg>
+)
+
+/**
+ * Stathme — the plumb line that sets a building true (architect). Dividers
+ * were drawn first and rejected on screen: two legs and a hinge bar read as a
+ * capital A at 13px, and a letter inside a glyph set is worse than no glyph.
+ */
+const IconRolePlumb = (
+  <Svg>
+    <path d="M9 3.5h6" />
+    <path d="M12 3.5v7.2" />
+    <path d="m12 10.7 3.8 4.3-3.8 5.5-3.8-5.5z" />
+  </Svg>
+)
+
+/**
+ * Ariadne's clew: the thread followed back out of the labyrinth (debugger).
+ * The wound arc INSIDE the ball is what keeps it a ball of thread instead of
+ * a lens, and the serpentine tail is what keeps it away from the search
+ * magnifier (circle + straight handle) it echoed on the first pass.
+ */
+const IconRoleClew = (
+  <Svg>
+    <circle cx="8" cy="7.6" r="4.6" />
+    <path d="M4.2 5c2.4 1.6 4.2 3.8 5 6.8" />
+    <path d="M11.8 5c-2.4 1.6-4.2 3.8-5 6.8" />
+    <path d="M10.6 11.2c2 2.2.2 4-.2 5.6-.4 1.8 1 3 3 2.6" />
+  </Svg>
+)
+
+/**
+ * Arachne's web: the one who weaves the surface (web-designer). Corner web,
+ * three radii and two circular arcs BULGING AWAY from the anchor — the first
+ * pass sagged them inward with quadratic curves and the whole quadrant filled
+ * in as a blob at 13px. Two arcs is the floor: one reads as a fan.
+ */
+const IconRoleWeb = (
+  <Svg>
+    <path d="M4.5 19.5V4.5M4.5 19.5 16 8M4.5 19.5h15" />
+    <path d="M4.5 11.5A8 8 0 0 1 12.5 19.5" />
+    <path d="M4.5 6A13.5 13.5 0 0 1 18 19.5" />
+  </Svg>
+)
+
+/** The Argo: the ship that went looking (explorer). */
+const IconRoleShip = (
+  <Svg>
+    <path d="M3.5 15.5h17c-1.3 2.9-4.2 4.3-8.5 4.3s-7.2-1.4-8.5-4.3z" />
+    <path d="M12 15.5V3.8" />
+    <path d="M13 6c2.9 1.8 4.5 4 5 6.9h-5" />
+  </Svg>
+)
+
+/**
+ * Herm: the roadside stone that names whoever it marks. The FALLBACK, so a
+ * role typed through "Other…" still shows that the session HAS one (with the
+ * label in the tooltip) instead of vanishing — an unknown role is unnamed
+ * here, not absent, and rendering nothing would hide exactly the metadata the
+ * role was added to surface.
+ */
+const IconRoleHerm = (
+  <Svg>
+    <circle cx="12" cy="6" r="2.3" />
+    <path d="M7.5 10.5h9" />
+    <path d="M9 10.5 9.6 20h4.8l.6-9.5" />
+  </Svg>
+)
+
+/**
+ * Role → glyph. Keys are the broker's normalised role shape (kebab, lowercase),
+ * so the lookup happens after the same normalisation `sanitizeRole` applies.
+ * NOT exhaustive over `BUILTIN_ROLES` on purpose (card b5ba8cac covers six
+ * roles): every other role, built-in or operator-typed, resolves to the herm
+ * through `roleGlyph`, which is why this is a plain record and not a
+ * `Record<Role, …>` that would fail the build the day a role is added.
+ */
+export const ROLE_GLYPHS: Record<string, React.JSX.Element> = {
+  developer: IconRoleHammer,
+  reviewer: IconRoleEye,
+  architect: IconRolePlumb,
+  debugger: IconRoleClew,
+  'web-designer': IconRoleWeb,
+  explorer: IconRoleShip
+}
+
+/**
+ * The glyph for a peer's role, or `null` when the peer has NO role (the row
+ * must then render exactly as it did before this card). Anything present but
+ * unmapped gets the herm: no crash, no hole, and the tooltip still names it.
+ */
+export function roleGlyph(role: string | undefined | null): React.JSX.Element | null {
+  const key = (role ?? '').trim().toLowerCase()
+  if (key.length === 0) return null
+  return ROLE_GLYPHS[key] ?? IconRoleHerm
+}
+
 export const GLYPH_BADGES = {
   laurel: IconLaurel,
   scales: IconScales,
