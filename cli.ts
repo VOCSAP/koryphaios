@@ -25,6 +25,8 @@
 
 import { loadConfig, brokerUrl } from "./shared/config.ts";
 import type { Peer, GroupStatsResponse, RoadmapUpsertResponse } from "./shared/types.ts";
+import { computeProjectKey } from "./shared/summarize.ts";
+import { resolveProjectKey } from "./shared/project-key.ts";
 
 const config = await loadConfig();
 const BROKER_URL = brokerUrl(config);
@@ -55,6 +57,31 @@ async function brokerPost<T>(path: string, body: unknown): Promise<T> {
     throw new Error(`${res.status}: ${await res.text()}`);
   }
   return res.json() as Promise<T>;
+}
+
+/**
+ * KNOWN, TRACKED DUPLICATE (card 51fd7b65), not an oversight: a second
+ * implementation of "find the git root", the other being server.ts's own
+ * private getGitRoot(). Shipping a second producer of a helper the codebase
+ * already has is the exact divergence this lot exists to close, one layer
+ * down. Deferred hoist into shared/project-key.ts (resolveProjectKey's
+ * home): that file was mid-review, and writing into it would have
+ * invalidated an in-flight verdict. Delete this copy once it lands there.
+ */
+async function getGitRoot(cwd: string): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(["git", "rev-parse", "--show-toplevel"], {
+      cwd,
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    const text = await new Response(proc.stdout).text();
+    const code = await proc.exited;
+    if (code === 0) return text.trim();
+  } catch {
+    // not a git repo
+  }
+  return null;
 }
 
 function formatPeerLine(p: Peer): string {
@@ -249,12 +276,57 @@ switch (cmd) {
     }
     try {
       const payload = JSON.parse(await Bun.file(file).text()) as Record<string, unknown>;
-      for (const field of ["project_key", "by", "title"] as const) {
+      // Card 51fd7b65: project_key is no longer a required payload field --
+      // this verb derives it below, the same way server.ts's
+      // roadmapProjectKey() does for a live MCP session. See the derivation
+      // block further down for why a payload-declared value is still read
+      // (compared, not trusted).
+      for (const field of ["by", "title"] as const) {
         if (!payload[field] || typeof payload[field] !== "string") {
           console.error(`Payload must include a string '${field}' field.`);
           process.exit(1);
         }
       }
+
+      // Card 51fd7b65: this verb used to require the CALLER to hand-compute
+      // project_key and send it VERBATIM -- the same divergence risk
+      // resolveProjectKey/normalizeRemoteUrl exist to close for every other
+      // producer (card 6aa32af4, shared/project-key.ts). A miscased or stale
+      // value here silently wrote into a DIFFERENT project's roadmap with no
+      // error at all: three cards were lost this way into
+      // `github.com/VOCSAP/koryphaios` (see roadmap-scribe.md's incident
+      // note) before being recovered by hand, 2026-08-27. This CLI is a
+      // one-shot process with no live session state, so it derives its own
+      // project_key from its own cwd -- computeProjectKey(cwd)
+      // (shared/summarize.ts) for the git-remote form, resolveProjectKey()
+      // (shared/project-key.ts) for the local:<hash> fallback when there is
+      // no remote -- instead of trusting the caller's claim.
+      const cwd = process.cwd();
+      const gitRoot = await getGitRoot(cwd);
+      const remoteProjectKey = await computeProjectKey(cwd);
+      const derivedProjectKey = resolveProjectKey(remoteProjectKey, gitRoot, cwd);
+
+      // A payload-declared project_key is not silently trusted NOR silently
+      // dropped: a caller that still writes one (roadmap-scribe.md's
+      // documented payload shape still does today, pending that page's own
+      // fix) believes it is authoritative, so a MISMATCH is refused loudly,
+      // before any network call, rather than overridden without a trace --
+      // the same refuse-don't-diverge discipline as card c92614ed's
+      // project_key checks in broker.ts. A matching value (the common case
+      // today) is a no-op.
+      if (
+        typeof payload.project_key === "string" &&
+        payload.project_key.length > 0 &&
+        payload.project_key !== derivedProjectKey
+      ) {
+        console.error(
+          `Payload's project_key ('${payload.project_key}') does not match this repo's derived key ` +
+            `('${derivedProjectKey}') -- remove project_key from the payload and let this verb derive it ` +
+            `from cwd, or fix the mismatch.`
+        );
+        process.exit(1);
+      }
+
       // Roadmap card 39c40571, layer 1. The broker now refuses a write whose
       // `by` names a REGISTERED peer without that peer's instance_token, and
       // this fallback has no token to present -- the scribe's documented
@@ -269,9 +341,10 @@ switch (cmd) {
       // dropped for the same reason -- this verb must never become a way to
       // launder one.
       const claimed = String(payload.by);
-      const { instance_token: _dropped, ...safePayload } = payload;
+      const { instance_token: _dropped, project_key: _droppedProjectKey, ...safePayload } = payload;
       const result = await brokerPost<RoadmapUpsertResponse>("/roadmap/upsert", {
         ...safePayload,
+        project_key: derivedProjectKey,
         by: claimed.startsWith("cli:") ? claimed : `cli:${claimed}`,
       });
       console.log(JSON.stringify(result.item, null, 2));
