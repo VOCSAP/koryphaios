@@ -89,7 +89,13 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   trust-mode gate (`config.supervisorSpawnMode`, Settings > General):
   `hands-free` (default, consent rule enforced at system-prompt level),
   `team-review` (one native recap dialog per plan), `full-control` (one
-  dialog per agent).
+  dialog per agent). The broadcast fired when a fresh session's peer_id
+  resolves is separately gated by `config.joinAnnounceLevel` (Settings >
+  General, card `8cb54a0f`): `off` (default, no announce), `lead` (only the
+  active team-lead session(s) by `role`, falling back to the active
+  supervisor(s), silent if neither exists), `all` (the historical
+  broadcast-to-everyone). Resolved per this Deck window's own `service.list()`
+  only, same locality as the spawn-ack tap above.
 - **Locked harnesses (C8 rule)**: every agent prompt (supervisor, plan import,
   reviewer, dispatch, digest, help assistant, context wand, graph chat/merge/
   judge) is a CODE CONSTANT, never operator- or repo-configurable. One-shot

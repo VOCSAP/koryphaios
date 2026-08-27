@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { LaunchPreset, ModelOption } from '@shared/types'
 import type { ProviderCatalog } from '@shared/models'
 import { defaultAnnounceDraft } from '@shared/announce'
-import { mergeRoleChoices, sanitizeRole } from '@shared/role'
+import { mergeRoleChoices, sanitizeRole, TEAM_LEAD_ROLE } from '@shared/role'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
@@ -196,7 +196,7 @@ export function CreateMenu({
   // `lead` programmatically.
   useEffect(() => {
     if (roleTouched || roleOther) return
-    setRole(lead ? 'team-lead' : '')
+    setRole(lead ? TEAM_LEAD_ROLE : '')
   }, [lead, roleTouched, roleOther])
 
   /** Commit the free-text role: normalise, remember it for next time, select it. */

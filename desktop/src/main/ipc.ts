@@ -1395,12 +1395,21 @@ export function registerIpc({
     templateSource(path, getConfig().projectDir) ? readTemplate(path) : null
   )
   regHandle('template:write', (_e, name: string, local: boolean, tpl: unknown) => {
-    // parseTemplate validates the shape AND normalizes lead uniqueness.
+    // parseTemplate validates the shape AND normalizes lead uniqueness; a
+    // demotion here is surfaced the same way readTemplate does (card 240d6efd).
     const parsed = parseTemplate(tpl)
     if (!parsed) throw new Error('invalid template')
-    if (name && name.trim()) parsed.name = name.trim()
+    if (parsed.demotedLeadNames.length > 0) {
+      reportError(
+        'template',
+        `template:write ${name || '(unnamed)'}: multiple sessions had lead: true, kept only ` +
+          `the first (demoted: ${parsed.demotedLeadNames.join(', ')})`
+      )
+    }
+    const out = parsed.template
+    if (name && name.trim()) out.name = name.trim()
     const dir = local ? localTemplatesDir(getConfig().projectDir) : globalTemplatesDir()
-    return writeTemplate(dir, name || parsed.name || 'template', parsed)
+    return writeTemplate(dir, name || out.name || 'template', out)
   })
 
   // ----- forward service events to every surface (window + companion, MB1) -----

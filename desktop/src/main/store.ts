@@ -2,7 +2,12 @@ import { app } from 'electron'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { SUPERVISOR_SPAWN_MODES, type AppConfig, type SessionDef } from '@shared/types'
+import {
+  JOIN_ANNOUNCE_LEVELS,
+  SUPERVISOR_SPAWN_MODES,
+  type AppConfig,
+  type SessionDef
+} from '@shared/types'
 import { writeFileAtomic } from './atomic-write'
 import { DEFAULT_PALETTE, sanitizeGlowColor } from '@shared/palette'
 import {
@@ -57,6 +62,9 @@ const DEFAULT_CONFIG: AppConfig = {
   // consent rule lives in the supervisor's system prompt, the app confirms
   // nothing. 'team-review' / 'full-control' add native approval dialogs.
   supervisorSpawnMode: 'hands-free',
+  // Join-announce gate (card 8cb54a0f): off by default -- the operator opts
+  // into either the lead-only note or the full historical broadcast.
+  joinAnnounceLevel: 'off',
   // Floating "?" help assistant (PLAN C9): shown by default, Haiku for cost.
   helpButton: true,
   helpTarget: DEFAULT_HELP_TARGET,
@@ -121,6 +129,10 @@ export function loadConfig(): AppConfig {
   // Unknown/absent trust mode (older config, hand-edited file) -> default.
   if (!SUPERVISOR_SPAWN_MODES.includes(cfg.supervisorSpawnMode)) {
     cfg.supervisorSpawnMode = 'hands-free'
+  }
+  // Unknown/absent join-announce level (older config, hand-edited file) -> default.
+  if (!JOIN_ANNOUNCE_LEVELS.includes(cfg.joinAnnounceLevel)) {
+    cfg.joinAnnounceLevel = 'off'
   }
   // Hand-edited file: a non-hex glow value becomes a CSS variable, so clamp.
   cfg.glowColor = sanitizeGlowColor(cfg.glowColor)

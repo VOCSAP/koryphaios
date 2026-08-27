@@ -113,13 +113,15 @@ consequences worth knowing before touching them:
 
 **Rule zero for controls: an element that still looks like the OS drew it is a
 bug**, exactly like an emoji in JSX. This covers EVERY interactive element, not
-just buttons — `<button>`, `<select>`, `<input>`, `<textarea>`, checkboxes,
-range sliders. The native Windows/Chromium defaults (grey button, square white
-dropdown, blue focus ring) ignore `data-theme` entirely, so one unstyled
-control makes a whole view read as unfinished. Two ways to satisfy it: give the
-element an archetype class, or rely on a rule that already targets it (the
-element-level `select` rule, `.modal-actions button:not(.primary)`, `.field
-input`). If you introduce a control type this guide does not cover yet, style
+just buttons — `<button>`, `<select>`, `<input>`, `<textarea>`, radios,
+checkboxes, range sliders. The native Windows/Chromium defaults (grey button,
+square white dropdown, blue focus ring) ignore `data-theme` entirely, so one
+unstyled control makes a whole view read as unfinished. Two ways to satisfy it:
+give the element an archetype class, or rely on a rule that already targets it
+(the element-level `select`, `textarea` and `input[type='radio']` rules,
+`.modal-actions button:not(.primary)`, `.field input`). Still native and NOT
+covered by any element rule as of 2026-08-27: `input[type='checkbox']` (11
+sites, card `0d57a60c`). If you introduce a control type this guide does not cover yet, style
 it at the ELEMENT level in `styles.css` and document it here — a per-instance
 class only fixes the instance you were looking at, and the next one ships bare.
 
@@ -225,6 +227,27 @@ failure shape as a className matching no selector at all, different cause.
   it; (c) the popup list is OS-drawn — `select option { background: var(--bg-2) }`
   is what stops it flashing white. Scoped classes should carry SIZE only
   (`max-width`, `font-size`), never the box.
+- **Radios**: styled at the ELEMENT level too (`input[type='radio'] { … }`),
+  same reason as `select` -- `accent-color` alone was the previous answer and
+  it only repaints the CHECKED dot, so the unchecked state, which is what most
+  radios show at rest, stayed native. `appearance: none`, then a 14px disc
+  (16px inside a `.field-check` row, whose equal-specificity rule wins on
+  source order, so the element block must sit BEFORE `.field-check input`),
+  `border-radius: 50%`, `--bg` fill, 1px `--border` ring turning `--accent`
+  when checked. The centre dot is a `background-image: radial-gradient` over
+  the disc's own fill, for two reasons worth keeping: (a) Chromium renders NO
+  generated content inside an `<input>` (a replaced element), so an `::after`
+  dot is simply invisible; (b) an inset `box-shadow` ring would force
+  hardcoding the PARENT surface colour, and these radios sit on two of them
+  (`--bg-2` in a modal, the panel in Settings), so one of the two would show a
+  seam. Hover must be guarded by `:not(:checked)`, or a checked radio loses its
+  accent border under the cursor; `:disabled` is the shared `opacity: 0.4` +
+  `cursor: default`. Focus is NOT redefined here: the global `:focus-visible`
+  rule already paints the accent outline and follows the 50% radius. One trap
+  when reusing this on another control: `appearance: none` does not clear
+  Chromium's UA margin, so `margin: 0` makes the container's `gap`
+  authoritative and TIGHTENS any row that was relying on both (`.tc-lead-toggle`
+  had to go from 3px to 6px).
 - **Collapsible side panels.** The reference implementation is the **Agents
   sidebar** (`.sidebar` / `.sidebar-collapsed`, `Sidebar.tsx`, card
   `079f034d`) — copy that one. It now has two siblings, both built on it: the

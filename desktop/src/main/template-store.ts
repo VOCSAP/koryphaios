@@ -11,6 +11,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync
 import { dirname, join, resolve } from 'node:path'
 import { globalConfigDir } from './launch-config'
 import { parseTemplate, type SessionTemplate } from '../shared/template'
+import { reportError } from './log'
 
 export interface TemplateSummary {
   /** Absolute path of the .json file; doubles as the id. */
@@ -49,10 +50,28 @@ export function templateSource(
   return null
 }
 
+/**
+ * Read + validate a template file. A multi-lead file is still normalized
+ * (first wins, card 240d6efd decision 3) but the repair is no longer silent:
+ * `parseTemplate` reports which session names it demoted, and this is the
+ * one place that turns that into an observable `reportError` (card 240d6efd
+ * decision 2) — every one of `readTemplate`'s own 3 callers (index.ts
+ * `resolveTemplateInputs`, ipc.ts `template:read`, `listDir` below) keeps
+ * getting a plain `SessionTemplate | null` and needs no change.
+ */
 export function readTemplate(path: string): SessionTemplate | null {
   try {
     if (!existsSync(path)) return null
-    return parseTemplate(JSON.parse(readFileSync(path, 'utf-8')))
+    const parsed = parseTemplate(JSON.parse(readFileSync(path, 'utf-8')))
+    if (!parsed) return null
+    if (parsed.demotedLeadNames.length > 0) {
+      reportError(
+        'template',
+        `${path}: multiple sessions had lead: true, kept only the first ` +
+          `(demoted: ${parsed.demotedLeadNames.join(', ')})`
+      )
+    }
+    return parsed.template
   } catch {
     return null
   }
@@ -97,8 +116,26 @@ function safeBase(name: string): string {
   return b || 'template'
 }
 
-/** Write `tpl` as `<safeName>.json` into `dir` (created on demand). Returns the path. */
+/**
+ * Write `tpl` as `<safeName>.json` into `dir` (created on demand). Returns
+ * the path. Refuses (throws) a template carrying more than one `lead: true`
+ * session (card 240d6efd decision 1): this is the single filesystem sink for
+ * ALL 3 production writers (`template:export`, `template:write`, deck-control
+ * `saveTemplate`) plus any future one, so a check here closes the gap by
+ * construction instead of enumerating call sites. `template:write` already
+ * runs its input through `parseTemplate` first, which demotes down to one
+ * lead before this ever sees it, so this never fires on that route — it is a
+ * live guard only for the two routes (`template:export`, `saveTemplate`)
+ * that build a template straight from live session defs and currently trust
+ * `lead`'s exclusivity invariant (session-service.ts) without checking it.
+ */
 export function writeTemplate(dir: string, name: string, tpl: SessionTemplate): string {
+  const leadNames = tpl.sessions.filter((s) => s.lead).map((s) => s.name)
+  if (leadNames.length > 1) {
+    throw new Error(
+      `template has multiple leads (${leadNames.join(', ')}); at most one session may carry lead: true`
+    )
+  }
   mkdirSync(dir, { recursive: true })
   const file = join(dir, `${safeBase(name)}.json`)
   writeFileSync(file, JSON.stringify(tpl, null, 2), 'utf-8')

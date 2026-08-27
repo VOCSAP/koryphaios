@@ -2,15 +2,14 @@ import { useEffect, useState } from 'react'
 import type { SessionTemplate, TemplateSession } from '@shared/template'
 import { TEMPLATE_TYPE, TEMPLATE_VERSION } from '@shared/template'
 import type { ModelOption } from '@shared/types'
-import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
+import { mergeRoleChoices } from '@shared/role'
 import { useDeck } from '../store'
-import { useT, type TFn } from '../i18n'
+import { useT } from '../i18n'
+import { EntryCard } from './TemplateEntryCard'
 
 // Template composer (PLAN C18): create/edit a team template WITHOUT spawning
 // anything. One card per entry with the advanced-create fields; at most one
 // lead (radio semantics), rendered hierarchically: lead top-center, team below.
-
-const EFFORT_LEVELS = ['', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
 interface Props {
   /** Template file to edit, or null to compose a fresh one. */
@@ -24,115 +23,13 @@ function emptySession(n: number): TemplateSession {
   return { name: `agent-${n}` }
 }
 
-function EntryCard({
-  session,
-  agents,
-  models,
-  onChange,
-  onRemove,
-  onLead,
-  t
-}: {
-  session: TemplateSession
-  agents: string[]
-  models: ModelOption[]
-  onChange: (next: TemplateSession) => void
-  onRemove: () => void
-  onLead: () => void
-  t: TFn
-}): React.JSX.Element {
-  const set = (patch: Partial<TemplateSession>): void => onChange({ ...session, ...patch })
-  return (
-    <div className={`tc-card${session.lead ? ' tc-card-lead' : ''}`}>
-      <div className="tc-card-head">
-        <input
-          type="color"
-          className="swatch"
-          value={session.color || '#4f86ff'}
-          onChange={(e) => set({ color: e.target.value })}
-        />
-        <input
-          className="tc-name"
-          value={session.name}
-          placeholder={t('composer.name')}
-          onChange={(e) => set({ name: e.target.value })}
-        />
-        <label className="tc-lead-toggle" title={t('create.leadHelp')}>
-          <input type="radio" checked={!!session.lead} onChange={onLead} />
-          <span>{GLYPH_BADGES.laurel}</span>
-        </label>
-        <button className="row-btn row-btn-danger tc-remove" title={t('common.delete')} onClick={onRemove}>
-          {GLYPH_ACTIONS.close}
-        </button>
-      </div>
-      <div className="tc-grid">
-        <label className="field">
-          <span>{t('create.agent')}</span>
-          <select value={session.agent ?? ''} onChange={(e) => set({ agent: e.target.value || undefined })}>
-            <option value="">{t('create.agentDefault')}</option>
-            {agents.map((a) => (
-              <option key={a} value={a}>
-                {a}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          <span>{t('create.model')}</span>
-          <select value={session.model ?? ''} onChange={(e) => set({ model: e.target.value || undefined })}>
-            <option value="">{t('create.modelDefault')}</option>
-            {models.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.label}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          <span>{t('create.effort')}</span>
-          <select value={session.effort ?? ''} onChange={(e) => set({ effort: e.target.value || undefined })}>
-            {EFFORT_LEVELS.map((l) => (
-              <option key={l} value={l}>
-                {l || t('create.effortAuto')}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          <span>{t('composer.worktree')}</span>
-          <input
-            value={session.worktreeBranch ?? ''}
-            placeholder={t('worktrees.branchPlaceholder')}
-            onChange={(e) => set({ worktreeBranch: e.target.value || undefined })}
-          />
-        </label>
-      </div>
-      <label className="field">
-        <span>{t('create.extraArgs')}</span>
-        <input value={session.args ?? ''} onChange={(e) => set({ args: e.target.value || undefined })} />
-      </label>
-      <label className="field">
-        <span>{t('create.prompt')}</span>
-        <textarea
-          rows={2}
-          value={session.prompt ?? ''}
-          onChange={(e) => set({ prompt: e.target.value || undefined })}
-        />
-      </label>
-      <label className="field">
-        <span>{t('create.announce')}</span>
-        <input
-          value={session.announce ?? ''}
-          onChange={(e) => set({ announce: e.target.value || undefined })}
-        />
-      </label>
-    </div>
-  )
-}
-
 export function TemplateComposer({ path, onClose, onSaved }: Props): React.JSX.Element {
   const t = useT()
   const showToast = useDeck((s) => s.showToast)
+  // Peer role (card 0b9e0b07 lot B): the same operator-global list CreateMenu
+  // reads (config.roleChoices), merged with the built-ins the same way.
+  const config = useDeck((s) => s.config!)
+  const roleChoices = mergeRoleChoices(config.roleChoices ?? [])
   const [name, setName] = useState('')
   const [local, setLocal] = useState(false)
   const [sessions, setSessions] = useState<TemplateSession[]>([emptySession(1)])
@@ -205,6 +102,7 @@ export function TemplateComposer({ path, onClose, onSaved }: Props): React.JSX.E
                 session={sessions[leadIdx]!}
                 agents={agents}
                 models={models}
+                roleChoices={roleChoices}
                 onChange={(next) => update(leadIdx, next)}
                 onRemove={() => remove(leadIdx)}
                 onLead={() => setLead(leadIdx)}
@@ -220,6 +118,7 @@ export function TemplateComposer({ path, onClose, onSaved }: Props): React.JSX.E
                   session={s}
                   agents={agents}
                   models={models}
+                  roleChoices={roleChoices}
                   onChange={(next) => update(i, next)}
                   onRemove={() => remove(i)}
                   onLead={() => setLead(i)}

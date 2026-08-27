@@ -35,6 +35,15 @@ export interface TemplateSession {
   worktreeBranch?: string
   /** Operator-authored join announce (PLAN C18). */
   announce?: string
+  /**
+   * Operator-chosen role (card 0b9e0b07, lot A). Captured and applied in BOTH
+   * the global and local template scope, no strip, no approval branch: a role
+   * carries no authorization today, it is a routing/display label (see
+   * `SessionDef.role` in shared/types.ts for the full arbitration). Re-validated
+   * at the one production sink (`session-service.ts`'s `sanitizeRole(input.role
+   * ?? '') || ''`), never here.
+   */
+  role?: string
 }
 
 export interface SessionTemplate {
@@ -54,6 +63,7 @@ interface DefLike {
   color?: string
   prompt?: string
   lead?: boolean
+  role?: string
 }
 
 /** Structural subset of CreateSessionInput a template produces (no cwd). */
@@ -69,6 +79,7 @@ export interface TemplateInput {
   model?: string
   worktreeBranch?: string
   announce?: string
+  role?: string
 }
 
 /**
@@ -87,6 +98,7 @@ export function toTemplate(defs: readonly DefLike[], name?: string): SessionTemp
       if (d.color && d.color.trim()) s.color = d.color.trim()
       if (d.prompt && d.prompt.trim()) s.prompt = d.prompt.trim()
       if (d.lead) s.lead = true
+      if (d.role && d.role.trim()) s.role = d.role.trim()
       return s
     })
   }
@@ -113,6 +125,7 @@ export function templateToInputs(tpl: SessionTemplate): TemplateInput[] {
     if (s.model && s.model.trim()) input.model = s.model.trim()
     if (s.worktreeBranch && s.worktreeBranch.trim()) input.worktreeBranch = s.worktreeBranch.trim()
     if (s.announce && s.announce.trim()) input.announce = s.announce.trim()
+    if (s.role && s.role.trim()) input.role = s.role.trim()
     return input
   })
 }
@@ -160,7 +173,8 @@ function isTemplateSession(v: unknown): v is TemplateSession {
     'agent',
     'model',
     'worktreeBranch',
-    'announce'
+    'announce',
+    'role'
   ] as const) {
     if (s[k] !== undefined && typeof s[k] !== 'string') return false
   }
@@ -168,32 +182,54 @@ function isTemplateSession(v: unknown): v is TemplateSession {
   return true
 }
 
+/** Result of {@link parseTemplate}: the normalized template plus what it silently fixed. */
+export interface ParsedTemplate {
+  /** The parsed template. Lead uniqueness (PLAN C10/C18: at most ONE per
+   * template) is normalized here — extra leads are demoted, first one wins.
+   * This RESOLUTION RULE is unchanged (card 240d6efd decision 3); only its
+   * silence is fixed, via `demotedLeadNames` below. */
+  template: SessionTemplate
+  /**
+   * Names of sessions whose `lead: true` was demoted by the first-wins rule
+   * above. Empty when nothing was repaired. This return shape was widened
+   * (rather than an optional param, or a callback) deliberately: every
+   * caller — `readTemplate` and `template:write`'s handler today, any future
+   * one tomorrow — must destructure `.template` instead of using the return
+   * value as a flat `SessionTemplate`, so a caller cannot compile while
+   * still reading the old shape and silently staying blind to a demotion
+   * (card 240d6efd decision 2).
+   */
+  demotedLeadNames: string[]
+}
+
 /**
  * Validate untrusted JSON as a SessionTemplate. Returns null on any structural
  * problem (wrong type tag, missing/!array sessions, malformed entries) so a bad
- * file is simply skipped rather than crashing a scan. Lead uniqueness (PLAN
- * C10/C18: at most ONE per template) is normalized here — extra leads are
- * demoted, first one wins.
+ * file is simply skipped rather than crashing a scan.
  */
-export function parseTemplate(raw: unknown): SessionTemplate | null {
+export function parseTemplate(raw: unknown): ParsedTemplate | null {
   if (!raw || typeof raw !== 'object') return null
   const r = raw as Record<string, unknown>
   if (r.type !== TEMPLATE_TYPE) return null
   if (typeof r.version !== 'number') return null
   if (!Array.isArray(r.sessions) || !r.sessions.every(isTemplateSession)) return null
   let leadSeen = false
+  const demotedLeadNames: string[] = []
   const tpl: SessionTemplate = {
     type: TEMPLATE_TYPE,
     version: r.version,
     sessions: (r.sessions as TemplateSession[]).map((s) => {
       const copy = { ...s }
       if (copy.lead) {
-        if (leadSeen) delete copy.lead
+        if (leadSeen) {
+          demotedLeadNames.push(copy.name)
+          delete copy.lead
+        }
         leadSeen = true
       }
       return copy
     })
   }
   if (typeof r.name === 'string' && r.name.trim()) tpl.name = r.name.trim()
-  return tpl
+  return { template: tpl, demotedLeadNames }
 }

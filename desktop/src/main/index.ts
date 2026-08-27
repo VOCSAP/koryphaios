@@ -78,7 +78,11 @@ import {
 import { directiveKeys, isDirectiveCommand, resolveDirectiveTargets } from './directive'
 import { ownsIdleLock } from './idle-lock'
 import type { AssignResult, DispatchResult, RoadmapItem, StopResult } from '@shared/types'
-import { composeJoinAnnounce, type JoinAnnounceIntent } from '@shared/announce'
+import {
+  composeJoinAnnounce,
+  joinAnnounceTargets,
+  type JoinAnnounceIntent
+} from '@shared/announce'
 import { isHead, queuedItems, wavesOf } from '@shared/workflow'
 import { APP_STATE_SUBDIR, runDataMigration } from './migrate-data-dir'
 import type { SessionRuntime } from '@shared/types'
@@ -755,13 +759,59 @@ const waitForPeer = (id: string, timeoutMs: number): Promise<string | null> => {
   })
 }
 
+/**
+ * Join-announce dispatch (card 8cb54a0f): resolves the operator's
+ * `joinAnnounceLevel` via the pure joinAnnounceTargets decision and sends (or
+ * deliberately doesn't) accordingly -- 'off' is silent, 'lead' addresses only
+ * the active team-lead/supervisor session(s) with NO broadcast fallback,
+ * 'all' keeps the historical broadcast-to-everyone behaviour. Named (not an
+ * inline lambda) so the peer-resolved wiring below is a single, stable call
+ * site. Fire-and-forget like every announce helper here, never on the spawn
+ * critical path.
+ */
+const sendJoinAnnounce = async (peerId: string, intent: JoinAnnounceIntent): Promise<void> => {
+  const level = getConfig().joinAnnounceLevel
+  const decision = joinAnnounceTargets(level, service.list())
+  if (decision.kind === 'silent') {
+    // 'off' is the requested behaviour, not an abandon -- no trace. 'lead'
+    // with nothing to address IS an abandon (mirrors announceToSupervisor's
+    // own "unreachable, ack dropped" journal entry just above).
+    if (level === 'lead') {
+      journal.add('announce', 'join announce dropped: no active team-lead or supervisor')
+    }
+    return
+  }
+  const text = composeJoinAnnounce(peerId, intent)
+  if (decision.kind === 'broadcast') {
+    await broadcastAnnounce(text, peerId)
+    return
+  }
+  // The joiner itself is never its own announce target (mirrors
+  // broadcastAnnounce's excludePeerId semantics on the 'all' branch above).
+  const targets = decision.peerIds.filter((id) => id !== peerId)
+  await Promise.all(
+    targets.map(async (toPeerId) => {
+      try {
+        const { sent } = await sendAnnounce(
+          { groupId: activeScope.groupId, secret: activeScope.secret, text, toPeerId },
+          { endpoint: resolveBrokerEndpoint() }
+        )
+        if (sent > 0) journal.add('announce', `join announce to ${toPeerId}: ${text.slice(0, 120)}`)
+      } catch (e) {
+        reportError('announce', 'join announce failed', e)
+      }
+    })
+  )
+}
+
 // Auto join announce: when a fresh session's peer_id first resolves, tell the
-// other peers a newcomer joined (excluding the joiner itself). Fire-and-forget,
-// never on the spawn critical path. Doubles as the spawn-ack trigger (TS3).
+// other peers a newcomer joined (level-gated by sendJoinAnnounce above).
+// Fire-and-forget, never on the spawn critical path. Doubles as the spawn-ack
+// trigger (TS3).
 service.on(
   'peer-resolved',
   ({ id, peerId, intent }: { id: string; peerId: string; intent: JoinAnnounceIntent }) => {
-    void broadcastAnnounce(composeJoinAnnounce(peerId, intent), peerId)
+    void sendJoinAnnounce(peerId, intent)
     const pending = pendingSpawnAcks.get(id)
     if (pending) {
       clearTimeout(pending.timer)

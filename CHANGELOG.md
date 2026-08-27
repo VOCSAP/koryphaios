@@ -1,5 +1,61 @@
 # Changelog
 
+## desktop -- le role d'une session voyage desormais dans les templates, et un template a plusieurs leads n'est plus repare en silence
+
+Fichiers : `desktop/src/shared/template.ts`, `desktop/src/main/template-store.ts`, `desktop/src/main/ipc.ts`, `desktop/src/renderer/src/components/TemplateComposer.tsx`, `tests/desktop-template.test.ts`, `tests/desktop-template-store.test.ts`, `tests/desktop-templates-composer-draft-reset.test.ts`, `tests/desktop-templates-composer-role.test.ts`. Cartes `0b9e0b07` et `240d6efd`, un meme commit : le bloc de tests de la premiere appelle une forme (`.template`) qui n'existe que parce que la seconde a elargi le retour de `parseTemplate`.
+
+**Le role se perdait en deux endroits distincts, pas un.** A la CAPTURE, `toTemplate` mappait sur une interface locale de 7 champs sans `role`, alors que `SessionDef` en porte 17 dont `role`. A l'APPLICATION, `templateToInputs` etait une pick-list de 11 cles, `role` absent. Les deux sont fermes.
+
+**Il transitait deja a moitie sans que personne le sache.** `parseTemplate` recopie par spread : une cle `role` deja presente dans un fichier de template survivait au parsing et a la re-sauvegarde, et ne mourait qu'a l'application, au moment de spawner la session.
+
+**Corollaire fail-open ferme dans le meme lot : `isTemplateSession` ne type-checkait pas `role`, `role: 42` etait accepte.**
+
+**Le role voyage dans les templates locaux et globaux, sans strip -- avec une reserve a inscrire.** Motif operateur du 27 aout 2026 : un role n'ouvre aucun droit sur Kory, c'est une etiquette. Le jour ou une autorisation se fonde sur le role, cette premisse tombe et l'arbitrage doit etre rouvert avant de livrer une telle garde.
+
+**Aucune migration : `TEMPLATE_VERSION` est inchange.** Un ancien template sans `role` se lit a l'identique ; un template neuf lu par un build ancien voit sa cle `role` ignoree puis recopiee.
+
+**Le composeur de templates gagne un select Role par carte, ferme, alimente par `mergeRoleChoices(config.roleChoices)`.** Aucune cle i18n neuve, aucune CSS neuve.
+
+**Ce que le lot ne fait pas.** Il ne repare pas une flotte deja demarree : les sessions vivantes ne recuperent pas de role, il faut ressaisir les roles dans le composeur, sauver, puis respawner. La reattribution a chaud est la carte `2e1f6821`.
+
+**`parseTemplate` demotait silencieusement les leads surnumeraires : aucune trace, aucun compte, aucune difference entre "rien a reparer" et "j'ai supprime N leads".** La regle de resolution premier gagne est inchangee, c'est le silence qui est corrige.
+
+**`writeTemplate` refuse desormais un template a plusieurs leads, avec un message qui nomme les sessions fautives.** Le refus vit dans le puits et non dans un de ses trois appelants, dont deux ne validaient rien : il couvre par construction tout quatrieme appelant futur, sans liste a maintenir.
+
+**Le message remonte intact sur les trois routes.** Rejet de `invoke()` cote renderer, HTTP 400 avec le message verbatim cote agent superviseur au lieu d'un sentinel generique, message preserve cote companion appaire.
+
+**`parseTemplate` rend maintenant `{ template, demotedLeadNames }`.** Un appelant futur ne peut plus omettre le traitement de la reparation sans casser la compilation. `readTemplate` journalise via `reportError`, `shared/template.ts` reste pur et sans electron.
+
+## desktop -- les boutons radio ne gardent plus leur apparence native
+
+Fichiers : `desktop/src/renderer/src/styles.css`. Sans carte.
+
+**Aucune regle au niveau ELEMENT n'existait pour `input[type='radio']` dans `styles.css` : les neuf radios rendus par l'app (modale REC, Reglages, composeur) etaient natifs, alors que la regle du depot est qu'aucun controle ne garde son apparence native.**
+
+**Le bloc est calque sur la regle ELEMENT `select`, seul controle deja tame a l'element, propriete par propriete.** Aucun token nouveau, aucune couleur nouvelle.
+
+**`.record-scope input[type='radio']` est supprimee.** Ses deux declarations etaient devenues fausses sous `appearance: none` : `accent-color` inerte, `margin: 0` redondant. Une declaration morte qui se lit comme active est un piege connu.
+
+**Deux effets collateraux voulus et mesures.** Le `gap` de `.tc-lead-toggle` passe de 3px a 6px pour restituer exactement l'ecart que la marge UA de Chromium produisait avant d'etre retiree. Les radios des Reglages remontent de 3px, desormais centres sur leur libelle au lieu d'etre pousses vers le bas par cette meme marge UA.
+
+**Valide a l'ecran sur une instance Electron privee : non coche, coche, survol, focus clavier, desactive, et coche+survol** -- ce dernier garde son accent grace a un `:not(:checked)` dans la regle de survol.
+
+**Les checkboxes restent natives, meme defaut, meme remede : une carte est deposee pour elles.**
+
+## desktop -- l'annonce de jonction d'un pair devient un reglage a trois niveaux, silencieuse par defaut
+
+Fichiers : `desktop/src/shared/types.ts`, `desktop/src/shared/announce.ts`, `desktop/src/shared/role.ts`, `desktop/src/main/store.ts`, `desktop/src/main/index.ts`, `desktop/src/renderer/src/components/SettingsView.tsx`, `desktop/src/main/i18n.ts`, `desktop/locales/en.json`, `desktop/locales/fr.json`. Carte `8cb54a0f`.
+
+**Un nouveau reglage `joinAnnounceLevel` gate desormais l'annonce diffusee quand un pair rejoint le groupe, avec trois valeurs et le defaut `off`.** `off` supprime l'annonce, `lead` la cible, `all` reprend le comportement historique de diffusion a tout le groupe. Le reglage suit exactement la chaine deja en place pour `supervisorSpawnMode` : type et tableau de validation cote partage, valeur par defaut et normalisation a la lecture d'un `config.json` ecrit a la main, groupe de radios dans les reglages, aucun nouveau canal IPC.
+
+**Le defaut `off` n'est pas une seconde correction d'un probleme deja corrige : le trailer sans-reponse avait deja supprime le reflexe de repondre a l'annonce, ce que ce lot vide est un cout de CONTEXTE.** Le cout croit en N*(N-1) pour N sessions demarrees ensemble : onze sessions lancees le meme soir font dix annonces recues par chacune, vingt-deux au total, chaque annonce restant dans le contexte de son destinataire meme quand elle n'appelle aucun tour d'inference.
+
+**Le niveau `lead` cible tous les porteurs de `role === team-lead`, jamais un seul.** La resolution est un `filter`, jamais un `find`/`get` : deux team-lead actifs en meme temps est un etat valide, tous deux recoivent l'annonce. A defaut de porteur du role, elle cible tous les superviseurs actifs, meme discipline de `filter`. A defaut des deux, elle reste SILENCIEUSE : aucun repli sur la diffusion generale, qui reintroduirait exactement le bruit que ce reglage existe pour supprimer.
+
+**Le gate vit au site d'EMISSION et non dans `broadcastAnnounce`.** `broadcastAnnounce` a quatre appelants, dont le megaphone manuel de l'operateur et le repli d'arret de la roadmap : les couper en silence en posant le gate a l'interieur de cette fonction aurait ete une regression separee, invisible tant qu'un operateur n'aurait pas cherche a l'utiliser. La decision elle-meme est une fonction pure exportee, `joinAnnounceTargets`, consommee par `sendJoinAnnounce`, elle-meme le seul appelant au point d'emission -- extraite d'une lambda anonyme pour que le cablage reste testable independamment de la decision.
+
+**Etat de fait du jour : une flotte dont les sessions ne portent pas de `role` retombe sur les superviseurs au niveau `lead`.** Ce n'est pas un defaut de ce lot mais la consequence d'un manque que la carte `0b9e0b07` corrige ailleurs : les sessions spawnees depuis un template ne transportent aujourd'hui aucun `role`.
+
 ## core -- un message de pair rappelle desormais au team-lead qu'il peut forcer un `/clear`, et a lui seul
 
 Fichiers : `shared/inbound-framing.ts`, `server.ts`, `tests/peer-inbound-framing.test.ts`. Lot B1, sans carte.

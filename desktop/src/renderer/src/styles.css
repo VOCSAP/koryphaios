@@ -1138,6 +1138,52 @@ select option {
   color: var(--fg);
 }
 
+/* Every radio, element-level for the same reason as <select> above (DESIGN.md
+   §3): the native control ignores data-theme entirely -- a white disc with an
+   OS-grey ring sitting on a dark panel. `accent-color` was the previous answer
+   (.record-scope) and it only repaints the CHECKED dot, so the unchecked state,
+   which is what five of the six radios show at rest, stayed native. Hence the
+   same recipe as <select>: appearance:none, then redraw from the tokens.
+
+   The checked dot is a radial-gradient over the disc's own background, NOT an
+   inset ring painted in a surface colour: these radios live on two different
+   surfaces (--bg-2 modal for .record-scope, panel for .field-check), and a
+   hardcoded gap colour would show a seam on one of them.
+
+   No ::after is used on purpose -- Chromium does not render generated content
+   inside a replaced <input>, so a pseudo-element dot would simply be invisible.
+
+   Focus is NOT handled here: the global :focus-visible rule at the top of this
+   file already draws the accent outline, and it follows the 50% radius. */
+input[type='radio'] {
+  -webkit-appearance: none;
+  appearance: none;
+  /* .field-check input wins on size (16px, equal specificity, later in file);
+     this is the size for every radio written outside that row archetype. */
+  width: 14px;
+  height: 14px;
+  flex: none;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background-color: var(--bg);
+  cursor: pointer;
+}
+
+input[type='radio']:hover:not(:disabled):not(:checked) {
+  border-color: color-mix(in srgb, var(--fg-dim) 60%, var(--border));
+}
+
+input[type='radio']:checked {
+  border-color: var(--accent);
+  background-image: radial-gradient(circle at center, var(--accent) 3px, transparent 3px);
+}
+
+input[type='radio']:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* Every <textarea>, element-level for the same reason as <select> above
    (DESIGN.md §3: no control keeps its native look): an unclassed textarea is
    a white square on Windows. Scoped rules (.field textarea, .msheet-textarea)
@@ -5073,10 +5119,13 @@ svg.glyph {
   padding: 4px 7px;
 }
 
+/* 6px and not 3px: the radio used to add Chromium's own margin-right on top of
+   this gap, and the element-level input[type='radio'] rule zeroes that UA
+   margin. 6px keeps the disc-to-laurel distance the operator already had. */
 .tc-lead-toggle {
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 6px;
   cursor: pointer;
 }
 
@@ -5276,10 +5325,11 @@ svg.glyph {
   cursor: pointer;
 }
 
-.record-scope input[type='radio'] {
-  accent-color: var(--accent);
-  margin: 0;
-}
+/* No per-instance radio rule here any more: this dialog's two radios are drawn
+   by the element-level input[type='radio'] block (Buttons & fields). The rule
+   that stood here set accent-color, which appearance:none makes inert -- a
+   declaration that survives a redraw it no longer affects reads as active and
+   is worse than none. */
 
 /* Scripted-scenario section of the REC dialog: optional prompt + model. */
 .record-scenario-label {

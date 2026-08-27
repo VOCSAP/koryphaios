@@ -342,6 +342,14 @@ export const EN_DEFAULTS: Record<string, string> = {
   'settings.spawnModeFullControl': 'Full control',
   'settings.spawnModeFullControlHelp':
     'Each agent is confirmed one by one before it launches. Most control, most clicks.',
+  'settings.joinAnnounceLevel': 'Peer-join announcement',
+  'settings.joinAnnounceLevelOff': 'Off',
+  'settings.joinAnnounceLevelOffHelp': 'No announcement when a new peer joins the group.',
+  'settings.joinAnnounceLevelLead': 'Lead only',
+  'settings.joinAnnounceLevelLeadHelp':
+    'Only the active team-lead (or supervisor if none) is told a new peer joined.',
+  'settings.joinAnnounceLevelAll': 'Everyone',
+  'settings.joinAnnounceLevelAllHelp': 'Every active peer in the group is told a new peer joined.',
   'sidebar.setLead': 'Designate as team-lead',
   'sidebar.leadTitle':
     'Team-lead: targeted app notices (dispatch, integrations) go to this session',

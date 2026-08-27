@@ -56,6 +56,9 @@ interface FakeDeckState {
   templatesManage: boolean;
   templatesComposerSeed: number;
   dict: Record<string, string>;
+  // Card 0b9e0b07 lot B: TemplateComposer now reads config.roleChoices to
+  // populate its per-card Role select (useDeck((s) => s.config!)).
+  config: { roleChoices: string[] };
   applyTemplate: (path: string, mode: "append" | "replace") => Promise<void>;
   removeTemplate: (path: string) => Promise<void>;
   openTemplates: (open: boolean, opts?: { manage?: boolean; composer?: boolean }) => void;
@@ -71,6 +74,7 @@ function initialFakeState(): FakeDeckState {
     templatesManage: false,
     templatesComposerSeed: 0,
     dict: {},
+    config: { roleChoices: [] },
     applyTemplate: async () => {},
     removeTemplate: async () => {},
     openTemplates: () => {},
@@ -97,6 +101,47 @@ mock.module("@shared/template", () => ({
   TEMPLATE_TYPE: "koryphaios.template",
   TEMPLATE_VERSION: 1
 }));
+
+// Card 0b9e0b07 lot B: TemplateComposer now also imports mergeRoleChoices
+// from '@shared/role' (same alias-resolution gap as above). Full, faithful
+// reimplementation of the real (tiny, dependency-free) module -- not a bare
+// stub -- so this mock's export surface matches shared/role.ts exactly and
+// its behavior is trustworthy wherever a future test exercises it.
+mock.module("@shared/role", () => {
+  const TEAM_LEAD_ROLE = "team-lead";
+  const BUILTIN_ROLES = [
+    TEAM_LEAD_ROLE,
+    "developer",
+    "reviewer",
+    "explorer",
+    "architect",
+    "test-engineer",
+    "doc-writer",
+    "security-auditor",
+    "debugger",
+    "release-engineer",
+    "web-designer"
+  ];
+  const ROLE_MAX = 32;
+  const sanitizeRole = (value: string): string => {
+    const kebab = value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/-{2,}/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, ROLE_MAX);
+    return kebab.replace(/-+$/, "");
+  };
+  const mergeRoleChoices = (custom: readonly string[]): string[] => {
+    const out: string[] = [...BUILTIN_ROLES];
+    for (const raw of custom) {
+      const role = sanitizeRole(raw);
+      if (role && !out.includes(role)) out.push(role);
+    }
+    return out;
+  };
+  return { TEAM_LEAD_ROLE, BUILTIN_ROLES, ROLE_MAX, sanitizeRole, mergeRoleChoices };
+});
 
 // TemplateComposer's mount effect calls window.api.listAgents() and
 // window.api.getLaunchConfig() UNCONDITIONALLY (not gated on `path`), and

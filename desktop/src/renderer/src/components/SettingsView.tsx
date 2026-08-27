@@ -227,6 +227,36 @@ export function SettingsView(): React.JSX.Element {
                   </small>
                 </div>
               ))}
+
+              <div className="field">
+                <span>{t('settings.joinAnnounceLevel')}</span>
+              </div>
+              {(['off', 'lead', 'all'] as const).map((level) => (
+                <div key={level}>
+                  <label className="field field-check">
+                    <input
+                      type="radio"
+                      name="join-announce-level"
+                      checked={(config.joinAnnounceLevel ?? 'off') === level}
+                      onChange={() => set('joinAnnounceLevel', level)}
+                    />
+                    <span>
+                      {level === 'off'
+                        ? t('settings.joinAnnounceLevelOff')
+                        : level === 'lead'
+                          ? t('settings.joinAnnounceLevelLead')
+                          : t('settings.joinAnnounceLevelAll')}
+                    </span>
+                  </label>
+                  <small className="field-check-help">
+                    {level === 'off'
+                      ? t('settings.joinAnnounceLevelOffHelp')
+                      : level === 'lead'
+                        ? t('settings.joinAnnounceLevelLeadHelp')
+                        : t('settings.joinAnnounceLevelAllHelp')}
+                  </small>
+                </div>
+              ))}
             </>
           )}
 

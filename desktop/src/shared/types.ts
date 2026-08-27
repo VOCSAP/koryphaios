@@ -31,15 +31,29 @@ export interface SessionDef {
    * 'team-lead'. Kebab, `^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`; empty/undefined
    * => no role. Its OWN field (not folded into `args`) for the same reason as
    * `effort` above: it must be re-emitted on every spawn, fresh AND fork-resume
-   * -- spawnSession() exports it as CLAUDE_PEERS_ROLE on both paths. Operator
-   * input only: no agent-facing path sets it, and it is deliberately absent
-   * from template/workspace capture so a cloned repo can never place a role
-   * (a workspace file lives in `<projectDir>/.claude/claude-peers/workspaces/`,
-   * i.e. hostile input #1). COST OF THAT EXCLUSION, accepted knowingly:
-   * `toWorkspaceSessions` is a 6-field pick-list, so restoring a workspace
-   * respawns every tile with no role, and since an empty CLAUDE_PEERS_ROLE is
-   * now a DECLARATION of absence, that restore ERASES the role broker-side --
-   * where `model`/`effort`/`agent` are merely forgotten.
+   * -- spawnSession() exports it as CLAUDE_PEERS_ROLE on both paths.
+   *
+   * TEMPLATE capture (card 0b9e0b07): captured by `toTemplate`/`templateToInputs`
+   * (`shared/template.ts`) in BOTH the operator-global and repo-local scope, no
+   * strip, no approval branch beyond the existing shell-fields gate. Operator
+   * arbitration 2026-08-27: a role opens no capability on Kory today -- it is a
+   * label a session is spawned under, re-normalised through the single
+   * production sink (`session-service.ts`'s `sanitizeRole(input.role ?? '') ||
+   * ''`) regardless of which scope the template came from. TEMPORAL RESERVE,
+   * not a security objection to this lot: the day an authorization decision is
+   * keyed on role (card 7defe381), this premise stops holding and a local
+   * template becomes hostile input #1 able to plant that role -- that
+   * arbitration must be REOPENED before shipping such a guard, not after.
+   *
+   * WORKSPACE capture (`toWorkspaceSessions`) is a SEPARATE, narrower decision,
+   * unchanged by the above: role stays deliberately absent there (a workspace
+   * file lives in `<projectDir>/.claude/claude-peers/workspaces/`, i.e. hostile
+   * input #1, and this exclusion was never reopened -- see card b313f0c3). COST
+   * OF THAT EXCLUSION, accepted knowingly: `toWorkspaceSessions` is a 6-field
+   * pick-list, so restoring a workspace respawns every tile with no role, and
+   * since an empty CLAUDE_PEERS_ROLE is now a DECLARATION of absence, that
+   * restore ERASES the role broker-side -- where `model`/`effort`/`agent` are
+   * merely forgotten.
    */
   role?: string
   /**
@@ -179,6 +193,18 @@ export const SUPERVISOR_SPAWN_MODES: SupervisorSpawnMode[] = [
 ]
 
 /**
+ * Gate for the peer-JOIN announcement ONLY (broadcast fired from
+ * service.on('peer-resolved') in main/index.ts): 'off' suppresses it
+ * entirely, 'lead' targets only the active team-lead/supervisor session(s)
+ * (silent if none, never a broadcast fallback), 'all' keeps the historical
+ * broadcast-to-everyone behaviour. Does not affect any other announce path
+ * (roadmap-stop, operator megaphone, spawn-ack).
+ */
+export type JoinAnnounceLevel = 'off' | 'lead' | 'all'
+
+export const JOIN_ANNOUNCE_LEVELS: JoinAnnounceLevel[] = ['off', 'lead', 'all']
+
+/**
  * Hand-kept mirror of TWO interfaces declared in repo-root shared/types.ts
  * (NOT this file): `Approval` and `ApprovalOrigin`. Verify by reading
  * `export interface Approval` and `export interface ApprovalOrigin` there —
@@ -316,6 +342,8 @@ export interface AppConfig {
   mobileApprovals: boolean
   /** Confirmation level for supervisor-initiated spawns (PLAN TS4). */
   supervisorSpawnMode: SupervisorSpawnMode
+  /** Gate for the peer-join announcement broadcast; default 'off'. */
+  joinAnnounceLevel: JoinAnnounceLevel
   /** Show the floating "?" help-assistant button (PLAN C9). */
   helpButton: boolean
   /**

@@ -4,13 +4,23 @@
 // window has); the two never derive from each other.
 
 /**
+ * The team-lead role value. Import this both where a caller PRODUCES it
+ * (setting `role` on a session, e.g. CreateMenu's laurel checkbox) and where
+ * a caller MATCHES it (e.g. the join-announce level 'lead' resolution,
+ * shared/announce.ts) -- neither side is enforced to use this constant
+ * instead of the raw string, so a future caller can still sow a literal;
+ * this only removes the temptation for the callers that already import it.
+ */
+export const TEAM_LEAD_ROLE = 'team-lead'
+
+/**
  * Roles this project actually staffs, offered first in the create menu. The
  * list is app-defined on purpose: it must NOT come from the cloned repo, since
  * a repo-supplied value is hostile input #1 (CLAUDE.md) and a role placed by a
  * checked-in file would defeat the whole point of an operator gesture.
  */
 export const BUILTIN_ROLES = [
-  'team-lead',
+  TEAM_LEAD_ROLE,
   'developer',
   'reviewer',
   'explorer',

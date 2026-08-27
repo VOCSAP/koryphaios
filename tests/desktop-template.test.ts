@@ -7,6 +7,7 @@ import {
   templateHasShellFields,
   parseTemplate,
   TEMPLATE_TYPE,
+  TEMPLATE_VERSION,
   type SessionTemplate,
 } from "../desktop/src/shared/template.ts";
 
@@ -32,12 +33,12 @@ test("toTemplate strips machine/project fields and keeps order + recipe", () => 
 // ----- templateToInputs -----
 
 test("templateToInputs maps entries to inputs without a cwd", () => {
-  const tpl = parseTemplate({
+  const parsed = parseTemplate({
     type: TEMPLATE_TYPE,
     version: 1,
     sessions: [{ name: "dev", args: "--agent dev", effort: "max", color: "#fff" }],
   })!;
-  const inputs = templateToInputs(tpl);
+  const inputs = templateToInputs(parsed.template);
   expect(inputs).toEqual([{ name: "dev", args: "--agent dev", effort: "max", color: "#fff" }]);
   expect(inputs[0]).not.toHaveProperty("cwd");
 });
@@ -45,9 +46,10 @@ test("templateToInputs maps entries to inputs without a cwd", () => {
 // ----- parseTemplate -----
 
 test("parseTemplate accepts a well-formed template", () => {
-  const tpl = parseTemplate({ type: TEMPLATE_TYPE, version: 1, name: "t", sessions: [{ name: "a" }] });
-  expect(tpl).not.toBeNull();
-  expect(tpl!.sessions).toHaveLength(1);
+  const parsed = parseTemplate({ type: TEMPLATE_TYPE, version: 1, name: "t", sessions: [{ name: "a" }] });
+  expect(parsed).not.toBeNull();
+  expect(parsed!.template.sessions).toHaveLength(1);
+  expect(parsed!.demotedLeadNames).toEqual([]);
 });
 
 test("parseTemplate rejects wrong type tag, bad sessions, and non-objects", () => {
@@ -64,14 +66,14 @@ test("toTemplate -> JSON -> parseTemplate round-trips", () => {
   const json = JSON.stringify(toTemplate(defs, "rt"));
   const back = parseTemplate(JSON.parse(json));
   expect(back).not.toBeNull();
-  expect(back!.name).toBe("rt");
-  expect(templateToInputs(back!)).toEqual([{ name: "a", args: "--agent a", effort: "high", color: "#abc" }]);
+  expect(back!.template.name).toBe("rt");
+  expect(templateToInputs(back!.template)).toEqual([{ name: "a", args: "--agent a", effort: "high", color: "#abc" }]);
 });
 
 // ----- composer fields + lead uniqueness (PLAN C18) -----
 
 test("composer fields (agent/model/worktreeBranch/announce) round-trip to inputs", () => {
-  const tpl = parseTemplate({
+  const parsed = parseTemplate({
     type: TEMPLATE_TYPE,
     version: 1,
     name: "team",
@@ -87,8 +89,9 @@ test("composer fields (agent/model/worktreeBranch/announce) round-trip to inputs
       { name: "dev", agent: "developer", worktreeBranch: "agent/dev-1" },
     ],
   })!;
-  expect(tpl).not.toBeNull();
-  const inputs = templateToInputs(tpl);
+  expect(parsed).not.toBeNull();
+  expect(parsed.demotedLeadNames).toEqual([]);
+  const inputs = templateToInputs(parsed.template);
   expect(inputs[0]).toEqual({
     name: "lead",
     agent: "team-lead",
@@ -100,13 +103,32 @@ test("composer fields (agent/model/worktreeBranch/announce) round-trip to inputs
   expect(inputs[1]).toEqual({ name: "dev", agent: "developer", worktreeBranch: "agent/dev-1" });
 });
 
-test("parseTemplate normalizes multiple leads down to the FIRST one", () => {
-  const tpl = parseTemplate({
+test("parseTemplate normalizes multiple leads down to the FIRST one, AND reports the demoted names (card 240d6efd)", () => {
+  const parsed = parseTemplate({
     type: TEMPLATE_TYPE,
     version: 1,
     sessions: [{ name: "a" }, { name: "b", lead: true }, { name: "c", lead: true }],
   })!;
-  expect(tpl.sessions.map((s) => !!s.lead)).toEqual([false, true, false]);
+  expect(parsed.template.sessions.map((s) => !!s.lead)).toEqual([false, true, false]);
+  // The resolution rule itself (first wins) is untouched -- only its
+  // silence is fixed: the demoted session's name is now observable.
+  expect(parsed.demotedLeadNames).toEqual(["c"]);
+});
+
+test("parseTemplate reports NO demotion for zero or one lead (negative control)", () => {
+  const zero = parseTemplate({
+    type: TEMPLATE_TYPE,
+    version: 1,
+    sessions: [{ name: "a" }, { name: "b" }],
+  })!;
+  expect(zero.demotedLeadNames).toEqual([]);
+  const one = parseTemplate({
+    type: TEMPLATE_TYPE,
+    version: 1,
+    sessions: [{ name: "a", lead: true }, { name: "b" }],
+  })!;
+  expect(one.demotedLeadNames).toEqual([]);
+  expect(one.template.sessions[0]!.lead).toBe(true);
 });
 
 test("parseTemplate rejects non-string composer fields", () => {
@@ -116,6 +138,52 @@ test("parseTemplate rejects non-string composer fields", () => {
   expect(
     parseTemplate({ type: TEMPLATE_TYPE, version: 1, sessions: [{ name: "a", worktreeBranch: {} }] })
   ).toBeNull();
+});
+
+// ----- role (card 0b9e0b07 lot A) -----
+
+test("toTemplate captures role, templateToInputs applies it back", () => {
+  const defs = [
+    { name: "lead", args: "--agent team-lead", role: "team-lead" },
+    { name: "dev", args: "--agent dev", role: "" },
+    { name: "obs", args: "--agent obs" },
+  ];
+  const tpl = toTemplate(defs as never, "team");
+  expect(tpl.sessions[0]).toEqual({ name: "lead", args: "--agent team-lead", role: "team-lead" });
+  // empty/undefined role is omitted, same as every other optional field.
+  expect(tpl.sessions[1]).not.toHaveProperty("role");
+  expect(tpl.sessions[2]).not.toHaveProperty("role");
+
+  const inputs = templateToInputs(tpl);
+  expect(inputs[0]).toEqual({ name: "lead", args: "--agent team-lead", role: "team-lead" });
+  expect(inputs[1]).not.toHaveProperty("role");
+});
+
+test("role survives template -> JSON -> parseTemplate -> templateToInputs round-trip, LOCAL scope included", () => {
+  // No local/global distinction anywhere in the parsing or application path:
+  // operator arbitration 2026-08-27 requires role to travel in BOTH scopes,
+  // parseTemplate itself has no scope input to gate on.
+  const defs = [{ name: "lead", role: "team-lead" }];
+  const json = JSON.stringify(toTemplate(defs, "rt"));
+  const back = parseTemplate(JSON.parse(json));
+  expect(back).not.toBeNull();
+  expect(templateToInputs(back!.template)).toEqual([{ name: "lead", role: "team-lead" }]);
+});
+
+test("isTemplateSession rejects a non-string role (fail-closed tightening)", () => {
+  expect(
+    parseTemplate({ type: TEMPLATE_TYPE, version: 1, sessions: [{ name: "a", role: 42 }] })
+  ).toBeNull();
+});
+
+test("a template written before role existed still parses and applies identically (no migration, TEMPLATE_VERSION unchanged)", () => {
+  expect(TEMPLATE_VERSION).toBe(1);
+  const oldStyleTpl = { type: TEMPLATE_TYPE, version: 1, sessions: [{ name: "dev", agent: "developer" }] };
+  const back = parseTemplate(oldStyleTpl);
+  expect(back).not.toBeNull();
+  const inputs = templateToInputs(back!.template);
+  expect(inputs[0]).not.toHaveProperty("role");
+  expect(inputs[0]).toEqual({ name: "dev", agent: "developer" });
 });
 
 // ----- templateHasShellFields (B4 gating trigger) -----

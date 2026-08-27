@@ -14,6 +14,7 @@ import {
   templateSource,
 } from "../desktop/src/main/template-store.ts";
 import { toTemplate, TEMPLATE_TYPE } from "../desktop/src/shared/template.ts";
+import { onDeckError } from "../desktop/src/main/log.ts";
 
 const tmpDirs: string[] = [];
 function tmp(): string {
@@ -51,6 +52,77 @@ test("write then read round-trips a template", () => {
   expect(back).not.toBeNull();
   expect(back!.type).toBe(TEMPLATE_TYPE);
   expect(back!.sessions[0].name).toBe("dev");
+});
+
+// ----- writeTemplate refuses multiple leads (card 240d6efd, decision 1) -----
+
+test("writeTemplate throws a specific, actionable message naming the offending sessions when >1 lead", () => {
+  const g = tmp();
+  const tpl = toTemplate(
+    [
+      { name: "a", lead: true },
+      { name: "b" },
+      { name: "c", lead: true },
+    ] as never,
+    "bad team"
+  );
+  // toTemplate() does not dedupe (it trusts live-session lead exclusivity),
+  // so this reproduces exactly what template:export / saveTemplate would
+  // hand to writeTemplate if that upstream invariant ever broke.
+  expect(() => writeTemplate(globalTemplatesDir(env(g)), "bad team", tpl)).toThrow(/a, c/);
+  expect(() => writeTemplate(globalTemplatesDir(env(g)), "bad team", tpl)).toThrow(/multiple leads/i);
+});
+
+test("writeTemplate does NOT throw for zero or one lead (negative control)", () => {
+  const g = tmp();
+  const zeroLead = toTemplate([{ name: "a" }, { name: "b" }] as never, "none");
+  expect(() => writeTemplate(globalTemplatesDir(env(g)), "none", zeroLead)).not.toThrow();
+  const oneLead = toTemplate([{ name: "a", lead: true }, { name: "b" }] as never, "one");
+  expect(() => writeTemplate(globalTemplatesDir(env(g)), "one", oneLead)).not.toThrow();
+});
+
+// ----- readTemplate surfaces a silent lead-demotion via reportError (decision 2) -----
+
+test("readTemplate reports an observable signal when the file on disk carries multiple leads", () => {
+  const g = tmp();
+  const dir = globalTemplatesDir(env(g));
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, "two-leads.json");
+  writeFileSync(
+    path,
+    JSON.stringify({
+      type: TEMPLATE_TYPE,
+      version: 1,
+      sessions: [{ name: "a", lead: true }, { name: "b", lead: true }],
+    }),
+    "utf-8"
+  );
+  const calls: Array<[string, string]> = [];
+  onDeckError((scope, text) => calls.push([scope, text]));
+  try {
+    const back = readTemplate(path);
+    expect(back).not.toBeNull();
+    expect(back!.sessions.map((s) => !!s.lead)).toEqual([true, false]);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls.some(([, text]) => text.includes("b"))).toBe(true);
+  } finally {
+    onDeckError(() => {}); // module-level singleton: never leave a test's listener armed
+  }
+});
+
+test("readTemplate reports NOTHING for a file with zero or one lead (negative control)", () => {
+  const g = tmp();
+  const dir = globalTemplatesDir(env(g));
+  const path = writeTemplate(dir, "fine", toTemplate([{ name: "a", lead: true }, { name: "b" }] as never, "fine"));
+  const calls: Array<[string, string]> = [];
+  onDeckError((scope, text) => calls.push([scope, text]));
+  try {
+    const back = readTemplate(path);
+    expect(back).not.toBeNull();
+    expect(calls).toEqual([]);
+  } finally {
+    onDeckError(() => {});
+  }
 });
 
 test("listTemplates reports global + local with source and session count, skipping junk", () => {
