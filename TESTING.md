@@ -398,3 +398,24 @@ Three files must carry the same key, or `desktop-i18n.test.ts` fails:
 
 Prefix keys by view/domain (`graph.*`, `roadmap.*`, `nav.*`, `common.*`) and
 keep the three insertions in the same relative position as their neighbors.
+
+**0a. A security guard cannot both run in CI and spawn a broker.** The two
+rules above compose into a dead end that has already cost two rewrites: name a
+regression guard `broker-*`/`server-*` and it never runs in CI; rename it out
+of the exemption and card b33b1874's inverse check reddens the moment it
+real-imports `_helper.ts`'s `startBroker`. Exactly one shape satisfies both,
+and it is not a compromise, it is the shape the guarantee wanted anyway. Put
+the DECISION in a `shared/` module with its row source injected
+(`ApprovalAuthDeps.queryOne` in `shared/approval-scope.ts`,
+`findPeerByInstanceToken` in `shared/graph-draft-scope.ts`), test THAT in CI
+against a fake under a non-exempt filename (`tests/graph-draft-authz.test.ts`),
+and keep the WIRING probe (does the real handler call it, with the real
+request, and use its real result) as a behavioural test against the live broker
+in the local-only `broker-*` file (`tests/broker-graph-drafts.test.ts`). Two
+proofs, not one: proving the pure function is not proving the handler CALLS it,
+and a `toContain("fn(")` source scan fails open -- this repo measured 12 of 13
+wiring mutations staying green against a fully passing pure-module suite. The
+header comment of `shared/graph-draft-scope.ts` carries the worked example.
+Consequence for any lot that ADDS a test file: `bun test
+tests/desktop-ci-glob-coverage.test.ts` belongs in its measurement set, since a
+three-file targeted run misses it.
