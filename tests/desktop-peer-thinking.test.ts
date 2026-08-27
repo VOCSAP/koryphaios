@@ -50,7 +50,7 @@ test("resolves the exact per-session file deterministically", () => {
   expect(resolvePeerId(cwd, sid, dir)).toBe("dev-pc-proj-2");
 });
 
-test("falls back to the newest file when the exact one is absent", () => {
+test("falls back to the newest file when no sessionId is given at all (legacy layout)", () => {
   const dir = tmpPeersDir();
   const cwd = "/home/u/proj";
   const key = computeCwdKey(cwd);
@@ -62,8 +62,24 @@ test("falls back to the newest file when the exact one is absent", () => {
   const now = Date.now() / 1000;
   utimesSync(older, now - 100, now - 100);
   utimesSync(newer, now, now);
-  // sessionId 'cccc' has no exact file -> newest fallback.
-  expect(resolvePeerId(cwd, "cccc", dir)).toBe("newer-peer");
+  // No sessionId at all -> legacy mtime fallback still applies.
+  expect(resolvePeerId(cwd, undefined, dir)).toBe("newer-peer");
+});
+
+test("returns null (not a sibling tile's peer_id) when a sessionId IS given but its exact file is missing", () => {
+  const dir = tmpPeersDir();
+  const cwd = "/home/u/proj";
+  const key = computeCwdKey(cwd);
+  const older = join(dir, `peer-id-${key}-aaaa.txt`);
+  const newer = join(dir, `peer-id-${key}-bbbb.txt`);
+  writeFileSync(older, "older-peer", "utf-8");
+  writeFileSync(newer, "newer-peer", "utf-8");
+  const now = Date.now() / 1000;
+  utimesSync(older, now - 100, now - 100);
+  utimesSync(newer, now, now);
+  // sessionId 'cccc' has no exact file of its own: must fail closed (null),
+  // never borrow a sibling tile's cache file (card aa8d6b5f).
+  expect(resolvePeerId(cwd, "cccc", dir)).toBeNull();
 });
 
 test("returns null when nothing matches", () => {

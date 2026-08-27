@@ -1,5 +1,17 @@
 # Changelog
 
+## desktop -- la resolution du peer_id d'une tuile empruntait le fichier de cache du voisin, et un `/clear` rendait cet emprunt certain
+
+Fichiers : `desktop/src/main/peer-state.ts`, `tests/desktop-peer-thinking.test.ts`. Carte `aa8d6b5f`.
+
+**`resolvePeerId` echouait OUVERT.** Quand le fichier de cache exact d'une session manquait, elle empruntait le fichier peer-id le PLUS RECENT du meme repertoire de travail, c'est-a-dire le peer_id d'une AUTRE tuile. Onze tuiles partagent ce repertoire, donc le repli par date de modification designait un voisin quelconque. Effet visible a l'ecran : deux tuiles differentes affichaient le meme peer_id, et le bouton copier de la barre laterale copiait celui du voisin.
+
+**Le declencheur mesure n'est pas une course au demarrage, c'est le `/clear`.** Il fait tourner le session_id en cours de processus alors que le nom du fichier de cache est gele au demarrage : le miss est donc GARANTI apres chaque `/clear`, et l'emprunt avec lui.
+
+**Le correctif est un refus, pas un meilleur choix de voisin.** Quand un sessionId est fourni, un miss rend `null`. Le repli par date de modification ne survit que pour l'ancien format, celui ou aucun sessionId n'est connu. Un test existant encodait le bug et a ete scinde en deux.
+
+**Ce lot echange un mensonge contre une absence, et il faut le dire.** Apres correctif, une tuile qui subit un `/clear` perd son peer_id cote Deck jusqu'a un respawn, alors que le peer_id cote broker, lui, reste correct. En sens inverse, une tuile deja derivee est assainie automatiquement en quelques secondes.
+
 ## core/desktop -- la notification d'inactivite du CLI cesse d'etre lue comme une question bloquante, sept portes d'ecriture refusent un project_key mal cadre, et trois cartes ont ete recuperees d'un projet fantome
 
 Fichiers : `desktop/hooks/approval-hook.ts`, `broker.ts`, `cli.ts`, `shared/config.ts`, `shared/project-key.ts`, `tests/_helper.ts`, `ARCHITECTURE.md`, `desktop/deck-plugin/agents/roadmap-scribe.md`, les six fichiers du volet Agents (`icons.tsx`, `Sidebar.tsx`, `RoadmapView.tsx`, `styles.css`, `i18n.ts`, les deux locales), et dix fichiers de tests dont deux nouveaux. Cartes `47baf25a`, `c92614ed`, `3e5f1853`, `581a0d56`, `b5ba8cac`, `51fd7b65`, `a688748b`.

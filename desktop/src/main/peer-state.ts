@@ -40,9 +40,12 @@ function readPeerIdFile(full: string): string | null {
 }
 
 /**
- * Resolve the peer_id for a session. When `sessionId` is known (M3+), read the
- * exact per-session cache file first; otherwise (or if it is missing) fall back
- * to the newest `peer-id-<cwdKey>-*.txt` for this cwd.
+ * Resolve the peer_id for a session. When `sessionId` is known (M3+), read
+ * ONLY the exact per-session cache file for it -- on a miss, return null,
+ * NEVER borrow a neighbouring tile's cache file for the same cwdKey (card
+ * aa8d6b5f: that neighbour-borrowing fail-open let a /clear'd tile silently
+ * adopt another tile's identity). The newest-file-by-mtime fallback applies
+ * only when no `sessionId` is known at all (legacy layout).
  */
 export function resolvePeerId(
   cwd: string,
@@ -57,10 +60,15 @@ export function resolvePeerId(
     const suffix = sanitizeSessionId(sessionId)
     if (suffix) {
       const exact = readPeerIdFile(join(peersDir, `peer-id-${key}-${suffix}.txt`))
-      if (exact) return exact
+      // A sessionId was given but its exact cache file is missing (e.g. a
+      // /clear rotated CLAUDE_CODE_SESSION_ID in-process without
+      // re-registering, card aa8d6b5f). Fail CLOSED: never borrow the newest
+      // sibling file for this cwdKey, which may belong to a different tile.
+      return exact
     }
 
-    // Fallback: newest matching file (legacy layout, or pre-register race).
+    // Fallback: newest matching file. Legacy layout only (no sessionId known
+    // at all) -- the mtime guess is never applied once a sessionId is given.
     const prefix = `peer-id-${key}`
     const matches = readdirSync(peersDir)
       .filter((f) => f.startsWith(prefix) && f.endsWith('.txt'))
