@@ -53,13 +53,47 @@ describe("event classification", () => {
     expect(classifyPayload({ hook_event_name: "PermissionRequest" })).toBe("permission");
   });
 
-  test("Notification yields a question for the open prompts", () => {
-    expect(
-      classifyPayload({ hook_event_name: "Notification", notification_type: "idle_prompt" })
-    ).toBe("question");
+  test("Notification yields a question for agent_needs_input", () => {
     expect(
       classifyPayload({ hook_event_name: "Notification", notification_type: "agent_needs_input" })
     ).toBe("question");
+  });
+
+  /**
+   * Card 47baf25a. This assertion is the INVERSE of what this file asserted
+   * until 2026-08-27, and the flip is the whole fix: `idle_prompt` used to be
+   * mapped to "question", which filed one blocking entry in the operator inbox
+   * per session at every restart (ten measured on 2026-08-26, all titled
+   * "Claude is waiting for your input" -- the CLI's own message, verbatim).
+   *
+   * It is not a matter of degree. Measured in the installed claude binary,
+   * `sendIdleNotification` is called from a `setTimeout` body guarded by
+   * `!isDialogOnScreen() && n >= getIdleNotifThresholdMs()`: the CLI emits
+   * this type only AFTER establishing that no dialog is on screen. So the
+   * event carries the guarantee that the session is NOT blocked on anything,
+   * which is the exact opposite of what the inbox entry claimed.
+   */
+  test("idle_prompt is skipped — the CLI emits it only when NO dialog is on screen", () => {
+    expect(
+      classifyPayload({ hook_event_name: "Notification", notification_type: "idle_prompt" })
+    ).toBe("skip");
+
+    // The SHAPE, not just the two known values. classifyPayload is written as
+    // an ALLOW-LIST of one type; a deny-list of the two names we happen to
+    // know today would behave identically on every input this CLI version can
+    // produce, and would then map any type a FUTURE version adds onto
+    // "question" -- silently, with no error and no red test. Measured on this
+    // lot's own mutation review: degrading the allow-list back into a
+    // deny-list was caught by exactly ONE pre-existing assertion, and only
+    // because it happened to name a real type ("auth_success"). That is an
+    // incidental literal, not a guarantee. This unknown type is the guarantee:
+    // it can only stay green while the code decides by inclusion.
+    expect(
+      classifyPayload({
+        hook_event_name: "Notification",
+        notification_type: "a_type_this_cli_does_not_emit_yet"
+      })
+    ).toBe("skip");
   });
 
   test("permission_prompt is skipped — PermissionRequest already owns it", () => {
@@ -167,9 +201,17 @@ describe("approval request shaping", () => {
     expect(body.session_ref).toBe("tile-1");
   });
 
+  // Card 47baf25a: the payload here was `idle_prompt` until 2026-08-27. Once
+  // classifyPayload skips that type, main() never reaches buildApprovalRequest
+  // with it, so asserting on it would have been asserting on an input the hook
+  // can no longer produce -- green, and proving nothing about the live path.
   test("a signal event becomes an open question", () => {
     const body = buildApprovalRequest(
-      { hook_event_name: "Notification", notification_type: "idle_prompt", message: "Waiting" },
+      {
+        hook_event_name: "Notification",
+        notification_type: "agent_needs_input",
+        message: "Waiting"
+      },
       cfg
     );
     expect(body.kind).toBe("question");
@@ -349,6 +391,80 @@ describe("hook subprocess", () => {
     const auth = buildAuthProof(op.privateKey, body, { kind: "operator", operator_id: op.id });
     const res = await post<{ approvals: Approval[] }>(`${b.url}/approval/list`, { ...body, auth });
     expect(res.body.approvals).toHaveLength(0);
+  }, 30_000);
+
+  /**
+   * Card 47baf25a, the END-TO-END half of the fix. The classification test
+   * above proves the pure helper; this proves the HOOK PROCESS, fed the real
+   * payload on real stdin against a real broker, files nothing -- which is the
+   * property the operator's inbox actually depends on. Keeping only the pure
+   * assertion would leave main()'s `if (classifyPayload(payload) === "skip")`
+   * unproven, and that early return is the only thing standing between an
+   * idle session and a row in `pending_approvals`.
+   *
+   * WHY THE POSITIVE HALF IS IN THE SAME TEST, and must stay there. An
+   * absence assertion alone is satisfied by ANY hook that does nothing, for
+   * any reason, including reasons that have nothing to do with this card.
+   * Measured by the mutation review of this very lot, 2026-08-27: with the
+   * absence half standing alone, `throw new Error("MUTANT")` on the first
+   * line of main() left it GREEN, and so did short-circuiting postApproval to
+   * `return false` (which is what a 4xx, a refused credential or a wrong
+   * project_key look like from here). Neither could be told apart from a
+   * correct skip. The exit code cannot arbitrate either: approval-hook.ts
+   * ends with `void main().finally(() => process.exit(0))`, so 0 is wired in
+   * and asserting on it is theatre.
+   *
+   * A positive control DID exist in this describe ("an open-question
+   * notification is registered too") and it does redden under both mutations
+   * -- but the pairing was IMPLICIT: two tests, two setup() calls, two
+   * brokers, nothing linking them, so `.skip` on the positive one would have
+   * quietly restored the hole. Replaying agent_needs_input HERE, through the
+   * same runHook, the same credFile and the same broker, is what turns the
+   * absence into evidence: the claim becomes "this exact pipe REFUSES
+   * idle_prompt and ACCEPTS agent_needs_input", which no dead hook and no
+   * refused POST can satisfy.
+   */
+  test("an idle_prompt notification registers nothing (card 47baf25a)", async () => {
+    const { b, credFile, op } = await setup();
+    const listPending = async (): Promise<Approval[]> => {
+      const body = approvalListBody("koryphaios", { public_key: op.publicKey });
+      const auth = buildAuthProof(op.privateKey, body, { kind: "operator", operator_id: op.id });
+      const res = await post<{ approvals: Approval[] }>(`${b.url}/approval/list`, {
+        ...body,
+        auth
+      });
+      return res.body.approvals;
+    };
+
+    const idle = runHook(
+      credFile,
+      {
+        hook_event_name: "Notification",
+        notification_type: "idle_prompt",
+        message: "Claude is waiting for your input"
+      },
+      "tile-1"
+    );
+    // No assertion on the exit code: it is `process.exit(0)` unconditionally.
+    // Awaiting it is only how we know the process is done writing.
+    await idle.exited;
+    expect(await listPending()).toHaveLength(0);
+
+    // NEGATIVE CONTROL, same pipe: if the zero above came from a broken hook
+    // rather than from the skip, this half cannot pass either.
+    const needed = runHook(
+      credFile,
+      {
+        hook_event_name: "Notification",
+        notification_type: "agent_needs_input",
+        message: "Which migration strategy?"
+      },
+      "tile-1"
+    );
+    await needed.exited;
+    const after = await listPending();
+    expect(after).toHaveLength(1);
+    expect(after[0]?.title).toContain("migration");
   }, 30_000);
 
   test("an unreachable broker fails silently and fast", async () => {

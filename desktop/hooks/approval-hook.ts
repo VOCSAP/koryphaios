@@ -17,11 +17,33 @@
 //     on EVERY tool call, so wiring it here would raise an approval per tool
 //     use.) It carries a structured payload — tool, input, cwd — which is why
 //     it beats scraping the screen.
-//   Notification      -> `idle_prompt` / `agent_needs_input`: the open
-//     questions no hook can settle (there is no documented hook for
-//     AskUserQuestion or plan approval). `permission_prompt` is skipped here
-//     because PermissionRequest already owns it — otherwise one dialog would
-//     raise two notifications.
+//   Notification      -> `agent_needs_input` ONLY: the open questions no hook
+//     can settle (there is no documented hook for AskUserQuestion or plan
+//     approval). `permission_prompt` is skipped here because PermissionRequest
+//     already owns it — otherwise one dialog would raise two notifications.
+//     `idle_prompt` was ALSO mapped here until card 47baf25a, and that is what
+//     filed one blocking question per session in the operator inbox (ten
+//     entries on 2026-08-26, all titled "Claude is waiting for your input").
+//     It is not a weak signal, it is the OPPOSITE signal. Measured in
+//     claude.exe 2.1.247 (the version installed 2026-08-27; the binary is
+//     replaced often, so re-measure before trusting this paragraph against a
+//     later one): `sendIdleNotification` fires from a `setTimeout` whose body
+//     is guarded by, among others, `!isDialogOnScreen()` and
+//     `n >= getIdleNotifThresholdMs()`. So the CLI emits this type only once
+//     it has established that NO dialog is on screen, and a session actually
+//     asking something never emits it. Two corollaries the wording above hides
+//     and that cost a day to establish: `n` counts from
+//     `lastQueryCompletionTime`, the END OF A TURN, not from startup -- so
+//     this is one notification per turn nobody follows up within the
+//     threshold, and a restart merely synchronises many of them into the same
+//     minute. And the timer is not armed at all while `submitCount === 0`, so
+//     a session nobody ever talked to emits nothing whatsoever.
+//     Do not re-add it: the PTY carries no distinguishing evidence either
+//     (see docs/DESIGN-ACTIVITY-PREDICATE.md, section 2 fact 2, measured: the
+//     resting glyph is emitted in EVERY class including `dialog-open-no-esc`;
+//     and desktop/src/main/detect/activity.ts has no `blocked` state at all,
+//     so "at rest" and "blocked on a dialog" both read as 'idle'). This
+//     structured field is the only place the difference exists at all.
 //
 // SECURITY: the hook carries a RESTRICTED session credential (PLAN §6.8), read
 // from a chmod-600 file whose path arrives in the environment — the key itself
@@ -85,8 +107,12 @@ export function classifyPayload(p: HookPayload): "permission" | "question" | "sk
   if (p.hook_event_name === "PermissionRequest") return "permission";
   if (p.hook_event_name === "Notification") {
     const t = p.notification_type ?? "";
-    // permission_prompt is PermissionRequest's job; the rest are open questions.
-    return t === "idle_prompt" || t === "agent_needs_input" ? "question" : "skip";
+    // ALLOW-LIST of exactly one type, never a deny-list (card 47baf25a): every
+    // other notification_type -- including the ones this CLI version does not
+    // emit yet -- must fall through to `skip`, because the cost of the wrong
+    // answer is asymmetric. A missed question is one entry the operator raises
+    // by hand; a spurious one is an inbox nobody reads any more.
+    return t === "agent_needs_input" ? "question" : "skip";
   }
   return "skip";
 }
