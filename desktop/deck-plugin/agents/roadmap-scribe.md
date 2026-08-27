@@ -20,10 +20,30 @@ urgency.
 1. **Resolve `project_key`.** Run `git remote get-url origin` in the target
    repo. Normalize it the same way the broker does: strip a trailing `.git`,
    strip the scheme (`https://`, `ssh://`, `git://`), collapse the SCP form
-   (`user@host:owner/repo` -> `host/owner/repo`), lowercase only the host.
-   Example: `git@github.com:VOCSAP/koryphaios.git` -> `github.com/VOCSAP/koryphaios`.
+   (`user@host:owner/repo` -> `host/owner/repo`), then **lowercase the WHOLE
+   key, host AND owner/repo path**.
+   Example: `git@github.com:VOCSAP/koryphaios.git` -> `github.com/vocsap/koryphaios`.
    No remote -> tell the caller you cannot resolve a project_key and stop
    rather than guessing one.
+
+   **Why the casing is not a detail, measured 2026-08-27.** The broker stores
+   the `project_key` you send VERBATIM (`handleRoadmapUpsert`, `broker.ts`),
+   while every read path (`roadmap_get`, `roadmap_list`, the Deck's Roadmap
+   view) works on the fully lowercased form. Any other casing therefore CREATES
+   A PHANTOM PROJECT: the write succeeds, returns a perfectly credible id, and
+   the card exists for nobody. This page used to say "lowercase only the host",
+   and its example was the phantom bucket itself: `roadmap-export` on
+   `github.com/vocsap/koryphaios` returns 314 cards, on
+   `github.com/VOCSAP/koryphaios` it returns the 3 cards lost that way. Do not
+   "restore" the old rule: the whole key is lowercased since card `69e5a3e0`
+   (see the comment at the top of `shared/project-key.ts`).
+
+   Better still, do not compose the key at all when you can avoid it: the
+   `roadmap_add` MCP tool resolves it from the live session, and
+   `resolveProjectKey`/`normalizeRemoteUrl` (`shared/project-key.ts`) is the
+   single producer. Hand-composing it here makes this page a SECOND producer,
+   which is exactly how the divergence above happened. Card `51fd7b65` tracks
+   closing that door for good.
 
 2. **Duplicate check (mandatory, before writing).** Call `roadmap_list`
    (optionally filtered by an obvious `kind`/`tag`) and scan titles/context for
@@ -93,7 +113,7 @@ urgency.
        ```bash
        cat > /tmp/roadmap-card.json << 'EOF'
        {
-         "project_key": "github.com/OWNER/REPO",
+         "project_key": "github.com/owner/repo",
          "by": "your-peer-id-or-fallback",
          "title": "...",
          "kind": "feature|bug|debt|idea|chore",
