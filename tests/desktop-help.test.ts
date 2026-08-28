@@ -180,16 +180,24 @@ posixOnly("runHelp surfaces a failing invocation as a rejected promise", async (
 // Same executor, no fixture and no shell override: `echo` and a missing binary
 // behave the same in sh and in PowerShell, so these run on every OS and keep
 // Windows covered for the marker-stripping / stdout / rejection contract.
+// Both carry an explicit 30_000 because both SPAWN a process, and a spawn on the
+// windows-latest runner costs one to two orders of magnitude more than on ubuntu:
+// measured 2026-08-28 over four windows runs, the first of these two took
+// 4206.49 / 2768.13 / 3221.34 ms and then TIMED OUT at 5000.70 ms under bun's
+// 5000 ms default (CI run 33174312698, job 98858868752), while the same test is
+// 107.84 ms on ubuntu. 30_000 is ~7x the worst duration ever observed here, and
+// it is the value the other two spawn-heavy files of this same batch already use
+// (desktop-commit-closure-check, desktop-sandbox-projection) -- no third number.
 test("runHelp strips its start marker and returns the command's stdout", async () => {
   const out = await runHelp({ command: "echo hello-from-help", shell: "", cwd: tmp() });
   expect(out).toBe("hello-from-help");
-});
+}, 30_000);
 
 test("runHelp rejects when the command cannot run", async () => {
   await expect(
     runHelp({ command: "definitely-not-a-command-xyz", shell: "", cwd: tmp() })
   ).rejects.toThrow();
-});
+}, 30_000);
 
 // ----- plan import prompt (PLAN C7, code constant like the help prompt) -----
 

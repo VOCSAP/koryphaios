@@ -75,10 +75,19 @@ const PARTIAL_REPO = join(SCRATCH, "partial");
 
 let shas: SensitivityRepoShas;
 
+// 60_000, DOUBLE the 30_000 the seven git-heavy tests below use, and that gap
+// is deliberate: this hook builds the ~20-commit fixture every test then only
+// READS, so its expiry does not cost one test, it costs all 57 in the file.
+// Measured 2026-08-28, CI run 33174312698, windows job 98858868752: it timed
+// out at 5002.56 ms under bun's 5000 ms default, bun killed the in-flight
+// `git commit` (signal=SIGTERM, empty stderr), and the clean batch played 2101
+// tests instead of 2157 -- exactly the 56 tests this file never reached. Cost
+// is ~2.6 s locally and past 5 s on that runner, where a process spawn is one
+// to two orders of magnitude dearer than on ubuntu.
 beforeAll(() => {
   shas = buildSensitivityRepo(MAIN_REPO);
   buildEmptyRepo(EMPTY_REPO);
-});
+}, 60_000);
 
 afterAll(() => {
   spawnSync("rm", ["-rf", SCRATCH]);
