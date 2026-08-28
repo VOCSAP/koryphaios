@@ -169,6 +169,32 @@ jobs:
       # text (anchored to end-of-line, so a rename to a superstring of this
       # name -- e.g. adding an `if:` and " [linux only]" in the same edit --
       # is caught as a dangling claim, not silently matched).
+      #
+      # timeout-minutes, paired with the `--timeout 30000` that
+      # scripts/partition-integration-tests.ts now passes to bun. Until that
+      # flag existed, bun's 5000 ms default WAS the de-facto brake on this
+      # step: nothing else bounded it, `grep -c timeout-minutes` over this
+      # file returned 0, so a hang was capped only by GitHub's 6 h job
+      # default. Raising the per-test budget removes that brake, hence this
+      # one.
+      #
+      # ON THE STEP, not on the job: this is the only step whose brake is
+      # being loosened. A job-level guard would have to cover the whole
+      # windows job (10 min 54 s measured on run 33176332938, of which
+      # "Install desktop deps" alone is 2 min 47 s), so its value would be
+      # dominated by steps this change does not touch, and a trip would not
+      # say which one ran away. `fail-fast: false` above already isolates the
+      # three OSes from each other.
+      #
+      # 25 and not 15: the step measures 5 min 05 s on its slowest OS
+      # (windows, same run), and the realistic worst case is ~23 min -- the
+      # 35 files that start a broker in a hook each burning the new 30 s
+      # budget (17 min 30 s) on top of the nominal 5 min. 25 sits just ABOVE
+      # that so a fully degraded run still COMPLETES and names its 35
+      # failures, instead of being cut into a single anonymous "action timed
+      # out" with no recap line; and it still turns the absolute worst case
+      # (every one of the ~497 tests hanging, 4 h) into 25 minutes.
       - name: Bun tests (integration)
         shell: bash
+        timeout-minutes: 25
         run: bun scripts/partition-integration-tests.ts
