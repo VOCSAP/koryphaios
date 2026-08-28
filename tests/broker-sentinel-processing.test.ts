@@ -262,6 +262,25 @@ for (const sentinel of guardProbes) {
   });
 
   test(`unregister refuses a sentinel-shaped instance_token -- worst case: does NOT delete the row or drain its inbox (${sentinel.peerId})`, async () => {
+    // Re-plant, like the `disconnect` and `set-id` probes above do. This one
+    // did not, and relied on the row planted TWO tests earlier still being
+    // there -- while this file's own broker runs with DORMANT_TTL_HOURS=0 and
+    // CLEAN_INTERVAL_SEC=1 (beforeAll), so every ORDINARY dormant row is
+    // purged within a second. The `__anything__` probe is ordinary on purpose
+    // (it is not a SENTINEL_DEFINITIONS entry, so not TTL-exempt), so it was
+    // the one that died: measured red 2026-08-28 on CI run 33176332938
+    // (windows) at line 276, `peerRow(...)` returning null while both guard
+    // assertions above it passed. It had been green by luck at 2.47-51 ms and
+    // went red at 106 ms.
+    //
+    // RESIDUAL, stated plainly: this narrows the race, it does NOT close it.
+    // The exposure drops from "several tests" to "one HTTP round trip", about
+    // 100 ms inside a 1000 ms sweep window on the slowest runner measured. A
+    // sweep tick landing inside that window would still delete the row and
+    // fail line 276 the same way. Closing it for real would mean not sharing
+    // this TTL=0 broker with the probe tests, which is a larger change than
+    // this defect justifies.
+    await ensureDormantRow(sentinel.instanceToken);
     await plantMessageTo(sentinel.instanceToken, `unregister-destruction-probe-${sentinel.peerId}`);
     const before = countUndelivered(sentinel.instanceToken);
     expect(before).toBeGreaterThan(0);
