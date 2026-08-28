@@ -1,5 +1,19 @@
 # Changelog
 
+## ci -- 54 suites d'integration qui ne tournaient dans aucun job de CI jouent desormais dans un step dedie
+
+Fichiers : `.github/workflows/desktop-build.yml`, `scripts/pure-module-partition.ts`, `scripts/partition-integration-tests.ts`, `tests/desktop-ci-glob-coverage.test.ts`. Carte `f4a3ed1e`.
+
+**Sur 219 fichiers `tests/*.test.ts`, 54 ne tournaient dans AUCUN job de CI, sous une justification d'exemption qui affirmait un lieu d'execution inexistant.** Une seule invocation de tests existait dans toute la CI, et c'etait precisement celle qui exemptait ces 54 fichiers -- la surface HTTP du broker, le serveur MCP et le hook d'approbation, le code ou une regression coute le plus cher.
+
+**Ce qui ferme le trou est la STRUCTURE, pas une discipline ecrite.** Le nouveau step `Bun tests (integration)` joue exactement le COMPLEMENT de la table d'exemptions, calcule par `exemptedFiles(listTestFiles(), EXEMPTIONS)` : toute exemption future est jouee automatiquement, sans prose a maintenir ni garde a re-ecrire.
+
+**Le step est BLOQUANT et place en DERNIER, apres le build electron-vite.** Un rouge d'integration ne doit pas supprimer le signal packaging et node-pty sur les trois OS, qui est la raison d'etre de ce workflow.
+
+**Les declencheurs gagnent `server.ts`, `cli.ts` et `scripts/**`** sur `on.push` et `on.pull_request` : sans eux, un commit ne touchant que `server.ts` ne declenchait aucun job, alors que les suites `server-*` desormais jouees couvrent exactement cette surface.
+
+**Ce que ce lot ne fait pas : la couverture CI n'est pas complete.** Ces 54 fichiers n'ont jamais tourne sur un runner Linux ni macOS ; un premier rouge y est attendu et sera trie au vol. Le script `pure-module` garde ses deux memes defauts fail-open, deliberement non corriges ici pour ne pas gonfler le lot -- carte `0168deef`.
+
 ## core -- une carte roadmap inactive ne peut plus etre mise en file de dispatch, sur aucun chemin d'ecriture
 
 Fichiers : `broker.ts`, `tests/broker-roadmap-inactive.test.ts`, `tests/broker-roadmap-reorder.test.ts`. Carte `c33a5968`.
