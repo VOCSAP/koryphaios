@@ -870,7 +870,19 @@ test("purge BLOCKER 2: an unauthenticated caller on a never-registered group can
   } finally {
     await stopBroker(cellBroker);
   }
-});
+  // 30_000, not the bun default of 5_000: this is the ONLY test in this file
+  // that starts a broker inside its own body (every other one reuses the
+  // beforeAll broker), so it pays a full spawn on top of its HTTP work. On the
+  // windows-latest runner it timed out at 5_001 ms, and bun's reaction to a
+  // timeout is to kill the dangling children -- "killed 2 dangling processes",
+  // i.e. this cell broker AND the beforeAll broker -- so the six tests after it
+  // died on ConnectionRefused against a dead shared port (measured 2026-08-28,
+  // CI run 33170636054, windows job 98846649311). Budget taken from the slowest
+  // broker-spawning test observed on that same runner, ntfy's "one operator
+  // disconnecting does not cut the other" at 11_511 ms: ~2.6x margin, and
+  // inside the 20_000..60_000 band the neighbouring broker-spawning files
+  // already use (broker-register-role 20_000, broker-ntfy-channel 60_000).
+}, 30_000);
 
 test("cursor drain marks delivered too (MAJOR 2): the TTL sweep must not treat cursor-read mail as still pending", async () => {
   const g = { id: await groupId("op-major2"), hash: await sha256Hex("op-major2") };

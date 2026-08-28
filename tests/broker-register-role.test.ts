@@ -24,7 +24,7 @@
 
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { Database } from "bun:sqlite";
 import { test, expect, afterAll } from "bun:test";
 import { startBroker, stopBroker, type TestBroker } from "./_helper.ts";
@@ -129,6 +129,15 @@ function spawnServer(
   return proc;
 }
 
+// `cwd` MUST be canonicalized (every caller below wraps its mkdtempSync in
+// realpathSync) because this is the only place in tests/ that compares a path
+// the test BUILT against a path an external process REPORTED: the row's `cwd`
+// comes from server.ts's `myCwd = process.cwd()`, which resolves symlinks. On
+// macOS `mkdtempSync(tmpdir())` yields `/var/folders/...` while the child
+// reports `/private/var/folders/...`, so the equality below matched nothing and
+// all seven tests died on this timeout (measured 2026-08-28, CI run
+// 33170636054, macos job 98846649290). Linux CI cannot see it: its tmpdir is
+// not symlinked.
 async function pollForRow(
   db: Database,
   cwd: string,
@@ -156,7 +165,7 @@ test(
   async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sessionCwd = mkdtempSync(join(tmpdir(), "cp-register-role-fresh-"));
+    const sessionCwd = realpathSync(mkdtempSync(join(tmpdir(), "cp-register-role-fresh-")));
     tmpDirs.push(sessionCwd);
 
     spawnServer(b, sessionCwd, "lead");
@@ -175,7 +184,7 @@ test(
   async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sessionCwd = mkdtempSync(join(tmpdir(), "cp-register-role-diff-"));
+    const sessionCwd = realpathSync(mkdtempSync(join(tmpdir(), "cp-register-role-diff-")));
     tmpDirs.push(sessionCwd);
 
     const proc1 = spawnServer(b, sessionCwd, "lead");
@@ -210,7 +219,7 @@ test(
   async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sessionCwd = mkdtempSync(join(tmpdir(), "cp-register-role-empty-"));
+    const sessionCwd = realpathSync(mkdtempSync(join(tmpdir(), "cp-register-role-empty-")));
     tmpDirs.push(sessionCwd);
 
     const proc1 = spawnServer(b, sessionCwd, "lead");
@@ -242,7 +251,7 @@ test(
   async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sessionCwd = mkdtempSync(join(tmpdir(), "cp-register-role-malformed-"));
+    const sessionCwd = realpathSync(mkdtempSync(join(tmpdir(), "cp-register-role-malformed-")));
     tmpDirs.push(sessionCwd);
 
     // "team lead": trim() does nothing (no leading/trailing space), so this
@@ -271,7 +280,7 @@ test(
   async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sessionCwd = mkdtempSync(join(tmpdir(), "cp-register-role-explicit-empty-"));
+    const sessionCwd = realpathSync(mkdtempSync(join(tmpdir(), "cp-register-role-explicit-empty-")));
     tmpDirs.push(sessionCwd);
 
     spawnServer(b, sessionCwd, ""); // CLAUDE_PEERS_ROLE="" -- present but empty
@@ -290,7 +299,7 @@ test(
   async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sessionCwd = mkdtempSync(join(tmpdir(), "cp-register-role-whoami-"));
+    const sessionCwd = realpathSync(mkdtempSync(join(tmpdir(), "cp-register-role-whoami-")));
     tmpDirs.push(sessionCwd);
 
     const proc1 = spawnServer(b, sessionCwd, "lead");
@@ -351,15 +360,19 @@ test(
   async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sessionCwd = mkdtempSync(join(tmpdir(), "cp-register-role-switchgroup-"));
+    const sessionCwd = realpathSync(mkdtempSync(join(tmpdir(), "cp-register-role-switchgroup-")));
     tmpDirs.push(sessionCwd);
 
-    // A dedicated, isolated Windows-style user config dir with a real named
+    // A dedicated, isolated user config dir with a real named
     // group -- switch_group's request body ends up on a DIFFERENT session_key
     // (different group_id) than the boot registration, so unlike the dormant-
     // resume tests above, the resulting peers row is a FRESH insert whose
     // role comes straight from THIS call's own body -- write-once cannot mask
     // an omission here the way it does on a same-group switch_group("default").
+    // NOT wrapped in realpathSync, unlike the seven sessionCwd above, and that
+    // is deliberate: this path is never compared to anything -- it only serves
+    // as the base of a join() and of a file read (server.ts reads
+    // <base>/claude-peers/config.json), both of which traverse a symlink fine.
     const appDataDir = mkdtempSync(join(tmpdir(), "cp-register-role-appdata-"));
     tmpDirs.push(appDataDir);
     const cfgDir = join(appDataDir, "claude-peers");
@@ -369,7 +382,18 @@ test(
       JSON.stringify({ groups: { other: "test-secret-for-role-switchgroup" } })
     );
 
-    const proc = spawnServer(b, sessionCwd, "lead", { APPDATA: appDataDir });
+    // BOTH keys, one directory: settingsFilePath() (shared/config.ts) reads
+    // APPDATA only under process.platform === "win32" and XDG_CONFIG_HOME
+    // otherwise, and both branches join the SAME subtree,
+    // "claude-peers/config.json", onto their base -- so one temp dir serves the
+    // three OSes. With APPDATA alone the file was never read off Windows,
+    // config.groups was empty, and switch_group answered
+    // "Group 'other' not in user config" with isError: true (measured
+    // 2026-08-28, CI run 33170636054, ubuntu job 98846649135).
+    const proc = spawnServer(b, sessionCwd, "lead", {
+      APPDATA: appDataDir,
+      XDG_CONFIG_HOME: appDataDir,
+    });
     const db = new Database(b.dbPath);
     const first = await pollForRow(db, sessionCwd, () => true);
     expect(first.role).toBe("lead");
