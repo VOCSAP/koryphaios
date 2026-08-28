@@ -98,5 +98,6 @@ invalidation exists or is needed.
 5. In-memory "already projected" marker made every app start re-pay the ~10 s
    projection -> marker persisted, keyed by container ID + config signature.
 
-Detailed narrative: `desktop/docs/sandbox.md`, CHANGELOG "Sandbox mode"
-entries, Kleos memories #11664 #11665 #11668-#11670 #11673 #11674.
+Detailed narrative: `desktop/docs/sandbox.md`, commits `32d2249` (M1) and
+`959c98f` (M2/M3) -- or `git log --all --grep "Sandbox mode"` -- Kleos
+memories #11664 #11665 #11668-#11670 #11673 #11674.

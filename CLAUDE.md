@@ -15,14 +15,21 @@ Two products in one repo:
   battle mode, unified model picker (frontier CLIs + local
   OpenAI-compatible endpoints).
 
-Release history + per-batch narratives live in `CHANGELOG.md`; remaining
+`CHANGELOG.md` was removed 2026-08-28 (operator decision, pre-1.0, no
+external users, commit bodies already carry richer narrative than its
+entries did). The narrative of a shipped lot now lives ONLY in the body of
+the commit that delivered it, found by `git log --all --grep "Card <id8>"`
+-- the only correct retrieval form by construction, since the citation lives
+in the commit MESSAGE, not its content, so neither `-S` nor `-G` finds it.
+Release history from before v1.0 stays fully consultable, nothing lost --
+only the living file is gone: `git show 0d5a4cb:CHANGELOG.md`. Remaining
 open work (to-do / to-verify / deferred, incl. security backlog) centralized
 in `BACKLOG.md`. Code comments reference chantier ids (`C1`…`C29`,
 `D1`…, `MB1`…, `TS1`…, `GX1`…, `CT1`…, `SBX1`…, `N0`…`N5`) from past working
 plans; historical only, artifact of agents self-tagging comments with their
 spec ids -- do not add new ones. Those standalone working docs (`PLAN-*`,
 `EXPLORATION-*`, `AUDIT-*`) consolidated + removed: shipped design decisions
-summarized in CHANGELOG entry of the batch that shipped them, open residual
+live in the commit body of the batch that shipped them, open residual
 lives in `BACKLOG.md`, full detail (exploit chains, design alternatives)
 stays in git history. Two tracked trees survive that consolidation and are
 NOT scratch: `docs/` holds the design briefs that production comments cite by
@@ -42,7 +49,7 @@ Read only file/skill matching area you touch:
 | Tests or a commit | `TESTING.md` | suite layout, smoke check, typecheck, locale parity |
 | Model/provider picker, headless inference point (help, wand, digest, graph, judge), non-Anthropic CLI/API syntax | `model-providers` skill (`.claude/skills/model-providers/SKILL.md`) | -- |
 | Nav-rail VIEW or `DeckApi` IPC channel (desktop only) | `add-deck-view` skill | agent→broker→Deck feature instead: `add-broker-feature` |
-| SANDBOX mode (`desktop/src/main/sandbox-*.ts`, Docker rail, where session executes) | `desktop/docs/sandbox.md` + "Sandbox mode" CHANGELOG entries | behavior, guards, copy-not-mount rule, why each decision taken |
+| SANDBOX mode (`desktop/src/main/sandbox-*.ts`, Docker rail, where session executes) | `desktop/docs/sandbox.md` + commits `32d2249` (M1) and `959c98f` (M2/M3) | behavior, guards, copy-not-mount rule, why each decision taken |
 | DEBUGGING sandbox (login loops, missing projected config, slow spawns, volume state) | `sandbox-debug` skill | field probes, confirmed root-cause catalogue |
 | Bun runtime / API conventions | `BUN.md` | which libs to use or avoid |
 | Bun-served frontend (HTML imports, React) | `FRONTEND.md` | -- |

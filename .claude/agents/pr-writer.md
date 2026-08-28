@@ -45,8 +45,8 @@ Derive `owner`/`repo` from `git remote get-url origin`: take the trailing
 
 A one-sentence lead, then a `##` section ONLY for each domain actually touched
 (e.g. Fonctionnalités / Correctifs / Refactor / Docs / Sécurité), each a few
-bullets grounded in the commit subjects. Then, ONLY when the commits or
-`CHANGELOG.md` actually state them:
+bullets grounded in the commit subjects. Then, ONLY when the commits
+actually state them:
 
 - `## Vérifications` — the checks that were run (tests / typecheck / smoke build).
 - `## Notes` — known limitations (e.g. "pas validé visuellement").
@@ -58,7 +58,7 @@ End the body, on its own line:
 ## Hard rules
 
 - NEVER invent verification results, test counts, or limitations — state only
-  what the commits/CHANGELOG claim; otherwise omit the section.
+  what the commits claim; otherwise omit the section.
 - No model identifier anywhere in the title or body.
 - Open exactly ONE PR; never merge, review, or update an existing one.
 - On a `create_pull_request` error, report the exact message; do not retry blindly.

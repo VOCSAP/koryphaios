@@ -2,8 +2,9 @@
 
 Fichier unique regroupant tout ce qui reste **ouvert** (à faire, à valider, à
 décider) dans le repo. Il consolide les fichiers de plan / exploration / audit
-de la racine. Le narratif de ce qui est **livré** vit dans `CHANGELOG.md` (par
-lot) ; ce fichier ne garde que le **résiduel**.
+de la racine. Le narratif de ce qui est **livré** vit désormais dans le corps
+des commits (retrouvable par `git log --all --grep "Card <id8>"`) ; ce fichier
+ne garde que le **résiduel**.
 
 > ⚠️ **Datation.** Les items sécurité viennent de l'audit du **2026-07-20**
 > (base `experimental`). Depuis, plusieurs lots ont été livrés (team-spawn,
@@ -20,7 +21,7 @@ les anciens `AUDIT-SECURITE-MAINTENANCE.md`, `AUDIT-REMEDIATION-PLAN.md`,
 `PLAN-git-explorer.md`, ainsi que les seeds de roadmap différée
 `roadmap-seed-v0.9.json` (items ci-dessous) et `roadmap-seed-v0.6.json`
 (C6/C7/C8, **entièrement livrés** — rien à porter). Le narratif livré vit dans
-`CHANGELOG.md`. Le mécanisme d'import roadmap (`bun cli.ts roadmap-import`)
+le corps des commits. Le mécanisme d'import roadmap (`bun cli.ts roadmap-import`)
 reste disponible pour recréer un seed depuis l'historique git au besoin.
 
 ---
@@ -343,8 +344,8 @@ l'opérateur sur une machine avec affichage.
 ### 3.1bis Limites d'usage (lot livré — résiduel)
 
 - [x] **Antigravity comme provider de MODÈLES** — livré (2e vague du lot) :
-      catalogue + adapter `agy -p` sous PTY (`pty-run.ts`), cf. CHANGELOG.
-      Résiduel à VALIDER sur un vrai poste : (a) les ids de modèles exacts via
+      catalogue + adapter `agy -p` sous PTY (`pty-run.ts`), cf. commit
+      `a7f9d33`. Résiduel à VALIDER sur un vrai poste : (a) les ids de modèles exacts via
       `agy models` (liste curatée depuis la reco, non vérifiée terrain) ;
       (b) que la lecture du fichier de contexte passe sans approbation en
       mode `-p` (sinon : timeout visible dans le nœud) ; (c) le rendu PTY
@@ -758,8 +759,8 @@ Le mode sandbox est **entièrement implémenté** (toggle et mode de travail par
 projet, conteneur persistant `kory-sbx-<hash>`, volume d'auth partagé + modale
 de login bloquante, vue rail Docker, wrapping `docker exec`, projection de la
 config opérateur, `deck_sandbox_exec`, resume côté conteneur, mode copie
-éphémère). Narratif de conception : les deux entrées « Sandbox mode » du
-`CHANGELOG.md`. Doc opérateur : `desktop/docs/sandbox.md`.
+éphémère). Narratif de conception : commits `32d2249` (M1) et `959c98f`
+(M2/M3). Doc opérateur : `desktop/docs/sandbox.md`.
 
 > **Backend distant (SSH / LXC Proxmox) : ABANDONNÉ** (décision opérateur,
 > 2026-07-25). Docker couvre le besoin ; la piste Proxmox était une analogie
@@ -924,8 +925,10 @@ démarrer sans besoin confirmé)**
 
 ## Notes d'entretien de ce fichier
 
-- Cocher/retirer un item quand il est livré (et l'ajouter au `CHANGELOG.md`).
+- Cocher/retirer un item quand il est livré (le narratif du lot qui l'a livré
+  vit dans le corps du commit correspondant, pas dans ce fichier).
 - Réf des ids (B*, M-*, N-*, NF-* côté audit ; MB*, TS*, GX*, P*/V*/M* côté
   plans/explorations) : le détail des chaînes d'exploitation et des décisions
   de design est dans l'**historique git** des fichiers supprimés (et le
-  narratif livré dans `CHANGELOG.md`).
+  narratif livré dans le corps des commits, retrouvable par
+  `git log --all --grep "Card <id8>"`).

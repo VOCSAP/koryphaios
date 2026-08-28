@@ -37,7 +37,7 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   (start/stop/rebuild/remove) lives in the Docker rail view, guarded by
   `hasLiveSessions()` exactly like the toggle. Settings in app-state
   `sandbox.json` (operator-owned, never the repo). Design + jalons M2/M3:
-  the two "Sandbox mode" CHANGELOG entries; operator docs:
+  commits `32d2249` (M1) and `959c98f` (M2/M3); operator docs:
   `desktop/docs/sandbox.md`.
 - **Remote approvals (opt-in, `mobileApprovals`)**: when a session blocks, the
   question is parked broker-side and can be answered from elsewhere; the Deck
