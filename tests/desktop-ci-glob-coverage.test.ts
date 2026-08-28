@@ -31,6 +31,29 @@
 // copies of a gating table is exactly the divergence CLAUDE.md's shared-table
 // rule warns about.
 //
+// Card f4a3ed1e (2026-08-28): EXEMPTIONS' reasons used to be honest about
+// WHY a file does not belong in this step but silent on whether anything
+// ELSE actually played it -- measured 2026-08-24, nothing did. Reviewer
+// 2026-08-28, measured against `git show HEAD:scripts/pure-module-partition.ts`:
+// the actual pre-fix wording was "the pure-module matrix is not for
+// integration suites" -- true, but making NO location claim at all, not the
+// "played elsewhere" framing a first pass at this fix assumed. That is why
+// auditExemptionLocations is fail-CLOSED (every reason must positively name
+// a verifiable step, or it is refused), not merely "refuse a vague claim".
+// This file now ALSO audits:
+//   - the companion "Bun tests (integration)" step's run: line invokes
+//     exactly scripts/partition-integration-tests.ts (same bounded parse,
+//     anchored to end-of-line so a rename to a superstring of the claimed
+//     name cannot silently keep matching), and that step's own text carries
+//     no continue-on-error/if: neutralization;
+//   - scripts/partition-integration-tests.ts actually exists on disk (an
+//     unstaged new script the workflow already references is invisible to
+//     a run:-string check alone);
+//   - every exemption reason's location claim is verifiable against the
+//     real workflow text (auditExemptionLocations, pure-module-partition.ts)
+//     -- refuses a dangling step name, a real-but-unrelated step name, AND
+//     any reason (vague or simply silent) that makes no verifiable claim.
+//
 // Team-lead audit 2026-08-26: this file lives directly under tests/ as
 // *.test.ts, which is what scripts/pure-module-partition.ts's listTestFiles
 // collects by default; it RUNS because isExempt's deny-list is keyed on the
@@ -52,6 +75,13 @@ import {
   parsePureModuleStepRun,
   WORKFLOW_PATH,
   type Exemptions,
+  INTEGRATION_STEP_NAME,
+  INTEGRATION_PARTITION_SCRIPT_COMMAND,
+  parseIntegrationStepRun,
+  parseNamedStepRun,
+  extractStepText,
+  exemptedFiles as computeExemptedFiles,
+  auditExemptionLocations,
 } from "../scripts/pure-module-partition.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -254,6 +284,141 @@ test("every exemption reason is a real, non-trivial explanation (not a placehold
   for (const reason of Object.values(EXEMPTIONS.exactFiles)) {
     expect(reason.length).toBeGreaterThan(15);
   }
+});
+
+// Card f4a3ed1e: the exemptions above used to be honest about WHY a file
+// does not belong in the pure-module step (spawns a daemon, binds a port)
+// but silent on whether anything ELSE actually plays it -- measured
+// 2026-08-24, nothing did. Reviewer 2026-08-28: the actual pre-fix wording
+// (verified below, verbatim, against git history) made NO location claim at
+// all -- not the "played elsewhere" framing a first pass assumed -- so
+// auditExemptionLocations is fail-CLOSED: every reason must positively name
+// a verifiable step, or it is refused, whether it is vague, silent, or
+// simply wrong.
+
+test("scripts/partition-integration-tests.ts actually exists on disk (the workflow already references it; a git-add-forgot new file is invisible to a run:-string check alone)", () => {
+  expect(existsSync(join(REPO_ROOT, "scripts", "partition-integration-tests.ts"))).toBe(true);
+});
+
+test("the integration step's run: line invokes exactly the integration partition script (bounded parse, same discipline as the pure-module step)", () => {
+  expect(parseIntegrationStepRun(REAL_WORKFLOW_TEXT)).toBe(INTEGRATION_PARTITION_SCRIPT_COMMAND);
+});
+
+test("the integration step carries no continue-on-error / if: neutralization (present, not decorative)", () => {
+  const stepText = extractStepText(REAL_WORKFLOW_TEXT, INTEGRATION_STEP_NAME);
+  expect(stepText).not.toMatch(/continue-on-error/);
+  expect(stepText).not.toMatch(/^\s*if:/m);
+});
+
+test("mutation proof, N4 (reviewer 2026-08-28): a step renamed to a SUPERSTRING of the claimed name is NOT matched -- the marker is anchored to end-of-line, not a substring search", () => {
+  // The exact composition the reviewer measured: renaming the step to carry
+  // an OS qualifier while adding a conditional -- a continue-on-error/if:
+  // neutralization riding along on the same edit that breaks the name match
+  // -- used to still match under a plain indexOf(`name: ${stepName}`).
+  const synthetic = `
+    steps:
+      - name: ${INTEGRATION_STEP_NAME} [linux only]
+        if: runner.os == 'Linux'
+        shell: bash
+        run: bun scripts/partition-integration-tests.ts
+`;
+  expect(() => parseNamedStepRun(synthetic, INTEGRATION_STEP_NAME)).toThrow();
+});
+
+test("mutation proof: the anchored marker still matches the ORDINARY, unmutated step name (the N4 fix does not over-tighten)", () => {
+  const synthetic = `
+    steps:
+      - name: ${INTEGRATION_STEP_NAME}
+        shell: bash
+        run: bun scripts/partition-integration-tests.ts
+`;
+  expect(parseNamedStepRun(synthetic, INTEGRATION_STEP_NAME)).toBe(INTEGRATION_PARTITION_SCRIPT_COMMAND);
+});
+
+test("every currently-exempted file is exactly the domain the integration step's own script computes (no drift between the deny-list and its complement runner)", () => {
+  const fromExemptions = computeExemptedFiles(REAL_FILES, EXEMPTIONS).sort();
+  const { clean, contaminated } = partitionTests(REAL_FILES, EXEMPTIONS);
+  const nonExempt = new Set([...clean, ...contaminated]);
+  const complementOfNonExempt = REAL_FILES.filter((f) => !nonExempt.has(f)).sort();
+  expect(fromExemptions).toEqual(complementOfNonExempt);
+});
+
+test("discipline: every exemption reason's location claim is verifiable against the real CI workflow (no dangling step name, no unrelated-but-real step name, no unlocated reason)", () => {
+  const { vagueReasons, unverifiedSteps, unlocatedReasons } = auditExemptionLocations(EXEMPTIONS, REAL_WORKFLOW_TEXT);
+  expect(vagueReasons).toEqual([]);
+  expect(unverifiedSteps).toEqual([]);
+  expect(unlocatedReasons).toEqual([]);
+});
+
+test("mutation proof, RED-FIRST -- the ACTUAL historical formulation (verbatim, per git show HEAD~N:scripts/pure-module-partition.ts before card f4a3ed1e) makes no location claim at all and is refused", () => {
+  // Measured against git history, reviewer 2026-08-28: the pre-fix reason
+  // was "spawns a daemon and binds ports; the pure-module matrix is not for
+  // integration suites" -- no "elsewhere", no step name. A checker that only
+  // refused VAGUE wording ("elsewhere"/"ailleurs") would NOT have caught
+  // this string: it is neither vague nor named, it simply claims nothing.
+  // This is the actual red-first proof for this card's root cause.
+  const historicalReason = "spawns a daemon and binds ports; the pure-module matrix is not for integration suites";
+  const mutated: Exemptions = {
+    familyPrefixes: { "broker-": historicalReason, "server-": historicalReason },
+    exactFiles: {
+      "approval-hook.test.ts": historicalReason,
+      "mcp-roadmap-ack.test.ts": historicalReason,
+    },
+  };
+  const { unlocatedReasons, vagueReasons } = auditExemptionLocations(mutated, REAL_WORKFLOW_TEXT);
+  expect(unlocatedReasons).toContain(historicalReason);
+  expect(vagueReasons).not.toContain(historicalReason); // not vague-worded, just silent -- both must still be caught
+});
+
+test("mutation proof, forme voisine du bug historique: a reason claiming the work is done 'elsewhere' with no named step is refused (both as vague AND as unlocated)", () => {
+  const reason = "spawns a daemon and binds ports; the integration suites are run elsewhere";
+  const mutated: Exemptions = {
+    familyPrefixes: { ...EXEMPTIONS.familyPrefixes, "fake-": reason },
+    exactFiles: EXEMPTIONS.exactFiles,
+  };
+  const { vagueReasons, unlocatedReasons } = auditExemptionLocations(mutated, REAL_WORKFLOW_TEXT);
+  expect(vagueReasons).toContain(reason);
+  expect(unlocatedReasons).toContain(reason);
+});
+
+test("mutation proof: a reason making no location claim at all, not even vague wording, is still refused by the fail-closed floor", () => {
+  const reason = "flaky on CI, skipped for now";
+  const mutated: Exemptions = {
+    familyPrefixes: { ...EXEMPTIONS.familyPrefixes, "fake-": reason },
+    exactFiles: EXEMPTIONS.exactFiles,
+  };
+  const { unlocatedReasons, vagueReasons } = auditExemptionLocations(mutated, REAL_WORKFLOW_TEXT);
+  expect(unlocatedReasons).toContain(reason);
+  expect(vagueReasons).not.toContain(reason);
+});
+
+test("mutation proof: a reason naming a step that does not exist in the workflow is refused", () => {
+  const mutated: Exemptions = {
+    familyPrefixes: { ...EXEMPTIONS.familyPrefixes, "fake-": "spawns a daemon; run by the 'Nonexistent Step' step in desktop-build.yml" },
+    exactFiles: EXEMPTIONS.exactFiles,
+  };
+  const { unverifiedSteps } = auditExemptionLocations(mutated, REAL_WORKFLOW_TEXT);
+  expect(unverifiedSteps).toContain("Nonexistent Step");
+});
+
+test("mutation proof: a reason naming a REAL step that does not run the exempted files is refused (a true step name alone is not verification)", () => {
+  const mutated: Exemptions = {
+    familyPrefixes: { ...EXEMPTIONS.familyPrefixes, "fake-": "spawns a daemon; run by the 'Rebuild node-pty (ABI gate)' step in desktop-build.yml" },
+    exactFiles: EXEMPTIONS.exactFiles,
+  };
+  const { unverifiedSteps } = auditExemptionLocations(mutated, REAL_WORKFLOW_TEXT);
+  expect(unverifiedSteps).toContain("Rebuild node-pty (ABI gate)");
+});
+
+test("mutation proof: a reason naming the real integration step, running the real integration command, is accepted (positive control -- the checker does not just refuse everything)", () => {
+  const mutated: Exemptions = {
+    familyPrefixes: { "fake-": `spawns a daemon; run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml` },
+    exactFiles: {},
+  };
+  const { vagueReasons, unverifiedSteps, unlocatedReasons } = auditExemptionLocations(mutated, REAL_WORKFLOW_TEXT);
+  expect(vagueReasons).toEqual([]);
+  expect(unverifiedSteps).toEqual([]);
+  expect(unlocatedReasons).toEqual([]);
 });
 
 test("every exempted file actually spawns a broker (measured property, not the family label)", () => {

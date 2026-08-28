@@ -27,21 +27,35 @@ export interface Exemptions {
   exactFiles: Record<string, string>;
 }
 
-// Unchanged from the pre-migration allow-list era (tests/desktop-ci-glob-coverage.test.ts,
-// same 4 entries): both families spawn a daemon and bind ports, which this
-// pure-module partition is not for.
+// Card f4a3ed1e (2026-08-28): these 4 entries used to justify themselves with
+// "the pure-module matrix is not for integration suites" -- true about WHY
+// they don't belong in that step, but silent on whether anything ELSE runs
+// them, which nothing did (measured 2026-08-24: `bun test` occurred exactly
+// once in the whole CI, in the very step that exempts them). The wording
+// below now makes a checkable claim -- the exact step name that plays this
+// family -- so `auditExemptionLocations` below can verify it against the
+// real workflow text instead of trusting prose. Card 0bbac537's original
+// property (both families spawn a daemon and bind ports) is unchanged and
+// still what makes them wrong for the pure-module step specifically.
+export const INTEGRATION_STEP_NAME = "Bun tests (integration)";
+
 export const EXEMPTIONS: Exemptions = {
   familyPrefixes: {
-    "broker-": "spawns a daemon and binds ports; the pure-module matrix is not for integration suites",
-    "server-": "spawns a daemon and binds ports; the pure-module matrix is not for integration suites",
+    "broker-": `spawns a daemon and binds ports; run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
+    "server-": `spawns a daemon and binds ports; run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
   },
   exactFiles: {
     "approval-hook.test.ts":
-      "spawns a daemon and binds ports (imports startBroker from tests/_helper.ts); the pure-module matrix is not for integration suites",
+      `spawns a daemon and binds ports (imports startBroker from tests/_helper.ts); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
     "mcp-roadmap-ack.test.ts":
-      "spawns a daemon and binds ports (imports startBroker from tests/_helper.ts, and Bun.spawn's `bun server.ts` directly); the pure-module matrix is not for integration suites",
+      `spawns a daemon and binds ports (imports startBroker from tests/_helper.ts, and Bun.spawn's \`bun server.ts\` directly); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
   },
 };
+
+/** The complement of the deny-list: exempted files, i.e. the domain the integration step must play. */
+export function exemptedFiles(files: string[], exemptions: Exemptions = EXEMPTIONS): string[] {
+  return files.filter((f) => isExempt(f, exemptions));
+}
 
 /**
  * Text markers that identify a file as mutating process-global state with
@@ -70,12 +84,14 @@ export interface Partition {
 
 /**
  * Splits `files` (bare filenames under tests/) into clean/contaminated,
- * after removing exempted files entirely: they are not run by this
- * partition at all, and (N1, reviewer 2026-08-24, measured: the "Bun tests
- * (pure modules)" step in .github/workflows/desktop-build.yml is the only
- * step in that workflow that invokes `bun test`) not run in CI at all today
- * -- pre-existing, unchanged by this migration. `readSource` is injectable
- * so tests can exercise this against synthetic in-memory sources without
+ * after removing exempted files entirely: they are never run by THIS
+ * partition (N1, reviewer 2026-08-24: the "Bun tests (pure modules)" step
+ * is not for integration suites). Card f4a3ed1e (2026-08-28) closed the gap
+ * this comment used to describe -- exempted files used to run in NO CI job
+ * at all; they are now run by the companion "Bun tests (integration)" step
+ * (scripts/partition-integration-tests.ts), which calls exemptedFiles()
+ * (this same module) for its own domain. `readSource` is injectable so
+ * tests can exercise this against synthetic in-memory sources without
  * touching disk.
  */
 export function partitionTests(
@@ -120,21 +136,34 @@ export function listTestFiles(testsDir: string = TESTS_DIR): string[] {
 // only keeps each test's expectation from being an independent copy).
 export const PARTITION_SCRIPT_COMMAND = "bun scripts/partition-pure-tests.ts";
 
+// Card f4a3ed1e: same discipline for the new integration step, so
+// auditExemptionLocations (below) can tell "names a real step" apart from
+// "names a real step that runs the WRONG command" -- a step name alone is
+// not verification, see that function's header.
+export const INTEGRATION_PARTITION_SCRIPT_COMMAND = "bun scripts/partition-integration-tests.ts";
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
- * Pulls the `run:` command out of the "Bun tests (pure modules)" step.
- * Anchored on the step's own `name:`, AND bounded to end at the next step
- * item (a line starting `      - ` at the steps list's own indent) -- not
- * just to end of file. Card 0bbac537 sweep, 2026-08-24: this bounded parse
- * used to be duplicated verbatim in tests/desktop-ci-glob-coverage.test.ts
- * AND tests/desktop-commit-closure-check.test.ts, each anchoring the exact
- * same step marker independently -- exactly the "N sites doing the same
- * parsing" shape CLAUDE.md's shared-gating-table rule targets. Extracted
- * here, both files import it. Search starts at offset 1 into the slice so
- * the step's own leading `- name:` line (which begins the very slice being
- * bounded) is never mistaken for the next step's boundary. Throws (not a
- * test assertion) so this stays usable at module scope, where a broken parse
- * should abort loudly rather than silently produce an empty (or wrong-step)
- * result.
+ * Locates and bounds the step whose `name:` is exactly `stepName`, returning
+ * its full text (name line through the line before the next step marker, or
+ * end of file). Bounded to end at the next step item (a line starting
+ * `      - ` at the steps list's own indent) -- not just to end of file.
+ * Card 0bbac537 sweep, 2026-08-24: this bounded parse used to be duplicated
+ * verbatim in tests/desktop-ci-glob-coverage.test.ts AND
+ * tests/desktop-commit-closure-check.test.ts, each anchoring the exact same
+ * step marker independently -- exactly the "N sites doing the same parsing"
+ * shape CLAUDE.md's shared-gating-table rule targets. Extracted here, both
+ * files import it via parsePureModuleStepRun below. Search starts at offset
+ * 1 into the slice so the step's own leading `- name:` line (which begins
+ * the very slice being bounded) is never mistaken for the next step's
+ * boundary. Throws (not a test assertion) so this stays usable at module
+ * scope, where a broken parse should abort loudly rather than silently
+ * produce an empty (or wrong-step) result -- including when `stepName`
+ * itself does not exist, which auditExemptionLocations relies on to treat a
+ * dangling location claim as unverified.
  *
  * N2, reviewer 2026-08-24: the step-item indentation used to be hardcoded to
  * 6 spaces. Probed: at 4-space indentation the hardcoded boundary regex
@@ -144,28 +173,131 @@ export const PARTITION_SCRIPT_COMMAND = "bun scripts/partition-pure-tests.ts";
  * Deriving the indentation from the actual matched line (walk back to the
  * start of the step marker's own line, measure the whitespace before its
  * `-`) makes the boundary correct at any indentation instead of assuming
- * today's.
+ * today's. Card f4a3ed1e: generalized from a hardcoded "Bun tests (pure
+ * modules)" literal to an argument, `parsePureModuleStepRun` below is now a
+ * thin wrapper so every existing caller keeps compiling unchanged.
+ *
+ * N4, reviewer 2026-08-28: the marker search used to be a plain
+ * `workflowText.indexOf(\`name: ${stepName}\`)` -- a SUBSTRING match, so
+ * renaming the step to a superstring of the claimed name (e.g. "Bun tests
+ * (integration) [linux only]" while auditExemptionLocations still checks the
+ * shorter "Bun tests (integration)") matched anyway, silently, with a
+ * `continue-on-error`/`if:` neutralization riding along on the same edit.
+ * Anchoring the marker to require an immediate end-of-line (or end of text)
+ * right after `stepName`, via a regex instead of indexOf, makes that
+ * superstring case throw ("step not found") instead of matching.
  */
-export function parsePureModuleStepRun(workflowText: string): string {
-  const stepMarker = "name: Bun tests (pure modules)";
-  const stepIdx = workflowText.indexOf(stepMarker);
-  if (stepIdx === -1) {
-    throw new Error(`"${stepMarker}" step not found in ${WORKFLOW_PATH}`);
+function boundStepText(workflowText: string, stepName: string): string {
+  const markerRe = new RegExp(`name: ${escapeRegExp(stepName)}[ \\t]*(?:\\r?\\n|$)`);
+  const markerMatch = markerRe.exec(workflowText);
+  if (!markerMatch) {
+    throw new Error(`"name: ${stepName}" step not found (anchored to end of line) in ${WORKFLOW_PATH}`);
   }
+  const stepIdx = markerMatch.index;
   const lineStart = workflowText.lastIndexOf("\n", stepIdx) + 1;
   const linePrefix = workflowText.slice(lineStart, stepIdx);
   const dashMatch = linePrefix.match(/^(\s*)-\s*$/);
   if (!dashMatch) {
-    throw new Error(`could not derive step-item indentation for "${stepMarker}" in ${WORKFLOW_PATH} (line prefix: ${JSON.stringify(linePrefix)})`);
+    throw new Error(`could not derive step-item indentation for "name: ${stepName}" in ${WORKFLOW_PATH} (line prefix: ${JSON.stringify(linePrefix)})`);
   }
   const indent = dashMatch[1]!;
   const rest = workflowText.slice(stepIdx);
   const nextStepBoundary = new RegExp(`\\r?\\n${indent}- `);
   const nextStepOffset = rest.slice(1).search(nextStepBoundary);
-  const stepText = nextStepOffset === -1 ? rest : rest.slice(0, nextStepOffset + 1);
+  return nextStepOffset === -1 ? rest : rest.slice(0, nextStepOffset + 1);
+}
+
+/** The full bounded text of the step named `stepName` (name line through end of its block). Throws if not found. */
+export function extractStepText(workflowText: string, stepName: string): string {
+  return boundStepText(workflowText, stepName);
+}
+
+export function parseNamedStepRun(workflowText: string, stepName: string): string {
+  const stepText = boundStepText(workflowText, stepName);
   const runMatch = stepText.match(/run:\s*(.+)/);
   if (!runMatch) {
-    throw new Error(`no "run:" line found inside the "${stepMarker}" step`);
+    throw new Error(`no "run:" line found inside the "name: ${stepName}" step`);
   }
   return runMatch[1].trim();
+}
+
+/** Unchanged call sites: parses the "Bun tests (pure modules)" step specifically. */
+export function parsePureModuleStepRun(workflowText: string): string {
+  return parseNamedStepRun(workflowText, "Bun tests (pure modules)");
+}
+
+/** Parses the "Bun tests (integration)" step specifically (card f4a3ed1e). */
+export function parseIntegrationStepRun(workflowText: string): string {
+  return parseNamedStepRun(workflowText, INTEGRATION_STEP_NAME);
+}
+
+// Card f4a3ed1e: matches an exemption reason's location claim in its one
+// checkable form (`run by the '<step name>' step`). "elsewhere"/"ailleurs"
+// is tracked separately below only as an informational sub-classification
+// (the wording of this card's root cause -- "jouees ailleurs" with nothing
+// actually playing them) -- it does NOT get a pass for being merely vague
+// rather than false: reviewer 2026-08-28 measured that the version of this
+// function which only refused a VAGUE claim (and left a claim-free reason
+// alone) would not have caught the actual pre-fix wording verbatim
+// ("the pure-module matrix is not for integration suites", no "elsewhere",
+// no step name) -- that reason made no location claim at all and passed.
+const NAMED_STEP_LOCATION_RE = /run by the '([^']+)' step/;
+const VAGUE_LOCATION_RE = /\b(elsewhere|ailleurs)\b/i;
+
+export interface ExemptionLocationAudit {
+  /** Informational subset of unlocatedReasons: an unfalsifiable "elsewhere"/"ailleurs" claim with no named step (this card's root-cause wording). */
+  vagueReasons: string[];
+  /** Step names an exemption reason claims, that either do not exist in the workflow or do not run one of the partition scripts this table's complement functions expect. */
+  unverifiedSteps: string[];
+  /**
+   * FAIL-CLOSED FLOOR (reviewer 2026-08-28): every reason must positively
+   * name a verifiable step, in the `run by the '<step>' step` form, or it
+   * lands here -- whether it is vague ("elsewhere"), silent on location
+   * entirely ("flaky on CI, skipped for now"), or anything else that does
+   * not match. Before this bucket existed, a claim-free reason was allowed
+   * through with nothing flagged; this is the change that makes a NEW
+   * exemption with no location claim at all refuse by default instead of
+   * passing by omission.
+   */
+  unlocatedReasons: string[];
+}
+
+/**
+ * Verifies every exemption reason's location claim against the real
+ * workflow text. A reason naming a step must point at one that (a) actually
+ * exists (parseNamedStepRun throws otherwise) and (b) actually runs one of
+ * the two known partition-script commands -- a real but unrelated step name
+ * (e.g. the node-pty rebuild step) is refused just as loudly as a
+ * nonexistent one, because a true step name is not by itself verification
+ * that IT runs these files. A reason that does not even attempt a named
+ * claim is refused too (unlocatedReasons) -- this function now REQUIRES a
+ * checkable location claim, it does not merely refuse an unconvincing one.
+ */
+export function auditExemptionLocations(exemptions: Exemptions, workflowText: string): ExemptionLocationAudit {
+  const vagueReasons: string[] = [];
+  const unverifiedSteps: string[] = [];
+  const unlocatedReasons: string[] = [];
+  const allReasons = [...Object.values(exemptions.familyPrefixes), ...Object.values(exemptions.exactFiles)];
+  for (const reason of allReasons) {
+    const namedMatch = reason.match(NAMED_STEP_LOCATION_RE);
+    if (!namedMatch) {
+      unlocatedReasons.push(reason);
+      if (VAGUE_LOCATION_RE.test(reason)) {
+        vagueReasons.push(reason);
+      }
+      continue;
+    }
+    const stepName = namedMatch[1]!;
+    let runText: string;
+    try {
+      runText = parseNamedStepRun(workflowText, stepName);
+    } catch {
+      unverifiedSteps.push(stepName);
+      continue;
+    }
+    if (runText !== PARTITION_SCRIPT_COMMAND && runText !== INTEGRATION_PARTITION_SCRIPT_COMMAND) {
+      unverifiedSteps.push(stepName);
+    }
+  }
+  return { vagueReasons, unverifiedSteps, unlocatedReasons };
 }

@@ -18,6 +18,16 @@ on:
       - 'shared/**'
       - 'tests/**'
       - 'broker.ts'
+      # Card f4a3ed1e, reviewer 2026-08-28: server.ts and cli.ts are exercised
+      # by tests this workflow now runs (server-*.test.ts,
+      # mcp-roadmap-ack.test.ts spawns `bun server.ts` directly) but neither
+      # file triggered this workflow at all -- a commit touching only
+      # server.ts ran no job. scripts/** is what DECIDES which tests run in
+      # both bun-tests steps; a change there changes CI behaviour with
+      # nothing to trigger a run that would show it.
+      - 'server.ts'
+      - 'cli.ts'
+      - 'scripts/**'
       - '.github/workflows/desktop-build.yml'
   pull_request:
     paths:
@@ -26,6 +36,9 @@ on:
       - 'shared/**'
       - 'tests/**'
       - 'broker.ts'
+      - 'server.ts'
+      - 'cli.ts'
+      - 'scripts/**'
       - '.github/workflows/desktop-build.yml'
 
 jobs:
@@ -128,3 +141,34 @@ jobs:
       - name: Build (electron-vite)
         working-directory: desktop
         run: npm run build
+
+      # Card f4a3ed1e: the complement of the "Bun tests (pure modules)" step
+      # above. 52+ tests/*.test.ts files (broker-/server- prefixes,
+      # approval-hook.test.ts, mcp-roadmap-ack.test.ts) spawn a daemon and
+      # bind a port each, so they are exempted from that step's shared-
+      # process batch on purpose (scripts/pure-module-partition.ts's
+      # EXEMPTIONS table) -- but until this step existed, nothing else
+      # played them either: they ran in NO CI job at all. Own step, own time
+      # budget, deliberately not merged into the pure-module batch (mixing
+      # daemon-spawning integration suites into that shared-process run
+      # would reintroduce port/timing coupling the pure-module partition
+      # exists to avoid).
+      #
+      # Placed LAST, reviewer 2026-08-28: these 52+ files have never run on
+      # a Linux/macOS CI runner, so a first red here is expected and must
+      # not swallow the packaging signal this workflow exists to protect --
+      # every OS toolchain gate above (typecheck, node-pty ABI rebuild,
+      # electron-vite build) reports on its own merits first. Still
+      # BLOCKING (no continue-on-error): a decorative step here would be the
+      # exact fail-open shape this card exists to close, just moved one
+      # level up.
+      #
+      # scripts/pure-module-partition.ts's EXEMPTIONS reasons name this step
+      # by this exact string; tests/desktop-ci-glob-coverage.test.ts's
+      # auditExemptionLocations verifies that claim against this file's real
+      # text (anchored to end-of-line, so a rename to a superstring of this
+      # name -- e.g. adding an `if:` and " [linux only]" in the same edit --
+      # is caught as a dangling claim, not silently matched).
+      - name: Bun tests (integration)
+        shell: bash
+        run: bun scripts/partition-integration-tests.ts
