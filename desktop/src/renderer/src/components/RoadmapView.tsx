@@ -526,6 +526,49 @@ export function RoadmapView(): React.JSX.Element {
   const menuItems = (item: RoadmapItem): ContextMenuItem[] => {
     const locked = isLocked(item)
     const closed = item.status === 'done' || item.status === 'archived'
+    const archived = item.status === 'archived'
+
+    // Card 99d3a9eb, arbitrage 3: the one action that survives on every
+    // closed card, built ONCE so the label/icon fix (was the trash glyph +
+    // roadmap.menuDelete on an action that actually calls setConfirmArchive
+    // -- card's own measurement) lives in a single place instead of drifting
+    // between the open- and closed-card branches below. `disabled: locked`
+    // is dead code today (isLocked() requires status==='in_progress', never
+    // true together with 'done'/'archived') but kept so this entry inherits
+    // the lockedHint discipline for free if that invariant ever loosens.
+    const archiveOrRestoreItem: ContextMenuItem = archived
+      ? {
+          label: (
+            <>
+              {GLYPH_ACTIONS.restore} {t('roadmap.restore')}
+            </>
+          ),
+          disabled: locked,
+          onSelect: () => void restore(item)
+        }
+      : {
+          label: (
+            <>
+              {GLYPH_BADGES.archive} {t('roadmap.archive')}
+            </>
+          ),
+          danger: true,
+          disabled: locked,
+          onSelect: () => setConfirmArchive(item)
+        }
+
+    // Arbitrage 1: MASKED, not disabled -- a closed card offers exactly one
+    // entry, never the other four greyed out. Arbitrage 3's criterion: every
+    // action that advances/modifies the card disappears; only its own
+    // cycle-of-life action (Archive on done, Restore on archived) survives.
+    // The archived branch here closes a coverage gap the card's own
+    // measurement did not enumerate for this surface (only the modal was
+    // measured as already correct for Restore) -- same criterion, applied
+    // to the one surface it missed.
+    if (closed) {
+      return [archiveOrRestoreItem]
+    }
+
     return [
       {
         label: (
@@ -548,7 +591,7 @@ export function RoadmapView(): React.JSX.Element {
                 {GLYPH_BADGES.clepsydra} {t('roadmap.menuQueue')}
               </>
             ),
-            disabled: locked || closed,
+            disabled: locked,
             onSelect: () => void queueItem(item)
           },
       {
@@ -557,7 +600,7 @@ export function RoadmapView(): React.JSX.Element {
             {GLYPH_ACTIONS.forward} {t('roadmap.menuAssign')}
           </>
         ),
-        disabled: locked || closed,
+        disabled: locked,
         onSelect: () => setAssignItem(item)
       },
       {
@@ -570,16 +613,7 @@ export function RoadmapView(): React.JSX.Element {
         disabled: locked,
         onSelect: () => void toggleInactive(item)
       },
-      {
-        label: (
-          <>
-            {GLYPH_ACTIONS.trash} {t('roadmap.menuDelete')}
-          </>
-        ),
-        danger: true,
-        disabled: locked || item.status === 'archived',
-        onSelect: () => setConfirmArchive(item)
-      }
+      archiveOrRestoreItem
     ]
   }
 

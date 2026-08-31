@@ -37,7 +37,14 @@ function BoardCard({
   t: TFn
 }): React.JSX.Element {
   const locked = isLocked(item)
-  const draggable = !locked && item.status !== 'archived'
+  // Card 99d3a9eb, AC2: the priority chip's setPriority() write needs the
+  // same gate as every other write path on this card -- reused below for
+  // both the drag guard (arbitrage 2) and the chip's click guard.
+  const closed = item.status === 'done' || item.status === 'archived'
+  // Card 99d3a9eb, arbitrage 2: a closed card (done or archived) no longer
+  // drags to another column -- 'archived' was already excluded, 'done' was
+  // not (the exact gap the card measured).
+  const draggable = !locked && !closed
   return (
     <button
       className={`rm-card${locked ? ' rm-card-locked' : ''}${item.status === 'archived' ? ' rm-card-archived' : ''}`}
@@ -57,11 +64,19 @@ function BoardCard({
             detail view needed. A span, not a button (nested buttons are
             invalid inside the card button). */}
         <span
-          className={`rm-prio-chip rm-prio-${item.priority}`}
-          role="button"
-          title={`${t(`roadmap.priority.${item.priority}`)} — ${t('roadmap.prioPick')}`}
+          className={`rm-prio-chip rm-prio-${item.priority}${locked || closed ? ' rm-prio-chip-inert' : ''}`}
+          role={locked || closed ? undefined : 'button'}
+          title={
+            locked || closed
+              ? t(`roadmap.priority.${item.priority}`)
+              : `${t(`roadmap.priority.${item.priority}`)} — ${t('roadmap.prioPick')}`
+          }
           onClick={(e) => {
             e.stopPropagation()
+            // Card 99d3a9eb, AC2: same gate as every other write path on a
+            // closed/locked card -- this chip was the one entry point that
+            // had none, a click straight on the card (not via right-click).
+            if (locked || closed) return
             const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
             onPrio(r.left, r.bottom + 4)
           }}

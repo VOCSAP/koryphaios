@@ -2831,6 +2831,19 @@ svg.glyph {
   background: color-mix(in srgb, currentColor 18%, transparent);
 }
 
+/* Card 99d3a9eb, retouche 2: the chip's onClick already no-ops on a
+   locked/closed card (AC2) -- this closes the same affordance-lies gap on
+   the VISUAL side, matching the role/tooltip removal already applied above
+   in JSX. No new state was needed before tonight because nothing gated
+   this chip at all. */
+.rm-prio-chip-inert {
+  cursor: default;
+}
+
+.rm-prio-chip-inert:hover {
+  background: none;
+}
+
 /* Priority dropdown (K7): context-menu look, one colored row per level. */
 .rm-prio-option {
   display: flex;

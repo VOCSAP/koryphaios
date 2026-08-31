@@ -232,8 +232,14 @@ export function RoadmapList(): React.JSX.Element {
     window.setTimeout(() => setUndo((u) => (u?.item.id === item.id ? null : u)), 5000)
   }
 
+  // Card 99d3a9eb, B2: the single gate BOTH move paths funnel through --
+  // the masked "Deplacer vers" sheet entry, and the basket chip's drop
+  // (detach() -> basket -> this), which stayed unconditioned on `closed`
+  // even with the sheet entry hidden. One `closed` check here closes the
+  // family by construction instead of chasing each entry point.
   const moveTo = (item: RoadmapItem, status: RoadmapStatus): void => {
-    if (item.status === status || isLocked(item)) return
+    const closed = item.status === 'done' || item.status === 'archived'
+    if (item.status === status || isLocked(item) || closed) return
     if (status === 'done') setConfirmDone(item)
     else void applyMove(item, status)
   }
@@ -381,90 +387,124 @@ export function RoadmapList(): React.JSX.Element {
       )}
 
       {/* Action sheet — the mobile mirror of the desktop right-click menu,
-          plus "Soulever" as the discoverable path to the basket. */}
-      {sheetItem && (
-        <MobileSheet onClose={() => setSheetItem(null)} title={sheetItem.title}>
-          <button
-            className="msheet-item"
-            onClick={() => {
-              setMoveItemSheet(sheetItem)
-              setSheetItem(null)
-            }}
-          >
-            ⇢ {t('mobile.moveTo')}
-          </button>
-          <button
-            className="msheet-item"
-            onClick={() => {
-              detach(sheetItem)
-              setSheetItem(null)
-            }}
-          >
-            <span className="msheet-icon">{GLYPH_BADGES.lift}</span> {t('mobile.lift')}
-          </button>
-          <button
-            className="msheet-item"
-            disabled={isLocked(sheetItem)}
-            onClick={() => {
-              setEdit({
-                id: sheetItem.id,
-                title: sheetItem.title,
-                priority: sheetItem.priority,
-                description: sheetItem.description
-              })
-              setSheetItem(null)
-            }}
-          >
-            <span className="msheet-icon">{GLYPH_ACTIONS.edit}</span> {t('roadmap.menuEdit')}
-          </button>
-          <button
-            className="msheet-item"
-            disabled={
-              isLocked(sheetItem) ||
-              sheetItem.status === 'done' ||
-              sheetItem.status === 'archived' ||
-              sheetItem.queue !== null
-            }
-            onClick={() => {
-              void queueItem(sheetItem)
-              setSheetItem(null)
-            }}
-          >
-            <span className="msheet-icon">{GLYPH_BADGES.clepsydra}</span> {t('roadmap.menuQueue')}
-          </button>
-          <button
-            className="msheet-item"
-            disabled={liveAgents.length === 0}
-            onClick={() => {
-              setAssignItem(sheetItem)
-              setSheetItem(null)
-            }}
-          >
-            <span className="msheet-icon">{GLYPHS.agents}</span> {t('roadmap.menuAssign')}
-          </button>
-          {isLocked(sheetItem) && (
-            <button
-              className="msheet-item"
-              onClick={() => {
-                void stop(sheetItem)
-                setSheetItem(null)
-              }}
-            >
-              <span className="msheet-icon">{GLYPH_ACTIONS.stop}</span> {t('roadmap.stop')}
-            </button>
-          )}
-          <button
-            className="msheet-item msheet-item-danger"
-            disabled={isLocked(sheetItem)}
-            onClick={() => {
-              void archive(sheetItem)
-              setSheetItem(null)
-            }}
-          >
-            <span className="msheet-icon">{GLYPH_ACTIONS.trash}</span> {t('roadmap.menuDelete')}
-          </button>
-        </MobileSheet>
-      )}
+          plus "Soulever" as the discoverable path to the basket. Card
+          99d3a9eb, arbitrage 1: a closed (done/archived) card MASKS the
+          actions that advance/modify it, same discipline as the desktop
+          menu -- only Archive/Restore and Soulever (arbitrage 4, always
+          unconditioned) survive. */}
+      {sheetItem &&
+        (() => {
+          const closed = sheetItem.status === 'done' || sheetItem.status === 'archived'
+          const archived = sheetItem.status === 'archived'
+          return (
+            <MobileSheet onClose={() => setSheetItem(null)} title={sheetItem.title}>
+              {!closed && (
+                <button
+                  className="msheet-item"
+                  onClick={() => {
+                    setMoveItemSheet(sheetItem)
+                    setSheetItem(null)
+                  }}
+                >
+                  ⇢ {t('mobile.moveTo')}
+                </button>
+              )}
+              <button
+                className="msheet-item"
+                onClick={() => {
+                  detach(sheetItem)
+                  setSheetItem(null)
+                }}
+              >
+                <span className="msheet-icon">{GLYPH_BADGES.lift}</span> {t('mobile.lift')}
+              </button>
+              {!closed && (
+                <button
+                  className="msheet-item"
+                  disabled={isLocked(sheetItem)}
+                  onClick={() => {
+                    setEdit({
+                      id: sheetItem.id,
+                      title: sheetItem.title,
+                      priority: sheetItem.priority,
+                      description: sheetItem.description
+                    })
+                    setSheetItem(null)
+                  }}
+                >
+                  <span className="msheet-icon">{GLYPH_ACTIONS.edit}</span> {t('roadmap.menuEdit')}
+                </button>
+              )}
+              {!closed && (
+                <button
+                  className="msheet-item"
+                  disabled={isLocked(sheetItem) || sheetItem.queue !== null}
+                  onClick={() => {
+                    void queueItem(sheetItem)
+                    setSheetItem(null)
+                  }}
+                >
+                  <span className="msheet-icon">{GLYPH_BADGES.clepsydra}</span>{' '}
+                  {t('roadmap.menuQueue')}
+                </button>
+              )}
+              {/* Card 99d3a9eb: previously conditioned on nothing but live-agent
+                  count -- the exact divergence from desktop's `locked || closed`
+                  discipline the card measured. Matched here. */}
+              {!closed && (
+                <button
+                  className="msheet-item"
+                  disabled={isLocked(sheetItem) || liveAgents.length === 0}
+                  onClick={() => {
+                    setAssignItem(sheetItem)
+                    setSheetItem(null)
+                  }}
+                >
+                  <span className="msheet-icon">{GLYPHS.agents}</span> {t('roadmap.menuAssign')}
+                </button>
+              )}
+              {isLocked(sheetItem) && (
+                <button
+                  className="msheet-item"
+                  onClick={() => {
+                    void stop(sheetItem)
+                    setSheetItem(null)
+                  }}
+                >
+                  <span className="msheet-icon">{GLYPH_ACTIONS.stop}</span> {t('roadmap.stop')}
+                </button>
+              )}
+              {/* Card 99d3a9eb: was mislabeled trash/roadmap.menuDelete for an
+                  action that always called archive() -- same fix as desktop,
+                  plus the archived-card Restore branch the modal already had. */}
+              {archived ? (
+                <button
+                  className="msheet-item"
+                  disabled={isLocked(sheetItem)}
+                  onClick={() => {
+                    void upsert({ id: sheetItem.id, status: 'planned' })
+                    setSheetItem(null)
+                  }}
+                >
+                  <span className="msheet-icon">{GLYPH_ACTIONS.restore}</span>{' '}
+                  {t('roadmap.restore')}
+                </button>
+              ) : (
+                <button
+                  className="msheet-item msheet-item-danger"
+                  disabled={isLocked(sheetItem)}
+                  onClick={() => {
+                    void archive(sheetItem)
+                    setSheetItem(null)
+                  }}
+                >
+                  <span className="msheet-icon">{GLYPH_BADGES.archive}</span>{' '}
+                  {t('roadmap.archive')}
+                </button>
+              )}
+            </MobileSheet>
+          )
+        })()}
 
       {moveItemSheet && (
         <MobileSheet onClose={() => setMoveItemSheet(null)} title={t('mobile.moveTo')}>

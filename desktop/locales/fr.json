@@ -709,7 +709,6 @@
   "roadmap.menuEdit": "Éditer…",
   "roadmap.menuQueue": "Ajouter à la file de traitement",
   "roadmap.menuAssign": "Traiter immédiatement…",
-  "roadmap.menuDelete": "Supprimer (archive)",
   "roadmap.menuMarkInactive": "Marquer inactive (opérateur uniquement)",
   "roadmap.menuReactivate": "Réactiver",
   "roadmap.inactiveBadge": "Inactive",

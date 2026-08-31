@@ -235,6 +235,11 @@ export function RoadmapItemModal({
   }, [onClose])
 
   const stoppable = item.locked && item.status === 'in_progress'
+  // Card 99d3a9eb, arbitrage 3: content stays readable, edit affordances
+  // don't -- shared by the pencil, launch-agent and the dependency editor
+  // below (AC1: onAddDep/onRemoveDep both write depends_on, a modification
+  // the card's "read-only for CONTENT" scope explicitly excludes).
+  const closed = item.status === 'done' || item.status === 'archived'
 
   const depCandidates = items.filter(
     (i) =>
@@ -253,14 +258,19 @@ export function RoadmapItemModal({
             {KIND_ICONS[item.kind]}
           </span>
           <h3>{item.title}</h3>
-          <button
-            className="icon-btn"
-            title={stoppable ? t('roadmap.lockedHint') : t('common.edit')}
-            disabled={stoppable}
-            onClick={onEdit}
-          >
-            {GLYPH_ACTIONS.edit}
-          </button>
+          {/* Card 99d3a9eb, arbitrage 1: masked (not disabled) on a closed
+              card -- editing a done/archived card has no object, unlike the
+              locked case below which stays disabled (temporary). */}
+          {!closed && (
+            <button
+              className="icon-btn"
+              title={stoppable ? t('roadmap.lockedHint') : t('common.edit')}
+              disabled={stoppable}
+              onClick={onEdit}
+            >
+              {GLYPH_ACTIONS.edit}
+            </button>
+          )}
           <button className="icon-btn" title={t('common.close')} onClick={onClose}>
             {GLYPH_ACTIONS.close}
           </button>
@@ -318,32 +328,40 @@ export function RoadmapItemModal({
           )}
           <section className="rm-modal-section">
             <h4>{t('roadmap.dependsOn')}</h4>
+            {/* Card 99d3a9eb, AC1: the dependency LIST is content (stays,
+                read-only) but onAddDep/onRemoveDep both write depends_on --
+                a modification, masked on a closed card same as the pencil
+                and launch-agent above. */}
             <div className="rm-dep-chips">
               {item.depends_on.map((d) => {
                 const dep = items.find((i) => i.id === d)
                 return (
                   <span key={d} className="rm-badge rm-dep-chip">
                     {dep ? dep.title : d.slice(0, 8)}
-                    <button
-                      type="button"
-                      className="rm-dep-chip-x"
-                      title={t('roadmap.wf.removeDep')}
-                      onClick={() => onRemoveDep(d)}
-                    >
-                      {GLYPH_ACTIONS.close}
-                    </button>
+                    {!closed && (
+                      <button
+                        type="button"
+                        className="rm-dep-chip-x"
+                        title={t('roadmap.wf.removeDep')}
+                        onClick={() => onRemoveDep(d)}
+                      >
+                        {GLYPH_ACTIONS.close}
+                      </button>
+                    )}
                   </span>
                 )
               })}
-              <button
-                type="button"
-                className="icon-btn rm-dep-add"
-                title={t('roadmap.addDep')}
-                disabled={depCandidates.length === 0}
-                onClick={(e) => setDepMenu({ x: e.clientX, y: e.clientY })}
-              >
-                {GLYPH_ACTIONS.plus}
-              </button>
+              {!closed && (
+                <button
+                  type="button"
+                  className="icon-btn rm-dep-add"
+                  title={t('roadmap.addDep')}
+                  disabled={depCandidates.length === 0}
+                  onClick={(e) => setDepMenu({ x: e.clientX, y: e.clientY })}
+                >
+                  {GLYPH_ACTIONS.plus}
+                </button>
+              )}
             </div>
           </section>
         </div>
@@ -355,7 +373,9 @@ export function RoadmapItemModal({
         </p>
 
         <div className="rm-detail-actions">
-          {item.status !== 'archived' && (
+          {/* Card 99d3a9eb: launching an agent on a closed card has no
+              object, same masking as the edit pencil above. */}
+          {!closed && (
             <button className="primary" onClick={onLaunch} disabled={stoppable}>
               {t('roadmap.launchAgent')}
             </button>

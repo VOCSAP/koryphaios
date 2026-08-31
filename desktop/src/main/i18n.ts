@@ -917,7 +917,6 @@ export const EN_DEFAULTS: Record<string, string> = {
   'roadmap.menuEdit': 'Edit…',
   'roadmap.menuQueue': 'Add to dispatch queue',
   'roadmap.menuAssign': 'Process now…',
-  'roadmap.menuDelete': 'Delete (archives)',
   'roadmap.menuMarkInactive': 'Mark inactive (operator only)',
   'roadmap.menuReactivate': 'Reactivate',
   'roadmap.inactiveBadge': 'Inactive',
