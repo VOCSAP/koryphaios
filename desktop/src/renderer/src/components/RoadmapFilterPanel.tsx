@@ -55,6 +55,8 @@ function FilterSection<T extends string>({
   onToggleCollapse,
   onToggleValue,
   onReset,
+  bodyHead,
+  emptyLabel,
   t
 }: {
   titleKey: string
@@ -67,6 +69,16 @@ function FilterSection<T extends string>({
   onToggleCollapse: () => void
   onToggleValue: (v: T) => void
   onReset: () => void
+  /** Rendered first inside the open body, above the checkbox rows (card
+   *  7dde9434: the tag section's own sifting field). It lives INSIDE the body
+   *  and not above the section head so that collapsing the section takes it
+   *  away too -- a search box for a list that is not on screen is a control
+   *  pointing at nothing. */
+  bodyHead?: React.ReactNode
+  /** Shown instead of the rows when `values` is empty. A section whose body
+   *  can be narrowed needs this: silently rendering nothing reads as a broken
+   *  panel, not as "no match". */
+  emptyLabel?: string
   t: TFn
 }): React.JSX.Element {
   return (
@@ -99,6 +111,10 @@ function FilterSection<T extends string>({
       </div>
       {!collapsed && (
         <div className="rm-filter-section-body">
+          {bodyHead}
+          {values.length === 0 && emptyLabel && (
+            <div className="rm-filter-section-empty">{emptyLabel}</div>
+          )}
           {values.map((v) => {
             const on = active.includes(v)
             const count = bucketCount(buckets, v)
@@ -154,6 +170,31 @@ export function RoadmapFilterPanel({
   // section, just seeded differently.
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({ tags: true })
   const toggleSection = (key: string): void => setCollapsed((c) => ({ ...c, [key]: !c[key] }))
+
+  // Card 7dde9434: the same 148 values that forced the section collapsed also
+  // make it unreadable once opened, so the section sifts itself.
+  //
+  // The query lives HERE, next to `collapsed`, and not inside FilterSection,
+  // for the reason the big comment below spells out: the body is UNMOUNTED
+  // when the panel folds, so any state held inside it would be silently
+  // destroyed by a fold/unfold cycle. Same placement, same lifetime, same
+  // guarantee as the per-section collapse.
+  //
+  // Filtering is purely local, and that is a MEASURED choice, not a shortcut:
+  // `computeRoadmapFacets` (broker.ts) selects the tag buckets with no LIMIT
+  // and no truncation, so the list the renderer holds is the project's whole
+  // tag set -- narrowing it here cannot hide a value the operator could have
+  // reached otherwise. Had that query been capped, this field would have had
+  // to become a broker predicate, like the card search above it.
+  const [tagQuery, setTagQuery] = useState('')
+  const tagNeedle = tagQuery.trim().toLowerCase()
+  const activeTags = criteria.tags ?? []
+  // An ACTIVE tag survives the needle. Making a checked box disappear under a
+  // text filter is the classic trap of this pattern: the filter stays applied
+  // to the board while the only control that undoes it is gone from the panel.
+  const tagBuckets = (facets?.tags ?? []).filter(
+    (b) => !tagNeedle || b.value.toLowerCase().includes(tagNeedle) || activeTags.includes(b.value)
+  )
 
   return (
     // Never mounted conditionally (card 7a2e76c6, DESIGN.md "Collapsible side
@@ -316,14 +357,50 @@ export function RoadmapFilterPanel({
           {facets && facets.tags.length > 0 && (
             <FilterSection
               titleKey="roadmap.filter.tags"
-              values={facets.tags.map((b) => b.value)}
-              active={criteria.tags ?? []}
+              values={tagBuckets.map((b) => b.value)}
+              active={activeTags}
+              // Counts still come from the UNNARROWED facet list: the needle
+              // decides which rows are shown, never what a row says.
               buckets={facets.tags}
               labelFor={(v) => `#${v}`}
               collapsed={!!collapsed.tags}
               onToggleCollapse={() => toggleSection('tags')}
               onToggleValue={(v) => setCriteria({ ...criteria, tags: toggled(criteria.tags, v) })}
               onReset={() => setCriteria({ ...criteria, tags: undefined })}
+              emptyLabel={t('roadmap.filter.tagSearchEmpty')}
+              bodyHead={
+                /* Deliberately NOT shaped like the card search above: that one
+                   wears a stacked "Search" label and reaches the broker, this
+                   one wears the lens inside its own box and only sifts what is
+                   already on screen. Two identically-labelled fields a few
+                   centimetres apart, with two different reaches, is exactly the
+                   confusion the difference in shape exists to prevent -- hence
+                   no visible label here, and a placeholder that names its own
+                   scope. */
+                <label className="rm-tag-search">
+                  <span className="rm-tag-search-icon" aria-hidden="true">
+                    {GLYPH_ACTIONS.search}
+                  </span>
+                  <input
+                    className="rm-tag-search-input"
+                    value={tagQuery}
+                    placeholder={t('roadmap.filter.tagSearchPlaceholder')}
+                    aria-label={t('roadmap.filter.tagSearchLabel')}
+                    onChange={(e) => setTagQuery(e.target.value)}
+                  />
+                  {tagQuery && (
+                    <button
+                      type="button"
+                      className="icon-btn rm-tag-search-clear"
+                      title={t('roadmap.filter.tagSearchClear')}
+                      aria-label={t('roadmap.filter.tagSearchClear')}
+                      onClick={() => setTagQuery('')}
+                    >
+                      {GLYPH_ACTIONS.close}
+                    </button>
+                  )}
+                </label>
+              }
               t={t}
             />
           )}

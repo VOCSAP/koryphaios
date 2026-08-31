@@ -1508,10 +1508,18 @@ textarea:disabled {
 /* Selects are deliberately absent: the element-level rule above already gives
    them the same box, and re-declaring `background`/`padding` here would erase
    the chevron and its reserved lane. */
+/* `.rm-tag-search-input` joins this group rather than restating the six
+   declarations: it is a text input that must draw exactly this box, but it
+   sits in a bare flex row, not under a `.field` wrapper, so none of the
+   selectors above reach it. There is still no ELEMENT-level rule for text
+   inputs (unlike `select`, `textarea` and the radios), which is why a bare
+   `<input>` written outside `.field` is native today -- card 634f9882,
+   too wide a blast radius to fix from here. */
 .field input[type='text'],
 .field input:not([type]),
 .field input[type='number'],
-.field textarea {
+.field textarea,
+.rm-tag-search-input {
   font: inherit;
   background: var(--bg);
   color: var(--fg);
@@ -2650,6 +2658,76 @@ svg.glyph {
 }
 
 .rm-filter-value-count {
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+
+/* Card 7dde9434: sifting the ~150 tag facets, from inside the Tags section's
+   own body. Both the lens and the clear button are positioned absolutely
+   INSIDE the input's box rather than being flex siblings of it -- same reason
+   as `.rm-filter-search-clear` above, and the same defect avoided: this panel
+   scrolls, so `overflow-y: auto` silently implies `overflow-x: auto`, and any
+   sibling the input's intrinsic width pushes past 220px leaves the clip box
+   instead of being clipped (invisible AND unclickable). Inside the box, that
+   cannot happen at any panel width. */
+.rm-tag-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin: 2px 0 6px;
+  font-size: 12px;
+}
+
+.rm-tag-search-icon {
+  position: absolute;
+  left: 7px;
+  display: inline-flex;
+  color: var(--fg-dim);
+  /* The wrapper is a <label>, so a click anywhere on it focuses the input;
+     the lens must not swallow that click and must never take a hit-test. */
+  pointer-events: none;
+}
+
+/* Box, colours and radius come from the `.field input` group far above, which
+   this class joined; only the two lanes reserved for the lens and the clear
+   button are declared here. Longhands beat that group's `padding` shorthand
+   because both selectors weigh (0,1,0) and this rule comes later in the file
+   -- the same equality/order argument as `.field input.rm-filter-search-input`,
+   without needing its compound selector, since no `.field` ancestor competes. */
+.rm-tag-search-input {
+  flex: 1;
+  min-width: 0;
+  padding-left: 24px;
+  padding-right: 24px;
+}
+
+.rm-tag-search-input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+
+.rm-tag-search-input::placeholder {
+  color: var(--fg-dim);
+}
+
+.rm-tag-search-clear {
+  position: absolute;
+  right: 4px;
+  background: none;
+  border: none;
+  padding: 2px;
+  line-height: 1;
+  color: var(--fg-dim);
+}
+
+.rm-tag-search-clear:hover {
+  color: var(--fg);
+}
+
+/* A section narrowed to nothing says so. Rendering an empty body reads as a
+   panel that broke, not as a query that matched nothing. */
+.rm-filter-section-empty {
+  padding: 4px 2px 6px;
   color: var(--fg-dim);
   font-size: 11px;
 }
