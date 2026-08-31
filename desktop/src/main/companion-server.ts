@@ -8,8 +8,13 @@
 // - One-shot pairing token in the QR, exchanged for a per-run credential.
 // - LAN only: bound to the detected private interface AND every peer address
 //   is checked against isPrivateAddress (RFC1918/ULA static filter).
-// - TLS with a STABLE self-signed cert persisted under app state (the browser
-//   warning happens once, not at every app launch).
+// - TLS with a STABLE self-signed cert persisted under app state, SHA-256
+//   signed with the LAN IP in its SAN (companion-cert.ts, card 3776ae19) so
+//   an ordinary browser's warning genuinely matches the served host and is
+//   not permanent. Persistence is versioned (COMPANION_CERT_VERSION): a cert
+//   from an older build is regenerated rather than served forever. This is
+//   still trust-on-first-use for any client that does not pin the
+//   fingerprint (only the Android shell does, see roadmap card 3776ae19).
 // - Anti-bruteforce lockout per address; every connect/deny hits the journal.
 
 import { createServer, type Server } from 'node:https'
@@ -35,6 +40,7 @@ import {
 import { invokeRemote, sendRemote, addEventSink } from './api-registry'
 import { reportError } from './log'
 import { generate as generateCert } from 'selfsigned'
+import { buildCertRequest, COMPANION_CERT_VERSION, loadOrCreateCert } from './companion-cert'
 
 export interface CompanionDeps {
   /** Directory of the built renderer bundle (index.html + assets). */
@@ -91,32 +97,6 @@ export function detectLanAddress(): string | null {
     }
   }
   return null
-}
-
-/** Load-or-create the persisted self-signed cert (EXPLORATION §5.5: STABLE
- * across launches even though tokens are ephemeral). */
-async function loadOrCreateCert(stateDir: string): Promise<{ key: string; cert: string }> {
-  const file = join(stateDir, 'companion-cert.json')
-  try {
-    if (existsSync(file)) {
-      const parsed = JSON.parse(readFileSync(file, 'utf8')) as { key?: string; cert?: string }
-      if (parsed.key && parsed.cert) return { key: parsed.key, cert: parsed.cert }
-    }
-  } catch (err) {
-    reportError('companion', 'persisted cert unreadable — regenerating', err)
-  }
-  const pems = await generateCert([{ name: 'commonName', value: 'koryphaios-companion' }], {
-    keySize: 2048
-  })
-  const material = { key: pems.private, cert: pems.cert }
-  try {
-    writeFileSync(file, JSON.stringify(material), { mode: 0o600 })
-  } catch (err) {
-    // Non-fatal: the server still runs, the browser warning just repeats
-    // next launch. Trace it (no-silent-errors rule).
-    reportError('companion', 'cert persistence failed', err)
-  }
-  return material
 }
 
 /**
@@ -207,7 +187,18 @@ export class CompanionServer {
     }
     const lanAddr = detectLanAddress()
     if (!lanAddr) throw new Error('no private LAN interface detected')
-    const { key, cert } = await loadOrCreateCert(this.deps.stateDir)
+    const { attrs, options } = buildCertRequest(lanAddr)
+    const { key, cert } = await loadOrCreateCert(
+      join(this.deps.stateDir, 'companion-cert.json'),
+      async () => {
+        const pems = await generateCert(attrs, options)
+        return { key: pems.private, cert: pems.cert }
+      },
+      COMPANION_CERT_VERSION,
+      lanAddr,
+      { existsSync, readFileSync, writeFileSync },
+      (msg, err) => reportError('companion', msg, err)
+    )
     this.fingerprint = certFingerprint(cert)
 
     const server = createServer({ key, cert }, (req, res) => this.serveStatic(req, res))
