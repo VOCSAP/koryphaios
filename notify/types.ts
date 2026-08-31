@@ -44,6 +44,15 @@ export interface InboundAnswer {
 export interface NotificationChannel {
   readonly kind: ChannelKind;
 
+  /**
+   * Start the transport (poll/connect). All three implementations
+   * (TelegramChannel, DiscordChannel, NtfyChannel) declare this publicly and
+   * broker.ts's real wiring calls it through this interface type
+   * (registerChannel -> `built.channel.start()`) -- this was missing from the
+   * interface itself, not from any implementation.
+   */
+  start(): void;
+
   /** True once the transport is configured and running. */
   isReady(): boolean;
 

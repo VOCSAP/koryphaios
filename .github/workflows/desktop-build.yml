@@ -83,6 +83,19 @@ jobs:
         shell: bash
         run: bun install
 
+      # Card 15fa65cd: broker.ts, server.ts, cli.ts and shared/ were
+      # typechecked NOWHERE, neither locally nor in CI -- bun test/build only
+      # transpile. tsconfig.core.json scopes tsc to this domain only (a
+      # tsc -p pointed at the root tsconfig.json instead pulls in every
+      # tests/*.test.ts and, transitively, most of desktop/src/**: 368 errors
+      # measured 2026-08-28 vs a dozen in the scoped domain -- that would make
+      # this gate red at birth for reasons unrelated to this lot). Placed right
+      # after root install and before the slower steps, same reasoning as
+      # "Typecheck the mobile shell" below: a type error should fail fast.
+      - name: Typecheck core (broker/server/cli/shared)
+        shell: bash
+        run: bun run typecheck
+
       # Pure modules (desktop main-process helpers, the notify channels and
       # their wire format, the mobile shell's decision logic, and a
       # happy-dom/React renderer harness) import under bun -- no node-pty /

@@ -87,7 +87,13 @@ export function createLogger(options: LoggerOptions): Logger {
       const match = entry.match(
         new RegExp(`^${options.name}\\.log\\.(\\d+)$`)
       );
-      if (match && parseInt(match[1], 10) >= maxFiles) {
+      // The pattern is fully anchored with one MANDATORY group ((\d+), no
+      // `?`), so match[1] is never undefined once `match` itself is non-null
+      // -- but noUncheckedIndexedAccess cannot see that from the regex.
+      // Explicit guard instead of a `!` assertion, same remedy as any other
+      // capture-group access under this flag.
+      const rotationSuffix = match?.[1];
+      if (rotationSuffix !== undefined && parseInt(rotationSuffix, 10) >= maxFiles) {
         try {
           unlinkSync(join(options.dir, entry));
         } catch {

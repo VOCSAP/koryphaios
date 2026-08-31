@@ -2,9 +2,9 @@
 
 ## Who runs what (read this before running anything)
 
-The full gate -- `bun test`, the smoke build, and `npm run typecheck` in
-`desktop/` -- is run **once, by whoever sequences the commits**, immediately
-before committing.
+The full gate -- `bun test`, the smoke build, `bun run typecheck` (root) and
+`npm run typecheck` in `desktop/` -- is run **once, by whoever sequences the
+commits**, immediately before committing.
 
 If you are not the one committing, run only the targeted file:
 
@@ -64,6 +64,16 @@ test("hello world", () => {
   --outdir=/tmp/cp-check` bundles all entrypoints in ~20 ms and surfaces any
   import or type-resolution error.
 - `npm run typecheck` in `desktop/` (tsconfig.node + tsconfig.web).
+- `bun run typecheck` (root) -- `tsc --noEmit -p tsconfig.core.json`, scoped to
+  `broker.ts`, `server.ts`, `cli.ts` and `shared/**/*.ts` (a glob, so it grows
+  on its own when a file is added to `shared/`). The plain root
+  `tsconfig.json` covers the same domain but pulls in every `tests/*.test.ts`
+  and, transitively, most of `desktop/src/**` (368 errors measured
+  2026-08-28 vs a dozen in the scoped domain) -- do not point the gate at it.
+  Card 15fa65cd: this domain had no typecheck anywhere, local or CI, before
+  this line existed. The scoped count moves as `broker.ts` changes hands
+  between sessions -- do not treat any specific number here as current,
+  re-run `bun run typecheck` for the live count.
 - Locale parity: `desktop/locales/en.json`, `fr.json` and the embedded
   `EN_DEFAULTS` (`desktop/src/main/i18n.ts`) must carry the same key set
   (enforced by `tests/desktop-i18n.test.ts`).

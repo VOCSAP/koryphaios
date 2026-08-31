@@ -1101,6 +1101,13 @@ export interface GraphDraftAddRequest {
   by?: string;
   title?: string;
   prompt?: string;
+  /**
+   * Card 3781b033: proof accompanying `by`, spread in by server.ts's
+   * roadmapProof() -- resolveProvenGraphDraftPeer (shared/graph-draft-
+   * scope.ts) requires it and refuses 401 without it. Declared here (was
+   * missing) to document what the wire already carries, not to widen it.
+   */
+  instance_token?: unknown;
 }
 
 export interface GraphDraftAddResponse {

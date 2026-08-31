@@ -80,8 +80,17 @@ export class NtfyChannel implements NotificationChannel {
   private connected = false;
   private loop: Promise<void> | null = null;
   private abort: AbortController | null = null;
-  /** Held so stop() can unblock a `read()` that is parked on a live stream. */
-  private reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  /**
+   * Held so stop() can unblock a `read()` that is parked on a live stream.
+   * Typed via `ReturnType<...['getReader']>` rather than the bare global
+   * `ReadableStreamDefaultReader` name: with `lib: ['ESNext']` (no DOM), that
+   * ambient name resolves through @types/node (installed transitively under
+   * @types/bun), whose global augmentation adds a Node-only `readMany()`
+   * this stream's actual `node:stream/web` module type does not have --
+   * deriving the field's type from the same expression that produces the
+   * value sidesteps the collision instead of asserting past it.
+   */
+  private reader: ReturnType<ReadableStream<Uint8Array>["getReader"]> | null = null;
   /** Resolves the backoff sleep early, so stop() never waits it out. */
   private wake: (() => void) | null = null;
   /** Last message id seen, so a reconnect resumes instead of replaying. */

@@ -5266,7 +5266,13 @@ function handleApprovalList(
         filters.map((c) => ` AND ${c}`).join("") +
         ` ORDER BY created_at DESC LIMIT 500`
     )
-    .all(...params) as ApprovalRow[];
+    // Same cast idiom as the other three `where.params` spreads in this file
+    // (broker.ts:4987, 5111, 5291): approvalWhere's fields are always strings
+    // at runtime (shared/approval-scope.ts's ScopeFields), `unknown[]` is just
+    // the module's deliberately opaque return type -- `never[]` is a subtype
+    // of every bun:sqlite tuple-length overload, so this satisfies the
+    // typecheck without claiming anything false about the actual values.
+    .all(...(params as never[])) as ApprovalRow[];
   return { approvals: rows.map(rowToApproval) };
 }
 
@@ -6469,35 +6475,35 @@ const server = Bun.serve<WsData>({
           return Response.json(result);
         }
         case "/approval/add": {
-          const result = handleApprovalAdd(body as ApprovalAddRequest);
+          const result = handleApprovalAdd(body as ApprovalAddRequest & Record<string, unknown>);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }
           return Response.json(result);
         }
         case "/approval/wait": {
-          const result = await handleApprovalWait(body as ApprovalWaitRequest);
+          const result = await handleApprovalWait(body as ApprovalWaitRequest & Record<string, unknown>);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }
           return Response.json(result);
         }
         case "/approval/claim": {
-          const result = handleApprovalClaim(body as ApprovalClaimRequest);
+          const result = handleApprovalClaim(body as ApprovalClaimRequest & Record<string, unknown>);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }
           return Response.json(result);
         }
         case "/approval/list": {
-          const result = handleApprovalList(body as ApprovalListRequest);
+          const result = handleApprovalList(body as ApprovalListRequest & Record<string, unknown>);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }
           return Response.json(result);
         }
         case "/approval/delivered": {
-          const result = handleApprovalDelivered(body as ApprovalDeliveredRequest);
+          const result = handleApprovalDelivered(body as ApprovalDeliveredRequest & Record<string, unknown>);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }
@@ -6525,14 +6531,14 @@ const server = Bun.serve<WsData>({
           return Response.json(result);
         }
         case "/approval/token-mint": {
-          const result = handleApprovalTokenMint(body as ApprovalTokenMintRequest);
+          const result = handleApprovalTokenMint(body as ApprovalTokenMintRequest & Record<string, unknown>);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }
           return Response.json(result);
         }
         case "/approval/token-revoke": {
-          const result = handleApprovalTokenRevoke(body as ApprovalTokenRevokeRequest);
+          const result = handleApprovalTokenRevoke(body as ApprovalTokenRevokeRequest & Record<string, unknown>);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }

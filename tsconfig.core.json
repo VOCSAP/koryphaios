@@ -1,0 +1,21 @@
+{
+  // Card 15fa65cd: broker.ts, server.ts, cli.ts and shared/ are typechecked
+  // NOWHERE, neither locally nor in CI. tsconfig.json (root) technically
+  // covers this domain too (no include => implicit include of everything
+  // under exclude: ["desktop"]), but running tsc against it pulls in every
+  // tests/*.test.ts and, transitively through
+  // desktop/tests-support/react-test-harness.ts, most of desktop/src/**
+  // as well (measured 2026-08-28: 368 errors root-wide vs 11 in this
+  // narrower domain). A gate wired against tsconfig.json would be red at
+  // birth for reasons that have nothing to do with the "core" lot this card
+  // is about, which is exactly the trap the card itself warns against
+  // ("l'ordre inverse ne marche pas").
+  //
+  // "shared/**/*.ts" is a GLOB, not an enumeration: it must grow on its own
+  // when a file is added to shared/, unlike the four-file enumeration in
+  // desktop/tsconfig.node.json that caused this card in the first place.
+  // broker.ts/server.ts/cli.ts are named individually because they are
+  // fixed entrypoints, not an open family.
+  "extends": "./tsconfig.json",
+  "include": ["broker.ts", "server.ts", "cli.ts", "shared/**/*.ts"]
+}

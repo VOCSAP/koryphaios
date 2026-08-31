@@ -9,7 +9,8 @@
   "scripts": {
     "broker": "bun broker.ts",
     "server": "bun server.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p tsconfig.core.json"
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "^20.11.1",
