@@ -164,6 +164,13 @@ export function RoadmapView(): React.JSX.Element {
   const [wandBusy, setWandBusy] = useState(false)
   // Workflow lane blown up to a foreground fullscreen modal.
   const [wfFull, setWfFull] = useState(false)
+  // Card 442084b7 (team-lead's Q4 arbitration): the INVERSE of includeArchived
+  // on purpose -- an inactive card is a deliberate operator set-aside, not a
+  // lifecycle state, so it must stay VISIBLE by default (opt-OUT to hide),
+  // never opt-in to reveal like archive. Plain client-side filter over
+  // `board` below; the broker already sends `inactive` on every item, so no
+  // query/broker change is needed.
+  const [hideInactive, setHideInactive] = useState(false)
   // Card 7a2e76c6: the fold state is no longer local `useState`. It lives in
   // AppConfig, for the same reason the Agents sidebar's does -- a fold that
   // resets at every launch re-opens the panel the operator had closed. The
@@ -449,6 +456,39 @@ export function RoadmapView(): React.JSX.Element {
     }
   }
 
+  // Card 442084b7: the operator-only park flag. `upsertRoadmap`
+  // (desktop/src/main/roadmap-service.ts) always runs its body through
+  // `signedAsOperator()` before posting, which is the actual carrier of the
+  // operator proof the broker's refusesInactiveToggle guard requires -- not
+  // the `by: DECK_AUTHOR` stamp by itself, which an unsigned caller could
+  // send too (refused 401 upstream of the roadmap guard, per
+  // resolveRoadmapAuthor's reserved-name branch, broker.ts). This relay
+  // works because it goes through that signer, not because of what the
+  // field is named. This specific call (only `id`/`inactive` in the body)
+  // cannot itself trip refusesInactiveClaim or refusesInactiveQueue.
+  // `nextQueue` is a direct read of `body.queue` -- absent here, so that
+  // guard's condition is false outright. `nextLocked` is NOT a direct read
+  // of `body.locked`: broker.ts resolves it via resolveRoadmapLock
+  // (shared/roadmap-lock.ts), which CAN move it away from `existing.locked`
+  // even when this call sends neither `status` nor `locked` -- but only in
+  // the RELEASING direction (forced to `false` whenever `nextStatus !==
+  // "in_progress"`, which this call's unchanged `nextStatus` inherits from
+  // `existing.status`); its one CLAIMING branch requires `by !== "deck"`,
+  // which a Deck write never satisfies. refusesInactiveClaim's lock
+  // disjunct is `nextLocked && !existingLocked` -- a claim, never a
+  // release -- so it stays false for every state this call can reach. A
+  // failure can still reach the operator through an ordinary channel
+  // (network error, broker down, a future
+  // guard) and must surface like any other, never be swallowed.
+  const toggleInactive = async (item: RoadmapItem): Promise<void> => {
+    try {
+      await window.api.roadmapUpsert({ id: item.id, inactive: !item.inactive })
+      await refresh()
+    } catch (e) {
+      setMutationError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   // ----- direct assignment (K6) -----
 
   // Live, addressable agents: peer_id resolved, not the supervisor.
@@ -523,6 +563,16 @@ export function RoadmapView(): React.JSX.Element {
       {
         label: (
           <>
+            {item.inactive ? GLYPH_BADGES.torchLit : GLYPH_BADGES.torchOut}{' '}
+            {t(item.inactive ? 'roadmap.menuReactivate' : 'roadmap.menuMarkInactive')}
+          </>
+        ),
+        disabled: locked,
+        onSelect: () => void toggleInactive(item)
+      },
+      {
+        label: (
+          <>
             {GLYPH_ACTIONS.trash} {t('roadmap.menuDelete')}
           </>
         ),
@@ -567,6 +617,9 @@ export function RoadmapView(): React.JSX.Element {
         setCriteria={setCriteria}
         includeArchived={includeArchived}
         setIncludeArchived={setIncludeArchived}
+        hideInactive={hideInactive}
+        setHideInactive={setHideInactive}
+        hiddenInactiveCount={hideInactive ? board.filter((i) => i.inactive).length : 0}
         t={t}
       />
 
@@ -584,10 +637,18 @@ export function RoadmapView(): React.JSX.Element {
 
         <div className="roadmap-main">
           <RoadmapBoard
-            items={board}
+            items={hideInactive ? board.filter((i) => !i.inactive) : board}
             showArchived={includeArchived}
-            hasActiveFilters={hasActiveCriteria(criteria)}
-            onClearFilters={() => setCriteria({})}
+            // Card 442084b7 review B1: hideInactive is a THIRD filter
+            // dimension alongside `criteria`/includeArchived and must count
+            // as "active" everywhere the others do -- omitting it here was
+            // the exact D1 regression (a narrow filter making the board look
+            // fully empty with no explanation) this prop exists to prevent.
+            hasActiveFilters={hasActiveCriteria(criteria) || hideInactive}
+            onClearFilters={() => {
+              setCriteria({})
+              setHideInactive(false)
+            }}
             loaded={loaded}
             error={error}
             dragId={dragId}

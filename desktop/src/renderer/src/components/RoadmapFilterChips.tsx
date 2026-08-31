@@ -1,12 +1,11 @@
 import type { RoadmapQuery } from '@shared/types'
-import { GLYPH_ACTIONS } from './icons'
+import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import type { TFn } from '../i18n'
 
 // Card 3b0fda5f: removable chips for every active criterion, reachable
 // OUTSIDE the (collapsible, easy-to-forget-open) filter panel -- the
 // operator should be able to see and clear an active filter without
-// reopening the panel. Renders nothing at all when idle (zero criteria and
-// `includeArchived` off), so it costs no layout space in the common case.
+// reopening the panel.
 //
 // Review round 2 (2026-08-10): `includeArchived` is a real, separate piece of
 // state (the panel's dedicated toggle, card 3b0fda5f point 4), not a member
@@ -14,6 +13,13 @@ import type { TFn } from '../i18n'
 // active "show archived" is invisible outside the panel, and "Clear all"
 // here must reset it too, or it silently diverges from the panel's own
 // Clear (which resets both).
+//
+// Card 442084b7 (team-lead's Q4 arbitration): `hideInactive` is the deliberate
+// INVERSE of includeArchived -- archive hides by default and reveals on an
+// opt-IN toggle, inactive shows by default and hides on an opt-OUT toggle
+// rendered here PERMANENTLY (never only inside the collapsible panel), so the
+// component can no longer return null when idle: this row now always shows at
+// least the hide-inactive control, even with zero criteria and archive off.
 
 interface Chip {
   key: string
@@ -57,6 +63,18 @@ export interface RoadmapFilterChipsProps {
   setCriteria: (next: RoadmapQuery) => void
   includeArchived: boolean
   setIncludeArchived: (next: boolean) => void
+  /** Card 442084b7: opt-out display filter, default false (inactive cards show). */
+  hideInactive: boolean
+  setHideInactive: (next: boolean) => void
+  /**
+   * Card 442084b7 (review B1): how many cards this toggle is currently
+   * hiding -- 0 whenever `hideInactive` is false. The toggle is the ONLY
+   * reactivation entry point once a card is hidden (RoadmapItemModal has no
+   * `inactive` control), so the count is what stops the operator from having
+   * to guess it exists: the permanent chip itself says "N hidden", not just
+   * on/off.
+   */
+  hiddenInactiveCount: number
   t: TFn
 }
 
@@ -65,8 +83,11 @@ export function RoadmapFilterChips({
   setCriteria,
   includeArchived,
   setIncludeArchived,
+  hideInactive,
+  setHideInactive,
+  hiddenInactiveCount,
   t
-}: RoadmapFilterChipsProps): React.JSX.Element | null {
+}: RoadmapFilterChipsProps): React.JSX.Element {
   const chips: Chip[] = []
 
   if (criteria.q && criteria.q.trim() !== '') {
@@ -102,10 +123,37 @@ export function RoadmapFilterChips({
     })
   }
 
-  if (chips.length === 0) return null
-
   return (
     <div className="rm-filter-chips">
+      {/* Permanent control (never gated behind chips.length): the operator
+          must be able to hide inactive cards without any other filter
+          active, and without opening the collapsible panel. The count in the
+          label (review B1) is the ONLY signal that cards are hidden at all --
+          without it, a card an operator just parked can vanish from the
+          board with nothing on screen explaining why. torchOut/torchLit
+          already name "reconnecting/host gone" in App.tsx's RemoteLinkOverlay,
+          mounted as a SIBLING of this view in both the desktop and mobile
+          trees (App.tsx), so it can be in the DOM at the same time as this
+          badge/chip -- reused anyway (team-lead's call, deck-design pass, no
+          icon in the registry fits "deliberately set aside" better). The
+          overlay is a full-screen MODAL, `position:fixed; inset:0; z-index:
+          5000` at 92% opacity with a 3px blur (styles.css's `.remote-overlay`)
+          -- it visually covers and obscures everything beneath it while
+          mounted, so the two glyphs are never both READABLE at once, even
+          though both may exist in the DOM simultaneously. */}
+      <button
+        type="button"
+        className={`rm-filter-chip rm-filter-chip-toggle${hideInactive ? ' is-on' : ''}`}
+        title={t('roadmap.filter.hideInactiveHint')}
+        aria-pressed={hideInactive}
+        onClick={() => setHideInactive(!hideInactive)}
+      >
+        {GLYPH_BADGES.torchOut}
+        <span className="rm-filter-chip-label">
+          {t('roadmap.filter.hideInactive')}
+          {hideInactive && hiddenInactiveCount > 0 ? ` (${hiddenInactiveCount})` : ''}
+        </span>
+      </button>
       {chips.map((c) => (
         <button
           type="button"
@@ -118,16 +166,19 @@ export function RoadmapFilterChips({
           {GLYPH_ACTIONS.close}
         </button>
       ))}
-      <button
-        type="button"
-        className="rm-filter-chip rm-filter-chip-clear"
-        onClick={() => {
-          setCriteria({})
-          setIncludeArchived(false)
-        }}
-      >
-        {t('roadmap.filter.clearAll')}
-      </button>
+      {chips.length > 0 && (
+        <button
+          type="button"
+          className="rm-filter-chip rm-filter-chip-clear"
+          onClick={() => {
+            setCriteria({})
+            setIncludeArchived(false)
+            setHideInactive(false)
+          }}
+        >
+          {t('roadmap.filter.clearAll')}
+        </button>
+      )}
     </div>
   )
 }

@@ -696,6 +696,8 @@ export const EN_DEFAULTS: Record<string, string> = {
   'roadmap.filter.searchPlaceholder': 'Search title, description...',
   'roadmap.filter.clearSearch': 'Clear search',
   'roadmap.filter.clearAll': 'Clear all',
+  'roadmap.filter.hideInactive': 'Hide inactive',
+  'roadmap.filter.hideInactiveHint': 'Hide cards the operator has deliberately set aside',
   'roadmap.filter.reset': 'Reset',
   'roadmap.filter.kind': 'Kind',
   'roadmap.filter.status': 'Status',
@@ -916,6 +918,11 @@ export const EN_DEFAULTS: Record<string, string> = {
   'roadmap.menuQueue': 'Add to dispatch queue',
   'roadmap.menuAssign': 'Process now…',
   'roadmap.menuDelete': 'Delete (archives)',
+  'roadmap.menuMarkInactive': 'Mark inactive (operator only)',
+  'roadmap.menuReactivate': 'Reactivate',
+  'roadmap.inactiveBadge': 'Inactive',
+  'roadmap.inactiveHint':
+    'Deliberately set aside by the operator -- agents cannot claim or queue this card until it is reactivated',
   'roadmap.assignTitle': 'Process now',
   'roadmap.assignHint':
     'Send "{title}" to a live agent (targeted announce), or spawn a fresh one on it.',

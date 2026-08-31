@@ -577,6 +577,19 @@ export interface RoadmapUpsertFields {
   locked?: boolean
   /** Bypass the broker's lock guard (K2); 'deck' writes never need it. */
   force?: boolean
+  /**
+   * Card 442084b7: operator-only park flag (see RoadmapItem.inactive's own
+   * doc comment). Deliberately absent from the MCP-facing roadmap_update
+   * tool schema (server.ts) -- only this Deck-signed relay carries it. The
+   * `by: DECK_AUTHOR` stamp alone is not what satisfies the broker's
+   * refusesInactiveToggle operator-proof requirement -- an unsigned
+   * `by: 'deck'` is refused 401 upstream of that guard (broker.ts's
+   * resolveRoadmapAuthor, reserved-name branch). The actual proof carrier is
+   * `signedAsOperator()` (desktop/src/main/roadmap-service.ts), which
+   * `upsertRoadmap` runs the whole body through before every POST -- without
+   * that signer this field would 401, not silently write unsigned.
+   */
+  inactive?: boolean
 }
 
 /**

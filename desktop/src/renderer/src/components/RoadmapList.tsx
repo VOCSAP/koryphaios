@@ -152,6 +152,12 @@ function RoadmapCard({
         <span className="mrm-kind">{KIND_ICONS[item.kind]}</span>
         <span className="mrm-title">{item.title}</span>
         {locked && <span className="mrm-lock">{GLYPH_BADGES.lock}</span>}
+        {/* Card 442084b7 (review A4, team-lead's arbitration): badge only on
+            mobile, same "see without opening the menu" promise this file
+            already keeps for the lock -- the toggle stays desktop-only,
+            carded separately. No color rule needed, matches mrm-lock's own
+            plain currentColor treatment. */}
+        {item.inactive && <span className="mrm-inactive">{GLYPH_BADGES.torchOut}</span>}
         {item.queue !== null && <span className="mrm-queue">#{item.queue}</span>}
       </div>
       <div className="mrm-card-meta">

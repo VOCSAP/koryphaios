@@ -94,6 +94,16 @@ function BoardCard({
             {GLYPH_BADGES.lock} {item.locked_by}
           </span>
         )}
+        {/* Card 442084b7: operator-only park flag. Neither the lock glyph
+            (an agent's own claim) nor the archive glyph/dimming (a lifecycle
+            end-state) -- an extinguished torch reads as "deliberately set
+            aside", distinct from both, and its own muted tone (--fg-dim)
+            avoids lock's amber and queue's accent blue. */}
+        {item.inactive && (
+          <span className="rm-badge rm-badge-inactive" title={t('roadmap.inactiveHint')}>
+            {GLYPH_BADGES.torchOut} {t('roadmap.inactiveBadge')}
+          </span>
+        )}
         {item.tags.map((tag) => (
           <span key={tag} className="rm-badge rm-badge-tag">
             #{tag}
@@ -113,7 +123,11 @@ export interface RoadmapBoardProps {
    * zero items, full stop" from "these filters matched zero items" -- the two
    * used to share ONE message ("Add a feature/bug/debt/idea...") keyed only
    * off `items.length === 0`, so a narrow filter on a 115-card project told
-   * the operator their whole backlog was gone.
+   * the operator their whole backlog was gone. Card 442084b7 review B1: this
+   * boolean must OR in every filtering dimension the caller applies to
+   * `items` before this point -- `criteria` via hasActiveCriteria() AND the
+   * client-side `hideInactive` toggle, not just the former. Missing one
+   * dimension here reopens exactly this D1 defect for that one dimension.
    */
   hasActiveFilters: boolean
   onClearFilters: () => void

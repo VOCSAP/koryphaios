@@ -2435,6 +2435,29 @@ svg.glyph {
   color: var(--fg-dim);
 }
 
+/* Card 442084b7: permanent opt-out toggle, not a removable criterion chip --
+   muted by default (nothing hidden), accent-highlighted once engaged, same
+   "active filter" convention as every other chip above. */
+.rm-filter-chip-toggle {
+  background: none;
+  border-color: var(--border);
+  color: var(--fg-dim);
+}
+
+.rm-filter-chip-toggle:hover {
+  border-color: var(--fg-dim);
+}
+
+.rm-filter-chip-toggle.is-on {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  color: var(--fg);
+}
+
+.rm-filter-chip-toggle.is-on:hover {
+  border-color: var(--accent);
+}
+
 .rm-filter-panel {
   display: flex;
   flex-direction: column;
@@ -2833,6 +2856,13 @@ svg.glyph {
 .rm-badge-locked {
   color: #e0b341;
   border-color: color-mix(in srgb, #e0b341 50%, transparent);
+}
+
+/* Card 442084b7: operator park flag. Deliberately --fg-dim, not lock's amber
+   (#e0b341) or queue's --accent -- a neutral "set aside", not a claim. */
+.rm-badge-inactive {
+  color: var(--fg-dim);
+  border-color: color-mix(in srgb, var(--fg-dim) 50%, transparent);
 }
 
 .rm-section {
