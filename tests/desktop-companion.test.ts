@@ -1,6 +1,8 @@
 // PLAN MB1/MB2: companion protocol invariants (manifest coverage, channel
 // uniqueness, tier completeness), the LAN-only guard, the frame parser, and
-// the pairing/lockout lifecycle. All pure — no electron, no sockets.
+// the pairing/lockout lifecycle. All pure — no electron, no sockets, no
+// desktop/node_modules dependency (this file runs in CI before desktop
+// deps are installed, see the source-scan test near the bottom for why).
 
 import { test, expect } from 'bun:test'
 import { readdirSync, readFileSync } from 'node:fs'
@@ -9,6 +11,7 @@ import {
   CHANNEL_TIERS,
   COMPANION_LOCKOUT_THRESHOLD,
   COMPANION_MANIFEST,
+  COMPANION_MAX_PAYLOAD_BYTES,
   CompanionAuth,
   isPrivateAddress,
   parseClientFrame,
@@ -241,6 +244,69 @@ test('lockout after repeated failures', () => {
   expect(auth.hello('10.0.0.9', { token: 'good' }, () => 'x').result).toBe('denied')
   now += 11 * 60_000
   expect(auth.isLocked('10.0.0.9')).toBe(false)
+})
+
+// Card 45c1999e: an unauthenticated attacker who NEVER sends a well-formed
+// hello (only garbage the server can't parse) must still trip the same
+// lockout — recordFailure() is the counter companion-server.ts's message
+// handler calls on an unparsable frame from an unauthenticated socket. If
+// this test only asserted CompanionAuth's shape, it would miss a parallel
+// counter; asserting it shares the budget with hello()'s denied path is
+// what proves there is no separate, unbounded path.
+test('unparsable frames alone (never a hello) trip the same lockout as bad hellos', () => {
+  const auth = new CompanionAuth(() => 0)
+  for (let i = 0; i < COMPANION_LOCKOUT_THRESHOLD - 1; i++) {
+    auth.recordFailure('10.0.0.7')
+  }
+  expect(auth.isLocked('10.0.0.7')).toBe(false) // one short of the threshold
+  auth.recordFailure('10.0.0.7')
+  expect(auth.isLocked('10.0.0.7')).toBe(true)
+})
+
+test('recordFailure and a bad hello share one counter, not two', () => {
+  const auth = new CompanionAuth(() => 0)
+  auth.arm('good')
+  for (let i = 0; i < COMPANION_LOCKOUT_THRESHOLD - 1; i++) {
+    auth.recordFailure('10.0.0.8')
+  }
+  expect(auth.isLocked('10.0.0.8')).toBe(false)
+  // The threshold-th failure via the OTHER path (a rejected hello) still
+  // locks — proving both paths increment the same budget.
+  expect(auth.hello('10.0.0.8', { token: 'bad' }, () => 'x').result).toBe('denied')
+  expect(auth.isLocked('10.0.0.8')).toBe(true)
+})
+
+// Card 45c1999e review round: a `ws` Receiver-level behavioural test used
+// to live here, importing the real npm package via a deep relative path
+// into desktop/node_modules (Bun's builtin 'ws' shim silently ignores
+// maxPayload, so the bare specifier couldn't be used). REMOVED: this file
+// is in scripts/pure-module-partition.ts's CLEAN set, which runs in CI's
+// "Bun tests (pure modules)" step BEFORE "Install desktop deps"
+// (.github/workflows/desktop-build.yml) — desktop/node_modules does not
+// exist yet at that point, so the whole file failed to load (same root
+// cause as card f4a3ed1e, see tests/desktop-xterm-manifest-parity.test.ts's
+// header). It was also self-referential: the frame size was built FROM
+// COMPANION_MAX_PAYLOAD_BYTES + 1, so it stayed green regardless of what
+// that constant was actually set to — it proved the ws library enforces
+// its own option, not that this codebase picked the right value.
+test('COMPANION_MAX_PAYLOAD_BYTES is pinned to 1 MiB', () => {
+  expect(COMPANION_MAX_PAYLOAD_BYTES).toBe(1024 * 1024)
+})
+
+// Card 45c1999e review round: neither the maxPayload option value nor the
+// recordFailure() call live in a module this suite can import (companion-
+// server.ts pulls in electron transitively via api-registry.ts), so nothing
+// here proves those CALL SITES exist — only that CompanionAuth/the exported
+// constant behave correctly in isolation, which the tests above already
+// cover. This is the weakest guard tier (CLAUDE.md's "source scan" case):
+// it bites pure deletion and constant-renaming, NOTHING ELSE — it does not
+// prove the option's value is actually consumed by the WebSocketServer
+// instance, nor that recordFailure's return value or side effect is used
+// correctly. Do not read a pass here as proof of wiring.
+test('companion-server.ts source still wires maxPayload and recordFailure (weak guard, see comment)', () => {
+  const src = readFileSync(join(import.meta.dir, '..', 'desktop', 'src', 'main', 'companion-server.ts'), 'utf8')
+  expect(src).toContain('maxPayload: COMPANION_MAX_PAYLOAD_BYTES')
+  expect(src).toContain('this.auth.recordFailure(addr)')
 })
 
 // ----- Lot 2: device list + revoke -----

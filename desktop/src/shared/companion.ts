@@ -542,6 +542,18 @@ export const COMPANION_CLIENT_TIMEOUT_MS = 12_000
 export const COMPANION_LOCKOUT_THRESHOLD = 10
 /** Lockout duration once the threshold is hit. */
 export const COMPANION_LOCKOUT_MS = 10 * 60_000
+/** Cap on INBOUND (client -> server) WS frame size (card 45c1999e: ws
+ * defaults to 100 MiB with no cap otherwise). Most client->server frames are
+ * small RPC invocation args (ids/strings/config -- see CompanionClientFrame
+ * below), never diff/digest/export bodies (those are server->client 'res'/
+ * 'ev' frames, outbound, unbounded by this). The largest REAL inbound
+ * carrier is graph:save, which sends a whole GraphDoc (shared/graph.ts's own
+ * MAX_NODE_TEXT=512 KiB for a single node, MAX_NODES=2000 -- a document can
+ * legitimately exceed a naive 256 KiB bound; measured real graphs-*.json on
+ * disk run ~13 KiB). pty:input can also carry a full pasted string in one
+ * frame. 1 MiB stays two orders of magnitude under ws's 100 MiB default (so
+ * the DoS reduction still holds) while leaving real documents headroom. */
+export const COMPANION_MAX_PAYLOAD_BYTES = 1024 * 1024
 
 /** Events withheld from a client in 'light' (backgrounded) mode (MB5). */
 export const LIGHT_MODE_BLOCKED_EVENTS: ReadonlySet<string> = new Set([
@@ -611,6 +623,22 @@ export class CompanionAuth {
     return !!f && f.lockedUntil > this.now()
   }
 
+  /** Count one failed attempt from `addr` toward the shared lockout
+   * threshold/window (COMPANION_LOCKOUT_THRESHOLD/_MS). Called by `hello`'s
+   * denied branch AND directly by callers for frames that never reach
+   * `hello` at all (e.g. unparsable ones) -- both must count against the
+   * same budget, or an attacker who only ever sends garbage never trips
+   * the lockout. */
+  recordFailure(addr: string): void {
+    const f = this.failures.get(addr) ?? { count: 0, lockedUntil: 0 }
+    f.count += 1
+    if (f.count >= COMPANION_LOCKOUT_THRESHOLD) {
+      f.lockedUntil = this.now() + COMPANION_LOCKOUT_MS
+      f.count = 0
+    }
+    this.failures.set(addr, f)
+  }
+
   /**
    * Validate a hello frame from `addr`. On pairing success the token is
    * CONSUMED and a fresh credential (minted by the caller) is registered.
@@ -641,13 +669,7 @@ export class CompanionAuth {
       this.failures.delete(addr)
       return { result: 'paired', cred }
     }
-    const f = this.failures.get(addr) ?? { count: 0, lockedUntil: 0 }
-    f.count += 1
-    if (f.count >= COMPANION_LOCKOUT_THRESHOLD) {
-      f.lockedUntil = this.now() + COMPANION_LOCKOUT_MS
-      f.count = 0
-    }
-    this.failures.set(addr, f)
+    this.recordFailure(addr)
     return { result: 'denied' }
   }
 

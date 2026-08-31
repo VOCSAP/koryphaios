@@ -23,6 +23,7 @@ import type { Duplex } from 'node:stream'
 import {
   CompanionAuth,
   COMPANION_HEARTBEAT_MS,
+  COMPANION_MAX_PAYLOAD_BYTES,
   LIGHT_MODE_BLOCKED_EVENTS,
   REMOTE_BLOCKED_CHANNELS,
   isPrivateAddress,
@@ -210,7 +211,12 @@ export class CompanionServer {
     this.fingerprint = certFingerprint(cert)
 
     const server = createServer({ key, cert }, (req, res) => this.serveStatic(req, res))
-    const wss = new WebSocketServer({ noServer: true })
+    // maxPayload bounds INBOUND (client -> server) frames only; ws defaults
+    // to 100 MiB with no cap otherwise (card 45c1999e). The value's own
+    // rationale (largest real inbound carrier is graph:save's whole
+    // GraphDoc) lives on COMPANION_MAX_PAYLOAD_BYTES in ../shared/companion,
+    // not repeated here.
+    const wss = new WebSocketServer({ noServer: true, maxPayload: COMPANION_MAX_PAYLOAD_BYTES })
     server.on('upgrade', (req: IncomingMessage, socket: Duplex, head: Buffer) => {
       const addr = req.socket.remoteAddress ?? ''
       if (!isPrivateAddress(addr) || this.auth.isLocked(addr)) {
@@ -299,7 +305,22 @@ export class CompanionServer {
     })
     ws.on('message', (data) => {
       const frame = parseClientFrame(typeof data === 'string' ? data : data.toString('utf8'))
-      if (!frame) return
+      if (!frame) {
+        // Unparsable frame on an unauthenticated socket: count it against
+        // the SAME lockout counter `hello` denials use (card 45c1999e),
+        // instead of a parallel mechanism, or an attacker who never sends a
+        // valid hello could stream garbage forever without ever tripping
+        // the lockout. Authenticated sockets already passed a hello and are
+        // left alone here.
+        if (!ctx.authed) {
+          this.auth.recordFailure(addr)
+          if (this.auth.isLocked(addr)) {
+            this.deps.journal(`companion: locked out ${addr} (garbage frames)`)
+            ws.close(4401, 'too many invalid frames')
+          }
+        }
+        return
+      }
       if (!ctx.authed) {
         if (frame.t !== 'hello') {
           ws.close(4401, 'hello required')
