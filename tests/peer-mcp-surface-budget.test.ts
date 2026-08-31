@@ -83,6 +83,12 @@ describe("the per-turn MCP surface stays under its cap", () => {
     // descriptions, not a second time here.
     expect(block).not.toContain("409");
     expect(block).not.toContain("magic_compact");
+    // Card 4658b614: roadmap_update's own description no longer states the
+    // status transition order or which peer_id in_progress locks under --
+    // this block is now the ONLY carrier of both facts. Pin them so a future
+    // trim of `instructions` cannot silently drop the last copy.
+    expect(block).toContain("planned -> in_progress -> done");
+    expect(block).toContain("LOCKS the item under your peer_id");
   });
 });
 

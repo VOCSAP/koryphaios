@@ -710,7 +710,7 @@ const TOOLS = [
   // when it fires. Keep in a description what changes the CALL (when to use
   // it, a parameter required by another, a lock, an irreversible effect, a
   // 409/403). Put the WHY in a comment like this one, and the remedy in the
-  // refusal text. tests/server-mcp-surface-budget.test.ts caps the total.
+  // refusal text. tests/peer-mcp-surface-budget.test.ts caps the total.
   //
   // Directive cards (kind='directive'): the Deck itself types the command
   // (clear | compact | magic_compact) into the terminals of target_peer_ids
@@ -749,7 +749,7 @@ const TOOLS = [
         context: {
           type: "string" as const,
           description:
-            "Briefing for the agent that picks this up in a FUTURE session with none of your context: objective, scope boundaries, relevant files/tests, acceptance criteria, decisions made. Write what a fresh session cannot rediscover from the repo.",
+            "Briefing for a future session with none of this one's context: objective, scope boundaries, relevant files/tests, acceptance criteria, decisions made -- what the repo alone won't reveal.",
         },
         priority: {
           type: "string" as const,
@@ -777,10 +777,19 @@ const TOOLS = [
   // takes a card out of every agent's reach until the operator lifts it. The
   // 403 fires on the CLAIM (in_progress or locked=true) whatever else the write
   // changes, so a retry with extra fields does not help.
+  // Card 4658b614: status:in_progress locks the item under the CALLER's own
+  // peer_id (never named in the description below -- the `locked` field's
+  // own description already covers release/re-claim, and the id field's own
+  // description already covers the prefix match, so neither is repeated
+  // here). Locking exists so two peers cannot silently work the same card.
+  // The remedy for a 409 (pick another item; `force:true` exists on the
+  // broker route but is NOT exposed by this tool) lives only in the broker's
+  // refusal text, per this file's own DESCRIPTION BUDGET convention above
+  // TOOLS -- never duplicated in the exposed description.
   {
     name: "roadmap_update",
     description:
-      "Partially update a roadmap item (only the fields you pass change): move status (planned -> in_progress -> done), reprioritize, retag, rewrite. id or unique prefix. status=archived archives, any other status restores. in_progress LOCKS the item under your peer_id, leaving it releases the lock; a status write on an item locked by another peer is refused (409): pick another item. Claiming a card marked [INACTIVE] is refused (403).",
+      "Partially update a roadmap item (only fields you pass change): reprioritize, retag, rewrite, or move status. status=archived archives, any other status restores. status:in_progress locks it; a status write on an item locked by another peer is refused (409). Claiming an [INACTIVE] card is refused (403).",
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -833,7 +842,7 @@ const TOOLS = [
   {
     name: "roadmap_archive",
     description:
-      "Archive a roadmap item (reversible soft delete: it disappears from default lists but can be restored with roadmap_update status). Accepts a full id or a unique prefix.",
+      "Archive a roadmap item (reversible soft delete: it disappears from default lists but can be restored with roadmap_update status).",
     inputSchema: {
       type: "object" as const,
       properties: {
