@@ -92,12 +92,16 @@ export function CreateMenu({
   const [leadTouched, setLeadTouched] = useState(false)
 
   // Peer role (card a2f61172): what this agent DOES. Independent of the laurel
-  // above -- checking it only SUGGESTS 'team-lead' below, until the operator
-  // touches the dropdown themselves.
+  // above.
+  // Card 015c9c97: team-lead is REMOVED from this list -- the laurel checkbox
+  // above is the SOLE way to name a team-lead in this panel. It is projected
+  // onto `role` only at submit time (see `effectiveRole` below), never by
+  // mutating this dropdown's state. mergeRoleChoices/BUILTIN_ROLES stay
+  // untouched (TemplateComposer.tsx still lists team-lead there, out of
+  // scope for this card).
   const updateConfig = useDeck((s) => s.updateConfig)
-  const roleChoices = mergeRoleChoices(config.roleChoices ?? [])
+  const roleChoices = mergeRoleChoices(config.roleChoices ?? []).filter((r) => r !== TEAM_LEAD_ROLE)
   const [role, setRole] = useState('')
-  const [roleTouched, setRoleTouched] = useState(false)
   const [roleOther, setRoleOther] = useState(false)
   const [roleDraft, setRoleDraft] = useState('')
 
@@ -189,24 +193,16 @@ export function CreateMenu({
     setLead(!hasLead && pattern !== '' && candidate.includes(pattern))
   }, [agent, name, hasLead, leadTouched, config.leadPattern])
 
-  // The laurel SUGGESTS the 'team-lead' role while the dropdown is untouched
-  // (card a2f61172): one gesture, two values that stay independent -- nothing
-  // downstream derives one from the other, and the operator can change or
-  // clear either. Also covers the leadPattern pre-check above, which sets
-  // `lead` programmatically.
-  useEffect(() => {
-    if (roleTouched || roleOther) return
-    setRole(lead ? TEAM_LEAD_ROLE : '')
-  }, [lead, roleTouched, roleOther])
-
   /** Commit the free-text role: normalise, remember it for next time, select it. */
   const addRole = (): void => {
     const value = sanitizeRole(roleDraft)
     setRoleOther(false)
     setRoleDraft('')
     if (!value) return
+    // Card 015c9c97: team-lead can only be named via the laurel checkbox, not
+    // through this free-text escape hatch.
+    if (value === TEAM_LEAD_ROLE) return
     setRole(value)
-    setRoleTouched(true)
     // Persisted in the operator-GLOBAL config, like modelFavorites. Built-ins
     // and already-known roles are filtered by mergeRoleChoices on read, but
     // guard here too so the stored list does not grow duplicates.
@@ -215,13 +211,18 @@ export function CreateMenu({
     }
   }
 
+  // Card 015c9c97: the laurel checkbox is the sole way to name a team-lead --
+  // the submitted role is derived from it here, never from the dropdown
+  // (which never offers TEAM_LEAD_ROLE as a choice, see roleChoices above).
+  const effectiveRole = lead ? TEAM_LEAD_ROLE : role
+
   const submit = (): void => {
     void createSession({
       name: name.trim() || undefined,
       agent: agent || undefined,
       model: effectiveModel || undefined,
       effort: effortLevel || undefined,
-      role: role || undefined,
+      role: effectiveRole || undefined,
       args: extraArgs.trim() || undefined,
       prompt: prompt.trim() || undefined,
       worktreeBranch: worktreeBranch.trim() || undefined,
@@ -279,14 +280,17 @@ export function CreateMenu({
         {/* Peer role (card a2f61172): what this agent DOES, exported to the
             session as CLAUDE_PEERS_ROLE. An OPERATOR gesture only -- no agent
             path sets it. Optional: "no role" is the default and leaves the
-            launch strictly as it was before this control existed. */}
-        <div className="field" title={t('create.roleHelp')}>
+            launch strictly as it was before this control existed.
+            Card 015c9c97: greyed out whenever the laurel checkbox is checked,
+            regardless of its own value -- the checkbox is the only source of
+            'team-lead' in this panel (see `effectiveRole` in submit). */}
+        <div className="field" title={t('create.roleHelp')} aria-disabled={lead}>
           <span>{t('create.role')}</span>
           <select
+            disabled={lead}
             value={roleOther ? ROLE_OTHER : role}
             onChange={(e) => {
               const picked = e.target.value
-              setRoleTouched(true)
               if (picked === ROLE_OTHER) {
                 setRoleOther(true)
                 setRole('')
@@ -308,6 +312,7 @@ export function CreateMenu({
             <div className="field-row">
               <input
                 autoFocus
+                disabled={lead}
                 value={roleDraft}
                 placeholder={t('create.rolePlaceholder')}
                 onChange={(e) => setRoleDraft(e.target.value)}
@@ -315,7 +320,7 @@ export function CreateMenu({
                   if (e.key === 'Enter') addRole()
                 }}
               />
-              <button className="icon-btn" onClick={addRole} title={t('create.roleAdd')}>
+              <button className="icon-btn" disabled={lead} onClick={addRole} title={t('create.roleAdd')}>
                 {GLYPH_ACTIONS.plus}
               </button>
             </div>
