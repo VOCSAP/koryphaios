@@ -98,14 +98,22 @@ interface Harness {
 
 let nextRpcId = 1;
 
-async function boot(): Promise<Harness> {
-  const b = await startBroker();
-  brokers.push(b);
-
+// Card 4441e883, Trou B: `bootOnBroker` factors the process-spawn half of
+// `boot()` out so a SECOND server.ts instance can be pointed at an EXISTING
+// broker instead of minting its own -- broker.ts's /register session_key
+// collision branch (broker.ts:1687-1716) mints a fresh peer_id/instance_token
+// for a second process sharing the same host+cwd+tty against an already-
+// active session, so two harnesses booted this way onto the SAME broker are
+// two genuinely distinct, independently PROVEN identities (own instance_token
+// each), never the same peer reconnecting. That distinctness is exactly what
+// B1/B2 need: one session claims a card's work-lock, the other must NOT be
+// mistaken for it.
+async function bootOnBroker(b: TestBroker, extraEnv: Record<string, string> = {}): Promise<Harness> {
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
     CLAUDE_PEERS_BROKER_URL: b.url,
     CLAUDE_PEERS_PORT: String(b.port),
+    ...extraEnv,
   };
   delete env.CLAUDE_PEERS_APPROVAL_FILE;
 
@@ -130,6 +138,12 @@ async function boot(): Promise<Harness> {
   await readUntil(reader, 0, buffer);
 
   return { b, proc, reader, buffer, send };
+}
+
+async function boot(): Promise<Harness> {
+  const b = await startBroker();
+  brokers.push(b);
+  return bootOnBroker(b);
 }
 
 async function callTool(
@@ -445,6 +459,59 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     expect(match).not.toBeNull();
     expect(Number(match![1])).toBeGreaterThan(secretNote.length);
     expect(Number(match![2])).toBeGreaterThan(secretNote.length);
+  }, 60_000);
+
+  // Card 4441e883, Trou B (team-lead review): formatRoadmapUpsertAck's
+  // work-lock trailer (server.ts) had zero coverage anywhere -- these two are
+  // the pair, B1 the positive case and B2 the negative control that carries
+  // the real weight (the card explicitly forbids a generic nudge toward
+  // callers holding NO lock -- server.ts:1111-1114 -- so a regression that
+  // widens the trailer to every caller must be caught here). Anchored on the
+  // stable fragment "you hold this card's work-lock" rather than the full
+  // line: a parallel developer session is actively reformatting `locked_at`
+  // and the follow-up advice clause in the SAME line (team-lead brief), so
+  // asserting the whole string would break on an unrelated, correct edit.
+  const WORK_LOCK_TRAILER_FRAGMENT = "you hold this card's work-lock";
+
+  test("card 4441e883 (Trou B1): a proven holder's own write on its locked card carries the work-lock trailer", async () => {
+    const h = await boot();
+    // roadmap_add doesn't forward `locked`, but a non-'deck' author writing
+    // status=in_progress on a fresh item claims it implicitly (PLAN K2) --
+    // same implicit-claim path A1/A2 exercise at the HTTP layer, here
+    // reached through the MCP tool this session's own identity actually
+    // uses. This session's `myInstanceToken` is what the broker just proved.
+    const created = await callTool(h, "roadmap_add", {
+      title: "B1: created already claimed by its own author",
+      status: "in_progress",
+    });
+    expect(created.result?.isError).toBeFalsy();
+    const ack = ackText(created);
+    expect(ack).toContain(WORK_LOCK_TRAILER_FRAGMENT);
+  }, 60_000);
+
+  test("card 4441e883 (Trou B2, negative control): a NON-holder's write on someone else's locked card carries NO work-lock trailer at all", async () => {
+    const holder = await boot();
+    const created = await callTool(holder, "roadmap_add", {
+      title: "B2: locked by the holder session, then edited by a stranger",
+      status: "in_progress",
+    });
+    expect(created.result?.isError).toBeFalsy();
+    const id = ackText(created).match(/Roadmap item created: ([0-9a-f]{8})/)![1]!;
+
+    // A genuinely different, independently proven session against the SAME
+    // broker (bootOnBroker's whole reason to exist -- see its doc comment).
+    const stranger = await bootOnBroker(holder.b);
+    // Neither `status` nor `locked`: an ORDINARY write, same shape the
+    // broker-level 409 guard already lets through untouched (see
+    // tests/broker-roadmap-lock.test.ts, "Non-status writes stay open").
+    const edited = await callTool(stranger, "roadmap_update", {
+      id,
+      context: "an unrelated edit from a stranger while the card stays locked",
+    });
+    expect(edited.result?.isError).toBeFalsy();
+    const ack = ackText(edited);
+    expect(ack).not.toContain(WORK_LOCK_TRAILER_FRAGMENT);
+    expect(ack).not.toContain("work-lock");
   }, 60_000);
 });
 

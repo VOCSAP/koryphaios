@@ -17,6 +17,7 @@ import {
   resolveRoadmapLock,
   matchesLockOwner,
   resolveLockedGroup,
+  resolveLockedByToken,
   resolveKeptLockedAt,
 } from "../shared/roadmap-lock.ts";
 
@@ -183,6 +184,35 @@ test.each([
     null,
     false,
   ],
+  // Card 4441e883, Trou D (team-lead review): a `bun cli.ts` write stamps
+  // `by` as `cli:<peer_id>` (cli.ts:348) -- an UNPROVEN author (no
+  // instance_token), so on the TOKEN path (resolveLockedByToken) it is
+  // already correctly NULL by construction (case 4/5 of that table above:
+  // any claim by an author with no instance_token stamps null). This
+  // comparator is the OTHER, unrelated half the card asks to be pinned: the
+  // DISPLAY comparator (`locked_by`, a plain string column) must treat a
+  // 'cli:'-prefixed peer_id as an ORDINARY opaque string, matching itself
+  // and refusing a different string, exactly like any other peer_id -- no
+  // special-casing of the prefix anywhere in matchesLockOwner. Motivation:
+  // `bun cli.ts roadmap-export`'s own census (broker.ts:2517-2518) shows 8
+  // peers appearing under BOTH the bare `x` and `cli:x` forms, so the two
+  // must never be treated as the same identity by this comparator either.
+  [
+    "'cli:'-prefixed locked_by matches itself as an ordinary opaque string (same peer_id, same group)",
+    "cli:desktop-7b2civn",
+    "g1",
+    "cli:desktop-7b2civn",
+    "g1",
+    true,
+  ],
+  [
+    "the bare form and its 'cli:'-prefixed counterpart are NOT the same identity to this comparator -- no prefix-stripping, no special-casing",
+    "cli:desktop-7b2civn",
+    "g1",
+    "desktop-7b2civn",
+    "g1",
+    false,
+  ],
 ] as const)(
   "matchesLockOwner: %s",
   (_name, existingLockedBy, existingLockedGroup, by, byLockedGroup, expected) => {
@@ -267,3 +297,67 @@ test.each([
 ] as const)("resolveKeptLockedAt: %s", (_name, resolvedLock, existingLockedAt, expected) => {
   expect(resolveKeptLockedAt(resolvedLock, existingLockedAt)).toBe(expected);
 });
+
+// Card 4441e883, mecanisme B: resolveLockedByToken's own truth table --
+// same claimed-only discipline as resolveLockedGroup above, one column
+// over. The case this table exists to pin is the ONE it must NOT share
+// with resolveLockedGroup: an ACTUAL claim from an author with NO proven
+// instance_token (an unproven claim, or an operator/deck-signed write)
+// must stamp NULL, never fall back to the row's own existing token and
+// never guess one from `by` -- "LE BACKFILL NE DEVINE JAMAIS".
+test.each([
+  [
+    "case 1 -- baseline: same proven owner, ORDINARY write (not a claim): preserves the existing token",
+    { locked: true, claimed: false },
+    "tok-A",
+    "tok-A",
+    "tok-A",
+  ],
+  [
+    "case 2 -- third party makes an ORDINARY write on a card locked by tok-A -- must NOT stamp the third party's own token over the true owner's",
+    { locked: true, claimed: false },
+    "tok-A",
+    "tok-B",
+    "tok-A",
+  ],
+  [
+    "case 3 -- an ACTUAL claim by a proven author: stamps the new owner's token",
+    { locked: true, claimed: true },
+    "tok-A",
+    "tok-B",
+    "tok-B",
+  ],
+  [
+    "case 4 -- THE DEFECT THIS COLUMN EXISTS TO CLOSE: an ACTUAL claim by an UNPROVEN author (no instance_token) must stamp NULL, never the row's existing token and never a guess",
+    { locked: true, claimed: true },
+    "tok-A",
+    undefined,
+    null,
+  ],
+  [
+    "case 5 -- an operator/deck-signed claim (no peer row, no instance_token): same NULL outcome as case 4",
+    { locked: true, claimed: true },
+    null,
+    undefined,
+    null,
+  ],
+  [
+    "case 6 -- legacy row (locked_by_token NULL, pre-migration), ORDINARY write: stays NULL, no accidental heal from a write that claimed nothing",
+    { locked: true, claimed: false },
+    null,
+    "tok-A",
+    null,
+  ],
+  [
+    "unlocked: always null, claimed or not",
+    { locked: false, claimed: false },
+    "tok-A",
+    "tok-B",
+    null,
+  ],
+] as const)(
+  "resolveLockedByToken: %s",
+  (_name, resolvedLock, existingLockedByToken, authorInstanceToken, expected) => {
+    expect(resolveLockedByToken(resolvedLock, existingLockedByToken, authorInstanceToken)).toBe(expected);
+  }
+);

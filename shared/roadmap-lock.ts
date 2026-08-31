@@ -109,6 +109,28 @@ export function resolveLockedGroup(
 }
 
 /**
+ * Card 4441e883, mecanisme B: `locked_by_token`'s own resolver -- same
+ * claimed-only discipline as `resolveLockedGroup` right above (a non-
+ * claiming write to an already-locked row must preserve the real owner's
+ * proven token, never overwrite it with the current writer's own, or with
+ * null if the current writer has none). `authorInstanceToken` is
+ * `RoadmapAuthor.instance_token` (broker.ts), `undefined` for any author
+ * resolveRoadmapAuthor could not prove via a real token -- normalized to
+ * `null` here, same as `resolveLockedGroup` normalizes a missing
+ * `author.group_id`. NEVER derived from `by` or from `authorLockedGroup`:
+ * see `RoadmapItem.locked_by_token`'s doc comment for why this column must
+ * stay NULL rather than guess.
+ */
+export function resolveLockedByToken(
+  resolvedLock: Pick<RoadmapLockResolution, "locked" | "claimed">,
+  existingLockedByToken: string | null,
+  authorInstanceToken: string | undefined
+): string | null {
+  if (!resolvedLock.locked) return null;
+  return resolvedLock.claimed ? (authorInstanceToken ?? null) : existingLockedByToken;
+}
+
+/**
  * Card e344fa79, review round 2: `locked_at`'s sibling to
  * `resolveLockedGroup` above -- same bug, one column over (team-lead review:
  * "la meme faute une colonne plus loin"). Keying `keptLockedAt` on the same

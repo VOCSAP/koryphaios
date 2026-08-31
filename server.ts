@@ -1101,14 +1101,26 @@ function formatRoadmapItemDetail(i: RoadmapItem): string {
  * ROADMAP_UPDATE_ACK_FIELDS) -- never a union: roadmap_add does not forward
  * `locked` to the broker at all, so it must never appear in that path's ack
  * even if the caller happened to pass it as an extra JSON property.
+ *
+ * Card 4441e883, mecanisme B (the "remorque conditionnee par l'etat"): when
+ * `holderInstanceToken` (this session's own, proven `myInstanceToken`)
+ * equals `item.locked_by_token`, the ack gains one factual trailer line --
+ * the caller just PROVED it holds this card's lock, so this is the cheapest
+ * possible moment to remind it how to release only its own claim. Every
+ * other caller (unproven, or a different/no lock) pays nothing: no trailer,
+ * no lookup beyond the equality check. Never a nudge toward callers who hold
+ * NO lock (that generic form was explicitly rejected in this card's design
+ * -- see 3817a84f's context -- it would pollute a channel that is otherwise
+ * 100% signal).
  */
 function formatRoadmapUpsertAck(opts: {
   label: "created" | "updated";
   item: RoadmapItem;
   args: Record<string, unknown>;
   domain: readonly RoadmapUpsertAckField[];
+  holderInstanceToken?: string;
 }): string {
-  const { label, item, args, domain } = opts;
+  const { label, item, args, domain, holderInstanceToken } = opts;
   const passed: string[] = [];
   const untouched: string[] = [];
   for (const field of domain) {
@@ -1141,6 +1153,19 @@ function formatRoadmapUpsertAck(opts: {
   const lines = [`Roadmap item ${label}: ${item.id.slice(0, 8)}`];
   if (passed.length) lines.push(`  ${passedLabel}: ${passed.join(", ")}`);
   if (untouched.length) lines.push(`  ${untouchedLabel}: ${untouched.join(", ")}`);
+  // Card 4441e883: `item.locked_by_token` is null on any unproven/unclaimed
+  // lock (see RoadmapItem.locked_by_token's doc comment) -- the `!== null`
+  // guard is what keeps two undefined/absent tokens from reading as a match.
+  if (
+    holderInstanceToken !== undefined &&
+    item.locked_by_token !== null &&
+    item.locked_by_token === holderInstanceToken
+  ) {
+    const since = item.locked_at !== null ? formatLockedAtHHMM(item.locked_at) : "an unknown time";
+    lines.push(
+      `  you hold this card's work-lock (since ${since}) -- if only your own part is done, pass locked:false while leaving status:in_progress so the card stays claimed for the rest`
+    );
+  }
   return lines.join("\n");
 }
 
@@ -1175,6 +1200,21 @@ function formatRoadmapAppendAck(requestedText: string, author: string, item: Roa
     `Roadmap item context appended: ${item.id.slice(0, 8)}`,
     `  appended ${appendedLen} chars (header included), context now ${landedLen} chars`,
   ].join("\n");
+}
+
+// Card 4441e883, team-lead correctif (L3): `locked_at` is either SQLite's
+// `datetime('now')` form ("YYYY-MM-DD HH:MM:SS", UTC, no timezone marker) or
+// an ISO string ("YYYY-MM-DDTHH:MM:SS.sssZ") -- broker.ts's UPDATE stamps it
+// via `COALESCE(?, datetime('now'))`, so an import-path caller can supply
+// either shape (same ambiguity `shared/roadmap-lock.ts`'s `parseAsUtcMs`
+// normalizes for TTL math). Both forms put HH:MM at the same offset right
+// after the date separator, so a plain match extracts it without going
+// through `Date` -- parsing a marker-less string with `Date` reads it as
+// LOCAL time (V8 behaviour) and would silently shift the displayed hour on
+// a non-UTC host, while this string carries no timezone of its own to lose.
+function formatLockedAtHHMM(lockedAt: string): string {
+  const m = lockedAt.match(/[ T](\d{2}):(\d{2})/);
+  return m ? `${m[1]}:${m[2]}` : lockedAt;
 }
 
 const roadmapToolError = (e: unknown): { content: { type: "text"; text: string }[]; isError: true } => ({
@@ -1773,6 +1813,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
                 item,
                 args: a,
                 domain: ROADMAP_ADD_ACK_FIELDS,
+                holderInstanceToken: myInstanceToken ?? undefined,
               }),
             },
           ],
@@ -1815,6 +1856,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
                 item,
                 args: a,
                 domain: ROADMAP_UPDATE_ACK_FIELDS,
+                holderInstanceToken: myInstanceToken ?? undefined,
               }),
             },
           ],

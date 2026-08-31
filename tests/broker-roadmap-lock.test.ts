@@ -632,8 +632,9 @@ test("card e344fa79: rowToRoadmapItem's response covers every roadmap_items colu
 
   // Sanity companion, not a substitute for the two checks above: the schema
   // and ROADMAP_IMPORT_COLUMNS (a list maintained independently, for a
-  // different route) name the same 29 columns today. If they ever diverge,
-  // that is itself worth knowing, but it is not what this test polices.
+  // different route) name the same 30 columns today (card 4441e883 added
+  // `locked_by_token`, the 30th). If they ever diverge, that is itself worth
+  // knowing, but it is not what this test polices.
   expect(findUncoveredRoadmapColumns(schemaColumns, ROADMAP_IMPORT_COLUMNS).missing).toEqual([]);
 });
 
@@ -1058,4 +1059,80 @@ test("card e344fa79, review round 3 (ROUTE-LEVEL): an ORDINARY write from a peer
   expect(saved.body.item.locked).toBe(true);
   expect(saved.body.item.locked_by).toBe(owner.body.peer_id);
   expect(saved.body.item.locked_group).toBe("e344fa79-ordinary-tp-group-owner");
+});
+
+// Card 4441e883, Trou A (team-lead review): resolveLockedByToken (shared/
+// roadmap-lock.ts) is truth-tabled in tests/roadmap-lock.test.ts, but nothing
+// proved the ROUTE actually calls it with the right arguments and stores the
+// result -- same "extraction moves the guarantee's boundary without closing
+// the hole" trap CLAUDE.md names. These two are the behavioural, route-level
+// pair: A1 (a proven claim stamps the caller's own instance_token) and A2
+// (an ordinary third-party write preserves the true owner's token, the
+// negative control that carries the real weight). Read straight off the HTTP
+// response's `locked_by_token` -- a public, pick-list-covered RoadmapItem
+// field (see the pick-list coverage test above in this file), no direct DB
+// read needed.
+test("card 4441e883 (Trou A1): a proven author's claim stamps locked_by_token = its own instance_token, read off the live route", async () => {
+  const reg = await post<{ instance_token: string; peer_id: string }>(`${broker.url}/register`, {
+    pid: livePid(), cwd: "/tmp/4441e883-a1", git_root: null, tty: null,
+    summary: "", host: "h-4441e883-a1", client_pid: livePid(), claude_cli_pid: 1,
+    project_key: PK, group_id: "default", group_secret_hash: null,
+  });
+  expect(reg.status).toBe(200);
+
+  const created = await add({ title: "A1: claimed via a proven author" });
+  expect(created.locked_by_token).toBeNull(); // unlocked, no claim yet
+
+  const claim = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    id: created.id,
+    by: reg.body.peer_id,
+    instance_token: reg.body.instance_token,
+    status: "in_progress",
+  });
+  expect(claim.status).toBe(200);
+  expect(claim.body.item.locked).toBe(true);
+  expect(claim.body.item.locked_by).toBe(reg.body.peer_id);
+  // THE ASSERTION THAT MATTERS: the response's own token, not a guess derived
+  // from `by` -- resolveLockedByToken's whole reason to exist (RoadmapItem.
+  // locked_by_token's doc comment: "LE BACKFILL NE DEVINE JAMAIS").
+  expect(claim.body.item.locked_by_token).toBe(reg.body.instance_token);
+});
+
+test("card 4441e883 (Trou A2, the negative control that carries the weight): an ordinary third-party write on an already-locked card preserves the true owner's proven token, never overwrites or nulls it", async () => {
+  const owner = await post<{ instance_token: string; peer_id: string }>(`${broker.url}/register`, {
+    pid: livePid(), cwd: "/tmp/4441e883-a2-owner", git_root: null, tty: null,
+    summary: "", host: "h-4441e883-a2-owner", client_pid: livePid(), claude_cli_pid: 1,
+    project_key: PK, group_id: "4441e883-a2-group-owner", group_secret_hash: null,
+  });
+  const thirdParty = await post<{ instance_token: string; peer_id: string }>(`${broker.url}/register`, {
+    pid: livePid(), cwd: "/tmp/4441e883-a2-third", git_root: null, tty: null,
+    summary: "", host: "h-4441e883-a2-third", client_pid: livePid(), claude_cli_pid: 1,
+    project_key: PK, group_id: "4441e883-a2-group-third", group_secret_hash: null,
+  });
+  expect(thirdParty.body.peer_id).not.toBe(owner.body.peer_id); // a genuine third party
+
+  const item = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    project_key: PK,
+    by: owner.body.peer_id,
+    instance_token: owner.body.instance_token,
+    title: "A2: locked by its owner, about to receive an ordinary third-party save",
+    status: "in_progress",
+  });
+  expect(item.body.item.locked).toBe(true);
+  expect(item.body.item.locked_by_token).toBe(owner.body.instance_token);
+
+  // Neither `status` nor `locked` -- an ORDINARY write, exactly the shape the
+  // sibling locked_group test above uses. Must not reassign locked_by_token
+  // to the third party's own proven token, and must not null it either.
+  const saved = await post<UpsertRes>(`${broker.url}/roadmap/upsert`, {
+    id: item.body.item.id,
+    by: thirdParty.body.peer_id,
+    instance_token: thirdParty.body.instance_token,
+    context: "an unrelated edit from a third party while the card stays locked",
+  });
+  expect(saved.status).toBe(200);
+  expect(saved.body.item.locked).toBe(true);
+  expect(saved.body.item.locked_by).toBe(owner.body.peer_id);
+  expect(saved.body.item.locked_by_token).toBe(owner.body.instance_token);
+  expect(saved.body.item.locked_by_token).not.toBe(thirdParty.body.instance_token);
 });

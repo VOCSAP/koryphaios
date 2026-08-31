@@ -433,6 +433,43 @@ export interface RoadmapItem {
    */
   locked_group: string | null;
   /**
+   * Card 4441e883, mecanisme B: the lock owner's `instance_token` at the
+   * moment it CLAIMED the lock -- `locked_by` above stays a DISPLAY name (a
+   * numbered-seat peer_id that a resumed session may not come back to, see
+   * that field's doc comment); this is the stable credential a caller can
+   * actually PROVE it still holds, for `formatRoadmapUpsertAck`'s "you hold
+   * this card" trailer.
+   *
+   * NEVER GUESSED OR BACKFILLED: NULL on every pre-existing row (fail-open
+   * migration state, same as `locked_group`), and NULL is also the
+   * PERMANENT, correct value for a claim `resolveRoadmapAuthor` could not
+   * prove via a real `instance_token` (an unproven claim, or an
+   * operator/deck-signed write, which authenticates a human, not a peer
+   * row) -- a resolver that fell back to naming the display peer_id here
+   * would defeat the entire point of adding this column (Card 4441e883,
+   * "LE BACKFILL NE DEVINE JAMAIS"). NULL reads "owner not proven": no
+   * gesture that depends on holding the lock may proceed on the strength of
+   * this column alone while it is NULL.
+   *
+   * Stamped only when `resolveRoadmapLock`'s own `claimed` is true (same
+   * discipline as `resolveLockedGroup`/`resolveKeptLockedAt` -- an ordinary
+   * third-party write to an already-locked row must not overwrite the real
+   * owner's proven token with its own, or with NULL if it has none itself),
+   * cleared to null everywhere `locked_by` itself is cleared.
+   *
+   * DOES NOT MAKE A LOCK SURVIVE A RESTART for most callers on this shared
+   * checkout: a peer that re-registers into an active `session_key`
+   * collision mints a brand-new `instance_token` (broker.ts's /register
+   * collision branch), so most sessions here do not carry the same token
+   * across a reconnect. This column trades "the lock outlives a restart"
+   * (mostly false in practice) for "an unproven claim never gets the trailer
+   * meant for a proven owner" (true by construction) -- an OPEN failure
+   * (legitimate owner returns under a fresh token, gets no trailer, same UX
+   * as today) traded for a CLOSED one (an agent that merely inherited a
+   * freed display name never gets told it holds a card it never claimed).
+   */
+  locked_by_token: string | null;
+  /**
    * kind 'directive' (CT1): the app-executed command; null for every other
    * kind. Persisted so the card survives broker restarts like any roadmap row.
    */
@@ -551,6 +588,7 @@ export const ROADMAP_IMPORT_COLUMNS = [
   "locked_by",
   "locked_at",
   "locked_group",
+  "locked_by_token",
   "operator_id",
   "inactive",
   "lock_parked_at",
