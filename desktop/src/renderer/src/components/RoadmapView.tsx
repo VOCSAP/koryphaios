@@ -145,6 +145,19 @@ export function RoadmapView(): React.JSX.Element {
   // Form state: null = closed; a Draft without id = create; with id = edit.
   const [draft, setDraft] = useState<Draft | null>(null)
   const [confirmArchive, setConfirmArchive] = useState<RoadmapItem | null>(null)
+  // Card f95ccfa6: the exact SHOWN population at the moment the button was
+  // clicked (RoadmapBoard's own already-filtered 'done' rows) -- never
+  // re-derived from `board`/`queue.all` at confirm time, so the count the
+  // dialog announces is guaranteed to match what archiveAll() below actually
+  // archives.
+  const [confirmArchiveAll, setConfirmArchiveAll] = useState<RoadmapItem[] | null>(null)
+  // Card f95ccfa6, ajout 1: the button must not stay clickable for the
+  // whole duration of the loop below -- `rows` (RoadmapBoard's own filtered
+  // slice) is only refreshed at the very end, so a second click before then
+  // would re-fire the identical batch. Harmless (the broker's archive is
+  // idempotent, COALESCE on deleted_at) but doubles the request volume for
+  // nothing on a large column.
+  const [archivingAll, setArchivingAll] = useState(false)
   // Drag & drop: the dragged item id + the column currently hovered (K1).
   const [dragId, setDragId] = useState<string | null>(null)
   const [dropCol, setDropCol] = useState<RoadmapStatus | null>(null)
@@ -264,6 +277,73 @@ export function RoadmapView(): React.JSX.Element {
       await refresh()
     } catch (e) {
       setMutationError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  // Card f95ccfa6: N sequential requests, not one -- the broker's own
+  // /roadmap/archive route is unitary (RoadmapArchiveRequest.id is a single
+  // string, measured against shared/types.ts and broker.ts's
+  // handleRoadmapArchive, no batch field exists). A failure on ONE item mid-
+  // loop must not abort the rest (each is independent) and must not be
+  // swallowed -- every failure is both logged (window.api.reportError, no
+  // silent catch) and surfaced to the operator as an honest count, naming
+  // which cards did not move rather than leaving them to guess.
+  //
+  // Review round 2, ajout 2 (documented, NOT fixed -- team-lead's arbitrage
+  // holds: reversible, count/action coherence is what matters here):
+  // (a) handleRoadmapArchive's K2 lock guard carries `by !== "deck"`, so the
+  //     Deck is EXEMPT from it (same exemption toggleInactive's own comment
+  //     already cites, card 442084b7). If a card leaves the shown snapshot
+  //     and gets claimed by an agent between the click and this item's turn
+  //     in the loop, the archive still SUCCEEDS -- no 409, no failure entry,
+  //     nothing in the toast -- and the UPDATE also zeroes `locked`, so the
+  //     agent keeps working, now on an archived, unlocked card under it.
+  //     Close cousin of card e0cc00dd (stale lock silently cleared by any
+  //     Deck write); carded separately, not fixed here.
+  // (b) with N sequential requests, the staleness window for the LAST item
+  //     is not the confirm-to-click delay, it is the FULL DURATION of the
+  //     loop: on a 152-card column, item 152 archives on a decision made
+  //     roughly 151 round-trips earlier.
+  const archiveAll = async (items: RoadmapItem[]): Promise<void> => {
+    setArchivingAll(true)
+    const ok: RoadmapItem[] = []
+    const failed: { item: RoadmapItem; error: string }[] = []
+    try {
+      for (const item of items) {
+        try {
+          await window.api.roadmapArchive(item.id)
+          ok.push(item)
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e)
+          failed.push({ item, error: msg })
+          window.api.reportError('roadmap:archive-all', `${item.title}: ${msg}`)
+        }
+      }
+      if (failed.length === 0) {
+        showToast(t('toast.roadmapArchivedAll', { count: ok.length }), 'info', { raw: true })
+      } else {
+        // Card f95ccfa6, AC1 (review round 2): `setMutationError` alone is
+        // NOT enough here. `error = fetchError ?? mutationError` in this
+        // component means a `refresh()` failure right after this call
+        // OVERWRITES this message on screen with a generic "broker
+        // unreachable" -- the one message naming which cards moved would
+        // vanish exactly in the failure mode most likely to trigger it (the
+        // broker dying mid-loop). A raw error toast is a SEPARATE piece of
+        // state `refresh()` cannot touch -- same precedent as store.ts's
+        // `guarded()` wrapper, built for the identical reason (PLAN O6).
+        showToast(
+          t('roadmap.archiveAllPartialFailure', {
+            ok: ok.length,
+            failed: failed.length,
+            titles: failed.map((f) => f.item.title).join(', ')
+          }),
+          'error',
+          { raw: true }
+        )
+      }
+      await refresh()
+    } finally {
+      setArchivingAll(false)
     }
   }
 
@@ -698,6 +778,8 @@ export function RoadmapView(): React.JSX.Element {
             onOpen={(item) => setSelectedId(item.id)}
             onMenu={(item, x, y) => setMenu({ x, y, item })}
             onPrio={(item, x, y) => setPrioMenu({ x, y, item })}
+            onArchiveAll={(items) => items.length > 0 && setConfirmArchiveAll(items)}
+            archiveAllBusy={archivingAll}
             t={t}
           />
 
@@ -1031,6 +1113,20 @@ export function RoadmapView(): React.JSX.Element {
             const item = confirmArchive
             setConfirmArchive(null)
             void archive(item)
+          }}
+        />
+      )}
+
+      {confirmArchiveAll && (
+        <ConfirmDialog
+          title={t('roadmap.confirmArchiveAllTitle', { count: confirmArchiveAll.length })}
+          message={t('roadmap.confirmArchiveAllMessage', { count: confirmArchiveAll.length })}
+          confirmLabel={t('roadmap.archive')}
+          onCancel={() => setConfirmArchiveAll(null)}
+          onConfirm={() => {
+            const items = confirmArchiveAll
+            setConfirmArchiveAll(null)
+            void archiveAll(items)
           }}
         />
       )}

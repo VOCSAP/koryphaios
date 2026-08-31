@@ -158,6 +158,16 @@ export interface RoadmapBoardProps {
   onOpen: (item: RoadmapItem) => void
   onMenu: (item: RoadmapItem, x: number, y: number) => void
   onPrio: (item: RoadmapItem, x: number, y: number) => void
+  /**
+   * Card f95ccfa6: passed the column's OWN already-filtered `rows` (never
+   * `items` in full, never the unfiltered queue) -- the confirmation this
+   * fires must announce exactly the population the operator can see, and
+   * this component is the only one that HAS that filtered slice by the time
+   * it is rendering the 'done' column's header.
+   */
+  onArchiveAll: (items: RoadmapItem[]) => void
+  /** Card f95ccfa6, ajout 1: true for the whole loop, not just the confirm -- a second click before the batch finishes would re-fire the same N requests. */
+  archiveAllBusy: boolean
   t: TFn
 }
 
@@ -178,6 +188,8 @@ export function RoadmapBoard({
   onOpen,
   onMenu,
   onPrio,
+  onArchiveAll,
+  archiveAllBusy,
   t
 }: RoadmapBoardProps): React.JSX.Element {
   const columns: RoadmapStatus[] = showArchived ? [...BOARD_COLUMNS, 'archived'] : BOARD_COLUMNS
@@ -229,6 +241,25 @@ export function RoadmapBoard({
                     that shows what is running, not to the view's top bar --
                     the operator halts what they are looking at. */}
                 {status === 'in_progress' && <AgentStopControls t={t} />}
+                {/* Card f95ccfa6: same placement precedent as the stop
+                    controls above -- a column-scoped mass action belongs in
+                    THAT column's own header, not the view's top bar. `rows`
+                    here is this render's own already-filtered slice for
+                    'done' (hideInactive + criteria both already applied
+                    upstream), passed through unchanged so the confirmation
+                    this fires announces exactly what the operator can see. */}
+                {status === 'done' && rows.length > 0 && (
+                  <button
+                    type="button"
+                    className="icon-btn rm-archive-all-btn"
+                    title={t('roadmap.archiveAllHint')}
+                    aria-label={t('roadmap.archiveAllHint')}
+                    disabled={archiveAllBusy}
+                    onClick={() => onArchiveAll(rows)}
+                  >
+                    {GLYPH_BADGES.archive}
+                  </button>
+                )}
               </h3>
               <div className="rm-col-body">
                 {rows.map((item) => (

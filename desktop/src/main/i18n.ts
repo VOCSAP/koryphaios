@@ -762,6 +762,11 @@ export const EN_DEFAULTS: Record<string, string> = {
   'roadmap.confirmArchiveTitle': 'Archive item?',
   'roadmap.confirmArchiveMessage':
     'Archive "{title}"? It disappears from default lists but can be restored later.',
+  'roadmap.archiveAllHint': 'Archive every shown finished card',
+  'roadmap.confirmArchiveAllTitle': 'Archive {count} card(s)?',
+  'roadmap.confirmArchiveAllMessage':
+    'Archive the {count} finished card(s) currently shown? They disappear from default lists but can be restored later.',
+  'roadmap.archiveAllPartialFailure': '{ok} card(s) archived, {failed} failed: {titles}',
   'roadmap.createdBy': 'created {date} by {name}',
   'roadmap.updatedBy': 'updated {date} by {name}',
   'roadmap.launchAgent': 'Launch an agent',
@@ -775,6 +780,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.roadmapCreated': 'Card “{title}” created',
   'toast.idCopied': 'Item id copied',
   'toast.roadmapArchived': 'Roadmap item archived',
+  'toast.roadmapArchivedAll': '{count} roadmap item(s) archived',
   'tile.snippetsTitle': 'Insert a saved prompt (fills the input, does not send)',
   'snippets.title': 'Saved prompts',
   'snippets.hint':
