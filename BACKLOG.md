@@ -6,12 +6,13 @@ de la racine. Le narratif de ce qui est **livré** vit désormais dans le corps
 des commits (retrouvable par `git log --all --grep "Card <id8>"`) ; ce fichier
 ne garde que le **résiduel**.
 
-> ⚠️ **Datation.** Les items sécurité viennent de l'audit du **2026-07-20**
-> (base `experimental`). Depuis, plusieurs lots ont été livrés (team-spawn,
-> multi-llm lot A, mobile-lan, Git/Files GX). **Chaque item sécurité ouvert
-> est donc à RE-VÉRIFIER sur le code courant avant traitement** — certains ont
-> pu être corrigés par un lot ultérieur. Les items marqués « différé (décision
-> opérateur) » sont des choix assumés, pas des oublis.
+> ⚠️ **Datation.** La section 1 (sécurité) a été **re-mesurée le 2026-08-31**
+> contre `HEAD 7d66987` : les 33 items de l'audit du 2026-07-20 ont été
+> revérifiés un par un sur le code courant. Résultat : 6 fermés, 1 sans objet,
+> 9 mal énoncés (corrigés), 17 ouverts tels quels. **Les énoncés ci-dessous
+> sont les énoncés CORRIGÉS**, pointant chacun vers sa carte roadmap quand le
+> travail résiduel est cardé. Les items marqués « différé (décision
+> opérateur) » restent des choix assumés, pas des oublis.
 
 Sources consolidées (fichiers désormais **supprimés** — détail complet des
 chaînes d'exploitation et des alternatives de design dans l'historique git) :
@@ -26,7 +27,7 @@ reste disponible pour recréer un seed depuis l'historique git au besoin.
 
 ---
 
-## 1. Sécurité — audit (à re-vérifier avant action)
+## 1. Sécurité -- audit (re-mesuré le 2026-08-31)
 
 ### 1.1 Déjà traité (rappel, ne rien refaire)
 
@@ -37,55 +38,171 @@ publiques peers+messages), **B2** (garde Origin), **B4** (gate templates projet)
 **M-SEC-9 / Desktop N3** (containment `template:read/apply`), **M-LOG-1**
 (écritures atomiques), **companion device management** (liste + révocation +
 notification). Plus, hors audit : **GX-SEC** (validation `dir` des handlers
-diff/explorer + garde realpath — lot Git/Files).
+diff/explorer + garde realpath -- lot Git/Files).
+
+Fermés par la repasse du 2026-08-31 (mesuré contre `HEAD 7d66987`), preuve en
+une ligne :
+
+- **NF-D** -- fermé par les cartes `39c40571` (layer 2) et `40ddf1f5` (import) :
+  `resolveRoadmapAuthor` couvre les 7 routes mutantes du roadmap, un
+  `by:"deck"` non signé est refusé 401/403
+  (`tests/broker-roadmap-author-auth.test.ts` : 34 pass, 0 fail).
+- **N-SEC-2** -- `desktop/src/main/scope.ts` : le fichier de secret de groupe
+  est déjà `chmod 600` (`openSync(filePath,'w',0o600)`).
+- **N-SEC-4** -- `broker.ts` : id du `graph_draft` généré par `randomUUID()`,
+  non prévisible.
+- **N-SEC-5** -- `ackPriorMessagesForSender` n'acquitte que la boîte du
+  sender dans son propre groupe (`to_token=? AND group_id=? AND id<?`), aucun
+  tiers touché.
+- **N-SEC-7** -- zéro occurrence de contenu de message/résumé loggué en clair
+  dans `broker.ts`, `server.ts`, `companion-server.ts`.
+- **N-LOG-2** -- `server.ts` a déjà `AbortSignal.timeout(2000)` par requête ET
+  un timeout global au boot (30×200 ms puis throw). Rien à reprendre.
+
+Sans objet (cible inexistante) :
+
+- **N-SEC-12** -- `decodeURIComponent` : 0 occurrence dans
+  `companion-server.ts`. Le containment actuel de `serveStatic` passe par
+  `normalize()` + `startsWith(root+sep)`. Piège latent documenté : si
+  `decodeURIComponent` est ajouté un jour, le containment doit être revu.
 
 ### 1.2 Différé par décision opérateur (assumé)
 
-- [ ] **B3** — groupe `default` non authentifié + endpoints admin en GET.
-- [ ] **B7** — flux « resume » = prise d'identité sans secret `(host,cwd,group)`.
-- [ ] **B8** — détournement/rejeu de socket WebSocket (auth statique, pas de nonce).
-- [ ] **B10 / M-SEC-5** — `CHANNEL_TIERS` déclarés mais **jamais appliqués**
-      (un appairage = accès équivalent-opérateur). *Multiplicateur des RCE ;
-      différé car « le mobile pilote l'app, son cred est de confiance ».*
+- [ ] **B3** -- groupe `default` non authentifié + endpoints admin en GET.
+- [ ] **B7** -- flux « resume » = prise d'identité sans secret `(host,cwd,group)`.
+- [ ] **B8** -- détournement/rejeu de socket WebSocket (auth statique, pas de nonce).
+- [ ] **B10 / M-SEC-5** -- l'énoncé « `CHANNEL_TIERS` déclarés mais jamais
+      appliqués » est PÉRIMÉ : ils SONT appliqués. `REMOTE_BLOCKED_CHANNELS`
+      est une union calculée (plancher manuel 38 + dérivation tier>=3 = 41, la
+      dérivation rattrapant `agents:stop`, `config:set` et
+      `launch:set-global`), appliquée dans `CompanionServer.dispatch` sur les
+      deux formes de trame ; `invokeRemote`/`sendRemote` n'ont qu'un site
+      d'appel chacun, tous deux derrière le garde. Le résiduel est un
+      RÉTRÉCISSEMENT : 82 des 123 canaux (34 tier0, 24 tier1, 24 tier2, zéro
+      tier3) restent invocables par un companion appairé. -> `1cf98d6f`. Le
+      différé opérateur porte désormais sur ce reste, pas sur l'absence
+      d'application.
 
 > Modèle de menace validé : broker + clients sur **LAN de confiance** ;
 > companion LAN uniquement. Priorité n°1 assumée = **RCE via dépôt cloné**
 > (déjà traité, B4/B5/B6). Le durcissement WAN/initié-LAN est « bienvenu si peu
 > coûteux », jamais prioritaire.
 
-### 1.3 Ouvert — MAJEUR (re-vérifier puis trancher)
+### 1.3 Ouvert -- MAJEUR (énoncés corrigés, 2026-08-31)
 
-- [ ] **M-SEC-2** — mode HTTP : aucun TLS imposé (tokens/messages en clair).
-- [ ] **M-SEC-3** — `ANTHROPIC_API_KEY` exfiltrée vers un endpoint OpenAI-compat tiers (fallback à supprimer).
-- [ ] **M-SEC-4** — `summarize` `base_url` non validée (`http://` + surface SSRF).
-- [ ] **M-SEC-6** — fenêtre principale sans garde `will-navigate` (bridge exposé si navigation hors app).
-- [ ] **M-SEC-7** — handlers IPC sans validation de `senderFrame` alors que `webviewTag` est actif.
-- [ ] **M-SEC-8** — `<webview>` `sandbox=no` sans clamp `will-attach-webview`.
-- [ ] **M-SEC-10** — clés provider persistées en clair sur Linux sans keyring (refuser / opt-in).
-- [ ] **M-SEC-11** — payloads broker non bornés (`maxRequestBodySize`, caps par champ, rate-limit).
-- [ ] **M-SEC-12** — messages de canal injectés comme instructions haute priorité (cadrer en donnée non fiable).
-- [ ] **M-LOG-2** — `handleRegister` non atomique → TOCTOU sur l'unicité `peer_id`.
-- [ ] **M-LOG-3** — `handleUnregister` non transactionnel (suppression partielle possible).
-- [ ] **M-LOG-4** — verrou workspace : TOCTOU + pas de vérif de propriété (`wx`/`O_EXCL`).
-- [ ] **NF-D** — autorité roadmap dérivée du champ client `by:"deck"` (forgeable → usurpation opérateur).
-- [ ] **NF-E** — `/roadmap/import` : `items` non borné + écrasement par id (cap + credential + create-only).
-- [ ] **NF-F** — `pid` client non fiable pour la vivacité (`process.kill(pid,0)` sur pid fourni).
+- [ ] **M-SEC-2** -- mode HTTP : aucun TLS imposé (tokens/messages en clair).
+      OUVERT tel quel, AUCUNE carte volontairement : décision de déploiement
+      (reverse proxy) plus qu'un lot de code, couverte par le modèle de menace
+      « LAN de confiance » de §1.2. Non cardé, et c'est assumé. Seul
+      durcissement code peu coûteux identifié : refuser ou avertir au boot
+      quand `bind_host` est non-loopback sans token.
+- [ ] **M-SEC-3** -- `ANTHROPIC_API_KEY` exfiltrée vers un endpoint
+      OpenAI-compat tiers (repli à conditionner au provider résolu, pas à
+      supprimer). -> `630e3d16`.
+- [ ] **M-SEC-4** -- l'énoncé « SSRF » est SURESTIMÉ : `summary_base_url` n'a
+      aucun écrivain contrôlable par un attaquant (8 références, uniquement
+      env `CLAUDE_PEERS_SUMMARY_BASE_URL` ou config GLOBALE, jamais un dépôt
+      cloné, jamais `config:set`). Énoncé juste : durcissement, parser en
+      `new URL()` et restreindre à https ou loopback. Multiplicateur de
+      M-SEC-3. -> `630e3d16`.
+- [ ] **M-SEC-6** -- fenêtre principale sans garde `will-navigate` (bridge
+      exposé si navigation hors app). OUVERT tel quel. -> `ddc42b7c`.
+- [ ] **M-SEC-7** -- handlers IPC sans validation de `senderFrame` alors que
+      `webviewTag` est actif. OUVERT, nuance DÉDUITE (lecture de code, non
+      rejouée) : le preload injecté au webview n'appelle que `sendToHost`,
+      jamais `invoke` -- une page distante
+      n'a donc pas de canal vers `ipcMain` aujourd'hui ; c'est de la défense
+      en profondeur à un cran de devenir vivante. -> `ddc42b7c`.
+- [ ] **M-SEC-8** -- `<webview>` `sandbox=no` sans clamp `will-attach-webview`.
+      OUVERT tel quel. -> `ddc42b7c`.
+- [ ] **M-SEC-10** -- le chiffrement au repos est LIVRÉ (C29 :
+      `applyProviderKeyPatch` + `secretCipher` `safeStorage` +
+      `sanitizeProviders`). Résiduel : le repli `plain:<key>` silencieux
+      quand `safeStorage.isEncryptionAvailable()` est faux, sans aucun
+      signalement à l'UI. -> `d8eaffdd`.
+- [ ] **M-SEC-11** -- des caps PAR CHAMP existent déjà
+      (`MAX_DIRECTIVE_TARGETS=16`, `LOCK_BATCH_MAX_TARGETS=64`,
+      `ROADMAP_REORDER_MAX=500`, `APPROVAL_MAX_PENDING=200`, entre autres). 3
+      trous restent : pas de cap global (`maxRequestBodySize` absent, défaut
+      Bun 128 Mo), `body.text` non borné, aucun rate-limit. -> `904b9410`.
+- [ ] **M-SEC-12** -- la partie « haute priorité » de l'énoncé d'origine est
+      PÉRIMÉE (le « RESPOND IMMEDIATELY » a disparu, `renderInbound` est
+      l'enforcer unique des 3 chemins). Le défaut qui tient :
+      `renderPeerMessage` concatène le texte du pair BRUT, aucune des 5 notes
+      ne le cadre comme donnée non fiable. -> `855b29cb`.
+- [ ] **M-LOG-4** -- code dans `desktop/`, PAS dans le domaine core, contrairement
+      à ce que sa place dans cette section laisse croire. La vérification de
+      PROPRIÉTÉ est FERMÉE (`ownsLock` compare pid+host, consommé par
+      `refreshLock` et `releaseLock`, carte `438c15e3`). Reste la moitié
+      `wx`/`O_EXCL` : `acquireLock` est un read-then-write sans création
+      atomique. Ce qui la rend non théorique depuis l'audit : le booléen
+      d'`acquireLock` est désormais CONSOMMÉ par `workspace-service.ts`, alors
+      qu'il était jeté auparavant. -> `27a2de08`.
+- [ ] **NF-E** -- trois moitiés. Credential : FERMÉ (`resolveRoadmapAuthor` sur
+      `/roadmap/import`, cartes `40ddf1f5` et `ad6aa6ed`). Cap : OUVERT
+      -> `904b9410`. Create-only : ARBITRAGE DE DESIGN, pas de la dette
+      (conservé en texte ici, pas de carte). Énoncé juste du résiduel :
+      `/roadmap/import` écrase par id toute carte NON verrouillée ; la seule
+      protection est le skip des cartes verrouillées, contournable par
+      `force:true`.
+- [ ] **N-SEC-3** -- remonté de MINEUR : ce n'est pas du durcissement mais un
+      trou d'authentification. Aucune des 3 occurrences de `secretHash` dans
+      `handleRegister` ne refuse un hash NULL pour un `group_id` autre que
+      `default` : le premier inscrit d'un groupe nommé peut pinner NULL, puis
+      `safeEqual(null,null)` matche pour tous les suivants. Le groupe se
+      comporte comme `default` sans avoir été exempté par son nom.
+      -> `e6bc137b`.
+- [ ] **N-SEC-9 + N-SEC-10** -- deux validations d'entrée main-side du Deck.
+      N-SEC-10 : `deleteTemplate`/`deleteSnippet` font leur containment par
+      `resolve(dirname(...))` sans aucun realpath, alors que `diff-service.ts`
+      utilise déjà `realpathWithin` -- incohérence interne avec la règle
+      hostile-input n°3 du CLAUDE.md. N-SEC-9 : `setConfig` applique une
+      DENY-LIST de 3 champs puis un spread brut, sans whitelist de clés ;
+      fail-open canonique quand le domaine des clés grandit. -> `25f859fa`.
+- [ ] **N-SEC-8** -- `announce:send` porte le tier 1, il tombe donc dans les 24
+      canaux tier1 atteignables par un companion appairé ; rien ne le bloque
+      parce que rien ne bloque son tier. Pas de carte propre : c'est la même
+      décision de seuil que B10. -> `1cf98d6f`.
 
-### 1.4 Ouvert — MINEUR (durcissement / robustesse)
+### 1.4 Ouvert -- MINEUR (durcissement / robustesse)
 
-Sécurité : N-SEC-1 (500 fuite l'exception brute), N-SEC-2 (perms du fichier secret
-de groupe), N-SEC-3 (validation `group_id` + hash NULL non-default), N-SEC-4 (temp
-graph-draft prévisible), N-SEC-5 (heuristic-ack marque des tiers `delivered`),
-N-SEC-6 (deadline d'auth WS), N-SEC-7 (contenu messages/résumés en clair dans les
-logs), N-SEC-8 (`announce:send` remote-atteignable), N-SEC-9 (whitelist des clés
-`config:set`), **N-SEC-10** (containment `delete*` par `realpath`, pas `resolve` —
-proche de la règle GX-SEC), N-SEC-11 (CORS `*` sur endpoint design), N-SEC-12
-(static serve compagnon fragile si `decodeURIComponent` ajouté).
+> Les deux paragraphes qui suivent (Sécurité / Logique) ont été mesurés
+> ouverts le 2026-08-31 et volontairement NON cardés : ils sont conservés ici
+> comme reste à faire de faible priorité.
 
-Logique : N-LOG-1 (gardes NaN sur `parseInt`), N-LOG-2 (timeout HTTP broker au
-boot), N-LOG-3 (réentrance `cleanup` SIGINT+SIGTERM), N-LOG-4 (`whoami.summary`
-toujours vide), N-LOG-5 (`switch_group` incomplet), N-LOG-6 (garde de type sur
-`body` désérialisé).
+Sécurité : N-SEC-6 (pas de deadline d'auth WS, seul `idleTimeout` 600 s
+générique borne une socket non authentifiée), N-SEC-11 (CORS `*` dans
+`design-endpoint.ts`, 1 seule occurrence).
+
+Logique : N-LOG-1 (17 `parseInt` d'env dans `broker.ts`, aucun garde `NaN` ;
+les 3 wrappées `Math.max(1,...)` restent `NaN` car `Math.max` avec `NaN` vaut
+`NaN`), N-LOG-3 (`cleanup` n'a AUCUN garde de réentrance là où
+`stdinShutdown` a `shuttingDown` : SIGINT+SIGTERM peut le relancer en
+concurrence), N-LOG-4 (`whoami.summary` : `currentSummary` initialisé à `""`
+et jamais réassigné), N-LOG-5 (`switch_group` re-register poste
+`summary:""` en dur, aucun restore).
+
+Descendus de 1.3 (majeur → mineur, énoncé corrigé) :
+
+- **NF-F** -- le défaut existe (pid client non validé, 4 sites de binding de
+  `body.pid`, `process.kill` à 2 sites) MAIS l'impact énoncé est faux :
+  `sweepInactivePeers` passe les pairs en dormant sur `last_seen` SANS
+  condition de host ni de pid, donc forger un pid vivant n'achète pas
+  l'immortalité, le heartbeat reste l'autorité. Effets réels : auto-infligé,
+  ou déclarer `host=BROKER_HOST` depuis un client distant. Fix low
+  (`Number.isInteger(pid) && pid > 0`, traiter host comme non fiable).
+- **M-LOG-2** -- l'énoncé TOCTOU est RÉFUTÉ (`handleRegister` n'est pas async,
+  0 `await`, `bun:sqlite` synchrone, `UNIQUE(peer_id,group_id)` fait échouer
+  FERMÉ, un seul processus ouvre la base). Le résidu réel est un doublon de
+  N-SEC-1 et il est déjà PORTÉ PAR LA CARTE `904b9410`, avec N-SEC-1 et
+  N-LOG-6 : l'échec de contrainte n'est pas rattrapé et sort en 500 avec le
+  message SQLite brut.
+- **M-LOG-3** -- `handleUnregister` est bien non transactionnel (3 `db.run`
+  DELETE nus) mais le risque de ligne orpheline est fermé :
+  `PRAGMA foreign_keys=ON` et l'ORDRE des DELETE purge les 3 REFERENCES
+  `peers` avant la ligne `peers`. Reste une perte de données sur abort I/O ou
+  BUSY (messages détruits, pair vivant). Fix low : envelopper dans
+  `db.transaction`.
 
 ---
 
