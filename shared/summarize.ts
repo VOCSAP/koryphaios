@@ -76,7 +76,13 @@ async function callAnthropic(
   ctx: SummaryContext,
   cfg: SummaryProviderConfig
 ): Promise<string | null> {
-  const apiKey = cfg.api_key ?? process.env.ANTHROPIC_API_KEY;
+  // Card 630e3d16 audit round 2: no process.env.ANTHROPIC_API_KEY fallback
+  // here. cfg.api_key is fully resolved upstream by
+  // shared/config.ts#buildSummaryProviderConfig before it ever reaches
+  // generateSummary, which is this function's only caller. Reading the env
+  // var again here would be a second, redundant leak path if the Anthropic
+  // endpoint below is ever made configurable without updating this file.
+  const apiKey = cfg.api_key;
   if (!apiKey) return null;
 
   try {

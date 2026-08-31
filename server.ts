@@ -48,7 +48,7 @@ import {
   loadConfig,
   brokerUrl,
   isLoopbackBrokerUrl,
-  resolveProvider,
+  buildSummaryProviderConfig,
   resolveGroup,
   computeGroupId,
   computeGroupSecretHash,
@@ -2214,17 +2214,17 @@ async function main() {
   // Background summary upgrade.
   (async () => {
     try {
-      const provider = resolveProvider(config);
+      const summaryConfig = buildSummaryProviderConfig(config);
+      if (summaryConfig.provider !== "none" && !summaryConfig.api_key) {
+        log(
+          `Summary provider ${summaryConfig.provider} has no API key available; falling back to heuristic summary`
+        );
+      }
       const summary = await generateSummary(
         { cwd: myCwd, git_root: myGitRoot, git_branch: gitBranch, recent_files: recentFiles },
-        {
-          provider,
-          api_key: config.summary_api_key ?? process.env.ANTHROPIC_API_KEY ?? null,
-          model: config.summary_model,
-          base_url: config.summary_base_url,
-        }
+        summaryConfig
       );
-      log(`Summary provider: ${provider} (model: ${config.summary_model})`);
+      log(`Summary provider: ${summaryConfig.provider} (model: ${config.summary_model})`);
       if (summary && summary !== initialSummary && myInstanceToken) {
         await brokerFetch("/set-summary", { instance_token: myInstanceToken, summary });
         log(`Summary upgraded: ${summary}`);

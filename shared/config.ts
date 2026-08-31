@@ -17,6 +17,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 
 import type { GroupId } from "./types.ts";
+import type { SummaryProviderConfig } from "./summarize.ts";
 import { createLogger, coreLogDir } from "./logger.ts";
 
 export type SummaryProvider = "auto" | "anthropic" | "openai-compat" | "none";
@@ -184,6 +185,44 @@ export function resolveProvider(config: Config): Exclude<SummaryProvider, "auto"
   if (config.summary_base_url) return "openai-compat";
   if (config.summary_api_key || process.env.ANTHROPIC_API_KEY) return "anthropic";
   return "none";
+}
+
+/**
+ * Card 630e3d16 (M-SEC-3): resolve the API key to use for the ALREADY-RESOLVED
+ * summary provider. process.env.ANTHROPIC_API_KEY is only ever a safe
+ * fallback when the resolved provider is "anthropic" (its only sink is
+ * callAnthropic, which hardcodes https://api.anthropic.com). Naming that one
+ * allowed value keeps this closed by construction: a future provider value
+ * added later still gets no env fallback unless explicitly added here.
+ */
+export function resolveSummaryApiKey(
+  provider: Exclude<SummaryProvider, "auto">,
+  config: Config
+): string | null {
+  if (provider === "anthropic") {
+    return config.summary_api_key ?? process.env.ANTHROPIC_API_KEY ?? null;
+  }
+  return config.summary_api_key ?? null;
+}
+
+/**
+ * Card 630e3d16 audit round 2: the previous fix wired resolveProvider +
+ * resolveSummaryApiKey inline at the server.ts call site, which left that
+ * call site itself unexercised by any test (a mutation reverting the
+ * unconditional env fallback there would pass every test). This function
+ * makes the call site trivial: server.ts calls it once and passes the
+ * result verbatim to generateSummary, so the only thing left to review at
+ * the call site is "was this function called and its result used" -- the
+ * security-relevant decision itself lives here, where the tests reach it.
+ */
+export function buildSummaryProviderConfig(config: Config): SummaryProviderConfig {
+  const provider = resolveProvider(config);
+  return {
+    provider,
+    api_key: resolveSummaryApiKey(provider, config),
+    model: config.summary_model,
+    base_url: config.summary_base_url,
+  };
 }
 
 /**
