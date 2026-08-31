@@ -27,6 +27,17 @@ import {
 
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Card 69011831. Poll until `ok()` holds, early exit on the FIRST success.
+ * Used by exactly ONE assertion in this file, the only one whose subject is a
+ * CHAINED timer (see its call site): every other assertion here stays
+ * single-shot, so a real regression still reddens on the first draw.
+ */
+async function waitUntil(ok: () => boolean, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!ok() && Date.now() < deadline) await wait(5);
+}
+
 /** Epoch ms for today at local hh:mm (tests reason in local time, like the parser). */
 function todayAt(hour: number, minute = 0): number {
   const d = new Date();
@@ -192,7 +203,21 @@ test("unknown reset time -> periodic resume-due while the episode lasts", async 
   const ev = collect(d);
   d.feed("s1", "You've hit your limit");
   expect(ev.limits[0].resetAt).toBeNull();
-  await wait(90);
+  // Card 69011831. This is the ONE racy assertion of the file, and it is racy
+  // for a structural reason, not a thin-margin one: quota.ts's armTimer
+  // re-arms the periodic retry from INSIDE its own callback (a chained
+  // setTimeout, not an interval), so lateness ACCUMULATES per hop. A fixed
+  // wait(90) needed two 25ms hops to land, i.e. 40ms of total headroom spread
+  // over 3 timer hops. Measured 2026-08-28 (bun 1.3.13, 24 cores) under 72
+  // CPU burners: 4 reds in 12 runs of this file, always this line; a synthetic
+  // in-window event-loop chopper puts the cliff at 45-50ms of per-tick stall.
+  // Its two neighbours are NOT affected and stay on a fixed wait() on purpose:
+  // a SINGLE timer armed before the deadline timer always expires first
+  // whatever the load (timers drain in expiry order), measured 25/25 green at
+  // a 300ms chopper -- they are protected by ORDERING, not by margin.
+  // Retry only this flag, early exit on first success; the assertion stays
+  // binary, so the test still reddens if the periodic retry stops entirely.
+  await waitUntil(() => ev.dues.length >= 2);
   expect(ev.dues.length).toBeGreaterThanOrEqual(2); // keeps retrying
   d.feed("s1", "⠹ esc to interrupt"); // episode ends
   const count = ev.dues.length;
