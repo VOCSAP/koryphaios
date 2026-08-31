@@ -78,7 +78,15 @@ const UNSCOPED_BY_DESIGN: Record<string, string> = {
     "One-shot migration of rows predating project scoping (card 1def56da). Global on purpose: it repairs EVERY operator's legacy rows, and no caller is acting.",
   "UPDATE pending_approvals SET status = 'expired_notif'":
     "Notification TTL sweep. A maintenance job with no caller and no identity, so there is nothing to scope it BY.",
-  "DELETE FROM pending_approvals": "Retention purge. Same reason as the sweep above.",
+  // B4, MEASURED (card d3f23918): this key USED TO BE the bare fragment
+  // "DELETE FROM pending_approvals", which excuses a SHAPE rather than a
+  // SITE -- any unscoped DELETE added anywhere else that happens to share
+  // that literal text would pass silently, exactly the trap the gateway
+  // exemption above already fell into once. Anchored instead on the specific
+  // status pair and TTL comparison, which exist nowhere but sweepApprovals's
+  // real purge statement.
+  "status IN ('answered','abandoned') AND created_at < datetime('now'":
+    "Retention purge (sweepApprovals). Same reason as the sweep above: a maintenance job with no caller and no identity to scope by.",
   "readonly [SCOPE_BRAND]":
     "Not SQL. The table name is the BRAND of the opaque scope type, which is deliberately named after the thing it authorises so a reader knows what it unlocks.",
   "readonly [STAMP_BRAND]":
@@ -116,6 +124,21 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 
 /**
+ * A line that OPENS a fresh SQL call. A statement cannot contain the start of
+ * another one, so this is the boundary the window must never cross -- see the
+ * B1/B2 note on `statementAt` below for why the paren counter alone cannot be
+ * trusted to find that boundary by itself. Matches both a full opener
+ * (`db.run(`, `deps.queryOne(`) and a bare continuation (`.query(` on its own
+ * line, the shape the legitimate multi-line probes in this file use).
+ * `.all(`/`.get(` are deliberately absent: they extract a RESULT from a call
+ * already open, they do not start a new one.
+ */
+const STATEMENT_OPENER = /\.(?:run|query|queryOne|queryAll|prepare)\s*\(/;
+
+/** How many lines past a statement's own start this scan will still search. */
+const MAX_STATEMENT_LINES = 5;
+
+/**
  * The window a statement occupies, ending at the STATEMENT'S OWN end rather
  * than after a fixed number of lines.
  *
@@ -126,13 +149,31 @@ function walk(dir: string, out: string[] = []): string[] {
  * balancing parentheses from the `db` call that opens the statement, which is
  * how the multi-line template literals in broker.ts are actually delimited --
  * a line count is not a syntactic fact, and this is why it could be fooled.
+ *
+ * MEASURED DEFECT, card d3f23918: the widened 40-line cap and the bare paren
+ * count were STILL two more ways to be fooled the same way. B1: a string
+ * literal carrying an unpaired parenthesis (a LIKE pattern) desyncs `depth`,
+ * so it never again reaches zero and the scan runs on past its own statement.
+ * B2: a table mention sitting among lines with no paren and no semicolon
+ * (array-element text, not code) satisfies neither break condition, so the
+ * scan keeps going -- in both cases straight into the NEXT statement, which
+ * then supplies the marker that vouches for THIS one. Two independent fixes,
+ * both fail-CLOSED: the window now stops the moment it sees a line (other
+ * than its own first one) that OPENS A NEW SQL call, since one statement
+ * cannot contain the start of another regardless of what the paren counter
+ * thinks; and the horizon shrinks from 40 lines to a handful, so an
+ * unresolved window ends there and reads as UNSCOPED rather than "keep
+ * looking". Every real multi-line statement in the SQL-bearing files
+ * resolves within 2-3 lines of its own trigger line (measured), so neither
+ * change costs a legitimate exemption.
  */
 function statementAt(lines: string[], start: number): string {
   let depth = 0;
   let seen = false;
   const parts: string[] = [];
-  for (let i = start; i < lines.length && i < start + 40; i++) {
+  for (let i = start; i < lines.length && i < start + MAX_STATEMENT_LINES; i++) {
     const line = lines[i] ?? "";
+    if (i > start && STATEMENT_OPENER.test(line)) break;
     parts.push(line);
     for (const ch of line) {
       if (ch === "(") {
@@ -322,6 +363,51 @@ describe("no unscoped SQL reaches pending_approvals", () => {
         // B3. The clause is in a COMMENT, so it vouches for nothing.
         "unscoped read whose trailing comment merely mentions the marker",
         [`db.query("SELECT * FROM ${TABLE} WHERE id = ?").get(x); // unlike \${where.sql} above`].join("\n"),
+        false,
+      ],
+      [
+        // B1, MEASURED (card d3f23918): a string literal carrying an UNPAIRED
+        // parenthesis (a LIKE pattern here) desyncs the depth counter, so the
+        // window never closes on its own statement and runs on into the next
+        // one, inheriting ITS ${where.sql} marker.
+        "unscoped read whose own text contains an unpaired parenthesis",
+        [
+          `const leak = db.query("SELECT * FROM ${TABLE} WHERE note LIKE '%(unmatched%'").get(x);`,
+          `const ok = db`,
+          `  .query(\`SELECT * FROM ${TABLE} WHERE \${where.sql}\`)`,
+          `  .all(...where.params);`,
+        ].join("\n"),
+        false,
+      ],
+      [
+        // B2, MEASURED (card d3f23918): every filler line the table mention
+        // sits among opens no paren and carries no semicolon (array-element
+        // text, not statements), so the OLD 40-line cap let the scan run
+        // clean past all of it and close on the FIRST line that happened to
+        // balance -- the neighbour's own self-contained call, several lines
+        // away, swallowing its ${where.sql} marker.
+        "unscoped mention with no end-of-statement nearby, followed later by a scoped read",
+        [
+          `  "about ${TABLE} maybe",`,
+          `  "filler 2",`,
+          `  "filler 3",`,
+          `  "filler 4",`,
+          `  "filler 5",`,
+          `  "filler 6",`,
+          `  "filler 7",`,
+          `  "filler 8",`,
+          `const ok = db.query(\`SELECT * FROM ${TABLE} WHERE \${where.sql}\`).all(...where.params);`,
+        ].join("\n"),
+        false,
+      ],
+      [
+        // B4, MEASURED (card d3f23918): the OLD purge exemption key was the
+        // generic fragment "DELETE FROM pending_approvals", excusing a SHAPE
+        // rather than a SITE -- any new unscoped DELETE sharing that literal
+        // text passed silently. This is what such a DELETE looks like: same
+        // table, unrelated WHERE clause, no scope marker.
+        "unscoped DELETE elsewhere carrying the same table name as the real purge",
+        [`db.run("DELETE FROM ${TABLE} WHERE id = ?", [id]);`].join("\n"),
         false,
       ],
       [
