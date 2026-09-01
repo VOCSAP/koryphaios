@@ -39,6 +39,7 @@ import {
 } from './session-transcript'
 import { clearDeskSessionId, readDeskSessionId } from './desk-session'
 import { ScreenGuard } from './screen-model'
+import { gracefulClose } from './session-close'
 import { createOscParser, type OscSnapshot } from './detect/osc'
 import { createActivityTracker, ACTIVITY_IDLE_MS, type Activity } from './detect/activity'
 import { reportError } from './log'
@@ -119,6 +120,21 @@ const DIRECTIVE_SETTLE_MS = 120
  * sooner than a routine /clear or /compact would.
  */
 export const STOP_IDLE_WAIT_MS = 15_000
+
+/**
+ * Card 032bdeae: remove()'s gracefulClose budgets. Deliberately SHORTER than
+ * gracefulClose's own 1500/1500ms defaults -- a session tile being closed
+ * has no reason to wait as long as a directive injection does, and the
+ * per-stage isAlive() polling (session-close.ts's own doc) means a session
+ * that dies quickly still closes quickly; these are ceilings for one that
+ * does not. CLOSE_HARD_DEADLINE_MS is the absolute safety net across BOTH
+ * stages combined, independent of them (see gracefulClose's own doc on why
+ * it cannot be redundant with the per-stage budgets).
+ */
+const CLOSE_EXIT_GRACE_MS = 1200
+const CLOSE_INTERRUPT_GRACE_MS = 800
+const CLOSE_POLL_MS = 100
+const CLOSE_HARD_DEADLINE_MS = 3000
 
 /** Dev-channels warning auto-ack: let the dialog finish painting first. */
 const STARTUP_ACK_SETTLE_MS = 350
@@ -219,6 +235,25 @@ export class SessionService extends EventEmitter {
   private outputAt = new Map<string, number>()
   /** Sessions whose dead-PTY write was already reported once (O6, anti-spam). */
   private deadWriteReported = new Set<string>()
+
+  /**
+   * Card 032bdeae: session ids currently escalating through remove()'s
+   * gracefulClose. Keyed by session id (the OBJECT), not by caller -- a
+   * second remove() call on the SAME id while the first is still in flight
+   * forces immediate cleanup instead of racing a second write onto the same
+   * pty (see remove()'s own comment).
+   */
+  private closingInFlight = new Set<string>()
+  /**
+   * Card 032bdeae: ids whose in-flight escalation has been overtaken by a
+   * concurrent second remove() call. Read by gracefulClose's
+   * `isClosingForced` at each poll tick so the original escalation stops
+   * writing further stages and exits immediately. Distinct from
+   * `closingInFlight` on purpose: `closingInFlight.has(id)` is true for the
+   * WHOLE duration of one's own escalation, so it cannot itself signal "a
+   * DIFFERENT caller forced this."
+   */
+  private forcedClose = new Set<string>()
 
   /** Live (post-fork) claude session ids open in this process; double-resume guard. */
   private registry = new OpenIdRegistry()
@@ -574,25 +609,87 @@ export class SessionService extends EventEmitter {
     return this.toRuntime(def)
   }
 
-  remove(id: string): void {
-    const def = this.defs.find((d) => d.id === id)
-    if (def) this.emit('removed', { id: def.id, name: def.name })
-    if (def?.sessionId) this.registry.release(def.sessionId)
-    this.pty.kill(id)
-    this.thinkingDetector.clear(id)
-    this.quotaDetector.clear(id)
-    this.attentionDetector.clear(id)
-    this.startupAckDetector.clear(id)
-    this.screenGuard.clear(id)
-    this.oscParsers.delete(id)
-    this.activityTrackers.get(id)?.stop()
-    this.activityTrackers.delete(id)
-    this.pendingPrompt.delete(id)
-    this.defs = this.defs.filter((d) => d.id !== id)
-    this.runtime.delete(id)
-    this.outputAt.delete(id)
-    this.persist()
-    this.broadcast()
+  /**
+   * Card 032bdeae: was a bare `this.pty.kill(id)` -- more brutal than the
+   * design (DESIGN 6.6) it cites, since gracefulClose (session-close.ts) was
+   * written, tested, and never wired to any production call. Now escalates
+   * (/exit, then Esc+Ctrl+C+/exit, then SIGTERM) BEFORE the terminal
+   * cleanup below, except for a tile this app already refuses to write into
+   * for other reasons (modal/needs-attention/rate-limited -- same signals
+   * injectCommand's own screen-state guard reads, see its comment above) and
+   * for a SECOND call on an id already closing, both of which skip straight
+   * to the same idempotent cleanup. `forceCleanup` is idempotent by
+   * construction (it is a no-op once `def` is gone) precisely because it can
+   * legitimately run twice under that second-call race.
+   */
+  async remove(id: string): Promise<void> {
+    const forceCleanup = (): void => {
+      const def = this.defs.find((d) => d.id === id)
+      if (!def) return
+      this.emit('removed', { id: def.id, name: def.name })
+      if (def.sessionId) this.registry.release(def.sessionId)
+      this.pty.kill(id)
+      this.thinkingDetector.clear(id)
+      this.quotaDetector.clear(id)
+      this.attentionDetector.clear(id)
+      this.startupAckDetector.clear(id)
+      this.screenGuard.clear(id)
+      this.oscParsers.delete(id)
+      this.activityTrackers.get(id)?.stop()
+      this.activityTrackers.delete(id)
+      this.pendingPrompt.delete(id)
+      this.defs = this.defs.filter((d) => d.id !== id)
+      this.runtime.delete(id)
+      this.outputAt.delete(id)
+      this.persist()
+      this.broadcast()
+    }
+
+    if (this.closingInFlight.has(id)) {
+      // Second close on the same id while the first is still escalating:
+      // force cleanup NOW (exactly one '/exit' ever reaches the pty) and
+      // flag it so the in-flight gracefulClose notices on its next poll.
+      this.forcedClose.add(id)
+      forceCleanup()
+      return
+    }
+
+    this.closingInFlight.add(id)
+    try {
+      const isModal = (): boolean =>
+        this.screenGuard.classify(id) === 'modal' ||
+        !!this.runtime.get(id)?.needsAttention ||
+        !!this.runtime.get(id)?.rateLimited
+      if (isModal()) {
+        forceCleanup()
+        return
+      }
+      await gracefulClose({
+        write: (data) => this.pty.write(id, data),
+        isAlive: () => this.pty.isAlive(id),
+        kill: () => this.pty.kill(id),
+        delay: (ms) => new Promise((res) => setTimeout(res, ms)),
+        exitGraceMs: CLOSE_EXIT_GRACE_MS,
+        interruptGraceMs: CLOSE_INTERRUPT_GRACE_MS,
+        pollMs: CLOSE_POLL_MS,
+        isClosingForced: () => this.forcedClose.has(id),
+        cleanup: forceCleanup,
+        absoluteDeadlineMs: CLOSE_HARD_DEADLINE_MS
+      })
+    } catch (e) {
+      // Card 6c380073 (review round 2): the try above ALSO covers isModal(),
+      // which reads screenGuard/runtime BEFORE gracefulClose is ever called --
+      // so a throw there used to escape with no cleanup at all, leaving the
+      // pty running and the def in place while remove() rejected. Nothing in
+      // this method may leave the process alive: force the same idempotent
+      // cleanup the escalation itself would have run, and leave a trace
+      // (no-silent-errors) rather than swallowing.
+      reportError('session', `close escalation failed for ${id}`, e)
+      forceCleanup()
+    } finally {
+      this.closingInFlight.delete(id)
+      this.forcedClose.delete(id)
+    }
   }
 
   /**
@@ -601,10 +698,21 @@ export class SessionService extends EventEmitter {
    * caller is expected to have detached/saved the current workspace first
    * (WorkspaceService.startNew), and the index.ts auto-save guard ignores the
    * empty broadcast so the prior workspace stays restorable.
+   *
+   * Card 6c380073 (second audit round): emits 'removed' per destroyed def.
+   * It used to destroy tiles SILENTLY -- remove()'s forceCleanup was the only
+   * emit site in this file -- so a departed team-lead's minted deck-control
+   * token stayed live in callerTable and its team-lead-mcp-<callerId>.json
+   * stayed on disk until app quit, letting a co-resident agent that read that
+   * file keep the lead's tool scope. Emitting here re-wires BOTH existing
+   * consumers at once (the journal entry and the revocation, index.ts's
+   * service.on('removed')) instead of bolting a second revocation call onto
+   * this one path.
    */
   closeAll(): void {
     if (this.defs.length === 0) return
     for (const d of this.defs) {
+      this.emit('removed', { id: d.id, name: d.name })
       if (d.sessionId) this.registry.release(d.sessionId)
     }
     this.pty.killAll()
@@ -649,6 +757,18 @@ export class SessionService extends EventEmitter {
    * supervisor is excluded: its deck-control token only lives for this app
    * launch, and Home re-spawns it on demand -- restoring it as a normal tile
    * would resurrect a dead bridge.
+   *
+   * Audit fix #7 (card 6c380073): this `{ ...d }` spread DOES embed `mcpConfig`
+   * (and therefore, for a team-lead def, the path to its --mcp-config file
+   * carrying its minted token) into the returned defs. What saves this today
+   * is that BOTH consumers project through PICK-LISTS that do not copy
+   * `mcpConfig`: `toWorkspaceSessions` (workspace-session-map.ts) and
+   * `toTemplate` (shared/template.ts). If either is ever changed to a spread
+   * instead of an explicit pick-list, a template/workspace captured while a
+   * team-lead tile is live would clone that lead's identity onto a SECOND,
+   * still-live tile -- the exact fail-open shape CLAUDE.md's `toPublicPeer`
+   * example describes. Keep those two pick-lists explicit; do not spread here
+   * either as a shortcut.
    */
   captureSessions(): SessionDef[] {
     return this.defs.filter((d) => !d.supervisor).map((d) => ({ ...d }))
@@ -662,6 +782,14 @@ export class SessionService extends EventEmitter {
    */
   restoreFrom(defs: SessionDef[]): SessionRuntime[] {
     // Tear down whatever is currently live.
+    // Card 6c380073 (second audit round): emit 'removed' for the OUTGOING defs
+    // FIRST, before anything is killed or replaced -- same reason as
+    // closeAll() above (a departed team-lead's minted token and its
+    // --mcp-config file must not outlive its tile). Order matters: emitting
+    // before `this.defs` is replaced means each revocation resolves against
+    // the session that is actually going away, never against an incoming one
+    // that happens to reuse an id.
+    for (const d of this.defs) this.emit('removed', { id: d.id, name: d.name })
     this.pty.killAll()
     this.thinkingDetector.stop()
     this.quotaDetector.stop()
