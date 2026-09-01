@@ -16,6 +16,8 @@ import {
 import { EMBEDDED_AGENTS } from "../desktop/src/main/team-embedded.ts";
 import {
   writeSupervisorMcpConfig,
+  writeTeamLeadMcpConfig,
+  TEAM_LEAD_DECK_TOOLS,
   buildSupervisorSystemPrompt,
   writeSupervisorSystemPrompt,
   SUPERVISOR_BRIEFING,
@@ -128,7 +130,8 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
     armSpawnAck: (id) => {
       acked.push(id);
     },
-    writeEmbeddedPrompt: (id) => `/state/embedded-agent-${id}.md`
+    writeEmbeddedPrompt: (id) => `/state/embedded-agent-${id}.md`,
+    writeTeamLeadMcpConfig: () => "/state/team-lead-mcp.json"
   };
 }
 
@@ -270,14 +273,26 @@ test("embedded spawn: prompt file, harness disallowedTools, team-lead crown rule
   expect(reviewerInput.appendSystemPromptFile).toBe("/state/embedded-agent-reviewer.md");
   expect(reviewerInput.args).toContain('--disallowedTools "Write,Edit');
   expect(reviewerInput.lead).toBeUndefined();
+  // Card ff091064 (piece 2): the deck-control bridge is team-lead-only --
+  // no other embedded profile spawned through this same path gets it.
+  expect(reviewerInput.mcpConfig).toBeUndefined();
 
   // team-lead lands as the window lead when none is live...
   await call(srv, "deck_spawn_session", { embedded_agent: "team-lead" });
   expect(deps.spawnInputs[1]!.lead).toBe(true);
+  // ...and, unlike every other profile, gets its own deck-control config.
+  expect(deps.spawnInputs[1]!.mcpConfig).toBe("/state/team-lead-mcp.json");
 
   // ...but never demotes an existing live lead.
   await call(srv, "deck_spawn_session", { name: "another", embedded_agent: "team-lead" });
   expect(deps.spawnInputs[2]!.lead).toBeUndefined();
+  // A SECOND team-lead-profile spawn (never the live lead) still gets the
+  // bridge -- mcpConfig is keyed on the embedded profile id, not on `lead`.
+  expect(deps.spawnInputs[2]!.mcpConfig).toBe("/state/team-lead-mcp.json");
+
+  // A plain operator-profile spawn (no embedded_agent at all) never gets it.
+  await call(srv, "deck_spawn_session", { agent: "dev" });
+  expect(deps.spawnInputs[3]!.mcpConfig).toBeUndefined();
 });
 
 test("deck_spawn_session acks: sync peer_id by default, async when wait_for_peer=false", async () => {
@@ -396,7 +411,42 @@ test("writeSupervisorMcpConfig writes a valid --mcp-config with env bridge", () 
   expect(server.env.ELECTRON_RUN_AS_NODE).toBe("1");
   expect(server.env.DECK_CONTROL_URL).toBe("http://127.0.0.1:1234");
   expect(server.env.DECK_CONTROL_TOKEN).toBe("tok");
+  expect(server.env.DECK_CONTROL_TOOLS).toBeUndefined();
   expect(SUPERVISOR_BRIEFING).toContain("deck_list_agents");
+});
+
+test("writeTeamLeadMcpConfig writes its OWN file, scoped to TEAM_LEAD_DECK_TOOLS", () => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-lead-"));
+  tmpDirs.push(dir);
+  const supFile = writeSupervisorMcpConfig({
+    dir,
+    mcpScriptPath: "/res/deck-plugin/mcp/deck-control-mcp.mjs",
+    execPath: "/usr/bin/electron",
+    controlUrl: "http://127.0.0.1:1234",
+    controlToken: "tok"
+  });
+  const leadFile = writeTeamLeadMcpConfig({
+    dir,
+    mcpScriptPath: "/res/deck-plugin/mcp/deck-control-mcp.mjs",
+    execPath: "/usr/bin/electron",
+    controlUrl: "http://127.0.0.1:1234",
+    controlToken: "tok"
+  });
+  // Distinct files: a live supervisor tile and a live team-lead tile must
+  // never race-overwrite each other's --mcp-config.
+  expect(leadFile).not.toBe(supFile);
+  const parsed = JSON.parse(readFileSync(leadFile, "utf-8")) as {
+    mcpServers: Record<string, { env: Record<string, string> }>;
+  };
+  expect(parsed.mcpServers["deck-control"]!.env.DECK_CONTROL_TOOLS).toBe(
+    TEAM_LEAD_DECK_TOOLS.join(",")
+  );
+  // The supervisor's own file stays unrestricted even after the team-lead's
+  // is written -- the two writers must not share mutable state.
+  const supParsed = JSON.parse(readFileSync(supFile, "utf-8")) as {
+    mcpServers: Record<string, { env: Record<string, string> }>;
+  };
+  expect(supParsed.mcpServers["deck-control"]!.env.DECK_CONTROL_TOOLS).toBeUndefined();
 });
 
 test("writeSupervisorSystemPrompt regenerates the role anchor from the code constant", () => {
@@ -503,6 +553,180 @@ test("deck-control-mcp speaks MCP over stdio and forwards tools/call", async () 
     params: { name: "deck_close_session", arguments: { id: "not-owned" } }
   });
   const refused = (await readMessage()) as { result: { isError?: boolean } };
+  expect(refused.result.isError).toBe(true);
+});
+
+// ----- DECK_CONTROL_TOOLS allow-list (Card ff091064, piece 1) -----
+// Coverage, not just sensitivity: each test below also stands in for "a 19th
+// tool ships tomorrow" -- the mechanism is a NAME filter over the live TOOLS
+// array (deck-control-mcp.ts), never an enumerated allow snapshot, so a new
+// tool automatically inherits whichever branch (unset/listed/empty) applies
+// without this suite needing an update.
+
+async function speakMcp(
+  env: Record<string, string | undefined>
+): Promise<{
+  send: (msg: unknown) => void;
+  recv: () => Promise<Record<string, unknown>>;
+}> {
+  const merged: Record<string, string | undefined> = { ...process.env, ...env };
+  // Explicit `undefined` means "force absent even if the outer process
+  // happens to carry it" -- distinct from simply omitting the key, which
+  // would only mean "no opinion" and could leak an inherited value.
+  for (const k of Object.keys(merged)) if (merged[k] === undefined) delete merged[k];
+  const proc = Bun.spawn(["bun", "desktop/mcp/deck-control-mcp.ts"], {
+    env: merged as Record<string, string>,
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "ignore"
+  });
+  procs.push(proc);
+  const reader = proc.stdout.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  return {
+    send: (msg: unknown) => {
+      proc.stdin.write(JSON.stringify(msg) + "\n");
+      void proc.stdin.flush();
+    },
+    recv: async () => {
+      for (;;) {
+        const nl = buffer.indexOf("\n");
+        if (nl !== -1) {
+          const line = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 1);
+          if (line.trim()) return JSON.parse(line) as Record<string, unknown>;
+          continue;
+        }
+        const { value, done } = await reader.read();
+        if (done) throw new Error("mcp server closed");
+        buffer += decoder.decode(value);
+      }
+    }
+  };
+}
+
+test("DECK_CONTROL_TOOLS unset: every tool listed, unrestricted (zero regression for the supervisor)", async () => {
+  const srv = await startDeckControl(makeDeps({ sessions: [] }));
+  servers.push(srv);
+  const { send, recv } = await speakMcp({
+    DECK_CONTROL_URL: srv.url,
+    DECK_CONTROL_TOKEN: srv.token,
+    // Explicit undefined: force-absent even if the test runner's own
+    // environment happened to carry this var (see speakMcp above).
+    DECK_CONTROL_TOOLS: undefined
+  });
+  send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const tools = (await recv()) as { result: { tools: { name: string }[] } };
+  const names = tools.result.tools.map((t) => t.name);
+  expect(names).toContain("deck_apply_template");
+  expect(names).toContain("deck_sandbox_exec");
+  expect(names.length).toBeGreaterThan(15);
+});
+
+test("DECK_CONTROL_TOOLS set: tools/list returns exactly the named subset, and tools/call refuses an excluded name", async () => {
+  const srv = await startDeckControl(makeDeps({ sessions: [] }));
+  servers.push(srv);
+  const { send, recv } = await speakMcp({
+    DECK_CONTROL_URL: srv.url,
+    DECK_CONTROL_TOKEN: srv.token,
+    DECK_CONTROL_TOOLS: "deck_spawn_session, deck_close_session"
+  });
+  send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const tools = (await recv()) as { result: { tools: { name: string }[] } };
+  expect(tools.result.tools.map((t) => t.name).sort()).toEqual([
+    "deck_close_session",
+    "deck_spawn_session"
+  ]);
+
+  // Listed tool: reaches deck-control.ts normally.
+  send({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: { name: "deck_spawn_session", arguments: { name: "x" } }
+  });
+  const allowed = (await recv()) as { result: { isError?: boolean } };
+  expect(allowed.result.isError).toBeUndefined();
+
+  // Excluded tool: refused HERE (never forwarded to deck-control.ts) even
+  // though it is a real, valid tool name the server would otherwise accept --
+  // this is the coverage half, not just "the listed ones work".
+  send({
+    jsonrpc: "2.0",
+    id: 3,
+    method: "tools/call",
+    params: { name: "deck_announce", arguments: { text: "hi" } }
+  });
+  const refused = (await recv()) as { result: { isError?: boolean; content: { text: string }[] } };
+  expect(refused.result.isError).toBe(true);
+  expect(refused.result.content[0]!.text).toContain("deck_announce");
+});
+
+test("DECK_CONTROL_TOOLS=TEAM_LEAD_DECK_TOOLS: deck_restart_session is refused AT THE CALL for the team-lead's real scope, not just absent from the listing", async () => {
+  // Card ff091064 correction (2026-09-01): deck_restart_session was dropped
+  // from TEAM_LEAD_DECK_TOOLS because deck-control.ts's own case has no
+  // ownedSessions guard (unlike close) -- unguarded on ANY tile (6c380073).
+  // Proving it here with the REAL exported constant, not a hand-copied
+  // string, means this test cannot silently pass once the underlying list
+  // is edited without this coverage being re-checked.
+  const srv = await startDeckControl(makeDeps({ sessions: [] }));
+  servers.push(srv);
+  const { send, recv } = await speakMcp({
+    DECK_CONTROL_URL: srv.url,
+    DECK_CONTROL_TOKEN: srv.token,
+    DECK_CONTROL_TOOLS: TEAM_LEAD_DECK_TOOLS.join(",")
+  });
+  send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const tools = (await recv()) as { result: { tools: { name: string }[] } };
+  expect(tools.result.tools.map((t) => t.name).sort()).toEqual(
+    [...TEAM_LEAD_DECK_TOOLS].sort()
+  );
+  expect(tools.result.tools.map((t) => t.name)).not.toContain("deck_restart_session");
+
+  send({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: { name: "deck_restart_session", arguments: { id: "whatever" } }
+  });
+  const refused = (await recv()) as { result: { isError?: boolean; content: { text: string }[] } };
+  // Text pins that this is the MCP-boundary refusal ("tool not available"),
+  // never reaching deck-control.ts's own dispatch/guard at all -- a
+  // business-logic refusal from THAT layer would read differently.
+  expect(refused.result.isError).toBe(true);
+  expect(refused.result.content[0]!.text).toBe("Error: tool not available: deck_restart_session");
+
+  // A listed tool still works normally through the same boundary.
+  send({
+    jsonrpc: "2.0",
+    id: 3,
+    method: "tools/call",
+    params: { name: "deck_spawn_session", arguments: { name: "x" } }
+  });
+  const allowed = (await recv()) as { result: { isError?: boolean } };
+  expect(allowed.result.isError).toBeUndefined();
+});
+
+test("DECK_CONTROL_TOOLS set and EMPTY: zero tools listed, every tools/call refused -- distinct from unset", async () => {
+  const srv = await startDeckControl(makeDeps({ sessions: [] }));
+  servers.push(srv);
+  const { send, recv } = await speakMcp({
+    DECK_CONTROL_URL: srv.url,
+    DECK_CONTROL_TOKEN: srv.token,
+    DECK_CONTROL_TOOLS: ""
+  });
+  send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const tools = (await recv()) as { result: { tools: unknown[] } };
+  expect(tools.result.tools).toEqual([]);
+
+  send({
+    jsonrpc: "2.0",
+    id: 2,
+    method: "tools/call",
+    params: { name: "deck_list_agents", arguments: {} }
+  });
+  const refused = (await recv()) as { result: { isError?: boolean } };
   expect(refused.result.isError).toBe(true);
 });
 

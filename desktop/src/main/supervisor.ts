@@ -1,6 +1,11 @@
 // Supervisor session support (PLAN C5): the generated --mcp-config file that
-// bridges ONLY the Home supervisor tile to the deck-control endpoint, plus its
+// bridges the Home supervisor tile to the deck-control endpoint, plus its
 // built-in briefing prompt (submitted via the C2 initial-prompt mechanism).
+// Card ff091064 (piece 2) adds writeTeamLeadMcpConfig: the same bridge for
+// the window's team-lead tile, scoped by DECK_CONTROL_TOOLS to a narrower
+// tool subset (deck-control-mcp.ts, piece 1) -- a distinct file from the
+// supervisor's own, since both tiles can be live at once and must not race
+// to overwrite each other's --mcp-config.
 //
 // Node builtins only, unit-testable under `bun test`.
 
@@ -77,27 +82,76 @@ export interface SupervisorMcpConfigInput {
 }
 
 /**
+ * Card ff091064: the deck-control tool subset the team-lead tile gets,
+ * arbitrated tool-by-tool by the operator on that card. Spawn + close only
+ * -- inventory, worktrees, templates, sandbox and announce stay
+ * supervisor-only. deck_restart_session is deliberately EXCLUDED (operator
+ * arbitration, 2026-09-01): a team-lead has no reason to restart a tile, it
+ * closes then reopens; restart stays supervisor-only. Second reason this is
+ * urgent rather than cosmetic -- deck-control.ts's 'deck_restart_session'
+ * case calls deps.restartSession(id) with NO ownedSessions check (unlike
+ * close), so it is unguarded on ANY tile; exposing it here would let the
+ * team-lead restart tiles it never spawned, including the operator's own.
+ * Carded as 6c380073 (the case itself is not fixed here). Read by
+ * writeTeamLeadMcpConfig via DECK_CONTROL_TOOLS (deck-control-mcp.ts, piece
+ * 1); NOT yet mirrored into the team-lead agent definition's own `tools:`
+ * frontmatter (piece 3, held for the operator).
+ */
+export const TEAM_LEAD_DECK_TOOLS = [
+  'deck_spawn_session',
+  'deck_spawn_team',
+  'deck_close_session'
+] as const
+
+/** Shared env/args shape for both writers below. */
+function buildDeckControlMcpConfig(
+  input: SupervisorMcpConfigInput,
+  toolsAllowlist?: readonly string[]
+): { mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }> } {
+  const env: Record<string, string> = {
+    ELECTRON_RUN_AS_NODE: '1',
+    DECK_CONTROL_URL: input.controlUrl,
+    DECK_CONTROL_TOKEN: input.controlToken
+  }
+  // Unset (undefined) on purpose when no allowlist is passed: DECK_CONTROL_TOOLS
+  // absent means "every tool" to the server (deck-control-mcp.ts), matching
+  // the supervisor's unrestricted surface -- never set it to an empty string
+  // here, that would mean "zero tools" instead.
+  if (toolsAllowlist) env.DECK_CONTROL_TOOLS = toolsAllowlist.join(',')
+  return {
+    mcpServers: {
+      'deck-control': { command: input.execPath, args: [input.mcpScriptPath], env }
+    }
+  }
+}
+
+/**
  * Write the supervisor's .mcp config file and return its path. Rewritten on
  * every supervisor spawn so the per-launch control URL/token stay current.
  * ELECTRON_RUN_AS_NODE makes the Electron binary behave as plain node, so the
- * MCP server runs without any bundled runtime, packaged or dev.
+ * MCP server runs without any bundled runtime, packaged or dev. Unrestricted
+ * tool surface (no DECK_CONTROL_TOOLS): the supervisor keeps all 18 tools.
  */
 export function writeSupervisorMcpConfig(input: SupervisorMcpConfigInput): string {
-  const config = {
-    mcpServers: {
-      'deck-control': {
-        command: input.execPath,
-        args: [input.mcpScriptPath],
-        env: {
-          ELECTRON_RUN_AS_NODE: '1',
-          DECK_CONTROL_URL: input.controlUrl,
-          DECK_CONTROL_TOKEN: input.controlToken
-        }
-      }
-    }
-  }
+  const config = buildDeckControlMcpConfig(input)
   mkdirSync(input.dir, { recursive: true })
   const file = join(input.dir, 'supervisor-mcp.json')
+  writeFileSync(file, JSON.stringify(config, null, 2), 'utf-8')
+  return file
+}
+
+/**
+ * Write the team-lead's .mcp config file and return its path (Card ff091064,
+ * piece 2). Same control server/token as the supervisor's -- one process-wide
+ * deck-control endpoint, see deck-control.ts's header -- but its own file
+ * (team-lead-mcp.json, never supervisor-mcp.json) so a live supervisor tile
+ * and a live team-lead tile never race-overwrite each other's --mcp-config,
+ * and DECK_CONTROL_TOOLS scoped to TEAM_LEAD_DECK_TOOLS.
+ */
+export function writeTeamLeadMcpConfig(input: SupervisorMcpConfigInput): string {
+  const config = buildDeckControlMcpConfig(input, TEAM_LEAD_DECK_TOOLS)
+  mkdirSync(input.dir, { recursive: true })
+  const file = join(input.dir, 'team-lead-mcp.json')
   writeFileSync(file, JSON.stringify(config, null, 2), 'utf-8')
   return file
 }

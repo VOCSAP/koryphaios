@@ -147,7 +147,8 @@ import {
   SUPERVISOR_BRIEFING,
   SUPERVISOR_NAME,
   writeSupervisorMcpConfig,
-  writeSupervisorSystemPrompt
+  writeSupervisorSystemPrompt,
+  writeTeamLeadMcpConfig
 } from './supervisor'
 import {
   createWorktree,
@@ -2132,7 +2133,27 @@ const controlDeps: DeckControlDeps = {
   waitForPeer,
   armSpawnAck,
   writeEmbeddedPrompt: (id) =>
-    writeEmbeddedAgentPrompt(join(app.getPath('userData'), APP_STATE_SUBDIR), id)
+    writeEmbeddedAgentPrompt(join(app.getPath('userData'), APP_STATE_SUBDIR), id),
+  // Card ff091064 (piece 2): mirrors ensureSupervisor's own writer call below,
+  // for the team-lead tile instead of the Home supervisor tile. Only reached
+  // once deck-control's dispatch is already handling a request, which cannot
+  // happen before startDeckControl (below) has resolved and set controlServer.
+  writeTeamLeadMcpConfig: (): string => {
+    if (!controlServer) throw new Error('deck-control endpoint not started yet')
+    const deckPluginDir = getDeckPluginDir()
+    if (!deckPluginDir) throw new Error('deck-plugin dir missing (build skipped)')
+    const mcpScript = join(deckPluginDir, 'mcp', 'deck-control-mcp.mjs')
+    if (!existsSync(mcpScript)) {
+      throw new Error('deck-control MCP script missing -- run `npm run build:mcp`')
+    }
+    return writeTeamLeadMcpConfig({
+      dir: join(app.getPath('userData'), APP_STATE_SUBDIR),
+      mcpScriptPath: mcpScript,
+      execPath: process.execPath,
+      controlUrl: controlServer.url,
+      controlToken: controlServer.token
+    })
+  }
 }
 
 let controlServer: DeckControlServer | null = null

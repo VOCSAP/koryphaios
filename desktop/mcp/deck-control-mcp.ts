@@ -11,11 +11,26 @@
 // Env contract (set in the generated --mcp-config file, per-server):
 //   DECK_CONTROL_URL   http://127.0.0.1:<port>
 //   DECK_CONTROL_TOKEN Bearer token minted per Deck launch
+//   DECK_CONTROL_TOOLS Optional ALLOW-list of tool names exposed via
+//     tools/list (Card ff091064). Allow-list, never deny-list -- a deny-list
+//     shrinking fails OPEN (a future tool ships exposed to everyone by
+//     default, silently); an allow-list shrinking fails CLOSED (a forgotten
+//     tool is refused, the symptom surfaces the same day). Semantics, all
+//     three states meaningful and distinct:
+//       unset            -> every tool (current behavior, zero regression
+//                            for a caller that never sets this var).
+//       set, non-empty   -> exactly the comma-separated names listed.
+//       set, empty ("")  -> zero tools. Distinguishing "absent" from "empty"
+//                            here is deliberate: without it, a bare
+//                            `DECK_CONTROL_TOOLS=` declaration would be
+//                            indistinguishable from "unset" and silently
+//                            grant everything instead of nothing.
 
 import { createInterface } from 'node:readline'
 
 const CONTROL_URL = process.env.DECK_CONTROL_URL ?? ''
 const CONTROL_TOKEN = process.env.DECK_CONTROL_TOKEN ?? ''
+const TOOLS_ENV_VAR = 'DECK_CONTROL_TOOLS'
 
 interface JsonRpcRequest {
   jsonrpc: '2.0'
@@ -225,6 +240,49 @@ const TOOLS = [
   }
 ]
 
+/**
+ * Pure allow-list resolver for DECK_CONTROL_TOOLS. `undefined` (env var
+ * absent) means "no restriction" -- distinct from `[]` (env var present and
+ * empty, meaning zero tools). See the env-contract comment above for the
+ * full semantics; kept pure so a test can drive it without spawning a
+ * process or touching env.
+ */
+function resolveToolAllowlist(envValue: string | undefined): string[] | null {
+  if (envValue === undefined) return null
+  if (envValue === '') return []
+  return envValue
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+}
+
+/** Pure filter: `null` allowlist (var absent) passes every tool through unchanged. */
+function filterTools(tools: typeof TOOLS, allowlist: string[] | null): typeof TOOLS {
+  if (allowlist === null) return tools
+  const allowed = new Set(allowlist)
+  return tools.filter((t) => allowed.has(t.name))
+}
+
+const TOOLS_ALLOWLIST_RAW = process.env[TOOLS_ENV_VAR]
+const TOOLS_ALLOWLIST = resolveToolAllowlist(TOOLS_ALLOWLIST_RAW)
+const FILTERED_TOOLS = filterTools(TOOLS, TOOLS_ALLOWLIST)
+
+// Resolution trace at startup (Card ff091064): when a tool is missing from a
+// caller's surface, this is what says whether DECK_CONTROL_TOOLS ate it and
+// what the requested vs retained lists were -- without it, diagnosing a
+// missing tool costs an hour of guessing between this filter and the
+// definition's own `tools:` frontmatter (a second, independent filter).
+// stdout is the JSON-RPC channel here (never console.log); stderr is the
+// only sink this dependency-free script has.
+process.stderr.write(
+  JSON.stringify({
+    ev: 'deck-control-mcp: tool allowlist resolved',
+    source: TOOLS_ALLOWLIST_RAW === undefined ? 'unset (no restriction)' : TOOLS_ENV_VAR,
+    requested: TOOLS_ALLOWLIST,
+    retained: FILTERED_TOOLS.map((t) => t.name)
+  }) + '\n'
+)
+
 async function callControl(tool: string, args: Record<string, unknown>): Promise<unknown> {
   const res = await fetch(`${CONTROL_URL}/call`, {
     method: 'POST',
@@ -265,10 +323,21 @@ async function handle(req: JsonRpcRequest): Promise<void> {
     case 'ping':
       return reply(req.id, {})
     case 'tools/list':
-      return reply(req.id, { tools: TOOLS })
+      return reply(req.id, { tools: FILTERED_TOOLS })
     case 'tools/call': {
       const name = req.params?.name as string
       const args = (req.params?.arguments ?? {}) as Record<string, unknown>
+      // Coverage, not just sensitivity (CLAUDE.md guard-coverage rule): hiding
+      // a tool from tools/list alone still leaves it CALLABLE by name, which
+      // would make the allow-list decorative. Refuse here too, so the deny
+      // is enforced at the boundary that actually reaches deck-control.ts,
+      // not only at discovery time.
+      if (!FILTERED_TOOLS.some((t) => t.name === name)) {
+        return reply(req.id, {
+          content: [{ type: 'text', text: `Error: tool not available: ${name}` }],
+          isError: true
+        })
+      }
       try {
         const result = await callControl(name, args)
         return reply(req.id, {

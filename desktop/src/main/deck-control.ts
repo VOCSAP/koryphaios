@@ -95,6 +95,13 @@ export interface DeckControlDeps {
   /** Write an embedded profile's prompt file and return its path (TS1). */
   writeEmbeddedPrompt(id: string): string
   /**
+   * Write the team-lead's own deck-control --mcp-config and return its path
+   * (Card ff091064, piece 2). Called once per team-lead spawn, from
+   * spawnEntry below -- the same shared control server the supervisor uses,
+   * scoped to TEAM_LEAD_DECK_TOOLS via DECK_CONTROL_TOOLS.
+   */
+  writeTeamLeadMcpConfig(): string
+  /**
    * Run a shell command INSIDE this project's sandbox container
    * (PLAN-SANDBOX M2): "add this dependency to the instance". Rejected when
    * sandbox mode is off. The command never touches a host shell — the
@@ -235,7 +242,11 @@ export function startDeckControl(
       worktreeBranch: entry.worktreeBranch,
       announce: entry.announce,
       appendSystemPromptFile: embedded ? deps.writeEmbeddedPrompt(embedded.id) : undefined,
-      lead: embedded?.id === 'team-lead' && !hasLiveLead ? true : undefined
+      lead: embedded?.id === 'team-lead' && !hasLiveLead ? true : undefined,
+      // Card ff091064 (piece 2): only the embedded team-lead gets the
+      // deck-control bridge -- every other embedded/operator profile spawned
+      // through this same path (dev, reviewer, ...) stays without it.
+      mcpConfig: embedded?.id === 'team-lead' ? deps.writeTeamLeadMcpConfig() : undefined
     }
     const created = await deps.spawnSession(input)
     ownedSessions.add(created.id)
