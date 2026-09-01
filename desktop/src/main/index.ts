@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import {
   app,
@@ -42,7 +42,7 @@ import {
   magicCompactPluginPresent,
   parseMagicResume
 } from './magic-compact'
-import { approve, isApproved, resolveApprovedLaunchCommand } from './launch-approval'
+import { approve, commandHash, isApproved, resolveApprovedLaunchCommand } from './launch-approval'
 import { homedir, hostname } from 'node:os'
 import { WorkspaceService } from './workspace-service'
 import type { WorkspaceSession } from './workspace-store'
@@ -76,6 +76,7 @@ import {
   type DispatchedEntry
 } from './dispatch'
 import { directiveKeys, isDirectiveCommand, resolveDirectiveTargets } from './directive'
+import { unreachedTargetsText } from './directive-journal'
 import { ownsIdleLock } from './idle-lock'
 import type { AssignResult, DispatchResult, RoadmapItem, StopResult } from '@shared/types'
 import {
@@ -164,7 +165,13 @@ import {
   templateSource,
   writeTemplate
 } from './template-store'
-import { templateHasShellFields, templateToInputs, toTemplate, type TemplateInput } from '@shared/template'
+import {
+  sessionsHaveShellFields,
+  templateHasShellFields,
+  templateToInputs,
+  toTemplate,
+  type TemplateInput
+} from '@shared/template'
 
 let mainWindow: BrowserWindow | null = null
 // The desktop window is the first event sink (PLAN MB1): state events emitted
@@ -662,8 +669,29 @@ const sandboxGate = async (): Promise<string | null> => {
   return sandbox.effectiveRoot()
 }
 
-service.on('removed', ({ name }: { id: string; name: string }) => {
+service.on('removed', ({ id, name }: { id: string; name: string }) => {
   journal.add('session', `session "${name}" closed`)
+  // Audit fix #2 (card 6c380073): revoke a team-lead tile's minted
+  // deck-control token/callerId on FINAL removal only, and delete its
+  // team-lead-mcp-<callerId>.json, so a departed lead's file can no longer
+  // authorize closing/restarting anything. No-op for a session that was
+  // never minted its own caller (the supervisor tile, any non-lead profile).
+  //
+  // WHAT REACHES HERE, all three emit sites of 'removed' in
+  // session-service.ts: remove()'s forceCleanup (operator close button and
+  // deck_close_session), closeAll() ("New/clear"), and restoreFrom() (a
+  // workspace restore). The last two used to destroy tiles SILENTLY, which
+  // left departed leads' tokens live until app quit; they emit per destroyed
+  // def since this same audit round.
+  //
+  // WHAT DELIBERATELY DOES NOT REACH HERE, and must not: a crash or a
+  // non-zero exit. Those emit 'exit', not 'removed' -- the tile still EXISTS
+  // in that case (kept as a visible, restartable corpse), and restart()
+  // relaunches it with the SAME def.mcpConfig, so revoking there would break
+  // the bridge of a session that is coming back. Not an oversight: the
+  // revocation is keyed on the tile being GONE, not on its process dying.
+  const revokedCallerId = controlServer?.revokeCallerForSession(id) ?? null
+  if (revokedCallerId) cleanupTeamLeadMcpFile(revokedCallerId)
 })
 service.on('exit', ({ id, exitCode, name }: { id: string; exitCode: number; name?: string }) => {
   const label = name ?? id.slice(0, 8)
@@ -1453,14 +1481,22 @@ const executeDirective = async (item: RoadmapItem): Promise<void> => {
     return
   }
   const keys = directiveKeys(cmd)
-  const { matched, missing } = resolveDirectiveTargets(item.target_peer_ids, service.list())
+  // Audit fix #8 (card 6c380073, dev2's directive.ts): `ambiguous` is READ
+  // from resolveDirectiveTargets's own output, never re-derived here --
+  // re-filtering service.list() a second time would be a second liveness
+  // predicate, the exact drift this lot exists to close.
+  const { matched, missing, ambiguous } = resolveDirectiveTargets(item.target_peer_ids, service.list())
   if (matched.length === 0) {
-    journal.add(
-      'dispatch',
-      `directive ${keys} "${item.title}": no live target (requested: ${
-        item.target_peer_ids.join(', ') || 'none'
-      })`
-    )
+    // A collision (id resolved to MORE THAN ONE live tile) is a live target
+    // refused for safety, not an absent one -- "no live target" is FALSE in
+    // that case (the target exists, twice) and misleads whoever reads the
+    // journal into thinking the peer_id was simply wrong. Both categories are
+    // always reported: an earlier version of this branch listed ONLY the
+    // ambiguous ids and silently dropped the plainly-absent ones, which is
+    // why the wording now lives in a pure, probed function
+    // (directive-journal.ts) instead of inline here.
+    const detail = unreachedTargetsText(missing, ambiguous) || `requested: ${item.target_peer_ids.join(', ') || 'none'}`
+    journal.add('dispatch', `directive ${keys} "${item.title}": ${detail}`)
     return
   }
   // Resolve the magic-compact decision ONCE per card (not per target): both
@@ -1487,10 +1523,10 @@ const executeDirective = async (item: RoadmapItem): Promise<void> => {
     }
   }
   if (missing.length > 0) {
-    journal.add(
-      'dispatch',
-      `directive ${keys} "${item.title}": ${missing.length} target(s) not reachable: ${missing.join(', ')}`
-    )
+    // Same composition as the no-match branch above, from the same pure
+    // function -- two call sites, one wording, so neither can drop a category
+    // the other reports.
+    journal.add('dispatch', `directive ${keys} "${item.title}": ${unreachedTargetsText(missing, ambiguous)}`)
   }
 }
 
@@ -1912,6 +1948,101 @@ const confirmShellFieldApproval = (opts: {
   return true
 }
 
+const DECK_SPAWN_SHELL_FIELD_KEYPART = 'deck-spawn'
+
+/**
+ * Derives the same {basename, hashPayload} shape confirmShellFieldApproval's
+ * own internal isApproved()/approve() key on -- factored out so the
+ * hands-free short-circuit below and the actual gate call can never
+ * disagree about which cache slot a given spawn entry occupies. `basename`
+ * is content-derived (a short hash of the payload itself) rather than a
+ * file name, since a spawn entry has no file: this is what lets two
+ * DIFFERENT args strings live in two independent approval slots instead of
+ * overwriting each other's single slot.
+ */
+function spawnShellFieldKey(entry: { command?: string; args?: string }): {
+  basename: string
+  hashPayload: { command: string; args: string }
+} {
+  const hashPayload = { command: entry.command ?? '', args: entry.args ?? '' }
+  const basename = commandHash(JSON.stringify(hashPayload)).slice(0, 16)
+  return { basename, hashPayload }
+}
+
+/**
+ * Card 6c380073, audit fix #1c. Was DELIBERATELY exempted from B4's
+ * repo-clone shell-field gate (commit 7e87f68, "close repo-clone RCE
+ * paths") -- that gate's whole threat model is a file READ from a cloned
+ * repo (a template, then a workspace snapshot, card 09d54a29); deck-control
+ * spawning did not exist in that scope, and its threat model is different --
+ * an agent's live MCP TOOL CALL, not a file on disk. That exemption became
+ * STALE, not wrong, once ff091064 gave an embedded team-lead a path to
+ * deck_spawn_session/deck_spawn_team with a free-form `args` string reaching
+ * the exact same unescaped shell sink (session-service.ts's create(), whose
+ * own comment used to assume every caller reaching it was
+ * operator-authorized -- an agent tool call is not). This closes that gap by
+ * reusing the SAME predicate (sessionsHaveShellFields) and the SAME
+ * operator-approval mechanism (confirmShellFieldApproval) templates and
+ * workspace-restore already use for the identical sink.
+ *
+ * confirmShellFieldApproval has NO trust-mode awareness of its own -- by
+ * design (see its own doc): it always opens a BLOCKING
+ * dialog.showMessageBoxSync (stalls the whole main process, not just this
+ * one call) unless the exact payload is already cache-approved. That is
+ * fine for a template/workspace file read at a deliberate operator gesture
+ * (apply/restore), but deck_spawn_session/deck_spawn_team can be called by
+ * an UNATTENDED hands-free team-lead or supervisor -- opening that dialog
+ * there would freeze the app on an answer nobody is watching, which is
+ * WORSE than a refusal (a refusal fails closed and is journaled; a stuck
+ * dialog fails nowhere and looks like a hang). So THIS function, not
+ * confirmShellFieldApproval, owns the hands-free decision: in hands-free
+ * mode, a payload that is not ALREADY cache-approved is refused outright,
+ * explicitly, journaled -- no dialog is ever opened in that mode. The escape
+ * hatch is the SAME persistent, content-hash-keyed cache
+ * confirmShellFieldApproval already writes to (launch-approval.ts's
+ * isApproved/approve, keyed on the payload's own hash, never on trust mode):
+ * approve a given args string once, in team-review or full-control (a real
+ * dialog, a real answer), and every later hands-free spawn carrying that
+ * SAME string passes silently thereafter.
+ *
+ * WHAT THIS CACHE IS NOT, said plainly because the escape hatch above reads
+ * like a guarantee: the approvals file lives in userData, a directory a
+ * NON-SANDBOXED host agent can WRITE, not just read. Such an agent can
+ * therefore pre-approve its own payload and walk straight through this gate.
+ * That is the same containment boundary the deck-control tokens themselves
+ * sit behind (see deck-control.ts's header): this separates COOPERATING
+ * authorities by role, and does not resist a deliberately hostile agent
+ * already running unsandboxed on the operator's account.
+ */
+const confirmSpawnShellFields = (entry: { command?: string; args?: string }): boolean => {
+  if (!sessionsHaveShellFields([entry])) return true
+  const { basename, hashPayload } = spawnShellFieldKey(entry)
+  if (getConfig().supervisorSpawnMode === 'hands-free') {
+    const key = `${computeDeckProjectKey(getConfig().projectDir)}::${DECK_SPAWN_SHELL_FIELD_KEYPART}::${basename}`
+    if (isApproved(approvalsFile(), key, JSON.stringify(hashPayload))) return true
+    journal.add(
+      'session',
+      `deck-spawn shell fields refused (hands-free, not pre-approved): ${hashPayload.args || hashPayload.command}`
+    )
+    return false
+  }
+  return confirmShellFieldApproval({
+    keyPart: DECK_SPAWN_SHELL_FIELD_KEYPART,
+    basename,
+    hashPayload,
+    previewLines: [hashPayload.command, hashPayload.args]
+      .filter((v) => v.trim())
+      .map((v) => `• ${v}`),
+    labelEn: 'Agent spawn',
+    labelFr: 'Lancement agent',
+    messageEn: 'This agent-requested session spawn runs custom launch arguments, executed in a shell.',
+    messageFr:
+      'Ce lancement de session demandé par un agent exécute des arguments personnalisés dans un shell.',
+    buttonsEn: ['Spawn this session', 'Refuse'],
+    buttonsFr: ['Lancer cette session', 'Refuser']
+  })
+}
+
 /**
  * Containment + approval gate for applying a template (B4 + M-SEC-9). Returns
  * the inputs to spawn, or null when: the path is outside the allowed template
@@ -2018,7 +2149,14 @@ const summaryLine = (s: SpawnSummary): string => {
     s.worktree_branch ? `⎇ ${s.worktree_branch}` : ''
   ].filter(Boolean)
   const head = parts.join('  ')
-  return s.prompt_preview ? `${head}\n   ${s.prompt_preview}` : head
+  // Audit fix #1b (card 6c380073): `args` used to be silently invisible here
+  // -- the operator approved a spawn without ever seeing its free-form shell
+  // arguments. Mirrors resolveTemplateInputs's own precedent (index.ts),
+  // which already shows command/args verbatim for the same reason.
+  const lines = [head, s.args ? `   args: ${s.args}` : '', s.prompt_preview ? `   ${s.prompt_preview}` : ''].filter(
+    Boolean
+  )
+  return lines.join('\n')
 }
 
 const spawnDialog = (title: string, detail: string): boolean => {
@@ -2069,6 +2207,54 @@ const approveSpawn = async (entries: SpawnSummary[]): Promise<boolean[]> => {
 // The loopback control endpoint the SUPERVISOR session pilots the app through.
 // Started lazily at the first Home visit; the URL/token pair is injected only
 // into the supervisor's generated --mcp-config, never into normal sessions.
+
+/** The team-lead --mcp-config filename for a given minted callerId (card 6c380073). */
+const teamLeadMcpConfigFile = (callerId: string): string => `team-lead-mcp-${callerId}.json`
+
+/**
+ * Card 6c380073 (review round 2, point 3): sweep team-lead-mcp-*.json left
+ * behind by a previous run. Every one of those carries a token that died with
+ * the callerTable of the process that minted it, so they are inert as
+ * AUTHORIZATION -- this is residue collection, not a security gate. Called
+ * once at startup, BEFORE any mint, so it can never race a file the current
+ * run has just written: this run's callerIds carry fresh random suffixes and
+ * do not exist on disk yet at this point.
+ */
+const sweepStaleTeamLeadMcpConfigs = (): void => {
+  const dir = join(app.getPath('userData'), APP_STATE_SUBDIR)
+  try {
+    if (!existsSync(dir)) return
+    for (const name of readdirSync(dir)) {
+      if (!name.startsWith('team-lead-mcp-') || !name.endsWith('.json')) continue
+      try {
+        unlinkSync(join(dir, name))
+      } catch (e) {
+        reportError('deck', `failed to sweep stale team-lead mcp config ${name}`, e)
+      }
+    }
+  } catch (e) {
+    reportError('deck', 'failed to scan the app-state dir for stale team-lead mcp configs', e)
+  }
+}
+
+/**
+ * Audit fix #2 (card 6c380073): delete a team-lead callerId's --mcp-config
+ * file, if any. Shared by the spawn-failure rollback (spawnEntry's own catch,
+ * via revokeTeamLeadMcpConfig below) AND the final-removal revocation (the
+ * 'removed' listener further down) so both paths agree on the exact same
+ * file name. Best-effort: a missing file is not an error, and the file may
+ * legitimately not exist yet (spawn failed before the write) or already be
+ * gone (removed by the other path under a genuine race).
+ */
+const cleanupTeamLeadMcpFile = (callerId: string): void => {
+  const file = join(app.getPath('userData'), APP_STATE_SUBDIR, teamLeadMcpConfigFile(callerId))
+  try {
+    if (existsSync(file)) unlinkSync(file)
+  } catch (e) {
+    reportError('deck', `failed to remove team-lead mcp config for ${callerId}`, e)
+  }
+}
+
 const controlDeps: DeckControlDeps = {
   listAgents: () => listAgents(getConfig().projectDir),
   listModels: () => resolveLaunchConfig(getConfig().projectDir).models,
@@ -2138,7 +2324,11 @@ const controlDeps: DeckControlDeps = {
   // for the team-lead tile instead of the Home supervisor tile. Only reached
   // once deck-control's dispatch is already handling a request, which cannot
   // happen before startDeckControl (below) has resolved and set controlServer.
-  writeTeamLeadMcpConfig: (): string => {
+  // Card 6c380073: `token`/`callerId` come from spawnEntry's own mintCaller()
+  // call (deck-control.ts), never controlServer.token (the supervisor's) --
+  // the filename is keyed on callerId so two team-lead spawns never race to
+  // overwrite each other's --mcp-config.
+  writeTeamLeadMcpConfig: (token: string, callerId: string, allowedTools: readonly string[]): string => {
     if (!controlServer) throw new Error('deck-control endpoint not started yet')
     const deckPluginDir = getDeckPluginDir()
     if (!deckPluginDir) throw new Error('deck-plugin dir missing (build skipped)')
@@ -2146,14 +2336,26 @@ const controlDeps: DeckControlDeps = {
     if (!existsSync(mcpScript)) {
       throw new Error('deck-control MCP script missing -- run `npm run build:mcp`')
     }
-    return writeTeamLeadMcpConfig({
-      dir: join(app.getPath('userData'), APP_STATE_SUBDIR),
-      mcpScriptPath: mcpScript,
-      execPath: process.execPath,
-      controlUrl: controlServer.url,
-      controlToken: controlServer.token
-    })
-  }
+    return writeTeamLeadMcpConfig(
+      {
+        dir: join(app.getPath('userData'), APP_STATE_SUBDIR),
+        mcpScriptPath: mcpScript,
+        execPath: process.execPath,
+        controlUrl: controlServer.url,
+        controlToken: token
+      },
+      teamLeadMcpConfigFile(callerId),
+      allowedTools
+    )
+  },
+  // Audit fix #2 (card 6c380073): undo a writeTeamLeadMcpConfig() call whose
+  // spawn failed after the token was minted and the file already written --
+  // best-effort, a missing file is not an error.
+  revokeTeamLeadMcpConfig: (callerId: string): void => {
+    cleanupTeamLeadMcpFile(callerId)
+  },
+  // Audit fix #1c (card 6c380073): see confirmSpawnShellFields's own doc.
+  confirmSpawnShellFields: (entry) => confirmSpawnShellFields(entry)
 }
 
 let controlServer: DeckControlServer | null = null
@@ -2342,6 +2544,10 @@ function createWindow(): void {
 
 app.whenReady().then(async () => {
   nativeTheme.themeSource = config.theme
+  // Card 6c380073: drop last run's team-lead --mcp-config files before this
+  // run can mint anything (see the function's own doc for why the ordering
+  // is what makes this safe rather than a race).
+  sweepStaleTeamLeadMcpConfigs()
   // PLAN C19: gate a PROJECT-sourced launchCommand behind a one-time operator
   // approval (hash remembered per project_key; a changed command asks again;
   // refusal keeps the global/default command for this run).

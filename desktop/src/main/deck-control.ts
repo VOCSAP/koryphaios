@@ -3,12 +3,30 @@
 // through the deck-control MCP server (desktop/mcp/deck-control-mcp.ts).
 //
 // Security model:
-// - 127.0.0.1 only, random port, Bearer token minted per app launch. The pair
-//   is injected ONLY into the supervisor tile's generated --mcp-config file,
-//   never into normal agent sessions, project files or the shell env.
-// - Destructive operations (close a session, remove a worktree) are allowed
-//   only on objects the supervisor itself created through this endpoint;
-//   anything else must go through the operator's UI.
+// - 127.0.0.1 only, random port. One process, one HTTP endpoint, but MULTIPLE
+//   Bearer tokens can be live at once (Card 6c380073): the historical token
+//   (injected into the supervisor tile's --mcp-config) and one minted per
+//   embedded team-lead spawn via mintCaller() below. Each token resolves to
+//   a callerId and an optional tool allow-list, both held in `callerTable`.
+// - Destructive operations (close/restart a session, remove a worktree) are
+//   allowed only on objects the SAME CALLER created through this endpoint --
+//   enforced by `ownedSessions`/`ownedWorktrees` (Map<id, callerId>) checked
+//   in the `deck_close_session` / `deck_restart_session` / `deck_remove_worktree`
+//   cases below, never by which endpoint the request arrived through.
+//   Anything else must go through the operator's UI.
+// - The per-caller tool allow-list (three-state semantics: absent -> every
+//   tool, array -> only those, empty array -> none) is enforced HERE, in the
+//   request handler below, before dispatch() ever runs -- deck-control-mcp.ts
+//   keeps its own copy of the same filter (piece 1) for tools/list UX, but it
+//   is no longer the only barrier: a caller could always skip tools/list and
+//   POST /call directly with a token that names a tool it should not have.
+// - Honesty about what this does NOT resist: both the supervisor's and the
+//   team-lead's --mcp-config files (each holding its own token) are written
+//   into the same userData/APP_STATE_SUBDIR directory (index.ts). A
+//   non-sandboxed agent hosted in a sibling tile could read the neighboring
+//   file and borrow its token. This scheme separates two COOPERATING
+//   authorities by role; it does not resist a deliberately hostile agent
+//   (same framing as shared/types.ts's own reserved-by-role note).
 // - A spawn cap keeps a runaway supervisor from flooding the window.
 //
 // The module is dependency-injected (no electron / node-pty imports) so the
@@ -27,6 +45,7 @@ import type {
 import type { WorktreeInfo } from './worktree-service'
 import { EMBEDDED_AGENTS, getEmbeddedAgent, type EmbeddedAgent } from './team-embedded'
 import { TEAM_PLAYBOOK } from './team-embedded'
+import { TEAM_LEAD_DECK_TOOLS } from './supervisor'
 
 /** Live sessions cap enforced on deck_spawn_session / deck_spawn_team. */
 export const SPAWN_CAP = 8
@@ -63,6 +82,13 @@ export interface SpawnSummary {
   cli: string
   worktree_branch: string
   prompt_preview: string
+  /**
+   * Audit fix #1b (card 6c380073): the free-form launch-args string, shown
+   * verbatim in the approval dialog (index.ts summaryLine) so the operator
+   * actually SEES what they are approving -- previously invisible in every
+   * trust mode above hands-free. '' when absent.
+   */
+  args: string
 }
 
 export interface DeckControlDeps {
@@ -98,9 +124,35 @@ export interface DeckControlDeps {
    * Write the team-lead's own deck-control --mcp-config and return its path
    * (Card ff091064, piece 2). Called once per team-lead spawn, from
    * spawnEntry below -- the same shared control server the supervisor uses,
-   * scoped to TEAM_LEAD_DECK_TOOLS via DECK_CONTROL_TOOLS.
+   * scoped to `allowedTools` via DECK_CONTROL_TOOLS. `token` and `callerId`
+   * come from a fresh mintCaller() call made by spawnEntry itself (Card
+   * 6c380073): a distinct token per team-lead spawn, never the supervisor's,
+   * and `callerId` is threaded through so the implementation (index.ts) can
+   * give each spawn's config file a distinct name -- a second mint must not
+   * silently invalidate the first one's file. `allowedTools` is the SAME
+   * array reference spawnEntry already passed to mintCaller (audit fix #6,
+   * card 6c380073) -- deliberately threaded through rather than re-imported
+   * a second time here, so the server-side scope and the client-side
+   * DECK_CONTROL_TOOLS filter can never independently drift apart.
    */
-  writeTeamLeadMcpConfig(): string
+  writeTeamLeadMcpConfig(token: string, callerId: string, allowedTools: readonly string[]): string
+  /**
+   * Undo a writeTeamLeadMcpConfig() call whose spawn failed AFTER the token
+   * was minted and the file already written (audit fix #2, card 6c380073) --
+   * deletes the orphaned team-lead-mcp-<callerId>.json. Also called on final
+   * removal of a team-lead tile (never on restart, which reuses the same
+   * file). Best-effort: a missing file is not an error.
+   */
+  revokeTeamLeadMcpConfig(callerId: string): void
+  /**
+   * Audit fix #1c (card 6c380073): gate a spawn entry carrying a shell-bearing
+   * field (`args` -- SpawnPlanEntry has no `command`) behind the same
+   * operator-approval mechanism templates/workspace-restore already use for
+   * the identical sink, but with the hands-free short-circuit that mechanism
+   * itself lacks (see the implementation's own doc, index.ts). Returns true
+   * when the spawn may proceed.
+   */
+  confirmSpawnShellFields(entry: { command?: string; args?: string }): boolean
   /**
    * Run a shell command INSIDE this project's sandbox container
    * (PLAN-SANDBOX M2): "add this dependency to the instance". Rejected when
@@ -112,7 +164,28 @@ export interface DeckControlDeps {
 
 export interface DeckControlServer {
   url: string
+  /** The historical, unrestricted token (callerId 'supervisor', allowedTools=null). */
   token: string
+  /**
+   * Mint a new caller: a fresh Bearer token, registered server-side with its
+   * own callerId and tool allow-list (Card 6c380073). `allowedTools`
+   * mirrors the three-state semantics of DECK_CONTROL_TOOLS (deck-control-mcp.ts):
+   * omitted/null = every tool, an array = only those, an empty array = none.
+   */
+  mintCaller(
+    label: string,
+    allowedTools?: readonly string[] | null
+  ): { token: string; callerId: string }
+  /**
+   * Audit fix #2 (card 6c380073): revoke the caller minted for a team-lead
+   * SESSION on its final removal, keyed by the session id (the object index
+   * caller ipc already has) rather than by callerId (which the caller would
+   * have to have tracked separately). No-ops (returns null) for a session
+   * that was never minted its own caller -- the supervisor tile, any
+   * non-lead profile. Returns the revoked callerId on a real revocation, so
+   * the caller can also delete the matching --mcp-config file.
+   */
+  revokeCallerForSession(sessionId: string): string | null
   close(): void
 }
 
@@ -140,14 +213,38 @@ function parseEntry(args: ToolArgs): SpawnPlanEntry {
 }
 
 /**
+ * The reasoning-effort levels this endpoint accepts (card 6c380073, second
+ * audit round). The SAME list is declared in deck-control-mcp.ts's JSON
+ * schema and in the renderer's two pickers, but BOTH of those are
+ * declarative: the MCP bridge's tools/call forwards `arguments` verbatim
+ * without validating them against its own schema, and a picker constrains
+ * only the UI. Measured: before this constant existed, the literal 'xhigh'
+ * appeared nowhere in desktop/src/main at all, so nothing in the main
+ * process ever checked this field on ANY path. This is the enforcing copy.
+ */
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/**
  * Validate one entry and resolve its embedded profile. Throws on: a non-claude
- * cli (v1 gate — the field is contract-frozen, the values are not), both agent
- * and embedded_agent set, or an unknown embedded id.
+ * cli (v1 gate — the field is contract-frozen, the values are not), an effort
+ * outside EFFORT_LEVELS, both agent and embedded_agent set, or an unknown
+ * embedded id.
  */
 function validateEntry(entry: SpawnPlanEntry): EmbeddedAgent | null {
   if (entry.cli && entry.cli !== 'claude') {
     throw new Error(
       `cli "${entry.cli}" is not supported yet — only 'claude' sessions can be spawned (the field is reserved for future multi-CLI support)`
+    )
+  }
+  // Card 6c380073 (second audit round): `effort` used to reach the login-shell
+  // command line unquoted and un-allow-listed (session-command.ts's
+  // effortFlag, fixed there too). That fix alone would silently EMPTY a bad
+  // value; refusing it BY NAME here is what tells the calling agent its
+  // argument was rejected instead of quietly ignored -- same reasoning as the
+  // `cli` refusal just above, and as the `args` refusal further down.
+  if (entry.effort && !(EFFORT_LEVELS as readonly string[]).includes(entry.effort)) {
+    throw new Error(
+      `effort "${entry.effort}" is not a valid level -- expected one of: ${EFFORT_LEVELS.join(', ')}`
     )
   }
   if (entry.agent && entry.embeddedAgent) {
@@ -173,7 +270,27 @@ function summarizeEntry(entry: SpawnPlanEntry, embedded: EmbeddedAgent | null): 
     effort: entry.effort ?? '',
     cli: entry.cli ?? 'claude',
     worktree_branch: entry.worktreeBranch ?? '',
-    prompt_preview: (entry.prompt ?? '').slice(0, 160)
+    prompt_preview: (entry.prompt ?? '').slice(0, 160),
+    args: entry.args ?? ''
+  }
+}
+
+/**
+ * Audit fix #1a (card 6c380073): a caller scoped to a NARROWED tool
+ * allow-list may never pass a free-form `args` string -- session-service.ts's
+ * create() documents that every path reaching it is operator-authorized
+ * (advanced menu, approved template, trusted companion cred) and is
+ * therefore NOT further escaped before hitting a login shell
+ * (session-command.ts -> shell-command.ts). An embedded team-lead calling
+ * deck_spawn_session/deck_spawn_team is neither of those. Refuses explicitly
+ * rather than silently dropping the field -- a silently dropped field reads
+ * to the caller as "applied".
+ */
+function assertArgsAllowedForRestrictedCaller(entry: SpawnPlanEntry, restricted: boolean): void {
+  if (restricted && entry.args) {
+    throw new Error(
+      'refused: this caller is scoped to a tool allow-list and may not pass a free-form `args` string (arbitrary shell arguments) -- ask the operator to spawn with custom args instead'
+    )
   }
 }
 
@@ -198,14 +315,76 @@ function sessionView(s: SessionRuntime): Record<string, unknown> {
   }
 }
 
+interface CallerEntry {
+  callerId: string
+  /** null = every tool, array = only those, empty array = none (Card 6c380073). */
+  allowedTools: string[] | null
+}
+
 export function startDeckControl(
   deps: DeckControlDeps,
   opts: { port?: number } = {}
 ): Promise<DeckControlServer> {
   const token = randomBytes(24).toString('hex')
-  // Objects created THROUGH this endpoint: the only ones destructive ops touch.
-  const ownedSessions = new Set<string>()
-  const ownedWorktrees = new Set<string>()
+  // One entry per live Bearer token, resolved by the request handler below
+  // BEFORE dispatch ever runs. The historical token is registered here as
+  // callerId 'supervisor' with an unrestricted (null) allow-list.
+  const callerTable = new Map<string, CallerEntry>()
+  callerTable.set(token, { callerId: 'supervisor', allowedTools: null })
+
+  /**
+   * Mint a fresh token/callerId pair (Card 6c380073). callerId includes a
+   * random suffix so two mints of the same label (e.g. two team-lead spawns)
+   * never collide -- each gets its own ownedSessions entries and its own
+   * --mcp-config filename downstream.
+   */
+  function mintCaller(
+    label: string,
+    allowedTools?: readonly string[] | null
+  ): { token: string; callerId: string } {
+    const mintedToken = randomBytes(24).toString('hex')
+    const callerId = `${label}-${randomBytes(4).toString('hex')}`
+    callerTable.set(mintedToken, {
+      callerId,
+      allowedTools: allowedTools ? [...allowedTools] : null
+    })
+    return { token: mintedToken, callerId }
+  }
+
+  /**
+   * Audit fix #2 (card 6c380073): remove every token registered under
+   * `callerId` -- a reverse lookup over callerTable since the token is the
+   * map KEY and callerId only lives in its value. No-op if callerId is not
+   * (or no longer) registered.
+   */
+  function revokeCaller(callerId: string): void {
+    for (const [tok, entry] of callerTable) {
+      if (entry.callerId === callerId) callerTable.delete(tok)
+    }
+  }
+
+  /** See DeckControlServer.revokeCallerForSession's own doc. */
+  function revokeCallerForSession(sessionId: string): string | null {
+    const callerId = sessionMintedCallerId.get(sessionId)
+    if (!callerId) return null
+    revokeCaller(callerId)
+    sessionMintedCallerId.delete(sessionId)
+    return callerId
+  }
+
+  // Objects created THROUGH this endpoint, keyed by which CALLER created them
+  // (Card 6c380073) -- not merely "created through this endpoint", now that a
+  // second identity (the team-lead) shares it with the supervisor.
+  const ownedSessions = new Map<string, string>()
+  const ownedWorktrees = new Map<string, string>()
+  /**
+   * Audit fix #2 (card 6c380073): session id -> the callerId MINTED FOR that
+   * session's own future calls (never the spawning caller's own callerId,
+   * already tracked by ownedSessions above -- a distinct dimension). Only
+   * populated for a team-lead spawn. Read by revokeCallerForSession on final
+   * removal so a departed lead's token/file stop authorizing anything.
+   */
+  const sessionMintedCallerId = new Map<string, string>()
 
   /** Enforce the live-session cap for a batch of n upcoming spawns. */
   function capCheck(n: number): void {
@@ -220,7 +399,8 @@ export function startDeckControl(
   /** Spawn one validated entry (shared by deck_spawn_session / deck_spawn_team). */
   async function spawnEntry(
     entry: SpawnPlanEntry,
-    embedded: EmbeddedAgent | null
+    embedded: EmbeddedAgent | null,
+    callerId: string
   ): Promise<SessionRuntime> {
     // Embedded read-only roles get their tool denial at harness level.
     const args = [
@@ -232,6 +412,14 @@ export function startDeckControl(
     // Embedded team-lead lands as the window lead only when none is live
     // (same rule as templates, PLAN C18 -- never demote an operator's lead).
     const hasLiveLead = deps.listSessions().some((s) => s.lead && s.status !== 'exited')
+    // Card 6c380073: a spawned team-lead tile gets its OWN minted token/callerId
+    // (never the spawning caller's), so its future deck-control calls are
+    // authorized under its own ownedSessions entries, not the supervisor's.
+    // Audit fix #6: TEAM_LEAD_DECK_TOOLS is named ONCE here and threaded to
+    // BOTH mintCaller (server-side scope) and writeTeamLeadMcpConfig
+    // (client-side DECK_CONTROL_TOOLS) below -- never imported a second time
+    // at either consumer, so the two can never independently drift apart.
+    const leadMint = embedded?.id === 'team-lead' ? mintCaller('team-lead', TEAM_LEAD_DECK_TOOLS) : null
     const input: CreateSessionInput = {
       name: entry.name ?? embedded?.id,
       agent: entry.agent,
@@ -246,15 +434,40 @@ export function startDeckControl(
       // Card ff091064 (piece 2): only the embedded team-lead gets the
       // deck-control bridge -- every other embedded/operator profile spawned
       // through this same path (dev, reviewer, ...) stays without it.
-      mcpConfig: embedded?.id === 'team-lead' ? deps.writeTeamLeadMcpConfig() : undefined
+      mcpConfig: leadMint
+        ? deps.writeTeamLeadMcpConfig(leadMint.token, leadMint.callerId, TEAM_LEAD_DECK_TOOLS)
+        : undefined
     }
-    const created = await deps.spawnSession(input)
-    ownedSessions.add(created.id)
-    if (created.worktree) ownedWorktrees.add(created.worktree.path)
+    let created: SessionRuntime
+    try {
+      created = await deps.spawnSession(input)
+    } catch (e) {
+      // Audit fix #2 (card 6c380073): the mint AND the --mcp-config file
+      // write both happen ABOVE, before the spawn -- if spawnSession then
+      // fails, undo both rather than leaving an orphaned token/file that
+      // authorizes a tile that was never created.
+      if (leadMint) {
+        revokeCaller(leadMint.callerId)
+        deps.revokeTeamLeadMcpConfig(leadMint.callerId)
+      }
+      throw e
+    }
+    ownedSessions.set(created.id, callerId)
+    if (leadMint) sessionMintedCallerId.set(created.id, leadMint.callerId)
+    // Audit fix #4: first-writer-wins -- a path collision must never let a
+    // second caller silently steal ownership of an existing worktree entry.
+    if (created.worktree && !ownedWorktrees.has(created.worktree.path)) {
+      ownedWorktrees.set(created.worktree.path, callerId)
+    }
     return created
   }
 
-  async function dispatch(tool: string, args: ToolArgs): Promise<unknown> {
+  async function dispatch(
+    tool: string,
+    args: ToolArgs,
+    callerId: string,
+    restricted: boolean
+  ): Promise<unknown> {
     switch (tool) {
       case 'deck_list_agents':
         return { agents: deps.listAgents() }
@@ -280,10 +493,17 @@ export function startDeckControl(
       case 'deck_spawn_session': {
         const entry = parseEntry(args)
         const embedded = validateEntry(entry)
+        // Audit fix #1a (card 6c380073): before capCheck/approval, never after.
+        assertArgsAllowedForRestrictedCaller(entry, restricted)
+        // Audit fix #1c: shell-bearing `args` needs operator approval (same
+        // gate templates/workspace-restore use), unless already cached.
+        if (!deps.confirmSpawnShellFields({ args: entry.args })) {
+          throw new Error('refused: this launch carries unapproved shell arguments')
+        }
         capCheck(1)
         const [approved] = await deps.approveSpawn([summarizeEntry(entry, embedded)])
         if (!approved) throw new Error('spawn refused by the operator')
-        const created = await spawnEntry(entry, embedded)
+        const created = await spawnEntry(entry, embedded, callerId)
         // Sync ack by default (single-agent contract, TS3): the result carries
         // the peer_id. wait_for_peer:false switches to the async targeted ack.
         if (args['wait_for_peer'] === false) {
@@ -319,6 +539,15 @@ export function startDeckControl(
           return parseEntry(e as ToolArgs)
         })
         const embeddeds = entries.map((entry) => validateEntry(entry))
+        // Audit fix #1a/#1c: same two gates as deck_spawn_session, applied to
+        // EVERY entry before the approval dialog / any spawn -- one bad entry
+        // poisons the whole plan, same convention as validateEntry above.
+        for (const entry of entries) {
+          assertArgsAllowedForRestrictedCaller(entry, restricted)
+          if (!deps.confirmSpawnShellFields({ args: entry.args })) {
+            throw new Error('refused: this team plan carries unapproved shell arguments')
+          }
+        }
         capCheck(entries.length)
         const decisions = await deps.approveSpawn(
           entries.map((entry, i) => summarizeEntry(entry, embeddeds[i] ?? null))
@@ -330,7 +559,7 @@ export function startDeckControl(
             refused++
             continue
           }
-          const created = await spawnEntry(entries[i]!, embeddeds[i] ?? null)
+          const created = await spawnEntry(entries[i]!, embeddeds[i] ?? null, callerId)
           // Team contract (TS3): always async -- the Deck notifies the
           // supervisor as each session connects (or fails to).
           deps.armSpawnAck(created.id, created.name)
@@ -361,6 +590,15 @@ export function startDeckControl(
       case 'deck_restart_session': {
         const id = str(args, 'id')
         if (!id) throw new Error('id is required')
+        // Card 6c380073: resolve the OBJECT first (its recorded owner, or
+        // undefined if never seen), THEN ask if THIS caller may act on it --
+        // an absent id refuses the same way a wrong-owner id does, never
+        // falling back to a default owner. Previously unguarded entirely.
+        if (ownedSessions.get(id) !== callerId) {
+          throw new Error(
+            'refused: only a session spawned by this same caller can be restarted -- ask the operator for the rest'
+          )
+        }
         deps.restartSession(id)
         return { ok: true }
       }
@@ -368,13 +606,26 @@ export function startDeckControl(
       case 'deck_close_session': {
         const id = str(args, 'id')
         if (!id) throw new Error('id is required')
-        if (!ownedSessions.has(id)) {
+        if (ownedSessions.get(id) !== callerId) {
           throw new Error(
-            'refused: only sessions spawned by the supervisor can be closed -- ask the operator for the rest'
+            'refused: only a session spawned by this same caller can be closed -- ask the operator for the rest'
           )
         }
         deps.closeSession(id)
         ownedSessions.delete(id)
+        // Card 6c380073 (review round 2, point 8): this case drops the
+        // OWNERSHIP entry only. It deliberately does NOT call
+        // revokeCallerForSession or touch sessionMintedCallerId -- that is
+        // covered TRANSITIVELY, and the chain is worth naming because nothing
+        // here hints at it. VERIFIED end to end: deps.closeSession is
+        // `(id) => service.remove(id)` (index.ts's controlDeps), remove()'s
+        // forceCleanup emits 'removed' (session-service.ts), and the single
+        // production listener for that event (index.ts's service.on('removed'))
+        // is what calls revokeCallerForSession and deletes the config file.
+        // Measured: 'removed' has exactly three emit sites (remove, closeAll,
+        // restoreFrom) and revokeCallerForSession exactly one production
+        // caller, that listener. Revoking here as well would be a second,
+        // divergence-prone path to the same guarantee.
         return { ok: true }
       }
 
@@ -382,7 +633,9 @@ export function startDeckControl(
         const branch = str(args, 'branch')
         if (!branch) throw new Error('branch is required')
         const wt = await deps.createWorktree(branch)
-        ownedWorktrees.add(wt.path)
+        // Audit fix #4: first-writer-wins, same reasoning as spawnEntry's own
+        // worktree-ownership write above.
+        if (!ownedWorktrees.has(wt.path)) ownedWorktrees.set(wt.path, callerId)
         return { worktree: wt }
       }
 
@@ -392,9 +645,9 @@ export function startDeckControl(
       case 'deck_remove_worktree': {
         const path = str(args, 'path')
         if (!path) throw new Error('path is required')
-        if (!ownedWorktrees.has(path)) {
+        if (ownedWorktrees.get(path) !== callerId) {
           throw new Error(
-            'refused: only worktrees created by the supervisor can be removed -- ask the operator for the rest'
+            'refused: only a worktree created by this same caller can be removed -- ask the operator for the rest'
           )
         }
         await deps.removeWorktree(path) // git still refuses dirty trees (never forced)
@@ -435,7 +688,13 @@ export function startDeckControl(
       res.writeHead(code, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: false, error: msg }))
     }
-    if (req.headers.authorization !== `Bearer ${token}`) return deny(401, 'unauthorized')
+    // Card 6c380073: any token registered in callerTable authorizes the
+    // request (no longer a single fixed comparison) -- an unknown/expired
+    // token still 401s exactly as before this table existed.
+    const auth = req.headers.authorization
+    const bearerToken = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7) : ''
+    const caller = callerTable.get(bearerToken)
+    if (!caller) return deny(401, 'unauthorized')
     if (req.method === 'GET' && req.url === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' })
       return res.end(JSON.stringify({ ok: true }))
@@ -452,7 +711,20 @@ export function startDeckControl(
         try {
           const parsed = JSON.parse(body) as { tool?: string; args?: ToolArgs }
           if (!parsed.tool) return deny(400, 'tool is required')
-          const result = await dispatch(parsed.tool, parsed.args ?? {})
+          // Card 6c380073: the allow-list now bites HERE, server-side, before
+          // dispatch ever runs -- not only in deck-control-mcp.ts's tools/list
+          // filter, which a caller could always bypass by POSTing /call
+          // directly with a valid-but-narrower token. Same three-state
+          // semantics as that client-side filter.
+          if (caller.allowedTools !== null && !caller.allowedTools.includes(parsed.tool)) {
+            return deny(403, `tool "${parsed.tool}" is not allowed for this caller`)
+          }
+          const result = await dispatch(
+            parsed.tool,
+            parsed.args ?? {},
+            caller.callerId,
+            caller.allowedTools !== null
+          )
           res.writeHead(200, { 'content-type': 'application/json' })
           res.end(JSON.stringify({ ok: true, result }))
         } catch (e) {
@@ -470,6 +742,8 @@ export function startDeckControl(
       resolvePromise({
         url: `http://127.0.0.1:${addr.port}`,
         token,
+        mintCaller,
+        revokeCallerForSession,
         close: () => server.close()
       })
     })

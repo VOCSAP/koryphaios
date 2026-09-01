@@ -87,15 +87,18 @@ export interface SupervisorMcpConfigInput {
  * -- inventory, worktrees, templates, sandbox and announce stay
  * supervisor-only. deck_restart_session is deliberately EXCLUDED (operator
  * arbitration, 2026-09-01): a team-lead has no reason to restart a tile, it
- * closes then reopens; restart stays supervisor-only. Second reason this is
+ * closes then reopens; restart stays supervisor-only. Second reason this was
  * urgent rather than cosmetic -- deck-control.ts's 'deck_restart_session'
- * case calls deps.restartSession(id) with NO ownedSessions check (unlike
- * close), so it is unguarded on ANY tile; exposing it here would let the
+ * case used to call deps.restartSession(id) with NO ownedSessions check
+ * (unlike close), unguarded on ANY tile; exposing it here would have let the
  * team-lead restart tiles it never spawned, including the operator's own.
- * Carded as 6c380073 (the case itself is not fixed here). Read by
- * writeTeamLeadMcpConfig via DECK_CONTROL_TOOLS (deck-control-mcp.ts, piece
- * 1); NOT yet mirrored into the team-lead agent definition's own `tools:`
- * frontmatter (piece 3, held for the operator).
+ * Card 6c380073 gave that case the same per-caller ownedSessions guard close
+ * already had (deck-control.ts, 'deck_restart_session'), and moved the tool
+ * allow-list enforcement server-side (POST /call), so this array is no longer
+ * the only barrier even if it were ever widened. Read by writeTeamLeadMcpConfig
+ * via DECK_CONTROL_TOOLS (deck-control-mcp.ts, piece 1); NOT yet mirrored into
+ * the team-lead agent definition's own `tools:` frontmatter (piece 3, held for
+ * the operator).
  */
 export const TEAM_LEAD_DECK_TOOLS = [
   'deck_spawn_session',
@@ -142,16 +145,31 @@ export function writeSupervisorMcpConfig(input: SupervisorMcpConfigInput): strin
 
 /**
  * Write the team-lead's .mcp config file and return its path (Card ff091064,
- * piece 2). Same control server/token as the supervisor's -- one process-wide
- * deck-control endpoint, see deck-control.ts's header -- but its own file
- * (team-lead-mcp.json, never supervisor-mcp.json) so a live supervisor tile
- * and a live team-lead tile never race-overwrite each other's --mcp-config,
- * and DECK_CONTROL_TOOLS scoped to TEAM_LEAD_DECK_TOOLS.
+ * piece 2). Same control server, but its OWN token (input.controlToken --
+ * Card 6c380073 mints a distinct one per team-lead spawn, never the
+ * supervisor's) and its own file (never supervisor-mcp.json), so a live
+ * supervisor tile and a live team-lead tile never race-overwrite each
+ * other's --mcp-config. `fileName` is REQUIRED and NOT defaulted (audit fix
+ * #5, card 6c380073): it used to default to the fixed 'team-lead-mcp.json',
+ * but that default has no production caller anymore -- index.ts always
+ * passes a per-callerId name -- so a lingering default is a trap, not a
+ * convenience: the next caller who forgets the argument would silently
+ * rewrite a SHARED file name, and two live leads would end up trading
+ * tokens/identity. The compiler now closes that door instead of a comment.
+ * `allowedTools` is likewise REQUIRED (audit fix #6): the caller (spawnEntry,
+ * deck-control.ts) threads through the SAME array reference it already
+ * passed to mintCaller, so the server-side scope and this file's
+ * DECK_CONTROL_TOOLS can never independently drift apart -- no default here
+ * either, so a future caller cannot silently fall back to an implicit list.
  */
-export function writeTeamLeadMcpConfig(input: SupervisorMcpConfigInput): string {
-  const config = buildDeckControlMcpConfig(input, TEAM_LEAD_DECK_TOOLS)
+export function writeTeamLeadMcpConfig(
+  input: SupervisorMcpConfigInput,
+  fileName: string,
+  allowedTools: readonly string[]
+): string {
+  const config = buildDeckControlMcpConfig(input, allowedTools)
   mkdirSync(input.dir, { recursive: true })
-  const file = join(input.dir, 'team-lead-mcp.json')
+  const file = join(input.dir, fileName)
   writeFileSync(file, JSON.stringify(config, null, 2), 'utf-8')
   return file
 }

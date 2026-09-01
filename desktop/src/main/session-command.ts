@@ -89,10 +89,26 @@ export interface SessionCommandInput {
   mode: SpawnMode
 }
 
-/** ` --effort <e>` when an effort level is set, otherwise empty. */
+/**
+ * ` --effort "<e>"` when an effort level is set, otherwise empty.
+ *
+ * Card 6c380073 (second audit round): this used to interpolate the raw value
+ * with NEITHER an allow-list NOR quotes, while `agent`/`model` -- the two
+ * other identifier-shaped flags, built a few lines below in
+ * buildSessionCommandLine's caller -- went through sanitizeFlagValue AND
+ * were double-quoted (session-service.ts's create()). Two disciplines in one
+ * file: the exception was the bug, and `effort: "low; <command> #"` reached
+ * `bash -l -c` verbatim. Nothing upstream caught it either -- the documented
+ * enum ('low'|'medium'|'high'|'xhigh'|'max') exists ONLY in
+ * deck-control-mcp.ts's DECLARATIVE JSON schema (whose tools/call forwards
+ * arguments verbatim) and in two renderer pickers, so it gated no path at
+ * all. Applying the SAME sanitizer here closes the field for every caller at
+ * once -- the operator's advanced menu, a template, a restored workspace, and
+ * a deck-control agent -- rather than one entry point at a time.
+ */
 function effortFlag(effort?: string): string {
-  const e = effort?.trim()
-  return e ? ` --effort ${e}` : ''
+  const e = sanitizeFlagValue(effort ?? '')
+  return e ? ` --effort "${e}"` : ''
 }
 
 /** ` --mcp-config "<path>"` when set, otherwise empty. */
