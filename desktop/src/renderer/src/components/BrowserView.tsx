@@ -35,6 +35,7 @@ import type {
   PickAnnotation,
   PickAnnotationIntent,
   PickAnnotationPriority,
+  PickNote,
   SessionRuntime,
   WindowSource
 } from '@shared/types'
@@ -50,10 +51,11 @@ import {
 import type { ModelTarget } from '@shared/graph'
 import { targetKey, type ProviderCatalog } from '@shared/models'
 import { ModelPicker } from './ModelPicker'
+import { PickContextDialog } from './PickContextDialog'
 import type { WebviewIpcMessageEvent, WebviewNavigateEvent, WebviewTag } from '../webview-types'
 import { GLYPHS, GLYPH_ACTIONS } from './icons'
 import { useDeck } from '../store'
-import { useT } from '../i18n'
+import { useT, type TFn } from '../i18n'
 
 const THEMES: Record<'dark' | 'light', ITheme> = {
   dark: { background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#d4d4d4', selectionBackground: '#264f78' },
@@ -106,6 +108,27 @@ function firstWords(text: string, n: number): string {
   const words = text.trim().split(/\s+/).filter(Boolean)
   if (!words.length) return ''
   return words.slice(0, n).join(' ') + (words.length > n ? '…' : '')
+}
+
+/**
+ * The `browser.elementPrompt` lead sentence, plus `browser.elementPromptText`
+ * when the pick carried text -- the two i18n pieces every element-pick prompt
+ * opens with, hoisted out so the pick-context-prompt-on branch (which delays
+ * composing the rest of the prompt until Send) and the flag-off branch
+ * (which composes it immediately, as before) build it identically instead of
+ * duplicating the two calls.
+ */
+function composePickLead(pick: ElementPick, tt: TFn): string {
+  const selector = pick.selectors[0]?.value ?? pick.tagName
+  let lead = tt('browser.elementPrompt', {
+    tag: pick.tagName,
+    url: pick.pageUrl,
+    selector,
+    w: pick.width,
+    h: pick.height
+  })
+  if (pick.text) lead += tt('browser.elementPromptText', { text: pick.text })
+  return lead
 }
 
 /**
@@ -250,6 +273,29 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
   // destroy-drafts rule) -- cleared only by Send or Discard.
   const [reviewArmed, setReviewArmed] = useState(false)
   const [pendingAnnotations, setPendingAnnotations] = useState<PickAnnotation[]>([])
+  // Pick-context dialog (`pickContextPrompt` flag): the pick awaiting an
+  // operator note before its prompt is composed and delivered. A fresh pick
+  // arriving while one is already pending REPLACES it outright (last pick
+  // wins, no queue) -- `id` is how the in-flight capture below tells whether
+  // it is still writing into the CURRENT pending pick or a since-replaced one.
+  const [pendingPick, setPendingPick] = useState<{
+    id: string
+    pick: ElementPick
+    shot: 'pending' | 'ready' | 'none'
+    shotPath: string | null
+  } | null>(null)
+  // Always holds the in-flight (or already-settled) capture promise for the
+  // CURRENT pendingPick -- reassigned synchronously the moment a new pick
+  // replaces the old one, so onSend below always awaits the right one.
+  const pendingPickCaptureRef = useRef<Promise<string | null> | null>(null)
+  // Guards the capture's .then callback against calling setState after this
+  // view has unmounted (e.g. the operator left the browser view mid-capture).
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
   const [viewport, setViewport] = useState<ViewportPreset | null>(null)
   const [drawing, setDrawing] = useState(false)
   const [sendingDraw, setSendingDraw] = useState(false)
@@ -471,15 +517,42 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
       if (ev.channel !== 'deck:element-selected') return
       const pick = ev.args[0] as ElementPick
       const tt = tRef.current
-      const selector = pick.selectors[0]?.value ?? pick.tagName
-      let prompt = tt('browser.elementPrompt', {
-        tag: pick.tagName,
-        url: pick.pageUrl,
-        selector,
-        w: pick.width,
-        h: pick.height
-      })
-      if (pick.text) prompt += tt('browser.elementPromptText', { text: pick.text })
+
+      // Pick-context dialog (`pickContextPrompt` flag, DeckConfig): read
+      // fresh via getState() rather than a stale render-time value/closure,
+      // same discipline as pendingAnnotationsRef above. Nothing is composed
+      // or delivered here -- the dialog does that on Send, once the operator
+      // has had a chance to add a note.
+      if (useDeck.getState().pickContextPrompt) {
+        const id = crypto.randomUUID()
+        // Unconditional overwrite: a second pick while one is pending
+        // REPLACES the older one (documented on the state declaration above).
+        setPendingPick({ id, pick, shot: 'pending', shotPath: null })
+        // Same precondition as the OD4 auto-shot capture on the flag-off
+        // branch below, and the same highlight-free-by-construction
+        // guarantee applies (see that branch's comment, still true here).
+        if (webviewRef.current && pick.x !== undefined && pick.y !== undefined) {
+          const capture = (async () => {
+            const shotPath = await captureElementShot(pick)
+            // Guard against a dangling write: this view unmounted, or a
+            // newer pick already replaced this one, while the capture was
+            // still in flight.
+            if (mountedRef.current) {
+              setPendingPick((prev) =>
+                prev && prev.id === id ? { ...prev, shot: shotPath ? 'ready' : 'none', shotPath } : prev
+              )
+            }
+            return shotPath
+          })()
+          pendingPickCaptureRef.current = capture
+        } else {
+          pendingPickCaptureRef.current = Promise.resolve(null)
+          setPendingPick((prev) => (prev && prev.id === id ? { ...prev, shot: 'none' } : prev))
+        }
+        return
+      }
+
+      let prompt = composePickLead(pick, tt)
       prompt += formatPickDetails(pick)
       prompt += viewportContext()
 
@@ -551,6 +624,35 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preloadPath])
+
+  /** Pick-context dialog Send: composes the same prompt shape the flag-off
+   *  path would have delivered directly, with the operator's note folded in
+   *  via `formatPickDetails`'s `note` parameter. */
+  async function sendPendingPick(note: PickNote, dontAskAgain: boolean): Promise<void> {
+    const current = pendingPick
+    if (!current) return
+    const tt = tRef.current
+    // Close the dialog BEFORE awaiting the capture: a second Ctrl+Enter or
+    // click during the await would otherwise re-enter here with the same
+    // `pendingPick` and deliver the prompt twice. The capture promise is
+    // pinned locally so a pick arriving during the await cannot swap it.
+    const capture = pendingPickCaptureRef.current ?? Promise.resolve(null)
+    setPendingPick(null)
+    if (dontAskAgain) useDeck.getState().setPickContextPrompt(false)
+    // Always resolves (captureElementShot's own try/catch, or the
+    // Promise.resolve(null) set when the capture precondition failed).
+    const shotPath = await capture
+    let prompt = composePickLead(current.pick, tt)
+    prompt += formatPickDetails(current.pick, note)
+    prompt += viewportContext()
+    if (shotPath) prompt += tt('browser.elementShotPrompt', { path: shotPath })
+    deliverPrompt(prompt, 'toast.pickSent', 'toast.pickCopied')
+  }
+
+  /** Pick-context dialog Cancel: discard the pick, no toast. */
+  function cancelPendingPick(): void {
+    setPendingPick(null)
+  }
 
   function navigate(): void {
     const wv = webviewRef.current
@@ -1505,6 +1607,14 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
             </div>
           </div>
         </div>
+      )}
+      {pendingPick && (
+        <PickContextDialog
+          pick={pendingPick.pick}
+          shot={pendingPick.shot}
+          onSend={(note, dontAskAgain) => void sendPendingPick(note, dontAskAgain)}
+          onCancel={cancelPendingPick}
+        />
       )}
     </div>
   )

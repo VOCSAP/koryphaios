@@ -59,6 +59,23 @@ hovered element, no page-context prompt. `S` needs the embedded browser's
 capture pipeline — the external deck-design client simply ignores the key
 and stays armed.
 
+### Pick-context dialog
+
+After a single pick — an inspect-mode click, the `C` hover shortcut, or a pick
+delivered through an external design-endpoint app — a modal asks for an
+optional note plus an optional intent and priority before the description is
+delivered. Sending with nothing filled in yields exactly the previous prompt,
+byte for byte. A filled-in note's lines (`note:`, then `intent:`, then
+`priority:` when given) land at the top of the `[element context]` block,
+ahead of `role:`/`source:` and the rest. The element screenshot capture (see
+above) runs while the dialog is open and is awaited on send, so it is still
+attached even though the operator took a moment to type. `Esc`, clicking the
+backdrop, or Cancel discard the pick — nothing is pasted or copied. A "Don't
+ask again" box in the dialog and a matching toggle in Settings both write
+`pickContextPrompt` (persisted in the Deck config, default on) to skip the
+dialog on future picks. The `S` screenshot-only shortcut and review
+(annotate) mode are unaffected — they keep delivering exactly as before.
+
 ### Review mode (Chantier OD5)
 
 A second toolbar toggle turns the one-pick-one-prompt flow above into a

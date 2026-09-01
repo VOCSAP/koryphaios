@@ -311,6 +311,12 @@ export interface AppConfig {
    *  `roadmapFiltersCollapsed`: a fold that resets at every launch is the
    *  defect this field exists to avoid. */
   graphListCollapsed: boolean
+  /** Ask for operator context in a modal after every single element pick
+   *  (browser view and external design-endpoint picks). `false` restores the
+   *  immediate paste-on-click flow; the dialog's "don't ask again" box and the
+   *  Settings toggle both write this flag. Persisted like the folds above:
+   *  a choice that resets at every launch is the defect this avoids. */
+  pickContextPrompt: boolean
   /** Workflow-lane canvas height in px (resizable via its top-edge handle, persisted). */
   wfLaneHeight: number
   theme: 'dark' | 'light'
@@ -1277,6 +1283,18 @@ export interface PickAnnotation {
   pick: ElementPick
   /** Best-effort auto screenshot path (captureElementShot, same as the single-pick flow); absent on failure. */
   screenshotPath?: string
+}
+
+/**
+ * Operator context attached to ONE single pick through the pick-context
+ * dialog (the modal that opens after a click in inspect mode). `comment` may
+ * be empty; `intent`/`priority` are absent unless the operator chose them, so
+ * a dialog sent untouched yields exactly the pre-dialog prompt.
+ */
+export interface PickNote {
+  comment: string
+  intent?: PickAnnotationIntent
+  priority?: PickAnnotationPriority
 }
 
 /** One capturable OS window/screen for the browser view's Window mode (D2a). */

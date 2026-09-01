@@ -7,8 +7,8 @@
 // data for the agent, the same register as the existing `[viewport: …]`
 // suffix, not operator-facing copy -- no i18n keys here.
 
-import type { ElementPick, PickAnnotation } from './types'
-import { isParseableUrl, sanitizePickUrl } from './pick-security'
+import type { ElementPick, PickAnnotation, PickNote } from './types'
+import { isParseableUrl, PICK_BUDGET, sanitizePickUrl } from './pick-security'
 
 /** role + accessibleName combined onto one line, whichever is present. */
 function roleLine(pick: ElementPick): string | null {
@@ -54,13 +54,37 @@ function nearbyLine(pick: ElementPick): string | null {
 }
 
 /**
+ * Operator context from the pick-context dialog, as block lines: the note
+ * first (it is what the operator actually wants), then intent and priority.
+ * Whitespace runs (newlines included) collapse to one space so a multi-line
+ * note cannot masquerade as further `key: value` lines of the block, and the
+ * comment is capped at the same budget as a review annotation. Empty or
+ * whitespace-only comments emit nothing; absent intent/priority emit nothing.
+ */
+function noteLines(note: PickNote | undefined): string[] {
+  if (!note) return []
+  const out: string[] = []
+  const comment = note.comment
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, PICK_BUDGET.annotationCommentMaxLength)
+  if (comment) out.push(`note: ${comment}`)
+  if (note.intent) out.push(`intent: ${note.intent}`)
+  if (note.priority) out.push(`priority: ${note.priority}`)
+  return out
+}
+
+/**
  * A compact "[element context]" block from the enriched pick fields, or ''
  * when the pick carries none of them (older external bundles, or a plain
  * element with no signal). Callers append this directly after the existing
- * elementPrompt/elementPromptText sentences.
+ * elementPrompt/elementPromptText sentences. `note` (pick-context dialog)
+ * adds its lines at the top of the block; a note with nothing in it leaves
+ * the output byte-identical to the note-less call.
  */
-export function formatPickDetails(pick: ElementPick): string {
+export function formatPickDetails(pick: ElementPick, note?: PickNote): string {
   const lines = [
+    ...noteLines(note),
     roleLine(pick),
     sourceLine(pick),
     reactLine(pick),

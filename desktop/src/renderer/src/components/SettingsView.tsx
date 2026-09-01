@@ -37,6 +37,8 @@ export function SettingsView(): React.JSX.Element {
   const availableLocales = useDeck((s) => s.availableLocales)
   const updateConfig = useDeck((s) => s.updateConfig)
   const openSettings = useDeck((s) => s.openSettings)
+  const pickContextPrompt = useDeck((s) => s.pickContextPrompt)
+  const setPickContextPrompt = useDeck((s) => s.setPickContextPrompt)
 
   const [active, setActive] = useState<Category>('general')
 
@@ -197,6 +199,16 @@ export function SettingsView(): React.JSX.Element {
                 <span>{t('settings.helpButton')}</span>
               </label>
               <small className="field-check-help">{t('settings.helpModelHint')}</small>
+
+              <label className="field field-check">
+                <input
+                  type="checkbox"
+                  checked={pickContextPrompt}
+                  onChange={(e) => setPickContextPrompt(e.target.checked)}
+                />
+                <span>{t('settings.pickContextPrompt')}</span>
+              </label>
+              <small className="field-check-help">{t('settings.pickContextPromptHint')}</small>
 
               <div className="field">
                 <span>{t('settings.spawnMode')}</span>

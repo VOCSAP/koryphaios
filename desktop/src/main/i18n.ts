@@ -325,6 +325,9 @@ export const EN_DEFAULTS: Record<string, string> = {
   'settings.helpModelHelp':
     "Each question is a one-shot read-only inference with the active view's context — any catalog model (frontier CLI or local endpoint). Haiku is cheap and usually enough; note local endpoints cannot read the project files.",
   'settings.helpModelHint': "The assistant's model is picked in the Models category.",
+  'settings.pickContextPrompt': 'Ask for context after picking an element',
+  'settings.pickContextPromptHint':
+    'Opens a dialog for a note, intent and priority before the element description is pasted to the agent.',
   'settings.wandModel': 'Roadmap context-wand model',
   'settings.wandModelHelp':
     "Read-only inference drafting an item's context briefing (the operator reviews before saving). Haiku default.",
@@ -619,6 +622,16 @@ export const EN_DEFAULTS: Record<string, string> = {
   'browser.annotateRemove': 'Remove this annotation',
   'browser.annotateDiscard': 'Discard',
   'browser.annotateSend': 'Send review ({n})',
+  'browser.pickContextTitle': 'Add context for the agent',
+  'browser.pickContextSummary': '<{tag}> {w}x{h}px, selector: {selector}',
+  'browser.pickContextPlaceholder': 'What is wrong, or what should change here? (optional)',
+  'browser.pickContextIntentUnset': 'Intent…',
+  'browser.pickContextPriorityUnset': 'Priority…',
+  'browser.pickContextShotPending': 'Capturing the element screenshot…',
+  'browser.pickContextShotReady': 'Element screenshot captured',
+  'browser.pickContextShotNone': 'No element screenshot',
+  'browser.pickContextSend': 'Send to agent',
+  'browser.pickContextDontAsk': "Don't ask again (Settings restores it)",
   'browser.devtools': "Open the page's DevTools",
   'browser.external': 'Open in the system browser',
   'browser.dockLabel': 'Docked agent',

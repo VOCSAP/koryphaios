@@ -1,10 +1,11 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { sanitizeGlowColor } from '@shared/palette'
-import { SANDBOX_BUILD_PTY_ID } from '@shared/types'
+import { SANDBOX_BUILD_PTY_ID, type DesignPickEvent, type PickNote } from '@shared/types'
 import { formatPickDetails } from '@shared/pick-prompt'
 import { GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
-import { useT } from '../i18n'
+import { useT, type TFn } from '../i18n'
+import { PickContextDialog } from './PickContextDialog'
 import { Sidebar } from './Sidebar'
 import { TileArea } from './TileArea'
 import { DisplayModeBar } from './DisplayModeBar'
@@ -44,6 +45,51 @@ import { KeyBar } from './KeyBar'
 /** Thin indirection so the mobile home view shares the agents key bar. */
 function KeyBarForSession({ id }: { id: string }): React.JSX.Element {
   return <KeyBar sessionId={id} />
+}
+
+/**
+ * The full external-app pick prompt (design endpoint, PLAN D2b): optional
+ * `design.sourcePrefix`, the `browser.elementPrompt`/`elementPromptText`
+ * lead, then `formatPickDetails` -- `note` folds in the pick-context
+ * dialog's comment/intent/priority when present, and produces the exact
+ * pre-dialog prompt (byte-identical) when omitted, per formatPickDetails'
+ * own contract. Shared by the flag-off direct path and the dialog's Send so
+ * the two never drift apart.
+ */
+function composeDesignPickPrompt(event: DesignPickEvent, note: PickNote | undefined, tt: TFn): string {
+  const pick = event.pick
+  const selector = pick.selectors[0]?.value ?? pick.tagName
+  let prompt = event.source ? tt('design.sourcePrefix', { source: event.source }) : ''
+  prompt += tt('browser.elementPrompt', {
+    tag: pick.tagName,
+    url: pick.pageUrl,
+    selector,
+    w: pick.width,
+    h: pick.height
+  })
+  if (pick.text) prompt += tt('browser.elementPromptText', { text: pick.text })
+  prompt += formatPickDetails(pick, note)
+  return prompt
+}
+
+/** Paste into the docked (else selected) running agent, else copy to the
+ *  clipboard -- the external-app pick's own delivery, same shape as
+ *  BrowserView.tsx's deliverPrompt but resolving its own target since this
+ *  path has no single "paired" session. Extracted so the flag-off direct
+ *  path and the pick-context dialog's Send share one target-resolution +
+ *  ptyInput/clipboard implementation instead of two. */
+function deliverDesignPick(prompt: string): void {
+  const { sessions, browserPairedId, selectedId, showToast } = useDeck.getState()
+  const target = [browserPairedId, selectedId]
+    .map((id) => sessions.find((s) => s.id === id))
+    .find((s) => s && s.status === 'running' && !s.supervisor)
+  if (target) {
+    window.api.ptyInput(target.id, `\x1b[200~${prompt}\x1b[201~`)
+    showToast('toast.pickSent')
+  } else {
+    void navigator.clipboard.writeText(prompt)
+    showToast('toast.pickCopied', 'info')
+  }
 }
 
 /** Companion link overlay (PLAN MB1/MB2): reconnecting curtain, and the
@@ -181,34 +227,34 @@ export function App(): React.JSX.Element {
   // store to keep i18n out of it (store.ts and i18n.ts would import-cycle).
   const tRef = useRef(t)
   tRef.current = t
+  // Pick-context dialog (`pickContextPrompt` flag): the external-app pick
+  // awaiting an operator note. This path has no capture capability (unlike
+  // BrowserView.tsx's webview picks), so PickContextDialog always renders it
+  // with shot="none". A second pick while one is pending replaces the older
+  // one -- there is no in-flight async write to guard here (no screenshot),
+  // so unlike BrowserView.tsx's pendingPick this needs no id/mounted guard.
+  const [pendingDesignPick, setPendingDesignPick] = useState<DesignPickEvent | null>(null)
   useEffect(() => {
     return window.api.onDesignPick((event) => {
-      const tt = tRef.current
-      const { sessions, browserPairedId, selectedId, showToast } = useDeck.getState()
-      const pick = event.pick
-      const selector = pick.selectors[0]?.value ?? pick.tagName
-      let prompt = event.source ? tt('design.sourcePrefix', { source: event.source }) : ''
-      prompt += tt('browser.elementPrompt', {
-        tag: pick.tagName,
-        url: pick.pageUrl,
-        selector,
-        w: pick.width,
-        h: pick.height
-      })
-      if (pick.text) prompt += tt('browser.elementPromptText', { text: pick.text })
-      prompt += formatPickDetails(pick)
-      const target = [browserPairedId, selectedId]
-        .map((id) => sessions.find((s) => s.id === id))
-        .find((s) => s && s.status === 'running' && !s.supervisor)
-      if (target) {
-        window.api.ptyInput(target.id, `\x1b[200~${prompt}\x1b[201~`)
-        showToast('toast.pickSent')
-      } else {
-        void navigator.clipboard.writeText(prompt)
-        showToast('toast.pickCopied', 'info')
+      if (useDeck.getState().pickContextPrompt) {
+        setPendingDesignPick(event)
+        return
       }
+      deliverDesignPick(composeDesignPickPrompt(event, undefined, tRef.current))
     })
   }, [])
+
+  function sendPendingDesignPick(note: PickNote, dontAskAgain: boolean): void {
+    const current = pendingDesignPick
+    if (!current) return
+    deliverDesignPick(composeDesignPickPrompt(current, note, tRef.current))
+    setPendingDesignPick(null)
+    if (dontAskAgain) useDeck.getState().setPickContextPrompt(false)
+  }
+
+  function cancelPendingDesignPick(): void {
+    setPendingDesignPick(null)
+  }
 
   // Ctrl+Shift+F toggles the cross-session search panel. Terminals swallow the
   // combo before the PTY sees it (TerminalTile's key handler) but let the DOM
@@ -251,6 +297,14 @@ export function App(): React.JSX.Element {
       <div className="app app-mobile">
         <StatusBanner />
         <RemoteLinkOverlay />
+        {pendingDesignPick && (
+          <PickContextDialog
+            pick={pendingDesignPick.pick}
+            shot="none"
+            onSend={sendPendingDesignPick}
+            onCancel={cancelPendingDesignPick}
+          />
+        )}
         <div className={`mview${view === 'agents' ? '' : ' view-hidden'}`}>
           <ErrorBoundary scope="agents">
             <MobileAgents />
@@ -306,6 +360,14 @@ export function App(): React.JSX.Element {
       {/* Fixed overlay (PLAN O5): shown while the broker is unreachable. */}
       <StatusBanner />
       <RemoteLinkOverlay />
+      {pendingDesignPick && (
+        <PickContextDialog
+          pick={pendingDesignPick.pick}
+          shot="none"
+          onSend={sendPendingDesignPick}
+          onCancel={cancelPendingDesignPick}
+        />
+      )}
       {companionOpen && !remote && <CompanionDialog />}
       {usageOpen && <UsageLimitsModal />}
       <NavRail />

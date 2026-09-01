@@ -1872,6 +1872,35 @@ small.field-error {
   margin: 0 0 8px;
 }
 
+/* Pick-context dialog (PickContextDialog.tsx, `pickContextPrompt` flag): a
+   flex column supplies the vertical rhythm between the summary, the reused
+   .annotate-comment/-select-row/-selects (self-contained for size, but their
+   usual spacing normally comes from the annotate review's .annotate-row
+   flex-column wrapper, which this dialog is not inside), the "don't ask
+   again" toggle and the footer -- so the h2's own bottom margin and
+   .modal-actions' own top margin are zeroed here to avoid doubling up. */
+.modal-pick-context {
+  width: 440px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.modal-pick-context h2 {
+  margin-bottom: 0;
+}
+
+.modal-pick-context .modal-actions {
+  margin-top: 0;
+}
+
+.pick-context-summary {
+  color: var(--fg-dim);
+  line-height: 1.4;
+  font-size: 12px;
+  margin: 0;
+}
+
 .primary.danger {
   background: var(--danger);
 }
