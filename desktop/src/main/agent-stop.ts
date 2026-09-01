@@ -80,10 +80,11 @@ export interface StopReport {
   outcomes: StopOutcome[]
   /**
    * Requested peerIds with no live, peer-resolved tile to stop -- malformed,
-   * dormant, or absent (resolveDirectiveTargets's `missing`, same meaning as
-   * executeDirective's). Only ever non-empty when `peerIds` was passed:
-   * the peerIds-absent ("everyone") path has nothing to report as missing.
-   * Omitted rather than `[]` when there is nothing to show.
+   * dormant, absent, or ambiguous (several live tiles share the id)
+   * (resolveDirectiveTargets's `missing`, same meaning as executeDirective's).
+   * Only ever non-empty when `peerIds` was passed: the peerIds-absent
+   * ("everyone") path has nothing to report as missing. Omitted rather than
+   * `[]` when there is nothing to show.
    */
   missing?: string[]
   /**
@@ -181,6 +182,7 @@ export async function broadcastStop(
   const all = deps.list()
   let targets: Array<{ id: string; peerId: string | null }>
   let missing: string[]
+  let ambiguous: string[] = []
   if (peerIds === undefined) {
     // The header button: every LIVE tile, peer-resolved or not -- a tile
     // whose peer hasn't registered yet is still a real process worth
@@ -213,6 +215,7 @@ export async function broadcastStop(
     const resolved = resolveDirectiveTargets(wellTyped, all)
     targets = resolved.matched
     missing = [...resolved.missing, ...badType]
+    ambiguous = resolved.ambiguous
   }
   const settled = await Promise.allSettled(
     targets.map(async (t): Promise<StopOutcome> => {
@@ -242,7 +245,12 @@ export async function broadcastStop(
     return { id: t.id, peerId: t.peerId, result: 'error' }
   })
   if (missing.length > 0) {
-    deps.journal(`stop ${mode}: ${missing.length} target(s) not reachable: ${missing.join(', ')}`)
+    // Read resolveDirectiveTargets's own `ambiguous` field rather than
+    // re-deriving it from `all`/`targets` -- re-filtering here would
+    // duplicate the liveness predicate in a second place (review round).
+    const ambigNote =
+      ambiguous.length > 0 ? ` (${ambiguous.length} ambiguous, several live tiles share the id: ${ambiguous.join(', ')})` : ''
+    deps.journal(`stop ${mode}: ${missing.length} target(s) not reachable: ${missing.join(', ')}${ambigNote}`)
   }
   deps.journal(`stop ${mode}: ${outcomes.length} target(s)`)
   return { outcomes, missing }

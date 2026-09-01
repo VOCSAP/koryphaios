@@ -69,3 +69,58 @@ test("resolveDirectiveTargets returns no matches when nothing is live", () => {
   expect(matched).toEqual([]);
   expect(missing).toEqual(["host-dev"]);
 });
+
+test("resolveDirectiveTargets fails closed (missing) when two live tiles share a peerId", () => {
+  const sessions = [
+    sess({ id: "t1", peerId: "dup-peer", status: "running" }),
+    sess({ id: "t2", peerId: "dup-peer", status: "running" }), // duplicate live peerId
+    sess({ id: "t3", peerId: "solo-peer", status: "running" })
+  ];
+  const { matched, missing } = resolveDirectiveTargets(["dup-peer", "solo-peer"], sessions);
+  // The collision is refused entirely: no tile for "dup-peer" is struck,
+  // rather than Array.find silently picking t1 or t2. Exactly one entry,
+  // not one per duplicate tile -- a `toContain` would also pass a `missing`
+  // holding "dup-peer" twice, which would misreport "2 target(s) not
+  // reachable" downstream.
+  expect(matched).toEqual([{ id: "t3", peerId: "solo-peer" }]);
+  expect(missing).toEqual(["dup-peer"]);
+});
+
+test("resolveDirectiveTargets: an exited tile sharing a live tile's peerId is not a false collision", () => {
+  const sessions = [
+    sess({ id: "t1", peerId: "same-id", status: "running" }),
+    sess({ id: "t2", peerId: "same-id", status: "exited" }) // dormant, not live
+  ];
+  const { matched, missing } = resolveDirectiveTargets(["same-id"], sessions);
+  expect(matched).toEqual([{ id: "t1", peerId: "same-id" }]);
+  expect(missing).toEqual([]);
+});
+
+test("resolveDirectiveTargets: three live tiles sharing a peerId still collapse into one missing entry", () => {
+  const sessions = [
+    sess({ id: "t1", peerId: "trio", status: "running" }),
+    sess({ id: "t2", peerId: "trio", status: "running" }),
+    sess({ id: "t3", peerId: "trio", status: "running" })
+  ];
+  const { matched, missing } = resolveDirectiveTargets(["trio"], sessions);
+  expect(matched).toEqual([]);
+  expect(missing).toEqual(["trio"]);
+});
+
+test("resolveDirectiveTargets: ambiguous is a subset of missing, populated only by collisions", () => {
+  const sessions = [
+    sess({ id: "t1", peerId: "dup-peer", status: "running" }),
+    sess({ id: "t2", peerId: "dup-peer", status: "running" }),
+    sess({ id: "t3", peerId: "solo-peer", status: "running" })
+  ];
+  const { matched, missing, ambiguous } = resolveDirectiveTargets(
+    ["dup-peer", "solo-peer", "host-absent", "Bad Peer!"],
+    sessions
+  );
+  expect(matched).toEqual([{ id: "t3", peerId: "solo-peer" }]);
+  expect(missing.sort()).toEqual(["Bad Peer!", "dup-peer", "host-absent"]);
+  // ambiguous names only the collision, not the plain-absent id, and every
+  // entry in it is also present in `missing` (subset, not a competing bucket).
+  expect(ambiguous).toEqual(["dup-peer"]);
+  for (const id of ambiguous) expect(missing).toContain(id);
+});

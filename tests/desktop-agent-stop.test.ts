@@ -227,6 +227,28 @@ test('a tile with a null peerId can never be matched by a peerIds subset (review
   expect(missing).toEqual(['null'])
 })
 
+test('two live tiles sharing a peerId are journaled as ambiguous, from the resolver field, not re-derived', async () => {
+  const lines: string[] = []
+  const deps = fakeDeps({
+    list: () => [
+      tile({ id: 'a', peerId: 'dup-peer' }),
+      tile({ id: 'b', peerId: 'dup-peer' }),
+      tile({ id: 'c', peerId: 'exited-twin', status: 'exited' }),
+      tile({ id: 'd', peerId: 'exited-twin' })
+    ],
+    journal: (line) => lines.push(line)
+  })
+  const { outcomes, missing } = await broadcastStop('hard', deps, [
+    'dup-peer',
+    'exited-twin',
+    'host-absent'
+  ])
+  expect(outcomes.map((o) => o.id)).toEqual(['d'])
+  expect(missing.sort()).toEqual(['dup-peer', 'host-absent'])
+  const note = lines.find((l) => l.includes('not reachable')) ?? ''
+  expect(note).toContain('(1 ambiguous, several live tiles share the id: dup-peer)')
+})
+
 test('peerIds present trims whitespace, dedupes, and rejects malformed charset via resolveDirectiveTargets (review round, correction 2)', async () => {
   const touched: string[] = []
   const deps = fakeDeps({ interrupt: (id) => { touched.push(id); return 'interrupted' } })

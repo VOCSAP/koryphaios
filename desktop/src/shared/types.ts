@@ -678,7 +678,7 @@ export interface StopOutcome {
 export interface StopReport {
   mode: StopMode
   outcomes: StopOutcome[]
-  /** Requested peerIds with no live, peer-resolved tile to stop. Omitted when empty. */
+  /** Requested peerIds with no SINGLE live, peer-resolved tile to stop -- absent, dormant, malformed, or matching several live tiles. Omitted when empty. */
   missing?: string[]
   /** Absent/partial in 'soft' mode: a soft stop asks, it does not touch the lock table. */
   locks: { parked?: number; released?: number; error?: string }
