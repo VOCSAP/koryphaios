@@ -494,11 +494,60 @@ db.run(`
     host TEXT NOT NULL,
     cwd TEXT NOT NULL,
     last_active_at TEXT NOT NULL,
+    cc_session_id TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (instance_token) REFERENCES peers(instance_token)
   )
 `);
 
 db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_lookup ON peer_sessions(group_id, host, cwd)`);
+
+// Migration (idempotent): cc_session_id on peer_sessions -- card 3d121a74, lot
+// L3-a. STORED in the row, deliberately NOT part of session_key: the tile token
+// decides WHICH ROW, this decides whether a row can be reclaimed after the tile
+// token itself changed. It is what catches the Restore gesture, which mints a
+// NEW tile id (fromWorkspaceSessions: id randomUUID()) while PRESERVING the CC
+// session (sessionId: s.claudeSessionId) -- keyed on the tile token alone, a
+// restored tile would lose its identity, which the operator's rule 3 forbids.
+//
+// The ALTER's own outcome is the migration flag for the one-shot purge below:
+// it SUCCEEDS exactly once per pre-L3-a database, and throws duplicate-column
+// forever after (and on a fresh database, where the CREATE TABLE above already
+// carries the column and there is nothing to purge).
+let peerSessionsColumnAdded = false;
+try {
+  db.run("ALTER TABLE peer_sessions ADD COLUMN cc_session_id TEXT NOT NULL DEFAULT ''");
+  peerSessionsColumnAdded = true;
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
+
+if (peerSessionsColumnAdded) {
+  // ONE-SHOT ROTATION (card 3d121a74). Widening the key makes every stored
+  // session_key unreachable, and the rows CANNOT be migrated: peer_sessions
+  // holds no column identifying a tile or a CC session, so there is nothing to
+  // recompute a key from. Coexistence (try the new key, fall back to the old)
+  // was refused by design and IS the mechanism of the bug: the old key hands a
+  // tile ANOTHER tile's ROW, hence its instance_token, hence its mail queue.
+  //
+  // So: purge peer_sessions, and NEVER peers. Peer rows keep their tokens and
+  // age out through the dormant TTL. Everyone's peer_id counter advances one
+  // last notch, which is assumed.
+  //
+  // Two numbers, one line. The undelivered count is the one nobody thinks to
+  // take: `messages` is keyed by to_token (never by session_key), so the purge
+  // touches no token -- a tile that re-registers afterwards gets a FRESH token
+  // and its old mail stays attached to the old one, orphaned, delivered to
+  // NOBODY, swept by the 24h dormant pass. That loss is CORRECT (delivering it
+  // is precisely the defect being closed) but it must never be silent.
+  const undelivered = (db.query("SELECT COUNT(*) AS n FROM messages WHERE delivered = 0")
+    .get() as { n: number }).n;
+  const purged = (db.query("SELECT COUNT(*) AS n FROM peer_sessions").get() as { n: number }).n;
+  db.run("DELETE FROM peer_sessions");
+  log.info(
+    `migration 3d121a74: peer_sessions purged for the widened identity key -- ${purged} session row(s) dropped, ${undelivered} undelivered message(s) now unreachable (peers untouched, tokens age out via the dormant TTL)`
+  );
+}
 
 // Courrier lot 1A (desktop/docs/design-courrier-lot1.md section 6.1, card
 // 54b1c71a). One row per Deck LAUNCH, minted in-memory and never persisted
@@ -964,7 +1013,19 @@ for (const col of [
 
 // --- Helpers ---
 
-function sessionKey(host: string, cwd: string, groupId: GroupId): string {
+/**
+ * The PRE-L3-a identity key: sha256(host, cwd, group_id). Kept verbatim, and
+ * kept CALLED (by sessionKey below, on BOTH its branches) rather than merely
+ * kept around: that is what makes "a legacy row is still resurrected by a
+ * register with no discriminant" true BY CONSTRUCTION for every non-Deck CLI
+ * user, instead of an equality a test would have to pin with a frozen hex
+ * literal. This is the ONLY base chain in the file, so a change to it moves
+ * both the legacy and the widened key together -- see sessionKey, which hashes
+ * this DIGEST rather than re-listing the same fields (an earlier revision
+ * re-copied them inline, and a review measured that a separator changed here
+ * would then not have followed there).
+ */
+function legacySessionKey(host: string, cwd: string, groupId: GroupId): string {
   return createHash("sha256")
     .update(host)
     .update("\0")
@@ -972,6 +1033,47 @@ function sessionKey(host: string, cwd: string, groupId: GroupId): string {
     .update("\0")
     .update(groupId)
     .digest("hex");
+}
+
+/**
+ * Identity key for peer_sessions (card 3d121a74, lot L3-a). The triplet
+ * (host, cwd, group_id) gives ONE row per directory, while a team deliberately
+ * puts N agents in one directory: the 2nd..Nth tile could never own its own
+ * row, and in the dormant window a DIFFERENT CC session opened in that
+ * directory inherited the previous occupant's instance_token -- hence its
+ * undelivered mail, since `messages` is keyed by to_token. Operator
+ * arbitration of 2026-09-01: several agents in one directory is SUPPORTED,
+ * so the key gets a per-tile discriminant.
+ *
+ * `deskSession` is the Deck's per-tile token (CLAUDE_PEERS_DESK_SESSION, a
+ * randomUUID stable across /clear, compact and restart). It must stay an
+ * unguessable CAPABILITY: a tile INDEX, slot number, tile name or pid would
+ * be DERIVABLE by any agent in the same repo and would turn this widening
+ * into a regression. Residual, stated plainly: an agent that can read another
+ * tile's environment (same OS account, outside a sandbox) can impersonate it.
+ * Same class of residual as the deck-control token and as `role` -- never
+ * trust this field as authorization proof; it raises the bar (122 random bits
+ * on top of the group secret) rather than creating a new exposure, since
+ * today's bar is (host, cwd, group_id), three values any agent in the repo
+ * already knows.
+ *
+ * BOTH branches are built on legacySessionKey: the empty one returns its
+ * digest unchanged, the widened one HASHES that digest with the discriminant
+ * instead of re-listing (host, cwd, group_id) a second time. That is a
+ * structural property, not a behavioural one -- swapping the call for a
+ * value-identical inline copy is undetectable by any test, which is exactly
+ * why the shape has to carry the guarantee rather than an assertion.
+ */
+function sessionKey(
+  host: string,
+  cwd: string,
+  groupId: GroupId,
+  deskSession?: string | null
+): string {
+  const discriminant = (deskSession ?? "").trim();
+  const base = legacySessionKey(host, cwd, groupId);
+  if (!discriminant) return base;
+  return createHash("sha256").update(base).update("\0").update(discriminant).digest("hex");
 }
 
 function deriveDefaultId(host: string, cwd: string, groupId: GroupId): string {
@@ -1494,11 +1596,12 @@ const purgeOldUndeliveredStmt = db.prepare(
 );
 
 const upsertPeerSession = db.prepare(`
-  INSERT INTO peer_sessions (session_key, instance_token, group_id, host, cwd, last_active_at)
-  VALUES (?, ?, ?, ?, ?, ?)
+  INSERT INTO peer_sessions (session_key, instance_token, group_id, host, cwd, last_active_at, cc_session_id)
+  VALUES (?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT (session_key) DO UPDATE SET
     instance_token = excluded.instance_token,
-    last_active_at = excluded.last_active_at
+    last_active_at = excluded.last_active_at,
+    cc_session_id = excluded.cc_session_id
 `);
 
 // --- TTL purge of undelivered messages ---
@@ -1624,11 +1727,45 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
   }
   // For 'default', secret_hash is ignored.
 
-  // 2) Resume lookup keyed on (host, cwd, group_id).
-  const sk = sessionKey(body.host, body.cwd, groupId);
-  const session = db.query(
+  // 2) Resume lookup keyed on (host, cwd, group_id, desk_session).
+  // Card 3d121a74 lot L3-a: the tile token widens the key so N agents sharing
+  // one directory each own a row. Absent (non-Deck CLI), the key delegates to
+  // the legacy triplet, so an existing legacy row still resurrects.
+  const ccSessionId = (body.cc_session_id ?? "").trim();
+  const sk = sessionKey(body.host, body.cwd, groupId, body.desk_session);
+  let session = db.query(
     "SELECT instance_token FROM peer_sessions WHERE session_key = ?"
   ).get(sk) as { instance_token: string } | null;
+
+  if (!session && ccSessionId) {
+    // SECONDARY lookup, only on a key MISS: the Restore gesture mints a NEW
+    // tile id while preserving the CC session (fromWorkspaceSessions), so the
+    // widened key legitimately misses on a session that IS continuing. The CC
+    // session id is deliberately not part of the key -- it rotates on /clear,
+    // which would move the key under a living tile's feet -- it only decides
+    // whether an existing row may be reclaimed.
+    //
+    // Two guards, both load-bearing. The empty check above is not cosmetic:
+    // cc_session_id defaults to the empty string, so an unguarded equality
+    // would match EVERY legacy row and hand out someone else's line, which is
+    // the exact defect this lot closes. And the lookup is scoped to
+    // (group_id, host, cwd) rather than trusting the CC id alone, then FAILS
+    // CLOSED when two rows carry it (two tiles restored from one CC session):
+    // picking one silently is how a token, and its mail, ends up on the wrong
+    // tile. LIMIT 2 is enough to detect "more than one" without scanning.
+    const candidates = db.query(
+      `SELECT instance_token FROM peer_sessions
+        WHERE group_id = ? AND host = ? AND cwd = ? AND cc_session_id = ?
+        LIMIT 2`
+    ).all(groupId, body.host, body.cwd, ccSessionId) as { instance_token: string }[];
+    if (candidates.length === 1) {
+      session = candidates[0] ?? null;
+    } else if (candidates.length > 1) {
+      log.warn(
+        `cc_session_id ${ccSessionId.slice(0, 16)} matches ${candidates.length} session rows; refusing to pick one, minting a fresh peer`
+      );
+    }
+  }
 
   if (session) {
     const existingPeer = db.query(
@@ -1676,7 +1813,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
         normalizedRole,
         existingPeer.instance_token
       );
-      upsertPeerSession.run(sk, existingPeer.instance_token, groupId, body.host, body.cwd, now);
+      upsertPeerSession.run(sk, existingPeer.instance_token, groupId, body.host, body.cwd, now, ccSessionId);
       return {
         peer_id: existingPeer.peer_id,
         instance_token: existingPeer.instance_token,
@@ -1738,7 +1875,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
       body.claude_cli_pid ?? null,
       normalizedRole
     );
-    upsertPeerSession.run(sk, session.instance_token, groupId, body.host, body.cwd, now);
+    upsertPeerSession.run(sk, session.instance_token, groupId, body.host, body.cwd, now, ccSessionId);
     return { peer_id: reusedId, instance_token: session.instance_token, role: normalizedRole };
   }
 
@@ -1763,7 +1900,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
     body.claude_cli_pid ?? null,
     normalizedRole
   );
-  upsertPeerSession.run(sk, newToken, groupId, body.host, body.cwd, now);
+  upsertPeerSession.run(sk, newToken, groupId, body.host, body.cwd, now, ccSessionId);
   return { peer_id: newPeerId, instance_token: newToken, role: normalizedRole };
 }
 

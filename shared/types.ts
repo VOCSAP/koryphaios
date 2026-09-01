@@ -97,6 +97,28 @@ export interface RegisterRequest {
   // /register, dormant resume included (see Peer.role). Normalized
   // broker-side. Never trust this field as authorization proof.
   role?: string;
+  /**
+   * Card 3d121a74 lot L3-a. The Deck's per-tile token
+   * (CLAUDE_PEERS_DESK_SESSION), part of the broker's identity KEY: it decides
+   * WHICH peer_sessions row, so N agents sharing one directory each own one
+   * instead of fighting over a single row. A randomUUID stable across /clear,
+   * compact and restart. Optional: a non-Deck CLI omits it and the broker
+   * delegates to the legacy (host, cwd, group_id) key, unchanged.
+   * Never trust this field as authorization proof -- it is a capability the
+   * caller DECLARES, not one it proves; an agent able to read another tile's
+   * environment can present it. It raises the bar, it does not fence.
+   */
+  desk_session?: string;
+  /**
+   * Card 3d121a74 lot L3-a. The CURRENT Claude Code session id
+   * (CLAUDE_CODE_SESSION_ID). Deliberately NOT part of the key -- it rotates
+   * on /clear, which would move the key under a living tile -- it is STORED in
+   * the row and only decides whether an existing row may be reclaimed after
+   * the tile token itself changed (the Restore gesture mints a new tile id and
+   * keeps the CC session). Optional, and same caveat as desk_session: declared
+   * by the caller, never an authorization proof.
+   */
+  cc_session_id?: string;
 }
 
 export interface RegisterResponse {

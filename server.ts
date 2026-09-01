@@ -1626,6 +1626,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           // sites must carry this or the role silently disappears on
           // switch_group (their bodies already diverge on claude_cli_pid).
           role: process.env.CLAUDE_PEERS_ROLE,
+          // Card 3d121a74 lot L3-a: same two sources as the boot /register
+          // below, and the same "both sites or nothing" rule as `role` -- a
+          // switch_group that omitted desk_session would silently fall back to
+          // the legacy directory-wide key and re-open the shared-row defect
+          // for exactly the peers that just changed group. Pinned by a test
+          // comparing the two bodies' identity keys as SETS.
+          desk_session: process.env.CLAUDE_PEERS_DESK_SESSION,
+          cc_session_id: process.env.CLAUDE_CODE_SESSION_ID,
         });
         myInstanceToken = reg.instance_token;
         myPeerId = reg.peer_id;
@@ -2195,6 +2203,10 @@ async function main() {
     group_secret_hash: groupSecretHash,
     // Card a2f61172: same source as the switch_group /register above.
     role: process.env.CLAUDE_PEERS_ROLE,
+    // Card 3d121a74 lot L3-a: same two sources as the switch_group /register
+    // above (see the note there for why both sites must carry them).
+    desk_session: process.env.CLAUDE_PEERS_DESK_SESSION,
+    cc_session_id: process.env.CLAUDE_CODE_SESSION_ID,
   });
   myInstanceToken = reg.instance_token;
   myPeerId = reg.peer_id;
