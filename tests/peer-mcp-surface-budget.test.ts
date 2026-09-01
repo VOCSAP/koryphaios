@@ -30,7 +30,7 @@ const SRC = await Bun.file(new URL("../server.ts", import.meta.url)).text();
 // Headroom above the post-lot measure (~17 800) is deliberately small, so a
 // single verbose description fails rather than ten small ones accumulating.
 const CEILING_CHARS = 19_000;
-// Below this, the extractor lost a block: 18 tools cannot fit in so little.
+// Below this, the extractor lost a block: a full TOOLS array cannot fit in so little.
 const FLOOR_CHARS = 8_000;
 
 function stripCommentLines(block: string): string {
@@ -113,6 +113,21 @@ describe("roadmap_list: the singular filters left the schema, not the handler", 
     for (const singular of ["kind", "status", "priority", "tag"]) {
       expect(handler).toContain(`${singular}: a.${singular},`);
     }
+  });
+});
+
+describe("graph_draft_prepare: the invite gate is a mono-carrier", () => {
+  test("the operator-invited restriction still lives somewhere the model reads", () => {
+    // `instructions` used to repeat this gate ("ONLY when the operator
+    // explicitly asks..."), and that copy was cut as a duplicate of this
+    // tool's own description (2026-09-01 MCP-surface trim). Cutting it made
+    // THIS the only remaining carrier of "never call this on your own
+    // initiative" -- pin it so a future trim of this description cannot drop
+    // it silently, the same way the instructions-block test above pins its
+    // own facts.
+    const block = toolBlock(SRC, "graph_draft_prepare");
+    expect(block).toContain("OPERATOR-INVITED ONLY");
+    expect(block).toContain("never on your own initiative");
   });
 });
 
