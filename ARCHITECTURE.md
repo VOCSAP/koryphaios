@@ -210,6 +210,19 @@ also why `stripControl`/`truncate` sit in `shared/text.ts` rather than beside
 
 The default `peer_id` is derived from `(host, cwd, group_id)` via `deriveDefaultId` with a `MAX_SUFFIX=1000` guardrail. Typical defaults look like `<host>-<dir>` (e.g. `dev-pc-my-project`, `dev-pc-my-project-2` on collision).
 
+### What happens when there are two?
+
+The broker may be a shared server serving several people, one person may run
+several sessions across several PCs, and two OS accounts on one host are two
+identities by construction -- so one human may hold two identities and one
+identity may be reached at the same address twice. A `Map`, cache, table, lock
+or `SELECT … LIMIT 1` keyed by too little fails SILENTLY. Authorise in the
+direction that survives a second identity: resolve the OBJECT first, then "may
+this caller act on THAT object", never "who does this caller belong to".
+Shipped instances: a gateway table keyed by channel `kind` (second operator
+replaced and stopped the first), an address→operator lookup whose `.get()`
+picked one of two rows, `hostname()` used as identity.
+
 ## Resume flow
 
 `session_key = sha256(host || \0 || cwd || \0 || group_id)`. On `/register`:
