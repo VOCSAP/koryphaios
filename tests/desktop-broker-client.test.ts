@@ -9,7 +9,9 @@ import {
   buildAnnouncePayload,
   sendAnnounce,
   fetchOperatorInbox,
-  purgeOperatorInbox
+  purgeOperatorInbox,
+  fetchDispatchRequests,
+  resolveDispatchRequest
 } from "../desktop/src/main/broker-client.ts";
 
 const dirs: string[] = [];
@@ -200,4 +202,74 @@ test("purgeOperatorInbox throws on a non-2xx response", async () => {
       { endpoint: { url: "http://x", token: null }, fetchFn }
     )
   ).rejects.toThrow("operator-inbox/purge failed: 403");
+});
+
+// ----- Dispatch requests (card bf76d37f) -----
+
+test("fetchDispatchRequests POSTs the project key to /dispatch-request/list and returns the requests", async () => {
+  let url = "";
+  let body: Record<string, unknown> = {};
+  let headers: Record<string, string> = {};
+  const fetchFn = (async (u: string | URL | Request, init?: RequestInit) => {
+    url = String(u);
+    body = JSON.parse(init!.body as string);
+    headers = init!.headers as Record<string, string>;
+    return new Response(
+      JSON.stringify({ requests: [{ id: "r1", project_key: "k", from_peer: "agent-1" }] }),
+      { status: 200 }
+    );
+  }) as unknown as typeof fetch;
+
+  const requests = await fetchDispatchRequests("k", {
+    endpoint: { url: "http://broker:7899", token: "sekret" },
+    fetchFn
+  });
+  expect(url).toBe("http://broker:7899/dispatch-request/list");
+  expect(body).toEqual({ project_key: "k" });
+  expect(headers["Authorization"]).toBe("Bearer sekret");
+  expect(requests.map((r) => r.id)).toEqual(["r1"]);
+});
+
+test("fetchDispatchRequests throws on a non-2xx response", async () => {
+  const fetchFn = (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch;
+  await expect(
+    fetchDispatchRequests("k", { endpoint: { url: "http://x", token: null }, fetchFn })
+  ).rejects.toThrow("dispatch-request/list failed: 500");
+});
+
+test("resolveDispatchRequest POSTs the id and the WHOLE outcome to /dispatch-request/resolve", async () => {
+  let url = "";
+  let body: Record<string, unknown> = {};
+  const fetchFn = (async (u: string | URL | Request, init?: RequestInit) => {
+    url = String(u);
+    body = JSON.parse(init!.body as string);
+    return new Response("{}", { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const outcome = {
+    cards: [
+      { id: "card-1", title: "t", kind: "directive", matched: ["p"], missing: ["q"], ambiguous: [] }
+    ],
+    note: "1 directive card executed by the Deck"
+  };
+  await resolveDispatchRequest("r1", outcome, {
+    endpoint: { url: "http://broker:7899", token: null },
+    fetchFn
+  });
+  expect(url).toBe("http://broker:7899/dispatch-request/resolve");
+  expect(body.id).toBe("r1");
+  // The outcome travels WHOLE: a client-side reshape here would silently drop
+  // the buckets the requester is asking for.
+  expect(body.outcome).toEqual(outcome);
+});
+
+test("resolveDispatchRequest throws on a non-2xx response, so the caller never believes it answered", async () => {
+  const fetchFn = (async () => new Response("nope", { status: 409 })) as unknown as typeof fetch;
+  await expect(
+    resolveDispatchRequest(
+      "r1",
+      { cards: [], note: "x" },
+      { endpoint: { url: "http://x", token: null }, fetchFn }
+    )
+  ).rejects.toThrow("dispatch-request/resolve failed: 409");
 });

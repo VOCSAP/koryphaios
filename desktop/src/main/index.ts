@@ -48,10 +48,12 @@ import { WorkspaceService } from './workspace-service'
 import type { WorkspaceSession } from './workspace-store'
 import {
   BrokerHealthTracker,
+  fetchDispatchRequests,
   fetchGraphDrafts,
   fetchOperatorInbox,
   purgeOperatorInbox,
   resolveBrokerEndpoint,
+  resolveDispatchRequest,
   sendAnnounce
 } from './broker-client'
 import { appendInboxHistory, clearInboxHistory, deleteInboxHistoryEntries } from './inbox-store'
@@ -72,14 +74,22 @@ import {
   nextBarrierPending,
   nextDispatchedState,
   runDirectiveWave,
+  runDispatchRequestPoll,
   splitWave,
   type DispatchedEntry
 } from './dispatch'
 import { directiveKeys, isDirectiveCommand, resolveDirectiveTargets } from './directive'
-import { unreachedTargetsText } from './directive-journal'
+import { unreachedTargets, unreachedTargetsText } from './directive-journal'
 import { decidePeerAnnounce } from './peer-rotation'
 import { ownsIdleLock } from './idle-lock'
-import type { AssignResult, DispatchResult, RoadmapItem, StopResult } from '@shared/types'
+import type {
+  AssignResult,
+  DirectiveDispatch,
+  DispatchedWaveMember,
+  DispatchResult,
+  RoadmapItem,
+  StopResult
+} from '@shared/types'
 import {
   composeJoinAnnounce,
   joinAnnounceTargets,
@@ -1523,13 +1533,24 @@ const runMagicCompact = async (
  * (idle-gated inside injectCommand) so the dispatch loop never blocks; each
  * injection journals its own outcome. No live target / unreachable targets are
  * journaled, never silently dropped.
+ *
+ * RETURNS what the card reached (card bf76d37f): the resolver's OWN buckets,
+ * projected into a DirectiveDispatch on each of the three return paths. Read
+ * from `resolveDirectiveTargets`'s output, never re-derived -- the same rule
+ * that already governs `ambiguous` below. The journal stays exactly as it was;
+ * this return is what stops the buckets from being journaled and then thrown
+ * away, and it is the only thing that can say what was hit, since
+ * runDirectiveWave marks the card done BEFORE calling this.
  */
-const executeDirective = async (item: RoadmapItem): Promise<void> => {
+const executeDirective = async (item: RoadmapItem): Promise<DirectiveDispatch> => {
   const cmd = item.directive
   // Re-validate the enum Deck-side (hostile input #2: broker response field).
   if (!isDirectiveCommand(cmd)) {
     reportError('dispatch', `directive card "${item.title}" carries no valid command; skipped`)
-    return
+    // `directive: null` is the discriminant for "refused BEFORE any
+    // resolution": both lists are empty because no bucket was ever computed,
+    // not because every requested id was reached.
+    return { id: item.id, title: item.title, directive: null, injected: [], unreached: [] }
   }
   const keys = directiveKeys(cmd)
   // Audit fix #8 (card 6c380073, dev2's directive.ts): `ambiguous` is READ
@@ -1548,7 +1569,13 @@ const executeDirective = async (item: RoadmapItem): Promise<void> => {
     // (directive-journal.ts) instead of inline here.
     const detail = unreachedTargetsText(missing, ambiguous) || `requested: ${item.target_peer_ids.join(', ') || 'none'}`
     journal.add('dispatch', `directive ${keys} "${item.title}": ${detail}`)
-    return
+    return {
+      id: item.id,
+      title: item.title,
+      directive: cmd,
+      injected: [],
+      unreached: unreachedTargets(missing, ambiguous)
+    }
   }
   // Resolve the magic-compact decision ONCE per card (not per target): both
   // resolveFeatures (config reads) and the plugin fs scan are invariant across
@@ -1579,6 +1606,13 @@ const executeDirective = async (item: RoadmapItem): Promise<void> => {
     // the other reports.
     journal.add('dispatch', `directive ${keys} "${item.title}": ${unreachedTargetsText(missing, ambiguous)}`)
   }
+  return {
+    id: item.id,
+    title: item.title,
+    directive: cmd,
+    injected: matched.map((t) => ({ tileId: t.id, peerId: t.peerId })),
+    unreached: unreachedTargets(missing, ambiguous)
+  }
 }
 
 // Multi-dispatch (roadmap card 5852c074): sends the WHOLE head wave (all
@@ -1588,6 +1622,22 @@ const executeDirective = async (item: RoadmapItem): Promise<void> => {
 // bun-testable; this function only drives the Electron-coupled network calls
 // and owns the dispatchedIds mutation (single source of truth, as before).
 const dispatchNextInner = async (): Promise<DispatchResult> => {
+  // Card bf76d37f: declared OUTSIDE the try, and accumulated across guard
+  // iterations, because the drain can execute several all-directive waves
+  // before it returns -- possibly through the empty-queue exit, or through the
+  // outer catch. Every one of those exits must still report the directives
+  // this call already ran; resetting per wave, or scoping this to the try,
+  // would drop exactly the work the caller cannot otherwise see.
+  const executedDirectives: DirectiveDispatch[] = []
+  const announcedMembers: DispatchedWaveMember[] = []
+  // Attached to EVERY exit rather than to the success path only. Each half is
+  // left absent when it stayed empty, so a dispatch that executed no directive
+  // card (or announced nothing) keeps the exact result shape it had before.
+  const withReports = (r: DispatchResult): DispatchResult => ({
+    ...r,
+    ...(executedDirectives.length > 0 ? { directives: executedDirectives } : {}),
+    ...(announcedMembers.length > 0 ? { dispatched: announcedMembers } : {})
+  })
   try {
     const endpoint = resolveBrokerEndpoint()
     const key = computeDeckProjectKey(config.projectDir)
@@ -1597,7 +1647,7 @@ const dispatchNextInner = async (): Promise<DispatchResult> => {
     for (let guard = 0; guard < 64; guard++) {
       const items = await listRoadmap(endpoint, key, {})
       const waveIds = wavesOf(queuedItems(items))[0]
-      if (!waveIds || waveIds.length === 0) return { sent: false, reason: 'empty-queue' }
+      if (!waveIds || waveIds.length === 0) return withReports({ sent: false, reason: 'empty-queue' })
       const byId = new Map(items.map((i) => [i.id, i]))
       const wave = waveIds.map((id) => byId.get(id)).filter((i): i is RoadmapItem => i !== undefined)
       const { directives, normal } = splitWave(wave)
@@ -1606,14 +1656,16 @@ const dispatchNextInner = async (): Promise<DispatchResult> => {
       // Mark-then-execute, not execute-then-mark (card b1932a6a): see
       // runDirectiveWave's doc comment in dispatch.ts for the cost-asymmetry
       // rationale and the accepted gap this ordering trades for.
-      await runDirectiveWave(directives, {
-        markDone: async (item) => {
-          await upsertRoadmap(endpoint, key, { id: item.id, queue: null, status: 'done' })
-        },
-        execute: executeDirective,
-        journal: (line) => journal.add('dispatch', line),
-        reportError: (message, error) => reportError('dispatch', message, error)
-      })
+      executedDirectives.push(
+        ...(await runDirectiveWave(directives, {
+          markDone: async (item) => {
+            await upsertRoadmap(endpoint, key, { id: item.id, queue: null, status: 'done' })
+          },
+          execute: executeDirective,
+          journal: (line) => journal.add('dispatch', line),
+          reportError: (message, error) => reportError('dispatch', message, error)
+        }))
+      )
       if (normal.length === 0) continue // all-directive wave: pull the next one
       const { result, dispatched, failed } = await dispatchNormalWave(normal, {
         announce: (text) => announceToLead(text),
@@ -1626,15 +1678,20 @@ const dispatchNextInner = async (): Promise<DispatchResult> => {
         }
       })
       for (const item of dispatched) dispatchedIds.set(item.id, { claimed: false })
+      // Card bf76d37f: the announced members' IDENTITY, from the same
+      // `dispatched` array that drives dispatchedIds above -- so the outcome
+      // reported to a requesting agent and the set this Deck actually tracks
+      // can never name different cards.
+      announcedMembers.push(...dispatched.map((i) => ({ id: i.id, title: i.title, kind: i.kind })))
       for (const { item, error } of failed) {
         reportError('dispatch', `wave member "${item.title}" failed to unqueue, not tracked`, error)
       }
-      return result
+      return withReports(result)
     }
-    return { sent: false, reason: 'error' }
+    return withReports({ sent: false, reason: 'error' })
   } catch (e) {
     reportError('dispatch', 'dispatch failed', e)
-    return { sent: false, reason: 'error' }
+    return withReports({ sent: false, reason: 'error' })
   }
 }
 
@@ -1650,6 +1707,35 @@ const dispatchNext = (): Promise<DispatchResult> => {
     dispatchInFlight = null
   })
   return dispatchInFlight
+}
+
+// ----- Dispatch requests poll (card bf76d37f) -----
+// An agent asks the Deck, through its MCP tool, to dispatch the next wave; the
+// broker parks the request and this poller serves it on the same 10 s cadence
+// as the four pollers above. The DECISION (park vs serve, what to answer, what
+// to do with a throwing dispatch) lives in runDispatchRequestPoll (./dispatch)
+// so it is behaviourally testable; this wrapper only supplies the deps.
+//
+// `inFlight` READS dispatchNext's existing guard, declared just above -- it is
+// deliberately not a second guard, and not a queue behind the first: see
+// runDispatchRequestPoll's doc comment for why serving a coalesced run would
+// answer the requester about a dispatch it never caused.
+const pollDispatchRequests = async (): Promise<void> => {
+  try {
+    const endpoint = resolveBrokerEndpoint()
+    const key = computeDeckProjectKey(config.projectDir)
+    await runDispatchRequestPoll({
+      list: () => fetchDispatchRequests(key, { endpoint }),
+      inFlight: () => dispatchInFlight !== null,
+      dispatch: () => dispatchNext(),
+      resolve: (id, outcome) => resolveDispatchRequest(id, outcome, { endpoint }),
+      reportError: (message, error) => reportError('dispatch', message, error)
+    })
+  } catch {
+    // Broker down / unreachable: silent, the next tick retries. Same shape as
+    // the four pollers above -- only the LIST call can land here, since every
+    // per-request failure is already reported inside runDispatchRequestPoll.
+  }
 }
 
 const watchDispatched = async (): Promise<void> => {
@@ -2797,6 +2883,7 @@ app.whenReady().then(async () => {
       void pollGraphDrafts()
       void pollApprovalVerdicts()
       void pollPendingApprovals()
+      void pollDispatchRequests()
     },
     approvalReply: async (id: string, text: string): Promise<boolean> => {
       const deps = approvals.deps()
@@ -2858,6 +2945,9 @@ app.whenReady().then(async () => {
     void pollGraphDrafts()
     void pollApprovalVerdicts()
     void pollPendingApprovals()
+    // Card bf76d37f: same cadence, same best-effort contract as its four
+    // siblings -- a tick that cannot reach the broker simply retries later.
+    void pollDispatchRequests()
   }, INBOX_POLL_MS)
   // Restart seed (card 5852c074): re-track already in-progress items BEFORE
   // the watcher's first tick, see seedDispatchedFromRoadmap's doc comment.

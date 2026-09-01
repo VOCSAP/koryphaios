@@ -25,8 +25,15 @@ import {
  * to its ack FIELD domain (checked via findUncoveredAckFields) or `null`
  * when its ack is not RoadmapItem-field-pick-list shaped at all (roadmap_get/
  * list/archive: no per-field ack; roadmap_append_context: reports a byte
- * count, not a list of RoadmapItem fields). See the test below for how a
- * 4th tool, or a stale entry, fails this the same day it happens.
+ * count, not a list of RoadmapItem fields; roadmap_dispatch: reports which
+ * CARDS were dispatched and which TILES they hit, so its ack names no
+ * RoadmapItem field at all). See the test below for how a 4th tool, or a
+ * stale entry, fails this the same day it happens.
+ *
+ * `null` is this table's EXEMPTION form, not a hole: the test below skips the
+ * field comparison for a null domain, so an entry landing here must be
+ * justified by the SHAPE of its ack, never by the absence of one being
+ * convenient.
  */
 const ROADMAP_TOOL_ACK_DOMAINS: Record<string, readonly string[] | null> = {
   roadmap_list: null,
@@ -35,6 +42,16 @@ const ROADMAP_TOOL_ACK_DOMAINS: Record<string, readonly string[] | null> = {
   roadmap_update: ROADMAP_UPDATE_ACK_FIELDS,
   roadmap_archive: null,
   roadmap_append_context: null,
+  // Card bf76d37f. Mutates NO card: it runs the head wave of the queue, so it
+  // acknowledges an EXECUTION, not a set of written fields. Two reasons a
+  // field domain would be wrong rather than merely unnecessary here. Its
+  // inputSchema has zero properties (the no-argument ruling), so any non-null
+  // domain would make findUncoveredAckFields compare an empty list and pass
+  // VACUOUSLY -- green while asserting nothing. And its ack deliberately
+  // cannot be a card-field echo: runDirectiveWave marks a card done BEFORE
+  // executing it, which is why this tool reports tiles hit / missed /
+  // ambiguous instead of anything read back off the RoadmapItem.
+  roadmap_dispatch: null,
 };
 
 const brokers: TestBroker[] = [];
@@ -418,7 +435,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     }
 
     for (const [name, domain] of Object.entries(ROADMAP_TOOL_ACK_DOMAINS)) {
-      if (domain === null) continue; // not a field-pick-list-shaped ack (roadmap_append_context reports a byte count, not RoadmapItem fields; roadmap_get/list/archive have no per-field ack at all)
+      if (domain === null) continue; // not a field-pick-list-shaped ack (roadmap_append_context reports a byte count, not RoadmapItem fields; roadmap_dispatch reports dispatched cards and the tiles they hit; roadmap_get/list/archive have no per-field ack at all)
       const tool = roadmapTools.find((t) => t.name === name)!;
       const schemaFields = Object.keys(tool.inputSchema?.properties ?? {}).filter((f) => f !== "id");
       const diff = findUncoveredAckFields(schemaFields, domain);

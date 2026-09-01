@@ -15,6 +15,19 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+// Dispatch-request shapes come from the REPO-ROOT shared/types.ts, the broker's
+// own file -- not from a Deck-side mirror. Type-only and relative (never the
+// @shared alias, which resolves to desktop/src/shared), so it is erased at
+// transpile and the repo-root bun harness never has to resolve it. The ENVELOPE
+// types travel with them: they are what makes each POST body below a checked
+// shape instead of an object literal nobody validates.
+import type {
+  DispatchRequest,
+  DispatchRequestListRequest,
+  DispatchRequestListResponse,
+  DispatchRequestOutcome,
+  DispatchRequestResolveRequest
+} from '../../../shared/types'
 
 export interface BrokerEndpoint {
   url: string
@@ -284,6 +297,61 @@ export async function markGraphDraftOpened(
   })
   if (!res.ok) throw new Error(`graph-draft/open failed: ${res.status}`)
   return ((await res.json()) as { draft: BrokerGraphDraft }).draft
+}
+
+/**
+ * POST /dispatch-request/list: the PENDING dispatch requests of this project
+ * (card bf76d37f). Non-destructive, like /graph-draft/list: a request only
+ * leaves the pending set when resolveDispatchRequest is called on it, which is
+ * what makes the PARK semantics work -- a tick that cannot dispatch simply
+ * returns, and the request is still there on the next one.
+ *
+ * `include_done` exists broker-side and is deliberately NOT sent: the Deck
+ * only ever wants what it still has to serve.
+ */
+export async function fetchDispatchRequests(
+  projectKey: string,
+  deps: AnnounceDeps
+): Promise<DispatchRequest[]> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (deps.endpoint.token) headers['Authorization'] = `Bearer ${deps.endpoint.token}`
+  const f = deps.fetchFn ?? fetch
+  const body: DispatchRequestListRequest = { project_key: projectKey }
+  const res = await f(`${deps.endpoint.url}/dispatch-request/list`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body)
+  })
+  if (!res.ok) throw new Error(`dispatch-request/list failed: ${res.status}`)
+  return ((await res.json()) as DispatchRequestListResponse).requests
+}
+
+/**
+ * POST /dispatch-request/resolve: hand one request its outcome (card
+ * bf76d37f). Throws on a non-2xx so the caller reports it instead of believing
+ * the requester was answered.
+ *
+ * Returns void on purpose. The broker answers with a
+ * `DispatchRequestResolveResponse` carrying the updated row, and the Deck has
+ * no use for it -- it already holds the outcome it just sent. Importing that
+ * response type only to parse and discard a body would be a dead import, so
+ * the 2xx alone is the acknowledgement.
+ */
+export async function resolveDispatchRequest(
+  id: string,
+  outcome: DispatchRequestOutcome,
+  deps: AnnounceDeps
+): Promise<void> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (deps.endpoint.token) headers['Authorization'] = `Bearer ${deps.endpoint.token}`
+  const f = deps.fetchFn ?? fetch
+  const body: DispatchRequestResolveRequest = { id, outcome }
+  const res = await f(`${deps.endpoint.url}/dispatch-request/resolve`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body)
+  })
+  if (!res.ok) throw new Error(`dispatch-request/resolve failed: ${res.status}`)
 }
 
 /**

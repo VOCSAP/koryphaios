@@ -1,9 +1,12 @@
 // PLAN C15: queue → team-lead dispatch helpers (desktop/src/main/dispatch).
 
 import { test, expect } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   canAutoDispatchNext,
   composeAssignText,
+  composeDispatchOutcome,
   composeDispatchText,
   composeMultiDispatchText,
   composeStopText,
@@ -14,9 +17,19 @@ import {
   nextQueuePosition,
   queuedItems,
   runDirectiveWave,
+  runDispatchRequestPoll,
   splitWave
 } from "../desktop/src/main/dispatch.ts";
-import type { RoadmapItem } from "../desktop/src/shared/types";
+import type {
+  DirectiveDispatch,
+  DispatchResult,
+  RoadmapItem
+} from "../desktop/src/shared/types";
+// The dispatch-request shapes are the BROKER's, declared once at the repo root
+// and imported by the three main-process consumers -- not mirrored Deck-side.
+// This test must read them from the same place they do, or it would pin a copy
+// nobody uses.
+import type { DispatchRequest, DispatchRequestOutcome } from "../shared/types";
 
 function item(over: Partial<RoadmapItem>): RoadmapItem {
   return {
@@ -42,6 +55,17 @@ function item(over: Partial<RoadmapItem>): RoadmapItem {
     locked: false,
     locked_by: null,
     locked_at: null,
+    // The four REQUIRED fields this factory used to leave to `...over` alone.
+    // A Partial<RoadmapItem> widens each of them with `undefined`, which the
+    // repo-root `tsc --noEmit` rejects with TS2322; desktop/'s own typecheck
+    // never sees it, since this file is outside tsconfig.node/web. Listed
+    // exhaustively against RoadmapItem rather than one at a time: tsc reports
+    // only the FIRST incompatible property, so fixing them singly means one
+    // full typecheck round-trip per field.
+    locked_group: null,
+    directive: null,
+    target_peer_ids: [],
+    inactive: false,
     ...over
   };
 }
@@ -308,7 +332,20 @@ test("splitWave: an all-normal or all-directive wave leaves the other bucket emp
 // Directive drain ordering (roadmap card b1932a6a): mark-then-execute, not
 // execute-then-mark. See runDirectiveWave's doc comment in dispatch.ts.
 
-function mockDirectiveDeps(opts: { throwForIds?: Set<string> } = {}) {
+/** A report shaped like executeDirective's, with nothing resolved by default. */
+function report(over: Partial<DirectiveDispatch> = {}): DirectiveDispatch {
+  return {
+    id: over.id ?? "a",
+    title: over.title ?? "t",
+    directive: over.directive ?? "clear",
+    injected: over.injected ?? [],
+    unreached: over.unreached ?? []
+  };
+}
+
+function mockDirectiveDeps(
+  opts: { throwForIds?: Set<string>; reports?: Record<string, DirectiveDispatch> } = {}
+) {
   const order: string[] = [];
   const journaled: string[] = [];
   const reported: { message: string; error: unknown }[] = [];
@@ -320,9 +357,10 @@ function mockDirectiveDeps(opts: { throwForIds?: Set<string> } = {}) {
       markDone: async (it: RoadmapItem) => {
         order.push(`mark:${it.id}`);
       },
-      execute: async (it: RoadmapItem) => {
+      execute: async (it: RoadmapItem): Promise<DirectiveDispatch> => {
         order.push(`execute:${it.id}`);
         if (opts.throwForIds?.has(it.id)) throw new Error(`inject failed for ${it.id}`);
+        return opts.reports?.[it.id] ?? report({ id: it.id, title: it.title });
       },
       journal: (line: string) => journaled.push(line),
       reportError: (message: string, error: unknown) => reported.push({ message, error })
@@ -381,7 +419,80 @@ test("runDirectiveWave: markDone throwing is not caught -- it propagates and exe
 test("runDirectiveWave: an invalid/null directive falls back to the '?' label", async () => {
   const { journaled, deps } = mockDirectiveDeps();
   await runDirectiveWave([item({ id: "a", kind: "directive", directive: null, title: "Broken card" })], deps);
-  expect(journaled).toEqual(['directive card dispatched: "Broken card" (?)']);
+  expect(journaled).toEqual(['directive card dispatched: "Broken card" (?) -> no target reached']);
+});
+
+// Card bf76d37f: the resolver's buckets stop being journaled-then-discarded.
+// These probes are BEHAVIOURAL -- they drive the real runDirectiveWave and
+// read its real return value; only the executor's own wiring (index.ts, not
+// importable under bun) is left to a source scan, in
+// tests/desktop-directive-journal.test.ts.
+
+test("runDirectiveWave: returns one report per card, carrying resolved AND unresolved targets distinctly", async () => {
+  const resolved = report({
+    id: "a",
+    title: "Clear one",
+    directive: "clear",
+    injected: [{ tileId: "tile-1", peerId: "peer-a" }]
+  });
+  const ambiguousOnly = report({
+    id: "b",
+    title: "Compact the twin",
+    directive: "compact",
+    unreached: [{ peerId: "dup-peer", reason: "ambiguous" }]
+  });
+  const { deps } = mockDirectiveDeps({ reports: { a: resolved, b: ambiguousOnly } });
+  const out = await runDirectiveWave(
+    [
+      item({ id: "a", kind: "directive", directive: "clear", title: "Clear one" }),
+      item({ id: "b", kind: "directive", directive: "compact", title: "Compact the twin" })
+    ],
+    deps
+  );
+  expect(out).toHaveLength(2);
+  // The wave carries BOTH outcomes, and they are not conflated: one names the
+  // tile it actually hit, the other names the id it refused and WHY.
+  expect(out[0]!.injected).toEqual([{ tileId: "tile-1", peerId: "peer-a" }]);
+  expect(out[0]!.unreached).toEqual([]);
+  expect(out[1]!.injected).toEqual([]);
+  expect(out[1]!.unreached).toEqual([{ peerId: "dup-peer", reason: "ambiguous" }]);
+  // Per-card identity, so a caller can tell which card produced which outcome.
+  expect(out.map((r) => r.id)).toEqual(["a", "b"]);
+});
+
+test("runDirectiveWave: a card whose execute throws is ABSENT from the reports, never an empty one", async () => {
+  const { deps } = mockDirectiveDeps({ throwForIds: new Set(["a"]) });
+  const out = await runDirectiveWave(
+    [
+      item({ id: "a", kind: "directive", directive: "clear" }),
+      item({ id: "b", kind: "directive", directive: "compact" })
+    ],
+    deps
+  );
+  // An empty report for "a" would read as "nothing was unreached", which is a
+  // claim nobody can make: the execution never returned.
+  expect(out.map((r) => r.id)).toEqual(["b"]);
+});
+
+test("runDirectiveWave: the dispatched journal line carries the hit/miss counts (the report is READ)", async () => {
+  const { journaled, deps } = mockDirectiveDeps({
+    reports: {
+      a: report({
+        id: "a",
+        title: "Clear both",
+        injected: [
+          { tileId: "t1", peerId: "peer-a" },
+          { tileId: "t2", peerId: "peer-b" }
+        ],
+        unreached: [{ peerId: "gone", reason: "no-live-target" }]
+      })
+    }
+  });
+  await runDirectiveWave([item({ id: "a", kind: "directive", directive: "clear", title: "Clear both" })], deps);
+  expect(journaled).toEqual(['directive card dispatched: "Clear both" (/clear) -> 2 targets, 1 unreached']);
+  // Counts only: the ids belong to executeDirective's own unreached line, and
+  // naming them here too would report the same miss twice.
+  expect(journaled[0]).not.toContain("gone");
 });
 
 function mockDeps(opts: { announceReturns?: number; failIds?: Set<string> } = {}) {
@@ -479,4 +590,280 @@ test("nextBarrierPending: clears when the queue empties (no head left to block o
 test("nextBarrierPending: left unchanged while a previous wave is still in flight", () => {
   expect(nextBarrierPending(true, 2, false, true)).toBe(true);
   expect(nextBarrierPending(false, 2, false, true)).toBe(false);
+});
+
+// ---------------------------------------------------------------------------
+// Dispatch requests (card bf76d37f): the Deck side of the agent's MCP tool.
+// Behavioural throughout -- runDispatchRequestPoll is dependency-injected on
+// purpose, so the park branch, the throwing dispatch and the throwing resolve
+// are all real executions here, not source scans.
+// ---------------------------------------------------------------------------
+
+function request(id: string): DispatchRequest {
+  return {
+    id,
+    project_key: "k",
+    from_peer: "agent-1",
+    status: "pending",
+    created_at: "2026-01-01T00:00:00.000Z",
+    resolved_at: null,
+    outcome: null
+  };
+}
+
+test("composeDispatchOutcome: the three buckets are PROJECTED, ambiguous stays a subset of missing", () => {
+  const result: DispatchResult = {
+    sent: false,
+    reason: "empty-queue",
+    directives: [
+      {
+        id: "card-1111",
+        title: "Clear the twins",
+        directive: "clear",
+        injected: [{ tileId: "t1", peerId: "peer-a" }],
+        unreached: [
+          { peerId: "gone", reason: "no-live-target" },
+          { peerId: "dup", reason: "ambiguous" }
+        ]
+      }
+    ]
+  };
+  const out = composeDispatchOutcome(result);
+  expect(out.cards).toHaveLength(1);
+  const c = out.cards[0]!;
+  expect(c.id).toBe("card-1111"); // COMPLETE id: the broker truncates, not us.
+  expect(c.kind).toBe("directive");
+  expect(c.matched).toEqual(["peer-a"]);
+  // `ambiguous` must be contained in `missing`, exactly as the resolver
+  // guarantees -- the subset relation has to survive the projection.
+  expect(c.missing).toEqual(["gone", "dup"]);
+  expect(c.ambiguous).toEqual(["dup"]);
+  for (const a of c.ambiguous) expect(c.missing).toContain(a);
+});
+
+test("composeDispatchOutcome: a mixed wave reports both families, directives first, each with its kind", () => {
+  const out = composeDispatchOutcome({
+    sent: true,
+    count: 1,
+    titles: ["Ship the thing"],
+    directives: [
+      { id: "d1", title: "Compact", directive: "compact", injected: [], unreached: [] }
+    ],
+    dispatched: [{ id: "n1", title: "Ship the thing", kind: "feature" }]
+  });
+  expect(out.cards.map((c) => c.id)).toEqual(["d1", "n1"]);
+  // A directive that reached nothing and a normal card BOTH carry three empty
+  // buckets: `kind` is the only thing that tells them apart.
+  expect(out.cards.map((c) => c.kind)).toEqual(["directive", "feature"]);
+  expect(out.cards[0]!.missing).toEqual([]);
+  expect(out.cards[1]!.missing).toEqual([]);
+  expect(out.note).toContain("1 card announced");
+  expect(out.note).toContain("1 directive card executed");
+});
+
+test("composeDispatchOutcome: nothing eligible is a SUCCESS with an empty cards list, not an error", () => {
+  const out = composeDispatchOutcome({ sent: false, reason: "empty-queue" });
+  expect(out.cards).toEqual([]);
+  expect(out.note).toContain("nothing eligible");
+  // The reason must survive: an empty queue and a missing lead are the same
+  // "nothing happened" for very different operator actions.
+  expect(out.note).toContain("empty-queue");
+  expect(composeDispatchOutcome({ sent: false, reason: "no-lead" }).note).toContain("no-lead");
+});
+
+function pollDeps(
+  opts: {
+    requests?: DispatchRequest[];
+    inFlight?: boolean;
+    dispatch?: () => Promise<DispatchResult>;
+    resolveThrows?: boolean;
+  } = {}
+) {
+  const calls: string[] = [];
+  const resolved: { id: string; outcome: DispatchRequestOutcome }[] = [];
+  const reported: { message: string; error: unknown }[] = [];
+  return {
+    calls,
+    resolved,
+    reported,
+    deps: {
+      list: async () => {
+        calls.push("list");
+        return opts.requests ?? [];
+      },
+      inFlight: () => opts.inFlight ?? false,
+      dispatch:
+        opts.dispatch ??
+        (async () => {
+          calls.push("dispatch");
+          return { sent: false, reason: "empty-queue" } as DispatchResult;
+        }),
+      resolve: async (id: string, outcome: DispatchRequestOutcome) => {
+        calls.push(`resolve:${id}`);
+        if (opts.resolveThrows) throw new Error("resolve exploded");
+        resolved.push({ id, outcome });
+      },
+      reportError: (message: string, error: unknown) => reported.push({ message, error })
+    }
+  };
+}
+
+test("runDispatchRequestPoll: no pending request never triggers a dispatch nobody asked for", async () => {
+  const { calls, deps } = pollDeps({ requests: [] });
+  await runDispatchRequestPoll(deps);
+  // The MECHANISM is the empty loop, not a length guard: an explicit
+  // `requests.length === 0` early return was measured redundant (removing it
+  // left this probe and every other one green), so it was deleted rather than
+  // kept as a line nothing can falsify.
+  expect(calls).toEqual(["list"]);
+});
+
+test("runDispatchRequestPoll: a dispatch already in flight PARKS the request -- nothing dispatched, nothing resolved", async () => {
+  const { calls, resolved, deps } = pollDeps({ requests: [request("r1")], inFlight: true });
+  await runDispatchRequestPoll(deps);
+  // Not resolved is the whole point: the request survives to the next tick.
+  // Resolving it here would consume it against a dispatch that never ran, and
+  // queueing behind the in-flight run would answer about a dispatch this
+  // requester did not cause (dispatchNext coalesces concurrent callers).
+  expect(calls).toEqual(["list"]);
+  expect(resolved).toEqual([]);
+});
+
+test("runDispatchRequestPoll: serves each pending request in order", async () => {
+  const { calls, resolved, deps } = pollDeps({ requests: [request("r1"), request("r2")] });
+  await runDispatchRequestPoll(deps);
+  expect(calls).toEqual(["list", "dispatch", "resolve:r1", "dispatch", "resolve:r2"]);
+  expect(resolved.map((r) => r.id)).toEqual(["r1", "r2"]);
+});
+
+test("runDispatchRequestPoll: a THROWING dispatch still answers, with a failure note", async () => {
+  const { resolved, reported, deps } = pollDeps({
+    requests: [request("r1")],
+    dispatch: async () => {
+      throw new Error("broker unreachable");
+    }
+  });
+  await runDispatchRequestPoll(deps);
+  // Silence is the one unacceptable outcome: the requester would time out at
+  // 25 s and be told the request is still parked, which is a lie for an
+  // exception the Deck swallowed.
+  expect(resolved).toHaveLength(1);
+  expect(resolved[0]!.outcome.cards).toEqual([]);
+  expect(resolved[0]!.outcome.note).toContain("dispatch failed");
+  expect(resolved[0]!.outcome.note).toContain("broker unreachable");
+  expect(reported).toHaveLength(1);
+  expect(reported[0]!.message).toContain("r1");
+});
+
+test("runDispatchRequestPoll: a throwing resolve is reported and does not silence the other requests", async () => {
+  const { calls, reported, deps } = pollDeps({
+    requests: [request("r1"), request("r2")],
+    resolveThrows: true
+  });
+  await runDispatchRequestPoll(deps);
+  expect(calls).toEqual(["list", "dispatch", "resolve:r1", "dispatch", "resolve:r2"]);
+  expect(reported.map((r) => r.message)).toEqual([
+    "dispatch request r1 could not be resolved",
+    "dispatch request r2 could not be resolved"
+  ]);
+});
+
+// SOURCE SCAN (weak, and labelled as such): the probes above prove the poll
+// DECISION, nothing proves it is ever CALLED -- index.ts imports electron and
+// cannot be imported under bun. A declared-but-unwired poller is the exact
+// defect CLAUDE.md names.
+//
+// A FIRST version of this scan counted occurrences over the whole file and was
+// measured fail-open FOUR ways by the reviewer, each mutation leaving it green:
+// a wrong project key handed to fetchDispatchRequests (the poller would query
+// another project), `dispatch: () => dispatchNext()` replaced by a stub (it
+// would answer the agent without dispatching), BOTH call sites made dead code
+// (`if (NEVER) void pollDispatchRequests()` -- the count stays 3, the substring
+// stays present, the poller is never called again), and the result produced
+// then discarded. What follows closes those four. It still cannot prove the
+// values are right at runtime; the injected probes above are what does that.
+
+/** index.ts with its comments removed -- see stripComments' own note. */
+function indexSource(): string {
+  return stripComments(
+    readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"), "utf-8")
+  );
+}
+
+/**
+ * Drops line and block comments so an anchor cannot be satisfied by a mention
+ * in prose. Same hole as the i18n orphan guard: a scan that does not strip
+ * comments accepts `// void pollDispatchRequests()` as wiring.
+ *
+ * Line comments are only stripped when the `//` is the first thing on the line
+ * (after indentation), which leaves any `http://` or `://` inside a string
+ * untouched -- a naive strip of every `//` would eat the middle of a URL and
+ * silently change which slice the anchors below are matched against.
+ */
+function stripComments(src: string): string {
+  return src
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n")
+    .filter((l) => !/^\s*\/\//.test(l))
+    .join("\n");
+}
+
+/** The body between two anchors, THROWING when either is missing. */
+function sliceBetween(src: string, open: string, close: string): string {
+  const after = src.split(open);
+  // A missing anchor would otherwise yield undefined -> "" and every
+  // `toContain` below would fail for the wrong reason, or worse, a `.length`
+  // check would pass over an empty slice.
+  if (after.length < 2) throw new Error(`anchor not found: ${open}`);
+  const body = after[1]!.split(close);
+  if (body.length < 2) throw new Error(`closing anchor not found: ${close}`);
+  return body[0]!;
+}
+
+test("SOURCE SCAN (weak): the poller is called INSIDE the 10 s timer body, not merely mentioned", () => {
+  const src = indexSource();
+  // Bounded to the interval body: making both call sites dead code (wrapping
+  // them in a never-taken branch) no longer satisfies this, and it covers the
+  // cadence at the same time.
+  const timerBody = sliceBetween(src, "inboxTimer = setInterval(", "}, INBOX_POLL_MS)");
+  // A LINE-ONLY match, not a substring: `if (NEVER) void pollDispatchRequests()`
+  // still CONTAINS the call while never running it, and that mutation was
+  // measured green against a plain toContain. Requiring the call to be the
+  // whole statement refuses it. This closes the measured instance, not the
+  // class -- `void (cond && pollDispatchRequests())` would still pass, which is
+  // the standing limit of any source scan.
+  const callAlone = /^[ \t]*void pollDispatchRequests\(\)[ \t]*$/m;
+  expect(timerBody).toMatch(callAlone);
+  // Its four siblings share the tick: if the poller ever moves out of this
+  // body, it must move somewhere as load-bearing.
+  expect(timerBody).toContain("void pollOperatorInbox()");
+  // The operator's manual retry path too, so a broker that came back up does
+  // not wait a full tick. Same line-only discipline, same bounded slice.
+  const retryBody = sliceBetween(src, "brokerRetry: () => {", "},");
+  expect(retryBody).toMatch(callAlone);
+});
+
+test("SOURCE SCAN (weak): the poller's three deps are the REAL ones, not stubs", () => {
+  const src = indexSource();
+  // Each of these was a green mutation before: a wrong key queries another
+  // project, a stubbed dispatch answers the agent without dispatching, a
+  // stubbed resolve never answers at all.
+  expect(src).toContain("list: () => fetchDispatchRequests(key, { endpoint })");
+  expect(src).toContain("dispatch: () => dispatchNext()");
+  expect(src).toContain("resolve: (id, outcome) => resolveDispatchRequest(id, outcome, { endpoint })");
+  // The park branch reads the EXISTING guard rather than declaring a new one.
+  expect(src).toContain("inFlight: () => dispatchInFlight !== null");
+});
+
+test("SOURCE SCAN (weak): DispatchResult.dispatched is produced AND reaches the result", () => {
+  const src = indexSource();
+  // Producer: fed from the same `dispatched` array that drives dispatchedIds,
+  // so the outcome and the tracked set can never name different cards.
+  expect(src).toContain(
+    "announcedMembers.push(...dispatched.map((i) => ({ id: i.id, title: i.title, kind: i.kind })))"
+  );
+  // ...and CONSUMED: producing the array then dropping it on the floor was a
+  // green mutation, because pinning the push alone says nothing about whether
+  // its result ever reaches the returned DispatchResult.
+  expect(src).toContain("dispatched: announcedMembers");
 });

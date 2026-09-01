@@ -166,13 +166,35 @@ function insertPendingApproval(db: Database, id: string, projectKey: string): vo
   );
 }
 
+function insertDispatchRequest(db: Database, id: string, projectKey: string): void {
+  db.run(
+    `INSERT INTO dispatch_requests (id, project_key, from_peer, status, created_at) VALUES (?, ?, 'lead-1', 'pending', ${NOW})`,
+    [id, projectKey]
+  );
+}
+
 test("discovery finds every real project_key-bearing table in broker.ts's schema, none else", () => {
   const db = seededDb();
   // This is the whole point of deriving from source: if broker.ts adds,
   // removes, or renames a project_key column, this assertion changes on its
   // own the next time this file runs -- nobody has to remember to update it.
+  //
+  // dispatch_requests joined this list with card bf76d37f, and it BELONGS
+  // here rather than being an accident to exclude. Its project_key is copied
+  // at add-time from the proven `peers` row -- exactly graph_drafts'
+  // provenance, two lines up -- and the Deck finds a parked request by
+  // querying that column with the key it recomputes at runtime. Migrate
+  // `peers` without migrating this table and an old mixed-case request goes
+  // permanently INVISIBLE to the Deck: never dispatched, while its requester
+  // was told it was parked and would be announced. The test further down
+  // measures that lockstep instead of trusting this paragraph. (No row in
+  // production should need it today, since the table postdates the
+  // normalizeRemoteUrl fix -- but membership is decided by what the column
+  // MEANS, not by whether stale data happens to exist, and the script's own
+  // header refuses exclusion lists on principle.)
   expect(discoverProjectKeyTables(db)).toEqual([
     "approval_session_tokens",
+    "dispatch_requests",
     "graph_drafts",
     "peers",
     "pending_approvals",
@@ -185,7 +207,10 @@ test("a table added AFTER this module is written is still discovered -- proves n
   db.run(`CREATE TABLE future_widget_table (id TEXT PRIMARY KEY, project_key TEXT NOT NULL)`);
   const tables = discoverProjectKeyTables(db);
   expect(tables).toContain("future_widget_table");
-  expect(tables.length).toBe(6);
+  // 6 real tables in broker.ts's schema (see the assertion above) + this one.
+  // Card bf76d37f took it from 5+1 to 6+1, and the fact that THIS test is what
+  // reported the change is the guarantee it exists to give.
+  expect(tables.length).toBe(7);
 });
 
 test("a column named in a different case (PROJECT_KEY) is still discovered -- PRAGMA table_info preserves declared casing, matching must not", () => {
@@ -247,6 +272,66 @@ test("--write lowercases mixed-case project_key across every discovered table in
     .query<{ project_key: string | null }, []>("SELECT project_key FROM peers WHERE instance_token = 'p2'")
     .get();
   expect(nullPeer?.project_key).toBeNull();
+});
+
+// Card bf76d37f. The two discovery assertions above name dispatch_requests in
+// a LIST, which proves it is in the domain but not that migrating it produces
+// a coherent result. This one measures the effect that actually matters: the
+// parked request and the peers row its key was COPIED from must come out of
+// one migration pass carrying the same key, or the Deck stops finding the
+// request while its requester has been told it is parked and will be
+// announced. Asserted as a JOIN on the value, not as two independent equality
+// checks, because two rows both migrated but to different values is precisely
+// the failure this is here to exclude.
+test("a parked dispatch request stays findable: its project_key migrates in lockstep with the peers row it was copied from", () => {
+  const db = seededDb();
+  const stale = "github.com/VOCSAP/Koryphaios";
+  insertPeer(db, "lead-1", stale);
+  insertDispatchRequest(db, "d1", stale);
+  // A neighbour on a DIFFERENT project, already lowercase: proves the pass
+  // does not simply rewrite every row of the table to one value.
+  insertDispatchRequest(db, "d2", "github.com/vocsap/other-repo");
+
+  const result = migrateAll(db, true);
+  expect(result.status).toBe("written");
+
+  const joined = db
+    .query<{ n: number }, []>(
+      `SELECT COUNT(*) AS n FROM dispatch_requests d
+         JOIN peers p ON p.project_key = d.project_key
+        WHERE d.id = 'd1' AND p.instance_token = 'lead-1'`
+    )
+    .get();
+  expect(joined?.n).toBe(1);
+
+  const migrated = db
+    .query<{ project_key: string }, []>("SELECT project_key FROM dispatch_requests WHERE id = 'd1'")
+    .get();
+  expect(migrated?.project_key).toBe("github.com/vocsap/koryphaios");
+  const untouched = db
+    .query<{ project_key: string }, []>("SELECT project_key FROM dispatch_requests WHERE id = 'd2'")
+    .get();
+  expect(untouched?.project_key).toBe("github.com/vocsap/other-repo");
+});
+
+test("a collision inside dispatch_requests is REFUSED, never merged", () => {
+  // The script's contract is refuse-and-write-nothing on any collision, in any
+  // table. Pinned for this table specifically because its rows are requests
+  // AWAITING execution: silently merging two of them would be silently
+  // dropping one lead's ask, and the long poll on the dropped one would time
+  // out looking exactly like a slow Deck.
+  const db = seededDb();
+  insertDispatchRequest(db, "d1", "github.com/VOCSAP/koryphaios");
+  insertDispatchRequest(db, "d2", "github.com/vocsap/koryphaios");
+
+  const result = migrateAll(db, true);
+  expect(result.status).toBe("collision");
+
+  // Nothing written: the mixed-case row is still exactly as it was.
+  const row = db
+    .query<{ project_key: string }, []>("SELECT project_key FROM dispatch_requests WHERE id = 'd1'")
+    .get();
+  expect(row?.project_key).toBe("github.com/VOCSAP/koryphaios");
 });
 
 test("non-ASCII casing uses Unicode-correct JS toLowerCase(), never SQLite's ASCII-only LOWER()", () => {

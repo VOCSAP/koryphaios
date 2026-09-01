@@ -73,6 +73,11 @@ import {
   isAuthError,
   type ApprovalScope,
 } from "./shared/approval-scope.ts";
+// Card bf76d37f: the dispatch outcome is written by the Deck and READ BACK by
+// an agent, so it crosses the same boundary as an approval answer and gets the
+// same flattening. shared/text.ts is the dependency-free leaf (shared/approval.ts
+// pulls node:crypto), which is why these two live there.
+import { stripControl, truncate } from "./shared/text.ts";
 import type {
   RegisterRequest,
   RegisterResponse,
@@ -120,6 +125,16 @@ import type {
   GraphDraftOpenRequest,
   GraphDraftOpenResponse,
   GraphDraftStatus,
+  DispatchRequest,
+  DispatchRequestAddRequest,
+  DispatchRequestAddResponse,
+  DispatchRequestListRequest,
+  DispatchRequestListResponse,
+  DispatchRequestOutcome,
+  DispatchRequestResolveRequest,
+  DispatchRequestResolveResponse,
+  DispatchRequestStatus,
+  DispatchedCard,
   Approval,
   ApprovalAddRequest,
   ApprovalAddResponse,
@@ -795,6 +810,31 @@ db.run(`
   )
 `);
 db.run(`CREATE INDEX IF NOT EXISTS idx_graph_drafts_project ON graph_drafts(project_key, status)`);
+
+// Dispatch requests (card bf76d37f): an agent asks the Deck to run the head
+// wave of the roadmap queue, and the Deck posts back WHAT it dispatched. Same
+// durability model as graph_drafts right above (no FK, plain-text peer
+// snapshot, status flips, listing non-destructive): a Deck restart loses no
+// parked request, and the row survives its answer so the requester can still
+// read the outcome after its long poll gave up.
+//
+// `outcome` is JSON TEXT and stays NULL until resolved. It is deliberately not
+// a set of columns: it is a report meant to be read once by the caller, not a
+// thing to query on, and cards[] is variable-length.
+db.run(`
+  CREATE TABLE IF NOT EXISTS dispatch_requests (
+    id TEXT PRIMARY KEY,
+    project_key TEXT NOT NULL,
+    from_peer TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    outcome TEXT
+  )
+`);
+db.run(
+  `CREATE INDEX IF NOT EXISTS idx_dispatch_requests_project ON dispatch_requests(project_key, status)`
+);
 
 // --- Remote approvals (PLAN-notifications-mobiles N1) ---
 // An agent hits a blocking question; it is parked here until SOMEONE answers:
@@ -4834,6 +4874,110 @@ function rowToGraphDraft(row: GraphDraftRow): GraphDraft {
   return { ...row };
 }
 
+// --- Dispatch requests (card bf76d37f) ---
+
+type DispatchRequestRow = {
+  id: string;
+  project_key: string;
+  from_peer: string;
+  status: DispatchRequestStatus;
+  created_at: string;
+  resolved_at: string | null;
+  /** JSON of a DispatchRequestOutcome, or NULL while pending. */
+  outcome: string | null;
+};
+
+/** How long /dispatch-request/add may hold its response open. */
+const DISPATCH_WAIT_MAX_SEC = Math.max(
+  1,
+  parseInt(process.env.CLAUDE_PEERS_DISPATCH_WAIT_MAX_SEC ?? "60", 10)
+);
+/** Bounds on a Deck-supplied outcome, so a report cannot flood an agent's context. */
+const DISPATCH_OUTCOME_MAX_CARDS = 50;
+const DISPATCH_OUTCOME_MAX_TARGETS = 50;
+const DISPATCH_OUTCOME_MAX_TEXT = 400;
+
+function rowToDispatchRequest(row: DispatchRequestRow): DispatchRequest {
+  let outcome: DispatchRequestOutcome | null = null;
+  if (row.outcome) {
+    try {
+      outcome = JSON.parse(row.outcome) as DispatchRequestOutcome;
+    } catch (err) {
+      // Only reachable if the column was written outside this broker: the
+      // insert path serialises a value this module itself validated. Report
+      // rather than swallow (CLAUDE.md "no silent errors"), and hand back a
+      // request the caller can still read as "resolved, report unreadable"
+      // instead of a 500 that loses the row entirely.
+      log.error("dispatch-request: stored outcome is not valid JSON", { id: row.id, err });
+      outcome = { cards: [], note: "the stored outcome could not be read back" };
+    }
+  }
+  return {
+    id: row.id,
+    project_key: row.project_key,
+    from_peer: row.from_peer,
+    status: row.status,
+    created_at: row.created_at,
+    resolved_at: row.resolved_at,
+    outcome,
+  };
+}
+
+function cleanDispatchText(v: unknown, max: number): string {
+  return truncate(stripControl(typeof v === "string" ? v : ""), max);
+}
+
+function cleanDispatchTargets(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .slice(0, DISPATCH_OUTCOME_MAX_TARGETS)
+    .map((t) => cleanDispatchText(t, DISPATCH_OUTCOME_MAX_TEXT))
+    .filter((t) => t.length > 0);
+}
+
+/**
+ * Flatten a Deck-supplied outcome before it can be parked and read back by an
+ * agent. Hostile-input class 2 (CLAUDE.md): this crosses the broker HTTP
+ * boundary in BOTH directions, so nothing here may keep a control byte, an
+ * ANSI sequence or an unbounded length. Total, not partial: every field the
+ * wire type declares is rebuilt from scratch, so an unknown extra property in
+ * the request body is dropped rather than projected onward.
+ */
+function sanitizeDispatchOutcome(v: unknown): DispatchRequestOutcome {
+  const src = (typeof v === "object" && v !== null ? v : {}) as Record<string, unknown>;
+  const rawCards = Array.isArray(src.cards) ? src.cards.slice(0, DISPATCH_OUTCOME_MAX_CARDS) : [];
+  const cards: DispatchedCard[] = rawCards.map((c) => {
+    const card = (typeof c === "object" && c !== null ? c : {}) as Record<string, unknown>;
+    return {
+      id: cleanDispatchText(card.id, DISPATCH_OUTCOME_MAX_TEXT),
+      title: cleanDispatchText(card.title, DISPATCH_OUTCOME_MAX_TEXT),
+      kind: cleanDispatchText(card.kind, DISPATCH_OUTCOME_MAX_TEXT),
+      matched: cleanDispatchTargets(card.matched),
+      missing: cleanDispatchTargets(card.missing),
+      ambiguous: cleanDispatchTargets(card.ambiguous),
+    };
+  });
+  return { cards, note: cleanDispatchText(src.note, DISPATCH_OUTCOME_MAX_TEXT) };
+}
+
+// Long-poll registry: /dispatch-request/add parks here until /dispatch-request
+// /resolve settles the row. Keyed by REQUEST id, never by project_key: two
+// leads triggering on one project are two rows, and each wakes only its own.
+const dispatchRequestWaiters = new Map<string, Set<(r: DispatchRequest) => void>>();
+
+function resolveDispatchRequestWaiters(request: DispatchRequest): void {
+  const set = dispatchRequestWaiters.get(request.id);
+  if (!set) return;
+  dispatchRequestWaiters.delete(request.id);
+  for (const fn of set) {
+    try {
+      fn(request);
+    } catch (err) {
+      log.error("dispatch-request: waiter callback threw", { id: request.id, err });
+    }
+  }
+}
+
 // --- Remote approvals (PLAN-notifications-mobiles N1) ---
 
 // Notification lifetime. Only the NOTIFICATION expires: the session stays
@@ -6306,6 +6450,164 @@ function handleGraphDraftOpen(
   return { draft: rowToGraphDraft(fresh) };
 }
 
+/**
+ * Card bf76d37f. Park a request for the Deck to run the head wave, then hold
+ * the response open until the Deck resolves it or `wait_sec` elapses.
+ *
+ * IDENTITY, and why this reuses the graph-draft resolver: the question this
+ * route asks is character-for-character the one resolveProvenGraphDraftPeer
+ * answers -- "which REGISTERED peer presents this instance_token, and what is
+ * ITS OWN project_key" -- and for the same reason: project_key and from_peer
+ * must come from the peers ROW, never from the body, or a caller could park a
+ * request against another project's queue and read back what it dispatched.
+ * The one seam this reuse leaves: the resolver's reserved-identity branch says
+ * "cannot author a graph draft". Its REMEDY (call set_id, then retry) is
+ * correct on both routes and that branch is only reachable by a legacy row
+ * registered before mint-time refused reserved names; widening the module's
+ * wording belongs to whoever owns shared/graph-draft-scope.ts, not to this lot.
+ *
+ * AUTHORISATION is deliberately NOT widened (team-lead ruling, 2026-09-01).
+ * "Who may CREATE a directive card" was closed by the operator on 2026-08-25,
+ * risk accepted. "Who may TRIGGER a wave that may contain cards it did not
+ * write" is closed by VISIBILITY, not by a permission: the response names the
+ * cards dispatched and the tiles hit, so a caller that triggers someone else's
+ * wave sees exactly that in its own reply.
+ */
+async function handleDispatchRequestAdd(
+  body: DispatchRequestAddRequest
+): Promise<DispatchRequestAddResponse | { error: string; status: number }> {
+  const peer = resolveProvenGraphDraftPeer(
+    graphDraftScopeDeps,
+    body,
+    "/dispatch-request/add",
+    (message, meta) => log.warn(message, meta)
+  );
+  if (isGraphDraftAuthError(peer)) return peer;
+  if (!peer.projectKey) {
+    return {
+      error: "this peer has no project_key on record; re-register with one before requesting a dispatch",
+      status: 401,
+    };
+  }
+
+  const row: DispatchRequestRow = {
+    id: randomUUID(),
+    project_key: peer.projectKey,
+    from_peer: peer.peerId,
+    status: "pending",
+    created_at: new Date().toISOString(),
+    resolved_at: null,
+    outcome: null,
+  };
+  db.run(
+    `INSERT INTO dispatch_requests (id, project_key, from_peer, status, created_at, resolved_at, outcome)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [row.id, row.project_key, row.from_peer, row.status, row.created_at, row.resolved_at, row.outcome]
+  );
+
+  const waitSec = Math.max(
+    0,
+    Math.min(DISPATCH_WAIT_MAX_SEC, Number.isFinite(body.wait_sec) ? Number(body.wait_sec) : 25)
+  );
+  if (waitSec === 0) return { request: rowToDispatchRequest(row) };
+
+  return await new Promise<DispatchRequestAddResponse>((resolve) => {
+    let done = false;
+    const settle = (request: DispatchRequest): void => {
+      if (done) return;
+      done = true;
+      const set = dispatchRequestWaiters.get(row.id);
+      if (set) {
+        set.delete(onResolved);
+        if (set.size === 0) dispatchRequestWaiters.delete(row.id);
+      }
+      clearTimeout(timer);
+      resolve({ request });
+    };
+    const onResolved = (request: DispatchRequest): void => settle(request);
+    const timer = setTimeout(() => {
+      // Re-read rather than settle on the in-memory `row`, which is a snapshot
+      // taken at INSERT time and says "pending" forever. Today no resolve can
+      // slip past us -- the INSERT, this executor and the set.add below all run
+      // in ONE synchronous tick, so a waiter is always registered before the
+      // event loop can serve /dispatch-request/resolve -- but that invariant is
+      // a property of this function's current shape, not of the feature: a
+      // future path that flips the row WITHOUT going through
+      // resolveDispatchRequestWaiters would make the snapshot a lie. Reading
+      // the durable row costs one query on the timeout path only, and makes the
+      // answer correct by construction instead of by that invariant holding.
+      const fresh = db
+        .query("SELECT * FROM dispatch_requests WHERE id = ?")
+        .get(row.id) as DispatchRequestRow | null;
+      settle(rowToDispatchRequest(fresh ?? row));
+    }, waitSec * 1000);
+    // A long poll must never keep the process alive on its own.
+    timer.unref?.();
+    let set = dispatchRequestWaiters.get(row.id);
+    if (!set) {
+      set = new Set();
+      dispatchRequestWaiters.set(row.id, set);
+    }
+    set.add(onResolved);
+  });
+}
+
+/** The Deck's read: what is parked and waiting for it on this project. */
+function handleDispatchRequestList(
+  body: DispatchRequestListRequest
+): DispatchRequestListResponse | { error: string; status: number } {
+  if (!body.project_key || typeof body.project_key !== "string") {
+    return { error: "project_key is required", status: 400 };
+  }
+  let sql = "SELECT * FROM dispatch_requests WHERE project_key = ?";
+  if (!body.include_done) sql += " AND status = 'pending'";
+  sql += " ORDER BY created_at, id";
+  const rows = db.query(sql).all(body.project_key) as DispatchRequestRow[];
+  return { requests: rows.map(rowToDispatchRequest) };
+}
+
+/**
+ * The Deck's write: the real report of what the wave dispatched.
+ *
+ * IDEMPOTENT on an already-resolved row: the stored outcome is returned
+ * unchanged rather than overwritten, so a Deck that retries after a lost
+ * response cannot replace a report the caller may already have read.
+ *
+ * RESIDUAL, stated rather than hidden: this route carries no per-caller proof,
+ * so any holder of the broker token can post an outcome -- the same bar as
+ * /graph-draft/open next to it. What that buys an attacker is bounded to
+ * LYING to the requester: nothing here dispatches anything, and the row's
+ * project_key and from_peer were fixed at add-time from a proven peers row.
+ */
+function handleDispatchRequestResolve(
+  body: DispatchRequestResolveRequest
+): DispatchRequestResolveResponse | { error: string; status: number } {
+  if (!body.id || typeof body.id !== "string") {
+    return { error: "id is required", status: 400 };
+  }
+  const row = db
+    .query("SELECT * FROM dispatch_requests WHERE id = ?")
+    .get(body.id) as DispatchRequestRow | null;
+  if (!row) return { error: "unknown dispatch request", status: 404 };
+  if (row.status === "done") return { request: rowToDispatchRequest(row) };
+
+  const outcome = sanitizeDispatchOutcome(body.outcome);
+  const resolvedAt = new Date().toISOString();
+  db.run("UPDATE dispatch_requests SET status = 'done', resolved_at = ?, outcome = ? WHERE id = ?", [
+    resolvedAt,
+    JSON.stringify(outcome),
+    row.id,
+  ]);
+  const request = rowToDispatchRequest({
+    ...row,
+    status: "done",
+    resolved_at: resolvedAt,
+    outcome: JSON.stringify(outcome),
+  });
+  resolveDispatchRequestWaiters(request);
+  return { request };
+}
+
 function handleGroupStats(): GroupStatsResponse {
   const rows = db.query(
     "SELECT group_id, COUNT(*) AS active_peers FROM peers WHERE status = 'active' GROUP BY group_id"
@@ -6683,6 +6985,27 @@ const server = Bun.serve<WsData>({
         }
         case "/graph-draft/open": {
           const result = handleGraphDraftOpen(body as GraphDraftOpenRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/dispatch-request/add": {
+          const result = await handleDispatchRequestAdd(body as DispatchRequestAddRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/dispatch-request/list": {
+          const result = handleDispatchRequestList(body as DispatchRequestListRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/dispatch-request/resolve": {
+          const result = handleDispatchRequestResolve(body as DispatchRequestResolveRequest);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }

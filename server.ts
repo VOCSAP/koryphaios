@@ -70,6 +70,7 @@ import {
   ROADMAP_UPDATE_ACK_FIELDS,
 } from "./shared/types.ts";
 import type { GraphDraftAddResponse } from "./shared/types.ts";
+import type { DispatchRequest, DispatchRequestAddResponse } from "./shared/types.ts";
 import type {
   ApprovalAddResponse,
   ApprovalWaitResponse,
@@ -498,7 +499,7 @@ SHARED ROADMAP: a persistent backlog (features, bugs, debt, ideas) scoped to thi
 - Start of a task: roadmap_list with a filter, to see what is planned and in progress.
 - Bug, debt or idea outside your task: roadmap_add, with the 'context' field filled.
 - Keep the status of items you work on current (roadmap_update: planned -> in_progress -> done). in_progress LOCKS the item under your peer_id: set it only when you really start, set it back to planned if you stop before finishing.
-- Team leads: a kind='directive' card (roadmap_add) lets the Deck reset a peer's context between items; you never run it yourself.
+- Team leads: a kind='directive' card (roadmap_add) lets the Deck reset a peer's context between items; queue it, then roadmap_dispatch runs the head wave and reports back what it hit.
 
 When you start, call set_summary to say what you are working on.`,
   }
@@ -875,6 +876,24 @@ const TOOLS = [
       required: ["id", "text"],
     },
   },
+  // Card bf76d37f. NO ARGUMENTS, and that is a ruling, not an oversight: the
+  // head wave is already selected by the queue, so letting the caller name a
+  // card would let it short-circuit the rank order and would create a SECOND
+  // way to aim at the wrong target. Symmetric with the Deck's own Dispatch
+  // button, which takes no argument either.
+  //
+  // The reply is the point of the tool. runDirectiveWave marks a card done
+  // BEFORE executing it, so a card's status proves nothing about execution and
+  // a bare "ok" would put the caller back in the exact situation this card was
+  // filed for: believing it was done. Comment lines inside TOOLS are stripped
+  // by tests/peer-mcp-surface-budget.test.ts, so this reasoning costs the
+  // model nothing per turn -- keep it here rather than in the description.
+  {
+    name: "roadmap_dispatch",
+    description:
+      "Run the head wave of the roadmap queue in the operator's Deck, like its Dispatch button; no argument. Waits ~25 s and returns which cards were dispatched and which tiles were hit, refused or missed.",
+    inputSchema: { type: "object" as const, properties: {} },
+  },
   {
     name: "graph_draft_prepare",
     description:
@@ -1005,6 +1024,32 @@ function roadmapAuthor(): string {
  */
 function roadmapProof(): Record<string, string> {
   return myInstanceToken ? { instance_token: myInstanceToken } : {};
+}
+
+/**
+ * Card bf76d37f. Render what the wave ACTUALLY did. Never "ok": the caller
+ * must be able to tell "dispatched to these tiles" from "nothing was queued"
+ * from "still running", because a directive card is marked done before it is
+ * executed and its status therefore acknowledges nothing.
+ */
+function renderDispatchOutcome(request: DispatchRequest): string {
+  if (request.status !== "done" || !request.outcome) {
+    return `Dispatch requested (id ${request.id}) — the Deck had not answered within the wait. The request is PARKED broker-side, not lost: the Deck runs it and announces the outcome on this channel. Do not assume it ran.`;
+  }
+  const { cards, note } = request.outcome;
+  if (cards.length === 0) {
+    return `Dispatch ran, and dispatched NOTHING${note ? `: ${note}` : "."} Nothing in the queue was eligible, so no tile was touched.`;
+  }
+  const lines = cards.map((c) => {
+    const parts = [`  - [${c.id.slice(0, 8)}] ${c.kind}: ${c.title}`];
+    parts.push(`    hit: ${c.matched.length > 0 ? c.matched.join(", ") : "(none)"}`);
+    if (c.missing.length > 0) parts.push(`    NOT hit: ${c.missing.join(", ")}`);
+    if (c.ambiguous.length > 0) {
+      parts.push(`    refused as ambiguous (several live tiles share the id): ${c.ambiguous.join(", ")}`);
+    }
+    return parts.join("\n");
+  });
+  return `Dispatch ran. ${cards.length} card(s) dispatched:\n${lines.join("\n")}${note ? `\n${note}` : ""}`;
 }
 
 /**
@@ -2073,6 +2118,35 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         return { content: [{ type: "text" as const, text: `${name} failed: ${msg}` }], isError: true };
+      }
+    }
+
+    case "roadmap_dispatch": {
+      try {
+        // One HTTP call: the broker parks the request and holds the response
+        // open until the Deck resolves it (wait_sec) -- imitating
+        // deck_spawn_session's "wait for the real result, else tell the caller
+        // the Deck will announce it". 25 s is two cycles of the Deck's 10 s
+        // poller, so a healthy Deck answers inside the wait and a slow one
+        // still gets its outcome parked on the row.
+        const { request } = await brokerFetch<DispatchRequestAddResponse>(
+          "/dispatch-request/add",
+          {
+            project_key: roadmapProjectKey(),
+            by: roadmapAuthor(),
+            wait_sec: 25,
+            ...roadmapProof(),
+          }
+        );
+        return {
+          content: [{ type: "text" as const, text: renderDispatchOutcome(request) }],
+        };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return {
+          content: [{ type: "text" as const, text: `roadmap_dispatch failed: ${msg}` }],
+          isError: true,
+        };
       }
     }
 

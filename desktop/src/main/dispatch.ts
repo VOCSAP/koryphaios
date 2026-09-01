@@ -7,8 +7,14 @@
 //
 // No electron imports so it is unit-testable under `bun test`.
 
-import type { DispatchResult, RoadmapItem } from '../shared/types'
+import type { DirectiveDispatch, DispatchResult, RoadmapItem } from '../shared/types'
+// Dispatch-request shapes come from the REPO-ROOT shared/types.ts, the broker's
+// own file: main-side only (no renderer/preload consumer), and
+// desktop/tsconfig.node.json already carries the root file in its program.
+// Type-only, so the repo-root bun harness never resolves it at runtime.
+import type { DispatchedCard, DispatchRequest, DispatchRequestOutcome } from '../../../shared/types'
 import { queuedItems } from '../shared/workflow'
+import { dispatchedTargetsTail } from './directive-journal'
 import { directiveKeys, isDirectiveCommand } from './directive'
 
 // queuedItems used to own its own filter+sort here (localeCompare tiebreak,
@@ -294,7 +300,12 @@ export async function dispatchNormalWave(
 
 export interface DirectiveWaveDeps {
   markDone: (item: RoadmapItem) => Promise<void>
-  execute: (item: RoadmapItem) => Promise<void>
+  /**
+   * Executes ONE directive card and reports what it reached (card bf76d37f).
+   * The report is the executor's own resolver output, never re-derived here:
+   * this module owns no liveness predicate and must not grow one.
+   */
+  execute: (item: RoadmapItem) => Promise<DirectiveDispatch>
   journal: (line: string) => void
   reportError: (message: string, error: unknown) => void
 }
@@ -342,14 +353,39 @@ export interface DirectiveWaveDeps {
  * loses the directive with no journal line at all. Accepted per the same
  * cost analysis: a silently lost directive is cheap to re-queue, a doubled
  * injection is not.
+ *
+ * RETURNS (card bf76d37f) one `DirectiveDispatch` per card whose `execute`
+ * RESOLVED, in execution order, so the caller can finally answer "what was
+ * really hit" -- the card status cannot, precisely because of the
+ * mark-then-execute order above. A card whose `execute` threw is ABSENT from
+ * that array rather than present with empty lists: nothing is known about what
+ * it reached, and an empty `unreached` would read as "everything was reached".
+ * Its journal line and reportError call below stay its only report.
+ *
+ * The report is also READ right here: the counts tail on the "dispatched" line
+ * (dispatchedTargetsTail, ./directive-journal) is the only SYNCHRONOUS witness
+ * of the hit/miss split at the instant the card is consumed -- the per-target
+ * outcomes arrive later and separately, from inside `execute`. Counts only, no
+ * ids: `execute` already journals the unreached ids through
+ * `unreachedTargetsText`, and naming them twice would double-report them.
  */
-export async function runDirectiveWave(directives: RoadmapItem[], deps: DirectiveWaveDeps): Promise<void> {
+export async function runDirectiveWave(
+  directives: RoadmapItem[],
+  deps: DirectiveWaveDeps
+): Promise<DirectiveDispatch[]> {
+  const executed: DirectiveDispatch[] = []
   for (const item of directives) {
     const label = isDirectiveCommand(item.directive) ? directiveKeys(item.directive) : `${item.directive ?? '?'}`
     await deps.markDone(item)
     try {
-      await deps.execute(item)
-      deps.journal(`directive card dispatched: "${item.title}" (${label})`)
+      const report = await deps.execute(item)
+      executed.push(report)
+      deps.journal(
+        `directive card dispatched: "${item.title}" (${label}) -> ${dispatchedTargetsTail(
+          report.injected.length,
+          report.unreached.length
+        )}`
+      )
     } catch (e) {
       deps.journal(
         `directive card "${item.title}" (${label}) marked done but execution threw: ${
@@ -357,6 +393,137 @@ export async function runDirectiveWave(directives: RoadmapItem[], deps: Directiv
         }`
       )
       deps.reportError(`directive execution threw after done-upsert for "${item.title}"`, e)
+    }
+  }
+  return executed
+}
+
+// ---------------------------------------------------------------------------
+// Dispatch requests (card bf76d37f): an agent asks through its MCP tool, the
+// broker PARKS the request, the Deck serves it here and posts the outcome back.
+// ---------------------------------------------------------------------------
+
+/**
+ * Projects one dispatch into the outcome the requesting agent reads.
+ *
+ * PROJECTION, NOT DERIVATION -- the whole point of the card. The three buckets
+ * come from the `DirectiveDispatch` the executor already returned, which holds
+ * resolveDirectiveTargets's own output. Nothing here re-inspects sessions:
+ * `matched` is the peerId of each injected tile, `missing` is EVERY unreached
+ * id, and `ambiguous` is the subset of those refused for ambiguity -- so the
+ * subset relation the resolver guarantees survives the trip unchanged.
+ *
+ * Both card families land in `cards`, directives first because that is the
+ * order the wave runs them in (runDirectiveWave before dispatchNormalWave).
+ * A normal card carries three EMPTY buckets, which is indistinguishable from a
+ * directive card that reached nothing -- `kind` is the only thing that tells
+ * them apart, so it is carried per card and never assumed per branch.
+ *
+ * An empty `cards` is a SUCCESS: it says nothing was eligible, and the broker
+ * distinguishes that from a tool-side failure. Never turn it into an error.
+ */
+export function composeDispatchOutcome(result: DispatchResult): DispatchRequestOutcome {
+  const cards: DispatchedCard[] = [
+    ...(result.directives ?? []).map((d): DispatchedCard => {
+      const missing = d.unreached.map((u) => u.peerId)
+      return {
+        id: d.id,
+        title: d.title,
+        kind: 'directive',
+        matched: d.injected.map((t) => t.peerId),
+        missing,
+        ambiguous: d.unreached.filter((u) => u.reason === 'ambiguous').map((u) => u.peerId)
+      }
+    }),
+    ...(result.dispatched ?? []).map((m): DispatchedCard => ({
+      id: m.id,
+      title: m.title,
+      kind: m.kind,
+      matched: [],
+      missing: [],
+      ambiguous: []
+    }))
+  ]
+  return { cards, note: dispatchOutcomeNote(result, cards.length) }
+}
+
+/** One readable line, used as-is by the requesting agent. */
+function dispatchOutcomeNote(result: DispatchResult, cardCount: number): string {
+  if (cardCount === 0) {
+    // Not an error, and the reason matters: an empty queue and a missing
+    // team-lead are both "nothing happened", for very different operator
+    // actions.
+    return `nothing eligible to dispatch (${result.reason ?? 'no reason reported'})`
+  }
+  const directives = result.directives?.length ?? 0
+  const announced = result.dispatched?.length ?? 0
+  const parts = [
+    announced > 0 ? `${announced} card${announced === 1 ? '' : 's'} announced to the team-lead` : '',
+    directives > 0 ? `${directives} directive card${directives === 1 ? '' : 's'} executed by the Deck` : ''
+  ].filter(Boolean)
+  return parts.join('; ')
+}
+
+/**
+ * Everything runDispatchRequestPoll touches, injected. index.ts owns the
+ * Electron-coupled wiring (broker endpoint, project key, the real dispatchNext
+ * and its re-entrancy guard); this function owns the DECISION, which is why it
+ * is here and not there -- index.ts imports electron and cannot be imported
+ * under `bun test`, so a decision left inline would only ever be source-scanned.
+ */
+export interface DispatchRequestPollDeps {
+  /** The pending requests parked broker-side for this project. */
+  list: () => Promise<DispatchRequest[]>
+  /**
+   * True while a dispatch is already running. READ, never re-implemented: the
+   * re-entrancy guard lives on dispatchNext in index.ts and stays the single
+   * one. See the park branch below for why this is a read and not a lock.
+   */
+  inFlight: () => boolean
+  dispatch: () => Promise<DispatchResult>
+  resolve: (id: string, outcome: DispatchRequestOutcome) => Promise<void>
+  reportError: (message: string, error: unknown) => void
+}
+
+/**
+ * Serves the parked dispatch requests of one tick.
+ *
+ * PARK, NOT DRAIN. When a dispatch is already in flight the tick returns
+ * having resolved NOTHING: the requests stay pending and the next tick serves
+ * them. Two things this deliberately does not do -- it does not queue behind
+ * the in-flight run (the requester would be handed the result of a dispatch it
+ * did not cause, since dispatchNext coalesces concurrent callers onto one
+ * run), and it does not add a second guard of its own. `inFlight` is a READ of
+ * the existing one.
+ *
+ * A dispatch that THROWS is still answered, with a failure note. Silence is
+ * the one outcome that is never acceptable here: the requester waits 25 s and
+ * is then told the request is still parked, which is honest for a timeout and
+ * a lie for an exception the Deck swallowed.
+ *
+ * A resolve that throws is reported and does NOT abort the remaining requests
+ * of the same tick -- one unanswerable requester must not silence the others.
+ * Its request simply stays pending, which is the same park state as above.
+ */
+export async function runDispatchRequestPoll(deps: DispatchRequestPollDeps): Promise<void> {
+  const requests = await deps.list()
+  // No early return on an empty list: the loop below IS the mechanism that
+  // never triggers a dispatch nobody asked for. A `requests.length === 0`
+  // guard here was measured REDUNDANT -- removing it left every probe green,
+  // which makes it a line no test can falsify rather than a guarantee.
+  if (deps.inFlight()) return
+  for (const req of requests) {
+    let outcome: DispatchRequestOutcome
+    try {
+      outcome = composeDispatchOutcome(await deps.dispatch())
+    } catch (e) {
+      deps.reportError(`dispatch request ${req.id} failed to dispatch`, e)
+      outcome = { cards: [], note: `dispatch failed: ${e instanceof Error ? e.message : String(e)}` }
+    }
+    try {
+      await deps.resolve(req.id, outcome)
+    } catch (e) {
+      deps.reportError(`dispatch request ${req.id} could not be resolved`, e)
     }
   }
 }

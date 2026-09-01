@@ -606,6 +606,55 @@ export interface RoadmapWandDraft {
   context: string
 }
 
+/**
+ * ONE requested peer_id a directive card never reached, and WHY (card
+ * bf76d37f). The distinction already exists in the resolver
+ * (desktop/src/main/directive.ts, `DirectiveTargets.ambiguous` is a subset of
+ * `missing`) and in the journal wording (`unreachedTargetsText`); this type
+ * only stops it from being thrown away at the executor's return.
+ *
+ * 'no-live-target' = absent, dormant, exited or malformed. 'ambiguous' = the
+ * id matched MORE THAN ONE live tile and was refused for safety, so the target
+ * exists -- twice -- which is why it must never be reported as absent.
+ */
+export interface UnreachedDirectiveTarget {
+  peerId: string
+  reason: 'no-live-target' | 'ambiguous'
+}
+
+/**
+ * What ONE directive card actually reached when the Deck executed it (card
+ * bf76d37f). Purely a REPORT: it records the resolver's own buckets, it never
+ * re-derives liveness -- a second liveness predicate is exactly the drift card
+ * 6c380073 closed.
+ *
+ * Why this exists at all: `runDirectiveWave` is mark-then-execute, so the card
+ * reads `done` in the roadmap before its execution is even attempted. The card
+ * status therefore cannot answer "what was really hit"; only this can.
+ */
+export interface DirectiveDispatch {
+  /** The directive card's id. */
+  id: string
+  /** The card's title, as journaled. */
+  title: string
+  /**
+   * The command actually executed, or `null` when the card carried no valid
+   * one and was refused BEFORE any target resolution happened. That null is
+   * the discriminant for "nothing was resolved": on that path `injected` and
+   * `unreached` are both empty because no bucket was ever computed, NOT
+   * because every requested id was reached.
+   */
+  directive: RoadmapDirective | null
+  /**
+   * The live tiles the command was typed into: the resolver's `matched`,
+   * one entry per tile. Dispatched, not necessarily completed -- each
+   * injection reports its own outcome asynchronously in the journal.
+   */
+  injected: { tileId: string; peerId: string }[]
+  /** Requested peer_ids that reached no tile, each with its reason. */
+  unreached: UnreachedDirectiveTarget[]
+}
+
 /** Result of a queue dispatch to the team-lead (PLAN C15). */
 export interface DispatchResult {
   sent: boolean
@@ -621,7 +670,54 @@ export interface DispatchResult {
   titles?: string[]
   /** Failure reason when not sent: 'empty-queue' | 'no-lead' | 'error'. */
   reason?: string
+  /**
+   * Directive cards the Deck executed ITSELF during this dispatch (card
+   * bf76d37f), one entry per card whose execution resolved, in execution
+   * order. Independent of `sent`, which only ever describes the announce to
+   * the team-lead: a drain made only of directive cards executes work and then
+   * returns `{sent:false, reason:'empty-queue'}`, and this field is the only
+   * place that says so.
+   *
+   * A card whose execution THREW is absent from this array rather than present
+   * with empty lists -- nothing is known about what it reached, and an empty
+   * `unreached` would read as "everything was reached". Its journal line and
+   * its reportError call (runDirectiveWave, ./dispatch) remain its report.
+   */
+  directives?: DirectiveDispatch[]
+  /**
+   * The NORMAL (announced) wave members actually tracked by this dispatch
+   * (card bf76d37f), in wave order. `titles` above names them for the UI;
+   * this carries their IDENTITY, which the dispatch-request outcome needs and
+   * a title cannot supply. Absent when the wave announced nothing, exactly
+   * like `directives` is absent when nothing was executed.
+   */
+  dispatched?: DispatchedWaveMember[]
 }
+
+/** Identity of one announced wave member (card bf76d37f). */
+export interface DispatchedWaveMember {
+  id: string
+  title: string
+  kind: string
+}
+
+// Dispatch requests (card bf76d37f) are NOT declared here. `DispatchRequest`,
+// `DispatchRequestOutcome`, `DispatchedCard` and `DispatchRequestStatus` live
+// ONCE, in the repo-root shared/types.ts the broker owns, and the three
+// main-process consumers import them from there
+// (`../../../shared/types`, the same relative form approval-auth.ts and
+// roadmap-service.ts already use).
+//
+// Why they are not mirrored like RoadmapItem: the mirror exists for shapes the
+// RENDERER consumes, and desktop/tsconfig.web.json really does refuse a
+// repo-root file (TS6307). These four are main-side only -- measured
+// 2026-09-01: zero occurrences under desktop/src/renderer or desktop/src/preload
+// -- and tsconfig.node.json ALREADY lists ../shared/types.ts in its include, so
+// the root file is in the node program. Importing removes the divergence risk
+// instead of adding a guard that watches for it.
+//
+// If a renderer consumer is ever added, this decision has to be revisited:
+// that is the day the mirror becomes mandatory.
 
 /** Result of a direct assignment to one chosen peer (PLAN K6). */
 export interface AssignResult {
