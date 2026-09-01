@@ -4807,14 +4807,33 @@ svg.glyph {
    control, over there", and it is the same --accent the button is filled with.
    The band tint is the lane's own border colour, diluted: it separates the
    line from the canvas below without adding a rule that would double the
-   panel's bottom border once the lane is collapsed. */
+   panel's bottom border once the lane is collapsed.
+
+   Two values here are MEASURED CEILINGS, not taste, both found by looking at
+   the real render and invisible to any stylesheet audit:
+
+   - 4% is the highest tint this band may wear. Light `--bg` is #f3f3f3, so the
+     tint only darkens the backdrop while --fg-dim (#6a6a6a) stays put, and the
+     WCAG ratio falls with it: 4% -> 4.62:1, 5% -> 4.56, 6% -> 4.50, 7% -> 4.44,
+     which is BELOW the 4.5 bar for 11.5px text. The band is the cause, not the
+     token: without it the same text measures 4.87:1. Dark has huge headroom
+     (6.04:1 here) and hides the whole problem, so raising this back on the
+     strength of a dark-theme look would ship a light-theme regression.
+   - The 52px right padding clears `.help-fab`, a FIXED 40x40 button in the
+     window's bottom-right corner. Collapsed, this lane reaches the bottom of
+     the window and the FAB painted over the end of the sentence
+     (`elementFromPoint` answered `help-fab` at 98% of the band's width). The
+     padding makes the text wrap before that column. It costs width in the
+     expanded state, where the FAB falls on the canvas instead; keeping it
+     unconditional is deliberate, a stateful padding would be a second source
+     of truth for one geometry. */
 .wf-manual-hint {
   display: flex;
   align-items: center;
   gap: 6px;
   margin: 0;
-  padding: 6px 10px;
-  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  padding: 6px 52px 6px 10px;
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
   color: var(--fg-dim);
   font-size: 11.5px;
 }
