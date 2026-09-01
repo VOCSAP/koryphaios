@@ -4799,6 +4799,32 @@ svg.glyph {
   opacity: 0.4;
 }
 
+/* Card 5ec7494c: the line that says a queued card only moves as part of a wave
+   that gets sent. It is an ORIENTING hint, not an alarm: nothing is broken,
+   this is how the queue is designed, so it wears the hint register (11.5px, --fg-dim)
+   and never --danger nor the amber of .rm-locked-note. Its only accent is the
+   leading glyph, which is the dispatch button's own -- the tint says "that
+   control, over there", and it is the same --accent the button is filled with.
+   The band tint is the lane's own border colour, diluted: it separates the
+   line from the canvas below without adding a rule that would double the
+   panel's bottom border once the lane is collapsed. */
+.wf-manual-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  color: var(--fg-dim);
+  font-size: 11.5px;
+}
+
+.wf-manual-hint-glyph {
+  display: inline-flex;
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
 .wf-canvas {
   position: relative;
   height: 240px;
