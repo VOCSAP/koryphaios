@@ -77,6 +77,7 @@ import {
 } from './dispatch'
 import { directiveKeys, isDirectiveCommand, resolveDirectiveTargets } from './directive'
 import { unreachedTargetsText } from './directive-journal'
+import { decidePeerAnnounce } from './peer-rotation'
 import { ownsIdleLock } from './idle-lock'
 import type { AssignResult, DispatchResult, RoadmapItem, StopResult } from '@shared/types'
 import {
@@ -798,7 +799,19 @@ const waitForPeer = (id: string, timeoutMs: number): Promise<string | null> => {
  * site. Fire-and-forget like every announce helper here, never on the spawn
  * critical path.
  */
-const sendJoinAnnounce = async (peerId: string, intent: JoinAnnounceIntent): Promise<void> => {
+const sendJoinAnnounce = async (peerId: string, intent: JoinAnnounceIntent): Promise<void> =>
+  sendPeerAnnounce(peerId, composeJoinAnnounce(peerId, intent), 'join')
+
+/**
+ * The DISPATCH half of a peer announce, shared by the join announce above and
+ * the peer_id rotation notice (card 6f59c73a L1). Extracted rather than
+ * copied: two send paths that must agree on the level gate, on the
+ * never-address-yourself rule and on the error trace would be exactly the kind
+ * of divergence-prone pair this codebase has already paid for twice.
+ * `subject` only labels the journal/error lines, so the two events stay
+ * distinguishable in the log.
+ */
+const sendPeerAnnounce = async (peerId: string, text: string, subject: string): Promise<void> => {
   const level = getConfig().joinAnnounceLevel
   const decision = joinAnnounceTargets(level, service.list())
   if (decision.kind === 'silent') {
@@ -806,16 +819,15 @@ const sendJoinAnnounce = async (peerId: string, intent: JoinAnnounceIntent): Pro
     // with nothing to address IS an abandon (mirrors announceToSupervisor's
     // own "unreachable, ack dropped" journal entry just above).
     if (level === 'lead') {
-      journal.add('announce', 'join announce dropped: no active team-lead or supervisor')
+      journal.add('announce', `${subject} announce dropped: no active team-lead or supervisor`)
     }
     return
   }
-  const text = composeJoinAnnounce(peerId, intent)
   if (decision.kind === 'broadcast') {
     await broadcastAnnounce(text, peerId)
     return
   }
-  // The joiner itself is never its own announce target (mirrors
+  // The subject peer itself is never its own announce target (mirrors
   // broadcastAnnounce's excludePeerId semantics on the 'all' branch above).
   const targets = decision.peerIds.filter((id) => id !== peerId)
   await Promise.all(
@@ -825,9 +837,11 @@ const sendJoinAnnounce = async (peerId: string, intent: JoinAnnounceIntent): Pro
           { groupId: activeScope.groupId, secret: activeScope.secret, text, toPeerId },
           { endpoint: resolveBrokerEndpoint() }
         )
-        if (sent > 0) journal.add('announce', `join announce to ${toPeerId}: ${text.slice(0, 120)}`)
+        if (sent > 0) {
+          journal.add('announce', `${subject} announce to ${toPeerId}: ${text.slice(0, 120)}`)
+        }
       } catch (e) {
-        reportError('announce', 'join announce failed', e)
+        reportError('announce', `${subject} announce failed`, e)
       }
     })
   )
@@ -837,10 +851,47 @@ const sendJoinAnnounce = async (peerId: string, intent: JoinAnnounceIntent): Pro
 // other peers a newcomer joined (level-gated by sendJoinAnnounce above).
 // Fire-and-forget, never on the spawn critical path. Doubles as the spawn-ack
 // trigger (TS3).
+//
+// Card 6f59c73a (L1): this event now also fires when a live tile's id ROTATES,
+// not only on first resolution -- peer-rotation.ts decides which of the two
+// (or neither) applies, and composes the rotation wording. The spawn ack below
+// stays pinned to FIRST RESOLUTION: an ack means "this spawn connected", which
+// a rotation is not.
 service.on(
   'peer-resolved',
-  ({ id, peerId, intent }: { id: string; peerId: string; intent: JoinAnnounceIntent }) => {
-    void sendJoinAnnounce(peerId, intent)
+  ({
+    id,
+    peerId,
+    previousPeerId,
+    intent
+  }: {
+    id: string
+    peerId: string
+    previousPeerId: string | null
+    intent: JoinAnnounceIntent | null
+  }) => {
+    const tile = service.list().find((s) => s.id === id)
+    const decision = decidePeerAnnounce({
+      previousPeerId,
+      nextPeerId: peerId,
+      tileName: tile?.name ?? '',
+      hasJoinIntent: !!intent
+    })
+    if (decision.kind === 'join' && intent) {
+      void sendJoinAnnounce(peerId, intent)
+    } else if (decision.kind === 'rotation') {
+      // Same level gate and same send path as a join announce (an operator who
+      // set joinAnnounceLevel to 'off' asked for silence on this channel), and
+      // the rotating tile is never its own announce target.
+      void sendPeerAnnounce(peerId, decision.text, 'rotation')
+      journal.add('announce', `peer id rotated: ${previousPeerId ?? '?'} -> ${peerId}`)
+    }
+    // First resolution ONLY: a rotation must not fire a pending spawn ack,
+    // which reports that a spawn CONNECTED. Truthiness, not `!== null`, on
+    // purpose: a payload without the field at all (an older shape, a future
+    // second emitter) then degrades to the HISTORICAL behaviour -- ack fires --
+    // instead of silently swallowing an ack the operator is waiting on.
+    if (previousPeerId) return
     const pending = pendingSpawnAcks.get(id)
     if (pending) {
       clearTimeout(pending.timer)

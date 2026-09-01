@@ -1667,12 +1667,36 @@ export class SessionService extends EventEmitter {
         ? resolvePeerId(def.cwd, def.sessionId, this.peersDirFor(def))
         : null
       if (next !== r.peerId) {
-        // First resolution of a fresh session -> emit a one-shot join announce
-        // for the Deck to broadcast, then consume the intent so it never repeats
-        // (a later set_id rename must not re-announce).
-        if (next && r.peerId === null && r.announce) {
-          // `id` rides along for the supervisor spawn-ack loop (TS3).
-          this.emit('peer-resolved', { id: def.id, peerId: next, intent: r.announce })
+        // Card 6f59c73a (L1): this emit used to be gated on FIRST RESOLUTION
+        // alone (`next && r.peerId === null && r.announce`), so a tile whose
+        // id ROTATED changed silently -- the renderer refreshed (below), but
+        // no peer was ever told, and every message still addressed to the old
+        // id went nowhere without raising an error. It now fires for any
+        // transition to a live id, carrying the PREVIOUS one so the consumer
+        // can tell the two cases apart; peer-rotation.ts owns that decision,
+        // index.ts routes on it. Still nothing is emitted when a tile LOSES
+        // its id (`next` null): there is no id to announce, and naming an
+        // empty one would be believed.
+        //
+        // TWO conditions were dropped here, not one: `r.peerId === null` AND
+        // `r.announce`. Dropping the latter means a RESTORED tile (restore
+        // passes announce: null, unlike create() which always sets one) now
+        // reaches the consumer at its FIRST resolution, where it lands in the
+        // spawn-ack block. Harmless only because armSpawnAck is called
+        // exclusively after a create() (deck-control.ts's spawn cases), so a
+        // restored tile never has an ack pending -- an invariant nothing else
+        // states, hence stating it here.
+        if (next) {
+          // `id` rides along for the supervisor spawn-ack loop (TS3), which
+          // the consumer keeps pinned to first resolution.
+          this.emit('peer-resolved', {
+            id: def.id,
+            peerId: next,
+            previousPeerId: r.peerId,
+            intent: r.announce
+          })
+          // One-shot: consume the join intent so a later rotation or set_id
+          // rename re-announces as a ROTATION, never a second join.
           r.announce = null
         }
         r.peerId = next
