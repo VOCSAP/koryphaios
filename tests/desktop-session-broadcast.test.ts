@@ -102,6 +102,11 @@ function findMatchingClose(s: string, openIdx: number, openCh: string, closeCh: 
     else if (s[i] === closeCh) depth--;
     i++;
   }
+  if (depth !== 0) {
+    throw new Error(
+      `findMatchingClose: "${openCh}...${closeCh}" block starting at "${s.slice(Math.max(0, openIdx - 60), openIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
+    );
+  }
   return i;
 }
 

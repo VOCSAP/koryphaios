@@ -44,6 +44,11 @@ function extractBracedBody(src: string, openIdx: number): string {
     else if (src[i] === "}") depth--;
     i++;
   }
+  if (depth !== 0) {
+    throw new Error(
+      `extractBracedBody: brace block starting at "${src.slice(Math.max(0, openIdx - 60), openIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
+    );
+  }
   return src.slice(openIdx + 1, i - 1);
 }
 
@@ -56,6 +61,11 @@ function extractParenBody(src: string, openIdx: number): string {
     if (src[i] === "(") depth++;
     else if (src[i] === ")") depth--;
     i++;
+  }
+  if (depth !== 0) {
+    throw new Error(
+      `extractParenBody: paren block starting at "${src.slice(Math.max(0, openIdx - 60), openIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
+    );
   }
   return src.slice(openIdx + 1, i - 1);
 }
@@ -91,6 +101,11 @@ export function checkRoleReachesEverySpawnPath(src: string): string | null {
       else if (body[branchEndIdx] === "}") depth--;
       branchEndIdx++;
     }
+    if (depth !== 0) {
+      throw new Error(
+        "checkRoleReachesEverySpawnPath: startPty()'s `if (effective === 'resume')` brace block never closed -- source truncated, renamed, or reshaped?"
+      );
+    }
   }
   // Absorb a trailing `else { ... }` into the same "branch region" if present.
   const afterIf = body.slice(branchEndIdx);
@@ -103,6 +118,11 @@ export function checkRoleReachesEverySpawnPath(src: string): string | null {
       if (body[j] === "{") depth++;
       else if (body[j] === "}") depth--;
       j++;
+    }
+    if (depth !== 0) {
+      throw new Error(
+        "checkRoleReachesEverySpawnPath: startPty()'s trailing `else { ... }` brace block never closed -- source truncated, renamed, or reshaped?"
+      );
     }
     branchEndIdx = j;
   }

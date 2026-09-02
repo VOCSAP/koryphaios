@@ -157,6 +157,11 @@ function extractObjectBody(src: string, headerRe: RegExp): string {
     else if (c === "}") depth--;
     i++;
   }
+  if (depth !== 0) {
+    throw new Error(
+      `extractObjectBody: header ${headerRe} matched but its object body never closed -- source truncated, renamed, or reshaped?`
+    );
+  }
   return src.slice(start, i - 1);
 }
 

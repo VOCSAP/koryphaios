@@ -347,6 +347,11 @@ test("hooks.json's PreToolUse matcher set equals the .ts source's TOOL_TEXT_FIEL
     else if (src[i] === "}") depth--;
     i++;
   }
+  if (depth !== 0) {
+    throw new Error(
+      "TOOL_TEXT_FIELDS declaration found in roadmap-guard-hook.ts but its brace block never closed -- source truncated, renamed, or reshaped?"
+    );
+  }
   const body = src.slice(declMatch.index + declMatch[0].length, i - 1);
   const toolNameSet = new Set([...body.matchAll(/"(mcp__[^"]+)"\s*:/g)].map((m) => m[1]));
 

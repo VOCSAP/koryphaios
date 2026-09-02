@@ -156,6 +156,11 @@ function extractBalancedParen(src: string, openParenIdx: number): { body: string
     else if (c === ")" || c === "}" || c === "]") depth--;
     i++;
   }
+  if (depth !== 0) {
+    throw new Error(
+      `extractBalancedParen: block starting at "${src.slice(Math.max(0, openParenIdx - 60), openParenIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
+    );
+  }
   return { body: src.slice(openParenIdx + 1, i - 1), endIdx: i };
 }
 

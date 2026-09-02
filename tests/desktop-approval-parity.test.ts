@@ -117,6 +117,9 @@ function extractInterface(cleanedSrc: string, name: string): Record<string, stri
     else if (cleanedSrc[i] === "}") depth--;
     i++;
   }
+  if (depth !== 0) {
+    throw new Error(`extractInterface: interface ${name} matched but its brace block never closed -- source truncated, renamed, or reshaped?`);
+  }
   const body = cleanedSrc.slice(start, i - 1);
   const fields: Record<string, string> = {};
   for (const rawLine of body.split("\n")) {

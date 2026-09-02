@@ -209,6 +209,11 @@ function extractBracedBody(src: string, openIdx: number): string {
     else if (src[i] === "}") depth--;
     i++;
   }
+  if (depth !== 0) {
+    throw new Error(
+      `extractBracedBody: brace block starting at "${src.slice(Math.max(0, openIdx - 60), openIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
+    );
+  }
   return src.slice(openIdx + 1, i - 1);
 }
 
