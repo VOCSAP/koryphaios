@@ -1,23 +1,11 @@
-// At-rest encryption for secrets the BROKER has to hold (PLAN N3/N4): the
-// Telegram bot token, the Discord bot token.
-//
-// WHY THE BROKER HOLDS THEM AT ALL. Telegram allows exactly one `getUpdates`
-// consumer per token, so the gateway must be a singleton — that is the broker,
-// not the N Decks. And the operator enrols from the app: asking them to SSH
-// into the broker host to drop a token in a config file is not an experience
-// we are willing to ship. So the token travels once, over an operator-signed
-// route, and lands here encrypted.
-//
-// THREAT MODEL, STATED PLAINLY. The key lives in a chmod-600 file beside the
-// database. This protects a leaked/copied DB file — a backup, a stray scp, a
-// snapshot — which is the realistic accident. It does NOT protect against an
-// attacker who already reads arbitrary files as the broker user: they get the
-// key too. That is inherent to a headless daemon with no OS keychain, and it
-// is why the operator documentation says to revoke the bot token (BotFather
-// `/revoke`, Discord "Reset Token") if the broker host is ever compromised.
-//
+// At-rest encryption for broker-held secrets (Telegram/Discord bot tokens) --
+// the broker must hold them since a bot token allows only one getUpdates-style
+// consumer, so the gateway must be a singleton.
+// The key lives in a chmod-600 file beside the database: this protects a leaked
+// or copied DB file, not an attacker who already reads arbitrary files as the
+// broker user -- revoke the bot token if the host is compromised.
 // AES-256-GCM: authenticated, so a tampered ciphertext fails loudly instead of
-// decrypting to garbage that would then be sent to a bot API.
+// decrypting to garbage that would be sent to a bot API.
 
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";

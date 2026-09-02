@@ -1,21 +1,12 @@
-// The wire format of the ntfy channel (PLAN N5).
-//
-// Pure module — no I/O — because everything here crosses a trust boundary and
-// must be unit-tested without a network:
-//
-//  - what the broker PUBLISHES on the notification topic (read by our Android
-//    app, and legibly by the official ntfy app as a fallback);
-//  - what the phone PUBLISHES BACK on the replies topic, which is the hostile
-//    direction: anyone able to write to that topic reaches `decodeInbound`.
-//
-// TWO TOPICS, ONE DIRECTION EACH. ntfy has no request/response: a topic is a
-// broadcast bus. The broker publishes to `topic_notif` and holds an OUTGOING
-// subscription on `topic_replies`; the phone does the mirror image. Neither
-// side ever listens on a port (EXPLORATION §4.3c).
-//
-// NO EDITING. Unlike Telegram and Discord, ntfy cannot rewrite a published
-// message. `settle` therefore publishes a CLOSING message carrying the same
-// approval id, and the app cancels the pending notification itself.
+// Pure module, no I/O, so both wire directions can be unit-tested without a
+// network: what the broker publishes and what a hostile phone can publish back
+// on the replies topic.
+// Two topics, one direction each: the broker publishes to topic_notif and holds
+// an outgoing subscription on topic_replies; neither side ever listens on a
+// port.
+// ntfy cannot edit a published message, so settle publishes a closing message
+// carrying the same approval id and the app cancels its own pending
+// notification.
 
 import { isPrivateHost } from "../shared/net.ts";
 import { stripControl, truncate } from "../shared/text.ts";
@@ -266,11 +257,8 @@ export function pairedClickUrl(ok: boolean): string {
 export type ClickView = "approval" | "settled" | "paired";
 
 /**
- * Inverse of the builders above, for the app.
- *
- * The scheme comes from the constant rather than a literal: they used to be
- * two independent spellings, so renaming the constant would have kept encoding
- * working while parsing silently stopped matching.
+ * Uses the shared scheme constant rather than a literal, so encoding and
+ * parsing cannot silently diverge if the scheme is ever renamed.
  */
 export function parseClickUrl(url: string): { view: ClickView; approvalId: string } | null {
   const m = new RegExp(`^${NTFY_CLICK_SCHEME}://(approval|settled|paired)/([^/?#]+)$`).exec(
@@ -316,21 +304,11 @@ export interface BuildPublishDeps {
 }
 
 /**
- * Build the publish body for a pending approval.
- *
- * ACTION BUTTONS CARRY NO CREDENTIAL. They used to embed the ntfy access token
- * as an `Authorization` header, on the reasoning that reading the notification
- * topic already discloses the approval ids needed to answer. That equivalence
- * does not hold: an ntfy token is an ACCOUNT credential, not a per-topic one,
- * so it grants strictly more than "answer this operator's approvals" — and the
- * relay caches a copy of it in the message, where anyone who learns the topic
- * finds it. Our own app never needed it there anyway: the notification actions
- * are posted natively and read the token from app-private storage. The only
- * thing dropping it costs is one-tap answering from the OFFICIAL ntfy app on a
- * token-protected server, which is a documented fallback, not the product.
- *
- * Free text never travels through a button either: ntfy actions carry a FIXED
- * body, so the compose UI lives in our app (EXPLORATION §4.3c).
+ * Action buttons carry no credential: the ntfy token lives in app-private
+ * storage, not in the message, because an ntfy token is account-wide and the
+ * relay caches whatever the message holds.
+ * Free text never travels through a button either -- ntfy actions carry a fixed
+ * body, so composing a reply lives in the app.
  */
 export function buildApprovalPublish(
   approval: Approval,

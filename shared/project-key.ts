@@ -1,48 +1,14 @@
-// Card 6aa32af4: single derivation for the project_key a session uses, so
-// peer registration (/register's request body) and roadmap card scoping
-// (server.ts's roadmapProjectKey()) can never diverge again. Before this,
-// they were two independent derivations of the same identity:
-// computeProjectKey() (this file's sibling, summarize.ts) returns null on
-// any git-remote failure with no fallback applied at that layer, while only
-// the roadmap-scoping call site added a local:<hash> fallback. A peer with
-// no git remote therefore registered project_key=null in the peers table
-// while its own roadmap cards were scoped to a non-null local:<hash> --
-// and releaseStaleLocks' NULL-safe `IS` comparison (card fc444eda) then
-// read "different key" as "not this peer's card", sweeping a live peer's
-// own lock as owner-gone within one grace period.
-//
-// Pure module, no I/O -- same shape as shared/roadmap-lock.ts (card
-// e7b364dc Part B) and for the same reason: server.ts has zero exports and
-// runs main() unconditionally at module scope, so it cannot be imported
-// directly for a unit test.
+// Single derivation for project_key, shared by peer registration and roadmap
+// card scoping, so the two can never diverge.
+// Pure module, no I/O -- server.ts has zero exports and runs main()
+// unconditionally, so it cannot be imported directly for a unit test.
 
 import { createHash } from "node:crypto";
 
 /**
- * Normalize a git remote URL into a stable cross-PC key, e.g.
- *   git@github.com:vocsap/koryphaios.git     -> github.com/vocsap/koryphaios
- *   https://github.com/vocsap/koryphaios.git -> github.com/vocsap/koryphaios
- *   ssh://git@gitlab.com:2222/group/proj.git -> gitlab.com/group/proj
- *
- * Card 69e5a3e0: the whole key is lowercased, host AND owner/repo path.
- * GitHub (and most hosts) accept cloning a repo under several casings of its
- * path, so two clones of the same logical repo used to compute two distinct
- * keys, silently splitting a shared roadmap/graph/approval scope in two. The
- * one-shot cold migration for rows written under the pre-fix casing lives in
- * scripts/migrate-project-key-case.ts.
- *
- * Card 6aa32af4 (2nd review round): this used to be duplicated verbatim in
- * shared/summarize.ts and desktop/src/main/roadmap-service.ts. Since
- * resolveProjectKey() below returns a non-empty remote key AS-IS (no
- * further transform), that duplicate WAS the entire derivation whenever a
- * repo has a remote -- the majority case -- so consolidating only
- * resolveProjectKey()'s local:<hash> fallback branch left the actual
- * divergence risk in place. Pure, node:crypto/regex only: safe to import
- * from both the Bun runtime (server.ts, shared/summarize.ts) and the
- * Electron/Node desktop/ build (roadmap-service.ts), same as
- * resolveProjectKey() itself. Both call sites re-export this symbol so
- * existing `from "./summarize.ts"` / `from "./roadmap-service.ts"` imports
- * keep working.
+ * Normalizes a git remote URL into a stable cross-PC key: the entire key (host
+ * and owner/repo path) is lowercased, since hosts accept several casings of the
+ * same repo path.
  */
 export function normalizeRemoteUrl(url: string): string | null {
   let s = url.trim();
@@ -101,56 +67,14 @@ export type ProjectKeyValidation =
   | { ok: false; reason: "empty" | "too_long" | "surrounding_whitespace" | "control_char" };
 
 /**
- * Card c92614ed lot L0: deny-list validation of a project_key VALUE already
- * extracted from a request body -- control/framing characters and a length
- * cap, never a charset allow-list. An ASCII allow-list was the first draft
- * and is measurably wrong against this file's own contract: normalizeRemoteUrl
- * legitimately produces non-ASCII (tests/project-key-normalize.test.ts's
- * "non-ASCII owner/repo path lowercases via Unicode-aware JS toLowerCase(),
- * never SQLite's ASCII-only LOWER()" pins "github.com/vocsap/été" as the
- * correct output of an accented remote,
- * since SQLite's LOWER() is ASCII-only and a downstream ASCII-fold would
- * fork a third, colliding key), and its no-scheme/no-scp fallback branch
- * (plain `s.toLowerCase()` above) legitimately produces backslashes, colons
- * and internal spaces for local-path remotes (/srv/git/foo.git,
- * C:\repos\foo, ../sibling). An allow-list derived from a sample already in
- * the peers table can only under-represent this producer's real codomain,
- * so it fails CLOSED on the next legitimate remote shape not yet seen --
- * the deny-list below is derived from the producer's contract, never from
- * what happens to be stored today.
- *
- * Rejects: C0 controls, DEL, C1 controls, leading/trailing whitespace, the
- * empty string, and anything over 256 chars -- a REFUSAL, not a silent
- * slice(): a truncated value quietly mints a second, colliding key for the
- * same project instead of surfacing the oversized input to its caller.
- *
- * Deliberately does NOT reject: non-ASCII, backslash, internal whitespace,
- * or colons (the `local:` prefix depends on the colon surviving). Homoglyphs
- * (a Cyrillic 'o' indistinguishable from a legitimate IDN path) are NOT
- * closed by this or any deny-list -- the absence of a rejection for them is
- * not a claim that they are handled, and no other mechanism in this repo
- * closes that vector for project_key today either (resolveRoadmapAuthor's
- * `[a-z0-9:_-]` allow-list closes the homoglyph class for the AUTHOR field
- * only, a different value with a different, much narrower legitimate
- * codomain -- it is not evidence of coverage here).
- *
- * Presence is the caller's concern, not this function's: a project_key-less
- * peer (e.g. a legacy row predating this field) is a valid state, so a
- * caller must check for null/absent BEFORE calling this, then only call it
- * once an actual string is in hand.
- *
- * WIRING CRITERION for every call site that takes a project_key from a
- * request body (card c92614ed lot L0, MAJOR 3 + MAJOR 4, team-lead review):
- * any handler that uses the value to WRITE -- storing it, or selecting the
- * rows of an UPDATE -- must call this and refuse on rejection. Only a pure
- * READ filter (`WHERE project_key = ?` with no downstream write) may skip
- * it, and only because a malformed value there can do nothing but fail to
- * match. This criterion lives here, not as an enumerated list at a call
- * site, because a list is already stale the day it ships (measured: a
- * decommented sweep at review time found an eighth `project_key`-reading
- * site this file's own test comments had not named) and a list in a TEST
- * file is invisible to whoever adds the next handler while working in
- * broker.ts.
+ * Deny-list only, never a charset allow-list: normalizeRemoteUrl legitimately
+ * produces non-ASCII and backslashes/colons/spaces for local-path remotes,
+ * which an allow-list would reject.
+ * Rejects control chars, DEL, leading/trailing whitespace, empty, and over 256
+ * chars, by refusing rather than truncating.
+ * Any write path (an INSERT or the row-selecting side of an UPDATE) using
+ * project_key must call this and refuse on rejection; a pure read filter may
+ * skip it since a malformed value merely fails to match.
  */
 export function validateProjectKey(value: string): ProjectKeyValidation {
   if (value.length === 0) return { ok: false, reason: "empty" };
@@ -161,25 +85,12 @@ export function validateProjectKey(value: string): ProjectKeyValidation {
 }
 
 /**
- * Resolve the project key a session uses to scope both peer registration
- * and roadmap cards. Always non-null: the normalized git remote when there
- * is one, else a stable local fallback derived from the git root (or cwd
- * when there is no git root either) so repos without a remote still get a
- * per-project, per-machine scope. Deterministic for the same inputs -- two
- * calls with the same (remoteProjectKey, gitRoot, cwd) always agree.
- *
- * Card c92614ed lot L0 (MAJOR 1, team-lead review): a remote-derived key has
- * no length cap of its own -- normalizeRemoteUrl performs no truncation, so a
- * deeply nested GitLab path or a long `file://` remote can legitimately
- * normalize past PROJECT_KEY_MAX_LENGTH. Without this guard that value would
- * reach /register, collapse to NULL there (broker.ts's
- * normalizeIncomingProjectKey), and reopen the exact owner-gone regression
- * card 69e5a3e0/6aa32af4 exists to prevent: a NULL peers.project_key never
- * matches roadmap_items.project_key (a NOT NULL column, compared via
- * releaseStaleLocks' `IS`), so a perfectly legitimate, actively-heartbeating
- * session would have every one of its own locks swept as owner-gone.
- * Falling back to the deterministic local:<hash> below keeps the key valid
- * and the peer's own locks correctly attributed.
+ * Always returns non-null: the normalized git remote when present, else a
+ * deterministic local:<hash> fallback so repos without a remote still get a
+ * per-project scope.
+ * Caps the remote-derived key length here since normalizeRemoteUrl performs no
+ * truncation of its own -- an oversized value falls back locally rather than
+ * passing through unchecked.
  */
 export function resolveProjectKey(
   remoteProjectKey: string | null,

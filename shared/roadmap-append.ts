@@ -1,86 +1,31 @@
-// Card 562fd9b5: caps, delimiter and header/plan constructor for roadmap
-// context-append mode. Pure module -- no I/O, no `Date.now()`, nothing that
-// makes two calls with the same arguments answer differently. That is what
-// lets the MCP tool (server.ts) PRE-REFUSE with the exact same numbers the
-// broker will enforce once its route exists, instead of round-tripping a
-// doomed request just to learn it was too big.
-//
-// No roadmap-shaped file exists in shared/ today; every roadmap validation
-// currently lives inside broker.ts. This module is the first one, deliberately
-// narrow: caps, delimiter and the pure planning function only, nothing that
-// touches the DB or the wire.
-//
-// NO CALLER EXISTS YET. The broker route (/roadmap/append-context) and the
-// server.ts MCP tool that will call these functions are the REST of card
-// 562fd9b5, not yet written. This module ships ahead of them deliberately --
-// it is pure and fully testable on its own -- but that means it is currently
-// instantiated by NOTHING (CLAUDE.md: a module/comment asserting a guarantee
-// must be wired to it, or a reader three weeks from now has no way to tell
-// "not wired yet" from "wired and I haven't found where").
+// Pure, deterministic module (no I/O, no Date.now()) so the MCP tool can
+// pre-refuse with the same numbers the broker enforces, without a round trip.
 
-/**
- * Per-call cap on the RAW text a caller appends, before the header is added.
- * Measured as the p90 of a card's current FULL context across the live
- * 107-card roadmap (2026-08-06) -- not invented, not round-tripped from the
- * result cap below.
- */
 export const ROADMAP_APPEND_PER_CALL_MAX_CHARS = 4000;
 
 /**
- * Cap on the RESULTING `context` (existing + header + new text) after this
- * append lands. Measured against the same 107-card roadmap: the longest
- * observed context is 14122 characters, so this cap refuses nothing that
- * exists today.
- *
- * UNIT IS CHARACTERS, NOT BYTES. SQLite's `length()` (what the broker uses to
- * enforce this at write time) counts characters by default -- if a future
- * edit switches it to `length(cast(context as blob))`, the cap silently
- * starts counting bytes instead, and this comment (and the client-side
- * pre-check here) go quietly out of sync with what the broker actually
- * enforces.
+ * Cap on the resulting context length in characters, not bytes -- SQLite's
+ * length() counts characters here; switching to a byte count would silently
+ * desync this comment and check from what the broker enforces.
  */
 export const ROADMAP_APPEND_RESULT_MAX_CHARS = 16000;
 
 /**
- * Delimiter markers wrapping every append header:
- *   \n<<< append <ISO8601> by <author> >>>\n
- *
- * Three chevrons, chosen by MEASURING collision against the live 107-card
- * roadmap, not by convention: '=== ' collides on 10 cards, '\n--- ' on 5,
- * '\n## ' on 1, '<<<'/'>>>' on zero. Three rather than seven chevrons is
- * deliberate too: it stays visually distinct from a git conflict marker
- * (`<<<<<<<`), which a card's context can legitimately contain (pasted diffs,
- * merge notes) without meaning "append boundary here".
- *
- * Either marker appearing in a caller's SUBMITTED text is refused outright
- * (see planRoadmapContextAppend) -- not stripped, not escaped. A payload that
- * embeds a forged header (e.g. an attacker-controlled block containing its
- * own "<<< append ... by deck >>>") must never be allowed to land inside a
- * real one and be read back as a legitimate entry by a future consumer of
- * this field.
+ * Delimiter markers wrapping each append header: \n<<< append <ISO8601> by
+ * <author> >>>\n.
+ * Either marker appearing in a caller's submitted text is refused outright,
+ * never stripped or escaped, so a forged header cannot be smuggled in and later
+ * read back as a legitimate entry.
  */
 export const ROADMAP_APPEND_HEADER_OPEN = "<<<";
 export const ROADMAP_APPEND_HEADER_CLOSE = ">>>";
 
 /**
- * Builds the attribution header for one append. Takes the timestamp as an
- * explicit ISO-8601 string rather than calling `Date.now()`/`new Date()`
- * itself -- this module stays pure, and the caller (broker.ts) is the one
- * place that already owns "what time is it".
- *
- * VOCABULARY, deliberate: this is an ATTRIBUTION, never call it a
- * "signature" in code or comments that touch it. `resolveRoadmapAuthor`
- * (broker.ts) accepts an unproven `by` -- the header records who CLAIMED the
- * append, proven or not, exactly like `created_by`/`updated_by` elsewhere on
- * a RoadmapItem. Writing "signed" here would assert a guarantee this header
- * is not wired to.
- *
- * The timestamp is not cosmetic either, and the two facts travel together:
- * append is NOT idempotent (a caller whose request times out AFTER the
- * broker already committed will retry and duplicate the block on a second
- * call), and the timestamp is what makes that duplicate visible to whoever
- * reads the card afterward. Making the header optional "to save N
- * characters" would make that non-idempotence invisible, not free.
+ * Attribution, not a signature: records who claimed the append, proven or not,
+ * same as created_by/updated_by elsewhere.
+ * Append is not idempotent -- a retried call after a timeout duplicates the
+ * block -- so the timestamp is what makes that duplicate visible when the card
+ * is read back.
  */
 export function buildRoadmapAppendHeader(nowIso: string, author: string): string {
   return `\n${ROADMAP_APPEND_HEADER_OPEN} append ${nowIso} by ${author} ${ROADMAP_APPEND_HEADER_CLOSE}\n`;
@@ -117,35 +62,13 @@ export type RoadmapContextAppendPlan =
     };
 
 /**
- * Validates and plans the part of an append that depends ONLY on the
- * incoming call -- never on the card's current `context`. This is the
- * function the broker's future /roadmap/context-append route calls: the
- * card's architecture deliberately has NO read-modify-write on the broker
- * side (a single `UPDATE ... SET context = COALESCE(context,'') || ? WHERE
- * id = ? AND length(COALESCE(context,'')) + ? <= 16000`, `db.changes`
- * distinguishing 200 from 409), so the broker never has an `existingContext`
- * to hand this module and must never SELECT one just to satisfy this
- * function's shape. The RESULT cap (ROADMAP_APPEND_RESULT_MAX_CHARS) is
- * therefore NOT checked here -- it is enforced exclusively by that SQL WHERE
- * clause. See planRoadmapContextAppend below for the full check, used only
- * by a caller that already holds `existingContext` for another reason (e.g.
- * a client pre-refusing against a RoadmapItem it already fetched).
- *
- * NOTE for whoever writes that route (not yet written, tracked separately
- * from this pure-module layer): the COALESCE is not cosmetic. In SQLite,
- * `NULL || text` evaluates to `NULL`, so a card whose `context` is NULL
- * would have its append silently discarded (still a 200, `changes` would
- * still be 1, but `context` would stay NULL) without COALESCE -- and the
- * live 107-card corpus this module's caps were measured against has zero
- * NULL contexts, so a test built only from that corpus would stay green
- * without ever exercising this path. That route needs its own dedicated
- * NULL-context probe.
- *
- * Only `text` (the INCOMING append) is checked for the delimiter marker, not
- * the card's existing context: a card that already carries a prior,
- * legitimate append (and therefore already contains "<<<"/">>>" in its
- * history) must not have every future append refused because of markers it
- * did not just submit.
+ * Checks only the per-call cap; the result cap is enforced exclusively by the
+ * broker's UPDATE ... WHERE length(...) <= 16000 clause, since the broker never
+ * SELECTs existingContext to hand here.
+ * That UPDATE must use COALESCE(context,'') -- NULL || text evaluates to NULL
+ * in SQLite, which would silently discard the append.
+ * Only the incoming text is checked for the delimiter marker, not existing
+ * context, so a card's own prior append is never used to refuse a new one.
  */
 export function planRoadmapAppendText(opts: {
   text: string;

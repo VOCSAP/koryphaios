@@ -1,26 +1,10 @@
 #!/usr/bin/env bun
 /**
- * claude-peers CLI (v0.3)
- *
- * Utility commands for managing the broker and inspecting peers.
- *
- * Note: talks to loopback (127.0.0.1:<port>) by default. If the global config
- * file or CLAUDE_PEERS_BROKER_URL/CLAUDE_PEERS_BROKER_TOKEN env vars set a
- * remote broker_url/broker_token (shared/config.ts), this CLI reaches that
- * broker directly -- no need to run it on the broker host in that case.
- *
- * Usage:
- *   bun cli.ts status                   -- Show broker status and all peers
- *   bun cli.ts peers [--include-dormant]-- List all peers across groups
- *   bun cli.ts groups                   -- Show active peer counts per group
- *   bun cli.ts kill-broker              -- Stop the broker daemon (Linux/macOS only)
- *   bun cli.ts roadmap-add --input <payload.json>
- *                                       -- Create one roadmap item (token stays
- *                                          in this process, never on argv)
- *
- * Note: 'send' is intentionally absent in v0.3 -- use the MCP send_message tool
- * from inside Claude Code. The broker requires a valid instance_token for
- * routing, which only registered peers hold.
+ * Talks to loopback by default; a configured broker_url/broker_token
+ * (shared/config.ts) redirects every command to that remote broker directly
+ * instead.
+ * 'send' is intentionally absent -- the broker requires a valid instance_token
+ * for routing, which only a registered MCP peer holds.
  */
 
 import { loadConfig, brokerUrl } from "./shared/config.ts";
@@ -276,11 +260,6 @@ switch (cmd) {
     }
     try {
       const payload = JSON.parse(await Bun.file(file).text()) as Record<string, unknown>;
-      // Card 51fd7b65: project_key is no longer a required payload field --
-      // this verb derives it below, the same way server.ts's
-      // roadmapProjectKey() does for a live MCP session. See the derivation
-      // block further down for why a payload-declared value is still read
-      // (compared, not trusted).
       for (const field of ["by", "title"] as const) {
         if (!payload[field] || typeof payload[field] !== "string") {
           console.error(`Payload must include a string '${field}' field.`);
@@ -288,19 +267,11 @@ switch (cmd) {
         }
       }
 
-      // Card 51fd7b65: this verb used to require the CALLER to hand-compute
-      // project_key and send it VERBATIM -- the same divergence risk
-      // resolveProjectKey/normalizeRemoteUrl exist to close for every other
-      // producer (card 6aa32af4, shared/project-key.ts). A miscased or stale
-      // value here silently wrote into a DIFFERENT project's roadmap with no
-      // error at all: three cards were lost this way into
-      // `github.com/VOCSAP/koryphaios` (see roadmap-scribe.md's incident
-      // note) before being recovered by hand, 2026-08-27. This CLI is a
-      // one-shot process with no live session state, so it derives its own
-      // project_key from its own cwd -- computeProjectKey(cwd)
-      // (shared/summarize.ts) for the git-remote form, resolveProjectKey()
-      // (shared/project-key.ts) for the local:<hash> fallback when there is
-      // no remote -- instead of trusting the caller's claim.
+      // Derives its own project_key from cwd (computeProjectKey for a git
+      // remote, resolveProjectKey's local:<hash> fallback otherwise) rather
+      // than trusting the payload's project_key.
+      // A caller-supplied value can be miscomputed or stale and would silently
+      // write into the wrong project's roadmap with no error.
       const cwd = process.cwd();
       const gitRoot = await getGitRoot(cwd);
       const remoteProjectKey = await computeProjectKey(cwd);
@@ -327,19 +298,12 @@ switch (cmd) {
         process.exit(1);
       }
 
-      // Roadmap card 39c40571, layer 1. The broker now refuses a write whose
-      // `by` names a REGISTERED peer without that peer's instance_token, and
-      // this fallback has no token to present -- the scribe's documented
-      // payload carries the calling session's peer_id, which would now be
-      // refused as impersonation of itself.
-      //
-      // The honest resolution is not to exempt this verb (any agent can run
-      // it, so exempting it would re-open the very hole the guard closes) but
-      // to stop it CLAIMING a proven identity: a CLI write is unproven by
-      // construction, so it is attributed as such. Attribution stays readable;
-      // only the claim of proof goes away. An instance_token in the payload is
-      // dropped for the same reason -- this verb must never become a way to
-      // launder one.
+      // This verb cannot present an instance_token, so `by` is attributed as an
+      // unproven CLI claim rather than a registered peer's identity --
+      // exempting it from the guard entirely would reopen the impersonation
+      // hole the guard closes.
+      // Any instance_token present in the payload is dropped rather than
+      // forwarded, so this verb can never be used to launder one.
       const claimed = String(payload.by);
       const { instance_token: _dropped, project_key: _droppedProjectKey, ...safePayload } = payload;
       const result = await brokerPost<RoadmapUpsertResponse>("/roadmap/upsert", {

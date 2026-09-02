@@ -1,31 +1,7 @@
-// Pure logic for the `wait_for_message` MCP tool (server.ts). Card a21f1303,
-// H4 volet 3 of docs/DESIGN-HERDR-ADOPTION.md. Filter matching, timeout
-// clamping, and the waiter registry that lets the two EXISTING
-// message-delivery paths (the WS push handler in connectWs, and the poll
-// fallback in pollFallback) resolve a pending wait, instead of a third
-// transport being invented -- the design brief is explicit that both paths
-// already exist and there is nothing to build there.
-//
-// Zero dependency on bun:sqlite, fetch, or timers: everything here is a pure
-// function over plain data, so tests/wait-for-message-logic.test.ts runs
-// under `bun test` with no broker daemon and no bound port. That test file
-// must NOT be named with a `broker-`/`server-` prefix, or
-// scripts/pure-module-partition.ts's deny-list (EXEMPTIONS.familyPrefixes)
-// exempts it from the CI cross-platform "pure modules" job -- verified
-// against the real isExempt() in that test file, not assumed.
-//
-// wait_for_message deliberately never calls the broker's consuming
-// /poll-messages endpoint (server.ts's check_messages tool keeps sole use of
-// it). It only ever reads via the already-non-consuming paths -- the WS push
-// frame, and /peek-messages -- so a timed-out or cancelled wait, and a
-// message that does not match a filtered wait, are never marked delivered:
-// they stay available for a later check_messages call, exactly like the
-// pre-existing WS-push/poll-fallback discipline (server.ts:124, :267 --
-// "Only check_messages marks delivered in the DB"). This is a design
-// constraint, not an oversight: broker.ts is out of scope for this card, and
-// it has no selective per-id delivered-marking endpoint, so selective
-// consumption is not implementable without inventing a second acknowledgment
-// discipline -- explicitly avoided per team-lead's arbitrage on card a21f1303.
+// wait_for_message only reads via the WS push frame and /peek-messages, never
+// the consuming /poll-messages endpoint.
+// A timed-out, cancelled, or filter-mismatched message is therefore never
+// marked delivered and stays available for a later check_messages call.
 
 /**
  * Hard ceiling for `timeout_sec`, in seconds. Measured 2026-08-26 against
@@ -48,38 +24,19 @@ export const WAIT_FOR_MESSAGE_HARD_CAP_SEC = 115;
 export const WAIT_FOR_MESSAGE_DEFAULT_SEC = 60;
 
 /**
- * Floor for an explicit `timeout_sec`. Card a21f1303 R6 (team-lead review,
- * 2026-08-26): two reachable inputs used to slip through with no lower
- * bound -- `true` (coerced to the number 1, silently a legitimate-looking
- * 1-second wait) and `0.0001` (a ~0.1ms timer, functionally the very polling
- * loop this tool exists to remove). This server never validates MCP tool
- * arguments against inputSchema itself, so both are reachable from a live
- * call, not just from a hostile test.
+ * Floor of 1s: timeout_sec is never validated against inputSchema, so true
+ * (coerces to 1) and near-zero values are reachable inputs, not just hostile
+ * test cases, and must not produce a de facto busy-poll.
  */
 export const WAIT_FOR_MESSAGE_MIN_SEC = 1;
 
 /**
- * Clamp a requested `timeout_sec` into [WAIT_FOR_MESSAGE_MIN_SEC,
- * WAIT_FOR_MESSAGE_HARD_CAP_SEC]. Provably never throws for ANY input,
- * including a hostile one (a `Symbol()`, or an object whose `valueOf`
- * throws): the only operations ever performed on `requested` are a `typeof`
- * check (never throws) and, when it is already a `string`, `Number(string)`
- * (never throws either -- a primitive string cannot trigger the ToPrimitive
- * path that lets a poisoned `valueOf`/`toString` on an OBJECT throw; `Number`
- * is only ever called on an already-`string` value here, never on an
- * arbitrary object). Anything that is neither a finite `number` nor a
- * `string` parsing to one -- wrong type (an object, `Symbol`, `bigint`,
- * `null`; `true`/`false`, which used to coerce to 1/0), NaN, Infinity, or
- * non-positive -- falls back to WAIT_FOR_MESSAGE_DEFAULT_SEC (CLAUDE.md: a
- * numeric validator must reject NaN explicitly -- every comparison against
- * NaN is false, so a naive clamp silently lets it through). Card a21f1303 U2
- * (team-lead review round 3, 2026-08-26): a numeric STRING (`"30"`) is a
- * realistic input -- this server never validates MCP tool args against its
- * own inputSchema, and an LLM caller regularly emits a JSON number as a
- * string -- so rejecting it by type alone silently substituted
- * WAIT_FOR_MESSAGE_DEFAULT_SEC for what the caller asked for, with no
- * signal. Accepting it here keeps every other hardening (`true`, `0.0001`,
- * `Symbol`, a throwing `valueOf`) closed.
+ * Never throws for any input: only typeof and Number(string) are used, both
+ * safe even on hostile values.
+ * Accepts a numeric string as well as a number, since an LLM caller regularly
+ * emits either.
+ * NaN is rejected explicitly; anything invalid falls back to
+ * WAIT_FOR_MESSAGE_DEFAULT_SEC.
  */
 export function clampWaitTimeoutSec(requested: unknown): number {
   let n: number;
@@ -121,17 +78,10 @@ export function matchesWaitFilter(
 }
 
 /**
- * Excludes candidates already handed to the agent this session -- the exact
- * `!notifiedMessageIds.has(m.id)` filter pollFallback applies (server.ts)
- * before deciding what is "fresh", now shared so wait_for_message's own
- * opportunistic peek uses the SAME discipline instead of a second one that
- * can silently diverge. Without this, an id still sitting undelivered=0 (WS
- * push and /peek-messages never mark delivered) but already dispatched via
- * mcp.notification() earlier in the session would immediately "resolve" a
- * wait with stale, already-seen content instead of actually waiting for a
- * NEW message -- the tool's nominal use case (an agent that already
- * exchanged messages, now waiting for the next one) is exactly the case
- * this breaks if left unfiltered.
+ * Applies the same notifiedMessageIds filter pollFallback uses: a message
+ * already dispatched via mcp.notification() stays undelivered=0, so without
+ * this filter a fresh wait could resolve immediately with stale, already-seen
+ * content.
  */
 export function selectFreshWaitCandidates(
   candidates: readonly WaitCandidateMessage[],
@@ -153,31 +103,11 @@ export interface WaitPlan {
 }
 
 /**
- * Normalizes the raw MCP tool call args into a plan: clamps `timeout_sec`
- * (via clampWaitTimeoutSec) and converts it to milliseconds, trims
- * `from_peer_id` down to `undefined` when blank. Card a21f1303 R1
- * (team-lead review, 2026-08-26): these four transforms (clamp, seconds ->
- * milliseconds, trim, and -- via selectPeekMatch/buildWaiter below -- first-
- * peek-match selection and the filter's use at waiter registration) used to
- * be five separate inline expressions written directly in server.ts's case,
- * none of them reachable by any test that cannot import server.ts (it has no
- * exports and runs main() unconditionally at module scope, the established
- * reason server.ts itself is untestable in this repo). A mutation of any one
- * of them left tests/wait-for-message-logic.test.ts fully green, because the
- * only assertions touching server.ts were source-scan `toContain` checks --
- * true regardless of what the matched substring's own arguments did.
- * Collecting the decision here, tested by direct execution, closes that gap
- * for good: server.ts's case no longer WRITES any of these transforms
- * itself, it only reads the plan's fields.
- *
- * Unlike clampWaitTimeoutSec, this function is NOT proven never to throw:
- * `a.timeout_sec` / `a.from_peer_id` are plain property reads, which throw on
- * a Proxy whose `get` trap throws. Not reachable from the real MCP/JSON-RPC
- * boundary (JSON deserialization never produces a Proxy), so the risk is
- * theoretical today -- but a future in-process caller passing something
- * other than parsed JSON should not assume the same guarantee
- * clampWaitTimeoutSec makes (card a21f1303 U3, team-lead review round 3,
- * 2026-08-26).
+ * Unlike clampWaitTimeoutSec, not proven to never throw:
+ * a.timeout_sec/a.from_peer_id are plain property reads, which throw on a Proxy
+ * whose get trap throws.
+ * Not reachable from the real JSON-RPC boundary, but an in-process caller
+ * should not assume the same guarantee.
  */
 export function buildWaitPlan(args: unknown): WaitPlan {
   const a = (args ?? {}) as { timeout_sec?: unknown; from_peer_id?: unknown };
@@ -257,37 +187,6 @@ export function removeWaiter(
   return waiters.filter((w) => w !== toRemove);
 }
 
-// --- runWaitForMessage: the whole case, injected (card a21f1303 U1) ---
-//
-// Team-lead review round 3 (2026-08-26): moving only the VALUE transforms
-// (buildWaitPlan/selectPeekMatch/buildWaiter above) into pure functions left
-// the CONTROL FLOW -- when the peek's fetch is bounded, which filter a real
-// waiter is registered under, whether the timer/cancellation actually drive
-// the outcome -- written directly in server.ts's case, still unreachable by
-// any test that cannot import server.ts. A mutation battery on that case
-// found 12 of 13 mutations invisible: replacing buildWaitPlan's call with a
-// literal object bypassed the clamp with every clamp test still green;
-// dropping the filter at waiter registration made the REAL wait ignore
-// from_peer_id while the peek kept honoring it; moving the timer/abort
-// wiring after the peek made it unbounded and uncancellable again; calling
-// selectFreshWaitCandidates and discarding its result passed the one
-// existing scan, which only checked the token's PRESENCE, never that its
-// result was USED.
-//
-// The fix is not a better scan: it is to make the defect unwritable in
-// server.ts by moving the CONTROL FLOW here too, injected with its only
-// impure dependencies (a non-consuming peek, a waiter registry, a timer, a
-// cancellation source) so a test can drive the WHOLE decision -- peek match,
-// waiter match, timeout, and cancellation, including mid-peek cancellation --
-// by execution, with fake timers and no real socket. server.ts's case is
-// reduced to wiring the REAL implementations of these five functions and
-// formatting the returned outcome; it does not decide anything itself.
-//
-// This closes the residual accepted (not proven) in an earlier round: the
-// expiration, cancellation, and WS-vs-poll-fallback separation criteria are
-// now provable by direct execution against fake timers, not merely simulated
-// candidate shapes plus wiring assertions.
-
 /** The outcome of one wait_for_message call. */
 export type WaitForMessageOutcome =
   | { readonly kind: "matched"; readonly message: WaitCandidateMessage }
@@ -317,27 +216,13 @@ export interface WaitForMessageDeps {
 }
 
 /**
- * The whole wait_for_message decision, injected. Exactly one of four things
- * settles the call, and each one cleans up every OTHER pending mechanism
- * (timer, cancellation subscription, waiter registration) before resolving,
- * via a single `settled` guard so none can double-fire or race:
- *
- * 1. The opportunistic peek finds an already-fresh match -> "matched",
- *    nothing is registered at all.
- * 2. No peek match -> a real waiter is registered; a later `onMatch` call
- *    (from server.ts's connectWs/pollFallback, via tryResolveWaiters) ->
- *    "matched".
- * 3. The timer (armed for the WHOLE call, peek included, from the very
- *    start -- not restarted after the peek) fires first -> "timed_out".
- * 4. `onCancelled` fires (client-side cancellation) at any point, including
- *    while the peek's own fetch is still in flight -> "cancelled".
- *
- * The timer and the cancellation subscription are both armed BEFORE the
- * peek starts, and deps.scheduleTimeout/onCancelled's OWN implementations
- * are responsible for actually aborting the in-flight peek fetch on fire
- * (server.ts's real implementations do, via a shared AbortController) --
- * this function only reacts to the abstract onExpire/onCancel signal, it
- * has no fetch of its own to abort.
+ * Exactly one of four outcomes settles the call -- a peek match, a
+ * later-registered waiter match, a timer, or cancellation -- guarded by a
+ * single settled flag so none can double-fire.
+ * The timer and the cancellation subscription are both armed before the peek
+ * starts, not restarted after it.
+ * deps.scheduleTimeout/onCancelled are responsible for aborting the in-flight
+ * peek fetch when they fire; this function only reacts to the abstract signal.
  */
 export async function runWaitForMessage(
   args: unknown,

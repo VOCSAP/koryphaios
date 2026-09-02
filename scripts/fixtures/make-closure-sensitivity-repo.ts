@@ -1,103 +1,8 @@
-// Card 67519e73. Ships WITH scripts/check-commit-closure.ts on purpose: a
-// checker's sensitivity/specificity proof must replay against a repo built
-// by code in the same commit, or it decays into a claim nobody can
-// re-verify after the next refactor. Ported from a hand-run shell prototype
-// (C:/Users/Olivier/AppData/Local/Temp/closure-sensitivity/make.sh) into
-// pure node:child_process spawnSync calls so it runs identically on
-// windows/macos/ubuntu CI runners -- no bash dependency.
-//
-// Builds ONE linear commit history, each commit isolating exactly one
-// concern, so a test can check any single sha and know precisely what it
-// is proving:
-//
-//   base              -- 5 files, ALL correct (relative import + @shared
-//                         alias import both resolve). Specificity case:
-//                         "clean multi-file commit".
-//   notExported       -- consumer.ts starts importing a symbol helper.ts
-//                         does not export yet (helper.ts left un-touched
-//                         by this commit). 1 file. Sensitivity case.
-//   exportedFix       -- helper.ts catches up, now exports it. 1 file, ALL
-//                         correct. Specificity case: "clean single-file
-//                         commit".
-//   missingTarget     -- a new file imports from a relative path that has
-//                         never existed anywhere in the tree. Sensitivity
-//                         case.
-//   controlByte       -- a new file's content contains a literal ESC byte.
-//                         Sensitivity case.
-//   aliasDivergence   -- tsconfig.node.json's @shared/* target is edited to
-//                         disagree with tsconfig.web.json's. Sensitivity
-//                         case for the alias-table cross-check.
-//   aliasNotExported  -- a new file imports a symbol via the @shared/*
-//                         alias that the aliased target does not export.
-//                         Sensitivity case for alias-based (not just
-//                         relative) import resolution. NOTE: built on
-//                         `exportedFix`, deliberately NOT on
-//                         `aliasDivergence`, so this commit's own tree
-//                         still has the two tsconfigs agreeing -- otherwise
-//                         this sha's aliasTableFromTsconfig would ALSO
-//                         report a divergence problem, muddying what this
-//                         specific sha is meant to isolate.
-//   cleanBatch        -- 7 new files added in one commit, all correct.
-//                         Specificity case matching the prototype's
-//                         original proof shape ("silent on 1 and 7 file
-//                         clean commits").
-//   quotedImports     -- a file whose ONLY import statements are quoted: in
-//                         a line comment, in a block comment, and inside a
-//                         string literal. Specificity case for the lexical
-//                         pre-pass.
-//   urlThenImport     -- a REAL broken import sharing a line with a string
-//                         literal containing "//". Sensitivity case, and the
-//                         negative control proving the pre-pass does not
-//                         over-strip at a URL.
-//   unlistedExtControlByte -- a .kt file carrying a literal NUL. Sensitivity
-//                         case for the control-byte scan's COVERAGE: .kt was
-//                         in no allow-list, so this was silently exempt.
-//   templateThenImport -- a REAL broken import after a quoted backtick, a
-//                         quoted unclosed "${", and a braced interpolation.
-//                         Second over-strip control, sibling of
-//                         urlThenImport: over-stripping is the SILENT
-//                         direction, so it gets two probes, not one.
-//   regexThenImport   -- a REAL broken import after a regex literal holding
-//                         a double quote. Third over-strip control, and the
-//                         shape that actually bit: without regex tracking
-//                         the quote opens a string literal and every state
-//                         after it is off by one.
-//   namedReExport     -- a barrel re-exporting in both brace forms
-//                         (`export { A } from`, `export type { B } from`)
-//                         with a consumer importing through it. Specificity
-//                         case: the `type` variant read as exporting
-//                         nothing, reddening healthy live code.
-//   dtsTarget         -- a consumer whose import target exists only as a
-//                         hand-written `.d.ts`. Specificity case for the
-//                         candidate list.
-//   importForms       -- default, namespace and side-effect imports, all of
-//                         targets that do not exist. Sensitivity case over
-//                         the import GRAMMAR: only the named form used to
-//                         be able to report a missing target.
-//   nonAsciiPath      -- two broken imports in one commit, one of them
-//                         behind an ACCENTED path. Sensitivity case for the
-//                         path lexing: git quotes and escapes non-ASCII
-//                         paths, and the quoted literal resolves to no
-//                         blob, so the file was announced as scanned and
-//                         checked as nothing.
-//   healedControlByte -- ansi.ts, dirty since `controlByte`, is CLEANED.
-//                         The case PR mode exists for: still red per
-//                         commit, silent on the net diff at head.
-//   mergeCommit       -- a --no-ff merge bringing in a file with a broken
-//                         import. Sensitivity case for the merge path:
-//                         `git show --name-only` prints nothing for a
-//                         merge, so this used to scan zero files and say OK.
-//                         Built LAST because it moves HEAD onto a merge.
-//   commentedExport   -- a consumer imports a symbol its target only
-//                         "exports" inside a comment and inside a string.
-//                         Sensitivity case for the EXPORT side, the
-//                         fail-open mirror of the quoted-import case.
-//
-// git history is LINEAR (each commit's parent is the previous one in this
-// list) except aliasNotExported, which branches off exportedFix so its tree
-// does not inherit aliasDivergence's edit -- git allows checking any commit
-// in isolation via `git show <sha>:<path>` regardless of branch topology,
-// so this does not affect any other commit's own tree.
+// Ships with the checker it tests so the sensitivity/specificity proof stays
+// runnable after a refactor, instead of decaying into an unverifiable claim.
+// Builds one linear commit history, each commit isolating exactly one
+// sensitivity or specificity case, so a test can check a single sha and know
+// precisely what it proves.
 
 import { spawnSync } from "node:child_process";
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
@@ -276,12 +181,6 @@ export function buildSensitivityRepo(dir: string): SensitivityRepoShas {
   git(dir, ["commit", "-qm", "7 clean files in one commit, tsconfig re-agreed"]);
   const cleanBatch = git(dir, ["rev-parse", "HEAD"]);
 
-  // --- quotedImports: SPECIFICITY. Every import-looking string in this file
-  // is merely QUOTED -- in a line comment, in a block comment, and inside a
-  // string literal -- and all three point at targets that do not exist. The
-  // commit must stay GREEN. This is the shape that made 2 of this repo's 40
-  // most recent commits red before the lexical pre-pass existed (a comment
-  // in tests/desktop-tile-area.test.ts citing an import).
   write(
     dir,
     "desktop/src/quoted-imports.ts",
@@ -340,15 +239,6 @@ export function buildSensitivityRepo(dir: string): SensitivityRepoShas {
   git(dir, ["commit", "-qm", "real broken import after a quoted backtick and a braced interpolation"]);
   const templateThenImport = git(dir, ["rev-parse", "HEAD"]);
 
-  // --- regexThenImport: SENSITIVITY, third over-strip control, and the one
-  // that actually bit. A regex literal containing a double quote (`/"/g`,
-  // ordinary code -- desktop/src/main/model-adapters.ts:59 does exactly
-  // this) is followed by a REAL broken import. Without regex-literal
-  // tracking the quote inside the regex opens a string literal, every state
-  // after it is off by one, and the whole rest of the file is mis-masked:
-  // measured on the real tree, the repo-wide closure run went from 3
-  // findings to 54, i.e. 51 phantom reports -- and here, the import would
-  // simply vanish, green and silent.
   write(
     dir,
     "desktop/src/regex-then-import.ts",
@@ -360,14 +250,6 @@ export function buildSensitivityRepo(dir: string): SensitivityRepoShas {
   git(dir, ["commit", "-qm", "real broken import after a regex literal containing a quote"]);
   const regexThenImport = git(dir, ["rev-parse", "HEAD"]);
 
-  // --- namedReExport: SPECIFICITY. A barrel re-exports symbols it does not
-  // declare, in the two brace forms this tree actually uses -- `export { A }
-  // from '...'` and `export type { B } from '...'` -- and a consumer imports
-  // through it. Must stay GREEN. The `type` variant is the one that was
-  // missed: desktop/src/shared/companion.ts:619 is exactly that line, and
-  // its importer companion-server.ts was reported not-exported on healthy
-  // code. No `export *` here on purpose: an unrecognised re-export must keep
-  // yielding a RED finding (fail-closed), and this tree has none.
   write(dir, "desktop/src/origin.ts", "export function fromOrigin() { return 1 }\nexport type OriginType = { a: number }\n");
   write(
     dir,
@@ -506,17 +388,12 @@ export function buildSensitivityRepo(dir: string): SensitivityRepoShas {
 }
 
 /**
- * Given a repo already built by buildSensitivityRepo (HEAD at the last
- * commit it makes, unlistedExtControlByte, whose tree still carries
- * helper.ts unchanged since exportedFix),
- * STAGES (git add, no commit) two files without committing:
- *  - a defect file importing a target that does not exist anywhere,
- *    proving --staged mode catches it before a commit is ever made;
- *  - a valid file that imports a RELATIVE target from an EARLIER commit
- *    (helper.ts, unchanged and un-staged by this call), proving the
- *    HEAD-fallback path for files the stage does not touch.
- * Leaves the index staged/dirty on return -- callers run the checker
- * against it, then are responsible for the temp dir's lifetime.
+ * Requires dir already at the fixture's final commit (helper.ts unchanged since
+ * exportedFix). Stages, without committing, one file importing a target that
+ * exists nowhere and one importing helper.ts via the HEAD fallback for
+ * untouched files.
+ * Leaves the index staged and dirty on return; the caller owns the temp dir's
+ * lifetime.
  */
 export function stageOnlyDefect(dir: string): void {
   write(

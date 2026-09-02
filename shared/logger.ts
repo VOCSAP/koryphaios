@@ -1,16 +1,12 @@
 /**
- * Rolling file logger (PLAN-observabilite-erreurs O1).
- *
- * Shared by the core (Bun: broker.ts, server.ts) and the Electron main process
- * (desktop/src/main/log.ts binds it to app.getPath('logs')). Node builtins
- * only -- no Bun.file, no electron imports -- so it runs everywhere and is
- * unit-testable under `bun test` with an injected directory.
- *
- * Size-based rotation, bounded on disk: when <name>.log reaches maxBytes it
- * shifts to <name>.log.1 ... <name>.log.<maxFiles-1>, oldest dropped. Writes
- * are synchronous appends so ordering is guaranteed and a last line can be
- * emitted from an uncaughtException handler. A failure to write the log file
- * itself must never throw: it falls back to the console (once per cause).
+ * Node builtins only (no Bun.file, no electron imports) so this runs in both
+ * the core (Bun) and the Electron main process, and is unit-testable with an
+ * injected directory.
+ * Size-based rotation: <name>.log shifts to .log.1 ... .log.<maxFiles-1> when
+ * it hits maxBytes, oldest dropped.
+ * Writes are synchronous so ordering is guaranteed and a last line can be
+ * emitted from an uncaughtException handler; a failure to write the log itself
+ * must never throw, falling back to console once per cause.
  */
 
 import {

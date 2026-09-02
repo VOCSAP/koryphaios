@@ -1,20 +1,10 @@
-// Telegram gateway (PLAN N3).
-//
-// Zero dependency: the Bot API is plain HTTPS + JSON, so a `fetch` client is
-// ~150 lines and keeps a supply chain off a component that handles a secret.
-//
-// TRANSPORT: long polling (`getUpdates`). It is an OUTGOING request, so the
-// broker needs no public address, no port, no domain. `setWebhook` is the only
-// mode that would, and the two are mutually exclusive — we never call it.
-//
-// SINGLE CONSUMER: Telegram allows exactly one getUpdates per token; a second
-// one gets HTTP 409. That is why this lives in the broker (a singleton) and not
-// in the N Decks. A 409 here is also a compromise signal: someone else is
-// draining this bot's updates.
-//
-// AUTHORISATION: the bot's username is public, so anyone can message it. There
-// is no API-level allow-list — the lock is ours: an update whose chat id is not
-// a known binding is dropped before it can touch the database.
+// Long polling only: an outgoing request needs no public address, port, or
+// domain, and is mutually exclusive with setWebhook, which is never called.
+// Telegram allows exactly one getUpdates consumer per token, so this lives in
+// the broker rather than per-Deck; an HTTP 409 here also signals another
+// consumer draining the same bot.
+// There is no API-level allow-list, so an update whose chat id is not a known
+// binding is dropped before it touches the database.
 
 import type { Approval } from "../shared/types.ts";
 import {

@@ -1,36 +1,10 @@
-// Card f4a3ed1e. Companion to scripts/partition-pure-tests.ts: where that
-// script runs everything scripts/pure-module-partition.ts's EXEMPTIONS
-// table does NOT name, this one runs exactly what it DOES -- the deny-list's
-// complement, i.e. every tests/*.test.ts file exempted from the pure-module
-// step because it spawns a daemon and binds ports (the broker-/server-
-// families, approval-hook.test.ts, mcp-roadmap-ack.test.ts).
-//
-// Before this script existed, that complement was measured (2026-08-24) to
-// run in NO CI job at all, under exemption reasons that (pre-fix) claimed
-// they were "played elsewhere" -- a claim nothing backed. This script is the
-// "elsewhere". EXEMPTIONS' reason strings now name this step by its exact
-// desktop-build.yml name ('Bun tests (integration)'), and
-// auditExemptionLocations (pure-module-partition.ts) verifies that claim
-// against the real workflow text, refusing both a dangling step name and an
-// unfalsifiable "run elsewhere" claim with no step name at all.
-//
-// Single shared `bun test` invocation, not one process per file: unlike the
-// pure-module partition, none of these 54 files carries a
-// CONTAMINATION_MARKERS hit (checked 2026-08-28 -- neither
-// GlobalRegistrator.register() nor mock.module() appears in any of them),
-// so the process-global leakage that forces per-file isolation over there
-// does not apply here. Each file's own broker binds an OS-assigned ephemeral
-// port (tests/_helper.ts's reserveEphemeralPort), so running them serially
-// in one bun:test process is expected to be safe -- unlike port collisions
-// under a fixed-window scheme, nothing here shares a resource keyed too
-// coarsely across files.
-//
-// EXPECT RED ON FIRST RUN. These files have never executed on a Linux or
-// macOS CI runner (team-lead brief, card f4a3ed1e): path separators, EOL,
-// port/timing assumptions and filesystem-name casing baked in on a Windows
-// dev machine are untested outside it. This script's job is to make that
-// failure VISIBLE (a real CI step, not a silent gap) -- not to guarantee a
-// green run the day it lands.
+// Runs the complement of partition-pure-tests.ts's exemption deny-list: every
+// test file that spawns a daemon and binds a port.
+// Single shared `bun test` invocation, not one process per file: none of these
+// files register a global (happy-dom) or mock a module, so the process-global
+// leakage that forces per-file isolation elsewhere does not apply here.
+// Each file's own broker binds an OS-assigned ephemeral port, so running them
+// serially in one process is expected to be safe.
 import { readdirSync } from "node:fs";
 import { EXEMPTIONS, exemptedFiles, isExempt, listTestFiles, REPO_ROOT, TESTS_DIR } from "./pure-module-partition.ts";
 
@@ -41,16 +15,12 @@ interface InvocationResult {
   filesRan: number | null;
 }
 
-// D5 (mirrors partition-pure-tests.ts, reviewer 2026-08-28 hardened it
-// further): the exit code alone does not prove anything ran, and the TEST
-// count alone does not prove every FILE ran -- a run where 53 of 54 files
-// are never collected but the one that IS still passes its own tests would
-// have reported PASS under the old check (testsRan >= 1). Now also captures
-// the `across M files?` half of bun's recap line and requires
-// filesRan >= files.length (not strict equality: a file that itself
-// contains zero `test()` calls would make bun's own count diverge, and that
-// is not this script's failure mode to police). FAILS CLOSED either way: an
-// unparseable recap is exit 1, never a default pass.
+// Exit code and test count alone don't prove every file ran; a file dropped
+// from collection could still let a lone survivor pass.
+// Also captures the `across M files?` half of bun's recap line and requires
+// filesRan >= files.length rather than exact equality, since a file with zero
+// test() calls makes bun's own count diverge harmlessly.
+// An unparseable recap fails, never a default pass.
 const RECAP_RE = /Ran (\d+) tests? across (\d+) files?/;
 
 // bun's default per-test budget is 5000 ms, which is a budget for a PURE
@@ -104,16 +74,11 @@ function runBunTest(files: string[]): InvocationResult {
 const allFiles = listTestFiles();
 const files = exemptedFiles(allFiles, EXEMPTIONS);
 
-// D1' (reviewer 2026-08-28): the previous check was a floor
-// (`files.length < 40`, 14 files of slack over the 54 measured 2026-08-28)
-// that would let up to 14 files silently vanish from this step's domain at
-// exit 0. Recompute the same domain via an INDEPENDENT readdirSync +
-// isExempt filter -- not a second call to exemptedFiles(allFiles, ...) on
-// the SAME allFiles array, which would let a shared bug in either the
-// enumeration or the filter cancel itself out -- and require exact equality
-// (same length, same set) with the production computation above. Any drift,
-// shrink or growth, refuses to run rather than silently running a different
-// set than intended.
+// Recomputes the exempt-file domain via an independent readdirSync + isExempt
+// filter, not a second call against the same allFiles array, so a shared bug in
+// either the enumeration or the filter can't cancel itself out.
+// Requires exact equality with the production computation; any drift, shrink or
+// growth, refuses to run rather than silently running a different set.
 const independentAllFiles = readdirSync(TESTS_DIR).filter((f) => f.endsWith(".test.ts"));
 const independentExemptFiles = independentAllFiles.filter((f) => isExempt(f, EXEMPTIONS)).sort();
 const productionExemptFiles = [...files].sort();

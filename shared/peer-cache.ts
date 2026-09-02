@@ -13,17 +13,11 @@ async function writeCacheAtomic(target: string, data: string): Promise<void> {
 }
 
 /**
- * Compute the cwd_key used by ~/.claude/status-line.sh:get_peer_id.
- *
- * Must match the bash logic exactly:
- *   sanitized=$(printf '%s' "$CWD" | sed 's/[^a-zA-Z0-9-]/_/g')
- *   len=${#sanitized}
- *   offset=$(( len > 40 ? len - 40 : 0 ))
- *   cwd_key="${sanitized:$offset}"
- *
- * Replaces every non-[A-Za-z0-9-] char with "_", then keeps the last 40 chars
- * (or the whole string if shorter). The explicit offset avoids the MSYS2 bash
- * 5.2 quirk where ${str: -40} returns empty when len(str) < 40.
+ * Must exactly replicate the equivalent bash logic in the status-line script:
+ * replace every non-[A-Za-z0-9-] character with "_", then keep the last 40
+ * characters (or the whole string if shorter).
+ * The explicit offset avoids an MSYS2 bash 5.2 quirk where ${str: -40} returns
+ * empty when the string is shorter than 40 chars.
  */
 export function computeCwdKey(cwd: string): string {
   const sanitized = cwd.replace(/[^a-zA-Z0-9-]/g, "_");
@@ -91,19 +85,13 @@ export async function writeDeskSessionFile(
 }
 
 /**
- * Deck back-channel writer. No-op unless BOTH CLAUDE_PEERS_DESK_SESSION (the
- * per-tile token set by the Deck) and CLAUDE_CODE_SESSION_ID (the real minted id,
- * set by Claude Code >= 2.x) are present. When both are set, writes the real id
- * to $HOME/.claude/peers/desk-session-<token>.txt, overwritten on every
- * /register so a resume captures the fresh (post-fork) minted id. Best-effort:
- * failures are silent so it never breaks the /register flow. Independent of the
- * status-line cache opt-in -- the token's presence is the gate, so non-Deck CLI
- * usage (token unset) writes nothing.
- *
- * Note: this only fires at /register (server.ts boot + switch_group). It cannot
- * observe an in-process session-id rotation such as /clear, because the env var
- * CLAUDE_CODE_SESSION_ID is frozen for the process lifetime. The SessionStart
- * hook (desktop/hooks/desk-backchannel-hook.ts) covers those rotations.
+ * No-op unless both CLAUDE_PEERS_DESK_SESSION and CLAUDE_CODE_SESSION_ID are
+ * set; writes the real session id to
+ * $HOME/.claude/peers/desk-session-<token>.txt, overwritten on every /register.
+ * Best-effort: failures are silent so it never breaks /register.
+ * Cannot observe an in-process session-id rotation (e.g. /clear) since
+ * CLAUDE_CODE_SESSION_ID is frozen for the process lifetime; the SessionStart
+ * hook covers those rotations instead.
  */
 export async function writeDeskSessionId(
   home: string = homedir(),
@@ -117,18 +105,13 @@ export async function writeDeskSessionId(
 }
 
 /**
- * Write the current peer_id to the cache file consumed by status-line.sh,
- * when opt-in via CLAUDE_PEERS_STATUS_LINE_CACHE.
- *
- * No-op when the env var is unset/falsy. When CLAUDE_CODE_SESSION_ID is set
- * (Claude Code >= 2.x), the cache file is suffixed with the session id so
- * multiple sessions sharing the same cwd each keep their own peer_id:
- *   $HOME/.claude/peers/peer-id-<cwdKey>-<sessionId>.txt
- * Without CLAUDE_CODE_SESSION_ID, falls back to the legacy single-file layout:
- *   $HOME/.claude/peers/peer-id-<cwdKey>.txt
- * The cache is overwritten on every /register so a stale value from a previous
- * version is replaced as soon as the session reconnects. Best-effort: failures
- * are silent so a transient FS issue never breaks the /register flow.
+ * No-op unless CLAUDE_PEERS_STATUS_LINE_CACHE is set. When
+ * CLAUDE_CODE_SESSION_ID is also set the cache file is suffixed with the
+ * session id so multiple sessions sharing a cwd each keep their own peer_id;
+ * otherwise it falls back to the legacy single-file layout.
+ * Overwritten on every /register so a stale value is replaced as soon as the
+ * session reconnects. Best-effort: failures are silent so a transient FS issue
+ * never breaks /register.
  */
 export async function writePeerIdCache(
   cwd: string,

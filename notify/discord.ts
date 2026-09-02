@@ -1,23 +1,10 @@
-// Discord gateway (PLAN N4).
-//
-// Same shape as the Telegram adapter, different transport: a bot receives
-// everything over an OUTGOING Gateway WebSocket — DM messages, button clicks
-// and modal submissions all arrive as events, and responses go out over plain
-// HTTPS. No public endpoint, no port, no domain.
-//
-// ONE PORTAL SETTING MATTERS: "Interactions Endpoint URL" must stay EMPTY.
-// Filling it switches interaction delivery to that HTTP address and the
-// Gateway stops receiving them — the two modes are mutually exclusive.
-//
-// NO PRIVILEGED INTENT: message content is exempt in DMs with the app itself,
-// so the standard DIRECT_MESSAGES intent is enough. (Reading a *server*
-// channel would need MESSAGE_CONTENT; we deliberately deliver by DM instead,
-// which is also more private.)
-//
-// THE MUTUAL-SERVER RULE: a bot cannot DM a user it shares no server with
-// (error 50278). The operator therefore creates a private server and invites
-// the bot — documented in desktop/docs/notifications.md. Nothing here can work
-// around it; we surface the error instead of retrying.
+// Gateway websocket transport, not a webhook: the portal's Interactions
+// Endpoint URL must stay empty, since filling it switches delivery to HTTP and
+// stops the Gateway from receiving anything.
+// DM only: message content is intent-exempt in DMs with the app itself, so no
+// privileged MESSAGE_CONTENT intent is needed.
+// A bot cannot DM a user it shares no server with (error 50278); the operator
+// invites it to a private server first, and nothing here works around that.
 
 import type { Approval } from "../shared/types.ts";
 import { ALREADY_HANDLED_NOTICE, decodeCallback, encodeCallback, renderDiscord, renderSettled } from "./format.ts";

@@ -1,26 +1,15 @@
 /**
- * Generate a 1-2 sentence summary of what a Claude Code instance is likely
- * working on, based on its working directory and git context.
- *
- * Multi-provider with graceful fallback:
- *   - "anthropic"     -> Anthropic Messages API (https://api.anthropic.com)
- *   - "openai-compat" -> any OpenAI-compatible /chat/completions endpoint
- *                        (LiteLLM, Ollama via /v1, OpenRouter, vLLM, OpenAI...)
- *   - "none"          -> heuristic only
- *
- * Resolution: see shared/config.ts (resolveProvider).
- *
- * If the network call fails (no key, HTTP error, timeout, parse error), the
- * heuristic summary is returned. Never throws, always returns a non-empty string.
+ * Multi-provider with graceful fallback: the Anthropic Messages API, any
+ * OpenAI-compatible /chat/completions endpoint (LiteLLM, Ollama, OpenRouter,
+ * vLLM...), or a heuristic only.
+ * Never throws, and always returns a non-empty string -- a failed network call
+ * (no key, HTTP error, timeout, parse error) falls back to the heuristic
+ * summary.
  */
 
 import { basename } from "node:path";
 import { normalizeRemoteUrl } from "./project-key";
 
-// Card 6aa32af4 (2nd review round): normalizeRemoteUrl used to be defined
-// here; moved to shared/project-key.ts (single source, imported by
-// desktop/src/main/roadmap-service.ts too) and re-exported below so
-// existing `from "./summarize.ts"` imports keep working.
 export { normalizeRemoteUrl };
 
 export interface SummaryContext {

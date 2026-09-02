@@ -1,126 +1,10 @@
-// Card 67519e73. Two mechanical checks against a commit/index TREE, both
-// invisible when reading the diff alone:
-//
-//  1. IMPORT CLOSURE. For every scanned file, every relative (./ ../) or
-//     @shared/*-aliased import is resolved AGAINST THE TREE BEING CHECKED
-//     (the commit's blobs, or the index's staged blobs with a HEAD fallback
-//     for files the commit/stage does not touch) -- never the working tree.
-//     Catches "this commit references code that only exists in the working
-//     tree": it builds for the author and breaks for everyone else the
-//     moment they check the commit out clean.
-//  2. LITERAL CONTROL BYTES (NUL, ESC, BEL) inside a committed/staged blob.
-//     One embedded NUL and git classifies the whole file BINARY: no diff,
-//     no blame, no 3-way merge, ripgrep refuses to show it -- the module
-//     silently drops out of code review and code search.
-//
-// THREE modes, sharing all the resolution logic below:
-//   PR mode:      bun scripts/check-commit-closure.ts --pr <base> <head> [repo]
-//                 THE MODE CI USES. Import closure per commit over
-//                 base..head; control bytes ONCE over the net diff
-//                 base...head, blobs read at head. See runPrCheck for why
-//                 the two halves are wired differently and what that costs.
-//   sha mode:     bun scripts/check-commit-closure.ts <sha> [repo]
-//                 audits ONE real, already-made commit -- a manual audit
-//                 after the fact, or bisecting which commit of a range went
-//                 red. CI does NOT loop over commits with this; that is PR
-//                 mode's job.
-//   staged mode:  bun scripts/check-commit-closure.ts --staged [repo]
-//                 audits the INDEX -- "if I commit right now, does this
-//                 commit stand on its own?" -- the question at the moment
-//                 it is still cheap to answer. Files staged read from the
-//                 index (`git show :<path>`); files the stage does not
-//                 touch fall back to HEAD, matching what the resulting
-//                 commit would actually contain.
-//
-// Ported from a hand-validated prototype (sha mode only, hardcoded to one
-// repo path) -- kept for provenance, not re-derived: sensitivity proved on
-// a throwaway repo carrying both defects, specificity proved silent on two
-// real clean commits (1 file, 7 files). This version adds --staged mode,
-// @shared/* alias resolution sourced from the tree being checked (not
-// disk), and non-zero exit codes so CI can gate on it.
-//
-// Exit code: 0 = clean, 1 = at least one problem found, 2 = usage/tool
-// error (git missing, bad ref, no such commit) so a broken invocation is
-// distinguishable from a genuine finding in CI logs.
-//
-// TEN KNOWN GAPS, documented rather than silently absent (the same
-// coverage question this tool exists to enforce, turned on itself). An
-// UNLISTED gap is worse than a listed one: the list is what a reader
-// audits against, so anything missing from it reads as covered.
-//   1. REVERSE DIRECTION NOT SCANNED. This only walks the files IN the
-//      commit/stage being checked. A commit that renames or deletes an
-//      export breaks every ALREADY-COMMITTED file that imports it, and
-//      none of those files are in this commit's file list -- the most
-//      perfidious half, invisible in the diff AND in `git show --name-only`.
-//      Closing this needs a reverse index (which committed files import the
-//      modified module) built by scanning the whole tree, not just the
-//      commit -- slower, deliberately out of scope here.
-//   2. NAME, NOT SHAPE. A symbol is "closed" once a same-name export
-//      exists at the target. A signature/type change under the same name
-//      stays green. Closing this needs a type checker, which is what the
-//      slow path (full checkout + `npm run typecheck`) is for -- see
-//      TESTING.md and the desktop-precommit skill for when to escalate.
-//   3. PROSE REFERENCES NOT FOLLOWED. Only `import ... from '...'`
-//      statements are parsed. A doc (TESTING.md, a skill) naming a file
-//      that never made it into the commit is not an import and is not
-//      caught -- caught by eye, or by a doc-specific link checker, neither
-//      of which this tool is.
-//   4. ALIASES ARE READ ONLY FROM THE TWO TSCONFIGS. Every prefix declared
-//      in their `compilerOptions.paths` is resolved, not just `@shared/*`
-//      (the constant naming it is a file list, not a prefix filter), so
-//      this gap is narrower than it used to claim.
-//      electron.vite.config.ts declares its own resolve.alias blocks (JS,
-//      not JSON) and is not parsed here -- a drift between it and the
-//      tsconfigs is a real defect this tool cannot see. A DIVERGENCE
-//      BETWEEN THE TWO TSCONFIGS THEMSELVES is checked and reported,
-//      because both are trivially parseable JSON already read for the
-//      alias table.
-//   5. A BRACE RE-EXPORT IS TRUSTED AT ONE HOP. `export { A } from './x'`
-//      and `export type { A } from './x'` count as exporting A without
-//      checking that ./x really exports it, so a broken SECOND hop stays
-//      green. This is fail-open and deliberate: following the chain means
-//      resolving the re-export's own specifier recursively, with cycle
-//      detection, which is a different tool. `export * from '...'` is NOT
-//      trusted at all and yields a red finding -- the fail-closed side,
-//      kept on purpose. Measured on this tree: exactly one `export *`
-//      line exists, `export * as React from 'react'`
-//      (desktop/tests-support/react-test-harness.ts:71), which is a
-//      NAMESPACE re-export of a bare package and is never a resolution
-//      target here -- so nothing is red today, but the claim is "one
-//      harmless occurrence", not "none".
-//   6. `export { A as B }` SATISFIES `import { A }`. The export scan looks
-//      for the name anywhere inside the braces, so the LOCAL side of a
-//      rename counts as if it were the exported name. Fail-open, measured,
-//      and left as is: fixing it means parsing the brace list per entry.
-//   7. THE IMPORT SCAN IS EXTENSION-FILTERED to .ts/.tsx/.js/.mjs, so
-//      `.jsx`, `.cjs` and `.mts` files' own imports are not walked. None
-//      exist in this tree today, which is exactly how this kind of gap
-//      survives -- it is the fail-open direction (a growing domain stays
-//      exempt), unlike the control-byte scan, which was inverted to a
-//      deny-list for that reason.
-//   8. JSX TEXT CAN UNBOUND THE LEXICAL PASS. maskCommentsAndStrings reads
-//      `/*` and a backtick as code even when they sit in JSX TEXT (not in
-//      an attribute string), so a literal `/*` or an odd backtick in
-//      rendered text opens a block comment or a template that runs to EOF.
-//      Both cases measured; incidence today 0 (no .tsx in this tree does
-//      it, and the whole-tree run reports 0 findings). It is NOT bounded
-//      to one line, and it cuts BOTH ways: over-stripping on the import
-//      side loses an import (silent), and on the export side, where the
-//      same pass feeds codeOnlySource, it loses an export and INVENTS a
-//      not-exported finding.
-//   9. MERGES ARE AUDITED AGAINST THEIR FIRST PARENT ONLY. See
-//      listCommitFiles: a merge's second-parent-only changes are not in
-//      that diff. The alternative (union of both diffs) re-audits the whole
-//      merged branch on every merge, which is the workflow's job via the
-//      commit range, not this one commit's.
-//  10. IN PR MODE THE CONTROL-BYTE HALF DOES NOT HOLD "EVERY COMMIT STANDS
-//      ALONE". It judges the NET diff at head, so a byte introduced and
-//      removed inside the range is not reported, and a `git checkout` of a
-//      mid-range commit can still land on a file git calls binary. Accepted
-//      deliberately (see runPrCheck): a control byte is a defect of a
-//      file's STATE, and history cannot be un-reddened, so the alternative
-//      was a gate red on its first real PR. The import-closure half keeps
-//      the per-commit property, because ITS defect is inter-commit.
+// Checks import closure (relative and @shared/* imports resolve against the
+// tree being verified, never the working tree) and literal control bytes in
+// tracked blobs, across --pr, sha, and --staged modes.
+// Exit 0 clean, 1 at least one finding, 2 usage/tool error, so a broken
+// invocation is distinguishable from a real finding in CI logs.
+// Known gaps: no reverse-import check, symbol name matched but not shape/type,
+// and merges audited against their first parent only.
 
 import { spawnSync } from "node:child_process";
 
@@ -167,22 +51,11 @@ function splitZ(out: string): string[] {
 }
 
 /**
- * Files touched by a real commit.
- *
- * MERGE COMMITS NEED THEIR OWN PATH. `git show --name-only` prints NOTHING
- * for a merge (git refuses to diff against several parents at once), so the
- * naive version scanned ZERO files and printed "import closure: OK" --
- * canonically the failure this whole tool exists to catch: a SUBSET that
- * reads as a success. Measured on this repo: `git show --pretty=format:
- * --name-only 3f3f4122` returns 0 lines, `git diff --name-only 3f3f4122^1
- * 3f3f4122` returns 62, and 41 of the last 200 commits are merges -- all of
- * them inside the `git rev-list base..head` range the CI workflow feeds in.
- *
- * A merge is therefore audited against its FIRST PARENT, which is the diff
- * it introduces into the line being merged INTO, and is exactly where a
- * semantic conflict (each side fine, the combination not) becomes visible.
- * Blobs are still read at the merge sha itself, so what is judged is the
- * merged tree, not either side.
+ * A merge is audited against its first parent -- the diff it introduces into
+ * the branch it merges into -- because `git show --name-only` prints nothing
+ * for a merge commit.
+ * Blobs are still read at the merge sha itself, so what is judged is the merged
+ * tree, not either parent alone.
  */
 export function listCommitFiles(repo: string, sha: string): string[] {
   const parents = runGit(repo, ["rev-list", "--parents", "-n1", sha]);
@@ -307,43 +180,14 @@ const IMPORT_RE =
 const SIDE_EFFECT_IMPORT_RE = /import\s+['"]([^'"]+)['"]/g;
 
 /**
- * Lexical pre-pass for IMPORT_RE. Running that regex over the RAW source
- * makes the checker parse an import statement that is only QUOTED -- inside
- * a `//` or block comment, or inside a string literal -- as if the commit
- * really imported it. Measured on this repo before this pass existed: 2 of
- * the 40 most recent commits went red on tests/desktop-tile-area.test.ts,
- * where a comment cites `import { TerminalTile } from './TerminalTile'`,
- * and scripts/fixtures/make-closure-sensitivity-repo.ts produced 5 red
- * findings because the fixture FILE CONTENTS it writes are import
- * statements living in string literals. A gate that is red on healthy code
- * from day one gets disarmed, so this is not cosmetic.
- *
- * Returns the source with every comment body blanked (spaces, newlines
- * preserved, so offsets and line numbers are unchanged) and a per-offset
- * flag marking characters that sit inside a string/template literal. The
- * caller keeps string CONTENT (the specifier itself is a string) and only
- * uses the flag to reject a match whose `import` KEYWORD is quoted.
- *
- * String literals, template literals (including `${ }` interpolation and
- * its brace depth) and REGEX literals are all tracked, because each one can
- * contain a character that would otherwise flip the state: `"https://x"`
- * (would look like a comment), `` `a ${ "b" } c` ``, and `/"/g` (would open
- * a string). Two containment rules keep any residual mis-lex local rather
- * than file-wide: an unterminated string or regex stops at end of line, and
- * an ambiguous `/` is resolved as DIVISION, never as a regex that could
- * swallow the file.
- *
- * Known, deliberate limits, and the bound is NOT uniform:
- *  - a `//` inside a regex whose opening `/` was classified as division
- *    (e.g. after an identifier) is read as a line comment, blanking the
- *    rest of that ONE line. Bounded, and harmless on the import side since
- *    an import statement contains no regex.
- *  - JSX TEXT is not distinguished from code: a literal `/*` or an odd
- *    backtick in rendered text opens a block comment or a template that
- *    runs to EOF. NOT bounded to one line (gap 8 in the header), and it
- *    hurts BOTH consumers -- the import side loses an import (silent), and
- *    codeOnlySource loses an export, which INVENTS a not-exported finding.
- *    Measured incidence on this tree: 0.
+ * Blanks every comment body (spaces/newlines preserved, so offsets stay
+ * unchanged) and flags characters inside a string/template/regex literal, so an
+ * import statement that is merely quoted is never parsed as a real one.
+ * An ambiguous `/` is resolved as division, never regex, so a mis-lex stays
+ * bounded to one line instead of swallowing the rest of the file.
+ * JSX text is not distinguished from code: a literal `/*` or stray backtick in
+ * rendered text can open a comment or template that runs unbounded to end of
+ * file.
  */
 export function maskCommentsAndStrings(src: string): { masked: string; inString: Uint8Array } {
   const out = src.split("");
@@ -360,19 +204,12 @@ export function maskCommentsAndStrings(src: string): { masked: string; inString:
   const frames: { braceDepth: number }[] = [];
   let i = 0;
 
-  // Regex-literal detection. Needed, not optional: `/"/g` and `/['"]/` are
-  // ordinary code in this repo, and without this the quote INSIDE the regex
-  // opens a string literal, which desynchronises every state that follows.
-  // Measured before this branch existed: masking desynchronised at
-  // desktop/src/main/model-adapters.ts:59 (`p.replace(/"/g, '')`) and the
-  // repo-wide closure run went from 3 findings to 54 -- 51 phantom
-  // not-exported reports on symbols that really are exported.
-  //
-  // `/` is ambiguous (regex vs division); it is a regex when the previous
-  // significant token cannot end an expression. Guessing DIVISION on the
-  // ambiguous leftovers is the containment-preserving choice: a mis-read
-  // division only mis-lexes the rest of one line, whereas a mis-read regex
-  // could swallow the file.
+  // Regex-literal tracking is required: ordinary code like `/"/g` would
+  // otherwise let the quote inside the regex desynchronize string masking for
+  // the rest of the file.
+  // A `/` is read as a regex only when the previous token cannot end an
+  // expression; otherwise it's division, since a wrong regex guess can swallow
+  // the whole file while a wrong division guess only mis-lexes one line.
   const REGEX_PREV_OK = new Set(["(", ",", "=", ":", "[", "!", "&", "|", "?", "{", "}", ";", "+", "-", "*", "%", "^", "~", "<", ">"]);
   const REGEX_PREV_KEYWORDS =
     /\b(return|typeof|instanceof|in|of|new|delete|void|case|do|else|yield|await)$/;
@@ -597,20 +434,11 @@ export function resolveImportClosure(scanFiles: string[], read: BlobReader, alia
       const base = resolveSpecifier(dir, spec, aliases);
       if (base === null) continue; // bare package specifier, not resolved here
 
-      // ORDERING IS LOAD-BEARING: target resolution runs for EVERY import
-      // form, and only the export check below is skipped when nothing is
-      // named. With the "nothing named" return sitting HERE (where it used
-      // to), `import Ghost from './ghost'`, `import * as G from './ghost'`
-      // and `import './ghost'` reported NOTHING on a target that does not
-      // exist -- measured 1 finding for the named form, 0 for the other
-      // three, on the same missing target.
-      //
-      // `.d.ts` belongs in the candidate list: a hand-written declaration file is a perfectly
-      // ordinary import target (desktop/src/renderer/src/webview-types.d.ts
-      // types the <webview> tag for the renderer, which has no Electron
-      // types). Omitting it reported a missing-target on a live, healthy
-      // file -- the exact "red on the code it protects" shape that gets a
-      // gate disarmed.
+      // Target resolution runs for every import form before checking whether
+      // anything is named, so a default, namespace, or side-effect import is
+      // checked against a missing target too, not just the named form.
+      // .d.ts is a valid candidate: a hand-written declaration file (e.g.
+      // webview-types.d.ts) is a real import target with no .ts sibling.
       const candidates = [base, `${base}.ts`, `${base}.tsx`, `${base}.d.ts`, `${base}/index.ts`];
       const target = candidates.find((c) => read(c) !== null);
       if (!target) {
@@ -626,20 +454,12 @@ export function resolveImportClosure(scanFiles: string[], read: BlobReader, alia
       // `export function X` does not silently satisfy the import.
       const targetSrc = codeOnlySource(read(target)!);
       for (const name of named) {
-        // Second branch covers BOTH brace forms, local export list and
-        // re-export: `export { A }`, `export { A } from '...'` and
-        // `export type { A, B } from '...'`. The optional `type` keyword is
-        // not cosmetic -- without it, desktop/src/shared/companion.ts:619
-        // (`export type { CompanionDevice, CompanionInfo } from './types'`)
-        // read as exporting nothing, and its importer was reported
-        // not-exported on healthy code. NOTE: `export * from '...'` is
-        // deliberately still NOT followed; an unrecognised re-export yields
-        // a RED finding, which is the fail-CLOSED polarity. Measured: this
-        // tree has exactly ONE `export *` line, `export * as React from
-        // 'react'` in desktop/tests-support/react-test-harness.ts:71 -- a
-        // namespace re-export of a bare package, never a resolution target,
-        // so nothing is red today. Gap 6 in the header covers the related
-        // `export { A as B }` fail-open, which this branch does NOT catch.
+        // Matches both brace export forms, local (`export { A }`) and re-export
+        // (`export { A } from`), including the optional `type` keyword needed
+        // to recognize a type-only re-export as exporting the name.
+        // `export * from` is deliberately not followed and yields a finding
+        // instead -- a fail-closed choice for a re-export this scan cannot
+        // verify.
         const exported = new RegExp(
           `export\\s+(async\\s+)?(function|const|let|var|class|interface|type|enum)\\s+${name}\\b|export\\s*(?:type\\s+)?\\{[^}]*\\b${name}\\b`,
         ).test(targetSrc);
@@ -658,23 +478,9 @@ export function resolveImportClosure(scanFiles: string[], read: BlobReader, alia
 
 const CONTROL_BYTES = [0x00, 0x1b, 0x07];
 
-// Genuinely binary tracked assets (a real PNG, a font, an archive) contain
-// NUL/ESC/BEL bytes as a matter of course -- scanning them would make this
-// check permanently red on any commit that adds an icon. The defect this
-// check exists to catch is a TEXT file that accidentally became binary (one
-// embedded control byte).
-//
-// This is a DENY-list on purpose, and the polarity is the whole point. The
-// first version enumerated the extensions to SCAN, which fails OPEN: every
-// text extension nobody thought of is silently exempt, and the exempt set
-// grows on its own as the repo does. Measured on this repo at the time of
-// the inversion: the allow-list scanned 391 of 401 tracked files, silently
-// skipping 5 `.kt`, 4 `.gitignore` (the leading dot read as an extension)
-// and 1 `.example`. The deny-list scans 401 of 401 and excludes nothing
-// currently tracked. Growth now fails CLOSED: a new text extension is
-// covered by default, and a newly added binary format shows up as a loud
-// red finding on the commit that adds it (add it here) rather than as
-// silent absence of coverage.
+// Deny-list, not an allow-list: an allow-list of text extensions fails open by
+// silently exempting anything unlisted, so this scans every tracked file by
+// default and a new binary format must be added here explicitly.
 const BINARY_EXT_RE = /\.(png|jpe?g|gif|bmp|ico|webp|avif|woff2?|ttf|otf|eot|zip|gz|tgz|bz2|xz|7z|rar|pdf|node|exe|dll|dylib|so|class|jar|wasm|mp[34]|wav|ogg|webm|mov|avi|psd|sqlite3?|db|bin|keystore|jks|p12|pfx)$/i;
 
 function isTextLikePath(path: string): boolean {
@@ -722,37 +528,15 @@ export interface CheckResult {
 }
 
 /**
- * PR mode. The two halves of this tool are wired DIFFERENTLY on purpose, and
- * the split is the measurement, not a preference:
- *
- *   IMPORT CLOSURE runs PER COMMIT over base..head. It is the only half that
- *   can catch a mid-stack commit that references code existing nowhere but
- *   the author's working tree, and it costs nothing in false reds: replayed
- *   over the full `main..experimental` range (297 commits, 36 merges) it
- *   reported ZERO.
- *
- *   CONTROL BYTES run ONCE over the PR's NET diff (`git diff --name-only
- *   base...head`, three dots), with blobs read AT HEAD. Per commit, the same
- *   range reported 7 reds, all control-byte, on 4 files -- every one of them
- *   a real byte really committed at the time. History cannot be un-reddened,
- *   so a per-commit byte scan makes the first real PR red on day one, and a
- *   gate that is red on day one gets disarmed with `|| true`.
- *
- * TRADE-OFF, stated rather than hidden: the byte half loses the "every
- * commit stands alone" property. This is the right half to lose it in,
- * because a control byte is a defect of a file's STATE, not of coherence
- * BETWEEN commits -- if the byte is gone at head, no checkout of head can
- * suffer from it. The import closure keeps the per-commit property precisely
- * because its defect IS inter-commit.
- *
- * Why no exemption mechanism (a reference sha, or a list of historical shas
- * to skip): neither closes the hole. A merge made after the reference that
- * merges a branch containing pre-reference commits is not an ancestor of the
- * reference, so it is still audited, and its first-parent diff re-lists the
- * offending files -- measured on this repo, 2 of the 7 reds were exactly
- * that (5274713f is an ancestor of 3f3f4122^2, 381af019 of 30e67bc3^2). An
- * exemption also rots the day history is rewritten. The exemption we do not
- * write is the one that cannot rot.
+ * Import closure runs per commit over base..head, since it's the only half that
+ * can catch a mid-stack commit referencing code that exists only in the
+ * author's working tree.
+ * Control bytes run once over the PR's net diff at head instead: a control byte
+ * is a defect of a file's state, not of coherence between commits, and history
+ * cannot be un-reddened.
+ * No exemption list: a merge that brings in pre-exemption commits is still
+ * audited via its own first-parent diff, so an exemption would neither close
+ * the hole nor survive history being rewritten.
  */
 export function runPrCheck(repo: string, baseRef: string, headRef: string): CheckResult {
   const fail = (detail: string): CheckResult => ({
