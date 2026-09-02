@@ -10,15 +10,19 @@ import {
   composeDispatchText,
   composeMultiDispatchText,
   composeStopText,
+  composeUnresolvedContext,
   dispatchNormalWave,
   firstQueued,
   nextBarrierPending,
   nextDispatchedState,
   nextQueuePosition,
+  NO_TARGET_REQUESTED_NOTE,
   queuedItems,
   runDirectiveWave,
   runDispatchRequestPoll,
-  splitWave
+  splitWave,
+  UNRESOLVED_TARGET_NOTE,
+  unresolvedDirectiveNote
 } from "../desktop/src/main/dispatch.ts";
 import type {
   DirectiveDispatch,
@@ -344,15 +348,21 @@ function report(over: Partial<DirectiveDispatch> = {}): DirectiveDispatch {
 }
 
 function mockDirectiveDeps(
-  opts: { throwForIds?: Set<string>; reports?: Record<string, DirectiveDispatch> } = {}
+  opts: {
+    throwForIds?: Set<string>;
+    reports?: Record<string, DirectiveDispatch>;
+    noteThrowsForIds?: Set<string>;
+  } = {}
 ) {
   const order: string[] = [];
   const journaled: string[] = [];
   const reported: { message: string; error: unknown }[] = [];
+  const noted: string[] = [];
   return {
     order,
     journaled,
     reported,
+    noted,
     deps: {
       markDone: async (it: RoadmapItem) => {
         order.push(`mark:${it.id}`);
@@ -363,7 +373,13 @@ function mockDirectiveDeps(
         return opts.reports?.[it.id] ?? report({ id: it.id, title: it.title });
       },
       journal: (line: string) => journaled.push(line),
-      reportError: (message: string, error: unknown) => reported.push({ message, error })
+      reportError: (message: string, error: unknown) => reported.push({ message, error }),
+      // Card 249ed831 (form b).
+      noteUnresolved: async (it: RoadmapItem) => {
+        order.push(`note:${it.id}`);
+        if (opts.noteThrowsForIds?.has(it.id)) throw new Error(`note failed for ${it.id}`);
+        noted.push(it.id);
+      }
     }
   };
 }
@@ -371,7 +387,10 @@ function mockDirectiveDeps(
 test("runDirectiveWave: marks done BEFORE executing (mark-then-execute, not the reverse)", async () => {
   const { order, deps } = mockDirectiveDeps();
   await runDirectiveWave([item({ id: "a", kind: "directive", directive: "clear" })], deps);
-  expect(order).toEqual(["mark:a", "execute:a"]);
+  // The default mock report (directive:'clear', injected:[]) is itself an
+  // unresolved-target outcome (card 249ed831), so the note fires too -- see
+  // the dedicated noteUnresolved tests below for its own ordering/predicate.
+  expect(order).toEqual(["mark:a", "execute:a", "note:a"]);
 });
 
 // The failure-path assertion the card's briefing calls out explicitly: a
@@ -399,7 +418,9 @@ test("runDirectiveWave: one item throwing does not stop siblings in the same wav
     ],
     deps
   );
-  expect(order).toEqual(["mark:a", "execute:a", "mark:b", "execute:b"]);
+  // b's default mock report is itself unresolved (injected:[]), so its note
+  // fires too -- see the dedicated noteUnresolved tests below.
+  expect(order).toEqual(["mark:a", "execute:a", "mark:b", "execute:b", "note:b"]);
   expect(journaled).toHaveLength(2);
   expect(journaled[0]).toContain("marked done but execution threw");
   expect(journaled[1]).toContain("directive card dispatched");
@@ -493,6 +514,115 @@ test("runDirectiveWave: the dispatched journal line carries the hit/miss counts 
   // Counts only: the ids belong to executeDirective's own unreached line, and
   // naming them here too would report the same miss twice.
   expect(journaled[0]).not.toContain("gone");
+});
+
+// Card 249ed831 (form b): a directive card marked done with zero targets
+// resolved must post the operator-visible note, on the exact predicate
+// `report.directive !== null && report.injected.length === 0` -- not a
+// heuristic reconstructed from the item or from `unreached`.
+
+test("runDirectiveWave: posts the unresolved note when zero targets are resolved (directive stays non-null)", async () => {
+  const { noted, order, deps } = mockDirectiveDeps({
+    reports: { a: report({ id: "a", directive: "clear", injected: [], unreached: [{ peerId: "gone", reason: "no-live-target" }] }) }
+  });
+  await runDirectiveWave([item({ id: "a", kind: "directive", directive: "clear" })], deps);
+  expect(noted).toEqual(["a"]);
+  // Runs AFTER the journal line, not interleaved before it.
+  expect(order).toEqual(["mark:a", "execute:a", "note:a"]);
+});
+
+test("runDirectiveWave: does NOT post the note when the card resolved at least one target", async () => {
+  const { noted, deps } = mockDirectiveDeps({
+    reports: {
+      a: report({ id: "a", directive: "clear", injected: [{ tileId: "t1", peerId: "peer-a" }] })
+    }
+  });
+  await runDirectiveWave([item({ id: "a", kind: "directive", directive: "clear" })], deps);
+  expect(noted).toEqual([]);
+});
+
+test("runDirectiveWave: does NOT post the note on the parse-refusal report (directive: null)", async () => {
+  // Shape executeDirective actually returns when isDirectiveCommand(cmd) is
+  // false (index.ts): directive:null, injected:[] -- injected is empty here
+  // too, so `directive !== null` is the ONLY thing distinguishing this from
+  // the branch that must fire. Built by hand, not via report(): that helper's
+  // `over.directive ?? "clear"` default treats an explicit `null` as "not
+  // provided" (nullish coalescing) and silently substitutes "clear".
+  const { noted, deps } = mockDirectiveDeps({
+    reports: { a: { id: "a", title: "t", directive: null, injected: [], unreached: [] } }
+  });
+  await runDirectiveWave([item({ id: "a", kind: "directive", directive: null })], deps);
+  expect(noted).toEqual([]);
+});
+
+test("runDirectiveWave: noteUnresolved throwing is reported, not fatal -- the wave's report still returns", async () => {
+  const unresolvedReport = report({ id: "a", directive: "clear", injected: [] });
+  const { noted, reported, deps } = mockDirectiveDeps({
+    reports: { a: unresolvedReport },
+    noteThrowsForIds: new Set(["a"])
+  });
+  const out = await runDirectiveWave([item({ id: "a", kind: "directive", directive: "clear" })], deps);
+  expect(noted).toEqual([]); // threw before pushing
+  expect(out).toEqual([unresolvedReport]); // execute's own result is unaffected
+  expect(reported).toHaveLength(1);
+  expect(reported[0]!.message).toContain("unresolved-target note");
+  expect(reported[0]!.error).toBeInstanceOf(Error);
+});
+
+test("composeUnresolvedContext: appends the given note to existing context", () => {
+  const out = composeUnresolvedContext("Some operator-written context.", UNRESOLVED_TARGET_NOTE);
+  expect(out).toBe(`Some operator-written context.\n\n${UNRESOLVED_TARGET_NOTE}`);
+});
+
+test("composeUnresolvedContext: empty context gets the note ALONE, no leading blank separator", () => {
+  const out = composeUnresolvedContext("", UNRESOLVED_TARGET_NOTE);
+  expect(out).toBe(UNRESOLVED_TARGET_NOTE);
+});
+
+test("composeUnresolvedContext: a card re-queued and failed again the SAME way carries the note ONCE, not twice", () => {
+  const once = composeUnresolvedContext("Context.", UNRESOLVED_TARGET_NOTE);
+  const twice = composeUnresolvedContext(once, UNRESOLVED_TARGET_NOTE);
+  expect(twice).toBe(`Context.\n\n${UNRESOLVED_TARGET_NOTE}`);
+  expect(twice.split(UNRESOLVED_TARGET_NOTE)).toHaveLength(2); // one occurrence only
+});
+
+// Card 249ed831, reviewer round 2 point 5: two distinct causes, two distinct
+// (and mutually exclusive) recommendations.
+
+test("unresolvedDirectiveNote: empty target_peer_ids gets the 'set targets first' note, not the re-queue one", () => {
+  expect(unresolvedDirectiveNote(item({ target_peer_ids: [] }))).toBe(NO_TARGET_REQUESTED_NOTE);
+});
+
+test("unresolvedDirectiveNote: a requested-but-unreachable target gets the re-queue note", () => {
+  expect(unresolvedDirectiveNote(item({ target_peer_ids: ["peer-a"] }))).toBe(UNRESOLVED_TARGET_NOTE);
+});
+
+test("composeUnresolvedContext: a card whose failure reason CHANGED between attempts carries only the NEW note", () => {
+  const firstFailure = composeUnresolvedContext("Context.", NO_TARGET_REQUESTED_NOTE);
+  const secondFailure = composeUnresolvedContext(firstFailure, UNRESOLVED_TARGET_NOTE);
+  expect(secondFailure).toBe(`Context.\n\n${UNRESOLVED_TARGET_NOTE}`);
+  expect(secondFailure).not.toContain(NO_TARGET_REQUESTED_NOTE);
+});
+
+// Reviewer round 3: the strip must be SYMMETRIC with the append. The append
+// is conditional (an empty existingContext gets the note with no leading
+// separator), so a strip that only recognizes the PREFIXED form would never
+// re-find a note stored on an originally-empty context -- the exact bug this
+// pair of round-trips exists to catch, starting from `""` where the earlier
+// "Context." round-trips above stay blind to it.
+
+test("composeUnresolvedContext: empty-context round trip, SAME cause, carries the note ONCE, not twice", () => {
+  const once = composeUnresolvedContext("", UNRESOLVED_TARGET_NOTE);
+  const twice = composeUnresolvedContext(once, UNRESOLVED_TARGET_NOTE);
+  expect(twice).toBe(UNRESOLVED_TARGET_NOTE);
+  expect(twice.split(UNRESOLVED_TARGET_NOTE)).toHaveLength(2); // one occurrence only
+});
+
+test("composeUnresolvedContext: empty-context round trip, cause CHANGED, carries only the NEW note -- never both", () => {
+  const firstFailure = composeUnresolvedContext("", NO_TARGET_REQUESTED_NOTE);
+  const secondFailure = composeUnresolvedContext(firstFailure, UNRESOLVED_TARGET_NOTE);
+  expect(secondFailure).toBe(UNRESOLVED_TARGET_NOTE);
+  expect(secondFailure).not.toContain(NO_TARGET_REQUESTED_NOTE);
 });
 
 function mockDeps(opts: { announceReturns?: number; failIds?: Set<string> } = {}) {

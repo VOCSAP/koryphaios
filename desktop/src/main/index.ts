@@ -69,6 +69,7 @@ import {
   canAutoDispatchNext,
   composeAssignText,
   composeStopText,
+  composeUnresolvedContext,
   dispatchNormalWave,
   firstQueued,
   nextBarrierPending,
@@ -76,6 +77,7 @@ import {
   runDirectiveWave,
   runDispatchRequestPoll,
   splitWave,
+  unresolvedDirectiveNote,
   type DispatchedEntry
 } from './dispatch'
 import { directiveKeys, isDirectiveCommand, resolveDirectiveTargets } from './directive'
@@ -1663,7 +1665,55 @@ const dispatchNextInner = async (): Promise<DispatchResult> => {
           },
           execute: executeDirective,
           journal: (line) => journal.add('dispatch', line),
-          reportError: (message, error) => reportError('dispatch', message, error)
+          reportError: (message, error) => reportError('dispatch', message, error),
+          // Card 249ed831 (form b), reviewer round 2 point 1.
+          //
+          // (a) REPLACE is a chosen ARBITRAGE, not the only possible tool --
+          // say what the alternative actually costs instead of calling it
+          // impossible. The body sent is `{id, context}`; broker.ts's upsert
+          // handler does `context: body.context ?? existing.context`
+          // (broker.ts:3404), a full replace of the column, so
+          // `composeUnresolvedContext` itself carries the prior text
+          // forward. The sibling atomic `/roadmap/append-context` route
+          // COULD be used instead, but today nothing under desktop/ calls it
+          // (measured: zero callers) -- it would need a new ~20-line client
+          // in roadmap-service.ts plus handling its 409 (cap exceeded), both
+          // out of this lot's scope. And even built, it would only reach
+          // idempotence via an `includes()` check on the SAME stale
+          // snapshot this upsert reads -- so its failure mode under the
+          // identical race window described in (b) is a DOUBLED note, never
+          // an overwrite of someone else's text. Upsert-replace was chosen
+          // because it is in-scope today and keeps the note bounded to one
+          // occurrence without that extra client; every OTHER field of the
+          // card is left untouched by this same broker-side `?? existing.*`
+          // behavior regardless of which tool is used.
+          //
+          // (b) the race window, precisely: FROM the `listRoadmap` read at
+          // the top of THIS guard iteration (`const items = await
+          // listRoadmap(...)` above) that produced this `item` -- carried
+          // unchanged through this item's own `markDone`+`execute` AND
+          // through every directive member processed earlier in the SAME
+          // wave (each its own markDone/execute round trip) -- TO this
+          // upsert call. Any write to THIS card's `context` by another
+          // agent/session landing inside that window (an append, or another
+          // upsert) is silently overwritten. UNBOUNDED in the number of
+          // wave members N -- the `guard < 64` loop above bounds how many
+          // WAVES one dispatchNextInner call drains, not how many items sit
+          // inside one wave, and nothing here re-reads `context` before
+          // writing -- but SMALL in practice today: for the common
+          // single-directive wave this is ~2 network round trips
+          // (markDone's upsert, then this one), since `executeDirective`
+          // itself contains no `await` on its own (its per-target injections
+          // are fire-and-forget -- see `executeDirective`'s own doc comment
+          // above, "The danger is NOT an await (this function contains
+          // none)", index.ts:1504). Both facts stated because either alone
+          // misleads: N is not bounded, but today's N is usually 1.
+          noteUnresolved: async (item) => {
+            await upsertRoadmap(endpoint, key, {
+              id: item.id,
+              context: composeUnresolvedContext(item.context, unresolvedDirectiveNote(item))
+            })
+          }
         }))
       )
       if (normal.length === 0) continue // all-directive wave: pull the next one

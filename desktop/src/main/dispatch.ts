@@ -298,6 +298,75 @@ export async function dispatchNormalWave(
   return { result, dispatched, failed }
 }
 
+/**
+ * Card 249ed831 (form b), reviewer round 2 point 5: the fixed, SHORT notes
+ * written to a directive card's context when it was marked done with
+ * nothing injected -- never a free-form message, and never the SAME wording
+ * for both causes. A card whose `target_peer_ids` was empty to begin with
+ * cannot be fixed by re-queuing alone (nothing was ever requested); a card
+ * whose requested target(s) were simply unreachable CAN be. Advising
+ * "re-queue" on the former is a wrong recommendation in a reachable state --
+ * the broker enforces no MINIMUM on `target_peer_ids` (only an upper bound,
+ * broker.ts:3213) and server.ts:1196 renders "(no targets yet)" as a
+ * first-class state, not an edge case nobody hits.
+ *
+ * Kept as constant strings, never built up with per-run detail, for two
+ * reasons: (1) the sibling append-context route this Deck could otherwise
+ * use is atomic but capped (16000 chars total, shared/roadmap-append.ts) and
+ * a growing note would eventually hit that cap on an unrelated caller's next
+ * append; (2) this note is instead written through `upsertRoadmap`'s
+ * partial-patch `context` field, a full REPLACE of that one column with no
+ * cap at all -- so nothing here stops a naive append from growing WITHOUT
+ * BOUND if the SAME card is re-queued and fails again. `composeUnresolvedContext`
+ * strips any prior occurrence of EITHER note before appending the one that
+ * applies now, so a card whose failure reason CHANGED between attempts
+ * (empty target_peer_ids, then set but unreachable) never accumulates both.
+ */
+export const UNRESOLVED_TARGET_NOTE =
+  '[dispatch] marked done with no live target resolved -- nothing was injected. Safe to re-queue once the requested target is reachable: no live session was touched.'
+
+export const NO_TARGET_REQUESTED_NOTE =
+  '[dispatch] marked done with zero target_peer_ids set -- nothing was ever requested, so nothing was injected. Re-queuing alone will NOT fix this: set target_peer_ids first.'
+
+const KNOWN_UNRESOLVED_NOTES = [UNRESOLVED_TARGET_NOTE, NO_TARGET_REQUESTED_NOTE]
+
+/** Picks the note that matches WHY nothing was injected (card 249ed831). */
+export function unresolvedDirectiveNote(item: RoadmapItem): string {
+  return item.target_peer_ids.length === 0 ? NO_TARGET_REQUESTED_NOTE : UNRESOLVED_TARGET_NOTE
+}
+
+/**
+ * The card's context with `note` appended exactly once (card 249ed831).
+ * Strips a prior occurrence of BOTH known notes first (see the constants'
+ * own doc comment for why), not just `note` itself. An empty
+ * `existingContext` gets `note` alone, with no leading blank separator --
+ * a bare leading `\n\n` would read as a Deck formatting bug to the operator,
+ * not as "nothing preceded this". `existingContext` is the item's OWN
+ * context as already held by the caller -- no re-fetch here; see index.ts's
+ * `noteUnresolved` wiring for what that snapshot's staleness window is (and
+ * is not) bounded by.
+ *
+ * STRIP IS SYMMETRIC WITH APPEND (reviewer round 3, a defect this same fix
+ * introduced): the append above is CONDITIONAL -- a note landing on an empty
+ * context is stored WITHOUT its `\n\n` prefix -- so the strip must remove
+ * BOTH the prefixed and the bare form, or a note posed on an empty context
+ * is never recognized on the next failure. Reachable, not theoretical:
+ * `context` starts as `''` for any directive card created without one
+ * (roadmap-service.ts's `str(r.context)`), the ORDINARY case for a card
+ * posed quickly by a lead. Without this, a card whose failure CAUSE changes
+ * between two attempts (empty target_peer_ids, then set but unreachable)
+ * ends up carrying BOTH notes -- exactly the invariant this function exists
+ * to prevent. The bare `.split(n)` is safe: both known notes are well over
+ * 150 characters and cannot appear by coincidence.
+ */
+export function composeUnresolvedContext(existingContext: string, note: string): string {
+  const stripped = KNOWN_UNRESOLVED_NOTES.reduce(
+    (acc, n) => acc.split(`\n\n${n}`).join('').split(n).join(''),
+    existingContext
+  )
+  return stripped ? `${stripped}\n\n${note}` : note
+}
+
 export interface DirectiveWaveDeps {
   markDone: (item: RoadmapItem) => Promise<void>
   /**
@@ -308,6 +377,18 @@ export interface DirectiveWaveDeps {
   execute: (item: RoadmapItem) => Promise<DirectiveDispatch>
   journal: (line: string) => void
   reportError: (message: string, error: unknown) => void
+  /**
+   * Card 249ed831 (form b): called once, right after `execute` resolves, when
+   * and ONLY when the card was consumed with NOTHING done -- the exact
+   * predicate is `report.directive !== null && report.injected.length === 0`,
+   * checked by the caller below, not by this dep. `directive !== null`
+   * excludes the separate parse-refusal branch (an invalid command, already
+   * reported through `reportError` inside `execute` itself); this hook is
+   * only for a VALID command that resolved zero live targets. Its failure is
+   * caught by the caller and routed through `reportError` -- it must never
+   * abort the wave or drop `report` from `executed`.
+   */
+  noteUnresolved: (item: RoadmapItem) => Promise<void>
 }
 
 /**
@@ -354,6 +435,15 @@ export interface DirectiveWaveDeps {
  * cost analysis: a silently lost directive is cheap to re-queue, a doubled
  * injection is not.
  *
+ * CARD 249ed831 (form b), the visibility half of that same gap: a card
+ * whose `execute` DOES resolve but reaches zero live targets is marked
+ * `done` and dequeued the same as a fully-injected one -- the journal line
+ * above is the only difference, and nothing on the CARD ITSELF says the
+ * operator should re-queue it. `deps.noteUnresolved` (see its own doc
+ * comment) closes that: called right after the journal line, on the exact
+ * `report.directive !== null && report.injected.length === 0` predicate,
+ * never a re-derivation of it.
+ *
  * RETURNS (card bf76d37f) one `DirectiveDispatch` per card whose `execute`
  * RESOLVED, in execution order, so the caller can finally answer "what was
  * really hit" -- the card status cannot, precisely because of the
@@ -386,6 +476,25 @@ export async function runDirectiveWave(
           report.unreached.length
         )}`
       )
+      // Card 249ed831 (form b), reviewer round 2 point 3: the operator-visible
+      // witness. The exclusion of the parse-refusal branch is NOT "it returns
+      // before any call here" -- that branch DOES reach `executed.push` and
+      // `deps.journal` above, same as this one. What actually excludes it is
+      // the `directive: null` discriminant itself: `DirectiveDispatch.directive`
+      // (shared/types.ts:646-653) is `null` exactly when the card carried no
+      // valid command and was refused BEFORE any target resolution -- set at
+      // index.ts:1547-1556's `!isDirectiveCommand(cmd)` branch, already
+      // reported through `reportError` there. `injected` is empty on THAT
+      // branch too (no bucket was ever computed), which is why `directive !==
+      // null` -- not `injected.length === 0` alone -- is the term that tells
+      // the two apart.
+      if (report.directive !== null && report.injected.length === 0) {
+        try {
+          await deps.noteUnresolved(item)
+        } catch (e) {
+          deps.reportError(`could not post the unresolved-target note for "${item.title}"`, e)
+        }
+      }
     } catch (e) {
       deps.journal(
         `directive card "${item.title}" (${label}) marked done but execution threw: ${
