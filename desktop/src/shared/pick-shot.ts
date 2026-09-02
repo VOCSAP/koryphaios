@@ -39,46 +39,51 @@ function isFiniteNumber(n: unknown): n is number {
 }
 
 /**
- * Map a picked element's viewport-CSS-px rect onto a captured bitmap's pixel
- * space, padded for context and clamped to the bitmap bounds. Returns null
- * (no screenshot, fail closed) when:
- *   - the element rect is missing (pick.x or pick.y undefined -- an older
- *     pre-OD1 payload, or a non-web design-endpoint pick which never reaches
- *     this path anyway since only the webview capture path calls it),
+ * Map an axis-aligned box (a picked element's rect, or a draw-mode stroke's
+ * bounding box -- shared/draw-strokes.ts's `StrokeBounds`) in viewport-CSS-px
+ * onto a captured bitmap's pixel space, padded for context and clamped to
+ * the bitmap bounds. Returns null (no screenshot, fail closed) when:
  *   - any input is NaN/non-finite (never trust a rect and image dimensions
- *     computed from an untrusted page or a raced/torn-down capture),
+ *     computed from an untrusted page, a pointer-event stream, or a raced/
+ *     torn-down capture),
  *   - viewportCssW or the image dimensions are <= 0,
- *   - the padded, clamped crop area is degenerate (sw or sh <= 0) -- the
- *     element rect was entirely outside the image, or its reported size was
- *     itself negative/zero beyond what the padding can absorb.
+ *   - the padded, clamped crop area is degenerate (sw or sh <= 0) -- the box
+ *     was entirely outside the image, or its reported size was itself
+ *     negative/zero beyond what the padding can absorb.
+ *
+ * `computeElementCropRect` below is a thin wrapper over this for the
+ * ElementPick shape (which carries OPTIONAL x/y -- see its own doc comment);
+ * every other precondition and the whole padding/scale/clamp body live here
+ * once, shared by both callers.
  */
-export function computeElementCropRect(
-  pick: { x?: number; y?: number; width: number; height: number },
+export function computeBoxCropRect(
+  box: { x: number; y: number; width: number; height: number },
   imgW: number,
   imgH: number,
   viewportCssW: number
 ): ElementCropRect | null {
-  if (!isFiniteNumber(pick.x) || !isFiniteNumber(pick.y)) return null
-  if (!isFiniteNumber(pick.width) || !isFiniteNumber(pick.height)) return null
+  if (!isFiniteNumber(box.x) || !isFiniteNumber(box.y)) return null
+  if (!isFiniteNumber(box.width) || !isFiniteNumber(box.height)) return null
   if (!isFiniteNumber(imgW) || !isFiniteNumber(imgH)) return null
   if (!isFiniteNumber(viewportCssW) || viewportCssW <= 0) return null
   if (imgW <= 0 || imgH <= 0) return null
-  // getBoundingClientRect never yields a negative width/height; a negative
-  // value here means a malformed/hostile payload, not a legitimately
-  // off-screen element (x/y CAN legitimately be negative -- a partially
-  // scrolled-off element -- so only width/height are rejected here, not
-  // position). Reject explicitly rather than let the padding math below
-  // coincidentally net a positive size out of corrupted data.
-  if (pick.width < 0 || pick.height < 0) return null
+  // getBoundingClientRect (and strokeBounds's own outward-rounding) never
+  // yields a negative width/height; a negative value here means a
+  // malformed/hostile payload, not a legitimately off-screen box (x/y CAN
+  // legitimately be negative -- a partially scrolled-off element or a stroke
+  // started above/left of the viewport -- so only width/height are rejected
+  // here, not position). Reject explicitly rather than let the padding math
+  // below coincidentally net a positive size out of corrupted data.
+  if (box.width < 0 || box.height < 0) return null
 
   // Empirical scale factor (subtlety (a) above): the capture is at bitmap
-  // (device) resolution, the pick rect at CSS resolution.
+  // (device) resolution, the box at CSS resolution.
   const scale = imgW / viewportCssW
 
-  const cssX = pick.x - CROP_PADDING_CSS_PX
-  const cssY = pick.y - CROP_PADDING_CSS_PX
-  const cssW = pick.width + CROP_PADDING_CSS_PX * 2
-  const cssH = pick.height + CROP_PADDING_CSS_PX * 2
+  const cssX = box.x - CROP_PADDING_CSS_PX
+  const cssY = box.y - CROP_PADDING_CSS_PX
+  const cssW = box.width + CROP_PADDING_CSS_PX * 2
+  const cssH = box.height + CROP_PADDING_CSS_PX * 2
 
   const rawSx = cssX * scale
   const rawSy = cssY * scale
@@ -94,4 +99,26 @@ export function computeElementCropRect(
 
   if (sw <= 0 || sh <= 0) return null
   return { sx, sy, sw, sh }
+}
+
+/**
+ * `computeBoxCropRect` for an ElementPick, whose x/y are OPTIONAL (an older
+ * pre-OD1 payload, or a non-web design-endpoint pick which never reaches this
+ * path anyway since only the webview capture path calls it) -- null on
+ * either being undefined, same fail-closed posture as every other guard
+ * `computeBoxCropRect` itself applies.
+ */
+export function computeElementCropRect(
+  pick: { x?: number; y?: number; width: number; height: number },
+  imgW: number,
+  imgH: number,
+  viewportCssW: number
+): ElementCropRect | null {
+  if (!isFiniteNumber(pick.x) || !isFiniteNumber(pick.y)) return null
+  return computeBoxCropRect(
+    { x: pick.x, y: pick.y, width: pick.width, height: pick.height },
+    imgW,
+    imgH,
+    viewportCssW
+  )
 }

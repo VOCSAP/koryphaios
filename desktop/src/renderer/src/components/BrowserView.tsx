@@ -16,16 +16,22 @@
 //   - viewport presets: render the page at a device size; the active preset is
 //     appended to every element/annotation prompt so the agent knows which
 //     breakpoint the operator was looking at;
-//   - draw mode: sketch over the page on a canvas overlay, then send — the
-//     page screenshot is composited with the strokes, saved as a PNG under app
-//     state, and the file path is pasted into the docked agent's prompt so a
-//     multimodal agent can Read the annotated image.
+//   - draw mode: sketch a region over the page on a canvas overlay -- freehand
+//     or a circle tool, toggled from the toolbar, or armed for as long as
+//     Ctrl/Cmd is held over the page ("hold-to-draw", see the "hold-to-draw
+//     watchers" section below). Every COMPLETED stroke becomes its own
+//     region annotation, pinned into the SAME review panel an element pick
+//     fills (see "----- draw mode -----" below), with a cropped screenshot
+//     that has the stroke burned in. Sending goes through the review panel's
+//     existing Send, never a draw-mode button of its own -- see
+//     docs/browser-design.md's draw-mode section for the full picture.
 //
 // D2a generalizes the pane beyond the web: a WINDOW mode mirrors any OS window
-// (desktopCapturer still) and the same draw/send flow annotates it — design
-// feedback on native apps (the Deck itself, a Tauri build…) with zero
-// integration in the target. Element picking stays web-only; for native
-// targets the sketch + multimodal Read covers the "which element" question.
+// (desktopCapturer still) and the same draw-then-review flow annotates it --
+// design feedback on native apps (the Deck itself, a Tauri build…) with zero
+// integration in the target, minus hold-to-draw (the still isn't interactive,
+// so only the toolbar toggle applies there). Element picking stays web-only;
+// for native targets the sketch covers the "which region" question.
 
 import { useEffect, useRef, useState } from 'react'
 import { Terminal, type ITheme } from '@xterm/xterm'
@@ -35,12 +41,18 @@ import type {
   PickAnnotation,
   PickAnnotationIntent,
   PickAnnotationPriority,
+  PickNote,
+  PickRegion,
   SessionRuntime,
   WindowSource
 } from '@shared/types'
+import { REVIEW_STATE_VERSION } from '@shared/types'
 import { formatAnnotationsReport, formatPickDetails } from '@shared/pick-prompt'
 import { PICK_BUDGET, sanitizePickUrl } from '@shared/pick-security'
-import { computeElementCropRect, PICK_SHOT_MAX_BYTES } from '@shared/pick-shot'
+import { computeBoxCropRect, computeElementCropRect, PICK_SHOT_MAX_BYTES } from '@shared/pick-shot'
+import { annotationToCardFields, pickNoteToCardSeed } from '@shared/pick-card'
+import { paintStroke, strokeBounds, type DrawStroke, type DrawTool, clampBoundsToBox } from '@shared/draw-strokes'
+import { createDrawModifierWatcher, type DrawModifierPlatform } from '@shared/draw-modifier'
 import {
   computeCropRect,
   formatElapsed,
@@ -50,10 +62,12 @@ import {
 import type { ModelTarget } from '@shared/graph'
 import { targetKey, type ProviderCatalog } from '@shared/models'
 import { ModelPicker } from './ModelPicker'
+import { PickContextDialog } from './PickContextDialog'
+import { ConfirmDialog } from './ConfirmDialog'
 import type { WebviewIpcMessageEvent, WebviewNavigateEvent, WebviewTag } from '../webview-types'
 import { GLYPHS, GLYPH_ACTIONS } from './icons'
-import { useDeck } from '../store'
-import { useT } from '../i18n'
+import { errorText, useDeck } from '../store'
+import { useT, type TFn } from '../i18n'
 
 const THEMES: Record<'dark' | 'light', ITheme> = {
   dark: { background: '#1e1e1e', foreground: '#d4d4d4', cursor: '#d4d4d4', selectionBackground: '#264f78' },
@@ -101,11 +115,55 @@ function toFileUrl(p: string): string {
   return `file://${norm.startsWith('/') ? '' : '/'}${norm}`
 }
 
+/**
+ * Guard an async IPC call the same shape as store.ts's own (module-private)
+ * `guarded` (PLAN O6): report to main.log/journal AND toast the raw error,
+ * never a silent catch. Re-implemented here rather than imported -- store.ts
+ * keeps its `guarded` private to its own actions -- since this component's
+ * review-persistence and roadmap-card calls are BrowserView's own IPC, not
+ * store actions. Always resolves (never rejects): callers can `.finally()`
+ * off it to run cleanup regardless of success or failure.
+ */
+async function guarded(label: string, fn: () => Promise<unknown>): Promise<void> {
+  try {
+    await fn()
+  } catch (e) {
+    const msg = errorText(e)
+    try {
+      window.api.reportError('browser', `${label} failed: ${msg}`)
+    } catch {
+      // Reporting must never mask the toast.
+    }
+    useDeck.getState().showToast(`${label}: ${msg}`, 'error', { raw: true })
+  }
+}
+
 /** First `n` words of `text`, ellipsised when truncated -- the annotate-panel row label (Chantier OD5). */
 function firstWords(text: string, n: number): string {
   const words = text.trim().split(/\s+/).filter(Boolean)
   if (!words.length) return ''
   return words.slice(0, n).join(' ') + (words.length > n ? '…' : '')
+}
+
+/**
+ * The `browser.elementPrompt` lead sentence, plus `browser.elementPromptText`
+ * when the pick carried text -- the two i18n pieces every element-pick prompt
+ * opens with, hoisted out so the pick-context-prompt-on branch (which delays
+ * composing the rest of the prompt until Send) and the flag-off branch
+ * (which composes it immediately, as before) build it identically instead of
+ * duplicating the two calls.
+ */
+function composePickLead(pick: ElementPick, tt: TFn): string {
+  const selector = pick.selectors[0]?.value ?? pick.tagName
+  let lead = tt('browser.elementPrompt', {
+    tag: pick.tagName,
+    url: pick.pageUrl,
+    selector,
+    w: pick.width,
+    h: pick.height
+  })
+  if (pick.text) lead += tt('browser.elementPromptText', { text: pick.text })
+  return lead
 }
 
 /**
@@ -248,13 +306,75 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
   // batch. `pendingAnnotations` deliberately OUTLIVES `reviewArmed` going
   // false (Escape only disarms picking, per DESIGN.md's collapsing-must-not-
   // destroy-drafts rule) -- cleared only by Send or Discard.
+  //
+  // INVARIANT (rework of the draw mode, see "----- draw mode -----" below):
+  // `reviewArmed` keeps its original, narrower meaning -- "the guest
+  // multi-pick listener is armed" -- unchanged by draw mode. A completed
+  // draw stroke pins straight into `pendingAnnotations` WITHOUT touching
+  // `reviewArmed` at all: the panel's own visibility condition
+  // (`reviewArmed || pendingAnnotations.length > 0`, see the JSX below)
+  // already shows the panel off that push alone, so overloading this flag's
+  // meaning would only make the review toolbar toggle (which reflects
+  // `reviewArmed`) lie about whether the guest listener is actually armed.
+  // Draw and review ARE, however, no longer mutually exclusive with EACH
+  // OTHER any more (toggleDraw/toggleAnnotate below stopped disarming one
+  // another) -- only INSPECT (single-element pick, `picking`) stays
+  // mutually exclusive with BOTH, since picking and review-multi share the
+  // same guest document listeners (shared/element-pick.ts) and the draw
+  // canvas overlay would swallow the guest's pointer events regardless.
   const [reviewArmed, setReviewArmed] = useState(false)
   const [pendingAnnotations, setPendingAnnotations] = useState<PickAnnotation[]>([])
+  // Review persistence (write-through effect further down): true once the
+  // initial window.api.loadReview() has settled, success OR failure -- gates
+  // the write-through so the empty INITIAL state (render before the load
+  // resolves) can never save over/clear a persisted draft that just hasn't
+  // loaded yet.
+  const loadedRef = useRef(false)
+  const reviewSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // "Create cards" confirm (Part B): armed by the panel button, cleared on
+  // confirm/cancel. Not derived from pendingAnnotations.length alone since
+  // the dialog itself must survive the count it was opened with.
+  const [confirmCreateCards, setConfirmCreateCards] = useState(false)
+  // Pick-context dialog (`pickContextPrompt` flag): the pick awaiting an
+  // operator note before its prompt is composed and delivered. A fresh pick
+  // arriving while one is already pending REPLACES it outright (last pick
+  // wins, no queue) -- `id` is how the in-flight capture below tells whether
+  // it is still writing into the CURRENT pending pick or a since-replaced one.
+  const [pendingPick, setPendingPick] = useState<{
+    id: string
+    pick: ElementPick
+    shot: 'pending' | 'ready' | 'none'
+    shotPath: string | null
+  } | null>(null)
+  // Always holds the in-flight (or already-settled) capture promise for the
+  // CURRENT pendingPick -- reassigned synchronously the moment a new pick
+  // replaces the old one, so onSend below always awaits the right one.
+  const pendingPickCaptureRef = useRef<Promise<string | null> | null>(null)
+  // Guards the capture's .then callback against calling setState after this
+  // view has unmounted (e.g. the operator left the browser view mid-capture).
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
   const [viewport, setViewport] = useState<ViewportPreset | null>(null)
+  // Draw mode: `drawing` is the TOOLBAR toggle (stays on until the operator
+  // turns it off or Escapes); `guestHold`/`hostHold` are the two independent
+  // hold-to-draw signals merged into `holdHeld` below -- see the "hold
+  // watchers" effects further down and draw-modifier.ts's own doc comment
+  // for why there have to be two. The canvas overlay renders on
+  // `drawing || holdHeld`.
   const [drawing, setDrawing] = useState(false)
-  const [sendingDraw, setSendingDraw] = useState(false)
+  const [drawTool, setDrawTool] = useState<DrawTool>('freehand')
+  const [guestHold, setGuestHold] = useState(false)
+  const [hostHold, setHostHold] = useState(false)
   // Window-mirror mode (D2a). The webview stays mounted (hidden) meanwhile.
   const [mode, setMode] = useState<'web' | 'window'>('web')
+  // Hold-to-draw is web-mode only: the window-mirror's still isn't
+  // interactive, so a hold over it means nothing -- computed here, after
+  // `mode`, rather than folded into the two flags above.
+  const holdHeld = mode === 'web' && (guestHold || hostHold)
   const [windows, setWindows] = useState<WindowSource[]>([])
   const [windowId, setWindowId] = useState('')
   const [shot, setShot] = useState<{ dataUrl: string; title: string } | null>(null)
@@ -264,7 +384,13 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
   const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const strokingRef = useRef(false)
-  const hasStrokesRef = useRef(false)
+  // The CURRENT in-progress stroke only (points accumulated on pointer move,
+  // repainted from scratch on every move so the circle tool's live preview
+  // tracks the drag) -- completed strokes are never kept here: each one is
+  // pinned into `pendingAnnotations` as its own region annotation the moment
+  // it finishes (pinRegionStroke), then the canvas is cleared. null when no
+  // stroke is in progress.
+  const activeStrokeRef = useRef<DrawStroke | null>(null)
   // Screen recording (REC). recordingSince lives in the store so the nav rail
   // can show the indicator from any view (this component stays mounted).
   const recordingSince = useDeck((s) => s.recordingSince)
@@ -294,6 +420,60 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
   useEffect(() => {
     void window.api.getBrowserPreloadPath().then((p) => setPreloadPath(toFileUrl(p)))
   }, [])
+
+  // Review persistence (main/review-state-service.ts), load half: restore a
+  // draft left over from a previous window reload / app restart. Same
+  // "once, on mount" shape as the preload-path load above. Screenshot paths
+  // on a restored annotation are already containment- and existence-checked
+  // main-side (validatePersistedReview drops an unsafe/stale one silently)
+  // -- nothing to re-check here in the renderer.
+  useEffect(() => {
+    void guarded('review-load', async () => {
+      const state = await window.api.loadReview()
+      if (!mountedRef.current || !state || state.annotations.length === 0) return
+      // The operator could in principle pin something (a fast pick, a hold-
+      // to-draw stroke) before this resolves -- unlikely, since it fires on
+      // mount before the webview/preload is even attached, but possible if
+      // the load itself is slow. Prefer whatever is already live rather than
+      // clobbering it with the persisted draft.
+      setPendingAnnotations((prev) => (prev.length > 0 ? prev : state.annotations))
+    }).finally(() => {
+      loadedRef.current = true
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Review persistence, write-through half: save on every change, debounced
+  // (a comment keystroke or a pin/pin/pin burst must not fire an IPC + disk
+  // write per character/pick). Gated on `loadedRef` -- see its own comment --
+  // so the pre-load empty render can never clobber a real persisted draft.
+  // `sendReview`/`discardReview` ALSO call clearReview() directly, not just
+  // through this effect: Send/Discard are definitive actions, so the file
+  // should be gone the instant either fires, not lag by up to the debounce.
+  useEffect(() => {
+    if (!loadedRef.current) return
+    if (reviewSaveTimer.current) clearTimeout(reviewSaveTimer.current)
+    reviewSaveTimer.current = setTimeout(() => {
+      if (pendingAnnotations.length === 0) {
+        void guarded('review-save', () => window.api.clearReview())
+        return
+      }
+      void guarded('review-save', () =>
+        window.api.saveReview({
+          version: REVIEW_STATE_VERSION,
+          pageUrl: sanitizePickUrl(webviewRef.current?.getURL() || urlText),
+          annotations: pendingAnnotations
+        })
+      )
+      // saveReview rejects with 'invalid review state' when main's strict
+      // validator refuses the payload (review-state-service.ts) -- that
+      // is a real bug signal (the renderer built something the validator
+      // doesn't accept), and `guarded` surfaces it rather than swallowing it.
+    }, 300)
+    return () => {
+      if (reviewSaveTimer.current) clearTimeout(reviewSaveTimer.current)
+    }
+  }, [pendingAnnotations])
 
   // Keep latest values available to the stable webview listeners.
   const pairedRef = useRef(paired)
@@ -408,6 +588,14 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
         setReviewArmed(false)
         return
       }
+      if (ev.channel === 'deck:draw-modifier') {
+        // Hold-to-draw, GUEST half (preload/browser-inspect.ts): the
+        // pointer/focus is over the PAGE. Merged with the host-side watcher
+        // into `holdHeld` -- see that computation's own comment for why both
+        // are needed.
+        setGuestHold(Boolean(ev.args[0]))
+        return
+      }
       if (ev.channel === 'deck:annotation-picked') {
         // Annotate review (Chantier OD5): pin the pick, best-effort auto
         // screenshot (same helper as the single-pick path below), refuse
@@ -471,15 +659,42 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
       if (ev.channel !== 'deck:element-selected') return
       const pick = ev.args[0] as ElementPick
       const tt = tRef.current
-      const selector = pick.selectors[0]?.value ?? pick.tagName
-      let prompt = tt('browser.elementPrompt', {
-        tag: pick.tagName,
-        url: pick.pageUrl,
-        selector,
-        w: pick.width,
-        h: pick.height
-      })
-      if (pick.text) prompt += tt('browser.elementPromptText', { text: pick.text })
+
+      // Pick-context dialog (`pickContextPrompt` flag, DeckConfig): read
+      // fresh via getState() rather than a stale render-time value/closure,
+      // same discipline as pendingAnnotationsRef above. Nothing is composed
+      // or delivered here -- the dialog does that on Send, once the operator
+      // has had a chance to add a note.
+      if (useDeck.getState().pickContextPrompt) {
+        const id = crypto.randomUUID()
+        // Unconditional overwrite: a second pick while one is pending
+        // REPLACES the older one (documented on the state declaration above).
+        setPendingPick({ id, pick, shot: 'pending', shotPath: null })
+        // Same precondition as the OD4 auto-shot capture on the flag-off
+        // branch below, and the same highlight-free-by-construction
+        // guarantee applies (see that branch's comment, still true here).
+        if (webviewRef.current && pick.x !== undefined && pick.y !== undefined) {
+          const capture = (async () => {
+            const shotPath = await captureElementShot(pick)
+            // Guard against a dangling write: this view unmounted, or a
+            // newer pick already replaced this one, while the capture was
+            // still in flight.
+            if (mountedRef.current) {
+              setPendingPick((prev) =>
+                prev && prev.id === id ? { ...prev, shot: shotPath ? 'ready' : 'none', shotPath } : prev
+              )
+            }
+            return shotPath
+          })()
+          pendingPickCaptureRef.current = capture
+        } else {
+          pendingPickCaptureRef.current = Promise.resolve(null)
+          setPendingPick((prev) => (prev && prev.id === id ? { ...prev, shot: 'none' } : prev))
+        }
+        return
+      }
+
+      let prompt = composePickLead(pick, tt)
       prompt += formatPickDetails(pick)
       prompt += viewportContext()
 
@@ -552,6 +767,51 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [preloadPath])
 
+  /** Pick-context dialog Send: composes the same prompt shape the flag-off
+   *  path would have delivered directly, with the operator's note folded in
+   *  via `formatPickDetails`'s `note` parameter. */
+  async function sendPendingPick(note: PickNote, dontAskAgain: boolean): Promise<void> {
+    const current = pendingPick
+    if (!current) return
+    const tt = tRef.current
+    // Close the dialog BEFORE awaiting the capture: a second Ctrl+Enter or
+    // click during the await would otherwise re-enter here with the same
+    // `pendingPick` and deliver the prompt twice. The capture promise is
+    // pinned locally so a pick arriving during the await cannot swap it.
+    const capture = pendingPickCaptureRef.current ?? Promise.resolve(null)
+    setPendingPick(null)
+    if (dontAskAgain) useDeck.getState().setPickContextPrompt(false)
+    // Always resolves (captureElementShot's own try/catch, or the
+    // Promise.resolve(null) set when the capture precondition failed).
+    const shotPath = await capture
+    let prompt = composePickLead(current.pick, tt)
+    prompt += formatPickDetails(current.pick, note)
+    prompt += viewportContext()
+    if (shotPath) prompt += tt('browser.elementShotPrompt', { path: shotPath })
+    deliverPrompt(prompt, 'toast.pickSent', 'toast.pickCopied')
+  }
+
+  /** Pick-context dialog Cancel: discard the pick, no toast. */
+  function cancelPendingPick(): void {
+    setPendingPick(null)
+  }
+
+  /**
+   * Pick-context dialog "Create a card" (Part B entry point 1): the pick is
+   * CONSUMED by the draft, no prompt is sent -- unlike Send, which composes
+   * and delivers a prompt from the same note. openRoadmapDraft only switches
+   * the view and pre-fills the create form; nothing is written until the
+   * operator saves it there.
+   */
+  function createPendingPickCard(note: PickNote): void {
+    const current = pendingPick
+    if (!current) return
+    const url = sanitizePickUrl(webviewRef.current?.getURL() || urlText)
+    const seed = pickNoteToCardSeed(current.pick, note, { url })
+    useDeck.getState().openRoadmapDraft(seed)
+    setPendingPick(null)
+  }
+
   function navigate(): void {
     const wv = webviewRef.current
     const url = normalizeUrl(urlText)
@@ -566,6 +826,9 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
   function togglePick(): void {
     const wv = webviewRef.current
     if (!wv) return
+    // INSPECT stays mutually exclusive with draw (see the invariant comment
+    // on `reviewArmed`'s declaration above) -- the canvas overlay would
+    // swallow the guest's own mouseover/click either way.
     if (drawing) exitDraw()
     // Single-pick and review-pick share the same guest document listeners
     // (shared/element-pick.ts) -- never arm both at once.
@@ -588,11 +851,15 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     setReviewArmed(false)
   }
 
-  /** Annotate review toggle (Chantier OD5): arms/disarms the multi-pick guest listener. */
+  /**
+   * Annotate review toggle (Chantier OD5): arms/disarms the multi-pick guest
+   * listener. Does NOT touch draw mode any more (see the invariant comment
+   * on `reviewArmed`'s declaration above) -- a stroke drawn while the review
+   * guest listener is armed pins straight into the same panel this arms.
+   */
   function toggleAnnotate(): void {
     const wv = webviewRef.current
     if (!wv) return
-    if (drawing) exitDraw()
     if (reviewArmed) {
       exitReview()
       return
@@ -635,12 +902,52 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     deliverPrompt(report, 'toast.reviewSent', 'toast.reviewCopied')
     setPendingAnnotations([])
     if (reviewArmed) exitReview()
+    // Clear the persisted draft NOW: the write-through effect above would
+    // also clear it once pendingAnnotations goes empty, but only after its
+    // ~300ms debounce -- Send is definitive, the file should be gone the
+    // instant it fires (e.g. an immediate app quit right after), not lag.
+    void guarded('review-clear', () => window.api.clearReview())
   }
 
   /** Footer "Discard": clears the batch without sending anything. */
   function discardReview(): void {
     setPendingAnnotations([])
     if (reviewArmed) exitReview()
+    // Same immediacy reasoning as sendReview's explicit clear above.
+    void guarded('review-clear', () => window.api.clearReview())
+  }
+
+  /**
+   * Panel "Create cards" (Part B, review-to-roadmap-card), confirmed action:
+   * one window.api.roadmapUpsert per pinned finding, in order, inside ONE
+   * `guarded` call. Sequential (not Promise.all): a mid-batch failure must
+   * stop the loop rather than fire the remaining upserts at a broker that
+   * just started erroring, and `guarded`'s own catch reports + toasts the
+   * failure exactly once. Cards created before that failure stay created --
+   * no rollback, no retry -- and are visible in the roadmap view even though
+   * the toast only fires on a FULL success (`created === total`).
+   *
+   * The review itself is left untouched either way: cards and the docked
+   * agent's prompt are complementary sinks for the same findings, so the
+   * operator may still Send this same review afterwards.
+   */
+  async function createReviewCards(): Promise<void> {
+    const wv = webviewRef.current
+    const page = {
+      url: sanitizePickUrl(wv?.getURL() || urlText),
+      viewport: viewport ? `${viewport.w}x${viewport.h} – ${viewport.name}` : undefined
+    }
+    const total = pendingAnnotations.length
+    let created = 0
+    await guarded('review-cards', async () => {
+      for (const a of pendingAnnotations) {
+        await window.api.roadmapUpsert(annotationToCardFields(a, page))
+        created++
+      }
+    })
+    if (created === total) {
+      showToast(tRef.current('toast.reviewCardsCreated', { n: created }), 'success', { raw: true })
+    }
   }
 
   // ----- window mirror (D2a) -----
@@ -655,6 +962,13 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
       setPicking(false)
     }
     if (reviewArmed) exitReview()
+    // Unconditional (not gated on `drawing`): a mode switch must also abort
+    // a HOLD-ONLY stroke -- `holdHeld` itself is gated to web mode, so it
+    // goes false on its own once `mode` changes, but that alone would leave
+    // a stale in-progress stroke in the refs and un-cleared canvas pixels.
+    strokingRef.current = false
+    activeStrokeRef.current = null
+    clearCanvasPixels()
     if (drawing) exitDraw()
   }
 
@@ -693,13 +1007,36 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     if (id) void captureShot(id)
   }
 
-  // ----- draw mode (D1b) -----
+  // ----- draw mode -----
+  //
+  // Rework: sending a whole-page composite (the old sendAnnotation) is gone.
+  // Every COMPLETED stroke (pointer-up with >= 2 points, or a hold ending
+  // mid-stroke) becomes its own region PickAnnotation, pinned into the same
+  // review panel an element pick fills, with a cropped screenshot that has
+  // the stroke burned in (captureRegionShot below) -- sending is the
+  // review panel's existing "Send review" (sendReview above), never a
+  // draw-mode button of its own. The canvas itself only ever shows the ONE
+  // in-progress stroke (`activeStrokeRef`); a completed stroke is cleared
+  // off it the instant it is pinned, same as a pick never leaves a mark on
+  // the guest page.
+
+  function clearCanvasPixels(): void {
+    const canvas = canvasRef.current
+    canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height)
+  }
 
   function exitDraw(): void {
     setDrawing(false)
-    hasStrokesRef.current = false
+    strokingRef.current = false
+    activeStrokeRef.current = null
+    clearCanvasPixels()
   }
 
+  /**
+   * Toolbar draw toggle. Still mutually exclusive with INSPECT (picking) --
+   * the invariant comment on `reviewArmed`'s declaration above explains why
+   * -- but no longer exits the review panel: draw and review coexist now.
+   */
   function toggleDraw(): void {
     if (drawing) {
       exitDraw()
@@ -713,24 +1050,27 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
       }
       setPicking(false)
     }
-    if (reviewArmed) exitReview()
     setDrawing(true)
   }
 
-  /** Size the canvas to its box; called on mount and box resize (clears strokes). */
+  /** Size the canvas to its box; called on mount and box resize (a resize discards any in-progress stroke -- its points are no longer meaningful against the new size). */
   function fitCanvas(canvas: HTMLCanvasElement): void {
     const w = canvas.clientWidth
     const h = canvas.clientHeight
     if (w > 0 && h > 0 && (canvas.width !== w || canvas.height !== h)) {
       canvas.width = w
       canvas.height = h
-      hasStrokesRef.current = false
+      strokingRef.current = false
+      activeStrokeRef.current = null
     }
   }
 
+  // Canvas overlay is visible on `drawing || holdHeld` (window mode: `drawing`
+  // only, per the `holdHeld` computation above). Escape exits the toolbar
+  // draw mode AND aborts a hold-only stroke -- same teardown either way.
   useEffect(() => {
     const canvas = canvasRef.current
-    if (!drawing || !canvas) return
+    if (!(drawing || holdHeld) || !canvas) return
     fitCanvas(canvas)
     const ro = new ResizeObserver(() => fitCanvas(canvas))
     ro.observe(canvas)
@@ -743,97 +1083,231 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
       window.removeEventListener('keydown', onKey)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [drawing])
+  }, [drawing, holdHeld])
+
+  // ----- hold-to-draw watchers -----
+  //
+  // Two independent sources merged into `holdHeld` (declared above, next to
+  // `mode`): the GUEST message (the pointer started over the page, before
+  // the canvas existed to steal focus) and this HOST watcher (the pointer/
+  // focus is over the canvas/toolbar once it is up, which the guest cannot
+  // see at all -- it is a separate webContents). Both stay installed for the
+  // whole life of the component, not just while drawing, so whichever one
+  // sees the keydown FIRST is the one that shows the canvas.
+  const holdPlatformRef = useRef<DrawModifierPlatform>(
+    typeof navigator !== 'undefined' && /mac/i.test(navigator.platform) ? 'mac' : 'other'
+  )
+  useEffect(() => {
+    return createDrawModifierWatcher(window, holdPlatformRef.current, (held) => {
+      setHostHold(held)
+      // A keyup seen HERE means the physical key is up, whatever the guest
+      // last reported: once the canvas is up and the operator presses on it,
+      // focus moves to the host and the guest never sees that keyup (its own
+      // window-blur release in preload/browser-inspect.ts is the other half
+      // of this pair). Without this line the canvas could stay up until the
+      // guest regained focus and saw a fresh keydown/keyup cycle.
+      if (!held) setGuestHold(false)
+    })
+  }, [])
+
+  /**
+   * A hold ending mid-stroke finishes it like a pointer-up, rather than
+   * dropping it -- the operator already drew something. Only applies to a
+   * HOLD-ONLY stroke: if the toolbar `drawing` mode is also on, the canvas
+   * stays up regardless of the hold, so the stroke keeps going. Guarded on
+   * `strokingRef` (not `activeStrokeRef` alone) so a hold ending with no
+   * stroke in progress is a no-op.
+   */
+  useEffect(() => {
+    if (!holdHeld && !drawing && strokingRef.current) finishActiveStroke()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [holdHeld, drawing])
 
   function strokePos(e: React.PointerEvent<HTMLCanvasElement>): { x: number; y: number } {
     const rect = e.currentTarget.getBoundingClientRect()
     return { x: e.clientX - rect.left, y: e.clientY - rect.top }
   }
 
-  function onDrawDown(e: React.PointerEvent<HTMLCanvasElement>): void {
-    const ctx = e.currentTarget.getContext('2d')
+  function repaintActiveStroke(): void {
+    const canvas = canvasRef.current
+    const stroke = activeStrokeRef.current
+    if (!canvas || !stroke) return
+    const ctx = canvas.getContext('2d')
     if (!ctx) return
+    ctx.clearRect(0, 0, canvas.width, canvas.height)
+    paintStroke(ctx, stroke, 1, { color: DRAW_STROKE, lineWidth: 3 })
+  }
+
+  function onDrawDown(e: React.PointerEvent<HTMLCanvasElement>): void {
     e.currentTarget.setPointerCapture(e.pointerId)
     strokingRef.current = true
-    hasStrokesRef.current = true
     const { x, y } = strokePos(e)
-    ctx.strokeStyle = DRAW_STROKE
-    ctx.lineWidth = 3
-    ctx.lineCap = 'round'
-    ctx.lineJoin = 'round'
-    ctx.beginPath()
-    ctx.moveTo(x, y)
+    activeStrokeRef.current = { tool: drawTool, points: [{ x, y }] }
   }
 
   function onDrawMove(e: React.PointerEvent<HTMLCanvasElement>): void {
-    if (!strokingRef.current) return
-    const ctx = e.currentTarget.getContext('2d')
-    if (!ctx) return
+    if (!strokingRef.current || !activeStrokeRef.current) return
     const { x, y } = strokePos(e)
-    ctx.lineTo(x, y)
-    ctx.stroke()
+    activeStrokeRef.current.points.push({ x, y })
+    // Redrawn from scratch every move (not an incremental lineTo, unlike the
+    // old freehand-only canvas): the circle tool's preview has to move its
+    // WHOLE ellipse as the drag continues, not append to a path.
+    repaintActiveStroke()
   }
 
+  /** Pointer-up: complete the stroke (pin it if it has >= 2 points). */
   function onDrawUp(): void {
-    strokingRef.current = false
+    finishActiveStroke()
   }
 
+  /** Pointer-cancel (palm rejection, system interrupt): abort, never pin a stroke the operator did not actually finish. */
+  function onDrawCancel(): void {
+    strokingRef.current = false
+    activeStrokeRef.current = null
+    clearCanvasPixels()
+  }
+
+  function finishActiveStroke(): void {
+    strokingRef.current = false
+    const stroke = activeStrokeRef.current
+    activeStrokeRef.current = null
+    if (stroke && stroke.points.length >= 2) pinRegionStroke(stroke)
+    else clearCanvasPixels()
+  }
+
+  /** Toolbar "Clear": aborts the in-progress stroke and blanks the canvas. Completed strokes are never on it (see the section comment above) -- there is nothing else to clear. */
   function clearDraw(): void {
-    const canvas = canvasRef.current
-    canvas?.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height)
-    hasStrokesRef.current = false
+    strokingRef.current = false
+    activeStrokeRef.current = null
+    clearCanvasPixels()
   }
 
   /**
-   * Composite the strokes over the captured image, save, prompt the agent.
-   * Web mode captures the live page; window mode reuses the DISPLAYED still
-   * (the strokes were drawn on it — a fresh capture could have moved).
+   * One completed stroke -> one region PickAnnotation, pinned exactly like
+   * the element-pick review handler (deck:annotation-picked in onIpc above):
+   * same cap check, same shape of pinned record, same best-effort async
+   * screenshot. `finishActiveStroke` already checked >= 2 points before
+   * calling this, so `strokeBounds` returning null here can only mean a
+   * non-finite pointer coordinate slipped through -- aborted silently, same
+   * fail-closed posture as `strokeBounds` itself (draw-strokes.ts). The cap
+   * being reached is the one case that DOES toast, since the operator
+   * visibly drew something that then went nowhere.
    */
-  async function sendAnnotation(): Promise<void> {
-    const wv = webviewRef.current
+  function pinRegionStroke(stroke: DrawStroke): void {
+    if (pendingAnnotationsRef.current.length >= PICK_BUDGET.annotationsMaxPerPage) {
+      showToast('toast.annotationCapReached', 'info')
+      clearCanvasPixels()
+      return
+    }
+    const bounds = strokeBounds(stroke)
+    if (!bounds) {
+      clearCanvasPixels()
+      return
+    }
+    // Persist and report the part of the stroke that is actually on screen:
+    // raw bounds can be negative (drag started off-canvas) and main's
+    // review-state validator refuses those, which would fail every later
+    // save of the whole review (see clampBoundsToBox's comment). The raw
+    // bounds still feed the capture below, whose crop clamps on its own.
     const canvas = canvasRef.current
-    if (!canvas || sendingDraw) return
-    if (mode === 'web' && !wv) return
-    if (mode === 'window' && !shot) return
-    setSendingDraw(true)
+    const visible = canvas ? clampBoundsToBox(bounds, canvas.clientWidth, canvas.clientHeight) : null
+    if (!visible) {
+      clearCanvasPixels()
+      return
+    }
+    const pageUrl =
+      mode === 'web' ? sanitizePickUrl(webviewRef.current?.getURL() || urlText) : ''
+    const region: PickRegion = { ...visible, tool: stroke.tool, pageUrl }
+    const id = crypto.randomUUID()
+    const annotation: PickAnnotation = {
+      id,
+      comment: '',
+      intent: 'change',
+      priority: 'suggestion',
+      region
+    }
+    setPendingAnnotations((prev) => [...prev, annotation])
+    showToast('toast.regionPinned')
+    // Each stroke stands alone (like a pick): clear the live canvas the
+    // instant it is pinned, not after the async capture below settles.
+    clearCanvasPixels()
+    // viewportCssW captured NOW (synchronously, same render the stroke was
+    // drawn against) rather than re-read inside the async capture -- a
+    // window resize mid-capture must not retroactively change the space the
+    // stroke's own points are interpreted in.
+    const viewportCssW =
+      mode === 'web' ? (webviewRef.current?.clientWidth ?? 0) : (canvasRef.current?.clientWidth ?? 0)
+    void captureRegionShot(stroke, bounds, id, viewportCssW)
+  }
+
+  /**
+   * Region screenshot pipeline: capture -> decode -> crop (computeBoxCropRect,
+   * the stroke's OWN bounds rather than a picked element's) -> burn the
+   * stroke back onto the crop (paintStroke, translated so the crop's own
+   * origin lands at the output's 0,0) -> byte-cap -> save. Mirrors
+   * captureElementShot's shape (Chantier OD4) with one deliberate
+   * difference: unlike that best-effort auto-shot, the screenshot here IS
+   * the region's main evidence (a region carries no selector/HTML an agent
+   * could otherwise use to find it), so failure is NOT silent -- it reports
+   * (window.api.reportError) and toasts (toast.shotFailed), leaving the
+   * annotation pinned without a screenshot rather than dropping it.
+   */
+  async function captureRegionShot(
+    stroke: DrawStroke,
+    bounds: { x: number; y: number; width: number; height: number },
+    annotationId: string,
+    viewportCssW: number
+  ): Promise<void> {
     try {
-      const dataUrl =
-        mode === 'web' ? await window.api.captureBrowser(wv!.getWebContentsId()) : shot!.dataUrl
-      if (!dataUrl) {
-        showToast('toast.drawFailed', 'info')
-        return
+      const wv = webviewRef.current
+      let dataUrl: string | null
+      if (mode === 'web') {
+        if (!wv) throw new Error('capture: no webview')
+        dataUrl = await window.api.captureBrowser(wv.getWebContentsId())
+      } else {
+        if (!shot) throw new Error('capture: no window still')
+        dataUrl = shot.dataUrl
       }
+      if (!dataUrl) throw new Error('capture: empty')
       const img = new Image()
       await new Promise<void>((res, rej) => {
         img.onload = () => res()
-        img.onerror = () => rej(new Error('decode'))
-        img.src = dataUrl
+        img.onerror = () => rej(new Error('capture: decode failed'))
+        img.src = dataUrl!
       })
-      // The capture is at device-pixel scale, the canvas at CSS px: composite
-      // at capture size and scale the strokes up — same region, same ratio.
+      const crop = computeBoxCropRect(bounds, img.naturalWidth, img.naturalHeight, viewportCssW)
+      if (!crop) throw new Error('capture: no crop rect')
       const out = document.createElement('canvas')
-      out.width = img.naturalWidth
-      out.height = img.naturalHeight
+      out.width = crop.sw
+      out.height = crop.sh
       const ctx = out.getContext('2d')
-      if (!ctx) return
-      ctx.drawImage(img, 0, 0)
-      ctx.drawImage(canvas, 0, 0, out.width, out.height)
-      const path = await window.api.saveAnnotation(out.toDataURL('image/png'))
-      if (!path) {
-        showToast('toast.drawFailed', 'info')
-        return
+      if (!ctx) throw new Error('capture: no 2d context')
+      ctx.drawImage(img, crop.sx, crop.sy, crop.sw, crop.sh, 0, 0, crop.sw, crop.sh)
+      // Same empirical scale computeBoxCropRect used internally; the crop's
+      // own origin (bitmap px) converted back to CSS px is exactly the
+      // translation the stroke's points need so they land in the output
+      // canvas's own coordinate space.
+      const scale = img.naturalWidth / viewportCssW
+      const translated: DrawStroke = {
+        tool: stroke.tool,
+        points: stroke.points.map((p) => ({ x: p.x - crop.sx / scale, y: p.y - crop.sy / scale }))
       }
-      const prompt =
-        mode === 'web'
-          ? tRef.current('browser.drawPrompt', { url: wv!.getURL(), path }) + viewportContext()
-          : tRef.current('browser.windowDrawPrompt', { title: shot!.title, path })
-      deliverPrompt(prompt, 'toast.drawSent', 'toast.drawCopied')
-      clearDraw()
-      exitDraw()
-    } catch {
-      showToast('toast.drawFailed', 'info')
-    } finally {
-      setSendingDraw(false)
+      paintStroke(ctx, translated, scale, { color: DRAW_STROKE, lineWidth: 3 })
+      const shotDataUrl = out.toDataURL('image/png')
+      // base64 inflates raw bytes by 4/3 -- same cap discipline as
+      // captureElementShot (pick-shot.ts's PICK_SHOT_MAX_BYTES).
+      const base64Len = shotDataUrl.length - (shotDataUrl.indexOf(',') + 1)
+      if (base64Len > (PICK_SHOT_MAX_BYTES * 4) / 3) throw new Error('capture: over budget')
+      const shotPath = await window.api.saveAnnotation(shotDataUrl)
+      if (!shotPath) throw new Error('capture: save failed')
+      if (mountedRef.current) {
+        setPendingAnnotations((prev) =>
+          prev.map((a) => (a.id === annotationId ? { ...a, screenshotPath: shotPath } : a))
+        )
+      }
+    } catch (e) {
+      window.api.reportError('browser', `region capture failed: ${String(e)}`)
+      showToast('toast.shotFailed', 'info')
     }
   }
 
@@ -1216,33 +1690,39 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
           )}
           <button
             type="button"
+            className={`browser-btn${drawTool === 'freehand' ? ' browser-btn-active' : ''}`}
+            title={t('browser.drawToolFreehand')}
+            onClick={() => setDrawTool('freehand')}
+          >
+            {t('browser.drawToolFreehand')}
+          </button>
+          <button
+            type="button"
+            className={`browser-btn${drawTool === 'circle' ? ' browser-btn-active' : ''}`}
+            title={t('browser.drawToolCircle')}
+            onClick={() => setDrawTool('circle')}
+          >
+            {t('browser.drawToolCircle')}
+          </button>
+          <button
+            type="button"
             className={`browser-btn${drawing ? ' browser-btn-active' : ''}`}
-            title={t('browser.draw')}
+            title={t('browser.drawHoldHint')}
+            aria-label={t('browser.draw')}
             disabled={mode === 'window' && !shot}
             onClick={toggleDraw}
           >
             {GLYPH_ACTIONS.edit}
           </button>
-          {drawing && (
-            <>
-              <button
-                type="button"
-                className="browser-btn browser-btn-accent"
-                title={t('browser.drawSend')}
-                disabled={sendingDraw}
-                onClick={() => void sendAnnotation()}
-              >
-                {GLYPH_ACTIONS.camera}
-              </button>
-              <button
-                type="button"
-                className="browser-btn"
-                title={t('browser.drawClear')}
-                onClick={clearDraw}
-              >
-                {GLYPH_ACTIONS.erase}
-              </button>
-            </>
+          {(drawing || holdHeld) && (
+            <button
+              type="button"
+              className="browser-btn"
+              title={t('browser.drawClear')}
+              onClick={clearDraw}
+            >
+              {GLYPH_ACTIONS.erase}
+            </button>
           )}
           {mode === 'web' && (
             <>
@@ -1320,14 +1800,15 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                 webpreferences="sandbox=no,backgroundThrottling=no"
               />
             )}
-            {drawing && mode === 'web' && (
+            {(drawing || holdHeld) && mode === 'web' && (
               <canvas
                 ref={canvasRef}
                 className="browser-draw-canvas"
+                title={t('browser.drawHoldHint')}
                 onPointerDown={onDrawDown}
                 onPointerMove={onDrawMove}
                 onPointerUp={onDrawUp}
-                onPointerCancel={onDrawUp}
+                onPointerCancel={onDrawCancel}
               />
             )}
             {loadError && mode === 'web' && (
@@ -1355,10 +1836,11 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                   <canvas
                     ref={canvasRef}
                     className="browser-draw-canvas"
+                    title={t('browser.drawHoldHint')}
                     onPointerDown={onDrawDown}
                     onPointerMove={onDrawMove}
                     onPointerUp={onDrawUp}
-                    onPointerCancel={onDrawUp}
+                    onPointerCancel={onDrawCancel}
                   />
                 )}
               </div>
@@ -1381,7 +1863,7 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
                     <div key={a.id} className="annotate-row">
                       <div className="annotate-row-head">
                         <span className="annotate-row-label">
-                          {a.pick.tagName}
+                          {a.pick ? a.pick.tagName : t('browser.annotateRegionLabel')}
                           {a.comment.trim() ? ` — ${firstWords(a.comment, 6)}` : ''}
                         </span>
                         <button
@@ -1437,6 +1919,14 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
               <div className="annotate-panel-footer">
                 <button type="button" className="btn" onClick={discardReview}>
                   {t('browser.annotateDiscard')}
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={pendingAnnotations.length === 0}
+                  onClick={() => setConfirmCreateCards(true)}
+                >
+                  {t('browser.annotateCreateCards')}
                 </button>
                 <button
                   type="button"
@@ -1505,6 +1995,28 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
             </div>
           </div>
         </div>
+      )}
+      {pendingPick && (
+        <PickContextDialog
+          pick={pendingPick.pick}
+          shot={pendingPick.shot}
+          onSend={(note, dontAskAgain) => void sendPendingPick(note, dontAskAgain)}
+          onCancel={cancelPendingPick}
+          onCreateCard={createPendingPickCard}
+        />
+      )}
+      {confirmCreateCards && (
+        <ConfirmDialog
+          title={t('browser.annotateCreateCards')}
+          message={t('browser.annotateCreateCardsConfirm', { n: pendingAnnotations.length })}
+          confirmLabel={t('browser.annotateCreateCards')}
+          tone="neutral"
+          onCancel={() => setConfirmCreateCards(false)}
+          onConfirm={() => {
+            setConfirmCreateCards(false)
+            void createReviewCards()
+          }}
+        />
       )}
     </div>
   )

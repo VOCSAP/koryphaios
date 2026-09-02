@@ -40,6 +40,9 @@ const DEFAULT_CONFIG: AppConfig = {
   roadmapFiltersCollapsed: false,
   // Graph chats panel starts unfolded, same spread guarantee as above.
   graphListCollapsed: false,
+  // Pick-context dialog on by default; a config written before this field
+  // existed gets `true` from the DEFAULT_CONFIG spread, never `undefined`.
+  pickContextPrompt: true,
   wfLaneHeight: 240,
   theme: 'dark',
   fontSize: 13,

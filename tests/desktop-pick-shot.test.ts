@@ -1,7 +1,11 @@
 // Element-pick screenshot crop math (Chantier OD4): pure, no DOM.
 
 import { test, expect } from "bun:test";
-import { computeElementCropRect, PICK_SHOT_MAX_BYTES } from "../desktop/src/shared/pick-shot.ts";
+import {
+  computeBoxCropRect,
+  computeElementCropRect,
+  PICK_SHOT_MAX_BYTES,
+} from "../desktop/src/shared/pick-shot.ts";
 
 test("computeElementCropRect: nominal 1x scale includes the 8px padding", () => {
   const r = computeElementCropRect({ x: 100, y: 50, width: 200, height: 100 }, 1000, 800, 1000);
@@ -53,4 +57,27 @@ test("computeElementCropRect: degenerate rect (negative size beyond padding) ret
 test("PICK_SHOT_MAX_BYTES is a sane positive constant", () => {
   expect(PICK_SHOT_MAX_BYTES).toBeGreaterThan(0);
   expect(PICK_SHOT_MAX_BYTES).toBe(2 * 1024 * 1024);
+});
+
+// ----- computeBoxCropRect (draw-mode region crop, generalized from the
+// element crop above -- shared/draw-strokes.ts's StrokeBounds is the same
+// {x,y,width,height} shape) -----
+
+test("computeBoxCropRect: identical result to computeElementCropRect for a box equal to a pick's rect", () => {
+  const rect = { x: 100, y: 50, width: 200, height: 100 };
+  const fromBox = computeBoxCropRect(rect, 1000, 800, 1000);
+  const fromPick = computeElementCropRect(rect, 1000, 800, 1000);
+  expect(fromBox).toEqual(fromPick);
+  expect(fromBox).toEqual({ sx: 92, sy: 42, sw: 216, sh: 116 });
+});
+
+test("computeBoxCropRect: NaN box returns null", () => {
+  expect(computeBoxCropRect({ x: NaN, y: 0, width: 10, height: 10 }, 1000, 800, 1000)).toBeNull();
+  expect(computeBoxCropRect({ x: 0, y: NaN, width: 10, height: 10 }, 1000, 800, 1000)).toBeNull();
+  expect(computeBoxCropRect({ x: 0, y: 0, width: NaN, height: 10 }, 1000, 800, 1000)).toBeNull();
+  expect(computeBoxCropRect({ x: 0, y: 0, width: 10, height: NaN }, 1000, 800, 1000)).toBeNull();
+});
+
+test("computeElementCropRect delegates to computeBoxCropRect: negative width/height still rejected", () => {
+  expect(computeElementCropRect({ x: 0, y: 0, width: -10, height: 10 }, 1000, 800, 1000)).toBeNull();
 });

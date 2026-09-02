@@ -101,6 +101,8 @@ interface DeckState {
   roadmapFiltersCollapsed: boolean
   /** Graph chats panel folded to its rail; same lifecycle as the one above. */
   graphListCollapsed: boolean
+  /** Whether picking an element in the browser's inspect mode opens the pick-context dialog; seeded from config, persisted on toggle. */
+  pickContextPrompt: boolean
   /** Operator inbox (PLAN C12): drained agent messages, newest LAST. */
   inboxMessages: InboxMessage[]
   inboxOpen: boolean
@@ -274,6 +276,8 @@ interface DeckState {
   setRoadmapFiltersCollapsed(collapsed: boolean): void
   /** Fold/unfold the Graph chats panel and persist it (card 67c21dd5). */
   setGraphListCollapsed(collapsed: boolean): void
+  /** Toggle the pick-context dialog on browser element pick and persist it. */
+  setPickContextPrompt(enabled: boolean): void
 
   /**
    * Toast policy (PLAN O5): reserved for the outcome of a DIRECT user action.
@@ -435,6 +439,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   sidebarCollapsed: false,
   roadmapFiltersCollapsed: false,
   graphListCollapsed: false,
+  pickContextPrompt: true,
   inboxMessages: [],
   inboxOpen: false,
   pendingApprovals: [],
@@ -514,6 +519,7 @@ export const useDeck = create<DeckState>((set, get) => ({
       sidebarCollapsed: config.sidebarCollapsed,
       roadmapFiltersCollapsed: config.roadmapFiltersCollapsed,
       graphListCollapsed: config.graphListCollapsed,
+      pickContextPrompt: config.pickContextPrompt,
       selectedId: get().selectedId ?? sessions[0]?.id ?? null
     })
 
@@ -779,6 +785,12 @@ export const useDeck = create<DeckState>((set, get) => ({
   setGraphListCollapsed: (collapsed) => {
     set({ graphListCollapsed: collapsed })
     void get().updateConfig({ graphListCollapsed: collapsed })
+  },
+
+  // Same write-through as the toggles above: one setting, one persisted flag.
+  setPickContextPrompt: (enabled) => {
+    set({ pickContextPrompt: enabled })
+    void get().updateConfig({ pickContextPrompt: enabled })
   },
 
   dismissOfflineBanner: () => {

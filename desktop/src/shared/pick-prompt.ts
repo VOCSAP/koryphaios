@@ -7,8 +7,8 @@
 // data for the agent, the same register as the existing `[viewport: …]`
 // suffix, not operator-facing copy -- no i18n keys here.
 
-import type { ElementPick, PickAnnotation } from './types'
-import { isParseableUrl, sanitizePickUrl } from './pick-security'
+import type { ElementPick, PickAnnotation, PickNote } from './types'
+import { isParseableUrl, PICK_BUDGET, sanitizePickUrl } from './pick-security'
 
 /** role + accessibleName combined onto one line, whichever is present. */
 function roleLine(pick: ElementPick): string | null {
@@ -54,13 +54,37 @@ function nearbyLine(pick: ElementPick): string | null {
 }
 
 /**
+ * Operator context from the pick-context dialog, as block lines: the note
+ * first (it is what the operator actually wants), then intent and priority.
+ * Whitespace runs (newlines included) collapse to one space so a multi-line
+ * note cannot masquerade as further `key: value` lines of the block, and the
+ * comment is capped at the same budget as a review annotation. Empty or
+ * whitespace-only comments emit nothing; absent intent/priority emit nothing.
+ */
+function noteLines(note: PickNote | undefined): string[] {
+  if (!note) return []
+  const out: string[] = []
+  const comment = note.comment
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, PICK_BUDGET.annotationCommentMaxLength)
+  if (comment) out.push(`note: ${comment}`)
+  if (note.intent) out.push(`intent: ${note.intent}`)
+  if (note.priority) out.push(`priority: ${note.priority}`)
+  return out
+}
+
+/**
  * A compact "[element context]" block from the enriched pick fields, or ''
  * when the pick carries none of them (older external bundles, or a plain
  * element with no signal). Callers append this directly after the existing
- * elementPrompt/elementPromptText sentences.
+ * elementPrompt/elementPromptText sentences. `note` (pick-context dialog)
+ * adds its lines at the top of the block; a note with nothing in it leaves
+ * the output byte-identical to the note-less call.
  */
-export function formatPickDetails(pick: ElementPick): string {
+export function formatPickDetails(pick: ElementPick, note?: PickNote): string {
   const lines = [
+    ...noteLines(note),
     roleLine(pick),
     sourceLine(pick),
     reactLine(pick),
@@ -138,6 +162,67 @@ function elementLabel(pick: ElementPick): string {
 }
 
 /**
+ * Agent-facing label of an annotation's target: the element label for a
+ * pick, `circled region` / `drawn region` for a draw-mode stroke, and the
+ * neutral `annotation` when a corrupt or pre-region record carries neither
+ * (the persisted-review loader rejects those; this is the last line, not
+ * the guard). English on purpose, like every other string in this module.
+ */
+export function annotationLabel(a: PickAnnotation): string {
+  if (a.pick) return elementLabel(a.pick)
+  if (a.region) return a.region.tool === 'circle' ? 'circled region' : 'drawn region'
+  return 'annotation'
+}
+
+/**
+ * The report body for ONE annotation: a `### <heading>` line, then Intent,
+ * Priority, the element-or-region-specific lines (selector/source/react/
+ * bounds/styles for a pick, Region/Bounds for a stroke), Screenshot when
+ * present, HTML in a fenced block when present, Feedback, and a trailing
+ * blank separator line. `heading` is caller-supplied text (no leading `### `)
+ * so a batch report can number it (`formatAnnotationsReport` passes
+ * `${i + 1}. ${annotationLabel(a)}`) while a single-card use (pick-card.ts)
+ * can pass the bare label. Extracted from formatAnnotationsReport's forEach
+ * body (Card review-to-roadmap-card phase) so that module can reuse the same
+ * verbatim selector/bounds/screenshot/HTML/feedback lines for a roadmap
+ * card's description instead of re-deriving them.
+ */
+export function formatAnnotationSection(a: PickAnnotation, heading: string): string[] {
+  const lines: string[] = [`### ${heading}`, `Intent: ${a.intent}`, `Priority: ${a.priority}`]
+  const { pick } = a
+  if (!pick) {
+    // Region annotation (draw mode): no DOM node to name, so the section
+    // is bounds + tool + the burned-in screenshot, then the feedback.
+    if (a.region) {
+      lines.push(`Region: ${a.region.tool}`)
+      lines.push(`Bounds: x=${a.region.x}, y=${a.region.y}, ${a.region.width}x${a.region.height}`)
+    }
+    if (a.screenshotPath) lines.push(`Screenshot: ${a.screenshotPath}`)
+    lines.push(`Feedback: ${a.comment}`)
+    lines.push('')
+    return lines
+  }
+  const selector = pick.selectors[0]?.value ?? pick.tagName
+  lines.push(`Selector: ${selector}`)
+  if (pick.sourceFile) lines.push(`Source: ${pick.sourceFile}`)
+  if (pick.reactComponents) lines.push(`React: ${pick.reactComponents}`)
+  lines.push(`Bounds: x=${pick.x ?? 0}, y=${pick.y ?? 0}, ${pick.width}x${pick.height}`)
+  const styleEntries = pick.styles ? Object.entries(pick.styles) : []
+  if (styleEntries.length) {
+    lines.push('Styles:')
+    for (const [k, v] of styleEntries) lines.push(`- ${k}: ${v}`)
+  }
+  if (a.screenshotPath) lines.push(`Screenshot: ${a.screenshotPath}`)
+  if (pick.html) {
+    lines.push('HTML:')
+    lines.push(...fence('html', pick.html))
+  }
+  lines.push(`Feedback: ${a.comment}`)
+  lines.push('')
+  return lines
+}
+
+/**
  * ONE structured Design Feedback message from a batch of pinned annotations:
  * header (page url + optional viewport), then one numbered section per
  * annotation (element label, intent, priority, selector, source/react when
@@ -169,27 +254,7 @@ export function formatAnnotationsReport(
   lines.push('')
 
   annotations.forEach((a, i) => {
-    const { pick } = a
-    const selector = pick.selectors[0]?.value ?? pick.tagName
-    lines.push(`### ${i + 1}. ${elementLabel(pick)}`)
-    lines.push(`Intent: ${a.intent}`)
-    lines.push(`Priority: ${a.priority}`)
-    lines.push(`Selector: ${selector}`)
-    if (pick.sourceFile) lines.push(`Source: ${pick.sourceFile}`)
-    if (pick.reactComponents) lines.push(`React: ${pick.reactComponents}`)
-    lines.push(`Bounds: x=${pick.x ?? 0}, y=${pick.y ?? 0}, ${pick.width}x${pick.height}`)
-    const styleEntries = pick.styles ? Object.entries(pick.styles) : []
-    if (styleEntries.length) {
-      lines.push('Styles:')
-      for (const [k, v] of styleEntries) lines.push(`- ${k}: ${v}`)
-    }
-    if (a.screenshotPath) lines.push(`Screenshot: ${a.screenshotPath}`)
-    if (pick.html) {
-      lines.push('HTML:')
-      lines.push(...fence('html', pick.html))
-    }
-    lines.push(`Feedback: ${a.comment}`)
-    lines.push('')
+    lines.push(...formatAnnotationSection(a, `${i + 1}. ${annotationLabel(a)}`))
   })
 
   return lines.join('\n').trimEnd()

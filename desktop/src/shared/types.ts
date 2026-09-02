@@ -311,6 +311,12 @@ export interface AppConfig {
    *  `roadmapFiltersCollapsed`: a fold that resets at every launch is the
    *  defect this field exists to avoid. */
   graphListCollapsed: boolean
+  /** Ask for operator context in a modal after every single element pick
+   *  (browser view and external design-endpoint picks). `false` restores the
+   *  immediate paste-on-click flow; the dialog's "don't ask again" box and the
+   *  Settings toggle both write this flag. Persisted like the folds above:
+   *  a choice that resets at every launch is the defect this avoids. */
+  pickContextPrompt: boolean
   /** Workflow-lane canvas height in px (resizable via its top-edge handle, persisted). */
   wfLaneHeight: number
   theme: 'dark' | 'light'
@@ -1268,15 +1274,70 @@ export type PickAnnotationIntent = 'fix' | 'change' | 'question' | 'approve'
 /** How urgent the annotation is. */
 export type PickAnnotationPriority = 'blocking' | 'important' | 'suggestion'
 
-/** One pinned element of an in-progress design review, editable in the panel until sent or discarded. */
+/**
+ * A region of the page the operator DREW over in draw mode (one completed
+ * stroke), in viewport CSS px at draw time: the stroke's bounding box. Unlike
+ * an ElementPick it names no DOM node -- the agent gets bounds, the tool, and
+ * the cropped screenshot with the stroke burned in.
+ */
+export interface PickRegion {
+  x: number
+  y: number
+  width: number
+  height: number
+  /** Stroke tool that produced the region. */
+  tool: 'freehand' | 'circle'
+  /** Sanitized page URL at draw time (sanitizePickUrl). */
+  pageUrl: string
+}
+
+/**
+ * One pinned item of an in-progress design review, editable in the panel
+ * until sent or discarded. Its TARGET is exactly one of `pick` (an element
+ * from inspect mode) or `region` (a stroke from draw mode); both optional at
+ * the type level because a persisted review written by an older build only
+ * knows `pick`, and the loader validates the exactly-one invariant. Consumers
+ * read the target through `annotationLabel` / the report composer in
+ * shared/pick-prompt.ts, never by assuming `pick` is there.
+ */
 export interface PickAnnotation {
   id: string
   comment: string
   intent: PickAnnotationIntent
   priority: PickAnnotationPriority
-  pick: ElementPick
-  /** Best-effort auto screenshot path (captureElementShot, same as the single-pick flow); absent on failure. */
+  /** The pinned element (inspect mode). Exactly one of `pick` / `region`. */
+  pick?: ElementPick
+  /** The drawn region (draw mode). Exactly one of `pick` / `region`. */
+  region?: PickRegion
+  /** Best-effort auto screenshot path (captureElementShot for an element, the stroke crop for a region); absent on failure. */
   screenshotPath?: string
+}
+
+/**
+ * Operator context attached to ONE single pick through the pick-context
+ * dialog (the modal that opens after a click in inspect mode). `comment` may
+ * be empty; `intent`/`priority` are absent unless the operator chose them, so
+ * a dialog sent untouched yields exactly the pre-dialog prompt.
+ */
+export interface PickNote {
+  comment: string
+  intent?: PickAnnotationIntent
+  priority?: PickAnnotationPriority
+}
+
+/**
+ * Persisted design-review draft (main/review-state-service.ts): the embedded
+ * browser's pending PickAnnotation[] survive a window reload or app restart.
+ * Defined here (not in the main-process service) so the renderer can type
+ * loadReview()/saveReview() without importing main code -- the service
+ * re-exports both symbols for its own (main-side) callers and tests.
+ */
+export const REVIEW_STATE_VERSION = 1
+
+export interface PersistedReview {
+  version: 1
+  pageUrl: string
+  annotations: PickAnnotation[]
 }
 
 /** One capturable OS window/screen for the browser view's Window mode (D2a). */
@@ -1785,6 +1846,16 @@ export interface DeckApi {
   listCaptureWindows(): Promise<WindowSource[]>
   /** Full-size still of one window/screen; null when gone. */
   captureWindow(id: string): Promise<{ dataUrl: string; title: string } | null>
+
+  // persisted design-review draft (main/review-state-service.ts): pending
+  // annotations survive a window reload / app restart. Renderer wiring
+  // (load at mount, save on change) lands separately against this API.
+  /** Load the persisted review, if any (absent/never-saved returns null). */
+  loadReview(): Promise<PersistedReview | null>
+  /** Re-validated main-side before writing (hostile input #3); throws on an invalid shape. */
+  saveReview(state: PersistedReview): Promise<boolean>
+  /** Delete the persisted review, if any. */
+  clearReview(): Promise<void>
 
   // supervisor (PLAN C5): spawn (or return) the Home supervisor session.
   ensureSupervisor(): Promise<SessionRuntime>
