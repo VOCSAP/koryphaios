@@ -476,6 +476,23 @@ export function startDeckControl(
       announce: entry.announce,
       appendSystemPromptFile: embedded ? deps.writeEmbeddedPrompt(embedded.id) : undefined,
       lead: embedded?.id === 'team-lead' && !hasLiveLead ? true : undefined,
+      // Card 3c085f1a: threaded straight through -- undefined on every
+      // profile in the catalog today (no list to recycle), same "absent
+      // means unrestricted" contract as SessionDef.peerTools's own doc.
+      peerTools: embedded?.peerTools,
+      // Card 8b6a5778: was never set on this path at all -- CLAUDE_PEERS_ROLE
+      // stayed '' for every agent-spawned tile, and a role is NOT repairable
+      // hot (single writer broker-side, frozen for the process's life), so a
+      // tile born without one is permanently unreachable by role-targeted
+      // roadmap dispatch. `embedded.id` (team-lead, developer, reviewer,
+      // explorer, debugger, test-engineer) is the value, NOT `embedded.role`
+      // (a prose one-line summary, a completely different field with the
+      // same name on EmbeddedAgent -- see that interface's own doc). All six
+      // ids already pass sanitizeRole (session-service.ts's single sink)
+      // UNCHANGED: already lowercase kebab, already in shared/role.ts's
+      // BUILTIN_ROLES. A spawn with no embedded profile poses no role, same
+      // as before this card -- never invented for an operator-profile spawn.
+      role: embedded?.id,
       // Card ff091064 (piece 2): only the embedded team-lead gets the
       // deck-control bridge -- every other embedded/operator profile spawned
       // through this same path (dev, reviewer, ...) stays without it.

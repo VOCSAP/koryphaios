@@ -57,6 +57,22 @@ export interface SessionDef {
    */
   role?: string
   /**
+   * Card 3c085f1a: per-tile allow-list for the CORE claude-peers MCP surface
+   * (list_peers, send_message, roadmap_*, ...), exported as CLAUDE_PEERS_TOOLS
+   * (server.ts's own three-state contract). undefined = no field on this def
+   * at all -> the env var is OMITTED entirely -> full surface (server.ts
+   * treats "absent" and "present but empty" as opposite ends, see its
+   * TOOLS_ENV_VAR comment) -- never normalise this to `[]` or `''` the way
+   * `role` above is, that would silently mean "zero tools" instead of
+   * "unrestricted". Populated today ONLY via an embedded profile's own
+   * `EmbeddedAgent.peerTools` (team-embedded.ts), threaded through by
+   * deck-control.ts's spawnEntry; a manually-configured session or a template
+   * has no way to set it (same C8 code-constant-only rule as the profile
+   * catalog itself). No validation of the tool names is performed at this
+   * layer (card 3c085f1a leaves that to a follow-up once real lists exist).
+   */
+  peerTools?: string[]
+  /**
    * Per-session override for quota auto-resume (PLAN C1). undefined = follow
    * the global `AppConfig.autoResumeQuota`; true/false forces it for this tile.
    */
@@ -441,6 +457,13 @@ export interface CreateSessionInput {
   effort?: string
   /** Operator-chosen role (SessionDef.role); empty/undefined => no role. */
   role?: string
+  /**
+   * MAIN-only (Card 3c085f1a): CLAUDE_PEERS_TOOLS allow-list (SessionDef.peerTools),
+   * threaded from an embedded profile's EmbeddedAgent.peerTools by
+   * deck-control.ts's spawnEntry. undefined => no restriction (see SessionDef's
+   * own doc for the three-state contract this must not collapse).
+   */
+  peerTools?: string[]
   /** Extra free-form launch args appended verbatim. */
   args?: string
   /** Initial prompt submitted on the fresh launch (positional arg, PLAN C2). */

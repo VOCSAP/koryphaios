@@ -70,6 +70,13 @@ test("embedded catalog: the 6 core roles, unique ids, Deck-wired prompts", () =>
   // Executors keep their hands.
   expect(getEmbeddedAgent("developer")!.disallowedTools).toBe("");
   expect(getEmbeddedAgent("nope")).toBeNull();
+  // Card 3c085f1a: `peerTools` is plumbing only in this lot -- no profile
+  // carries a list yet. undefined must NOT collapse to `[]` here: an empty
+  // array means "zero tools" server-side (server.ts's three-state contract),
+  // the opposite of what an unset field must mean (unrestricted).
+  for (const agent of EMBEDDED_AGENTS) {
+    expect(agent.peerTools).toBeUndefined();
+  }
 });
 
 test("writeEmbeddedAgentPrompt regenerates from the code constant", () => {

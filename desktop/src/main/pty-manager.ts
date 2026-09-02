@@ -78,18 +78,34 @@ export class PtyManager extends EventEmitter {
     this.kill(id)
     const { file, args, marker } = buildShellInvocation(opts)
 
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      // Populate the status-line peer_id cache so the Deck can show peer_id.
+      CLAUDE_PEERS_STATUS_LINE_CACHE: '1',
+      TERM: 'xterm-256color',
+      ...extraEnv
+    }
+    // Card 3c085f1a (review round 2): CLAUDE_PEERS_TOOLS is the one key whose
+    // ABSENCE is load-bearing, unlike every other key this merge handles.
+    // session-service.ts's own neutralisation rule (its `sessionEnv`
+    // declaration, right above the comment naming CLAUDE_PEERS_ROLE) exports
+    // CLAUDE_PEERS_ROLE unconditionally, '' included, precisely so a value
+    // inherited from the process that launched the Deck can never
+    // re-activate something a session has none of -- that same fix cannot be
+    // copied here, because '' means ZERO TOOLS for CLAUDE_PEERS_TOOLS, the
+    // opposite of "no restriction". If Kory's OWN process env happens to
+    // carry CLAUDE_PEERS_TOOLS (inherited from whatever launched the Deck)
+    // and this spawn's sessionEnv did not set it, the `...process.env` spread
+    // above would otherwise silently restrict a tile nobody meant to
+    // restrict -- delete, not a neutral value, is the only correct shape.
+    if (!extraEnv || !('CLAUDE_PEERS_TOOLS' in extraEnv)) delete env.CLAUDE_PEERS_TOOLS
+
     const proc = pty.spawn(file, args, {
       name: 'xterm-256color',
       cols: 80,
       rows: 24,
       cwd,
-      env: {
-        ...process.env,
-        // Populate the status-line peer_id cache so the Deck can show peer_id.
-        CLAUDE_PEERS_STATUS_LINE_CACHE: '1',
-        TERM: 'xterm-256color',
-        ...extraEnv
-      }
+      env
     })
 
     const state: Spawned = {

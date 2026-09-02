@@ -13,7 +13,8 @@ import {
   type DeckControlServer,
   type SpawnSummary
 } from "../desktop/src/main/deck-control.ts";
-import { EMBEDDED_AGENTS } from "../desktop/src/main/team-embedded.ts";
+import { EMBEDDED_AGENTS, getEmbeddedAgent } from "../desktop/src/main/team-embedded.ts";
+import { sanitizeRole } from "../desktop/src/shared/role.ts";
 import {
   writeSupervisorMcpConfig,
   writeTeamLeadMcpConfig,
@@ -608,6 +609,77 @@ test("embedded spawn: prompt file, harness disallowedTools, team-lead crown rule
   // A plain operator-profile spawn (no embedded_agent at all) never gets it.
   await call(srv, "deck_spawn_session", { agent: "dev" });
   expect(deps.spawnInputs[3]!.mcpConfig).toBeUndefined();
+});
+
+// Card 3c085f1a: spawnEntry threads embedded.peerTools into
+// CreateSessionInput.peerTools. No real profile in the catalog carries a
+// list today (measured: every EMBEDDED_AGENTS entry has peerTools
+// undefined), so this test MONKEY-PATCHES one catalog entry for its own
+// duration (restored in `finally`, EMBEDDED_AGENTS is a live array of
+// mutable objects, not frozen) -- a "profil de test" standing in for a real
+// one, per the team-lead's own framing of this gap.
+test("embedded spawn: a profile carrying peerTools threads EXACTLY that list into CreateSessionInput; a profile/spawn without one gets undefined", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const developer = EMBEDDED_AGENTS.find((a) => a.id === "developer")!;
+  expect(developer.peerTools).toBeUndefined(); // baseline, per the catalog test
+  developer.peerTools = ["list_peers", "send_message"];
+  try {
+    const withList = await call(srv, "deck_spawn_session", { embedded_agent: "developer" });
+    expect(withList.body.ok).toBe(true);
+    expect(deps.spawnInputs[0]!.peerTools).toEqual(["list_peers", "send_message"]);
+  } finally {
+    delete developer.peerTools; // not `= undefined`: a real absent key, not an own property set to undefined
+  }
+  // Restored: the same profile now threads undefined again.
+  await call(srv, "deck_spawn_session", { embedded_agent: "developer" });
+  expect(deps.spawnInputs[1]!.peerTools).toBeUndefined();
+
+  // A profile that never carried a list at all (unaffected by the patch above).
+  await call(srv, "deck_spawn_session", { embedded_agent: "reviewer" });
+  expect(deps.spawnInputs[2]!.peerTools).toBeUndefined();
+
+  // No embedded profile at all -- nothing to thread.
+  await call(srv, "deck_spawn_session", { agent: "dev" });
+  expect(deps.spawnInputs[3]!.peerTools).toBeUndefined();
+});
+
+// Card 8b6a5778: spawnEntry never set `role` at all on this path --
+// CLAUDE_PEERS_ROLE stayed '' for every agent-spawned tile, permanently (a
+// role is not repairable hot). `embedded.id`, NOT `embedded.role` (a prose
+// summary, a different field of the same name) is the value. Uses REAL
+// catalog entries (no monkey-patch needed, every embedded profile already
+// qualifies): the env-level reach of CreateSessionInput.role -> def.role ->
+// sessionEnv.CLAUDE_PEERS_ROLE is role-source-agnostic and already proven,
+// for ANY role value, by the frozen tests/desktop-session-role-env.test.ts
+// -- this test's job stops at proving spawnEntry poses the RIGHT value here.
+test("embedded spawn: threads embedded.id as `role` (never embedded.role, the prose summary); no profile poses no role", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  await call(srv, "deck_spawn_session", { embedded_agent: "reviewer" });
+  expect(deps.spawnInputs[0]!.role).toBe("reviewer");
+  expect(deps.spawnInputs[0]!.role).not.toBe(getEmbeddedAgent("reviewer")!.role);
+
+  await call(srv, "deck_spawn_session", { embedded_agent: "team-lead" });
+  expect(deps.spawnInputs[1]!.role).toBe("team-lead");
+
+  // No embedded profile at all -- no role invented.
+  await call(srv, "deck_spawn_session", { agent: "dev" });
+  expect(deps.spawnInputs[2]!.role).toBeUndefined();
+
+  // Every real catalog id survives sanitizeRole (session-service.ts's single
+  // production sink) UNCHANGED -- already lowercase kebab, already listed in
+  // shared/role.ts's BUILTIN_ROLES, so posing it never gets silently mangled
+  // before it reaches the broker.
+  for (const agent of EMBEDDED_AGENTS) {
+    expect(sanitizeRole(agent.id)).toBe(agent.id);
+  }
 });
 
 // Card 6c380073 audit fix #3: the old stub threw away the (token, callerId,

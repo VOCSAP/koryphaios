@@ -47,6 +47,7 @@ import { DEFAULT_PALETTE, paletteColor } from '@shared/palette'
 import { sanitizeRole } from '@shared/role'
 import { reconcileOrder } from '@shared/reorder'
 import type { JoinAnnounceIntent } from '@shared/announce'
+import { peerToolsEnvValue } from './session-env'
 
 interface RuntimeState {
   status: SessionStatus
@@ -562,6 +563,10 @@ export class SessionService extends EventEmitter {
       // point before the value becomes an exported env var, and the renderer's
       // sanitizer is typing assistance, not a guarantee.
       role: sanitizeRole(input.role ?? '') || '',
+      // Card 3c085f1a: undefined stays undefined (no sanitization/normalisation
+      // -- see SessionDef.peerTools's own doc on why this must not collapse
+      // to `[]`, unlike `role` right above it).
+      peerTools: input.peerTools,
       prompt: input.prompt?.trim() || '',
       // Filled by the ipc layer after `git worktree add` (PLAN C4).
       worktree: input.worktree,
@@ -1202,6 +1207,25 @@ export class SessionService extends EventEmitter {
       CLAUDE_PEERS_DESK_SESSION: def.id,
       CLAUDE_PEERS_ROLE: def.role ?? ''
     }
+    // Card 3c085f1a: CLAUDE_PEERS_TOOLS, unlike CLAUDE_PEERS_ROLE just above,
+    // is OMITTED entirely when def.peerTools is undefined -- server.ts's own
+    // three-state contract treats "absent" (full surface) and "present but
+    // empty" (zero tools) as opposites, so this key must never be exported as
+    // '' the way CLAUDE_PEERS_ROLE deliberately is. peerToolsEnvValue is the
+    // pure, directly-tested piece (tests/desktop-session-peer-tools-env.test.ts);
+    // this `if` is the wiring, kept separate so the sessionEnv declaration
+    // right above stays byte-identical to what the sibling role-env test's
+    // structural scan of startPty() depends on.
+    const peerToolsValue = peerToolsEnvValue(def.peerTools)
+    // Object.assign, not a direct `sessionEnv.CLAUDE_PEERS_TOOLS = ...` write:
+    // the object literal's inferred type (implicit index signature, TS's own
+    // rule for object-literal-typed consts) is what lets sessionEnv satisfy
+    // Record<string, string> at the two call sites below without an explicit
+    // type annotation up top -- a direct property write needs that property
+    // declared up front, forcing either an annotation or a key in the
+    // literal, both of which would change the declaration's exact text that
+    // the sibling role-env test's structural scan of startPty() depends on.
+    if (peerToolsValue !== undefined) Object.assign(sessionEnv, { CLAUDE_PEERS_TOOLS: peerToolsValue })
 
     // Sandbox mode (SBX1): wrap the composed command in a `docker exec` into
     // the project container. The supervisor is exempt — it pilots the Deck
