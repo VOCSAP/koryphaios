@@ -229,3 +229,54 @@ test("formatAnnotationsReport: no HTML field omits the HTML section entirely", (
   const out = formatAnnotationsReport([annotation()], { url: "https://example.com/settings" });
   expect(out).not.toContain("HTML:");
 });
+
+// ---------------------------------------------------------------------------
+// Region annotations (draw mode, PickAnnotation.region): a stroke's bounding
+// box with no DOM node behind it. The report must name it, print its bounds
+// and tool, and never print element-only lines (Selector/Source/HTML) for it.
+// ---------------------------------------------------------------------------
+
+function regionAnnotation(overrides: Partial<PickAnnotation> = {}): PickAnnotation {
+  return {
+    id: "r1",
+    comment: "this whole block is misaligned",
+    intent: "fix",
+    priority: "important",
+    region: { x: 10, y: 20, width: 300, height: 120, tool: "circle", pageUrl: "https://example.com/settings" },
+    screenshotPath: "/state/annotations/region-1.png",
+    ...overrides,
+  };
+}
+
+test("region annotation: section names the region, prints Region/Bounds/Screenshot/Feedback, no Selector or HTML", () => {
+  const out = formatAnnotationsReport([regionAnnotation()], { url: "https://example.com/settings" });
+  expect(out).toContain("### 1. circled region");
+  expect(out).toContain("Region: circle");
+  expect(out).toContain("Bounds: x=10, y=20, 300x120");
+  expect(out).toContain("Screenshot: /state/annotations/region-1.png");
+  expect(out).toContain("Feedback: this whole block is misaligned");
+  expect(out).not.toContain("Selector:");
+  expect(out).not.toContain("HTML:");
+});
+
+test("region annotation: a freehand stroke is a 'drawn region'; a record with neither pick nor region is a bare 'annotation'", () => {
+  const drawn = regionAnnotation({ region: { x: 0, y: 0, width: 5, height: 5, tool: "freehand", pageUrl: "" } });
+  expect(formatAnnotationsReport([drawn], { url: "https://example.com/" })).toContain("### 1. drawn region");
+  const bare = regionAnnotation({ region: undefined, screenshotPath: undefined });
+  const out = formatAnnotationsReport([bare], { url: "https://example.com/" });
+  expect(out).toContain("### 1. annotation");
+  expect(out).not.toContain("Bounds:");
+});
+
+test("mixed review: element and region sections are numbered in list order", () => {
+  const element: PickAnnotation = {
+    id: "e1",
+    comment: "wrong colour",
+    intent: "change",
+    priority: "suggestion",
+    pick: pick({ tagName: "button", accessibleName: "Save" }),
+  };
+  const out = formatAnnotationsReport([element, regionAnnotation()], { url: "https://example.com/" });
+  expect(out.indexOf("### 1. button \"Save\"")).toBeGreaterThan(-1);
+  expect(out.indexOf("### 2. circled region")).toBeGreaterThan(out.indexOf("### 1. button"));
+});

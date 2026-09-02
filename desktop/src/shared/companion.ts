@@ -110,6 +110,9 @@ export const COMPANION_MANIFEST = {
   cancelDemoScenario: { kind: 'invoke', channel: 'browser:demo-cancel' },
   listCaptureWindows: { kind: 'invoke', channel: 'design:list-windows' },
   captureWindow: { kind: 'invoke', channel: 'design:capture-window' },
+  loadReview: { kind: 'invoke', channel: 'browser:review-load' },
+  saveReview: { kind: 'invoke', channel: 'browser:review-save' },
+  clearReview: { kind: 'invoke', channel: 'browser:review-clear' },
 
   // supervisor / help / digest
   ensureSupervisor: { kind: 'invoke', channel: 'supervisor:ensure' },
@@ -417,6 +420,12 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'browser:demo-cancel': 2,
   'design:list-windows': 2,
   'design:capture-window': 2,
+  // Reading the pending review is a read (tier 0, like diff:collect); saving
+  // or clearing it writes app state and is gated the same as its sibling
+  // browser:save-annotation (tier 2, execute/structure).
+  'browser:review-load': 0,
+  'browser:review-save': 2,
+  'browser:review-clear': 2,
 
   'sandbox:status': 0,
   'sandbox:list': 0,

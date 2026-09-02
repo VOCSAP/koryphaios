@@ -5464,11 +5464,6 @@ svg.glyph {
   border-color: var(--accent);
 }
 
-/* Send-annotation: accented so the "do it" action stands out while drawing. */
-.browser-btn-accent {
-  color: var(--accent);
-}
-
 /* REC running: red glyph, slow pulse; the same button stops the recording. */
 .browser-btn-rec {
   color: var(--danger);

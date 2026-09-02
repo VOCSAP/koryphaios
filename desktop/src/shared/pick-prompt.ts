@@ -162,6 +162,67 @@ function elementLabel(pick: ElementPick): string {
 }
 
 /**
+ * Agent-facing label of an annotation's target: the element label for a
+ * pick, `circled region` / `drawn region` for a draw-mode stroke, and the
+ * neutral `annotation` when a corrupt or pre-region record carries neither
+ * (the persisted-review loader rejects those; this is the last line, not
+ * the guard). English on purpose, like every other string in this module.
+ */
+export function annotationLabel(a: PickAnnotation): string {
+  if (a.pick) return elementLabel(a.pick)
+  if (a.region) return a.region.tool === 'circle' ? 'circled region' : 'drawn region'
+  return 'annotation'
+}
+
+/**
+ * The report body for ONE annotation: a `### <heading>` line, then Intent,
+ * Priority, the element-or-region-specific lines (selector/source/react/
+ * bounds/styles for a pick, Region/Bounds for a stroke), Screenshot when
+ * present, HTML in a fenced block when present, Feedback, and a trailing
+ * blank separator line. `heading` is caller-supplied text (no leading `### `)
+ * so a batch report can number it (`formatAnnotationsReport` passes
+ * `${i + 1}. ${annotationLabel(a)}`) while a single-card use (pick-card.ts)
+ * can pass the bare label. Extracted from formatAnnotationsReport's forEach
+ * body (Card review-to-roadmap-card phase) so that module can reuse the same
+ * verbatim selector/bounds/screenshot/HTML/feedback lines for a roadmap
+ * card's description instead of re-deriving them.
+ */
+export function formatAnnotationSection(a: PickAnnotation, heading: string): string[] {
+  const lines: string[] = [`### ${heading}`, `Intent: ${a.intent}`, `Priority: ${a.priority}`]
+  const { pick } = a
+  if (!pick) {
+    // Region annotation (draw mode): no DOM node to name, so the section
+    // is bounds + tool + the burned-in screenshot, then the feedback.
+    if (a.region) {
+      lines.push(`Region: ${a.region.tool}`)
+      lines.push(`Bounds: x=${a.region.x}, y=${a.region.y}, ${a.region.width}x${a.region.height}`)
+    }
+    if (a.screenshotPath) lines.push(`Screenshot: ${a.screenshotPath}`)
+    lines.push(`Feedback: ${a.comment}`)
+    lines.push('')
+    return lines
+  }
+  const selector = pick.selectors[0]?.value ?? pick.tagName
+  lines.push(`Selector: ${selector}`)
+  if (pick.sourceFile) lines.push(`Source: ${pick.sourceFile}`)
+  if (pick.reactComponents) lines.push(`React: ${pick.reactComponents}`)
+  lines.push(`Bounds: x=${pick.x ?? 0}, y=${pick.y ?? 0}, ${pick.width}x${pick.height}`)
+  const styleEntries = pick.styles ? Object.entries(pick.styles) : []
+  if (styleEntries.length) {
+    lines.push('Styles:')
+    for (const [k, v] of styleEntries) lines.push(`- ${k}: ${v}`)
+  }
+  if (a.screenshotPath) lines.push(`Screenshot: ${a.screenshotPath}`)
+  if (pick.html) {
+    lines.push('HTML:')
+    lines.push(...fence('html', pick.html))
+  }
+  lines.push(`Feedback: ${a.comment}`)
+  lines.push('')
+  return lines
+}
+
+/**
  * ONE structured Design Feedback message from a batch of pinned annotations:
  * header (page url + optional viewport), then one numbered section per
  * annotation (element label, intent, priority, selector, source/react when
@@ -193,27 +254,7 @@ export function formatAnnotationsReport(
   lines.push('')
 
   annotations.forEach((a, i) => {
-    const { pick } = a
-    const selector = pick.selectors[0]?.value ?? pick.tagName
-    lines.push(`### ${i + 1}. ${elementLabel(pick)}`)
-    lines.push(`Intent: ${a.intent}`)
-    lines.push(`Priority: ${a.priority}`)
-    lines.push(`Selector: ${selector}`)
-    if (pick.sourceFile) lines.push(`Source: ${pick.sourceFile}`)
-    if (pick.reactComponents) lines.push(`React: ${pick.reactComponents}`)
-    lines.push(`Bounds: x=${pick.x ?? 0}, y=${pick.y ?? 0}, ${pick.width}x${pick.height}`)
-    const styleEntries = pick.styles ? Object.entries(pick.styles) : []
-    if (styleEntries.length) {
-      lines.push('Styles:')
-      for (const [k, v] of styleEntries) lines.push(`- ${k}: ${v}`)
-    }
-    if (a.screenshotPath) lines.push(`Screenshot: ${a.screenshotPath}`)
-    if (pick.html) {
-      lines.push('HTML:')
-      lines.push(...fence('html', pick.html))
-    }
-    lines.push(`Feedback: ${a.comment}`)
-    lines.push('')
+    lines.push(...formatAnnotationSection(a, `${i + 1}. ${annotationLabel(a)}`))
   })
 
   return lines.join('\n').trimEnd()

@@ -26,7 +26,8 @@ export function PickContextDialog({
   pick,
   shot,
   onSend,
-  onCancel
+  onCancel,
+  onCreateCard
 }: {
   pick: ElementPick
   /** Best-effort element screenshot: 'pending' while captureElementShot is
@@ -36,6 +37,16 @@ export function PickContextDialog({
   shot: 'pending' | 'ready' | 'none'
   onSend: (note: PickNote, dontAskAgain: boolean) => void
   onCancel: () => void
+  /**
+   * "A review finding becomes a roadmap card" (Card review-to-roadmap-card),
+   * entry point 1: when the caller wires this, a third `.modal-actions`
+   * button offers filing the note as a roadmap draft seed instead of
+   * sending it as a prompt. Optional and prop-driven like every other
+   * behaviour here -- absent (both call sites, until the next phase wires
+   * shared/pick-card.ts's pickNoteToCardSeed + store.ts's openRoadmapDraft
+   * in), the button does not render at all.
+   */
+  onCreateCard?: (note: PickNote) => void
 }): React.JSX.Element {
   const t = useT()
   const [comment, setComment] = useState('')
@@ -45,8 +56,13 @@ export function PickContextDialog({
 
   const selector = pick.selectors[0]?.value ?? pick.tagName
 
+  /** Shared by both the Send and Create-a-card actions -- same note shape either way. */
+  function buildNote(): PickNote {
+    return { comment, intent: intent || undefined, priority: priority || undefined }
+  }
+
   function send(): void {
-    onSend({ comment, intent: intent || undefined, priority: priority || undefined }, dontAskAgain)
+    onSend(buildNote(), dontAskAgain)
   }
 
   // Refs so the window-level keydown listener below (mounted once) always
@@ -149,6 +165,11 @@ export function PickContextDialog({
         </button>
         <div className="modal-actions">
           <button onClick={onCancel}>{t('common.cancel')}</button>
+          {onCreateCard && (
+            <button type="button" onClick={() => onCreateCard(buildNote())}>
+              {t('browser.pickContextCard')}
+            </button>
+          )}
           <button className="primary" onClick={send}>
             {t('browser.pickContextSend')}
           </button>

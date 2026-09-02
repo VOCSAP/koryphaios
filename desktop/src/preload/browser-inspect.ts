@@ -9,6 +9,7 @@
 
 import { ipcRenderer } from 'electron'
 import { createInspectMode } from '@shared/element-pick'
+import { createDrawModifierWatcher } from '@shared/draw-modifier'
 
 const mode = createInspectMode({
   onPick: (pick) => ipcRenderer.sendToHost('deck:element-selected', pick),
@@ -39,3 +40,38 @@ ipcRenderer.on('deck:enter-inspect', mode.enter)
 ipcRenderer.on('deck:exit-inspect', mode.exit)
 ipcRenderer.on('deck:enter-inspect-multi', reviewMode.enter)
 ipcRenderer.on('deck:exit-inspect-multi', reviewMode.exit)
+
+// Hold-to-draw (embedded browser rework, docs/browser-design.md's "Draw
+// mode" section): watched HERE, on the GUEST page's own document, because key
+// events over the <webview> guest never reach the host window -- it is a
+// separate Electron webContents/renderer process. BrowserView.tsx merges
+// this with its OWN host-side watcher (armed once the pointer/focus is over
+// the canvas/toolbar rather than the page) -- see that file's own comment
+// for why both installs are needed. `process.platform` is available
+// directly here, same as every other Node global this preload already
+// relies on (`sandbox=no` on the <webview>'s webpreferences, set by
+// BrowserView.tsx, is what gives a webview preload that access without a
+// contextBridge indirection).
+createDrawModifierWatcher(
+  document,
+  process.platform === 'darwin' ? 'mac' : 'other',
+  (held) => ipcRenderer.sendToHost('deck:draw-modifier', held)
+)
+
+// A navigation (or the guest tearing down) mid-hold must not leave the host
+// stuck believing the modifier is still held: neither a `blur` nor a keyup
+// is guaranteed to fire on the way out (the page can navigate, or be torn
+// down, with focus still inside it) -- force the host back to "not held"
+// explicitly on both exit paths.
+const forceDrawModifierReleased = (): void => ipcRenderer.sendToHost('deck:draw-modifier', false)
+window.addEventListener('pagehide', forceDrawModifierReleased)
+window.addEventListener('beforeunload', forceDrawModifierReleased)
+// Focus leaving the guest is the COMMON exit path, not an edge case: the
+// canvas the host raises on keydown sits over the page, so the operator's
+// very next press lands on the host and moves focus there -- the keyup then
+// happens in the host and this document never sees it. A window-level blur
+// is dispatched on `window` only (it does not travel through `document`, so
+// the watcher's own capture-phase blur listener cannot observe it), hence
+// the explicit release here. The host mirrors this from its side too (a
+// host-side keyup also clears the guest signal) so the pair closes both ways.
+window.addEventListener('blur', forceDrawModifierReleased)

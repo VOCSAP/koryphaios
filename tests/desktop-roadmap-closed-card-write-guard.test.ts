@@ -139,6 +139,13 @@ const KNOWN_SITES: FileEntry[] = [
       "onUnqueue: wired to RoadmapItemModal's queue add/remove block, already correctly excluded on done/archived before this card (pre-existing, verified correct).",
       'onRestore: the surviving cycle-of-life action itself, mirrors RoadmapView.tsx.'
     ]
+  },
+  {
+    file: join('renderer', 'src', 'components', 'BrowserView.tsx'),
+    count: 1,
+    reasons: [
+      "createReviewCards(): CREATION only -- annotationToCardFields (shared/pick-card.ts) is a pick-list build that never sets `id`, so this site cannot address an existing card, closed or not; reached only through the review panel's Create-cards ConfirmDialog (tests/desktop-pick-card.test.ts pins the exact field set)."
+    ]
   }
 ]
 

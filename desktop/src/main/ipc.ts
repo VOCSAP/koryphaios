@@ -61,6 +61,7 @@ import { validateReorderWaves } from './roadmap-reorder-validate'
 import { createSessionWithWorktree } from './create-session'
 import { composePlanImportPrompt } from './import-plan'
 import { collectDiff, collectFileDiff, composeDiffReviewPrompt } from './diff-service'
+import { clearReviewState, readReviewState, validatePersistedReview, writeReviewState } from './review-state-service'
 import { recordingFileName } from '@shared/recording'
 import { DEFAULT_DEMO_TARGET, sanitizeTarget } from '@shared/models'
 import { startDemoControl } from './demo-control'
@@ -353,6 +354,14 @@ export function registerIpc({
     return { dataUrl: src.thumbnail.toDataURL(), title: src.name }
   })
 
+  // Shared by browser:save-annotation and the review-state handlers below --
+  // both need the same annotations dir (screenshots referenced by a pending
+  // review live there; its 7-day prune runs from the save-annotation path).
+  const reviewAnnotationsDir = (): string => join(app.getPath('userData'), APP_STATE_SUBDIR, 'annotations')
+  // Sibling of, not inside, the annotations dir -- so the state file itself
+  // is never swept by the annotations dir's 7-day prune.
+  const reviewStateFile = (): string => join(app.getPath('userData'), APP_STATE_SUBDIR, 'review-pending.json')
+
   // Persist an annotated screenshot (page capture + operator strokes,
   // composited renderer-side) so the docked agent can Read the image file.
   // Kept under app state, pruned after 7 days (same policy as checkpoints).
@@ -361,7 +370,7 @@ export function registerIpc({
     if (typeof dataUrl !== 'string' || !dataUrl.startsWith(PREFIX)) return null
     const b64 = dataUrl.slice(PREFIX.length)
     if (b64.length > 48 * 1024 * 1024) return null // ~36 MB decoded, plenty
-    const dir = join(app.getPath('userData'), APP_STATE_SUBDIR, 'annotations')
+    const dir = reviewAnnotationsDir()
     try {
       mkdirSync(dir, { recursive: true })
       for (const f of readdirSync(dir)) {
@@ -379,6 +388,45 @@ export function registerIpc({
     } catch (err) {
       console.error('[browser] annotation save failed:', err)
       return null
+    }
+  })
+
+  // Persisted design-review draft (review-state-service.ts): pending
+  // PickAnnotation[] survive a window reload / app restart. Same annotations
+  // dir as browser:save-annotation (screenshotPath containment checks
+  // against it); the state file itself is a sibling under app state, not
+  // inside the annotations dir (so its own 7-day prune never touches it).
+  regHandle('browser:review-load', () =>
+    readReviewState(reviewStateFile(), {
+      annotationsDir: reviewAnnotationsDir(),
+      report: (m, e) => reportError('browser', m, e)
+    })
+  )
+
+  // The renderer is not trusted blindly (hostile input #3): re-validate
+  // through the same STRICT/fail-closed validatePersistedReview the read
+  // path uses before ever writing it to disk.
+  regHandle('browser:review-save', async (_e, raw: unknown) => {
+    const validated = await validatePersistedReview(raw, { annotationsDir: reviewAnnotationsDir() })
+    if (!validated) {
+      reportError('browser', 'review-save rejected: invalid review state', raw)
+      throw new Error('invalid review state')
+    }
+    try {
+      await writeReviewState(reviewStateFile(), validated)
+      return true
+    } catch (err) {
+      reportError('browser', 'review-save failed', err)
+      throw err
+    }
+  })
+
+  regHandle('browser:review-clear', async () => {
+    try {
+      await clearReviewState(reviewStateFile())
+    } catch (err) {
+      reportError('browser', 'review-clear failed', err)
+      throw err
     }
   })
 

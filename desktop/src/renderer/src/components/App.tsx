@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { sanitizeGlowColor } from '@shared/palette'
 import { SANDBOX_BUILD_PTY_ID, type DesignPickEvent, type PickNote } from '@shared/types'
 import { formatPickDetails } from '@shared/pick-prompt'
+import { pickNoteToCardSeed } from '@shared/pick-card'
 import { GLYPH_BADGES } from './icons'
 import { useDeck } from '../store'
 import { useT, type TFn } from '../i18n'
@@ -256,6 +257,22 @@ export function App(): React.JSX.Element {
     setPendingDesignPick(null)
   }
 
+  /**
+   * Pick-context dialog "Create a card" (Part B entry point 1, external-app
+   * pick path): the pick is CONSUMED by the draft, no prompt sent -- same
+   * contract as BrowserView.tsx's own createPendingPickCard. This path has
+   * no webview to read a live URL from, so the pick's OWN pageUrl is what
+   * pickNoteToCardSeed sanitizes internally (same source composeDesignPickPrompt
+   * above already uses for the prompt path).
+   */
+  function createPendingDesignPickCard(note: PickNote): void {
+    const current = pendingDesignPick
+    if (!current) return
+    const seed = pickNoteToCardSeed(current.pick, note, { url: current.pick.pageUrl })
+    useDeck.getState().openRoadmapDraft(seed)
+    setPendingDesignPick(null)
+  }
+
   // Ctrl+Shift+F toggles the cross-session search panel. Terminals swallow the
   // combo before the PTY sees it (TerminalTile's key handler) but let the DOM
   // event bubble up to this window-level listener.
@@ -303,6 +320,7 @@ export function App(): React.JSX.Element {
             shot="none"
             onSend={sendPendingDesignPick}
             onCancel={cancelPendingDesignPick}
+            onCreateCard={createPendingDesignPickCard}
           />
         )}
         <div className={`mview${view === 'agents' ? '' : ' view-hidden'}`}>
@@ -366,6 +384,7 @@ export function App(): React.JSX.Element {
           shot="none"
           onSend={sendPendingDesignPick}
           onCancel={cancelPendingDesignPick}
+          onCreateCard={createPendingDesignPickCard}
         />
       )}
       {companionOpen && !remote && <CompanionDialog />}

@@ -95,6 +95,37 @@ away from the Browser view (unmounting `BrowserView`) loses any pending
 draft — accepted for this first version, same as any other unsaved-in-memory
 UI state in the Deck.
 
+### Persistence
+
+The review panel's pending annotations survive a window reload or app
+restart: written to `review-pending.json` under the app's state directory
+(`main/review-state-service.ts`), debounced ~300ms after every change to
+`pendingAnnotations`, and cleared immediately (not waiting on the debounce)
+on Send or Discard. Loaded once on mount and validated STRICTLY: any single
+bad item, or a screenshot path that fails a containment/existence check,
+fails the WHOLE load rather than restoring a half-good draft — a review is
+one unit the operator composed together. A missing file is the normal
+"nothing was ever saved" state and stays silent; any other load or save
+failure (corrupt file, main's validator refusing a save) reports to the
+renderer's error log and surfaces as a toast, never a silent catch.
+
+### Roadmap cards
+
+Two ways a review finding becomes a roadmap card instead of a prompt
+(`shared/pick-card.ts`), neither touching the docked agent. The pick-context
+dialog's "Create a card" seeds a roadmap DRAFT (`openRoadmapDraft`) from the
+single pick and its note and switches to the Roadmap view — nothing is
+written until the operator saves it there, and the pick is consumed by the
+draft rather than delivered as a prompt. The review panel's "Create cards"
+instead creates one card PER pinned finding directly (`roadmapUpsert`, one
+call each, in order), after a confirmation naming the count. Intent maps to
+roadmap kind (`fix`→bug, `change`→feature, `question`/`approve`→idea) and
+priority to MoSCoW (`blocking`→must, `important`→should, `suggestion`→could).
+Cards land in the Deck's project roadmap — the app-wide project, the same
+scope the Roadmap view shows — and the review itself is left as-is
+afterwards: cards and the agent prompt are complementary sinks for the same
+findings, so the operator may still send the review too.
+
 ## Viewport presets
 
 Render the page at a device size (iPhone SE, iPad, laptop…) centred in the
@@ -104,22 +135,65 @@ were looking at.
 
 ## Draw mode (`✏`)
 
-Sketch freehand over the page (red strokes on a canvas overlay), then `📸`:
-the page screenshot is composited with your strokes, saved as a PNG under app
-state (pruned after 7 days), and its file path is pasted into the docked
-agent's prompt — the agent `Read`s the image and sees exactly what you
-circled. `⌫` clears the sketch, `Esc` exits. Covers the feedback the element
-picker can't express ("this whole block is misaligned").
+Sketch a region over the page on a canvas overlay — a red stroke, freehand or
+circle (two toolbar toggles next to `✏`: freehand draws the path as-is,
+circle inscribes an ellipse in the bounding box of the drag's start and end
+point). Covers the feedback the element picker can't express ("this whole
+block is misaligned").
+
+**Every completed stroke pins its own region into the same review panel an
+element pick fills** (see "Review mode" above) — draw mode has no send
+button of its own any more; sending is the panel's "Send review". The moment
+a stroke finishes (pointer up with at least two points, or a hold ending
+mid-stroke — see below), it becomes a `region` annotation (bounds, tool,
+page URL) alongside any pinned elements, with the same per-page cap (20),
+comment/intent/priority fields, and "Discard" behaviour. The canvas itself
+only ever shows the ONE in-progress stroke: the instant it is pinned the
+overlay is cleared, exactly like a pick leaves no mark on the guest page. A
+cropped screenshot of the stroke's own bounding box — padded for context,
+with the stroke burned back onto the crop at the right position and scale —
+is captured asynchronously and attached to the annotation, same
+`annotations/` folder and 7-day pruning as the element picker's auto-shot.
+Unlike that auto-shot, a FAILED region capture is not silent: the screenshot
+is the region's only evidence (there is no selector or HTML to fall back
+on), so a failure surfaces as a toast and the annotation stays pinned
+without one. `⌫` clears the in-progress stroke; `Esc` exits the toolbar
+toggle (armed strokes elsewhere — a hold in progress — are unaffected by
+Escape, only the toolbar mode).
+
+**Hold-to-draw**: holding Ctrl (Cmd on macOS) while the pointer is over the
+page shows the draw canvas for as long as the key is held, WITHOUT entering
+the toolbar's draw mode — the page stays interactive between holds, so a
+quick region note doesn't require toggling a mode on and back off. Ending
+the hold mid-stroke finishes it exactly like a pointer-up (the stroke is
+pinned, not dropped) unless the toolbar draw mode is *also* active, in which
+case the canvas stays up and the stroke keeps going. The modifier is watched
+from TWO places and merged: the guest page's own document (the pointer
+started over the page, before any canvas exists to intercept key events —
+the `<webview>` guest is a separate process from the host window) and the
+host window (once the canvas/toolbar has focus). Hold-to-draw applies to the
+web pane only — the window-mirror's still isn't interactive, so only the
+toolbar toggle (`✏`) applies there.
+
+Draw mode and the review panel are no longer mutually exclusive: they can be
+armed together (a stroke pins straight into a panel a review pick may
+already be filling). Only the element picker (`⌖`, single-pick INSPECT mode)
+stays mutually exclusive with both draw and review — picking and the
+review-multi-pick guest listener share the same document-level hooks, and
+the draw canvas overlay would swallow the guest's own pointer events
+regardless.
 
 ## Window mirror (`🪟`)
 
 The same pane can mirror **any OS window** (still capture, `⟳` refreshes):
-pick a window, annotate the capture with `✏`, send with `📸`. Design feedback
-on NATIVE apps — the Koryphaios window itself, a Tauri build, anything —
-with zero integration in the target. Element picking stays web-only; the
-sketch + the agent's multimodal `Read` answer the "which element" question
-for native targets. The embedded web page keeps its state while in window
-mode.
+pick a window, draw a region over the still with `✏` (freehand or circle)
+and send it through the review panel, same as the web pane — see "Draw
+mode" above. Design feedback on NATIVE apps — the Koryphaios window itself,
+a Tauri build, anything — with zero integration in the target. Element
+picking stays web-only; the sketch + the agent's multimodal `Read` answer
+the "which element" question for native targets. Hold-to-draw does not
+apply here (the still isn't interactive) — only the toolbar toggle does.
+The embedded web page keeps its state while in window mode.
 
 ## Recording (REC)
 

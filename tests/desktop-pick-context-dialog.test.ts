@@ -123,10 +123,16 @@ interface MountResult {
   onCancel: () => void;
   sendCalls: Array<{ note: PickNote; dontAskAgain: boolean }>;
   cancelCalls: number;
+  createCardCalls: PickNote[];
 }
 
-function mountDialog(p: ElementPick, shot: "pending" | "ready" | "none" = "none"): MountResult {
+function mountDialog(
+  p: ElementPick,
+  shot: "pending" | "ready" | "none" = "none",
+  withCreateCard = false
+): MountResult {
   const sendCalls: Array<{ note: PickNote; dontAskAgain: boolean }> = [];
+  const createCardCalls: PickNote[] = [];
   let cancelCalls = 0;
   const onSend = (note: PickNote, dontAskAgain: boolean): void => {
     sendCalls.push({ note, dontAskAgain });
@@ -134,17 +140,31 @@ function mountDialog(p: ElementPick, shot: "pending" | "ready" | "none" = "none"
   const onCancel = (): void => {
     cancelCalls++;
   };
+  const onCreateCard = withCreateCard
+    ? (note: PickNote): void => {
+        createCardCalls.push(note);
+      }
+    : undefined;
   act(() => {
-    root.render(React.createElement(PickContextDialog, { pick: p, shot, onSend, onCancel }));
+    root.render(
+      React.createElement(PickContextDialog, { pick: p, shot, onSend, onCancel, onCreateCard })
+    );
   });
   return {
     onSend,
     onCancel,
     sendCalls,
+    createCardCalls,
     get cancelCalls() {
       return cancelCalls;
     }
   } as MountResult;
+}
+
+/** The "Create a card" button -- present only when the caller wires onCreateCard. */
+function createCardButton(): HTMLButtonElement | null {
+  const buttons = Array.from(container.querySelectorAll(".modal-actions button")) as HTMLButtonElement[];
+  return buttons.find((b) => b.textContent === "browser.pickContextCard") ?? null;
 }
 
 function textarea(): HTMLTextAreaElement {
@@ -246,4 +266,35 @@ test("the summary renders the selector and sourceFile as TEXT, never injected ma
   expect(container.querySelector("b")).toBeNull();
   expect(container.innerHTML).not.toContain("<b>evil</b>");
   expect(container.innerHTML).not.toContain("<b>injected</b>");
+});
+
+// ---------------------------------------------------------------------------
+// "Create a card" (Card review-to-roadmap-card, entry point 1): a third
+// `.modal-actions` button, present only when the caller wires onCreateCard.
+// ---------------------------------------------------------------------------
+
+test("Create-a-card button is absent when onCreateCard is not passed", () => {
+  mountDialog(pick());
+  expect(createCardButton()).toBeNull();
+});
+
+test("Create-a-card button is present, between Cancel and Send, when onCreateCard is passed", () => {
+  mountDialog(pick(), "none", true);
+  const buttons = Array.from(container.querySelectorAll(".modal-actions button"));
+  expect(buttons).toHaveLength(3);
+  expect(buttons[0]!.textContent).toBe("common.cancel");
+  expect(buttons[1]!.textContent).toBe("browser.pickContextCard");
+  expect(buttons[2]!.textContent).toBe("browser.pickContextSend");
+});
+
+test("clicking Create-a-card calls onCreateCard with the same note shape Send would use, and never calls onSend", () => {
+  const m = mountDialog(pick(), "none", true);
+  act(() => setValue(textarea(), "file this as a card", "input"));
+  const { intent } = selects();
+  act(() => setValue(intent, "fix" satisfies PickAnnotationIntent, "change"));
+  act(() => createCardButton()!.click());
+
+  expect(m.createCardCalls).toHaveLength(1);
+  expect(m.createCardCalls[0]).toEqual({ comment: "file this as a card", intent: "fix", priority: undefined });
+  expect(m.sendCalls).toHaveLength(0);
 });

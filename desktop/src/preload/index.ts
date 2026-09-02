@@ -176,6 +176,9 @@ const api: DeckApi = {
   cancelDemoScenario: () => ipcRenderer.invoke('browser:demo-cancel'),
   listCaptureWindows: () => ipcRenderer.invoke('design:list-windows'),
   captureWindow: (id: string) => ipcRenderer.invoke('design:capture-window', id),
+  loadReview: () => ipcRenderer.invoke('browser:review-load'),
+  saveReview: (state) => ipcRenderer.invoke('browser:review-save', state),
+  clearReview: () => ipcRenderer.invoke('browser:review-clear'),
   ensureSupervisor: () => ipcRenderer.invoke('supervisor:ensure'),
   askHelp: (question: string, view: DeckView, transcript: HelpExchange[], selection?: HelpSelection) =>
     ipcRenderer.invoke('help:ask', question, view, transcript, selection),
