@@ -165,27 +165,16 @@ export function RoadmapFilterPanel({
   onToggleFold,
   t
 }: RoadmapFilterPanelProps): React.JSX.Element {
-  // Review round 3 (2026-08-10), MINOR (D4): 148 tag values made the panel
-  // ~4130px tall for 748px visible -- collapsed by default, same as any other
-  // section, just seeded differently.
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({ tags: true })
   const toggleSection = (key: string): void => setCollapsed((c) => ({ ...c, [key]: !c[key] }))
 
-  // Card 7dde9434: the same 148 values that forced the section collapsed also
-  // make it unreadable once opened, so the section sifts itself.
-  //
-  // The query lives HERE, next to `collapsed`, and not inside FilterSection,
-  // for the reason the big comment below spells out: the body is UNMOUNTED
-  // when the panel folds, so any state held inside it would be silently
-  // destroyed by a fold/unfold cycle. Same placement, same lifetime, same
-  // guarantee as the per-section collapse.
-  //
-  // Filtering is purely local, and that is a MEASURED choice, not a shortcut:
-  // `computeRoadmapFacets` (broker.ts) selects the tag buckets with no LIMIT
-  // and no truncation, so the list the renderer holds is the project's whole
-  // tag set -- narrowing it here cannot hide a value the operator could have
-  // reached otherwise. Had that query been capped, this field would have had
-  // to become a broker predicate, like the card search above it.
+  // Query state lives next to collapsed, not inside FilterSection, because the
+  // section's body unmounts when folded and would silently destroy any state
+  // held inside it.
+  // Filtering is purely local because computeRoadmapFacets selects tag buckets
+  // with no limit or truncation — the renderer already holds the project's
+  // whole tag set, so narrowing here cannot hide a value the operator could
+  // reach otherwise.
   const [tagQuery, setTagQuery] = useState('')
   const tagNeedle = tagQuery.trim().toLowerCase()
   const activeTags = criteria.tags ?? []
@@ -197,11 +186,9 @@ export function RoadmapFilterPanel({
   )
 
   return (
-    // Never mounted conditionally (card 7a2e76c6, DESIGN.md "Collapsible side
-    // panels"): folding is a modifier class on the SAME element. It used to be
-    // `{filterPanelOpen && <RoadmapFilterPanel/>}` in RoadmapView, which is why
-    // the control that undoes the fold had to live far away, in the view's
-    // action row -- a panel that unmounts takes its own control with it.
+    // Never mounted conditionally: folding is a modifier class on the same
+    // element, so the control that undoes the fold can live inside the panel
+    // itself instead of a separate view far away.
     <aside className={`rm-filter-panel${folded ? ' rm-filter-panel-collapsed' : ''}`}>
       {/* Review round 3 (2026-08-10), MAJOR (D5/D6): this header used to carry
           its OWN "Clear all" button, a second one alongside the chip bar's

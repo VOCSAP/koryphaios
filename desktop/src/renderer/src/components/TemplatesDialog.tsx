@@ -41,38 +41,21 @@ export function TemplatesDialog(): React.JSX.Element {
   const [deleting, setDeleting] = useState<TemplateSummary | null>(null)
   // Composer (PLAN C18): open state; path null = create fresh.
   const [composer, setComposer] = useState<{ path: string | null } | null>(null)
-  // Render key for a BLANK composer (card 290a14e2 review round 2), bumped at
-  // both places that open one: the composerSeed effect below and the
-  // manage-mode "New" button. `setComposer({ path: null })` alone does not
-  // remount <TemplateComposer> when one is already showing a blank draft --
-  // same type, same shallow-equal-looking state, no `key` change, so React
-  // reuses the instance, and TemplateComposer seeds its `useState` draft
-  // fields only on mount (its reload effect is guarded by `if (!path)
-  // return`). A second "New template…" while a draft is in progress left
-  // that draft on screen instead of a blank form -- pre-existing on the
-  // "New" button too, caught by the test-engineer's
-  // desktop-templates-composer-draft-reset test against production code.
-  // NOT the same mechanism as the `useRef` sentinel removed from the effect
-  // below: that one compared a value across component REMOUNTS; this one is
-  // a purely local render key, never compared to anything.
+  // Bumped at both places that open a blank composer: setComposer({ path: null
+  // }) alone does not remount TemplateComposer when one is already open, since
+  // React reuses the instance.
+  // TemplateComposer seeds its draft fields only on mount, so without a key
+  // change a second blank composer keeps showing the in-progress draft instead
+  // of a fresh form.
   const composerNonce = useRef(0)
-  // File > New template… (card 290a14e2): `composerSeed` is SELF-CLEARING --
-  // this effect resets it to 0 (both here and, since the review, at the
-  // store's own close path) the instant it acts on it. A first cut compared
-  // an ever-increasing counter against a `useRef` sentinel that only lived
-  // for this component instance; that broke the case it was meant to
-  // survive: closing the WHOLE dialog and reopening it later via an
-  // unrelated path (e.g. the home "Use template" button, no `composer` opt)
-  // remounts this component, which re-initialises the ref, so a STALE
-  // non-zero seed left over from an earlier "New template…" session forced
-  // the composer back open every time -- caught live via a CDP screenshot,
-  // not by the type/unit tests, which cannot see a remount's fresh `useRef`.
-  // With self-clearing, a plain boolean would behave the same across two
-  // SEPARATE trigger events (true -> false -> true is a real change either
-  // way): the counter now earns its keep only for two requests landing in
-  // the same React batch, where a boolean set to `true` twice collapses to
-  // one edge. It is the self-clearing, not the counter, that closes the
-  // remount-staleness bug above.
+  // composerSeed is self-clearing — reset to 0 immediately after acting on it,
+  // both here and at the store's own close path — rather than compared against
+  // a useRef sentinel, because that sentinel doesn't survive a full dialog
+  // remount (e.g. closing and reopening via a different entry point), which
+  // left a stale seed forcing the composer back open.
+  // A plain boolean would behave the same across two separate trigger events;
+  // the counter only matters when two requests land in the same React batch,
+  // where a boolean set true twice would collapse to one edge.
   useEffect(() => {
     if (composerSeed > 0) {
       composerNonce.current++

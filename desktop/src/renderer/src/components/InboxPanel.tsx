@@ -9,20 +9,14 @@ import { verdictAnswerKindFor } from './approval-verdict'
 import { resolveApprovalSender } from '../inbox-sender'
 
 /**
- * Operator Courrier (PLAN C12, refonte card 8fdac3dd): the entries addressed
- * to the reserved 'operator' peer, in ONE list whose three families stay
- * structurally distinct (see `InboxEntry` in shared/types.ts):
- *
- *  1. a peer MESSAGE — repliable (targeted announce), uncorrelated, ackable;
- *  2. an EVENT — no recipient at all, so no reply field is offered, ackable;
- *  3. a blocking QUESTION — repliable AND correlated: an agent is stopped
- *     until it is answered. It carries NO ack, not even a greyed one: the
- *     type `AckableInboxEntry` forbids passing it to `inboxAck` at compile
- *     time. Its counterpart is DECLINE, which is an answer (it settles the
- *     ticket and releases the agent with a refusal) rather than a dismissal.
- *
- * A click opens the full text in a modal; closing the modal NEVER acks, so an
- * entry opened without the time to handle it stays in the operator's way.
+ * Three structurally distinct entry families: a peer message (repliable,
+ * ackable), an event (no recipient, ackable), and a blocking question
+ * (repliable and correlated — an agent stays stopped until answered).
+ * A question carries no ack at all, not even a greyed one — AckableInboxEntry
+ * forbids passing it to inboxAck at compile time; its counterpart is decline,
+ * an answer that settles the ticket, not a dismissal.
+ * Closing the modal never acks, so an entry opened without time to handle it
+ * stays in the operator's way.
  */
 
 /** The three read-states, derived: an entry absent from the map is unread. */
@@ -108,8 +102,8 @@ export function InboxPanel(): React.JSX.Element {
   }, [messages, approvals])
 
   const open = entries.find((e) => reactKey(e) === openKey) ?? null
-  // The entry vanished under the modal (answered from the phone, rotated out):
-  // close rather than leave a dialog quoting something that no longer exists.
+  // Closes the modal rather than leaving it open on an entry that vanished
+  // underneath it (e.g. answered from the phone).
   useEffect(() => {
     if (openKey && !open) setOpenKey(null)
   }, [openKey, open])

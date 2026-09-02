@@ -5,29 +5,17 @@ import lightPlus from '@shikijs/themes/light-plus'
 import darkPlus from '@shikijs/themes/dark-plus'
 import { planHighlight, type CodeLang } from '@shared/code-lang'
 
-// READ-ONLY syntax highlighting for the Files viewer and the diff colorizer
-// (card 526665f7). Four decisions worth keeping in mind before touching this:
-//
-// 1. FINE-GRAINED, not the `shiki` barrel. `import … from 'shiki'` drags every
-//    grammar and every theme in: measured 9.64 MB of emitted chunks against
-//    2.38 MB for the table below, for the same two surfaces.
-// 2. JS regex engine, no WASM: an Electron renderer should not ship (nor
-//    fetch) a `.wasm` blob for a reading aid. `forgiving` keeps a grammar
-//    whose regex the JS engine cannot compile from throwing -- the affected
-//    token just stays unstyled.
-// 3. The loaders below are LITERAL dynamic imports typed `satisfies
-//    Record<CodeLang, …>`: one chunk per grammar, loaded the first time a file
-//    of that language is opened, and a `CodeLang` with no grammar is a
-//    COMPILE error (the failure this table exists to prevent is the runtime
-//    one, where the viewer blanks on an unmapped language).
-// 4. BI-THEME output: the light colour lands inline, the dark one in the
-//    `--shiki-dark` custom property, so flipping `data-theme` is pure CSS and
-//    never re-tokenises (see the `.shiki-code` rules in styles.css).
-// 5. TOKENISING IS SYNCHRONOUS AND BLOCKS THE WHOLE WINDOW. Only the grammar
-//    import below is async; `codeToTokens` runs on the renderer's main thread,
-//    so every tile and every terminal is frozen while it works (~4.2 ms per KB,
-//    measured in the renderer). That is what `planHighlight` bounds, and why
-//    this module yields between blocks. Do not "simplify" either away.
+// Imports each grammar individually rather than the shiki barrel, which drags
+// in every grammar and theme; JS regex engine only, no WASM blob, with
+// forgiving mode so an uncompilable grammar's regex leaves its tokens unstyled
+// instead of throwing.
+// Loaders are literal dynamic imports typed as Record<CodeLang,…>, so a
+// CodeLang with no grammar is a compile error rather than a runtime blank.
+// Bi-theme output: light lands inline, dark in --shiki-dark, so flipping
+// data-theme is pure CSS and never re-tokenises.
+// codeToTokens runs synchronously on the renderer's main thread and freezes
+// every tile and terminal while it works — planHighlight bounds this by
+// yielding between blocks; do not remove that yielding.
 
 type GrammarLoader = () => Promise<{ default: LanguageRegistration[] }>
 

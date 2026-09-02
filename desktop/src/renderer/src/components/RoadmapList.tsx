@@ -10,21 +10,13 @@ import { KIND_ICONS, RoadmapItemModal } from './RoadmapItemModal'
 import { DEFAULT_HOLD_GESTURE, HoldGesture } from '@shared/hold-gesture'
 import { buildAppendToQueue } from '@shared/workflow'
 
-// Mobile roadmap (PLAN MB4 — EXPLORATION §4): ONE column at a time (status
-// tabs + counters), full-width cards auto-sorted by MoSCoW, explicit moves
-// through the action sheet, and the FLOATING BASKET: long-press seizes a card
-// (haptic), moving detaches it into a thumbnail tray docked above the tab
-// bar; navigate to the target column and tap the thumbnail to drop it there.
-// Same five roadmap IPC calls as the desktop kanban — presentation only.
-//
-// Card 3b0fda5f: sources its data from the same useRoadmapData() hook as the
-// desktop kanban (RoadmapView.tsx) instead of its own hand-rolled poll, so
-// the mobile layout's queueItem() also gets the reorder-id invariant for
-// free -- it composes buildAppendToQueue(queue, ...) against the hook's
-// branded QueueSource rather than re-deriving the append-with-closure
-// sequence by hand. This view never sets filter criteria, so `board` from
-// the hook always mirrors the full unfiltered list (no filter/search UI is
-// added here; that is desktop-only per this card's scope).
+// One column at a time, full-width cards, moves through an action sheet, plus a
+// floating basket: long-press seizes a card into a thumbnail tray docked above
+// the tab bar, and tapping the thumbnail after navigating drops it in the new
+// column.
+// Sources data from the same useRoadmapData() hook as the desktop kanban rather
+// than its own poll, so it gets the reorder-id invariant for free; this view
+// never sets filter criteria, so board always mirrors the full unfiltered list.
 
 const STATUSES: RoadmapStatus[] = ['idea', 'planned', 'in_progress', 'done']
 const PRIORITY_RANK: Record<RoadmapPriority, number> = { must: 0, should: 1, could: 2, wont: 3 }
@@ -61,10 +53,9 @@ function RoadmapCard({
   const [seized, setSeized] = useState(false)
   const locked = isLocked(item)
 
-  // Latest-ref pattern: the parent re-renders every POLL_MS (5s) with fresh
-  // inline callbacks. Reading them through a ref keeps the listener effect
-  // stable (deps: [locked] only), so a re-render mid-press no longer tears
-  // down the HoldGesture and aborts the seize/drag in progress.
+  // Callbacks are read through a ref rather than closed over directly, so the
+  // listener effect's deps stay [locked] only and a re-render mid-press does
+  // not tear down the gesture and abort an in-progress seize/drag.
   const cbRef = useRef({ onSeize, onDetach, onOptions })
   cbRef.current = { onSeize, onDetach, onOptions }
 

@@ -1,20 +1,8 @@
-// Unified model catalog for the model pickers (EXPLORATION-graph-chat C29):
-// graph chat targets, judge, and the agents' advanced create menu share one
-// mechanism — providers → models, favorites pinned by the operator.
-//
-// Two provider kinds (decision D10):
-// - FRONTIER (Anthropic / OpenAI / Gemini): executed through their CLIs
-//   (claude / codex / gemini). No reliable dynamic listing exists without an
-//   API key (the CLIs authenticate via OAuth and expose no `list models`
-//   command), so the catalog below is CURATED IN CODE — one constant to bump
-//   when a new frontier model ships. A frontier provider is only shown when
-//   its CLI is detected on the machine (decision D11).
-// - LOCAL (Ollama, LiteLLM, vLLM, any OpenAI-compatible endpoint): configured
-//   in Settings (name + base URL + optional API key) and their model list IS
-//   discovered dynamically (`/v1/models`, Ollama `/api/tags` fallback).
-//
-// Pure module (no node/electron imports): shared by main and renderer,
-// unit-testable under bun.
+// Two provider kinds: frontier (Anthropic/OpenAI/Gemini) executed through their
+// CLIs and curated in code, since none exposes a reliable dynamic model listing
+// without an API key; local (Ollama/LiteLLM/vLLM/any OpenAI-compatible
+// endpoint) configured in Settings with models discovered dynamically.
+// A frontier provider is only shown when its CLI is detected on the machine.
 
 import { GRAPH_CLIS, type GraphCli, type ModelTarget } from './graph'
 

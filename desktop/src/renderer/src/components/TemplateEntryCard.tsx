@@ -5,18 +5,14 @@ import type { TFn } from '../i18n'
 
 const EFFORT_LEVELS = ['', 'low', 'medium', 'high', 'xhigh', 'max'] as const
 
-/** Extracted from TemplateComposer.tsx into its OWN module (entry-card-
- * isolation lot, on top of card 0b9e0b07 lot B) so it is immune BY
- * CONSTRUCTION to tests/desktop-templates-composer-seed.test.ts's
- * `mock.module('.../TemplateComposer.tsx', () => ({ TemplateComposer: stub }))`.
- * bun's `mock.module` freezes the SPECIFIER's export surface to exactly the
- * keys the first-registered factory returns, for the rest of the process --
- * merely exporting EntryCard alongside TemplateComposer from the SAME file
- * never protected it, since any later import of that specifier in the same
- * process got `EntryCard: undefined` from the frozen, TemplateComposer-only
- * factory. This card is a pure, prop-driven component -- no `useDeck` call
- * anywhere inside it -- so mounting it standalone in a test needs no store
- * mock at all, and now no immunity-defeating shared specifier either. */
+/**
+ * Its own module, not exported alongside TemplateComposer from the same file:
+ * bun's mock.module freezes a specifier's export surface to exactly what the
+ * first-registered factory returns for the rest of the process, so a later
+ * import from a mocked specifier would get this export as undefined.
+ * Pure and prop-driven, no useDeck call anywhere inside it, so mounting it
+ * standalone needs no store mock at all.
+ */
 export function EntryCard({
   session,
   agents,

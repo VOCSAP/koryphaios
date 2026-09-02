@@ -27,49 +27,24 @@ export interface SessionDef {
    */
   effort?: string
   /**
-   * What this agent DOES (card a2f61172), e.g. 'developer' | 'reviewer' |
-   * 'team-lead'. Kebab, `^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`; empty/undefined
-   * => no role. Its OWN field (not folded into `args`) for the same reason as
-   * `effort` above: it must be re-emitted on every spawn, fresh AND fork-resume
-   * -- spawnSession() exports it as CLAUDE_PEERS_ROLE on both paths.
-   *
-   * TEMPLATE capture (card 0b9e0b07): captured by `toTemplate`/`templateToInputs`
-   * (`shared/template.ts`) in BOTH the operator-global and repo-local scope, no
-   * strip, no approval branch beyond the existing shell-fields gate. Operator
-   * arbitration 2026-08-27: a role opens no capability on Kory today -- it is a
-   * label a session is spawned under, re-normalised through the single
-   * production sink (`session-service.ts`'s `sanitizeRole(input.role ?? '') ||
-   * ''`) regardless of which scope the template came from. TEMPORAL RESERVE,
-   * not a security objection to this lot: the day an authorization decision is
-   * keyed on role (card 7defe381), this premise stops holding and a local
-   * template becomes hostile input #1 able to plant that role -- that
-   * arbitration must be REOPENED before shipping such a guard, not after.
-   *
-   * WORKSPACE capture (`toWorkspaceSessions`) is a SEPARATE, narrower decision,
-   * unchanged by the above: role stays deliberately absent there (a workspace
-   * file lives in `<projectDir>/.claude/claude-peers/workspaces/`, i.e. hostile
-   * input #1, and this exclusion was never reopened -- see card b313f0c3). COST
-   * OF THAT EXCLUSION, accepted knowingly: `toWorkspaceSessions` is a 6-field
-   * pick-list, so restoring a workspace respawns every tile with no role, and
-   * since an empty CLAUDE_PEERS_ROLE is now a DECLARATION of absence, that
-   * restore ERASES the role broker-side -- where `model`/`effort`/`agent` are
-   * merely forgotten.
+   * Kebab-cased role label (^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$);
+   * empty/undefined means no role. Its own field, not folded into args, so it
+   * can be re-emitted fresh on both a plain spawn and a fork-resume.
+   * A role opens no capability today -- it is re-normalised through the single
+   * production sink regardless of scope. The day an authorization decision is
+   * keyed on role, this premise stops holding; that arbitration must be
+   * reopened first, card 7defe381.
+   * Deliberately absent from workspace capture: a workspace file is hostile
+   * input too, so restoring one erases the role broker-side rather than merely
+   * forgetting it.
    */
   role?: string
   /**
-   * Card 3c085f1a: per-tile allow-list for the CORE claude-peers MCP surface
-   * (list_peers, send_message, roadmap_*, ...), exported as CLAUDE_PEERS_TOOLS
-   * (server.ts's own three-state contract). undefined = no field on this def
-   * at all -> the env var is OMITTED entirely -> full surface (server.ts
-   * treats "absent" and "present but empty" as opposite ends, see its
-   * TOOLS_ENV_VAR comment) -- never normalise this to `[]` or `''` the way
-   * `role` above is, that would silently mean "zero tools" instead of
-   * "unrestricted". Populated today ONLY via an embedded profile's own
-   * `EmbeddedAgent.peerTools` (team-embedded.ts), threaded through by
-   * deck-control.ts's spawnEntry; a manually-configured session or a template
-   * has no way to set it (same C8 code-constant-only rule as the profile
-   * catalog itself). No validation of the tool names is performed at this
-   * layer (card 3c085f1a leaves that to a follow-up once real lists exist).
+   * Per-tile allow-list for the core claude-peers MCP surface, exported as
+   * CLAUDE_PEERS_TOOLS. undefined omits the env var entirely, which means the
+   * full surface: never normalise it to `[]` or `''`, that would mean zero
+   * tools. Set only from an embedded profile's `EmbeddedAgent.peerTools`;
+   * tool names are not validated at this layer.
    */
   peerTools?: string[]
   /**
@@ -145,17 +120,12 @@ export interface SessionRuntime extends SessionDef {
   /** True while the session waits for the operator (permission/question, C11). */
   needsAttention: boolean
   /**
-   * True when this session runs the Claude Code CLI itself (session-kind.ts,
-   * card fd1914cc). FROZEN AT SPAWN (main's RuntimeState.claudeLaunch, set
-   * by startPty from the command actually used for that spawn) -- never
-   * recomputed afterward, so it cannot flip out from under an already-live
-   * session if the global launch command changes while it runs. Claude Code
-   * 2.1.235+ owns its own quota resume by default, but that is not provable
-   * active from here, so the Deck's detector only stays off for such a
-   * session while it follows the global default (`autoResume === undefined`
-   * -- see `quotaGateActive` in session-service.ts); an explicit per-session
-   * override always wins and restores normal detection+injection. Never
-   * persisted.
+   * Frozen at spawn from the command actually used, never recomputed afterward,
+   * so it cannot flip out from under an already-live session if the global
+   * launch command changes while it runs.
+   * The Deck's own quota-resume detector only stays off for such a session
+   * while it follows the global default; an explicit per-session override
+   * always wins. Never persisted.
    */
   claudeLaunch: boolean
 }
@@ -221,25 +191,11 @@ export type JoinAnnounceLevel = 'off' | 'lead' | 'all'
 export const JOIN_ANNOUNCE_LEVELS: JoinAnnounceLevel[] = ['off', 'lead', 'all']
 
 /**
- * Hand-kept mirror of TWO interfaces declared in repo-root shared/types.ts
- * (NOT this file): `Approval` and `ApprovalOrigin`. Verify by reading
- * `export interface Approval` and `export interface ApprovalOrigin` there —
- * repo-root shared/approval.ts imports both from that same file and
- * re-exports them for the main process (see approval-auth.ts). NOT an
- * import here: MEASURED, not assumed (team-lead's own review round, ask_operator
- * lot, 2026-08-13) — `import type { Approval } from '../../../shared/approval'`
- * in this file makes `npm run typecheck:web` fail with:
- *   src/shared/types.ts(N,M): error TS6307: File '.../shared/approval.ts' is
- *   not listed within the file list of project '.../desktop/tsconfig.web.json'.
- *   Projects must list all files or use an 'include' pattern.
- * (cascades into shared/approval.ts's own imports of shared/text.ts and
- * shared/types.ts, same TS6307). `npm run typecheck:node` passes with the
- * SAME import — this is a web-project-only `include` boundary, not a
- * cross-desktop-wide constraint. If tsconfig.web.json's `include`/`files`
- * setup changes, retry the import — see the file/commit that closes this
- * comment's premise before assuming it still holds. Until then: keep the
- * fields in sync by hand if the broker's shape moves; nothing enforces that
- * automatically.
+ * Hand-kept mirror of Approval and ApprovalOrigin from repo-root
+ * shared/types.ts, not imported: desktop/tsconfig.web.json's include list
+ * rejects a repo-root file (TS6307), while tsconfig.node.json already lists it.
+ * Keep the fields in sync by hand if the broker's shape moves -- nothing
+ * enforces that automatically.
  */
 export type ApprovalStatus = 'pending' | 'answered' | 'expired_notif' | 'abandoned'
 export type ApprovalKind = 'permission' | 'question' | 'plan'
@@ -481,22 +437,14 @@ export interface CreateSessionInput {
   /** Designate the created session as the window's team-lead (PLAN C10). */
   lead?: boolean
   /**
-   * MAIN-only (PLAN C5): --mcp-config path re-passed on every spawn.
-   *
-   * DELIBERATELY the only channel for a team-lead deck-control bridge too
-   * (Card 3c322f10, piece 2, operator route): there is NO separate
-   * `teamLeadDeckBridge`-shaped marker field on this interface, and there
-   * must never be one. `CreateSessionInput` is the exact JSON shape a
-   * companion/phone client can populate verbatim (ipc.ts's `sessions:create`
-   * handler forwards it unreconstructed -- see Card 28d63a42, the open,
-   * separate carding of this whole class) and `sessions:create` is
-   * CHANNEL_TIERS 2, i.e. remote-reachable (shared/companion.ts) -- so any
-   * boolean living HERE that grants a capability is one a remote caller can
-   * set on itself, regardless of what convention says only main code should
-   * write it. The operator-route bridge decision therefore travels as a
-   * SEPARATE function parameter, never a property of this object: see
-   * `SessionService.create()`'s second (`opts`) parameter and
-   * `team-lead-bridge.ts`'s own header for the full reasoning.
+   * Deliberately the only channel for a team-lead deck-control bridge too:
+   * there is no separate teamLeadDeckBridge marker field, and there must never
+   * be one.
+   * CreateSessionInput is the exact JSON shape a companion/phone client can
+   * populate verbatim, and sessions:create is remote-reachable, so any boolean
+   * here that grants a capability is one a remote caller can set on itself.
+   * The operator-route bridge decision travels as a separate function parameter
+   * instead.
    */
   mcpConfig?: string
   /** MAIN-only (PLAN C8): --append-system-prompt-file path (supervisor anchor). */
@@ -717,17 +665,12 @@ export interface DispatchResult {
   /** Failure reason when not sent: 'empty-queue' | 'no-lead' | 'error'. */
   reason?: string
   /**
-   * Directive cards the Deck executed ITSELF during this dispatch (card
-   * bf76d37f), one entry per card whose execution resolved, in execution
-   * order. Independent of `sent`, which only ever describes the announce to
-   * the team-lead: a drain made only of directive cards executes work and then
-   * returns `{sent:false, reason:'empty-queue'}`, and this field is the only
-   * place that says so.
-   *
-   * A card whose execution THREW is absent from this array rather than present
-   * with empty lists -- nothing is known about what it reached, and an empty
-   * `unreached` would read as "everything was reached". Its journal line and
-   * its reportError call (runDirectiveWave, ./dispatch) remain its report.
+   * Directive cards the Deck executed itself during this dispatch, one entry
+   * per card whose execution resolved, in execution order. Independent of sent,
+   * which only describes the announce to the team-lead.
+   * A card whose execution threw is absent from this array rather than present
+   * with empty lists -- an empty unreached would read as everything was
+   * reached.
    */
   directives?: DirectiveDispatch[]
   /**
@@ -747,23 +690,10 @@ export interface DispatchedWaveMember {
   kind: string
 }
 
-// Dispatch requests (card bf76d37f) are NOT declared here. `DispatchRequest`,
-// `DispatchRequestOutcome`, `DispatchedCard` and `DispatchRequestStatus` live
-// ONCE, in the repo-root shared/types.ts the broker owns, and the three
-// main-process consumers import them from there
-// (`../../../shared/types`, the same relative form approval-auth.ts and
-// roadmap-service.ts already use).
-//
-// Why they are not mirrored like RoadmapItem: the mirror exists for shapes the
-// RENDERER consumes, and desktop/tsconfig.web.json really does refuse a
-// repo-root file (TS6307). These four are main-side only -- measured
-// 2026-09-01: zero occurrences under desktop/src/renderer or desktop/src/preload
-// -- and tsconfig.node.json ALREADY lists ../shared/types.ts in its include, so
-// the root file is in the node program. Importing removes the divergence risk
-// instead of adding a guard that watches for it.
-//
-// If a renderer consumer is ever added, this decision has to be revisited:
-// that is the day the mirror becomes mandatory.
+// DispatchRequest and its related types import directly from repo-root
+// shared/types.ts instead of being mirrored here: they are main-side only, and
+// tsconfig.node.json already lists that file, unlike the renderer-facing shapes
+// this file does mirror.
 
 /** Result of a direct assignment to one chosen peer (PLAN K6). */
 export interface AssignResult {
@@ -794,25 +724,14 @@ export interface StopOutcome {
   id: string
   peerId: string | null
   /**
-   * 'written' guarantees only that the pty write succeeded -- not that the
-   * terminal submitted it, that the agent received it, or that it will act
-   * on it (measured false at least once: card 6168b7f4). Soft stop is a
-   * request, not a guarantee (only pause/hard are); this value is why.
-   *
-   * 'refused-modal' (Vague 10 A2-1/A2-2 follow-up, cards 5dbf3255/63ca372f;
-   * card 120148eb added the second source below): the tile's own
-   * screen-state guard refused to write anything at all. Reachable in
-   * TWO modes, from two different guards: 'soft' (SessionService.
-   * injectCommand's own guard) and 'pause' (SessionService.interrupt's
-   * own gate on the same union, added by 120148eb -- interrupt() is no
-   * longer unconditional for 'pause'). 'hard' is deliberately left
-   * ungated (interrupt() skips the check for that mode), so 'hard' never
-   * produces this value. Mirrors DirectiveOutcome
-   * (session-service.ts) and InjectOutcome (agent-stop.ts); this is the
-   * THIRD hand-maintained mirror of the same union with no compile-time
-   * link between them -- adding a member here does not fail the other two's
-   * build, which is exactly how this value went missing the first time
-   * (roadmap debt card filed for the duplication itself, not fixed here).
+   * 'written' guarantees only that the pty write succeeded, not that the
+   * terminal submitted it or the agent received or acted on it -- soft stop is
+   * a request, not a guarantee.
+   * 'refused-modal' is reachable from two different guards (soft's own
+   * injectCommand guard, pause's own interrupt gate); 'hard' is deliberately
+   * left ungated and never produces this value.
+   * Hand-maintained mirror of DirectiveOutcome and InjectOutcome, with no
+   * compile-time link between the three.
    */
   result: 'interrupted' | 'written' | 'busy-timeout' | 'no-terminal' | 'error' | 'refused-modal'
 }
@@ -1038,24 +957,14 @@ const UNBOUNDED_NESTED_WITNESS_PATHS: readonly string[] = ['src/app.ts', 'a/b/c/
 const UNBOUNDED_NESTED_DOTFILE_WITNESS_PATHS: readonly string[] = ['src/.env', 'a/b/.secret']
 
 /**
- * True when `glob`, compiled and expanded exactly like `selectCopyPaths`
- * would, matches every witness in one of the four sets above — i.e. it does
- * not constrain the file name within whichever of those classes it targets,
- * and is equivalent to a whole-tree (or whole-dotfile-tree, or
- * whole-nested-subtree) match (audit 94f8cc0c, card 4b668844). Derived from
- * the matcher itself rather than a literal list of known-bad strings: a list
- * can only ever name the forms someone already thought of (`*`, `**`,
- * `**\/*`, `.*`), and missed `*.*`, `**\/**`, `?*`, `**\/*.*`, the backslash
- * form `**\*`, and the nesting-floor forms `*\/**`/`**\/*\/*` -- all of which
- * resolve to a whole-(sub)tree match once expanded the way the real matcher
- * expands it. RESIDUAL, written down rather than implied: this is a widening
- * list of witness DEPTHS, not a closed proof -- `*\/*\/**` (nesting floor of
- * 3) still escapes every set above, and every additional floor will need its
- * own witness rows. The real invariant this approximates is "the glob names
- * no secret it doesn't intend to," which is a different, harder question
- * than "does it match everything" -- tracked as a follow-up card rather than
- * solved here. Rejected by saneGlobs' write path ONLY (never silently
- * stripped from an already-persisted store at load time).
+ * True when glob, expanded exactly like selectCopyPaths would, matches every
+ * witness in one of the four sets above -- equivalent to a whole-(sub)tree
+ * match.
+ * Derived from the matcher itself rather than a literal list of known-bad
+ * strings, since a list can only ever name forms someone already thought of.
+ * A widening list of witness depths, not a closed proof -- a deeper nesting
+ * floor can still escape every set above. Rejected by the write path only,
+ * never stripped from an already-persisted store at load time.
  */
 export function isUnboundedGlob(glob: string): boolean {
   const patterns = expandCopyGlob(glob)
@@ -1184,17 +1093,12 @@ export interface SandboxStatus {
   /** Card 9e529177: mount-mode protection sub-policy state, see SandboxProtectionStatus. */
   protection: SandboxProtectionStatus
   /**
-   * Card e35b2791 round 2: a CLOSED, CUMULABLE set of reasons this
-   * RUNNING/STOPPED container needs a rebuild to pick up a security fix.
-   * Deliberately NOT a single boolean or a free-form string: an operator
-   * reading one generic "rebuild needed" message during an actual
-   * cross-project run-dir sharing incident would read a FALSE cause off a
-   * message written for a different reason (missing `:ro` protection
-   * binds) -- worse than no signal, because it reads as low-urgency comfort
-   * text instead of the security incident it actually is. Both reasons can
-   * be true at once on the same old container; SandboxView.tsx renders one
-   * line per reason present, each with its own i18n key. Empty array = no
-   * rebuild needed. Always empty when no container exists yet.
+   * A closed, cumulable set of reasons rather than a single boolean or
+   * free-form string: a generic message would let an operator read a false,
+   * low-urgency cause off an actual security incident.
+   * Both reasons can be true at once on the same old container; the view
+   * renders one line per reason present. Empty when no rebuild is needed,
+   * always empty when no container exists yet.
    */
   rebuildReasons: SandboxRebuildReason[]
   /** Last lifecycle error, operator-readable, or null. */

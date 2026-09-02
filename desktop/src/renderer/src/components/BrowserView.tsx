@@ -1,37 +1,13 @@
-// Embedded browser view (PLAN D1, experimental).
-//
-// Two ways in, one pane:
-//   - the 🌐 rail entry: full-width browser for focused web-design work;
-//   - the 🌐 button of an agent tile: the same browser with that agent's
-//     terminal DOCKED on the left (second xterm on the same PTY — the tile in
-//     the hidden Agents view stays mounted, so nothing is lost when leaving).
-//
-// The page lives in an Electron <webview> tag whose guest preload
-// (preload/browser-inspect.ts) provides inspect mode: pick an element in the
-// page and its description is injected into the docked agent's prompt as a
-// bracketed paste (vibeyard's ESC[200~…ESC[201~ + PTY-write pattern), ready to
-// be completed and submitted by the operator.
-//
-// Two more vibeyard-inspired grounding tools (D1b):
-//   - viewport presets: render the page at a device size; the active preset is
-//     appended to every element/annotation prompt so the agent knows which
-//     breakpoint the operator was looking at;
-//   - draw mode: sketch a region over the page on a canvas overlay -- freehand
-//     or a circle tool, toggled from the toolbar, or armed for as long as
-//     Ctrl/Cmd is held over the page ("hold-to-draw", see the "hold-to-draw
-//     watchers" section below). Every COMPLETED stroke becomes its own
-//     region annotation, pinned into the SAME review panel an element pick
-//     fills (see "----- draw mode -----" below), with a cropped screenshot
-//     that has the stroke burned in. Sending goes through the review panel's
-//     existing Send, never a draw-mode button of its own -- see
-//     docs/browser-design.md's draw-mode section for the full picture.
-//
-// D2a generalizes the pane beyond the web: a WINDOW mode mirrors any OS window
-// (desktopCapturer still) and the same draw-then-review flow annotates it --
-// design feedback on native apps (the Deck itself, a Tauri build…) with zero
-// integration in the target, minus hold-to-draw (the still isn't interactive,
-// so only the toolbar toggle applies there). Element picking stays web-only;
-// for native targets the sketch covers the "which region" question.
+// Two entries dock the same pane: the rail's full-width browser, and a tile's
+// browser button which docks a second xterm on the same PTY while the tile
+// stays mounted in the hidden Agents view, so nothing is lost when leaving.
+// Inspect mode injects an element description into the docked agent's prompt as
+// a bracketed paste; draw mode pins a cropped, stroke-burned screenshot into
+// the same review panel, and both send only through that panel's Send, never a
+// button of their own.
+// Window mode mirrors any OS window through the same draw-then-review flow;
+// element picking stays web-only, so the sketch is what answers "which region"
+// for native targets.
 
 import { useEffect, useRef, useState } from 'react'
 import { Terminal, type ITheme } from '@xterm/xterm'
@@ -698,24 +674,14 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
       prompt += formatPickDetails(pick)
       prompt += viewportContext()
 
-      // Best-effort auto screenshot (Chantier OD4, webview path only -- the
-      // external design-endpoint pick path in App.tsx has no capture
-      // capability and is untouched). ANY failure at any step degrades
-      // silently to delivering the prompt unchanged: the pick itself already
-      // succeeded, and a missing screenshot here is a normal state (the
-      // capture can race a navigation or the webview tearing down mid-flight),
-      // not an error worth a toast -- per the repo's best-effort-cache
-      // exception to "no silent errors". deliverPrompt is called exactly once
-      // per pick, from whichever branch runs.
-      //
-      // Highlight-free by construction, not by luck: shared/element-pick.ts's
-      // onClick calls handlers.onPick(pick) (which is what posts this very
-      // IPC message) and THEN calls exit() synchronously in the same
-      // handler, before returning to the event loop. exit() calls
-      // setHovered(null), which restores the element's saved boxShadow right
-      // there. So by the time this ipc-message listener runs at all -- let
-      // alone the async capture below -- the highlight is already gone from
-      // the guest page.
+      // Best-effort screenshot only: any failure at any step degrades silently
+      // to delivering the prompt unchanged, since the pick itself already
+      // succeeded and a missing screenshot is a normal race, not an error worth
+      // a toast.
+      // Highlight-free by construction: the guest's onClick posts this pick and
+      // then calls exit() synchronously before returning to the event loop, so
+      // the highlight is already restored by the time this listener — let alone
+      // the async capture — runs.
       if (webviewRef.current && pick.x !== undefined && pick.y !== undefined) {
         // Keep this handler itself synchronous (no `async` on onIpc): the
         // capture is fired as a detached IIFE so the ipc-message listener
@@ -918,18 +884,13 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
   }
 
   /**
-   * Panel "Create cards" (Part B, review-to-roadmap-card), confirmed action:
-   * one window.api.roadmapUpsert per pinned finding, in order, inside ONE
-   * `guarded` call. Sequential (not Promise.all): a mid-batch failure must
-   * stop the loop rather than fire the remaining upserts at a broker that
-   * just started erroring, and `guarded`'s own catch reports + toasts the
-   * failure exactly once. Cards created before that failure stay created --
-   * no rollback, no retry -- and are visible in the roadmap view even though
-   * the toast only fires on a FULL success (`created === total`).
-   *
-   * The review itself is left untouched either way: cards and the docked
-   * agent's prompt are complementary sinks for the same findings, so the
-   * operator may still Send this same review afterwards.
+   * One roadmapUpsert per pinned finding, sequential inside a single guarded
+   * call — not Promise.all — so a mid-batch failure stops the loop instead of
+   * firing the rest at an already-erroring broker.
+   * Cards created before that failure stay created; there is no rollback or
+   * retry, and the success toast only fires when created equals total.
+   * The review itself is left untouched either way, so the operator can still
+   * Send it afterwards.
    */
   async function createReviewCards(): Promise<void> {
     const wv = webviewRef.current
@@ -1032,11 +993,6 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     clearCanvasPixels()
   }
 
-  /**
-   * Toolbar draw toggle. Still mutually exclusive with INSPECT (picking) --
-   * the invariant comment on `reviewArmed`'s declaration above explains why
-   * -- but no longer exits the review panel: draw and review coexist now.
-   */
   function toggleDraw(): void {
     if (drawing) {
       exitDraw()

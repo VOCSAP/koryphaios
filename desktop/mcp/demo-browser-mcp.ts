@@ -1,16 +1,7 @@
-// demo-browser MCP server (REC scripted-scenario lot): the DEMO-DRIVER
-// agent's bridge to the Deck's embedded browser. A minimal, dependency-free
-// MCP stdio server (newline-delimited JSON-RPC 2.0) that forwards every tool
-// call to the per-run demo-control loopback endpoint
-// (desktop/src/main/demo-control.ts) — mirroring deck-control-mcp.ts.
-//
-// Runs under plain Node (packaged app: the Electron binary with
-// ELECTRON_RUN_AS_NODE=1). Built by `npm run build:mcp` to
-// deck-plugin/mcp/demo-browser-mcp.mjs.
-//
-// Env contract (set in the generated --mcp-config file, per run):
-//   DEMO_CONTROL_URL   http://127.0.0.1:<port>
-//   DEMO_CONTROL_TOKEN Bearer token minted per demo run
+// Demo-driver agent's bridge to the Deck's embedded browser: a dependency-free
+// MCP stdio server forwarding every tool call to the per-run demo-control
+// loopback endpoint.
+// Runs under plain Node (ELECTRON_RUN_AS_NODE=1).
 
 import { createInterface } from 'node:readline'
 

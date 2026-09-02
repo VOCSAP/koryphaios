@@ -100,19 +100,13 @@ export function formatPickDetails(pick: ElementPick, note?: PickNote): string {
   return `\n[element context]\n${lines.join('\n')}\n`
 }
 
-// ---------------------------------------------------------------------------
-// Annotate review report (Chantier OD5, DESIGN-ORCA-DOOP-ADOPTION.md §3.5):
-// up to PICK_BUDGET.annotationsMaxPerPage pinned elements, each with an
-// operator comment + intent + priority, folded into ONE structured
-// `## Design Feedback` message instead of one prompt per pick. Layout ported
-// from orca's browser-annotation-output.ts (MIT) -- including its backtick-
-// fence trick (a picked element's outerHTML can itself contain ``` runs) --
-// but this is its own function with its own shape, not a wrapper around
-// formatPickDetails above: that one is a compact inline block appended to an
-// existing sentence, this one is the whole message. English fixed labels for
-// the same reason as formatPickDetails: agent-facing technical data, not
-// operator-facing copy -- only the UI editing these fields is translated.
-// ---------------------------------------------------------------------------
+// Folds up to PICK_BUDGET.annotationsMaxPerPage pinned elements into one
+// structured Design Feedback message instead of one prompt per pick.
+// Layout ported from orca's browser-annotation-output.ts, including its
+// backtick-fence trick since a picked element's outerHTML can itself contain
+// ``` runs.
+// Its own function and shape, not a wrapper over formatPickDetails: that one is
+// a compact inline block, this is the whole message.
 
 /** Longest run of consecutive backticks in `content`, at least `floor` (orca's maxBacktickRunLength). */
 function maxBacktickRunLength(content: string, floor: number): number {
@@ -175,17 +169,11 @@ export function annotationLabel(a: PickAnnotation): string {
 }
 
 /**
- * The report body for ONE annotation: a `### <heading>` line, then Intent,
- * Priority, the element-or-region-specific lines (selector/source/react/
- * bounds/styles for a pick, Region/Bounds for a stroke), Screenshot when
- * present, HTML in a fenced block when present, Feedback, and a trailing
- * blank separator line. `heading` is caller-supplied text (no leading `### `)
- * so a batch report can number it (`formatAnnotationsReport` passes
- * `${i + 1}. ${annotationLabel(a)}`) while a single-card use (pick-card.ts)
- * can pass the bare label. Extracted from formatAnnotationsReport's forEach
- * body (Card review-to-roadmap-card phase) so that module can reuse the same
- * verbatim selector/bounds/screenshot/HTML/feedback lines for a roadmap
- * card's description instead of re-deriving them.
+ * The report body for one annotation: a heading line, Intent, Priority,
+ * element-or-region-specific lines, Screenshot/HTML when present, Feedback, and
+ * a trailing blank line.
+ * heading is caller-supplied text with no leading '### ', so a batch report can
+ * number it while a single-card use passes the bare label.
  */
 export function formatAnnotationSection(a: PickAnnotation, heading: string): string[] {
   const lines: string[] = [`### ${heading}`, `Intent: ${a.intent}`, `Priority: ${a.priority}`]

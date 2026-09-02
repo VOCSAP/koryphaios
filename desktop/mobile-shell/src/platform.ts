@@ -161,23 +161,16 @@ export async function reloadKey(store: KeyValueStore, key: string): Promise<void
 }
 
 /**
- * `CapacitorBarcodeScannerTypeHintALLOption.ALL`, inlined.
- *
- * The value is a literal rather than an import on purpose: importing the
- * plugin's enum pulls `html5-qrcode` (its web implementation) into a bundle
- * that is 15 KB and deliberately free of dependencies.
- *
- * ALL rather than `QR_CODE` (0), even though a pairing QR is all this app ever
- * scans, because the two degrade differently when the constant is wrong. The
- * hint crosses to Kotlin as an ordinal into an enum that lives in a prebuilt
- * AAR (`OSBARCScannerHint.entries.getOrNull(hint)`), which cannot be checked
- * from this repo. `getOrNull` answers null for an out-of-range ALL, which the
- * native side reads as "no format constraint" — degrading to scanning
- * everything. A wrong 0 instead silently selects some OTHER format, and the QR
- * then never scans, on device only. Note also that 0 is falsy: any
- * `hint || default` on the way through would erase it. Nothing in the current
- * chain does that (`call.getInt("hint")?.let` is a null check), but ALL costs
- * nothing and does not depend on it staying that way.
+ * Inlined value of CapacitorBarcodeScannerTypeHintALLOption.ALL rather than
+ * importing the plugin's enum, which would pull html5-qrcode (its web
+ * implementation) into an otherwise 15 KB dependency-free bundle.
+ * ALL rather than QR_CODE (0), even though a pairing QR is all this app ever
+ * scans: the hint crosses to Kotlin as an ordinal into a prebuilt-AAR enum, and
+ * an out-of-range ALL degrades to "scan everything" while a wrong 0 silently
+ * selects some other format and the QR then never scans, on device only.
+ * 0 is also falsy, so any `hint || default` on the way through would erase it —
+ * nothing in the current chain does that, but ALL costs nothing and does not
+ * depend on it staying that way.
  */
 const BARCODE_HINT_ALL = 17;
 

@@ -1,19 +1,9 @@
-// APPROVALS mode: the phone's link to the broker, through ntfy (PLAN N5).
-//
-// The other half of the split described in `paired-hosts.ts`. Everything here
-// is deliberately independent of companion mode:
-//
-//  - ONE pairing, not a list. It belongs to an OPERATOR, not to a machine, so
-//    every Deck of that operator reaches this phone through it — including
-//    Decks the phone has never met and could not reach on the LAN.
-//  - It must work with NO Deck reachable at all. Nothing in this file touches
-//    a host, an address on the local network, or a companion credential.
-//  - Its threat model is different: the payload is a relay credential, not a
-//    session credential, and it survives app restarts by design.
-//
-// The wire format is imported from `notify/ntfy-protocol.ts` — the same module
-// the broker uses. Sharing it is what keeps the two ends from drifting; it is
-// dependency-free precisely so it can be bundled into a WebView.
+// One pairing, not a list: it belongs to the operator, not a machine, so every
+// Deck of that operator reaches this phone through it, including ones the phone
+// has never met.
+// Deliberately independent of companion mode: must work with no Deck reachable,
+// and its payload is a relay credential — not a session credential — that
+// survives app restarts by design.
 
 import {
   decodePairingPayload,

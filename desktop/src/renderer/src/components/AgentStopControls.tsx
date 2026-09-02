@@ -4,35 +4,24 @@ import { GLYPH_ACTIONS } from './icons'
 import { ConfirmDialog } from './ConfirmDialog'
 import { type TFn } from '../i18n'
 
-// Card aaf4537d, lot 4: fleet-wide stop controls in the "in progress" column
-// head of the kanban board. Three DISTINCT operator gestures, never one:
-//
-//   pause -- interrupt every agent, KEEP their cards locked (reversible pause)
-//   soft  -- ask every agent to stop at its next turn and hand its card back
-//   hard  -- interrupt now AND release every card those agents hold
-//
-// Soft is the default face of a SPLIT button whose embedded arrow flips it to
-// hard and back; the action played is always the one DISPLAYED, so the operator
-// never fires a mode they cannot see. Pause is a separate button, left of the
-// split pair: it does not share the stop semantics (nothing is handed back), and
-// severity then reads left-to-right, least destructive first.
-//
-// The component owns its own state on purpose: RoadmapBoard is a props-driven
-// child of RoadmapView and none of this belongs to the board's data flow.
+// Three distinct operator gestures: pause interrupts every agent and keeps
+// their cards locked (reversible); soft asks each to stop at its next turn and
+// hand the card back; hard interrupts now and releases every card.
+// Soft is the default face of a split button whose arrow flips it to hard; the
+// action played is always the one displayed, so the operator never fires a mode
+// they cannot see.
+// Pause is a separate button, left of the split pair, since it does not share
+// the stop semantics — severity then reads left-to-right, least destructive
+// first.
 
 /**
- * Narrow, OPTIONAL view of the two bridge methods. Typing them optional is not
- * decoration: an older packaged preload has no `agentsStop`, and the control
- * must then degrade to "disabled, with a readable reason" instead of throwing on
- * a call to `undefined`. `peerIds` absent = every live tile; present and
- * non-empty = only those peers; an EMPTY array is refused main-side and must
- * never be sent, so an escalation with nothing to target is not offered at all.
- *
- * Derived from `DeckApi` rather than redeclared: a cast would make a RENAMED
- * method (a bug) indistinguishable from an absent one (legitimate degradation),
- * and tsc would stay green while these three controls went dead for good.
- * `DeckApi` is assignable to a `Partial<Pick<>>` of itself, so no cast is
- * needed and a rename fails HERE, at compile time.
+ * Typed optional, not decoration: an older packaged preload has no agentsStop,
+ * and the control must then degrade to disabled-with-reason instead of throwing
+ * on a call to undefined.
+ * peerIds absent means every live tile; present and non-empty targets only
+ * those; an empty array is refused main-side and must never be sent.
+ * Derived from DeckApi rather than redeclared, so a renamed method fails here
+ * at compile time instead of silently going dead behind a cast.
  */
 type StopApi = Partial<Pick<DeckApi, 'agentsStop' | 'agentsStopState'>>
 
@@ -49,12 +38,10 @@ function interrupted(r: StopReport): StopOutcome[] {
 }
 
 /**
- * The soft path. `written` states that the pty WRITE succeeded and nothing more --
- * not that the agent read it, not that it will stop. Measured 2026-08-12 on a
- * live tile: the message text sat at the prompt UNSUBMITTED while the outcome
- * counted as a success, and a manual carriage return submitted it. So the copy
- * says "transmitted", never "stopped", and these tiles stay escalable: a soft
- * stop is a REQUEST, pause and hard are the guarantees.
+ * `written` only means the pty write succeeded, not that the agent read it or
+ * will stop — the message can sit unsubmitted at the prompt.
+ * So the copy says "transmitted", never "stopped", and these tiles stay
+ * escalable: a soft stop is a request, pause and hard are the guarantees.
  */
 function transmitted(r: StopReport): StopOutcome[] {
   return r.outcomes.filter((o) => o.result === 'written')
@@ -74,20 +61,16 @@ function unreachable(r: StopReport): StopOutcome[] {
 }
 
 /**
- * The screen-state guard (Vague 10 A2-1/A2-2 follow-up, session-service.ts)
- * refused to write anything at all -- not busy, not unreachable, not a
- * confirmed write: the tile's screen looked like an open dialog where either
- * gesture could have quit the session or accepted something in the
- * operator's name, so nothing was sent. Reachable in TWO modes, from two
- * different guards: 'soft' (SessionService.injectCommand's own guard) and
- * 'pause' (SessionService.interrupt's own gate on the same union, card
- * 120148eb -- interrupt() is no longer unconditional for 'pause'). 'hard'
- * is deliberately left ungated, so it never lands in this bucket. Its own
- * bucket on purpose (team-lead, 2026-08-17): folding it into `stragglers`
- * would claim the agent is "still busy" (false -- it may be sitting idle at
- * a dialog), and folding it into `unreachable` would claim the tile could
- * not be reached at all (also false -- the Deck reached it and chose not to
- * write).
+ * The screen-state guard refused to write anything at all — not busy, not
+ * unreachable, not confirmed-sent — because the tile looked like an open dialog
+ * where either gesture could quit the session or accept something in the
+ * operator's name.
+ * Reachable from two separate guards: soft's own injectCommand guard and
+ * pause's own interrupt gate on the same union; hard is deliberately ungated
+ * and never lands here.
+ * Kept as its own bucket rather than folded into stragglers (would falsely
+ * claim the agent is still busy) or unreachable (would falsely claim the tile
+ * could not be reached at all).
  */
 function refusedModal(r: StopReport): StopOutcome[] {
   return r.outcomes.filter((o) => o.result === 'refused-modal')
@@ -194,11 +177,9 @@ export function AgentStopControls({ t }: { t: TFn }): React.JSX.Element {
   }
 
   /**
-   * The confirm always announces a COUNT: the subset's, or the fleet's. It also
-   * announces the MODE, and both halves must come from the same source as the
-   * fired action -- a subset confirm keyed on "targets are set" alone announced
-   * "arrêt net" while running a soft stop (measured in review 2026-08-12: the
-   * played action was right, the sentence was not).
+   * The confirm's count and mode must come from the same source as the action
+   * actually fired, or a subset confirm can announce the wrong mode for what
+   * runs.
    */
   const subsetSuffix = (m: StopMode): string => (m === 'pause' ? 'Pause' : m === 'soft' ? 'Soft' : 'Hard')
 

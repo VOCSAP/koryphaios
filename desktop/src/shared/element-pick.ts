@@ -443,25 +443,14 @@ export function buildPick(el: HTMLElement): ElementPick {
 }
 
 /**
- * Install inspect mode on the current document: crosshair cursor, hover
- * highlight, capture-phase click -> onPick(payload), Escape or one pick ->
- * teardown + onExit. Returns the enter/exit pair; enter is idempotent.
- *
- * Hover shortcuts (Chantier OD6, DESIGN-ORCA-DOOP-ADOPTION.md §3.6): a click
- * collapses whatever state produced it (an open dropdown, a hover menu)
- * before the pick can describe it. `C` picks the currently hovered element
- * without ever dispatching a click at the page, so the captured description
- * still shows that state. `S` is the same idea for a screenshot; it is
- * optional (`onShot`) because the external deck-design client (which has no
- * capture capability) does not pass it, and the key is then simply inert.
- *
- * Multi-shot review mode (Chantier OD5, DESIGN-ORCA-DOOP-ADOPTION.md §3.5):
- * `opts.multi` keeps inspect mode ARMED after a delivered pick (click, `C`
- * or `S`) instead of tearing down -- the operator pins several elements in
- * a row, and only Escape (or the host explicitly calling `exit()`) ends the
- * session. Default (`opts` omitted or `multi` falsy) is the original
- * single-shot behaviour, unchanged -- this keeps every existing caller
- * (single-pick preload, external deck-design client) source-compatible.
+ * Installs inspect mode: crosshair cursor, hover highlight, capture-phase
+ * click, Escape or one pick tears down. Enter is idempotent.
+ * 'C' picks the currently hovered element without dispatching a click, so the
+ * captured description still shows that state; 'S' does the same for a
+ * screenshot and is optional since the external deck-design client has no
+ * capture capability.
+ * opts.multi keeps inspect mode armed after a delivered pick instead of tearing
+ * down, so the operator can pin several elements in a row.
  */
 export function createInspectMode(
   handlers: {

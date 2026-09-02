@@ -1,59 +1,13 @@
-// Claude Code hooks -> remote approvals (PLAN-notifications-mobiles N2.a).
-//
-// Turns a session's blocking prompts into approvals the operator can settle
-// from a phone. Deterministic: no PTY scraping, the payload is structured JSON
-// straight from Claude Code.
-//
-// IT DOES NOT BLOCK. The hook posts the approval and exits immediately. There
-// is nothing to gain from holding the process open: Claude Code is ALREADY
-// waiting on its own dialog, and it keeps waiting until someone answers. The
-// answer is then applied by the Deck, which types it into the tile. Not
-// blocking removes a per-prompt hook process lingering for minutes, and with
-// it the whole question of how long a hook may legally block.
-//
-// WHICH EVENTS, AND WHY THOSE:
-//   PermissionRequest -> the tool-permission dialog. It fires only when a
-//     dialog actually appears, which is exactly our trigger. (PreToolUse fires
-//     on EVERY tool call, so wiring it here would raise an approval per tool
-//     use.) It carries a structured payload — tool, input, cwd — which is why
-//     it beats scraping the screen.
-//   Notification      -> `agent_needs_input` ONLY: the open questions no hook
-//     can settle (there is no documented hook for AskUserQuestion or plan
-//     approval). `permission_prompt` is skipped here because PermissionRequest
-//     already owns it — otherwise one dialog would raise two notifications.
-//     `idle_prompt` was ALSO mapped here until card 47baf25a, and that is what
-//     filed one blocking question per session in the operator inbox (ten
-//     entries on 2026-08-26, all titled "Claude is waiting for your input").
-//     It is not a weak signal, it is the OPPOSITE signal. Measured in
-//     claude.exe 2.1.247 (the version installed 2026-08-27; the binary is
-//     replaced often, so re-measure before trusting this paragraph against a
-//     later one): `sendIdleNotification` fires from a `setTimeout` whose body
-//     is guarded by, among others, `!isDialogOnScreen()` and
-//     `n >= getIdleNotifThresholdMs()`. So the CLI emits this type only once
-//     it has established that NO dialog is on screen, and a session actually
-//     asking something never emits it. Two corollaries the wording above hides
-//     and that cost a day to establish: `n` counts from
-//     `lastQueryCompletionTime`, the END OF A TURN, not from startup -- so
-//     this is one notification per turn nobody follows up within the
-//     threshold, and a restart merely synchronises many of them into the same
-//     minute. And the timer is not armed at all while `submitCount === 0`, so
-//     a session nobody ever talked to emits nothing whatsoever.
-//     Do not re-add it: the PTY carries no distinguishing evidence either
-//     (see docs/DESIGN-ACTIVITY-PREDICATE.md, section 2 fact 2, measured: the
-//     resting glyph is emitted in EVERY class including `dialog-open-no-esc`;
-//     and desktop/src/main/detect/activity.ts has no `blocked` state at all,
-//     so "at rest" and "blocked on a dialog" both read as 'idle'). This
-//     structured field is the only place the difference exists at all.
-//
-// SECURITY: the hook carries a RESTRICTED session credential (PLAN §6.8), read
-// from a chmod-600 file whose path arrives in the environment — the key itself
-// never touches argv or /proc/<pid>/environ. That credential may only `add`
-// for THIS window; it can never settle an approval. Only the Deck, holding the
-// operator key, can do that.
-//
-// FAIL-SILENT: any failure (no credential, broker down, malformed payload)
-// exits 0 having done nothing. The session is unaffected — it simply waits on
-// its dialog as it would without this feature.
+// Fire-and-forget: posts the approval and exits immediately rather than
+// blocking; Claude Code already waits on its own dialog until the Deck later
+// types the answer into the tile.
+// Wired only on PermissionRequest and Notification's agent_needs_input —
+// permission_prompt is skipped (already covered) and idle_prompt is
+// deliberately excluded, since it fires once no dialog is on screen.
+// Carries a restricted session credential (read from a chmod-600 file, never
+// argv/environ) that can only add for this window, never settle.
+// Fails silent: any error (no credential, broker down, malformed payload) exits
+// 0 and leaves the session waiting on its dialog as if the hook were absent.
 
 import { buildAuthProof, stripControl } from "../../shared/approval.ts";
 import {

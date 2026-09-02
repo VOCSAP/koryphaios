@@ -174,18 +174,14 @@ function badges(item: RoadmapItem, t: TFn): React.JSX.Element {
 }
 
 /**
- * Display name of a directive target, or null to fall back to the raw peer_id.
- *
- * The name is what the operator recognises; the peer_id stays visible next to it
- * because it is the ROUTING key and the only discriminator when two agents share
- * a display name -- same primary/secondary split as the directive editor
- * (`.rm-target-*` in RoadmapView). A card outlives the sessions it targets, so an
- * id matching nothing (dead or foreign peer) legitimately renders alone.
- *
- * peerId is a routing key, not a primary key on THIS list: a resumed session and
- * its dormant twin can both carry it, so the lookup resolves the OBJECT first
- * (live wins, then any) instead of a Map keyed by peerId, which would silently
- * pick one of the two.
+ * peer_id stays visible next to the display name because it is the routing key
+ * and the only discriminator when two agents share a name; a card can outlive
+ * the sessions it targets, so an id matching nothing legitimately renders
+ * alone.
+ * peerId is a routing key, not a primary key on this list — a resumed session
+ * and its dormant twin can both carry it, so the lookup resolves the object
+ * first (live wins, then any) instead of a Map keyed by peerId, which would
+ * silently pick one of the two.
  */
 function targetName(sessions: SessionRuntime[], peerId: string): string | null {
   const s =

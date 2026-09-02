@@ -1,22 +1,13 @@
-// Claude Code SessionStart hook -- keeps the Deck back-channel in sync with the
-// REAL current session id across in-process id rotations (notably /clear and
-// compaction), which server.ts cannot observe (its CLAUDE_CODE_SESSION_ID env is
-// frozen for the process lifetime, and /clear does not re-register the MCP).
-//
-// Install it as a SessionStart hook (matchers startup|resume|clear|compact) in a
-// settings.json that the Deck's claude sessions load. It is gated on
-// CLAUDE_PEERS_DESK_SESSION (the per-tile token the Deck injects), so any non-Deck
-// claude session runs it as a silent no-op.
-//
-// On each fire it reads the SessionStart JSON payload on stdin, takes the REAL
-// resumable id from `transcript_path` (its .jsonl basename -- the file --resume
-// actually reloads) and overwrites ~/.claude/peers/desk-session-<token>.txt. The
-// Deck re-reads that file at workspace save (SessionService.refreshLiveSessionIds)
-// so the persisted id is the post-/clear one, not the stale pre-/clear id.
-//
-// Run with bun (already on PATH for Deck sessions, since .mcp.json launches the
-// core via bun). Imports resolve relative to THIS file, so the cwd of the claude
-// session is irrelevant.
+// Keeps the Deck's back-channel session id in sync across in-process id
+// rotations (/clear, compaction) that server.ts cannot observe, since its
+// CLAUDE_CODE_SESSION_ID env is frozen for the process lifetime.
+// Gated on CLAUDE_PEERS_DESK_SESSION so any non-Deck session runs it as a
+// silent no-op.
+// Reads the real resumable id from the SessionStart payload's transcript_path
+// (its .jsonl basename) and overwrites
+// ~/.claude/peers/desk-session-<token>.txt.
+// Must run under bun; imports resolve relative to this file regardless of the
+// session's cwd.
 
 import { sanitizeSessionId, writeDeskSessionFile } from "../../shared/peer-cache.ts";
 

@@ -1,17 +1,9 @@
-// Draw-mode stroke model (embedded browser rework, docs/browser-design.md's
-// "Draw mode" section). Pure geometry, no DOM: a stroke is the operator's raw
-// pointer trail in CSS px, either 'freehand' (an arbitrary polyline, painted as
-// recorded) or 'circle' (an ellipse inscribed in the bounding box of the
-// drag's FIRST and LAST point only -- points recorded in between, the live
-// preview path, never affect a circle's own geometry). One completed stroke
-// becomes exactly one PickRegion (shared/types.ts) once BrowserView.tsx
-// computes its bounds and pins it into the review panel.
-//
-// paintStroke takes a CanvasRenderingContext2D-SHAPED parameter (not the real
-// DOM type) so this module carries zero DOM lib dependency and stays plain
-// bun-testable with a fake context object that records calls
-// (tests/desktop-draw-strokes.test.ts) -- same "pure module, DOM type erased
-// to its own minimal shape" convention as shared/pick-shot.ts.
+// A stroke is the operator's raw pointer trail in CSS px: 'freehand' an
+// arbitrary polyline, 'circle' an ellipse inscribed in the bounding box of the
+// drag's first and last point only -- intermediate points and the live preview
+// never affect a circle's own geometry.
+// paintStroke takes a CanvasRenderingContext2D-shaped parameter, not the real
+// DOM type, so this module stays DOM-free and bun-testable.
 
 export type DrawTool = 'freehand' | 'circle'
 
@@ -50,19 +42,11 @@ function boundingPoints(stroke: DrawStroke): DrawPoint[] {
 }
 
 /**
- * Bounding box of a stroke, in CSS px, or null when there is nothing to
- * bound: fewer than 2 points, or any point (of the tool's own bounding set --
- * see `boundingPoints`) carrying a non-finite coordinate. Numeric validators
- * must reject NaN/Infinity explicitly (CLAUDE.md) -- a pointer-event-derived
- * stream is never trusted blindly, and a non-finite value here would
- * otherwise silently propagate into a persisted PickRegion and the crop math
- * downstream (pick-shot.ts's computeBoxCropRect, which itself fails closed on
- * NaN but has no way to know a bound was already corrupt).
- *
- * Width/height are rounded OUTWARD (floor the min corner, ceil the max
- * corner) so a sub-pixel stroke never collapses to a zero-size box, then
- * floored at 1 so even a perfectly straight horizontal/vertical drag still
- * yields a paintable, croppable rect.
+ * Returns null when there are fewer than 2 points or any bounding point is
+ * non-finite -- a pointer-event-derived stream is never trusted blindly.
+ * Width/height round outward (floor the min corner, ceil the max) then floor at
+ * 1, so a sub-pixel or perfectly straight drag still yields a paintable,
+ * croppable rect.
  */
 export function strokeBounds(stroke: DrawStroke): StrokeBounds | null {
   if (!stroke || !Array.isArray(stroke.points) || stroke.points.length < 2) return null
@@ -177,16 +161,12 @@ export function paintStroke(
 }
 
 /**
- * Intersection of `bounds` with the visible box `[0, boxW] x [0, boxH]`, or
- * null when nothing of it is visible. A stroke may legitimately start above
- * or left of the canvas (pointer capture keeps delivering moves once a drag
- * began), so its raw bounds can carry negative x/y -- fine for the crop
- * math, which clamps to the bitmap on its own, but NOT for the persisted
- * PickRegion: main's review-state validator rejects negative coordinates
- * and a single rejected item fails the whole saved review (proved by
- * tests/desktop-review-state.test.ts "region with negative coordinate").
- * Callers persist and report the CLAMPED region and keep feeding the raw
- * bounds to the capture path.
+ * Intersects bounds with the visible box, or null if nothing is visible. A
+ * stroke's raw bounds can carry negative x/y (pointer capture keeps delivering
+ * moves once a drag began off-canvas) -- fine for the crop math, but the
+ * persisted PickRegion validator rejects negative coordinates.
+ * Callers persist the clamped region and keep feeding the raw bounds to the
+ * capture path.
  */
 export function clampBoundsToBox(
   bounds: StrokeBounds,

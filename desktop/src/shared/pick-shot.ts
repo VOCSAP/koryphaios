@@ -1,18 +1,10 @@
-// Element-pick screenshot crop math (Chantier OD4, DESIGN-ORCA-DOOP-ADOPTION.md
-// §3.3). Pure, no DOM: turns a picked element's viewport-CSS-px rect (OD1's
-// ElementPick.x/y/width/height) plus a captured bitmap's dimensions into a
-// source rect to crop, in the bitmap's own pixel space. Kept import-free
-// (only plain numbers in/out) so it stays bun-testable without Electron.
-//
-// Two subtleties ported from orca's browser-grab-screenshot.ts (MIT), cited
-// in the design brief:
-//   (a) the CSS->bitmap scale factor is derived EMPIRICALLY as
-//       capturedImageWidth / viewportCSSWidth, never from the primary
-//       display's devicePixelRatio -- wrong on mixed-DPI multi-monitor
-//       setups, since the webview can be rendered on a non-primary display.
-//   (b) fail closed to null ("no screenshot") on any degenerate input rather
-//       than emit an oversized or malformed crop -- the pick itself already
-//       succeeded and is delivered regardless (see BrowserView.tsx).
+// Turns a picked element's viewport-CSS-px rect plus a captured bitmap's
+// dimensions into a source rect to crop, in the bitmap's own pixel space.
+// The CSS->bitmap scale factor is derived empirically as capturedImageWidth /
+// viewportCSSWidth, never from devicePixelRatio, since the webview can render
+// on a non-primary display in a mixed-DPI setup.
+// Fails closed to null on any degenerate input -- the pick itself already
+// succeeded and is delivered regardless.
 
 /** Source rectangle to crop out of the captured bitmap, in bitmap px. */
 export interface ElementCropRect {
@@ -39,22 +31,12 @@ function isFiniteNumber(n: unknown): n is number {
 }
 
 /**
- * Map an axis-aligned box (a picked element's rect, or a draw-mode stroke's
- * bounding box -- shared/draw-strokes.ts's `StrokeBounds`) in viewport-CSS-px
- * onto a captured bitmap's pixel space, padded for context and clamped to
- * the bitmap bounds. Returns null (no screenshot, fail closed) when:
- *   - any input is NaN/non-finite (never trust a rect and image dimensions
- *     computed from an untrusted page, a pointer-event stream, or a raced/
- *     torn-down capture),
- *   - viewportCssW or the image dimensions are <= 0,
- *   - the padded, clamped crop area is degenerate (sw or sh <= 0) -- the box
- *     was entirely outside the image, or its reported size was itself
- *     negative/zero beyond what the padding can absorb.
- *
- * `computeElementCropRect` below is a thin wrapper over this for the
- * ElementPick shape (which carries OPTIONAL x/y -- see its own doc comment);
- * every other precondition and the whole padding/scale/clamp body live here
- * once, shared by both callers.
+ * Returns null (fail closed) when any input is NaN/non-finite, when
+ * viewportCssW or the image dimensions are <= 0, or when the padded, clamped
+ * crop area is degenerate.
+ * computeElementCropRect is a thin wrapper over this for the ElementPick shape;
+ * every other precondition and the padding/scale/clamp body live here once,
+ * shared by both callers.
  */
 export function computeBoxCropRect(
   box: { x: number; y: number; width: number; height: number },

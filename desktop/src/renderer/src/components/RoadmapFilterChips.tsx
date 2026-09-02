@@ -2,24 +2,15 @@ import type { RoadmapQuery } from '@shared/types'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import type { TFn } from '../i18n'
 
-// Card 3b0fda5f: removable chips for every active criterion, reachable
-// OUTSIDE the (collapsible, easy-to-forget-open) filter panel -- the
-// operator should be able to see and clear an active filter without
-// reopening the panel.
-//
-// Review round 2 (2026-08-10): `includeArchived` is a real, separate piece of
-// state (the panel's dedicated toggle, card 3b0fda5f point 4), not a member
-// of `criteria` -- it MUST be passed in and rendered as its own chip, or an
-// active "show archived" is invisible outside the panel, and "Clear all"
-// here must reset it too, or it silently diverges from the panel's own
-// Clear (which resets both).
-//
-// Card 442084b7 (team-lead's Q4 arbitration): `hideInactive` is the deliberate
-// INVERSE of includeArchived -- archive hides by default and reveals on an
-// opt-IN toggle, inactive shows by default and hides on an opt-OUT toggle
-// rendered here PERMANENTLY (never only inside the collapsible panel), so the
-// component can no longer return null when idle: this row now always shows at
-// least the hide-inactive control, even with zero criteria and archive off.
+// Removable chips for every active criterion, reachable outside the collapsible
+// filter panel so an active filter is visible without reopening it.
+// includeArchived is separate state that must be passed and rendered as its own
+// chip, and Clear-all here must reset it too, or it silently diverges from the
+// panel's own Clear.
+// hideInactive is the deliberate inverse of includeArchived (archive hides by
+// default and opts in, inactive shows by default and opts out) and renders here
+// permanently, so this row never returns null even with zero criteria and
+// archive off.
 
 interface Chip {
   key: string

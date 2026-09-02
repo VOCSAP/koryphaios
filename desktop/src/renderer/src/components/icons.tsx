@@ -2,23 +2,11 @@ import { useId } from 'react'
 import type { DeckView, RoadmapKind } from '@shared/types'
 import type { FrontierProviderId } from '@shared/models'
 
-// Greek-glyph icon set of the navigation rails (desktop rail + mobile tabs).
-// Hand-drawn inline SVGs — no icon font, no CDN — so the packaged app and the
-// companion client stay self-contained. Visual language (DESIGN.md §
-// "Iconography"): 24×24 grid, stroke-only (`currentColor`, width 1.5, round
-// caps/joins), no fills except tiny "dot" accents. Colour, hover/active states
-// and the attention glow are entirely CSS-driven through `currentColor` +
-// `drop-shadow`, which is why the SVGs must never hardcode a colour.
-//
-// Each glyph trades the generic VS Code metaphor for a mythological one
-// (Κορυφαῖος leads the chorus): temple = supervisor's home, theatre mask =
-// agents (the chorus), armillary sphere = browser, sealed scroll = files,
-// labyrinth = roadmap, constellation = graph, olive branch = worktrees,
-// pithos = the sandbox container (Diogenes lived in his jar), open volumen =
-// journal, winged tablet = companion, caduceus = inbox
-// (Hermes carries the messages), amphora = usage limits (the level left in
-// the jar). Git keeps the universal branch graph — recognisability wins over
-// lore for SCM.
+// Hand-drawn inline SVGs, no icon font or CDN, so the packaged app and
+// companion client stay self-contained.
+// 24×24 grid, stroke-only (currentColor, width 1.5, round caps/joins), no fills
+// except small dot accents; colour and hover/glow states are CSS-driven through
+// currentColor and drop-shadow, so an SVG here must never hardcode a colour.
 
 /** Shared frame so every glyph renders identically inside the rail spans. */
 function Svg({ children }: { children: React.ReactNode }): React.JSX.Element {
@@ -428,24 +416,14 @@ const IconPanelUnfold = (
   </Svg>
 )
 
-/** Folding FILTER panel — the ἠθμός, the strainer, fused with the bar stack.
- *  Operator's ruling (card `6aef4c54`, 2026-08-11): one sign carrying both
- *  ideas, the funnel for "filter" and the hamburger for "show/hide a panel",
- *  so the association needs no learning. The fusion costs nothing, because the
- *  two are the SAME primitive: `IconMenu` is three equal `h` bars, and a funnel
- *  is those same three bars with a taper (10 → 6 → 2 here). The taper must stay
- *  FRANK — halve it and the sign falls back to a bare hamburger, which the pair
- *  above warns says "a list", not "this panel folds".
- *  Two glyphs rather than one mirrored, and the constant/variable split is the
- *  pair's above: the funnel is the constant OBJECT (what folds), the chevron is
- *  the sign that changes direction (the gesture). That chevron is the pair's
- *  own, same shape, same size, same direction, translated +4 in x for the one
- *  reason that there is no frame here for it to sit inside — so the gesture
- *  reads identically in the roadmap filters and in the graph list (card
- *  `67c21dd5`, which keeps `panelFold`/`panelUnfold`), while the object
- *  differs, as it must: a conversation list is not a filter. Both spans are
- *  3.5 → 20.5 in x and centred on y 12, so this reads at the same optical
- *  weight as its neighbours. */
+/**
+ * One sign fuses filter (funnel) and fold (hamburger) because they are the same
+ * primitive: IconMenu's three bars tapered 10→6→2. Halving the taper falls back
+ * to a bare hamburger, which reads as "a list", not "this panel folds".
+ * The chevron is shared, same shape/size/direction, with the graph list's own
+ * fold toggle, so the gesture reads identically in both places even though the
+ * object differs.
+ */
 const IconFilterFold = (
   <Svg>
     <path d="M3.5 6.5h10M5.5 12h6M7.5 17.5h2" />
@@ -996,11 +974,9 @@ const IconRoleShip = (
 )
 
 /**
- * Herm: the roadside stone that names whoever it marks. The FALLBACK, so a
- * role typed through "Other…" still shows that the session HAS one (with the
- * label in the tooltip) instead of vanishing — an unknown role is unnamed
- * here, not absent, and rendering nothing would hide exactly the metadata the
- * role was added to surface.
+ * Fallback for an unmapped role: renders the herm rather than nothing, so the
+ * session still visibly has a role (named in the tooltip) instead of the
+ * metadata disappearing.
  */
 const IconRoleHerm = (
   <Svg>
@@ -1028,9 +1004,9 @@ export const ROLE_GLYPHS: Record<string, React.JSX.Element> = {
 }
 
 /**
- * The glyph for a peer's role, or `null` when the peer has NO role (the row
- * must then render exactly as it did before this card). Anything present but
- * unmapped gets the herm: no crash, no hole, and the tooltip still names it.
+ * Returns null when the peer has no role at all, so the row renders with no
+ * role glyph; anything present but unmapped gets the herm instead of a crash or
+ * a hole.
  */
 export function roleGlyph(role: string | undefined | null): React.JSX.Element | null {
   const key = (role ?? '').trim().toLowerCase()

@@ -1,26 +1,13 @@
-// COMPANION mode: the list of paired Decks (PLAN N5, multi-host).
-//
-// This file owns ONE of the shell's two pairings, and the distinction is the
-// whole point of the N5 split:
-//
-//   COMPANION (here)   the phone loads the UI SERVED BY a Deck, over the LAN.
-//                      Requires network proximity, one entry per Deck, and it
-//                      is screen mirroring: the host is the authority.
-//   APPROVALS (see approval-pairing.ts)   the phone is reached from ANYWHERE
-//                      through the broker and ntfy. No Deck involved, no
-//                      Wi-Fi involved, and it must keep working when no Deck
-//                      is reachable at all.
-//
-// They share nothing on purpose: separate storage keys, separate lifecycles,
-// separate threat models. Forgetting every companion host must not cost the
-// operator their approvals, and vice versa.
-//
-// ABOUT THE STORED CREDENTIAL. The desktop's `CompanionAuth.arm()` wipes every
-// credential each time the companion server starts, and the QR token is single
-// use. So a credential kept here is a RESUME hint, valid while that Deck run
-// lives — it buys back "put the phone down, pick it up an hour later" across an
-// app kill, and nothing more. When it is refused, the entry survives (address
-// and pin are still right) and only a fresh scan is needed.
+// Companion pairing (LAN, screen mirroring) is deliberately separate from the
+// approvals pairing (broker+ntfy, reachable anywhere): separate storage,
+// lifecycles and threat models, so losing one never costs the operator the
+// other.
+// The stored credential is only a resume hint, not a real secret: the desktop
+// wipes every credential on each companion-server start and the QR token is
+// single-use, so this buys back reconnecting after an app kill during the same
+// Deck run — nothing more.
+// When refused, the entry survives (address and pin still correct) and only a
+// fresh scan is needed.
 
 import { isPrivateHost } from "../../../shared/net.ts";
 import { COMPANION_CRED_STORAGE_KEY } from "../../src/shared/companion.ts";

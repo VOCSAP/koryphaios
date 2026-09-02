@@ -1,20 +1,10 @@
-// Card 3b0fda5f. The one data hook shared by both roadmap layouts
-// (RoadmapView.tsx desktop kanban, RoadmapList.tsx mobile list): two polls
-// against the broker's single /roadmap/list endpoint (extended in place by
-// card 15952e09), never one.
-//
-// Call A is always fetched with NO filter criteria (only `include_archived`,
-// which is orthogonal state, not a "criterion") -- this is the queue TRUTH
-// (the Workflow lane's QueueSource is minted from it, see queue below) and
-// the facet reference set. Call B is debounced 250ms and only fires once at
-// least one criterion is active; its result narrows the board. With zero
-// active criteria the board is call A's result directly and call B never
-// fires at all, so an idle filter panel costs nothing extra on the wire.
-//
-// queueSourceOf is minted HERE and only here (tests/desktop-workflow-queue-
-// source.test.ts's discipline sweep asserts exactly one occurrence across
-// the renderer tree) -- every reorder call site downstream receives the
-// already-branded `queue: QueueSource`, never the raw unfiltered array.
+// Two polls against the broker's single /roadmap/list endpoint, never one: call
+// A (no filter criteria) is the queue truth and facet reference set, call B is
+// debounced 250ms and only fires once a criterion is active.
+// With zero active criteria the board is call A's result directly, so an idle
+// filter panel costs nothing extra.
+// queueSourceOf is minted only here; every reorder call site downstream
+// receives the already-branded queue, never the raw array.
 
 import { useCallback, useEffect, useState } from 'react'
 import type { RoadmapFacets, RoadmapItem, RoadmapQuery } from '@shared/types'
