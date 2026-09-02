@@ -49,47 +49,24 @@ test('blocked channels all exist in the manifest', () => {
 })
 
 test('REMOTE_BLOCKED_CHANNELS derivation actually unions every tier>=3 CHANNEL_TIERS entry, not just the explicit floor', () => {
-  // Renamed (review round, correction 8): this test's original name --
-  // "REMOTE_BLOCKED_CHANNELS is complete" -- overclaimed. It cannot detect a
-  // channel missing a CHANNEL_TIERS entry altogether (that's the new
-  // regHandle-coverage test below); it only proves the DERIVATION mechanism
-  // itself (companion.ts's union spread over Object.entries(CHANNEL_TIERS))
-  // actually reads every tier>=3 entry instead of silently dropping some.
-  //
-  // CHANNEL_TIERS used to be purely declarative -- a channel could be tiered
-  // 3 and still be missing from the hand-written deny-list, nothing failing
-  // ('config:set', 'launch:set-global' were exactly that gap). This asserts
-  // the derived union (companion.ts, after CHANNEL_TIERS) actually covers
-  // the whole tier>=3 set, not just the channels someone remembered to list.
+  // Proves the derivation mechanism itself -- the union spread over
+  // Object.entries(CHANNEL_TIERS) -- actually reads every tier>=3 entry instead
+  // of silently dropping some; it cannot detect a channel missing a
+  // CHANNEL_TIERS entry altogether.
   for (const [channel, tier] of Object.entries(CHANNEL_TIERS)) {
     if (tier >= 3) expect(REMOTE_BLOCKED_CHANNELS.has(channel)).toBe(true)
   }
 })
 
-// companion-server.ts denies REMOTE_BLOCKED_CHANNELS then invokes -- a
-// regHandle'd channel with NO CHANNEL_TIERS entry is neither tier>=3 nor in
-// the explicit floor, so it is remotely invocable by DEFAULT (fail-open).
-//
-// Review round, second pass (reviewer measurement): a first version of this
-// guard hardcoded ipc.ts as the only file to scan and required the channel's
-// quote glued to the call's opening paren. Real domain was 112 registered
-// channels (101 in ipc.ts + 11 in index.ts, companion:*/approvals:*), not
-// the 99 that shape found -- 2 lost to multi-line `regHandle(\n  'chan',`
-// calls (browser:demo-run, help:ask), 11 lost to never reading index.ts at
-// all. Both gaps were SILENT: the guard read green while covering 99/112.
-//
-// Fixed two ways: (1) the file set is DISCOVERED by walking main/ for any
-// file containing a call-shaped `regHandle(` (not `api-registry.ts`'s own
-// `export function regHandle(channel: string, ...)` declaration -- the
-// negative lookbehind excludes that one specifically), so a third file that
-// starts calling regHandle tomorrow is picked up without editing this test.
-// (2) the extractor is FAIL-CLOSED on ITS OWN reach: it counts every
-// call-shaped `regHandle(` occurrence per file and compares that to how many
-// it could parse a plain single-quoted first argument out of. A gap (a
-// channel built via backtick, string concatenation, a double-quoted literal,
-// or anything else this regex can't read) is a NAMED, LOUD failure -- not a
-// silent undercount that still reads green because the rest of the domain
-// happens to be clean.
+// A regHandle'd channel with no CHANNEL_TIERS entry is neither tier>=3 nor on
+// the explicit floor, so by default it is remotely invocable (fail-open).
+// The file set is discovered by walking main/ for any file containing a
+// call-shaped `regHandle(`, excluding api-registry.ts's own declaration, so a
+// new caller file is picked up automatically.
+// The extractor is fail-closed on its own reach: it counts every call-shaped
+// `regHandle(` occurrence and compares that to how many it could parse a plain
+// single-quoted first argument out of, so an unparseable form (backtick,
+// concatenation, double quotes) is a loud failure, not a silent undercount.
 const MAIN_DIR = join(import.meta.dir, '..', 'desktop', 'src', 'main')
 
 /** Call-shaped `regHandle(`, excluding api-registry.ts's own declaration. */
@@ -143,27 +120,14 @@ test('agents:stop (trust-changing) is remote-blocked; agents:stop-state (read) i
   expect(REMOTE_BLOCKED_CHANNELS.has('agents:stop-state')).toBe(false)
 })
 
-// ask_operator lot (mutation review, trou 1): 'approvals:reply' and
-// 'approvals:decline' render a HUMAN VERDICT that a stopped agent consumes
-// and acts on directly -- unlike inbox:reply (a message; the recipient keeps
-// judgement) a remote companion answering here MANUFACTURES the human
-// consent that was the only thing stopping the agent (companion.ts's own
-// comment above EXPLICIT_REMOTE_BLOCKED_CHANNELS, 'ask_operator lot' section).
-// Both channels are tier 2 in CHANNEL_TIERS, BELOW the tier>=3 threshold that
-// REMOTE_BLOCKED_CHANNELS auto-unions -- so nothing derives their presence on
-// the floor; they are only blocked because EXPLICIT_REMOTE_BLOCKED_CHANNELS
-// hand-lists them. Measured (mutation review): removing either from that
-// list leaves desktop-companion.test.ts, desktop-approvals.test.ts and
-// mobile-shell-approvals.test.ts all green (70/70) -- nothing else in the
-// suite exercises this specific pair.
-//
-// This is a deliberately NAMED PAIR, not a derived rule: CHANNEL_TIERS has no
-// field encoding "renders a human verdict an agent consumes" (only the
-// numeric 0-3 sensitivity tier), and inventing one that doesn't exist in the
-// code to make this "derivable" would be exactly the fabricated taxonomy
-// this repo's conventions warn against. If a third channel gains this same
-// property later, it must be added to EXPLICIT_REMOTE_BLOCKED_CHANNELS AND
-// to this list by hand -- neither happens automatically.
+// approvals:reply and approvals:decline render a human verdict a stopped agent
+// consumes directly, unlike inbox:reply where the recipient keeps judgement --
+// a remote companion answering here manufactures the consent that was the only
+// thing stopping the agent.
+// Both are tier 2, below the tier>=3 threshold REMOTE_BLOCKED_CHANNELS
+// auto-unions, so they are blocked only because
+// EXPLICIT_REMOTE_BLOCKED_CHANNELS hand-lists them; a third channel with this
+// property must be added to both by hand.
 test('approvals:reply and approvals:decline (render a human verdict a stopped agent consumes) stay on the remote-block floor', () => {
   expect(REMOTE_BLOCKED_CHANNELS.has('approvals:reply')).toBe(true)
   expect(REMOTE_BLOCKED_CHANNELS.has('approvals:decline')).toBe(true)
@@ -276,19 +240,6 @@ test('recordFailure and a bad hello share one counter, not two', () => {
   expect(auth.isLocked('10.0.0.8')).toBe(true)
 })
 
-// Card 45c1999e review round: a `ws` Receiver-level behavioural test used
-// to live here, importing the real npm package via a deep relative path
-// into desktop/node_modules (Bun's builtin 'ws' shim silently ignores
-// maxPayload, so the bare specifier couldn't be used). REMOVED: this file
-// is in scripts/pure-module-partition.ts's CLEAN set, which runs in CI's
-// "Bun tests (pure modules)" step BEFORE "Install desktop deps"
-// (.github/workflows/desktop-build.yml) — desktop/node_modules does not
-// exist yet at that point, so the whole file failed to load (same root
-// cause as card f4a3ed1e, see tests/desktop-xterm-manifest-parity.test.ts's
-// header). It was also self-referential: the frame size was built FROM
-// COMPANION_MAX_PAYLOAD_BYTES + 1, so it stayed green regardless of what
-// that constant was actually set to — it proved the ws library enforces
-// its own option, not that this codebase picked the right value.
 test('COMPANION_MAX_PAYLOAD_BYTES is pinned to 1 MiB', () => {
   expect(COMPANION_MAX_PAYLOAD_BYTES).toBe(1024 * 1024)
 })

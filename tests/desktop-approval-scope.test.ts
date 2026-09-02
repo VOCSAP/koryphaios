@@ -1,26 +1,7 @@
-// spec_67d0b267 -- card 1def56da. The DECISION layer of approval authorization.
-//
-// WHY THIS FILE IS NAMED `desktop-*` DESPITE TESTING A CORE MODULE.
-// The prefix is the CI selector, not a topic label: `.github/workflows/
-// desktop-build.yml` line 79 collects by glob, and `tests/desktop-*.test.ts` is
-// the first of the ten. Measured 2026-08-19, and it is the reason this file
-// exists at all: the FOUR suites that cover approvals today
-// (tests/broker-approvals.test.ts 644 lines, tests/approval-hook.test.ts 370,
-// tests/broker-approval-reply.test.ts 258, tests/broker-project-key-alignment
-// .test.ts 137) match NONE of those ten globs, so 1409 lines of approval
-// coverage have never run on a CI runner. They cannot be renamed: they spawn a
-// broker and bind ports, which is exactly what that matrix excludes on purpose.
-//
-// So the guarantee was split. Everything that can be decided WITHOUT a database
-// lives in shared/approval-scope.ts and is proved here, under CI. Everything
-// that needs a live broker stays in the broker suites, and stays local. This
-// file does not replace them; it is the part of the contract that gets replayed
-// on Windows and macOS instead of only on this machine.
-//
-// It also proves what a source scan could not: that `project_key` for a SESSION
-// credential comes from the token even when the request body declares a
-// different one. That is the actual defect card 1def56da closes, and it is a
-// behaviour, not a shape.
+// project_key for a session credential is always derived from the token, even
+// when the request body declares a different one.
+// Everything decidable without a database is proved here; what needs a live
+// broker stays in the broker-prefixed suites.
 
 import { test, expect, describe } from "bun:test";
 import {
@@ -171,11 +152,10 @@ describe("approvalWhere is the single clause producer", () => {
   });
 
   test("an empty project_key is a VALUE in the clause, never a missing clause", () => {
-    // Team-lead arbitration, 2026-08-19. A wildcard here would be the
-    // cross-project leak written by our own hand, so the empty string has to
-    // travel as an ordinary parameter. It cannot be produced through the
-    // credential paths (both refuse it), so it is exercised on the row path,
-    // which is where a legacy row's '' actually arrives.
+    // An empty project_key must travel as an ordinary bound parameter, never a
+    // wildcard, or it becomes a cross-project leak.
+    // Both credential paths refuse an empty string, so this is exercised on the
+    // row path, where a legacy row's '' actually arrives.
     const legacyRow = { id: "ap-old", operator_id: "op-1", project_key: "" };
     const auth = createApprovalAuth({
       queryOne: <T,>(): T => legacyRow as T,

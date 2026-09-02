@@ -1,24 +1,7 @@
-// Card 3d121a74 lot L3-a. server.ts has TWO /register producers -- the boot
-// one and switch_group's -- and their bodies ALREADY DIVERGE: switch_group
-// omits claude_cli_pid, and the in-situ comment left by card a2f61172 says
-// verbatim that both sites must carry `role` "or the role silently disappears
-// on switch_group". That is a shipped precedent of the exact fault this lot
-// could repeat: adding the identity discriminant to one site only would leave
-// a switched-group peer silently back on the legacy directory-wide key, which
-// is the shared-row defect being closed.
-//
-// A test that checks ONE site passes while the other stays naked, so this one
-// compares the two bodies as SETS. Two assertions, deliberately complementary,
-// because either alone fails OPEN:
-//   - the symmetric difference must be exactly the ONE documented divergence,
-//     which catches any key added to (or dropped from) a single site;
-//   - every REQUIRED identity key must be present in both, which catches a key
-//     dropped from BOTH sites -- invisible to a symmetric difference, since
-//     removing it from both keeps the two sets equal.
-//
-// Pure source scan: no broker, no spawn, so it is named outside the `broker-`/
-// `server-` families and runs in the pure-module CI step (see
-// scripts/pure-module-partition.ts EXEMPTIONS).
+// Compares the two /register bodies as sets rather than checking one site: a
+// key added to or dropped from a single site is caught by the symmetric
+// difference, and a key dropped from both sites (invisible to that difference)
+// is caught by requiring every identity key present in both.
 
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";

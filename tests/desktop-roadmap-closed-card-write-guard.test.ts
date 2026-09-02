@@ -1,92 +1,13 @@
-// Card 99d3a9eb: a discipline test, in the shape of
-// tests/desktop-workflow-queue-source.test.ts (enumerate every real call
-// site by GLOB across the renderer subtree, fail closed the moment the
-// enumeration finds one the table does not already know about) -- not a
-// React-mount harness. Team-lead's own review measured that a mount would
-// have caught NONE of tonight's four defects (an i18n orphan a mount never
-// touches, a three-hop chain through two components, and two statically-
-// readable unconditioned handlers) -- this lot is a COVERAGE problem
-// (does a write site exist unaccounted for), not a sensitivity one (does
-// the masked entry stay masked), and coverage is what an enumeration proves.
-//
-// WHAT THIS PROVES: every current call site of `window.api.roadmapUpsert(`
-// or the per-file `upsert(` pass-through wrapper, in desktop/src/renderer,
-// is accounted for by an exact PER-FILE COUNT plus a documented reason list.
-// A NEW call site anywhere -- in a known file or a brand new one -- changes
-// that file's live count and fails the test, forcing a human to look at it
-// and extend the table, exactly the property that let team-lead's own menu
-// addition (442084b7, this same evening) slip the desktop-i18n test's
-// orphan check silently until re-measured by hand.
-//
-// KEYED BY FILE + COUNT, NOT FILE + LINE (review round 2 retouche): a
-// file:line key rougit on every cosmetic edit that merely shifts lines below
-// an unrelated change -- exactly the repo's own standing lesson that a link
-// to code must hold by PATH + SYMBOL, never file:line, because the line
-// moves and the symbol does not. A per-file line-number table degrades the
-// same way: someone updates the numbers mechanically to get back to green
-// without doing the review the table exists to force, and it stays green
-// while meaning nothing. Per-file COUNT is immune to a pure reshuffle
-// (nothing added or removed) while staying exactly as sensitive to a NEW
-// site (the count moves) -- see the two red-first probes below, one for
-// each half of that claim.
-//
-// WHAT THIS SCAN CANNOT SEE (asked for explicitly, review round 2):
-// 1. A NEW local wrapper under a DIFFERENT name (not literally `upsert`)
-//    that itself calls `window.api.roadmapUpsert` -- the wrapper's own
-//    definition line still matches `roadmapUpsert(` and moves its file's
-//    count (good), but every CALL SITE reaching the write through that
-//    differently-named wrapper is invisible to this pattern; a human
-//    reviewing the one new unclassified line would need to notice the
-//    fan-out themselves, this test does not enumerate it for them.
-// 2. A truly DYNAMIC dispatch (`window.api[someVar](...)` where `someVar`
-//    holds the string at runtime, never appearing as the literal identifier
-//    `roadmapUpsert` in source text) -- invisible to any source-text scan,
-//    would need real interpretation.
-// 3. Any OTHER write API by design -- `roadmapArchive`/`roadmapAssign`/
-//    `roadmapStop`/`roadmapReorder`/`roadmapDispatch` are out of this
-//    scan's scope on purpose (team-lead's own instruction named
-//    "roadmapUpsert / le wrapper upsert" specifically); Archive/Restore are
-//    the ONE surviving write action on a closed card by arbitrage 3, so
-//    scanning them here would be the wrong question, not a missed one.
-// 4. WHETHER a reason is actually TRUE. This test can only prove every site
-//    is NAMED with a reason, not that the cited guard genuinely reaches it --
-//    that remains a human review responsibility, same as any code review.
-// 5. WHICH specific site a reason describes, once more than one site shares
-//    a file -- the count+reasons-list form is an AGGREGATE correspondence
-//    (N sites, N reasons, matched by a human during review), not a precise
-//    per-site pin. Traded deliberately for immunity to line churn; a
-//    reviewer who wants "which exact call is reason #3" re-derives it by
-//    reading the file, same as before this test existed.
-// 6. A SWAP inside an already-known file -- one site added and one removed
-//    in the SAME file, same edit -- leaves that file's count unchanged and
-//    stays GREEN. This is the direct price of point 5's own line-immunity
-//    (review round 2's own retouche): counting occurrences instead of
-//    pinning lines cannot distinguish "nothing changed" from "one thing
-//    replaced another." Written down here as a KNOWN limit, not discovered
-//    the day it bites.
-// 7. Anything outside `desktop/src/renderer` -- the scan root is that
-//    subtree only. A write reaching `window.api.roadmapUpsert` from
-//    `desktop/src/main` (a different layer, a different API surface) would
-//    never be scanned. Defensible (this card's four families are all
-//    renderer UI), but unstated until now.
-// 8. Comments and string literals are NOT stripped before matching. A bare
-//    mention of `upsert(` or `roadmapUpsert(` in a comment or a template
-//    string inflates a file's count and fails the test -- but only in the
-//    NOISY direction (a real change is needed to go green again, nothing
-//    slips through unseen), never in the direction that would hide a real
-//    site. Worth knowing before chasing a false red as a code bug.
-//
-// Mirror-probe red-first proof (2026-08-31, mirror-probe recipe 1, reported
-// to the team-lead, never committed), TWO probes for the two halves of the
-// file+count claim:
-// - NEW SITE must still bite: added a new unguarded call
-//   (`upsert({id, priority})`) inside RoadmapList.tsx -- RED (that file's
-//   live count read 8, table expected 7). Reverting restored GREEN.
-// - PURE RESHUFFLE must stay silent: moved an existing call
-//   (RoadmapList.tsx's `addDep`) down by 12 blank lines with no site added
-//   or removed -- stayed GREEN (count unchanged), proving the retouche
-//   actually closes the noisy-on-cosmetic-edit complaint the file:line form
-//   had, not just in prose.
+// Enumerates every window.api.roadmapUpsert (or the per-file upsert wrapper)
+// call site under desktop/src/renderer, keyed by per-file count rather than
+// file:line so a pure line reshuffle can't false-red.
+// Blind spots: a differently-named wrapper's own call sites, truly dynamic
+// dispatch, other write APIs by design, whether a cited reason is actually
+// true, and a same-file swap (one site added, one removed) that leaves the
+// count unchanged.
+// Comments and string literals are not stripped before matching, so a bare
+// mention of upsert( inflates a count -- only in the noisy direction, never
+// hiding a real site.
 
 import { test, expect } from 'bun:test'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
@@ -149,19 +70,12 @@ const KNOWN_SITES: FileEntry[] = [
   }
 ]
 
-// NOT in KNOWN_SITES above, and NOT fixed as part of this card -- flagged to
-// the team-lead instead. RoadmapList.tsx's `applyMove` has two callers this
-// scan structurally cannot enumerate, because neither call contains the
-// literal text `upsert(` -- they call `applyMove(` one level removed from
-// the write itself: the Undo snackbar's onClick, and the "mark done"
-// ConfirmDialog's onConfirm. Both read an item snapshot captured only AFTER
-// moveTo()'s own `closed` guard already ran once, not re-checked at
-// click/confirm time -- a concurrent session closing the same card between
-// the snapshot and the click is invisible to a source-text scan (data-flow,
-// not a missing textual gate), and is a narrower, different hazard class
-// than B2's tap-through. This is exactly this file's header point 1's shape
-// (a call reaching the write through an intermediate, differently-named
-// function), demonstrated on real code instead of only asserted in prose.
+// RoadmapList.tsx's applyMove has two callers this scan can't see, since
+// neither call contains the literal text upsert(: the Undo snackbar's onClick
+// and the mark-done confirm dialog's onConfirm.
+// Both read an item snapshot captured before moveTo's own closed guard runs, so
+// a concurrent close between the snapshot and the click is invisible to a
+// source-text scan.
 
 const SCAN_ROOT = join(import.meta.dir, '..', 'desktop', 'src')
 

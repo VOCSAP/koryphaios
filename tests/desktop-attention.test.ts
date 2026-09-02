@@ -125,29 +125,6 @@ test("a genuinely raised flag is NOT cleared by a bare dev-channels title arrivi
   d.stop();
 });
 
-// --- Exemption coverage (debugger's fixtures, card 4f0143ff review): each
-// case is one way the dev-channels screen can degrade or be imitated.
-//
-// Which test guards which fix, MEASURED by reverting one change at a time
-// and re-running this file (final review of 4f0143ff). Do not trim this
-// suite by eye: a test's name says what it exercises, not what it protects,
-// and the sole guards below read like adjacent coverage.
-//
-//   revert `st.buf = ''` at raise time -> fails the two clear-side cases
-//     plus the reverse-order one. Sole guards of that fix.
-//   revert stillWaiting back to detectWaiting -> fails exactly ONE test,
-//     the reverse-order case. Sole guard of the raise/clear asymmetry.
-//   revert to the intermediate title-only exemption -> fails the
-//     reworded-accept-option case and the genuine-chooser-on-the-same-buffer
-//     case. Sole guards of the two-cue predicate. The other two exemption
-//     cases pass on BOTH versions: they document adjacent behaviour and
-//     protect nothing, which is fine as long as nobody counts them.
-//
-// NOT guarded by anything in this file, recorded rather than implied:
-// deleting the re-scan clearer outright, or making purgeScreenMemory a
-// no-op, leaves this suite fully green. Both mechanisms ship without a
-// sensitivity test; a card is open for the two that are missing.
-
 test("the channels exemption needs BOTH cues, so a reworded accept option stops exempting", () => {
   const titleOnly = `WARNING: Loading development channels
 ❯ 1. Continue anyway
@@ -212,17 +189,9 @@ test("streamed prose mentioning the exempted wording does not clear a raised fla
   d.stop();
 });
 
-// FIELD CAPTURE, card 00588e6c phase 2. spec_17343687. This frame was
-// SYNTHETIC until 2026-08-26 -- built from the pattern startup-ack.ts's
-// comment described, on the strength of a 2026-07-28 capture nobody kept.
-// It is now the real thing: tests/pty-harness/fixtures/channels-warning-
-// conpty-win.json holds 26 real chunks of one Windows PTY session, recorded
-// upstream of every detector by KORY_PTY_RAW_CAPTURE (pty-manager.ts,
-// proc.onData before handleData). The encoding the old fixture guessed was
-// right -- \x1b[1C between words -- but the guess was incomplete: the CLI
-// repaints the same dialog in LITERAL spaces ~130 ms later. Both forms must
-// stay exempted, so both are asserted below. Provenance and the measurement
-// itself live in tests/desktop-startup-ack.test.ts's field-capture block.
+// Both encodings of the channels-warning dialog must stay exempted: `\x1b[1C`
+// spacing between words, and the literal-space repaint the CLI produces roughly
+// 130ms later.
 type ChannelsChunk = { t: number; data: string };
 const CHANNELS_FIELD_CAPTURE: ChannelsChunk[] = JSON.parse(
   readFileSync(
@@ -286,17 +255,10 @@ test("purgeScreenMemory clears the retained buffer without touching a live waiti
   d.stop();
 });
 
-// Card c8d69928, residu 1 (root cause of the missing guard, mutation-measured
-// on the final review of 4f0143ff): the re-scan fallback (feed()'s
-// stillWaiting branch, attention.ts ~184) and purgeScreenMemory each have
-// ZERO sensitivity in this file before the two tests below -- deleting the
-// re-scan branch entirely, or replacing purgeScreenMemory's body with a
-// no-op, leaves the 16 tests above fully green. Every test above that raises
-// then clears does so via the busy-cue branch (attention.ts:168), which is
-// unconditional on buffer content and so proves nothing about either
-// mechanism. Measured 2026-08-05 by neutralizing each mechanism in turn and
-// re-running this file; see the commit message for the exact red-first
-// output of both.
+// The two tests below are the only ones in this file that exercise the re-scan
+// fallback and purgeScreenMemory specifically.
+// Every test above raises and clears via the unconditional busy-cue branch,
+// which proves nothing about either mechanism.
 
 test("card c8d69928 residu 1a: the buffer-slide clearer (path D) actually clears once the raising pattern leaves the MAX_BUF window", () => {
   const d = new AttentionDetector();
@@ -330,13 +292,9 @@ test("card c8d69928 residu 1b: purgeScreenMemory actually empties the buffer, ob
   expect(events).toEqual([{ id: "s1", waiting: true }]);
 
   d.purgeScreenMemory("s1");
-  // Deliberately NOT a busy cue: the busy-cue branch clears unconditionally
-  // regardless of buffer content (attention.ts:168) and would pass even if
-  // purgeScreenMemory were a no-op -- exactly the false-negative the
-  // pre-existing purge test above has. The bare dev-channels title matches
-  // neither WAITING_PATTERNS entry on its own, so stillWaiting() only
-  // reports "cleared" here if the buffer no longer carries PERMISSION_SCREEN's
-  // "❯ 1." from before the purge -- i.e. only if the purge actually emptied it.
+  // Deliberately not a busy cue, which clears unconditionally regardless of
+  // buffer content: this only reports 'cleared' if purgeScreenMemory actually
+  // emptied the buffer of the prior waiting pattern.
   d.feed("s1", DEV_CHANNELS_TITLE_ONLY);
   expect(events).toEqual([
     { id: "s1", waiting: true },

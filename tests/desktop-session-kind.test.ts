@@ -64,11 +64,9 @@ test("an unknown wrapper script is not detected as claude (documented gap, stays
   expect(isClaudeLaunch("npx some-other-cli")).toBe(false);
 });
 
-// ----- Widening (team-lead review, card fd1914cc): the predicate matches
-// ANY token, not only the first, so launches where the executable name
-// is not the first token are still detected. Per the documented asymmetry,
-// this is deliberately generous -- see the accepted-false-positive test
-// right after.
+// Deliberately matches any token, not only the first, so a launch where the
+// executable name isn't first is still detected -- a documented, generous
+// false-positive tradeoff.
 
 test("claude launched indirectly: npx claude, cmd /c claude, wsl claude, docker exec ... claude", () => {
   expect(isClaudeLaunch("npx claude --model opus")).toBe(true);

@@ -54,13 +54,9 @@ describe("verdictAnswerKindFor (chip -> answerKind routing)", () => {
   });
 });
 
-// Mutation review, MAJOR-1: the pre-fix code was `optionIndex === 0 ? 'allow'
-// : 'deny'` -- a CATCH-ALL where every index other than 0 (a future third Ink
-// option, a stray -1, or NaN) silently became the DESTRUCTIVE 'deny' verdict.
-// These probes pin the flipped shape: only optionIndex===1 is the decided
-// 'deny'; everything else degrades to the BENIGN 'text' (retype the label)
-// instead. Proven red against the pre-fix catch-all (all three used to return
-// 'deny'), green after.
+// Only optionIndex===1 resolves to the destructive 'deny' verdict; every other
+// index (a future third option, -1, NaN) degrades to the benign 'text' retype
+// rather than silently becoming 'deny'.
 describe("verdictAnswerKindFor -- degenerate/unknown 'permission' indices degrade to 'text', never silently to 'deny'", () => {
   test("a third option (index 2, e.g. a future 'always allow') is not silently 'deny'", () => {
     expect(verdictAnswerKindFor("permission", 2)).toBe("text");
@@ -88,13 +84,9 @@ describe("verdictAnswerKindFor -- arity is pinned so a label-based branch cannot
   });
 });
 
-// Mutation review, MINOR-3: 'plan' is a valid ApprovalKind (shared/types.ts)
-// with no current producer, and previously reached 'text' only by falling
-// into the same unconditional return that handles 'question' -- an omission,
-// not a decision. See the source's own comment on the 'plan' branch for why
-// 'text' is the correct default TODAY (no producer, and the channel is not a
-// pty chooser): if that stops being true, this test is the first thing that
-// should force a reader back to the comment.
+// 'plan' is a valid ApprovalKind with no current producer; it resolves to
+// 'text' as an explicit decision, not by falling into the same branch that
+// handles 'question'.
 describe("verdictAnswerKindFor -- 'plan' is an explicit decision, not a fallthrough", () => {
   test("'plan' resolves to 'text' regardless of index, including the indices that would mean allow/deny for 'permission'", () => {
     expect(verdictAnswerKindFor("plan", 0)).toBe("text");

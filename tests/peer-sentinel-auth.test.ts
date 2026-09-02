@@ -1,22 +1,7 @@
-// Card 78bf378d: the WS handshake in broker.ts now calls
-// refuseSentinelInstanceToken (broker.ts, HTTP-side helper) before its DB
-// lookup -- but broker.ts has zero exports and calls Bun.serve at module
-// scope (card e7b364dc's own precedent note, repeated in the DISCIPLINE
-// section of this card's brief), so it cannot be imported by a test. What
-// IS importable, and IS the actual refusal predicate both the 9 HTTP routes
-// and the new WS call site key off, is isSentinelInstanceToken -- a pure
-// function in shared/types.ts (card 37a2b8c7). This file pins its truth
-// table directly, no broker/WS harness needed, mirroring
-// tests/roadmap-lock.test.ts for shared/roadmap-lock.ts.
-//
-// Named tests/peer-*.test.ts (not tests/broker-*): the CI workflow
-// (.github/workflows/desktop-build.yml) collects `tests/peer-*.test.ts` but
-// excludes the whole `broker-*` family (see tests/desktop-ci-glob-coverage.test.ts).
-// This file imports only shared/types.ts, no startBroker, no live broker or
-// WS socket -- a broker-*-prefixed end-to-end test that opens a real WS and
-// exercises the sentinel-refusal close path is a separate, optional
-// follow-up per this card's brief, acceptable only because this pure truth
-// table exists first.
+// Pins isSentinelInstanceToken's truth table directly: broker.ts has zero
+// exports and calls Bun.serve at module scope, so it cannot be imported, and
+// this pure predicate is what every HTTP route and the WS handshake actually
+// key their refusal off.
 
 import { test, expect } from "bun:test";
 import { isSentinelInstanceToken, SENTINEL_DEFINITIONS } from "../shared/types.ts";

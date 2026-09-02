@@ -1,19 +1,9 @@
-// Coverage for loadAckStateWithMigrationSeed (desktop/src/main/inbox-store.ts):
-// a one-time, per-Deck MASS-ACKNOWLEDGEMENT path that runs on the very FIRST
-// read of ack state after this lot ships, for every operator. Nothing about
-// it ever replays: a defect here doesn't corrupt one edge case, it silently
-// erases whatever the operator had NOT yet processed, once, unreproducibly.
-// Team-lead named the five properties; the two decisive mutations below are
-// deliberate breaks of the real function, proven red, then reverted.
-//
-// The security property the whole mechanism rests on: `existsSync` is
-// checked BEFORE any read, never inferred from a parse/read failure. A
-// corrupt file is a corrupt file (loadAckFile's own separate catch already
-// degrades it to empty state) and must never look like an ABSENT one --
-// deriving "should I seed" from a read/parse failure instead of existence
-// would turn every future corruption incident into a silent mass-ack of
-// real unacked state, which is strictly worse than the badge this whole
-// feature exists to avoid.
+// loadAckStateWithMigrationSeed runs once per Deck, on the very first read of
+// ack state; a defect here silently erases whatever the operator had not yet
+// processed, once, unreproducibly.
+// existsSync is checked before any read, never inferred from a parse/read
+// failure -- treating a corrupt file as absent would mass-ack real unacked
+// state.
 
 import { test, expect } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";

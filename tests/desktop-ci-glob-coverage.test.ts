@@ -1,66 +1,8 @@
-// spec_f731f289 (amended): card 01c82fdf follow-up. The token-safe
-// roadmap-add fallback (cli-roadmap-add-no-token.test.ts) shipped uncovered
-// by CI: .github/workflows/desktop-build.yml's "Bun tests (pure modules)"
-// step listed an explicit glob set rather than running `bun test` bare, and
-// that set had never been checked against the real tests/*.test.ts
-// inventory. Team-lead review, 2026-08-03: a one-line fix for the single
-// missed file would have left the same gap open for the next new suite.
-//
-// Card 0bbac537 (2026-08-24): the glob allow-list itself is gone. The step
-// now runs `bun scripts/partition-pure-tests.ts`, which enumerates every
-// tests/*.test.ts file and runs all of it EXCEPT what
-// scripts/pure-module-partition.ts's EXEMPTIONS names -- a deny-list that
-// fails CLOSED (a new file is run by default; an exemption must justify
-// itself), replacing the allow-list that failed OPEN. This file now audits:
-//   - the workflow step's `run:` line invokes exactly that script (bounded
-//     parse, same discipline as the retired glob parser had);
-//   - EXEMPTIONS is honest in both directions (every exempted file really
-//     spawns a daemon; no non-exempt file quietly does);
-//   - EXEMPTIONS has no stale entry (names something that still exists);
-//   - a brand-new, non-exempt file is run by default (the deny-list's
-//     defining property, and the mutation proof for it);
-//   - the migration was NEUTRAL the day it landed: the deny-list's domain
-//     (all files minus EXEMPTIONS) is EXACTLY the domain the retired
-//     allow-list used to collect, measured against a frozen snapshot of
-//     that allow-list's glob patterns (frozen because the live workflow no
-//     longer contains them to parse -- see FROZEN_PRE_MIGRATION_GLOBS).
-//
-// EXEMPTIONS itself is NOT redefined here: it is imported from
-// scripts/pure-module-partition.ts, the single module partition-pure-tests.ts
-// (the script that actually runs the tests) also imports it from. Two
-// copies of a gating table is exactly the divergence CLAUDE.md's shared-table
-// rule warns about.
-//
-// Card f4a3ed1e (2026-08-28): EXEMPTIONS' reasons used to be honest about
-// WHY a file does not belong in this step but silent on whether anything
-// ELSE actually played it -- measured 2026-08-24, nothing did. Reviewer
-// 2026-08-28, measured against `git show HEAD:scripts/pure-module-partition.ts`:
-// the actual pre-fix wording was "the pure-module matrix is not for
-// integration suites" -- true, but making NO location claim at all, not the
-// "played elsewhere" framing a first pass at this fix assumed. That is why
-// auditExemptionLocations is fail-CLOSED (every reason must positively name
-// a verifiable step, or it is refused), not merely "refuse a vague claim".
-// This file now ALSO audits:
-//   - the companion "Bun tests (integration)" step's run: line invokes
-//     exactly scripts/partition-integration-tests.ts (same bounded parse,
-//     anchored to end-of-line so a rename to a superstring of the claimed
-//     name cannot silently keep matching), and that step's own text carries
-//     no continue-on-error/if: neutralization;
-//   - scripts/partition-integration-tests.ts actually exists on disk (an
-//     unstaged new script the workflow already references is invisible to
-//     a run:-string check alone);
-//   - every exemption reason's location claim is verifiable against the
-//     real workflow text (auditExemptionLocations, pure-module-partition.ts)
-//     -- refuses a dangling step name, a real-but-unrelated step name, AND
-//     any reason (vague or simply silent) that makes no verifiable claim.
-//
-// Team-lead audit 2026-08-26: this file lives directly under tests/ as
-// *.test.ts, which is what scripts/pure-module-partition.ts's listTestFiles
-// collects by default; it RUNS because isExempt's deny-list is keyed on the
-// broker-/server- prefixes and two exact filenames, none of which name this
-// file -- the "desktop-" prefix plays no role in either function (mirrors
-// tests/desktop-test-hygiene.test.ts's own self-coverage note) -- checked
-// explicitly by a test below, not assumed from the name.
+// The pure-module CI step runs scripts/partition-pure-tests.ts, which
+// enumerates every tests/*.test.ts file and excludes only what EXEMPTIONS names
+// -- a deny-list that fails closed, since an unlisted new file runs by default.
+// EXEMPTIONS itself is imported from scripts/pure-module-partition.ts rather
+// than redefined here, so there is one copy of the gating table.
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -113,13 +55,9 @@ const REAL_WORKFLOW_TEXT = readFileSync(WORKFLOW_PATH, "utf-8");
 const REAL_STEP_RUN = parsePureModuleStepRun(REAL_WORKFLOW_TEXT);
 const REAL_FILES = readdirSync(TESTS_DIR).filter((f) => f.endsWith(".test.ts"));
 
-// Frozen snapshot of the allow-list this partition replaced, measured
-// 2026-08-24 straight out of the pre-migration workflow text (parsed with
-// the retired parsePureModuleGlobs, before this commit removed it). NOT
-// re-derived from the live workflow: the whole point of this constant is to
-// survive the migration that deletes the thing it describes, so the
-// neutrality test below stays meaningful after that line is gone from
-// desktop-build.yml.
+// Frozen snapshot of the retired allow-list's glob patterns, independent of the
+// live workflow text, so the neutrality comparison below stays meaningful after
+// that line is removed from the workflow.
 const FROZEN_PRE_MIGRATION_GLOBS = [
   "tests/desktop-*.test.ts",
   "tests/notify-*.test.ts",
@@ -135,17 +73,10 @@ const FROZEN_PRE_MIGRATION_GLOBS = [
   "tests/project-key-normalize.test.ts",
 ];
 
-// N3, reviewer 2026-08-24: comparing FROZEN_PRE_MIGRATION_GLOBS against the
-// LIVE tests/ tree turned a one-day neutrality proof into a permanent naming
-// constraint -- any future file whose name matched none of the 12 inherited
-// glob patterns (a legitimate, correctly-run file under the deny-list) would
-// make the equality test below fail forever, for a reason that has nothing
-// to do with a regression. Frozen alongside the globs: the exact 199
-// tests/*.test.ts filenames on disk the day this migration landed. The
-// neutrality test intersects this snapshot with whatever REAL_FILES is
-// today, so a file outside the snapshot (new OR deleted) never enters either
-// side of the comparison -- the proof stays about the day-J domain only, and
-// is inert for anything that came after.
+// Frozen alongside the retired globs: the exact test filenames on disk the day
+// this migration landed.
+// The neutrality check below intersects this snapshot with today's files, so a
+// file added or removed afterward never enters the comparison.
 const SNAPSHOT_FILES_2026_08_24 = [
   "approval-hook.test.ts","approval-identity.test.ts","broker-activity-status.test.ts","broker-announce.test.ts","broker-approval-reply.test.ts","broker-approvals.test.ts","broker-channels.test.ts","broker-cross-host-cleanup.test.ts","broker-cross-host-register.test.ts","broker-desktop-roadmap-service.test.ts","broker-expects-reply-delivery.test.ts","broker-fk-cleanup.test.ts","broker-flush-cap.test.ts","broker-graph-drafts.test.ts","broker-groups.test.ts","broker-logging.test.ts","broker-message-ttl.test.ts","broker-migration.test.ts","broker-ntfy-channel.test.ts","broker-operator-inbox.test.ts","broker-project-key-alignment.test.ts","broker-register-body.test.ts","broker-resume.test.ts","broker-roadmap-append.test.ts","broker-roadmap-author-auth.test.ts","broker-roadmap-context.test.ts","broker-roadmap-directive.test.ts","broker-roadmap-import.test.ts","broker-roadmap-inactive.test.ts","broker-roadmap-lock-grace.test.ts","broker-roadmap-lock-park-release.test.ts","broker-roadmap-lock-park-tz.test.ts","broker-roadmap-lock.test.ts","broker-roadmap-operator-id.test.ts","broker-roadmap-parked-archive.test.ts","broker-roadmap-queue.test.ts","broker-roadmap-reorder.test.ts","broker-roadmap-route-coverage.test.ts","broker-roadmap-search.test.ts","broker-roadmap.test.ts","broker-send-ack.test.ts","broker-sentinel-processing.test.ts","broker-set-id.test.ts","broker-status.test.ts","broker-sweep-inactive.test.ts","broker-websocket.test.ts","broker-ws-auth.test.ts","broker-ws-sentinel-auth.test.ts","cli-roadmap-add-no-token.test.ts","config-force-group.test.ts","config-loopback.test.ts","desktop-agent-stop-visibility.test.ts","desktop-agent-stop.test.ts","desktop-announce.test.ts","desktop-approval-add-logging.test.ts","desktop-approval-arm-unconditional.test.ts","desktop-approval-defer.test.ts","desktop-approval-parity.test.ts","desktop-approval-runtime-project-key.test.ts","desktop-approval-runtime.test.ts","desktop-approval-scope-discipline.test.ts","desktop-approval-scope.test.ts","desktop-approval-service-project-key.test.ts","desktop-approval-verdict.test.ts","desktop-approvals.test.ts","desktop-attention.test.ts","desktop-broker-client.test.ts","desktop-broker-health.test.ts","desktop-browser-drive.test.ts","desktop-checkpoint.test.ts","desktop-ci-glob-coverage.test.ts","desktop-clear-backchannel.test.ts","desktop-code-lang.test.ts","desktop-code-selection.test.ts","desktop-commit-closure-check.test.ts","desktop-companion.test.ts","desktop-confirm-dialog-autofocus.test.ts","desktop-context-wand.test.ts","desktop-css-tokens.test.ts","desktop-data-migration.test.ts","desktop-deck-control.test.ts","desktop-deck-plugin-agent-refs.test.ts","desktop-deckapi-producer-coverage.test.ts","desktop-demo-control.test.ts","desktop-demo-driver.test.ts","desktop-design-endpoint-sanitize.test.ts","desktop-desk-session.test.ts","desktop-diff.test.ts","desktop-digest.test.ts","desktop-directive.test.ts","desktop-discovery.test.ts","desktop-dispatch.test.ts","desktop-docs.test.ts","desktop-electron-builder-resources.test.ts","desktop-element-pick.test.ts","desktop-explorer-selection-dom.test.ts","desktop-explorer.test.ts","desktop-external-url.test.ts","desktop-features.test.ts","desktop-graph-adapters.test.ts","desktop-graph-core.test.ts","desktop-graph-engine.test.ts","desktop-graph-layout.test.ts","desktop-graph-store.test.ts","desktop-happy-dom-teardown.test.ts","desktop-help.test.ts","desktop-hold-gesture.test.ts","desktop-i18n.test.ts","desktop-inbox-ack.test.ts","desktop-inbox-migration-seed.test.ts","desktop-inbox-purge-coverage.test.ts","desktop-inbox-sender-dom.test.ts","desktop-inbox-sender.test.ts","desktop-inbox-session.test.ts","desktop-inbox-store.test.ts","desktop-inject-command-modal-guard.test.ts","desktop-inject-command-write-check.test.ts","desktop-journal.test.ts","desktop-launch-approval.test.ts","desktop-launch.test.ts","desktop-log.test.ts","desktop-magic-compact.test.ts","desktop-markdown.test.ts","desktop-model-registry.test.ts","desktop-models-catalog.test.ts","desktop-nav-badge-producer.test.ts","desktop-oauth-url.test.ts","desktop-palette.test.ts","desktop-peer-table.test.ts","desktop-peer-thinking.test.ts","desktop-pick-report.test.ts","desktop-pick-security.test.ts","desktop-pick-shot.test.ts","desktop-provider-secrets.test.ts","desktop-pty-coalescing.test.ts","desktop-quota-gate.test.ts","desktop-quota.test.ts","desktop-recording.test.ts","desktop-reorder.test.ts","desktop-roadmap-project-key.test.ts","desktop-roadmap-reorder-validate.test.ts","desktop-roadmap-sanitize.test.ts","desktop-sandbox-command.test.ts","desktop-sandbox-copy.test.ts","desktop-sandbox-projection.test.ts","desktop-sandbox-protect.test.ts","desktop-sandbox-service.test.ts","desktop-sandbox-store.test.ts","desktop-scope-secrets.test.ts","desktop-scope.test.ts","desktop-screen-model.test.ts","desktop-search-core.test.ts","desktop-session-broadcast.test.ts","desktop-session-kind.test.ts","desktop-sidebar-autoresume-dom.test.ts","desktop-snippet-store.test.ts","desktop-startup-ack.test.ts","desktop-team-embedded.test.ts","desktop-template-store.test.ts","desktop-template.test.ts","desktop-templates-composer-draft-reset.test.ts","desktop-templates-composer-seed.test.ts","desktop-test-hygiene.test.ts","desktop-tile-area.test.ts","desktop-tsconfig-flags.test.ts","desktop-usage.test.ts","desktop-utility-inference.test.ts","desktop-workflow-queue-source.test.ts","desktop-workflow.test.ts","desktop-workspace-empty-snapshot.test.ts","desktop-workspace-freshdir.test.ts","desktop-workspace-runtime.test.ts","desktop-workspace.test.ts","desktop-worktree.test.ts","graph-draft.test.ts","logger.test.ts","mcp-roadmap-ack.test.ts","migrate-project-key-case.test.ts","mobile-shell-approvals.test.ts","mobile-shell-hosts.test.ts","mobile-shell-ntfy-client.test.ts","notify-format.test.ts","notify-ntfy-protocol.test.ts","notify-ntfy.test.ts","notify-registry.test.ts","peer-cache.test.ts","peer-inbound-framing.test.ts","peer-mcp-surface-budget.test.ts","peer-message-framing.test.ts","peer-sentinel-auth.test.ts","project-key-normalize.test.ts","roadmap-append.test.ts","roadmap-lock.test.ts","roadmap-parked-archive-predicate.test.ts","roadmap-project-key.test.ts","server-ask-operator.test.ts","server-inbound-framing-delivery.test.ts","server-roadmap-inactive-marker.test.ts","server-stdin-eof.test.ts",
 ];
@@ -160,28 +91,14 @@ function matchesAnyGlob(file: string, globs: string[]): boolean {
   return regexes.some((r) => r.test(`tests/${file}`));
 }
 
-// Card 67519e73, team-lead review: commit-closure.yml carries a top-of-file
-// comment ASSERTING a guarantee ("no `paths:` filter on purpose ... scoping
-// it to any path list reopens the same reachability gap") that nothing in
-// the repo enforced. A comment that asserts a guarantee must be wired to
-// what applies it (see CLAUDE.md). This audits that workflow the same way
-// the rest of this file audits desktop-build.yml: read the REAL file,
-// extract the relevant block with a bounded parse (never a naive full-text
-// substring search, which the script-path check below specifically guards
-// against -- this workflow's own header comment mentions
-// "scripts/check-commit-closure.ts" in prose, which a naive `.includes()`
-// would wrongly accept even if the actual invoking step vanished).
+// Extracted with a bounded parse rather than a naive substring search: the
+// workflow's own header comment mentions the script name in prose, which
+// `.includes()` would wrongly accept even if the invoking step vanished.
 const COMMIT_CLOSURE_WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "commit-closure.yml");
-// This file is NOT affected today (measured): anyStepRunInvokesCommitClosureScript
-// below splits on a bare "\n\s*run:" lookahead, and a CRLF checkout never
-// interposes "\r" between that "\n" and the token it looks for, while its
-// own final assertion is a tolerant boolean, not a strict equality.
-// The normalization below is preventive hardening, not a fix to an active
-// defect: it keeps a future tightening of that assertion into a strict
-// equality from silently reopening the same trap.
-// See tests/desktop-ci-typecheck-coverage.test.ts:104 for the real,
-// measured defect and its cause (windows-latest checkout smudges the
-// LF-committed blob to CRLF via git core.autocrlf=true).
+// Normalized to LF: a CRLF checkout would otherwise desync the bare
+// `\n`-anchored lookahead this parser uses.
+// The current assertion here is tolerant enough that this is preventive, not a
+// fix to an active defect.
 const REAL_COMMIT_CLOSURE_TEXT = readFileSync(COMMIT_CLOSURE_WORKFLOW_PATH, "utf-8").replace(/\r\n/g, "\n");
 
 /**
@@ -243,11 +160,8 @@ test("bounded parse does not adopt a LATER step's run: line (the composition cas
 });
 
 test("mutation proof, N2: the bounded parse derives its step-item indentation instead of hardcoding it -- correct at a DIFFERENT indent level too", () => {
-  // Reviewer 2026-08-24: the retired hardcoded-6-spaces version of
-  // parsePureModuleStepRun would silently adopt the later step's run: line
-  // at 4-space indentation (the boundary regex simply never matched). This
-  // constructs that exact indentation and asserts the current, derived-
-  // indentation parser still bounds correctly.
+  // Constructs the step at 4-space indentation to prove the parser derives its
+  // boundary from the marker's own indent rather than assuming a fixed depth.
   const fourSpaceIndent = `
   steps:
     - name: Bun tests (pure modules)
@@ -262,14 +176,9 @@ test("mutation proof, N2: the bounded parse derives its step-item indentation in
 });
 
 test("D1: listTestFiles(TESTS_DIR) -- the production enumeration scripts/partition-pure-tests.ts and partitionTests both consume -- matches this guard's own independent readdirSync count", () => {
-  // Reviewer 2026-08-24: this file's REAL_FILES and desktop-happy-dom-teardown.test.ts's
-  // `sources` both do their OWN readdirSync, entirely independent of
-  // listTestFiles(). A truncation in the PRODUCTION enumeration (measured:
-  // `.slice(0, 100)` inside listTestFiles) is invisible to either guard --
-  // both keep computing their own full count and stay green -- while the
-  // runner would silently play 53 of 147 files at exit 0. This equality
-  // between the production function's output and an independent oracle
-  // (REAL_FILES, already computed above) is what makes that mutation loud.
+  // REAL_FILES is computed independently of listTestFiles via its own
+  // readdirSync, so a truncation inside the production enumeration shows up as
+  // a mismatch here instead of both sides silently agreeing on a shrunk count.
   expect(listTestFiles(TESTS_DIR).length).toBe(REAL_FILES.length);
 });
 
@@ -286,15 +195,9 @@ test("every exemption reason is a real, non-trivial explanation (not a placehold
   }
 });
 
-// Card f4a3ed1e: the exemptions above used to be honest about WHY a file
-// does not belong in the pure-module step (spawns a daemon, binds a port)
-// but silent on whether anything ELSE actually plays it -- measured
-// 2026-08-24, nothing did. Reviewer 2026-08-28: the actual pre-fix wording
-// (verified below, verbatim, against git history) made NO location claim at
-// all -- not the "played elsewhere" framing a first pass assumed -- so
-// auditExemptionLocations is fail-CLOSED: every reason must positively name
-// a verifiable step, or it is refused, whether it is vague, silent, or
-// simply wrong.
+// auditExemptionLocations is fail-closed: every exemption reason must
+// positively name a verifiable workflow step, or it is refused, whether the
+// reason is vague, silent, or simply wrong.
 
 test("scripts/partition-integration-tests.ts actually exists on disk (the workflow already references it; a git-add-forgot new file is invisible to a run:-string check alone)", () => {
   expect(existsSync(join(REPO_ROOT, "scripts", "partition-integration-tests.ts"))).toBe(true);
@@ -351,12 +254,9 @@ test("discipline: every exemption reason's location claim is verifiable against 
 });
 
 test("mutation proof, RED-FIRST -- the ACTUAL historical formulation (verbatim, per git show HEAD~N:scripts/pure-module-partition.ts before card f4a3ed1e) makes no location claim at all and is refused", () => {
-  // Measured against git history, reviewer 2026-08-28: the pre-fix reason
-  // was "spawns a daemon and binds ports; the pure-module matrix is not for
-  // integration suites" -- no "elsewhere", no step name. A checker that only
-  // refused VAGUE wording ("elsewhere"/"ailleurs") would NOT have caught
-  // this string: it is neither vague nor named, it simply claims nothing.
-  // This is the actual red-first proof for this card's root cause.
+  // The historical reason claims no location at all -- not vague, not named --
+  // so a checker that only rejects vague wording like 'elsewhere' would still
+  // miss it.
   const historicalReason = "spawns a daemon and binds ports; the pure-module matrix is not for integration suites";
   const mutated: Exemptions = {
     familyPrefixes: { "broker-": historicalReason, "server-": historicalReason },
@@ -422,12 +322,10 @@ test("mutation proof: a reason naming the real integration step, running the rea
 });
 
 test("every exempted file actually spawns a broker (measured property, not the family label)", () => {
-  // N2, carried over from the glob-era review: `file.startsWith(prefix)`
-  // only checks the NAME. A future pure file that happens to get named
-  // broker-something would be silently exempted forever with nothing going
-  // red -- growth of the EXEMPT domain, not the run one. This asserts the
-  // actual property the exemption claims (imports startBroker, or otherwise
-  // pulls in tests/_helper.ts) rather than trusting the filename pattern.
+  // Checks the actual property the exemption claims (imports startBroker, or
+  // otherwise pulls in the broker test helper) rather than trusting the
+  // filename prefix, since a future non-broker file named broker-* would
+  // otherwise be silently exempted forever.
   const files = exemptedFiles(EXEMPTIONS, REAL_FILES);
   expect(files.length).toBeGreaterThan(0);
   for (const f of files) {
@@ -462,10 +360,9 @@ test("every on-disk tests/*.test.ts file is either exempt or included in the com
 });
 
 test("mutation proof, growth (the deny-list's defining property): a brand-new, non-exempt file is included by default", () => {
-  // The property the allow-list-era "uncovered" test used to check for the
-  // opposite reason (a glob had to be added by hand for a new file to run).
-  // Under the deny-list, the default is inverted: nothing has to be added
-  // for a new file to run, an exemption has to be added for it NOT to.
+  // Under the deny-list, a new file runs by default; an exemption must be added
+  // for it not to. That is the inverse of the retired allow-list, which
+  // required a glob to be added for a new file to run.
   const mutatedFiles = [...REAL_FILES, "a-brand-new-untriaged-file.test.ts"];
   expect(isExempt("a-brand-new-untriaged-file.test.ts", EXEMPTIONS)).toBe(false);
   const { clean, contaminated } = partitionTests(mutatedFiles, EXEMPTIONS, (f) =>
@@ -499,14 +396,6 @@ test("EXEMPTIONS itself carries no stale entry today", () => {
 });
 
 test("card b33b1874: no non-exempt file real-imports the broker-spawning helper", () => {
-  // Measured 2026-08-04 in the glob-era version of this test: this was RED
-  // before broker-desktop-roadmap-service.test.ts was renamed out of the
-  // tests/desktop-*.test.ts family it used to match -- it real-imported
-  // startBroker from ./_helper.ts, was collected, and carried no exemption
-  // at all. Renaming it into the already-exempted broker- family is what
-  // fixed it; this assertion is what would have caught it. Still meaningful
-  // under the deny-list: "non-exempt" now IS the run domain (no glob to
-  // intersect with), so this walks the whole thing.
   const files = wronglyIncludedFiles(EXEMPTIONS, REAL_FILES, (f) => readFileSync(join(TESTS_DIR, f), "utf-8"));
   expect(files).toEqual([]);
 });
@@ -544,11 +433,6 @@ function onSnapshot(files: string[]): string[] {
 }
 
 test("switchover neutrality: on the frozen day-J snapshot, the deny-list's run domain is EXACTLY the retired allow-list's covered domain (measured 2026-08-24: 199 files, 147 glob-covered, 52 uncovered, residue after the 4 exemptions is 0)", () => {
-  // N3, reviewer 2026-08-24: both sides are intersected with
-  // SNAPSHOT_FILES_2026_08_24 before comparing, so a file added or removed
-  // after the snapshot was taken never enters this comparison. This is
-  // deliberately narrower than "REAL_FILES today" -- see the two mutation
-  // proofs below for why.
   const newDomain = onSnapshot(REAL_FILES.filter((f) => !isExempt(f, EXEMPTIONS))).sort();
   const oldDomain = onSnapshot(REAL_FILES.filter((f) => matchesAnyGlob(f, FROZEN_PRE_MIGRATION_GLOBS))).sort();
   expect(newDomain).toEqual(oldDomain);
@@ -588,20 +472,12 @@ test("mutation proof: the (now intersected) switchover-neutrality check still ca
   expect(newDomain).not.toEqual(oldDomain);
 });
 
-// Team-lead/reviewer review, round 2: `/^\s*paths:/m` only fires on BLOCK-style
-// YAML (`paths:` alone on its own line). It is silent on the legal FLOW form
-// of the same key (`on: {pull_request: {paths: [...]}}`), so a reformat (or a
-// tool regenerating this workflow) closes the reachability gap this test
-// exists to make loud, with nothing going red. Unanchored on purpose: the
-// guarantee is "no `paths` key anywhere under `on:`", not "no `paths:` at the
-// start of a line". `paths-ignore` is included deliberately, not excluded:
-// it narrows the same commit domain (audits fewer paths than "every commit"),
-// so it is the same regression under a different key name. `\b` before
-// `paths` keeps this from firing on an unrelated identifier that merely ENDS
-// in "paths" joined by a word character (e.g. `external_paths:`, no boundary
-// between `_` and `p`) -- proven below. A hyphen-joined false positive (e.g.
-// a hypothetical `static-paths:` key) is an accepted residual: no such key
-// exists in GitHub Actions' `on.pull_request` vocabulary today.
+// Matches both block-style (`paths:` alone on a line) and flow-style (`{paths:
+// [...]}`) YAML.
+// paths-ignore is included deliberately, since it narrows the same commit
+// domain under a different key name.
+// `\b` before `paths` avoids matching an unrelated identifier merely ending in
+// the word, e.g. `external_paths:`.
 const PATHS_FILTER_RE = /\bpaths(-ignore)?\s*:/;
 
 test("commit-closure.yml's on.pull_request carries no paths: filter, block OR flow style, paths-ignore included (Card 67519e73: a paths filter reopens the reachability gap this workflow exists to close)", () => {
@@ -698,26 +574,11 @@ test("mutation proof: a workflow with no run: occurrences at all does not throw 
   expect(anyStepRunInvokesCommitClosureScript(synthetic)).toBe(false);
 });
 
-// Card 8acf72be: three workflows (commit-closure.yml, desktop-build.yml,
-// desktop-release.yml) used to each carry their own literal `bun-version:
-// latest` on oven-sh/setup-bun@v2 -- a runtime that could (and measurably
-// did, same day, no commit in between) resolve to a different bun version on
-// every run, on top of three copies of the same literal to hand-sync once
-// pinned. Both are fixed by routing every setup-bun step through a single
-// root .bun-version file (bun-version-file: .bun-version). This block
-// enforces that neither regression comes back:
-//   - no workflow that installs bun via setup-bun carries a literal
-//     bun-version: again (the copies-to-sync failure mode);
-//   - .bun-version itself exists and is non-empty (the silent-404 failure
-//     mode a bun-version-file pointing at nothing would be).
-//
-// DISCOVERS its targets (readdirSync(WORKFLOWS_DIR)), never names the three
-// files: CLAUDE.md's coverage rule, growth-of-domain half -- a fourth
-// workflow added later with `uses: oven-sh/setup-bun` and a literal
-// bun-version: must be caught the same way the first three would be, with
-// nothing to edit in this file for that to hold. The two floor assertions
-// below exist so a broken/renamed WORKFLOWS_DIR or a broken usesSetupBun
-// detector reads as "0 offenders" (a vacuous pass), not as a red.
+// Discovers workflows via readdirSync rather than naming the known offenders,
+// so a new workflow adding a literal bun-version: on setup-bun is caught the
+// same way.
+// Two floor assertions guard against a broken WORKFLOWS_DIR or detector
+// silently reading as a vacuous zero-offenders pass.
 const WORKFLOWS_DIR = join(REPO_ROOT, ".github", "workflows");
 const BUN_VERSION_FILE_PATH = join(REPO_ROOT, ".bun-version");
 

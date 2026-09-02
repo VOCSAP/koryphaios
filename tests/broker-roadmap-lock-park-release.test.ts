@@ -1,17 +1,8 @@
-// Card aaf4537d, lots 1+2: HTTP-level proof for the two new routes,
-// /roadmap/lock-park and /roadmap/lock-release, in broker.ts
-// (handleRoadmapLockPark / handleRoadmapLockRelease). Same split as
-// tests/broker-roadmap-parked-archive.test.ts: a live broker daemon is
-// required (locks/parks are read back from sqlite), so this file is
-// `broker-*`-prefixed and deliberately EXEMPTED from the CI pure-modules
-// glob (.github/workflows/desktop-build.yml collects tests/roadmap-*.test.ts
-// only) -- local-gate-only via `bun test`, same precedent as
-// broker-roadmap-inactive.test.ts and broker-roadmap-parked-archive.test.ts.
-//
-// Wire contract measured from the already-shipped desktop caller
-// (desktop/src/main/roadmap-service.ts's lockPark/lockRelease) and matched
-// here: POST body {project_key, peer_ids, by:'deck', + operator Ed25519
-// proof}, response {parked|released: string[], failed?: string[]}.
+// HTTP-level proof for /roadmap/lock-park and /roadmap/lock-release.
+// Wire contract matched against the desktop caller (roadmap-service.ts's
+// lockPark/lockRelease): POST body {project_key, peer_ids, by:'deck', +
+// operator Ed25519 proof}, response {parked|released: string[], failed?:
+// string[]}.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { startBroker, stopBroker, post, deckAuthored, FIXTURE_OPERATOR_ID, type TestBroker } from "./_helper.ts";
@@ -160,19 +151,12 @@ test("lock-release: fully frees the card (locked, locked_by, park columns cleare
   expect(row.status).toBe("planned");
 });
 
-// ---------------------------------------------------------------------------
-// Team-lead blocking verification: refusesParkedArchive compares
-// actorOperatorId against existing.lock_parked_by. lock-park must therefore
-// write an OPERATOR_ID into lock_parked_by, not a peer_id, or the park
-// owner's own archive would refuse forever (undefined-shaped mismatch, fail-
-// closed but WRONG -- nobody could ever reverse their own park). The subset
-// test above already asserts lock_parked_by === FIXTURE_OPERATOR_ID after a
-// route-driven park, but that alone doesn't prove the ARCHIVE call site
-// reads it back correctly -- these two tests park VIA THE ROUTE (no direct
-// SQL) and then archive via upsert, exactly as requested, with two DISTINCT
-// operator credentials so a same-operator vs different-operator mismatch
-// cannot hide behind a single shared identity.
-// ---------------------------------------------------------------------------
+// lock-park must write an operator_id into lock_parked_by, not a peer_id:
+// refusesParkedArchive compares actorOperatorId against lock_parked_by, and a
+// peer_id there would make the park owner's own archive refuse forever.
+// These two tests park via the route (not direct SQL) and archive via upsert
+// with two distinct operator credentials, so a same-operator vs
+// different-operator mismatch can't hide behind one shared identity.
 
 const OPERATOR_A = generateCredential();
 const OPERATOR_B = generateCredential();
@@ -360,24 +344,6 @@ test("lock-park: peer_ids must be a non-empty array", async () => {
   );
   expect(res.status).toBe(400);
 });
-
-// ---------------------------------------------------------------------------
-// Round-3 mutation review, item 3 (MAJOR): before this lot, both routes fed
-// `peer_ids` straight into `cleanPeerIds(body.peer_ids)` with its DEFAULT
-// `maxLen` (MAX_DIRECTIVE_TARGETS = 16, sized for Hard Stop's directive
-// fanout, an unrelated feature) -- a batch of 17+ was silently TRUNCATED to
-// 16 with no error, no `failed` entry, nothing in the response distinguishing
-// "truncated" from "all 17 legitimately had nothing to park/release". A
-// dedicated LOCK_BATCH_MAX_TARGETS = 64 (broker.ts, sized off a live
-// measurement: `bun cli.ts peers` showed 24 total peers, 12 in the koryphaios
-// group, at the time of the review) now gates BOTH routes with a loud 400
-// BEFORE cleanPeerIds ever runs, so silent truncation cannot occur beneath
-// it -- the two tests per route below prove both ends of that gate: over the
-// cap is refused outright (400, row count 0 -- the call never even reaches
-// the per-peer loop), and AT the cap every single target is still honoured
-// (no off-by-one truncating the last entry the way the old default would
-// have on anything past 16).
-// ---------------------------------------------------------------------------
 
 test("lock-park: over LOCK_BATCH_MAX_TARGETS (65) is refused 400, loudly, before any row is touched", async () => {
   const ids = await Promise.all(

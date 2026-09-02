@@ -3,23 +3,10 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { extractBracedBody } from './_braced-body'
 
-// Vague 10 A2-1 follow-up (cards 5dbf3255/63ca372f), team-lead blocker: the
-// new SessionService.injectCommand outcome 'refused-modal' reaches the
-// operator-facing stop report (AgentStopControls.tsx -> StopOutcome.result,
-// shared/types.ts) but the four EXISTING filters (interrupted/transmitted/
-// stragglers/unreachable) match none of it -- a screen-guard refusal was
-// silently absent from both the tally and the hard-stop escalation offer.
-// spec_dba4d63f.
-//
-// AgentStopControls.tsx pulls in React and sibling renderer components
-// (icons.tsx, ConfirmDialog.tsx) that this repo does not import cleanly
-// under `bun test` (no bundler/CSS loader here, same constraint BUN.md
-// documents for main-process modules that touch electron/node-pty). The
-// five filter functions this file checks are plain, unexported one-liners,
-// so this test extracts each PREDICATE from the real file text and actually
-// EVALUATES it (not just pattern-matches its shape) against synthetic
-// StopOutcome objects -- real behavioural proof of the negative control
-// team-lead asked for, without needing the module to import.
+// AgentStopControls.tsx pulls in React and sibling components that don't import
+// cleanly under `bun test` (no bundler/CSS loader), so this extracts each
+// filter predicate from the real file text and evaluates it directly against
+// synthetic StopOutcome objects.
 
 const SRC_PATH = join(
   import.meta.dir,
@@ -339,33 +326,16 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
   }
 
   /**
-   * The set of screen-state signals a guard region consults: every distinct
-   * `this.runtime.get(id)?.<field>` name (generic capture, not a fixed
-   * list -- adding a signal named anything grows this set automatically),
-   * plus a fixed marker for the geometric `screenGuard.classify(id) ===
-   * 'modal'` check (that one is a single, unnamed boolean read, not a
-   * family of possible field names, so it has no field name to capture --
-   * its own literal presence/absence IS the signal).
-   *
-   * MEASURED maintenance trap (mutation review round 3), read before adding
-   * a `this.runtime.get(id)?.X` read near either guard: this derivation
-   * captures EVERY such read in the region, whether or not it participates
-   * in a refusal decision -- an innocent, non-gating read (e.g. `const
-   * tileName = this.runtime.get(id)?.name` used only for a log line) is
-   * indistinguishable here from a real signal, and makes the equality test
-   * below fail. Worse, the two regions do NOT share the same extent:
-   * `extractInjectCommandGuardPrologue` returns the WHOLE body before the
-   * Escape write (`body.slice(0, escIdx)`), so any such read ANYWHERE in
-   * that prologue is caught, while `extractInterruptPauseBranch` returns
-   * ONLY the braced `mode === 'pause'` block, so the identical innocent
-   * read placed in `interrupt()` OUTSIDE that branch is invisible to this
-   * derivation entirely -- fatal on one side, silent on the other, by a
-   * boundary this comment is the only place that names it. The correct fix
-   * for a red caused by a non-gating field is to move that read OUT of the
-   * guarded region (before the prologue, or outside the pause branch),
-   * NEVER to add a matching-but-unused read on the other side just to
-   * silence the test -- that would fabricate a fake signal to quiet a real
-   * one, which is worse than the false red it "fixes".
+   * Captures every distinct this.runtime.get(id)?.<field> read in the guard
+   * region, whether or not it participates in a refusal decision -- an innocent
+   * read used only for logging is indistinguishable here from a real signal.
+   * The two regions do not share the same extent: the injectCommand prologue is
+   * the whole body before the Escape write, while the interrupt(pause) region
+   * is only the braced pause block, so an identical innocent read outside that
+   * block is invisible on that side.
+   * A red caused by a non-gating field is fixed by moving that read out of the
+   * guarded region, never by adding a matching-but-unused read on the other
+   * side to silence the test.
    */
   function extractGuardSignals(text: string): Set<string> {
     const signals = new Set<string>()

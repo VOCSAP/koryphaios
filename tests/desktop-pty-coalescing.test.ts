@@ -3,45 +3,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-// Card 6168b7f4. THIS FILE IS NOT A GUARD ON ANY PRODUCTION LINE. It
-// characterizes ConPTY's own write-coalescing behaviour, the field evidence
-// that justified 90c2a8e's single glued write in session-service.ts's
-// injectCommand. Verified directly (flaky-repair, 2026-08-19): neither this
-// file nor coalescing-probe.cjs imports anything under desktop/src; a
-// deliberate mutation of session-service.ts:1241 back to the pre-fix
-// two-write shape left every test here unchanged (10/10 green, before and
-// after). Read every test below as "what ConPTY does on this machine", never
-// as "what the product still does".
-//
-// The property this file's field evidence justifies IS guarded, by two OTHER
-// files, both proven (mutation-tested) to redden on the exact regression:
-//  - tests/desktop-inject-command-write-check.test.ts extracts the REAL
-//    injectCommand body from session-service.ts and asserts it submits in
-//    ONE gated, bracketed-paste-encoded write with no bare '\r' write of its
-//    own (a source-scan, not a live invocation: SessionService is not
-//    bun-test-importable, see that file's own header).
-//  - tests/desktop-launch.test.ts exercises `encodeInitialPromptKeystrokes`
-//    (a one-line alias over `encodeSubmittedKeystrokes`, session-command.ts)
-//    for real and pins its exact output shape, `\x1b[200~<text>\x1b[201~\r`.
-// Together those two guard both halves (the call site, and the encoding it
-// calls) of the property 90c2a8e delivered. This file guards neither.
-//
-// Two kinds of measurement live here:
-//
-//  1. FIXTURE assertions (always run, every platform). They read the raw pty
-//     journals captured from real Claude Code turns on 2026-08-13 and assert
-//     the facts the fix and its neighbouring diagnoses rest on. These are field
-//     captures: they cannot re-measure the machine, but they CAN refute a future
-//     claim about what the CLI puts on the wire, which is exactly what they are
-//     kept for.
-//
-//  2. The LIVE ConPTY coalescing probe (Windows only). It re-measures the write
-//     coalescing that makes the two-write shape fail. It is skipped -- by name,
-//     with the reason in the test title -- when the platform is not win32 or
-//     when desktop/node_modules is not installed, because the behaviour is a
-//     ConPTY property and the probe needs the Electron-ABI node-pty. A skip that
-//     announces itself is the point: a test that passes while measuring nothing
-//     is the defect this repo tracks.
+// This file is not a guard on any production line: it characterizes ConPTY's
+// own write-coalescing behavior, not the product's.
+// Fixture assertions read captured pty journals; the live ConPTY probe (Windows
+// only) re-measures coalescing directly and is skipped, by name, when the
+// platform or node-pty build can't run it.
 
 const REPO = join(import.meta.dir, "..");
 const FIXTURES = join(import.meta.dir, "pty-harness", "fixtures");
@@ -154,21 +120,9 @@ test("the bare ESC that PREDATES this card quits the CLI when that dialog is on 
 
 // ------------------------------------------------------- probe classifier
 
-// Cross-platform, deterministic, no ConPTY/Electron/node-pty required: pins
-// the flaky-repair fix to coalescing-probe.cjs's chunk classification.
-//
-// Before this fix, COALESCED/SEPARATED were read off ONE flat array by
-// position (lens[0]/lens[1]/lens[2]). Measured 2026-08-19 (debugger report,
-// card 6168b7f4 follow-up): on the real ~13% miss draw, phase A produces TWO
-// chunks instead of one ([239,1] rather than [240]), which shifts every index
-// after it -- so the position-based read reported SEPARATED false, falsely
-// accusing phase B of failing when phase B is not racy at all and separated
-// cleanly on every measured trial (13/15 direct, 12/14 via `bun test`; the
-// two red draws were always this same accusation, phase B never actually
-// failed). classify() now takes phase A and phase B as SEPARATE buffers
-// (coalescing-probe.cjs splits its pty output by wall-clock arrival time
-// against the phase-B write, not by chunk count), so a phase-A miss can never
-// shift phase B's reading.
+// classify() takes phase A and phase B as separate buffers rather than reading
+// one flat array by position: a phase-A chunk split shifts every index after it
+// and would misattribute a failure to phase B.
 const probeModule = require(PROBE) as {
   classify: (outA: string, outB: string) => { lensA: number[]; lensB: number[]; coalesced: boolean; separated: boolean };
 };
@@ -206,22 +160,9 @@ const skipReason =
 
 const probeTest = canProbe ? test : test.skip;
 
-// Card 6168b7f4 flaky-repair (2026-08-19). Phase A (write coalescing) is a
-// genuine, non-deterministic ConPTY property: measured ~13% single-trial miss
-// rate (13/15 direct probe runs, 12/14 via `bun test` on this same file, both
-// concordant). A single spawnSync draw asserting COALESCED true was therefore
-// asserting a coin flip, not a regression guard -- it flaked this file ~1 run
-// in 7. The property itself is real and worth guarding (it is the whole
-// reason session-service.ts's injectCommand had to move to a single glued
-// write, see 90c2a8e): what was wrong was proving it on ONE draw.
-//
-// Reformulated claim: coalescing must be OBSERVED within a bounded number of
-// independent trials (still goes red if the mechanism regresses to "never
-// coalesces" -- P(5 consecutive misses | true ~13% rate) is ~1 in 24 000, a
-// false red this test will essentially never produce by chance alone) while
-// phase B (writes 120ms apart) is checked on EVERY attempt and never retried
-// past, because it is measured deterministic: a single SEPARATED false is
-// real, not a race, per the classifier tests above.
+// Phase A (coalescing) is retried across a bounded number of trials since it's
+// a genuinely non-deterministic ConPTY property; phase B (separated writes) is
+// checked once per attempt with no retry, since it's deterministic.
 probeTest(
   canProbe
     ? "ConPTY coalesces back-to-back pty writes into one read within a bounded number of trials, and separates delayed writes on every trial"

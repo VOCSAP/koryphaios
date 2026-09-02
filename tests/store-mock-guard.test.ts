@@ -1,9 +1,6 @@
-// Card a688748b. Unit-tests tests/_store-mock.ts in isolation: pure logic
-// only, no DOM, no broker, no mock.module registration reaching a complete
-// state (that would globally register a stub store.ts for the rest of this
-// bun test process -- harmless for the throw path below, since the check
-// runs BEFORE mock.module is ever called, but avoided on the success path
-// too so this file never has an opinion on what other test files see).
+// The throw-path check runs before mock.module is ever registered, and the
+// success path avoids it too, so this file never affects what other test files
+// in the same bun test process see.
 import { expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
 import {
@@ -108,23 +105,11 @@ test("findDirectStoreMocks: canonicalizes paths instead of comparing text -- a n
 });
 
 test("listTestsDirFiles: matches an independent readdirSync scan, and both it and the floor below are load-bearing", () => {
-  // Reviewer-measured (card a688748b, mutation M5): a floor check
-  // (`length > 100`) against the SAME function it is meant to guard stayed
-  // green when that function's own implementation was truncated to 101 of
-  // 218 -- a floor only catches an absurd value, not a plausible-looking
-  // narrowing. The equality check below catches that: recomputing the scan
-  // independently and requiring EXACT equality makes a narrowed production
-  // implementation mismatch immediately, whatever the narrowed count is.
-  //
-  // But the floor is NOT subsumed by that equality, and dropping it would
-  // be a real regression (reviewer-measured, mutation N4): both this test's
-  // "independent" recomputation and the production function read the SAME
-  // `TESTS_DIR` constant. If `TESTS_DIR` itself drifted (e.g. toward
-  // `desktop/src/main`), the two sides would still agree with each other --
-  // equality holds VACUOUSLY on a small, wrong directory -- and only an
-  // absolute floor on the resulting size catches that a domain this small
-  // cannot be the real tests/. Floor catches a DOMAIN drift; equality
-  // catches an IMPLEMENTATION drift. Neither stands in for the other.
+  // Floor and equality checks catch different regressions: equality alone would
+  // stay green if TESTS_DIR itself drifted to a smaller, wrong directory, since
+  // both sides read the same constant and would agree vacuously.
+  // The floor alone would miss a narrowed-but-still-plausible implementation.
+  // Neither subsumes the other.
   const independent = readdirSync(TESTS_DIR).filter((f) => /\.[cm]?tsx?$/.test(f));
   expect(independent.length).toBeGreaterThan(180);
   expect(listTestsDirFiles().sort()).toEqual(independent.sort());

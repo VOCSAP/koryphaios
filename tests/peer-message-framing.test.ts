@@ -1,30 +1,3 @@
-// spec_d7cd3308 / spec_258af6eb -- card 3d3c7d40 volet A: the `expects_reply`
-// waiver on send_message, and the text it makes a peer receive.
-//
-// WHAT THIS FILE COVERS, AND WHAT IT DELIBERATELY DOES NOT.
-// This suite is PURE: it imports shared/message-framing.ts and spawns nothing,
-// which is why it carries the `peer-` prefix (a CI-collected glob) rather than
-// `broker-`/`server-` (the daemon-spawning families exempted from that glob).
-// Whether that naming actually holds is NOT re-checked here: the repo-wide
-// guard tests/desktop-ci-glob-coverage.test.ts already audits every
-// tests/*.test.ts against the globs parsed out of the workflow, so a local copy
-// would only duplicate it -- and the local copy that first shipped here also
-// asserted "exactly ONE `run: bun test` line", a brand-new coupling that would
-// have gone red the day the workflow gained a second legitimate job without any
-// file having stopped being collected.
-//
-// It covers the pure DECISION only. The WIRING of that decision into
-// server.ts's send_message case is attested by
-// tests/broker-expects-reply-delivery.test.ts, which spawns a broker plus two
-// peers and asserts on what the recipient really receives. That split is not
-// tidiness: review measured that removing the second argument at the server.ts
-// call site left THIS suite fully green, so a pure suite cannot be the proof
-// that the feature is connected to anything.
-//
-// Every assertion below is on the RENDERED TEXT, never on a stored field.
-// That is the card's acceptance criterion and it is also the only thing an
-// agent actually reacts to.
-
 import { expect, test } from "bun:test";
 import { OPERATOR_INSTANCE_TOKEN, OPERATOR_PEER_ID } from "../shared/types.ts";
 import { composeOutboundMessage, PEER_NO_REPLY_NOTE } from "../shared/message-framing.ts";
@@ -91,20 +64,11 @@ test("the note opens with a blank line, asserted literally", () => {
 });
 
 test("the waiver does not restrict whom the recipient may contact", () => {
-  // The arbitrage that made this a NEW constant instead of a reuse of
-  // DECK_NO_REPLY_NOTE. At the time (card 3d3c7d40) that note ALSO forbade
-  // messaging any other peer about the message, which is wrong for a
-  // peer-to-peer inform -- and already contradicted the Deck's own dispatch
-  // text, which tells the team-lead to brief another peer with send_message.
-  //
-  // UPDATED, cards e3f8065d + dd388182: that note has since moved to
-  // shared/inbound-framing.ts AND lost the offending clause, so the
-  // contradiction described above no longer exists there. The assertions below
-  // are unchanged and keep their point: they pin THIS constant's own property,
-  // so that a later "harmonisation" collapsing the three notes -- now that they
-  // agree on it -- cannot silently re-key one mechanism on another's identity.
-  // The counterpart assertion on the deck note lives in
-  // tests/peer-inbound-framing.test.ts.
+  // Kept as its own constant rather than reused from the Deck's no-reply note:
+  // that note forbids messaging any other peer, which is wrong for a
+  // peer-to-peer inform.
+  // Staying separate, even though the two notes agree today, means a later
+  // merge cannot silently re-key one mechanism on the other's identity.
   expect(PEER_NO_REPLY_NOTE).not.toContain("do NOT message any other peer");
   expect(PEER_NO_REPLY_NOTE).toContain("free to message any peer");
 });

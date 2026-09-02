@@ -1,58 +1,17 @@
-// Card 3535599d. ConfirmDialog.tsx rendered its modal in a plain
-// `<div className="modal-backdrop">` -- no native `<dialog>` element, so
-// nothing traps or moves focus into it on open. `autoFocus` sat on the
-// CONFIRM button, unconditionally, regardless of `tone`: on a `danger`
-// (destructive) dialog, hitting Enter immediately after the dialog opens
-// armed the destructive action. 23 of 25 call sites never pass `tone`
-// explicitly and so inherited the dangerous default.
-//
-// Team-lead arbitration (not renegotiable here): move `autoFocus` to the
-// Cancel button, unconditionally, for every tone. Pure removal would leave
-// focus outside the modal entirely (no `<dialog>` to fall back on); gating
-// by `tone` would still leave Enter arming an action on the one call site
-// that already passes `tone="neutral"` for zero real benefit, and it would
-// make safety depend on a default 23/25 sites never pass explicitly.
-//
-// THE GUARD IS DOMAIN-WIDE, NOT FILE-SCOPED. A test asserting only "there is
-// no `autoFocus` on ConfirmDialog.tsx's confirm button" has a strictly
-// narrower reach than its name promises: it would never see a 26th call
-// site, or a *different* component, reintroducing the same defect (e.g.
-// BrowserView.tsx already has an unrelated local reimplementation of this
-// exact modal-actions pattern, deliberately out of scope for this card --
-// see the allow-list below). So this test source-scans every .tsx file
-// under desktop/src/renderer/src for ANY `<button>` JSX tag that carries
-// both a `danger` class token and the `autoFocus` attribute, regardless of
-// which component it lives in.
-//
-// TAG PARSING. A naive `first '>' after '<button'` search breaks on
-// `onClick={() => doThing()}` inside the tag -- the `=>` arrow contains a
-// literal '>' that is not the tag's closing bracket. `extractButtonTags`
-// scans character-by-character, tracking `{...}` brace depth and string
-// quote state, and only treats a bare `>` as the tag terminator when it is
-// at brace-depth 0, outside a string, and not the second character of `=>`.
-// Proven against the real BrowserView.tsx source below (has an arrow
-// function inside the tag AND is the intentional exception).
-//
-// `danger` TOKEN DETECTION (second review pass). The first version captured
-// `className={...}` with a non-greedy `\{([\s\S]*?)\}` and matched `danger`
-// only inside that capture -- both wrong: the capture stops at the FIRST
-// `}` (so `cx({ a: 1 }, 'danger')` never reaches the string literal), and a
-// tight border class rejected object-key shorthand (`{ danger: cond }`, the
-// `:` right after the word). `hasDangerClass` now tests the token against
-// the WHOLE opening tag once a `className=` attribute is confirmed present,
-// with a widened border (`['"\s-]` left, `['"\s:,}\]-]` right) that also
-// catches CSS suffix idioms already destructive in this repo's stylesheet
-// (`row-btn-danger`, `tile-btn-danger`, `ws-btn-danger`,
-// `context-menu-item-danger`, `msheet-item-danger`).
-//
-// STRUCTURAL BLIND SPOT, DOCUMENTED NOT FIXED: this guard is a source-text
-// scan, not a JS/CSS evaluator. Two shapes are unreachable by construction
-// and will stay green even with the fix above: (1) a destructive button
-// styled without any class literally containing `danger` (e.g. an inline
-// style or a differently-named class); (2) a class name fully COMPOSED at
-// runtime, e.g. `` className={`primary ${tone}`} `` -- no `danger` token
-// exists in the source text to find. Closing either requires evaluating the
-// component, not scanning its source; out of scope for this guard.
+// ConfirmDialog.tsx has no native `<dialog>` to trap focus, and `autoFocus` sat
+// unconditionally on the Confirm button regardless of tone, so hitting Enter
+// right after a danger dialog opened armed the destructive action. Fix moves
+// autoFocus to Cancel unconditionally rather than gating by tone, since 23 of
+// 25 call sites never pass tone explicitly.
+// This is a domain-wide source scan over every .tsx under
+// desktop/src/renderer/src, not scoped to ConfirmDialog.tsx, so it also catches
+// the pattern reimplemented in a different component.
+// extractButtonTags tracks brace depth and string-quote state character by
+// character so an arrow function inside the tag (`=>`) is not mistaken for the
+// tag's closing `>`.
+// Structural blind spot, not fixed: a destructive button styled without a class
+// literally containing `danger`, or a class name composed at runtime, is
+// invisible to this source-text scan.
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";
@@ -60,15 +19,10 @@ import { describe, expect, test } from "bun:test";
 const REPO_ROOT = join(import.meta.dir, "..");
 const RENDERER_SRC = join(REPO_ROOT, "desktop", "src", "renderer", "src");
 
-// Deliberately out of scope for card 3535599d (team-lead: "je le traite
-// separement"): BrowserView.tsx:1173 has `autoFocus` on a `primary`
-// (non-danger) button in its own local recording-start dialog. Not a
-// `danger` button, so the scan below would not flag it anyway -- this list
-// exists to make that fact explicit and checked, not to silence a real hit.
-// NEVER USED TO SKIP A FILE in the domain-wide scan below: it is read only
-// by the "allow-list stays honest" test, which asserts the entry is in fact
-// non-danger. A `danger` button appearing in a listed file still fails the
-// domain-wide test -- adding a file here does not exempt it.
+// BrowserView.tsx has autoFocus on a primary (non-danger) button in its own
+// local dialog, deliberately out of scope. This list only documents that fact
+// for the allow-list-honesty test; it never exempts a file from the domain-wide
+// scan below.
 const DOCUMENTED_NON_DANGER_AUTOFOCUS = new Set(["components/BrowserView.tsx"]);
 
 function listTsxFiles(dir: string, out: string[] = []): string[] {

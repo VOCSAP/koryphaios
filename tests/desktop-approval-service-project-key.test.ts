@@ -1,45 +1,11 @@
-// Card 4df14b5b -- witness for the client-side half of the project_key fix.
-// Card 32ce0217 -- extended the same witness to the four call sites commit
-// 8fb9558 (card 1def56da) newly made mandatory.
-//
-// ApprovalDeps.projectKey (desktop/src/main/approval-service.ts) is a
-// REQUIRED TypeScript field: the type system refuses to compile a caller that
-// forgets to pass a projectKey into ApprovalDeps at all. But that is a
-// compile-time gate on the STRUCT, not a runtime guarantee that the field
-// actually reaches the outgoing HTTP body -- a caller can hold a perfectly
-// well-typed `deps.projectKey` and still never put it in the JSON it sends.
-// Team-lead's mutation review (2026-08-18) measured exactly that gap:
-//   - drop `project_key: deps.projectKey` from fetchUndeliveredVerdicts alone
-//     -> 75 pass / 0 new fail, clean typecheck.
-//   - drop it from fetchPendingApprovals alone -> same, 75 pass / 0 new fail.
-// Neither half had an execution witness. This file is that witness for BOTH,
-// independently: it calls the real, unmodified fetchUndeliveredVerdicts and
-// fetchPendingApprovals through the fetchImpl seam already in ApprovalDeps
-// (no broker process, no spawn), captures every outgoing request, and checks
-// project_key on EACH ONE addressably -- not "at least one of N" -- because
+// mintSessionToken, addApproval, claimApproval and markVerdictsDelivered must
+// each put project_key in their outgoing HTTP body -- a compile-time-required
+// struct field does not guarantee it reaches the JSON.
+// mintSessionToken enforces this via its own check in broker.ts, not the shared
+// resolveProjectKey gate the other three share.
 // fetchPendingApprovals fires two independent requests (status:'pending' and
-// status:'expired_notif', desktop/src/main/approval-service.ts:223-237) and a
-// mutation could plausibly drop the field from only one of the two branches.
-//
-// Card 32ce0217 measured (2026-08-19, `git show 8fb9558 --
-// desktop/src/main/approval-service.ts`) that the same commit that made
-// project_key mandatory broker-side also added `project_key: deps.projectKey`
-// to FOUR call sites, not the three the originating card text named:
-// mintSessionToken (/approval/token-mint), addApproval (/approval/add),
-// claimApproval (/approval/claim) and markVerdictsDelivered
-// (/approval/delivered). None of the four had a body witness before this
-// batch of tests. mintSessionToken's route enforces project_key through its
-// own explicit check in broker.ts (not the shared resolveProjectKey gate the
-// other four routes share, shared/approval-scope.ts:345-356), but it is
-// exactly as silently breakable client-side, so it gets the same treatment.
-//
-// CI glob note: this file is named tests/desktop-*.test.ts on purpose --
-// .github/workflows/desktop-build.yml's "Bun tests (pure modules)" step lists
-// explicit globs and does NOT include tests/approval-*.test.ts or
-// tests/broker-*.test.ts (those spawn a broker daemon, out of scope for that
-// matrix). A guard named outside tests/desktop-*.test.ts would never run in
-// CI at all -- confirmed by reading that workflow file directly before
-// picking this name.
+// status:'expired_notif'), so each is checked addressably, not just one of the
+// two.
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import {
   addApproval,
@@ -103,8 +69,9 @@ test("fetchUndeliveredVerdicts sends project_key on its single /approval/list re
   const deps = makeDeps("proj-A");
   await fetchUndeliveredVerdicts(deps);
   expect(calls.length).toBe(1);
-  // Route asserted too: a well-formed body sent to the WRONG route (e.g.
-  // '/approval/delivered', destructive) previously passed unnoticed here.
+  // Route is checked alongside body: a well-formed body sent to the wrong
+  // endpoint (e.g. the destructive /approval/delivered) would otherwise pass
+  // silently.
   expect(calls[0]!.url.endsWith("/approval/list")).toBe(true);
   expect(calls[0]!.body.project_key).toBe("proj-A");
   expect(calls[0]!.body.undelivered_only).toBe(true);
@@ -114,8 +81,8 @@ test("fetchPendingApprovals sends project_key on BOTH its /approval/list request
   const deps = makeDeps("proj-B");
   await fetchPendingApprovals(deps);
   expect(calls.length).toBe(2);
-  // Every captured call, not just one: a mutation sending the expired_notif
-  // branch to a different (destructive) route previously passed unnoticed.
+  // Every captured call is checked, not just one: a mutation routing only the
+  // expired_notif branch to a different endpoint would otherwise pass silently.
   expect(calls.every((c) => c.url.endsWith("/approval/list"))).toBe(true);
 
   const pendingCall = calls.find((c) => c.body.status === "pending");

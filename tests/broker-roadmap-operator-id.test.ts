@@ -1,18 +1,3 @@
-// Card edefff05: `resolveRoadmapAuthor`'s reserved-peer-name branch proves an
-// operator's Ed25519 signature (`resolveApprovalAuth`) but used to discard
-// `auth.operator_id`. This file proves the digest actually survives on
-// roadmap_items.operator_id across every write path that can touch it.
-//
-// `broker-*` family (spawns a real broker daemon), deliberately EXEMPTED from
-// the CI glob (tests/desktop-ci-glob-coverage.test.ts) -- local-only via
-// `bun test`. All six cells need a live broker (each hits an HTTP write
-// route), so a single file is correct here; none of them is a pure
-// PRAGMA-vs-constant comparison like card aad5e954's guard, which is why
-// there is no companion `roadmap-*.test.ts` for this card.
-//
-// One test PER WRITE PATH, not one end-to-end test: upsert-create,
-// upsert-patch, archive, context-append, import, reorder-does-not-erase.
-
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { startBroker, stopBroker, post, type TestBroker, deckAuthored, FIXTURE_OPERATOR_ID } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";

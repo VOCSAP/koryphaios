@@ -1,9 +1,3 @@
-// Hold-to-draw modifier watcher (embedded browser rework). happy-dom,
-// registered globally -- see tests/desktop-explorer-selection-dom.test.ts's
-// header comment for the measured cross-file blast radius of a missing
-// GlobalRegistrator.unregister() (CORS breakage in every later fetch-using
-// suite within this single `bun test` process). Paired register/unregister
-// below, same discipline as tests/desktop-element-pick.test.ts.
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 GlobalRegistrator.register();

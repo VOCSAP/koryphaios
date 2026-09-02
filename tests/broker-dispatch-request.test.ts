@@ -1,18 +1,6 @@
-// Dispatch requests (card bf76d37f): an agent asks the Deck to run the head
-// wave of the roadmap queue, and the Deck posts back WHAT it dispatched.
-//
-// Why the outcome is the thing under test and not a nicety: runDirectiveWave
-// (desktop/src/main/dispatch.ts) marks a card done BEFORE executing it, so a
-// card's `status` acknowledges nothing. The measured failure this card was
-// filed for is a lead believing a wave ran because the card said done. So the
-// assertions below never stop at "200 OK": they check that what comes back
-// names the cards and the tiles, and that a request nobody answered comes back
-// visibly PENDING rather than as an empty success.
-//
-// `broker-` prefix: this file spawns a real broker via startBroker, so it
-// belongs to the local-only family (tests/desktop-ci-glob-coverage.test.ts's
-// "no non-exempt file real-imports the broker-spawning helper" guard is what
-// makes that prefix load-bearing rather than cosmetic).
+// runDirectiveWave marks a card done before executing it, so status alone
+// proves nothing; assertions check what the response names as dispatched, and
+// an unanswered request comes back pending rather than an empty success.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
@@ -302,14 +290,6 @@ test("the long poll returns the REAL outcome when the Deck resolves during the w
   // The point: the caller gets the report on the SAME call, without polling.
   expect(res.body.request.status).toBe("done");
   expect(res.body.request.outcome?.cards[0]!.matched).toEqual(["reviewer-1", "reviewer-2"]);
-  // MEASURED NECESSITY (2026-09-01). Without this bound the three assertions
-  // above stay GREEN when the waiter registry is keyed by anything other than
-  // the request id: no waiter is ever found, the long poll runs its full
-  // wait_sec, and the TIMEOUT branch then re-reads the durable row and finds
-  // the very same resolved outcome. Correct answer, 20 s late -- indis-
-  // tinguishable by value, only by time. The bound is what makes this a test
-  // of the WAKE-UP and not merely of the durable row (the whole file went from
-  // 3.4 s to 41.5 s under that mutation, with 13/13 still passing).
   expect(wokeAfterMs).toBeLessThan(5_000);
 }, 30_000);
 

@@ -1,73 +1,10 @@
-// Domain-wide guard against a workspace-reset handler forgetting the
-// operator-inbox purge (Courrier lot 1D, card 1e81ee7b). Mutation review
-// today (spec_cadf71a7) found the exact defect this test exists to catch:
-// deleting the `void purgeInboxSession()` call from ANY of the three known
-// reset handlers (`app:new-clear`, `workspace:restore`,
-// `template:apply` mode='replace') in desktop/src/main/ipc.ts left every
-// test green, because nothing under tests/ scans ipc.ts's source at all.
-// Worse, the third path (`template:apply` replace) was ABSENT from the
-// original two-handler design note and only found later by a human grep
-// (see the comment at ipc.ts:1156-1159, "the fifth path the design doc
-// names explicitly").
-//
-// MEASURED CORRECTION TO THE ORIGINAL BRIEF (spec_cadf71a7 edge case 1):
-// the brief that requested this test claimed all three known handlers call
-// `startNew()` and/or `closeAll()`. That is true for `app:new-clear` and
-// `template:apply`, but NOT for `workspace:restore`: reading ipc.ts:614-634
-// shows it calls `workspaces.restore(id)` -- a third, distinct verb
-// (confirmed by workspace-service.ts:379's `restore()` method, which resets
-// sessions via `service.restoreFrom(...)`, never `startNew`/`closeAll`).
-// `grep -n -E "restoreFrom|\.restore\(|closeAll\(|startNew\(" ipc.ts`
-// returns exactly workspace:restore's `workspaces.restore(id)` call plus the
-// four startNew/closeAll call sites in the other two handlers -- zero
-// overlap. A scanner built strictly on the brief's 2-verb signature would
-// DISCOVER ONLY 2 of the 3 known handlers and be blind to the exact
-// handler (`workspace:restore`) whose omission this whole exercise is
-// about -- the same "sensitivity without coverage" shape CLAUDE.md warns
-// about. The domain signature below therefore recognizes THREE verbs:
-// `workspaces.startNew(`, `service.closeAll(`, `workspaces.restore(`.
-//
-// Scope: every `regHandle('channel', ...)` / `regOn('channel', ...)` call
-// site in desktop/src/main/ipc.ts whose handler body invokes at least one of
-// the three reset verbs above is a workspace-reset handler, and must also
-// call `purgeInboxSession(` somewhere in that same body.
-//
-// Modeled on tests/desktop-deckapi-producer-coverage.test.ts: domain
-// discovered by scanning the real file (not a hardcoded channel list),
-// comments stripped first, fails closed on parse failure or an empty
-// domain, and a floor assertion catches the scan silently collapsing to
-// near-zero after a refactor.
-//
-// WHAT THIS DOES NOT COVER, stated rather than assumed:
-//  - A FOURTH reset verb never used before today (a brand-new primitive
-//    that also wipes all sessions, spelled some way other than
-//    `workspaces.startNew(`, `service.closeAll(`, or `workspaces.restore(`)
-//    is invisible to this scanner. This is the same class of limit the
-//    producer-coverage test documents for a wrapper function it doesn't
-//    recognize: the verb set is enumerated from what exists in the repo
-//    TODAY, not derived from a structural marker (ipc.ts has no such marker
-//    to key off of -- "resets the workspace" is not a syntactic property).
-//    A new reset primitive added under a new name needs this verb list
-//    extended by hand; this is the honest boundary of a source-text scan
-//    and the reason this comment calls it out explicitly.
-//  - A reset verb called through an intermediate helper function (e.g. a
-//    locally-declared `function resetEverything() { workspaces.startNew();
-//    service.closeAll() }` called as `resetEverything()` from a handler)
-//    is invisible: the scan only sees the verb name inside the handler's
-//    OWN body text, it does not follow calls into helpers defined elsewhere
-//    in the file. No handler is written this way today (verified by
-//    reading all three real call sites below), but a future refactor that
-//    introduces such a helper would silently drop out of scope.
-//  - A reset verb call that exists only in UNREACHABLE code (a dead
-//    branch, an early-returned-past `if`) is textually indistinguishable
-//    from a live one -- static text presence is treated as evidence, not
-//    runtime reachability, same limit the producer-coverage test states.
-//  - A channel mentioned only inside a `//` or `/* */` comment does not
-//    enter the domain and a reset-verb/purge call mentioned only in a
-//    comment does not count either -- both proven by fixture below.
-//  - `regHandle`/`regOn` calls whose channel name is not a string literal
-//    (a computed/templated name) are counted as UNPARSED and fail the
-//    guard loudly rather than being silently skipped -- proven by fixture.
+// Scans desktop/src/main/ipc.ts for handlers invoking any of three reset verbs
+// (workspaces.startNew, service.closeAll, workspaces.restore) and requires each
+// to also call purgeInboxSession in the same body.
+// Does not follow a reset verb reached through an intermediate helper function,
+// and treats a verb reachable only through dead code as present.
+// A regHandle/regOn channel name that isn't a string literal fails the guard
+// loudly rather than being silently skipped.
 
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -83,10 +20,6 @@ const IPC_TS = join(REPO_ROOT, "desktop", "src", "main", "ipc.ts");
 const RESET_VERB_RE = /\bworkspaces\.startNew\(|\bservice\.closeAll\(|\bworkspaces\.restore\(/;
 const PURGE_CALL_RE = /\bpurgeInboxSession\(/;
 
-// Quote- and backtick-aware // and /* */ stripper (same shape as
-// tests/desktop-deckapi-producer-coverage.test.ts's local copy -- kept
-// local per that file's own note that sharing test-only utilities across
-// test files is not this repo's established pattern).
 function stripComments(src: string): string {
   let out = "";
   let i = 0;

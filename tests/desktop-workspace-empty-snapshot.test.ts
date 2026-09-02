@@ -219,14 +219,10 @@ test("empty deck + a non-empty current workspace is NOT caught by the zero-sessi
   expect(current.current).toBe(true);
   expect(current.sessionCount).toBe(1);
 
-  // Renderer side (TileArea.tsx's pickRestorable, covered separately in
-  // tests/desktop-tile-area.test.ts): once the deck's live AGENT count drops
-  // to 0, `current` becomes a valid restore candidate again -- but
-  // pickRestorable only ever offers workspaces with sessionCount > 0. This
-  // test pins the OTHER half of that contract: restore()'s zero-SESSIONS
-  // refusal (point 1) counts PERSISTED sessions, not live agents, so it must
-  // not also swallow this case -- the two guards count different things and
-  // must not collide.
+  // restore()'s zero-sessions refusal counts persisted sessions, not live
+  // agents, so it must not also swallow the case where the deck's live agent
+  // count has dropped to 0 -- the two guards count different things and must
+  // not collide.
   expect(svc.restore(current.id)).toEqual({ ok: true });
   expect(restored.at(-1)).toHaveLength(1);
 

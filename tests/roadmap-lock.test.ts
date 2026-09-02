@@ -1,17 +1,3 @@
-// Card e7b364dc, Part B: shared/roadmap-lock.ts is a pure module (no broker,
-// no server, no I/O) so resolveRoadmapLock is truth-tabled directly here,
-// no HTTP harness needed -- same precedent as tests/roadmap-append.test.ts
-// for shared/roadmap-append.ts.
-//
-// Named tests/roadmap-*.test.ts (not tests/broker-roadmap-*.test.ts)
-// deliberately: the CI workflow (.github/workflows/desktop-build.yml)
-// collects `tests/roadmap-*.test.ts` but the whole `broker-*` family is
-// excluded from its glob (measured by reading the `bun test` line in that
-// workflow) -- a test living only in tests/broker-roadmap-lock.test.ts would
-// be green locally and never run in CI. The 409-guard HTTP tests stay in
-// tests/broker-roadmap-lock.test.ts (they need a live broker); this file
-// covers the pure resolution function that guard now depends on.
-
 import { test, expect } from "bun:test";
 import {
   resolveRoadmapLock,
@@ -113,17 +99,10 @@ test.each([
   expect(result).toEqual(expected);
 });
 
-// Card e344fa79: peers.peer_id is unique only PER GROUP (schema declares
-// UNIQUE(peer_id, group_id)), but the roadmap is shared across groups on the
-// same broker -- a bare `existing.locked_by === by` comparison (the shape
-// every guard used before this card) reads a legitimately-registered
-// homonym peer in a DIFFERENT group as the SAME owner. matchesLockOwner
-// completes that comparison into the composite key the schema already
-// declares. `locked_group` stores the group_id RAW (team-lead arbitration,
-// reversing an initial digest-based design once bun:sqlite was measured to
-// have no SQL scalar-function registration -- see shared/roadmap-lock.ts's
-// header comment on this function), so these fixtures use plain group_id
-// strings, not a hash of them.
+// matchesLockOwner compares on the composite (peer_id, group_id) key, not
+// peer_id alone: peer_id is unique only per group, so a bare comparison would
+// read a same-named peer registered in a different group as the same lock
+// owner.
 
 test("matchesLockOwner: THE DEFECT THIS CARD CLOSES -- a same-peer_id homonym registered in a DIFFERENT group must NOT satisfy the lock, even though the OLD bare-peer_id comparison this replaces would have said it did", () => {
   const homonymPeerId = "desktop-7b2civn-koryphaios";
@@ -184,19 +163,10 @@ test.each([
     null,
     false,
   ],
-  // Card 4441e883, Trou D (team-lead review): a `bun cli.ts` write stamps
-  // `by` as `cli:<peer_id>` (cli.ts:348) -- an UNPROVEN author (no
-  // instance_token), so on the TOKEN path (resolveLockedByToken) it is
-  // already correctly NULL by construction (case 4/5 of that table above:
-  // any claim by an author with no instance_token stamps null). This
-  // comparator is the OTHER, unrelated half the card asks to be pinned: the
-  // DISPLAY comparator (`locked_by`, a plain string column) must treat a
-  // 'cli:'-prefixed peer_id as an ORDINARY opaque string, matching itself
-  // and refusing a different string, exactly like any other peer_id -- no
-  // special-casing of the prefix anywhere in matchesLockOwner. Motivation:
-  // `bun cli.ts roadmap-export`'s own census (broker.ts:2517-2518) shows 8
-  // peers appearing under BOTH the bare `x` and `cli:x` forms, so the two
-  // must never be treated as the same identity by this comparator either.
+  // A 'cli:'-prefixed peer_id is treated as an ordinary opaque string by this
+  // comparator, with no special-casing of the prefix: the same peer can appear
+  // under both the bare and 'cli:'-prefixed form, and the two must never be
+  // conflated as one identity.
   [
     "'cli:'-prefixed locked_by matches itself as an ordinary opaque string (same peer_id, same group)",
     "cli:desktop-7b2civn",
@@ -288,8 +258,6 @@ test.each([
   }
 );
 
-// resolveKeptLockedAt's sibling table (team-lead review: "la meme faute une
-// colonne plus loin") -- same claimed/not-claimed axis, one column over.
 test.each([
   ["locked, not claimed: preserves the existing timestamp", { locked: true, claimed: false }, "T0", "T0"],
   ["locked, claimed: stamps fresh (null -> broker.ts's SQL COALESCE(?, datetime('now')))", { locked: true, claimed: true }, "T0", null],

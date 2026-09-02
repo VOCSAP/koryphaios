@@ -3,30 +3,16 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { extractBracedBody } from "./_braced-body";
 
-// Two guards on SessionService.injectCommand (session-service.ts), from two
-// different cards, on the same few lines of code:
-//
-//  (1) aaf4537d lot 3: injectCommand must consult pty.write()'s own boolean
-//      return, not just the isAlive() pre-check. pty.write's doc says exactly
-//      what that return means: "Returns false when no live PTY carries this id
-//      (write silently dropped)" (pty-manager.ts) -- a real failure signal that
-//      used to be computed and thrown away. isAlive() only proves the pty was
-//      alive AT THAT INSTANT, not during the write itself.
-//
-//  (2) 6168b7f4: the text and its submit keystroke must go out in ONE write,
-//      bracketed-paste encoded (encodeSubmittedKeystrokes), NOT as "write the
-//      text, then write a bare '\r'". Measured 2026-08-13: ConPTY coalesces
-//      two back-to-back writes into one read, and Claude Code's tokenizer only
-//      promotes a control byte to its own token (hence to a `return` key) when
-//      the whole read is under 64 characters -- so the old two-write shape
-//      silently failed to SUBMIT anything past that size. A separate probe
-//      (desktop-pty-coalescing.test.ts) measures the coalescing itself; this
-//      file guards the shape of the code that depends on it.
-//
-// This is a source-scan (like desktop-session-broadcast.test.ts): SessionService
-// isn't bun-test-importable (PtyManager -> node-pty, plus unresolved @shared/*
-// aliases outside desktop's own tsconfig), so the guard reads the real file text
-// instead of instantiating the class.
+// injectCommand must consult pty.write()'s own boolean return, not just the
+// isAlive() pre-check: isAlive() only proves the pty was alive at that instant,
+// not during the write itself.
+// The text and its submit keystroke must go out as one bracketed-paste-encoded
+// write, not text then a bare '\r': ConPTY coalesces back-to-back writes, and
+// the CLI's tokenizer only promotes a control byte to a return key when the
+// whole read is under 64 characters.
+// SessionService isn't bun-test-importable (PtyManager -> node-pty, unresolved
+// @shared/* aliases), so this reads the real file text instead of instantiating
+// the class.
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
 

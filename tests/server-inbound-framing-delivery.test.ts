@@ -1,43 +1,7 @@
-// spec_c599a9c5 -- card e3f8065d, the WIRING attestation.
-//
-// WHY THIS FILE EXISTS, AND WHY IT IS NOT A SOURCE SCAN.
-// tests/peer-inbound-framing.test.ts proves the pure DECISION in
-// shared/inbound-framing.ts and nothing else: measured on card 3d3c7d40, a pure
-// suite stays fully green while the module it imports is connected to NOTHING.
-// The extraction performed here moved a block out of server.ts and made
-// check_messages consume it instead of its own inline copy of the branching --
-// so the single line that now carries the whole behaviour of the third receive
-// path is a call site, and a call site is exactly what a pure suite cannot see.
-//
-// A scan of server.ts for the string "renderInbound(" would close the
-// disconnection without proving the contract, and is defeated by the same
-// string surviving in a comment. So this is END TO END: a real broker, a real
-// `bun server.ts` peer, a real POST /announce from the reserved deck sentinel,
-// and the assertion made on THE TEXT THE RECIPIENT ACTUALLY READS through its
-// own check_messages tool.
-//
-// THE MUTATION IT MUST SURVIVE. Replacing `renderInbound(m.from_peer_id, m.text)`
-// by `m.text` at that call site leaves the pure suite at 15/15 and the smoke
-// build passing. It must turn THIS file red. The negative control below (an
-// ordinary peer message must arrive byte-identical) is the other half: a
-// blanket framing applied to every message would satisfy the deck assertions
-// and fail there, so neither test alone pins the behaviour.
-//
-// NAMING AND CI. `server-` prefix because it spawns daemons and binds ports.
-// That family is EXEMPTED from the pure-module glob at
-// .github/workflows/desktop-build.yml line 79, deliberately and by the
-// workflow's own comment. It is therefore NOT collected by CI and runs in the
-// full local gate. Renaming it to `peer-` to force collection would inject a
-// port-binding suite into that matrix, which is the very thing the exemption
-// exists to prevent.
-//
-// GROUP ISOLATION. The peer is spawned with CLAUDE_PEERS_FORCE_GROUP, the same
-// env the Deck uses to force an isolated group. The group_id and the TOFU hash
-// are then DERIVED here through the production functions (computeGroupId /
-// computeGroupSecretHash) rather than hardcoded or guessed from the checkout's
-// own group -- which would make the test depend on whatever group this working
-// copy happens to resolve to. The forced value below is a test fixture, not a
-// credential: it isolates the group, and the broker pins it on first use.
+// End to end on purpose: a source scan for the call site's string would pass
+// even with the call removed, since the same string can survive in a comment.
+// This spawns a real broker and a real peer and asserts on the text the
+// recipient actually reads.
 
 import { test, expect, describe, afterAll } from "bun:test";
 import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
@@ -107,11 +71,9 @@ async function readUntil(
 }
 
 /**
- * Same scan as readUntil, but keyed on the JSON-RPC `method` of a NOTIFICATION
- * rather than on a response id. The WS push is the NOMINAL delivery path and it
- * never answers a request, so nothing with an id ever comes back for it: a
- * harness that only knows how to await ids is structurally blind to it, which
- * is exactly how server.ts:335 stayed unattested until review measured it.
+ * Keyed on the JSON-RPC notification method rather than a response id: the WS
+ * push never answers a request, so a harness that only awaits ids cannot see
+ * it.
  */
 async function readNotification(p: Peer, method: string): Promise<JsonRpcResponse> {
   const decoder = new TextDecoder();
@@ -137,18 +99,10 @@ async function readNotification(p: Peer, method: string): Promise<JsonRpcRespons
 }
 
 /**
- * Spawn one `bun server.ts` MCP peer into the forced, isolated group.
- *
- * `extraEnv` (spec_e028bad2, card 7defe381 lot B1) lets a caller set
- * CLAUDE_PEERS_ROLE (myRole -> the recipientRole argument of
- * renderInbound/formatInboundLine) and CLAUDE_PEERS_POLL_FALLBACK_SEC (the
- * fallback-poll test below needs a near-zero interval to catch a message
- * within the narrow window the WS is actually down). CLAUDE_PEERS_ROLE is
- * explicitly deleted from the inherited shell env first: unlike
- * startBroker's cleanEnv scrub, this function otherwise spreads the whole
- * process.env, so a developer's own shell setting would silently leak into
- * every test that does not pass its own role and corrupt the negative
- * control.
+ * Deletes CLAUDE_PEERS_ROLE from the inherited env before spawning: unlike the
+ * broker's own env scrub, this spreads the whole process.env, so a developer's
+ * own shell setting would otherwise leak into any test that doesn't pass its
+ * own role.
  */
 async function spawnPeer(b: TestBroker, extraEnv: Record<string, string> = {}): Promise<Peer> {
   const env: Record<string, string> = {
@@ -186,32 +140,10 @@ async function spawnPeer(b: TestBroker, extraEnv: Record<string, string> = {}): 
 }
 
 /**
- * Kill `b`'s broker and respawn a fresh one on the SAME port, reusing the
- * SAME sqlite db file (so every already-registered peer row survives), then
- * mutate `b.proc` in place. spec_e028bad2 (card 7defe381 lot B1), PATH 2/4.
- *
- * WHY THIS EXISTS, AND WHY THE IDLE-TIMEOUT KNOB DID NOT WORK. The first
- * version of this file's fallback-poll test tried to force server.ts's
- * private `wsConnected` false via the documented
- * CLAUDE_PEERS_WS_IDLE_TIMEOUT_SEC broker knob. MEASURED by a swap-mutation
- * diagnostic (mutate the WS-push call site instead of the fallback-poll
- * call site, in the same test): that test turned RED, meaning it was
- * silently exercising the WS PUSH path the whole time, not the fallback
- * poll -- Bun's websocket server evidently keeps the connection alive
- * across the configured idle window regardless (no `sendPings` knob is set
- * in broker.ts to rule this out), so the socket never actually went down.
- * A source scan of the mutated line would have said nothing about this; only
- * the swap caught it, which is why a "which mutation makes this go red"
- * matrix belongs in the record, not just "it went red once".
- *
- * A hard process kill sidesteps that uncertainty entirely: it closes the
- * OS-level TCP connection unconditionally, and the recipient's `ws.close()`
- * handler fires within milliseconds on loopback -- no dependency on any
- * broker-internal idle/ping behaviour. WS_RECONNECT_INITIAL_MS (1000ms,
- * hardcoded in server.ts) only starts counting from that close event, so
- * bringing the replacement broker up and sending the probe message within a
- * couple hundred ms leaves a wide, controlled margin before the peer's own
- * reconnect can possibly win the race.
+ * Kills the broker process outright rather than relying on the WS idle-timeout
+ * knob: the underlying websocket server keeps the connection alive across that
+ * window regardless, so only a hard TCP close reliably triggers the peer's
+ * close handler and its reconnect.
  */
 async function killAndRestartBroker(b: TestBroker): Promise<void> {
   try {
@@ -324,30 +256,16 @@ describe("deck framing survives to the recipient, through check_messages", () =>
     // for: it is false the moment check_messages stops calling renderInbound.
     expect(received).toContain(DECK_NO_REPLY_NOTE.trim());
 
-    // Card dd388182, proved on the wire rather than on the constant: what a
-    // recipient actually reads no longer forbids it from messaging a peer.
     expect(received).toContain("free to message any peer");
     expect(received).not.toContain("do NOT message any other peer");
   }, 90_000);
 
   test("the WS PUSH, the nominal path, delivers the framing too", async () => {
-    // ADDED AFTER REVIEW, and the review is the reason it exists. Twelve
-    // mutations were played against this lot; two came back GREEN on all four
-    // suites: replacing renderInbound by the raw text at server.ts:335 (this
-    // push) and at server.ts:388 (the fallback poll). The three tests around
-    // this one assert through check_messages, which is a PULL, so they could
-    // not see it. The path left uncovered was the NOMINAL one -- the poll is
-    // only a fallback -- so an agent receiving a Deck announcement over the
-    // push would have read it NAKED, with no header and no note, and nothing
-    // would have gone red.
-    //
-    // The push emits a JSON-RPC NOTIFICATION, which carries no id and answers
-    // no request, hence readNotification above rather than readUntil.
-    //
-    // The assertions below are on HARDCODED literals, never on
-    // DECK_NO_REPLY_NOTE itself: review measured that an assertion comparing
-    // the output to the constant is self-referential and stays green through
-    // any rewrite of that constant, since both sides move together.
+    // Asserts on hardcoded literals rather than comparing against
+    // DECK_NO_REPLY_NOTE itself, since a comparison against the constant stays
+    // green through any rewrite of it.
+    // Covers the WS push path specifically: the other tests here go through the
+    // pull-based check_messages tool and cannot see a framing bug in the push.
     const b = await startBroker();
     brokers.push(b);
     const recipient = await spawnPeer(b);

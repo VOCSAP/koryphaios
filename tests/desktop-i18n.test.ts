@@ -119,20 +119,10 @@ test("fr.json key set is identical to en.json (no missing/extra keys)", async ()
   expect(Object.keys(fr).sort()).toEqual(Object.keys(en).sort());
 });
 
-// ----- emoji-free gate: no pictograph/emoji code points in any locale source -----
-// Card d5b7d842: DESIGN.md bans emoji in the UI outright (every icon is an SVG
-// glyph from components/icons.tsx) -- this is the regression gate that keeps
-// that rule enforced on the 3 sources that actually ship user-facing strings
-// (EN_DEFAULTS, en.json, fr.json; i18n.ts's EN_DEFAULTS is exercised via the
-// already-imported object rather than re-reading the .ts source as text).
-//
-// This is a BLOCKING gate for the whole team, so the range list is
-// deliberately biased toward false negatives (miss a rare emoji) over false
-// positives (flag legitimate typography and block everyone's commit). It
-// intentionally does NOT cover the arrows block (U+2190-U+21FF, used by
-// notifications.help.discord's "->" navigation prose), em/en dashes, curly
-// quotes/guillemets, or full-width punctuation (e.g. composer.new's "+" --
-// FULLWIDTH PLUS SIGN, a deliberate decorative convention, not an emoji).
+// Blocking gate for the whole team: the range list is deliberately biased
+// toward false negatives (missing a rare emoji) over false positives, so it
+// excludes the arrows block, em/en dashes, curly quotes/guillemets, and
+// full-width punctuation used decoratively.
 const EMOJI_RANGES: Array<[number, number]> = [
   [0x1f000, 0x1faff], // mahjong/domino/playing cards, enclosed alphanumeric supplement (🆕🆗🅰), misc pictographs, emoticons, transport, supplemental symbols
   [0x2600, 0x26ff], // misc symbols (warning triangle, sun, umbrella, ...)
@@ -187,27 +177,13 @@ test("the emoji gate does not flag legitimate typography (arrows, dashes, full-w
   expect(hasEmoji("« {title} »")).toBe(false); // guillemets
 });
 
-// ----- source-wide pictograph gate: no emoji/pictograph code point anywhere
-// in desktop/src -----
-// Card d5b7d842 CHANGES round (reviewer desktop-7b2civn-koryphaios-11): the
-// gate above only covers the 3 sources that ship TRANSLATED strings -- it
-// says nothing about a pictograph typed directly into a .tsx literal (e.g.
-// ModelPicker's provider glyphs, Sidebar's branch/attention badges) or left
-// in a comment (e.g. RoadmapView.tsx's "⏹ Stop button" note). This gate
-// closes that gap by scanning every .ts/.tsx file's raw text under
-// desktop/src for the same EMOJI_RANGES code points.
-//
-// Scope is desktop/src, NOT desktop/** -- desktop/dist/win-unpacked ships a
-// full copy of built resources (locale JSON, bundled assets) that is not
-// source and would double-count/pollute the baseline with build artefacts.
-// i18n.ts IS included here (unlike collectDesktopSrcFiles's orphan-key scan
-// below, whose skip of i18n.ts is specific to that different check -- a
-// pictograph typed into EN_DEFAULTS belongs in this gate too).
-//
-// The scan is file-TEXT level: it cannot distinguish rendered output from a
-// comment or a string literal, so the baseline is named for what it actually
-// knows (a pictograph found in the source text), not for where it lands
-// on screen.
+// Scans every .ts/.tsx file's raw text under desktop/src, unlike the
+// EN_DEFAULTS/en.json/fr.json gate above, so a pictograph typed directly into a
+// literal or left in a comment is also caught.
+// Scope is desktop/src, not desktop/**, since desktop/dist ships built
+// artefacts that would pollute the baseline. This is a file-text scan: it
+// cannot distinguish rendered output from a comment or string literal, so the
+// baseline is named for what it actually detects.
 
 function collectAllDesktopSrcFiles(dir: string): string[] {
   const out: string[] = [];
@@ -241,50 +217,18 @@ function findSourcePictographs(root: string, files: string[]): string[] {
   return [...hits];
 }
 
-// Snapshot of the desktop/src tree as of this gate's introduction (card
-// d5b7d842 CHANGES round). Card b72b82f7 (2026-07-29) drew SVG glyphs for
-// ModelPicker's 5 provider sigils, the graph-chat node/timeline
-// provider+warning marks, and the remaining rendered ⎇/⏸/✓/✗ occurrences.
-// Card d16a930c (2026-07-29) sorted the 27 entries left after b72b82f7 and
-// closed the 5 that were genuinely RENDERED (ExplorerView's directory-toggle
-// caret carried two code points on one line, so 6 entries drop for 5 fixes):
-// ExplorerView's ▾/▸ and Sidebar/TileArea's static twins swap to
-// GLYPH_ACTIONS.forward (CSS-rotated where the state must show, per the
-// three-case ARIA tree below); RoadmapView's ✓ swaps to GLYPH_ACTIONS.check
-// with the state moved onto the button (menuitemradio/aria-checked) instead
-// of the glyph; GitView's ⎇ prefix moves out of the string field into a
-// GLYPHS.git glyph rendered in the JSX span that already displays it.
-//
-// Every entry still below is EXEMPTED, not merely un-triaged -- named here so
-// the next pass doesn't re-derive the same arbitration:
-//   - 10 are main/preload PROCESS strings (journal lines, prompts, approval
-//     banners): main/approval-service.ts, main/attention.ts,
-//     main/companion-server.ts, main/context-wand.ts,
-//     main/explorer-service.ts, main/index.ts (x2), main/ipc.ts,
-//     main/startup-ack.ts, preload/browser-inspect.ts. DESIGN.md governs
-//     rendered UI; a pictograph in a log/prompt line is not a control that
-//     keeps its native look.
-//   - 11 are COMMENT-ONLY mentions, verified as such (no JSX renders them):
-//     App.tsx, BrowserView.tsx, ModelPicker.tsx ("★ pinned favorites"
-//     banner), RoadmapView.tsx ("⏹ Stop button" note), SearchBar.tsx,
-//     SnippetsDialog.tsx, TerminalTile.tsx, UsageLimitsModal.tsx,
-//     store.ts, and shared/types.ts (both entries -- doc comments on
-//     `lead` and `ExplorerRoot` describing UI drawn elsewhere).
-// Like KNOWN_ORPHAN_KEYS and KNOWN_EMOJI_KEYS above, this baseline may only
-// ever shrink from here, never grow.
+// Every entry below is exempted, not un-triaged: 10 are main/preload process
+// strings (journal lines, prompts, banners) not governed by DESIGN.md's
+// rendered-UI rule; 6 are comment-only mentions verified as such.
+// This baseline may only ever shrink, never grow.
 const KNOWN_SOURCE_PICTOGRAPHS: string[] = [
-  "main/approval-service.ts U+276F",
   "main/attention.ts U+276F",
-  "main/companion-server.ts U+1F4F1",
-  "main/context-wand.ts U+1FA84",
   "main/explorer-service.ts U+1F4C1",
   "main/index.ts U+1F4F1",
   "main/index.ts U+2387",
   "main/ipc.ts U+2387",
-  "main/startup-ack.ts U+276F",
   "preload/browser-inspect.ts U+2316",
   "renderer/src/components/App.tsx U+2316",
-  "renderer/src/components/BrowserView.tsx U+1F310",
   "renderer/src/components/ModelPicker.tsx U+2605",
   "renderer/src/components/RoadmapView.tsx U+23F9",
   "renderer/src/components/SearchBar.tsx U+1F50D",
@@ -365,9 +309,9 @@ const KNOWN_ORPHAN_KEYS: string[] = [];
 // reported. The guard is therefore fail-open on that one axis; closing it may
 // surface pre-existing orphans and is tracked as its own card.
 test("the orphan baseline may only ever shrink -- growing it must be an explicit act", () => {
-  // Materialises the sentence above the baseline, which was a comment only.
-  // Adding an entry now fails HERE, so it takes deleting this assertion on
-  // purpose -- it can no longer happen as a side effect of "making it green".
+  // Materialises the shrink-only rule as an assertion: adding an entry now
+  // fails here, so it takes deleting this assertion on purpose rather than
+  // happening as a side effect of making a change green.
   expect(KNOWN_ORPHAN_KEYS).toHaveLength(0);
 });
 
@@ -403,31 +347,13 @@ test("the orphan check covers a key only reachable through a discovered dynamic 
   expect(findOrphans([dynamicKey!], files)).toEqual([]);
 });
 
-// ----- missing-key check: every literal t('...') call must resolve in EN_DEFAULTS -----
-// The mirror image of the orphan check above (card 4600faed): a key that is
-// CALLED but never DEFINED does not throw or warn -- t() falls back to
-// returning the raw key string (see "t returns the raw key when the key is
-// missing" above), so a typo or a renamed/removed EN_DEFAULTS entry surfaces
-// only as a literal dotted string rendered verbatim in the UI, silently.
-// Extraction reuses the same two ideas as the orphan check's dynamic-prefix
-// scan: parse call sites structurally rather than by naive regex-only
-// matching, and only claim a key is "used" when the call site's own text
-// proves it -- no cross-file indirection tracing (a t(v.key) call with `key`
-// defined elsewhere is out of scope here, same as the dynamic-prefix
-// t(`prefix.${x}`) case, both left to the orphan check's coverage instead).
-//
-// Known tradeoff (reviewer, card 4600faed): the scan reads raw source text
-// and does NOT strip comments or unrelated strings first. A literal like
-// t('example.not.a.real.key') written inside a // comment, to illustrate
-// something, is indistinguishable from a real call site and WILL fail this
-// check for the whole team -- with a non-intuitive cause the day it happens.
-// Deliberately not fixed here (stripping comments/strings correctly is its
-// own can of worms); this sentence exists so the failure is looked up
-// instead of debugged from scratch.
-//
-// The example literal above is safe here ONLY because this file lives in
-// tests/, outside DESKTOP_SRC (desktop/src) -- the same line copied into a
-// file under desktop/src would trip exactly the gate it describes.
+// t() falls back to returning the raw key string on a miss rather than throwing
+// or warning, so a typo or removed EN_DEFAULTS entry surfaces only as a literal
+// dotted string rendered verbatim in the UI.
+// The scan does not strip comments or unrelated strings first: a literal like
+// t('example.not.a.real.key') written inside a comment is indistinguishable
+// from a real call site and will fail this check for the whole team. The
+// example above is safe only because this file lives outside desktop/src.
 
 // Matches the outer '(' of any standalone `t(` call (word-boundary before
 // `t` excludes things like `format(`/`count(`, but still matches `.t(`

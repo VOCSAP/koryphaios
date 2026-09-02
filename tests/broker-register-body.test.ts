@@ -1,31 +1,9 @@
-// Card 6aa32af4 review finding: neither roadmap-project-key.test.ts (unit,
-// imports resolveProjectKey directly) nor roadmap-project-key-alignment.test.ts
-// (broker-level, but drives the peers/roadmap_items tables directly with a
-// hardcoded project_key) ever looks at what server.ts actually PUTS in the
-// `/register` request body. Reviewer measured this the hard way: revert both
-// /register call sites in server.ts back to the raw, possibly-null
-// `myProjectKey` -- both existing test files stay 8 pass, 0 fail. Production
-// reverted to its buggy form, nothing red. This file closes that gap by
-// spawning the real server.ts (same harness shape as server-ask-operator.test.ts
-// and mcp-roadmap-ack.test.ts) with a temp, non-git cwd, and reading the
-// `peers` row the broker actually stored.
-//
-// Two pitfalls paid for by the reviewer, avoided here:
-// (a) `bun server.ts` must be spawned with the ABSOLUTE path to server.ts --
-//     the temp non-git cwd is the very thing under test, and a relative
-//     "server.ts" resolves against that cwd, not the repo.
-// (b) never `SELECT ... LIMIT 1` on `peers` with no WHERE clause: broker.ts
-//     seeds dormant sentinel rows with cwd = '' (see broker.ts's
-//     SENTINEL_DEFINITIONS insert) that a bare LIMIT 1 can pick up instead of
-//     the session under test. Filter `status = 'active' AND cwd <> ''`.
-//
-// 2nd review round: also covers the `whoami` tool's `project_key` field
-// (server.ts's whoami handler used to echo the raw, possibly-null
-// myProjectKey instead of roadmapProjectKey()'s resolved value -- silent
-// contradiction with list_peers on a no-remote repo). This harness already
-// spawns a real server.ts, so a full MCP stdio handshake (initialize +
-// tools/call, same shape as mcp-roadmap-ack.test.ts's boot()/callTool())
-// costs one JSON-RPC round trip, not a new harness.
+// bun server.ts must be spawned with the absolute path to server.ts: the temp
+// non-git cwd under test would otherwise resolve a relative path against
+// itself, not the repo.
+// Never SELECT ... LIMIT 1 on peers with no WHERE clause: dormant sentinel rows
+// seeded with cwd = '' can be picked up instead of the session under test;
+// filter status = 'active' AND cwd <> ''.
 
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";

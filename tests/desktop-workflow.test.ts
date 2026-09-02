@@ -151,9 +151,6 @@ test('layoutLane: a depends_on link does NOT pull items into the same column any
 })
 
 test('layoutLane: distinct queue values rank densely, a gap does not draw an empty column', () => {
-  // Mirrors tests/broker-roadmap-queue.test.ts:50 (queue: 7 with nothing else
-  // queued is reachable): the column must be the RANK of the distinct queue
-  // values present, not the raw value itself.
   const ordered = laneItems([item('a', { queue: 1 }), item('b', { queue: 7 })])
   const pos = layoutLane(ordered)
   expect(pos.get('a')!.col).toBe(0)
@@ -529,16 +526,11 @@ test('joinAnchorAt: the heads column never resolves to an anchor', () => {
   expect(joinAnchorAt(ordered, pos, WF_NODE_W / 2)).toBeNull()
 })
 
-// Roadmap card 42edc88b phase 2, reviewer-flagged wave-preservation gap: a
-// non-lane write (queueItem/saveDraft-style append) must PRESERVE an
-// existing wave tie, not flatten it to 1..N. Regression for exactly the bug
-// the reviewer caught -- RoadmapView.tsx/RoadmapList.tsx call sites that sent
-// `ids` alone to roadmap:reorder (no `waves`) silently destroyed any tie the
-// moment they ran, since the broker's legacy no-waves branch stamps
-// sequential queue numbers (see tests/broker-roadmap-reorder.test.ts "waves
-// omitted keeps the existing flat 1..N stamping"). Composing wavesOf +
-// insertSoloWaves the way every non-lane call site now does is what avoids
-// that: this test fails if either helper is bypassed in favor of `ids` alone.
+// A non-lane append (queueItem/saveDraft-style) must preserve an existing wave
+// tie rather than flatten it to 1..N: call sites sending ids alone to
+// roadmap:reorder destroyed any tie because the broker's legacy no-waves branch
+// stamps sequential queue numbers. Composing wavesOf + insertSoloWaves avoids
+// that.
 test('wavesOf + insertSoloWaves: a non-lane append preserves an existing wave tie', () => {
   const items = [item('a', { queue: 1 }), item('b', { queue: 1 }), item('c')]
   const queued = queuedItems(items)
@@ -549,16 +541,10 @@ test('wavesOf + insertSoloWaves: a non-lane append preserves an existing wave ti
   expect(waves.flat()).toEqual(ids)
 })
 
-// Reviewer finding on e2b0630, narrower-scope sibling of the gap above:
-// stackItem used to splice a stacked card at the target's raw flat index + 1.
-// When the target sits in the MIDDLE of a multi-member wave, that flat index
-// lands INSIDE the wave, and insertSoloWaves correctly (per its own
-// documented mid-wave behavior) breaks it into two ties either side of the
-// insertion -- un-tying wave-mates the operator never touched. The fix rounds
-// the splice point to the flat boundary right AFTER the target's WHOLE wave
-// (team-lead-confirmed 2026-07-29, wave = one execution slot). This models
-// that boundary computation directly on the helpers, the way stackItem now
-// does, and is the regression for "target mid-wave -> the wave stays whole".
+// When the target sits mid-wave, splicing at its raw flat index lands inside
+// the wave and un-ties wave-mates the operator never touched. The fix rounds
+// the splice point to the flat boundary right after the target's whole wave,
+// keeping a mid-wave target's wave intact.
 test('wavesOf + insertSoloWaves: rounding to the end of the target wave (stackItem-style) keeps a mid-wave target\'s wave whole', () => {
   const items = [item('a', { queue: 1 }), item('b', { queue: 1 }), item('c', { queue: 1 })]
   const queued = queuedItems(items)

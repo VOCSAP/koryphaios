@@ -1,25 +1,3 @@
-// Card 9c6de1e1: a verdict answered from the phone was marked DELIVERED
-// without ever being typed, whenever the operator had dismissed the tile's
-// attention badge in the meantime.
-//
-// Chain (hyp_9405c518): clearAttention -> waitingTiles.delete -> the poller's
-// `!canApplyVerdict` branch -> `applied.push(id)` -> markVerdictsDelivered.
-// The poller conflated "nobody will ever type this" (tile gone, channel
-// route) with "this tile is alive, its flag was merely cleared".
-//
-// The guard lives in TWO places and both are exercised here:
-//   1. the pure classifier in approval-service.ts (imports cleanly), and
-//   2. the REAL poller in desktop/src/main/index.ts, sliced verbatim out of
-//      the file and run with fakes -- index.ts cannot be imported under bun
-//      (electron, node-pty), but the poller closes over nothing that needs
-//      them. Slicing rather than retyping means the bytes under test are the
-//      shipped bytes: a paraphrase here could drift from index.ts without
-//      anything failing, which is exactly the failure mode this test exists
-//      to prevent. The extracted line range + a sha256 are printed so a
-//      reviewer can check what actually ran.
-//
-// The attention listener is sliced the same way for the second half of the
-// fix: dismissing a flag while an approval is still open must leave a trace.
 import { describe, expect, test } from "bun:test";
 import { EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
@@ -35,12 +13,9 @@ import {
 } from "../desktop/src/main/approval-service";
 import type { Approval } from "../desktop/src/main/approval-auth";
 
-// The negative control has to stay REPLAYABLE, or "I measured it red" is just
-// a claim: point this at an older copy of index.ts and the four defect
-// assertions must fail there, which is what proves they look at the right place
-// and that the untouched-path assertions are not vacuous.
-//   git show <rev>:desktop/src/main/index.ts > /tmp/index-prefix.ts
-//   KORY_INDEX_TS=/tmp/index-prefix.ts bun test tests/desktop-approval-defer.test.ts
+// KORY_INDEX_TS overrides which index.ts copy is sliced, letting this suite
+// replay against an older revision to confirm the defect assertions fail there
+// and are not vacuous.
 const INDEX =
   process.env.KORY_INDEX_TS || join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
 // index.ts is CRLF on disk; normalise line endings only (no other rewriting)
@@ -68,29 +43,10 @@ function slice(anchor: string, terminators: string[], label: string): string {
   );
   return body;
 }
-// Un repertoire NEUF par tranche, et son chemin canonicalise. Les deux moities
-// repondent au meme echec de CI, rouge sur le seul job macos-latest depuis le
-// 2026-08-13 (carte c1849cf9) :
-//
-//   error: Cannot find module '/private/var/folders/.../kory-slice-XXXXXX/
-//                              listener-b6342d05.ts' from ''
-//
-// Le fait discriminant est que le PREMIER import de tranche REUSSIT et que
-// seul le SECOND echoue. Si la cause etait la seule canonicalisation macOS de
-// /var vers /private/var, le premier echouerait aussi ; le /private/var du
-// message est donc la forme sous laquelle bun rapporte, pas la cause. Reste
-// que le second fichier est ecrit APRES que le premier import a fait lister ce
-// repertoire, d'ou un repertoire par tranche : aucun listing n'est reutilise.
-//
-// `realpathSync.native` traite l'autre moitie, celle que CLAUDE.md nomme
-// (« Comparing two paths? Canonicalize both ») : sur macOS `tmpdir()` rend
-// /var/folders/... quand tout outil externe repond /private/var/folders/...,
-// et sur Windows un nom court 8.3. Le chemin ecrit et le chemin resolu sont
-// alors le meme.
-//
-// Aucune des deux moities n'est verifiable ailleurs que sur le runner macOS :
-// ni Linux ni Windows ne symlinkent leur repertoire temporaire, ce qui est
-// exactement la remarque « Cross-platform tests » de TESTING.md.
+// Un repertoire temporaire neuf par tranche : bun ne retrouve pas un fichier
+// ecrit dans un repertoire deja liste par un import precedent.
+// realpathSync.native canonicalise le chemin ecrit et le chemin resolu (macOS
+// symlinke /var vers /private/var, Windows rend un nom court 8.3).
 async function evaluate<T>(wrapper: string, name: string): Promise<(env: Record<string, unknown>) => T> {
   const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "kory-slice-")));
   const file = join(dir, `${name}-${createHash("sha256").update(wrapper).digest("hex").slice(0, 8)}.ts`);

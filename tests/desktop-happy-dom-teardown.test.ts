@@ -1,49 +1,15 @@
-// Card 526665f7. Un fichier de test qui appelle `GlobalRegistrator.register()`
-// prend DEUX choses au processus, et doit rendre les deux :
-//
-//  1. les GLOBALS. bun execute tous les fichiers de test dans un seul
-//     processus, donc `globalThis.fetch` reste celui de happy-dom pour tous
-//     les fichiers suivants. Ce fetch la applique la politique de meme
-//     origine, celui de bun ne l'applique pas : chaque suite ulterieure qui
-//     parle a un serveur qu'elle vient de lancer sur 127.0.0.1 est refusee en
-//     "Cross-Origin Request Blocked" puis expire a 30 ou 60 s. Mesure : la
-//     suite complete passait de 1 echec en 166 s a 19 echecs, 11 erreurs et
-//     961 s, avec 20 404 lignes de refus, sans qu'AUCUN des echecs
-//     supplementaires ne soit dans un fichier du lot fautif.
-//
-//  2. le SLOT. Le registrator garde un drapeau interne : tant qu'il est a
-//     true, tout autre `register()` leve "Happy DOM has already been globally
-//     registered". Restaurer les globals a la main ne rend PAS le slot, et
-//     c'est pourquoi la restauration de descripteurs n'est pas acceptee ici
-//     comme teardown.
-//
-// La lecon de forme, et la raison d'etre de cette garde : L'ORDRE D'EXECUTION
-// DES FICHIERS DE TEST N'EST PAS GARANTI. Toute propriete qui tient parce
-// qu'un fichier passe avant un autre tient par accident.
-//
-// Card 0bbac537 (2026-08-24) : l'appariement TEXTUEL register()/unregister()
-// que cette garde faisait auparavant ne protege PAS contre la vraie panne
-// mesuree. `tests/desktop-tile-area.test.ts` apparie parfaitement son
-// mock.module() (aucun `unregister()` en jeu, ce marqueur-la n'a pas de
-// contrepartie textuelle) et aurait ete invisible a ce controle ; le vrai
-// declencheur etait `tests/desktop-inbox-sender-dom.test.ts`, qui meurt AU
-// CHARGEMENT (une SyntaxError d'import ESM), donc APRES son propre
-// `GlobalRegistrator.register()` et AVANT que son `afterAll` -- ou tout
-// `unregister()` textuellement present plus bas dans le fichier -- ne
-// puisse tourner. Le texte du fichier ment : il "a" un unregister(), il ne
-// l'execute jamais. La garde teste maintenant la consequence pratique, pas
-// la forme du texte : AUCUN fichier porteur d'un marqueur de contamination
-// (GlobalRegistrator.register( ou mock.module() -- memes marqueurs que
-// scripts/pure-module-partition.ts) ne doit se trouver dans l'ensemble
-// PROPRE que ce module calcule, celui que scripts/partition-pure-tests.ts
-// joue en un seul processus partage. C'est la garantie qui compte : peu
-// importe si le texte s'appaire, un fichier marque qui finit dans le lot
-// partage rouvre exactement la chaine de contamination ci-dessus.
-//
-// Cette garde parcourt l'arbre au lieu de nommer des fichiers, parce que le
-// prochain fautif n'existe pas encore. Les deux planchers sont la contre la
-// maniere dont ce genre de garde echoue OUVERT : un parcours qui ne trouve
-// plus rien reste vert sur l'ensemble vide.
+// A file calling GlobalRegistrator.register() must restore both the globals it
+// overwrites (fetch enforces same-origin in later suites otherwise) and the
+// registrator's own internal slot, which a manual descriptor restore does not
+// release.
+// Test file execution order is not guaranteed, so any property that holds only
+// because one file runs before another holds by accident.
+// Textual register()/unregister() pairing is not sufficient: a file that dies
+// at load (an ESM SyntaxError) never reaches its own afterAll even though the
+// unregister() call is textually present. The guard instead checks that no file
+// carrying a contamination marker (GlobalRegistrator.register( or
+// mock.module()) ends up in the shared-process set that
+// scripts/partition-pure-tests.ts actually runs.
 import { expect, test } from "bun:test"
 import { readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"

@@ -249,15 +249,11 @@ test("an EMPTY cc_session_id never reclaims a legacy row (the empty string is no
 });
 
 test("two rows sharing one cc_session_id FAIL CLOSED: a third tile gets a fresh identity, never one of the two", async () => {
-  // How this state is REACHED, measured rather than assumed: a restore
-  // resurrects the row found by the secondary lookup but upserts under the
-  // NEW tile's key, so the pre-restore row survives and both carry the same
-  // cc_session_id. Restore twice from one CC session and the id no longer
-  // designates one row -- so the resolver must refuse rather than pick, the
-  // same discipline as directive.ts's ambiguous peer_id.
-  // (Building the state with two SIMULTANEOUSLY live tiles does NOT work and
-  // is not the real shape: the second register hits the active-collision
-  // branch, which mints a derived id and deliberately writes no row.)
+  // This state is reached by restoring the same CC session twice: restore
+  // resurrects the row under the new tile's key while the pre-restore row
+  // survives, so both end up sharing one cc_session_id.
+  // Two simultaneously live tiles do not reproduce this: the second register
+  // hits the active-collision branch and mints a derived id instead.
   const host = "hostAmbiguous";
   const cwd = "/ambiguous-cc";
   const one = await register(host, cwd, livePid(), { desk_session: "tile-A", cc_session_id: "cc-dup" });

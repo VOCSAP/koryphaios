@@ -1,54 +1,17 @@
-// Card 5bffb7b9 -- companion guard to tests/desktop-inbox-sender.test.ts.
-//
-// That file's proof-2 describes (source scan) that InboxPanel.tsx routes
-// through resolveApprovalSender(); it does NOT prove that senderOf() actually
-// RENDERS what resolveApprovalSender() returns. Measured by the team-lead
-// 2026-08-18 (mutation review): inserting `return res.raw || '?'` as the
-// FIRST line inside senderOf()'s `if (e.kind === 'approval')` block turns the
-// real JSX beneath it into dead code, and tests/desktop-inbox-sender.test.ts
-// stays 12 pass / 0 fail -- a string-presence scan over the source text is
-// vacated by dead code sitting right next to the string it's looking for.
-//
-// This file closes that gap by mounting the REAL, unmodified InboxPanel
-// component (not a reimplementation) and reading the actual rendered DOM for
-// all three shapes senderOf() can produce on an approval entry:
-//   1. resolved (tile_ref matches a live session)      -> name only, no <code>
-//   2. unresolved with a non-empty raw tile_ref         -> senderUnresolved text + <code>raw</code>
-//   3. unresolved with an empty tile_ref                -> senderUnresolvedEmpty text, no <code>
-//
-// Scope note (card's point 1): the card cites inbox-sender.ts:52-53 as "where
-// the contract lives" -- that is the DOC COMMENT stating the contract
-// (resolveApprovalSender's docstring), not the render logic. inbox-sender.ts
-// is deliberately a pure, react-free module (its own header comment): it
-// returns a tagged union, nothing more. The rendering of that union into two
-// visibly-different DOM shapes happens in InboxPanel.tsx's senderOf()
-// (components/InboxPanel.tsx:130-148), which is what this file actually
-// exercises. The card is stale on that one locator, not wrong about the gap.
-//
-// Resolution note for the `@shared/*` imports: InboxPanel.tsx has two REAL
-// (non-type-only) imports from bare specifiers that bun cannot resolve when
-// `bun test` runs from the repo root (no root tsconfig `paths` entry for
-// `@shared`, same trap documented in tests/desktop-nav-badge-producer.test.ts
-// and tests/desktop-tile-area.test.ts's TemplateComposer note) --
-// `inboxEntryKey` from '@shared/types' and `COMPANION_MANIFEST` /
-// `REMOTE_BLOCKED_CHANNELS` from '@shared/companion'. Both are intercepted
-// with `mock.module` below, keyed by the bare specifier string itself (empirically
-// confirmed bun's mock.module matches on the literal specifier as written in
-// the importing file's `import` statement, not on a resolved filesystem path,
-// so a specifier that would otherwise fail to resolve at all can still be
-// mocked). `inboxEntryKey` is never actually CALLED by anything this file
-// exercises: InboxPanel's `reactKey()` only calls it for `kind !== 'approval'`,
-// and every InboxEntry fixture here is `kind: 'approval'` -- so the stub only
-// needs to exist for the import to succeed, not to behave correctly.
+// Mounts the real InboxPanel component and reads the rendered DOM for the three
+// shapes senderOf() can produce on an approval entry: resolved (name only),
+// unresolved with a tile_ref (text + <code>), unresolved with an empty tile_ref
+// (text only).
+// '@shared/*' imports are intercepted with mock.module, keyed by the bare
+// specifier exactly as written in the importing file -- bun matches on that
+// literal string, not on a resolved filesystem path.
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 GlobalRegistrator.register();
 
-// Paired unregister, required by tests/desktop-happy-dom-teardown.test.ts's
-// repo-wide scan (checks source text for both calls) and by the real
-// contract behind it (register() replaces globalThis.fetch repo-wide for the
-// rest of this `bun test` process; see that file's header for the measured
-// blast radius).
+// GlobalRegistrator.register() replaces globalThis.fetch repo-wide for the rest
+// of this bun test process; the paired unregister is required by the repo-wide
+// teardown scan.
 afterAll(async () => {
   await GlobalRegistrator.unregister();
 });
@@ -62,11 +25,9 @@ import { mockStore, storeMockStubs } from "./_store-mock";
 // would be hoisted ahead of the register() call regardless of source order.
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
 
-// ---------------------------------------------------------------------------
-// Fake store: minimal FakeDeckState covering exactly what InboxPanel.tsx and
-// i18n.ts's useT() read (both resolve '../store' / './store' to the SAME
-// file, desktop/src/renderer/src/store.ts -- one mock.module call covers
-// both call sites, per tests/desktop-tile-area.test.ts's established pattern).
+// FakeDeckState covers exactly what InboxPanel.tsx and i18n's useT() read; both
+// resolve '../store' and './store' to the same file, so one mock.module call
+// covers both call sites.
 type FakeSession = { id: string; name: string };
 interface FakeApprovalOrigin {
   tile_ref: string;
@@ -123,11 +84,9 @@ function resetFakeStore(): void {
   fakeUseDeck.setState(initialFakeState(), true);
 }
 
-// `errorText` is InboxPanel.tsx's other named import from '../store' (used
-// only inside catch blocks of deleteEntry/sendReply/answerApproval, none of
-// which this file's render-only tests exercise) -- must still exist as an
-// export or the module fails to load. mockStore (tests/_store-mock.ts,
-// card a688748b) requires every real store.ts export, not just this one.
+// errorText is InboxPanel's other named import from '../store', unused by these
+// render-only tests but must still exist as an export or the module fails to
+// load.
 mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 
 // '@shared/types': only `inboxEntryKey` is a real (value) import in

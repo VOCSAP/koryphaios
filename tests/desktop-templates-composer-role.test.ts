@@ -71,20 +71,15 @@ function resetFakeStore(): void {
   fakeUseDeck.setState(initialFakeState(), true);
 }
 
-// Still required even for the EntryCard-only tests: TemplateComposer.tsx's
-// top-level `import { useDeck } from '../store'` must resolve to SOMETHING
-// syntactically valid for the module to load at all (the real store.ts
-// itself fails under bun test on its own `@shared/types` alias import, per
-// tests/_store-mock.ts's own header comment) -- but since EntryCard never
-// CALLS `useDeck`, it is provably inert which instance wins the module-cache
-// race described above.
+// TemplateComposer.tsx's top-level import of useDeck must resolve to something
+// syntactically valid for the module to load, but EntryCard never calls
+// useDeck, so which mock instance wins the module-cache race described above is
+// provably inert.
 mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 
-// TemplateComposer.tsx imports value exports from '@shared/template' and
-// '@shared/role' (both tsconfig-only aliases, not resolved by bun test --
-// same gap documented in tests/desktop-tile-area.test.ts's header). Faithful
-// reimplementation of the tiny, dependency-free role module (not a bare
-// stub), so mergeRoleChoices' real behavior populates the select for real.
+// @shared/template and @shared/role are tsconfig-only aliases bun test does not
+// resolve. The role module is faithfully reimplemented here (not stubbed) so
+// mergeRoleChoices' real behavior populates the select.
 mock.module("@shared/template", () => ({
   TEMPLATE_TYPE: "koryphaios.template",
   TEMPLATE_VERSION: 1
@@ -162,13 +157,10 @@ afterEach(() => {
   container.remove();
 });
 
-// Same native-setter bypass as tests/desktop-templates-composer-draft-reset.test.ts's
-// typeInto, generalized to any value-bearing element (input OR select): React
-// patches the element's own `value` property setter to track "did this change
-// externally", so a bare `el.value = x` leaves React's tracker unaware and the
-// subsequent event finds "no change" -- onChange never fires. Bypass via the
-// native prototype setter, same technique React Testing Library's
-// fireEvent.change uses. `<select>` fires on 'change', not 'input'.
+// React patches an element's native value setter to detect external changes, so
+// a bare el.value = x leaves onChange unfired. Bypasses via the native
+// prototype setter instead, the same technique React Testing Library's
+// fireEvent uses. A select fires on 'change', not 'input'.
 function setValue(el: HTMLInputElement | HTMLSelectElement, value: string, eventType: "input" | "change"): void {
   const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set;
   if (!setter) throw new Error("no native value setter found on element prototype");

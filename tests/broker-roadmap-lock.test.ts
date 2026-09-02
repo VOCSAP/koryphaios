@@ -187,8 +187,6 @@ test("a bare locked:false from a non-owner is refused with 409 (release-only ste
   expect(bareRelease.status).toBe(409);
   expect(bareRelease.error).toContain("locked by 'test-peer'");
 
-  // The lock must still be intact -- the whole point is that this single
-  // field can no longer silently clear it.
   const listed = await post<{ items: RoadmapItem[] }>(`${broker.url}/roadmap/list`, {
     project_key: PK,
   });
@@ -198,13 +196,9 @@ test("a bare locked:false from a non-owner is refused with 409 (release-only ste
 });
 
 test("a bare locked:false with force:true from an unproven author is still refused with 409", async () => {
-  // Same release-steal shape as the test above, but with `force: true` added.
-  // Card 39c40571 layer 1 only honours `force` for a PROVEN author (a real
-  // registered peer, not a self-declared `by` string) -- an anonymous body
-  // cannot use `force` to launder the release-steal either. This cell's
-  // outcome flipped 200 -> 409 as a side effect of the e7b364dc guard fix
-  // above (the guard now also gates on `body.locked !== undefined`), but
-  // nothing asserted it until now.
+  // force is only honoured for a proven author (a real registered peer, not a
+  // self-declared `by` string); an anonymous body cannot use it to launder a
+  // release-steal either.
   const item = await add({ title: "release-steal target, forced", status: "in_progress" });
   expect(item.locked).toBe(true);
 
@@ -212,37 +206,15 @@ test("a bare locked:false with force:true from an unproven author is still refus
   expect(bareRelease.status).toBe(409);
 });
 
-// The domain here is six fields across two endpoints (measured by walking
-// the request interfaces, not the handlers): /roadmap/upsert's `locked`,
-// `status` (an in_progress write implicitly claims/releases) and `force`
-// (claims-of-certainty, honoured only for a proven author -- see the next
-// test); /roadmap/import's `locked`, `locked_by`, `locked_at` (whole-row
-// restore, EXEMPTED BY ARBITRATION, not by an oversight: card 39c40571 rules
-// that a --force import is allowed to write the three lock columns straight
-// from file content with no proven author at all, because import skips a
-// locked row outright unless force -- see tests/broker-roadmap-import.test.ts
-// card 40ddf1f5, which already carries the negative controls for it; this is
-// a pointer, not a duplicate). /roadmap/archive releases the lock with no
-// body field at all, but is already gated by an owner/deck-only check
-// (see "another peer's status write on a locked item is refused with 409"
-// above, which asserts the archive-by-intruder 409 case) -- nothing to fix
-// there, card e7b364dc's own text describing it as open predates that guard.
-//
-// Growth-of-domain answer (Part B, card e7b364dc): the guard used to be an
-// enumerated OR-list of body FIELD NAMES -- fails open the instant a new
-// request field also moves the lock, until someone adds it by hand. It is
-// now an EFFECT check: shared/roadmap-lock.ts's resolveRoadmapLock is called
-// once, before the guard, and the guard fires when its resolved
-// {locked, lockedBy} actually differs from `existing` (OR body.status is set
-// at all, which must survive on its own -- see the truth table in
-// tests/roadmap-lock.test.ts for the same-status-already-locked cell that
-// resolves to zero delta yet must still 409). A hypothetical 7th field that
-// feeds resolveRoadmapLock is covered automatically, by construction, as
-// long as it flows through that one function -- the guard no longer needs to
-// name it. A 7th field that bypasses resolveRoadmapLock entirely (writes lock
-// state through some other path) is not covered by this and would need the
-// same audit this card just did; that limit is structural, not a gap in this
-// fix.
+// The lock-move guard is an effect check, not a field-name list:
+// resolveRoadmapLock is called once, before the guard, and the guard fires when
+// its resolved {locked, lockedBy} actually differs from `existing` (or
+// body.status is set at all).
+// A future field that feeds resolveRoadmapLock is covered automatically; one
+// that bypasses it entirely is not, and needs the same audit this card did.
+// /roadmap/import's locked/locked_by/locked_at are exempted by arbitration
+// (card 39c40571): a --force import may write the lock columns from file
+// content with no proven author.
 
 test("owner, deck and force:true bypass the guard", async () => {
   const a = await add({ title: "owner moves", status: "in_progress" });
@@ -423,21 +395,12 @@ test("owner-gone sweep releases after grace, but an active owner keeps the lock"
     expect(held.body.item.locked).toBe(true);
     expect(ghost.body.item.locked).toBe(true);
 
-    // Card 365561ba: releaseStaleLocks' owner-gone check is
-    // `datetime(locked_at) < datetime('now', -GRACE seconds)`, and SQLite's
-    // datetime() truncates BOTH sides to whole seconds. Combined with the 1s
-    // sweep tick, the release is only guaranteed observable within
-    // grace_sec + sweep_period_sec, plus up to 1s more of truncation
-    // aliasing depending on which second locked_at floors into relative to
-    // the tick schedule -- measured worst case ~4s for this grace=2s/
-    // sweep=1s config (instrumented repro: iter1 still-locked at +3865ms,
-    // the boundary tick's `<` missed by the floor, released only on the
-    // NEXT tick). A single fixed sleep budget close to that worst case
-    // reproduces the flake on a slower/busier machine -- poll the real
-    // condition instead (pollUntil above). Budget generous margin over the
-    // measured worst case, not a value that skims it: polling only costs
-    // the wall time actually used, so a wide ceiling is free when things
-    // are fast and honest when they are not.
+    // SQLite's datetime() truncates both sides to whole seconds, so combined
+    // with the 1s sweep tick the release is only guaranteed observable within
+    // grace_sec + sweep_period_sec, plus up to 1s of truncation aliasing.
+    // Poll the real condition (pollUntil) rather than a fixed sleep: a wide
+    // ceiling costs nothing when things are fast and stays honest when they are
+    // not.
     let heldAfter: RoadmapItem | undefined;
     const ghostAfter = await pollUntil(12_000, 300, async () => {
       await post(`${b.url}/heartbeat`, { instance_token: reg.body.instance_token });
@@ -460,15 +423,6 @@ test("owner-gone sweep releases after grace, but an active owner keeps the lock"
   }
 }, 20_000);
 
-// Card e344fa79, site (c): the fail-open INVERSE of the sibling test above.
-// There, the SAME peer that holds the lock stays active and keeps it. Here,
-// the TRUE owner goes silent (never heartbeats again) while a peer sharing
-// its EXACT peer_id string, but registered in a DIFFERENT group, stays
-// alive -- before this card, releaseStaleLocks' owner-gone check
-// (`NOT EXISTS ... WHERE p.peer_id = roadmap_items.locked_by AND
-// p.project_key IS roadmap_items.project_key AND ...`) had no group term at
-// all, so the homonym's mere existence (same peer_id, same project) read as
-// "the owner is still here" and the abandoned lock was NEVER released.
 test("owner-gone sweep (site c): a live homonym peer in a DIFFERENT group does not keep a dead true owner's lock alive", async () => {
   const b = await startBroker({
     CLAUDE_PEERS_LOCK_TTL_SEC: "3600",
@@ -514,9 +468,6 @@ test("owner-gone sweep (site c): a live homonym peer in a DIFFERENT group does n
     );
     db.close();
 
-    // Only the homonym (different group, same peer_id) stays alive, polled
-    // the same way the sibling "active owner keeps the lock" test keeps its
-    // owner alive. Before this card's fix, that alone kept the lock forever.
     const after = await pollUntil(12_000, 300, async () => {
       await post(`${b.url}/heartbeat`, { instance_token: homonym.body.instance_token });
       const listed = await post<{ items: RoadmapItem[] }>(`${b.url}/roadmap/list`, {
@@ -533,13 +484,11 @@ test("owner-gone sweep (site c): a live homonym peer in a DIFFERENT group does n
   }
 }, 20_000);
 
-// Card e344fa79: the migration's fail-open guarantee, exercised for real
-// rather than only asserted by `matchesLockOwner`'s truth table. A row
-// locked BEFORE this card shipped has `locked_group IS NULL` (no ALTER
-// TABLE backfills it), and the owner-gone sweep's new group term is written
-// to degrade to the OLD peer_id-only check on such a row -- this proves the
-// degrade actually releases a truly-abandoned legacy lock, not just that it
-// declines to crash on NULL.
+// A row locked before the group column existed has locked_group IS NULL (no
+// backfill), and the owner-gone sweep's group term degrades to the old
+// peer_id-only check on such a row.
+// This proves the degrade actually releases a truly-abandoned legacy lock, not
+// just that it declines to crash on NULL.
 test("owner-gone sweep (site c): a legacy row (locked_group NULL, pre-migration) still releases normally once its owner is gone", async () => {
   const b = await startBroker({
     CLAUDE_PEERS_LOCK_TTL_SEC: "3600",
@@ -576,26 +525,13 @@ test("owner-gone sweep (site c): a legacy row (locked_group NULL, pre-migration)
   }
 }, 20_000);
 
-// Card e344fa79: the CORE of this lot. broker.ts's rowToRoadmapItem used to
-// be a `...row` rest-spread -- the fail-open shape CLAUDE.md names
-// (`toPublicPeer` letting a 17th `Peer` field ship publicly with nothing
-// failing) -- and is now an explicit pick-list, precisely so a future column
-// is invisible until named instead of public the moment its migration runs.
-// An incomplete pick-list is the exact SILENT bug that trade protects
-// against: it drops a real column from every response with nothing failing,
-// so this needs its own proof, same pattern as ROADMAP_IMPORT_COLUMNS'
-// coverage test above it in tests/broker-roadmap-import.test.ts -- compare
-// the LIVE schema (PRAGMA table_info, read off the broker's own db) against
-// what the function ACTUALLY emits, not a second hand-maintained list that
-// could drift from the real object literal the same way the first one did.
-//
-// The response is read off a REAL round trip (not a call into broker.ts,
-// which exports nothing) from a card signed by an operator, specifically so
-// `operator_id` -- RoadmapItem's one truly OPTIONAL field -- is a real
-// string rather than `undefined`: JSON.stringify DROPS a key whose value is
-// `undefined`, which would otherwise make this test read "operator_id is
-// missing" as a false positive on every ordinary agent-authored card,
-// indistinguishable from the real defect this test exists to catch.
+// rowToRoadmapItem is an explicit pick-list, not a `...row` rest-spread, so a
+// future column stays invisible until named instead of shipping publicly the
+// moment its migration runs.
+// The response is read off a real round trip so operator_id -- RoadmapItem's
+// one optional field -- is a real string rather than undefined: JSON.stringify
+// drops an undefined key, which would otherwise read as a false positive on any
+// ordinary agent-authored card.
 test("card e344fa79: rowToRoadmapItem's response covers every roadmap_items column (pick-list coverage, not a rest-spread)", async () => {
   const db = new Database(broker.dbPath, { readonly: true });
   let schemaColumns: string[];
@@ -761,16 +697,9 @@ test("park immunity: clauses 1/2 (TTL, owner-gone) do not release a parked card 
 }, 20_000);
 
 test("owner-gone sweep releases a NULL-project_key peer's lock on a DIFFERENT project's card, even while that peer stays active", async () => {
-  // Card fc444eda (operator ruling, 2026-08-11): the owner-gone liveness
-  // check is scoped on project_key alone, and a NULL project_key is a value
-  // in its own right, not a wildcard -- a project-less peer only "counts as
-  // live" for project-less cards, never for a real project's. Before the
-  // fix, `(p.project_key IS NULL OR p.project_key = roadmap_items.project_key)`
-  // let a NULL-project peer squat locks on ANY project forever, as long as
-  // it kept heartbeating -- regardless of whether that project was actually
-  // its own. This proves the opposite of the sibling "owner-gone" test
-  // above: there the SAME-project owner stays active and keeps its lock;
-  // here a MISMATCHED-project owner stays active and still LOSES it.
+  // A NULL project_key is a value in its own right, not a wildcard: the
+  // owner-gone liveness check is scoped on project_key, so a project-less peer
+  // only counts as live for project-less cards, never for a real project's.
   const b = await startBroker({
     CLAUDE_PEERS_LOCK_TTL_SEC: "3600",
     CLAUDE_PEERS_LOCK_GRACE_SEC: "2",
@@ -913,19 +842,12 @@ test("the same accident, on /roadmap/archive: a same-peer_id homonym in a differ
   expect(stolen.status).toBe(409);
 });
 
-// Card e344fa79, review finding (EIGHTH site, in this same file): a bare
-// `existing.locked_by === resolvedLock.lockedBy` in isSameOwnerReclaim
-// (handleRoadmapUpsert) does not itself let anyone steal a card -- the
-// upsert guard already decided that, separately -- but it DOES decide
-// whether `locked_group` is preserved from the row's PRIOR owner or
-// stamped fresh from the write's actual author. A `force:true` steal by a
-// PROVEN homonym in a different group legitimately passes the guard (that
-// is what `force` is for), then hits this bare comparison: same peer_id
-// string, so the old code read it as the SAME owner reclaiming and kept
-// the VICTIM's locked_group on a row now actually held by the intruder --
-// inert as an escalation (the guard already 200'd this write on its own
-// terms), but WRONG as stored metadata, and that metadata is compared
-// again on the very next write.
+// isSameOwnerReclaim's bare locked_by === resolvedLock.lockedBy comparison also
+// decides whether locked_group is preserved from the row's prior owner or
+// stamped fresh from the write's actual author.
+// A force:true steal by a proven homonym in a different group passes the upsert
+// guard on its own terms, but this comparison read same peer_id string as same
+// owner and kept the victim's locked_group on a row now held by the intruder.
 test("force:true steal by a proven homonym in a DIFFERENT group stamps the NEW owner's locked_group, not the victim's (card e344fa79, isSameOwnerReclaim)", async () => {
   const host = "h-e344fa79-force";
   const cwd = "/tmp/e344fa79-force-repo";
@@ -974,14 +896,6 @@ test("force:true steal by a proven homonym in a DIFFERENT group stamps the NEW o
   expect(forced.body.item.locked_group).toBe("e344fa79-force-group-intruder");
 });
 
-// Card e344fa79, review round 3: the round-2 fix (resolveRoadmapLock's
-// `claimed` field, resolveLockedGroup/resolveKeptLockedAt) was proven at the
-// PURE-FUNCTION level (tests/roadmap-lock.test.ts) but never asserted at the
-// ROUTE level -- `locked_group` was only ever checked twice in this whole
-// file, both in the force-steal test above. This is the wiring proof: an
-// ORDINARY write (no `status`, no `locked` -- that absence is what makes it
-// ordinary) must PRESERVE the true owner's locked_by/locked_group, never
-// reassign or null them, however the write is authored.
 test("card e344fa79, review round 3 (ROUTE-LEVEL): the Deck's ORDINARY signed write on a locked card preserves locked_by/locked_group -- the routine path, and the one review measured most expensive to break", async () => {
   const host = "h-e344fa79-ordinary-deck";
   const cwd = "/tmp/e344fa79-ordinary-deck-repo";
@@ -1061,17 +975,6 @@ test("card e344fa79, review round 3 (ROUTE-LEVEL): an ORDINARY write from a peer
   expect(saved.body.item.locked_group).toBe("e344fa79-ordinary-tp-group-owner");
 });
 
-// Card 4441e883, Trou A (team-lead review): resolveLockedByToken (shared/
-// roadmap-lock.ts) is truth-tabled in tests/roadmap-lock.test.ts, but nothing
-// proved the ROUTE actually calls it with the right arguments and stores the
-// result -- same "extraction moves the guarantee's boundary without closing
-// the hole" trap CLAUDE.md names. These two are the behavioural, route-level
-// pair: A1 (a proven claim stamps the caller's own instance_token) and A2
-// (an ordinary third-party write preserves the true owner's token, the
-// negative control that carries the real weight). Read straight off the HTTP
-// response's `locked_by_token` -- a public, pick-list-covered RoadmapItem
-// field (see the pick-list coverage test above in this file), no direct DB
-// read needed.
 test("card 4441e883 (Trou A1): a proven author's claim stamps locked_by_token = its own instance_token, read off the live route", async () => {
   const reg = await post<{ instance_token: string; peer_id: string }>(`${broker.url}/register`, {
     pid: livePid(), cwd: "/tmp/4441e883-a1", git_root: null, tty: null,

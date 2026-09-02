@@ -1,33 +1,9 @@
-// Card 55c5470e: handleApprovalAdd (broker.ts) logged its DUPLICATE-raise
-// branch but never its ordinary, successful, NEW-insert path -- which is
-// exactly what made two reported occurrences of an unattributed blocking
-// question ("Claude is waiting for your input", sender "?") untraceable by
-// timestamp in broker.log. This proves the nominal path now leaves a trace
-// too, and that the duplicate path still logs its own (different) message
-// exactly once, never both.
-//
-// broker.ts cannot be imported directly under bun: it calls Bun.serve(...)
-// unconditionally at module scope (no `import.meta.main` guard), so any file
-// that imports it becomes -- by TESTING.md's own rule (`0. Does your file
-// run there at all?`) -- a daemon-spawning integration suite that belongs in
-// the `broker-*` family EXCLUDED from the cross-platform CI glob. Team-lead
-// ruling 2026-08-17 (card 55c5470e): this fix must stay verifiable under the
-// `desktop-*` prefix, so it must not import broker.ts.
-//
-// Technique: identical to tests/desktop-approval-defer.test.ts's `slice()` --
-// cut the REAL function verbatim out of the CURRENT broker.ts (re-read on
-// every run, not a frozen copy) by anchor + first column-0 terminator, eval
-// it with a handful of fakes for its free variables, and assert on what it
-// actually calls. Anti-drift property (measured, not assumed -- team-lead
-// asked for this explicitly): if broker.ts ever renames/moves this function,
-// `slice()` throws "anchor not found" at test-collection time; if a future
-// edit adds a free variable this env object does not provide, the eval
-// throws a ReferenceError at call time. Either way this test fails LOUDLY
-// rather than silently passing against stale bytes -- it can only stay green
-// while exercising broker.ts's CURRENT handleApprovalAdd, verbatim. The one
-// gap this cannot catch: a behavior change that keeps the same anchor, the
-// same free variables, AND produces the same log calls my assertions check
-// for. That residual is accepted, matching the existing precedent.
+// broker.ts cannot be imported under bun -- it calls Bun.serve()
+// unconditionally at module scope. This test slices handleApprovalAdd's body
+// out of the current file by anchor and evals it against fake free variables.
+// It can only stay green while exercising the current handleApprovalAdd
+// verbatim: a rename or moved anchor throws at collection time, a new free
+// variable throws at call time.
 import { test, expect, describe } from "bun:test";
 import { readFileSync } from "node:fs";
 import { writeFileSync, mkdtempSync } from "node:fs";
@@ -138,13 +114,9 @@ interface LogCall {
 /** `existingRow` non-null simulates a pending duplicate for the same tile. */
 function makeDb(existingRow: unknown) {
   const queries: string[] = [];
-  // Card 1def56da. Two things changed in the sliced body and both land here.
-  // The de-duplication SELECT no longer spells its identity clause inline (it
-  // interpolates `${where.sql}`), so it is recognised by `tile_ref = ?`; and
-  // the handler now READS THE ROW BACK after inserting, instead of assembling
-  // its response from values it holds. The read-back therefore has to return
-  // something, or the handler takes its "vanished between insert and read-back"
-  // branch and logs an error rather than the nominal line under test.
+  // makeDb's read-back must return a row after insert, or the sliced handler
+  // takes the vanished-row branch and logs an error instead of the nominal line
+  // under test.
   let inserted: Record<string, unknown> | null = null;
   return {
     query(sql: string) {
@@ -182,21 +154,9 @@ function env(overrides: { existingRow?: unknown } = {}) {
   const db = makeDb(overrides.existingRow ?? null);
   return {
     env: {
-      // Card 1def56da. `resolveApprovalAuth` USED TO BE STUBBED HERE and no
-      // longer exists: the sliced function now authorises through
-      // shared/approval-scope.ts, so the slice needs that surface instead.
-      //
-      // This suite executes the body of `handleApprovalAdd` VERBATIM in an
-      // injected scope, which is exactly why it broke on a refactor that
-      // changed no behaviour it asserts: it depends on the function's internal
-      // vocabulary, not on its contract. The contract IS preserved and is what
-      // the tests below still check, unchanged -- one 'approval: new' line on
-      // the nominal path, `tile=-` for an empty tile_ref, and no nominal line
-      // on a duplicate raise.
-      //
-      // The stubs return real opaque values by building a genuine auth against
-      // a fake db, rather than fabricating a scope object: a hand-made one is
-      // refused at runtime by the WeakMap, which is the guarantee itself.
+      // The stubs build real auth objects against a fake db rather than
+      // fabricating a scope object: a hand-made scope is refused at runtime by
+      // the WeakMap, which is the guarantee itself.
       approvalAuth: sliceAuth(),
       approvalWhere: sliceApprovalWhere,
       stampInsert: sliceStampInsert,

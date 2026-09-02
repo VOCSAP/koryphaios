@@ -101,10 +101,8 @@ test("'missing' shows its OWN toast.workspaceMissing -- distinct from 'locked's 
   expect(workspaceRestoreToastKeyFor("missing")).not.toBe(workspaceRestoreToastKeyFor("locked"));
 });
 
-// Card 07134c6a, proof #2 (mirrors card 96c98453's own proof #2, the card's
-// own acceptance criterion): an operator refusal produces a DIFFERENT
-// observable outcome from a workspace locked by another live window --
-// today (before this fix) both produce the SAME toast.alreadyOpen.
+// An operator refusal (shell-declined / cwd-declined) shows no toast at all,
+// distinct from 'locked' which shows toast.alreadyOpen.
 test("proof #2: shell-declined and cwd-declined show NO toast -- distinct from 'locked', which shows toast.alreadyOpen", () => {
   expect(workspaceRestoreToastKeyFor("shell-declined")).toBeNull();
   expect(workspaceRestoreToastKeyFor("cwd-declined")).toBeNull();

@@ -254,19 +254,13 @@ test("acquireLock refuses a live same-host owner, reclaims a dead one", () => {
   expect(readLock(proj, "wsp_1")!.pid).toBe(9999);
 });
 
-// ----- boot-instant discriminant (card 438c15e3, review round 4) -----
-//
-// A bare pid-alive check cannot tell a still-running owner from an
-// unrelated process that reused the same pid after a reboot. Round 3's fix
-// (querying the OS for a foreign pid's actual start time) was dropped in
-// round 4: it needs a subprocess per check, which is either a per-30s
-// spawn risk or, worse, silently fails OPEN on any machine where the query
-// itself fails (missing/restricted shell -- e.g. this product's own
-// sandbox). The replacement is one-way and free: no process survives a
-// reboot, so a lock recorded as started before THIS machine's boot is
-// provably dead regardless of pid; anything else is inconclusive and falls
-// back to a bare pid-alive check -- the pre-card guarantee, never "no
-// guarantee".
+// A bare pid-alive check cannot tell a still-running owner from an unrelated
+// process that reused the same pid after reboot. Querying the OS for a foreign
+// pid's start time needs a subprocess per check and fails open where the query
+// itself is unavailable (e.g. this product's own sandbox).
+// Instead: no process survives a reboot, so a lock recorded as started before
+// this machine's boot is provably dead regardless of pid; anything else falls
+// back to a bare pid-alive check.
 
 test("isLockLive same-host: lock startedAt provably precedes this machine's boot AND heartbeat is stale -> dead, isPidAlive not even consulted", () => {
   // Reclaim without consulting isPidAlive needs BOTH halves (review round 6):
@@ -549,13 +543,9 @@ test("WorkspaceService.restore(): TOCTOU race lost between the top guard and own
   const deps = fakeDeps(proj);
   const svc = new WorkspaceService(deps);
 
-  // Step 1: a REAL prior restore, so currentId is non-null and its lock is
-  // genuinely on disk -- the exact state the corruption bug needed to exist
-  // (a service freshly constructed with currentId already null, the
-  // ORIGINAL test's shape, made the fix's two lines unreachable no-ops:
-  // `grep -c "lock-race" tests/desktop-workspace.test.ts` found all 3
-  // mentions in this one test, none of which ever exercised a non-null
-  // currentId).
+  // Needs a real prior restore so currentId is non-null and its lock is
+  // genuinely on disk: a freshly constructed service with currentId already
+  // null made the fix's two lines unreachable no-ops.
   expect(svc.restore("wsp_old")).toEqual({ ok: true });
   expect(svc.currentWorkspaceId).toBe("wsp_old");
   expect(readLock(proj, "wsp_old")).not.toBeNull();
@@ -626,10 +616,6 @@ test("WorkspaceService.restore(): succeeds and owns the lock when nothing conten
   expect(lock!.host).toBe("this-host");
 });
 
-// Card 07134c6a: the two remaining sink reasons -- 'missing' and 'empty' --
-// had no dedicated test before this card (only inferred client-side from a
-// bare boolean). Pinned directly here now that restore() names them.
-
 test("WorkspaceService.restore(): a workspace id with no saved file resolves to reason 'missing'", () => {
   const proj = freshProject();
   ensureWorkspacesDir(proj);
@@ -655,15 +641,12 @@ test("WorkspaceService.restore(): a saved workspace with zero sessions resolves 
   expect(deps.sessions).toEqual([fakeSession()]);
 });
 
-// Card 09d54a29: a repo-hostile workspace file's `args` is joined and
-// appended VERBATIM to the login-shell command line (session-command.ts:195-
-// 196), no escaping, once restoreFrom() reaches startPty. restore() must gate
-// that on the same operator approval templates already require for their own
-// command/args (B4, templateHasShellFields + launch-approval), BEFORE
-// restoreFrom() ever runs -- not merely before the mode is decided, since
-// session-service.ts's spawnSession (811-813) silently downgrades a `resume`
-// with no matching transcript to `fresh` (re-attaching args), which an
-// attacker gets for free by supplying a claudeSessionId that never had one.
+// A repo-hostile workspace file's args is joined and appended verbatim to the
+// login-shell command line with no escaping. restore() must gate that on the
+// same operator approval templates require, before restoreFrom() runs --
+// spawnSession silently downgrades a resume with no matching transcript to
+// fresh, re-attaching args, which an attacker gets for free via a
+// claudeSessionId that never had one.
 test("WorkspaceService.restore(): refuses when args are shell-bearing and confirmShellFields declines (card 09d54a29)", () => {
   const proj = freshProject();
   ensureWorkspacesDir(proj);

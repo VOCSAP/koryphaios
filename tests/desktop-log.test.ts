@@ -47,9 +47,9 @@ test("rolling logger writes leveled lines and rotates at maxBytes", () => {
 test("flushJournalSnapshot writes a stamped file and prunes old snapshots", () => {
   const stale = join(dir, "journal-old.log");
   writeFileSync(stale, "old run\n");
-  // Anchor on fixedNow, not the wall clock: with Date.now() the fixture's age
-  // shrinks as the calendar advances past fixedNow and the prune stops firing
-  // (the test rotted on 2026-07-22 exactly this way).
+  // Anchored on fixedNow, not the wall clock: using Date.now() lets the
+  // fixture's age shrink as the calendar advances past fixedNow, silently
+  // stopping the prune from firing.
   const tenDaysAgo = (fixedNow().getTime() - 10 * 24 * 3600 * 1000) / 1000;
   utimesSync(stale, tenDaysAgo, tenDaysAgo);
   const recent = join(dir, "journal-recent.log");

@@ -1,18 +1,7 @@
-// Card 3776ae19 (certificate half): companion-cert.ts's invalidation logic
-// and cert-request parameters, tested PURE -- no RUNTIME import of
-// 'selfsigned' or 'electron' anywhere in this file's own import graph (the
-// production module it imports, companion-cert.ts, has a type-only import
-// of 'selfsigned', erased at transpile -- see that module's header), no
-// filesystem. Runs in the "Bun tests (pure modules)" CI step, which happens
-// BEFORE `npm install` in desktop/.
-//
-// The behavioural core this file proves: a stateDir carrying a companion-
-// cert.json from BEFORE this card (no `version` field at all) must trigger
-// regeneration, not be served forever -- the exact defect the roadmap card's
-// team-lead named as "the piece that annuls the other two fixes if left
-// untreated". tests/desktop-companion-cert-e2e.test.ts (integration step,
-// real selfsigned + node:crypto) proves the same invalidation path end to
-// end with a REAL generated certificate's SHA-256 signature and SAN.
+// Pure test: no runtime import of 'selfsigned' or 'electron', no filesystem, so
+// it runs before npm install in desktop/.
+// Proves a stateDir carrying a pre-version companion-cert.json (no `version`
+// field) triggers regeneration rather than being served forever.
 
 import { test, expect } from 'bun:test'
 import { readFileSync } from 'node:fs'
@@ -220,21 +209,13 @@ test('buildCertRequest SAN always carries the given LAN IP as a type-7 (IP) altN
   expect(san.altNames.some((a) => a.type === 7 && a.ip === '10.20.30.40')).toBe(true)
 })
 
-// Regression pin for the trap documented in companion-cert.ts's header:
-// selfsigned's buildExtensions REPLACES the whole default extension set the
-// moment a non-empty `extensions` array is supplied -- a subjectAltName-only
-// array (the roadmap card's literal suggested form) would silently drop
-// basicConstraints/keyUsage/extKeyUsage. This asserts all four survive.
-//
-// Review round: a NAMES-only comparison is blind to VALUES and to the
-// `critical` flag selfsigned's own defaults set per extension (basicConstraints
-// and keyUsage critical=true, extKeyUsage and subjectAltName critical=false --
-// selfsigned/index.js's buildExtensions, the `!userExtensions` branch). A
-// hand-copied extension object with no `critical` field silently becomes
-// critical=false (the user-extensions branch does `ext.critical || false`),
-// diverging from what selfsigned would have produced unassisted -- exactly
-// the fail-open this card's whole point is to close. Comparing (name,
-// critical) pairs, not just names, catches that class.
+// selfsigned's buildExtensions replaces the whole default extension set the
+// moment a non-empty `extensions` array is supplied, so a subjectAltName-only
+// array would silently drop basicConstraints/keyUsage/extKeyUsage; this asserts
+// all four survive.
+// Comparing (name, critical) pairs, not just names: a hand-copied extension
+// with no `critical` field silently becomes critical=false, diverging from
+// selfsigned's own per-extension defaults.
 test('buildCertRequest replicates the full default extension set INCLUDING each extension\'s critical flag, matching selfsigned\'s own defaults exactly (selfsigned override trap)', () => {
   const { options } = buildCertRequest('192.168.1.1')
   const pairs = options.extensions
@@ -257,59 +238,16 @@ test('buildCertRequest SAN also keeps a DNS entry for the commonName (unchanged 
   expect(san.altNames.some((a) => a.type === 2 && a.value === cn)).toBe(true)
 })
 
-// Weak guard (documented, same tier as the maxPayload/recordFailure source
-// scan in tests/desktop-companion.test.ts): companion-server.ts pulls in
-// electron transitively (via api-registry.ts) so nothing here can import and
-// exercise it directly. This only proves the WIRING TEXT is present, not
-// that it executes correctly -- the behavioural coverage above (this file +
-// the e2e file) is what actually proves the fix; this only guards against a
-// silent deletion or renaming of the call site.
-//
-// Review round, N-th instance of the class this repo's CLAUDE.md names
-// ("source scan defeated by presence elsewhere in the file"): the earlier
-// version of this test asserted `src.toContain(...)` against the WHOLE file
-// text. Measured (reviewer) against three mutations of the real call site --
-// COMPANION_CERT_VERSION swapped for a literal, generateCert(attrs, options)
-// reverted to the pre-fix generateCert(attrs, {keySize:2048}), existsSync
-// replaced by a stub returning false -- all three stayed GREEN, because the
-// import line alone satisfies the COMPANION_CERT_VERSION assertion and the
-// other two substrings simply never appeared anywhere to begin with (a
-// missing assertion, not a present one). Slicing the source to the text
-// STARTING AT the call expression (`await loadOrCreateCert(`) before
-// asserting excludes the import line and pins each assertion to the actual
-// call arguments -- verified to redden on all three mutations before this
-// comment was written (see the mutation-proof test below).
-/**
- * The measured property the wiring guard asserts, extracted once so the
- * real guard test and its mutation-proof below check the EXACT SAME logic
- * -- two independent hand-written copies could diverge and silently cancel
- * each other's blind spot out, which is the failure mode this whole file's
- * review round exists to close (see the header comment above).
- *
- * Second instance of the SAME blindness, found while writing this fix's own
- * mutation proof: slicing to END OF FILE (not just to the call expression's
- * closing paren) is too wide for a substring that recurs LATER in the same
- * file for an unrelated reason -- 'lanAddr,' also appears in this file's
- * `server.listen(0, lanAddr, ...)` a few lines after the loadOrCreateCert
- * call closes, so mutating only the call-site occurrence still left the
- * slice-to-EOF property true via that later, untouched match. Bounding the
- * slice to end at the next unique marker right after the call
- * (`this.fingerprint = certFingerprint(cert)`, the line immediately
- * following it) closes that gap.
- *
- * Third review round: the four checks above proved the GENERATION side
- * (algorithm/version/address/fs) but none of them named the PERSISTED FILE
- * PATH -- a mutation swapping `join(this.deps.stateDir, 'companion-
- * cert.json')` for an unrelated path (e.g. a plain tmp file) type-checks
- * cleanly and left this guard green, while silently breaking the actual
- * on-disk caching this whole card is about: every start would regenerate,
- * the fingerprint would move, and the Android shell's pinning (which trusts
- * a STABLE fingerprint) would break -- the same externally-visible effect as
- * the existsSync mutation (M3) already covered, reached through the file
- * path instead of the fs functions. `'companion-cert.json'` is verified
- * (aidex literal search) to appear exactly once in companion-server.ts, at
- * this exact call site, so it is safe as a required substring.
- */
+// Weak guard: companion-server.ts pulls in electron transitively, so nothing
+// here can import and exercise it directly. This only proves the wiring text is
+// present at the real call site, not that it executes correctly.
+// The source slice is bounded from the call expression to the next unique
+// marker right after it, not to end of file: an unbounded slice-to-EOF stayed
+// true even when the call site itself was mutated, because an unrelated later
+// occurrence of the same substring kept it green.
+// The measured property is extracted once so the guard test and its
+// mutation-proof below check the exact same logic, so they cannot diverge and
+// silently cancel out each other's blind spot.
 function callSiteWired(companionServerSrc: string): boolean {
   const callStart = companionServerSrc.indexOf('await loadOrCreateCert(')
   if (callStart === -1) return false

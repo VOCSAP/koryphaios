@@ -1,40 +1,12 @@
-// Card 249ed831 (form b), reviewer round 2 point 2 (extended round 3 point
-// 2): the `noteUnresolved` dep wired into runDirectiveWave's call inside
-// index.ts's dispatchNextInner is completely untested from
-// tests/desktop-dispatch.test.ts's own suite -- the mocked `noteUnresolved`
-// there proves the PREDICATE that decides WHEN runDirectiveWave calls it,
-// never what the REAL index.ts wiring does when it fires. Measured by the
-// reviewer: `grep -rl "noteUnresolved" --include=*.ts .` returns exactly 3
-// files (dispatch.ts, index.ts, tests/desktop-dispatch.test.ts), and none of
-// them proves the composed body of the real call. Five mutations stay green
-// on the WHOLE suite without this file:
-//   (i)   a no-op stub (`noteUnresolved: async () => {}`)
-//   (ii)  the upsert sent raw `item.context`, never composed
-//   (iii) `composeUnresolvedContext` fed from something other than
-//         `item.context` (a stale variable, a hardcoded string), so the
-//         strip-then-append idempotence silently stops applying
-//   (iv)  the note is HARDCODED (e.g. always `UNRESOLVED_TARGET_NOTE`)
-//         instead of read from `unresolvedDirectiveNote(item)` -- the round-2
-//         point-5 fix (two distinct, mutually exclusive recommendations)
-//         silently regresses to one wrong recommendation half the time
-//   (v)   the selector is REIMPLEMENTED inline instead of calling
-//         `unresolvedDirectiveNote(item)` (e.g. a locally re-typed, possibly
-//         INVERTED ternary on `target_peer_ids.length`) -- same regression
-//         as (iv), reached without ever naming the shared helper
-//
-// index.ts imports electron and cannot be `import()`-ed under `bun test`
-// (measured precedent: tests/desktop-idle-lock-wiring-sweep.test.ts's own
-// header). This file reads it as TEXT instead and proves PRESENCE by
-// brace-body extraction on the `noteUnresolved:` object-property arrow --
-// same technique as that file's `extractBracedBody`, bounded strictly to
-// this ONE block, never a slice running to end-of-file.
-//
-// HONEST SCOPE: this is a textual PRESENCE check, the weakest guard in the
-// catalogue (same admission as tests/desktop-idle-lock-wiring-sweep.test.ts's
-// own header) -- it does not execute the block, so a body that contains both
-// required substrings in a NON-functional arrangement (e.g. inside a
-// comment, or inside a branch that never runs) would still pass. It still
-// kills all three mutations above, which is what it is for.
+// index.ts imports electron and cannot be import()-ed under bun test, so this
+// reads it as text and proves presence by brace-body extraction on the
+// `noteUnresolved:` object-property arrow, bounded strictly to that one block.
+// Textual presence is the weakest guard in the catalogue: it does not execute
+// the block, so both required substrings appearing in a non-functional
+// arrangement (a comment, a dead branch) would still pass. It still kills the
+// mutations it targets: a no-op stub, an uncomposed context, a context fed from
+// the wrong source, a hardcoded note, and a reimplemented (possibly inverted)
+// selector.
 
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";

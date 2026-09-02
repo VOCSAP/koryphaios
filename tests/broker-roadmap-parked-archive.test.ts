@@ -1,29 +1,3 @@
-// Card aaf4537d: HTTP-level proof that broker.ts's handleRoadmapArchive
-// actually WIRES refusesParkedArchive (shared/roadmap-lock.ts:143) into the
-// live /roadmap/archive route -- the pure predicate truth table lives in
-// tests/roadmap-parked-archive-predicate.test.ts (CI-collected,
-// tests/roadmap-*.test.ts glob), this file proves the PRODUCTION CALL SITE
-// (broker.ts:~2775) is not orphaned, same split as
-// tests/broker-roadmap-inactive.test.ts / tests/roadmap-lock.test.ts.
-//
-// `broker-*` family (spawns a real broker daemon), deliberately EXEMPTED
-// from the CI pure-modules glob (.github/workflows/desktop-build.yml) --
-// local-only via `bun test`, same precedent as broker-roadmap-inactive.test.ts
-// and broker-roadmap-operator-id.test.ts document in their own headers.
-//
-// Every assertion below was proven RED-then-GREEN in a detached git worktree
-// (`git worktree add --detach <tmp> HEAD`), TWO separate production removals
-// measured independently:
-//   (1) the CALL SITE at broker.ts:~2775 (proves the predicate is actually
-//       INVOKED by handleRoadmapArchive, not just defined)
-//   (2) the predicate BODY at shared/roadmap-lock.ts:143-151 (proves the
-//       predicate, once invoked, actually COMPUTES the refusal -- covered
-//       independently by the pure truth-table file, repeated here to prove
-//       the two layers compose end to end over HTTP)
-// See the test-engineer's report to the team-lead for the exact removal/
-// restore transcripts. Working checkout (broker.ts, shared/roadmap-lock.ts)
-// was never touched -- all mutation happened in the throwaway worktree.
-
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
 import { Database } from "bun:sqlite";
@@ -79,20 +53,12 @@ async function createItem(title: string): Promise<string> {
   return res.body.item.id;
 }
 
-// There is no HTTP route to PARK a card yet (lock-park is a later lot), so
-// every fixture here sets lock_parked_at/lock_parked_by directly via sqlite,
-// same discipline tests/broker-roadmap-lock.test.ts's park tests already use
-// for the TTL-sweep clause. That precedent writes lock_parked_at via
-// SQLite's own datetime('now', ...) because it is checked SERVER-SIDE, in
-// SQL, by releaseStaleLocks. refusesParkedArchive is different: it runs
-// isParked() in JS, via Date.parse(). A bare SQLite "YYYY-MM-DD HH:MM:SS"
-// string (no 'Z', no offset) parses as LOCAL time in JS, not UTC -- on a
-// non-UTC box (measured: Europe/Paris, UTC+2, on the box this suite ran on)
-// that silently shifts the timestamp and flips isParked's verdict. Every
-// production writer of this column (broker.ts's keptParkedAt path, the only
-// one that exists today) carries forward a JS-generated ISO string, so this
-// fixture writes one too, computed in JS, to stay representative of the
-// real write path.
+// refusesParkedArchive runs isParked() in JS via Date.parse(), which reads a
+// bare SQLite datetime string as local time on a non-UTC host, flipping the
+// verdict.
+// The fixture writes lock_parked_at as a JS-generated ISO string, matching
+// every production writer of this column, to stay representative of the real
+// write path.
 function parkDirectly(id: string, parkedByOperatorId: string, ageSeconds: number): void {
   const parkedAt = new Date(Date.now() - ageSeconds * 1000).toISOString();
   const db = new Database(broker.dbPath);
@@ -227,23 +193,12 @@ test("upsert: never parked card: archive via upsert by any author proceeds, refu
   expect(res.body.item?.status).toBe("archived");
 });
 
-// ---------------------------------------------------------------------------
-// Card aaf4537d, round-3 mutation review, item 1 (BLOCKING): the two-upsert
-// bypass. keptParkedAt/keptParkedBy (broker.ts's handleRoadmapUpsert) used to
-// reuse isSameOwnerReclaim -- a predicate scoped to LOCK ownership (peer_id),
-// not to PARK ownership (operator_id) -- to decide whether a write erases the
-// park. Any write that moves the item OUT of in_progress (isSameOwnerReclaim
-// becomes false the instant resolvedLock.locked is false) silently nulled
-// BOTH lock_parked_at/lock_parked_by, regardless of who signed it or whether
-// they were the operator who parked the card. A SECOND upsert then archives
-// straight through refusesParkedArchive, which only ever sees the row state
-// THIS call left behind -- it has no memory of a park a PRIOR write already
-// erased. Fixed by parkOwnerIsAuthor/parkStillLive (broker.ts, keyed on
-// author.operator_id vs existing.lock_parked_by, entirely decoupled from lock
-// reclaim). Both variants below share the same second call (a foreign
-// operator's archive attempt) and differ only in how the FIRST write releases
-// the lock without touching the park directly.
-// ---------------------------------------------------------------------------
+// keptParkedAt/keptParkedBy is keyed on author.operator_id vs
+// existing.lock_parked_by, decoupled from lock reclaim: any write that moves
+// the item out of in_progress used to null the park regardless of who signed
+// it.
+// A second upsert could then archive straight through refusesParkedArchive,
+// which only sees the row state the prior write left behind.
 
 function signedRelease(id: string, credential: typeof OPERATOR_A): Record<string, unknown> {
   const body = { id, by: "deck", status: "planned", public_key: credential.publicKey };
@@ -301,25 +256,13 @@ test("two-upsert bypass, unsigned-as-lock-owner variant: the peer holding the lo
   expect(archiveRes.body.error).toContain("parked");
 });
 
-// ---------------------------------------------------------------------------
-// Card aaf4537d, round-3 mutation review, extra cell (a): does `force:true`
-// bypass the PARK guard the way it bypasses the LOCK guard? The two guards
-// are independent clauses in handleRoadmapUpsert (broker.ts ~2540-2598): the
-// lock guard reads `!(body.force === true && author.proven)`, the park guard
-// (refusesParkedArchive) never reads `force` anywhere in its own signature or
-// body. A naive test signed as `by:'deck'` would prove nothing here --
-// `by !== "deck"` is already false for that name, so the lock guard is
-// skipped UNCONDITIONALLY regardless of `force`, and the scenario would 409
-// from the park guard alone with `force` never actually exercised.
-// `by:'operator'` is the OTHER RESERVED_PEER_IDS name (see
-// tests/broker-roadmap-lock.test.ts's TTL-sweep test, which documents this
-// same distinction): it goes through the same signed branch of
-// resolveRoadmapAuthor as 'deck' (author.proven === true, operator_id
-// stamped) but, unlike 'deck', is NOT exempted from claiming or tripping the
-// lock guard -- so `by !== existing.locked_by` and `by !== "deck"` are both
-// genuinely true here, making `force` the actual deciding clause of whether
-// the lock guard fires.
-// ---------------------------------------------------------------------------
+// The lock guard and the park guard (refusesParkedArchive) are independent:
+// refusesParkedArchive never reads `force`. by:'deck' would skip the lock guard
+// unconditionally (by !== 'deck' is false), masking whether force actually
+// matters.
+// by:'operator' is the other RESERVED_PEER_IDS name: it goes through the same
+// proven-author branch but, unlike 'deck', is not exempt from the lock guard,
+// so force is genuinely the deciding clause here.
 
 function signedOperatorArchive(
   id: string,

@@ -1,97 +1,16 @@
-// Card 9ef6f513. desktop-tsconfig-flags.test.ts (cards a7822bc4/d07ab3f0)
-// pins the FLAGS a discovered desktop tsconfig carries and the SOURCE FILES
-// its include array covers. Neither pins that program's EXECUTION: nothing
-// stopped .github/workflows/desktop-build.yml from losing the "Typecheck
-// desktop (node + web)" or "Typecheck the mobile shell" step (or having it
-// quietly neutralized) while every tsconfig-flags/source-coverage test above
-// stayed green and the whole suite stayed green -- the exact "degradation
-// that yields a subset, not an error" shape CLAUDE.md's gating-coverage rule
-// warns about, already realized once on this same surface (the CI glob that
-// silently ran 78 of 116 files, TESTING.md "Cross-platform tests").
-//
-// This file closes that gap by DISCOVERING the programs to typecheck
-// structurally, never a hardcoded step list: a desktop tsconfig counts as a
-// real program iff it carries its OWN `compilerOptions` (desktop/tsconfig.json
-// is a solution file -- `files: []`, only `references` -- with no
-// compilerOptions of its own, so it is excluded by construction, no
-// hand-maintained exemption list required, unlike EXEMPT_CONFIGS in
-// desktop-tsconfig-flags.test.ts). For each discovered program, a CI step
-// must actually invoke `tsc ... -p <that config>`, resolved TRANSITIVELY
-// through `npm run <script>` indirection by reading the real
-// desktop/package.json scripts table (so "npm run typecheck" resolving to
-// "typecheck:node && typecheck:web" resolving to two separate `tsc -p`
-// invocations is followed, not just pattern-matched on the literal string
-// "typecheck"). Steps are matched by the COMMAND they run, never by `name:`
-// (a step is free to rename itself; a step is not free to stop invoking tsc).
-//
-// THE NEIGHBOR-KEY QUESTION (team-lead brief, 2026-08-26): a guard proven
-// sensitive on `continue-on-error: true` is a single key. The direct
-// neighbor that achieves the identical "step present, decorative" effect
-// through a DIFFERENT mechanism entirely is a shell-level failure swallow
-// appended to the run line itself (`... || true`, `... || exit 0`) -- no
-// GitHub Actions key involved at all, so a detector keyed only on YAML keys
-// (continue-on-error, if:) would stay green on this mutation. isNeutralized()
-// below checks all three; the mutation-proof tests exercise each
-// independently so a regression in any one of the three stays loud. So does a
-// JOB-LEVEL kill switch (jobLevelSafe): one `continue-on-error`/`if: false`
-// above every step, or an `on:` trigger reduced to drop `push`/`pull_request`,
-// makes every step-level check below it decorative in one line -- checked on
-// the text preceding the first step marker so it needs no hardcoded key path.
-// A swallow can also be moved one level deeper than the run: line, into a
-// RESOLVED npm script's own body (`resolveTsConfigsForRun` reads that body to
-// extract `-p`), and a typecheck command can be commented out (`# tsc ...`)
-// inside a multi-line `run:` block while still text-matching the same
-// extraction regex -- both checked before a config is ever counted covered.
-//
-// TEAM-LEAD AUDIT, MUTATION REVIEW 2026-08-26: found this paragraph
-// understating its own gaps -- a prior version claimed a single known
-// residual where nine forms of neutralization actually passed green. This is
-// the MEASURED list of what remains open AFTER the fixes above, not before:
-//
-//   - `|| :` (a no-op command, not `true`/`exit 0`) as a shell swallow --
-//     SHELL_SWALLOW_RE only recognizes the two forms actually seen in this
-//     workflow today.
-//   - a shell-level negated conditional (`if ! tsc ...; then ... fi`) --
-//     no `||` is present at all, so no swallow-shaped regex sees it, and
-//     nothing here parses shell control flow.
-//   - `shell: bash {0}` on a multi-line `run:` block -- GitHub Actions' custom
-//     shell invocation syntax drops the implicit `-eo pipefail` that a plain
-//     `shell: bash` gets, so a failing command mid-script does not fail the
-//     step; no such invocation exists in this workflow today.
-//   - a non-literal, always-false `if:` expression (e.g. an `${{ }}`
-//     comparison that evaluates to false without the literal token `false`
-//     appearing) -- IF_FALSE_RE matches the literal, not arbitrary expression
-//     evaluation, which this file cannot do without a GitHub Actions
-//     expression evaluator.
-//
-// These four are shell/expression CONTROL FLOW, structurally out of scope for
-// a YAML-text-level guard the same way the original `set +e` residual was --
-// catching them generally would mean parsing shell, not YAML. Separately, the
-// tsconfig DOMAIN discovery (collectTypecheckedConfigs) has its own known
-// gaps, orthogonal to neutralization: an `extends`-only tsconfig with no own
-// `compilerOptions` key is excluded from the domain by construction (the same
-// rule that correctly excludes desktop/tsconfig.json's solution-file shape
-// cannot distinguish the two); a tsconfig using `/* */` block comments is
-// unparseable by `stripJsonComments` (line-comment stripper only) and is
-// skipped SILENTLY rather than failing loud, same as any other unparseable
-// tsconfig. And on the other side, a legitimate rewrite of a run line --
-// `tsc --project` instead of `-p`, `npm run -s <script>`, or `bun run
-// <script>` instead of `npm run` -- is not matched by `tscRe`/`npmRunRe`
-// either, so it would read as a FALSE "not typechecked by any live CI step"
-// alarm rather than a silent hole: a fail-CLOSED false positive, the safer
-// direction to be wrong in, but still a maintenance trap for whoever rewrites
-// these steps next.
-//
-// Team-lead audit 2026-08-26: this file used to claim its `tests/desktop-*`
-// naming is why the CI partition collects it. Measured false: partition-
-// pure-tests.ts's listTestFiles reads every `tests/*.test.ts` file via a
-// plain readdirSync, and scripts/pure-module-partition.ts's isExempt is a
-// DENY-list keyed on `broker-`/`server-` prefixes and two exact filenames --
-// the "desktop-" prefix carries no meaning to either function, and an
-// identically-shaped file with no prefix at all would be collected the same
-// way. Named `desktop-ci-typecheck-coverage.test.ts` to sit alongside its
-// sibling `desktop-ci-*.test.ts` files for a human scanning the directory,
-// nothing more.
+// A tsconfig counts as a real program iff it declares its own compilerOptions,
+// discovered structurally rather than off a hardcoded step list; each must have
+// an actual `tsc -p` invocation, resolved transitively through package.json
+// script indirection and matched by the command a step runs, never by its name.
+// isNeutralized() catches continue-on-error, if:-false, and shell-level `||
+// true`/`|| exit 0` swallows at both step and job level, plus an invocation
+// commented out inside a run: block.
+// Known open gaps: a shell `if ! tsc; then fi` swallow, `shell: bash {0}`
+// losing its implicit -eo pipefail, and a non-literal always-false `if:`
+// expression -- all shell/expression control flow outside what a YAML-text scan
+// can parse.
+// A tsconfig using block comments, or an extends-only config with no own
+// compilerOptions, is silently excluded from the checked domain.
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -101,20 +20,9 @@ import { expect, test } from "bun:test";
 const REPO_ROOT = join(import.meta.dir, "..");
 const DESKTOP_ROOT = join(REPO_ROOT, "desktop");
 const WORKFLOW_PATH = join(REPO_ROOT, ".github", "workflows", "desktop-build.yml");
-// Normalized to LF at the read site, once, for every regex below that is
-// anchored on a bare "\n" (line 214's markerRe, the split()s further down,
-// and the pull_request: removal at line 660): the blob committed to git is
-// LF-only, but actions/checkout on windows-latest applies git's default
-// core.autocrlf=true and smudges it to CRLF on that runner alone -- macOS
-// and Linux check out the LF blob as-is, and a local Windows working copy
-// commonly still is LF too (autocrlf only bites on a fresh checkout), which
-// is why this went red on windows-latest CI specifically while staying
-// green everywhere else including a local Windows `bun test`. Normalizing
-// here closes the gap for every regex in this file at once, instead of
-// re-adding a `\r?` to each one and leaving the next one written here to
-// rediscover the same trap (measured: tests/desktop-ci-glob-coverage.test.ts
-// has the same unguarded pattern, not fixed here, out of scope for this
-// change).
+// Normalized to LF once at the read site: windows-latest's checkout applies
+// core.autocrlf=true and smudges the committed LF blob to CRLF, which breaks
+// every `\n`-anchored regex below on that runner alone.
 const REAL_WORKFLOW_TEXT = readFileSync(WORKFLOW_PATH, "utf-8").replace(/\r\n/g, "\n");
 
 function toRepoRelative(absPath: string): string {
@@ -216,13 +124,9 @@ interface StepBounds {
 }
 
 /**
- * Splits `text` into step blocks bounded at each `- name:`/`- uses:` marker
- * (the first key of every GitHub Actions step, by convention -- also relied
- * on by tests/desktop-ci-glob-coverage.test.ts's parsePureModuleStepRun for
- * the same file). The indentation of the marker itself is captured and used
- * as the boundary, never a literal column count, so this is correct at
- * whatever indent level the workflow actually uses (mirrors N2's fix in that
- * sibling file, mutation-proofed below the same way).
+ * Splits into step blocks at each `- name:`/`- uses:` marker, capturing the
+ * marker's own indentation as the boundary rather than a hardcoded column, so
+ * this is correct regardless of the workflow's actual indent level.
  */
 function stepBoundsList(text: string): StepBounds[] {
   const markerRe = /\n( +)- (?:name|uses):/g;
@@ -245,19 +149,11 @@ function splitWorkflowSteps(text: string): string[] {
 }
 
 /**
- * Extracts a step's `run:` value, handling both the single-line form
- * (`run: cmd`) and the YAML block-scalar form (`run: |` / `run: >` followed
- * by more-indented lines) -- the same composition
- * tests/desktop-ci-glob-coverage.test.ts's parsePureModuleStepRun already
- * guards for the pure-module step, reused here so a future reformat of
- * either typecheck step's `run:` line does not silently blind this parser.
+ * Handles both the single-line `run: cmd` form and the block-scalar `run:
+ * |`/`run: >` form.
+ * Comment lines are stripped first, since a typecheck invocation commented out
+ * with `#` still matches the raw extraction regex otherwise.
  */
-// Team-lead audit 2026-08-26: a `#`-commented line inside a `run:` block
-// still matched tscRe/npmRunRe below (neither regex knows what a shell
-// comment is), so a typecheck invocation commented OUT still counted as
-// coverage. Stripped once, here, so every consumer of extractRun's return
-// value (resolveTsConfigsForRun, isNeutralized's SHELL_SWALLOW_RE check on
-// step.run) sees the shell as it actually executes, not as it reads.
 function stripCommentLines(text: string): string {
   return text
     .split("\n")
@@ -360,16 +256,10 @@ function resolveTsConfigsForRun(
     const scripts = readPackageScripts(dirAbs);
     const body = scripts?.[scriptName];
     if (!body) continue;
-    // Team-lead audit 2026-08-26: the neighbor-key argument in the header
-    // applies one level deeper too -- a swallow does not have to sit on the
-    // workflow's run: line at all. Moving it into the RESOLVED npm script's
-    // own body (`"typecheck:node": "tsc --noEmit -p tsconfig.node.json || true"`)
-    // defeats coverage identically, since this function already reads that
-    // body to extract the -p argument. Checked on the body BEFORE recursing
-    // into it, so a swallow on a composing script (`typecheck: "npm run
-    // typecheck:node && npm run typecheck:web || true"`) drops every leaf
-    // config it would otherwise have resolved, not just its own direct
-    // matches (it has none).
+    // Checked on the script body before recursing, so a swallow on a composing
+    // script (e.g. `"npm run typecheck:node && npm run typecheck:web || true"`)
+    // drops every leaf config it would otherwise resolve, not only its own
+    // direct matches.
     if (SHELL_SWALLOW_RE.test(body)) continue;
     results.push(...resolveTsConfigsForRun(body, workingDir, repoRoot, readPackageScripts, visited));
   }
@@ -390,17 +280,11 @@ function realReadPackageScripts(absDir: string): Record<string, string> | undefi
 // ----- job-level kill switch: one line above the steps defeats all of them --
 
 /**
- * Team-lead audit 2026-08-26, the highest-value fix in this pass: every
- * check above is scoped to a single STEP, but `continue-on-error`/`if:`
- * are legal on the JOB too, and either one there makes the whole job
- * non-blocking regardless of what any step below does. Same effect from the
- * other direction: reducing the `on:` trigger to drop `push`/`pull_request`
- * means the workflow simply never runs on the events that matter, which is
- * observably identical to every step inside it being neutralized. Checked on
- * the text that PRECEDES the first step boundary (`stepBoundsList`'s own
- * marker) rather than a named YAML path, so it is structural: whatever job
- * keys or trigger shape exist above the first `- name:`/`- uses:` line are
- * covered by construction, nothing here to update if the job grows a new key.
+ * continue-on-error/if: are legal at the job level too, where either one
+ * neutralizes every step beneath it in one line; narrowing the on: trigger to
+ * drop push/pull_request has the same effect.
+ * Checked on the text preceding the first step boundary, so it is structural
+ * regardless of what job-level keys exist.
  */
 function jobPrefixText(text: string): string {
   const firstStart = stepBoundsList(text)[0]?.start ?? text.length;
@@ -446,16 +330,9 @@ function coveredConfigsFromWorkflowText(
 // text string and returns a new string; none of them touch the filesystem.
 
 /**
- * Team-lead audit 2026-08-26: the previous selector (`findStepBoundsByName`)
- * picked the step to mutate by its hardcoded `name:` string -- but this
- * file's own header says renaming a step is legitimate ("Steps are matched
- * by the COMMAND they run, never by `name:`"). A rename would therefore make
- * these mutation-proof tests throw with "step not found", reading as a test
- * bug rather than the real regression they exist to catch. Selects by the
- * SAME property the production check itself keys on instead: the tsconfig
- * the step's `run:` actually resolves to, via `resolveTsConfigsForRun` --
- * so a step surviving a rename is still found by what it does, not what it
- * is called.
+ * Selects the step to mutate by the tsconfig its run: actually resolves to, not
+ * by its `name:` string -- a step is free to rename itself, so a name-keyed
+ * selector would break on a legitimate rename.
  */
 function findStepBoundsByResolvedConfig(
   text: string,
@@ -604,20 +481,11 @@ test("MUTATION does not corrupt the untouched sibling step: neutralizing the des
 });
 
 test("MUTATION-SELECTOR RESILIENCE: renaming a step does not break mutation selection (selection is by resolved config, never by name)", () => {
-  // Team-lead audit 2026-08-26, point 5: this file's own header says a step
-  // rename is legitimate. Proves findStepBoundsByResolvedConfig actually
-  // survives one, where the old by-name selector would have thrown.
   const renamed = REAL_WORKFLOW_TEXT.replace("Typecheck the mobile shell", "Typecheck mobile shell (renamed)");
   const mutated = removeStepResolvingConfig(renamed, "desktop/mobile-shell/tsconfig.json", REPO_ROOT, realReadPackageScripts);
   const after = coveredConfigsFromWorkflowText(mutated, REPO_ROOT, realReadPackageScripts);
   expect(after.has("desktop/mobile-shell/tsconfig.json")).toBe(false);
 });
-
-// ============================================================================
-// Team-lead audit 2026-08-26: three of the nine neutralization forms a
-// mutation review found still passing green. Each test below is the required
-// replayed proof for the corresponding fix.
-// ============================================================================
 
 test("MUTATION: a shell swallow moved into the npm script BODY (not the workflow run: line) still turns the config red", () => {
   // The swallow never touches .github/workflows/desktop-build.yml at all --

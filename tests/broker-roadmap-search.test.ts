@@ -1,12 +1,3 @@
-// Card 15952e09: roadmap_list gains plural filters (kinds/statuses/priorities/
-// efforts/values/tags), FTS5-backed free-text search (q/q_deep), and optional
-// flat facets (with_facets). Named `broker-*` (not `roadmap-*`): this suite
-// spawns a real broker daemon via tests/_helper.ts startBroker, so it must
-// stay OUT of desktop-build.yml's cross-platform `tests/roadmap-*.test.ts`
-// glob, which is reserved for pure-module suites (see TESTING.md,
-// "Cross-platform tests", and card b33b1874's broker-desktop-roadmap-service
-// precedent for the exact same rename reason).
-
 import { Database } from "bun:sqlite";
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { startBroker, stopBroker, post } from "./_helper.ts";
@@ -197,13 +188,9 @@ test("an unknown tag is a 400 that lists the project's actual tags", async () =>
   expect(body.error).toContain("zzqxknowntag");
 });
 
-// Review round 2 (2026-08-10), MAJOR (point 3): a tag that survives only on
-// an ARCHIVED card must still validate normally with include_archived:false
-// -- the reference set for the "unknown tag" 400 check is the WHOLE project,
-// archived included, independent of the request's own include_archived.
-// Before the fix, this filtered normally (200, empty/short result) when it
-// happened to be validated against the wrong (narrower) reference set by
-// coincidence of ordering; the measured regression is a 400 false-positive.
+// The reference set for the unknown-tag 400 check is the whole project,
+// archived cards included, independent of the request's own include_archived
+// filter.
 test("a tag living only on an archived card still validates with include_archived:false", async () => {
   const created = await add({ title: "archived-only tag fixture", tags: ["zzqxarchivedonlytag"] });
   await archive(PK, created.id);
@@ -215,11 +202,6 @@ test("a tag living only on an archived card still validates with include_archive
   expect(body.items.some((i) => i.id === created.id)).toBe(false);
 });
 
-// Review round 3 (2026-08-10), MAJOR (point A1): the short id shown on every
-// board tile is in no FTS column, so searching it used to reward a card that
-// merely MENTIONS the prefix in its text over the card whose id it actually
-// IS. Fixed via an `id LIKE '<prefix>%'` branch ORed with the FTS branch --
-// exactly this test's shape: both cards must appear, neither masking the other.
 test("an id-prefix search returns the card whose id starts with it, not masked by a card that only mentions it", async () => {
   const target = await add({ title: "id prefix search target" });
   const prefix = target.id.slice(0, 8);

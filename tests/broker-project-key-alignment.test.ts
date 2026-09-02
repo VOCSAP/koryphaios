@@ -1,31 +1,3 @@
-// Card 6aa32af4, proof step 1 (reviewer's regression probe on card
-// fc444eda): the owner-gone sweep's NULL-safe `IS` comparison
-// (`p.project_key IS roadmap_items.project_key`, broker.ts releaseStaleLocks)
-// only recognizes an active peer as "this card's owner" when the peer's
-// REGISTERED project_key matches the card's project_key EXACTLY -- a NULL
-// registered project_key is a value in its own right, not a wildcard.
-//
-// Before this card's alignment, server.ts's /register sent the raw,
-// possibly-null computeProjectKey() result, while roadmap cards were always
-// scoped under roadmapProjectKey()'s non-null local:<hash> fallback. A
-// live peer with no git remote therefore registered project_key=null while
-// its own in_progress card carried project_key="local:<hash>" -- a
-// mismatch the `IS` clause reads as "not this peer's card", so the peer's
-// OWN lock got swept as owner-gone after one grace period even though the
-// peer was actively heartbeating. This is broker-level: it reproduces from
-// raw HTTP with mismatched values alone, independent of which server.ts
-// build sent them -- which is exactly why it is a regression risk of the
-// fc444eda fix landing without this alignment, not a scenario that needs a
-// real server.ts process to observe.
-//
-// The two tests below pin both ends: the mismatched shape (what an
-// unaligned server.ts produced) still gets swept, and the matched shape
-// (what server.ts's /register now sends, via roadmapProjectKey() --
-// card 6aa32af4) stays held. tests/roadmap-broker-lock.test.ts's own
-// owner-gone case stays a SEPARATE, still-relevant scenario: a raw client
-// posting project_key:null on both sides (the ghost-peer-never-registered
-// squat), unaffected by this alignment.
-
 import { test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
 import { startBroker, stopBroker, post, livePid, deckAuthored } from "./_helper.ts";
@@ -137,26 +109,6 @@ test("matched registered project_key (post-alignment shape, card 6aa32af4) keeps
     await stopBroker(b);
   }
 }, 20_000);
-
-// ----- Card c92614ed lot L0: control-character/framing deny-list on
-// project_key at every write ingress -- register, mint, roadmap/upsert
-// (create), roadmap/import, and (MAJOR 3, team-lead review round 1) the
-// three UPDATE-scoping handlers lock-park/lock-release/reorder, which
-// select-then-write on project_key and are not read-only filters. Behavioural
-// probes against the REAL handlers (raw HTTP through the spawned broker.ts,
-// same shape as the tests above), not just shared/project-key.ts's
-// validateProjectKey in isolation: an extracted pure predicate proves
-// nothing about whether the handler calls it and uses the result (see this
-// repo's own wiring-mutation-audit rule).
-//
-// Which OTHER handlers are exempt is deliberately NOT enumerated here: an
-// enumerated list goes stale the moment a ninth site is added (measured at
-// review time -- a decommented sweep found a site this comment's earlier
-// draft had missed) and a list living in a test file is invisible to
-// whoever writes that ninth site while working in broker.ts. The actual
-// criterion lives once, at the call site every wired handler already
-// imports: see the "WIRING CRITERION" paragraph in validateProjectKey's
-// docstring (shared/project-key.ts).
 
 function peerProjectKeyByToken(dbPath: string, instanceToken: string): string | null {
   const db = new Database(dbPath, { readonly: true });
@@ -336,13 +288,9 @@ test("roadmap/upsert (create): a project_key with a control character is refused
     expect(res.status).toBe(400);
     expect(res.body.error).toContain("invalid");
 
-    // Card c92614ed lot L0 (MAJOR 2, team-lead review): scoping this COUNT by
-    // `badKey` only proves "nothing under THIS exact key" -- a mutant that
-    // sanitizes the raw value before inserting (instead of refusing) would
-    // insert under the SANITIZED key and this assertion would stay green,
-    // seeing nothing. The broker is fresh in this test (startBroker() per
-    // test, no shared fixture), so an unscoped COUNT proves the stronger
-    // claim that actually matters: nothing landed AT ALL, under any key.
+    // An unscoped COUNT is used deliberately, not one filtered by the bad key:
+    // the broker is fresh per test, so this proves nothing landed under any
+    // key, not just under the exact key tried.
     const db = new Database(b.dbPath, { readonly: true });
     try {
       const row = db.query("SELECT COUNT(*) AS n FROM roadmap_items").get() as { n: number };
@@ -395,13 +343,9 @@ test("roadmap/import: a project_key with a control character refuses the whole b
   }
 });
 
-// ----- MAJOR 3 (team-lead review round 1): lock-park/lock-release/reorder
-// scope an UPDATE on project_key, so they need the same refuse-not-trim
-// discipline as create/import, not the read-only-filter exemption. Decisive
-// probe that found the gap: the SAME leading-whitespace string refused by
-// /roadmap/upsert (400) was silently trimmed and ACCEPTED (200, write
-// happened) by /roadmap/reorder -- one caller-declared string, two
-// disciplines, in the very lot that establishes the discipline.
+// lock-park/lock-release/reorder perform an UPDATE scoped by project_key, so
+// they need the same refuse-not-trim discipline as create/import rather than
+// the read-only-filter exemption.
 
 test("roadmap/lock-park: a project_key with leading whitespace is refused with 400, not silently trimmed", async () => {
   const b = await startBroker();

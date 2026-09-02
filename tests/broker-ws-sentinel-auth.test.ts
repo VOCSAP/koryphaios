@@ -1,18 +1,3 @@
-// Card 78bf378d: WS handshake now refuses a sentinel-shaped instance_token
-// with the same close code/reason as an unknown instance_token, before
-// wsPool.set()/flushPendingForToken() are ever reached. This is the
-// live-path proof alongside tests/peer-sentinel-auth.test.ts's pure truth
-// table (per this card's brief: a broker-*-prefixed end-to-end test opening
-// a real WebSocket is acceptable only because that pure test exists first).
-// Reuses SENTINEL_INSTANCE_TOKENS (shared/types.ts) rather than a hardcoded
-// literal, same as tests/broker-sentinel-processing.test.ts.
-//
-// Named tests/broker-*.test.ts (not tests/peer-*): it real-imports
-// startBroker (spawns a live broker.ts subprocess), so per
-// tests/desktop-ci-glob-coverage.test.ts's guard it must live in the
-// broker-* family (excluded from CI on every platform), never a
-// topically-named CI-collected prefix.
-
 import { test, expect, afterEach } from "bun:test";
 import { Database } from "bun:sqlite";
 import { startBroker, stopBroker, type TestBroker } from "./_helper.ts";

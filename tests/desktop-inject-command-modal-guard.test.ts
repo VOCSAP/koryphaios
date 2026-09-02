@@ -4,20 +4,10 @@ import { join } from 'node:path'
 import { makeScreen, classifyInjectGuard, ScreenGuard } from '../desktop/src/main/screen-model.ts'
 import { extractBracedBody } from './_braced-body'
 
-// Vague 10 A2-1 (cards 5dbf3255 + 63ca372f). spec_575cabbb / spec_052fe1d7.
-//
 // SessionService isn't bun-test-importable (PtyManager -> node-pty, plus
-// unresolved @shared/* aliases outside desktop's own tsconfig) -- same
-// constraint tests/desktop-inject-command-write-check.test.ts documents, and
-// the same source-scan approach: read the real file text, extract
-// injectCommand's body, assert on its SHAPE rather than instantiate the
-// class.
-//
-// This file proves the guard is actually WIRED, not just that screen-model.ts
-// exists in isolation (that half is tests/desktop-screen-model.test.ts). The
-// RED-proof below (removing the guard lines from a synthetic copy of the
-// body) is what makes this a guard and not a comment: a probe not shipped in
-// the diff is not a guard, per this repo's own review convention.
+// unresolved @shared/* aliases outside desktop's own tsconfig); this reads the
+// real file text and asserts on injectCommand's body shape rather than
+// instantiating the class.
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, '..', 'desktop', 'src', 'main', 'session-service.ts')
 
@@ -165,30 +155,14 @@ test('screenGuard.feed is wired into the central pty data handler alongside the 
   expect(feedBlockMatch![0]).toContain('this.startupAckDetector.feed(e.id, e.data)')
 })
 
-// J3 (team-lead review, 2026-08-18, MESURE): the test this comment used to
-// introduce counted this.screenGuard.(clear|stop)( occurrences across the
-// whole file and compared the count to attentionDetector's. A mutation that
-// DELETED screenGuard.clear(id) from remove() (a real PTY-life boundary) and
-// ADDED an unrelated screenGuard.clear(id) call to the top of interrupt()
-// (not a life boundary at all) left the count unchanged -- 10 pass / 0 fail,
-// green while the tile's screen genuinely leaked. The predicate "detects a
-// DISAPPEARANCE, never a RELOCATION" is a structural property of any
-// occurrence count, not a bug specific to this one regex, and a per-site
-// textual presence check has the same class of problem (a call replaced by
-// a comment that merely mentions the string still reads as present -- see
-// the ScreenGuard.resize RED-proof above, D7, for a shipped instance of
-// exactly that). So this is deliberately NOT a source scan of
-// session-service.ts at all: it exercises ScreenGuard's own clear()
-// contract directly, which is the actual mechanism whose failure produces
-// the real-world consequence team-lead named (a reused tile id inheriting a
-// dead grid). NOTE what this test does NOT cover: it cannot observe
-// whether session-service.ts's remove() (or any other boundary) actually
-// calls screenGuard.clear(id) at runtime -- SessionService is not
-// bun-test-importable (PtyManager -> node-pty native module, unresolved
-// @shared/* aliases outside desktop's own tsconfig, several side-effecting
-// dependencies: store.ts disk I/O, open-id-registry, desk-session), per
-// this file's own header comment. That specific wiring gap is reported as
-// an open item rather than papered over with another text scan.
+// Exercises ScreenGuard.clear()'s own contract directly rather than scanning
+// session-service.ts, because an occurrence count of screenGuard.clear/stop
+// calls detects a call disappearing but not relocating: a deleted call from a
+// real boundary plus an unrelated call added elsewhere leaves the count
+// unchanged.
+// Whether session-service.ts's remove() (or any other boundary) actually calls
+// screenGuard.clear(id) at runtime is not verified here: SessionService isn't
+// bun-test-importable, so that wiring gap is a separate open item.
 test('a tile id reused after ScreenGuard.clear() gets a fresh classification, never the dead grid a leaked entry would produce', () => {
   const guard = new ScreenGuard()
   const id = 'tile-reused'
@@ -202,18 +176,10 @@ test('a tile id reused after ScreenGuard.clear() gets a fresh classification, ne
   // closeAll(), restoreFrom(), the pty-exit handler, restart's fresh spawn).
   guard.clear(id)
 
-  // Same id reused by a fresh PTY life. Its composer paints LOWER on the
-  // screen (content row 20, chevron row 21) than the old one, on purpose
-  // (team-lead complement, 2026-08-18): if this second composer landed on
-  // the SAME rows as the first, a leaked old Screen and a freshly-built one
-  // would both contain an identical, correctly-shaped composer and both
-  // classify 'clear' -- proving nothing either way, the exact masking that
-  // emptied the resize RED-proof above (D7). Placing it lower means that if
-  // clear() was skipped, the leaked old Screen still carries the OLD
-  // chevron at row 6, which sits ABOVE the new one at row 21 and wins
-  // classifyInjectGuard's topmost-match search -- so it reads the stale
-  // chevron against the NEW cursor position (row 20) and the verdict flips
-  // to 'modal', diverging from the correct 'clear' this assertion checks.
+  // The reused id's composer paints lower (row 20/21) than the original (row 6)
+  // on purpose: if clear() were skipped, the leaked screen's stale chevron at
+  // row 6 would win the topmost-match search and flip the verdict to 'modal',
+  // so same-position composers would prove nothing either way.
   guard.feed(id, '\x1b[20;1Hnew draft\x1b[21;1H❯\x1b[20;10H')
   expect(guard.classify(id)).toBe('clear')
 })
@@ -243,16 +209,11 @@ describe('ScreenGuard.resize (card 120148eb review finding: the grid must track 
     feed(`\x1b[${CONTENT_ROW};5H`)
   }
 
-  // 1-indexed CUP rows BEYOND the 400x200 default's own last row (rows-1 =
-  // 199), used only by the ScreenGuard.resize/NaN-rejection tests below.
-  // D7 (team-lead review, 2026-08-18, MESURE): the 101/102 composer above
-  // fits comfortably inside the generous default even when resize() is
-  // stripped to a no-op, so it cannot tell "resize() actually rebuilt the
-  // grid" from "the default was big enough anyway" -- that gap made the
-  // resize()-RED-proof test below pass at 29/0 with resize() inert. This
-  // composer sits past the default's own reach, so an inert resize() (grid
-  // stays at the 400x200 default) clamps both rows to 199 and misclassifies,
-  // while a real resize(id, 120, 300) comfortably covers it.
+  // TALL_CONTENT_ROW/TALL_CHEVRON_ROW sit past ScreenGuard's default 400x200
+  // grid reach, used only by the resize/NaN-rejection tests: an inert resize()
+  // clamps both rows to the default's last row and misclassifies, while a real
+  // resize() covers them -- only this composer can tell whether resize()
+  // actually ran.
   const TALL_CONTENT_ROW = 250 // 0-indexed 249, beyond the default's rows-1=199
   const TALL_CHEVRON_ROW = 251 // 0-indexed 250
   const feedTallComposer = (feed: (data: string) => void): void => {

@@ -1,19 +1,9 @@
-// Roadmap card c7ba8ce8: the Deck accepts every roadmap response with
-// `return (await res.json()) as T` (roadmap-service.ts:100), i.e. no validation
-// at all, while the house convention treats a broker response field as hostile
-// input #2.
-//
-// WHY A STUB SERVER AND NOT THE REAL BROKER. The broker sanitizes on the way
-// out (broker.ts:1429-1436, parseList forces Array.isArray then filters
-// strings), so a conforming broker CANNOT produce the payloads under test. The
-// point is precisely that the Deck must not depend on that goodwill, so the
-// hostile payload has to come from a stub.
-//
-// The first block records the MEASURED behaviour that motivates the fix and is
-// green before and after: it is about JavaScript and directive.ts, not about
-// the sanitizer. Its negative control is what makes the rest readable -- without
-// it, a suite cannot tell "the validation bites" from "everything throws
-// anyway".
+// Uses a stub server, not the real broker: the broker already sanitizes
+// outgoing roadmap responses, so a conforming broker cannot produce the hostile
+// payloads under test -- the Deck must not depend on that goodwill.
+// The first block records baseline JavaScript/directive.ts behavior as a
+// negative control, so the suite can tell "the validation bites" from
+// "everything throws anyway".
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { resolveDirectiveTargets } from "../desktop/src/main/directive.ts";
@@ -35,8 +25,8 @@ test("a STRING target_peer_ids does not throw in resolveDirectiveTargets: it ite
   const hostile = "abc" as unknown as string[];
   const r = resolveDirectiveTargets(hostile, []);
   expect(r.matched).toEqual([]);
-  // The characters, not an error: this is what lets execution reach the
-  // matched.length === 0 branch at index.ts:1095.
+  // Asserts the individual characters, not an error: that's what lets execution
+  // reach the matched.length === 0 branch.
   expect(r.missing).toEqual(["a", "b", "c"]);
 });
 
@@ -53,10 +43,9 @@ test("reaching the journal line with a string is what rejects: a string has no .
 });
 
 test("the SILENT variant: a string depends_on answers substring matches through .includes", () => {
-  // RoadmapList.tsx:206 and RoadmapView.tsx:392 both do
-  // `child.depends_on.includes(parentId)`. A string HAS .includes, so this one
-  // never throws -- it answers wrong. That is why the fix cannot stop at
-  // target_peer_ids.
+  // A string has .includes, so a hostile string depends_on never throws -- it
+  // silently answers substring matches instead, which is why the fix can't stop
+  // at target_peer_ids.
   const hostile = "abcdef" as unknown as string[];
   expect(hostile.includes("cde")).toBe(true); // a dependency that does not exist
   expect(hostile.includes("xyz")).toBe(false);

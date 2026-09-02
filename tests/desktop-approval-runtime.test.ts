@@ -24,15 +24,16 @@ function tmp(): string {
   return d;
 }
 
-/** Reversible fake cipher (same shape as tests/desktop-approvals.test.ts). */
 const fakeCipher: SecretCipher = {
   isAvailable: () => true,
   encrypt: (s: string) => Buffer.from(`X${s}`, "utf8"),
   decrypt: (b: Buffer) => b.toString("utf8").slice(1),
 };
 
-/** A cipher that can no longer decrypt what fakeCipher encrypted — simulates
- * a corrupted / re-keyed operator identity file. */
+/**
+ * Simulates a corrupted or re-keyed operator identity file: cannot decrypt what
+ * fakeCipher encrypted.
+ */
 const hostileCipher: SecretCipher = {
   isAvailable: () => true,
   encrypt: () => Buffer.from(""),
@@ -70,17 +71,9 @@ function stubMintSuccess(): void {
 describe("armApprovalsAtStartup() -- the PRIMARY, behavioral proof for card 469f3176", () => {
   beforeEach(() => stubMintSuccess());
 
-  // This is the real regression proof, not tests/desktop-approval-arm-unconditional.test.ts's
-  // text scan (team-lead ruling, 2026-08-13): armApprovalsAtStartup()'s
-  // signature takes no mobileApprovals-shaped argument at all. A `mobile:
-  // false`-shaped config is built right here to make that concrete -- note it
-  // is never passed to the function under test, because there is nowhere to
-  // pass it. Reverting this extraction back to `if (config.mobileApprovals) {
-  // await approvals.arm() }` inline in index.ts cannot be re-hidden from THIS
-  // test the way it could hide from a text scan under a rephrased condition,
-  // because arming a runtime and observing its result here does not go
-  // through index.ts's call site at all -- it exercises the same arm() path
-  // directly, with no config in scope to gate it.
+  // armApprovalsAtStartup takes no mobileApprovals-shaped argument, so nothing
+  // inside it can branch on transport config regardless of how a caller spells
+  // the condition.
   test("arms successfully with no mobile transport ever configured or reachable", async () => {
     const operatorNeverEnabledMobile = { mobileApprovals: false as const };
     void operatorNeverEnabledMobile; // documents the scenario; deliberately unused below

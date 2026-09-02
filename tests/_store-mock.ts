@@ -15,47 +15,20 @@ import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { TESTS_DIR } from "../scripts/pure-module-partition.ts";
 
-// Read as TEXT, never imported/executed: an actual `import` of store.ts
-// from a file living outside `desktop/` hits the SAME gap already
-// documented in tests/desktop-templates-composer-draft-reset.test.ts --
-// `@shared/*` is a tsconfig-only path alias (desktop/tsconfig.web.json)
-// that Bun does not resolve when `bun test` runs from the repo root, and
-// store.ts's own `import { inboxEntryKey } from '@shared/types'` (a VALUE
-// import, not `import type`) throws before this module could ever read
-// `Object.keys()` off the real thing. Measured directly: `bun test
-// tests/desktop-tile-area.test.ts` with a real `import * as RealStore from
-// ".../store.ts"` here failed with "Cannot find module '@shared/types'
-// from '.../store.ts'" before a single test ran.
+// Read as text, never imported: store.ts imports '@shared/types' via a
+// tsconfig-only path alias that Bun does not resolve when bun test runs from
+// the repo root, so a real import throws before this module can read it.
 const STORE_SOURCE_PATH = join(import.meta.dir, "../desktop/src/renderer/src/store.ts");
 
 /**
- * Value-export names store.ts has TODAY, scanned off its own source rather
- * than hardcoded -- a future export added there shows up here for free, and
- * a mock written against yesterday's surface starts failing loudly instead
- * of silently shipping a hole. Scoped to ONE canonical, stable-shaped file
- * (never to the arbitrary test files that MOCK it, which is the fragile
- * scan this project's conventions warn against).
- *
- * Line-by-line, not a whole-text `matchAll`: reviewer-measured (card
- * a688748b, mutations M6a/M6b/M6c) that a whole-text regex pair silently
- * NARROWS the required surface -- `export class X {}`, `const x = 1; export
- * { x }`, and `export function NAME` reflowed across two lines
- * (`export\nfunction NAME`, valid JS) all left the key set UNCHANGED, no
- * error, a smaller domain nobody asked for. Every line starting with
- * `export` must now be consumed by a form this function explicitly
- * recognizes -- function, const (not a const enum), `export type`, or
- * `export const enum` -- or it throws: an unrecognized shape becomes a loud
- * failure instead of a quietly dropped key. `export type` lines are
- * excluded on purpose -- erased at runtime, never a key a `mock.module`
- * factory needs.
- *
- * A RECOGNIZED line can still drop a key: reviewer-measured (card a688748b,
- * mutation N1) that `export const tone = 1, badge = 2` matched the const
- * regex, captured only the FIRST declarator ("tone"), and silently threw
- * "badge" away with no error -- the same failure class as M6, one level
- * lower (an incomplete EXTRACTION of a recognized line, not an unrecognized
- * line). `hasTopLevelComma` below rejects any const line with more than one
- * declarator instead of silently taking the first.
+ * Scans store.ts's own source for its current value-export names rather than
+ * hardcoding them, so a mock written against a stale surface fails loudly
+ * instead of silently missing an export.
+ * Every exported line must match a recognized form (function, const with a
+ * single declarator, export type, export const enum) or this throws; export
+ * type is excluded since it carries no runtime key.
+ * hasTopLevelComma rejects a multi-declarator const line instead of silently
+ * keeping only the first name.
  */
 function hasTopLevelComma(text: string): boolean {
   let depth = 0;
@@ -185,32 +158,9 @@ export const storeMockStubs = {
 // enters the swept set for free, without anyone adding its name anywhere.
 
 /**
- * Every TypeScript file under tests/, at any depth, as a path relative to
- * tests/ (e.g. "desktop-tile-area.test.ts", or "fixtures/x.ts" for a
- * nested one) -- deliberately NOT `scripts/pure-module-partition.ts`'s
- * `listTestFiles()`, which filters to top-level `*.test.ts` for a DIFFERENT
- * purpose (which files bun actually runs as a suite). Reviewer-measured
- * (card a688748b, mutation M1): scoping this scan's domain to `*.test.ts`
- * left a synthetic `_evil-helper.ts` -- exactly the shape of the two real,
- * non-`.test.ts` helper files this directory already has (`_helper.ts`,
- * `_store-mock.ts` itself) -- completely invisible, since a helper never
- * runs as a test file itself but its `mock.module` call still lands in the
- * same process the moment anything imports it.
- *
- * Extension pattern matches `.ts`/`.tsx`/`.mts`/`.cts` (mutation N3,
- * reviewer-measured): a bare `f.endsWith(".ts")` let a `.tsx` helper --
- * plausible in a directory that mounts React components with happy-dom --
- * through undetected.
- *
- * RECURSIVE (mutation N2, reviewer-measured): tests/ already has real
- * subdirectories today (`fixtures/`, `pty-harness/`, both non-TypeScript
- * fixture data) -- an earlier draft of this function THREW on any
- * subdirectory's mere existence, which would have made it fail against
- * this very repo. `readdirSync(..., { recursive: true })` closes the
- * domain-growth gap by construction instead: any `.ts` file added under a
- * subdirectory later is swept for free, the same way a new top-level file
- * already is, rather than requiring the assumption "still flat" to be
- * re-verified by hand.
+ * Lists every .ts/.tsx/.mts/.cts file under tests/, recursively, as a path
+ * relative to tests/ -- distinct from pure-module-partition's listTestFiles(),
+ * which scopes to top-level *.test.ts files bun actually runs as a suite.
  */
 export function listTestsDirFiles(): string[] {
   return readdirSync(TESTS_DIR, { recursive: true, withFileTypes: true })
@@ -223,23 +173,10 @@ const CANONICAL_STORE_MOCK_FILE = "_store-mock.ts";
 const REAL_STORE_ABS_PATH = resolve(TESTS_DIR, "../desktop/src/renderer/src/store.ts");
 
 /**
- * Extracts every `mock.module(<specifier>, ...)` call's specifier argument
- * from `source`, but ONLY when it is a plain string/template literal with
- * no interpolation.
- *
- * COVERAGE, stated in code rather than left to be found the day it bites:
- * a specifier built in a variable (`const s = "..."; mock.module(s, ...)`)
- * or reached through a path alias instead of a relative path is INVISIBLE
- * to this regex by construction -- an AST walk or a real Bun.plugin-level
- * intercept of `mock.module` itself would be needed to see those, and
- * neither exists here. `scripts/pure-module-partition.ts`'s own
- * CONTAMINATION_MARKERS scan (which this file's OWN presence in `tests/`
- * legitimately trips, since it contains the literal text `mock.module(`)
- * makes the identical trade-off for the same reason. Degradation check: a
- * regex NARROWED to double-quotes only would silently drop every
- * single-quoted or template-literal specifier into the same blind spot --
- * covered below by testing all three forms, not just the one the current 6
- * adopters happen to use.
+ * Extracts mock.module() specifier arguments that are plain string/template
+ * literals; a specifier built from a variable or a path alias is invisible to
+ * this regex by construction, matching the same tradeoff
+ * pure-module-partition's CONTAMINATION_MARKERS scan makes.
  */
 function extractMockModuleSpecifiers(source: string): string[] {
   const specifiers: string[] = [];
@@ -292,12 +229,9 @@ export function findDirectStoreMocks(
 }
 
 /**
- * How many literal specifiers in `source` (as if written inside `fromFile`)
- * resolve to store.ts. Exported so a test file that legitimately embeds
- * `mock.module(store.ts, ...)` text as synthetic fixture DATA (this repo has
- * exactly one: tests/store-mock-guard.test.ts) can pin the count instead of
- * exempting itself by filename alone -- a filename exemption stays blind to
- * a genuine violation added to that same file later; a pinned count does not.
+ * Exported so a file that legitimately embeds mock.module(store.ts, ...) as
+ * fixture text can pin the expected count instead of exempting itself by
+ * filename, which would stay blind to a real violation added later.
  */
 export function countStoreMockSpecifiers(source: string, fromFile: string): number {
   return extractMockModuleSpecifiers(source).filter((specifier) => resolvesToStore(specifier, fromFile)).length;

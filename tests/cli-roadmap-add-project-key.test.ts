@@ -1,38 +1,12 @@
-// Card 51fd7b65: `bun cli.ts roadmap-add`'s HTTP fallback used to require the
-// calling agent to hand-compute `project_key` and send it VERBATIM in the
-// payload -- the same divergence risk closed for every other producer by
-// card 6aa32af4 (single resolveProjectKey/normalizeRemoteUrl producer,
-// shared/project-key.ts). A miscased or stale value here silently wrote into
-// a DIFFERENT project's roadmap with no error at all: three cards were lost
-// this way into `github.com/VOCSAP/koryphaios` (the correctly-scoped bucket
-// is `github.com/vocsap/koryphaios`) before being recovered by hand,
-// 2026-08-27.
-//
-// This test proves the fix is a DERIVATION, not merely documentation: the
-// verb must compute its own project_key from its own cwd's git remote,
-// exactly like server.ts's roadmapProjectKey() does for a live MCP session,
-// and refuse (before any network call) a payload whose declared project_key
-// disagrees with that derivation. A source-scan of cli.ts text would pass on
-// a call that is present but discarded, or an argument swapped for a
-// literal (CLAUDE.md's wiring-coverage rule) -- so this spawns the REAL
-// `bun cli.ts roadmap-add` subprocess from a fixture git repo with a known
-// fake remote, and inspects the actual HTTP body it sends.
-//
-// Deliberately does NOT import startBroker from ./_helper.ts (a real
-// broker.ts daemon): tests/desktop-ci-glob-coverage.test.ts's "card b33b1874:
-// no non-exempt file real-imports the broker-spawning helper" guard flags
-// any such import on a non-exempt file, and scripts/pure-module-partition.ts
-// documents that an EXEMPTED file is not run in CI AT ALL today -- exempting
-// this file would silence the exact behavioral proof it exists to provide.
-// A minimal Bun.serve() stub captures the POST body instead, which is all
-// this test needs: broker-side validation of that body is someone else's
-// coverage (tests/broker-roadmap-author-auth.test.ts et al).
-//
-// Named tests/cli-*.test.ts (not tests/broker-*.test.ts / server-*.test.ts):
-// per TESTING.md "Cross-platform tests", those two prefixes are excluded
-// from the CI collection glob (scripts/pure-module-partition.ts) and would
-// be green locally, never in CI -- this file already exists in that
-// tests/cli-*.test.ts family (tests/cli-roadmap-add-no-token.test.ts).
+// Proves the fix is a derivation, not documentation: the verb computes its own
+// project_key from its own cwd's git remote and refuses, before any network
+// call, a payload whose declared project_key disagrees with that derivation.
+// Spawns the real `bun cli.ts roadmap-add` subprocess against a fixture git
+// repo with a known fake remote and inspects the actual HTTP body sent, rather
+// than source-scanning cli.ts (which would pass on a call that is present but
+// discarded).
+// Uses a minimal Bun.serve() stub to capture the POST body instead of a real
+// broker: broker-side validation of that body is covered elsewhere.
 
 import { test, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";

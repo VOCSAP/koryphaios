@@ -1,18 +1,8 @@
-// Card 032bdeae: gracefulClose (session-close.ts) was written, tested, and
-// wired to NO production call -- session-service.ts's remove() did a bare
-// this.pty.kill(id). This file proves the NEW options (isModal,
-// isClosingForced, cleanup, absoluteDeadlineMs) that session-service.ts's
-// remove() now supplies, behaviorally, against the real exported
-// gracefulClose -- not the pre-existing 4 tests in
-// tests/desktop-workspace.test.ts:931-994, which only ever exercised the
-// ORIGINAL write/isAlive/kill/delay shape and remain untouched by this lot.
-//
-// SessionService itself is not bun-test-importable (PtyManager -> node-pty),
-// same constraint tests/desktop-inject-command-modal-guard.test.ts documents
-// -- so the actual CALL SITE inside remove() (that it awaits gracefulClose
-// with these exact options) is covered by a source scan at the bottom of
-// this file, not a behavioral probe. That half is explicitly the WEAK one;
-// see its own comment.
+// Proves the new options (isModal, isClosingForced, cleanup,
+// absoluteDeadlineMs) that remove() now supplies, against the real
+// gracefulClose.
+// The actual call site inside remove() is verified only by a source scan below,
+// since SessionService isn't bun-test-importable.
 
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -118,21 +108,10 @@ test("P4 -- a thrown write() still reaches kill() (filet a)", async () => {
 // redundant one, since the escalation's own try/finally is permanently stuck
 // awaiting that promise and never runs its own cleanup.
 
-// Card 6c380073 (review round 2, point 6): this probe must FAIL, not HANG,
-// when the net it exists to prove is absent -- a hanging probe proves nothing
-// and blocks a CI job instead of reddening it.
-//
-// A per-test timeout does NOT achieve that here. MEASURED on bun 1.3.13 with
-// the deadline net removed: `test(..., 5000)` still hung past 90s, printing
-// only the banner. Isolated with a 5-line control (a bare
-// `await new Promise(() => {})` under a 1000ms cap, no project code, no
-// imports) -- it hangs identically, so bun's per-test timeout cannot
-// interrupt an await on a promise that never settles and arms no timer.
-//
-// So the test races the call against a REAL timer itself and asserts on the
-// winner. It therefore always settles, on any bun version, and a missing net
-// reads as a legible `"HUNG"` instead of a stalled runner. The `}, 5000)` cap
-// stays as a second net for any future shape that CAN be interrupted.
+// A per-test timeout does not rescue a promise that never settles and arms no
+// timer -- measured to hang past 90s regardless.
+// The test races the call against its own timer and asserts the winner, so a
+// missing safety net reads as HUNG instead of stalling the runner.
 test("P5 -- delay() that never resolves is rescued ONLY by the absolute-deadline safety net", async () => {
   let killed = 0;
   let cleaned = 0;
@@ -182,16 +161,9 @@ test("P6 -- isClosingForced() flipping true mid-escalation stops further writes 
   expect(killed).toBe(1);
 });
 
-// ----- Residual (WEAK half, explicitly labeled): remove()'s own call site in
-// session-service.ts is out of reach of a behavioral probe (SessionService
-// isn't bun-test-importable). This is a SOURCE SCAN, not a behavioral proof:
-// it only shows the escalation is wired and AWAITED and that the
-// second-click state exists in scope -- it does NOT prove kill() is
-// unreachable on the nominal path, nor that isModal/cleanup are wired
-// correctly (only the behavioral probes above prove the FUNCTION's own
-// logic). Per this repo's convention (tests/desktop-inject-command-modal-guard.test.ts),
-// the checker itself is RED-proofed against synthetic bodies below so it
-// cannot pass by never actually checking anything.
+// Source scan only, since SessionService isn't bun-test-importable: proves the
+// escalation is wired and awaited and the second-click state is referenced, but
+// not that kill() is unreachable on the nominal path.
 
 const SESSION_SERVICE_PATH = join(
   import.meta.dir,
@@ -214,19 +186,10 @@ function extractRemoveBody(src: string): string {
 }
 
 /**
- * WEAK by design (see the block comment above): only proves the escalation
- * is present, AWAITED (not fire-and-forget), that the second-click state
- * (`closingInFlight`) is referenced, and that the modal pre-check reads ALL
- * THREE of its signals. Does not, and cannot by source scan alone, prove
- * kill() is unreachable on any particular path.
- *
- * Card 6c380073 (review round 2, point 7): the three-signal half is here
- * because the COMPOSITION of the pre-check was guarded by nothing. Measured:
- * reducing the real predicate to `classify(id) === 'modal'` alone -- dropping
- * needsAttention and rateLimited -- left this file at 10 pass / 0 fail. P1
- * only exercises the isModal callback that the TEST injects, so it is blind
- * to which signals the production caller actually composes; only naming the
- * three here closes that.
+ * Weak by design (source scan only): proves the escalation call is present,
+ * awaited, and that the modal pre-check reads all three signals (isModal,
+ * needsAttention, rateLimited) -- not that kill() is unreachable on any given
+ * path.
  */
 function removeIsWiredToEscalation(body: string): boolean {
   return (

@@ -202,13 +202,10 @@ test("releaseStaleLocks: a lock in the secret-less 'default' group drops the eve
   }
 }, 20_000);
 
-// Card 4441e883, Trou C (team-lead review): the three tests above only ever
-// exercise clause 1 (TTL). C1 proves clause 2 (owner-gone) reaches the SAME
-// emitLockAbandonedEvent call (broker.ts's release() helper is shared by all
-// three clauses, but nothing pinned that the OTHER two clauses actually go
-// through it). LOCK_TTL_SEC is set far outside this test's window so a TTL
-// release cannot fire first and make the assertion pass for the wrong
-// clause -- only owner-gone (LOCK_GRACE_SEC, short) can release this row.
+// This proves clause 2 (owner-gone) reaches the same emitLockAbandonedEvent
+// call as clause 1 (TTL), not just that clause 1 does.
+// LOCK_TTL_SEC is set far outside this test's window so only owner-gone (short
+// LOCK_GRACE_SEC) can release this row.
 test("releaseStaleLocks: a lock swept by clause 2 (owner-gone, not TTL) deposits the same operator-inbox event", async () => {
   const g = { id: await groupId("lock-abandon-owner-gone"), hash: await sha256Hex("lock-abandon-owner-gone") };
   const b: TestBroker = await startBroker({
@@ -217,15 +214,12 @@ test("releaseStaleLocks: a lock swept by clause 2 (owner-gone, not TTL) deposits
     CLAUDE_PEERS_LOCK_SWEEP_SEC: "1",
   });
   try {
-    // locked_group is ONLY ever stamped from a PROVEN author's own real
-    // `peers` row (resolveRoadmapAuthor's instance_token branch -- an
-    // unproven "ghost-peer" claim, as used by the sibling owner-gone tests
-    // in tests/broker-roadmap-lock.test.ts, would leave locked_group NULL,
-    // which routes through the OTHER guard C2 exists to pin, not this one).
-    // A real group therefore needs a REAL registered peer -- forced dormant
-    // and stale directly via sqlite, same technique as that file's
-    // "owner-gone sweep (site c)" tests, so it never heartbeats again and
-    // clause 2 (not clause 1: LOCK_TTL_SEC is 3600s here) is what releases it.
+    // locked_group is only ever stamped from a proven author's real registered
+    // peer row; an unproven ghost-peer claim leaves it NULL and routes through
+    // a different guard.
+    // The peer is forced dormant and stale directly via sqlite so it never
+    // heartbeats again, releasing via clause 2 (not clause 1: LOCK_TTL_SEC is
+    // 3600s here).
     const reg = await post<{ instance_token: string; peer_id: string }>(`${b.url}/register`, {
       pid: livePid(), cwd: "/tmp/lock-abandon-owner-gone", git_root: null, tty: null,
       summary: "", host: "h-lock-abandon-owner-gone", client_pid: livePid(), claude_cli_pid: 1,
@@ -269,14 +263,12 @@ test("releaseStaleLocks: a lock swept by clause 2 (owner-gone, not TTL) deposits
   }
 }, 20_000);
 
-// C2: emitLockAbandonedEvent's FIRST guard (broker.ts:1109-1114) -- a
-// migration-era row (`locked_group IS NULL`) must be logged and DROPPED,
-// never routed. This is a DIFFERENT guard than the "default group" test
-// above (that one is groupMayCarryOperatorInbox, the SECOND guard, which
-// only ever runs once the first has already let a non-null group through).
-// Same technique as tests/broker-roadmap-lock.test.ts's "legacy row
-// (locked_group NULL, pre-migration)" test: force the column back to NULL
-// directly via sqlite, since no HTTP route lets a caller set it.
+// emitLockAbandonedEvent's first guard drops a migration-era row (locked_group
+// IS NULL) before it ever reaches the second guard
+// (groupMayCarryOperatorInbox), which only runs once a non-null group has
+// passed through.
+// locked_group is forced back to NULL directly via sqlite since no HTTP route
+// lets a caller set it.
 test("releaseStaleLocks: emitLockAbandonedEvent's first guard drops a migration-era row (locked_group NULL) instead of routing it anywhere", async () => {
   const g = { id: await groupId("lock-abandon-null-group"), hash: await sha256Hex("lock-abandon-null-group") };
   const b: TestBroker = await startBroker({

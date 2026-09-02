@@ -71,10 +71,9 @@ test("ANSI escapes in the dialog are stripped before matching", () => {
 });
 
 test("matches the ConPTY repaint frame where spaces are cursor-forward sequences", () => {
-  // Real Windows capture (2026-07-28 audit): the ConPTY resize repaint encodes
-  // every inter-word space as \x1b[1C, which the ANSI strip removes entirely --
-  // the words arrive JOINED ("WARNING:Loadingdevelopmentchannels"). The
-  // patterns use \s* so this frame still acks.
+  // ConPTY's resize repaint encodes inter-word spaces as \x1b[1C, which
+  // ANSI-stripping removes entirely, joining the words together; patterns use
+  // \s* so this frame still acks.
   const d = new StartupAckDetector();
   const events = collect(d);
   d.feed(
@@ -133,20 +132,9 @@ test("the dev-channels warning still acks when an OSC title update is interleave
   expect(events).toEqual([{ id: "s1" }]);
 });
 
-// Card 1aa69066 (H2) review, blocker F2: the test above only exercises an OSC
-// sequence that arrives WHOLE within one feed() call -- a per-chunk-only
-// strip already handles that case, so it does not distinguish the fix (the
-// accumulated-buffer re-strip) from the bug it closes. MEASURED (reviewer,
-// mutation review): removing the accumulated-buffer re-strip left EVERY
-// existing test in this suite green -- the fragmentation-across-chunks
-// mechanism this file's own header comment describes was covered by
-// nothing. This is the POSITIVE CONTROL: an OSC 0 title split across two PTY
-// chunks, landing in the MIDDLE of the second warning cue. Only the
-// accumulated-buffer re-strip can remove it -- a per-chunk strip cannot,
-// because chunk 1's OSC half has no terminator yet, so nothing matches
-// within that single chunk string. Two witnesses alongside it: the same OSC
-// whole in one chunk (already covered above, repeated here for direct
-// comparison) and no OSC at all (baseline) -- both must still ack.
+// Positive control for the accumulated-buffer re-strip: a per-chunk-only strip
+// can't remove an OSC title split across two PTY chunks landing mid-cue, since
+// chunk 1's OSC half has no terminator yet within that single chunk.
 test("the warning still acks when its OSC title update is FRAGMENTED across chunks, landing mid-cue", () => {
   const fragmented = new StartupAckDetector();
   const fragmentedEvents = collect(fragmented);
@@ -168,37 +156,11 @@ test("the warning still acks when its OSC title update is FRAGMENTED across chun
   expect(noOscEvents).toEqual([{ id: "s1" }]);
 });
 
-// ---------------------------------------------------------------------------
-// FIELD CAPTURE, card 00588e6c. spec_17343687.
-//
-// tests/pty-harness/fixtures/channels-warning-conpty-win.json is a REAL
-// Windows ConPTY stream, not a hand-built frame: the 26 first chunks of one
-// PTY session (850cd834), captured 2026-08-26 through KORY_PTY_RAW_CAPTURE in
-// desktop/src/main/pty-manager.ts, whose hook sits in proc.onData BEFORE
-// handleData -- the most UPSTREAM point our own code can reach, so what it
-// records is ConPTY's encoding and not our pipeline's. Everything after
-// node-pty's UTF-8 decode is untouched; the fixture was rebuilt from that
-// capture's hex dump, byte for byte.
-//
-// It settles the question card 00588e6c was filed to settle, and it corrects
-// the answer everyone had assumed. The FIRST paint of the screen is indeed
-// `\x1b[1C` throughout, exactly as startup-ack.ts's comment claimed on the
-// strength of a 2026-07-28 capture that was never kept -- but the stream does
-// not stay that way. Measured here: chunk 8 paints both cues compressed,
-// then ~130 ms later chunks 10 and 12 REPAINT the same screen with LITERAL
-// spaces. Both encodings are real, in one session, seconds apart. So a
-// space-anchored pattern would not "never match" as the old comment said; it
-// would miss the first frame and match the repaint, which is worse than
-// either, because the failure would be a two-frame delay that nobody sees
-// until a version stops repainting.
-//
-// The three tests below replace the lost log as the thing the claim rests on:
-// they go red if the fixture is deleted (readFileSync throws) and they go red
-// if a future CLI changes the encoding, which is precisely the day production
-// would break while the rest of this suite stayed green.
-//
-// Deliberately NOT extended past the channels screen (the card's own scope
-// limit), and Windows-only: this repaint behaviour is ConPTY's.
+// Real captured Windows ConPTY stream: the first paint uses \x1b[1C throughout,
+// but roughly 130ms later the same screen repaints with literal spaces.
+// Both encodings occur within one session, so a space-anchored-only pattern
+// would miss the first frame and only match the repaint -- a two-frame delay
+// nobody notices until a version stops repainting.
 
 type FieldChunk = { t: number; data: string };
 const CHANNELS_FIELD_CAPTURE: FieldChunk[] = JSON.parse(
@@ -249,10 +211,9 @@ test("field capture: the FIRST paint encodes inter-word spaces as \\x1b[1C, so a
 });
 
 test("field capture: the LATER repaints of the same screen use literal spaces -- both encodings are real", () => {
-  // The fact the lost 2026-07-28 capture could not tell anyone, and the
-  // reason `\s*` (zero or more) is the right quantifier rather than a
-  // hardcoded `\x1b[1C`: the CLI repaints the very same dialog in plain
-  // spaces a fraction of a second later.
+  // The CLI repaints the same dialog in plain spaces a fraction of a second
+  // after the ANSI-coded first paint, which is why \s* (zero or more), not a
+  // hardcoded \x1b[1C, is the right quantifier.
   const later = CHANNELS_FIELD_CAPTURE.slice(FIRST_PAINT + 1)
     .map((c) => stripAnsi(c.data))
     .filter((s) => /WARNING: Loading development channels/.test(s));

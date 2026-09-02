@@ -9,93 +9,12 @@ import {
 } from "../desktop/hooks/roadmap-guard-hook.ts";
 import { extractBracedBody } from "./_braced-body";
 
-// Card 800b0fe3: guards the PreToolUse roadmap-markup-accident hook
-// (desktop/hooks/roadmap-guard-hook.ts, built to
-// desktop/deck-plugin/hooks/roadmap-guard-hook.mjs). Delivered and manually
-// verified by the release-engineer via ad-hoc stdin pipes and headless
-// runs -- nothing replays those. This file is that replay.
-//
-// RULE (2nd revision, 2026-08-24, post-review): a field carries ITS OWN
-// closing tag (`</field>`) IMMEDIATELY followed by another parameter's
-// opening tag (`<parameter name="X">`), no condition on X -- X can be any
-// name, including a non-text field (tags, priority, ...) or a name this
-// tool does not even have. An EARLIER revision instead required "opening
-// tag naming a DIFFERENT known field that is itself empty" -- that
-// conjunction was VACUOUS on `roadmap_update` (partial updates are the
-// contract: most fields legitimately absent), silently exempted any
-// accident naming a non-free-text field, and made the
-// `roadmap_append_context` matcher permanently dead (its one field can
-// never be its own "other" target). The close-then-open pair fixes all
-// three at once. This file's 5 real samples were chosen specifically
-// because each one is a measured instance of one of those defects, not an
-// invented edge case (see the release-engineer's dispatch and the .ts
-// source's own header for the measurement trail).
-//
-// WHICH ARTIFACT: the plugin executes the .mjs, not the .ts, so a source
-// edit with no rebuild would be invisible to any test that only imports the
-// .ts. This file tests BOTH, deliberately, for different reasons:
-//   - unit-level edge cases (no-preceding-close, no-known-field condition
-//     on the target) import the .ts directly -- fast, precise, and these
-//     are pure-function properties that do not depend on which artifact
-//     ships. Decision: follow tests/approval-hook.test.ts's own precedent
-//     (imports the sibling hook's .ts directly), per the team lead's
-//     explicit call on this exact question.
-//   - the FIVE real roadmap-sample payloads (the ones that actually decide
-//     whether this hook is correct) are piped into a REAL BUILT .mjs via a
-//     real spawned process -- that is what a live Claude Code session
-//     actually runs, so these are the only tests that can be wrong in the
-//     way that matters.
-//
-// THE BUNDLE IS NOT COMMITTED (card 7e5c0f08, 2026-08-25): it was tracked by
-// oversight (never added to desktop/.gitignore next to its two siblings
-// desk-backchannel-hook.mjs and approval-hook.mjs), and committing it forced
-// a byte-exact freshness test whose result depended on the bun VERSION and
-// the checkout's line-ending conversion, not just on the source -- it went
-// red on all 3 CI legs the same day it shipped, then red again on Windows
-// alone from a second, unrelated cause (CRLF). This file now BUILDS ITS OWN
-// throwaway copy in a `beforeAll` (see `builtMjsPath` below) instead of
-// reading a checked-in file, which removes the freshness test entirely (a
-// self-built copy cannot go stale) and also closes the build-cwd pin (card
-// 6781c2a8's M1): the build always runs from `DESKTOP_DIR`, never from
-// whatever directory `bun test` happened to be invoked from.
-//
-// FIXTURES: tests/fixtures/roadmap-guard/*.json are BYTE COPIES (md5-
-// verified against the release-engineer's own probe files under
-// ~/.agent-forge/scratch/pretooluse-probe/, never retyped) of FIVE real
-// samples:
-//   - b313f0c3 (accident, `rationale` swallowed the tag and the content
-//     meant for `context`)                                     -> DENY
-//   - 800b0fe3 (deliberate citation, incomplete tag fragment, no preceding
-//     close, every field filled)                                -> PASS
-//   - s1 (a PARTIAL `roadmap_update`, {id, description}, description cites
-//     the tag syntax -- the exact false positive the FIRST revision's
-//     conjunction produced, because "absent field" is the norm on a
-//     partial update, not a signal)                             -> PASS
-//   - s2 (accident whose opening tag names a NON-TEXT field, `tags` -- the
-//     first revision's known-field check silently exempted this)  -> DENY
-//   - s3 (accident on `roadmap_append_context`, whose SOLE field is `text`
-//     -- the first revision's rule made this matcher permanently DEAD,
-//     since a field can never accidentally swallow itself)         -> DENY
-// The negative controls (800b0fe3, s1) are weighted exactly as heavily as
-// the positive ones -- a hook that denies a valid call is worse than no
-// hook, per the card's own framing.
-//
-// COVERAGE CROSS-CHECK, avoiding a sibling enumeration: hooks.json declares
-// 3 PreToolUse matchers by hand, and the .ts source declares its own
-// TOOL_TEXT_FIELDS key set by hand -- two independent hand-lists that could
-// silently drift. Rather than adding a THIRD hand-list here, this file
-// extracts BOTH sets structurally from the real files and compares them to
-// each other, so a tool added to one but not the other is caught without
-// this test ever knowing a tool's name in advance.
-//
-// Named tests/roadmap-guard-hook.test.ts, not approval-hook-prefixed and
-// not broker-/server- prefixed: verified against
-// scripts/pure-module-partition.ts's EXEMPTIONS table before naming (same
-// check as tests/role-domain-sweep.test.ts's header) -- this file spawns no
-// daemon and binds no port (short-lived `bun <file>.mjs` subprocesses that
-// read stdin and exit, not a broker), so it belongs in the default
-// "collected, clean" bucket, not an exemption bucket that (card f4a3ed1e:
-// 52 test files run in NO CI job) is easy to fall into by name alone.
+// Matches a field's own closing tag immediately followed by another parameter's
+// opening tag, with no condition on that other field's name or type.
+// A condition requiring the other field to be a known, empty text field was
+// tried and rejected: it exempted accidents naming a non-text field and made
+// the roadmap_append_context matcher permanently unable to fire, since its one
+// field can never swallow itself.
 
 const DESKTOP_DIR = resolve(import.meta.dir, "..", "desktop");
 const HOOK_TS = join(DESKTOP_DIR, "hooks", "roadmap-guard-hook.ts");
@@ -113,13 +32,10 @@ afterAll(() => {
   }
 });
 
-// Card 7e5c0f08: the .mjs this file exercises is no longer committed, and CI
-// runs this test BEFORE `npm run build:hook` (`.github/workflows/desktop-
-// build.yml` installs+tests desktop/ before its own build step), so the
-// checked-out tree has no bundle to read at test time. Build a throwaway
-// copy once, into a scratch dir cleaned up by the `afterAll` above, using
-// the exact command desktop/package.json's build:hook script uses for this
-// file -- same source, same target, same cwd (DESKTOP_DIR) as a real build.
+// Builds a throwaway copy of the compiled hook in beforeAll rather than reading
+// a checked-in file: the bundle isn't committed, and comparing against one
+// would tie the test's freshness to the build environment rather than the
+// source.
 let builtMjsPath: string;
 beforeAll(async () => {
   const scratchDir = mkdtempSync(join(tmpdir(), "cp-roadmap-guard-selfbuild-"));
@@ -217,14 +133,9 @@ test(
   15_000
 );
 
-// --- Card 0e28cb4e: the SECOND real closing-tag spelling (generic
-// `</parameter>`, not field-named). Measured 2026-08-25: this form is what
-// Claude Code's own tool-call serialization always emits, and the
-// b313f0c3/800b0fe3 rule above only ever matched the semantic `</field>`
-// spelling, so this payload passed straight through (empty stdout, exit 0,
-// no deny) before the fix that added the `</parameter>` alternative to
-// `detectSerializationAccident`'s regex. Mutation-tested below: removing
-// that alternative reproduces the exact red this test showed pre-fix.
+// Matches the generic `</parameter>` closing spelling in addition to the
+// field-named one, since that is what real tool-call serialization always emits
+// and a rule matching only the semantic spelling lets it through undetected.
 
 test(
   "card 0e28cb4e: accident with the GENERIC closing spelling (`</parameter>` instead of `</description>`) -> DENY",

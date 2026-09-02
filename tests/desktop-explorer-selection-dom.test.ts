@@ -1,42 +1,20 @@
-// Card 526665f7. GUARD, not an illustration: the Files viewer computes the
-// selected line span from `Range.toString()`, which concatenates TEXT NODES
-// and synthesises nothing for a block boundary. Syntax highlighting replaced
-// one flat text node with a span-per-token tree, so the line breaks now exist
-// only because `HighlightedLines` emits them as real "\n" text nodes between
-// the lines.
-//
-// Render one `<div>` per line instead -- the obvious refactor, and the shape
-// every other line-oriented component in the app uses -- and typecheck, build
-// and every other test stay GREEN while "lignes 3-4" silently becomes
-// "lignes 3-3". A comment cannot stop that; this replays the gesture on a real
-// DOM and goes red.
-//
-// Scope note: this exercises `HighlightedLines` (the component ExplorerView
-// renders inside its <pre>) plus the real `selectionLineRange`, NOT the whole
-// ExplorerView, which would drag in the store, i18n and window.api for no
-// added bite. Rewiring the <pre> to something else entirely is a different
-// change, and out of this guard's reach by construction.
+// The Files viewer computes selected line span from Range.toString(), which
+// concatenates text nodes and synthesizes nothing at a block boundary; syntax
+// highlighting replaced one flat text node with a span-per-token tree, so line
+// breaks now exist only because HighlightedLines emits real newline text nodes
+// between lines.
+// Exercises HighlightedLines and the real selectionLineRange directly rather
+// than the whole ExplorerView, to avoid dragging in the store, i18n and
+// window.api for no added coverage.
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 GlobalRegistrator.register();
 
-// Bun runs every test file in ONE process, so the globals happy-dom installs
-// above outlive this file. `fetch` is the one that bites: happy-dom's fetch
-// applies the same-origin policy, which Bun's native fetch does not, so every
-// later suite that talks to a server it spawned on 127.0.0.1 is refused with
-// "Cross-Origin Request Blocked" and then times out. Measured on the tree that
-// shipped without this teardown: THIS FILE plus tests/server-ask-operator.test.ts
-// alone produced 7109 CORS lines, 5 fail and 4 errors in 300 s, and the whole
-// suite went from 1 fail / 166 s to 19 fail / 11 errors / 961 s -- none of the
-// extra red being in a file this batch touched, which is what made it read as
-// environmental for three runs. tests/desktop-happy-dom-teardown.test.ts is the
-// guard that keeps every future registrant paired with a teardown.
-//
-// `unregister()` is the registrator's own API for this and returns a promise,
-// so it must be awaited: a bare call would let the restore race the next file.
-// The alternative shape, restoring a pre-register descriptor snapshot by hand,
-// lives in tests/desktop-tile-area.test.ts, which needs Bun-native globals back
-// DURING its own test rather than after it.
+// happy-dom's fetch enforces same-origin policy, unlike Bun's native fetch, so
+// every later suite in this shared bun test process that talks to a server on
+// 127.0.0.1 fails with CORS if this teardown is skipped.
+// unregister() must be awaited, not fire-and-forget, or the restore races the
+// next test file.
 afterAll(async () => {
   await GlobalRegistrator.unregister();
 });

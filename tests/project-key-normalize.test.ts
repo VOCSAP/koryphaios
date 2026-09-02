@@ -1,19 +1,7 @@
-// Card 69e5a3e0: normalizeRemoteUrl used to lowercase the host but leave the
-// owner/repo path in its original casing. GitHub (and most hosts) accept
-// cloning a repo under several casings of its path, so two clones of the
-// same logical repo computed two distinct project_key values with no error
-// signal -- silently splitting a shared roadmap/graph/approval scope in two.
-// This file pins the fix (whole key lowercased, host AND path) directly
-// against this repo's real remote casing, so a regression that re-introduces
-// a case-sensitive branch shows up here rather than only downstream.
-//
-// This repo's actual checkout remote is "VOCSAP" (capital), confirmed via
-// `bun cli.ts status` against the shared broker (2026-08-20): the real
-// project_key is "github.com/VOCSAP/koryphaios" pre-fix,
-// "github.com/vocsap/koryphaios" post-fix. Any lowercase literal elsewhere
-// in the test suite predating this card (e.g. tests/broker-approvals.test.ts's
-// DEFAULT_PROJECT_KEY) is a synthetic fixture that was never derived from
-// normalizeRemoteUrl and stays unaffected by this change either way.
+// normalizeRemoteUrl lowercases the whole key, host and path, since two casings
+// of the same GitHub path would otherwise compute two distinct project_key
+// values with no error signal, silently splitting a shared
+// roadmap/graph/approval scope.
 
 import { test, expect } from "bun:test";
 import { normalizeRemoteUrl, validateProjectKey, resolveProjectKey } from "../shared/project-key.ts";
@@ -76,14 +64,9 @@ test("host-only remote (no path segment) still lowercases", () => {
 });
 
 test("non-ASCII owner/repo path lowercases via Unicode-aware JS toLowerCase(), never SQLite's ASCII-only LOWER()", () => {
-  // Mutation-review finding on scripts/migrate-project-key-case.ts
-  // (2026-08-20): SQLite's LOWER() is ASCII-only and would leave accented
-  // letters untouched ("ÉTÉ" -> "ÉtÉ"), producing a THIRD key this function
-  // itself would never produce. normalizeRemoteUrl uses plain JS
-  // .toLowerCase() throughout (shared/project-key.ts), which is
-  // Unicode-aware -- pin that here so the two stay provably in agreement,
-  // since the migration script's tests assert equality against THIS
-  // function's output, not a re-derivation.
+  // normalizeRemoteUrl uses JS's Unicode-aware toLowerCase() throughout, never
+  // SQLite's ASCII-only LOWER(), which would leave accented letters untouched
+  // and produce a third, mismatched key.
   expect(normalizeRemoteUrl("https://github.com/VOCSAP/ÉTÉ.git")).toBe("github.com/vocsap/été");
   expect(normalizeRemoteUrl("https://github.com/VOCSAP/ÉTÉ.git")).not.toBe("github.com/vocsap/ÉtÉ");
 });

@@ -38,7 +38,8 @@ test("cleanStalePeers skips PID liveness check for cross-host peers", async () =
   for (let i = 0; i < 20; i++) {
     await Bun.sleep(250);
     const all = await get<any[]>(`${broker.url}/admin/peers?include_dormant=1`);
-    // B1: admin/peers no longer exposes instance_token — match by peer_id.
+    // admin/peers does not expose instance_token; match rows by peer_id
+    // instead.
     const s = all.body.find((p) => p.peer_id === same.body.peer_id);
     const o = all.body.find((p) => p.peer_id === other.body.peer_id);
     sameStatus = s?.status ?? "missing";

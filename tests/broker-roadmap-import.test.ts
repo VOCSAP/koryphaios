@@ -501,26 +501,9 @@ test("a duplicate id in one import: the later entry wins, unless an earlier entr
   expect(after.locked).toBe(true);
 });
 
-// ----- card aad5e954: the column list must stay COUPLED to the schema -----
-//
-// Card 40ddf1f5 fixed the OCCURRENCE (three lock columns were missing from the
-// INSERT, so every import reset them). This pins the FORM: `INSERT OR REPLACE`
-// deletes the row before reinserting it, so a column the statement does not
-// carry goes back to its table DEFAULT, silently, on every import. Two columns
-// are already planned for this table, so the next occurrence is scheduled.
-//
-// The two sides come from DIFFERENT sources on purpose: the schema side is read
-// with PRAGMA off a database the broker itself created (CREATE TABLE plus the
-// ALTER TABLE migrations), the list side is the exported constant the statement
-// is generated from. Comparing two lists derived from the same source is the
-// easy false green here, and it would pass forever.
-//
-// The database is the TEST broker's own (broker.dbPath, spawned in beforeAll).
-// The throwaway probe that found this defect opened the operator's real
-// ~/.claude-peers.db; that is fine for a one-shot, and unacceptable for a
-// committed test, which would then depend on one machine's file, its path and
-// its schema at one instant: red on a fresh checkout, red in CI, green only for
-// its author.
+// INSERT OR REPLACE deletes the row before reinserting it, so any column
+// missing from this statement silently reverts to its table default on every
+// import.
 
 test("card aad5e954: the import writes every column the live roadmap_items schema has", () => {
   const db = new Database(broker.dbPath, { readonly: true });
@@ -547,15 +530,9 @@ test("card aad5e954: the import writes every column the live roadmap_items schem
 });
 
 test("card aad5e954: the comparison NAMES an uncovered column (negative control)", () => {
-  // The integration halves above agree by construction whenever both sides are
-  // right, so they can never demonstrate that the comparison would speak up.
-  // Hand it the exact future it exists for: a column added to the table and
-  // forgotten in the list. The synthetic column name must be one that can
-  // NEVER become a real column -- team-lead review, 2026-08-12, blocker 1:
-  // this used to be the literal `"inactive"`, which WAS a fictional future
-  // column when written but became real the same day (card c33a5968), so
-  // `grown` contained it twice and `missing` silently went empty. `bun test
-  // tests/broker-roadmap-import.test.ts` caught it: 17 pass, 1 fail.
+  // The synthetic column name must be one that can never become a real column:
+  // a name that later became a real column left the comparison finding nothing
+  // missing, with no error.
   const grown = [...ROADMAP_IMPORT_COLUMNS, "__never_a_real_column__"];
   const uncovered = findUncoveredRoadmapColumns(grown, ROADMAP_IMPORT_COLUMNS);
   expect(uncovered.missing).toEqual(["__never_a_real_column__"]);

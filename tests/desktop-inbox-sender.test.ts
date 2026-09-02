@@ -1,22 +1,8 @@
-// Card 55c5470e: the Courrier operateur showed a bare "?" sender for every
-// blocking question raised by the Notification hook, because origin.from_peer
-// was never populated at credential-mint time (approval-runtime.ts arm()).
-// Fix: resolve the sender from origin.tile_ref against the Deck's own live
-// tile registry instead. This file proves TWO separate things (team-lead
-// ruling 2026-08-17, "a correctly implemented guarantee wired to nothing" is
-// this repo's costliest defect class):
-//
-//   1. inbox-sender.ts's resolveApprovalSender() does what it says: a
-//      tile_ref matching a live session resolves to that session's name; a
-//      hostile/oversized/absent tile_ref never does, and is capped +
-//      stripped in the unresolved shape (tests below).
-//   2. InboxPanel.tsx actually ROUTES THROUGH IT -- no inline fallback path
-//      was left behind that could bypass the guarantee (the exhaustive scan
-//      below, not a partial read).
-//
-// This module has ZERO react/react-dom/zustand imports on purpose (TESTING.md
-// "0b"): it is plain data in, plain data out, so it needs neither the DOM
-// harness nor a store mock to be tested directly from tests/.
+// resolveApprovalSender resolves a tile_ref against live sessions; a
+// hostile/oversized/absent tile_ref never resolves and is capped and stripped
+// in the unresolved shape.
+// This module has no react/react-dom/zustand imports, so it is tested directly
+// without a DOM harness or a store mock.
 import { test, expect, describe } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -87,15 +73,9 @@ describe("resolveApprovalSender() -- proof 1, the module itself", () => {
     expect(sanitizeUnresolvedTileRef(withControls)).toBe("abcdef");
   });
 
-  // Security case, team-lead ruling 2026-08-18: origin.tile_ref is producer-
-  // controlled (a spawned agent's own environment), so a value that merely
-  // STARTS WITH a real tile id must not be treated as a match either -- an
-  // agent that can only guess a prefix of a live tile id (partial leak,
-  // truncated log, brute force) must not be able to impersonate it. The
-  // equality check in resolveApprovalSender() (`s.id === ref`) already
-  // rejects this; retrofitted as a RED PROOF against a relaxed `startsWith`
-  // comparison to prove the assertion actually bites (see the developer's
-  // report for the exact stash/red/restore/green commands).
+  // origin.tile_ref is producer-controlled; a value that merely starts with a
+  // real tile id must not resolve, so an agent that can only guess a prefix of
+  // a live tile id cannot impersonate it.
   test("a tile_ref that is a PREFIX of a real tile id does not resolve", () => {
     const res = resolveApprovalSender("tile-ab", sessions);
     expect(res.resolved).toBe(false);

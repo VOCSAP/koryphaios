@@ -1,14 +1,6 @@
-// Card fd1914cc correction: SessionService.quotaGateActive must gate ONLY
-// the DEFAULT auto-resume path (def.autoResume === undefined) for a claude
-// session, never an EXPLICIT per-session override (true or false) -- an
-// operator who forces autoResume=true needs quotaDetector.feed to keep
-// running for that tile, or the injection they just authorized would have
-// no trigger. session-service.ts imports node-pty (native addon), so this
-// extracts the real method body from the source text and executes it
-// against a stubbed `this` (isClaudeSession stubbed directly: that
-// collaborator's own logic is covered by tests/desktop-session-kind.test.ts),
-// real behavioural proof of the true/false/undefined asymmetry rather than a
-// second restatement of the same condition.
+// quotaGateActive gates only the default auto-resume path (autoResume ===
+// undefined); an explicit true/false override always keeps quotaDetector.feed
+// running for that tile.
 
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -27,20 +19,11 @@ const SESSION_SERVICE_PATH = join(
 );
 
 
-// The extractors below use the FIRST regex match unconditionally
-// (RegExp.prototype.exec on a non-global pattern). That is safe against a
-// rename (throws, see below) or a name-containing decoy (the signature's
-// literal continuation breaks contiguity) -- proven by mutation, koryphaios
-// card fd1914cc audit. It is NOT safe against an exact-name duplicate
-// declared earlier in the file: `.exec()` would silently grab that decoy's
-// body instead of the real one, and -- because the fabricated `self` in
-// this file drives assertions with genuinely different expected booleans
-// per test -- that failure mode does not even show up as a clean "all
-// red": some assertions coincidentally still match the decoy's output,
-// producing a misleading PARTIAL pass that reads like "fix these two
-// assertions" rather than "the extraction is compromised". This guard
-// closes that gap by asserting the target signature appears EXACTLY once
-// before any extraction is attempted.
+// Extractors use the first regex match unconditionally, which is safe against a
+// rename or a name-containing decoy but not against an exact-name duplicate
+// declared earlier in the file.
+// assertSingleDeclaration closes that gap by requiring the target signature
+// appear exactly once before any extraction is attempted.
 function assertSingleDeclaration(src: string, pattern: RegExp, label: string): void {
   const globalPattern = new RegExp(
     pattern.source,
@@ -176,17 +159,6 @@ test("REGRESSION (card fd1914cc correction): a session spawned on the default cl
   expect(svc.quotaGateActive("a")).toBe(true);
 });
 
-// =============================================================================
-// Team-lead mutation review (2026-08-19): six findings below. Three MAJOR
-// (a load-bearing line with no test, a frozen-at-spawn assignment with no
-// test, and a Sidebar escape hatch with no test), three MINOR (branch
-// defaults on isClaudeSession/resolveClaudeLaunch/toRuntime). Reviewer's
-// own measurement: mutating each of the six previously left 187 pass, 0
-// fail. See tests/desktop-sidebar-autoresume-dom.test.ts for the Sidebar
-// (third MAJOR) proof -- that one needs a real DOM, out of this file's
-// reach.
-// =============================================================================
-
 function extractPtyDataHandlerBody(src: string): string {
   const pattern = /this\.pty\.on\('data', \(e: \{ id: string; data: string \}\) => \{/;
   assertSingleDeclaration(src, pattern, "pty.on('data', ...) handler");
@@ -216,16 +188,9 @@ function makeDataHandler(gateActive: boolean) {
     attentionDetector: { feed: () => {} },
     startupAckDetector: { feed: () => {} },
     screenGuard: { feed: () => {} },
-    // Card 1aa69066/H2: the real handler now also routes through
-    // this.oscParserFor(e.id).feed(e.data) -- stubbed directly, same
-    // reasoning as quotaGateActive above (this test targets only the gate
-    // condition, not the OSC parser's own behaviour, covered by
-    // tests/desktop-osc.test.ts). Returns a real-shaped snapshot (not `{}`)
-    // because the handler now reads `.titleSeq` off it unconditionally.
+    // oscParserFor is stubbed directly; returns a real-shaped snapshot, not {},
+    // because the handler reads .titleSeq off it unconditionally.
     oscParserFor: () => ({ feed: () => ({ title: null, progress: null, notify: null, titleSeq: 0 }) }),
-    // Card f8082208: the handler also routes titleSeq into
-    // this.activityTrackerFor(e.id).observe(...) -- stubbed directly, same
-    // reasoning (covered for real by tests/desktop-activity.test.ts).
     activityTrackerFor: () => ({ observe: () => {} })
   };
   return {

@@ -256,14 +256,10 @@ test("nextDispatchedState: claims when the lead locks it in_progress", () => {
   expect(nextDispatchedState({ claimed: false }, it)).toEqual({ kind: "claim" });
 });
 
-// Reviewer finding on commit 60213f0 (card 6f19206e review): claim must NOT
-// require `locked`. broker.ts only grants the work-lock to a non-'deck'
-// author writing status=in_progress -- the Deck's own in_progress writes
-// (e.g. an operator kanban drag, author='deck') leave locked=false. Gating
-// claim on `locked` stranded exactly that item: claimed never flips true,
-// so a later revert to planned reads as never-claimed-kept instead of
-// abandoned-removed, reproducing the barrier-stuck-forever bug this
-// function exists to fix.
+// Claim must not require `locked`: broker.ts only grants the work-lock to a
+// non-'deck' author, so a Deck-authored in_progress write (author='deck')
+// leaves locked=false and would otherwise never claim, reproducing the
+// barrier-stuck-forever bug.
 test("nextDispatchedState: claims on status alone -- a Deck-authored in_progress write (unlocked) still claims", () => {
   const it = item({ status: "in_progress", locked: false });
   expect(nextDispatchedState({ claimed: false }, it)).toEqual({ kind: "claim" });
@@ -898,20 +894,12 @@ test("runDispatchRequestPoll: a throwing resolve is reported and does not silenc
   ]);
 });
 
-// SOURCE SCAN (weak, and labelled as such): the probes above prove the poll
-// DECISION, nothing proves it is ever CALLED -- index.ts imports electron and
-// cannot be imported under bun. A declared-but-unwired poller is the exact
-// defect CLAUDE.md names.
-//
-// A FIRST version of this scan counted occurrences over the whole file and was
-// measured fail-open FOUR ways by the reviewer, each mutation leaving it green:
-// a wrong project key handed to fetchDispatchRequests (the poller would query
-// another project), `dispatch: () => dispatchNext()` replaced by a stub (it
-// would answer the agent without dispatching), BOTH call sites made dead code
-// (`if (NEVER) void pollDispatchRequests()` -- the count stays 3, the substring
-// stays present, the poller is never called again), and the result produced
-// then discarded. What follows closes those four. It still cannot prove the
-// values are right at runtime; the injected probes above are what does that.
+// Weak: proves the poll decision, not that it is ever called -- index.ts
+// imports electron and cannot be imported under bun.
+// A first version counted occurrences over the whole file and stayed green
+// under four mutations: a wrong project key, a stubbed dispatch call, both call
+// sites made dead code, and a discarded result. The refined scan closes those
+// four but still cannot prove the values are right at runtime.
 
 /** index.ts with its comments removed -- see stripComments' own note. */
 function indexSource(): string {

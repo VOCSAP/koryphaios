@@ -1,26 +1,7 @@
-// Card 3776ae19, review round point 6 (twin of tests/desktop-xterm-manifest-
-// parity.test.ts, card f4a3ed1e -- see that file's header for the mechanism
-// this mirrors, kept as a SEPARATE file rather than folded in: that file's
-// own header states it is "deliberately scoped to exactly the three
-// packages TerminalTile.tsx imports", so adding an unrelated package there
-// would contradict its own documented narrowness).
-//
-// 'selfsigned' is now declared in TWO manifests: desktop/package.json's
-// `dependencies` (companion-server.ts's own generateCert call) and the root
-// package.json's `devDependencies` (tests/desktop-companion-cert-e2e.test.ts,
-// which cannot resolve desktop/node_modules -- see that file's header). Both
-// declare `^5.5.0` today, and `bun.lock` / `desktop/package-lock.json`
-// resolve to the identical concrete version -- but the RANGE comparison
-// below (first four tests) does NOT by itself prove that: two identical
-// caret ranges can still resolve to two DIFFERENT concrete versions once
-// their two INDEPENDENT lockfiles are regenerated at different times (e.g. a
-// plain `npm install` inside desktop/ bumping past a patch/minor boundary
-// while `bun.lock` at the root stays put) -- exactly the scenario this
-// file's whole point is to catch, since it is what would let the e2e test
-// validate a DIFFERENT selfsigned than the one companion-server.ts actually
-// ships, with the range comparison alone staying green throughout. The
-// RESOLVED-version tests near the bottom close that gap by reading the two
-// lockfiles directly instead of trusting the declared ranges.
+// A declared-range comparison alone isn't sufficient: two identical caret
+// ranges can resolve to different concrete versions once their independent
+// lockfiles regenerate at different times.
+// The resolved-version tests read both lockfiles directly to close that gap.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

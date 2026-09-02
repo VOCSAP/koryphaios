@@ -148,20 +148,10 @@ test("/peek-messages also returns the full backlog without marking delivered", a
   }
 });
 
-// ----- Card 1d9f25e5: selectUndeliveredCapped / flushPendingForToken cross-group isolation -----
-//
-// x lives in group A, y and z live in group B. A cross-group message x->y is
-// built by direct DB insert, not /send-message: the real send route resolves
-// an ordinary to_peer_id scoped to the SENDER's own group_id ("Peer '...' not
-// found in your group" otherwise), so it can never itself produce a
-// cross-group-addressed row for an ordinary token. The row this cell
-// simulates is the SHAPE of the one real shared-to_token surface in the
-// schema: 'operator' routes every group's /send-message to the single
-// OPERATOR_INSTANCE_TOKEN sentinel, tagged with the sender's own group_id, so
-// that one to_token legitimately accumulates rows from every group -- the
-// case selectUndeliveredCapped's group_id filter exists to keep separated
-// once/if a WS ever authenticates as it. z->y is the same-group positive
-// control, proving flush isn't just broken outright.
+// The 'operator' token routes every group's /send-message to one shared
+// sentinel tagged with the sender's group_id, so it legitimately accumulates
+// rows across groups; selectUndeliveredCapped's group_id filter exists to keep
+// those separated.
 test("flush WS withholds a cross-group message and still delivers a same-group one (selectUndeliveredCapped group_id filter)", async () => {
   const seed = crypto.randomUUID();
   const groupA = await groupId(`${seed}-A`);

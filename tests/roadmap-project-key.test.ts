@@ -1,18 +1,6 @@
-// Card 6aa32af4: pins the operator's invariant -- "project_key a toujours
-// une valeur determinee et reproductible pour un meme cwd" -- against the
-// single shared derivation both peer registration (/register) and roadmap
-// card scoping (server.ts's roadmapProjectKey()) now route through. Before
-// this, the two sites diverged: a peer with no git remote registered
-// project_key=null while its own roadmap cards were scoped to a non-null
-// local:<hash> fallback, and releaseStaleLocks' NULL-safe `IS` comparison
-// (card fc444eda) then read "different key" as "not this peer's card",
-// sweeping a live peer's own lock as owner-gone.
-//
-// Pure module, no broker/server process involved -- resolveProjectKey has
-// no I/O, so this is a straight unit test, not an HTTP round-trip like
-// tests/roadmap-broker-lock.test.ts (which still covers the raw-client
-// squat scenario: a client posting project_key:null directly over HTTP,
-// bypassing this derivation entirely).
+// Pins that resolveProjectKey returns one deterministic, reproducible value for
+// a given cwd, since /register and the roadmap's own card scoping both depend
+// on agreeing on it independently.
 
 import { test, expect } from "bun:test";
 import { resolveProjectKey } from "../shared/project-key.ts";

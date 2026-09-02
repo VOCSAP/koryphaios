@@ -38,7 +38,6 @@ function env(global: string): NodeJS.ProcessEnv {
 
 test("globalTemplatesDir / localTemplatesDir resolve under the app dirs", () => {
   const g = tmp();
-  // v0.7.0 rename: the global config dir moved from claude-peers-desk to koryphaios.
   expect(globalTemplatesDir(env(g)).replace(/\\/g, "/")).toContain("koryphaios/templates");
   const proj = tmp();
   expect(localTemplatesDir(proj).replace(/\\/g, "/")).toContain(".claude/claude-peers/templates");

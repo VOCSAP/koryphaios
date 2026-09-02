@@ -330,10 +330,9 @@ test("win32 prompt quoting doubles embedded single quotes (PowerShell)", () => {
   expect(quotePromptArg("l'item '12'", "win32")).toBe("'l''item ''12'''");
 });
 
-// ----- post-spawn prompt keystroke injection (150eb188): the initial prompt
-// no longer rides argv (SessionCommandInput has no `prompt` field anymore --
-// session-service injects it as PTY keystrokes once the tile's startup-ack
-// fires) -- encodeInitialPromptKeystrokes is the pure encoder for that path.
+// The initial prompt is injected as PTY keystrokes once the tile's startup-ack
+// fires, not passed via argv; encodeInitialPromptKeystrokes is the pure encoder
+// for that path.
 
 test("wraps the prompt in bracketed-paste marks with a trailing submit \\r, embedded newlines and quotes literal", () => {
   const prompt = 'Read "PLAN-v0.4.md" and start C2\nUse l\'item #12 for context.';

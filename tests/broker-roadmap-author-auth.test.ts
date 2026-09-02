@@ -1,22 +1,8 @@
-// Roadmap card 39c40571, LAYER 1: the author of a roadmap write must be PROVEN,
-// not declared.
-//
-// Measured before the fix: `by` is a free string read straight from the request
-// body (broker.ts:1523 upsert, :1763 archive, :1802 reorder) and is never
-// recouped against any token -- the request types carried none. Every agent
-// holds the broker bearer token (shared/config.ts loadConfig), so any of them
-// could write under another peer's identity, or pass by:'deck' / force:true to
-// walk through the work-lock guard (broker.ts:1578-1579).
-//
-// SCOPE OF THIS LAYER, deliberately narrow. It closes the PEER-TO-PEER axis:
-// claiming an author that matches an existing, non-sentinel peer row now
-// requires that peer's instance_token. It does NOT close the deck axis --
-// a bare by:'deck' stays accepted, because the Deck has no peer row and no
-// instance_token, and giving it one means wiring the operator proof (layer 2,
-// frozen pending an operator decision). What layer 1 does guarantee about that
-// axis is that the escalation never becomes REACHABLE THROUGH A TOKEN: the
-// sentinel values are PUBLIC exported constants (shared/types.ts:176,183), so
-// presenting one must be refused outright.
+// Layer 1 closes only the peer-to-peer axis: claiming an author matching an
+// existing, non-sentinel peer row requires that peer's instance_token.
+// The deck axis (by: 'deck') stays accepted here since the Deck holds no peer
+// row or token, but a sentinel value presented as a claim is refused outright
+// since sentinels are public exported constants.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
@@ -218,67 +204,9 @@ test("an author matching no peer row stays accepted (cli.ts and fixtures)", asyn
   expect(res.body.item.created_by).toBe("some-unregistered-author");
 });
 
-// ---------------------------------------------------------------------------
-// LAYER 2: the deck axis, the one author layer 1 still took on faith.
-//
-// 'deck' names the OPERATOR. Layer 1 let a bare claim through because the
-// sentinel matches no peer row, so any holder of the shared bearer token could
-// write as the human and, via `proven`, walk the work-lock guard with force.
-// The claim must now carry an Ed25519 operator proof.
-//
-// DOMAIN. The routes below were not copied from the card: they are every call
-// site of resolveRoadmapAuthor, enumerated with
-//   grep -n "resolveRoadmapAuthor(" broker.ts
-// which returns the definition plus SEVEN callers (upsert, archive, reorder,
-// import, lock-park, lock-release, append-context). The card named upsert
-// alone; a guard wired to the cited example rather than to the discovered
-// domain is how three of the seven stayed open until this diff (team-lead
-// audit, 2026-08-26: this list originally enumerated 4 of 7, while its own
-// test name claimed "every route" -- lock-park, lock-release and
-// append-context all propagate resolveRoadmapAuthor's error the same way as
-// the original four (`if ("error" in author) return author;`) and are all
-// wired live in broker.ts's HTTP dispatch table, so none is a legitimate
-// exemption).
-//
-// The list is no longer trusted on its own: "DECK_WRITE_ROUTES matches every
-// route broker.ts actually resolves an author for" below DERIVES the real
-// domain from broker.ts source and fails if this list ever again falls
-// behind it, instead of silently under-covering like this one did.
-//
-// REUSE DECISION (team-lead review, 2026-08-26, measured before hardening):
-// tests/broker-roadmap-route-coverage.test.ts's discoverRoadmapRoutes parses
-// the SAME broker.ts and already extracts route strings quote-agnostically.
-// Its domain is not ours, though: it finds every "/roadmap/..." literal
-// mentioned anywhere (9 today, including the two read-only routes), not
-// specifically the routes that resolve an author -- that classification
-// lives in that file's own hand-maintained GUARDED_PROBES/
-// OPERATOR_GUARDED_PROBES dicts. Importing those to feed DECK_WRITE_ROUTES
-// would swap this file's structural guarantee ("resolveRoadmapAuthor really
-// is called here") for a differently-sourced one ("a human classified this
-// route as needing proof, verified by its runtime status code") and couple
-// this file to edits made in that one for unrelated reasons (e.g. adding a
-// new read-only route). Decision: keep a separate, local detector.
-//
-// DETECTOR SHAPE, widened (team-lead review, 2026-08-26). Mutation-measured
-// (disposable script, never this repo) that the previous regex
-// (`resolveRoadmapAuthor\(\s*body\s*,\s*"([^"]+)"\s*\)`) stayed SILENT --
-// the parity test below stayed green -- on a genuine new call site written
-// with a different first-argument identifier than the literal `body` (e.g.
-// an intermediate variable), or with a single-quoted route string, because
-// BOTH sides of the equality stayed unchanged together. discoverRoadmapAuthorRoutes
-// below now accepts any first-argument expression up to the comma and either
-// quote style, closing both. What it STILL cannot see, by construction: a
-// local alias/rebinding of the resolveRoadmapAuthor function reference
-// itself (`const resolveAuthor = resolveRoadmapAuthor;` then calling
-// `resolveAuthor(...)`) -- a regex over call sites cannot resolve a binding.
-// hasAliasOfResolveRoadmapAuthor below closes that one differently: it
-// asserts no such alias exists in broker.ts at all, rather than trying to
-// see through one. Residual, stated rather than hidden: a route string built
-// from a runtime constant or template literal (never appearing as a literal
-// double/single-quoted string in source) escapes both detectors -- no static
-// regex over source text can resolve that, the same structural limit
-// discoverRoadmapRoutes in the sibling file accepts for its own domain.
-// ---------------------------------------------------------------------------
+// DECK_WRITE_ROUTES is checked against the actual set of resolveRoadmapAuthor
+// call sites parsed from broker.ts, rather than trusted as the domain, so a new
+// caller cannot silently go unguarded.
 
 const DECK_WRITE_ROUTES = [
   { route: "/roadmap/upsert", body: (id: string) => ({ project_key: PK, id, description: "operator edit" }) },
@@ -291,33 +219,20 @@ const DECK_WRITE_ROUTES = [
       items: [{ id, kind: "feature", title: "imported by the deck" }],
     }),
   },
-  // Card 1def56da/team-lead audit 2026-08-26: same operator-signature gate as
-  // the four above, via resolveRoadmapAuthor -- these three were the ones the
-  // original list left uncovered. `id` here is repurposed as a peer_id: lock-
-  // park/lock-release only need a non-empty peer_ids array to reach the
-  // author check (any string works, since the 401 fires before the array's
-  // contents are ever consulted).
+  // id is repurposed as peer_id for lock-park/lock-release: any non-empty
+  // string works, since the author check's 401 fires before the array's
+  // contents are read.
   { route: "/roadmap/lock-park", body: (id: string) => ({ project_key: PK, peer_ids: [id] }) },
   { route: "/roadmap/lock-release", body: (id: string) => ({ project_key: PK, peer_ids: [id] }) },
   { route: "/roadmap/append-context", body: (id: string) => ({ id, text: "appended by the deck" }) },
 ] as const;
 
 /**
- * Team-lead audit 2026-08-26: parses broker.ts to derive the REAL set of
- * routes that resolve an author, so DECK_WRITE_ROUTES above is checked
- * against the domain instead of being trusted as the domain. Matches the
- * call shape `resolveRoadmapAuthor(<any first arg>, '...'|"...")`, which
- * excludes the function's own definition line (`function resolveRoadmapAuthor(`)
- * by construction -- that line has no comma-separated second argument at
- * all, let alone a quoted one. Widened (team-lead review, 2026-08-26,
- * mutation-measured against the previous `\s*body\s*` + double-quote-only
- * form -- see the header comment above DECK_WRITE_ROUTES) to accept ANY
- * first-argument expression up to the comma (not just the literal
- * identifier `body`) and EITHER quote style, so a genuine new call site
- * written through an intermediate variable or with single quotes is still
- * discovered instead of silently agreeing with a stale DECK_WRITE_ROUTES.
- * What this still cannot see: a local alias of the function reference
- * itself -- hasAliasOfResolveRoadmapAuthor below closes that separately.
+ * Matches resolveRoadmapAuthor(<any first arg>, '...'|"...") calls, so a call
+ * site reached through an intermediate variable or either quote style is still
+ * discovered.
+ * Cannot see a call reached through a local alias of the function reference
+ * itself; hasAliasOfResolveRoadmapAuthor covers that separately.
  */
 function discoverRoadmapAuthorRoutes(source: string): string[] {
   const matches = [...source.matchAll(/resolveRoadmapAuthor\(\s*[^,]+\s*,\s*['"]([^'"]+)['"]\s*\)/g)];
@@ -325,19 +240,9 @@ function discoverRoadmapAuthorRoutes(source: string): string[] {
 }
 
 /**
- * Team-lead review, 2026-08-26: discoverRoadmapAuthorRoutes above matches
- * CALL SITES, so it is structurally blind to a call reached through a local
- * alias/rebinding of the function reference (`const resolveAuthor =
- * resolveRoadmapAuthor;` then calling `resolveAuthor(...)`) -- mutation-
- * measured (disposable script) that such a call is genuinely invisible to
- * the regex above, regardless of how it is widened. Rather than trying to
- * resolve bindings, this asserts no such alias exists at all: an assignment
- * of the bare function reference (`= resolveRoadmapAuthor` followed by `;`,
- * `,` or `)`) or an import-alias form (`resolveRoadmapAuthor as <name>`,
- * defensive even though the function is locally defined today, not
- * imported). Excludes the function's own `function resolveRoadmapAuthor(`
- * definition line by construction -- there is no `=` immediately before the
- * name there, so neither alternative matches it.
+ * Asserts no alias of resolveRoadmapAuthor exists (a bare reference assignment
+ * or an `as` import alias), since a call reached through such an alias is
+ * invisible to a call-site regex.
  */
 function hasAliasOfResolveRoadmapAuthor(source: string): boolean {
   return /(?:=\s*resolveRoadmapAuthor\s*[;,)])|resolveRoadmapAuthor\s+as\s+\w+/.test(source);
@@ -370,14 +275,6 @@ test("DECK_WRITE_ROUTES matches every route broker.ts actually resolves an autho
   const declared = DECK_WRITE_ROUTES.map((r) => r.route).slice().sort();
   expect(declared).toEqual(discovered);
 });
-
-// ---------------------------------------------------------------------------
-// discoverRoadmapAuthorRoutes / hasAliasOfResolveRoadmapAuthor: mutation
-// coverage for the widened detector (team-lead review, 2026-08-26). Each
-// fixture below reproduces, in isolation, ONE of the forms measured to slip
-// past the previous regex silently -- three separate tests, not one shared
-// probe, so a regression in any single form stays attributable.
-// ---------------------------------------------------------------------------
 
 test("discoverRoadmapAuthorRoutes sees a new call site written through an intermediate variable, not just the literal identifier `body`", () => {
   const fixture = `
@@ -458,24 +355,10 @@ test("layer 2: an UNSIGNED by:'deck' write is refused on every route that resolv
       by: "deck",
     });
     expect({ route, status: res.status }).toEqual({ route, status: 401 });
-    // Team-lead audit 2026-08-26: /roadmap/lock-park and /roadmap/lock-release
-    // carry a SECOND, independent gate beyond the RESERVED_PEER_IDS branch this
-    // assertion exercises -- their own handlers (handleRoadmapLockPark,
-    // handleRoadmapLockRelease) refuse any write where `author.operator_id` is
-    // undefined, unconditionally, regardless of what `by` names. Mutation-
-    // measured: neutralizing only the RESERVED_PEER_IDS branch does NOT open
-    // these two routes to 200 -- they fall through to a 403 from that second
-    // gate instead of the 401 asserted here, so the strict assertion above
-    // still rightly reddens on that mutation, just via a different status and
-    // message than the other five routes in this loop.
-    // This asymmetry is deliberate, not an oversight on the other five: these
-    // two routes accept no instance_token at all, so no peer row is ever
-    // resolvable to compare a work-lock's owner GROUP against, and they are
-    // operator-only by construction as a result -- see card 6cd01490.
-    //
-    // The refusal must be readable enough to tell an ACTIVE guard from an
-    // ABSENT one: a running broker can be hours older than this code, and a
-    // silent 401 looks the same as a broker that never had the guard.
+    // /roadmap/lock-park and /roadmap/lock-release accept no instance_token at
+    // all, so no peer row is ever resolvable and they are operator-only by
+    // construction; unlike the other five routes here they fail via a second
+    // gate (403) rather than the 401 asserted for those.
     expect(res.body.error ?? "").toContain("sign the write with the operator credential");
   }
 });
@@ -535,23 +418,10 @@ test("layer 2: a SESSION credential may not sign a roadmap write", async () => {
   expect(res.body.error ?? "").toContain("roadmap-write");
 });
 
-// ---------------------------------------------------------------------------
-// LAYER 2, THE BYPASS. Measured end to end on the first attempt (29bff61) and
-// red before this fix: THREE requests, no signature anywhere.
-//
-//   1. /register with host:'deck' and cwd:'/' -> the broker MINTS peer_id
-//      'deck' and hands back a REAL, non-sentinel instance_token.
-//   2. /roadmap/upsert with by:'deck' + that token -> 200, updated_by 'deck'.
-//   3. the target card was locked by another peer: a proven ordinary peer gets
-//      409, this one overwrites the status.
-//
-// Two links, both INSIDE the guard rather than around it, which is why no
-// perimeter sweep could see them: the routes were all wired, the SQL writes all
-// went through resolveRoadmapAuthor, and the defect was the ORDER of evaluation
-// plus a name that should never have been mintable. The pair "real token +
-// reserved name" was covered by no assertion at all -- the existing probes fed
-// SENTINEL tokens, which are refused by shape long before this.
-// ---------------------------------------------------------------------------
+// The bypass this guards: registering host: 'deck' minted a real instance_token
+// for peer_id 'deck', which could then author /roadmap/upsert writes and
+// override another peer's lock -- both steps individually valid, the exploit
+// was in their combination.
 
 async function registerAs(host: string, cwd: string, group: string) {
   return post<RegisterResponse>(`${broker.url}/register`, {
@@ -723,26 +593,13 @@ test("layer 2 bypass: a REAL token cannot buy the 'deck' author, on any route", 
 });
 
 test("layer 2 bypass, MIGRATION: a pre-existing peer row named 'deck' cannot author either", async () => {
-  // The mint-time refusal cannot act backwards, and the operator deploys onto a
-  // database that predates it. A row named after a reserved identity may
-  // therefore already exist, holding a perfectly real token -- so the check has
-  // to run on the RESOLVED name too, not only on the claimed one.
-  //
-  // Seeded straight into the database on purpose: /register can no longer mint
-  // this row, so the only way to reach the branch that guards it is to create
-  // the state a live database already has. Without the seed this probe would be
-  // vacuous -- it would refuse a peer that does not exist.
-  // REGISTER first, then RENAME the row in the database. A hand-written INSERT
-  // was the first attempt and it was NOT the legacy state: it created a peers
-  // row with no peer_sessions row, so reconnecting minted a fresh derived id
-  // ("legacy-host-legacy") instead of restoring the reserved one, and the probe
-  // measured a case that cannot exist. A peer that really carries a reserved
-  // name got it through /register, so it has a session row, and that row is
-  // exactly what makes reconnection restore the name.
-  //
-  // In a group of its OWN: 'default' already holds the sentinel row named
-  // 'deck', and the UNIQUE (peer_id, group_id) index would refuse a second one.
-  // That same collision is why the original exploit needed a fresh group.
+  // Seeded by registering under a fresh group then renaming the row in the
+  // database, not by a hand-written INSERT: an INSERT alone leaves no
+  // peer_sessions row, so reconnecting would mint a fresh derived id instead of
+  // restoring the reserved name.
+  // A fresh group is required since 'default' already holds a sentinel peer row
+  // named 'deck', and the unique (peer_id, group_id) index refuses a second
+  // one.
   const legacyGroup = nextGroup();
   const legacy = await registerAs("legacy-host", "/legacy", legacyGroup);
   expect(legacy.status).toBe(200);
@@ -910,8 +767,8 @@ test("cli.ts roadmap-add attributes its writes as unproven and drops any token",
   const cli = readFileSync(join(import.meta.dir, "..", "cli.ts"), "utf8");
   const start = cli.indexOf('case "roadmap-add"');
   expect(start).toBeGreaterThan(-1);
-  // CRLF-safe block boundary, same reason as tests/cli-roadmap-add-no-token.ts:
-  // a "\n"-only pattern never matches this file and would assert vacuously.
+  // CRLF-safe: a \n-only pattern never matches on Windows line endings and the
+  // assertion would pass vacuously.
   const rel = cli.slice(start + 1).search(/\r?\n  (case "|default:)/);
   expect(rel).toBeGreaterThan(-1);
   const block = cli.slice(start, start + 1 + rel);

@@ -3,40 +3,12 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { extractBracedBody, extractParenBody, findMatchingClose } from "./_braced-body";
 
-// Card a2f61172, follow-up to the web-designer's own measurement (session
-// creation): CLAUDE_PEERS_ROLE is emitted from session-service.ts's ONE
-// spawn point (startPty), reached by BOTH a fresh launch and a fork-resume
-// (spawnSession normalizes mode -> effectiveMode -> startPty; see that
-// function's own comment on why role lives in `def`, not `def.args`, so a
-// fork-resume re-exports it "for free"). A guard that enumerates 'fresh' and
-// 'resume' by name would miss a THIRD spawn path silently -- this repo
-// already has one that does NOT go through session-service.ts at all
-// (deck-control.ts:222, the supervisor's own spawn, uncabled today). This
-// guard therefore keys on the OBJECT session env is built from
-// (`sessionEnv`), not on an enumeration of modes: it asserts `sessionEnv` is
-// constructed exactly ONCE, structurally OUTSIDE the `effective === 'resume'`
-// branch (so it is reached regardless of which branch ran), carries
-// CLAUDE_PEERS_ROLE, and that the SAME identifier -- not a re-derived
-// stand-in -- is what actually reaches `this.pty.spawn(...)`.
-//
-// HONEST SCOPE LIMIT (do not read this file as covering more than it does):
-// this guard only reaches spawns that go through session-service.ts's
-// startPty. The supervisor's spawn path (deck-control.ts:222) is a
-// structurally separate function/file and is NOT exercised by this guard at
-// all -- if it needs CLAUDE_PEERS_ROLE, that is untested here, full stop.
-//
-// Lives in tests/ (not desktop/src/main/) so it can use bun:test directly --
-// desktop/tsconfig.node.json's ambient types don't include bun-types (same
-// reasoning as tests/desktop-session-broadcast.test.ts). Named desktop-*
-// so scripts/pure-module-partition.ts's deny-list runs it by default (see
-// that module's EXEMPTIONS table: it exempts by filename prefix/exact name,
-// this file matches neither).
+// Keys on the sessionEnv object being constructed exactly once, outside the
+// resume branch, rather than enumerating spawn modes by name.
+// A third spawn path (deck-control.ts's supervisor spawn) exists and bypasses
+// session-service.ts's startPty entirely, so this guard does not reach it.
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
-
-// extractBracedBody/extractParenBody/findMatchingClose all now live in
-// tests/_braced-body.ts (card 9e450573 Lot A + Lot B dedup) -- imported
-// above. Nothing local left in this file.
 
 /**
  * Structural check, independent of any hand-maintained mode list: reads the

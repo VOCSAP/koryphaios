@@ -1,23 +1,7 @@
-// Card 7defe381 LOT 1: `roadmap_list` gained an `order: "queue"` mode that
-// renders the REAL dispatch order (queue ascending, waves grouped, non-queued
-// after) instead of the MoSCoW grouping, plus a `queue:<n>` marker on any
-// enqueued card's line in EITHER mode. Both are delegated to
-// `queuedItems`/`wavesOf` (desktop/src/shared/workflow.ts) rather than a
-// locally re-derived sort -- see the import comment in server.ts.
-//
-// DISCRIMINANT, not merely present: two cards sharing the same `queue` value
-// must land in the SAME wave block (not two ranks), a lower `queue` value
-// must render before a higher one regardless of creation order, and an
-// unqueued card must carry no marker at all. A test that only checks "some
-// queue text appears somewhere" would stay green even if the ordering were
-// wrong -- this asserts relative POSITION in the rendered text.
-//
-// Harness mirrors server-roadmap-inactive-marker.test.ts: spawn `bun
-// server.ts` for real (formatRoadmapQueueOrder/formatRoadmapItemLine are
-// neither exported nor safely importable -- server.ts runs its MCP stdio
-// loop unconditionally at module scope), speak JSON-RPC on stdin, read real
-// tool output. `server-*` prefix per that file's existing precedent (local
-// daemon spawn, exempted from the CI glob the same way).
+// Asserts relative position in the rendered text, not just presence: two cards
+// sharing a queue value must land in the same wave, a lower value must render
+// before a higher one regardless of creation order, and an unqueued card
+// carries no marker at all.
 
 import { test, expect, afterAll } from "bun:test";
 import { startBroker, stopBroker, post, deckAuthored, type TestBroker } from "./_helper.ts";

@@ -1,14 +1,3 @@
-// Card 55c5470e: origin.project_key was never written into the session
-// credential file at all (approval-runtime.ts arm()), which is one half of
-// why the Courrier operateur showed an unattributed "?" blocking question --
-// the other half (origin.from_peer resolution) is fixed renderer-side and
-// covered by tests/desktop-inbox-sender.test.ts.
-//
-// This targets ApprovalRuntime.arm() directly, same technique as the
-// existing tests/desktop-approval-runtime.test.ts (no electron import in
-// approval-runtime.ts, so it is unit-testable under bun) -- a new file
-// rather than an addition to that one, to avoid touching a file this card's
-// scope does not include.
 import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";

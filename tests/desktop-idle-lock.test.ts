@@ -1,14 +1,7 @@
-// Card e344fa79 lineage, LOT D1 (desktop/src/main/index.ts's watchIdleLocks):
-// a locked roadmap card's owner used to be identified by a bare
-// `item.locked_by === s.peerId` comparison, which is only unique PER GROUP
-// (peers.UNIQUE(peer_id, group_id)) -- a homonym peer_id locked by a peer in
-// a DIFFERENT group on the same broker would match one of this Deck's own
-// idle tiles and get that OTHER group's lock silently released.
-//
-// index.ts imports electron and cannot be unit-tested directly, so this
-// suite covers the pure predicate it now delegates to (idle-lock.ts) and
-// pins the computeGroupId duplicate (scope.ts vs shared/config.ts) that
-// predicate's caller (index.ts's activeScope.groupId) ultimately rests on.
+// index.ts imports electron and cannot be unit-tested directly; this suite
+// covers the pure predicate (idle-lock.ts) it delegates to, and pins the
+// computeGroupId duplicate between scope.ts and shared/config.ts that
+// predicate's caller relies on.
 
 import { test, expect } from "bun:test";
 import { ownsIdleLock } from "../desktop/src/main/idle-lock.ts";
