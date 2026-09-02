@@ -20,6 +20,15 @@
 //
 // `peer-` prefix: pure, binds no port, spawns nothing, so it belongs in the
 // CI matrix that collects that prefix (see peer-inbound-framing.test.ts).
+//
+// Card a67ec467: CLAUDE_PEERS_TOOLS (server.ts) now lets a caller filter
+// FILTERED_TOOLS down from TOOLS at runtime, without touching this SOURCE
+// text -- so this ceiling still caps what an UNFILTERED session pays every
+// turn, but it no longer represents the real per-turn cost of a session
+// launched with that var set (tests/server-tools-allowlist.test.ts covers
+// the filter's own behavior; `server-` prefix, not `peer-`, because it real-
+// spawns `bun server.ts` and a broker -- the daemon-spawning family this CI
+// matrix's pure-module step excludes, see scripts/pure-module-partition.ts).
 
 import { test, expect, describe } from "bun:test";
 

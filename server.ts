@@ -970,8 +970,72 @@ const TOOLS = [
 
 // --- Tool handlers ---
 
+// Card a67ec467: optional ALLOW-list of tool names exposed to THIS server
+// process, read once at module load. Same three-state contract as
+// deck-control-mcp.ts's DECK_CONTROL_TOOLS (Card ff091064), recopied rather
+// than reinvented -- an allow-list shrinks and fails CLOSED (a forgotten
+// tool is refused, the symptom surfaces the same day); a deny-list would
+// shrink and fail OPEN (a future tool ships exposed to everyone by default,
+// silently), which CLAUDE.md's guard-coverage rule rules out.
+//   unset            -> every tool (current behavior, zero regression for
+//                        every session launched outside Kory, or by an
+//                        embedded profile that sets no peerTools).
+//   set, non-empty   -> exactly the comma-separated names listed.
+//   set, empty ("")  -> zero tools. Distinguishing "absent" from "empty" is
+//                        deliberate: without it a bare `CLAUDE_PEERS_TOOLS=`
+//                        declaration would be indistinguishable from "unset"
+//                        and silently grant everything instead of nothing.
+// This acts on the PROCESS Kory spawns for a session tile; a sub-agent
+// inherits the already-connected parent server, so this lever has no effect
+// on sub-agents (see the roadmap card's context for the measured limit).
+const TOOLS_ENV_VAR = "CLAUDE_PEERS_TOOLS";
+
+/**
+ * Pure allow-list resolver. `undefined` (env var absent) means "no
+ * restriction" -- distinct from `[]` (env var present and empty, meaning
+ * zero tools). Kept pure so a test can drive it without spawning a process
+ * or touching env.
+ */
+function resolveToolAllowlist(envValue: string | undefined): string[] | null {
+  if (envValue === undefined) return null;
+  if (envValue === "") return [];
+  return envValue
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * Pure filter: `null` allowlist (var absent) passes every tool through
+ * unchanged. The Set intersection means the allow-list can only SHRINK the
+ * surface below TOOLS, never grow it -- a stale or misspelled name in the
+ * env var is silently dropped, never surfaced as a phantom tool.
+ */
+function filterTools(tools: typeof TOOLS, allowlist: string[] | null): typeof TOOLS {
+  if (allowlist === null) return tools;
+  const allowed = new Set(allowlist);
+  return tools.filter((t) => allowed.has(t.name));
+}
+
+const TOOLS_ALLOWLIST_RAW = process.env[TOOLS_ENV_VAR];
+const TOOLS_ALLOWLIST = resolveToolAllowlist(TOOLS_ALLOWLIST_RAW);
+const FILTERED_TOOLS = filterTools(TOOLS, TOOLS_ALLOWLIST);
+
+// Resolution trace at startup: when a tool is missing from a caller's
+// surface, this is what says whether CLAUDE_PEERS_TOOLS ate it and what the
+// requested vs retained lists were -- without it, diagnosing a missing tool
+// costs an hour of guessing (same rationale as deck-control-mcp.ts's own
+// startup trace, Card ff091064).
+log(
+  `Tool allowlist resolved (source: ${
+    TOOLS_ALLOWLIST_RAW === undefined ? "unset (no restriction)" : TOOLS_ENV_VAR
+  }); requested=${JSON.stringify(TOOLS_ALLOWLIST)} retained=${JSON.stringify(
+    FILTERED_TOOLS.map((t) => t.name)
+  )}`
+);
+
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: TOOLS,
+  tools: FILTERED_TOOLS,
 }));
 
 function formatElapsed(iso: string | null): string {
@@ -1298,6 +1362,24 @@ function formatInboundLine(fromPeerId: string, text: string, sentAt: string, rec
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
   const { name, arguments: args } = req.params;
+
+  // Coverage, not just sensitivity (CLAUDE.md guard-coverage rule): hiding a
+  // tool from tools/list alone still leaves it CALLABLE by name, which would
+  // make CLAUDE_PEERS_TOOLS decorative. Refuse here too, at the boundary
+  // that actually dispatches -- same shape as deck-control-mcp.ts's own
+  // tools/call refusal (Card ff091064). Guarded on "known to TOOLS but
+  // filtered out", not merely "absent from FILTERED_TOOLS": a name that is
+  // not in TOOLS at all (typo, stale client) is a DIFFERENT, pre-existing
+  // failure mode and must keep hitting the switch's own `default: throw`
+  // below unchanged -- collapsing the two would silently swap that
+  // protocol-level error for this tool-result shape for every caller,
+  // allow-list or not.
+  if (TOOLS.some((t) => t.name === name) && !FILTERED_TOOLS.some((t) => t.name === name)) {
+    return {
+      content: [{ type: "text" as const, text: `Error: tool not available: ${name}` }],
+      isError: true,
+    };
+  }
 
   switch (name) {
     case "list_peers": {
