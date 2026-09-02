@@ -62,6 +62,7 @@
 import { test, expect } from "bun:test";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { extractBracedBody } from "./_braced-body";
 
 const MAIN_DIR = join(import.meta.dir, "..", "desktop", "src", "main");
 const INDEX_PATH = join(MAIN_DIR, "index.ts");
@@ -75,22 +76,6 @@ function listTsFiles(dir: string): string[] {
     else if (entry.endsWith(".ts")) out.push(full);
   }
   return out;
-}
-
-function extractBracedBody(src: string, openIdx: number): string {
-  let depth = 1;
-  let i = openIdx + 1;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") depth--;
-    i++;
-  }
-  if (depth !== 0) {
-    throw new Error(
-      `extractBracedBody: brace block starting at "${src.slice(Math.max(0, openIdx - 60), openIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
-    );
-  }
-  return src.slice(openIdx + 1, i - 1);
 }
 
 /**

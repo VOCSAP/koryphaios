@@ -15,6 +15,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { isClaudeLaunch } from "../desktop/src/main/session-kind.ts";
+import { extractBracedBody } from "./_braced-body";
 
 const SESSION_SERVICE_PATH = join(
   import.meta.dir,
@@ -25,21 +26,6 @@ const SESSION_SERVICE_PATH = join(
   "session-service.ts"
 );
 
-function extractBracedBody(src: string, openIdx: number): string {
-  let depth = 1;
-  let i = openIdx + 1;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") depth--;
-    i++;
-  }
-  if (depth !== 0) {
-    throw new Error(
-      `extractBracedBody: brace block starting at "${src.slice(Math.max(0, openIdx - 60), openIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
-    );
-  }
-  return src.slice(openIdx + 1, i - 1);
-}
 
 // The extractors below use the FIRST regex match unconditionally
 // (RegExp.prototype.exec on a non-global pattern). That is safe against a

@@ -39,33 +39,12 @@
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { extractBracedBody } from "./_braced-body";
 
 const INDEX_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
 const SRC = readFileSync(INDEX_PATH, "utf-8");
 
 const ANCHOR = "noteUnresolved: async (item) => {";
-
-/**
- * Brace-balance body extractor (same convention as
- * tests/desktop-idle-lock-wiring-sweep.test.ts). Fails CLOSED: an anchor that
- * no longer matches (rename/reshape) throws rather than returning an empty,
- * vacuously-passing body.
- */
-function extractBracedBody(src: string, openIdx: number): string {
-  let depth = 1;
-  let i = openIdx + 1;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") depth--;
-    i++;
-  }
-  if (depth !== 0) {
-    throw new Error(
-      `extractBracedBody: brace block starting at "${src.slice(Math.max(0, openIdx - 60), openIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
-    );
-  }
-  return src.slice(openIdx + 1, i - 1);
-}
 
 export function findNoteUnresolvedBody(src: string): string {
   const start = src.indexOf(ANCHOR);

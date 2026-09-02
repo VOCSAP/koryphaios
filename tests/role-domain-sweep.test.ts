@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { extractBracedBody } from "./_braced-body";
 
 // Card a2f61172, PARTIE 2 of the post-reversal rewrite: the central guarantee
 // on `role` is no longer a per-scenario write-once rule (see
@@ -68,21 +69,9 @@ import { join } from "node:path";
 const BROKER_PATH = join(import.meta.dir, "..", "broker.ts");
 const SERVER_PATH = join(import.meta.dir, "..", "server.ts");
 
-function extractBracedBody(src: string, openIdx: number): string {
-  let depth = 1;
-  let i = openIdx + 1;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") depth--;
-    i++;
-  }
-  if (depth !== 0) {
-    throw new Error(
-      `extractBracedBody: brace block starting at "${src.slice(Math.max(0, openIdx - 60), openIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
-    );
-  }
-  return src.slice(openIdx + 1, i - 1);
-}
+// extractBracedBody itself now lives in tests/_braced-body.ts (card 9e450573
+// Lot A dedup) -- imported above. extractBracketedBody and the inline loop in
+// findRoleWritesOutsideHandleRegister stay LOCAL below (deferred to Lot B).
 
 function extractBracketedBody(src: string, openIdx: number): string {
   let depth = 1;

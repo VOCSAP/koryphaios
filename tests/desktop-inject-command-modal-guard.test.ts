@@ -2,6 +2,7 @@ import { test, expect, describe } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { makeScreen, classifyInjectGuard, ScreenGuard } from '../desktop/src/main/screen-model.ts'
+import { extractBracedBody } from './_braced-body'
 
 // Vague 10 A2-1 (cards 5dbf3255 + 63ca372f). spec_575cabbb / spec_052fe1d7.
 //
@@ -19,22 +20,6 @@ import { makeScreen, classifyInjectGuard, ScreenGuard } from '../desktop/src/mai
 // the diff is not a guard, per this repo's own review convention.
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, '..', 'desktop', 'src', 'main', 'session-service.ts')
-
-function extractBracedBody(src: string, openIdx: number): string {
-  let depth = 1
-  let i = openIdx + 1
-  while (depth > 0 && i < src.length) {
-    if (src[i] === '{') depth++
-    else if (src[i] === '}') depth--
-    i++
-  }
-  if (depth !== 0) {
-    throw new Error(
-      `extractBracedBody: brace block starting at "${src.slice(Math.max(0, openIdx - 60), openIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
-    )
-  }
-  return src.slice(openIdx + 1, i - 1)
-}
 
 function extractInjectCommandBody(src: string): string {
   const fnMatch = /async injectCommand\([^)]*\)[^{]*\{/.exec(src)

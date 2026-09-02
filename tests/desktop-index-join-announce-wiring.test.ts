@@ -95,6 +95,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { decidePeerAnnounce } from "../desktop/src/main/peer-rotation.ts";
+import { extractBracedBody } from "./_braced-body";
 
 const INDEX =
   process.env.KORY_INDEX_TS || join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
@@ -172,30 +173,6 @@ for (const [label, body] of [
   test(`slice floor: ${label} extracted at least 100 bytes`, () => {
     expect(body.length).toBeGreaterThan(100);
   });
-}
-
-/**
- * Brace-balance body extractor (same convention as
- * tests/desktop-idle-lock-wiring-sweep.test.ts and
- * tests/desktop-quota-gate.test.ts): `openIdx` must point at the opening `{`
- * of the body. Unlike `slice()`'s terminator search, this works for a body at
- * ANY indentation depth -- required for `announceTo`, which is nested inside a
- * returned object literal, never at column 0.
- */
-function extractBracedBody(src: string, openIdx: number): string {
-  let depth = 1;
-  let i = openIdx + 1;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") depth--;
-    i++;
-  }
-  if (depth !== 0) {
-    throw new Error(
-      `extractBracedBody: brace block starting at "${src.slice(Math.max(0, openIdx - 60), openIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
-    );
-  }
-  return src.slice(openIdx + 1, i - 1);
 }
 
 interface Emitter {

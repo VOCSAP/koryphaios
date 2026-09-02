@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { extractBracedBody } from "./_braced-body";
 
 // Card a2f61172, follow-up to the web-designer's own measurement (session
 // creation): CLAUDE_PEERS_ROLE is emitted from session-service.ts's ONE
@@ -33,24 +34,10 @@ import { join } from "node:path";
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
 
-// Same brace-balancing technique as desktop-session-broadcast.test.ts's
-// extractBracedBody: `openIdx` must point at an opening `{`, returns the
-// slice up to (not including) its matching `}`.
-function extractBracedBody(src: string, openIdx: number): string {
-  let depth = 1;
-  let i = openIdx + 1;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") depth--;
-    i++;
-  }
-  if (depth !== 0) {
-    throw new Error(
-      `extractBracedBody: brace block starting at "${src.slice(Math.max(0, openIdx - 60), openIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
-    );
-  }
-  return src.slice(openIdx + 1, i - 1);
-}
+// extractBracedBody itself now lives in tests/_braced-body.ts (card 9e450573
+// Lot A dedup) -- imported above. Kept LOCAL below: extractParenBody and the
+// two inline loops in checkRoleReachesEverySpawnPath, none of which are the
+// byte-identical shape Lot A migrated (deferred to Lot B).
 
 // Same technique, for a `(` ... `)` call-argument list. `openIdx` must point
 // at the opening `(`.

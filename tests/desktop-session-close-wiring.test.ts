@@ -18,6 +18,7 @@ import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { gracefulClose } from "../desktop/src/main/session-close.ts";
+import { extractBracedBody } from "./_braced-body";
 
 const EXIT = "/exit\n";
 const ESC = "\x1b";
@@ -201,21 +202,6 @@ const SESSION_SERVICE_PATH = join(
   "session-service.ts"
 );
 
-function extractBracedBody(src: string, openIdx: number): string {
-  let depth = 1;
-  let i = openIdx + 1;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") depth--;
-    i++;
-  }
-  if (depth !== 0) {
-    throw new Error(
-      `extractBracedBody: brace block starting at "${src.slice(Math.max(0, openIdx - 60), openIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
-    );
-  }
-  return src.slice(openIdx + 1, i - 1);
-}
 
 function extractRemoveBody(src: string): string {
   const fnMatch = /async remove\(id: string\): Promise<void> \{/.exec(src);
