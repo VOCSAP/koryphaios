@@ -72,6 +72,7 @@
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { findMatchingClose } from "./_braced-body";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const IPC_TS = join(REPO_ROOT, "desktop", "src", "main", "ipc.ts");
@@ -133,35 +134,8 @@ function stripComments(src: string): string {
  * always nests these three bracket kinds in matching pairs.
  */
 function extractBalancedParen(src: string, openParenIdx: number): { body: string; endIdx: number } {
-  let depth = 1;
-  let i = openParenIdx + 1;
-  let inString: string | null = null;
-  while (i < src.length && depth > 0) {
-    const c = src[i]!;
-    if (inString) {
-      if (c === "\\") {
-        i += 2;
-        continue;
-      }
-      if (c === inString) inString = null;
-      i++;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      inString = c;
-      i++;
-      continue;
-    }
-    if (c === "(" || c === "{" || c === "[") depth++;
-    else if (c === ")" || c === "}" || c === "]") depth--;
-    i++;
-  }
-  if (depth !== 0) {
-    throw new Error(
-      `extractBalancedParen: block starting at "${src.slice(Math.max(0, openParenIdx - 60), openParenIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
-    );
-  }
-  return { body: src.slice(openParenIdx + 1, i - 1), endIdx: i };
+  const endIdx = findMatchingClose(src, openParenIdx, ["(", "{", "["], [")", "}", "]"], true);
+  return { body: src.slice(openParenIdx + 1, endIdx - 1), endIdx };
 }
 
 interface ScannedHandler {

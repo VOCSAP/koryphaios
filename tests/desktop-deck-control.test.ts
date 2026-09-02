@@ -28,6 +28,7 @@ import type { CreateSessionInput, SessionRuntime } from "../desktop/src/shared/t
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { extractBracedBody } from "./_braced-body";
 
 const servers: DeckControlServer[] = [];
 const procs: Subprocess[] = [];
@@ -1423,17 +1424,6 @@ test("deck_list_sessions: sessionView's `thinking` field carries 'working'/'idle
 // section, against the real deck-control.ts dispatch.
 
 const INDEX_TS_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
-
-function extractBracedBody(src: string, openIdx: number): string {
-  let depth = 1;
-  let i = openIdx + 1;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") depth--;
-    i++;
-  }
-  return src.slice(openIdx + 1, i - 1);
-}
 
 function extractConfirmSpawnShellFieldsBody(src: string): string {
   const fnMatch =

@@ -7,6 +7,7 @@ import {
   buildDecision,
   parseHookPayload,
 } from "../desktop/hooks/roadmap-guard-hook.ts";
+import { extractBracedBody } from "./_braced-body";
 
 // Card 800b0fe3: guards the PreToolUse roadmap-markup-accident hook
 // (desktop/hooks/roadmap-guard-hook.ts, built to
@@ -340,19 +341,7 @@ test("hooks.json's PreToolUse matcher set equals the .ts source's TOOL_TEXT_FIEL
   const src = readFileSync(HOOK_TS, "utf-8");
   const declMatch = /const TOOL_TEXT_FIELDS[^{]*\{/.exec(src);
   if (!declMatch) throw new Error("TOOL_TEXT_FIELDS declaration not found in roadmap-guard-hook.ts");
-  let depth = 1;
-  let i = declMatch.index + declMatch[0].length;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") depth--;
-    i++;
-  }
-  if (depth !== 0) {
-    throw new Error(
-      "TOOL_TEXT_FIELDS declaration found in roadmap-guard-hook.ts but its brace block never closed -- source truncated, renamed, or reshaped?"
-    );
-  }
-  const body = src.slice(declMatch.index + declMatch[0].length, i - 1);
+  const body = extractBracedBody(src, declMatch.index + declMatch[0].length - 1);
   const toolNameSet = new Set([...body.matchAll(/"(mcp__[^"]+)"\s*:/g)].map((m) => m[1]));
 
   expect(toolNameSet.size).toBeGreaterThan(0);

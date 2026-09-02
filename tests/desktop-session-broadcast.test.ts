@@ -1,6 +1,7 @@
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { findMatchingClose, extractBracedBody, extractParenBody } from "./_braced-body";
 
 // A handler wired via `<receiver>.on(...)` that mutates a RuntimeState field
 // surfaced by toRuntime() but skips this.broadcast() leaves the renderer's
@@ -89,34 +90,11 @@ function stripComments(s: string): string {
   return out;
 }
 
-// Balances delimiters from just after `openIdx` (which must point at an
-// opening `openCh`) and returns the index just PAST the matching `closeCh`.
-// Shared by brace and paren matching below -- string/regex-literal contents
-// are not excluded (accepted pre-existing limitation of this file's whole
-// regex-based approach, same as the original extractBracedBody).
-function findMatchingClose(s: string, openIdx: number, openCh: string, closeCh: string): number {
-  let depth = 1;
-  let i = openIdx + 1;
-  while (depth > 0 && i < s.length) {
-    if (s[i] === openCh) depth++;
-    else if (s[i] === closeCh) depth--;
-    i++;
-  }
-  if (depth !== 0) {
-    throw new Error(
-      `findMatchingClose: "${openCh}...${closeCh}" block starting at "${s.slice(Math.max(0, openIdx - 60), openIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
-    );
-  }
-  return i;
-}
-
-function extractBracedBody(src: string, openIdx: number): string {
-  return src.slice(openIdx + 1, findMatchingClose(src, openIdx, "{", "}") - 1);
-}
-
-function extractParenBody(src: string, openIdx: number): string {
-  return src.slice(openIdx + 1, findMatchingClose(src, openIdx, "(", ")") - 1);
-}
+// findMatchingClose/extractBracedBody/extractParenBody now live in
+// tests/_braced-body.ts (card 9e450573 Lot B dedup) -- imported above. This
+// file's local copies were byte-for-byte the same contract (string/regex-
+// literal contents not excluded, same pre-existing limitation), so the
+// delegation collapses to a direct import with no wrapper needed.
 
 // toRuntime() is the source of truth for which RuntimeState fields the
 // renderer actually sees -- extracted from its `return { ... }` object

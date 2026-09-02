@@ -78,6 +78,7 @@ import {
   type Activity
 } from "../desktop/src/main/detect/activity.ts";
 import { createOscParser } from "../desktop/src/main/detect/osc.ts";
+import { findMatchingClose } from "./_braced-body";
 
 // ----- fake clock/timer, shared by sections 1 and 2 ------------------------
 
@@ -356,21 +357,14 @@ test("pty.on('data') wires activityTrackerFor(e.id).observe(...) with the EXACT 
 // braces from `openIdx` (which must point at an opening `{`) and returns the
 // slice INCLUSIVE of both braces (so callers can wrap it directly as
 // `` `function(x) ${body}` `` without re-adding braces themselves -- same
-// convention as this file's own extractPtyDataHandlerBody above).
+// convention as this file's own extractPtyDataHandlerBody above). Different
+// convention than tests/_braced-body.ts's own extractBracedBody (EXCLUSIVE
+// slice) -- delegates to that module's findMatchingClose for the depth-
+// counting/guard, but keeps its own inclusive slice locally rather than
+// importing extractBracedBody under this name (card 9e450573 Lot B: the two
+// conventions must not collide).
 function extractBracedBody(src: string, openIdx: number): string {
-  let depth = 1;
-  let i = openIdx + 1;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === "{") depth++;
-    else if (src[i] === "}") depth--;
-    i++;
-  }
-  if (depth !== 0) {
-    throw new Error(
-      `extractBracedBody: brace block starting at "${src.slice(Math.max(0, openIdx - 60), openIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
-    );
-  }
-  return src.slice(openIdx, i);
+  return src.slice(openIdx, findMatchingClose(src, openIdx, "{", "}"));
 }
 
 function extractByAnchor(src: string, anchor: string, label: string): string {

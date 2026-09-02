@@ -40,6 +40,7 @@
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { extractBracedBody } from "./_braced-body";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const ROOT_TYPES_TS = join(REPO_ROOT, "shared", "types.ts");
@@ -105,22 +106,23 @@ function extractUnion(cleanedSrc: string, name: string): string[] | undefined {
   return [...m[1]!.matchAll(/["']([^"']+)["']/g)].map((mm) => mm[1]!).sort();
 }
 
-/** `export interface Name { field?: Type ... }` -> { "field" | "field?": normalizedTypeText }. undefined if absent. */
+/**
+ * `export interface Name { field?: Type ... }` -> { "field" | "field?": normalizedTypeText }. undefined if absent.
+ * Delegates to tests/_braced-body.ts (card 9e450573 Lot B dedup) with
+ * quoteAware=true: `cleanedSrc` has been through stripComments (above),
+ * which strips comments but NOT string literals, so a future field whose
+ * type is a string-literal type containing a brace character would
+ * otherwise desync a naive counter. Verified inert against the two REAL
+ * interface bodies this runs on today (ApprovalOrigin, Approval in both
+ * shared/types.ts and desktop/src/shared/types.ts): neither contains any
+ * string literal at all, so quoteAware changes nothing today -- it is
+ * forward robustness, not a behavior change, checked rather than assumed.
+ */
 function extractInterface(cleanedSrc: string, name: string): Record<string, string> | undefined {
   const startMatch = cleanedSrc.match(new RegExp(`export interface ${name}\\s*\\{`));
   if (!startMatch) return undefined;
   const start = startMatch.index! + startMatch[0].length;
-  let depth = 1;
-  let i = start;
-  while (i < cleanedSrc.length && depth > 0) {
-    if (cleanedSrc[i] === "{") depth++;
-    else if (cleanedSrc[i] === "}") depth--;
-    i++;
-  }
-  if (depth !== 0) {
-    throw new Error(`extractInterface: interface ${name} matched but its brace block never closed -- source truncated, renamed, or reshaped?`);
-  }
-  const body = cleanedSrc.slice(start, i - 1);
+  const body = extractBracedBody(cleanedSrc, start - 1, true);
   const fields: Record<string, string> = {};
   for (const rawLine of body.split("\n")) {
     const line = rawLine.trim();

@@ -1,7 +1,7 @@
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { extractBracedBody } from "./_braced-body";
+import { extractBracedBody, extractParenBody, findMatchingClose } from "./_braced-body";
 
 // Card a2f61172, follow-up to the web-designer's own measurement (session
 // creation): CLAUDE_PEERS_ROLE is emitted from session-service.ts's ONE
@@ -34,28 +34,9 @@ import { extractBracedBody } from "./_braced-body";
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
 
-// extractBracedBody itself now lives in tests/_braced-body.ts (card 9e450573
-// Lot A dedup) -- imported above. Kept LOCAL below: extractParenBody and the
-// two inline loops in checkRoleReachesEverySpawnPath, none of which are the
-// byte-identical shape Lot A migrated (deferred to Lot B).
-
-// Same technique, for a `(` ... `)` call-argument list. `openIdx` must point
-// at the opening `(`.
-function extractParenBody(src: string, openIdx: number): string {
-  let depth = 1;
-  let i = openIdx + 1;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === "(") depth++;
-    else if (src[i] === ")") depth--;
-    i++;
-  }
-  if (depth !== 0) {
-    throw new Error(
-      `extractParenBody: paren block starting at "${src.slice(Math.max(0, openIdx - 60), openIdx + 1)}" never closed -- source truncated, renamed, or reshaped?`
-    );
-  }
-  return src.slice(openIdx + 1, i - 1);
-}
+// extractBracedBody/extractParenBody/findMatchingClose all now live in
+// tests/_braced-body.ts (card 9e450573 Lot A + Lot B dedup) -- imported
+// above. Nothing local left in this file.
 
 /**
  * Structural check, independent of any hand-maintained mode list: reads the
@@ -80,38 +61,13 @@ export function checkRoleReachesEverySpawnPath(src: string): string | null {
     return "startPty()'s `if (effective === 'resume')` branch not found -- has the mode-branch shape changed?";
   }
   const ifOpenIdx = ifMatch.index + ifMatch[0].length - 1;
-  let branchEndIdx = ifOpenIdx + 1;
-  {
-    let depth = 1;
-    while (depth > 0 && branchEndIdx < body.length) {
-      if (body[branchEndIdx] === "{") depth++;
-      else if (body[branchEndIdx] === "}") depth--;
-      branchEndIdx++;
-    }
-    if (depth !== 0) {
-      throw new Error(
-        "checkRoleReachesEverySpawnPath: startPty()'s `if (effective === 'resume')` brace block never closed -- source truncated, renamed, or reshaped?"
-      );
-    }
-  }
+  let branchEndIdx = findMatchingClose(body, ifOpenIdx, "{", "}");
   // Absorb a trailing `else { ... }` into the same "branch region" if present.
   const afterIf = body.slice(branchEndIdx);
   const elseMatch = /^\s*else\s*\{/.exec(afterIf);
   if (elseMatch) {
     const elseOpenIdx = branchEndIdx + elseMatch[0].length - 1;
-    let depth = 1;
-    let j = elseOpenIdx + 1;
-    while (depth > 0 && j < body.length) {
-      if (body[j] === "{") depth++;
-      else if (body[j] === "}") depth--;
-      j++;
-    }
-    if (depth !== 0) {
-      throw new Error(
-        "checkRoleReachesEverySpawnPath: startPty()'s trailing `else { ... }` brace block never closed -- source truncated, renamed, or reshaped?"
-      );
-    }
-    branchEndIdx = j;
+    branchEndIdx = findMatchingClose(body, elseOpenIdx, "{", "}");
   }
 
   const sessionEnvMatches = [...body.matchAll(/const sessionEnv\s*=\s*\{/g)];

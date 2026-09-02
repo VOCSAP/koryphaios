@@ -80,6 +80,7 @@
 import { test, expect } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { extractBracedBody } from "./_braced-body";
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const PRELOAD_TS = join(REPO_ROOT, "desktop", "src", "preload", "index.ts");
@@ -129,40 +130,17 @@ function stripComments(src: string): string {
   return out;
 }
 
-/** Extracts the `{ ... }` body following a header regex, by brace-counting (quote-aware). */
+/**
+ * Extracts the `{ ... }` body following a header regex, quote-aware.
+ * Delegates to tests/_braced-body.ts (card 9e450573 Lot B dedup): `start` is
+ * one past the opening `{` (same convention the shared helper's `openIdx`
+ * expects, offset by one), so the call passes `start - 1`.
+ */
 function extractObjectBody(src: string, headerRe: RegExp): string {
   const m = src.match(headerRe);
   if (!m) throw new Error(`extractObjectBody: header not found: ${headerRe}`);
   const start = m.index! + m[0].length;
-  let depth = 1;
-  let i = start;
-  let inString: string | null = null;
-  while (i < src.length && depth > 0) {
-    const c = src[i]!;
-    if (inString) {
-      if (c === "\\") {
-        i += 2;
-        continue;
-      }
-      if (c === inString) inString = null;
-      i++;
-      continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      inString = c;
-      i++;
-      continue;
-    }
-    if (c === "{") depth++;
-    else if (c === "}") depth--;
-    i++;
-  }
-  if (depth !== 0) {
-    throw new Error(
-      `extractObjectBody: header ${headerRe} matched but its object body never closed -- source truncated, renamed, or reshaped?`
-    );
-  }
-  return src.slice(start, i - 1);
+  return extractBracedBody(src, start - 1, true);
 }
 
 /** Splits an object-literal body into top-level `key: value` properties (nesting- and quote-aware). */
