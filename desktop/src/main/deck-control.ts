@@ -43,6 +43,7 @@ import type {
   TemplateSummary
 } from '../shared/types'
 import type { WorktreeInfo } from './worktree-service'
+import { resolveDirectiveTargets } from './directive'
 import { EMBEDDED_AGENTS, getEmbeddedAgent, type EmbeddedAgent } from './team-embedded'
 import { TEAM_PLAYBOOK } from './team-embedded'
 import { TEAM_LEAD_DECK_TOOLS } from './supervisor'
@@ -605,14 +606,65 @@ export function startDeckControl(
 
       case 'deck_close_session': {
         const id = str(args, 'id')
-        if (!id) throw new Error('id is required')
-        if (ownedSessions.get(id) !== callerId) {
+        const peerId = str(args, 'peer_id')
+        // Card c4cbb845: `peer_id` names the SAME target by its other name, it
+        // is never a second target -- both set is refused rather than one
+        // silently preferred (same discipline as validateEntry's
+        // agent/embedded_agent above). The MCP schema
+        // (desktop/mcp/deck-control-mcp.ts) declares both and requires
+        // neither; it validates NOTHING, the handler receives arguments
+        // verbatim, so these four lines ARE the exactly-one-of rule.
+        if (id && peerId) throw new Error('id and peer_id are mutually exclusive -- pick one')
+        if (!id && !peerId) throw new Error('id or peer_id is required')
+        let target = id
+        if (peerId) {
+          // The one existing peer_id -> tile resolver main-side (directive.ts,
+          // also used by index.ts and agent-stop.ts): reused, not
+          // re-implemented. Closing a tile is irreversible, so zero match and
+          // several matches both refuse and this path never picks.
+          const resolved = resolveDirectiveTargets([peerId], deps.listSessions())
+          // Ambiguity is refused BEFORE matched is read, on purpose. The
+          // resolver already keeps an ambiguous peer_id out of `matched`
+          // (directive.ts), but its own doc calls `ambiguous` an annotation of
+          // WHY an id is missing -- a guarantee this case would merely be
+          // BORROWING. Should that resolver ever be "improved" into pushing
+          // the first match while still annotating, closing here must fail,
+          // not pick. So the fail-closed is LOCAL: an annotated ambiguity
+          // refuses whatever `matched` holds.
+          if (resolved.ambiguous.length > 0) {
+            throw new Error(
+              `refused: peer_id "${peerId}" is ambiguous -- several live tiles carry it, close it by tile id instead`
+            )
+          }
+          const hit = resolved.matched[0]
+          if (!hit) throw new Error(`refused: no live session carries peer_id "${peerId}"`)
+          target = hit.id
+        }
+        // Card 6c380073, extended by c4cbb845: resolve the OBJECT first, THEN
+        // ask whether THIS caller may act on it -- so the guard bites on the
+        // RESOLVED tile id, never on the argument as typed.
+        //
+        // Two refusal wordings, on purpose, and here is what backs the split.
+        // This one is WORD FOR WORD the tile-id path's: a caller must not
+        // learn from the ownership refusal whether the tile is someone
+        // else's or absent. The unresolved/ambiguous refusals above ARE
+        // distinct, which does tell the caller a live tile carries that
+        // peer_id -- accepted because that enumeration is already available
+        // to the same tile through another channel: the deck-control config
+        // (supervisor.ts, buildDeckControlMcpConfig) scopes DECK_CONTROL_TOOLS
+        // on the deck-control server ONLY, the tile's command line carries
+        // `--mcp-config` and never `--strict-mcp-config` (session-command.ts),
+        // so the repo's own .mcp.json claude-peers server is merged in and
+        // list_peers already enumerates the live peer_ids. The split buys
+        // diagnosability on the frequent error (a typo) without granting
+        // anything the caller lacks.
+        if (ownedSessions.get(target) !== callerId) {
           throw new Error(
             'refused: only a session spawned by this same caller can be closed -- ask the operator for the rest'
           )
         }
-        deps.closeSession(id)
-        ownedSessions.delete(id)
+        deps.closeSession(target)
+        ownedSessions.delete(target)
         // Card 6c380073 (review round 2, point 8): this case drops the
         // OWNERSHIP entry only. It deliberately does NOT call
         // revokeCallerForSession or touch sessionMintedCallerId -- that is

@@ -304,6 +304,109 @@ test("mintCaller: a second caller cannot close nor restart a tile owned by the f
   expect(deps.closed).toEqual([id]);
 });
 
+// ----- Card c4cbb845: deck_close_session takes `peer_id` as an ALTERNATIVE to -----
+// the tile id, resolved through resolveDirectiveTargets (the only peer_id ->
+// tile resolver main-side). Two properties these tests pin, in order of
+// importance:
+//  1. the ownership guard bites on the RESOLVED tile id -- otherwise the new
+//     argument is an ownership bypass wearing another name;
+//  2. resolution fails CLOSED (zero match AND ambiguous match both refuse),
+//     because closing a tile is irreversible and must never be a guess.
+
+test("deck_close_session: a peer_id resolving to a tile this caller owns closes THAT tile", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const spawned = await call(srv, "deck_spawn_session", { name: "mine" });
+  const session = (spawned.body.result as { session: { id: string; peer_id: string } }).session;
+  expect(session.peer_id).toBe(`peer-${session.id}`);
+
+  const ok = await call(srv, "deck_close_session", { peer_id: session.peer_id });
+  expect(ok.body.ok).toBe(true);
+  // The RESOLVED tile id reaches closeSession, never the peer_id.
+  expect(deps.closed).toEqual([session.id]);
+});
+
+test("deck_close_session: id and peer_id together are refused; neither is still refused", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const spawned = await call(srv, "deck_spawn_session", { name: "mine" });
+  const session = (spawned.body.result as { session: { id: string; peer_id: string } }).session;
+
+  const both = await call(srv, "deck_close_session", {
+    id: session.id,
+    peer_id: session.peer_id
+  });
+  expect(both.status).toBe(400);
+  expect(both.body.error).toContain("mutually exclusive");
+  expect(deps.closed).toEqual([]);
+
+  // The MCP schema no longer marks `id` required, so an empty argument object
+  // reaches the handler: it must refuse HERE (this is the only validation).
+  const neither = await call(srv, "deck_close_session", {});
+  expect(neither.status).toBe(400);
+  expect(neither.body.error).toContain("required");
+  expect(deps.closed).toEqual([]);
+});
+
+test("deck_close_session: a peer_id matching zero tiles, or TWO live tiles, is refused", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const spawned = await call(srv, "deck_spawn_session", { name: "mine" });
+  const session = (spawned.body.result as { session: { id: string; peer_id: string } }).session;
+
+  const unknown = await call(srv, "deck_close_session", { peer_id: "peer-nobody" });
+  expect(unknown.status).toBe(400);
+  expect(unknown.body.error).toContain("no live session");
+  expect(deps.closed).toEqual([]);
+
+  // A SECOND live tile carrying the SAME peer_id (measured as possible,
+  // commit 73b5e67): resolveDirectiveTargets buckets it ambiguous, and the
+  // close must refuse rather than pick one of the two.
+  state.sessions.push(fakeSession("twin", { peerId: session.peer_id }));
+  const ambiguous = await call(srv, "deck_close_session", { peer_id: session.peer_id });
+  expect(ambiguous.status).toBe(400);
+  expect(ambiguous.body.error).toContain("ambiguous");
+  expect(deps.closed).toEqual([]);
+});
+
+test("deck_close_session: a peer_id resolving to a tile this caller does NOT own is refused, exactly like the tile id", async () => {
+  const state = { sessions: [fakeSession("operator-1")] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  // An operator tile the endpoint never spawned: reachable by peer_id, but
+  // owned by nobody here. The refusal must be WORD FOR WORD the one the tile
+  // id already produces: the ownership answer never distinguishes "someone
+  // else's tile" from "no such tile" (the unresolved/ambiguous refusals are
+  // deliberately distinct, see the case's comment for what backs that split).
+  const byId = await call(srv, "deck_close_session", { id: "operator-1" });
+  const byPeer = await call(srv, "deck_close_session", { peer_id: "peer-operator-1" });
+  expect(byId.status).toBe(400);
+  expect(byPeer.status).toBe(400);
+  expect(byPeer.body.error).toBe(byId.body.error);
+  expect(deps.closed).toEqual([]);
+
+  // The bypass probe proper: a tile owned by ANOTHER minted caller resolves
+  // fine, then the guard must bite on the resolved id.
+  const spawned = await call(srv, "deck_spawn_session", { name: "mine" });
+  const session = (spawned.body.result as { session: { id: string; peer_id: string } }).session;
+  const other = srv.mintCaller("other-caller", null);
+  const refused = await call(srv, "deck_close_session", { peer_id: session.peer_id }, other.token);
+  expect(refused.status).toBe(400);
+  expect(refused.body.error).toContain("refused");
+  expect(deps.closed).toEqual([]);
+});
+
 test("mintCaller: a second caller cannot remove a worktree created by the first caller", async () => {
   const state = { sessions: [] as SessionRuntime[] };
   const deps = makeDeps(state);
