@@ -43,6 +43,7 @@ import type {
   TemplateSummary
 } from '../shared/types'
 import type { WorktreeInfo } from './worktree-service'
+import type { TemplateInput } from '../shared/template'
 import { resolveDirectiveTargets } from './directive'
 import { EMBEDDED_AGENTS, getEmbeddedAgent, type EmbeddedAgent } from './team-embedded'
 import { TEAM_PLAYBOOK } from './team-embedded'
@@ -105,8 +106,28 @@ export interface DeckControlDeps {
   listWorktrees(): Promise<WorktreeInfo[]>
   removeWorktree(path: string): Promise<void>
   listTemplates(): TemplateSummary[]
-  /** Append-only from the supervisor ('replace' would kill its own tile). */
-  applyTemplate(path: string): Promise<number>
+  /**
+   * Card 89cb66f9: resolution + containment/approval gate (MAY prompt the
+   * operator and persist an approval, see index.ts's confirmShellFieldApproval)
+   * -- no SPAWN side effect, returns the inputs to spawn or null. Split out
+   * of the old applyTemplate(path): Promise<number> so deck_apply_template
+   * can capCheck/approveSpawn the batch BEFORE any tile spawns, exactly like
+   * deck_spawn_team already does.
+   */
+  resolveTemplate(path: string): TemplateInput[] | null
+  /**
+   * Card 89cb66f9: spawn exactly ONE template entry and return the created
+   * SessionRuntime -- the old dep returned only a count (inputs.length),
+   * which made ownedSessions.set structurally impossible to write per tile.
+   * Append-only from the supervisor ('replace' would kill its own tile).
+   * `checkpoint` covers the whole batch in one git checkpoint (pass true only
+   * for the first tile the caller actually spawns); `hasLead` is decided ONCE
+   * by the caller before the loop starts (PLAN C18 crown rule).
+   */
+  spawnTemplateEntry(
+    input: TemplateInput,
+    opts: { checkpoint: boolean; hasLead: boolean }
+  ): Promise<SessionRuntime>
   saveTemplate(name: string, local: boolean): string | null
   announce(text: string): Promise<number>
   /**
@@ -273,6 +294,29 @@ function summarizeEntry(entry: SpawnPlanEntry, embedded: EmbeddedAgent | null): 
     worktree_branch: entry.worktreeBranch ?? '',
     prompt_preview: (entry.prompt ?? '').slice(0, 160),
     args: entry.args ?? ''
+  }
+}
+
+/**
+ * The recap shown by the approval dialog for a template batch (card 89cb66f9)
+ * -- mirrors summarizeEntry above, but from a TemplateInput (which carries a
+ * separate `command` field the shell-field-approval hash already covers, so
+ * both are folded into `args` here for the operator to actually SEE what a
+ * template entry runs, same reasoning as summarizeEntry's own `args`). A
+ * `[lead]` prefix flags an entry that will take the window's crown (PLAN
+ * C18) -- otherwise the dialog never says a tile is about to become lead.
+ */
+function summarizeTemplateInput(input: TemplateInput): SpawnSummary {
+  return {
+    name: (input.lead ? '[lead] ' : '') + (input.name ?? input.agent ?? 'peer'),
+    agent: input.agent ?? '',
+    embedded: '',
+    model: input.model ?? '',
+    effort: input.effort ?? '',
+    cli: 'claude',
+    worktree_branch: input.worktreeBranch ?? '',
+    prompt_preview: (input.prompt ?? '').slice(0, 160),
+    args: [input.command ?? '', input.args ?? ''].filter(Boolean).join(' ')
   }
 }
 
@@ -711,9 +755,45 @@ export function startDeckControl(
         return { templates: deps.listTemplates() }
 
       case 'deck_apply_template': {
+        // Card 89cb66f9: was spawning unconditionally through a dep that
+        // returned only a count, bypassing the cap/approval pair that guards
+        // deck_spawn_session/deck_spawn_team AND leaving every tile out of
+        // ownedSessions (untraceable: nobody, supervisor included, could
+        // later close or restart it). Now mirrors deck_spawn_team exactly:
+        // resolve first, capCheck the whole batch, ONE approveSpawn call for
+        // the lot (never N dialogs), then spawn + ownedSessions.set per tile.
         const path = str(args, 'path')
         if (!path) throw new Error('path is required')
-        return { spawned: await deps.applyTemplate(path) }
+        const inputs = deps.resolveTemplate(path)
+        if (!inputs || inputs.length === 0) return { spawned: 0, refused: 0 }
+        capCheck(inputs.length)
+        const decisions = await deps.approveSpawn(inputs.map(summarizeTemplateInput))
+        // Crown rule (PLAN C18): decided ONCE for the whole batch, same as
+        // the pre-existing applyTemplate behaviour -- a later tile in this
+        // same batch never re-checks against tiles this batch just spawned.
+        const hasLead = deps.listSessions().some((s) => s.lead && s.status !== 'exited')
+        let spawned = 0
+        // A real counter (not inputs.length - spawned, review round 2 nit 1):
+        // `refused` must stay accurate the day a second skip reason joins
+        // the lone `!decisions[i]` one (malformed entry, per-tile quota,
+        // dedup) instead of silently reading as "refused by the operator".
+        let refused = 0
+        for (let i = 0; i < inputs.length; i++) {
+          if (!decisions[i]) {
+            refused++
+            continue
+          }
+          const created = await deps.spawnTemplateEntry(inputs[i]!, {
+            checkpoint: spawned === 0,
+            hasLead
+          })
+          ownedSessions.set(created.id, callerId)
+          spawned++
+        }
+        // Distinct from a resolved-but-empty template (spawned:0, refused:0
+        // above): a total refusal by the operator must not read the same as
+        // "there was nothing to spawn" (same shape as deck_spawn_team).
+        return { spawned, refused }
       }
 
       case 'deck_save_template': {

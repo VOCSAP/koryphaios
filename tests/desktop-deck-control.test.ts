@@ -81,6 +81,7 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   restarted: string[];
   leadMcpCalls: { token: string; callerId: string; allowedTools: readonly string[] }[];
   revokedLeadCallerIds: string[];
+  spawnOpts: { checkpoint: boolean; hasLead: boolean }[];
 } {
   const closed: string[] = [];
   const removedWt: string[] = [];
@@ -88,6 +89,11 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   const approvals: SpawnSummary[][] = [];
   const spawnInputs: CreateSessionInput[] = [];
   const restarted: string[] = [];
+  // Card 89cb66f9 (review round 1): captures what deck-control.ts ACTUALLY
+  // passes as `opts` to spawnTemplateEntry -- the previous stub threw it
+  // away, so a mutation of `checkpoint`/`hasLead` in the case body stayed
+  // green under every test.
+  const spawnOpts: { checkpoint: boolean; hasLead: boolean }[] = [];
   // Card 6c380073 audit fix #3: captures what spawnEntry ACTUALLY passes to
   // writeTeamLeadMcpConfig, so a test can assert the real identity/scope
   // instead of only the stub's fixed return value (the coverage gap the
@@ -104,6 +110,7 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
     restarted,
     leadMcpCalls,
     revokedLeadCallerIds,
+    spawnOpts,
     listAgents: () => ["team-lead", "dev", "reviewer"],
     listModels: () => [{ id: "opus", label: "Opus" }],
     listPresets: () => [],
@@ -133,7 +140,19 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
       removedWt.push(path);
     },
     listTemplates: () => [{ path: "/t.json", name: "team", source: "global", sessionCount: 2 }],
-    applyTemplate: async () => 2,
+    // Card 89cb66f9: overridable per test via `deps.resolveTemplate = ...`.
+    // Default: two plain entries, mirroring the old fixed `applyTemplate: async () => 2` stub.
+    resolveTemplate: () => [{ name: "tpl-a" }, { name: "tpl-b" }],
+    spawnTemplateEntry: async (input, opts) => {
+      spawnInputs.push(input);
+      spawnOpts.push(opts);
+      // Mirrors index.ts's real spawnTemplateEntry: hasLead:true strips the
+      // incoming lead field (a live lead already exists), same as
+      // `opts.hasLead ? { ...input, lead: undefined } : input`.
+      const s = fakeSession(`tpl-spawned-${++n}`, { name: input.name ?? "peer", lead: opts.hasLead ? undefined : input.lead });
+      state.sessions.push(s);
+      return s;
+    },
     saveTemplate: (name) => `/templates/${name}.json`,
     announce: async () => 3,
     // Team-spawn deps (TS2-TS4): hands-free defaults, overridable per test.
@@ -806,6 +825,148 @@ test("deck_spawn_team: batch cap and pre-approval validation", async () => {
 
   const empty = await call(srv, "deck_spawn_team", { team: [] });
   expect(empty.status).toBe(400);
+});
+
+// ----- Card 89cb66f9: deck_apply_template used to spawn unconditionally --
+// no capCheck, no approveSpawn, and its tiles never entered ownedSessions
+// because the old dep returned only a count. These tests pin the fix:
+// resolveTemplate/spawnTemplateEntry mirror deck_spawn_team's own guard shape.
+
+test("deck_apply_template: capCheck + ONE approveSpawn for the whole batch, ownedSessions written per tile", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const applied = await call(srv, "deck_apply_template", { path: "/t.json" });
+  expect(applied.body.ok).toBe(true);
+  expect((applied.body.result as { spawned: number; refused: number }).spawned).toBe(2);
+  expect((applied.body.result as { spawned: number; refused: number }).refused).toBe(0);
+  // ONE approval call carrying the whole template batch, never one per entry.
+  expect(deps.approvals.length).toBe(1);
+  expect(deps.approvals[0]!.length).toBe(2);
+  // Checkpoint covers the whole batch: true only for the FIRST tile actually
+  // spawned, false for every subsequent one (review round 1, geste 1a-c).
+  expect(deps.spawnOpts.map((o) => o.checkpoint)).toEqual([true, false]);
+
+  // Prove ownership was actually WRITTEN, not just that spawnTemplateEntry
+  // ran: closing each spawned tile as the SAME caller must succeed -- the
+  // only externally observable proof, since ownedSessions is private state.
+  const listed = await call(srv, "deck_list_sessions");
+  const sessions = (listed.body.result as { sessions: { id: string }[] }).sessions;
+  expect(sessions.length).toBe(2);
+  for (const s of sessions) {
+    const closeOk = await call(srv, "deck_close_session", { id: s.id });
+    expect(closeOk.body.ok).toBe(true);
+  }
+});
+
+test("deck_apply_template: a foreign caller cannot close a template-spawned tile", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  await call(srv, "deck_apply_template", { path: "/t.json" });
+  const listed = await call(srv, "deck_list_sessions");
+  const [first] = (listed.body.result as { sessions: { id: string }[] }).sessions;
+
+  const other = srv.mintCaller("other-caller", null);
+  const closeRefused = await call(srv, "deck_close_session", { id: first!.id }, other.token);
+  expect(closeRefused.status).toBe(400);
+  expect(closeRefused.body.error).toContain("refused");
+  expect(deps.closed).toEqual([]);
+});
+
+test("deck_apply_template: batch cap refuses the whole template before any tile spawns or approval is asked", async () => {
+  const state = { sessions: Array.from({ length: SPAWN_CAP - 1 }, (_, i) => fakeSession(`live-${i}`)) };
+  const deps = makeDeps(state);
+  deps.resolveTemplate = () => [{ name: "a" }, { name: "b" }]; // 7 live + 2 > SPAWN_CAP(8)
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const over = await call(srv, "deck_apply_template", { path: "/t.json" });
+  expect(over.status).toBe(400);
+  expect(over.body.error).toContain("spawn cap");
+  expect(deps.approvals).toEqual([]);
+  expect(deps.spawnInputs).toEqual([]);
+});
+
+test("deck_apply_template: resolveTemplate returning null spawns nothing and skips approveSpawn", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  deps.resolveTemplate = () => null;
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const applied = await call(srv, "deck_apply_template", { path: "/missing.json" });
+  expect(applied.body.ok).toBe(true);
+  expect((applied.body.result as { spawned: number; refused: number }).spawned).toBe(0);
+  expect((applied.body.result as { spawned: number; refused: number }).refused).toBe(0);
+  expect(deps.approvals).toEqual([]);
+});
+
+test("deck_apply_template: an operator refusal on one entry skips that tile, its ownedSessions entry, and is counted in `refused`", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  deps.resolveTemplate = () => [{ name: "no" }, { name: "yes" }];
+  deps.approveSpawn = async (entries) => entries.map((_, i) => i === 1);
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  const applied = await call(srv, "deck_apply_template", { path: "/t.json" });
+  const result = applied.body.result as { spawned: number; refused: number };
+  expect(result.spawned).toBe(1);
+  expect(result.refused).toBe(1);
+  expect(deps.spawnInputs.length).toBe(1);
+  expect((deps.spawnInputs[0] as { name?: string }).name).toBe("yes");
+  // Review round 2 majeur: this is the ONE test that produces a partial
+  // refusal, so it is the only one that can distinguish "checkpoint the
+  // first tile ACTUALLY spawned" (spawned===0) from "checkpoint the first
+  // LOOP index" (i===0) -- entry 0 is refused, entry 1 (i=1) is the one that
+  // spawns and must still get checkpoint:true.
+  expect(deps.spawnOpts.map((o) => o.checkpoint)).toEqual([true]);
+
+  // The surviving tile really is owned (not merely spawned): the same caller
+  // can close it -- the refused entry left no ownedSessions entry to prove
+  // absence of, so this closes the loop on the one that DID spawn.
+  const listed = await call(srv, "deck_list_sessions");
+  const sessions = (listed.body.result as { sessions: { id: string }[] }).sessions;
+  expect(sessions.length).toBe(1);
+  const [survivor] = sessions;
+  const closeOk = await call(srv, "deck_close_session", { id: survivor!.id });
+  expect(closeOk.body.ok).toBe(true);
+});
+
+test("deck_apply_template: hasLead decided ONCE before the batch -- true strips the crown from every tile, false lets the template's own lead land", async () => {
+  // hasLead=true: a live lead already exists, so spawnTemplateEntry must be
+  // called with opts.hasLead=true for every entry, never recomputed mid-loop.
+  const withLiveLead = { sessions: [fakeSession("existing-lead", { lead: true })] as SessionRuntime[] };
+  const deps1 = makeDeps(withLiveLead);
+  deps1.resolveTemplate = () => [{ name: "a" }, { name: "b", lead: true }];
+  const srv1 = await startDeckControl(deps1);
+  servers.push(srv1);
+  await call(srv1, "deck_apply_template", { path: "/t.json" });
+  expect(deps1.spawnOpts.map((o) => o.hasLead)).toEqual([true, true]);
+  // Review round 2 nit 3: the stub SIMULATES the real strip
+  // (opts.hasLead ? { ...input, lead: undefined } : input, index.ts) but
+  // nothing read the produced session's `lead` field until now -- assert the
+  // behaviour the lot actually claims, not just the opts it was called with.
+  expect(withLiveLead.sessions.filter((s) => s.name === "a" || s.name === "b").every((s) => !s.lead)).toBe(
+    true
+  );
+
+  // hasLead=false: no live lead, so the template's own lead:true entry must
+  // be allowed through (opts.hasLead=false for every entry of this batch).
+  const withoutLead = { sessions: [] as SessionRuntime[] };
+  const deps2 = makeDeps(withoutLead);
+  deps2.resolveTemplate = () => [{ name: "a", lead: true }, { name: "b" }];
+  const srv2 = await startDeckControl(deps2);
+  servers.push(srv2);
+  await call(srv2, "deck_apply_template", { path: "/t.json" });
+  expect(deps2.spawnOpts.map((o) => o.hasLead)).toEqual([false, false]);
+  expect(withoutLead.sessions.find((s) => s.name === "a")!.lead).toBe(true);
+  expect(withoutLead.sessions.find((s) => s.name === "b")!.lead).toBeFalsy();
 });
 
 // ----- supervisor mcp-config file -----

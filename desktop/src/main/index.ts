@@ -2473,26 +2473,27 @@ const controlDeps: DeckControlDeps = {
     journal.add('worktree', `worktree removed: ${path} (supervisor)`)
   },
   listTemplates: () => listTemplates(getConfig().projectDir),
+  // Card 89cb66f9: split in two so deck-control.ts can capCheck/approveSpawn
+  // the whole batch and write ownedSessions per tile -- the old applyTemplate
+  // returned only a count (inputs.length), never the created sessions.
+  // resolveTemplate is PURE (path containment + repo-local shell-field
+  // approval via resolveTemplateInputs, unchanged): no spawn side effect.
+  resolveTemplate: (path) => resolveTemplateInputs(path),
   // Append-only by contract (deck-control): never closes existing tiles.
-  applyTemplate: async (path) => {
-    const inputs = resolveTemplateInputs(path)
-    if (!inputs) return 0
-    // One checkpoint covers the whole batch (all spawn into the project dir).
-    if (inputs.length > 0) await checkpointBeforeSpawn(getConfig().projectDir)
-    // Template lead only lands when the window has none yet (PLAN C18).
-    const hasLead = service.list().some((s) => s.lead && s.status !== 'exited')
-    for (const input of inputs) {
-      await createSessionWithWorktree(
-        service,
-        getConfig().projectDir,
-        hasLead ? { ...input, lead: undefined } : input,
-        undefined,
-        getWorktreeInit(),
-        sandboxGate,
-        warmSandboxTranscripts
-      )
-    }
-    return inputs.length
+  // `checkpoint`/`hasLead` are decided ONCE by the caller for the whole
+  // batch (same semantics the old inline loop had) and threaded through here
+  // rather than recomputed per tile.
+  spawnTemplateEntry: async (input, opts) => {
+    if (opts.checkpoint) await checkpointBeforeSpawn(getConfig().projectDir)
+    return createSessionWithWorktree(
+      service,
+      getConfig().projectDir,
+      opts.hasLead ? { ...input, lead: undefined } : input,
+      undefined,
+      getWorktreeInit(),
+      sandboxGate,
+      warmSandboxTranscripts
+    )
   },
   saveTemplate: (name, local) => {
     const tpl = toTemplate(service.captureSessions(), name)
