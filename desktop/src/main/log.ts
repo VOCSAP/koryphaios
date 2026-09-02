@@ -154,7 +154,7 @@ export function logWarn(scope: string, message: string, context?: unknown): void
 
 /**
  * Central error sink for the main process: file + console (dev) + journal.
- * Never throws. Use for every caught-but-previously-silent failure.
+ * Never throws. Use for every caught failure that would otherwise stay silent.
  */
 export function reportError(scope: string, message: string, error?: unknown): void {
   try {

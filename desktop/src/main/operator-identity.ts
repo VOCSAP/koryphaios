@@ -1,27 +1,14 @@
-// Operator identity for remote approvals (PLAN-notifications-mobiles N0).
-//
-// WHY A NEW AXIS. The Deck already knows a host, a cwd, a group and a peer_id.
-// None of them names a PERSON: two Windows accounts on one machine share
-// `hostname()`, so routing notifications by host would send account B's
-// approvals to account A. The operator credential fixes that, and gets its
-// isolation for free — this file lives in the app-state directory, which is
-// per-OS-user (%APPDATA% / $XDG_CONFIG_HOME). Two accounts therefore mint two
-// credentials without a single line of code deciding it.
-//
-// WHAT IS STORED. An Ed25519 keypair. The broker only ever receives the PUBLIC
-// half, and `operator_id` is its digest, so the binding is self-certifying and
-// a leak of the broker database grants nobody the ability to act as this
-// operator. The private half is encrypted at rest with the injected cipher
-// (safeStorage), falling back to clear text when the OS keychain is missing so
-// the feature never simply breaks — the same explicit-fallback contract as
-// provider-secrets.ts.
-//
-// MULTI-PC. Enrolling a second machine copies the credential (an operator is a
-// person, not a device), which is why exportEnrolment/applyEnrolment exist. The
-// inventory of machines lives broker-side.
-//
-// Pure module: no electron import, directory and cipher injected, so it is
-// unit-testable under bun (inbox-store pattern).
+// operator_id names a person, not a host, cwd, group, or peer_id: two OS
+// accounts on one machine share hostname(), so routing notifications by host
+// would send one account's approvals to the other.
+// The broker only ever receives the Ed25519 public half; operator_id is its
+// digest, so the binding is self-certifying and a leak of the broker database
+// grants nobody the ability to act as this operator.
+// The private half is encrypted at rest with the injected cipher, falling back
+// to clear text when the OS keychain is missing so the feature never simply
+// breaks.
+// Enrolling a second machine copies the credential rather than minting a new
+// one, since an operator is a person, not a device.
 
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
@@ -116,22 +103,14 @@ function computeOsUserHash(salt: string): string {
 }
 
 /**
- * Load the operator identity, creating one on first run. Returns null when
- * the identity file exists but its content could not be decrypted -- which
- * is NOT proof the identity is gone: a null here is exactly as likely to
- * mean the OS keychain is merely unavailable right now (locked, mid
- * migration) as it is to mean real corruption, and this function cannot
- * tell the two apart from in here (card 469f3176 review, mutation Q1: a
- * caller that treated null as "corrupt, regenerate" without checking which
- * one it was destroyed a live private key over a transient outage).
- *
- * Every caller except ONE must treat a null return the conservative way:
- * surface a re-enrolment prompt, never silently start a new identity. The
- * one exception is ApprovalRuntime.arm() (approval-runtime.ts), which
- * self-heals on a GENUINE corruption -- gated on `cipher.isAvailable()` so a
- * transient outage never reaches it, and backed by
- * createOperatorIdentity's mandatory backup-before-overwrite as the second
- * line of defense should that gate ever be wrong.
+ * A null return means the identity file exists but could not be decrypted — not
+ * proof the identity is gone, since this is equally likely to mean the OS
+ * keychain is merely unavailable right now (locked, mid migration) as real
+ * corruption.
+ * Every caller except ApprovalRuntime.arm() must treat a null return
+ * conservatively: surface a re-enrolment prompt, never silently start a new
+ * identity. arm() self-heals on genuine corruption only because it's gated on
+ * cipher.isAvailable(), so a transient outage never reaches it.
  */
 export function loadOperatorIdentity(dir: string, cipher: SecretCipher): OperatorIdentity | null {
   const file = identityPath(dir)

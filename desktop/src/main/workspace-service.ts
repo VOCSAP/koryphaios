@@ -68,20 +68,12 @@ function ownProcessStartedAt(): number {
 }
 
 /**
- * THIS machine's boot instant (epoch ms, rounded to the nearest second).
- * `os.uptime()` is monotonic seconds since boot, independent of wall-clock
- * adjustments, so this is free (no subprocess, works in a minimal container)
- * and available on every platform -- unlike querying a DIFFERENT pid's start
- * time (review round 4: that approach was dropped, see `isLockLive`'s
- * same-host boot check in workspace-lock.ts for how this value is used as a
- * one-way "no process survives a reboot" reclaim signal, combined with
- * heartbeat freshness, falling back to a bare pid-alive check when
- * inconclusive). Sampled ONCE (`WorkspaceService.bootAnchorInstant`) and
- * advanced afterward via monotonic process uptime deltas rather than
- * re-reading `Date.now()` on every call -- see
- * `WorkspaceService.currentBootInstant` (review round 5: a long-lived
- * process re-deriving this from `Date.now()` on every check straddles any
- * NTP correction that occurs during its lifetime).
+ * os.uptime() is monotonic since boot and unaffected by wall-clock adjustments,
+ * and needs no subprocess -- cheaper than querying another process's start
+ * time.
+ * Sampled once and advanced via monotonic uptime deltas rather than re-reading
+ * Date.now(), so a long-lived process doesn't drift across an NTP correction
+ * mid-life.
  */
 function initialBootInstant(): number {
   return Math.round((Date.now() - osUptime() * 1000) / 1000) * 1000
@@ -241,19 +233,13 @@ export class WorkspaceService {
    * race was invisible).
    */
   private own(id: string): boolean {
-    // Already own this id -- do NOT call acquireLock() again: it refuses
-    // whenever the existing lock is live (isLockLive checks pid-alive, not
-    // identity), so re-acquiring our own live lock would spuriously fail,
-    // turning a self-restore (restore() called on the already-current
-    // workspace) into a reported error over nothing (flagged before landing
-    // any code: card 438c15e3, "own(x) when currentId already x"). Nothing
-    // to acquire or release: the on-disk lock already reflects this
-    // instance, untouched either way. `this.currentId` alone is an
-    // IN-MEMORY belief, not proof (review round 7): re-read the on-disk
-    // lock and confirm it is still stamped with THIS identity via ownsLock
-    // before taking the shortcut -- if a third party has since reclaimed
-    // the file, fall through to the normal acquire path instead of writing
-    // under a lock we no longer hold.
+    // Not calling acquireLock() again here: it refuses against any live lock,
+    // including our own (isLockLive checks pid-alive, not identity), turning a
+    // self-restore into a false error.
+    // this.currentId is only an in-memory belief; ownsLock reconfirms the
+    // on-disk lock still names this identity before skipping acquire/release,
+    // falling through to the normal path if a third party has since reclaimed
+    // it.
     if (this.currentId === id) {
       const lock = readLock(this.deps.projectDir, id)
       if (lock && ownsLock(lock, { pid: this.pid, host: this.host })) {
@@ -399,12 +385,8 @@ export class WorkspaceService {
 
   /**
    * Restore a workspace: adopt its scope, swap the session set, set the layout.
-   * Returns a discriminated WorkspaceRestoreResult (card 07134c6a): `ok:true`
-   * after a successful restore, `ok:false` with a reason literal naming
-   * WHICH of the six real no-op/failure causes fired -- never a bare
-   * boolean, so a caller can no longer only guess why (the bug this card
-   * fixes: three of those six reasons used to read as "already owned by
-   * another live window", which is only true for two of them).
+   * Returns a discriminated WorkspaceRestoreResult naming which of six
+   * no-op/failure reasons applies, never a bare boolean.
    */
   restore(id: string): WorkspaceRestoreResult {
     const ws = loadWorkspace(this.deps.projectDir, id)
@@ -478,21 +460,13 @@ export class WorkspaceService {
         'workspace',
         `restore(${id}) lost the lock race after swapping sessions -- ownership unresolved`
       )
-      // Card 07134c6a C2 (team-lead decision, operator's data at stake):
-      // own() failing here leaves `this.currentId` pointing at the OLD
-      // workspace while the LIVE sessions are already the NEW workspace's
-      // (restoreFrom() above already ran). Left alone, the debounced
-      // auto-save armed by the 'changed' event restoreFrom() just emitted
-      // would call ensureCurrent() -> own(OLD currentId) -> succeed, and
-      // silently overwrite the OLD workspace's file with the NEW
-      // workspace's sessions. Mirrors startNew()'s own manoeuvre (line 511)
-      // MINUS its saveAuto() call: calling saveAuto() here would COMMIT
-      // that exact overwrite immediately instead of merely risking it
-      // later. The currentId reset below is what actually closes the
-      // corruption path -- releaseLock's own result is still checked and
-      // traced (review correction D2), same shape as startNew()'s own
-      // report a few lines above, so a failure to release the OLD lock is
-      // never lost the way an unchecked call would lose it.
+      // When own() fails here after restoreFrom() already swapped sessions,
+      // this.currentId would otherwise still point at the OLD workspace while
+      // the live sessions belong to the NEW one, letting a debounced auto-save
+      // silently overwrite the OLD workspace's file with the NEW workspace's
+      // sessions.
+      // The currentId reset below closes that path; releaseLock's result is
+      // still checked and traced rather than ignored.
       if (
         this.currentId &&
         !releaseLock(this.deps.projectDir, this.currentId, { pid: this.pid, host: this.host })

@@ -1,17 +1,9 @@
-// Demo driver (REC scripted-scenario lot): one throwaway `claude -p`
-// invocation that drives the embedded browser through the demo-browser MCP
-// bridge while the renderer records the pane. Command/harness composition
-// mirrors utility-inference (system by FILE, question fed via stdin, D5
-// extended to the prompt — roadmap 07dc42c0: the scenario used to ride the
-// command line as a quoted positional arg, but on win32 the PowerShell shell
-// wrap mangles embedded double quotes when re-invoking the native claude.exe,
-// see model-adapters.ts header comment) but a generated --mcp-config replaces
-// the read-only toolset: the agent gets the five demo_* browser tools and
-// NOTHING else — no file tools, no shell (the operator's scenario text is
+// The scenario text is passed via a generated --mcp-config rather than the
+// command line: on win32 the PowerShell wrap mangles embedded double quotes
+// when re-invoking claude.exe.
+// The generated config replaces the toolset entirely with the five demo_*
+// browser tools; no file tools, no shell.
 // data, not the harness: C8 rule).
-//
-// Node builtins only (electron-free): the webview binding lives in
-// browser-drive.ts, the wiring in ipc.ts. Everything here is bun-testable.
 
 import { execFile, type ChildProcess } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'

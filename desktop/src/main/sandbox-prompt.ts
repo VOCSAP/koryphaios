@@ -19,17 +19,11 @@ import { APP_STATE_SUBDIR } from './migrate-data-dir'
 const FLAG_RE = /--append-system-prompt-file "([^"]*)"/
 
 /**
- * The containment root composeSandboxAppendPrompt anchors on: SAME
- * expression as index.ts's `secretsDir()`/local `stateDir` consts
- * (`join(app.getPath('userData'), APP_STATE_SUBDIR)`), factored out here so
- * a test can pin the expression production actually uses instead of an
- * independently-injected tmpdir that could silently diverge from it. This is
- * also exactly the `dir` argument `writeSupervisorSystemPrompt`
- * (supervisor.ts) and `writeEmbeddedAgentPrompt` (team-embedded.ts) write
- * their role prompt files DIRECTLY into (`join(dir, '<name>.md')`) -- the
- * legitimate case this containment check exists to accept, not just refuse.
- * Takes `userDataDir` (== `app.getPath('userData')`) as a parameter rather
- * than importing `electron` itself, which is what keeps this bun-testable.
+ * Same containment root expression production actually uses, factored out so a
+ * test pins it instead of an independently injected tmpdir that could silently
+ * diverge.
+ * Takes userDataDir as a parameter rather than importing electron directly,
+ * which is what keeps this bun-testable.
  */
 export function sandboxPromptRoot(userDataDir: string): string {
   return join(userDataDir, APP_STATE_SUBDIR)
@@ -53,19 +47,14 @@ export function isValidSandboxSessionId(id: string): boolean {
 }
 
 /**
- * Sync realpath-based containment, symlinks included: `target` must resolve
- * strictly inside `root`. Mirrors diff-service.ts's realpathWithin, sync
- * because SessionService's SandboxWrapper.wrap contract is SYNCHRONOUS
- * (`wrap(...): string`, no Promise -- session-service.ts), so the async
- * version cannot be awaited at index.ts's only call site. Missing target /
- * broken symlink / missing root all resolve to `false` (fail closed).
- *
- * Card 9e529177 audit: before this card, --append-system-prompt-file's host
- * path was never readable from inside the container, so an uncontained path
- * was harmless dead weight. wrap() now reads it host-side and injects the
- * content into the sandboxed agent's prompt -- an uncontained path would
- * newly become an exfiltration vector (e.g. ~/.ssh/id_rsa) for a compromised
- * agent with network egress. This is what closes that.
+ * Sync realpath-based containment, symlinks included: target must resolve
+ * strictly inside root. Sync because SandboxWrapper.wrap is a synchronous
+ * contract with no Promise, so an async version couldn't be awaited at its only
+ * call site.
+ * Missing target, broken symlink, or missing root all resolve to false (fail
+ * closed) — wrap() reads this path host-side and injects its content into the
+ * sandboxed agent's prompt, so an uncontained path is an exfiltration vector
+ * for a compromised agent with network egress.
  */
 export function isWithinDir(root: string, target: string): boolean {
   try {

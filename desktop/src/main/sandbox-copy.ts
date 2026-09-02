@@ -1,46 +1,21 @@
-// Sandbox mode (PLAN-SANDBOX M3): the "ephemeral copy" work mode. Instead of
-// bind-mounting the real project, the Deck clones it HOST-side into a throwaway
-// dir and mounts THAT — so agents cannot touch the real tree, while the Deck's
-// git/diff/explorer views keep working (the clone is a normal repo on disk).
-//
-// `git clone --local` shares the object store, so even a large repo clones in
-// well under a second and costs almost no disk.
-//
-// The clone alone is not enough: files that are deliberately gitignored but
-// needed to work (planning notes, local fixtures) would vanish. Hence an
-// operator ALLOW-LIST of globs copied on top — with a hard DENY-LIST that wins
-// over anything configured: secrets (.env*), credential material and huge
-// dependency dirs are denied by shape; the list is not a completeness
-// guarantee, and a sandbox with network access is handed whatever a glob
-// selects that this list doesn't happen to name.
-//
-// Node builtins only (no electron, no @shared alias) so it is bun-testable.
+// Clones the project host-side into a throwaway dir with git clone --local
+// (near-instant, shares the object store) and mounts that, so agents never
+// touch the real tree while git/diff/explorer views keep working on a real
+// repo.
+// An operator allow-list of globs copies gitignored files still needed to work;
+// a hard deny-list of secrets and dependency dirs always wins over it.
 
 import { lstatSync, readdirSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { reportError } from './log'
 
 /**
- * A dot-extension counted as a match wherever it occurs as its own path
- * segment component: at the true end of the string (`server.pem`), or
- * followed by decoration that doesn't extend the extension into a different
- * word AND stays in the SAME path segment (`server.pem.bak`, `key.pem~`, a
- * Windows trailing dot/space, `app.key-mapping.json`). A plain `$` anchor is
- * defeated by any of those; requiring the next character (if any) to be
- * non-alphanumeric keeps `.pem` from matching `.pemx` while still matching
- * every decorated form. The decoration class also excludes `/`: without
- * that, the extension token matched inside a DIRECTORY component too (e.g.
- * `foo.key/bar.txt`), silently denying the whole subtree under a dir merely
- * NAMED like a key file. Once the decoration starts, `/` is allowed to
- * appear again (`[^/]*`) so multi-dot same-segment decoration keeps working;
- * it is only the character immediately after the extension that must not be
- * a segment separator.
- *
- * Residual: same-segment decoration is still denied even though it isn't a
- * secret (`app.key-mapping.json`, `docs/api.key-rotation.md`,
- * `deploy.pem_notes.md`, `README.keystore-guide.md`). Deliberate fail-closed
- * trade-off -- a file whose name merely LOOKS like a key/cert derivative
- * stays out rather than risk a real one slipping through a cleverer suffix.
+ * A dot-extension matches at the true end of a path segment or when followed by
+ * same-segment decoration (server.pem.bak, key.pem~), but never across a / — so
+ * a directory merely named like a key file (foo.key/bar.txt) is not denied
+ * wholesale.
+ * Requiring the next character to be non-alphanumeric keeps .pem from matching
+ * .pemx while still matching every decorated form.
  */
 function extDeny(ext: string): RegExp {
   return new RegExp(`\\.${ext}(?:[^a-zA-Z0-9/][^/]*)?$`, 'i')
@@ -199,17 +174,12 @@ export function globToRegExp(pattern: string): RegExp {
 }
 
 /**
- * Expand one operator-entered glob into the RegExp set a path is tested
- * against: normalize (trim + backslash-to-slash, so a Windows-typed `**\*`
- * means the same as `**\/*`), then a pattern with no separator also matches
- * at any depth (`PLAN-*.md` catches `docs/PLAN-x.md` — the intuitive reading
- * of a bare filename pattern). Single source of truth for `selectCopyPaths`
- * below: `isUnboundedGlob` (shared/types.ts) duplicates this exact
- * normalize+expand so it classifies a glob the same way this function
- * actually matches it — audit 94f8cc0c found the two had drifted (validation
- * compared a raw string, matching normalized-then-expanded it first), which
- * let `*.*`, `**\/**`, `?*`, `**\/*.*` and `**\*` slip past as "not unbounded"
- * while resolving to a whole-tree match here. Keep both copies in lock-step.
+ * Normalizes a glob (trim, backslashes to slashes), then when it has no
+ * separator also matches at any depth — PLAN-*.md catches docs/PLAN-x.md, the
+ * intuitive reading of a bare filename pattern.
+ * shared/types.ts's isUnboundedGlob must classify a glob the same way this
+ * matches it; the two drifted once (card 94f8cc0c) and let unbounded globs pass
+ * as bounded.
  */
 function expandCopyGlob(glob: string): RegExp[] {
   const g = glob.trim().replace(/\\/g, '/')
@@ -244,56 +214,27 @@ function selectRawMatches(relPaths: string[], globs: string[]): string[] {
 }
 
 /**
- * True when a `path/x` probe still matches whatever denied the bare
- * `segment`, i.e. the pattern that fired is SUBTREE-shaped
- * (`(^|\/)node_modules(\/|$)` and its siblings): its own anchors already
- * treat "followed by / or end" as equivalent, so an isolated segment and
- * that same segment embedded mid-path agree on the verdict. The other
- * DENY_PATTERNS entries -- every `extDeny`, and the `id_rsa`-style
- * end-anchors -- do NOT deny a directory merely named like their target
- * (extDeny's own doc comment: excluding `/` from the decoration class is
- * exactly what keeps `foo.key/bar.txt` copyable), so for those the probe
- * fails and this returns false. Empirical rather than a hand-classified
- * list of "which DENY_PATTERNS entries are subtree-shaped": exactly the
- * kind of second copy that drifts from the source of truth, the failure
- * mode `expandCopyGlob`'s doc comment warns about (card 94f8cc0c).
+ * True only when the pattern that denied a bare segment is subtree-shaped (its
+ * own anchors already treat 'followed by / or end' as equivalent) — an
+ * extension or exact-name deny does not deny a directory merely named like its
+ * target.
  */
 function isSubtreeDenyMatch(segment: string): boolean {
   return isDeniedCopyPath(segment) && isDeniedCopyPath(`${segment}/x`)
 }
 
 /**
- * True when SOME literal (wildcard-free) path segment of `glob` already
- * falls inside the deny-list, so every real match the glob could ever
- * produce is refused no matter where the wildcards around it sit --
- * `node_modules/**`, `**\/node_modules/**` and `*\/node_modules/**` all say
- * the same thing and must all classify the same way. An earlier version only
- * checked the literal PREFIX (text before the first wildcard), which
- * silently missed the last two: a leading `**`/`*` ("at any depth") is a
- * common, natural way to write this glob, and it makes the prefix the empty
- * string.
- *
- * A non-last segment is only tested via `isSubtreeDenyMatch` (see above) --
- * NOT the full pattern set -- because a mid-path segment always denotes a
- * DIRECTORY component, and only subtree-shaped patterns are entitled to deny
- * a directory's contents. Skipping that distinction was a real bug caught in
- * review: testing `report.key` (a segment, not a full path) against the raw
- * pattern set matches via `extDeny('key')`, but `report.key/notes.md` as an
- * actual candidate path does not -- extDeny deliberately excludes `/` from
- * its decoration, so `report.key/**` must NOT be denied. The glob's own LAST
- * segment, when itself literal, additionally gets the full pattern set: it
- * is the one position where "this text" and "the file a real match would
- * land on" coincide, so `docs/id_rsa` (no trailing wildcard) is correctly
- * denied by the `id_rsa` end-anchor even though that pattern is not
- * subtree-shaped.
- *
- * Exists because `walkProjectFiles`'s SKIP_DIRS prune never visits these
- * trees at all -- a real performance requirement, not a bug -- so a glob
- * that ONLY targets one of them produces zero raw matches with no walk ever
- * having looked. Without this check such a glob is indistinguishable from an
- * honest typo (`unmatched`), even though retyping the same text can never
- * fix it: only the deny-list itself, which the operator does not control,
- * could.
+ * True when some literal (wildcard-free) segment of `glob` already falls
+ * inside the deny-list, so every real match is refused wherever the
+ * wildcards sit: `node_modules/**`, `**\/node_modules/**` and
+ * `*\/node_modules/**` classify the same way (a literal-prefix check misses
+ * the last two, their prefix is empty). A non-last segment is tested with
+ * isSubtreeDenyMatch only: a mid-path segment is a directory component and
+ * only subtree-shaped patterns may deny a directory's contents (extDeny
+ * excludes `/`, so `report.key/**` is not denied); the last segment, when
+ * literal, gets the full pattern set (`docs/id_rsa` hits the `id_rsa`
+ * end-anchor). Needed because walkProjectFiles prunes SKIP_DIRS: a glob
+ * targeting only such a tree yields zero matches and would read as a typo.
  */
 function globIsDenied(glob: string): boolean {
   const g = glob.trim().replace(/\\/g, '/')
@@ -311,18 +252,10 @@ export interface WalkLimits {
 }
 
 /**
- * Collect repo-relative file paths of `root`, skipping heavy/forbidden dirs.
  * Best-effort: an unreadable subtree is skipped rather than failing the spawn.
- *
- * Truncation (either cap below stops the walk before the tree is fully
- * enumerated) used to be silent -- card 5ff9a432 -- so an operator whose
- * project exceeds either cap got a copy plan quietly missing files with no
- * signal anywhere. `truncated` is set at the exact break that fires because
- * of a cap (never inferred from the stack being non-empty afterward: the
- * stack can legitimately be empty even though the CURRENT directory's
- * remaining sibling names were cut off mid-batch by the visits cap), and
- * reportError fires at most once per call, after the loop, with the file
- * count actually returned.
+ * truncated is set at the exact break caused by a cap, never inferred from the
+ * stack being empty afterward — the stack can legitimately empty out even when
+ * sibling names were cut off mid-batch by the visits cap.
  */
 export function walkProjectFiles(root: string, limits: WalkLimits = {}): string[] {
   const maxEntries = limits.maxEntries ?? MAX_WALK_ENTRIES

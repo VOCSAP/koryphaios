@@ -1,21 +1,12 @@
-// Persistence layer for graph chat documents (EXPLORATION-graph-chat C23).
-//
-// Desktop-local by decision D7 (unlike the roadmap, which lives in the broker
-// and is shared with the agents): one JSON file per PROJECT under the app
-// state dir, keyed by the deck project_key (git-remote-normalized, so the
-// same project across worktrees/clones shares its graphs).
-//
-// Encrypted at rest (PLAN K8): conversations are operator-personal, so when a
-// SecretCipher (Electron safeStorage, injected by ipc.ts like the C29 provider
-// keys) is available, the file is an envelope { v, cipher: 'safeStorage',
-// payload: base64(encrypt(json)) } instead of the clear doc array. Reading
-// accepts both shapes -- a legacy clear file keeps loading and is re-encrypted
-// by migrateGraphsAtRest (called before each list) or the next save. When the
-// OS keychain is unavailable (e.g. Linux without a keyring) the store falls
-// back to clear text rather than losing the feature, mirroring scope-secrets.
-//
-// Node builtins + relative imports only (no electron), dir + cipher passed as
-// parameters: unit-testable under bun, like snippet-store/template-store.
+// Desktop-local rather than broker-shared: graph chat documents are
+// operator-personal, unlike the roadmap.
+// One JSON file per project, keyed by the git-remote-normalized project_key, so
+// the same project shares its graphs across worktrees/clones.
+// Encrypted at rest via Electron safeStorage when available; falls back to
+// clear text when the OS keychain is unavailable (e.g. Linux without a keyring)
+// rather than losing the feature.
+// A legacy clear file keeps loading and gets re-encrypted on the next list or
+// save.
 
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'

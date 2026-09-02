@@ -277,31 +277,14 @@ export function registerIpc({
 }: IpcDeps): void {
   // ----- sessions -----
   regHandle('sessions:list', () => service.list())
-  // Worktree handling (PLAN C4) lives in the shared create path, also used by
-  // the supervisor's deck-control spawn.
-  //
-  // Card 3c322f10 (piece 2, operator route): the ONLY site that ever poses
-  // `teamLeadDeckBridge`. Computed HERE, main-side, from `input?.agent`
-  // straight -- NEVER read off `input` itself and forwarded, and never a
-  // property merged into the object passed to createSessionWithWorktree
-  // (which stays `input ?? {}`, byte-for-byte what a companion/phone client
-  // sent -- see CreateSessionInput.mcpConfig's own doc, shared/types.ts, for
-  // why no boolean may ever live on that object). This channel is
-  // CHANNEL_TIERS 2 (shared/companion.ts), i.e. remote-reachable via
-  // api-registry.ts's invokeRemote.
-  //
-  // STATE THE BOUNDARY PRECISELY (security review correction, 2026-09-02):
-  // `opts` cannot be forged AS A PROPERTY -- a remote payload has no field
-  // name that lands in it, so it cannot grant itself the bridge by JSON
-  // alone. But `opts.teamLeadDeckBridge` is a PURE FUNCTION of `input.agent`,
-  // a field the caller fully controls: a paired companion that requests
-  // `agent: 'team-lead'` DOES get the bridge, today, by design. What makes
-  // this acceptable is NOT unforgeability -- it is the absence of marginal
-  // power: a paired companion can already call `pty:input` (CHANNEL_TIERS 1)
-  // into ANY live tile, i.e. execute an arbitrary command by shell-prefix
-  // already, so the 3 deck-control tools grant nothing that channel did not
-  // already grant. Operator arbitration, 2026-09-02 -- if that tier-1 power
-  // is ever revoked or scoped down, this boundary must be re-examined.
+  // teamLeadDeckBridge is computed here from input?.agent directly, never read
+  // off input and forwarded — no boolean may ride along on the object passed to
+  // createSessionWithWorktree, which stays byte-for-byte what the caller sent.
+  // A paired companion requesting agent:'team-lead' does get the bridge, by
+  // design; that's acceptable only because such a companion can already call
+  // pty:input into any live tile — execute an arbitrary command by shell-prefix
+  // already — so these tools grant no additional power. Re-examine if that
+  // tier-1 power is ever revoked or scoped down.
   regHandle('sessions:create', async (_e, input: CreateSessionInput) => {
     const teamLeadDeckBridge = input?.agent === 'team-lead'
     // Card 3c322f10 (piece 2, operator route, team-lead arbitration): started
@@ -1150,18 +1133,10 @@ export function registerIpc({
     // busy) -- see docs/DESIGN-ACTIVITY-PREDICATE.md section 5.
     const busy = live.filter((r) => r.activity === 'working')
     const unknown = live.filter((r) => r.activity === 'unknown')
-    // Round-3 mutation review (card aaf4537d, item 6): paused/parkedCards are
-    // still hardcoded 0 -- STALE justification corrected here. POST
-    // /roadmap/lock-park is implemented broker-side now (this same card), so
-    // "stay 0 until the route exists" no longer holds. What is still missing
-    // is the DERIVATION itself: a tile is paused iff its peerId holds >=1
-    // non-expired parked lock (per LOCK_PARK_TTL_SEC), and computing that
-    // here needs a roadmap read scoped to this project's live peerIds --
-    // `service.list()` above has no roadmap access at all. That is a real
-    // feature addition (a new broker read + wiring), out of scope for a
-    // comment-only fix; left as 0 deliberately (an honest "not computed",
-    // not a fabricated count) and escalated to the team-lead rather than
-    // implemented inline.
+    // paused and parkedCards stay hardcoded 0: computing them needs a roadmap
+    // read scoped to this project's live peerIds, which this handler doesn't
+    // have. Deliberately an honest 'not computed' rather than a fabricated
+    // count.
     return { live: live.length, busy: busy.length, unknown: unknown.length, paused: 0, parkedCards: 0 }
   })
 

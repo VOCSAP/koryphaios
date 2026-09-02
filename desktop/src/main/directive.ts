@@ -51,34 +51,21 @@ export interface DirectiveTargets {
 }
 
 /**
- * Resolve a directive card's target_peer_ids against the current sessions:
- * well-formed ids mapping to EXACTLY ONE live (non-exited, peer-resolved)
- * tile become `matched`; every other requested id — malformed, dormant,
- * absent, or ambiguous (see below) — is `missing` so the caller can journal
- * it (never a silent drop).
- *
- * Deliberately no owner/authority dimension: this resolver only maps a
- * peer_id to a live tile, it never asks whether the card's author may act
- * on that tile. That question WAS put to the operator on 2026-08-25 and he
- * decided NOT to treat it -- risk accepted explicitly, see
- * docs/DESIGN-QUEUE-WRITE-AUTHORITY.md section 4 ("Le cas `directive` a ete
- * arbitre, ne pas le rouvrir"). No AUTHORITY check enforces it anywhere
- * today, broker included; a guard here would reopen a closed arbitrage in
- * the wrong layer.
+ * Malformed, dormant, absent, or ambiguous ids all resolve to missing, never a
+ * silent drop.
+ * Deliberately no owner/authority check: this only maps peer_id to a live tile,
+ * never whether the card's author may act on it.
  */
 export function resolveDirectiveTargets(
   targetPeerIds: string[],
   sessions: SessionRuntime[]
 ): DirectiveTargets {
   const live = sessions.filter((s) => s.status !== 'exited' && s.peerId)
-  // Peer-id collision guard (measured 2026-08-27: two live tiles can share a
-  // peerId). Array.find would silently pick the first match and let a
-  // destructive directive (e.g. clear) hit an unintended tile. Count live
-  // tiles per peerId up front so a duplicate fails CLOSED into `missing`
-  // instead of being picked -- `ambiguous` only annotates WHY within that
-  // same bucket, both existing callers still see a complete, unchanged
-  // `missing`. Counting is scoped to `live` on purpose: an `exited` tile
-  // sharing an id with a live one is not a collision.
+  // Array.find would silently pick the first of two live tiles sharing a
+  // peerId; counting live tiles per id instead fails a duplicate closed into
+  // missing.
+  // Counting is scoped to live tiles only: an exited tile sharing an id with a
+  // live one is not a collision.
   const liveCounts = new Map<string, number>()
   for (const s of live) {
     // `live`'s filter predicate is not a type guard, so `s.peerId` is still

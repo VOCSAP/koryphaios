@@ -1,21 +1,9 @@
-// Sandbox mode (PLAN-SANDBOX M2): projection of the OPERATOR's Claude config
-// into the sandbox container, so agents keep the global CLAUDE.md, agents,
-// skills and plugins that shape the operator's workflow.
-//
-// SECURITY — why a COPY and never a mount (CLAUDE.md hostile input #5): the host
-// `~/.claude` carries `settings.json`, whose hooks execute on the HOST in
-// every non-sandboxed session. A read-write mount would let a compromised
-// agent write a hook inside the sandbox and have it run outside — a clean
-// sandbox escape. A read-only mount is not an option either (the CLI writes
-// to ~/.claude in normal operation). So: an explicit ALLOW-LIST of entries is
-// copied in at container start; the agent may wreck its copy, it dies with
-// the container.
-//
-// The projection also honours an OVERLAY dir (`~/.claude/sandbox-overrides/`):
-// a same-named entry there wins, which is how a Windows operator supplies
-// Linux equivalents of PowerShell hooks.
-//
-// Node builtins only (no electron, no @shared alias) so it is bun-testable.
+// A read-write mount of the host ~/.claude would let a compromised agent write
+// a hook that later runs on the host; a read-only mount isn't viable either
+// since the CLI writes to ~/.claude in normal operation.
+// So an explicit allow-list of entries is copied into the container at start;
+// the agent may wreck its copy, it dies with the container. sandbox-overrides/
+// overlay entries win over the same-named copied one.
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
@@ -70,19 +58,13 @@ const SIG_MAX_DEPTH = 6
 export const SIG_MAX_ENTRIES = 5000
 
 /**
- * A cheap fingerprint of what WOULD be projected, so the copy can be skipped
- * when nothing changed.
- *
- * Why it exists: the projection is one `docker cp` per entry, and re-running it
- * on every agent spawn cost the operator about fifteen silent seconds each
- * time. Caching on "already projected once" alone would have been worse than
- * the slowness -- it would silently ignore an edit to the global CLAUDE.md
- * until the container was rebuilt. So the skip is conditional on this
- * signature, which walks the projected entries (following symlinks: many
- * operators keep them as links into a config repo) and folds in every file's
- * size and mtime. Bounded by depth and count, and any unreadable path folds in
- * as a marker rather than throwing -- a signature that changes too often only
- * costs a copy, one that throws would break spawning.
+ * Skips the copy when nothing changed: re-running the projection on every spawn
+ * cost about fifteen seconds. Caching on 'already projected once' alone would
+ * silently ignore a later edit to the global CLAUDE.md, so the skip is
+ * conditioned on this walked size+mtime fingerprint instead.
+ * Bounded by depth and count; an unreadable path folds in as a marker rather
+ * than throwing — a signature that changes too often only costs a copy, one
+ * that throws would break spawning.
  */
 export function projectionSignature(claudeHomeDir: string): string {
   return signatureOfEntries(planProjection(claudeHomeDir))
@@ -135,22 +117,13 @@ export function signatureOfEntries(entries: ProjectionEntry[]): string {
 }
 
 /**
- * The exact composition sandbox-service.ts's ensure() persists as the
- * per-container marker key: container id, deck-plugin's OWN signature
- * (its own SIG_MAX_ENTRIES budget, walked separately -- see signatureOfEntries'
- * doc), and, only when the operator's config projection is enabled, the
- * config's own signature via projectionSignature; otherwise the literal
- * 'disabled' in that slot so toggling the opt-out mismatches the marker and
- * forces exactly one re-project/scrub.
- *
- * Pulled out of ensure() (impure: Docker/Podman lifecycle, not
- * bun-testable) into this pure module so the composition ensure() ACTUALLY
- * RUNS is what a regression test exercises. A test that re-implements this
- * shape independently instead of calling this function only proves its own
- * copy stays correct if ensure()'s logic changes underneath it -- exactly
- * the trap this repo's CLAUDE.md coverage rule names (card a79c7696 volet 1
- * review: the first version of this fix shipped a starvation regression
- * test that never called production code).
+ * The marker key persisted per container: container id, deck-plugin's own
+ * signature, and the config's signature only when config projection is enabled
+ * (else the literal 'disabled'), so toggling the opt-out mismatches the marker
+ * and forces exactly one re-project or scrub.
+ * Pulled out of the impure ensure() into this pure module so a regression test
+ * exercises the composition ensure() actually calls, not an independently
+ * re-implemented copy.
  */
 export function containerSignature(
   containerId: string,
@@ -165,21 +138,16 @@ export function containerSignature(
 }
 
 /**
- * Hook commands that cannot work in the Linux container (PowerShell, cmd,
- * drive-letter paths, .ps1/.bat/.exe). Reported to the operator so they can
- * drop a Linux equivalent in sandbox-overrides/settings.json rather than
- * discovering the breakage inside an agent's terminal.
+ * Reported to the operator so they can drop a Linux equivalent in
+ * sandbox-overrides/settings.json rather than discovering the breakage inside
+ * an agent's terminal.
+ * The drive-letter pattern is anchored at a word start — unanchored, it also
+ * matches the s:/ inside https://, which flagged every hook containing a URL.
+ * $USERPROFILE and similar vars look like valid Linux commands but resolve
+ * empty in the container, so a hook using them fails silently on every session
+ * start; the %VAR% check is a named list, not a generic pattern, so it doesn't
+ * flag date +%s%N.
  */
-// The drive-letter branch is anchored at a word START. Unanchored,
-// `[A-Za-z]:[\\/]` also matches the `s:/` inside `https://`, so every hook
-// containing a URL was falsely reported as un-runnable in the container.
-//
-// Windows-only ENV VARS are host-only too: `bash "$USERPROFILE/.claude/…"`
-// is a perfectly Linux-looking command, but $USERPROFILE is empty in the
-// container, so the hook resolves to `/.claude/…` and fails on every
-// session start — that exact shape shipped unreported. The %VAR% branch is
-// a NAMED list, not `%\w+%`: a generic pattern would flag the `%s%N` inside
-// an innocent `date +%s%N`.
 const WIN_VARS = 'USERPROFILE|APPDATA|LOCALAPPDATA|HOMEDRIVE|HOMEPATH|PROGRAMFILES|SYSTEMROOT|WINDIR'
 const HOST_ONLY = new RegExp(
   /(^|[\s"'=/\\])(powershell(\.exe)?|pwsh|cmd\.exe)([\s"']|$)|\.(ps1|bat|cmd|exe)([\s"']|$)|(^|[\s"'=])[A-Za-z]:[\\/]/
@@ -214,18 +182,11 @@ export function detectHostOnlyHooks(settingsJson: string): string[] {
 }
 
 /**
- * Build the sandbox overlay settings from the HOST settings.json: same JSON,
- * minus every hook command the container cannot run (HOST_ONLY above), minus
- * the hook groups/events that end up empty. This is the sane alternative to
- * auto-translating Windows hooks to Linux: a translated hook whose runtime
- * dependency is missing in the container (agent-forge, kleos-cli — Windows
- * binaries) would go from "fails non-blocking at session start" to "BLOCKS
- * every Write/Edit of the sandboxed agent". Removal is deterministic and the
- * removed commands are returned so the operator sees exactly what the sandbox
- * loses.
- *
- * Returns null when the input is not a JSON object — the caller must then
- * write NOTHING (an empty overlay would silently replace the whole config).
+ * Never auto-translates a Windows hook to Linux: a translated hook whose
+ * runtime dependency (agent-forge, kleos-cli) is missing in the container would
+ * go from failing non-blocking at session start to blocking every Write/Edit.
+ * Returns null when the input isn't a JSON object — the caller must then write
+ * nothing, since an empty overlay would silently replace the whole config.
  */
 export function stripHostOnlyHooks(
   settingsJson: string

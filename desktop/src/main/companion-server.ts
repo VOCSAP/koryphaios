@@ -1,21 +1,9 @@
-// Companion server (PLAN MB1/MB2): HTTPS + WebSocket endpoint started by the
-// Electron main process ON EXPLICIT OPERATOR ACTION (the 📱 Compagnon button),
-// serving the built renderer bundle to a phone on the SAME LAN and bridging
-// the DeckApi protocol over WS (shared/companion.ts).
-//
-// Security model (EXPLORATION-mobile-lan §5.1/§5.5 — ephemeral session mode):
-// - Off by default; nothing survives the process (closing the app revokes).
-// - One-shot pairing token in the QR, exchanged for a per-run credential.
-// - LAN only: bound to the detected private interface AND every peer address
-//   is checked against isPrivateAddress (RFC1918/ULA static filter).
-// - TLS with a STABLE self-signed cert persisted under app state, SHA-256
-//   signed with the LAN IP in its SAN (companion-cert.ts, card 3776ae19) so
-//   an ordinary browser's warning genuinely matches the served host and is
-//   not permanent. Persistence is versioned (COMPANION_CERT_VERSION): a cert
-//   from an older build is regenerated rather than served forever. This is
-//   still trust-on-first-use for any client that does not pin the
-//   fingerprint (only the Android shell does, see roadmap card 3776ae19).
-// - Anti-bruteforce lockout per address; every connect/deny hits the journal.
+// Off by default; nothing survives the process. LAN only: bound to the detected
+// private interface, and every peer address is checked against
+// isPrivateAddress.
+// TLS uses a stable self-signed cert persisted under app state and versioned,
+// so a build change regenerates it rather than serving a stale one forever;
+// unpinned clients still see trust-on-first-use.
 
 import { createServer, type Server } from 'node:https'
 import type { IncomingMessage, ServerResponse } from 'node:http'

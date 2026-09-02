@@ -51,13 +51,9 @@ export function templateSource(
 }
 
 /**
- * Read + validate a template file. A multi-lead file is still normalized
- * (first wins, card 240d6efd decision 3) but the repair is no longer silent:
- * `parseTemplate` reports which session names it demoted, and this is the
- * one place that turns that into an observable `reportError` (card 240d6efd
- * decision 2) — every one of `readTemplate`'s own 3 callers (index.ts
- * `resolveTemplateInputs`, ipc.ts `template:read`, `listDir` below) keeps
- * getting a plain `SessionTemplate | null` and needs no change.
+ * Reads and validates a template file; a multi-lead file is normalized (first
+ * wins) and the repair is reported via reportError rather than happening
+ * silently.
  */
 export function readTemplate(path: string): SessionTemplate | null {
   try {
@@ -117,17 +113,12 @@ function safeBase(name: string): string {
 }
 
 /**
- * Write `tpl` as `<safeName>.json` into `dir` (created on demand). Returns
- * the path. Refuses (throws) a template carrying more than one `lead: true`
- * session (card 240d6efd decision 1): this is the single filesystem sink for
- * ALL 3 production writers (`template:export`, `template:write`, deck-control
- * `saveTemplate`) plus any future one, so a check here closes the gap by
- * construction instead of enumerating call sites. `template:write` already
- * runs its input through `parseTemplate` first, which demotes down to one
- * lead before this ever sees it, so this never fires on that route — it is a
- * live guard only for the two routes (`template:export`, `saveTemplate`)
- * that build a template straight from live session defs and currently trust
- * `lead`'s exclusivity invariant (session-service.ts) without checking it.
+ * Refuses (throws) a template carrying more than one lead: true session. Single
+ * filesystem sink for all production writers, so the check closes the gap by
+ * construction instead of enumerating call sites.
+ * template:write already demotes down to one lead before reaching here via
+ * parseTemplate, so this only fires as a live guard on the two routes that
+ * build a template straight from live session defs.
  */
 export function writeTemplate(dir: string, name: string, tpl: SessionTemplate): string {
   const leadNames = tpl.sessions.filter((s) => s.lead).map((s) => s.name)

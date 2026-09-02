@@ -1,17 +1,7 @@
-// Graceful close routine for a peer session (DESIGN 6.6).
-// Escalation: write "/exit" -> if still alive, Esc + Ctrl+C + retry "/exit" ->
-// if still alive, SIGTERM (the peer side is cleaned by server.ts on its end).
-//
-// Pure: all IO (write to PTY, liveness check, kill, delay) is injected, so the
-// escalation logic is unit-testable under bun without a real terminal. No
-// module imports at all (not even node builtins) -- setTimeout used below for
-// the absolute-deadline safety net is a global, not an import.
-//
-// Card 032bdeae: gracefulClose's ORIGINAL signature (write/isAlive/kill/delay,
-// exitGraceMs/interruptGraceMs) is UNCHANGED -- the 4 tests in
-// tests/desktop-workspace.test.ts:931-994 call it exactly as before and their
-// outcomes/write-sequences are untouched. Everything below is new OPTIONAL
-// fields that only activate when a caller (session-service.ts) supplies them.
+// Escalation: write /exit, then if still alive Esc + Ctrl+C + retry /exit, then
+// SIGTERM.
+// Pure: all IO (write, liveness check, kill, delay) is injected, so the
+// escalation logic is unit-testable under bun without a real terminal.
 
 export type CloseOutcome = 'exit' | 'interrupt' | 'sigterm' | 'modal' | 'forced' | 'deadline'
 
@@ -29,13 +19,9 @@ export interface GracefulCloseOpts {
   /** Grace after Esc/Ctrl+C + retry "/exit" before SIGTERM. Default 1500ms. */
   interruptGraceMs?: number
   /**
-   * Poll cadence while waiting out a stage's grace period. Default 100ms.
-   * Card 032bdeae: the ORIGINAL implementation only ever called `isAlive()`
-   * once, AFTER the full grace delay had elapsed -- a session that died in
-   * 80ms still cost the full 1500ms of perceived latency. Polling closes
-   * that gap for every caller, old and new, without changing any outcome
-   * the 4 pre-existing tests assert on (their fake `delay` resolves
-   * instantly regardless of the ms argument).
+   * Polls at this cadence during a stage's grace period rather than checking
+   * once at the end, so a session that dies early doesn't cost the full grace
+   * delay in perceived latency.
    */
   pollMs?: number
   /**

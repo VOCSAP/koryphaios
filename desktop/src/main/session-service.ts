@@ -55,16 +55,10 @@ interface RuntimeState {
   exitCode: number | null
   peerId: string | null
   /**
-   * FREQUENCY-based, ternary (card f8082208 / docs/DESIGN-ACTIVITY-PREDICATE.md):
-   * 'working' | 'idle' | 'unknown', driven by the activity tracker
-   * (detect/activity.ts) fed with OSC 0/2's titleSeq counter (detect/osc.ts).
-   * RENAMED from the old `thinking: boolean` (placeholder BUSY_RE detector,
-   * thinking.ts, measured dead in production since the CLI's 2026-08-11
-   * update) so every stale consumer fails to compile instead of silently
-   * reading a field that is no longer written the same way. 'unknown' is
-   * the default and stays there forever for a session whose agent-kind
-   * never paints an OSC 0 title -- never collapsed into 'idle', which is
-   * exactly the silent-degradation shape this rename exists to prevent.
+   * Frequency-based ternary ('working' | 'idle' | 'unknown') driven by the
+   * activity tracker.
+   * 'unknown' is the default and stays there forever for a session whose
+   * agent-kind never paints an OSC 0 title; it never collapses into 'idle'.
    */
   activity: Activity
   /** Restore-time: persisted id had no transcript, so it was not resumed. */
@@ -76,18 +70,10 @@ interface RuntimeState {
   /** True while the session waits for the operator (attention.ts, PLAN C11). */
   needsAttention: boolean
   /**
-   * True when this session runs the Claude Code CLI itself (session-kind.ts).
-   * FROZEN at spawn time (startPty) from the command actually used to build
-   * that spawn's command line -- never recomputed afterward. Card fd1914cc
-   * correction: `this.launchCommand` can change while a session stays alive
-   * (setLaunchCommand's own doc comment: "Affects future spawns only; live
-   * PTYs keep running what they started with"), so a live recompute would
-   * let an already-running claude session flip to "non-claude" out from
-   * under itself and silently re-arm the Deck's own double injector.
-   * restart() re-spawns and so recomputes this for the new instance; the
-   * def itself has no live-edit path for `command` (verified: no
-   * `def.command =` / `session.command =` assignment anywhere under
-   * desktop/src).
+   * True when this session runs the Claude Code CLI itself; frozen at spawn
+   * time from the command used to build that spawn, never recomputed while the
+   * session stays alive.
+   * restart() recomputes it for the new instance.
    */
   claudeLaunch: boolean
   /**
@@ -271,53 +257,27 @@ export class SessionService extends EventEmitter {
     /** Resolved base command (launch-config) used when a session has no override. */
     private launchCommand = '',
     /**
-     * Getter for the absolute path to the Deck's embedded plugin dir (SessionStart
-     * back-channel hook, approval hook, deck-control/demo-browser MCP bridges,
-     * roadmap-card skill + roadmap-scribe agent), injected as `--plugin-dir` on
-     * every spawn so the whole plugin loads -- the back-channel hook is what
-     * keeps each tile's session id current across /clear. Empty => no plugin
-     * flag (resolved by index.ts's getDeckPluginDir).
-     *
-     * A GETTER, not a cached string (card d02c8e96 fix c): a prior version
-     * took a plain string here, resolved once at construction, which is
-     * exactly what let a mid-run deletion of resources/deck-plugin go
-     * undetected for ~9h -- every spawn for the rest of the process kept
-     * passing --plugin-dir toward a directory that no longer existed. Calling
-     * this fresh in startPty() re-checks existsSync live on every spawn, and
-     * (since index.ts funnels every deckPluginDir consumer through the same
-     * function) is also where the single missing-dir report fires the first
-     * time any consumer discovers it gone.
+     * Getter, not a cached string: resolved fresh via existsSync on every
+     * spawn, so a deletion of the plugin dir after construction is still
+     * detected.
+     * Empty return means no --plugin-dir flag is passed.
      */
     private getPluginDir: () => string = () => '',
     /** Home dir for transcript existence checks (injectable for tests). */
     private home: string = homedir(),
     /**
-     * Card 3c322f10 (piece 2, operator route): mints the team-lead
-     * deck-control bridge -- a fresh mcpConfig path + callerId -- when
-     * create() decides one is owed (see that call's own comment). Built by
-     * index.ts (team-lead-bridge.ts's buildMintTeamLeadBridge) from the
-     * controlServer plus writeTeamLeadMcpConfig/TEAM_LEAD_DECK_TOOLS (both
-     * supervisor.ts, reused exactly as deck-control.ts's spawnEntry already
-     * does for the agent-spawned route -- never duplicated here), which is
-     * also why this module takes it as an injected function rather than
-     * importing electron/deck-control itself (kept free of both, matching
-     * every other getter above). SYNC and nullable on purpose (team-lead
-     * arbitration, Card 3c322f10 -- an earlier version was async here so the
-     * mint could lazily start the deck-control server itself, which forced
-     * create() to become async too, giving every session creation a
-     * microtask yield point BEFORE `this.defs.push(def)` -- not acceptable
-     * for a feature that never needed create() to lose its atomicity): the
-     * lazy start is PROACTIVE, awaited by ipc.ts's `sessions:create` handler
-     * (already async) BEFORE it ever calls into create(). A null return here
-     * means the caller chose not to (or could not) start the server first,
-     * read as "no bridge this spawn", never as a fatal error (see create()).
+     * Mints the team-lead deck-control bridge when create() decides one is
+     * owed; injected as a function so this module stays free of the
+     * deck-control/electron import.
+     * Sync and nullable: the deck-control server is started proactively by the
+     * caller before create() runs; a null return means no bridge for this
+     * spawn, not a fatal error.
      */
     private mintTeamLeadBridge: MintTeamLeadBridge = () => null
   ) {
     super()
-    // Start empty: the app no longer auto-restores the legacy sessions.json on
-    // launch (operator request). The previous run is recovered explicitly via a
-    // workspace restore.
+    // Starts empty: the previous run is recovered explicitly through a
+    // workspace restore, not by auto-restoring the legacy sessions.json.
     this.defs = []
 
     this.pty.on('data', (e: { id: string; data: string }) => {
@@ -334,11 +294,10 @@ export class SessionService extends EventEmitter {
       this.activityTrackerFor(e.id).observe(oscSnap.titleSeq)
     })
     this.pty.on('exit', ({ id, exitCode }: { id: string; exitCode: number }) => {
-      // pty-manager only emits 'exit' for a spontaneous process exit (the user
-      // typed /exit, or claude crashed) -- never for a kill() / restart, which it
-      // filters out. So here we own the close decision.
-      // The id is no longer live -> free the double-resume guard (a later restart
-      // re-registers the fresh forked id).
+      // pty-manager only emits 'exit' for a spontaneous process exit, never for
+      // kill()/restart, so this handler owns the close decision.
+      // Frees the double-resume guard for the id; a later restart re-registers
+      // the fresh forked id.
       const def = this.defs.find((d) => d.id === id)
       if (def?.sessionId) this.registry.release(def.sessionId)
       this.thinkingDetector.clear(id)
@@ -369,13 +328,9 @@ export class SessionService extends EventEmitter {
       if (r) {
         r.status = 'exited'
         r.exitCode = exitCode
-        // Never CREATE an idle observation the tracker never made (card
-        // f8082208, B1 review, 2026-08-26): a session whose agent-kind
-        // never painted a title stays 'unknown' straight through exit --
-        // it must not collapse to 'idle' just because the process died,
-        // that is exactly the silent-degradation shape this lot exists to
-        // prevent. A session that WAS 'working'/'idle' at exit legitimately
-        // becomes 'idle': it is certainly no longer producing.
+        // Never creates an 'idle' observation the tracker never made: a session
+        // stuck at 'unknown' stays 'unknown' through exit.
+        // A session that was 'working' or 'idle' at exit becomes 'idle'.
         if (r.activity !== 'unknown') r.activity = 'idle'
       }
       this.emit('exit', { id, exitCode, name: def?.name })
@@ -420,21 +375,13 @@ export class SessionService extends EventEmitter {
       this.broadcast()
     })
 
-    // Development-channels warning auto-ack (issue #42486): one Enter after a
-    // short settle activates the dialog's highlighted accept option, for EVERY
-    // session the Deck spawns (operator create, supervisor, template, restart).
-    // The detector fires once per process run; liveness is re-checked at send
-    // time. 'startup-ack' is journaled by index.ts so each ack leaves a trace.
-    //
-    // Also the sync point for the initial-prompt keystroke injection
-    // (150eb188): a fresh spawn with a pending prompt (session id present in
-    // pendingPrompt, set by startPty) gets it typed in right after, once
-    // Claude Code's own TUI has had a moment to render past the dialog.
-    // Known residual limitation, not handled here: a launch command override
-    // that omits --dangerously-load-development-channels never shows this
-    // dialog, so 'ack' never fires and a pending prompt for that spawn is
-    // never injected (falls back to "type it yourself" -- same as before
-    // this card for that one case).
+    // Auto-acks the development-channels dialog once per process run for every
+    // spawn; liveness is re-checked at send time.
+    // Also the sync point for the initial-prompt keystroke injection, once the
+    // dialog has cleared.
+    // A launch override that omits --dangerously-load-development-channels
+    // never shows the dialog, so neither the ack nor the pending-prompt
+    // injection fires; falls back to manual typing.
     this.startupAckDetector.on('ack', ({ id }: StartupAckEvent) => {
       // Card 4f0143ff review (MAJOR 3 follow-up): this dialog's text has no
       // further reason to sit in AttentionDetector's retained buffer once
@@ -554,43 +501,14 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * `opts.teamLeadDeckBridge` is the ONLY channel for the operator-route
-   * deck-control bridge decision (Card 3c322f10, piece 2) -- deliberately a
-   * separate function parameter, never a property of `input`
-   * (`CreateSessionInput`). `input` is the exact JSON shape ipc.ts's
-   * `sessions:create` handler forwards verbatim from its caller, which is
-   * remote-reachable (CHANNEL_TIERS 2, shared/companion.ts) -- a boolean
-   * living on that object would be one a companion/phone client could set on
-   * itself DIRECTLY, by naming the field. Only ipc.ts's own handler code
-   * constructs `opts` (a plain object literal it builds itself, never spread
-   * from the untrusted input), so there is no PROPERTY NAME a remote payload
-   * can carry that reaches this decision.
-   *
-   * STATE THE BOUNDARY PRECISELY (security review correction, 2026-09-02):
-   * this is not "unreachable by a remote caller" -- `opts.teamLeadDeckBridge`
-   * is a pure function of `input.agent`, which the caller fully controls, so
-   * a paired companion requesting `agent: 'team-lead'` DOES get the bridge.
-   * What is closed here is only the SHORTCUT (setting the boolean directly
-   * without going through `agent`), not the outcome. See ipc.ts's
-   * `sessions:create` handler and team-lead-bridge.ts's own header for why
-   * that residual reachability is an accepted operator arbitration (a paired
-   * companion already has CHANNEL_TIERS-1 `pty:input` into any live tile,
-   * i.e. arbitrary command execution by shell-prefix, so these 3 tools add
-   * no marginal power) rather than a gap this parameter split closes by
-   * itself.
-   *
-   * STAYS SYNCHRONOUS (team-lead arbitration, Card 3c322f10): an earlier
-   * version made this async so mintTeamLeadBridge could itself await the
-   * deck-control server's lazy start -- rejected, because that inserts a
-   * microtask yield point before `this.defs.push(def)` on EVERY create()
-   * call, not only team-lead ones, making session creation non-atomic (two
-   * create() calls issued back-to-back could interleave their synchronous
-   * tails: the lead-uniqueness sweep, name defaulting, peer_id assignment
-   * all assume no other create() runs concurrently). The lazy start is
-   * instead PROACTIVE: ipc.ts's `sessions:create` handler (already async)
-   * awaits index.ts's `ensureControlServer()` itself, BEFORE ever calling
-   * into this synchronous function. `mintTeamLeadBridge` here just reads
-   * whatever is already available.
+   * opts.teamLeadDeckBridge is a separate function parameter, never a property
+   * of input: input is forwarded verbatim from a remote-reachable channel, so a
+   * boolean field on it could be set directly by a companion client.
+   * This only closes the shortcut of setting the flag directly; a caller
+   * requesting agent: 'team-lead' still gets the bridge through the normal
+   * path.
+   * Stays synchronous: an async mint would insert a yield point before
+   * defs.push(def) on every create() call, breaking create()'s atomicity.
    */
   create(input: CreateSessionInput, opts?: { teamLeadDeckBridge?: boolean }): SessionRuntime {
     const cfg = this.getConfig()
@@ -611,20 +529,12 @@ export class SessionService extends EventEmitter {
     ]
       .filter(Boolean)
       .join(' ')
-    // Card 3c322f10 (piece 2, operator route): mirrors the mcpConfig deck-control
-    // has already carried for the agent-spawned route (deck-control.ts's
-    // spawnEntry, Card ff091064/6c380073) -- an operator tile opened with
-    // `--agent team-lead` gets the SAME bridge, but ONLY when ipc.ts's
-    // `sessions:create` handler posed `opts.teamLeadDeckBridge` itself (see
-    // create()'s own doc above: deliberately NOT a property of `input`,
-    // which is remote-reachable). A template/workspace-restore/one-shot-agent
-    // input can name `agent: 'team-lead'` too, but none of those callers ever
-    // pass `opts`, so they fall straight through untouched -- fail-closed by
-    // construction, not by an enumerated exclusion list. Logic lives in
-    // team-lead-bridge.ts (a pure, `@shared`-free module) rather than inline
-    // here so it stays behaviourally testable under `bun test` -- this file
-    // itself cannot be imported from a plain `bun test` run at the repo root
-    // (see that module's own header).
+    // Mirrors the mcpConfig the agent-spawned route already carries, but only
+    // when the caller posed opts.teamLeadDeckBridge itself; other callers
+    // (template, workspace-restore, one-shot-agent) never pass opts and fall
+    // through untouched.
+    // Kept in team-lead-bridge.ts, a module with no @shared import, so it stays
+    // testable under a plain bun test run.
     const mcpConfig = resolveMcpConfig(
       input,
       agent,
@@ -698,17 +608,12 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Card 032bdeae: was a bare `this.pty.kill(id)` -- more brutal than the
-   * design (DESIGN 6.6) it cites, since gracefulClose (session-close.ts) was
-   * written, tested, and never wired to any production call. Now escalates
-   * (/exit, then Esc+Ctrl+C+/exit, then SIGTERM) BEFORE the terminal
-   * cleanup below, except for a tile this app already refuses to write into
-   * for other reasons (modal/needs-attention/rate-limited -- same signals
-   * injectCommand's own screen-state guard reads, see its comment above) and
-   * for a SECOND call on an id already closing, both of which skip straight
-   * to the same idempotent cleanup. `forceCleanup` is idempotent by
-   * construction (it is a no-op once `def` is gone) precisely because it can
-   * legitimately run twice under that second-call race.
+   * Escalates (/exit, then Esc+Ctrl+C+/exit, then SIGTERM) before the terminal
+   * cleanup, rather than killing outright.
+   * Skips straight to cleanup for a tile already refused for writing
+   * (modal/needs-attention/rate-limited) or already closing.
+   * forceCleanup is idempotent: a no-op once def is gone, since it can
+   * legitimately run twice under that race.
    */
   async remove(id: string): Promise<void> {
     const forceCleanup = (): void => {
@@ -781,21 +686,11 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Close every session (graceful PTY kill) and clear the set -- the "New
-   * (clear)" action. No-op when already empty. Broadcasts an empty list; the
-   * caller is expected to have detached/saved the current workspace first
-   * (WorkspaceService.startNew), and the index.ts auto-save guard ignores the
-   * empty broadcast so the prior workspace stays restorable.
-   *
-   * Card 6c380073 (second audit round): emits 'removed' per destroyed def.
-   * It used to destroy tiles SILENTLY -- remove()'s forceCleanup was the only
-   * emit site in this file -- so a departed team-lead's minted deck-control
-   * token stayed live in callerTable and its team-lead-mcp-<callerId>.json
-   * stayed on disk until app quit, letting a co-resident agent that read that
-   * file keep the lead's tool scope. Emitting here re-wires BOTH existing
-   * consumers at once (the journal entry and the revocation, index.ts's
-   * service.on('removed')) instead of bolting a second revocation call onto
-   * this one path.
+   * Closes every session and clears the set; no-op when already empty.
+   * Emits 'removed' per destroyed def so the journal entry and token revocation
+   * both fire for every closed tile, not only the single-remove path.
+   * Caller is expected to have detached/saved the current workspace first; the
+   * auto-save guard ignores this empty broadcast.
    */
   closeAll(): void {
     if (this.defs.length === 0) return
@@ -818,17 +713,14 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Re-read each live tile's back-channel and adopt a changed REAL session id.
-   * The discovery track (discoverRealId) is a one-shot that closes after 30s, so
-   * an in-process rotation that happens later -- notably a `/clear`, which mints a
-   * fresh transcript without re-registering the MCP -- is invisible to it. The
-   * SessionStart hook keeps desk-session-<token>.txt current across those
-   * rotations; this picks the new id up at save time so the persisted (and thus
-   * restorable) id is the post-/clear one, not the stale pre-/clear id. Adopts
-   * only when the new id actually has a transcript (i.e. it is resumable).
-   *
-   * Called by WorkspaceService before captureSessions(); kept off the template
-   * path (ipc.ts) so capturing a template never mutates live session ids.
+   * Re-reads each live tile's back-channel and adopts a changed real session
+   * id, so the persisted id after a /clear is the new one, not the stale
+   * pre-clear id.
+   * The one-shot discovery track closes after 30s, so a later rotation is
+   * invisible to it; only picked up here at save time.
+   * Adopts only when the new id actually has a transcript.
+   * Kept off the template path so capturing a template never mutates live
+   * session ids.
    */
   refreshLiveSessionIds(): void {
     for (const def of this.defs) {
@@ -841,22 +733,11 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Snapshot the current persisted session defs (for a workspace save). The
-   * supervisor is excluded: its deck-control token only lives for this app
-   * launch, and Home re-spawns it on demand -- restoring it as a normal tile
-   * would resurrect a dead bridge.
-   *
-   * Audit fix #7 (card 6c380073): this `{ ...d }` spread DOES embed `mcpConfig`
-   * (and therefore, for a team-lead def, the path to its --mcp-config file
-   * carrying its minted token) into the returned defs. What saves this today
-   * is that BOTH consumers project through PICK-LISTS that do not copy
-   * `mcpConfig`: `toWorkspaceSessions` (workspace-session-map.ts) and
-   * `toTemplate` (shared/template.ts). If either is ever changed to a spread
-   * instead of an explicit pick-list, a template/workspace captured while a
-   * team-lead tile is live would clone that lead's identity onto a SECOND,
-   * still-live tile -- the exact fail-open shape CLAUDE.md's `toPublicPeer`
-   * example describes. Keep those two pick-lists explicit; do not spread here
-   * either as a shortcut.
+   * Supervisor is excluded: its token only lives for this app launch, and Home
+   * re-spawns it on demand.
+   * The spread here does include mcpConfig; both consumers project through
+   * explicit pick-lists rather than a spread, so a live team-lead identity is
+   * never captured onto a second tile. Keep those pick-lists explicit.
    */
   captureSessions(): SessionDef[] {
     return this.defs.filter((d) => !d.supervisor).map((d) => ({ ...d }))
@@ -978,15 +859,6 @@ export class SessionService extends EventEmitter {
     return this.oscParsers.get(id)?.feed('') ?? null
   }
 
-  /**
-   * Get-or-create the OSC parser for a session, minted at first PTY data
-   * (never module-level state -- see the field's own doc comment). Kept as
-   * its own `this.`-prefixed method, not a bare `createOscParser()` call
-   * inlined in the pty.on('data') handler, so the handler's own extracted-
-   * and-executed test (tests/desktop-quota-gate.test.ts, which runs the real
-   * handler body against a stubbed `this`) can stub this one call instead of
-   * needing `createOscParser` in scope.
-   */
   private oscParserFor(id: string): ReturnType<typeof createOscParser> {
     let p = this.oscParsers.get(id)
     if (!p) {
@@ -997,13 +869,9 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Get-or-create the activity tracker for a session (card f8082208), same
-   * lazy-mint convention as oscParserFor. Its `on()` transition callback is
-   * wired here, once, at creation: writes RuntimeState.activity, forwards
-   * `session:thinking` (unchanged channel name -- see shared/types.ts's
-   * SessionThinkingEvent, now carrying the ternary `state` instead of the
-   * old `busy` boolean) and broadcasts, mirroring the old ThinkingDetector
-   * forwarding this replaces.
+   * Lazy-mint, same convention as oscParserFor; the transition callback is
+   * wired once here at creation, writing RuntimeState.activity and forwarding
+   * session:thinking.
    */
   private activityTrackerFor(id: string): ReturnType<typeof createActivityTracker<NodeJS.Timeout>> {
     let t = this.activityTrackers.get(id)
@@ -1042,22 +910,13 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Manual escape hatch for a stuck "needs you" flag (card 4f0143ff): the
-   * auto-clearers (a busy cue, or the re-scan in attention.ts) only fire when
-   * the PTY stream itself moves past the wait screen, which never happens for
-   * a false raise (e.g. the dev-channels dialog before the WAITING_PATTERNS
-   * narrowing) or a wait resolved outside the stream. Also drops the
-   * detector's per-session buffer so a stale partial match cannot instantly
-   * re-raise it. Not persisted (runtime-only, like the rest of RuntimeState).
-   *
-   * `manual: true` on the emitted event (BLOCKER 2, review of 4f0143ff): the
-   * `'attention'` channel had exactly one producer before this method existed
-   * -- the PTY-driven auto-detector -- and index.ts's listener infers from
-   * `waiting:false` that a real turn ran, so it settles any open remote/phone
-   * approval as answered. This method is a SECOND, human-driven producer on
-   * the same channel with a different meaning ("the operator says this flag
-   * is wrong"), which the consumer must not conflate with "the operator
-   * already answered via the terminal" -- see index.ts's `manual` check.
+   * Manual escape hatch for a stuck needsAttention flag: the auto-clearers only
+   * fire when the PTY stream moves past the wait screen, which never happens
+   * for a false raise or a wait resolved outside the stream.
+   * Drops the detector's per-session buffer so a stale partial match cannot
+   * instantly re-raise it. Runtime-only, not persisted.
+   * Emits manual: true so the consumer does not conflate this with the operator
+   * having answered through the terminal.
    */
   clearAttention(id: string): void {
     const r = this.runtime.get(id)
@@ -1290,15 +1149,10 @@ export class SessionService extends EventEmitter {
       CLAUDE_PEERS_DESK_SESSION: def.id,
       CLAUDE_PEERS_ROLE: def.role ?? ''
     }
-    // Card 3c085f1a: CLAUDE_PEERS_TOOLS, unlike CLAUDE_PEERS_ROLE just above,
-    // is OMITTED entirely when def.peerTools is undefined -- server.ts's own
-    // three-state contract treats "absent" (full surface) and "present but
-    // empty" (zero tools) as opposites, so this key must never be exported as
-    // '' the way CLAUDE_PEERS_ROLE deliberately is. peerToolsEnvValue is the
-    // pure, directly-tested piece (tests/desktop-session-peer-tools-env.test.ts);
-    // this `if` is the wiring, kept separate so the sessionEnv declaration
-    // right above stays byte-identical to what the sibling role-env test's
-    // structural scan of startPty() depends on.
+    // CLAUDE_PEERS_TOOLS is omitted entirely when def.peerTools is undefined,
+    // never exported as '', unlike CLAUDE_PEERS_ROLE just above.
+    // The consumer treats absent (full surface) and an explicit empty list
+    // (zero tools) as opposites.
     const peerToolsValue = peerToolsEnvValue(def.peerTools)
     // Object.assign, not a direct `sessionEnv.CLAUDE_PEERS_TOOLS = ...` write:
     // the object literal's inferred type (implicit index signature, TS's own
@@ -1436,22 +1290,11 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * True when the Deck's OWN quota detector+injector must stay off for
-   * `id` (card fd1914cc). Gates ONLY the DEFAULT path -- `def.autoResume`
-   * left `undefined`, i.e. the session follows the global setting -- never
-   * an EXPLICIT per-session override. Claude Code 2.1.235+ ships its own
-   * `autoContinueAtUsageLimit` resume, but that is NOT provable active from
-   * here: the /config toggle is shown only conditionally, is
-   * `consentGated`, and its state is partly server-side (not present in
-   * this machine's settings.json even when the CLI is current). Silencing
-   * the default path without an escape hatch would trade a visible doubled
-   * injection for a SILENT non-resume, which is worse -- so an operator who
-   * explicitly sets `autoResume` (true OR false) on a claude session always
-   * wins, restoring the pre-fd1914cc behaviour for that tile: `true` keeps
-   * `quotaDetector.feed` running (it needs a trigger) and lets `autoResume`
-   * below inject; `false` also keeps `feed` running (so the rate-limited
-   * badge still shows) but `autoResume` no-ops on `enabled === false`, same
-   * as any other explicitly-disabled session.
+   * True when the Deck's own quota detector+injector must stay off for a claude
+   * session; gates only the default path where autoResume is undefined, never
+   * an explicit per-session override.
+   * An operator who explicitly sets autoResume (true or false) always wins over
+   * this gate.
    */
   private quotaGateActive(id: string): boolean {
     const def = this.defs.find((d) => d.id === id)
@@ -1466,17 +1309,10 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Inject the resume keystrokes when a quota episode's reset time passes:
-   * Escape (dismisses the /rate-limit-options menu), a 100 ms settle, then the
-   * literal prompt "continue" + Enter -- exactly what a human would type. Only
-   * fires when `quotaGateActive(id)` is false (this session is not on the
-   * claude-default gate -- either it is not a claude launch, or the operator
-   * set an explicit per-session override), auto-resume is enabled (per-session
-   * override, else the global setting), the PTY is alive and the episode is
-   * still open (the user may have resumed manually in the meantime). In
-   * practice `quotaGateActive` guards `quotaDetector.feed` too (the pty
-   * 'data' handler above), so a gated session never reaches this method at
-   * all -- the check here is defense-in-depth, not the load-bearing gate.
+   * Injects Escape, a 100ms settle, then 'continue' + Enter, exactly what a
+   * human would type.
+   * Fires only when quotaGateActive(id) is false, auto-resume is enabled, the
+   * PTY is alive, and the episode is still open.
    */
   private autoResume(id: string): void {
     const def = this.defs.find((d) => d.id === id)
@@ -1499,36 +1335,13 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Type a command (or a whole conversation turn) into a session's live
-   * terminal the way the operator would (CT3 directive cards, aaf4537d soft
-   * stop): dismiss any open menu (Escape), a short settle, then ONE write
-   * carrying the text and its submit keystroke, encoded by
-   * `encodeSubmittedKeystrokes` (session-command.ts).
-   *
-   * That single write is not a style choice, see the comment at the write
-   * itself and the encoder's own: the previous two-write shape (text, then a
-   * bare '\r') did not submit at all past ~64 bytes, which is card 6168b7f4.
-   * autoResume, further up this file, still writes 'continue' then '\r'
-   * separately -- that is NOT a contradiction and NOT a precedent to copy
-   * from: its coalesced chunk measures 9 bytes, comfortably under the 64
-   * threshold, so it submits. It is left alone deliberately (its own gap is
-   * observability, diagnosed under the quota family).
-   *
-   * SECURITY: `command` is ALWAYS a CODE CONSTANT chosen by the caller (never a
-   * value from the broker, a repo, or a peer). The tile is resolved by the
-   * caller; nothing from a directive card's payload is written here verbatim.
-   * The encoder strips every ESC byte anyway, so a hostile string could not
-   * break out of the bracketed paste into keystrokes.
-   *
-   * Meant to be gated on the tile being idle so a directive never interrupts a
-   * live turn: when the tile is busy it waits (bounded) for idle, then injects;
-   * if it never falls idle within the deadline the command is NOT sent (a clear
-   * mid-task would destroy work) and 'busy-timeout' is returned for the caller
-   * to log. `waitIdle` is deliberately driven by byte-recency (lastOutputAt),
-   * NOT by RuntimeState.activity -- see waitIdle's own doc comment for why
-   * (docs/DESIGN-ACTIVITY-PREDICATE.md section 5: the activity predicate is
-   * silent while the operator types, which would make this gate open exactly
-   * when it must not).
+   * Types a command the way the operator would: dismiss any open menu, settle,
+   * then one write carrying the text and its submit keystroke.
+   * command is always a code constant chosen by the caller, never a value from
+   * the broker, a repo, or a peer.
+   * Gated on the tile being idle so a directive never interrupts a live turn;
+   * if it never falls idle within the deadline the command is not sent and
+   * 'busy-timeout' is returned.
    */
   async injectCommand(
     id: string,
@@ -1539,42 +1352,14 @@ export class SessionService extends EventEmitter {
     const idle = await this.waitIdle(id, idleWaitMs)
     if (!this.pty.isAlive(id)) return 'no-terminal'
     if (!idle) return 'busy-timeout'
-    // Screen-state guard (Vague 10 A2-1, cards 5dbf3255/63ca372f): refuse the
-    // WHOLE sequence -- neither the Escape below nor the paste -- when the
-    // tile looks like a modal dialog. Measured (2026-08-13, see the comment
-    // further down): on the trust/confirm dialog, the bare Escape quits the
-    // CLI outright, and the paste alone silently confirms whatever option is
-    // highlighted. Both gestures destroy; guessing which one is "safer" is
-    // not an option, so this refuses instead (D2, team-lead's brief).
-    //
-    // UNION of two independently-sourced signals, neither trusted alone:
-    //  - screenGuard (screen-model.ts): a GEOMETRIC read of the tile's
-    //    current screen -- does the live cursor sit where the composer's
-    //    content row puts it. MESURE against five real byte fixtures
-    //    (tests/pty-harness/fixtures/), but DEDUIT (not measured) on two
-    //    screens outside that set (the @-mention picker, the tool-permission
-    //    prompt) -- see that function's own doc for what it actually covers.
-    //  - RuntimeState.needsAttention: the text-pattern "needs you" detector
-    //    already shipped and tested in attention.ts (WAITING_PATTERNS +
-    //    detectWaiting, wired via the attentionDetector.on('attention')
-    //    handler below in this constructor, which is what keeps this field
-    //    current). Consulted read-only -- this file does not modify
-    //    attention.ts. Its own doc claims coverage of tool-permission
-    //    prompts, plan approvals and AskUserQuestion menus in addition to
-    //    the trust prompt; that broader claim has not been independently
-    //    re-verified here, which is exactly why it is not trusted alone
-    //    either.
-    // Team-lead's instruction (claude-peers, 2026-08-17): if EITHER signal
-    // says modal, refuse -- only write when BOTH say non-modal. A closing
-    // union can only ever ADD refusals relative to either signal running
-    // alone, never remove one: the two false-positive surfaces are additive,
-    // but there is no way for the union to produce a false NEGATIVE that a
-    // single signal would have caught, since a 'modal' from either side is
-    // final. That is the asymmetry that makes composing two
-    // partially-verified signals safe even though neither is fully proven on
-    // its own: a false refusal costs a directive that waits one more idle
-    // cycle (visible in the journal, replayable); a false pass on either
-    // side alone could cost a killed session or a blind accept.
+    // Refuses the whole sequence, not just the Escape, when the tile looks like
+    // a modal dialog: a bare Escape can quit the CLI outright, and the paste
+    // alone can silently confirm whatever option is highlighted.
+    // Union of two independently-sourced signals (a geometric screen read, and
+    // the text-pattern needs-attention detector), neither trusted alone: either
+    // saying modal refuses, both must say non-modal to proceed.
+    // A false refusal only costs one more idle cycle; the union cannot produce
+    // a false negative that a single signal would have caught.
     if (this.screenGuard.classify(id) === 'modal') return 'refused-modal'
     if (this.runtime.get(id)?.needsAttention) return 'refused-modal'
     // Third refusal signal (card 63ca372f's own contract: idle AND NOT
@@ -1590,109 +1375,46 @@ export class SessionService extends EventEmitter {
     this.pty.write(id, '\x1b')
     await new Promise((res) => setTimeout(res, DIRECTIVE_SETTLE_MS))
     if (!this.pty.isAlive(id)) return 'no-terminal'
-    // ONE write, bracketed-paste wrapped, CR inside the same string (card
-    // 6168b7f4). This used to be two writes -- the command, then a bare '\r'
-    // -- and that shape did not SUBMIT: measured 2026-08-12 on a live tile,
-    // the text appeared at the prompt and stayed there 12s later, and again
-    // in a pty harness, where the mechanism was pinned. ConPTY coalesces two
-    // back-to-back writes into one read, and Claude Code's tokenizer only
-    // turns a control byte into its own token (hence into a `return` key)
-    // when the whole read is under 64 characters; above that the CR is
-    // swallowed into the text run. encodeSubmittedKeystrokes' own comment
-    // (session-command.ts) carries the full measurement and the reason the
-    // closing ESC[201~ makes this deterministic rather than timing-dependent.
-    // Do NOT "simplify" this back into two writes, and do not add a delay:
-    // a delay is a race that passes on an idle machine.
-    //
-    // write() itself reports write-silently-dropped (pty-manager.ts's own
-    // doc: "Returns false when no live PTY carries this id") -- the isAlive
-    // check just above only proves liveness at that instant, not that the
-    // pty was still alive for THIS write. Consulting the boolean here (not
-    // just the pre-check) is what actually closes that gap.
+    // One write, bracketed-paste wrapped, with the CR inside the same string:
+    // two separate writes did not submit, because ConPTY coalesces them into
+    // one read and the CLI only turns a control byte into Enter when the whole
+    // read is under 64 characters.
+    // Do not split this back into two writes or add a delay; a delay is a race
+    // that passes only on an idle machine.
+    // write()'s own return value is consulted, not just the prior isAlive
+    // check, since isAlive only proves liveness at that instant, not for this
+    // specific write.
     if (!this.pty.write(id, encodeSubmittedKeystrokes(command))) return 'no-terminal'
-    // 'written' guarantees that pty.write() returned true and that the bytes
-    // sent are the shape the CLI submits AT THE MAIN PROMPT. It does NOT
-    // guarantee the terminal accepted them in every UI state. One non-nominal
-    // state was measured (2026-08-13, trust/confirm dialog open -- the
-    // cheapest one reachable without spending an API turn) and RE-MEASURED
-    // 2026-08-17 (an earlier version of this paragraph said the paste was
-    // silently swallowed -- WRONG, corrected here): with the bare ESC below
-    // sent first, the CLI quits outright; with the ESC skipped and only the
-    // paste sent, the paste CONFIRMS whichever option the dialog has
-    // highlighted -- not a lost command, a blind accept typed in the
-    // operator's name. Two related facts from the same capture: the CLI
-    // turns bracketed paste ON at startup (`CSI ?2004h`) and OFF on exit
-    // (`CSI ?2004l`). The screen-state guard above this point is what now
-    // stops both branches from reaching this dialog at all; see its own
-    // comment for what it does and does not cover (tool-permission prompt,
-    // open selection list -- DEDUIT, not measured, treated as modal).
-    //
-    // `waitIdle`'s own idleness signal is byte-recency (lastOutputAt), not
-    // RuntimeState.activity (card f8082208) -- see waitIdle's own doc
-    // comment for why. Nor is it guaranteed, by nature, that the agent read
-    // the line, understood it, or will act on it. Turning 'written' into a
-    // proof of submission needs output-side confirmation AFTER the CR --
-    // waitForOutput (below in this file) is the instrument, but the activity
-    // cue it would look for is itself unreliable today (the interrupt hint is
-    // never emitted during a turn, and the activity label rotates), so that
-    // work is deliberately a separate card, not a half-measure here.
+    // 'written' guarantees pty.write() returned true and the bytes are the
+    // shape the CLI submits at the main prompt; it does not guarantee the
+    // terminal accepted them in every UI state.
+    // On a modal dialog, a bare Escape quits the CLI outright, while the paste
+    // alone confirms whichever option is highlighted; the screen-state guard
+    // above this point is what stops both from reaching the dialog.
+    // waitIdle's idleness signal is byte-recency, not RuntimeState.activity,
+    // since the activity predicate is silent while the operator types.
     return 'written'
   }
 
   /**
-   * Bare, non-idle-gated ESC write (aaf4537d lot 3: Pause/Hard Stop). Extracted
-   * from autoResume's existing raw ESC write below -- same primitive, now
-   * reusable outside the auto-resume flow. Unlike injectCommand this never
-   * waits for idle: Pause/Hard act on the process immediately, they do not
-   * ask the agent to wrap up (that's Soft Stop's job, via injectCommand).
-   *
-   * EXACTLY ONE '\x1b', never doubled -- do not "retry with a second ESC" if
-   * this doesn't seem to bite. Measured 2026-08-12 in the installed Claude
-   * Code CLI binary: it contains the string "esc to close · esc again quits",
-   * i.e. at least one UI state exists where a SECOND escape QUITS the session
-   * instead of interrupting it. A blind double-ESC can therefore kill a
-   * session where Hard Stop only meant to interrupt it. If a single ESC
-   * proves insufficient in some state, that is a real observation to make
-   * later, with a different remedy -- not a reason to double this write.
-   */
-  /**
-   * `mode` (card 120148eb): 'pause' routes through the SAME screen-state
-   * refusal injectCommand uses (ScreenGuard.classify()==='modal' OR
-   * needsAttention), because Pause's own contract (this method's doc above,
-   * and the roadmap.stop.pauseHint i18n copy) is explicitly reversible -- a
-   * bare Escape that quits the CLI on a modal-showing tile breaks that
-   * promise silently: the operator believes the session paused, it is dead,
-   * and the roadmap card stays locked to nothing. 'hard' deliberately skips
-   * the gate: its own contract is to end the session by force, right now, so
-   * the same worst case (CLI exit) is in-contract there, not a bug
-   * (team-lead's read on roadmap card 120148eb, confirmed against both
-   * texts before this was written). `mode` has NO default, DELIBERATELY
-   * (team-lead's call, claude-peers 2026-08-18): a default would be a
-   * fail-open -- a future caller added without thinking about it would
-   * silently get the ungated path. That is a convention this signature
-   * expresses, not a guarantee anything currently enforces: nothing stops
-   * a future edit from adding `= 'hard'` back, and a source-scan test built
-   * only to catch that one string is the same weak family the mutation
-   * review (this same card) already flagged elsewhere -- so none exists
-   * here. The asymmetry itself (pause gated, hard not) IS pinned
-   * behaviorally, see the test asserting both directions on a
-   * modal-classified tile.
+   * Bare, non-idle-gated ESC write: Pause/Hard act on the process immediately
+   * rather than asking the agent to wrap up.
+   * Exactly one ESC, never doubled: the installed CLI has at least one screen
+   * where a second Escape quits the session instead of interrupting it.
+   * 'pause' routes through the same screen-state refusal injectCommand uses,
+   * since pause's contract is explicitly reversible; 'hard' skips the gate
+   * because ending the session by force is in its contract.
+   * mode has no default, deliberately: a default here would let a future caller
+   * silently get the ungated path.
    */
   interrupt(id: string, mode: 'pause' | 'hard'): 'interrupted' | 'no-terminal' | 'refused-modal' {
     if (!this.pty.isAlive(id)) return 'no-terminal'
     if (mode === 'pause') {
       if (this.screenGuard.classify(id) === 'modal') return 'refused-modal'
       if (this.runtime.get(id)?.needsAttention) return 'refused-modal'
-      // Third signal, same as injectCommand's own (mutation review, second
-      // pass on 120148eb): without it, a Pause landing during a quota-resume
-      // window races autoResume's own raw ESC write (this file, autoResume)
-      // -- autoResume writes '\x1b', then 100ms later via its own setTimeout
-      // writes 'continue' + '\r'. A second bare ESC from Pause inside that
-      // window is not just noise: the installed CLI binary contains the
-      // string "esc to close, esc again quits" (measured 2026-08-12, see
-      // this method's own doc above), so a second ESC can KILL the session
-      // -- the exact 120148eb contract violation, reached through the door
-      // this branch itself exists to close.
+      // Third refusal signal: without it, a Pause landing during a quota-resume
+      // window races autoResume's own raw ESC write, and a second bare ESC can
+      // kill the session instead of interrupting it.
       if (this.runtime.get(id)?.rateLimited) return 'refused-modal'
     }
     this.pty.write(id, '\x1b')
@@ -1741,17 +1463,12 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Resolve once the PTY has been quiet (no output byte) for at least
-   * ACTIVITY_IDLE_MS, or false at the deadline. Deliberately driven by
-   * `lastOutputAt` (byte recency), NOT `RuntimeState.activity` (card
-   * f8082208 / docs/DESIGN-ACTIVITY-PREDICATE.md section 5): OSC 0 is
-   * SILENT while the operator types (measured -- ~20s of typing produced
-   * zero OSC 0 emissions while output bytes kept echoing), so gating this
-   * on the activity field would open the write gate exactly while a human
-   * is mid-keystroke, the one moment an injected directive must not land.
-   * A session that has never produced any output yet (`lastOutputAt` ===
-   * null) is treated as idle -- nothing is mid-turn to interrupt. An
-   * already-quiet tile resolves on the first tick.
+   * Resolves once the PTY has been quiet for at least ACTIVITY_IDLE_MS, or
+   * false at the deadline.
+   * Driven by byte recency, not RuntimeState.activity: OSC 0 stays silent while
+   * the operator types, so gating on the activity field would open the write
+   * gate exactly while a human is mid-keystroke.
+   * A session with no output yet is treated as idle.
    */
   private async waitIdle(id: string, deadlineMs: number): Promise<boolean> {
     const deadline = Date.now() + deadlineMs
@@ -1774,25 +1491,14 @@ export class SessionService extends EventEmitter {
         ? resolvePeerId(def.cwd, def.sessionId, this.peersDirFor(def))
         : null
       if (next !== r.peerId) {
-        // Card 6f59c73a (L1): this emit used to be gated on FIRST RESOLUTION
-        // alone (`next && r.peerId === null && r.announce`), so a tile whose
-        // id ROTATED changed silently -- the renderer refreshed (below), but
-        // no peer was ever told, and every message still addressed to the old
-        // id went nowhere without raising an error. It now fires for any
-        // transition to a live id, carrying the PREVIOUS one so the consumer
-        // can tell the two cases apart; peer-rotation.ts owns that decision,
-        // index.ts routes on it. Still nothing is emitted when a tile LOSES
-        // its id (`next` null): there is no id to announce, and naming an
-        // empty one would be believed.
-        //
-        // TWO conditions were dropped here, not one: `r.peerId === null` AND
-        // `r.announce`. Dropping the latter means a RESTORED tile (restore
-        // passes announce: null, unlike create() which always sets one) now
-        // reaches the consumer at its FIRST resolution, where it lands in the
-        // spawn-ack block. Harmless only because armSpawnAck is called
-        // exclusively after a create() (deck-control.ts's spawn cases), so a
-        // restored tile never has an ack pending -- an invariant nothing else
-        // states, hence stating it here.
+        // Fires for any transition to a live id, carrying the previous one,
+        // rather than only on first resolution: a rotated id (e.g. after
+        // /clear) now reaches the consumer instead of changing silently.
+        // Nothing is emitted when a tile loses its id: there is no id to
+        // announce and naming an empty one would be believed.
+        // A restored tile now also reaches the consumer at its first
+        // resolution; harmless because the spawn-ack path is only armed after
+        // create(), so a restored tile never has an ack pending.
         if (next) {
           // `id` rides along for the supervisor spawn-ack loop (TS3), which
           // the consumer keeps pinned to first resolution.

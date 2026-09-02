@@ -1,16 +1,8 @@
-// Single import point for the approval crypto in the Deck's main process.
-//
-// It deliberately RE-EXPORTS the core module (repo-root `shared/approval.ts`)
-// rather than mirroring it, unlike broker-client.ts which had to re-implement
-// shared/config.ts. The reason that mirror exists does not apply here:
-// shared/config.ts uses `Bun.file`, unavailable under Electron, whereas
-// shared/approval.ts uses node:crypto only and runs unchanged in Electron, in
-// Bun and in a hook subprocess.
-//
-// Mirroring would be actively dangerous for this particular file: a drift of a
-// single byte in the canonical serialization or a domain-separation string
-// silently invalidates every signature between the Deck and the broker. One
-// implementation, one behaviour.
+// Re-exports shared/approval.ts rather than mirroring it: that module only uses
+// node:crypto, so it runs unchanged under Electron, Bun and a hook subprocess.
+// A byte of drift in the canonical serialization or domain-separation string
+// would silently invalidate every signature between the Deck and the broker, so
+// mirroring here would be dangerous.
 
 export {
   APPROVAL_ANSWER_MAX,

@@ -1,16 +1,9 @@
-// Minimal VT screen model + injectCommand's screen-state guard (Vague 10 lot
-// A2-1, cards 5dbf3255 + 63ca372f). Ported from tests/pty-harness/mini-screen.cjs
-// per team-lead directive (claude-peers channel, 2026-08-17): Claude Code paints
-// with ABSOLUTE cursor addressing (CUP), so a stripAnsi buffer renders text in
-// PAINT order, not READING order -- "is there a composer box on screen right
-// now, and where is the cursor" is undecidable from stripAnsi alone. This model
-// tracks a grid + cursor position instead, same subset the debugger's probe
-// covers (CUP/CHA/CUF/CUB/CUU/CUD/EL/ED; SGR/OSC/DEC-private ignored).
-//
-// NOT a terminal emulator: no scrollback, no wrapping semantics beyond the
-// naive one, no charsets. Good enough to READ a screen, never to drive one.
-// Pure module -- no electron/node-pty import (BUN.md convention) -- so
-// `bun test` can exercise it directly.
+// Claude Code paints with absolute cursor addressing, so a stripAnsi buffer
+// renders in paint order, not reading order — undecidable whether a composer
+// box is on screen and where the cursor sits. This model tracks a grid and
+// cursor position instead.
+// Not a terminal emulator: no scrollback, no wrapping beyond the naive case, no
+// charsets — good enough to read a screen, never to drive one.
 
 export interface Screen {
   feed(data: string): void
@@ -21,24 +14,13 @@ export interface Screen {
 }
 
 /**
- * Defaults (400x200) are deliberately far larger than any real terminal:
- * CUP addressing is ABSOLUTE, so a grid LARGER than the real terminal
- * preserves geometry exactly (no clamp, no wrap) while a grid SMALLER than
- * it destroys geometry permanently -- once a row/column falls outside a
- * too-small grid every future CUP to that coordinate clamps to the same
- * wrong cell forever, corrupting classifyInjectGuard's cursor-vs-chevron
- * read for the rest of that tile's life (review finding, roadmap cards
- * 63ca372f/120148eb: a tile taller than the old 120x40 default froze
- * classifyInjectGuard at 'modal' permanently). This default matters for the
- * window between ANY (re)creation of a tile's Screen and the NEXT resize --
- * not just the initial spawn (PtyManager.spawn's own fixed 80x24) before
- * the renderer's first FitAddon fit. ScreenGuard.feed below builds a fresh
- * Screen at this default every time no Screen is on record for that id yet,
- * which is also true after every ScreenGuard.clear(id) call site (PTY exit,
- * remove, restart's respawn) -- each one reopens the same window until the
- * next pty:resize. Oversizing costs nothing (an unused row or column stays
- * blank), undersizing costs correctness. Do not shrink this default back
- * toward a "realistic" terminal size.
+ * Default grid is far larger than any real terminal on purpose: CUP addressing
+ * is absolute, so a grid larger than the terminal preserves geometry exactly,
+ * while a grid smaller than it corrupts every future CUP to an out-of-range
+ * cell permanently, clamping to the same wrong cell forever.
+ * Matters for the window between any Screen (re)creation and the next resize,
+ * not just the initial spawn. Do not shrink this default toward a 'realistic'
+ * terminal size.
  */
 export function makeScreen(cols = 400, rows = 200): Screen {
   const grid: string[][] = Array.from({ length: rows }, () => new Array(cols).fill(' '))
@@ -197,56 +179,18 @@ export function makeScreen(cols = 400, rows = 200): Screen {
 export type InjectGuardState = 'clear' | 'modal'
 
 /**
- * GEOMETRIC discriminant (team-lead correction over claude-peers, 2026-08-17,
- * superseding an earlier text-pattern plan; MESURE, not DEDUIT, by direct
- * replay of tests/pty-harness/fixtures/ through this same model -- see
- * tests/desktop-screen-model.test.ts, which pins these exact five files):
- *
- * Claude Code's composer box (this CLI version, no border characters -- an
- * earlier design here assumed a bordered '╭...╮' box and was WRONG, measured
- * wrong by replaying the real fixtures, not by re-reading a comment) draws as
- * two rows: the editable content row (blank, or the operator's echoed
- * draft/slash text), then a static CHEVRON marker row directly BELOW it (the
- * chevron cursor glyph, U+276F -- named here rather than painted literally;
- * the regex below matches it via a Unicode escape, not a bare character).
- * The real terminal cursor sits on the CONTENT row, i.e. exactly one row
- * ABOVE the chevron marker, in ALL THREE non-modal captures
- * (prompt-idle-with-esc.json, draft-typed-with-esc.json,
- * slash-menu-with-esc.json -- empty prompt, a draft in progress, and the
- * slash-command menu open, respectively; the menu result in particular
- * retires the "numbered chooser == modal" idea a draft of this guard nearly
- * shipped: the slash list is ALSO numbered/chevron-led content further
- * down-screen, but that is not the ROW this check inspects).
- *
- * The trust/config dialog (fixtures dialog-open-no-esc.json /
- * dialog-open-with-esc.json) replaces the whole screen with a choice panel:
- * it still paints its own chevron next to the selected option, but the real
- * cursor ends up THREE rows below that, on the "Enter to confirm · Esc to
- * cancel" footer text -- not one row above. Same glyph, different row
- * relationship to the live cursor; that relationship, not the glyph's mere
- * presence, is what this function tests.
- *
- * DEDUIT, not MESURE, on exactly two screens this rule has not been observed
- * against: the @-mention picker and the tool-permission prompt. Both are
- * treated conservatively as modal below (open item, per team-lead), since
- * neither could be captured today (the operator's global permission
- * allow-list makes tool calls execute without ever showing the prompt in a
- * disposable cwd, and overriding that config was out of scope). Both fall
- * through to the conservative default below, same as any other screen this
- * function cannot positively confirm has the cursor-on-content-row
- * relationship: no confirmed match -> 'modal'. This is the fail-closed
- * direction team-lead's brief calls D2 -- doubt costs a refused (deferred,
- * journaled, replayable) directive, never a write onto a screen this
- * function isn't sure about.
- *
- * What this function does NOT cover on its own: it is combined with a SECOND,
- * independently-sourced signal at the injectCommand call site (see that
- * method's own comment) precisely because this geometric rule is derived
- * from five captures, not a swept domain -- a screen a future CLI version
- * paints differently (e.g. moving the chevron marker to the SAME row as the
- * content, or adding a third composer row) could defeat it silently in
- * either direction. The composition is a union that only ever adds
- * refusals, never removes one this function would have raised alone.
+ * The composer box draws as two rows: editable content, then a static chevron
+ * marker directly below it. The real cursor sits on the content row, one row
+ * above the chevron, whenever the state is not modal.
+ * The trust/config dialog paints the same chevron glyph, but the cursor ends up
+ * three rows below it, on the footer — same glyph, different row relationship
+ * to the cursor, which is what this checks.
+ * No confirmed match defaults to modal (fail closed): the @-mention picker and
+ * the tool-permission prompt could not be captured and are treated
+ * conservatively as modal.
+ * Combined at the call site with a second, independently-sourced signal, since
+ * this geometric rule is derived from five captures, not a swept domain, and a
+ * future CLI screen layout could defeat it silently.
  */
 export function classifyInjectGuard(screen: Screen): InjectGuardState {
   const lines = screen.lines()
@@ -259,29 +203,11 @@ export function classifyInjectGuard(screen: Screen): InjectGuardState {
 }
 
 /**
- * Rolling per-session Screen instance (keyed by tile id, same convention as
- * ThinkingDetector/QuotaDetector/AttentionDetector/StartupAckDetector in
- * session-service.ts -- "keyed by what, and what happens when there are two":
- * a tile's screen belongs to that tile's PTY life, never shared, and cleared
- * at every PTY-life boundary attentionDetector is, except attentionDetector's
- * own clearAttention() (the operator's manual per-flag dismiss, not a
- * PTY-life boundary -- see tests/desktop-inject-command-modal-guard.test.ts's
- * own comment on that exact asymmetry, which this file mirrors, not a vaguer
- * "these detectors" grouping that no single shared clear-site list actually
- * matches). Fed from the SAME central pty 'data' handler as the other
- * detectors, so it stays in lockstep with them -- no separate polling: the
- * grid is a fixed cols*rows array, and VT cursor state persists correctly
- * across chunk boundaries because each chunk is fed to the SAME live Screen
- * instance, in order, exactly once.
- *
- * The grid being FIXED-SIZE is not itself a free advantage -- until
- * `resize` below existed, "fixed" meant "fixed at makeScreen's default
- * forever," which is exactly what let a tall tile permanently misclassify
- * (see makeScreen's own doc). `resize` is what makes the fixed-size grid
- * track the tile's REAL size instead of a guess: called from
- * SessionService.resize in lockstep with PtyManager.resize, fed the same
- * cols/rows the renderer's FitAddon sends through the pty:resize IPC
- * channel, so PTY and screen model never diverge in steady state.
+ * Keyed by tile id: a tile's screen belongs to that tile's PTY life, never
+ * shared, and is cleared at every PTY-life boundary except the operator's
+ * manual per-flag dismiss.
+ * Fed from the same central pty data handler as the other per-tile detectors,
+ * so it stays in lockstep with them with no separate polling.
  */
 export class ScreenGuard {
   private screens = new Map<string, Screen>()
@@ -296,21 +222,13 @@ export class ScreenGuard {
   }
 
   /**
-   * Rebuild this tile's Screen at its real terminal size. Rebuilds rather
-   * than reflows: a live TUI repaints its whole screen on a real resize
-   * (Claude Code's own does -- field-proven, not assumed: pty-manager.ts's
-   * CONPTY_KICK_DELAYS_MS doc records a same-dimensions resize flushing a
-   * whole withheld dialog instantly, 2026-07-28 audit), so the previous
-   * grid's content has no claim to survive a dimension change -- keeping it
-   * around stale risks a wrong read for the one 'data' chunk between the
-   * resize and the next repaint, where a fresh (blank) grid degrades toward
-   * 'modal' (fail-closed, D2) instead.
-   *
-   * cols/rows are IPC-sourced (renderer FitAddon -> pty:resize -> here, same
-   * numbers PtyManager.resize's own call receives): NaN is rejected
-   * EXPLICITLY via Number.isFinite, since a bare `cols < 1` comparison
-   * against NaN is `false` and would let it through silently into
-   * `new Array(NaN)`, which throws.
+   * Rebuilds rather than reflows: a live TUI repaints its whole screen on a
+   * real resize, so the previous grid's content has no claim to survive a
+   * dimension change — a fresh blank grid degrades toward modal (fail closed)
+   * for the one chunk between resize and the next repaint.
+   * cols/rows are IPC-sourced; NaN is rejected explicitly via Number.isFinite,
+   * since cols < 1 against NaN is false and would otherwise reach new
+   * Array(NaN), which throws.
    */
   resize(id: string, cols: number, rows: number): void {
     if (!Number.isFinite(cols) || !Number.isFinite(rows) || cols < 1 || rows < 1) return

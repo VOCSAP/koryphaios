@@ -1,26 +1,14 @@
-// Peer_id rotation announce (card 6f59c73a, sub-lot L1). Pure: no electron /
-// node-pty import, so `bun test` exercises both the DECISION and the exact
-// TEXT the Deck sends.
-//
-// THE PROBLEM, lived twice on 2026-09-01: when peer_ids rotate, the team-lead
-// keeps addressing the OLD id and the team stops talking -- with no error
-// raised anywhere, because a send to a dead id returns no error. Detection was
-// never the gap: pollPeerIds (session-service.ts) already compares
-// `next !== r.peerId` on every tick and refreshes the renderer. What was
-// missing is the ANNOUNCE: its emit was guarded by
-// `next && r.peerId === null && r.announce`, i.e. FIRST RESOLUTION only.
-//
-// This module owns the four-way decision and the wording. It deliberately
-// declares its OWN types rather than extending JoinAnnounceIntent
-// (shared/announce.ts): a rotation is not a join, it carries no
-// agent/model/effort intent, and widening a shared type for it would couple
-// two unrelated events.
-//
-// WHY THE WORDING LIVES HERE TOO, and not inline at the call site: a source
-// scan proves which symbols a caller reads, and is BLIND to how it composes a
-// message. That is not hypothetical on this codebase -- the directive journal
-// shipped a regression of exactly that shape (an id silently dropped from a
-// message a scan had approved). So the text is composed here and probed here.
+// Pure module (no electron / node-pty import), so bun test exercises both the
+// rotation decision and the exact text the Deck sends.
+// Detecting a rotation was never the gap — pollPeerIds already compares next
+// !== r.peerId on every tick — what was missing was the announce itself, which
+// fired only on first resolution rather than on every rotation.
+// Declares its own types rather than extending JoinAnnounceIntent, since a
+// rotation carries no agent/model/effort intent and widening a shared type for
+// it would couple two unrelated events.
+// The wording is composed here too, not at the call site, because a source scan
+// proves which symbols a caller reads but is blind to how it composes a
+// message.
 
 /** Why nothing is announced, kept explicit so a silent path is never guessed at. */
 export type PeerAnnounceSilentReason =

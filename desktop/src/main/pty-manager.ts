@@ -5,21 +5,15 @@ import { buildShellInvocation, type SpawnOpts } from './shell-command'
 import { reportError } from './log'
 
 /**
- * Diagnostic-only raw PTY capture (card 00588e6c, phase 1: instrumentation).
- * Set KORY_PTY_RAW_CAPTURE to an absolute file path OUTSIDE this repo (e.g.
- * under os.tmpdir()) to hex-dump the first RAW_CAPTURE_LIMIT chunks node-pty
- * hands us -- before marker stripping, before stripAnsi, before any
- * detection heuristic. This is the most upstream point reachable from our
- * code: node-pty itself already UTF-8-decodes the raw bytes into `data`
- * before onData fires, and that decode is outside our control. Unset (the
- * default) -> zero fs calls, inert. Counter is module-level (shared across
- * every spawned session), matching this task's single-session manual
- * capture use case, not a per-id budget.
- *
- * MUST be set in the environment BEFORE the kory/Electron main process
- * launches (`process.env` is read once, at module load, into the constant
- * below) -- exporting it in a terminal AFTER kory is already running has no
- * effect on that already-running process.
+ * KORY_PTY_RAW_CAPTURE hex-dumps the first RAW_CAPTURE_LIMIT PTY chunks before
+ * marker stripping, ANSI stripping, or any detection heuristic — the most
+ * upstream point reachable from our code, since node-pty itself already
+ * UTF-8-decodes bytes before onData fires.
+ * Must be set in the environment before the Electron main process launches,
+ * since process.env is read once at module load; setting it in a terminal
+ * afterward has no effect on an already-running process.
+ * Counter is module-level, shared across every spawned session, matching a
+ * single manual capture session rather than a per-id budget.
  */
 const RAW_CAPTURE_FILE = process.env.KORY_PTY_RAW_CAPTURE ?? null
 const RAW_CAPTURE_LIMIT = 30
@@ -38,17 +32,13 @@ export interface PtyExitPayload {
 const MARKER_BUFFER_CAP = 65536
 
 /**
- * ConPTY (Windows) can WITHHOLD a TUI's first full-screen frame: the child
- * draws it, ConPTY buffers it, and NOTHING reaches the pipe reader until the
- * next resize forces a repaint. Field-proven on the dev-channels warning
- * dialog (2026-07-28 audit): 30 s of silence, then a resize to the SAME
- * dimensions flushed the whole dialog instantly. The Deck only resizes on a
- * tile's doFit (mount / view return), which always lands BEFORE claude has
- * drawn its first screen -- so the dialog stayed invisible and the startup
- * auto-ack (startup-ack.ts) never fired until the operator navigated away and
- * back. These delayed same-dims "kicks" force the flush instead. A kick on an
- * already-flowing PTY is a harmless repaint, so they are unconditional; the
- * spread covers slow boots (MCP servers, hooks) without kicking forever.
+ * ConPTY (Windows) can withhold a TUI's first full-screen frame until the next
+ * resize forces a repaint; the Deck only resizes on a tile's mount/view return,
+ * which lands before the child has drawn its first screen, so the frame can
+ * stay invisible indefinitely.
+ * These delayed same-dims 'kicks' force the flush instead. A kick on an
+ * already-flowing PTY is just a harmless repaint, so they run unconditionally;
+ * the spread covers slow boots (MCP servers, hooks) without kicking forever.
  */
 const CONPTY_KICK_DELAYS_MS = [1500, 4000, 8000, 15000]
 
@@ -85,19 +75,14 @@ export class PtyManager extends EventEmitter {
       TERM: 'xterm-256color',
       ...extraEnv
     }
-    // Card 3c085f1a (review round 2): CLAUDE_PEERS_TOOLS is the one key whose
-    // ABSENCE is load-bearing, unlike every other key this merge handles.
-    // session-service.ts's own neutralisation rule (its `sessionEnv`
-    // declaration, right above the comment naming CLAUDE_PEERS_ROLE) exports
-    // CLAUDE_PEERS_ROLE unconditionally, '' included, precisely so a value
-    // inherited from the process that launched the Deck can never
-    // re-activate something a session has none of -- that same fix cannot be
-    // copied here, because '' means ZERO TOOLS for CLAUDE_PEERS_TOOLS, the
-    // opposite of "no restriction". If Kory's OWN process env happens to
-    // carry CLAUDE_PEERS_TOOLS (inherited from whatever launched the Deck)
-    // and this spawn's sessionEnv did not set it, the `...process.env` spread
-    // above would otherwise silently restrict a tile nobody meant to
-    // restrict -- delete, not a neutral value, is the only correct shape.
+    // CLAUDE_PEERS_TOOLS's absence is load-bearing, unlike every other key this
+    // merge handles: '' means zero tools, the opposite of 'no restriction', so
+    // it can't be neutralized with an empty-string default the way other keys
+    // are.
+    // If Kory's own process env carries CLAUDE_PEERS_TOOLS and this spawn's
+    // sessionEnv didn't set it, the ...process.env spread would otherwise
+    // silently restrict a tile nobody meant to restrict — deleting the key, not
+    // defaulting it, is the only correct shape.
     if (!extraEnv || !('CLAUDE_PEERS_TOOLS' in extraEnv)) delete env.CLAUDE_PEERS_TOOLS
 
     const proc = pty.spawn(file, args, {

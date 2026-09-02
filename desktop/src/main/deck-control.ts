@@ -1,36 +1,12 @@
-// Deck control endpoint (PLAN C5): a loopback HTTP server, started by the
-// Electron main process, that lets the SUPERVISOR session pilot the app
-// through the deck-control MCP server (desktop/mcp/deck-control-mcp.ts).
-//
-// Security model:
-// - 127.0.0.1 only, random port. One process, one HTTP endpoint, but MULTIPLE
-//   Bearer tokens can be live at once (Card 6c380073): the historical token
-//   (injected into the supervisor tile's --mcp-config) and one minted per
-//   embedded team-lead spawn via mintCaller() below. Each token resolves to
-//   a callerId and an optional tool allow-list, both held in `callerTable`.
-// - Destructive operations (close/restart a session, remove a worktree) are
-//   allowed only on objects the SAME CALLER created through this endpoint --
-//   enforced by `ownedSessions`/`ownedWorktrees` (Map<id, callerId>) checked
-//   in the `deck_close_session` / `deck_restart_session` / `deck_remove_worktree`
-//   cases below, never by which endpoint the request arrived through.
-//   Anything else must go through the operator's UI.
-// - The per-caller tool allow-list (three-state semantics: absent -> every
-//   tool, array -> only those, empty array -> none) is enforced HERE, in the
-//   request handler below, before dispatch() ever runs -- deck-control-mcp.ts
-//   keeps its own copy of the same filter (piece 1) for tools/list UX, but it
-//   is no longer the only barrier: a caller could always skip tools/list and
-//   POST /call directly with a token that names a tool it should not have.
-// - Honesty about what this does NOT resist: both the supervisor's and the
-//   team-lead's --mcp-config files (each holding its own token) are written
-//   into the same userData/APP_STATE_SUBDIR directory (index.ts). A
-//   non-sandboxed agent hosted in a sibling tile could read the neighboring
-//   file and borrow its token. This scheme separates two COOPERATING
-//   authorities by role; it does not resist a deliberately hostile agent
-//   (same framing as shared/types.ts's own reserved-by-role note).
-// - A spawn cap keeps a runaway supervisor from flooding the window.
-//
-// The module is dependency-injected (no electron / node-pty imports) so the
-// full dispatch + guard logic is unit-testable under `bun test`.
+// 127.0.0.1 only; multiple bearer tokens can be live at once, each resolved to
+// a callerId and optional tool allow-list in `callerTable`.
+// Destructive operations are allowed only on objects the same caller created
+// through this endpoint, enforced by ownedSessions/ownedWorktrees, never by
+// which endpoint the request arrived through.
+// The per-caller tool allow-list is enforced here at the request handler,
+// before dispatch runs, not only by the client-side copy of the filter.
+// Does not resist a hostile sibling tile reading another tile's mcp-config
+// token file; it only separates two cooperating authorities by role.
 
 import { createServer, type Server } from 'node:http'
 import { randomBytes } from 'node:crypto'
@@ -86,10 +62,8 @@ export interface SpawnSummary {
   worktree_branch: string
   prompt_preview: string
   /**
-   * Audit fix #1b (card 6c380073): the free-form launch-args string, shown
-   * verbatim in the approval dialog (index.ts summaryLine) so the operator
-   * actually SEES what they are approving -- previously invisible in every
-   * trust mode above hands-free. '' when absent.
+   * The free-form launch-args string, shown verbatim in the approval dialog so
+   * the operator actually sees what they are approving. '' when absent.
    */
   args: string
 }
@@ -145,19 +119,12 @@ export interface DeckControlDeps {
   /** Write an embedded profile's prompt file and return its path (TS1). */
   writeEmbeddedPrompt(id: string): string
   /**
-   * Write the team-lead's own deck-control --mcp-config and return its path
-   * (Card ff091064, piece 2). Called once per team-lead spawn, from
-   * spawnEntry below -- the same shared control server the supervisor uses,
-   * scoped to `allowedTools` via DECK_CONTROL_TOOLS. `token` and `callerId`
-   * come from a fresh mintCaller() call made by spawnEntry itself (Card
-   * 6c380073): a distinct token per team-lead spawn, never the supervisor's,
-   * and `callerId` is threaded through so the implementation (index.ts) can
-   * give each spawn's config file a distinct name -- a second mint must not
-   * silently invalidate the first one's file. `allowedTools` is the SAME
-   * array reference spawnEntry already passed to mintCaller (audit fix #6,
-   * card 6c380073) -- deliberately threaded through rather than re-imported
-   * a second time here, so the server-side scope and the client-side
-   * DECK_CONTROL_TOOLS filter can never independently drift apart.
+   * `token` and `callerId` come from a fresh mintCaller() call per team-lead
+   * spawn, never the supervisor's, so a second mint cannot silently invalidate
+   * the first spawn's config file.
+   * `allowedTools` is the same array reference already passed to mintCaller, so
+   * the server-side scope and the client-side filter cannot independently drift
+   * apart.
    */
   writeTeamLeadMcpConfig(token: string, callerId: string, allowedTools: readonly string[]): string
   /**
@@ -399,10 +366,9 @@ export function startDeckControl(
   }
 
   /**
-   * Audit fix #2 (card 6c380073): remove every token registered under
-   * `callerId` -- a reverse lookup over callerTable since the token is the
-   * map KEY and callerId only lives in its value. No-op if callerId is not
-   * (or no longer) registered.
+   * Reverse lookup over callerTable: the token is the map key and callerId only
+   * lives in the value, so every token registered under callerId must be found
+   * by scanning. No-op if callerId is not registered.
    */
   function revokeCaller(callerId: string): void {
     for (const [tok, entry] of callerTable) {
@@ -482,18 +448,11 @@ export function startDeckControl(
       // profile in the catalog today (no list to recycle), same "absent
       // means unrestricted" contract as SessionDef.peerTools's own doc.
       peerTools: embedded?.peerTools,
-      // Card 8b6a5778: was never set on this path at all -- CLAUDE_PEERS_ROLE
-      // stayed '' for every agent-spawned tile, and a role is NOT repairable
-      // hot (single writer broker-side, frozen for the process's life), so a
-      // tile born without one is permanently unreachable by role-targeted
-      // roadmap dispatch. `embedded.id` (team-lead, developer, reviewer,
-      // explorer, debugger, test-engineer) is the value, NOT `embedded.role`
-      // (a prose one-line summary, a completely different field with the
-      // same name on EmbeddedAgent -- see that interface's own doc). All six
-      // ids already pass sanitizeRole (session-service.ts's single sink)
-      // UNCHANGED: already lowercase kebab, already in shared/role.ts's
-      // BUILTIN_ROLES. A spawn with no embedded profile poses no role, same
-      // as before this card -- never invented for an operator-profile spawn.
+      // Uses `embedded.id` (team-lead, developer, reviewer, explorer, debugger,
+      // test-engineer), not `embedded.role`: EmbeddedAgent has two unrelated
+      // fields with that same name, the latter a prose summary.
+      // A spawn with no embedded profile poses no role; never invented for an
+      // operator-profile spawn.
       role: embedded?.id,
       // Card ff091064 (piece 2): only the embedded team-lead gets the
       // deck-control bridge -- every other embedded/operator profile spawned
@@ -654,10 +613,10 @@ export function startDeckControl(
       case 'deck_restart_session': {
         const id = str(args, 'id')
         if (!id) throw new Error('id is required')
-        // Card 6c380073: resolve the OBJECT first (its recorded owner, or
-        // undefined if never seen), THEN ask if THIS caller may act on it --
-        // an absent id refuses the same way a wrong-owner id does, never
-        // falling back to a default owner. Previously unguarded entirely.
+        // Resolves the object first (its recorded owner, or undefined if never
+        // seen), then asks whether this caller may act on it. An absent id
+        // refuses the same way a wrong-owner id does, never falling back to a
+        // default owner.
         if (ownedSessions.get(id) !== callerId) {
           throw new Error(
             'refused: only a session spawned by this same caller can be restarted -- ask the operator for the rest'
@@ -703,24 +662,12 @@ export function startDeckControl(
           if (!hit) throw new Error(`refused: no live session carries peer_id "${peerId}"`)
           target = hit.id
         }
-        // Card 6c380073, extended by c4cbb845: resolve the OBJECT first, THEN
-        // ask whether THIS caller may act on it -- so the guard bites on the
-        // RESOLVED tile id, never on the argument as typed.
-        //
-        // Two refusal wordings, on purpose, and here is what backs the split.
-        // This one is WORD FOR WORD the tile-id path's: a caller must not
-        // learn from the ownership refusal whether the tile is someone
-        // else's or absent. The unresolved/ambiguous refusals above ARE
-        // distinct, which does tell the caller a live tile carries that
-        // peer_id -- accepted because that enumeration is already available
-        // to the same tile through another channel: the deck-control config
-        // (supervisor.ts, buildDeckControlMcpConfig) scopes DECK_CONTROL_TOOLS
-        // on the deck-control server ONLY, the tile's command line carries
-        // `--mcp-config` and never `--strict-mcp-config` (session-command.ts),
-        // so the repo's own .mcp.json claude-peers server is merged in and
-        // list_peers already enumerates the live peer_ids. The split buys
-        // diagnosability on the frequent error (a typo) without granting
-        // anything the caller lacks.
+        // The unresolved/ambiguous and the wrong-owner refusals are worded
+        // identically on purpose: a caller must not learn from the ownership
+        // refusal alone whether a tile is someone else's or simply absent.
+        // That distinction is safe to leak at the unresolved stage because the
+        // same enumeration is already available to the tile through list_peers
+        // on the merged claude-peers MCP server.
         if (ownedSessions.get(target) !== callerId) {
           throw new Error(
             'refused: only a session spawned by this same caller can be closed -- ask the operator for the rest'
@@ -728,19 +675,12 @@ export function startDeckControl(
         }
         deps.closeSession(target)
         ownedSessions.delete(target)
-        // Card 6c380073 (review round 2, point 8): this case drops the
-        // OWNERSHIP entry only. It deliberately does NOT call
-        // revokeCallerForSession or touch sessionMintedCallerId -- that is
-        // covered TRANSITIVELY, and the chain is worth naming because nothing
-        // here hints at it. VERIFIED end to end: deps.closeSession is
-        // `(id) => service.remove(id)` (index.ts's controlDeps), remove()'s
-        // forceCleanup emits 'removed' (session-service.ts), and the single
-        // production listener for that event (index.ts's service.on('removed'))
-        // is what calls revokeCallerForSession and deletes the config file.
-        // Measured: 'removed' has exactly three emit sites (remove, closeAll,
-        // restoreFrom) and revokeCallerForSession exactly one production
-        // caller, that listener. Revoking here as well would be a second,
-        // divergence-prone path to the same guarantee.
+        // Drops only the ownership entry; it deliberately does not call
+        // revokeCallerForSession or touch sessionMintedCallerId here.
+        // That happens transitively: closeSession emits a 'removed' event whose
+        // single production listener revokes the caller and deletes the config
+        // file. Revoking here too would be a second, divergence-prone path to
+        // the same guarantee.
         return { ok: true }
       }
 
@@ -861,9 +801,6 @@ export function startDeckControl(
       res.writeHead(code, { 'content-type': 'application/json' })
       res.end(JSON.stringify({ ok: false, error: msg }))
     }
-    // Card 6c380073: any token registered in callerTable authorizes the
-    // request (no longer a single fixed comparison) -- an unknown/expired
-    // token still 401s exactly as before this table existed.
     const auth = req.headers.authorization
     const bearerToken = typeof auth === 'string' && auth.startsWith('Bearer ') ? auth.slice(7) : ''
     const caller = callerTable.get(bearerToken)

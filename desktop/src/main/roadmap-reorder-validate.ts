@@ -1,16 +1,9 @@
-// Workflow lane waves (roadmap card 42edc88b phase 1): main-side re-validation
-// of the OPTIONAL `waves` IPC argument to `roadmap:reorder`, before it ever
-// reaches roadmap-service.ts / the broker.
-//
-// roadmap:reorder is exposed to the companion/MCP surface at tier 1
-// (desktop/src/shared/companion.ts CHANNEL_TIERS) -- a tier is a declaration,
-// not an access gate (see CLAUDE.md's five-hostile-inputs convention). The
-// broker performs its own full validation (shape, flat(waves) === ids,
-// singleton-wave directives) and remains the source of truth for what is
-// actually persisted; this module exists so a malformed payload from an
-// agent-facing tool never leaves the Deck process in the first place.
-//
-// No electron imports so it is unit-testable under `bun test`.
+// Re-validates the optional waves argument main-side before it reaches the
+// broker, since roadmap:reorder is exposed to the companion/MCP surface and a
+// tier is a declaration, not an access gate.
+// The broker still performs its own full validation and remains the source of
+// truth for what's persisted; this exists so a malformed payload from an
+// agent-facing tool never leaves the Deck process at all.
 
 export interface ValidateReorderWavesOptions {
   /** Cap on the number of waves a single reorder may submit. */

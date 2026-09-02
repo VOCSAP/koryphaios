@@ -1,22 +1,9 @@
-// Sandbox mode (card 6e3863ef): mount-mode sub-policy that closes the
-// git-hooks/config-file evasion class. In `mount` mode the operator's real
-// tree is bind-mounted read-write at /work — code we assume COMPROMISE
-// (CLAUDE.md "hostile inputs") can then write /work/.git/hooks/pre-commit,
-// /work/.mcp.json or /work/.claude/settings.json, which the HOST later
-// executes or trusts when the operator next opens/commits the project. This
-// module computes which paths get a nested `:ro` bind on top of the rw mount
-// to close that; `buildCreateArgs` (sandbox-command.ts) stays pure/synchronous
-// and only renders the plan this module produces into `-v` args.
-//
-// CRITERION (A5): any project path whose CONTENT is EXECUTED or INTERPRETED
-// AS A COMMAND by the HOST when the host opens or manipulates this project.
-// The list below (PROTECTED_PATHS) is a DATED INSTANCE of that criterion,
-// not the rule itself — a future path that becomes host-executed belongs
-// there under the same test, appended with its kind.
-//
-// Node builtins only (no electron) so this stays bun-testable. This is the
-// ONLY file in the sandbox-command family that touches disk (statSync /
-// existsSync) — buildCreateArgs itself must stay pure.
+// In mount mode the operator's real tree is bind-mounted read-write; code
+// assumed compromised could otherwise write .git/hooks/pre-commit, .mcp.json or
+// .claude/settings.json for the host to later execute or trust.
+// Computes which paths get a nested read-only bind on top of the rw mount to
+// close that. Any project path whose content the host executes or interprets as
+// a command when it opens or manipulates the project belongs on that list.
 
 import { existsSync, statSync } from 'node:fs'
 import { isAbsolute, join } from 'node:path'
@@ -49,30 +36,14 @@ export type ProtectionPlan =
   | { status: 'applied'; applied: readonly ProtectedBind[]; skipped: readonly SkippedBind[] }
 
 /**
- * ONE list, `kind` a MANDATORY field on every entry — not two arrays sorted
- * by kind. Two arrays let an entry's dir/file classification be wrong by
- * construction (moving `.claude/settings.json` between them makes NO test
- * fail: nothing forces the array it lives in to agree with its actual
- * on-disk shape). TypeScript alone does not close this — `{ rel: string;
- * kind: ProtectedKind }` accepts any (rel, kind) pair, so a `kind:'dir'`
- * entry for a path that is actually a file is still perfectly type-valid.
- * What this restructuring buys is narrower and real: `kind` is now LOCAL
- * and VISIBLE at the exact point an entry is added (no second array to
- * remember to pick correctly), and the coverage test below builds its
- * fixture FROM this list, creating a directory for `kind:'dir'` and a file
- * for `kind:'file'` — so a wrong `kind` on any entry now fails that test
- * (proved by reclassifying '.claude/settings.json' as 'dir' and reverting).
- *
- * - `dir` gets an UNCONDITIONAL bind. Docker recursively creates any missing
- *   host-side path components on a directory bind (owned by the operator,
- *   mode 755 — measured 2026-08-13/14), so conditioning this on existsSync
- *   would fail OPEN the day one of these directories is created for the
- *   first time by the operator's own tooling after the sandbox already
- *   exists.
- * - `file` is bound only when it already exists as a FILE. Docker's bind on
- *   a missing file target fabricates a DIRECTORY of that name host-side
- *   (measured) — an unconditional file bind would be corruption, not
- *   protection.
+ * One list with kind as a mandatory per-entry field, not two arrays sorted by
+ * kind: two arrays let an entry's dir/file classification be wrong by
+ * construction, since nothing forces the array it lives in to match its actual
+ * on-disk shape.
+ * dir gets an unconditional bind — Docker creates missing host-side path
+ * components for a directory bind. file is bound only when it already exists as
+ * a file — Docker's bind on a missing file target fabricates a directory of
+ * that name host-side.
  */
 export const PROTECTED_PATHS: readonly { rel: string; kind: ProtectedKind }[] = [
   { rel: '.git/hooks', kind: 'dir' },
@@ -173,18 +144,10 @@ export function planProtectedBinds(args: {
 }
 
 /**
- * Renders `plan` into the short English notice an agent sees when it hits
- * EPERM on a protected path, so it recognizes a POLICY and does not try to
- * work around it. Pure, no disk access, no i18n — this text goes to a CLI
- * agent, not the operator (unlike everything under i18n.ts).
- *
- * SECURITY (A2, non-negotiable): this function enumerates ONLY
- * `plan.applied`. It must NEVER mention `plan.skipped` — neither the paths
- * nor even their count. Our doctrine assumes the agent is COMPROMISED: the
- * list of what is NOT protected is worthless for its legitimate work and
- * highly useful to an attacker mapping the remaining write surface. If you
- * are tempted to add skipped "for completeness", don't — that is exactly
- * the leak this comment exists to block.
+ * Pure, no i18n — this text goes to a CLI agent, not the operator.
+ * Must never mention plan.skipped, not even its count: the doctrine assumes the
+ * agent is compromised, and the list of what is not protected is only useful to
+ * an attacker mapping the remaining write surface.
  */
 export function renderProtectionNotice(plan: ProtectionPlan): string {
   if (plan.status !== 'applied' || plan.applied.length === 0) return ''

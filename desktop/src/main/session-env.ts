@@ -1,11 +1,3 @@
-// Pure env-construction helpers for session-service.ts, split out into their
-// own dependency-free module (no electron/node-pty imports, same convention
-// as session-command.ts/shell-command.ts/peer-state.ts) so they are directly
-// unit-testable under `bun test` without pulling in SessionService's own
-// hardcoded PtyManager -- which is not dependency-injected, so a genuinely
-// behavioral test cannot instantiate the class itself (see
-// tests/desktop-session-role-env.test.ts's own header on this exact limit).
-
 /**
  * Card 3c085f1a: the CLAUDE_PEERS_TOOLS env value for a session's peerTools
  * allow-list. undefined `peerTools` (no embedded profile, or a profile that

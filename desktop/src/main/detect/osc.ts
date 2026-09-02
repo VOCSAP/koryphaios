@@ -1,46 +1,9 @@
-// Pure incremental OSC extractor for the PTY data stream. Card 1aa69066 / H2
-// of docs/DESIGN-HERDR-ADOPTION.md (amended 2026-08-26 to include OSC 777).
-// No electron/node-pty import -- unit-testable directly under bun, same
-// discipline as session-kind.ts and screen-model.ts.
-//
-// Captures three OSC families BEFORE the ANSI-stripping detectors see the
-// chunk (attention.ts, quota.ts, startup-ack.ts all defined a CSI-only strip
-// today, so OSC bytes survived untouched in their rolling buffers -- see the
-// same card's context):
-//   - OSC 0 / OSC 2 (title):  ESC ] 0 ; <text> BEL|ST   and  ESC ] 2 ; ...
-//   - OSC 9;4 (progress):     ESC ] 9 ; 4 ; <state> ; <progress> BEL|ST
-//   - OSC 777 (notify):       ESC ] 777 ; notify ; <title> ; <body> BEL|ST
-// Retains only the LAST title and LAST progress seen (no history, per H2's
-// design) and the LAST OSC 777 body. Classifying that body into one of the
-// 21 kinds / 11 bodies measured on card f8082208 is deliberately left to the
-// caller: DESIGN-NOTIFY-EVENTS.md section 6.4 is explicit that this table is
-// ENRICHMENT, never an admission list -- an unrecognised body must still
-// raise a generic level-A event, never be silently dropped. Returning the
-// raw body here is what keeps that door open.
-//
-// FREQUENCY DOES NOT ENTER THIS MODULE, deliberately (H1's own portability
-// contract in docs/DESIGN-HERDR-ADOPTION.md, "La FREQUENCE n'entre pas dans
-// le moteur"). This module renders the last snapshot it saw -- never a rate,
-// a timestamp or a clock. The activity predicate built on OSC 0's emission
-// cadence lives entirely with the caller.
-//
-// INCREMENTAL AND SESSION-KEYED, BY CONSTRUCTION: an OSC sequence can be
-// split across two consecutive PTY chunks, including mid-terminator (the
-// ESC of an ST landing at the very end of one chunk, its backslash arriving
-// at the start of the next). createOscParser() returns a per-instance state
-// machine closed over its own local variables -- there is no module-level
-// mutable state anywhere in this file, so two sessions that each hold their
-// own instance can never share a continuation buffer even if their chunks
-// arrive interleaved. session-service.ts is expected to hold one instance
-// per session id in a Map, the same shape ScreenGuard (screen-model.ts) and
-// the *Detector classes (attention.ts, quota.ts, startup-ack.ts) already use.
-//
-// The 8-bit ST terminator (single byte 0x9C, ST_8BIT below) IS covered,
-// alongside BEL and the 7-bit two-byte form (ESC \\): accepted directly in
-// the 'in-osc' branch's termination check (card 5b324e11). xterm in UTF-8
-// mode -- what ConPTY/Claude Code emit here -- never actually sends a raw
-// 0x9C, but accepting it costs nothing and matches safe-strip.ts's own
-// posture.
+// Retains only the last title, last progress, and last OSC 777 body seen, no
+// history. Classifying the 777 body is left to the caller: an unrecognised body
+// must still raise a generic event, never be silently dropped.
+// Per-instance state only, closed over local variables, so two sessions holding
+// their own parser instance can never share a continuation buffer even with
+// interleaved chunks.
 
 /** The most recent OSC 777 notification body seen, unclassified (see header). */
 export interface OscNotify {
@@ -70,26 +33,12 @@ export interface OscSnapshot {
 }
 
 /**
- * A pending (over-length) OSC payload stops accumulating past this many
- * characters -- once exceeded, the pending sequence is ABANDONED and the
- * parser resumes 'idle' immediately (card 5b324e11): a terminator that
- * arrives later for the abandoned sequence is not "consumed" specially, it
- * is just ordinary input to whatever state 'idle' finds it in (typically a
- * no-op, since BEL/ST alone match nothing there).
- *
- * DELIBERATE TRADEOFF, same spirit as safe-strip.ts's own documented
- * abandon posture ("fail-open toward NOT losing data, never fail-open
- * toward permanent silence"): resuming 'idle' mid-payload means any
- * well-formed OSC sequence EMBEDDED inside the abandoned, over-length
- * payload is parsed fresh and APPLIED, not discarded along with the rest of
- * that payload. Unlike safe-strip.ts (where the leaked content is inert
- * text), what leaks through here is a real title/progress/notify -- a
- * notify body can reach operator-facing notifications. This is still the
- * right tradeoff (the alternative, staying stuck in 'in-osc' forever, was
- * strictly worse: it silently swallowed every subsequent legitimate
- * sequence for the rest of the session, card 5b324e11's own bug), but it is
- * a real behavior, not just noise passing through, and callers of this
- * module should not assume every byte inside an abandoned payload is inert.
+ * A pending OSC payload abandons past this length rather than accumulating
+ * forever; a terminator arriving later for the abandoned sequence is just
+ * ordinary input to whatever state 'idle' finds it in.
+ * Fails open toward not losing data: a well-formed sequence embedded inside an
+ * abandoned over-length payload is still parsed and applied, which can leak a
+ * real title/progress/notify rather than staying inert.
  */
 const OSC_MAX_LEN = 4096
 
@@ -139,25 +88,13 @@ export function createOscParser(): { feed(chunk: string): OscSnapshot } {
     }
   }
 
-  // Appends `s` to buf; on overflow past OSC_MAX_LEN, abandons the pending
-  // sequence IMMEDIATELY: clears buf and exits to 'idle' right here, rather
-  // than only setting a flag and leaving `mode` stuck in 'in-osc' /
-  // 'in-osc-esc-seen'. Mirrors safe-strip.ts's CSI/OSC abandon branches
-  // (card 1aa69066 review round 3, blocker T2). Before this fix (card
-  // 5b324e11, measured): staying in 'in-osc' meant every subsequent byte --
-  // including a wholly separate, well-formed OSC sequence that followed,
-  // and THAT sequence's own terminator -- was consumed as if it still
-  // belonged to the abandoned head, and its terminator's applyPayload call
-  // was then skipped too (the old `capped` flag never cleared), so the next
-  // legitimate title/progress/notify was silently dropped. Returns true if
-  // it just abandoned (caller must not applyPayload for this event). The
-  // caller must not consume a character it has not itself appended through
-  // this function: the 'in-osc' call site appends `c` and always advances
-  // past it (it is real, already-accounted-for payload content either
-  // way), while the 'in-osc-esc-seen' call site appends the PENDING ESC,
-  // not the current character `c` -- `c` was never appended, so it must be
-  // reprocessed fresh under whichever mode this function just left `mode`
-  // in, hence that call site never advances `i`.
+  // Abandons the pending sequence immediately on overflow, clearing buf and
+  // exiting to 'idle' right here, rather than leaving `mode` stuck and silently
+  // dropping every subsequent legitimate sequence.
+  // The caller must not consume a character it has not itself appended: the
+  // 'in-osc' call site appends and advances past `c`, while 'in-osc-esc-seen'
+  // appends the pending ESC and reprocesses `c` fresh, so that call site never
+  // advances `i`.
   function appendAndCheckCap(s: string): boolean {
     buf += s
     if (buf.length > OSC_MAX_LEN) {

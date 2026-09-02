@@ -66,15 +66,11 @@ import { planProtectedBinds, type ProtectionPlan } from './sandbox-protect'
 export interface SandboxMountInfo {
   destination: string
   /**
-   * Card e35b2791: carried ONLY for isRunDirMountShared's containerName
-   * CONTAINMENT check (a token comparison, immune to representation).
-   * isProtectionRebuildNeeded still compares Destination + RW ONLY, never
-   * Source by EQUALITY (CLAUDE.md "canonicalize both paths"): measured
-   * live via `docker inspect` on a real kory-sbx-* container (2026-08-14),
-   * the SAME container reports Source in two different forms across its own
-   * binds within one inspect call (a `C:\...` host path for one mount,
-   * `/run/desktop/mnt/host/c/...` for another) -- no single expected string
-   * can be built and compared by equality.
+   * Carried only for isRunDirMountShared's containment check (a token
+   * comparison). isProtectionRebuildNeeded compares Destination and rw only,
+   * never Source by equality: the same container reports Source in different
+   * forms across its own binds within one docker inspect call, so no single
+   * expected string can be compared by equality.
    */
   source: string
   rw: boolean
@@ -148,25 +144,14 @@ export function isProtectionRebuildNeeded(
 }
 
 /**
- * Card e35b2791 point 3: `/kory-run` (SANDBOX_RUN_DIR) used to be ONE
- * directory shared by every project (runDirHost had no per-container
- * keying) -- a container created before that fix has the OLD shared Source
- * baked into its bind and keeps it until rebuilt, regardless of what the
- * current code would create today. `isProtectionRebuildNeeded` above can't
- * see this: its Destination (`/kory-run`) never changes, only Source does.
- *
- * Compared by SUBSTRING containment of `containerName` in Source, never by
- * equality on the full Source: see SandboxMountInfo's own comment for the
- * measured two-representation problem this sidesteps. `containerName`
- * (`kory-sbx-<hex12>`, validated by NAME_RE, no separators) is a plain
- * directory-name TOKEN that survives either representation unchanged --
- * substring containment exploits that without needing to know which form
- * this engine/OS combination happens to use.
- *
- * A missing `/kory-run` mount entirely is ALSO treated as drift (fail-safe,
- * same direction as parseMounts' RW default): a container this broken needs
- * a rebuild regardless of the specific reason. Always false when no
- * container exists yet, same as isProtectionRebuildNeeded.
+ * A container created before run-dir keying kept the old shared Source baked
+ * into its bind until rebuilt; isProtectionRebuildNeeded can't see this since
+ * Destination never changes, only Source does.
+ * Compared by substring containment of containerName in Source, never by
+ * equality on the full Source, since the same mount can report Source in
+ * different forms across one docker inspect call.
+ * A missing /kory-run mount entirely is also treated as drift — such a
+ * container needs a rebuild regardless of the specific reason.
  */
 export function isRunDirMountShared(
   mounts: readonly SandboxMountInfo[],
@@ -338,17 +323,13 @@ export class SandboxService extends EventEmitter {
   /** In-flight background auth probe (status() must never stack a second one). */
   private authProbeInFlight: Promise<void> | null = null
   /**
-   * PERSISTED marker of what was last projected: the container ID plus a
-   * fingerprint of the operator's config (projectionSignature), written to a
-   * per-container file under the app state dir. Three deliberate choices:
-   *  - keyed by the container ID (not the name): a recreate mints a new ID, so
-   *    a fresh container always gets a fresh copy with no manual invalidation;
-   *  - persisted (not an instance field): the projection copies ~200 MB of
-   *    plugins through `docker cp` (~10 s measured) and an in-memory marker
-   *    made EVERY app start pay it again on the first spawn — the operator's
-   *    "why does the first agent take 15 seconds" bug;
-   *  - stored OUTSIDE any container-mounted dir (hostile input #5): a marker
-   *    inside the run dir would let a sandboxed agent tamper with it.
+   * Keyed by container id, not name: a recreate mints a new id so a fresh
+   * container always gets a fresh copy with no manual invalidation.
+   * Persisted rather than an instance field: the projection copies ~200 MB of
+   * plugins through docker cp, and an in-memory marker made every app start pay
+   * that cost again on first spawn.
+   * Stored outside any container-mounted dir so a sandboxed agent can't tamper
+   * with it.
    */
   private readonly projectedMarkerFile: string
   private projectionSummary: string | null = null
@@ -1026,37 +1007,16 @@ export class SandboxService extends EventEmitter {
         mark('start')
       }
       this.lastReady = true
-      // Projection and bridge probe are both off the per-spawn critical path:
-      // the projection runs only when the container ID or the operator's config
-      // fingerprint changed (the marker is PERSISTED — an in-memory flag made
-      // every app start re-copy ~200 MB of plugins, ~10 s measured), and the
-      // bridge probe is a Docker-view diagnostic with no business blocking a
-      // spawn.
-      // The opt-out folds into the marker key: toggling projectConfig either
-      // way mismatches the marker, so the next ensure() re-projects or scrubs
-      // exactly once, then skips again.
-      // deck-plugin folds into the signature unconditionally (both branches
-      // below) -- it is always projected regardless of the operator's config
-      // opt-out, so a deck-plugin-only change (app update) must still trip a
-      // re-project on an existing container even when projectConfig is off.
-      //
-      // Review (card a79c7696 volet 1, reviewer measured): signatureOfEntries
-      // shares one SIG_MAX_ENTRIES=5000 budget across the entries it walks, IN
-      // ARRAY ORDER. Concatenating deck-plugin AFTER planProjection(...) (as a
-      // single walk) meant an operator config tree bigger than the budget
-      // (an installed plugin with deps reaches that easily) starved
-      // deck-plugin's fingerprint to zero -- it silently stopped moving the
-      // signature, so an app update landed in the container only by
-      // coincidence, on the next unrelated operator-config edit. Computing
-      // deck-plugin's signature as its OWN walk (own 5000-entry budget, order
-      // no longer able to matter) and folding the two strings together fixes
-      // it without depending on which one a future reorder puts first.
-      //
-      // Composition itself lives in sandbox-projection.ts's containerSignature
-      // (pure, bun-testable) instead of being re-typed here: a regression test
-      // that re-implemented this shape independently would only prove its own
-      // copy correct, not that ensure() actually calls it (card a79c7696 volet
-      // 1 review, 2nd pass).
+      // Projection runs only when the container id or the config fingerprint
+      // changed (the marker is persisted); the bridge probe is a diagnostic
+      // that never blocks a spawn.
+      // Toggling the config opt-out mismatches the marker, so the next ensure()
+      // re-projects or scrubs exactly once, then skips again; deck-plugin folds
+      // into the signature unconditionally so an app update still triggers a
+      // re-project even when config projection is off.
+      // deck-plugin's signature is walked separately with its own entry budget,
+      // since concatenating it after a large operator config tree could starve
+      // its own fingerprint to zero.
       const signature = containerSignature(
         info.id,
         this.deckPluginProjectionEntries(),
@@ -1070,27 +1030,15 @@ export class SandboxService extends EventEmitter {
         this.writeProjectedMarker(signature)
         mark('projection')
       } else {
-        // Security (card a79c7696 volet 1 review): deck-plugin lands in the
-        // auth volume (SANDBOX_AUTH_VOLUME = 'kory-claude-auth', a bare
-        // constant -- one volume for the WHOLE APP, shared by every
-        // project's container and by the throwaway auth container, not one
-        // per project). The signature above only fingerprints the HOST source
-        // files -- it says nothing about what is currently sitting in that
-        // volume, which a compromised agent in a DIFFERENT container could
-        // have overwritten (it carries executable bundles + hooks.json, not
-        // just markdown). An unchanged signature is therefore not proof of an
-        // unchanged copy. Re-project unconditionally on every real container
-        // start (containerJustStarted, not every ensure() poll of an
-        // already-running container) so any such alteration is overwritten
-        // before this container's agent can be handed a tampered
-        // hook/bridge. This closes PERSISTENCE of a tampered copy across a
-        // restart; it does not close the window while a container stays up
-        // and running (out of scope for this fix, same as the pre-existing
-        // rm-rf-on-shared-volume issue the reviewer carded separately).
-        // No regression test covers this branch specifically: nothing today
-        // imports sandbox-service.ts (Docker/Podman lifecycle, not the pure
-        // sandbox-command.ts/sandbox-projection.ts split) -- that is the gap
-        // to close, not a claim this is untestable in principle.
+        // deck-plugin lands in the app-wide auth volume shared by every
+        // project's container and the throwaway auth container. The signature
+        // only fingerprints host source files, so an unchanged signature is not
+        // proof of an unchanged copy in that volume — a different container's
+        // compromised agent could have overwritten it.
+        // Re-projected unconditionally on every real container start, not every
+        // ensure() poll, so any such tampering is overwritten before this
+        // container's agent runs; does not close the window while a container
+        // stays up and running.
         if (containerJustStarted) await this.projectDeckPlugin()
         if (this.projectionSummary === null && marker.summary !== null) {
           // Skipped operator-config projection after an app restart: the
@@ -1337,11 +1285,8 @@ export class SandboxService extends EventEmitter {
   }
 
   /**
-   * Wipe the credentials in the shared volume ("disconnect"). Like the login
-   * and the probe, this runs in a throwaway container: it used to be an `exec`
-   * that needed THIS project's container running, which contradicted the
-   * upstream guard ("no live sessions") and made the button unusable half the
-   * time.
+   * Runs in a throwaway container, like the login and the probe, so it works
+   * even with no session of this project running.
    */
   async purgeAuth(): Promise<SandboxStatus> {
     const probe = await this.detectEngine()
@@ -1437,27 +1382,16 @@ export class SandboxService extends EventEmitter {
   }
 
   /**
-   * Rail-view action. `name` is renderer-supplied: re-validated against the
-   * generated shape + the kory.sandbox label before reaching the CLI. `remove`
-   * / `rebuild` never run implicitly — operator-invoked, ConfirmDialog'd.
-   */
-  /**
-   * Card e35b2791 (A4): purges the containerName-keyed run/peers dirs when a
-   * container is removed or rebuilt. Side-effect-free to purge: launch
-   * scripts are regenerated on every start (writeLaunchScript), peer-cache
-   * files regenerate on connect. Deliberately NEVER touches copyDirHost --
-   * that clone is kept ACROSS a remove/rebuild on purpose, to avoid a
-   * re-clone on the next container; purging it here would be a regression
-   * dressed up as a hardening.
-   *
-   * Targets `name`'s OWN dirs, not necessarily `this.containerName`'s:
-   * containerAction's 'remove' case can act on a DIFFERENT project's
-   * container from the cross-project list view, and `deps.stateDir` is the
-   * shared Deck app-state dir (not per-project), so that project's leftover
-   * dir is computable and purgeable from here without a second instance.
-   * Safe by construction: containerAction validates `name` against
-   * isSandboxContainerName (NAME_RE, no separators) before any case runs, so
-   * `join(..., name)` can never escape its parent directory.
+   * name is renderer-supplied and re-validated against the generated shape plus
+   * the kory.sandbox label before reaching the CLI; remove/rebuild are
+   * operator-invoked only, never automatic.
+   * Purging run/peers dirs is side-effect-free: launch scripts regenerate on
+   * every start, peer-cache files regenerate on connect. Never touches
+   * copyDirHost — that clone survives a remove/rebuild on purpose to avoid a
+   * re-clone.
+   * Targets name's own dirs, which may differ from this.containerName's, since
+   * containerAction's remove case can act on a different project's container
+   * from the cross-project list view.
    */
   private purgeRunDirsFor(name: string): void {
     rmSync(join(this.deps.stateDir, 'sandbox-run', name), { recursive: true, force: true })

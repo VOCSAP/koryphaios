@@ -1,23 +1,10 @@
-// Deck-side approval client (PLAN-notifications-mobiles N1/N2.c).
-//
-// The Deck is the only holder of the OPERATOR credential, so it is the only
-// participant that can settle an approval. Its three jobs:
-//
-//  1. mint a RESTRICTED per-session credential for each spawned agent, so the
-//     agent (hook + ask_operator) can raise approvals without ever being able
-//     to answer one — including from inside a sandbox container (PLAN §6.8);
-//  2. raise approvals itself for the sessions no hook covers (non-Claude CLIs,
-//     via the attention detector);
-//  3. collect settled approvals and APPLY them by typing into the tile. Since
-//     the hooks do not block, this is the only way a verdict reaches a session
-//     (bar ask_operator, whose return value IS the answer).
-//
-// Job 3 is where the danger is: the answer is remote input reaching a
-// terminal. It is sanitised broker-side on claim AND again here, and the
-// submitting Enter is added by this code — never by the received text.
-//
-// Node builtins + fetch only (no electron import) so it is unit-testable under
-// bun, matching broker-client.ts.
+// The Deck is the only holder of the operator credential and the only
+// participant that can settle an approval: it mints restricted per-session
+// credentials for spawned agents, raises approvals for sessions no hook covers,
+// and applies settled verdicts by typing into the tile.
+// Applying a verdict is remote input reaching a terminal: it is sanitised
+// broker-side on claim and again here, and the submitting Enter is added by
+// this code, never by the received text.
 
 import { buildAuthProof, sanitizeAnswerForPty, type Approval } from './approval-auth'
 import type { OperatorIdentity } from './operator-identity'
@@ -108,13 +95,9 @@ export async function addApproval(
     title: args.title,
     question: args.question,
     options: args.options ?? [],
-    // Card 1def56da, hyp_17ec1784. TOP-LEVEL and mandatory for an OPERATOR
-    // credential, on all four approval routes and no longer on /approval/list
-    // alone. `origin.project_key` below is now DESCRIPTIVE only: the broker
-    // stopped reading it, because a field the caller declares cannot be the
-    // dimension the caller is filtered on. This call sent it only inside
-    // `origin` and took a 400 in the gate -- the Deck could no longer raise an
-    // approval at all.
+    // project_key is mandatory at the top level on every approval route, not
+    // only inside `origin`: the broker filters on this field and does not read
+    // origin.project_key.
     project_key: deps.projectKey,
     session_ref: args.sessionRef,
     tile_ref: args.tileRef ?? args.sessionRef,
@@ -149,10 +132,8 @@ export async function claimApproval(
   try {
     const res = await signedPost<{ approval: Approval }>(deps, '/approval/claim', {
       id: args.id,
-      // Card 1def56da, hyp_17ec1784. Without it the broker answers 400 and the
-      // Deck can no longer settle ANY approval -- the single most visible
-      // breakage of the lot, and the one no suite covered, since the Deck's own
-      // callers are never run against a real broker.
+      // project_key is required here: without it the broker refuses the claim
+      // and the Deck cannot settle any approval.
       project_key: deps.projectKey,
       via: 'deck',
       answer_kind: args.answerKind,
@@ -268,23 +249,13 @@ export async function markVerdictsDelivered(deps: ApprovalDeps, ids: string[]): 
 }
 
 /**
- * Translate a settled approval into the exact bytes to type into a PTY.
- *
- * This is the SINGLE return path: the hooks detect but never answer (they do
- * not block, so Claude Code keeps its own dialog up), which means every verdict
- * that is not an ask_operator return value lands here. That makes the
- * conservatism below load-bearing rather than incidental.
- *
- * Conservative on purpose:
- *  - allow -> a bare Enter, accepting the highlighted first option (the
- *    attention detector only fires on `❯ 1.`, so option 1 IS the selection);
- *  - deny  -> Escape, which every Claude Code chooser treats as "cancel".
- *    Picking a numbered "no" would mean guessing an index that varies between
- *    prompts — and guessing wrong could select "yes, and don't ask again";
- *  - text  -> the sanitised answer, then exactly one Enter added HERE.
- *
- * Returns null when nothing safe can be typed, in which case the caller must
- * leave the session alone rather than improvise.
+ * The single return path for every verdict not returned via ask_operator, so
+ * this mapping is load-bearing: allow types a bare Enter (the attention
+ * detector only fires on the highlighted first option), deny sends Escape
+ * rather than a numbered choice (a wrong guess could select "don't ask again"),
+ * text is sanitised then followed by exactly one Enter added here.
+ * Returns null when nothing safe can be typed; the caller must leave the
+ * session alone rather than improvise.
  */
 export function buildKeystrokes(approval: Approval): string | null {
   switch (approval.answer_kind) {
@@ -306,25 +277,12 @@ export function buildKeystrokes(approval: Approval): string | null {
 }
 
 /**
- * How long a verdict may wait for its tile to ask again (card 9c6de1e1).
- *
- * Measured from `answered_at`, not from when this Deck first saw the verdict:
- * the anchor then survives a Deck restart, and two Decks polling the same
- * approval reach the same conclusion instead of each starting their own clock.
- *
- * The value trades two opposite risks. Too short and the fix does nothing (the
- * dismissed prompt is still on screen, and a repaint that re-arms the flag
- * arrives seconds later). Too long and the session may have moved on to a
- * DIFFERENT question by the time it flags again, and would receive the old
- * answer -- exactly what the `waiting` guard exists to prevent. 90s is ~9 poll
- * ticks (INBOX_POLL_MS = 10s) and stays well inside one operator gesture.
- *
- * A BET, not a setting: it exists only because no signal distinguishes a
- * repaint of the same still-blocked prompt from a brand-new question -- both
- * reach the Deck as a fresh `waiting:true`. The bet is deliberately on the
- * recoverable side (a lost answer the operator can retype, never an answer
- * typed into the WRONG question). Should a prompt identity ever travel with an
- * approval, match on it and DELETE this constant rather than tune it.
+ * Measured from `answered_at`, not from when this Deck first observed the
+ * verdict, so a Deck restart and two Decks polling the same approval reach the
+ * same deadline.
+ * 90s is roughly 9 poll ticks and stays inside one operator gesture: short
+ * enough that a dismissed prompt still on screen gets retried, long enough not
+ * to answer a since-changed question.
  */
 export const VERDICT_DEFER_MS = 90_000
 
@@ -341,21 +299,12 @@ export const VERDICT_DEFER_MS = 90_000
 export type VerdictDisposition = 'apply' | 'settle' | 'defer' | 'abandon'
 
 /**
- * Decide what happens to a verdict that was settled elsewhere (phone).
- *
- * The `waiting` guard is the load-bearing one: an answer that arrives after
- * the operator already dealt with the prompt locally must not be typed into
- * whatever is on screen now. What card 9c6de1e1 fixed is not that guard but
- * its OUTCOME -- the poller used to answer a single boolean and treat every
- * `false` as "settled, stop sending it", which silently BURNED the answer when
- * the operator had merely dismissed the attention badge (session-service's
- * `clearAttention` drops the tile from `waitingTiles` by design) while the
- * agent was still sitting at the very same prompt.
- *
- * So a live tile that is not currently flagged is deferred, not settled: the
- * broker keeps the verdict on its undelivered list, and it is applied the
- * moment the session asks again -- bounded by VERDICT_DEFER_MS, past which it
- * is abandoned WITH a trace rather than quietly dropped.
+ * The `waiting` guard is load-bearing: an answer that arrives after the
+ * operator already dealt with the prompt locally must not be typed into
+ * whatever is on screen now.
+ * A live tile that is not currently flagged is deferred rather than settled, so
+ * the verdict is applied the moment the session asks again, bounded by
+ * VERDICT_DEFER_MS before it is abandoned with a trace.
  */
 export function classifyVerdict(
   approval: Approval,

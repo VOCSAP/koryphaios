@@ -1,16 +1,10 @@
-// Team-spawn support for the SUPERVISOR (PLAN TS1): the team-building playbook
-// served by deck_team_playbook, the embedded agent catalog served by
-// deck_team_agents, and the spawn-ack texts targeted at the supervisor.
-//
+// Everything here is a code constant, never operator- or repo-configurable: the
+// playbook shapes how a session that can spawn up to 8 briefed agents behaves,
+// and a configurable version would let a cloned repository repurpose it.
+// Embedded profiles are referenced by id through deck_spawn_session, never by
+// free text, so the supervisor's inference can pick a profile but cannot author
+// one.
 // SECURITY (C8 rule): everything in this module is a CODE CONSTANT — never
-// operator- or repo-configurable. The playbook shapes how a session that can
-// spawn up to 8 briefed agents behaves, and the embedded profiles are injected
-// at system-prompt level; a configurable version of either would let a cloned
-// repository repurpose them. Embedded profiles are referenced BY ID through
-// deck_spawn_session (never by free text), so the supervisor's inference can
-// pick a profile but cannot author one.
-//
-// Node builtins only, unit-testable under `bun test`.
 
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -53,19 +47,13 @@ export interface EmbeddedAgent {
    */
   disallowedTools: string
   /**
-   * Card 3c085f1a: allow-list for the CORE claude-peers MCP surface (server.ts
-   * CLAUDE_PEERS_TOOLS), threaded through spawnEntry (deck-control.ts) into
-   * SessionDef.peerTools/sessionEnv. Three states, do not confuse the last
-   * two: undefined = full surface (no restriction), a non-empty array = that
-   * subset, an EMPTY array = zero tools -- writing `[]` to mean "no
-   * restriction" mutes the tile silently, nothing will flag it. undefined
-   * is the state every profile in this catalog is in today -- NOT the same
-   * lever as `disallowedTools` above,
-   * which is a per-CLI-process deny-list (fail-open) rather than an
-   * MCP-server-scoped allow-list (fail-closed). Deliberately unpopulated on
-   * every profile below: which tools go on which profile is undecided and
-   * cards separately, see that card's own arbitration on why an empty list
-   * here must never be typed as `[]` (that would mean "zero tools").
+   * Allow-list for the core claude-peers MCP surface. Three states: undefined
+   * is full surface, a non-empty array is that subset, an empty array is zero
+   * tools.
+   * Writing [] to mean no restriction mutes the tile silently; undefined is the
+   * state every profile here is in today. Not the same lever as disallowedTools
+   * above, which is a per-process deny-list rather than an MCP-scoped
+   * allow-list.
    */
   peerTools?: string[]
   /** Full role prompt, injected via --append-system-prompt-file. */

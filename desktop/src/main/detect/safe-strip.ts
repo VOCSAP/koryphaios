@@ -1,36 +1,10 @@
-// Incremental, chunk-boundary-safe ANSI (CSI + OSC) stripper. Card 1aa69066
-// (H2) review, blocker F3.
-//
-// attention.ts and quota.ts each test a busy cue (BUSY_RE: braille spinner
-// frames or "esc to interrupt") against the STATELESS, per-chunk
-// `stripAnsi(data)` output, BEFORE anything touches the accumulated buffer
-// -- deliberately, for immediate responsiveness (the fast path a real
-// running turn needs). That per-chunk regex strip is fine for the
-// ACCUMULATED buffer (`st.buf`), which eventually holds BOTH halves of a
-// split escape sequence together, so a later re-strip pass catches it (see
-// the F2 fix on attention.ts/quota.ts/startup-ack.ts's own `stripAnsi`
-// comment). It is NOT fine for an IMMEDIATE per-chunk answer: a stateless
-// regex has nothing to match without seeing the terminator, so an
-// unterminated escape sequence's raw bytes -- including any glyph or word
-// it happens to carry -- sit untouched in THAT SAME chunk's output. Card
-// 1aa69066 review, blocker F3, measured: a braille glyph inside a
-// fragmented OSC 0 title spuriously satisfied BUSY_RE on the very chunk
-// that carries the glyph, clearing a real waiting/limited episode that was
-// never actually over.
-//
-// This module holds back ANY not-yet-resolved escape sequence (a lone ESC,
-// a CSI in progress, an OSC in progress) across feed() calls instead of
-// ever emitting its raw bytes -- same state-machine discipline as
-// createOscParser() in osc.ts: a held-back byte is either later confirmed
-// literal text and emitted, or consumed as part of a recognised-and-
-// discarded escape sequence, never both, never leaked in between. Per-
-// instance state only (mirrors osc.ts): no module-level mutable state, so
-// two sessions each holding their own instance cannot collide.
-//
-// SCOPE: only ever used to sanitise the text fed to an IMMEDIATE per-chunk
-// predicate (BUSY_RE today). It does not replace `stripAnsi`/the
-// accumulated-buffer re-strip, which stays exactly as-is (already proven
-// correct for `st.buf`, card 1aa69066 review F2).
+// Holds back any not-yet-resolved escape sequence across feed() calls instead
+// of emitting its raw bytes, so a fragmented sequence's glyph or word cannot
+// spuriously satisfy an immediate per-chunk predicate.
+// Only for sanitising input to an immediate per-chunk predicate; it does not
+// replace the accumulated-buffer re-strip, which stays as-is.
+// Per-instance state only: no module-level mutable state, so two sessions
+// cannot collide.
 
 const ESC = '\x1b'
 const BEL = '\x07'
@@ -149,21 +123,10 @@ export function createSafeStripper(): { feed(chunk: string): string } {
           } else {
             pendingLen++
             if (pendingLen > OSC_MAX_LEN) {
-              // Abandon: card 1aa69066 review round 3, blocker T2. Resume
-              // idle and let subsequent bytes (including whatever real
-              // terminator eventually shows up, if any) through as ordinary
-              // text, SAME posture as the CSI branch's own abandon comment
-              // above -- deliberately, not an oversight. The alternative
-              // (stay in 'osc', keep discarding forever) is what this fix
-              // replaces: a never-terminated OSC head used to swallow the
-              // ENTIRE REST OF THE SESSION'S OUTPUT, silently and
-              // permanently -- measured, review round 3: `feed(ESC+']')`
-              // followed by anything at all returned `""` forever after.
-              // Leaking a bounded run of adversarial text once abandoned is
-              // the same accepted tradeoff the CSI branch already makes
-              // (fail-open toward NOT losing data, never fail-open toward
-              // permanent silence) -- not a new risk, an existing one
-              // applied symmetrically.
+              // Abandon resumes 'idle' and lets subsequent bytes through as
+              // ordinary text, same posture as the CSI branch: the alternative,
+              // staying in 'osc' forever, used to swallow the entire rest of
+              // the session's output silently and permanently.
               mode = 'idle'
             }
             i++

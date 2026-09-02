@@ -27,10 +27,8 @@ export interface ThinkingEvent {
 // in colour codes still matches. Only touches ESC-introduced sequences.
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g
-// Exported for tests/desktop-osc.test.ts's behavioural exemption-staleness
-// proof (card 1aa69066 review round 3, blocker T3) only -- thinking.ts
-// stays deliberately unfixed (see EXEMPT_DETECTORS's own comment there),
-// this export does not change its behaviour or add a consumer.
+// Exported only to support a test's own staleness check; this export does not
+// change behaviour or add a consumer.
 export function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '')
 }
