@@ -21,11 +21,16 @@ Two products in one repo:
   `git show 0d5a4cb:CHANGELOG.md` for older entries.
 - **Open work** (to-do / to-verify / deferred, security backlog): `BACKLOG.md`
   only.
-- **`docs/` and `runbooks/` are tracked, not scratch**: design briefs cited by
-  path from `broker.ts` / `shared/` comments, and procedures for the deployed
-  broker. Working notes go elsewhere.
+- **`docs/` and `runbooks/` are tracked, not scratch**: design briefs and
+  procedures for the deployed broker. Working notes go elsewhere. Code does
+  not cite them by path: a comment states the non-obvious choice in a line or
+  two, the design stays in the brief, the rationale in the commit body.
 - **Chantier ids in comments** (`C1`…`C29`, `D1`…, `MB1`…, `TS1`…, `GX1`…,
   `CT1`…, `SBX1`…, `N0`…`N5`) are historical tags: do not add new ones.
+- **Comments carry no history.** The card id, the lot, the review and the
+  measurement go in the commit body; a comment never says "previously",
+  "used to", a date, a session, or `see <file>`. Existing narrative comments
+  are deleted when the code around them is touched, not extended.
 
 ## Read on demand
 
@@ -100,7 +105,7 @@ Read only the file/skill matching the area you touch:
 - **A guard needs its COVERAGE audited, not just its sensitivity**: what
   degradation yields a SUBSET instead of an error? Deny-lists and
   omit-projections fail OPEN; a source scan (`toContain("fn(")`) is the
-  weakest guard; a comment that asserts a guarantee must point at what
-  enforces it; a new validator has every call path enumerated and rejects
+  weakest guard; a guarantee is an assertion whose message names what it
+  guards, never a comment; a new validator has every call path enumerated and rejects
   `NaN`. Full checklist with precedents: `TESTING.md`, "Reviewing a commit
   and auditing a guard".

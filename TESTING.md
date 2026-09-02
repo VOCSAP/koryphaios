@@ -101,14 +101,17 @@ test, a validator, a discipline check or review a diff, not on every task.
   commit is not a guard, since nothing replays it -- ask of any "proved it
   bites": is that probe in the diff?
 
-- **A comment or class that ASSERTS a guarantee must be wired to it, and
-  point at what actually enforces it.** `PinnedTrust.kt` implemented pinning
-  and was instantiated by nothing; a `DeckApi.onX` declared, multiplexed and
-  subscribed tests green with NO producer. Grep that the emitter is called
-  (`broadcast('<channel>'` / `send('<channel>'`), not just that a listener
-  exists. A false pointer (a comment citing `pty.on('exit', ...)` for a field
-  assigned in `pollPeerIds()`) costs as much: a reader who finds nothing at
-  the cited spot stops trusting the comment even when its conclusion holds.
+- **A class that ASSERTS a guarantee must be wired to it.** `PinnedTrust.kt`
+  implemented pinning and was instantiated by nothing; a `DeckApi.onX`
+  declared, multiplexed and subscribed tests green with NO producer. Grep that
+  the emitter is called (`broadcast('<channel>'` / `send('<channel>'`), not
+  just that a listener exists.
+
+- **A comment never carries a guarantee.** "X is enforced by `pty.on('exit',
+  ...)`" is a pointer that goes stale the day the field moves, and a reader
+  who finds nothing at the cited spot stops trusting the comment even when
+  its conclusion holds. Delete the comment and write the guarantee as a test
+  whose assertion message names what it guards.
 
 - **A new validator needs every call path enumerated**: live gesture,
   persisted-state restore/load, automatic-placement heuristic, IPC entry
