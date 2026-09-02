@@ -1907,8 +1907,14 @@ export interface DeckApi {
   ): Promise<string>
   /** Export the current sessions as a template; `local` => project dir, else global. Returns the written path. */
   exportTemplate(name: string, local: boolean): Promise<string | null>
-  /** Instantiate a template by path: 'append' adds to current sessions, 'replace' clears first. Returns count. */
-  applyTemplate(path: string, mode: 'append' | 'replace'): Promise<number>
+  /**
+   * Instantiate a template by path: 'append' adds to current sessions,
+   * 'replace' clears first. Returns the spawned count, or null (card
+   * 96c98453) when the operator declined the shell-field approval dialog --
+   * a deliberate choice, not an error; the handler THROWS for a real
+   * anomaly (path outside the allowed dirs, malformed file) instead.
+   */
+  applyTemplate(path: string, mode: 'append' | 'replace'): Promise<number | null>
   /** Delete a template file by path. Returns true if a file was removed. */
   deleteTemplate(path: string): Promise<boolean>
 

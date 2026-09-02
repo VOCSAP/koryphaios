@@ -83,6 +83,19 @@ export interface TemplateInput {
 }
 
 /**
+ * Discriminated result of resolving a template path to spawnable inputs
+ * (card 96c98453). 'refused' is the operator's own choice in the shell-field
+ * approval dialog and is NOT an error -- 'containment' (path outside the
+ * allowed template dirs) and 'malformed' (unreadable / invalid file) are real
+ * anomalies. Consumers must switch on `reason` with a never-exhaustiveness
+ * default so a future fourth reason fails to compile instead of silently
+ * falling into an existing bucket.
+ */
+export type TemplateResolveResult =
+  | { ok: true; inputs: TemplateInput[] }
+  | { ok: false; reason: 'containment' | 'malformed' | 'refused' }
+
+/**
  * Build a template from the current session defs. Keeps name/command/args/
  * effort/colour and the order; drops cwd / id / sessionId / createdAt.
  */

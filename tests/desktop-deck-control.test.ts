@@ -144,7 +144,9 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
     listTemplates: () => [{ path: "/t.json", name: "team", source: "global", sessionCount: 2 }],
     // Card 89cb66f9: overridable per test via `deps.resolveTemplate = ...`.
     // Default: two plain entries, mirroring the old fixed `applyTemplate: async () => 2` stub.
-    resolveTemplate: () => [{ name: "tpl-a" }, { name: "tpl-b" }],
+    // Card 96c98453: resolveTemplate now returns a discriminated result, not
+    // TemplateInput[] | null directly.
+    resolveTemplate: () => ({ ok: true, inputs: [{ name: "tpl-a" }, { name: "tpl-b" }] }),
     spawnTemplateEntry: async (input, opts) => {
       spawnInputs.push(input);
       spawnOpts.push(opts);
@@ -954,7 +956,7 @@ test("deck_apply_template: a foreign caller cannot close a template-spawned tile
 test("deck_apply_template: batch cap refuses the whole template before any tile spawns or approval is asked", async () => {
   const state = { sessions: Array.from({ length: SPAWN_CAP - 1 }, (_, i) => fakeSession(`live-${i}`)) };
   const deps = makeDeps(state);
-  deps.resolveTemplate = () => [{ name: "a" }, { name: "b" }]; // 7 live + 2 > SPAWN_CAP(8)
+  deps.resolveTemplate = () => ({ ok: true, inputs: [{ name: "a" }, { name: "b" }] }); // 7 live + 2 > SPAWN_CAP(8)
   const srv = await startDeckControl(deps);
   servers.push(srv);
 
@@ -965,24 +967,65 @@ test("deck_apply_template: batch cap refuses the whole template before any tile 
   expect(deps.spawnInputs).toEqual([]);
 });
 
-test("deck_apply_template: resolveTemplate returning null spawns nothing and skips approveSpawn", async () => {
+// Card 96c98453, proof requested by the team-lead: deck_apply_template is the
+// route this dossier's own measurement (M3) named as "bypasses ipc.ts's
+// template:apply entirely, so making resolveTemplateInputs THROW for a real
+// anomaly could hand it an unhandled exception". Every non-ok reason --
+// containment, malformed, AND refused -- must still map to `spawned: 0`,
+// and none of the three may throw through this HTTP endpoint (a thrown
+// reason would surface as a 500, not the structured `ok:true` body asserted
+// below).
+//
+// Review correction C5: `refused: 0` alone is NOT asserted as "the correct
+// result of a refusal" here -- `refused` is a PER-TILE approval counter (see
+// the "an operator refusal on one entry..." test below) and is mechanically
+// 0 whenever the per-tile loop never ran at all, which is also true, but on
+// its own it reads exactly like "there was nothing to spawn", the same
+// misleading non-event this whole card exists to kill on the other two
+// surfaces (ipc.ts, store.ts). The additive `resolution` field is what
+// actually distinguishes a real refusal/anomaly from a genuinely empty
+// template, and every reason below is asserted against it.
+for (const reason of ["containment", "malformed", "refused"] as const) {
+  test(`deck_apply_template: resolveTemplate resolving to reason='${reason}' spawns nothing, skips approveSpawn, does not throw, and NAMES the reason via 'resolution'`, async () => {
+    const state = { sessions: [] as SessionRuntime[] };
+    const deps = makeDeps(state);
+    deps.resolveTemplate = () => ({ ok: false, reason });
+    const srv = await startDeckControl(deps);
+    servers.push(srv);
+
+    const applied = await call(srv, "deck_apply_template", { path: "/missing.json" });
+    expect(applied.body.ok).toBe(true);
+    const result = applied.body.result as { spawned: number; refused: number; resolution?: string };
+    expect(result.spawned).toBe(0);
+    expect(result.refused).toBe(0);
+    expect(result.resolution).toBe(reason);
+    expect(deps.approvals).toEqual([]);
+  });
+}
+
+// A genuinely empty template (ok:true, zero sessions) is the one case that
+// SHOULD read as "nothing to spawn" with no further explanation -- distinct
+// from the three reasons above, `resolution` must be absent here, not some
+// empty-string stand-in for "no reason".
+test("deck_apply_template: an ok:true resolution with zero sessions has no `resolution` field -- distinct from a real refusal/anomaly", async () => {
   const state = { sessions: [] as SessionRuntime[] };
   const deps = makeDeps(state);
-  deps.resolveTemplate = () => null;
+  deps.resolveTemplate = () => ({ ok: true, inputs: [] });
   const srv = await startDeckControl(deps);
   servers.push(srv);
 
-  const applied = await call(srv, "deck_apply_template", { path: "/missing.json" });
+  const applied = await call(srv, "deck_apply_template", { path: "/empty.json" });
   expect(applied.body.ok).toBe(true);
-  expect((applied.body.result as { spawned: number; refused: number }).spawned).toBe(0);
-  expect((applied.body.result as { spawned: number; refused: number }).refused).toBe(0);
-  expect(deps.approvals).toEqual([]);
+  const result = applied.body.result as { spawned: number; refused: number; resolution?: string };
+  expect(result.spawned).toBe(0);
+  expect(result.refused).toBe(0);
+  expect(result.resolution).toBeUndefined();
 });
 
 test("deck_apply_template: an operator refusal on one entry skips that tile, its ownedSessions entry, and is counted in `refused`", async () => {
   const state = { sessions: [] as SessionRuntime[] };
   const deps = makeDeps(state);
-  deps.resolveTemplate = () => [{ name: "no" }, { name: "yes" }];
+  deps.resolveTemplate = () => ({ ok: true, inputs: [{ name: "no" }, { name: "yes" }] });
   deps.approveSpawn = async (entries) => entries.map((_, i) => i === 1);
   const srv = await startDeckControl(deps);
   servers.push(srv);
@@ -1016,7 +1059,7 @@ test("deck_apply_template: hasLead decided ONCE before the batch -- true strips 
   // called with opts.hasLead=true for every entry, never recomputed mid-loop.
   const withLiveLead = { sessions: [fakeSession("existing-lead", { lead: true })] as SessionRuntime[] };
   const deps1 = makeDeps(withLiveLead);
-  deps1.resolveTemplate = () => [{ name: "a" }, { name: "b", lead: true }];
+  deps1.resolveTemplate = () => ({ ok: true, inputs: [{ name: "a" }, { name: "b", lead: true }] });
   const srv1 = await startDeckControl(deps1);
   servers.push(srv1);
   await call(srv1, "deck_apply_template", { path: "/t.json" });
@@ -1033,7 +1076,7 @@ test("deck_apply_template: hasLead decided ONCE before the batch -- true strips 
   // be allowed through (opts.hasLead=false for every entry of this batch).
   const withoutLead = { sessions: [] as SessionRuntime[] };
   const deps2 = makeDeps(withoutLead);
-  deps2.resolveTemplate = () => [{ name: "a", lead: true }, { name: "b" }];
+  deps2.resolveTemplate = () => ({ ok: true, inputs: [{ name: "a", lead: true }, { name: "b" }] });
   const srv2 = await startDeckControl(deps2);
   servers.push(srv2);
   await call(srv2, "deck_apply_template", { path: "/t.json" });

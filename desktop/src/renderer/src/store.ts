@@ -21,6 +21,7 @@ import type {
   WorkspaceSummary
 } from '@shared/types'
 import { onRemoteRefresh, onRemoteState, remoteInstalled, type RemoteState } from './remote-api'
+import { shouldShowTemplateAppliedToast } from '@shared/template-apply-outcome'
 
 /**
  * The blocking-question payload, DERIVED from the Courrier union instead of
@@ -749,7 +750,17 @@ export const useDeck = create<DeckState>((set, get) => ({
 
   async applyTemplate(path, mode) {
     await guarded('apply template', async () => {
-      await window.api.applyTemplate(path, mode)
+      const count = await window.api.applyTemplate(path, mode)
+      // Card 96c98453: whether to show the success toast is delegated to
+      // shouldShowTemplateAppliedToast (shared/template-apply-outcome.ts),
+      // the same pure module the main-process handler consults for its own
+      // half of this contract. null means the operator declined the
+      // shell-field approval dialog -- a deliberate choice, not an error: no
+      // toast, and the dialog stays open so they can pick a different
+      // template. A real anomaly (containment/malformed) instead THROWS and
+      // is caught above by guarded(), which shows the error toast with the
+      // thrown message.
+      if (!shouldShowTemplateAppliedToast(count)) return
       set({ templatesOpen: false })
       // Sessions refresh via onSessionsChanged (create/closeAll broadcast).
       get().showToast('toast.templateApplied')

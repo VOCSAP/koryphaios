@@ -118,7 +118,8 @@ import { decryptProviders, sanitizeProviders } from './provider-secrets'
 import type { SecretCipher } from './scope-secrets'
 import { compileContext, runInference, type InferRequest } from './graph-engine'
 import { graphId as graphDocId, parseGraphDoc, type GraphDoc } from '../shared/graph'
-import { parseTemplate, toTemplate, type TemplateInput } from '@shared/template'
+import { parseTemplate, toTemplate, type TemplateResolveResult } from '@shared/template'
+import { templateInputsOrThrow } from '@shared/template-apply-outcome'
 import { availableLocales, loadDict, resolveLocale } from './i18n'
 import { reportError } from './log'
 
@@ -174,11 +175,12 @@ interface IpcDeps {
   /** Operator-approved worktree-init hook for this project (B5), or undefined. */
   getWorktreeInit: () => string | undefined
   /**
-   * Containment + approval gate for a template path (B4 + M-SEC-9): returns the
-   * inputs to spawn, or null when the path is out-of-tree / malformed / a
-   * repo-local shell-bearing template the operator declined.
+   * Containment + approval gate for a template path (B4 + M-SEC-9): returns a
+   * discriminated result (card 96c98453) -- 'ok:false' distinguishes a real
+   * anomaly (out-of-tree path, malformed file) from the operator declining a
+   * repo-local shell-bearing template ('refused', not an error).
    */
-  resolveTemplateInputs: (path: string) => TemplateInput[] | null
+  resolveTemplateInputs: (path: string) => TemplateResolveResult
   /** Current broker reachability (PLAN O5), owned by index.ts. */
   brokerStatus: () => BrokerStatusEvent
   /** Force an immediate broker poll (banner Retry button). */
@@ -1195,9 +1197,20 @@ export function registerIpc({
     deleteTemplate(path, getConfig().projectDir)
   )
   regHandle('template:apply', async (_e, path: string, mode: 'append' | 'replace') => {
-    // Containment + repo-local shell-field approval (B4 + M-SEC-9).
-    const inputs = resolveTemplateInputs(path)
-    if (!inputs) return 0
+    // Containment + repo-local shell-field approval (B4 + M-SEC-9). Card
+    // 96c98453, review correction C3: templateInputsOrThrow
+    // (shared/template-apply-outcome.ts) is this handler's ONLY source of
+    // `TemplateInput[]` -- there is no other `inputs` in scope, so a
+    // mutation cannot silently "compute the decision, then return a count
+    // anyway" for a real anomaly the way an earlier draft (a returned
+    // throw/return-null descriptor this handler had to act on) could. The
+    // same module also holds store.ts's half of this contract (whether to
+    // show the success toast) and deck-control.ts's (the agent route's
+    // empty-batch mapping), kept together so the three sinks cannot drift
+    // apart from each other and let a refusal read as success again.
+    const resolved = resolveTemplateInputs(path)
+    const inputs = templateInputsOrThrow(resolved, path)
+    if (inputs === null) return null
     // One checkpoint covers the batch: every session spawns in the project dir.
     if (inputs.length > 0) await checkpoint(getConfig().projectDir)
     if (mode === 'replace') {

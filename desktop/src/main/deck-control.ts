@@ -43,7 +43,8 @@ import type {
   TemplateSummary
 } from '../shared/types'
 import type { WorktreeInfo } from './worktree-service'
-import type { TemplateInput } from '../shared/template'
+import type { TemplateInput, TemplateResolveResult } from '../shared/template'
+import { templateInputsOrEmpty } from '../shared/template-apply-outcome'
 import { resolveDirectiveTargets } from './directive'
 import { EMBEDDED_AGENTS, getEmbeddedAgent, type EmbeddedAgent } from './team-embedded'
 import { TEAM_PLAYBOOK } from './team-embedded'
@@ -109,12 +110,13 @@ export interface DeckControlDeps {
   /**
    * Card 89cb66f9: resolution + containment/approval gate (MAY prompt the
    * operator and persist an approval, see index.ts's confirmShellFieldApproval)
-   * -- no SPAWN side effect, returns the inputs to spawn or null. Split out
-   * of the old applyTemplate(path): Promise<number> so deck_apply_template
-   * can capCheck/approveSpawn the batch BEFORE any tile spawns, exactly like
-   * deck_spawn_team already does.
+   * -- no SPAWN side effect, returns a discriminated TemplateResolveResult
+   * (card 96c98453: 'ok:true' carries the inputs to spawn, 'ok:false' names
+   * why not). Split out of the old applyTemplate(path): Promise<number> so
+   * deck_apply_template can capCheck/approveSpawn the batch BEFORE any tile
+   * spawns, exactly like deck_spawn_team already does.
    */
-  resolveTemplate(path: string): TemplateInput[] | null
+  resolveTemplate(path: string): TemplateResolveResult
   /**
    * Card 89cb66f9: spawn exactly ONE template entry and return the created
    * SessionRuntime -- the old dep returned only a count (inputs.length),
@@ -781,8 +783,30 @@ export function startDeckControl(
         // the lot (never N dialogs), then spawn + ownedSessions.set per tile.
         const path = str(args, 'path')
         if (!path) throw new Error('path is required')
-        const inputs = deps.resolveTemplate(path)
-        if (!inputs || inputs.length === 0) return { spawned: 0, refused: 0 }
+        // Card 96c98453: resolveTemplate now returns a discriminated result.
+        // This route never throws for a non-ok reason (containment,
+        // malformed, or the operator declining the approval dialog) -- every
+        // one maps to an empty batch, via templateInputsOrEmpty
+        // (shared/template-apply-outcome.ts, review correction C2: a
+        // dedicated, exhaustively-checked sink, not an inline ternary that
+        // would silently swallow a future fourth reason).
+        const resolved = deps.resolveTemplate(path)
+        const inputs = templateInputsOrEmpty(resolved)
+        if (inputs.length === 0) {
+          // Review correction C5, card 96c98453: `refused` below is a
+          // PER-TILE approval counter (see the loop's own comment) and must
+          // not be reused to describe a whole-batch outcome -- reusing it
+          // would conflate two distinct meanings. A total resolution
+          // failure (an operator refusal at the shell-field approval
+          // dialog, or a real containment/malformed anomaly) is instead
+          // named ADDITIVELY via `resolution`, so it stops reading the same
+          // as "there was nothing to spawn" -- the exact bug this card
+          // fixes on the other two surfaces (ipc.ts, store.ts), now closed
+          // here too.
+          return resolved.ok
+            ? { spawned: 0, refused: 0 }
+            : { spawned: 0, refused: 0, resolution: resolved.reason }
+        }
         capCheck(inputs.length)
         const decisions = await deps.approveSpawn(inputs.map(summarizeTemplateInput))
         // Crown rule (PLAN C18): decided ONCE for the whole batch, same as

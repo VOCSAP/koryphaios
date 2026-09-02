@@ -183,7 +183,7 @@ import {
   templateHasShellFields,
   templateToInputs,
   toTemplate,
-  type TemplateInput
+  type TemplateResolveResult
 } from '@shared/template'
 
 let mainWindow: BrowserWindow | null = null
@@ -2232,20 +2232,32 @@ const confirmSpawnShellFields = (entry: { command?: string; args?: string }): bo
 
 /**
  * Containment + approval gate for applying a template (B4 + M-SEC-9). Returns
- * the inputs to spawn, or null when: the path is outside the allowed template
- * dirs, the file is malformed, or a REPO-LOCAL template carrying a shell-bearing
- * `command`/`args` was declined by the operator. Global (operator-owned)
- * templates are trusted and never prompt.
+ * a discriminated result (card 96c98453): 'ok:false' distinguishes a real
+ * anomaly (path outside the allowed template dirs, malformed file -- both
+ * MUST be surfaced as an error by callers) from the operator declining a
+ * REPO-LOCAL template's shell-field approval dialog ('refused' -- a
+ * deliberate choice, never an error). Global (operator-owned) templates are
+ * trusted and never prompt.
  */
-const resolveTemplateInputs = (path: string): TemplateInput[] | null => {
+const resolveTemplateInputs = (path: string): TemplateResolveResult => {
   const projectDir = getConfig().projectDir
   const source = templateSource(path, projectDir)
   if (!source) {
     reportError('template', `refused template path outside the allowed dirs: ${path}`)
-    return null
+    return { ok: false, reason: 'containment' }
   }
   const tpl = readTemplate(path)
-  if (!tpl) return null
+  if (!tpl) {
+    // Review correction C1, card 96c98453: mirrors the containment branch
+    // above (2246) -- without this, a malformed template left NO trace
+    // anywhere. readTemplate already swallows the real parse/schema cause
+    // into a plain null (template-store.ts's own catch), and the agent
+    // route (deck-control.ts) has no log sink of its own on this path
+    // (`grep -c reportError deck-control.ts` is 0), so this is the only
+    // place this anomaly is ever recorded.
+    reportError('template', `template file is missing or invalid: ${path}`)
+    return { ok: false, reason: 'malformed' }
+  }
   if (
     source === 'local' &&
     templateHasShellFields(tpl) &&
@@ -2264,9 +2276,9 @@ const resolveTemplateInputs = (path: string): TemplateInput[] | null => {
       buttonsFr: ['Appliquer ce modèle', 'Refuser']
     })
   ) {
-    return null
+    return { ok: false, reason: 'refused' }
   }
-  return templateToInputs(tpl)
+  return { ok: true, inputs: templateToInputs(tpl) }
 }
 
 /**
@@ -2477,7 +2489,10 @@ const controlDeps: DeckControlDeps = {
   // the whole batch and write ownedSessions per tile -- the old applyTemplate
   // returned only a count (inputs.length), never the created sessions.
   // resolveTemplate is PURE (path containment + repo-local shell-field
-  // approval via resolveTemplateInputs, unchanged): no spawn side effect.
+  // approval via resolveTemplateInputs): no spawn side effect. Since card
+  // 96c98453 this forwards a discriminated TemplateResolveResult, not
+  // TemplateInput[] | null -- deck-control.ts's own dep type and call site
+  // were updated to match (see its own templateInputsOrEmpty usage).
   resolveTemplate: (path) => resolveTemplateInputs(path),
   // Append-only by contract (deck-control): never closes existing tiles.
   // `checkpoint`/`hasLead` are decided ONCE by the caller for the whole
