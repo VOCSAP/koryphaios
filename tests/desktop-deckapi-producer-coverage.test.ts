@@ -1,20 +1,15 @@
 // Every `onX` property of the DeckApi object literal in preload/index.ts must
-// resolve to a channel with a real emitter (a literal
-// broadcast/webContents.send call, or a named wrapper forwarding to one)
-// somewhere in desktop/src/main/*.ts. Both sides are discovered by scanning the
-// actual files, not read from a fixed channel list.
-// The consumer side is anchored to the set of properties on `api`, not to the
-// subscribe/multiplex verbs, so a property wired some other way still enters
-// the domain; an unresolvable channel value is counted as UNPARSED and fails
-// loudly rather than being silently dropped.
-// Not covered: a producer call in unreachable code reads as wired regardless of
-// runtime reachability; a channel built from a named constant instead of a
-// string literal is UNPARSED, not resolved; DeckApi declaring an onX that
-// preload never implements is caught by TypeScript's own structural check
-// instead.
-// The producer scan reads desktop/src/main/*.ts non-recursively and the
-// consumer scan reads only preload/index.ts -- if either is ever split across
-// files, coverage would silently shrink to whatever the scan still reaches.
+// resolve to a channel with a real emitter (a literal broadcast or
+// webContents.send, or a named wrapper forwarding to one) in
+// desktop/src/main/*.ts. Both sides are discovered by scanning the files, not
+// from a fixed channel list; the consumer side is anchored to the properties
+// of `api`, not to the subscribe verbs, and an unresolvable channel value is
+// UNPARSED and fails loudly rather than being dropped.
+// Not covered: a producer call in unreachable code reads as wired; a channel
+// named by a constant is UNPARSED; an onX declared on DeckApi but never
+// implemented is TypeScript's job. The producer scan is non-recursive and the
+// consumer scan reads only preload/index.ts: splitting either across files
+// silently shrinks the coverage.
 
 import { test, expect } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";

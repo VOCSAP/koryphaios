@@ -1071,9 +1071,9 @@ export interface SandboxStatus {
   /** Operator-config entries projected into the container, or null. */
   projection: string | null
   /**
-   * False after the operator's "Remove" in the projection card: the global
-   * config is scrubbed from the container and no longer copied at start.
-   * Generate re-enables.
+   * False once the operator removes the projection: the global config is
+   * scrubbed from the container and stops being copied at start.
+   * Generate re-enables it.
    */
   projectionEnabled: boolean
   /**
@@ -1184,13 +1184,11 @@ export interface ElementPick {
   nearbyText?: string[]
   /** Readable ancestor labels, outermost first. */
   ancestors?: string[]
-  // ----- React context (Chantier OD3, DESIGN-ORCA-DOOP-ADOPTION.md §3.2).
-  // Both OPTIONAL for the same reasons as the OD1 block above, plus a THIRD:
-  // React's dev-only fiber debug metadata (`_debugSource`) was removed in
-  // React 19, so even a DEV build of a React-19+ app yields neither field.
-  // Absent outside React, in a PRODUCTION build, or on React 19+ -- never an
-  // error, this is the expected common case.
-  /** Surrounding component stack, outermost first, e.g. `<App> > <ProductCard>`. */
+  // Both optional for the same reasons noted above, plus a third: React 19
+  // drops its dev-only fiber debug metadata entirely, so even a dev build of a
+  // React 19+ app yields neither field.
+  // Absent outside React, in a production build, or on React 19+ is the
+  // expected common case, never an error.
   reactComponents?: string
   /** `path/to/Component.tsx:42:7`, from React's dev-only debug source metadata. */
   sourceFile?: string

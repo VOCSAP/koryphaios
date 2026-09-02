@@ -120,10 +120,12 @@ test("dispatchedTargetsTail: counts only, singular/plural, and an explicit zero"
   expect(dispatchedTargetsTail(0, 3)).toBe("no target reached, 3 unreached");
 });
 
-// executeDirective lives in index.ts, which imports electron and cannot be
-// imported under bun -- so its RETURN is the one thing here that only a source
-// scan covers. Weak by nature (it cannot prove the values are right), which is
-// why the behaviour it feeds is probed for real in tests/desktop-dispatch.test.ts.
+// executeDirective's own module imports electron and cannot be imported under
+// bun test, so its return value is the one thing here that only a source scan
+// can cover -- weak by nature, since it cannot prove the values are actually
+// right.
+// The behavior it feeds is instead probed directly, against a live call,
+// elsewhere.
 test("SOURCE SCAN (weak): executeDirective returns the resolver's buckets on every path", () => {
   const src = readFileSync(
     join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"),

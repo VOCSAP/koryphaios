@@ -88,18 +88,13 @@ export function buildMintTeamLeadBridge(deps: {
   write: (token: string, callerId: string, allowedTools: readonly string[]) => string
 }): MintTeamLeadBridge {
   return () => {
-    // LOAD-BEARING (security review note, 2026-09-02): this whole function
-    // is SYNCHRONOUS, and specifically there is NO `await`/yield point
-    // between `getControlServer()` and `write(...)` below -- that is what
-    // guarantees `server.url` (baked into the --mcp-config `write` produces)
-    // and the `token` minted by THIS SAME `server` designate the identical
-    // deck-control instance. If this closure is ever made async (e.g. to let
-    // `getControlServer` itself start the server -- already tried once and
-    // reverted, see this file's header), a yield point inserted between
-    // these two calls would let `controlServer` be reassigned to a DIFFERENT
-    // instance in between (a restart, a second concurrent start before Card
-    // 3c322f10's own race fix), producing a token and a URL that no longer
-    // match. Keep both calls in the same synchronous tick.
+    // Load-bearing: this closure is synchronous on purpose, with no await
+    // between getControlServer() and write() below -- that is what guarantees
+    // server.url (baked into the MCP config write produces) and the token
+    // minted by this same server designate the identical deck-control instance.
+    // Making this async would let a yield point between the two calls allow
+    // controlServer to be reassigned to a different instance in between,
+    // producing a token and URL that fail to match.
     const server = deps.getControlServer()
     if (!server) return null
     const { token, callerId } = server.mintCaller('team-lead', TEAM_LEAD_DECK_TOOLS)

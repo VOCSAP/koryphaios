@@ -35,12 +35,14 @@ interface StoredCert extends CertMaterial {
    * as an explicit stale version.
    */
   version?: number
-  /** The LAN address the cert's SAN was generated for. Review round: a cert
-   * whose version still matches but whose SAN carries an address the server
-   * no longer binds to (LAN change, DHCP renewal) is just as stale as a
-   * version mismatch -- both leave the browser warning permanent, which is
-   * this whole card's point. Absent on every cert generated before this
-   * field existed, same treatment as a missing `version`. */
+  /**
+   * The LAN address the cert's SAN was generated for.
+   * A cert whose version still matches but whose SAN carries an address the
+   * server does not currently bind to (LAN change, DHCP renewal) is just as
+   * stale as a version mismatch -- both leave the browser warning permanent.
+   * Absent on a cert generated before this field existed, treated the same as a
+   * missing version.
+   */
   addr?: string
 }
 

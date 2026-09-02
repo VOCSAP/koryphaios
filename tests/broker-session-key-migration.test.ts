@@ -1,17 +1,13 @@
-// Card 3d121a74 lot L3-a: the ONE-SHOT peer_sessions purge that pays for the
-// widened identity key.
-//
-// Why a purge at all, and why it cannot be a migration: peer_sessions holds
-// six columns (session_key, instance_token, group_id, host, cwd,
-// last_active_at) and NONE identifies a tile or a CC session, so there is
-// nothing to recompute a widened key from. Coexistence (try the new key, fall
-// back to the old) was refused by design and IS the mechanism of the bug: the
-// legacy key hands a tile ANOTHER tile's row, hence its instance_token, hence
-// its undelivered mail.
-//
-// The database under test is not hand-rolled: a real broker writes a real
-// database, which is then DOWNGRADED by dropping the new column, so the
-// migration runs against rows a genuine pre-L3-a broker produced.
+// A one-shot purge of peer_sessions rather than a migration: the table's six
+// columns identify none of a tile or a CC session, so there is nothing to
+// recompute a widened key from.
+// Coexistence (try the new key, fall back to the narrower one) is rejected by
+// design, since that fallback is the mechanism of the bug it fixes -- the
+// narrower key hands a tile another tile's row, and with it its instance_token
+// and undelivered mail.
+// The database under test is downgraded from a real broker-written database by
+// dropping the new column, so the purge runs against rows a genuine
+// pre-widening broker actually produced.
 
 import { test, expect, afterAll } from "bun:test";
 import { readdirSync, readFileSync, copyFileSync, existsSync, mkdtempSync, rmSync } from "node:fs";

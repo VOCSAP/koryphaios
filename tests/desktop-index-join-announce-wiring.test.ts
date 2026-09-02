@@ -35,12 +35,11 @@ const GATED_DISPATCH = "sendPeerAnnounce";
 const GATED_NAMES = [GATED_DISPATCH, "sendJoinAnnounce"];
 
 /**
- * Cut one top-level statement out of index.ts, from `anchor` to the first
- * terminator listed (earliest wins). Fail CLOSED: an anchor that no longer
- * matches (rename/reshape) THROWS rather than returning an empty/vacuous
- * slice, so a test built on top of this never silently degrades to "0 checks,
- * green" -- which is exactly what happened, loudly and correctly, when the
- * dispatch was extracted (review round 4 above).
+ * Cuts one top-level statement out of source, from anchor to the first
+ * terminator listed (earliest wins).
+ * Fails closed: an anchor that stops matching (a rename or reshape) throws
+ * rather than returning an empty or vacuous slice, so a test built on this
+ * never silently degrades to a green result that checks nothing.
  */
 function slice(anchor: string, terminators: string[], label: string): string {
   const start = SRC.indexOf(anchor);
@@ -467,10 +466,10 @@ test("C domain floor: the discovered set includes announceTo (the object-propert
   expect(SWEPT_EMITTERS.map((e) => e.name)).toContain("announceTo");
 });
 
-// Without this, renaming the gated dispatch would make its NAME-based
-// exclusion vacuous: the sweep would keep passing over a domain that no longer
-// contains the gate holder, and the ABSENCE property would be asserted about
-// nothing in particular.
+// Without this, renaming the gated dispatch would make its name-based exclusion
+// vacuous: the sweep would keep passing over a domain that has stopped
+// containing the gate holder at all, so the absence property it checks would be
+// asserted about nothing in particular.
 test("C domain: the gated dispatch is itself a discovered sendAnnounce emitter, so excluding it by name is not a vacuous exclusion", () => {
   expect(ALL_EMITTERS.map((e) => e.name)).toContain(GATED_DISPATCH);
 });

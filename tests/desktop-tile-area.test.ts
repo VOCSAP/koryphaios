@@ -1,21 +1,16 @@
-// Regression harness for maximizing a tile remounting every terminal and
-// destroying scrollback: TileArea's three JSX return branches each build
-// sessions.map(...) inline rather than sharing one hoisted children value, so
-// switching branches remounts every TerminalTile and tears down its real
-// xterm.js instance.
-// Exercises the single exported TileArea component, unmodified, through both
-// branches -- splitting the branches into separate components would make React
-// remount on element type change and mask the bug rather than prove it fixed.
+// Maximizing a tile must not remount every terminal: TileArea's three JSX
+// return branches share one hoisted children value instead of building
+// sessions.map(...) inline, otherwise switching branches tears down every
+// real xterm.js instance and its scrollback. Exercises the single exported
+// TileArea, unmodified, through both branches: split components would make
+// React remount on element type change and mask the bug.
 // GlobalRegistrator.register() mutates globalThis for the whole bun test
-// process, not just this file; happy-dom's fetch cannot parse a Bun.serve
-// response, so any other file sharing the run that does real HTTP would hang.
-// The fix restores every replaced global to its Bun-native value after
-// registering, then re-applies happy-dom's own value only for the 9 names this
-// harness actually needs.
+// process, and happy-dom's fetch cannot parse a Bun.serve response, so every
+// replaced global is restored to its Bun-native value and happy-dom's own
+// value re-applied only for the 9 names this harness needs.
 // Root devDependencies on react/react-dom/zustand/@happy-dom exist because CI
-// runs this suite before desktop/'s own npm install, so resolution walks up to
-// the repo root and needs a copy there even though locally desktop/node_modules
-// shadows it.
+// runs this suite before desktop/'s npm install, so resolution walks up here.
+
 // `import 'react-dom/client'` anywhere in this file would load react-dom // scanfile-swallow-ok: prose example
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 

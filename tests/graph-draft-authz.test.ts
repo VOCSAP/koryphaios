@@ -1,30 +1,14 @@
-// Card 3781b033, lot 2 (team-lead ruling, 2026-08-26): proves the DECISION
-// in shared/graph-draft-scope.ts against an INJECTED fake row source --
-// deliberately no live broker (no import of tests/_helper.ts's startBroker),
-// so this file stays collected by CI's "Bun tests (pure modules)" step
-// (scripts/pure-module-partition.ts's EXEMPTIONS excludes the broker-/
-// server- families; the first version of this file imported startBroker
-// while living outside those prefixes, which tripped
-// tests/desktop-ci-glob-coverage.test.ts's "card b33b1874: no non-exempt
-// file real-imports the broker-spawning helper" guard -- extracting the
-// decision into a pure, DB-free module is what closes that without an
-// exemption on either side).
-//
-// TWO PROOFS, NOT ONE. This file proves the DECISION only. The WIRING --
-// does broker.ts's handleGraphDraftAdd actually call this function, with the
-// real request, and use its real result -- is proved separately, against a
-// live broker, in tests/broker-graph-drafts.test.ts (local-only, same as the
-// rest of the broker-*.test.ts family). Extracting logic into a pure module
-// makes its CALL SITE invisible to a suite that only exercises the module,
-// so neither proof stands in for the other.
-//
-// SCOPE, stated per CLAUDE.md's rule on partial fixes: this closes
-// ATTRIBUTION on /graph-draft/add (from_peer/project_key come from the
-// matched peers ROW, never the body), not SCOPE (the peers.project_key
-// column itself is caller-declared at /register with no ownership check --
-// see shared/graph-draft-scope.ts's header for the full residual) and not
-// the FAMILY (handleGraphDraftList, handleGraphDraftOpen and
-// handleRoadmapList still trust their body's claims -- card c92614ed).
+// Proves the decision against an injected fake row source, deliberately with no
+// live broker, so this file stays part of the fast, isolated test step rather
+// than the integration one.
+// This proves the decision only -- whether the real handler actually calls this
+// function, with a real request, is proved separately against a live broker
+// elsewhere, since extracting logic into a pure module makes its call site
+// invisible to a suite that only exercises the module.
+// Scope: this closes attribution on adding a graph draft only (from_peer and
+// project_key come from the matched peer row, never the request body), not the
+// underlying ownership gap on that row's own project_key column, and not the
+// sibling handlers that still trust their body's claims.
 
 import { test, expect } from "bun:test";
 import {

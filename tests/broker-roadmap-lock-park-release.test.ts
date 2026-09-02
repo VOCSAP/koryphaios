@@ -208,18 +208,11 @@ test("end-to-end: parked via the lock-park ROUTE by operator A, archived via ups
   expect(res.body.error).toContain("parked");
 });
 
-// ---------------------------------------------------------------------------
-// Team-lead arbitration (after the blocking verification above): an
-// unrestricted release would be a service door around bc0ccb17 -- operator B
-// releases operator A's park (lock_parked_by -> NULL), the card is no longer
-// parked by the time B's own upsert tries to archive it, so
-// refusesParkedArchive never engages. Anti-bypass cell below replaces the
-// "release succeeds regardless of operator" cell this test file used to
-// carry (that cell asserted the exact opposite of the now-required
-// behaviour, so it does not coexist with this one). Restriction is scoped to
-// PARKED rows only: the "not parked at all" legitimate cell further below
-// proves Hard Stop keeps its admin-wide reach there.
-// ---------------------------------------------------------------------------
+// An unrestricted release would open a bypass: operator B releases operator A's
+// park, and by the time B's own upsert tries to archive the card it is not
+// parked anymore, so refusesParkedArchive never engages.
+// This restriction is scoped to parked rows only -- a not-parked row still lets
+// Hard Stop apply with its full admin-wide reach.
 
 test("lock-release: a park set by operator A is REFUSED by a lock-release call signed by a different operator B -- the peer_id lands in `failed`, the park and lock survive untouched", async () => {
   const id = await createItem("e2e: release refused, foreign park");

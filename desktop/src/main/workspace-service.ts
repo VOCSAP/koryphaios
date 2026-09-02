@@ -399,14 +399,14 @@ export class WorkspaceService {
     // (WorkspacesDialog.tsx) also disables Restore on sessionCount === 0; this
     // is the service-side line of defense for every other caller.
     if (ws.sessions.length === 0) return { ok: false, reason: 'empty' }
-    // Refuse to restore a workspace another live instance already owns -- two
-    // windows must not drive the same Claude sessions (the UI also disables
-    // it). Exemption is by LOCK IDENTITY (the pid+host actually stamped in the
-    // lock file), not by comparing `id` to `this.currentId`: currentId is only
-    // this instance's own belief about what it owns, and refreshLock()
-    // re-stamps whatever identity the file already holds, so a second Deck
-    // could keep alive a lock this instance no longer truly matches. Resolve
-    // the object (the lock) first, then ask whether THIS caller (pid+host) is
+    // Refuses to restore a workspace another live instance already owns, since
+    // two windows must not drive the same Claude sessions.
+    // Exemption is by lock identity (the pid+host actually stamped in the lock
+    // file), not by comparing id to this.currentId: currentId is only this
+    // instance's own belief about what it owns, and refreshLock re-stamps
+    // whatever identity the file already holds, so a second Deck can hold a
+    // lock this instance does not actually match.
+    // Resolve the lock object first, then ask whether this caller (pid+host) is
     // the one holding it.
     const lock = readLock(this.deps.projectDir, id)
     if (

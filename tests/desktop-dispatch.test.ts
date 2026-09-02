@@ -239,12 +239,13 @@ test("canAutoDispatchNext: a dependency missing from the roadmap counts as resol
   expect(canAutoDispatchNext(items, new Set())).toBe(true);
 });
 
-// dispatchedIds lifecycle (card 6f19206e): watchDispatched's only removal
-// paths used to be done/archived/absent, so an operator stop or an
-// idle-lock release reverting a CLAIMED item back to planned never left
-// dispatchedIds, permanently closing the R5 wave barrier above. Sense A is
-// the guard-rail against the naive/wrong fix (delete on planned+unlocked):
-// a freshly dispatched item is planned+unlocked too, before it is claimed.
+// watchDispatched's removal paths cover done, archived and absent states;
+// without a path for a claimed item reverting to planned (an operator stop, or
+// an idle-lock release), dispatchedIds would never clear and the wave barrier
+// would stay permanently closed.
+// Sense A guards against the naive fix of deleting on planned+unlocked: a
+// freshly dispatched item is planned and unlocked too, before it is ever
+// claimed.
 
 test("nextDispatchedState: sense A -- a freshly dispatched item (never claimed) stays tracked", () => {
   const it = item({ status: "planned", locked: false });
@@ -439,11 +440,11 @@ test("runDirectiveWave: an invalid/null directive falls back to the '?' label", 
   expect(journaled).toEqual(['directive card dispatched: "Broken card" (?) -> no target reached']);
 });
 
-// Card bf76d37f: the resolver's buckets stop being journaled-then-discarded.
-// These probes are BEHAVIOURAL -- they drive the real runDirectiveWave and
-// read its real return value; only the executor's own wiring (index.ts, not
-// importable under bun) is left to a source scan, in
-// tests/desktop-directive-journal.test.ts.
+// These probes are behavioral: they drive the real runDirectiveWave and read
+// its actual return value, carrying both resolved and unresolved targets
+// distinctly rather than journaling then discarding them.
+// Only the executor's own wiring, in a module that imports electron and cannot
+// run under bun test, is left to a source scan elsewhere.
 
 test("runDirectiveWave: returns one report per card, carrying resolved AND unresolved targets distinctly", async () => {
   const resolved = report({
@@ -940,8 +941,8 @@ function sliceBetween(src: string, open: string, close: string): string {
 
 test("SOURCE SCAN (weak): the poller is called INSIDE the 10 s timer body, not merely mentioned", () => {
   const src = indexSource();
-  // Bounded to the interval body: making both call sites dead code (wrapping
-  // them in a never-taken branch) no longer satisfies this, and it covers the
+  // Bounded to the interval body specifically: wrapping both call sites in a
+  // never-taken branch would not satisfy this check, and it pins the polling
   // cadence at the same time.
   const timerBody = sliceBetween(src, "inboxTimer = setInterval(", "}, INBOX_POLL_MS)");
   // A LINE-ONLY match, not a substring: `if (NEVER) void pollDispatchRequests()`

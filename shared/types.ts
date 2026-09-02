@@ -458,27 +458,15 @@ export interface RoadmapItem {
 }
 
 /**
- * Card aad5e954: the column list /roadmap/import writes, as NAMED DATA.
- *
- * `INSERT OR REPLACE` deletes the row before reinserting it, so any column of
- * roadmap_items missing from this list is silently reset to its table DEFAULT
- * on every import. Card 40ddf1f5 paid that once (locked/locked_by/locked_at
- * were absent, so an unrelated import erased another card's lock); this
- * constant exists so the failure mode cannot come back as a NEW column.
- *
- * Two properties earn their keep here, and both are the reason this is an
- * array rather than a hand-written SQL string:
- *  - the statement text AND the bound values are generated from it in
- *    broker.ts, so they cannot drift apart positionally, and a column added
- *    here without a value is a TYPE error rather than a runtime surprise;
- *  - it is directly comparable to the live schema. tests/broker-roadmap-import
- *    reads PRAGMA table_info on a broker-spawned database and compares it to
- *    this list, so a column added to the table and forgotten here fails CLOSED.
- *    Deliberately NOT extracted from the SQL by regex: that would make the
- *    regex a link in the guard, and a regex that silently returns a SUBSET
- *    turns the comparison green exactly when it should scream (measured
- *    precedent in this repo on 2026-08-04, a comment scanner that desynced on
- *    a quoted literal and went from 3 findings to 54).
+ * The column list /roadmap/import writes, as data rather than a hand-written
+ * SQL string: INSERT OR REPLACE deletes the row first, so any roadmap_items
+ * column missing from this list is silently reset to its table DEFAULT on
+ * import.
+ * Statement text and bound values are generated from this array so they cannot
+ * drift positionally, and it is compared directly against the live schema so a
+ * forgotten column fails closed.
+ * Deliberately not derived from the SQL by regex: a regex that silently returns
+ * a subset would make that comparison pass exactly when it should fail.
  */
 export const ROADMAP_IMPORT_COLUMNS = [
   "id",

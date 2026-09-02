@@ -1,16 +1,13 @@
-// A tsconfig counts as a real program iff it declares its own compilerOptions,
-// discovered structurally rather than off a hardcoded step list; each must have
-// an actual `tsc -p` invocation, resolved transitively through package.json
-// script indirection and matched by the command a step runs, never by its name.
-// isNeutralized() catches continue-on-error, if:-false, and shell-level `||
-// true`/`|| exit 0` swallows at both step and job level, plus an invocation
-// commented out inside a run: block.
-// Known open gaps: a shell `if ! tsc; then fi` swallow, `shell: bash {0}`
-// losing its implicit -eo pipefail, and a non-literal always-false `if:`
-// expression -- all shell/expression control flow outside what a YAML-text scan
-// can parse.
-// A tsconfig using block comments, or an extends-only config with no own
-// compilerOptions, is silently excluded from the checked domain.
+// A tsconfig counts as a real program iff it declares its own compilerOptions
+// (discovered structurally, not from a step list); each needs an actual
+// `tsc -p` invocation, resolved through package.json script indirection and
+// matched by the command a step runs, never by its name. isNeutralized()
+// catches continue-on-error, if:-false, `|| true`/`|| exit 0` at step and job
+// level, and an invocation commented out inside a run: block.
+// Open gaps: a shell `if ! tsc; then fi` swallow, `shell: bash {0}` losing its
+// implicit -eo pipefail, a non-literal always-false `if:` expression, a
+// tsconfig using block comments, and an extends-only config with no own
+// compilerOptions (silently excluded from the domain).
 
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

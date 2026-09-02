@@ -187,19 +187,15 @@ export function buildSessionCommandLine(input: SessionCommandInput): string {
 }
 
 /**
- * Encodes text as bracketed paste with the \r submit keystroke appended in a
- * single write: on Windows/ConPTY back-to-back writes coalesce into one read,
- * and Claude Code's tokenizer only treats a control character as its own token
- * when the whole read is under 64 characters — split writes can land the text
- * unsubmitted with no error.
- * The closing paste marker closes the text run inside the tokenizer, so the
- * trailing \r is always a separate token regardless of read size.
- * Every ESC byte is stripped first, since text can originate from a cloned
- * repo's template and reach a live terminal: bracketed paste is not a
- * sanitizer, and a literal escape sequence inside the text could close the
- * paste early and let the remainder be interpreted as keystrokes.
- * A bare \r or \r\n is normalized to \n, since not every terminal app treats a
- * raw CR inside the paste as literal.
+ * Encodes text as bracketed paste with the \r submit keystroke in a single
+ * write: on Windows/ConPTY split writes coalesce into one read, and Claude
+ * Code's tokenizer only isolates a control character when the whole read is
+ * under 64 characters, so the text could land unsubmitted. The closing paste
+ * marker ends the text run, so the trailing \r is always its own token.
+ * Every ESC byte is stripped first (text can come from a cloned repo's
+ * template): a literal escape could close the paste early and let the rest
+ * run as keystrokes. A bare \r or \r\n becomes \n, since not every terminal
+ * app treats a raw CR inside a paste as literal.
  */
 export function encodeSubmittedKeystrokes(text: string): string {
   // eslint-disable-next-line no-control-regex

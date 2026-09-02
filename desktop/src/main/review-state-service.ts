@@ -111,15 +111,13 @@ function validateAnnotation(raw: unknown, seenIds: Set<string>): PickAnnotation 
 }
 
 /**
- * Validate an untrusted persisted-review body. STRICT and fail-closed: any
- * violation anywhere in the array rejects the WHOLE file (returns null) --
- * see module header for why half a review is worse than none.
- *
- * screenshotPath is the one exception to "violation rejects the file": a
- * path outside `opts.annotationsDir`, or one whose file no longer exists
- * (pruned after 7 days), is silently DROPPED from the item rather than
- * failing it -- the annotation itself (comment/intent/pick/region) is still
- * good and worth keeping.
+ * Validates an untrusted persisted-review body.
+ * Strict and fail-closed: any violation anywhere in the array rejects the whole
+ * file (returns null).
+ * screenshotPath is the one exception: a path outside opts.annotationsDir, or
+ * one whose file is missing (pruned after 7 days), is silently dropped from the
+ * item rather than failing it -- the rest of the annotation is still good and
+ * worth keeping.
  */
 export async function validatePersistedReview(
   raw: unknown,

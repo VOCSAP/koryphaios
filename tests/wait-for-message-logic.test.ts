@@ -385,18 +385,14 @@ test("wait_for_message's opportunistic peek and pollFallback both call the non-c
   expect(pollFallbackBody).not.toContain('"/poll-messages"');
 });
 
-// --- runWaitForMessage: the whole decision, injected (team-lead U1, round 3, 2026-08-26) ---
-//
-// A mutation battery on an earlier version of server.ts's case (which moved
-// only VALUE transforms into the pure module, not the CONTROL FLOW) found 12
-// of 13 mutations invisible: no source-scan test can prove a peeked
-// candidate's freshness filter result is actually USED (as opposed to
-// computed and discarded), that the timer is armed with the CLAMPED value,
-// that cancellation actually suppresses a later result, or that two
-// concurrent settle paths (timer vs waiter vs cancel) cannot double-fire.
-// These tests execute runWaitForMessage directly with fake deps -- no
-// network, no real timer -- so each of those properties is proven by running
-// the real decision code, not by scanning server.ts's text for a token.
+// These tests execute runWaitForMessage directly against fake dependencies --
+// no network, no real timer -- because a source scan cannot prove a peeked
+// candidate's freshness-filter result is actually used rather than computed and
+// discarded, that the timer is armed with the clamped value, that cancellation
+// actually suppresses a later result, or that the timer, waiter and cancel
+// paths cannot double-fire against each other.
+// Running the real decision code directly is what proves each of those
+// properties.
 
 /** A promise plus its resolver, exposed for a test to drive timing by hand. */
 function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
@@ -549,17 +545,14 @@ test("runWaitForMessage: a waiter match cancels the pending timer and unsubscrib
   expect(cancelUnsubscribed).toBe(true);
 });
 
-// Team-lead review round 4, 2026-08-26: the "cancellation while the peek is
-// still in flight" test above only exercises cancellation BEFORE any waiter
-// exists. Measured gap: a mutation that resolves "cancelled" directly
-// (bypassing finish()'s cleanup) stayed green against that test, because no
-// waiter is registered yet at that point for the missing unregister call to
-// matter. The uncaught consequence: an orphaned waiter would stay in
-// server.ts's pendingWaiters after its own call has already resolved
-// cancelled, and a later WS/poll message matching its filter would resolve
-// it anyway -- one dead call "consuming" a message (the notifiedMessageIds
-// side effect on that path marks it notified) that the agent who actually
-// asked for it never sees, since its own tool call already returned.
+// Cancellation exercised only before any waiter exists does not catch a
+// mutation that resolves 'cancelled' directly, bypassing cleanup: with no
+// waiter registered yet, the missing unregister call has nothing to matter
+// against.
+// Left unchecked, an orphaned waiter would stay registered after its own call
+// already resolved cancelled, and a later message matching its filter would
+// resolve it anyway -- consumed by a call whose caller already stopped
+// listening.
 test("runWaitForMessage: cancellation AFTER the waiter is registered unregisters it exactly once", async () => {
   const peeked = deferred<WaitCandidateMessage[]>();
   const registered = deferred<void>();

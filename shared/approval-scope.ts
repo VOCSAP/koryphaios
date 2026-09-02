@@ -227,9 +227,10 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
       if (row.operator_id !== proof.operator_id) return { error: "token/operator mismatch", status: 401 };
       knownKey = row.public_key;
       sessionRef = row.session_ref;
-      // '' for a token minted before this card. Kept as '' rather than
-      // normalised to null: the two mean different things downstream, and the
-      // refusal that names the cause lives at the point of use, not here.
+      // Kept as '' rather than normalized to null: a token minted without
+      // project scoping carries '' here, and the refusal that names the cause
+      // lives at the point of use, not here.
+      // The two values mean different things downstream.
       tokenProjectKey = typeof row.project_key === "string" ? row.project_key : "";
     }
 
@@ -255,21 +256,13 @@ export function createApprovalAuth(deps: ApprovalAuthDeps): ApprovalAuth {
   }
 
   /**
-   * Where a scope's `project_key` comes from, and why it differs by credential.
-   *
-   * SESSION credential: from the TOKEN, never from the body. That is the whole
-   * point of card 1def56da -- a sandboxed agent must not choose the project its
-   * question is filed under. A token minted before this card carries '' and is
-   * refused here, naming the cause, on the model of `handleApprovalList`'s
-   * existing 400. Falling back on the body would reintroduce the defect under
-   * cover of compatibility, which docs/DESIGN-APPROVAL-SCOPE.md §4 forbids in terms.
-   *
-   * OPERATOR credential: DECLARED in the body, and mandatory. The operator is
-   * the trusted party, so declaration is not a hole; but they own several
-   * projects under one `operator_id`, so without a declaration there is no
-   * project dimension at all -- which is exactly the leak card 4df14b5b exists
-   * to close. Refusing loudly is the fail-CLOSED direction, and it is the same
-   * refusal `/approval/list` has already shipped.
+   * Where a scope's project_key comes from differs by credential.
+   * Session credential: always from the token, never the body -- a sandboxed
+   * agent must not choose which project its own question is filed under; a
+   * token carrying '' for project_key is refused here, naming the cause.
+   * Operator credential: must be declared in the body, since one operator_id
+   * can own several projects and without a declaration there is no project
+   * dimension to scope on.
    */
   function resolveProjectKey(id: ApprovalIdentity, body: Body): AuthResult<string> {
     if (id.kind === "session") {

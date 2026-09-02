@@ -491,31 +491,18 @@ export function insertSoloWaves(waves: string[][], at: number, ids: string[]): s
   return [...waves, ...solo]
 }
 
-// ----- reorder-id invariant (card 3b0fda5f) -----
-//
-// The filter/search UI (roadmap-data.ts) hands the two layouts a BOARD that
-// is a subset of the true dispatch queue. Every reorder commit (save's
-// lane-born draft, queueItem, stackItem, WorkflowLane's own drops) must
-// still be computed against the WHOLE unfiltered list -- a reorder built
-// from the filtered board would silently drop every hidden item out of the
-// queue the moment it committed.
-//
-// Review round 2 (2026-08-10), MAJOR: an EARLIER version of this branded
-// exactly `{ ...queue, all: board }` COMPILED against it -- object-literal
-// spread copies a value's own keys (symbols included), so the resulting
-// literal structurally matched the interface, escaping BOTH the type brand
-// and tests/desktop-workflow-queue-source.test.ts's `queueSourceOf(` grep
-// sweep in one motion, which is exactly the silent-unqueue this exists to
-// forbid. A CLASS with a private field closes that hole: TypeScript only
-// treats a value as assignable to a class type with a private member when
-// the value's type is nominally that class (or a subtype) -- a fresh object
-// literal, however many properties it copies at runtime, is never nominally
-// `QueueSource`, so `{ ...queue, all: board }` no longer typechecks as one.
-// `queueSourceOf` is kept as the public constructor function (unchanged call
-// sites everywhere else); the class itself is private-constructed so it can
-// only be minted here. What DOES still survive is a bare `as QueueSource`
-// type assertion -- TypeScript's `as` is looser than plain assignment -- so
-// that spelling is added to the discipline sweep by name, same file.
+// Every reorder commit must be computed against the whole unfiltered queue,
+// never the filtered board the UI hands the layouts -- a reorder built from the
+// filtered board would silently drop every hidden item out of the queue the
+// moment it committed.
+// QueueSourceImpl is a class with a private field, not a plain interface:
+// TypeScript only treats a value as assignable to a class type with a private
+// member when it is nominally that class, so a fresh object literal, however
+// many properties it copies, never satisfies QueueSource by structural typing
+// alone.
+// queueSourceOf stays the public constructor function; a bare `as QueueSource`
+// type assertion still bypasses this and is caught by name in the discipline
+// sweep instead.
 class QueueSourceImpl {
   private readonly brand = true
   private constructor(readonly all: RoadmapItem[]) {}

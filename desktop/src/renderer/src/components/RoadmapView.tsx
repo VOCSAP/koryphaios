@@ -22,19 +22,15 @@ import { WorkflowLane } from './WorkflowLane'
 import { hasActiveCriteria, useRoadmapData } from '../roadmap-data'
 import { buildAppendToQueue, buildInsertIntoQueue, buildStackIntoQueue } from '@shared/workflow'
 
-// Roadmap view (PLAN C3-M3, reworked as a kanban board in PLAN K1, split into
-// container + RoadmapBoard/RoadmapFilterPanel/RoadmapFilterChips by card
-// 3b0fda5f): the container keeps mutation logic/modals and the Workflow lane,
-// consumes the ONE shared useRoadmapData() hook (roadmap-data.ts) also used
-// by RoadmapList.tsx's mobile layout, and renders the board/filter pieces as
-// props-driven children. Data lives in the broker (roadmap:* IPC); agents
-// write to the same table through their MCP tools, so the hook polls while
-// the view is mounted to pick up their changes.
-//
-// Movement rules (K1/K2): dropping on "done" asks for confirmation (the item
-// will no longer be picked up); a locked in_progress card (an agent actively
-// works on it) is greyed out and not draggable -- the operator goes through the
-// ⏹ Stop button (K3) to reclaim it.
+// The container owns mutation logic, modals and the Workflow lane, consumes one
+// shared roadmap-data hook also used by the mobile list layout, and renders the
+// board and filter pieces as props-driven children.
+// Data lives in the broker; agents write to the same table through their own
+// MCP tools, so this hook polls while the view is mounted to pick up their
+// changes.
+// Dropping a card on done asks for confirmation, since the item will not be
+// picked up again; a locked in-progress card is greyed out and not draggable --
+// the operator reclaims it through the Stop button instead.
 
 const KINDS: RoadmapKind[] = ['feature', 'bug', 'debt', 'idea', 'chore', 'directive']
 const DIRECTIVES: RoadmapDirective[] = ['clear', 'compact', 'magic_compact']

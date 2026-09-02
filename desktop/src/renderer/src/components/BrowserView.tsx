@@ -278,26 +278,17 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
   /** Last page-level failure (did-fail-load / renderer gone), or null (O6). */
   const [loadError, setLoadError] = useState<string | null>(null)
   const [picking, setPicking] = useState(false)
-  // Annotate review (Chantier OD5): multi-pick armed state + the pinned
-  // batch. `pendingAnnotations` deliberately OUTLIVES `reviewArmed` going
-  // false (Escape only disarms picking, per DESIGN.md's collapsing-must-not-
-  // destroy-drafts rule) -- cleared only by Send or Discard.
-  //
-  // INVARIANT (rework of the draw mode, see "----- draw mode -----" below):
-  // `reviewArmed` keeps its original, narrower meaning -- "the guest
-  // multi-pick listener is armed" -- unchanged by draw mode. A completed
-  // draw stroke pins straight into `pendingAnnotations` WITHOUT touching
-  // `reviewArmed` at all: the panel's own visibility condition
-  // (`reviewArmed || pendingAnnotations.length > 0`, see the JSX below)
-  // already shows the panel off that push alone, so overloading this flag's
-  // meaning would only make the review toolbar toggle (which reflects
-  // `reviewArmed`) lie about whether the guest listener is actually armed.
-  // Draw and review ARE, however, no longer mutually exclusive with EACH
-  // OTHER any more (toggleDraw/toggleAnnotate below stopped disarming one
-  // another) -- only INSPECT (single-element pick, `picking`) stays
-  // mutually exclusive with BOTH, since picking and review-multi share the
-  // same guest document listeners (shared/element-pick.ts) and the draw
-  // canvas overlay would swallow the guest's pointer events regardless.
+  // pendingAnnotations deliberately outlives reviewArmed going false: Escape
+  // only disarms picking, never destroys pinned drafts -- only Send or Discard
+  // clears them.
+  // reviewArmed keeps a narrow meaning (the guest multi-pick listener is
+  // armed); a completed draw stroke pins into pendingAnnotations without
+  // touching it, and the panel's own visibility condition already reacts to
+  // that push alone.
+  // Draw and review are not mutually exclusive with each other, but inspect
+  // (single-element pick) stays mutually exclusive with both, since picking and
+  // review-multi share the same guest document listeners and the draw overlay
+  // would swallow guest pointer events regardless.
   const [reviewArmed, setReviewArmed] = useState(false)
   const [pendingAnnotations, setPendingAnnotations] = useState<PickAnnotation[]>([])
   // Review persistence (write-through effect further down): true once the
@@ -322,9 +313,9 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     shot: 'pending' | 'ready' | 'none'
     shotPath: string | null
   } | null>(null)
-  // Always holds the in-flight (or already-settled) capture promise for the
-  // CURRENT pendingPick -- reassigned synchronously the moment a new pick
-  // replaces the old one, so onSend below always awaits the right one.
+  // Always holds the capture promise for the current pendingPick, reassigned
+  // synchronously the instant a new pick is made, so onSend below always awaits
+  // the right one.
   const pendingPickCaptureRef = useRef<Promise<string | null> | null>(null)
   // Guards the capture's .then callback against calling setState after this
   // view has unmounted (e.g. the operator left the browser view mid-capture).
@@ -1009,7 +1000,11 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     setDrawing(true)
   }
 
-  /** Size the canvas to its box; called on mount and box resize (a resize discards any in-progress stroke -- its points are no longer meaningful against the new size). */
+  /**
+   * Sizes the canvas to its box; called on mount and on box resize.
+   * A resize discards any in-progress stroke, since its points do not
+   * correspond to the new canvas size.
+   */
   function fitCanvas(canvas: HTMLCanvasElement): void {
     const w = canvas.clientWidth
     const h = canvas.clientHeight

@@ -128,25 +128,18 @@ test("resume preserves claude_cli_pid through dormant cycle", async () => {
 // undelivered mail, `messages` being keyed by to_token.
 
 test("a peer_sessions row written under the LEGACY key is still resurrected by a register with NO discriminant", async () => {
-  // The property that matters for every non-Deck CLI user, and the one that
-  // breaks most quietly: they send no discriminant, so their row must keep
-  // being found. Proven at DATABASE level, against the pre-L3-a hash
-  // RECOMPUTED here from its documented definition -- deliberately a second
-  // copy of the algorithm rather than a frozen hex literal, so it stands for
-  // what a pre-L3-a broker actually wrote. Drop the delegation in
-  // sessionKey and this goes red on the stored key, not merely on a token.
-  //
-  // DO NOT delete this as redundant with the resume tests below. The disaster
-  // it simulates -- rows written by a PREVIOUS binary becoming unreachable --
-  // only exists across a BINARY BOUNDARY, and no test suite produces one
-  // spontaneously: every run starts from a fresh database written by the
-  // broker it is testing, so both sides of a round trip share whatever
-  // algorithm is current, broken or not. Measured: with the delegation
-  // removed and only this key assertion disabled, the whole file still read
-  // 10 pass / 0 fail. There are exactly two ways to cross that boundary in a
-  // test -- recompute the old key independently (here), or downgrade a real
-  // database (tests/broker-session-key-migration.test.ts) -- and this file
-  // uses the first.
+  // Proves at database level that a peer_sessions row written under the
+  // pre-widening hash algorithm is still found by a register call carrying no
+  // discriminant -- the property that matters for every non-Deck CLI caller,
+  // since they never send one.
+  // The hash is recomputed here from its documented definition, independently
+  // of sessionKey's current implementation, since no test run can otherwise
+  // produce a value written by a binary that predates the widening: every fresh
+  // run shares whatever algorithm is current.
+  // Do not delete this as redundant with the resume tests nearby -- the failure
+  // mode it simulates only exists across a binary boundary, and this is one of
+  // only two ways a test can cross that boundary; the other downgrades a real
+  // database instead.
   const host = "hostLegacy";
   const cwd = "/legacy-key";
   const a = await register(host, cwd);

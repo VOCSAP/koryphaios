@@ -1,17 +1,12 @@
-// ConfirmDialog.tsx has no native `<dialog>` to trap focus, and `autoFocus` sat
-// unconditionally on the Confirm button regardless of tone, so hitting Enter
-// right after a danger dialog opened armed the destructive action. Fix moves
-// autoFocus to Cancel unconditionally rather than gating by tone, since 23 of
-// 25 call sites never pass tone explicitly.
-// This is a domain-wide source scan over every .tsx under
-// desktop/src/renderer/src, not scoped to ConfirmDialog.tsx, so it also catches
-// the pattern reimplemented in a different component.
-// extractButtonTags tracks brace depth and string-quote state character by
-// character so an arrow function inside the tag (`=>`) is not mistaken for the
-// tag's closing `>`.
-// Structural blind spot, not fixed: a destructive button styled without a class
-// literally containing `danger`, or a class name composed at runtime, is
-// invisible to this source-text scan.
+// autoFocus belongs on Cancel unconditionally, not gated by tone (23 of 25
+// call sites never pass tone): with no native `<dialog>` to trap focus, an
+// Enter right after a danger dialog opens must not arm the destructive
+// action. Domain-wide source scan over every .tsx under desktop/src/renderer,
+// so the pattern reimplemented in another component is caught too.
+// extractButtonTags tracks brace depth and string-quote state so an arrow
+// function's `=>` inside a tag is not mistaken for the closing `>`.
+// Blind spot: a destructive button whose class does not literally contain
+// `danger`, or a class name composed at runtime, is invisible to this scan.
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "bun:test";

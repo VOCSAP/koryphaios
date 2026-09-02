@@ -216,8 +216,8 @@ test(
     db.close();
 
     expect(second.instance_token).toBe(first.instance_token);
-    // The direction everyone forgets: absent transport is a DECLARATION of
-    // absence and must clear a previously-stored role, not preserve it.
+    // The direction everyone forgets: an absent transport role is a declaration
+    // of absence, and must clear whatever role is stored, not preserve it.
     expect(second.role).toBeNull();
   },
   20_000

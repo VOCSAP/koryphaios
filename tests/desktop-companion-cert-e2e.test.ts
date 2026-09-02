@@ -1,38 +1,11 @@
-// Card 3776ae19 (certificate half), end-to-end proof against the REAL
-// 'selfsigned' package. Companion to tests/desktop-companion-cert.test.ts
-// (pure, DI-only, stub generate()): this file is the one that actually
-// closes the acceptance criterion the team-lead named as non-negotiable --
-// "on a stateDir that already carries an OLD-format companion-cert.json,
-// the certificate served after the fix is SHA-256 signed AND carries the
-// LAN IP in its SAN". A test that only exercises a fresh/empty stateDir
-// does not bite on that case, since the bug this card fixes IS the
-// unconditional cache read on an existing file.
-//
-// 'selfsigned' is declared in desktop/package.json (production dependency,
-// for companion-server.ts's own generateCert call) AND, for THIS file's
-// benefit, also in the ROOT package.json devDependencies -- tests/ is a
-// SIBLING of desktop/, not an ancestor of desktop/node_modules, so a bare
-// `import ... from 'selfsigned'` in any tests/*.test.ts file cannot resolve
-// via desktop/node_modules no matter which CI step runs it. Same pattern
-// already used for react/react-dom/zustand/@happy-dom/global-registrator
-// (desktop-build.yml's "Root install" step comment) -- NOT an entry in
-// scripts/pure-module-partition.ts's EXEMPTIONS (an earlier version of this
-// fix tried that, measured it did not actually resolve the import either,
-// and reverted it). This file therefore runs in the fast, trusted
-// "Bun tests (pure modules)" step like its sibling tests/desktop-companion-
-// cert.test.ts, not in the "Bun tests (integration)" step.
-//
-// node:crypto's X509Certificate exposes .subjectAltName as a human-readable
-// string but has NO public signatureAlgorithm getter (measured against
-// Node 24.18 / bun 1.3.13 locally: Object.getOwnPropertyNames on its
-// prototype lists ca/checkEmail/.../subjectAltName/toJSON/... with nothing
-// naming the signature algorithm). The signature algorithm is instead
-// asserted by scanning the certificate's raw DER bytes for the two mutually
-// exclusive PKCS#1 OIDs: sha256WithRSAEncryption (1.2.840.113549.1.1.11)
-// vs sha1WithRSAEncryption (1.2.840.113549.1.1.5) -- measured locally
-// (scratch probe) to appear exactly once, and exactly the expected one,
-// for a cert generated with algorithm:'sha256' vs one generated with no
-// algorithm option at all (selfsigned's SHA-1 default).
+// End-to-end against the real selfsigned package: a stateDir already carrying
+// an old-format cached certificate must be served one that is SHA-256 signed
+// and carries the current LAN IP in its SAN; an empty stateDir would not
+// exercise the cache-read path. selfsigned is also a root devDependency
+// because tests/ is a sibling of the app directory, not an ancestor of its
+// node_modules. The signature algorithm is asserted by scanning the raw DER
+// bytes for the sha256WithRSAEncryption vs sha1WithRSAEncryption PKCS#1 OIDs,
+// since node:crypto's X509Certificate exposes no signatureAlgorithm getter.
 
 import { test, expect } from 'bun:test'
 import { X509Certificate } from 'node:crypto'
@@ -114,10 +87,10 @@ test('regenerating over a legacy stateDir with the real generateCert() yields a 
   expect(x509.subjectAltName).toContain(`IP Address:${lanAddr}`)
 })
 
-// Review round (point 4): a cert cached for an OLDER LAN address must be
-// regenerated for the NEW one, real selfsigned end to end -- a laptop that
-// changes networks (or a DHCP lease renewal) must not keep serving a cert
-// whose SAN carries an address the server no longer binds to.
+// A cert cached for an older LAN address must be regenerated for the new one: a
+// laptop that changes networks, or renews its DHCP lease, must not keep serving
+// a certificate whose SAN carries an address the server does not currently bind
+// to.
 test('a cert cached for an OLD LAN address is regenerated with the NEW address in its SAN when the address changes', async () => {
   const oldAddr = '192.168.1.10'
   const newAddr = '192.168.1.20'

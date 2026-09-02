@@ -151,15 +151,12 @@ export class QuotaDetector extends EventEmitter {
   feed(id: string, data: string): void {
     const st = this.state(id)
     const stripped = stripAnsi(data)
-    // Card 1aa69066 review round 3, blocker T1: `st.safe` MUST be fed on
-    // EVERY chunk, unconditionally, not only while `st.limited` is true --
-    // an incremental state machine fed a SUB-SAMPLED stream is no longer
-    // incremental. The chunk that OPENS an episode (this one, seen before
-    // `st.limited` flips true below) can itself carry an unterminated OSC
-    // head; skipping it here left `st.safe` desynchronised from the real
-    // byte stream, reopening F3 exactly where it had been measured closed.
-    // attention.ts already has this right (`busySafe` computed before its
-    // `if (st.waiting)` branch) -- this hoists quota.ts to match.
+    // st.safe must be fed on every chunk unconditionally, not only while
+    // st.limited is true: an incremental state machine fed a filtered stream
+    // drifts out of sync with the real byte stream.
+    // The chunk that opens an episode can itself carry an unterminated OSC
+    // head, so skipping it here would desynchronize st.safe before st.limited
+    // even flips true.
     const busySafe = st.safe.feed(data)
 
     if (st.limited) {

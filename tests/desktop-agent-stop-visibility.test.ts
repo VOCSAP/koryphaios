@@ -361,10 +361,11 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
           `Signal sets diverged -- injectCommand-only: [${onlyInject.join(', ')}], interrupt(pause)-only: [${onlyInterrupt.join(', ')}]`
         )
       }
-      // Anti-vacuity: two EMPTY sets would also satisfy "equal" above, which
-      // would make this test pass on a body that no longer checks anything
-      // at all. A floor (not a fixed list -- no field name is hardcoded)
-      // rules that degenerate case out.
+      // Anti-vacuity: two empty sets would also satisfy equality above, which
+      // would let this test pass even if the body being checked stopped
+      // checking anything at all.
+      // A floor, not a fixed list, rules that degenerate case out without
+      // hardcoding any field name.
       expect(injectSignals.size).toBeGreaterThanOrEqual(2)
     }
   )

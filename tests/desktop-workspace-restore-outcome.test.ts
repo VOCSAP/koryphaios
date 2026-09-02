@@ -1,14 +1,9 @@
-// Card 07134c6a (prerequisite for the 64f8f629 dossier): behavioural proof
-// for the two sinks of workspace-restore-outcome.ts, mirroring
-// tests/desktop-template-apply-outcome.test.ts's structure for card
-// 96c98453. Unlike that lot, this card's PRODUCER (workspace-service.ts) is
-// ALREADY bun-testable directly (tests/desktop-workspace.test.ts pins every
-// one of the six real reasons against WorkspaceService itself, closing the
-// wiring-mutation gap at the real call site) -- this file covers only the
-// two pure sink functions that ipc.ts and store.ts each delegate to, since
-// THOSE two files remain unimportable under bun test's default resolution
-// (electron / `@shared/*` alias, same class of blocker measured for card
-// 96c98453).
+// Covers only the two pure sink functions the IPC and store layers each
+// delegate to.
+// The underlying service producing the six real reasons is already directly
+// testable and pinned elsewhere; these two sinks alone remain unimportable
+// under the default test resolution, since their modules pull in an Electron or
+// aliased import that cannot resolve there.
 
 import { test, expect } from "bun:test";
 import {
@@ -92,10 +87,9 @@ test("'locked' shows toast.alreadyOpen -- the existing wording fits it", () => {
   expect(workspaceRestoreToastKeyFor("locked")).toBe("toast.alreadyOpen");
 });
 
-// Review correction C3, card 07134c6a: 'missing' used to ALSO fall into
-// toast.alreadyOpen ("Session already open") -- a FALSE message for a
-// workspace whose FILE no longer exists (nothing is "already open", it is
-// simply gone). This is its own dedicated toast, never reusing 'locked's.
+// 'missing' gets its own toast.workspaceMissing, distinct from 'locked's
+// toast.alreadyOpen: a workspace whose file is gone is not 'already open' --
+// nothing is open at all.
 test("'missing' shows its OWN toast.workspaceMissing -- distinct from 'locked's toast.alreadyOpen", () => {
   expect(workspaceRestoreToastKeyFor("missing")).toBe("toast.workspaceMissing");
   expect(workspaceRestoreToastKeyFor("missing")).not.toBe(workspaceRestoreToastKeyFor("locked"));

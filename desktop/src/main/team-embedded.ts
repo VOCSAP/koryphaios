@@ -178,17 +178,11 @@ export function writeEmbeddedAgentPrompt(dir: string, id: string): string {
 }
 
 /**
- * Card e3f8065d. The two spawn composers below used to carry SEPARATE copies of
- * this sentence, eleven lines apart, both ending their own last line with it.
- * That is why a 2026-08-19 sweep of "every no-reply wording in production"
- * counted four and there were six: the enumeration counted one per FILE, and
- * this file held two. One editable copy per composer is one chance per composer
- * of drifting -- and a drift here is invisible, since neither string is ever
- * compared to the other.
- *
- * The extraction is byte-preserving on purpose: both returned strings are
- * unchanged, down to the leading space this constant does NOT carry (the
- * callers keep their own separator) and the trailing period it DOES.
+ * Single source for this sentence, shared by both spawn composers rather than
+ * each keeping a separate copy -- a duplicated string is a second, invisible
+ * place to drift, since neither copy is ever compared to the other.
+ * Byte-preserving: the string carries the trailing period but not the leading
+ * space, which callers still supply themselves.
  */
 const SPAWN_NO_REPLY_SUFFIX = 'Notification only: do not reply to this message.'
 

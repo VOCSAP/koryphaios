@@ -411,13 +411,13 @@ const ANTIGRAVITY_CLIENT_ID =
   '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com'
 
 /**
- * The matching client "secret" is NOT embedded here: even though Google ships
- * it in every Antigravity install (installed-app flow — it is not actually
- * confidential), committing the literal trips GitHub secret scanning. It is
- * read at runtime instead: KORY_ANTIGRAVITY_CLIENT_SECRET env override, else
- * extracted from the local `agy` binary the way community trackers do. When
- * neither works the token refresh is skipped and the stored access token is
- * used as-is (Antigravity itself refreshes the keyring while it runs).
+ * The matching client secret is not embedded here: even though it ships in
+ * every Antigravity install and is not actually confidential, committing the
+ * literal trips secret scanning.
+ * Read at runtime instead -- an env override, or pulled out of the local binary
+ * the way community trackers do.
+ * When neither source is available, the token refresh is skipped and the stored
+ * access token is used as-is.
  */
 export function findGoogleClientSecret(text: string): string | null {
   const m = /GOCSPX-[A-Za-z0-9_-]{10,60}/.exec(text)

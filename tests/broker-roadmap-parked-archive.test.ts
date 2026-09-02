@@ -114,16 +114,11 @@ test("unparked card: archive by any author proceeds, refusesParkedArchive never 
   expect(res.body.item?.status).toBe("archived");
 });
 
-// ---------------------------------------------------------------------------
-// Card bc0ccb17: a SECOND production call site for the same predicate.
-// /roadmap/upsert can also drive a card to status='archived' directly
-// (RoadmapStatus enum includes it, and the write stamps deleted_at exactly
-// like /roadmap/archive does) -- that path bypassed refusesParkedArchive
-// entirely before this card, a disguised fail-open of the guard the tests
-// above already prove /roadmap/archive enforces. Same fixtures, same
-// predicate, a DIFFERENT route -- wiring at one call site never proves
-// wiring at the other.
-// ---------------------------------------------------------------------------
+// /roadmap/upsert can also drive a card directly to status='archived', stamping
+// deleted_at exactly like /roadmap/archive does -- a second production call
+// site for the same predicate.
+// Proving the guard fires at one call site never proves it fires at the other,
+// since each route reaches the database independently.
 
 function signedUpsertArchive(id: string, credential: typeof OPERATOR_A): Record<string, unknown> {
   const body = { id, by: "deck", status: "archived", public_key: credential.publicKey };

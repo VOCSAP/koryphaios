@@ -224,15 +224,13 @@ function isSubtreeDenyMatch(segment: string): boolean {
 }
 
 /**
- * True when some literal (wildcard-free) segment of `glob` already falls
- * inside the deny-list, so every real match is refused wherever the
- * wildcards sit: `node_modules/**`, `**\/node_modules/**` and
- * `*\/node_modules/**` classify the same way (a literal-prefix check misses
- * the last two, their prefix is empty). A non-last segment is tested with
- * isSubtreeDenyMatch only: a mid-path segment is a directory component and
- * only subtree-shaped patterns may deny a directory's contents (extDeny
- * excludes `/`, so `report.key/**` is not denied); the last segment, when
- * literal, gets the full pattern set (`docs/id_rsa` hits the `id_rsa`
+ * True when some literal segment of `glob` already falls inside the
+ * deny-list, so every real match is refused wherever the wildcards sit:
+ * `node_modules/**`, `**\/node_modules/**` and `*\/node_modules/**` classify
+ * the same way (a literal-prefix check misses the last two). A non-last
+ * segment is a directory component, tested with isSubtreeDenyMatch only
+ * (extDeny excludes `/`, so `report.key/**` is not denied); a literal last
+ * segment gets the full pattern set (`docs/id_rsa` hits the `id_rsa`
  * end-anchor). Needed because walkProjectFiles prunes SKIP_DIRS: a glob
  * targeting only such a tree yields zero matches and would read as a typo.
  */

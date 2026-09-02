@@ -901,32 +901,13 @@ db.run(
   `CREATE INDEX IF NOT EXISTS idx_approvals_operator ON pending_approvals(operator_id, status)`
 );
 
-// Card 1def56da, and this migration is a DECISION rather than a cleanup.
-//
-// `project_key` is `NOT NULL DEFAULT ''`, so every row written before card
-// 4df14b5b carries the empty string. Once the scope clause becomes mandatory on
-// all four handlers, '' compares as an ORDINARY VALUE -- never as a wildcard,
-// because a wildcard would be the cross-project leak written by our own hand.
-// The consequence is that those rows become addressable by nobody: no live
-// caller can present '' as its project, so they could never again be answered
-// nor marked delivered, and they would sit `pending` forever with nothing
-// saying why.
-//
-// `abandoned` is the honest status for them, and it is the status's own
-// definition (shared/types.ts: "the producer gave up, session closed, host
-// gone"): a question raised before project scoping has no living producer that
-// can claim its project. Both reader sides were VERIFIED rather than assumed,
-// because this is the FIRST producer of `abandoned` in the codebase -- the Deck
-// asks /approval/list for `pending` and `expired_notif` by name
-// (desktop/src/main/approval-service.ts, fetchPendingApprovals), so these rows
-// stop being offered; and `sweepApprovals` below already collects `abandoned`
-// alongside `answered` after APPROVAL_TTL_DAYS, so they are reclaimed rather
-// than accumulating.
-//
-// Idempotent by its own WHERE: rows already moved no longer match `pending`.
-// Measured on the machine this shipped from: 0 rows in `pending_approvals`
-// total, so this migration is a no-op here and its proof lives in a seeded
-// fixture, not in the live database.
+// Card 1def56da: rows written before project scoping carry project_key = '',
+// which compares as an ordinary value here, not a wildcard -- nothing can claim
+// them once every handler requires a scope.
+// They are set abandoned rather than left pending forever, matching that
+// status's own definition (producer gone, session closed).
+// The WHERE clause only matches rows still pending, so rerunning this migration
+// is a no-op on rows already handled.
 {
   const stranded = db.run(
     `UPDATE pending_approvals SET status = 'abandoned'
@@ -1256,12 +1237,11 @@ const updateLastActivity = db.prepare(
   `UPDATE peers SET last_activity_at = ? WHERE instance_token = ?`
 );
 
-// Card a2f61172 (operator-arbitrated design reversal): `role` IS in this SET
-// list, deliberately -- role is a property of the LAUNCH, not persisted
-// state. The transport (CLAUDE_PEERS_ROLE, process env set by the Deck at
-// spawn, unreachable by any MCP tool or route) wins on every /register,
-// dormant resume included. An empty/absent transport is a declaration of
-// "no role" and overwrites a previously-stored one, not a no-op.
+// role is included in this SET list deliberately: it is a property of the
+// launch, not persisted state, so the transport value overwrites on every
+// register.
+// An empty or absent transport value is a declaratively empty role and clears
+// whatever role is stored, rather than leaving it untouched.
 const updateActiveOnRegister = db.prepare(`
   UPDATE peers
   SET status = 'active',
@@ -4498,12 +4478,11 @@ function deliverApprovalAnswer(row: ApprovalRow): void {
 function handleApprovalAdd(
   body: ApprovalAddRequest & Record<string, unknown>
 ): ApprovalAddResponse | { error: string; status: number } {
-  // Card 1def56da. `authorizeCreate` returns a SCOPE (for the two reads below)
-  // and a STAMP (for the INSERT). Neither is readable here, and that is the
-  // point: this handler can no longer decide what `project_key` the new row
-  // carries, because it cannot see the value. Before this card it read
-  // `origin.project_key` out of the request body, so a sandboxed agent could
-  // file its question under another project.
+  // authorizeCreate returns a scope (for reads) and a stamp (for the insert);
+  // neither is exposed to this handler, so it cannot choose what project_key
+  // the new row carries.
+  // That closes the path where a sandboxed agent reads project_key from the
+  // request body to file under another project.
   const authorized = approvalAuth.authorizeCreate(body);
   if (isAuthError(authorized)) return authorized;
   const { scope, stamp } = authorized;
@@ -4739,11 +4718,10 @@ async function handleApprovalWait(
   body: ApprovalWaitRequest & Record<string, unknown>
 ): Promise<ApprovalWaitResponse | { error: string; status: number }> {
   const id = typeof body.id === "string" ? body.id : "";
-  // Card 1def56da. `authorizeTarget` resolves the row under scope and hands it
-  // back, so the separate `SELECT ... WHERE id = ? AND operator_id = ?` that
-  // used to stand here is gone along with the round-trip. The session pin that
-  // used to be a second `if` on `row.session_ref` is now INSIDE approvalWhere,
-  // which is why it cannot be forgotten by the next handler that needs it.
+  // authorizeTarget resolves the row under scope and returns it in one round
+  // trip, combining what would otherwise be a separate id + operator_id lookup.
+  // The session pin lives inside scope-building, so a handler needing it cannot
+  // skip it.
   const authorized = approvalAuth.authorizeTarget<ApprovalRow>(body, "wait", id ? [id] : []);
   if (isAuthError(authorized)) return authorized;
   if (!id) return { error: "id is required", status: 400 };

@@ -280,16 +280,12 @@ test("pty.on('data') wires activityTrackerFor(e.id).observe(...) with the EXACT 
   expect(observeCalls).toEqual([{ id: "session-under-test", seq: 4242 }]);
 });
 
-// Small shared helper for the extractions below (sections 5-8) -- balances
-// braces from `openIdx` (which must point at an opening `{`) and returns the
-// slice INCLUSIVE of both braces (so callers can wrap it directly as
-// `` `function(x) ${body}` `` without re-adding braces themselves -- same
-// convention as this file's own extractPtyDataHandlerBody above). Different
-// convention than tests/_braced-body.ts's own extractBracedBody (EXCLUSIVE
-// slice) -- delegates to that module's findMatchingClose for the depth-
-// counting/guard, but keeps its own inclusive slice locally rather than
-// importing extractBracedBody under this name (card 9e450573 Lot B: the two
-// conventions must not collide).
+// Balances braces from openIdx (which must point at an opening brace) and
+// returns the slice inclusive of both braces, so callers can wrap it directly
+// as `function(x) ${body}` without re-adding braces.
+// A different, unrelated helper elsewhere uses the opposite, exclusive
+// convention -- the two must not be confused for each other, so this one is
+// kept local rather than imported under the same name.
 function extractBracedBody(src: string, openIdx: number): string {
   return src.slice(openIdx, findMatchingClose(src, openIdx, "{", "}"));
 }

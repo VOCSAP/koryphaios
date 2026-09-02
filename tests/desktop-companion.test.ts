@@ -298,7 +298,7 @@ test('revoke removes the device and returns its credential; the cred then fails 
 
   expect(auth.revoke(id)).toBe(cred)
   expect(auth.credCount).toBe(0)
-  // The revoked credential can no longer resume — this is the lost-phone kill switch.
+  // The revoked credential cannot resume — this is the lost-phone kill switch.
   expect(auth.hello('10.0.0.2', { cred }, () => 'x').result).toBe('denied')
   // Revoking an unknown id is a no-op.
   expect(auth.revoke('nope')).toBeNull()

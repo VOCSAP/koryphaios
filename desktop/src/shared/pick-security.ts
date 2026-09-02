@@ -180,6 +180,9 @@ export const PICK_BUDGET = {
   reactComponentsMaxEntries: 6,
   /** Annotate review (OD5): comment textarea cap, mirrors orca's GRAB_BUDGET. */
   annotationCommentMaxLength: 2000,
-  /** Annotate review (OD5): pinned-elements cap per review; further picks are refused with a toast. */
+  /**
+   * Pinned-elements cap: further picks past this limit are refused with a
+   * toast, not silently dropped.
+   */
   annotationsMaxPerPage: 20
 } as const

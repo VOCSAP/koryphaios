@@ -337,13 +337,11 @@ export class SessionService extends EventEmitter {
       this.broadcast()
     })
 
-    // thinkingDetector.feed()/.clear()/.stop() above stays wired (BUSY_RE is
-    // measured dead in production, see thinking.ts's own header and card
-    // 1aa69066's EXEMPT_DETECTORS reasoning in tests/desktop-osc.test.ts) but
-    // its transitions are no longer forwarded anywhere: RuntimeState.activity
-    // is driven exclusively by the activity tracker below (card f8082208).
-    // Deliberately NOT touching the thinkingDetector wiring itself keeps that
-    // placeholder's coverage exemption valid unchanged.
+    // thinkingDetector.feed()/.clear()/.stop() stay wired, but their
+    // transitions are not forwarded anywhere: RuntimeState.activity is driven
+    // exclusively by the activity tracker below.
+    // Left wired deliberately, to keep its existing test coverage meaningful
+    // rather than deleting a placeholder mid-measurement.
 
     // Quota episodes (ipc -> session:quota). The detector observes/schedules;
     // the injection decision (enabled? alive? still limited?) is made here.
@@ -1116,18 +1114,12 @@ export class SessionService extends EventEmitter {
         appendSystemPromptFile: def.appendSystemPromptFile,
         mode: 'fresh'
       })
-      // 150eb188: the prompt no longer rides argv (win32 CommandLineToArgvW
-      // mangled it past the first embedded quote). Record it here so the
-      // startup-ack handler types it into the tile once it is actually up.
-      // The guard is PER SPAWN, not per session: def.prompt itself is never
-      // cleared (kept for the never-launched-yet case, its own doc comment),
-      // so any fresh spawn re-arms injection -- including a resume that has
-      // no transcript yet and degrades to 'fresh' above (spawnSession), which
-      // is exactly what restart()/restoreFrom() do for a session that was
-      // opened but never had real activity recorded. That is intentional (a
-      // fresh launch, degraded or not, still deserves its initial prompt);
-      // what the guard actually prevents is a *resume with a real transcript*
-      // re-playing a prompt the agent already saw.
+      // The prompt is recorded here rather than passed via argv, since Windows'
+      // CommandLineToArgvW mangles it past the first embedded quote.
+      // Recorded for the startup-ack handler to type once the tile is up.
+      // The guard is per spawn, not per session: def.prompt is never cleared,
+      // so every fresh spawn re-arms injection; what it actually prevents is a
+      // resume with a real transcript replaying a prompt the agent already saw.
       if (shouldInjectPrompt(effective, def.prompt)) this.pendingPrompt.set(def.id, def.prompt!.trim())
     }
 

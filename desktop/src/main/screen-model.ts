@@ -179,18 +179,13 @@ export function makeScreen(cols = 400, rows = 200): Screen {
 export type InjectGuardState = 'clear' | 'modal'
 
 /**
- * The composer box draws as two rows: editable content, then a static chevron
- * marker directly below it. The real cursor sits on the content row, one row
- * above the chevron, whenever the state is not modal.
- * The trust/config dialog paints the same chevron glyph, but the cursor ends up
- * three rows below it, on the footer — same glyph, different row relationship
- * to the cursor, which is what this checks.
- * No confirmed match defaults to modal (fail closed): the @-mention picker and
- * the tool-permission prompt could not be captured and are treated
- * conservatively as modal.
- * Combined at the call site with a second, independently-sourced signal, since
- * this geometric rule is derived from five captures, not a swept domain, and a
- * future CLI screen layout could defeat it silently.
+ * Non-modal iff the cursor sits one row above the composer's chevron marker:
+ * the trust/config dialog paints the same glyph but leaves the cursor three
+ * rows below it, on the footer. No confirmed match defaults to modal (fail
+ * closed): the @-mention picker and the tool-permission prompt could not be
+ * captured. Combined at the call site with a second, independent signal,
+ * since this geometric rule comes from five captures, not a swept domain,
+ * and a future CLI layout could defeat it silently.
  */
 export function classifyInjectGuard(screen: Screen): InjectGuardState {
   const lines = screen.lines()

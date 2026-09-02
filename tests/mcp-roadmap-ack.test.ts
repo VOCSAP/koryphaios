@@ -392,14 +392,11 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
   }, 60_000);
 
   test("every roadmap_ tool in the live tools/list is accounted for in ROADMAP_TOOL_ACK_DOMAINS, and field-pick-list tools stay covered", async () => {
-    // Review delta, card 562fd9b5: this used to be two hand-written find()
-    // calls for roadmap_add/roadmap_update only. A third tool
-    // (roadmap_append_context) shipped with zero test coverage and this
-    // guard did not notice, because its domain wasn't unioned/checked, it
-    // was simply never asked about. A TABLE plus a membership assertion in
-    // BOTH directions closes that: a 4th roadmap_ tool added tomorrow
-    // without a matching entry here fails this test the same day, and a
-    // stale entry for a tool that got removed fails it too.
+    // A table plus a membership assertion in both directions: a new roadmap_
+    // tool added without a matching entry here fails this test, and a stale
+    // entry left for a removed tool fails it too.
+    // Two hand-written checks alone can silently miss a tool shipping with zero
+    // coverage, since nothing unions or asks about the full set.
     const h = await boot();
     h.send({ jsonrpc: "2.0", id: nextRpcId, method: "tools/list", params: {} });
     const res = await readUntil(h.reader, nextRpcId, h.buffer);

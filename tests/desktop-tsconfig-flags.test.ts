@@ -184,11 +184,10 @@ test("the exemption list only names configs that actually exist on disk, with a 
   const configs = new Set(collectTsconfigs(DESKTOP_ROOT).map(toRepoRelative));
   for (const [rel, reason] of Object.entries(EXEMPT_CONFIGS)) {
     expect(configs.has(rel), `EXEMPT_CONFIGS names ${rel}, which collectTsconfigs did not find`).toBe(true);
-    // The exemption's whole justification is "a written reason" (see the
-    // comment above EXEMPT_CONFIGS and the header comment at the top of this
-    // file) -- but nothing previously read the string's CONTENT, so `""`
-    // would have passed silently. Require something more than a token
-    // placeholder.
+    // The exemption's whole justification is a written reason, but nothing
+    // checks the string's actual content, so an empty string would pass
+    // silently.
+    // This requires something more than a token placeholder.
     expect(
       reason.trim().length,
       `EXEMPT_CONFIGS["${rel}"] reason is too short to be a real written explanation: ${JSON.stringify(reason)}`

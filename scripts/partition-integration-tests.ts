@@ -23,33 +23,12 @@ interface InvocationResult {
 // An unparseable recap fails, never a default pass.
 const RECAP_RE = /Ran (\d+) tests? across (\d+) files?/;
 
-// bun's default per-test budget is 5000 ms, which is a budget for a PURE
-// FUNCTION, not for a suite that spawns a daemon and polls its /health. It
-// belongs here and not in the pure-module partition, which keeps the 5000 ms
-// default on purpose.
-//
-// Why a GLOBAL setting rather than N unitary timeouts (measured 2026-08-28):
-// 35 of these 54 files start their broker inside a `beforeAll`/`beforeEach`,
-// and none of the 35 carries a hook timeout. A per-test timeout has NO effect
-// on a hook, so the unitary discipline cannot reach that surface at all -- it
-// is where the CI failures actually landed (two "(unnamed)" hook timeouts in
-// CI run 33176332938 alone, each aborting its whole file).
-//
-// Safe because an EXPLICIT per-test timeout always WINS over this flag,
-// measured: a test written `}, 50)` still fails at 50 ms under
-// `--timeout 5000`. Every value already pinned deliberately (30_000, 60_000,
-// broker-ntfy-channel's 90_000) stays sovereign; this only moves the floor.
-//
-// In the SCRIPT, not in the workflow: this file's header pins the invariant
-// that it is "called identically in CI and locally", and a flag added on the
-// workflow side would break that invariant silently -- a local run would then
-// play a different policy than CI, which is the exact class of drift this
-// script exists to remove. `bunfig.toml [test] timeout` is NOT an option
-// either: measured ignored on bun 1.3.13, and the 1.4.0 docs list
-// `[test] retry` with no `timeout` counterpart.
-//
-// Raising this removes the only thing that bounded a runaway, so it is paired
-// with a `timeout-minutes` on the step in .github/workflows/desktop-build.yml.
+// Sets the bun test timeout floor globally rather than per test: a per-test
+// timeout has no effect on a beforeAll/beforeEach hook, and many of these
+// suites spawn a broker inside one.
+// An explicit per-test timeout still wins over this flag.
+// Paired with a timeout-minutes ceiling on the CI step, since raising this
+// removes the only bound on a runaway run.
 const DEFAULT_TEST_TIMEOUT_MS = 30_000;
 
 function runBunTest(files: string[]): InvocationResult {

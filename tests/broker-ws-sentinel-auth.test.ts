@@ -77,10 +77,8 @@ test("WS auth: refuses a sentinel-shaped instance_token even if its peers row is
   try {
     const res = db.run("UPDATE peers SET status = 'active' WHERE instance_token = ?", [sentinel]);
     // Premise check: if this ever matches 0 rows (sentinel renamed, seed
-    // changed, row not created yet), the test below would go vacuously
-    // green again -- exactly the trap the earlier version of this file
-    // fell into. A premise that no longer holds must fail loudly, not
-    // silently pass.
+    // changed, row not created yet), the test below would go vacuously green.
+    // A premise that stops holding must fail loudly here, not pass silently.
     expect(res.changes).toBe(1);
   } finally {
     db.close();

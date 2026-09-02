@@ -959,7 +959,7 @@ const pollApprovalVerdicts = async (): Promise<void> => {
       journal.add('attention', `answered "${live?.name ?? tile}" from ${approval.answered_via}`)
       applied.push(approval.id)
     }
-    // Anything the broker no longer lists is gone (answered elsewhere, expired,
+    // Anything absent from the broker's list is gone (answered elsewhere, expired,
     // purged): drop our bookkeeping with it.
     for (const id of heldVerdicts) if (!seen.has(id)) heldVerdicts.delete(id)
     await markVerdictsDelivered(deps, applied)
@@ -1393,18 +1393,14 @@ const runMagicCompact = async (
 }
 
 /**
- * CONTRACT: this must never reject. The danger isn't an await (there is none) —
- * it's a synchronous call inside this async wrapper throwing and becoming a
- * rejected promise, so no synchronous call in this prelude may throw.
- * Enforced by sanitizeRoadmapItem, applied by every wrapper around roadmapPost,
- * so every field of item already has its declared type by the time it reaches
- * here; the two fs-touching calls swallow their own errors and return
- * false/null independently.
  * Executes a directive card by typing the command into the terminals of its
  * live targets, fire-and-forget per target so the dispatch loop never blocks;
- * it never announces to the lead.
- * Returns what the card reached, read from resolveDirectiveTargets's own
- * buckets and never re-derived.
+ * it never announces to the lead. Returns what the card reached, read from
+ * resolveDirectiveTargets's own buckets.
+ * Must never reject: there is no await, so the only way to a rejected promise
+ * is a synchronous throw in this prelude. sanitizeRoadmapItem has already
+ * typed every field of item, and the two fs-touching calls swallow their own
+ * errors and return false/null.
  */
 const executeDirective = async (item: RoadmapItem): Promise<DirectiveDispatch> => {
   const cmd = item.directive
@@ -1940,17 +1936,14 @@ function spawnShellFieldKey(entry: { command?: string; args?: string }): {
 }
 
 /**
- * Reuses sessionsHaveShellFields and confirmShellFieldApproval's own
- * persistent, content-hash-keyed cache, but adds a hands-free awareness that
- * function lacks: in hands-free mode a payload not already cache-approved is
- * refused outright and journaled, rather than opening a blocking dialog nobody
- * is watching (which would freeze the app looking like a hang, worse than a
- * journaled refusal).
- * Approving a given payload once in team-review or full-control lets every
- * later hands-free spawn carrying that same payload pass silently thereafter.
- * That cache lives in userData, writable by any non-sandboxed host agent, so it
- * does not resist an already-hostile agent pre-approving its own payload — it
- * separates cooperating authorities by role, nothing more.
+ * Same content-hash-keyed approval cache as confirmShellFieldApproval, plus
+ * hands-free awareness: a payload not already cache-approved is refused and
+ * journaled rather than opening a blocking dialog nobody is watching. One
+ * approval in team-review or full-control lets every later hands-free spawn
+ * of the same payload pass.
+ * The cache lives in userData, writable by any non-sandboxed host agent: it
+ * separates cooperating authorities by role and does not resist a hostile
+ * agent pre-approving its own payload.
  */
 const confirmSpawnShellFields = (entry: { command?: string; args?: string }): boolean => {
   if (!sessionsHaveShellFields([entry])) return true

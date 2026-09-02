@@ -215,12 +215,12 @@ test("clear() drops state and cancels pending timers", async () => {
   d.stop();
 });
 
-// Card 1aa69066 (H2): OSC sequences must be stripped, closing the FALLBACK_PATTERNS
-// false-positive an OSC-carried literal phrase could otherwise cause. Direction 1
-// (presence): stripAnsi actually removes an OSC 777 body. Direction 2 (regression):
-// the fixed stripAnsi output no longer matches "limit reached" that only ever
-// existed inside the OSC payload -- distinguishing this from a real limit screen,
-// which spells the phrase in plain PTY text with no OSC wrapper at all.
+// OSC sequences must be stripped, closing a false-positive an OSC-carried
+// literal phrase could otherwise cause against FALLBACK_PATTERNS.
+// Direction 1 (presence): stripAnsi actually removes an OSC 777 body.
+// Direction 2 (regression): the fixed output does not match text that only ever
+// existed inside that OSC payload, distinguishing it from a real limit screen,
+// which spells the same phrase in plain PTY text with no OSC wrapper.
 test("stripAnsi removes an OSC 777 sequence, not just CSI", () => {
   const withOsc = "\x1b]777;notify;Claude Code;limit reached\x07plain screen text";
   expect(stripAnsi(withOsc)).toBe("plain screen text");

@@ -256,15 +256,12 @@ test("two instances constructed from the SAME factory function do not share the 
   expect(snapB.title).toBeNull();
 });
 
-// ----- 3b. SessionService.oscSnapshot() -- card 1aa69066 review, nit F6 ---
-// No caller and no test before this: its doc comment ASSERTS "feeding an
-// empty chunk reads the snapshot without mutating any in-progress
-// continuation state" -- true by reading createOscParser()'s feed()
-// implementation, but wired to no proof (CLAUDE.md's own rule: a comment
-// asserting a guarantee must be wired to it). session-service.ts imports
-// node-pty, so it cannot be `import`ed directly under bun test -- extract
-// the one-line method body and execute it against a stub `this`, same
-// technique as tests/desktop-quota-gate.test.ts.
+// oscSnapshot()'s own doc comment asserts that feeding an empty chunk reads the
+// snapshot without mutating any in-progress continuation state -- true by
+// construction, but wired to no proof until this test.
+// Its owning module imports node-pty and cannot be imported directly under bun
+// test, so this extracts the one-line method body and executes it against a
+// stub this.
 
 const REPO_ROOT = join(import.meta.dir, "..");
 const SESSION_SERVICE_PATH = join(REPO_ROOT, "desktop/src/main/session-service.ts");

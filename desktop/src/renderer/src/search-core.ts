@@ -105,10 +105,11 @@ export function searchBuffer(buf: BufferLike, query: string, opts?: SearchOption
 }
 
 /**
- * Re-locate a match at jump time: buffer rows shift between the scan and the
- * double-click (new output, scrollback trim, reflow on unhide), so pick the
- * current occurrence closest to where the match used to be. Dedupe is off --
- * repaint duplicates are exactly what makes the nearest row reachable.
+ * Re-locates a match at jump time: buffer rows shift between the scan and the
+ * double-click (new output, scrollback trim, reflow on unhide), so this picks
+ * the current occurrence closest to the match's original location.
+ * Dedupe stays off on purpose -- repaint duplicates are exactly what makes the
+ * nearest row reachable.
  */
 export function findClosestMatch(
   buf: BufferLike,

@@ -58,12 +58,12 @@ function stripComments(s: string): string {
   return out;
 }
 
-// toRuntime() is the source of truth for which RuntimeState fields the
-// renderer actually sees -- extracted from its `return { ... }` object
-// literal rather than hand-listed. A hand-maintained list drifts silently as
-// fields are added: a prior version of this guard hard-coded 4 field names
-// and missed 4 more (status, exitCode, peerId, expired), so a future handler
-// mutating one of those went undetected.
+// toRuntime()'s own return object literal is the source of truth for which
+// RuntimeState fields the renderer actually sees, so this reads the field list
+// directly out of that literal rather than hand-listing it.
+// A hand-maintained list drifts silently as fields are added: a hardcoded list
+// of four names once missed four more, and a handler mutating one of those
+// would go undetected.
 function extractRuntimeFields(src: string): string[] {
   const fnMatch = /private toRuntime\([^)]*\)[^{]*\{/.exec(src);
   if (!fnMatch) throw new Error("toRuntime() not found in session-service.ts -- has it been renamed?");

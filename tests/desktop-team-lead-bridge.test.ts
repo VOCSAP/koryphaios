@@ -52,18 +52,15 @@ test("PROOF 1: marker FALSE (template-shaped call, e.g. a template naming agent:
 });
 
 test("PROOF (Q1 non-regression): a stray `teamLeadDeckBridge` JSON property ON `input` itself has NO effect -- only the separate `marker` parameter can grant the bridge", () => {
-  // Card 3c322f10 Q1: `ipc.ts`'s `sessions:create` handler forwards its
-  // `input` verbatim (no field-by-field reconstruction), and that channel is
-  // CHANNEL_TIERS 2 (shared/companion.ts) -- remote-reachable by a paired
-  // companion/phone client via api-registry.ts's invokeRemote, not just the
-  // local renderer. `CreateSessionInput` no longer even declares a
-  // `teamLeadDeckBridge` field (the type refusal IS part of the fix), but an
-  // attacker does not go through the TypeScript compiler: a plain JS object
-  // can still carry an extra property at runtime regardless of the type. The
-  // cast below simulates exactly that hostile JSON body. The real ipc.ts
-  // handler always computes `marker` itself from server-side context and
-  // NEVER reads it off `input` -- simulated here by passing `false`
-  // regardless of what the hostile object carries.
+  // The session-create handler forwards its input verbatim rather than
+  // reconstructing it field by field, and that channel is remote-reachable by a
+  // paired companion client, not just the local renderer.
+  // The input type does not declare a teamLeadDeckBridge field, but an attacker
+  // does not go through the compiler: a plain object can still carry that extra
+  // property at runtime regardless of the type.
+  // The real handler always computes marker itself from server-side context and
+  // never reads it off input -- simulated here by passing false regardless of
+  // what the hostile object carries.
   const hostileInput = { teamLeadDeckBridge: true } as unknown as TeamLeadBridgeInput;
   const mint = mock(fakeMint({ mcpConfig: "/state/should-not-be-used.json", callerId: "x" }));
   const report = mock(() => {});

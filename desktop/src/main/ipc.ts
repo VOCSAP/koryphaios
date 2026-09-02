@@ -1434,11 +1434,11 @@ export function registerIpc({
     return { docId: doc.id, nodeId }
   })
 
-  // Persisted operator-inbox history (startup hydration). Courrier lot 1B:
-  // the broker drain is no longer destructive (cursor by session_id,
-  // broker.ts), but this file stays the only durable copy for a different
-  // reason -- see inbox-store.ts's header comment (session_id is minted
-  // in-memory and never survives a restart either).
+  // Persisted operator-inbox history for startup hydration.
+  // This file is the only durable copy of inbox history: even though the broker
+  // drain (cursor by session_id) does not delete rows, session_id itself is
+  // minted in-memory and never survives a restart, so the broker alone cannot
+  // reconstruct history after one.
   regHandle('inbox:history', () =>
     loadInboxHistory(join(app.getPath('userData'), APP_STATE_SUBDIR))
   )

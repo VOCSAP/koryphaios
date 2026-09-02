@@ -761,8 +761,9 @@ test("a spawn that fails AFTER the mint revokes the token and deletes its config
   // A token WAS minted and a file WAS written before the failure...
   expect(deps.leadMcpCalls.length).toBe(1);
   const orphanedCallerId = deps.leadMcpCalls[0]!.callerId;
-  // ...and both were rolled back: the file deletion was requested for THAT
-  // callerId, and the token no longer authorizes anything.
+  // Both the minted token and the written file are rolled back on failure:
+  // deletion is requested for the same callerId, and the token stops
+  // authorizing anything afterward.
   expect(deps.revokedLeadCallerIds).toEqual([orphanedCallerId]);
   const orphanedToken = deps.leadMcpCalls[0]!.token;
   const afterRollback = await call(srv, "deck_list_agents", {}, orphanedToken);
@@ -1046,10 +1047,9 @@ test("deck_apply_template: hasLead decided ONCE before the batch -- true strips 
   servers.push(srv1);
   await call(srv1, "deck_apply_template", { path: "/t.json" });
   expect(deps1.spawnOpts.map((o) => o.hasLead)).toEqual([true, true]);
-  // Review round 2 nit 3: the stub SIMULATES the real strip
-  // (opts.hasLead ? { ...input, lead: undefined } : input, index.ts) but
-  // nothing read the produced session's `lead` field until now -- assert the
-  // behaviour the lot actually claims, not just the opts it was called with.
+  // The stub simulates the real lead-stripping behavior, but nothing reads the
+  // produced session's own lead field elsewhere -- this asserts the behavior
+  // actually claimed, not merely the options the stub was called with.
   expect(withLiveLead.sessions.filter((s) => s.name === "a" || s.name === "b").every((s) => !s.lead)).toBe(
     true
   );

@@ -129,11 +129,10 @@ test("addApproval sends project_key TOP-LEVEL on its /approval/add request", asy
     title: "t",
     question: "q?",
     sessionRef: "session-y",
-    // Deliberately DIFFERENT from deps.projectKey: addApproval also carries a
-    // second, DESCRIPTIVE-only project_key inside `origin` (the broker no
-    // longer reads it, per approval-service.ts:112-114). Using distinct
-    // values here proves the assertion below is reading the TOP-LEVEL field
-    // the broker actually enforces, not this decoy.
+    // Deliberately different from the origin's own descriptive project_key
+    // field, which the broker does not read for enforcement.
+    // Using distinct values here proves the assertion below reads the top-level
+    // field the broker actually enforces, not this decoy.
     projectKey: "origin-decoy",
     host: "host-y"
   });

@@ -4,19 +4,14 @@
 // marked delivered and stays available for a later check_messages call.
 
 /**
- * Hard ceiling for `timeout_sec`, in seconds. Measured 2026-08-26 against
- * Claude Code's own docs (code.claude.com/docs/en/env-vars, scraped that
- * day): a still-running MCP tool call in the main conversation silently
- * converts to a background task past CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS
- * (default 120_000 ms) -- not an error, but it makes this tool's documented
- * contract ("resolves with the message(s), or { timed_out: true }") false in
- * that mode: the call would return a task id instead, and the result would
- * arrive later as a task notification rather than as this call's own return
- * value. 115s stays strictly under that default. The stdio idle-timeout
- * (CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT, default 1_800_000 ms / 30 min for a
- * stdio server -- this one is stdio, per .mcp.json) is the NEXT limit up,
- * not the one that governs here. Both are Claude Code DEFAULTS the server
- * cannot detect an operator lowering.
+ * Hard ceiling for timeout_sec, in seconds.
+ * Must stay strictly under CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS's default of
+ * 120_000 ms: past that, a still-running MCP call silently converts to a
+ * background task, and this tool's documented contract (resolves with the
+ * message(s), or { timed_out: true }) does not hold in that mode -- the call
+ * returns a task id instead.
+ * The stdio idle timeout (default 1_800_000 ms) is the next limit up and is not
+ * the one this constant guards against.
  */
 export const WAIT_FOR_MESSAGE_HARD_CAP_SEC = 115;
 

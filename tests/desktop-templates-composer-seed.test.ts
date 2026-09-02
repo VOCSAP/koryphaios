@@ -147,9 +147,10 @@ test("RED CONTROL: pre-fix useRef-sentinel repro wrongly reopens the composer af
     root.render(React.createElement(BuggyComposerRepro));
   });
 
-  // This is the bug: composer reopens even though nothing requested it this
-  // time. If this assertion ever fails, the repro no longer reproduces the
-  // documented anti-pattern and this red control is no longer meaningful.
+  // This is the bug: the composer reopens even though nothing requested it this
+  // time.
+  // If this assertion ever fails, the repro has stopped reproducing the
+  // documented anti-pattern, and this red control stops being meaningful.
   expect(hasComposerStub()).toBe(true);
 });
 

@@ -1,22 +1,11 @@
-// Roadmap card 39c40571, LAYER 1: COVERAGE of the author guard, not just its
-// sensitivity.
-//
-// A test that fires the known defect at the known handler passes honestly and
-// proves nothing about the rest of the domain. This repo has measured that
-// failure four times (a discipline test announcing "every handler" while its
-// hardcoded list covered 4 of 8). So this file does not carry a list of routes:
-// it DISCOVERS them from broker.ts and forces every newly discovered one to be
-// classified before it can be considered covered.
-//
-// Two negative controls keep the extractor itself from becoming the silent
-// point of failure:
-//   1. the discovered set is compared to an explicit expected set, so a
-//      reformat that shrinks the extraction is RED ("extraction shrank"),
-//      never a quietly smaller subset;
-//   2. the extractor is run against a FIXTURE containing a route that exists
-//      nowhere in production, proving it actually bites. The sentinel lives in
-//      the fixture on purpose -- an unguarded sentinel route left in the real
-//      routing table would be a hole in itself.
+// Routes are discovered from the router's own source rather than hardcoded,
+// since a hardcoded list has repeatedly covered only a fraction of the handlers
+// while claiming full coverage.
+// Two negative controls guard the extractor itself: the discovered set is
+// diffed against an explicit expected set, so a shrinking extraction fails
+// loudly instead of quietly returning a smaller subset.
+// The extractor is also run against a fixture route that exists nowhere in
+// production, to prove it actually fires.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { readFileSync } from "node:fs";

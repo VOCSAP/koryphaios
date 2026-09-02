@@ -67,10 +67,9 @@ test("MUTATION PROOF: the pre-fix bare peerId comparison wrongly allows the cros
 
   // RED under the real fix:
   expect(ownsIdleLock(itemLockedBy, itemLockedGroup, candidatePeerId, activeGroupId)).toBe(false);
-  // The bug: the OLD call site (bare peer_id compare) says yes on the exact
-  // same fixture -- this is the line that used to sit in index.ts's
-  // watchIdleLocks before this fix, replayed here because index.ts itself
-  // cannot be executed under bun.
+  // preFixOwnsIdleLock reproduces a bare peer_id comparison as a standalone
+  // fixture, since the module holding that logic imports electron and cannot
+  // itself run under bun test.
   expect(preFixOwnsIdleLock(itemLockedBy, candidatePeerId)).toBe(true);
 });
 

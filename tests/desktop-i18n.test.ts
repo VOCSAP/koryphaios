@@ -219,7 +219,7 @@ function findSourcePictographs(root: string, files: string[]): string[] {
 
 // Every entry below is exempted, not un-triaged: 10 are main/preload process
 // strings (journal lines, prompts, banners) not governed by DESIGN.md's
-// rendered-UI rule; 6 are comment-only mentions verified as such.
+// rendered-UI rule; 5 are comment-only mentions verified as such.
 // This baseline may only ever shrink, never grow.
 const KNOWN_SOURCE_PICTOGRAPHS: string[] = [
   "main/attention.ts U+276F",
@@ -230,7 +230,6 @@ const KNOWN_SOURCE_PICTOGRAPHS: string[] = [
   "preload/browser-inspect.ts U+2316",
   "renderer/src/components/App.tsx U+2316",
   "renderer/src/components/ModelPicker.tsx U+2605",
-  "renderer/src/components/RoadmapView.tsx U+23F9",
   "renderer/src/components/SearchBar.tsx U+1F50D",
   "renderer/src/components/SnippetsDialog.tsx U+26A1",
   "renderer/src/components/TerminalTile.tsx U+26A1",
