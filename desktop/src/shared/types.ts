@@ -1770,7 +1770,13 @@ export interface DeckApi {
   // workspaces (persistence / restore)
   listWorkspaces(): Promise<WorkspaceSummary[]>
   saveWorkspace(name?: string): Promise<WorkspaceSummary | null>
-  restoreWorkspace(id: string): Promise<boolean>
+  /**
+   * Card 07134c6a: widened from Promise<boolean> to a discriminated outcome
+   * -- a bare boolean could not say WHY a restore did not apply, so the
+   * renderer had to guess, and guessed wrong for 3 of 6 real causes.
+   * `applied: true` on success; `applied: false` carries the real reason.
+   */
+  restoreWorkspace(id: string): Promise<import('./workspace-restore-outcome').WorkspaceRestoreOutcome>
   deleteWorkspace(id: string): Promise<void>
   currentWorkspace(): Promise<string | null>
 

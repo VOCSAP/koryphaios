@@ -524,37 +524,90 @@ function fakeDeps(
   return deps;
 }
 
-test("WorkspaceService.restore(): TOCTOU race lost between the top guard and own() still returns false, not silently true", () => {
+test("WorkspaceService.restore(): TOCTOU race lost between the top guard and own() still returns false, not silently true, and does NOT corrupt the OLD workspace's file (review correction D1, card 07134c6a)", () => {
   const proj = freshProject();
   ensureWorkspacesDir(proj);
-  const ws = sampleWorkspace({ id: "wsp_target" });
-  saveWorkspace(proj, ws);
-  // restore()'s own top-of-function guard (readLock + isLockLive + ownsLock)
-  // passes here -- no lock exists yet, so pre-seeding a foreign live lock
-  // before calling restore() would only exercise THAT pre-existing guard
-  // (b8d65b24), not the deeper own()-return-value fix this card adds. To
-  // reach own()'s OWN refusal, a foreign instance must grab the lock in the
-  // window between the guard and own(id) -- simulated deterministically by
-  // acquiring it as a side effect of adoptScope(), the first deps call
-  // restore() makes after its guard and before own().
-  const deps = fakeDeps(proj, {
-    adoptScope: () => {
-      acquireLock(proj, "wsp_target", {
-        host: "other-host",
-        now: Date.now(),
-        startedAt: 1_000,
-        staleMs: 5_000,
-        isPidAlive: () => true,
-        pid: 1,
-      });
-    },
+  const oldWs = sampleWorkspace({ id: "wsp_old" });
+  saveWorkspace(proj, oldWs);
+  // A session shape distinguishable from oldWs's default ("reviewer") so the
+  // anti-corruption assertion below cannot pass by content coincidence.
+  const targetWs = sampleWorkspace({
+    id: "wsp_target",
+    sessions: [
+      {
+        claudeSessionId: "sid-target",
+        name: "target-peer",
+        cwd: "/abs/project",
+        args: ["--agent", "target"],
+        color: "#4488ff",
+        position: 0,
+      },
+    ],
   });
+  saveWorkspace(proj, targetWs);
+
+  const deps = fakeDeps(proj);
   const svc = new WorkspaceService(deps);
-  const ok = svc.restore("wsp_target");
-  expect(ok).toBe(false);
-  // own() failing must not corrupt currentWorkspaceId to the id it failed
-  // to acquire.
-  expect(svc.currentWorkspaceId).not.toBe("wsp_target");
+
+  // Step 1: a REAL prior restore, so currentId is non-null and its lock is
+  // genuinely on disk -- the exact state the corruption bug needed to exist
+  // (a service freshly constructed with currentId already null, the
+  // ORIGINAL test's shape, made the fix's two lines unreachable no-ops:
+  // `grep -c "lock-race" tests/desktop-workspace.test.ts` found all 3
+  // mentions in this one test, none of which ever exercised a non-null
+  // currentId).
+  expect(svc.restore("wsp_old")).toEqual({ ok: true });
+  expect(svc.currentWorkspaceId).toBe("wsp_old");
+  expect(readLock(proj, "wsp_old")).not.toBeNull();
+
+  // Step 2: race-lose the restore of wsp_target -- restore()'s own
+  // top-of-function guard (readLock + isLockLive + ownsLock) passes here
+  // (wsp_target has no lock yet), so pre-seeding a foreign live lock before
+  // calling restore() would only exercise THAT pre-existing guard
+  // (b8d65b24), not the deeper own()-return-value fix this card adds. To
+  // reach own()'s OWN refusal, a foreign instance must grab wsp_target's
+  // lock in the window between the guard and own(id) -- simulated
+  // deterministically via adoptScope(), the first deps call restore() makes
+  // after its guard and before own(). Overridden on the SAME deps object
+  // restore() already holds, so only THIS call races.
+  deps.adoptScope = () => {
+    acquireLock(proj, "wsp_target", {
+      host: "other-host",
+      now: Date.now(),
+      startedAt: 1_000,
+      staleMs: 5_000,
+      isPidAlive: () => true,
+      pid: 1,
+    });
+  };
+  const result = svc.restore("wsp_target");
+  // Card 07134c6a: this is the ONE reason where the operator's sessions
+  // were ALREADY swapped by restoreFrom() before the lock reclaim failed --
+  // 'lock-race', never lumped with the top-guard 'locked' case (a DIFFERENT
+  // test), and never silently resolved.
+  expect(result).toEqual({ ok: false, reason: "lock-race" });
+
+  // Card 07134c6a C2: currentId must be null (not "wsp_old", the id it
+  // still pointed at when own() failed), and wsp_old's OWN lock must have
+  // been released -- both PRECONDITIONS of the anti-corruption fix, not the
+  // fix itself.
+  expect(svc.currentWorkspaceId).toBeNull();
+  expect(readLock(proj, "wsp_old")).toBeNull();
+
+  // THE assertion that actually pins the anti-corruption fix, not just its
+  // preconditions: without releaseLock+currentId=null above, the debounced
+  // auto-save the 'changed' event (restoreFrom already emitted it) arms
+  // would call saveAuto() -> ensureCurrent() -> own(currentId) -> succeed
+  // against the STILL-"wsp_old" id, silently overwriting wsp_old's FILE
+  // with wsp_target's already-swapped sessions. Simulated directly here (no
+  // timer needed): call saveAuto() -- with currentId now null, it mints a
+  // FRESH id instead -- then read wsp_old's file back from disk.
+  svc.saveAuto();
+  const oldFileAfter = loadWorkspace(proj, "wsp_old");
+  expect(oldFileAfter).not.toBeNull();
+  expect(oldFileAfter!.sessions).toEqual(oldWs.sessions);
+
+  svc.releaseOnQuit();
 });
 
 test("WorkspaceService.restore(): succeeds and owns the lock when nothing contends", () => {
@@ -564,13 +617,42 @@ test("WorkspaceService.restore(): succeeds and owns the lock when nothing conten
   saveWorkspace(proj, ws);
   const deps = fakeDeps(proj);
   const svc = new WorkspaceService(deps);
-  const ok = svc.restore("wsp_target");
-  expect(ok).toBe(true);
+  const result = svc.restore("wsp_target");
+  expect(result).toEqual({ ok: true });
   expect(svc.currentWorkspaceId).toBe("wsp_target");
   const lock = readLock(proj, "wsp_target");
   expect(lock).not.toBeNull();
   expect(lock!.pid).toBe(4242);
   expect(lock!.host).toBe("this-host");
+});
+
+// Card 07134c6a: the two remaining sink reasons -- 'missing' and 'empty' --
+// had no dedicated test before this card (only inferred client-side from a
+// bare boolean). Pinned directly here now that restore() names them.
+
+test("WorkspaceService.restore(): a workspace id with no saved file resolves to reason 'missing'", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const deps = fakeDeps(proj);
+  const svc = new WorkspaceService(deps);
+  const result = svc.restore("wsp_does_not_exist");
+  expect(result).toEqual({ ok: false, reason: "missing" });
+  expect(svc.currentWorkspaceId).not.toBe("wsp_does_not_exist");
+});
+
+test("WorkspaceService.restore(): a saved workspace with zero sessions resolves to reason 'empty', never reaching restoreFrom (b8d65b24 follow-up)", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = sampleWorkspace({ id: "wsp_empty", sessions: [] });
+  saveWorkspace(proj, ws);
+  const deps = fakeDeps(proj);
+  const svc = new WorkspaceService(deps);
+  const result = svc.restore("wsp_empty");
+  expect(result).toEqual({ ok: false, reason: "empty" });
+  // restoreFrom() must never run for an empty snapshot: it starts with
+  // pty.killAll(), so "restoring nothing" would kill every live session for
+  // no replacement.
+  expect(deps.sessions).toEqual([fakeSession()]);
 });
 
 // Card 09d54a29: a repo-hostile workspace file's `args` is joined and
@@ -609,8 +691,8 @@ test("WorkspaceService.restore(): refuses when args are shell-bearing and confir
     },
   });
   const svc = new WorkspaceService(deps);
-  const ok = svc.restore("wsp_hostile");
-  expect(ok).toBe(false);
+  const result = svc.restore("wsp_hostile");
+  expect(result).toEqual({ ok: false, reason: "shell-declined" });
   // The exact shape of the vulnerability: restoreFrom() (-> startPty ->
   // buildSessionCommandLine) must never run. Proven here by the stub's
   // captured session defs being untouched from before the call.
@@ -626,8 +708,8 @@ test("WorkspaceService.restore(): proceeds when args are shell-bearing and confi
   saveWorkspace(proj, ws);
   const deps = fakeDeps(proj, { confirmShellFields: () => true });
   const svc = new WorkspaceService(deps);
-  const ok = svc.restore("wsp_approved");
-  expect(ok).toBe(true);
+  const result = svc.restore("wsp_approved");
+  expect(result).toEqual({ ok: true });
 });
 
 test("WorkspaceService.restore(): never asks for approval when no session carries args", () => {
@@ -655,8 +737,8 @@ test("WorkspaceService.restore(): never asks for approval when no session carrie
     },
   });
   const svc = new WorkspaceService(deps);
-  const ok = svc.restore("wsp_benign");
-  expect(ok).toBe(true);
+  const result = svc.restore("wsp_benign");
+  expect(result).toEqual({ ok: true });
   expect(confirmCalls).toBe(0);
 });
 
@@ -697,8 +779,8 @@ test("WorkspaceService.restore(): refuses when a session's cwd is outside the pr
     },
   });
   const svc = new WorkspaceService(deps);
-  const ok = svc.restore("wsp_hostile_cwd");
-  expect(ok).toBe(false);
+  const result = svc.restore("wsp_hostile_cwd");
+  expect(result).toEqual({ ok: false, reason: "cwd-declined" });
   expect(deps.sessions).toEqual([fakeSession()]);
   expect(confirmCalls).toBe(1);
 });
@@ -725,8 +807,8 @@ test("WorkspaceService.restore(): proceeds when cwd is outside the project tree 
   saveWorkspace(proj, ws);
   const deps = fakeDeps(proj, { confirmUntrustedCwd: () => true });
   const svc = new WorkspaceService(deps);
-  const ok = svc.restore("wsp_approved_cwd");
-  expect(ok).toBe(true);
+  const result = svc.restore("wsp_approved_cwd");
+  expect(result).toEqual({ ok: true });
 });
 
 // No false positive on the common case: a saved multi-worktree workspace
@@ -755,8 +837,8 @@ test("WorkspaceService.restore(): never asks about cwd for the project root or a
     },
   });
   const svc = new WorkspaceService(deps);
-  const ok = svc.restore("wsp_worktrees");
-  expect(ok).toBe(true);
+  const result = svc.restore("wsp_worktrees");
+  expect(result).toEqual({ ok: true });
   expect(confirmCalls).toBe(0);
 });
 
@@ -818,7 +900,7 @@ test("WorkspaceService.restore(): re-restoring the already-current workspace doe
   saveWorkspace(proj, ws);
   const deps = fakeDeps(proj);
   const svc = new WorkspaceService(deps);
-  expect(svc.restore("wsp_target")).toBe(true);
+  expect(svc.restore("wsp_target")).toEqual({ ok: true });
   const before = readLock(proj, "wsp_target");
   expect(before).not.toBeNull();
   // A second restore() of the SAME id this instance already owns must NOT
@@ -828,7 +910,7 @@ test("WorkspaceService.restore(): re-restoring the already-current workspace doe
   // path -- turning a harmless self-restore into a reported error over
   // nothing (flagged by review before any code changed here: "own(x) when
   // currentId already x, the lock must survive the call").
-  expect(svc.restore("wsp_target")).toBe(true);
+  expect(svc.restore("wsp_target")).toEqual({ ok: true });
   expect(svc.currentWorkspaceId).toBe("wsp_target");
   expect(readLock(proj, "wsp_target")).toEqual(before);
 });
@@ -845,7 +927,7 @@ test("WorkspaceService.saveNamed(): a third party reclaiming the lock file out f
   saveWorkspace(proj, ws);
   const deps = fakeDeps(proj); // pid: 4242, host: "this-host"
   const svc = new WorkspaceService(deps);
-  expect(svc.restore("wsp_target")).toBe(true);
+  expect(svc.restore("wsp_target")).toEqual({ ok: true });
   expect(svc.currentWorkspaceId).toBe("wsp_target");
 
   // Third party reclaims the file WITHOUT going through this WorkspaceService.
@@ -881,7 +963,7 @@ test("WorkspaceService.restore(): failing to acquire the NEW lock leaves the OLD
   saveWorkspace(proj, sampleWorkspace({ id: "wsp_b" }));
   const deps = fakeDeps(proj);
   const svc = new WorkspaceService(deps);
-  expect(svc.restore("wsp_a")).toBe(true);
+  expect(svc.restore("wsp_a")).toEqual({ ok: true });
   const lockABefore = readLock(proj, "wsp_a");
   expect(lockABefore).not.toBeNull();
   // wsp_b is already held live by a foreign instance -- own("wsp_b") must
@@ -897,7 +979,11 @@ test("WorkspaceService.restore(): failing to acquire the NEW lock leaves the OLD
     isPidAlive: () => true,
     pid: 1,
   });
-  expect(svc.restore("wsp_b")).toBe(false);
+  // Card 07134c6a: this failure fires at restore()'s TOP guard (the lock is
+  // already held live by 'other-host' before restore() is even called) --
+  // reason 'locked', distinct from the TOCTOU 'lock-race' test above (which
+  // loses the race INSIDE own(), after sessions were already swapped).
+  expect(svc.restore("wsp_b")).toEqual({ ok: false, reason: "locked" });
   expect(svc.currentWorkspaceId).toBe("wsp_a");
   expect(readLock(proj, "wsp_a")).toEqual(lockABefore);
 });
@@ -919,8 +1005,8 @@ test("WorkspaceService.saveAuto(): reclaims a lock left by a dead pid after the 
   writeFileSync(join(workspacesDir(proj), `${id}.lock`), JSON.stringify(deadLock));
   const deps2 = fakeDeps(proj, { pid: 5555 });
   const svc2 = new WorkspaceService(deps2);
-  const ok = svc2.restore(id);
-  expect(ok).toBe(true);
+  const result = svc2.restore(id);
+  expect(result).toEqual({ ok: true });
   expect(readLock(proj, id)!.pid).toBe(5555);
 });
 

@@ -22,6 +22,7 @@ import type {
 } from '@shared/types'
 import { onRemoteRefresh, onRemoteState, remoteInstalled, type RemoteState } from './remote-api'
 import { shouldShowTemplateAppliedToast } from '@shared/template-apply-outcome'
+import { workspaceRestoreToastKeyFor } from '@shared/workspace-restore-outcome'
 
 /**
  * The blocking-question payload, DERIVED from the Courrier union instead of
@@ -1041,26 +1042,28 @@ export const useDeck = create<DeckState>((set, get) => ({
 
   async restoreWorkspace(id) {
     await guarded('restore workspace', async () => {
-      // Captured before the call: distinguishes WHY a `false` came back
-      // without widening the IPC contract (workspace:restore stays a plain
-      // boolean). The list is already loaded whenever a caller can reach this
-      // (picker or "restore previous"), so the cached summary is current.
-      const target = get().workspaces.find((w) => w.id === id)
-      const ok = await window.api.restoreWorkspace(id)
+      // Card 07134c6a: the IPC contract WAS a plain boolean by deliberate
+      // choice (this comment used to say so) -- that choice stopped holding
+      // the moment restore() grew a sixth failure reason (a lock-race that
+      // fires AFTER sessions were already swapped): a client-side guess from
+      // a bare boolean could not tell an operator's own deliberate refusal
+      // apart from a stale lock, and got it wrong for 3 of 6 real causes.
+      // The contract now carries the real reason (workspaceRestoreOrThrow,
+      // shared/workspace-restore-outcome.ts); no more guessing here.
+      const outcome = await window.api.restoreWorkspace(id)
       // Sessions refresh via onSessionsChanged (restoreFrom broadcasts 'changed').
       await get().refreshWorkspaces()
-      if (ok) {
+      if (outcome.applied) {
         // Close the selection window once a workspace has been loaded.
         set({ workspacesOpen: false })
-      } else if (target && target.sessionCount === 0) {
-        // Distinct from "already open": this workspace never had a live
-        // session to restore in the first place (a legacy empty snapshot) --
-        // toast.alreadyOpen would lie here (b8d65b24 follow-up).
-        get().showToast('toast.nothingToRestore', 'info')
-      } else {
-        // Already owned by another live window (or gone) -> inform, don't restore.
-        get().showToast('toast.alreadyOpen', 'info')
+        return
       }
+      const toastKey = workspaceRestoreToastKeyFor(outcome.reason)
+      // shell-declined / cwd-declined resolve to null on purpose: the
+      // operator just made that choice at the approval dialog, so a toast
+      // would be redundant, and showing the WRONG one (today's bug) is
+      // worse than showing none.
+      if (toastKey) get().showToast(toastKey, 'info')
     })
   },
 

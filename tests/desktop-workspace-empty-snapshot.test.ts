@@ -124,9 +124,9 @@ test("restoring a workspace is not a silent no-op success", () => {
   svc.releaseOnQuit();
   live = [];
   const next = makeService(proj, () => live, restored);
-  const ok = next.restore(saved.id);
+  const result = next.restore(saved.id);
 
-  expect(ok).toBe(true);
+  expect(result).toEqual({ ok: true });
   // fromWorkspaceSessions mints a fresh local id/createdAt on restore, so
   // compare on the fields the round-trip actually preserves.
   expect(restored.at(-1)).toHaveLength(1);
@@ -167,7 +167,7 @@ test("restoring the workspace this instance already owns succeeds (lock self-exe
   const current = svc.listForCwd()[0]!;
   expect(current.current).toBe(true);
 
-  expect(svc.restore(current.id)).toBe(true);
+  expect(svc.restore(current.id)).toEqual({ ok: true });
   expect(restored.at(-1)).toHaveLength(1);
   expect(restored.at(-1)![0]).toMatchObject({ name: "team-lead", sessionId: "sid-team-lead" });
 
@@ -197,9 +197,9 @@ test("restore() refuses a workspace persisted with zero sessions, never touching
   };
   saveWorkspace(proj, empty);
 
-  const ok = svc.restore("legacy-empty");
+  const result = svc.restore("legacy-empty");
 
-  expect(ok).toBe(false);
+  expect(result).toEqual({ ok: false, reason: "empty" });
   // restoreFrom starts with pty.killAll() in the real service -- proving it
   // was never called is what makes this "refuses to kill for nothing", not
   // just "returns false".
@@ -227,7 +227,7 @@ test("empty deck + a non-empty current workspace is NOT caught by the zero-sessi
   // refusal (point 1) counts PERSISTED sessions, not live agents, so it must
   // not also swallow this case -- the two guards count different things and
   // must not collide.
-  expect(svc.restore(current.id)).toBe(true);
+  expect(svc.restore(current.id)).toEqual({ ok: true });
   expect(restored.at(-1)).toHaveLength(1);
 
   svc.releaseOnQuit();

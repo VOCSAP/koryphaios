@@ -156,6 +156,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.nothingToSave': 'Nothing to save',
   'toast.nothingToRestore': 'This workspace has no sessions to restore',
   'toast.alreadyOpen': 'Session already open',
+  'toast.workspaceMissing': 'This workspace no longer exists',
   'toast.peerIdCopied': 'peer id copied',
   'toast.peerTableCopied': 'peer table copied',
 

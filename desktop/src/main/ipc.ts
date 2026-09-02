@@ -120,6 +120,7 @@ import { compileContext, runInference, type InferRequest } from './graph-engine'
 import { graphId as graphDocId, parseGraphDoc, type GraphDoc } from '../shared/graph'
 import { parseTemplate, toTemplate, type TemplateResolveResult } from '@shared/template'
 import { templateInputsOrThrow } from '@shared/template-apply-outcome'
+import { workspaceRestoreOrThrow } from '@shared/workspace-restore-outcome'
 import { availableLocales, loadDict, resolveLocale } from './i18n'
 import { reportError } from './log'
 
@@ -723,16 +724,41 @@ export function registerIpc({
       // worktree sessions live elsewhere and would otherwise all start fresh.
       for (const cwd of workspaces.sessionCwds(id)) await sandbox.refreshTranscripts(cwd)
     }
-    const ok = workspaces.restore(id)
-    if (ok) {
+    // Card 07134c6a: workspaces.restore(id) now returns a discriminated
+    // WorkspaceRestoreResult naming WHICH of six real causes fired, not a
+    // bare boolean. workspaceRestoreOrThrow (shared/workspace-restore-
+    // outcome.ts) is this handler's ONLY source of the outcome it returns --
+    // it throws for 'lock-race' (the one reason the operator does not
+    // already know, since their sessions were already swapped) and resolves
+    // quietly for every other reason, carrying WHICH one through so store.ts
+    // can pick the right toast instead of guessing.
+    const result = workspaces.restore(id)
+    const announceCurrent = (): void => {
       const current = workspaces.listForCwd().find((w) => w.current) ?? null
       broadcast('workspace:current', current)
-      // Courrier lot 1D: only a SUCCESSFUL restore counts as "this session
-      // starts over" -- a failed restore (ok===false) changed nothing, so it
-      // must not purge either.
+    }
+    // Card 07134c6a, review correction C2: 'lock-race' is the ONE non-ok
+    // reason where sessions were ALREADY swapped (restoreFrom() already ran)
+    // before the failure -- unlike every other reason (nothing moved), the
+    // window's current-workspace state and the inbox must still reflect
+    // that change even though workspaceRestoreOrThrow below is about to
+    // throw an error to the caller. Checked on the RAW result (not by
+    // catching the throw) so this only fires for the one reason actually
+    // known to have changed state, never for a future unrecognised reason.
+    if (!result.ok && result.reason === 'lock-race') {
+      announceCurrent()
       void purgeInboxSession()
     }
-    return ok
+    const outcome = workspaceRestoreOrThrow(result)
+    if (outcome.applied) {
+      announceCurrent()
+      // Courrier lot 1D: only a SUCCESSFUL restore counts as "this session
+      // starts over" -- a failed restore (applied===false) changed nothing
+      // for every OTHER reason, so it must not purge either (see the
+      // 'lock-race' exception handled above, before this point).
+      void purgeInboxSession()
+    }
+    return outcome
   })
   regHandle('workspace:delete', (_e, id: string) => workspaces.deleteWs(id))
   regHandle('workspace:current', () => workspaces.currentWorkspaceId)

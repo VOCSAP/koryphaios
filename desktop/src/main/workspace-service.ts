@@ -9,6 +9,7 @@
 
 import { hostname, uptime as osUptime } from 'node:os'
 import type { AppConfig, DisplayMode, WorkspaceSummary } from '@shared/types'
+import type { WorkspaceRestoreResult } from '../shared/workspace-restore-outcome'
 import type { Scope } from './scope'
 import type { SessionService } from './session-service'
 import {
@@ -398,12 +399,16 @@ export class WorkspaceService {
 
   /**
    * Restore a workspace: adopt its scope, swap the session set, set the layout.
-   * Returns false (no-op) when the workspace is missing or already owned by
-   * another live instance; true after a successful restore.
+   * Returns a discriminated WorkspaceRestoreResult (card 07134c6a): `ok:true`
+   * after a successful restore, `ok:false` with a reason literal naming
+   * WHICH of the six real no-op/failure causes fired -- never a bare
+   * boolean, so a caller can no longer only guess why (the bug this card
+   * fixes: three of those six reasons used to read as "already owned by
+   * another live window", which is only true for two of them).
    */
-  restore(id: string): boolean {
+  restore(id: string): WorkspaceRestoreResult {
     const ws = loadWorkspace(this.deps.projectDir, id)
-    if (!ws) return false
+    if (!ws) return { ok: false, reason: 'missing' }
     // A workspace persisted with zero sessions (a legacy empty snapshot minted
     // before saveAuto()'s empty-capture guard existed, or any future writer
     // that bypasses it) must never reach restoreFrom: restoreFrom starts with
@@ -411,7 +416,7 @@ export class WorkspaceService {
     // no replacement (b8d65b24 follow-up, mutation-tested review). The picker
     // (WorkspacesDialog.tsx) also disables Restore on sessionCount === 0; this
     // is the service-side line of defense for every other caller.
-    if (ws.sessions.length === 0) return false
+    if (ws.sessions.length === 0) return { ok: false, reason: 'empty' }
     // Refuse to restore a workspace another live instance already owns -- two
     // windows must not drive the same Claude sessions (the UI also disables
     // it). Exemption is by LOCK IDENTITY (the pid+host actually stamped in the
@@ -433,7 +438,7 @@ export class WorkspaceService {
       }) &&
       !ownsLock(lock, { pid: this.pid, host: this.host })
     ) {
-      return false
+      return { ok: false, reason: 'locked' }
     }
     // Card 09d54a29: a workspace is read from a REPO-CLONED file
     // (<projectDir>/.claude/claude-peers/workspaces/*.json), exactly like a
@@ -447,7 +452,7 @@ export class WorkspaceService {
     // stored claudeSessionId has no matching transcript, which a hostile
     // workspace file gets for free by supplying one that never had one.
     if (workspaceHasShellFields(ws) && !this.deps.confirmShellFields(ws)) {
-      return false
+      return { ok: false, reason: 'shell-declined' }
     }
     // Card 09d54a29 follow-up: a session `cwd` outside the project tree
     // becomes a readable root for the explorer/diff channels the moment it
@@ -457,7 +462,7 @@ export class WorkspaceService {
       workspaceHasUntrustedCwd(ws, this.deps.projectDir) &&
       !this.deps.confirmUntrustedCwd(ws)
     ) {
-      return false
+      return { ok: false, reason: 'cwd-declined' }
     }
     this.deps.adoptScope({ groupId: ws.groupId, scopeKind: ws.scopeKind })
     this.deps.setConfig(fromDisplayMode(ws.displayMode))
@@ -473,7 +478,32 @@ export class WorkspaceService {
         'workspace',
         `restore(${id}) lost the lock race after swapping sessions -- ownership unresolved`
       )
-      return false
+      // Card 07134c6a C2 (team-lead decision, operator's data at stake):
+      // own() failing here leaves `this.currentId` pointing at the OLD
+      // workspace while the LIVE sessions are already the NEW workspace's
+      // (restoreFrom() above already ran). Left alone, the debounced
+      // auto-save armed by the 'changed' event restoreFrom() just emitted
+      // would call ensureCurrent() -> own(OLD currentId) -> succeed, and
+      // silently overwrite the OLD workspace's file with the NEW
+      // workspace's sessions. Mirrors startNew()'s own manoeuvre (line 511)
+      // MINUS its saveAuto() call: calling saveAuto() here would COMMIT
+      // that exact overwrite immediately instead of merely risking it
+      // later. The currentId reset below is what actually closes the
+      // corruption path -- releaseLock's own result is still checked and
+      // traced (review correction D2), same shape as startNew()'s own
+      // report a few lines above, so a failure to release the OLD lock is
+      // never lost the way an unchecked call would lose it.
+      if (
+        this.currentId &&
+        !releaseLock(this.deps.projectDir, this.currentId, { pid: this.pid, host: this.host })
+      ) {
+        reportError(
+          'workspace',
+          `restore(${id}) skipped releaseLock for ${this.currentId}: on-disk lock owned by another identity`
+        )
+      }
+      this.currentId = null
+      return { ok: false, reason: 'lock-race' }
     }
     // Recapture right after restoring a non-empty workspace (ws.sessions.length
     // > 0, guarded above) must not itself come back empty -- that would mean
@@ -486,7 +516,7 @@ export class WorkspaceService {
         `restore(${id}) recaptured 0 sessions right after restoring ${ws.sessions.length}`
       )
     }
-    return true
+    return { ok: true }
   }
 
   deleteWs(id: string): void {
