@@ -48,7 +48,18 @@ export async function createSessionWithWorktree(
    * worktree is created — a worktree session's cwd is not the project root, and
    * warming only the root left every worktree resume starting fresh.
    */
-  sandboxWarmTranscripts?: (cwd: string) => Promise<void>
+  sandboxWarmTranscripts?: (cwd: string) => Promise<void>,
+  /**
+   * Card 3c322f10 (piece 2, operator route): threaded straight through to
+   * SessionService.create()'s own `opts` -- see that parameter's doc for why
+   * it is a plain function argument here too, never a property merged into
+   * `input`/`req` below. Only ipc.ts's `sessions:create` handler ever
+   * supplies it; every other caller of this function (deck-control's
+   * spawnSession, diff:review, roadmap:import-plan, template:apply,
+   * spawnTemplateEntry) omits it, which is what keeps them fail-closed by
+   * construction.
+   */
+  opts?: { teamLeadDeckBridge?: boolean }
 ): Promise<SessionRuntime> {
   let root = projectDir
   if (sandboxGate && !input.supervisor) {
@@ -76,5 +87,5 @@ export async function createSessionWithWorktree(
     if (beforeSpawn) await beforeSpawn(req.cwd?.trim() || root)
   }
   if (sandboxWarmTranscripts) await sandboxWarmTranscripts(req.cwd?.trim() || root)
-  return service.create(req)
+  return service.create(req, opts)
 }

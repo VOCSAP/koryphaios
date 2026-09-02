@@ -232,6 +232,16 @@ interface IpcDeps {
   purgeInboxSession: () => Promise<void>
   /** Courrier lot 1E (card 1e81ee7b): manual delete, see inbox-store.ts. */
   inboxDelete: (ids: number[]) => Promise<number>
+  /**
+   * Card 3c322f10 (piece 2, operator route): lazily start (or return the
+   * already-started) deck-control HTTP endpoint. `sessions:create` awaits
+   * this itself, proactively, BEFORE calling into SessionService.create()
+   * for an `agent: 'team-lead'` request -- kept OUT of SessionService.create()
+   * itself (team-lead arbitration) so session creation stays synchronous/
+   * atomic for every other caller. Shared with ensureSupervisor (index.ts),
+   * never a second lazy-start guard.
+   */
+  ensureControlServer: () => Promise<unknown>
 }
 
 export function registerIpc({
@@ -261,23 +271,64 @@ export function registerIpc({
   approvalAllow,
   announceTo,
   purgeInboxSession,
-  inboxDelete
+  inboxDelete,
+  ensureControlServer
 }: IpcDeps): void {
   // ----- sessions -----
   regHandle('sessions:list', () => service.list())
   // Worktree handling (PLAN C4) lives in the shared create path, also used by
   // the supervisor's deck-control spawn.
-  regHandle('sessions:create', (_e, input: CreateSessionInput) =>
-    createSessionWithWorktree(
+  //
+  // Card 3c322f10 (piece 2, operator route): the ONLY site that ever poses
+  // `teamLeadDeckBridge`. Computed HERE, main-side, from `input?.agent`
+  // straight -- NEVER read off `input` itself and forwarded, and never a
+  // property merged into the object passed to createSessionWithWorktree
+  // (which stays `input ?? {}`, byte-for-byte what a companion/phone client
+  // sent -- see CreateSessionInput.mcpConfig's own doc, shared/types.ts, for
+  // why no boolean may ever live on that object). This channel is
+  // CHANNEL_TIERS 2 (shared/companion.ts), i.e. remote-reachable via
+  // api-registry.ts's invokeRemote.
+  //
+  // STATE THE BOUNDARY PRECISELY (security review correction, 2026-09-02):
+  // `opts` cannot be forged AS A PROPERTY -- a remote payload has no field
+  // name that lands in it, so it cannot grant itself the bridge by JSON
+  // alone. But `opts.teamLeadDeckBridge` is a PURE FUNCTION of `input.agent`,
+  // a field the caller fully controls: a paired companion that requests
+  // `agent: 'team-lead'` DOES get the bridge, today, by design. What makes
+  // this acceptable is NOT unforgeability -- it is the absence of marginal
+  // power: a paired companion can already call `pty:input` (CHANNEL_TIERS 1)
+  // into ANY live tile, i.e. execute an arbitrary command by shell-prefix
+  // already, so the 3 deck-control tools grant nothing that channel did not
+  // already grant. Operator arbitration, 2026-09-02 -- if that tier-1 power
+  // is ever revoked or scoped down, this boundary must be re-examined.
+  regHandle('sessions:create', async (_e, input: CreateSessionInput) => {
+    const teamLeadDeckBridge = input?.agent === 'team-lead'
+    // Card 3c322f10 (piece 2, operator route, team-lead arbitration): started
+    // PROACTIVELY here, not inside SessionService.create() -- see that
+    // function's own doc for why staying synchronous/atomic there matters.
+    // Best-effort: a failure here (e.g. deck-plugin dir missing) must not
+    // block the operator's tile from opening at all, only mean it opens
+    // without the bridge (SessionService.create()'s own mintTeamLeadBridge
+    // reads `controlServer` as still null and degrades the same way it
+    // already does for every other "not started" case).
+    if (teamLeadDeckBridge) {
+      try {
+        await ensureControlServer()
+      } catch (e) {
+        reportError('session', 'failed to start the deck-control endpoint for an operator-opened team-lead tile', e)
+      }
+    }
+    return createSessionWithWorktree(
       service,
       getConfig().projectDir,
       input ?? {},
       checkpoint,
       getWorktreeInit(),
       sandboxGate,
-      sandboxWarmTranscripts
+      sandboxWarmTranscripts,
+      { teamLeadDeckBridge }
     )
-  )
+  })
   regHandle('sessions:remove', (_e, id: string) => service.remove(id))
   regHandle('sessions:rename', (_e, id: string, name: string) => service.rename(id, name))
   regHandle('sessions:set-color', (_e, id: string, color: string) =>

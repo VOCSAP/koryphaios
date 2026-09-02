@@ -43,6 +43,7 @@ import { gracefulClose } from './session-close'
 import { createOscParser, type OscSnapshot } from './detect/osc'
 import { createActivityTracker, ACTIVITY_IDLE_MS, type Activity } from './detect/activity'
 import { reportError } from './log'
+import { resolveMcpConfig, type MintTeamLeadBridge } from './team-lead-bridge'
 import { DEFAULT_PALETTE, paletteColor } from '@shared/palette'
 import { sanitizeRole } from '@shared/role'
 import { reconcileOrder } from '@shared/reorder'
@@ -289,7 +290,29 @@ export class SessionService extends EventEmitter {
      */
     private getPluginDir: () => string = () => '',
     /** Home dir for transcript existence checks (injectable for tests). */
-    private home: string = homedir()
+    private home: string = homedir(),
+    /**
+     * Card 3c322f10 (piece 2, operator route): mints the team-lead
+     * deck-control bridge -- a fresh mcpConfig path + callerId -- when
+     * create() decides one is owed (see that call's own comment). Built by
+     * index.ts (team-lead-bridge.ts's buildMintTeamLeadBridge) from the
+     * controlServer plus writeTeamLeadMcpConfig/TEAM_LEAD_DECK_TOOLS (both
+     * supervisor.ts, reused exactly as deck-control.ts's spawnEntry already
+     * does for the agent-spawned route -- never duplicated here), which is
+     * also why this module takes it as an injected function rather than
+     * importing electron/deck-control itself (kept free of both, matching
+     * every other getter above). SYNC and nullable on purpose (team-lead
+     * arbitration, Card 3c322f10 -- an earlier version was async here so the
+     * mint could lazily start the deck-control server itself, which forced
+     * create() to become async too, giving every session creation a
+     * microtask yield point BEFORE `this.defs.push(def)` -- not acceptable
+     * for a feature that never needed create() to lose its atomicity): the
+     * lazy start is PROACTIVE, awaited by ipc.ts's `sessions:create` handler
+     * (already async) BEFORE it ever calls into create(). A null return here
+     * means the caller chose not to (or could not) start the server first,
+     * read as "no bridge this spawn", never as a fatal error (see create()).
+     */
+    private mintTeamLeadBridge: MintTeamLeadBridge = () => null
   ) {
     super()
     // Start empty: the app no longer auto-restores the legacy sessions.json on
@@ -530,7 +553,46 @@ export class SessionService extends EventEmitter {
     return this.defs.some((d) => this.pty.isAlive(d.id))
   }
 
-  create(input: CreateSessionInput): SessionRuntime {
+  /**
+   * `opts.teamLeadDeckBridge` is the ONLY channel for the operator-route
+   * deck-control bridge decision (Card 3c322f10, piece 2) -- deliberately a
+   * separate function parameter, never a property of `input`
+   * (`CreateSessionInput`). `input` is the exact JSON shape ipc.ts's
+   * `sessions:create` handler forwards verbatim from its caller, which is
+   * remote-reachable (CHANNEL_TIERS 2, shared/companion.ts) -- a boolean
+   * living on that object would be one a companion/phone client could set on
+   * itself DIRECTLY, by naming the field. Only ipc.ts's own handler code
+   * constructs `opts` (a plain object literal it builds itself, never spread
+   * from the untrusted input), so there is no PROPERTY NAME a remote payload
+   * can carry that reaches this decision.
+   *
+   * STATE THE BOUNDARY PRECISELY (security review correction, 2026-09-02):
+   * this is not "unreachable by a remote caller" -- `opts.teamLeadDeckBridge`
+   * is a pure function of `input.agent`, which the caller fully controls, so
+   * a paired companion requesting `agent: 'team-lead'` DOES get the bridge.
+   * What is closed here is only the SHORTCUT (setting the boolean directly
+   * without going through `agent`), not the outcome. See ipc.ts's
+   * `sessions:create` handler and team-lead-bridge.ts's own header for why
+   * that residual reachability is an accepted operator arbitration (a paired
+   * companion already has CHANNEL_TIERS-1 `pty:input` into any live tile,
+   * i.e. arbitrary command execution by shell-prefix, so these 3 tools add
+   * no marginal power) rather than a gap this parameter split closes by
+   * itself.
+   *
+   * STAYS SYNCHRONOUS (team-lead arbitration, Card 3c322f10): an earlier
+   * version made this async so mintTeamLeadBridge could itself await the
+   * deck-control server's lazy start -- rejected, because that inserts a
+   * microtask yield point before `this.defs.push(def)` on EVERY create()
+   * call, not only team-lead ones, making session creation non-atomic (two
+   * create() calls issued back-to-back could interleave their synchronous
+   * tails: the lead-uniqueness sweep, name defaulting, peer_id assignment
+   * all assume no other create() runs concurrently). The lazy start is
+   * instead PROACTIVE: ipc.ts's `sessions:create` handler (already async)
+   * awaits index.ts's `ensureControlServer()` itself, BEFORE ever calling
+   * into this synchronous function. `mintTeamLeadBridge` here just reads
+   * whatever is already available.
+   */
+  create(input: CreateSessionInput, opts?: { teamLeadDeckBridge?: boolean }): SessionRuntime {
     const cfg = this.getConfig()
     // B6: agent/model are structured identifiers that get interpolated into the
     // login-shell command line, so they are allow-listed (sanitizeFlagValue) and
@@ -549,6 +611,27 @@ export class SessionService extends EventEmitter {
     ]
       .filter(Boolean)
       .join(' ')
+    // Card 3c322f10 (piece 2, operator route): mirrors the mcpConfig deck-control
+    // has already carried for the agent-spawned route (deck-control.ts's
+    // spawnEntry, Card ff091064/6c380073) -- an operator tile opened with
+    // `--agent team-lead` gets the SAME bridge, but ONLY when ipc.ts's
+    // `sessions:create` handler posed `opts.teamLeadDeckBridge` itself (see
+    // create()'s own doc above: deliberately NOT a property of `input`,
+    // which is remote-reachable). A template/workspace-restore/one-shot-agent
+    // input can name `agent: 'team-lead'` too, but none of those callers ever
+    // pass `opts`, so they fall straight through untouched -- fail-closed by
+    // construction, not by an enumerated exclusion list. Logic lives in
+    // team-lead-bridge.ts (a pure, `@shared`-free module) rather than inline
+    // here so it stays behaviourally testable under `bun test` -- this file
+    // itself cannot be imported from a plain `bun test` run at the repo root
+    // (see that module's own header).
+    const mcpConfig = resolveMcpConfig(
+      input,
+      agent,
+      opts?.teamLeadDeckBridge === true,
+      this.mintTeamLeadBridge,
+      reportError
+    )
     const def: SessionDef = {
       id: randomUUID(),
       name: input.name?.trim() || this.defaultName(agent),
@@ -574,7 +657,7 @@ export class SessionService extends EventEmitter {
       supervisor: input.supervisor || undefined,
       // Team-lead (PLAN C10): explicit flag; uniqueness enforced below.
       lead: input.lead && !input.supervisor ? true : undefined,
-      mcpConfig: input.mcpConfig?.trim() || undefined,
+      mcpConfig,
       appendSystemPromptFile: input.appendSystemPromptFile?.trim() || undefined,
       createdAt: Date.now()
     }

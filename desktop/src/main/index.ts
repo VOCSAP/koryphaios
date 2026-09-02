@@ -164,6 +164,7 @@ import {
   writeSupervisorSystemPrompt,
   writeTeamLeadMcpConfig
 } from './supervisor'
+import { buildMintTeamLeadBridge } from './team-lead-bridge'
 import {
   createWorktree,
   listWorktrees,
@@ -486,7 +487,25 @@ const service = new SessionService(
       : null)
   }),
   safeLaunchCommand,
-  getDeckPluginDir
+  getDeckPluginDir,
+  undefined, // home: default (homedir()) -- unused by index.ts, kept positional per session-service.ts's existing append-at-the-end convention.
+  // Both properties are wrapped in an arrow function on purpose, same as
+  // `designServer` a few lines above in this very call: `controlServer` and
+  // `controlDeps` are both declared FURTHER DOWN this file (TDZ) -- an eager
+  // `{ getControlServer: () => controlServer }` written as a bare property
+  // value would still be fine here since `controlServer` is only READ inside
+  // the arrow body, not at construction time, but `controlDeps` needs the
+  // same deferral. SYNC on purpose (team-lead arbitration, Card 3c322f10):
+  // this getter never starts the server itself, only reads whatever is
+  // CURRENTLY there -- ipc.ts's `sessions:create` handler is the one that
+  // proactively awaits `ensureControlServer()` before ever calling into
+  // SessionService.create(), so by the time this runs for that route the
+  // server is already up (or the operator's tile opens without the bridge,
+  // fail-closed, if that await was skipped for any reason).
+  buildMintTeamLeadBridge({
+    getControlServer: () => controlServer,
+    write: (token, callerId, allowedTools) => controlDeps.writeTeamLeadMcpConfig(token, callerId, allowedTools)
+  })
 )
 
 // Activity journal (PLAN C14): per-window narration of spawns, exits, quota
@@ -2563,6 +2582,50 @@ const controlDeps: DeckControlDeps = {
 
 let controlServer: DeckControlServer | null = null
 let companionServer: CompanionServer | null = null
+/**
+ * The IN-FLIGHT start, memoized separately from `controlServer` above
+ * (security review correction, 2026-09-02): memoizing only the RESULT
+ * (`if (!controlServer) controlServer = await startDeckControl(...)`) is a
+ * classic check-then-act race once this guard has more than one caller --
+ * exactly what Card 3c322f10 (piece 2) introduced, `ensureSupervisor` and
+ * `sessions:create` now both able to call `ensureControlServer()` close
+ * together. Two concurrent calls would both observe `controlServer` still
+ * null, both invoke `startDeckControl`, and the second assignment would
+ * silently orphan the first server (a loopback HTTP listener with no
+ * remaining reference, never closed). Memoizing the PROMISE instead closes
+ * this: the `if (!controlServerStarting)` check and its assignment run
+ * synchronously (no `await` between them), so a second caller arriving
+ * before the first `startDeckControl` resolves always sees the SAME
+ * in-flight promise and awaits that one instead of starting its own.
+ */
+let controlServerStarting: Promise<DeckControlServer> | null = null
+
+/**
+ * Lazily start the deck-control HTTP endpoint, memoized in the module-scope
+ * `controlServer` above (race-safe via `controlServerStarting`, its own
+ * doc). Card 3c322f10 (piece 2, operator route) factored this out of
+ * ensureSupervisor (which used to inline the same check): the operator-route
+ * team-lead bridge (buildMintTeamLeadBridge, wired into the SessionService
+ * constructor above) needs the IDENTICAL "started once, shared across every
+ * consumer" guard.
+ */
+const ensureControlServer = async (): Promise<DeckControlServer> => {
+  if (controlServer) return controlServer
+  if (!controlServerStarting) {
+    controlServerStarting = startDeckControl(controlDeps)
+      .then((server) => {
+        controlServer = server
+        return server
+      })
+      .catch((e) => {
+        // Allow a later call to retry a failed start instead of being stuck
+        // replaying the same rejection forever.
+        controlServerStarting = null
+        throw e
+      })
+  }
+  return controlServerStarting
+}
 
 /**
  * Return the live supervisor session, resume an exited one, or spawn it:
@@ -2583,14 +2646,14 @@ const ensureSupervisor = async (): Promise<SessionRuntime> => {
   if (!existsSync(mcpScript)) {
     throw new Error('deck-control MCP script missing -- run `npm run build:mcp`')
   }
-  if (!controlServer) controlServer = await startDeckControl(controlDeps)
+  const server = await ensureControlServer()
   const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
   const mcpConfig = writeSupervisorMcpConfig({
     dir: stateDir,
     mcpScriptPath: mcpScript,
     execPath: process.execPath,
-    controlUrl: controlServer.url,
-    controlToken: controlServer.token
+    controlUrl: server.url,
+    controlToken: server.token
   })
   const appendSystemPromptFile = writeSupervisorSystemPrompt(stateDir, resolveDocsDir())
   return service.create({
@@ -2936,6 +2999,10 @@ app.whenReady().then(async () => {
     getWindow: () => mainWindow,
     announce: (text: string) => broadcastAnnounce(text),
     ensureSupervisor,
+    // Card 3c322f10 (piece 2): declared at line ~2582, well before this call
+    // site (~2964) -- no TDZ concern here, unlike the SessionService
+    // constructor much earlier in the file.
+    ensureControlServer,
     journal,
     dispatchNext,
     stopRoadmapItem,

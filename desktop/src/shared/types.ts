@@ -480,7 +480,24 @@ export interface CreateSessionInput {
   supervisor?: boolean
   /** Designate the created session as the window's team-lead (PLAN C10). */
   lead?: boolean
-  /** MAIN-only (PLAN C5): --mcp-config path re-passed on every spawn. */
+  /**
+   * MAIN-only (PLAN C5): --mcp-config path re-passed on every spawn.
+   *
+   * DELIBERATELY the only channel for a team-lead deck-control bridge too
+   * (Card 3c322f10, piece 2, operator route): there is NO separate
+   * `teamLeadDeckBridge`-shaped marker field on this interface, and there
+   * must never be one. `CreateSessionInput` is the exact JSON shape a
+   * companion/phone client can populate verbatim (ipc.ts's `sessions:create`
+   * handler forwards it unreconstructed -- see Card 28d63a42, the open,
+   * separate carding of this whole class) and `sessions:create` is
+   * CHANNEL_TIERS 2, i.e. remote-reachable (shared/companion.ts) -- so any
+   * boolean living HERE that grants a capability is one a remote caller can
+   * set on itself, regardless of what convention says only main code should
+   * write it. The operator-route bridge decision therefore travels as a
+   * SEPARATE function parameter, never a property of this object: see
+   * `SessionService.create()`'s second (`opts`) parameter and
+   * `team-lead-bridge.ts`'s own header for the full reasoning.
+   */
   mcpConfig?: string
   /** MAIN-only (PLAN C8): --append-system-prompt-file path (supervisor anchor). */
   appendSystemPromptFile?: string
