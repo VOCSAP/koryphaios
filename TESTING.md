@@ -81,6 +81,63 @@ test("hello world", () => {
 The `desktop-precommit` skill (`.claude/skills/`) walks this checklist with
 the workarounds for the known environment quirks below.
 
+## Reviewing a commit and auditing a guard
+
+Moved here from `CLAUDE.md` (2026-09-01): these rules bite when you write a
+test, a validator, a discipline check or review a diff, not on every task.
+
+- **Coverage rule: a gating mechanism (discipline test, validator, CI glob,
+  allow-list, deny-list, parser feeding a decision) needs its COVERAGE
+  audited, not just its sensitivity.** Ask two halves: what degradation
+  yields a SUBSET rather than an error, and what growth of the DOMAIN slips
+  through untouched? An allow-list shrinking fails CLOSED (surfaces the same
+  day); deny-lists and omit-projections fail OPEN, silently -- audit those
+  first. Canonical fail-open shape: `toPublicPeer` in `broker.ts`
+  rest-spreads three fields out and projects the rest, so a new `Peer` field
+  ships publicly with nothing failing; a pick-list would fail closed. Shipped
+  green: a discipline test whose hardcoded list covered 4 of 8 handlers, a CI
+  glob running 78 of 116 collected files ("Cross-platform tests" below).
+  Corollary on the PROOF: a probe measured red-first and left out of the
+  commit is not a guard, since nothing replays it -- ask of any "proved it
+  bites": is that probe in the diff?
+
+- **A comment or class that ASSERTS a guarantee must be wired to it, and
+  point at what actually enforces it.** `PinnedTrust.kt` implemented pinning
+  and was instantiated by nothing; a `DeckApi.onX` declared, multiplexed and
+  subscribed tests green with NO producer. Grep that the emitter is called
+  (`broadcast('<channel>'` / `send('<channel>'`), not just that a listener
+  exists. A false pointer (a comment citing `pty.on('exit', ...)` for a field
+  assigned in `pollPeerIds()`) costs as much: a reader who finds nothing at
+  the cited spot stops trusting the comment even when its conclusion holds.
+
+- **A new validator needs every call path enumerated**: live gesture,
+  persisted-state restore/load, automatic-placement heuristic, IPC entry
+  point -- wire or consciously exempt each. Numeric validators must reject
+  `NaN` explicitly: every `<`/`>` against `NaN` is `false`, so it passes any
+  comparison-based clamp silently.
+
+- **Extracting logic into a pure module makes its CALL SITE invisible.** The
+  tests prove the function; nothing proves it is CALLED, with which
+  arguments, so the suite gets GREENER as the guarantee gets weaker
+  (measured: 12 of 13 mutations of a wiring `case` stayed green after
+  extraction). Three remedies, by increasing power: a SOURCE SCAN
+  (`toContain("fn(")`) is the weakest and fails open (result DISCARDED,
+  argument swapped for a literal -- presence is not contract); a BEHAVIOURAL
+  probe (real input into the real exported function, require the real
+  effect) is the right default; DEPENDENCY INJECTION closes by construction
+  (make the wiring itself pure and executable). When two call sites of one
+  module carry different disciplines, the exception is the bug. Plumbing for
+  a mutation probe without touching the shared tree: `mirror-probe` skill.
+
+- **Review against what a commit SHOULD contain, not just the diff it
+  shows.** Costliest defects are invisible in the diff: a commit referencing
+  a file that only existed in the working tree; a millisecond-resolution sort
+  key dropping rows on tie; a validator wired to one of two callers; a prop
+  default de-flagging a confirmation outside the hunks. Hence: stage
+  explicitly by filename, `git show --stat` after every commit, `cat-file -e`
+  on imports touching co-edited files (automated by the commit closure check
+  below).
+
 ## Commit closure check (import closure + control bytes)
 
 `scripts/check-commit-closure.ts` answers two questions a diff review and
@@ -258,7 +315,7 @@ resolved) cannot be caught by an assertion on the CSS rule text or on any
 `getComputedStyle` value that doesn't require box geometry -- the code
 correctly follows the rule either way, so such an assertion would pass
 whether the visual bug is present or not (the exact false-witness shape the
-CLAUDE.md coverage rule warns about).
+coverage rule in "Reviewing a commit and auditing a guard" warns about).
 
 This class stays a **manual validation step**, not an automated guard: drive
 a real Koryphaios instance over CDP (screenshot or computed-style read on a
