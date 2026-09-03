@@ -899,7 +899,12 @@ const heldVerdicts = new Set<string>()
  */
 const pollApprovalVerdicts = async (): Promise<void> => {
   const deps = approvals.deps()
-  if (!deps || !approvalsEnabled()) return
+  // Card 7394e2f8: mobileApprovals governs the PHONE relay only -- typing an
+  // already-answered verdict into this window's own tile is local delivery,
+  // regardless of who answered (a phone or this Deck's own Allow chip), so it
+  // must not be gated on that setting. `deps` alone (operator identity) still
+  // guards it.
+  if (!deps) return
   try {
     const settled = await fetchUndeliveredVerdicts(deps)
     if (settled.length === 0) {

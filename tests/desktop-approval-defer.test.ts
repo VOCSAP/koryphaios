@@ -105,7 +105,13 @@ function verdict(over: Partial<Approval> & { tile?: string } = {}): Approval {
   } as unknown as Approval;
 }
 
-function pollerEnv(opts: { settled: Approval[]; tiles?: string[]; waiting?: string[] }) {
+function pollerEnv(opts: {
+  settled: Approval[];
+  tiles?: string[];
+  waiting?: string[];
+  /** Card 7394e2f8: overridable so a test can force it false and still expect delivery. */
+  approvalsEnabled?: () => boolean;
+}) {
   const calls: Call[] = [];
   const waitingTiles = new Set<string>(opts.waiting ?? []);
   const openApprovals = new Map<string, string>();
@@ -113,7 +119,7 @@ function pollerEnv(opts: { settled: Approval[]; tiles?: string[]; waiting?: stri
   const marked: string[][] = [];
   const env = {
     approvals: { deps: () => ({ fake: true }) },
-    approvalsEnabled: () => true,
+    approvalsEnabled: opts.approvalsEnabled ?? (() => true),
     fetchUndeliveredVerdicts: async () => opts.settled,
     service: {
       list: () => (opts.tiles ?? ["s1"]).map((id) => ({ id, name: `tile ${id}`, peerId: null })),
@@ -242,6 +248,21 @@ describe("pollApprovalVerdicts (sliced verbatim from index.ts)", () => {
     const { poll, written, marked } = pollerEnv({ settled: [verdict()], tiles: ["s1"], waiting: ["s1"] });
     await poll();
     expect(written).toEqual([{ tile: "s1", keys: "\r" }]);
+    expect(flat(marked)).toEqual(["appr-42"]);
+  });
+
+  test("card 7394e2f8: with mobileApprovals OFF (approvalsEnabled() false), a waiting tile's verdict still gets typed into the pty", async () => {
+    const { poll, written, marked } = pollerEnv({
+      settled: [verdict()],
+      tiles: ["s1"],
+      waiting: ["s1"],
+      approvalsEnabled: () => false,
+    });
+    await poll();
+    expect(
+      written,
+      "the LOCAL delivery leg must not read mobileApprovals -- that setting governs the phone relay only, never a Deck-local Allow click",
+    ).toEqual([{ tile: "s1", keys: "\r" }]);
     expect(flat(marked)).toEqual(["appr-42"]);
   });
 
