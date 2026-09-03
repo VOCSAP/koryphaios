@@ -33,6 +33,20 @@ export function isTeamLeadAgent(agent: string | undefined): boolean {
 }
 
 /**
+ * Card 6363bd69: workspace restore is the one caller with no
+ * CreateSessionInput.agent to read directly -- it only has the already-built
+ * SessionDef.args string. Bounded to the EXACT shape `create()` writes
+ * (`--agent "value"`, sanitizeFlagValue-restricted so `value` can never
+ * itself contain a `"` or whitespace): returns undefined, never a guess, on
+ * zero matches, on more than one (a hand-edited workspace file is untrusted
+ * input), or on anything short of that exact quoted form.
+ */
+export function agentFromRestoredArgs(args: string): string | undefined {
+  const matches = [...args.matchAll(/(?:^|\s)--agent "([^"\s]+)"(?=\s|$)/g)]
+  return matches.length === 1 ? matches[0]?.[1] : undefined
+}
+
+/**
  * True only when: no mcpConfig is already set, the caller-supplied
  * `marker` is `true` (a plain boolean, NEVER read off `input` -- see this
  * module's header), AND the (already sanitizeFlagValue'd) agent is exactly

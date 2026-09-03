@@ -710,6 +710,17 @@ export function registerIpc({
       // worktree sessions live elsewhere and would otherwise all start fresh.
       for (const cwd of workspaces.sessionCwds(id)) await sandbox.refreshTranscripts(cwd)
     }
+    // Card 6363bd69: started once for the whole batch, before restoreFrom()
+    // ever runs -- mirrors template:apply's own best-effort start (see that
+    // handler above). A failure here must not block the restore, only mean
+    // the team-lead tile(s) in it reopen without the bridge.
+    if (workspaces.hasTeamLeadAgentSession(id)) {
+      try {
+        await ensureControlServer()
+      } catch (e) {
+        reportError('session', 'failed to start the deck-control endpoint for a workspace-restored team-lead tile', e)
+      }
+    }
     // Card 07134c6a: workspaces.restore(id) now returns a discriminated
     // WorkspaceRestoreResult naming WHICH of six real causes fired, not a
     // bare boolean. workspaceRestoreOrThrow (shared/workspace-restore-

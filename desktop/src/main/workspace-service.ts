@@ -34,8 +34,9 @@ import {
   refreshLock,
   releaseLock
 } from './workspace-lock'
-import { fromWorkspaceSessions, toWorkspaceSessions } from './workspace-session-map'
+import { fromWorkspaceSessions, joinArgs, toWorkspaceSessions } from './workspace-session-map'
 import { logWarn, reportError } from './log'
+import { agentFromRestoredArgs, isTeamLeadAgent } from './team-lead-bridge'
 
 /**
  * Whether a restore() caller has an operator at the desktop app who could
@@ -415,6 +416,18 @@ export class WorkspaceService {
       .map((d) => d.cwd?.trim())
       .filter((c): c is string => !!c)
     return [...new Set(cwds)]
+  }
+
+  /**
+   * Card 6363bd69: peeks at a not-yet-restored workspace's own sessions with
+   * the SAME signal `restoreFrom()` itself recovers post-restore, so a caller
+   * can start the deck-control endpoint proactively -- mirrors
+   * template:apply's own `inputs.some(isTeamLeadAgent)` pre-check.
+   */
+  hasTeamLeadAgentSession(id: string): boolean {
+    const ws = loadWorkspace(this.deps.projectDir, id)
+    if (!ws) return false
+    return ws.sessions.some((s) => isTeamLeadAgent(agentFromRestoredArgs(joinArgs(s.args))))
   }
 
   /**

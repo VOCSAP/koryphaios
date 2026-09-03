@@ -43,7 +43,7 @@ import { gracefulClose } from './session-close'
 import { createOscParser, type OscSnapshot } from './detect/osc'
 import { createActivityTracker, ACTIVITY_IDLE_MS, type Activity } from './detect/activity'
 import { reportError } from './log'
-import { resolveMcpConfig, type MintTeamLeadBridge } from './team-lead-bridge'
+import { agentFromRestoredArgs, isTeamLeadAgent, resolveMcpConfig, type MintTeamLeadBridge } from './team-lead-bridge'
 import { DEFAULT_PALETTE, paletteColor } from '@shared/palette'
 import { sanitizeRole } from '@shared/role'
 import { reconcileOrder } from '@shared/reorder'
@@ -778,6 +778,15 @@ export class SessionService extends EventEmitter {
     for (const d of this.defs) {
       if (d.lead && leadSeen) delete d.lead
       if (d.lead) leadSeen = true
+    }
+    // Card 6363bd69: restore never goes through create()/resolveMcpConfig (a
+    // batch replace, not per-def CreateSessionInput calls), so a team-lead
+    // AGENT def arrives here with mcpConfig stripped by the workspace
+    // round-trip -- args is the only surviving signal, recovered through the
+    // SAME isTeamLeadAgent predicate every other route decides the bridge with.
+    for (const d of this.defs) {
+      const agent = agentFromRestoredArgs(d.args)
+      d.mcpConfig = resolveMcpConfig({}, agent ?? '', isTeamLeadAgent(agent), this.mintTeamLeadBridge, reportError)
     }
     for (const d of this.defs) {
       this.runtime.set(d.id, {
