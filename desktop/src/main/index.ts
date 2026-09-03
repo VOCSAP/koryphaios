@@ -170,6 +170,7 @@ import {
   writeTeamLeadMcpConfig
 } from './supervisor'
 import { buildMintTeamLeadBridge, isTeamLeadAgent } from './team-lead-bridge'
+import { sweepTeamLeadMcpConfigs, teamLeadInstanceToken, teamLeadMcpConfigFileName } from './team-lead-mcp-sweep'
 import {
   createWorktree,
   listWorktrees,
@@ -2210,8 +2211,16 @@ const approveSpawn = async (entries: SpawnSummary[], attendance: CallerAttendanc
 // Started lazily at the first Home visit; the URL/token pair is injected only
 // into the supervisor's generated --mcp-config, never into normal sessions.
 
-/** The team-lead --mcp-config filename for a given minted callerId (card 6c380073). */
-const teamLeadMcpConfigFile = (callerId: string): string => `team-lead-mcp-${callerId}.json`
+/**
+ * Card 9d8e24f4: userData is shared by every Kory instance (no
+ * requestSingleInstanceLock) -- this project directory's own identity, so
+ * `teamLeadMcpConfigFile` below and the sweep call further down read the SAME
+ * value rather than each deriving their own.
+ */
+const instanceToken = teamLeadInstanceToken(computeDeckProjectKey(cliContext.projectDir))
+
+/** The team-lead --mcp-config filename for a given minted callerId (card 6c380073), prefixed per-instance (card 9d8e24f4). */
+const teamLeadMcpConfigFile = (callerId: string): string => teamLeadMcpConfigFileName(instanceToken, callerId)
 
 /**
  * Card 6c380073 (review round 2, point 3): sweep team-lead-mcp-*.json left
@@ -2221,22 +2230,18 @@ const teamLeadMcpConfigFile = (callerId: string): string => `team-lead-mcp-${cal
  * once at startup, BEFORE any mint, so it can never race a file the current
  * run has just written: this run's callerIds carry fresh random suffixes and
  * do not exist on disk yet at this point.
+ * Card 9d8e24f4: the instance-token prefix (see `instanceToken` above) keeps
+ * this from ever matching another live instance's file.
  */
 const sweepStaleTeamLeadMcpConfigs = (): void => {
   const dir = join(app.getPath('userData'), APP_STATE_SUBDIR)
-  try {
-    if (!existsSync(dir)) return
-    for (const name of readdirSync(dir)) {
-      if (!name.startsWith('team-lead-mcp-') || !name.endsWith('.json')) continue
-      try {
-        unlinkSync(join(dir, name))
-      } catch (e) {
-        reportError('deck', `failed to sweep stale team-lead mcp config ${name}`, e)
-      }
-    }
-  } catch (e) {
-    reportError('deck', 'failed to scan the app-state dir for stale team-lead mcp configs', e)
-  }
+  sweepTeamLeadMcpConfigs(dir, instanceToken, {
+    dirExists: existsSync,
+    listFiles: readdirSync,
+    removeFile: (d, name) => unlinkSync(join(d, name)),
+    onFileError: (name, e) => reportError('deck', `failed to sweep stale team-lead mcp config ${name}`, e),
+    onScanError: (e) => reportError('deck', 'failed to scan the app-state dir for stale team-lead mcp configs', e)
+  })
 }
 
 /**
