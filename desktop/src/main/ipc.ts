@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { app, BrowserWindow, desktopCapturer, dialog, shell, webContents } from 'electron'
-import { broadcast, regHandle, regOn } from './api-registry'
+import { broadcast, isLocalIpcEvent, regHandle, regOn } from './api-registry'
 import { safeExternalUrl } from './external-url'
 import type {
   AckableInboxEntry,
@@ -89,7 +89,7 @@ import {
 import { resolve as resolvePath } from 'node:path'
 import type { SessionService } from './session-service'
 import { STOP_IDLE_WAIT_MS } from './session-service'
-import type { WorkspaceService } from './workspace-service'
+import type { CallerAttendance, WorkspaceService } from './workspace-service'
 import type { Journal, JournalKind } from './journal'
 import { listAgents } from './agents'
 import { resolveLaunchConfig, saveGlobalConfig } from './launch-config'
@@ -179,9 +179,11 @@ interface IpcDeps {
    * Containment + approval gate for a template path (B4 + M-SEC-9): returns a
    * discriminated result (card 96c98453) -- 'ok:false' distinguishes a real
    * anomaly (out-of-tree path, malformed file) from the operator declining a
-   * repo-local shell-bearing template ('refused', not an error).
+   * repo-local shell-bearing template ('refused', not an error). `attendance`
+   * (card 64f8f629): 'unattended' never opens the shell-field approval dialog
+   * for an unapproved payload.
    */
-  resolveTemplateInputs: (path: string) => TemplateResolveResult
+  resolveTemplateInputs: (path: string, attendance: CallerAttendance) => TemplateResolveResult
   /** Current broker reachability (PLAN O5), owned by index.ts. */
   brokerStatus: () => BrokerStatusEvent
   /** Force an immediate broker poll (banner Retry button). */
@@ -715,7 +717,11 @@ export function registerIpc({
     // already know, since their sessions were already swapped) and resolves
     // quietly for every other reason, carrying WHICH one through so store.ts
     // can pick the right toast instead of guessing.
-    const result = workspaces.restore(id)
+    // Card 64f8f629: same isLocalIpcEvent-derived attendance as template:apply
+    // above -- see its own doc for why an unrecognized event falls closed to
+    // 'unattended'.
+    const attendance: CallerAttendance = isLocalIpcEvent(_e) ? 'attended' : 'unattended'
+    const result = workspaces.restore(id, attendance)
     const announceCurrent = (): void => {
       const current = workspaces.listForCwd().find((w) => w.current) ?? null
       broadcast('workspace:current', current)
@@ -1260,7 +1266,12 @@ export function registerIpc({
     // show the success toast) and deck-control.ts's (the agent route's
     // empty-batch mapping), kept together so the three sinks cannot drift
     // apart from each other and let a refusal read as success again.
-    const resolved = resolveTemplateInputs(path)
+    // Card 64f8f629: `attendance` defaults to 'unattended' for anything
+    // isLocalIpcEvent does not positively recognize as the real window's
+    // own ipcMain event -- a companion call (REMOTE_EVENT) or any future
+    // unrecognized caller must never be read as an attended operator.
+    const attendance: CallerAttendance = isLocalIpcEvent(_e) ? 'attended' : 'unattended'
+    const resolved = resolveTemplateInputs(path, attendance)
     const inputs = templateInputsOrThrow(resolved, path)
     if (inputs === null) return null
     // One checkpoint covers the batch: every session spawns in the project dir.

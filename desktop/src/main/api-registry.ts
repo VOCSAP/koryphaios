@@ -36,6 +36,19 @@ export function hasInvokeHandler(channel: string): boolean {
   return invokeHandlers.has(channel)
 }
 
+/**
+ * True only for a genuine local Electron ipcMain invoke event, never for
+ * REMOTE_EVENT or anything else unrecognized (card 64f8f629): a POSITIVE
+ * check on purpose, so an unrecognized value defaults to false (unattended)
+ * rather than the fail-open a negative `isRemoteEvent`-style check would
+ * give any caller shape it does not recognize. Structural (a real event
+ * carries `sender`) AND by reference against REMOTE_EVENT, never by
+ * matching REMOTE_EVENT's own forgeable `{ remote: true }` shape.
+ */
+export function isLocalIpcEvent(e: unknown): boolean {
+  return e !== null && typeof e === 'object' && e !== REMOTE_EVENT && 'sender' in e
+}
+
 /** Invoke a handler on behalf of a remote client. Throws on unknown channel. */
 export async function invokeRemote(channel: string, args: unknown[]): Promise<unknown> {
   const fn = invokeHandlers.get(channel)

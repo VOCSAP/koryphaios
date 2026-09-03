@@ -44,7 +44,7 @@ import {
 } from './magic-compact'
 import { approve, commandHash, isApproved, resolveApprovedLaunchCommand } from './launch-approval'
 import { homedir, hostname } from 'node:os'
-import { WorkspaceService } from './workspace-service'
+import { WorkspaceService, type CallerAttendance, type WorkspaceApprovalGateResult } from './workspace-service'
 import type { WorkspaceSession } from './workspace-store'
 import {
   BrokerHealthTracker,
@@ -1874,7 +1874,7 @@ let lockWatchTimer: NodeJS.Timeout | null = null
  * so this stays agnostic to which field is dangerous — each caller names its
  * own vulnerability class.
  */
-const confirmShellFieldApproval = (opts: {
+type ShellFieldApprovalOpts = {
   keyPart: string
   basename: string
   hashPayload: unknown
@@ -1885,10 +1885,33 @@ const confirmShellFieldApproval = (opts: {
   messageFr: string
   buttonsEn: [string, string]
   buttonsFr: [string, string]
-}): boolean => {
-  const projectDir = getConfig().projectDir
-  const key = `${computeDeckProjectKey(projectDir)}::${opts.keyPart}::${opts.basename}`
-  const value = JSON.stringify(opts.hashPayload)
+}
+
+/**
+ * The same {key, value} pair confirmShellFieldApproval's own isApproved()/
+ * approve() calls use -- factored out so a caller can consult the cache
+ * WITHOUT opening the dialog (see isShellFieldPreApproved below), and the
+ * two can never disagree about which slot a given payload occupies.
+ */
+const shellFieldApprovalCacheKey = (opts: ShellFieldApprovalOpts): { key: string; value: string } => ({
+  key: `${computeDeckProjectKey(getConfig().projectDir)}::${opts.keyPart}::${opts.basename}`,
+  value: JSON.stringify(opts.hashPayload)
+})
+
+/**
+ * Whether `opts` is already cache-approved, without ever risking the
+ * blocking dialog (card 64f8f629): callers use this to decide 'unattended'
+ * BEFORE calling confirmShellFieldApproval, since a payload already approved
+ * must succeed even with nobody watching -- the dialog would have rubber-
+ * stamped it too.
+ */
+const isShellFieldPreApproved = (opts: ShellFieldApprovalOpts): boolean => {
+  const { key, value } = shellFieldApprovalCacheKey(opts)
+  return isApproved(approvalsFile(), key, value)
+}
+
+const confirmShellFieldApproval = (opts: ShellFieldApprovalOpts): boolean => {
+  const { key, value } = shellFieldApprovalCacheKey(opts)
   const file = approvalsFile()
   if (isApproved(file, key, value)) return true
   const isFr = isFrLocale()
@@ -1981,9 +2004,11 @@ const confirmSpawnShellFields = (entry: { command?: string; args?: string }): bo
  * MUST be surfaced as an error by callers) from the operator declining a
  * REPO-LOCAL template's shell-field approval dialog ('refused' -- a
  * deliberate choice, never an error). Global (operator-owned) templates are
- * trusted and never prompt.
+ * trusted and never prompt. `attendance` (card 64f8f629) is required: an
+ * 'unattended' caller never opens the dialog for an unapproved payload --
+ * see confirmShellFieldApproval's own doc for why.
  */
-const resolveTemplateInputs = (path: string): TemplateResolveResult => {
+const resolveTemplateInputs = (path: string, attendance: CallerAttendance): TemplateResolveResult => {
   const projectDir = getConfig().projectDir
   const source = templateSource(path, projectDir)
   if (!source) {
@@ -2002,10 +2027,8 @@ const resolveTemplateInputs = (path: string): TemplateResolveResult => {
     reportError('template', `template file is missing or invalid: ${path}`)
     return { ok: false, reason: 'malformed' }
   }
-  if (
-    source === 'local' &&
-    templateHasShellFields(tpl) &&
-    !confirmShellFieldApproval({
+  if (source === 'local' && templateHasShellFields(tpl)) {
+    const approvalOpts: ShellFieldApprovalOpts = {
       keyPart: 'template',
       basename: basename(path),
       hashPayload: tpl.sessions.map((s) => ({ command: s.command ?? '', args: s.args ?? '' })),
@@ -2018,9 +2041,14 @@ const resolveTemplateInputs = (path: string): TemplateResolveResult => {
       messageFr: 'Ce modèle (config du projet) exécute des commandes personnalisées dans un shell.',
       buttonsEn: ['Apply this template', 'Refuse'],
       buttonsFr: ['Appliquer ce modèle', 'Refuser']
-    })
-  ) {
-    return { ok: false, reason: 'refused' }
+    }
+    if (attendance === 'unattended' && !isShellFieldPreApproved(approvalOpts)) {
+      journal.add('session', `template refused (no attended operator, not pre-approved): ${approvalOpts.basename}`)
+      return { ok: false, reason: 'unattended' }
+    }
+    if (!confirmShellFieldApproval(approvalOpts)) {
+      return { ok: false, reason: 'refused' }
+    }
   }
   return { ok: true, inputs: templateToInputs(tpl) }
 }
@@ -2032,8 +2060,11 @@ const resolveTemplateInputs = (path: string): TemplateResolveResult => {
  * in the exact same shell sink, so it is gated the exact same way. Called by
  * WorkspaceService.restore() ONLY when workspaceHasShellFields(ws) is true.
  */
-const confirmWorkspaceShellFields = (ws: { id: string; name: string; sessions: WorkspaceSession[] }): boolean =>
-  confirmShellFieldApproval({
+const confirmWorkspaceShellFields = (
+  ws: { id: string; name: string; sessions: WorkspaceSession[] },
+  attendance: CallerAttendance
+): WorkspaceApprovalGateResult => {
+  const approvalOpts: ShellFieldApprovalOpts = {
     keyPart: 'workspace',
     basename: ws.name && ws.name.trim() ? ws.name : ws.id,
     hashPayload: ws.sessions.map((s) => ({ args: s.args.join(' ') })),
@@ -2046,7 +2077,13 @@ const confirmWorkspaceShellFields = (ws: { id: string; name: string; sessions: W
     messageFr: 'Cet espace de travail (config du projet) exécute des arguments de lancement personnalisés dans un shell.',
     buttonsEn: ['Restore this workspace', 'Refuse'],
     buttonsFr: ['Restaurer cet espace de travail', 'Refuser']
-  })
+  }
+  if (attendance === 'unattended' && !isShellFieldPreApproved(approvalOpts)) {
+    journal.add('session', `workspace shell fields refused (no attended operator, not pre-approved): ${approvalOpts.basename}`)
+    return 'unattended'
+  }
+  return confirmShellFieldApproval(approvalOpts) ? 'approved' : 'declined'
+}
 
 /**
  * Operator approval gate for workspace restore, untrusted `cwd` (card
@@ -2057,12 +2094,11 @@ const confirmWorkspaceShellFields = (ws: { id: string; name: string; sessions: W
  * ipc.ts workDirRoots) rather than command execution -- kept as its own
  * keyPart/copy so the two are never silently conflated into one approval.
  */
-const confirmWorkspaceUntrustedCwd = (ws: {
-  id: string
-  name: string
-  sessions: WorkspaceSession[]
-}): boolean =>
-  confirmShellFieldApproval({
+const confirmWorkspaceUntrustedCwd = (
+  ws: { id: string; name: string; sessions: WorkspaceSession[] },
+  attendance: CallerAttendance
+): WorkspaceApprovalGateResult => {
+  const approvalOpts: ShellFieldApprovalOpts = {
     keyPart: 'workspace-cwd',
     basename: ws.name && ws.name.trim() ? ws.name : ws.id,
     hashPayload: ws.sessions.map((s) => ({ cwd: s.cwd ?? '' })),
@@ -2076,7 +2112,13 @@ const confirmWorkspaceUntrustedCwd = (ws: {
       'Cet espace de travail (config du projet) ouvre une session en dehors de votre dossier de projet.',
     buttonsEn: ['Restore this workspace', 'Refuse'],
     buttonsFr: ['Restaurer cet espace de travail', 'Refuser']
-  })
+  }
+  if (attendance === 'unattended' && !isShellFieldPreApproved(approvalOpts)) {
+    journal.add('session', `workspace untrusted cwd refused (no attended operator, not pre-approved): ${approvalOpts.basename}`)
+    return 'unattended'
+  }
+  return confirmShellFieldApproval(approvalOpts) ? 'approved' : 'declined'
+}
 
 // ----- Supervisor spawn approval (PLAN TS4) -----
 // The trust-mode gate behind deck_spawn_session / deck_spawn_team. hands-free:
@@ -2235,7 +2277,13 @@ const controlDeps: DeckControlDeps = {
   // 96c98453 this forwards a discriminated TemplateResolveResult, not
   // TemplateInput[] | null -- deck-control.ts's own dep type and call site
   // were updated to match (see its own templateInputsOrEmpty usage).
-  resolveTemplate: (path) => resolveTemplateInputs(path),
+  // Card 64f8f629: deck-control has its own bearer-token caller identity,
+  // never the companion's REMOTE_EVENT sentinel, so its attendance signal
+  // cannot be derived the way ipc.ts's does -- it reuses the same
+  // hands-free check confirmSpawnShellFields already applies to a parallel
+  // decision (spawn approval) for this one (template shell-field approval).
+  resolveTemplate: (path) =>
+    resolveTemplateInputs(path, getConfig().supervisorSpawnMode === 'hands-free' ? 'unattended' : 'attended'),
   // Append-only by contract (deck-control): never closes existing tiles.
   // `checkpoint`/`hasLead` are decided ONCE by the caller for the whole
   // batch (same semantics the old inline loop had) and threaded through here

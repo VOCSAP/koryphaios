@@ -124,7 +124,7 @@ test("restoring a workspace is not a silent no-op success", () => {
   svc.releaseOnQuit();
   live = [];
   const next = makeService(proj, () => live, restored);
-  const result = next.restore(saved.id);
+  const result = next.restore(saved.id, "attended");
 
   expect(result).toEqual({ ok: true });
   // fromWorkspaceSessions mints a fresh local id/createdAt on restore, so
@@ -167,7 +167,7 @@ test("restoring the workspace this instance already owns succeeds (lock self-exe
   const current = svc.listForCwd()[0]!;
   expect(current.current).toBe(true);
 
-  expect(svc.restore(current.id)).toEqual({ ok: true });
+  expect(svc.restore(current.id, "attended")).toEqual({ ok: true });
   expect(restored.at(-1)).toHaveLength(1);
   expect(restored.at(-1)![0]).toMatchObject({ name: "team-lead", sessionId: "sid-team-lead" });
 
@@ -197,7 +197,7 @@ test("restore() refuses a workspace persisted with zero sessions, never touching
   };
   saveWorkspace(proj, empty);
 
-  const result = svc.restore("legacy-empty");
+  const result = svc.restore("legacy-empty", "attended");
 
   expect(result).toEqual({ ok: false, reason: "empty" });
   // restoreFrom starts with pty.killAll() in the real service -- proving it
@@ -223,7 +223,7 @@ test("empty deck + a non-empty current workspace is NOT caught by the zero-sessi
   // agents, so it must not also swallow the case where the deck's live agent
   // count has dropped to 0 -- the two guards count different things and must
   // not collide.
-  expect(svc.restore(current.id)).toEqual({ ok: true });
+  expect(svc.restore(current.id, "attended")).toEqual({ ok: true });
   expect(restored.at(-1)).toHaveLength(1);
 
   svc.releaseOnQuit();

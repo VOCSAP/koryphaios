@@ -6,18 +6,22 @@
  */
 export type WorkspaceRestoreResult =
   | { ok: true }
-  | { ok: false; reason: 'missing' | 'empty' | 'locked' | 'shell-declined' | 'cwd-declined' | 'lock-race' }
+  | {
+      ok: false
+      reason: 'missing' | 'empty' | 'locked' | 'shell-declined' | 'cwd-declined' | 'lock-race' | 'unattended'
+    }
 
 /**
- * Excludes lock-race by hand, not derived from workspaceRestoreOrThrow's own
- * switch -- the two must be kept in sync manually.
- * A second reason that starts throwing needs adding here too: forgetting fails
+ * Excludes lock-race and unattended by hand, not derived from
+ * workspaceRestoreOrThrow's own switch -- the two must be kept in sync
+ * manually.
+ * A third reason that starts throwing needs adding here too: forgetting fails
  * safe (the exhaustive switch below would then fail to compile) but is not
  * automatic.
  */
 export type WorkspaceRestoreQuietReason = Exclude<
   Exclude<WorkspaceRestoreResult, { ok: true }>['reason'],
-  'lock-race'
+  'lock-race' | 'unattended'
 >
 
 /** The main-process sink's resolved (non-throwing) outcome. */
@@ -29,7 +33,12 @@ export type WorkspaceRestoreOutcome = { applied: true } | { applied: false; reas
  * deliberate choice at the approval dialog, so they resolve quietly too.
  * 'lock-race' throws: restoreFrom() already swapped the live sessions before
  * the lock reclaim failed, so announced and real state would otherwise diverge.
- * The switch's never-typed default makes a future seventh reason a compile
+ * 'unattended' (card 64f8f629) throws too: a caller with nobody at the
+ * desktop app to answer the shell-field/untrusted-cwd approval dialog never
+ * got a chance to decide anything, unlike 'shell-declined'/'cwd-declined'
+ * (an operator's own deliberate click) -- a quiet return here would read as
+ * an ordinary no-op restore instead of the blocked approval it actually is.
+ * The switch's never-typed default makes a future eighth reason a compile
  * error, not a silent fall-through.
  */
 export function workspaceRestoreOrThrow(result: WorkspaceRestoreResult): WorkspaceRestoreOutcome {
@@ -44,6 +53,10 @@ export function workspaceRestoreOrThrow(result: WorkspaceRestoreResult): Workspa
     case 'lock-race':
       throw new Error(
         'workspace restore failed partway through: your sessions were already swapped, but the lock could not be reclaimed -- check the current state in the workspace picker'
+      )
+    case 'unattended':
+      throw new Error(
+        'workspace runs custom shell commands or opens a folder outside the project and needs an operator at the desktop app to approve it -- open the desktop window and retry'
       )
     default: {
       const _exhaustive: never = result.reason

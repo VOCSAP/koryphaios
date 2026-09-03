@@ -42,18 +42,31 @@ test("lock-race throws, with an actionable message naming what happened", () => 
   );
 });
 
-// Card 07134c6a, proof #1 (mirrors card 96c98453's own proof #1): a
-// mutation that reverts the fix -- lock-race silently resolving instead of
-// throwing -- must go RED. This pins the CURRENT, correct mapping: exactly
-// one of six reasons throws.
-test("proof #1: exactly one reason ('lock-race') throws; the other five resolve", () => {
+// Card 64f8f629: unlike shell-declined/cwd-declined (the operator's own
+// click, who already knows why), an unattended caller never got a chance to
+// decide anything -- a quiet resolve here would read as an ordinary no-op
+// restore instead of the blocked approval it actually is.
+test("unattended throws, with an actionable message distinct from lock-race's", () => {
+  expect(() => workspaceRestoreOrThrow({ ok: false, reason: "unattended" })).toThrow(
+    /operator at the desktop app/
+  );
+  expect(() => workspaceRestoreOrThrow({ ok: false, reason: "unattended" })).not.toThrow(/already swapped/);
+});
+
+// Card 07134c6a, proof #1 (mirrors card 96c98453's own proof #1); extended by
+// card 64f8f629 with 'unattended'. A mutation that reverts either fix --
+// lock-race or unattended silently resolving instead of throwing -- must go
+// RED. This pins the CURRENT, correct mapping: exactly two of seven reasons
+// throw.
+test("proof #1: exactly 'lock-race' and 'unattended' throw; the other five resolve", () => {
   const reasons: WorkspaceRestoreResult[] = [
     { ok: false, reason: "missing" },
     { ok: false, reason: "empty" },
     { ok: false, reason: "locked" },
     { ok: false, reason: "shell-declined" },
     { ok: false, reason: "cwd-declined" },
-    { ok: false, reason: "lock-race" }
+    { ok: false, reason: "lock-race" },
+    { ok: false, reason: "unattended" }
   ];
   const threw = reasons.map((r) => {
     try {
@@ -63,15 +76,15 @@ test("proof #1: exactly one reason ('lock-race') throws; the other five resolve"
       return true;
     }
   });
-  expect(threw).toEqual([false, false, false, false, false, true]);
+  expect(threw).toEqual([false, false, false, false, false, true, true]);
 });
 
 // The switch's `default: { const _exhaustive: never = result.reason; ... }`
-// is a compile-time guard (a 7th reason literal -- e.g. 64f8f629's own
-// 'unattended caller' -- added to the union without a case fails
-// `npm run typecheck:node`/`typecheck:web`, not this test) -- this run-time
-// case only documents the fallback shape for a value that bypasses the type
-// system, it does not exercise the exhaustiveness check itself.
+// is a compile-time guard (an 8th reason literal added to the union without
+// a case fails `npm run typecheck:node`/`typecheck:web`, not this test) --
+// this run-time case only documents the fallback shape for a value that
+// bypasses the type system, it does not exercise the exhaustiveness check
+// itself.
 test("an unrecognised reason value (bypassing the type system) throws rather than silently resolving", () => {
   const bogus = { ok: false, reason: "something-new" } as unknown as WorkspaceRestoreResult;
   expect(() => workspaceRestoreOrThrow(bogus)).toThrow();

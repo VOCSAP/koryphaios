@@ -50,6 +50,16 @@ test("malformed: throws, with a message distinct from containment's", () => {
   }
 });
 
+// Card 64f8f629: unlike 'refused' (the operator's own click, who already
+// knows why), an unattended caller never got a chance to decide anything --
+// a quiet null here would read as a silent refusal instead of the blocked
+// approval it actually is.
+test("unattended: throws, with a message distinct from refused's silent null", () => {
+  expect(() => templateInputsOrThrow({ ok: false, reason: "unattended" }, "/t/local.json")).toThrow(
+    /operator at the desktop app/
+  );
+});
+
 // Card 96c98453, proof #1 requested by the team-lead: a mutation that
 // reverts the pre-fix behaviour (a real anomaly resolves to a returned
 // value instead of a thrown error, exactly ipc.ts's old
@@ -57,7 +67,7 @@ test("malformed: throws, with a message distinct from containment's", () => {
 // mapping: 'containment' and 'malformed' both throw, only 'refused'
 // resolves to a value (null).
 test("proof #1: only 'refused' resolves to a value; every other non-ok reason throws", () => {
-  const reasons: NotOk["reason"][] = ["containment", "malformed", "refused"];
+  const reasons: NotOk["reason"][] = ["containment", "malformed", "refused", "unattended"];
   const outcomes = reasons.map((reason) => {
     try {
       return { threw: false, value: templateInputsOrThrow({ ok: false, reason }, "/x.json") };
@@ -65,7 +75,7 @@ test("proof #1: only 'refused' resolves to a value; every other non-ok reason th
       return { threw: true, value: undefined };
     }
   });
-  expect(outcomes.map((o) => o.threw)).toEqual([true, true, false]);
+  expect(outcomes.map((o) => o.threw)).toEqual([true, true, false, true]);
 });
 
 // The switch's `default: { const _exhaustive: never = result.reason; ... }`
@@ -91,7 +101,7 @@ test("ok:true resolves to its own inputs, untouched", () => {
 // reasons, not just the one deck-control.ts's own tests happened to cover
 // before this correction.
 test("every non-ok reason resolves to an empty array, never throws", () => {
-  const reasons: NotOk["reason"][] = ["containment", "malformed", "refused"];
+  const reasons: NotOk["reason"][] = ["containment", "malformed", "refused", "unattended"];
   for (const reason of reasons) {
     expect(templateInputsOrEmpty({ ok: false, reason })).toEqual([]);
   }

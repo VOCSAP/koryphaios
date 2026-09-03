@@ -37,6 +37,24 @@ import {
 import { fromWorkspaceSessions, toWorkspaceSessions } from './workspace-session-map'
 import { logWarn, reportError } from './log'
 
+/**
+ * Whether a restore() caller has an operator at the desktop app who could
+ * answer a blocking approval dialog (card 64f8f629). A literal union, never
+ * a boolean, so a call site names which one it means instead of an easily
+ * inverted `!` -- ipc.ts, deck-control.ts and index.ts all import this same
+ * alias rather than each declaring their own union.
+ */
+export type CallerAttendance = 'attended' | 'unattended'
+
+/**
+ * A single shell-field/untrusted-cwd approval gate's outcome (card
+ * 64f8f629): 'declined' is the operator's own deliberate refusal at the
+ * dialog: 'unattended' is a caller nobody could show that dialog to in the
+ * first place, which restore() must report as its own reason rather than
+ * folding into 'declined'.
+ */
+export type WorkspaceApprovalGateResult = 'approved' | 'declined' | 'unattended'
+
 const HEARTBEAT_MS = 30_000
 /** Cross-host lock is stale after this without a heartbeat (best-effort, DESIGN 15). */
 const LOCK_STALE_MS = 120_000
@@ -112,13 +130,15 @@ export interface WorkspaceDeps {
    * Operator approval gate for a workspace whose sessions carry shell-bearing
    * `args` (card 09d54a29, mirroring the template B4 gate): called by
    * `restore()` ONLY when `workspaceHasShellFields(ws)` is true, BEFORE
-   * `service.restoreFrom()` ever runs. Returning false refuses the restore.
+   * `service.restoreFrom()` ever runs. `attendance` (card 64f8f629) tells the
+   * gate whether an operator could actually answer its dialog -- 'unattended'
+   * must never open one, see the implementation's own doc (index.ts).
    * Production default (index.ts) reuses the same launch-approval.ts
    * isApproved/approve mechanism and dialog copy the template gate already
    * uses, so the two cannot drift apart the way they already had (the `lead`
    * field capture gap).
    */
-  confirmShellFields: (ws: Workspace) => boolean
+  confirmShellFields: (ws: Workspace, attendance: CallerAttendance) => WorkspaceApprovalGateResult
   /**
    * Operator approval gate for a workspace whose sessions carry a `cwd`
    * OUTSIDE the project tree (card 09d54a29 follow-up, GX-SEC class): called
@@ -130,7 +150,7 @@ export interface WorkspaceDeps {
    * (not folded into confirmShellFields) so the two vulnerability classes
    * are never silently conflated.
    */
-  confirmUntrustedCwd: (ws: Workspace) => boolean
+  confirmUntrustedCwd: (ws: Workspace, attendance: CallerAttendance) => WorkspaceApprovalGateResult
   pid?: number
   host?: string
   /** THIS process's own actual start time (epoch ms). Test-injectable like
@@ -385,10 +405,12 @@ export class WorkspaceService {
 
   /**
    * Restore a workspace: adopt its scope, swap the session set, set the layout.
-   * Returns a discriminated WorkspaceRestoreResult naming which of six
-   * no-op/failure reasons applies, never a bare boolean.
+   * Returns a discriminated WorkspaceRestoreResult naming which of seven
+   * no-op/failure reasons applies, never a bare boolean. `attendance` (card
+   * 64f8f629) is required and threaded to both approval gates below -- there
+   * is no default, so a caller that forgets to name it fails to compile.
    */
-  restore(id: string): WorkspaceRestoreResult {
+  restore(id: string, attendance: CallerAttendance): WorkspaceRestoreResult {
     const ws = loadWorkspace(this.deps.projectDir, id)
     if (!ws) return { ok: false, reason: 'missing' }
     // A workspace persisted with zero sessions (a legacy empty snapshot minted
@@ -433,18 +455,19 @@ export class WorkspaceService {
     // silently downgrades resume to fresh (re-attaching args) whenever the
     // stored claudeSessionId has no matching transcript, which a hostile
     // workspace file gets for free by supplying one that never had one.
-    if (workspaceHasShellFields(ws) && !this.deps.confirmShellFields(ws)) {
-      return { ok: false, reason: 'shell-declined' }
+    if (workspaceHasShellFields(ws)) {
+      const gate = this.deps.confirmShellFields(ws, attendance)
+      if (gate === 'declined') return { ok: false, reason: 'shell-declined' }
+      if (gate === 'unattended') return { ok: false, reason: 'unattended' }
     }
     // Card 09d54a29 follow-up: a session `cwd` outside the project tree
     // becomes a readable root for the explorer/diff channels the moment it
     // is live (ipc.ts workDirRoots trusts every live session's cwd) -- a
     // separate approval from the args gate above, see workspaceHasUntrustedCwd.
-    if (
-      workspaceHasUntrustedCwd(ws, this.deps.projectDir) &&
-      !this.deps.confirmUntrustedCwd(ws)
-    ) {
-      return { ok: false, reason: 'cwd-declined' }
+    if (workspaceHasUntrustedCwd(ws, this.deps.projectDir)) {
+      const gate = this.deps.confirmUntrustedCwd(ws, attendance)
+      if (gate === 'declined') return { ok: false, reason: 'cwd-declined' }
+      if (gate === 'unattended') return { ok: false, reason: 'unattended' }
     }
     this.deps.adoptScope({ groupId: ws.groupId, scopeKind: ws.scopeKind })
     this.deps.setConfig(fromDisplayMode(ws.displayMode))

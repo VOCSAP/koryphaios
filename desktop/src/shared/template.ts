@@ -87,13 +87,16 @@ export interface TemplateInput {
  * (card 96c98453). 'refused' is the operator's own choice in the shell-field
  * approval dialog and is NOT an error -- 'containment' (path outside the
  * allowed template dirs) and 'malformed' (unreadable / invalid file) are real
- * anomalies. Consumers must switch on `reason` with a never-exhaustiveness
- * default so a future fourth reason fails to compile instead of silently
- * falling into an existing bucket.
+ * anomalies. 'unattended' (card 64f8f629) is a caller with nobody at the
+ * desktop app to answer the approval dialog: distinct from 'refused' (an
+ * operator's deliberate click) because the caller here never got a chance to
+ * decide anything. Consumers must switch on `reason` with a never-
+ * exhaustiveness default so a future fifth reason fails to compile instead of
+ * silently falling into an existing bucket.
  */
 export type TemplateResolveResult =
   | { ok: true; inputs: TemplateInput[] }
-  | { ok: false; reason: 'containment' | 'malformed' | 'refused' }
+  | { ok: false; reason: 'containment' | 'malformed' | 'refused' | 'unattended' }
 
 /**
  * Build a template from the current session defs. Keeps name/command/args/

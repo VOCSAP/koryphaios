@@ -26,6 +26,10 @@ export function templateInputsOrThrow(result: TemplateResolveResult, path: strin
       throw new Error(`template path is outside the allowed template directories: ${path}`)
     case 'malformed':
       throw new Error(`template file is missing or invalid: ${path}`)
+    case 'unattended':
+      throw new Error(
+        `template runs custom shell commands and needs an operator at the desktop app to approve it: ${path} -- open the desktop window and retry`
+      )
     default: {
       const _exhaustive: never = result.reason
       throw new Error(`unknown template resolution failure: ${String(_exhaustive)}`)
@@ -44,6 +48,7 @@ export function templateInputsOrEmpty(result: TemplateResolveResult): TemplateIn
     case 'containment':
     case 'malformed':
     case 'refused':
+    case 'unattended':
       return []
     default: {
       const _exhaustive: never = result.reason
