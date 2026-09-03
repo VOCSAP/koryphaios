@@ -44,7 +44,12 @@ import {
 } from './magic-compact'
 import { approve, commandHash, isApproved, resolveApprovedLaunchCommand } from './launch-approval'
 import { homedir, hostname } from 'node:os'
-import { WorkspaceService, type CallerAttendance, type WorkspaceApprovalGateResult } from './workspace-service'
+import {
+  WorkspaceService,
+  refusesUnattendedApproval,
+  type CallerAttendance,
+  type WorkspaceApprovalGateResult
+} from './workspace-service'
 import type { WorkspaceSession } from './workspace-store'
 import {
   BrokerHealthTracker,
@@ -1959,28 +1964,24 @@ function spawnShellFieldKey(entry: { command?: string; args?: string }): {
 }
 
 /**
- * Same content-hash-keyed approval cache as confirmShellFieldApproval, plus
- * hands-free awareness: a payload not already cache-approved is refused and
- * journaled rather than opening a blocking dialog nobody is watching. One
- * approval in team-review or full-control lets every later hands-free spawn
- * of the same payload pass.
+ * Same content-hash-keyed approval cache as confirmShellFieldApproval (card
+ * 64f8f629's isShellFieldPreApproved/shellFieldApprovalCacheKey), applied to
+ * a spawn entry's shell fields. `attendance` (card ffafeea6) is always
+ * 'unattended' on this route -- a deck-control caller is by construction an
+ * agent, never the operator at the desktop -- so an unapproved payload
+ * refuses and journals rather than opening a blocking dialog nobody is
+ * watching.
  * The cache lives in userData, writable by any non-sandboxed host agent: it
  * separates cooperating authorities by role and does not resist a hostile
  * agent pre-approving its own payload.
  */
-const confirmSpawnShellFields = (entry: { command?: string; args?: string }): boolean => {
+const confirmSpawnShellFields = (
+  entry: { command?: string; args?: string },
+  attendance: CallerAttendance
+): boolean => {
   if (!sessionsHaveShellFields([entry])) return true
   const { basename, hashPayload } = spawnShellFieldKey(entry)
-  if (getConfig().supervisorSpawnMode === 'hands-free') {
-    const key = `${computeDeckProjectKey(getConfig().projectDir)}::${DECK_SPAWN_SHELL_FIELD_KEYPART}::${basename}`
-    if (isApproved(approvalsFile(), key, JSON.stringify(hashPayload))) return true
-    journal.add(
-      'session',
-      `deck-spawn shell fields refused (hands-free, not pre-approved): ${hashPayload.args || hashPayload.command}`
-    )
-    return false
-  }
-  return confirmShellFieldApproval({
+  const approvalOpts: ShellFieldApprovalOpts = {
     keyPart: DECK_SPAWN_SHELL_FIELD_KEYPART,
     basename,
     hashPayload,
@@ -1994,7 +1995,15 @@ const confirmSpawnShellFields = (entry: { command?: string; args?: string }): bo
       'Ce lancement de session demandé par un agent exécute des arguments personnalisés dans un shell.',
     buttonsEn: ['Spawn this session', 'Refuse'],
     buttonsFr: ['Lancer cette session', 'Refuser']
-  })
+  }
+  if (refusesUnattendedApproval(attendance, isShellFieldPreApproved(approvalOpts))) {
+    journal.add(
+      'session',
+      `deck-spawn shell fields refused (no attended operator, not pre-approved): ${hashPayload.args || hashPayload.command}`
+    )
+    return false
+  }
+  return confirmShellFieldApproval(approvalOpts)
 }
 
 /**
@@ -2122,9 +2131,11 @@ const confirmWorkspaceUntrustedCwd = (
 
 // ----- Supervisor spawn approval (PLAN TS4) -----
 // The trust-mode gate behind deck_spawn_session / deck_spawn_team. hands-free:
-// no UI (the consent rule lives in the supervisor's system prompt); team-review:
-// ONE recap dialog approves/refuses the whole plan; full-control: one dialog per
-// entry. Dialogs reuse the native pattern of the template approval (B4).
+// no UI (the consent rule lives in the supervisor's system prompt); team-review
+// would show ONE recap dialog, full-control one dialog per entry -- but every
+// caller of this gate is a deck-control (agent) caller, CallerAttendance is
+// always 'unattended' here (card ffafeea6), so those two modes refuse instead
+// of opening a dialog nobody at the desktop could answer.
 const summaryLine = (s: SpawnSummary): string => {
   const parts = [
     `• ${s.name}`,
@@ -2157,9 +2168,17 @@ const spawnDialog = (title: string, detail: string): boolean => {
   )
 }
 
-const approveSpawn = async (entries: SpawnSummary[]): Promise<boolean[]> => {
+const approveSpawn = async (entries: SpawnSummary[], attendance: CallerAttendance): Promise<boolean[]> => {
   const mode = getConfig().supervisorSpawnMode
   if (mode === 'hands-free' || entries.length === 0) return entries.map(() => true)
+  // alreadyApproved is always false here: unlike confirmSpawnShellFields's
+  // per-payload cache, a whole spawn PLAN has no pre-approval concept to
+  // fall back on -- an unattended caller refuses unconditionally rather than
+  // opening spawnDialog on nobody.
+  if (refusesUnattendedApproval(attendance, false)) {
+    journal.add('session', `supervisor spawn plan (${entries.length}) refused (no attended operator to review)`)
+    return entries.map(() => false)
+  }
   const isFr = isFrLocale()
   if (mode === 'team-review') {
     const ok = spawnDialog(
@@ -2284,13 +2303,12 @@ const controlDeps: DeckControlDeps = {
   // 96c98453 this forwards a discriminated TemplateResolveResult, not
   // TemplateInput[] | null -- deck-control.ts's own dep type and call site
   // were updated to match (see its own templateInputsOrEmpty usage).
-  // Card 64f8f629: deck-control has its own bearer-token caller identity,
-  // never the companion's REMOTE_EVENT sentinel, so its attendance signal
-  // cannot be derived the way ipc.ts's does -- it reuses the same
-  // hands-free check confirmSpawnShellFields already applies to a parallel
-  // decision (spawn approval) for this one (template shell-field approval).
-  resolveTemplate: (path) =>
-    resolveTemplateInputs(path, getConfig().supervisorSpawnMode === 'hands-free' ? 'unattended' : 'attended'),
+  // Card ffafeea6: a deck-control caller is by construction an agent, never
+  // the operator at the desktop -- 'unattended' unconditionally, regardless
+  // of supervisorSpawnMode. An unapproved shell-bearing template refuses
+  // rather than opening confirmShellFieldApproval's blocking dialog on a
+  // caller who could never answer it.
+  resolveTemplate: (path) => resolveTemplateInputs(path, 'unattended'),
   // Append-only by contract (deck-control): never closes existing tiles.
   // `checkpoint`/`hasLead` are decided ONCE by the caller for the whole
   // batch (same semantics the old inline loop had) and threaded through here
@@ -2320,7 +2338,9 @@ const controlDeps: DeckControlDeps = {
   announce: (text) => broadcastAnnounce(text),
   // Team spawn (TS2-TS4): trust-mode gate, sync/async connection acks, and the
   // embedded profile prompt regenerated from the code constant at every spawn.
-  approveSpawn,
+  // Card ffafeea6: 'unattended' unconditionally, same reasoning as
+  // resolveTemplate above -- this route's caller is never the operator.
+  approveSpawn: (entries) => approveSpawn(entries, 'unattended'),
   waitForPeer,
   armSpawnAck,
   writeEmbeddedPrompt: (id) =>
@@ -2360,7 +2380,9 @@ const controlDeps: DeckControlDeps = {
     cleanupTeamLeadMcpFile(callerId)
   },
   // Audit fix #1c (card 6c380073): see confirmSpawnShellFields's own doc.
-  confirmSpawnShellFields: (entry) => confirmSpawnShellFields(entry)
+  // Card ffafeea6: 'unattended' unconditionally, same reasoning as
+  // resolveTemplate/approveSpawn above.
+  confirmSpawnShellFields: (entry) => confirmSpawnShellFields(entry, 'unattended')
 }
 
 let controlServer: DeckControlServer | null = null

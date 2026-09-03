@@ -1435,81 +1435,107 @@ test("deck_list_sessions: sessionView's `thinking` field carries 'working'/'idle
 });
 
 // This branch lives in index.ts's confirmSpawnShellFields, not
-// bun-test-importable (electron: dialog), so it is covered by a source scan on
-// the real file instead; the behavioural halves are covered by the two tests
-// above against the real deck-control.ts dispatch.
+// bun-test-importable (electron: dialog), so it is covered by a source scan
+// on the real file instead; the behavioural halves are covered by the two
+// tests above against the real deck-control.ts dispatch. The guarantee: an
+// UNATTENDED caller refuses BEFORE confirmShellFieldApproval's dialog call,
+// in every supervisorSpawnMode -- the function reads only CallerAttendance,
+// never supervisorSpawnMode, so there is a single branch to anchor on rather
+// than one per mode.
 
 const INDEX_TS_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
 
+const CONFIRM_SPAWN_SHELL_FIELDS_SIGNATURE =
+  /const confirmSpawnShellFields = \(\s*entry: \{ command\?: string; args\?: string \},\s*attendance: CallerAttendance\s*\): boolean => \{/g;
+
 function extractConfirmSpawnShellFieldsBody(src: string): string {
-  const fnMatch =
-    /const confirmSpawnShellFields = \(entry: \{ command\?: string; args\?: string \}\): boolean => \{/.exec(
-      src
-    );
-  if (!fnMatch) {
+  const matches = [...src.matchAll(CONFIRM_SPAWN_SHELL_FIELDS_SIGNATURE)];
+  if (matches.length === 0) {
     throw new Error(
       "confirmSpawnShellFields not found in index.ts with its expected signature -- has it been renamed?"
     );
   }
-  return extractBracedBody(src, fnMatch.index + fnMatch[0].length - 1);
+  if (matches.length > 1) {
+    throw new Error(
+      `confirmSpawnShellFields signature matched ${matches.length} times -- anchor is no longer unique, cannot pick one without guessing`
+    );
+  }
+  const m = matches[0]!;
+  return extractBracedBody(src, m.index + m[0].length - 1);
 }
 
-const HANDS_FREE_CHECK = /supervisorSpawnMode\s*===\s*'hands-free'/;
+const UNATTENDED_REFUSAL_CALL = /refusesUnattendedApproval\(/;
 const DIALOG_GATE_CALL = /confirmShellFieldApproval\(/;
 
 /**
- * WEAK by design (see the block comment above): only proves the hands-free
- * check appears BEFORE the dialog-opening call textually, and that a
- * `return false` exists in that same preceding slice (the refusal). Cannot,
- * by source scan alone, prove the cache lookup itself is correct -- that is
- * covered by launch-approval.ts's own isApproved/approve tests.
+ * WEAK by design (see the block comment above): only proves the
+ * refusesUnattendedApproval call appears BEFORE the dialog-opening call
+ * textually, and that a `return false` exists in that same preceding slice
+ * (the refusal). Cannot, by source scan alone, prove refusesUnattendedApproval
+ * itself decides correctly -- that is covered by a direct unit test on the
+ * predicate.
  */
-function handsFreeRefusesBeforeDialog(body: string): boolean {
-  const handsFreeIdx = body.search(HANDS_FREE_CHECK);
-  if (handsFreeIdx === -1) return false;
+function unattendedRefusesBeforeDialog(body: string): boolean {
+  const refusalIdx = body.search(UNATTENDED_REFUSAL_CALL);
+  if (refusalIdx === -1) return false;
   const dialogIdx = body.search(DIALOG_GATE_CALL);
   if (dialogIdx === -1) return false;
-  if (handsFreeIdx > dialogIdx) return false;
-  const handsFreeBranch = body.slice(handsFreeIdx, dialogIdx);
-  return /return false/.test(handsFreeBranch);
+  if (refusalIdx > dialogIdx) return false;
+  const refusalBranch = body.slice(refusalIdx, dialogIdx);
+  return /return false/.test(refusalBranch);
 }
 
-test("confirmSpawnShellFields refuses BEFORE opening the dialog in hands-free mode (real file)", () => {
+test("confirmSpawnShellFields refuses BEFORE opening the dialog for an unattended caller, in every mode (real file)", () => {
   const body = extractConfirmSpawnShellFieldsBody(readFileSync(INDEX_TS_PATH, "utf-8"));
-  expect(handsFreeRefusesBeforeDialog(body)).toBe(true);
+  expect(unattendedRefusesBeforeDialog(body)).toBe(true);
 });
 
-// RED-proof: the checker itself, against synthetic bodies -- immune to
-// source drift in index.ts.
+// RED-proof: the extractor and the checker, against synthetic sources --
+// immune to source drift in index.ts.
 
-test("the checker REJECTS a body that opens the dialog unconditionally (no hands-free branch at all)", () => {
-  const noHandsFree = `
+test("the extractor throws when the signature is absent", () => {
+  expect(() => extractConfirmSpawnShellFieldsBody("no such function here")).toThrow(/has it been renamed/);
+});
+
+test("the extractor throws (never picks the first) when the signature matches more than once", () => {
+  const oneOccurrence = `const confirmSpawnShellFields = (
+  entry: { command?: string; args?: string },
+  attendance: CallerAttendance
+): boolean => {
+  return true
+}
+`;
+  const twice = oneOccurrence + "\n" + oneOccurrence;
+  expect(() => extractConfirmSpawnShellFieldsBody(twice)).toThrow(/matched 2 times/);
+});
+
+test("the checker REJECTS a body that opens the dialog unconditionally (no refusal branch at all)", () => {
+  const noRefusalBranch = `
     if (!sessionsHaveShellFields([entry])) return true
     return confirmShellFieldApproval({ keyPart: 'deck-spawn' })
   `;
-  expect(handsFreeRefusesBeforeDialog(noHandsFree)).toBe(false);
+  expect(unattendedRefusesBeforeDialog(noRefusalBranch)).toBe(false);
 });
 
-test("the checker REJECTS a body where the hands-free branch does NOT refuse (falls through to the dialog anyway)", () => {
+test("the checker REJECTS a body where the unattended branch does NOT refuse (falls through to the dialog anyway)", () => {
   const fallsThrough = `
     if (!sessionsHaveShellFields([entry])) return true
-    if (getConfig().supervisorSpawnMode === 'hands-free') {
+    if (refusesUnattendedApproval(attendance, isShellFieldPreApproved(approvalOpts))) {
       journal.add('session', 'note only, no refusal')
     }
     return confirmShellFieldApproval({ keyPart: 'deck-spawn' })
   `;
-  expect(handsFreeRefusesBeforeDialog(fallsThrough)).toBe(false);
+  expect(unattendedRefusesBeforeDialog(fallsThrough)).toBe(false);
 });
 
-test("the checker ACCEPTS the new shape (hands-free checked and refuses BEFORE the dialog call)", () => {
+test("the checker ACCEPTS the new shape (unattended checked and refuses BEFORE the dialog call)", () => {
   const newBody = `
     if (!sessionsHaveShellFields([entry])) return true
-    if (getConfig().supervisorSpawnMode === 'hands-free') {
-      if (isApproved(approvalsFile(), key, JSON.stringify(hashPayload))) return true
+    if (refusesUnattendedApproval(attendance, isShellFieldPreApproved(approvalOpts))) {
       journal.add('session', 'refused')
       return false
     }
     return confirmShellFieldApproval({ keyPart: 'deck-spawn' })
   `;
-  expect(handsFreeRefusesBeforeDialog(newBody)).toBe(true);
+  expect(unattendedRefusesBeforeDialog(newBody)).toBe(true);
 });

@@ -55,6 +55,20 @@ export type CallerAttendance = 'attended' | 'unattended'
  */
 export type WorkspaceApprovalGateResult = 'approved' | 'declined' | 'unattended'
 
+/**
+ * Whether an attendance-gated approval must refuse outright, without ever
+ * opening its dialog (card ffafeea6): true only for an 'unattended' caller
+ * whose payload has no separate pre-approval to fall back on. Shared by
+ * index.ts's confirmSpawnShellFields (payload may be cache pre-approved,
+ * pass its own check) and approveSpawn (no pre-approval concept exists for a
+ * whole spawn plan, so it always calls with alreadyApproved=false) so the
+ * two dialog-opening sinks that route closes agree on one definition of
+ * 'unattended' rather than two that could drift.
+ */
+export function refusesUnattendedApproval(attendance: CallerAttendance, alreadyApproved: boolean): boolean {
+  return attendance === 'unattended' && !alreadyApproved
+}
+
 const HEARTBEAT_MS = 30_000
 /** Cross-host lock is stale after this without a heartbeat (best-effort, DESIGN 15). */
 const LOCK_STALE_MS = 120_000
