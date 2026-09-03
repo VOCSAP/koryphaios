@@ -1,34 +1,11 @@
-// Pure activity predicate over OSC 0/2 emission FREQUENCY. Card f8082208 /
-// docs/DESIGN-ACTIVITY-PREDICATE.md, verdict rendered 2026-08-26. No
-// electron/node-pty import -- unit-testable directly under bun, same
-// discipline as detect/osc.ts.
-//
-// VERDICT this module encodes: the FREQUENCY of osc.ts's titleSeq counter
-// decides, the title TEXT decides nothing. A caller feeds observe() the
-// latest titleSeq (desktop/src/main/detect/osc.ts's OscSnapshot field) on
-// every PTY chunk -- this module never reads a title string or a glyph, and
-// never imports a clock of its own (see the injected `now`/`setTimer`/
-// `clearTimer` below).
-//
-// TERNARY BY DESIGN, never a boolean (design doc section 6, "audit de
-// couverture"). An agent-kind that paints no OSC 0 title at all (codex,
-// gemini, a bare shell, a sandbox session -- unmeasured, assumed) must read
-// as 'unknown' FOREVER, never silently decay to 'idle': a boolean has no
-// such state, which is exactly what would make that degradation invisible
-// -- no error, no red test, just a badge that never lights and a fleet-stop
-// that silently forgets those tiles. 'idle' is reachable ONLY after at
-// least one real observation (state starts 'unknown' and stays there until
-// the first titleSeq increase is observed).
-//
-// FRONT-EDGE, never LEVEL (design doc's own M4 measurement: a six-emission
-// burst followed by silence). Every OBSERVED titleSeq increase re-arms the
-// idle timer from the moment it is observed -- 'working' extends idleMs
-// PAST THE LAST increase, never just "is a title arriving right now".
-//
-// INJECTED CLOCK (design doc section 7, the obligatory difference from
-// thinking.ts's ThinkingDetector): the caller's wiring becomes pure and
-// replayable against a real PTY fixture's own recorded timestamps, with no
-// real setTimeout/Date.now() involved in a test.
+// Frequency of the OSC title counter decides activity, never the title text
+// itself; this module never reads a title string or imports a clock of its own.
+// Ternary, not boolean: an agent kind that never paints an OSC 0 title reads as
+// 'unknown' forever rather than silently decaying to 'idle', so a fleet-stop
+// cannot silently forget those tiles.
+// Front-edge, not level: every observed titleSeq increase re-arms the idle
+// timer, so 'working' extends past the last increase rather than requiring one
+// right now.
 
 export type Activity = 'working' | 'idle' | 'unknown'
 

@@ -1,62 +1,15 @@
-// Card 69e5a3e0. Cold, one-shot migration. shared/project-key.ts's
-// normalizeRemoteUrl now lowercases the owner/repo path in addition to the
-// host (it used to lowercase the host only), so every table with a
-// project_key column written before that fix may carry a mixed-case key
-// that no longer matches what the fixed code computes at runtime -- two
-// clones of the same repo, cloned under different casing, used to land in
-// two different roadmap/graph/approval scopes with no error signal.
-//
-// MUST RUN COLD: broker AND every session stopped first, then this script,
-// then restart. Never against a live broker (--dry-run or otherwise): 22
-// sessions were writing project_key concurrently at the time this card was
-// filed, and this script's own idempotent WHERE-clause guarantee only holds
-// between two runs of ITSELF, not against a writer racing it mid-transaction.
-//
-// TABLE DISCOVERY IS BY SCHEMA INTROSPECTION (sqlite_master + PRAGMA
-// table_info), never a hand-written list. This card exists because a
-// hand-written enumeration of "the tables with project_key" (4 tables) was
-// short one -- approval_session_tokens (broker.ts:741, added via ALTER
-// TABLE) -- for two days, undetected because nothing forced the list to stay
-// exhaustive. A future 6th project_key-bearing table is picked up
-// automatically here. No exclusion list on principle: even the ephemeral
-// `peers` table (re-derived on every registration, so migrating it changes
-// nothing observable) is migrated, because an exclusion list is exactly the
-// hand-written-enumeration defect this script exists not to repeat.
-//
-// UNIQUE-constraint check (done once, by reading this file's own measurement
-// rather than re-deriving it every run): as of 2026-08-20 this schema has
-// exactly two UNIQUE constraints in the whole database (peers(peer_id,
-// group_id) and approval_channels(operator_id, kind, address)) and NEITHER
-// includes project_key. A mass UPDATE lowercasing project_key therefore
-// cannot throw a UNIQUE-constraint violation today. This is not re-verified
-// at runtime (schema can drift after this comment is written), which is
-// exactly why the collision check below exists independently of it: it does
-// not rely on this fact staying true.
-//
-// COLLISION = a table where a lowercase form of a key is ALREADY present
-// (literal data) alongside a mixed-case form that would migrate to it. This
-// is checked for ALL discovered tables BEFORE any UPDATE runs, so a
-// collision found in table N never leaves tables 1..N-1 already migrated.
-// On any collision, in any table: REFUSE, write nothing, exit non-zero. This
-// script never merges silently.
-//
-// Usage:
-//   bun scripts/migrate-project-key-case.ts --db <path/to/broker.sqlite>            (dry-run; default; writes nothing)
-//   bun scripts/migrate-project-key-case.ts --db <path/to/broker.sqlite> --write    (commit)
-//
-// --db has NO default and is required on purpose: this script never guesses
-// where the broker's sqlite file lives (config.db in broker.ts resolves it
-// from env/config at broker boot, which this standalone script does not
-// import or replicate).
+// Must run cold: stop the broker and every session first, then run this, then
+// restart. The idempotent WHERE-clause guarantee holds only between two runs of
+// itself, never against a concurrent writer.
+// Tables are discovered by schema introspection (sqlite_master + PRAGMA
+// table_info), never a hardcoded list, so a newly added project_key column is
+// picked up automatically.
+// Every discovered table is checked for a lowercase/mixed-case collision before
+// any UPDATE runs; a collision in any table refuses the whole run and writes
+// nothing.
+// --db has no default: it never guesses where the broker's sqlite file lives.
 
 import { Database } from "bun:sqlite";
-
-// Every function below is pure over a `Database` handle (no argv, no
-// filesystem path) so tests/migrate-project-key-case.test.ts can exercise
-// the discovery/collision/migration logic against an in-memory (`:memory:`)
-// database -- no real or on-disk file touched, satisfying this card's "no
-// execution against a real database" constraint while still proving the
-// logic red-then-green.
 
 export interface Args {
   dbPath: string;
@@ -234,15 +187,11 @@ export function migrateAll(db: Database, write: boolean): MigrateResult {
  * anything exercising it is exactly the gap this extraction closes.
  */
 export function openForMode(dbPath: string, write: boolean): Database {
-  // bun:sqlite only applies its documented default ({readwrite: true,
-  // create: true}) when NONE of readonly/create/readwrite are present in
-  // the options object at all -- passing `{readonly: false}` alone (no
-  // `create`/`readwrite`) leaves every SQLITE_OPEN_* flag unset and throws
-  // "bad parameter or other API misuse" (measured directly against a real
-  // on-disk file, 2026-08-20; both flags-omitted defaults and
-  // flags-fully-explicit work, an explicit `readonly: false` alone does
-  // not). Every branch below sets all three explicitly so behavior never
-  // depends on that undocumented default-merging.
+  // bun:sqlite only applies its {readwrite:true, create:true} default when none
+  // of readonly/create/readwrite are set at all; an explicit `{readonly:
+  // false}` alone leaves every SQLITE_OPEN_* flag unset and throws.
+  // Every branch below sets all three flags explicitly so behavior never
+  // depends on that default-merging.
   return write
     ? new Database(dbPath, { readonly: false, readwrite: true, create: true })
     : new Database(dbPath, { readonly: true, create: false });

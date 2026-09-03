@@ -1,33 +1,11 @@
-// Usage-limit gauges (usage modal): read the subscription quota meters of the
-// installed frontier CLIs — the numbers their own `/usage` / `/status` screens
-// show — so the operator sees how much runway each account has left without
-// opening three terminals.
-//
-// Per-provider mechanism (recherche 2026-07, none is a public documented API —
-// the endpoints are the ones each CLI itself calls, mirrored from the
-// community trackers CodexBar / openusage / Claude-Code-Usage-Monitor):
-// - claude:      GET api.anthropic.com/api/oauth/usage with the OAuth token
-//                Claude Code maintains in ~/.claude/.credentials.json (macOS:
-//                Keychain). Requires a `claude-code/<version>` User-Agent or
-//                the endpoint rate-limits aggressively.
-// - codex:       `codex app-server` JSON-RPC over stdio, method
-//                account/rateLimits/read (typed schema shipped in the codex
-//                repo). Fallback: the newest ~/.codex/sessions rollout file —
-//                every turn persists a rate_limits snapshot (marked stale).
-// - antigravity: POST cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary
-//                with the OAuth token the CLI keeps in the OS keyring
-//                (service "gemini", account "antigravity"), refreshed via
-//                oauth2.googleapis.com when expired. Buckets gemini-*/3p-*
-//                carry remainingFraction + resetTime per 5h/weekly window.
-//
-// Gemini CLI is deliberately NOT a provider: Google cut individual-account
-// service on 2026-06-18 (migrated to Antigravity); only org Code Assist seats
-// still answer, and the operator asked for the Antigravity path instead.
-//
-// Design rules: tokens NEVER leave this module (reports carry percentages
-// only); every network/spawn failure degrades to a per-provider status, the
-// modal never throws; pure parsers are exported for the bun test suite and
-// all effectful deps are injectable.
+// Reads the subscription quota meters of installed frontier CLIs so the
+// operator sees runway without opening three terminals.
+// None of the per-provider endpoints is a public documented API; each is the
+// one the CLI itself calls, mirrored from community trackers.
+// Gemini CLI is deliberately not a provider: individual-account service was
+// cut, only org Code Assist answers, so the Antigravity path is used instead.
+// Tokens never leave this module; every network/spawn failure degrades to a
+// per-provider status rather than throwing.
 
 import { execFile, spawn } from 'node:child_process'
 import { open, readFile, readdir } from 'node:fs/promises'
@@ -433,13 +411,13 @@ const ANTIGRAVITY_CLIENT_ID =
   '1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com'
 
 /**
- * The matching client "secret" is NOT embedded here: even though Google ships
- * it in every Antigravity install (installed-app flow — it is not actually
- * confidential), committing the literal trips GitHub secret scanning. It is
- * read at runtime instead: KORY_ANTIGRAVITY_CLIENT_SECRET env override, else
- * extracted from the local `agy` binary the way community trackers do. When
- * neither works the token refresh is skipped and the stored access token is
- * used as-is (Antigravity itself refreshes the keyring while it runs).
+ * The matching client secret is not embedded here: even though it ships in
+ * every Antigravity install and is not actually confidential, committing the
+ * literal trips secret scanning.
+ * Read at runtime instead -- an env override, or pulled out of the local binary
+ * the way community trackers do.
+ * When neither source is available, the token refresh is skipped and the stored
+ * access token is used as-is.
  */
 export function findGoogleClientSecret(text: string): string | null {
   const m = /GOCSPX-[A-Za-z0-9_-]{10,60}/.exec(text)

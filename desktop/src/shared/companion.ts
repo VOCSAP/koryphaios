@@ -223,17 +223,12 @@ export const COMPANION_MANIFEST = {
 export type CompanionMethodName = keyof typeof COMPANION_MANIFEST
 
 /**
- * Invoke channels a REMOTE client may never call (EXPLORATION §3/§5.4):
- * native dialogs open on the PC screen, browser/design captures are a desktop
- * workflow, and companion control requires physical presence at the host.
- * Enforced server-side (defense) AND stubbed shim-side (clean errors).
- *
- * This is the manually-curated FLOOR, not the whole answer -- it also
- * carries entries below tier 3 (e.g. 'shell:open-external' is tier 2) that
- * still must never be remote-callable. The exported REMOTE_BLOCKED_CHANNELS
- * below unions this list with every tier>=3 channel, so a new trust-changing
- * channel is blocked the moment it's tiered 3, with no separate deny-list
- * edit to remember. See the completeness test in tests/desktop-companion.test.ts.
+ * Invoke channels a remote client may never call: native dialogs,
+ * browser/design captures, and companion control all require physical presence
+ * at the host.
+ * Enforced server-side and stubbed shim-side. This is a manually-curated floor,
+ * not the whole answer -- REMOTE_BLOCKED_CHANNELS unions it with every tier>=3
+ * channel, so a new trust-changing channel is blocked the moment it's tiered 3.
  */
 const EXPLICIT_REMOTE_BLOCKED_CHANNELS: readonly string[] = [
   'dialog:pickDirectory',
@@ -468,12 +463,11 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
 }
 
 /**
- * DERIVED (aaf4537d lot 3): explicit floor above ∪ every channel whose
- * CHANNEL_TIERS entry is >= 3. Before this, CHANNEL_TIERS was purely
- * declarative/informational -- a channel could be tiered 3 and still be
- * missing from the hand-written deny-list above with nothing failing
- * (measured: 'config:set' and 'launch:set-global' were exactly that gap).
- * tests/desktop-companion.test.ts asserts every tier>=3 channel is a member.
+ * Derived: the explicit floor above union every channel whose CHANNEL_TIERS
+ * entry is >= 3.
+ * Before this, a channel tiered 3 but missing from the hand-written deny-list
+ * failed open silently -- config:set and launch:set-global were exactly that
+ * gap.
  */
 export const REMOTE_BLOCKED_CHANNELS: ReadonlySet<string> = new Set([
   ...EXPLICIT_REMOTE_BLOCKED_CHANNELS,

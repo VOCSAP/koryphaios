@@ -193,9 +193,7 @@ let mainWindow: BrowserWindow | null = null
 // authenticated companion client.
 addEventSink((channel, payload) => mainWindow?.webContents.send(channel, payload))
 
-// Pin the app-data folder on the "koryphaios" root (v0.7 rename; previously
-// "claude-peers-desk", and before that userData lived in "claude-peers-deck").
-// Must run before any getPath('userData') / loadConfig() below; the chained
+// Must run before any getPath('userData')/loadConfig() below; the chained
 // migrations in migrate-data-dir.ts carry the legacy folders' content over.
 // App state lives under <userData>/config to avoid colliding with the launch
 // config.json at the root.
@@ -353,44 +351,13 @@ const sanitizeConfigForRenderer = (cfg: AppConfig): AppConfig => ({
   localProviders: sanitizeProviders(cfg.localProviders ?? [])
 })
 
-// Embedded plugin: the SessionStart back-channel hook, the approval hook, the
-// deck-control and demo-browser MCP bridges, and the roadmap-card skill with
-// its roadmap-scribe agent (card a79c7696 volet 3). Loaded into every Deck
-// session via --plugin-dir so a /clear-minted session id is captured at save
-// (see desk-backchannel-hook + SessionService.refreshLiveSessionIds). Resolved
-// like ipc.ts locales: from process.resourcesPath when packaged, the app dir in
-// dev. Empty when the dir is missing (build skipped) so the spawn never breaks.
-//
-// Card d02c8e96: this used to be a module-level const, computed ONCE at boot
-// and cached for the life of the process. That is what let a packaging defect
-// go undetected for ~9h -- an aborted `electron-builder` run deleted
-// resources/deck-plugin (and locales/docs/sandbox alongside it) out from under
-// an already-running Deck, which kept passing --plugin-dir toward a directory
-// that no longer existed, silently. Fix (c): re-check existsSync LIVE, at
-// every spawn, instead of once at load. Fix (a) rides the same function: it
-// is the single point every consumer resolves through (ensureSupervisor
-// below, the demo-browser IPC handler in ipc.ts, and every session spawn via
-// SessionService's pluginDir getter), so the ONE reportError()+journal.add()
-// call below fires once per EPISODE of absence -- not once per process (that
-// would arm on the very first, harmless "no plugin dir yet" boot and stay
-// spent forever, never firing again for the mid-run deletion this card is
-// actually about) and not once per spawn (log spam for the ordinary case of
-// a dev checkout with no plugin build at all). createMissingDirTracker is a
-// pure state machine (session-command.ts) so this exact transition semantic
-// is unit-tested under bun independently of this impure module. reportError()
-// already fans into the journal via the onDeckError listener wired further
-// down, so no separate journal.add() call is needed here.
-//
-// LOAD-BEARING: getDeckPluginDir is passed BY REFERENCE to every consumer
-// (SessionService's constructor at the call site below, registerIpc's deps
-// object) -- it is never called and its result stored at module scope. That
-// is precisely what makes its first evaluation happen at SPAWN time, not at
-// boot. If this is ever "optimised" into calling it once here and passing
-// the resulting string instead of the function, that single call both loses
-// the live re-check (fix c) AND spends the tracker's one-time boot report,
-// silently re-creating this card's exact bug in a new form: --plugin-dir
-// would again point at whatever existed at boot, forever, with no signal
-// when it later disappears.
+// getDeckPluginDir re-checks existsSync live at every spawn instead of caching
+// it once at boot, so a plugin dir deleted mid-run is caught, not silently
+// kept.
+// Passed by reference to every consumer, never called and its result stored,
+// which is what makes that live check happen at spawn time rather than boot.
+// reportError fires once per episode of absence, not once per process (would
+// arm on the first harmless boot and never fire again) or per spawn (log spam).
 const deckPluginMissingTracker = createMissingDirTracker()
 const getDeckPluginDir = (): string => {
   const dir = deckPluginDirFor(app.isPackaged, process.resourcesPath, app.getAppPath())
@@ -424,27 +391,15 @@ const approvals = new ApprovalRuntime({
   projectKey: () => computeDeckProjectKey(cliContext.projectDir)
 })
 
-// Card 39c40571 layer 2: a roadmap write authored by 'deck' speaks as the
-// HUMAN, so the broker now demands an operator signature on it. The loader is
-// registered here and runs on the FIRST write, never at boot: the identity is
-// deliberately NOT read from ApprovalRuntime -- roadmap signing must keep
-// working even when approvals.arm() never runs or fails for a reason that has
-// nothing to do with the roadmap (broker unreachable at boot, a token mint
-// failure), and resolving lazily means the first write is never blocked on
-// arm() having already finished. A machine that never enrolled has no
-// identity file yet, so the first signature MINTS one; operator_id is the
-// digest of the public key, so the credential self-certifies on first contact
-// and no enrolment step is required for the backlog to work.
-//
-// KNOWN GAP, carded not patched here (be4ae042): this loader runs the same
-// `loadOperatorIdentity(...) ?? createOperatorIdentity(...)` shape
-// ApprovalRuntime.arm() used to, without arm()'s cipher.isAvailable() guard
-// (card 469f3176). Reviewer measurement: with the cipher unavailable, THIS
-// call site still swaps the live identity (old b479dd85ecdf2bdc -> now-live
-// c347b5b6b7a2d7f4) seconds after arm() correctly refused to, in the same
-// process. createOperatorIdentity's backup-before-overwrite means nothing is
-// destroyed, but the substitution still happens: the roadmap ends up signed
-// under a new operator_id nobody asked for.
+// configureRoadmapSigner's loader runs lazily on the first write, not at boot,
+// and deliberately does not read identity from ApprovalRuntime, so roadmap
+// signing keeps working when arm() never runs or fails for an unrelated reason.
+// A machine with no identity file yet mints one on that first signature;
+// operator_id is the digest of the public key, so the credential self-certifies
+// with no separate enrolment step.
+// Known gap (card be4ae042): unlike arm(), this loader has no
+// cipher.isAvailable() guard, so it can swap the live identity even while the
+// cipher is unavailable.
 configureRoadmapSigner(() => {
   const stateDir = join(app.getPath('userData'), APP_STATE_SUBDIR)
   const identity =
@@ -489,19 +444,13 @@ const service = new SessionService(
   safeLaunchCommand,
   getDeckPluginDir,
   undefined, // home: default (homedir()) -- unused by index.ts, kept positional per session-service.ts's existing append-at-the-end convention.
-  // Both properties are wrapped in an arrow function on purpose, same as
-  // `designServer` a few lines above in this very call: `controlServer` and
-  // `controlDeps` are both declared FURTHER DOWN this file (TDZ) -- an eager
-  // `{ getControlServer: () => controlServer }` written as a bare property
-  // value would still be fine here since `controlServer` is only READ inside
-  // the arrow body, not at construction time, but `controlDeps` needs the
-  // same deferral. SYNC on purpose (team-lead arbitration, Card 3c322f10):
-  // this getter never starts the server itself, only reads whatever is
-  // CURRENTLY there -- ipc.ts's `sessions:create` handler is the one that
-  // proactively awaits `ensureControlServer()` before ever calling into
-  // SessionService.create(), so by the time this runs for that route the
-  // server is already up (or the operator's tile opens without the bridge,
-  // fail-closed, if that await was skipped for any reason).
+  // Both getters are wrapped in an arrow function on purpose: controlServer and
+  // controlDeps are declared further down this file (TDZ), and the arrow only
+  // reads them when called, not at construction.
+  // This getter never starts the server itself, only reads whatever is
+  // currently there; the sessions:create route awaits ensureControlServer()
+  // first, so by the time this runs the server is already up (or the tile opens
+  // without the bridge, fail-closed).
   buildMintTeamLeadBridge({
     getControlServer: () => controlServer,
     write: (token, callerId, allowedTools) => controlDeps.writeTeamLeadMcpConfig(token, callerId, allowedTools)
@@ -570,24 +519,11 @@ const containerBrokerEnv = (): Record<string, string> => {
 }
 
 /**
- * Card 9e529177: `--append-system-prompt-file "<hostPath>"` (session-command.ts's
- * appendSystemPromptFlag) carries a HOST path that does not exist inside the
- * container -- wrap() already rewrites --plugin-dir the same way just below
- * (rewritePluginDirForContainer), this is the sandbox-only companion for the
- * system-prompt flag, AND the sole delivery vehicle for the mount-mode
- * protection notice (sandbox-protect.ts's renderProtectionNotice): the field
- * is singular (session-command.ts), so composing into ONE file is what
- * avoids a collision between a role's prompt and the notice, never posing
- * the flag twice.
- *
- * Composes, in order: (1) the existing role prompt's CONTENT if the flag was
- * present, (2) the protection notice if the plan is 'applied'. Either piece
- * missing degrades to the other. Both missing: the command line is returned
- * UNCHANGED -- no file written, no flag touched. This also fixes a latent
- * bug the same mechanism exhumed: an embedded team role spawned sandboxed
- * (deck-control.ts) used to carry --append-system-prompt-file straight
- * through wrap() untouched, pointing at a path invisible in the container --
- * its role anchor silently never reached the agent.
+ * Composes into one file the existing role prompt content (if present) and the
+ * mount-mode protection notice (if the plan is 'applied'), since the flag is
+ * singular and can only carry one file.
+ * Either piece missing degrades to the other; both missing leaves the command
+ * line unchanged, with no file written and no flag touched.
  */
 function composeSandboxAppendPrompt(sessionId: string, command: string, launch: SandboxLaunch): string {
   if (!isValidSandboxSessionId(sessionId)) {
@@ -606,12 +542,11 @@ function composeSandboxAppendPrompt(sessionId: string, command: string, launch: 
         reportError('sandbox', `append-system-prompt-file unreadable: ${hostPromptPath}`, e)
       }
     } else {
-      // Card 9e529177 audit: before this card, this flag's host path was
-      // never readable from inside the container, so a path outside
-      // secretsDir() was harmless dead weight. wrap() now reads it host-side
-      // and injects the content into the sandboxed agent's prompt -- an
-      // uncontained path would newly become an exfiltration vector. Compose
-      // the notice alone; the spawn must not block on this.
+      // An uncontained host path here would become an exfiltration vector,
+      // since this content is read host-side and injected into the sandboxed
+      // agent's own prompt.
+      // Compose the notice alone in that case; the spawn must not block on
+      // this.
       reportError('sandbox', `append-system-prompt-file outside state dir, refusing to read: ${hostPromptPath}`)
     }
   }
@@ -703,25 +638,12 @@ const sandboxGate = async (): Promise<string | null> => {
 
 service.on('removed', ({ id, name }: { id: string; name: string }) => {
   journal.add('session', `session "${name}" closed`)
-  // Audit fix #2 (card 6c380073): revoke a team-lead tile's minted
-  // deck-control token/callerId on FINAL removal only, and delete its
-  // team-lead-mcp-<callerId>.json, so a departed lead's file can no longer
-  // authorize closing/restarting anything. No-op for a session that was
-  // never minted its own caller (the supervisor tile, any non-lead profile).
-  //
-  // WHAT REACHES HERE, all three emit sites of 'removed' in
-  // session-service.ts: remove()'s forceCleanup (operator close button and
-  // deck_close_session), closeAll() ("New/clear"), and restoreFrom() (a
-  // workspace restore). The last two used to destroy tiles SILENTLY, which
-  // left departed leads' tokens live until app quit; they emit per destroyed
-  // def since this same audit round.
-  //
-  // WHAT DELIBERATELY DOES NOT REACH HERE, and must not: a crash or a
-  // non-zero exit. Those emit 'exit', not 'removed' -- the tile still EXISTS
-  // in that case (kept as a visible, restartable corpse), and restart()
-  // relaunches it with the SAME def.mcpConfig, so revoking there would break
-  // the bridge of a session that is coming back. Not an oversight: the
-  // revocation is keyed on the tile being GONE, not on its process dying.
+  // Revokes a team-lead tile's minted deck-control token/callerId and deletes
+  // its team-lead-mcp file only on final removal, not on crash or non-zero exit
+  // (which emit 'exit', not 'removed') — a crashed tile is kept as a
+  // restartable corpse and restart() reuses the same mcpConfig.
+  // No-op for a session that never minted its own caller (the supervisor tile,
+  // any non-lead profile).
   const revokedCallerId = controlServer?.revokeCallerForSession(id) ?? null
   if (revokedCallerId) cleanupTeamLeadMcpFile(revokedCallerId)
 })
@@ -959,19 +881,15 @@ const openApprovals = new Map<string, string>()
 const heldVerdicts = new Set<string>()
 
 /**
- * Apply approvals settled elsewhere (phone) to their session.
- *
- * Only the fallback path lands here: a hook or ask_operator verdict returns
- * through its own call. Guarded twice — the tile must still exist AND still be
- * waiting — because an answer arriving after the operator dealt with the
- * prompt locally must be dropped, not typed into whatever is on screen now.
- *
- * "Dropped" means HELD, not discarded (card 9c6de1e1): marking a verdict
- * delivered tells the broker to stop sending it, so doing that for a tile that
- * is merely un-flagged (the operator dismissed the badge while the agent sat at
- * the very same prompt) lost the answer for good — phone side said delivered,
- * terminal side never received a byte, journal said nothing. classifyVerdict
- * separates the two, and only 'settle'/'abandon' end the verdict's life here.
+ * Only the fallback path lands here: a hook or ask_operator verdict returning
+ * through its own call is handled elsewhere. Guarded twice — the tile must
+ * still exist and still be waiting — since an answer arriving after the
+ * operator dealt with the prompt locally must be dropped, not typed into
+ * whatever is on screen now.
+ * 'Dropped' means held, not discarded: marking a verdict delivered tells the
+ * broker to stop sending it, so doing that for a merely un-flagged tile would
+ * lose the answer for good. classifyVerdict separates the two; only
+ * 'settle'/'abandon' end a verdict's life here.
  */
 const pollApprovalVerdicts = async (): Promise<void> => {
   const deps = approvals.deps()
@@ -1041,7 +959,7 @@ const pollApprovalVerdicts = async (): Promise<void> => {
       journal.add('attention', `answered "${live?.name ?? tile}" from ${approval.answered_via}`)
       applied.push(approval.id)
     }
-    // Anything the broker no longer lists is gone (answered elsewhere, expired,
+    // Anything absent from the broker's list is gone (answered elsewhere, expired,
     // purged): drop our bookkeeping with it.
     for (const id of heldVerdicts) if (!seen.has(id)) heldVerdicts.delete(id)
     await markVerdictsDelivered(deps, applied)
@@ -1064,10 +982,9 @@ service.on(
       // false-positive badge would silently ALLOW a pending remote/phone
       // approval nobody actually responded to (BLOCKER 2, review).
       if (manual) {
-        // The approval stays OPEN (the poller can still deliver it, see
-        // classifyVerdict's 'defer'), but the two views have just diverged:
-        // the Deck shows nothing pending while the phone still does. Card
-        // 9c6de1e1: that divergence used to be the one thing nobody could see.
+        // The approval stays open — the poller can still deliver it — but the
+        // two views have just diverged: the Deck shows nothing pending while
+        // the phone still does.
         const pending = openApprovals.get(id)
         if (pending)
           reportError(
@@ -1141,12 +1058,6 @@ let inboxTimer: NodeJS.Timeout | null = null
 // broker already forgot them, this queue is their only copy.
 const pendingInboxWrites: { id: number; from: string; text: string; sentAt: string }[] = []
 
-// Courrier lot 1B (card 54b1c71a): session_id lifecycle, extracted to
-// inbox-session.ts (pure, bun-testable -- this file imports electron and
-// cannot be unit-tested directly) after mutation review found the re-mint
-// rule was previously pinned only by a comment. See that module's doc
-// comment for the full rationale (activeScope.groupId is mutable at
-// runtime, the frozen broker's session upsert does not migrate group_id).
 const currentInboxSessionId = createInboxSessionTracker(() => activeScope.groupId)
 
 // Broker reachability (PLAN O5): fed by the inbox poll below (one signal per
@@ -1219,23 +1130,12 @@ const pollOperatorInbox = async (): Promise<void> => {
 }
 
 /**
- * Courrier lot 1D (card 1e81ee7b): the session-scope purge triggered by the
- * three classifying gestures (app:new-clear, a SUCCESSFUL workspace:restore,
- * template:apply mode='replace' -- wired at their ipc.ts call sites). Bumps
- * this session's broker cursor to MAX(id) and deletes everything <= the
- * group's slowest live session (broker.ts's handleOperatorInboxPurge), then
- * truncates the local journal at the SAME instant -- skipping either half
- * leaves the bug looking unfixed (broker-only: local journal still shows
- * dead entries; local-only: broker keeps growing for other Decks that
- * already read past them).
- *
- * Best-effort by design: a purge failure must never block the gesture it
- * rides on (new/restore/apply-replace all complete regardless). The
- * broker-purge-then-always-truncate control flow is delegated to
- * purgeInboxSessionCore (inbox-session.ts, pure/bun-testable) after mutation
- * review found nothing pinned the "truncate even when the broker call
- * throws" guarantee this doc comment names -- only broadcast('inbox:cleared')
- * stays here (a side effect, not pure).
+ * Bumps this session's broker cursor to MAX(id) and deletes local journal
+ * entries up through the group's slowest live session, in the same instant —
+ * skipping either half leaves the bug looking unfixed (broker-only or
+ * local-only).
+ * Best-effort by design: a purge failure must never block the gesture it rides
+ * on.
  */
 async function purgeInboxSession(): Promise<void> {
   await purgeInboxSessionCore({
@@ -1417,33 +1317,14 @@ const checkpointBeforeSpawn = async (dir: string): Promise<void> => {
   }
 }
 
-// ----- Queue → team-lead dispatch (PLAN C15) -----
-// The operator queues roadmap items; dispatching sends the first one to the
-// team-lead as a targeted announce (C10), unqueues it and remembers its id.
-// A light watcher polls the tracked ids and auto-dispatches the next queued
-// item when a dispatched one turns done — the "conveyor belt" loop.
-//
-// WAVE BARRIER load-bearing caveat (card 42edc88b phase 3, canAutoDispatchNext
-// in ./dispatch): once an item is dispatched it is unqueued and moved back to
-// planned (see dispatchNextInner below), so firstQueued no longer sees it —
-// its wave membership exists ONLY in this in-memory Map. Before the barrier
-// this tracking was informational (a completion journal / conveyor-belt
-// trigger); the barrier makes it load-bearing for CORRECTNESS (it gates
-// whether the next auto-dispatch may fire at all). A Deck restart mid-wave
-// loses it and can over-dispatch past a wave that hadn't actually finished.
-// seedDispatchedFromRoadmap (below, called once at startup) partially
-// mitigates this: an isHead item (locked in_progress, queue null) is
-// re-seeded as claimed:true, but an in_progress-but-UNLOCKED item is not (see
-// that function's own doc comment for why, and its documented blind spot).
-//
-// LIFECYCLE (card 6f19206e): each entry's `claimed` flag distinguishes
-// "dispatched, lead has not set it in_progress yet" from "lead actually
-// picked it up" — see nextDispatchedState's doc comment in ./dispatch for
-// why a bare Set (deleted on planned+unlocked) is wrong: a freshly
-// dispatched item is planned+unlocked too, before it is claimed. Without
-// this distinction, an operator stop (stopRoadmapItem) or an idle-lock
-// release (watchIdleLocks) reverting a CLAIMED item back to planned never
-// left the Set, permanently closing the barrier above.
+// dispatchedIds tracks wave membership only in this in-memory Map; once an item
+// is dispatched it's unqueued and moved back to planned, so nothing else
+// records which wave it belonged to. A Deck restart loses it and can
+// over-dispatch past a wave that hadn't actually finished.
+// Each entry's claimed flag distinguishes 'dispatched, not yet in_progress'
+// from 'lead actually picked it up' — needed because a freshly dispatched item
+// is planned+unlocked too, before being claimed, so a bare set would clear too
+// early.
 const dispatchedIds = new Map<string, DispatchedEntry>()
 
 // Card 0e55a30b / 5852c074 acceptance criterion 4: canAutoDispatchNext can
@@ -1460,17 +1341,11 @@ let barrierPending = false
 const DISPATCH_WATCH_MS = 20_000
 
 /**
- * Magic-compact chain for one target (CT4). When the plugin is available (flag
- * 'on', or 'auto' + detected), inject /magic-compact, capture the "/resume <id>"
- * banner from the tile's output, and re-enter the compacted session IN PLACE
- * (option A: the process never restarts, so peer_id and the launch harness are
- * preserved). On the plugin's shim-failure message or a timeout, fall back to a
- * standard /compact. When the plugin is disabled/absent, go straight to /compact.
- *
- * EMPIRICAL CHECKS deferred to BACKLOG (CT4): that argument-form `/resume <id>`
- * is honored in the TUI on the targeted CC versions, and that the harness
- * survives the in-app session switch. Options B (restart fork-resume) and C
- * (kill+respawn) are the documented fallbacks if A regresses.
+ * When the plugin is available, injects /magic-compact, captures the '/resume
+ * <id>' banner, and re-enters the compacted session in place so peer_id and the
+ * launch harness are preserved (the process never restarts).
+ * Falls back to a standard /compact on the plugin's shim-failure message or a
+ * timeout; goes straight to /compact when the plugin is disabled or absent.
  */
 const runMagicCompact = async (
   tileId: string,
@@ -1518,50 +1393,14 @@ const runMagicCompact = async (
 }
 
 /**
- * CONTRACT (card 722fa003): callers rely on this never rejecting --
- * runDirectiveWave's catch in dispatch.ts is defense-in-depth, not a live
- * path. The danger is NOT an await (this function contains none): it's a
- * SYNCHRONOUS call that throws inside this async wrapper, which becomes a
- * rejected promise.
- *
- * THE RULE, deliberately not a list (card c7ba8ce8): NO synchronous call in
- * this prelude may throw. An earlier version of this note enumerated the five
- * calls that qualified, which read as exhaustive and was not -- a string-valued
- * `target_peer_ids` slips PAST resolveDirectiveTargets (it iterates the
- * CHARACTERS of a string) and rejects further down on `.join`, a sixth vector
- * the list never named. Any enumeration here under-counts again the next time a
- * call is added; the rule cannot.
- *
- * WHAT ENFORCES IT, checkable: `sanitizeRoadmapItem` in
- * desktop/src/main/roadmap-service.ts, applied by all four wrappers around
- * `roadmapPost`, so every field of `item` reaching this function already has
- * its declared type -- `target_peer_ids` is an array of strings or []. That
- * closes the whole class at the boundary rather than one call at a time, which
- * is why nothing here validates `item`. The two fs-touching calls keep their
- * own guards independently: magicCompactPluginPresent -> dirHasMagic
- * (magic-compact.ts) swallows readdirSync/statSync and returns false;
- * resolveFeatures -> readConfigFile (launch-config.ts) swallows
- * readFileSync+JSON.parse and returns null. If either stops swallowing, this
- * function starts rejecting with no change here.
- *
- * Keep the two `for`-loop branches fire-and-forget with their own handler,
- * which stays exact.
- *
- * Execute a directive card (CT3): the Deck itself types the command into the
- * terminals of the card's live targets. It NEVER announces to the lead. The
- * command is a code constant (directiveKeys); the card's payload only selects
- * which constant and which live tiles. Per-target injection is fire-and-forget
- * (idle-gated inside injectCommand) so the dispatch loop never blocks; each
- * injection journals its own outcome. No live target / unreachable targets are
- * journaled, never silently dropped.
- *
- * RETURNS what the card reached (card bf76d37f): the resolver's OWN buckets,
- * projected into a DirectiveDispatch on each of the three return paths. Read
- * from `resolveDirectiveTargets`'s output, never re-derived -- the same rule
- * that already governs `ambiguous` below. The journal stays exactly as it was;
- * this return is what stops the buckets from being journaled and then thrown
- * away, and it is the only thing that can say what was hit, since
- * runDirectiveWave marks the card done BEFORE calling this.
+ * Executes a directive card by typing the command into the terminals of its
+ * live targets, fire-and-forget per target so the dispatch loop never blocks;
+ * it never announces to the lead. Returns what the card reached, read from
+ * resolveDirectiveTargets's own buckets.
+ * Must never reject: there is no await, so the only way to a rejected promise
+ * is a synchronous throw in this prelude. sanitizeRoadmapItem has already
+ * typed every field of item, and the two fs-touching calls swallow their own
+ * errors and return false/null.
  */
 const executeDirective = async (item: RoadmapItem): Promise<DirectiveDispatch> => {
   const cmd = item.directive
@@ -1685,48 +1524,14 @@ const dispatchNextInner = async (): Promise<DispatchResult> => {
           execute: executeDirective,
           journal: (line) => journal.add('dispatch', line),
           reportError: (message, error) => reportError('dispatch', message, error),
-          // Card 249ed831 (form b), reviewer round 2 point 1.
-          //
-          // (a) REPLACE is a chosen ARBITRAGE, not the only possible tool --
-          // say what the alternative actually costs instead of calling it
-          // impossible. The body sent is `{id, context}`; broker.ts's upsert
-          // handler does `context: body.context ?? existing.context`
-          // (broker.ts:3404), a full replace of the column, so
-          // `composeUnresolvedContext` itself carries the prior text
-          // forward. The sibling atomic `/roadmap/append-context` route
-          // COULD be used instead, but today nothing under desktop/ calls it
-          // (measured: zero callers) -- it would need a new ~20-line client
-          // in roadmap-service.ts plus handling its 409 (cap exceeded), both
-          // out of this lot's scope. And even built, it would only reach
-          // idempotence via an `includes()` check on the SAME stale
-          // snapshot this upsert reads -- so its failure mode under the
-          // identical race window described in (b) is a DOUBLED note, never
-          // an overwrite of someone else's text. Upsert-replace was chosen
-          // because it is in-scope today and keeps the note bounded to one
-          // occurrence without that extra client; every OTHER field of the
-          // card is left untouched by this same broker-side `?? existing.*`
-          // behavior regardless of which tool is used.
-          //
-          // (b) the race window, precisely: FROM the `listRoadmap` read at
-          // the top of THIS guard iteration (`const items = await
-          // listRoadmap(...)` above) that produced this `item` -- carried
-          // unchanged through this item's own `markDone`+`execute` AND
-          // through every directive member processed earlier in the SAME
-          // wave (each its own markDone/execute round trip) -- TO this
-          // upsert call. Any write to THIS card's `context` by another
-          // agent/session landing inside that window (an append, or another
-          // upsert) is silently overwritten. UNBOUNDED in the number of
-          // wave members N -- the `guard < 64` loop above bounds how many
-          // WAVES one dispatchNextInner call drains, not how many items sit
-          // inside one wave, and nothing here re-reads `context` before
-          // writing -- but SMALL in practice today: for the common
-          // single-directive wave this is ~2 network round trips
-          // (markDone's upsert, then this one), since `executeDirective`
-          // itself contains no `await` on its own (its per-target injections
-          // are fire-and-forget -- see `executeDirective`'s own doc comment
-          // above, "The danger is NOT an await (this function contains
-          // none)", index.ts:1504). Both facts stated because either alone
-          // misleads: N is not bounded, but today's N is usually 1.
+          // noteUnresolved's upsert replaces context wholesale (a full column
+          // replace server-side), rather than the atomic append-context route,
+          // so composeUnresolvedContext itself must carry the prior text
+          // forward.
+          // Any write to this card's context by another agent landing between
+          // the top-of-loop roadmap read and this upsert is silently
+          // overwritten; unbounded in the number of wave members, though in
+          // practice today a wave is usually a single directive.
           noteUnresolved: async (item) => {
             await upsertRoadmap(endpoint, key, {
               id: item.id,
@@ -1840,23 +1645,14 @@ const watchDispatched = async (): Promise<void> => {
           break
       }
     }
-    // R5 wave barrier (card 42edc88b phase 3, canAutoDispatchNext in
-    // ./dispatch): only the AUTOMATIC path is gated here -- the manual
-    // "send first to team-lead" button (ipc.ts roadmap:dispatch) calls
-    // dispatchNext() directly, unguarded, and stays the operator's escape
-    // hatch when the barrier holds (an abandoned in-flight item, or a head
-    // whose dependency stalls).
-    //
-    // barrierPending (card 0e55a30b, absorbed into 5852c074) closes the gap a
-    // pure dispatchedIds watch has: the queued head's depends_on can
-    // reference an item this Deck never dispatched (e.g. a locked in_progress
-    // item, excluded from enqueueClosure's "active work, not queueable"
-    // filter), so dispatchedIds itself never changes when THAT dependency
-    // resolves. `retry` below runs the check on every tick while a
-    // dependency block is outstanding, not only on a completion transition;
-    // journal lines still only fire on an actual state change (dispatch
-    // success, or entering/leaving the blocked state), so a stuck item
-    // doesn't flood the journal every DISPATCH_WATCH_MS.
+    // Only the automatic dispatch path is gated here — the manual 'send first
+    // to team-lead' button calls dispatchNext() directly, unguarded, and stays
+    // the operator's escape hatch when the barrier holds.
+    // barrierPending covers the case a pure dispatchedIds watch misses: the
+    // queued head's dependency may be an item this Deck never dispatched, so
+    // dispatchedIds itself never changes when that dependency resolves. retry
+    // re-checks every tick while blocked; journal lines still only fire on an
+    // actual state change.
     const retry = completed || (dispatchedIds.size === 0 && barrierPending)
     if (retry) {
       let dispatchSucceeded = false
@@ -1918,36 +1714,15 @@ const watchDispatched = async (): Promise<void> => {
 }
 
 /**
- * Restart-time seed (roadmap card 5852c074, acceptance criterion 5): called
- * once at startup, before the watcher's first tick. dispatchedIds is
- * in-memory only (see its own doc comment above) — a Deck restart loses it
- * entirely, so an item the PREVIOUS process dispatched and the lead already
- * claimed becomes invisible to nextDispatchedState on the new process: never
- * tracked, so its eventual completion never re-arms the barrier for the
- * queue behind it.
- *
- * Seeds every isHead item (shared/workflow: locked, in_progress, queue null)
- * as claimed:true, not claimed:false — isHead REQUIRES status in_progress by
- * construction, so "claimed" (observed in_progress at least once — see
- * nextDispatchedState's doc comment on the 6f19206e semantic shift) is a
- * direct logical consequence here, not an approximation.
- *
- * BLIND SPOT, deliberately left open: isHead also REQUIRES `locked`, so an
- * in_progress-but-UNLOCKED item (e.g. a Deck-authored kanban drag, right
- * after a restart) is seeded as neither claimed nor tracked — exactly the
- * case the 6f19206e fix addressed for a LIVE Deck. A freshly restarted Deck
- * cannot tell that case apart from an item that was never dispatched at all
- * (both read as unlocked+in_progress from its fresh-boot point of view), so
- * this seed intentionally leaves it untracked: the manual "send first to
- * team-lead" button remains the escape hatch.
- *
- * Deliberately excludes: queued-but-not-dispatched items (queue non-null —
- * still visible to wavesOf/firstQueued, seeding them here would double-count
- * them once they are actually dispatched) and items locked via
- * assignRoadmapItem's direct-assign path (K6) — that Deck-authored upsert
- * never sets `locked` itself (broker.ts only grants the lock to a non-'deck'
- * author), so a fresh assign reads as unlocked and isHead already excludes
- * it without any extra filtering needed here.
+ * dispatchedIds is in-memory only, so a Deck restart loses it entirely; this
+ * seeds every locked, in_progress item as claimed:true at startup so its later
+ * completion still re-arms the barrier.
+ * An in_progress-but-unlocked item is deliberately left untracked: a freshly
+ * restarted Deck can't tell it apart from one never dispatched at all, so the
+ * manual dispatch button remains the escape hatch for that case.
+ * Excludes queued-but-undispatched items (would double-count once actually
+ * dispatched) and items locked via the direct-assign path, which never sets
+ * locked for a 'deck' author and so already reads as unlocked.
  */
 const seedDispatchedFromRoadmap = async (): Promise<void> => {
   try {
@@ -2054,21 +1829,14 @@ const stopRoadmapItem = async (id: string): Promise<StopResult> => {
   return { stopped: true, via }
 }
 
-// ----- Deck-side lock release on idle terminals (PLAN K2) -----
-// A locked item whose owner is one of THIS window's tiles with a silent PTY
-// for LOCK_IDLE_MS is released (back to 'planned'). Finer than the broker's
-// sweep -- the heartbeat keeps a peer 'active' even when Claude sits idle --
-// but only covers sessions this Deck can observe; remote/CLI sessions rely on
-// the broker's TTL + owner-gone sweep.
-//
-// Card e344fa79 lineage: the owner lookup below used to compare
-// `item.locked_by` against a bare `s.peerId`, which is only unique PER GROUP
-// -- a homonym peer_id locked by a peer in a DIFFERENT group on the same
-// broker would match one of this Deck's own idle tiles and get its lock
-// silently released. `ownsIdleLock` (idle-lock.ts) also requires
-// `item.locked_group` to match this Deck's OWN `activeScope.groupId`,
-// fail-closed when `locked_group` is null (see that module's doc comment for
-// the fail-closed/fail-open asymmetry with the broker's own sweep).
+// Releases a locked item back to 'planned' when its owner is one of this
+// window's tiles with a silent PTY for LOCK_IDLE_MS — finer than the broker's
+// sweep, since the heartbeat keeps a peer 'active' even while Claude sits idle,
+// but only covers sessions this Deck can observe.
+// Also requires locked_group to match this Deck's own group, fail-closed when
+// locked_group is null, since a peer_id is only unique per group and a
+// same-named peer in a different group could otherwise have its lock silently
+// released.
 const LOCK_IDLE_MS = 2 * 3600_000
 const LOCK_WATCH_MS = 60_000
 const watchIdleLocks = async (): Promise<void> => {
@@ -2098,21 +1866,13 @@ const watchIdleLocks = async (): Promise<void> => {
 let lockWatchTimer: NodeJS.Timeout | null = null
 
 /**
- * Shared operator-approval core (B4) for a repo-cloned file carrying content
- * that lands in a sensitive sink -- originally inline in
- * `resolveTemplateInputs` (shell-bearing `command`/`args`, appended verbatim
- * to the login-shell command line, session-command.ts); factored out (card
- * 09d54a29) and generalized (card 09d54a29 follow-up: a SECOND, unrelated
- * vulnerability class -- an untrusted `cwd` widening the explorer/diff
- * read allow-set, see workspaceHasUntrustedCwd -- needed the SAME mechanism
- * but different copy/hash content) so every caller reuses the EXACT SAME
- * approval bookkeeping (isApproved/approve, keyed per project + `keyPart` +
- * content hash, so an unchanged approved file re-applies silently while an
- * edited one re-prompts) instead of a second, divergence-prone copy.
- * `hashPayload`/`previewLines` are supplied by the caller rather than
- * derived here, so this stays agnostic to WHICH field is dangerous --
- * each caller names its own vulnerability class instead of this function
- * silently enumerating fields.
+ * Shared approval core for a repo-cloned file whose content lands in a
+ * sensitive sink: every caller reuses the same bookkeeping (keyed per project +
+ * keyPart + content hash), so an unchanged approved file re-applies silently
+ * while an edited one re-prompts.
+ * hashPayload/previewLines are supplied by the caller rather than derived here,
+ * so this stays agnostic to which field is dangerous — each caller names its
+ * own vulnerability class.
  */
 const confirmShellFieldApproval = (opts: {
   keyPart: string
@@ -2176,49 +1936,14 @@ function spawnShellFieldKey(entry: { command?: string; args?: string }): {
 }
 
 /**
- * Card 6c380073, audit fix #1c. Was DELIBERATELY exempted from B4's
- * repo-clone shell-field gate (commit 7e87f68, "close repo-clone RCE
- * paths") -- that gate's whole threat model is a file READ from a cloned
- * repo (a template, then a workspace snapshot, card 09d54a29); deck-control
- * spawning did not exist in that scope, and its threat model is different --
- * an agent's live MCP TOOL CALL, not a file on disk. That exemption became
- * STALE, not wrong, once ff091064 gave an embedded team-lead a path to
- * deck_spawn_session/deck_spawn_team with a free-form `args` string reaching
- * the exact same unescaped shell sink (session-service.ts's create(), whose
- * own comment used to assume every caller reaching it was
- * operator-authorized -- an agent tool call is not). This closes that gap by
- * reusing the SAME predicate (sessionsHaveShellFields) and the SAME
- * operator-approval mechanism (confirmShellFieldApproval) templates and
- * workspace-restore already use for the identical sink.
- *
- * confirmShellFieldApproval has NO trust-mode awareness of its own -- by
- * design (see its own doc): it always opens a BLOCKING
- * dialog.showMessageBoxSync (stalls the whole main process, not just this
- * one call) unless the exact payload is already cache-approved. That is
- * fine for a template/workspace file read at a deliberate operator gesture
- * (apply/restore), but deck_spawn_session/deck_spawn_team can be called by
- * an UNATTENDED hands-free team-lead or supervisor -- opening that dialog
- * there would freeze the app on an answer nobody is watching, which is
- * WORSE than a refusal (a refusal fails closed and is journaled; a stuck
- * dialog fails nowhere and looks like a hang). So THIS function, not
- * confirmShellFieldApproval, owns the hands-free decision: in hands-free
- * mode, a payload that is not ALREADY cache-approved is refused outright,
- * explicitly, journaled -- no dialog is ever opened in that mode. The escape
- * hatch is the SAME persistent, content-hash-keyed cache
- * confirmShellFieldApproval already writes to (launch-approval.ts's
- * isApproved/approve, keyed on the payload's own hash, never on trust mode):
- * approve a given args string once, in team-review or full-control (a real
- * dialog, a real answer), and every later hands-free spawn carrying that
- * SAME string passes silently thereafter.
- *
- * WHAT THIS CACHE IS NOT, said plainly because the escape hatch above reads
- * like a guarantee: the approvals file lives in userData, a directory a
- * NON-SANDBOXED host agent can WRITE, not just read. Such an agent can
- * therefore pre-approve its own payload and walk straight through this gate.
- * That is the same containment boundary the deck-control tokens themselves
- * sit behind (see deck-control.ts's header): this separates COOPERATING
- * authorities by role, and does not resist a deliberately hostile agent
- * already running unsandboxed on the operator's account.
+ * Same content-hash-keyed approval cache as confirmShellFieldApproval, plus
+ * hands-free awareness: a payload not already cache-approved is refused and
+ * journaled rather than opening a blocking dialog nobody is watching. One
+ * approval in team-review or full-control lets every later hands-free spawn
+ * of the same payload pass.
+ * The cache lives in userData, writable by any non-sandboxed host agent: it
+ * separates cooperating authorities by role and does not resist a hostile
+ * agent pre-approving its own payload.
  */
 const confirmSpawnShellFields = (entry: { command?: string; args?: string }): boolean => {
   if (!sessionsHaveShellFields([entry])) return true
@@ -2367,10 +2092,8 @@ const summaryLine = (s: SpawnSummary): string => {
     s.worktree_branch ? `⎇ ${s.worktree_branch}` : ''
   ].filter(Boolean)
   const head = parts.join('  ')
-  // Audit fix #1b (card 6c380073): `args` used to be silently invisible here
-  // -- the operator approved a spawn without ever seeing its free-form shell
-  // arguments. Mirrors resolveTemplateInputs's own precedent (index.ts),
-  // which already shows command/args verbatim for the same reason.
+  // Shows args verbatim so the operator can see the free-form shell arguments
+  // before approving the spawn.
   const lines = [head, s.args ? `   args: ${s.args}` : '', s.prompt_preview ? `   ${s.prompt_preview}` : ''].filter(
     Boolean
   )
@@ -2583,20 +2306,13 @@ const controlDeps: DeckControlDeps = {
 let controlServer: DeckControlServer | null = null
 let companionServer: CompanionServer | null = null
 /**
- * The IN-FLIGHT start, memoized separately from `controlServer` above
- * (security review correction, 2026-09-02): memoizing only the RESULT
- * (`if (!controlServer) controlServer = await startDeckControl(...)`) is a
- * classic check-then-act race once this guard has more than one caller --
- * exactly what Card 3c322f10 (piece 2) introduced, `ensureSupervisor` and
- * `sessions:create` now both able to call `ensureControlServer()` close
- * together. Two concurrent calls would both observe `controlServer` still
- * null, both invoke `startDeckControl`, and the second assignment would
- * silently orphan the first server (a loopback HTTP listener with no
- * remaining reference, never closed). Memoizing the PROMISE instead closes
- * this: the `if (!controlServerStarting)` check and its assignment run
- * synchronously (no `await` between them), so a second caller arriving
- * before the first `startDeckControl` resolves always sees the SAME
- * in-flight promise and awaits that one instead of starting its own.
+ * Memoizes the in-flight start promise, not just the started server: two
+ * callers could otherwise both observe controlServer still null, both invoke
+ * startDeckControl, and the second assignment would silently orphan the first
+ * server (a loopback listener with no remaining reference, never closed).
+ * The null check and the assignment run synchronously with no await between
+ * them, so a second caller arriving before the first startDeckControl resolves
+ * always awaits that same in-flight promise instead of starting its own.
  */
 let controlServerStarting: Promise<DeckControlServer> | null = null
 

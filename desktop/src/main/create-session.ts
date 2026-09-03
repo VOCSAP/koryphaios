@@ -25,10 +25,10 @@ export async function createSessionWithWorktree(
    */
   beforeSpawn?: (cwd: string) => Promise<void>,
   /**
-   * The APPROVED worktree-init hook (B5). This is resolved once at startup
-   * through the C19 gate (a project-sourced hook only lands after the operator
-   * approves it), so it is passed in rather than re-read from the project config
-   * here — a repo-shipped worktreeInit can no longer reach the shell ungated.
+   * The approved worktree-init hook.
+   * Resolved once at startup through the operator-approval gate, then passed in
+   * rather than re-read from the project config here, so a repo-shipped
+   * worktreeInit cannot reach the shell without that approval.
    */
   worktreeInit?: string,
   /**

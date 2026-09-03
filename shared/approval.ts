@@ -1,25 +1,12 @@
-// Remote approvals (PLAN-notifications-mobiles, lots N0/N1): the shared
-// vocabulary of the "answer an agent's blocking question from your phone"
-// feature. Used by broker.ts (arbiter), server.ts (ask_operator MCP tool) and
-// desktop/hooks/approval-hook.ts (Claude Code hooks).
-//
-// SECURITY — two credential classes, deliberately asymmetric (PLAN §6.8):
-//
-//   operator key  -> full scope. Held ONLY by the Deck (app-state, per OS
-//                    user). It is the only credential that may `claim`, i.e.
-//                    settle an approval and thus authorise a tool call.
-//   session token -> restricted scope. Minted by the Deck per session,
-//                    handed to the spawned agent (including INSIDE a sandbox
-//                    container). May only `add` for its own session_ref and
-//                    `wait` on what it created. NEVER `claim`.
-//
-// The asymmetry is the whole point: a compromised sandboxed agent holding a
-// session token can at worst spam its own operator with notifications. If it
-// held the operator key it could answer OTHER sessions' approvals — including
-// non-sandboxed ones on the host — which would be a clean authority escape.
-//
-// Node builtins only (node:crypto), no Bun-specific API: the same file runs
-// under the broker, the MCP server and a bun-spawned hook.
+// Two credential classes, deliberately asymmetric: the operator key (held only
+// by the Deck) is the only credential that may claim/settle an approval; a
+// session token (handed to the spawned agent, including inside a sandbox) may
+// only add for its own session_ref and wait on what it created, never claim.
+// A compromised sandboxed agent holding a session token can at worst spam its
+// own operator; holding the operator key it could settle other sessions'
+// approvals, a clean authority escape.
+// Node builtins only -- the same file runs under the broker, the MCP server,
+// and a bun-spawned hook.
 
 import {
   createHash,

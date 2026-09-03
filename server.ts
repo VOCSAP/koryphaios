@@ -1,13 +1,7 @@
 #!/usr/bin/env bun
 /**
- * claude-peers MCP server (v0.9.0)
- *
- * Runs locally alongside Claude Code. Always uses local context detection --
- * SSH mode is removed in v0.3.1.
- *
- * Connects to the broker via WebSocket (loopback) for push delivery, with a
- * polling fallback for resilience. SIGINT/SIGTERM transitions the peer to
- * 'dormant' via /disconnect (resume-able), instead of /unregister (DELETE).
+ * SIGINT/SIGTERM transitions the peer to 'dormant' via /disconnect
+ * (resume-able) rather than /unregister (DELETE).
  */
 
 import { fileURLToPath } from "node:url";
@@ -115,14 +109,6 @@ import { queuedItems, wavesOf } from "./desktop/src/shared/workflow.ts";
 
 const PEER_ID_REGEX = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/;
 
-// --- Deck announcements (v0.3.4) ---
-// Card e3f8065d: the two note constants and the five framing functions used to
-// be DEFINED here. They now live in shared/inbound-framing.ts so that the third
-// receive path (check_messages, below) consumes the SAME renderInbound as the WS
-// push and the fallback poll, instead of re-implementing the branching inline.
-// The module's header carries the full reasoning, including why the framing
-// stays at reception rather than moving to emission.
-
 // --- Configuration ---
 
 const config = await loadConfig();
@@ -144,15 +130,11 @@ function brokerHeaders(extra?: Record<string, string>): Record<string, string> {
   return h;
 }
 
-// `signal` is optional and defaults to undefined -- every existing caller is
-// unaffected (fetch() treats an undefined signal exactly like no signal at
-// all). Card a21f1303 R2 (team-lead review, 2026-08-26): wait_for_message's
-// own opportunistic peek is the one call site that supplies it, so that
-// specific fetch is bounded by the tool's own cap instead of hanging with no
-// timeout at all when a broker accepts the TCP connection and never replies
-// (measured: `after 20024 ms -> still hanging`, no default timeout on plain
-// fetch()). Not a global default: imposing one here would change behaviour
-// for every OTHER caller of brokerFetch, outside this card's scope.
+// signal is optional and defaults to undefined so every existing brokerFetch
+// caller is unaffected; only wait_for_message's own opportunistic peek supplies
+// it, bounding that one fetch by the tool's own cap.
+// Not a global default: imposing a timeout here would change behaviour for
+// every other caller of brokerFetch.
 async function brokerFetch<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(`${BROKER_URL}${path}`, {
     method: "POST",
@@ -191,10 +173,9 @@ async function ensureBroker(): Promise<void> {
     return;
   }
 
-  // HTTP-remote mode: the configured broker lives on another host, so a local
-  // spawn would bind 127.0.0.1 and never satisfy isBrokerAlive() on the remote
-  // URL. proc.unref() would then leak that local broker as a zombie after the
-  // outer throw (observed as Bug F, 2026-05-15). Fail fast instead.
+  // HTTP-remote mode fails fast instead of spawning a local broker: a local
+  // spawn would bind 127.0.0.1 and never satisfy the remote URL, leaking the
+  // spawned process as a zombie after the outer throw.
   if (!isLoopbackBrokerUrl(BROKER_URL)) {
     throw new Error(
       `Broker at ${BROKER_URL} is unreachable. Remote brokers (HTTP mode) must be started manually; refusing to spawn a local broker that would not serve this URL.`
@@ -261,8 +242,6 @@ async function getGitRoot(cwd: string): Promise<string | null> {
   }
   return null;
 }
-
-// --- State (v0.3 dual identity) ---
 
 let myInstanceToken: InstanceToken | null = null;
 let myPeerId: PeerId | null = null;
@@ -705,22 +684,12 @@ const TOOLS = [
       required: ["id"],
     },
   },
-  // DESCRIPTION BUDGET (spec_ec5cf671). Every tool description below is read by
-  // the model on EVERY turn of EVERY session, so a sentence here costs its
-  // length times the turn count, while an error message costs once and only
-  // when it fires. Keep in a description what changes the CALL (when to use
-  // it, a parameter required by another, a lock, an irreversible effect, a
-  // 409/403). Put the WHY in a comment like this one, and the remedy in the
-  // refusal text. tests/peer-mcp-surface-budget.test.ts caps the total.
-  //
-  // Directive cards (kind='directive'): the Deck itself types the command
-  // (clear | compact | magic_compact) into the terminals of target_peer_ids
-  // when the card reaches the head of the operator's dispatch queue; agents
-  // never run it. A 'clear' between two independent items resets a peer's
-  // context for free; the briefing for the NEXT item goes in that item's
-  // `context`, not in the directive. 'clear' keeps system prompt, CLAUDE.md
-  // and MCP; 'compact' costs one inference on the target's model;
-  // 'magic_compact' is the deterministic plugin and falls back to compact.
+  // Directive cards run when reached at the head of the dispatch queue: the
+  // Deck types the command into target_peer_ids' terminals, agents never invoke
+  // it themselves.
+  // 'clear' resets a peer's context for free and keeps system prompt, CLAUDE.md
+  // and MCP; 'compact' costs one inference; 'magic_compact' is the
+  // deterministic plugin, falling back to compact.
   {
     name: "roadmap_add",
     description:
@@ -774,19 +743,12 @@ const TOOLS = [
       required: ["title"],
     },
   },
-  // [INACTIVE] is an operator flag with no agent-side field on purpose: it
-  // takes a card out of every agent's reach until the operator lifts it. The
-  // 403 fires on the CLAIM (in_progress or locked=true) whatever else the write
-  // changes, so a retry with extra fields does not help.
-  // Card 4658b614: status:in_progress locks the item under the CALLER's own
-  // peer_id (never named in the description below -- the `locked` field's
-  // own description already covers release/re-claim, and the id field's own
-  // description already covers the prefix match, so neither is repeated
-  // here). Locking exists so two peers cannot silently work the same card.
-  // The remedy for a 409 (pick another item; `force:true` exists on the
-  // broker route but is NOT exposed by this tool) lives only in the broker's
-  // refusal text, per this file's own DESCRIPTION BUDGET convention above
-  // TOOLS -- never duplicated in the exposed description.
+  // [INACTIVE] has no agent-side field: only the operator can lift it, and
+  // claiming (in_progress or locked=true) 403s regardless of what else the
+  // write changes -- a retry with extra fields does not help.
+  // status:in_progress locks the item under the caller's own peer_id so two
+  // peers cannot claim the same card.
+  // The broker's force:true override exists but is not exposed by this tool.
   {
     name: "roadmap_update",
     description:
@@ -826,15 +788,9 @@ const TOOLS = [
           type: "boolean" as const,
           description: "Usually implicit. false releases your lock while staying in_progress, true re-claims.",
         },
-        // MCP SURFACE BUDGET (tests/peer-mcp-surface-budget.test.ts): the WHY
-        // lives here, never in the exposed description below, which is
-        // reread every turn of every session in the group. Card 7defe381 lot
-        // 2a: a wave is a run of cards sharing one queue rank, dispatched
-        // together (shared/workflow.ts wavesOf); posing a rank via this arg
-        // only sets THIS card's own rank and never reorders/renumbers the
-        // rest of the queue (that global-reorder path is /roadmap/reorder,
-        // deliberately not exposed here -- its known wave-flattening defect,
-        // card f12e34f1, does not apply to this single-card write).
+        // queue sets only this card's own rank; it never reorders or renumbers
+        // the rest of the queue. Global reorder is /roadmap/reorder,
+        // deliberately not exposed here.
         queue: { type: "number" as const, description: "Rank; null dequeues; ties share a wave." },
       },
       required: ["id"],
@@ -876,18 +832,10 @@ const TOOLS = [
       required: ["id", "text"],
     },
   },
-  // Card bf76d37f. NO ARGUMENTS, and that is a ruling, not an oversight: the
-  // head wave is already selected by the queue, so letting the caller name a
-  // card would let it short-circuit the rank order and would create a SECOND
-  // way to aim at the wrong target. Symmetric with the Deck's own Dispatch
-  // button, which takes no argument either.
-  //
-  // The reply is the point of the tool. runDirectiveWave marks a card done
-  // BEFORE executing it, so a card's status proves nothing about execution and
-  // a bare "ok" would put the caller back in the exact situation this card was
-  // filed for: believing it was done. Comment lines inside TOOLS are stripped
-  // by tests/peer-mcp-surface-budget.test.ts, so this reasoning costs the
-  // model nothing per turn -- keep it here rather than in the description.
+  // No arguments: the head wave is already selected by the queue, so a caller
+  // cannot aim at a different card.
+  // runDirectiveWave marks a card done before it executes, so status alone
+  // proves nothing about execution -- the reply is the actual result.
   {
     name: "roadmap_dispatch",
     description:
@@ -970,24 +918,11 @@ const TOOLS = [
 
 // --- Tool handlers ---
 
-// Card a67ec467: optional ALLOW-list of tool names exposed to THIS server
-// process, read once at module load. Same three-state contract as
-// deck-control-mcp.ts's DECK_CONTROL_TOOLS (Card ff091064), recopied rather
-// than reinvented -- an allow-list shrinks and fails CLOSED (a forgotten
-// tool is refused, the symptom surfaces the same day); a deny-list would
-// shrink and fail OPEN (a future tool ships exposed to everyone by default,
-// silently), which CLAUDE.md's guard-coverage rule rules out.
-//   unset            -> every tool (current behavior, zero regression for
-//                        every session launched outside Kory, or by an
-//                        embedded profile that sets no peerTools).
-//   set, non-empty   -> exactly the comma-separated names listed.
-//   set, empty ("")  -> zero tools. Distinguishing "absent" from "empty" is
-//                        deliberate: without it a bare `CLAUDE_PEERS_TOOLS=`
-//                        declaration would be indistinguishable from "unset"
-//                        and silently grant everything instead of nothing.
-// This acts on the PROCESS Kory spawns for a session tile; a sub-agent
-// inherits the already-connected parent server, so this lever has no effect
-// on sub-agents (see the roadmap card's context for the measured limit).
+// CLAUDE_PEERS_TOOLS: unset exposes every tool; set to a comma-separated list
+// exposes exactly those names; set to the empty string exposes none. The three
+// states are distinguished deliberately.
+// Applies to the process Kory spawns per session tile; a sub-agent inherits the
+// already-connected parent server, so this has no effect on sub-agents.
 const TOOLS_ENV_VAR = "CLAUDE_PEERS_TOOLS";
 
 /**
@@ -1051,7 +986,6 @@ function formatElapsed(iso: string | null): string {
 
 function formatPeer(p: PublicPeer): string {
   const statusLabel = { active: "🟢 active", sleep: "🟡 sleep", closed: "🔴 closed" }[p.activity_status];
-  // B1: the client PID is no longer exposed over the wire; show host only.
   const idLine = p.host ? `peer_id: ${p.peer_id}  (${p.host})` : `peer_id: ${p.peer_id}`;
   const parts = [`${statusLabel}  ${idLine}`, `CWD: ${p.cwd}`];
   if (p.role) parts.push(`Role: ${p.role}`);
@@ -1062,8 +996,6 @@ function formatPeer(p: PublicPeer): string {
   parts.push(`Last exchange: ${formatElapsed(p.last_activity_at)}`);
   return parts.join("\n  ");
 }
-
-// --- Roadmap helpers (v0.4, PLAN C3-M2) ---
 
 /**
  * The roadmap scope for this session: the normalized git remote when there is
@@ -1141,10 +1073,8 @@ async function resolveRoadmapId(idOrPrefix: string): Promise<string> {
 function formatRoadmapItemLine(i: RoadmapItem): string {
   const tags = i.tags.length ? `  #${i.tags.join(" #")}` : "";
   const lock = i.locked ? ` 🔒${i.locked_by ?? ""}` : "";
-  // Card c33a5968, major 2 (team-lead review, 2026-08-12): the population a
-  // parked card is meant to keep OUT (any agent listing cards to pick one
-  // up) previously had no way to see the flag before hitting a 403 that
-  // tells it to do the one thing it is structurally forbidden from doing.
+  // Shown in list output so an agent evaluating a card sees it is blocked
+  // before attempting the claim that would 403.
   const inactive = i.inactive ? " [INACTIVE -- do not claim]" : "";
   // Card 7defe381 LOT 1: a marker present ONLY when the card is enqueued, so
   // the vast majority of unenqueued cards pay zero extra chars per turn.
@@ -1206,30 +1136,14 @@ function formatRoadmapItemDetail(i: RoadmapItem): string {
 }
 
 /**
- * Compact ack for roadmap_add/roadmap_update. Reports what the caller
- * REQUESTED (from `args`, to decide which fields to mention) crossed against
- * what actually LANDED (from the broker's returned `item`, via
- * ROADMAP_UPSERT_ACK_FIELDS -- shared/types.ts). Never trust `args` for a
- * value: broker-side normalization (title trim, cleanList/cleanPeerIds
- * dropping entries, the lock guard forcing `locked=false` outside
- * in_progress, target_peer_ids reset to [] outside kind='directive') means
- * the caller's raw argument is not the truth of what got persisted.
- *
- * `domain` is the PER-TOOL field list (ROADMAP_ADD_ACK_FIELDS /
- * ROADMAP_UPDATE_ACK_FIELDS) -- never a union: roadmap_add does not forward
- * `locked` to the broker at all, so it must never appear in that path's ack
- * even if the caller happened to pass it as an extra JSON property.
- *
- * Card 4441e883, mecanisme B (the "remorque conditionnee par l'etat"): when
- * `holderInstanceToken` (this session's own, proven `myInstanceToken`)
- * equals `item.locked_by_token`, the ack gains one factual trailer line --
- * the caller just PROVED it holds this card's lock, so this is the cheapest
- * possible moment to remind it how to release only its own claim. Every
- * other caller (unproven, or a different/no lock) pays nothing: no trailer,
- * no lookup beyond the equality check. Never a nudge toward callers who hold
- * NO lock (that generic form was explicitly rejected in this card's design
- * -- see 3817a84f's context -- it would pollute a channel that is otherwise
- * 100% signal).
+ * Reports what the caller requested crossed against what the broker actually
+ * landed (via ROADMAP_UPSERT_ACK_FIELDS); args are never trusted directly since
+ * the broker silently normalizes or drops fields.
+ * domain is per-tool, never a union: roadmap_add never forwards locked, so it
+ * must never appear in that path's ack even if passed.
+ * When the caller's own instance token matches item.locked_by_token, the ack
+ * adds one trailer line reminding it how to release its own claim; no lookup or
+ * trailer otherwise.
  */
 function formatRoadmapUpsertAck(opts: {
   label: "created" | "updated";
@@ -1288,26 +1202,13 @@ function formatRoadmapUpsertAck(opts: {
 }
 
 /**
- * Compact ack for roadmap_append_context. Never the appended content itself
- * (card 4dcd4f04, commit fb50266 -- do not regress it), but a DIFFERENT
- * wording than formatRoadmapUpsertAck's "requested N chars, landed M chars"
- * (review delta, card 562fd9b5): that phrase describes TWO STATES of the
- * SAME field on an upsert (before/after a replace). Append is not a
- * replace -- `requested` would be only the incoming fragment while `landed`
- * is the ENTIRE resulting context, so reusing the upsert wording here reads
- * as a massive, false deformation of what was sent ("requested 12 chars,
- * landed 3400 chars"). Says what actually happened instead: how much was
- * ADDED (header included, since that is what really left the wire), and
- * what the field's new total size is.
- *
- * Reuses ROADMAP_UPSERT_ACK_FIELDS's "context" landed-extractor for the
- * total (same discipline as formatRoadmapUpsertAck: never re-derive how to
- * read a field off an item). The appended length is computed the same way
- * the broker computed it -- buildRoadmapAppendHeader with the SAME author
- * this call sent as `by` -- rather than guessed: an ISO-8601 timestamp is
- * always 24 characters regardless of instant, so the header's length is
- * deterministic and does not need to match the broker's exact timestamp,
- * only its shape and author.
+ * Never echoes the appended content itself.
+ * Reports how much was added (header included) and the field's new total size,
+ * rather than upsert's requested-vs-landed wording: an append's total is not
+ * comparable to the incoming fragment the way an upsert's before/after is.
+ * The appended length is computed via buildRoadmapAppendHeader with the same
+ * `by` author, since an ISO-8601 timestamp is always 24 chars regardless of
+ * instant.
  */
 function formatRoadmapAppendAck(requestedText: string, author: string, item: RoadmapItem): string {
   const landed = ROADMAP_UPSERT_ACK_FIELDS.context.landed(item);
@@ -1345,12 +1246,6 @@ const roadmapToolError = (e: unknown): { content: { type: "text"; text: string }
   isError: true,
 });
 
-// Shared by check_messages and wait_for_message (card a21f1303): the
-// "From <name> (<date>):" prefix over the same renderInbound() framing.
-// Card e3f8065d already established that the label substitutes a DISPLAY
-// name (a sentinel's public id, or "<dormant peer>") while renderInbound
-// itself must key on the real sender identity -- see the longer comment
-// this replaces at the check_messages case for the full reasoning.
 function formatInboundLine(fromPeerId: string, text: string, sentAt: string, recipientRole: string | null): string {
   const label = isOperatorSender(fromPeerId)
     ? OPERATOR_PEER_ID
@@ -1545,26 +1440,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         };
       }
 
-      // Card a21f1303 U1 (team-lead review round 3, 2026-08-26): the whole
-      // decision -- clamp/trim, the opportunistic peek's freshness filter,
-      // timer arming, and cancellation forwarding -- lives in
-      // runWaitForMessage (shared/wait-for-message.ts), executed by direct
-      // unit tests with injected fakes for peek/timers/cancellation. This
-      // case only wires the REAL implementations of those five dependencies
-      // and formats the returned outcome; it decides nothing itself. A
-      // mutation battery on an earlier version of this case (which moved
-      // only the VALUE transforms, not the control flow, into the pure
-      // module) found 12 of 13 mutations invisible to any test -- see that
-      // module's header for the reasoning this closes.
-      //
-      // One AbortController, shared by every dependency below, bounds the
-      // opportunistic peek's fetch end-to-end: brokerFetch has no signal by
-      // default (shared by 17 other callers, all unaffected -- signal stays
-      // an optional 3rd argument); this site supplies its own, aborted by
-      // EITHER the timer firing OR extra.signal (client cancellation).
-      // Measured: a broker that accepts the TCP connection and never
-      // replies leaves a signal-less fetch() hanging with no default
-      // timeout at all (`after 20024 ms -> still hanging`).
+      // This case only wires the real peek/timer/cancellation dependencies for
+      // runWaitForMessage; the decision logic lives there.
+      // One AbortController is shared across all three, aborted by either the
+      // timer firing or extra.signal (client cancellation) -- brokerFetch has
+      // no signal by default.
       const controller = new AbortController();
       const outcome = await runWaitForMessage(args, {
         peek: async () => {
@@ -1659,16 +1539,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         client_pid: myClientPid,
         cwd: myCwd,
         git_root: myGitRoot,
-        // Resolved, not the raw myProjectKey: /register and roadmap_list
-        // already store/scope on roadmapProjectKey()'s value (card 6aa32af4),
-        // so a no-remote repo whose peers-table row carries the local:<hash>
-        // fallback must show that same value here, not null -- otherwise
-        // whoami contradicts what list_peers reports for this exact session.
-        // Pinned by tests/roadmap-register-body.test.ts's whoami round trip.
-        // Today this field is pure DISPLAY; the day something consumes it as
-        // an input (the Deck, a script, an agent feeding it into roadmap_list)
-        // a regression here stops being visible the way it is today -- keep
-        // it wired to roadmapProjectKey(), never a locally recomputed value.
+        // Resolved via roadmapProjectKey(), never a locally recomputed value:
+        // /register and roadmap_list scope on that same value, including the
+        // local:<hash> fallback for a no-remote repo, so whoami must match what
+        // list_peers reports for this session.
         project_key: roadmapProjectKey(),
         group_name: groupNameForId(myGroupId),
         summary: currentSummary,
@@ -1766,11 +1640,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         myPeerId = reg.peer_id;
         myGroupId = newGroupId;
         myRegisteredAt = new Date().toISOString();
-        // Card a2f61172 review fix: an OLDER broker (pre-lot-A) omits `role` from
-        // its /register response entirely, so reg.role is `undefined` at runtime
-        // despite the `string | null` type. JSON.stringify DROPS an undefined key,
-        // so whoami's role field would vanish instead of rendering `null` -- an
-        // agent could no longer tell "no role" from "field absent".
+        // reg.role can be undefined at runtime -- an older broker omits it from
+        // /register entirely, despite the string|null type.
+        // Coalesced to null because JSON.stringify drops an undefined key,
+        // which would make whoami's role field vanish instead of showing null.
         myRole = reg.role ?? null;
         await writePeerIdCache(myCwd, myPeerId);
         await writeDeskSessionId();
@@ -2367,11 +2240,10 @@ async function main() {
   myInstanceToken = reg.instance_token;
   myPeerId = reg.peer_id;
   myRegisteredAt = new Date().toISOString();
-  // Card a2f61172 review fix: an OLDER broker (pre-lot-A) omits `role` from
-  // its /register response entirely, so reg.role is `undefined` at runtime
-  // despite the `string | null` type. JSON.stringify DROPS an undefined key,
-  // so whoami's role field would vanish instead of rendering `null` -- an
-  // agent could no longer tell "no role" from "field absent".
+  // reg.role can be undefined at runtime -- an older broker omits it from
+  // /register entirely, despite the string|null type.
+  // Coalesced to null because JSON.stringify drops an undefined key, which
+  // would make whoami's role field vanish instead of showing null.
   myRole = reg.role ?? null;
   await writePeerIdCache(myCwd, myPeerId);
   // Deck back-channel: hand the real minted session id to the per-tile token file

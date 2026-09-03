@@ -1,8 +1,6 @@
-// Courrier lot 1B/1D coverage follow-up (mutation review, 1/9 fail): pins the
-// two rules that were previously ONLY comments in index.ts (untestable under
-// bun, since index.ts imports electron) -- session_id re-mint on group
-// change, and the local journal truncate running even when the broker purge
-// throws. desktop/src/main/inbox-session.ts is the pure extraction.
+// Pins two rules from desktop/src/main/index.ts, untestable directly since
+// index.ts imports electron: session_id re-mints on group change, and the local
+// journal truncate runs even when the broker purge throws.
 
 import { test, expect } from "bun:test";
 import {

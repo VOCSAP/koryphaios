@@ -1,29 +1,12 @@
-// Card f4a3ed1e follow-up (2026-08-28). CI red on all three OS: the "Bun
-// tests (pure modules)" step (scripts/partition-pure-tests.ts) runs BEFORE
-// "Install desktop deps" in .github/workflows/desktop-build.yml.
-// tests/desktop-activity-unknown-render.test.ts is not exempted by
-// scripts/pure-module-partition.ts's EXEMPTIONS deny-list, and it dynamically
-// imports desktop/src/renderer/src/components/TerminalTile.tsx, which imports
-// @xterm/xterm, @xterm/addon-fit and @xterm/addon-web-links -- packages that
-// used to live ONLY in desktop/package.json's devDependencies. At the point
-// the pure-module step runs, desktop/node_modules does not exist yet, so
-// resolution fails with "Cannot find module '@xterm/xterm'". Fixed by adding
-// the same three packages, at IDENTICAL version ranges, to the ROOT
-// package.json's devDependencies -- bare-specifier resolution then walks up
-// from desktop/src/... to the repo root's node_modules and finds them there.
-//
-// This file is the guard the team-lead's brief asked for: half the value of
-// that fix is a test that goes RED if the two manifests' ranges ever diverge
-// again, since two node_modules roots with two different versions of the
-// same package (resolved differently depending on which directory a command
-// is launched from) is a worse failure mode than the one this card closes --
-// silent, and dependent on invocation cwd. Deliberately scoped to exactly the
-// three packages TerminalTile.tsx imports, not every "@xterm/*" key: desktop/
-// package.json also carries @xterm/addon-webgl (^0.18.0), which nothing in
-// the pure-module step's import graph touches and which this fix's scope
-// (interface_contract, spec_9efcd686) explicitly excludes -- asserting on it
-// here would force a root-manifest change for a package this bug never
-// needed there.
+// CI's pure-modules test step runs before desktop deps install, so a file
+// importing TerminalTile.tsx (which pulls in @xterm/xterm, @xterm/addon-fit,
+// @xterm/addon-web-links) fails to resolve those packages unless they are also
+// listed in the root package.json's devDependencies at identical version
+// ranges.
+// This guard goes red if the two manifests' ranges ever diverge, since two
+// node_modules roots with different versions of the same package resolved
+// differently by invocation cwd is a worse, silent failure mode. Scoped to
+// exactly the three packages TerminalTile.tsx imports, not every @xterm/* key.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

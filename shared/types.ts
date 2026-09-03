@@ -1,5 +1,3 @@
-// --- Identity primitives (v0.3) ---
-
 // Display name for a peer, mutable via set_id, unique per (peer_id, group_id).
 export type PeerId = string;
 
@@ -205,40 +203,21 @@ export interface PollMessagesResponse {
   messages: DeliveredMessage[];
 }
 
-// --- Deck system sender (v0.3.4) ---
-// The desktop Deck broadcasts outbound, fire-and-forget announcements via
-// POST /announce. They are stored with a reserved, non-routable sender so peers
-// can never reply to the Deck (send_message to 'deck' fails: the reserved row is
-// dormant, and active-target resolution misses it). The sentinel from_peer_id is
-// also the server-side suppression key that renders these as "do not reply".
+// The Deck broadcasts outbound, fire-and-forget announcements via POST
+// /announce, stored under a reserved, non-routable sender so peers cannot reply
+// -- send_message to 'deck' fails since the reserved row stays dormant and
+// active-target resolution misses it.
 
 /**
- * Card 37a2b8c7 volet 3: single source of truth for every reserved sentinel
- * identity. isSentinelInstanceToken (below) covers the REFUSAL direction --
- * catching an unlisted future sentinel at the network edge by shape, so
- * nobody needs to remember to add it anywhere. This array covers the
- * opposite, PROCESSING direction, which a shape predicate cannot: the sites
- * that must know each sentinel individually to act on it one by one (seed a
- * dormant DB row for it, exempt it from the dormant-TTL purge, map it to a
- * from_peer_id, refuse it as a set_id target) can only derive from an
- * enumerable list. Adding a sentinel means adding an entry HERE -- the
- * *_INSTANCE_TOKEN / *_PEER_ID constants below are meant to be DERIVED FROM
- * this array (not the reverse), via sentinelToken(peerId) below. That
- * convention is not self-enforcing: a future constant written as a hardcoded
- * literal instead of a sentinelToken()/RESERVED_PEER_IDS derivation would
- * bypass it silently (review finding, card 37a2b8c7). findUnbackedInstance
- * TokenExports/findUnbackedPeerIdExports (below) make the reciprocity
- * CHECKABLE, and tests/broker-sentinel-processing.test.ts asserts it holds
- * over the real module namespace (must be empty) -- so a constant added
- * without backing it here goes red, instead of only failing open at runtime,
- * PROVIDED it is declared in THIS module (the check only ever receives this
- * file's own namespace) and its export name ends in `_INSTANCE_TOKEN` or
- * `_PEER_ID` (that is how both this check and the pre-existing shape test
- * discover candidates; a same-purpose constant declared elsewhere, or named
- * without the conforming suffix, escapes both -- review pass 2, MINOR-1).
- * The same test file also iterates this array (not a hand-copied list) to
- * assert every entry is seeded, TTL-exempt, mapped, and set_id-reserved --
- * so a third entry added here is covered automatically on all four axes.
+ * Single source of truth for every reserved sentinel identity: adding one means
+ * adding an entry here, since the sites that process each sentinel individually
+ * (seed a dormant row, exempt it from TTL purge, map it to a from_peer_id,
+ * refuse it as a set_id target) can only derive from an enumerable list.
+ * Every *_INSTANCE_TOKEN/*_PEER_ID constant must be derived from this array via
+ * sentinelToken(), never a hardcoded literal --
+ * findUnbackedInstanceTokenExports/findUnbackedPeerIdExports make that
+ * reciprocity checkable, but only for a constant declared in this module whose
+ * export name ends in _INSTANCE_TOKEN or _PEER_ID.
  */
 export interface SentinelDefinition {
   readonly instanceToken: InstanceToken;
@@ -263,18 +242,15 @@ function sentinelToken(peerId: PeerId): InstanceToken {
 export const DECK_INSTANCE_TOKEN: InstanceToken = sentinelToken("deck");
 export const DECK_PEER_ID: PeerId = "deck";
 /**
- * Reserved OPERATOR inbox sentinel (v0.6, PLAN C12): the human in front of the
- * Deck. Agents `send_message` to 'operator'; the Deck polls /operator-inbox.
- * Like the deck row: permanently dormant, never listed, never purged.
+ * Reserved operator inbox sentinel: agents send_message to 'operator', the Deck
+ * polls /operator-inbox. Permanently dormant like the deck row -- never listed,
+ * never purged.
  */
 export const OPERATOR_INSTANCE_TOKEN: InstanceToken = sentinelToken("operator");
 export const OPERATOR_PEER_ID: PeerId = "operator";
 /**
- * Reserved display ids set_id must refuse. Derived from SENTINEL_DEFINITIONS
- * plus the literal "system" (system has no instance_token sentinel row, only
- * a reserved display name) -- previously a hand-written array disjoint from
- * the *_INSTANCE_TOKEN constants, so a sentinel added to one set silently
- * never reached the other.
+ * Derived from SENTINEL_DEFINITIONS plus the literal "system" -- system has no
+ * instance_token sentinel row, only a reserved display name.
  */
 export const RESERVED_PEER_IDS: readonly PeerId[] = [
   ...SENTINEL_DEFINITIONS.map((d) => d.peerId),
@@ -282,20 +258,12 @@ export const RESERVED_PEER_IDS: readonly PeerId[] = [
 ];
 
 /**
- * Card 37a2b8c7 review follow-up (MAJOR-1): the derivation comment above only
- * held for the two constants that actually call sentinelToken()/derive from
- * SENTINEL_DEFINITIONS. Nothing stopped a future `export const
- * SUPERVISOR_INSTANCE_TOKEN: InstanceToken = "__supervisor__"` hardcoded
- * literal from bypassing both -- it would pass the existing shape test
- * (tests/broker-roadmap-author-auth.test.ts) yet have no seed row, no TTL
- * exemption, no resolveSenderMeta mapping, and no reserved peer_id. This pair
- * makes that reciprocity checkable: given a module namespace object, return
- * the names of any `*_INSTANCE_TOKEN`/`*_PEER_ID` export whose VALUE is not
- * present in the derived array. Both are pure functions over a passed-in
- * object (not `import.meta`/self-reflection) so a test can feed them the real
- * `shared/types.ts` namespace (expect empty) AND a synthetic
- * supervisor-shaped object (expect it caught) in the same assertion --
- * proving the check discriminates instead of being vacuously green.
+ * Checks whether the derivation above actually held: given a module namespace,
+ * returns the names of any *_INSTANCE_TOKEN/*_PEER_ID export whose value is not
+ * present in the derived array -- a hardcoded literal bypassing
+ * sentinelToken()/SENTINEL_DEFINITIONS would otherwise pass silently.
+ * Pure over a passed-in object, not self-reflection, so a test can feed both
+ * the real namespace and a synthetic bad one in the same assertion.
  */
 export function findUnbackedInstanceTokenExports(
   moduleExports: Record<string, unknown>
@@ -312,18 +280,11 @@ export function findUnbackedPeerIdExports(moduleExports: Record<string, unknown>
 }
 
 /**
- * Is this instance_token one of the reserved sentinels?
- *
- * The sentinel VALUES above are exported constants, so they are public and any
- * caller can type one. They are labels the broker writes on its own rows, never
- * credentials -- so a request PRESENTING one proves nothing and must be refused
+ * Sentinel values are public labels the broker writes on its own rows, never
+ * credentials -- a request presenting one proves nothing and must be refused
  * wherever a token is used as proof of identity.
- *
- * Matching on the SHAPE rather than on an enumeration is deliberate: a third
- * sentinel added later is caught without anyone remembering to extend a list.
- * The half that the shape cannot cover -- a future sentinel written WITHOUT the
- * underscores -- is asserted by tests/broker-roadmap-author-auth.test.ts, which
- * enumerates every exported `*_INSTANCE_TOKEN` and requires it to match here.
+ * Matches on shape (__..__) rather than enumeration, so a future sentinel is
+ * caught without extending a list.
  */
 export function isSentinelInstanceToken(token: string): boolean {
   return /^__.+__$/.test(token);
@@ -347,16 +308,12 @@ export interface AnnounceResponse {
   sent: number;
 }
 
-// --- Roadmap (v0.4, PLAN C3): shared per-project backlog ---
-//
-// Items are scoped by project_key (normalized git remote), NOT by group_id:
-// groups are ephemeral (Deck windows mint a fresh secret per launch) while the
-// project is stable, so every session working on the same repo shares one
-// roadmap regardless of its group. Items deliberately carry NO foreign key to
-// peers/groups -- created_by/updated_by are plain-text snapshots of a peer_id
-// (or 'deck' for the operator) -- so their lifecycle is fully independent of
-// sessions: no cleanup timer ever touches them, deletion is a reversible
-// archive (deleted_at), and rows survive broker restarts like any other table.
+// Items are scoped by project_key, not group_id: groups are ephemeral (a fresh
+// secret per Deck launch) while the project is stable, so every session on the
+// same repo shares one roadmap regardless of group.
+// No foreign key to peers/groups -- created_by/updated_by are plain-text
+// snapshots -- so the lifecycle is independent of sessions: no cleanup timer,
+// deletion is a reversible archive.
 
 // 'directive' (CT1) is a control card, not a work item: it carries a `directive`
 // command the Deck app INJECTS into the terminals of `target_peer_ids` when the
@@ -429,66 +386,23 @@ export interface RoadmapItem {
   /** ISO timestamp of the lock, for the TTL sweep. null when unlocked. */
   locked_at: string | null;
   /**
-   * Card e344fa79: the lock owner's OWN group_id -- `locked_by` alone is
-   * only unique PER GROUP (peers.UNIQUE(peer_id, group_id)), so on a broker
-   * shared by several groups a legitimate homonym peer in another group can
-   * satisfy a bare `locked_by` comparison. This is the missing half of that
-   * composite key, not a new SCOPE column: the roadmap's scope stays
-   * `project_key` alone (operator arbitration fc444eda), this column answers
-   * "who holds the lock", not "which group may see this card".
-   *
-   * Stored RAW (team-lead arbitration, reversing an initial digest-based
-   * design once bun:sqlite was measured to have no SQL scalar-function
-   * registration -- a digest would have made the owner-gone sweep's
-   * correlated `peers` join uncomputable in pure SQL). Leaving this
-   * interface publicly exposed to every group listing the roadmap was
-   * judged the smaller risk than leaving locked_group's SQL comparison
-   * split across a JS pre-pass: `rowToRoadmapItem` (broker.ts) is now an
-   * explicit pick-list rather than a `...row` rest-spread, which closes the
-   * fail-open for every column, present and future, not just this one --
-   * see `ROADMAP_IMPORT_COLUMNS`'s doc comment above for the same
-   * discipline already applied to the import path.
-   *
+   * locked_by alone is unique only per group; this is the group_id half of that
+   * composite key -- it answers who holds the lock, not which group may see the
+   * card (the roadmap's own scope stays project_key).
    * null when unlocked, or when the row predates this column (fail-open
-   * migration state -- see `matchesLockOwner`'s doc comment in
-   * shared/roadmap-lock.ts).
+   * migration state).
    */
   locked_group: string | null;
   /**
-   * Card 4441e883, mecanisme B: the lock owner's `instance_token` at the
-   * moment it CLAIMED the lock -- `locked_by` above stays a DISPLAY name (a
-   * numbered-seat peer_id that a resumed session may not come back to, see
-   * that field's doc comment); this is the stable credential a caller can
-   * actually PROVE it still holds, for `formatRoadmapUpsertAck`'s "you hold
-   * this card" trailer.
-   *
-   * NEVER GUESSED OR BACKFILLED: NULL on every pre-existing row (fail-open
-   * migration state, same as `locked_group`), and NULL is also the
-   * PERMANENT, correct value for a claim `resolveRoadmapAuthor` could not
-   * prove via a real `instance_token` (an unproven claim, or an
-   * operator/deck-signed write, which authenticates a human, not a peer
-   * row) -- a resolver that fell back to naming the display peer_id here
-   * would defeat the entire point of adding this column (Card 4441e883,
-   * "LE BACKFILL NE DEVINE JAMAIS"). NULL reads "owner not proven": no
-   * gesture that depends on holding the lock may proceed on the strength of
-   * this column alone while it is NULL.
-   *
-   * Stamped only when `resolveRoadmapLock`'s own `claimed` is true (same
-   * discipline as `resolveLockedGroup`/`resolveKeptLockedAt` -- an ordinary
-   * third-party write to an already-locked row must not overwrite the real
-   * owner's proven token with its own, or with NULL if it has none itself),
-   * cleared to null everywhere `locked_by` itself is cleared.
-   *
-   * DOES NOT MAKE A LOCK SURVIVE A RESTART for most callers on this shared
-   * checkout: a peer that re-registers into an active `session_key`
-   * collision mints a brand-new `instance_token` (broker.ts's /register
-   * collision branch), so most sessions here do not carry the same token
-   * across a reconnect. This column trades "the lock outlives a restart"
-   * (mostly false in practice) for "an unproven claim never gets the trailer
-   * meant for a proven owner" (true by construction) -- an OPEN failure
-   * (legitimate owner returns under a fresh token, gets no trailer, same UX
-   * as today) traded for a CLOSED one (an agent that merely inherited a
-   * freed display name never gets told it holds a card it never claimed).
+   * Never guessed or backfilled: null on every pre-existing row, and null is
+   * also the permanent, correct value for a claim that could not be proven via
+   * a real instance_token -- falling back to the display peer_id here would
+   * defeat the point of this column.
+   * Stamped only when the write actually claims the lock, never overwritten by
+   * an ordinary third-party write.
+   * Does not make a lock survive a restart for most callers: re-registering
+   * into a session_key collision mints a fresh instance_token, so most sessions
+   * do not carry the same token across a reconnect.
    */
   locked_by_token: string | null;
   /**
@@ -502,48 +416,30 @@ export interface RoadmapItem {
    */
   target_peer_ids: string[];
   /**
-   * Card edefff05: the last OPERATOR (human, via the Ed25519 credential --
-   * see resolveApprovalAuth) who SIGNED a write on this card. Set only when
-   * that write's `by` was a reserved name (RESERVED_PEER_IDS) proven by that
-   * signature. Undefined until an operator signs a write on this card, and
-   * again after a stale-lock sweep (releaseStaleLocks), which resets this
-   * column to NULL the same way it resets locked_by. An ordinary agent's
-   * write PRESERVES the existing value. A signed reorder does not stamp it
-   * (queue write, not an authorship event on the card -- see
-   * handleRoadmapReorder).
-   *
-   * This is attribution, NOT ownership -- ownership of an active work-lock
-   * stays `locked_by`/`locked_at` on this same interface. A future "reserve
-   * this object to one operator" feature belongs on the OBJECT the operator
-   * is reserving, not on this card.
+   * Set only when the write's by is a reserved name proven by an Ed25519-signed
+   * operator credential. An ordinary agent's write preserves the existing
+   * value; a stale-lock sweep resets it to null the same way it resets
+   * locked_by; a signed reorder does not stamp it (a queue write, not an
+   * authorship event on the card).
+   * Attribution, not ownership -- ownership of an active work-lock stays
+   * locked_by/locked_at.
    */
   operator_id?: string;
   /**
-   * Card c33a5968: operator-only "inactive" flag. An inactive card stays
-   * VISIBLE and ordinary edits (retitle, tags, description, context) stay
-   * permitted, but every write path that would move it toward status='in_progress' or
-   * locked=true is refused (403) while this is true -- see
-   * `refusesInactiveClaim`/`refusesInactiveToggle` in `shared/roadmap-lock.ts`.
-   * Never a `RoadmapStatus` enum value: status feeds the MCP tool schema,
-   * board filters and the stale-lock sweep, and this flag must stay
-   * orthogonal to (and distinct from) `wont`. Toggling it requires
-   * `author.operator_id` (resolveRoadmapAuthor's cryptographically-resolved
-   * field, never client-declared) -- deliberately absent from the
+   * An inactive card stays visible and ordinary edits (retitle, tags,
+   * description, context) stay permitted, but any write moving it toward
+   * status=in_progress or locked=true is refused while this is true.
+   * Never a RoadmapStatus value -- stays orthogonal to (and distinct from)
+   * wont. Toggling requires author.operator_id, deliberately absent from the
    * roadmap_update MCP tool schema so an ordinary agent cannot self-unblock.
    */
   inactive: boolean;
   /**
-   * Card aaf4537d (Pause stop): set when an operator PAUSES the agent that
-   * holds this card's work-lock, instead of hard-stopping it -- the lock
-   * itself (`locked`/`locked_by`/`locked_at`) is left untouched, this column
-   * only makes the card immune to `releaseStaleLocks`'s ordinary TTL/owner-
-   * gone sweep for `LOCK_PARK_TTL_SEC` (default 24h; see
-   * `shared/roadmap-lock.ts`'s `isParked`). Nullity IS the state -- no
-   * separate boolean, so the two can never desync. Cleared (both this and
-   * `lock_parked_by`) the moment the lock itself is cleared, by any of: the
-   * park's own TTL expiring (sweep clause 3), a hard-release
-   * (`/roadmap/lock-release`), or an ordinary write moving the card out of
-   * `in_progress`.
+   * Set when an operator pauses the agent holding this card's lock instead of
+   * hard-stopping it -- the lock itself is left untouched, this only exempts
+   * the card from the TTL/owner-gone sweep for LOCK_PARK_TTL_SEC.
+   * Nullity is the state, no separate boolean. Cleared together with
+   * lock_parked_by whenever the lock itself is cleared.
    */
   lock_parked_at: string | null;
   /**
@@ -562,27 +458,15 @@ export interface RoadmapItem {
 }
 
 /**
- * Card aad5e954: the column list /roadmap/import writes, as NAMED DATA.
- *
- * `INSERT OR REPLACE` deletes the row before reinserting it, so any column of
- * roadmap_items missing from this list is silently reset to its table DEFAULT
- * on every import. Card 40ddf1f5 paid that once (locked/locked_by/locked_at
- * were absent, so an unrelated import erased another card's lock); this
- * constant exists so the failure mode cannot come back as a NEW column.
- *
- * Two properties earn their keep here, and both are the reason this is an
- * array rather than a hand-written SQL string:
- *  - the statement text AND the bound values are generated from it in
- *    broker.ts, so they cannot drift apart positionally, and a column added
- *    here without a value is a TYPE error rather than a runtime surprise;
- *  - it is directly comparable to the live schema. tests/broker-roadmap-import
- *    reads PRAGMA table_info on a broker-spawned database and compares it to
- *    this list, so a column added to the table and forgotten here fails CLOSED.
- *    Deliberately NOT extracted from the SQL by regex: that would make the
- *    regex a link in the guard, and a regex that silently returns a SUBSET
- *    turns the comparison green exactly when it should scream (measured
- *    precedent in this repo on 2026-08-04, a comment scanner that desynced on
- *    a quoted literal and went from 3 findings to 54).
+ * The column list /roadmap/import writes, as data rather than a hand-written
+ * SQL string: INSERT OR REPLACE deletes the row first, so any roadmap_items
+ * column missing from this list is silently reset to its table DEFAULT on
+ * import.
+ * Statement text and bound values are generated from this array so they cannot
+ * drift positionally, and it is compared directly against the live schema so a
+ * forgotten column fails closed.
+ * Deliberately not derived from the SQL by regex: a regex that silently returns
+ * a subset would make that comparison pass exactly when it should fail.
  */
 export const ROADMAP_IMPORT_COLUMNS = [
   "id",
@@ -644,33 +528,16 @@ export function findUncoveredRoadmapColumns(
 }
 
 /**
- * Card 4dcd4f04: fields the roadmap_add/roadmap_update MCP tools may report in
- * their compact upsert ack (server.ts formatRoadmapUpsertAck -- never the full
- * item, nobody consumes that echo and it can carry kilobytes of `context`).
- *
- * Reviewer FAIL on the first cut (same card): the ack was built from the
- * CALLER'S RAW ARGS, so it lied on 5 fields the broker silently changes --
- * `title` (trimmed), `tags`/`depends_on` (cleanList drops non-string/blank
- * entries), `target_peer_ids` (cleanPeerIds drops malformed/reserved/dupe
- * entries, and the broker forces [] outside kind='directive'), and `locked`
- * (roadmap_add never forwards it to the broker at all -- the field is outside
- * that path's domain, not merely unreported). Every `landed` extractor below
- * reads off the RoadmapItem the broker actually returned, never off the
- * caller's args; args only decide WHICH fields were requested.
- *
- * Three report shapes:
- *  - "long": free text, potentially large (title/description/rationale/
- *    context). The ack reports character counts only -- REQUESTED (the
- *    caller's raw arg length) AND LANDED (the persisted length) -- never the
- *    content, and never just one of the two: a requested field the broker
- *    silently drops must say so (0 landed chars), not vanish from the ack.
- *  - "short": an enum/scalar. The ack reports the LANDED value only.
- *  - "list": an array. The ack reports the LANDED item count only.
- *
- * `ROADMAP_UPSERT_ACK_FIELDS` is a `Record` total over the union, so a field
- * added to `RoadmapItem`/`RoadmapUpsertRequest` without a matching entry here
- * is a COMPILE error, never a silently-omitted line in the ack (CLAUDE.md
- * coverage rule, same discipline as `findUncoveredRoadmapColumns` below).
+ * Every `landed` extractor reads off the RoadmapItem the broker actually
+ * returned, never the caller's raw args -- the broker silently changes fields
+ * (trims title, cleans tags/target_peer_ids, drops locked on roadmap_add), so
+ * args only decide which fields were requested.
+ * Three report shapes: "long" text fields report requested and landed character
+ * counts, never content; "short" scalars report the landed value only; "list"
+ * arrays report the landed item count only.
+ * A Record total over the union, so a field added to
+ * RoadmapItem/RoadmapUpsertRequest without a matching entry here is a compile
+ * error, never a silently-omitted ack line.
  */
 export type RoadmapUpsertAckField =
   | "title"
@@ -744,14 +611,12 @@ export const ROADMAP_UPDATE_ACK_FIELDS: readonly RoadmapUpsertAckField[] = [
 ] as const;
 
 /**
- * Compare a tool's LIVE MCP inputSchema property names (minus plumbing the
- * ack never reports: `id`) against its ack field domain above. Same shape as
- * `findUncoveredRoadmapColumns` (card aad5e954): `missing` is a schema field
- * the domain forgot (would silently vanish from the ack forever the day it is
- * added), `extra` is a stale domain entry the schema no longer declares.
+ * Compares a tool's live MCP inputSchema property names against its ack field
+ * domain: missing is a schema field the domain forgot, extra is a stale domain
+ * entry.
  * Call once per tool, never on a union of both tools' schemas -- the
- * roadmap_add/roadmap_update asymmetry (`locked`) is exactly what a unioned
- * comparison would hide.
+ * roadmap_add/roadmap_update asymmetry is exactly what a unioned comparison
+ * would hide.
  */
 export function findUncoveredAckFields(
   schemaFields: readonly string[],
@@ -842,14 +707,12 @@ export interface RoadmapUpsertRequest {
   /** Author of the write: peer_id or 'deck'. */
   by: string;
   /**
-   * Roadmap card 39c40571, layer 1: PROOF that the caller really is `by`.
-   *
    * Optional over the wire because two legitimate callers have no peer row and
-   * therefore no token -- cli.ts (runs on the broker host and already holds the
-   * broker token) and the Deck (writes as 'deck'). It stops being optional the
-   * moment `by` names an EXISTING peer: the broker then demands the matching
-   * token and refuses the write otherwise, so one agent can no longer write
-   * under another's identity. When present it OVERRIDES `by`.
+   * no token -- cli.ts (already holds the broker token) and the Deck (writes as
+   * 'deck').
+   * It stops being optional the moment by names an existing peer: the broker
+   * then demands the matching token and refuses otherwise. When present it
+   * overrides by.
    */
   instance_token?: string;
   kind?: RoadmapKind;
@@ -1153,22 +1016,12 @@ export interface GraphDraftOpenResponse {
   draft: GraphDraft;
 }
 
-// --- Dispatch requests (card bf76d37f) ---
-// A team lead can CREATE a directive card and QUEUE it, but nothing an agent
-// owns TRIGGERS the wave: dispatchNext (desktop/src/main/index.ts) has exactly
-// two callers, the 'roadmap:dispatch' IPC channel and the watchDispatched
-// timer, both Deck-side. The broker parks the ASK here; the Deck polls it,
-// runs its own dispatchNext, and posts the OUTCOME back on the same row.
-//
-// Durability is the graph_drafts / roadmap_items model, NOT the messages one:
-// no FK to peers, plain-text author snapshot, status flips, listing is
-// non-destructive — a Deck restart never loses a parked request.
-//
-// The outcome is the POINT of the feature, not a nicety. runDirectiveWave
-// (desktop/src/main/dispatch.ts) marks a card done BEFORE executing it, so a
-// card's `status` proves nothing about its execution and cannot serve as an
-// acknowledgement. What comes back must name the cards actually dispatched and
-// the tiles actually hit.
+// The broker only parks the dispatch request; nothing broker-side triggers the
+// wave -- the Deck polls it, runs its own dispatch, and posts the outcome back
+// on the same row.
+// The outcome matters because status alone proves nothing: a card is marked
+// done before it is executed, so what comes back must name the cards actually
+// dispatched and the tiles actually hit.
 
 export type DispatchRequestStatus = "pending" | "done";
 

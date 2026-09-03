@@ -1,27 +1,8 @@
-// Roadmap client for the Deck (PLAN C3-M3). Read/write access to the broker's
-// per-project roadmap (/roadmap/list|upsert|archive) for the operator UI.
-//
-// Node builtins + fetch only (no electron, no @shared alias) so it is
-// unit-testable under `bun test` against an ephemeral broker, like
-// broker-client.ts. The broker endpoint comes from the same claude-peers
-// config the spawned sessions use (resolveBrokerEndpoint).
-//
-// The project key MUST match what server.ts computes for the sessions spawned
-// in the same directory, otherwise the Deck and its agents would see two
-// different roadmaps. Card 6aa32af4, 2nd review round: this file used to
-// keep its own copy of normalizeRemoteUrl -- since resolveProjectKey()
-// returns a non-empty remote key AS-IS, that copy alone determined the
-// whole derivation whenever a repo has a remote (the majority case), so an
-// earlier pass that unified only the local:<hash> fallback branch left the
-// real divergence risk in place. Fixed by importing both normalizeRemoteUrl
-// and resolveProjectKey from shared/project-key.ts -- single source, zero
-// duplication. The git shelling itself (execFileSync) stays local to this
-// file: it is Node-native, and shared/summarize.ts (which also re-exports
-// normalizeRemoteUrl for its own callers) references the Bun global
-// directly in computeProjectKey(), which desktop/tsconfig.node.json's
-// `"types": ["node", "electron-vite/node"]` (no bun-types) can't resolve --
-// importing it here would fail `npm run typecheck` with "Cannot find name
-// 'Bun'", not a runtime problem.
+// The project key must match what server.ts computes for sessions spawned in
+// the same directory, or the Deck and its agents see different roadmaps.
+// Git shelling stays local to this file rather than importing
+// shared/summarize.ts: that module references the Bun global, which desktop's
+// node tsconfig (no bun-types) cannot resolve, breaking npm run typecheck.
 
 import { execFileSync } from 'node:child_process'
 import { reportError } from './log'
@@ -41,9 +22,6 @@ import type {
   RoadmapUpsertResponse
 } from '../shared/types'
 
-// Card 6aa32af4: re-exported so existing `from "./roadmap-service.ts"`
-// imports (tests/broker-desktop-roadmap-service.test.ts) keep working now
-// that the implementation lives in shared/project-key.ts.
 export { normalizeRemoteUrl }
 
 function gitOutput(args: string[], cwd: string): string | null {
@@ -55,11 +33,8 @@ function gitOutput(args: string[], cwd: string): string | null {
 }
 
 /**
- * The roadmap scope for a project directory. Git shelling (remote lookup,
- * git root) stays local to this file; the combine step -- normalized
- * `origin` remote wins, else `local:<hash>` -- is shared/project-key.ts's
- * resolveProjectKey(), the same function server.ts's roadmapProjectKey()
- * calls, so the two can no longer silently diverge.
+ * Shares resolveProjectKey with server.ts's roadmapProjectKey so the two can't
+ * silently diverge on how a project key is derived.
  */
 export function computeDeckProjectKey(projectDir: string): string {
   const remote = gitOutput(['remote', 'get-url', 'origin'], projectDir)
@@ -68,29 +43,12 @@ export function computeDeckProjectKey(projectDir: string): string {
   return resolveProjectKey(normalized, gitRoot, projectDir)
 }
 
-// --- Operator signature on operator-authored writes (card 39c40571 layer 2) ---
-//
-// A write claiming `by: 'deck'` speaks as the HUMAN, and the broker now demands
-// an Ed25519 proof for it. The identity lives in the app-state directory and is
-// read through a cipher, both of which are electron-side concerns, so this
-// module never loads it: index.ts injects a LOADER once and the first WRITE
-// calls it. Lazy on purpose -- the identity used to be loaded only inside
-// ApprovalRuntime.arm(), which is gated by the mobileApprovals setting, so
-// wiring the signature there would have made a phone-notification toggle the
-// on/off switch of the shared roadmap.
-//
-// One loader per main process, and that is the right key: the identity file
-// lives in the per-OS-user app-state directory (see operator-identity.ts), so
-// one running Deck is one OS user is one operator. Two OS accounts are two
-// processes with two directories, never two identities racing on this variable.
-/**
- * The fields a signature ADDS to the body: the proof itself plus the public
- * key. The key travels because operator_id is its digest, so a broker meeting
- * this operator for the first time can self-certify the binding instead of
- * refusing an unknown id -- and the signature must therefore cover the body
- * WITH the key in it, which is why the signer receives the payload and returns
- * both fields rather than just a proof.
- */
+// Writes claiming by: 'deck' need an Ed25519 signature; index.ts injects the
+// signer lazily since the identity loader is electron-side and this module
+// stays loader-free.
+// The signature must cover the payload together with the public key it adds,
+// since operator_id is the key's digest — a broker meeting the operator for the
+// first time can self-certify the binding instead of refusing an unknown id.
 export type RoadmapAuthFields = Record<string, unknown>
 export type RoadmapSigner = (payload: Record<string, unknown>) => RoadmapAuthFields | null
 
@@ -163,24 +121,12 @@ async function roadmapPost<T>(endpoint: BrokerEndpoint, path: string, body: unkn
 /** Operator writes are attributed to the reserved 'deck' author. */
 const DECK_AUTHOR = 'deck'
 
-// --- Boundary validation (roadmap card c7ba8ce8) -----------------------------
-//
-// roadmapPost ends with `as T` on a network body, which validates nothing, while
-// a broker response field is hostile input #2 by convention. Measured cost of
-// trusting it: a `target_peer_ids` holding a STRING does NOT throw in
-// resolveDirectiveTargets (directive.ts iterates the CHARACTERS of a string), so
-// executeDirective reaches its `matched.length === 0` branch and rejects on
-// `.join`. The same shape on `depends_on` is worse because it is SILENT: a
-// string HAS `.includes`, so RoadmapList/RoadmapView answer substring matches
-// and report dependencies that do not exist, with no error anywhere.
-//
-// The guard therefore lives at the choke point every response passes through,
-// not at one caller: validating only listRoadmap would leave upsert, reorder and
-// archive open, which is a validator wired to one of its call paths.
-//
-// COERCE, do not drop: an empty `target_peer_ids` routes into the pre-existing
-// "no live target" branch, which already journals. Dropping the item instead
-// would make the operator's board lie by omission.
+// Validates every broker response field at this module's single choke point,
+// not per caller, since an unchecked target_peer_ids or depends_on string
+// degrades silently into wrong substring matches or false empty results.
+// Coerces rather than drops: an empty target_peer_ids still lands in the
+// existing no-live-target branch, which already journals, instead of vanishing
+// from the operator's board.
 
 const KINDS = ['feature', 'bug', 'debt', 'idea', 'chore', 'directive'] as const
 const PRIORITIES = ['must', 'should', 'could', 'wont'] as const
@@ -222,21 +168,13 @@ function queuePos(v: unknown): number | null {
 }
 
 /**
- * Shape one roadmap item coming off the wire, or null when it is unusable.
- *
- * PICK-LIST, NEVER A SPREAD. Do not "simplify" this into `{ ...raw, tags: ... }`:
- * `RoadmapItem` has 27 fields and the list below covers all 27, so a 28th added
- * broker-side would travel through unvalidated with nothing failing, which is
- * the canonical fail-open shape this guard exists to avoid. Naming every field
- * means a new one simply does not arrive until someone adds it here. The
- * compiler only catches a REQUIRED field left out; an OPTIONAL field (like
- * `operator_id`) omitted from this pick-list compiles clean and produces no
- * error, so what actually retains the guarantee is the field count asserted
- * in `tests/desktop-roadmap-sanitize.test.ts` -- a new field must be added
- * here AND that count updated, or the omission ships silent.
- *
- * `id` and `project_key` are STRUCTURAL rather than coercible: an item without
- * them cannot be addressed, updated or matched, so it is dropped and traced.
+ * Pick-list, never a spread: every RoadmapItem field is named explicitly, so a
+ * field added broker-side without being listed here does not travel through
+ * unvalidated.
+ * The compiler only catches a required field omitted here; an optional one left
+ * out compiles clean with no error.
+ * id and project_key are structural, not coercible — an item missing either
+ * cannot be addressed or matched, so it is dropped and traced.
  */
 export function sanitizeRoadmapItem(raw: unknown): RoadmapItem | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
@@ -266,9 +204,8 @@ export function sanitizeRoadmapItem(raw: unknown): RoadmapItem | null {
     locked: r.locked === true,
     locked_by: nullableStr(r.locked_by),
     locked_at: nullableStr(r.locked_at),
-    // Card e344fa79 lineage: the lock owner's group_id, consumed by
-    // idle-lock.ts's ownsIdleLock so watchIdleLocks can no longer match a
-    // homonym peer_id in a different group.
+    // The lock owner's group_id, so a lock ownership check can't match a
+    // same-named peer_id from a different group.
     locked_group: nullableStr(r.locked_group),
     directive: typeof r.directive === 'string' ? oneOfOrNull(r.directive) : null,
     target_peer_ids: strList(r.target_peer_ids),
@@ -334,11 +271,9 @@ export async function listRoadmap(
 const FACET_DIMENSIONS = ['kind', 'priority', 'effort', 'value', 'status', 'tags'] as const
 
 /**
- * One facet dimension's buckets. Malformed INDIVIDUAL buckets are dropped
- * and traced (mirrors sanitizeList's dropped-count discipline) -- but this
- * never manufactures a bucket list out of a dimension that isn't an array at
- * all; sanitizeFacets checks that shape itself and rejects the whole payload
- * when it's wrong, per review round 2 point 2.
+ * A malformed individual bucket is dropped and traced, but a dimension that
+ * isn't an array at all rejects the whole payload instead of silently producing
+ * an empty bucket list.
  */
 function sanitizeFacetBucketList(raw: unknown[], dim: string, route: string): RoadmapFacetBucket[] {
   const out: RoadmapFacetBucket[] = []
@@ -366,23 +301,12 @@ function sanitizeFacetBucketList(raw: unknown[], dim: string, route: string): Ro
 }
 
 /**
- * Shape a `RoadmapFacets` payload, or null when unusable -- PICK-LIST, NEVER
- * A SPREAD, same discipline as sanitizeRoadmapItem. Returning null (never a
- * partially-filled object) is deliberate: `RoadmapSearchResult.facets` is
- * typed `RoadmapFacets | null` precisely so an older broker that never sends
- * counters is distinguishable from a real zero-count bucket -- a half-built
- * object here would silently manufacture false zeros in the filter panel.
- *
- * Review round 2 (2026-08-10), MAJOR (point 2): this used to return `[]` for
- * any dimension whose bucket array was malformed, silently, with no trace --
- * so a broker response where only `kind` was broken shipped a VALID-looking
- * facets object with `kind: []`, indistinguishable from "this project truly
- * has zero of every kind", a silent false-empty the filter panel could not
- * tell apart from a real zero. Fixed: every one of the six expected
- * dimensions is checked for `Array.isArray` up front; if even one fails, the
- * WHOLE payload is rejected (traced) and the caller falls back to no
- * facets at all -- the same "distinguishable from an older broker" contract
- * the doc above already promises, now actually honoured per-dimension too.
+ * Returns null rather than a partially-filled object: RoadmapFacets is nullable
+ * exactly to distinguish an older broker that omits counters from a real
+ * zero-count bucket.
+ * Every one of the six dimensions must be a real array or the whole payload is
+ * rejected and traced — a single broken dimension must not report a false
+ * all-zero facet set.
  */
 export function sanitizeFacets(raw: unknown, route = '/roadmap/list (search)'): RoadmapFacets | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null

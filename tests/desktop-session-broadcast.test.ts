@@ -3,43 +3,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { findMatchingClose, extractBracedBody, extractParenBody } from "./_braced-body";
 
-// A handler wired via `<receiver>.on(...)` that mutates a RuntimeState field
-// surfaced by toRuntime() but skips this.broadcast() leaves the renderer's
-// snapshot stale (2026-07-30: the thinking badge froze this way). This is a
-// static/textual guard on the whole handler family, deliberately not a pure
-// extracted module: the source it scans is session-service.ts itself.
-//
-// Card 581a0d56 (2026-08-26 mutation review, measured 2026-08-27): the prior
-// version of this guard anchored its handler discovery on a REGEX with two
-// filters -- the receiver's NAME had to match `\w+Detector`, and the
-// callback's parameter had to be a destructured object literal `({...})`.
-// Both filters are accidental, not semantic: `this.pty.on('exit', ...)`
-// mutates `status`/`exitCode`/`activity` and was invisible only because "pty"
-// doesn't end in "Detector"; the activity tracker's `t.on((state) => ...)`
-// mutates `activity` and was invisible on BOTH counts (name "t", positional
-// param). Measured real-domain coverage that day: 5 mutating `.on(...)` call
-// sites in session-service.ts, only 3 seen by the old regex. Worse than
-// stagnant, coverage was REGRESSIVE by construction: any lot that introduces
-// a differently-named or differently-shaped event emitter silently shrinks
-// what this guard can see, with nothing turning red.
-//
-// This version discovers its domain the way toRuntime()'s own field list is
-// discovered -- by SCANNING the real source, not by matching a name or a
-// shape. `findOnCallSites` finds every `<expr>.on(` call in the file, full
-// stop; `resolveCallbackBody` then extracts that call's callback body
-// regardless of whether it is a destructured-object arrow, a positional-arg
-// arrow, an `async` arrow, or a *named reference* to a method/const-arrow
-// defined elsewhere in the same file (resolved by scanning for that
-// definition; an UNRESOLVABLE reference throws rather than being silently
-// treated as safe -- an unresolved callback is a guard blind spot, not a
-// passing case, same principle as `extractRuntimeFields`'s own "not found"
-// throws below).
-//
-// Lives in tests/ (not desktop/src/main/) so it can use bun:test directly --
-// desktop/tsconfig.node.json's ambient types don't include bun-types, and
-// this file is outside that tsconfig's scope entirely. Named desktop-*.test.ts
-// so the Windows/macOS/ubuntu CI matrix (.github/workflows/desktop-build.yml,
-// explicit glob list, see TESTING.md) actually runs it.
+// Discovers its domain by scanning session-service.ts for every <expr>.on( call
+// site, rather than matching on receiver name or callback shape, since both are
+// accidental, not semantic.
+// resolveCallbackBody follows a named reference to its definition elsewhere in
+// the file; an unresolvable reference throws rather than being treated as safe.
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
 
@@ -90,18 +58,12 @@ function stripComments(s: string): string {
   return out;
 }
 
-// findMatchingClose/extractBracedBody/extractParenBody now live in
-// tests/_braced-body.ts (card 9e450573 Lot B dedup) -- imported above. This
-// file's local copies were byte-for-byte the same contract (string/regex-
-// literal contents not excluded, same pre-existing limitation), so the
-// delegation collapses to a direct import with no wrapper needed.
-
-// toRuntime() is the source of truth for which RuntimeState fields the
-// renderer actually sees -- extracted from its `return { ... }` object
-// literal rather than hand-listed. A hand-maintained list drifts silently as
-// fields are added: a prior version of this guard hard-coded 4 field names
-// and missed 4 more (status, exitCode, peerId, expired), so a future handler
-// mutating one of those went undetected.
+// toRuntime()'s own return object literal is the source of truth for which
+// RuntimeState fields the renderer actually sees, so this reads the field list
+// directly out of that literal rather than hand-listing it.
+// A hand-maintained list drifts silently as fields are added: a hardcoded list
+// of four names once missed four more, and a handler mutating one of those
+// would go undetected.
 function extractRuntimeFields(src: string): string[] {
   const fnMatch = /private toRuntime\([^)]*\)[^{]*\{/.exec(src);
   if (!fnMatch) throw new Error("toRuntime() not found in session-service.ts -- has it been renamed?");
@@ -260,13 +222,9 @@ test("every `.on(...)` handler in session-service.ts that mutates a renderer-vis
   const src = stripComments(readFileSync(SESSION_SERVICE_PATH, "utf-8"));
   const fields = extractRuntimeFields(src);
   assertExtractorProducedFields(fields);
-  // As of card 581a0d56's fix this sees all 5 real mutating sites (previously
-  // 3 of 5): quotaDetector.on('limit'/'clear'), attentionDetector.on('attention'),
-  // this.pty.on('exit') and the activity tracker's t.on((state) => ...) --
-  // the last two were the guard's own blind spot, not a real bug (both do
-  // call this.broadcast()). Negative control: startupAckDetector.on('ack')
-  // matches the domain (it's a real `.on(...)` site) but mutates nothing, so
-  // it must NOT appear here even though it's now in-scope.
+  // Negative control: startupAckDetector.on('ack') matches the .on(...) scan
+  // domain but mutates nothing, so it must not appear in
+  // findUnbroadcastMutators's result even though it's in scope.
   expect(findUnbroadcastMutators(src, fields)).toEqual([]);
 });
 
@@ -308,9 +266,6 @@ test("the guard does not flag a handler that mutates a guarded field and also br
   `;
   expect(findUnbroadcastMutators(src, FIXTURE_FIELDS)).toEqual([]);
 });
-
-// ----- the four domain-growth vectors the OLD name+shape regex could never
-// see (card 581a0d56, point 3): each is fed alone, each must be flagged. -----
 
 test("vector (a) -- receiver name does NOT end in 'Detector'", () => {
   const src = `

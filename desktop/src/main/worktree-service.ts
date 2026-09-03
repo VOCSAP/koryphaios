@@ -1,17 +1,12 @@
-// Git worktree layer for the Deck (PLAN C4). One session = one working dir +
-// one branch, so several agents can work the same repo in parallel without
-// stepping on each other. Worktrees live under <projectDir>/.worktrees/<name>
-// (recommend adding `.worktrees/` to the project's .gitignore).
-//
-// Node builtins only (no electron, no @shared alias) so it is unit-testable
-// under `bun test` on a throwaway repo, like roadmap-service.ts. All git
-// errors surface as thrown Error messages for the IPC layer to relay.
-//
-// Deliberate rules:
-// - `remove` NEVER deletes the branch, and never uses --force: un-merged or
-//   dirty work must survive a tile closing (the operator can force by hand).
-// - The optional post-create hook (deps install) runs in the BACKGROUND:
-//   spawning the session is never gated on an `npm install`.
+// One session = one working dir + branch, under <projectDir>/.worktrees/<name>
+// (add .worktrees/ to the project's .gitignore).
+// Node builtins only, no electron or @shared alias, so this is unit-testable
+// under bun test on a throwaway repo; git errors surface as thrown Error
+// messages.
+// remove() never deletes the branch and never uses --force, so unmerged or
+// dirty work survives a tile closing.
+// The optional post-create hook runs in the background; spawning a session is
+// never gated on it.
 
 import { exec, execFile } from 'node:child_process'
 import { reportError } from './log'
@@ -21,19 +16,12 @@ import { join, resolve, sep } from 'node:path'
 export const WORKTREES_DIR = '.worktrees'
 
 /**
- * Canonical form of a path, for comparison with git's own output.
- *
- * git always reports the REAL path (symlinks resolved, Windows long name),
- * while what reaches us can be a symlinked prefix (macOS `/var` is a symlink
- * to `/private/var`, so every temp dir and many home setups differ) or an 8.3
- * short name (`C:\Users\RUNNER~1\…`). Comparing the two forms fails silently:
- * `removeWorktree` answered "not a worktree of this repo" for a worktree it
- * had just created, and the Worktrees view could not match a worktree to its
- * session. `realpathSync.native` also normalizes the Windows short name.
- *
- * A path that does not exist cannot be realpath'd — fall back to `resolve` so
- * callers still get a stable key and the caller's own "not a worktree" error
- * instead of a throw from here.
+ * git always reports the real path (symlinks resolved, Windows short names
+ * expanded), while what reaches us can be a symlinked prefix (macOS /var ->
+ * /private/var) or an 8.3 short name, so raw comparison against git's output
+ * fails silently.
+ * A path that doesn't exist can't be realpath'd, so this falls back to resolve
+ * for a stable key instead of throwing.
  */
 export function canonicalPath(p: string): string {
   try {

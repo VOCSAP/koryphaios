@@ -1,13 +1,9 @@
-// Sonde rejouee par tests/desktop-happy-dom-teardown.test.ts dans un processus
-// bun NEUF. Elle vit dans un processus separe pour une raison mesuree, pas par
-// gout de l'isolation : l'ordre d'execution des fichiers de test n'est pas
-// garanti (bun 1.3.13 trie alphabetiquement, la CI sur bun 1.3.14 ne trie pas),
-// donc une sonde qui s'execute dans le processus partage ne peut RIEN affirmer
-// sur l'etat initial des globals -- n'importe quel fichier a pu enregistrer
-// happy-dom avant elle. Dans un processus neuf, l'etat de depart est connu.
-//
-// Codes de sortie distincts pour que l'echec soit lisible sans relire ce
-// fichier. Le contrat est le texte "PROBE ok" sur stdout et le code 0.
+// Rejouée dans un processus bun neuf : l'ordre d'exécution des fichiers de test
+// n'est pas garanti (des versions de bun trient différemment), donc une sonde
+// partageant le processus ne peut rien affirmer sur l'état initial des globals.
+// Le contrat : le texte 'PROBE ok' sur stdout, code de sortie 0 en cas de
+// succès, un code distinct par échec pour rester lisible sans relire ce
+// fichier.
 import { GlobalRegistrator } from "@happy-dom/global-registrator"
 
 const nativeFetch = globalThis.fetch

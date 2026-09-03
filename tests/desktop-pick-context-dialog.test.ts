@@ -1,15 +1,5 @@
-// Pick-context dialog (PickContextDialog.tsx, `pickContextPrompt` flag,
-// DeckConfig): the modal that opens after an element pick so the operator
-// can add an optional note/intent/priority before the prompt is composed
-// and delivered by the two call sites (BrowserView.tsx's webview handler,
-// App.tsx's onDesignPick). Pure and prop-driven -- like TemplateEntryCard's
-// EntryCard (tests/desktop-templates-composer-role.test.ts, the harness this
-// file is modelled on) -- so it is mounted DIRECTLY, no BrowserView/App in
-// sight.
-//
-// happy-dom, registered globally -- see tests/desktop-explorer-selection-dom.test.ts's
-// header comment for the measured cross-file blast radius of a missing
-// GlobalRegistrator.unregister().
+// Mounted directly, without BrowserView or App, since the dialog is pure and
+// prop-driven.
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 GlobalRegistrator.register();
@@ -48,11 +38,8 @@ function resetFakeStore(): void {
   fakeUseDeck.setState(initialFakeState(), true);
 }
 
-// store.ts's own `@shared/types` value import does not resolve under plain
-// `bun test` from the repo root (tests/_store-mock.ts's header comment) --
-// required regardless of whether this file's component under test reaches
-// useDeck's STATE for anything beyond `dict` (i18n.ts's useT calls useDeck
-// unconditionally, and PickContextDialog.tsx calls useT).
+// mockStore is required even though the component only needs `dict`: i18n's
+// useT calls useDeck unconditionally.
 mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 
 // PickContextDialog.tsx's only VALUE import through the `@shared/*`
@@ -68,8 +55,9 @@ const { PickContextDialog } = await import(
   "../desktop/src/renderer/src/components/PickContextDialog"
 );
 
-/** Minimal valid ElementPick, overridable per test -- same shape as
- *  tests/desktop-pick-note.test.ts's helper. */
+/**
+ * Minimal valid ElementPick, overridable per test.
+ */
 function pick(overrides: Partial<ElementPick> = {}): ElementPick {
   return {
     tagName: "button",
@@ -101,12 +89,10 @@ afterEach(() => {
   container.remove();
 });
 
-// Same native-setter bypass as tests/desktop-templates-composer-role.test.ts's
-// typeInto/setValue: React patches the element's own `value` property
-// setter, so a bare `el.value = x` leaves React's change-tracker unaware and
-// the subsequent event finds "no change" -- onChange never fires. `<select>`
-// and a plain `<input>` fire on 'change'; a controlled `<textarea>` (typing)
-// fires on 'input'.
+// React patches the element's own value setter, so a bare assignment leaves
+// React's change-tracker unaware and onChange never fires.
+// <select> and a plain <input> fire on 'change'; a controlled <textarea> fires
+// on 'input'.
 function setValue(
   el: HTMLTextAreaElement | HTMLSelectElement,
   value: string,

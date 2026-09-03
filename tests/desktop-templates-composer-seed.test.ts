@@ -1,38 +1,10 @@
-// Card 290a14e2 / spec_11049b90. Regression guard for the composer-seed
-// self-clearing fix documented in TemplatesDialog.tsx: `templatesComposerSeed`
-// is a one-shot counter, bumped by `openTemplates(open, { composer: true })`
-// (File > New template...), consumed and cleared back to 0 the instant the
-// dialog opens the blank composer. Self-clearing matters because a first cut
-// compared the counter against a component-local `useRef` sentinel instead
-// of clearing the STORE's own copy -- that broke exactly the case this file
-// exercises: closing the whole dialog, then reopening it later via an
-// UNRELATED path (e.g. the home "Use template" button, no `composer` opt),
-// which remounts TemplatesDialog and re-initialises any component-local ref.
-// A stale non-zero seed left over from an earlier "New template..." session
-// then forced the composer back open every time. Caught live via a CDP
-// screenshot on 2026-08-21, not by any type/unit test -- this file is that
-// missing replay.
-//
-// CONSTRAINT (team-lead, shared checkout, three cards live under desktop/src/
-// right now, two in review): this file must not touch ANY file under
-// desktop/src/, not even temporarily to revert-and-restore the fix for a
-// red-first measurement. So the red-first proof below does not revert the
-// production file. Instead it reproduces the documented PRE-FIX anti-pattern
-// (`BuggyComposerRepro` below) entirely inside this test file, from the
-// description in TemplatesDialog.tsx's own comment, and drives it through the
-// exact same three-step scenario used against the real component: bump the
-// seed, unmount the whole dialog, remount fresh via an unrelated path (no
-// seed bump). The repro is shown to reopen wrongly (RED); the real,
-// unmodified TemplatesDialog is then shown to stay closed (GREEN) under the
-// identical scenario and the identical store instance.
-//
-// DOM harness: same dual-React-copy jsdom/happy-dom bridge and mock.module
-// pattern already used for the same component in tests/desktop-tile-area.test.ts
-// (store.ts and TemplateComposer.tsx mocked the same way). See that file's
-// header for the full happy-dom global-registrator rationale; this file keeps
-// only the minimal register()/unregister() pairing required by
-// tests/desktop-happy-dom-teardown.test.ts's repo-wide guard (same minimal
-// shape as tests/desktop-sidebar-autoresume-dom.test.ts).
+// templatesComposerSeed is a one-shot counter cleared by
+// clearTemplatesComposerSeed the instant the composer opens; a stale non-zero
+// value left over from an earlier session forces the composer open on an
+// unrelated later path.
+// This file must not touch any file under desktop/src/ (shared checkout
+// constraint), so the red-first proof reproduces the pre-fix anti-pattern
+// locally in BuggyComposerRepro rather than reverting the production file.
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 GlobalRegistrator.register();
@@ -47,10 +19,6 @@ import { mockStore, storeMockStubs } from "./_store-mock";
 
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
 
-// ---------------------------------------------------------------------------
-// Fake store: covers exactly what TemplatesDialog reads/calls (mirrors the
-// FakeDeckState already proven to work for this same component in
-// tests/desktop-tile-area.test.ts).
 interface FakeSession {
   id: string;
   supervisor?: boolean;
@@ -87,10 +55,9 @@ function initialFakeState(): FakeDeckState {
     openTemplates: () => {},
     refreshTemplates: async () => {},
     showToast: () => {},
-    // Faithful to the real store contract (store.ts:257): clears the seed
-    // back to 0 synchronously. A fake that no-ops here would let the real
-    // component's assertion pass for the wrong reason (edge case from the
-    // spec: "clearTemplatesComposerSeed never wired" must NOT silently pass).
+    // Clears the seed back to 0 synchronously, matching the real store
+    // contract: a fake that no-ops here would let the real component's
+    // assertion pass for the wrong reason.
     clearTemplatesComposerSeed: () => fakeUseDeck.setState({ templatesComposerSeed: 0 })
   };
 }
@@ -180,9 +147,10 @@ test("RED CONTROL: pre-fix useRef-sentinel repro wrongly reopens the composer af
     root.render(React.createElement(BuggyComposerRepro));
   });
 
-  // This is the bug: composer reopens even though nothing requested it this
-  // time. If this assertion ever fails, the repro no longer reproduces the
-  // documented anti-pattern and this red control is no longer meaningful.
+  // This is the bug: the composer reopens even though nothing requested it this
+  // time.
+  // If this assertion ever fails, the repro has stopped reproducing the
+  // documented anti-pattern, and this red control stops being meaningful.
   expect(hasComposerStub()).toBe(true);
 });
 

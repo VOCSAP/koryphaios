@@ -1,94 +1,23 @@
-// spec_fe032ba6: regression harness for "maximizing a tile remounts every
-// terminal and destroys all scrollback" (roadmap card 903ee271).
-//
-// TileArea.tsx (desktop/src/renderer/src/components/TileArea.tsx) has three
-// JSX `return` branches that each render `sessions.map((s) => <TerminalTile
-// key={s.id} .../>)` inline. The suspected bug: switching between branches
-// (e.g. grid <-> maximized) unmounts and remounts every TerminalTile instead
-// of reusing it, because the branches build the children differently rather
-// than sharing one hoisted `children` value. A remount tears down the real
-// xterm.js Terminal object living inside TerminalTile, which is where the
-// operator's scrollback lives -- so a remount is data loss, not a cosmetic
-// re-render.
-//
-// This test exercises the SINGLE exported TileArea component, unmodified,
-// through both of its JSX branches. Splitting the branches into separate
-// components to make them individually testable would defeat the point:
-// React remounts on element TYPE change, so a synthetic split would report
-// the bug as fixed while the production code (single component, single type)
-// still has it. TerminalTile itself is mocked -- swapping out a *child*
-// module is ordinary test isolation, not a rewrite of the component under
-// test.
-//
-// DOM harness note -- CORRECTED 2026-08-03 (debugger-caught, was FALSE):
-// this used to claim happy-dom was "self-contained... at the top of THIS
-// file only". Measured false: `bun test` loads every matched file into ONE
-// process before running any of them, so `GlobalRegistrator.register()`
-// mutates `globalThis` for every file in the invocation, not this one.
-// Measured (debugger, full before/after diff of `globalThis`, not a
-// five-name guess): register() REPLACES 34 existing globals, ADDS ~484 (the
-// DOM surface itself, wanted), removes none. Of the 34 replaced, happy-dom's
-// `fetch` is built on `node:_http_client` and cannot parse a `Bun.serve`
-// response ("Parse Error, HPE_UNEXPECTED_CONTENT_LENGTH") -- so any OTHER
-// file in the same `bun test` run that joins a broker over real HTTP (e.g.
-// tests/server-ask-operator.test.ts) hung to its own deadline the instant
-// this file's `register()` ran. Fix below: snapshot `globalThis` before
-// registering, restore every replaced name to its Bun-native value after,
-// then re-apply happy-dom's own value ONLY for the 9 names this DOM harness
-// (createElement/appendChild, addEventListener+dispatchEvent, a React
-// `useEffect` mount) measurably needs -- see `RESTORE_HAPPY_DOM_FOR` below
-// for the list and why each one is there. A hardcoded 3-or-9-name list
-// applied as the RESTORE set would be silently incomplete the moment
-// happy-dom's own replaced-globals surface grows; the snapshot diff cannot
-// be, by construction. Restorable-without-effect-on-the-DOM (confirmed by
-// exercising createElement/dispatchEvent/React mount with them restored):
-// all of fetch/WebSocket/Response/Request/Headers/URL/Blob/File/FormData/
-// AbortController/AbortSignal/DOMException/MessagePort/navigator/atob/btoa/
-// postMessage/queueMicrotask/setTimeout/setInterval/clearTimeout/
-// clearInterval and a few more -- every network and timer primitive on the
-// broker suites' hot path.
-//
-// New ROOT devDependencies: @happy-dom/global-registrator, and also
-// react / react-dom / zustand (mirrors desktop/'s own versions). Both are
-// needed, for two DIFFERENT environments: this test itself imports react
-// only through desktop/tests-support/react-test-harness.ts (a relative
-// import, physically inside desktop/, so it resolves against whichever
-// node_modules is nearest -- same as TileArea.tsx's own bare react import
-// (`import ... from` a bare specifier), which this test does NOT and
-// cannot modify). Locally that
-// nearest node_modules is desktop/node_modules, so the root copies sit
-// unused. In CI, `bun test tests/desktop-*...` runs at the repo root right
-// after a root `bun install` but BEFORE desktop/'s own `npm install`, so
-// desktop/node_modules does not exist yet on that runner -- resolution for
-// BOTH the bridge and TileArea.tsx then walks up to the repo root instead,
-// and needs a copy there or TileArea.tsx itself fails to resolve `react`
-// before this test ever runs. See the bridge file's header for the full
-// explanation; do not remove the root copies because they look unused
-// locally.
-//
-// Ordering note: GlobalRegistrator.register() must run before ANY module
-// that inspects `window`/`document` at import time (react-dom does). Static
-// `import` declarations are all evaluated before a module's own top-level
-// statements run, regardless of where they appear in the file -- writing
+// Maximizing a tile must not remount every terminal: TileArea's three JSX
+// return branches share one hoisted children value instead of building
+// sessions.map(...) inline, otherwise switching branches tears down every
+// real xterm.js instance and its scrollback. Exercises the single exported
+// TileArea, unmodified, through both branches: split components would make
+// React remount on element type change and mask the bug.
+// GlobalRegistrator.register() mutates globalThis for the whole bun test
+// process, and happy-dom's fetch cannot parse a Bun.serve response, so every
+// replaced global is restored to its Bun-native value and happy-dom's own
+// value re-applied only for the 9 names this harness needs.
+// Root devDependencies on react/react-dom/zustand/@happy-dom exist because CI
+// runs this suite before desktop/'s npm install, so resolution walks up here.
+
 // `import 'react-dom/client'` anywhere in this file would load react-dom // scanfile-swallow-ok: prose example
-// before `GlobalRegistrator.register()` executes. The harness bridge is
-// therefore pulled in via a dynamic `await import()`, which (unlike a static
-// import) genuinely defers evaluation to this point in the file.
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
-// The 9 names happy-dom is allowed to keep replaced, and the single reason
-// shared by all 9: happy-dom's own event dispatch is built on ITS
-// EventTarget/Event classes -- `document.createElement(...).dispatchEvent`
-// only fires listeners registered through happy-dom's own
-// addEventListener, because happy-dom checks `instanceof` its own Event
-// class internally. Restoring any one of these 9 to Bun's native breaks
-// event delivery for every other happy-dom object (measured: with all 34
-// restored, `createElement` and a React `useEffect` mount still worked,
-// but `dispatchEvent` failed with "parameter 1 is not of type 'Event'" --
-// a render-only smoke test would NOT have caught this). None of the 9 are
-// on the broker suites' hot path (no other test file constructs or
-// dispatches a DOM Event), so keeping them polyfilled here costs nothing
-// outside this file.
+// All 9 restored-as-happy-dom names share one reason: happy-dom's own event
+// dispatch checks instanceof its own Event/EventTarget classes internally, so
+// restoring any one of them to Bun's native breaks dispatchEvent for every
+// other happy-dom object even though creation and mounting still work.
 const RESTORE_HAPPY_DOM_FOR = new Set([
   "Event",
   "EventTarget",
@@ -143,19 +72,11 @@ for (const [name, nativeDescriptor] of globalsBeforeRegister) {
   }
 }
 
-// La restauration ci-dessus rend les GLOBALS natifs, mais elle ne rend pas le
-// SLOT: le registrator garde son drapeau interne a true, donc tout autre
-// fichier qui appelle register() ensuite leve "Happy DOM has already been
-// globally registered". Ce n'est pas theorique. L'ordre d'execution des
-// fichiers de test n'est PAS garanti: bun 1.3.13 les trie alphabetiquement,
-// la CI sur bun 1.3.14 ne les trie pas (ordre mesure: desktop-journal,
-// desktop-tile-area, desktop-graph-adapters, desktop-digest). Ce fichier
-// passant en deuxieme en CI, il verrouillait desktop-explorer-selection-dom
-// et desktop-happy-dom-teardown, qui echouaient tous deux au chargement alors
-// que la meme commande rendait zero conflit en local. Rendre le slot est donc
-// une obligation de tout enregistrant, distincte de la restauration ci-dessus
-// et non couverte par elle. tests/desktop-happy-dom-teardown.test.ts est la
-// garde qui l'exige de tout fichier futur.
+// Restoring the globals above does not clear the registrator's internal
+// 'already registered' flag, so a later file calling register() throws unless
+// this file unregisters it here. Test file order is not guaranteed across bun
+// versions, so this obligation falls on every file that registers, not just the
+// one that happens to run first.
 afterAll(async () => {
   await GlobalRegistrator.unregister();
 });
@@ -184,13 +105,9 @@ interface FakeDeckState {
   workspaces: unknown[];
   templates: unknown[];
   templatesManage: boolean;
-  // Team-lead review 2026-08-21 (reviewer-caught): missing here, `composerSeed`
-  // read `undefined` in tests/desktop-templates-composer-seed.test.ts's earlier
-  // sibling scenarios, `undefined > 0` is false, so TemplatesDialog's seed
-  // effect never ran and `clearTemplatesComposerSeed` was never called --
-  // every test exercising TemplatesDialog in this file passed without ever
-  // touching that code path. Added to stop that silent no-op, not because any
-  // test below needs the composer to open.
+  // Without this field, composerSeed read undefined here, undefined > 0 is
+  // false, and TemplatesDialog's seed effect (and clearTemplatesComposerSeed)
+  // never ran in any test in this file.
   templatesComposerSeed: number;
   dict: Record<string, string>;
   createSession: () => Promise<void>;
@@ -307,18 +224,10 @@ afterEach(() => {
 });
 
 test("happy-dom event dispatch still works after the global restore above (guards the 9-name exception list)", () => {
-  // The restore loop above deliberately leaves Event/EventTarget/
-  // addEventListener/removeEventListener/dispatchEvent/CustomEvent/
-  // MessageEvent/ErrorEvent/CloseEvent on happy-dom. Nothing else in this
-  // file dispatches a DOM event -- the three regression tests below mount
-  // components and push store state, never `.dispatchEvent(...)` -- so
-  // without this test, restoring that exception list to Bun's natives by
-  // mistake (e.g. someone "cleaning up" RESTORE_HAPPY_DOM_FOR because it
-  // looks unused) would pass every other test in this file while breaking
-  // event delivery for every happy-dom object (debugger-caught 2026-08-03:
-  // restoring all 34 kept `createElement` and a full React mount working,
-  // only `dispatchEvent` failed, with "parameter 1 is not of type
-  // 'Event'"). This is the compensatory guard for that gap.
+  // Guards RESTORE_HAPPY_DOM_FOR: nothing else in this file dispatches a DOM
+  // event, so restoring that exception list to Bun natives by mistake would
+  // pass every other test here while silently breaking event delivery for every
+  // happy-dom object.
   const el = document.createElement("button");
   let fired = 0;
   el.addEventListener("click", () => {
@@ -438,31 +347,13 @@ test("toggling displayMode between grid and 1x1 carousel does not remount Termin
   expect(mountCounts.get("s2")).toBe(1);
 });
 
-// ---------------------------------------------------------------------------
-// NEGATIVE CONTROL (spec_b0cf2db9, team-lead ask 2026-08-04).
-//
-// Everything above asserts ZERO unmounts. Ten such assertions prove ten true
-// statements and nothing more: a counter that has silently lost the ability to
-// observe a remount passes them all. The red-first measurement that made them
-// meaningful ("1 unmount before the fix, 0 after") was taken once, by hand,
-// and lives in commit 1320be6's MESSAGE -- nothing in this tree replays it. So
-// the day React stops deriving an implicit key path from a JSX subtree's
-// structural position, the guard above becomes vacuous and stays green for the
-// wrong reason, with nobody the wiser.
-//
-// The two tests below are that missing replay. They do not test TileArea: they
-// test THE MECHANISM the guard depends on, on two miniature components that
-// differ only in children shape. The pre-fix shape must remount, the shipped
-// shape must not. If the pre-fix one ever passes WITHOUT unmounts, the
-// mechanism is gone and every zero-unmount assertion above has become
-// unfalsifiable -- that failure is the signal, not a nuisance to silence.
-//
-// TRAP, measured 2026-07-30, and the reason this must not be "simplified":
-// each shape has to be ONE component with THREE returns, exactly like the real
-// TileArea. Writing each branch as its own component makes React remount on
-// the element TYPE change, which produces the expected unmount for a reason
-// that has nothing to do with children shape. A control that passes for the
-// wrong reason is worth less than no control at all.
+// Tests the mechanism the zero-unmount assertions above depend on (React's
+// implicit key from JSX structural position), not TileArea itself: a counter
+// that lost the ability to observe a remount would pass all of them silently.
+// Each shape must be one component with three returns, exactly like TileArea:
+// splitting branches into separate components makes React remount on element
+// type change for a reason unrelated to children shape, which would pass for
+// the wrong reason.
 const ctlMounts = new Map<string, number>();
 const ctlUnmounts = new Map<string, number>();
 
@@ -625,17 +516,9 @@ test("pickRestorable: `current` with a live agent still running is EXCLUDED", ()
   expect(pickRestorable([current], 1)).toBeUndefined();
 });
 
-// ---------------------------------------------------------------------------
-// TemplatesDialog "Apply" button population regression (third occurrence in
-// two days of "filter on one population, act on another"). The component
-// used to read `useDeck((s) => s.sessions)` directly -- a population that
-// INCLUDES the supervisor tile -- and gate `.btn-apply` on that raw list's
-// length, so a deck with nothing open but the supervisor still showed Apply.
-// It now reads the raw selector and filters `!s.supervisor` in the component
-// body before every session-count check. These two tests exercise the real
-// TemplatesDialog component (unmodified) through both directions of that
-// filter, so a regression back to the raw `sessions` population fails one of
-// them instead of passing silently.
+// TemplatesDialog gates .btn-apply on sessions filtered to exclude the
+// supervisor tile; reading the raw sessions selector directly showed Apply for
+// a deck with nothing open but the supervisor.
 test("TemplatesDialog: supervisor-only deck (no agent sessions) shows no Apply button", () => {
   act(() => {
     fakeUseDeck.setState({

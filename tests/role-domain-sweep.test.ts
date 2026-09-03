@@ -3,75 +3,16 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { extractBracedBody, extractBracketedBody, findMatchingClose } from "./_braced-body";
 
-// Card a2f61172, PARTIE 2 of the post-reversal rewrite: the central guarantee
-// on `role` is no longer a per-scenario write-once rule (see
-// tests/broker-register-role.test.ts), it is a DOMAIN property --
-//   NO PATH REACHABLE BY AN AGENT MAY SET OR CHANGE A ROLE, OTHER THAN
-//   /register's handleRegister (broker.ts), which alone derives it from a
-//   TRANSPORT value (body.role, ultimately CLAUDE_PEERS_ROLE) via
-//   normalizeRole().
-// This is the only thing standing between an agent and self-promoting its
-// own role, so a scenario-based test ("call tool X, assert role unchanged")
-// cannot cover it -- there is no bounded list of scenarios, only a bounded
-// list of WRITE PATHS. This file sweeps the actual DOMAIN of write paths
-// instead of enumerating tools or SQL statements by name, so it keeps
-// covering the domain as it grows:
-//
-//   LEG 1 (server.ts): no MCP tool's inputSchema declares a `role`-named
-//   argument, found by parsing the REAL `TOOLS` array structurally (bracket-
-//   and brace-balanced), not by checking a hand-picked list of tool names.
-//   Deliberately STRICTER than "wired to a write": this repo is small enough
-//   that a `role` argument appearing in a schema AT ALL is itself the defect
-//   worth catching, before anyone gets to wire it further.
-//
-//   LEG 2 (broker.ts, the load-bearing leg): every db.prepare/db.run SQL
-//   statement that writes `peers` (INSERT INTO peers / UPDATE peers SET) AND
-//   whose column list/SET clause contains `role` -- found by regex-sweeping
-//   the WHOLE FILE for db.prepare(...)/db.run(...) calls, not by checking
-//   `insertPeer`/`updateActiveOnRegister` by name -- must have EVERY actual
-//   `.run(...)` call site lexically INSIDE handleRegister's function body
-//   (brace-balanced containment, not a line-number guess). A statement with
-//   zero found call sites also fails: an unused role-writing statement is a
-//   live capability nobody is watching.
-//
-//   LEG 3 (broker.ts, corroborating only): `body.role` is read in exactly
-//   one place. Declared LIMIT: this is a naming-dependent proxy (a future
-//   handler destructuring its request body under a different identifier
-//   would silently miss it) -- LEG 2 is what actually enforces the
-//   guarantee; LEG 3 only corroborates the specific mechanism in place today.
-//
-// HONEST SCOPE LIMIT: this sweep covers broker.ts (the only place `peers`
-// rows are written) and server.ts's MCP tool surface (the only agent-facing
-// entry point into the broker). It does NOT sweep desktop/'s IPC channels
-// (DeckApi) -- an agent does not call those directly, and the reviewer's own
-// three measured facts this file reuses were scoped to broker.ts/server.ts.
-//
-// SECOND HONEST SCOPE LIMIT (review finding, 2026-08-24): LEG 2 reads ONE
-// hardcoded file, BROKER_PATH. It is blind to a `peers` write from a NEW
-// file -- not hypothetical: tests/migrate-project-key-case.test.ts already
-// exercises scripts/migrate-project-key-case.ts, which does its own
-// `INSERT INTO peers` outside broker.ts entirely. It is equally blind to
-// `role` migrating to a different TABLE (`peer_sessions`, a future `roles`
-// table): the SQL filter is anchored on the literal token `peers`.
-//
-// Named role-domain-sweep.test.ts, deliberately NOT broker-role-...: read
-// scripts/pure-module-partition.ts's EXEMPTIONS table before naming this
-// file and found `familyPrefixes: { "broker-": ..., "server-": ... }` is a
-// bare filename `.startsWith(prefix)` check with zero content awareness --
-// and that module's own header states the exempted families are "not run in
-// CI at all today" (N1, pre-existing). This file spawns no daemon and binds
-// no port (pure text sweep over two source files), so it belongs in the
-// default "clean, runs in the shared pure-modules process" bucket; a
-// `broker-`-prefixed name would have silently dropped it out of CI exactly
-// like the trap this repo's own CLAUDE.md warns about for CI globs/deny-
-// lists, and nothing would have caught that until someone went looking.
+// Sweeps the actual domain of role-write paths -- every db statement in
+// broker.ts writing peers with role in its column list, and every MCP tool
+// schema in server.ts -- rather than enumerating scenarios, since there is no
+// bounded list of scenarios that could self-promote a role, only a bounded list
+// of write paths.
+// Scoped to broker.ts and server.ts only: blind to a peers write from another
+// file, or to role migrating to a different table.
 
 const BROKER_PATH = join(import.meta.dir, "..", "broker.ts");
 const SERVER_PATH = join(import.meta.dir, "..", "server.ts");
-
-// extractBracedBody/extractBracketedBody/findMatchingClose all now live in
-// tests/_braced-body.ts (card 9e450573 Lot A + Lot B dedup) -- imported
-// above. Nothing local left in this file.
 
 /** LEG 1: no MCP tool inputSchema in server.ts declares a `role` argument. */
 export function findRoleArgumentInToolSchemas(src: string): string[] {
@@ -119,14 +60,11 @@ interface SqlStatement {
 /** Every db.prepare(...)/db.run(...) call in `src`, with its raw SQL text. */
 function findSqlStatements(src: string): SqlStatement[] {
   const statements: SqlStatement[] = [];
-  // `db.query(...)` is included alongside prepare/run -- review finding
-  // (2026-08-24): db.query(...) is the DOMINANT idiom in broker.ts (35
-  // occurrences), most reading, but `db.query(SQL).run(args)` is a fully
-  // functional write shape already practiced live in this repo
-  // (tests/broker-operator-inbox.test.ts:532), and was invisible to a sweep
-  // that only knew prepare/run. Single-quoted SQL strings ('[^']*') are
-  // included too -- none exist in broker.ts today, but a formatter flipping
-  // quote style would otherwise silently drop a statement from the sweep.
+  // Includes db.query(...) alongside prepare/run, since it is broker.ts's
+  // dominant idiom and db.query(SQL).run(args) is still a fully functional
+  // write shape.
+  // Matches single-quoted SQL too, so a formatter flipping quote style can't
+  // silently drop a statement from the sweep.
   const re = /(?:const\s+(\w+)\s*=\s*)?db\.(?:prepare|run|query)\(\s*(`[^`]*`|"[^"]*"|'[^']*')/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src))) {
@@ -165,10 +103,8 @@ export function findRoleWritesOutsideHandleRegister(src: string): string[] {
   const fnStart = fnKeywordMatch.index + lastBraceInSigLine;
   const fnEnd = findMatchingClose(src, fnStart, "{", "}");
 
-  // `insert\s+into` alone misses "INSERT OR IGNORE INTO peers" / "INSERT OR
-  // REPLACE INTO peers" -- review finding (2026-08-24): broker.ts:469
-  // already contains exactly that form (the sentinel-row seed), so this
-  // wasn't a hypothetical, it was a statement in the very file being swept.
+  // Matches 'INSERT OR IGNORE/REPLACE INTO' as well as plain 'INSERT INTO':
+  // broker.ts's own sentinel-row seed uses that form.
   const roleWritingStatements = findSqlStatements(src).filter(
     (s) => /\b(?:insert(?:\s+or\s+\w+)?\s+into|update)\s+peers\b/i.test(s.sql) && /\brole\b/.test(s.sql)
   );

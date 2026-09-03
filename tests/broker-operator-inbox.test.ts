@@ -11,10 +11,8 @@ import {
   generateCredential,
   type ApprovalCredential,
 } from "../shared/approval.ts";
-// Review MINOR-1: the sentinel token is IMPORTED, never re-typed. A hand-typed
-// '__operator__' on both sides of a probe keeps seed and assertion agreeing with
-// each other while testing a row that is no longer the operator inbox -- green
-// for a reason foreign to what the probe claims to test.
+// The sentinel token is imported rather than re-typed, so seed and assertion
+// cannot silently agree with each other while testing an unrelated row.
 import { OPERATOR_INSTANCE_TOKEN, SENTINEL_DEFINITIONS, type Approval } from "../shared/types.ts";
 
 let broker: TestBroker;
@@ -256,21 +254,10 @@ test("set_id refuses the reserved name 'operator'", async () => {
   expect(res.status).toBe(400);
 });
 
-// --- Card 37a2b8c7 volet 1, COVERAGE half -------------------------------------
-//
-// The two guards above close the two routes that reach the operator inbox
-// TODAY. The half no guard covers is DOMAIN GROWTH: a route added tomorrow that
-// accepts a client-supplied recipient and resolves it to the sentinel would
-// re-open the inbox with nothing failing.
-//
-// So the domain is DISCOVERED from the request interfaces (the method that
-// found NINE routes trusting a client instance_token where a read-by-handlers
-// found eight: a handler is forgotten, a field in a data contract is not), and
-// every interface carrying a recipient field must be classified here -- guarded,
-// or exempt WITH ITS REASON. An unclassified one fails.
-//
-// Pinning a COUNT was considered and rejected: it goes red on a rename or an
-// added import, and a test that reddens for nothing gets deleted.
+// The domain is discovered from the request interfaces rather than pinned as a
+// handler list or a count, so a route added later that resolves a
+// client-supplied recipient must be explicitly classified here or the scan
+// fails.
 
 interface RecipientClassification {
   /** The recipient field the scanner found. */
@@ -327,34 +314,12 @@ const RECIPIENT_ROUTES: Record<string, RecipientClassification> = {
 };
 
 /**
- * Discover every exported interface carrying a client-supplied RECIPIENT field.
- *
- * Name-shaped rather than handler-shaped, and deliberately NOT limited to
- * interfaces whose name ends in "Request": a body type named something else
- * would silently leave the domain. Anything it finds must be classified above,
- * including internal row shapes -- an over-wide scanner costs one entry in the
- * table, an under-wide one costs the whole guarantee.
- *
- * Review MAJOR-1: the first draft required a SINGULAR suffix and therefore
- * matched no plural field, so it silently missed RoadmapItem.target_peer_ids
- * and RoadmapUpsertRequest.target_peer_ids -- a subset announcing itself as a
- * total, which is the exact shape this test exists to forbid. Hence
- * `peer_ids` in the alternation, and a PLURAL variant in the negative control
- * below: a fix that is only asserted is not proven.
- *
- * TWO LIMITS, both inherent to discovery by name, stated so a reader does not
- * mistake this for a total:
- *  1. It reads the data CONTRACT. A handler parsing a recipient straight out of
- *     an untyped body escapes it: handleChannelConnect, handleChannelDisconnect
- *     and handleChannelList take a `Record<string, unknown>` body
- *     (/approval/channel-connect|disconnect|list) and read a notification
- *     DESTINATION out of it. Named rather than counted on purpose: a count
- *     rots at the next edit and a reader who re-measures it stops trusting the
- *     whole paragraph, while three route names stay checkable.
- *  2. The domain is NOMINAL. A destination named `chat_id`, `address` or
- *     `deliver_to` -- a Telegram chat or a Discord guild is a recipient too --
- *     leaves the domain by its NAME alone.
- * Widening to untyped bodies is a separate unit, deliberately not done here.
+ * Discovers every exported interface with a client-supplied recipient field by
+ * name, not by handler or an "...Request" suffix, so an oddly-named body type
+ * cannot silently leave the domain.
+ * Reads the data contract only: a handler parsing a recipient straight out of
+ * an untyped Record body is invisible to it, and the domain is nominal -- a
+ * destination field under an unrecognized name also escapes it.
  */
 function findRecipientCarryingInterfaces(source: string): { iface: string; field: string }[] {
   const found: { iface: string; field: string }[] = [];
@@ -870,18 +835,9 @@ test("purge BLOCKER 2: an unauthenticated caller on a never-registered group can
   } finally {
     await stopBroker(cellBroker);
   }
-  // 30_000, not the bun default of 5_000: this is the ONLY test in this file
-  // that starts a broker inside its own body (every other one reuses the
-  // beforeAll broker), so it pays a full spawn on top of its HTTP work. On the
-  // windows-latest runner it timed out at 5_001 ms, and bun's reaction to a
-  // timeout is to kill the dangling children -- "killed 2 dangling processes",
-  // i.e. this cell broker AND the beforeAll broker -- so the six tests after it
-  // died on ConnectionRefused against a dead shared port (measured 2026-08-28,
-  // CI run 33170636054, windows job 98846649311). Budget taken from the slowest
-  // broker-spawning test observed on that same runner, ntfy's "one operator
-  // disconnecting does not cut the other" at 11_511 ms: ~2.6x margin, and
-  // inside the 20_000..60_000 band the neighbouring broker-spawning files
-  // already use (broker-register-role 20_000, broker-ntfy-channel 60_000).
+  // 30_000, not the bun default of 5_000: this is the only test that spawns its
+  // own broker instead of reusing the shared one, so it needs the extra time
+  // for that spawn on top of its HTTP work.
 }, 30_000);
 
 test("cursor drain marks delivered too (MAJOR 2): the TTL sweep must not treat cursor-read mail as still pending", async () => {
@@ -991,12 +947,6 @@ test("purge MINOR: non-integer ids are refused rather than silently deleting not
 });
 
 test("cursor session_id is scoped per group (MAJOR 1, composite PK): the same session_id under two groups does not alias", async () => {
-  // Card 1e81ee7b Cell 1: the composite PRIMARY KEY (session_id, group_id)
-  // was previously only exercised by an ACCIDENTAL session_id collision
-  // between two unrelated fixtures across two separate tests, in full-suite
-  // order only -- a property named for something else entirely (purge
-  // BLOCKER 2), invisible in isolation. This test pins it directly: ONE
-  // session_id, TWO groups, in ONE test body.
   const gA = { id: await groupId("op-major1-A"), hash: await sha256Hex("op-major1-A") };
   const gB = { id: await groupId("op-major1-B"), hash: await sha256Hex("op-major1-B") };
   const a = await register("hMajor1A", "/major1A", gA);

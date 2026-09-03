@@ -1,35 +1,18 @@
-// Pure builder for the per-session claude command line, plus the sibling
-// pure encoder for the post-spawn prompt-keystroke path (150eb188). No
-// node-pty / electron imports so both are unit-testable under bun.
-//
-// Fork-on-every-resume (DESIGN §6.2 / §11): a new session is launched with its
-// own --session-id; resuming forks the previous session into a fresh id so two
-// live processes never share a session id. The resume form deliberately omits
-// the stored args and never re-passes --agent / --model, which Claude Code
-// auto-restores on --fork-session (verified CC 2.1.158, DESIGN §14.3).
-//
-// Initial prompt (PLAN C2) does NOT ride argv anymore: 07dc42c0 fixed the
-// headless adapters' win32 CommandLineToArgvW mangling by moving operator
-// text off argv onto stdin/file, but excluded this interactive-PTY path on
-// purpose (stdin redirect would break live keystrokes). 150eb188 closes the
-// remaining exposure the other way: session-service types the prompt into
-// the live terminal once it is up (see encodeInitialPromptKeystrokes below),
-// instead of composing it into the spawned command line.
+// Fork-on-every-resume: a new session launches with its own --session-id;
+// resuming forks the previous session into a fresh id so two live processes
+// never share a session id. The resume form omits stored args and never
+// re-passes --agent/--model, which Claude Code auto-restores on --fork-session.
+// The initial prompt is typed into the live terminal once it's up, not composed
+// into the spawned command line — argv on this interactive-PTY path can't be
+// redirected to stdin/file without breaking live keystrokes.
 
 import { join } from 'node:path'
 
 /**
- * Basename of the embedded deck-plugin dir, wherever index.ts's
- * getDeckPluginDir resolves it (packaged: `resourcesPath/deck-plugin`, dev:
- * `appPath/deck-plugin`). Pulled out as a pure constant, not re-derived by
- * each caller, so index.ts's host resolution and sandbox-command.ts's
- * SANDBOX_DECK_PLUGIN_NAME/DIR stay pinned to the SAME string without an
- * import cycle (index.ts already imports this module for
- * createMissingDirTracker; sandbox-command.ts cannot import index.ts, an
- * electron-heavy module). Card a79c7696 volet 1 review: the sandboxed
- * copy's basename, the ProjectionEntry name driving clean/chown, and this
- * host-side basename were three unpinned occurrences of the literal
- * 'deck-plugin' before this constant existed.
+ * Pulled out as a pure constant so index.ts's host resolution and
+ * sandbox-command.ts's sandboxed-copy basename stay pinned to the same string
+ * without an import cycle (sandbox-command.ts cannot import the electron-heavy
+ * index.ts).
  */
 export const DECK_PLUGIN_DIRNAME = 'deck-plugin'
 
@@ -90,21 +73,10 @@ export interface SessionCommandInput {
 }
 
 /**
- * ` --effort "<e>"` when an effort level is set, otherwise empty.
- *
- * Card 6c380073 (second audit round): this used to interpolate the raw value
- * with NEITHER an allow-list NOR quotes, while `agent`/`model` -- the two
- * other identifier-shaped flags, built a few lines below in
- * buildSessionCommandLine's caller -- went through sanitizeFlagValue AND
- * were double-quoted (session-service.ts's create()). Two disciplines in one
- * file: the exception was the bug, and `effort: "low; <command> #"` reached
- * `bash -l -c` verbatim. Nothing upstream caught it either -- the documented
- * enum ('low'|'medium'|'high'|'xhigh'|'max') exists ONLY in
- * deck-control-mcp.ts's DECLARATIVE JSON schema (whose tools/call forwards
- * arguments verbatim) and in two renderer pickers, so it gated no path at
- * all. Applying the SAME sanitizer here closes the field for every caller at
- * once -- the operator's advanced menu, a template, a restored workspace, and
- * a deck-control agent -- rather than one entry point at a time.
+ * Sanitized and double-quoted the same way as the agent/model flags built
+ * alongside it, closing this field for every caller at once — the operator's
+ * menu, a template, a restored workspace, and a deck-control agent — rather
+ * than one entry point at a time.
  */
 function effortFlag(effort?: string): string {
   const e = sanitizeFlagValue(effort ?? '')
@@ -130,17 +102,12 @@ function pluginFlag(pluginDir?: string): string {
 }
 
 /**
- * Tracks whether a "the dir is missing" report has already fired for the
- * CURRENT episode of absence, so a caller re-checking the dir on every spawn
- * (card d02c8e96 fix c) can report the transition exactly once per episode
- * instead of once per process (too late to ever catch a mid-run deletion,
- * since the report would already be spent from the very first boot-time
- * check) or once per spawn (log spam for the long, ordinary window where a
- * dev checkout simply has no plugin build).
- *
- * Pure state machine, no fs/electron import, so the transition semantics --
- * the exact thing the card's incident hinged on -- are unit-testable under
- * bun independently of index.ts's impure existsSync/reportError wiring.
+ * Reports a missing plugin dir exactly once per episode of absence, not once
+ * per process (too late for a mid-run deletion) nor once per spawn (log spam
+ * for an ordinary dev checkout with no plugin build).
+ * Pure state machine with no fs/electron import, so the transition semantics
+ * are unit-testable under bun independently of the caller's impure
+ * existsSync/reportError wiring.
  */
 export function createMissingDirTracker(): { check(exists: boolean): boolean } {
   let reported = false
@@ -220,49 +187,15 @@ export function buildSessionCommandLine(input: SessionCommandInput): string {
 }
 
 /**
- * Encode arbitrary text as ONE pty write that Claude Code's TUI actually
- * SUBMITS: bracketed paste (xterm `ESC[200~...ESC[201~`, the precedent already
- * used by BrowserView.tsx's `bracketedPaste()`) with the `\r` submit keystroke
- * appended, all in a single string.
- *
- * The single-write, marker-wrapped shape is load-bearing. Splitting it back
- * into "write the text, then write `\r`" reintroduces a measured defect (card
- * 6168b7f4, measured 2026-08-13 against CLI v2.1.229). Two facts, both measured
- * on this platform, that only bite together:
- *
- *  1. Windows/ConPTY COALESCES back-to-back `pty.write()` calls into a single
- *     read on the child: `write(text)` then `write('\r')` with no await arrives
- *     as ONE chunk (239 chars + CR measured as a single 240-byte read; the same
- *     pair 120 ms apart arrives as 240 then 1).
- *  2. Claude Code's ANSI tokenizer only emits a control character as its OWN
- *     token when the whole read is UNDER 64 characters. At or above that the CR
- *     is absorbed into the surrounding text run and never becomes a `return`
- *     key, so the text lands at the prompt and sits there, unsubmitted, with no
- *     error anywhere. Measured against the real CLI: a 63-byte coalesced chunk
- *     submits, a 64-byte one does not, and a lone `\r` sent afterwards submits
- *     it instantly.
- *
- * The closing `ESC[201~` is what makes this deterministic instead of a race: it
- * is a sequence token, so it CLOSES the text run inside the tokenizer and the
- * trailing `\r` is a separate token whatever the read size (measured: 252 bytes
- * in one write submits). A delay between two writes would also work on a quiet
- * machine and silently stop working on a loaded one.
- *
- * `text` can originate from a project template (`templates/*.json` in a CLONED
- * repo, hostile input #1 per CLAUDE.md) and this function's output reaches a
- * LIVE TERMINAL (hostile input #4) -- so every ESC byte is stripped first.
- * Bracketed paste is not a sanitizer: a literal `ESC[201~` inside the text
- * would close the paste early and let the remainder be interpreted as
- * keystrokes (terminal escape-sequence injection). Stripping ALL ESC bytes
- * (not just that one marker) closes the whole class at once -- neither a prompt
- * nor an injected command has a legitimate use for a raw control byte.
- *
- * A bare `\r` (or a `\r\n` pair) is normalized to `\n` for the same reason:
- * bracketed paste protects against embedded `\n` submitting early on a TUI
- * that honours it correctly, but not every terminal app treats a raw CR
- * inside the paste as literal -- some read it as Enter regardless. Folding
- * both CRLF and lone CR to LF removes the other control byte capable of
- * submitting early, without touching the text's actual content.
+ * Encodes text as bracketed paste with the \r submit keystroke in a single
+ * write: on Windows/ConPTY split writes coalesce into one read, and Claude
+ * Code's tokenizer only isolates a control character when the whole read is
+ * under 64 characters, so the text could land unsubmitted. The closing paste
+ * marker ends the text run, so the trailing \r is always its own token.
+ * Every ESC byte is stripped first (text can come from a cloned repo's
+ * template): a literal escape could close the paste early and let the rest
+ * run as keystrokes. A bare \r or \r\n becomes \n, since not every terminal
+ * app treats a raw CR inside a paste as literal.
  */
 export function encodeSubmittedKeystrokes(text: string): string {
   // eslint-disable-next-line no-control-regex

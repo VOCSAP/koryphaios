@@ -59,25 +59,14 @@ interface DeckState {
   /** Picker opened in manage mode (File > Import template): shows per-row Delete. */
   templatesManage: boolean
   /**
-   * One-shot seed (card 290a14e2, same pattern as `helpSeed`/`roadmapSeed`):
-   * bumped by `openTemplates(open, { composer: true })` (File > New
-   * template…), consumed and cleared back to 0 by TemplatesDialog the
-   * instant it opens the blank composer, and forced back to 0 unconditionally
-   * on close (see `openTemplates` below). SELF-CLEARING is what closes the
-   * bug this seed was introduced for: closing the whole dialog then
-   * reopening it later via an UNRELATED path (e.g. the home "Use template"
-   * button) must NOT resurrect a stale request -- a first cut compared an
-   * ever-increasing counter against a component-local `useRef` instead of
-   * clearing the store's own copy, and that broke exactly this case on every
-   * remount (the ref reinitialised, the counter didn't).
-   * With self-clearing in place, a plain boolean would behave identically
-   * across two SEPARATE trigger events (true -> false -> true is a real
-   * change either way) -- the counter, rather than a boolean, only earns its
-   * keep for two requests landing in the same React batch, where re-setting
-   * `true` a second time before the first clear has flushed would otherwise
-   * collapse to one edge. Do not read this field's existence as evidence
-   * that boolean-vs-batch was the hard part; it wasn't -- the remount case
-   * above was.
+   * Bumped by openTemplates(open, { composer: true }), consumed and cleared by
+   * TemplatesDialog once it opens, and forced back to 0 unconditionally on
+   * close.
+   * Self-clearing so closing the dialog and reopening it later via an unrelated
+   * path never resurrects a stale request.
+   * A counter rather than a boolean only matters for two requests landing in
+   * the same React batch, where a second true before the first clear flushes
+   * would otherwise collapse to one edge.
    */
   templatesComposerSeed: number
   /** Export-template dialog (name + local checkbox) visibility. */
@@ -388,14 +377,9 @@ export function inboxPendingCount(s: DeckState): number {
 }
 
 /**
- * THE single producer of the Courrier attention badge, shared by every
- * navigation bar (`NavRail` desktop, `MobileNav` remote). Two twin sums that
- * must agree is exactly the defect this lot already shipped once — the
- * blocking-question term was added to one bar and not the other — so the
- * bars must CALL this, never re-add three terms of their own.
- *
- * Blocking questions count until they are RESOLVED (an agent is stopped on
- * each one), drafts until they are opened.
+ * The single producer of the Courrier attention badge, shared by every
+ * navigation bar -- bars must call this, never re-add the terms themselves.
+ * Blocking questions count until resolved, drafts until opened.
  */
 export function inboxBadgeCount(s: DeckState): number {
   return inboxPendingCount(s) + s.pendingApprovals.length + s.graphDrafts.length
@@ -659,8 +643,8 @@ export const useDeck = create<DeckState>((set, get) => ({
     })),
   setBrowserPaired: (id) => set({ browserPairedId: id }),
   setRecordingSince: (at) => set({ recordingSince: at }),
-  // Opening the panel no longer zeroes anything: an entry leaves the badge
-  // when it is ACKED, not when it is glanced at (card 8fdac3dd).
+  // Opening the panel does not zero anything: an entry leaves the badge only
+  // when it is acked, not when it is glanced at.
   openInbox: (open) => set({ inboxOpen: open }),
   // Opening an entry is NOT acknowledging it: 'seen' is the middle state, and
   // it must never overwrite an 'acked' one (a re-opened acked entry stays

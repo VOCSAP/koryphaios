@@ -140,20 +140,9 @@ test("list/upsert/archive round-trip against a live broker", async () => {
   expect(withArchived.map((i) => i.id)).toContain(created.id);
 });
 
-// Card 442084b7, review A3: `RoadmapView.tsx`'s toggleInactive() sends
-// exactly `{ id, inactive }` through `window.api.roadmapUpsert` ->
-// `roadmap:upsert` IPC -> this file's `upsertRoadmap`, which relies on the
-// `...fields` spread inside `signedAsOperator({ project_key, by, ...fields })`
-// to carry the key onto the wire -- nothing names `inactive` explicitly at
-// that call site. A future pick-list there (the exact shape server.ts's
-// agent-facing roadmap_update already uses on purpose) would drop the field
-// SILENTLY: no type error (the field is still a valid, just-unused, key on
-// the object), no thrown error (the write still succeeds, just without the
-// flag), so only a behavioral round trip through the real function proves
-// the wire survives. Red-first proven in a /tmp mirror (mirror-probe recipe
-// 1): replacing `...fields` with an explicit pick-list omitting `inactive`
-// in a copy of roadmap-service.ts turned this test red (`patched.inactive`
-// read back `false` after requesting `true`); reverting restored green.
+// upsertRoadmap relies on `...fields` spread to carry inactive onto the wire; a
+// pick-list there would silently drop the field with no type or runtime error,
+// so only a real round trip proves it survives.
 test("upsertRoadmap threads `inactive` through to the broker, same call shape as toggleInactive", async () => {
   const endpoint = { url: broker.url, token: null };
   const key = "github.com/acme/deck-inactive-test";

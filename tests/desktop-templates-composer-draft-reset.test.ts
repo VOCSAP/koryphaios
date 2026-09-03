@@ -1,28 +1,9 @@
-// Team-lead review 2026-08-21 (spec_542dab47), CDP-frozen fix on
-// TemplatesDialog.tsx / TemplateComposer.tsx: `{composer && <TemplateComposer
-// path={composer.path} .../>}` has no `key`. The seed effect always calls
-// `setComposer({ path: null })`. If the composer is ALREADY open on a blank
-// draft, that is a transition from `{path:null}` to a NEW but structurally
-// identical `{path:null}` object -- same element type, same JSX position, no
-// key -- so React reuses the existing TemplateComposer instance rather than
-// remounting it. TemplateComposer seeds its fields via `useState('')`, which
-// only runs at mount, and its sole reload effect is `useEffect(..., [path])`
-// with an early `if (!path) return` -- so a second "New template..." while
-// the composer is open leaves whatever the operator already typed on screen.
-// The card's acceptance criterion promises a blank composer on every
-// trigger; this is currently false in that case.
-//
-// THIS IS A NATURAL RED: unlike tests/desktop-templates-composer-seed.test.ts
-// (which had to reproduce a PAST, already-fixed anti-pattern locally to get a
-// red control), the bug this file guards is present in the tree right now.
-// No repro, no swap: this file is written once, run once to capture the
-// failing output, then left exactly as-is for the fix author (a different
-// agent, under an explicit freeze on this file pair) to turn green.
-//
-// Scope: unlike the composer-seed file, THIS bug lives inside
-// TemplateComposer.tsx itself, so that component is mounted for REAL here,
-// not stubbed -- the whole point is to observe its internal draft state
-// surviving a reuse it shouldn't survive.
+// TemplatesDialog renders TemplateComposer with no key; a second "New
+// template..." while it's already open on a blank draft is a transition between
+// two structurally identical {path:null} objects, so React reuses the existing
+// instance instead of remounting it.
+// TemplateComposer seeds its fields via useState, which only runs at mount, so
+// the previous draft stays on screen instead of resetting.
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 GlobalRegistrator.register();
@@ -37,9 +18,6 @@ import { mockStore, storeMockStubs } from "./_store-mock";
 
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
 
-// ---------------------------------------------------------------------------
-// Fake store: same FakeDeckState shape already proven for TemplatesDialog in
-// tests/desktop-templates-composer-seed.test.ts.
 interface FakeSession {
   id: string;
   supervisor?: boolean;
@@ -92,11 +70,10 @@ function resetFakeStore(): void {
 
 mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 
-// TemplateComposer.tsx imports value exports TEMPLATE_TYPE/TEMPLATE_VERSION
-// from '@shared/template' (a tsconfig-only alias not resolved when bun test
-// runs from the repo root -- same gap documented in
-// tests/desktop-tile-area.test.ts's header). Arbitrary placeholder values are
-// fine: this file never calls save(), which is the only place they are read.
+// @shared/template's TEMPLATE_TYPE/TEMPLATE_VERSION are aliased only in
+// desktop's own tsconfig, unresolved when bun test runs from the repo root.
+// Placeholder values are fine here since this file never calls save(), the only
+// place they're read.
 mock.module("@shared/template", () => ({
   TEMPLATE_TYPE: "koryphaios.template",
   TEMPLATE_VERSION: 1
@@ -189,24 +166,11 @@ function typeInto(el: HTMLInputElement, value: string): void {
 }
 
 test("BUG (spec_542dab47): a second seed while the composer is open on a draft leaves the previous draft on screen instead of a blank composer", async () => {
-  // Step 1: File > New template... -> composer opens on a blank draft.
-  // Async act(): TemplateComposer's mount effect fires window.api.listAgents()
-  // and window.api.getLaunchConfig() UNCONDITIONALLY, both resolving as a
-  // microtask (the fake window.api stub returns already-resolved promises).
-  // `await Promise.resolve()` inside this act() callback yields once, which
-  // drains both already-queued `.then(setAgents)`/`.then(setModels)`
-  // microtasks (both chained synchronously in the same effect run, so both
-  // are ahead of this continuation in the queue) BEFORE act() resolves --
-  // measured necessary (hyp_ log-hypothesis before this fix): without it,
-  // those two setState calls land after this test function returns
-  // (root.unmount() in afterEach already ran, and once this is the only test
-  // in the file, GlobalRegistrator.unregister() in afterAll already tore
-  // down `window` too), which the React scheduler then dereferences in a
-  // later callback tick ("ReferenceError: window is not defined" in
-  // react-dom-client's performWorkOnRootViaSchedulerTask) -- exit code 1 on
-  // an otherwise-passing test ("Unhandled error between tests"). Confirmed by
-  // removing this flush and reproducing the exact reported crash, then
-  // adding it back.
+  // TemplateComposer's mount effect fires listAgents()/getLaunchConfig()
+  // unconditionally, both resolving as an already-queued microtask; await
+  // Promise.resolve() here drains both before act() resolves.
+  // Without it, their setState calls land after unmount/teardown and crash with
+  // "window is not defined" in a later scheduler tick.
   await act(async () => {
     fakeUseDeck.setState({ templatesComposerSeed: 1 });
     root.render(React.createElement(TemplatesDialog));

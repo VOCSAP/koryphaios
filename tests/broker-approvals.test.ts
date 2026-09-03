@@ -36,16 +36,11 @@ async function signedPost<T>(
 ): Promise<{ status: number; body: T }> {
   const kind = signer.kind ?? "operator";
   const body = {
-    // Card 1def56da: an OPERATOR credential must DECLARE the project it is
-    // acting on, for all four approval handlers and no longer for /approval/list
-    // alone. Injected here as a default rather than at each of the ~30 call
-    // sites, and injected BEFORE the spread so a test can still override it or
-    // set it to "" -- which several below do on purpose, since the refusal is
-    // half of what this suite proves.
-    //
-    // The position matters twice over: this object is what gets SIGNED, so a
-    // field appended after buildAuthProof would produce a 401 bad-signature
-    // rather than the 400 the test is looking for.
+    // project_key is set before the spread so it lands inside the signed
+    // payload, while a test can still override it through the spread that
+    // follows.
+    // A field appended after signing would fail with a bad-signature 401 rather
+    // than the intended 400.
     project_key: DEFAULT_PROJECT_KEY,
     ...payload,
     public_key: signer.cred.publicKey,
@@ -301,8 +296,6 @@ describe("operator compartmentalisation", () => {
     // The multi-PC case: PC#2 enrolled with the same credential.
     const b = await boot();
     const op = newOperator();
-    // `origin.host` still travels in the body (it is descriptive, not a scope);
-    // `project_key` no longer does (card 1def56da), it is declared top level.
     await addApproval(b, op, { origin: { host: "bureau" }, project_key: "p" });
     await addApproval(b, op, { origin: { host: "portable" }, project_key: "p" });
 
@@ -351,11 +344,6 @@ describe("project scoping (card 4df14b5b)", () => {
     expect(listB.body.approvals.map((x) => x.id)).toEqual([c.id]);
   });
 
-  // THIS is the red-then-green proof of the fix. Before this card, a request
-  // with no project_key (exactly what fetchPendingApprovals used to send)
-  // returned 200 with BOTH approvals below -- the leak the card exists to
-  // close. Measured red on the pre-fix broker.ts (git stash push -- broker.ts):
-  // `missing.status` was 200 and `missing.body.approvals` held both ids.
   test("a request without project_key is refused, not silently unioned across projects", async () => {
     const b = await boot();
     const op = newOperator();
@@ -674,16 +662,9 @@ describe("flood bound", () => {
 });
 
 /**
- * Card 1def56da. Before this lot, project scoping existed on `/approval/list`
- * and NOWHERE ELSE: `wait`, `claim` and `delivered` filtered on `operator_id`
- * alone, which is per OS ACCOUNT and therefore shared by two Deck windows on
- * two different repos. Measured before writing these: ZERO test exercised
- * `project_key` on any of the three, so the three clauses could have been
- * removed with the whole suite staying green.
- *
- * Each test below is written so that removing ITS handler's scope turns THIS
- * test red and leaves the others alone -- that is what makes the four of them a
- * coverage matrix rather than four ways of proving the same thing once.
+ * Each test below isolates one handler's project scoping: removing only that
+ * handler's filter turns just that test red, so together they form a coverage
+ * matrix rather than four proofs of the same thing.
  */
 describe("project scoping reaches every handler (card 1def56da)", () => {
   /** One operator, one approval filed under `repo-a`. The intruder is `repo-b`. */

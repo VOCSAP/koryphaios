@@ -1,28 +1,11 @@
-// spec_fe032ba6, A2 fix (2026-08-03, team-lead review): these fixtures used
-// to live inline inside tests/desktop-test-hygiene.test.ts's own scanFile
-// unit tests. Every fixture below deliberately contains a real, quoted
-// react/react-dom/zustand specifier as CODE (not a comment) -- that is
-// exactly the shape the discipline test in tests/ exists to catch, which
-// meant the discipline test had to exempt ITSELF (by basename) from its own
-// `violations` check just to keep its own unit tests from tripping it. A
-// basename-matched self-exemption is precisely the kind of gate that file's
-// own header spends forty lines arguing against, and the reviewer proved it
-// wasn't even fail-closed on the compensatory guard meant to bound it.
-//
-// Moving the literal fixture DATA out here -- physically inside
-// desktop/tests-support/, which the hygiene walk does not recurse into (it
-// only walks TESTS_DIR = import.meta.dir, i.e. tests/ itself) -- removes the
-// exemption instead of tightening it: tests/desktop-test-hygiene.test.ts now
-// runs `violations` over its own (fixture-free) source like every other file
-// in tests/. The test() bodies themselves, and scanFile/the patterns they
-// exercise, stay in tests/desktop-test-hygiene.test.ts so they remain part
-// of the CI-collected glob (tests/desktop-*.test.ts, see TESTING.md
-// "Cross-platform tests") -- only the literal specifier strings move.
-//
-// This module is data only (no test() calls) -- it is not itself collected
-// by any test glob, and does not need to be: desktop/tests-support/ already
-// exists as the one place root-level tests/ code sources
-// react/react-dom/zustand-adjacent material from outside tests/'s own scan.
+// Fixture data lives here, physically outside the directory the hygiene walk
+// scans, because every fixture below deliberately contains a real, quoted
+// react/react-dom/zustand specifier as code -- exactly the shape the discipline
+// test exists to catch.
+// Keeping that data inside the scanned directory would force the discipline
+// test to exempt itself from its own check just to pass its own unit tests.
+// This module holds data only, no test() calls, and is not itself collected by
+// any test glob.
 
 export interface ScanFixture {
   readonly input: string;

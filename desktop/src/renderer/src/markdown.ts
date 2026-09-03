@@ -1,16 +1,8 @@
-// Minimal markdown tokenizer for the roadmap detail modal (PLAN K5).
-//
-// The description/rationale/context fields are free markdown WRITTEN BY AGENTS,
-// so the renderer must be injection-safe by construction: this module only
-// produces a token tree (no HTML strings), and the React side maps tokens to
-// elements -- React escapes every text node, so no sanitizer is needed and no
-// markdown dependency enters the repo (zero-dep convention).
-//
-// Supported subset (enough for briefings): #..#### headings, paragraphs,
-// unordered (-/*) and ordered (1.) lists, ``` code fences, inline `code`,
-// **bold**, *italic*, [label](url) links. Everything else renders literally.
-//
-// Pure (no react/electron imports) so it is unit-testable under `bun test`.
+// Produces a token tree, never HTML strings: the description/rationale/context
+// fields are free markdown written by agents, and React escapes every text
+// node, so no sanitizer or markdown dependency is needed.
+// Supports #..#### headings, paragraphs, lists, code fences, inline code, bold,
+// italic, links; everything else renders literally.
 
 export type InlineToken =
   | { t: 'text'; text: string }

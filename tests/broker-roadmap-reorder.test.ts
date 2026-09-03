@@ -102,11 +102,6 @@ test("reorder validates authorship, project scope, duplicates and closed items",
   expect(after.body.items.find((i) => i.id === a.id)?.queue).toBe(1);
 });
 
-// Gap closed 2026-08-27 (card c33a5968 family): resolveRoadmapAuthor accepts
-// the same breadth of callers on /roadmap/reorder as on /roadmap/upsert, so
-// this handler needs the same inactive guard on the queue-adjacent write it
-// performs -- see refusesInactiveQueue's doc comment in broker.ts.
-
 test("reorder refuses the WHOLE batch, naming the offending id, when any item is inactive (403)", async () => {
   const a = await create("wf inactive a");
   const parked = await create("wf inactive parked", { inactive: true });

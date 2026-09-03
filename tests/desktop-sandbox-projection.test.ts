@@ -261,19 +261,16 @@ test("signatureOfEntries folds an entry from a root outside claudeHomeDir, and m
   }
 });
 
-// Reviewer measured (card a79c7696 volet 1 review, correction 1): the test
-// above bites on a 3-file fixture, far under SIG_MAX_ENTRIES's shared
-// per-walk budget -- it proves the FEATURE works, not that it survives the
-// real domain. signatureOfEntries decrements ONE budget across the entries
-// it walks IN ARRAY ORDER, so concatenating [...operatorEntries,
-// deckPluginEntry] into a SINGLE walk starves deck-plugin's fingerprint to
-// zero once the operator config alone exceeds the budget (an installed
-// plugin with deps reaches SIG_MAX_ENTRIES files without effort) -- a
-// deck-plugin-only edit then silently stops moving the signature. This
-// builds an operator config that genuinely exceeds SIG_MAX_ENTRIES and
-// proves BOTH halves: the single-walk composition really is blind past the
-// budget (red without the fix), and two INDEPENDENT walks concatenated as
-// strings (order no longer able to matter) is not.
+// signatureOfEntries decrements one shared budget across the entries it walks
+// in array order, so concatenating operator and plugin entries into a single
+// walk can starve the plugin's fingerprint to zero once the operator config
+// alone exceeds SIG_MAX_ENTRIES -- an installed plugin with dependencies
+// reaches that budget with no effort, and a plugin-only edit then silently
+// stops moving the signature.
+// This builds an operator config that genuinely exceeds SIG_MAX_ENTRIES and
+// proves both halves: the single-walk composition really is blind past the
+// budget, and two independent walks concatenated as strings, where order cannot
+// matter, are not.
 test("a deck-plugin-only edit still moves the signature when the operator config exceeds SIG_MAX_ENTRIES", () => {
   const bigDir = mkdtempSync(join(tmpdir(), "cp-sandbox-big-"));
   const pluginDir = mkdtempSync(join(tmpdir(), "cp-sandbox-plugin2-"));

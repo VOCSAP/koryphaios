@@ -6,21 +6,14 @@ import { TerminalTile } from './TerminalTile'
 import { GLYPH_ACTIONS } from './icons'
 
 /**
- * The workspace the "restore previous" button/chevron should offer: not
- * locked by another live instance, and actually has sessions to respawn
- * (`workspaces[0]` alone, the previous behavior, could pick a locked or
- * empty/dead entry, leaving the button clickable and functionally dead --
- * b8d65b24). The CURRENT workspace is only a candidate when the deck has no
- * live agent session left: an empty deck is itself a fresh start, so
- * "restore what I just had" is exactly the operator's main use case there
- * (b8d65b24 follow-up, operator arbitration); with any agent still running,
- * restoring `current` would kill it for no replacement, so it stays excluded
- * exactly like `locked`. `liveAgentCount` is a PARAMETER, not a store read,
- * so this stays pure and testable without mounting the store -- pass the
- * caller's own supervisor-excluded count (same population `captureSessions()`
- * uses), never a second definition of "live" computed here. Pure and
- * exported so the rule is pinned by a unit test instead of only exercised
- * via JSX.
+ * Never picks a locked or empty/dead workspace, which would leave the restore
+ * button clickable but functionally dead.
+ * The current workspace is only a candidate when the deck has no live agent
+ * session: with any agent still running, restoring current would kill it for no
+ * replacement, so it stays excluded exactly like locked.
+ * liveAgentCount is a parameter, not a store read, so this stays pure and
+ * testable — callers must pass the same supervisor-excluded live count they use
+ * elsewhere, never a second definition of live computed here.
  */
 export function pickRestorable(
   workspaces: WorkspaceSummary[],
@@ -81,19 +74,15 @@ export function TileArea(): React.JSX.Element {
   const openTemplates = useDeck((s) => s.openTemplates)
   const carouselRef = useRef<HTMLDivElement>(null)
 
-  // Hoisted above the three tile-rendering returns below (maximized/carousel/
-  // grid, 903ee271): all three must pass an IDENTICAL children shape, because
-  // React's implicit key path is derived from a JSX subtree's structural
-  // position, not just each element's own `key`. Building this array once and
-  // reusing it verbatim in `{children}` keeps that shape identical across a
-  // maximize/un-maximize transition, so TerminalTile stays mounted (its PTY
-  // and scrollback survive) instead of unmounting/remounting on every switch.
-  // Maximized never showed pending-spawn placeholders before this hoist (the
-  // old maximized return had no pendingTiles at all) -- keep that behavior by
-  // nulling the slot rather than omitting it: `null` still occupies the
-  // second children position, so the shape (and therefore the reconciliation
-  // path) stays identical across branches; omitting it conditionally would
-  // reintroduce the remount bug this hoist fixes.
+  // All three tile-rendering branches must pass an identical children shape,
+  // since React's implicit key path derives from a JSX subtree's structural
+  // position, not just each element's own key.
+  // Building this array once and reusing it verbatim keeps TerminalTile mounted
+  // (its PTY and scrollback survive) across a maximize/un-maximize transition
+  // instead of remounting.
+  // The maximized branch nulls the pending-spawn slot rather than omitting it,
+  // so the shape — and therefore the reconciliation path — stays identical
+  // across branches.
   const children = (
     <>
       {sessions.map((s) => (

@@ -1,23 +1,9 @@
-// Design endpoint (PLAN D2b): a loopback HTTP server, started by the Electron
-// main process, that receives ELEMENT PICKS from external apps in design mode
-// — a Tauri dev build, another Electron app, any webview-based UI running the
-// deck-design client script (deck-plugin/design/deck-design.js).
-//
-// Why not the broker? The broker may live on a REMOTE, headless machine (HTTP
-// mode); routing local, interactive design picks through it would add a WAN
-// round-trip, force broker auth into target apps, and break its outbound-only
-// Deck philosophy. Picks are a strictly local concern: target app and Deck run
-// on the same PC, so the deck-control loopback pattern (C5) applies verbatim.
-//
-// Security model (same as deck-control.ts):
-// - 127.0.0.1 only, random port, token minted per app launch. The pair is
-//   handed out ONLY through the env of PTYs the Deck itself spawns
-//   (CLAUDE_DECK_DESIGN_URL / CLAUDE_DECK_DESIGN_TOKEN), so an app launched
-//   from a Deck session terminal inherits it; nothing is persisted.
-// - Bodies are size-capped and shape-checked; the endpoint only ever forwards
-//   a sanitized pick to the renderer, it exposes zero read/control surface.
-//
-// Dependency-free (node http/crypto only) so it stays unit-testable.
+// Not routed through the broker: the broker may be remote/headless, and routing
+// local interactive picks through it would add a WAN round-trip and force
+// broker auth into target apps. Picks are local, so the deck-control loopback
+// pattern applies.
+// The token is handed out only through the env of PTYs the Deck itself spawns;
+// nothing is persisted.
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { randomBytes } from 'node:crypto'

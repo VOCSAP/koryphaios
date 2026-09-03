@@ -160,9 +160,8 @@ test("toTemplate captures role, templateToInputs applies it back", () => {
 });
 
 test("role survives template -> JSON -> parseTemplate -> templateToInputs round-trip, LOCAL scope included", () => {
-  // No local/global distinction anywhere in the parsing or application path:
-  // operator arbitration 2026-08-27 requires role to travel in BOTH scopes,
-  // parseTemplate itself has no scope input to gate on.
+  // Role travels in both local and global scopes; parseTemplate has no scope
+  // input to gate on, so there's no distinction to enforce here.
   const defs = [{ name: "lead", role: "team-lead" }];
   const json = JSON.stringify(toTemplate(defs, "rt"));
   const back = parseTemplate(JSON.parse(json));

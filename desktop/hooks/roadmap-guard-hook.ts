@@ -1,62 +1,15 @@
-// Claude Code PreToolUse hook -- refuses a roadmap_add / roadmap_update /
-// roadmap_append_context call whose text arguments carry the literal tag
-// markup of ANOTHER argument (a serialization accident), before the call
-// ever reaches the broker (card 800b0fe3).
-//
-// WHAT IT DETECTS, AND WHY THIS SHAPE:
-//   Measured 2026-08-24 on the shared roadmap export (card b313f0c3): the
-//   real accident leaves `rationale` ending in its own genuine content,
-//   immediately followed by `</rationale>\n<parameter name="context">` and
-//   then the ENTIRE content meant for `context`. The discriminating part is
-//   the CLOSING TAG OF THE FIELD ITSELF immediately followed by an opening
-//   tag: a citation never carries the closing tag of the field that
-//   contains it, because that would require quoting the markup AND
-//   simultaneously having it swallow the rest of the value -- which is
-//   exactly the accident, not a description of it.
-//
-//   TWO real spellings of "the field's own closing tag" exist, both
-//   measured live (card 0e28cb4e, 2026-08-25, by replay against the built
-//   .mjs -- the b313f0c3 rule had covered only the first for a full day):
-//     - SEMANTIC: `</rationale>`, field-named. b313f0c3's own accident.
-//     - GENERIC: `</parameter>`, not field-named. This is the form Claude
-//       Code's tool-call serialization always emits (every
-//       `<parameter name="X">...</parameter>` pair closes generically), so
-//       it is the more common of the two, not an edge case. A synthetic
-//       payload using this spelling passed straight through the
-//       semantic-only regex (exit 0, empty stdout, no deny) before this
-//       fix. Both spellings answer the same invariant above; the regex
-//       accepts either as "this field's own closing tag" (see
-//       `detectSerializationAccident` below).
-//
-//   The negative control is real too (card 800b0fe3.context): a deliberate
-//   citation of the same syntax, but as an INCOMPLETE fragment
-//   (`` `<parameter name=` `` inside backticks, no closing quote/bracket,
-//   mid-sentence, and critically no preceding closing tag of either
-//   spelling).
-//
-//   Reviewed 2026-08-24 (desktop-7b2civn-koryphaios-2): an earlier version
-//   used "opening tag naming another field, AND that field empty" as the
-//   rule. That conjunction is vacuous on `roadmap_update` (a PARTIAL
-//   update -- most fields are legitimately absent by contract) and on
-//   `roadmap_add` (only `title` is required), so it degraded to "opening
-//   tag alone" on the dominant call shape -- exactly the naive detector
-//   this hook exists to avoid, refusing a partial update that merely cites
-//   the syntax. It also silently exempted any accident naming a
-//   non-free-text field (tags, priority, kind, ...), and made the
-//   `roadmap_append_context` matcher permanently dead (its one field can
-//   never be its own "other" target). The CLOSE-then-OPEN pair fixes all
-//   three: it needs no sibling-field-empty check, no known-field-name
-//   check on the target, and fires on a single-field tool just as well.
-//
-// MATCHER: this hook is wired with `matcher` set to the exact MCP tool
-// names below (not an empty matcher + internal filter). Measured 2026-08-24
-// via an isolated headless probe, both settings.json-sourced and
-// plugin-sourced (the form this hook ships as): a matcher naming the tool
-// dispatches reliably on this platform/version, and an empty matcher would
-// spawn this process on EVERY tool call in the session for no benefit.
-//
-// FAIL OPEN: any internal error (malformed stdin, unexpected shape) exits 0
-// with no decision, so a bug in this guard never blocks the team's roadmap.
+// Refuses a roadmap_add/update/append_context call whose text arguments carry
+// the literal tag markup of another argument (a serialization accident), before
+// it reaches the broker.
+// Detects the field's own closing tag (either </fieldName> or the generic
+// </parameter>, both real serialization forms) immediately followed by another
+// parameter's opening tag — a citation never carries a closing tag it would
+// also have to quote and escape, which is exactly the accident.
+// Matcher names the MCP tools explicitly rather than using an empty matcher
+// plus internal filtering, since an empty matcher would spawn this process on
+// every tool call in the session.
+// Fails open: any internal error exits 0 with no decision, so a bug here never
+// blocks a legitimate roadmap write.
 
 /** Free-text fields this hook inspects, per MCP tool. Extending coverage to
  * a future roadmap tool that writes long free text means adding BOTH an
@@ -111,24 +64,8 @@ export function detectSerializationAccident(
     const value = toolInput[field];
     if (typeof value !== "string" || value === "") continue;
 
-    // Field names here are our own static list (no operator input), so
-    // interpolating into a RegExp is safe -- nothing to escape.
-    //
-    // TWO closing spellings for "this field's own closing tag", both
-    // measured live against the real .mjs (card 0e28cb4e, 2026-08-25):
-    //   - `</${field}>` -- the SEMANTIC form, field-named. Confirmed real
-    //     (card b313f0c3's own accident: `</rationale>` then
-    //     `<parameter name="context">`).
-    //   - `</parameter>` -- the GENERIC form. This is the form Claude
-    //     Code's own tool-call serialization always emits (every
-    //     `<parameter name="X">...</parameter>` pair closes generically,
-    //     never with `</X>`), so it is the MORE common of the two, not an
-    //     edge case. A synthetic replay confirmed the semantic-only regex
-    //     let this form straight through: exit 0, empty stdout, no deny.
-    // Both spellings answer the SAME invariant the file header already
-    // states (this field's own closing tag immediately followed by
-    // another parameter's opening tag) -- this is not a third enumerated
-    // case, just the second real spelling of the first case.
+    // Field names are our own static list, never operator input, so
+    // interpolating them into a RegExp here is safe — nothing needs escaping.
     const closeThenOpenRe = new RegExp(
       `(</${field}>|</parameter>)\\s*<parameter\\s+name\\s*=\\s*"([a-zA-Z0-9_]+)"\\s*>`
     );

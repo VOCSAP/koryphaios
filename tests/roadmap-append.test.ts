@@ -1,11 +1,3 @@
-// Card 562fd9b5, layer 6 (partial): shared/roadmap-append.ts is a pure
-// module (no broker, no server, no I/O) so these tests run directly against
-// it, no harness needed. Boundary-condition style, synthetic input, same
-// falsifiable-negative-control discipline as
-// tests/broker-roadmap-import.test.ts's findUncoveredRoadmapColumns tests:
-// prove the guard actually rejects, not just that it agrees with itself on
-// well-formed input.
-
 import { test, expect } from "bun:test";
 import {
   ROADMAP_APPEND_PER_CALL_MAX_CHARS,

@@ -1,21 +1,3 @@
-// spec_c599a9c5 -- cards e3f8065d (extraction) + dd388182 (note content).
-//
-// WHAT THIS FILE PROVES, AND WHAT IT DELIBERATELY DOES NOT.
-// It proves the DECISION: given a sender class and a text, what does the
-// recipient read. It cannot prove the WIRING -- measured yesterday on card
-// 3d3c7d40, a pure suite stayed 13/13 green while the module it imported was
-// connected to nothing. The wiring of the three receive paths, and above all of
-// check_messages (which re-implemented the branching inline until this commit),
-// is attested by tests/server-inbound-framing-delivery.test.ts, which spawns a
-// real broker and real peers. The two files are not redundant, they answer two
-// different questions and neither substitutes for the other.
-//
-// NAMING AND CI. `peer-` prefix: .github/workflows/desktop-build.yml line 79
-// collects it (measured 2026-08-19: that glob line matches 134 of the 185 files
-// in tests/). This file imports a pure module, binds no port and spawns nothing,
-// so it belongs in that matrix. Its E2E counterpart carries `server-` and is
-// deliberately NOT collected there, for the reason the workflow states itself.
-
 import { test, expect, describe } from "bun:test";
 import {
   DECK_NO_REPLY_NOTE,

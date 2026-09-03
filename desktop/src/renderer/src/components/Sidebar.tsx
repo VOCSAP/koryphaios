@@ -20,12 +20,9 @@ export interface RowDnd {
   onDragEnd: () => void
 }
 
-// Exported (was file-local) so tests/desktop-sidebar-autoresume-dom.test.ts
-// can mount ONE row directly with a minimal store surface, instead of the
-// whole Sidebar tree (which would drag in createSession/reorderSessions/
-// workspaces/sandbox/etc. for no added bite -- same reasoning as
-// tests/desktop-explorer-selection-dom.test.ts's scope note on mounting
-// HighlightedLines instead of the whole ExplorerView).
+// Exported rather than file-local so a single row can be mounted directly with
+// a minimal store surface, instead of dragging in the whole Sidebar tree's
+// dependencies for no added coverage.
 export function SessionRow({
   session,
   dnd,

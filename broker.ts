@@ -1,12 +1,8 @@
 #!/usr/bin/env bun
 /**
- * claude-peers broker daemon (v0.9.0)
- *
- * Singleton HTTP server on 127.0.0.1:<port> backed by SQLite.
- * Tracks registered Claude Code peers, isolates them by group, persists session
- * identity across reconnects, and routes messages between them.
- *
- * Run directly: bun broker.ts
+ * Singleton HTTP server on 127.0.0.1:<port>, SQLite-backed.
+ * Persists session identity across reconnects and routes messages between
+ * grouped peers.
  */
 
 import { Database } from "bun:sqlite";
@@ -289,50 +285,18 @@ function safeEqual(a: string | null | undefined, b: string | null | undefined): 
   return timingSafeEqual(ab, bb);
 }
 
-// Card 37a2b8c7 volet 4: single place deciding whether a group is exempt from
-// the TOFU secret check. Previously this literal `groupId !== "default"` was
-// copy-pasted in handleRegister, handleAnnounce and handleOperatorInbox --
-// three independent editable copies of the SAME assumption ("'default'
-// carries nothing confidential"). shared/config.ts only reflects that
-// assumption on WELL-BEHAVED clients (it's client-side code the broker never
-// runs); the broker itself imposes nothing, so a hostile POST can still
-// declare group_id "default" with any hash it likes. isTofuExemptGroup's
-// unconditional exemption is a deliberate broker-side choice, not something
-// shared/config.ts enforces. This predicate is a pure extraction, not a
-// behavior change: whichever of the three call sites needs a DIFFERENT rule
-// changes THIS ONE FUNCTION, not three call sites. The arbitration it was
-// waiting for (card 37a2b8c7 volet 1, the operator-inbox exposure) is SETTLED:
-// the inbox is refused in an exempt group rather than authenticated there --
-// see groupMayCarryOperatorInbox below, which derives from this predicate.
+// Single source of truth for whether a group is TOFU-exempt: shared/config.ts
+// only reflects this assumption on well-behaved clients, so the broker still
+// enforces it itself rather than trusting the client side.
 function isTofuExemptGroup(groupId: string): boolean {
   return groupId === "default";
 }
 
 /**
- * Card 37a2b8c7 volet 1 (operator arbitration of 2026-08-05, option d).
- *
- * A TOFU-exempt group pins no secret, so ANY holder of the shared BROKER_TOKEN
- * can name it and drain it. The operator inbox is the only CONFIDENTIAL payload
- * such a group can carry, and it cannot be authenticated without pinning a
- * secret -- which would destroy the zero-config rendezvous that makes the group
- * exempt in the first place. Exposure and feature are the SAME property here,
- * so the inbox is refused there instead of being authenticated: the assumption
- * "an exempt group carries nothing confidential" becomes TRUE BY CONSTRUCTION,
- * which is what makes handleRegister's and handleAnnounce's exemptions
- * legitimate rather than copies of a doubtful rule.
- *
- * COVERAGE. Both ends are refused (drain in handleOperatorInbox, deposit in
- * handleSendMessage): refusing only the drain would keep accepting a write
- * nobody will ever read -- a lying success. The predicate is DERIVED from
- * isTofuExemptGroup rather than re-testing "default", so a second exempt group
- * added later inherits both refusals instead of silently re-opening the hole;
- * the degradation that yields a subset (someone re-typing the literal at one of
- * the two sites) is what tests/broker-operator-inbox.test.ts pins.
- *
- * COST, deliberate: a bare-mode claude-peers user with no group secret loses a
- * documented capability (send_message to 'operator'). It was already inert
- * there -- the core ships no consumer for that inbox, so the message sat
- * delivered=0 forever. The refusal makes the existing silence explicit.
+ * A TOFU-exempt group pins no secret, so the operator inbox -- its only
+ * confidential payload -- is refused there rather than authenticated: pinning a
+ * secret to authenticate it would break the zero-config rendezvous that makes
+ * the group exempt in the first place.
  */
 function groupMayCarryOperatorInbox(groupId: string): boolean {
   return !isTofuExemptGroup(groupId);
@@ -359,22 +323,10 @@ function checkGroupSecret(
 }
 
 /**
- * Whether `groupId` has ever registered (a row in `groups`, pinned by the
- * `INSERT INTO groups` in the /register handler on first sight).
- * checkGroupSecret authorises an ACTION inside a group;
- * it never attests the group EXISTS -- for a never-seen group `existing` is
- * null above, so there is nothing to compare and TOFU accepts the unknown.
- *
- * Every older caller of checkGroupSecret (/announce, /operator-inbox's
- * legacy drain) got away without this because their writes/reads sit behind
- * `WHERE group_id = ?` on `peers` or `messages` -- tables an unknown group
- * can never have populated, so it is always the empty set there. Courrier's
- * operator_inbox_sessions is the first table where a caller-supplied
- * group_id is the write's ONLY anchor (INSERT on /operator-inbox's cursor
- * path, DELETE with no other scoping column on /operator-inbox/purge's GC).
- * Any route in that shape must call this BEFORE writing (card 1e81ee7b
- * MAJOR 5 / part 4) -- see its two call sites in handleOperatorInbox and
- * handleOperatorInboxPurge, which are what actually enforce this.
+ * checkGroupSecret authorizes an action inside a group but never proves the
+ * group exists -- for an unseen group, TOFU just accepts it. Call this first on
+ * any route whose write is anchored solely by group_id, with no peers/messages
+ * row to scope it, like the operator-inbox tables.
  */
 function groupExists(groupId: string): boolean {
   return db.query("SELECT 1 FROM groups WHERE group_id = ?").get(groupId) != null;
@@ -395,8 +347,6 @@ try {
 } catch (e) {
   log.warn(`cannot create db directory for ${DB_PATH} (best-effort)`, e);
 }
-
-// --- Database setup (v0.3 schema, no migration path) ---
 
 const db = new Database(DB_PATH);
 db.run("PRAGMA journal_mode = WAL");
@@ -538,23 +488,10 @@ try {
 }
 
 if (peerSessionsColumnAdded) {
-  // ONE-SHOT ROTATION (card 3d121a74). Widening the key makes every stored
-  // session_key unreachable, and the rows CANNOT be migrated: peer_sessions
-  // holds no column identifying a tile or a CC session, so there is nothing to
-  // recompute a key from. Coexistence (try the new key, fall back to the old)
-  // was refused by design and IS the mechanism of the bug: the old key hands a
-  // tile ANOTHER tile's ROW, hence its instance_token, hence its mail queue.
-  //
-  // So: purge peer_sessions, and NEVER peers. Peer rows keep their tokens and
-  // age out through the dormant TTL. Everyone's peer_id counter advances one
-  // last notch, which is assumed.
-  //
-  // Two numbers, one line. The undelivered count is the one nobody thinks to
-  // take: `messages` is keyed by to_token (never by session_key), so the purge
-  // touches no token -- a tile that re-registers afterwards gets a FRESH token
-  // and its old mail stays attached to the old one, orphaned, delivered to
-  // NOBODY, swept by the 24h dormant pass. That loss is CORRECT (delivering it
-  // is precisely the defect being closed) but it must never be silent.
+  // Widening the session key makes every stored session_key unreachable, and
+  // the rows cannot be migrated. Purge peer_sessions only, never peers: keeping
+  // both keys around is the mechanism of the bug it fixes, handing a tile
+  // another tile's row (its token, its mail).
   const undelivered = (db.query("SELECT COUNT(*) AS n FROM messages WHERE delivered = 0")
     .get() as { n: number }).n;
   const purged = (db.query("SELECT COUNT(*) AS n FROM peer_sessions").get() as { n: number }).n;
@@ -564,21 +501,13 @@ if (peerSessionsColumnAdded) {
   );
 }
 
-// Courrier lot 1A (desktop/docs/design-courrier-lot1.md section 6.1, card
-// 54b1c71a). One row per Deck LAUNCH, minted in-memory and never persisted
-// Deck-side (that's the whole point: the cursor's lifetime IS the session's
-// lifetime). Keyed by session_id, NOT group_id or operator_id -- see the
-// design doc section 3 for why those two are the wrong axis (operator_id is
-// deliberately copied across a person's machines, so it would let two Decks
-// of the same human steal each other's Courrier, exactly the bug this closes).
-// Composite PK (session_id, group_id): a session_id that later polls under a
-// DIFFERENT group_id gets its OWN row instead of silently keeping the
-// original group on an ON CONFLICT update (card 1e81ee7b MAJOR 1). This
-// removes the "group changed" case rather than tracking it -- there is no
-// branch left that needs one. It does NOT by itself scope reads/writes to
-// the CALLER's group: every statement below still carries its own explicit
-// `group_id = ?`, which is what actually stops a cross-group cursor bump or
-// GC (see the blockers this table's statements fix, further down).
+// Keyed by session_id, not group_id or operator_id: operator_id is deliberately
+// shared across one person's machines, so keying on it would let two Decks of
+// the same operator steal each other's inbox.
+// A session polling under a different group_id gets its own row rather than
+// silently migrating the original.
+// Does not itself scope reads/writes to a group -- every statement below still
+// carries its own explicit group_id filter.
 db.run(`
   CREATE TABLE IF NOT EXISTS operator_inbox_sessions (
     session_id TEXT NOT NULL,
@@ -591,11 +520,10 @@ db.run(`
 `);
 db.run(`CREATE INDEX IF NOT EXISTS idx_operator_inbox_sessions_group ON operator_inbox_sessions(group_id, last_seen_at)`);
 
-// Roadmap items (v0.4, PLAN C3). Scoped by project_key, NOT group_id, and with
-// deliberately NO foreign key to peers/groups: created_by/updated_by are plain
-// text snapshots of a peer_id (or 'deck'), so items live independently of the
-// session lifecycle -- no cleanup timer touches this table, and deletion is a
-// reversible archive (deleted_at) rather than a DELETE.
+// Scoped by project_key, not group_id, with no foreign key to peers/groups:
+// created_by/updated_by are plain-text peer_id snapshots, so items outlive the
+// session lifecycle. Deletion is a reversible archive (deleted_at), never a
+// DELETE.
 db.run(`
   CREATE TABLE IF NOT EXISTS roadmap_items (
     id TEXT PRIMARY KEY,
@@ -622,7 +550,6 @@ db.run(`
   )
 `);
 
-// Migration (v0.6, PLAN C15): dispatch-queue position on pre-existing tables.
 try {
   db.run("ALTER TABLE roadmap_items ADD COLUMN queue INTEGER");
 } catch (e) {
@@ -630,7 +557,6 @@ try {
   if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
 }
 
-// Migration (v0.7, PLAN C20): agent briefing on pre-existing tables.
 try {
   db.run("ALTER TABLE roadmap_items ADD COLUMN context TEXT NOT NULL DEFAULT ''");
 } catch (e) {
@@ -638,8 +564,6 @@ try {
   if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
 }
 
-// Migration (v0.8, PLAN K2): agent work-lock on pre-existing tables. locked_by
-// is a plain-text peer_id snapshot (no FK), like created_by/updated_by.
 for (const col of [
   "locked INTEGER NOT NULL DEFAULT 0",
   "locked_by TEXT",
@@ -836,20 +760,11 @@ db.run(
   `CREATE INDEX IF NOT EXISTS idx_dispatch_requests_project ON dispatch_requests(project_key, status)`
 );
 
-// --- Remote approvals (PLAN-notifications-mobiles N1) ---
-// An agent hits a blocking question; it is parked here until SOMEONE answers:
-// the Deck, or a notification channel on the operator's phone. Durability is
-// the graph_drafts model (no FK, plain-text snapshots, status flips, listing
-// non-destructive) — a broker or Deck restart never loses a pending approval.
-//
-// IDENTITY: `operator_id` is a NEW axis, orthogonal to peers/groups. It names a
-// PERSON, which `host` cannot: two OS accounts on one machine share a hostname
-// but must never see each other's approvals.
-//
-// Only PUBLIC keys are stored. `operator_id` is a digest of the public key, so
-// the binding is self-certifying: presenting a different key for a known id
-// would require a hash collision, and reading this database grants no ability
-// to impersonate anyone.
+// operator_id names a PERSON, not a host: two OS accounts on one machine share
+// a hostname but must never see each other's approvals.
+// Only public keys are stored -- operator_id is a digest of the key, so the
+// binding is self-certifying and reading this table grants no ability to
+// impersonate anyone.
 db.run(`
   CREATE TABLE IF NOT EXISTS approval_operators (
     operator_id TEXT PRIMARY KEY,
@@ -986,32 +901,13 @@ db.run(
   `CREATE INDEX IF NOT EXISTS idx_approvals_operator ON pending_approvals(operator_id, status)`
 );
 
-// Card 1def56da, and this migration is a DECISION rather than a cleanup.
-//
-// `project_key` is `NOT NULL DEFAULT ''`, so every row written before card
-// 4df14b5b carries the empty string. Once the scope clause becomes mandatory on
-// all four handlers, '' compares as an ORDINARY VALUE -- never as a wildcard,
-// because a wildcard would be the cross-project leak written by our own hand.
-// The consequence is that those rows become addressable by nobody: no live
-// caller can present '' as its project, so they could never again be answered
-// nor marked delivered, and they would sit `pending` forever with nothing
-// saying why.
-//
-// `abandoned` is the honest status for them, and it is the status's own
-// definition (shared/types.ts: "the producer gave up, session closed, host
-// gone"): a question raised before project scoping has no living producer that
-// can claim its project. Both reader sides were VERIFIED rather than assumed,
-// because this is the FIRST producer of `abandoned` in the codebase -- the Deck
-// asks /approval/list for `pending` and `expired_notif` by name
-// (desktop/src/main/approval-service.ts, fetchPendingApprovals), so these rows
-// stop being offered; and `sweepApprovals` below already collects `abandoned`
-// alongside `answered` after APPROVAL_TTL_DAYS, so they are reclaimed rather
-// than accumulating.
-//
-// Idempotent by its own WHERE: rows already moved no longer match `pending`.
-// Measured on the machine this shipped from: 0 rows in `pending_approvals`
-// total, so this migration is a no-op here and its proof lives in a seeded
-// fixture, not in the live database.
+// Card 1def56da: rows written before project scoping carry project_key = '',
+// which compares as an ordinary value here, not a wildcard -- nothing can claim
+// them once every handler requires a scope.
+// They are set abandoned rather than left pending forever, matching that
+// status's own definition (producer gone, session closed).
+// The WHERE clause only matches rows still pending, so rerunning this migration
+// is a no-op on rows already handled.
 {
   const stranded = db.run(
     `UPDATE pending_approvals SET status = 'abandoned'
@@ -1076,33 +972,12 @@ function legacySessionKey(host: string, cwd: string, groupId: GroupId): string {
 }
 
 /**
- * Identity key for peer_sessions (card 3d121a74, lot L3-a). The triplet
- * (host, cwd, group_id) gives ONE row per directory, while a team deliberately
- * puts N agents in one directory: the 2nd..Nth tile could never own its own
- * row, and in the dormant window a DIFFERENT CC session opened in that
- * directory inherited the previous occupant's instance_token -- hence its
- * undelivered mail, since `messages` is keyed by to_token. Operator
- * arbitration of 2026-09-01: several agents in one directory is SUPPORTED,
- * so the key gets a per-tile discriminant.
- *
- * `deskSession` is the Deck's per-tile token (CLAUDE_PEERS_DESK_SESSION, a
- * randomUUID stable across /clear, compact and restart). It must stay an
- * unguessable CAPABILITY: a tile INDEX, slot number, tile name or pid would
- * be DERIVABLE by any agent in the same repo and would turn this widening
- * into a regression. Residual, stated plainly: an agent that can read another
- * tile's environment (same OS account, outside a sandbox) can impersonate it.
- * Same class of residual as the deck-control token and as `role` -- never
- * trust this field as authorization proof; it raises the bar (122 random bits
- * on top of the group secret) rather than creating a new exposure, since
- * today's bar is (host, cwd, group_id), three values any agent in the repo
- * already knows.
- *
- * BOTH branches are built on legacySessionKey: the empty one returns its
- * digest unchanged, the widened one HASHES that digest with the discriminant
- * instead of re-listing (host, cwd, group_id) a second time. That is a
- * structural property, not a behavioural one -- swapping the call for a
- * value-identical inline copy is undetectable by any test, which is exactly
- * why the shape has to carry the guarantee rather than an assertion.
+ * deskSession must be an unguessable capability (a randomUUID stable across
+ * /clear, compact and restart), never a derivable value like a tile index, slot
+ * number, or pid -- those are visible to any agent in the same repo and would
+ * turn this widening into a regression.
+ * Residual: an agent that can already read another tile's environment can still
+ * impersonate it; this only raises the bar, it does not create a new exposure.
  */
 function sessionKey(
   host: string,
@@ -1211,35 +1086,16 @@ function sweepInactivePeers(): void {
 guardedInterval("sweepInactivePeers", sweepInactivePeers, SWEEP_INTERVAL_SEC * 1000);
 
 /**
- * Card 4441e883, mecanisme A: the consumer `releaseStaleLocks()` never had.
- * A stale sweep used to release the lock and revert the card to 'planned'
- * IN SILENCE -- this is the event that makes an abandonment VISIBLE, in the
- * operator inbox (sentinel 'operator', table `messages`, no new table). One
- * call per abandoned row, from `releaseStaleLocks`'s own per-clause loop: a
- * card reclaimed and abandoned three times produces three events, never a
- * view recomputed at display time (design note in card 3817a84f, "UN
- * EVENEMENT, JAMAIS UNE VUE").
- *
- * ROUTING (architect correction 2026-08-26, P1 -- supersedes this card's own
- * original text): the row's OWN `locked_group` column is the route, read off
- * the card itself, never re-derived by joining `locked_by` against a live
- * `peers` row. That is deliberate, not a shortcut: the sweep's "owner gone"
- * clause fires PRECISELY when no live peer row for `locked_by` may exist
- * (that is the condition being swept), so a route that depended on finding
- * one would silently lose exactly the abandonments this event exists to
- * report. `locked_group IS NULL` is a migration-era row (see
- * `RoadmapItem.locked_group`'s doc comment) -- logged and DROPPED, never
- * defaulted to `'default'`: that group pins no secret, so a message routed
- * there would be readable by any holder of the shared BROKER_TOKEN
- * (`groupMayCarryOperatorInbox`'s whole reason to exist). The same refusal
- * covers a `locked_group` that names a real but TOFU-exempt group.
- *
- * SENDER: `DECK_INSTANCE_TOKEN`, the sentinel already in service for a
- * system-authored message with no real peer row behind it (`handleAnnounce`,
- * broker.ts, `insertMessage.run(DECK_INSTANCE_TOKEN, ...)` directly, not
- * `recordMessageTx` -- same reason here: the sweep is not a peer, so the
- * ack-heuristic/last-activity bookkeeping `recordMessageTx` performs on
- * `fromToken` would touch a row that does not exist). No new sentinel.
+ * Routes off the card's own locked_group column, never re-derived by joining
+ * locked_by against a live peers row -- the sweep fires precisely when no live
+ * peer for locked_by exists, so a join-based route would silently miss the
+ * abandonment it exists to report.
+ * A NULL locked_group (migration-era row) is logged and dropped, never
+ * defaulted to 'default': that group pins no secret, so a misrouted message
+ * would be readable by any holder of the shared token.
+ * Sender is DECK_INSTANCE_TOKEN directly, not routed through the normal
+ * message-send path: the sweep is not a peer, and there is no row for the usual
+ * bookkeeping to update.
  */
 function emitLockAbandonedEvent(row: {
   id: string;
@@ -1289,22 +1145,12 @@ function emitLockAbandonedEvent(row: {
 // RELEASES (locked -> 0, in_progress -> planned), it never claims a card, so
 // it cannot violate the "inactive card can't become in_progress/locked" rule.
 function releaseStaleLocks(): void {
-  // Card aaf4537d: `lock_parked_at`/`lock_parked_by` are nulled
-  // unconditionally by every clause below -- harmless on clauses 1/2 (they
-  // only ever match a row where `lock_parked_at IS NULL` to begin with, see
-  // their prefix) and required on clause 3 (the sweep that actually clears
-  // an expired park). One SET list shared by all three keeps that in sync.
-  //
-  // Card 4441e883 (mecanisme A): each clause SELECTs the rows it is about to
-  // release BEFORE the UPDATE runs, so the event below reports the row's
-  // pre-release state (who held it, for how long) rather than the NULLs the
-  // UPDATE just wrote. `held_minutes` is computed in SQL via julianday --
-  // SQLite's own datetime functions accept both the space-separated
-  // `datetime('now')` form and a 'T'/'Z' ISO string natively (verified
-  // against SQLite's format-8/format-with-timezone parsing), which sidesteps
-  // the exact space-vs-'T'/no-timezone pitfall shared/roadmap-lock.ts's
-  // `parseAsUtcMs` exists to close in JS -- no need to reimplement that
-  // parsing here since the arithmetic never leaves SQL.
+  // Each clause SELECTs the rows before the UPDATE clears them, so the
+  // abandonment event reports the row's pre-release state, not the NULLs the
+  // UPDATE just wrote.
+  // held_minutes is computed in SQL via julianday, sidestepping the
+  // space-vs-'T'-timestamp parsing pitfall that has to be handled explicitly in
+  // JS.
   const release = (where: string, params: string[]): void => {
     const abandoned = db
       .query(
@@ -1343,47 +1189,13 @@ function releaseStaleLocks(): void {
   release(`lock_parked_at IS NULL AND datetime(updated_at) < datetime('now', ?)`, [
     `-${LOCK_TTL_SEC} seconds`,
   ]);
-  // Owner gone: no peer for this locked_by/project_key has been seen (an
-  // active row, OR a dormant row whose `peers.last_seen` is still within
-  // LOCK_GRACE_SEC) for this project. Card 399aa31a (team-lead arbitration,
-  // 2026-08-12): grace is anchored on `peers.last_seen` -- the owner's last
-  // real heartbeat/activity -- not on `locked_at` (when the lock was TAKEN).
-  // The old anchor gave zero effective grace to any lock held longer than
-  // LOCK_GRACE_SEC (the common case): the instant the owner's row left
-  // 'active', the very next sweep stripped it. `sweepInactivePeers` only
-  // ever rewrites `status`, never `last_seen`, so this anchor can only ever
-  // ADD grace versus wall-clock disconnect time (bounded by
-  // ACTIVE_STALE_SEC + the sweep's own cadence), never subtract it -- the
-  // safe failure direction for a mechanism that strips work from an agent.
-  // Operator ruling (Card fc444eda, 2026-08-11): project_key alone scopes
-  // liveness (group_id stays out by design, decision of e7b364dc), and a
-  // NULL project_key is a value in its own right, not a wildcard -- a
-  // project-less peer is only "live" for project-less cards. `IS` is
-  // SQLite's NULL-safe equality (column-to-column too): `NULL IS NULL` is
-  // true, unlike `=` where `NULL = NULL` is NULL/false, which would have
-  // stripped a project-less peer of even its own project-less locks.
-  // Card aaf4537d: same park-immunity prefix as clause 1 -- a paused agent's
-  // peer legitimately going inactive (or its session exiting) must not
-  // strip a park the operator deliberately granted.
-  //
-  // Card e344fa79: the `p.group_id IS roadmap_items.locked_group` term below
-  // is NOT a reversal of fc444eda's ruling above -- that ruling decides
-  // whether a peer's mere EXISTENCE counts as "live" for a project
-  // (deliberately group-blind, so a peer's own liveness never depends on
-  // which group asks). This term answers a different question: is the peer
-  // row this EXISTS just found the SAME peer the lock recorded, or merely
-  // one that happens to share its peer_id string in a different group. The
-  // fail-open half matters as much as the term itself: `roadmap_items.
-  // locked_group IS NULL` is a migration-era row (see RoadmapItem.
-  // locked_group's doc comment), and `peers.group_id` is `NOT NULL DEFAULT
-  // 'default'` (never actually NULL) -- an unconditional `p.group_id IS
-  // roadmap_items.locked_group` would therefore make EVERY legacy locked row
-  // read as "no live owner" on the very first sweep after this ships (no
-  // peer row can ever satisfy `p.group_id IS NULL`), releasing every
-  // pre-migration lock out from under its real, still-active owner. The `OR
-  // roadmap_items.locked_group IS NULL` clause is what keeps this
-  // self-healing rather than a one-time mass release, same discipline as
-  // `matchesLockOwner`'s own NULL branch.
+  // Grace is anchored on the owner's last real heartbeat, not on when the lock
+  // was taken -- anchoring on lock time gave zero effective grace to any lock
+  // held longer than the grace window, the common case.
+  // Liveness is scoped by project_key alone; group_id stays out by design.
+  // Uses SQL's NULL-safe `IS`, not `=`, so a NULL project_key only matches
+  // other NULL project_keys rather than comparing as NULL/false against
+  // everything.
   release(
     `lock_parked_at IS NULL
      AND NOT EXISTS (
@@ -1395,12 +1207,9 @@ function releaseStaleLocks(): void {
      )`,
     [`-${LOCK_GRACE_SEC} seconds`]
   );
-  // Card aaf4537d, clause 3 (team-lead correction, 2026-08-12): the park
-  // itself expires -- a card parked more than LOCK_PARK_TTL_SEC ago is swept
-  // like any other stale lock, even if its `updated_at` was refreshed by a
-  // permitted ordinary edit in the meantime and its owner peer is still
-  // alive (neither clause 1 nor clause 2 above would ever catch that row on
-  // their own; this is the exact hole the arbitration exists to close).
+  // The park itself expires: a card parked past the park TTL is swept even if
+  // its updated_at was refreshed by a permitted edit meanwhile and its owner is
+  // still alive -- the other two clauses never catch that case on their own.
   release(`lock_parked_at IS NOT NULL AND datetime(lock_parked_at) < datetime('now', ?)`, [
     `-${LOCK_PARK_TTL_SEC} seconds`,
   ]);
@@ -1428,12 +1237,11 @@ const updateLastActivity = db.prepare(
   `UPDATE peers SET last_activity_at = ? WHERE instance_token = ?`
 );
 
-// Card a2f61172 (operator-arbitrated design reversal): `role` IS in this SET
-// list, deliberately -- role is a property of the LAUNCH, not persisted
-// state. The transport (CLAUDE_PEERS_ROLE, process env set by the Deck at
-// spawn, unreachable by any MCP tool or route) wins on every /register,
-// dormant resume included. An empty/absent transport is a declaration of
-// "no role" and overwrites a previously-stored one, not a no-op.
+// role is included in this SET list deliberately: it is a property of the
+// launch, not persisted state, so the transport value overwrites on every
+// register.
+// An empty or absent transport value is a declaratively empty role and clears
+// whatever role is stored, rather than leaving it untouched.
 const updateActiveOnRegister = db.prepare(`
   UPDATE peers
   SET status = 'active',
@@ -1457,45 +1265,19 @@ const insertMessage = db.prepare(`
   VALUES (?, ?, ?, ?, ?, 0)
 `);
 
-// Ordered by id, not sent_at: same latent bug class as ackPriorMessagesForSender
-// below (sent_at is millisecond-resolution and two sends on a fast local
-// broker regularly tie within the same millisecond). ORDER BY sent_at, id
-// (not id alone): sent_at stays the PRIMARY key so the intended chronological
-// order is preserved -- id only breaks a genuine sent_at TIE. In real traffic
-// the two are always monotonically correlated (recordMessageTx assigns both
-// in the same transaction), so this composite key changes nothing there; it
-// matters for tests that seed historical sent_at values directly (e.g.
-// tests/broker-flush-cap.test.ts's insertMessageAt helper inserts rows with
-// sent_at older than their id to simulate a time window), where a plain
-// ORDER BY id would silently invert the intended recency order. Kleos:
-// koryphaios card 82e3d293, follow-up to cf4af14d/commit 53526ca.
+// Ordered by sent_at then id, not id alone: sent_at stays the primary sort key
+// so intended chronological order is preserved, while id only breaks a genuine
+// sent_at tie -- two sends can land in the same millisecond.
 const selectUndelivered = db.prepare(
   `SELECT * FROM messages WHERE to_token = ? AND delivered = 0 ORDER BY sent_at ASC, id ASC`
 );
 
-// Capped variant used only by flushPendingForToken to avoid replaying the entire
-// backlog at every WS reconnect. /poll-messages and /peek-messages keep using the
-// uncapped selectUndelivered so an explicit check_messages still returns everything.
-// The sent_at > datetime('now', ?) filter is a coarse time WINDOW (like the TTL
-// purge below), not a same-millisecond comparison, so it stays on sent_at --
-// only the ORDER BY clauses gain the id tiebreaker, same reasoning as above.
-//
-// Card 1d9f25e5: takes group_id, unlike selectUndelivered above. Both queries
-// answer the same "pending messages for a to_token" question handleOperatorInbox
-// answers too, and that handler filters `m.group_id = ?` -- this one did not,
-// which is the defect this card fixes. Today the gap is inert (to_token
-// references peers.instance_token, which IS the PRIMARY KEY there, and
-// ordinary tokens are randomUUID(), so no ordinary token is ever shared
-// across two groups; the only shared to_token values are
-// the sentinel constants, and card 78bf378d already refuses a sentinel-shaped
-// token at the ws-auth handshake before flushPendingForToken ever runs) -- but
-// that is a precondition of DB state and WS-auth code elsewhere, not a rule
-// this query itself enforces, so it stays a defense-in-depth fix rather than a
-// "leave it, it's unreachable" no-op. selectUndelivered above is NOT given the
-// same treatment: its two callers (handlePollMessages, handlePeekMessages)
-// already refuse a sentinel-shaped instance_token by shape (card 37a2b8c7)
-// before the query runs, which closes the same gap the same way, so adding an
-// unused parameter there would be scope creep with nothing left to guard.
+// Capped variant used only to avoid replaying the whole backlog on every
+// reconnect; the uncapped query stays in use elsewhere so an explicit full
+// check still returns everything.
+// Unlike the uncapped query, this one filters group_id -- the uncapped query's
+// own callers already refuse a sentinel-shaped token by shape before it runs,
+// so it doesn't need the same filter.
 const selectUndeliveredCapped = db.prepare(
   `SELECT * FROM (
      SELECT * FROM messages
@@ -1584,29 +1366,15 @@ const purgeOperatorInboxByIds = (ids: number[]) =>
     `DELETE FROM messages WHERE to_token = ? AND group_id = ? AND id IN (${ids.map(() => "?").join(",")})`
   );
 
-// Heuristic ack: when a peer sends a message in a group, it has necessarily
-// processed the messages addressed to it in that same group before sent_at.
-// Promoting those to delivered=1 prevents the flushPendingForToken avalanche
-// at the next WS reconnect for bidirectional conversations.
-// Ordered by the AUTOINCREMENT row id, not sent_at: sent_at is a millisecond-
-// resolution ISO string, and two sends on a fast local broker can complete
-// within the same millisecond, tying (or even inverting) their sent_at
-// values -- a strict 'sent_at < ?' then misses a message that was in fact
-// inserted earlier. The row id is assigned strictly in insertion order
-// within the same db.transaction, so it stays a correct ordering key
-// regardless of clock resolution.
-// id ALONE here, not the "sent_at, id" composite used by selectUndelivered /
-// selectUndeliveredCapped above: this is a deliberate asymmetry, not a missed
-// harmonization -- do not "fix" it to match. The two queries answer different
-// questions. This one is a CUTOFF on a happens-before/insertion relation
-// ("what was inserted before this message"), which needs a total, tie-free
-// order -- id is exactly that; adding sent_at here would reintroduce this
-// same flaky-ack bug. selectUndelivered is an ORDER BY / recency WINDOW on
-// content time ("present in what order, and which N are most recent"), where
-// sent_at is the business-meaningful key and id only breaks a genuine tie;
-// using plain id there breaks tests/broker-flush-cap.test.ts's recency-cap
-// semantics (its fixture seeds sent_at out of step with id). Kleos: koryphaios
-// card 82e3d293, commit 31fe49b.
+// Heuristic ack: a peer sending a message in a group has necessarily processed
+// everything addressed to it in that group before sent_at, so those get
+// promoted to delivered=1, avoiding a flush avalanche on the next reconnect.
+// Ordered by row id, not sent_at -- sent_at is millisecond-resolution and two
+// sends can tie or invert, so a strict sent_at cutoff can miss a message
+// actually inserted earlier.
+// This is a deliberate asymmetry from the recency queries' sent_at-first order,
+// not an inconsistency: this needs a tie-free cutoff, those need a
+// business-meaningful recency window.
 const ackPriorMessagesForSender = db.prepare(
   `UPDATE messages
      SET delivered = 1
@@ -1698,26 +1466,12 @@ function normalizeRole(raw: unknown): string | null {
   return trimmed;
 }
 
-// Card c92614ed lot L0: single normalization point for project_key at
-// register, same shape as normalizeRole above -- register must never fail
-// because of a malformed project_key (a session still needs to come up), so
-// an invalid value collapses to null (not stored) with a warn trace, exactly
-// like a malformed role collapses to null instead of erroring. Presence is
-// checked here (not just in validateProjectKey, whose contract requires an
-// already-non-null string): a legacy/no-remote peer with no project_key at
-// all is a valid state and must pass through as null untouched.
-//
-// The counterpart this collapse carries (MAJOR 1, team-lead review): a peer
-// stored with project_key=NULL is a live owner of ZERO roadmap cards as far
-// as releaseStaleLocks is concerned (roadmap_items.project_key is NOT NULL,
-// compared via `IS`, so NULL never matches any row) -- its locks WILL be
-// swept as owner-gone on the next sweep, even while the peer keeps
-// heartbeating. This collapse trades "the session can still start" for "it
-// starts with no lock ownership", never the reverse; shared/project-key.ts's
-// resolveProjectKey guards the one LEGITIMATE trigger (an over-length remote
-// key) by falling back to a valid local:<hash> before this function ever
-// sees it, so what reaches here as genuinely invalid is a hostile/malformed
-// client, for whom losing lock ownership is the correct outcome.
+// register must never fail on a malformed project_key -- a session still needs
+// to come up -- so an invalid value collapses to null (not stored) with a warn
+// trace, like a malformed role does.
+// Trade-off: a peer stored with project_key=null owns zero roadmap locks
+// (compared via IS, NULL matches nothing), so its locks get swept as owner-gone
+// even while it keeps heartbeating.
 function normalizeIncomingProjectKey(
   raw: unknown,
   context: { host: string; client_pid: number }
@@ -1778,21 +1532,13 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
   ).get(sk) as { instance_token: string } | null;
 
   if (!session && ccSessionId) {
-    // SECONDARY lookup, only on a key MISS: the Restore gesture mints a NEW
-    // tile id while preserving the CC session (fromWorkspaceSessions), so the
-    // widened key legitimately misses on a session that IS continuing. The CC
-    // session id is deliberately not part of the key -- it rotates on /clear,
-    // which would move the key under a living tile's feet -- it only decides
-    // whether an existing row may be reclaimed.
-    //
-    // Two guards, both load-bearing. The empty check above is not cosmetic:
-    // cc_session_id defaults to the empty string, so an unguarded equality
-    // would match EVERY legacy row and hand out someone else's line, which is
-    // the exact defect this lot closes. And the lookup is scoped to
-    // (group_id, host, cwd) rather than trusting the CC id alone, then FAILS
-    // CLOSED when two rows carry it (two tiles restored from one CC session):
-    // picking one silently is how a token, and its mail, ends up on the wrong
-    // tile. LIMIT 2 is enough to detect "more than one" without scanning.
+    // Secondary lookup only on a key miss, for the Restore gesture (a new tile
+    // id, same CC session); the CC session id stays out of the primary key
+    // since it rotates on /clear.
+    // The empty-string check matters: cc_session_id defaults to '', so an
+    // unguarded match would hand out any legacy row's token.
+    // Scoped to (group_id, host, cwd) and fails closed when two rows match,
+    // rather than picking one and misrouting a token.
     const candidates = db.query(
       `SELECT instance_token FROM peer_sessions
         WHERE group_id = ? AND host = ? AND cwd = ? AND cc_session_id = ?
@@ -1814,12 +1560,11 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
       | { instance_token: string; peer_id: string; status: "active" | "dormant"; pid: number; host: string; role: string | null }
       | null;
 
-    // If marked active but the bun server.ts pid is dead, treat as dormant.
-    // This shrinks the post-crash window where the user would otherwise
-    // receive a fresh peer_id while waiting for cleanStalePeers (30s tick).
-    // Only valid for same-host peers: a Linux broker cannot probe a Windows
-    // PID, the kill throws unconditionally, and the resurrect path would
-    // silently steal the active peer's identity (see Bug D, 2026-05-15).
+    // If marked active but the local pid is dead, treat as dormant to shrink
+    // the post-crash window before the next cleanup tick.
+    // Only valid for same-host peers -- probing a different host's pid always
+    // throws, and treating that as dead would let the resurrect path silently
+    // steal the active peer's identity.
     if (existingPeer && existingPeer.status === "active" && existingPeer.host === BROKER_HOST) {
       try {
         process.kill(existingPeer.pid, 0);
@@ -2395,24 +2140,12 @@ function handlePeekMessages(body: PollMessagesRequest): PollMessagesResponse {
   return { messages: rows.map(toDeliveredMessage) };
 }
 
-// --- Roadmap handlers (v0.4, PLAN C3) ---
-
 const ROADMAP_KINDS: readonly RoadmapKind[] = ["feature", "bug", "debt", "idea", "chore", "directive"];
 const DIRECTIVE_COMMANDS: readonly RoadmapDirective[] = ["clear", "compact", "magic_compact"];
 const MAX_DIRECTIVE_TARGETS = 16;
-// Round-3 mutation review (card aaf4537d): lock-park/lock-release must not
-// share MAX_DIRECTIVE_TARGETS -- their batch is Hard Stop's "every live tile
-// in this Deck", a materially different population from a directive card's
-// hand-picked target list, and cleanPeerIds's own truncation silently
-// dropped the tail with no signal (measured: 20 peer_ids in, 16 parked, 0
-// failed, the remaining 4 read by the caller as "nothing to do"). Sized
-// against a MEASURED real fleet, not guessed: this exact broker, right now,
-// carries 12 concurrently-registered peers in the koryphaios group alone
-// (`bun cli.ts peers`, one operator's own heavy multi-session dev workflow)
-// and 24 total across every group it serves -- a single Deck's tile count is
-// bounded further still by one PTY + one webContents per tile, so 64 stays
-// generous above any observed real batch while remaining a real, enforced
-// ceiling rather than no bound at all.
+// card aaf4537d: this batch cap is deliberately separate from the
+// directive-target cap -- lock-park/lock-release batch over every live tile in
+// a Deck, a different population from a directive's hand-picked target list.
 const LOCK_BATCH_MAX_TARGETS = 64;
 const ROADMAP_PRIORITIES: readonly RoadmapPriority[] = ["must", "should", "could", "wont"];
 const ROADMAP_LEVELS: readonly RoadmapLevel[] = ["low", "medium", "high"];
@@ -2439,21 +2172,10 @@ type RoadmapRow = Omit<
 };
 
 /**
- * Card e344fa79: an explicit pick-list, not a `...row` rest-spread -- the
- * canonical fail-open shape CLAUDE.md names (`toPublicPeer`'s old rest-
- * spread let a 17th `Peer` field ship publicly with nothing failing). A row
- * from `roadmap_items` reaches every group that lists the roadmap; a field
- * added to the table (as `locked_group` itself just was) used to reach every
- * one of them automatically, whether or not that was ever decided. Naming
- * every field here means a FUTURE column is invisible to callers until a
- * line is added for it (fails CLOSED: a legitimate new field is silently
- * absent from the response, loud the moment anyone checks for it) instead of
- * public the moment the migration runs (failed OPEN: silent, and the only
- * way to notice is to already suspect it). `tests/broker-roadmap-lock.test.ts`
- * pins this list against `PRAGMA table_info(roadmap_items)` in both
- * directions (same pattern as `ROADMAP_IMPORT_COLUMNS`'s own coverage test),
- * so a column added to the schema and forgotten here fails a test, not a
- * silent audit.
+ * Explicit pick-list, not a rest-spread: a table column added later stays
+ * invisible here until a line is added for it (fails closed -- silent until
+ * noticed) rather than becoming public to every group the moment the migration
+ * runs (fails open).
  */
 function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
   const parseList = (s: string): string[] => {
@@ -2507,18 +2229,10 @@ function cleanList(v: unknown): string[] | null {
 }
 
 /**
- * Sanitize a directive card's target_peer_ids (CT1): keep only well-formed,
- * non-reserved peer_ids (same charset as set_id), deduped and capped. A field
- * crossing the broker HTTP boundary is never trusted verbatim -- the Deck
- * re-validates it again before it ever reaches a PTY (three-hostile-inputs #2).
- */
-/**
- * Card 8c1effca: resolve ONE text column of an imported item.
- *
- * `undefined` means the file never mentioned the column, so the existing row
- * wins (or "" for a brand-new card). Anything else means the file DID mention
- * it: a string is taken as-is, and an explicit null (or any non-string) clears
- * the column, because a self-export must still be able to blank a field.
+ * undefined means the file never mentioned the column, so the existing row's
+ * value wins (or '' for a new card); anything else means the file did mention
+ * it -- a string is taken as-is, and an explicit null (or any non-string)
+ * clears the column, since a self-export must be able to blank a field.
  */
 function importedText(value: unknown, existing: string | undefined): string {
   if (value === undefined) return existing ?? "";
@@ -2554,26 +2268,11 @@ function getRoadmapItem(id: string): RoadmapItem | null {
 }
 
 /**
- * Roadmap card 39c40571, layer 1: resolve WHO is writing, instead of believing
- * the `by` string the body happens to carry.
- *
- * Before this, `by` was free text recouped against nothing, while every agent
- * holds the shared broker token -- so any of them could write under another
- * peer's identity, or claim the operator's 'deck' author to walk through the
- * work-lock guard.
- *
- * The rule resolves the OBJECT (the claimed author) before asking whether the
- * caller may act as it:
- *  - a presented instance_token WINS over `by`, so the recorded author is the
- *    peer the token actually belongs to;
- *  - a SENTINEL token is refused: those values are public constants, so
- *    presenting one is an escalation attempt, not a credential;
- *  - with no token, the write may only claim a name that belongs to NO real
- *    peer -- cli.ts, test fixtures, and 'deck' (whose row carries a sentinel
- *    token, hence is not a real peer). Closing that last case means making the
- *    Deck sign with the operator credential, which is layer 2.
- *
- * `proven` is what a caller-sensitive rule keys on (currently `force`).
+ * Resolves WHO is writing before deciding whether the caller may act as it: a
+ * presented instance_token wins over `by`, a sentinel token is refused
+ * outright, and with no token the write may only claim a name belonging to no
+ * real peer.
+ * `proven` is what a caller-sensitive rule (currently `force`) keys on.
  */
 interface RoadmapAuthor {
   by: string;
@@ -2614,35 +2313,15 @@ interface RoadmapAuthor {
 }
 
 /**
- * Card ad6aa6ed: shared lowercase+charset normalization for any author-
- * identity FIELD, not just the `by` claim resolveRoadmapAuthor validates
- * below -- also used for `locked_by` on /roadmap/import
- * (handleRoadmapImport), the one other place a caller-supplied string
- * becomes an author-identity column without passing through
- * resolveRoadmapAuthor itself. Extracted so the two call sites cannot drift:
- * the [a-z0-9:_-] charset the long comment below justifies (case/homoglyph/
- * invisible-character/header-forgery closure, measured against live data)
- * applies here without restating the justification a second time and
- * risking the two going out of sync.
- *
- * Returns the offending CHARACTER on failure, never the value: the caller
- * already knows what it sent, and the error text a caller receives (via
- * resolveRoadmapAuthor, and via handleRoadmapImport's per-item validation)
- * can end up in an LLM-facing tool-error context through roadmapToolError,
- * where replaying a hostile string back gains nothing (reviewer NIT, card
- * ad6aa6ed). Server-side logging at each call site keeps the full raw value
- * for operator audit -- that sink is not LLM-facing.
- *
- * REFUSES THE EMPTY STRING (review delta, card ad6aa6ed): the old inline
- * regex this replaced was `/^[a-z0-9:_-]+$/`, whose `+` already rejected "".
- * A version that only searches for a DISALLOWED character has none to find
- * in an empty string and would silently return ok:true, value:"" --
- * unreachable on the `by` path (empty already refused earlier in
- * resolveRoadmapAuthor) but real on the `locked_by` import path, where an
- * empty lock owner would land and then never equal any real `by`, defeating
- * the `by !== existing.locked_by` lock-owner comparison for that row
- * permanently. Written here explicitly so a THIRD future call site does not
- * have to rediscover this the same way.
+ * Shared normalization for any author-identity field, also used for locked_by
+ * on import -- the one other caller-supplied string that becomes an author
+ * column outside this resolver.
+ * Returns the offending character on failure, never the value: the error can
+ * reach an LLM-facing tool-error context, where echoing a hostile string back
+ * gains nothing.
+ * Refuses the empty string explicitly: the regex this replaced already did via
+ * `+`, but a plain disallowed-character search over '' would silently return
+ * ok:true.
  */
 function normalizeAuthorIdentity(
   raw: string
@@ -2661,73 +2340,13 @@ function resolveRoadmapAuthor(
   const rawBy = typeof body.by === "string" ? body.by.trim() : "";
   if (!rawBy) return { error: "by (author peer_id) is required", status: 400 };
 
-  // Card ad6aa6ed: normalize BEFORE any comparison, not just at the reserved-
-  // name check. `by` is free text by design (any agent may claim any
-  // peer_id, proven or not) so it never traversed PEER_ID_REGEX/sanitize()
-  // the way a real peer_id does -- measured to be the ONLY one of
-  // RESERVED_PEER_IDS' five runtime consumers without that shared format
-  // gate (deriveDefaultId, handleSetId, cleanPeerIds and the resolved-
-  // instance_token branch below all inherit lowercase-only as a SIDE EFFECT
-  // of it; this claimed-name branch inherited nothing). A by:'Deck' therefore
-  // fell through the reserved check below as an ordinary unproven author.
-  //
-  // A bare .toLowerCase() would close that CASE bypass and stop there, which
-  // is not enough: measured that sanitize() does far more than fold case
-  // (collapses every char outside [a-z0-9-] to a hyphen), and a fix that
-  // only touched case would still let a homoglyph ('dеck', Cyrillic е) or an
-  // invisible character ('deck​') through, DISPLAYED as 'deck' to the
-  // operator -- the exact attribution-forgery this exists to close. So this
-  // rejects on SHAPE, not just case: lowercase, then anything outside
-  // [a-z0-9:_-] is refused closed (400), never silently stripped.
-  //
-  // Applied to what gets STORED, not only what gets compared here: closes
-  // the unproven-claim registered-peer lookup a few lines below in this same
-  // function (was case-sensitive against the same raw value). The sibling
-  // `by !== existing.locked_by` lock-owner comparison in handleRoadmapUpsert
-  // is closed too, but NOT by this function alone: `locked_by` also reaches
-  // storage through handleRoadmapImport, which normalizes it separately with
-  // the SAME normalizeAuthorIdentity() helper this function calls (review
-  // finding, card ad6aa6ed: `created_by`/`updated_by` went through this
-  // resolver on that route, `locked_by` did not, and it is a field the
-  // rendered `locked: by X since ...` line in roadmap_get DISPLAYS verbatim
-  // -- same forgery class as the header attack below, on a different field).
-  //
-  // Guarantee overall is scoped to authors CLAIMED BY A CALLER, normalized
-  // through normalizeAuthorIdentity() at one of ITS call sites -- 'lock-sweep'
-  // (broker.ts, the lock-expiry sweep) writes `updated_by` directly in SQL, a
-  // hardcoded constant that never reaches either call site; harmless (never
-  // externally influenced) but outside what this validation can promise.
-  // handleGraphDraftAdd's from_peer (broker.ts, a different table) used to be
-  // this same class of unvalidated author identity (a caller-claimed
-  // `body.by`, out of this function's coverage). Card 3781b033 closed it, but
-  // NOT by routing that handler through this function: resolveProvenGraphDraftPeer
-  // (shared/graph-draft-scope.ts) derives from_peer straight from the matched
-  // `peers` row instead, which sidesteps this normalizer entirely rather than
-  // extending its coverage -- see that module's doc comment for why.
-  //
-  // Charset picked from live data, not invented: `bun cli.ts roadmap-export`
-  // on this project's roadmap (107 items, 15 distinct created_by/updated_by/
-  // locked_by values -- 'deck', bare peer_ids, and three 'cli:<peer_id>'
-  // forms) shows zero values outside [a-z0-9:_-] today, so nothing legitimate
-  // in THIS project's corpus is rejected. Scoped measurement, not a global
-  // one: a legitimate author on a DIFFERENT project_key carrying a character
-  // outside this set would now be refused -- fails closed, visible the same
-  // day, remedy is widening the allowlist, but the next reader should not
-  // read "zero legitimate author falls" as verified beyond this one project.
-  //
-  // Also forecloses, by construction, a forgery class for card 562fd9b5
-  // (append-mode context blocks, route not yet written): an append header
-  // built from this same `by` could otherwise embed
-  // "x >>>\n\ntext\n\n<<< append 2020-01-01T00:00:00Z by deck" and fabricate a
-  // complete fake block inside a real one, attributed to the operator, which
-  // a future parser would render as a legitimate entry. Space, '>' and
-  // newline are all outside the allowlist, so that payload is refused before
-  // the append route exists to build it -- and because the check lives
-  // INSIDE this resolver rather than at each call site, that future handler
-  // cannot construct an unvalidated header without explicitly bypassing this
-  // function (CLAUDE.md: a new validator needs every call path enumerated --
-  // the path that does not exist yet is the one a call-site check would have
-  // missed).
+  // Normalized before any comparison, not just at the reserved-name check --
+  // `by` is free text, so it never passes through the same format gate a real
+  // peer_id does.
+  // Rejects on shape (lowercase, then anything outside the allowed charset)
+  // rather than only folding case: a homoglyph or invisible character could
+  // still display as a reserved name to the operator while bypassing a
+  // case-only check.
   const normalizedBy = normalizeAuthorIdentity(rawBy);
   if (!normalizedBy.ok) {
     log.warn(`${route}: refused an author claim with a character outside [a-z0-9:_-]`, {
@@ -2748,37 +2367,14 @@ function resolveRoadmapAuthor(
   }
   const by = normalizedBy.value;
 
-  // Card 39c40571 LAYER 2: the one author layer 1 still took on faith.
-  //
-  // 'deck' names the OPERATOR, and `proven` is what walks the work-lock guard,
-  // so an unproven claim to it edits the backlog as the human and takes locks
-  // held by agents. The Deck now SIGNS with the operator credential (Ed25519,
-  // operator_id = digest of the public key, so it is self-certifying).
-  //
-  // FIRST, and that ORDER is the guard, not a style choice. Shipped once with
-  // this block placed after the instance_token branch below, and it was
-  // bypassable in three requests with no signature at all: /register with
-  // host:'deck' mints a peer literally named 'deck' holding a REAL token, the
-  // token branch resolves it to {by:'deck', proven:true} and returns before
-  // this block is ever consulted. The name decides which rule applies, so the
-  // name must be tested before any credential is honoured. The Deck itself is
-  // unaffected: it sends a signature and no token at all (no instance_token
-  // anywhere in desktop/src/main/roadmap-service.ts).
-  //
-  // Routed through resolveApprovalAuth rather than verified here, so this path
-  // inherits the signature check, the nonce REPLAY guard and the operation
-  // table in one move. 'roadmap-write' is deliberately absent from
-  // SESSION_ALLOWED: a sandboxed agent holding a session token gets 403 from
-  // that table, not from a rule re-typed here.
-  // Review follow-up: the branch is keyed on the reserved SET, not on the one
-  // literal that happened to be exploitable. Measured before widening:
-  // `by:'operator'` and `by:'system'` were accepted unsigned, 200, and the card
-  // then displayed `created_by: "operator"`. No privilege rode on them today
-  // (the lock exemption tests `by !== "deck"` and `proven` stayed false), so the
-  // cost was attribution theft rather than escalation -- but all three names
-  // designate the human, so all three now demand the operator signature. Keying
-  // on the set also means a fourth reserved name inherits this without anyone
-  // remembering to come back here.
+  // 'deck' names the operator, and `proven` is what walks the work-lock guard,
+  // so this reserved-name check must run BEFORE the instance_token branch below
+  // -- reversed, a peer registered with a reserved hostname could resolve to a
+  // proven claim via its own real token and skip the signature entirely.
+  // Routed through the approval-auth layer so it inherits the signature check,
+  // nonce replay guard, and operation table in one move.
+  // Keyed on the whole reserved set, not one literal, so a future reserved name
+  // inherits the protection automatically.
   if (RESERVED_PEER_IDS.includes(by)) {
     // Card 1def56da: identity, not scope. This is a ROADMAP write; it does not
     // touch `pending_approvals` at all, and it needs only the signature check,
@@ -2825,12 +2421,10 @@ function resolveRoadmapAuthor(
       log.warn(`${route}: refused an unknown instance_token`, { claimed_by: by });
       return { error: "unknown instance_token", status: 401 };
     }
-    // The RESOLVED name is checked too, not just the claimed one. A row named
-    // after a reserved identity can no longer be minted (deriveDefaultId now
-    // consults RESERVED_PEER_IDS), but rows created BEFORE that fix still exist
-    // in live databases, and this branch would hand one of them a proven
-    // 'deck' authorship on the strength of its own token. Migration case: the
-    // mint-time refusal cannot reach backwards, this can.
+    // The resolved peer_id is checked too, not just the claimed one: a row
+    // named after a reserved identity minted before that was blocked can still
+    // exist in live databases, and this branch would otherwise hand it proven
+    // authorship on the strength of its own token.
     if (RESERVED_PEER_IDS.includes(owner.peer_id)) {
       log.warn(`${route}: refused a token whose peer_id is a reserved identity`, {
         peer_id: owner.peer_id,
@@ -2927,17 +2521,10 @@ function buildFtsMatchExpr(q: string, deep: boolean): string | null {
 }
 
 /**
- * Dynamic values (unlike the fixed kind/status/priority/effort/value enums):
- * the tags that actually occur ANYWHERE in this project, archived cards
- * included -- unconditionally, no `includeArchived` parameter, on purpose
- * (review round 2, point 3). This backs ONLY the "unknown tag" 400 error's
- * actionable listing (the tags facet's own counts are computed separately in
- * computeRoadmapFacets, which does respect `include_archived` since a facet
- * count is meant to describe the current view). Validation must not: a tag
- * that survives only on cards archived in a later pass would otherwise 400
- * for a caller whose `include_archived` happens to be false that request --
- * a routine occurrence, not a rare edge case, the moment `done` cards get
- * archived en masse and take their only tags with them.
+ * Unconditionally includes archived cards' tags, unlike the facet counts
+ * elsewhere which respect the caller's include_archived -- this list only backs
+ * the 'unknown tag' error, and a tag surviving only on archived cards must not
+ * read as unknown just because a request happened to exclude them.
  */
 function projectExistingTags(projectKey: string): string[] {
   const rows = db
@@ -3031,22 +2618,12 @@ function handleRoadmapList(
 
   const includeArchived = !!body.include_archived;
 
-  // Unknown filter value = error, never zero results (decision 6): a typo in
-  // a free-form tag must not read back as "no such card", a silent false
-  // negative. Enums are validated above against a fixed list; tags are
-  // dynamic, so the actionable list in the error is computed here.
-  //
-  // Review round 2 (2026-08-10), MAJOR (point 3): the reference set here is
-  // ALWAYS the full project, archived included, independent of this
-  // request's own `include_archived` -- validating against the (possibly
-  // narrower) filtered reference set turned a tag that only survives on
-  // archived cards into a false-positive 400 the moment `include_archived`
-  // was false, and this goes from a rare edge case to routine the moment a
-  // pass of `done` cards gets archived and takes their only tags with them.
-  // Team-lead's explicit call: legacy singular `tag` gets the same 400 as
-  // plural `tags` (one engine, one semantics, no external users pre-1.0) --
-  // this fix is about WHICH reference set validates both, not about
-  // softening either.
+  // Unknown tag value is a 400, not a silent empty result -- a typo must not
+  // read back as 'no such card'.
+  // The reference set validated against is always the full project, archived
+  // cards included, independent of this request's own include_archived.
+  // Legacy singular `tag` gets the same 400 as plural `tags`: one engine, one
+  // semantics.
   if (tagsEff.length > 0) {
     const existing = projectExistingTags(body.project_key);
     const unknown = tagsEff.filter((t) => !existing.includes(t));
@@ -3061,27 +2638,18 @@ function handleRoadmapList(
 
   const matchExpr = body.q ? buildFtsMatchExpr(body.q, !!body.q_deep) : null;
 
-  // Review round 2 (2026-08-10), MAJOR (point A1): the card's short id (shown
-  // on every board tile, RoadmapItemId) is in NO FTS column -- title,
-  // description, tags, rationale, context. Typing it into the search box
-  // (the operator's obvious move, since that id is what the screen shows)
-  // measured a false positive: the query rewards a card that merely MENTIONS
-  // the id in its text over the card whose id it actually IS, because only
-  // the mention lives in an indexed column. Do NOT index `id` into
-  // roadmap_fts either -- FTS5's tokenizer would split a hex/uuid string into
-  // fragments and return unrelated partial matches, an even worse failure
-  // mode. Instead: an exact, bounded `id LIKE '<prefix>%'` predicate, ORed
-  // with the FTS branch so neither can mask the other's hit. Threshold >= 4
-  // hex characters (team-lead's call) -- short enough to catch the 8-char
-  // short id, long enough that an ordinary word rarely qualifies by accident,
-  // and a false-positive OR only ever ADDS a row, never hides one.
+  // A card's short id lives in no FTS column, so a plain search for it only
+  // matches cards that happen to mention it in text, not the card it actually
+  // is.
+  // An `id LIKE 'prefix%'` predicate is ORed alongside the FTS branch instead,
+  // at a threshold of 4+ hex characters -- short enough to catch the short id,
+  // long enough that an ordinary word rarely qualifies by accident.
   const qTrimmed = body.q?.trim();
   const idPrefix = qTrimmed && /^[0-9a-f]{4,}$/i.test(qTrimmed) ? qTrimmed : null;
 
-  // Guard #3b: every FTS-joined query re-asserts project_key itself -- the
-  // roadmap_fts table has no project scoping of its own (one row per card
-  // across ALL projects), so a MATCH without this join+filter leaks cards
-  // from other projects (measured, see tests/broker-roadmap-search.test.ts).
+  // The FTS table holds one row per card across all projects with no project
+  // scoping of its own, so every FTS-joined query must re-assert project_key
+  // itself or it leaks cards from other projects.
   let sql: string;
   const params: (string | number)[] = [];
   if (matchExpr && idPrefix) {
@@ -3153,26 +2721,11 @@ function handleRoadmapList(
 }
 
 /**
- * Card c33a5968 gap closed 2026-08-27: `refusesInactiveClaim` only ever
- * checked `status`/`locked` -- a write that ONLY sets `queue` (dispatch
- * queue position) on an inactive card sailed through untouched, and a
- * queued item is dispatchable regardless of `inactive`
- * (`desktop/src/shared/workflow.ts`'s `queuedItems`/`wavesOf` do not filter
- * it, confirmed by measurement, and no file under `desktop/src/main/*.ts`
- * other than `roadmap-service.ts` references `inactive` either). An agent
- * enqueuing its own inactive card is the exact self-unblock c33a5968
- * forbids ("must not be able to lift its own block"), just via a write path
- * that did not exist when that card's guards were written.
- *
- * DELTA form, same reasoning as `refusesInactiveClaim`'s own doc comment:
- * only a write that actually MOVES `queue` to a new value may be refused.
- * An absolute check (`storedInactive && nextQueue != null`) would refuse a
- * client that round-trips its already-queued position on every save (the
- * exact "punishes a write that claims NOTHING" bug `refusesInactiveClaim`'s
- * delta form was built to avoid) -- once an inactive card is queued, every
- * later edit of an unrelated field would 403 forever if the client happens
- * to echo the unchanged `queue` value back. Un-queuing (`nextQueue ===
- * null`) is never refused: it is the SAFE direction, same as clearing a
+ * Only a write that actually moves `queue` to a new value is refused, never a
+ * client round-tripping its already-queued position on every save -- an
+ * absolute check would 403 every later edit of an unrelated field once an
+ * inactive card is queued.
+ * Un-queuing is never refused: it is the safe direction, same as clearing a
  * lock is not a claim.
  */
 function refusesInactiveQueue(
@@ -3258,16 +2811,10 @@ function handleRoadmapUpsert(
     // clears `inactive` and claims the card in the same call must still be
     // refused (see refusesInactiveClaim's doc comment, delta form).
     const nextInactive = body.inactive !== undefined ? body.inactive : existing.inactive;
-    // `author.operator_id !== undefined` (mirrored at the create/import call
-    // sites below) is deliberately NOT `by === "deck"`: today the two are
-    // equivalent in practice (operator_id is only ever produced by the
-    // reserved-peer-name branch of resolveRoadmapAuthor, and an unsigned
-    // `by: "deck"` is refused 401 upstream, so no test currently
-    // distinguishes them -- confirmed by mutation, 2026-08-12). The
-    // `operator_id` form is the one that stays correct if a future
-    // deck-signed path is ever added that does NOT populate operator_id: the
-    // `by === "deck"` form would silently start accepting an unsigned toggle
-    // that day, with nothing here turning red to say so.
+    // Checked via the resolved operator_id, not a name comparison against
+    // 'deck' -- equivalent today, but operator_id stays correct if a future
+    // signed path is ever added without populating it, where a name-based check
+    // would silently start accepting an unsigned toggle.
     if (refusesInactiveToggle(existing.inactive, nextInactive, author.operator_id !== undefined)) {
       return { error: "toggling inactive requires an operator-signed write", status: 403 };
     }
@@ -3279,12 +2826,9 @@ function handleRoadmapUpsert(
         status: 403,
       };
     }
-    // Card c33a5968 gap closed 2026-08-27: queuing (not just claiming) an
-    // inactive item is refused the same way -- see refusesInactiveQueue's
-    // doc comment. Uses `existing.queue` (the STORED, pre-write value), same
-    // discipline as the claim guard above, so a single request that both
-    // clears `inactive` AND sets `queue` still reads the stored inactive=true
-    // and is still refused.
+    // Uses the stored pre-write value, not the incoming one -- a single request
+    // that both clears `inactive` and sets `queue` still reads the stored
+    // inactive=true and is refused.
     if (refusesInactiveQueue(existing.inactive, existing.queue, body.queue)) {
       return {
         error: "item is inactive -- clear inactive before queuing it",
@@ -3303,19 +2847,12 @@ function handleRoadmapUpsert(
     // write from a third party would otherwise silently clear the lock.
     if (
       existing.locked &&
-      // Card e7b364dc Part B: this used to be an enumerated OR-list of body
-      // FIELD NAMES (`body.status !== undefined || body.locked !== undefined`)
-      // -- structurally fail-open, since any future RoadmapUpsertRequest field
-      // that also moves the lock would need manual addition here or slip
-      // through unguarded (the exact defect family that produced this card's
-      // original bug: the guard checked `body.locked === true` while the
-      // resolution below honoured `body.locked !== undefined`, two readings of
-      // the same body drifting apart). Replaced by an EFFECT check: does the
-      // already-resolved lock outcome actually differ from `existing`? Plus
-      // `body.status !== undefined` MUST survive on its own -- a same-status
-      // in_progress write from an intruder resolves to zero delta (the lock
-      // was already theirs to keep) yet is still an attempted claim and must
-      // still 409.
+      // Checks whether the resolved lock outcome actually differs from the
+      // existing row, rather than enumerating body field names that might move
+      // the lock -- an enumerated list needs manual upkeep for every new field
+      // and silently misses one.
+      // The status field must survive on its own: a same-status write from an
+      // intruder resolves to zero delta yet is still an attempted claim.
       (body.status !== undefined ||
         resolvedLock.locked !== existing.locked ||
         resolvedLock.lockedBy !== existing.locked_by) &&
@@ -3325,19 +2862,11 @@ function handleRoadmapUpsert(
       // since peer_id is unique only per group. See matchesLockOwner.
       !matchesLockOwner(existing.locked_by, existing.locked_group, by, authorLockedGroup) &&
       by !== "deck" &&
-      // Card 39c40571 layer 1: `force` is a claim of certainty, so it is only
-      // honoured for a caller that PROVED who it is -- an anonymous body could
-      // otherwise steal any locked item by adding one field. This closes the
-      // `force` route; the `by !== "deck"` clause four lines up is closed by a
-      // different mechanism, upstream of this whole guard: resolveRoadmapAuthor's
-      // RESERVED_PEER_IDS branch already requires approvalAuth.authenticateOperator
-      // for any write claiming `by: 'deck'` (or 'operator'/'system'), refusing an
-      // unsigned one with 401 before this lock guard is ever reached -- on
-      // /roadmap/upsert and /roadmap/archive alike (card 1def56da, shipped
-      // 2026-08-05). So an unproven `by: 'deck'` cannot walk this guard: it never
-      // gets this far. See tests/broker-roadmap-author-auth.test.ts, "layer 2: an
-      // UNSIGNED by:'deck' write is refused on every route that resolves an
-      // author", for the mutation-tested coverage.
+      // `force` is a claim of certainty, honoured only for a proven caller --
+      // an anonymous body could otherwise steal any locked item by adding one
+      // field.
+      // The reserved-name clause beside it is closed separately, upstream: an
+      // unproven claim to it is already refused before this guard runs.
       !(body.force === true && author.proven)
     ) {
       return {
@@ -3416,63 +2945,22 @@ function handleRoadmapUpsert(
     };
     if (!next.title) return { error: "title cannot be empty", status: 400 };
 
-    // resolvedLock was already computed above, before the guard -- this write
-    // consumes that SAME object rather than resolving the lock a second time
-    // (the two-readings-of-the-body drift is exactly what produced card
-    // e7b364dc's original bug).
-    //
-    // Card e344fa79, review round 2 (EIGHTH site, corrected twice): the
-    // first fix here used `existing.locked_by === resolvedLock.lockedBy`
-    // (a same-OWNER-NAME check) to decide whether keptLockedAt/
-    // nextLockedGroup preserve the row's existing values or stamp the
-    // CURRENT WRITER's own. That mixes two different identities: the NAME
-    // comes from `resolvedLock` (which only changes on an actual claim --
-    // see below), the GROUP came from `authorLockedGroup` (always the
-    // CURRENT caller's own group, claim or not). On an ORDINARY write from
-    // a third party (no status/locked field, guard correctly lets it
-    // through because nothing lock-relevant moved), `resolvedLock.lockedBy`
-    // reads back UNCHANGED (still the true owner's name, per
-    // resolveRoadmapLock's own no-op branch), so the name-based check read
-    // "same owner" -- and then stamped the ACTUAL WRITER's own group onto
-    // the card regardless, corrupting `locked_group` on a lock nobody
-    // reclaimed. Worst case (measured by review): the Deck's own routine
-    // signed writes (`by:'deck'`, no peer row, `authorLockedGroup` null)
-    // would NULL a locked card's `locked_group` on every ordinary save,
-    // silently reopening the bare-peer_id comparison this whole card exists
-    // to close.
-    //
-    // The real question a caller needs is not "does the name match" but
-    // "did THIS write actually claim the lock" -- resolveRoadmapLock is the
-    // only place that knows, so it now says so directly via `claimed` (see
-    // RoadmapLockResolution.claimed's doc comment in shared/roadmap-lock.ts).
-    // Both helpers below preserve the existing value on any NON-claiming
-    // write (an ordinary edit, a re-sent status from the owner that does not
-    // re-trigger a claim) and stamp fresh only when `claimed` is true --
-    // which is also the one and only place `locked_group` self-heals a
-    // legacy NULL row (see the migration comment above, and
-    // matchesLockOwner's doc comment). Pulled into shared/roadmap-lock.ts,
-    // truth-tabled in tests/roadmap-lock.test.ts, same reason
-    // resolveRoadmapLock itself is a pure function and not inlined here.
+    // Reuses the same lock resolution computed earlier rather than resolving a
+    // second time -- two separate reads of the body drifting apart is what
+    // produced the original bug this closes.
+    // Keys on whether the write actually claimed the lock, not a
+    // same-owner-name comparison: a name match reads true on an ordinary
+    // third-party write too, which stamped that writer's own group onto
+    // locked_group even though nobody reclaimed the lock.
     const keptLockedAt = resolveKeptLockedAt(resolvedLock, existing.locked_at);
     const nextLockedGroup = resolveLockedGroup(resolvedLock, existing.locked_group, authorLockedGroup);
     // Card 4441e883, mecanisme B: same claimed-only discipline, one column
     // over -- see resolveLockedByToken's doc comment in shared/roadmap-lock.ts.
     const nextLockedByToken = resolveLockedByToken(resolvedLock, existing.locked_by_token, author.instance_token);
-    // Card aaf4537d, DELTA (round-3 mutation review): the park is scoped to
-    // the OPERATOR who parked it, never to the peer-lock reclaim question
-    // above (keptLockedAt/nextLockedGroup key on `resolvedLock.claimed`, a
-    // different actor entirely). Conflating the two was the two-upsert
-    // service door: a foreign, non-archiving write (nextStatus !== 'in_progress',
-    // so `resolvedLock.locked` is false) silently nulled the park, and a
-    // SECOND upsert with status='archived' then sailed through refusesParkedArchive
-    // -- that guard only ever sees THIS call's own row state, it has no
-    // memory of a park a prior write already erased. The park now survives
-    // every write except two: the SAME operator who parked it touching the
-    // card again (their own decision to reverse, same as a self-archive), or
-    // a park that has already expired past LOCK_PARK_TTL_SEC (this only has
-    // to agree with isParked's verdict for a row a write happens to touch;
-    // releaseStaleLocks's SQL sweep is what clears an expired park on a row
-    // nothing ever touches again).
+    // The park is scoped to the operator who parked it -- a separate question
+    // from the peer-lock reclaim above.
+    // It survives every write except the same operator reversing their own
+    // park, or the park having already expired.
     const parkOwnerIsAuthor =
       existing.lock_parked_by !== null && author.operator_id === existing.lock_parked_by;
     const parkStillLive = isParked(existing.lock_parked_at, new Date().toISOString(), LOCK_PARK_TTL_SEC);
@@ -3539,10 +3027,8 @@ function handleRoadmapUpsert(
   // Create.
   const rawCreateProjectKey = typeof body.project_key === "string" ? body.project_key : "";
   if (!rawCreateProjectKey) return { error: "project_key is required", status: 400 };
-  // Card c92614ed lot L0: a refusal, not the .trim() this replaces -- silently
-  // trimming surrounding whitespace off a caller-declared value would store a
-  // DIFFERENT key than the one the caller believes it used, the same
-  // scope-splitting risk this lot exists to close.
+  // A refusal, not a silent trim: trimming a caller-declared project_key would
+  // store a different key than the one the caller believes it used.
   const createProjectKeyCheck = validateProjectKey(rawCreateProjectKey);
   if (!createProjectKeyCheck.ok) {
     return { error: `project_key is invalid (${createProjectKeyCheck.reason})`, status: 400 };
@@ -3707,27 +3193,16 @@ function handleRoadmapArchive(
 }
 
 /**
- * Card aaf4537d, lot 1: parks the work-lock(s) currently held by each of
- * `peer_ids` under `project_key` -- the broker-side counterpart of the
- * desktop's Pause stop (`lockPark` in desktop/src/main/roadmap-service.ts,
- * wired ahead of this route landing). Operator-gated UNCONDITIONALLY, not
- * just when `by` happens to be a reserved name: this route acts on OTHER
- * agents' locks by construction (a peer never parks its own lock; the
- * operator does it on their behalf while pausing that agent's tile), so an
- * ordinary unproven agent write must be refused even though most other
- * roadmap routes would accept one. `lock_parked_by` is stamped with the
- * OPERATOR's `operator_id` (never `by`, never the target peer_id) -- see
- * `refusesParkedArchive`'s doc comment in shared/roadmap-lock.ts for why
- * that distinction matters.
- *
- * A peer_id with no currently-locked card under this project is a silent
- * no-op (absent from both `parked` and `failed`) -- team-lead arbitration:
- * `failed` is reserved for a genuine per-row write exception, since most
- * pause targets simply hold no lock and that must not read as an error.
+ * Operator-gated unconditionally, not just when the author is a reserved name
+ * -- this route acts on other agents' locks by construction, since a peer never
+ * parks its own.
+ * lock_parked_by is always the operator's own id, never the claimed author or
+ * the target peer_id.
+ * A peer_id holding no lock is a silent no-op, not a failure -- most pause
+ * targets simply hold none.
+ * No inactive guard (card c33a5968): this handler only ever writes the park
+ * fields, never status or locked, so it cannot claim a card.
  */
-// Card c33a5968: no inactive guard here, deliberately -- this handler only
-// ever writes lock_parked_at/lock_parked_by, never status or locked, so it
-// structurally cannot claim a card toward in_progress/locked.
 function handleRoadmapLockPark(
   body: RoadmapLockParkRequest
 ): RoadmapLockParkResponse | { error: string; status: number } {
@@ -3738,10 +3213,8 @@ function handleRoadmapLockPark(
   }
   const rawLockParkProjectKey = typeof body.project_key === "string" ? body.project_key : "";
   if (!rawLockParkProjectKey) return { error: "project_key is required", status: 400 };
-  // Card c92614ed lot L0 (MAJOR 3, team-lead review): this handler scopes an
-  // UPDATE, not a read filter -- a silent .trim() here would let the same
-  // caller-declared string be accepted here and refused at /roadmap/upsert,
-  // exactly the discipline gap this lot exists to close.
+  // Refused, not trimmed: this scopes an UPDATE, not a read filter, so a
+  // silently trimmed key here would drift from what is actually stored.
   const lockParkProjectKeyCheck = validateProjectKey(rawLockParkProjectKey);
   if (!lockParkProjectKeyCheck.ok) {
     return { error: `project_key is invalid (${lockParkProjectKeyCheck.reason})`, status: 400 };
@@ -3758,19 +3231,10 @@ function handleRoadmapLockPark(
   const failed: string[] = [];
   for (const peerId of cleanPeerIds(body.peer_ids, LOCK_BATCH_MAX_TARGETS)) {
     try {
-      // Round-4 mutation review (card aaf4537d): a row already parked by a
-      // DIFFERENT operator must land in `failed`, not be silently overwritten
-      // -- the exact mirror of lock-release's own foreign-park refusal a few
-      // lines down this file. Without this SELECT, an unconditional WHERE
-      // (locked = 1 AND project_key = ? AND locked_by = ?) let operator B
-      // re-park a card operator A already parked: `lock_parked_by` flips to
-      // B, and B can then archive straight through refusesParkedArchive,
-      // which only ever compares against the CURRENT `lock_parked_by` -- the
-      // same two-upsert-shaped bypass item 1 closed on the upsert side,
-      // reopened here on the park route itself. Read FIRST, same reasoning
-      // as lock-release: `changes === 0` alone can't distinguish "nothing to
-      // park" from "refused, foreign park" and this route's contract (like
-      // release's) requires telling them apart.
+      // Reads the row before the UPDATE: an unconditional WHERE would let a
+      // second operator silently re-park (and later archive) a card another
+      // operator already parked, since a zero-rows-changed result alone can't
+      // distinguish 'nothing to park' from 'refused, foreign park'.
       const row = db
         .query(
           `SELECT lock_parked_by FROM roadmap_items WHERE locked = 1 AND project_key = ? AND locked_by = ?`
@@ -3813,35 +3277,17 @@ function handleRoadmapLockPark(
 }
 
 /**
- * Card aaf4537d, lot 2: Hard Stop's counterpart of lock-park. Releases the
- * work-lock(s) held by each of `peer_ids` under `project_key` OUTRIGHT --
- * same end state as `releaseStaleLocks`'s sweep (locked cleared, park
- * cleared, `in_progress` reverts to `planned`), not merely a de-park. Hard
- * Stop's promise to the operator is that the agent's cards come back to the
- * board free for someone else to pick up; a lock-release that only cleared
- * `lock_parked_at`/`lock_parked_by` and left `locked`/`locked_by` standing
- * would silently break that promise (the card would stay claimed by an
- * agent Hard Stop just killed). Same unconditional operator gate as
- * lock-park, same peer_id-with-nothing-to-release-is-not-a-failure rule.
- *
- * Team-lead arbitration (aaf4537d, after bc0ccb17 landed): a row parked by a
- * DIFFERENT operator is refused, landing in `failed`, never released -- an
- * unrestricted release would otherwise be a service door around
- * refusesParkedArchive: operator B releases operator A's park (clearing
- * lock_parked_by), and the card is no longer parked at all by the time B's
- * upsert tries to archive it, so bc0ccb17's guard never engages. The
- * restriction is scoped to PARKED rows ONLY (`lock_parked_by` non-NULL and
- * different from `author.operator_id`) -- a row that is merely locked, never
- * parked, stays releasable by any operator-proven write, Hard Stop keeps its
- * admin-wide reach there. A row parked by the SAME operator releasing it, or
- * not parked at all, still releases normally. One peer_id's foreign-park
- * refusal never fails the whole request: each peer_id is independent, same
- * `released`/`failed` partial-result contract as lock-park.
+ * Releases outright -- lock, park, and in-progress status all cleared -- the
+ * same end state as the stale-lock sweep, so an agent this action just stopped
+ * doesn't keep the card claimed.
+ * A row parked by a DIFFERENT operator is refused rather than released:
+ * releasing it would silently clear the park owner and let that operator
+ * archive around the parked-archive guard.
+ * A row merely locked, never parked, stays releasable by any operator-proven
+ * write.
+ * No inactive guard (card c33a5968): this handler only ever decreases a
+ * claim, so releasing a lock on an inactive card is legitimate.
  */
-// Card c33a5968: no inactive guard here, deliberately -- this handler only
-// ever DECREASES a claim (locked -> 0, in_progress -> planned), so it
-// structurally never moves a card toward in_progress/locked; releasing a
-// lock on an inactive card is a legitimate operation, not a claim.
 function handleRoadmapLockRelease(
   body: RoadmapLockReleaseRequest
 ): RoadmapLockReleaseResponse | { error: string; status: number } {
@@ -3852,8 +3298,9 @@ function handleRoadmapLockRelease(
   }
   const rawLockReleaseProjectKey = typeof body.project_key === "string" ? body.project_key : "";
   if (!rawLockReleaseProjectKey) return { error: "project_key is required", status: 400 };
-  // Card c92614ed lot L0 (MAJOR 3, team-lead review): same refuse-not-trim
-  // discipline as lock-park above -- this handler scopes an UPDATE.
+  // Refused, not trimmed: this handler scopes an UPDATE by project_key, and a
+  // silently trimmed value here would let the same caller-declared string be
+  // accepted where another route would refuse it.
   const lockReleaseProjectKeyCheck = validateProjectKey(rawLockReleaseProjectKey);
   if (!lockReleaseProjectKeyCheck.ok) {
     return { error: `project_key is invalid (${lockReleaseProjectKeyCheck.reason})`, status: 400 };
@@ -3897,29 +3344,10 @@ function handleRoadmapLockRelease(
         failed.push(peerId);
         continue;
       }
-      // The UPDATE's WHERE repeats the same park-owner condition as the
-      // SELECT above (now including the same expiration threshold, via
-      // LOCK_PARK_TTL_SEC's cutoff expressed in SQL -- releaseStaleLocks's
-      // clause 3 already needed the identical cutoff for its own sweep, so
-      // this reuses that shape rather than inventing a second one). Round-3
-      // mutation review (card aaf4537d, item 5): this used to be documented
-      // as "defense in depth against a park landing between the SELECT above
-      // and this write" -- MEASURED that this race window does not
-      // currently exist. `handleRoadmapLockRelease` is a synchronous
-      // function (no `await` anywhere in its body; bun:sqlite's
-      // `db.query`/`db.run` are synchronous bindings, confirmed by grepping
-      // the whole file for `await db.` -- zero matches), so once this loop
-      // starts running for a request, JS run-to-completion guarantees
-      // nothing else -- not a concurrent lock-park call, not another
-      // request's own write -- can execute between this SELECT and this
-      // UPDATE, for any peer_id in the batch. The repeated predicate is
-      // therefore currently REDUNDANT with the SELECT-based check above, not
-      // a live defense: kept as a guard against a FUTURE regression (an
-      // `await` introduced into this loop -- a slower store, an added
-      // network call -- would reopen exactly this window), not something a
-      // test can pin today. There is no way to land a foreign park inside a
-      // gap that does not exist without mocking bun:sqlite's own
-      // synchronicity, which would test the mock, not this code.
+      // Redundant with the SELECT above today -- this function is fully
+      // synchronous, so nothing can interleave between them -- but kept as a
+      // guard against a future regression, such as an await introduced into
+      // this loop, that would reopen the race.
       const res = db.run(
         `UPDATE roadmap_items SET
            locked = 0, locked_by = NULL, locked_by_token = NULL, locked_at = NULL, operator_id = NULL,
@@ -3943,69 +3371,17 @@ function handleRoadmapLockRelease(
 }
 
 /**
- * Card 562fd9b5: append-only edit to `context`. The write is a SINGLE SQL
- * statement -- no SELECT-then-UPDATE. That is the card's central decision,
- * not an optimization: a prior SELECT would reintroduce the destructive
- * read-modify-write this route exists to remove, AND would break atomicity
- * between two concurrent appenders (both would read the same starting
- * context, both would compute a result including only their own text, the
- * second UPDATE would silently overwrite the first's block). One statement,
- * the result cap enforced in its own WHERE clause, `db.changes` distinguishes
- * success (1) from a refused-by-cap write (0) -- ambiguous against "id does
- * not exist" (also 0 changes), so a SELECT-for-EXISTENCE runs AFTER a 0
- * result to tell the two apart with the right status code. That SELECT is
- * not part of the write path and does not reintroduce the race: it never
- * informs what gets written.
- *
- * COALESCE(context,'') is not cosmetic: SQLite's `NULL || text` evaluates to
- * `NULL`, so without it a NULL context would be silently WIPED by an append
- * instead of appended to. MEASURED: `roadmap_items.context` is declared
- * `TEXT NOT NULL DEFAULT ''` (both the CREATE TABLE and the ADD COLUMN
- * migration), and SQLite enforces that unconditionally -- a direct
- * `UPDATE roadmap_items SET context = NULL` against a scratch table with the
- * same constraint fails closed with `NOT NULL constraint failed`. So NULL is
- * NOT reachable through this column today; COALESCE stays as defense in
- * depth against a future migration or an external tool that relaxes that
- * constraint, not against a live risk. See tests/broker-roadmap-append.test.ts
- * for how that is probed given the real column cannot be made NULL to order.
- *
- * `length()` on the SQL side counts CHARACTERS (SQLite default for TEXT),
- * matching ROADMAP_APPEND_RESULT_MAX_CHARS's own unit -- both the existing
- * context and the new chunk are measured via SQL's own `length(?)`, not a JS
- * `.length`, so the two never disagree on what a "character" is (JS
- * UTF-16 code units can diverge from SQLite's count on astral-plane text).
- *
- * TWO GUARDS /roadmap/upsert enforces are DELIBERATELY not enforced here:
- *  - the work-lock does not apply. An append is a single atomic statement,
- *    so it cannot race the lock holder's own write, and the entire point of
- *    this tool is to leave a note on ANOTHER agent's card while it works.
- *    Bound: this route touches ONLY `context` and `operator_id` -- never
- *    `status`, `locked`, or any other arbitration field, all of which remain
- *    fully guarded by /roadmap/upsert's lock check. There is no code path
- *    here that could even attempt to set them (RoadmapContextAppendRequest
- *    carries none). `operator_id` (card edefff05) is not an arbitration
- *    field itself -- nothing gates on it, `releaseStaleLocks` keys its TTL
- *    off `updated_at` alone -- so writing it here does not reopen the
- *    lock-TTL hazard the next bullet describes for `updated_at`.
- *  - `deleted_at` is not checked. Appending to an ARCHIVED card is
- *    intentional -- it is how a post-mortem note gets written.
- *
- * `updated_by`/`updated_at` are ALSO deliberately not touched by the SET
- * clause -- review delta on this card: `updated_at` is itself an arbitration
- * field, not a neutral timestamp. `releaseStaleLocks` frees a stale lock on
- * `datetime(updated_at) < datetime('now', -LOCK_TTL_SEC)`, so if this route
- * refreshed it, a THIRD PARTY appending a note to another agent's locked
- * card would silently extend THAT agent's lock TTL -- exactly the conflict
- * the lock-exemption bullet above claims cannot happen ("an append is
- * atomic and cannot conflict with the lock holder"). It can, through
- * `updated_at`, if this route touches it. Nothing is lost by not touching
- * it: the append header already carries WHO and WHEN inside `context`
- * itself -- the recency information just lives in a different place than
- * the column, not nowhere.
+ * Single UPDATE statement, no SELECT-then-UPDATE: a prior read would
+ * reintroduce the destructive read-modify-write this route removes, and would
+ * let two concurrent appends silently overwrite each other.
+ * COALESCE on the column matters because SQLite's NULL concatenation evaluates
+ * to NULL, which would otherwise wipe a NULL value instead of appending to it.
+ * updated_at is deliberately not touched -- it is an arbitration field the lock
+ * sweep keys its TTL off, so touching it here would let a third party's note
+ * silently extend another agent's lock.
+ * No inactive guard (card c33a5968): this handler only ever touches context
+ * and operator_id, never status or locked, so it cannot claim a card.
  */
-// Card c33a5968: no inactive guard here, deliberately -- this handler touches
-// only `context` and `operator_id`, never `status`/`locked`, so it cannot
-// claim a card regardless of its `inactive` value.
 function handleRoadmapContextAppend(
   body: RoadmapContextAppendRequest
 ): RoadmapContextAppendResponse | { error: string; status: number } {
@@ -4070,18 +3446,13 @@ function handleRoadmapContextAppend(
 const ROADMAP_REORDER_MAX = 500;
 
 /**
- * Atomic queue rewrite (Workflow lane): `ids` becomes the whole dispatch
- * queue (queue = 1..N in order), every other queued item of the project is
- * unqueued. One transaction, so the operator's insert-in-the-middle never
- * interleaves with an agent's writes half-applied.
+ * The submitted list replaces the whole dispatch queue in order; every other
+ * queued item of the project is unqueued in the same transaction, so an
+ * operator's insert-in-the-middle never interleaves with an agent's
+ * half-applied writes.
+ * Refuses the whole batch if any id is inactive (card c33a5968), in the
+ * id-validation loop, the same mechanism as the done/archived check.
  */
-// Card c33a5968 gap closed 2026-08-27: this handler writes `queue` (never
-// `status`/`locked`), which was the exact reasoning that USED to exempt it
-// here -- true until `queue` itself became a claim-adjacent field (see
-// `refusesInactiveQueue`'s doc comment in `handleRoadmapUpsert` above). This
-// handler now refuses the WHOLE batch if any id is `inactive`, in the id-
-// validation loop below, same mechanism as the existing done/archived check
-// it sits next to.
 function handleRoadmapReorder(
   body: RoadmapReorderRequest
 ): RoadmapReorderResponse | { error: string; status: number } {
@@ -4090,9 +3461,9 @@ function handleRoadmapReorder(
   const by = author.by;
   const rawReorderProjectKey = typeof body.project_key === "string" ? body.project_key : "";
   if (!rawReorderProjectKey) return { error: "project_key is required", status: 400 };
-  // Card c92614ed lot L0 (MAJOR 3, team-lead review): this handler selects
-  // items by project_key and then writes their `queue` -- not a read-only
-  // filter -- so it gets the same refuse-not-trim discipline as create/import.
+  // Refused, not trimmed: this handler selects items by project_key and writes
+  // their queue, not a read-only filter, so a caller-declared value must not be
+  // silently reshaped.
   const reorderProjectKeyCheck = validateProjectKey(rawReorderProjectKey);
   if (!reorderProjectKeyCheck.ok) {
     return { error: `project_key is invalid (${reorderProjectKeyCheck.reason})`, status: 400 };
@@ -4114,14 +3485,10 @@ function handleRoadmapReorder(
     if (item.status === "done" || item.status === "archived") {
       return { error: `item '${id}' is ${item.status} and cannot be queued`, status: 400 };
     }
-    // Card c33a5968 gap closed 2026-08-27: same reasoning/status code as
-    // refusesInactiveQueue's guard on /roadmap/upsert (403, the inactive-
-    // guard family's own convention -- distinct from the 400 above, which is
-    // a terminal-state validation, not a "clear the flag first" permission
-    // gate). Whole-batch refusal, not a partial skip: RoadmapReorderResponse
-    // has no field to report a skip (unlike ImportRes's `skipped`), and this
-    // handler already refuses the whole batch for the done/archived case
-    // right above -- same mechanism, not a new response-shape category.
+    // 403, not the 400 used for done/archived above: this is a 'clear the flag
+    // first' permission gate, not a terminal-state validation.
+    // Whole-batch refusal, not a partial skip -- the response has no field to
+    // report a per-item skip.
     if (item.inactive) {
       return { error: `item '${id}' is inactive -- clear inactive before queuing it`, status: 403 };
     }
@@ -4272,21 +3639,12 @@ function handleRoadmapImport(body: {
   const author = resolveRoadmapAuthor(body, "/roadmap/import");
   if ("error" in author) return author;
   const by = author.by;
-  // The CLI's roadmap-import is the only non-test caller (arbitration: exempt
-  // from card 39c40571's future operator-signature proof, since it already
-  // runs on the broker's own host holding the bearer token -- it IS the local
-  // operator's own gesture). But that means `by` on THIS route is a DECLARED
-  // string, never a proven one (no instance_token flows through the CLI's
-  // bearer-only auth) -- so it must never be compared against a card's
-  // locked_by to decide ownership: an attacker (or a compromised script using
-  // the broker token) could simply declare by:'<lock owner>' or by:'deck' and
-  // walk straight through an ownership check, having the guard politely ask
-  // the attacker if it owns the card. Every locked card is skipped
-  // unconditionally instead -- no author comparison on a path with no proven
-  // author -- with an explicit, hand-typed `force:true` escape hatch for an
-  // operator who is certain (skip-policy (b)+(c): import proceeds for
-  // everything else, skipped cards are counted and named, force overrides
-  // deliberately rather than by accident or by a remote declaration).
+  // The declared author here is never a proven one -- no instance_token flows
+  // through this route's auth -- so it must never be compared against a card's
+  // locked_by to decide ownership, or a caller could simply declare ownership
+  // and walk through the check.
+  // Every locked card is skipped unconditionally instead, with an explicit
+  // force escape hatch.
   const force = body.force === true;
 
   const items = body.items as Partial<RoadmapItem>[];
@@ -4361,27 +3719,12 @@ function handleRoadmapImport(body: {
     }
   }
 
-  // Card aad5e954: both the column list and the placeholders are GENERATED from
-  // the single ROADMAP_IMPORT_COLUMNS constant, and the values below are bound
-  // by mapping that same constant over a record keyed by its union -- so the
-  // count and the ORDER cannot drift apart, which is the failure this handler
-  // was one hand-edit away from.
-  //
-  // What that does NOT buy, measured rather than assumed, so nobody trusts a
-  // net that is not there: a key MISSING from the record binds `undefined`,
-  // and bun:sqlite accepts it as NULL. It throws only for the five columns
-  // that are NOT NULL with no DEFAULT (project_key, kind, title, created_at,
-  // updated_at); on every DEFAULTED column it silently stores the DEFAULT --
-  // exactly the silent reset this card exists to prevent. The Record type is
-  // what requires each key, and this repo has NO gate enforcing it: the root
-  // package.json has no typecheck script (broker/server/test only) and CI
-  // typechecks desktop/ alone, while `bun test` and `bun build` erase types
-  // without checking them. So the type is checked by an editor or a manual
-  // tsc, NOT by a guard, and the real runtime net is the import test suite
-  // asserting that real values survive.
-  //
-  // And the constant cannot notice a column added to the TABLE and forgotten
-  // in the list; that is what the PRAGMA comparison in the tests is for.
+  // Column list and placeholders are both generated from the same column
+  // constant, so count and order cannot drift apart.
+  // A key missing from the values record binds undefined, which the driver
+  // treats as NULL -- on a defaulted column that silently stores the default
+  // instead of erroring, and nothing in this repo's typecheck/CI catches a
+  // missing key; only the import test suite's real-value assertions do.
   const insert = db.prepare(
     `INSERT OR REPLACE INTO roadmap_items
        (${ROADMAP_IMPORT_COLUMNS.join(", ")})
@@ -4397,21 +3740,12 @@ function handleRoadmapImport(body: {
       // transaction, and this lookup must see that write, not the pre-import
       // state, to skip/preserve correctly for the later duplicate too.
       const existing = getRoadmapItem(id);
-      // Card 40ddf1f5 (defect 1): unconditional skip, no author comparison --
-      // see the note above resolveRoadmapAuthor for why comparing `by`
-      // against locked_by would be a self-declared bypass on this route.
-      //
-      // Card bc0ccb17: this is also this route's ENTIRE answer to
-      // refusesParkedArchive -- a parked card is, by construction, a locked
-      // one (parking only ever happens to a card an agent already holds
-      // in_progress), so this same skip already refuses an import row that
-      // would otherwise archive-in-place a parked card. handleRoadmapImport
-      // deliberately does NOT call refusesParkedArchive itself: doing so
-      // would leave `force:true` as the one path that still bypasses it,
-      // silently reintroducing the hole this skip closes for every other
-      // row. `force` is a CONSCIOUS exemption instead (restoring a self-
-      // export, an operator's own gesture), tracked by card 40ddf1f5, not a
-      // silent gap.
+      // Unconditional skip on a locked card, no author comparison -- comparing
+      // the claimed author against locked_by here would be a self-declared
+      // bypass, since the author is never proven on this route.
+      // This is also this route's entire defense against archiving a parked
+      // card in place: a parked card is, by construction, locked, so this same
+      // skip already refuses it, with force as the one conscious exemption.
       if (existing?.locked && !force) {
         skipped.push(id);
         continue;
@@ -4448,22 +3782,11 @@ function handleRoadmapImport(body: {
             ? it.locked_at
             : null
           : (existing?.locked_at ?? null);
-      // Card e344fa79: same file-wins/existing-wins discipline as
-      // locked_by/locked_at -- no charset check needed, unlike locked_by.
-      // Not because the value is a digest (it is the RAW group_id, per this
-      // card's final design -- see RoadmapItem.locked_group's doc comment),
-      // but because of what it is COMPARED against: on every route that
-      // acts on a lock (upsert, archive, the owner-gone sweep),
-      // authorLockedGroup/`p.group_id` comes ONLY from resolveRoadmapAuthor's
-      // instance_token-resolved SELECT on `peers`, never from request-body
-      // content -- so a caller can never present a locked_group string that
-      // then gets compared as if it were an identity claim, the forgery
-      // class normalizeAuthorIdentity exists to close for `by`/`locked_by`.
-      // On THIS route specifically, `by` is never proven either way (see the
-      // note above resolveRoadmapAuthor), so a file-declared locked_group
-      // here is only ever as trustworthy as this whole route already treats
-      // locked_by, which the existing unconditional locked-and-!force skip
-      // above already covers.
+      // Same file-wins/existing-wins discipline as locked_by/locked_at, but
+      // with no charset check: the value actually compared against this field
+      // on every lock-acting route comes only from the resolved peers row,
+      // never from request-body content, so a caller-supplied value here is
+      // never trusted as an identity claim.
       const lockedGroupVal =
         it.locked_group !== undefined
           ? typeof it.locked_group === "string"
@@ -4498,21 +3821,12 @@ function handleRoadmapImport(body: {
             ? it.lock_parked_by.toLowerCase()
             : null
           : (existing?.lock_parked_by ?? null);
-      // Card c33a5968: inactive follows the SAME file-wins/existing-wins
-      // discipline as the ordinary content fields below (state restoration is
-      // a legitimate reason for a file to carry inactive, UNLIKE operator_id
-      // further below, which never trusts the file). Guards mirror the upsert
-      // path's predicates, but skip THIS ROW (not the whole batch) on refusal,
-      // same granularity as the existing locked-and-!force skip above.
-      //
-      // `existingStatusVal`/`existingLockedVal` (team-lead review 2026-08-12,
-      // delta form -- see refusesInactiveClaim's doc comment): a force-import
-      // that faithfully re-carries an inactive-and-in_progress row's OWN stored
-      // status/lock must not be refused by comparing against itself. Reading
-      // the pre-write row here, deliberately NOT `nextStatusVal`/`lockedVal`,
-      // is what makes that round-trip possible while still refusing an actual
-      // upward claim (existingStatus not already in_progress, or not already
-      // locked) in the same call.
+      // inactive follows the same file-wins/existing-wins discipline as
+      // ordinary content fields, unlike operator_id which never trusts the file
+      // -- but a refusal here skips this row only, not the whole batch.
+      // The comparison reads the pre-write row, not the about-to-be-written
+      // values, so a force-import re-carrying a row's own
+      // already-inactive-and-claimed state round-trips without being refused.
       const existingInactive = existing?.inactive ?? false;
       const existingStatusVal = existing?.status ?? "idea";
       const existingLockedVal = existing?.locked ?? false;
@@ -4528,24 +3842,13 @@ function handleRoadmapImport(body: {
         skipped.push(id);
         continue;
       }
-      // Card 8c1effca: the columns below follow the SAME discipline the three
-      // lock columns already had -- a key PRESENT in the file wins (including an
-      // explicit null, which is a genuine clear in a self-export), a key truly
-      // ABSENT falls back to the EXISTING row, and only a brand-new row falls
-      // back to the table default. Before this, everything but the lock columns
-      // fell back to a literal, so a partial file (the exact gesture an operator
-      // makes to fix one field by hand) silently erased description, rationale,
-      // context, tags, depends_on, queue and deleted_at.
-      //
-      // TWO EXCEPTIONS, and they are safe only by someone else's rule.
-      // `directive` and `target_peer_ids` do NOT fall back to the existing row:
-      // a partial import of a directive card would blank its command and its
-      // targets, i.e. this very defect surviving in two columns. It cannot
-      // happen TODAY because the validation ~60 lines above refuses (400) any
-      // item with kind 'directive' and no valid directive, so the partial file
-      // that would trigger it never reaches this INSERT. Relax that validation
-      // to allow editing a directive card field by field -- a plausible
-      // request -- and the erasure becomes live with nothing going red.
+      // A key present in the file wins, including an explicit null (a genuine
+      // clear in a self-export); a key truly absent falls back to the existing
+      // row; only a brand-new row falls back to the table default.
+      // directive and target_peer_ids never fall back to the existing row,
+      // since a partial import of a directive card would otherwise blank its
+      // command and targets -- safe only because upstream validation already
+      // refuses a directive item with no valid directive.
       const values: Record<RoadmapImportColumn, string | number | null> = {
         id,
         project_key: projectKey,
@@ -4619,20 +3922,13 @@ function handleRoadmapImport(body: {
       insert.run(...ROADMAP_IMPORT_COLUMNS.map((column) => values[column]));
       imported++;
     }
-    // Review round 2 (2026-08-10), MINOR (point 6): `INSERT OR REPLACE` on a
-    // re-imported id deletes-then-reinserts the row, but roadmap_fts's own
-    // DELETE trigger only fires on a REPLACE conflict when
-    // `PRAGMA recursive_triggers` is ON -- OFF by default in SQLite, and not
-    // set anywhere in this codebase. Measured: the old rowid's FTS row
-    // survives, orphaned; the JOIN in handleRoadmapList masks it today (no
-    // false positive, since the join keys on a rowid that no longer exists
-    // in roadmap_items), but the FTS index still grows by one dead row on
-    // every re-import of an existing card. Fixed LOCALLY, at this one write
-    // path, rather than flipping the PRAGMA globally: that would change
-    // trigger semantics for every table in the database to fix a single
-    // route, a wider remedy than the defect. `rebuild` re-derives the whole
-    // FTS index from roadmap_items inside this same transaction, so a
-    // crash/rollback mid-import cannot leave it half-rebuilt.
+    // INSERT OR REPLACE deletes-then-reinserts, but the FTS table's own delete
+    // trigger only fires on a REPLACE conflict when recursive triggers are
+    // enabled -- off by default, and unset here, so the old FTS row survives
+    // orphaned.
+    // Fixed locally by rebuilding the FTS index inside this same transaction,
+    // rather than flipping that setting globally, which would change trigger
+    // semantics for every table to fix one route.
     if (imported > 0) {
       db.run(`INSERT INTO roadmap_fts(roadmap_fts) VALUES('rebuild')`);
     }
@@ -4642,36 +3938,14 @@ function handleRoadmapImport(body: {
 }
 
 /**
- * Drain the operator inbox of a group (PLAN C12): messages agents sent to the
- * reserved 'operator' sentinel. Same TOFU group auth as /announce.
- *
- * Courrail lot 1A (card 54b1c71a): `body.session_id` branches the read.
- * - Absent (or not a non-empty string -- see EDGE CASE below): LEGACY path,
- *   byte-identical to before this card -- delivered=0 selected and marked
- *   delivered, no operator_inbox_sessions row touched. Keeps an old Deck
- *   against a new broker, and a bare send_message-only caller, working.
- * - A non-empty string: NON-DESTRUCTIVE cursor path. The session's own
- *   operator_inbox_sessions row gates what IT has already read (id > last_id),
- *   so two Decks draining the same group_id each see everything and neither
- *   consumes for the other -- see design doc section 3 for why the key is the
- *   session_id and not group_id or operator_id.
- *
- * EDGE CASE (empty string / non-string session_id): treated as absent rather
- * than rejected with 400 or used as-is. Used as-is it would upsert a garbage
- * PRIMARY KEY row (e.g. every caller sharing session_id="" would collide on
- * one cursor, reintroducing the group_id-keyed bug this card fixes); a hard
- * 400 would break a legacy Deck that sends `session_id: ""` instead of
- * omitting the field. Falling back to legacy is the one option that is both
- * safe and backward-compatible.
- *
- * `markDelivered` is still called on EVERY row read by either path (see the
- * doc comment on the operator_inbox_sessions statements block above for why
- * this must not be dropped): `delivered` no longer means "visible" once any
- * session has drained by cursor -- it now means "at least one session has
- * seen it" -- but it must stay 1 so purgeOldUndeliveredStmt's 7-day TTL sweep
- * (broker.ts, "TTL purge of undelivered messages") does not silently claim
- * Courrier rows nobody asked it to purge. Visibility is now governed by each
- * session's own cursor, not by this column.
+ * session_id branches the read: absent, or empty/non-string and treated as
+ * absent rather than a 400 or used as-is, takes the legacy byte-identical path;
+ * a real value takes a non-destructive cursor path scoped to that session.
+ * A hard 400 would break a legacy caller, and using an empty value as-is would
+ * collide every such caller onto one cursor row.
+ * delivered is still set on every row either path reads: it now means 'at least
+ * one session has seen it', not 'visible', but it must stay set so the
+ * undelivered-message TTL sweep doesn't claim rows nobody asked it to purge.
  */
 function handleOperatorInbox(
   body: OperatorInboxRequest
@@ -4765,21 +4039,12 @@ function handleOperatorInbox(
 }
 
 /**
- * Purge the operator inbox of a group (Courrier lot 1C, card 1e81ee7b broker
- * half). Same guard order as the drain: groupMayCarryOperatorInbox THEN
- * checkGroupSecret -- the group_secret_hash proves the right to act on the
- * GROUP'S box, never resolved through "the caller's own" identity.
- *
- * scope='session': this session's cursor jumps to the box's MAX(id) (so it
- * behaves like "I've seen everything, including what I'm about to delete"),
- * then rows with id <= MIN(last_id) across the group's LIVE sessions are
- * deleted. Dead sessions are GC'd FIRST, or a session that stopped polling
- * would pin the floor forever and this purge would never delete anything.
- *
- * scope='ids': immediate, global delete of the named ids for this group --
- * an explicit human "delete this one" gesture, independent of any cursor.
- * The group_id filter is ANDed into the delete so a caller cannot name an id
- * that belongs to a different group and reach across the boundary.
+ * scope='session': this session's own cursor first jumps to the box's latest
+ * id, then rows at or below the lowest cursor across the group's live sessions
+ * are deleted -- dead sessions are garbage-collected first, or one that stopped
+ * polling would pin the floor forever and nothing would ever be deleted.
+ * scope='ids': an immediate global delete of the named ids, ANDed with group_id
+ * so a caller cannot name an id belonging to a different group.
  */
 function handleOperatorInboxPurge(
   body: OperatorInboxPurgeRequest
@@ -5097,20 +4362,10 @@ function rememberNonce(nonce: string, nowSec: number): boolean {
 }
 
 /**
- * Card 1def56da: `resolveApprovalAuth` USED TO LIVE HERE and is DELETED, not
- * deprecated. It returned an identity and left each of its eleven call sites to
- * finish the scoping by hand, which is why three of the four approval handlers
- * had no project dimension at all. Keeping it "for the transition" would have
- * made the whole lot pointless: a fail-closed mechanism that cohabits with its
- * fail-open predecessor IS fail-open, since the twelfth site can still call the
- * old one.
- *
- * Its replacement is shared/approval-scope.ts, whose header carries the full
- * reasoning. The single instance below is the ONLY authenticator in this
- * process; the database and the nonce cache are injected so the decision layer
- * imports no `bun:sqlite` and can be unit-tested against a fake -- which is how
- * part of this guarantee reaches CI, the four broker approval suites matching
- * none of the workflow's globs.
+ * The database and nonce cache are injected here so the decision logic stays
+ * free of the database driver and can be unit-tested against a fake.
+ * This single instance is the only authenticator in the process -- any other
+ * ad-hoc auth path would silently reopen what this consolidation closes.
  */
 const approvalAuth = createApprovalAuth({
   queryOne: <T,>(sql: string, params: unknown[]): T | null =>
@@ -5223,12 +4478,11 @@ function deliverApprovalAnswer(row: ApprovalRow): void {
 function handleApprovalAdd(
   body: ApprovalAddRequest & Record<string, unknown>
 ): ApprovalAddResponse | { error: string; status: number } {
-  // Card 1def56da. `authorizeCreate` returns a SCOPE (for the two reads below)
-  // and a STAMP (for the INSERT). Neither is readable here, and that is the
-  // point: this handler can no longer decide what `project_key` the new row
-  // carries, because it cannot see the value. Before this card it read
-  // `origin.project_key` out of the request body, so a sandboxed agent could
-  // file its question under another project.
+  // authorizeCreate returns a scope (for reads) and a stamp (for the insert);
+  // neither is exposed to this handler, so it cannot choose what project_key
+  // the new row carries.
+  // That closes the path where a sandboxed agent reads project_key from the
+  // request body to file under another project.
   const authorized = approvalAuth.authorizeCreate(body);
   if (isAuthError(authorized)) return authorized;
   const { scope, stamp } = authorized;
@@ -5464,11 +4718,10 @@ async function handleApprovalWait(
   body: ApprovalWaitRequest & Record<string, unknown>
 ): Promise<ApprovalWaitResponse | { error: string; status: number }> {
   const id = typeof body.id === "string" ? body.id : "";
-  // Card 1def56da. `authorizeTarget` resolves the row under scope and hands it
-  // back, so the separate `SELECT ... WHERE id = ? AND operator_id = ?` that
-  // used to stand here is gone along with the round-trip. The session pin that
-  // used to be a second `if` on `row.session_ref` is now INSIDE approvalWhere,
-  // which is why it cannot be forgotten by the next handler that needs it.
+  // authorizeTarget resolves the row under scope and returns it in one round
+  // trip, combining what would otherwise be a separate id + operator_id lookup.
+  // The session pin lives inside scope-building, so a handler needing it cannot
+  // skip it.
   const authorized = approvalAuth.authorizeTarget<ApprovalRow>(body, "wait", id ? [id] : []);
   if (isAuthError(authorized)) return authorized;
   if (!id) return { error: "id is required", status: 400 };
@@ -5527,13 +4780,10 @@ function handleApprovalList(
   if (isAuthError(authorized)) return authorized;
 
   const where = approvalWhere(authorized.scope);
-  // The identity clause is INTERPOLATED FIRST and literally, rather than pushed
-  // into the `clauses` array it used to head. The behaviour is identical; the
-  // difference is that a reader -- and the discipline scan in
-  // tests/desktop-approval-scope-discipline.test.ts -- can see the scope in the
-  // statement itself. Hidden behind `clauses.join(...)`, a later edit that
-  // seeded the array from somewhere else would have dropped the scope with
-  // nothing to point at.
+  // The identity clause is interpolated first and literally, not pushed into
+  // the filters array, so a reader -- and an automated discipline check -- can
+  // see the scope in the statement itself rather than trusting that whatever
+  // later populated the array still includes it.
   const filters: string[] = [];
   const params: unknown[] = [...where.params];
   if (typeof body.status === "string" && body.status) {
@@ -5547,12 +4797,10 @@ function handleApprovalList(
         filters.map((c) => ` AND ${c}`).join("") +
         ` ORDER BY created_at DESC LIMIT 500`
     )
-    // Same cast idiom as the other three `where.params` spreads in this file
-    // (broker.ts:4987, 5111, 5291): approvalWhere's fields are always strings
-    // at runtime (shared/approval-scope.ts's ScopeFields), `unknown[]` is just
-    // the module's deliberately opaque return type -- `never[]` is a subtype
-    // of every bun:sqlite tuple-length overload, so this satisfies the
-    // typecheck without claiming anything false about the actual values.
+    // The scope fields are always strings at runtime; the opaque array type is
+    // just the module's deliberately loose return type. The cast here satisfies
+    // the driver's tuple-length overloads without claiming anything false about
+    // the actual values.
     .all(...(params as never[])) as ApprovalRow[];
   return { approvals: rows.map(rowToApproval) };
 }
@@ -5801,9 +5049,9 @@ function handleApprovalTokenMint(
   // every `add` then refuses, which is a worse failure than refusing the mint.
   const rawProjectKey = typeof body.project_key === "string" ? body.project_key : "";
   if (!rawProjectKey) return { error: "project_key is required", status: 400 };
-  // Card c92614ed lot L0: a refusal, not the slice(0,256) this replaces -- a
-  // silently truncated value would mint a second, colliding project_key for
-  // the same project instead of surfacing the oversized/malformed input.
+  // A refusal, not a truncation: silently truncating an oversized project_key
+  // would mint a second, colliding key for the same project instead of
+  // surfacing the malformed input.
   const projectKeyCheck = validateProjectKey(rawProjectKey);
   if (!projectKeyCheck.ok) {
     return { error: `project_key is invalid (${projectKeyCheck.reason})`, status: 400 };
@@ -6021,16 +5269,14 @@ function toBinding(r: {
  */
 const channelHost: ChannelHost = {
   async onAnswer(kind, answer) {
-    // The approval FIRST (a read by id, nothing written), then "is the sender
-    // paired for THAT approval's owner". Resolving the address to an operator
-    // and comparing was equivalent only while an address belonged to exactly
-    // one operator — which stops being true the moment one person runs two OS
-    // accounts against one bot and one chat account.
-    // Card 1def56da, review round 2. The row AND its scope come back together
-    // from the module, which read the row itself. Two consequences worth the
-    // line: this handler no longer performs raw SQL on the protected table at
-    // all, and the scope cannot be assembled from anything the sender supplied
-    // -- the only thing crossing in is an id.
+    // Resolves the approval first (a read by id, nothing written), then checks
+    // whether the sender is paired for that approval's own owner -- resolving
+    // the address to an operator and comparing was only equivalent while an
+    // address belonged to exactly one operator, which stops holding once one
+    // person runs two OS accounts against one bot.
+    // The row and its scope come back together from one call, so the scope can
+    // never be assembled from anything the sender supplied -- only an id
+    // crosses in.
     const resolved = approvalAuth.scopeForAnsweredRow<ApprovalRow>(answer.approvalId);
     if (!resolved) return null;
     const row = resolved.row;
@@ -6136,20 +5382,14 @@ function approvalForPostedMessage(kind: ChannelKind, address: string, externalRe
 }
 
 /**
- * Live gateways, keyed by TRANSPORT rather than by operator.
- *
- * Two operators on one broker are the normal case (two OS accounts, or a box
- * shared by a team), and they may legitimately enrol the SAME bot token — one
- * person with two OS accounts and one bot. Telegram allows exactly one
- * `getUpdates` consumer per token, so a gateway each would make them fight over
- * the updates forever. Identical configuration therefore means ONE instance,
- * registered under both operators' slots.
- *
- * The key is a digest of the sealed secret's plaintext, never the plaintext:
- * for Telegram and Discord that is the bot token (same token = same key), and
- * for ntfy it is the whole config, so two operators sharing an ntfy account
- * still get one gateway each — their topics differ, and each needs its own
- * subscription.
+ * Keyed by transport, not operator: two operators may legitimately share one
+ * bot token, and some transports allow only one live consumer per token, so
+ * identical configuration means one gateway instance registered under both
+ * operators' slots.
+ * The key is a digest of the sealed secret's plaintext, never the plaintext
+ * itself -- for a config-keyed transport that's the whole config, so two
+ * operators sharing an account still get their own gateway for their own
+ * topics.
  */
 interface LiveGateway {
   channel: NotificationChannel;
@@ -6344,30 +5584,14 @@ sweepApprovals();
 guardedInterval("sweepApprovals", sweepApprovals, PURGE_INTERVAL_SEC * 1000);
 
 /**
- * Card 3781b033, team-lead ruling: deliberately NOT a resolveRoadmapAuthor
- * call site. That helper answers "who is the author of this write", which
- * legitimately includes an operator-signed reserved identity (RESERVED_PEER_IDS,
- * e.g. 'deck') carrying no `peers` row and therefore no project_key --
- * correct for the roadmap, where a signed operator write is a real, supported
- * caller. handleGraphDraftAdd asks a narrower question this handler alone
- * needs answered: "which REGISTERED peer presents this instance_token, and
- * what is ITS OWN project_key". A signed-but-tokenless caller has no answer
- * to that question by construction, not by omission, so routing this handler
- * through resolveRoadmapAuthor would either wrongly refuse every legitimately
- * signed write (if this handler kept requiring project_key) or wrongly
- * accept an operator-signed write with no verifiable project (if it did
- * not) -- neither is a fix. Keeping the two resolvers separate is also what
- * keeps tests/broker-roadmap-author-auth.test.ts's DECK_WRITE_ROUTES parity
- * check green without adding an exemption to it: that check enumerates
- * resolveRoadmapAuthor's call sites specifically, and this route is
- * deliberately not one of them -- an exemption list fails OPEN at the next
- * route, which is exactly what this card exists to stop doing.
- *
- * Card 3781b033, lot 2: the DECISION lives in shared/graph-draft-scope.ts
- * (resolveProvenGraphDraftPeer, pure, DB-free) so it can be unit-tested in CI
- * against a fake row source; this is the thin, database-backed injection --
- * see that module's header for the "two proofs, not one" reasoning and for
- * the exact ATTRIBUTION-vs-SCOPE boundary of what it closes.
+ * Deliberately not routed through the roadmap author resolver: that helper
+ * answers 'who is the author', which legitimately includes a signed reserved
+ * identity with no peers row and no project_key.
+ * This handler needs a narrower answer -- which registered peer presents this
+ * instance_token, and what is its own project_key -- and a signed-but-tokenless
+ * caller has no answer to that by construction, so reusing the roadmap resolver
+ * would either wrongly refuse every signed write or wrongly accept one with no
+ * verifiable project.
  */
 const graphDraftScopeDeps: GraphDraftScopeDeps = {
   findPeerByInstanceToken(token: string) {
@@ -6451,27 +5675,13 @@ function handleGraphDraftOpen(
 }
 
 /**
- * Card bf76d37f. Park a request for the Deck to run the head wave, then hold
- * the response open until the Deck resolves it or `wait_sec` elapses.
- *
- * IDENTITY, and why this reuses the graph-draft resolver: the question this
- * route asks is character-for-character the one resolveProvenGraphDraftPeer
- * answers -- "which REGISTERED peer presents this instance_token, and what is
- * ITS OWN project_key" -- and for the same reason: project_key and from_peer
- * must come from the peers ROW, never from the body, or a caller could park a
- * request against another project's queue and read back what it dispatched.
- * The one seam this reuse leaves: the resolver's reserved-identity branch says
- * "cannot author a graph draft". Its REMEDY (call set_id, then retry) is
- * correct on both routes and that branch is only reachable by a legacy row
- * registered before mint-time refused reserved names; widening the module's
- * wording belongs to whoever owns shared/graph-draft-scope.ts, not to this lot.
- *
- * AUTHORISATION is deliberately NOT widened (team-lead ruling, 2026-09-01).
- * "Who may CREATE a directive card" was closed by the operator on 2026-08-25,
- * risk accepted. "Who may TRIGGER a wave that may contain cards it did not
- * write" is closed by VISIBILITY, not by a permission: the response names the
- * cards dispatched and the tiles hit, so a caller that triggers someone else's
- * wave sees exactly that in its own reply.
+ * Reuses the same peer resolver used elsewhere for identity, since project_key
+ * and from_peer must come from the peers row, never the body, or a caller could
+ * park a request against another project's queue.
+ * Authorization is deliberately not widened: who may trigger a wave that
+ * contains cards it didn't write is closed by visibility, not permission -- the
+ * response names the cards dispatched and tiles hit, so a caller triggering
+ * someone else's wave sees exactly that in its own reply.
  */
 async function handleDispatchRequestAdd(
   body: DispatchRequestAddRequest
@@ -6567,17 +5777,13 @@ function handleDispatchRequestList(
 }
 
 /**
- * The Deck's write: the real report of what the wave dispatched.
- *
- * IDEMPOTENT on an already-resolved row: the stored outcome is returned
- * unchanged rather than overwritten, so a Deck that retries after a lost
- * response cannot replace a report the caller may already have read.
- *
- * RESIDUAL, stated rather than hidden: this route carries no per-caller proof,
- * so any holder of the broker token can post an outcome -- the same bar as
- * /graph-draft/open next to it. What that buys an attacker is bounded to
- * LYING to the requester: nothing here dispatches anything, and the row's
- * project_key and from_peer were fixed at add-time from a proven peers row.
+ * Idempotent on an already-resolved row: the stored outcome is returned
+ * unchanged rather than overwritten, so a retry after a lost response can't
+ * replace a report the caller may already have read.
+ * This route carries no per-caller proof -- any holder of the broker token can
+ * post an outcome -- but that's bounded to lying to the requester: nothing here
+ * dispatches anything, and the row's project_key/from_peer were fixed at
+ * add-time from a proven peers row.
  */
 function handleDispatchRequestResolve(
   body: DispatchRequestResolveRequest
@@ -6676,26 +5882,14 @@ const server = Bun.serve<WsData>({
         ws.close(1008, "expected auth frame");
         return;
       }
-      // Card 78bf378d: this handshake used to trust frame.instance_token with
-      // only a DB existence+status='active' check -- the only thing standing
-      // between a sentinel-shaped token and wsPool.set()/flushPendingForToken
-      // (whose selectUndeliveredCapped had no group_id filter at the time, so
-      // an authenticated __operator__ socket would drain every group's
-      // operator inbox at once -- selectUndeliveredCapped itself gained that
-      // filter under card 1d9f25e5, as defense in depth, so this shape guard
-      // is no longer the ONLY thing standing between them) was the sentinel
-      // rows being seeded permanently 'dormant', an accident of DB state, not
-      // a rule. Reuse the SAME predicate+trace the 14 HTTP routes already apply
-      // (refuseSentinelInstanceToken), rather than a parallel WS-specific
-      // guard. Client-visible outcome is IDENTICAL to the unknown-token
-      // branch below (same close code, same reason, no differentiation) --
-      // matching the established HTTP-side precedent of never confirming to
-      // the caller which refusal fired (poll/peek return an empty list
-      // either way). Only the server-side log (inside the helper) tells the
-      // two apart. Compare against `!== null`, not truthiness: the helper's
-      // contract is string-or-null, and a future refactor returning `""`
-      // must still refuse here exactly like it would break all 14 HTTP call
-      // sites visibly, not silently flip this one's meaning.
+      // Reuses the same predicate the HTTP routes already apply, rather than a
+      // parallel WS-specific guard.
+      // Client-visible outcome is identical to the unknown-token branch below
+      // -- same close code, no differentiation -- only the server-side log
+      // tells the two apart.
+      // Compared against a strict not-null check, not truthiness: the helper's
+      // contract is string-or-null, and this must keep refusing even if a
+      // future refactor returns an empty string.
       if (refuseSentinelInstanceToken("ws-auth", frame.instance_token) !== null) {
         ws.close(1008, "unknown or inactive instance_token");
         return;

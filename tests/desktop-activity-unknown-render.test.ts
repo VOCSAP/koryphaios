@@ -1,29 +1,7 @@
-// Card 581a0d56, residual 4a (measured 2026-08-27): SessionRow (Sidebar.tsx)
-// and TerminalTile.tsx both render a ternary branch for `session.activity ===
-// 'unknown'` -- a `dot-unknown` CSS class on the status dot plus (Sidebar and
-// TerminalTile only, not BrowserView) a `status.unknown` tooltip -- and until
-// this file, NOTHING mounted either component's real DOM with an 'unknown'
-// activity. Proven by mutation in an isolated out-of-repo copy: deleting the
-// three branches (Sidebar.tsx, TerminalTile.tsx, BrowserView.tsx) left 1369
-// of 1369 tests in the desktop-*.test.ts glob green, identical before and
-// after. This file closes two of those three gaps (Sidebar, TerminalTile).
-// BrowserView.tsx is NOT covered here: its `paired` dock header (the third
-// site) sits behind ~1300 lines pulling in 6 unmocked `@shared/*` modules
-// (pick-prompt, pick-security, pick-shot, recording, graph, models) that
-// have no existing root-level alias resolution -- reported to the team-lead
-// as exceeding this lot's cheap-harness budget rather than force-mocked.
-//
-// Both mounts follow the SAME narrow-component pattern as
-// tests/desktop-sidebar-autoresume-dom.test.ts (mount the real, unmodified
-// component with a minimal fake store) -- see that file's own scope note for
-// why the whole Sidebar/App tree is not mounted instead.
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 GlobalRegistrator.register();
 
-// Paired unregister (tests/desktop-happy-dom-teardown.test.ts's repo-wide
-// scan, and the real fetch/CORS blast-radius documented in
-// tests/desktop-explorer-selection-dom.test.ts).
 afterAll(async () => {
   await GlobalRegistrator.unregister();
 });
@@ -145,24 +123,18 @@ function initialFakeDeckState(): FakeDeckState {
 
 const fakeDeck = create<FakeDeckState>(() => initialFakeDeckState());
 
-// Every value export store.ts currently has must be present here (card
-// a688748b): Bun's module registry is process-global, so whichever test
-// file mocks this specifier first freezes the surface for the rest of the
-// `bun test` run, and a later file needing a key this one omitted dies with
-// `SyntaxError: Export named '...' not found in module store.ts`. mockStore
-// (tests/_store-mock.ts) derives the required key set from store.ts itself
-// and throws here instead, rather than leaving it to whichever sibling file
-// happens to load next. `storeMockStubs` are harmless stand-ins, not the
-// real implementation -- SessionRow/Sidebar.tsx never call any of them.
+// Bun's module registry is process-global: whichever test file mocks this
+// specifier first freezes the surface for the rest of the `bun test` run, so
+// mockStore derives the required key set from store.ts itself and throws here
+// instead of failing in a later, unrelated file.
 mockStore({ useDeck: fakeDeck, ...storeMockStubs });
 
 mock.module("@shared/reorder", () => ({
   moveBeside: (ids: string[]) => ids
 }));
 
-// Same reasoning as tests/desktop-sidebar-autoresume-dom.test.ts: CreateMenu
-// is never rendered by SessionRow, and stubbing it avoids dragging in its
-// whole '@shared/models' import graph.
+// CreateMenu is never rendered by SessionRow; stubbing it avoids dragging in
+// its whole '@shared/models' import graph.
 mock.module("../desktop/src/renderer/src/components/CreateMenu.tsx", () => ({
   CreateMenu: () => {
     throw new Error("CreateMenu stub rendered -- this file only mounts SessionRow/TerminalTile");
@@ -205,8 +177,6 @@ test("SessionRow renders dot-unknown and the status.unknown tooltip for an 'unkn
   renderSessionRow(session({ activity: "unknown" }));
   const dot = sidebarDot();
   expect(dot.className).toContain("dot-unknown");
-  // Empty dict -> translate() falls back to the literal key (same convention
-  // as tests/desktop-sidebar-autoresume-dom.test.ts's menu-label assertions).
   expect(dot.getAttribute("title")).toBe("status.unknown");
 });
 

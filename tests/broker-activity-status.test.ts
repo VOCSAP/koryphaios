@@ -24,11 +24,6 @@ async function listPeers(token: string, cwd: string): Promise<PeerRow[]> {
   return res.body;
 }
 
-// Bug A: regression -- previously a peer right after /register had
-// last_activity_at = NULL, so list_peers reported activity_status='sleep'
-// (yellow icon) before it had ever sent a message. The fix initializes
-// last_activity_at on INSERT and on dormant resurrect.
-
 test("fresh peer reports activity_status 'active' immediately after register", async () => {
   const a = await register("activity-a", "/act-a");
   const b = await register("activity-b", "/act-b");

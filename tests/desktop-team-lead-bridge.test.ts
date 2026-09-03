@@ -1,34 +1,9 @@
-// Card 3c322f10 (piece 2, operator route): behavioural proof for
-// team-lead-bridge.ts's resolveMcpConfig/wantsTeamLeadBridge/
-// buildMintTeamLeadBridge (the decision + allow-list wiring
-// SessionService.create() delegates to for minting the team-lead
-// deck-control bridge on an OPERATOR-opened `--agent team-lead` tile), PLUS
-// a source-text wiring guard for session-service.ts::create()'s call site
-// (see its own header below for why a behavioural test cannot reach it).
-//
-// ALL SYNCHRONOUS (team-lead arbitration, Card 3c322f10): an earlier version
-// of this file (and of team-lead-bridge.ts) made resolveMcpConfig/
-// buildMintTeamLeadBridge ASYNC so the mint could itself await the
-// deck-control server's lazy start -- rejected, because that would have
-// forced SessionService.create() to become async, giving every session
-// creation a microtask yield point before `this.defs.push(def)`, not only
-// team-lead ones (non-atomic session creation for a feature that never
-// needed it). The lazy start is instead PROACTIVE: ipc.ts's `sessions:create`
-// handler (already async) awaits index.ts's `ensureControlServer()` itself,
-// BEFORE ever calling into SessionService.create(). Everything below this
-// point is therefore synchronous again.
-//
-// This targets the pure module directly (not SessionService itself):
-// session-service.ts imports `@shared/palette`/`@shared/role`/`@shared/reorder`,
-// none of which resolve under a plain `bun test` run from the repo root
-// (tests/ is a sibling of desktop/, not under desktop's own tsconfig.node.json
-// path mapping -- measured, importing session-service.ts here fails with
-// "Cannot find module '@shared/palette'" before ever reaching node-pty).
-// team-lead-bridge.ts was deliberately extracted to have neither import (only
-// supervisor.ts, itself "Node builtins only, unit-testable under bun test"),
-// so it can be exercised for real instead of falling back to a source-text
-// scan for the DECISION or the ALLOW-LIST -- only the call SITE (Q2 below)
-// still needs one.
+// Deliberately synchronous: an async resolveMcpConfig/buildMintTeamLeadBridge
+// would force SessionService.create() to become async, adding a microtask yield
+// point to every session creation, not only team-lead ones.
+// The deck-control lazy start is instead proactive: ipc.ts's sessions:create
+// handler awaits ensureControlServer() itself before ever calling
+// SessionService.create().
 
 import { test, expect, mock } from "bun:test";
 import { readFileSync, mkdtempSync, rmSync } from "node:fs";
@@ -77,18 +52,15 @@ test("PROOF 1: marker FALSE (template-shaped call, e.g. a template naming agent:
 });
 
 test("PROOF (Q1 non-regression): a stray `teamLeadDeckBridge` JSON property ON `input` itself has NO effect -- only the separate `marker` parameter can grant the bridge", () => {
-  // Card 3c322f10 Q1: `ipc.ts`'s `sessions:create` handler forwards its
-  // `input` verbatim (no field-by-field reconstruction), and that channel is
-  // CHANNEL_TIERS 2 (shared/companion.ts) -- remote-reachable by a paired
-  // companion/phone client via api-registry.ts's invokeRemote, not just the
-  // local renderer. `CreateSessionInput` no longer even declares a
-  // `teamLeadDeckBridge` field (the type refusal IS part of the fix), but an
-  // attacker does not go through the TypeScript compiler: a plain JS object
-  // can still carry an extra property at runtime regardless of the type. The
-  // cast below simulates exactly that hostile JSON body. The real ipc.ts
-  // handler always computes `marker` itself from server-side context and
-  // NEVER reads it off `input` -- simulated here by passing `false`
-  // regardless of what the hostile object carries.
+  // The session-create handler forwards its input verbatim rather than
+  // reconstructing it field by field, and that channel is remote-reachable by a
+  // paired companion client, not just the local renderer.
+  // The input type does not declare a teamLeadDeckBridge field, but an attacker
+  // does not go through the compiler: a plain object can still carry that extra
+  // property at runtime regardless of the type.
+  // The real handler always computes marker itself from server-side context and
+  // never reads it off input -- simulated here by passing false regardless of
+  // what the hostile object carries.
   const hostileInput = { teamLeadDeckBridge: true } as unknown as TeamLeadBridgeInput;
   const mint = mock(fakeMint({ mcpConfig: "/state/should-not-be-used.json", callerId: "x" }));
   const report = mock(() => {});
@@ -165,20 +137,10 @@ test("wantsTeamLeadBridge: agent comparison is exact, not a prefix/substring mat
   expect(wantsTeamLeadBridge({}, "", true)).toBe(false);
 });
 
-// ----- proof #4: the allow-list wiring, buildMintTeamLeadBridge -----
-//
-// TEAM_LEAD_DECK_TOOLS is threaded through HERE, to both `mintCaller`
-// (server-side scope) and `write` (client-side DECK_CONTROL_TOOLS, via the
-// REAL writeTeamLeadMcpConfig -- run for real against a throwaway temp dir,
-// not mocked, so the proof covers the actual file the team-lead tile's
-// `--mcp-config` would load). A mutation widening this array, or emptying
-// it, changes BOTH call sites at once and is caught by comparing against the
-// LIVE `TEAM_LEAD_DECK_TOOLS` export -- not a hand-copied literal that could
-// silently drift from it. RE-RUN after the sync/async form changed (this
-// function's own `getControlServer` contract flipped from
-// `() => Promise<DeckControlServerLike>` to `() => DeckControlServerLike |
-// null`) to make sure the proof still covers the SHIPPED shape, not an
-// abandoned one.
+// TEAM_LEAD_DECK_TOOLS is compared against the live export, not a hand-copied
+// literal, so a widening or emptying mutation is caught at both the server-side
+// mintCaller scope and the client-side write, the latter via the real
+// writeTeamLeadMcpConfig against a throwaway temp dir.
 
 function fakeControlServer(mintCaller: DeckControlServerLike["mintCaller"]): DeckControlServerLike {
   return { url: "http://127.0.0.1:9999", mintCaller };
@@ -265,25 +227,11 @@ test("TEAM_LEAD_DECK_TOOLS is exactly the 3 spawn/close tools -- restart deliber
   expect([...TEAM_LEAD_DECK_TOOLS]).toEqual(["deck_spawn_session", "deck_spawn_team", "deck_close_session"]);
 });
 
-// ----- Q2: source-text wiring guard for session-service.ts::create()'s call site -----
-//
-// HONEST SCOPE LIMIT, stated as required: this is the WEAKEST guard in this
-// repo's own hierarchy (CLAUDE.md: "a source scan (toContain('fn(')) is the
-// weakest guard"), used ONLY because session-service.ts cannot be exercised
-// behaviourally under `bun test` today (see this file's header) -- that
-// tooling gap is card dd7c1abd, explicitly OUT OF SCOPE here, not fixed by
-// this guard. It proves the call exists, is assigned, and its result reaches
-// the SessionDef literal. It does NOT and CANNOT prove the call is made with
-// the CORRECT arguments -- a mutation that calls `resolveMcpConfig` with a
-// WRONG argument (e.g. a hardcoded `"wrong-agent"` in place of the real
-// sanitized `agent`, or a substituted `mint` function) passes this check
-// unchanged, because the check only looks for "a call exists, assigned to
-// `mcpConfig`, which the SessionDef literal carries" -- never the VALUES
-// passed. That class of mutation is invisible to this guard, by
-// construction, and is left as a named blind spot rather than a false
-// promise of coverage. Targets session-service.ts BY NAME (SESSION_SERVICE_PATH
-// above): it does not discover its target by directory traversal, and does
-// not claim to cover any file added after it.
+// Weakest guard in this repo's own hierarchy (source scan only), used because
+// session-service.ts can't be exercised behaviorally.
+// Proves the call exists and its result reaches the SessionDef literal, but
+// cannot prove it's called with the correct arguments -- a mutation
+// substituting a wrong argument passes unchanged.
 
 export function checkMcpConfigWiring(src: string): string | null {
   // Non-greedy up to the return-type arrow, not `[^{]*` -- the signature's

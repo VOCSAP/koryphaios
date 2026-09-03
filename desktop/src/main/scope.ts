@@ -84,14 +84,12 @@ export function computeScope(projectDir: string, scopeId?: string): Scope {
 }
 
 /**
- * Resolve the scope to use when restoring a workspace (DESIGN 6.8). The workspace
- * persists only a `groupId` + `scopeKind`, never the secret:
- * - custom + groupId matches the currently-launched scope -> reuse it (the user
- *   re-supplied the same launch arg, so we can rejoin the same shared group).
- * - otherwise (ephemeral, or a custom whose secret we no longer have) -> mint a
- *   FRESH ephemeral scope. The restored sessions get new forked ids and
- *   rediscover each other in the new group; there were no external members of an
- *   ephemeral group, so nothing is lost, and we never join a wrong group.
+ * A custom scope whose groupId matches the currently-launched scope is reused,
+ * so a restored workspace rejoins the same shared group.
+ * Otherwise (ephemeral, or a custom scope whose secret is gone) a fresh
+ * ephemeral scope is minted — restored sessions get new ids and rediscover each
+ * other in the new group, since an ephemeral group has no external members to
+ * lose.
  */
 export function resolveAdoptedScope(
   ws: { groupId: string; scopeKind: ScopeKind },

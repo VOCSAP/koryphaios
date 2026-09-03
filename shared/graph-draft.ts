@@ -1,19 +1,12 @@
-// Graph-draft preparation harness: an agent, INVITED BY THE OPERATOR, escalates
-// a blocking question into a pre-filled (never auto-submitted) graph-chat
-// prompt. A pinned-haiku one-shot compiles the question plus ONLY the relevant
-// context and file references, so the (expensive) models the operator later
-// fans out to never pay for repo exploration.
-//
+// An agent, invited by the operator, escalates a blocking question into a
+// pre-filled (never auto-submitted) graph-chat prompt; a pinned-haiku one-shot
+// compiles the question plus only relevant context so the more expensive models
+// the operator later fans out to don't pay for repo exploration.
+// The system prompt is a code constant, never operator- or repo-configurable;
+// invocation is read-only (Read/Grep/Glob left available) and the model is
+// pinned to haiku -- it only proposes, the calling agent reviews and explicitly
+// sends.
 // Security model (C8 rule, same harness family as the desktop's context wand):
-// the system prompt below is a CODE CONSTANT, never operator- or
-// repo-configurable; the invocation is technically read-only
-// (`--strict-mcp-config` + `--disallowedTools`, Read/Grep/Glob left available
-// so references cite real files) and the model is pinned to haiku. Haiku only
-// PROPOSES: the draft goes back to the calling agent, which reviews it and
-// explicitly sends it (graph_draft_send) — and inference itself stays a human
-// action in the Deck.
-//
-// Pure module (no bun/node imports): builders unit-testable under bun.
 
 export const GRAPH_DRAFT_MODEL = "haiku";
 export const GRAPH_DRAFT_TITLE_MAX = 200;

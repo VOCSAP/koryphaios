@@ -1,27 +1,11 @@
-// Card aaf4537d, round-3 mutation review, item 2 (MAJOR, defect newly
-// introduced by this lot): a park's survival depends on comparing
-// `lock_parked_at` against "now" (shared/roadmap-lock.ts's `isParked`, used
-// both by /roadmap/lock-park's TTL logic indirectly and by
-// `refusesParkedArchive` on the archive path). SQLite's bare
-// `datetime('now')` produces a marker-less string ("YYYY-MM-DD HH:MM:SS"),
-// and `Date.parse()` reads a marker-less string as LOCAL time (V8
-// behaviour) -- on a non-UTC host that silently shifts the parsed instant by
-// the host's UTC offset, shrinking (or, for a negative offset, extending) a
-// park's remaining life.
-//
-// `bun test` forces TZ=UTC in ITS OWN process (measured: process.env.TZ is
-// unset there, local offset 0), so this bug is invisible to any test running
-// in that process directly -- it can only be observed in a CHILD process
-// (the broker) started with an explicit non-UTC TZ. Same `broker-*`-prefixed,
-// local-gate-only precedent as the sibling files in this family.
-//
-// Two producers matter here, and both are proved:
-//   A) broker.ts's /roadmap/lock-park route itself now writes an ISO string
-//      (with 'Z'), immune to the local-time misparse regardless of host TZ.
-//   B) shared/roadmap-lock.ts's `isParked` normalizes ANY marker-less string
-//      as UTC, so a producer OTHER than lock-park (a restored/imported row,
-//      a future write path) is covered too -- fixing the producer alone
-//      would leave that domain unprotected.
+// SQLite's bare datetime('now') has no timezone marker, and Date.parse() reads
+// a marker-less string as local time (V8 behaviour) -- on a non-UTC host this
+// silently shifts a park's remaining life by the host's UTC offset.
+// bun test forces TZ=UTC in its own process, so the bug is only observable in a
+// child process (the broker) started with an explicit non-UTC TZ.
+// Two producers are proved immune: lock-park writes an ISO string with 'Z', and
+// isParked (shared/roadmap-lock.ts) normalizes any marker-less string as UTC so
+// other producers are covered too.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";

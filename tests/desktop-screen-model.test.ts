@@ -3,28 +3,11 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { makeScreen, classifyInjectGuard } from '../desktop/src/main/screen-model'
 
-// Vague 10 A2-1 (cards 5dbf3255 + 63ca372f). spec_575cabbb / spec_052fe1d7.
-//
-// Pins the GEOMETRIC discriminant (screen-model.ts's classifyInjectGuard)
-// against the five real byte fixtures under tests/pty-harness/fixtures/ --
-// two modal (the trust/confirm dialog, with and without the pre-existing
-// Escape) and three non-modal (empty prompt, a draft in progress, the
-// slash-command menu open). No live CLI, no node-pty, no Electron: this is
-// the same offline replay tests/pty-harness/replay-fixture.cjs does, run
-// through bun:test instead of printed to stdout.
-//
-// PIEGE 1 (team-lead, 2026-08-17): the marker chunks
-// (`\n########## ... ##########\n`) inserted by the capture harness are
-// SYNTHETIC -- never emitted by the real CLI. Feeding them to the screen
-// model paints the marker text itself into the grid and corrupts the very
-// screen being asserted on. `isMarker` below filters them out before
-// `feed()`, exactly like replay-fixture.cjs's own predicate (that script is
-// a standalone .cjs runner, not a module -- nothing to import from it -- so
-// this redeclares the identical one-line check rather than a different one).
-//
-// PIEGE 2: the captures are 120x40. Fixed explicitly below, never left to
-// `makeScreen()`'s default -- replaying at another size does not fail, it
-// silently reflows into a screen that never existed.
+// Marker chunks inserted by the capture harness are synthetic, never emitted by
+// the real CLI; isMarker filters them out before feed(), or they'd paint into
+// the grid and corrupt the screen under test.
+// Screen size is fixed at 120x40 explicitly -- replaying at another size
+// doesn't fail, it silently reflows into a screen that never existed.
 
 const FIXTURES = join(import.meta.dir, 'pty-harness', 'fixtures')
 const COLS = 120

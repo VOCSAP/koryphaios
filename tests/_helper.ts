@@ -165,18 +165,10 @@ export async function groupId(secret: string): Promise<string> {
 }
 
 /**
- * Sign a roadmap write as the operator (card 39c40571 layer 2).
- *
- * `by: 'deck'` names the HUMAN, so the broker demands an Ed25519 proof on it.
- * Fixtures that only need SOME author should use a plain name instead (any
- * string matching no peer row is accepted unproven); this helper is for the
- * tests that assert DECK-SPECIFIC behaviour -- the lock exemptions, force, the
- * "submitted, not started" rule -- which would otherwise silently stop testing
- * the deck path the day they were switched to another author.
- *
+ * by: 'deck' names the human operator and requires an Ed25519 proof; tests that
+ * need only some author should pass a plain name instead (unproven, accepted).
  * One credential per test process: operator_id is the digest of the public key,
- * so the broker self-certifies it on first contact and every fixture speaks as
- * the same operator, which is what a single Deck does.
+ * so every fixture in a run speaks as the same operator.
  */
 const FIXTURE_OPERATOR = generateCredential();
 

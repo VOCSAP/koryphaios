@@ -31,21 +31,10 @@ test("containsSecret misses: ordinary strings and near-miss substrings", () => {
   expect(containsSecret("Product Name")).toBe(false);
 });
 
-// ONE table drives every check, not two parallel lists matched by name: the
-// prior version paired 13 flat `expect()` calls against a separate
-// `coveredPatterns` array via `toContain`, which only asserted "this name
-// appears somewhere" -- it did not tie a specific example to a specific
-// pattern, and the coverage loop iterated PICK_SECRET_PATTERNS itself, so
-// three independent edits each stayed green: deleting one example
-// assertion (its name-only reference in `coveredPatterns` still counted as
-// "covered"), adding a pattern to PICK_SECRET_PATTERNS without adding an
-// example (the loop only checked names already present in an unrelated
-// list), and removing a pattern from PICK_SECRET_PATTERNS while leaving its
-// example untouched (the loop no longer visited it at all). This table
-// closes all three: every row is checked against containsSecret AND against
-// which pattern(s) actually match it, and a final two-way set-equality
-// between the table's pattern column and PICK_SECRET_PATTERNS itself means
-// the table can neither omit a live pattern nor keep a dead one.
+// One table drives every check: each row is asserted against containsSecret and
+// against which pattern actually matches it, plus a set-equality check against
+// PICK_SECRET_PATTERNS so the table can neither omit a live pattern nor keep a
+// dead one.
 const SECRET_EXAMPLES: [pattern: string, example: string][] = [
   ["access_token", "access_token=abc123"],
   ["auth_token", "x-auth_token-y"],

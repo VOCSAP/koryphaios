@@ -1,23 +1,11 @@
-// Operator-inbox ack-state coverage (ask_operator lot, Etape A, card 8fdac3dd
-// "trois etats, a ne surtout pas fondre en deux"): the sole producer of the
-// ack key (inboxEntryKey, shared/types.ts) and its persistence
-// (loadAckState/appendSeenKey/appendAckedKey, main/inbox-store.ts) had no
-// unit coverage before this file -- only the destructive history journal
-// (appendInboxHistory/loadInboxHistory) is covered, in
-// tests/desktop-inbox-store.test.ts. spec_042c9e69.
-//
-// Four properties this file exists to prove, per team-lead brief:
-//  1. acked never regresses to seen (seen-after-ack must stay acked).
-//  2. the key survives a broker DB recreate: two entries sharing the same
-//     broker `id` but a different `sentAt` must produce DISTINCT keys.
-//  3. a blocking question (kind:'approval') cannot be acked -- proven as a
-//     COMPILE-time exclusion (AckableInboxEntry structurally omits it), not
-//     a runtime guard, by spawning tsc against a generated probe and
-//     asserting it fails with the expected diagnostic (plus a positive
-//     control that a valid probe compiles clean, so the probe itself is
-//     shown to be discriminating rather than broken/always-red).
-//  4. inboxEntryKey throws on an unrecognized shape, and a missing/corrupt
-//     inbox-ack.json degrades to empty state rather than crashing.
+// Covers inboxEntryKey (the sole producer of the ack key) and its persistence
+// (loadAckState/appendSeenKey/appendAckedKey).
+// Four properties held here: acked never regresses to seen; two entries sharing
+// a broker id but a different sentAt across a database recreate produce
+// distinct keys; a blocking approval entry is excluded from AckableInboxEntry
+// at compile time, verified by spawning tsc against a generated probe; and
+// inboxEntryKey throws on an unrecognized shape while a missing or corrupt
+// ack-state file degrades to empty state rather than crashing.
 
 import { test, expect } from "bun:test";
 import { existsSync, mkdtempSync, writeFileSync, readFileSync } from "node:fs";

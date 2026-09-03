@@ -1,23 +1,11 @@
-// deck-design client (PLAN D2b): drop this script into ANY webview-based app
-// (Tauri, Electron, plain dev server page) to get Deck inspect mode inside it.
-//
-//   Ctrl+Shift+D  toggle inspect mode (hover highlight, click picks, Esc exits)
-//
-// A pick is POSTed to the Deck's LOOPBACK design endpoint; the Deck routes it
-// into the docked/selected agent's prompt exactly like a pick from the
-// embedded browser. Nothing transits the claude-peers broker (which may be a
-// remote headless server): target app and Deck talk on 127.0.0.1 only.
-//
-// Endpoint discovery, in order:
-//   1. window.__DECK_DESIGN__ = { url, token, source? }
-//      (a Tauri app injects it from the env the Deck put in its PTY:
-//       CLAUDE_DECK_DESIGN_URL / CLAUDE_DECK_DESIGN_TOKEN — see README)
-//   2. <meta name="deck-design-url" content="…"> +
-//      <meta name="deck-design-token" content="…">
-//      (+ optional <meta name="deck-design-source" content="my-app">)
-//
-// Built to deck-plugin/design/deck-design.js by `npm run build:design`
-// (dependency-free, safe to embed in a dev build; do NOT ship it in prod).
+// Drop into any webview-based app to add Deck inspect mode (Ctrl+Shift+D); a
+// pick posts to the Deck's loopback design endpoint on 127.0.0.1 only, never
+// through the broker.
+// Endpoint discovery: window.__DECK_DESIGN__ = {url, token, source?}, or <meta
+// name="deck-design-url">/<meta name="deck-design-token"> (+ optional
+// deck-design-source).
+// Built to deck-plugin/design/deck-design.js by npm run build:design —
+// dependency-free; do not ship in prod.
 
 import { createInspectMode } from '../src/shared/element-pick'
 import type { ElementPick } from '../src/shared/types'

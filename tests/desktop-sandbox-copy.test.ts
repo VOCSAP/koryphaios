@@ -200,11 +200,10 @@ test("structural: every SKIP_DIRS entry is also denied by DENY_PATTERNS (finding
   }
 });
 
-// The loop above iterates the LIVE Set, so removing an entry removes its own
-// assertion too -- growth is covered, shrinkage is not (review round 2, card
-// 94f8cc0c; the same hole shipped this morning in
-// tests/desktop-tsconfig-flags.test.ts). Pin the content as a literal so a
-// removed entry fails closed instead of silently narrowing the loop above.
+// The loop above iterates the live Set, so removing an entry removes its own
+// assertion too -- growth is covered, shrinkage is not.
+// Pins the content as a literal so a removed entry fails closed instead of
+// silently narrowing the loop above.
 test("structural: SKIP_DIRS content is pinned (review round 2, card 94f8cc0c)", () => {
   expect([...SKIP_DIRS].sort()).toEqual([
     ".cache",
@@ -418,10 +417,9 @@ test("walkProjectFiles: no truncation trace when the tree is well under both cap
 });
 
 test("walkProjectFiles: hitting the cap exactly as the tree naturally ends is NOT reported as truncated", () => {
-  // The false-positive this guards against: checking the cap AFTER pushing a
-  // file (instead of before consuming the next name) flags this case even
-  // though nothing was left unvisited -- exercised red against a prior draft
-  // of this fix before the check was moved to the top of the loop.
+  // Guards against checking the cap after pushing a file rather than before
+  // consuming the next name, which would falsely flag truncation even though
+  // nothing was left unvisited.
   const captured = captureDeckErrors();
   writeFileSync(join(dir, "a.md"), "x");
   writeFileSync(join(dir, "b.md"), "x");

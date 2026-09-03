@@ -1,19 +1,12 @@
 /**
- * What clicking option[N] of a Courrier approval chip should DO (card
- * c7df3781).
- *
- * `Approval.options` carries two OPPOSITE semantics depending on `kind`:
- *  - 'permission' (desktop/hooks/approval-hook.ts's `buildApprovalRequest`,
- *    `reply_route: 'pty'`) poses `["Allow", "Deny"]` as LABELS. The answer
- *    the CLI's Ink chooser accepts is allow/deny, never free text — typing
- *    the label back (`answerKind: 'text'`) leaves the agent stuck on a menu
- *    that does not take text input.
- *  - 'question' (`ask_operator`, `reply_route: 'channel'`) lets the AGENT
- *    choose the options; there the label IS the answer, and `answerKind:
- *    'text'` is correct — nothing is typed into a terminal, the broker
- *    relays it as a peer message.
- *
- * Discrimination is on `kind`, NEVER on the option's label string — an
+ * Approval.options carries two opposite semantics depending on kind:
+ * 'permission' poses ["Allow","Deny"] as labels for the CLI's Ink chooser,
+ * which accepts allow/deny only — typing the label back as free text leaves the
+ * agent stuck on a menu that doesn't take text input.
+ * 'question' lets the agent choose its own options, so there the label is the
+ * answer and answerKind: 'text' is correct — nothing is typed into a terminal,
+ * the broker relays it as a peer message.
+ * Discrimination is always on kind, never on the option's label string — an
  * English UI label is not a stable verdict identifier.
  */
 
@@ -29,15 +22,9 @@ export function verdictAnswerKindFor(
   optionIndex: number
 ): VerdictAnswerKind {
   if (kind === 'permission') {
-    // Mutation review, MAJOR-1: this used to be `optionIndex === 0 ? 'allow'
-    // : 'deny'` -- a CATCH-ALL where every index other than 0 (a future
-    // third Ink option such as "Allow, and don't ask again", a stray -1, or
-    // NaN) silently became the DESTRUCTIVE 'deny' verdict, with no test
-    // moving. Only optionIndex===1 -- the real second option emitted today
-    // by buildApprovalRequest's `["Allow", "Deny"]` -- is a DECIDED 'deny'.
-    // Every other index (including NaN: NaN===0 and NaN===1 are both false,
-    // so it falls through here too) degrades to 'text' instead: benign
-    // (retype the label) rather than destructive.
+    // Only optionIndex===1 (the real second Ink option) is a decided 'deny';
+    // every other index, including a future third option or NaN, degrades to
+    // 'text' rather than silently becoming the destructive deny verdict.
     if (optionIndex === 1) return 'deny'
     if (optionIndex === 0) return 'allow'
     return 'text'

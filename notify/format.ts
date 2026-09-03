@@ -94,5 +94,4 @@ export function renderSettled(approval: Approval, viaLabel: string): string {
   return `✓ ${truncate(approval.title, 120)} — handled via ${viaLabel}: ${verdict}`;
 }
 
-/** Shown when someone answers a request that is no longer open. */
 export const ALREADY_HANDLED_NOTICE = "Validation expired or invalid / already handled";

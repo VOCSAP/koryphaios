@@ -35,22 +35,18 @@ import { ConfirmDialog } from './ConfirmDialog'
 import { ContextMenu } from './ContextMenu'
 import { KIND_ICONS } from './RoadmapItemModal'
 
-// Workflow lane (bottom half of the roadmap view): the dispatch queue drawn as
-// a left-to-right chain of cards, GraphView-style (manual camera, SVG edges,
-// positioned divs — no library). Every position is DERIVED from the queue
-// order and lock state (shared/workflow.ts): the column is the WAVE — a run
-// of items tied for the same execution slot, either by a shared persisted
-// `queue` value (queued items) or, for locked in_progress heads, a single
-// shared column 0 (heads are ACTUAL observed concurrency, not a scheduling
-// intent, so they never lay out as a sequence) — and nothing visual is
-// persisted, the lane and the kanban always agree. Dropping a card INSIDE an
-// existing wave's column band ties it into that wave (same queue number as
-// its new wave-mates); dropping it in the gap between two waves starts a new,
-// one-item wave. Reordering commits through ONE atomic roadmap:reorder call
-// carrying both the flat id order and this wave grouping; dropping a card
-// above/below another makes it a parallel sibling instead (it adopts the
-// target's dependencies); depends_on edges are red when the queue order
-// breaks them (click an edge for the why).
+// Every card position is derived from queue order and lock state, nothing
+// visual is persisted, so the lane and the kanban always agree.
+// A column is a wave: items tied for the same execution slot, either sharing a
+// persisted queue number (queued items) or, for locked in-progress heads, a
+// single shared column 0 — heads are observed concurrency, not a scheduling
+// intent, so they never lay out as a sequence.
+// Dropping inside an existing wave's column band ties the card into that wave;
+// dropping in the gap between two waves starts a new one-item wave; dropping
+// above/below another card makes it a parallel sibling that adopts the target's
+// dependencies.
+// Reordering commits through one atomic roadmap:reorder call carrying both the
+// flat id order and the wave grouping.
 
 /** Extra padding around the content when framing the camera. */
 const FIT_PAD = 24
@@ -289,11 +285,8 @@ export function WorkflowLane({
     if (!droppable(id)) return
     const next = queueAfterDrop(id, slot)
     if (!next) return
-    // Enqueue id's unmet, unqueued dependencies alongside it -- in the same
-    // reorder commit, spliced dependency-first right before id's own slot
-    // (AUDIT-graph-view-2026-07-28.md §7). Covers both entry points that
-    // funnel through commitDrop: the kanban-to-lane drop and lane-internal
-    // reorders.
+    // Enqueues id's unmet, unqueued dependencies alongside it in the same
+    // reorder commit, spliced dependency-first right before id's own slot.
     const closure = enqueueClosure(items, id)
     const idx = next.indexOf(id)
     const withClosure =

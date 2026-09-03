@@ -1,26 +1,8 @@
-// Card a2f61172: `role` is a PROPERTY OF THE LAUNCH, not persisted identity
-// like peer_id/instance_token, per an operator-arbitrated design reversal
-// (2026-08-24): the write-once semantics this file originally guarded were
-// REMOVED. The rule is now the opposite -- on every /register, including a
-// dormant-resume, the TRANSPORT's normalizeRole(body.role) value wins
-// UNCONDITIONALLY, overwriting whatever was stored. An empty/absent transport
-// role is a DECLARATION of absence (normalizes to NULL and is written as
-// such), not "no information, keep the old value": the CLAUDE_PEERS_ROLE key
-// is always emitted by the Deck (session-service.ts's sessionEnv, see
-// tests/desktop-session-role-env.test.ts), so its absence in a body is itself
-// meaningful.
-//
-// Same harness shape as broker-register-body.test.ts: real broker.ts + real
-// server.ts children, real `peers` row read back from the broker's sqlite
-// file. No mocking of the broker.
-//
-// History (for anyone diffing this file against an older revision): the
-// first version of this file guarded the INVERSE rule (stored wins on
-// dormant-resume) and its mutation pass (M1/M2/M5) proved that guard bit.
-// That rule was deliberately reversed by the operator, not a regression --
-// tests/role-domain-sweep.test.ts is the companion file for the NEW central
-// guarantee ("no agent-reachable path may set/change a role"), which is a
-// domain question this per-scenario file cannot answer.
+// role is a property of the launch, not persisted identity: on every /register,
+// including a dormant resume, the transport's normalizeRole(body.role) value
+// wins unconditionally over whatever was stored.
+// An empty or absent transport role is a declaration of absence and is written
+// as NULL, not treated as "no information, keep the old value".
 
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -129,15 +111,10 @@ function spawnServer(
   return proc;
 }
 
-// `cwd` MUST be canonicalized (every caller below wraps its mkdtempSync in
-// realpathSync) because this is the only place in tests/ that compares a path
-// the test BUILT against a path an external process REPORTED: the row's `cwd`
-// comes from server.ts's `myCwd = process.cwd()`, which resolves symlinks. On
-// macOS `mkdtempSync(tmpdir())` yields `/var/folders/...` while the child
-// reports `/private/var/folders/...`, so the equality below matched nothing and
-// all seven tests died on this timeout (measured 2026-08-28, CI run
-// 33170636054, macos job 98846649290). Linux CI cannot see it: its tmpdir is
-// not symlinked.
+// cwd must be canonicalized before comparison: server.ts reports process.cwd()
+// with symlinks resolved, and on macOS mkdtempSync(tmpdir()) yields
+// /var/folders/... while the child reports /private/var/folders/..., so an
+// uncanonicalized comparison matches nothing.
 async function pollForRow(
   db: Database,
   cwd: string,
@@ -239,8 +216,8 @@ test(
     db.close();
 
     expect(second.instance_token).toBe(first.instance_token);
-    // The direction everyone forgets: absent transport is a DECLARATION of
-    // absence and must clear a previously-stored role, not preserve it.
+    // The direction everyone forgets: an absent transport role is a declaration
+    // of absence, and must clear whatever role is stored, not preserve it.
     expect(second.role).toBeNull();
   },
   20_000
@@ -254,12 +231,8 @@ test(
     const sessionCwd = realpathSync(mkdtempSync(join(tmpdir(), "cp-register-role-malformed-")));
     tmpDirs.push(sessionCwd);
 
-    // "team lead": trim() does nothing (no leading/trailing space), so this
-    // is NOT caught by the "" == "" empty check -- it must be caught by
-    // ROLE_REGEX itself, which rejects the internal space. Review finding
-    // (2026-08-24): removing broker.ts:1385's `if (!ROLE_REGEX.test(...))`
-    // line left every OTHER test in this suite green -- none of them ever
-    // sent a value that is non-empty yet still regex-invalid.
+    // trim() leaves this value unchanged, so it must be caught by ROLE_REGEX
+    // rejecting the internal space, not by an empty-string check.
     spawnServer(b, sessionCwd, "team lead");
 
     const db = new Database(b.dbPath);
@@ -382,14 +355,9 @@ test(
       JSON.stringify({ groups: { other: "test-secret-for-role-switchgroup" } })
     );
 
-    // BOTH keys, one directory: settingsFilePath() (shared/config.ts) reads
-    // APPDATA only under process.platform === "win32" and XDG_CONFIG_HOME
-    // otherwise, and both branches join the SAME subtree,
-    // "claude-peers/config.json", onto their base -- so one temp dir serves the
-    // three OSes. With APPDATA alone the file was never read off Windows,
-    // config.groups was empty, and switch_group answered
-    // "Group 'other' not in user config" with isError: true (measured
-    // 2026-08-28, CI run 33170636054, ubuntu job 98846649135).
+    // settingsFilePath() reads APPDATA on win32 and XDG_CONFIG_HOME otherwise,
+    // both joining the same claude-peers/config.json subtree, so one temp dir
+    // set as both env vars serves all three OSes.
     const proc = spawnServer(b, sessionCwd, "lead", {
       APPDATA: appDataDir,
       XDG_CONFIG_HOME: appDataDir,

@@ -1,11 +1,7 @@
-// Runtime i18n for the main process. Pure (node fs/path only, no electron import)
-// so it stays unit-testable under `bun test`. The electron-specific directory
-// resolution (app dir / userData override) is wired in ipc.ts.
-//
-// Locale files live at desktop/locales/<lang>.json and are read at runtime, then
-// merged user-override-on-top. EN_DEFAULTS below is the embedded last-resort
-// fallback (DESIGN section 11) and MUST stay in sync with locales/en.json --
-// the parity is asserted by tests/i18n.test.ts.
+// Pure (node fs/path only, no electron import) so it stays unit-testable under
+// bun test; the electron-specific directory resolution is wired separately.
+// EN_DEFAULTS is the embedded last-resort fallback and must stay in sync with
+// locales/en.json.
 
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'

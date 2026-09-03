@@ -296,21 +296,12 @@ test('lockTargets ignores tiles never dispatched to -- reading service.list() in
   expect(lockTargets(outcomes)).toEqual(['peer-a'])
 })
 
-// ----- Third mutation review round: ipc.ts's `agents:stop` handler is the
-// ONE production call site that actually wires StopDeps.interrupt to
-// SessionService.interrupt via toInterruptMode -- nothing pinned it.
-// Reviewer measured: reverting it to the pre-D3/D4 inline ternary
-// (`mode === 'pause' ? 'pause' : 'hard'`) still yields a clean run across
-// the four targeted test files. ipc.ts imports electron/session-service and
-// is not bun-test-importable, so this reuses this morning's D6 technique
-// (extract the real source text, compile it with `new Function`, EXECUTE
-// it) rather than a source-scan -- extraction is intentionally LOOSE (it
-// does not require the literal substring `toInterruptMode(mode)`), so a
-// mutation that removes that call still extracts and RUNS; the behavioral
-// comparison against the REAL `toInterruptMode` (imported, never
-// re-implemented here) is what catches the divergence, specifically on
-// 'soft' -- the one StopMode where the correct function and the old
-// ternary disagree (soft -> 'pause' vs soft -> 'hard').
+// ipc.ts isn't bun-test-importable (imports electron/session-service), so this
+// extracts the real source text and executes it via `new Function` rather than
+// source-scanning.
+// The behavioural comparison against the real toInterruptMode catches
+// divergence specifically on 'soft', the one StopMode where it disagrees with
+// the old inline ternary.
 
 const IPC_PATH = join(import.meta.dir, '..', 'desktop', 'src', 'main', 'ipc.ts')
 

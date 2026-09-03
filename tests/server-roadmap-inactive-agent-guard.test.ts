@@ -1,39 +1,7 @@
-// Card 442084b7 (team-lead's proof requirement): the UI lot that gave the
-// Deck operator a menu action to set/clear `inactive` (RoadmapUpsertFields,
-// shared/types.ts) touches ONLY desktop/ -- it never modifies server.ts. This
-// is the regression pin proving that lot did not, as a side effect, open the
-// same capability to an AGENT calling the claude-peers `roadmap_update` MCP
-// tool.
-//
-// server.ts's `case "roadmap_update"` builds the POST /roadmap/upsert body
-// from an explicit PICK-LIST of named fields (never a `...args` spread), and
-// `inactive` is not one of them (see the `[INACTIVE] is an operator flag
-// with no agent-side field on purpose` comment a few lines above that case).
-// An agent CAN still put `inactive` in its tool-call arguments -- nothing on
-// the MCP transport enforces the advertised inputSchema -- so the primary
-// assertion is not "the call errors", it is "the stored value did not move":
-// re-read through the SAME MCP tool a real agent would use.
-//
-// Mirror-probe red-first proof (2026-08-31, reported to the team-lead, never
-// committed): in a /tmp mirror of this repo (mirror-probe skill, recipe 2),
-// temporarily added `inactive: a.inactive,` to server.ts's roadmap_update
-// pick-list. This test went RED, but on the OTHER assertion
-// (`expect(attempt.result?.isError).toBeFalsy()` saw `true`), not the value
-// re-read -- because forwarding the field just moves the fight one layer
-// down: broker.ts's own `refusesInactiveToggle` (shared/roadmap-lock.ts) then
-// 403s the write itself, since an agent's `by` is never operator-signed.
-// This is a STRONGER result than the one this comment originally predicted:
-// two independent layers (server.ts's pick-list, broker.ts's operator-proof
-// guard) each independently block the same attack, so this test's `isError`
-// assertion is itself a live tripwire for the pick-list layer, on top of the
-// value re-read pinning the broker layer. Reverting the mutation restored
-// GREEN (matches the untouched baseline: 1 pass, isError false, value
-// unchanged). Both layers bite.
-//
-// Harness mirrors tests/server-roadmap-inactive-marker.test.ts exactly:
-// spawns real `bun server.ts` (its MCP tool logic is neither exported nor
-// safely importable -- the file runs its stdio loop unconditionally at
-// module scope), speaks JSON-RPC on stdin, reads real tool output.
+// Asserts the stored value did not move, not merely that the call errored:
+// nothing on the MCP transport enforces the advertised inputSchema, so an agent
+// can still send `inactive` in its tool-call arguments regardless of what the
+// schema declares.
 
 import { test, expect, afterAll } from "bun:test";
 import { startBroker, stopBroker, post, deckAuthored, type TestBroker } from "./_helper.ts";
@@ -183,8 +151,6 @@ test("an agent's roadmap_update call cannot clear the operator-only inactive fla
   expect(detailAfter.split("\n")[0]).toContain("[INACTIVE -- do not claim]");
   expect(detailAfter).toContain("inactive: this card is inactive");
 
-  // Belt-and-suspenders direct-broker re-read (bypasses server.ts entirely,
-  // same discriminant tests/server-roadmap-inactive-marker.test.ts uses).
   const directRead = await post<ItemRes>(`${h.b.url}/roadmap/upsert`, deckAuthored({ id: idFull }));
   expect(directRead.status).toBe(200);
   expect(directRead.body.item.inactive).toBe(true);

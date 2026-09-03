@@ -1,25 +1,7 @@
-// Multi-tile stop broadcast (roadmap card aaf4537d, lot 3). Pure module --
-// no electron/node-pty import -- so bun test can exercise broadcastStop
-// against a fake StopDeps without a real PTY/session stack. Mirrors
-// executeDirective's fire-per-target dispatch (main/index.ts, function
-// executeDirective) but swaps its fire-and-forget shape for
-// Promise.allSettled + a returned outcome vector: an operator who clicks
-// "stop all" deserves a report, not silence.
-//
-// Review round (lot 3, MERGEABLE AVEC CORRECTIONS): the peerIds-present path
-// now delegates target resolution to resolveDirectiveTargets (directive.ts,
-// CT3's already-tested resolver) instead of a hand-rolled peerId filter --
-// that closes the charset/trim/dedupe gaps this file used to have and
-// surfaces `missing` for the peerIds that requested a tile with no live,
-// peer-resolved session. lockTargets/stopTouchesLocks are exported so the
-// lock-park/lock-release wiring in ipc.ts is no longer untested inline logic.
-//
-// Wire contract kept in lockstep with the renderer's consumer (lot 4,
-// AgentStopControls.tsx) BY VALUE: StopMode/StopOutcome/StopReport here are
-// what desktop/src/shared/types.ts's DeckApi re-exports, and what the
-// component's own local copy (kept for it to compile ahead of this file
-// landing) is written against. Do not rename a field here without also
-// checking that file.
+// Pure module, no electron/node-pty import, so bun test can exercise
+// broadcastStop against a fake StopDeps.
+// StopMode/StopOutcome/StopReport are mirrored by value in the renderer's
+// AgentStopControls component: rename a field here only alongside that copy.
 
 import type { SessionRuntime } from '@shared/types'
 import { resolveDirectiveTargets } from './directive'
@@ -37,21 +19,9 @@ export type StopMode = 'pause' | 'soft' | 'hard'
 export const STOP_MODES: readonly StopMode[] = ['pause', 'soft', 'hard']
 
 /**
- * Maps a StopMode onto the two-value shape SessionService.interrupt's own
- * `mode` param takes (card 120148eb, mutation review round 2, D3+D4).
- *
- * FAIL-CLOSED, not a deny-list: only the literal 'hard' skips the gate,
- * everything else -- 'pause', 'soft' (never actually reaches interrupt()
- * today, see broadcastStop below), and any FUTURE StopMode this union
- * grows to -- maps to 'pause', i.e. gated. The pre-fix shape at the one
- * real call site (ipc.ts) was `mode === 'pause' ? 'pause' : 'hard'`: an
- * allow-list that defaults UNKNOWN input to the ungated path, wrong
- * polarity per this repo's own convention (unknown must fail closed, not
- * open). Extracted as a pure, exported function (not inlined at the call
- * site) specifically so its behavior has a real behavioral pin -- see its
- * own test, which iterates STOP_MODES rather than hand-copying it, so a
- * fourth mode added later is covered automatically instead of silently
- * shrinking this function's proven domain.
+ * Fail-closed, not a deny-list: only the literal 'hard' skips the interrupt
+ * gate.
+ * Every other value, including any future StopMode, maps to 'pause'.
  */
 export function toInterruptMode(mode: StopMode): 'pause' | 'hard' {
   return mode === 'hard' ? 'hard' : 'pause'
@@ -137,19 +107,10 @@ export function lockTargets(outcomes: StopOutcome[]): string[] {
 }
 
 /**
- * Soft-stop is a request TO THE AGENT, not a verb on the process (unlike
- * pause/hard, which act on the PTY directly via interrupt) -- so it injects
- * a conversation turn, not a CLI command.
- *
- * Kept to a single line with no embedded '\n'. That used to be a hard
- * requirement (injectCommand wrote the text then a bare '\r', so an internal
- * newline submitted early and truncated the rest). Since card 6168b7f4 the
- * injection goes through `encodeSubmittedKeystrokes` -- bracketed paste, one
- * write -- which keeps embedded newlines literal, so a multi-line message
- * would no longer be truncated. Single-line is now a readability preference
- * for the terminal it lands in, not a correctness constraint. Do NOT reason
- * from this comment about how submission works: the encoder in
- * session-command.ts is where that is measured and explained.
+ * Soft-stop injects a conversation turn rather than acting on the PTY directly,
+ * unlike pause/hard.
+ * Kept to a single line with no embedded newline for readability in the
+ * terminal, not correctness.
  */
 export const SOFT_STOP_MESSAGE =
   'Operator soft stop: finish the current turn, then stop. Do not start new work. ' +
@@ -157,17 +118,12 @@ export const SOFT_STOP_MESSAGE =
   "and send your team-lead a one-line report of where you stopped."
 
 /**
- * Fires one independent stop action per live tile and resolves once every
- * one has settled -- a slow or throwing tile never blocks another's outcome
- * (Promise.allSettled semantics, deliberately not Promise.all).
- *
- * `peerIds`, absent vs. present vs. present-and-empty, are three distinct
- * cases (aaf4537d lot 3 amendment, escalate-only-the-stragglers): absent
- * targets every live tile (the header button); present-and-non-empty
- * targets only those peers (e.g. escalating soft-stop stragglers to hard,
- * without also touching -- and releasing the cards of -- agents who already
- * took the stop); present-and-EMPTY is refused rather than silently treated
- * as "everyone", same discipline as /roadmap/lock-park|lock-release.
+ * peerIds absent, present-and-empty, and present-and-non-empty are three
+ * distinct cases: absent targets every live tile, present-and-empty is refused
+ * rather than treated as "everyone", present-and-non-empty targets exactly
+ * those peers.
+ * Uses Promise.allSettled so one throwing or slow tile never blocks another's
+ * outcome.
  */
 export async function broadcastStop(
   mode: StopMode,
@@ -193,19 +149,11 @@ export async function broadcastStop(
     targets = all.filter((s) => s.status !== 'exited')
     missing = []
   } else {
-    // Delegates to the already-tested resolver (directive.ts) instead of a
-    // hand-rolled filter: closes the charset/trim/dedupe gaps this file used
-    // to have, and surfaces `missing` for peerIds with no live, peer-resolved
-    // match (review round, correction 2).
-    //
-    // resolveDirectiveTargets's OWN contract assumes a real string[] --
-    // its `raw.trim()` throws on a non-string element, and its one existing
-    // caller (executeDirective) is guaranteed one by sanitizeRoadmapItem's
-    // strList() upstream. broadcastStop has no such guarantee at its own
-    // boundary (ipc.ts re-validates before calling it, but a non-string
-    // slipping past TS -- e.g. a stale/fuzzed payload -- must not crash this
-    // function outright): non-strings are filtered out here and reported via
-    // `missing`, same "never a silent drop" discipline as a malformed peerId.
+    // Delegates target resolution to resolveDirectiveTargets rather than a
+    // hand-rolled filter.
+    // That resolver assumes a real string[] and throws on a non-string element;
+    // a non-string peerId here is filtered out and reported via `missing`
+    // instead of crashing the call.
     const wellTyped: string[] = []
     const badType: string[] = []
     for (const p of peerIds) {

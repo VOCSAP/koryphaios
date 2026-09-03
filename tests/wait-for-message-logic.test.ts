@@ -1,21 +1,7 @@
-// Card a21f1303, H4 volet 3: shared/wait-for-message.ts is a pure module (no
-// broker, no server, no bun:sqlite, no timers) so its filter/cap/registry
-// logic is tested directly here, no daemon needed.
-//
-// Named tests/wait-for-message-logic.test.ts (not
-// tests/server-wait-for-message.test.ts) deliberately: the CI "pure modules"
-// job (.github/workflows/desktop-build.yml, `bun scripts/partition-pure-tests.ts`)
-// runs a DENY-list keyed on scripts/pure-module-partition.ts's EXEMPTIONS
-// (card 0bbac537) -- only the `broker-`/`server-` filename prefixes (plus two
-// exact files) are excluded, everything else runs by default. Measured
-// directly against the real isExempt() below, not assumed from the filename
-// convention alone.
-//
-// The two message-delivery paths (WS push in connectWs, poll fallback in
-// pollFallback) are exercised here by feeding tryResolveWaiters the exact
-// candidate shape each call site produces -- proving the SAME pure resolver
-// handles both, and a source-scan proves both call sites actually invoke it
-// (not just one, leaving the other a declared-but-unwired consumer).
+// Named without a server-/broker- prefix so the CI pure-module job's deny-list
+// (card 0bbac537) includes it by default.
+// Both message-delivery paths (WS push and poll fallback) are exercised against
+// the same pure resolver, not assumed identical.
 
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -39,8 +25,6 @@ import {
 } from "../shared/wait-for-message.ts";
 import { isExempt } from "../scripts/pure-module-partition.ts";
 
-// --- Cap measurement (Arbitrage 1, team-lead 2026-08-26) ---
-
 test("hard cap is 115s, strictly under CLAUDE_CODE_MCP_AUTO_BACKGROUND_MS's 120s default", () => {
   expect(WAIT_FOR_MESSAGE_HARD_CAP_SEC).toBe(115);
   expect(WAIT_FOR_MESSAGE_HARD_CAP_SEC).toBeLessThan(120);
@@ -53,12 +37,9 @@ test.each([
   ["omitted (undefined) falls back to the default", undefined, WAIT_FOR_MESSAGE_DEFAULT_SEC],
   ["NaN falls back to the default, never propagates", NaN, WAIT_FOR_MESSAGE_DEFAULT_SEC],
   ["a non-numeric string falls back to the default", "soon", WAIT_FOR_MESSAGE_DEFAULT_SEC],
-  // Team-lead review round 3, 2026-08-26 (U2): a numeric STRING is a
-  // realistic input (this server never validates MCP args against its own
-  // inputSchema, and an LLM caller regularly emits a JSON number as a
-  // string) -- rejecting it by type alone silently substituted the default
-  // for what the caller asked for, with no signal. Number() on a primitive
-  // string cannot throw, so accepting it does not reopen "never throws".
+  // A numeric string is accepted, not rejected by type: this server never
+  // validates MCP args against its own inputSchema, and an LLM caller regularly
+  // emits a JSON number as a string.
   ["a numeric string is parsed, not silently defaulted", "30", 30],
   ["a numeric string with surrounding whitespace is parsed (Number() trims)", "  45  ", 45],
   ["a numeric string above the cap still clamps", "600", WAIT_FOR_MESSAGE_HARD_CAP_SEC],
@@ -66,13 +47,6 @@ test.each([
   ["zero falls back to the default", 0, WAIT_FOR_MESSAGE_DEFAULT_SEC],
   ["a negative value falls back to the default", -30, WAIT_FOR_MESSAGE_DEFAULT_SEC],
   ["Infinity falls back to the default", Infinity, WAIT_FOR_MESSAGE_DEFAULT_SEC],
-  // Team-lead review, 2026-08-26 (R6): two reachable inputs used to slip
-  // through with no lower bound. `true` used to coerce to the number 1 (a
-  // silently-plausible 1-second wait); a tiny positive fraction used to pass
-  // through nearly as-is (a sub-millisecond timer, functionally the polling
-  // loop this tool exists to remove). Both now floor to
-  // WAIT_FOR_MESSAGE_MIN_SEC or fall to the default -- see the two cases
-  // below.
   ["a boolean is rejected by type (was: coerced to 1/0), falls to the default", true, WAIT_FOR_MESSAGE_DEFAULT_SEC],
   ["a tiny positive fraction floors to WAIT_FOR_MESSAGE_MIN_SEC, not near-zero", 0.0001, WAIT_FOR_MESSAGE_MIN_SEC],
   ["a value between 0 and the floor also floors to WAIT_FOR_MESSAGE_MIN_SEC", 0.5, WAIT_FOR_MESSAGE_MIN_SEC],
@@ -81,11 +55,8 @@ test.each([
 });
 
 test("clampWaitTimeoutSec: provably never throws, not even on a Symbol or a valueOf that throws", () => {
-  // Team-lead review, 2026-08-26 (R6): the doc comment claims "never throws"
-  // unconditionally. Before the fix, `Number(requested)` was called on
-  // whatever `requested` was, and Number() invokes valueOf/toString on an
-  // object -- a hostile one can throw from there. The rewritten clamp only
-  // ever runs `typeof requested`, which cannot throw for any value.
+  // clampWaitTimeoutSec only ever evaluates typeof on the input, never Number()
+  // on an arbitrary value, so a hostile valueOf/toString cannot make it throw.
   expect(() => clampWaitTimeoutSec(Symbol("x"))).not.toThrow();
   expect(clampWaitTimeoutSec(Symbol("x"))).toBe(WAIT_FOR_MESSAGE_DEFAULT_SEC);
   const poisoned = { valueOf(): number { throw new Error("boom"); } };
@@ -119,16 +90,6 @@ function candidate(from_peer_id: string, id = 1): WaitCandidateMessage {
 function waiterFor(filterPeerId: string | undefined, sink: WaitCandidateMessage[]): MessageWaiter {
   return { filterPeerId, resolve: (m) => sink.push(m) };
 }
-
-// --- buildWaitPlan / selectPeekMatch / buildWaiter (team-lead R1, 2026-08-26) ---
-// These three replace what used to be five separate inline expressions
-// written directly in server.ts's case (clamp, seconds->ms, trim, first-peek-
-// match selection, and the waiter's filterPeerId field) -- none reachable by
-// execution from a test that cannot import server.ts. A mutation of any one
-// of them used to leave this whole suite green, because the only assertions
-// touching server.ts were source-scan `toContain` checks, true regardless of
-// what the matched substring's own arguments did. Direct execution here
-// closes that gap.
 
 test("buildWaitPlan: clamps timeout_sec and converts to milliseconds", () => {
   expect(buildWaitPlan({ timeout_sec: 600 }).timeoutMs).toBe(WAIT_FOR_MESSAGE_HARD_CAP_SEC * 1000);
@@ -175,16 +136,11 @@ test("buildWaiter: an unfiltered plan produces an unfiltered waiter", () => {
   expect(waiter.filterPeerId).toBeUndefined();
 });
 
-// --- Opportunistic-peek freshness filter (team-lead finding, 2026-08-26) ---
-// server.ts's wait_for_message case peeks once for an already-pending match
-// before registering a waiter. That peek must apply the SAME
-// notifiedMessageIds filter pollFallback already does (server.ts), or a
-// message dispatched via mcp.notification() earlier in the session -- still
-// sitting delivered=0 in the broker (WS push and /peek-messages never mark
-// delivered) -- would instantly "resolve" a wait with stale, already-seen
-// content instead of actually waiting for a NEW one. That is the tool's
-// NOMINAL use case (an agent that already exchanged messages, now waiting
-// for the next reply), not an edge case.
+// The opportunistic peek must apply the same notifiedMessageIds filter
+// pollFallback does, or an undelivered-but-already-seen message resolves the
+// wait with stale content instead of waiting for a new one.
+// This is the tool's nominal case (an agent already mid-exchange), not an edge
+// case.
 
 test("selectFreshWaitCandidates: drops a candidate whose id was already notified this session", () => {
   const already = new Set([1]);
@@ -260,19 +216,10 @@ test("removeWaiter then tryResolveWaiters: a removed (cancelled/expired) waiter 
   expect(sink).toEqual([]); // never called: nothing was consumed for this waiter
 });
 
-// --- Registry leak checks: the registry must empty on EVERY exit (team-lead
-// arbitrage, 2026-08-26). The pure registry is what server.ts's three exit
-// sites (a resolved waiter, setTimeout's expiry callback, extra.signal's
-// abort listener) all funnel through -- tryResolveWaiters on the resolution
-// side, removeWaiter on the other two -- so proving these three leave the
-// registry empty, and that a later probe never rediscovers the departed
-// waiter, covers all three without needing a live timer or a live
-// AbortSignal. A dead extra.signal (never fires) does not reopen zero-loss:
-// wait_for_message never calls the broker's consuming /poll-messages, so an
-// orphaned waiter is, at worst, a resource that outlives its usefulness for
-// up to WAIT_FOR_MESSAGE_HARD_CAP_SEC -- not a lost message. This is exactly
-// the residual the setTimeout branch bounds regardless of the signal ever
-// firing, so a leaked waiter cannot survive past that cap either way.
+// An orphaned waiter (a dead abort signal that never fires) is at worst a
+// resource that outlives its usefulness up to WAIT_FOR_MESSAGE_HARD_CAP_SEC,
+// not a lost message: wait_for_message never consumes via the broker's
+// poll-messages endpoint.
 
 test("registry leak check, RESOLUTION exit: a resolved waiter is gone, and a later candidate finds nobody left", () => {
   const sink: WaitCandidateMessage[] = [];
@@ -309,12 +256,6 @@ test("registry leak check, CANCELLATION exit: an aborted waiter is gone, and a l
 });
 
 test("registry leak check: resolving via WS while an expiry timer is still pending leaves no duplicate entry", () => {
-  // Team-lead review, 2026-08-26: the original fixture called removeWaiter on
-  // an ALREADY-EMPTY list, so the assertion held for any implementation that
-  // does not fabricate elements out of nothing -- it had no discriminating
-  // power. A second, still-pending waiter alongside `w` restores it: a
-  // broken removeWaiter (e.g. one that clears the whole list, or that
-  // resurrects the just-removed entry) now has something to get wrong.
   const sink: WaitCandidateMessage[] = [];
   const w = waiterFor("peer-a", sink);
   const other = waiterFor("peer-b", []);
@@ -336,7 +277,6 @@ test("registry leak check: resolving via WS while an expiry timer is still pendi
 // --- Both delivery paths, simulated with the exact candidate shape each produces ---
 
 test("resolves a waiter the way connectWs's WS push handler would (frame.type === 'message')", () => {
-  // Shape of `f` at server.ts:332-341, the WS frame's own fields.
   const wsFrame: WaitCandidateMessage = {
     id: 7,
     from_peer_id: "peer-a",
@@ -354,7 +294,6 @@ test("resolves a waiter the way connectWs's WS push handler would (frame.type ==
 });
 
 test("resolves a waiter the way pollFallback's /peek-messages loop would (fresh, undelivered)", () => {
-  // Shape of `msg` at server.ts:394-410, one row of PollMessagesResponse.messages.
   const peeked: WaitCandidateMessage = {
     id: 8,
     from_peer_id: "peer-a",
@@ -389,14 +328,11 @@ test("the same file under a server-/broker- prefix would NOT be collected (the e
 function extractFunctionBody(source: string, header: string): string {
   const start = source.indexOf(header);
   if (start === -1) throw new Error(`extractFunctionBody: header not found: ${header}`);
-  // Bounded to the next top-level declaration/section marker, not the whole
-  // file -- avoids a match anywhere below merely because the identifier
-  // exists somewhere else in server.ts. Also bounds at the next `case "` (4-
-  // space indent, matching the switch's own style) so this same helper
-  // extracts a `case "...": {` header's body too, without sweeping in every
-  // OTHER case that follows it up to the next function/section marker --
-  // team-lead review round 4, 2026-08-26: reused for the wait_for_message
-  // case, not duplicated into a second helper.
+  // Bounded to the next top-level declaration or section marker, not the end of
+  // the file, so a match isn't found merely because the identifier exists
+  // elsewhere.
+  // Also stops at the next 4-space-indented `case "`, so the same helper
+  // extracts a switch case's body too.
   const rest = source.slice(start + header.length);
   const nextMarkerRe = /\n(?:function |async function |\/\/ --- | {4}case ")/;
   const end = rest.search(nextMarkerRe);
@@ -409,14 +345,6 @@ function extractFunctionBody(source: string, header: string): string {
 function stripComments(code: string): string {
   return code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 }
-
-// Team-lead review, 2026-08-26: a bare `toContain` proves PRESENCE, not the
-// ORDER the test's own name asserts. Measured: moving the whole
-// tryResolveWaiters resolution block to AFTER connectWs's mcp.notification()
-// call left the old toContain-only assertion green, while the agent would
-// now receive the same message TWICE (once via the notification that fires
-// unconditionally, once via the waiter that still resolves afterward).
-// indexOf both and compare positions instead.
 
 test("connectWs's WS message handler calls tryResolveWaiters before falling back to mcp.notification()", () => {
   const source = readFileSync(join(import.meta.dir, "..", "server.ts"), "utf-8");
@@ -435,30 +363,17 @@ test("pollFallback calls tryResolveWaiters before falling back to mcp.notificati
 });
 
 test("server.ts registers a wait_for_message MCP tool", () => {
-  // Team-lead review, 2026-08-26: a bare '"wait_for_message"' substring check
-  // is fail-open -- it also matches the `case "wait_for_message":` switch
-  // label, so deleting the TOOLS array entry entirely (making the tool
-  // invisible to every agent, delivered dead) leaves this test green.
-  // Anchor on the TOOLS entry's own `name:` key specifically. A regex
-  // (round 3, U5) rather than a literal `toContain` so a formatter putting
-  // `name:` and the value on separate lines, or varying whitespace, does not
-  // produce a gratuitous false red.
+  // Anchored on the TOOLS entry's own name key via regex, not a literal
+  // toContain, so formatter whitespace or line breaks around name: don't cause
+  // a false red.
   const source = readFileSync(join(import.meta.dir, "..", "server.ts"), "utf-8");
   expect(stripComments(source)).toMatch(/name:\s*"wait_for_message"/);
 });
 
-// Team-lead review round 4, 2026-08-26: measured that a ONE-CHARACTER change
-// in server.ts -- "/peek-messages" -> "/poll-messages" at either call site --
-// left the whole suite green. /poll-messages MARKS messages delivered
-// (broker.ts); /peek-messages does not. That single substitution turns
-// wait_for_message (or pollFallback) from non-consuming into consuming, so
-// an expired/cancelled wait would DESTROY the very messages it just read --
-// the zero-message-lost property this whole card is built on holds today
-// only because of this literal, nothing guards it. A source-scan is
-// generally weak (CLAUDE.md), but this is the one shape where it genuinely
-// bites: a bare string literal, no substitutable argument, no branching --
-// there is no execution path that could hide the substitution from a text
-// match the way a variable or a computed value could.
+// This literal must stay /peek-messages, never /poll-messages: poll-messages
+// marks messages delivered, and that distinction alone is what keeps
+// wait_for_message and pollFallback non-consuming so an expired or cancelled
+// wait can't destroy the message it just read.
 test("wait_for_message's opportunistic peek and pollFallback both call the non-consuming /peek-messages endpoint, never the consuming /poll-messages one", () => {
   const source = readFileSync(join(import.meta.dir, "..", "server.ts"), "utf-8");
   const waitBody = stripComments(extractFunctionBody(source, 'case "wait_for_message": {'));
@@ -470,18 +385,14 @@ test("wait_for_message's opportunistic peek and pollFallback both call the non-c
   expect(pollFallbackBody).not.toContain('"/poll-messages"');
 });
 
-// --- runWaitForMessage: the whole decision, injected (team-lead U1, round 3, 2026-08-26) ---
-//
-// A mutation battery on an earlier version of server.ts's case (which moved
-// only VALUE transforms into the pure module, not the CONTROL FLOW) found 12
-// of 13 mutations invisible: no source-scan test can prove a peeked
-// candidate's freshness filter result is actually USED (as opposed to
-// computed and discarded), that the timer is armed with the CLAMPED value,
-// that cancellation actually suppresses a later result, or that two
-// concurrent settle paths (timer vs waiter vs cancel) cannot double-fire.
-// These tests execute runWaitForMessage directly with fake deps -- no
-// network, no real timer -- so each of those properties is proven by running
-// the real decision code, not by scanning server.ts's text for a token.
+// These tests execute runWaitForMessage directly against fake dependencies --
+// no network, no real timer -- because a source scan cannot prove a peeked
+// candidate's freshness-filter result is actually used rather than computed and
+// discarded, that the timer is armed with the clamped value, that cancellation
+// actually suppresses a later result, or that the timer, waiter and cancel
+// paths cannot double-fire against each other.
+// Running the real decision code directly is what proves each of those
+// properties.
 
 /** A promise plus its resolver, exposed for a test to drive timing by hand. */
 function deferred<T>(): { promise: Promise<T>; resolve: (v: T) => void } {
@@ -634,17 +545,14 @@ test("runWaitForMessage: a waiter match cancels the pending timer and unsubscrib
   expect(cancelUnsubscribed).toBe(true);
 });
 
-// Team-lead review round 4, 2026-08-26: the "cancellation while the peek is
-// still in flight" test above only exercises cancellation BEFORE any waiter
-// exists. Measured gap: a mutation that resolves "cancelled" directly
-// (bypassing finish()'s cleanup) stayed green against that test, because no
-// waiter is registered yet at that point for the missing unregister call to
-// matter. The uncaught consequence: an orphaned waiter would stay in
-// server.ts's pendingWaiters after its own call has already resolved
-// cancelled, and a later WS/poll message matching its filter would resolve
-// it anyway -- one dead call "consuming" a message (the notifiedMessageIds
-// side effect on that path marks it notified) that the agent who actually
-// asked for it never sees, since its own tool call already returned.
+// Cancellation exercised only before any waiter exists does not catch a
+// mutation that resolves 'cancelled' directly, bypassing cleanup: with no
+// waiter registered yet, the missing unregister call has nothing to matter
+// against.
+// Left unchecked, an orphaned waiter would stay registered after its own call
+// already resolved cancelled, and a later message matching its filter would
+// resolve it anyway -- consumed by a call whose caller already stopped
+// listening.
 test("runWaitForMessage: cancellation AFTER the waiter is registered unregisters it exactly once", async () => {
   const peeked = deferred<WaitCandidateMessage[]>();
   const registered = deferred<void>();

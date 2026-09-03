@@ -1,23 +1,8 @@
-// Card 3c085f1a, review round 2 (geste 2): tests/desktop-session-peer-tools-env.test.ts
-// proves peerToolsEnvValue's own VALUE logic behaviorally, but explicitly
-// does NOT prove its result only reaches sessionEnv CONDITIONALLY -- that
-// file's own header says so ("proven by construction, not independently
-// re-tested here"). This closes that gap: without it, the mutation
-// `Object.assign(sessionEnv, { CLAUDE_PEERS_TOOLS: peerToolsValue ?? '' })`
-// (unconditional -- every tile gets ZERO tools, the worst possible outcome)
-// left every other test GREEN, because the value-only test never calls the
-// real wiring and the frozen role-env scan only looks at CLAUDE_PEERS_ROLE.
-//
-// SessionService cannot be instantiated behaviorally (hardcoded `PtyManager`,
-// not dependency-injected -- see tests/desktop-session-role-env.test.ts's own
-// header for the identical limit on CLAUDE_PEERS_ROLE), so this is a
-// structural scan, the SAME class of proof already accepted in this repo for
-// this exact unmockable class. Deliberately a NEW, SEPARATE file: it never
-// opens or extends tests/desktop-session-role-env.test.ts, which is frozen
-// (test-engineer's shared-helper migration, md5-pinned). Brace-balancing
-// delegates to tests/_braced-body.ts (card 9e450573 Lot A) rather than
-// re-copying it -- that card's own measurement is exactly what this file
-// would otherwise have become the 22nd instance of.
+// Closes a gap the value-only env test leaves open: it doesn't prove
+// peerToolsEnvValue's result reaches sessionEnv conditionally.
+// A structural scan is used since SessionService can't be instantiated
+// behaviorally; an unconditional Object.assign mutation (every tile gets zero
+// tools) would otherwise leave every other test green.
 
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";

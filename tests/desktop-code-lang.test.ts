@@ -156,22 +156,14 @@ test("the caps stay at the values their measurement justifies", () => {
   expect(HIGHLIGHT_MAX_TOTAL_CHARS).toBe(262144);
 });
 
-// --- Coverage guard -----------------------------------------------------
-//
-// PROXY, NOT THE DOMAIN. The Files viewer opens worktrees and live session
-// cwds, i.e. arbitrary repositories, so no test can enumerate the languages it
-// will actually meet. This scan measures THIS repository only -- the best
-// approximation available, and deliberately a weaker claim than "the language
-// table is complete". What it does buy: the day this project grows a language
-// nobody mapped, the failure is LOUD here instead of a silently plain-text
-// viewer. The closed guard lives in the type system, not here: the renderer's
-// grammar table is `satisfies Record<CodeLang, ...>`, so a language with no
-// grammar cannot compile.
-//
-// The test OWNS its premise. Both the threshold and the accepted-unmapped list
-// are frozen in this file, so neither can drift under the assertion and leave
-// it vacuously green: a new extension crossing the threshold fails until
-// someone either maps it or writes it down below, on purpose.
+// A proxy, not the domain: the Files viewer opens arbitrary repositories, so
+// this census checks only this repo's language mix, not what the viewer will
+// actually meet.
+// The closed guard is the type system: the renderer's grammar table is
+// `satisfies Record<CodeLang, ...>`, so a language with no grammar cannot
+// compile.
+// Both the threshold and the accepted-unmapped list are frozen here so neither
+// can drift and leave the assertion vacuously green.
 const CENSUS_THRESHOLD = 3;
 const ACCEPTED_UNMAPPED: Record<string, string> = {
   png: "binary asset, never highlighted",

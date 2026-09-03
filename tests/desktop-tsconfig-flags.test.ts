@@ -1,27 +1,6 @@
-// spec_4fb62fae / spec_37a29aeb: pins noUnusedLocals/noUnusedParameters across
-// every desktop tsconfig, so a merge-conflict resolution or a new config
-// added later can't silently drop the gate a previous card enabled
-// (desktop/tsconfig.node.json, desktop/tsconfig.web.json) and this card
-// extended to desktop/mobile-shell/tsconfig.json -- BEFORE this card, the
-// mobile-shell config was the ONE tsconfig CI actually type-checked
-// (.github/workflows/desktop-build.yml, "Typecheck the mobile shell" step).
-// This same batch adds a "Typecheck desktop (node + web)" step, so as of this
-// commit CI type-checks all three.
-//
-// Coverage requirement (the whole point of this file, per CLAUDE.md's gating-
-// coverage rule): the set of configs to check is DISCOVERED by walking
-// desktop/** on disk, never a fixed array of 2-3 known paths. A fourth
-// tsconfig added next month is picked up automatically and must either carry
-// both flags or be added to EXEMPT_CONFIGS below with a written reason --
-// silence is not an option, an unhandled config fails the test. The other
-// half of coverage -- a config DISAPPEARING from the walk -- is guarded
-// explicitly below (see "anchors the discovered set" test): a bare length
-// floor only catches wholesale breakage, not one known config quietly
-// dropping out.
-//
-// This file's own name matches the CI collection glob
-// (tests/desktop-*.test.ts, see TESTING.md "Cross-platform tests") -- a
-// pin that isn't collected by CI enforces nothing where it matters.
+// Pins noUnusedLocals/noUnusedParameters across every desktop tsconfig by
+// walking desktop/** on disk rather than a fixed list, so a new config is
+// either compliant or must be named in EXEMPT_CONFIGS with a written reason.
 
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -77,17 +56,10 @@ const EXEMPT_CONFIGS: Record<string, string> = {
     "no compilerOptions of its own, nothing for tsc to type-check directly under this config.",
 };
 
-// Strips `// line` comments from JSONC while leaving double-quoted string
-// contents untouched, so a `"https://..."` value (or any other string
-// containing "//") survives intact. JSON has no single-quoted or template
-// string literals and no regex literals, so (unlike the react/react-dom/
-// zustand hygiene scanner in tests/desktop-test-hygiene.test.ts, which has to
-// track eight states for real JS/TS source) tracking exactly one piece of
-// state -- "currently inside a double-quoted string" -- is sufficient for
-// `//` comments specifically. It does NOT handle `/* */` block comments --
-// none of the tsconfigs in this tree use them today, and auditConfigs()
-// below fails closed (a named, attributable violation) rather than silently
-// passing if one ever does, so the gap is safe but real.
+// Strips // line comments from JSONC, leaving double-quoted string contents
+// untouched so a URL survives. Tracks only 'inside a double-quoted string'
+// state since JSON has no other literal forms; does not handle /* */ block
+// comments, which auditConfigs() fails closed on rather than silently passing.
 function stripJsonComments(src: string): string {
   let out = "";
   let inString = false;
@@ -212,11 +184,10 @@ test("the exemption list only names configs that actually exist on disk, with a 
   const configs = new Set(collectTsconfigs(DESKTOP_ROOT).map(toRepoRelative));
   for (const [rel, reason] of Object.entries(EXEMPT_CONFIGS)) {
     expect(configs.has(rel), `EXEMPT_CONFIGS names ${rel}, which collectTsconfigs did not find`).toBe(true);
-    // The exemption's whole justification is "a written reason" (see the
-    // comment above EXEMPT_CONFIGS and the header comment at the top of this
-    // file) -- but nothing previously read the string's CONTENT, so `""`
-    // would have passed silently. Require something more than a token
-    // placeholder.
+    // The exemption's whole justification is a written reason, but nothing
+    // checks the string's actual content, so an empty string would pass
+    // silently.
+    // This requires something more than a token placeholder.
     expect(
       reason.trim().length,
       `EXEMPT_CONFIGS["${rel}"] reason is too short to be a real written explanation: ${JSON.stringify(reason)}`
@@ -300,24 +271,10 @@ test("stripJsonComments: a trailing // comment on the same line as a real value 
   expect(parseJsonc(src)).toEqual({ a: true });
 });
 
-// ----- desktop/tsconfig.node.json include coverage over mcp/ and hooks/ ---
-//
-// Card d07ab3f0: desktop/tsconfig.node.json's `include` array carries
-// "hooks/**/*.ts" and "mcp/**/*.ts" alongside named-file entries for
-// desktop/../shared/*.ts, but nothing previously read that array's CONTENT --
-// only its two compilerOptions flags, asserted above. A one-character
-// regression (deleting "mcp/**/*.ts" from include) would silently drop
-// desktop/mcp/deck-control-mcp.ts and desktop/mcp/demo-browser-mcp.ts (the
-// two production MCP servers card a7822bc4 just brought under typecheck)
-// back out of tsc's program, with this suite and CI both staying green.
-//
-// This closes the gap by DISCOVERING the real tracked file set (`git
-// ls-files desktop/mcp desktop/hooks`, never a hardcoded list -- so a new
-// file dropped into either directory is covered automatically) and asserting
-// every path is matched by at least one glob in the parsed include array.
-// Fails closed in both directions per CLAUDE.md's gating-coverage rule: glob
-// removed from include -> known file now unmatched; new source directory
-// added under desktop/ with nothing in include naming it -> also unmatched.
+// desktop/tsconfig.node.json's include array is discovered from the real
+// tracked file set via git ls-files rather than asserted only on its two
+// compilerOptions flags, so a glob silently dropped from include (e.g. losing
+// mcp/**/*.ts) fails this test instead of staying green.
 
 // Translates one tsconfig `include` glob entry to a RegExp, using the same
 // ** and * semantics tsc itself applies (`**/` matches zero or more full
@@ -367,42 +324,14 @@ function matchesAnyGlob(relPath: string, globs: string[]): boolean {
   return globs.some((g) => globToRegExp(g).test(relPath));
 }
 
-// ----- desktop/**/*.ts(x) source coverage across ALL desktop tsconfigs ----
-//
-// Card d07ab3f0, widened during review (team-lead desktop-7b2civn-koryphaios-2):
-// the first cut of this test scoped its domain to `git ls-files desktop/mcp
-// desktop/hooks`, i.e. two directory names written into the test itself. That
-// is the exact fail-open shape the card exists to close, just with a smaller
-// N -- MEASURED directly: dropping a probe file under a brand-new
-// desktop/agents/ directory left that narrower test green. The domain must
-// instead be "every tracked .ts/.tsx file anywhere under desktop/", walked
-// via `git ls-files desktop` (never a directory allow-list), checked against
-// every desktop tsconfig's own include array (also walked, not just
-// tsconfig.node.json).
-//
-// A domain this wide immediately surfaces real files covered by NOTHING:
-// MEASURED via a disposable audit script against the three real configs
-// before writing this test, exactly two kinds of pre-existing gap turned up
-// (never three, never zero -- this comment is not a guess about what the
-// exemption list below will contain, it is what was found):
-//   - desktop/tests-support/{hygiene-fixtures.ts,react-test-harness.ts}: no
-//     tsconfig, no CI step, no comment anywhere names them -- an UNDECLARED
-//     gap, tracked by roadmap card f4125a11, expected to disappear.
-//   - desktop/mobile-shell/capacitor.config.ts: deliberately excluded by
-//     mobile-shell/tsconfig.json's own written comment next to
-//     `"include": ["src/**/*.ts"]` (imports @capacitor/cli, a dev-only
-//     Android-tooling dependency, carries no logic worth checking) -- a
-//     DELIBERATE, already-documented exclusion, expected to stay.
-//
-// EXEMPT_SOURCES exists to let exactly those two kinds through, and no
-// others: an entry is only admitted with a written reason AND one of the two
-// `nature` values below, so a future reader can't extend the list by
-// analogy alone -- they must say which kind of exception they are adding.
-// Citing "path + symbol" for the deliberate case (never a line number): a
-// line-numbered pointer rots the moment the file reflows (this repo has
-// precedent -- a laurel badge moved 35 lines while its CSS class stayed
-// put), while `desktop/mobile-shell/tsconfig.json`'s capacitor.config.ts
-// comment is found by grepping the filename, not a number.
+// Domain is every tracked .ts/.tsx file under desktop/ via git ls-files, not a
+// directory allow-list: scoping to two named directories left a probe file
+// under a brand-new directory uncovered and still green.
+// EXEMPT_SOURCES only admits an entry with a written reason and a nature of
+// undeclared-gap (tracked by a roadmap card, expected to disappear) or
+// deliberate (already documented next to some tsconfig's own include/exclude,
+// cited by path and symbol rather than line number since this repo has had
+// comments rot after a reflow).
 type SourceExemptionNature =
   | "undeclared-gap" // no tsconfig, no CI step, no comment names it anywhere; tracked by a dedicated roadmap card; expected to disappear.
   | "deliberate"; // excluded on purpose, already documented in the product itself (a written comment next to some tsconfig's own include/exclude); expected to stay.
@@ -476,26 +405,12 @@ function loadIncludeGlobs(spec: {
   return { baseDir: spec.baseDir, include: parsed.include ?? [], exclude: parsed.exclude ?? [] };
 }
 
-// The exact git ls-files invocation the real-repo test below relies on for
-// its domain, pinned to a literal array rather than inlined at the call
-// site, so a future edit reviving `--others --exclude-standard` (which this
-// file carried for one round, see git history around card d07ab3f0) fails
-// this pin closed instead of silently changing behaviour again.
-//
-// `--cached` ONLY, deliberately NOT `--others`. Decision (team-lead
-// desktop-7b2civn-koryphaios-2): `--cached` reads the INDEX, i.e. exactly
-// what is staged -- a source file that is actually about to ship has been
-// `git add`-ed, so it already appears in `--cached` by the time this gate
-// would matter for real. `--others` would instead also enumerate untracked
-// working-tree files, which in this repo's 12-concurrent-session shared
-// checkout means ANY session's uncommitted, unrelated WIP file under
-// desktop/ can turn this test red for everyone -- a failure that is not
-// attributable to whoever is running the suite, and one CI can never
-// reproduce (CI never has untracked content), which is exactly the
-// local-vs-CI divergence other cards in this repo exist to close. The
-// residual gap this choice accepts: the narrow window between a file's
-// creation and its `git add` is not covered -- nothing can land through
-// that window, so nothing is lost by not checking it.
+// Pinned to a literal array rather than inlined at the call site, so a future
+// edit reviving --others fails this pin instead of silently changing behavior.
+// --cached only, deliberately not --others: --others would also enumerate
+// untracked working-tree files, which in a shared checkout means any session's
+// unrelated uncommitted file under desktop/ could turn this test red for
+// everyone, a failure CI can never reproduce.
 const DESKTOP_SOURCE_DISCOVERY_ARGS = ["ls-files", "--cached", "desktop"];
 
 // Extracted so the real-repo test below and its fixture-backed counterparts
@@ -548,17 +463,10 @@ test("globToRegExp: a plain path with no wildcard only matches itself", () => {
 // never to invent one: the reason's author still writes the sentence.
 const REASON_PATH_REFERENCE = /[\w.-]+(?:\/[\w.-]+)+\.(?:json|ts|tsx|md)\b/;
 
-// Checks that `nature` is not just a label but a claim the reason text can
-// actually be held to (fix for team-lead review round 2 on card d07ab3f0:
-// MEASURED that swapping "undeclared-gap" and "deliberate" on an existing
-// entry left every prior assertion green -- nothing depended on which value
-// was there). "undeclared-gap" must cite a tracking roadmap card id (an
-// 8-hex-char id, this repo's own id shape) so the entry is attributable and
-// so a future reader knows which card's completion should delete it.
-// "deliberate" must name a file that (a) exists and (b) itself mentions the
-// exempted file's basename -- i.e. the claimed documentation is real, not an
-// invented pointer (this repo's own file:line-rot precedent is exactly why
-// this checks CONTENT, not just that some path-shaped substring is present).
+// An undeclared-gap entry must cite an 8-hex-char roadmap card id so it is
+// attributable and removable; a deliberate entry must name a file that both
+// exists and itself mentions the exempted file's basename, so the claimed
+// documentation is real rather than an invented pointer.
 function validateExemptionNature(rel: string, entry: SourceExemption): string | undefined {
   if (entry.nature === "undeclared-gap") {
     if (!/\b[0-9a-f]{8}\b/.test(entry.reason)) {
@@ -656,19 +564,10 @@ test("every .ts/.tsx/.mts/.cts file staged or committed under desktop/ is covere
   ).toEqual([]);
 });
 
-// This exercises the REAL include data (DESKTOP_TS_CONFIGS/loadIncludeGlobs)
-// and the REAL exemption list (EXEMPT_SOURCES) against a file list that
-// includes a brand-new, uncovered directory -- only the git enumeration
-// itself is simulated (a literal array standing in for `git ls-files
-// --cached desktop`'s output). HONEST RESIDUAL: this does NOT prove that
-// `git ls-files --cached desktop` itself returns the right domain -- that
-// command's shape is pinned separately by the "desktop source discovery
-// uses git ls-files --cached" test above. What this proves is that IF the
-// domain includes a newly-landing, uncovered file, the real config/exemption
-// data reports it -- the property that stayed silently unproven when the
-// first cut of this test scoped its git enumeration to desktop/mcp and
-// desktop/hooks only (MEASURED: a real untracked probe under desktop/agents/
-// left that version green).
+// Exercises the real include data and the real EXEMPT_SOURCES against a
+// simulated git-ls-files output containing a brand-new uncovered directory:
+// proves the real config/exemption data reports such a file, which a narrower
+// version scoped to two named directories did not.
 test("findUncoveredDesktopSources: against the REAL desktop tsconfigs and REAL exemptions, a file under a brand-new uncovered directory is still reported", () => {
   const configs = DESKTOP_TS_CONFIGS.map(loadIncludeGlobs);
   const files = ["desktop/mcp/deck-control-mcp.ts", "desktop/agents/zzprobe.ts"];
@@ -676,12 +575,10 @@ test("findUncoveredDesktopSources: against the REAL desktop tsconfigs and REAL e
   expect(unmatched).toEqual(["desktop/agents/zzprobe.ts"]);
 });
 
-// findUncoveredDesktopSources fixture tests -- these exercise what the
-// real-repo test above cannot, on its own, distinguish from a hardcoded
-// two-or-three-file check: a NEW source file appearing under a directory
-// nothing has ever heard of, and the exemption list actually being READ
-// (removing an entry must turn a previously-silent gap back into a
-// violation -- an exemption that can vanish with no effect is decorative).
+// Exercises what the real-repo test above cannot distinguish from a hardcoded
+// check on its own: a new source file under a directory nothing has ever heard
+// of, and that removing an exemption entry actually turns a silent gap back
+// into a violation.
 test("findUncoveredDesktopSources: a file under a brand-new, uncovered directory is reported", () => {
   const configs = [{ baseDir: "desktop/", include: ["hooks/**/*.ts", "mcp/**/*.ts"] }];
   const files = ["desktop/mcp/deck-control-mcp.ts", "desktop/agents/new-agent.ts"];
@@ -707,12 +604,9 @@ test("findUncoveredDesktopSources: a file matching no config's include is report
   expect(findUncoveredDesktopSources(files, configs, exemption)).toEqual([]);
 });
 
-// Blocker fix (team-lead review round 2 on card d07ab3f0): `exclude` cancels
-// a matching `include`, exactly like tsc itself. MEASURED against a
-// disposable git-archive mirror of desktop/ (never the real tree) that the
-// UNFIXED include-only logic reported zero uncovered files even after
-// adding `"exclude": ["mcp/**/*.ts"]` to the mirrored tsconfig.node.json --
-// this fixture is the permanent, always-on form of that same proof.
+// exclude cancels a matching include, exactly like tsc itself: an include-only
+// version reported zero uncovered files even after adding a matching exclude
+// entry.
 test("findUncoveredDesktopSources: a file matching include but also matching exclude is reported as uncovered", () => {
   const configs = [{ baseDir: "desktop/", include: ["mcp/**/*.ts"], exclude: ["mcp/**/*.ts"] }];
   const files = ["desktop/mcp/deck-control-mcp.ts"];

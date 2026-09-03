@@ -1,20 +1,9 @@
-// Usage-limit (quota) detection + auto-resume scheduling (PLAN-v0.4 C1).
-//
 // Pattern-matches Claude Code's rate-limit messages in the PTY output stream,
-// parses the reset time the message itself prints, and emits `resume-due` once
-// that time passes so the session service can inject a "continue" keystroke.
-// The regex families mirror henryaj/autoclaude (verified against its sources):
-// old format ("limit reached ∙ resets 2pm"), new format ("You've hit your
-// limit · resets 10pm (Europe/London)"), minutes remaining ("resets 8m"), plus
-// conservative word-boundary fallbacks with no captured time.
-//
-// Unlike tmux capture-pane (which re-reads the whole screen every poll), the
-// PTY stream arrives in chunks and a message can be split across two of them,
-// so detection runs on a small per-session ROLLING buffer of ANSI-stripped
-// text rather than chunk by chunk.
-//
-// Like thinking.ts, this module stays deliberately heuristic and isolated so
-// the rules can be tuned per Claude Code version without touching the service.
+// parses the reset time the message itself prints, and emits 'resume-due' once
+// that time passes.
+// Detection runs on a small per-session rolling buffer of ANSI-stripped text
+// rather than chunk by chunk, since a rate-limit message can be split across
+// two PTY chunks.
 
 import { EventEmitter } from 'node:events'
 import { createSafeStripper } from './detect/safe-strip'
@@ -33,25 +22,13 @@ export interface QuotaResumeDueEvent {
   id: string
 }
 
-// Strips CSI (colours, cursor moves) AND OSC (title, progress, notify --
-// card 1aa69066/H2) sequences, so a marker wrapped in colour codes still
-// matches, AND text carried inside an OSC payload (e.g. the spinner glyph in
-// Claude Code's own OSC 0 title, measured in docs/DESIGN-NOTIFY-EVENTS.md)
-// cannot spuriously feed FALLBACK_PATTERNS below. One combined regex rather
-// than two, deliberately: a per-chunk strip alone cannot remove an OSC
-// sequence fragmented across two PTY chunks (its first half has no
-// terminator yet, so nothing matches), which is why `feed()` below re-runs
-// this same function on the ACCUMULATED buffer after concatenation, not
-// only on the incoming per-chunk delta.
-//
-// OSC branch's class EXCLUDES ESC (not just BEL) -- that exclusion, not
-// the `{0,4096}` bound alongside it, is what prevents the quadratic blowup
-// on an adversarial buffer full of unterminated "ESC ]" heads on the main
-// process's hot PTY path. Corrected false pointer, card 1aa69066 review
-// round 3 (T5): the bound ALONE, without the ESC exclusion, measured
-// WORSE than the original unfixed regex. Full measurement + rationale on
-// attention.ts's own ANSI_RE comment; tests/desktop-osc-perf.test.ts pins
-// both properties, separately, for all four files that carry this class.
+// Strips CSI and OSC sequences in one combined regex, since a per-chunk strip
+// alone can't remove an OSC sequence fragmented across two PTY chunks — feed()
+// re-runs this same function on the accumulated buffer after concatenation, not
+// only on the incoming delta, to catch that.
+// The OSC branch's character class excludes ESC, not just BEL; that exclusion,
+// not the length bound alongside it, is what prevents a quadratic blowup on an
+// adversarial buffer of unterminated OSC heads on the hot PTY path.
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b\n]{0,4096}(?:\x07|\x1b\\))/g
 export function stripAnsi(s: string): string {
@@ -174,15 +151,12 @@ export class QuotaDetector extends EventEmitter {
   feed(id: string, data: string): void {
     const st = this.state(id)
     const stripped = stripAnsi(data)
-    // Card 1aa69066 review round 3, blocker T1: `st.safe` MUST be fed on
-    // EVERY chunk, unconditionally, not only while `st.limited` is true --
-    // an incremental state machine fed a SUB-SAMPLED stream is no longer
-    // incremental. The chunk that OPENS an episode (this one, seen before
-    // `st.limited` flips true below) can itself carry an unterminated OSC
-    // head; skipping it here left `st.safe` desynchronised from the real
-    // byte stream, reopening F3 exactly where it had been measured closed.
-    // attention.ts already has this right (`busySafe` computed before its
-    // `if (st.waiting)` branch) -- this hoists quota.ts to match.
+    // st.safe must be fed on every chunk unconditionally, not only while
+    // st.limited is true: an incremental state machine fed a filtered stream
+    // drifts out of sync with the real byte stream.
+    // The chunk that opens an episode can itself carry an unterminated OSC
+    // head, so skipping it here would desynchronize st.safe before st.limited
+    // even flips true.
     const busySafe = st.safe.feed(data)
 
     if (st.limited) {

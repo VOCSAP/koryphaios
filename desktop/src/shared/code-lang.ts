@@ -138,26 +138,14 @@ export function resolveCodeLang(path: string, firstLine?: string): CodeLang | nu
   return null
 }
 
-// --- Tokenisation budget -------------------------------------------------
-//
-// Shiki's tokenisation is SYNCHRONOUS. Only loading a grammar is async, so the
-// tokenising itself runs on the renderer's main thread and freezes the whole
-// window (every tile, every terminal) for its duration. Measured in the real
-// renderer (Electron 43 / V8): ~4.2 ms per KB above ~24 KB, linear. A 224 KB
-// file froze the Deck for 1150 ms before these caps existed.
-//
-// TWO caps, because they answer two different questions, and neither replaces
-// the other:
-//   PER BLOCK  bounds the worst SINGLE freeze: one block is one uninterruptible
-//              task. 64 KB is ~270 ms, and still covers 98.3% of this repo's
-//              highlightable files (measured: p90 23 KB, p95 37 KB, p99 83 KB).
-//   TOTAL      bounds the CPU spent on one request. It cannot bound the freeze,
-//              since the renderer yields between blocks -- but a 100-hunk diff
-//              must not burn seconds of CPU just because each slice is small.
-// A global cap alone was the shipped bug: it summed the blocks and compared
-// once, so a single 400 KB block sailed through it. The Files viewer is exactly
-// that shape (it always submits ONE block, the whole file), so the per-block
-// cap is the only thing protecting it.
+// Shiki's tokenisation is synchronous and runs on the renderer's main thread,
+// freezing the whole window for its duration.
+// Two caps because they bound different things: per-block bounds the worst
+// single freeze, total bounds the CPU spent on one request (the renderer yields
+// between blocks, so total cannot bound the freeze).
+// A global cap alone let one oversized block sail through by summing and
+// comparing once; the Files viewer always submits one whole-file block, so the
+// per-block cap is what protects it.
 export const HIGHLIGHT_MAX_BLOCK_CHARS = 64 * 1024
 export const HIGHLIGHT_MAX_TOTAL_CHARS = 256 * 1024
 

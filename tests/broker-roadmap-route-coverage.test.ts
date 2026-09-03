@@ -1,22 +1,11 @@
-// Roadmap card 39c40571, LAYER 1: COVERAGE of the author guard, not just its
-// sensitivity.
-//
-// A test that fires the known defect at the known handler passes honestly and
-// proves nothing about the rest of the domain. This repo has measured that
-// failure four times (a discipline test announcing "every handler" while its
-// hardcoded list covered 4 of 8). So this file does not carry a list of routes:
-// it DISCOVERS them from broker.ts and forces every newly discovered one to be
-// classified before it can be considered covered.
-//
-// Two negative controls keep the extractor itself from becoming the silent
-// point of failure:
-//   1. the discovered set is compared to an explicit expected set, so a
-//      reformat that shrinks the extraction is RED ("extraction shrank"),
-//      never a quietly smaller subset;
-//   2. the extractor is run against a FIXTURE containing a route that exists
-//      nowhere in production, proving it actually bites. The sentinel lives in
-//      the fixture on purpose -- an unguarded sentinel route left in the real
-//      routing table would be a hole in itself.
+// Routes are discovered from the router's own source rather than hardcoded,
+// since a hardcoded list has repeatedly covered only a fraction of the handlers
+// while claiming full coverage.
+// Two negative controls guard the extractor itself: the discovered set is
+// diffed against an explicit expected set, so a shrinking extraction fails
+// loudly instead of quietly returning a smaller subset.
+// The extractor is also run against a fixture route that exists nowhere in
+// production, to prove it actually fires.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -66,14 +55,6 @@ function discoverRoadmapRoutes(source: string): string[] {
 /** Read-only: no author to prove. */
 const READ_ROUTES = new Set(["/roadmap/list", "/roadmap/export"]);
 
-/**
- * Nothing left to exempt: card 40ddf1f5 wired resolveRoadmapAuthor into
- * /roadmap/import (it used to be exempted here on the grounds that its guard
- * was that card's job, not this file's -- the exemption's own reasoning said
- * so). An empty set is kept, not deleted, so the fail-closed default below
- * (unclassifiedRoutes) still has three buckets to check a future route
- * against, not two.
- */
 const EXEMPT_ROUTES = new Set<string>([]);
 
 /** Write routes that must refuse an unproven author, with a well-formed body. */
@@ -227,28 +208,13 @@ test("every guarded write route refuses an author it cannot prove", async () => 
   }
 });
 
-// Card aaf4537d (round-3 mutation review, C7a): the 401 loop above cannot by
-// itself catch a route MISCLASSIFIED into GUARDED_PROBES that actually
-// belongs in OPERATOR_GUARDED_PROBES (e.g. /roadmap/lock-park) -- its probe's
-// `by` is a REGISTERED peer_id, so resolveRoadmapAuthor's own impersonation
-// gate 401s BEFORE any route-specific logic runs, for every route without
-// exception. Moving lock-park into GUARDED_PROBES stayed fully green under
-// that probe alone: the assertion is blind to which bucket a route sits in.
-// This is the same discipline the OPERATOR_GUARDED_PROBES probe below already
-// uses (an UNREGISTERED, unreserved `by`), applied here as a SECOND, additive
-// check -- not a replacement, since the five real GUARDED_PROBES members
-// (upsert/archive/reorder/import/append-context) legitimately SUCCEED for an
-// ordinary unregistered author on an unlocked/unparked item (measured by
-// reading each handler: none of them requires `author.proven` or
-// `author.operator_id` outside of privileged sub-paths like `force`). So
-// replacing the registered-peer probe with an unregistered one, as the
-// review's wording could be read literally, would turn those five green
-// assertions red for the wrong reason. What actually distinguishes a
-// GUARDED_PROBES route from an OPERATOR_GUARDED_PROBES one is the 403 gate
-// itself: only the latter checks `author.operator_id === undefined`. Sending
-// an unregistered `by` and asserting the response is NEVER 403 catches
-// exactly that -- if lock-park sat here, this probe would 403 (it requires
-// operator proof) where "not 403" is expected, going red.
+// The 401 loop above can't by itself catch a route misclassified into
+// GUARDED_PROBES that actually belongs in OPERATOR_GUARDED_PROBES, since
+// resolveRoadmapAuthor's impersonation gate 401s first for any registered `by`,
+// regardless of bucket.
+// This second probe uses an unregistered `by` and asserts the response is never
+// 403: only OPERATOR_GUARDED_PROBES routes check author.operator_id ===
+// undefined, so a misclassified route would go red here specifically.
 test("no guarded write route silently requires operator proof (that gate belongs to OPERATOR_GUARDED_PROBES only)", async () => {
   const seeded = await post<{ item: RoadmapItem }>(`${broker.url}/roadmap/upsert`, {
     project_key: PK,
@@ -269,14 +235,9 @@ test("no guarded write route silently requires operator proof (that gate belongs
 });
 
 test("every operator-guarded write route refuses a well-formed write with no operator proof, with 403 (identity is provable, privilege is not)", async () => {
-  // `by` is deliberately an UNREGISTERED name here, unlike the 401 probe
-  // above: a `by` matching a real registered peer_id would trip
-  // resolveRoadmapAuthor's OWN peer-identity-proof branch first (401),
-  // masking this route's separate operator-privilege gate entirely --
-  // measured (RED before this fix: 401 received where 403 was expected).
-  // An unregistered, unreserved name resolves as an ordinary unproven claim
-  // (author.operator_id === undefined, no error), which is exactly the
-  // shape that isolates the 403 gate under test.
+  // `by` is deliberately unregistered here: a registered peer_id would trip
+  // resolveRoadmapAuthor's own identity-proof branch first (401), masking this
+  // route's separate operator-privilege gate (403).
   const seeded = await post<{ item: RoadmapItem }>(`${broker.url}/roadmap/upsert`, {
     project_key: PK,
     by: "unregistered-fixture-operator",
@@ -292,24 +253,13 @@ test("every operator-guarded write route refuses a well-formed write with no ope
   }
 });
 
-// ---------------------------------------------------------------------------
-// SECOND AXIS (card c33a5968): the guard above proves resolveRoadmapAuthor is
-// called on every write route -- it says nothing about whether a HANDLER
-// touches status/locked (and therefore needs the inactive-claim guard).
-// Without this, a future handler could write `locked = 1` unguarded and
-// nothing here would break: this file's first axis is keyed on ROUTES, this
-// one is keyed on HANDLER FUNCTION NAMES, discovered the same way (regex over
-// broker.ts, explicit expected-set shrink detection, fixture-bites negative
-// control) so a new handler cannot silently land unclassified either.
-//
-// Known limitation, stated rather than hidden: this axis only classifies
-// handlers named `handleRoadmap*`/`releaseStaleLocks` and only checks that a
-// GUARDED handler's body contains a call to the two guard predicates. It does
-// NOT prove the guard is reachable on every code path inside that handler,
-// and it cannot catch a rewrite INSIDE an already-EXEMPT handler that later
-// starts writing status/locked -- the same structural limitation the route
-// axis above has (it proves a call exists, not that every branch reaches it).
-// ---------------------------------------------------------------------------
+// A second axis, keyed on handler function names rather than routes: proves
+// resolveRoadmapAuthor is called everywhere, but says nothing about whether a
+// handler that touches status/locked also carries the inactive-claim guard.
+// Known limitation: only classifies handlers named
+// handleRoadmap*/releaseStaleLocks, and only checks that a guarded handler's
+// body contains a call to the two guard predicates -- it does not prove every
+// code path reaches them.
 
 /**
  * Handler function names discovered from broker.ts. Column-0-closing-brace
@@ -325,14 +275,10 @@ function discoverRoadmapHandlers(source: string): string[] {
 }
 
 /**
- * Same closing-brace convention as tests/desktop-sandbox-copy.test.ts's
- * extractFunctionBody (a top-level function's closing brace sits alone at
- * column 0, never a nested block's), adapted for this file's handlers: their
- * return type is routinely a union with an INLINE object
- * (`RoadmapUpsertResponse | { error: string; status: number }`), whose own
- * `{` is not followed by a newline -- unlike the real body-opening brace, so
+ * A handler's return type is routinely a union with an inline object whose own
+ * `{` is not followed by a newline, unlike the real body-opening brace --
  * matching the first `{...\n` (not just the first `{`) is what tells them
- * apart and keeps this from grabbing the return-type's braces instead.
+ * apart.
  */
 function extractFunctionBody(source: string, name: string): string {
   const match = source.match(
@@ -417,15 +363,9 @@ test("every discovered handler is classified: guarded or consciously exempt", ()
 });
 
 /**
- * Team-lead review (2026-08-12), upgrading the previous `.includes()` check:
- * a substring check only proves ONE call site exists in the whole function,
- * not that EVERY branch has one -- measured by mutation, removing the call
- * from only one of `handleRoadmapUpsert`'s two branches (patch, create) left
- * `body.includes(...)` still true. Pinning the exact COUNT makes removing
- * either branch's call go red immediately, and makes adding a third branch
- * force a conscious update of this table instead of silently landing
- * uncovered -- the same fail-closed shape as EXPECTED_ROUTES/
- * EXPECTED_INACTIVE_HANDLERS above.
+ * Pins the exact call count per branch rather than a substring check: removing
+ * the guard call from only one of handleRoadmapUpsert's two branches (patch,
+ * create) left a substring check still true.
  */
 const EXPECTED_INACTIVE_GUARD_CALL_COUNTS: Record<string, { claim: number; toggle: number }> = {
   handleRoadmapUpsert: { claim: 2, toggle: 2 }, // patch branch + create branch
@@ -443,17 +383,10 @@ function countOccurrences(haystack: string, needle: string): number {
 }
 
 /**
- * Card c33a5968, mineur 1 (team-lead review, 2026-08-12): the exact-count
- * guard above counted the RAW body text, comments and strings included. The
- * reviewer's probe removed the create branch's real
- * `refusesInactiveClaim(...)` call and refunded the count with nothing more
- * than `// NOTE: the create path relies on refusesInactiveClaim(...)
- * upstream.` -- still 12 pass, 0 fail, because the substring sits in a
- * comment just as validly as in a live call. Stripping comments before
- * counting is what makes the count mean "this many CALLS", not "this many
- * mentions of the name" -- doesn't touch string literals (the guard's error
- * messages happen not to repeat these two identifiers), only `//...` and
- * `/*...*\/`.
+ * Strips comments before counting calls: a removed real guard call refunded
+ * with only a comment mentioning the function name left the substring count
+ * unchanged, so the count must exclude comments to mean "this many calls", not
+ * "this many mentions".
  */
 function stripComments(code: string): string {
   return code.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");

@@ -201,9 +201,9 @@ test("fan-out: one assistant node per target, errors isolated per target", async
 test("battle: judge node arbitrates the ok answers, legend reveals the mapping", async () => {
   const doc = docOf([n("q", [], "user", "hello")]);
   const out = await runInference(
-    // The judge's system/prompt text no longer rides the command line for the
-    // claude adapter (D5 extended, 07dc42c0) -- only its context/promptFile
-    // paths do, and graph-engine names them `${nodeId}-judge`/`-judge-prompt`.
+    // The judge's system/prompt text does not ride the command line for the
+    // claude adapter -- only its context/promptFile paths do, named
+    // `${nodeId}-judge`/`-judge-prompt`.
     deps(async (cmd) => (cmd.includes("-judge") ? "merged verdict" : "candidate")),
     doc,
     {

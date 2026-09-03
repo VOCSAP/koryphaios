@@ -1,18 +1,11 @@
-// The shell's own UI (PLAN N5).
-//
-// Deliberately tiny and framework-free. The shell embeds no application UI:
-// companion mode navigates to the Deck-served renderer, so anything drawn here
-// exists only because it CANNOT come from a host — the host list (you pick a
-// Deck before you have one) and the approvals screen (which must work when no
-// Deck is reachable at all).
-//
-// The free-text answer box is the reason the approvals screen exists rather
-// than leaning on the official ntfy app: an ntfy action button carries a FIXED
-// body, so "Approve"/"Reject" can be buttons but "use the staging bucket
-// instead" cannot (EXPLORATION §4.3c).
-//
-// All decision logic lives in the sibling modules, which run under `bun test`.
-// This file is wiring and DOM.
+// Deliberately tiny and framework-free: this shell embeds no application UI
+// itself. Companion mode navigates to the Deck-served renderer, so only what
+// cannot come from a host lives here — the host picker and the approvals
+// screen, which must work with no Deck reachable at all.
+// The free-text answer box exists because an ntfy action button carries a fixed
+// body, so approve/reject work as buttons but a free-form reply cannot.
+// All decision logic lives in the sibling modules; this file is wiring and DOM
+// only.
 
 import {
   applyEffect,

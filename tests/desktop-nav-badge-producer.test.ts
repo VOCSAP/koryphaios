@@ -1,31 +1,11 @@
-// Guards the single-producer rule store.ts's own header comment states for
-// the Courrier attention badge: "THE single producer of the Courrier
-// attention badge, shared by every navigation bar (NavRail desktop, MobileNav
-// remote). Two twin sums that must agree is exactly the defect this lot
-// already shipped once -- the blocking-question term was added to one bar
-// and not the other -- so the bars must CALL this, never re-add three terms
-// of their own." (store.ts:352-356). Nothing REPLAYED that comment: mutation
-// review (second pass) swapped `useDeck(inboxBadgeCount)` for a bogus
-// selector in both NavRail.tsx and MobileNav.tsx and got 97 pass / 0 fail --
-// no file under tests/ contains 'inboxBadgeCount', 'inboxPendingCount', or
-// 'inboxAwaitsAction'. spec_7a41d5bc.
-//
-// Text-scan, not an import of store.ts: store.ts pulls in `@shared/types`,
-// which bun cannot resolve outside the desktop/ toolchain ("Cannot find
-// module '@shared/types'") -- the same reason other guard tests in this repo
-// (desktop-approval-parity, desktop-deckapi-producer-coverage) scan source
-// text rather than importing the module under test.
-//
-// WHAT THIS DOES NOT COVER:
-//  - It does not verify inboxBadgeCount's OWN arithmetic is correct (that's
-//    store.ts's job, untested by this file). It only verifies both bars call
-//    the single producer and don't additionally re-sum any of its terms
-//    themselves -- the exact shape of the bug this lot fixed once.
-//  - The banned-term list is a hand-picked set of the terms inboxBadgeCount
-//    is built from today (inboxPendingCount's internal sum, pendingApprovals
-//    .length, graphDrafts.length, inboxUnread). If inboxBadgeCount is
-//    rewritten to use a different internal term, this list goes stale
-//    silently -- it is not derived from the function body.
+// Guards store.ts's single-producer rule for the Courrier attention badge: both
+// nav bars must call inboxBadgeCount rather than re-summing its terms
+// themselves.
+// Scans source text rather than importing store.ts, which pulls in
+// @shared/types, unresolvable outside desktop's own toolchain.
+// Does not verify inboxBadgeCount's own arithmetic, only that both bars call
+// it; the banned-term list is hand-picked from today's internal terms and goes
+// stale silently if the function is rewritten.
 
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";

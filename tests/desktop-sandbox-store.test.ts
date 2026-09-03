@@ -132,25 +132,12 @@ test("writeSandboxSettings catches an unbounded glob padded with whitespace", ()
   );
 });
 
-// Audit 94f8cc0c (external review of card 4b668844): isUnboundedGlob compared
-// the raw trimmed string against a literal list, while selectCopyPaths
-// normalizes backslashes to slashes and expands slash-free globs before
-// matching -- a canonicalization mismatch. These 5 forms resolve to the exact
-// same whole-tree RegExp a plain "*" does once expanded that way, but were
-// not in the literal list, so a project's real files were silently copy-able
-// under them. One row per form (not one assertion per form) so the next
-// idiom nobody thought of is a line to add, not a test to rewrite. At least
-// 2 legitimate narrow globs are included as counter-examples so this table
-// measures specificity, not just sensitivity.
-//
-// Rework round 2 (reviewer measurement on the first fix): "*/**" and
-// "**/*/*" require at least one path SEGMENT of nesting -- the flat
-// (unnested) witness paths above never trip that requirement, so both
-// resolved to isUnboundedGlob=false while selectCopyPaths pulled 10/20 files
-// off a real corpus under them, incl. a/b/.secret, app/keys.json,
-// creds/token.txt. Nested-only witness rows below close this one instance;
-// see the "residual" comment on isUnboundedGlob for why this is a widening
-// list, not a closed proof.
+// One row per glob form, not one assertion per form, so a newly-discovered
+// unbounded idiom is a line to add rather than a test to rewrite.
+// Includes narrow-glob counter-examples so the table measures specificity, not
+// just sensitivity.
+// Nested-only witness rows are required: an unnested form like "*/**" never
+// trips the at-least-one-segment nesting check.
 test.each([
   ["*.*", true],
   ["**/**", true],

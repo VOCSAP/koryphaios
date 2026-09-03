@@ -66,22 +66,14 @@ export type JoinAnnounceTargets =
   | { kind: 'silent' }
 
 /**
- * Resolve joinAnnounceTargets for the join-announce gate (card 8cb54a0f).
- * 'off' -> silent. 'all' -> broadcast (unchanged historical behaviour).
- * 'lead' -> every active (active = active IN THIS DECK WINDOW, i.e.
- * `service.list()`; a team-lead living in another window or on another host
- * of the same group is not a candidate and the announce is dropped, same
- * locality as `announceToSupervisor` -- non-exited, peer_id resolved)
- * session whose `role` is the team-lead role (`filter`, never `find`/`get`:
- * two active team-leads is a valid state, both must be addressed); if none,
- * every active supervisor session (same `filter`, same reasoning --
- * `supervisor` is exclusive in practice today but not by construction, see
- * card tracking the ensureSupervisor() TOCTOU); if still none, silent -- no
- * broadcast fallback, since that would reintroduce exactly the noise this
- * gate exists to remove. Any OTHER value (unknown/corrupt config -- normally
- * unreachable, store.ts clamps to a valid level on read, this is defense in
- * depth) falls through to silent as well: a gate that fails toward MORE
- * announces than requested is exactly backwards.
+ * 'off' is silent, 'all' broadcasts. 'lead' targets every active team-lead
+ * session in this Deck window (filter, never find/get: two active leads is
+ * valid and both must be addressed); if none, every active supervisor session;
+ * if still none, silent -- no broadcast fallback, which would reintroduce the
+ * noise this gate exists to remove.
+ * Any other value (unreachable in practice, defense in depth) also falls
+ * through to silent: a gate that fails toward more announces than requested is
+ * backwards.
  */
 export function joinAnnounceTargets(
   level: JoinAnnounceLevel,

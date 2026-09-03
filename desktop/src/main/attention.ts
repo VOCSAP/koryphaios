@@ -13,55 +13,20 @@ export interface AttentionEvent {
   id: string
   waiting: boolean
   /**
-   * True only when the operator dismissed the flag by hand (SessionService's
-   * clearAttention). Load-bearing, not informational: the consumer in
-   * index.ts reads `waiting: false` as "a turn ran, so someone answered" and
-   * claims the open remote approval with answerKind 'allow'. That inference
-   * holds for the automatic clearers and is FALSE for a manual dismiss,
-   * which means "this flag was wrong" -- so the consumer skips claiming when
-   * this is set. Declared here rather than passed as an ad-hoc property so
-   * that the sites which must agree (this one, SessionAttentionEvent in
-   * shared/types.ts, and the consumer's parameter in index.ts) fail to
-   * compile if they drift; a typo in a bare string key would otherwise
-   * reopen the approval bug in silence.
+   * True only when the operator dismissed the flag by hand. Load-bearing:
+   * index.ts reads `waiting: false` as "a turn ran, someone answered" and
+   * claims the open remote approval, but a manual dismiss means the flag was
+   * wrong, so the consumer skips claiming when this is set.
    */
   manual?: boolean
 }
 
-// Strips CSI (colours, cursor moves) AND OSC (title, progress, notify --
-// card 1aa69066/H2) sequences. Combined into ONE regex rather than two
-// separate ones so the fix is atomic in the source: a per-chunk strip alone
-// cannot remove an OSC sequence fragmented across two PTY chunks (its first
-// half has no terminator yet, so nothing matches), which is why `feed()`
-// below re-runs this same function on the ACCUMULATED buffer after
-// concatenation, not only on the incoming per-chunk delta -- by then both
-// halves of a previously-split sequence sit adjacent and the OSC branch
-// matches.
-//
-// THE OSC BRANCH'S CHARACTER CLASS EXCLUDES ESC (not just BEL) --
-// measured regression, card 1aa69066 review round 2: `[^\x07]*?` (lazy,
-// unbounded, BEL-only exclusion) is quadratic on an adversarial
-// MAX_BUF-sized buffer full of unterminated "ESC ]" heads (each restarts a
-// full lazy backtracking scan), 0.04ms at n=512 to 2.34ms at n=4096 -- a
-// `cat` of a binary file into a tile hits this on the Electron main
-// process's hot PTY-data path, x3 detectors x N sessions.
-//
-// FALSE POINTER, CORRECTED (review round 3, blocker T5): the FIRST fix
-// attributed this to the `{0,4096}` bound. MEASURED WRONG: the same class
-// made UNBOUNDED but with ESC still excluded, `[^\x07\x1b\n]*?`, is
-// FASTER (0.0035ms) than the shipped bounded one (0.0216ms); a class that
-// IS bounded but does NOT exclude ESC, `[^\x07]{0,4096}`, is 3.5507ms --
-// WORSE than the ORIGINAL unfixed regex (2.6813ms). The bound is not what
-// closes the hole. EXCLUDING ESC is: once ESC is excluded from the class,
-// the next "ESC ]" head immediately halts that match attempt (backtracking
-// has nowhere to grow), which is self-limiting on this adversarial shape
-// regardless of any explicit cap. `{0,4096}` still matters, separately, for
-// MEMORY on a pathological run containing neither ESC nor a terminator (a
-// giant plain-text OSC body) -- but it is not the perf fix, and crediting
-// it as one is exactly the false-pointer failure mode CLAUDE.md warns
-// about: correct code, wrong stated reason, and the reason is what the
-// next person trusts when they touch this line.
-// tests/desktop-osc-perf.test.ts pins BOTH properties, separately.
+// Excludes ESC, not just BEL, from the OSC branch's character class: without
+// it, an unterminated OSC head is quadratic on an adversarial buffer, and
+// excluding ESC makes each new escape head halt the match immediately
+// regardless of any length bound.
+// The `{0,4096}` bound still matters separately, for memory on a plain-text OSC
+// body with no ESC and no terminator.
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b\n]{0,4096}(?:\x07|\x1b\\))/g
 export function stripAnsi(s: string): string {
@@ -81,52 +46,14 @@ const WAITING_PATTERNS = [
   /\bdo you trust the files\b/i
 ]
 
-// The dev-channels startup warning (startup-ack.ts) renders its own accept
-// option as "❯ 1. I am using this for local development" -- a numbered
-// chooser by construction, so it matches the pattern above even though
-// startup-ack.ts is about to auto-Enter past it (one keystroke, not a
-// genuine "needs you" wait). Card 4f0143ff, root cause. Recognise that
-// screen via `detectChannelsWarning` (startup-ack.ts's own two-cue
-// detector -- title AND accept-option wording, both required) and exclude
-// it, rather than broadening BUSY_RE or weakening the chooser pattern for
-// every other caller. Single source of a shared literal (MAJOR 4, review of
-// 4f0143ff): a title-only regex duplicated from startup-ack.ts used to live
-// here; importing the real two-cue predicate instead of re-deriving a
-// weaker one-cue copy removes both the duplication and most of the false
-// exemption surface (MAJOR 3, below) in one move. Does NOT cover: a genuine
-// numbered chooser sharing the retained BUFFER with both cues. Note the unit
-// -- detectWaiting runs on st.buf, a rolling MAX_BUF window, not on a
-// screen, so "the warning is full-screen and nothing overlays it" is not the
-// argument. Measured: feeding the warning and then a real permission prompt
-// raises nothing until roughly 2000 to 4000 bytes of later output push the
-// title out of the window. What actually keeps that ordinary sequence
-// working in production is purgeScreenMemory, called from session-service
-// when startup-ack answers the dialog: it drops the retained text at the
-// moment the warning stops being on screen. That call is the guarantee, not
-// a belt-and-suspenders extra -- with it stubbed out, the next genuine
-// prompt is swallowed.
-//
-// Two more explicit non-coverage points (asked in review, card 4f0143ff):
-//  - Any OTHER auto-advancing single-option chooser (present or future,
-//    outside startup-ack.ts) with different wording is not exempted here
-//    and still raises the flag once -- narrow > broad exemption, by design.
-//  - If this dialog's wording is ever changed on ONE of the two cues,
-//    `detectChannelsWarning` silently stops matching -- it does NOT throw or
-//    log, it just falls through to WAITING_PATTERNS again, i.e. the
-//    flag-raise regresses to pre-4f0143ff behaviour with no error anywhere.
-// Both cases are bounded, not prevented, by the feed() re-scan fallback
-// (scope b, below): the flag still gets raised, but it self-clears as soon
-// as the PTY stream moves past the screen (one keystroke, for an
-// auto-Enter dialog) instead of staying stuck -- which is what 4f0143ff was
-// actually about. This exemption is a latency/UX optimization (skip the
-// flicker), not the sole correctness guarantee; the re-scan is.
-//
-// Used to decide whether to RAISE the flag. Deliberately conservative in
-// the direction of NOT raising when unsure -- a missed raise is bounded (the
-// re-scan below, or a later screen, catches most real waits eventually),
-// while a false raise is only a flicker at worst. detectWaitingForClear
-// below is the mirror predicate for the OPPOSITE decision, and does NOT
-// reuse this exemption (see its own comment for why the two must differ).
+// Exempts only the dev-channels startup warning's own two-cue screen (title and
+// accept-option wording, both required via detectChannelsWarning), not any
+// other auto-advancing single-option chooser.
+// If either cue's wording changes, the exemption silently stops matching and
+// this falls back to WAITING_PATTERNS with no error.
+// purgeScreenMemory, called when startup-ack answers the dialog, is the actual
+// guarantee against a stuck false exemption; the re-scan fallback only bounds
+// it.
 export function detectWaiting(text: string): boolean {
   if (detectChannelsWarning(text)) {
     return /\bdo you trust the files\b/i.test(text)
@@ -134,48 +61,21 @@ export function detectWaiting(text: string): boolean {
   return WAITING_PATTERNS.some((re) => re.test(text))
 }
 
-// Used to decide whether an ALREADY-RAISED flag should be CLEARED by the
-// re-scan fallback (scope b). Review of 4f0143ff (team-lead, reverse-order
-// probe): reusing detectWaiting here is wrong, not just imprecise. Raising
-// and clearing are opposite decisions under uncertainty -- staying silent
-// when unsure is the safe default for a raise (the operator loses nothing
-// they didn't already not have), but clearing when unsure loses an
-// operator who IS actually waiting. The two must not share a predicate that
-// treats "saw an exempted screen go by" as evidence for both.
-// Measured (card 4f0143ff review): a real chooser raises the flag, then
-// unrelated dev-channels text later enters the retained buffer (reverse
-// order from the original bug) -- reusing detectWaiting's exemption cleared
-// the flag on that text alone, without the chooser's own "❯ 1." pattern
-// ever having left the buffer. This predicate never exempts: it only
-// clears on POSITIVE evidence the raising pattern itself is gone (or, in
-// feed() below, an explicit busy cue). Does NOT cover a wait screen
-// replaced by a DIFFERENT wait screen with no cue in between (correctly
-// stays waiting, since the pattern is still present).
+// Deliberately does not reuse detectWaiting's exemption: raising and clearing
+// are opposite decisions under uncertainty, and reusing it let a real chooser's
+// flag get cleared by unrelated dev-channels text entering the buffer
+// afterward.
+// Only clears on positive evidence the raising pattern itself is gone.
 function stillWaiting(text: string): boolean {
   return WAITING_PATTERNS.some((re) => re.test(text))
 }
 
-// Cap on the retained screen. Four things clear a raised flag; this
-// constant is load-bearing for one of them, not just a memory guard-rail
-// (review of 4f0143ff, team-lead -- a comment asserting a guarantee must be
-// wired to it):
-//  A. a busy cue (BUSY_RE) -- immediate, feed() checks it before anything
-//     else touches st.buf.
-//  B. purgeScreenMemory() on the startup-ack 'ack' event (session-service.ts)
-//     -- immediate, scoped to the dev-channels dialog specifically.
-//  C. the operator dismissing the flag by hand -- SessionService's
-//     clearAttention calls clear(id), which drops both the flag and the
-//     retained buffer. Added by this card; it is the reason this list says
-//     four and not three.
-//  D. none of the above: the ONLY thing left is stillWaiting(st.buf)
-//     turning false once the raising pattern slides out of this window.
-//     Measured (card 4f0143ff review, debugger): ~4050 bytes of ordinary
-//     (non-busy-cue) output with no intervening ack. Real, but bounded and
-//     rare -- most sessions hit A or D long before B -- and pre-existing,
-//     not introduced or worsened by this card's fixes (measured identically
-//     on the pre-fix code). Not fixed here: team-lead's explicit scope call,
-//     since fixing it means comparing against the current screen instead of
-//     a cumulative buffer, a rework big enough to want its own card.
+// Load-bearing for one of four ways a raised flag clears: a busy cue,
+// purgeScreenMemory on the dev-channels ack, the operator dismissing it by
+// hand, or the raising pattern sliding out of this window once it fills.
+// The fourth path is real but bounded and rare; comparing against the current
+// screen instead of a cumulative buffer would remove it but is out of scope
+// here.
 const MAX_BUF = 4096
 
 interface SessionState {

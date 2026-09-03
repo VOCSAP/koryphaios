@@ -1,23 +1,12 @@
-// What the phone does with the messages it receives (PLAN N5).
-//
-// Pure reducers over ntfy events, so the app's whole decision logic runs under
-// `bun test` while the Android build — which this container cannot produce —
-// only has to deliver bytes and paint pixels.
-//
-// TWO KINDS OF MESSAGE arrive on the notification topic, told apart by their
-// `click` deep link:
-//
-//   parastates://approval/<id>   a session is waiting  -> add to the list
-//   parastates://settled/<id>    somebody answered     -> drop it, cancel the
-//                                                         Android notification
-//   parastates://paired/<0|1>    the broker answered our pairing handshake
-//
-// The second exists because ntfy CANNOT edit a delivered message (unlike
-// Telegram and Discord, where `settle` rewrites the original). A closing
-// message plus this reducer is what replaces that rewrite — without it, a
-// question already answered in the Deck would sit on the phone looking
-// actionable, which is exactly the failure the registry's settle rule exists
-// to prevent.
+// Pure reducers over ntfy events, so the whole decision logic is testable
+// without the Android build.
+// Told apart by their click deep link: parastates://approval/<id> adds to the
+// list, parastates://settled/<id> drops it and cancels the Android
+// notification, parastates://paired/<0|1> is the broker's pairing-handshake
+// reply.
+// ntfy cannot edit a delivered message (unlike Telegram/Discord), so a settled
+// message plus this reducer is what makes an already-answered question stop
+// looking actionable on the phone.
 
 import { parseClickUrl } from "../../../notify/ntfy-protocol.ts";
 import { readJson, writeJson, type KeyValueStore } from "./storage.ts";

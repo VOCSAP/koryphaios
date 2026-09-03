@@ -1,19 +1,11 @@
-// Session-side credential for remote approvals (PLAN-notifications-mobiles N2).
-//
-// Both approval producers that live INSIDE a spawned agent — the Claude Code
-// hooks (desktop/hooks/approval-hook.ts) and the ask_operator MCP tool
-// (server.ts) — authenticate with the same restricted per-session credential.
-// This module owns its on-disk shape so the two cannot drift.
-//
-// TRANSPORT: the Deck writes a chmod-600 JSON file and passes its PATH in the
-// environment, exactly like the group secret (desktop/src/main/scope.ts). The
-// private key therefore never lands in argv nor in /proc/<pid>/environ.
-//
-// SCOPE: this credential may only `add` and `wait` for ITS OWN session. It can
-// never settle an approval — only the Deck, holding the operator key, can
-// (PLAN §6.8). That is what makes the file safe to project into a sandbox
-// container: a compromised agent can spam its operator with notifications and
-// nothing more.
+// Shared on-disk shape for the session-side approval credential used by both
+// approval producers spawned inside an agent (Claude Code hooks and the
+// ask_operator tool), so they cannot drift.
+// The Deck writes a chmod-600 JSON file and passes its path via env, so the
+// private key never lands in argv or /proc/<pid>/environ.
+// This credential may only add/wait for its own session and can never settle
+// (claim) an approval -- only the Deck can, which is what makes the file safe
+// to project into a sandbox container.
 
 import { readFileSync } from "node:fs";
 

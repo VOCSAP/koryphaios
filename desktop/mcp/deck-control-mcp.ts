@@ -1,30 +1,11 @@
-// deck-control MCP server (PLAN C5): the SUPERVISOR session's bridge to the
-// Deck. A minimal, dependency-free MCP stdio server (newline-delimited
-// JSON-RPC 2.0) that forwards every tool call to the Deck's loopback control
-// endpoint (desktop/src/main/deck-control.ts).
-//
-// Runs under plain Node (packaged app: the Electron binary with
-// ELECTRON_RUN_AS_NODE=1) -- node builtins + global fetch only, no
-// @modelcontextprotocol/sdk, mirroring the desk-backchannel-hook build.
-// Built by `npm run build:mcp` to deck-plugin/mcp/deck-control-mcp.mjs.
-//
-// Env contract (set in the generated --mcp-config file, per-server):
-//   DECK_CONTROL_URL   http://127.0.0.1:<port>
-//   DECK_CONTROL_TOKEN Bearer token minted per Deck launch
-//   DECK_CONTROL_TOOLS Optional ALLOW-list of tool names exposed via
-//     tools/list (Card ff091064). Allow-list, never deny-list -- a deny-list
-//     shrinking fails OPEN (a future tool ships exposed to everyone by
-//     default, silently); an allow-list shrinking fails CLOSED (a forgotten
-//     tool is refused, the symptom surfaces the same day). Semantics, all
-//     three states meaningful and distinct:
-//       unset            -> every tool (current behavior, zero regression
-//                            for a caller that never sets this var).
-//       set, non-empty   -> exactly the comma-separated names listed.
-//       set, empty ("")  -> zero tools. Distinguishing "absent" from "empty"
-//                            here is deliberate: without it, a bare
-//                            `DECK_CONTROL_TOOLS=` declaration would be
-//                            indistinguishable from "unset" and silently
-//                            grant everything instead of nothing.
+// Supervisor session's bridge to the Deck: a dependency-free MCP stdio server
+// (newline-delimited JSON-RPC 2.0) forwarding every tool call to the Deck's
+// loopback control endpoint.
+// Runs under plain Node (ELECTRON_RUN_AS_NODE=1) with no
+// @modelcontextprotocol/sdk — node builtins and global fetch only.
+// DECK_CONTROL_TOOLS is an allow-list, never a deny-list, so a forgotten entry
+// fails closed instead of exposing a new tool by default; unset exposes every
+// tool, and a set-but-empty value is distinct from unset and exposes zero.
 
 import { createInterface } from 'node:readline'
 

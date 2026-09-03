@@ -1,29 +1,8 @@
-// Card 3c085f1a: CLAUDE_PEERS_TOOLS wiring, session-service.ts side.
-//
-// SessionService hardcodes its own `PtyManager` (not dependency-injected),
-// so a genuinely behavioral test cannot instantiate the class and spawn a
-// real session -- the same limit tests/desktop-session-role-env.test.ts
-// documents for CLAUDE_PEERS_ROLE, which is why that file resorts to a
-// structural source scan instead. peerToolsEnvValue lives in the new
-// dependency-free desktop/src/main/session-env.ts (no electron/node-pty
-// imports, same convention as session-command.ts/shell-command.ts/
-// peer-state.ts) specifically so it CAN be imported directly here without
-// pulling in session-service.ts's own heavy import graph (measured: a
-// direct import of session-service.ts fails to even resolve under `bun
-// test`, "Cannot find module '@shared/palette'") -- so THIS file calls the
-// real function with real inputs and asserts the real output. A probe that
-// only grepped the source for the string "CLAUDE_PEERS_TOOLS" would keep
-// nothing: this one actually runs the code. session-service.ts's own
-// wiring (that this value reaches the real sessionEnv object, present vs
-// omitted) is proven by construction, not independently re-tested here --
-// see that file's own `if (peerToolsValue !== undefined) Object.assign(...)`
-// comment for why it could not be extracted alongside without breaking the
-// sibling role-env test's structural scan.
-//
-// Lives in tests/ (not desktop/src/main/) so it can use bun:test directly --
-// desktop/tsconfig.node.json's ambient types don't include bun-types (same
-// reasoning as tests/desktop-session-role-env.test.ts). Named desktop-* so
-// scripts/pure-module-partition.ts's deny-list runs it by default.
+// SessionService can't be instantiated behaviorally (hardcoded PtyManager, not
+// injected), so peerToolsEnvValue lives in a dependency-free module importable
+// without pulling in session-service.ts's own heavy import graph.
+// This file calls the real function with real inputs and asserts the real
+// output, rather than grepping source for the env var name.
 
 import { test, expect } from "bun:test";
 import { peerToolsEnvValue } from "../desktop/src/main/session-env.ts";

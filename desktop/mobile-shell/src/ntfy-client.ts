@@ -1,16 +1,7 @@
-// The phone's two legs to ntfy (PLAN N5), mirror image of the broker's.
-//
-//   phone ──GET  /{topic_notif}/json   (held open) ──▶ questions arrive
-//   phone ──POST /{topic_replies}      ─────────────▶ answers go out
-//
-// Both outgoing, like every other leg in this feature: the phone opens no port
-// and publishes no address either.
-//
-// This is the FOREGROUND transport — what runs while the app is on screen.
-// Passive listening with the screen off cannot be done from a WebView at all
-// (Doze suspends network access), which is what the native foreground service
-// in `android-src/` is for. Keeping the two apart means the app is fully
-// usable, and fully testable, without the native half.
+// The foreground transport only: Android Doze suspends network access from a
+// WebView with the screen off, so passive listening while asleep is handled by
+// the native foreground service in android-src/ instead.
+// Both legs are outgoing — the phone opens no port and publishes no address.
 
 import { createLineSplitter, parseStreamLine, type NtfyMessage } from "./approval-inbox.ts";
 import { authHeaders, repliesUrl, subscribeUrl, type ApprovalPairing } from "./approval-pairing.ts";

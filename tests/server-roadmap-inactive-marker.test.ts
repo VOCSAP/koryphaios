@@ -1,38 +1,7 @@
-// Card c33a5968, major 2 (team-lead review, 2026-08-12): the MCP-facing
-// population `inactive` is meant to keep OUT (any agent listing/reading a
-// card before claiming it) previously had NO way to see the flag before
-// hitting the 403 that tells it to do the one thing it is structurally
-// forbidden from doing (`formatRoadmapItemLine`/`formatRoadmapItemDetail`,
-// server.ts, rendered `locked` but not `inactive`). The fix added a
-// `[INACTIVE -- do not claim]` suffix to the list line and an `inactive:`
-// line to the detail view.
-//
-// This is the test the reviewer required for that fix. It must be
-// DISCRIMINANT (team-lead's exact wording): an `inactive: true` item
-// produces the marker, an `inactive: false` item does NOT -- a cell that
-// only checks presence-on-the-inactive-item stays green even if the
-// formatter started stamping the marker on every item unconditionally.
-//
-// Harness mirrors mcp-roadmap-ack.test.ts / server-ask-operator.test.ts:
-// spawn `bun server.ts` for real (formatRoadmapItemLine/Detail are neither
-// exported nor safely importable -- server.ts runs its MCP stdio loop
-// unconditionally at module scope), speak JSON-RPC on stdin, read real tool
-// output. No source file other than this one is touched by this change --
-// see the team-lead's explicit review-window constraint.
-//
-// project_key plumbing: `roadmap_add`/`roadmap_get`/`roadmap_list` over MCP
-// resolve the project_key from the spawned server's own cwd (server.ts's
-// `roadmapProjectKey()`), which this test does not control and does not
-// need to know -- every card below is created via the MCP tool itself, and
-// the follow-up direct-broker PATCH that flips `inactive` addresses the row
-// by `id` alone (broker.ts's patch path: "Partial patch: omitted fields
-// keep their value; project_key never moves" -- it never reads
-// `body.project_key` once `body.id` is set).
-//
-// `broker-*`-style daemon spawn (spawns `bun server.ts`, a real subprocess)
-// but named `server-*` to match this file family's existing precedent
-// (server-ask-operator.test.ts, mcp-roadmap-ack.test.ts) -- both prefixes are
-// already exempted from the CI glob the same way (local-only via `bun test`).
+// Must be discriminant: an inactive:true card shows the marker and an
+// inactive:false card does not, so a formatter that stamped the marker on every
+// card unconditionally would still pass a presence-only check but fail this
+// one.
 
 import { test, expect, afterAll } from "bun:test";
 import { startBroker, stopBroker, post, deckAuthored, type TestBroker } from "./_helper.ts";
@@ -192,8 +161,6 @@ test("inactive marker is discriminant across MCP list line and detail view: pres
   const activeDetail = toolText(await callTool(h, "roadmap_get", { id: idActive }));
   const targetDetail = toolText(await callTool(h, "roadmap_get", { id: idTarget }));
 
-  // detail's first line is formatRoadmapItemLine's own output (server.ts:975
-  // `${formatRoadmapItemLine(i)}`) -- same discriminant check, real call.
   expect(targetDetail.split("\n")[0]).toContain("[INACTIVE -- do not claim]");
   expect(activeDetail.split("\n")[0]).not.toContain("INACTIVE");
 

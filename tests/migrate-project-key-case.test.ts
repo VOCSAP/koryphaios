@@ -1,19 +1,8 @@
-// Card 69e5a3e0. Exercises scripts/migrate-project-key-case.ts's pure logic
-// (migrateAll and friends) against in-memory (`:memory:`) bun:sqlite
-// databases, plus one real on-disk temp file for the readonly-open test --
-// never a real broker database, satisfying this card's "no execution
-// against a real database" cadre while still proving the
-// discovery/collision/transaction/casing guarantees red-then-green.
-//
-// The schema used here is DERIVED FROM broker.ts's actual source
-// (loadRealSchemaFromBroker below), not hand-listed. Mutation-testing review
-// (2026-08-20) found the first version of this file hand-listed 4 tables in
-// its fixture and forgot pending_approvals -- the exact defect card
-// 69e5a3e0 exists to close, reborn one layer down in the test written not
-// to repeat it. Deriving the fixture from broker.ts's CREATE TABLE / ALTER
-// TABLE statements means a future 6th (or 7th...) project_key-bearing table
-// is covered here automatically, with no one having to remember to update
-// this file.
+// Exercises migrateAll's pure logic against in-memory sqlite fixtures, never a
+// real broker database.
+// The schema is derived from broker.ts's actual CREATE/ALTER statements rather
+// than hand-listed, so a newly added project_key-bearing table is covered
+// automatically.
 
 import { test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
@@ -30,34 +19,18 @@ import {
 } from "../scripts/migrate-project-key-case.ts";
 
 /**
- * Replays broker.ts's OWN schema-defining statements (every
- * `CREATE TABLE IF NOT EXISTS ...` and `ALTER TABLE ... ADD COLUMN ...`,
- * in source order) against an in-memory database, plus the one PRAGMA and
- * the one seed row those statements structurally depend on. This is a
- * SOURCE-TEXT replay, not a re-implementation: if broker.ts gains, loses,
- * or renames a project_key-bearing table, this fixture reflects it on the
- * next run without anyone touching this file.
- *
- * What this fixture is NOT a full mirror of, on purpose: broker.ts also
- * declares one FTS5 VIRTUAL TABLE (`roadmap_fts`, broker.ts:624, matched by
- * neither regex below -- "CREATE VIRTUAL TABLE" is a different literal than
- * "CREATE TABLE IF NOT EXISTS"), three TRIGGERs that keep it in sync with
- * roadmap_items (`roadmap_fts_ai`/`_ad`/`_au`, broker.ts:644-663 -- these
- * fire in PRODUCTION on every INSERT/DELETE/UPDATE of roadmap_items,
- * INCLUDING the migration's own UPDATE, but never fire here since this
- * fixture never creates them), and 12 CREATE INDEX statements (11 plain +
- * 1 UNIQUE, MEASURED via `grep -c 'CREATE INDEX\|CREATE UNIQUE INDEX'
- * broker.ts`, 2026-08-20). None of the three carry or gate on project_key,
- * so their absence does not change what this file asserts -- but a reader
- * expecting an exact schema mirror would be wrong to assume they are here.
+ * Replays broker.ts's own schema-defining statements (CREATE TABLE / ALTER
+ * TABLE, in source order) against an in-memory database, so this fixture stays
+ * in sync as tables are added, removed, or renamed.
+ * Does not mirror the FTS5 virtual table, its sync triggers, or index
+ * definitions -- none of them carry or gate on project_key, so their absence
+ * doesn't change what this file asserts.
  */
 function loadRealSchemaFromBroker(db: Database): void {
   const src = readFileSync(join(import.meta.dir, "..", "broker.ts"), "utf-8");
 
-  // peers.group_id carries `FOREIGN KEY (group_id) REFERENCES
-  // groups(group_id)` (broker.ts:406) -- mirror broker.ts:373's own
-  // enforcement so a test inserting an invalid group_id fails the same way
-  // the real broker would, instead of silently succeeding.
+  // Enables foreign_keys so an invalid group_id fails here the same way it
+  // fails against the real broker.
   db.run("PRAGMA foreign_keys = ON");
 
   // Every CREATE TABLE in broker.ts lives in a `db.run(\`...\`)`
@@ -91,18 +64,12 @@ function loadRealSchemaFromBroker(db: Database): void {
     );
   }
 
-  // Columns added to a pre-existing table after its initial CREATE TABLE
-  // (e.g. approval_session_tokens' project_key, card 1def56da, broker.ts:741)
-  // live in a separate `db.run("ALTER TABLE ...")` call -- must be replayed
-  // too, or such a column is invisible here even though
-  // discoverProjectKeyTables would find it on the real, live database. Some
-  // of these are idempotent migrations for a column that a LATER edit of
-  // broker.ts folded into the table's own CREATE TABLE (e.g. roadmap_items'
-  // `queue`, broker.ts:529 inline AND broker.ts:537 ALTER for pre-existing
-  // rows) -- broker.ts itself wraps every one of these in a try/catch
-  // swallowing "duplicate column name" (see rules/bun.md's idempotent
-  // migration pattern); mirror that here rather than special-casing which
-  // ALTERs are now redundant.
+  // Replays ALTER TABLE statements separately from CREATE TABLE, since columns
+  // added later live in their own statement and would otherwise be invisible
+  // here.
+  // Swallows duplicate-column errors, mirroring broker.ts's own
+  // idempotent-migration handling rather than special-casing which ALTERs are
+  // now redundant.
   const alterTableRe = /db\.run\("(ALTER TABLE [^"]*)"\)/g;
   while ((m = alterTableRe.exec(src))) {
     try {
@@ -113,8 +80,8 @@ function loadRealSchemaFromBroker(db: Database): void {
     }
   }
 
-  // broker.ts:384-387 seeds the 'default' group at boot -- peers.group_id's
-  // FK above requires it to exist before any peers row can be inserted.
+  // Seeds the 'default' group before any peers row, since peers.group_id's
+  // foreign key requires it to exist first.
   db.run(
     `INSERT OR IGNORE INTO groups (group_id, secret_hash, name, created_at) VALUES ('default', NULL, 'default', datetime('now'))`
   );
@@ -175,23 +142,11 @@ function insertDispatchRequest(db: Database, id: string, projectKey: string): vo
 
 test("discovery finds every real project_key-bearing table in broker.ts's schema, none else", () => {
   const db = seededDb();
-  // This is the whole point of deriving from source: if broker.ts adds,
-  // removes, or renames a project_key column, this assertion changes on its
-  // own the next time this file runs -- nobody has to remember to update it.
-  //
-  // dispatch_requests joined this list with card bf76d37f, and it BELONGS
-  // here rather than being an accident to exclude. Its project_key is copied
-  // at add-time from the proven `peers` row -- exactly graph_drafts'
-  // provenance, two lines up -- and the Deck finds a parked request by
-  // querying that column with the key it recomputes at runtime. Migrate
-  // `peers` without migrating this table and an old mixed-case request goes
-  // permanently INVISIBLE to the Deck: never dispatched, while its requester
-  // was told it was parked and would be announced. The test further down
-  // measures that lockstep instead of trusting this paragraph. (No row in
-  // production should need it today, since the table postdates the
-  // normalizeRemoteUrl fix -- but membership is decided by what the column
-  // MEANS, not by whether stale data happens to exist, and the script's own
-  // header refuses exclusion lists on principle.)
+  // Deriving the table list from source means this assertion changes on its own
+  // if broker.ts adds, removes, or renames a project_key column.
+  // dispatch_requests belongs in this list: its project_key is copied at
+  // add-time from the proven peers row, and a peer migrated without migrating
+  // this table would leave old mixed-case requests invisible to the Deck.
   expect(discoverProjectKeyTables(db)).toEqual([
     "approval_session_tokens",
     "dispatch_requests",

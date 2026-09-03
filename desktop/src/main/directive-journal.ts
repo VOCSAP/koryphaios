@@ -1,22 +1,8 @@
-// Journal wording for a directive card's UNREACHED targets (card 6c380073,
-// review round 2). Pure: no electron/node import, so `bun test` exercises the
-// exact strings index.ts's executeDirective journals.
-//
-// WHY THIS IS ITS OWN MODULE, and why a source scan was not enough. The first
-// version of this wording lived inline in executeDirective and shipped a
-// REGRESSION that a source scan could not see: when nothing matched AND at
-// least one id was ambiguous, the message listed only the ambiguous ids and
-// SILENTLY DROPPED the plainly-absent ones. A scan proves which SYMBOLS a call
-// site reads (`ambiguous` read, not re-derived) and it was green on that
-// wording -- the defect was in the COMPOSITION of the message, which only a
-// probe over real inputs can catch. Hence: a pure function, three probes
-// (absent only, ambiguous only, and BOTH -- the case that was broken), and a
-// presence scan at the call site on top.
-//
-// The stakes are not cosmetic: runDirectiveWave is mark-then-execute, so the
-// card is already consumed by the time this text is written. This journal line
-// is the ONLY report the operator ever gets, which is what makes a dropped id
-// a real loss rather than a typo.
+// Pure module (no electron/node import) so bun test exercises the exact wording
+// index.ts's executeDirective journals.
+// A composition-level bug (right ids present, wrong bucket) survives a source
+// scan since call sites still read the correct symbols -- only a probe over
+// real inputs (absent-only, ambiguous-only, both) catches it.
 
 import type { UnreachedDirectiveTarget } from '../shared/types'
 

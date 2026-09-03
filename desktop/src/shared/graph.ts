@@ -210,14 +210,12 @@ export function nodeH(n: GraphNode): number {
 }
 
 /**
- * Snap (x, y) to the grid, then scan RIGHT (same hierarchy level) until the
- * card no longer overlaps an existing node. Keeps siblings created one by one
+ * Snaps (x, y) to the grid, then scans right (same hierarchy level) until the
+ * card stops overlapping any existing node, keeping siblings created one by one
  * on the same horizontal line instead of stacking them.
- *
- * Real AABB test (a0f2e983 review): both the existing node's real size AND
- * the size of the node being placed matter once cards can be resized -- a
- * distance-between-origins check against one fixed width breaks in both
- * directions as soon as either card differs from the default.
+ * Uses a real AABB test against both nodes' actual sizes: a
+ * distance-between-origins check against one fixed width breaks as soon as
+ * either card is resized off the default.
  */
 export function findFreeSpot(
   nodes: GraphNode[],

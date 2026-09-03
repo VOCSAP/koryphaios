@@ -1,15 +1,9 @@
 import { test, expect } from "bun:test";
 import { generateSummary, heuristicSummary, type SummaryContext } from "../shared/summarize.ts";
 
-// Card 630e3d16 audit round 2: callAnthropic used to have its OWN
-// `cfg.api_key ?? process.env.ANTHROPIC_API_KEY` fallback, one layer below
-// shared/config.ts#buildSummaryProviderConfig's allow-list. It never leaked
-// today (the fetch target is the hardcoded https://api.anthropic.com), but
-// it made the allow-list's "closed by construction" comment false: the
-// closure actually depended on generateSummary's dispatch, not on the
-// resolver alone. Removed. This test proves it stays removed: with a fake
-// env key present and cfg.api_key explicitly null, fetch must never be
-// called at all.
+// Proves callAnthropic never falls back to process.env.ANTHROPIC_API_KEY on its
+// own: with a fake env key present and cfg.api_key explicitly null, fetch must
+// never be called at all.
 
 const FAKE_ENV_KEY = "test-only-placeholder-value-not-a-real-secret";
 

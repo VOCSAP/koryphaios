@@ -1,31 +1,13 @@
-// Headless CLI adapters for graph chat inference (EXPLORATION-graph-chat C24).
-//
-// Generalization of the C9 skeleton (help-assistant): one stateless throwaway
-// invocation per assistant node, run through runHelp's shell wrap + profile
-// noise marker. Three adapters share one contract:
-//
-// - The compiled context ALWAYS travels by FILE, never on the command line
-//   (decision D5 — a 50k-char context would blow Windows' ~32k limit):
-//   * claude: constant system prompt + context in --append-system-prompt-file,
-//     the operator's question fed via stdin from a second file (D5 extended
-//     to the prompt, roadmap 07dc42c0: the question used to ride the command
-//     line as a quoted positional arg, but on win32 the PowerShell shell wrap
-//     re-invokes the native claude.exe in legacy argument-passing mode, which
-//     does NOT re-escape embedded double quotes — CommandLineToArgvW then
-//     re-parses one as an argument terminator and truncates the operator's
-//     message mid-sentence, invisibly to the graph inspector which shows the
-//     pre-mangling file side). `claude -p` reads the prompt from stdin when
-//     no positional argument is given, so this reuses the same stdinFromFile
-//     wrapper as codex/gemini below.
-//   * codex / gemini: the full composed prompt (system + context + question)
-//     written to a file fed through stdin (`< "file"` POSIX,
-//     `Get-Content -Raw "file" |` PowerShell).
-// - Read-only harness per CLI (decision D6, revised lot A): claude
-//   --strict-mcp-config + --disallowedTools (Read/Grep/Glob stay); codex
-//   --sandbox read-only; gemini --approval-mode plan (documented read-only
-//   mode — supersedes the C24-era "no reliable equivalent" note).
-//
-// Node builtins only; every builder is pure and unit-testable under bun.
+// The compiled context always travels by file, never the command line, since a
+// large context would blow Windows' ~32k command-line limit.
+// claude: constant system prompt + context via --append-system-prompt-file,
+// question fed via stdin — a quoted positional argument gets mis-escaped when
+// the PowerShell wrap re-invokes claude.exe in legacy argument mode.
+// codex/gemini: the full composed prompt (system + context + question) is
+// written to a file and fed through stdin.
+// Read-only harness per CLI: claude uses --strict-mcp-config +
+// --disallowedTools, codex uses --sandbox read-only, gemini uses
+// --approval-mode plan.
 
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'

@@ -1,18 +1,7 @@
-// Card 469f3176: mobileApprovals must be a pure TRANSPORT choice (whether to
-// also relay a question to Telegram/Discord/ntfy), never a gate on whether
-// the blocking ask_operator channel exists at all.
-//
-// SECOND RIDEAU, not the primary proof (team-lead ruling, 2026-08-13): a text
-// scan only catches the LITERAL spelling of a reintroduced guard --
-// `=== true`, a ternary, an inverted early-return all stay invisible to it
-// while the bug is back. The PRIMARY, behavioral proof lives in
-// tests/desktop-approval-runtime.test.ts, which calls
-// armApprovalsAtStartup() directly: that function's signature takes no
-// mobileApprovals-shaped argument at all, so nothing inside it can branch on
-// one regardless of how a future edit spells the condition. What a text scan
-// still catches, and what the extraction alone cannot: index.ts's call site
-// itself being wrapped in a guard around the call, which is why this test is
-// kept as a second check on that one line rather than deleted.
+// mobileApprovals gates only the Telegram/Discord/ntfy relay, never whether the
+// blocking ask_operator channel exists.
+// This is a text scan: it only catches a reintroduced literal condition on the
+// call site, not a behavioral change inside the armed function.
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";

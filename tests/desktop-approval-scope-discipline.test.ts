@@ -1,25 +1,8 @@
-// spec_67d0b267 -- card 1def56da, docs/DESIGN-APPROVAL-SCOPE.md D4.
-//
-// WHAT THE TYPE CANNOT DO, AND THEREFORE WHAT THIS FILE IS FOR.
-// shared/approval-scope.ts makes it impossible to build an identity clause on
-// `pending_approvals` without a scope: `approvalWhere` takes one, and no
-// exported function turns an `ApprovalIdentity` into one. That closes forgetting
-// the scope WHEN YOU GO THROUGH THE MODULE. It cannot close writing SQL that
-// bypasses the module entirely -- a module boundary is not a language boundary,
-// and the brief says so rather than pretending otherwise.
-//
-// This scan is that missing half. Its polarity is the point: the default is
-// REFUSE. A new statement touching the table fails until someone writes down
-// why it may be unscoped, and a new FILE touching the table fails outright.
-// The list below is therefore not the "watched" set -- everything is watched --
-// it is the set of statements whose lack of a scope has been argued.
-//
-// NAMED `desktop-*` so the CI glob at .github/workflows/desktop-build.yml:79
-// collects it. That is not decoration: measured 2026-08-19, the four suites
-// covering approvals (1409 lines) match none of the ten globs, so without a
-// deliberate name this guard would run on one developer's machine and nowhere
-// else -- the exact failure docs/DESIGN-NOTIFY-DECIDER.md §5.4 describes for the
-// sibling guard.
+// shared/approval-scope.ts stops a caller from building an identity clause
+// without a scope, but cannot stop SQL that bypasses the module entirely.
+// This scan is that missing half: a new statement or file touching
+// pending_approvals fails until an exemption below argues in writing why it may
+// be unscoped.
 
 import { test, expect, describe } from "bun:test";
 import { readFileSync, readdirSync, statSync } from "node:fs";
@@ -42,20 +25,11 @@ const ALLOWED_FILES = new Set([
   join("tests", "broker-approvals.test.ts"),
   join("tests", "desktop-approval-scope.test.ts"),
   join("tests", "desktop-approval-scope-discipline.test.ts"),
-  // Card 69e5a3e0: tests/migrate-project-key-case.test.ts replays broker.ts's
-  // OWN CREATE TABLE / ALTER TABLE statements (source-text extraction, not a
-  // hand copy) to build an in-memory mirror of the real schema, then inserts
-  // one fixture row per table via explicit column lists -- including
-  // pending_approvals, since the migration script under test discovers and
-  // migrates that table like the other four. This is DDL replay and a raw
-  // fixture insert, not application logic reading or writing an approval on
-  // behalf of a caller -- there is no operator, no session, no request to
-  // scope BY, the same shape `UNSCOPED_BY_DESIGN`'s DDL/migration entries
-  // above already argue for inside broker.ts itself. It does NOT authorise
-  // this file to add unscoped queries that impersonate a caller (list,
-  // claim, wait, answer): those would need to go through
-  // shared/approval-scope.ts like everywhere else, and this exemption grants
-  // nothing beyond being NAMED in this scan without being flagged.
+  // card 69e5a3e0: this file replays broker.ts's own CREATE/ALTER TABLE
+  // statements as a schema mirror and inserts one fixture row per table via
+  // DDL, not application logic acting for a caller.
+  // The exemption covers only that replay, not an unscoped query added
+  // elsewhere in this file that impersonates a caller.
   join("tests", "migrate-project-key-case.test.ts"),
 ]);
 
@@ -78,13 +52,9 @@ const UNSCOPED_BY_DESIGN: Record<string, string> = {
     "One-shot migration of rows predating project scoping (card 1def56da). Global on purpose: it repairs EVERY operator's legacy rows, and no caller is acting.",
   "UPDATE pending_approvals SET status = 'expired_notif'":
     "Notification TTL sweep. A maintenance job with no caller and no identity, so there is nothing to scope it BY.",
-  // B4, MEASURED (card d3f23918): this key USED TO BE the bare fragment
-  // "DELETE FROM pending_approvals", which excuses a SHAPE rather than a
-  // SITE -- any unscoped DELETE added anywhere else that happens to share
-  // that literal text would pass silently, exactly the trap the gateway
-  // exemption above already fell into once. Anchored instead on the specific
-  // status pair and TTL comparison, which exist nowhere but sweepApprovals's
-  // real purge statement.
+  // card d3f23918: anchored on the specific status pair and TTL comparison
+  // unique to sweepApprovals's purge statement, not the bare table name, so an
+  // unrelated unscoped DELETE elsewhere cannot silently match this exemption.
   "status IN ('answered','abandoned') AND created_at < datetime('now'":
     "Retention purge (sweepApprovals). Same reason as the sweep above: a maintenance job with no caller and no identity to scope by.",
   "readonly [SCOPE_BRAND]":
@@ -94,23 +64,10 @@ const UNSCOPED_BY_DESIGN: Record<string, string> = {
   "[approvalId]":
     "The read INSIDE scopeForAnsweredRow, the gateway path's only SQL. It is what PRODUCES a scope from a row, so scoping it would require the answer it exists to produce. It is safe for the reason the old exported form was not: the caller supplies an id and nothing else, so it cannot name its own operator or project.",
 
-  // A GATEWAY EXEMPTION USED TO SIT HERE, `get(answer.approvalId)`, for
-  // `channelHost.onAnswer`'s pre-authorisation read. It is GONE because the read
-  // is gone: review round 2 moved it inside shared/approval-scope.ts
-  // (`scopeForAnsweredRow`), so the handler performs no SQL on this table at
-  // all. Deleted rather than left dormant on purpose -- an exemption that
-  // protects no site is a false pointer in the making, and this one also
-  // carried the justification of a mechanism (`scopeForOwnedRow`) that no
-  // longer exists. The next reader would have taken it for a live derogation
-  // and copied it.
-  //
-  // Its history is worth one line, because the trap it fell into is generic:
-  // written first as the bare SQL string `"SELECT * FROM pending_approvals
-  // WHERE id = ?"`, it excused an unscoped read fabricated in a COMPLETELY
-  // DIFFERENT handler, and the scan stayed 4/4 green while the broker suite
-  // went red. A generic fragment excuses a SHAPE, not a site. Any exemption
-  // added below must be anchored on something unique to the one place it
-  // covers.
+  // An exemption is deleted, not left dormant, once the site it covers is gone:
+  // a stale exemption protecting nothing reads as live and gets copied.
+  // Every exemption here must be anchored on something unique to the one site
+  // it covers, never a bare SQL fragment that could match elsewhere.
 };
 
 function walk(dir: string, out: string[] = []): string[] {
@@ -139,33 +96,14 @@ const STATEMENT_OPENER = /\.(?:run|query|queryOne|queryAll|prepare)\s*\(/;
 const MAX_STATEMENT_LINES = 5;
 
 /**
- * The window a statement occupies, ending at the STATEMENT'S OWN end rather
- * than after a fixed number of lines.
- *
- * MEASURED DEFECT, review round 2: a fixed four-line window let an UNSCOPED
- * read placed directly above a scoped one pass, because the NEIGHBOUR's
- * `${where.sql}` fell inside the window. The scan then vouched for a statement
- * on the strength of a different statement's clause. The end is found by
- * balancing parentheses from the `db` call that opens the statement, which is
- * how the multi-line template literals in broker.ts are actually delimited --
- * a line count is not a syntactic fact, and this is why it could be fooled.
- *
- * MEASURED DEFECT, card d3f23918: the widened 40-line cap and the bare paren
- * count were STILL two more ways to be fooled the same way. B1: a string
- * literal carrying an unpaired parenthesis (a LIKE pattern) desyncs `depth`,
- * so it never again reaches zero and the scan runs on past its own statement.
- * B2: a table mention sitting among lines with no paren and no semicolon
- * (array-element text, not code) satisfies neither break condition, so the
- * scan keeps going -- in both cases straight into the NEXT statement, which
- * then supplies the marker that vouches for THIS one. Two independent fixes,
- * both fail-CLOSED: the window now stops the moment it sees a line (other
- * than its own first one) that OPENS A NEW SQL call, since one statement
- * cannot contain the start of another regardless of what the paren counter
- * thinks; and the horizon shrinks from 40 lines to a handful, so an
- * unresolved window ends there and reads as UNSCOPED rather than "keep
- * looking". Every real multi-line statement in the SQL-bearing files
- * resolves within 2-3 lines of its own trigger line (measured), so neither
- * change costs a legitimate exemption.
+ * Ends at the statement's own end by balancing parentheses from the opening db
+ * call, not a fixed line count.
+ * A string literal with an unpaired parenthesis (a LIKE pattern) can desync the
+ * depth counter, so the window also stops the moment it sees a line opening a
+ * new SQL call.
+ * The horizon is capped at a handful of lines rather than resolved
+ * indefinitely, so an unresolved window reads as unscoped instead of continuing
+ * to search.
  */
 function statementAt(lines: string[], start: number): string {
   let depth = 0;
@@ -194,17 +132,10 @@ function statementAt(lines: string[], start: number): string {
 const SQL_BEARING_FILES = ["broker.ts", join("shared", "approval-scope.ts")];
 
 /**
- * Strip a line-comment tail before looking for markers.
- *
- * B3, MEASURED: the comment skip applied only to the line where the table name
- * appeared, never to the CONTENTS of the window. So an unscoped read whose
- * trailing comment merely MENTIONED `${where.sql}` was vouched for by its own
- * prose. Code and commentary have to be told apart wherever a marker is looked
- * for, not only where the offence is detected.
- *
- * Naive on purpose: a `//` inside a string literal (a URL) would truncate the
- * line early. That costs a false POSITIVE at worst, which is the fail-closed
- * direction, and no statement in the scanned files contains one.
+ * Strips only a trailing `//` comment; naive by design.
+ * A `//` inside a string literal would truncate the line early, but that only
+ * produces a false positive (fail-closed), and no statement in the scanned
+ * files contains one.
  */
 function codeOnly(line: string): string {
   const at = line.indexOf("//");
@@ -212,25 +143,11 @@ function codeOnly(line: string): string {
 }
 
 /**
- * Does this LINE reach the table in code, as opposed to naming it in prose?
- *
- * MEASURED 2026-08-27, card 47baf25a: the file-level audit below carried its
- * OWN naive `source.includes(TABLE)`, with none of the comment discipline the
- * statement-level audit had already been forced to learn (defect B3, argued in
- * `codeOnly` above). It therefore refused `tests/approval-hook.test.ts`, a file
- * that reaches approvals exclusively through `POST /approval/list` with the
- * operator credential and names the table ONCE, in a doc block explaining what
- * the hook's early return prevents. A guard that punishes DOCUMENTATION of
- * the thing it protects trains people to stop writing the documentation.
- *
- * This is A1 one level up, and the file said so itself: "sharing the parser was
- * not sharing the predicate". Both audits now share this one body, so the
- * file-level half cannot drift from the statement-level half again. Note the
- * direction of the change is NOT a weakening: it drops prose, and in exchange
- * the file scan gains the case-insensitivity and the split-name detection
- * (D2a/D2b) that it never had -- a file writing `PENDING_APPROVALS` or
- * `"pending_" + "approvals"` used to read, to that scan, as a file that does
- * not mention the table at all.
+ * Distinguishes code that reaches the table from prose merely naming it in a
+ * comment or doc block, case-insensitively and across split names (e.g. string
+ * concatenation).
+ * A guard that flags documentation of the table trains people to stop
+ * documenting it.
  */
 function namesTableInCode(line: string): boolean {
   const trimmed = line.trimStart();
@@ -298,12 +215,6 @@ describe("no unscoped SQL reaches pending_approvals", () => {
   });
 
   test("every statement in the SQL-bearing files is scoped, or argued in writing", () => {
-    // C1, MEASURED: this audit used to read `broker.ts` ALONE. Since review
-    // round 2, `shared/approval-scope.ts` performs its own SELECT on the
-    // protected table (`scopeForAnsweredRow`), so the file with the best reason
-    // to write there was the one file the guard never looked at -- an unscoped
-    // read fabricated inside it left the scan at 4 pass. Both are already in
-    // ALLOWED_FILES, so there was nothing to arbitrate, only to loop over.
     const offenders: string[] = [];
     for (const rel of SQL_BEARING_FILES) {
       offenders.push(...offendersIn(readFileSync(join(REPO_ROOT, rel), "utf-8"), rel));
@@ -316,10 +227,9 @@ describe("no unscoped SQL reaches pending_approvals", () => {
   });
 
   /**
-   * The probes call `offendersIn`, the SAME function the audit above calls --
-   * not a copy of its logic. That is the whole correction of A1: previously
-   * this was a second loop body, so the audit could go blind while every probe
-   * stayed green.
+   * These probes call offendersIn, the same function the audit above uses, not
+   * a reimplementation -- so the audit cannot silently diverge from what the
+   * probes cover.
    */
   const clean = (src: string): boolean => offendersIn(src, "probe").length === 0;
 
@@ -422,16 +332,10 @@ describe("no unscoped SQL reaches pending_approvals", () => {
   });
 
   test("the FILE scan ignores prose and still refuses a new file that reaches the table", () => {
-    // The file-level half used to be a bare `includes(TABLE)`, so it had no
-    // probes at all and nothing would have caught it drifting from the
-    // statement-level half. These call `fileNamesTable`, the function the audit
-    // itself calls -- not a copy of its logic (A1).
-    //
-    // The first case alone would be satisfied by `fileNamesTable = () => false`,
-    // which is exactly how an absence assertion accepts the destruction of the
-    // thing it guards. The four that follow are its negative control: they are
-    // what makes the relaxation a REFINEMENT rather than a hole, and three of
-    // them are forms the old `includes(TABLE)` did NOT catch.
+    // These probes call fileNamesTable, the function the audit itself uses, not
+    // a copy of its logic.
+    // The four negative-control cases make the relaxation a refinement rather
+    // than a hole in what the guard flags.
     const cases: Array<[string, string, boolean]> = [
       [
         "prose in a doc block, the false positive this refinement fixes",

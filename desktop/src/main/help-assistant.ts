@@ -1,23 +1,11 @@
-// Floating "?" help assistant (PLAN C9): each question is a throwaway
-// headless invocation with an app-generated system prompt describing the
-// active view and a snapshot of its data. No supervisor context involved.
-// Since lot A (EXPLORATION-multi-llm) the target is configurable
-// (config.helpTarget) and the command/HTTP routing lives in
-// utility-inference.ts over the C24 adapters; this module keeps the help
-// prompts, the transcript replay, and the shell executor (runHelp).
-//
+// Each question is a throwaway headless invocation with an app-generated system
+// prompt; no supervisor context involved.
+// The system prompt is a code constant plus app-generated context, never an
+// operator/repo template.
+// Technically read-only, not just prompt-constrained: --strict-mcp-config loads
+// no MCP servers and --disallowedTools denies every mutating tool, while
+// Read/Grep/Glob stay available to ground answers in project files.
 // Security model (consistent with the C8 locked-harness decision):
-// - The system prompt is a CODE CONSTANT (+ app-generated context), never an
-//   operator/repo template.
-// - The assistant is TECHNICALLY read-only, not just prompt-constrained:
-//   `--strict-mcp-config` with no MCP config loads NO MCP servers (no
-//   claude-peers, no deck-control), and `--disallowedTools` denies every
-//   mutating tool (codex: --sandbox read-only; gemini: --approval-mode
-//   plan). Read/Grep/Glob stay available so claude can ground answers in
-//   the project files.
-//
-// Node builtins only; the pure builders are unit-testable under bun, and
-// runHelp accepts an injectable command for tests.
 
 import { execFile } from 'node:child_process'
 import { randomBytes } from 'node:crypto'

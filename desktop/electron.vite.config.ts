@@ -5,7 +5,7 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   main: {
     // node-pty is a native module; it must stay external so it is required at
-    // runtime — covered by build.externalizeDeps (default true since v5).
+    // runtime instead of bundled.
     resolve: {
       alias: { '@shared': resolve(__dirname, 'src/shared') }
     },

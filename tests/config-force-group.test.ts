@@ -19,9 +19,6 @@ import {
 // Fixture group passphrases below are throwaway test strings, not real
 // credentials.
 
-// All env keys the forced-group path or the legacy path may read. Snapshotted
-// and restored around every test so cases never leak into each other or inherit
-// the developer's shell.
 const ENV_KEYS = [
   "CLAUDE_PEERS_FORCE_GROUP",
   "CLAUDE_PEERS_FORCE_GROUP_FILE",
@@ -158,7 +155,6 @@ test("no forced env nor file: resolution is unchanged (backward-compat)", () => 
   const name = resolveGroupName(dir, dir, userConfig);
   const resolved = resolveGroup(dir, dir, userConfig);
 
-  // The project file wins, exactly as before this change.
   expect(name).toBe("from-project-file");
   expect(resolved.name).toBe("from-project-file");
   expect(resolved.group_id).toBe(computeGroupId("pf-pass"));

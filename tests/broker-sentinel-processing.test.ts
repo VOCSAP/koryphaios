@@ -1,37 +1,9 @@
-// Card 37a2b8c7, volets 2 + 3: authenticate __sentinel__-adjacent authority.
-//
-// Volet 2 (Chain A): a client-declared sentinel-shaped instance_token/from_token
-// is an impersonation/leak attempt, never a legitimate identity. Measured before
-// the fix: 0 of 8 routes that trust a client-declared instance_token as identity
-// proof refused it -- only resolveRoadmapAuthor (unrelated feature) had the shape
-// guard wired. Review (reviewer -10 / team-lead -13) found the first pass only
-// covered 3 of the 8 (/send-message, /poll-messages, /peek-messages); this file
-// now covers all 8, including /unregister, whose unguarded path would DESTROY
-// the sentinel's row and every undelivered operator-inbox message across every
-// group in one call -- the same prerequisite as the disclosure routes, a
-// different (destructive) primitive.
-//
-// Volet 3: SENTINEL_DEFINITIONS (shared/types.ts) is the single enumerable
-// source of truth the 4 processing sites (DB seed, TTL exemption, sender-meta
-// resolution, RESERVED_PEER_IDS/set_id refusal) now derive from, replacing 4
-// hardcoded per-constant copies. The tests below iterate SENTINEL_DEFINITIONS
-// directly instead of hardcoding "deck"/"operator", so a third sentinel added
-// to the array tomorrow is automatically covered by the SAME test with zero
-// test-code changes -- the failure mode this must catch is "array grows, a
-// processing site silently doesn't", not "someone forgets to update a test".
-// All 4 axes (seeded / TTL-exempt / mapped / set_id-reserved) are asserted
-// below, matching this file's own header claim (review MINOR: a prior draft
-// promised 4 and asserted 3).
-//
-// Reciprocity (review MAJOR-1): the PROCESSING-direction guarantee above only
-// holds if every *_INSTANCE_TOKEN/*_PEER_ID export actually derives from this
-// array -- nothing stopped a hardcoded literal export from bypassing that.
+// Tests iterate SENTINEL_DEFINITIONS (shared/types.ts) directly rather than
+// hardcoding 'deck'/'operator', so a third sentinel added later is covered
+// automatically with no test-code change.
 // findUnbackedInstanceTokenExports/findUnbackedPeerIdExports (shared/types.ts)
-// make it checkable; the tests below assert it holds for the REAL module
-// namespace, and separately (negative control) that the same function catches
-// a synthetic supervisor-shaped export that isn't backed -- proving the check
-// discriminates rather than being vacuously green, mirroring the reviewer's
-// own /tmp probe.
+// check that every *_INSTANCE_TOKEN/*_PEER_ID export actually derives from that
+// array, since nothing else stops a hardcoded literal export from bypassing it.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
@@ -262,24 +234,12 @@ for (const sentinel of guardProbes) {
   });
 
   test(`unregister refuses a sentinel-shaped instance_token -- worst case: does NOT delete the row or drain its inbox (${sentinel.peerId})`, async () => {
-    // Re-plant, like the `disconnect` and `set-id` probes above do. This one
-    // did not, and relied on the row planted TWO tests earlier still being
-    // there -- while this file's own broker runs with DORMANT_TTL_HOURS=0 and
-    // CLEAN_INTERVAL_SEC=1 (beforeAll), so every ORDINARY dormant row is
-    // purged within a second. The `__anything__` probe is ordinary on purpose
-    // (it is not a SENTINEL_DEFINITIONS entry, so not TTL-exempt), so it was
-    // the one that died: measured red 2026-08-28 on CI run 33176332938
-    // (windows) at line 276, `peerRow(...)` returning null while both guard
-    // assertions above it passed. It had been green by luck at 2.47-51 ms and
-    // went red at 106 ms.
-    //
-    // RESIDUAL, stated plainly: this narrows the race, it does NOT close it.
-    // The exposure drops from "several tests" to "one HTTP round trip", about
-    // 100 ms inside a 1000 ms sweep window on the slowest runner measured. A
-    // sweep tick landing inside that window would still delete the row and
-    // fail line 276 the same way. Closing it for real would mean not sharing
-    // this TTL=0 broker with the probe tests, which is a larger change than
-    // this defect justifies.
+    // This re-plants the row (like the disconnect/set-id probes above) because
+    // this file's broker runs with DORMANT_TTL_HOURS=0 and
+    // CLEAN_INTERVAL_SEC=1, purging any ordinary dormant row within a second.
+    // Residual, stated plainly: this narrows the race to one HTTP round trip
+    // inside a 1000ms sweep window, it does not close it. A sweep tick landing
+    // inside that window would still delete the row.
     await ensureDormantRow(sentinel.instanceToken);
     await plantMessageTo(sentinel.instanceToken, `unregister-destruction-probe-${sentinel.peerId}`);
     const before = countUndelivered(sentinel.instanceToken);
@@ -392,13 +352,10 @@ test("every SENTINEL_DEFINITIONS row survives cleanStalePeers regardless of TTL"
 }, 15_000);
 
 test("resolveSenderMeta maps every SENTINEL_DEFINITIONS entry's instance_token to its peer_id", async () => {
-  // resolveSenderMeta is only reachable indirectly (toDeliveredMessage, called
-  // from poll/peek), and no live handler currently emits a message FROM a
-  // sentinel other than 'deck' via /announce -- 'operator' only ever RECEIVES.
-  // Insert the row directly (same technique as tests/broker-fk-cleanup.test.ts)
-  // to exercise the read-side mapping for every array entry regardless of which
-  // write paths exist today; this is deliberately robust to volet-1 adding a
-  // legitimate operator-authored send path later.
+  // resolveSenderMeta is only reachable indirectly, and no live handler
+  // currently emits a message from a sentinel other than 'deck' via /announce,
+  // so the row is inserted directly to exercise the read-side mapping for every
+  // array entry regardless of which write paths exist today.
   const g = { id: await groupId("sentinel-meta"), hash: await sha256Hex("sentinel-meta") };
   const target = await register("hsp-meta", "/sp-meta", g);
 

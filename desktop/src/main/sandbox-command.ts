@@ -57,19 +57,13 @@ export const SANDBOX_USER = 'kory'
 export const SANDBOX_HOME = `/home/${SANDBOX_USER}`
 
 /**
- * The CLI keeps its credentials in `<config>/.credentials.json` but its
- * ONBOARDING state (the account, "login done") in `.claude.json`, which by
- * default sits BESIDE the config dir, in $HOME. Our shared volume covers
- * `~/.claude` only, so by default that state is per-container: the login
- * happens in the throwaway auth container, `--rm` destroys the file, and the
- * project container still believes nobody ever signed in -- the agent then
- * greets the operator with "Select login method" while the Docker view
- * (rightly) reports the volume as connected.
- *
- * Pointing CLAUDE_CONFIG_DIR at the mounted directory moves `.claude.json`
- * INSIDE it (verified against the CLI: with the variable set, nothing is
- * written to $HOME), so the login state now travels with the credentials.
- * It must be exported for BOTH the auth container and every session.
+ * The CLI writes onboarding state to .claude.json beside $HOME by default,
+ * separate from the credentials dir — so a login in the throwaway auth
+ * container never reaches the project container, which still shows the login
+ * screen despite a connected volume.
+ * Setting CLAUDE_CONFIG_DIR to the mounted dir moves .claude.json inside it
+ * too, so login state travels with the credentials; must be exported for both
+ * the auth container and every session.
  */
 export const SANDBOX_CONFIG_DIR = `${SANDBOX_HOME}/.claude`
 export const SANDBOX_CONFIG_DIR_ENV = `CLAUDE_CONFIG_DIR=${SANDBOX_CONFIG_DIR}`
@@ -173,20 +167,12 @@ export function shQuote(value: string): string {
 }
 
 /**
- * Rewrite the `--plugin-dir "<hostDir>"` flag (session-command.ts's
- * pluginFlag) inside an already-composed session command line so it points at
- * SANDBOX_DECK_PLUGIN_DIR instead of the host directory index.ts's
- * getDeckPluginDir resolved it to. Card a79c7696 volet 1: SBX1's wrap()
- * already translates cwd (mapHostPathToContainer) and env (sandboxifyEnv) but
- * left this flag untouched, so a sandboxed session's --plugin-dir pointed at
- * a host path the container cannot see — the skill/agent silently failed to
- * load, indistinguishable from "not relevant here" (no error either way).
- *
- * A single fixed replacement (not a host-path-aware rewrite) is correct here:
- * there is exactly one deck-plugin per app, always projected to the same
- * container path by projectDeckPlugin() — no per-call host value to thread
- * through. No-op when the flag is absent (deck-plugin dir missing on the
- * host; getDeckPluginDir already reports that once per episode).
+ * Rewrites the --plugin-dir flag in an already-composed command line to the
+ * container path, since the host path it was built with is invisible inside the
+ * sandbox and the plugin would fail to load silently.
+ * A single fixed replacement is correct: there is exactly one deck-plugin per
+ * app, always projected to the same container path. No-op when the flag is
+ * absent.
  */
 export function rewritePluginDirForContainer(command: string): string {
   return command.replace(/--plugin-dir "[^"]*"/, `--plugin-dir "${SANDBOX_DECK_PLUGIN_DIR}"`)
@@ -210,17 +196,10 @@ export interface SandboxCreateSpec {
   /** Host dir holding the generated launch scripts (bind-mounted at /kory-run). */
   runDirHost: string
   /**
-   * DECK-OWNED peers dir (app state), bind-mounted where the container's
-   * server.ts writes the peer cache + desk-session back-channel. The Deck reads
-   * sandboxed sessions' back-channel from here.
-   *
-   * SECURITY (CLAUDE.md hostile input #5): this is deliberately NOT the host
-   * `~/.claude/peers`. Mounting that one read-write let a sandboxed agent
-   * rewrite the back-channel file of a NON-sandboxed tile, whose id the Deck
-   * then adopts and passes to `--resume` on the host shell — a sandbox escape.
-   * Sandboxed containers now share only a dir of their own; host tiles are out
-   * of reach. (desk-session.ts validates the value and session-command.ts
-   * quotes it: three locks, because one of them will eventually be wrong.)
+   * Deck-owned peers dir, not the host ~/.claude/peers: mounting the real one
+   * read-write would let a sandboxed agent rewrite another, non-sandboxed
+   * tile's back-channel file and have the Deck resume it on the host — a
+   * sandbox escape.
    */
   peersDirHost?: string
   /** Dev-server ports published as 127.0.0.1:p:p (webview reaches them as localhost). */
@@ -365,18 +344,9 @@ export function buildExecCommand(engine: SandboxEngine, name: string, sessionId:
 }
 
 /**
- * The credentials volume is APP-WIDE (one login serves every project), so every
- * operation on it runs in a THROWAWAY container that mounts nothing else — no
- * /work, no run dir, no peers dir, no published ports. Two consequences, both
- * deliberate:
- *  - the login, the probe and the wipe no longer need this project's container
- *    to exist, let alone run (they used to be `exec` into it, which coupled an
- *    app-wide volume to per-project state and made "sign in" impossible until a
- *    whole project container had been created);
- *  - it is the smallest possible mount set (CLAUDE.md hostile input #5): a
- *    container that only ever sees ~/.claude cannot touch the operator's tree.
- * The image is still required — it is what carries the `claude` CLI — but it is
- * global too, built once for every project.
+ * The credentials volume is app-wide, so every operation on it runs in a
+ * throwaway container mounting nothing else — no /work, no run dir, no peers
+ * dir, no published ports — the smallest possible mount set.
  */
 function authVolumeMount(): string[] {
   return ['-v', `${SANDBOX_AUTH_VOLUME}:${SANDBOX_HOME}/.claude`, '-e', SANDBOX_CONFIG_DIR_ENV]
@@ -393,19 +363,13 @@ export function buildAuthCommand(engine: SandboxEngine, image: string): string {
 }
 
 /**
- * Arg vector probing the login state (exit 0 = ready for agents). TWO
- * conditions, not one: the credentials file AND `hasCompletedOnboarding` in
- * `.claude.json`. The CLI writes the credentials the moment OAuth succeeds but
- * keeps onboarding (theme, confirmations) going and only then records
- * `hasCompletedOnboarding` — and the login dialog KILLS the login PTY as soon
- * as this probe passes. Probing the credentials alone therefore killed the CLI
- * mid-onboarding: the account landed in the volume, the Docker view said
- * "connected", and every agent still greeted the operator with the onboarding
- * screen. The command is a constant — no operator/agent input crosses into
- * `sh -c` (hostile input #4 stays satisfied). The if/else collapses every
- * miss to exit 1: a bare `grep -q` on a MISSING .claude.json exits 2, which
- * probeAuth() reads as "engine trouble / unknown" instead of a plain "not
- * signed in".
+ * Checks both the credentials file and hasCompletedOnboarding in .claude.json:
+ * the CLI writes credentials as soon as OAuth succeeds but keeps onboarding
+ * open, and the login dialog kills the login PTY the instant a credentials-only
+ * check would pass.
+ * On a missing .claude.json a bare grep -q exits 2; the if/else collapses every
+ * miss to exit 1 so probeAuth reads it as a plain not-signed-in rather than
+ * engine trouble.
  */
 export function buildAuthProbeArgs(image: string): string[] {
   return [
@@ -484,18 +448,12 @@ export function buildCopyIntoArgs(name: string, hostPath: string, containerPath:
 }
 
 /**
- * Arg vector deleting the projected entries from the container's ~/.claude
- * BEFORE they are re-copied. `docker cp -L` overwrites destination FILES but
- * silently refuses to replace a destination DIRECTORY SYMLINK with a real
- * directory — and the auth volume still carried `agents`/`skills` links from a
- * pre-`-L` copy, pointing at Windows paths that exist nowhere in the
- * container. The projection then reported success while the operator's global
- * agents/skills stayed absent from every sandboxed session. Deleting the
- * targets first makes the copy authoritative whatever the volume holds.
- *
- * Only the entries about to be re-copied are passed (never the whole
- * allow-list): purging an entry the host no longer has would delete the
- * container's last copy without a replacement.
+ * docker cp -L overwrites a destination file but refuses to replace a
+ * destination directory symlink with a real directory, so stale projected
+ * entries are deleted before the copy to make it authoritative.
+ * Only entries about to be re-copied are purged, never the whole allow-list, so
+ * removing a host entry never deletes the container's last copy without a
+ * replacement.
  */
 export function buildProjectionCleanArgs(name: string, entryNames: string[]): string[] {
   // Entry names come from PROJECTED_ENTRIES via planProjection, but re-check

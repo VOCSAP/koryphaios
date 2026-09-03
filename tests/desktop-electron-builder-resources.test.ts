@@ -3,40 +3,14 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// Packaging regression guard for card d02c8e96 (deck-plugin extraResources
-// silently dropped by an aborted electron-builder run). A unit test of
-// pluginFlag()/getDeckPluginDir() would be green today and prove nothing --
-// the actual defect was a MISMATCH between what electron-builder.yml declares
-// and what a packaged app/win-unpacked tree ends up containing, and no
-// existing test looks at a real packaged tree at all.
-//
-// This test reads the extraResources list FROM desktop/electron-builder.yml
-// (never hardcoded -- a hardcoded list is exactly the "sensitivity without
-// coverage" shape CLAUDE.md warns about: a 5th entry added later would
-// silently escape a hardcoded guard).
-//
-// Split in two halves (reviewer d02c8e96 review, second pass), each catching
-// a DIFFERENT real failure mode, neither subsuming the other:
-//   - LOCAL half: does each declared `to` target exist, non-empty, under a
-//     packaged dist/win-unpacked/resources. Only runs the real assertion on a
-//     machine that has just `npm run package`d (skipped elsewhere via
-//     test.skipIf, see below -- an explicit, visible skip, not a silent
-//     pass). Catches an aborted/partial packaging run, the card's own
-//     incident -- output-side destruction CI cannot see regardless, since no
-//     packaging job runs there (deliberately out of scope today: electron-
-//     builder in CI is expensive and that is not today's trade-off).
-//   - CI half: does each declared `from:` source directory exist, non-empty,
-//     in the SOURCE tree (desktop/). Needs no packaging, runs everywhere
-//     including plain CI for free. Catches a mistyped `from:`, a renamed
-//     source directory, or a new entry pointing nowhere -- a human typo, the
-//     one failure mode of the two a person can actually introduce by hand
-//     (`from: resources/sandbox` / `to: sandbox` already shows these paths
-//     are not always the same string).
-//
-// Deliberately does NOT invoke `npm run package` itself: packaging needs a
-// native toolchain and takes minutes; this file stays a pure module so it
-// runs in the same fast "Bun tests (pure modules)" CI step as the rest of
-// tests/desktop-*.test.ts (see .github/workflows/desktop-build.yml).
+// Reads the extraResources list from desktop/electron-builder.yml rather than
+// hardcoding it, since a hardcoded list would silently miss a newly added
+// entry.
+// Two independent halves: the local half checks each declared `to` target
+// exists in a packaged dist/win-unpacked tree (skipped unless one was just
+// built) and catches an aborted packaging run; the CI half checks each `from:`
+// source directory exists in desktop/ and catches a typo or renamed source,
+// running everywhere including CI. Neither subsumes the other.
 
 const DESKTOP_DIR = join(import.meta.dir, "..", "desktop");
 const YML_PATH = join(DESKTOP_DIR, "electron-builder.yml");
@@ -119,18 +93,9 @@ function parseExtraResourcesEntries(yamlText: string): ExtraResourceEntry[] {
 }
 
 /**
- * CI half of the packaging guard (reviewer d02c8e96 review, second pass):
- * the local/packaged half above only ever asserts on a machine that has just
- * run `npm run package`, so it is skipped in CI (no packaging job exists
- * there, and adding one is explicitly out of scope for today per the
- * reviewer). This half needs no packaging at all -- it reads each
- * extraResources `from:` and checks it exists and is non-empty in the SOURCE
- * tree (desktop/), so it runs everywhere, including plain CI. It catches a
- * different, real failure mode than the local half: a mistyped `from:`, a
- * renamed source directory, or a new entry that points nowhere -- a human
- * typo, not an aborted packaging run (that class only ever shows up in
- * packaged OUTPUT, which is exactly why the local half exists too; neither
- * half subsumes the other).
+ * Checks each extraResources `from:` exists and is non-empty in the source
+ * tree, so it runs everywhere including plain CI, unlike the local/packaged
+ * half which needs a real `npm run package` output and is skipped there.
  */
 function checkSourceEntries(desktopDir: string, entries: ExtraResourceEntry[]): { missing: string[]; empty: string[] } {
   const missing: string[] = [];

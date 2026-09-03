@@ -1,18 +1,6 @@
-// PLAN-v0.4 C1: quota (usage-limit) detection + auto-resume scheduling.
-// Fixtures mirror the real Claude Code screens the regexes were derived from
-// (via henryaj/autoclaude's verified pattern families).
-//
-// Scope note (koryphaios card fd1914cc audit, 2026-08-19): this file tests
-// ONLY quota.ts's own units (detectRateLimit/parseResetClock/QuotaDetector)
-// -- it never touches session-service.ts. The double-injection bug that
-// fd1914cc fixed lived one layer up, in SessionService's unconditional
-// `quotaDetector.feed()` call, which nothing here exercises. So this file
-// was already green before that fix landed, but that was never informative
-// about the bug: it was never the relevant guard for it. The gating
-// behaviour (isClaudeSession/quotaGateActive) is covered by
-// tests/desktop-quota-gate.test.ts instead. Keep that split -- this file
-// stays scoped to quota.ts's own parsing/detector contract, which is still
-// genuinely exercised (conditionally) by session-service.ts today.
+// Tests only quota.ts's own units
+// (detectRateLimit/parseResetClock/QuotaDetector); it never exercises
+// session-service.ts, so it does not guard the gating behavior there.
 
 import { test, expect } from "bun:test";
 
@@ -203,20 +191,11 @@ test("unknown reset time -> periodic resume-due while the episode lasts", async 
   const ev = collect(d);
   d.feed("s1", "You've hit your limit");
   expect(ev.limits[0].resetAt).toBeNull();
-  // Card 69011831. This is the ONE racy assertion of the file, and it is racy
-  // for a structural reason, not a thin-margin one: quota.ts's armTimer
-  // re-arms the periodic retry from INSIDE its own callback (a chained
-  // setTimeout, not an interval), so lateness ACCUMULATES per hop. A fixed
-  // wait(90) needed two 25ms hops to land, i.e. 40ms of total headroom spread
-  // over 3 timer hops. Measured 2026-08-28 (bun 1.3.13, 24 cores) under 72
-  // CPU burners: 4 reds in 12 runs of this file, always this line; a synthetic
-  // in-window event-loop chopper puts the cliff at 45-50ms of per-tick stall.
-  // Its two neighbours are NOT affected and stay on a fixed wait() on purpose:
-  // a SINGLE timer armed before the deadline timer always expires first
-  // whatever the load (timers drain in expiry order), measured 25/25 green at
-  // a 300ms chopper -- they are protected by ORDERING, not by margin.
-  // Retry only this flag, early exit on first success; the assertion stays
-  // binary, so the test still reddens if the periodic retry stops entirely.
+  // This assertion is racy because armTimer re-arms from inside its own
+  // callback (a chained setTimeout), so lateness accumulates per hop.
+  // It retries only this flag with an early exit on first success, keeping the
+  // assertion binary; its neighbors use a fixed wait since a single timer armed
+  // before the deadline timer always wins ordering.
   await waitUntil(() => ev.dues.length >= 2);
   expect(ev.dues.length).toBeGreaterThanOrEqual(2); // keeps retrying
   d.feed("s1", "⠹ esc to interrupt"); // episode ends
@@ -236,12 +215,12 @@ test("clear() drops state and cancels pending timers", async () => {
   d.stop();
 });
 
-// Card 1aa69066 (H2): OSC sequences must be stripped, closing the FALLBACK_PATTERNS
-// false-positive an OSC-carried literal phrase could otherwise cause. Direction 1
-// (presence): stripAnsi actually removes an OSC 777 body. Direction 2 (regression):
-// the fixed stripAnsi output no longer matches "limit reached" that only ever
-// existed inside the OSC payload -- distinguishing this from a real limit screen,
-// which spells the phrase in plain PTY text with no OSC wrapper at all.
+// OSC sequences must be stripped, closing a false-positive an OSC-carried
+// literal phrase could otherwise cause against FALLBACK_PATTERNS.
+// Direction 1 (presence): stripAnsi actually removes an OSC 777 body.
+// Direction 2 (regression): the fixed output does not match text that only ever
+// existed inside that OSC payload, distinguishing it from a real limit screen,
+// which spells the same phrase in plain PTY text with no OSC wrapper.
 test("stripAnsi removes an OSC 777 sequence, not just CSI", () => {
   const withOsc = "\x1b]777;notify;Claude Code;limit reached\x07plain screen text";
   expect(stripAnsi(withOsc)).toBe("plain screen text");

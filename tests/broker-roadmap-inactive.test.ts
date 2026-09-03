@@ -1,18 +1,8 @@
-// Card c33a5968: an operator-only "park" flag (`roadmap_items.inactive`,
-// NEVER a `status` enum value). A parked card stays VISIBLE and ordinary
-// edits stay permitted, but every write path that would move it toward
-// status='in_progress' or locked=true is refused (403) while it stays
-// inactive. Toggling the flag itself (set OR clear) requires
-// `author.operator_id` (a Deck-signed write), else 403 fail-closed.
-//
-// `broker-*` family (spawns a real broker daemon), deliberately EXEMPTED
-// from the CI glob (tests/desktop-ci-glob-coverage.test.ts) -- local-only
-// via `bun test`, same precedent as broker-roadmap-operator-id.test.ts.
-//
-// Every guard cell below was proven RED-then-GREEN by removing the guard
-// from broker.ts (not by a parallel re-implementation), running this file,
-// observing the failure, then restoring it -- see the developer's report to
-// the team-lead for the exact removal/restore pairs and their transcripts.
+// inactive is an operator-only park flag, never a status enum value: a parked
+// card stays visible and editable, but any write moving it toward
+// status='in_progress' or locked=true is refused while it is inactive.
+// Toggling the flag itself requires author.operator_id (a Deck-signed write),
+// else it is refused.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { startBroker, stopBroker, post, type TestBroker, deckAuthored, FIXTURE_OPERATOR_ID } from "./_helper.ts";
@@ -154,15 +144,9 @@ test("upsert-patch: claiming an inactive card (status=in_progress) is refused 40
   expect(after.locked).toBe(false);
 });
 
-// ---------------------------------------------------------------------------
-// Gap closed 2026-08-27 (measured by the architect, ahead of exposing `queue`
-// writes to agents via roadmap_update): refusesInactiveClaim only checked
-// status/locked, never queue. A queued item is dispatchable regardless of
-// inactive (desktop/src/shared/workflow.ts does not filter it), so enqueuing
-// an inactive card is the same self-unblock c33a5968 forbids on the claim
-// path, via a write path that did not exist when that card's guards were
-// written. See refusesInactiveQueue's doc comment in broker.ts.
-// ---------------------------------------------------------------------------
+// A queued item is dispatchable regardless of inactive, so enqueuing an
+// inactive card must be refused the same as claiming one -- card c33a5968's
+// guard did not originally cover the queue write path.
 
 test("upsert-patch: queuing an inactive card (queue set) is refused 403", async () => {
   const created = await post<ItemRes>(
@@ -461,13 +445,8 @@ test("import: inactive must be a boolean when present (400)", async () => {
   expect(res.status).toBe(400);
 });
 
-// ---------------------------------------------------------------------------
-// Blocker 2 (team-lead review, 2026-08-12): refusesInactiveClaim's original
-// ABSOLUTE form (`nextStatus === "in_progress"`) refused a write that claims
-// NOTHING once the stored status is already 'in_progress' -- including the
-// operator's own attempt to lift the park they just set. Reproduces the
-// team-lead's exact 5-step transcript; steps 3 and 4 used to be 403.
-// ---------------------------------------------------------------------------
+// Parking an already in_progress card must not lock the operator out of
+// ordinary edits or of lifting the park themselves.
 
 test("blocker 2 regression: parking an already in_progress card does not lock the operator out of ordinary edits or of lifting the park", async () => {
   // 1. P1 create (deck, status in_progress): 200

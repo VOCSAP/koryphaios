@@ -1,25 +1,11 @@
-// Card 0bbac537. Replaces the desktop-build "Bun tests (pure modules)" step's
-// explicit `bun test <globs...>` allow-list. Called identically in CI
-// (.github/workflows/desktop-build.yml) and locally: `bun scripts/partition-pure-tests.ts`.
-//
-// Root cause (measured 2026-08-24, hyp_df4a33c4, full chain in
-// scripts/pure-module-partition.ts's header): bun runs every tests/*.test.ts
-// file in ONE process, and two mechanisms (happy-dom's GlobalRegistrator
-// slot, bun's mock.module()) mutate PROCESS-GLOBAL state with no working
-// in-process teardown once a file dies at import time. The only fix is a
-// process boundary: the marker-free set runs together in a single `bun test`
-// invocation (fast, matches today's collection), and every marker-carrying
-// file gets its own fresh process (isolated, cannot poison a neighbour).
-//
-// Exit code is non-zero if ANY invocation (the clean batch, or any single
-// contaminated file) failed -- this is what makes the step's overall pass/
-// fail meaningful again.
-//
-// Reviewer round, 2026-08-24: five floors added below (D1-D5), all measured
-// to pass the guard-file baseline (31/0) while degrading production to a
-// SILENT SUBSET at exit 0. None of them are optional hardening -- each is a
-// distinct way this runner could report PASS while running less than it
-// claims to.
+// bun runs every tests/*.test.ts file in one process; happy-dom's
+// GlobalRegistrator and bun's mock.module() mutate process-global state with no
+// in-process teardown if a file dies at import time.
+// The marker-free set runs together in one `bun test` invocation; every
+// marker-carrying file gets its own process, isolated so it cannot poison a
+// neighbour.
+// Exit code is non-zero if any invocation -- the clean batch or any single
+// contaminated file -- fails.
 import { EXEMPTIONS, listTestFiles, partitionTests, REPO_ROOT } from "./pure-module-partition.ts";
 
 interface InvocationResult {
@@ -59,13 +45,10 @@ function runBunTest(label: string, files: string[]): InvocationResult {
   return { label, fileCount: files.length, exitCode, ms, testsRan };
 }
 
-// D1: a truncated production enumeration (e.g. listTestFiles sliced to 100)
-// is invisible to the guard tests, which do their own independent
-// readdirSync -- see tests/desktop-ci-glob-coverage.test.ts's D1 test for
-// the guard-side half of this fix. This is the runner-side half: refuse to
-// run at all rather than silently play a subset of CI. Measured 2026-08-24:
-// 199 files on disk; 150 is a floor with headroom, not the exact count, so
-// ordinary file additions/removals do not need to touch this number.
+// Refuses to run if fewer than MIN_EXPECTED_FILES are found, rather than
+// silently running a truncated subset of what CI expects.
+// This is a floor with headroom, not the exact count -- ordinary file additions
+// or removals do not need to touch it.
 const MIN_EXPECTED_FILES = 150;
 
 const allFiles = listTestFiles();

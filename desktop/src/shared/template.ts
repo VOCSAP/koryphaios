@@ -203,14 +203,12 @@ export interface ParsedTemplate {
    * silence is fixed, via `demotedLeadNames` below. */
   template: SessionTemplate
   /**
-   * Names of sessions whose `lead: true` was demoted by the first-wins rule
-   * above. Empty when nothing was repaired. This return shape was widened
-   * (rather than an optional param, or a callback) deliberately: every
-   * caller — `readTemplate` and `template:write`'s handler today, any future
-   * one tomorrow — must destructure `.template` instead of using the return
-   * value as a flat `SessionTemplate`, so a caller cannot compile while
-   * still reading the old shape and silently staying blind to a demotion
-   * (card 240d6efd decision 2).
+   * Names of sessions whose lead: true was demoted by the first-wins rule
+   * above; empty when nothing was repaired.
+   * Returned as a widened shape rather than an optional param or callback, so
+   * every caller must destructure .template instead of reading the return value
+   * as a flat SessionTemplate -- a caller cannot compile while still blind to a
+   * demotion.
    */
   demotedLeadNames: string[]
 }

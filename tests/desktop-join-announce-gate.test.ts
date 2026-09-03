@@ -1,18 +1,9 @@
-// Card 8cb54a0f: joinAnnounceTargets (shared/announce.ts) is the PURE decision
-// behind the three-level join-announce gate ('off' | 'lead' | 'all', default
-// 'off'). It imports cleanly under bun (no electron/node-pty -- see its own
-// module header), so this file exercises the REAL function directly, no
-// slicing needed. What this file does NOT prove: that the wiring at the
-// index.ts call site (sendJoinAnnounce/service.on('peer-resolved', ...)) is
-// unchanged and still reachable -- see tests/desktop-index-join-announce-
-// wiring.test.ts for the slice-based behavioural proof of that half.
-//
-// Two properties the team-lead's review flagged BY NAME, both pinned here:
-//   1. the 'lead' resolution is `filter`, never `find`/`get` -- TWO active
-//      team-leads is a valid state and BOTH must be addressed, not one.
-//   2. an empty recipient pool at 'lead' is SILENT, never a broadcast
-//      fallback -- the whole point of the gate is to remove exactly that
-//      noise, so falling back would reintroduce the bug this card fixes.
+// joinAnnounceTargets is the pure decision behind the join-announce gate; it
+// imports cleanly under bun, so this exercises the real function directly.
+// 'lead' resolution uses filter, never find/get: two active team-leads is a
+// valid state and both must be addressed.
+// An empty recipient pool at 'lead' is silent, never a broadcast fallback -- a
+// fallback would reintroduce the noise this gate exists to remove.
 
 import { test, expect } from "bun:test";
 import { joinAnnounceTargets } from "../desktop/src/shared/announce.ts";
@@ -101,12 +92,9 @@ test("'lead' excludes an exited or peerId-less team-lead from the pool", () => {
 });
 
 test("the joiner is never re-addressed as its own target (mirrors sendJoinAnnounce's own exclusion at the 'targets' branch)", () => {
-  // joinAnnounceTargets itself does not know which session is "the joiner" --
-  // that exclusion is applied by its caller (sendJoinAnnounce, index.ts:782).
-  // This test pins the CONTRACT: peerIds returned are exactly the resolved
-  // pool, unfiltered by any joiner identity, so a caller-side regression that
-  // stops excluding the joiner cannot hide behind this function silently
-  // doing it instead.
+  // joinAnnounceTargets doesn't know which session is the joiner -- that
+  // exclusion is applied by its caller (sendJoinAnnounce). This pins the
+  // returned pool as unfiltered by any joiner identity.
   const sessions = [sess({ id: "s1", role: "team-lead", peerId: "lead-a", status: "running" })];
   const decision = joinAnnounceTargets("lead", sessions);
   expect(decision).toEqual({ kind: "targets", peerIds: ["lead-a"] });

@@ -1,41 +1,8 @@
-// Card 67519e73. Behavioral proof for scripts/check-commit-closure.ts: both
-// checks (import closure, control bytes) plus alias resolution,
-// alias-divergence detection, and ALL THREE regimes (sha, --staged, --pr),
-// run against REAL git repos built by
-// scripts/fixtures/make-closure-sensitivity-repo.ts -- never against a
-// synthetic string standing in for git's own behavior. Fixture repos live
-// under a per-run, randomized os.tmpdir() subdirectory so concurrent
-// `bun test` runs (this checkout is shared by several sessions today)
-// cannot collide on the same scratch path.
-//
-// Both halves of the coverage question, per file:
-//   SENSITIVITY -- fires on each known defect shape: not-exported,
-//   missing-target (named, default, namespace and side-effect forms),
-//   control-byte (including an extension no allow-list enumerated),
-//   alias-divergence, alias-based not-exported, a defect reached only
-//   through a MERGE commit, one behind a NON-ASCII path, and an export that
-//   exists only inside a comment.
-//   SPECIFICITY -- silent (exit 0, zero problems) on clean 1-, 5- and
-//   7-file commits, on quoted (commented/stringified) imports, on both
-//   brace re-export forms and on a `.d.ts` target -- sensitivity alone
-//   would pass a checker that is simply always red.
-//   FAIL-CLOSED -- a shallow clone, a partial clone, an unresolvable ref
-//   and an empty domain must never print an OK.
-//
-// Several tests are NEGATIVE CONTROLS in disguise: they are green with the
-// shipped code and were each measured RED against the code that lacked the
-// fix they cover (the over-strip probes, the merge path, the import-grammar
-// forms, the path lexing, the net-diff split).
-//
-// Team-lead audit 2026-08-26: doubly stale. This file lives directly under
-// tests/ as *.test.ts, collected by scripts/pure-module-partition.ts's
-// listTestFiles regardless of name; it RUNS because isExempt's deny-list
-// names the broker-/server- prefixes and two exact filenames, none of which
-// name this file -- "desktop-" plays no role in either function. It is also
-// no longer a "CI glob": card 0bbac537 replaced the workflow's glob-based
-// `bun test <globs>` line with that same deny-list partition script, which is
-// what the test below (and tests/desktop-ci-glob-coverage.test.ts) actually
-// verifies -- not assumed from the name.
+// Fixture repos live under a per-run, randomized os.tmpdir() subdirectory so
+// concurrent bun test runs cannot collide on the same scratch path.
+// Sensitivity, specificity and fail-closed cases are each proved against real
+// git repos built by scripts/fixtures/make-closure-sensitivity-repo.ts, never a
+// synthetic string standing in for git's own behavior.
 
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -75,15 +42,9 @@ const PARTIAL_REPO = join(SCRATCH, "partial");
 
 let shas: SensitivityRepoShas;
 
-// 60_000, DOUBLE the 30_000 the seven git-heavy tests below use, and that gap
-// is deliberate: this hook builds the ~20-commit fixture every test then only
-// READS, so its expiry does not cost one test, it costs all 57 in the file.
-// Measured 2026-08-28, CI run 33174312698, windows job 98858868752: it timed
-// out at 5002.56 ms under bun's 5000 ms default, bun killed the in-flight
-// `git commit` (signal=SIGTERM, empty stderr), and the clean batch played 2101
-// tests instead of 2157 -- exactly the 56 tests this file never reached. Cost
-// is ~2.6 s locally and past 5 s on that runner, where a process spawn is one
-// to two orders of magnitude dearer than on ubuntu.
+// 60_000, double the timeout the git-heavy tests below use: this hook builds
+// the fixture once but every test in the file only reads it, so its expiry cost
+// is paid by all of them, not just one.
 beforeAll(() => {
   shas = buildSensitivityRepo(MAIN_REPO);
   buildEmptyRepo(EMPTY_REPO);
@@ -244,10 +205,8 @@ describe("sha mode -- specificity (silent on clean commits)", () => {
   });
 
   test("silent on a consumer importing through a barrel that re-exports with 'export { A } from' AND 'export type { B } from'", () => {
-    // The `type` brace form is the one that was missed:
-    // desktop/src/shared/companion.ts:619 re-exports CompanionDevice and
-    // CompanionInfo that way, and its importer was reported not-exported on
-    // healthy live code.
+    // The `type` brace re-export form is covered because it was the one missed:
+    // a healthy import through it was reported not-exported.
     const result = runCheck("sha", shas.namedReExport, MAIN_REPO);
     expect(result.problems).toEqual([]);
     expect(result.exitCode).toBe(0);
@@ -260,9 +219,6 @@ describe("sha mode -- specificity (silent on clean commits)", () => {
   });
 
   test("silent on a commit whose only import statements are QUOTED (line comment, block comment, string literal)", () => {
-    // The measured false positive this pre-pass exists to kill: 2 of this
-    // repo's 40 most recent commits (52f3fa1, 1320be6) went red on
-    // tests/desktop-tile-area.test.ts, where a comment cites an import.
     const result = runCheck("sha", shas.quotedImports, MAIN_REPO);
     expect(result.problems).toEqual([]);
     expect(result.exitCode).toBe(0);
@@ -295,20 +251,10 @@ describe("--staged mode", () => {
 });
 
 describe("--pr mode (import closure per commit, control bytes over the net diff)", () => {
-  // The three tests below (this one, "import closure is still judged per
-  // commit...", "a non-ASCII path is carried through the NET diff too...")
-  // are the only ones in this file that call runPrCheck over the FULL
-  // shas.base..HEAD range (~20 commits, each read via its own git
-  // subprocess) rather than a single sha or a same-ref empty range. Card
-  // ba58fb12: measured 5.2-5.5s each, in-process, even with the fixture's
-  // own commits made hermetic to the host's git hooks (see HOOKS_OFF in
-  // scripts/fixtures/make-closure-sensitivity-repo.ts) -- this cost is the
-  // range walk itself, a different and unrelated budget from the
-  // beforeAll fixture build. An explicit per-test timeout, not a raised
-  // file- or suite-wide default, keeps the other 54 tests (most well under
-  // 100ms) honest about their own budget; 30_000ms matches the timeout
-  // already used a few tests below for the shallow/partial clone probes,
-  // the other git-subprocess-heavy tests in this same file.
+  // The three tests calling runPrCheck over the full range each spawn one git
+  // subprocess per commit and take 5+ seconds; an explicit per-test timeout
+  // keeps the other tests (mostly under 100ms) honest about their own budget
+  // instead of raising a file-wide default.
   test("a control byte introduced and healed INSIDE the range is not reported, while one still present at head is", () => {
     // The whole point of the split, in one call. Per commit the range still
     // holds a real red on ansi.ts (shas.controlByte, correct history), but

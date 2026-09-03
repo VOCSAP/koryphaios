@@ -1,13 +1,6 @@
-// Chantier OD1/OD2 (DESIGN-ORCA-DOOP-ADOPTION.md §3.1/§3.4): DOM-level
-// coverage for shared/element-pick.ts's enriched buildPick() and its
-// exported helpers, plus the guest-side half of the redaction guarantee
-// (a compromised page must not be able to smuggle a secret into the pick).
-//
-// happy-dom, registered globally -- see tests/desktop-explorer-selection-dom.test.ts's
-// header comment for the measured cross-file blast radius of a missing
-// GlobalRegistrator.unregister() (CORS breakage in every later fetch-using
-// suite within this single `bun test` process). Paired register/unregister
-// below, same discipline.
+// happy-dom is registered globally and must be paired with an unregister()
+// teardown -- a missing one contaminates every later fetch-using suite in the
+// same bun test process with CORS failures.
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 // A URL with a query and a hash lets the pageUrl-sanitization assertion run

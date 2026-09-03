@@ -1,18 +1,9 @@
-// Roadmap context wand (PLAN C21): the 🪄 button of the item editor runs one
-// throwaway headless inference that drafts the item's `context` field -- the
-// implementation briefing for the agent that will pick the item up later --
-// grounded in the project files. The result only fills the editor textarea;
-// nothing reaches the broker until the operator reviews and saves.
-//
+// The system prompt is a code constant forcing the briefing pattern; the
+// invocation is read-only per the CLI harness, with Read/Grep/Glob available so
+// pointers cite real files.
+// Only fills the editor textarea; nothing reaches the broker until the operator
+// reviews and saves.
 // Security model (C8 rule, same harness as help-assistant.ts): the system
-// prompt is a CODE CONSTANT that forces the briefing pattern; the invocation
-// is technically read-only (per-CLI harness in model-adapters.ts), with
-// Read/Grep/Glob left available on claude so pointers cite real files. The
-// target is configurable since lot A (config.wandTarget, haiku default —
-// cheap + fast; the wand drafts, the operator decides); routing lives in
-// utility-inference.ts.
-//
-// Node builtins only; pure builders unit-testable under bun.
 
 import type { RoadmapWandDraft } from '../shared/types'
 

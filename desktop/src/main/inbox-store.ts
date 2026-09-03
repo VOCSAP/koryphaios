@@ -1,21 +1,9 @@
-// Operator-inbox persistence. Drained batches are journaled to one JSON file
-// in the app-state dir and reloaded at startup. Plain JSON on purpose: these
-// messages transit the broker's unencrypted SQLite anyway, so cipher here
-// would protect nothing (unlike graph docs, which exist only Deck-side).
-//
-// Courrier lot 1B/1D (card 54b1c71a/1e81ee7b): the broker drain used to be
-// unconditionally DESTRUCTIVE (delivered=1, never returned again), which is
-// why this journal exists at all -- a Deck restart would otherwise lose the
-// whole inbox. It is now cursor-based per session_id (broker.ts), but the
-// journal stays load-bearing for a DIFFERENT reason: a session_id is minted
-// in-memory and never persisted, so on restart the Deck starts a BRAND NEW
-// session whose cursor seeds at the box's current MAX(id) -- it can no longer
-// replay anything from the broker either. This file remains the only durable
-// copy of what was already shown. clearInboxHistory/deleteInboxHistoryEntries
-// below are this journal's half of the two purge gestures (lot 1D session
-// purge, lot 1E manual delete) -- see their own doc comments.
-//
-// Node builtins only (injectable dir): unit-testable under bun.
+// Plain JSON on purpose: these messages transit the broker's unencrypted SQLite
+// anyway, so encrypting the local copy would protect nothing.
+// The journal is the only durable copy of what was already shown: a session_id
+// is minted in-memory and never persisted, so a restart starts a brand new
+// session whose cursor seeds at the box's current max id, unable to replay
+// anything from the broker either.
 
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { writeFileAtomic } from './atomic-write'
@@ -117,23 +105,12 @@ export function deleteInboxHistoryEntries(
   return remaining
 }
 
-// ----- ack state (ask_operator lot, Etape A) -----
-//
-// Family 1/2 Courrier entries only (never family 3, blocking questions —
-// see AckableInboxEntry in shared/types.ts). Separate small file, THREE
-// read-states (card 8fdac3dd: never fold to two) persisted across a Deck
-// restart: absent from both sets below = unread, in `seen` = opened but not
-// resolved, in `acked` = dismissed. `seen` never regresses an `acked` entry
-// (checked at the call site in ipc.ts).
-//
-// Key widened past the bare broker id on review (team-lead, ask_operator
-// lot): `messages.id` is an integer from the BROKER's own DB, which can be
-// wiped/reinstalled/swapped to a shared broker independently of this Deck's
-// local inbox-ack.json. A bare 'msg:<id>' would then silently mask a brand
-// new message reusing a low id — the exact "singleton keyed by too little"
-// failure this repo's conventions call out, and silent because nothing
-// would ever flag the collision. `sentAt` is the broker's own timestamp and
-// does not get reissued on a DB reset, so it disambiguates a replayed id.
+// Three read-states, never folded to two: absent from both sets is unread, in
+// `seen` is opened but not resolved, in `acked` is dismissed; `seen` never
+// regresses an `acked` entry.
+// Keyed by (id, sentAt) rather than the bare broker id: messages.id can collide
+// after the broker's DB is wiped or swapped to a shared broker, and sentAt
+// disambiguates a replayed id.
 
 export const INBOX_ACK_CAP = 2000
 const ACK_FILE = 'inbox-ack.json'
@@ -185,26 +162,12 @@ export function loadAckState(stateDir: string): Record<string, InboxAckStatus> {
 }
 
 /**
- * One-time migration seed (team-lead review, ask_operator lot follow-up):
- * on the very FIRST read of ack state -- inbox-ack.json does not exist yet
- * -- every entry already in inbox-history.json (up to 500) is seeded as
- * 'acked' before the normal read. These entries predate the ack feature,
- * and under the previous session-counter model opening the inbox panel had
- * already reset all of them to zero, so seeding them acked restores what
- * the operator believed their inbox state was, instead of surfacing a
- * badge of up to 500 items nobody asked for.
- *
- * Triggers ONLY on ABSENCE of the file, checked with `existsSync` BEFORE
- * any read -- never inferred from a read failure. A corrupt/unreadable
- * file is a corrupt file (loadAckFile's own catch already degrades it to
- * empty, unrelated to this function) and must never be treated as
- * "missing": a disk incident silently mass-acknowledging real unacked
- * state would be strictly worse than the badge this seed exists to avoid.
- * Writes the file unconditionally on that first read (even when there is
- * no history yet, i.e. an empty acked set) so the existence check alone
- * makes this idempotent -- once the file exists, no later call can
- * reseed, and only entries seen at THIS call are ever touched; anything
- * appended afterward follows the normal appendSeenKey/appendAckedKey path.
+ * Triggers only on absence of the ack file, checked with existsSync before any
+ * read, never inferred from a read failure -- a corrupt file must never be
+ * treated as missing, or a disk incident would silently mass-acknowledge real
+ * unacked state.
+ * Writes the file unconditionally on first read, even when empty, so the
+ * existence check alone makes this idempotent.
  */
 export function loadAckStateWithMigrationSeed(
   stateDir: string,

@@ -211,9 +211,6 @@ describe("the inbox", () => {
   });
 
   test("the broker's pairing ack is routed, not swallowed", () => {
-    // It used to be published with an empty `click`, so `classify` dropped it
-    // and the phone waited forever on a confirmation already sent — keeping
-    // its one-shot code on disk for good.
     expect(classify({ click: pairedClickUrl(true), message: "Paired." }, T0)).toEqual({
       kind: "paired",
       ok: true,

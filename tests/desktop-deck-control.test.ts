@@ -316,9 +316,6 @@ test("mintCaller: a second caller cannot close nor restart a tile owned by the f
   expect(unknownId.status).toBe(400);
   expect(unknownId.body.error).toContain("refused");
 
-  // The OWNING caller (the legacy token that actually spawned it) can do
-  // both -- restart was previously unguarded on ANY tile; now it enforces
-  // the same per-caller check deck_close_session already had.
   const restartOk = await call(srv, "deck_restart_session", { id });
   expect(restartOk.body.ok).toBe(true);
   expect(deps.restarted).toEqual([id]);
@@ -369,8 +366,9 @@ test("deck_close_session: id and peer_id together are refused; neither is still 
   expect(both.body.error).toContain("mutually exclusive");
   expect(deps.closed).toEqual([]);
 
-  // The MCP schema no longer marks `id` required, so an empty argument object
-  // reaches the handler: it must refuse HERE (this is the only validation).
+  // The MCP schema does not mark `id` required, so an empty argument object
+  // reaches the handler and must be refused here -- this is the only validation
+  // of that case.
   const neither = await call(srv, "deck_close_session", {});
   expect(neither.status).toBe(400);
   expect(neither.body.error).toContain("required");
@@ -650,15 +648,8 @@ test("embedded spawn: a profile carrying peerTools threads EXACTLY that list int
   expect(deps.spawnInputs[3]!.peerTools).toBeUndefined();
 });
 
-// Card 8b6a5778: spawnEntry never set `role` at all on this path --
-// CLAUDE_PEERS_ROLE stayed '' for every agent-spawned tile, permanently (a
-// role is not repairable hot). `embedded.id`, NOT `embedded.role` (a prose
-// summary, a different field of the same name) is the value. Uses REAL
-// catalog entries (no monkey-patch needed, every embedded profile already
-// qualifies): the env-level reach of CreateSessionInput.role -> def.role ->
-// sessionEnv.CLAUDE_PEERS_ROLE is role-source-agnostic and already proven,
-// for ANY role value, by the frozen tests/desktop-session-role-env.test.ts
-// -- this test's job stops at proving spawnEntry poses the RIGHT value here.
+// Asserts `embedded.id`, not `embedded.role` (a prose summary field of the same
+// name), is the value threaded through as `role`.
 test("embedded spawn: threads embedded.id as `role` (never embedded.role, the prose summary); no profile poses no role", async () => {
   const state = { sessions: [] as SessionRuntime[] };
   const deps = makeDeps(state);
@@ -770,8 +761,9 @@ test("a spawn that fails AFTER the mint revokes the token and deletes its config
   // A token WAS minted and a file WAS written before the failure...
   expect(deps.leadMcpCalls.length).toBe(1);
   const orphanedCallerId = deps.leadMcpCalls[0]!.callerId;
-  // ...and both were rolled back: the file deletion was requested for THAT
-  // callerId, and the token no longer authorizes anything.
+  // Both the minted token and the written file are rolled back on failure:
+  // deletion is requested for the same callerId, and the token stops
+  // authorizing anything afterward.
   expect(deps.revokedLeadCallerIds).toEqual([orphanedCallerId]);
   const orphanedToken = deps.leadMcpCalls[0]!.token;
   const afterRollback = await call(srv, "deck_list_agents", {}, orphanedToken);
@@ -967,24 +959,15 @@ test("deck_apply_template: batch cap refuses the whole template before any tile 
   expect(deps.spawnInputs).toEqual([]);
 });
 
-// Card 96c98453, proof requested by the team-lead: deck_apply_template is the
-// route this dossier's own measurement (M3) named as "bypasses ipc.ts's
-// template:apply entirely, so making resolveTemplateInputs THROW for a real
+// Every non-ok reason (containment, malformed, refused) must map to `spawned:
+// 0` and none may throw through this HTTP endpoint -- a thrown reason would
+// surface as a 500, not the structured ok:true body asserted below.
+// `refused: 0` alone is not asserted as proof of a correct refusal: it is a
+// per-tile approval counter that is mechanically 0 whenever the per-tile loop
+// never ran, which reads identically to an empty template. The `resolution`
+// field is what actually distinguishes a real refusal from a genuinely empty
+// template.
 // anomaly could hand it an unhandled exception". Every non-ok reason --
-// containment, malformed, AND refused -- must still map to `spawned: 0`,
-// and none of the three may throw through this HTTP endpoint (a thrown
-// reason would surface as a 500, not the structured `ok:true` body asserted
-// below).
-//
-// Review correction C5: `refused: 0` alone is NOT asserted as "the correct
-// result of a refusal" here -- `refused` is a PER-TILE approval counter (see
-// the "an operator refusal on one entry..." test below) and is mechanically
-// 0 whenever the per-tile loop never ran at all, which is also true, but on
-// its own it reads exactly like "there was nothing to spawn", the same
-// misleading non-event this whole card exists to kill on the other two
-// surfaces (ipc.ts, store.ts). The additive `resolution` field is what
-// actually distinguishes a real refusal/anomaly from a genuinely empty
-// template, and every reason below is asserted against it.
 for (const reason of ["containment", "malformed", "refused"] as const) {
   test(`deck_apply_template: resolveTemplate resolving to reason='${reason}' spawns nothing, skips approveSpawn, does not throw, and NAMES the reason via 'resolution'`, async () => {
     const state = { sessions: [] as SessionRuntime[] };
@@ -1064,10 +1047,9 @@ test("deck_apply_template: hasLead decided ONCE before the batch -- true strips 
   servers.push(srv1);
   await call(srv1, "deck_apply_template", { path: "/t.json" });
   expect(deps1.spawnOpts.map((o) => o.hasLead)).toEqual([true, true]);
-  // Review round 2 nit 3: the stub SIMULATES the real strip
-  // (opts.hasLead ? { ...input, lead: undefined } : input, index.ts) but
-  // nothing read the produced session's `lead` field until now -- assert the
-  // behaviour the lot actually claims, not just the opts it was called with.
+  // The stub simulates the real lead-stripping behavior, but nothing reads the
+  // produced session's own lead field elsewhere -- this asserts the behavior
+  // actually claimed, not merely the options the stub was called with.
   expect(withLiveLead.sessions.filter((s) => s.name === "a" || s.name === "b").every((s) => !s.lead)).toBe(
     true
   );
@@ -1366,12 +1348,9 @@ test("DECK_CONTROL_TOOLS set: tools/list returns exactly the named subset, and t
 });
 
 test("DECK_CONTROL_TOOLS=TEAM_LEAD_DECK_TOOLS: deck_restart_session is refused AT THE CALL for the team-lead's real scope, not just absent from the listing", async () => {
-  // Card ff091064 correction (2026-09-01): deck_restart_session was dropped
-  // from TEAM_LEAD_DECK_TOOLS because deck-control.ts's own case has no
-  // ownedSessions guard (unlike close) -- unguarded on ANY tile (6c380073).
-  // Proving it here with the REAL exported constant, not a hand-copied
-  // string, means this test cannot silently pass once the underlying list
-  // is edited without this coverage being re-checked.
+  // Uses the real exported TEAM_LEAD_DECK_TOOLS constant rather than a
+  // hand-copied string, so this cannot silently pass once the underlying list
+  // changes without the coverage being re-checked.
   const srv = await startDeckControl(makeDeps({ sessions: [] }));
   servers.push(srv);
   const { send, recv } = await speakMcp({
@@ -1455,16 +1434,10 @@ test("deck_list_sessions: sessionView's `thinking` field carries 'working'/'idle
   expect(byId).toEqual({ a: "working", b: "idle", c: "unknown" });
 });
 
-// ----- Card 6c380073 audit fix #1c: hands-free must refuse an unapproved
-// shell-bearing spawn WITHOUT ever opening the (blocking) dialog. This
-// specific branch lives in index.ts's confirmSpawnShellFields, which is NOT
-// bun-test-importable (electron: `dialog`) -- same constraint
-// tests/desktop-inject-command-modal-guard.test.ts documents for
-// session-service.ts. Covered here by a source scan on the real file, same
-// convention, RED-proofed against synthetic bodies below. This is the WEAK
-// half of the #1c proof; the behavioral halves (the gate actually blocks a
-// spawn, and does not fire on a plain one) are the two tests above this
-// section, against the real deck-control.ts dispatch.
+// This branch lives in index.ts's confirmSpawnShellFields, not
+// bun-test-importable (electron: dialog), so it is covered by a source scan on
+// the real file instead; the behavioural halves are covered by the two tests
+// above against the real deck-control.ts dispatch.
 
 const INDEX_TS_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
 

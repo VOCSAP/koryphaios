@@ -1,74 +1,3 @@
-// Card f8082208 (activity producer half) / docs/DESIGN-ACTIVITY-PREDICATE.md,
-// verdict rendered 2026-08-26: OSC 0's emission FREQUENCY decides working vs
-// idle, the title CONTENT decides nothing. spec_1449bb52.
-//
-// Four independent sections:
-//   1. Pure unit tests of createActivityTracker (desktop/src/main/detect/
-//      activity.ts) against a fully injected fake clock/timer -- no real
-//      setTimeout/Date.now() anywhere in this section.
-//   2. A behavioural replay of the REAL PTY fixture
-//      tests/pty-harness/fixtures/turn-chunks-inherited-env.json through the
-//      REAL createOscParser()+createActivityTracker() pair, driven by the
-//      fixture's own recorded `t` timestamps mapped onto the same fake
-//      clock -- not synthetic strings the test invents itself.
-//
-//      MEASURED DISCREPANCY WITH THE DESIGN DOC, recorded here rather than
-//      silently corrected away (CLAUDE.md: "the brief is a hypothesis, your
-//      measurement is authoritative"). Section 7 of DESIGN-ACTIVITY-
-//      PREDICATE.md states the expected sequence as "working from t=11051,
-//      idle at t=19776 (last emission 16776+3000)". Direct replay of this
-//      fixture's real OSC 0 timestamps (grep command in the design doc's
-//      own section 2, re-run here) shows TEN title emissions, not the ones
-//      implied by that arithmetic: an eleventh -- sorry, a TENTH title at
-//      t=17769 ("Compter lentement de 1 a 30", 993ms after 16776, itself
-//      well under the 3000ms threshold) re-arms the idle timer to 20769,
-//      and the fixture's own last recorded byte is at t=19879 -- BEFORE
-//      that deadline. So the tracker is still 'working' at the fixture's
-//      last timestamp, never idle, within the captured window. This file
-//      asserts the MEASURED sequence, not the design doc's arithmetic
-//      illustration, and section 2's own two earliest titles (t=297
-//      "claude", t=1487 "Claude Code" idle glyph) are themselves genuine
-//      titleSeq increases -- unsuppressed isolated-event false positives
-//      are EXPLICITLY accepted by the design doc (its own section 2.4/3:
-//      suppressing them is optional, out of scope for this lot) -- so
-//      'working' is measured to start at t=297, not t=11051; what starts
-//      at t=11051 is the SUSTAINED alternation, not the first 'working'
-//      transition. All of this is exactly the algorithm the design doc's
-//      interface contract specifies (front-edge re-arm on every observed
-//      titleSeq increase); the doc's own illustrative numbers just did not
-//      re-derive them from the full, unabridged emission list.
-//   3. Negative control: OSC 0 is programmatically stripped from that same
-//      real fixture (an honest stand-in for "an agent-kind whose CLI paints
-//      everything but the title", since none of the 8 captured fixtures are
-//      naturally OSC-0-free -- even a resting screen paints the idle glyph,
-//      design doc section 2 fact 2). Activity must read 'unknown' at every
-//      checkpoint, NEVER 'idle' -- proving the fail-visible default holds
-//      when titleSeq never increases.
-//   4. Wiring/call-site proof: session-service.ts's real pty.on('data')
-//      handler, extracted and executed against a stubbed `this` (same
-//      technique as tests/desktop-quota-gate.test.ts and tests/
-//      desktop-osc.test.ts's oscSnapshot() test -- SessionService imports
-//      node-pty and cannot be `import`ed under bun). Proves
-//      activityTrackerFor(e.id).observe(...) is called with the SAME
-//      titleSeq oscParserFor(e.id).feed(e.data) actually returned, not a
-//      discarded result, not e.id, not a literal.
-//
-// Added 2026-08-26, team-lead mutation review (B1/B2/B3 + correction 1):
-//   5. Exit-path proof (B1): pty.on('exit') must not CREATE an 'idle' the
-//      tracker never observed -- 'unknown' survives exit, 'working'/'idle'
-//      collapse to 'idle'.
-//   6. waitIdle proof (B2): behavioural, extracted from the real method,
-//      shows it resolves from BYTE RECENCY (lastOutputAt) even when
-//      activity is 'working', and does NOT resolve early from activity
-//      alone when bytes are still fresh.
-//   7. activityTrackerFor's `.on()` callback wiring proof (B3): extracted
-//      and executed for real (not stubbed away) -- a genuine titleSeq
-//      transition must write RuntimeState.activity, emit 'thinking', and
-//      call broadcast().
-//   8. agents:stop-state proof (correction 1, ipc.ts side; the deck-control
-//      side lives in tests/desktop-deck-control.test.ts): 'unknown' is
-//      counted separately from `busy`, never folded into it nor into idle.
-
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -261,13 +190,11 @@ test("stripping OSC 0 from the real fixture (simulating a title-blind agent-kind
   const rawChunks = load("turn-chunks-inherited-env.json");
   const strippedChunks = rawChunks.map((c) => ({ t: c.t, data: stripOsc0(c.data) }));
 
-  // Team-lead review (correction 2, 2026-08-26): the assertions below alone
-  // are VACUOUS against a mutant `stripOsc0 = () => ""` (strips the WHOLE
-  // chunk, not just OSC 0) -- that mutant is also all-'unknown', for the
-  // wrong reason (no bytes at all reach the parser, not "no titles reach
-  // it"). Pin that the strip is SURGICAL: a known substring OUTSIDE any OSC
-  // 0/2 sequence (the version banner "v2.1.229", printed on-screen at
-  // t=1609, never inside a title payload) must SURVIVE.
+  // The assertions below alone are vacuous against a mutant stripOsc0 that
+  // strips the whole chunk instead of just OSC 0 -- both read all-'unknown' for
+  // different reasons.
+  // Pins that the strip is surgical: a known substring outside any OSC 0/2
+  // sequence must survive.
   const strippedText = strippedChunks.map((c) => c.data).join("");
   expect(strippedText).toContain("v2.1.229");
 
@@ -353,16 +280,12 @@ test("pty.on('data') wires activityTrackerFor(e.id).observe(...) with the EXACT 
   expect(observeCalls).toEqual([{ id: "session-under-test", seq: 4242 }]);
 });
 
-// Small shared helper for the extractions below (sections 5-8) -- balances
-// braces from `openIdx` (which must point at an opening `{`) and returns the
-// slice INCLUSIVE of both braces (so callers can wrap it directly as
-// `` `function(x) ${body}` `` without re-adding braces themselves -- same
-// convention as this file's own extractPtyDataHandlerBody above). Different
-// convention than tests/_braced-body.ts's own extractBracedBody (EXCLUSIVE
-// slice) -- delegates to that module's findMatchingClose for the depth-
-// counting/guard, but keeps its own inclusive slice locally rather than
-// importing extractBracedBody under this name (card 9e450573 Lot B: the two
-// conventions must not collide).
+// Balances braces from openIdx (which must point at an opening brace) and
+// returns the slice inclusive of both braces, so callers can wrap it directly
+// as `function(x) ${body}` without re-adding braces.
+// A different, unrelated helper elsewhere uses the opposite, exclusive
+// convention -- the two must not be confused for each other, so this one is
+// kept local rather than imported under the same name.
 function extractBracedBody(src: string, openIdx: number): string {
   return src.slice(openIdx, findMatchingClose(src, openIdx, "{", "}"));
 }
@@ -491,15 +414,6 @@ test("B2: an unknown session id resolves false immediately (no runtime entry)", 
   expect(await waitIdle(self, "missing", 100)).toBe(false);
 });
 
-// N6 (team-lead mutation review round 3, 2026-08-26): the probe above starts
-// from an EMPTY runtime Map, so it exits via `if (!r) return false` and
-// never reaches the `last === null` branch at all -- it does not cover
-// "a session with a live runtime entry that has never produced a byte".
-// Removing `last === null ||` from waitIdle stayed green against it.
-// Real-world effect of that mutant: a freshly spawned tile (runtime entry
-// exists, no PTY data yet) would poll to the deadline and refuse an
-// injection instead of resolving immediately, exactly the intermittent
-// defect this card's own waitIdle repointing exists to avoid.
 test("B2: a session with a PRESENT runtime entry that has never produced a byte (lastOutputAt === null) resolves true immediately -- covers the `last === null` branch specifically, not the `!r` early return", async () => {
   const waitIdle = makeWaitIdle();
   const self = {
@@ -582,11 +496,6 @@ test("B3: activityTrackerFor mints exactly one tracker per id and reuses it on a
   t1.stop();
 });
 
-// ----- 8. agents:stop-state proof (correction 1, ipc.ts side) -------------
-// The deck-control.ts side of this correction lives in
-// tests/desktop-deck-control.test.ts ("deck_list_sessions: sessionView's
-// `thinking` field...").
-
 const IPC_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "ipc.ts");
 const STOP_STATE_ANCHOR = "regHandle('agents:stop-state', () => {";
 
@@ -601,12 +510,9 @@ test("correction 1: agents:stop-state counts 'unknown' SEPARATELY from busy and 
     paused: number;
     parkedCards: number;
   };
-  // N12 (team-lead mutation review round 3, 2026-08-26): the previous
-  // fixture was SYMMETRIC (exactly one 'working', one 'unknown'), so
-  // swapping the two filters (busy counts 'unknown', unknown counts
-  // 'working') produced the SAME pair of counts and stayed green. TWO
-  // 'working' tiles breaks that symmetry: a swap now yields {busy:1,
-  // unknown:2} instead of the correct {busy:2, unknown:1}.
+  // Two 'working' tiles rather than a symmetric one-each fixture: a symmetric
+  // fixture doesn't catch a swap of the busy/unknown filters, since swapping
+  // them would yield the same pair of counts.
   const service = {
     list: () => [
       { status: "running", activity: "working" },

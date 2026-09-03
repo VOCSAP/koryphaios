@@ -104,22 +104,13 @@ test('COUNTER-PROBE: buildStackIntoQueue from the FILTERED board silently drops 
   expect(new Set(payload.ids)).toEqual(new Set(['a', 'b', 'c', 'new-id']))
 })
 
-// ----- discipline sweep -----
-//
-// Review round 2 (2026-08-10), MINOR (point 5): this used to root on
-// `desktop/src/renderer` alone, so a mint planted in `shared/**` or
-// `main/**` was invisible to it. Rooted on `desktop/src` instead, with the
-// definition file exempted BY NAME (not just skipped implicitly) so the
-// exemption itself is greppable rather than a silent hole. That file's own
-// prose additionally mentions both patterns in English sentences (describing
-// the guarantee), which is exactly why the exemption must name the file
-// instead of relying on the patterns never appearing there.
-//
-// Glob-driven (never a hardcoded file list otherwise), so a future new file
-// anywhere under desktop/src is covered by construction: queueSourceOf must
-// be minted in exactly ONE place (roadmap-data.ts's useRoadmapData), and the
-// `as QueueSource` escape hatch the class-based brand still allows (see
-// shared/workflow.ts) must never appear at all outside the definition file.
+// Rooted on desktop/src rather than desktop/src/renderer alone, so a mint
+// planted under shared/** or main/** is not invisible to the sweep; the
+// definition file is exempted by name since its own prose mentions the patterns
+// in English sentences describing the guarantee.
+// Glob-driven rather than a hardcoded file list: queueSourceOf must be minted
+// in exactly one place, and the `as QueueSource` escape hatch must never appear
+// outside the definition file.
 const DEFINITION_FILE = join('desktop', 'src', 'shared', 'workflow.ts')
 
 function collectFiles(dir: string, out: string[]): string[] {

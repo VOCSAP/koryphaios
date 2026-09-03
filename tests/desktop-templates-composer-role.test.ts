@@ -1,42 +1,12 @@
-// Card 0b9e0b07 lot B: proof that a role picked on a session card inside the
-// team template composer actually reaches the saved template file -- the
-// round-trip lot A's shared/template.ts made possible but nobody had
-// exercised from the UI yet (see tests/desktop-template.test.ts /
-// tests/desktop-template-store.test.ts for the file<->inputs half, already
-// covered).
-//
-// DOM harness: same dual-React-copy happy-dom bridge already used for
-// TemplateComposer in tests/desktop-templates-composer-draft-reset.test.ts.
-//
-// DELIBERATE SPLIT, and why: the first 3 tests mount `EntryCard` DIRECTLY,
-// imported from its own module (desktop/src/renderer/src/components/
-// TemplateEntryCard.tsx, entry-card-isolation lot) instead of the full
-// `TemplateComposer`. EntryCard never calls `useDeck` -- it is a pure,
-// prop-driven component -- so it needs no store mock, and living in its OWN
-// file is what makes it immune BY CONSTRUCTION to a real, measured cross-file
-// contamination: tests/desktop-templates-composer-seed.test.ts calls
-// `mock.module(".../TemplateComposer.tsx", () => ({ TemplateComposer: stub }))`.
-// bun's `mock.module` freezes a specifier's export surface to exactly the
-// keys the FIRST-registered factory returns, for the rest of the bun test
-// process. Measured before the extraction: `bun test
-// ./tests/desktop-templates-composer-draft-reset.test.ts ./tests/desktop-templates-composer-role.test.ts`
-// -> 5 pass / 0 fail (this file's OWN suspect, a useDeck race with
-// draft-reset.test.ts, is innocent); `bun test
-// ./tests/desktop-templates-composer-seed.test.ts ./tests/desktop-templates-composer-role.test.ts`
-// -> 4 pass / 4 fail, `Element type is invalid: ... but got: undefined ...
-// at mountEntryCard` -- once seed.test.ts's mock.module of TemplateComposer.tsx
-// loads first, ANY later import of that specifier in the same process
-// (including this file's, for EntryCard) receives `EntryCard: undefined`
-// from the frozen, TemplateComposer-only factory. Exporting EntryCard
-// alongside TemplateComposer from the SAME file, as a prior lot did, never
-// actually protected it from this -- only moving it to a file seed.test.ts
-// never mocks does. The one test below that still needs the full component
-// (the true save()-to-disk round trip) remains order-dependent ON PURPOSE:
-// it passes only if this file loads before
-// tests/desktop-templates-composer-seed.test.ts, which today is guaranteed
-// by alphabetical order under a bare `bun test` and by per-file process
-// isolation under scripts/partition-pure-tests.ts in CI, and by NOTHING ELSE
-// -- it is NOT immune the way the 3 EntryCard tests above it now are.
+// EntryCard is mounted directly from its own module rather than through the
+// full TemplateComposer, since it calls no store hook and is otherwise immune,
+// by construction, to a real cross-file contamination: a test-mocking utility
+// used elsewhere in this family freezes a specifier's export surface to
+// whatever the first-registered factory returns, for the rest of the process.
+// Re-exporting EntryCard alongside TemplateComposer from the same module never
+// actually protects it from that; only living in its own file does.
+// The remaining save()-to-disk round trip still needs the full component and
+// stays order-dependent on that file loading first.
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 GlobalRegistrator.register();
@@ -71,20 +41,15 @@ function resetFakeStore(): void {
   fakeUseDeck.setState(initialFakeState(), true);
 }
 
-// Still required even for the EntryCard-only tests: TemplateComposer.tsx's
-// top-level `import { useDeck } from '../store'` must resolve to SOMETHING
-// syntactically valid for the module to load at all (the real store.ts
-// itself fails under bun test on its own `@shared/types` alias import, per
-// tests/_store-mock.ts's own header comment) -- but since EntryCard never
-// CALLS `useDeck`, it is provably inert which instance wins the module-cache
-// race described above.
+// TemplateComposer.tsx's top-level import of useDeck must resolve to something
+// syntactically valid for the module to load, but EntryCard never calls
+// useDeck, so which mock instance wins the module-cache race described above is
+// provably inert.
 mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 
-// TemplateComposer.tsx imports value exports from '@shared/template' and
-// '@shared/role' (both tsconfig-only aliases, not resolved by bun test --
-// same gap documented in tests/desktop-tile-area.test.ts's header). Faithful
-// reimplementation of the tiny, dependency-free role module (not a bare
-// stub), so mergeRoleChoices' real behavior populates the select for real.
+// @shared/template and @shared/role are tsconfig-only aliases bun test does not
+// resolve. The role module is faithfully reimplemented here (not stubbed) so
+// mergeRoleChoices' real behavior populates the select.
 mock.module("@shared/template", () => ({
   TEMPLATE_TYPE: "koryphaios.template",
   TEMPLATE_VERSION: 1
@@ -162,13 +127,10 @@ afterEach(() => {
   container.remove();
 });
 
-// Same native-setter bypass as tests/desktop-templates-composer-draft-reset.test.ts's
-// typeInto, generalized to any value-bearing element (input OR select): React
-// patches the element's own `value` property setter to track "did this change
-// externally", so a bare `el.value = x` leaves React's tracker unaware and the
-// subsequent event finds "no change" -- onChange never fires. Bypass via the
-// native prototype setter, same technique React Testing Library's
-// fireEvent.change uses. `<select>` fires on 'change', not 'input'.
+// React patches an element's native value setter to detect external changes, so
+// a bare el.value = x leaves onChange unfired. Bypasses via the native
+// prototype setter instead, the same technique React Testing Library's
+// fireEvent uses. A select fires on 'change', not 'input'.
 function setValue(el: HTMLInputElement | HTMLSelectElement, value: string, eventType: "input" | "change"): void {
   const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), "value")?.set;
   if (!setter) throw new Error("no native value setter found on element prototype");

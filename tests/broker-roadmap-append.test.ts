@@ -1,22 +1,3 @@
-// Card 562fd9b5, layer 6: broker.ts's /roadmap/append-context route
-// (handleRoadmapContextAppend). `broker-` family, EXEMPTED from the CI glob
-// (tests/desktop-ci-glob-coverage.test.ts, EXEMPTIONS.familyPrefixes["broker-"]
-// -- it spawns a real broker daemon) -- these probes run LOCAL ONLY via
-// `bun test`, never in CI.
-//
-// The card's central decision is a SINGLE UPDATE statement, no SELECT before
-// it (see the long comment on handleRoadmapContextAppend in broker.ts for
-// why). Three probes are load-bearing here, not incidental: two concurrent
-// appenders both surviving is the actual proof that design works; the exact
-// cap boundary (15999/16000/16001) proves the WHERE clause's off-by-one is
-// right in both directions, not just that it refuses SOMETHING eventually;
-// and the schema probe proves `context` really is NOT NULL today (a PRAGMA
-// read off the test broker's own database, same pattern as card aad5e954's
-// ROADMAP_IMPORT_COLUMNS test), which is what makes COALESCE(context,'')
-// defense-in-depth rather than a live guard right now -- see that test for
-// the full reasoning and why an earlier, self-proving scratch-table version
-// of it was replaced.
-
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
 import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
@@ -135,21 +116,6 @@ test("cap boundary: exactly at the cap and one under both succeed, one over is r
 });
 
 test("card 562fd9b5 review delta: roadmap_items.context is NOT NULL -- this goes red the day that constraint is relaxed", () => {
-  // Replaces an earlier version of this probe that ran the SQL fragment
-  // against an isolated in-memory scratch table: it proved SQLite's
-  // COALESCE(NULL,'') semantics (which never change) but never read the
-  // live schema, so deleting COALESCE from broker.ts entirely would have
-  // left it green -- it wasn't guarding anything real (review finding).
-  //
-  // This version reads the constraint off the TEST BROKER'S OWN database
-  // (same PRAGMA pattern and same reasoning as card aad5e954's
-  // ROADMAP_IMPORT_COLUMNS test in tests/broker-roadmap-import.test.ts): if
-  // a future migration ever relaxes `context` to nullable, THIS test fails
-  // the same day -- which is exactly the day COALESCE(context,'') in
-  // handleRoadmapContextAppend's UPDATE starts mattering for real instead of
-  // sitting there as defense in depth. COALESCE stays in the SQL regardless
-  // of what this probe finds; its actual guard is the concurrency test
-  // above, already red-proven by a targeted revert.
   const db = new Database(broker.dbPath, { readonly: true });
   try {
     const columns = db.query("PRAGMA table_info(roadmap_items)").all() as {

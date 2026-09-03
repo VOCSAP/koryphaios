@@ -1,81 +1,15 @@
-// Domain-wide guard against the "declared consumer, no producer" shape --
-// the general case of the sandbox:changed bug this repo already paid for
-// once (CLAUDE.md: "A comment or class that ASSERTS a guarantee must be
-// wired to it... DeckApi.onX declared, multiplexed and subscribed compiles
-// and tests green with NO producer"). Mutation review on the ask_operator
-// lot (M8) reproduced it live: replacing `broadcast('approvals:pending',
-// list)` in index.ts with `void 0` left 67 tests green, because no file
-// under tests/ contains the string 'approvals:pending'. spec_fb1c615c.
-//
-// Scope: every `onX` PROPERTY of the `const api: DeckApi = { ... }` object
-// literal in desktop/src/preload/index.ts must resolve to a channel string,
-// and that channel must have a real emitter -- a literal `broadcast('chan',
-// ...)` or `mainWindow?.webContents.send('chan', ...)` call, or a call to a
-// named single-line wrapper function that itself forwards to one of those
-// two verbs (the real `toRenderer` in index.ts) -- somewhere in
-// desktop/src/main/*.ts.
-//
-// The consumer side is anchored to the SET OF PROPERTIES on `api`, not to
-// the `subscribe`/`multiplex` VERBS an earlier version of this file matched
-// on (mutation review, second pass): a property wired some OTHER way --
-// e.g. `onGhostFeed: (l) => ipcRenderer.on('ghost:feed', l)`, bypassing both
-// helpers -- still enters the domain, because every `on\w+` key is walked
-// regardless of how its value is shaped. A channel a property's value
-// contains no literal for at all (and doesn't call a locally-declared
-// `multiplex(...)`-bound wrapper either) is counted as UNPARSED and fails
-// the guard loudly, the same fail-closed contract the producer side already
-// had. This is what makes "a new onX added tomorrow is automatically in
-// scope" a true claim rather than one that only holds for onX methods wired
-// through the two verbs this file happened to recognize first (the earlier
-// wording overclaimed exactly this, per mutation review).
-//
-// Both sides are DISCOVERED by scanning the actual files, not read from a
-// fixed channel list (CLAUDE.md's gating-coverage rule, growth half).
-//
-// WHAT THIS DOES NOT COVER, stated rather than assumed (D7/D8 from review):
-//  - A producer call that exists only in UNREACHABLE code (a dead branch,
-//    an unused function, code after an early return) is textually
-//    indistinguishable from a live one to this scanner -- static text
-//    presence is treated as evidence of wiring, not runtime reachability.
-//    No test claims to catch this; it is a real, named limit.
-//  - The OTHER gap in the same chain -- DeckApi declares an `onX` method
-//    that preload's own `api` object never implements at all -- is a
-//    DIFFERENT bug and is not re-covered here. It doesn't need to be: `const
-//    api: DeckApi = { ... }` in preload/index.ts is a plain object literal
-//    assigned to an interface-typed binding, so TypeScript's structural
-//    check already fails that assignment to compile if a required `onX`
-//    property is missing (verified by reading preload/index.ts:73 and
-//    ordinary TS excess/missing-property assignability rules; also gated by
-//    `npm run typecheck` in desktop/, since `src/preload/**/*.ts` is in
-//    tsconfig.node.json's `include`). Re-implementing that check here in
-//    text form would be strictly weaker than the compiler, for no benefit.
-//  - A producer call written as `broadcast(SOME_CONST, x)` (a named
-//    constant instead of a string literal) is not resolved to a channel
-//    name -- it is counted as an UNPARSED call site instead, and the guard
-//    fails loudly on any nonzero unparsed count rather than silently
-//    treating it as "produced" or silently dropping it from the count. This
-//    is a deliberate fail-closed choice, proven by a fixture below.
-//  - A channel mentioned only inside a `//` or `/* */` comment (never real
-//    code) does not satisfy the guard -- both scans strip comments before
-//    matching, proven by a fixture below (this repo has a known precedent
-//    of exactly this fail-open shape in an i18n orphan-key scanner).
-//
-// NOTED, NOT FIXED (mutation review, second pass -- recorded rather than
-// corrected on purpose): the consumer scan reads ONLY
-// desktop/src/preload/index.ts, and the producer scan reads
-// desktop/src/main/*.ts NON-recursively (no subdirectory walk). The
-// producer side fails CLOSED if an emitter moved into a subdirectory (it
-// would stop being found, and the guard would correctly start reporting
-// every channel that emitter used to cover as missing). The CONSUMER side
-// is the asymmetric risk: if preload/index.ts were ever split into multiple
-// files, this scan would silently shrink to whatever fraction still lives
-// in index.ts, and the `>= 20` sanity floor below only catches the walk
-// collapsing to near-zero, not losing half the properties to a sibling file
-// it never reads. Fixing this would mean discovering preload source files
-// the same way the producer side discovers desktop/src/main/*.ts (a
-// directory walk instead of one hardcoded path) -- left as a known gap
-// because preload is a single file today and no such split is planned; if
-// one happens, this comment is the trigger to revisit.
+// Every `onX` property of the DeckApi object literal in preload/index.ts must
+// resolve to a channel with a real emitter (a literal broadcast or
+// webContents.send, or a named wrapper forwarding to one) in
+// desktop/src/main/*.ts. Both sides are discovered by scanning the files, not
+// from a fixed channel list; the consumer side is anchored to the properties
+// of `api`, not to the subscribe verbs, and an unresolvable channel value is
+// UNPARSED and fails loudly rather than being dropped.
+// Not covered: a producer call in unreachable code reads as wired; a channel
+// named by a constant is UNPARSED; an onX declared on DeckApi but never
+// implemented is TypeScript's job. The producer scan is non-recursive and the
+// consumer scan reads only preload/index.ts: splitting either across files
+// silently shrinks the coverage.
 
 import { test, expect } from "bun:test";
 import { readFileSync, readdirSync } from "node:fs";
@@ -86,11 +20,6 @@ const REPO_ROOT = join(import.meta.dir, "..");
 const PRELOAD_TS = join(REPO_ROOT, "desktop", "src", "preload", "index.ts");
 const MAIN_DIR = join(REPO_ROOT, "desktop", "src", "main");
 
-// Quote- and backtick-aware // and /* */ stripper (same shape as the one in
-// tests/desktop-approval-parity.test.ts and tests/desktop-tsconfig-flags.test.ts's
-// JSONC variant -- kept local rather than shared, since sharing test-only
-// utilities across test files is not this repo's established pattern and
-// each copy stays trivially auditable on its own).
 function stripComments(src: string): string {
   let out = "";
   let i = 0;
@@ -130,12 +59,6 @@ function stripComments(src: string): string {
   return out;
 }
 
-/**
- * Extracts the `{ ... }` body following a header regex, quote-aware.
- * Delegates to tests/_braced-body.ts (card 9e450573 Lot B dedup): `start` is
- * one past the opening `{` (same convention the shared helper's `openIdx`
- * expects, offset by one), so the call passes `start - 1`.
- */
 function extractObjectBody(src: string, headerRe: RegExp): string {
   const m = src.match(headerRe);
   if (!m) throw new Error(`extractObjectBody: header not found: ${headerRe}`);

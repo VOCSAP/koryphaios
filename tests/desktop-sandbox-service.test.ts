@@ -272,9 +272,8 @@ test("audit fix 3: isValidSandboxSessionId accepts a uuid, rejects shell-hostile
   expect(isValidSandboxSessionId("not-a-uuid")).toBe(false);
 });
 
-// Audit fix 1: containment, symlinks included. Root and target are real
-// tmpdir trees (mirrors tests/desktop-explorer.test.ts's resolveWithin
-// pattern), not mocked -- isWithinDir does real realpathSync calls.
+// Root and target are real tmpdir trees, not mocked: isWithinDir makes real
+// realpathSync calls, so symlink containment is exercised for real.
 let containDir: string;
 let outsideDir: string;
 beforeEach(() => {
@@ -390,9 +389,9 @@ test("audit fix 1 sexies: writeEmbeddedAgentPrompt's real output (team-role anch
   rmSync(userDataDir, { recursive: true, force: true });
 });
 
-// Card e35b2791: runDirHost/peersDirHost keying by containerName (previously
-// ONE directory shared read-write by every sandboxed project on the
-// machine), purge on remove/rebuild, and the shared-mount drift signal.
+// runDirHost/peersDirHost are keyed by containerName and purged on remove or
+// rebuild -- the shared-mount drift signal depends on this per-container
+// isolation.
 
 test("P-a: two projects' writeLaunchScript land in DIFFERENT, containerName-keyed run dirs", () => {
   const stateDir = mkdtempSync(join(tmpdir(), "cp-sandbox-svc-keying-"));
@@ -623,22 +622,12 @@ test("P-g bis: rebuildReasons is always empty when the container is 'missing', r
   expect(computeRebuildReasons(APPLIED_PLAN, [], "kory-sbx-abcdef123456", "missing")).toEqual([]);
 });
 
-// Card e35b2791 audit round 3, point 3: the P-e/P-e bis/P-g tests above all
-// start from a HAND-BUILT SandboxMountInfo (source already a parsed string),
-// which is structurally blind to whatever `docker/podman inspect --format
-// {{json .Mounts}}` actually emits. This test instead runs the REAL
-// parseMounts on realistic raw JSON, using the exact field names and BOTH
-// Source representations measured live on a real container this session
-// (see the round-1 report: kory-sbx-0e0a7a172d92, 2026-08-14).
-//
-// PODMAN RESIDUAL, DOCUMENTED NOT ASSUMED COVERED: podman is not installed
-// on this machine (`podman --version` -> command not found, measured just
-// now) -- its actual `inspect --format {{json .Mounts}}` output was NOT
-// captured, so this test proves the Docker Desktop Windows case only. The
-// containment approach (containerName substring in Source) is BELIEVED to
-// generalize because podman targets Docker CLI/API compatibility for this
-// exact command shape, but that is an unverified assumption, not a
-// measurement -- flag as open with whoever next has a podman engine to test.
+// Runs the real parseMounts on realistic raw docker-inspect JSON rather than a
+// hand-built SandboxMountInfo, using both Source representations measured on a
+// real container.
+// Podman is not installed here, so its inspect --format {{json .Mounts}} output
+// is untested; the containerName-substring containment approach is assumed, not
+// verified, to generalize to it.
 test("P-i: computeRebuildReasons through the REAL parseMounts on realistic docker-inspect JSON (both measured Source forms)", () => {
   const containerName = "kory-sbx-abcdef123456";
   const rawKeyedWsl = JSON.stringify([

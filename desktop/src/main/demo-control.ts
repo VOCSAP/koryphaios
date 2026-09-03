@@ -1,20 +1,8 @@
-// Demo control endpoint (REC scripted-scenario lot): a loopback HTTP server,
-// started PER DEMO RUN by the Electron main process, that lets the one-shot
-// demo-driver agent act on the embedded browser through the demo-browser MCP
-// bridge (desktop/mcp/demo-browser-mcp.ts).
-//
-// Security model — deliberately NOT the deck-control endpoint:
-// - The supervisor token grants spawn/close powers; the demo agent gets a
-//   SEPARATE server with a token minted per run and a toolset limited to the
-//   embedded browser pane (navigate/click/type/read/wait). Least privilege:
-//   a runaway demo agent can at worst click around one webview.
-// - 127.0.0.1 only, random port; the pair travels only in the generated
-//   --mcp-config file of that single `claude -p` invocation.
-// - A step cap bounds runaway loops; the server closes with the run.
-//
-// Dependency-injected (no electron imports) so dispatch + guards are
-// unit-testable under `bun test`; the real deps are the BrowserDriver
-// (browser-drive.ts) bound to the webview's WebContents.
+// A separate server from deck-control, with a token minted per demo run and a
+// toolset limited to the embedded browser pane: a runaway demo agent can at
+// worst click around one webview.
+// 127.0.0.1 only; the token pair travels only in the generated --mcp-config
+// file of that single invocation.
 
 import { createServer, type Server } from 'node:http'
 import { randomBytes } from 'node:crypto'

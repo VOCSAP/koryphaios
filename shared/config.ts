@@ -266,21 +266,16 @@ const FORCE_GROUP_FILE_ENV = "CLAUDE_PEERS_FORCE_GROUP_FILE";
 const FORCE_GROUP_NAME_ENV = "CLAUDE_PEERS_FORCE_GROUP_NAME";
 
 /**
- * Resolve the forced group secret, if any. Reads CLAUDE_PEERS_FORCE_GROUP (env)
- * first; if unset or empty, reads the trimmed content of the file pointed at by
- * CLAUDE_PEERS_FORCE_GROUP_FILE. Returns null when neither yields a non-empty
- * secret. The three cases that fall through silently -- missing file, empty
- * file, or a read exception (e.g. EPERM) -- are traced at warn/error level via
- * shared/logger.ts's coreLogDir()-rooted "config.log". (The case where
- * CLAUDE_PEERS_FORCE_GROUP_FILE itself is unset falls through to null with no
- * trace at all: there is no path to read, so nothing to report.) This logger
- * is created with mirrorToConsole: false and each traced branch pairs its
- * log.warn/log.error call with its own explicit console.error -- the same
- * split server.ts uses for its own fileLog -- because an untouched logger's
- * console mirror would also carry a future log.info onto stdout, which
- * carries the MCP stdio protocol for stdio-mode callers. A session landing in
- * the wrong group leaves a record instead of a silent fallback to normal
- * group resolution.
+ * Reads CLAUDE_PEERS_FORCE_GROUP first, then falls back to the trimmed content
+ * of CLAUDE_PEERS_FORCE_GROUP_FILE; returns null if neither yields a non-empty
+ * secret. Missing file, empty file, or a read exception are traced via a
+ * dedicated logger.
+ * That logger has mirrorToConsole: false, and each traced branch pairs
+ * log.warn/log.error with its own console.error -- an untouched logger's
+ * console mirror would put a future log.info on stdout, which carries the MCP
+ * stdio protocol for stdio-mode callers.
+ * CLAUDE_PEERS_FORCE_GROUP_FILE itself being unset falls through to null with
+ * no trace: there is no path to read.
  */
 function resolveForcedGroupSecret(): string | null {
   const envSecret = process.env[FORCE_GROUP_ENV];

@@ -1,16 +1,8 @@
-// Per-project remote-approval settings (PLAN-notifications-mobiles N2.d).
-//
-// Deliberately NOT an AppConfig field and deliberately NOT in the repository:
-// this decides whether an agent's blocking prompts leave the machine and reach
-// a phone. That is an operator decision, so it lives in app-state, keyed by
-// project_key — the sandbox-store.ts pattern, for the same reason (hostile
-// input #1: a cloned repo must never be able to turn a channel on, off, or
-// point it elsewhere).
-//
-// THE RULE: global AND NOT project-opt-out. A project can only ever RESTRICT
-// what the global switch allows; it can never enable the feature on its own.
-//
-// Pure module: file path injected, unit-testable under bun.
+// Deliberately not an AppConfig field and not in the repository: this decides
+// whether an agent's blocking prompts reach a phone, an operator decision,
+// keyed by project_key like sandbox-store.ts.
+// A project can only restrict what the global switch allows; it can never
+// enable the feature on its own.
 
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'

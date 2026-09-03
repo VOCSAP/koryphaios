@@ -19,22 +19,12 @@ export interface PeerTableRow {
 }
 
 /**
- * Build the aligned `peer_id = role` table.
- *
- * Two populations are dropped, and both omissions are deliberate:
- *  - the SUPERVISOR, which is not an agent of the Agents list (the sidebar
- *    filters it out too -- filtering here as well keeps the table right even
- *    if a future caller forgets, rather than silently leaking it);
- *  - sessions with no `peerId` yet (still booting), which would otherwise
- *    produce a row whose left column is empty.
- *
- * Returns '' when nothing is left to show, so callers can treat the empty
- * string as "nothing to copy".
- *
- * @param sessions rows to render, in display order
- * @param youLabel marker appended to the team-lead row -- the table is meant
- *   to be pasted INTO the lead's prompt, so the lead is the reader. Comes from
- *   the dictionary (`sidebar.peerTableYou`), never a hardcoded literal.
+ * Drops the supervisor and any session with no peerId yet (still booting), so
+ * the table only lists ready agents.
+ * Returns '' when nothing is left, so callers can treat the empty string as
+ * nothing to copy.
+ * @param youLabel comes from the dictionary, never a hardcoded literal -- the
+ * table is pasted into the lead's own prompt.
  */
 export function formatPeerTable(sessions: readonly PeerTableRow[], youLabel: string): string {
   const rows = sessions.flatMap((s) =>

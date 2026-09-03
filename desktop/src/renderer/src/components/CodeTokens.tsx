@@ -21,14 +21,12 @@ export function CodeTokens({ line }: { line: HlLine }): React.JSX.Element {
 }
 
 /**
- * A whole highlighted file, as INLINE spans separated by REAL newline text
- * nodes. The separator is the load-bearing part: the Files viewer derives the
- * selected line span from `Range.toString()`, which concatenates text nodes
- * and synthesises NOTHING for block boundaries. Render one `<div>` per line
- * here and every line break silently disappears from a selection, so
- * "lines 3-4" starts reporting "lines 3-3" with no error anywhere.
- * `tests/desktop-explorer-selection-dom.test.ts` replays exactly that gesture
- * on the real DOM and goes red if this structure changes.
+ * Inline spans separated by real newline text nodes, deliberately not one div
+ * per line: the Files viewer derives the selected line span from
+ * Range.toString(), which concatenates text nodes and synthesises nothing for
+ * block boundaries.
+ * Rendering block-level line breaks here would make selections silently
+ * under-report (e.g. lines 3-4 reporting as 3-3) with no error anywhere.
  */
 export function HighlightedLines({ lines }: { lines: HlLine[] }): React.JSX.Element {
   return (

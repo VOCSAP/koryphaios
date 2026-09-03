@@ -1,16 +1,9 @@
-// Model catalog registry (EXPLORATION-graph-chat C29): detects which frontier
-// CLIs exist on this machine (decision D11 — a provider is only offered when
-// its CLI is installed) and discovers the model lists of the local providers
-// configured in Settings (Ollama / LiteLLM / any OpenAI-compatible endpoint).
-//
-// Frontier model LISTS are curated code constants (shared/models.ts, D10):
-// the OAuth CLIs expose no `list models` command and the vendor APIs need an
-// API key the operator may not have. Local endpoints DO expose dynamic
-// listing: `/v1/models` (OpenAI-compatible, LiteLLM/vLLM/Ollama) with an
-// `/api/tags` fallback (native Ollama).
-//
-// Node builtins only; pure builders/parsers unit-testable under bun,
-// execution takes injectable runners.
+// A provider is only offered when its CLI is installed. Frontier model lists
+// are curated code constants, since the OAuth CLIs expose no 'list models'
+// command and the vendor APIs need an API key the operator may not have.
+// Local endpoints discover their models dynamically instead: /v1/models
+// (OpenAI-compatible: LiteLLM/vLLM/Ollama) with an /api/tags fallback for
+// native Ollama.
 
 import { execFile } from 'node:child_process'
 import { platform } from 'node:os'

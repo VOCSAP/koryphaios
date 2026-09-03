@@ -5,22 +5,13 @@ import { GLYPH_BADGES } from './icons'
 import { useT } from '../i18n'
 
 /**
- * Pick-context dialog (`pickContextPrompt` flag, DeckConfig): opens right
- * after an element pick -- the webview's inspect mode (BrowserView.tsx) or an
- * external app's pick over the design endpoint (App.tsx's onDesignPick) --
- * so the operator can add an optional note/intent/priority before the prompt
- * is composed and delivered. Pure and prop-driven, no `useDeck`, modelled on
- * ConfirmDialog.tsx: both call sites already hold everything this needs
- * (the pick, the best-effort screenshot's status, and what to do on
- * send/cancel), and staying prop-driven keeps it mountable in isolation here
- * and in tests/desktop-pick-context-dialog.test.ts.
- *
- * `pick` is HOSTILE input -- every field on it was read off the inspected
- * page, not typed by the operator -- so the summary below renders it as text
- * nodes only (plain JSX interpolation), never `dangerouslySetInnerHTML` or a
- * hand-built HTML string. `formatPickDetails` (shared/pick-prompt.ts) does
- * the actual prompt composition from the returned `PickNote`; this component
- * never pre-formats the note itself.
+ * Opens after an element pick to let the operator add an optional note before
+ * the prompt is composed and delivered; pure and prop-driven, no store access.
+ * pick is hostile input — every field came from the inspected page, not the
+ * operator — so the summary renders it as text nodes only, never
+ * dangerouslySetInnerHTML or a hand-built HTML string.
+ * formatPickDetails does the actual prompt composition; this component never
+ * pre-formats the note itself.
  */
 export function PickContextDialog({
   pick,

@@ -41,9 +41,7 @@ function BoardCard({
   // same gate as every other write path on this card -- reused below for
   // both the drag guard (arbitrage 2) and the chip's click guard.
   const closed = item.status === 'done' || item.status === 'archived'
-  // Card 99d3a9eb, arbitrage 2: a closed card (done or archived) no longer
-  // drags to another column -- 'archived' was already excluded, 'done' was
-  // not (the exact gap the card measured).
+  // A closed card (done or archived) does not drag to another column.
   const draggable = !locked && !closed
   return (
     <button
@@ -134,15 +132,10 @@ export interface RoadmapBoardProps {
   items: RoadmapItem[]
   showArchived: boolean
   /**
-   * Review round 3 (2026-08-10), MAJOR (D1): distinguishes "the roadmap has
-   * zero items, full stop" from "these filters matched zero items" -- the two
-   * used to share ONE message ("Add a feature/bug/debt/idea...") keyed only
-   * off `items.length === 0`, so a narrow filter on a 115-card project told
-   * the operator their whole backlog was gone. Card 442084b7 review B1: this
-   * boolean must OR in every filtering dimension the caller applies to
-   * `items` before this point -- `criteria` via hasActiveCriteria() AND the
-   * client-side `hideInactive` toggle, not just the former. Missing one
-   * dimension here reopens exactly this D1 defect for that one dimension.
+   * Distinguishes an empty roadmap from filters matching zero items — must OR
+   * in every filtering dimension applied to items before this point (criteria
+   * and the client-side hideInactive toggle), or a narrow filter reads as an
+   * empty backlog.
    */
   hasActiveFilters: boolean
   onClearFilters: () => void

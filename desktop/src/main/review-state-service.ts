@@ -1,18 +1,11 @@
-// Persisted design-review annotations (Chantier OD5 follow-on): the embedded
-// browser's pending PickAnnotation[] (comment/intent/priority + a pinned
-// element or drawn region) survive a window reload or app restart. Mirrors
-// sandbox-store.ts's read/validate/atomic-write model: Node builtins + local
-// relative imports only, NO electron import, so this stays bun-testable on a
-// throwaway tmp file without booting the app.
-//
-// STRICT / FAIL-CLOSED / PICK-LIST validation (CLAUDE.md coverage rule): the
-// output object is built field by field from the untrusted input, never by
-// spreading it, so an unknown top-level or per-item field is silently
-// dropped rather than riding along into a shape nothing here ever checked.
-// And any single item failing a rule rejects the WHOLE file (returns null):
-// a review is one unit the operator composed together, and half of it
-// silently surviving (thereby hiding which annotations were lost) is worse
-// than losing the whole draft, which is visibly empty and gets redone.
+// No electron import, so this stays bun-testable on a throwaway tmp file
+// without booting the app.
+// The output object is built field by field from the untrusted input, never by
+// spreading it, so an unknown field is silently dropped rather than riding
+// along into a shape nothing here checked.
+// Any single item failing validation rejects the whole file: a review is one
+// unit the operator composed together, and half of it silently surviving is
+// worse than a visibly empty draft that gets redone.
 
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, relative } from 'node:path'
@@ -118,15 +111,13 @@ function validateAnnotation(raw: unknown, seenIds: Set<string>): PickAnnotation 
 }
 
 /**
- * Validate an untrusted persisted-review body. STRICT and fail-closed: any
- * violation anywhere in the array rejects the WHOLE file (returns null) --
- * see module header for why half a review is worse than none.
- *
- * screenshotPath is the one exception to "violation rejects the file": a
- * path outside `opts.annotationsDir`, or one whose file no longer exists
- * (pruned after 7 days), is silently DROPPED from the item rather than
- * failing it -- the annotation itself (comment/intent/pick/region) is still
- * good and worth keeping.
+ * Validates an untrusted persisted-review body.
+ * Strict and fail-closed: any violation anywhere in the array rejects the whole
+ * file (returns null).
+ * screenshotPath is the one exception: a path outside opts.annotationsDir, or
+ * one whose file is missing (pruned after 7 days), is silently dropped from the
+ * item rather than failing it -- the rest of the annotation is still good and
+ * worth keeping.
  */
 export async function validatePersistedReview(
   raw: unknown,

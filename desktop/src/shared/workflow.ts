@@ -128,23 +128,12 @@ export interface LanePos {
 }
 
 /**
- * Derived placement, wave-first: the column is the WAVE index -- a run of
- * items the broker stamps at the SAME execution slot (roadmap card 42edc88b
- * phase 1's `waves` reorder param ties ids under one `queue` value). Distinct
- * queue values render as distinct columns via a DENSE rank over the values
- * actually PRESENT, not the raw value itself: `queue` numbers are not
- * guaranteed contiguous (a mid-queue removal, or an explicit `queue` write
- * via roadmap_add/roadmap_update, both leave gaps), so indexing by the raw
- * value would draw empty columns for the gaps.
- *
- * Locked in_progress heads all share column 0 instead of one column each:
- * heads are the one place the system has ACTUAL, observed concurrency
- * (several agents genuinely working right now), not a scheduling intent --
- * laying them out left to right like a queue would draw real parallelism as
- * sequential, in a view whose whole point in phase 2 is to show
- * parallelism. laneItems already orders heads oldest-locked-first, so row
- * order still reflects lock age; queued items stack by queue order
- * (queuedItems' compareById tiebreak keeps ties stable).
+ * The column is the wave index, ranked densely over the queue values actually
+ * present rather than the raw value itself -- queue numbers are not guaranteed
+ * contiguous, so indexing by raw value would draw empty columns for the gaps.
+ * Locked in_progress heads all share column 0 instead of one column each: heads
+ * are the one place with actual observed concurrency, not scheduling intent,
+ * and laying them left to right would draw real parallelism as sequential.
  */
 export function layoutLane(ordered: RoadmapItem[]): Map<string, LanePos> {
   const pos = new Map<string, LanePos>()
@@ -318,24 +307,11 @@ export function enqueueClosure(items: RoadmapItem[], id: string): string[] {
 }
 
 /**
- * Displayed items a drop of `drag` at full-lane `slot` would put on the wrong
- * side of one of its DIRECT dependency links: a dependency scheduled at/after
- * the insertion point, or a dependent scheduled before it. The renderer turns
- * these cards' borders and the connecting links red while the drag hovers.
- * Only DIRECT depends_on links are checked (`drag.depends_on`/`i.depends_on`
- * membership, never a transitive closure): if A depends on B, B depends on
- * C, and a drop lands A and C in the same wave, that real violation is NOT
- * reported here. Catching it would need a full transitive closure computed
- * on every drag frame; treat this as a known limit of the check, not a
- * guarantee that any two co-located cards are conflict-free.
- *
- * When `join` is true the drop additionally TIES `drag`'s queue with the
- * wave landed on (see insertSlotAt's `join`): any OTHER member of that wave
- * directly linked to `drag` is then a conflict too, independent of
- * before/after order -- two items on either end of a direct dependency can
- * never share an execution slot, even when their relative position would
- * otherwise look fine. A wave made only of locked heads is never a join
- * target (heads are not queue-tied; see layoutLane).
+ * Only checks direct depends_on links, never a transitive closure: a real
+ * violation two hops away is not reported here. Treat this as a known limit,
+ * not a guarantee that any two co-located cards are conflict-free.
+ * When join is true, any other member of the landed wave directly linked to
+ * drag is also a conflict, independent of before/after order.
  */
 export function slotConflicts(
   ordered: RoadmapItem[],
@@ -487,20 +463,11 @@ export function insertAt(ids: string[], id: string, index: number): string[] {
 }
 
 /**
- * Splice `ids` into `waves` (see wavesOf) at flat index `at`, each as its OWN
- * singleton wave, in the order given -- never merged into a neighboring wave.
- * v1/conservative by design (roadmap card 42edc88b phase 2, team-lead
- * decision 2026-07-29): a newly-queued item (or an enqueueClosure batch
- * spliced ahead of it in topological order) has no existing tie to join, so
- * it starts alone. Grouping independent dependency-closure ids into a SHARED
- * wave (same dep-level = same slot) is a real future improvement, but belongs
- * with the future multi-dispatch work (roadmap 5852c074), not here: doing it
- * silently now would let one write invent a concurrency tie the operator
- * never asked for. Splicing into the MIDDLE of an existing wave correctly
- * breaks it into two independently-tied runs either side of the insertion --
- * inserting a foreign, order-only item between two tied members is exactly
- * what un-ties them positionally, and is unavoidable given a flat insertion
- * index.
+ * Splices each id in as its own singleton wave, never merged into a neighboring
+ * wave: a newly-queued item has no existing tie to join, so it starts alone.
+ * Splicing into the middle of an existing wave breaks it into two
+ * independently-tied runs either side of the insertion -- unavoidable given a
+ * flat insertion index.
  */
 export function insertSoloWaves(waves: string[][], at: number, ids: string[]): string[][] {
   if (ids.length === 0) return waves
@@ -524,31 +491,18 @@ export function insertSoloWaves(waves: string[][], at: number, ids: string[]): s
   return [...waves, ...solo]
 }
 
-// ----- reorder-id invariant (card 3b0fda5f) -----
-//
-// The filter/search UI (roadmap-data.ts) hands the two layouts a BOARD that
-// is a subset of the true dispatch queue. Every reorder commit (save's
-// lane-born draft, queueItem, stackItem, WorkflowLane's own drops) must
-// still be computed against the WHOLE unfiltered list -- a reorder built
-// from the filtered board would silently drop every hidden item out of the
-// queue the moment it committed.
-//
-// Review round 2 (2026-08-10), MAJOR: an EARLIER version of this branded
-// exactly `{ ...queue, all: board }` COMPILED against it -- object-literal
-// spread copies a value's own keys (symbols included), so the resulting
-// literal structurally matched the interface, escaping BOTH the type brand
-// and tests/desktop-workflow-queue-source.test.ts's `queueSourceOf(` grep
-// sweep in one motion, which is exactly the silent-unqueue this exists to
-// forbid. A CLASS with a private field closes that hole: TypeScript only
-// treats a value as assignable to a class type with a private member when
-// the value's type is nominally that class (or a subtype) -- a fresh object
-// literal, however many properties it copies at runtime, is never nominally
-// `QueueSource`, so `{ ...queue, all: board }` no longer typechecks as one.
-// `queueSourceOf` is kept as the public constructor function (unchanged call
-// sites everywhere else); the class itself is private-constructed so it can
-// only be minted here. What DOES still survive is a bare `as QueueSource`
-// type assertion -- TypeScript's `as` is looser than plain assignment -- so
-// that spelling is added to the discipline sweep by name, same file.
+// Every reorder commit must be computed against the whole unfiltered queue,
+// never the filtered board the UI hands the layouts -- a reorder built from the
+// filtered board would silently drop every hidden item out of the queue the
+// moment it committed.
+// QueueSourceImpl is a class with a private field, not a plain interface:
+// TypeScript only treats a value as assignable to a class type with a private
+// member when it is nominally that class, so a fresh object literal, however
+// many properties it copies, never satisfies QueueSource by structural typing
+// alone.
+// queueSourceOf stays the public constructor function; a bare `as QueueSource`
+// type assertion still bypasses this and is caught by name in the discipline
+// sweep instead.
 class QueueSourceImpl {
   private readonly brand = true
   private constructor(readonly all: RoadmapItem[]) {}
@@ -608,12 +562,8 @@ export function buildInsertIntoQueue(src: QueueSource, id: string, at: number): 
 }
 
 /**
- * Place `dragId` as a parallel sibling of `targetId`: inserted right at the
- * boundary before ('before') or after ('after') the target's WHOLE wave --
- * never mid-wave, see stackTargetAt's caller-side wave-boundary rounding
- * this mirrors (RoadmapView.stackItem, team-lead-confirmed 2026-07-29
- * conservative v1). Dependency adoption (dragId adopting targetId's
- * depends_on) is the caller's job via roadmapUpsert, same as today --
+ * Inserts dragId right at the boundary before or after the target's whole wave,
+ * never mid-wave. Dependency adoption is the caller's job via roadmapUpsert;
  * this only computes the id/wave placement.
  */
 export function buildStackIntoQueue(

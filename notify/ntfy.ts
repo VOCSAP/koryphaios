@@ -1,30 +1,14 @@
-// ntfy gateway — the channel of Parastates, the Koryphaios app (PLAN N5).
-//
-// Third implementation of `NotificationChannel`, and the one whose transport is
-// least like the other two: ntfy is a pub/sub relay, not a messenger.
-//
-// TWO TOPICS, BOTH LEGS OUTGOING (EXPLORATION §4.3c):
-//
-//   broker ──POST /{topic_notif}──▶ ntfy ──push──▶ phone
-//   broker ◀── GET /{topic_replies}/json (held open) ◀──POST── phone
-//
-// The subscription is an ordinary GET whose body streams forever, so — exactly
-// like Telegram's long poll and Discord's gateway socket — no port is opened,
-// no address is published, nothing on the broker becomes reachable.
-//
-// WHY NOT FCM: pushing to FCM needs a Firebase service-account key on the
-// sending side, which cannot be shipped in an open-source app; ntfy is the
-// relay that already solved this, and it is self-hostable. Rationale in
-// EXPLORATION §4.3b.
-//
-// NO EDIT: ntfy cannot rewrite a published message, so `settle` publishes a
-// closing message carrying the same approval id and the app cancels its own
-// notification. That is the one behavioural difference the registry sees.
-//
-// AUTHORISATION: a topic is a bus. Anyone able to publish on the replies topic
-// reaches `handleInbound`, so nothing here trusts what it reads: the payload is
-// validated by `decodeInbound`, the address is checked against a binding, and
-// the verdict comes from the broker (C-1).
+// Two topics, both legs outgoing: the broker POSTs to topic_notif and holds an
+// open GET on topic_replies, so no port is opened and nothing on the broker
+// becomes reachable.
+// FCM is avoided because it needs a Firebase service-account key on the sending
+// side, which cannot ship in an open-source app; ntfy is self-hostable and
+// already solves this.
+// ntfy cannot rewrite a published message, so settle publishes a closing
+// message with the same approval id and the app cancels its own notification.
+// A topic is a bus: anyone able to publish on the replies topic reaches
+// handleInbound, so nothing here trusts what it reads without validation and an
+// address-binding check.
 
 import type { Approval } from "../shared/types.ts";
 import { ALREADY_HANDLED_NOTICE, originLabel, renderSettled } from "./format.ts";

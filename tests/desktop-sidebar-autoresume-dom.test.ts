@@ -1,30 +1,13 @@
-// Card fd1914cc, team-lead mutation review (MAJOR 3): Sidebar's context-menu
-// "force quota auto-resume" item is the SOLE escape hatch by which an
-// operator regains both detection and injection on a Claude Code session
-// stuck on the (gated) default path. The reviewer's measured mutant --
-// swapping the item's `setAutoResume(session.id, true)` for `..., false)` --
-// left every prior test green (nothing in this repo mounted Sidebar's real
-// DOM). Worse than a rendering bug: inverted, the item still visibly does
-// something (autoResume stops being undefined, so quotaGateActive flips off
-// and the detector re-arms -- the badge even comes back), so the operator
-// sees a plausible "it worked" signal while autoResume() itself no-ops on
-// `enabled === false`. The symptom lies in the direction that deceives.
-//
-// This file mounts the REAL, unmodified `SessionRow` (exported from
-// Sidebar.tsx for exactly this reason) and drives a real DOM contextmenu +
-// click, asserting the store call's SECOND ARGUMENT, not just that it fired.
-//
-// Scope note: mounts `SessionRow` directly, not the whole `Sidebar`, which
-// would drag in createSession/reorderSessions/workspaces/sandbox/etc. for no
-// added bite (tests/desktop-explorer-selection-dom.test.ts's established
-// reasoning for mounting the narrower component under test).
+// Asserts the store call's second argument, not just that it fired: an inverted
+// "..., false)" mutant still flips quotaGateActive off and re-arms the badge,
+// so the operator sees a false "it worked" signal while autoResume() actually
+// no-ops.
+// Mounts SessionRow directly rather than the whole Sidebar, avoiding unrelated
+// createSession/reorderSessions/workspaces/sandbox setup.
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
 GlobalRegistrator.register();
 
-// Paired unregister (tests/desktop-happy-dom-teardown.test.ts's repo-wide
-// scan, and the real fetch/CORS blast-radius documented in
-// tests/desktop-explorer-selection-dom.test.ts).
 afterAll(async () => {
   await GlobalRegistrator.unregister();
 });

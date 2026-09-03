@@ -159,19 +159,12 @@ function isInsideProject(cwd: string, projectDir: string): boolean {
 }
 
 /**
- * True when a workspace has a session whose `cwd` falls OUTSIDE the given
- * project tree (card 09d54a29 follow-up, auditor finding, GX-SEC class).
- * `cwd` is a SEPARATE vulnerability class from `workspaceHasShellFields`
- * above -- arbitrary file read (via ipc.ts's workDirRoots, which trusts every
- * live session's cwd for the explorer/diff channels) rather than command
- * execution -- so it gets its OWN named predicate rather than being folded
- * into the shell-fields check: conflating unrelated risks into one flag is
- * exactly the "enumeration of dangerous fields" fragility this card's own
- * review round flagged. Git worktrees always live under
- * `<projectDir>/.worktrees/<name>` (worktree-service.ts createWorktree), so
- * this single containment check also clears the common multi-worktree
- * restore case without a false positive -- see the "no false positive"
- * tests in tests/desktop-workspace.test.ts.
+ * A cwd outside the project tree is a separate vulnerability class from
+ * workspaceHasShellFields above -- arbitrary file read via ipc.ts's
+ * workDirRoots trusting every session's cwd, not command execution -- so it
+ * gets its own predicate rather than folding into the shell-fields check.
+ * Git worktrees live under <projectDir>/.worktrees/<name>, so this containment
+ * check also clears the multi-worktree restore case without a false positive.
  */
 export function workspaceHasUntrustedCwd(
   ws: Pick<Workspace, 'sessions'>,

@@ -1,38 +1,12 @@
-// Fan-out and settle rules, written once for every channel (PLAN N3/N4/N5).
-//
-// The registry owns the two behaviours the operator actually feels:
-//
-//  1. FAN-OUT — a request goes to every enabled channel of THAT operator, and
-//     only that operator. It is never a broadcast: the query is bounded by
-//     operator_id (C-5). Sending to all of them is safe because the broker
-//     arbitrates: whichever the operator answers from wins, the rest get 409.
-//
-//  2. SETTLE — the moment one channel wins, every OTHER posted copy is
-//     rewritten to "handled via X" and loses its buttons. Without that, a
-//     stale request would sit on the phone looking actionable, and tapping it
-//     would produce an error instead of an answer.
-//
-// KEYED BY (OPERATOR, KIND), NOT BY KIND. A broker can serve several people —
-// two OS accounts on one PC, or a box on the network shared by a team. Keying
-// the gateway table by kind alone meant the last operator to enrol a Telegram
-// bot silently REPLACED (and stopped) the previous one's: their notifications
-// stopped arriving, and for ntfy they arrived but their answers vanished,
-// because the adapter's reply topic belonged to somebody else. That is an
-// availability bug, never a confidentiality one — inbound routing resolves the
-// binding by address and the broker still refuses to settle another operator's
-// approval — but it is silent, which is worse.
-//
-// ONE GATEWAY PER TRANSPORT, SHARED WHEN IT MUST BE. Two operators may enrol
-// the SAME bot token on purpose (one person, two OS accounts, one bot). Telegram
-// allows exactly one `getUpdates` consumer per token, so giving them a gateway
-// each would make them fight — one would take the updates and the other would
-// see 409 forever. So the same instance is registered under BOTH keys: the
-// caller decides what "the same transport" means (`broker.ts` digests the
-// sealed config) and this table just points at it twice. Stopping is therefore
-// reference-counted — disconnecting one operator must not cut the other's bot.
-//
-// It holds no transport of its own: adapters are injected, so the whole thing
-// is testable with a fake channel and no network.
+// Fan-out is bounded by operator_id, never a broadcast: a request goes only to
+// that operator's enabled channels, and the broker arbitrates so whichever
+// channel answers wins while the rest get 409.
+// Keyed by (operator, kind), not by kind alone, since one broker can serve
+// several operators and a kind-only key would let a later enrolment silently
+// replace an earlier one's gateway.
+// The same channel token can be registered under two operators on purpose;
+// stopping is reference-counted so disconnecting one operator never cuts the
+// other's.
 
 import type { Approval } from "../shared/types.ts";
 import type { ChannelBinding, ChannelKind, NotificationChannel, PostedMessage } from "./types.ts";

@@ -59,20 +59,6 @@ describe("event classification", () => {
     ).toBe("question");
   });
 
-  /**
-   * Card 47baf25a. This assertion is the INVERSE of what this file asserted
-   * until 2026-08-27, and the flip is the whole fix: `idle_prompt` used to be
-   * mapped to "question", which filed one blocking entry in the operator inbox
-   * per session at every restart (ten measured on 2026-08-26, all titled
-   * "Claude is waiting for your input" -- the CLI's own message, verbatim).
-   *
-   * It is not a matter of degree. Measured in the installed claude binary,
-   * `sendIdleNotification` is called from a `setTimeout` body guarded by
-   * `!isDialogOnScreen() && n >= getIdleNotifThresholdMs()`: the CLI emits
-   * this type only AFTER establishing that no dialog is on screen. So the
-   * event carries the guarantee that the session is NOT blocked on anything,
-   * which is the exact opposite of what the inbox entry claimed.
-   */
   test("idle_prompt is skipped — the CLI emits it only when NO dialog is on screen", () => {
     expect(
       classifyPayload({ hook_event_name: "Notification", notification_type: "idle_prompt" })
@@ -201,10 +187,6 @@ describe("approval request shaping", () => {
     expect(body.session_ref).toBe("tile-1");
   });
 
-  // Card 47baf25a: the payload here was `idle_prompt` until 2026-08-27. Once
-  // classifyPayload skips that type, main() never reaches buildApprovalRequest
-  // with it, so asserting on it would have been asserting on an input the hook
-  // can no longer produce -- green, and proving nothing about the live path.
   test("a signal event becomes an open question", () => {
     const body = buildApprovalRequest(
       {
@@ -393,37 +375,6 @@ describe("hook subprocess", () => {
     expect(res.body.approvals).toHaveLength(0);
   }, 30_000);
 
-  /**
-   * Card 47baf25a, the END-TO-END half of the fix. The classification test
-   * above proves the pure helper; this proves the HOOK PROCESS, fed the real
-   * payload on real stdin against a real broker, files nothing -- which is the
-   * property the operator's inbox actually depends on. Keeping only the pure
-   * assertion would leave main()'s `if (classifyPayload(payload) === "skip")`
-   * unproven, and that early return is the only thing standing between an
-   * idle session and a row in `pending_approvals`.
-   *
-   * WHY THE POSITIVE HALF IS IN THE SAME TEST, and must stay there. An
-   * absence assertion alone is satisfied by ANY hook that does nothing, for
-   * any reason, including reasons that have nothing to do with this card.
-   * Measured by the mutation review of this very lot, 2026-08-27: with the
-   * absence half standing alone, `throw new Error("MUTANT")` on the first
-   * line of main() left it GREEN, and so did short-circuiting postApproval to
-   * `return false` (which is what a 4xx, a refused credential or a wrong
-   * project_key look like from here). Neither could be told apart from a
-   * correct skip. The exit code cannot arbitrate either: approval-hook.ts
-   * ends with `void main().finally(() => process.exit(0))`, so 0 is wired in
-   * and asserting on it is theatre.
-   *
-   * A positive control DID exist in this describe ("an open-question
-   * notification is registered too") and it does redden under both mutations
-   * -- but the pairing was IMPLICIT: two tests, two setup() calls, two
-   * brokers, nothing linking them, so `.skip` on the positive one would have
-   * quietly restored the hole. Replaying agent_needs_input HERE, through the
-   * same runHook, the same credFile and the same broker, is what turns the
-   * absence into evidence: the claim becomes "this exact pipe REFUSES
-   * idle_prompt and ACCEPTS agent_needs_input", which no dead hook and no
-   * refused POST can satisfy.
-   */
   test("an idle_prompt notification registers nothing (card 47baf25a)", async () => {
     const { b, credFile, op } = await setup();
     const listPending = async (): Promise<Approval[]> => {

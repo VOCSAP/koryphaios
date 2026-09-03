@@ -22,19 +22,15 @@ import { WorkflowLane } from './WorkflowLane'
 import { hasActiveCriteria, useRoadmapData } from '../roadmap-data'
 import { buildAppendToQueue, buildInsertIntoQueue, buildStackIntoQueue } from '@shared/workflow'
 
-// Roadmap view (PLAN C3-M3, reworked as a kanban board in PLAN K1, split into
-// container + RoadmapBoard/RoadmapFilterPanel/RoadmapFilterChips by card
-// 3b0fda5f): the container keeps mutation logic/modals and the Workflow lane,
-// consumes the ONE shared useRoadmapData() hook (roadmap-data.ts) also used
-// by RoadmapList.tsx's mobile layout, and renders the board/filter pieces as
-// props-driven children. Data lives in the broker (roadmap:* IPC); agents
-// write to the same table through their MCP tools, so the hook polls while
-// the view is mounted to pick up their changes.
-//
-// Movement rules (K1/K2): dropping on "done" asks for confirmation (the item
-// will no longer be picked up); a locked in_progress card (an agent actively
-// works on it) is greyed out and not draggable -- the operator goes through the
-// ⏹ Stop button (K3) to reclaim it.
+// The container owns mutation logic, modals and the Workflow lane, consumes one
+// shared roadmap-data hook also used by the mobile list layout, and renders the
+// board and filter pieces as props-driven children.
+// Data lives in the broker; agents write to the same table through their own
+// MCP tools, so this hook polls while the view is mounted to pick up their
+// changes.
+// Dropping a card on done asks for confirmation, since the item will not be
+// picked up again; a locked in-progress card is greyed out and not draggable --
+// the operator reclaims it through the Stop button instead.
 
 const KINDS: RoadmapKind[] = ['feature', 'bug', 'debt', 'idea', 'chore', 'directive']
 const DIRECTIVES: RoadmapDirective[] = ['clear', 'compact', 'magic_compact']
@@ -184,11 +180,9 @@ export function RoadmapView(): React.JSX.Element {
   // `board` below; the broker already sends `inactive` on every item, so no
   // query/broker change is needed.
   const [hideInactive, setHideInactive] = useState(false)
-  // Card 7a2e76c6: the fold state is no longer local `useState`. It lives in
-  // AppConfig, for the same reason the Agents sidebar's does -- a fold that
-  // resets at every launch re-opens the panel the operator had closed. The
-  // panel itself owns the control now, so this view holds the state and
-  // nothing else.
+  // Fold state lives in AppConfig, not local state, so it does not reset (and
+  // silently reopen a closed panel) at every launch; the panel itself owns the
+  // toggle now.
   const filtersFolded = useDeck((s) => s.roadmapFiltersCollapsed)
   const setFiltersFolded = useDeck((s) => s.setRoadmapFiltersCollapsed)
 
@@ -280,30 +274,17 @@ export function RoadmapView(): React.JSX.Element {
     }
   }
 
-  // Card f95ccfa6: N sequential requests, not one -- the broker's own
-  // /roadmap/archive route is unitary (RoadmapArchiveRequest.id is a single
-  // string, measured against shared/types.ts and broker.ts's
-  // handleRoadmapArchive, no batch field exists). A failure on ONE item mid-
-  // loop must not abort the rest (each is independent) and must not be
-  // swallowed -- every failure is both logged (window.api.reportError, no
-  // silent catch) and surfaced to the operator as an honest count, naming
-  // which cards did not move rather than leaving them to guess.
-  //
-  // Review round 2, ajout 2 (documented, NOT fixed -- team-lead's arbitrage
-  // holds: reversible, count/action coherence is what matters here):
-  // (a) handleRoadmapArchive's K2 lock guard carries `by !== "deck"`, so the
-  //     Deck is EXEMPT from it (same exemption toggleInactive's own comment
-  //     already cites, card 442084b7). If a card leaves the shown snapshot
-  //     and gets claimed by an agent between the click and this item's turn
-  //     in the loop, the archive still SUCCEEDS -- no 409, no failure entry,
-  //     nothing in the toast -- and the UPDATE also zeroes `locked`, so the
-  //     agent keeps working, now on an archived, unlocked card under it.
-  //     Close cousin of card e0cc00dd (stale lock silently cleared by any
-  //     Deck write); carded separately, not fixed here.
-  // (b) with N sequential requests, the staleness window for the LAST item
-  //     is not the confirm-to-click delay, it is the FULL DURATION of the
-  //     loop: on a 152-card column, item 152 archives on a decision made
-  //     roughly 151 round-trips earlier.
+  // Sequential requests, not batched: /roadmap/archive takes one id at a time,
+  // so each item is issued independently — a failure on one must not abort the
+  // rest, and every failure is both logged and surfaced as an honest count
+  // naming which cards did not move.
+  // The Deck's own writes are exempt from the in-progress lock guard, so a card
+  // claimed by an agent between the click and this item's turn in the loop
+  // still archives successfully with no failure entry, and unlocks it under the
+  // agent — documented, not fixed.
+  // The staleness window grows with the loop: on a large column, the last item
+  // archives on a decision made as many round-trips earlier as there are items
+  // ahead of it.
   const archiveAll = async (items: RoadmapItem[]): Promise<void> => {
     setArchivingAll(true)
     const ok: RoadmapItem[] = []
@@ -536,30 +517,15 @@ export function RoadmapView(): React.JSX.Element {
     }
   }
 
-  // Card 442084b7: the operator-only park flag. `upsertRoadmap`
-  // (desktop/src/main/roadmap-service.ts) always runs its body through
-  // `signedAsOperator()` before posting, which is the actual carrier of the
-  // operator proof the broker's refusesInactiveToggle guard requires -- not
-  // the `by: DECK_AUTHOR` stamp by itself, which an unsigned caller could
-  // send too (refused 401 upstream of the roadmap guard, per
-  // resolveRoadmapAuthor's reserved-name branch, broker.ts). This relay
-  // works because it goes through that signer, not because of what the
-  // field is named. This specific call (only `id`/`inactive` in the body)
-  // cannot itself trip refusesInactiveClaim or refusesInactiveQueue.
-  // `nextQueue` is a direct read of `body.queue` -- absent here, so that
-  // guard's condition is false outright. `nextLocked` is NOT a direct read
-  // of `body.locked`: broker.ts resolves it via resolveRoadmapLock
-  // (shared/roadmap-lock.ts), which CAN move it away from `existing.locked`
-  // even when this call sends neither `status` nor `locked` -- but only in
-  // the RELEASING direction (forced to `false` whenever `nextStatus !==
-  // "in_progress"`, which this call's unchanged `nextStatus` inherits from
-  // `existing.status`); its one CLAIMING branch requires `by !== "deck"`,
-  // which a Deck write never satisfies. refusesInactiveClaim's lock
-  // disjunct is `nextLocked && !existingLocked` -- a claim, never a
-  // release -- so it stays false for every state this call can reach. A
-  // failure can still reach the operator through an ordinary channel
-  // (network error, broker down, a future
-  // guard) and must surface like any other, never be swallowed.
+  // The operator proof the broker's refusesInactiveToggle guard requires comes
+  // from going through signedAsOperator() when posting, not from the by:
+  // DECK_AUTHOR stamp, which an unsigned caller could send too.
+  // This call (id/inactive only) cannot itself trip refusesInactiveClaim or
+  // refusesInactiveQueue: it sends no queue field, and the lock resolver only
+  // forces locked to false in the releasing direction when nextStatus stays
+  // unchanged from in_progress, never claims one.
+  // A failure still surfaces like any other, through the ordinary
+  // network/broker-down channel — never swallowed.
   const toggleInactive = async (item: RoadmapItem): Promise<void> => {
     try {
       await window.api.roadmapUpsert({ id: item.id, inactive: !item.inactive })

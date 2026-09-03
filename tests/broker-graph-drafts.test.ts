@@ -1,25 +1,5 @@
-// Graph drafts: agent-escalated questions parked durably on the broker until
-// the operator opens them in the Deck's graph view. Covers create/list/open,
-// validation, project_key isolation, and the durability guarantee that
-// motivated a dedicated table: listing is NON-destructive (no drain — a Deck
-// crash between two polls loses nothing), only /graph-draft/open flips status.
-//
-// Card 3781b033: /graph-draft/add used to trust project_key AND by straight
-// from the request body. Both now come from a proven instance_token lookup
-// (resolveProvenGraphDraftPeer, shared/graph-draft-scope.ts, called by
-// broker.ts's handleGraphDraftAdd) -- so every add() below registers a real
-// peer first and authenticates with its instance_token, mirroring
-// tests/broker-roadmap-author-auth.test.ts's `register` helper.
-//
-// TWO PROOFS, NOT ONE (team-lead instruction, lot 2). This file is the
-// WIRING half, local-only like the rest of the broker-*.test.ts family: it
-// proves the REAL handler, reached over real HTTP, actually calls the
-// resolver and uses its real result -- in particular that a forged by/
-// project_key claim in the body is silently overridden by the caller's OWN
-// proven identity, not merged with it. The DECISION half (every refusal
-// branch of resolveProvenGraphDraftPeer, against an injected fake row
-// source) lives in tests/graph-draft-authz.test.ts, which runs in CI because
-// it imports no daemon-spawning helper.
+// Graph draft listing is non-destructive (no drain), so a Deck crash between
+// two polls loses nothing; only /graph-draft/open flips status.
 
 import { test, expect, beforeAll, afterAll } from "bun:test";
 import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
@@ -91,13 +71,6 @@ test("add creates a pending draft with author snapshot and timestamps", async ()
   expect(draft.opened_at).toBeNull();
 });
 
-// Was "add rejects missing project_key / title / prompt and oversized prompt".
-// project_key is no longer a body field the caller controls at all (it is
-// derived from the proven instance_token), so the case that used to matter --
-// a request with no project_key -- is now "a request with no instance_token",
-// and the fix's whole point is that this must be refused (401), not merely
-// validated (400). The title/prompt/oversized-prompt cases are unchanged in
-// spirit, just now behind a real authenticated caller.
 test("add rejects a body with no instance_token (401), and still validates title / prompt / oversized prompt for an authenticated caller (400)", async () => {
   const peer = await register(PK);
 
@@ -211,10 +184,9 @@ test("a proven caller's OWN project_key and identity are used, not a forged clai
 });
 
 test("a corrupted instance_token is refused (401), not silently treated as unproven", async () => {
-  // A real, valid token from a fresh registration, corrupted by one
-  // character -- proves the guard compares the whole value against a real
-  // peers row rather than merely checking presence/shape (same technique as
-  // tests/broker-roadmap-author-auth.test.ts's "near-miss" probe).
+  // A real token corrupted by one character, proving the guard compares the
+  // whole value against a peers row rather than only checking presence or
+  // shape.
   const peer = await register(PK);
   const corrupted = `${peer.token.slice(0, -1)}${peer.token.endsWith("a") ? "b" : "a"}`;
   expect(corrupted).not.toBe(peer.token);

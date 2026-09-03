@@ -17,33 +17,14 @@ export interface Lock {
   pid: number
   host: string
   /**
-   * The OWNING PROCESS's own actual start time (epoch ms, rounded to the
-   * nearest second to absorb clock-read drift) -- NOT when this lock file
-   * was written. Combined with a stale heartbeat (see `isLockLive`), this is
-   * a reclaim signal for a same-host owner: no process survives a reboot, so
-   * a lock whose `startedAt` predates this machine's last boot AND whose
-   * heartbeat has gone quiet is provably dead, even if its pid was later
-   * recycled by an unrelated process (card 438c15e3, review round 3). The
-   * `startedAt` half alone is NOT sufficient (review round 5): it is a
-   * wall-clock-derived estimate, sampled once at acquire time, and an NTP
-   * correction occurring later can shift a FRESH `bootInstant` estimate away
-   * from a STALE `startedAt` by more than any fixed tolerance, wrongly
-   * declaring a live owner dead -- structural to comparing two wall-clock+
-   * uptime estimates sampled at different real times, not specific to this
-   * pair of fields. The heartbeat half is what closes that gap: a live
-   * owner's NEXT beat lands on the corrected clock and is fresh again,
-   * regardless of how large the `startedAt` gap now looks. When either half
-   * is inconclusive (startedAt at/after boot, OR heartbeat still fresh),
-   * same-host liveness falls back to a bare pid-alive check -- see
-   * `isLockLive`. KNOWN LIMITATION, deliberately not addressed here: a jump
-   * FORWARD larger than `staleMs`, landing in the window before the owner's
-   * next heartbeat (at most one heartbeat interval wide), can still steal a
-   * live lock -- narrow and requires an unusually large single correction,
-   * see `isLockLive`. Locks written before this field carried real meaning
-   * still parse (same shape, `number`), but their value is an acquisition
-   * timestamp, not a launch time -- harmless for the one-way check (an
-   * acquisition timestamp is never earlier than the process's own actual
-   * start), so no migration is needed.
+   * startedAt is the owning process's own start time, not when this lock file
+   * was written, rounded to the nearest second.
+   * Combined with heartbeat freshness to detect a same-host owner that died
+   * across a reboot: neither signal alone is reliable (a wall-clock correction
+   * can skew startedAt), so both must fail before falling back to a pid-alive
+   * check.
+   * Locks written before this field existed still parse as an acquisition
+   * timestamp, which is safe for the one-way comparison.
    */
   startedAt: number
   heartbeat: number
@@ -115,21 +96,11 @@ export function readLock(projectDir: string, id: string): Lock | null {
 }
 
 /**
- * Is a lock held by a LIVE owner?
- * - Same host: dead (without consulting `isPidAlive`) only if BOTH hold --
- *   `startedAt` provably predates this machine's last boot (no process
- *   survives a reboot) AND the heartbeat is stale. The `startedAt` half
- *   alone is not enough: it is a wall-clock estimate sampled once, and an
- *   NTP correction can make a FRESH `bootInstant` outrun a STALE
- *   `startedAt` by more than any fixed tolerance, wrongly declaring a live
- *   owner dead (review round 5). The heartbeat half absorbs that: a live
- *   owner's next beat lands on the corrected clock and is fresh again, so
- *   the AND blocks the false reclaim while a genuinely dead (or
- *   pid-recycled) owner's heartbeat stays stale and the reclaim still
- *   fires. When either half is inconclusive, fall back to the OS process
- *   table via `isPidAlive` (pre-card guarantee).
- * - Cross host: trust heartbeat freshness only (best-effort). A heartbeat
- *   older-or-equal to `now - staleMs` is stale (boundary treated as stale).
+ * Same host: dead only when both startedAt provably predates this machine's
+ * last boot and the heartbeat is stale; either alone can misfire around an NTP
+ * correction. Inconclusive falls back to isPidAlive.
+ * Cross host: trusts heartbeat freshness only (best-effort); a heartbeat
+ * exactly staleMs old counts as stale.
  */
 export function isLockLive(lock: Lock, opts: LivenessOpts): boolean {
   if (lock.host === opts.host) {

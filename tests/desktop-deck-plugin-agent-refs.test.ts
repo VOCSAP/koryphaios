@@ -1,20 +1,10 @@
-// Card a79c7696 volet 3. Claude Code registers a plugin's agents ONLY under
-// "<plugin.json name>:<agent name>" -- there is no bare alias. So an `agent:`
-// frontmatter field inside a plugin SKILL.md that names the agent bare does NOT
-// resolve to the plugin's own agent. Measured on 2.1.222: the fork still HAPPENS,
-// it just runs with no agent system prompt, hence no `model:` and no `tools:`
-// restriction, and emits no error at all. That is why this file exists: nothing
-// at runtime will ever complain.
-//
-// The invariant spans TWO files (the skill's `agent:` and the plugin's `name`),
-// so renaming the plugin silently breaks the fork. This test pins them together.
-//
-// Coverage note: it DISCOVERS every SKILL.md under desktop/deck-plugin/ instead of
-// naming roadmap-card, so a third skill added tomorrow with a bare agent name
-// turns it red without anyone remembering to extend the list. Same reason a file
-// whose frontmatter cannot be parsed is an OFFENDER and not a skip: it would
-// otherwise leave the audited set in silence while this test still announced
-// full coverage.
+// Claude Code registers a plugin's agents only under "<plugin.json name>:<agent
+// name>" -- a bare `agent:` name in a plugin SKILL.md silently forks with no
+// agent system prompt and no error.
+// The invariant spans two files (the skill's `agent:` and the plugin's `name`),
+// so it discovers every SKILL.md under desktop/deck-plugin/ rather than naming
+// files by hand, and treats an unparseable frontmatter as an offender rather
+// than a skip.
 
 import { test, expect } from "bun:test";
 import { readdirSync, readFileSync, existsSync, statSync } from "node:fs";

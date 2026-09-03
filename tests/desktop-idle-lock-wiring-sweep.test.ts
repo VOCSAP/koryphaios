@@ -1,63 +1,12 @@
-// Card e344fa79 lineage, LOT D1 follow-up (team-lead review round 2): a
-// standalone unit test on ownsIdleLock (idle-lock.ts, see
-// tests/desktop-idle-lock.test.ts) proves the PURE FUNCTION is correct in
-// isolation, but proves nothing about the WIRING -- if watchIdleLocks
-// (desktop/src/main/index.ts) called it with arguments in the wrong order,
-// passed something other than activeScope.groupId, or dropped the call
-// entirely and fell back to a bare peer_id comparison, every one of those
-// unit tests stays green while the sweep becomes a silent no-op. Measured
-// precedent for exactly this failure mode: card e344fa79's own review round
-// 3 found a fix proven only at the pure-function level left the route-level
-// wiring untested, 22 then 28 tests green over a real gap.
-//
-// index.ts imports electron and is not bun-testable (its own comment at the
-// inbox-session.ts import site says so), so the WIRING itself cannot be
-// exercised by calling it -- only by READING it, the same shape as
-// tests/role-domain-sweep.test.ts (2026-08-24 precedent, read before writing
-// this file). Two halves, because a guarantee about a DOMAIN (no dangerous
-// comparison anywhere) fails OPEN if only checked at the one known site:
-//
-//   PRESENCE: watchIdleLocks's own function body contains a call to
-//   ownsIdleLock with the four real, group-aware argument expressions
-//   (item.locked_by, item.locked_group, <candidate peerId>,
-//   activeScope.groupId) in that order.
-//
-//   ABSENCE (the half that matters more -- PRESENCE alone stays green even
-//   if someone adds a SECOND, unguarded comparison next to the correct one):
-//   no TEXTUALLY ADJACENT bare `peerId <-> locked_by` equality (a member
-//   expression on each side, joined directly by an equality operator)
-//   survives anywhere under desktop/src/main, swept file-by-file, not just
-//   re-checked at the one line this lot touched.
-//
-// HONEST SCOPE LIMIT #1: this sweeps desktop/src/main only (where
-// SessionRuntime and RoadmapItem are both in scope for a comparison like
-// this to even compile) -- desktop/src/renderer's four locked_by READERS
-// (RoadmapBoard.tsx, RoadmapItemModal.tsx x2, WorkflowLane.tsx) are pure
-// display, already reviewed as out of scope for this lot, and none of them
-// have a peerId of their own to compare against.
-//
-// HONEST SCOPE LIMIT #2 (review round 2, point 3): the ABSENCE promise is
-// deliberately NARROW, not "no way to reintroduce this bug exists". This is
-// a TEXTUAL sweep, not a data-flow analysis, and widening the regex to catch
-// data-flow would make it one -- explicitly out of scope. Measured escapes
-// (4, all via a local variable aliasing one or both sides before the
-// comparison): `const pid = s.peerId; pid === item.locked_by`, the symmetric
-// form aliasing `item.locked_by` instead, both sides aliased at once, and a
-// closure-captured rename such as `sessions.find(x => x.peerId ===
-// lockedBy)`. A check that isn't a direct equality at all (`.includes(...)`,
-// a `byPeer.get(...)` lookup) is outside this pattern's shape by
-// construction, not merely unswept. A narrow, true promise beats a wide,
-// false one (CLAUDE.md: a stale-but-plausible comment is worse than an
-// honestly scoped one, because the next reader who checks it once and finds
-// it right stops re-verifying it).
-//
-// Also note: this sweep does NOT strip comments or string literals before
-// matching -- a future `main`-side comment that happens to quote this exact
-// anti-pattern (e.g. documenting it, the way THIS file's own header does)
-// would redden the ABSENCE test. That is fail-CLOSED (a false positive, not
-// a missed regression) so it is left as-is rather than adding a
-// comment/string stripper -- but it is worth knowing before being surprised
-// by it.
+// PRESENCE: watchIdleLocks calls ownsIdleLock with the four group-aware
+// arguments, in that order. ABSENCE: no bare peerId===locked_by comparison
+// exists anywhere under desktop/src/main, swept file-by-file.
+// Scoped to desktop/src/main only; renderer's locked_by readers are pure
+// display and are out of scope.
+// A textual sweep, not data-flow: aliasing either side into a local variable
+// before the comparison escapes detection by design.
+// Does not strip comments or strings before matching, so a comment quoting this
+// exact pattern can false-positive -- accepted as fail-closed.
 
 import { test, expect } from "bun:test";
 import { readFileSync, readdirSync, statSync } from "node:fs";

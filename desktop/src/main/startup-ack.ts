@@ -1,24 +1,11 @@
-// Auto-acknowledgment of Claude Code's development-channels warning
-// (anthropics/claude-code#42486): the channels flag the Deck's launch command
-// passes (--dangerously-load-development-channels server:claude-peers) makes
-// EVERY spawn — operator create, supervisor spawn, template, restart — stop on
-// a full-screen warning dialog until a human presses Enter. The channel
-// entries come from the operator's own launch command (C19-gated when
-// project-sourced), so the Deck acknowledges its own flag automatically.
-//
-// Deliberately narrow, one keystroke:
-// - BOTH screen cues must be present in the rolling buffer;
-// - the ack fires ONCE per process run (re-armed by clear() on restart);
-// - the service sends a single Enter — the dialog's default option is the
-//   accept ("❯ 1. I am using this for local development"), and a
-//   mis-detection can at worst submit an empty prompt. Never a digit: a "1"
-//   landing on the WRONG dialog could pick a destructive option.
-// - The MCP-server consent dialog ("New MCP server found in this project") is
-//   NEVER auto-acknowledged: its content is project-sourced (hostile input
-//   #1) — that trust decision stays with the operator.
-//
-// Same shape as attention.ts/quota.ts: ANSI-stripped rolling buffer per
-// session, EventEmitter transitions, decisions stay in session-service.
+// Auto-acknowledges Claude Code's development-channels warning
+// (anthropics/claude-code#42486), since the Deck's own launch flags make every
+// spawn stop on it until a human presses Enter.
+// Requires both screen cues present before acking, fires once per process run,
+// and sends a single Enter, never a digit, so a mis-detection at worst submits
+// an empty prompt.
+// The MCP-server consent dialog is never auto-acknowledged: its content is
+// project-sourced, so that trust decision stays with the operator.
 
 import { EventEmitter } from 'node:events'
 
@@ -26,22 +13,12 @@ export interface StartupAckEvent {
   id: string
 }
 
-// Strips CSI (colours, cursor moves) AND OSC (title, progress, notify --
-// card 1aa69066/H2) sequences so a marker wrapped in colour codes still
-// matches. One combined regex rather than two, deliberately: a per-chunk
-// strip alone cannot remove an OSC sequence fragmented across two PTY
-// chunks (its first half has no terminator yet, so nothing matches), which
-// is why `feed()` below re-runs this same function on the ACCUMULATED
-// buffer after concatenation, not only on the incoming per-chunk delta.
-//
-// OSC branch's class EXCLUDES ESC (not just BEL) -- that exclusion, not
-// the `{0,4096}` bound alongside it, is what prevents the quadratic blowup
-// on an adversarial buffer full of unterminated "ESC ]" heads on the main
-// process's hot PTY path. Corrected false pointer, card 1aa69066 review
-// round 3 (T5): the bound ALONE, without the ESC exclusion, measured
-// WORSE than the original unfixed regex. Full measurement + rationale on
-// attention.ts's own ANSI_RE comment; tests/desktop-osc-perf.test.ts pins
-// both properties, separately, for all four files that carry this class.
+// Strips both CSI and OSC sequences with one combined regex, re-run on the
+// accumulated buffer in feed() so an OSC sequence split across two PTY chunks
+// is still caught.
+// The OSC branch's character class excludes ESC itself: that exclusion, not the
+// length bound alongside it, prevents quadratic blowup on an adversarial buffer
+// of unterminated OSC heads.
 // eslint-disable-next-line no-control-regex
 const ANSI_RE = /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b\n]{0,4096}(?:\x07|\x1b\\))/g
 export function stripAnsi(s: string): string {
@@ -49,27 +26,11 @@ export function stripAnsi(s: string): string {
 }
 
 /**
- * Both must match: the dialog title AND its accept option's wording.
- *
- * `\s*` (zero or more) instead of literal spaces, because the CLI paints this
- * one dialog in TWO different spacings within the same second, and only the
- * first of them is what a reader expects. The Windows ConPTY frame that paints
- * it FIRST encodes every inter-word space as a cursor-forward sequence
- * (`\x1b[1C`), so after ANSI stripping the title reads
- * `WARNING:Loadingdevelopmentchannels` and a space-anchored pattern sees
- * nothing; the repaints that follow ~130 ms later carry LITERAL spaces. A
- * pattern written the obvious way would therefore not fail outright -- worse,
- * it would miss the first frame and ack on a repaint, a delay nobody notices
- * until a CLI version stops repainting. `\s*` covers both. The joined form is
- * specific enough that prose cannot produce it by accident, and the two-cue
- * requirement still holds.
- *
- * Field-measured 2026-08-26 on a real Windows session and KEPT, which the
- * 2026-07-28 audit this comment used to cite was not: the bytes are in
- * tests/pty-harness/fixtures/channels-warning-conpty-win.json, recorded
- * upstream of every detector by pty-manager.ts's KORY_PTY_RAW_CAPTURE hook,
- * and both spacings are asserted in tests/desktop-startup-ack.test.ts (its
- * FIELD CAPTURE block) and tests/desktop-attention.test.ts.
+ * Both the dialog title and its accept option's wording must match.
+ * \s* rather than literal spaces: the CLI's first paint of this dialog encodes
+ * inter-word spaces as cursor-forward sequences, so after ANSI stripping the
+ * title has no spaces at all; a later repaint uses literal spaces. \s* covers
+ * both without missing the first frame.
  */
 const CHANNELS_WARNING_PATTERNS = [
   /loading\s*development\s*channels/i,

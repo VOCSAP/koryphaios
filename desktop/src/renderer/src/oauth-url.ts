@@ -29,29 +29,12 @@ const MAX_JOIN_ROWS = 32
 const MAX_URL_CHARS = 8192
 
 /**
- * The LAST http(s) URL in `chunk`, or null. Last rather than first: the CLI
- * prints docs links before the one the operator has to open, and a retry
- * prints a fresh URL that supersedes the previous one.
- *
- * The hard part is that the CLI (Ink) wraps to the terminal width by emitting a
- * REAL newline, mid-token, inside the URL -- it is not the terminal wrapping at
- * render time. So the raw stream genuinely contains `…response_type=co\ndе&…`
- * and any regex that stops at whitespace stops one row in, handing the operator
- * a truncated link that OAuth rejects for a missing redirect_uri. (xterm's
- * `isWrapped` is no help for the same reason: these are real newlines.)
- *
- * The tell that a match was wrapped is that it ends exactly at the END of its
- * row; a URL that stops mid-row was never wrapped, and nothing is glued to it.
- *
- * From there, every following row that is non-empty and WHITESPACE-FREE is a
- * continuation. Note what this rule deliberately does NOT do: measure row
- * lengths. The obvious "all rows of a wrapped block are exactly the terminal
- * width" is false in practice -- the observed rows differ by a character, which
- * truncated a 451-character link to 225 after a single join. Any width-based
- * test is an off-by-one away from truncating or over-joining; the whitespace
- * boundary is structural. The assumption that remains is that the CLI puts a
- * blank line (or a line with spaces) between the link and whatever follows,
- * which is what its login screen does.
+ * Returns the last http(s) URL in chunk, not the first: the CLI prints docs
+ * links before the one to open, and a retry's URL supersedes the previous one.
+ * The CLI wraps mid-token with a real newline at the terminal width, so a
+ * wrapped URL is detected by ending exactly at its row's end, never by measured
+ * row length (observed rows vary by a character).
+ * Every following non-empty, whitespace-free row is treated as a continuation.
  */
 export function extractAuthUrl(chunk: string): string | null {
   const rows = chunk

@@ -1,20 +1,9 @@
-// Card 399aa31a: releaseStaleLocks' owner-gone clause (broker.ts) used to
-// anchor its LOCK_GRACE_SEC window on `roadmap_items.locked_at` (when the
-// lock was TAKEN), not on any timestamp of the owner's disconnection. Any
-// lock held longer than LOCK_GRACE_SEC -- the ordinary case -- got ZERO
-// effective grace: the instant its owner's peers row left 'active', the very
-// next sweep tick stripped it. The fix reanchors on `peers.last_seen` (the
-// owner's last real heartbeat/activity), via the same peer_id/project_key
-// join the clause already used. This file proves the one cell that did not
-// exist before the fix -- a lock held well past LOCK_GRACE_SEC, whose owner
-// then goes non-active with a RECENT last_seen, must survive -- and that the
-// clause still eventually releases once last_seen itself ages past grace.
-// broker-roadmap-lock.test.ts already covers: an ACTIVE owner keeps its lock
-// indefinitely ("owner-gone sweep releases after grace, but an active owner
-// keeps the lock"), a lock with no peer row at all releases immediately (the
-// ghost-peer cells throughout that file), and park immunity to this clause
-// ("park immunity: clauses 1/2 ... do not release a parked card") -- none of
-// that is re-proven here, only pointed at.
+// releaseStaleLocks' owner-gone clause anchors LOCK_GRACE_SEC on
+// peers.last_seen (the owner's last heartbeat), not on locked_at, so a lock's
+// grace period starts from disconnection rather than from when it was taken.
+// This proves the one cell that mattered: a lock held past LOCK_GRACE_SEC whose
+// owner goes non-active with a recent last_seen still survives, and is released
+// once last_seen itself ages past grace.
 
 import { test, expect } from "bun:test";
 import { startBroker, stopBroker, post, livePid } from "./_helper.ts";

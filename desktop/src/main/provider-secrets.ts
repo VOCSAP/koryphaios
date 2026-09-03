@@ -1,18 +1,11 @@
-// C29 hardening: local-provider API keys encrypted at rest with Electron
-// safeStorage (same SecretCipher surface as scope-secrets.ts, D8).
-//
-// Key lifecycle — three shapes of LocalProviderConfig, one per trust zone:
-// - RENDERER -> MAIN (transient): `apiKey` is set ONLY when the operator just
-//   typed a key ('' = explicit "forget the key"; absent = unchanged).
-// - AT REST (config.json): `apiKeyEnc` = 'enc:<base64(safeStorage blob)>', or
-//   'plain:<key>' when OS encryption is unavailable (Linux without a keyring —
-//   the feature still works, the fallback is explicit in the stored value).
-//   `apiKey` is NEVER stored.
-// - MAIN -> RENDERER: `hasKey` marker only; neither `apiKey` nor `apiKeyEnc`
-//   ever reaches the renderer.
-//
-// Pure: no electron import, cipher injected by index.ts — unit-testable under
-// bun with a fake cipher (scope-secrets pattern).
+// Local-provider API keys are encrypted at rest with Electron safeStorage.
+// Renderer to main: apiKey is set only when the operator just typed a key (''
+// means explicitly forget it, absent means unchanged).
+// At rest: apiKeyEnc is 'enc:<base64 blob>', or 'plain:<key>' when OS
+// encryption is unavailable (Linux without a keyring) — apiKey itself is never
+// stored.
+// Main to renderer exposes only a hasKey marker; neither apiKey nor apiKeyEnc
+// ever reaches the renderer.
 
 import type { LocalProviderConfig } from '../shared/models'
 import type { SecretCipher } from './scope-secrets'

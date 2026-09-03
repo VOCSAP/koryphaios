@@ -1,15 +1,8 @@
-// Minimal outbound broker client for the Deck (v0.3.4). The Deck is a one-way
-// participant: it POSTs /announce to broadcast operator messages to a group's
-// peers, and never reads inbound traffic. It is NOT a registered peer.
-//
-// This module deliberately avoids electron/node-pty imports (node builtins +
-// fetch only) so it can be unit-tested under `bun test`, and avoids the @shared
-// alias (bun cannot resolve it in the repo-root test harness).
-//
-// The broker URL/token are read from the SAME claude-peers config the spawned
-// sessions use (env > %APPDATA%/XDG config.json > loopback default), mirroring
-// shared/config.ts -- but with Node fs, since shared/config.ts uses Bun.file
-// which is unavailable in the Electron main process.
+// The Deck only POSTs /announce and never reads inbound traffic; it is not a
+// registered peer.
+// Avoids electron/node-pty imports so it is unit-testable under bun test, and
+// reads the broker URL/token from the same claude-peers config the spawned
+// sessions use.
 
 import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'

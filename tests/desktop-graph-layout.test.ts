@@ -63,12 +63,6 @@ test("findFreeSpot only cares about card-overlap distance", () => {
   expect(far.x).toBe(0); // vertically clear of the card: no shift
 });
 
-// ----- findFreeSpot + resizable nodes (a0f2e983 review, bc72d2c CHANGES) -----
-// The pre-fix test compared distance between ORIGINS against one fixed
-// GRAPH_NODE_W, ignoring any node.w/node.h set by a resize. These must FAIL
-// against that old formula (both a spot that used to read as "free" but
-// isn't, and one that used to get needlessly pushed away).
-
 test("findFreeSpot uses an existing node's REAL (resized) width, not the fixed default", () => {
   const wide = n("wide", [], "user", 0, 0);
   wide.w = GRAPH_NODE_MAX_W; // 640: far wider than the old fixed GRAPH_NODE_W=260

@@ -17,24 +17,12 @@ import type { Approval } from "../shared/types.ts";
 import { resolveProjectKey } from "../shared/project-key.ts";
 import { computeProjectKey } from "../shared/summarize.ts";
 
-// Card 4df14b5b: /approval/list now requires project_key. boot() spawns
-// `bun server.ts` with no explicit `cwd` (Bun.spawn inherits this test
-// runner's cwd), so the spawned process raises its ask_operator approval
-// with origin.project_key: roadmapProjectKey() resolved from that SAME cwd
-// -- server.ts:920's private roadmapProjectKey() combines resolveProjectKey
-// (shared/project-key.ts) with computeProjectKey (shared/summarize.ts) and a
-// git-root lookup. server.ts has zero exports and runs main() unconditionally
-// at module scope, so it cannot be imported here; this mirrors its inputs
-// instead of guessing a literal. A wrong-but-non-empty literal would be
-// WORSE than an empty one: the broker returns 200 with a silently empty
-// list, indistinguishable from "not raised yet" (this repo's real remote
-// derives to "github.com/vocsap/koryphaios" since card 69e5a3e0 lowercases
-// the whole normalizeRemoteUrl output, host AND path -- before that fix it
-// was "github.com/VOCSAP/koryphaios", capital VOCSAP; either way this is
-// computed dynamically below, not the lowercase fixture literal used
-// elsewhere in tests/broker-approvals.test.ts, which is a synthetic value
-// never derived from a real remote). Computed once at module scope, since it
-// shells out to git and cannot change within this test run.
+// Computes the expected project_key dynamically by mirroring server.ts's own
+// resolution (cwd plus git root) rather than hardcoding a literal, since
+// server.ts cannot be imported here.
+// A wrong-but-non-empty literal would be worse than an empty one: the broker
+// would return 200 with a silently empty list, indistinguishable from 'not
+// raised yet'.
 
 /** Mirrors server.ts's private, unexported getGitRoot() -- same command,
  * same shape, kept local since server.ts cannot be imported (see above). */
@@ -132,20 +120,11 @@ async function boot(withCredential: boolean): Promise<Harness> {
   const mintBody = {
     session_public_key: sessionCred.publicKey,
     session_ref: "tile-1",
-    // Card 1def56da: the Deck PINS the window's project into the credential at
-    // mint time, so the agent holding it cannot choose the project its blocking
-    // questions are filed under. Required, and it must sit in the object BEFORE
-    // buildAuthProof below -- the proof covers the body minus its own `auth`,
-    // so a field appended afterwards yields 401 rather than the 200 asserted.
-    //
-    // THE VALUE MATTERS, and it is the same constant `firstApproval` lists by.
-    // The card creates an AGREEMENT the code did not need before: an approval
-    // raised by this session is now filed under the TOKEN's project, so a
-    // window that minted with one value and lists with another sees nothing at
-    // all. Hardcoding a different literal here made three tests fail with an
-    // empty list and no error, which is precisely the shape that agreement can
-    // fail in. In production both ends come from `safeProjectKey()`
-    // (approval-runtime.ts), so they agree by construction.
+    // project_key must be set before buildAuthProof is called: the proof covers
+    // the body minus its own auth field, so appending it afterward yields 401
+    // instead of the expected 200.
+    // Must match the literal firstApproval lists by, since minting under one
+    // value and listing under another returns an empty list with no error.
     project_key: SPAWNED_SERVER_PROJECT_KEY,
     public_key: opCred.publicKey,
   };
@@ -260,13 +239,6 @@ describe("ask_operator over MCP stdio", () => {
     const res = await readUntil(h.reader, 1, h.buffer);
     expect(res.result?.isError).toBe(true);
     const text = res.result?.content?.[0]?.text ?? "";
-    // Card 469f3176 review: this refusal used to be worded "not enabled",
-    // which became FALSE once arming stopped being gated on mobileApprovals
-    // -- the only way left to hit this path is a session that predates the
-    // arming. Anchored on the two facts that carry the meaning (the cause
-    // named, the remediation given) rather than a loose fragment that would
-    // pass with any refusal text: this must still catch a regression back to
-    // the stale wording, or to a message that stops naming either one.
     expect(text).toContain("before remote approvals were armed");
     expect(text).toContain("Restart the session");
   }, 60_000);

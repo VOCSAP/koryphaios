@@ -1,41 +1,11 @@
-// Guards the forced local mirror of the Approval wire shape: desktop's
-// tsconfig.web.json has an explicit file list that cannot reach outside
-// desktop/ (measured by team-lead: reinstating the direct import and
-// deleting the mirror makes `tsc -p desktop/tsconfig.web.json` fail with
-// `error TS6307: File '.../shared/approval.ts' is not listed within the
-// file list of project '.../desktop/tsconfig.web.json'` -- the node half of
-// the typecheck passes the same import, which is why approval-auth.ts and
-// roadmap-service.ts already import the root shared/ from desktop/src/main:
-// the boundary only closes on the web side). desktop/src/shared/types.ts
-// therefore carries its own copy of Approval, ApprovalOrigin and the five
-// associated type aliases, with a header comment telling the reader to
-// resync by hand -- a guarantee asserted in prose with nothing wired to it,
-// which is exactly the pattern CLAUDE.md's "a comment that asserts a
-// guarantee must be wired to it" rule calls out. spec_35136ce1.
-//
-// Coverage requirement (CLAUDE.md's gating-coverage rule): the dangerous
-// direction is the ROOT source GROWING a field the mirror doesn't have --
-// that's how a wire shape evolves in practice, the Deck still compiles, the
-// existing tests still pass, and the mirror lies silently until a live
-// operator hits a field that isn't there. A comparison that only checks
-// "everything in the mirror exists in the root" does not see this. Every
-// check below runs in BOTH directions on purpose.
-//
-// WHAT THIS DOES NOT CATCH, stated rather than assumed:
-//  - A field or union member renamed IDENTICALLY on both sides in the same
-//    edit produces two shapes that still match -- this guard cannot see a
-//    coordinated rename, only a one-sided edit.
-//  - Field TYPE comparison is whitespace-normalized TEXT equality, not a
-//    real type-level diff: `Array<string>` vs `string[]` (semantically the
-//    same) would be flagged as a violation, and a reordered union written
-//    differently (`null | ApprovalVia` vs `ApprovalVia | null`) would too.
-//    Both are false positives that fail CLOSED (a human has to look), which
-//    this repo's conventions treat as the safe failure mode -- but they are
-//    real limits of this method, not edge cases it handles.
-//  - Only the 7 declarations named in DECLARATIONS below are tracked. A
-//    field whose type references some OTHER shared type not in that list
-//    (none exist today) would not have that referenced type's own shape
-//    checked.
+// desktop/src/shared/types.ts carries a hand-synced copy of
+// Approval/ApprovalOrigin because desktop/tsconfig.web.json's file list cannot
+// reach outside desktop/.
+// This guard diffs both copies in both directions: a field added to the root
+// shape but not mirrored still compiles clean and passes existing tests, so
+// only a bidirectional check catches it.
+// Field types are compared as whitespace-normalized text, not a real type diff,
+// so an equivalent-but-differently-spelled type is a false positive by design.
 
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
@@ -55,11 +25,8 @@ const UNION_NAMES = [
 ] as const;
 const INTERFACE_NAMES = ["ApprovalOrigin", "Approval"] as const;
 
-// Strips `//` line comments and `/* */` block comments, quote-aware (a
-// union member is itself a quoted string, e.g. "expired_notif", and must
-// survive untouched even though it contains no comment-like sequences today
-// -- defensive, same shape as the JSONC stripper in
-// tests/desktop-tsconfig-flags.test.ts).
+// Strips `//` and `/* */` comments while leaving quoted strings untouched,
+// since a union member value is itself a quoted string.
 function stripComments(src: string): string {
   let out = "";
   let i = 0;
@@ -107,16 +74,9 @@ function extractUnion(cleanedSrc: string, name: string): string[] | undefined {
 }
 
 /**
- * `export interface Name { field?: Type ... }` -> { "field" | "field?": normalizedTypeText }. undefined if absent.
- * Delegates to tests/_braced-body.ts (card 9e450573 Lot B dedup) with
- * quoteAware=true: `cleanedSrc` has been through stripComments (above),
- * which strips comments but NOT string literals, so a future field whose
- * type is a string-literal type containing a brace character would
- * otherwise desync a naive counter. Verified inert against the two REAL
- * interface bodies this runs on today (ApprovalOrigin, Approval in both
- * shared/types.ts and desktop/src/shared/types.ts): neither contains any
- * string literal at all, so quoteAware changes nothing today -- it is
- * forward robustness, not a behavior change, checked rather than assumed.
+ * Comments are already stripped, but not string literals: quoteAware avoids
+ * desyncing the brace counter on a brace character inside a future
+ * string-literal-type field.
  */
 function extractInterface(cleanedSrc: string, name: string): Record<string, string> | undefined {
   const startMatch = cleanedSrc.match(new RegExp(`export interface ${name}\\s*\\{`));
@@ -194,13 +154,6 @@ test("running the real-file comparison twice is idempotent (byte-identical viola
   const second = diffApprovalShapes(rootSrc, mirrorSrc);
   expect(second).toEqual(first);
 });
-
-// ----- fixture-backed positive/negative controls --------------------------
-//
-// Small synthetic sources, not the real files, exercising diffApprovalShapes
-// directly -- the same function the real-repo test above uses, so the two
-// paths cannot drift (same pattern as auditConfigs() in
-// tests/desktop-tsconfig-flags.test.ts).
 
 function fixtureSource(overrides: { approvalKindExtra?: string; originExtra?: string } = {}): string {
   return `

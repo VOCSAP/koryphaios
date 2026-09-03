@@ -1,33 +1,6 @@
-// Card 9e450573, dedup follow-up to card 18d7fda2. That card measured 21
-// near-identical brace/paren/bracket-counting extraction copies across
-// tests/*.test.ts, every one missing a `depth !== 0` termination guard --
-// fixed independently, per copy, there. This module is the single shared
-// implementation the mechanically-substitutable copies delegate to.
-//
-// Lot A (10 files: 6 byte-identical, 2 quote/semicolon-style-only variants,
-// one site each in the two "mixed" files desktop-session-role-env.test.ts
-// and role-domain-sweep.test.ts) landed with just findMatchingClose +
-// extractBracedBody, single-character openCh/closeCh, quoteAware always
-// false. Lot B adds: openCh/closeCh accepting an ARRAY of characters (needed
-// by extractBalancedParen's shape -- ONE depth counter shared across '(',
-// '{', '[' simultaneously, not three independent counters), plus
-// extractParenBody/extractBracketedBody convenience wrappers, and actually
-// EXERCISES quoteAware: true for the 3 quote-aware call sites this lot
-// migrates (extractObjectBody, extractBalancedParen, extractInterface).
-//
-// NAMING: deliberately NOT *.test.ts (tests/_helper.ts, tests/_store-mock.ts
-// precedent). scripts/pure-module-partition.ts's listTestFiles() and
-// tests/desktop-ci-glob-coverage.test.ts's independent REAL_FILES both filter
-// strictly on `f.endsWith(".test.ts")` -- a file whose name doesn't end in
-// that suffix is invisible to BOTH enumerations symmetrically, never
-// collected as a test entrypoint, only ever imported by relative path.
-//
-// quoteAware: card 18d7fda2 measured that a bare bracket character INSIDE A
-// STRING LITERAL desyncs a naive counter (it isn't tracking strings, so the
-// literal character counts as a real bracket). Pass `quoteAware: true` for
-// callers that need immunity to that trick. Lot A's 10 sites were never
-// quote-aware before migration and stay that way (quoteAware omitted,
-// defaults to false).
+// Not named *.test.ts on purpose: the test-file enumerations here filter
+// strictly on that suffix, so this module stays reachable only by relative
+// import, never collected as a test entrypoint.
 
 type CharSet = string | string[];
 
@@ -36,19 +9,15 @@ function toCharArray(cs: CharSet): string[] {
 }
 
 /**
- * Finds the index one past the character matching `openCh` at `openIdx`
- * (i.e. `s[openIdx]` must be one of `openCh`), balancing nested `openCh`/
- * `closeCh` pairs. `openCh`/`closeCh` each accept a single character OR an
- * array of characters sharing ONE depth counter (extractBalancedParen's
- * shape: '(', '{', '[' all increment/decrement the same counter, safe only
- * because well-formed TS code always nests the three kinds in matching
- * pairs -- see that call site). Throws, naming the anchor via a lookback
- * snippet, if the block never closes (depth never returns to 0) -- never
- * silently returns an EOF-truncated index. `quoteAware` (default false)
- * additionally tracks single/double/backtick-quoted strings so an `openCh`/
- * `closeCh` character INSIDE a string literal does not desync the count;
- * backslash-escapes inside a tracked string are skipped as a pair so an
- * escaped quote character does not end the string early.
+ * Finds the index one past the character in openCh at openIdx, balancing nested
+ * pairs.
+ * openCh/closeCh accept a single character or an array sharing one depth
+ * counter (needed when '(', '{', '[' must nest as one balanced unit).
+ * Throws, naming the anchor, if depth never returns to 0 -- never returns an
+ * EOF-truncated index.
+ * quoteAware (default false) tracks quoted strings so a bracket character
+ * inside a string literal does not desync the count; escaped quotes are skipped
+ * as a pair.
  */
 export function findMatchingClose(
   s: string,

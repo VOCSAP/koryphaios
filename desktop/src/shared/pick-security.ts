@@ -39,12 +39,9 @@ export function containsSecret(v: string): boolean {
 }
 
 /**
- * Redact a string in place if it matches a secret pattern; otherwise pass
- * through unchanged. Single source of truth for both re-validation points
- * (guest-side element-pick.ts and main-side design-endpoint.ts) so a field
- * redacted on one side is redacted on the other -- moved here from
- * design-endpoint.ts, which had this as a private helper the guest twin
- * never saw.
+ * Single source of truth for both re-validation points (guest-side
+ * element-pick.ts and main-side design-endpoint.ts), so a field redacted on one
+ * side is redacted on the other.
  */
 export function redactIfSecret(v: string): string {
   return containsSecret(v) ? '[redacted]' : v
@@ -132,14 +129,10 @@ const NON_URL_ATTRS = [
 ]
 
 /**
- * URL-bearing attributes actually captured by the pick payload today --
- * typed as a subset of URL_ATTR_NAMES, so TypeScript rejects any entry here
- * that isn't already a member of URL_ATTRS. This is what makes the defect
- * measured in review structurally impossible to reintroduce: growing
- * PICK_ATTRIBUTE_ALLOWLIST with a new URL-bearing attribute can no longer be
- * done by editing PICK_ATTRIBUTE_ALLOWLIST itself (it is derived, not a
- * literal), and adding the attribute here without first adding it to
- * URL_ATTR_NAMES above is a compile error.
+ * Typed as a subset of URL_ATTR_NAMES, so TypeScript rejects any entry here
+ * that isn't already a member of URL_ATTRS: growing the allowlist with a new
+ * URL-bearing attribute is a compile error unless it is added to URL_ATTR_NAMES
+ * first.
  */
 const URL_ATTRS_ALLOWED: UrlAttrName[] = ['href', 'src']
 
@@ -187,6 +180,9 @@ export const PICK_BUDGET = {
   reactComponentsMaxEntries: 6,
   /** Annotate review (OD5): comment textarea cap, mirrors orca's GRAB_BUDGET. */
   annotationCommentMaxLength: 2000,
-  /** Annotate review (OD5): pinned-elements cap per review; further picks are refused with a toast. */
+  /**
+   * Pinned-elements cap: further picks past this limit are refused with a
+   * toast, not silently dropped.
+   */
   annotationsMaxPerPage: 20
 } as const

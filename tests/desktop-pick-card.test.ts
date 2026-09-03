@@ -1,8 +1,3 @@
-// "A review finding becomes a roadmap card" (Card review-to-roadmap-card):
-// pure-function coverage for shared/pick-card.ts, the mapping from a
-// design-review PickAnnotation (or a pick-context PickNote) to roadmap
-// fields. No DOM needed, same posture as tests/desktop-pick-report.test.ts.
-
 import { expect, test } from "bun:test";
 import {
   annotationToCardFields,
@@ -13,7 +8,6 @@ import {
 } from "../desktop/src/shared/pick-card.ts";
 import type { ElementPick, PickAnnotation, PickNote } from "../desktop/src/shared/types.ts";
 
-/** Minimal valid ElementPick, overridable per test -- same shape as tests/desktop-pick-report.test.ts's helper. */
 function pick(overrides: Partial<ElementPick> = {}): ElementPick {
   return {
     tagName: "button",
@@ -28,7 +22,6 @@ function pick(overrides: Partial<ElementPick> = {}): ElementPick {
   };
 }
 
-/** Minimal valid PickAnnotation, overridable per test -- same shape as tests/desktop-pick-report.test.ts's helper. */
 function annotation(overrides: Partial<PickAnnotation> = {}): PickAnnotation {
   return {
     id: "a1",

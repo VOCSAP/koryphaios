@@ -1,16 +1,10 @@
-// Card 4dcd4f04: roadmap_add/roadmap_update over MCP stdio must return a
-// compact ack, never the full item (nobody consumes that echo, and it can
-// carry kilobytes of `context`/`description`). Harness mirrors
-// server-ask-operator.test.ts (spawn `bun server.ts`, speak JSON-RPC on stdin).
-//
-// Reviewer FAIL on the first cut of this card: the ack was built from the
-// caller's RAW ARGS, so it lied on 5 fields the broker silently changes --
-// title (trim), tags/depends_on (cleanList drops), target_peer_ids
-// (cleanPeerIds / reset to [] outside kind='directive'), and locked
-// (roadmap_add never forwards it at all). This file replays that exact
-// probe as a versioned test (a probe that proves once in /tmp and then
-// disappears never existed), and adds a schema-drift guard so a 15th field
-// added to RoadmapUpsertRequest tomorrow fails this suite the same day.
+// roadmap_add/roadmap_update over MCP stdio must return a compact ack, never
+// the full item, since nobody consumes that echo and it can carry kilobytes of
+// context/description.
+// The ack must be built from the broker's actual response, not the caller's raw
+// args: title is trimmed, tags/depends_on are cleaned, target_peer_ids is reset
+// outside kind='directive', and roadmap_add never forwards locked at all -- a
+// raw-args ack lies on all five.
 
 import { test, expect, describe, afterAll } from "bun:test";
 import { startBroker, stopBroker, type TestBroker } from "./_helper.ts";
@@ -21,19 +15,12 @@ import {
 } from "../shared/types.ts";
 
 /**
- * Every tool name starting with "roadmap_" that server.ts registers, mapped
- * to its ack FIELD domain (checked via findUncoveredAckFields) or `null`
- * when its ack is not RoadmapItem-field-pick-list shaped at all (roadmap_get/
- * list/archive: no per-field ack; roadmap_append_context: reports a byte
- * count, not a list of RoadmapItem fields; roadmap_dispatch: reports which
- * CARDS were dispatched and which TILES they hit, so its ack names no
- * RoadmapItem field at all). See the test below for how a 4th tool, or a
- * stale entry, fails this the same day it happens.
- *
- * `null` is this table's EXEMPTION form, not a hole: the test below skips the
- * field comparison for a null domain, so an entry landing here must be
- * justified by the SHAPE of its ack, never by the absence of one being
- * convenient.
+ * Maps every roadmap_ tool to its ack field domain, or null when the ack is not
+ * RoadmapItem-field-pick-list shaped at all (roadmap_get/list/archive have no
+ * per-field ack, roadmap_append_context reports a byte count, roadmap_dispatch
+ * reports cards/tiles dispatched).
+ * null is an exemption that must be justified by the ack's shape, never used
+ * just because no domain was defined.
  */
 const ROADMAP_TOOL_ACK_DOMAINS: Record<string, readonly string[] | null> = {
   roadmap_list: null,
@@ -115,16 +102,11 @@ interface Harness {
 
 let nextRpcId = 1;
 
-// Card 4441e883, Trou B: `bootOnBroker` factors the process-spawn half of
-// `boot()` out so a SECOND server.ts instance can be pointed at an EXISTING
-// broker instead of minting its own -- broker.ts's /register session_key
-// collision branch (broker.ts:1687-1716) mints a fresh peer_id/instance_token
-// for a second process sharing the same host+cwd+tty against an already-
-// active session, so two harnesses booted this way onto the SAME broker are
-// two genuinely distinct, independently PROVEN identities (own instance_token
-// each), never the same peer reconnecting. That distinctness is exactly what
-// B1/B2 need: one session claims a card's work-lock, the other must NOT be
-// mistaken for it.
+// Factors out the process-spawn half of boot() so a second server.ts instance
+// can attach to an existing broker: the broker's session_key collision branch
+// mints a fresh peer_id/instance_token for a second process sharing
+// host+cwd+tty, so two harnesses booted this way are genuinely distinct,
+// independently proven identities.
 async function bootOnBroker(b: TestBroker, extraEnv: Record<string, string> = {}): Promise<Harness> {
   const env: Record<string, string> = {
     ...(process.env as Record<string, string>),
@@ -410,14 +392,11 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
   }, 60_000);
 
   test("every roadmap_ tool in the live tools/list is accounted for in ROADMAP_TOOL_ACK_DOMAINS, and field-pick-list tools stay covered", async () => {
-    // Review delta, card 562fd9b5: this used to be two hand-written find()
-    // calls for roadmap_add/roadmap_update only. A third tool
-    // (roadmap_append_context) shipped with zero test coverage and this
-    // guard did not notice, because its domain wasn't unioned/checked, it
-    // was simply never asked about. A TABLE plus a membership assertion in
-    // BOTH directions closes that: a 4th roadmap_ tool added tomorrow
-    // without a matching entry here fails this test the same day, and a
-    // stale entry for a tool that got removed fails it too.
+    // A table plus a membership assertion in both directions: a new roadmap_
+    // tool added without a matching entry here fails this test, and a stale
+    // entry left for a removed tool fails it too.
+    // Two hand-written checks alone can silently miss a tool shipping with zero
+    // coverage, since nothing unions or asks about the full set.
     const h = await boot();
     h.send({ jsonrpc: "2.0", id: nextRpcId, method: "tools/list", params: {} });
     const res = await readUntil(h.reader, nextRpcId, h.buffer);
@@ -478,16 +457,12 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     expect(Number(match![2])).toBeGreaterThan(secretNote.length);
   }, 60_000);
 
-  // Card 4441e883, Trou B (team-lead review): formatRoadmapUpsertAck's
-  // work-lock trailer (server.ts) had zero coverage anywhere -- these two are
-  // the pair, B1 the positive case and B2 the negative control that carries
-  // the real weight (the card explicitly forbids a generic nudge toward
-  // callers holding NO lock -- server.ts:1111-1114 -- so a regression that
-  // widens the trailer to every caller must be caught here). Anchored on the
-  // stable fragment "you hold this card's work-lock" rather than the full
-  // line: a parallel developer session is actively reformatting `locked_at`
-  // and the follow-up advice clause in the SAME line (team-lead brief), so
-  // asserting the whole string would break on an unrelated, correct edit.
+  // formatRoadmapUpsertAck's work-lock trailer had zero coverage anywhere; B1
+  // is the positive case, B2 the negative control that the trailer never
+  // appears for a caller holding no lock.
+  // Anchored on the stable fragment "you hold this card's work-lock" rather
+  // than the full line, since surrounding text in the same line changes
+  // independently.
   const WORK_LOCK_TRAILER_FRAGMENT = "you hold this card's work-lock";
 
   test("card 4441e883 (Trou B1): a proven holder's own write on its locked card carries the work-lock trailer", async () => {
@@ -518,9 +493,8 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     // A genuinely different, independently proven session against the SAME
     // broker (bootOnBroker's whole reason to exist -- see its doc comment).
     const stranger = await bootOnBroker(holder.b);
-    // Neither `status` nor `locked`: an ORDINARY write, same shape the
-    // broker-level 409 guard already lets through untouched (see
-    // tests/broker-roadmap-lock.test.ts, "Non-status writes stay open").
+    // An ordinary write (neither status nor locked), the same shape the
+    // broker-level 409 guard already lets through untouched.
     const edited = await callTool(stranger, "roadmap_update", {
       id,
       context: "an unrelated edit from a stranger while the card stays locked",
