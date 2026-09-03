@@ -59,12 +59,14 @@ export type WorkspaceApprovalGateResult = 'approved' | 'declined' | 'unattended'
 /**
  * Whether an attendance-gated approval must refuse outright, without ever
  * opening its dialog (card ffafeea6): true only for an 'unattended' caller
- * whose payload has no separate pre-approval to fall back on. Shared by
- * index.ts's confirmSpawnShellFields (payload may be cache pre-approved,
- * pass its own check) and approveSpawn (no pre-approval concept exists for a
- * whole spawn plan, so it always calls with alreadyApproved=false) so the
- * two dialog-opening sinks that route closes agree on one definition of
- * 'unattended' rather than two that could drift.
+ * whose payload has no separate pre-approval to fall back on. Called by
+ * every index.ts site that guards confirmShellFieldApproval's dialog --
+ * confirmSpawnShellFields, resolveTemplateInputs, confirmWorkspaceShellFields,
+ * confirmWorkspaceUntrustedCwd (each passes its own isShellFieldPreApproved
+ * check as `alreadyApproved`) -- plus approveSpawn's spawnDialog, which has no
+ * pre-approval concept for a whole spawn plan and always calls with
+ * alreadyApproved=false. One definition of 'unattended' for all five sinks,
+ * rather than one copy per site that could drift.
  */
 export function refusesUnattendedApproval(attendance: CallerAttendance, alreadyApproved: boolean): boolean {
   return attendance === 'unattended' && !alreadyApproved

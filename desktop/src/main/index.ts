@@ -2052,7 +2052,7 @@ const resolveTemplateInputs = (path: string, attendance: CallerAttendance): Temp
       buttonsEn: ['Apply this template', 'Refuse'],
       buttonsFr: ['Appliquer ce modèle', 'Refuser']
     }
-    if (attendance === 'unattended' && !isShellFieldPreApproved(approvalOpts)) {
+    if (refusesUnattendedApproval(attendance, isShellFieldPreApproved(approvalOpts))) {
       journal.add('session', `template refused (no attended operator, not pre-approved): ${approvalOpts.basename}`)
       return { ok: false, reason: 'unattended' }
     }
@@ -2088,7 +2088,7 @@ const confirmWorkspaceShellFields = (
     buttonsEn: ['Restore this workspace', 'Refuse'],
     buttonsFr: ['Restaurer cet espace de travail', 'Refuser']
   }
-  if (attendance === 'unattended' && !isShellFieldPreApproved(approvalOpts)) {
+  if (refusesUnattendedApproval(attendance, isShellFieldPreApproved(approvalOpts))) {
     journal.add('session', `workspace shell fields refused (no attended operator, not pre-approved): ${approvalOpts.basename}`)
     return 'unattended'
   }
@@ -2123,7 +2123,7 @@ const confirmWorkspaceUntrustedCwd = (
     buttonsEn: ['Restore this workspace', 'Refuse'],
     buttonsFr: ['Restaurer cet espace de travail', 'Refuser']
   }
-  if (attendance === 'unattended' && !isShellFieldPreApproved(approvalOpts)) {
+  if (refusesUnattendedApproval(attendance, isShellFieldPreApproved(approvalOpts))) {
     journal.add('session', `workspace untrusted cwd refused (no attended operator, not pre-approved): ${approvalOpts.basename}`)
     return 'unattended'
   }

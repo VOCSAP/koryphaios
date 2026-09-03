@@ -1464,16 +1464,21 @@ function extractConfirmSpawnShellFieldsBody(src: string): string {
   return extractBracedBody(src, m.index + m[0].length - 1);
 }
 
-const UNATTENDED_REFUSAL_CALL = /refusesUnattendedApproval\(/;
+// Pins BOTH arguments, not just the function name (card ecaf736b): a mutation
+// that replaces the second argument with a constant (e.g. `true`, always
+// pre-approved) must not match this anchor at all, so it cannot silently keep
+// the guard green the way a name-only `refusesUnattendedApproval\(` would.
+const UNATTENDED_REFUSAL_CALL =
+  /refusesUnattendedApproval\(\s*attendance\s*,\s*isShellFieldPreApproved\(approvalOpts\)\s*\)/;
 const DIALOG_GATE_CALL = /confirmShellFieldApproval\(/;
 
 /**
  * WEAK by design (see the block comment above): only proves the
- * refusesUnattendedApproval call appears BEFORE the dialog-opening call
- * textually, and that a `return false` exists in that same preceding slice
- * (the refusal). Cannot, by source scan alone, prove refusesUnattendedApproval
- * itself decides correctly -- that is covered by a direct unit test on the
- * predicate.
+ * refusesUnattendedApproval call, with its real pre-approval check as second
+ * argument, appears BEFORE the dialog-opening call textually, and that a
+ * `return false` exists in that same preceding slice (the refusal). Cannot,
+ * by source scan alone, prove refusesUnattendedApproval itself decides
+ * correctly -- that is covered by a direct unit test on the predicate.
  */
 function unattendedRefusesBeforeDialog(body: string): boolean {
   const refusalIdx = body.search(UNATTENDED_REFUSAL_CALL);
@@ -1538,4 +1543,29 @@ test("the checker ACCEPTS the new shape (unattended checked and refuses BEFORE t
     return confirmShellFieldApproval({ keyPart: 'deck-spawn' })
   `;
   expect(unattendedRefusesBeforeDialog(newBody)).toBe(true);
+});
+
+test("the checker REJECTS a second argument replaced by a constant (always/never pre-approved)", () => {
+  const constantSecondArg = `
+    if (!sessionsHaveShellFields([entry])) return true
+    if (refusesUnattendedApproval(attendance, true)) {
+      journal.add('session', 'refused')
+      return false
+    }
+    return confirmShellFieldApproval({ keyPart: 'deck-spawn' })
+  `;
+  expect(unattendedRefusesBeforeDialog(constantSecondArg)).toBe(false);
+});
+
+// Card ecaf736b: confirmShellFieldApproval has five dialog-opening sinks in
+// index.ts (confirmSpawnShellFields, resolveTemplateInputs,
+// confirmWorkspaceShellFields, confirmWorkspaceUntrustedCwd, approveSpawn).
+// Only confirmSpawnShellFields gets the full argument-pinned source scan
+// above; this count is the cheaper guard for the other four -- it does not
+// name which site regressed, only that one stopped calling the shared
+// predicate and reverted to its own inline copy.
+test("refusesUnattendedApproval is called at exactly 5 sites in index.ts (one per dialog-opening sink)", () => {
+  const src = readFileSync(INDEX_TS_PATH, "utf-8");
+  const calls = src.match(/refusesUnattendedApproval\(/g) ?? [];
+  expect(calls.length).toBe(5);
 });
