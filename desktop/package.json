@@ -16,7 +16,7 @@
     "build:design": "bun build design-client/deck-design.ts --target=browser --outfile=deck-plugin/design/deck-design.js",
     "dev": "npm run build:hook && npm run build:mcp && npm run build:design && electron-vite dev",
     "start": "electron-vite preview",
-    "build": "npm run build:hook && npm run build:mcp && npm run build:design && electron-vite build",
+    "build": "npm run build:hook && npm run build:mcp && npm run build:design && electron-vite build && node scripts/write-build-info.js",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",
