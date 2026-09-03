@@ -9,8 +9,9 @@ import { test, expect, mock } from "bun:test";
 import { readFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { extractBracedBody } from "./_braced-body";
+import { extractBracedBody, extractParenBody } from "./_braced-body";
 import {
+  isTeamLeadAgent,
   wantsTeamLeadBridge,
   resolveMcpConfig,
   buildMintTeamLeadBridge,
@@ -21,6 +22,8 @@ import {
 import { TEAM_LEAD_DECK_TOOLS, writeTeamLeadMcpConfig } from "../desktop/src/main/supervisor";
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
+const INDEX_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
+const IPC_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "ipc.ts");
 
 function fakeMint(result: { mcpConfig: string; callerId: string } | null): MintTeamLeadBridge {
   return () => result;
@@ -37,11 +40,12 @@ test("marker true + agent team-lead + no existing mcpConfig -> mints and uses th
   expect(report).not.toHaveBeenCalled();
 });
 
-test("PROOF 1: marker FALSE (template-shaped call, e.g. a template naming agent: 'team-lead') -> no mcpConfig, mint never called", () => {
-  // A repo-sourced template naming `agent: 'team-lead'` never causes its
-  // caller (createSessionWithWorktree -> SessionService.create()) to pass
-  // `opts`, so `marker` arrives as `false` here -- even though the mint
-  // function IS wired and WOULD return a valid bridge, it must never be
+test("PROOF 1: marker FALSE -> no mcpConfig, mint never called", () => {
+  // resolveMcpConfig itself never knows or cares *why* marker is false: a
+  // caller that never computes it (diff:review, roadmap:import-plan), or one
+  // that computed isTeamLeadAgent(input.agent) as false for a non-team-lead
+  // entry, must produce the identical no-bridge result -- even though the
+  // mint function IS wired and WOULD return a valid bridge, it must never be
   // reached.
   const mint = mock(fakeMint({ mcpConfig: "/state/should-not-be-used.json", callerId: "x" }));
   const report = mock(() => {});
@@ -135,6 +139,16 @@ test("MUTATION PROOF: a predicate that drops the marker check would wrongly gran
 test("wantsTeamLeadBridge: agent comparison is exact, not a prefix/substring match", () => {
   expect(wantsTeamLeadBridge({}, "team-lead-2", true)).toBe(false);
   expect(wantsTeamLeadBridge({}, "", true)).toBe(false);
+});
+
+// ----- isTeamLeadAgent: the single predicate all three marker call sites share -----
+
+test("isTeamLeadAgent: exact match only, not a prefix/substring, and false on empty/undefined", () => {
+  expect(isTeamLeadAgent("team-lead")).toBe(true);
+  expect(isTeamLeadAgent("team-lead-2")).toBe(false);
+  expect(isTeamLeadAgent("Team-Lead")).toBe(false);
+  expect(isTeamLeadAgent("")).toBe(false);
+  expect(isTeamLeadAgent(undefined)).toBe(false);
 });
 
 // TEAM_LEAD_DECK_TOOLS is compared against the live export, not a hand-copied
@@ -302,4 +316,357 @@ test("negative control: the checker REJECTS a synthetic body where the call is d
   const reason = checkMcpConfigWiring(mutated);
   expect(reason).not.toBeNull();
   expect(reason).toContain("expected exactly one resolveMcpConfig(");
+});
+
+// LINKED_MARKER anchors the key and the isTeamLeadAgent(input.agent) call as
+// ONE regex, since two independent regexes (predicate name, key name) cannot
+// tell an inverted marker or an unused-predicate decoy apart from the real
+// wiring -- both still match separately. checkAllCallsCarryLinkedMarker
+// requires it on EVERY createSessionWithWorktree(...) call in a body, not
+// just the first, so a second unguarded call cannot slip past.
+// Accepts both input.agent and the optional-chained input?.agent -- both are
+// real call sites in this repo, so only one form would false-positive on the
+// other.
+const LINKED_MARKER = /teamLeadDeckBridge\s*:\s*isTeamLeadAgent\(input\??\.agent\)\s*[,}]/;
+
+/** A mis-balanced extraction (e.g. a stray brace inside a string literal) reads as "could not extract", never as a guard violation. */
+function extractFnBody(src: string, fnMatch: RegExpExecArray | null, fileLabel: string, anchorLabel: string):
+  { body: string } | { error: string } {
+  if (!fnMatch) return { error: `${anchorLabel} not found in ${fileLabel} -- has its signature changed?` };
+  const openIdx = fnMatch.index + fnMatch[0].length - 1;
+  try {
+    return { body: extractBracedBody(src, openIdx) };
+  } catch (e) {
+    return { error: `could not extract the ${anchorLabel} body from ${fileLabel}: ${(e as Error).message}` };
+  }
+}
+
+function checkAllCallsCarryLinkedMarker(body: string, anchorLabel: string): string | null {
+  const calls = [...body.matchAll(/createSessionWithWorktree\(/g)];
+  if (calls.length === 0) return `createSessionWithWorktree( call not found inside ${anchorLabel}`;
+  for (const call of calls) {
+    const argsOpenIdx = call.index + call[0].length - 1;
+    let args: string;
+    try {
+      args = extractParenBody(body, argsOpenIdx);
+    } catch (e) {
+      return `could not extract a createSessionWithWorktree(...) call's args inside ${anchorLabel}: ${(e as Error).message}`;
+    }
+    if (!LINKED_MARKER.test(args)) {
+      return `a createSessionWithWorktree(...) call inside ${anchorLabel} does not carry a linked "teamLeadDeckBridge: isTeamLeadAgent(input.agent)" argument`;
+    }
+  }
+  return null;
+}
+
+interface WiringCheckSpec {
+  anchor: RegExp;
+  fileLabel: string;
+  anchorLabel: string;
+  /** Runs on the extracted body before the linked-marker scan; return a reason string to fail early (e.g. template:apply's ensureControlServer() requirement). */
+  extraCheck?: (body: string) => string | null;
+}
+
+/**
+ * The one function every wiring checker below goes through: extraction is
+ * always extractFnBody (a braced function body, syntactically bounded by
+ * matching braces), never a hand-anchored regex reaching for the call --
+ * a same-shaped custom anchor is what let a delegated spawnSession
+ * (`(input) => spawnHelper(input)`) certify green by drifting onto the NEXT
+ * function's call.
+ */
+function checkWiring(src: string, spec: WiringCheckSpec): string | null {
+  const extracted = extractFnBody(src, spec.anchor.exec(src), spec.fileLabel, spec.anchorLabel);
+  if ("error" in extracted) return extracted.error;
+  if (spec.extraCheck) {
+    const reason = spec.extraCheck(extracted.body);
+    if (reason) return reason;
+  }
+  return checkAllCallsCarryLinkedMarker(extracted.body, spec.anchorLabel);
+}
+
+export function checkSpawnTemplateEntryWiring(src: string): string | null {
+  return checkWiring(src, {
+    anchor: /spawnTemplateEntry:\s*async\s*\(input,\s*opts\)\s*=>\s*\{/,
+    fileLabel: "index.ts",
+    anchorLabel: "spawnTemplateEntry"
+  });
+}
+
+test("index.ts's spawnTemplateEntry passes a linked isTeamLeadAgent(input.agent) as opts.teamLeadDeckBridge to createSessionWithWorktree", () => {
+  const src = readFileSync(INDEX_PATH, "utf-8");
+  const reason = checkSpawnTemplateEntryWiring(src);
+  expect(reason).toBeNull();
+});
+
+export function checkSpawnSessionWiring(src: string): string | null {
+  return checkWiring(src, {
+    anchor: /spawnSession:\s*\(input\)\s*=>\s*\{/,
+    fileLabel: "index.ts",
+    anchorLabel: "spawnSession"
+  });
+}
+
+test("index.ts's spawnSession (deck_spawn_session MCP tool) passes a linked isTeamLeadAgent(input.agent) as opts.teamLeadDeckBridge", () => {
+  const src = readFileSync(INDEX_PATH, "utf-8");
+  const reason = checkSpawnSessionWiring(src);
+  expect(reason).toBeNull();
+});
+
+test("MUTATION PROOF: checkSpawnSessionWiring REJECTS a delegated spawnSession whose body never reaches createSessionWithWorktree, instead of drifting onto the next property's call", () => {
+  const delegated = [
+    "  spawnSession: (input) => spawnHelper(input),",
+    "  listSessions: () => service.list(),",
+    "  spawnTemplateEntry: async (input, opts) => {",
+    "    return createSessionWithWorktree(",
+    "      service, getConfig().projectDir, input, undefined, getWorktreeInit(), sandboxGate, warmSandboxTranscripts,",
+    "      { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }",
+    "    )",
+    "  },"
+  ].join("\n");
+  expect(checkSpawnSessionWiring(delegated)).not.toBeNull();
+});
+
+test("MUTATION PROOF: checkSpawnSessionWiring REJECTS a braced spawnSession with a second, unguarded createSessionWithWorktree(...) call", () => {
+  const secondCallUnguarded = [
+    "  spawnSession: (input) => {",
+    "    if (legacy) {",
+    "      createSessionWithWorktree(service, getConfig().projectDir, input, undefined, getWorktreeInit())",
+    "    }",
+    "    return createSessionWithWorktree(",
+    "      service, getConfig().projectDir, input, undefined, getWorktreeInit(), sandboxGate, warmSandboxTranscripts,",
+    "      { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }",
+    "    )",
+    "  },"
+  ].join("\n");
+  const reason = checkSpawnSessionWiring(secondCallUnguarded);
+  expect(reason).not.toBeNull();
+  expect(reason).toContain("a createSessionWithWorktree");
+});
+
+test("negative control: LINKED_MARKER accepts the optional-chained input?.agent form, not just input.agent", () => {
+  const optionalChained = [
+    "  spawnSession: (input) => {",
+    "    return createSessionWithWorktree(",
+    "      service, getConfig().projectDir, input, undefined, getWorktreeInit(), sandboxGate, warmSandboxTranscripts,",
+    "      { teamLeadDeckBridge: isTeamLeadAgent(input?.agent) }",
+    "    )",
+    "  },"
+  ].join("\n");
+  expect(checkSpawnSessionWiring(optionalChained)).toBeNull();
+});
+
+test("negative control: the checker REJECTS a synthetic spawnTemplateEntry that grants the bridge unconditionally", () => {
+  const mutated = [
+    "  spawnTemplateEntry: async (input, opts) => {",
+    "    return createSessionWithWorktree(",
+    "      service,",
+    "      getConfig().projectDir,",
+    "      input,",
+    "      undefined,",
+    "      getWorktreeInit(),",
+    "      sandboxGate,",
+    "      warmSandboxTranscripts,",
+    "      { teamLeadDeckBridge: true }",
+    "    )",
+    "  },"
+  ].join("\n");
+  const reason = checkSpawnTemplateEntryWiring(mutated);
+  expect(reason).not.toBeNull();
+});
+
+test("MUTATION PROOF: the checker REJECTS an inverted marker and an unused-predicate decoy, both accepted by two independent regexes", () => {
+  const inverted = [
+    "  spawnTemplateEntry: async (input, opts) => {",
+    "    return createSessionWithWorktree(",
+    "      service, getConfig().projectDir, input, undefined, getWorktreeInit(), sandboxGate, warmSandboxTranscripts,",
+    "      { teamLeadDeckBridge: !isTeamLeadAgent(input.agent) }",
+    "    )",
+    "  },"
+  ].join("\n");
+  expect(checkSpawnTemplateEntryWiring(inverted)).not.toBeNull();
+
+  const unusedDecoy = [
+    "  spawnTemplateEntry: async (input, opts) => {",
+    "    return createSessionWithWorktree(",
+    "      service, getConfig().projectDir, input, undefined, getWorktreeInit(), sandboxGate, warmSandboxTranscripts,",
+    "      { teamLeadDeckBridge: false, unused: isTeamLeadAgent(input.agent) }",
+    "    )",
+    "  },"
+  ].join("\n");
+  expect(checkSpawnTemplateEntryWiring(unusedDecoy)).not.toBeNull();
+
+  // Negative control on the negative control: the real, linked form still passes.
+  const real = [
+    "  spawnTemplateEntry: async (input, opts) => {",
+    "    return createSessionWithWorktree(",
+    "      service, getConfig().projectDir, input, undefined, getWorktreeInit(), sandboxGate, warmSandboxTranscripts,",
+    "      { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }",
+    "    )",
+    "  },"
+  ].join("\n");
+  expect(checkSpawnTemplateEntryWiring(real)).toBeNull();
+});
+
+test("MUTATION PROOF: the checker REJECTS a body with a second, unguarded createSessionWithWorktree(...) call", () => {
+  const secondCallUnguarded = [
+    "  spawnTemplateEntry: async (input, opts) => {",
+    "    if (opts.legacy) {",
+    "      createSessionWithWorktree(service, getConfig().projectDir, input, undefined, getWorktreeInit())",
+    "    }",
+    "    return createSessionWithWorktree(",
+    "      service, getConfig().projectDir, input, undefined, getWorktreeInit(), sandboxGate, warmSandboxTranscripts,",
+    "      { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }",
+    "    )",
+    "  },"
+  ].join("\n");
+  const reason = checkSpawnTemplateEntryWiring(secondCallUnguarded);
+  expect(reason).not.toBeNull();
+  expect(reason).toContain("a createSessionWithWorktree");
+});
+
+test("negative control: an extraction failure reads as 'could not extract', not as a guard violation", () => {
+  const truncatingBody = [
+    "  spawnTemplateEntry: async (input, opts) => {",
+    '    const label = "oops {"',
+    "  },"
+  ].join("\n");
+  const reason = checkSpawnTemplateEntryWiring(truncatingBody);
+  expect(reason).not.toBeNull();
+  expect(reason).toContain("could not extract");
+});
+
+export function checkTemplateApplyWiring(src: string): string | null {
+  return checkWiring(src, {
+    anchor: /regHandle\(\s*'template:apply'[\s\S]*?=>\s*\{/,
+    fileLabel: "ipc.ts",
+    anchorLabel: "template:apply",
+    extraCheck: (body) =>
+      /ensureControlServer\(\)/.test(body)
+        ? null
+        : "template:apply no longer calls ensureControlServer() -- a template-opened team-lead tile could mint against a server never started"
+  });
+}
+
+test("ipc.ts's template:apply calls ensureControlServer() and passes a linked isTeamLeadAgent(input.agent) on every createSessionWithWorktree call", () => {
+  const src = readFileSync(IPC_PATH, "utf-8");
+  const reason = checkTemplateApplyWiring(src);
+  expect(reason).toBeNull();
+});
+
+test("negative control: the checker REJECTS a synthetic template:apply that never starts the control server", () => {
+  const mutated = [
+    "  regHandle('template:apply', async (_e, path, mode) => {",
+    "    for (const input of inputs) {",
+    "      await createSessionWithWorktree(",
+    "        service, getConfig().projectDir, input, undefined, getWorktreeInit(), undefined, undefined,",
+    "        { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }",
+    "      )",
+    "    }",
+    "  })"
+  ].join("\n");
+  const reason = checkTemplateApplyWiring(mutated);
+  expect(reason).not.toBeNull();
+  expect(reason).toContain("ensureControlServer");
+});
+
+test("negative control: the checker REJECTS a synthetic template:apply that grants the bridge unconditionally", () => {
+  const mutated = [
+    "  regHandle('template:apply', async (_e, path, mode) => {",
+    "    await ensureControlServer()",
+    "    for (const input of inputs) {",
+    "      await createSessionWithWorktree(",
+    "        service, getConfig().projectDir, input, undefined, getWorktreeInit(), undefined, undefined,",
+    "        { teamLeadDeckBridge: true }",
+    "      )",
+    "    }",
+    "  })"
+  ].join("\n");
+  const reason = checkTemplateApplyWiring(mutated);
+  expect(reason).not.toBeNull();
+});
+
+test("MUTATION PROOF (template:apply): the checker REJECTS an inverted marker", () => {
+  const mutated = [
+    "  regHandle('template:apply', async (_e, path, mode) => {",
+    "    await ensureControlServer()",
+    "    for (const input of inputs) {",
+    "      await createSessionWithWorktree(",
+    "        service, getConfig().projectDir, input, undefined, getWorktreeInit(), undefined, undefined,",
+    "        { teamLeadDeckBridge: !isTeamLeadAgent(input.agent) }",
+    "      )",
+    "    }",
+    "  })"
+  ].join("\n");
+  expect(checkTemplateApplyWiring(mutated)).not.toBeNull();
+});
+
+test("MUTATION PROOF (template:apply): the checker REJECTS a body with a second, unguarded createSessionWithWorktree(...) call", () => {
+  const mutated = [
+    "  regHandle('template:apply', async (_e, path, mode) => {",
+    "    await ensureControlServer()",
+    "    if (legacyInputs.length) {",
+    "      createSessionWithWorktree(service, getConfig().projectDir, legacyInputs[0], undefined, getWorktreeInit())",
+    "    }",
+    "    for (const input of inputs) {",
+    "      await createSessionWithWorktree(",
+    "        service, getConfig().projectDir, input, undefined, getWorktreeInit(), undefined, undefined,",
+    "        { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }",
+    "      )",
+    "    }",
+    "  })"
+  ].join("\n");
+  const reason = checkTemplateApplyWiring(mutated);
+  expect(reason).not.toBeNull();
+  expect(reason).toContain("a createSessionWithWorktree");
+});
+
+test("shorthand { teamLeadDeckBridge } calls are rejected regardless of how a same-named const nearby is initialized", () => {
+  // LINKED_MARKER only recognizes the inline `key: isTeamLeadAgent(...)`
+  // shape, which requires a `:` -- a shorthand call has none, so it fails
+  // independently of any nearby const's initializer, including one crafted
+  // to always evaluate true (`&& false`, `|| true`, a ternary).
+  const bodies = [
+    "const teamLeadDeckBridge = isTeamLeadAgent(input.agent) && false\ncreateSessionWithWorktree(a, b, c, d, e, f, g, { teamLeadDeckBridge })",
+    "const teamLeadDeckBridge = isTeamLeadAgent(input.agent) || true\ncreateSessionWithWorktree(a, b, c, d, e, f, g, { teamLeadDeckBridge })",
+    "const teamLeadDeckBridge = isTeamLeadAgent(input.agent) ? false : false\ncreateSessionWithWorktree(a, b, c, d, e, f, g, { teamLeadDeckBridge })"
+  ];
+  for (const body of bodies) {
+    expect(checkAllCallsCarryLinkedMarker(body, "synthetic")).not.toBeNull();
+  }
+});
+
+// ----- mechanized enumeration: create-session.ts's own doc comment names an
+// exact 4-vs-2 split of every createSessionWithWorktree(...) call site across
+// ipc.ts and index.ts. A count replaces that prose so a 7th call site, or one
+// moved between the two columns, fails a number instead of staling a comment.
+
+function countCallSites(src: string): { total: number; withMarker: number } {
+  let total = 0;
+  let withMarker = 0;
+  for (const call of src.matchAll(/createSessionWithWorktree\(/g)) {
+    total++;
+    const argsOpenIdx = call.index + call[0].length - 1;
+    try {
+      if (LINKED_MARKER.test(extractParenBody(src, argsOpenIdx))) withMarker++;
+    } catch {
+      // An extraction failure counts toward `total` but not `withMarker`.
+    }
+  }
+  return { total, withMarker };
+}
+
+test("createSessionWithWorktree(...) call sites across ipc.ts + index.ts partition exactly 4 marker-bearing / 2 not, 6 total", () => {
+  const ipc = countCallSites(readFileSync(IPC_PATH, "utf-8"));
+  const index = countCallSites(readFileSync(INDEX_PATH, "utf-8"));
+  const total = ipc.total + index.total;
+  const withMarker = ipc.withMarker + index.withMarker;
+  expect(total).toBe(6);
+  expect(withMarker).toBe(4);
+  expect(total - withMarker).toBe(2);
+});
+
+test("negative control: countCallSites does not mistake the import statement for a call site", () => {
+  const importOnly = "import { createSessionWithWorktree } from './create-session'\n";
+  expect(countCallSites(importOnly)).toEqual({ total: 0, withMarker: 0 });
 });

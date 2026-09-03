@@ -164,7 +164,7 @@ import {
   writeSupervisorSystemPrompt,
   writeTeamLeadMcpConfig
 } from './supervisor'
-import { buildMintTeamLeadBridge } from './team-lead-bridge'
+import { buildMintTeamLeadBridge, isTeamLeadAgent } from './team-lead-bridge'
 import {
   createWorktree,
   listWorktrees,
@@ -2242,16 +2242,23 @@ const controlDeps: DeckControlDeps = {
   listAgents: () => listAgents(getConfig().projectDir),
   listModels: () => resolveLaunchConfig(getConfig().projectDir).models,
   listPresets: () => resolveLaunchConfig(getConfig().projectDir).presets,
-  spawnSession: (input) =>
-    createSessionWithWorktree(
+  spawnSession: (input) => {
+    // Card 3c322f10: this is the plain `deck_spawn_session` MCP tool,
+    // `entry.agent` set directly rather than `embedded_agent` -- deck-control.ts's
+    // own leadMint/mcpConfig above only fires for the latter, so an
+    // `agent: 'team-lead'` call here still needs the marker computed the same
+    // way as every other route.
+    return createSessionWithWorktree(
       service,
       getConfig().projectDir,
       input,
       checkpointBeforeSpawn,
       getWorktreeInit(),
       sandboxGate,
-      warmSandboxTranscripts
-    ),
+      warmSandboxTranscripts,
+      { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }
+    )
+  },
   listSessions: () => service.list(),
   sandboxExec: (command) => sandbox.supervisorExec(command),
   restartSession: (id) => void service.restart(id),
@@ -2297,7 +2304,12 @@ const controlDeps: DeckControlDeps = {
       undefined,
       getWorktreeInit(),
       sandboxGate,
-      warmSandboxTranscripts
+      warmSandboxTranscripts,
+      // Card 3c322f10 (piece 3, agent route): the deck-control server is
+      // necessarily already up here -- this call only ever arrives through
+      // it -- so unlike the operator route there is no ensureControlServer()
+      // to start proactively.
+      { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }
     )
   },
   saveTemplate: (name, local) => {

@@ -59,6 +59,7 @@ import {
 } from './roadmap-service'
 import { validateReorderWaves } from './roadmap-reorder-validate'
 import { createSessionWithWorktree } from './create-session'
+import { isTeamLeadAgent } from './team-lead-bridge'
 import { composePlanImportPrompt } from './import-plan'
 import { collectDiff, collectFileDiff, composeDiffReviewPrompt } from './diff-service'
 import { clearReviewState, readReviewState, validatePersistedReview, writeReviewState } from './review-state-service'
@@ -288,7 +289,7 @@ export function registerIpc({
   // already — so these tools grant no additional power. Re-examine if that
   // tier-1 power is ever revoked or scoped down.
   regHandle('sessions:create', async (_e, input: CreateSessionInput) => {
-    const teamLeadDeckBridge = input?.agent === 'team-lead'
+    const teamLeadDeckBridge = isTeamLeadAgent(input?.agent)
     // Card 3c322f10 (piece 2, operator route, team-lead arbitration): started
     // PROACTIVELY here, not inside SessionService.create() -- see that
     // function's own doc for why staying synchronous/atomic there matters.
@@ -312,7 +313,7 @@ export function registerIpc({
       getWorktreeInit(),
       sandboxGate,
       sandboxWarmTranscripts,
-      { teamLeadDeckBridge }
+      { teamLeadDeckBridge: isTeamLeadAgent(input?.agent) }
     )
   })
   regHandle('sessions:remove', (_e, id: string) => service.remove(id))
@@ -1290,6 +1291,18 @@ export function registerIpc({
     // The template's lead becomes the window's ONLY when no lead exists yet
     // (PLAN C18) — applying a team must not silently steal the crown.
     const hasLead = service.list().some((s) => s.lead && s.status !== 'exited')
+    // Card 3c322f10 (piece 3, template routes): started once for the whole
+    // batch, not per tile -- mirrors sessions:create's own best-effort start
+    // (see that handler above). A failure here must not block the batch from
+    // opening at all, only mean the team-lead tile(s) in it open without the
+    // bridge.
+    if (inputs.some((i) => isTeamLeadAgent(i.agent))) {
+      try {
+        await ensureControlServer()
+      } catch (e) {
+        reportError('session', 'failed to start the deck-control endpoint for a template-opened team-lead tile', e)
+      }
+    }
     // Each peer spawns in this window's current project dir + group (no cwd in
     // the template); order is preserved by creation order. Routed through the
     // worktree-aware path so composer templates with worktreeBranch work.
@@ -1299,7 +1312,10 @@ export function registerIpc({
         getConfig().projectDir,
         hasLead ? { ...input, lead: undefined } : input,
         undefined,
-        getWorktreeInit()
+        getWorktreeInit(),
+        undefined,
+        undefined,
+        { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }
       )
     }
     return inputs.length

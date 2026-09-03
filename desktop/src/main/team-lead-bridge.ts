@@ -20,6 +20,19 @@ export interface TeamLeadBridgeInput {
 export type MintTeamLeadBridge = () => { mcpConfig: string; callerId: string } | null
 
 /**
+ * Single source of truth for computing the `agent`-based deck-control bridge
+ * marker (the `agent: 'team-lead'` field, exact match, no prefix/substring).
+ * Every call site that needs it (ipc.ts's sessions:create and template:apply,
+ * index.ts's spawnTemplateEntry and spawnSession) goes through this instead
+ * of repeating the string comparison. Distinct from the `embedded_agent`
+ * route's own team-lead decision (deck-control.ts's `embedded?.id ===
+ * 'team-lead'`), which stays a separate check on a separate field.
+ */
+export function isTeamLeadAgent(agent: string | undefined): boolean {
+  return agent === 'team-lead'
+}
+
+/**
  * True only when: no mcpConfig is already set, the caller-supplied
  * `marker` is `true` (a plain boolean, NEVER read off `input` -- see this
  * module's header), AND the (already sanitizeFlagValue'd) agent is exactly
@@ -31,7 +44,7 @@ export function wantsTeamLeadBridge(
   sanitizedAgent: string,
   marker: boolean
 ): boolean {
-  return !input.mcpConfig?.trim() && marker === true && sanitizedAgent === 'team-lead'
+  return !input.mcpConfig?.trim() && marker === true && isTeamLeadAgent(sanitizedAgent)
 }
 
 /**
