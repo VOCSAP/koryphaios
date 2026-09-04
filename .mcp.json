@@ -1,9 +1,0 @@
-{
-  "mcpServers": {
-    "claude-peers": {
-      "type": "stdio",
-      "command": "bun",
-      "args": ["./server.ts"]
-    }
-  }
-}
