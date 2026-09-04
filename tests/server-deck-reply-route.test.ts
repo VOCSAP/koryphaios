@@ -130,7 +130,7 @@ function pumpStderr(proc: ReturnType<typeof Bun.spawn>): { text: string } {
 
 async function bootDeck(
   b: TestBroker,
-  opts: { deskSession: string; identity: { peerId: string; groupId: string } | null }
+  opts: { deskSession: string; identity: { peerId: string; groupId: string; instanceToken: string } | null }
 ): Promise<{
   proc: ReturnType<typeof Bun.spawn>;
   reader: ReadableStreamDefaultReader<Uint8Array>;
@@ -145,7 +145,13 @@ async function bootDeck(
   dirs.push(credDir);
 
   if (opts.identity) {
-    await writeSessionIdentityFile(opts.deskSession, opts.identity.peerId, opts.identity.groupId, homeDir);
+    await writeSessionIdentityFile(
+      opts.deskSession,
+      opts.identity.peerId,
+      opts.identity.groupId,
+      opts.identity.instanceToken,
+      homeDir
+    );
   }
 
   const opCred = generateCredential();
@@ -234,9 +240,9 @@ describe("server-deck.ts ask_operator reply routing", () => {
     const b = await startBroker();
     brokers.push(b);
     const groupId = "deck-reply-route-group-positive";
-    const { peerId } = await registerTestPeer(b, groupId);
+    const { peerId, instanceToken } = await registerTestPeer(b, groupId);
 
-    const h = await bootDeck(b, { deskSession: "probe-positive", identity: { peerId, groupId } });
+    const h = await bootDeck(b, { deskSession: "probe-positive", identity: { peerId, groupId, instanceToken } });
     h.send({
       jsonrpc: "2.0",
       id: 1,
@@ -289,7 +295,7 @@ describe("server-deck.ts ask_operator reply routing", () => {
     const { peerId, instanceToken } = await registerTestPeer(b, groupId);
     expect((await post(`${b.url}/disconnect`, { instance_token: instanceToken })).status).toBe(200);
 
-    const h = await bootDeck(b, { deskSession: "probe-stale", identity: { peerId, groupId } });
+    const h = await bootDeck(b, { deskSession: "probe-stale", identity: { peerId, groupId, instanceToken } });
     h.send({
       jsonrpc: "2.0",
       id: 1,

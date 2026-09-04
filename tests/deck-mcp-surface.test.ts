@@ -1,5 +1,5 @@
-// Surface test for the second MCP entrypoint (Card c9269fef lot L2):
-// exactly the three identity-free tools, and no `instructions` block.
+// Surface test for the second MCP entrypoint (Card c9269fef, lots L2/L3):
+// exactly the five Kory-only tools, and no `instructions` block.
 
 import { test, expect, describe, afterAll } from "bun:test";
 
@@ -80,11 +80,17 @@ describe("server-deck.ts surface", () => {
     expect(initRes.result?.instructions).toBeUndefined();
   }, 30_000);
 
-  test("exposes exactly the three identity-free tools", async () => {
+  test("exposes exactly the five Kory-only tools", async () => {
     const { reader, buffer, send } = await boot();
     send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
     const res = await readUntil(reader, 1, buffer);
     const names = (res.result?.tools ?? []).map((t) => t.name).sort();
-    expect(names).toEqual(["ask_operator", "ask_operator_wait", "graph_draft_prepare"]);
+    expect(names).toEqual([
+      "ask_operator",
+      "ask_operator_wait",
+      "graph_draft_prepare",
+      "graph_draft_send",
+      "roadmap_dispatch",
+    ]);
   }, 30_000);
 });

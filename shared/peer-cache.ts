@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -11,7 +11,9 @@ async function writeCacheAtomic(target: string, data: string): Promise<void> {
   // 0o600: computeGroupId (shared/config.ts) is sha256(secret).slice(0,32),
   // the first half of group_secret_hash -- a world-readable identity file
   // would hand any other local user an offline verification oracle on the
-  // group secret.
+  // group secret. POSIX-only: NTFS has no permission bits, so on Windows
+  // this mode is a no-op and the file's real protection is the user profile's
+  // own ACLs (measured -- st.mode reads 0o666 regardless of what is asked for).
   await writeFile(tmp, data, { encoding: "utf-8", mode: 0o600 });
   await rename(tmp, target);
 }
@@ -109,65 +111,90 @@ export async function writeDeskSessionId(
 }
 
 /**
- * Filename of the per-tile identity file (Card c9269fef lot L2-bis): carries
- * only peer_id and group_id, never the instance_token (a secret, deferred to
- * the token-transport lot). Keyed by the same desk-session token as
- * deskSessionFileName, since that is the only value both the main server.ts
- * process and a companion MCP process for the same tile already share.
+ * Filename of the per-tile identity file (Card c9269fef, lots L2-bis/L3):
+ * carries peer_id, group_id and instance_token, the last a SECRET, which is
+ * why the file is written 0600 (writeCacheAtomic). Keyed by the same
+ * desk-session token as deskSessionFileName, since that is the only value
+ * both the main server.ts process and a companion MCP process for the same
+ * tile already share.
  */
 export function sessionIdentityFileName(token: string): string {
   return `session-identity-${sanitizeSessionId(token)}.json`;
 }
 
 /**
- * Write the per-tile identity file for an already-resolved (peerId, groupId)
- * pair. No-op when the token, peerId or groupId is empty -- the reader
- * rejects a partial identity too, so the writer must not produce one.
- * Best-effort: failures are silent so callers never break their own
- * /register flow. Called from EVERY site that can change myPeerId (boot,
- * switch_group, set_id) alongside writePeerIdCache, so the two never drift
- * apart -- both or neither.
+ * Write the per-tile identity file for an already-resolved (peerId, groupId,
+ * instanceToken) triple. No-op when the token or any of the three is empty
+ * -- the reader rejects a partial identity too, so the writer must not
+ * produce one. Best-effort: failures are silent so callers never break their
+ * own /register flow. Called from EVERY site that can change myPeerId or
+ * myInstanceToken (boot, switch_group, set_id) alongside writePeerIdCache,
+ * so the two never drift apart -- both or neither.
  */
 export async function writeSessionIdentityFile(
   token: string,
   peerId: string,
   groupId: string,
+  instanceToken: string,
   home: string = homedir(),
 ): Promise<void> {
   const safeToken = sanitizeSessionId(token);
-  if (!safeToken || !peerId || !groupId) return;
+  if (!safeToken || !peerId || !groupId || !instanceToken) return;
   try {
     const cacheDir = join(home, ".claude", "peers");
     await mkdir(cacheDir, { recursive: true });
     await writeCacheAtomic(
       join(cacheDir, sessionIdentityFileName(safeToken)),
-      JSON.stringify({ peer_id: peerId, group_id: groupId })
+      JSON.stringify({ peer_id: peerId, group_id: groupId, instance_token: instanceToken })
     );
   } catch {
-    // best-effort: a companion MCP process falls back to reply_route "pty"
+    // best-effort: a companion MCP process falls back to an unproven identity
   }
 }
 
 /**
  * Read the per-tile identity file written by writeSessionIdentityFile.
  * Returns null on any absence, parse failure or malformed shape -- the
- * caller's job is to fail closed to reply_route "pty" on null, never to
- * guess a partial identity.
+ * caller's job is to fail closed (reply_route "pty", a refused dispatch...)
+ * on null, never to guess a partial identity. Never log the return value:
+ * instanceToken is a credential.
  */
 export async function readSessionIdentityFile(
   token: string,
   home: string = homedir(),
-): Promise<{ peerId: string; groupId: string } | null> {
+): Promise<{ peerId: string; groupId: string; instanceToken: string } | null> {
   const safeToken = sanitizeSessionId(token);
   if (!safeToken) return null;
   try {
     const raw = await readFile(join(home, ".claude", "peers", sessionIdentityFileName(safeToken)), "utf-8");
-    const parsed = JSON.parse(raw) as { peer_id?: unknown; group_id?: unknown };
+    const parsed = JSON.parse(raw) as { peer_id?: unknown; group_id?: unknown; instance_token?: unknown };
     if (typeof parsed.peer_id !== "string" || !parsed.peer_id) return null;
     if (typeof parsed.group_id !== "string" || !parsed.group_id) return null;
-    return { peerId: parsed.peer_id, groupId: parsed.group_id };
+    if (typeof parsed.instance_token !== "string" || !parsed.instance_token) return null;
+    return { peerId: parsed.peer_id, groupId: parsed.group_id, instanceToken: parsed.instance_token };
   } catch {
     return null;
+  }
+}
+
+/**
+ * Delete the per-tile identity file: called both at the TOP of main()
+ * (before /register, so a file surviving a PREVIOUS process's crash for the
+ * same desk_session token can never be read as live) and from cleanup()
+ * alongside the /disconnect POST -- the instance_token, unlike peer_id/
+ * group_id, has no status filter downstream (findPeerByInstanceToken).
+ * Silent ONLY on ENOENT; any other failure (EBUSY/EPERM, a held handle on
+ * Windows) is a security-relevant deletion failure and is rethrown -- the
+ * caller logs it, this module deliberately has no logger of its own.
+ */
+export async function deleteSessionIdentityFile(token: string, home: string = homedir()): Promise<void> {
+  const safeToken = sanitizeSessionId(token);
+  if (!safeToken) return;
+  try {
+    await unlink(join(home, ".claude", "peers", sessionIdentityFileName(safeToken)));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException)?.code === "ENOENT") return;
+    throw e;
   }
 }
 

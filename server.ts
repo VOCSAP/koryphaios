@@ -52,7 +52,12 @@ import {
   isOperatorSender,
   renderInbound,
 } from "./shared/inbound-framing.ts";
-import { writePeerIdCache, writeDeskSessionId, writeSessionIdentityFile } from "./shared/peer-cache.ts";
+import {
+  writePeerIdCache,
+  writeDeskSessionId,
+  writeSessionIdentityFile,
+  deleteSessionIdentityFile,
+} from "./shared/peer-cache.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
 import {
   DECK_PEER_ID,
@@ -1287,20 +1292,22 @@ async function handleGraphDraftPrepare(args: unknown) {
   }
 }
 
-/** Caller-resolved identity: handleAskOperator reads no module variable, so a
- * companion process (server-deck.ts) can supply its own, sourced from the
- * per-tile identity file instead of server.ts's own (unset in that process)
- * registration state. */
-interface AskOperatorIdentity {
+/** Caller-resolved identity: none of the three companion-eligible handlers
+ * read a module variable, so server-deck.ts can supply its own, sourced from
+ * the per-tile identity file instead of server.ts's own (unset in that
+ * process) registration state. instanceToken is a credential -- never log
+ * it, truncated or not. */
+interface CompanionIdentity {
   host: string;
   peerId: string | null;
   groupId: string;
+  instanceToken: string | null;
   projectKey: string;
   fromPeer: string;
 }
 
 /** ask_operator / ask_operator_wait: signs with the session's restricted credential, no peer identity required. */
-async function handleAskOperator(name: string, args: unknown, identity: AskOperatorIdentity) {
+async function handleAskOperator(name: string, args: unknown, identity: CompanionIdentity) {
   const cred = loadSessionApprovalCredential();
   if (!cred) {
     return {
@@ -1423,6 +1430,74 @@ async function handleAskOperator(name: string, args: unknown, identity: AskOpera
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return { content: [{ type: "text" as const, text: `${name} failed: ${msg}` }], isError: true };
+  }
+}
+
+/** Proof body for a proven-identity route: present only when a token is available. */
+function proofFrom(instanceToken: string | null): Record<string, string> {
+  return instanceToken ? { instance_token: instanceToken } : {};
+}
+
+/** roadmap_dispatch: broker-side resolveProvenGraphDraftPeer's sibling route
+ * derives from/project from the proven instance_token, so `by`/`project_key`
+ * here are declarative only -- the token is what actually authorizes this. */
+async function handleRoadmapDispatch(identity: CompanionIdentity) {
+  try {
+    // One HTTP call: the broker parks the request and holds the response
+    // open until the Deck resolves it (wait_sec) -- imitating
+    // deck_spawn_session's "wait for the real result, else tell the caller
+    // the Deck will announce it". 25 s is two cycles of the Deck's 10 s
+    // poller, so a healthy Deck answers inside the wait and a slow one
+    // still gets its outcome parked on the row.
+    const { request } = await brokerFetch<DispatchRequestAddResponse>(
+      "/dispatch-request/add",
+      {
+        project_key: identity.projectKey,
+        by: identity.fromPeer,
+        wait_sec: 25,
+        ...proofFrom(identity.instanceToken),
+      }
+    );
+    return {
+      content: [{ type: "text" as const, text: renderDispatchOutcome(request) }],
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      content: [{ type: "text" as const, text: `roadmap_dispatch failed: ${msg}` }],
+      isError: true,
+    };
+  }
+}
+
+/** graph_draft_send: same proven-identity shape as handleRoadmapDispatch. */
+async function handleGraphDraftSend(args: unknown, identity: CompanionIdentity) {
+  const payload = validateDraftPayload(args as { title?: unknown; prompt?: unknown });
+  if ("error" in payload) {
+    return { content: [{ type: "text" as const, text: payload.error }], isError: true };
+  }
+  try {
+    const { draft } = await brokerFetch<GraphDraftAddResponse>("/graph-draft/add", {
+      project_key: identity.projectKey,
+      by: identity.fromPeer,
+      title: payload.title,
+      prompt: payload.prompt,
+      ...proofFrom(identity.instanceToken),
+    });
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `Graph draft sent to the operator's Deck (id ${draft.id}). It stays pending — broker-persisted — until the operator opens it in the graph view, picks models and launches the inference. You can go back to your task.`,
+        },
+      ],
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      content: [{ type: "text" as const, text: `graph_draft_send failed: ${msg}` }],
+      isError: true,
+    };
   }
 }
 
@@ -1817,7 +1892,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         // which would make whoami's role field vanish instead of showing null.
         myRole = reg.role ?? null;
         await writePeerIdCache(myCwd, myPeerId);
-        await writeSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "", myPeerId, myGroupId);
+        await writeSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "", myPeerId, myGroupId, myInstanceToken ?? "");
         await writeDeskSessionId();
         connectWs();
         return {
@@ -1871,7 +1946,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         // free for a future registration to claim: third mutator of myPeerId
         // alongside boot and switch_group, same "both or neither" rule.
         await writePeerIdCache(myCwd, myPeerId);
-        await writeSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "", myPeerId, myGroupId);
+        await writeSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "", myPeerId, myGroupId, myInstanceToken ?? "");
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result) }],
         };
@@ -2110,68 +2185,30 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         host: myHost,
         peerId: myPeerId,
         groupId: myGroupId,
+        instanceToken: myInstanceToken,
         projectKey: roadmapProjectKey(),
         fromPeer: roadmapAuthor(),
       });
 
-    case "roadmap_dispatch": {
-      try {
-        // One HTTP call: the broker parks the request and holds the response
-        // open until the Deck resolves it (wait_sec) -- imitating
-        // deck_spawn_session's "wait for the real result, else tell the caller
-        // the Deck will announce it". 25 s is two cycles of the Deck's 10 s
-        // poller, so a healthy Deck answers inside the wait and a slow one
-        // still gets its outcome parked on the row.
-        const { request } = await brokerFetch<DispatchRequestAddResponse>(
-          "/dispatch-request/add",
-          {
-            project_key: roadmapProjectKey(),
-            by: roadmapAuthor(),
-            wait_sec: 25,
-            ...roadmapProof(),
-          }
-        );
-        return {
-          content: [{ type: "text" as const, text: renderDispatchOutcome(request) }],
-        };
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return {
-          content: [{ type: "text" as const, text: `roadmap_dispatch failed: ${msg}` }],
-          isError: true,
-        };
-      }
-    }
+    case "roadmap_dispatch":
+      return handleRoadmapDispatch({
+        host: myHost,
+        peerId: myPeerId,
+        groupId: myGroupId,
+        instanceToken: myInstanceToken,
+        projectKey: roadmapProjectKey(),
+        fromPeer: roadmapAuthor(),
+      });
 
-    case "graph_draft_send": {
-      const payload = validateDraftPayload(args as { title?: unknown; prompt?: unknown });
-      if ("error" in payload) {
-        return { content: [{ type: "text" as const, text: payload.error }], isError: true };
-      }
-      try {
-        const { draft } = await brokerFetch<GraphDraftAddResponse>("/graph-draft/add", {
-          project_key: roadmapProjectKey(),
-          by: roadmapAuthor(),
-          title: payload.title,
-          prompt: payload.prompt,
-          ...roadmapProof(),
-        });
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Graph draft sent to the operator's Deck (id ${draft.id}). It stays pending — broker-persisted — until the operator opens it in the graph view, picks models and launches the inference. You can go back to your task.`,
-            },
-          ],
-        };
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return {
-          content: [{ type: "text" as const, text: `graph_draft_send failed: ${msg}` }],
-          isError: true,
-        };
-      }
-    }
+    case "graph_draft_send":
+      return handleGraphDraftSend(args, {
+        host: myHost,
+        peerId: myPeerId,
+        groupId: myGroupId,
+        instanceToken: myInstanceToken,
+        projectKey: roadmapProjectKey(),
+        fromPeer: roadmapAuthor(),
+      });
 
     default:
       throw new Error(`Unknown tool: ${name}`);
@@ -2220,6 +2257,20 @@ async function runDraftOneShot(userMessage: string): Promise<string> {
 // --- Startup ---
 
 async function main() {
+  // CLAUDE_PEERS_DESK_SESSION (= the Deck's SessionDef.id) is STABLE across
+  // this tile's whole lifetime -- persisted in the workspace, reused on
+  // restore and fork-resume, not a fresh id per launch. A file left behind
+  // by a PREVIOUS process for this same token (SIGKILL, power loss, a crash
+  // that skipped cleanup()) would otherwise carry a token whose peer has no
+  // status filter downstream (findPeerByInstanceToken): deleting it before
+  // this process /register's closes that window instead of relying on every
+  // exit path to have run cleanup().
+  try {
+    await deleteSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "");
+  } catch (e) {
+    logError("Failed to delete a stale session-identity file at boot", e);
+  }
+
   log("Local context detection...");
   myCwd = process.cwd();
   myGitRoot = await getGitRoot(myCwd);
@@ -2284,7 +2335,7 @@ async function main() {
   // would make whoami's role field vanish instead of showing null.
   myRole = reg.role ?? null;
   await writePeerIdCache(myCwd, myPeerId);
-  await writeSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "", myPeerId, myGroupId);
+  await writeSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "", myPeerId, myGroupId, myInstanceToken ?? "");
   // Deck back-channel: hand the real minted session id to the per-tile token file
   // so the Deck maps tile -> session id deterministically (no-op outside the Deck).
   await writeDeskSessionId();
@@ -2337,6 +2388,15 @@ async function main() {
     if (wsSocket && wsSocket.readyState !== WebSocket.CLOSED) {
       try { wsSocket.close(); } catch { /* ignore */ }
     }
+    // Local work that cannot fail to complete goes BEFORE the unbounded
+    // network call below: brokerFetch has no timeout (deliberately, see its
+    // own comment), so a reachable-but-silent broker would otherwise hang
+    // cleanup() forever and the deletion would never run.
+    try {
+      await deleteSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "");
+    } catch (e) {
+      logError("Failed to delete session-identity file on cleanup", e);
+    }
     if (myInstanceToken) {
       try {
         await brokerFetch("/disconnect", { instance_token: myInstanceToken });
@@ -2368,5 +2428,13 @@ if (import.meta.main) {
   });
 }
 
-export { TOOLS, TOOLS_ALLOWLIST, filterTools, handleGraphDraftPrepare, handleAskOperator };
-export type { AskOperatorIdentity };
+export {
+  TOOLS,
+  TOOLS_ALLOWLIST,
+  filterTools,
+  handleGraphDraftPrepare,
+  handleAskOperator,
+  handleRoadmapDispatch,
+  handleGraphDraftSend,
+};
+export type { CompanionIdentity };
