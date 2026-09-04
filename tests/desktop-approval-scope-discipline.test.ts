@@ -12,8 +12,19 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
 const TABLE = "pending_approvals";
 
-/** The composer whose presence proves a statement is scoped. */
+/** The composers whose presence anywhere in the window proves scoping. */
 const SCOPE_MARKERS = ["${where.sql}", "stamped.columns"];
+
+/**
+ * `approvalTileWhere` is WEAKER than `approvalWhere` (no session_ref), so its
+ * marker is accepted only on the ONE statement it exists for, anchored on a
+ * fragment unique to that site -- the same discipline UNSCOPED_BY_DESIGN uses
+ * for its own exemptions -- rather than treated as an equivalent-strength
+ * marker on any statement that happens to reuse the variable name
+ * `tileWhere`.
+ */
+const WEAK_SCOPE_MARKER = "${tileWhere.sql}";
+const WEAK_SCOPE_MARKER_SITE_ANCHOR = "mergeable = 1";
 
 /**
  * Files allowed to name the table at all. Anything else fails, which is what
@@ -192,6 +203,7 @@ function offendersIn(source: string, label: string): string[] {
       .map(codeOnly)
       .join("\n");
     if (SCOPE_MARKERS.some((m) => window.includes(m))) continue;
+    if (window.includes(WEAK_SCOPE_MARKER) && window.includes(WEAK_SCOPE_MARKER_SITE_ANCHOR)) continue;
     if (Object.keys(UNSCOPED_BY_DESIGN).some((frag) => window.includes(frag))) continue;
     found.push(`${label}:${i + 1}: ${line.trim().slice(0, 100)}`);
   }

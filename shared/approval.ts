@@ -20,10 +20,12 @@ import {
 import { stripControl } from "./text.ts";
 import type {
   Approval,
+  ApprovalAddResponse,
   ApprovalAnswerKind,
   ApprovalAuthKind,
   ApprovalAuthProof,
   ApprovalKind,
+  ApprovalMerge,
   ApprovalOrigin,
   ApprovalReplyRoute,
   ApprovalStatus,
@@ -32,10 +34,12 @@ import type {
 
 export type {
   Approval,
+  ApprovalAddResponse,
   ApprovalAnswerKind,
   ApprovalAuthKind,
   ApprovalAuthProof,
   ApprovalKind,
+  ApprovalMerge,
   ApprovalOrigin,
   ApprovalReplyRoute,
   ApprovalStatus,
@@ -240,6 +244,14 @@ export interface ApprovalDraft {
   options: string[];
   session_ref: string;
   tile_ref: string;
+  /**
+   * Required, not optional: every in-repo producer must state its species
+   * (chantier 3189b002+874e9053) so an omission is a TYPECHECK failure at
+   * its own call site, not a silent default chosen here. The WIRE body may
+   * still omit it (see validateApprovalDraft), for a hook build predating
+   * this field.
+   */
+  merge: ApprovalMerge;
 }
 
 export type ValidationResult<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -260,6 +272,7 @@ export function validateApprovalDraft(body: {
   options?: unknown;
   session_ref?: unknown;
   tile_ref?: unknown;
+  merge?: unknown;
 }): ValidationResult<ApprovalDraft> {
   const kind = str(body.kind) as ApprovalKind;
   if (!APPROVAL_KINDS.includes(kind)) return { ok: false, error: "kind must be permission|question|plan" };
@@ -282,8 +295,17 @@ export function validateApprovalDraft(body: {
 
   const session_ref = stripControl(str(body.session_ref)).trim().slice(0, APPROVAL_SESSION_REF_MAX);
   const tile_ref = stripControl(str(body.tile_ref)).trim().slice(0, APPROVAL_SESSION_REF_MAX);
+  // Absent or null normalises to 'tile' -- a build predating this field, which
+  // must keep behaving exactly as it does today. A PRESENT but unrecognised
+  // value (a typo, a stray "Never") is refused rather than silently folded
+  // into 'tile': that fold would let a guarded request merge with whatever
+  // else is pending on the tile, the exact defect this field exists to close.
+  if (body.merge !== undefined && body.merge !== null && body.merge !== "tile" && body.merge !== "never") {
+    return { ok: false, error: "merge must be tile|never" };
+  }
+  const merge: ApprovalMerge = body.merge === "never" ? "never" : "tile";
 
-  return { ok: true, value: { kind, title, question, options, session_ref, tile_ref } };
+  return { ok: true, value: { kind, title, question, options, session_ref, tile_ref, merge } };
 }
 
 // --- Sanitisers ---

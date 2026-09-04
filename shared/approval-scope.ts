@@ -107,7 +107,8 @@ function mintStamp(f: ScopeFields): OriginStamp {
 }
 
 /**
- * THE SINGLE PRODUCER of an identity clause on `pending_approvals`.
+ * THE SINGLE PRODUCER of the caller-scoped identity clause on
+ * `pending_approvals`.
  *
  * NO OPTIONAL PARAMETER, EVER (docs/DESIGN-APPROVAL-SCOPE.md D2, classed Fatal). An
  * optional dimension would let a caller omit it and receive a SHORTER clause
@@ -127,6 +128,22 @@ export function approvalWhere(scope: ApprovalScope): { sql: string; params: unkn
     params.push(f.session_ref);
   }
   return { sql: sql.join(" AND "), params };
+}
+
+/**
+ * THE SINGLE PRODUCER of the tile-merge identity clause: operator_id AND
+ * project_key only, deliberately WITHOUT session_ref. Called EXCLUSIVELY by
+ * the /approval/add de-duplication SELECT (card 874e9053): a hook's SESSION
+ * credential and the Deck fallback's OPERATOR credential must see the SAME
+ * candidate rows for the same tile regardless of which posts first, or the
+ * merge commit 4c2b2cf buys only one direction. Not an optional parameter on
+ * approvalWhere (D2, classed Fatal, just above) -- a second NAMED mint so its
+ * one caller stays greppable instead of a flag any caller could flip.
+ */
+export function approvalTileWhere(scope: ApprovalScope): { sql: string; params: unknown[] } {
+  const f = scopeFields.get(scope);
+  if (!f) throw new Error("approvalTileWhere: not a scope minted by this module");
+  return { sql: "operator_id = ? AND project_key = ?", params: [f.operator_id, f.project_key] };
 }
 
 /**

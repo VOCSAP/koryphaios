@@ -223,6 +223,29 @@ describe("draft validation (agent-supplied, hostile input #4)", () => {
     expect(r.ok).toBe(true);
     if (r.ok) expect(r.value.options).toEqual(["ok"]);
   });
+
+  test("merge defaults to 'tile' when absent or null, and 'never' is honoured", () => {
+    const absent = validateApprovalDraft({ ...base });
+    expect(absent.ok).toBe(true);
+    if (absent.ok) expect(absent.value.merge).toBe("tile");
+
+    const nullMerge = validateApprovalDraft({ ...base, merge: null });
+    expect(nullMerge.ok).toBe(true);
+    if (nullMerge.ok) expect(nullMerge.value.merge).toBe("tile");
+
+    const never = validateApprovalDraft({ ...base, merge: "never" });
+    expect(never.ok).toBe(true);
+    if (never.ok) expect(never.value.merge).toBe("never");
+  });
+
+  test("a PRESENT but unrecognised merge value is refused, never silently folded into 'tile'", () => {
+    // A typo or a stray casing must not fold into 'tile': that fold would
+    // let a guarded request merge with whatever else is pending on the tile,
+    // the exact defect this field exists to close.
+    for (const bad of ["nevr", "Never", "NEVER", 42, ["never"]]) {
+      expect(validateApprovalDraft({ ...base, merge: bad as never }).ok).toBe(false);
+    }
+  });
 });
 
 describe("sanitizeAnswerForPty (hostile input, PLAN §6.3)", () => {

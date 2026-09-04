@@ -64,6 +64,7 @@ import {
 import {
   createApprovalAuth,
   approvalWhere,
+  approvalTileWhere,
   stampInsert,
   assertStampSessionRef,
   isAuthError,
@@ -927,6 +928,17 @@ db.run(
 // now applied by the Deck, which needs to know WHICH tile to type into.
 try {
   db.run("ALTER TABLE pending_approvals ADD COLUMN tile_ref TEXT NOT NULL DEFAULT ''");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
+
+// Migration (chantier 3189b002+874e9053): whether a row PARTICIPATES in
+// tile-scoped merging at all. A row from before this migration reads back 1,
+// which is today's behaviour -- every row merged, because only notifications
+// existed.
+try {
+  db.run("ALTER TABLE pending_approvals ADD COLUMN mergeable INTEGER NOT NULL DEFAULT 1");
 } catch (e) {
   const msg = e instanceof Error ? e.message : String(e);
   if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
@@ -4501,28 +4513,31 @@ function handleApprovalAdd(
   if (pinned) return pinned;
 
   // De-duplication: a tile can only be waiting on ONE thing at a time, so a
-  // second pending approval for the same tile is always a double-raise -- the
-  // hook's `agent_needs_input` and the Deck's attention detector both fire on the
-  // same screen. Returning the existing one keeps a single notification per
-  // real event instead of ringing the operator's phone twice.
-  // Both reads below go through `approvalWhere`, so they gained the project
-  // dimension without anyone deciding to add it here -- which is the whole
-  // return on the shape. The de-duplication one MATTERS: scoped on operator_id
-  // alone, two Deck windows using the same tile_ref would have collapsed two
-  // different projects' questions into one, and the second window would have
-  // received the FIRST window's approval as its own.
+  // second NOTIFICATION for the same tile is a double-raise, merged into one
+  // (commit 4c2b2cf). A GUARDED REQUEST (`merge: 'never'`) neither searches
+  // for a row to reuse nor is ever found by one: its verdict is re-read by a
+  // caller gating an action (chantier 3189b002+874e9053).
+  // The pending-count check keeps the session-pinned `approvalWhere` (a flood
+  // cap is about THIS credential). The dedup SELECT uses `approvalTileWhere`
+  // instead, deliberately wider (no session_ref), so the hook's session
+  // credential and the Deck fallback's operator credential see the SAME
+  // candidate rows regardless of arrival order (874e9053's asymmetry).
   const where = approvalWhere(scope);
-  if (draft.value.tile_ref) {
+  if (draft.value.tile_ref && draft.value.merge === "tile") {
+    const tileWhere = approvalTileWhere(scope);
     const existing = db
       .query(
-        `SELECT * FROM pending_approvals
-          WHERE ${where.sql} AND tile_ref = ? AND status = 'pending'
+        `SELECT id, status FROM pending_approvals
+          WHERE ${tileWhere.sql} AND tile_ref = ? AND mergeable = 1 AND status = 'pending'
           ORDER BY created_at DESC LIMIT 1`
       )
-      .get(...(where.params as never[]), draft.value.tile_ref) as ApprovalRow | null;
+      .get(...(tileWhere.params as never[]), draft.value.tile_ref) as { id: string; status: string } | null;
     if (existing) {
       log.info(`approval: duplicate raise for tile ${draft.value.tile_ref} — reusing ${existing.id}`);
-      return { approval: rowToApproval(existing) };
+      // Only id + status: this branch can now match a row from a DIFFERENT
+      // credential kind, so the caller must not read another producer's
+      // title/question off it.
+      return { approval: { id: existing.id, status: existing.status as ApprovalStatus } };
     }
   }
 
@@ -4562,9 +4577,9 @@ function handleApprovalAdd(
   db.run(
     `INSERT INTO pending_approvals
        (id, ${stamped.columns.join(", ")}, origin_host, origin_user, group_id, from_peer,
-        tile_ref, reply_route, reply_token, reply_group,
+        tile_ref, mergeable, reply_route, reply_token, reply_group,
         kind, title, question, options_json, status, created_at, notif_expires_at)
-     VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+     VALUES (?, ${stamped.columns.map(() => "?").join(", ")}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
     [
       id,
       ...stamped.values,
@@ -4573,6 +4588,7 @@ function handleApprovalAdd(
       pick("group_id").slice(0, 64),
       pick("from_peer").slice(0, 128),
       draft.value.tile_ref,
+      draft.value.merge === "tile" ? 1 : 0,
       reply.route,
       reply.token,
       reply.group,

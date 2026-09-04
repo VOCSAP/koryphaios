@@ -2006,6 +2006,9 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
             question: question.slice(0, APPROVAL_QUESTION_MAX),
             options: Array.isArray(rawOptions) ? rawOptions.slice(0, 10).map(String) : [],
             session_ref: cred.sessionRef,
+            // A GUARDED REQUEST: this tool re-reads its own verdict, so it must
+            // never be satisfied by someone else's row (chantier 3189b002).
+            merge: "never",
             // Belt and braces: the tool returns the answer directly, but if the
             // agent stops polling its ticket the broker still hands it over as
             // a peer message rather than stranding it.

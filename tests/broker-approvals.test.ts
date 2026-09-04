@@ -860,3 +860,149 @@ describe("project scoping reaches every handler (card 1def56da)", () => {
     expect(again.id).toBe(a.id);
   });
 });
+
+describe("merge species (chantier 3189b002+874e9053)", () => {
+  async function mintSession(
+    b: TestBroker,
+    op: { cred: ApprovalCredential; id: string },
+    sessionRef: string
+  ): Promise<{ cred: ApprovalCredential; token_id: string }> {
+    const cred = generateCredential();
+    const res = await signedPost<{ token_id: string }>(
+      b,
+      "/approval/token-mint",
+      { session_public_key: cred.publicKey, session_ref: sessionRef },
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(res.status).toBe(200);
+    return { cred, token_id: res.body.token_id };
+  }
+
+  test("the same event merges in BOTH arrival orders (closes 874e9053's asymmetry)", async () => {
+    const b = await boot();
+    const op = newOperator();
+
+    // hook-then-deck: already merged pre-fix (874e9053's own measurement).
+    const tileA = "tile-order-hook-first";
+    const sessionA = await mintSession(b, op, tileA);
+    const hookFirst = await signedPost<{ approval: { id: string } }>(
+      b,
+      "/approval/add",
+      { kind: "question", title: "hook title", question: "hook question", session_ref: tileA, tile_ref: tileA },
+      { cred: sessionA.cred, operator_id: op.id, kind: "session", token_id: sessionA.token_id }
+    );
+    expect(hookFirst.status).toBe(200);
+    const deckSecond = await addApproval(b, op, { title: "deck title", question: "deck question", tile_ref: tileA });
+    expect(deckSecond.id).toBe(hookFirst.body.approval.id);
+
+    // deck-then-hook: the order 874e9053 measured as NOT merging pre-fix,
+    // because the hook's session-pinned SELECT never matched a row the Deck
+    // (an operator credential) wrote with session_ref=''.
+    const tileB = "tile-order-deck-first";
+    const sessionB = await mintSession(b, op, tileB);
+    const deckFirst = await addApproval(b, op, { title: "deck title", question: "deck question", tile_ref: tileB });
+    const hookSecond = await signedPost<{ approval: { id: string } }>(
+      b,
+      "/approval/add",
+      { kind: "question", title: "hook title", question: "hook question", session_ref: tileB, tile_ref: tileB },
+      { cred: sessionB.cred, operator_id: op.id, kind: "session", token_id: sessionB.token_id }
+    );
+    expect(hookSecond.status).toBe(200);
+    expect(hookSecond.body.approval.id).toBe(deckFirst.id);
+    // Piece 4's guarantee on the real wire, not just the declared type: the
+    // merged branch returns ONLY id + status, never another producer's
+    // title/question.
+    expect(Object.keys(hookSecond.body.approval)).toEqual(["id", "status"]);
+  });
+
+  test("a session credential merged onto an operator-authored row cannot wait on it (MAJOR 3, known limitation)", async () => {
+    // Only a FIRE-AND-FORGET producer may raise merge:'tile' with a session
+    // credential: the hook never reads its response (no /approval/wait call
+    // anywhere in desktop/hooks/approval-hook.ts) and ask_operator raises
+    // merge:'never' without a tile_ref, so it never merges. A session
+    // producer that DID try to wait on a row it merged onto would 404,
+    // because /approval/wait stays pinned to its own session_ref (piece 4
+    // must not widen it, or the id-only narrowing it just closed reopens).
+    const b = await boot();
+    const op = newOperator();
+    const tileRef = "tile-major3";
+
+    const deckFirst = await addApproval(b, op, { tile_ref: tileRef });
+    const session = await mintSession(b, op, tileRef);
+    const sessionSecond = await signedPost<{ approval: { id: string } }>(
+      b,
+      "/approval/add",
+      { kind: "question", title: "hook title", question: "hook question", session_ref: tileRef, tile_ref: tileRef },
+      { cred: session.cred, operator_id: op.id, kind: "session", token_id: session.token_id }
+    );
+    expect(sessionSecond.status).toBe(200);
+    // Confirms the merge actually happened (piece 3's fix): without it, this
+    // would be a fresh row and the wait below would trivially succeed.
+    expect(sessionSecond.body.approval.id).toBe(deckFirst.id);
+
+    const waited = await signedPost<{ error: string }>(
+      b,
+      "/approval/wait",
+      { id: deckFirst.id, timeout_sec: 1 },
+      { cred: session.cred, operator_id: op.id, kind: "session", token_id: session.token_id }
+    );
+    expect(
+      waited.status,
+      "a session credential that merged onto an operator-authored row must 404 on /approval/wait -- " +
+        "only a fire-and-forget producer (the hook) may raise merge:'tile' with a session credential"
+    ).toBe(404);
+  });
+
+  test("a notification and a guarded request on the SAME tile get separate rows", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const tileRef = "tile-species";
+
+    // A GUARDED request first (merge:'never'), as 02e1c07c will raise one
+    // carrying a real tile_ref for Courrier attribution.
+    const guarded = await addApproval(b, op, {
+      title: "Guarded question",
+      question: "may I proceed?",
+      tile_ref: tileRef,
+      merge: "never",
+    });
+    // A NOTIFICATION second, same tile, default merge ('tile').
+    const notif = await addApproval(b, op, {
+      title: "Screen notice",
+      question: "session X waits",
+      tile_ref: tileRef,
+    });
+
+    expect(notif.id).not.toBe(guarded.id);
+    const list = await signedPost<{ approvals: Approval[] }>(
+      b,
+      "/approval/list",
+      approvalListBody(DEFAULT_PROJECT_KEY),
+      { cred: op.cred, operator_id: op.id }
+    );
+    expect(list.body.approvals.filter((a) => a.origin.tile_ref === tileRef)).toHaveLength(2);
+  });
+
+  test("a row predating this migration (mergeable defaults to 1) still merges", async () => {
+    const b = await boot();
+    const op = newOperator();
+    const tileRef = "tile-legacy";
+
+    // Simulate a row inserted before `mergeable` existed: every NOT-NULL
+    // column this INSERT needs EXCEPT mergeable, relying on the column's own
+    // DEFAULT 1 rather than setting it explicitly.
+    const db = new Database(b.dbPath);
+    const legacyId = "legacy-row-id";
+    const now = new Date().toISOString();
+    db.run(
+      `INSERT INTO pending_approvals
+         (id, operator_id, project_key, tile_ref, kind, title, question, status, created_at, notif_expires_at)
+       VALUES (?, ?, ?, ?, 'question', 'legacy title', 'legacy question', 'pending', ?, ?)`,
+      [legacyId, op.id, DEFAULT_PROJECT_KEY, tileRef, now, now]
+    );
+    db.close();
+
+    const second = await addApproval(b, op, { tile_ref: tileRef });
+    expect(second.id).toBe(legacyId);
+  });
+});

@@ -134,7 +134,8 @@ test("addApproval sends project_key TOP-LEVEL on its /approval/add request", asy
     // Using distinct values here proves the assertion below reads the top-level
     // field the broker actually enforces, not this decoy.
     projectKey: "origin-decoy",
-    host: "host-y"
+    host: "host-y",
+    merge: "tile"
   });
   expect(calls.length).toBe(1);
   expect(calls[0]!.url.endsWith("/approval/add")).toBe(true);

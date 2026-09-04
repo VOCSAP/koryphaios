@@ -22,6 +22,7 @@ export {
   validateApprovalDraft,
   verifyAuthProof,
   type Approval,
+  type ApprovalAddResponse,
   type ApprovalAnswerKind,
   type ApprovalAuthKind,
   type ApprovalAuthProof,

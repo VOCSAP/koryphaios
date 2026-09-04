@@ -15,6 +15,7 @@ import { validateApprovalDraft, generateCredential, deriveOperatorId, buildAuthP
 import {
   createApprovalAuth,
   approvalWhere as sliceApprovalWhere,
+  approvalTileWhere as sliceApprovalTileWhere,
   stampInsert as sliceStampInsert,
   isAuthError as sliceIsAuthError,
 } from "../shared/approval-scope.ts";
@@ -96,7 +97,7 @@ const registerHandleApprovalAdd = await evaluate<{
   // and this suite fails LOUDLY -- which is exactly how the refactor was
   // caught, and the property the file's header promises.
   `export function register(env) {
-  const { approvalAuth, approvalWhere, stampInsert, assertStampSessionRef, isAuthError,
+  const { approvalAuth, approvalWhere, approvalTileWhere, stampInsert, assertStampSessionRef, isAuthError,
           validateApprovalDraft, db, rowToApproval, APPROVAL_MAX_PENDING,
           resolveReplyRoute, APPROVAL_NOTIF_TTL_HOURS, randomUUID, notifyRegistry, log } = env
 ${HANDLE_APPROVAL_ADD}
@@ -159,6 +160,7 @@ function env(overrides: { existingRow?: unknown } = {}) {
       // the WeakMap, which is the guarantee itself.
       approvalAuth: sliceAuth(),
       approvalWhere: sliceApprovalWhere,
+      approvalTileWhere: sliceApprovalTileWhere,
       stampInsert: sliceStampInsert,
       assertStampSessionRef: () => null,
       isAuthError: sliceIsAuthError,
@@ -213,11 +215,14 @@ describe("handleApprovalAdd (broker.ts, sliced verbatim) -- nominal-path logging
   });
 
   test("a duplicate raise logs ONLY its own message, never the nominal 'approval: new' one", async () => {
-    const { env: e, calls } = env({ existingRow: { id: "existing-id" } });
+    const { env: e, calls } = env({ existingRow: { id: "existing-id", status: "pending" } });
     const { handleApprovalAdd } = registerHandleApprovalAdd(e);
     const result = handleApprovalAdd(draftBody()) as { approval: unknown };
 
-    expect(result.approval).toEqual({ id: "existing-id" });
+    // Only id + status: the dedup branch may now match a row from a
+    // DIFFERENT credential kind (874e9053), so it must not read back
+    // anything a caller shouldn't see off someone else's row.
+    expect(result.approval).toEqual({ id: "existing-id", status: "pending" });
     expect(calls.length).toBe(1);
     expect(calls[0]!.message).toContain("duplicate raise");
     expect(calls.some((c) => c.message.startsWith("approval: new "))).toBe(false);

@@ -1142,6 +1142,15 @@ export type ApprovalVia = "deck" | "telegram" | "discord" | "ntfy";
  */
 export type ApprovalReplyRoute = "channel" | "pty";
 
+/**
+ * Whether a row may merge with another pending row on the same tile.
+ * `tile`  — a NOTIFICATION: the verdict applies to the SCREEN, so a different
+ *   text for the same screen still merges (commit 4c2b2cf's guarantee).
+ * `never` — a GUARDED REQUEST: the verdict is re-read by a caller gating an
+ *   action, so it may never be satisfied by someone else's row.
+ */
+export type ApprovalMerge = "tile" | "never";
+
 /** Which credential class signed a request (see shared/approval.ts header). */
 export type ApprovalAuthKind = "operator" | "session";
 
@@ -1216,10 +1225,18 @@ export interface ApprovalAddRequest {
    */
   reply_peer_id?: string;
   ttl_hours?: number;
+  /** Absent, null or unrecognised normalises to 'tile' broker-side. */
+  merge?: ApprovalMerge;
 }
 
 export interface ApprovalAddResponse {
-  approval: Approval;
+  /**
+   * The de-duplication branch returns only the fields a producer actually
+   * reads (every current one reads just `id`), not the full row: widening
+   * the dedup match to a differently-scoped row (card 874e9053) must not
+   * also widen what a caller can read off SOMEONE ELSE's approval.
+   */
+  approval: Approval | Pick<Approval, "id" | "status">;
 }
 
 export interface ApprovalWaitRequest {

@@ -1035,7 +1035,10 @@ service.on(
           // a message (C-9) and nothing is typed. Non-Claude CLIs and
           // not-yet-registered tiles fall back to keystrokes.
           replyPeerId: session.peerId ?? undefined,
-          groupId: activeScope.groupId
+          groupId: activeScope.groupId,
+          // A NOTIFICATION: the verdict applies to the screen, so it may
+          // merge with the hook's own raise for the same tile (4c2b2cf).
+          merge: 'tile'
         })
           .then((a) => openApprovals.set(id, a.id))
           .catch((e) => reportError('approvals', 'could not raise an approval', e))

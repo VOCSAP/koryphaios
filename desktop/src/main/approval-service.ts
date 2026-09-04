@@ -6,7 +6,7 @@
 // broker-side on claim and again here, and the submitting Enter is added by
 // this code, never by the received text.
 
-import { buildAuthProof, sanitizeAnswerForPty, type Approval } from './approval-auth'
+import { buildAuthProof, sanitizeAnswerForPty, type Approval, type ApprovalAddResponse } from './approval-auth'
 import type { OperatorIdentity } from './operator-identity'
 import type { BrokerEndpoint } from './broker-client'
 
@@ -88,9 +88,16 @@ export async function addApproval(
     /** Peer to hand the answer to. Set => 'channel' route (C-9). */
     replyPeerId?: string | null
     groupId?: string
+    /**
+     * Required, not optional: every caller must state whether this row may
+     * merge with another pending row on the same tile (chantier
+     * 3189b002+874e9053), so an omission fails at compile time here rather
+     * than defaulting silently.
+     */
+    merge: 'tile' | 'never'
   }
-): Promise<Approval> {
-  const res = await signedPost<{ approval: Approval }>(deps, '/approval/add', {
+): Promise<ApprovalAddResponse['approval']> {
+  const res = await signedPost<ApprovalAddResponse>(deps, '/approval/add', {
     kind: args.kind,
     title: args.title,
     question: args.question,
@@ -101,6 +108,7 @@ export async function addApproval(
     project_key: deps.projectKey,
     session_ref: args.sessionRef,
     tile_ref: args.tileRef ?? args.sessionRef,
+    merge: args.merge,
     // A resolved peer means the broker can deliver the answer as a message and
     // nothing has to be typed. Without one (peer not resolved yet, or a CLI
     // with no push channel) the broker downgrades to 'pty' on its own.
