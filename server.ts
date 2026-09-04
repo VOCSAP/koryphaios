@@ -52,7 +52,7 @@ import {
   isOperatorSender,
   renderInbound,
 } from "./shared/inbound-framing.ts";
-import { writePeerIdCache, writeDeskSessionId } from "./shared/peer-cache.ts";
+import { writePeerIdCache, writeDeskSessionId, writeSessionIdentityFile } from "./shared/peer-cache.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
 import {
   DECK_PEER_ID,
@@ -1255,6 +1255,177 @@ function formatInboundLine(fromPeerId: string, text: string, sentAt: string, rec
   return `From ${label} (${sentAt}):\n${renderInbound(fromPeerId, text, recipientRole)}`;
 }
 
+/** graph_draft_prepare: pure local inference, no peer identity, no broker call. */
+async function handleGraphDraftPrepare(args: unknown) {
+  const a = args as { question?: string; hints?: string };
+  const question = (a.question ?? "").trim();
+  if (!question) {
+    return {
+      content: [{ type: "text" as const, text: "question is required" }],
+      isError: true,
+    };
+  }
+  try {
+    const output = await runDraftOneShot(composeDraftUserMessage(question, a.hints));
+    const { title, prompt } = parseDraftOutput(output, question.slice(0, 80));
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text:
+            `Draft prepared — REVIEW IT (edit or re-run with better hints if off), then submit with graph_draft_send:\n\n` +
+            `title: ${title}\n\n${prompt}`,
+        },
+      ],
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      content: [{ type: "text" as const, text: `graph_draft_prepare failed: ${msg}` }],
+      isError: true,
+    };
+  }
+}
+
+/** Caller-resolved identity: handleAskOperator reads no module variable, so a
+ * companion process (server-deck.ts) can supply its own, sourced from the
+ * per-tile identity file instead of server.ts's own (unset in that process)
+ * registration state. */
+interface AskOperatorIdentity {
+  host: string;
+  peerId: string | null;
+  groupId: string;
+  projectKey: string;
+  fromPeer: string;
+}
+
+/** ask_operator / ask_operator_wait: signs with the session's restricted credential, no peer identity required. */
+async function handleAskOperator(name: string, args: unknown, identity: AskOperatorIdentity) {
+  const cred = loadSessionApprovalCredential();
+  if (!cred) {
+    return {
+      content: [
+        {
+          type: "text" as const,
+          // Card 469f3176: the credential is armed unconditionally at Deck
+          // startup and inherited by every session spawned AFTER that (the
+          // env var travels at spawn time only). This refusal therefore no
+          // longer means "no remote channel configured" -- it means THIS
+          // session predates the arming, so it never inherited
+          // CLAUDE_PEERS_APPROVAL_FILE. Naming the real cause here, not a
+          // stale one, since a wrong-but-plausible reason is worse than none.
+          text: "This session started before remote approvals were armed, so it never inherited the credential. Restart the session to pick it up, or ask the operator directly, on screen.",
+        },
+      ],
+      isError: true,
+    };
+  }
+
+  /** Sign + POST an approval route with this session's restricted credential. */
+  const signedPost = async <T>(path: string, payload: Record<string, unknown>): Promise<T> => {
+    const body = { ...payload, public_key: cred.publicKey };
+    const auth = buildAuthProof(cred.privateKey, body, {
+      kind: "session",
+      operator_id: cred.operatorId,
+      token_id: cred.tokenId,
+    });
+    return brokerFetch<T>(path, { ...body, auth });
+  };
+
+  try {
+    let approvalId: string;
+    if (name === "ask_operator") {
+      const title = String((args as { title?: unknown }).title ?? "").trim();
+      const question = String((args as { question?: unknown }).question ?? "").trim();
+      if (!title || !question) {
+        return {
+          content: [{ type: "text" as const, text: "title and question are required" }],
+          isError: true,
+        };
+      }
+      const rawOptions = (args as { options?: unknown }).options;
+      const created = await signedPost<ApprovalAddResponse>("/approval/add", {
+        kind: "question",
+        title: title.slice(0, APPROVAL_TITLE_MAX),
+        question: question.slice(0, APPROVAL_QUESTION_MAX),
+        options: Array.isArray(rawOptions) ? rawOptions.slice(0, 10).map(String) : [],
+        session_ref: cred.sessionRef,
+        // A GUARDED REQUEST: this tool re-reads its own verdict, so it must
+        // never be satisfied by someone else's row (chantier 3189b002).
+        merge: "never",
+        // Belt and braces: the tool returns the answer directly, but if the
+        // agent stops polling its ticket the broker still hands it over as
+        // a peer message rather than stranding it.
+        // Never "channel" with a null peer: a missing identity is decided
+        // HERE, explicitly, rather than leaving the broker's own (silent,
+        // untraced) fallback branch be the only place that downgrades it.
+        reply_route: identity.peerId ? "channel" : "pty",
+        reply_peer_id: identity.peerId ?? undefined,
+        origin: {
+          host: identity.host,
+          os_user_hash: cred.osUserHash,
+          project_key: identity.projectKey,
+          from_peer: identity.fromPeer,
+          group_id: identity.groupId,
+        },
+      });
+      approvalId = created.approval.id;
+    } else {
+      approvalId = String((args as { ticket?: unknown }).ticket ?? "").trim();
+      if (!approvalId) {
+        return { content: [{ type: "text" as const, text: "ticket is required" }], isError: true };
+      }
+    }
+
+    // Bounded leg: never rely on the MCP client's own tool timeout. When it
+    // lapses we hand back a ticket, so waiting is resumable indefinitely
+    // without any single call hanging.
+    const res = await signedPost<ApprovalWaitResponse>("/approval/wait", {
+      id: approvalId,
+      timeout_sec: 90,
+    });
+    const answered = res.approval?.status === "answered" ? res.approval : null;
+    if (answered) {
+      const verdict =
+        answered.answer_kind === "text"
+          ? (answered.answer_text ?? "")
+          : answered.answer_kind === "allow"
+            ? "yes / approved"
+            : "no / rejected";
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `The operator answered (via ${answered.answered_via}): ${verdict}`,
+          },
+        ],
+      };
+    }
+    if (res.approval && res.approval.status !== "pending") {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: "That question is no longer awaiting an answer (it expired or was withdrawn). Ask the operator on screen.",
+          },
+        ],
+        isError: true,
+      };
+    }
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `No answer yet. The operator has been notified. Call ask_operator_wait with ticket "${approvalId}" to keep waiting — do not assume an answer.`,
+        },
+      ],
+    };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { content: [{ type: "text" as const, text: `${name} failed: ${msg}` }], isError: true };
+  }
+}
+
 mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
   const { name, arguments: args } = req.params;
 
@@ -1646,6 +1817,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         // which would make whoami's role field vanish instead of showing null.
         myRole = reg.role ?? null;
         await writePeerIdCache(myCwd, myPeerId);
+        await writeSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "", myPeerId, myGroupId);
         await writeDeskSessionId();
         connectWs();
         return {
@@ -1695,6 +1867,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           };
         }
         myPeerId = result.peer_id;
+        // set-id renames the peer IN PLACE broker-side, so this name becomes
+        // free for a future registration to claim: third mutator of myPeerId
+        // alongside boot and switch_group, same "both or neither" rule.
+        await writePeerIdCache(myCwd, myPeerId);
+        await writeSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "", myPeerId, myGroupId);
         return {
           content: [{ type: "text" as const, text: JSON.stringify(result) }],
         };
@@ -1924,160 +2101,18 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
       }
     }
 
-    case "graph_draft_prepare": {
-      const a = args as { question?: string; hints?: string };
-      const question = (a.question ?? "").trim();
-      if (!question) {
-        return {
-          content: [{ type: "text" as const, text: "question is required" }],
-          isError: true,
-        };
-      }
-      try {
-        const output = await runDraftOneShot(composeDraftUserMessage(question, a.hints));
-        const { title, prompt } = parseDraftOutput(output, question.slice(0, 80));
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text:
-                `Draft prepared — REVIEW IT (edit or re-run with better hints if off), then submit with graph_draft_send:\n\n` +
-                `title: ${title}\n\n${prompt}`,
-            },
-          ],
-        };
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return {
-          content: [{ type: "text" as const, text: `graph_draft_prepare failed: ${msg}` }],
-          isError: true,
-        };
-      }
-    }
+    case "graph_draft_prepare":
+      return handleGraphDraftPrepare(args);
 
     case "ask_operator":
-    case "ask_operator_wait": {
-      const cred = loadSessionApprovalCredential();
-      if (!cred) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              // Card 469f3176: the credential is armed unconditionally at Deck
-              // startup and inherited by every session spawned AFTER that (the
-              // env var travels at spawn time only). This refusal therefore no
-              // longer means "no remote channel configured" -- it means THIS
-              // session predates the arming, so it never inherited
-              // CLAUDE_PEERS_APPROVAL_FILE. Naming the real cause here, not a
-              // stale one, since a wrong-but-plausible reason is worse than none.
-              text: "This session started before remote approvals were armed, so it never inherited the credential. Restart the session to pick it up, or ask the operator directly, on screen.",
-            },
-          ],
-          isError: true,
-        };
-      }
-
-      /** Sign + POST an approval route with this session's restricted credential. */
-      const signedPost = async <T>(path: string, payload: Record<string, unknown>): Promise<T> => {
-        const body = { ...payload, public_key: cred.publicKey };
-        const auth = buildAuthProof(cred.privateKey, body, {
-          kind: "session",
-          operator_id: cred.operatorId,
-          token_id: cred.tokenId,
-        });
-        return brokerFetch<T>(path, { ...body, auth });
-      };
-
-      try {
-        let approvalId: string;
-        if (name === "ask_operator") {
-          const title = String((args as { title?: unknown }).title ?? "").trim();
-          const question = String((args as { question?: unknown }).question ?? "").trim();
-          if (!title || !question) {
-            return {
-              content: [{ type: "text" as const, text: "title and question are required" }],
-              isError: true,
-            };
-          }
-          const rawOptions = (args as { options?: unknown }).options;
-          const created = await signedPost<ApprovalAddResponse>("/approval/add", {
-            kind: "question",
-            title: title.slice(0, APPROVAL_TITLE_MAX),
-            question: question.slice(0, APPROVAL_QUESTION_MAX),
-            options: Array.isArray(rawOptions) ? rawOptions.slice(0, 10).map(String) : [],
-            session_ref: cred.sessionRef,
-            // A GUARDED REQUEST: this tool re-reads its own verdict, so it must
-            // never be satisfied by someone else's row (chantier 3189b002).
-            merge: "never",
-            // Belt and braces: the tool returns the answer directly, but if the
-            // agent stops polling its ticket the broker still hands it over as
-            // a peer message rather than stranding it.
-            reply_route: "channel",
-            reply_peer_id: myPeerId ?? undefined,
-            origin: {
-              host: myHost,
-              os_user_hash: cred.osUserHash,
-              project_key: roadmapProjectKey(),
-              from_peer: roadmapAuthor(),
-              group_id: myGroupId,
-            },
-          });
-          approvalId = created.approval.id;
-        } else {
-          approvalId = String((args as { ticket?: unknown }).ticket ?? "").trim();
-          if (!approvalId) {
-            return { content: [{ type: "text" as const, text: "ticket is required" }], isError: true };
-          }
-        }
-
-        // Bounded leg: never rely on the MCP client's own tool timeout. When it
-        // lapses we hand back a ticket, so waiting is resumable indefinitely
-        // without any single call hanging.
-        const res = await signedPost<ApprovalWaitResponse>("/approval/wait", {
-          id: approvalId,
-          timeout_sec: 90,
-        });
-        const answered = res.approval?.status === "answered" ? res.approval : null;
-        if (answered) {
-          const verdict =
-            answered.answer_kind === "text"
-              ? (answered.answer_text ?? "")
-              : answered.answer_kind === "allow"
-                ? "yes / approved"
-                : "no / rejected";
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `The operator answered (via ${answered.answered_via}): ${verdict}`,
-              },
-            ],
-          };
-        }
-        if (res.approval && res.approval.status !== "pending") {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: "That question is no longer awaiting an answer (it expired or was withdrawn). Ask the operator on screen.",
-              },
-            ],
-            isError: true,
-          };
-        }
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `No answer yet. The operator has been notified. Call ask_operator_wait with ticket "${approvalId}" to keep waiting — do not assume an answer.`,
-            },
-          ],
-        };
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        return { content: [{ type: "text" as const, text: `${name} failed: ${msg}` }], isError: true };
-      }
-    }
+    case "ask_operator_wait":
+      return handleAskOperator(name, args, {
+        host: myHost,
+        peerId: myPeerId,
+        groupId: myGroupId,
+        projectKey: roadmapProjectKey(),
+        fromPeer: roadmapAuthor(),
+      });
 
     case "roadmap_dispatch": {
       try {
@@ -2249,6 +2284,7 @@ async function main() {
   // would make whoami's role field vanish instead of showing null.
   myRole = reg.role ?? null;
   await writePeerIdCache(myCwd, myPeerId);
+  await writeSessionIdentityFile(process.env.CLAUDE_PEERS_DESK_SESSION ?? "", myPeerId, myGroupId);
   // Deck back-channel: hand the real minted session id to the per-tile token file
   // so the Deck maps tile -> session id deterministically (no-op outside the Deck).
   await writeDeskSessionId();
@@ -2325,7 +2361,12 @@ async function main() {
   process.stdin.on("close", () => { void stdinShutdown("close"); });
 }
 
-main().catch((e) => {
-  log(`Fatal: ${e instanceof Error ? e.message : String(e)}`);
-  process.exit(1);
-});
+if (import.meta.main) {
+  main().catch((e) => {
+    log(`Fatal: ${e instanceof Error ? e.message : String(e)}`);
+    process.exit(1);
+  });
+}
+
+export { TOOLS, TOOLS_ALLOWLIST, filterTools, handleGraphDraftPrepare, handleAskOperator };
+export type { AskOperatorIdentity };

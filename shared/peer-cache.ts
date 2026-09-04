@@ -1,4 +1,4 @@
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -8,7 +8,11 @@ import { join } from "node:path";
 // pid-scoped so concurrent writers do not clobber each other's temp.
 async function writeCacheAtomic(target: string, data: string): Promise<void> {
   const tmp = `${target}.${process.pid}.tmp`;
-  await writeFile(tmp, data, "utf-8");
+  // 0o600: computeGroupId (shared/config.ts) is sha256(secret).slice(0,32),
+  // the first half of group_secret_hash -- a world-readable identity file
+  // would hand any other local user an offline verification oracle on the
+  // group secret.
+  await writeFile(tmp, data, { encoding: "utf-8", mode: 0o600 });
   await rename(tmp, target);
 }
 
@@ -102,6 +106,69 @@ export async function writeDeskSessionId(
     env.CLAUDE_CODE_SESSION_ID ?? "",
     home,
   );
+}
+
+/**
+ * Filename of the per-tile identity file (Card c9269fef lot L2-bis): carries
+ * only peer_id and group_id, never the instance_token (a secret, deferred to
+ * the token-transport lot). Keyed by the same desk-session token as
+ * deskSessionFileName, since that is the only value both the main server.ts
+ * process and a companion MCP process for the same tile already share.
+ */
+export function sessionIdentityFileName(token: string): string {
+  return `session-identity-${sanitizeSessionId(token)}.json`;
+}
+
+/**
+ * Write the per-tile identity file for an already-resolved (peerId, groupId)
+ * pair. No-op when the token, peerId or groupId is empty -- the reader
+ * rejects a partial identity too, so the writer must not produce one.
+ * Best-effort: failures are silent so callers never break their own
+ * /register flow. Called from EVERY site that can change myPeerId (boot,
+ * switch_group, set_id) alongside writePeerIdCache, so the two never drift
+ * apart -- both or neither.
+ */
+export async function writeSessionIdentityFile(
+  token: string,
+  peerId: string,
+  groupId: string,
+  home: string = homedir(),
+): Promise<void> {
+  const safeToken = sanitizeSessionId(token);
+  if (!safeToken || !peerId || !groupId) return;
+  try {
+    const cacheDir = join(home, ".claude", "peers");
+    await mkdir(cacheDir, { recursive: true });
+    await writeCacheAtomic(
+      join(cacheDir, sessionIdentityFileName(safeToken)),
+      JSON.stringify({ peer_id: peerId, group_id: groupId })
+    );
+  } catch {
+    // best-effort: a companion MCP process falls back to reply_route "pty"
+  }
+}
+
+/**
+ * Read the per-tile identity file written by writeSessionIdentityFile.
+ * Returns null on any absence, parse failure or malformed shape -- the
+ * caller's job is to fail closed to reply_route "pty" on null, never to
+ * guess a partial identity.
+ */
+export async function readSessionIdentityFile(
+  token: string,
+  home: string = homedir(),
+): Promise<{ peerId: string; groupId: string } | null> {
+  const safeToken = sanitizeSessionId(token);
+  if (!safeToken) return null;
+  try {
+    const raw = await readFile(join(home, ".claude", "peers", sessionIdentityFileName(safeToken)), "utf-8");
+    const parsed = JSON.parse(raw) as { peer_id?: unknown; group_id?: unknown };
+    if (typeof parsed.peer_id !== "string" || !parsed.peer_id) return null;
+    if (typeof parsed.group_id !== "string" || !parsed.group_id) return null;
+    return { peerId: parsed.peer_id, groupId: parsed.group_id };
+  } catch {
+    return null;
+  }
 }
 
 /**

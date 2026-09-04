@@ -17,5 +17,5 @@
   // broker.ts/server.ts/cli.ts are named individually because they are
   // fixed entrypoints, not an open family.
   "extends": "./tsconfig.json",
-  "include": ["broker.ts", "server.ts", "cli.ts", "shared/**/*.ts"]
+  "include": ["broker.ts", "server.ts", "server-deck.ts", "cli.ts", "shared/**/*.ts"]
 }
