@@ -12,11 +12,31 @@ import { generateCredential, deriveTokenId } from './approval-auth'
 import { writeFileAtomic } from './atomic-write'
 import { loadOperatorIdentity, createOperatorIdentity, type OperatorIdentity } from './operator-identity'
 import { mintSessionToken, revokeSessionToken, type ApprovalDeps } from './approval-service'
+import { teamLeadInstanceToken } from './team-lead-mcp-sweep'
+import { loadApprovalCredential } from '../../../shared/approval-client'
 import type { SecretCipher } from './scope-secrets'
 import type { BrokerEndpoint } from './broker-client'
 import { reportError } from './log'
 
 const CRED_FILE = 'session-approval.json'
+
+/**
+ * Card a76d8b4a: userData is shared across Kory instances (no
+ * requestSingleInstanceLock, same root cause as card 9d8e24f4). Prefixing
+ * the filename with the SAME instance token that card already established
+ * for team-lead-mcp-*.json keeps this a single pattern for that shared
+ * defect class, not a second one.
+ *
+ * RESIDUAL GAP, deliberately not closed tonight: projectKey is the
+ * normalized git remote, so every WORKTREE of the same repo shares one
+ * project_key and therefore one instanceToken. Two Kory windows open on two
+ * worktrees of the SAME repo still collide on this file -- a discriminant
+ * narrower than "project" (pid, a persisted per-window nonce, ...) is a
+ * design decision left open on purpose, not an oversight.
+ */
+export function approvalCredFileName(projectKey: string): string {
+  return `${teamLeadInstanceToken(projectKey)}-${CRED_FILE}`
+}
 
 export interface ApprovalRuntimeOptions {
   stateDir: string
@@ -134,7 +154,7 @@ export class ApprovalRuntime {
         sessionRef: this.opts.sessionRef
       })
 
-      const path = join(this.opts.stateDir, CRED_FILE)
+      const path = join(this.opts.stateDir, approvalCredFileName(projectKey))
       writeFileAtomic(
         path,
         JSON.stringify({
@@ -152,12 +172,37 @@ export class ApprovalRuntime {
       )
       this.credPath = path
       this.armed = true
+      this.cleanupLegacyCredFile(projectKey)
       return true
     } catch (e) {
       // Broker down at launch, unwritable state dir: the app must still start,
       // simply without remote approvals.
       reportError('approvals', 'could not arm remote approvals', e)
       return false
+    }
+  }
+
+  /**
+   * Removes the unprefixed file, but ONLY when empty or scoped to THIS
+   * window's own project: an unconditional delete breaks an OLDER,
+   * still-running window sharing it -- its ask_operator refuses with a
+   * now-false "restart the session" message, and approval-hook.ts silently
+   * stops mirroring permission prompts (`if (!cfg) return`, no trace).
+   * A read failure (absent/corrupt) is safe to delete either way. Compares
+   * ONLY origin.project_key, never logs the parsed credential. Never
+   * revokes broker-side (unlike disarm()): that would kill a co-existing
+   * window's LIVE token under cohabitation; it expires on its own.
+   */
+  private cleanupLegacyCredFile(projectKey: string): void {
+    const legacyPath = join(this.opts.stateDir, CRED_FILE)
+    const legacy = loadApprovalCredential(legacyPath)
+    if (legacy && legacy.origin.project_key && legacy.origin.project_key !== projectKey) return
+    try {
+      rmSync(legacyPath, { force: false })
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+        reportError('approvals', 'could not remove the legacy shared credential file', e)
+      }
     }
   }
 

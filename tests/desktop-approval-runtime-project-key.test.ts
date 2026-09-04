@@ -2,7 +2,7 @@ import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ApprovalRuntime } from "../desktop/src/main/approval-runtime.ts";
+import { ApprovalRuntime, approvalCredFileName } from "../desktop/src/main/approval-runtime.ts";
 import type { SecretCipher } from "../desktop/src/main/scope-secrets.ts";
 
 const dirs: string[] = [];
@@ -31,8 +31,8 @@ function stubMintSuccess(): void {
     })) as typeof fetch;
 }
 
-function readCredentialOrigin(stateDir: string): Record<string, unknown> {
-  const raw = readFileSync(join(stateDir, "session-approval.json"), "utf8");
+function readCredentialOrigin(stateDir: string, projectKey: string): Record<string, unknown> {
+  const raw = readFileSync(join(stateDir, approvalCredFileName(projectKey)), "utf8");
   return (JSON.parse(raw) as { origin: Record<string, unknown> }).origin;
 }
 
@@ -51,7 +51,7 @@ describe("ApprovalRuntime.arm() writes origin.project_key", () => {
       });
       const armed = await runtime.arm();
       expect(armed).toBe(true);
-      const origin = readCredentialOrigin(stateDir);
+      const origin = readCredentialOrigin(stateDir, "local:deadbeefcafebabe");
       expect(origin.project_key).toBe("local:deadbeefcafebabe");
       // Purely additive, per team-lead ruling: everything the identity path
       // writes stays exactly as before.
@@ -77,7 +77,7 @@ describe("ApprovalRuntime.arm() writes origin.project_key", () => {
       });
       const armed = await runtime.arm();
       expect(armed).toBe(true);
-      const origin = readCredentialOrigin(stateDir);
+      const origin = readCredentialOrigin(stateDir, "");
       expect(origin.project_key).toBe("");
     } finally {
       globalThis.fetch = originalFetch;
@@ -101,7 +101,7 @@ describe("ApprovalRuntime.arm() writes origin.project_key", () => {
       const armed = await runtime.arm();
       expect(armed).toBe(true);
       expect(runtime.operator?.operatorId).toMatch(/^[0-9a-f]{16}$/);
-      const origin = readCredentialOrigin(stateDir);
+      const origin = readCredentialOrigin(stateDir, "");
       expect(origin.project_key).toBe("");
     } finally {
       globalThis.fetch = originalFetch;
