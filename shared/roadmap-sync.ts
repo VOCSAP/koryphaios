@@ -66,6 +66,32 @@ export function contentEquals(a: RoadmapSyncContent, b: RoadmapSyncContent): boo
 }
 
 /**
+ * The one divergence a replica resolves without asking: the upstream content
+ * differs from the merge base by nothing but `status` going from 'in_progress'
+ * back to 'planned' -- what the stale-lock sweep does to a card whose owner
+ * went quiet, and the reason every in-progress card would otherwise come back
+ * conflicted after each disconnection.
+ *
+ * The measure is the CONTENT, never `updated_by`: that column names the LAST
+ * writer, so a real upstream edit followed by the sweep carries the sweep's
+ * name and would have its edit dropped. A null base has nothing to compare
+ * against, so it never qualifies; an upstream that came back to the base
+ * exactly does (there is nothing left to arbitrate).
+ */
+export function isSweepOnlyStatusChange(
+  base: RoadmapSyncContent | null,
+  remote: RoadmapSyncContent
+): boolean {
+  if (base === null) return false;
+  for (const field of ROADMAP_SYNC_CONTENT_FIELDS) {
+    if (fieldEquals(field, base, remote)) continue;
+    if (field !== "status") return false;
+    if (base.status !== "in_progress" || remote.status !== "planned") return false;
+  }
+  return true;
+}
+
+/**
  * Three-way merge, field by field: the side that moved away from the base
  * wins, and when BOTH moved the local side wins (the operator asking for this
  * resolution sits on the replica). A null base means the card has no common

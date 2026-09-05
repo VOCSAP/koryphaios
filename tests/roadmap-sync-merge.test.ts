@@ -5,6 +5,7 @@
 import { test, expect } from "bun:test";
 import {
   contentEquals,
+  isSweepOnlyStatusChange,
   mergeReopen,
   parseSyncContent,
   pickSyncContent,
@@ -128,4 +129,35 @@ test("parseSyncContent refuses a partial or malformed snapshot instead of half-f
   ]).toEqual(["a snapshot missing a content field is unusable as a merge base", null]);
   const listNotArray = { ...content(), tags: "a,b" };
   expect(parseSyncContent(JSON.stringify(listNotArray))).toBeNull();
+});
+
+test("the sweep auto-resolution reads the CONTENT: only a lone in_progress -> planned move qualifies", () => {
+  const base = content({ status: "in_progress" });
+  expect([
+    "the sweep's own signature -- one status field, in_progress back to planned",
+    isSweepOnlyStatusChange(base, content({ status: "planned" })),
+  ]).toEqual(["the sweep's own signature -- one status field, in_progress back to planned", true]);
+  expect([
+    "a real upstream edit riding under the same status move is NOT auto-resolvable",
+    isSweepOnlyStatusChange(base, content({ status: "planned", rationale: "a human wrote this" })),
+  ]).toEqual([
+    "a real upstream edit riding under the same status move is NOT auto-resolvable",
+    false,
+  ]);
+  expect([
+    "any other status transition is an ordinary divergence",
+    isSweepOnlyStatusChange(base, content({ status: "done" })),
+    isSweepOnlyStatusChange(content({ status: "planned" }), content({ status: "in_progress" })),
+  ]).toEqual(["any other status transition is an ordinary divergence", false, false]);
+  expect([
+    "a card with no common ancestor has nothing to measure the sweep against",
+    isSweepOnlyStatusChange(null, content({ status: "planned" })),
+  ]).toEqual([
+    "a card with no common ancestor has nothing to measure the sweep against",
+    false,
+  ]);
+  expect([
+    "an upstream that came back to the base changed nothing to arbitrate",
+    isSweepOnlyStatusChange(base, content({ status: "in_progress" })),
+  ]).toEqual(["an upstream that came back to the base changed nothing to arbitrate", true]);
 });

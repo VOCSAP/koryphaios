@@ -63,15 +63,30 @@ const READ_ROUTES = new Set([
 
 /**
  * The two replication WRITE routes. They are exempt from the author guard by
- * construction, not by oversight: their caller is a replica BROKER
- * authenticated by the bearer token, and what they write is a state another
- * broker already resolved and attributed. `/roadmap/sync/push` re-validates
- * the transported `created_by`/`updated_by` through normalizeAuthorIdentity
- * and keeps them; `/roadmap/sync/lock` names the owner it relays. Neither has
- * a caller identity of its own to prove, so resolveRoadmapAuthor would have
- * nothing to resolve -- and requiring it would make every replicated write
- * impossible. `/roadmap/sync/resolve` is the opposite case and sits in
- * GUARDED_PROBES: it is the OPERATOR arbitrating, i.e. an ordinary Deck write.
+ * construction, not by oversight: their caller is a replica BROKER, and what
+ * they write is a state another broker already resolved and attributed, for
+ * agents that have no `peers` row here to prove anything with. What stands in
+ * for resolveRoadmapAuthor on these two is a chain of three guarantees, each
+ * asserted where the routes themselves are tested:
+ *
+ * 1. the shared broker_token is REQUIRED -- a broker configured without one
+ *    does not serve them at all (probed live below, since this file's broker
+ *    is exactly such a deployment);
+ * 2. the work-lock still binds -- a push onto a card locked by a holder this
+ *    replica does not relay is refused 409 'locked_upstream', the same answer
+ *    a third party gets from /roadmap/upsert;
+ * 3. the transported `created_by`/`updated_by` go through
+ *    normalizeAuthorIdentity, are REFUSED when they claim another replica's
+ *    `via:` prefix, and are rewritten to `via:<replica8>:<name>` whenever they
+ *    name a reserved identity, a peer registered here, or the stale-lock
+ *    sweep. So the provenance a replica asserts is its own or none: a relayed
+ *    write can never be read as this broker's operator, one of its agents, its
+ *    sweep, or another machine's relay. What it does NOT promise, and cannot:
+ *    the peer check happens at push time, so a plain name kept verbatim today
+ *    reads as a peer of that name if one registers here tomorrow.
+ *
+ * `/roadmap/sync/resolve` is the opposite case and sits in GUARDED_PROBES: it
+ * is the OPERATOR arbitrating, i.e. an ordinary Deck write.
  */
 const EXEMPT_ROUTES = new Set<string>(["/roadmap/sync/push", "/roadmap/sync/lock"]);
 
@@ -198,6 +213,56 @@ test("extraction has not shrunk: broker.ts exposes exactly the expected routes",
 test("every discovered route is classified: read, consciously exempt, or guarded", () => {
   const routes = discoverRoadmapRoutes(readFileSync(BROKER_SRC, "utf8"));
   expect(unclassifiedRoutes(routes)).toEqual([]);
+});
+
+test("the author-exempt replication routes are not open: with no broker_token they are not served", async () => {
+  // The mechanical half of the exemption above. This file's broker runs with no
+  // CLAUDE_PEERS_BROKER_TOKEN, so both routes must refuse outright -- a body
+  // that would otherwise be accepted (the push inserts, the claim is well
+  // formed) and no author to prove anywhere in it.
+  const probes: Record<string, Record<string, unknown>> = {
+    "/roadmap/sync/push": {
+      replica_id: "replica-coverage",
+      expected_content_rev: null,
+      item: {
+        id: "card-coverage-exempt",
+        project_key: PK,
+        kind: "feature",
+        title: "pushed with no credential at all",
+        description: "",
+        rationale: "",
+        context: "",
+        priority: "could",
+        value: "medium",
+        effort: "medium",
+        status: "planned",
+        tags: [],
+        depends_on: [],
+        deleted_at: null,
+        directive: null,
+        target_peer_ids: [],
+        inactive: false,
+        created_by: "deck",
+        updated_by: "deck",
+        created_at: "2026-01-01T00:00:00.000Z",
+        updated_at: "2026-01-01T00:00:00.000Z",
+      },
+    },
+    "/roadmap/sync/lock": {
+      replica_id: "replica-coverage",
+      id: "card-coverage-exempt",
+      action: "claim",
+      owner: { peer_id: "agent-coverage", group_id: "default" },
+    },
+  };
+  // Every exempt route is probed, so a third one added to the set without a
+  // probe fails here rather than joining the exemption unexamined.
+  expect(Object.keys(probes).sort()).toEqual([...EXEMPT_ROUTES].sort());
+  for (const [route, body] of Object.entries(probes)) {
+    const res = await post<{ error?: string }>(`${broker.url}${route}`, body);
+    expect([route, res.status]).toEqual([route, 403]);
+    expect([route, (res.body.error ?? "").includes("broker_token")]).toEqual([route, true]);
+  }
 });
 
 test("every guarded write route refuses an author it cannot prove", async () => {
@@ -480,8 +545,11 @@ test("no replication write handler assigns the lock column, which is what exempt
     const body = stripComments(extractFunctionBody(source, name));
     // `locked` may appear as a column NAME in an insert list (written as the
     // literal 0); what must never appear is an assignment of a lock value.
-    expect([name, /locked\s*=/.test(body)]).toEqual([name, false]);
-    expect([name, /locked_by\s*=/.test(body)]).toEqual([name, false]);
+    // The lookahead keeps a COMPARISON (`locked === 1`, how the push reads the
+    // upstream lock before refusing a write behind it) out of the match: a
+    // read of the column is the opposite of the write this guards against.
+    expect([name, /locked\s*=(?!=)/.test(body)]).toEqual([name, false]);
+    expect([name, /locked_by\s*=(?!=)/.test(body)]).toEqual([name, false]);
   }
 });
 

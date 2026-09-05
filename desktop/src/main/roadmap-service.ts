@@ -104,6 +104,25 @@ function signedAsOperator(body: Record<string, unknown>): Record<string, unknown
   return fields ? { ...body, ...fields } : body
 }
 
+/**
+ * A roadmap route answered with a non-2xx. Carries the HTTP status because one
+ * caller has to tell a MISSING ROUTE from a failing one: a broker too old to
+ * serve /roadmap/sync/status answers 404 forever, and polling it every tick
+ * until the process ends is the difference between an outage and a version
+ * gap. A transport failure is not this error -- fetch rejects with its own,
+ * which is exactly the distinction the caller needs.
+ */
+export class RoadmapRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly path: string
+  ) {
+    super(message)
+    this.name = 'RoadmapRequestError'
+  }
+}
+
 async function roadmapPost<T>(endpoint: BrokerEndpoint, path: string, body: unknown): Promise<T> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (endpoint.token) headers['Authorization'] = `Bearer ${endpoint.token}`
@@ -119,7 +138,7 @@ async function roadmapPost<T>(endpoint: BrokerEndpoint, path: string, body: unkn
     } catch {
       /* non-json error body */
     }
-    throw new Error(detail || `roadmap request failed: ${res.status}`)
+    throw new RoadmapRequestError(detail || `roadmap request failed: ${res.status}`, res.status, path)
   }
   return (await res.json()) as T
 }
@@ -553,6 +572,8 @@ export function sanitizeSyncStatus(raw: unknown, route = '/roadmap/sync/status')
     cursor: counter(r.cursor),
     conflicts: counter(r.conflicts),
     pending_push: counter(r.pending_push),
+    refused: counter(r.refused),
+    refused_locks: counter(r.refused_locks),
     locks: lockCounts(r.locks)
   }
 }

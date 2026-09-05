@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react'
 import { NotificationChannels } from './NotificationChannels'
-import type { AppConfig, DisplayMode, LaunchPreset, ModelOption } from '@shared/types'
+import type {
+  AppConfig,
+  DeckBrokerMode,
+  DisplayMode,
+  LaunchPreset,
+  ModelOption
+} from '@shared/types'
 import { targetKey, type LocalProviderConfig, type ProviderCatalog } from '@shared/models'
 import { ModelPicker } from './ModelPicker'
 import { DEFAULT_GLOW, DEFAULT_PALETTE } from '@shared/palette'
@@ -15,13 +21,26 @@ import { useT } from '../i18n'
 // Edit > Settings…). Changes apply live -- discrete inputs on change, free-text
 // inputs on blur -- so switching the language is instant (no Save button).
 
-type Category = 'general' | 'appearance' | 'terminal' | 'models'
+type Category = 'general' | 'appearance' | 'terminal' | 'models' | 'broker'
 
 const CATEGORIES: { id: Category; key: string }[] = [
   { id: 'general', key: 'settings.catGeneral' },
   { id: 'appearance', key: 'settings.catAppearance' },
   { id: 'terminal', key: 'settings.catTerminal' },
-  { id: 'models', key: 'settings.catModels' }
+  { id: 'models', key: 'settings.catModels' },
+  { id: 'broker', key: 'settings.catBroker' }
+]
+
+/**
+ * The three deployment shapes, all three explained side by side rather than
+ * only the active one: the operator is deciding whether to opt into the third,
+ * and a lone label ("replica") says nothing about what the other two would do
+ * instead. Literal key strings, so the locale parity scan sees their producer.
+ */
+const BROKER_MODES: { id: DeckBrokerMode; label: string; help: string }[] = [
+  { id: 'local', label: 'settings.brokerModeLocal', help: 'settings.brokerModeLocalHelp' },
+  { id: 'remote', label: 'settings.brokerModeRemote', help: 'settings.brokerModeRemoteHelp' },
+  { id: 'replica', label: 'settings.brokerModeReplica', help: 'settings.brokerModeReplicaHelp' }
 ]
 
 const DISPLAY_MODE_KEYS: { value: DisplayMode; key: string }[] = [
@@ -39,6 +58,10 @@ export function SettingsView(): React.JSX.Element {
   const openSettings = useDeck((s) => s.openSettings)
   const pickContextPrompt = useDeck((s) => s.pickContextPrompt)
   const setPickContextPrompt = useDeck((s) => s.setPickContextPrompt)
+  const peers = useDeck((s) => s.peersConfig)
+  const peersError = useDeck((s) => s.peersConfigError)
+  const refreshPeersConfig = useDeck((s) => s.refreshPeersConfig)
+  const setOfflineReplica = useDeck((s) => s.setOfflineReplica)
 
   const [active, setActive] = useState<Category>('general')
 
@@ -63,6 +86,13 @@ export function SettingsView(): React.JSX.Element {
       setWorktreeInit(c.worktreeInit)
     })
   }, [])
+
+  // Re-read on every visit, not once: this file belongs to claude-peers, not
+  // to the Deck -- the operator (or another machine's provisioning) can edit it
+  // between two openings of this page.
+  useEffect(() => {
+    if (active === 'broker') void refreshPeersConfig()
+  }, [active, refreshPeersConfig])
 
   const set = <K extends keyof AppConfig>(key: K, value: AppConfig[K]): void => {
     void updateConfig({ [key]: value } as Partial<AppConfig>)
@@ -561,6 +591,111 @@ export function SettingsView(): React.JSX.Element {
                   </button>
                 </div>
               </div>
+            </>
+          )}
+
+          {/* Three states, never a blank page: the read failed, the read has
+              not answered yet, or the summary is here. A category that renders
+              nothing at all reads as a broken app, and the reportError already
+              emitted main-side is invisible to the operator. */}
+          {active === 'broker' && peersError && (
+            <div className="field">
+              <span>{t('settings.brokerUnavailable')}</span>
+              <small>{t('settings.brokerUnavailableHelp')}</small>
+              <div>
+                <button className="btn" onClick={() => void refreshPeersConfig()}>
+                  {t('settings.brokerRetry')}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {active === 'broker' && !peersError && peers === null && (
+            <div className="field">
+              <span>{t('settings.brokerLoading')}</span>
+            </div>
+          )}
+
+          {active === 'broker' && peers !== null && (
+            <>
+              <div className="field">
+                <span>{t('settings.brokerMode')}</span>
+                <ul className="settings-broker-modes">
+                  {BROKER_MODES.map((m) => (
+                    <li
+                      key={m.id}
+                      className={`settings-broker-mode${peers.mode === m.id ? ' is-active' : ''}`}
+                    >
+                      <span className="settings-broker-mode-name">{t(m.label)}</span>
+                      <span className="settings-broker-mode-help">{t(m.help)}</span>
+                    </li>
+                  ))}
+                </ul>
+                <small>{t('settings.brokerModeHelp')}</small>
+              </div>
+
+              <div className="field">
+                <span>{t('settings.brokerUrl')}</span>
+                <div className="settings-broker-value">
+                  {peers.brokerUrl ?? t('settings.brokerUrlNone')}
+                </div>
+                <small>
+                  {peers.forcedByEnv.brokerUrl
+                    ? t('settings.brokerUrlEnv')
+                    : t('settings.brokerUrlHelp')}
+                </small>
+              </div>
+
+              {/* Yes/no only: the bearer token never crosses the IPC boundary,
+                  same rule as the local-provider API keys. */}
+              <div className="field">
+                <span>{t('settings.brokerToken')}</span>
+                <div className="settings-broker-value">
+                  {t(peers.hasToken ? 'settings.brokerTokenYes' : 'settings.brokerTokenNo')}
+                </div>
+                <small>{t('settings.brokerTokenHelp')}</small>
+                {/* The upstream's replication routes answer 403 without one,
+                    which surfaces to the operator as "upstream unreachable" --
+                    a symptom that says nothing about its cause. */}
+                {!peers.hasToken ? (
+                  <small className="settings-broker-note">{t('settings.brokerTokenMissing')}</small>
+                ) : null}
+              </div>
+
+              <label
+                className="field field-check"
+                aria-disabled={
+                  peers.forcedByEnv.offlineReplica || peers.brokerUrl === null ? 'true' : undefined
+                }
+              >
+                <input
+                  type="checkbox"
+                  checked={peers.offlineReplica}
+                  disabled={peers.forcedByEnv.offlineReplica || peers.brokerUrl === null}
+                  onChange={(e) => void setOfflineReplica(e.target.checked)}
+                />
+                <span>{t('settings.offlineReplica')}</span>
+              </label>
+              <small className="field-check-help">{t('settings.offlineReplicaHelp')}</small>
+              {/* A warning, not a disable: the operator can add the token to
+                  the same file right after ticking this. */}
+              {!peers.hasToken ? (
+                <small className="field-check-help settings-broker-note">
+                  {t('settings.brokerTokenMissing')}
+                </small>
+              ) : null}
+              {/* A disabled control with no reason reads as a bug: say which of
+                  the two conditions is holding it, env first (it outranks the
+                  file whatever the URL says). */}
+              {peers.forcedByEnv.offlineReplica ? (
+                <small className="field-check-help settings-broker-note">
+                  {t('settings.offlineReplicaEnv')}
+                </small>
+              ) : peers.brokerUrl === null ? (
+                <small className="field-check-help settings-broker-note">
+                  {t('settings.offlineReplicaNoUrl')}
+                </small>
+              ) : null}
             </>
           )}
         </div>

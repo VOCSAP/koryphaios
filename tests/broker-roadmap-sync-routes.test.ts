@@ -6,7 +6,14 @@
 
 import { test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
-import { startBroker, stopBroker, post, livePid, deckAuthored, type TestBroker } from "./_helper.ts";
+import {
+  startBroker as startPlainBroker,
+  stopBroker,
+  livePid,
+  deckAuthored,
+  FIXTURE_OPERATOR_ID,
+  type TestBroker,
+} from "./_helper.ts";
 import type {
   RegisterResponse,
   RoadmapItem,
@@ -23,6 +30,26 @@ import type {
 const PK = "github.com/vocsap/sync-routes-repo";
 const R1 = "replica-one";
 const R2 = "replica-two";
+/**
+ * The replication routes are served only by a broker that has a broker_token
+ * to authenticate its replicas with, so every upstream in this file runs with
+ * one and every request carries the Bearer. `startPlainBroker` is used raw only
+ * where the absence of a token IS the subject.
+ */
+const TOKEN = "sync-routes-token";
+
+function startBroker(env: Record<string, string> = {}): Promise<TestBroker> {
+  return startPlainBroker({ CLAUDE_PEERS_BROKER_TOKEN: TOKEN, ...env });
+}
+
+async function post<T = unknown>(url: string, body: unknown): Promise<{ status: number; body: T }> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, body: (await res.json()) as T };
+}
 
 type UpsertRes = { item: RoadmapItem };
 
@@ -248,7 +275,12 @@ test("push: fast-forward accepted, stale base refused, unknown base refused, ins
       item: pushItem({ id: "card-insert", description: "third version" }),
       expected_content_rev: baseRev,
     });
-    expect([stale.status, stale.body.error]).toEqual([409, "conflict"]);
+    expect([
+      "a stale base is a CONTENT divergence, and the body says so",
+      stale.status,
+      stale.body.error,
+      stale.body.reason,
+    ]).toEqual(["a stale base is a CONTENT divergence, and the body says so", 409, "conflict", "content"]);
     expect(stale.body.item?.description).toBe("second version");
 
     // A null base on an id the upstream already has is a divergence too.
@@ -257,7 +289,11 @@ test("push: fast-forward accepted, stale base refused, unknown base refused, ins
       item: pushItem({ id: "card-insert", description: "offline creation" }),
       expected_content_rev: null,
     });
-    expect([collision.status, collision.body.item?.id]).toEqual([409, "card-insert"]);
+    expect([collision.status, collision.body.item?.id, collision.body.reason]).toEqual([
+      409,
+      "card-insert",
+      "content",
+    ]);
 
     // A base claimed for a row the upstream does not have: nothing to
     // fast-forward from, and the empty item says so.
@@ -270,18 +306,24 @@ test("push: fast-forward accepted, stale base refused, unknown base refused, ins
       "a base for a row the upstream lost is refused with an empty item",
       orphan.status,
       orphan.body.item,
-    ]).toEqual(["a base for a row the upstream lost is refused with an empty item", 409, null]);
+      orphan.body.reason,
+    ]).toEqual([
+      "a base for a row the upstream lost is refused with an empty item",
+      409,
+      null,
+      "missing",
+    ]);
   } finally {
     await stopBroker(b);
   }
 }, 20_000);
 
-test("push never writes the queue, the lock columns or operator_id", async () => {
+test("push is refused on a card the upstream work-locks for a holder this replica does not relay", async () => {
   const b = await startBroker();
   try {
     const reg = await post<RegisterResponse>(`${b.url}/register`, {
       pid: livePid(),
-      cwd: "/work/sync-push-guard",
+      cwd: "/work/sync-push-lock",
       git_root: null,
       tty: null,
       summary: "",
@@ -291,49 +333,243 @@ test("push never writes the queue, the lock columns or operator_id", async () =>
       group_id: "default",
       group_secret_hash: null,
     });
-    const native = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+    const held = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
       project_key: PK,
       by: reg.body.peer_id,
       instance_token: reg.body.instance_token,
-      title: "held upstream",
+      title: "held by a native peer",
       status: "in_progress",
-      queue: 3,
     });
-    const id = native.body.item.id;
-    const before = await pull(b, 0);
-    const beforeRow = before.body.items.find((i) => i.id === id)!;
+    const heldRow = (await pull(b, 0)).body.items.find((i) => i.id === held.body.item.id)!;
+
+    // The base is exactly what the upstream holds, so the ONLY thing refusing
+    // this push is the work-lock -- the same answer a direct upsert gets.
+    const refused = await post<RoadmapSyncPushConflict>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id: held.body.item.id, title: "edited on the replica" }),
+      expected_content_rev: heldRow.content_rev,
+    });
+    expect([
+      "a card locked upstream by someone else refuses a replicated write, naming why",
+      refused.status,
+      refused.body.error,
+      refused.body.reason,
+      refused.body.item?.title,
+    ]).toEqual([
+      "a card locked upstream by someone else refuses a replicated write, naming why",
+      409,
+      "conflict",
+      "locked_upstream",
+      "held by a native peer",
+    ]);
+    const afterRefusal = (await pull(b, 0)).body.items.find((i) => i.id === held.body.item.id)!;
+    const db = new Database(b.dbPath);
+    const heldToken = (
+      db.query("SELECT locked_by_token FROM roadmap_items WHERE id = ?").get(held.body.item.id) as {
+        locked_by_token: string | null;
+      }
+    ).locked_by_token;
+    db.close();
+    expect([
+      "a refused push writes nothing at all, the holder's own credential included",
+      afterRefusal.title,
+      afterRefusal.content_rev,
+      heldToken !== null,
+    ]).toEqual([
+      "a refused push writes nothing at all, the holder's own credential included",
+      "held by a native peer",
+      heldRow.content_rev,
+      true,
+    ]);
+
+    // The lock THIS replica relays is not somebody else's: its own agent's
+    // edits keep flowing while it holds the card.
+    const relayed = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: "agent-seed",
+      title: "relayed by this replica",
+    });
+    const claim = await post<RoadmapSyncLockClaimResponse>(`${b.url}/roadmap/sync/lock`, {
+      replica_id: R1,
+      id: relayed.body.item.id,
+      action: "claim",
+      owner: { peer_id: "agent-remote", group_id: "default" },
+    });
+    expect(claim.status).toBe(200);
+    const relayedPush = await post<RoadmapSyncPushResponse>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id: relayed.body.item.id, title: "edited behind our own lock" }),
+      expected_content_rev: claim.body.item.content_rev,
+    });
+    expect([
+      "the holder this replica relays is the replica itself: its push goes through",
+      relayedPush.status,
+      relayedPush.body.item?.title,
+    ]).toEqual([
+      "the holder this replica relays is the replica itself: its push goes through",
+      200,
+      "edited behind our own lock",
+    ]);
+
+    // ...and another replica's push on that same relayed lock is refused.
+    const otherReplica = await post<RoadmapSyncPushConflict>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R2,
+      item: pushItem({ id: relayed.body.item.id, title: "edited from elsewhere" }),
+      expected_content_rev: relayedPush.body.content_rev,
+    });
+    expect([
+      "a relay belongs to ONE replica: another one is refused like any third party",
+      otherReplica.status,
+      otherReplica.body.reason,
+    ]).toEqual([
+      "a relay belongs to ONE replica: another one is refused like any third party",
+      409,
+      "locked_upstream",
+    ]);
+  } finally {
+    await stopBroker(b);
+  }
+}, 30_000);
+
+test("push never writes the queue, the lock columns or operator_id", async () => {
+  const b = await startBroker();
+  try {
+    // Signed by the operator so the row carries an operator_id, and queued so
+    // the row carries a position: the two columns a push must leave alone.
+    // Its lock is the one this replica relays, the only kind a push may land
+    // behind at all.
+    const signed = await post<UpsertRes>(
+      `${b.url}/roadmap/upsert`,
+      deckAuthored({ project_key: PK, title: "queued and signed upstream", queue: 3 })
+    );
+    expect(signed.status).toBe(200);
+    const id = signed.body.item.id;
+    const claim = await post<RoadmapSyncLockClaimResponse>(`${b.url}/roadmap/sync/lock`, {
+      replica_id: R1,
+      id,
+      action: "claim",
+      owner: { peer_id: "agent-remote", group_id: "default" },
+    });
+    expect(claim.status).toBe(200);
 
     const pushed = await post<RoadmapSyncPushResponse>(`${b.url}/roadmap/sync/push`, {
       replica_id: R1,
       item: pushItem({ id, title: "edited on the replica", queue: 99 } as Partial<RoadmapSyncPushItem> & { id: string }),
-      expected_content_rev: beforeRow.content_rev,
+      expected_content_rev: claim.body.item.content_rev,
     });
     expect(pushed.status).toBe(200);
     expect(pushed.body.item.title).toBe("edited on the replica");
 
     const db = new Database(b.dbPath);
     const stored = db
-      .query("SELECT queue, locked, locked_by, locked_by_token, operator_id FROM roadmap_items WHERE id = ?")
+      .query(
+        "SELECT queue, locked, locked_by, locked_by_token, lock_relay, operator_id FROM roadmap_items WHERE id = ?"
+      )
       .get(id) as {
       queue: number | null;
       locked: number;
       locked_by: string | null;
       locked_by_token: string | null;
+      lock_relay: string | null;
       operator_id: string | null;
     };
     db.close();
     expect([
-      "a push carries content only: the queue and the lock stay as the upstream had them",
+      "a push carries content only: the queue, the lock and the operator proof stay as the upstream had them",
       stored.queue,
       stored.locked,
       stored.locked_by,
+      stored.lock_relay,
+      stored.locked_by_token,
+      stored.operator_id,
     ]).toEqual([
-      "a push carries content only: the queue and the lock stay as the upstream had them",
+      "a push carries content only: the queue, the lock and the operator proof stay as the upstream had them",
       3,
       1,
-      reg.body.peer_id,
+      "agent-remote",
+      R1,
+      null,
+      FIXTURE_OPERATOR_ID,
     ]);
-    expect(stored.locked_by_token).not.toBeNull();
+  } finally {
+    await stopBroker(b);
+  }
+}, 20_000);
+
+test("push never stores an author this upstream reads as one of its own: it stamps the relay instead", async () => {
+  const b = await startBroker();
+  try {
+    const reg = await post<RegisterResponse>(`${b.url}/register`, {
+      pid: livePid(),
+      cwd: "/work/sync-author",
+      git_root: null,
+      tty: null,
+      summary: "",
+      host: "sync-host",
+      client_pid: livePid(),
+      project_key: PK,
+      group_id: "default",
+      group_secret_hash: null,
+    });
+    const relay = `via:${R1.slice(0, 8)}:`;
+
+    // 'deck' names the OPERATOR of the broker reading it, and an upsert claiming
+    // it must be signed. Relayed, it names the operator of the OTHER machine.
+    const reserved = await post<RoadmapSyncPushResponse>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id: "card-author-deck", created_by: "deck", updated_by: "deck" }),
+      expected_content_rev: null,
+    });
+    expect([
+      "a reserved identity crossing the boundary is prefixed with the replica that relayed it",
+      reserved.status,
+      reserved.body.item?.created_by,
+      reserved.body.item?.updated_by,
+    ]).toEqual([
+      "a reserved identity crossing the boundary is prefixed with the replica that relayed it",
+      200,
+      `${relay}deck`,
+      `${relay}deck`,
+    ]);
+
+    // A name that belongs to a peer registered HERE: kept as-is it would credit
+    // this upstream's own agent for a write it never made.
+    const homonym = await post<RoadmapSyncPushResponse>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({
+        id: "card-author-homonym",
+        created_by: reg.body.peer_id,
+        updated_by: reg.body.peer_id,
+      }),
+      expected_content_rev: null,
+    });
+    expect([
+      "a name this upstream already knows as a peer is prefixed too",
+      homonym.status,
+      homonym.body.item?.updated_by,
+    ]).toEqual([
+      "a name this upstream already knows as a peer is prefixed too",
+      200,
+      `${relay}${reg.body.peer_id}`,
+    ]);
+
+    // A plain name nobody here answers to means exactly what it says.
+    const plain = await post<RoadmapSyncPushResponse>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id: "card-author-plain", created_by: "agent-elsewhere", updated_by: "agent-elsewhere" }),
+      expected_content_rev: null,
+    });
+    expect([
+      "an author unknown here is carried verbatim: the relay adds provenance, it does not rename",
+      plain.status,
+      plain.body.item?.created_by,
+      plain.body.item?.updated_by,
+    ]).toEqual([
+      "an author unknown here is carried verbatim: the relay adds provenance, it does not rename",
+      200,
+      "agent-elsewhere",
+      "agent-elsewhere",
+    ]);
   } finally {
     await stopBroker(b);
   }
@@ -409,16 +645,26 @@ test("a replicated write carries content and never locks; a relayed claim still 
       pushed.body.item.locked,
     ]).toEqual(["a replicated content write never locks the card", 200, "in_progress", false]);
 
-    const claim = await post<{ error?: string }>(`${b.url}/roadmap/sync/lock`, {
+    const claim = await post<{ error?: string; scope?: string }>(`${b.url}/roadmap/sync/lock`, {
       replica_id: R1,
       id,
       action: "claim",
       owner: { peer_id: "agent-a", group_id: "default" },
     });
+    // Same status as a contested claim, and a body that says which of the two
+    // it is: 'contested' means another holder has the card and the replica must
+    // say so on its own cards; 'inactive' means nobody holds it at all.
     expect([
-      "a relayed claim on a card the operator set aside is refused like a local one",
+      "a relayed claim on a card the operator set aside is refused, and names the reason",
       claim.status,
-    ]).toEqual(["a relayed claim on a card the operator set aside is refused like a local one", 409]);
+      claim.body.error,
+      claim.body.scope,
+    ]).toEqual([
+      "a relayed claim on a card the operator set aside is refused, and names the reason",
+      409,
+      "inactive",
+      undefined,
+    ]);
   } finally {
     await stopBroker(b);
   }
@@ -590,6 +836,413 @@ test("a relayed lock survives the owner-gone sweep while its relay is fresh, and
       return { done: !row.locked, value: row };
     });
     expect(swept.updated_by).toBe("lock-sweep");
+  } finally {
+    await stopBroker(b);
+  }
+}, 30_000);
+
+test("the three replication routes are refused outright on a broker with no configured token", async () => {
+  // Without a broker_token every route is unauthenticated, and /roadmap/sync/push
+  // writes content on any card under any author while walking past the work-lock
+  // guard. The routes exist only where a credential gates them.
+  const open = await startPlainBroker();
+  const closed = await startBroker();
+  try {
+    const seeded = await post<UpsertRes>(`${closed.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: "agent-seed",
+      title: "reachable with the bearer",
+    });
+    expect(seeded.status).toBe(200);
+
+    for (const [route, body] of [
+      ["/roadmap/sync/pull", { replica_id: R1, since_rev: 0 }],
+      [
+        "/roadmap/sync/push",
+        { replica_id: R1, item: pushItem({ id: "card-tokenless" }), expected_content_rev: null },
+      ],
+      [
+        "/roadmap/sync/lock",
+        { replica_id: R1, id: seeded.body.item.id, action: "claim", owner: { peer_id: "agent-remote", group_id: null } },
+      ],
+    ] as const) {
+      const res = await fetch(`${open.url}${route}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const parsed = (await res.json()) as { error?: string };
+      expect([route, res.status]).toEqual([route, 403]);
+      expect([route, (parsed.error ?? "").includes("broker_token")]).toEqual([route, true]);
+    }
+
+    // The same three calls, on a broker that HAS a token, with the Bearer.
+    const pulled = await pull(closed, 0);
+    expect(["pull answers a token-bearing replica", pulled.status]).toEqual([
+      "pull answers a token-bearing replica",
+      200,
+    ]);
+    const pushed = await post<RoadmapSyncPushResponse>(`${closed.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id: "card-with-token", title: "pushed with a bearer" }),
+      expected_content_rev: null,
+    });
+    expect(["push answers a token-bearing replica", pushed.status]).toEqual([
+      "push answers a token-bearing replica",
+      200,
+    ]);
+    const claimed = await post<RoadmapSyncLockClaimResponse>(`${closed.url}/roadmap/sync/lock`, {
+      replica_id: R1,
+      id: seeded.body.item.id,
+      action: "claim",
+      owner: { peer_id: "agent-remote", group_id: null },
+    });
+    expect(["lock answers a token-bearing replica", claimed.status]).toEqual([
+      "lock answers a token-bearing replica",
+      200,
+    ]);
+  } finally {
+    await stopBroker(closed);
+    await stopBroker(open);
+  }
+}, 30_000);
+
+test("a relayed lock survives the TTL clause too, while its relay keeps beating", async () => {
+  // The TTL clause reads `updated_at`, which no lock claim refreshes: a replica
+  // whose agent works for hours without writing the card has a live relay and a
+  // stale row, and the sweep would take the lock away from an agent that is
+  // demonstrably still there -- leaving the replica locked while the upstream
+  // shows the card free.
+  const b = await startBroker({
+    CLAUDE_PEERS_LOCK_TTL_SEC: "5",
+    CLAUDE_PEERS_LOCK_GRACE_SEC: "30",
+    CLAUDE_PEERS_LOCK_SWEEP_SEC: "1",
+  });
+  try {
+    const relayed = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: "agent-seed",
+      title: "relayed through the TTL",
+    });
+    const claim = await post<RoadmapSyncLockClaimResponse>(`${b.url}/roadmap/sync/lock`, {
+      replica_id: R1,
+      id: relayed.body.item.id,
+      action: "claim",
+      owner: { peer_id: "agent-remote", group_id: "default" },
+    });
+    expect(claim.status).toBe(200);
+
+    // A lock nobody relays, aged the same way: it must fall on the first sweep,
+    // which is what proves the sweep ran at all during the window below.
+    const ghost = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: "agent-ghost",
+      title: "aged, nobody relays it",
+      status: "in_progress",
+    });
+    expect(ghost.body.item.locked).toBe(true);
+
+    const db = new Database(b.dbPath);
+    db.run("PRAGMA busy_timeout = 3000");
+    db.run(
+      "UPDATE roadmap_items SET updated_at = datetime('now', '-600 seconds') WHERE id IN (?, ?)",
+      [relayed.body.item.id, ghost.body.item.id]
+    );
+    db.close();
+
+    const fallen = await pollUntil(12_000, 300, async () => {
+      const page = await pull(b, 0);
+      const held = page.body.items.find((i) => i.id === relayed.body.item.id)!;
+      expect([
+        "a lock whose relay is beating is not stale, however old the row is",
+        held.locked,
+      ]).toEqual(["a lock whose relay is beating is not stale, however old the row is", true]);
+      const other = page.body.items.find((i) => i.id === ghost.body.item.id)!;
+      return { done: !other.locked, value: other };
+    });
+    expect(fallen.updated_by).toBe("lock-sweep");
+
+    // The relay goes quiet: the row is stale AND unrelayed, and falls.
+    const db2 = new Database(b.dbPath);
+    db2.run("PRAGMA busy_timeout = 3000");
+    db2.run("UPDATE roadmap_items SET lock_relay_seen = datetime('now', '-120 seconds') WHERE id = ?", [
+      relayed.body.item.id,
+    ]);
+    db2.close();
+    const swept = await pollUntil(12_000, 300, async () => {
+      const page = await pull(b, 0);
+      const row = page.body.items.find((i) => i.id === relayed.body.item.id)!;
+      return { done: !row.locked, value: row };
+    });
+    expect(swept.updated_by).toBe("lock-sweep");
+  } finally {
+    await stopBroker(b);
+  }
+}, 30_000);
+
+test("a replica cannot sign a write with another replica's provenance, nor with the sweep's", async () => {
+  // The relay prefix is what a reader trusts to answer "whose operator wrote
+  // this": a replica free to send `via:<someone else>:deck` writes as the
+  // OTHER machine's operator, and the victim replica -- which strips its own
+  // prefix on the way in -- displays it as its own operator's work. The sweep's
+  // name is the same kind of claim: it is what unlocks the one auto-resolution
+  // a replica performs without asking.
+  const b = await startBroker();
+  const own = `via:${R1.slice(0, 8)}:`;
+  try {
+    for (const [field, value] of [
+      ["updated_by", "via:aaaaaaaa:deck"],
+      ["created_by", "via:aaaaaaaa:deck"],
+    ] as const) {
+      const forged = await post<{ error?: string }>(`${b.url}/roadmap/sync/push`, {
+        replica_id: R1,
+        item: pushItem({ id: `card-forged-${field}`, [field]: value }),
+        expected_content_rev: null,
+      });
+      expect([
+        `a ${field} claiming another replica's relay is refused, not stored`,
+        forged.status,
+      ]).toEqual([`a ${field} claiming another replica's relay is refused, not stored`, 400]);
+    }
+
+    // Its OWN prefix is not a claim about anyone else: a row it already relayed
+    // is pushed back unchanged, and stays as it is.
+    const mine = await post<RoadmapSyncPushResponse>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id: "card-own-prefix", created_by: `${own}deck`, updated_by: `${own}deck` }),
+      expected_content_rev: null,
+    });
+    expect([
+      "a replica re-pushing its own relayed authorship is idempotent, never prefixed twice",
+      mine.status,
+      mine.body.item?.created_by,
+      mine.body.item?.updated_by,
+    ]).toEqual([
+      "a replica re-pushing its own relayed authorship is idempotent, never prefixed twice",
+      200,
+      `${own}deck`,
+      `${own}deck`,
+    ]);
+
+    // The sweep is this broker's own voice. A replica's local sweep is a real
+    // event that has to travel, so it is relabelled rather than refused.
+    const swept = await post<RoadmapSyncPushResponse>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id: "card-swept-elsewhere", created_by: "agent-b", updated_by: "lock-sweep" }),
+      expected_content_rev: null,
+    });
+    expect([
+      "another broker's sweep is stamped as that broker's, so it unlocks nobody's auto-resolution here",
+      swept.status,
+      swept.body.item?.updated_by,
+    ]).toEqual([
+      "another broker's sweep is stamped as that broker's, so it unlocks nobody's auto-resolution here",
+      200,
+      `${own}lock-sweep`,
+    ]);
+
+    // A card this upstream already attributes to another replica's relay: the
+    // field is immutable here and the push does not write it, so carrying it
+    // back unchanged is not a claim and must not block the content.
+    const foreign = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: "via:aaaaaaaa:deck",
+      title: "created through another replica",
+    });
+    expect(foreign.body.item.created_by).toBe("via:aaaaaaaa:deck");
+    const row = (await pull(b, 0)).body.items.find((i) => i.id === foreign.body.item.id)!;
+    const carried = await post<RoadmapSyncPushResponse>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({
+        id: foreign.body.item.id,
+        title: "edited on a second replica",
+        created_by: "via:aaaaaaaa:deck",
+        updated_by: "agent-b",
+      }),
+      expected_content_rev: row.content_rev,
+    });
+    expect([
+      "an existing card's creator is not written by a push, so carrying it back is not a claim",
+      carried.status,
+      carried.body.item?.created_by,
+      carried.body.item?.title,
+    ]).toEqual([
+      "an existing card's creator is not written by a push, so carrying it back is not a claim",
+      200,
+      "via:aaaaaaaa:deck",
+      "edited on a second replica",
+    ]);
+  } finally {
+    await stopBroker(b);
+  }
+}, 30_000);
+
+test("a relay the sweep released leaves nothing behind, and cannot write behind the peer that took the card", async () => {
+  // The sweep clears the lock but used to leave `lock_relay` pointing at the
+  // replica that held it. A native peer then takes the card, and the push guard
+  // -- which asks "is the holder MY relay?" -- reads that stale pointer and
+  // lets the departed replica write straight through a lock it no longer has.
+  const b = await startBroker({
+    CLAUDE_PEERS_LOCK_TTL_SEC: "3600",
+    CLAUDE_PEERS_LOCK_GRACE_SEC: "1",
+    CLAUDE_PEERS_LOCK_SWEEP_SEC: "1",
+  });
+  try {
+    const created = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: "agent-seed",
+      title: "relayed, then swept, then taken",
+    });
+    const id = created.body.item.id;
+    const claim = await post<RoadmapSyncLockClaimResponse>(`${b.url}/roadmap/sync/lock`, {
+      replica_id: R1,
+      id,
+      action: "claim",
+      owner: { peer_id: "agent-remote", group_id: "default" },
+    });
+    expect(claim.status).toBe(200);
+
+    // The replica goes away for good: its heartbeat ages past the grace window
+    // and the sweep reclaims the card.
+    const db = new Database(b.dbPath);
+    db.run("PRAGMA busy_timeout = 3000");
+    db.run("UPDATE roadmap_items SET lock_relay_seen = datetime('now', '-120 seconds') WHERE id = ?", [id]);
+    db.close();
+    await pollUntil(12_000, 200, async () => {
+      const page = await pull(b, 0);
+      return { done: !page.body.items.find((i) => i.id === id)!.locked, value: null };
+    });
+
+    const swept = new Database(b.dbPath);
+    const after = swept
+      .query("SELECT lock_relay, lock_relay_seen, lock_contested_by FROM roadmap_items WHERE id = ?")
+      .get(id) as { lock_relay: string | null; lock_relay_seen: string | null; lock_contested_by: string };
+    swept.close();
+    expect([
+      "a released lock keeps no relay: the pointer that grants a replica its rights dies with it",
+      after.lock_relay,
+      after.lock_relay_seen,
+      after.lock_contested_by,
+    ]).toEqual([
+      "a released lock keeps no relay: the pointer that grants a replica its rights dies with it",
+      null,
+      null,
+      "[]",
+    ]);
+
+    // A native peer picks the card up.
+    const reg = await post<RegisterResponse>(`${b.url}/register`, {
+      pid: livePid(),
+      cwd: "/work/sync-relay-taken",
+      git_root: null,
+      tty: null,
+      summary: "",
+      host: "sync-host",
+      client_pid: livePid(),
+      project_key: PK,
+      group_id: "default",
+      group_secret_hash: null,
+    });
+    const taken = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK,
+      id,
+      by: reg.body.peer_id,
+      instance_token: reg.body.instance_token,
+      status: "in_progress",
+    });
+    expect([taken.body.item.locked, taken.body.item.locked_by]).toEqual([true, reg.body.peer_id]);
+
+    const row = (await pull(b, 0)).body.items.find((i) => i.id === id)!;
+    const pushed = await post<RoadmapSyncPushConflict>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id, title: "written by a relay that no longer holds anything" }),
+      expected_content_rev: row.content_rev,
+    });
+    expect([
+      "the replica that used to relay this lock is a third party like any other",
+      pushed.status,
+      pushed.body.reason,
+    ]).toEqual([
+      "the replica that used to relay this lock is a third party like any other",
+      409,
+      "locked_upstream",
+    ]);
+    const stillTheirs = (await pull(b, 0)).body.items.find((i) => i.id === id)!;
+    expect([
+      "and it wrote nothing",
+      stillTheirs.title,
+      stillTheirs.locked_by,
+    ]).toEqual(["and it wrote nothing", "relayed, then swept, then taken", reg.body.peer_id]);
+
+    const release = await post<RoadmapSyncLockReleaseResponse>(`${b.url}/roadmap/sync/lock`, {
+      replica_id: R1,
+      id,
+      action: "release",
+      owner: { peer_id: "agent-remote", group_id: "default" },
+    });
+    expect([
+      "nor can it release the lock it no longer relays",
+      release.status,
+      release.body.released,
+      release.body.item?.locked,
+    ]).toEqual(["nor can it release the lock it no longer relays", 200, false, true]);
+  } finally {
+    await stopBroker(b);
+  }
+}, 30_000);
+
+test("a push behind a relay whose heartbeat has gone stale is refused, sweep or no sweep", async () => {
+  // The relay pointer alone is not a right: it is worth exactly as much as the
+  // heartbeat behind it, the same measure the sweep uses to decide the agent is
+  // still there. Swept out of the way here (a 1 h sweep interval) so the check
+  // is the push guard's own and not the sweep's.
+  const b = await startBroker({
+    CLAUDE_PEERS_LOCK_TTL_SEC: "3600",
+    CLAUDE_PEERS_LOCK_GRACE_SEC: "30",
+    CLAUDE_PEERS_LOCK_SWEEP_SEC: "3600",
+  });
+  try {
+    const created = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: "agent-seed",
+      title: "relayed by a replica gone quiet",
+    });
+    const id = created.body.item.id;
+    const claim = await post<RoadmapSyncLockClaimResponse>(`${b.url}/roadmap/sync/lock`, {
+      replica_id: R1,
+      id,
+      action: "claim",
+      owner: { peer_id: "agent-remote", group_id: "default" },
+    });
+    expect(claim.status).toBe(200);
+    const fresh = await post<RoadmapSyncPushResponse>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id, title: "written while the relay beats" }),
+      expected_content_rev: claim.body.item.content_rev,
+    });
+    expect(["a beating relay writes behind its own lock", fresh.status]).toEqual([
+      "a beating relay writes behind its own lock",
+      200,
+    ]);
+
+    const db = new Database(b.dbPath);
+    db.run("PRAGMA busy_timeout = 3000");
+    db.run("UPDATE roadmap_items SET lock_relay_seen = datetime('now', '-120 seconds') WHERE id = ?", [id]);
+    db.close();
+    const stale = await post<RoadmapSyncPushConflict>(`${b.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id, title: "written after it went quiet" }),
+      expected_content_rev: fresh.body.content_rev,
+    });
+    expect([
+      "a relay that stopped beating no longer speaks for the agent behind it",
+      stale.status,
+      stale.body.reason,
+    ]).toEqual([
+      "a relay that stopped beating no longer speaks for the agent behind it",
+      409,
+      "locked_upstream",
+    ]);
   } finally {
     await stopBroker(b);
   }

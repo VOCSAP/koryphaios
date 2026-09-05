@@ -12,6 +12,7 @@ import type {
   InboxEntry,
   InboxMessage,
   LocaleOption,
+  PeersConfigSummary,
   RoadmapKind,
   RoadmapSyncEvent,
   RoadmapSyncResolution,
@@ -128,6 +129,20 @@ interface DeckState {
    */
   roadmapSync: RoadmapSyncEvent
   /**
+   * Summary of the claude-peers CORE config (Settings > Broker), null until
+   * the panel asks for it. Read lazily rather than at boot: it is one file
+   * read serving one settings category, and it must be re-read on open
+   * because the operator can edit that file outside the Deck.
+   */
+  peersConfig: PeersConfigSummary | null
+  /**
+   * The last read of that summary FAILED. Distinct from `peersConfig === null`,
+   * which is also the never-read-yet state: the panel must show an explicit
+   * error instead of an empty page, and a blank page is what a single null
+   * would give it.
+   */
+  peersConfigError: boolean
+  /**
    * Id of the conflicted card whose resolution dialog is open, null when
    * closed. Store-owned rather than a prop chain: the same dialog is opened
    * from the kanban card, from the mobile list and from the detail modal.
@@ -223,6 +238,10 @@ interface DeckState {
   setView(view: DeckView): void
   /** Hide the offline banner for the current outage (red rail dot remains). */
   dismissOfflineBanner(): void
+  /** Re-read the claude-peers core config summary (Settings > Broker). */
+  refreshPeersConfig(): Promise<void>
+  /** Write the `offline_replica` opt-in; the store takes the RE-READ summary. */
+  setOfflineReplica(value: boolean): Promise<void>
   openCompanion(open: boolean): void
   openUsage(open: boolean): void
   /** Open the browser view, optionally docking a session next to it (D1). */
@@ -366,9 +385,15 @@ export function errorText(e: unknown): string {
  * an unhandled promise rejection and the click silently no-oped. Now it lands
  * in main.log + the journal and surfaces as an error toast (raw message).
  */
-async function guarded(label: string, fn: () => Promise<unknown>): Promise<void> {
+/**
+ * Returns whether the call succeeded, so a caller that has to RENDER the
+ * failure (rather than only toast it) can tell "not read yet" from "read and
+ * failed". Most callers ignore it and keep the fire-and-forget shape.
+ */
+async function guarded(label: string, fn: () => Promise<unknown>): Promise<boolean> {
   try {
     await fn()
+    return true
   } catch (e) {
     const msg = errorText(e)
     try {
@@ -377,6 +402,7 @@ async function guarded(label: string, fn: () => Promise<unknown>): Promise<void>
       // Reporting must never mask the toast.
     }
     useDeck.getState().showToast(`${label}: ${msg}`, 'error', { raw: true })
+    return false
   }
 }
 
@@ -469,6 +495,8 @@ export const useDeck = create<DeckState>((set, get) => ({
   // yet must render as a plain non-replica one, never raise the offline
   // banner on a state nobody reported.
   roadmapSync: { status: { mode: 'local' }, conflicts: [] },
+  peersConfig: null,
+  peersConfigError: false,
   roadmapConflictId: null,
   graphFocus: null,
   diffTarget: null,
@@ -639,6 +667,9 @@ export const useDeck = create<DeckState>((set, get) => ({
     // Replication state: pushed only when it actually changed (main-side
     // signature compare), so this replaces the whole state each time.
     window.api.onRoadmapSync((roadmapSync) => set({ roadmapSync }))
+    // Core-config summary, re-broadcast by main after a successful write so
+    // every open surface shows the file rather than its own optimistic guess.
+    window.api.onPeersConfig((peersConfig) => set({ peersConfig }))
     // Notification click on an inbox message: surface the panel.
     window.api.onInboxOpen(() => get().openInbox(true))
     // Broker reachability (PLAN O5): transitions pushed by main + the current
@@ -735,6 +766,20 @@ export const useDeck = create<DeckState>((set, get) => ({
         },
         roadmapConflictId: s.roadmapConflictId === id ? null : s.roadmapConflictId
       }))
+    })
+  },
+  refreshPeersConfig: async () => {
+    const ok = await guarded('broker settings', async () => {
+      set({ peersConfig: await window.api.getPeersConfig() })
+    })
+    set({ peersConfigError: !ok })
+  },
+  // The main process answers with the summary RE-READ from disk, so a refused
+  // write (malformed file, non-boolean) surfaces as a toast and the checkbox
+  // snaps back to what the file actually says.
+  setOfflineReplica: async (value) => {
+    await guarded('replica mode', async () => {
+      set({ peersConfig: await window.api.setOfflineReplica(value) })
     })
   },
   openRoadmapConflict: (id) => set({ roadmapConflictId: id }),

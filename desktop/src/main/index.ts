@@ -69,6 +69,7 @@ import {
   fetchRoadmapConflicts,
   fetchRoadmapSyncStatus,
   listRoadmap,
+  RoadmapRequestError,
   upsertRoadmap
 } from './roadmap-service'
 import { createCheckpoint, purgeCheckpoints, restoreCommand } from './checkpoint-service'
@@ -1266,7 +1267,15 @@ const pollGraphDrafts = async (): Promise<void> => {
 // job. Outside replica mode the whole feature costs one probe at startup plus
 // one per broker recovery — a Deck on a plain local broker pays nothing per
 // tick, so this rides the existing timer without slowing it down.
-let roadmapSyncMode: RoadmapSyncStatus['mode'] | null = null
+/**
+ * The poll's own view of the broker, which is NOT only a protocol mode:
+ * 'legacy' marks a broker whose /roadmap/sync/status route does not exist. It
+ * never travels to the renderer -- what a legacy broker gets broadcast is the
+ * inert `{ mode: 'local' }` status below.
+ */
+type RoadmapSyncPollMode = RoadmapSyncStatus['mode'] | 'legacy'
+
+let roadmapSyncMode: RoadmapSyncPollMode | null = null
 let roadmapSyncProbeDue = true
 let lastRoadmapSyncSignature = ''
 let roadmapSyncErrorReported = false
@@ -1284,6 +1293,12 @@ function roadmapSyncSignature(status: RoadmapSyncStatus, conflicts: RoadmapSyncC
     status.since,
     status.conflicts,
     status.pending_push,
+    // Both refusal counters, because neither implies a new `last_error`: the
+    // upstream can refuse the same card twice, or refuse a lock while the
+    // latest message still names a content refusal, and the banner would then
+    // keep showing a count nobody updated.
+    status.refused,
+    status.refused_locks,
     status.last_error
   ].join('|')
   const rows = conflicts
@@ -1312,6 +1327,27 @@ const pollRoadmapSync = async (): Promise<void> => {
     }
     roadmapSyncErrorReported = false
   } catch (e) {
+    // A broker that does not serve the route is a VERSION gap, not an outage:
+    // it will answer 404 on every tick until the process ends, so the mode is
+    // parked on the terminal 'legacy' and the poll stops until the health
+    // tracker's next up-flip re-arms the probe. One inert broadcast leaves the
+    // renderer with no badge, no banner and no conflict list. A transport
+    // failure carries no status and falls through to the outage branch below.
+    if (e instanceof RoadmapRequestError && e.status === 404) {
+      if (roadmapSyncMode !== 'legacy') {
+        logInfo('roadmap', 'broker has no /roadmap/sync/status route; replication polling stopped')
+      }
+      roadmapSyncMode = 'legacy'
+      roadmapSyncProbeDue = false
+      roadmapSyncErrorReported = false
+      const inert: RoadmapSyncEvent = { status: { mode: 'local' }, conflicts: [] }
+      const signature = roadmapSyncSignature(inert.status, inert.conflicts)
+      if (signature !== lastRoadmapSyncSignature) {
+        lastRoadmapSyncSignature = signature
+        broadcast('roadmap:sync', inert)
+      }
+      return
+    }
     // One trace per outage, never one per tick: the health tracker owns the
     // broker-down banner, this only records that the replication state itself
     // went unreadable. Re-armed by the next success.

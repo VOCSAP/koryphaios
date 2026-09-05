@@ -183,7 +183,7 @@ async function ensureBroker(): Promise<void> {
   // spawned process as a zombie after the outer throw.
   if (!isLoopbackBrokerUrl(BROKER_URL)) {
     throw new Error(
-      `Broker at ${BROKER_URL} is unreachable. Remote brokers (HTTP mode) must be started manually; refusing to spawn a local broker that would not serve this URL.`
+      `Broker at ${BROKER_URL} is unreachable. Remote brokers (HTTP mode) must be started manually; refusing to spawn a local broker that would not serve this URL. If this machine must keep working while the broker is unreachable, set offline_replica: true in ~/.config/claude-peers/config.json (%APPDATA%\\claude-peers\\config.json on Windows) (or CLAUDE_PEERS_OFFLINE_REPLICA=1) to run a local replica.`
     );
   }
 

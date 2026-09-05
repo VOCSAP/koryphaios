@@ -15,6 +15,8 @@
 
 import { test, expect } from "bun:test";
 import {
+  fetchRoadmapSyncStatus,
+  RoadmapRequestError,
   sanitizeSyncConflicts,
   sanitizeSyncStatus,
 } from "../desktop/src/main/roadmap-service.ts";
@@ -162,6 +164,32 @@ test("ONE unreadable lock counter drops the WHOLE lock set, not just that counte
   expect(sanitizeSyncStatus({ mode: "replica", locks: { local: 1 } }).locks).toBeUndefined();
 });
 
+test("refused is a counter like the others, absent until a broker reports one", () => {
+  // The refusal banner is the ONLY surface naming last_error, so a fabricated
+  // zero would hide a real refusal and a fabricated count would raise a banner
+  // over nothing.
+  expect(sanitizeSyncStatus({ mode: "replica", refused: 2, last_error: "400 bad title" }).refused).toBe(2);
+  expect(sanitizeSyncStatus({ mode: "replica", refused: 0 }).refused).toBe(0);
+  expect(sanitizeSyncStatus({ mode: "replica" }).refused).toBeUndefined();
+  expect(sanitizeSyncStatus({ mode: "replica", refused: "2" }).refused).toBeUndefined();
+  expect(sanitizeSyncStatus({ mode: "replica", refused: 1.5 }).refused).toBeUndefined();
+  expect(sanitizeSyncStatus({ mode: "replica", refused: null }).refused).toBeUndefined();
+  expect(sanitizeSyncStatus({ mode: "replica", refused: NaN }).refused).toBeUndefined();
+});
+
+test("refused_locks is its own counter: a refused lock is not a refused change", () => {
+  // Both counters feed the poll's change signature, because neither implies a
+  // new last_error -- the upstream can refuse the same card twice, or refuse a
+  // lock while the message still names a content refusal.
+  const status = sanitizeSyncStatus({ mode: "replica", refused: 1, refused_locks: 2 });
+  expect(status.refused).toBe(1);
+  expect(status.refused_locks).toBe(2);
+  expect(sanitizeSyncStatus({ mode: "replica", refused: 1 }).refused_locks).toBeUndefined();
+  expect(sanitizeSyncStatus({ mode: "replica", refused_locks: "2" }).refused_locks).toBeUndefined();
+  expect(sanitizeSyncStatus({ mode: "replica", refused_locks: 1.5 }).refused_locks).toBeUndefined();
+  expect(sanitizeSyncStatus({ mode: "replica", refused_locks: NaN }).refused_locks).toBeUndefined();
+});
+
 test("extra broker fields never travel through the status pick-list", () => {
   const status = sanitizeSyncStatus({ mode: "replica", broker_token: "s3cret", replica_id: "r1" });
   expect(Object.keys(status)).not.toContain("broker_token");
@@ -189,6 +217,22 @@ test("a well-formed conflict keeps both sides and the upstream revisions", () =>
   expect(conflict!.remote.rev).toBe(12);
   expect(conflict!.remote.content_rev).toBe(9);
   expect(conflict!.base?.title).toBe("base title");
+});
+
+test("the local side is accepted as a plain item OR as an upstream row", () => {
+  // The broker may serve `local` as a bare RoadmapItem or as the row shape
+  // carrying rev/content_rev; either way the two extra counters are dropped by
+  // the pick-list and the card renders. What must NEVER travel is the
+  // attribution half: locked_by_token and operator_id do not cross in any
+  // direction, so a row shaped without them is not a degraded conflict.
+  const asRow = wellFormedItem({ title: "local title", rev: 12, content_rev: 9 });
+  delete (asRow as Record<string, unknown>).operator_id;
+  const [conflict] = sanitizeSyncConflicts([wellFormedConflict({ local: asRow })]);
+  expect(conflict).toBeDefined();
+  expect(conflict!.local.title).toBe("local title");
+  expect(Object.keys(conflict!.local)).not.toContain("rev");
+  expect(Object.keys(conflict!.local)).not.toContain("content_rev");
+  expect(Object.keys(conflict!.local)).not.toContain("locked_by_token");
 });
 
 test("a conflict missing EITHER side is dropped, never half-rendered", () => {
@@ -359,4 +403,65 @@ test("the three resolutions are exactly the ones the broker accepts", () => {
   // renders one button per entry: a fourth button could not exist without a
   // fourth entry, which the broker would then have to accept.
   expect([...ROADMAP_SYNC_RESOLUTIONS]).toEqual(["remote", "local", "merge_reopen"]);
+});
+
+// ---------------------------------------------------------------------------
+// 4. The HTTP status a failed roadmap call carries
+// ---------------------------------------------------------------------------
+// A broker too old to serve /roadmap/sync/status answers 404 on every tick,
+// forever. The poll can only stop asking if it can tell that answer from a
+// broker that is merely failing, so the status has to survive the throw --
+// before this it was flattened into a message string.
+
+async function statusOf(code: number, body: unknown): Promise<unknown> {
+  const stub = Bun.serve({
+    port: 0,
+    fetch: () =>
+      new Response(JSON.stringify(body), {
+        status: code,
+        headers: { "content-type": "application/json" },
+      }),
+  });
+  try {
+    return await fetchRoadmapSyncStatus({ url: `http://127.0.0.1:${stub.port}`, token: null }).then(
+      () => null,
+      (e: unknown) => e
+    );
+  } finally {
+    stub.stop(true);
+  }
+}
+
+test("a 404 on the sync route throws a RoadmapRequestError carrying 404 and the path", async () => {
+  const error = await statusOf(404, { error: "unknown route" });
+  expect(error).toBeInstanceOf(RoadmapRequestError);
+  expect((error as RoadmapRequestError).status).toBe(404);
+  expect((error as RoadmapRequestError).path).toBe("/roadmap/sync/status");
+});
+
+test("a failing broker is NOT mistaken for a missing route", async () => {
+  // Guarantee: only 404 parks the poll. A 500 or a 503 is an outage the next
+  // tick must retry, so the discriminator has to be the status and not the
+  // fact that something threw.
+  for (const code of [500, 502, 503, 401, 403]) {
+    const error = await statusOf(code, { error: "boom" });
+    expect((error as RoadmapRequestError).status).toBe(code);
+  }
+});
+
+test("the error message still carries the broker's own text, as before", async () => {
+  const error = await statusOf(404, { error: "unknown route" });
+  expect((error as Error).message).toBe("unknown route");
+});
+
+test("a transport failure carries NO status: it is a different failure entirely", async () => {
+  // Nothing listening: fetch rejects with its own error, which must not be
+  // read as a version gap and silence the poll for the rest of the run.
+  const dead = { url: "http://127.0.0.1:1", token: null };
+  const error = await fetchRoadmapSyncStatus(dead).then(
+    () => null,
+    (e: unknown) => e
+  );
+  expect(error).toBeInstanceOf(Error);
+  expect(error).not.toBeInstanceOf(RoadmapRequestError);
 });

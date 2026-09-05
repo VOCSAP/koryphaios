@@ -96,6 +96,18 @@ Consequence assumee : pendant une coupure, une approbation levee par un agent
 local ne peut pas etre repondue depuis un autre Deck ni via un canal de
 notification tenu par l'upstream.
 
+### 2.3 Perimetre de replication
+
+**DECIDE (2026-09-05)** -- une replica miroite TOUS les projets de son
+upstream, pas seulement celui du Deck qui l'a demarree : le pull est
+`rev > cursor` sur la table entiere, sans filtre `project_key`. Accepte : un
+broker replica sert potentiellement plusieurs projets, `RoadmapSyncStatus`
+(`conflicts`, `pending_push`) est donc un compteur GLOBAL au broker, pas par
+projet. Seul le badge du rail Deck (§9) est filtre par projet courant --
+`/roadmap/sync/conflicts` prend deja `project_key` en entree (§7) pour cet
+usage. Filtrer le pull par projet cassait le cas multi-projets d'un seul
+upstream sans rien simplifier cote protocole.
+
 ---
 
 ## 3. Modele de revision : entiers monotones, jamais des dates
@@ -157,6 +169,17 @@ helper appele depuis chaque handler. Un helper echoue OUVERT le jour ou un
 nouveau chemin d'ecriture l'oublie ; un trigger couvre `/upsert`, `/archive`,
 `/append-context`, `/reorder`, `/import`, le sweep et tout handler futur.
 
+**DECIDE (2026-09-05)** -- la promesse "un trigger couvre tout handler futur"
+est SURESTIMEE pour `/roadmap/import` : la route ecrit par `INSERT OR
+REPLACE`, qui ne declenche QUE le trigger `AFTER INSERT` (SQLite traite un
+REPLACE comme un DELETE puis un INSERT, jamais un UPDATE). Le bump
+`content_rev`/`sync_dirty` de la clause `AFTER UPDATE OF <15 colonnes>` ne
+tourne donc jamais sur un import qui ecrase une carte existante. Correction :
+`/roadmap/import`, cote handler, compare le contenu ecrit a l'ancien avant le
+`INSERT OR REPLACE` et pose `sync_dirty = 1` explicitement quand il differe --
+seule route ou le trigger ne suffit pas, et donc seule ou un bump manuel est
+justifie plutot qu'un helper generalise.
+
 - `AFTER INSERT` : `rev = content_rev = next(rev_seq)`.
 - `AFTER UPDATE` (toute colonne hors `rev`, `content_rev`, `sync_*`,
   `lock_relay_seen`) : `rev = next`.
@@ -204,6 +227,18 @@ la coupure) est resolu `local` sans intervention, avec une ligne de journal.
 Sans elle, chaque carte en cours cote replica remonterait en conflit a chaque
 reconnexion a cause du seul sweep.
 
+**DECIDE (2026-09-05)** -- condition resserree apres revue adversariale :
+l'auto-resolution ne s'applique QUE si le contenu upstream ne differe du
+`sync_base` local QUE par la transition `status: in_progress -> planned` (les
+14 autres colonnes de contenu identiques a la base). Tout autre champ
+different a cote de ce `status` reste un conflit dur, arbitre normalement.
+Le piege que ce resserrement ferme : `updated_by = 'lock-sweep'` dit
+seulement que le sweep a ete le DERNIER a ecrire la ligne upstream, pas
+qu'il en a ete le SEUL ecrivain -- un humain ayant edite la description
+juste avant que le sweep ne passe (liberant le verrou en meme temps) verrait
+son edition silencieusement ecrasee par l'auto-resolution `local` si la
+regle ne portait que sur l'auteur de la derniere ecriture.
+
 ---
 
 ## 4. File de dispatch : l'upstream l'emporte
@@ -237,8 +272,18 @@ premier passage. D'ou le relais :
   gardant le `peer_id` de l'agent en texte pour l'affichage,
   `locked_by_token = NULL` (le token de l'agent ne traverse jamais).
 - La clause 2 du sweep exempte `lock_relay IS NOT NULL AND
-  datetime(lock_relay_seen) >= datetime('now', -LOCK_GRACE_SEC)`. La clause 1
-  (TTL sans ecriture, 6 h) est inchangee.
+  datetime(lock_relay_seen) >= datetime('now', -LOCK_GRACE_SEC)`.
+
+**DECIDE (2026-09-05)** -- la clause 1 (TTL 6 h sans ecriture sur l'item)
+exempte ELLE AUSSI tout verrou relaye dont `lock_relay_seen` est frais (meme
+garde que la clause 2), pas seulement la clause 2 comme ecrit initialement :
+une carte verrouillee par un agent replica peut rester `in_progress` plus de
+6 h sans ecriture (revue longue, agent en pause) sans que le TTL la libere
+tant que le heartbeat de relais est vivant -- sinon la clause 1 relacherait
+un verrou legitime que la clause 2 venait justement d'exempter, rendant
+l'exemption de la clause 2 inoperante des que le TTL expire. La replica
+reste la seule autorite sur les verrous de SES agents : c'est son propre
+sweep local (§5.1), pas le TTL upstream, qui decide de leur relachement.
 - Quand la replica coupe, le relais se tait, la grace s'ecoule, le sweep
   relache : Bob n'est pas bloque des jours par une machine absente. C'est la
   semantique actuelle « silence du proprietaire = verrou abandonne ».
@@ -273,18 +318,99 @@ colonnes de verrou recues.
 
 ## 6. Frontiere de confiance
 
+**DECIDE (2026-09-05)** -- section reecrite apres revue adversariale : la
+version initiale ("l'upstream fait confiance au relais", `deck`/`operator`
+conserves tels quels) ouvrait une usurpation d'attribution triviale --
+n'importe quelle replica pouvait pousser `updated_by: 'operator'` ou
+`updated_by: 'deck'` et l'upstream l'aurait affiche comme une ecriture
+locale legitime.
+
 - La replica s'authentifie aupres de l'upstream par `broker_token` (Bearer),
-  comme tout client HTTP. Elle est donc de confiance AU NIVEAU DU TOKEN.
+  comme tout client HTTP. Elle est donc de confiance AU NIVEAU DU TOKEN --
+  mais ce niveau ne couvre PAS l'attribution individuelle (voir plus bas).
+- Les routes de replication `/roadmap/sync/pull|push|lock` sont refusees 403
+  si l'upstream n'a PAS de `broker_token` CONFIGURE : sans token, n'importe
+  quel processus loopback pourrait se faire passer pour une replica de
+  confiance -- c'est une garde SUPPLEMENTAIRE, specifique a la replication,
+  qui s'ajoute au Bearer ordinaire, elle ne le remplace pas.
+
+  **DECIDE (2026-09-05)**, precision apres revue adversariale : `/roadmap/
+  sync/status` n'est dispensee QUE de cette garde-la (elle n'exige pas que
+  l'upstream ait un token configure pour repondre, contrairement a
+  pull|push|lock). Elle reste soumise au controle Bearer GENERIQUE du
+  broker (`unauthorizedIfToken` dans `broker.ts`), qui s'applique a TOUTE
+  route hors `/health` des qu'un `broker_token` est configure sur CE
+  broker -- l'enonce initial ("reste accessible sans token, comme
+  `/health`") etait faux : `/health` a une exemption explicite dans le
+  `fetch` handler, `/roadmap/sync/status` n'en a aucune. Un appelant sans
+  Bearer valide contre un broker qui a un token configure recoit donc 401
+  sur `/roadmap/sync/status` comme sur n'importe quelle autre route.
 - `locked_by_token` et `operator_id` ne traversent jamais la frontiere, dans
   aucun sens : la projection des lignes de `/roadmap/sync/pull` est une
   pick-list (jamais un rest-spread), et un test affirme l'absence du champ.
+  `operator_id` upstream : valeur existante conservee ou NULL, jamais celle
+  de la replica -- inchange.
 - `/roadmap/sync/push` re-valide `created_by`/`updated_by` par
-  `normalizeAuthorIdentity` (charset `[a-z0-9:_-]`) mais CONSERVE le nom
-  transmis, y compris `deck` : la replica a verifie la signature localement,
-  l'upstream fait confiance au relais. `operator_id` upstream : valeur
-  existante conservee ou NULL, jamais celle de la replica.
+  `normalizeAuthorIdentity` (charset `[a-z0-9:_-]`) puis reattribue :
+  - un nom qui est une identite RESERVEE (`deck`, `operator`) ou un `peer_id`
+    deja enregistre COTE UPSTREAM est stocke `via:<replica8>:<name>`
+    (`replica8` = 8 premiers caracteres du `replica_id`) -- la provenance
+    reste lisible sans permettre l'usurpation ;
+  - un nom inconnu de l'upstream (agent local a la replica, jamais vu
+    upstream) est conserve tel quel : c'est un pair legitime qui n'a
+    simplement pas de presence upstream (federation = §10) ;
+  - au pull, la replica retire son PROPRE prefixe `via:<replica8-local>:`
+    des lignes qu'elle recoit (ses propres ecritures relues via l'upstream
+    ne doublent pas le prefixe a chaque aller-retour). Un `via:<autre8>:`
+    d'une AUTRE replica est laisse tel quel : c'est une attribution
+    legitime a tracer, pas a masquer.
+
+  **DECIDE (2026-09-05)**, modele de provenance precise honnetement apres
+  revue adversariale -- ce que `via:<replica8>:<name>` garantit et ce qu'il
+  NE garantit PAS :
+  - le prefixe est ASSERTE par la replica qui relaie, pas verifie
+    independamment : l'upstream lui fait confiance AU NIVEAU DU TOKEN
+    (meme niveau que le reste de §6), pas au niveau de l'identite
+    individuelle qu'il porte -- une replica compromise mais dont le token
+    reste valide peut mentir sur le `<name>` qu'elle relaie, exactement
+    comme elle pourrait deja le faire pour un pair inconnu (branche
+    precedente).
+  - l'upstream REFUSE (400) un `created_by`/`updated_by` pousse qui porte
+    DEJA un prefixe `via:<autre8>:` (usurpation de la provenance d'une AUTRE
+    replica). Un `lock-sweep` pousse est REECRIT comme un nom reserve
+    (`via:<replica8>:lock-sweep`) et non refuse : le sweep local d'une
+    replica est un evenement reel qui doit voyager, mais sous ce prefixe il
+    ne qualifie jamais l'auto-resolution d'un autre broker (§3.5 lit le
+    `updated_by` brut, donc seul le sweep de l'upstream lui-meme compte).
+    Sans cette garde, une replica pourrait forger `updated_by: 'lock-sweep'`
+    pour faire passer sa propre ecriture comme eligible a l'auto-resolution
+    silencieuse d'une AUTRE replica au prochain conflit.
+  - un `created_by`/`updated_by` qui porte DEJA le PROPRE prefixe
+    `via:<replica8>:` de la replica qui pousse (rejoue d'une ligne deja
+    relayee) est conserve TEL QUEL, idempotent -- il n'est jamais
+    re-enveloppe (`via:X:via:X:name`).
+  - un nom inconnu de l'upstream AU MOMENT DU PUSH est stocke verbatim
+    (branche precedente) ; c'est un TOCTOU assume : si ce `peer_id`
+    s'enregistre plus tard cote upstream, les lignes deja poussees avant
+    son enregistrement restent verbatim et se lisent comme une ecriture
+    upstream native, alors qu'elles viennent bien de la replica. Aucune
+    reecriture retroactive n'est prevue -- seule une NOUVELLE ecriture
+    apres l'enregistrement du peer declenche le prefixage.
+- Une carte verrouillee upstream par un holder que la replica ne relaie pas
+  (`lock_scope` local absent de la carte, verrou upstream tenu par un tiers)
+  refuse tout `push` dessus : 409 `{ error: 'conflict', reason:
+  'locked_upstream', item }`. Cote replica ce refus se presente comme un
+  conflit ordinaire (§3.4/§8) -- l'operateur ne peut alors que prendre la
+  version upstream (`resolve remote`) tant que le verrou tient : c'est le
+  mecanisme qui remplace un "ils resoudront au commit/push/pull" implicite
+  par un arbitrage explicite dans le Deck plutot qu'un ecrasement silencieux.
 - `/roadmap/sync/resolve` est une ecriture Deck : signee `by='deck'` via
-  `resolveRoadmapAuthor`, comme `/roadmap/upsert`.
+  `resolveRoadmapAuthor`, comme `/roadmap/upsert` -- inchange, c'est une
+  ecriture LOCALE a la replica, jamais relayee telle quelle upstream.
+- `/roadmap/sync/conflicts` projette les DEUX cotes (local et `sync_remote`)
+  a travers la MEME pick-list que `/roadmap/sync/pull` : un champ absent du
+  pull (`locked_by_token`, `operator_id`) est absent de la vue conflit, sans
+  liste separee a maintenir.
 - Les routes `/roadmap/sync/*` sont des routes ordinaires du `switch` : le
   Bearer s'applique, et `replica_id` est un identifiant (uuid persiste dans
   `roadmap_sync_meta`), pas un secret.
@@ -298,7 +424,7 @@ Toutes en `POST`, JSON, `{ error, status }` en echec comme les autres routes.
 | Route | Corps | Reponse |
 |---|---|---|
 | `/roadmap/sync/pull` | `{ replica_id, since_rev, limit? }` | `{ items: RoadmapSyncRow[], next_rev }` -- lignes `rev > since_rev`, ordre `rev`, `limit <= 500` (defaut 500) ; `next_rev` = plus grande `rev` renvoyee ou `since_rev` |
-| `/roadmap/sync/push` | `{ replica_id, item: RoadmapSyncPushItem, expected_content_rev }` | 200 `{ item: RoadmapSyncRow, rev, content_rev }` (jamais un `RoadmapItem` : il porterait `locked_by_token`) ; 409 `{ error: 'conflict', item }` si `content_rev` upstream differe (ou ligne existante avec `expected = null`) ; 409 `{ error: 'conflict', item: null }` si `expected != null` et ligne absente |
+| `/roadmap/sync/push` | `{ replica_id, item: RoadmapSyncPushItem, expected_content_rev }` | 200 `{ item: RoadmapSyncRow, rev, content_rev }` (jamais un `RoadmapItem` : il porterait `locked_by_token`) ; 409 `{ error: 'conflict', item }` si `content_rev` upstream differe (ou ligne existante avec `expected = null`) ; 409 `{ error: 'conflict', item: null }` si `expected != null` et ligne absente ; 409 `{ error: 'conflict', reason: 'locked_upstream', item }` si la carte est verrouillee upstream par un holder non relaye par cette replica (§6) ; 403 si l'upstream n'a pas de `broker_token` configure (§6) |
 | `/roadmap/sync/lock` | `{ replica_id, id, action: 'claim'\|'release', owner: { peer_id, group_id } }` | claim : 200 `{ scope: 'global', item }` ou 409 `{ scope: 'contested', item }` ; release : 200 `{ released: boolean, item }` |
 | `/roadmap/sync/status` | `{}` | `RoadmapSyncStatus` (replica) ; `{ mode: 'upstream' }` ou `{ mode: 'local' }` sinon |
 | `/roadmap/sync/conflicts` | `{ project_key }` | `{ items: RoadmapConflict[] }` |
@@ -306,7 +432,11 @@ Toutes en `POST`, JSON, `{ error, status }` en echec comme les autres routes.
 
 Semantique de `push` : applique les 15 colonnes de contenu + `updated_by`,
 `updated_at`, `created_by`, `created_at` (celles-ci seulement a l'insertion).
-Ne touche ni `queue`, ni les colonnes de verrou, ni `operator_id`.
+Ne touche ni `queue`, ni les colonnes de verrou, ni `operator_id`. Refuse la
+carte verrouillee upstream par un holder non relaye (§6, `locked_upstream`).
+`created_by`/`updated_by` transmis sont reattribues avant ecriture selon la
+regle du §6 (`via:<replica8>:<name>` pour une identite reservee ou un
+`peer_id` deja connu de l'upstream, conserve tel quel sinon).
 
 Semantique de `lock claim` : autorise si la carte est libre OU si
 `lock_relay === replica_id AND locked_by === owner.peer_id` (re-assertion) ;
@@ -341,6 +471,20 @@ puis retour a la cadence nominale au premier succes. Etat `online` avec
 hysteresis (2 echecs consecutifs -> offline, 1 succes -> online), transitions
 journalisees UNE fois chacune (`shared/logger.ts`), jamais a chaque tick.
 
+**DECIDE (2026-09-05)** -- l'upstream d'une replica DOIT avoir un
+`broker_token` configure (§6) : sans lui, TOUTES les routes de replication
+(pull, push, lock) repondent 403 des le premier appel. Ce 403-la n'a rien a
+voir avec le 403 par-carte du push (ci-dessous) : il touche le PASSAGE
+ENTIER (le pull lui-meme echoue, il n'y a donc rien a synchroniser), la
+replica le traite comme un upstream INJOIGNABLE et il compte pour la
+hysteresis `online`/`offline` comme une panne reseau -- ce n'est pas une
+exception a la regle "seuls le reseau et les 5xx comptent pour offline",
+c'est un echec DE PASSAGE plutot qu'un refus D'UNE CARTE. Cote broker, le
+demarrage de la replica journalise une erreur EXPLICITE des ce premier
+echec (plutot que de laisser le backoff generique masquer la cause) : un
+operateur qui a oublie le token le voit nomme dans les logs, au lieu de
+decouvrir une replica "hors ligne" sans explication apparente.
+
 Ordre d'un passage :
 
 1. **Pull** en boucle tant que `items.length === limit`. Par ligne recue :
@@ -363,9 +507,30 @@ Ordre d'un passage :
    sync_base_rev = ?, sync_base = ?, sync_dirty = CASE WHEN content_rev = ?
    THEN 0 ELSE sync_dirty END` (le `content_rev` lu avant l'envoi : une
    ecriture locale survenue pendant l'aller-retour reste dirty et repart au
-   tick suivant avec la bonne base). Sur 409 : conflit avec l'item renvoye.
+   tick suivant avec la bonne base). Sur 409 : conflit avec l'item renvoye
+   (y compris `reason: 'locked_upstream'`, §6).
+
+   **DECIDE (2026-09-05)** -- un push refuse par un 4xx AUTRE que 409 (400
+   payload invalide, etc. -- le 403 sans token amont est un echec de PASSAGE,
+   voir plus haut) est isole PAR CARTE : la ligne fautive est journalisee une
+   fois par carte et par message (pas a chaque tick si l'erreur persiste),
+   comptee `refused` dans `RoadmapSyncStatus`, `last_error` nomme la derniere
+   raison ; la passe CONTINUE sur les cartes suivantes et ne bascule jamais
+   `online = false` pour cette seule cause -- seuls un echec reseau ou un 5xx
+   comptent pour la hysteresis online/offline (une erreur de payload sur une
+   carte ne dit rien de la joignabilite de l'upstream).
+
+   **DECIDE (2026-09-05)**, precision de cadence -- une ligne `refused` est
+   EXCLUE du lot de push du tick suivant (elle ne repart pas immediatement se
+   refaire refuser) et repasse sur une cadence PLUS LENTE dediee aux lignes
+   refusees, pour qu'une carte durablement invalide ne monopolise pas chaque
+   passage au detriment des lignes saines.
 3. **Verrous** : `claim` pour `local`/`global`/`contested`, `release` pour
-   `release_pending` ; `lock_scope` mis a jour d'apres la reponse.
+   `release_pending` ; `lock_scope` mis a jour d'apres la reponse. Un `claim`
+   ou `release` refuse par un 4xx (hors 409 `contested`, une reponse
+   normale) est compte `refused_locks` dans `RoadmapSyncStatus`, meme
+   traitement que les pushs refuses (isole par carte, cadence de retry
+   ralentie, jamais de bascule offline pour cette seule cause).
 
 Au premier demarrage : `replica_id = randomUUID()` persiste ; `upstream_cursor
 = 0` -> pull integral. Le predicat « a pousser » est `sync_state = 'clean' AND
@@ -375,6 +540,12 @@ preexistantes (jamais synchronisees) partent comme nouvelles (`expected =
 null`) sans avoir a etre dirty. Le push n'applique ni la garde de verrou ni
 la garde `inactive` (une edition hors ligne deviendrait a jamais
 impoussable) ; `/roadmap/sync/lock` applique la garde `inactive`.
+
+**DECIDE (2026-09-05)** -- semantique de l'instantane de statut : `refused`
+(pushs) et `refused_locks` (claims/releases) sont publies dans
+`RoadmapSyncStatus` a la FIN de chaque passage, aux cotes de `online` et
+`last_error` -- un seul instantane coherent, jamais des compteurs mis a jour
+au milieu d'un passage en cours que le Deck pourrait lire a mi-chemin.
 
 ---
 
@@ -386,9 +557,10 @@ impoussable) ; `/roadmap/sync/lock` applique la garde `inactive`.
   `pollGraphDrafts`. En mode `local`/`upstream`, un seul appel `status` au
   demarrage puis plus rien.
 - Rail : badge numerique sur l'entree Roadmap = nombre de conflits (meme
-  `nav-rail-badge` que l'inbox). Banniere d'etat (ton info, pas erreur) tant
-  que `online = false` en mode replica : « broker distant injoignable, travail
-  hors ligne, N modifications en attente ».
+  `nav-rail-badge` que l'inbox, filtre au projet courant via
+  `/roadmap/sync/conflicts`, §2.3). Banniere d'etat (ton info, pas erreur)
+  tant que `online = false` en mode replica : « broker distant injoignable,
+  travail hors ligne, N modifications en attente ».
 - Cartes : `sync_state = 'conflict'` -> cerclage `--danger` ; `lock_scope =
   'remote'` -> glyphe verrou existant avec le titre « verrou distant (peer) »
   ; `lock_scope = 'contested'` -> cerclage d'avertissement.
@@ -399,22 +571,66 @@ impoussable) ; `/roadmap/sync/lock` applique la garde `inactive`.
   `sanitizeRoadmapItem` (pick-list) gagnent `sync_state`, `lock_scope`,
   `lock_contested_by` avec defauts surs.
 
+**DECIDE (2026-09-05)**, ajouts issus de la revue adversariale :
+
+- Banniere d'etat : quand plusieurs conditions coexistent, priorite
+  d'affichage `broker local injoignable` (cas degrade le plus grave, rien ne
+  synchronise) > `N conflits a arbitrer` > `N pushs refuses` > info hors
+  ligne simple (`online = false` sans conflit ni refus). Le libelle
+  « N conflits a arbitrer » s'affiche des que `RoadmapSyncStatus.conflicts >
+  0`, meme `online = true` (un conflit ne se resout pas tout seul en
+  revenant en ligne). `last_error` (§8) est rendu dans le detail de la
+  banniere quand present.
+- Nouvelle categorie Settings « Broker » dans le Deck : affiche le mode
+  (`local`/`remote`/`replica`), l'URL amont, et si un token est configure
+  (jamais le token lui-meme) ; porte une case a cocher qui ecrit
+  `offline_replica` dans le MEME fichier `config.json` de claude-peers que
+  lisent `server.ts`/`cli.ts` (§ README, "Sessions outside Kory") -- pas un
+  reglage Deck-only. Desactivee (grisee, avec l'explication) quand le mode
+  est force par l'environnement (`CLAUDE_PEERS_OFFLINE_REPLICA` deja
+  positionne) ou quand aucun `broker_url` n'est configure (rien a repliquer,
+  §2.1). Le changement s'applique aux brokers/sessions demarres APRES
+  l'ecriture -- pas de bascule a chaud d'un broker deja lance (§2.1 :
+  `ensureBroker()` decouvre son mode a son propre demarrage).
+
 ---
 
 ## 10. Refuse ou differe (repris dans `BACKLOG.md`)
 
 - **Federation peers/messages** (relais des enregistrements et messages
-  inter-machines via la replica) : phase 2, gros lot. En v1, en mode
-  replica, la messagerie est locale a la machine -- regression assumee par
-  rapport au mode `remote` pour les messages inter-PC, compensee par la
-  continuite hors ligne.
+  inter-machines via la replica) : phase 2, gros lot -- DEVENU LE PREMIER
+  item de `BACKLOG.md` §3.9 apres la revue adversariale.
+  **DECIDE (2026-09-05)** -- en v1, la messagerie inter-PC est locale a la
+  machine EN MODE REPLICA, MEME EN LIGNE (pas seulement pendant une
+  coupure) : l'operateur a valide ce compromis en connaissance de cause, en
+  echange de la continuite hors ligne de la roadmap -- peers et messages
+  restent portes par le broker loopback de chaque machine, jamais relayes
+  vers l'upstream tant que la federation n'est pas livree.
 - **Fusion automatique par champ** : refusee (§3.5).
 - **Toast Deck « N positions de file perdues »** : journal seul en v1.
 - **Grace de vivacite a 1 h** : non retenue. A 600 s, une carte dont l'agent a
-  plante est liberee en 10 min ; a 1 h elle bloque l'equipe une heure. La
-  tolerance a la coupure est portee par le broker local, qui ne relache rien.
+  plante est liberee en 10 min ; a 1 h elle bloque l'equipe une heure.
+
+  **DECIDE (2026-09-05)** -- correction : l'enonce "le broker local... ne
+  relache rien" etait FAUX. Le sweep LOCAL de la replica relache
+  normalement les verrous `local`/`global`/`contested` (memes regles
+  qu'un broker `local`/`remote` ordinaire, §5.1) ; SEUL le verrou de
+  portee `remote` (miroir d'un verrou tenu par un tiers upstream, §5.2) en
+  est exempte -- il n'est pas "a lui" a relacher, il suit l'etat upstream.
+  La tolerance a la coupure porte donc uniquement sur les verrous relayes
+  upstream (§5, exemption `lock_relay_seen`), pas sur une supposee
+  inertie generale du sweep local.
 - **Confiance relais pour `operator_id`** : jamais transmis ; si un besoin de
   provenance operateur inter-brokers apparait, il passera par une signature
   verifiable upstream, pas par un champ declare.
 - **Outil MCP exposant `lock_contested_by` aux agents natifs** : l'annotation
   est stockee et visible du Deck ; l'exposition aux agents est a mesurer.
+- **Le Deck ne demarre pas le broker loopback lui-meme**, en mode local
+  comme en mode replica : c'est une session (`server.ts`, via
+  `ensureBroker()`) qui le fait naitre au demarrage. **DECIDE (2026-09-05)**
+  -- consequence assumee, listee ici en suivi : un Deck ouvert sans aucune
+  session active ne peut pas lire la roadmap replica (pas de broker
+  loopback vivant a interroger) -- c'est exactement le comportement deja en
+  vigueur en mode `local` aujourd'hui, pas une regression introduite par ce
+  lot. Faire demarrer le broker depuis le Deck lui-meme (independamment de
+  toute session) reste a cadrer separement.

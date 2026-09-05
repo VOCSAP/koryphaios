@@ -82,9 +82,35 @@ Set `offline_replica: true` alongside `broker_url`. Clients (`server.ts`, the De
 
 Scope of this mode:
 
-- Only `roadmap_items` is replicated. `peers` and `messages` stay local to this machine: cross-PC messaging in this mode is a known regression versus Mode 2, traded for offline continuity.
+- Only `roadmap_items` is replicated. `peers` and `messages` stay local to this machine, **even while online**: in replica mode, inter-PC messaging is a known regression versus Mode 2, traded for offline continuity, until federation ships (see `BACKLOG.md` §3.9).
 - `offline_replica` requires a remote `broker_url` to have any effect -- setting it without `broker_url` is equivalent to Mode 1 (nothing to replicate against).
-- The replica broker authenticates to its upstream with the same `broker_token` both read from this same config; there is no separate replica credential.
+- The replica broker authenticates to its upstream with the same `broker_token` both read from this same config; there is no separate replica credential. The upstream **must** have that token configured before it will serve the `/roadmap/sync/pull|push|lock` routes at all -- an upstream with no `broker_token` refuses replication outright (403), and the replica treats that exactly as an unreachable upstream (same online/offline hysteresis as a network outage). The replica logs an explicit startup error the first time this happens, rather than leaving the operator to guess why it never comes online.
+- A push onto a card locked upstream by a peer this replica does not relay comes back as a conflict in the Deck (`reason: 'locked_upstream'`): the operator can only take the upstream version while that lock holds.
+
+### Sessions outside Kory (global claude.json MCP entry)
+
+Nothing changes in a standalone MCP entry for a session outside Kory --
+still `bun ~/koryphaios/server.ts` and, if you use one, the `CLAUDE_PEERS_GROUP`
+env var. The mode (`local`/`remote`/`replica`) is resolved from the *same*
+claude-peers settings file every consumer reads (`%APPDATA%\claude-peers\config.json`
+on Windows, `$XDG_CONFIG_HOME/claude-peers/config.json` when `XDG_CONFIG_HOME`
+is set, otherwise `~/.config/claude-peers/config.json` on Linux/macOS) plus the
+`CLAUDE_PEERS_*` environment -- so setting `"offline_replica": true` in that
+file (or `CLAUDE_PEERS_OFFLINE_REPLICA=1` in the user environment) switches
+*every* consumer at once: Kory's sessions, standalone sessions, and `cli.ts`.
+
+**Kory and standalone sessions must agree on the mode.** A standalone
+session left in `remote` would talk to the upstream broker directly while
+Kory's agents talk to the local replica -- splitting locks and messaging
+across two brokers that never see each other's writes except through the
+replication tick. Put the `offline_replica` flag in the shared config file
+or the user environment, never only inside one MCP entry's `env` block.
+
+The replica requires the same `broker_token` as the upstream from every
+local client; a standalone session that already has the token configured
+(env var or settings file) needs nothing else to keep working under replica
+mode. Kory's Settings -> Broker toggle (see `docs/DESIGN-OFFLINE-REPLICA.md`
+§9) writes `offline_replica` into that same shared `config.json`.
 
 See `docs/DESIGN-OFFLINE-REPLICA.md` for the full protocol.
 
@@ -447,7 +473,7 @@ Every setting can be provided via an environment variable or via a JSON settings
 | `CLAUDE_PEERS_BROKER_URL`            | `broker_url`           | (none)                               | server                | HTTP mode: direct broker URL (e.g. `http://my-server:7899`). Overrides loopback. |
 | `CLAUDE_PEERS_BROKER_TOKEN`          | `broker_token`         | (none)                               | broker + server       | Bearer token for broker auth. Broker requires it on all requests (except `/health`); server sends it on every call. |
 | `CLAUDE_PEERS_BIND_HOST`             | `bind_host`            | `127.0.0.1`                          | broker                | Broker bind address. Set `0.0.0.0` to accept external connections.     |
-| `CLAUDE_PEERS_OFFLINE_REPLICA`       | `offline_replica`      | `false`                              | broker / server / cli / Deck | Opt-in for Mode 3 (see [Two deployment modes](#two-deployment-modes)). Accepts `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitive; anything else falls back to the settings-file value. Has no effect without a remote `broker_url`. |
+| `CLAUDE_PEERS_OFFLINE_REPLICA`       | `offline_replica`      | `false`                              | broker / server / cli / Deck | Opt-in for Mode 3 (see [Two deployment modes](#two-deployment-modes)). Accepts `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitive; anything else falls back to the settings-file value. Has no effect without a remote `broker_url`. The upstream must have a `broker_token` configured, or it refuses (403) the `/roadmap/sync/pull|push|lock` routes this mode depends on. |
 | `CLAUDE_PEERS_SYNC_TICK_MS`          | (n/a)                  | `5000`                               | broker                | Mode 3 only: cadence of the replica's pull/push/lock sync pass against its upstream. |
 | `CLAUDE_PEERS_STATUS_LINE_CACHE`     | (n/a)                  | (unset = off)                        | server                | Opt-in: when truthy (`1`, `true`, `yes`, `on`, case-insensitive), `server.ts` writes the active `peer_id` to `$HOME/.claude/peers/peer-id-<cwd_key>-<session_id>.txt` (per-session, from `CLAUDE_CODE_SESSION_ID`) on every register so a status-line script can read it; it falls back to the legacy `peer-id-<cwd_key>.txt` when the session id is unset. Any other value (or unset) disables the write. See [Status-line integration](#status-line-integration). |
 

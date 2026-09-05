@@ -43,6 +43,8 @@ export const COMPANION_MANIFEST = {
   // config / i18n
   getConfig: { kind: 'invoke', channel: 'config:get' },
   setConfig: { kind: 'invoke', channel: 'config:set' },
+  getPeersConfig: { kind: 'invoke', channel: 'peersConfig:get' },
+  setOfflineReplica: { kind: 'invoke', channel: 'peersConfig:setOfflineReplica' },
   pickDirectory: { kind: 'invoke', channel: 'dialog:pickDirectory' },
   getI18n: { kind: 'invoke', channel: 'i18n:get' },
 
@@ -202,6 +204,7 @@ export const COMPANION_MANIFEST = {
   onPendingApprovals: { kind: 'event', channel: 'approvals:pending' },
   onGraphDrafts: { kind: 'event', channel: 'graphDrafts:update' },
   onRoadmapSync: { kind: 'event', channel: 'roadmap:sync' },
+  onPeersConfig: { kind: 'event', channel: 'peersConfig:summary' },
   onInboxOpen: { kind: 'event', channel: 'inbox:open' },
   onFocusSession: { kind: 'event', channel: 'session:focus' },
   onDesignPick: { kind: 'event', channel: 'design:pick' },
@@ -308,6 +311,9 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'sessions:list': 0,
   'sessions:peek-next-color': 0,
   'config:get': 0,
+  // Read-only, and deliberately secret-free: the summary carries a yes/no
+  // token marker, never the bearer token itself.
+  'peersConfig:get': 0,
   'i18n:get': 0,
   'workspace:list': 0,
   'workspace:current': 0,
@@ -446,6 +452,12 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'sandbox:reset-copy': 2,
 
   'config:set': 3,
+  // Trust-changing, one notch beyond config:set: this writes the claude-peers
+  // CORE config, which decides which broker every agent on this machine talks
+  // to -- not just this Deck window. Tier 3 puts it on the remote-blocked
+  // floor by construction, which is the intent: a paired phone must never
+  // repoint the machine's brokers.
+  'peersConfig:setOfflineReplica': 3,
   'launch:set-global': 3,
   // Trust-changing: stops every live tile at once (pause/soft/hard), the
   // remote-companion equivalent of pulling the plug on the whole session.

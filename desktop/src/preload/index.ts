@@ -10,6 +10,7 @@ import type {
   HelpSelection,
   InboxMessage,
   LaunchConfig,
+  PeersConfigSummary,
   PtyDataEvent,
   PtyExitEvent,
   RoadmapListFilters,
@@ -100,6 +101,8 @@ const api: DeckApi = {
 
   getConfig: () => ipcRenderer.invoke('config:get'),
   setConfig: (patch: Partial<AppConfig>) => ipcRenderer.invoke('config:set', patch),
+  getPeersConfig: () => ipcRenderer.invoke('peersConfig:get'),
+  setOfflineReplica: (value: boolean) => ipcRenderer.invoke('peersConfig:setOfflineReplica', value),
   pickDirectory: () => ipcRenderer.invoke('dialog:pickDirectory'),
 
   getI18n: () => ipcRenderer.invoke('i18n:get'),
@@ -253,6 +256,7 @@ const api: DeckApi = {
   onPendingApprovals: (cb) => subscribe('approvals:pending', cb),
   onGraphDrafts: (cb) => subscribe('graphDrafts:update', cb),
   onRoadmapSync: (cb: (event: RoadmapSyncEvent) => void) => subscribe('roadmap:sync', cb),
+  onPeersConfig: (cb: (summary: PeersConfigSummary) => void) => subscribe('peersConfig:summary', cb),
   onInboxOpen: (cb: () => void) => subscribe('inbox:open', () => cb()),
   onFocusSession: (cb: (id: string) => void) => subscribe('session:focus', cb),
   onDesignPick: (cb: (event: DesignPickEvent) => void) => subscribe('design:pick', cb),

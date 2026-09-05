@@ -67,6 +67,11 @@
      window. This value is the most complete of those four; declaring it here is
      what makes `var(--mono, …)` mean something. */
   --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+  /* Checkbox tick drawn by us, same reason as --select-arrow: `appearance:
+     none` is what themes the box, and it takes the native tick with it. One
+     declaration for both themes -- the tick sits on --accent, whose foreground
+     is white in light and dark alike. */
+  --check-mark: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 10'%3E%3Cpath d='M1 5l3.5 3.5L11 1.5' fill='none' stroke='%23ffffff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   font-size: 13px;
 }
@@ -1184,6 +1189,46 @@ input[type='radio']:disabled {
   cursor: default;
 }
 
+/* Every checkbox, element-level for the same reason as <select> and <radio>
+   above (DESIGN.md §3): the native box ignores data-theme, so an unstyled one
+   is a white square with an OS-blue tick sitting on a dark panel. Styling the
+   ELEMENT is what themes the next checkbox the day it is written; a per-row
+   class would only fix the one being looked at.
+
+   The tick is a background image over the accent fill (--check-mark), not a
+   ::after: Chromium renders no generated content inside a replaced <input>,
+   the same trap the radio's dot documents just above. */
+input[type='checkbox'] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  flex: none;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background-color: var(--bg);
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 10px 8px;
+  cursor: pointer;
+}
+
+input[type='checkbox']:hover:not(:disabled):not(:checked) {
+  border-color: color-mix(in srgb, var(--fg-dim) 60%, var(--border));
+}
+
+input[type='checkbox']:checked {
+  border-color: var(--accent);
+  background-color: var(--accent);
+  background-image: var(--check-mark);
+}
+
+input[type='checkbox']:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* Every <textarea>, element-level for the same reason as <select> above
    (DESIGN.md §3: no control keeps its native look): an unclassed textarea is
    a white square on Windows. Scoped rules (.field textarea, .msheet-textarea)
@@ -1367,12 +1412,25 @@ textarea:disabled {
   border-bottom: 1px solid #c04545;
 }
 
-/* Offline replica: the LOCAL broker is up, only its upstream is unreachable.
-   Info tone (the amber of the info toast), never the outage red -- nothing is
-   broken, the sharing with the other machines is merely paused. */
-.status-banner-info {
+/* Warning: replication conflicts awaiting arbitration, or changes the upstream
+   refused. The amber of DESIGN.md's transient/warning states -- the link works
+   and the Deck works, but something is stuck and only the operator can move
+   it. */
+.status-banner-warn {
   background: #9a6700;
   border-bottom: 1px solid #b9770e;
+}
+
+/* Offline replica: the LOCAL broker is up, only its upstream is unreachable.
+   The three tones must be readable as a ladder (neutral < amber < red), so
+   this one is the neutral inset surface rather than a second amber: nothing is
+   broken, the sharing with the other machines is merely paused, and there is
+   nothing for the operator to do. Overrides the strip's white text, which only
+   suits the two filled tones. */
+.status-banner-info {
+  background: var(--bg-3);
+  color: var(--fg);
+  border-bottom: 1px solid var(--border);
 }
 
 .status-banner-text {
@@ -6890,6 +6948,65 @@ svg.glyph {
   color: var(--fg-dim);
   font-size: 11px;
   white-space: nowrap;
+}
+
+/* ----- Broker category: read-only report of the claude-peers core config ----- */
+
+/* The three deployment shapes as a ladder, the active one lifted out of the
+   list. Not a <select>: nothing here is chosen, the mode is DERIVED from the
+   file and from the env, and a dropdown would promise an edit that does not
+   exist. */
+.settings-broker-modes {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-broker-mode {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: var(--fg-dim);
+}
+
+.settings-broker-mode.is-active {
+  border-color: var(--accent);
+  background: var(--selected);
+  color: var(--fg);
+}
+
+.settings-broker-mode-name {
+  font-weight: 500;
+}
+
+.settings-broker-mode-help {
+  font-size: 12px;
+}
+
+/* A resolved value the operator can read and copy, never type into. */
+.settings-broker-value {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+/* Why a control right above is disabled. Amber like every other "stuck, and
+   the operator has to move something" state. */
+.settings-broker-note {
+  color: #9a6700;
 }
 
 /* ==========================================================================

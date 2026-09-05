@@ -32,7 +32,8 @@ import { APP_STATE_SUBDIR } from './migrate-data-dir'
 import { buildHelpPrompt, buildHelpSystemPrompt, sanitizeHelpSelection } from './help-assistant'
 import { buildWandPrompt, WAND_SYSTEM_PROMPT, type WandDraft } from './context-wand'
 import { runUtilityInference, type UtilityDeps } from './utility-inference'
-import { markGraphDraftOpened, resolveBrokerEndpoint } from './broker-client'
+import { markGraphDraftOpened, peersConfigPath, resolveBrokerEndpoint } from './broker-client'
+import { readPeersConfigSummary, writeOfflineReplica } from './peers-config-store'
 import type { BrokerStatusEvent } from './broker-client'
 import {
   appendAckedKey,
@@ -686,6 +687,24 @@ export function registerIpc({
     ...setConfig(patch ?? {}),
     localProviders: sanitizeProviders(getConfig().localProviders ?? [])
   }))
+  // ----- claude-peers core config (Settings > Broker) -----
+  // The FILE PATH is resolved main-side and is never a renderer argument, so
+  // the only untrusted value crossing this boundary is the boolean --
+  // re-validated by writeOfflineReplica, which refuses anything else rather
+  // than coercing it. The read reports the bearer token as a yes/no marker;
+  // the value never leaves the main process.
+  regHandle('peersConfig:get', () => readPeersConfigSummary(peersConfigPath()))
+  regHandle('peersConfig:setOfflineReplica', (_e, value: unknown) => {
+    const path = peersConfigPath()
+    writeOfflineReplica(path, value)
+    // Re-read instead of echoing what was just written: the panel must show
+    // the FILE (another process may have set keys this one never saw), and the
+    // broadcast carries the same summary to every other surface.
+    const summary = readPeersConfigSummary(path)
+    broadcast('peersConfig:summary', summary)
+    return summary
+  })
+
   regHandle('dialog:pickDirectory', async () => {
     const win = getWindow()
     const res = await dialog.showOpenDialog(win ?? undefined!, {

@@ -21,15 +21,23 @@ import type {
   DispatchRequestOutcome,
   DispatchRequestResolveRequest
 } from '../../../shared/types'
+import type { DeckBrokerMode } from '../shared/types'
 
 export interface BrokerEndpoint {
   url: string
   token: string | null
 }
 
-export type DeckBrokerMode = 'local' | 'remote' | 'replica'
+/**
+ * The three deployment shapes, declared once in the renderer-facing types and
+ * re-exported here: the Settings panel and this resolver must not each carry
+ * their own copy of the union. Type-only and relative, like the dispatch
+ * imports above -- erased at transpile, so the bun harness never resolves it.
+ */
+export type { DeckBrokerMode }
 
-interface PeersFileConfig {
+/** The keys of the claude-peers core config.json this process reads or writes. */
+export interface PeersFileConfig {
   port?: number
   broker_url?: string
   broker_token?: string
@@ -44,11 +52,22 @@ interface PeersFileConfig {
  * copies are asserted to agree by tests/desktop-broker-mode-parity.test.ts.
  */
 function parseBooleanFlag(raw: string | undefined, fallback: boolean): boolean {
-  if (raw === undefined) return fallback
+  return parseBooleanEnvFlag(raw) ?? fallback
+}
+
+/**
+ * The same vocabulary as a DECISION: `undefined` when the variable is absent
+ * or carries a word the parser does not recognize, which decides nothing and
+ * leaves the config file in charge. Exported so the Settings panel can say
+ * "forced by the environment" from the one list that actually forces it, and
+ * never claim a force over `CLAUDE_PEERS_OFFLINE_REPLICA=maybe`.
+ */
+export function parseBooleanEnvFlag(raw: string | undefined): boolean | undefined {
+  if (raw === undefined) return undefined
   const v = raw.trim().toLowerCase()
   if (v === '1' || v === 'true' || v === 'yes' || v === 'on') return true
   if (v === '0' || v === 'false' || v === 'no' || v === 'off') return false
-  return fallback
+  return undefined
 }
 
 /** Path of the claude-peers core config.json, matching shared/config.ts. */
@@ -65,7 +84,14 @@ export function peersConfigPath(env: NodeJS.ProcessEnv = process.env): string {
     : join(homedir(), '.config', 'claude-peers', 'config.json')
 }
 
-function readPeersConfig(path: string): PeersFileConfig {
+/**
+ * Parse the core config file, tolerating absence. A malformed file reads as {}
+ * HERE on purpose -- every caller in this module only needs to resolve an
+ * endpoint and must degrade to loopback rather than throw at startup. The
+ * WRITE path (peers-config-store.ts) makes the opposite choice and refuses to
+ * overwrite what it could not parse.
+ */
+export function readPeersConfig(path: string): PeersFileConfig {
   try {
     if (!existsSync(path)) return {}
     const parsed = JSON.parse(readFileSync(path, 'utf-8')) as unknown

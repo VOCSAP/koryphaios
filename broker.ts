@@ -40,6 +40,7 @@ import {
 import { planRoadmapAppendText, ROADMAP_APPEND_RESULT_MAX_CHARS } from "./shared/roadmap-append.ts";
 import {
   contentEquals,
+  isSweepOnlyStatusChange,
   mergeReopen,
   parseSyncContent,
   pickSyncContent,
@@ -174,6 +175,7 @@ import type {
   RoadmapSyncConflictsResponse,
   RoadmapSyncContent,
   RoadmapSyncLockClaimResponse,
+  RoadmapSyncLockInactiveResponse,
   RoadmapSyncLockReleaseResponse,
   RoadmapSyncLockRequest,
   RoadmapSyncPullRequest,
@@ -1458,6 +1460,37 @@ function emitLockAbandonedEvent(row: {
   insertMessage.run(DECK_INSTANCE_TOKEN, OPERATOR_INSTANCE_TOKEN, row.locked_group, text, new Date().toISOString());
 }
 
+/**
+ * The columns a lock RELEASE (or a hand-over to another holder) must clear
+ * beside the lock itself. `lock_relay` is what tells this broker "the holder is
+ * that replica's agent", and every right a replica has over a card it does not
+ * otherwise own -- writing behind the lock, releasing it -- is read from it: a
+ * pointer left behind by a released lock is a right left behind. The
+ * contested list goes with it, because contestation is defined against a
+ * holder and there is none any more.
+ * Written as a SET fragment so a release path cannot half-apply it.
+ */
+const CLEAR_LOCK_RELAY_SET =
+  "lock_relay = NULL, lock_relay_seen = NULL, lock_contested_by = '[]'";
+
+/**
+ * A lock RELAYED for a replica's agent has no `peers` row on this broker and no
+ * local write refreshing its `updated_at`: the replica's own heartbeat
+ * (`lock_relay_seen`, rewritten by every claim of its replication pass) is the
+ * liveness signal, and it stands in for BOTH -- the absent owner row and the
+ * silent card. Written once and bound with the grace window, so the two
+ * LIVENESS clauses of the sweep cannot disagree on what "still there" means.
+ * Once the replica goes quiet for LOCK_GRACE_SEC the lock falls exactly like an
+ * abandoned local one.
+ *
+ * The park-expiry clause deliberately does NOT read it: that clause releases a
+ * card whose park outlived its TTL whatever the owner's liveness -- an operator
+ * decision that has expired, not a silence to interpret -- and a relay is an
+ * owner like any other there.
+ */
+const RELAY_HEARTBEAT_FRESH =
+  "COALESCE(lock_relay IS NOT NULL AND datetime(lock_relay_seen) >= datetime('now', ?), 0)";
+
 // --- Stale roadmap-lock sweep (PLAN K2) ---
 // Releases agent work-locks whose owner is gone or that outlived the TTL, so a
 // crashed or abandoned session never freezes an item forever. A released item
@@ -1500,7 +1533,7 @@ function releaseStaleLocks(): void {
     db.run(
       `UPDATE roadmap_items SET
          locked = 0, locked_by = NULL, locked_group = NULL, locked_by_token = NULL, locked_at = NULL, operator_id = NULL,
-         lock_parked_at = NULL, lock_parked_by = NULL,
+         lock_parked_at = NULL, lock_parked_by = NULL, ${CLEAR_LOCK_RELAY_SET},
          status = CASE WHEN status = 'in_progress' THEN 'planned' ELSE status END,
          updated_by = 'lock-sweep', updated_at = datetime('now')
        WHERE locked = 1 AND lock_scope IS NOT 'remote' AND ${where}`,
@@ -1515,9 +1548,12 @@ function releaseStaleLocks(): void {
   // below is the only clause that may release it, and only once the park
   // itself expires (LOCK_PARK_TTL_SEC), or the park would defeat the sweep
   // that a paused agent's owner-gone silence would otherwise trigger.
-  release(`lock_parked_at IS NULL AND datetime(updated_at) < datetime('now', ?)`, [
-    `-${LOCK_TTL_SEC} seconds`,
-  ]);
+  release(
+    `lock_parked_at IS NULL
+     AND ${RELAY_HEARTBEAT_FRESH} = 0
+     AND datetime(updated_at) < datetime('now', ?)`,
+    [`-${LOCK_GRACE_SEC} seconds`, `-${LOCK_TTL_SEC} seconds`]
+  );
   // Grace is anchored on the owner's last real heartbeat, not on when the lock
   // was taken -- anchoring on lock time gave zero effective grace to any lock
   // held longer than the grace window, the common case.
@@ -1525,15 +1561,9 @@ function releaseStaleLocks(): void {
   // Uses SQL's NULL-safe `IS`, not `=`, so a NULL project_key only matches
   // other NULL project_keys rather than comparing as NULL/false against
   // everything.
-  // A lock RELAYED for a replica's agent has no peers row on this broker by
-  // construction (the agent is registered on the replica), so the owner-gone
-  // clause would sweep it on its first pass. The relay's own heartbeat
-  // (lock_relay_seen, refreshed by every claim of the replication pass) stands
-  // in for the owner's: once the replica goes quiet for LOCK_GRACE_SEC the
-  // lock falls exactly like an abandoned local one.
   release(
     `lock_parked_at IS NULL
-     AND COALESCE(lock_relay IS NOT NULL AND datetime(lock_relay_seen) >= datetime('now', ?), 0) = 0
+     AND ${RELAY_HEARTBEAT_FRESH} = 0
      AND NOT EXISTS (
        SELECT 1 FROM peers p
        WHERE p.peer_id = roadmap_items.locked_by
@@ -3412,6 +3442,18 @@ function handleRoadmapUpsert(
         body.id,
       ]
     );
+    // The lock this write leaves behind is a LOCAL one: this route never sets a
+    // relay, so a card that was dropped or handed to another holder keeps none.
+    // Written only when there was one, so an ordinary edit does not version the
+    // row for nothing.
+    if (
+      // Read from the ROW: the public item this handler works with does not
+      // carry the replication columns, and must not start to.
+      (getRoadmapRow(body.id)?.lock_relay ?? null) !== null &&
+      !(resolvedLock.locked && resolvedLock.lockedBy === existing.locked_by)
+    ) {
+      db.run(`UPDATE roadmap_items SET ${CLEAR_LOCK_RELAY_SET} WHERE id = ?`, [body.id]);
+    }
     return { item: getRoadmapItem(body.id)! };
   }
 
@@ -3575,7 +3617,7 @@ function handleRoadmapArchive(
        deleted_at = COALESCE(deleted_at, datetime('now')),
        locked = 0, locked_by = NULL, locked_group = NULL, locked_by_token = NULL, locked_at = NULL,
        operator_id = COALESCE(?, operator_id),
-       lock_parked_at = NULL, lock_parked_by = NULL,
+       lock_parked_at = NULL, lock_parked_by = NULL, ${CLEAR_LOCK_RELAY_SET},
        updated_by = ?, updated_at = datetime('now')
      WHERE id = ?`,
     [author.operator_id ?? null, by, body.id]
@@ -3742,7 +3784,7 @@ function handleRoadmapLockRelease(
       const res = db.run(
         `UPDATE roadmap_items SET
            locked = 0, locked_by = NULL, locked_by_token = NULL, locked_at = NULL, operator_id = NULL,
-           lock_parked_at = NULL, lock_parked_by = NULL,
+           lock_parked_at = NULL, lock_parked_by = NULL, ${CLEAR_LOCK_RELAY_SET},
            status = CASE WHEN status = 'in_progress' THEN 'planned' ELSE status END,
            updated_by = ?, updated_at = datetime('now')
          WHERE locked = 1 AND project_key = ? AND locked_by = ?
@@ -4331,6 +4373,21 @@ function handleRoadmapImport(body: {
         lock_release_owner: existingRow?.lock_release_owner ?? null,
       };
       insert.run(...ROADMAP_IMPORT_COLUMNS.map((column) => values[column]));
+      // INSERT OR REPLACE fires the INSERT trigger, never the UPDATE one, so
+      // the trigger that marks changed content dirty cannot see an import: a
+      // replica has to flag the divergence itself, or the imported content
+      // would sit here unpushed until the next pull overwrote it. Measured on
+      // the content pick-list around the write, so re-importing an identical
+      // file owes the upstream nothing. A brand-new row needs no flag: with no
+      // `sync_base_rev` it is already pending as a card the upstream has never
+      // seen.
+      if (BROKER_MODE === "replica" && existing) {
+        const before = pickSyncContent(existing);
+        const after = pickSyncContent(rowToRoadmapItem(getRoadmapRow(id)!));
+        if (!contentEquals(before, after)) {
+          db.run("UPDATE roadmap_items SET sync_dirty = 1 WHERE id = ?", [id]);
+        }
+      }
       imported++;
     }
     // INSERT OR REPLACE deletes-then-reinserts, but the FTS table's own delete
@@ -4412,6 +4469,25 @@ function refuseWhenReplica(route: string): { error: string; status: number } | n
 }
 
 /**
+ * The three upstream-only routes again, on the credential side. A replica
+ * writes content, and claims locks, for identities this broker cannot verify
+ * itself: the shared broker_token IS what that relay rests on. A deployment
+ * that configures none leaves them open to anyone who can reach the port --
+ * including a push, which writes card content under any author and does not
+ * apply the work-lock guard -- so they are not served at all rather than
+ * served unauthenticated. 403: the request is well-formed, the deployment
+ * simply grants nobody the right to make it.
+ */
+function requireBrokerToken(route: string): { error: string; status: number } | null {
+  if (BROKER_TOKEN) return null;
+  log.warn(`${route}: refused, replication routes require a configured broker_token`);
+  return {
+    error: `${route} is not served here: replication routes require a configured broker_token`,
+    status: 403,
+  };
+}
+
+/**
  * The two replica-only routes. 409, not 400: the request is well-formed and
  * the caller is entitled to it, the deployment simply has no replication state
  * to answer with -- and the distinct status keeps this refusal apart from the
@@ -4475,6 +4551,8 @@ function handleRoadmapSyncPull(
 ): RoadmapSyncPullResponse | { error: string; status: number } {
   const refused = refuseWhenReplica("/roadmap/sync/pull");
   if (refused) return refused;
+  const unauthenticated = requireBrokerToken("/roadmap/sync/pull");
+  if (unauthenticated) return unauthenticated;
   const replicaId = syncReplicaId(body.replica_id);
   if (typeof replicaId !== "string") return replicaId;
   const since = syncInteger(body.since_rev, "since_rev", 0);
@@ -4601,9 +4679,84 @@ function validatePushItem(
   };
 }
 
+/** First 8 characters of a replica_id: enough to tell two replicas apart in an author column. */
+const RELAY_ID_CHARS = 8;
+/** Prefix marking an author this broker did not resolve itself, and the replica that did. */
+const RELAY_AUTHOR_PREFIX = "via:";
+/** The stale-lock sweep's own name: an author, and the key to the replicas' one auto-resolution. */
+const SWEEP_AUTHOR = "lock-sweep";
+
+/**
+ * A pushed author naming a provenance the pushing replica is not entitled to
+ * assert: ANOTHER replica's relay prefix (it would write as that machine's
+ * operator, and that machine strips the prefix on the way in, so the forgery
+ * lands as its own operator's work) or this broker's sweep (the name that
+ * unlocks the auto-resolution every replica applies without asking).
+ * Its OWN prefix is not a claim about anyone else, so it passes and is stored
+ * verbatim -- re-pushing a row it already relayed must be idempotent.
+ * `lock-sweep` is not refused but REWRITTEN below: a replica's local sweep is a
+ * real event that has to travel.
+ */
+function forgesRelayedAuthor(name: string, replicaId: string): boolean {
+  if (!name.startsWith(RELAY_AUTHOR_PREFIX)) return false;
+  return !name.startsWith(`${RELAY_AUTHOR_PREFIX}${replicaId.slice(0, RELAY_ID_CHARS)}:`);
+}
+
+/**
+ * The author a pushed card is stored under. A replica proves its own writers to
+ * ITSELF, and this broker cannot re-check any of them: taken verbatim, a pushed
+ * 'deck' would claim the operator identity that every local route demands an
+ * Ed25519 signature for, a pushed name matching one of this broker's own peers
+ * would credit that peer with a write it never made, and a pushed 'lock-sweep'
+ * would speak as this broker's own sweep. All three are stamped
+ * `via:<replica8>:<name>` instead -- provenance the operator can read, inside
+ * the same [a-z0-9:_-] charset every author column obeys.
+ *
+ * A name this broker knows nothing about is kept as sent: it names an agent
+ * that exists only over there, and prefixing it would say less, not more. What
+ * that costs is stated rather than hidden: the check is made at PUSH time, so a
+ * name that is registered as a peer here only later stays stored bare, and then
+ * reads as that peer. The guarantee is about what a replica may ASSERT, not
+ * about names this broker will hold in the future.
+ *
+ * The peers lookup is deliberately an EXISTENCE question over every group -- one
+ * peer_id can name two identities in two groups, and either of them is a reason
+ * to refuse the name.
+ */
+function relayedAuthor(name: string, replicaId: string): string {
+  const knownHere =
+    RESERVED_PEER_IDS.includes(name) ||
+    // Not a reserved PEER id (nothing registers under it, and every other
+    // consumer of RESERVED_PEER_IDS asks about peers), but an author name this
+    // broker writes itself and its replicas read as a verdict.
+    name === SWEEP_AUTHOR ||
+    ((db.query("SELECT EXISTS(SELECT 1 FROM peers WHERE peer_id = ?) AS present").get(name) as {
+      present: number;
+    }).present === 1);
+  return knownHere ? `via:${replicaId.slice(0, RELAY_ID_CHARS)}:${name}` : name;
+}
+
+/**
+ * Whether this replica is the live relay of the card's work-lock. Asked in SQL,
+ * against the same fragment the sweep reads: a stored timestamp compared in JS
+ * would need its own parsing of SQLite's space-separated datetimes, and the two
+ * answers must be the same answer.
+ */
+function relayHoldsLock(id: string, replicaId: string): boolean {
+  const row = db
+    .query(
+      `SELECT ${RELAY_HEARTBEAT_FRESH} AS fresh FROM roadmap_items
+        WHERE id = ? AND locked = 1 AND lock_relay = ?`
+    )
+    .get(`-${LOCK_GRACE_SEC} seconds`, id, replicaId) as { fresh: number } | null;
+  return row?.fresh === 1;
+}
+
 function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
   const refused = refuseWhenReplica("/roadmap/sync/push");
   if (refused) return refused;
+  const unauthenticated = requireBrokerToken("/roadmap/sync/push");
+  if (unauthenticated) return unauthenticated;
   const replicaId = syncReplicaId(body.replica_id);
   if (typeof replicaId !== "string") return replicaId;
   let expected: number | null = null;
@@ -4614,14 +4767,58 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
   }
   const validated = validatePushItem(body.item);
   if ("error" in validated) return validated;
-  const item = validated.item;
+  const item = {
+    ...validated.item,
+    created_by: relayedAuthor(validated.item.created_by, replicaId),
+    updated_by: relayedAuthor(validated.item.updated_by, replicaId),
+  };
 
   const existing = getRoadmapRow(item.id);
+  // Only the fields this push actually WRITES are checked for a forged
+  // provenance: `created_by` is written on the insert alone, so a card the
+  // upstream already attributes to another replica keeps flowing through a
+  // second replica's edits instead of becoming permanently unpushable.
+  const claimedAuthors = existing ? ([["updated_by", item.updated_by]] as const)
+    : ([["created_by", item.created_by], ["updated_by", item.updated_by]] as const);
+  for (const [field, name] of claimedAuthors) {
+    if (forgesRelayedAuthor(name, replicaId)) {
+      log.warn(`/roadmap/sync/push: refused an author claiming another replica's relay`, {
+        field,
+        replica_id: replicaId,
+      });
+      return {
+        error: `item.${field} claims a relay this replica does not own -- only 'via:${replicaId.slice(0, RELAY_ID_CHARS)}:' may be pushed from here`,
+        status: 400,
+      };
+    }
+  }
   if (existing) {
+    // The work-lock guard, in the one form it can take here: this route has no
+    // caller identity to compare against `locked_by` (the agent is registered
+    // on the replica, not here), so the question it CAN answer is whether the
+    // holder is a lock this replica is CURRENTLY relaying -- the pointer and a
+    // heartbeat still inside the grace window, the very predicate the sweep
+    // uses to decide the agent behind it is still there. Anyone else's lock
+    // refuses the write, whatever the revisions -- the same answer
+    // /roadmap/upsert gives a third party, and the reason the operator sees it
+    // as a conflict to settle at reconnection rather than an edit that
+    // silently landed.
+    if (existing.locked === 1 && !relayHoldsLock(item.id, replicaId)) {
+      log.info(
+        `/roadmap/sync/push: card ${item.id} is work-locked by '${existing.locked_by}', replica ${replicaId} refused`
+      );
+      return {
+        ok: false,
+        conflict: { error: "conflict", reason: "locked_upstream", item: rowToSyncRow(existing) },
+      };
+    }
     // An `expected` of null claims the upstream has never seen this card, so a
     // row under the same id IS the divergence, whatever its content_rev.
     if (expected === null || existing.content_rev !== expected) {
-      return { ok: false, conflict: { error: "conflict", item: rowToSyncRow(existing) } };
+      return {
+        ok: false,
+        conflict: { error: "conflict", reason: "content", item: rowToSyncRow(existing) },
+      };
     }
     // Content plus the columns that ride with it. `queue` (the upstream owns
     // the order), every lock column (their own protocol) and `operator_id`
@@ -4645,7 +4842,7 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
     if (expected !== null) {
       // The replica derives from a row this broker no longer has: it cannot be
       // fast-forwarded and cannot be inserted under a base that is gone.
-      return { ok: false, conflict: { error: "conflict", item: null } };
+      return { ok: false, conflict: { error: "conflict", reason: "missing", item: null } };
     }
     db.run(
       `INSERT INTO roadmap_items
@@ -4671,6 +4868,7 @@ type SyncLockResult =
   | { ok: true; claim: RoadmapSyncLockClaimResponse }
   | { ok: true; release: RoadmapSyncLockReleaseResponse }
   | { ok: false; contested: RoadmapSyncLockClaimResponse }
+  | { ok: false; inactive: RoadmapSyncLockInactiveResponse }
   | { error: string; status: number };
 
 /**
@@ -4682,6 +4880,8 @@ type SyncLockResult =
 function handleRoadmapSyncLock(body: RoadmapSyncLockRequest): SyncLockResult {
   const refused = refuseWhenReplica("/roadmap/sync/lock");
   if (refused) return refused;
+  const unauthenticated = requireBrokerToken("/roadmap/sync/lock");
+  if (unauthenticated) return unauthenticated;
   const replicaId = syncReplicaId(body.replica_id);
   if (typeof replicaId !== "string") return replicaId;
   if (body.action !== "claim" && body.action !== "release") {
@@ -4725,7 +4925,10 @@ function handleRoadmapSyncLock(body: RoadmapSyncLockRequest): SyncLockResult {
     // refuses it locally too, so reaching this is a replica out of step -- not
     // a reason to let the claim through.
     if (refusesInactiveClaim(row.inactive === 1, row.status, row.locked === 1, row.status, true)) {
-      return { error: "item is inactive -- clear inactive before locking it", status: 409 };
+      // Refused with a body of its own, not the generic error shape: a replica
+      // that read this as the contested answer would mark a lock conflict on a
+      // card no one else holds.
+      return { ok: false, inactive: { error: "inactive", item: rowToSyncRow(row) } };
     }
     if (row.locked === 0) {
       db.run(
@@ -4767,9 +4970,9 @@ function handleRoadmapSyncLock(body: RoadmapSyncLockRequest): SyncLockResult {
     db.run(
       `UPDATE roadmap_items SET
          locked = 0, locked_by = NULL, locked_group = NULL, locked_by_token = NULL,
-         locked_at = NULL, lock_relay = NULL, lock_relay_seen = NULL, lock_contested_by = ?
+         locked_at = NULL, ${CLEAR_LOCK_RELAY_SET}
        WHERE id = ?`,
-      [JSON.stringify(withoutOwner), body.id]
+      [body.id]
     );
     return { ok: true, release: { released: true, item: rowToSyncRow(getRoadmapRow(body.id)!) } };
   }
@@ -4793,6 +4996,9 @@ function handleRoadmapSyncLock(body: RoadmapSyncLockRequest): SyncLockResult {
 function handleRoadmapSyncStatus(): RoadmapSyncStatus {
   if (BROKER_MODE === "local") return { mode: "local" };
   if (BROKER_MODE === "remote") return { mode: "upstream" };
+  // `conflicts`, `pending_push` and `refused` are BROKER-WIDE, every project
+  // included: a replica mirrors every project its upstream carries, and the
+  // operator's badge must not hide work waiting under another project_key.
   const conflicts = (
     db.query("SELECT COUNT(*) AS n FROM roadmap_items WHERE sync_state = 'conflict'").get() as {
       n: number;
@@ -4817,13 +5023,15 @@ function handleRoadmapSyncStatus(): RoadmapSyncStatus {
   return {
     mode: "replica",
     upstream_url: UPSTREAM_URL ?? "",
-    online: syncOnlineState === "online",
-    since: syncStateSince,
-    last_error: syncLastError,
-    last_sync_at: syncLastSyncAt,
+    online: syncPublished.online,
+    since: syncPublished.since,
+    last_error: syncPublished.last_error,
+    last_sync_at: syncPublished.last_sync_at,
     cursor: parseInt(syncMetaGet("upstream_cursor") ?? "0", 10),
     conflicts,
     pending_push: pendingPush,
+    refused: syncPublished.refused,
+    refused_locks: syncPublished.refused_locks,
     locks,
   };
 }
@@ -4850,7 +5058,7 @@ function handleRoadmapSyncConflicts(
     const remote = parseSyncRemote(row.id, row.sync_remote);
     if (!remote) continue;
     items.push({
-      local: rowToRoadmapItem(row),
+      local: rowToSyncRow(row),
       remote,
       base: readSyncBase(row.id, row.sync_base),
     });
@@ -4858,10 +5066,28 @@ function handleRoadmapSyncConflicts(
   return { items };
 }
 
+/** A count read back from a stored blob: a non-negative integer or nothing (NaN and 1.5 alike are nothing). */
+function storedInteger(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function storedText(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function storedNullableText(value: unknown): string | null {
+  return typeof value === "string" ? value : null;
+}
+
 /**
- * The upstream row stored at conflict time. Validated on the two fields the
- * resolution actually needs (`content_rev` becomes the new merge base, the
- * content decides what is applied), never trusted on shape alone.
+ * The upstream row stored at conflict time, rebuilt field by field. The blob
+ * was written by this broker, but it is READ BACK from a column and handed to
+ * the operator's dialog, so it is picked rather than cast: a cast would carry
+ * whatever the stored object happens to hold -- a column added to the pull
+ * projection tomorrow, a credential a future writer forgets to strip -- into a
+ * response whose whole contract is that it carries neither. The three fields
+ * the resolution depends on (`id`, `content_rev` as the new merge base, and the
+ * content itself) are validated; the rest is picked with a safe default.
  */
 function parseSyncRemote(id: string, raw: string | null): RoadmapSyncRow | null {
   if (!raw) {
@@ -4875,16 +5101,56 @@ function parseSyncRemote(id: string, raw: string | null): RoadmapSyncRow | null 
     log.error(`roadmap sync: card ${id} has an unreadable stored upstream row`, e);
     return null;
   }
-  const candidate = parsed as Partial<RoadmapSyncRow> | null;
-  if (!candidate || typeof candidate.content_rev !== "number" || typeof candidate.id !== "string") {
+  if (typeof parsed !== "object" || parsed === null) {
+    log.error(`roadmap sync: card ${id} has a stored upstream row that is not an object`);
+    return null;
+  }
+  const record = parsed as Record<string, unknown>;
+  const contentRev = storedInteger(record.content_rev);
+  if (typeof record.id !== "string" || contentRev === null) {
     log.error(`roadmap sync: card ${id} has a stored upstream row without id/content_rev`);
     return null;
   }
-  if (!parseSyncContent(raw)) {
+  const content = parseSyncContent(raw);
+  if (!content) {
     log.error(`roadmap sync: card ${id} has a stored upstream row missing content fields`);
     return null;
   }
-  return candidate as RoadmapSyncRow;
+  return {
+    id: record.id,
+    project_key: storedText(record.project_key),
+    kind: content.kind,
+    title: content.title,
+    description: content.description,
+    rationale: content.rationale,
+    context: content.context,
+    priority: content.priority,
+    value: content.value,
+    effort: content.effort,
+    status: content.status,
+    tags: content.tags,
+    depends_on: content.depends_on,
+    created_by: storedText(record.created_by),
+    updated_by: storedText(record.updated_by),
+    created_at: storedText(record.created_at),
+    updated_at: storedText(record.updated_at),
+    deleted_at: content.deleted_at,
+    queue: storedInteger(record.queue),
+    directive: content.directive,
+    target_peer_ids: content.target_peer_ids,
+    locked: record.locked === true,
+    locked_by: storedNullableText(record.locked_by),
+    locked_at: storedNullableText(record.locked_at),
+    locked_group: storedNullableText(record.locked_group),
+    inactive: content.inactive,
+    lock_parked_at: storedNullableText(record.lock_parked_at),
+    lock_parked_by: storedNullableText(record.lock_parked_by),
+    sync_state: readSyncState(storedNullableText(record.sync_state)),
+    lock_scope: readLockScope(storedNullableText(record.lock_scope)),
+    lock_contested_by: cleanList(record.lock_contested_by) ?? [],
+    rev: storedInteger(record.rev) ?? 0,
+    content_rev: contentRev,
+  };
 }
 
 /**
@@ -4984,6 +5250,32 @@ let syncOnlineState: SyncOnlineState = "unknown";
 let syncStateSince = new Date().toISOString();
 let syncLastError: string | null = null;
 let syncLastSyncAt: string | null = null;
+
+/**
+ * What a status read is answered with, replaced as ONE object at the very end
+ * of a pass. The counts move while the pass runs and the online state is
+ * decided only once it ends, so a poll landing in between would otherwise mix
+ * this pass's refusals with the previous pass's verdict -- a state that never
+ * existed, and the kind an operator (and a test) reads as a contradiction.
+ * The DB-backed counts of the status route are not here: they are the
+ * database's own truth, consistent whenever they are read.
+ */
+interface SyncPublishedState {
+  online: boolean;
+  since: string;
+  last_error: string | null;
+  last_sync_at: string | null;
+  refused: number;
+  refused_locks: number;
+}
+let syncPublished: SyncPublishedState = {
+  online: false,
+  since: syncStateSince,
+  last_error: null,
+  last_sync_at: null,
+  refused: 0,
+  refused_locks: 0,
+};
 let syncInFlight = false;
 let syncFailures = 0;
 let syncBackoffMs = SYNC_TICK_MS;
@@ -5049,6 +5341,19 @@ async function upstreamPost<T>(path: string, body: unknown): Promise<{ status: n
 }
 
 /**
+ * The mirror of `relayedAuthor`, read from the other end: a `via:<replica8>:`
+ * prefix naming THIS replica was added upstream to an author that was ours to
+ * begin with, so it is peeled off before the row lands -- the operator's own
+ * writes must read 'deck' on the machine that made them. A prefix naming
+ * another replica is kept: there it is the provenance it was written for.
+ */
+function localAuthor(name: string): string {
+  if (REPLICA_ID === "") return name;
+  const prefix = `via:${REPLICA_ID.slice(0, RELAY_ID_CHARS)}:`;
+  return name.startsWith(prefix) ? name.slice(prefix.length) : name;
+}
+
+/**
  * Applies one pulled row. Returns true when a local queue position was
  * replaced, so the pass can report how much local ordering the upstream order
  * overwrote (§4: the queue is never pushed, and losing a local order must not
@@ -5058,6 +5363,8 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
   const local = getRoadmapRow(remote.id);
   const content = pickSyncContent(remote);
   const contentJson = JSON.stringify(content);
+  const createdBy = localAuthor(remote.created_by);
+  const updatedBy = localAuthor(remote.updated_by);
   if (!local) {
     const lockedRemotely = remote.locked && remote.locked_by !== null;
     db.run(
@@ -5073,7 +5380,7 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
         remote.id, remote.project_key, content.kind, content.title, content.description,
         content.rationale, content.context, content.priority, content.value, content.effort,
         content.status, JSON.stringify(content.tags), JSON.stringify(content.depends_on),
-        remote.created_by, remote.updated_by, remote.created_at, remote.updated_at,
+        createdBy, updatedBy, remote.created_at, remote.updated_at,
         content.deleted_at, remote.queue, content.directive,
         JSON.stringify(content.target_peer_ids), content.inactive ? 1 : 0,
         lockedRemotely ? 1 : 0, lockedRemotely ? remote.locked_by : null,
@@ -5094,7 +5401,7 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
       remote.id,
     ]);
   } else if (!dirty) {
-    writeSyncContent(remote.id, content, remote.updated_by, remote.updated_at);
+    writeSyncContent(remote.id, content, updatedBy, remote.updated_at);
     db.run(
       `UPDATE roadmap_items SET sync_base_rev = ?, sync_base = ?, sync_dirty = 0,
          sync_state = 'clean', sync_remote = NULL WHERE id = ?`,
@@ -5102,11 +5409,17 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
     );
   } else if (local.sync_base_rev !== null && local.sync_base_rev === remote.content_rev) {
     // Dirty here, untouched there: the local edit stands and will be pushed.
-  } else if (remote.updated_by === "lock-sweep") {
-    // §3.5: the upstream change is the stale-lock sweep reclaiming a card this
-    // replica is still working on. Resolved as 'local' with no operator
-    // arbitration, or every in-progress card would come back conflicted after
-    // each disconnection.
+  } else if (
+    // The RAW pulled name, never the localised one: only THIS upstream's own
+    // sweep carries it bare, a relayed one arrives prefixed with the replica
+    // whose sweep it was.
+    remote.updated_by === SWEEP_AUTHOR &&
+    isSweepOnlyStatusChange(parseSyncContent(local.sync_base), content)
+  ) {
+    // The stale-lock sweep reclaiming a card this replica is still working on,
+    // and nothing else: resolved as 'local' with no operator arbitration. The
+    // content check is what makes that safe -- the sweep's name alone would
+    // also cover a human edit it happens to have written after.
     db.run(
       `UPDATE roadmap_items SET sync_base_rev = ?, sync_base = ? WHERE id = ?`,
       [remote.content_rev, JSON.stringify(pickSyncContent(remote)), remote.id]
@@ -5188,12 +5501,75 @@ async function syncPullPass(): Promise<void> {
   log.warn("roadmap sync: pull stopped at the page cap, continuing on the next pass");
 }
 
+/**
+ * Cards the upstream refused with a 4xx that is NOT a conflict: a validation
+ * refusal, which retrying cannot settle and which says nothing about the
+ * network. The pass records them and moves on -- one row the upstream will
+ * never accept must not hold back every other card, nor report an outage that
+ * is not happening. Keyed by card and carrying the `content_rev` the refusal
+ * was measured on, so the log carries one line per (card, message) instead of
+ * one per pass, and an edited -- or finally accepted -- card speaks again.
+ */
+const syncRefusedPushes = new Map<string, { contentRev: number; message: string }>();
+/**
+ * Passes between two attempts at a card the upstream already refused. Skipping
+ * them keeps the batch moving; retrying them on a slow cadence keeps a refusal
+ * from becoming permanent when its cause is gone.
+ */
+const SYNC_REFUSED_RETRY_PASSES = 20;
+let syncPassNumber = 0;
+/** Same discipline for a refused lock claim or release; not counted as a pending push. */
+const syncRefusedLocks = new Map<string, string>();
+let syncLastRefusal: string | null = null;
+
+function noteRefusedPush(id: string, contentRev: number, message: string): void {
+  const known = syncRefusedPushes.get(id);
+  if (!known || known.contentRev !== contentRev || known.message !== message) {
+    log.error(`roadmap sync: ${message} -- the card stays here and the pass continues`);
+  }
+  syncRefusedPushes.set(id, { contentRev, message });
+  syncLastRefusal = message;
+}
+
+function clearRefusedPush(id: string): void {
+  if (!syncRefusedPushes.delete(id)) return;
+  const remaining = [...syncRefusedPushes.values()];
+  syncLastRefusal = remaining.length > 0 ? remaining[remaining.length - 1]!.message : null;
+}
+
+function noteRefusedLock(id: string, message: string): void {
+  if (syncRefusedLocks.get(id) !== message) {
+    log.error(`roadmap sync: ${message} -- the lock stays as it is and the pass continues`);
+  }
+  syncRefusedLocks.set(id, message);
+}
+
 async function syncPushPass(): Promise<void> {
+  // A refusal is measured on a card in a given state: a card that stopped being
+  // pending -- resolved, deleted, overwritten by the upstream -- or that has
+  // been edited since is not refused any more, and goes back in the queue.
+  for (const [id, refusal] of [...syncRefusedPushes]) {
+    const current = db
+      .query(`SELECT content_rev FROM roadmap_items WHERE id = ? AND ${SYNC_PENDING_PUSH_WHERE}`)
+      .get(id) as { content_rev: number } | null;
+    if (!current || current.content_rev !== refusal.contentRev) clearRefusedPush(id);
+  }
+  // The batch is ordered by content_rev and capped, so rows the upstream keeps
+  // refusing sit at its head for good: a batch's worth of them would be a wall
+  // nothing written afterwards ever gets past. They are skipped by id, and
+  // re-offered every SYNC_REFUSED_RETRY_PASSES passes -- a refusal can outlive
+  // its cause (a validation the upstream loosened, a card the operator fixed
+  // through another route), so it must never become permanent silence.
+  syncPassNumber += 1;
+  const retryRefused = syncRefusedPushes.size > 0 && syncPassNumber % SYNC_REFUSED_RETRY_PASSES === 0;
+  const skipped = retryRefused ? [] : [...syncRefusedPushes.keys()];
+  const skipClause =
+    skipped.length > 0 ? ` AND id NOT IN (${skipped.map(() => "?").join(", ")})` : "";
   const rows = db
     .query(
-      `SELECT * FROM roadmap_items WHERE ${SYNC_PENDING_PUSH_WHERE} ORDER BY content_rev LIMIT ?`
+      `SELECT * FROM roadmap_items WHERE ${SYNC_PENDING_PUSH_WHERE}${skipClause} ORDER BY content_rev LIMIT ?`
     )
-    .all(SYNC_PUSH_BATCH) as RoadmapRow[];
+    .all(...skipped, SYNC_PUSH_BATCH) as RoadmapRow[];
   for (const row of rows) {
     const content = pickSyncContent(rowToRoadmapItem(row));
     // Read BEFORE the round-trip: a local edit landing while the request is in
@@ -5215,6 +5591,7 @@ async function syncPushPass(): Promise<void> {
       { replica_id: REPLICA_ID, item, expected_content_rev: row.sync_base_rev }
     );
     if (res.status === 200) {
+      clearRefusedPush(row.id);
       const accepted = res.body as RoadmapSyncPushResponse;
       withApplying(() => {
         db.run(
@@ -5227,10 +5604,23 @@ async function syncPushPass(): Promise<void> {
       continue;
     }
     if (res.status === 409) {
-      recordPushDivergence(row, (res.body as RoadmapSyncPushConflict).item ?? null);
+      clearRefusedPush(row.id);
+      const conflict = res.body as RoadmapSyncPushConflict;
+      // An upstream that does not send a reason says nothing beyond the 409;
+      // 'content' is the safest reading of it, since it never widens the
+      // auto-resolution.
+      recordPushDivergence(row, conflict?.item ?? null, conflict?.reason ?? "content");
       continue;
     }
-    throw new Error(`push refused (${res.status}) for card ${row.id}: ${upstreamErrorText(res.body)}`);
+    const message = `push refused (${res.status}) for card ${row.id}: ${upstreamErrorText(res.body)}`;
+    // 4xx: the upstream understood and said no. Only a 5xx or a transport
+    // failure means "ask again later", and only those may fail the pass and
+    // move the online state.
+    if (res.status >= 400 && res.status < 500) {
+      noteRefusedPush(row.id, sentContentRev, message);
+      continue;
+    }
+    throw new Error(message);
   }
 }
 
@@ -5238,8 +5628,16 @@ async function syncPushPass(): Promise<void> {
  * A refused push. `item: null` means the upstream no longer has the row this
  * copy derives from: the base is dropped so the next pass offers the card as
  * a new one rather than retrying a fast-forward that can never succeed.
+ * A refusal by the upstream WORK-LOCK is never auto-resolved: the revisions
+ * may well be reconcilable, but the card cannot be written at all until the
+ * holder lets go, so the operator has to see it -- resolving it 'local' simply
+ * sends it back into the same refusal, which is the intended behaviour.
  */
-function recordPushDivergence(row: RoadmapRow, remote: RoadmapSyncRow | null): void {
+function recordPushDivergence(
+  row: RoadmapRow,
+  remote: RoadmapSyncRow | null,
+  reason: RoadmapSyncPushConflict["reason"]
+): void {
   if (!remote) {
     log.warn(
       `roadmap sync: the upstream no longer has card ${row.id}, it will be pushed again as a new card`
@@ -5249,7 +5647,11 @@ function recordPushDivergence(row: RoadmapRow, remote: RoadmapSyncRow | null): v
     });
     return;
   }
-  if (remote.updated_by === "lock-sweep") {
+  if (
+    reason !== "locked_upstream" &&
+    remote.updated_by === SWEEP_AUTHOR &&
+    isSweepOnlyStatusChange(parseSyncContent(row.sync_base), pickSyncContent(remote))
+  ) {
     withApplying(() => {
       db.run("UPDATE roadmap_items SET sync_base_rev = ?, sync_base = ? WHERE id = ?", [
         remote.content_rev,
@@ -5266,7 +5668,9 @@ function recordPushDivergence(row: RoadmapRow, remote: RoadmapSyncRow | null): v
       row.id,
     ]);
   });
-  log.info(`roadmap sync: card ${row.id} was refused by the upstream, operator arbitration needed`);
+  log.info(
+    `roadmap sync: card ${row.id} was refused by the upstream (${reason}), operator arbitration needed`
+  );
 }
 
 function setLockScope(id: string, scope: RoadmapLockScope | null): void {
@@ -5285,6 +5689,16 @@ async function syncLockPass(): Promise<void> {
         WHERE locked = 1 AND lock_scope IN ('local', 'global', 'contested')`
     )
     .all() as { id: string; locked_by: string | null; locked_group: string | null }[];
+  const releases = db
+    .query("SELECT id, lock_release_owner FROM roadmap_items WHERE lock_scope = 'release_pending'")
+    .all() as { id: string; lock_release_owner: string | null }[];
+  // A card this pass no longer claims or releases -- the agent let it go, the
+  // upstream took it -- is not a refused lock any more, whatever the last
+  // answer was.
+  const asserted = new Set([...claims.map((c) => c.id), ...releases.map((r) => r.id)]);
+  for (const id of [...syncRefusedLocks.keys()]) {
+    if (!asserted.has(id)) syncRefusedLocks.delete(id);
+  }
   for (const claim of claims) {
     if (!claim.locked_by) {
       log.warn(`roadmap sync: card ${claim.id} is locked with no owner, no upstream claim sent`);
@@ -5297,13 +5711,34 @@ async function syncLockPass(): Promise<void> {
       owner: { peer_id: claim.locked_by, group_id: claim.locked_group },
     });
     if (res.status === 200) {
+      syncRefusedLocks.delete(claim.id);
       setLockScope(claim.id, "global");
     } else if (res.status === 409) {
-      setLockScope(claim.id, "contested");
+      // Two different refusals share this status: a card held by someone else
+      // (the body names the contested scope) and a card the operator set aside
+      // upstream (no scope at all). Only the first is a lock conflict; the
+      // second leaves this replica's own scope exactly as it was.
+      const refusal = res.body as Partial<RoadmapSyncLockClaimResponse & { error?: string }> | null;
+      if (refusal?.scope === "contested") {
+        syncRefusedLocks.delete(claim.id);
+        setLockScope(claim.id, "contested");
+      } else {
+        noteRefusedLock(
+          claim.id,
+          `lock claim on card ${claim.id} refused by the upstream: ${upstreamErrorText(res.body)}`
+        );
+      }
     } else if (res.status === 404) {
       // The card has not reached the upstream yet (it is pushed by the step
       // above only once it is dirty): claim it on a later pass.
       log.warn(`roadmap sync: the upstream does not know card ${claim.id} yet, lock claim deferred`);
+    } else if (res.status >= 400 && res.status < 500) {
+      // Same rule as a refused push: the upstream said no to THIS claim, which
+      // is no reason to leave the other locks unasserted.
+      noteRefusedLock(
+        claim.id,
+        `lock claim refused (${res.status}) for card ${claim.id}: ${upstreamErrorText(res.body)}`
+      );
     } else {
       throw new Error(
         `lock claim refused (${res.status}) for card ${claim.id}: ${upstreamErrorText(res.body)}`
@@ -5311,9 +5746,6 @@ async function syncLockPass(): Promise<void> {
     }
   }
 
-  const releases = db
-    .query("SELECT id, lock_release_owner FROM roadmap_items WHERE lock_scope = 'release_pending'")
-    .all() as { id: string; lock_release_owner: string | null }[];
   for (const pending of releases) {
     if (!pending.lock_release_owner) {
       // Nothing to name upstream, so nothing it would accept: clear the local
@@ -5331,7 +5763,13 @@ async function syncLockPass(): Promise<void> {
       owner: { peer_id: pending.lock_release_owner, group_id: null },
     });
     if (res.status === 200 || res.status === 404) {
+      syncRefusedLocks.delete(pending.id);
       setLockScope(pending.id, null);
+    } else if (res.status >= 400 && res.status < 500) {
+      noteRefusedLock(
+        pending.id,
+        `lock release refused (${res.status}) for card ${pending.id}: ${upstreamErrorText(res.body)}`
+      );
     } else {
       throw new Error(
         `lock release refused (${res.status}) for card ${pending.id}: ${upstreamErrorText(res.body)}`
@@ -5348,7 +5786,10 @@ async function runSyncPass(): Promise<void> {
     await syncPushPass();
     await syncLockPass();
     syncLastSyncAt = new Date().toISOString();
-    syncLastError = null;
+    // A pass that completed still reports the rows the upstream refused inside
+    // it: they are the reason a card is not there, and clearing the field would
+    // leave the operator with a count and no message.
+    syncLastError = syncLastRefusal;
     syncFailures = 0;
     syncBackoffMs = SYNC_TICK_MS;
     if (syncOnlineState !== "online") {
@@ -5370,6 +5811,15 @@ async function runSyncPass(): Promise<void> {
       log.error(`roadmap sync: upstream ${UPSTREAM_URL} unreachable, working offline`, e);
     }
   } finally {
+    // One assignment, after the pass has decided everything it decides.
+    syncPublished = {
+      online: syncOnlineState === "online",
+      since: syncStateSince,
+      last_error: syncLastError,
+      last_sync_at: syncLastSyncAt,
+      refused: syncRefusedPushes.size,
+      refused_locks: syncRefusedLocks.size,
+    };
     syncInFlight = false;
     armSyncTimer(syncOnlineState === "offline" ? syncBackoffMs : SYNC_TICK_MS);
   }
@@ -5388,6 +5838,15 @@ function armSyncTimer(delayMs: number): void {
 
 const REPLICA_ID = BROKER_MODE === "replica" ? ensureReplicaId() : "";
 if (BROKER_MODE === "replica") {
+  // Said once, at startup, rather than left to be inferred from a pass that
+  // fails forever: an upstream serves its replication routes to authenticated
+  // replicas only, so a replica with no token can never be anything but
+  // offline -- a configuration answer, not a network one.
+  if (!BROKER_TOKEN) {
+    log.error(
+      `roadmap sync: no broker_token configured -- ${UPSTREAM_URL} serves its replication routes only to a replica that presents one, so replication will not start`
+    );
+  }
   // First pass right away rather than one cadence later: on a Deck start the
   // operator expects the roadmap to be current, not current in five seconds.
   armSyncTimer(Math.min(SYNC_TICK_MS, 100));
@@ -7580,10 +8039,17 @@ const server = Bun.serve<WsData>({
         }
         case "/roadmap/sync/lock": {
           const result = handleRoadmapSyncLock(body as RoadmapSyncLockRequest);
-          if ("error" in result) {
+          // Narrowed on `ok`, not on `error`: the inactive refusal carries its
+          // own error field INSIDE its body, and an `"error" in result` test
+          // would drag it into the generic error shape.
+          if (!("ok" in result)) {
             return Response.json({ error: result.error }, { status: result.status });
           }
-          if (!result.ok) return Response.json(result.contested, { status: 409 });
+          if (!result.ok) {
+            return Response.json("inactive" in result ? result.inactive : result.contested, {
+              status: 409,
+            });
+          }
           return Response.json("claim" in result ? result.claim : result.release);
         }
         case "/roadmap/sync/status":

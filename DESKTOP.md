@@ -184,12 +184,21 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   gets `/roadmap/sync/conflicts` polled for the current project. The
   `roadmap:sync` broadcast fires on a signature change only (health fields +
   each conflict's upstream `content_rev`, so an edit landing on an already
-  conflicted card is not mistaken for "nothing moved"). Renderer side: a
+  conflicted card is not mistaken for "nothing moved"). A broker with no
+  `/roadmap/sync/status` route at all is a VERSION gap, not an outage: the
+  404 parks the poll on a terminal internal `legacy` mode (never a protocol
+  mode, never broadcast) and pushes one inert `{ mode: 'local' }` state, and
+  only a broker-health up-flip re-arms the probe. Renderer side: a
   numeric badge on the Roadmap rail entry (this project's conflicts, never
-  the broker's cross-project counter), an INFO-tone status banner while the
-  upstream is unreachable — the local broker is up, work continues, only the
-  sharing is paused, so it is not the red outage banner and the two are
-  exclusive by construction — a red ring + a clickable badge on a conflicted
+  the broker's cross-project counter); ONE status banner over four
+  overlapping states, arbitrated by the pure `bannerKind`
+  (`shared/status-banner.ts`) since the bar is a fixed overlay — local broker
+  down (red) > conflicts awaiting arbitration (amber, and the only banner
+  carrying an action, "open the Roadmap": they appear exactly when the
+  offline banner disappears) > pushes the upstream REFUSED, `last_error` as
+  the detail (amber) > upstream unreachable (neutral info tone: the local
+  broker is up, work continues, only the sharing is paused); a red ring + a
+  clickable badge on a conflicted
   card, an amber ring on a contested lock, the lock glyph with a "remote
   lock" title for one held upstream, and `RoadmapConflictDialog` listing ONLY
   the content fields that differ (lifecycle `status`/`deleted_at` first) with
@@ -198,7 +207,22 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   the broker, and every broker response goes through the pick-list sanitizers
   of `roadmap-service.ts` whose defaults are inert: an unreadable status reads
   as a non-replica broker, an unknown `sync_state` as `clean`, an unknown
-  `lock_scope` as null.
+  `lock_scope` as null. The opt-in itself is reachable from **Settings >
+  Broker**: a read-only report of the resolved mode (the three shapes
+  explained side by side), the broker URL, whether a bearer token is
+  configured (yes/no — the value never crosses the IPC boundary) and which
+  `CLAUDE_PEERS_*` variable is deciding instead of the file, plus the
+  `offline_replica` checkbox. No token is a WARNING, never a disable (the
+  operator can add one right after ticking): the upstream's replication routes
+  answer 403 without one, and that surfaces as "upstream unreachable", a
+  symptom saying nothing about its cause. A read that fails renders an explicit
+  error with a re-read button — a category rendering nothing reads as a broken
+  app, and the main-side `reportError` is invisible to the operator. That checkbox writes the claude-peers CORE
+  config (`peers-config-store.ts`: read-modify-write preserving every other
+  key, atomic, 0600, and a file it could not parse is never overwritten) —
+  the same file `server.ts`, `cli.ts` and every non-Kory session read, so the
+  channel is tier 3 / remote-blocked and the help text says plainly that the
+  change only reaches sessions and brokers started afterwards.
 - **Files & Git rail views (GX1–GX9)**: two READ-ONLY rail
   views. 📁 Files: lazy explorer + plain-text viewer (line-number gutter, no
   highlighting in v1 — shiki/highlight.js noted for v2) over roots the main

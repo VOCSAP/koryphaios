@@ -1024,11 +1024,22 @@ Brief : `docs/DESIGN-OFFLINE-REPLICA.md`. La v1 réplique `roadmap_items`
 (contenu par révisions entières, file « upstream l'emporte », verrous relayés
 par le broker local) et arbitre les conflits dans le Deck. Reste ouvert :
 
-- [ ] **Fédération peers/messages** : en mode `replica`, la messagerie est
-      locale à la machine (régression assumée vs `remote` pour les messages
-      inter-PC). Relayer enregistrements, `send-message` et `list-peers` vers
-      l'upstream avec heartbeat relais ; identité Ed25519 des peers déjà
-      compatible avec un ré-enregistrement sur un autre broker.
+- [ ] **Fédération peers/messages** (item n°1, priorité relevée après la revue
+      adversariale du 2026-09-05) : en mode `replica`, la messagerie est
+      locale à la machine **même en ligne**, pas seulement pendant une
+      coupure -- décision explicite de l'opérateur (§10 du brief), pas une
+      dégradation temporaire à corriger en passant. Relayer enregistrements,
+      `send-message` et `list-peers` vers l'upstream avec heartbeat relais ;
+      identité Ed25519 des peers déjà compatible avec un ré-enregistrement
+      sur un autre broker.
+- [ ] **Le Deck ne démarre pas lui-même le broker loopback**, en mode local
+      comme en mode replica : seule une session (`server.ts`, via
+      `ensureBroker()`) le fait naître aujourd'hui. Conséquence : un Deck
+      ouvert sans aucune session active ne peut pas lire la roadmap (locale
+      ou replica) -- comportement déjà en vigueur en mode local, pas une
+      régression du mode replica, mais qui devient plus visible avec la
+      bannière d'état de la replica. Faire spawn/ensure le broker depuis le
+      Deck lui-même reste à cadrer.
 - [ ] **Toast Deck « N positions de file perdues »** à la reconnexion : la v1
       ne journalise (`info`) que côté broker.
 - [ ] **Exposition de `lock_contested_by` aux agents natifs** (outil MCP ou
@@ -1044,6 +1055,28 @@ par le broker local) et arbitre les conflits dans le Deck. Reste ouvert :
       enrichissement de l'autre doivent rester un conflit dur) ; ne revenir
       dessus qu'avec un instantané de base et une règle explicite sur
       `status`/`deleted_at`.
+- [ ] **Aucun rôle `upstream` explicite** (résiduel de la revue adversariale
+      du 2026-09-05) : les routes `/roadmap/sync/pull|push|lock` sont
+      servies par TOUT broker qui porte un `broker_token` configuré, pas
+      seulement par un broker que l'opérateur a délibérément désigné comme
+      upstream d'une replica -- un broker `remote` ordinaire avec token
+      répond donc, sans le savoir, comme un upstream valide à qui le lui
+      demande. Durcissement possible : un flag de rôle explicite
+      (`upstream: true` ou équivalent) que le broker doit porter pour
+      accepter ces routes, au lieu du seul token comme condition suffisante.
+- [ ] **Écriture de `config.json` sans verrou inter-processus** (résiduel) :
+      deux fenêtres Kory (ou une fenêtre Kory + une session `cli.ts`)
+      écrivant `offline_replica` (ou tout autre champ) au même moment sur le
+      même fichier peuvent se piler l'une sur l'autre -- pas de lock
+      exclusif, dernier écrivain gagne silencieusement.
+- [ ] **`peersConfig:get` lisible par un companion distant appairé**
+      (résiduel) : le canal IPC/companion qui sert mode/URL/présence-de-token
+      au Settings « Broker » du Deck (jamais le token lui-même) est
+      atteignable par un companion mobile appairé, comme le reste des
+      canaux tier bas -- à mesurer si ce niveau d'exposition (topologie
+      broker de l'opérateur) doit descendre derrière une confirmation
+      supplémentaire, cohérent avec la revue `CHANNEL_TIERS` de `BACKLOG.md`
+      §1.2 (B10).
 
 ---
 

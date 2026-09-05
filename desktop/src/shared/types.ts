@@ -620,6 +620,19 @@ export interface RoadmapSyncStatus {
   conflicts?: number
   /** Cards modified locally and waiting to be pushed upstream. */
   pending_push?: number
+  /**
+   * Cards whose last push the upstream REFUSED with a validation error (a 4xx
+   * that is not the 409 conflict): the link is up, the change is not going
+   * anywhere, and `last_error` names the latest refusal. Distinct from
+   * `pending_push`, which is only waiting.
+   */
+  refused?: number
+  /**
+   * Lock claims and releases the upstream refused the same way, published with
+   * the same pass snapshot: a lock that never reached the upstream is a card
+   * two machines can both believe they hold.
+   */
+  refused_locks?: number
   locks?: { local: number; global: number; contested: number; remote: number }
 }
 
@@ -639,6 +652,35 @@ export interface RoadmapSyncEvent {
   status: RoadmapSyncStatus
   conflicts: RoadmapSyncConflict[]
 }
+
+/**
+ * Read-only view of the claude-peers CORE config file (the one server.ts,
+ * cli.ts and every non-Kory session read), for the Settings > Broker panel.
+ * The bearer token is reported as a yes/no marker and never as a value.
+ */
+export interface PeersConfigSummary {
+  /** Deployment shape this config describes, as deckBrokerMode resolves it. */
+  mode: DeckBrokerMode
+  /** Configured remote broker, env override included; null in local mode. */
+  brokerUrl: string | null
+  /** Whether a bearer token is configured. NEVER the token itself. */
+  hasToken: boolean
+  /** The `offline_replica` opt-in as it stands IN THE FILE. */
+  offlineReplica: boolean
+  /**
+   * Environment variables that override the file, so the panel can explain why
+   * a control is disabled instead of silently refusing the operator's click.
+   */
+  forcedByEnv: {
+    /** CLAUDE_PEERS_BROKER_URL is set. */
+    brokerUrl: boolean
+    /** CLAUDE_PEERS_OFFLINE_REPLICA is set: the checkbox cannot decide the mode. */
+    offlineReplica: boolean
+  }
+}
+
+/** Which deployment shape the claude-peers config describes (mirror of core BrokerMode). */
+export type DeckBrokerMode = 'local' | 'remote' | 'replica'
 
 export interface RoadmapListFilters {
   kind?: RoadmapKind
@@ -1766,6 +1808,14 @@ export interface DeckApi {
   getConfig(): Promise<AppConfig>
   setConfig(patch: Partial<AppConfig>): Promise<AppConfig>
   pickDirectory(): Promise<string | null>
+  /** Read-only summary of the claude-peers core config (never the token value). */
+  getPeersConfig(): Promise<PeersConfigSummary>
+  /**
+   * Flip the `offline_replica` opt-in in the claude-peers core config file.
+   * Returns the summary RE-READ from disk, so the panel shows the file and not
+   * the value the renderer hoped for.
+   */
+  setOfflineReplica(value: boolean): Promise<PeersConfigSummary>
 
   // i18n
   getI18n(): Promise<I18nPayload>
@@ -2207,6 +2257,8 @@ export interface DeckApi {
    * as onGraphDrafts: an empty conflicts array is a valid full state.
    */
   onRoadmapSync(cb: (event: RoadmapSyncEvent) => void): () => void
+  /** Core-config summary, re-broadcast after the replica opt-in is written. */
+  onPeersConfig(cb: (summary: PeersConfigSummary) => void): () => void
   /** Notification click on an inbox message: open the inbox panel. */
   onInboxOpen(cb: () => void): () => void
   /** Notification click: bring a session into view (agents view + selection). */

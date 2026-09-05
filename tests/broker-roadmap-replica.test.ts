@@ -9,7 +9,6 @@ import { Database } from "bun:sqlite";
 import {
   startBroker,
   stopBroker,
-  post,
   livePid,
   deckAuthored,
   type TestBroker,
@@ -22,6 +21,22 @@ import type {
 } from "../shared/types.ts";
 
 const PK = "github.com/vocsap/replica-repo";
+/**
+ * Both brokers of the pair run authenticated: the replication routes are served
+ * only where a broker_token is configured, and the replica presents that same
+ * token upstream. Every request this file makes therefore carries the Bearer,
+ * through this wrapper rather than through a per-call header.
+ */
+const TOKEN = "replica-suite-token";
+
+async function post<T = unknown>(url: string, body: unknown): Promise<{ status: number; body: T }> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${TOKEN}` },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, body: (await res.json()) as T };
+}
 
 type UpsertRes = { item: RoadmapItem };
 type ListRes = { items: RoadmapItem[] };
@@ -34,7 +49,7 @@ let replicaId: string;
 let upstreamBlocked = false;
 
 beforeAll(async () => {
-  upstream = await startBroker();
+  upstream = await startBroker({ CLAUDE_PEERS_BROKER_TOKEN: TOKEN });
   proxy = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -52,6 +67,7 @@ beforeAll(async () => {
   });
   replica = await startBroker({
     CLAUDE_PEERS_BROKER_URL: `http://127.0.0.1:${proxy.port}`,
+    CLAUDE_PEERS_BROKER_TOKEN: TOKEN,
     CLAUDE_PEERS_OFFLINE_REPLICA: "1",
     CLAUDE_PEERS_SYNC_TICK_MS: "150",
   });
@@ -351,6 +367,211 @@ test("an upstream change made by the lock sweep resolves itself in favour of the
   ]).toEqual(["a sweep-only divergence never asks the operator anything", false]);
 }, 40_000);
 
+test("a real upstream edit the sweep later stamped over is a conflict, never a silent local win", async () => {
+  // The auto-resolution reads WHAT the upstream changed, not who wrote last:
+  // `updated_by` names the last writer only, so a human edit followed by the
+  // sweep looks exactly like a sweep-only divergence -- and used to lose the
+  // human's work without ever asking the operator.
+  const card = await createOn(upstream, {
+    by: "agent-upstream",
+    title: "edited then swept",
+    description: "common base",
+    status: "in_progress",
+  });
+  await waitForItem("sweep-after-edit fixture reaches the replica", replica, card.id, (i) => i.description === "common base");
+
+  await goOffline();
+  await createOn(replica, { id: card.id, by: "agent-local", description: "still working on it" });
+  // A human enriches the card upstream...
+  await createOn(upstream, {
+    id: card.id,
+    by: "agent-upstream",
+    rationale: "why this card matters, written by a human",
+  });
+  // ...and only THEN does the sweep reclaim it, becoming the last writer.
+  const db = new Database(upstream.dbPath);
+  db.run("PRAGMA busy_timeout = 3000");
+  db.run(
+    "UPDATE roadmap_items SET status = 'planned', locked = 0, updated_by = 'lock-sweep', updated_at = datetime('now') WHERE id = ?",
+    [card.id]
+  );
+  db.close();
+  await goOnline();
+
+  const conflict = await pollUntil("the card is reported in conflict", 15_000, async () => {
+    const res = await post<RoadmapSyncConflictsResponse>(`${replica.url}/roadmap/sync/conflicts`, {
+      project_key: PK,
+    });
+    const found = res.body.items.find((c) => c.local.id === card.id);
+    return { done: found !== undefined, value: found };
+  });
+  expect([
+    "the operator arbitrates, and the upstream's human edit is on the remote side",
+    conflict!.remote.rationale,
+    conflict!.local.description,
+  ]).toEqual([
+    "the operator arbitrates, and the upstream's human edit is on the remote side",
+    "why this card matters, written by a human",
+    "still working on it",
+  ]);
+  const upstreamCard = await itemOn(upstream, card.id);
+  expect([
+    "nothing was pushed over the human edit while the operator has not chosen",
+    upstreamCard!.rationale,
+    upstreamCard!.description,
+  ]).toEqual([
+    "nothing was pushed over the human edit while the operator has not chosen",
+    "why this card matters, written by a human",
+    "common base",
+  ]);
+}, 40_000);
+
+test("a card work-locked upstream refuses the replica's push and lands in the operator's conflicts", async () => {
+  // The upstream lock guard has no replica-side twin for a card taken AFTER the
+  // replica already diverged: without the push refusal, an offline edit
+  // overwrites the content the upstream's own agent is working on.
+  const nativePeer = await post<RegisterResponse>(`${upstream.url}/register`, {
+    pid: livePid(),
+    cwd: "/work/upstream-holder",
+    git_root: null,
+    tty: null,
+    summary: "",
+    host: "upstream-host",
+    client_pid: livePid(),
+    project_key: PK,
+    group_id: "default",
+    group_secret_hash: null,
+  });
+  const held = await createOn(upstream, {
+    by: nativePeer.body.peer_id,
+    instance_token: nativePeer.body.instance_token,
+    title: "worked on upstream",
+    description: "the upstream agent's version",
+    status: "in_progress",
+  });
+  await waitForItem(
+    "the held card and its lock reach the replica",
+    replica,
+    held.id,
+    (i) => i.lock_scope === "remote" && i.description === "the upstream agent's version"
+  );
+
+  // A content-only edit: the card keeps the status it has, so nothing but the
+  // work-lock stands between this write and the upstream.
+  await createOn(replica, {
+    id: held.id,
+    by: "agent-local",
+    description: "the replica's version",
+  });
+
+  const conflicted = await pollUntil("the refused push becomes a conflict", 20_000, async () => {
+    const res = await post<RoadmapSyncConflictsResponse>(`${replica.url}/roadmap/sync/conflicts`, {
+      project_key: PK,
+    });
+    const found = res.body.items.find((c) => c.local.id === held.id);
+    return { done: found !== undefined, value: res.body.items.map((c) => c.local.id) };
+  });
+  expect(conflicted).toContain(held.id);
+  const upstreamHeld = await itemOn(upstream, held.id);
+  expect([
+    "the upstream agent's content is untouched while its lock holds",
+    upstreamHeld!.description,
+    upstreamHeld!.locked_by,
+  ]).toEqual([
+    "the upstream agent's content is untouched while its lock holds",
+    "the upstream agent's version",
+    nativePeer.body.peer_id,
+  ]);
+
+  // Choosing 'local' does not force the write through: the next push is refused
+  // by the same lock, and the card comes back for arbitration. Resolution
+  // happens at push time, not in the dialog.
+  const resolved = await post<{ item: RoadmapItem }>(
+    `${replica.url}/roadmap/sync/resolve`,
+    deckAuthored({ id: held.id, choice: "local" })
+  );
+  expect(resolved.status).toBe(200);
+  const again = await pollUntil("the lock still refuses the kept local version", 20_000, async () => {
+    const res = await post<RoadmapSyncConflictsResponse>(`${replica.url}/roadmap/sync/conflicts`, {
+      project_key: PK,
+    });
+    return {
+      done: res.body.items.some((c) => c.local.id === held.id),
+      value: res.body.items.map((c) => c.local.id),
+    };
+  });
+  expect([
+    "a lock held upstream keeps refusing until it is released, and says so every time",
+    again.includes(held.id),
+    (await itemOn(upstream, held.id))!.description,
+  ]).toEqual([
+    "a lock held upstream keeps refusing until it is released, and says so every time",
+    true,
+    "the upstream agent's version",
+  ]);
+}, 40_000);
+
+test("a lock-sweep divergence under a lock held upstream is still reported, never retried in silence", async () => {
+  // The one case where the two rules meet: the upstream row IS a sweep-only
+  // divergence (so the pull resolves it 'local'), and the card is ALSO locked
+  // upstream, so the push that follows is refused. Read on `updated_by` alone
+  // the refusal looks resolvable, and the pass would re-send the same card
+  // every tick without the operator ever being told.
+  const card = await createOn(upstream, {
+    by: "agent-upstream",
+    title: "swept, then taken by another replica",
+    description: "common base",
+    status: "in_progress",
+  });
+  await waitForItem("fixture reaches the replica", replica, card.id, (i) => i.description === "common base");
+
+  await goOffline();
+  await createOn(replica, { id: card.id, by: "agent-local", description: "still working on it" });
+  const db = new Database(upstream.dbPath);
+  db.run("PRAGMA busy_timeout = 3000");
+  db.run(
+    "UPDATE roadmap_items SET status = 'planned', locked = 0, locked_by = NULL, updated_by = 'lock-sweep', updated_at = datetime('now') WHERE id = ?",
+    [card.id]
+  );
+  db.close();
+  // Another replica relays the lock for one of ITS agents: no content changes,
+  // so the sweep stays the last content writer upstream.
+  const otherClaim = await post<{ scope?: string }>(`${upstream.url}/roadmap/sync/lock`, {
+    replica_id: "replica-elsewhere",
+    id: card.id,
+    action: "claim",
+    owner: { peer_id: "agent-elsewhere", group_id: "default" },
+  });
+  expect(["another replica holds the card upstream", otherClaim.status]).toEqual([
+    "another replica holds the card upstream",
+    200,
+  ]);
+  await goOnline();
+
+  const listed = await pollUntil("the refused card reaches the operator", 20_000, async () => {
+    const res = await post<RoadmapSyncConflictsResponse>(`${replica.url}/roadmap/sync/conflicts`, {
+      project_key: PK,
+    });
+    return {
+      done: res.body.items.some((c) => c.local.id === card.id),
+      value: res.body.items.map((c) => c.local.id),
+    };
+  });
+  expect(listed).toContain(card.id);
+  const status = await syncStatus();
+  expect([
+    "a refusal the protocol has an answer for is a conflict, not a validation refusal",
+    status.online,
+    status.refused ?? 0,
+    (await itemOn(upstream, card.id))!.description,
+  ]).toEqual([
+    "a refusal the protocol has an answer for is a conflict, not a validation refusal",
+    true,
+    0,
+    "common base",
+  ]);
+}, 40_000);
+
 test("the dispatch queue is owned by the upstream: its order arrives, a local reorder never leaves", async () => {
   const first = await createOn(upstream, { by: "agent-upstream", title: "queue head" });
   const second = await createOn(upstream, { by: "agent-upstream", title: "queue tail" });
@@ -555,3 +776,459 @@ test("a lock taken on the replica is relayed upstream, and one taken upstream bl
   expect((await itemOn(upstream, heldUpstream.id))!.locked_by).toBe(nativePeer.body.peer_id);
   upstreamDb.close();
 }, 40_000);
+
+test("an author relayed through the upstream comes back stripped of the relay this replica added", async () => {
+  // The operator signs a card here; upstream it is stored as this replica's
+  // relay of 'deck', so no upstream reader mistakes it for its OWN operator.
+  // Coming back down, that prefix names US -- the operator must not discover
+  // their own writes credited to a machine.
+  const card = await createOn(
+    replica,
+    deckAuthored({ project_key: PK, title: "signed by the operator", description: "operator work" })
+  );
+  const relayed = await waitForItem(
+    "the signed card reaches the upstream",
+    upstream,
+    card.id,
+    (i) => i.description === "operator work"
+  );
+  const prefix = `via:${replicaId.slice(0, 8)}:`;
+  expect([
+    "upstream, the operator of another machine is named as that machine's relay",
+    relayed.created_by,
+    relayed.updated_by,
+  ]).toEqual([
+    "upstream, the operator of another machine is named as that machine's relay",
+    `${prefix}deck`,
+    `${prefix}deck`,
+  ]);
+
+  // Forget the card locally and rewind the cursor: the replica pulls it back as
+  // a card it has never seen, which is exactly how a re-cloned replica meets its
+  // own past writes.
+  const db = new Database(replica.dbPath);
+  db.run("PRAGMA busy_timeout = 3000");
+  db.run("DELETE FROM roadmap_items WHERE id = ?", [card.id]);
+  db.run("UPDATE roadmap_sync_meta SET value = '0' WHERE key = 'upstream_cursor'");
+  db.close();
+
+  const returned = await waitForItem(
+    "the card comes back down",
+    replica,
+    card.id,
+    (i) => i.description === "operator work"
+  );
+  expect([
+    "on the machine that made them, the operator's writes read 'deck' again",
+    returned.created_by,
+    returned.updated_by,
+  ]).toEqual([
+    "on the machine that made them, the operator's writes read 'deck' again",
+    "deck",
+    "deck",
+  ]);
+}, 40_000);
+
+test("an import on the replica is a local edit like any other: counted as pending, and pushed", async () => {
+  // /roadmap/import writes with INSERT OR REPLACE, which fires the INSERT
+  // trigger and never the UPDATE one -- the trigger that marks a card dirty.
+  // Left to itself the import lands locally, is never pushed, and the next pull
+  // silently overwrites it with the upstream content.
+  const card = await createOn(upstream, {
+    by: "agent-upstream",
+    title: "imported over",
+    description: "the upstream version",
+  });
+  await waitForItem("import fixture reaches the replica", replica, card.id, (i) => i.description === "the upstream version");
+
+  await goOffline();
+  const pendingBefore = (await syncStatus()).pending_push ?? 0;
+  const imported = await post<{ imported: number; skipped: string[] }>(
+    `${replica.url}/roadmap/import`,
+    deckAuthored({
+      project_key: PK,
+      items: [
+        {
+          id: card.id,
+          kind: card.kind,
+          title: "imported over",
+          description: "the imported version",
+          priority: card.priority,
+          value: card.value,
+          effort: card.effort,
+          status: card.status,
+        },
+      ],
+    })
+  );
+  expect([imported.status, imported.body.imported]).toEqual([200, 1]);
+  const afterImport = await syncStatus();
+  expect([
+    "an imported change is waiting to be pushed like any other local edit",
+    (afterImport.pending_push ?? 0) - pendingBefore,
+  ]).toEqual(["an imported change is waiting to be pushed like any other local edit", 1]);
+
+  await goOnline();
+  const upstreamCard = await waitForItem(
+    "the imported change reaches the upstream",
+    upstream,
+    card.id,
+    (i) => i.description === "the imported version"
+  );
+  expect(upstreamCard.description).toBe("the imported version");
+
+  // The same file imported twice changes nothing, so it owes the upstream
+  // nothing: the comparison is on the content, not on the fact of writing.
+  const settled = await pollUntil("the backlog drains", 15_000, async () => {
+    const status = await syncStatus();
+    return { done: (status.pending_push ?? 0) === 0, value: status.pending_push };
+  });
+  expect(settled).toBe(0);
+  const reimported = await post<{ imported: number }>(
+    `${replica.url}/roadmap/import`,
+    deckAuthored({
+      project_key: PK,
+      items: [
+        {
+          id: card.id,
+          kind: card.kind,
+          title: "imported over",
+          description: "the imported version",
+          priority: card.priority,
+          value: card.value,
+          effort: card.effort,
+          status: card.status,
+        },
+      ],
+    })
+  );
+  expect(reimported.status).toBe(200);
+  expect([
+    "re-importing identical content owes the upstream nothing",
+    (await syncStatus()).pending_push ?? 0,
+  ]).toEqual(["re-importing identical content owes the upstream nothing", 0]);
+}, 60_000);
+
+test("one row the upstream refuses does not stop the pass, and never reads as an outage", async () => {
+  // A 4xx that is not a conflict is a validation refusal: the row cannot be
+  // fixed by retrying, but the twenty behind it are fine. Aborting the pass on
+  // it stopped replication for good and reported the upstream unreachable --
+  // the operator sees an outage that does not exist while their work piles up.
+  await goOffline();
+  const poison = await createOn(replica, { by: "agent-local", title: "the upstream will refuse this" });
+  const db = new Database(replica.dbPath);
+  db.run("PRAGMA busy_timeout = 3000");
+  // An author no upstream accepts: the identity charset refuses the empty
+  // string, and every push of this card is answered 400 for as long as it says
+  // so. Written straight to the column because no route would accept it.
+  db.run("UPDATE roadmap_items SET created_by = '' WHERE id = ?", [poison.id]);
+  db.close();
+  const healthy = await createOn(replica, {
+    by: "agent-local",
+    title: "behind the refused one",
+    description: "must still travel",
+  });
+
+  upstreamBlocked = false;
+  await waitForItem(
+    "the row behind the refused one still reaches the upstream",
+    upstream,
+    healthy.id,
+    (i) => i.description === "must still travel"
+  );
+  // Waits for the SNAPSHOT, not for a count: the pass publishes its counts and
+  // its verdict together, so `refused` and `online` are read from the same
+  // pass or not at all.
+  const status = await pollUntil("the refusal is counted", 15_000, async () => {
+    const s = await syncStatus();
+    return { done: s.online === true && (s.refused ?? 0) >= 1, value: s };
+  });
+  expect([
+    "a refused row is reported as such, and the upstream is still online",
+    status.online,
+    status.refused,
+    (status.last_error ?? "").includes(poison.id),
+  ]).toEqual([
+    "a refused row is reported as such, and the upstream is still online",
+    true,
+    1,
+    true,
+  ]);
+  expect(await itemOn(upstream, poison.id)).toBeUndefined();
+
+  // Fixing the card upstream-acceptable clears the refusal: the count is live
+  // state, not a tally of everything that ever failed.
+  const db2 = new Database(replica.dbPath);
+  db2.run("PRAGMA busy_timeout = 3000");
+  db2.run("UPDATE roadmap_items SET created_by = 'agent-local' WHERE id = ?", [poison.id]);
+  db2.close();
+  await waitForItem("the fixed row departs on its own", upstream, poison.id, (i) => i.title === "the upstream will refuse this");
+  const cleared = await pollUntil("the refusal count clears", 15_000, async () => {
+    const s = await syncStatus();
+    return { done: (s.refused ?? 0) === 0, value: s.refused };
+  });
+  expect(["nothing is refused any more", cleared]).toEqual(["nothing is refused any more", 0]);
+}, 60_000);
+
+test("a lock claim the upstream refuses stops that claim only, not the pass", async () => {
+  const peer = await post<RegisterResponse>(`${replica.url}/register`, {
+    pid: livePid(),
+    cwd: "/work/replica-lock-isolation",
+    git_root: null,
+    tty: null,
+    summary: "",
+    host: "replica-host",
+    client_pid: livePid(),
+    project_key: PK,
+    group_id: "default",
+    group_secret_hash: null,
+  });
+  const first = await createOn(replica, {
+    by: peer.body.peer_id,
+    instance_token: peer.body.instance_token,
+    title: "claimed first, then poisoned",
+    status: "in_progress",
+  });
+  await waitForItem("the first lock is asserted upstream", replica, first.id, (i) => i.lock_scope === "global");
+
+  const db = new Database(replica.dbPath);
+  db.run("PRAGMA busy_timeout = 3000");
+  // An owner name outside the identity charset: every claim carrying it is
+  // answered 400, and this card is claimed before the next one on every pass.
+  db.run("UPDATE roadmap_items SET locked_by = 'agent@bad' WHERE id = ?", [first.id]);
+  db.close();
+
+  const second = await createOn(replica, {
+    by: peer.body.peer_id,
+    instance_token: peer.body.instance_token,
+    title: "claimed behind the refused one",
+    status: "in_progress",
+  });
+  const asserted = await waitForItem(
+    "the claim behind the refused one still reaches the upstream",
+    replica,
+    second.id,
+    (i) => i.lock_scope === "global"
+  );
+  expect(asserted.lock_scope).toBe("global");
+  const status = await pollUntil("the refused claim is counted", 15_000, async () => {
+    const s = await syncStatus();
+    return { done: s.online === true && (s.refused_locks ?? 0) >= 1, value: s };
+  });
+  expect([
+    "a refused claim is counted on its own, and is not an outage either",
+    status.online,
+    status.refused_locks,
+  ]).toEqual(["a refused claim is counted on its own, and is not an outage either", true, 1]);
+}, 60_000);
+
+test("a claim the upstream refuses because the card is inactive is not read as contested", async () => {
+  // 409 answers two different questions on this route. Read as one, a card the
+  // operator merely set aside upstream shows up on the replica as "another
+  // holder wants it", which is a lock conflict that does not exist.
+  const peer = await post<RegisterResponse>(`${replica.url}/register`, {
+    pid: livePid(),
+    cwd: "/work/replica-inactive",
+    git_root: null,
+    tty: null,
+    summary: "",
+    host: "replica-host",
+    client_pid: livePid(),
+    project_key: PK,
+    group_id: "default",
+    group_secret_hash: null,
+  });
+  const card = await createOn(upstream, { by: "agent-upstream", title: "set aside upstream" });
+  await waitForItem("the card reaches the replica", replica, card.id, (i) => i.title === "set aside upstream");
+
+  await goOffline();
+  const taken = await createOn(replica, {
+    id: card.id,
+    by: peer.body.peer_id,
+    instance_token: peer.body.instance_token,
+    status: "in_progress",
+  });
+  expect([taken.locked, taken.lock_scope]).toEqual([true, "local"]);
+  const setAside = await post<UpsertRes>(
+    `${upstream.url}/roadmap/upsert`,
+    deckAuthored({ project_key: PK, id: card.id, inactive: true })
+  );
+  expect(setAside.body.item.inactive).toBe(true);
+
+  upstreamBlocked = false;
+  // A card locked here AFTER the refused one: its claim reaching the upstream
+  // is the proof that the lock pass ran past the refusal.
+  const behind = await createOn(replica, {
+    by: peer.body.peer_id,
+    instance_token: peer.body.instance_token,
+    title: "claimed after the inactive one",
+    status: "in_progress",
+  });
+  await waitForItem("the pass got past the refused claim", replica, behind.id, (i) => i.lock_scope === "global");
+
+  const held = await itemOn(replica, card.id);
+  expect([
+    "a card nobody else holds is never shown as contested",
+    held!.locked,
+    held!.lock_scope,
+  ]).toEqual(["a card nobody else holds is never shown as contested", true, "local"]);
+}, 60_000);
+
+test("an arbitration carries no credential and no operator proof, on either side", async () => {
+  // The two fields that never cross the replication boundary do not cross the
+  // OPERATOR boundary either: /roadmap/sync/conflicts is read by the Deck, and
+  // the local side used to be projected straight from the stored row.
+  const peer = await post<RegisterResponse>(`${replica.url}/register`, {
+    pid: livePid(),
+    cwd: "/work/replica-projection",
+    git_root: null,
+    tty: null,
+    summary: "",
+    host: "replica-host",
+    client_pid: livePid(),
+    project_key: PK,
+    group_id: "default",
+    group_secret_hash: null,
+  });
+  const card = await createOn(upstream, {
+    by: "agent-upstream",
+    title: "arbitrated card",
+    description: "common base",
+  });
+  await waitForItem("projection fixture reaches the replica", replica, card.id, (i) => i.description === "common base");
+
+  await goOffline();
+  // A local lock (a credential lands in locked_by_token) and a signed write
+  // (an operator_id lands beside it), then a divergent upstream edit.
+  await createOn(replica, {
+    id: card.id,
+    by: peer.body.peer_id,
+    instance_token: peer.body.instance_token,
+    status: "in_progress",
+  });
+  await post<UpsertRes>(
+    `${replica.url}/roadmap/upsert`,
+    deckAuthored({ project_key: PK, id: card.id, description: "the replica's version" })
+  );
+  await createOn(upstream, { id: card.id, by: "agent-upstream", description: "the upstream's version" });
+  await goOnline();
+
+  const conflict = await pollUntil("the card is reported in conflict", 20_000, async () => {
+    const res = await post<RoadmapSyncConflictsResponse>(`${replica.url}/roadmap/sync/conflicts`, {
+      project_key: PK,
+    });
+    const found = res.body.items.find((c) => c.local.id === card.id);
+    return { done: found !== undefined, value: found };
+  });
+
+  const db = new Database(replica.dbPath);
+  const stored = db
+    .query("SELECT locked_by_token, operator_id FROM roadmap_items WHERE id = ?")
+    .get(card.id) as { locked_by_token: string | null; operator_id: string | null };
+  db.close();
+  expect([
+    "the stored row DOES carry both, so their absence below is the projection at work",
+    stored.locked_by_token !== null,
+    stored.operator_id !== null,
+  ]).toEqual([
+    "the stored row DOES carry both, so their absence below is the projection at work",
+    true,
+    true,
+  ]);
+
+  const leaked = (side: unknown): string[] =>
+    Object.keys(side as Record<string, unknown>).filter(
+      (k) => k === "locked_by_token" || k === "operator_id"
+    );
+  expect([
+    "neither the local nor the remote side of an arbitration carries a credential or an operator proof",
+    leaked(conflict!.local),
+    leaked(conflict!.remote),
+  ]).toEqual([
+    "neither the local nor the remote side of an arbitration carries a credential or an operator proof",
+    [],
+    [],
+  ]);
+
+  // The remote side is a blob read back from a column: give it the two fields
+  // and the response must still not carry them. Without the pick-list this
+  // stored object would be handed to the Deck as it stands.
+  const poisoned = new Database(replica.dbPath);
+  poisoned.run("PRAGMA busy_timeout = 3000");
+  const rawRemote = JSON.parse(
+    (
+      poisoned.query("SELECT sync_remote FROM roadmap_items WHERE id = ?").get(card.id) as {
+        sync_remote: string;
+      }
+    ).sync_remote
+  ) as Record<string, unknown>;
+  rawRemote.locked_by_token = "a-token-that-must-not-travel";
+  rawRemote.operator_id = "an-operator-proof-that-must-not-travel";
+  poisoned.run("UPDATE roadmap_items SET sync_remote = ? WHERE id = ?", [
+    JSON.stringify(rawRemote),
+    card.id,
+  ]);
+  poisoned.close();
+
+  const reread = (
+    await post<RoadmapSyncConflictsResponse>(`${replica.url}/roadmap/sync/conflicts`, {
+      project_key: PK,
+    })
+  ).body.items.find((c) => c.local.id === card.id)!;
+  expect([
+    "the stored upstream row is rebuilt field by field, so what it gained never reaches the operator",
+    leaked(reread.remote),
+    reread.remote.description,
+  ]).toEqual([
+    "the stored upstream row is rebuilt field by field, so what it gained never reaches the operator",
+    [],
+    "the upstream's version",
+  ]);
+}, 60_000);
+
+test("a batch full of rows the upstream refuses never starves the row behind them", async () => {
+  // The push batch is ordered by content_rev and capped: rows the upstream
+  // refuses keep their revision and their place at the head, so a batch's worth
+  // of them is a wall the next card never gets past -- replication silently
+  // stops for everything written afterwards.
+  await goOffline();
+  const poison: string[] = [];
+  for (let i = 0; i < 51; i++) {
+    const card = await createOn(replica, { by: "agent-local", title: `refused row ${i}` });
+    poison.push(card.id);
+  }
+  const db = new Database(replica.dbPath);
+  db.run("PRAGMA busy_timeout = 3000");
+  db.run(
+    `UPDATE roadmap_items SET created_by = '' WHERE id IN (${poison.map(() => "?").join(", ")})`,
+    poison
+  );
+  db.close();
+  const healthy = await createOn(replica, {
+    by: "agent-local",
+    title: "written behind the wall",
+    description: "must still travel",
+  });
+
+  upstreamBlocked = false;
+  await waitForItem(
+    "the row behind a full batch of refusals still reaches the upstream",
+    upstream,
+    healthy.id,
+    (i) => i.description === "must still travel",
+    30_000
+  );
+  const status = await pollUntil("every refusal is accounted for", 20_000, async () => {
+    const s = await syncStatus();
+    return { done: (s.refused ?? 0) >= poison.length, value: s };
+  });
+  expect([
+    "the wall is reported in full, and the upstream is not called unreachable for it",
+    status.refused,
+    status.online,
+  ]).toEqual([
+    "the wall is reported in full, and the upstream is not called unreachable for it",
+    poison.length,
+    true,
+  ]);
+}, 90_000);

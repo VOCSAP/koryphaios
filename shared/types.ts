@@ -560,9 +560,16 @@ export interface RoadmapSyncPushResponse {
   content_rev: number;
 }
 
-/** 409 body of /roadmap/sync/push: `item` is the upstream row, null when the row is missing. */
+/**
+ * 409 body of /roadmap/sync/push. `reason`: 'content' when the upstream
+ * content_rev moved past the replica's base, 'locked_upstream' when the card is
+ * work-locked upstream by a holder this replica does not relay (the push is
+ * refused whatever the revisions, exactly as a direct upsert would be), 'missing'
+ * when the replica derives from a row the upstream no longer has (`item` null).
+ */
 export interface RoadmapSyncPushConflict {
   error: "conflict";
+  reason: "content" | "locked_upstream" | "missing";
   item: RoadmapSyncRow | null;
 }
 
@@ -578,6 +585,18 @@ export interface RoadmapSyncLockRequest {
 export interface RoadmapSyncLockClaimResponse {
   /** 'global' on 200, 'contested' on 409. */
   scope: "global" | "contested";
+  item: RoadmapSyncRow;
+}
+
+/**
+ * 409 body of a /roadmap/sync/lock claim on a card the operator set aside
+ * upstream. Same status as a contested claim and a different shape on purpose:
+ * `scope` is absent, so a replica reading `error` -- or the missing scope --
+ * never records a lock conflict where there is no other holder. The card is
+ * simply not claimable until `inactive` is cleared.
+ */
+export interface RoadmapSyncLockInactiveResponse {
+  error: "inactive";
   item: RoadmapSyncRow;
 }
 
@@ -602,11 +621,25 @@ export interface RoadmapSyncStatus {
   conflicts?: number;
   /** Cards dirty and clean, i.e. waiting to be pushed. */
   pending_push?: number;
+  /**
+   * Cards whose last push the upstream refused with a 4xx other than 409
+   * (a validation error, never a network failure): retried every pass, never
+   * a reason to report the upstream offline. `last_error` names the latest.
+   */
+  refused?: number;
+  /** Lock claims/releases the upstream refused with a 4xx other than a contested 409, published with the same pass snapshot. */
+  refused_locks?: number;
   locks?: { local: number; global: number; contested: number; remote: number };
 }
 
 export interface RoadmapSyncConflict {
-  local: RoadmapItem;
+  /**
+   * The replica's own copy, projected through the SAME pick-list as the
+   * upstream side: `locked_by_token` and `operator_id` cross no boundary,
+   * the operator's dialog included. Carries `rev`/`content_rev` as a
+   * consequence of that shared projection; the arbitration reads neither.
+   */
+  local: RoadmapSyncRow;
   remote: RoadmapSyncRow;
   /** Content the two sides diverged from; null when the card had never been synced. */
   base: RoadmapSyncContent | null;
