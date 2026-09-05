@@ -15,9 +15,15 @@ import type {
   RoadmapItem,
   RoadmapListFilters,
   RoadmapListResponse,
+  RoadmapLockScope,
   RoadmapQuery,
   RoadmapReorderResponse,
   RoadmapSearchResult,
+  RoadmapSyncConflict,
+  RoadmapSyncContent,
+  RoadmapSyncResolution,
+  RoadmapSyncRow,
+  RoadmapSyncStatus,
   RoadmapUpsertFields,
   RoadmapUpsertResponse
 } from '../shared/types'
@@ -133,6 +139,9 @@ const PRIORITIES = ['must', 'should', 'could', 'wont'] as const
 const LEVELS = ['low', 'medium', 'high'] as const
 const STATUSES = ['idea', 'planned', 'in_progress', 'done', 'archived'] as const
 const DIRECTIVES = ['clear', 'compact', 'magic_compact'] as const
+const SYNC_STATES = ['clean', 'conflict'] as const
+const LOCK_SCOPES = ['local', 'global', 'contested', 'remote', 'release_pending'] as const
+const SYNC_MODES = ['local', 'upstream', 'replica'] as const
 
 function str(v: unknown): string {
   return typeof v === 'string' ? v : ''
@@ -215,8 +224,21 @@ export function sanitizeRoadmapItem(raw: unknown): RoadmapItem | null {
     operator_id: typeof r.operator_id === 'string' ? r.operator_id : undefined,
     // Card c33a5968: NOT NULL DEFAULT 0 broker-side, so this is always a
     // boolean on the wire -- coerced defensively like `locked` above.
-    inactive: r.inactive === true
+    inactive: r.inactive === true,
+    // Replication fields. 'clean' and null are the states a NON-replica
+    // broker reports, so an older broker that omits these keys entirely, and
+    // a hostile one that sends garbage, both land on "nothing to arbitrate,
+    // no remote lock" -- the board renders exactly as it did before.
+    sync_state: oneOf(r.sync_state, SYNC_STATES, 'clean'),
+    lock_scope: lockScopeOrNull(r.lock_scope),
+    lock_contested_by: strList(r.lock_contested_by)
   }
+}
+
+function lockScopeOrNull(v: unknown): RoadmapLockScope | null {
+  return typeof v === 'string' && (LOCK_SCOPES as readonly string[]).includes(v)
+    ? (v as RoadmapLockScope)
+    : null
 }
 
 function oneOfOrNull(v: string): RoadmapItem['directive'] {
@@ -462,4 +484,191 @@ export async function lockRelease(
   peerIds: string[]
 ): Promise<RoadmapLockPeerResult> {
   return roadmapLockPeers(endpoint, '/roadmap/lock-release', projectKey, peerIds)
+}
+
+// ----- Roadmap replication (offline replica) -----
+// The Deck NEVER talks to the upstream broker: it polls the LOCAL broker,
+// which owns the replication loop. Every response below is sanitized through
+// the same pick-list discipline as /roadmap/list -- a replica answers with
+// rows it received from a machine this Deck has no relationship with, so the
+// shapes are trusted even less here than elsewhere.
+
+/** A counter, or undefined -- rejects NaN and non-integers explicitly. */
+function counter(v: unknown): number | undefined {
+  return typeof v === 'number' && Number.isInteger(v) ? v : undefined
+}
+
+/** A counter that must exist, defaulting to 0 (a revision is never absent). */
+function revision(v: unknown): number {
+  return typeof v === 'number' && Number.isInteger(v) ? v : 0
+}
+
+function boolOrUndefined(v: unknown): boolean | undefined {
+  return typeof v === 'boolean' ? v : undefined
+}
+
+function strOrUndefined(v: unknown): string | undefined {
+  return typeof v === 'string' ? v : undefined
+}
+
+/**
+ * Lock counters travel as one object or not at all: a partially-readable set
+ * would report "0 contested locks" on a broker that simply spoke a different
+ * shape, which is a confident zero over something nobody counted.
+ */
+function lockCounts(v: unknown): RoadmapSyncStatus['locks'] {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined
+  const r = v as Record<string, unknown>
+  const local = counter(r.local)
+  const global = counter(r.global)
+  const contested = counter(r.contested)
+  const remote = counter(r.remote)
+  if (local === undefined || global === undefined || contested === undefined || remote === undefined) {
+    return undefined
+  }
+  return { local, global, contested, remote }
+}
+
+/**
+ * Pick-list over the status payload. `mode` falls back to 'local', the inert
+ * value: an unreadable status must never make the Deck believe it is a
+ * replica, since that alone starts the conflicts poll and can raise the
+ * offline banner. Every other field is optional by contract (a non-replica
+ * broker answers `{ mode }` alone), so an absent one stays absent rather than
+ * becoming a fabricated zero.
+ */
+export function sanitizeSyncStatus(raw: unknown, route = '/roadmap/sync/status'): RoadmapSyncStatus {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    reportError('roadmap', `${route}: response was not an object; treated as a non-replica broker`)
+    return { mode: 'local' }
+  }
+  const r = raw as Record<string, unknown>
+  return {
+    mode: oneOf(r.mode, SYNC_MODES, 'local'),
+    upstream_url: strOrUndefined(r.upstream_url),
+    online: boolOrUndefined(r.online),
+    since: strOrUndefined(r.since),
+    last_error: nullableStr(r.last_error),
+    last_sync_at: nullableStr(r.last_sync_at),
+    cursor: counter(r.cursor),
+    conflicts: counter(r.conflicts),
+    pending_push: counter(r.pending_push),
+    locks: lockCounts(r.locks)
+  }
+}
+
+/**
+ * The upstream row: an ordinary item plus the two revision counters. Reuses
+ * sanitizeRoadmapItem so the content pick-list has exactly one definition --
+ * a second copy here is what would silently let a new column through.
+ */
+function sanitizeSyncRow(raw: unknown): RoadmapSyncRow | null {
+  const item = sanitizeRoadmapItem(raw)
+  if (!item) return null
+  const r = raw as Record<string, unknown>
+  return { ...item, rev: revision(r.rev), content_rev: revision(r.content_rev) }
+}
+
+/** Explicit pick-list, never a loop over the field array: the compiler checks it. */
+function contentOf(item: RoadmapItem): RoadmapSyncContent {
+  return {
+    kind: item.kind,
+    title: item.title,
+    description: item.description,
+    rationale: item.rationale,
+    context: item.context,
+    priority: item.priority,
+    value: item.value,
+    effort: item.effort,
+    status: item.status,
+    tags: item.tags,
+    depends_on: item.depends_on,
+    deleted_at: item.deleted_at,
+    directive: item.directive,
+    target_peer_ids: item.target_peer_ids,
+    inactive: item.inactive
+  }
+}
+
+/**
+ * The common base carries the fifteen content columns and nothing else, so it
+ * is sanitized by borrowing the item pick-list under the conflict's own
+ * id/project_key and keeping the content half. null (never synced) is a
+ * legitimate value the dialog renders differently, not a failure.
+ */
+function sanitizeSyncBase(raw: unknown, id: string, projectKey: string): RoadmapSyncContent | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const item = sanitizeRoadmapItem({
+    ...(raw as Record<string, unknown>),
+    id,
+    project_key: projectKey
+  })
+  return item ? contentOf(item) : null
+}
+
+/**
+ * Sanitize the conflicts list, tracing how many entries were unusable. A
+ * conflict missing either side cannot be arbitrated at all -- the dialog would
+ * offer three buttons over half a card -- so it is dropped rather than
+ * half-rendered.
+ */
+export function sanitizeSyncConflicts(raw: unknown, route = '/roadmap/sync/conflicts'): RoadmapSyncConflict[] {
+  const items = Array.isArray(raw) ? raw : []
+  if (!Array.isArray(raw)) {
+    reportError('roadmap', `${route}: response items was not an array; treated as empty`)
+  }
+  const out: RoadmapSyncConflict[] = []
+  let dropped = 0
+  for (const entry of items) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      dropped++
+      continue
+    }
+    const e = entry as Record<string, unknown>
+    const local = sanitizeRoadmapItem(e.local)
+    const remote = sanitizeSyncRow(e.remote)
+    if (!local || !remote) {
+      dropped++
+      continue
+    }
+    out.push({ local, remote, base: sanitizeSyncBase(e.base, local.id, local.project_key) })
+  }
+  if (dropped > 0) {
+    reportError('roadmap', `${route}: dropped ${dropped} conflict(s) missing a usable local or remote side`)
+  }
+  return out
+}
+
+/** Replication health of the broker this Deck talks to. */
+export async function fetchRoadmapSyncStatus(endpoint: BrokerEndpoint): Promise<RoadmapSyncStatus> {
+  const res = await roadmapPost<unknown>(endpoint, '/roadmap/sync/status', {})
+  return sanitizeSyncStatus(res)
+}
+
+/** Cards of ONE project awaiting the operator's arbitration. */
+export async function fetchRoadmapConflicts(
+  endpoint: BrokerEndpoint,
+  projectKey: string
+): Promise<RoadmapSyncConflict[]> {
+  const res = await roadmapPost<{ items?: unknown }>(endpoint, '/roadmap/sync/conflicts', {
+    project_key: projectKey
+  })
+  return sanitizeSyncConflicts(res?.items)
+}
+
+/**
+ * Arbitrate one conflict. An operator write like every other roadmap write of
+ * this module: signed, attributed to the reserved 'deck' author.
+ */
+export async function resolveRoadmapConflict(
+  endpoint: BrokerEndpoint,
+  id: string,
+  choice: RoadmapSyncResolution
+): Promise<RoadmapItem> {
+  const res = await roadmapPost<{ item?: unknown }>(
+    endpoint,
+    '/roadmap/sync/resolve',
+    signedAsOperator({ id, choice, by: DECK_AUTHOR })
+  )
+  return sanitizeOne(res?.item, '/roadmap/sync/resolve')
 }

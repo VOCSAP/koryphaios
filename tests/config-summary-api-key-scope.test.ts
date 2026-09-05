@@ -27,6 +27,7 @@ const baseConfig: Config = {
   broker_url: null,
   broker_token: null,
   bind_host: null,
+  offline_replica: false,
 };
 
 function withFakeEnvKey(fn: () => void) {

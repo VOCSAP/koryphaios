@@ -174,6 +174,31 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   floor, then a thin proportional scrollbar takes over; an expand button
   blows the lane up into a fullscreen foreground modal (same component,
   `fullscreen` prop).
+- **Replica mode in the Deck (offline replica)**: when the local broker
+  replicates a distant one, the Deck reads the replication state off its OWN
+  broker and never addresses the upstream — pushing, pulling and relaying
+  locks are the local broker's job, so a network cut is invisible to the
+  tiles. `/roadmap/sync/status` rides the existing `INBOX_POLL_MS` tick and
+  self-gates: outside replica mode it is one probe at startup plus one per
+  broker recovery, and only a broker that positively answers `replica` also
+  gets `/roadmap/sync/conflicts` polled for the current project. The
+  `roadmap:sync` broadcast fires on a signature change only (health fields +
+  each conflict's upstream `content_rev`, so an edit landing on an already
+  conflicted card is not mistaken for "nothing moved"). Renderer side: a
+  numeric badge on the Roadmap rail entry (this project's conflicts, never
+  the broker's cross-project counter), an INFO-tone status banner while the
+  upstream is unreachable — the local broker is up, work continues, only the
+  sharing is paused, so it is not the red outage banner and the two are
+  exclusive by construction — a red ring + a clickable badge on a conflicted
+  card, an amber ring on a contested lock, the lock glyph with a "remote
+  lock" title for one held upstream, and `RoadmapConflictDialog` listing ONLY
+  the content fields that differ (lifecycle `status`/`deleted_at` first) with
+  the three arbitrations `remote` / `local` / `merge_reopen`. The choice is
+  re-validated main-side against `ROADMAP_SYNC_RESOLUTIONS` before it reaches
+  the broker, and every broker response goes through the pick-list sanitizers
+  of `roadmap-service.ts` whose defaults are inert: an unreadable status reads
+  as a non-replica broker, an unknown `sync_state` as `clean`, an unknown
+  `lock_scope` as null.
 - **Files & Git rail views (GX1–GX9)**: two READ-ONLY rail
   views. 📁 Files: lazy explorer + plain-text viewer (line-number gutter, no
   highlighting in v1 — shiki/highlight.js noted for v2) over roots the main

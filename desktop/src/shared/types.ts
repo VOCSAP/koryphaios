@@ -537,6 +537,107 @@ export interface RoadmapItem {
    * to set/clear it exists yet, this is the read-direction field only.
    */
   inactive: boolean
+  /**
+   * Replica-side reconciliation state against the upstream broker:
+   * 'conflict' when both sides changed the content since their common base
+   * and the operator has not arbitrated yet. Always 'clean' on a broker that
+   * is not a replica, so every non-replica Deck renders exactly as before.
+   */
+  sync_state: RoadmapSyncState
+  /**
+   * Replica-side scope of the work-lock. 'remote' mirrors a lock held
+   * upstream by a third party (the local guard then blocks local agents);
+   * 'contested' means this Deck holds it locally while someone else holds it
+   * upstream. null when unlocked or on a non-replica broker.
+   */
+  lock_scope: RoadmapLockScope | null
+  /**
+   * Upstream-side `"<peer_id>@<replica_id>"` holders who hold this card
+   * locally while it is locked here by someone else. Visibility only, never
+   * a lock guard input.
+   */
+  lock_contested_by: string[]
+}
+
+/** Mirror of the core RoadmapSyncState (DESIGN-OFFLINE-REPLICA §3.1). */
+export type RoadmapSyncState = 'clean' | 'conflict'
+
+/** Mirror of the core RoadmapLockScope (DESIGN-OFFLINE-REPLICA §5.1). */
+export type RoadmapLockScope = 'local' | 'global' | 'contested' | 'remote' | 'release_pending'
+
+/**
+ * The fifteen columns whose divergence between a replica and its upstream IS
+ * a conflict, mirroring the core ROADMAP_SYNC_CONTENT_FIELDS. `queue`, the
+ * lock columns, the attribution/timestamp columns and `operator_id` are
+ * deliberately absent: they travel with a card without defining its content.
+ */
+export const ROADMAP_SYNC_CONTENT_FIELDS = [
+  'kind',
+  'title',
+  'description',
+  'rationale',
+  'context',
+  'priority',
+  'value',
+  'effort',
+  'status',
+  'tags',
+  'depends_on',
+  'deleted_at',
+  'directive',
+  'target_peer_ids',
+  'inactive'
+] as const
+
+export type RoadmapSyncContentField = (typeof ROADMAP_SYNC_CONTENT_FIELDS)[number]
+
+/** The content snapshot the replica stores as its base and merges three ways. */
+export type RoadmapSyncContent = Pick<RoadmapItem, RoadmapSyncContentField>
+
+/** An upstream row: the item plus the two upstream revision counters. */
+export type RoadmapSyncRow = RoadmapItem & {
+  rev: number
+  content_rev: number
+}
+
+/** Which broker the Deck is actually talking to (mirror of core RoadmapSyncMode). */
+export type RoadmapSyncMode = 'local' | 'upstream' | 'replica'
+
+/**
+ * Replication health, polled on the inbox tick. Every field beyond `mode` is
+ * replica-only and optional: a non-replica broker answers `{ mode }` alone.
+ */
+export interface RoadmapSyncStatus {
+  mode: RoadmapSyncMode
+  upstream_url?: string
+  online?: boolean
+  /** ISO timestamp of the last online/offline transition. */
+  since?: string
+  last_error?: string | null
+  last_sync_at?: string | null
+  cursor?: number
+  /** Cards in sync_state 'conflict', every project. */
+  conflicts?: number
+  /** Cards modified locally and waiting to be pushed upstream. */
+  pending_push?: number
+  locks?: { local: number; global: number; contested: number; remote: number }
+}
+
+/** One card the operator must arbitrate: the two sides plus their common base. */
+export interface RoadmapSyncConflict {
+  local: RoadmapItem
+  remote: RoadmapSyncRow
+  /** Content the two sides diverged from; null when the card had never been synced. */
+  base: RoadmapSyncContent | null
+}
+
+/** Operator arbitration of one conflict (mirror of core RoadmapSyncResolution). */
+export type RoadmapSyncResolution = 'remote' | 'local' | 'merge_reopen'
+
+/** Payload of the 'roadmap:sync' broadcast: replication health + this project's conflicts. */
+export interface RoadmapSyncEvent {
+  status: RoadmapSyncStatus
+  conflicts: RoadmapSyncConflict[]
 }
 
 export interface RoadmapListFilters {
@@ -1719,6 +1820,12 @@ export interface DeckApi {
   /** Pick a plan file and spawn a one-shot import agent (PLAN C7). */
   importPlan(): Promise<boolean>
   /**
+   * Offline replica: arbitrate ONE replication conflict. `choice` is
+   * re-validated main-side against the three known resolutions before it
+   * reaches the broker. Returns the card as it stands after the arbitration.
+   */
+  resolveRoadmapConflict(id: string, choice: RoadmapSyncResolution): Promise<RoadmapItem>
+  /**
    * Fleet-wide stop broadcast (card aaf4537d lot 3): pause/soft/hard every
    * live tile at once. Companion-tier 3 (trust-changing, remote-blocked).
    *
@@ -2094,6 +2201,12 @@ export interface DeckApi {
   onPendingApprovals(cb: (approvals: Approval[]) => void): () => void
   /** Full pending graph-draft list (non-destructive broker poll). */
   onGraphDrafts(cb: (drafts: DeckGraphDraft[]) => void): () => void
+  /**
+   * Replication health + this project's conflicts, pushed by the main-process
+   * poll only when either actually changed. Same replace-whole-state contract
+   * as onGraphDrafts: an empty conflicts array is a valid full state.
+   */
+  onRoadmapSync(cb: (event: RoadmapSyncEvent) => void): () => void
   /** Notification click on an inbox message: open the inbox panel. */
   onInboxOpen(cb: () => void): () => void
   /** Notification click: bring a session into view (agents view + selection). */

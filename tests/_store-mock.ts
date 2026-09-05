@@ -145,7 +145,8 @@ export const storeMockStubs = {
   errorText: (e: unknown): string => String(e),
   inboxPendingCount: (): number => 0,
   inboxBadgeCount: (): number => 0,
-  inboxAwaitsAction: (): boolean => false
+  inboxAwaitsAction: (): boolean => false,
+  roadmapConflictCount: (): number => 0
 };
 
 // ---------------------------------------------------------------------------

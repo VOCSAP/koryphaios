@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { inboxBadgeCount, useDeck } from '../store'
+import { inboxBadgeCount, roadmapConflictCount, useDeck } from '../store'
 import { useT } from '../i18n'
 import { MobileSheet } from './MobileSheet'
 import { GLYPHS, GLYPH_BADGES } from './icons'
@@ -30,6 +30,9 @@ export function MobileNav(): React.JSX.Element {
   // review). A blocking question is the one family where an agent is stopped
   // waiting, so a mobile zero here was a confident lie.
   const badge = useDeck(inboxBadgeCount)
+  // Same single producer as the rail: a conflict count that reached one bar
+  // and not the other is exactly the divergence card 8fdac3dd fixed above.
+  const conflicts = useDeck(roadmapConflictCount)
 
   return (
     <>
@@ -40,7 +43,12 @@ export function MobileNav(): React.JSX.Element {
             className={`mnav-btn${view === id && !inboxOpen ? ' is-active' : ''}`}
             onClick={() => goto(id)}
           >
-            <span className="mnav-icon">{GLYPHS[id]}</span>
+            <span className="mnav-icon">
+              {GLYPHS[id]}
+              {id === 'roadmap' && conflicts > 0 && (
+                <span className="mnav-badge">{conflicts > 99 ? '99+' : conflicts}</span>
+              )}
+            </span>
             <span className="mnav-label">{t(MOBILE_VIEWS[id].labelKey)}</span>
           </button>
         ))}

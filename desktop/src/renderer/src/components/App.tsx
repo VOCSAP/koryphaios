@@ -35,6 +35,7 @@ import { TemplatesDialog } from './TemplatesDialog'
 import { ExportTemplateDialog } from './ExportTemplateDialog'
 import { ErrorBoundary } from './ErrorBoundary'
 import { StatusBanner } from './StatusBanner'
+import { RoadmapConflictDialog } from './RoadmapConflictDialog'
 import { CompanionDialog } from './CompanionDialog'
 import { UsageLimitsModal } from './UsageLimitsModal'
 import { MobileNav } from './MobileNav'
@@ -367,6 +368,7 @@ export function App(): React.JSX.Element {
         <ErrorBoundary scope="diff">
           <DiffPanel />
         </ErrorBoundary>
+        <RoadmapConflictDialog />
         <MobileNav />
         <Toast />
       </div>
@@ -389,6 +391,9 @@ export function App(): React.JSX.Element {
       )}
       {companionOpen && !remote && <CompanionDialog />}
       {usageOpen && <UsageLimitsModal />}
+      {/* Offline replica: store-owned open state, opened from the board card,
+          the mobile list or the detail modal. Renders nothing when closed. */}
+      <RoadmapConflictDialog />
       <NavRail />
       {/* The agents and home views stay MOUNTED under the other views:
           unmounting TerminalTile would tear down the xterm instances and their

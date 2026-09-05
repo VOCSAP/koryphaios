@@ -1018,6 +1018,33 @@ démarrer sans besoin confirmé)**
       main-side des noms/images/ports, pas de host network. Prérequis
       conseillé : l'image personnalisée couvre déjà une partie du besoin.
 
+### 3.9 Mode replica (broker local répliquant un broker distant) — différés
+
+Brief : `docs/DESIGN-OFFLINE-REPLICA.md`. La v1 réplique `roadmap_items`
+(contenu par révisions entières, file « upstream l'emporte », verrous relayés
+par le broker local) et arbitre les conflits dans le Deck. Reste ouvert :
+
+- [ ] **Fédération peers/messages** : en mode `replica`, la messagerie est
+      locale à la machine (régression assumée vs `remote` pour les messages
+      inter-PC). Relayer enregistrements, `send-message` et `list-peers` vers
+      l'upstream avec heartbeat relais ; identité Ed25519 des peers déjà
+      compatible avec un ré-enregistrement sur un autre broker.
+- [ ] **Toast Deck « N positions de file perdues »** à la reconnexion : la v1
+      ne journalise (`info`) que côté broker.
+- [ ] **Exposition de `lock_contested_by` aux agents natifs** (outil MCP ou
+      note d'inbound) : stocké et visible du Deck seulement.
+- [ ] **Provenance opérateur inter-brokers** : `operator_id` ne traverse
+      jamais la frontière ; si un besoin apparaît, signature vérifiable
+      upstream, jamais un champ déclaré par la replica.
+- [ ] **Tables hors roadmap pendant une coupure** : approbations, dispatch,
+      graph drafts, inbox restent locaux ; une approbation levée hors ligne
+      n'est pas répondable depuis un autre Deck ni via un canal de
+      notification tenu par l'upstream.
+- [ ] **Fusion automatique par champ** : REFUSÉE (une clôture d'un côté et un
+      enrichissement de l'autre doivent rester un conflit dur) ; ne revenir
+      dessus qu'avec un instantané de base et une règle explicite sur
+      `status`/`deleted_at`.
+
 ---
 
 ## 4. Maintenance / dette technique

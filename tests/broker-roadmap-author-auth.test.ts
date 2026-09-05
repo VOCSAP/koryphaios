@@ -225,7 +225,22 @@ const DECK_WRITE_ROUTES = [
   { route: "/roadmap/lock-park", body: (id: string) => ({ project_key: PK, peer_ids: [id] }) },
   { route: "/roadmap/lock-release", body: (id: string) => ({ project_key: PK, peer_ids: [id] }) },
   { route: "/roadmap/append-context", body: (id: string) => ({ id, text: "appended by the deck" }) },
+  // The operator arbitrating a replication conflict: an ordinary Deck write,
+  // resolved through the same author gate. This broker is not a replica, so a
+  // write that PASSES the gate is then refused 409 for the deployment -- which
+  // is exactly what makes it usable as a positive control here: the author
+  // check has to run first for that 409 to be reachable at all.
+  {
+    route: "/roadmap/sync/resolve",
+    body: (id: string) => ({ id, choice: "local" }),
+    signedStatus: 409,
+  },
 ] as const;
+
+/** Status a signed operator write earns on THIS broker; 200 unless stated. */
+function signedStatusOf(entry: { signedStatus?: number }): number {
+  return entry.signedStatus ?? 200;
+}
 
 /**
  * Matches resolveRoadmapAuthor(<any first arg>, '...'|"...") calls, so a call
@@ -270,7 +285,7 @@ test("DECK_WRITE_ROUTES matches every route broker.ts actually resolves an autho
   // set would make the equality below vacuously informative about nothing --
   // this is what a broken regex looks like, and it must fail loudly instead
   // of passing by finding nothing to compare against.
-  expect(discovered.length).toBeGreaterThanOrEqual(7);
+  expect(discovered.length).toBeGreaterThanOrEqual(8);
 
   const declared = DECK_WRITE_ROUTES.map((r) => r.route).slice().sort();
   expect(declared).toEqual(discovered);
@@ -368,13 +383,14 @@ test("layer 2: the SAME writes signed with the operator credential are accepted"
   // only the proof differs, so a red here would say the routes are broken for
   // everyone rather than closed for the unsigned.
   const cred = generateCredential();
-  for (const { route, body } of DECK_WRITE_ROUTES) {
+  for (const entry of DECK_WRITE_ROUTES) {
+    const { route, body } = entry;
     const item = await seed(`signed deck target for ${route}`);
     const res = await post<{ error?: string }>(
       `${broker.url}${route}`,
       signedBody(body(item.id), cred)
     );
-    expect({ route, status: res.status }).toEqual({ route, status: 200 });
+    expect({ route, status: res.status }).toEqual({ route, status: signedStatusOf(entry) });
   }
 });
 

@@ -563,14 +563,35 @@ test("card e344fa79: rowToRoadmapItem's response covers every roadmap_items colu
 
   const emittedColumns = Object.keys(res.body.item);
   const { missing, extra } = findUncoveredRoadmapColumns(schemaColumns, emittedColumns);
-  expect(missing).toEqual([]); // a column the table has that the response silently drops
+  // Replication bookkeeping (DESIGN-OFFLINE-REPLICA): revision counters, the
+  // merge base, the relay heartbeat. They belong to the sync protocol, not to
+  // the card an agent or the Deck reads, so the public projection drops them
+  // ON PURPOSE -- listed here one by one so a column added later still has to
+  // be classified rather than silently joining them. The three replication
+  // fields the operator DOES see (sync_state, lock_scope, lock_contested_by)
+  // are absent from this list precisely because they must be emitted.
+  const INTERNAL_ONLY_COLUMNS = [
+    "rev",
+    "content_rev",
+    "sync_base_rev",
+    "sync_base",
+    "sync_dirty",
+    "sync_remote",
+    "lock_relay",
+    "lock_relay_seen",
+    "lock_release_owner",
+  ];
+  // Equality, not a subset check: a public column dropped from the projection
+  // and an unclassified new column both land here and both fail.
+  expect(missing).toEqual(INTERNAL_ONLY_COLUMNS);
   expect(extra).toEqual([]); // a key in the response with no backing column
 
   // Sanity companion, not a substitute for the two checks above: the schema
   // and ROADMAP_IMPORT_COLUMNS (a list maintained independently, for a
-  // different route) name the same 30 columns today (card 4441e883 added
-  // `locked_by_token`, the 30th). If they ever diverge, that is itself worth
-  // knowing, but it is not what this test polices.
+  // different route) must name the same columns -- including the internal
+  // ones above, which /roadmap/import has to carry over or REPLACE resets
+  // them. If they ever diverge, that is itself worth knowing, but it is not
+  // what this test polices.
   expect(findUncoveredRoadmapColumns(schemaColumns, ROADMAP_IMPORT_COLUMNS).missing).toEqual([]);
 });
 

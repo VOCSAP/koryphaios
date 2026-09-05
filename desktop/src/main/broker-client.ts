@@ -27,10 +27,28 @@ export interface BrokerEndpoint {
   token: string | null
 }
 
+export type DeckBrokerMode = 'local' | 'remote' | 'replica'
+
 interface PeersFileConfig {
   port?: number
   broker_url?: string
   broker_token?: string
+  offline_replica?: boolean
+}
+
+/**
+ * Same env-flag parser as shared/config.ts's parseBooleanFlag, duplicated here
+ * because this file deliberately avoids importing shared/config.ts (that
+ * module pulls in shared/logger.ts and node:crypto file-tracing paths this
+ * unit-testable, electron-free file has no other reason to depend on). Both
+ * copies are asserted to agree by tests/desktop-broker-mode-parity.test.ts.
+ */
+function parseBooleanFlag(raw: string | undefined, fallback: boolean): boolean {
+  if (raw === undefined) return fallback
+  const v = raw.trim().toLowerCase()
+  if (v === '1' || v === 'true' || v === 'yes' || v === 'on') return true
+  if (v === '0' || v === 'false' || v === 'no' || v === 'off') return false
+  return fallback
 }
 
 /** Path of the claude-peers core config.json, matching shared/config.ts. */
@@ -58,8 +76,29 @@ function readPeersConfig(path: string): PeersFileConfig {
 }
 
 /**
+ * The one decision of which deployment shape this config describes -- the
+ * Deck-side mirror of shared/config.ts's brokerMode. Same rule: no broker_url
+ * at all is 'local'; a broker_url without the replica opt-in is 'remote';
+ * a broker_url WITH the opt-in is 'replica' (clients stay on loopback, the
+ * loopback broker replicates against broker_url as its upstream).
+ */
+export function deckBrokerMode(
+  env: NodeJS.ProcessEnv = process.env,
+  configPath: string = peersConfigPath(env)
+): DeckBrokerMode {
+  const file = readPeersConfig(configPath)
+  if (!(env.CLAUDE_PEERS_BROKER_URL ?? file.broker_url)) return 'local'
+  const offlineReplica = parseBooleanFlag(env.CLAUDE_PEERS_OFFLINE_REPLICA, file.offline_replica === true)
+  return offlineReplica ? 'replica' : 'remote'
+}
+
+/**
  * Resolve the broker endpoint (url + optional bearer token) the Deck should POST
  * /announce to. Precedence mirrors shared/config.ts: env > config file > default.
+ * Only 'remote' mode points away from loopback -- a replica keeps its clients
+ * local by design, same as shared/config.ts's brokerUrl. The bearer token is
+ * unaffected by mode: a replica broker requires the same token as its
+ * upstream, since both read the same broker_token.
  */
 export function resolveBrokerEndpoint(
   env: NodeJS.ProcessEnv = process.env,
@@ -67,8 +106,11 @@ export function resolveBrokerEndpoint(
 ): BrokerEndpoint {
   const file = readPeersConfig(configPath)
   const port = parseInt(env.CLAUDE_PEERS_PORT ?? String(file.port ?? 7899), 10)
-  const url = env.CLAUDE_PEERS_BROKER_URL ?? file.broker_url ?? `http://127.0.0.1:${port}`
   const token = env.CLAUDE_PEERS_BROKER_TOKEN ?? file.broker_token ?? null
+  if (deckBrokerMode(env, configPath) !== 'remote') {
+    return { url: `http://127.0.0.1:${port}`, token }
+  }
+  const url = env.CLAUDE_PEERS_BROKER_URL ?? file.broker_url ?? `http://127.0.0.1:${port}`
   return { url, token }
 }
 

@@ -52,6 +52,10 @@ function RoadmapCard({
   const ref = useRef<HTMLDivElement>(null)
   const [seized, setSeized] = useState(false)
   const locked = isLocked(item)
+  // Offline replica: same two states as the kanban card, same meaning.
+  const conflicted = item.sync_state === 'conflict'
+  const contested = item.lock_scope === 'contested'
+  const openConflict = useDeck((s) => s.openRoadmapConflict)
 
   // Callbacks are read through a ref rather than closed over directly, so the
   // listener effect's deps stay [locked] only and a re-render mid-press does
@@ -136,13 +140,30 @@ function RoadmapCard({
   return (
     <div
       ref={ref}
-      className={`mrm-card${locked ? ' mrm-card-locked' : ''}${seized ? ' mrm-card-seized' : ''}`}
+      className={`mrm-card${locked ? ' mrm-card-locked' : ''}${seized ? ' mrm-card-seized' : ''}${conflicted ? ' rm-card-conflict' : ''}${contested ? ' rm-card-contested' : ''}`}
       onClick={onTap}
     >
       <div className="mrm-card-head">
         <span className="mrm-kind">{KIND_ICONS[item.kind]}</span>
         <span className="mrm-title">{item.title}</span>
-        {locked && <span className="mrm-lock">{GLYPH_BADGES.lock}</span>}
+        {/* Tapping the mark opens the arbitration dialog directly; the tap on
+            the card itself keeps opening the card, as everywhere else. */}
+        {conflicted && (
+          <span
+            className="mrm-conflict"
+            role="button"
+            title={t('roadmap.sync.conflictHint')}
+            onClick={(e) => {
+              e.stopPropagation()
+              openConflict(item.id)
+            }}
+          >
+            {GLYPH_BADGES.warning}
+          </span>
+        )}
+        {(locked || item.lock_scope === 'remote') && (
+          <span className="mrm-lock">{GLYPH_BADGES.lock}</span>
+        )}
         {/* Card 442084b7 (review A4, team-lead's arbitration): badge only on
             mobile, same "see without opening the menu" promise this file
             already keeps for the lock -- the toggle stays desktop-only,

@@ -13,6 +13,8 @@ import type {
   InboxMessage,
   LocaleOption,
   RoadmapKind,
+  RoadmapSyncEvent,
+  RoadmapSyncResolution,
   SandboxContainerInfo,
   SandboxSettingsPatch,
   SandboxStatus,
@@ -118,6 +120,19 @@ interface DeckState {
   inboxReplyDrafts: Record<string, string>
   /** Pending graph drafts (agent-escalated questions): drive the rail glyph. */
   graphDrafts: DeckGraphDraft[]
+  /**
+   * Offline replica: replication health + this project's conflicts, pushed
+   * whole by 'roadmap:sync'. Held in the store and not in the roadmap view
+   * because the rail badge and the offline banner must be truthful while the
+   * operator is looking at another view entirely.
+   */
+  roadmapSync: RoadmapSyncEvent
+  /**
+   * Id of the conflicted card whose resolution dialog is open, null when
+   * closed. Store-owned rather than a prop chain: the same dialog is opened
+   * from the kanban card, from the mobile list and from the detail modal.
+   */
+  roadmapConflictId: string | null
   /** Graph view navigation request: open this doc and select this node. */
   graphFocus: { docId: string; nodeId: string } | null
   /** Diff panel target (PLAN C13): a dir to diff + display title, or null. */
@@ -232,6 +247,14 @@ interface DeckState {
   clearPendingApproval(id: string): void
   /** Open a pending draft: create the pre-filled graph and navigate to it. */
   openGraphDraft(draft: DeckGraphDraft): Promise<void>
+  /**
+   * Offline replica: arbitrate one conflict. The resolved card is dropped
+   * from the local list optimistically; the next poll is what confirms it,
+   * exactly like clearPendingApproval above.
+   */
+  resolveRoadmapConflict(id: string, choice: RoadmapSyncResolution): Promise<void>
+  /** Open (id) or close (null) the conflict-resolution dialog. */
+  openRoadmapConflict(id: string | null): void
   /** GraphView consumed the navigation request. */
   clearGraphFocus(): void
   /** Open the diff panel on a dir (null closes it). */
@@ -393,6 +416,16 @@ export function inboxAwaitsAction(s: DeckState): boolean {
   return s.pendingApprovals.length + s.graphDrafts.length > 0
 }
 
+/**
+ * Cards of THIS project awaiting the operator's arbitration -- the Roadmap
+ * rail badge. Counts the conflicts actually listed, never
+ * `roadmapSync.status.conflicts`, which the broker computes across every
+ * project: a badge of 3 leading to a board showing none would be a lie.
+ */
+export function roadmapConflictCount(s: DeckState): number {
+  return s.roadmapSync.conflicts.length
+}
+
 export const useDeck = create<DeckState>((set, get) => ({
   sessions: [],
   config: null,
@@ -432,6 +465,11 @@ export const useDeck = create<DeckState>((set, get) => ({
   inboxAckState: {},
   inboxReplyDrafts: {},
   graphDrafts: [],
+  // 'local' is the inert default: a Deck that has not heard from its broker
+  // yet must render as a plain non-replica one, never raise the offline
+  // banner on a state nobody reported.
+  roadmapSync: { status: { mode: 'local' }, conflicts: [] },
+  roadmapConflictId: null,
   graphFocus: null,
   diffTarget: null,
   helpSeed: null,
@@ -598,6 +636,9 @@ export const useDeck = create<DeckState>((set, get) => ({
       .catch((e) => window.api.reportError('store', `inbox ack state: ${errorText(e)}`))
     // Pending graph drafts: full list pushed by the main-process poll.
     window.api.onGraphDrafts((drafts) => set({ graphDrafts: drafts }))
+    // Replication state: pushed only when it actually changed (main-side
+    // signature compare), so this replaces the whole state each time.
+    window.api.onRoadmapSync((roadmapSync) => set({ roadmapSync }))
     // Notification click on an inbox message: surface the panel.
     window.api.onInboxOpen(() => get().openInbox(true))
     // Broker reachability (PLAN O5): transitions pushed by main + the current
@@ -684,6 +725,19 @@ export const useDeck = create<DeckState>((set, get) => ({
       }))
     })
   },
+  resolveRoadmapConflict: async (id, choice) => {
+    await guarded('resolve conflict', async () => {
+      await window.api.resolveRoadmapConflict(id, choice)
+      set((s) => ({
+        roadmapSync: {
+          ...s.roadmapSync,
+          conflicts: s.roadmapSync.conflicts.filter((c) => c.local.id !== id)
+        },
+        roadmapConflictId: s.roadmapConflictId === id ? null : s.roadmapConflictId
+      }))
+    })
+  },
+  openRoadmapConflict: (id) => set({ roadmapConflictId: id }),
   clearGraphFocus: () => set({ graphFocus: null }),
   openDiff: (target) => set({ diffTarget: target }),
   openHelpAssistant: (seed) => set({ helpSeed: seed }),

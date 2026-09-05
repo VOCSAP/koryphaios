@@ -14,6 +14,7 @@ import type {
   LaunchConfig,
   RoadmapListFilters,
   RoadmapQuery,
+  RoadmapSyncResolution,
   RoadmapUpsertFields,
   SandboxContainerAction,
   SandboxSettingsPatch,
@@ -23,6 +24,7 @@ import type {
   StopResult
 } from '@shared/types'
 import { inboxEntryKey } from '@shared/types'
+import { ROADMAP_SYNC_RESOLUTIONS } from '@shared/roadmap-sync'
 import { broadcastStop, lockTargets, STOP_MODES, stopTouchesLocks, toInterruptMode } from './agent-stop'
 import type { SandboxService } from './sandbox-service'
 import { buildAuthCommand, SANDBOX_AUTH_PTY_ID, SANDBOX_BUILD_PTY_ID } from './sandbox-command'
@@ -54,6 +56,7 @@ import {
   lockPark,
   lockRelease,
   reorderRoadmap,
+  resolveRoadmapConflict,
   searchRoadmap,
   upsertRoadmap
 } from './roadmap-service'
@@ -804,6 +807,21 @@ export function registerIpc({
     const validated = validateReorderWaves(cleanIds, waves)
     if (!validated.ok) throw new Error(validated.error)
     return reorderRoadmap(endpoint, key, cleanIds, validated.waves)
+  })
+  // Offline replica: operator arbitration of one replication conflict. Both
+  // arguments are re-validated here rather than trusted from the renderer --
+  // this channel carries the same tier as roadmap:upsert, and a tier is a
+  // declaration, not an access gate. `choice` decides which side of a diverged
+  // card survives, so an unrecognized value must be refused, never defaulted.
+  regHandle('roadmapSync:resolve', (_e, id: unknown, choice: unknown) => {
+    const { endpoint } = roadmapCtx()
+    if (typeof id !== 'string' || id.trim() === '') {
+      throw new Error('roadmapSync:resolve requires a non-empty item id')
+    }
+    if (typeof choice !== 'string' || !(ROADMAP_SYNC_RESOLUTIONS as readonly string[]).includes(choice)) {
+      throw new Error(`roadmapSync:resolve: unknown resolution ${JSON.stringify(choice)}`)
+    }
+    return resolveRoadmapConflict(endpoint, id, choice as RoadmapSyncResolution)
   })
   // Queue dispatch (PLAN C15): first queued item -> targeted announce to the
   // team-lead. The renderer greys the button when no lead is designated.

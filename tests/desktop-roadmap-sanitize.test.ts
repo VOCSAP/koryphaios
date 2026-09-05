@@ -83,7 +83,10 @@ function wellFormed(): Record<string, unknown> {
     locked_group: null,
     directive: null,
     target_peer_ids: [],
-    inactive: false
+    inactive: false,
+    sync_state: "clean",
+    lock_scope: null,
+    lock_contested_by: []
   };
 }
 
@@ -176,13 +179,14 @@ test("id and project_key are STRUCTURAL: the item is dropped, not coerced", () =
 });
 
 test("PICK-LIST, not spread: an unknown broker field does not travel through", () => {
-  // RoadmapItem has 27 fields (card e344fa79 lineage added locked_group,
-  // after c33a5968's inactive and edefff05's operator_id) and the pick-list
-  // covers all 27 (measured), so the next one broker-side is the 28th.
-  const item = sanitizeRoadmapItem({ ...wellFormed(), surprise_28th_field: "x" }) as RoadmapItem;
+  // RoadmapItem has 30 fields: the 27 of the e344fa79/c33a5968/edefff05
+  // lineage plus the offline-replica trio (sync_state, lock_scope,
+  // lock_contested_by). The pick-list covers all 30 (measured), so the next
+  // one broker-side is the 31st.
+  const item = sanitizeRoadmapItem({ ...wellFormed(), surprise_31st_field: "x" }) as RoadmapItem;
   expect(item).not.toBeNull();
-  expect(Object.keys(item)).not.toContain("surprise_28th_field");
-  expect(Object.keys(item)).toHaveLength(27);
+  expect(Object.keys(item)).not.toContain("surprise_31st_field");
+  expect(Object.keys(item)).toHaveLength(30);
 });
 
 test("locked_group survives when the broker sends it, and coerces non-string to null", () => {
@@ -358,4 +362,54 @@ test("a malformed INDIVIDUAL bucket is dropped from its dimension, not the whole
   // whole payload, distinguishing it from the test above.
   expect(facets!.kind).toEqual([{ value: "feature", count: 3 }]);
   expect(facets!.priority).toEqual([{ value: "must", count: 1 }]);
+});
+
+// ---------------------------------------------------------------------------
+// 4. The offline-replica trio. Each guarantees a DEFAULT that is inert, so a
+// broker that never heard of replication (or a hostile one) renders exactly
+// like the board did before the feature existed.
+// ---------------------------------------------------------------------------
+
+test("sync_state defaults to 'clean': an unreadable value must never mark a card conflicted", () => {
+  expect(sanitized({ sync_state: "conflict" }).sync_state).toBe("conflict");
+  // Guarantee: only the two known states exist; anything else is 'clean', so
+  // garbage can neither raise a red ring nor be counted by the rail badge.
+  expect(sanitized({ sync_state: "CONFLICT" }).sync_state).toBe("clean");
+  expect(sanitized({ sync_state: "dirty" }).sync_state).toBe("clean");
+  expect(sanitized({ sync_state: 1 }).sync_state).toBe("clean");
+  expect(sanitized({ sync_state: null }).sync_state).toBe("clean");
+  // Absent entirely (a broker predating the feature): also 'clean'.
+  const older = wellFormed();
+  delete older.sync_state;
+  expect((sanitizeRoadmapItem(older) as RoadmapItem).sync_state).toBe("clean");
+});
+
+test("lock_scope keeps only the five known scopes and is null otherwise", () => {
+  for (const scope of ["local", "global", "contested", "remote", "release_pending"]) {
+    expect(sanitized({ lock_scope: scope }).lock_scope).toBe(scope as never);
+  }
+  // Guarantee: an unrecognized scope reads as "no replica scope", never as
+  // 'remote' -- 'remote' is what makes the Deck show a lock nobody local holds.
+  expect(sanitized({ lock_scope: "REMOTE" }).lock_scope).toBeNull();
+  expect(sanitized({ lock_scope: "upstream" }).lock_scope).toBeNull();
+  expect(sanitized({ lock_scope: 0 }).lock_scope).toBeNull();
+  expect(sanitized({ lock_scope: ["remote"] }).lock_scope).toBeNull();
+  const older = wellFormed();
+  delete older.lock_scope;
+  expect((sanitizeRoadmapItem(older) as RoadmapItem).lock_scope).toBeNull();
+});
+
+test("lock_contested_by is a string array or [], elements included", () => {
+  expect(sanitized({ lock_contested_by: ["p1@r1", "p2@r2"] }).lock_contested_by).toEqual([
+    "p1@r1",
+    "p2@r2",
+  ]);
+  // Guarantee: the field is rendered as a list of holders, so a string would
+  // otherwise be iterated character by character exactly like target_peer_ids.
+  expect(sanitized({ lock_contested_by: "p1@r1" }).lock_contested_by).toEqual([]);
+  expect(sanitized({ lock_contested_by: [1, 2] }).lock_contested_by).toEqual([]);
+  expect(sanitized({ lock_contested_by: null }).lock_contested_by).toEqual([]);
+  const older = wellFormed();
+  delete older.lock_contested_by;
+  expect((sanitizeRoadmapItem(older) as RoadmapItem).lock_contested_by).toEqual([]);
 });

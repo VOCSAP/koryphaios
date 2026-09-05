@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { loadConfig } from "./shared/config.ts";
+import { brokerMode, isLoopbackBrokerUrl, loadConfig, upstreamUrl } from "./shared/config.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { validateProjectKey } from "./shared/project-key.ts";
 import { loadOrCreateSecretKey, openSecret, sealSecret, secretHint } from "./shared/secret-box.ts";
@@ -38,6 +38,12 @@ import {
   type GraphDraftPeerRow,
 } from "./shared/graph-draft-scope.ts";
 import { planRoadmapAppendText, ROADMAP_APPEND_RESULT_MAX_CHARS } from "./shared/roadmap-append.ts";
+import {
+  contentEquals,
+  mergeReopen,
+  parseSyncContent,
+  pickSyncContent,
+} from "./shared/roadmap-sync.ts";
 import {
   resolveRoadmapLock,
   refusesInactiveClaim,
@@ -162,6 +168,25 @@ import type {
   DeliveredMessage,
   GroupId,
   InstanceToken,
+  RoadmapLockScope,
+  RoadmapSyncConflict,
+  RoadmapSyncConflictsRequest,
+  RoadmapSyncConflictsResponse,
+  RoadmapSyncContent,
+  RoadmapSyncLockClaimResponse,
+  RoadmapSyncLockReleaseResponse,
+  RoadmapSyncLockRequest,
+  RoadmapSyncPullRequest,
+  RoadmapSyncPullResponse,
+  RoadmapSyncPushConflict,
+  RoadmapSyncPushItem,
+  RoadmapSyncPushRequest,
+  RoadmapSyncPushResponse,
+  RoadmapSyncResolveRequest,
+  RoadmapSyncResolveResponse,
+  RoadmapSyncRow,
+  RoadmapSyncState,
+  RoadmapSyncStatus,
 } from "./shared/types.ts";
 import {
   DECK_INSTANCE_TOKEN,
@@ -170,6 +195,7 @@ import {
   OPERATOR_PEER_ID,
   RESERVED_PEER_IDS,
   ROADMAP_IMPORT_COLUMNS,
+  ROADMAP_SYNC_CONTENT_FIELDS,
   type RoadmapImportColumn,
   isSentinelInstanceToken,
   SENTINEL_DEFINITIONS,
@@ -247,6 +273,28 @@ const PURGE_INTERVAL_SEC = Math.max(
   parseInt(process.env.CLAUDE_PEERS_PURGE_INTERVAL_SEC ?? "3600", 10)
 );
 
+// Replication (DESIGN-OFFLINE-REPLICA). BROKER_MODE is read from the ONE
+// function that decides it, so the broker and its clients cannot disagree on
+// the deployment shape; UPSTREAM_URL is non-null only in replica mode.
+const BROKER_MODE = brokerMode(config);
+const UPSTREAM_URL = upstreamUrl(config);
+// Cadence of the replication pass. Floored at 200 ms: a lower value would
+// spend the broker's time on round-trips rather than on serving its clients.
+const SYNC_TICK_MS = Math.max(
+  200,
+  parseInt(process.env.CLAUDE_PEERS_SYNC_TICK_MS ?? "5000", 10)
+);
+// Ceiling of a pull page, applied to the caller's `limit` as well as used as
+// its default.
+const SYNC_PULL_LIMIT_MAX = 500;
+// Rows pushed per pass: an offline burst is drained over several passes rather
+// than in one long series of round-trips that would delay the next pull.
+const SYNC_PUSH_BATCH = 50;
+// Failure backoff ceiling, and the number of consecutive failures that flips
+// the online state to offline (one success flips it back).
+const SYNC_BACKOFF_MAX_MS = 60_000;
+const SYNC_OFFLINE_AFTER_FAILURES = 2;
+
 // Rolling file log (PLAN-observabilite-erreurs O1/O2). The broker daemon often
 // outlives the stderr of whoever spawned it (server.ts spawns it detached), so
 // it must own its on-disk trail. Console mirroring keeps `bun broker.ts` usable.
@@ -262,6 +310,33 @@ process.on("unhandledRejection", (e) => {
   log.error("unhandled rejection, exiting", e);
   process.exit(1);
 });
+
+// Replicating on ONESELF is a configuration error, not a case to tolerate: the
+// pass would pull its own rows back and every card would look conflicted.
+// The check is "is this me", not "is this loopback": two brokers on one machine
+// (an upstream and its replica, the shape the replica test suite runs) are a
+// legitimate topology, and a replica refuses to SERVE the upstream sync routes
+// anyway, so no cycle can form.
+if (BROKER_MODE === "replica") {
+  if (!UPSTREAM_URL) {
+    log.error("replica mode is on but broker_url is empty -- nothing to replicate against, exiting");
+    process.exit(1);
+  }
+  let upstreamPort: number | null = null;
+  try {
+    const parsed = new URL(UPSTREAM_URL);
+    upstreamPort = parsed.port ? parseInt(parsed.port, 10) : parsed.protocol === "https:" ? 443 : 80;
+    if (isLoopbackBrokerUrl(UPSTREAM_URL) && upstreamPort === PORT) {
+      log.error(
+        `replica mode points at this very broker (${UPSTREAM_URL}) -- set broker_url to the remote broker, exiting`
+      );
+      process.exit(1);
+    }
+  } catch (e) {
+    log.error(`replica mode has an unparsable broker_url (${UPSTREAM_URL}), exiting`, e);
+    process.exit(1);
+  }
+}
 
 /**
  * setInterval wrapper for the maintenance timers: they run outside the HTTP
@@ -660,6 +735,242 @@ try {
   const msg = e instanceof Error ? e.message : String(e);
   if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
 }
+
+// Replication columns (DESIGN-OFFLINE-REPLICA §3.1). `rev` is the pull cursor
+// (bumped by ANY tracked write), `content_rev` versions the fifteen content
+// columns alone, and the sync_* group is the replica's reconciliation state
+// against its upstream. `lock_relay`/`lock_relay_seen`/`lock_contested_by` are
+// the upstream half of the lock relay; `lock_scope` the replica half.
+// `lock_release_owner` is not in the brief's table and is the one column added
+// on top of it: the release trigger below fires when `locked_by` has ALREADY
+// been cleared, and the upstream release refuses a relay whose owner it cannot
+// match, so the owner has to survive the release somewhere.
+for (const col of [
+  "rev INTEGER NOT NULL DEFAULT 0",
+  "content_rev INTEGER NOT NULL DEFAULT 0",
+  "sync_base_rev INTEGER",
+  "sync_base TEXT",
+  "sync_dirty INTEGER NOT NULL DEFAULT 0",
+  "sync_state TEXT NOT NULL DEFAULT 'clean'",
+  "sync_remote TEXT",
+  "lock_scope TEXT",
+  "lock_relay TEXT",
+  "lock_relay_seen TEXT",
+  "lock_contested_by TEXT NOT NULL DEFAULT '[]'",
+  "lock_release_owner TEXT",
+]) {
+  try {
+    db.run(`ALTER TABLE roadmap_items ADD COLUMN ${col}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+  }
+}
+
+// Replication bookkeeping, one row per key: `rev_seq` (the revision sequence
+// the triggers below draw from), `applying` ('1' while a replication write is
+// in flight, so the content trigger does not mark it dirty), `mode` (read by
+// the two lock triggers, which only exist on a replica), `replica_id` and
+// `upstream_cursor`.
+db.run(`
+  CREATE TABLE IF NOT EXISTS roadmap_sync_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  )
+`);
+for (const [key, value] of [
+  ["rev_seq", "0"],
+  ["applying", "0"],
+  ["upstream_cursor", "0"],
+]) {
+  db.run("INSERT OR IGNORE INTO roadmap_sync_meta (key, value) VALUES (?, ?)", [key!, value!]);
+}
+// The mode is re-stamped on every startup: it follows the config, and a stale
+// value would leave the lock triggers wired for the previous deployment.
+db.run(
+  `INSERT INTO roadmap_sync_meta (key, value) VALUES ('mode', ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+  [BROKER_MODE]
+);
+// And so is the applying flag. A transaction rollback already clears it, but
+// the failure it guards against is silent -- a flag stuck at '1' would stop
+// marking local edits dirty, so they would simply never be pushed -- and no
+// running process can legitimately hold it across a startup.
+db.run("UPDATE roadmap_sync_meta SET value = '0' WHERE key = 'applying'");
+
+/** Reads one bookkeeping value; the table's primary key makes the row unique. */
+function syncMetaGet(key: string): string | null {
+  const row = db.query("SELECT value FROM roadmap_sync_meta WHERE key = ?").get(key) as
+    | { value: string }
+    | null;
+  return row ? row.value : null;
+}
+
+function syncMetaSet(key: string, value: string): void {
+  db.run(
+    `INSERT INTO roadmap_sync_meta (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    [key, value]
+  );
+}
+
+// Rows written before this migration all carry rev = 0, and the pull cursor is
+// exclusive (`rev > since_rev`, starting at 0) -- left at 0 they would be
+// invisible to every replica forever. Numbered once, in rowid order, from the
+// same sequence the triggers use.
+const backfillRevs = db.transaction(() => {
+  const rows = db
+    .query("SELECT rowid AS rid FROM roadmap_items WHERE rev = 0 ORDER BY rowid")
+    .all() as { rid: number }[];
+  if (rows.length === 0) return 0;
+  let seq = parseInt(syncMetaGet("rev_seq") ?? "0", 10);
+  const stamp = db.prepare("UPDATE roadmap_items SET rev = ?, content_rev = ? WHERE rowid = ?");
+  for (const row of rows) {
+    seq += 1;
+    stamp.run(seq, seq, row.rid);
+  }
+  syncMetaSet("rev_seq", String(seq));
+  return rows.length;
+});
+const backfilled = backfillRevs();
+if (backfilled > 0) log.info(`migration: numbered ${backfilled} roadmap row(s) into the replication sequence`);
+
+db.run(`CREATE INDEX IF NOT EXISTS idx_roadmap_rev ON roadmap_items(rev)`);
+
+// Revision stamping lives in TRIGGERS, not in a helper each handler calls: a
+// helper fails OPEN the day a new write path forgets it, while a trigger covers
+// /upsert, /archive, /append-context, /reorder, /import, the sweep and every
+// future writer by construction.
+// Nested triggers must not re-enter (each body UPDATEs the same table), which
+// is SQLite's default; stated explicitly here because the whole scheme -- and
+// the "one write, one stamp" test -- depends on it.
+db.run("PRAGMA recursive_triggers = OFF");
+
+// Column lists are GENERATED, never hand-copied: the tracked set is the live
+// schema minus the columns whose own change must not count as a write, and the
+// content set is the protocol constant itself.
+const REV_UNTRACKED_COLUMNS = new Set([
+  "rev",
+  "content_rev",
+  "sync_base_rev",
+  "sync_base",
+  "sync_dirty",
+  "sync_state",
+  "sync_remote",
+  "lock_relay_seen",
+]);
+const roadmapTableColumns = (
+  db.query("PRAGMA table_info(roadmap_items)").all() as { name: string }[]
+).map((c) => c.name);
+const revTrackedColumns = roadmapTableColumns.filter((c) => !REV_UNTRACKED_COLUMNS.has(c));
+const syncContentColumns = [...ROADMAP_SYNC_CONTENT_FIELDS];
+const missingContentColumns = syncContentColumns.filter((c) => !roadmapTableColumns.includes(c));
+if (missingContentColumns.length > 0) {
+  log.error(
+    `roadmap replication: content column(s) absent from roadmap_items -- ${missingContentColumns.join(", ")}`
+  );
+}
+/**
+ * What a replica still owes its upstream: a card whose content moved since the
+ * merge base, and a card that has NO base at all -- born here while offline,
+ * or predating the switch to replica mode. Both are pushed with the base they
+ * have (`sync_base_rev`, null for the second kind), and a card awaiting
+ * arbitration is not pushed at all. One fragment, shared by the pass and by
+ * the count the operator reads, so the two cannot disagree on what is pending.
+ */
+const SYNC_PENDING_PUSH_WHERE = "sync_state = 'clean' AND (sync_dirty = 1 OR sync_base_rev IS NULL)";
+
+const NEXT_REV = "(SELECT CAST(value AS INTEGER) FROM roadmap_sync_meta WHERE key = 'rev_seq')";
+const BUMP_REV_SEQ =
+  "UPDATE roadmap_sync_meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'rev_seq';";
+const IS_APPLYING = "COALESCE((SELECT value FROM roadmap_sync_meta WHERE key = 'applying'), '0') = '1'";
+const IS_REPLICA = "COALESCE((SELECT value FROM roadmap_sync_meta WHERE key = 'mode'), '') = 'replica'";
+
+// Dropped and recreated on every startup rather than CREATE IF NOT EXISTS: the
+// generated column lists change with the schema, and an "if not exists" would
+// keep serving the definition compiled by an older broker.
+for (const name of [
+  "roadmap_rev_ai",
+  "roadmap_rev_au",
+  "roadmap_content_rev_au",
+  "roadmap_lock_scope_ai",
+  "roadmap_lock_scope_au",
+  "roadmap_lock_release_au",
+]) {
+  db.run(`DROP TRIGGER IF EXISTS ${name}`);
+}
+
+db.run(`
+  CREATE TRIGGER roadmap_rev_ai AFTER INSERT ON roadmap_items BEGIN
+    ${BUMP_REV_SEQ}
+    UPDATE roadmap_items SET rev = ${NEXT_REV}, content_rev = ${NEXT_REV}
+     WHERE rowid = new.rowid;
+  END
+`);
+
+db.run(`
+  CREATE TRIGGER roadmap_rev_au AFTER UPDATE OF ${revTrackedColumns.join(", ")} ON roadmap_items BEGIN
+    ${BUMP_REV_SEQ}
+    UPDATE roadmap_items SET rev = ${NEXT_REV} WHERE rowid = new.rowid;
+  END
+`);
+
+// The WHEN clause is what keeps a rewrite of identical values from versioning
+// the content: every upsert SETs all fifteen columns, so without it a queue
+// move or a lock claim would bump content_rev and mark the card dirty.
+db.run(`
+  CREATE TRIGGER roadmap_content_rev_au AFTER UPDATE OF ${syncContentColumns.join(", ")} ON roadmap_items
+  WHEN ${syncContentColumns.map((c) => `old.${c} IS NOT new.${c}`).join(" OR ")}
+  BEGIN
+    ${BUMP_REV_SEQ}
+    UPDATE roadmap_items
+       SET content_rev = ${NEXT_REV},
+           sync_dirty = CASE WHEN ${IS_APPLYING} THEN sync_dirty ELSE 1 END
+     WHERE rowid = new.rowid;
+  END
+`);
+
+// Lock scope is replica-only state, so all three lock triggers are gated on
+// the mode AND on the applying flag: a scope the replication pass itself wrote
+// (a lock mirrored from upstream) must not be reinterpreted as a local claim.
+// A card can be BORN locked (an agent creating it in_progress), so the claim
+// side needs an INSERT trigger as well as an UPDATE one.
+db.run(`
+  CREATE TRIGGER roadmap_lock_scope_ai AFTER INSERT ON roadmap_items
+  WHEN new.locked = 1
+   AND new.lock_scope IS NULL
+   AND ${IS_REPLICA}
+   AND NOT ${IS_APPLYING}
+  BEGIN
+    UPDATE roadmap_items SET lock_scope = 'local' WHERE rowid = new.rowid;
+  END
+`);
+
+db.run(`
+  CREATE TRIGGER roadmap_lock_scope_au AFTER UPDATE OF locked, locked_by ON roadmap_items
+  WHEN new.locked = 1
+   AND (old.locked = 0 OR old.locked_by IS NOT new.locked_by)
+   AND ${IS_REPLICA}
+   AND NOT ${IS_APPLYING}
+  BEGIN
+    UPDATE roadmap_items SET lock_scope = 'local', lock_release_owner = NULL WHERE rowid = new.rowid;
+  END
+`);
+
+// Any local release -- explicit, a status change, the sweep -- becomes a
+// pending upstream release without enumerating the paths that can cause one.
+db.run(`
+  CREATE TRIGGER roadmap_lock_release_au AFTER UPDATE OF locked ON roadmap_items
+  WHEN old.locked = 1 AND new.locked = 0
+   AND old.lock_scope IN ('local', 'global', 'contested')
+   AND ${IS_REPLICA}
+   AND NOT ${IS_APPLYING}
+  BEGIN
+    UPDATE roadmap_items
+       SET lock_scope = 'release_pending', lock_release_owner = old.locked_by
+     WHERE rowid = new.rowid;
+  END
+`);
 
 db.run(`CREATE INDEX IF NOT EXISTS idx_roadmap_project ON roadmap_items(project_key, status)`);
 
@@ -1163,13 +1474,19 @@ function releaseStaleLocks(): void {
   // held_minutes is computed in SQL via julianday, sidestepping the
   // space-vs-'T'-timestamp parsing pitfall that has to be handled explicitly in
   // JS.
+  // A 'remote' scope means the lock is a MIRROR of one held on the upstream
+  // broker, refreshed by the replication pull and by nothing else: no local
+  // peer carries its owner and no local write refreshes updated_at, so every
+  // clause below would release it on sight -- and the release would then be
+  // pushed back as a local content change. Exempted once, in the shared
+  // helper, so a fourth clause inherits the exemption.
   const release = (where: string, params: string[]): void => {
     const abandoned = db
       .query(
         `SELECT id, title, locked_by, locked_group, status, lock_parked_at,
                 CAST((julianday('now') - julianday(locked_at)) * 1440 AS INTEGER) AS held_minutes
            FROM roadmap_items
-          WHERE locked = 1 AND ${where}`
+          WHERE locked = 1 AND lock_scope IS NOT 'remote' AND ${where}`
       )
       .all(...params) as {
       id: string;
@@ -1186,7 +1503,7 @@ function releaseStaleLocks(): void {
          lock_parked_at = NULL, lock_parked_by = NULL,
          status = CASE WHEN status = 'in_progress' THEN 'planned' ELSE status END,
          updated_by = 'lock-sweep', updated_at = datetime('now')
-       WHERE locked = 1 AND ${where}`,
+       WHERE locked = 1 AND lock_scope IS NOT 'remote' AND ${where}`,
       params
     );
     for (const row of abandoned) emitLockAbandonedEvent(row);
@@ -1208,8 +1525,15 @@ function releaseStaleLocks(): void {
   // Uses SQL's NULL-safe `IS`, not `=`, so a NULL project_key only matches
   // other NULL project_keys rather than comparing as NULL/false against
   // everything.
+  // A lock RELAYED for a replica's agent has no peers row on this broker by
+  // construction (the agent is registered on the replica), so the owner-gone
+  // clause would sweep it on its first pass. The relay's own heartbeat
+  // (lock_relay_seen, refreshed by every claim of the replication pass) stands
+  // in for the owner's: once the replica goes quiet for LOCK_GRACE_SEC the
+  // lock falls exactly like an abandoned local one.
   release(
     `lock_parked_at IS NULL
+     AND COALESCE(lock_relay IS NOT NULL AND datetime(lock_relay_seen) >= datetime('now', ?), 0) = 0
      AND NOT EXISTS (
        SELECT 1 FROM peers p
        WHERE p.peer_id = roadmap_items.locked_by
@@ -1217,7 +1541,7 @@ function releaseStaleLocks(): void {
          AND (roadmap_items.locked_group IS NULL OR p.group_id IS roadmap_items.locked_group)
          AND (p.status = 'active' OR datetime(p.last_seen) >= datetime('now', ?))
      )`,
-    [`-${LOCK_GRACE_SEC} seconds`]
+    [`-${LOCK_GRACE_SEC} seconds`, `-${LOCK_GRACE_SEC} seconds`]
   );
   // The park itself expires: a card parked past the park TTL is swept even if
   // its updated_at was refreshed by a permitted edit meanwhile and its owner is
@@ -2171,7 +2495,15 @@ const ROADMAP_STATUSES: readonly RoadmapStatus[] = [
 
 type RoadmapRow = Omit<
   RoadmapItem,
-  "tags" | "depends_on" | "locked" | "target_peer_ids" | "operator_id" | "inactive"
+  | "tags"
+  | "depends_on"
+  | "locked"
+  | "target_peer_ids"
+  | "operator_id"
+  | "inactive"
+  | "sync_state"
+  | "lock_scope"
+  | "lock_contested_by"
 > & {
   tags: string;
   depends_on: string;
@@ -2181,7 +2513,39 @@ type RoadmapRow = Omit<
   // bun:sqlite hands back NULL as null, not undefined.
   operator_id: string | null;
   inactive: number;
+  // Free-text columns as SQLite returns them; the enums are narrowed on read,
+  // never trusted, so a hand-edited database cannot inject a scope value the
+  // rest of the code switches on.
+  sync_state: string;
+  lock_scope: string | null;
+  lock_contested_by: string;
+  rev: number;
+  content_rev: number;
+  sync_base_rev: number | null;
+  sync_base: string | null;
+  sync_dirty: number;
+  sync_remote: string | null;
+  lock_relay: string | null;
+  lock_relay_seen: string | null;
+  lock_release_owner: string | null;
 };
+
+const ROADMAP_LOCK_SCOPES: readonly RoadmapLockScope[] = [
+  "local",
+  "global",
+  "contested",
+  "remote",
+  "release_pending",
+];
+
+/** Unknown stored value degrades to the safest reading: no conflict, no scope. */
+function readSyncState(raw: string | null): RoadmapSyncState {
+  return raw === "conflict" ? "conflict" : "clean";
+}
+
+function readLockScope(raw: string | null): RoadmapLockScope | null {
+  return ROADMAP_LOCK_SCOPES.includes(raw as RoadmapLockScope) ? (raw as RoadmapLockScope) : null;
+}
 
 /**
  * Explicit pick-list, not a rest-spread: a table column added later stays
@@ -2231,6 +2595,10 @@ function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
     inactive: row.inactive === 1,
     lock_parked_at: row.lock_parked_at,
     lock_parked_by: row.lock_parked_by,
+    sync_state: readSyncState(row.sync_state),
+    lock_scope: readLockScope(row.lock_scope),
+    // Legacy rows created before the migration have NULL here; default to [].
+    lock_contested_by: row.lock_contested_by ? parseList(row.lock_contested_by) : [],
   };
 }
 
@@ -2275,8 +2643,19 @@ function badEnum<T extends string>(value: unknown, allowed: readonly T[]): boole
 }
 
 function getRoadmapItem(id: string): RoadmapItem | null {
-  const row = db.query("SELECT * FROM roadmap_items WHERE id = ?").get(id) as RoadmapRow | null;
+  const row = getRoadmapRow(id);
   return row ? rowToRoadmapItem(row) : null;
+}
+
+/**
+ * The raw row, replication columns included -- `id` is the table's primary
+ * key, so this `.get()` can only ever name one card. Callers that only need
+ * the public item use getRoadmapItem; this one exists for the paths that must
+ * read or carry over `rev`/`sync_*`/`lock_relay*`, which the public projection
+ * deliberately drops.
+ */
+function getRoadmapRow(id: string): RoadmapRow | null {
+  return db.query("SELECT * FROM roadmap_items WHERE id = ?").get(id) as RoadmapRow | null;
 }
 
 /**
@@ -3751,7 +4130,8 @@ function handleRoadmapImport(body: {
       // duplicate id earlier in the same file already wrote through this same
       // transaction, and this lookup must see that write, not the pre-import
       // state, to skip/preserve correctly for the later duplicate too.
-      const existing = getRoadmapItem(id);
+      const existingRow = getRoadmapRow(id);
+      const existing = existingRow ? rowToRoadmapItem(existingRow) : null;
       // Unconditional skip on a locked card, no author comparison -- comparing
       // the claimed author against locked_by here would be a self-declared
       // bypass, since the author is never proven on this route.
@@ -3930,6 +4310,25 @@ function handleRoadmapImport(body: {
         inactive: nextInactiveVal ? 1 : 0,
         lock_parked_at: lockParkedAtVal,
         lock_parked_by: lockParkedByVal,
+        // Replication state is never file-declared, whatever the file says:
+        // these columns are protocol bookkeeping, not content, and an import
+        // that could set them would let any bearer-token holder rewrite a
+        // card's merge base or forge a lock relay. Carried over from the
+        // existing row (REPLACE would otherwise reset them to the table
+        // default), table defaults for a new row -- `rev`/`content_rev` are
+        // re-stamped by the INSERT trigger either way.
+        rev: existingRow?.rev ?? 0,
+        content_rev: existingRow?.content_rev ?? 0,
+        sync_base_rev: existingRow?.sync_base_rev ?? null,
+        sync_base: existingRow?.sync_base ?? null,
+        sync_dirty: existingRow?.sync_dirty ?? 0,
+        sync_state: existingRow?.sync_state ?? "clean",
+        sync_remote: existingRow?.sync_remote ?? null,
+        lock_scope: existingRow?.lock_scope ?? null,
+        lock_relay: existingRow?.lock_relay ?? null,
+        lock_relay_seen: existingRow?.lock_relay_seen ?? null,
+        lock_contested_by: existingRow?.lock_contested_by ?? "[]",
+        lock_release_owner: existingRow?.lock_release_owner ?? null,
       };
       insert.run(...ROADMAP_IMPORT_COLUMNS.map((column) => values[column]));
       imported++;
@@ -3947,6 +4346,1051 @@ function handleRoadmapImport(body: {
     return { imported, skipped };
   });
   return importAll(items);
+}
+
+// --- Roadmap replication: the routes an upstream broker serves (§7) ---
+
+/**
+ * A replica_id is an identifier, not a credential (the Bearer token is the
+ * credential): it is validated for SHAPE because it is concatenated into the
+ * `"<peer_id>@<replica_id>"` contested-holder tags, where a stray '@' or a
+ * quote would corrupt an entry the operator reads.
+ */
+const REPLICA_ID_REGEX = /^[a-z0-9][a-z0-9_-]{7,63}$/;
+/** roadmap_items.id: what randomUUID produces, plus the dashed-hex tolerance. */
+const ROADMAP_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+/** Upstream round-trip budget. A pass that hangs here delays every later pass. */
+const SYNC_HTTP_TIMEOUT_MS = 10_000;
+
+function parseStringList(raw: string | null): string[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch (e) {
+    log.warn("roadmap sync: a stored JSON list could not be parsed, read as empty", e);
+    return [];
+  }
+}
+
+/**
+ * Integers off the wire, refused rather than clamped. `Number.isInteger`
+ * rejects NaN and Infinity as well as floats -- every `<`/`>` comparison
+ * against NaN is false, so a clamp alone would let it through silently.
+ */
+function syncInteger(
+  value: unknown,
+  name: string,
+  min: number
+): number | { error: string; status: number } {
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    return { error: `${name} must be an integer`, status: 400 };
+  }
+  if (value < min) return { error: `${name} must be >= ${min}`, status: 400 };
+  return value;
+}
+
+function syncReplicaId(value: unknown): string | { error: string; status: number } {
+  if (typeof value !== "string" || !REPLICA_ID_REGEX.test(value)) {
+    return { error: "replica_id must be 8 to 64 chars of [a-z0-9_-]", status: 400 };
+  }
+  return value;
+}
+
+/**
+ * The three upstream-only routes. A replica refuses to serve them so no chain
+ * of replicas -- and no cycle -- can form; 403 because the refusal is about
+ * WHO may ask (a replica is nobody's upstream), not about the request's shape.
+ */
+function refuseWhenReplica(route: string): { error: string; status: number } | null {
+  if (BROKER_MODE !== "replica") return null;
+  log.warn(`${route}: refused, a replica broker never serves the upstream sync routes`);
+  return {
+    error: `${route} is served by an upstream broker only -- this broker is a replica`,
+    status: 403,
+  };
+}
+
+/**
+ * The two replica-only routes. 409, not 400: the request is well-formed and
+ * the caller is entitled to it, the deployment simply has no replication state
+ * to answer with -- and the distinct status keeps this refusal apart from the
+ * 403 above in the logs.
+ */
+function requireReplica(route: string): { error: string; status: number } | null {
+  if (BROKER_MODE === "replica") return null;
+  return {
+    error: `${route} exists on a replica broker only -- this broker runs in '${BROKER_MODE}' mode`,
+    status: 409,
+  };
+}
+
+/**
+ * Pick-list, not a rest-spread: `locked_by_token` and `operator_id` must never
+ * cross the replication boundary in either direction, and a rest-spread would
+ * ship the next column added to the table along with them. Listing every field
+ * makes an omission a compile error and an addition a conscious line.
+ */
+function rowToSyncRow(row: RoadmapRow): RoadmapSyncRow {
+  const item = rowToRoadmapItem(row);
+  return {
+    id: item.id,
+    project_key: item.project_key,
+    kind: item.kind,
+    title: item.title,
+    description: item.description,
+    rationale: item.rationale,
+    context: item.context,
+    priority: item.priority,
+    value: item.value,
+    effort: item.effort,
+    status: item.status,
+    tags: item.tags,
+    depends_on: item.depends_on,
+    created_by: item.created_by,
+    updated_by: item.updated_by,
+    created_at: item.created_at,
+    updated_at: item.updated_at,
+    deleted_at: item.deleted_at,
+    queue: item.queue,
+    directive: item.directive,
+    target_peer_ids: item.target_peer_ids,
+    locked: item.locked,
+    locked_by: item.locked_by,
+    locked_at: item.locked_at,
+    locked_group: item.locked_group,
+    inactive: item.inactive,
+    lock_parked_at: item.lock_parked_at,
+    lock_parked_by: item.lock_parked_by,
+    sync_state: item.sync_state,
+    lock_scope: item.lock_scope,
+    lock_contested_by: item.lock_contested_by,
+    rev: row.rev,
+    content_rev: row.content_rev,
+  };
+}
+
+function handleRoadmapSyncPull(
+  body: RoadmapSyncPullRequest
+): RoadmapSyncPullResponse | { error: string; status: number } {
+  const refused = refuseWhenReplica("/roadmap/sync/pull");
+  if (refused) return refused;
+  const replicaId = syncReplicaId(body.replica_id);
+  if (typeof replicaId !== "string") return replicaId;
+  const since = syncInteger(body.since_rev, "since_rev", 0);
+  if (typeof since !== "number") return since;
+  let limit = SYNC_PULL_LIMIT_MAX;
+  if (body.limit !== undefined) {
+    const asked = syncInteger(body.limit, "limit", 1);
+    if (typeof asked !== "number") return asked;
+    // Capped, not refused: the cap is a server-side page size, and a caller
+    // asking for more simply gets a page plus a cursor to continue with.
+    limit = Math.min(asked, SYNC_PULL_LIMIT_MAX);
+  }
+  const rows = db
+    .query("SELECT * FROM roadmap_items WHERE rev > ? ORDER BY rev LIMIT ?")
+    .all(since, limit) as RoadmapRow[];
+  const items = rows.map(rowToSyncRow);
+  // The last row of an ORDER BY rev page carries the greatest rev; an empty
+  // page leaves the cursor where it was.
+  const next_rev = items.length > 0 ? items[items.length - 1]!.rev : since;
+  return { items, next_rev };
+}
+
+type SyncPushResult =
+  | { ok: true; response: RoadmapSyncPushResponse }
+  | { ok: false; conflict: RoadmapSyncPushConflict }
+  | { error: string; status: number };
+
+/**
+ * Validates the pushed card the way /roadmap/upsert validates a body: the
+ * replica is trusted at the token level, which is not a reason to write
+ * unchecked enums, unparsable timestamps (an unparsable `updated_at` freezes
+ * the lock sweep for that row) or an author outside the identity charset.
+ * `created_by`/`updated_by` are KEPT as sent -- including 'deck': the replica
+ * verified the signature locally and this route relays its verdict.
+ */
+function validatePushItem(
+  raw: unknown
+): { item: RoadmapSyncPushItem } | { error: string; status: number } {
+  if (typeof raw !== "object" || raw === null) return { error: "item is required", status: 400 };
+  const it = raw as Record<string, unknown>;
+  if (typeof it.id !== "string" || !ROADMAP_ID_REGEX.test(it.id)) {
+    return { error: "item.id is missing or malformed", status: 400 };
+  }
+  const rawProjectKey = typeof it.project_key === "string" ? it.project_key : "";
+  const projectKeyCheck = validateProjectKey(rawProjectKey);
+  if (!projectKeyCheck.ok) {
+    return { error: `item.project_key is invalid (${projectKeyCheck.reason})`, status: 400 };
+  }
+  if (
+    badEnum(it.kind, ROADMAP_KINDS) ||
+    badEnum(it.priority, ROADMAP_PRIORITIES) ||
+    badEnum(it.value, ROADMAP_LEVELS) ||
+    badEnum(it.effort, ROADMAP_LEVELS) ||
+    badEnum(it.status, ROADMAP_STATUSES)
+  ) {
+    return { error: "item has an invalid kind/priority/value/effort/status", status: 400 };
+  }
+  if (it.kind === undefined || it.priority === undefined || it.value === undefined ||
+      it.effort === undefined || it.status === undefined) {
+    return { error: "item is missing kind/priority/value/effort/status", status: 400 };
+  }
+  if (badEnum(it.directive ?? undefined, DIRECTIVE_COMMANDS)) {
+    return { error: "item has an invalid directive", status: 400 };
+  }
+  if (it.kind === "directive" && !it.directive) {
+    return { error: "item of kind 'directive' carries no directive", status: 400 };
+  }
+  const title = typeof it.title === "string" ? it.title.trim() : "";
+  if (!title) return { error: "item.title is required", status: 400 };
+  for (const field of ["description", "rationale", "context"] as const) {
+    if (typeof it[field] !== "string") return { error: `item.${field} must be a string`, status: 400 };
+  }
+  if (typeof it.inactive !== "boolean") return { error: "item.inactive must be a boolean", status: 400 };
+  for (const field of ["created_at", "updated_at"] as const) {
+    if (typeof it[field] !== "string" || Number.isNaN(Date.parse(it[field] as string))) {
+      return { error: `item.${field} is not a parsable timestamp`, status: 400 };
+    }
+  }
+  if (it.deleted_at !== null && it.deleted_at !== undefined) {
+    if (typeof it.deleted_at !== "string" || Number.isNaN(Date.parse(it.deleted_at))) {
+      return { error: "item.deleted_at is not a parsable timestamp", status: 400 };
+    }
+  }
+  const authors: { created_by: string; updated_by: string } = { created_by: "", updated_by: "" };
+  for (const field of ["created_by", "updated_by"] as const) {
+    const claimed = typeof it[field] === "string" ? (it[field] as string) : "";
+    const normalized = normalizeAuthorIdentity(claimed);
+    if (!normalized.ok) {
+      log.warn(`/roadmap/sync/push: refused an author claim outside [a-z0-9:_-]`, { field });
+      return {
+        error:
+          normalized.code === "empty"
+            ? `item.${field} is empty`
+            : `item.${field} contains a disallowed character '${normalized.badChar}' -- only [a-z0-9:_-] allowed`,
+        status: 400,
+      };
+    }
+    authors[field] = normalized.value;
+  }
+  return {
+    item: {
+      id: it.id,
+      project_key: rawProjectKey,
+      kind: it.kind as RoadmapKind,
+      title,
+      description: it.description as string,
+      rationale: it.rationale as string,
+      context: it.context as string,
+      priority: it.priority as RoadmapPriority,
+      value: it.value as RoadmapLevel,
+      effort: it.effort as RoadmapLevel,
+      status: it.status as RoadmapStatus,
+      tags: cleanList(it.tags) ?? [],
+      depends_on: cleanList(it.depends_on) ?? [],
+      deleted_at: typeof it.deleted_at === "string" ? it.deleted_at : null,
+      directive: (it.directive as RoadmapDirective | undefined) ?? null,
+      target_peer_ids: it.kind === "directive" ? cleanPeerIds(it.target_peer_ids) : [],
+      inactive: it.inactive,
+      created_by: authors.created_by,
+      updated_by: authors.updated_by,
+      created_at: it.created_at as string,
+      updated_at: it.updated_at as string,
+    },
+  };
+}
+
+function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
+  const refused = refuseWhenReplica("/roadmap/sync/push");
+  if (refused) return refused;
+  const replicaId = syncReplicaId(body.replica_id);
+  if (typeof replicaId !== "string") return replicaId;
+  let expected: number | null = null;
+  if (body.expected_content_rev !== null && body.expected_content_rev !== undefined) {
+    const parsed = syncInteger(body.expected_content_rev, "expected_content_rev", 0);
+    if (typeof parsed !== "number") return parsed;
+    expected = parsed;
+  }
+  const validated = validatePushItem(body.item);
+  if ("error" in validated) return validated;
+  const item = validated.item;
+
+  const existing = getRoadmapRow(item.id);
+  if (existing) {
+    // An `expected` of null claims the upstream has never seen this card, so a
+    // row under the same id IS the divergence, whatever its content_rev.
+    if (expected === null || existing.content_rev !== expected) {
+      return { ok: false, conflict: { error: "conflict", item: rowToSyncRow(existing) } };
+    }
+    // Content plus the columns that ride with it. `queue` (the upstream owns
+    // the order), every lock column (their own protocol) and `operator_id`
+    // (a local signature proof) are deliberately absent from this SET list.
+    db.run(
+      `UPDATE roadmap_items SET
+         kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
+         value = ?, effort = ?, status = ?, tags = ?, depends_on = ?, deleted_at = ?,
+         directive = ?, target_peer_ids = ?, inactive = ?,
+         updated_by = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        item.kind, item.title, item.description, item.rationale, item.context, item.priority,
+        item.value, item.effort, item.status, JSON.stringify(item.tags),
+        JSON.stringify(item.depends_on), item.deleted_at, item.directive,
+        JSON.stringify(item.target_peer_ids), item.inactive ? 1 : 0,
+        item.updated_by, item.updated_at, item.id,
+      ]
+    );
+  } else {
+    if (expected !== null) {
+      // The replica derives from a row this broker no longer has: it cannot be
+      // fast-forwarded and cannot be inserted under a base that is gone.
+      return { ok: false, conflict: { error: "conflict", item: null } };
+    }
+    db.run(
+      `INSERT INTO roadmap_items
+         (id, project_key, kind, title, description, rationale, context, priority, value,
+          effort, status, tags, depends_on, created_by, updated_by, created_at, updated_at,
+          deleted_at, queue, directive, target_peer_ids, locked, inactive)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 0, ?)`,
+      [
+        item.id, item.project_key, item.kind, item.title, item.description, item.rationale,
+        item.context, item.priority, item.value, item.effort, item.status,
+        JSON.stringify(item.tags), JSON.stringify(item.depends_on), item.created_by,
+        item.updated_by, item.created_at, item.updated_at, item.deleted_at, item.directive,
+        JSON.stringify(item.target_peer_ids), item.inactive ? 1 : 0,
+      ]
+    );
+  }
+  const stored = getRoadmapRow(item.id)!;
+  const row = rowToSyncRow(stored);
+  return { ok: true, response: { item: row, rev: row.rev, content_rev: row.content_rev } };
+}
+
+type SyncLockResult =
+  | { ok: true; claim: RoadmapSyncLockClaimResponse }
+  | { ok: true; release: RoadmapSyncLockReleaseResponse }
+  | { ok: false; contested: RoadmapSyncLockClaimResponse }
+  | { error: string; status: number };
+
+/**
+ * The upstream half of the lock relay. A relayed lock keeps the agent's
+ * peer_id in `locked_by` for display, carries `locked_by_token = NULL` (the
+ * agent's credential never leaves its own broker) and is kept alive by
+ * `lock_relay_seen`, which the sweep reads in place of the absent peer row.
+ */
+function handleRoadmapSyncLock(body: RoadmapSyncLockRequest): SyncLockResult {
+  const refused = refuseWhenReplica("/roadmap/sync/lock");
+  if (refused) return refused;
+  const replicaId = syncReplicaId(body.replica_id);
+  if (typeof replicaId !== "string") return replicaId;
+  if (body.action !== "claim" && body.action !== "release") {
+    return { error: "action must be 'claim' or 'release'", status: 400 };
+  }
+  if (typeof body.id !== "string" || !ROADMAP_ID_REGEX.test(body.id)) {
+    return { error: "id is missing or malformed", status: 400 };
+  }
+  const owner = body.owner;
+  if (typeof owner !== "object" || owner === null) {
+    return { error: "owner { peer_id, group_id } is required", status: 400 };
+  }
+  const normalizedOwner = normalizeAuthorIdentity(
+    typeof owner.peer_id === "string" ? owner.peer_id : ""
+  );
+  if (!normalizedOwner.ok) {
+    return { error: "owner.peer_id is empty or outside [a-z0-9:_-]", status: 400 };
+  }
+  const ownerPeer = normalizedOwner.value;
+  const ownerGroup = typeof owner.group_id === "string" ? owner.group_id : null;
+  const tag = `${ownerPeer}@${replicaId}`;
+
+  const row = getRoadmapRow(body.id);
+  if (!row) {
+    if (body.action === "release") {
+      // A release for a card this broker does not have has nothing left to
+      // undo: answering 200 lets the replica clear its pending release
+      // instead of retrying it forever.
+      return { ok: true, release: { released: false, item: null } };
+    }
+    return { error: "unknown roadmap item", status: 404 };
+  }
+  const contested = parseStringList(row.lock_contested_by);
+  const withoutOwner = contested.filter((entry) => entry !== tag);
+  const heldByThisRelay =
+    row.locked === 1 && row.lock_relay === replicaId && row.locked_by === ownerPeer;
+
+  if (body.action === "claim") {
+    // The same rule an agent's own claim obeys: a card the operator set aside
+    // cannot be taken, whichever broker the taker sits behind. The replica
+    // refuses it locally too, so reaching this is a replica out of step -- not
+    // a reason to let the claim through.
+    if (refusesInactiveClaim(row.inactive === 1, row.status, row.locked === 1, row.status, true)) {
+      return { error: "item is inactive -- clear inactive before locking it", status: 409 };
+    }
+    if (row.locked === 0) {
+      db.run(
+        `UPDATE roadmap_items SET
+           locked = 1, locked_by = ?, locked_group = ?, locked_by_token = NULL,
+           locked_at = datetime('now'), lock_relay = ?, lock_relay_seen = datetime('now'),
+           lock_contested_by = ?
+         WHERE id = ?`,
+        [ownerPeer, ownerGroup, replicaId, JSON.stringify(withoutOwner), body.id]
+      );
+    } else if (heldByThisRelay) {
+      // Re-assertion. `lock_relay_seen` alone is deliberately outside the
+      // rev-tracked columns, so a heartbeat every tick does not re-publish
+      // the row to every other replica.
+      if (withoutOwner.length !== contested.length) {
+        db.run(
+          "UPDATE roadmap_items SET lock_relay_seen = datetime('now'), lock_contested_by = ? WHERE id = ?",
+          [JSON.stringify(withoutOwner), body.id]
+        );
+      } else {
+        db.run("UPDATE roadmap_items SET lock_relay_seen = datetime('now') WHERE id = ?", [body.id]);
+      }
+    } else {
+      // Refused: annotate the holder so the operator sees who else wants it,
+      // and write only when the annotation actually changes (an unchanged
+      // list re-written every tick would bump `rev` forever).
+      if (!contested.includes(tag)) {
+        db.run("UPDATE roadmap_items SET lock_contested_by = ? WHERE id = ?", [
+          JSON.stringify([...contested, tag]),
+          body.id,
+        ]);
+      }
+      return { ok: false, contested: { scope: "contested", item: rowToSyncRow(getRoadmapRow(body.id)!) } };
+    }
+    return { ok: true, claim: { scope: "global", item: rowToSyncRow(getRoadmapRow(body.id)!) } };
+  }
+
+  if (heldByThisRelay) {
+    db.run(
+      `UPDATE roadmap_items SET
+         locked = 0, locked_by = NULL, locked_group = NULL, locked_by_token = NULL,
+         locked_at = NULL, lock_relay = NULL, lock_relay_seen = NULL, lock_contested_by = ?
+       WHERE id = ?`,
+      [JSON.stringify(withoutOwner), body.id]
+    );
+    return { ok: true, release: { released: true, item: rowToSyncRow(getRoadmapRow(body.id)!) } };
+  }
+  // Not ours to release: the only thing this owner can withdraw is its own
+  // contested claim.
+  if (withoutOwner.length !== contested.length) {
+    db.run("UPDATE roadmap_items SET lock_contested_by = ? WHERE id = ?", [
+      JSON.stringify(withoutOwner),
+      body.id,
+    ]);
+  }
+  return { ok: true, release: { released: false, item: rowToSyncRow(getRoadmapRow(body.id)!) } };
+}
+
+/**
+ * Answers in every mode, so one Deck poll can tell a replica from a broker
+ * that has no replication state at all. 'upstream' is the mode of a broker
+ * configured to defer to a remote one: its clients talk to that remote broker
+ * directly, so it holds no cursor and no conflicts of its own.
+ */
+function handleRoadmapSyncStatus(): RoadmapSyncStatus {
+  if (BROKER_MODE === "local") return { mode: "local" };
+  if (BROKER_MODE === "remote") return { mode: "upstream" };
+  const conflicts = (
+    db.query("SELECT COUNT(*) AS n FROM roadmap_items WHERE sync_state = 'conflict'").get() as {
+      n: number;
+    }
+  ).n;
+  const pendingPush = (
+    db.query(`SELECT COUNT(*) AS n FROM roadmap_items WHERE ${SYNC_PENDING_PUSH_WHERE}`).get() as {
+      n: number;
+    }
+  ).n;
+  const scopeRows = db
+    .query(
+      "SELECT lock_scope AS scope, COUNT(*) AS n FROM roadmap_items WHERE lock_scope IS NOT NULL GROUP BY lock_scope"
+    )
+    .all() as { scope: string; n: number }[];
+  const locks = { local: 0, global: 0, contested: 0, remote: 0 };
+  for (const r of scopeRows) {
+    if (r.scope === "local" || r.scope === "global" || r.scope === "contested" || r.scope === "remote") {
+      locks[r.scope] = r.n;
+    }
+  }
+  return {
+    mode: "replica",
+    upstream_url: UPSTREAM_URL ?? "",
+    online: syncOnlineState === "online",
+    since: syncStateSince,
+    last_error: syncLastError,
+    last_sync_at: syncLastSyncAt,
+    cursor: parseInt(syncMetaGet("upstream_cursor") ?? "0", 10),
+    conflicts,
+    pending_push: pendingPush,
+    locks,
+  };
+}
+
+/**
+ * Rebuilds the operator's arbitration material: what this broker holds, what
+ * the upstream held when the two diverged, and the content both derive from.
+ * A row whose stored upstream snapshot cannot be read is reported in the log
+ * and left out -- presenting a conflict with no remote side would offer a
+ * choice that cannot be applied.
+ */
+function handleRoadmapSyncConflicts(
+  body: RoadmapSyncConflictsRequest
+): RoadmapSyncConflictsResponse | { error: string; status: number } {
+  const refused = requireReplica("/roadmap/sync/conflicts");
+  if (refused) return refused;
+  const projectKey = typeof body.project_key === "string" ? body.project_key : "";
+  if (!projectKey) return { error: "project_key is required", status: 400 };
+  const rows = db
+    .query("SELECT * FROM roadmap_items WHERE project_key = ? AND sync_state = 'conflict' ORDER BY updated_at DESC")
+    .all(projectKey) as RoadmapRow[];
+  const items: RoadmapSyncConflict[] = [];
+  for (const row of rows) {
+    const remote = parseSyncRemote(row.id, row.sync_remote);
+    if (!remote) continue;
+    items.push({
+      local: rowToRoadmapItem(row),
+      remote,
+      base: readSyncBase(row.id, row.sync_base),
+    });
+  }
+  return { items };
+}
+
+/**
+ * The upstream row stored at conflict time. Validated on the two fields the
+ * resolution actually needs (`content_rev` becomes the new merge base, the
+ * content decides what is applied), never trusted on shape alone.
+ */
+function parseSyncRemote(id: string, raw: string | null): RoadmapSyncRow | null {
+  if (!raw) {
+    log.error(`roadmap sync: card ${id} is flagged conflict with no stored upstream row`);
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    log.error(`roadmap sync: card ${id} has an unreadable stored upstream row`, e);
+    return null;
+  }
+  const candidate = parsed as Partial<RoadmapSyncRow> | null;
+  if (!candidate || typeof candidate.content_rev !== "number" || typeof candidate.id !== "string") {
+    log.error(`roadmap sync: card ${id} has a stored upstream row without id/content_rev`);
+    return null;
+  }
+  if (!parseSyncContent(raw)) {
+    log.error(`roadmap sync: card ${id} has a stored upstream row missing content fields`);
+    return null;
+  }
+  return candidate as RoadmapSyncRow;
+}
+
+/**
+ * The stored common ancestor. A null column is the ordinary "this card was
+ * never synced" case; a column that is present but unreadable is not, and is
+ * traced -- the merge would otherwise silently treat every field as locally
+ * changed, which looks exactly like a successful merge.
+ */
+function readSyncBase(id: string, raw: string | null): RoadmapSyncContent | null {
+  const parsed = parseSyncContent(raw);
+  if (raw !== null && parsed === null) {
+    log.warn(`roadmap sync: card ${id} has an unreadable merge base, merging as if it had none`);
+  }
+  return parsed;
+}
+
+function handleRoadmapSyncResolve(
+  body: RoadmapSyncResolveRequest
+): RoadmapSyncResolveResponse | { error: string; status: number } {
+  // Same author proof as /roadmap/upsert -- this is a Deck write, and 'deck'
+  // names the operator -- resolved BEFORE the mode check so an unprovable
+  // author is refused identically on every deployment.
+  const author = resolveRoadmapAuthor(body, "/roadmap/sync/resolve");
+  if ("error" in author) return author;
+  const refused = requireReplica("/roadmap/sync/resolve");
+  if (refused) return refused;
+  if (typeof body.id !== "string" || !body.id) return { error: "id is required", status: 400 };
+  if (body.choice !== "remote" && body.choice !== "local" && body.choice !== "merge_reopen") {
+    return { error: "choice must be 'remote', 'local' or 'merge_reopen'", status: 400 };
+  }
+  const row = getRoadmapRow(body.id);
+  if (!row) return { error: "unknown roadmap item", status: 404 };
+  if (readSyncState(row.sync_state) !== "conflict") {
+    return { error: "item is not in conflict", status: 409 };
+  }
+  const remote = parseSyncRemote(row.id, row.sync_remote);
+  if (!remote) return { error: "the stored upstream row is unreadable, cannot resolve", status: 409 };
+  const remoteContent = pickSyncContent(remote);
+  const localContent = pickSyncContent(rowToRoadmapItem(row));
+  const base = readSyncBase(row.id, row.sync_base);
+
+  const applied =
+    body.choice === "remote"
+      ? remoteContent
+      : body.choice === "merge_reopen"
+        ? mergeReopen(base, localContent, remoteContent)
+        : null;
+  // 'local' keeps the local content and stays dirty, so it is pushed on the
+  // next pass; 'remote' adopts the upstream content and is clean; a merge is a
+  // local content of its own, hence dirty like 'local'.
+  const dirty = body.choice !== "remote";
+
+  withApplying(() => {
+    if (applied !== null && !contentEquals(applied, localContent)) {
+      writeSyncContent(row.id, applied, author.by, new Date().toISOString());
+    }
+    db.run(
+      `UPDATE roadmap_items SET
+         sync_base_rev = ?, sync_base = ?, sync_dirty = ?, sync_state = 'clean', sync_remote = NULL
+       WHERE id = ?`,
+      [remote.content_rev, JSON.stringify(remoteContent), dirty ? 1 : 0, row.id]
+    );
+  });
+  log.info(`roadmap sync: conflict on card ${row.id} resolved '${body.choice}' by '${author.by}'`);
+  return { item: getRoadmapItem(row.id)! };
+}
+
+/** The one statement that writes replicated content onto a local card. */
+function writeSyncContent(
+  id: string,
+  content: RoadmapSyncContent,
+  updatedBy: string,
+  updatedAt: string
+): void {
+  db.run(
+    `UPDATE roadmap_items SET
+       kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
+       value = ?, effort = ?, status = ?, tags = ?, depends_on = ?, deleted_at = ?,
+       directive = ?, target_peer_ids = ?, inactive = ?,
+       updated_by = ?, updated_at = ?
+     WHERE id = ?`,
+    [
+      content.kind, content.title, content.description, content.rationale, content.context,
+      content.priority, content.value, content.effort, content.status,
+      JSON.stringify(content.tags), JSON.stringify(content.depends_on), content.deleted_at,
+      content.directive, JSON.stringify(content.target_peer_ids), content.inactive ? 1 : 0,
+      updatedBy, updatedAt, id,
+    ]
+  );
+}
+
+// --- Roadmap replication: the pass a replica runs against its upstream (§8) ---
+
+type SyncOnlineState = "unknown" | "online" | "offline";
+
+let syncOnlineState: SyncOnlineState = "unknown";
+let syncStateSince = new Date().toISOString();
+let syncLastError: string | null = null;
+let syncLastSyncAt: string | null = null;
+let syncInFlight = false;
+let syncFailures = 0;
+let syncBackoffMs = SYNC_TICK_MS;
+let syncTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Every replication write runs inside this: the `applying` flag tells the
+ * content trigger not to mark the card dirty (the change came FROM the
+ * upstream, it is not a local edit) and the lock triggers not to read a
+ * mirrored lock as a local claim. Set and cleared inside one transaction with
+ * a finally, so a throw can never leave the flag stuck -- and the rollback
+ * would clear it a second time anyway.
+ */
+function withApplying<T>(fn: () => T): T {
+  const tx = db.transaction(() => {
+    syncMetaSet("applying", "1");
+    try {
+      return fn();
+    } finally {
+      syncMetaSet("applying", "0");
+    }
+  });
+  return tx() as T;
+}
+
+/** The replica's own identity upstream: persisted, so a restart keeps its relays. */
+function ensureReplicaId(): string {
+  const stored = syncMetaGet("replica_id");
+  if (stored && REPLICA_ID_REGEX.test(stored)) return stored;
+  const minted = randomUUID();
+  syncMetaSet("replica_id", minted);
+  log.info(`roadmap sync: this replica is ${minted}`);
+  return minted;
+}
+
+function upstreamErrorText(body: unknown): string {
+  if (body && typeof body === "object" && "error" in body) {
+    return String((body as { error: unknown }).error);
+  }
+  return "no error field";
+}
+
+async function upstreamPost<T>(path: string, body: unknown): Promise<{ status: number; body: T }> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  // Same Bearer the other clients of this upstream present; absent when the
+  // upstream runs unauthenticated.
+  if (BROKER_TOKEN) headers.authorization = `Bearer ${BROKER_TOKEN}`;
+  const res = await fetch(`${UPSTREAM_URL}${path}`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(SYNC_HTTP_TIMEOUT_MS),
+  });
+  const text = await res.text();
+  if (!text) return { status: res.status, body: null as T };
+  try {
+    return { status: res.status, body: JSON.parse(text) as T };
+  } catch (e) {
+    throw new Error(
+      `${path} answered ${res.status} with a body that is not JSON: ${e instanceof Error ? e.message : String(e)}`
+    );
+  }
+}
+
+/**
+ * Applies one pulled row. Returns true when a local queue position was
+ * replaced, so the pass can report how much local ordering the upstream order
+ * overwrote (§4: the queue is never pushed, and losing a local order must not
+ * be silent).
+ */
+function applyPulledRow(remote: RoadmapSyncRow): boolean {
+  const local = getRoadmapRow(remote.id);
+  const content = pickSyncContent(remote);
+  const contentJson = JSON.stringify(content);
+  if (!local) {
+    const lockedRemotely = remote.locked && remote.locked_by !== null;
+    db.run(
+      `INSERT INTO roadmap_items
+         (id, project_key, kind, title, description, rationale, context, priority, value,
+          effort, status, tags, depends_on, created_by, updated_by, created_at, updated_at,
+          deleted_at, queue, directive, target_peer_ids, inactive,
+          locked, locked_by, locked_group, locked_at, lock_scope,
+          sync_base_rev, sync_base, sync_dirty, sync_state)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+               ?, ?, ?, ?, ?, ?, ?, 0, 'clean')`,
+      [
+        remote.id, remote.project_key, content.kind, content.title, content.description,
+        content.rationale, content.context, content.priority, content.value, content.effort,
+        content.status, JSON.stringify(content.tags), JSON.stringify(content.depends_on),
+        remote.created_by, remote.updated_by, remote.created_at, remote.updated_at,
+        content.deleted_at, remote.queue, content.directive,
+        JSON.stringify(content.target_peer_ids), content.inactive ? 1 : 0,
+        lockedRemotely ? 1 : 0, lockedRemotely ? remote.locked_by : null,
+        lockedRemotely ? remote.locked_group : null, lockedRemotely ? remote.locked_at : null,
+        lockedRemotely ? "remote" : null,
+        remote.content_rev, contentJson,
+      ]
+    );
+    return false;
+  }
+
+  const queueReplaced = local.queue !== null && local.queue !== remote.queue;
+  const dirty = local.sync_dirty === 1;
+  if (readSyncState(local.sync_state) === "conflict") {
+    // Already waiting on the operator: keep the arbitration material current.
+    db.run("UPDATE roadmap_items SET sync_remote = ? WHERE id = ?", [
+      JSON.stringify(remote),
+      remote.id,
+    ]);
+  } else if (!dirty) {
+    writeSyncContent(remote.id, content, remote.updated_by, remote.updated_at);
+    db.run(
+      `UPDATE roadmap_items SET sync_base_rev = ?, sync_base = ?, sync_dirty = 0,
+         sync_state = 'clean', sync_remote = NULL WHERE id = ?`,
+      [remote.content_rev, contentJson, remote.id]
+    );
+  } else if (local.sync_base_rev !== null && local.sync_base_rev === remote.content_rev) {
+    // Dirty here, untouched there: the local edit stands and will be pushed.
+  } else if (remote.updated_by === "lock-sweep") {
+    // §3.5: the upstream change is the stale-lock sweep reclaiming a card this
+    // replica is still working on. Resolved as 'local' with no operator
+    // arbitration, or every in-progress card would come back conflicted after
+    // each disconnection.
+    db.run(
+      `UPDATE roadmap_items SET sync_base_rev = ?, sync_base = ? WHERE id = ?`,
+      [remote.content_rev, JSON.stringify(pickSyncContent(remote)), remote.id]
+    );
+    log.info(
+      `roadmap sync: card ${remote.id} kept local, the upstream change came from the lock sweep`
+    );
+  } else {
+    db.run("UPDATE roadmap_items SET sync_state = 'conflict', sync_remote = ? WHERE id = ?", [
+      JSON.stringify(remote),
+      remote.id,
+    ]);
+    log.info(`roadmap sync: card ${remote.id} diverged from the upstream, operator arbitration needed`);
+  }
+
+  // Queue and locks travel outside the content protocol and are applied on
+  // every branch, conflict included.
+  const localScope = readLockScope(local.lock_scope);
+  const heldLocally =
+    local.locked === 1 &&
+    (localScope === "local" ||
+      localScope === "global" ||
+      localScope === "contested" ||
+      localScope === "release_pending");
+  if (heldLocally) {
+    db.run("UPDATE roadmap_items SET queue = ? WHERE id = ?", [remote.queue, remote.id]);
+  } else if (remote.locked && remote.locked_by !== null) {
+    db.run(
+      `UPDATE roadmap_items SET queue = ?, locked = 1, locked_by = ?, locked_group = ?,
+         locked_by_token = NULL, locked_at = ?, lock_scope = 'remote' WHERE id = ?`,
+      [remote.queue, remote.locked_by, remote.locked_group, remote.locked_at, remote.id]
+    );
+  } else if (localScope === "remote") {
+    db.run(
+      `UPDATE roadmap_items SET queue = ?, locked = 0, locked_by = NULL, locked_group = NULL,
+         locked_by_token = NULL, locked_at = NULL, lock_scope = NULL WHERE id = ?`,
+      [remote.queue, remote.id]
+    );
+  } else {
+    db.run("UPDATE roadmap_items SET queue = ? WHERE id = ?", [remote.queue, remote.id]);
+  }
+  return queueReplaced;
+}
+
+function applyPulledPage(items: RoadmapSyncRow[], nextRev: number): void {
+  withApplying(() => {
+    let queueReplaced = 0;
+    for (const remote of items) {
+      if (applyPulledRow(remote)) queueReplaced += 1;
+    }
+    // The cursor advances in the same transaction as the rows it covers: a
+    // crash between the two would otherwise skip a page for good.
+    syncMetaSet("upstream_cursor", String(nextRev));
+    if (queueReplaced > 0) {
+      log.info(
+        `roadmap sync: ${queueReplaced} local queue position(s) replaced by the upstream order`
+      );
+    }
+  });
+}
+
+async function syncPullPass(): Promise<void> {
+  // Bounded so one pass cannot loop forever on a broker whose cursor never
+  // advances; the next pass simply continues where this one stopped.
+  for (let page = 0; page < 100; page++) {
+    const since = parseInt(syncMetaGet("upstream_cursor") ?? "0", 10);
+    const res = await upstreamPost<RoadmapSyncPullResponse>("/roadmap/sync/pull", {
+      replica_id: REPLICA_ID,
+      since_rev: Number.isFinite(since) ? since : 0,
+      limit: SYNC_PULL_LIMIT_MAX,
+    });
+    if (res.status !== 200 || !res.body || !Array.isArray(res.body.items)) {
+      throw new Error(`pull refused (${res.status}): ${upstreamErrorText(res.body)}`);
+    }
+    const nextRev = typeof res.body.next_rev === "number" ? res.body.next_rev : since;
+    applyPulledPage(res.body.items, nextRev);
+    if (res.body.items.length < SYNC_PULL_LIMIT_MAX) return;
+  }
+  log.warn("roadmap sync: pull stopped at the page cap, continuing on the next pass");
+}
+
+async function syncPushPass(): Promise<void> {
+  const rows = db
+    .query(
+      `SELECT * FROM roadmap_items WHERE ${SYNC_PENDING_PUSH_WHERE} ORDER BY content_rev LIMIT ?`
+    )
+    .all(SYNC_PUSH_BATCH) as RoadmapRow[];
+  for (const row of rows) {
+    const content = pickSyncContent(rowToRoadmapItem(row));
+    // Read BEFORE the round-trip: a local edit landing while the request is in
+    // flight must leave the card dirty, so it departs again on the next pass.
+    const sentContentRev = row.content_rev;
+    const item: RoadmapSyncPushItem = {
+      id: row.id,
+      project_key: row.project_key,
+      created_by: row.created_by,
+      updated_by: row.updated_by,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      // Spread of a pick-list result, whose type is exactly the fifteen
+      // content fields -- no table column can ride along.
+      ...content,
+    };
+    const res = await upstreamPost<RoadmapSyncPushResponse | RoadmapSyncPushConflict>(
+      "/roadmap/sync/push",
+      { replica_id: REPLICA_ID, item, expected_content_rev: row.sync_base_rev }
+    );
+    if (res.status === 200) {
+      const accepted = res.body as RoadmapSyncPushResponse;
+      withApplying(() => {
+        db.run(
+          `UPDATE roadmap_items SET sync_base_rev = ?, sync_base = ?,
+             sync_dirty = CASE WHEN content_rev = ? THEN 0 ELSE sync_dirty END
+           WHERE id = ?`,
+          [accepted.content_rev, JSON.stringify(content), sentContentRev, row.id]
+        );
+      });
+      continue;
+    }
+    if (res.status === 409) {
+      recordPushDivergence(row, (res.body as RoadmapSyncPushConflict).item ?? null);
+      continue;
+    }
+    throw new Error(`push refused (${res.status}) for card ${row.id}: ${upstreamErrorText(res.body)}`);
+  }
+}
+
+/**
+ * A refused push. `item: null` means the upstream no longer has the row this
+ * copy derives from: the base is dropped so the next pass offers the card as
+ * a new one rather than retrying a fast-forward that can never succeed.
+ */
+function recordPushDivergence(row: RoadmapRow, remote: RoadmapSyncRow | null): void {
+  if (!remote) {
+    log.warn(
+      `roadmap sync: the upstream no longer has card ${row.id}, it will be pushed again as a new card`
+    );
+    withApplying(() => {
+      db.run("UPDATE roadmap_items SET sync_base_rev = NULL, sync_base = NULL WHERE id = ?", [row.id]);
+    });
+    return;
+  }
+  if (remote.updated_by === "lock-sweep") {
+    withApplying(() => {
+      db.run("UPDATE roadmap_items SET sync_base_rev = ?, sync_base = ? WHERE id = ?", [
+        remote.content_rev,
+        JSON.stringify(pickSyncContent(remote)),
+        row.id,
+      ]);
+    });
+    log.info(`roadmap sync: card ${row.id} kept local, the upstream change came from the lock sweep`);
+    return;
+  }
+  withApplying(() => {
+    db.run("UPDATE roadmap_items SET sync_state = 'conflict', sync_remote = ? WHERE id = ?", [
+      JSON.stringify(remote),
+      row.id,
+    ]);
+  });
+  log.info(`roadmap sync: card ${row.id} was refused by the upstream, operator arbitration needed`);
+}
+
+function setLockScope(id: string, scope: RoadmapLockScope | null): void {
+  withApplying(() => {
+    db.run("UPDATE roadmap_items SET lock_scope = ?, lock_release_owner = NULL WHERE id = ?", [
+      scope,
+      id,
+    ]);
+  });
+}
+
+async function syncLockPass(): Promise<void> {
+  const claims = db
+    .query(
+      `SELECT id, locked_by, locked_group FROM roadmap_items
+        WHERE locked = 1 AND lock_scope IN ('local', 'global', 'contested')`
+    )
+    .all() as { id: string; locked_by: string | null; locked_group: string | null }[];
+  for (const claim of claims) {
+    if (!claim.locked_by) {
+      log.warn(`roadmap sync: card ${claim.id} is locked with no owner, no upstream claim sent`);
+      continue;
+    }
+    const res = await upstreamPost<RoadmapSyncLockClaimResponse>("/roadmap/sync/lock", {
+      replica_id: REPLICA_ID,
+      id: claim.id,
+      action: "claim",
+      owner: { peer_id: claim.locked_by, group_id: claim.locked_group },
+    });
+    if (res.status === 200) {
+      setLockScope(claim.id, "global");
+    } else if (res.status === 409) {
+      setLockScope(claim.id, "contested");
+    } else if (res.status === 404) {
+      // The card has not reached the upstream yet (it is pushed by the step
+      // above only once it is dirty): claim it on a later pass.
+      log.warn(`roadmap sync: the upstream does not know card ${claim.id} yet, lock claim deferred`);
+    } else {
+      throw new Error(
+        `lock claim refused (${res.status}) for card ${claim.id}: ${upstreamErrorText(res.body)}`
+      );
+    }
+  }
+
+  const releases = db
+    .query("SELECT id, lock_release_owner FROM roadmap_items WHERE lock_scope = 'release_pending'")
+    .all() as { id: string; lock_release_owner: string | null }[];
+  for (const pending of releases) {
+    if (!pending.lock_release_owner) {
+      // Nothing to name upstream, so nothing it would accept: clear the local
+      // marker rather than retry an unaddressable release every pass.
+      log.warn(
+        `roadmap sync: card ${pending.id} awaits an upstream release with no recorded owner, cleared locally`
+      );
+      setLockScope(pending.id, null);
+      continue;
+    }
+    const res = await upstreamPost<RoadmapSyncLockReleaseResponse>("/roadmap/sync/lock", {
+      replica_id: REPLICA_ID,
+      id: pending.id,
+      action: "release",
+      owner: { peer_id: pending.lock_release_owner, group_id: null },
+    });
+    if (res.status === 200 || res.status === 404) {
+      setLockScope(pending.id, null);
+    } else {
+      throw new Error(
+        `lock release refused (${res.status}) for card ${pending.id}: ${upstreamErrorText(res.body)}`
+      );
+    }
+  }
+}
+
+async function runSyncPass(): Promise<void> {
+  if (syncInFlight) return;
+  syncInFlight = true;
+  try {
+    await syncPullPass();
+    await syncPushPass();
+    await syncLockPass();
+    syncLastSyncAt = new Date().toISOString();
+    syncLastError = null;
+    syncFailures = 0;
+    syncBackoffMs = SYNC_TICK_MS;
+    if (syncOnlineState !== "online") {
+      syncOnlineState = "online";
+      syncStateSince = new Date().toISOString();
+      log.info(`roadmap sync: upstream ${UPSTREAM_URL} reachable, replication running`);
+    }
+  } catch (e) {
+    syncLastError = e instanceof Error ? e.message : String(e);
+    syncFailures += 1;
+    syncBackoffMs = Math.min(SYNC_BACKOFF_MAX_MS, syncBackoffMs * 2);
+    // Hysteresis: one lost round-trip is not a disconnection, and the
+    // transition is logged ONCE -- a line per failed pass would fill the log
+    // for as long as the operator works offline, which is the point of the
+    // mode.
+    if (syncFailures >= SYNC_OFFLINE_AFTER_FAILURES && syncOnlineState !== "offline") {
+      syncOnlineState = "offline";
+      syncStateSince = new Date().toISOString();
+      log.error(`roadmap sync: upstream ${UPSTREAM_URL} unreachable, working offline`, e);
+    }
+  } finally {
+    syncInFlight = false;
+    armSyncTimer(syncOnlineState === "offline" ? syncBackoffMs : SYNC_TICK_MS);
+  }
+}
+
+/**
+ * setTimeout re-armed at the END of each pass, never setInterval: a pass
+ * slower than the cadence must not overlap the next one.
+ */
+function armSyncTimer(delayMs: number): void {
+  if (syncTimer) clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => {
+    void runSyncPass();
+  }, delayMs);
+}
+
+const REPLICA_ID = BROKER_MODE === "replica" ? ensureReplicaId() : "";
+if (BROKER_MODE === "replica") {
+  // First pass right away rather than one cadence later: on a Deck start the
+  // operator expects the roadmap to be current, not current in five seconds.
+  armSyncTimer(Math.min(SYNC_TICK_MS, 100));
 }
 
 /**
@@ -5951,7 +7395,15 @@ const server = Bun.serve<WsData>({
       if (path === "/health") {
         const total = (db.query("SELECT COUNT(*) AS n FROM peers WHERE status = 'active'")
           .get() as { n: number }).n;
-        return Response.json({ status: "ok", peers: total, ws_clients: wsPool.size });
+        return Response.json({
+          status: "ok",
+          peers: total,
+          ws_clients: wsPool.size,
+          mode: BROKER_MODE,
+          // Only a replica has an upstream to be online against; on the other
+          // modes the field is absent rather than a misleading `true`.
+          ...(BROKER_MODE === "replica" ? { upstream_online: syncOnlineState === "online" } : {}),
+        });
       }
       if (path === "/group-stats") {
         return Response.json(handleGroupStats());
@@ -6109,6 +7561,47 @@ const server = Bun.serve<WsData>({
           }
           return Response.json(result);
         }
+        case "/roadmap/sync/pull": {
+          const result = handleRoadmapSyncPull(body as RoadmapSyncPullRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/sync/push": {
+          const result = handleRoadmapSyncPush(body as RoadmapSyncPushRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          // A refused push is not a request error: the body carries the
+          // upstream row the replica needs to arbitrate against.
+          if (!result.ok) return Response.json(result.conflict, { status: 409 });
+          return Response.json(result.response);
+        }
+        case "/roadmap/sync/lock": {
+          const result = handleRoadmapSyncLock(body as RoadmapSyncLockRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          if (!result.ok) return Response.json(result.contested, { status: 409 });
+          return Response.json("claim" in result ? result.claim : result.release);
+        }
+        case "/roadmap/sync/status":
+          return Response.json(handleRoadmapSyncStatus());
+        case "/roadmap/sync/conflicts": {
+          const result = handleRoadmapSyncConflicts(body as RoadmapSyncConflictsRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/sync/resolve": {
+          const result = handleRoadmapSyncResolve(body as RoadmapSyncResolveRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
         case "/graph-draft/add": {
           const result = handleGraphDraftAdd(body as GraphDraftAddRequest);
           if ("error" in result) {
@@ -6246,5 +7739,7 @@ log.info(
   `activity_timeout=${ACTIVITY_TIMEOUT_MS / 1000}s, ws_idle=${WS_IDLE_TIMEOUT_SEC}s, ` +
   `active_stale=${ACTIVE_STALE_SEC}s, sweep_interval=${SWEEP_INTERVAL_SEC}s, ` +
   `lock_ttl=${LOCK_TTL_SEC}s, lock_grace=${LOCK_GRACE_SEC}s, ` +
-  `auth=${BROKER_TOKEN ? "token" : "none"})`
+  `mode=${BROKER_MODE}` +
+  (BROKER_MODE === "replica" ? `, upstream=${UPSTREAM_URL}, sync_tick=${SYNC_TICK_MS}ms` : "") +
+  `, auth=${BROKER_TOKEN ? "token" : "none"})`
 );

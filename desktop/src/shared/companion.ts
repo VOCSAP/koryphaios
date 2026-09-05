@@ -72,6 +72,9 @@ export const COMPANION_MANIFEST = {
   roadmapStop: { kind: 'invoke', channel: 'roadmap:stop' },
   roadmapAssign: { kind: 'invoke', channel: 'roadmap:assign' },
   importPlan: { kind: 'invoke', channel: 'roadmap:import-plan' },
+  // Offline replica: arbitrating a conflict IS a roadmap write, so it takes
+  // roadmap:upsert's tier and, like it, stays reachable remotely.
+  resolveRoadmapConflict: { kind: 'invoke', channel: 'roadmapSync:resolve' },
 
   // agent stop broadcast (aaf4537d lot 3): stopping every tile at once is
   // trust-changing (agents:stop), reading the current stop state is not.
@@ -198,6 +201,7 @@ export const COMPANION_MANIFEST = {
   onInboxCleared: { kind: 'event', channel: 'inbox:cleared' },
   onPendingApprovals: { kind: 'event', channel: 'approvals:pending' },
   onGraphDrafts: { kind: 'event', channel: 'graphDrafts:update' },
+  onRoadmapSync: { kind: 'event', channel: 'roadmap:sync' },
   onInboxOpen: { kind: 'event', channel: 'inbox:open' },
   onFocusSession: { kind: 'event', channel: 'session:focus' },
   onDesignPick: { kind: 'event', channel: 'design:pick' },
@@ -376,6 +380,8 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'roadmap:archive': 1,
   'roadmap:reorder': 1,
   'roadmap:wand': 1,
+  // Mirrors roadmap:upsert: it rewrites one card's content, nothing more.
+  'roadmapSync:resolve': 1,
   'roadmap:stop': 1,
   'graph:create': 1,
   'graph:delete': 1,

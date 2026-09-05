@@ -455,6 +455,183 @@ export interface RoadmapItem {
    * null when unparked.
    */
   lock_parked_by: string | null;
+  /**
+   * Replica-side reconciliation state of this card against the upstream
+   * broker: 'conflict' when both sides changed the content since the common
+   * base and the operator has not chosen yet. Always 'clean' on a broker that
+   * is not a replica.
+   */
+  sync_state: RoadmapSyncState;
+  /**
+   * Replica-side scope of the work-lock: 'local' (taken while the upstream
+   * was unreachable, not yet asserted), 'global' (held on the upstream through
+   * this replica's relay), 'contested' (refused upstream because another
+   * holder has it), 'remote' (mirrors a lock held upstream by a third party,
+   * refreshed by the pull), 'release_pending' (released locally, release not
+   * yet sent). null when unlocked or on a non-replica broker.
+   */
+  lock_scope: RoadmapLockScope | null;
+  /**
+   * Upstream-side list of `"<peer_id>@<replica_id>"` holders who hold this
+   * card locally while it is locked here by someone else. Visibility only;
+   * never a lock guard input.
+   */
+  lock_contested_by: string[];
+}
+
+// --- Roadmap replication (DESIGN-OFFLINE-REPLICA) ---
+
+export type RoadmapSyncState = "clean" | "conflict";
+
+export type RoadmapLockScope = "local" | "global" | "contested" | "remote" | "release_pending";
+
+/**
+ * The fifteen columns whose divergence between a replica and its upstream IS
+ * a conflict. `queue` (upstream wins), the lock columns (own protocol),
+ * `updated_by`/`updated_at`/`created_*` (ride along, never decide) and
+ * `operator_id` (never crosses) are deliberately absent.
+ */
+export const ROADMAP_SYNC_CONTENT_FIELDS = [
+  "kind",
+  "title",
+  "description",
+  "rationale",
+  "context",
+  "priority",
+  "value",
+  "effort",
+  "status",
+  "tags",
+  "depends_on",
+  "deleted_at",
+  "directive",
+  "target_peer_ids",
+  "inactive",
+] as const;
+
+export type RoadmapSyncContentField = (typeof ROADMAP_SYNC_CONTENT_FIELDS)[number];
+
+/** The content snapshot stored as `sync_base` / `sync_remote` and merged three-way. */
+export type RoadmapSyncContent = Pick<RoadmapItem, RoadmapSyncContentField>;
+
+/**
+ * One row served by /roadmap/sync/pull: the public item plus the two upstream
+ * revision counters. Built by a pick-list, so `locked_by_token` and
+ * `operator_id` can never ride along.
+ */
+export type RoadmapSyncRow = Omit<RoadmapItem, "locked_by_token" | "operator_id"> & {
+  rev: number;
+  content_rev: number;
+};
+
+export interface RoadmapSyncPullRequest {
+  replica_id: string;
+  /** Exclusive lower bound on `rev`; 0 on first sync. */
+  since_rev: number;
+  /** Page size, capped at 500 server-side. */
+  limit?: number;
+}
+
+export interface RoadmapSyncPullResponse {
+  items: RoadmapSyncRow[];
+  /** Greatest `rev` returned, or `since_rev` when the page is empty. */
+  next_rev: number;
+}
+
+/** What a replica pushes: content plus the attribution/timestamp columns that ride along. */
+export type RoadmapSyncPushItem = RoadmapSyncContent &
+  Pick<RoadmapItem, "id" | "project_key" | "created_by" | "updated_by" | "created_at" | "updated_at">;
+
+export interface RoadmapSyncPushRequest {
+  replica_id: string;
+  item: RoadmapSyncPushItem;
+  /** Upstream `content_rev` the replica's copy derives from; null for a card the upstream has never seen. */
+  expected_content_rev: number | null;
+}
+
+export interface RoadmapSyncPushResponse {
+  /**
+   * The upstream row as the replica may see it -- same pick-list projection as
+   * /roadmap/sync/pull, so an accepted push cannot hand back the
+   * `locked_by_token` of whoever holds the card upstream.
+   */
+  item: RoadmapSyncRow;
+  rev: number;
+  content_rev: number;
+}
+
+/** 409 body of /roadmap/sync/push: `item` is the upstream row, null when the row is missing. */
+export interface RoadmapSyncPushConflict {
+  error: "conflict";
+  item: RoadmapSyncRow | null;
+}
+
+export type RoadmapSyncLockAction = "claim" | "release";
+
+export interface RoadmapSyncLockRequest {
+  replica_id: string;
+  id: string;
+  action: RoadmapSyncLockAction;
+  owner: { peer_id: string; group_id: string | null };
+}
+
+export interface RoadmapSyncLockClaimResponse {
+  /** 'global' on 200, 'contested' on 409. */
+  scope: "global" | "contested";
+  item: RoadmapSyncRow;
+}
+
+export interface RoadmapSyncLockReleaseResponse {
+  released: boolean;
+  item: RoadmapSyncRow | null;
+}
+
+export type RoadmapSyncMode = "local" | "upstream" | "replica";
+
+export interface RoadmapSyncStatus {
+  mode: RoadmapSyncMode;
+  /** Set only when mode === 'replica'. */
+  upstream_url?: string;
+  online?: boolean;
+  /** ISO timestamp of the last online/offline transition. */
+  since?: string;
+  last_error?: string | null;
+  last_sync_at?: string | null;
+  cursor?: number;
+  /** Cards in sync_state 'conflict', every project. */
+  conflicts?: number;
+  /** Cards dirty and clean, i.e. waiting to be pushed. */
+  pending_push?: number;
+  locks?: { local: number; global: number; contested: number; remote: number };
+}
+
+export interface RoadmapSyncConflict {
+  local: RoadmapItem;
+  remote: RoadmapSyncRow;
+  /** Content the two sides diverged from; null when the card had never been synced. */
+  base: RoadmapSyncContent | null;
+}
+
+export interface RoadmapSyncConflictsRequest {
+  project_key: string;
+}
+
+export interface RoadmapSyncConflictsResponse {
+  items: RoadmapSyncConflict[];
+}
+
+export type RoadmapSyncResolution = "remote" | "local" | "merge_reopen";
+
+export interface RoadmapSyncResolveRequest {
+  id: string;
+  choice: RoadmapSyncResolution;
+  /** Author of the resolution: 'deck', signed like every Deck roadmap write. */
+  by: string;
+  instance_token?: string;
+}
+
+export interface RoadmapSyncResolveResponse {
+  item: RoadmapItem;
 }
 
 /**
@@ -499,6 +676,18 @@ export const ROADMAP_IMPORT_COLUMNS = [
   "inactive",
   "lock_parked_at",
   "lock_parked_by",
+  "rev",
+  "content_rev",
+  "sync_base_rev",
+  "sync_base",
+  "sync_dirty",
+  "sync_state",
+  "sync_remote",
+  "lock_scope",
+  "lock_relay",
+  "lock_relay_seen",
+  "lock_contested_by",
+  "lock_release_owner",
 ] as const;
 
 export type RoadmapImportColumn = (typeof ROADMAP_IMPORT_COLUMNS)[number];

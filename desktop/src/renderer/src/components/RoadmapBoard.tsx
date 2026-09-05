@@ -2,6 +2,7 @@ import type { RoadmapItem, RoadmapPriority, RoadmapStatus } from '@shared/types'
 import { AgentStopControls } from './AgentStopControls'
 import { GLYPH_BADGES } from './icons'
 import { KIND_ICONS, RoadmapItemId } from './RoadmapItemModal'
+import { useDeck } from '../store'
 import { type TFn } from '../i18n'
 
 // Card 3b0fda5f: the kanban board, extracted out of RoadmapView.tsx so it can
@@ -37,15 +38,30 @@ function BoardCard({
   t: TFn
 }): React.JSX.Element {
   const locked = isLocked(item)
+  // Offline replica: the card diverged from the upstream, or its lock is
+  // contested there. Both are rings on the card itself, not badges only: the
+  // operator must see them while scanning a column, not after opening one.
+  const conflicted = item.sync_state === 'conflict'
+  const contested = item.lock_scope === 'contested'
+  const openConflict = useDeck((s) => s.openRoadmapConflict)
   // Card 99d3a9eb, AC2: the priority chip's setPriority() write needs the
   // same gate as every other write path on this card -- reused below for
   // both the drag guard (arbitrage 2) and the chip's click guard.
   const closed = item.status === 'done' || item.status === 'archived'
   // A closed card (done or archived) does not drag to another column.
   const draggable = !locked && !closed
+  const stateTitle = conflicted
+    ? t('roadmap.sync.conflictHint')
+    : contested
+      ? t('roadmap.sync.contestedHint', { name: item.locked_by ?? '' })
+      : item.lock_scope === 'remote'
+        ? t('roadmap.sync.remoteLockHint', { name: item.locked_by ?? '' })
+        : locked
+          ? t('roadmap.lockedHint')
+          : undefined
   return (
     <button
-      className={`rm-card${locked ? ' rm-card-locked' : ''}${item.status === 'archived' ? ' rm-card-archived' : ''}`}
+      className={`rm-card${locked ? ' rm-card-locked' : ''}${item.status === 'archived' ? ' rm-card-archived' : ''}${conflicted ? ' rm-card-conflict' : ''}${contested ? ' rm-card-contested' : ''}`}
       draggable={draggable}
       onDragStart={draggable ? onDragStart : undefined}
       onDragEnd={onDragEnd}
@@ -55,7 +71,7 @@ function BoardCard({
         e.stopPropagation()
         onMenu(e.clientX, e.clientY)
       }}
-      title={locked ? t('roadmap.lockedHint') : undefined}
+      title={stateTitle}
     >
       <span className="rm-card-head">
         {/* Priority quick-switch (K7): the chip opens a styled dropdown, no
@@ -102,10 +118,39 @@ function BoardCard({
             {GLYPH_BADGES.clepsydra} #{item.queue}
           </span>
         )}
-        {locked && (
-          <span className="rm-badge rm-badge-locked" title={t('roadmap.lockedHint')}>
+        {/* Replication conflict: the badge is the direct way into the
+            arbitration dialog, so the operator does not have to open the
+            card first. A span with role="button", like the priority chip --
+            this card IS a <button>, and a nested one is invalid. */}
+        {conflicted && (
+          <span
+            className="rm-badge rm-badge-conflict"
+            role="button"
+            title={t('roadmap.sync.conflictHint')}
+            onClick={(e) => {
+              e.stopPropagation()
+              openConflict(item.id)
+            }}
+          >
+            {GLYPH_BADGES.warning} {t('roadmap.sync.conflictBadge')}
+          </span>
+        )}
+        {/* A lock held UPSTREAM by a third party: same glyph as a local
+            work-lock (it blocks local agents just the same), a different
+            title so the operator knows nobody on this machine holds it. */}
+        {item.lock_scope === 'remote' ? (
+          <span
+            className="rm-badge rm-badge-lock-remote"
+            title={t('roadmap.sync.remoteLockHint', { name: item.locked_by ?? '' })}
+          >
             {GLYPH_BADGES.lock} {item.locked_by}
           </span>
+        ) : (
+          locked && (
+            <span className="rm-badge rm-badge-locked" title={t('roadmap.lockedHint')}>
+              {GLYPH_BADGES.lock} {item.locked_by}
+            </span>
+          )
         )}
         {/* Card 442084b7: operator-only park flag. Neither the lock glyph
             (an agent's own claim) nor the archive glyph/dimming (a lifecycle

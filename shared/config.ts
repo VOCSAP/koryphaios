@@ -45,6 +45,12 @@ export interface Config {
   broker_token: string | null;
   /** Broker bind host. null = "127.0.0.1" (loopback only). Set "0.0.0.0" for public access. */
   bind_host: string | null;
+  /**
+   * Replica mode opt-in: with a remote broker_url, the clients keep talking to
+   * a loopback broker and THAT broker replicates the roadmap against broker_url
+   * (its upstream). A remote broker_url alone never implies it.
+   */
+  offline_replica: boolean;
 }
 
 interface FileConfig {
@@ -61,6 +67,7 @@ interface FileConfig {
   broker_url?: string;
   broker_token?: string;
   bind_host?: string;
+  offline_replica?: boolean;
 }
 
 const DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001";
@@ -156,6 +163,10 @@ export async function loadConfig(): Promise<Config> {
   const broker_url = process.env.CLAUDE_PEERS_BROKER_URL ?? fileCfg.broker_url ?? null;
   const broker_token = process.env.CLAUDE_PEERS_BROKER_TOKEN ?? fileCfg.broker_token ?? null;
   const bind_host = process.env.CLAUDE_PEERS_BIND_HOST ?? fileCfg.bind_host ?? null;
+  const offline_replica = parseBooleanFlag(
+    process.env.CLAUDE_PEERS_OFFLINE_REPLICA,
+    fileCfg.offline_replica === true
+  );
 
   return {
     port,
@@ -169,7 +180,21 @@ export async function loadConfig(): Promise<Config> {
     broker_url,
     broker_token,
     bind_host,
+    offline_replica,
   };
+}
+
+/**
+ * Env flag parser for the booleans this loader owns: "1"/"true"/"yes"/"on" set,
+ * "0"/"false"/"no"/"off" clear, anything else (unset, empty, typo) falls back
+ * to the file value so a mistyped env var cannot silently flip a mode.
+ */
+export function parseBooleanFlag(raw: string | undefined, fallback: boolean): boolean {
+  if (raw === undefined) return fallback;
+  const v = raw.trim().toLowerCase();
+  if (v === "1" || v === "true" || v === "yes" || v === "on") return true;
+  if (v === "0" || v === "false" || v === "no" || v === "off") return false;
+  return fallback;
 }
 
 /**
@@ -225,13 +250,39 @@ export function buildSummaryProviderConfig(config: Config): SummaryProviderConfi
   };
 }
 
+export type BrokerMode = "local" | "remote" | "replica";
+
 /**
- * Build the broker URL from the resolved config.
- * If broker_url is set, use it directly (HTTP mode). Otherwise, loopback.
+ * The ONE decision of which deployment shape this config describes. Every
+ * client (server.ts, cli.ts, the Deck's resolveBrokerEndpoint mirror) and the
+ * broker itself derive their endpoint from it, so the three can never
+ * disagree on where the broker is.
+ *  - local:   no broker_url -> loopback broker, auto-spawned.
+ *  - remote:  broker_url, no opt-in -> clients talk to broker_url directly.
+ *  - replica: broker_url + offline_replica -> clients talk to loopback; the
+ *             loopback broker replicates against broker_url (its upstream).
  */
-export function brokerUrl(config: Config): string {
-  if (config.broker_url) return config.broker_url;
+export function brokerMode(config: Pick<Config, "broker_url" | "offline_replica">): BrokerMode {
+  if (!config.broker_url) return "local";
+  return config.offline_replica ? "replica" : "remote";
+}
+
+/**
+ * Build the broker URL the CLIENTS of this config talk to. Only the remote
+ * mode points away from loopback; a replica keeps its clients local by design.
+ */
+export function brokerUrl(config: Pick<Config, "broker_url" | "offline_replica" | "port">): string {
+  if (brokerMode(config) === "remote") return config.broker_url as string;
   return `http://127.0.0.1:${config.port}`;
+}
+
+/**
+ * The broker this config's LOCAL broker replicates against; null unless the
+ * mode is replica. The broker refuses to start on a loopback upstream (a
+ * replica of itself), that check lives with the broker, not here.
+ */
+export function upstreamUrl(config: Pick<Config, "broker_url" | "offline_replica">): string | null {
+  return brokerMode(config) === "replica" ? config.broker_url : null;
 }
 
 /**

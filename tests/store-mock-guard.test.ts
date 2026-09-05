@@ -19,7 +19,7 @@ import { join } from "node:path";
 // re-derived here on purpose: this file asserts the GUARD's behaviour
 // against a fixed set it controls, so a change to store.ts's real surface
 // shows up as this test needing an update, distinct from the guard mis-firing.
-const KNOWN_REAL_KEYS = ["errorText", "inboxAwaitsAction", "inboxBadgeCount", "inboxPendingCount", "useDeck"].sort();
+const KNOWN_REAL_KEYS = ["errorText", "inboxAwaitsAction", "inboxBadgeCount", "inboxPendingCount", "roadmapConflictCount", "useDeck"].sort();
 
 test("missingStoreKeys: empty when every real store.ts export is present", () => {
   const complete = Object.fromEntries(KNOWN_REAL_KEYS.map((key) => [key, () => {}]));

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { inboxAwaitsAction, inboxBadgeCount, useDeck } from '../store'
+import { inboxAwaitsAction, inboxBadgeCount, roadmapConflictCount, useDeck } from '../store'
 import { useT } from '../i18n'
 import { AmphoraGauge, GLYPHS, PithosGlyph } from './icons'
 import { sessionRemainingFraction, usageTone } from '@shared/usage'
@@ -77,6 +77,10 @@ export function NavRail(): React.JSX.Element {
   const badge = useDeck(inboxBadgeCount)
   const awaitsAction = useDeck(inboxAwaitsAction)
 
+  // Offline replica: cards of this project the operator must arbitrate. Same
+  // counter badge as the Courrier's, on the view that actually shows them.
+  const conflicts = useDeck(roadmapConflictCount)
+
   // Residual offline indicator: while the broker is down the inbox entry
   // carries a red dot, so the outage stays visible even once the top banner
   // is dismissed (the dot clears on its own when the broker comes back).
@@ -147,7 +151,9 @@ export function NavRail(): React.JSX.Element {
           title={
             v.id === 'sandbox' && sandboxNeedsAuth
               ? `${t(v.key)} · ${t('sandbox.railNeedsAuth')}`
-              : t(v.key)
+              : v.id === 'roadmap' && conflicts > 0
+                ? `${t(v.key)} · ${t('roadmap.sync.railBadge', { count: conflicts })}`
+                : t(v.key)
           }
           onClick={() => setView(v.id)}
         >
@@ -157,6 +163,9 @@ export function NavRail(): React.JSX.Element {
             {v.id === 'sandbox' ? <PithosGlyph needsAuth={sandboxNeedsAuth} /> : GLYPHS[v.id]}
             {v.id === 'git' && gitDirty > 0 && (
               <span className="nav-rail-badge">{gitDirty > 99 ? '99+' : gitDirty}</span>
+            )}
+            {v.id === 'roadmap' && conflicts > 0 && (
+              <span className="nav-rail-badge">{conflicts > 99 ? '99+' : conflicts}</span>
             )}
             {v.id === 'browser' && recording && (
               <span className="nav-rail-rec-dot" title={t('browser.recordStop')} />

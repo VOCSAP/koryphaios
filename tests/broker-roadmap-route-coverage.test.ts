@@ -53,9 +53,27 @@ function discoverRoadmapRoutes(source: string): string[] {
 // ---------------------------------------------------------------------------
 
 /** Read-only: no author to prove. */
-const READ_ROUTES = new Set(["/roadmap/list", "/roadmap/export"]);
+const READ_ROUTES = new Set([
+  "/roadmap/list",
+  "/roadmap/export",
+  "/roadmap/sync/pull",
+  "/roadmap/sync/status",
+  "/roadmap/sync/conflicts",
+]);
 
-const EXEMPT_ROUTES = new Set<string>([]);
+/**
+ * The two replication WRITE routes. They are exempt from the author guard by
+ * construction, not by oversight: their caller is a replica BROKER
+ * authenticated by the bearer token, and what they write is a state another
+ * broker already resolved and attributed. `/roadmap/sync/push` re-validates
+ * the transported `created_by`/`updated_by` through normalizeAuthorIdentity
+ * and keeps them; `/roadmap/sync/lock` names the owner it relays. Neither has
+ * a caller identity of its own to prove, so resolveRoadmapAuthor would have
+ * nothing to resolve -- and requiring it would make every replicated write
+ * impossible. `/roadmap/sync/resolve` is the opposite case and sits in
+ * GUARDED_PROBES: it is the OPERATOR arbitrating, i.e. an ordinary Deck write.
+ */
+const EXEMPT_ROUTES = new Set<string>(["/roadmap/sync/push", "/roadmap/sync/lock"]);
 
 /** Write routes that must refuse an unproven author, with a well-formed body. */
 const GUARDED_PROBES: Record<string, (ctx: ProbeCtx) => Record<string, unknown>> = {
@@ -77,6 +95,9 @@ const GUARDED_PROBES: Record<string, (ctx: ProbeCtx) => Record<string, unknown>>
   // it as EXEMPT here would silently stop testing that its author check
   // actually refuses impersonation.
   "/roadmap/append-context": (c) => ({ id: c.itemId, by: c.victimPeerId, text: "x" }),
+  // The author is resolved before the replica-only check, so this probe reaches
+  // the identity guard on any broker, replica or not.
+  "/roadmap/sync/resolve": (c) => ({ id: c.itemId, by: c.victimPeerId, choice: "local" }),
 };
 
 /**
@@ -128,6 +149,12 @@ const EXPECTED_ROUTES = [
   "/roadmap/lock-park",
   "/roadmap/lock-release",
   "/roadmap/reorder",
+  "/roadmap/sync/conflicts",
+  "/roadmap/sync/lock",
+  "/roadmap/sync/pull",
+  "/roadmap/sync/push",
+  "/roadmap/sync/resolve",
+  "/roadmap/sync/status",
   "/roadmap/upsert",
 ];
 
@@ -289,7 +316,27 @@ function extractFunctionBody(source: string, name: string): string {
 }
 
 /** Handlers that must refuse a claim on an inactive card. */
-const GUARDED_INACTIVE_HANDLERS = new Set(["handleRoadmapUpsert", "handleRoadmapImport"]);
+const GUARDED_INACTIVE_HANDLERS = new Set([
+  "handleRoadmapUpsert",
+  "handleRoadmapImport",
+  // Relaying a claim for a remote agent is still a claim: the card ends up
+  // locked, so the same predicate decides it.
+  "handleRoadmapSyncLock",
+]);
+
+/**
+ * Replication WRITE handlers that carry content between brokers without ever
+ * claiming a card. They cannot take the inactive guard: what they write was
+ * already arbitrated on the other broker (whose own guards ran), and refusing
+ * it here would leave that card permanently unable to converge -- a silent
+ * divergence instead of a refusal anyone sees. What makes the exemption safe
+ * is that they never LOCK, checked mechanically below and behaviourally in
+ * tests/broker-roadmap-sync-routes.test.ts.
+ */
+const REPLICATION_INACTIVE_HANDLERS = new Set([
+  "handleRoadmapSyncPush",
+  "handleRoadmapSyncResolve",
+]);
 
 /**
  * Handlers that structurally cannot claim a card (verified by reading each
@@ -314,14 +361,21 @@ const EXEMPT_INACTIVE_HANDLERS = new Set([
  * body) rather than by a comment, since that is a strictly stronger
  * guarantee than a comment for a handler that does no write at all.
  */
-const READ_ONLY_INACTIVE_HANDLERS = new Set(["handleRoadmapList", "handleRoadmapExport"]);
+const READ_ONLY_INACTIVE_HANDLERS = new Set([
+  "handleRoadmapList",
+  "handleRoadmapExport",
+  "handleRoadmapSyncPull",
+  "handleRoadmapSyncStatus",
+  "handleRoadmapSyncConflicts",
+]);
 
 function unclassifiedInactiveHandlers(handlers: string[]): string[] {
   return handlers.filter(
     (h) =>
       !GUARDED_INACTIVE_HANDLERS.has(h) &&
       !EXEMPT_INACTIVE_HANDLERS.has(h) &&
-      !READ_ONLY_INACTIVE_HANDLERS.has(h)
+      !READ_ONLY_INACTIVE_HANDLERS.has(h) &&
+      !REPLICATION_INACTIVE_HANDLERS.has(h)
   );
 }
 
@@ -334,6 +388,12 @@ const EXPECTED_INACTIVE_HANDLERS = [
   "handleRoadmapLockPark",
   "handleRoadmapLockRelease",
   "handleRoadmapReorder",
+  "handleRoadmapSyncConflicts",
+  "handleRoadmapSyncLock",
+  "handleRoadmapSyncPull",
+  "handleRoadmapSyncPush",
+  "handleRoadmapSyncResolve",
+  "handleRoadmapSyncStatus",
   "handleRoadmapUpsert",
   "releaseStaleLocks",
 ];
@@ -370,6 +430,9 @@ test("every discovered handler is classified: guarded or consciously exempt", ()
 const EXPECTED_INACTIVE_GUARD_CALL_COUNTS: Record<string, { claim: number; toggle: number }> = {
   handleRoadmapUpsert: { claim: 2, toggle: 2 }, // patch branch + create branch
   handleRoadmapImport: { claim: 1, toggle: 1 }, // one per-row call site
+  // The relayed claim, once. This handler cannot toggle `inactive` at all --
+  // it writes lock columns only -- so it has no toggle call site to expect.
+  handleRoadmapSyncLock: { claim: 1, toggle: 0 },
 };
 
 function countOccurrences(haystack: string, needle: string): number {
@@ -408,6 +471,17 @@ test("every READ-ONLY handler's body writes neither UPDATE nor INSERT on roadmap
     const body = extractFunctionBody(source, name);
     expect([name, body.includes("UPDATE roadmap_items")]).toEqual([name, false]);
     expect([name, body.includes("INSERT INTO roadmap_items")]).toEqual([name, false]);
+  }
+});
+
+test("no replication write handler assigns the lock column, which is what exempts it from the claim guard", () => {
+  const source = readFileSync(BROKER_SRC, "utf8");
+  for (const name of REPLICATION_INACTIVE_HANDLERS) {
+    const body = stripComments(extractFunctionBody(source, name));
+    // `locked` may appear as a column NAME in an insert list (written as the
+    // literal 0); what must never appear is an assignment of a lock value.
+    expect([name, /locked\s*=/.test(body)]).toEqual([name, false]);
+    expect([name, /locked_by\s*=/.test(body)]).toEqual([name, false]);
   }
 });
 

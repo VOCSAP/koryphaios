@@ -76,6 +76,18 @@ Broker runs on the same PC as your Claude Code sessions. See [Quick start (local
 
 `server.ts` runs locally on each PC and connects directly to a remote broker over HTTP. Suited for multi-PC setups and contributors. See [Quick start (HTTP)](#quick-start-http).
 
+### Mode 3 -- Replica (offline-capable)
+
+Set `offline_replica: true` alongside `broker_url`. Clients (`server.ts`, the Deck, `cli.ts`) still talk to a loopback broker, auto-spawned exactly as in Mode 1; that loopback broker replicates the roadmap in the background against `broker_url` (its *upstream*), instead of any client talking to it directly. A network outage is invisible to agents on this machine: the roadmap stays readable and writable, and reconnection reconciles automatically -- a conflicting card is arbitrated in the Deck, never merged silently.
+
+Scope of this mode:
+
+- Only `roadmap_items` is replicated. `peers` and `messages` stay local to this machine: cross-PC messaging in this mode is a known regression versus Mode 2, traded for offline continuity.
+- `offline_replica` requires a remote `broker_url` to have any effect -- setting it without `broker_url` is equivalent to Mode 1 (nothing to replicate against).
+- The replica broker authenticates to its upstream with the same `broker_token` both read from this same config; there is no separate replica credential.
+
+See `docs/DESIGN-OFFLINE-REPLICA.md` for the full protocol.
+
 ---
 
 ## Quick start (local)
@@ -435,6 +447,8 @@ Every setting can be provided via an environment variable or via a JSON settings
 | `CLAUDE_PEERS_BROKER_URL`            | `broker_url`           | (none)                               | server                | HTTP mode: direct broker URL (e.g. `http://my-server:7899`). Overrides loopback. |
 | `CLAUDE_PEERS_BROKER_TOKEN`          | `broker_token`         | (none)                               | broker + server       | Bearer token for broker auth. Broker requires it on all requests (except `/health`); server sends it on every call. |
 | `CLAUDE_PEERS_BIND_HOST`             | `bind_host`            | `127.0.0.1`                          | broker                | Broker bind address. Set `0.0.0.0` to accept external connections.     |
+| `CLAUDE_PEERS_OFFLINE_REPLICA`       | `offline_replica`      | `false`                              | broker / server / cli / Deck | Opt-in for Mode 3 (see [Two deployment modes](#two-deployment-modes)). Accepts `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitive; anything else falls back to the settings-file value. Has no effect without a remote `broker_url`. |
+| `CLAUDE_PEERS_SYNC_TICK_MS`          | (n/a)                  | `5000`                               | broker                | Mode 3 only: cadence of the replica's pull/push/lock sync pass against its upstream. |
 | `CLAUDE_PEERS_STATUS_LINE_CACHE`     | (n/a)                  | (unset = off)                        | server                | Opt-in: when truthy (`1`, `true`, `yes`, `on`, case-insensitive), `server.ts` writes the active `peer_id` to `$HOME/.claude/peers/peer-id-<cwd_key>-<session_id>.txt` (per-session, from `CLAUDE_CODE_SESSION_ID`) on every register so a status-line script can read it; it falls back to the legacy `peer-id-<cwd_key>.txt` when the session id is unset. Any other value (or unset) disables the write. See [Status-line integration](#status-line-integration). |
 
 ### Example settings file (with groups)
@@ -460,6 +474,23 @@ HTTP mode (remote broker):
 {
   "broker_url": "http://broker-host:7899",
   "broker_token": "your-shared-secret",
+  "groups": {
+    "perso":  "secret-perso-aaaa",
+    "work":   "secret-work-bbbb"
+  },
+  "default_group": "perso",
+  "summary_provider": "auto",
+  "summary_model": "claude-haiku-4-5-20251001"
+}
+```
+
+Replica mode (Mode 3, offline-capable):
+
+```json
+{
+  "broker_url": "http://broker-host:7899",
+  "broker_token": "your-shared-secret",
+  "offline_replica": true,
   "groups": {
     "perso":  "secret-perso-aaaa",
     "work":   "secret-work-bbbb"

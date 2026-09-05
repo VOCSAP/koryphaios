@@ -160,8 +160,22 @@ function badges(item: RoadmapItem, t: TFn): React.JSX.Element {
         <span className="rm-badge rm-badge-queue">{GLYPH_BADGES.clepsydra} #{item.queue}</span>
       )}
       {item.locked && (
-        <span className="rm-badge rm-badge-locked" title={t('roadmap.lockedHint')}>
+        <span
+          className={`rm-badge ${item.lock_scope === 'remote' ? 'rm-badge-lock-remote' : 'rm-badge-locked'}`}
+          title={
+            item.lock_scope === 'remote'
+              ? t('roadmap.sync.remoteLockHint', { name: item.locked_by ?? '' })
+              : item.lock_scope === 'contested'
+                ? t('roadmap.sync.contestedHint', { name: item.locked_by ?? '' })
+                : t('roadmap.lockedHint')
+          }
+        >
           {GLYPH_BADGES.lock} {item.locked_by}
+        </span>
+      )}
+      {item.sync_state === 'conflict' && (
+        <span className="rm-badge rm-badge-conflict" title={t('roadmap.sync.conflictHint')}>
+          {GLYPH_BADGES.warning} {t('roadmap.sync.conflictBadge')}
         </span>
       )}
       {item.tags.map((tag) => (
@@ -220,6 +234,7 @@ export function RoadmapItemModal({
   const t = useT()
   // Directive targets are stored as peer ids; the sessions list is what names them.
   const sessions = useDeck((s) => s.sessions)
+  const openConflict = useDeck((s) => s.openRoadmapConflict)
   const [depMenu, setDepMenu] = useState<{ x: number; y: number } | null>(null)
 
   useEffect(() => {
@@ -265,6 +280,19 @@ export function RoadmapItemModal({
               onClick={onEdit}
             >
               {GLYPH_ACTIONS.edit}
+            </button>
+          )}
+          {/* Offline replica: the second way into the arbitration dialog (the
+              first is the badge on the board card), for the operator who
+              opened the card to read it before deciding. */}
+          {item.sync_state === 'conflict' && (
+            <button
+              className="icon-btn"
+              title={t('roadmap.sync.resolve')}
+              aria-label={t('roadmap.sync.resolve')}
+              onClick={() => openConflict(item.id)}
+            >
+              {GLYPH_BADGES.scales}
             </button>
           )}
           <button className="icon-btn" title={t('common.close')} onClick={onClose}>

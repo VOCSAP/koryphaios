@@ -66,6 +66,8 @@ import { createInboxSessionTracker, purgeInboxSessionCore } from './inbox-sessio
 import {
   computeDeckProjectKey,
   configureRoadmapSigner,
+  fetchRoadmapConflicts,
+  fetchRoadmapSyncStatus,
   listRoadmap,
   upsertRoadmap
 } from './roadmap-service'
@@ -95,6 +97,9 @@ import type {
   DispatchedWaveMember,
   DispatchResult,
   RoadmapItem,
+  RoadmapSyncConflict,
+  RoadmapSyncEvent,
+  RoadmapSyncStatus,
   StopResult
 } from '@shared/types'
 import {
@@ -1079,8 +1084,13 @@ const currentInboxSessionId = createInboxSessionTracker(() => activeScope.groupI
 // 2-failure hysteresis into a single tick). Transitions drive the renderer's
 // red banner + the log/journal.
 const brokerHealth = new BrokerHealthTracker((status) => {
-  if (status.up) logInfo('broker', 'broker reachable again')
-  else reportError('broker', `broker unreachable: ${status.lastError ?? 'unknown error'}`)
+  if (status.up) {
+    logInfo('broker', 'broker reachable again')
+    // A broker that just came back may be a different one (reconfigured,
+    // restarted as a replica): re-probe the replication mode once instead of
+    // trusting what the previous process answered.
+    roadmapSyncProbeDue = true
+  } else reportError('broker', `broker unreachable: ${status.lastError ?? 'unknown error'}`)
   broadcast('broker:status', status)
 })
 
@@ -1247,6 +1257,72 @@ const pollGraphDrafts = async (): Promise<void> => {
     }
   } catch {
     // Broker down / unreachable: silent, the next tick retries.
+  }
+}
+
+// ----- Roadmap replication poll (offline replica) -----
+// The Deck asks its OWN broker how replication is going and never addresses
+// the upstream: pushing, pulling and relaying locks are the local broker's
+// job. Outside replica mode the whole feature costs one probe at startup plus
+// one per broker recovery — a Deck on a plain local broker pays nothing per
+// tick, so this rides the existing timer without slowing it down.
+let roadmapSyncMode: RoadmapSyncStatus['mode'] | null = null
+let roadmapSyncProbeDue = true
+let lastRoadmapSyncSignature = ''
+let roadmapSyncErrorReported = false
+
+/**
+ * Signature of what the renderer would actually render. Conflicts carry the
+ * upstream `content_rev` and the local `updated_at`, not just the id set: an
+ * edit landing on an ALREADY conflicted card changes every line of the
+ * resolution dialog while leaving the ids identical.
+ */
+function roadmapSyncSignature(status: RoadmapSyncStatus, conflicts: RoadmapSyncConflict[]): string {
+  const health = [
+    status.mode,
+    status.online,
+    status.since,
+    status.conflicts,
+    status.pending_push,
+    status.last_error
+  ].join('|')
+  const rows = conflicts
+    .map((c) => `${c.local.id}:${c.remote.content_rev}:${c.local.updated_at}`)
+    .join(',')
+  return `${health}#${rows}`
+}
+
+const pollRoadmapSync = async (): Promise<void> => {
+  // Mode resolved and not a replica: nothing to poll until the broker (and
+  // therefore possibly its configuration) comes back.
+  if (roadmapSyncMode !== null && roadmapSyncMode !== 'replica' && !roadmapSyncProbeDue) return
+  try {
+    const endpoint = resolveBrokerEndpoint()
+    const status = await fetchRoadmapSyncStatus(endpoint)
+    roadmapSyncMode = status.mode
+    roadmapSyncProbeDue = false
+    const conflicts =
+      status.mode === 'replica'
+        ? await fetchRoadmapConflicts(endpoint, computeDeckProjectKey(config.projectDir))
+        : []
+    const signature = roadmapSyncSignature(status, conflicts)
+    if (signature !== lastRoadmapSyncSignature) {
+      lastRoadmapSyncSignature = signature
+      broadcast('roadmap:sync', { status, conflicts } satisfies RoadmapSyncEvent)
+    }
+    roadmapSyncErrorReported = false
+  } catch (e) {
+    // One trace per outage, never one per tick: the health tracker owns the
+    // broker-down banner, this only records that the replication state itself
+    // went unreadable. Re-armed by the next success.
+    if (!roadmapSyncErrorReported) {
+      roadmapSyncErrorReported = true
+      reportError('roadmap', 'replication status poll failed; sync state and conflicts are stale', e)
+    }
+    // Retry on the next tick only while the mode is still UNKNOWN. Once it is
+    // known, a broker recovery is what re-arms the probe — a broker with no
+    // /roadmap/sync/status route must not be asked every ten seconds forever.
+    roadmapSyncProbeDue = roadmapSyncMode === null
   }
 }
 
@@ -2828,6 +2904,7 @@ app.whenReady().then(async () => {
       void pollApprovalVerdicts()
       void pollPendingApprovals()
       void pollDispatchRequests()
+      void pollRoadmapSync()
     },
     approvalReply: async (id: string, text: string): Promise<boolean> => {
       const deps = approvals.deps()
@@ -2892,6 +2969,8 @@ app.whenReady().then(async () => {
     // Card bf76d37f: same cadence, same best-effort contract as its four
     // siblings -- a tick that cannot reach the broker simply retries later.
     void pollDispatchRequests()
+    // Replication state: self-gated, a non-replica broker costs nothing here.
+    void pollRoadmapSync()
   }, INBOX_POLL_MS)
   // Restart seed (card 5852c074): re-track already in-progress items BEFORE
   // the watcher's first tick, see seedDispatchedFromRoadmap's doc comment.
