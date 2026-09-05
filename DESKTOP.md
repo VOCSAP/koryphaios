@@ -21,6 +21,10 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   copy path, and the failure is silent — the sandbox login terminal shipped
   that way, so the OAuth URL could not be moved to the host browser while the
   CLI's own "Copied!" (written to the CONTAINER's clipboard) said otherwise.
+  A tile marked `bridge: 'clodex'` resolves its actual launch command at
+  SPAWN time (`session-service.ts`'s `resolveBaseCommand`, rewritten by
+  `withClodexWrapper` in `session-kind.ts`), never at create time — so it
+  still follows a launch-config change made after the tile was created.
 - **Sandbox mode (🏺 Docker rail view, SBX1–SBX5)**: per-project
   toggle that runs NEW sessions inside a persistent Docker/Podman container
   (`kory-sbx-<hash12>`, project bind-mounted at `/work`, `sleep infinity` +
@@ -212,7 +216,16 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   endpoints (Ollama, LiteLLM…) are configured in Settings > Models and
   discovered dynamically (`/v1/models`, `/api/tags` fallback); their API keys
   are encrypted at rest via safeStorage (`provider-secrets.ts` — the renderer
-  only ever sees a `hasKey` marker).
+  only ever sees a `hasKey` marker). A third kind, `bridge`, covers
+  [clodex](https://github.com/bman654/clodex): OpenAI models reached THROUGH
+  the `claude` CLI by its `clodex-claude` wrapper (`main/clodex-bridge.ts`
+  probes the wrapper, its proxy and its patch freshness against the installed
+  `claude`). Its "OpenAI · clodex" section appears in the create menu next to
+  Anthropic, hidden while the wrapper is absent and greyed while installed but
+  idle; headless inference points (help, wand, graph judge) always spawn the
+  plain CLI, so they exclude bridge sections from their picker
+  (`excludeKinds={['bridge']}`) and clamp any stored target main-side
+  (`sanitizeUtilityTarget`).
 - **Usage limits (amphora rail button)**: the amphora's liquid level IS the
   mean remaining session (5 h) quota of the providers this run draws down —
   live tiles + inference targets marked via `markProviderUsed`, math in
@@ -239,7 +252,12 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   one-time operator dialog) — never invent a new trust store, and never put the
   trust decision in the repo. Currently gated: project `launchCommand`, project
   `worktreeInit`, and a repo-local template's shell-bearing `command`/`args`
-  (`resolveTemplateInputs` in `index.ts`). GLOBAL-only (never read from a repo):
+  (`resolveTemplateInputs` in `index.ts`) — a session/workspace's `bridge`
+  marker is shell-bearing the same way (it swaps the launch binary at spawn)
+  and folds into the same approval hash (`sessionsHaveShellFields`); the
+  wrapper is a host binary, so sandbox mode ignores a tile's `bridge` marker
+  outright, tracing the drop rather than launching it unbridged. GLOBAL-only
+  (never read from a repo):
   resume-digest sources. Separately, `agent`/`model`/`args` interpolated into
   the login-shell command line are allow-listed + quoted (`sanitizeFlagValue` /
   `quotePromptArg` in `session-command.ts`) — add new interpolated fields the

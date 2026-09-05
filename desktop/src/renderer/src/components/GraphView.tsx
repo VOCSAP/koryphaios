@@ -955,10 +955,13 @@ export function GraphView(): React.JSX.Element {
                     })}
                   </div>
                 )}
+                {/* The graph engine spawns the CLI itself, so a bridged
+                    provider would silently answer as plain claude. */}
                 <ModelPicker
                   catalogs={catalogs}
                   selected={targetKeys}
                   multi
+                  excludeKinds={['bridge']}
                   onPick={toggleTarget}
                 />
                 <label className="graph-battle-row" title={t('graph.battleHint')}>
@@ -976,6 +979,7 @@ export function GraphView(): React.JSX.Element {
                       catalogs={catalogs}
                       selected={[judgeKey]}
                       multi={false}
+                      excludeKinds={['bridge']}
                       onPick={(key, target) => {
                         setJudgeKey(key)
                         setJudgeTarget(target)

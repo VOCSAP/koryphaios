@@ -289,15 +289,39 @@ function extractResolveClaudeLaunchBody(src: string): string {
   return extractBracedBody(src, fnMatch.index + fnMatch[0].length - 1);
 }
 
+function extractResolveBaseCommandBody(src: string): string {
+  const pattern = /private resolveBaseCommand\(def: SessionDef\): string \{/;
+  assertSingleDeclaration(src, pattern, "resolveBaseCommand()");
+  const fnMatch = pattern.exec(src);
+  if (!fnMatch) {
+    throw new Error("resolveBaseCommand() not found in session-service.ts -- has it been renamed?");
+  }
+  return extractBracedBody(src, fnMatch.index + fnMatch[0].length - 1);
+}
+
 test("MINOR (mutation review): resolveClaudeLaunch falls back to this.launchCommand when def.command is empty", () => {
-  const body = extractResolveClaudeLaunchBody(readFileSync(SESSION_SERVICE_PATH, "utf-8"));
+  const src = readFileSync(SESSION_SERVICE_PATH, "utf-8");
+  const body = extractResolveClaudeLaunchBody(src);
+  // The command resolution resolveClaudeLaunch delegates to is the REAL
+  // extracted body too, not a stub: the `|| this.launchCommand` fallback this
+  // test names now lives there, and a mutant dropping it must still fail here.
+  // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
+  const resolveBaseCommand = new Function("def", extractResolveBaseCommandBody(src)) as (
+    this: unknown,
+    def: { command: string; bridge?: string }
+  ) => string;
   // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
   const fn = new Function("def", "isClaudeLaunch", body) as (
     this: unknown,
     def: { command: string },
     isClaudeLaunchArg: (command: string) => boolean
   ) => boolean;
-  const self = { launchCommand: "codex --flag" };
+  const self = {
+    launchCommand: "codex --flag",
+    resolveBaseCommand(def: { command: string; bridge?: string }): string {
+      return resolveBaseCommand.call(self, def);
+    }
+  };
   // The named mutant (isClaudeLaunch(def.command), dropping the `||`
   // fallback) would call isClaudeLaunch('') -> true (empty-string default);
   // asserting `false` here is exactly what that mutant fails.

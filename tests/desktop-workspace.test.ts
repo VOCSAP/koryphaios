@@ -15,6 +15,7 @@ import {
   newWorkspaceId,
   saveWorkspace,
   selectPrunableWorkspaces,
+  workspaceHasShellFields,
   workspacesDir,
 } from "../desktop/src/main/workspace-store.ts";
 import {
@@ -106,6 +107,59 @@ test("saveWorkspace + loadWorkspace round-trips (modulo updatedAt) and stores no
   // The persisted bytes must not contain the sentinel anywhere.
   const raw = readFileSync(join(workspacesDir(proj), `${ws.id}.json`), "utf8");
   expect(raw).not.toContain(LEAK_MARKER);
+});
+
+// The bridge marker names the binary the tile launches and spends the
+// operator's own provider quota, so a repo-cloned workspace carrying one is
+// gated exactly like `args` -- and on its own, with no args at all.
+test("workspaceHasShellFields fires on a bridge marker alone, with empty args", () => {
+  const bridged = (bridge: unknown) => ({
+    sessions: [
+      {
+        claudeSessionId: "sid-1",
+        name: "s",
+        cwd: "/p",
+        args: [] as string[],
+        bridge: bridge as "clodex" | undefined,
+        color: "#000",
+        position: 0,
+      },
+    ],
+  });
+  expect(workspaceHasShellFields(bridged(undefined))).toBe(false);
+  expect(workspaceHasShellFields(bridged(""))).toBe(false);
+  expect(workspaceHasShellFields(bridged("clodex"))).toBe(true);
+  // An unknown value is not a reason to skip the gate: a marker this build
+  // does not recognize still asked for a launch binary of its own.
+  expect(workspaceHasShellFields(bridged("something-else"))).toBe(true);
+  expect(workspaceHasShellFields(bridged(42))).toBe(true);
+});
+
+test("loadWorkspace rejects a file whose session names a bridge this build does not know", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = sampleWorkspace({ id: "wsp_bad_bridge" });
+  const hostile = {
+    ...ws,
+    sessions: [{ ...ws.sessions[0]!, bridge: "clodex-evil" }],
+  };
+  writeFileSync(
+    join(workspacesDir(proj), "wsp_bad_bridge.json"),
+    JSON.stringify(hostile, null, 2),
+    "utf8",
+  );
+  expect(loadWorkspace(proj, "wsp_bad_bridge")).toBeNull();
+  expect(listWorkspaces(proj).map((w) => w.id)).not.toContain("wsp_bad_bridge");
+
+  // Control: the very same file with the known marker loads, so the rejection
+  // above is the enum check and not the surrounding shape.
+  const good = { ...ws, sessions: [{ ...ws.sessions[0]!, bridge: "clodex" }] };
+  writeFileSync(
+    join(workspacesDir(proj), "wsp_good_bridge.json"),
+    JSON.stringify({ ...good, id: "wsp_good_bridge" }, null, 2),
+    "utf8",
+  );
+  expect(loadWorkspace(proj, "wsp_good_bridge")?.sessions[0]!.bridge).toBe("clodex");
 });
 
 test("listWorkspaces sorts by updatedAt desc and skips malformed files", () => {
@@ -685,6 +739,44 @@ test("WorkspaceService.restore(): refuses when args are shell-bearing and confir
   // captured session defs being untouched from before the call.
   expect(deps.sessions).toEqual([fakeSession()]);
   expect(confirmCalls).toBe(1);
+});
+
+// Same file, same class of vulnerability, no args at all: `bridge` alone
+// decides which binary the restored tile launches, so it must reach the SAME
+// gate before restoreFrom() runs.
+test("WorkspaceService.restore(): refuses when a session carries only a bridge marker and confirmShellFields declines", () => {
+  const proj = freshProject();
+  ensureWorkspacesDir(proj);
+  const ws = sampleWorkspace({
+    id: "wsp_bridge_only",
+    sessions: [
+      {
+        claudeSessionId: "sid-1",
+        name: "bridged",
+        cwd: "/abs/project",
+        args: [],
+        bridge: "clodex",
+        color: "#4488ff",
+        position: 0,
+      },
+    ],
+  });
+  saveWorkspace(proj, ws);
+  let confirmCalls = 0;
+  const deps = fakeDeps(proj, {
+    confirmShellFields: () => {
+      confirmCalls++;
+      return "declined";
+    },
+  });
+  const svc = new WorkspaceService(deps);
+  expect(svc.restore("wsp_bridge_only", "attended")).toEqual({
+    ok: false,
+    reason: "shell-declined",
+  });
+  expect(confirmCalls).toBe(1);
+  // restoreFrom() must never have run: the stub's captured defs are untouched.
+  expect(deps.sessions).toEqual([fakeSession()]);
 });
 
 test("WorkspaceService.restore(): proceeds when args are shell-bearing and confirmShellFields approves", () => {

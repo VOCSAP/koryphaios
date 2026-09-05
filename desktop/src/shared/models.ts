@@ -1,7 +1,9 @@
-// Two provider kinds: frontier (Anthropic/OpenAI/Gemini) executed through their
-// CLIs and curated in code, since none exposes a reliable dynamic model listing
-// without an API key; local (Ollama/LiteLLM/vLLM/any OpenAI-compatible
-// endpoint) configured in Settings with models discovered dynamically.
+// Three provider kinds: frontier (Anthropic/OpenAI/Gemini) executed through
+// their CLIs and curated in code, since none exposes a reliable dynamic model
+// listing without an API key; local (Ollama/LiteLLM/vLLM/any OpenAI-compatible
+// endpoint) configured in Settings with models discovered dynamically; bridge
+// (clodex), third-party models reached THROUGH the `claude` CLI by a wrapper
+// binary, listed by that wrapper's own tooling.
 // A frontier provider is only shown when its CLI is detected on the machine.
 
 import { GRAPH_CLIS, type GraphCli, type ModelTarget } from './graph'
@@ -15,6 +17,25 @@ export const FRONTIER_ID_BY_CLI: Record<Exclude<GraphCli, 'local'>, FrontierProv
   codex: 'openai',
   gemini: 'gemini',
   antigravity: 'antigravity'
+}
+
+/** Bridge provider id: doubles as a favorite-key prefix, keep it stable. */
+export const CLODEX_PROVIDER_ID = 'clodex'
+
+/** Section title of the clodex bridge (a provider name, not an i18n string). */
+export const CLODEX_PROVIDER_NAME = 'OpenAI · clodex'
+
+/** Local toolchain of a bridge provider, probed main-side. */
+export interface BridgeState {
+  /** Wrapper binary found on the operator's PATH. */
+  installed: boolean
+  /** The wrapper reports a reachable local proxy. */
+  serverUp: boolean
+  /**
+   * Whether the `claude` binary the wrapper patched still matches the
+   * installed one: a stale/absent patch means model aliases are not honoured.
+   */
+  patch: 'fresh' | 'stale' | 'none' | 'unknown'
 }
 
 export interface ModelEntry {
@@ -52,14 +73,19 @@ export interface LocalProviderConfig {
 
 /** A provider section of the picker, models resolved and ready to render. */
 export interface ProviderCatalog {
-  id: string // FrontierProviderId or a LocalProviderConfig.id
+  id: string // FrontierProviderId, a LocalProviderConfig.id, or CLODEX_PROVIDER_ID
   name: string
-  kind: 'frontier' | 'local'
-  /** Frontier: the CLI that executes it. Local providers run over HTTP. */
+  kind: 'frontier' | 'local' | 'bridge'
+  /** Frontier/bridge: the CLI that executes it. Local providers run over HTTP. */
   cli: GraphCli
-  /** Frontier: CLI detected on this machine. Local: endpoint reachable. */
+  /**
+   * Frontier: CLI detected on this machine. Local: endpoint reachable.
+   * Bridge: wrapper installed AND its proxy up.
+   */
   available: boolean
   models: ModelEntry[]
+  /** kind 'bridge' only: why the section is offered, greyed or absent. */
+  bridge?: BridgeState
 }
 
 /**
@@ -134,16 +160,25 @@ export function favKey(providerId: string, modelId: string): string {
   return `${providerId}:${modelId}`
 }
 
-/** The favorite-style key selecting `target` in a picker. */
+/**
+ * The favorite-style key selecting `target` in a picker. A provider id always
+ * wins: a bridge target runs under a frontier CLI but keys on its own section.
+ */
 export function targetKey(target: ModelTarget): string {
-  const providerId =
-    target.cli === 'local' ? (target.providerId ?? '') : FRONTIER_ID_BY_CLI[target.cli]
+  if (typeof target.providerId === 'string' && target.providerId) {
+    return favKey(target.providerId, target.model)
+  }
+  const providerId = target.cli === 'local' ? '' : FRONTIER_ID_BY_CLI[target.cli]
   return favKey(providerId, target.model)
 }
 
-/** Compact operator-facing label for a target ('' model = CLI default). */
+/**
+ * Compact operator-facing label for a target ('' model = CLI default). A
+ * provider id names the label whatever the CLI: a bridged model would read as
+ * a plain claude one otherwise.
+ */
 export function targetLabel(target: ModelTarget): string {
-  const provider = target.cli === 'local' ? (target.providerId ?? 'local') : target.cli
+  const provider = target.providerId || (target.cli === 'local' ? 'local' : target.cli)
   return target.model ? `${provider} · ${target.model}` : `${provider} (default)`
 }
 
@@ -164,8 +199,10 @@ export const DEFAULT_DEMO_TARGET: ModelTarget = { cli: 'claude', model: 'sonnet'
 /**
  * Validate a stored/incoming target (config files travel through JSON edited
  * by hand): unknown CLI, missing model, or a 'local' target with no provider
- * id falls back. Legacy configs carry `helpModel: '<alias>'` instead — map it
- * with `legacyHelpTarget` before falling back.
+ * id falls back. A 'claude' target keeps a non-empty provider id (it names the
+ * bridge that executes it); every other cli drops the field. Legacy configs
+ * carry `helpModel: '<alias>'` instead — map it with `legacyHelpTarget` before
+ * falling back.
  */
 export function sanitizeTarget(raw: unknown, fallback: ModelTarget): ModelTarget {
   if (!raw || typeof raw !== 'object') return { ...fallback }
@@ -176,7 +213,24 @@ export function sanitizeTarget(raw: unknown, fallback: ModelTarget): ModelTarget
     if (typeof t.providerId !== 'string' || !t.providerId) return { ...fallback }
     return { cli: 'local', model: t.model, providerId: t.providerId }
   }
+  if (t.cli === 'claude' && typeof t.providerId === 'string' && t.providerId) {
+    return { cli: 'claude', model: t.model, providerId: t.providerId }
+  }
   return { cli: t.cli as GraphCli, model: t.model }
+}
+
+/**
+ * Validate a stored/incoming UTILITY-inference target (help, wand, demo): same
+ * rules as sanitizeTarget, plus a bridge provider is refused. Those inferences
+ * spawn the plain CLI, which would answer from the frontier model instead of
+ * the bridged one the operator picked.
+ */
+export function sanitizeUtilityTarget(raw: unknown, fallback: ModelTarget): ModelTarget {
+  const target = sanitizeTarget(raw, fallback)
+  // A provider id on a CLI target always names a bridge (locals are the HTTP
+  // ones), so a second bridge is refused the day it ships, not the day it is
+  // added to a list here.
+  return target.cli !== 'local' && target.providerId ? { ...fallback } : target
 }
 
 /** Map the pre-lot-A `helpModel` string setting to a target, or null. */
@@ -201,13 +255,17 @@ export function toggleFavorite(favorites: string[], key: string): string[] {
 // Catalog assembly
 
 /**
- * Build the picker's provider sections. Frontier providers whose CLI is not
- * detected are marked unavailable (the pickers hide them, D11); local
- * providers carry whatever their discovery returned (empty = unreachable).
+ * Build the picker's provider sections, in display order: frontier, bridges,
+ * locals. Frontier providers whose CLI is not detected are marked unavailable
+ * (the pickers hide them, D11); local providers carry whatever their discovery
+ * returned (empty = unreachable); a bridge is available only once its wrapper
+ * is installed AND its proxy answers, its `bridge` state telling the pickers
+ * apart "absent" from "installed but idle".
  */
 export function buildCatalogs(
   detected: Record<GraphCli, boolean>,
-  locals: { provider: LocalProviderConfig; models: ModelEntry[] }[]
+  locals: { provider: LocalProviderConfig; models: ModelEntry[] }[],
+  bridges: { id: string; name: string; state: BridgeState; models: ModelEntry[] }[] = []
 ): ProviderCatalog[] {
   const out: ProviderCatalog[] = FRONTIER_IDS.map((id) => {
     const f = FRONTIER_CATALOG[id]
@@ -220,6 +278,17 @@ export function buildCatalogs(
       models: f.models
     }
   })
+  for (const { id, name, state, models } of bridges) {
+    out.push({
+      id,
+      name,
+      kind: 'bridge',
+      cli: 'claude',
+      available: state.installed && state.serverUp,
+      models,
+      bridge: state
+    })
+  }
   for (const { provider, models } of locals) {
     out.push({
       id: provider.id,

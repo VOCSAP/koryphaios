@@ -457,6 +457,18 @@ l'opérateur sur une machine avec affichage.
       Card ; nos sessions sont éphémères et le broker fait déjà le transport). À
       ne considérer que si le broker doit un jour parler à des agents hébergés
       hors de la machine/LAN.
+- [ ] **Pont clodex (lot livré 2026-09-05 — résiduel)** : modèles OpenAI
+      atteints via le wrapper `clodex-claude` (`main/clodex-bridge.ts`,
+      `session-kind.ts`), section « OpenAI · clodex » du picker de création.
+      Items ouverts :
+  - Sandbox : le wrapper et la CA sont des artefacts hôte, le proxy écoute sur le loopback hôte ; bridging non couvert en mode sandbox (marqueur ignoré avec trace). Piste : `host.docker.internal` + copie de la CA (jamais montage).
+  - Non vérifié : un binaire `claude` NON patché accepte-t-il `--model clodex:…` au lancement ? Le badge d'avertissement du picker suppose que non.
+  - Étape 2 : ligne « Harnais » (Claude Code | Codex) au-dessus du picker de création, une fois les tuiles Codex natives livrées ; la section OpenAI·clodex passe sous le harnais Claude Code.
+  - Headless (help/wand/graph/juge) : jamais bridgés ; une inférence utilitaire via clodex demanderait de lancer `clodex-claude` dans `utility-inference.ts`.
+  - `toTemplate` perd le marqueur `bridge` sans trace (un template ne porte jamais de pont, par construction) ; décider si le point de capture doit tracer ou avertir.
+  - Trace en double : une tuile bridgée dont le pont est abandonné (sandbox) journalise deux fois par spawn (résolution à la création puis au spawn).
+  - Le clamp de `loadConfig` (store.ts) sur les cibles utilitaires n'a pas de preuve de câblage (store.ts non importable sous bun) ; la décision est testée dans `sanitizeUtilityTarget`.
+  - ToS OpenAI : aucune information confirmée sur l'usage d'un jeton de plan ChatGPT hors du Codex CLI.
 
 ### 3.1bis Limites d'usage (lot livré — résiduel)
 

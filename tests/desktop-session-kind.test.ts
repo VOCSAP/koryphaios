@@ -3,7 +3,11 @@
 
 import { test, expect } from "bun:test";
 
-import { isClaudeLaunch } from "../desktop/src/main/session-kind.ts";
+import {
+  isClaudeLaunch,
+  isClodexLaunch,
+  withClodexWrapper
+} from "../desktop/src/main/session-kind.ts";
 
 test("empty command => true (resolves to the CONFIGURED launch command, which starts with claude absent an override)", () => {
   expect(isClaudeLaunch("")).toBe(true);
@@ -81,4 +85,84 @@ test("ACCEPTED false positive: a flag value that happens to literally read 'clau
 
 test("a renamed/aliased claude binary (no token spells 'claude') is still an open, documented gap", () => {
   expect(isClaudeLaunch("cc --model opus")).toBe(false);
+});
+
+// ----- clodex wrapper -----
+
+test("the clodex wrapper is recognised as a claude launch (it execs the same binary)", () => {
+  expect(isClaudeLaunch("clodex-claude --model opus")).toBe(true);
+  expect(isClaudeLaunch("/usr/local/bin/clodex-claude --model opus")).toBe(true);
+  expect(
+    isClaudeLaunch("C:\\Users\\op\\AppData\\Roaming\\npm\\clodex-claude.cmd --model opus")
+  ).toBe(true);
+  expect(isClaudeLaunch("CLODEX-CLAUDE --model opus")).toBe(true);
+});
+
+test("isClodexLaunch is true only for the wrapper, never for plain claude", () => {
+  expect(isClodexLaunch("clodex-claude --model opus")).toBe(true);
+  expect(isClodexLaunch("npx clodex-claude")).toBe(true);
+  expect(isClodexLaunch('"C:\\Program Files\\clodex-claude.cmd" --model opus')).toBe(true);
+  expect(isClodexLaunch("claude --model opus")).toBe(false);
+  expect(isClodexLaunch("")).toBe(false);
+});
+
+test("withClodexWrapper rewrites the default launch command, keeping every other token verbatim", () => {
+  expect(
+    withClodexWrapper("claude --dangerously-load-development-channels server:claude-peers")
+  ).toBe("clodex-claude --dangerously-load-development-channels server:claude-peers");
+});
+
+test("withClodexWrapper drops the directory prefix: the wrapper resolves the real binary itself", () => {
+  expect(withClodexWrapper("/usr/local/bin/claude --model opus")).toBe(
+    "clodex-claude --model opus"
+  );
+});
+
+test("withClodexWrapper drops a Windows executable extension too", () => {
+  expect(
+    withClodexWrapper("C:\\Users\\op\\AppData\\Roaming\\npm\\claude.cmd --model opus")
+  ).toBe("clodex-claude --model opus");
+});
+
+test("withClodexWrapper replaces a QUOTED path (quotes included) and leaves the other tokens' quoting untouched", () => {
+  expect(withClodexWrapper('"C:\\Program Files\\claude.cmd" --agent "my agent"')).toBe(
+    'clodex-claude --agent "my agent"'
+  );
+});
+
+test("withClodexWrapper rewrites the claude token of an indirect launch, not the launcher", () => {
+  expect(withClodexWrapper("npx claude --model opus")).toBe("npx clodex-claude --model opus");
+  expect(withClodexWrapper("cmd /c claude --model opus")).toBe(
+    "cmd /c clodex-claude --model opus"
+  );
+});
+
+test("withClodexWrapper rewrites the FIRST claude token only", () => {
+  expect(withClodexWrapper("claude --agent claude")).toBe("clodex-claude --agent claude");
+});
+
+// Same accepted false positive as isClaudeLaunch's: a flag value spelling
+// 'claude' is indistinguishable from a binary name at this layer, and the
+// resulting tile fails visibly instead of silently running unbridged.
+test("ACCEPTED false positive: a flag value that literally reads 'claude' is rewritten", () => {
+  expect(withClodexWrapper("some-cli --agent claude")).toBe("some-cli --agent clodex-claude");
+});
+
+test("withClodexWrapper returns a command with no claude token unchanged", () => {
+  expect(withClodexWrapper("codex --flag")).toBe("codex --flag");
+  expect(withClodexWrapper("./run-agent.sh --whatever")).toBe("./run-agent.sh --whatever");
+  expect(withClodexWrapper("cc --model opus")).toBe("cc --model opus");
+});
+
+test("withClodexWrapper is idempotent: an already-wrapped command is returned unchanged", () => {
+  const wrapped = withClodexWrapper("claude --model opus");
+  expect(withClodexWrapper(wrapped)).toBe(wrapped);
+  expect(withClodexWrapper("/opt/bin/clodex-claude --model opus")).toBe(
+    "/opt/bin/clodex-claude --model opus"
+  );
+});
+
+test("withClodexWrapper THROWS on an empty command: empty means the CONFIGURED launch command, which only the caller can resolve", () => {
+  expect(() => withClodexWrapper("")).toThrow(/withClodexWrapper guard/);
+  expect(() => withClodexWrapper("   ")).toThrow(/withClodexWrapper guard/);
 });

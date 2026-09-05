@@ -465,7 +465,9 @@ export function SettingsView(): React.JSX.Element {
               </div>
 
               {/* Utility-inference targets (lot A): help+digest and the
-                  roadmap context wand each pick any catalog model. */}
+                  roadmap context wand each pick any catalog model. Bridged
+                  providers are excluded: these run the plain CLI, which would
+                  answer from the frontier model instead. */}
               <div className="field">
                 <span>{t('settings.helpModel')}</span>
                 <small>{t('settings.helpModelHelp')}</small>
@@ -473,6 +475,7 @@ export function SettingsView(): React.JSX.Element {
                   catalogs={catalogs ?? []}
                   selected={[targetKey(config.helpTarget)]}
                   multi={false}
+                  excludeKinds={['bridge']}
                   onPick={(_key, target) => set('helpTarget', target)}
                 />
               </div>
@@ -483,6 +486,7 @@ export function SettingsView(): React.JSX.Element {
                   catalogs={catalogs ?? []}
                   selected={[targetKey(config.wandTarget)]}
                   multi={false}
+                  excludeKinds={['bridge']}
                   onPick={(_key, target) => set('wandTarget', target)}
                 />
               </div>

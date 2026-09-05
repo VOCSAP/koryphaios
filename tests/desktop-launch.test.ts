@@ -407,6 +407,9 @@ test("sanitizeFlagValue passes real agent/model ids, including the 1M form", () 
   expect(sanitizeFlagValue("claude-opus-4-8[1m]")).toBe("claude-opus-4-8[1m]");
   expect(sanitizeFlagValue("openai:gpt-4o")).toBe("openai:gpt-4o");
   expect(sanitizeFlagValue("openrouter/anthropic/claude")).toBe("openrouter/anthropic/claude");
+  // Bridged (clodex) ids: three colon-separated segments plus a dotted
+  // version, the exact string the wrapper's --model expects.
+  expect(sanitizeFlagValue("clodex:openai-oauth:gpt-5.6-sol")).toBe("clodex:openai-oauth:gpt-5.6-sol");
   expect(sanitizeFlagValue("  reviewer  ")).toBe("reviewer");
 });
 

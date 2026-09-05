@@ -21,7 +21,7 @@ import {
   type SpawnMode
 } from './session-command'
 import { ThinkingDetector } from './thinking'
-import { isClaudeLaunch } from './session-kind'
+import { isClaudeLaunch, isClodexLaunch, withClodexWrapper } from './session-kind'
 import {
   QuotaDetector,
   type QuotaClearEvent,
@@ -499,6 +499,44 @@ export class SessionService extends EventEmitter {
   }
 
   /**
+   * Launch command for a tile the operator asked to route through the clodex
+   * wrapper. The wrapper is a HOST binary and the proxy it discovers listens on
+   * the host loopback, so a sandboxed tile -- which runs the command inside the
+   * container -- keeps its unwrapped command; sandboxPeersDir() is the
+   * service's own "sandbox mode is on" signal (null = off) and never throws.
+   * Every drop leaves a trace: the operator picked a bridged model and must see
+   * why the tile did not get one.
+   */
+  private bridgedCommand(base: string): string {
+    if (this.sandboxPeersDir() !== null) {
+      reportError('session', `clodex bridge ignored, sandbox mode owns the launch command: "${base}"`)
+      return base
+    }
+    if (!base.trim()) {
+      reportError('session', 'clodex bridge ignored, no launch command resolved to wrap')
+      return base
+    }
+    const wrapped = withClodexWrapper(base)
+    if (wrapped === base && !isClodexLaunch(base)) {
+      reportError('session', `clodex bridge ignored, no claude binary in the launch command: "${base}"`)
+    }
+    return wrapped
+  }
+
+  /**
+   * The command `def` actually spawns on: its own override, else the configured
+   * launch command, rewritten through the clodex wrapper when the tile carries
+   * the bridge marker. The ONE place either is resolved, so no spawn path can
+   * read `def.command` raw and start a bridged tile on the unwrapped binary.
+   * `def.bridge` comes back from persisted session/workspace files, so it is
+   * re-validated here as the exact string rather than tested for truthiness.
+   */
+  private resolveBaseCommand(def: SessionDef): string {
+    const base = def.command.trim() || this.launchCommand
+    return def.bridge === 'clodex' ? this.bridgedCommand(base) : base
+  }
+
+  /**
    * opts.teamLeadDeckBridge is a separate function parameter, never a property
    * of input: input is forwarded verbatim from a remote-reachable channel, so a
    * boolean field on it could be set directly by a companion client.
@@ -540,12 +578,18 @@ export class SessionService extends EventEmitter {
       this.mintTeamLeadBridge,
       reportError
     )
+    // Strict enum, like every other agent-/companion-reachable field that
+    // reaches a command line: only the exact string requests the wrapper. It is
+    // stored as a marker and applied at every spawn (resolveBaseCommand), so
+    // `command` stays the operator's own override and nothing else.
+    const bridge = input.bridge === 'clodex' ? 'clodex' : undefined
     const def: SessionDef = {
       id: randomUUID(),
       name: input.name?.trim() || this.defaultName(agent),
       cwd: input.cwd?.trim() || cfg.projectDir,
       // Empty => the resolved launchCommand; a non-empty value overrides it.
       command: input.command?.trim() || '',
+      bridge,
       args,
       sessionId: '',
       color: input.color?.trim() || paletteColor(cfg.palette ?? DEFAULT_PALETTE, this.defs.length),
@@ -1076,7 +1120,7 @@ export class SessionService extends EventEmitter {
 
   private startPty(def: SessionDef, mode: SpawnMode): void {
     const cfg = this.getConfig()
-    const base = def.command.trim() || this.launchCommand
+    const base = this.resolveBaseCommand(def)
 
     // Single source of truth for "is this actually a fresh line" (review nit
     // on 150eb188/ce5aacf): `mode` alone is not enough because a caller could
@@ -1263,15 +1307,17 @@ export class SessionService extends EventEmitter {
   }
 
   /**
-   * Resolves whether `def` runs the Claude Code CLI itself, from its OWN
-   * command (falling back to the resolved base `this.launchCommand`, same
-   * precedence as startPty's `base`). Used ONLY to seed the initial
-   * RuntimeState.claudeLaunch at create()/restoreFrom() and by startPty to
-   * set the authoritative frozen-at-spawn value -- never called afterward
-   * to re-derive a live session's answer (see RuntimeState.claudeLaunch).
+   * Resolves whether `def` runs the Claude Code CLI itself, from the SAME
+   * fully-resolved command startPty spawns (resolveBaseCommand: own override,
+   * else the configured launch command, else either of them wrapped) -- asking
+   * the question of the pre-bridge text would answer for a command no tile
+   * ever runs. Used ONLY to seed the initial RuntimeState.claudeLaunch at
+   * create()/restoreFrom() and by startPty to set the authoritative
+   * frozen-at-spawn value -- never called afterward to re-derive a live
+   * session's answer (see RuntimeState.claudeLaunch).
    */
   private resolveClaudeLaunch(def: SessionDef): boolean {
-    return isClaudeLaunch(def.command.trim() || this.launchCommand)
+    return isClaudeLaunch(this.resolveBaseCommand(def))
   }
 
   /**

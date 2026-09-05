@@ -1080,6 +1080,11 @@ export const EN_DEFAULTS: Record<string, string> = {
     'No provider available — install claude / codex / gemini, or add a local endpoint in Settings.',
   'models.noFavorites': 'No favorites yet — expand a provider and star a model.',
   'models.local': 'local',
+  'models.bridge': 'via clodex',
+  'models.bridgeServerDown':
+    'clodex is installed but no proxy server answers — run `clodex server --proxy`.',
+  'models.bridgePatchStale':
+    'Claude Code binary not patched for these models — run `clodex patch` (needed for /model and subagents).',
   'settings.catModels': 'Models',
   'settings.modelsDetection': 'Detected CLIs',
   'settings.modelsDetectionHelp':

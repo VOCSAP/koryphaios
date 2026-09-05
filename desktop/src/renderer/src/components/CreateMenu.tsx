@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { LaunchPreset, ModelOption } from '@shared/types'
 import type { ProviderCatalog } from '@shared/models'
+import { CLODEX_PROVIDER_ID, favKey } from '@shared/models'
 import { defaultAnnounceDraft } from '@shared/announce'
 import { mergeRoleChoices, sanitizeRole, TEAM_LEAD_ROLE } from '@shared/role'
 import { useDeck } from '../store'
@@ -36,9 +37,11 @@ function supports1mContext(id: string): boolean {
 }
 
 /**
- * Anthropic section of the create-menu picker (C29): the launch-config models
- * (operator-curated, first) merged with the frontier catalog, deduped by id.
- * Forced available: agent sessions run the claude CLI by construction.
+ * Sections of the create-menu picker (C29): the launch-config models
+ * (operator-curated, first) merged with the Anthropic frontier catalog, deduped
+ * by id, then the bridge providers as probed. Anthropic is forced available
+ * (agent sessions run the claude CLI by construction); a bridge keeps its own
+ * availability, since its wrapper may be missing or its proxy idle.
  */
 function mergeCreateCatalogs(
   models: ModelOption[],
@@ -57,7 +60,8 @@ function mergeCreateCatalogs(
       cli: 'claude',
       available: true,
       models: merged
-    }
+    },
+    ...catalogs.filter((c) => c.kind === 'bridge')
   ]
 }
 
@@ -108,12 +112,16 @@ export function CreateMenu({
   const [agents, setAgents] = useState<string[]>([])
   const [presets, setPresets] = useState<LaunchPreset[]>([])
   const [models, setModels] = useState<ModelOption[]>([])
-  // Unified picker catalogs (C29): the Anthropic section + favorites, since
-  // agent sessions always run the claude CLI.
+  // Unified picker catalogs (C29): the Anthropic section + favorites, plus the
+  // bridge sections, since agent sessions always run the claude CLI (a bridged
+  // one through its wrapper).
   const [catalogs, setCatalogs] = useState<ProviderCatalog[]>([])
   const [agent, setAgent] = useState('')
   const [name, setName] = useState(initial?.name ?? '')
-  const [model, setModel] = useState('')
+  // Model choice: the id alone would collide between the Anthropic section and
+  // a bridge offering the same id, so the picked provider travels with it.
+  // An empty model with no provider is the CLI default.
+  const [pick, setPick] = useState<{ model: string; providerId?: string }>({ model: '' })
   // Extended 1M context: appends the `[1m]` suffix to the model id (Claude Code
   // strips it before calling the provider). Only meaningful on a 1M-capable
   // model (Opus / Sonnet, not Haiku) and only when a concrete model is picked.
@@ -135,6 +143,9 @@ export function CreateMenu({
   // initial.announce counts as authored from the start.
   const [announce, setAnnounce] = useState(initial?.announce ?? '')
   const [announceTouched, setAnnounceTouched] = useState(!!initial?.announce)
+  // The bridge wrapper is a host binary: it cannot reach into a container, so
+  // sandbox mode hides those sections entirely.
+  const sandboxOn = useDeck((s) => s.sandboxStatus)?.enabled === true
 
   useEffect(() => {
     void window.api.listAgents().then(setAgents)
@@ -156,9 +167,12 @@ export function CreateMenu({
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  const model = pick.model
+  const isBridge = pick.providerId === CLODEX_PROVIDER_ID
   // Whether the 1M toggle applies to the current pick, and the model id actually
-  // submitted (base id, or `<id>[1m]` when extended context is requested).
-  const canExtend = supports1mContext(model)
+  // submitted (base id, or `<id>[1m]` when extended context is requested). A
+  // bridged model is served by another provider: the suffix means nothing there.
+  const canExtend = !isBridge && supports1mContext(model)
   const use1m = extended && canExtend
   const effectiveModel = use1m ? `${model}[1m]` : model
 
@@ -167,8 +181,21 @@ export function CreateMenu({
   // the join note reflects the `[1m]` suffix when extended context is on.
   useEffect(() => {
     if (announceTouched) return
-    setAnnounce(defaultAnnounceDraft({ agent, model: effectiveModel, effort: EFFORT_LEVELS[effortIdx] ?? '' }))
-  }, [agent, effectiveModel, effortIdx, announceTouched])
+    setAnnounce(
+      defaultAnnounceDraft({
+        agent,
+        model: effectiveModel,
+        effort: EFFORT_LEVELS[effortIdx] ?? '',
+        via: isBridge ? CLODEX_PROVIDER_ID : undefined
+      })
+    )
+  }, [agent, effectiveModel, effortIdx, isBridge, announceTouched])
+
+  // Sandbox mode cannot honour a bridged model, so a pick made before the
+  // toggle flipped is dropped rather than silently launched unbridged.
+  useEffect(() => {
+    if (sandboxOn && isBridge) setPick({ model: '' })
+  }, [sandboxOn, isBridge])
 
   const applyPreset = (p: LaunchPreset): void => {
     setExtraArgs((prev) => [prev.trim(), p.args.trim()].filter(Boolean).join(' '))
@@ -232,7 +259,8 @@ export function CreateMenu({
       // main process assigns the next palette colour at spawn time.
       color: customColor ? color : undefined,
       announce: announce.trim() || undefined,
-      lead: lead || undefined
+      lead: lead || undefined,
+      bridge: isBridge ? 'clodex' : undefined
     })
     onCreate?.()
     onClose()
@@ -334,22 +362,25 @@ export function CreateMenu({
         <div className="field">
           <span>{t('create.model')}</span>
           {/* Unified picker (C29): launch-config models first (operator-curated),
-              then the frontier Anthropic catalog; favorites pinned below the
-              separator. Always shown even if CLI detection failed — without
-              claude there would be no sessions at all. */}
+              then the frontier Anthropic catalog, then the bridged providers;
+              favorites pinned below the separator. Always shown even if CLI
+              detection failed — without claude there would be no sessions at all. */}
           <div className="create-model-picker">
             <div
               className={`mp-model${model === '' ? ' is-selected' : ''}`}
-              onClick={() => setModel('')}
+              onClick={() => setPick({ model: '' })}
             >
               <span className="mp-model-name">{t('create.modelDefault')}</span>
             </div>
             <ModelPicker
               catalogs={mergeCreateCatalogs(models, catalogs)}
-              selected={[`anthropic:${model}`]}
+              selected={[favKey(pick.providerId ?? 'anthropic', model)]}
               multi={false}
-              onlyProviders={['anthropic']}
-              onPick={(_key, target) => setModel(target.model)}
+              onlyProviders={['anthropic', CLODEX_PROVIDER_ID]}
+              excludeKinds={sandboxOn ? ['bridge'] : undefined}
+              onPick={(_key, target) =>
+                setPick({ model: target.model, providerId: target.providerId })
+              }
             />
           </div>
         </div>

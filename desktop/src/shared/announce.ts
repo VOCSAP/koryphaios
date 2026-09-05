@@ -16,6 +16,8 @@ export interface JoinAnnounceIntent {
   agent: string
   model: string
   effort: string
+  /** Provider bridging the model (peers read a claude session otherwise). */
+  via?: string
 }
 
 /**
@@ -27,7 +29,8 @@ export function defaultAnnounceDraft(intent: Omit<JoinAnnounceIntent, 'custom'>)
   return [
     `agent: ${intent.agent || 'default'}`,
     `model: ${intent.model || 'default'}`,
-    `effort: ${intent.effort || 'auto'}`
+    `effort: ${intent.effort || 'auto'}`,
+    ...(intent.via ? [`via: ${intent.via}`] : [])
   ].join(', ')
 }
 

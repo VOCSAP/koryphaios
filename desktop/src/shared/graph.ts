@@ -21,7 +21,7 @@ export const GRAPH_CLIS: GraphCli[] = ['claude', 'codex', 'gemini', 'antigravity
 export interface ModelTarget {
   cli: GraphCli
   model: string
-  /** cli 'local' only: which configured local provider runs it (C29). */
+  /** cli 'local': the configured local provider; cli 'claude': a bridge provider (clodex). */
   providerId?: string
 }
 

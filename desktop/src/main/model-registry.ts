@@ -3,13 +3,23 @@
 // command and the vendor APIs need an API key the operator may not have.
 // Local endpoints discover their models dynamically instead: /v1/models
 // (OpenAI-compatible: LiteLLM/vLLM/Ollama) with an /api/tags fallback for
-// native Ollama.
+// native Ollama. The clodex bridge is probed the same way (clodex-bridge.ts):
+// its section is offered only when the wrapper and its proxy both answer.
 
 import { execFile } from 'node:child_process'
 import { platform } from 'node:os'
+import {
+  absentBridge,
+  defaultClodexDeps,
+  probeClodex,
+  type ClodexProbeResult
+} from './clodex-bridge'
+import { reportError } from './log'
 import { buildShellInvocation } from './shell-command'
 import {
   buildCatalogs,
+  CLODEX_PROVIDER_ID,
+  CLODEX_PROVIDER_NAME,
   type LocalProviderConfig,
   type ModelEntry,
   type ProviderCatalog
@@ -44,8 +54,9 @@ function probeBin(bin: string, shell: string): Promise<boolean> {
   })
 }
 
-/** Session-lifetime cache: PATH changes are rare, probes spawn login shells. */
+/** Session-lifetime caches: PATH changes are rare, probes spawn login shells. */
 let detectCache: Record<GraphCli, boolean> | null = null
+let clodexCache: ClodexProbeResult | null = null
 
 export async function detectClis(
   shell: string,
@@ -64,6 +75,32 @@ export async function detectClis(
   FRONTIER_BINS.forEach(({ cli }, i) => (detected[cli] = !!results[i]))
   detectCache = detected
   return detected
+}
+
+/** Injected in tests so no probe ever spawns a login shell. */
+export type ClodexProbe = () => Promise<ClodexProbeResult>
+
+/**
+ * Bridge probe, cached for the app run like the CLI detection. A probe that
+ * throws is traced and cached as "not installed": the bridge section then
+ * disappears, but the rest of the catalog still reaches the pickers.
+ */
+export async function detectClodex(
+  shell: string,
+  opts: { refresh?: boolean; probe?: ClodexProbe } = {}
+): Promise<ClodexProbeResult> {
+  if (clodexCache && !opts.refresh) return clodexCache
+  const probe =
+    opts.probe ?? ((): Promise<ClodexProbeResult> => probeClodex(defaultClodexDeps(shell)))
+  let result: ClodexProbeResult
+  try {
+    result = await probe()
+  } catch (err) {
+    reportError('clodex', 'bridge probe failed; the provider is reported as not installed', err)
+    result = absentBridge()
+  }
+  clodexCache = result
+  return result
 }
 
 // ---------------------------------------------------------------------------
@@ -131,16 +168,19 @@ export async function discoverLocalModels(
 }
 
 /**
- * Full picker catalog: frontier detection (cached) + parallel discovery of
- * every configured local provider.
+ * Full picker catalog: frontier detection + bridge probe (both cached) +
+ * parallel discovery of every configured local provider. The bridge section is
+ * always emitted: its `bridge` state is what tells the pickers whether to hide
+ * it (absent) or grey it (installed, proxy down).
  */
 export async function getCatalogs(
   locals: LocalProviderConfig[],
   shell: string,
-  opts: { refresh?: boolean; fetchImpl?: typeof fetch } = {}
+  opts: { refresh?: boolean; fetchImpl?: typeof fetch; clodexProbe?: ClodexProbe } = {}
 ): Promise<ProviderCatalog[]> {
-  const [detected, discovered] = await Promise.all([
+  const [detected, clodex, discovered] = await Promise.all([
     detectClis(shell, { refresh: opts.refresh }),
+    detectClodex(shell, { refresh: opts.refresh, probe: opts.clodexProbe }),
     Promise.all(
       (locals ?? [])
         .filter((p) => p && p.id && p.baseUrl)
@@ -150,10 +190,18 @@ export async function getCatalogs(
         }))
     )
   ])
-  return buildCatalogs(detected, discovered)
+  return buildCatalogs(detected, discovered, [
+    {
+      id: CLODEX_PROVIDER_ID,
+      name: CLODEX_PROVIDER_NAME,
+      state: clodex.state,
+      models: clodex.models
+    }
+  ])
 }
 
-/** Test hook: reset the detection cache. */
+/** Test hook: reset the detection and bridge caches. */
 export function resetDetectCache(): void {
   detectCache = null
+  clodexCache = null
 }

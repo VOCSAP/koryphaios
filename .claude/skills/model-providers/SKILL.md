@@ -29,6 +29,29 @@ altitude; imitate, don't invent.
 The `[1m]` context suffix (CreateMenu) is Claude-session-only — catalog
 entries never carry it.
 
+## Bridge providers (clodex)
+
+A THIRD `ProviderCatalog.kind`, `'bridge'`, covers a provider reached THROUGH
+another CLI instead of its own — today only
+[clodex](https://github.com/bman654/clodex), OpenAI models served through the
+`claude` CLI by its `clodex-claude` wrapper. Files: `main/clodex-bridge.ts`
+(probes the wrapper, its proxy, its patch freshness, its model list),
+`main/model-registry.ts` (`getCatalogs` folds the bridge section in, cached
+like CLI detection), `shared/models.ts` (`CLODEX_PROVIDER_ID`, `BridgeState`,
+`buildCatalogs`), `ModelPicker.tsx`/`CreateMenu.tsx` (section rendering,
+greyed-idle state). Rules:
+
+- **The `--model` value is the clodex `id`, never the `alias`** — an alias is
+  only recognized by a PATCHED `claude` binary; the label may show the alias,
+  the flag never does.
+- **Headless points never take a bridge target.** They spawn the plain CLI, so
+  a bridge model there would silently answer from the wrong provider:
+  `sanitizeUtilityTarget` clamps any stored target and every headless
+  `ModelPicker` passes `excludeKinds={['bridge']}`.
+- **Any new bridge reuses `sessionsHaveShellFields`** — it swaps the launch
+  binary at spawn, so it is shell-bearing exactly like `command`/`args` and
+  must fold into the same operator-approval hash, never a separate gate.
+
 ## The inference points and their executors
 
 | Point | Target setting | Executor |
@@ -39,6 +62,9 @@ entries never carry it.
 | REC demo scenario (browser) | `config.demoTarget` — **claude-only** (the browser bridge rides `--mcp-config`) | `demo-driver.ts` (+ per-run `demo-control.ts` endpoint) |
 | Peer auto-summary (core) | `summary_*` config/env | `shared/summarize.ts` |
 | Agent tiles / supervisor / plan import | Claude Code sessions only (multi-CLI deferred — see `BACKLOG.md` §3.1) | `session-command.ts` |
+
+None of these points takes a `bridge` target (see "Bridge providers" above) —
+only an agent tile can be bridged.
 
 All one-shot prompts are CODE CONSTANTS (C8) — never operator/repo templates.
 Any new one-shot inference goes through `runUtilityInference` (or imitates

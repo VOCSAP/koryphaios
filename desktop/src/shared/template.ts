@@ -147,9 +147,25 @@ export function templateToInputs(tpl: SessionTemplate): TemplateInput[] {
 }
 
 /**
+ * A `bridge` marker swaps the launch binary for a wrapper of its own and
+ * spends the operator's own provider quota, so it is shell-bearing exactly
+ * like `command` — the value it names is irrelevant, only that one is asked
+ * for at all. Read as `unknown`, not through the declared type: callers hand
+ * this predicate objects parsed from an untrusted file, so anything that is
+ * neither absent nor an empty string must GATE rather than slip past a
+ * `.trim()` that would throw on it.
+ */
+function hasLaunchBridge(bridge: unknown): boolean {
+  if (bridge === undefined) return false
+  return typeof bridge === 'string' ? bridge.trim() !== '' : true
+}
+
+/**
  * True when any session-like object carries a shell-bearing field — a
- * `command` (which replaces the launch binary) or a free-form `args` string
- * (appended verbatim to the login-shell command line, session-command.ts).
+ * `command` (which replaces the launch binary), a free-form `args` string
+ * (appended verbatim to the login-shell command line, session-command.ts), or
+ * a `bridge` marker (which rewrites the launch binary at spawn,
+ * session-service.ts's resolveBaseCommand).
  * The core predicate behind `templateHasShellFields`, factored out so a
  * second untrusted-file source of sessions (workspace restore, card
  * 09d54a29: `workspaceHasShellFields` in workspace-store.ts) can reuse the
@@ -157,20 +173,28 @@ export function templateToInputs(tpl: SessionTemplate): TemplateInput[] {
  * the two already had on the `lead` field.
  */
 export function sessionsHaveShellFields(
-  sessions: readonly { command?: string; args?: string }[]
+  sessions: readonly { command?: string; args?: string; bridge?: string }[]
 ): boolean {
   return sessions.some(
-    (s) => (s.command && s.command.trim() !== '') || (s.args && s.args.trim() !== '')
+    (s) =>
+      (s.command && s.command.trim() !== '') ||
+      (s.args && s.args.trim() !== '') ||
+      hasLaunchBridge(s.bridge)
   )
 }
 
 /**
  * True when any session in the template carries a shell-bearing field — a
- * `command` (which replaces the launch binary) or a free-form `args` string
- * (appended verbatim to the login-shell command line). A repo-local template
- * with either is treated as untrusted and gated behind operator approval before
- * it can spawn (B4), mirroring the C19 launchCommand gate. `agent`/`model` are
- * NOT shell-bearing here: they are allow-listed + quoted at spawn (B6).
+ * `command` (which replaces the launch binary), a free-form `args` string
+ * (appended verbatim to the login-shell command line) or a `bridge` marker. A
+ * repo-local template with any of them is treated as untrusted and gated
+ * behind operator approval before it can spawn (B4), mirroring the C19
+ * launchCommand gate. `agent`/`model` are NOT shell-bearing here: they are
+ * allow-listed + quoted at spawn (B6).
+ * `TemplateSession` deliberately declares no `bridge` field and
+ * `templateToInputs` copies no such field, so a template cannot bridge a tile
+ * today; the predicate covers it anyway, since `parseTemplate` copies its
+ * entries with a spread and an unknown key rides along at runtime.
  */
 export function templateHasShellFields(tpl: SessionTemplate): boolean {
   return sessionsHaveShellFields(tpl.sessions)

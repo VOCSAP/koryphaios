@@ -15,6 +15,36 @@ test("defaultAnnounceDraft summarises agent/model/effort with fallbacks", () => 
   );
 });
 
+test("defaultAnnounceDraft names the bridge only when one carries the model", () => {
+  expect(
+    defaultAnnounceDraft({
+      agent: "developer",
+      model: "clodex:openai-oauth:gpt-5.6-sol",
+      effort: "high",
+      via: "clodex"
+    })
+  ).toBe("agent: developer, model: clodex:openai-oauth:gpt-5.6-sol, effort: high, via: clodex");
+  // Absent or empty: the line keeps its three historical fields, unchanged for
+  // every non-bridged session.
+  expect(defaultAnnounceDraft({ agent: "a", model: "m", effort: "low", via: "" })).toBe(
+    "agent: a, model: m, effort: low"
+  );
+  expect(defaultAnnounceDraft({ agent: "a", model: "m", effort: "low" })).toBe(
+    "agent: a, model: m, effort: low"
+  );
+});
+
+test("composeJoinAnnounce carries the bridge through the default path", () => {
+  const intent: JoinAnnounceIntent = {
+    custom: null,
+    agent: "reviewer",
+    model: "gpt-5.6-sol",
+    effort: "",
+    via: "clodex"
+  };
+  expect(composeJoinAnnounce("dev-pc-foo-2", intent)).toContain("via: clodex");
+});
+
 test("composeJoinAnnounce default path always includes the peer_id and the summary", () => {
   const intent: JoinAnnounceIntent = { custom: null, agent: "reviewer", model: "sonnet", effort: "" };
   const text = composeJoinAnnounce("dev-pc-foo-2", intent);

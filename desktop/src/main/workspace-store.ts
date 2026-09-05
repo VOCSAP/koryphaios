@@ -46,6 +46,14 @@ export interface WorkspaceSession {
   cwd: string
   /** Launch args kept for display + the expired-session fallback. */
   args: string[]
+  /**
+   * The session's clodex-bridge marker (SessionDef.bridge). Persisted because
+   * a workspace rebuilds `command` as '' (workspace-session-map.ts), so this
+   * is the only thing that tells a restored tile to relaunch through the
+   * wrapper instead of plain claude -- which would reject the `clodex:` model
+   * still sitting in `args`.
+   */
+  bridge?: 'clodex'
   color: string
   position: number
 }
@@ -123,7 +131,11 @@ function isWorkspaceSession(value: unknown): value is WorkspaceSession {
     typeof s.color === 'string' &&
     typeof s.position === 'number' &&
     Array.isArray(s.args) &&
-    s.args.every((a) => typeof a === 'string')
+    s.args.every((a) => typeof a === 'string') &&
+    // Strict enum at the parse boundary, so the declared 'clodex' type stays
+    // honest for every reader downstream; a file naming any other bridge is
+    // rejected whole rather than silently restored without it.
+    (s.bridge === undefined || s.bridge === 'clodex')
   )
 }
 
@@ -138,17 +150,20 @@ function isWorkspace(value: unknown): value is Workspace {
 }
 
 /**
- * True when any session in a workspace carries a shell-bearing `args` field
- * -- same predicate templates use for `command`/`args` (`templateHasShellFields`,
- * shared/template.ts, B4), reused via `sessionsHaveShellFields` rather than
- * reimplemented so the two gates cannot drift apart (card 09d54a29: they
- * already had, on the `lead` field). Workspaces never persist `command`
- * (workspace-session-map.ts always rebuilds it as `''`); `args` is stored as
- * string[] (`joinArgs`-shaped) and joined back into the free-form string
- * `sessionsHaveShellFields` expects.
+ * True when any session in a workspace carries a shell-bearing field -- same
+ * predicate templates use (`templateHasShellFields`, shared/template.ts, B4),
+ * reused via `sessionsHaveShellFields` rather than reimplemented so the two
+ * gates cannot drift apart (card 09d54a29: they already had, on the `lead`
+ * field). Workspaces never persist `command` (workspace-session-map.ts always
+ * rebuilds it as `''`); `args` is stored as string[] (`joinArgs`-shaped) and
+ * joined back into the free-form string `sessionsHaveShellFields` expects, and
+ * `bridge` is forwarded because it decides the launch binary on its own, with
+ * no `args` needed.
  */
 export function workspaceHasShellFields(ws: Pick<Workspace, 'sessions'>): boolean {
-  return sessionsHaveShellFields(ws.sessions.map((s) => ({ args: s.args.join(' ') })))
+  return sessionsHaveShellFields(
+    ws.sessions.map((s) => ({ args: s.args.join(' '), bridge: s.bridge }))
+  )
 }
 
 /** True when `cwd` is `projectDir` itself or a path nested under it. */

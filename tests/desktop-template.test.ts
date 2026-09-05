@@ -203,3 +203,37 @@ test("templateHasShellFields flags command or non-empty args, ignores agent/mode
     templateHasShellFields(mk([{ name: "a" }, { name: "b", command: "x" }]))
   ).toBe(true);
 });
+
+// The two gates share ONE predicate (card 09d54a29): a field that is
+// shell-bearing for a workspace is shell-bearing for a template, whether or not
+// a template can produce it today. parseTemplate copies its entries with a
+// spread, so an unknown `bridge` key rides along at runtime even though
+// TemplateSession does not declare one.
+test("templateHasShellFields flags a bridge marker, whatever it names, and ignores an empty one", () => {
+  const mk = (session: Record<string, unknown>): SessionTemplate =>
+    ({
+      type: TEMPLATE_TYPE,
+      version: 1,
+      sessions: [session],
+    }) as unknown as SessionTemplate;
+  expect(templateHasShellFields(mk({ name: "a", bridge: "" }))).toBe(false);
+  expect(templateHasShellFields(mk({ name: "a", bridge: "clodex" }))).toBe(true);
+  expect(templateHasShellFields(mk({ name: "a", bridge: "clodex-evil" }))).toBe(true);
+  expect(templateHasShellFields(mk({ name: "a", bridge: 42 }))).toBe(true);
+  expect(templateHasShellFields(mk({ name: "a", bridge: { toString: () => "" } }))).toBe(true);
+});
+
+// Belt to the predicate's braces: even an APPROVED template must not be able to
+// bridge a tile, because templateToInputs maps a fixed, explicit field list.
+test("templateToInputs never carries a bridge into a spawnable input", () => {
+  const raw = {
+    type: TEMPLATE_TYPE,
+    version: 1,
+    sessions: [{ name: "a", agent: "dev", bridge: "clodex" }],
+  };
+  const parsed = parseTemplate(raw);
+  expect(parsed).not.toBeNull();
+  const inputs = templateToInputs(parsed!.template);
+  expect(inputs[0]).not.toHaveProperty("bridge");
+  expect(inputs[0]).toEqual({ name: "a", agent: "dev" });
+});

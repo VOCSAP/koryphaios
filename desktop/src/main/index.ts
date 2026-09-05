@@ -2085,14 +2085,23 @@ const confirmWorkspaceShellFields = (
   const approvalOpts: ShellFieldApprovalOpts = {
     keyPart: 'workspace',
     basename: ws.name && ws.name.trim() ? ws.name : ws.id,
-    hashPayload: ws.sessions.map((s) => ({ args: s.args.join(' ') })),
+    // `bridge` is folded in only when a session carries one: it must land in a
+    // DIFFERENT cache slot than the same args without it (approving the args
+    // alone must never pre-approve a wrapper), while a workspace that has none
+    // keeps the slot the operator already approved.
+    hashPayload: ws.sessions.map((s) => ({
+      args: s.args.join(' '),
+      ...(s.bridge ? { bridge: s.bridge } : {})
+    })),
     previewLines: ws.sessions
-      .filter((s) => s.args.length > 0)
-      .map((s) => `• ${s.name}: ${s.args.join(' ')}`),
+      .filter((s) => s.args.length > 0 || s.bridge)
+      .map((s) => `• ${s.name}: ${[s.bridge && `[${s.bridge}]`, ...s.args].filter(Boolean).join(' ')}`),
     labelEn: 'Workspace',
     labelFr: 'Espace de travail',
-    messageEn: 'This project workspace runs custom launch args, executed in a shell.',
-    messageFr: 'Cet espace de travail (config du projet) exécute des arguments de lancement personnalisés dans un shell.',
+    messageEn:
+      'This project workspace runs custom launch args or a custom launch binary, executed in a shell.',
+    messageFr:
+      'Cet espace de travail (config du projet) exécute des arguments ou un binaire de lancement personnalisés dans un shell.',
     buttonsEn: ['Restore this workspace', 'Refuse'],
     buttonsFr: ['Restaurer cet espace de travail', 'Refuser']
   }

@@ -6521,6 +6521,29 @@ svg.glyph {
   background: var(--bg-3);
 }
 
+/* Bridge provider installed but idle: the section states what is missing
+   instead of vanishing, so nothing here is clickable. */
+.mp-provider-head.is-disabled,
+.mp-provider-head.is-disabled:hover {
+  color: var(--fg-dim);
+  cursor: default;
+  background: none;
+}
+
+.mp-provider-hint {
+  color: var(--fg-dim);
+  font-size: 10px;
+  padding: 0 8px 6px 20px;
+}
+
+/* Warning tone of DESIGN §2: the wrapper's patch no longer matches the
+   installed claude binary, so its models answer only partially. */
+.mp-provider-warn {
+  display: inline-flex;
+  font-size: 12px;
+  color: #e0b341;
+}
+
 .mp-provider-icon {
   width: 16px;
   text-align: center;

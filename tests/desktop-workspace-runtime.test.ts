@@ -82,6 +82,64 @@ test("fromWorkspaceSessions(toWorkspaceSessions(defs)) preserves the durable fie
   expect(round[0]!.id).not.toBe("local-1");
 });
 
+// A workspace rebuilds `command` as '' for every session, so the bridge marker
+// is the ONLY thing that survives to tell a restored tile to relaunch through
+// the wrapper. Losing it gives back a plain claude tile still carrying
+// `--model "clodex:..."` in its args, which plain claude rejects.
+test("the clodex bridge marker survives toWorkspaceSessions -> fromWorkspaceSessions, alongside the emptied command", () => {
+  const defs = [
+    {
+      id: "local-1",
+      name: "bridged",
+      cwd: "/abs/project",
+      command: "",
+      bridge: "clodex" as const,
+      args: '--model "clodex:openai-oauth:gpt-5.6-sol"',
+      sessionId: "sid-1",
+      color: "#4488ff",
+      createdAt: 111,
+    },
+    {
+      id: "local-2",
+      name: "plain",
+      cwd: "/abs/project",
+      command: "",
+      args: "",
+      sessionId: "sid-2",
+      color: "#3ec46d",
+      createdAt: 222,
+    },
+  ];
+  const persisted = toWorkspaceSessions(defs);
+  expect(persisted.map((s) => s.bridge)).toEqual(["clodex", undefined]);
+  const round = fromWorkspaceSessions(persisted);
+  expect(round.map((d) => d.bridge)).toEqual(["clodex", undefined]);
+  expect(round.map((d) => d.command)).toEqual(["", ""]);
+});
+
+// The workspace file is repo-cloned (hostile input): its `bridge` names the
+// launch binary, so anything but the exact string must be dropped rather than
+// carried into a spawn.
+test("a bridge value that is not the exact 'clodex' string is dropped on restore, never carried into the def", () => {
+  const hostile: WorkspaceSession[] = [
+    "clodex-evil",
+    "Clodex",
+    "clodex ",
+    "",
+    1 as unknown as string,
+    { toString: () => "clodex" } as unknown as string,
+  ].map((bridge, i) => ({
+    claudeSessionId: `sid-${i}`,
+    name: `s-${i}`,
+    cwd: "/p",
+    args: [],
+    bridge: bridge as WorkspaceSession["bridge"],
+    color: "#000",
+    position: i,
+  }));
+  expect(fromWorkspaceSessions(hostile).map((d) => d.bridge)).toEqual(hostile.map(() => undefined));
+});
+
 test("fromWorkspaceSessions honours position ordering", () => {
   const sessions: WorkspaceSession[] = [
     { claudeSessionId: "b", name: "B", cwd: "/p", args: [], color: "#000", position: 1 },

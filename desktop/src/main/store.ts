@@ -15,7 +15,7 @@ import {
   DEFAULT_HELP_TARGET,
   DEFAULT_WAND_TARGET,
   legacyHelpTarget,
-  sanitizeTarget
+  sanitizeUtilityTarget
 } from '@shared/models'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
 import { reportError } from './log'
@@ -120,14 +120,16 @@ export function loadConfig(): AppConfig {
   // Legacy pre-lot-A configs carry `helpModel: '<alias>'` instead of targets.
   const raw = readJson<Partial<AppConfig> & { helpModel?: string }>(configPath(), {})
   const cfg = { ...DEFAULT_CONFIG, ...raw }
-  cfg.helpTarget = sanitizeTarget(
+  // Utility inferences spawn the plain CLI: sanitizeUtilityTarget also refuses
+  // a bridge provider, which the spawned binary would ignore.
+  cfg.helpTarget = sanitizeUtilityTarget(
     raw.helpTarget ?? legacyHelpTarget(raw.helpModel),
     DEFAULT_HELP_TARGET
   )
-  cfg.wandTarget = sanitizeTarget(raw.wandTarget, DEFAULT_WAND_TARGET)
+  cfg.wandTarget = sanitizeUtilityTarget(raw.wandTarget, DEFAULT_WAND_TARGET)
   // The demo bridge is claude-only (--mcp-config): a hand-edited non-claude
   // target would silently run without browser tools — clamp it back.
-  cfg.demoTarget = sanitizeTarget(raw.demoTarget, DEFAULT_DEMO_TARGET)
+  cfg.demoTarget = sanitizeUtilityTarget(raw.demoTarget, DEFAULT_DEMO_TARGET)
   if (cfg.demoTarget.cli !== 'claude') cfg.demoTarget = { ...DEFAULT_DEMO_TARGET }
   // Unknown/absent trust mode (older config, hand-edited file) -> default.
   if (!SUPERVISOR_SPAWN_MODES.includes(cfg.supervisorSpawnMode)) {

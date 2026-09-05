@@ -13,6 +13,16 @@ export interface SessionDef {
   cwd: string
   /** Base command override; empty => the resolved launchCommand (launch-config). */
   command: string
+  /**
+   * Route this tile's launch through the clodex wrapper binary: at every spawn
+   * the claude token of the resolved base command is rewritten to
+   * `clodex-claude`, which execs the same binary against a local OpenAI-backed
+   * proxy. A marker rather than a pre-wrapped `command`, so the tile keeps
+   * following the configured launch command and survives a workspace
+   * round-trip (which rebuilds `command` as ''). Persisted, hence untrusted on
+   * the way back in: every reader re-validates it as the exact string.
+   */
+  bridge?: 'clodex'
   /** Extra launch args appended after --session-id on a fresh launch. */
   args: string
   /** Current claude --session-id. Changes on every fork-resume. Empty until first spawn. */
@@ -405,6 +415,17 @@ export interface CreateSessionInput {
   cwd?: string
   /** Base command override; empty => the resolved launchCommand. */
   command?: string
+  /**
+   * Launch the tile through the clodex wrapper binary instead of `claude`
+   * itself: the claude token of the resolved launch command is rewritten to
+   * `clodex-claude`, which execs the same binary against a local
+   * OpenAI-backed proxy. Re-validated MAIN-side as an enum (anything but the
+   * exact string 'clodex' is ignored), so the only value a companion can send
+   * is this one, and it grants nothing: the wrapper accepts every claude flag
+   * and falls back to plain claude when no proxy is running, so the worst case
+   * is a tile launched through a pass-through wrapper.
+   */
+  bridge?: 'clodex'
   /** Chosen subagent (becomes `--agent <name>` and seeds the default name). */
   agent?: string
   /** Chosen model (becomes `--model <id>`). */
