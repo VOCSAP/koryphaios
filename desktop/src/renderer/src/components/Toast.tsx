@@ -12,10 +12,11 @@ export function Toast(): React.JSX.Element | null {
   const toast = useDeck((s) => s.toast)
   const variant = useDeck((s) => s.toastVariant)
   const raw = useDeck((s) => s.toastRaw)
+  const params = useDeck((s) => s.toastParams)
   if (!toast) return null
   return (
     <div className={`toast toast-${variant}`} role={variant === 'error' ? 'alert' : 'status'}>
-      {raw ? toast : t(toast)}
+      {raw ? toast : t(toast, params ?? undefined)}
     </div>
   )
 }

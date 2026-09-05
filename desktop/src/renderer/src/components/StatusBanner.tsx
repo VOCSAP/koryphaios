@@ -106,7 +106,7 @@ export function StatusBanner(): React.JSX.Element | null {
   if (kind === 'replica-offline') {
     return (
       <div className="status-banner status-banner-info" role="status">
-        <span className="status-banner-text" title={sync.upstream_url}>
+        <span className="status-banner-text">
           {GLYPH_BADGES.beacon} {t('banner.replicaOffline', { count: sync.pending_push ?? 0 })}
           {sync.last_error ? (
             <span className="status-banner-detail"> — {sync.last_error}</span>

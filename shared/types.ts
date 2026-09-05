@@ -629,6 +629,12 @@ export interface RoadmapSyncStatus {
   refused?: number;
   /** Lock claims/releases the upstream refused with a 4xx other than a contested 409, published with the same pass snapshot. */
   refused_locks?: number;
+  /**
+   * Local dispatch-queue positions overwritten by the upstream order since this
+   * broker started (the queue is never pushed; a reorder made offline is lost
+   * at reconnection). Cumulative and monotonic so a poller can toast the delta.
+   */
+  queue_replaced?: number;
   locks?: { local: number; global: number; contested: number; remote: number };
 }
 

@@ -42,6 +42,7 @@ export interface PeersFileConfig {
   broker_url?: string
   broker_token?: string
   offline_replica?: boolean
+  serve_replicas?: boolean
 }
 
 /**

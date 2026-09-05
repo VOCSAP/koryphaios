@@ -4,20 +4,13 @@
 // It holds the GROUP ID only -- never the scope secret (DESIGN 6.8) -- so a
 // leaked or cloud-synced workspace cannot join the group.
 //
-// Pure: node fs/path/crypto only (no electron / node-pty), so it is unit-testable
-// under bun. Own types are declared here rather than imported via @shared, to
+// Pure: node fs/path/crypto plus two node-builtins-only siblings (atomic-write,
+// worktree-service) and no electron / node-pty, so it is unit-testable under
+// bun. Own types are declared here rather than imported via @shared, to
 // mirror the existing pure-module pattern (scope.ts, session-command.ts).
 
 import { randomUUID } from 'node:crypto'
-import {
-  existsSync,
-  mkdirSync,
-  readdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync
-} from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join, sep } from 'node:path'
 // Relative import (not the @shared alias), like workspace-session-map.ts: this
 // pulls in only the pure predicate, keeping this module resolvable under
@@ -29,6 +22,7 @@ import { sessionsHaveShellFields } from '../shared/template'
 // resolve()+startsWith comparison misses macOS symlinked tmpdirs and Windows
 // 8.3 short names (worktree-service.ts's own docstring on canonicalPath).
 import { canonicalPath } from './worktree-service'
+import { writeFileAtomic } from './atomic-write'
 
 /** "ephemeral" scopes mint a fresh secret on restore; "custom" ones are re-supplied via the launch arg. */
 export type ScopeKind = 'ephemeral' | 'custom'
@@ -214,9 +208,7 @@ export function saveWorkspace(projectDir: string, ws: Workspace): Workspace {
   // Defensive: a secret must never be persisted (DESIGN 6.8).
   delete (stamped as Workspace & { scopeSecret?: unknown }).scopeSecret
   const file = workspacePath(projectDir, ws.id)
-  const tmp = `${file}.tmp`
-  writeFileSync(tmp, JSON.stringify(stamped, null, 2), 'utf8')
-  renameSync(tmp, file)
+  writeFileAtomic(file, JSON.stringify(stamped, null, 2))
   return stamped
 }
 

@@ -17,8 +17,8 @@ import {
   CompanionAuth,
   COMPANION_HEARTBEAT_MS,
   COMPANION_MAX_PAYLOAD_BYTES,
-  LIGHT_MODE_BLOCKED_EVENTS,
   REMOTE_BLOCKED_CHANNELS,
+  shouldForwardEvent,
   isPrivateAddress,
   parseClientFrame,
   type CompanionDevice,
@@ -379,7 +379,7 @@ export class CompanionServer {
   }
 
   private forward(ctx: ClientCtx, channel: string, payload: unknown): void {
-    if (ctx.mode === 'light' && LIGHT_MODE_BLOCKED_EVENTS.has(channel)) return
+    if (!shouldForwardEvent(channel, ctx.mode)) return
     if (channel === 'pty:data' && ctx.ws.bufferedAmount > MAX_BUFFERED) {
       // Backpressure guard (MB5): drop terminal stream frames rather than
       // ballooning memory. Latched per-client, logged once per episode.

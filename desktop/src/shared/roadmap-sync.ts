@@ -118,3 +118,49 @@ export function formatSyncValue(value: unknown, labels: SyncValueLabels): string
   const text = String(value)
   return text.length === 0 ? labels.empty : text
 }
+
+/**
+ * Dispatch-queue positions the upstream order overwrote BETWEEN two readings
+ * of the replica status, or null when nothing can be announced yet.
+ *
+ * `queue_replaced` is cumulative for the lifetime of the local broker, so the
+ * raw number is never what the operator is told: a Deck attaching to a broker
+ * that has been replicating for a day would announce that whole day's losses
+ * as if they had just happened.
+ *
+ * - `prev === null` (nothing observed yet) -> null: the first reading only
+ *   establishes the baseline. A Deck restart must not replay history.
+ * - the counter went DOWN (the local broker restarted, its counter with it)
+ *   -> 0: silently re-baseline rather than report a negative or a fake surge.
+ * - the counter is absent (a non-replica or older broker) -> 0: there is
+ *   nothing to compare, and a missing field is not a loss.
+ */
+export function queueReplacedDelta(prev: number | null, next: number | undefined): number | null {
+  if (typeof next !== 'number' || !Number.isFinite(next)) return 0
+  if (prev === null) return null
+  return next > prev ? next - prev : 0
+}
+
+/**
+ * The baseline to remember after that reading. Kept next to the delta so the
+ * two halves of one decision cannot drift: a counter that was not reported
+ * leaves the baseline where it was, and never resets it to "never seen".
+ */
+export function nextQueueReplacedSeen(prev: number | null, next: number | undefined): number | null {
+  return typeof next === 'number' && Number.isFinite(next) ? next : prev
+}
+
+/**
+ * Positions still waiting to be announced after observing `delta`.
+ *
+ * The toast throttle (one per key per 5 s) DROPS a repeat, it does not queue
+ * it, while the baseline advances regardless -- so a second lossy pass inside
+ * the throttle window would be lost for good. Accumulating means the next
+ * toast that gets through names every position, not only the latest batch.
+ *
+ * `null` (first observation) and 0 leave the pending count alone: neither is
+ * something to announce, and neither cancels what is already waiting.
+ */
+export function pendingQueueReplaced(pending: number, delta: number | null): number {
+  return delta === null || delta <= 0 ? pending : pending + delta
+}

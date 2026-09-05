@@ -1299,6 +1299,11 @@ function roadmapSyncSignature(status: RoadmapSyncStatus, conflicts: RoadmapSyncC
     // keep showing a count nobody updated.
     status.refused,
     status.refused_locks,
+    // The renderer toasts the DELTA of this counter, so a pass that only
+    // replaced queue positions must still be broadcast: without it the
+    // increment would be folded into whichever later change happened to move
+    // another field, and announced as if it had just occurred.
+    status.queue_replaced,
     status.last_error
   ].join('|')
   const rows = conflicts

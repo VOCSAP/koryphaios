@@ -25,6 +25,9 @@ import {
   ROADMAP_SYNC_TRANSITION_FIELDS,
   conflictFieldDiffs,
   formatSyncValue,
+  nextQueueReplacedSeen,
+  pendingQueueReplaced,
+  queueReplacedDelta,
   sameSyncValue,
 } from "../desktop/src/shared/roadmap-sync.ts";
 import {
@@ -79,7 +82,6 @@ function wellFormedItem(patch: Record<string, unknown> = {}): Record<string, unk
 test("a well-formed replica status survives field for field", () => {
   const status = sanitizeSyncStatus({
     mode: "replica",
-    upstream_url: "https://broker.example/",
     online: false,
     since: "2026-09-05T10:00:00.000Z",
     last_error: "fetch failed",
@@ -87,11 +89,11 @@ test("a well-formed replica status survives field for field", () => {
     cursor: 42,
     conflicts: 3,
     pending_push: 7,
+    queue_replaced: 5,
     locks: { local: 1, global: 2, contested: 0, remote: 4 },
   });
   expect(status).toEqual({
     mode: "replica",
-    upstream_url: "https://broker.example/",
     online: false,
     since: "2026-09-05T10:00:00.000Z",
     last_error: "fetch failed",
@@ -99,8 +101,54 @@ test("a well-formed replica status survives field for field", () => {
     cursor: 42,
     conflicts: 3,
     pending_push: 7,
+    queue_replaced: 5,
     locks: { local: 1, global: 2, contested: 0, remote: 4 },
   });
+});
+
+test("the upstream broker's ADDRESS is dropped, not merely unused: it never enters the payload", () => {
+  // 'roadmap:sync' is an EVENT a paired companion receives, so anything the
+  // sanitizer maps travels to the phone. The upstream's URL is host
+  // configuration -- the same thing peersConfig:get and peersConfig:summary
+  // are refused for. A field left in "because nothing renders it" is one
+  // `title=` away from being on screen again, so the guarantee is the ABSENCE
+  // of the key, not the absence of a consumer.
+  const status = sanitizeSyncStatus({
+    mode: "replica",
+    upstream_url: "https://broker.internal.example:7899",
+    online: true,
+  }) as Record<string, unknown>;
+  expect(
+    Object.keys(status).includes("upstream_url"),
+    "no companion-reachable payload may carry the upstream broker URL"
+  ).toBe(false);
+  // The whole payload serialized: a URL smuggled under another key, or nested
+  // in one, fails here too.
+  expect(JSON.stringify(status)).not.toContain("broker.internal.example");
+  // And the rest of the status still came through, so this is a targeted drop
+  // and not a sanitizer that stopped reading its input.
+  expect(status.mode).toBe("replica");
+  expect(status.online).toBe(true);
+});
+
+test("neither is the bearer-token marker nor the local broker URL: the replica status carries no configuration at all", () => {
+  // The three field names Settings > Broker owns, and which the companion
+  // floor exists to keep on the host. None may reappear on this event by way
+  // of a broker that simply answers with them.
+  const status = sanitizeSyncStatus({
+    mode: "replica",
+    upstream_url: "https://u",
+    brokerUrl: "https://b",
+    hasToken: true,
+    broker_token: "s3cr3t",
+  }) as Record<string, unknown>;
+  for (const field of ["upstream_url", "brokerUrl", "hasToken", "broker_token"]) {
+    expect(
+      Object.keys(status).includes(field),
+      `the replica status must not carry ${field}: it is host configuration, and this event reaches paired companions`
+    ).toBe(false);
+  }
+  expect(JSON.stringify(status)).not.toContain("s3cr3t");
 });
 
 test("a non-replica broker's bare { mode } answer stays bare", () => {
@@ -112,6 +160,9 @@ test("a non-replica broker's bare { mode } answer stays bare", () => {
   expect(status.pending_push).toBeUndefined();
   expect(status.online).toBeUndefined();
   expect(status.locks).toBeUndefined();
+  // queue_replaced drives a TOAST, so a fabricated 0 would silently become the
+  // baseline the first real reading is compared against.
+  expect(status.queue_replaced).toBeUndefined();
 });
 
 test("an unreadable mode falls back to 'local', the INERT value", () => {
@@ -137,6 +188,12 @@ test("counters take only finite integers; every other JSON shape drops the field
   expect(sanitizeSyncStatus({ mode: "replica", conflicts: null }).conflicts).toBeUndefined();
   expect(sanitizeSyncStatus({ mode: "replica", conflicts: NaN }).conflicts).toBeUndefined();
   expect(sanitizeSyncStatus({ mode: "replica", pending_push: 0 }).pending_push).toBe(0);
+  // Same pick-list for the counter the toast reads: a float or a numeric
+  // string would otherwise produce a delta nobody can interpret.
+  expect(sanitizeSyncStatus({ mode: "replica", queue_replaced: "3" }).queue_replaced).toBeUndefined();
+  expect(sanitizeSyncStatus({ mode: "replica", queue_replaced: 1.5 }).queue_replaced).toBeUndefined();
+  expect(sanitizeSyncStatus({ mode: "replica", queue_replaced: NaN }).queue_replaced).toBeUndefined();
+  expect(sanitizeSyncStatus({ mode: "replica", queue_replaced: 0 }).queue_replaced).toBe(0);
   // Number("") is 0, so a sanitizer coercing through Number() would turn an
   // empty string into "nothing pending" instead of "nobody said".
   expect(Number("")).toBe(0);
@@ -464,4 +521,123 @@ test("a transport failure carries NO status: it is a different failure entirely"
   );
   expect(error).toBeInstanceOf(Error);
   expect(error).not.toBeInstanceOf(RoadmapRequestError);
+});
+
+// ---------------------------------------------------------------------------
+// 3. queue_replaced: the toast the operator gets when a local reorder is lost
+//
+// `queue_replaced` is CUMULATIVE for the lifetime of the local broker. What
+// the operator may be told is the delta between two readings: the counter
+// itself would announce a whole day of replication as if it had just happened,
+// every time a Deck attaches to a long-running broker.
+// ---------------------------------------------------------------------------
+
+test("the FIRST observation only sets the baseline: a Deck restart never replays the total", () => {
+  // The regression this closes: a broker that has replaced 12 positions since
+  // yesterday would greet every newly-opened window with "12 positions lost".
+  expect(queueReplacedDelta(null, 12)).toBeNull();
+  expect(nextQueueReplacedSeen(null, 12)).toBe(12);
+  // And the reading right after it, unchanged, says nothing.
+  expect(queueReplacedDelta(12, 12)).toBe(0);
+});
+
+test("an increase yields exactly the delta, never the running total", () => {
+  expect(queueReplacedDelta(0, 1)).toBe(1);
+  expect(queueReplacedDelta(12, 15)).toBe(3);
+  expect(nextQueueReplacedSeen(12, 15)).toBe(15);
+  // A baseline of 0 is a REAL baseline, not "never observed": the distinction
+  // is what makes the first increment after a quiet start announceable.
+  expect(queueReplacedDelta(0, 4)).toBe(4);
+});
+
+test("a DECREASE re-baselines silently: the local broker restarted, its counter with it", () => {
+  // Never a negative, and never `next` read as a fresh burst of losses.
+  expect(queueReplacedDelta(15, 2)).toBe(0);
+  expect(nextQueueReplacedSeen(15, 2)).toBe(2);
+  // Proof the re-baseline actually took: the next increase counts from 2.
+  expect(queueReplacedDelta(2, 5)).toBe(3);
+});
+
+test("an ABSENT counter is not a loss, and does not erase the baseline", () => {
+  // A non-replica or older broker answers without the field. Treating that as
+  // "never observed" would re-arm the first-observation branch and let the
+  // NEXT reading of a still-running broker replay its whole total.
+  expect(queueReplacedDelta(12, undefined)).toBe(0);
+  expect(nextQueueReplacedSeen(12, undefined)).toBe(12);
+  expect(queueReplacedDelta(null, undefined)).toBe(0);
+  expect(nextQueueReplacedSeen(null, undefined)).toBeNull();
+});
+
+test("a NaN counter is treated as absent, not as a delta", () => {
+  // sanitizeSyncStatus already drops it, so this is the direct-call path: a
+  // NaN reaching the subtraction would make `next > prev` false and yield a
+  // silent 0 while poisoning the baseline with NaN.
+  expect(queueReplacedDelta(12, NaN)).toBe(0);
+  // 0 ("absent"), not null ("first observation"): a NaN must not be allowed to
+  // masquerade as a baseline-setting reading, which would leave the next real
+  // counter to be compared against nothing.
+  expect(queueReplacedDelta(null, NaN)).toBe(0);
+  expect(nextQueueReplacedSeen(12, NaN)).toBe(12);
+  expect(nextQueueReplacedSeen(null, NaN)).toBeNull();
+});
+
+test("the toast condition, spelled as the store applies it: only a positive delta speaks", () => {
+  // null (first reading) and 0 (nothing new, or a re-baseline) must both stay
+  // silent -- a `delta !== null` test alone would toast "0 positions lost".
+  const speaks = (prev: number | null, next: number | undefined): boolean => {
+    const delta = queueReplacedDelta(prev, next);
+    return delta !== null && delta > 0;
+  };
+  expect(speaks(null, 12)).toBe(false);
+  expect(speaks(12, 12)).toBe(false);
+  expect(speaks(15, 2)).toBe(false);
+  expect(speaks(12, undefined)).toBe(false);
+  expect(speaks(12, 13)).toBe(true);
+});
+
+test("the accumulator carries a delta the toast throttle dropped: no loss goes unannounced", () => {
+  // showToast drops a repeat of the same key inside 5 s rather than queueing
+  // it, while the baseline advances regardless -- so a swallowed 3 followed by
+  // a 2 must be announced as 5, never as 2.
+  let pending = 0;
+  pending = pendingQueueReplaced(pending, queueReplacedDelta(10, 13)); // +3, toast dropped
+  expect(pending).toBe(3);
+  pending = pendingQueueReplaced(pending, queueReplacedDelta(13, 15)); // +2, toast allowed
+  expect(
+    pending,
+    "the announced number must be every position lost since the last toast, not the latest batch"
+  ).toBe(5);
+});
+
+test("the accumulator is not disturbed by the readings that say nothing", () => {
+  // null (first observation), 0 (no change), a decrease (broker restart) and an
+  // absent counter must all LEAVE a pending count alone: none of them is
+  // something to announce, and none of them cancels what is already waiting.
+  for (const [prev, next] of [
+    [null, 7],
+    [7, 7],
+    [15, 2],
+    [12, undefined],
+  ] as [number | null, number | undefined][]) {
+    expect(pendingQueueReplaced(4, queueReplacedDelta(prev, next))).toBe(4);
+  }
+  // And from zero they add nothing rather than something.
+  expect(pendingQueueReplaced(0, queueReplacedDelta(null, 7))).toBe(0);
+  // Direct-call path: queueReplacedDelta clamps, so it never hands over a
+  // negative -- but a bare `pending + delta` would SUBTRACT from the count
+  // waiting to be announced the day another producer feeds this helper.
+  expect(
+    pendingQueueReplaced(4, -3),
+    "a negative delta must never reduce the positions still waiting to be announced"
+  ).toBe(4);
+});
+
+test("a flushed accumulator starts over: the same loss is never announced twice", () => {
+  // The store zeroes `pending` only when showToast reports it DISPLAYED; this
+  // pins the arithmetic that follows that reset.
+  let pending = pendingQueueReplaced(0, queueReplacedDelta(1, 4));
+  expect(pending).toBe(3);
+  pending = 0; // toast displayed
+  expect(pendingQueueReplaced(pending, queueReplacedDelta(4, 4))).toBe(0);
+  expect(pendingQueueReplaced(pending, queueReplacedDelta(4, 5))).toBe(1);
 });

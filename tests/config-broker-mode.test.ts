@@ -84,6 +84,7 @@ const ENV_KEYS = [
   "XDG_CONFIG_HOME",
   "APPDATA",
   "CLAUDE_PEERS_OFFLINE_REPLICA",
+  "CLAUDE_PEERS_SERVE_REPLICAS",
   "CLAUDE_PEERS_BROKER_URL",
   "CLAUDE_PEERS_PORT",
 ] as const;
@@ -154,4 +155,55 @@ test("loadConfig: a garbage env value falls back to the file value, not to a har
   process.env.CLAUDE_PEERS_OFFLINE_REPLICA = "banana";
   const cfg = await loadConfig();
   expect(cfg.offline_replica).toBe(true);
+});
+
+// --- serve_replicas: the upstream ROLE, decided apart from holding a token ---
+
+test("loadConfig: no serve_replicas key defaults to false, even on a broker that has a token", async () => {
+  writeConfigFile({ broker_token: "a-token" });
+  const cfg = await loadConfig();
+  expect(
+    cfg.serve_replicas,
+    "a configured broker_token must not by itself turn a broker into an upstream"
+  ).toBe(false);
+});
+
+test("loadConfig: serve_replicas: true in the file is picked up", async () => {
+  writeConfigFile({ broker_token: "a-token", serve_replicas: true });
+  const cfg = await loadConfig();
+  expect(cfg.serve_replicas).toBe(true);
+});
+
+test("loadConfig: CLAUDE_PEERS_SERVE_REPLICAS overrides the file value in both directions", async () => {
+  writeConfigFile({ serve_replicas: true });
+  process.env.CLAUDE_PEERS_SERVE_REPLICAS = "0";
+  let cfg = await loadConfig();
+  expect(cfg.serve_replicas).toBe(false);
+
+  writeConfigFile({});
+  process.env.CLAUDE_PEERS_SERVE_REPLICAS = "yes";
+  cfg = await loadConfig();
+  expect(cfg.serve_replicas).toBe(true);
+});
+
+test("loadConfig: a garbage CLAUDE_PEERS_SERVE_REPLICAS falls back to the file value, never to a hardcoded true", async () => {
+  writeConfigFile({ serve_replicas: true });
+  process.env.CLAUDE_PEERS_SERVE_REPLICAS = "banana";
+  expect((await loadConfig()).serve_replicas).toBe(true);
+
+  writeConfigFile({ serve_replicas: false });
+  process.env.CLAUDE_PEERS_SERVE_REPLICAS = "banana";
+  expect(
+    (await loadConfig()).serve_replicas,
+    "a mistyped env value must never grant the upstream role a config withholds"
+  ).toBe(false);
+});
+
+test("serve_replicas is independent of the mode: replica and remote read it the same way", async () => {
+  writeConfigFile({ broker_url: "http://broker-host:7899", offline_replica: true, serve_replicas: true });
+  const cfg = await loadConfig();
+  expect(brokerMode(cfg)).toBe("replica");
+  // The loader records the operator's answer verbatim; refusing to ACT on it
+  // is the broker's decision, asserted in tests/broker-roadmap-sync-routes.
+  expect(cfg.serve_replicas).toBe(true);
 });

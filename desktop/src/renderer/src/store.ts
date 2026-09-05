@@ -24,6 +24,11 @@ import type {
   WorkspaceSummary
 } from '@shared/types'
 import { onRemoteRefresh, onRemoteState, remoteInstalled, type RemoteState } from './remote-api'
+import {
+  nextQueueReplacedSeen,
+  pendingQueueReplaced,
+  queueReplacedDelta
+} from '@shared/roadmap-sync'
 import { shouldShowTemplateAppliedToast } from '@shared/template-apply-outcome'
 import { workspaceRestoreToastKeyFor } from '@shared/workspace-restore-outcome'
 
@@ -84,6 +89,12 @@ interface DeckState {
   toastVariant: 'success' | 'info' | 'error'
   /** True when `toast` is raw text (an error message), not an i18n key. */
   toastRaw: boolean
+  /**
+   * Interpolation params for `toast` when it is a key. Carried here rather
+   * than pre-rendered into raw text, so a toast raised from the store (which
+   * holds the dictionary but not the `t` bound to it) stays a translated key.
+   */
+  toastParams: Record<string, string | number> | null
   /** Name of the current workspace, shown in the window title. */
   currentWorkspaceName: string | null
   workspaces: WorkspaceSummary[]
@@ -316,8 +327,16 @@ interface DeckState {
    * Toast policy (PLAN O5): reserved for the outcome of a DIRECT user action.
    * Background/systemic failures go to the log + journal (+ banner when the
    * broker is down) -- never toast them. Same key throttled to one per 5 s.
+   *
+   * Returns whether it DISPLAYED: the throttle drops a repeat instead of
+   * queueing it, so a caller carrying a count (rather than a fixed sentence)
+   * needs to know whether its number was announced or must be carried over.
    */
-  showToast(key: string, variant?: 'success' | 'info' | 'error', opts?: { raw?: boolean }): void
+  showToast(
+    key: string,
+    variant?: 'success' | 'info' | 'error',
+    opts?: { raw?: boolean; params?: Record<string, string | number> }
+  ): boolean
   saveCurrent(): Promise<void>
   saveAs(name: string): Promise<void>
   requestRestore(id: string): void
@@ -367,6 +386,15 @@ interface DeckState {
 let toastToken = 0
 // Last display time per toast key (throttle, PLAN O5).
 const lastToastAt = new Map<string, number>()
+// Last `queue_replaced` this renderer observed, null until the first status
+// lands. Module-level, like the two above: it drives a toast, never a render,
+// and a state field would re-render every subscriber on a counter nobody sees.
+let queueReplacedSeen: number | null = null
+// Positions observed but not yet announced, because the toast throttle DROPS a
+// repeat rather than queueing it. Flushed by the next status that gets a toast
+// through; a count still pending when the statuses stop changing waits for the
+// next one rather than arming a timer of its own.
+let queueReplacedPending = 0
 
 /**
  * Readable text for an error crossing the IPC boundary. Electron wraps every
@@ -478,6 +506,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   toast: null,
   toastVariant: 'success',
   toastRaw: false,
+  toastParams: null,
   currentWorkspaceName: null,
   workspaces: [],
   sidebarWidth: 260,
@@ -666,7 +695,29 @@ export const useDeck = create<DeckState>((set, get) => ({
     window.api.onGraphDrafts((drafts) => set({ graphDrafts: drafts }))
     // Replication state: pushed only when it actually changed (main-side
     // signature compare), so this replaces the whole state each time.
-    window.api.onRoadmapSync((roadmapSync) => set({ roadmapSync }))
+    window.api.onRoadmapSync((roadmapSync) => {
+      set({ roadmapSync })
+      // A reorder made while the upstream was unreachable is not pushed: the
+      // reconnection overwrites it with the upstream order. Toastable under
+      // the O5 policy despite arriving on a poll -- it reports the outcome of
+      // the operator's OWN reordering, not a background failure, and only they
+      // can decide to redo it. The DELTA since the previous status, never the
+      // broker's lifetime total (the first observation only sets the baseline,
+      // so a Deck restart cannot replay it).
+      const seen = queueReplacedSeen
+      const replaced = roadmapSync.status.queue_replaced
+      queueReplacedSeen = nextQueueReplacedSeen(seen, replaced)
+      queueReplacedPending = pendingQueueReplaced(
+        queueReplacedPending,
+        queueReplacedDelta(seen, replaced)
+      )
+      if (
+        queueReplacedPending > 0 &&
+        get().showToast('toast.queueReplaced', 'info', { params: { n: queueReplacedPending } })
+      ) {
+        queueReplacedPending = 0
+      }
+    })
     // Core-config summary, re-broadcast by main after a successful write so
     // every open surface shows the file rather than its own optimistic guess.
     window.api.onPeersConfig((peersConfig) => set({ peersConfig }))
@@ -898,13 +949,19 @@ export const useDeck = create<DeckState>((set, get) => ({
     // strobe the UI -- one toast per key per 5 s.
     const now = Date.now()
     const last = lastToastAt.get(key) ?? 0
-    if (now - last < 5000) return
+    if (now - last < 5000) return false
     lastToastAt.set(key, now)
-    set({ toast: key, toastVariant: variant, toastRaw: opts?.raw ?? false })
+    set({
+      toast: key,
+      toastVariant: variant,
+      toastRaw: opts?.raw ?? false,
+      toastParams: opts?.params ?? null
+    })
     const token = ++toastToken
     setTimeout(() => {
       if (toastToken === token) set({ toast: null })
     }, 3000)
+    return true
   },
 
   async saveCurrent() {

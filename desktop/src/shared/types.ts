@@ -607,9 +607,15 @@ export type RoadmapSyncMode = 'local' | 'upstream' | 'replica'
  * Replication health, polled on the inbox tick. Every field beyond `mode` is
  * replica-only and optional: a non-replica broker answers `{ mode }` alone.
  */
+/**
+ * The replica health the RENDERER sees. Deliberately narrower than the
+ * broker's own payload: no `upstream_url`. This travels on 'roadmap:sync',
+ * which a paired companion receives, and the upstream broker's address is host
+ * configuration -- the same thing the peersConfig channels are blocked for.
+ * The host operator reads it in Settings > Broker, which is host-only.
+ */
 export interface RoadmapSyncStatus {
   mode: RoadmapSyncMode
-  upstream_url?: string
   online?: boolean
   /** ISO timestamp of the last online/offline transition. */
   since?: string
@@ -633,6 +639,13 @@ export interface RoadmapSyncStatus {
    * two machines can both believe they hold.
    */
   refused_locks?: number
+  /**
+   * Local dispatch-queue positions overwritten by the upstream order since the
+   * broker started (the queue is never pushed; a reorder made offline is lost
+   * at reconnection). Cumulative and monotonic, so the delta between two polls
+   * is what the operator is told about -- never the lifetime total.
+   */
+  queue_replaced?: number
   locks?: { local: number; global: number; contested: number; remote: number }
 }
 
@@ -667,6 +680,13 @@ export interface PeersConfigSummary {
   hasToken: boolean
   /** The `offline_replica` opt-in as it stands IN THE FILE. */
   offlineReplica: boolean
+  /**
+   * Whether THIS machine's broker answers other machines' replication
+   * requests (`serve_replicas`, env override included). Read-only here: it
+   * decides what the broker serves, not what this Deck consumes, and a broker
+   * in replica mode never serves replicas whatever it says.
+   */
+  serveReplicas: boolean
   /**
    * Environment variables that override the file, so the panel can explain why
    * a control is disabled instead of silently refusing the operator's click.

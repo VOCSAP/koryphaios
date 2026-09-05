@@ -1040,10 +1040,15 @@ par le broker local) et arbitre les conflits dans le Deck. Reste ouvert :
       régression du mode replica, mais qui devient plus visible avec la
       bannière d'état de la replica. Faire spawn/ensure le broker depuis le
       Deck lui-même reste à cadrer.
-- [ ] **Toast Deck « N positions de file perdues »** à la reconnexion : la v1
-      ne journalise (`info`) que côté broker.
-- [ ] **Exposition de `lock_contested_by` aux agents natifs** (outil MCP ou
-      note d'inbound) : stocké et visible du Deck seulement.
+- [x] **Toast Deck « N positions de file perdues »** à la reconnexion —
+      livré : le broker publie `queue_replaced` (cumulatif depuis le
+      démarrage du broker) dans l'instantané `RoadmapSyncStatus` ; le Deck
+      toaste le DELTA entre deux lectures, jamais au premier `status`
+      observé après démarrage.
+- [x] **Exposition de `lock_contested_by` aux agents natifs** — livré (outil
+      MCP ou note d'inbound) : rendu dans `roadmap_list` par carte et dans
+      l'ack de `roadmap_update` quand le tableau est non vide, en plus
+      d'être visible du Deck.
 - [ ] **Provenance opérateur inter-brokers** : `operator_id` ne traverse
       jamais la frontière ; si un besoin apparaît, signature vérifiable
       upstream, jamais un champ déclaré par la replica.
@@ -1055,28 +1060,41 @@ par le broker local) et arbitre les conflits dans le Deck. Reste ouvert :
       enrichissement de l'autre doivent rester un conflit dur) ; ne revenir
       dessus qu'avec un instantané de base et une règle explicite sur
       `status`/`deleted_at`.
-- [ ] **Aucun rôle `upstream` explicite** (résiduel de la revue adversariale
-      du 2026-09-05) : les routes `/roadmap/sync/pull|push|lock` sont
-      servies par TOUT broker qui porte un `broker_token` configuré, pas
-      seulement par un broker que l'opérateur a délibérément désigné comme
-      upstream d'une replica -- un broker `remote` ordinaire avec token
-      répond donc, sans le savoir, comme un upstream valide à qui le lui
-      demande. Durcissement possible : un flag de rôle explicite
-      (`upstream: true` ou équivalent) que le broker doit porter pour
-      accepter ces routes, au lieu du seul token comme condition suffisante.
-- [ ] **Écriture de `config.json` sans verrou inter-processus** (résiduel) :
-      deux fenêtres Kory (ou une fenêtre Kory + une session `cli.ts`)
-      écrivant `offline_replica` (ou tout autre champ) au même moment sur le
-      même fichier peuvent se piler l'une sur l'autre -- pas de lock
-      exclusif, dernier écrivain gagne silencieusement.
-- [ ] **`peersConfig:get` lisible par un companion distant appairé**
-      (résiduel) : le canal IPC/companion qui sert mode/URL/présence-de-token
-      au Settings « Broker » du Deck (jamais le token lui-même) est
-      atteignable par un companion mobile appairé, comme le reste des
-      canaux tier bas -- à mesurer si ce niveau d'exposition (topologie
-      broker de l'opérateur) doit descendre derrière une confirmation
-      supplémentaire, cohérent avec la revue `CHANNEL_TIERS` de `BACKLOG.md`
-      §1.2 (B10).
+- [x] **Aucun rôle `upstream` explicite** (résiduel de la revue adversariale
+      du 2026-09-05) — livré : servir `/roadmap/sync/pull|push|lock` exige
+      désormais un rôle EXPLICITE, `serve_replicas: true` (fichier) /
+      `CLAUDE_PEERS_SERVE_REPLICAS=1` (env, mêmes graphies que
+      `CLAUDE_PEERS_OFFLINE_REPLICA`), en plus du `broker_token` déjà requis
+      -- un broker `remote` ordinaire sans ce flag ne répond plus comme un
+      upstream valide. Chaque condition manquante (`replica` / `serve_replicas`
+      / `token`) refuse avec un message distinct ; un broker en mode `replica`
+      ne sert jamais ces routes même si `serve_replicas: true` est aussi posé
+      dessus (avertissement au démarrage).
+- [x] **Écriture de `config.json` sans verrou inter-processus** (résiduel) —
+      livré : un verrou fichier inter-processus (`.lock`, `O_EXCL`) protège
+      désormais chaque écriture de `config.json`, avec reprise si le PID
+      détenteur est mort et le verrou vieux de ~10 s, un nombre de tentatives
+      borné, et un nom de fichier temporaire unique par écrivain.
+- [x] **`peersConfig:get` lisible par un companion distant appairé**
+      (résiduel) — livré : plus aucun payload atteignable par un companion ne
+      porte `brokerUrl`, `hasToken` ou `upstream_url` -- le canal `peersConfig:get`
+      ET l'évènement poussé `peersConfig:summary` sont bloqués pour un
+      companion appairé (le Settings « Broker » du Deck affiche « host-only »
+      sur un téléphone), et `upstream_url` est retiré de l'instantané de
+      statut de replication côté renderer. Rationale : c'est une information
+      de configuration DE L'HÔTE, l'écriture était déjà bloquée, et un
+      téléphone n'a aucun usage de l'URL/état du broker.
+- [ ] **Autres écritures `.tmp` fixe hors `config.json`** (résiduel) :
+      `workspace-store.ts` portait le même motif (nom de fichier temporaire
+      fixe, sujet à collision entre deux écritures concurrentes) et bascule
+      sur `writeFileAtomic` dans ce lot -- auditer chaque écriture
+      `tmp`+`rename` restante en ligne dans `desktop/src/main` pour la même
+      classe de bug avant de la considérer close partout.
+- [ ] **Le Deck n'a pas de verrou mono-instance** (résiduel) : deux fenêtres
+      Kory partagent chaque store (config, workspaces, roadmap cache local,
+      etc.) ; le verrou `config.json` livré ci-dessus ne couvre QUE ce fichier
+      -- les autres stores écrits par plusieurs fenêtres restent exposés au
+      même dernier-écrivain-gagne silencieux.
 
 ---
 

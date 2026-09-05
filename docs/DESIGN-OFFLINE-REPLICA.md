@@ -84,6 +84,24 @@ Regles derivees :
   reservees a l'upstream : pas de chainage, pas de cycle.
 - `/health` expose `mode` et, en replica, `upstream_online`.
 
+**DECIDE (2026-09-05)** -- servir `/roadmap/sync/pull|push|lock` exige un
+role UPSTREAM explicite, pas seulement un `broker_token` configure (residuel
+releve en revue adversariale, `BACKLOG.md` §3.9) : sinon TOUT broker `remote`
+ordinaire portant un token repond, sans le savoir, comme un upstream valide a
+qui le lui demande. Troisieme condition NECESSAIRE : `serve_replicas: true`
+(fichier) / `CLAUDE_PEERS_SERVE_REPLICAS=1` (env, memes graphies acceptees
+que `CLAUDE_PEERS_OFFLINE_REPLICA`). Les trois conditions pour servir ces
+routes -- ne pas etre soi-meme en mode `replica`, `serve_replicas: true`, ET
+`broker_token` configure -- sont chacune refusees avec un message DISTINCT
+(`replica` / `serve_replicas` / `token`) pour qu'un operateur diagnostique la
+bonne cause au lieu d'un 403 generique. Un broker `replica` qui porterait
+aussi `serve_replicas: true` (config incoherente, deux roles a la fois) reste
+refuse : une replica ne sert jamais ces routes, meme avec le flag, et
+journalise un avertissement au demarrage plutot que d'echouer en silence.
+Migration : tout upstream deja deploye doit ajouter ce flag, sinon chaque
+replica qui s'y connecte le voit comme injoignable (`README.md`, note en
+gras dans Mode 3).
+
 ### 2.2 Perimetre des tables
 
 | Table | Politique v1 |
@@ -250,7 +268,15 @@ remplace la locale sur chaque ligne recue. Consequences assumees :
   `queue = null` : a replacer a la main ;
 - les reorganisations hors ligne sont perdues, PAS silencieusement : une
   ligne de journal `info` par reconnexion avec le nombre de positions locales
-  ecrasees. (Le toast Deck correspondant est differe, §10.)
+  ecrasees.
+
+**DECIDE (2026-09-05)** -- ce compte est aussi publie au Deck : le broker
+cumule les positions ecrasees depuis SON demarrage dans
+`RoadmapSyncStatus.queue_replaced` (instantane de fin de passage, §8), et le
+Deck toaste le DELTA entre deux lectures successives de ce compteur -- jamais
+au premier `status` observe apres un demarrage du Deck, ce qui produirait un
+toast fantome pour un cumul deja non nul avant que ce Deck n'ait rien vu
+(§9).
 
 Hors ligne, la file locale reste pleinement fonctionnelle pour le dispatch
 local ; la regle ne s'applique qu'a la reconnexion.
@@ -303,6 +329,19 @@ Un seul algorithme : a chaque tick, TOUT verrou local de portee `local`,
 `global` ou `contested` passe par `/roadmap/sync/lock action=claim` ; la
 reponse fixe la portee. `release_pending` passe par `action=release`.
 
+**DECIDE (2026-09-05)** -- `lock_contested_by` est desormais expose aux
+AGENTS natifs, pas seulement au Deck (§10 le listait comme differe) : rendu
+dans `roadmap_list` par carte et dans l'ack de `roadmap_update` quand le
+tableau est non vide apres l'ecriture. La colonne JSON `["<peer_id>@
+<replica_id>", ...]` etait deja stockee upstream (§3.1) ; seule la
+PROJECTION cote outil MCP change, pour qu'un agent voie qui d'autre conteste
+le verrou qu'il vient de tenter, au lieu de decouvrir le 409 sans contexte.
+Cote REPLICA, la valeur de `lock_contested_by` tiree du pull n'est pas
+seulement relayee en vol : elle est PERSISTEE sur la ligne locale, pour que
+les agents d'une replica beneficient de la meme projection `roadmap_list`/
+`roadmap_update` que les agents upstream, sans devoir attendre un aller-retour
+supplementaire.
+
 ### 5.2 Verrous distants vus par la replica
 
 Un verrou upstream tenu par un tiers arrive au pull sur une carte non
@@ -329,10 +368,13 @@ locale legitime.
   comme tout client HTTP. Elle est donc de confiance AU NIVEAU DU TOKEN --
   mais ce niveau ne couvre PAS l'attribution individuelle (voir plus bas).
 - Les routes de replication `/roadmap/sync/pull|push|lock` sont refusees 403
-  si l'upstream n'a PAS de `broker_token` CONFIGURE : sans token, n'importe
-  quel processus loopback pourrait se faire passer pour une replica de
-  confiance -- c'est une garde SUPPLEMENTAIRE, specifique a la replication,
-  qui s'ajoute au Bearer ordinaire, elle ne le remplace pas.
+  si l'upstream n'a PAS de `broker_token` CONFIGURE, ni `serve_replicas: true`
+  (le role upstream explicite, §2.1) : sans token, n'importe quel processus
+  loopback pourrait se faire passer pour une replica de confiance -- c'est une
+  garde SUPPLEMENTAIRE, specifique a la replication, qui s'ajoute au Bearer
+  ordinaire, elle ne le remplace pas. Sans `serve_replicas`, un broker `remote`
+  ordinaire qui a simplement un token configure pour son propre usage ne
+  repondrait pas comme un upstream a qui le lui demande sans le vouloir.
 
   **DECIDE (2026-09-05)**, precision apres revue adversariale : `/roadmap/
   sync/status` n'est dispensee QUE de cette garde-la (elle n'exige pas que
@@ -542,10 +584,12 @@ la garde `inactive` (une edition hors ligne deviendrait a jamais
 impoussable) ; `/roadmap/sync/lock` applique la garde `inactive`.
 
 **DECIDE (2026-09-05)** -- semantique de l'instantane de statut : `refused`
-(pushs) et `refused_locks` (claims/releases) sont publies dans
-`RoadmapSyncStatus` a la FIN de chaque passage, aux cotes de `online` et
-`last_error` -- un seul instantane coherent, jamais des compteurs mis a jour
-au milieu d'un passage en cours que le Deck pourrait lire a mi-chemin.
+(pushs), `refused_locks` (claims/releases) et `queue_replaced` (positions de
+file ecrasees par le pull, §4 -- CUMULATIF depuis le demarrage du broker, pas
+remis a zero entre deux passages) sont publies dans `RoadmapSyncStatus` a la
+FIN de chaque passage, aux cotes de `online` et `last_error` -- un seul
+instantane coherent, jamais des compteurs mis a jour au milieu d'un passage
+en cours que le Deck pourrait lire a mi-chemin.
 
 ---
 
@@ -593,6 +637,50 @@ au milieu d'un passage en cours que le Deck pourrait lire a mi-chemin.
   l'ecriture -- pas de bascule a chaud d'un broker deja lance (§2.1 :
   `ensureBroker()` decouvre son mode a son propre demarrage).
 
+**DECIDE (2026-09-05)**, correctifs complementaires apres revue
+adversariale :
+
+- Toast « N positions de file perdues » (§4, residuel `BACKLOG.md` §3.9) :
+  le Deck compare `RoadmapSyncStatus.queue_replaced` (cumulatif) lu a ce tick
+  a la derniere valeur qu'il a lui-meme vue, et toaste le DELTA quand il est
+  positif -- jamais lors de la toute premiere lecture apres un demarrage du
+  Deck (sinon un cumul deja non nul avant que ce Deck n'existe produirait un
+  toast qui ne correspond a rien que l'operateur ait vecu dans cette session).
+- Le canal `peersConfig:get` (invoke, lu par Settings « Broker ») ET
+  l'evenement `peersConfig:summary` (pousse sans etre demande apres une
+  ecriture cote hote) sont desormais BLOQUES pour un companion mobile
+  appaire (residuel `BACKLOG.md` §3.9, B10) : le panneau affiche « host-only »
+  sur un telephone au lieu du mode/URL/presence-de-token, et l'annonce
+  post-ecriture ne traverse plus vers un companion non plus. `upstream_url`
+  est en outre RETIRE de l'instantane de statut de replication cote renderer
+  (celui que lit le badge/la banniere) : aucun payload atteignable par un
+  companion ne porte donc plus l'URL du broker ni la presence d'un token,
+  qu'il s'agisse du canal de config ou du statut de sync. Rationale :
+  c'est une information de configuration DE L'HOTE (topologie du broker de
+  l'operateur), l'ECRITURE etait deja bloquee pour un companion, et un
+  telephone n'a aucun usage de l'URL/etat du broker -- seul le Deck lui-meme
+  (l'operateur devant son poste) en a besoin.
+- Ecriture de `config.json` (residuel `BACKLOG.md` §3.9) : les ecritures
+  concurrentes de DEUX FENETRES KORY passent desormais par un verrou fichier
+  INTER-PROCESSUS (`config.json.lock`, cree avec `O_EXCL` -- echoue si le
+  fichier existe deja, donc jamais deux detenteurs a la fois) avant toute
+  sequence lecture-modification-ecriture. C'est une convention COTE DECK, pas
+  une propriete du fichier : `cli.ts` et `shared/config.ts` n'ecrivent jamais
+  ce fichier aujourd'hui et n'implementent pas ce protocole de verrou -- tout
+  futur ecrivain cote coeur devrait adopter le meme protocole `.lock` pour
+  rester sans danger vis-a-vis du Deck. Reprise du verrou dans trois cas :
+  le PID qui le detient est mort (`process.kill(pid, 0)` echoue) ET le verrou
+  a plus d'environ 10 s (mort probable, pas juste lent -- une fenetre qui
+  vient de demarrer ne doit pas se faire voler son verrou tout frais) ; le
+  verrou porte NOTRE PROPRE pid (verrou laisse par ce meme processus lors
+  d'un crash pendant une ecriture precedente) ; le fichier de verrou est
+  ILLISIBLE ou VIDE, auquel cas ni le pid ni son age ne peuvent etre lus et
+  seul le mtime du fichier tranche (meme delai d'environ 10 s). Nombre de
+  tentatives BORNE avant d'abandonner avec une erreur explicite plutot qu'une
+  attente infinie ; nom de fichier temporaire de l'ecriture atomique UNIQUE
+  par ecrivain (pas de collision entre deux ecritures concurrentes qui se
+  disputeraient le meme nom provisoire).
+
 ---
 
 ## 10. Refuse ou differe (repris dans `BACKLOG.md`)
@@ -607,7 +695,6 @@ au milieu d'un passage en cours que le Deck pourrait lire a mi-chemin.
   restent portes par le broker loopback de chaque machine, jamais relayes
   vers l'upstream tant que la federation n'est pas livree.
 - **Fusion automatique par champ** : refusee (§3.5).
-- **Toast Deck « N positions de file perdues »** : journal seul en v1.
 - **Grace de vivacite a 1 h** : non retenue. A 600 s, une carte dont l'agent a
   plante est liberee en 10 min ; a 1 h elle bloque l'equipe une heure.
 
@@ -623,8 +710,6 @@ au milieu d'un passage en cours que le Deck pourrait lire a mi-chemin.
 - **Confiance relais pour `operator_id`** : jamais transmis ; si un besoin de
   provenance operateur inter-brokers apparait, il passera par une signature
   verifiable upstream, pas par un champ declare.
-- **Outil MCP exposant `lock_contested_by` aux agents natifs** : l'annotation
-  est stockee et visible du Deck ; l'exposition aux agents est a mesurer.
 - **Le Deck ne demarre pas le broker loopback lui-meme**, en mode local
   comme en mode replica : c'est une session (`server.ts`, via
   `ensureBroker()`) qui le fait naitre au demarrage. **DECIDE (2026-09-05)**

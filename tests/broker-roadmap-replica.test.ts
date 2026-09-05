@@ -49,7 +49,12 @@ let replicaId: string;
 let upstreamBlocked = false;
 
 beforeAll(async () => {
-  upstream = await startBroker({ CLAUDE_PEERS_BROKER_TOKEN: TOKEN });
+  // The upstream takes the ROLE explicitly (serve_replicas) on top of the token:
+  // a token alone authenticates callers, it does not make a broker an upstream.
+  upstream = await startBroker({
+    CLAUDE_PEERS_BROKER_TOKEN: TOKEN,
+    CLAUDE_PEERS_SERVE_REPLICAS: "1",
+  });
   proxy = Bun.serve({
     port: 0,
     async fetch(req) {
@@ -613,6 +618,204 @@ test("the dispatch queue is owned by the upstream: its order arrives, a local re
     (i) => i.description === "touched upstream" && i.queue === 1
   );
 }, 40_000);
+
+test("a contest raised on another replica reaches this one, and its own contest is not echoed back", async () => {
+  // `lock_contested_by` is written upstream and travels in the pull row. Without
+  // it landing on the local row an agent on a replica has no way to learn that
+  // the card it is looking at is disputed on another machine -- the field would
+  // read `[]` on every replica in the deployment.
+  const nativePeer = await post<RegisterResponse>(`${upstream.url}/register`, {
+    pid: livePid(),
+    cwd: "/work/upstream-contested",
+    git_root: null,
+    tty: null,
+    summary: "",
+    host: "upstream-host",
+    client_pid: livePid(),
+    project_key: PK,
+    group_id: "default",
+    group_secret_hash: null,
+  });
+  const localPeer = await post<RegisterResponse>(`${replica.url}/register`, {
+    pid: livePid(),
+    cwd: "/work/replica-contested",
+    git_root: null,
+    tty: null,
+    summary: "",
+    host: "replica-host",
+    client_pid: livePid(),
+    project_key: PK,
+    group_id: "default",
+    group_secret_hash: null,
+  });
+  const held = await createOn(upstream, {
+    by: nativePeer.body.peer_id,
+    instance_token: nativePeer.body.instance_token,
+    title: "disputed across three machines",
+    status: "in_progress",
+  });
+  await waitForItem("the upstream lock is mirrored here", replica, held.id, (i) => i.lock_scope === "remote");
+
+  // A THIRD broker -- another replica of the same upstream -- claims it and is
+  // refused, exactly as this replica's pass would be.
+  const beta = await post<{ item?: RoadmapItem }>(`${upstream.url}/roadmap/sync/lock`, {
+    replica_id: "replica-beta",
+    id: held.id,
+    action: "claim",
+    owner: { peer_id: "agent-beta", group_id: null },
+  });
+  expect(["a claim on a card locked upstream is contested", beta.status]).toEqual([
+    "a claim on a card locked upstream is contested",
+    409,
+  ]);
+
+  const seen = await waitForItem(
+    "the other replica's contest reaches this one",
+    replica,
+    held.id,
+    (i) => i.lock_contested_by.includes("agent-beta@replica-beta")
+  );
+  expect([
+    "an agent on this replica reads who else holds the card, not an empty list",
+    seen.lock_contested_by,
+  ]).toEqual([
+    "an agent on this replica reads who else holds the card, not an empty list",
+    ["agent-beta@replica-beta"],
+  ]);
+
+  // This replica contests it too: the upstream now lists BOTH, and the entry
+  // naming this very replica must not come back as somebody else's hold.
+  const forced = await post<UpsertRes>(`${replica.url}/roadmap/upsert`, {
+    project_key: PK,
+    id: held.id,
+    by: localPeer.body.peer_id,
+    instance_token: localPeer.body.instance_token,
+    status: "in_progress",
+    locked: true,
+    force: true,
+  });
+  expect(forced.status).toBe(200);
+  const ownTag = `${localPeer.body.peer_id}@${replicaId}`;
+  await pollUntil("the upstream lists both contesting holders", 15_000, async () => {
+    const item = await itemOn(upstream, held.id);
+    const list = item?.lock_contested_by ?? [];
+    return { done: list.includes(ownTag) && list.includes("agent-beta@replica-beta"), value: list };
+  });
+  const bothUpstream = await itemOn(replica, held.id);
+  expect([
+    "this replica's own contest stays its lock_scope, never a foreign holder",
+    bothUpstream!.lock_contested_by,
+    bothUpstream!.lock_scope,
+  ]).toEqual([
+    "this replica's own contest stays its lock_scope, never a foreign holder",
+    ["agent-beta@replica-beta"],
+    "contested",
+  ]);
+
+  // The other replica withdraws: the upstream list empties, and so does this
+  // one -- a mirrored annotation that only ever grew would strand a lock that
+  // nobody disputes any more.
+  const withdrawn = await post(`${upstream.url}/roadmap/sync/lock`, {
+    replica_id: "replica-beta",
+    id: held.id,
+    action: "release",
+    owner: { peer_id: "agent-beta", group_id: null },
+  });
+  expect(["the withdrawal is accepted", withdrawn.status]).toEqual(["the withdrawal is accepted", 200]);
+  const emptied = await waitForItem(
+    "the emptied upstream list empties this one",
+    replica,
+    held.id,
+    (i) => i.lock_contested_by.length === 0
+  );
+  expect([
+    "nothing is left behind once the other replica gave up",
+    emptied.lock_contested_by,
+  ]).toEqual(["nothing is left behind once the other replica gave up", []]);
+}, 60_000);
+
+test("queue_replaced counts the local positions the upstream order took back, and only those", async () => {
+  // The queue is the one field a replica never pushes, so an offline reorder is
+  // lost at reconnection. The log line says so once per page; this counter is
+  // what lets a poller notice it after the fact, so it must move by exactly the
+  // number of rows whose local position differed -- and not move at all on a
+  // pass that changed nothing.
+  const before = (await syncStatus()).queue_replaced;
+  expect(
+    typeof before,
+    "queue_replaced is published in replica mode, as a number, before anything is replaced"
+  ).toBe("number");
+
+  const head = await createOn(upstream, { by: "agent-upstream", title: "counted head" });
+  const tail = await createOn(upstream, { by: "agent-upstream", title: "counted tail" });
+  expect(
+    (
+      await post<{ ids: string[] }>(`${upstream.url}/roadmap/reorder`, {
+        project_key: PK,
+        by: "agent-upstream",
+        ids: [head.id, tail.id],
+      })
+    ).status
+  ).toBe(200);
+  const headQueue = (await waitForItem("the upstream order reaches the replica", replica, head.id, (i) => i.queue !== null)).queue!;
+  await waitForItem("the upstream order reaches the replica", replica, tail.id, (i) => i.queue !== null);
+  const settled = (await syncStatus()).queue_replaced;
+
+  await goOffline();
+  // Both rows get a LOCAL position that differs from the upstream one, and the
+  // upstream then writes both cards so the reconnection pull carries them back.
+  const localOrder = await post<{ ids: string[] }>(`${replica.url}/roadmap/reorder`, {
+    project_key: PK,
+    by: "agent-local",
+    ids: [tail.id, head.id],
+  });
+  expect(localOrder.status).toBe(200);
+  expect(
+    (await itemOn(replica, head.id))!.queue,
+    "the offline reorder really moved the head, otherwise the pull would replace nothing"
+  ).not.toBe(headQueue);
+  await createOn(upstream, { id: head.id, by: "agent-upstream", description: "touched while offline" });
+  await createOn(upstream, { id: tail.id, by: "agent-upstream", description: "touched while offline" });
+  await goOnline();
+
+  await waitForItem(
+    "the upstream order comes back with the head",
+    replica,
+    head.id,
+    (i) => i.description === "touched while offline" && i.queue === headQueue
+  );
+  await waitForItem(
+    "the upstream order comes back with the tail",
+    replica,
+    tail.id,
+    (i) => i.description === "touched while offline"
+  );
+
+  const after = await pollUntil("the pass that applied the page publishes its snapshot", 15_000, async () => {
+    const value = (await syncStatus()).queue_replaced ?? 0;
+    return { done: value >= (settled ?? 0) + 2, value };
+  });
+  expect([
+    "exactly the two rows whose local position differed are counted",
+    after,
+  ]).toEqual(["exactly the two rows whose local position differed are counted", (settled ?? 0) + 2]);
+
+  // Several further passes, with nothing left to apply: the counter is a
+  // broker-lifetime total, not a per-pass one, so an empty pull must neither
+  // grow it nor reset it. `last_sync_at` changes once per completed pass, so
+  // waiting for two distinct values waits for two real passes rather than a
+  // fixed sleep.
+  const seenPasses = new Set<string>();
+  await pollUntil("two further passes complete with nothing to apply", 15_000, async () => {
+    const status = await syncStatus();
+    if (status.last_sync_at) seenPasses.add(status.last_sync_at);
+    return { done: seenPasses.size >= 3, value: seenPasses.size };
+  });
+  expect([
+    "a pull that replaces nothing leaves the counter where it was",
+    (await syncStatus()).queue_replaced,
+  ]).toEqual(["a pull that replaces nothing leaves the counter where it was", after]);
+}, 60_000);
 
 test("with its upstream unreachable the replica keeps serving, counts what is waiting, then drains it", async () => {
   await goOffline();

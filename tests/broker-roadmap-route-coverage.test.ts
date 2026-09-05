@@ -16,7 +16,9 @@ import type { RegisterResponse, RoadmapItem } from "../shared/types.ts";
 let broker: TestBroker;
 
 beforeAll(async () => {
-  broker = await startBroker();
+  // serve_replicas ON, no broker_token: the replication routes get past the
+  // ROLE refusal so the probe below reaches the CREDENTIAL one it is about.
+  broker = await startBroker({ CLAUDE_PEERS_SERVE_REPLICAS: "1" });
 });
 
 afterAll(async () => {
@@ -69,9 +71,11 @@ const READ_ROUTES = new Set([
  * for resolveRoadmapAuthor on these two is a chain of three guarantees, each
  * asserted where the routes themselves are tested:
  *
- * 1. the shared broker_token is REQUIRED -- a broker configured without one
- *    does not serve them at all (probed live below, since this file's broker
- *    is exactly such a deployment);
+ * 1. the deployment must opt into the upstream ROLE (`serve_replicas`) AND
+ *    have a shared broker_token -- either one missing and the routes are not
+ *    served at all (the token half is probed live below, since this file's
+ *    broker is exactly such a deployment; the role half lives in
+ *    tests/broker-roadmap-sync-routes);
  * 2. the work-lock still binds -- a push onto a card locked by a holder this
  *    replica does not relay is refused 409 'locked_upstream', the same answer
  *    a third party gets from /roadmap/upsert;

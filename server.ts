@@ -1075,16 +1075,42 @@ async function resolveRoadmapId(idOrPrefix: string): Promise<string> {
   );
 }
 
-function formatRoadmapItemLine(i: RoadmapItem): string {
+/**
+ * How many contesting holders a rendered line names before it stops counting
+ * them. `lock_contested_by` is written by whichever OTHER brokers relay a claim
+ * on the same card, so its length is not this process's to bound, and one
+ * runaway card must not be able to inflate every line of a roadmap_list.
+ */
+const LOCK_CONTESTED_SHOWN = 3;
+
+/**
+ * The peers holding this card's work-lock on ANOTHER broker at the same time as
+ * its local holder. Empty string when nothing contests it, so an uncontested
+ * card -- almost every card -- costs zero characters per turn; a tolerated
+ * absent field (an older broker answers without it) reads the same way.
+ */
+export function formatLockContestedBy(contested: readonly string[] | undefined): string {
+  if (!Array.isArray(contested) || contested.length === 0) return "";
+  const shown = contested.slice(0, LOCK_CONTESTED_SHOWN);
+  const hidden = contested.length - shown.length;
+  return `${shown.join(", ")}${hidden > 0 ? `, +${hidden} more` : ""}`;
+}
+
+export function formatRoadmapItemLine(i: RoadmapItem): string {
   const tags = i.tags.length ? `  #${i.tags.join(" #")}` : "";
   const lock = i.locked ? ` 🔒${i.locked_by ?? ""}` : "";
+  // Next to the lock marker, where an agent already looks to decide whether the
+  // card is free: a claim relayed to a shared upstream can be held by an agent
+  // on another machine, which no local field would ever show.
+  const contested = formatLockContestedBy(i.lock_contested_by);
+  const alsoHeld = contested ? ` [also held elsewhere: ${contested}]` : "";
   // Shown in list output so an agent evaluating a card sees it is blocked
   // before attempting the claim that would 403.
   const inactive = i.inactive ? " [INACTIVE -- do not claim]" : "";
   // Card 7defe381 LOT 1: a marker present ONLY when the card is enqueued, so
   // the vast majority of unenqueued cards pay zero extra chars per turn.
   const queueRank = i.queue !== null ? ` queue:${i.queue}` : "";
-  return `[${i.id.slice(0, 8)}] ${i.kind} · ${i.priority} · value:${i.value} effort:${i.effort} · ${i.status}${queueRank}${lock}${inactive} — ${i.title}${tags}`;
+  return `[${i.id.slice(0, 8)}] ${i.kind} · ${i.priority} · value:${i.value} effort:${i.effort} · ${i.status}${queueRank}${lock}${alsoHeld}${inactive} — ${i.title}${tags}`;
 }
 
 /**
@@ -1146,11 +1172,12 @@ function formatRoadmapItemDetail(i: RoadmapItem): string {
  * the broker silently normalizes or drops fields.
  * domain is per-tool, never a union: roadmap_add never forwards locked, so it
  * must never appear in that path's ack even if passed.
- * When the caller's own instance token matches item.locked_by_token, the ack
- * adds one trailer line reminding it how to release its own claim; no lookup or
- * trailer otherwise.
+ * Two conditional trailers, each read off the written item: one when the
+ * caller's own instance token matches item.locked_by_token, reminding it how to
+ * release its own claim, and one when another broker holds the same work-lock
+ * (lock_contested_by). Neither costs a lookup nor a character otherwise.
  */
-function formatRoadmapUpsertAck(opts: {
+export function formatRoadmapUpsertAck(opts: {
   label: "created" | "updated";
   item: RoadmapItem;
   args: Record<string, unknown>;
@@ -1202,6 +1229,13 @@ function formatRoadmapUpsertAck(opts: {
     lines.push(
       `  you hold this card's work-lock (since ${since}) -- if only your own part is done, pass locked:false while leaving status:in_progress so the card stays claimed for the rest`
     );
+  }
+  // Read off the WRITTEN card, like every other line here: an agent that just
+  // claimed a card relayed to a shared upstream learns from the ack itself that
+  // somebody else holds it too, instead of from a silent divergence later.
+  const contested = formatLockContestedBy(item.lock_contested_by);
+  if (contested) {
+    lines.push(`  work-lock also held elsewhere: ${contested}`);
   }
   return lines.join("\n");
 }

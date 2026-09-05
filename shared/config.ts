@@ -51,6 +51,14 @@ export interface Config {
    * (its upstream). A remote broker_url alone never implies it.
    */
   offline_replica: boolean;
+  /**
+   * Upstream role opt-in: this broker serves the replication routes
+   * (/roadmap/sync/pull|push|lock) to the replicas that present its
+   * broker_token. Off by default -- holding a token makes a broker
+   * authenticated, not an upstream, and a deployment that never meant to be
+   * replicated from must not become one by having a token.
+   */
+  serve_replicas: boolean;
 }
 
 interface FileConfig {
@@ -68,6 +76,7 @@ interface FileConfig {
   broker_token?: string;
   bind_host?: string;
   offline_replica?: boolean;
+  serve_replicas?: boolean;
 }
 
 const DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001";
@@ -167,6 +176,10 @@ export async function loadConfig(): Promise<Config> {
     process.env.CLAUDE_PEERS_OFFLINE_REPLICA,
     fileCfg.offline_replica === true
   );
+  const serve_replicas = parseBooleanFlag(
+    process.env.CLAUDE_PEERS_SERVE_REPLICAS,
+    fileCfg.serve_replicas === true
+  );
 
   return {
     port,
@@ -181,6 +194,7 @@ export async function loadConfig(): Promise<Config> {
     broker_token,
     bind_host,
     offline_replica,
+    serve_replicas,
   };
 }
 

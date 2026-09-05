@@ -7,6 +7,7 @@
 import { test, expect } from 'bun:test'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { extractBracedBody } from './_braced-body'
 import {
   CHANNEL_TIERS,
   COMPANION_LOCKOUT_THRESHOLD,
@@ -14,8 +15,11 @@ import {
   COMPANION_MAX_PAYLOAD_BYTES,
   CompanionAuth,
   isPrivateAddress,
+  LIGHT_MODE_BLOCKED_EVENTS,
   parseClientFrame,
-  REMOTE_BLOCKED_CHANNELS
+  REMOTE_BLOCKED_CHANNELS,
+  REMOTE_BLOCKED_EVENTS,
+  shouldForwardEvent
 } from '../desktop/src/shared/companion.ts'
 
 test('channels are unique within each transport kind', () => {
@@ -131,6 +135,85 @@ test('agents:stop (trust-changing) is remote-blocked; agents:stop-state (read) i
 test('approvals:reply and approvals:decline (render a human verdict a stopped agent consumes) stay on the remote-block floor', () => {
   expect(REMOTE_BLOCKED_CHANNELS.has('approvals:reply')).toBe(true)
   expect(REMOTE_BLOCKED_CHANNELS.has('approvals:decline')).toBe(true)
+})
+
+// peersConfig:get is a READ (tier 0) and is blocked anyway: it describes the
+// HOST's broker topology -- the URL, whether a bearer token is configured,
+// which environment variables force it. Tier 0 is below the tier>=3 threshold
+// REMOTE_BLOCKED_CHANNELS auto-unions, so only the explicit floor blocks it;
+// dropping it from that list would silently publish the operator's machine
+// configuration to any paired phone, with no test failing anywhere else.
+test('peersConfig:get stays remote-blocked by the EXPLICIT floor even though it is a tier-0 read', () => {
+  expect(CHANNEL_TIERS['peersConfig:get']).toBe(0)
+  expect(REMOTE_BLOCKED_CHANNELS.has('peersConfig:get')).toBe(true)
+  // The write side is blocked by its tier alone; both halves of the pair must
+  // be unreachable, or the panel would be readable and half-usable remotely.
+  expect(CHANNEL_TIERS['peersConfig:setOfflineReplica']).toBe(3)
+  expect(REMOTE_BLOCKED_CHANNELS.has('peersConfig:setOfflineReplica')).toBe(true)
+})
+
+test('peersConfig:summary is never PUSHED either: blocking the read alone would leak the same payload', () => {
+  // The invoke floor only refuses what the phone ASKS for. peersConfig:summary
+  // is broadcast by the host after a successful write, unasked -- so blocking
+  // peersConfig:get while leaving the event open would deliver the host's
+  // broker URL and token marker over the LAN the moment the operator ticks the
+  // checkbox on the PC.
+  expect(REMOTE_BLOCKED_EVENTS.has('peersConfig:summary')).toBe(true)
+  for (const mode of ['full', 'light'] as const) {
+    expect(shouldForwardEvent('peersConfig:summary', mode)).toBe(false)
+  }
+})
+
+test('every REMOTE_BLOCKED_EVENTS entry is a declared EVENT channel, not a misfiled invoke', () => {
+  // A name that matches no event channel blocks nothing and is invisible: the
+  // set would keep looking like a guard while forwarding everything.
+  const events = new Set(
+    Object.values(COMPANION_MANIFEST)
+      .filter((s) => s.kind === 'event')
+      .map((s) => s.channel)
+  )
+  for (const ch of REMOTE_BLOCKED_EVENTS) expect(events.has(ch)).toBe(true)
+})
+
+test('shouldForwardEvent: the security floor holds in both modes, the bandwidth rule only in light', () => {
+  // The two reasons must not collapse into one: a light-mode-only check would
+  // forward the blocked event to a foregrounded phone, and a floor-only check
+  // would restore the pty:data flood MB5 closed.
+  for (const ch of LIGHT_MODE_BLOCKED_EVENTS) {
+    expect(shouldForwardEvent(ch, 'light')).toBe(false)
+    expect(shouldForwardEvent(ch, 'full')).toBe(true)
+  }
+  // An ordinary event travels in both modes.
+  expect(shouldForwardEvent('sessions:changed', 'full')).toBe(true)
+  expect(shouldForwardEvent('sessions:changed', 'light')).toBe(true)
+})
+
+// Host CONFIGURATION never reaches a paired device, by two different means:
+// the peersConfig channels are refused (invoke floor + event floor above), and
+// the payloads that DO travel simply do not carry the fields. The second half
+// is the one nothing else guards: 'roadmap:sync' is an ordinary, forwarded
+// event, so a field re-added to its status type would be on the phone with no
+// channel decision to review.
+// Residual, stated not assumed: this reads ONE declaration's text. It is not a
+// walk of every event payload type in the manifest -- that needs a TS AST --
+// so it bites the field coming back on RoadmapSyncStatus and nothing wider.
+const DECK_TYPES = join(import.meta.dir, '..', 'desktop', 'src', 'shared', 'types.ts')
+const HOST_CONFIG_FIELDS = ['upstream_url', 'brokerUrl', 'hasToken', 'broker_token']
+
+test("the 'roadmap:sync' status type declares no host-configuration field", () => {
+  const src = readFileSync(DECK_TYPES, 'utf8')
+  const anchor = src.indexOf('export interface RoadmapSyncStatus {')
+  // Fail-closed on its own reach: a renamed or moved declaration must break
+  // this test, never make it silently scan an empty string.
+  expect(anchor).toBeGreaterThan(-1)
+  const body = extractBracedBody(src, src.indexOf('{', anchor))
+  expect(body.length).toBeGreaterThan(0)
+  for (const field of HOST_CONFIG_FIELDS) {
+    expect(
+      new RegExp(`(^|[^\\w])${field}\\s*\\??\\s*:`).test(body),
+      `RoadmapSyncStatus must not declare ${field}: this status is broadcast on 'roadmap:sync', an event every paired companion receives`
+    ).toBe(false)
+  }
 })
 
 test('companion control + native dialogs are remote-blocked', () => {
@@ -258,6 +341,18 @@ test('companion-server.ts source still wires maxPayload and recordFailure (weak 
   const src = readFileSync(join(import.meta.dir, '..', 'desktop', 'src', 'main', 'companion-server.ts'), 'utf8')
   expect(src).toContain('maxPayload: COMPANION_MAX_PAYLOAD_BYTES')
   expect(src).toContain('this.auth.recordFailure(addr)')
+})
+
+// Same weak tier, same warning: shouldForwardEvent is pure and tested above,
+// but nothing here proves the server's outbound path really consults it -- the
+// event push runs inside a WebSocket connection this file never opens. What
+// the scan does bite: the call being deleted, and a SECOND, unaudited decision
+// path reappearing next to it (a bare membership test on either set).
+test('companion-server.ts source still routes every outbound event through shouldForwardEvent (weak guard, see comment)', () => {
+  const src = readFileSync(join(import.meta.dir, '..', 'desktop', 'src', 'main', 'companion-server.ts'), 'utf8')
+  expect(src).toContain('shouldForwardEvent(channel, ctx.mode)')
+  expect(src).not.toContain('LIGHT_MODE_BLOCKED_EVENTS.has(')
+  expect(src).not.toContain('REMOTE_BLOCKED_EVENTS.has(')
 })
 
 // ----- Lot 2: device list + revoke -----

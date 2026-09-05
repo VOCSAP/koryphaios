@@ -217,12 +217,60 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   answer 403 without one, and that surfaces as "upstream unreachable", a
   symptom saying nothing about its cause. A read that fails renders an explicit
   error with a re-read button — a category rendering nothing reads as a broken
-  app, and the main-side `reportError` is invisible to the operator. That checkbox writes the claude-peers CORE
+  app, and the main-side `reportError` is invisible to the operator. The panel
+  is `BrokerSettings.tsx`, mounted only while the category is open (so the file
+  is re-read on every visit) and driven by the pure `brokerPanelState`
+  (`shared/broker-panel.ts`) over four states: a COMPANION client gets a
+  host-only message and issues no read at all — `peersConfig:get` is a tier-0
+  read that the EXPLICIT remote-block floor refuses anyway, since the broker
+  topology of the host (URL, token presence, which `CLAUDE_PEERS_*` variable
+  forces it) is host configuration a paired phone has no use for, and the
+  refusal would otherwise land in the error state as an alarm about a file that
+  is none of that device's business. The same helper gates the read, so the
+  guard on the call and the guard on the rendering cannot disagree. Blocking
+  the invoke is only two thirds: `peersConfig:summary` is PUSHED unasked after a
+  host write, so it sits on a second floor, `REMOTE_BLOCKED_EVENTS`, consulted
+  with the light-mode rule by the pure `shouldForwardEvent`; and `roadmap:sync`
+  is an ordinary forwarded event no floor refuses, so the Deck's
+  `RoadmapSyncStatus` simply does not declare `upstream_url` — the sanitizer
+  never maps it and the offline banner carries no `title`. The guarantee is
+  therefore **no companion-reachable payload carries a broker URL or the token
+  presence**, and the host operator reads both in Settings > Broker, which is
+  host-only. That panel also reports `serve_replicas` (file key, or
+  `CLAUDE_PEERS_SERVE_REPLICAS`, same flag vocabulary, env over file) read-only:
+  an upstream that answers 403 surfaces as "upstream unreachable", and this line
+  is where the real cause becomes visible. That
+  checkbox writes the claude-peers CORE
   config (`peers-config-store.ts`: read-modify-write preserving every other
   key, atomic, 0600, and a file it could not parse is never overwritten) —
   the same file `server.ts`, `cli.ts` and every non-Kory session read, so the
   channel is tier 3 / remote-blocked and the help text says plainly that the
-  change only reaches sessions and brokers started afterwards.
+  change only reaches sessions and brokers started afterwards. Two Kory windows
+  writing it at once is closed by an exclusive `config.json.lock` created with
+  `wx`, holding `{ pid, at }` -- a DECK-SIDE convention, not a property of the
+  file format: `cli.ts` and `shared/config.ts` never write this file and do
+  not implement the lock protocol, so a window and a `cli.ts` invocation can
+  still race each other, and any future core writer would need to adopt the
+  same `.lock` protocol to close that gap. Taken over when it is older than
+  10 s AND its process is gone (`process.kill(pid, 0)`, EPERM reading as
+  alive), or when it names OUR OWN pid (this same process's lock, left behind
+  by a crash mid-write on a prior run), or -- since neither check applies to a
+  file with nothing to read -- an empty or malformed lock file expires on
+  mtime alone (an EMPTY one silently: `wx` publishes the lock before its body,
+  so a reader between the two legitimately sees zero bytes, and tracing that
+  would journal a line on every contended save); retried 20 × 50 ms before an
+  explicit refusal whose message names the recovery ("… a lock left behind by a
+  crashed writer is taken over after 10 s, so retry in a few seconds" — it
+  reaches the operator verbatim, since `guarded()` toasts the IPC error raw),
+  and released in a `finally`;
+  `writeFileAtomic` names its temp file `<file>.<pid>.<random>.tmp` so a lost
+  race cannot publish another process's buffer. A queue position lost to the
+  upstream order (`queue_replaced`, cumulative and part of the broadcast
+  signature) is toasted as the DELTA between two polls — the first observation
+  only sets the baseline, so a Deck restart never replays the lifetime count.
+  The toast throttle DROPS a repeat rather than queueing it, so deltas are
+  accumulated (`pendingQueueReplaced`) and the pending count is cleared only
+  once `showToast` reports it actually displayed: no loss goes unannounced.
 - **Files & Git rail views (GX1–GX9)**: two READ-ONLY rail
   views. 📁 Files: lazy explorer + plain-text viewer (line-number gutter, no
   highlighting in v1 — shiki/highlight.js noted for v2) over roots the main

@@ -564,7 +564,11 @@ export function sanitizeSyncStatus(raw: unknown, route = '/roadmap/sync/status')
   const r = raw as Record<string, unknown>
   return {
     mode: oneOf(r.mode, SYNC_MODES, 'local'),
-    upstream_url: strOrUndefined(r.upstream_url),
+    // `upstream_url` is deliberately NOT mapped: the status is broadcast on
+    // 'roadmap:sync', an event a paired companion receives, and the address of
+    // the operator's upstream broker is host configuration. Dropping it at the
+    // sanitizer closes the leak by construction rather than by a filter each
+    // new sink would have to remember.
     online: boolOrUndefined(r.online),
     since: strOrUndefined(r.since),
     last_error: nullableStr(r.last_error),
@@ -574,6 +578,7 @@ export function sanitizeSyncStatus(raw: unknown, route = '/roadmap/sync/status')
     pending_push: counter(r.pending_push),
     refused: counter(r.refused),
     refused_locks: counter(r.refused_locks),
+    queue_replaced: counter(r.queue_replaced),
     locks: lockCounts(r.locks)
   }
 }

@@ -6,6 +6,7 @@
 
 import { test, expect } from "bun:test";
 import { Database } from "bun:sqlite";
+import { join } from "node:path";
 import {
   startBroker as startPlainBroker,
   stopBroker,
@@ -31,15 +32,20 @@ const PK = "github.com/vocsap/sync-routes-repo";
 const R1 = "replica-one";
 const R2 = "replica-two";
 /**
- * The replication routes are served only by a broker that has a broker_token
- * to authenticate its replicas with, so every upstream in this file runs with
- * one and every request carries the Bearer. `startPlainBroker` is used raw only
- * where the absence of a token IS the subject.
+ * An upstream in this file is two opt-ins, not one: `serve_replicas` for the
+ * ROLE and a broker_token to authenticate the replicas that take it up. Every
+ * upstream here runs with both and every request carries the Bearer;
+ * `startPlainBroker` is used raw only where the absence of one of the two IS
+ * the subject.
  */
 const TOKEN = "sync-routes-token";
 
 function startBroker(env: Record<string, string> = {}): Promise<TestBroker> {
-  return startPlainBroker({ CLAUDE_PEERS_BROKER_TOKEN: TOKEN, ...env });
+  return startPlainBroker({
+    CLAUDE_PEERS_BROKER_TOKEN: TOKEN,
+    CLAUDE_PEERS_SERVE_REPLICAS: "1",
+    ...env,
+  });
 }
 
 async function post<T = unknown>(url: string, body: unknown): Promise<{ status: number; body: T }> {
@@ -845,7 +851,9 @@ test("the three replication routes are refused outright on a broker with no conf
   // Without a broker_token every route is unauthenticated, and /roadmap/sync/push
   // writes content on any card under any author while walking past the work-lock
   // guard. The routes exist only where a credential gates them.
-  const open = await startPlainBroker();
+  // serve_replicas ON and no token: the role is granted, so the refusal this
+  // probe reads back is the CREDENTIAL one and not the role one that precedes it.
+  const open = await startPlainBroker({ CLAUDE_PEERS_SERVE_REPLICAS: "1" });
   const closed = await startBroker();
   try {
     const seeded = await post<UpsertRes>(`${closed.url}/roadmap/upsert`, {
@@ -904,6 +912,370 @@ test("the three replication routes are refused outright on a broker with no conf
   } finally {
     await stopBroker(closed);
     await stopBroker(open);
+  }
+}, 30_000);
+
+test("releasing a natively-held card drops the contest annotation, relayed or not", async () => {
+  // Contestation is defined against a HOLDER: once the lock is gone the list has
+  // nothing left to be about. The clear used to be conditional on the card
+  // carrying a `lock_relay`, which a natively-held card never does -- so a
+  // contest raised against a local agent's lock outlived the lock forever, and
+  // every replica of this broker mirrored that stale entry on every pull.
+  const b = await startBroker();
+  try {
+    const native = await post<RegisterResponse>(`${b.url}/register`, {
+      pid: livePid(),
+      cwd: "/work/native-holder",
+      git_root: null,
+      tty: null,
+      summary: "",
+      host: "native-host",
+      client_pid: livePid(),
+      project_key: PK,
+      group_id: "default",
+      group_secret_hash: null,
+    });
+    const held = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: native.body.peer_id,
+      instance_token: native.body.instance_token,
+      title: "held by a local agent, wanted by a replica",
+      status: "in_progress",
+    });
+    expect(held.status).toBe(200);
+    expect(["the native peer really holds it", held.body.item.locked]).toEqual([
+      "the native peer really holds it",
+      true,
+    ]);
+    // No relay anywhere on this card: the holder is one of this broker's own
+    // agents, which is exactly the shape the old condition skipped.
+    const db = new Database(b.dbPath);
+    const relayed = db
+      .query("SELECT lock_relay FROM roadmap_items WHERE id = ?")
+      .get(held.body.item.id) as { lock_relay: string | null };
+    expect(["a natively-held card carries no relay", relayed.lock_relay]).toEqual([
+      "a natively-held card carries no relay",
+      null,
+    ]);
+
+    const contest = await post<{ item?: RoadmapSyncRow }>(`${b.url}/roadmap/sync/lock`, {
+      replica_id: R2,
+      id: held.body.item.id,
+      action: "claim",
+      owner: { peer_id: "agent-beta", group_id: null },
+    });
+    expect(["a replica's claim on a held card is contested", contest.status]).toEqual([
+      "a replica's claim on a held card is contested",
+      409,
+    ]);
+    expect([
+      "the contest is recorded against the holder",
+      contest.body.item?.lock_contested_by,
+    ]).toEqual(["the contest is recorded against the holder", [`agent-beta@${R2}`]]);
+
+    const released = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK,
+      id: held.body.item.id,
+      by: native.body.peer_id,
+      instance_token: native.body.instance_token,
+      locked: false,
+    });
+    expect(["the holder releases its own lock", released.status, released.body.item.locked]).toEqual([
+      "the holder releases its own lock",
+      200,
+      false,
+    ]);
+    const after = db
+      .query("SELECT lock_contested_by, lock_relay FROM roadmap_items WHERE id = ?")
+      .get(held.body.item.id) as { lock_contested_by: string; lock_relay: string | null };
+    expect([
+      "a released card keeps no contest for a holder that is gone",
+      after.lock_contested_by,
+      after.lock_relay,
+    ]).toEqual(["a released card keeps no contest for a holder that is gone", "[]", null]);
+
+    // The sibling native release paths clear the same set unconditionally in
+    // their own single UPDATE (archive here; the operator lock-release and the
+    // stale-lock sweep share that statement shape). Green before this change as
+    // well as after: it is here so a future edit that makes one of them
+    // conditional the way upsert's was is caught by a test rather than by a
+    // replica mirroring a dead contest.
+    const archived = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: native.body.peer_id,
+      instance_token: native.body.instance_token,
+      title: "contested, then archived",
+      status: "in_progress",
+    });
+    const archivedContest = await post<{ item?: RoadmapSyncRow }>(`${b.url}/roadmap/sync/lock`, {
+      replica_id: R2,
+      id: archived.body.item.id,
+      action: "claim",
+      owner: { peer_id: "agent-beta", group_id: null },
+    });
+    expect(["the second card is contested too", archivedContest.status]).toEqual([
+      "the second card is contested too",
+      409,
+    ]);
+    const archiveRes = await post(`${b.url}/roadmap/archive`, {
+      id: archived.body.item.id,
+      by: native.body.peer_id,
+      instance_token: native.body.instance_token,
+    });
+    expect(["the holder archives its own card", archiveRes.status]).toEqual([
+      "the holder archives its own card",
+      200,
+    ]);
+    const afterArchive = db
+      .query("SELECT lock_contested_by FROM roadmap_items WHERE id = ?")
+      .get(archived.body.item.id) as { lock_contested_by: string };
+    expect([
+      "archiving releases the lock and the contest with it",
+      afterArchive.lock_contested_by,
+    ]).toEqual(["archiving releases the lock and the contest with it", "[]"]);
+
+    // The other half of the same decision: a card with nothing to clear must not
+    // pay a second row version for the check. `rev` is the pull cursor, so an
+    // extra bump per ordinary edit would republish every card to every replica.
+    const plain = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: native.body.peer_id,
+      instance_token: native.body.instance_token,
+      title: "never locked, never contested",
+    });
+    const revOf = (id: string) =>
+      (db.query("SELECT rev FROM roadmap_items WHERE id = ?").get(id) as { rev: number }).rev;
+    const ordinaryEdit = {
+      project_key: PK,
+      id: plain.body.item.id,
+      by: native.body.peer_id,
+      instance_token: native.body.instance_token,
+      description: "an ordinary edit",
+    };
+    // Sent twice, and MEASURED on the second: an edit that changes the content
+    // versions the row through the content trigger as well, so only a repeat of
+    // the same values isolates the one bump the main UPDATE owes. A guard that
+    // fired here would add a second.
+    await post<UpsertRes>(`${b.url}/roadmap/upsert`, ordinaryEdit);
+    const before = revOf(plain.body.item.id);
+    await post<UpsertRes>(`${b.url}/roadmap/upsert`, ordinaryEdit);
+    expect([
+      "an edit with no lock state to clear versions the row exactly once",
+      revOf(plain.body.item.id) - before,
+    ]).toEqual(["an edit with no lock state to clear versions the row exactly once", 1]);
+    db.close();
+  } finally {
+    await stopBroker(b);
+  }
+}, 30_000);
+
+test("the three replication routes are refused on a token-bearing broker that does not serve replicas", async () => {
+  // A broker_token is what a broker gives its own agents and Decks; it is not a
+  // declaration that this broker is somebody's upstream. Without serve_replicas
+  // the three routes are refused even to a caller holding the right Bearer --
+  // and the refusal NAMES the flag, so the operator does not go hunting for a
+  // credential he already has.
+  const noRole = await startPlainBroker({ CLAUDE_PEERS_BROKER_TOKEN: TOKEN });
+  const upstream = await startBroker();
+  try {
+    const seeded = await post<UpsertRes>(`${noRole.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: "agent-seed",
+      title: "reachable, and not replicable",
+    });
+    expect(seeded.status).toBe(200);
+
+    for (const [route, body] of [
+      ["/roadmap/sync/pull", { replica_id: R1, since_rev: 0 }],
+      [
+        "/roadmap/sync/push",
+        { replica_id: R1, item: pushItem({ id: "card-no-role" }), expected_content_rev: null },
+      ],
+      [
+        "/roadmap/sync/lock",
+        {
+          replica_id: R1,
+          id: seeded.body.item.id,
+          action: "claim",
+          owner: { peer_id: "agent-remote", group_id: null },
+        },
+      ],
+    ] as const) {
+      const res = await post<{ error?: string }>(`${noRole.url}${route}`, body);
+      expect([`${route} is refused without serve_replicas`, res.status]).toEqual([
+        `${route} is refused without serve_replicas`,
+        403,
+      ]);
+      expect([
+        `${route}: the refusal names serve_replicas so the operator can act on it`,
+        (res.body.error ?? "").includes("serve_replicas"),
+      ]).toEqual([
+        `${route}: the refusal names serve_replicas so the operator can act on it`,
+        true,
+      ]);
+      if (route === "/roadmap/sync/pull") {
+        // Pinned verbatim once: this string is what an operator greps for and
+        // what the replica half matches on to raise its own hint.
+        expect(res.body.error).toBe(
+          "/roadmap/sync/pull is not served here: replication routes require serve_replicas to be enabled on this broker"
+        );
+      }
+      // Distinct from the credential refusal: a broker that HAS the token must
+      // never be told to go configure one.
+      expect([
+        `${route}: the role refusal is not the broker_token refusal`,
+        (res.body.error ?? "").includes("broker_token"),
+      ]).toEqual([`${route}: the role refusal is not the broker_token refusal`, false]);
+    }
+
+    // Same three calls, same token, on a broker that DID take the role.
+    const pulled = await pull(upstream, 0);
+    expect(["pull answers once serve_replicas is on", pulled.status]).toEqual([
+      "pull answers once serve_replicas is on",
+      200,
+    ]);
+    const served = await post<UpsertRes>(`${upstream.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: "agent-seed",
+      title: "replicable",
+    });
+    const pushed = await post<RoadmapSyncPushResponse>(`${upstream.url}/roadmap/sync/push`, {
+      replica_id: R1,
+      item: pushItem({ id: "card-with-role", title: "pushed to a real upstream" }),
+      expected_content_rev: null,
+    });
+    expect(["push answers once serve_replicas is on", pushed.status]).toEqual([
+      "push answers once serve_replicas is on",
+      200,
+    ]);
+    const claimed = await post<RoadmapSyncLockClaimResponse>(`${upstream.url}/roadmap/sync/lock`, {
+      replica_id: R1,
+      id: served.body.item.id,
+      action: "claim",
+      owner: { peer_id: "agent-remote", group_id: null },
+    });
+    expect(["lock answers once serve_replicas is on", claimed.status]).toEqual([
+      "lock answers once serve_replicas is on",
+      200,
+    ]);
+  } finally {
+    await stopBroker(upstream);
+    await stopBroker(noRole);
+  }
+}, 30_000);
+
+test("with NEITHER the role nor a token, the role refusal is the one answered", async () => {
+  // Both guards fire on this deployment, so only their ORDER decides what the
+  // operator reads. It is pinned here rather than left to whichever guard the
+  // handler happens to call first: taking the role first means the answer names
+  // the decision to make (be an upstream at all) before the credential that
+  // decision would need, and an operator told to configure a token for routes
+  // he never meant to serve would be following the wrong instruction.
+  const bare = await startPlainBroker();
+  try {
+    for (const [route, body] of [
+      ["/roadmap/sync/pull", { replica_id: R1, since_rev: 0 }],
+      [
+        "/roadmap/sync/push",
+        { replica_id: R1, item: pushItem({ id: "card-bare" }), expected_content_rev: null },
+      ],
+      [
+        "/roadmap/sync/lock",
+        { replica_id: R1, id: "card-bare", action: "claim", owner: { peer_id: "agent-x", group_id: null } },
+      ],
+    ] as const) {
+      const res = await fetch(`${bare.url}${route}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const parsed = (await res.json()) as { error?: string };
+      expect([`${route}: refused`, res.status]).toEqual([`${route}: refused`, 403]);
+      expect([
+        `${route}: the role refusal comes first, the credential one is not what is said`,
+        (parsed.error ?? "").includes("serve_replicas"),
+        (parsed.error ?? "").includes("broker_token"),
+      ]).toEqual([
+        `${route}: the role refusal comes first, the credential one is not what is said`,
+        true,
+        false,
+      ]);
+    }
+  } finally {
+    await stopBroker(bare);
+  }
+}, 30_000);
+
+test("a replica with serve_replicas set warns at startup and still refuses to serve the routes", async () => {
+  // The flag is dead config on a replica: chaining replicas is what the mode
+  // refusal exists to prevent, and a role opt-in must never be able to undo it.
+  // The warning is the other half -- an operator who set the flag must not read
+  // his own replicas' 403s as a bug.
+  const upstream = await startBroker();
+  const replica = await startPlainBroker({
+    CLAUDE_PEERS_BROKER_URL: upstream.url,
+    CLAUDE_PEERS_BROKER_TOKEN: TOKEN,
+    CLAUDE_PEERS_OFFLINE_REPLICA: "1",
+    CLAUDE_PEERS_SERVE_REPLICAS: "1",
+  });
+  try {
+    const health = (await (await fetch(`${replica.url}/health`)).json()) as {
+      mode: string;
+      serve_replicas: boolean;
+    };
+    expect(["the replica reports its mode", health.mode]).toEqual(["the replica reports its mode", "replica"]);
+    expect([
+      "/health reports the flag as configured, even where the broker will not act on it",
+      health.serve_replicas,
+    ]).toEqual([
+      "/health reports the flag as configured, even where the broker will not act on it",
+      true,
+    ]);
+
+    for (const [route, body] of [
+      ["/roadmap/sync/pull", { replica_id: R1, since_rev: 0 }],
+      [
+        "/roadmap/sync/push",
+        { replica_id: R1, item: pushItem({ id: "card-chained" }), expected_content_rev: null },
+      ],
+      [
+        "/roadmap/sync/lock",
+        { replica_id: R1, id: "card-chained", action: "claim", owner: { peer_id: "agent-x", group_id: null } },
+      ],
+    ] as const) {
+      const res = await post<{ error?: string }>(`${replica.url}${route}`, body);
+      expect([`${route}: a replica with the flag still refuses`, res.status]).toEqual([
+        `${route}: a replica with the flag still refuses`,
+        403,
+      ]);
+      expect([
+        `${route}: the refusal is the replica-mode one, not the role one`,
+        (res.body.error ?? "").includes("this broker is a replica"),
+      ]).toEqual([`${route}: the refusal is the replica-mode one, not the role one`, true]);
+      expect([
+        `${route}: a replica never answers with the serve_replicas hint`,
+        (res.body.error ?? "").includes("serve_replicas"),
+      ]).toEqual([`${route}: a replica never answers with the serve_replicas hint`, false]);
+    }
+
+    // A pristine replica publishes the counter at zero rather than omitting it:
+    // a poller that reads `undefined` on a fresh broker cannot tell "nothing
+    // replaced yet" from "this broker does not report it".
+    const status = await post<RoadmapSyncStatus>(`${replica.url}/roadmap/sync/status`, {});
+    expect([
+      "a fresh replica publishes queue_replaced at zero",
+      status.body.mode,
+      status.body.queue_replaced,
+    ]).toEqual(["a fresh replica publishes queue_replaced at zero", "replica", 0]);
+
+    const logged = await Bun.file(join(replica.tmpDir, "logs", "broker.log")).text();
+    expect(
+      logged.includes("serve_replicas is set on a broker running in replica mode"),
+      "the operator who set a flag the broker will not obey is told so at startup"
+    ).toBe(true);
+  } finally {
+    await stopBroker(replica);
+    await stopBroker(upstream);
   }
 }, 30_000);
 

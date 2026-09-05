@@ -80,11 +80,13 @@ Broker runs on the same PC as your Claude Code sessions. See [Quick start (local
 
 Set `offline_replica: true` alongside `broker_url`. Clients (`server.ts`, the Deck, `cli.ts`) still talk to a loopback broker, auto-spawned exactly as in Mode 1; that loopback broker replicates the roadmap in the background against `broker_url` (its *upstream*), instead of any client talking to it directly. A network outage is invisible to agents on this machine: the roadmap stays readable and writable, and reconnection reconciles automatically -- a conflicting card is arbitrated in the Deck, never merged silently.
 
+**Migration:** the CENTRAL broker (the upstream a replica points `broker_url` at) must now also carry `serve_replicas: true` (or `CLAUDE_PEERS_SERVE_REPLICAS=1`) -- without it, an otherwise correctly configured upstream refuses to serve the `/roadmap/sync/pull|push|lock` routes, and **every replica reports it unreachable**, indistinguishable from a network outage, even with `broker_token` set correctly.
+
 Scope of this mode:
 
 - Only `roadmap_items` is replicated. `peers` and `messages` stay local to this machine, **even while online**: in replica mode, inter-PC messaging is a known regression versus Mode 2, traded for offline continuity, until federation ships (see `BACKLOG.md` §3.9).
 - `offline_replica` requires a remote `broker_url` to have any effect -- setting it without `broker_url` is equivalent to Mode 1 (nothing to replicate against).
-- The replica broker authenticates to its upstream with the same `broker_token` both read from this same config; there is no separate replica credential. The upstream **must** have that token configured before it will serve the `/roadmap/sync/pull|push|lock` routes at all -- an upstream with no `broker_token` refuses replication outright (403), and the replica treats that exactly as an unreachable upstream (same online/offline hysteresis as a network outage). The replica logs an explicit startup error the first time this happens, rather than leaving the operator to guess why it never comes online.
+- The replica broker authenticates to its upstream with the same `broker_token` both read from this same config; there is no separate replica credential. Serving the replication routes at all is now an explicit, opt-in upstream ROLE: the upstream needs `serve_replicas: true` **and** a `broker_token` configured, or it refuses (403) with a message naming which of the two is missing. A broker that is itself in `replica` mode never serves these routes, even if `serve_replicas: true` is also set on it (that combination is a config mistake, not a chained topology) -- it logs a startup warning instead. The replica treats any of these refusals exactly as an unreachable upstream (same online/offline hysteresis as a network outage), logging an explicit startup error the first time this happens rather than leaving the operator to guess why it never comes online.
 - A push onto a card locked upstream by a peer this replica does not relay comes back as a conflict in the Deck (`reason: 'locked_upstream'`): the operator can only take the upstream version while that lock holds.
 
 ### Sessions outside Kory (global claude.json MCP entry)
@@ -152,17 +154,29 @@ The broker daemon auto-starts on first launch.
 
 ### 1. On the broker host -- expose the broker publicly
 
-Add `CLAUDE_PEERS_BIND_HOST=0.0.0.0` (and optionally a bearer token) to the broker service:
+Add `CLAUDE_PEERS_BIND_HOST=0.0.0.0` (and optionally a bearer token) to the broker service. If any client PC will attach as a Mode 3 replica rather than a direct Mode 2 client, also set `CLAUDE_PEERS_SERVE_REPLICAS=1` -- it's optional and only needed to serve replicas, but every replica reports this broker unreachable without it:
 
 ```bash
 cat >/etc/claude-peers/claude-peers.env <<'EOF'
 CLAUDE_PEERS_DB=/var/lib/claude-peers/peers.db
 CLAUDE_PEERS_BIND_HOST=0.0.0.0
 CLAUDE_PEERS_BROKER_TOKEN=your-shared-secret
+# CLAUDE_PEERS_SERVE_REPLICAS=1   # optional: only if replicas (Mode 3) will attach
 EOF
 systemctl restart claude-peers-broker
 curl http://127.0.0.1:7899/health   # still reachable on loopback too
 ```
+
+**Turning `serve_replicas` on for an already-running broker:** it's read once at
+startup, so a config/env change needs a restart of the broker process to take
+effect. Verify it landed with `curl -s http://<upstream-host>:7899/health` and
+check the response includes `"serve_replicas":true`; keep `broker_token` set
+(it's still required alongside the flag). Set `serve_replicas: true` on the
+upstream **before** switching any client machine to `offline_replica` -- while
+you do, each replica keeps serving its own agents locally off the loopback
+broker, shows the offline banner with the pending-changes count, and logs the
+"upstream is not configured to serve replicas" hint once per process rather
+than spamming it every tick.
 
 Make sure your firewall allows TCP port 7899 from the outside.
 
@@ -473,7 +487,8 @@ Every setting can be provided via an environment variable or via a JSON settings
 | `CLAUDE_PEERS_BROKER_URL`            | `broker_url`           | (none)                               | server                | HTTP mode: direct broker URL (e.g. `http://my-server:7899`). Overrides loopback. |
 | `CLAUDE_PEERS_BROKER_TOKEN`          | `broker_token`         | (none)                               | broker + server       | Bearer token for broker auth. Broker requires it on all requests (except `/health`); server sends it on every call. |
 | `CLAUDE_PEERS_BIND_HOST`             | `bind_host`            | `127.0.0.1`                          | broker                | Broker bind address. Set `0.0.0.0` to accept external connections.     |
-| `CLAUDE_PEERS_OFFLINE_REPLICA`       | `offline_replica`      | `false`                              | broker / server / cli / Deck | Opt-in for Mode 3 (see [Two deployment modes](#two-deployment-modes)). Accepts `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitive; anything else falls back to the settings-file value. Has no effect without a remote `broker_url`. The upstream must have a `broker_token` configured, or it refuses (403) the `/roadmap/sync/pull|push|lock` routes this mode depends on. |
+| `CLAUDE_PEERS_OFFLINE_REPLICA`       | `offline_replica`      | `false`                              | broker / server / cli / Deck | Opt-in for Mode 3 (see [Two deployment modes](#two-deployment-modes)). Accepts `1`/`true`/`yes`/`on` and `0`/`false`/`no`/`off`, case-insensitive; anything else falls back to the settings-file value. Has no effect without a remote `broker_url`. The upstream must have `serve_replicas: true` **and** a `broker_token` configured, or it refuses (403) the `/roadmap/sync/pull\|push\|lock` routes this mode depends on. |
+| `CLAUDE_PEERS_SERVE_REPLICAS`        | `serve_replicas`       | `false`                              | broker                | Opt-in, on the UPSTREAM broker only: without it, `/roadmap/sync/pull\|push\|lock` refuse (403) every replica even with a `broker_token` configured -- the explicit "I am willing to serve replicas" role flag (Mode 3 migration note above). Accepts the same spellings as `CLAUDE_PEERS_OFFLINE_REPLICA`. A broker itself running in `replica` mode never serves these routes even when this is also set (logs a startup warning). |
 | `CLAUDE_PEERS_SYNC_TICK_MS`          | (n/a)                  | `5000`                               | broker                | Mode 3 only: cadence of the replica's pull/push/lock sync pass against its upstream. |
 | `CLAUDE_PEERS_STATUS_LINE_CACHE`     | (n/a)                  | (unset = off)                        | server                | Opt-in: when truthy (`1`, `true`, `yes`, `on`, case-insensitive), `server.ts` writes the active `peer_id` to `$HOME/.claude/peers/peer-id-<cwd_key>-<session_id>.txt` (per-session, from `CLAUDE_CODE_SESSION_ID`) on every register so a status-line script can read it; it falls back to the legacy `peer-id-<cwd_key>.txt` when the session id is unset. Any other value (or unset) disables the write. See [Status-line integration](#status-line-integration). |
 

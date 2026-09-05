@@ -280,6 +280,11 @@ const PURGE_INTERVAL_SEC = Math.max(
 // the deployment shape; UPSTREAM_URL is non-null only in replica mode.
 const BROKER_MODE = brokerMode(config);
 const UPSTREAM_URL = upstreamUrl(config);
+// The upstream ROLE, opted into on its own. Holding a broker_token makes a
+// broker authenticated, not somebody's upstream: without this flag the three
+// replication routes are refused even to a caller presenting the right Bearer,
+// so a deployment never starts serving replicas by accident.
+const SERVE_REPLICAS = config.serve_replicas;
 // Cadence of the replication pass. Floored at 200 ms: a lower value would
 // spend the broker's time on round-trips rather than on serving its clients.
 const SYNC_TICK_MS = Math.max(
@@ -337,6 +342,14 @@ if (BROKER_MODE === "replica") {
   } catch (e) {
     log.error(`replica mode has an unparsable broker_url (${UPSTREAM_URL}), exiting`, e);
     process.exit(1);
+  }
+  if (SERVE_REPLICAS) {
+    // Not fatal, and not obeyed either: a replica is nobody's upstream, so the
+    // flag is dead config here. Said out loud so the operator who set it does
+    // not read the 403s his own replicas get as a bug.
+    log.warn(
+      "serve_replicas is set on a broker running in replica mode -- a replica never serves replicas, the replication routes stay refused"
+    );
   }
 }
 
@@ -3443,13 +3456,29 @@ function handleRoadmapUpsert(
       ]
     );
     // The lock this write leaves behind is a LOCAL one: this route never sets a
-    // relay, so a card that was dropped or handed to another holder keeps none.
-    // Written only when there was one, so an ordinary edit does not version the
-    // row for nothing.
+    // relay, so a card that was dropped or handed to another holder keeps
+    // neither the relay pointer nor the contest raised against the holder that
+    // is gone -- contestation is defined against a HOLDER, so the annotation
+    // outliving one is a hold nobody disputes any more, mirrored by every
+    // replica on every pull. The two are cleared together, whichever of them
+    // the card carried: a natively-held card is contestable and never relayed.
+    // Written only when there IS something to clear, so an ordinary edit does
+    // not version the row -- and `rev` is the pull cursor, so a needless bump
+    // republishes the card to every replica.
+    // Read from the ROW: the public item this handler works with does not carry
+    // the replication columns, and must not start to.
+    // Never on a replica: there both columns are UPSTREAM state that the
+    // replication pass owns. `lock_relay` is never written on a replica at all,
+    // and `lock_contested_by` is a mirror of what the upstream holds -- a local
+    // write clearing it would flap until the next page put it back, and would
+    // version the row for nothing in between.
+    const afterWrite = getRoadmapRow(body.id);
+    const carriesLockRelayState =
+      (afterWrite?.lock_relay ?? null) !== null ||
+      parseStringList(afterWrite?.lock_contested_by ?? null).length > 0;
     if (
-      // Read from the ROW: the public item this handler works with does not
-      // carry the replication columns, and must not start to.
-      (getRoadmapRow(body.id)?.lock_relay ?? null) !== null &&
+      BROKER_MODE !== "replica" &&
+      carriesLockRelayState &&
       !(resolvedLock.locked && resolvedLock.lockedBy === existing.locked_by)
     ) {
       db.run(`UPDATE roadmap_items SET ${CLEAR_LOCK_RELAY_SET} WHERE id = ?`, [body.id]);
@@ -4469,6 +4498,24 @@ function refuseWhenReplica(route: string): { error: string; status: number } | n
 }
 
 /**
+ * The three upstream-only routes again, on the ROLE side. Serving replicas is
+ * an opt-in: it grants any holder of this broker's token the right to write
+ * card content under authors this broker cannot verify, and to claim its work
+ * locks for them. A broker that was only ever meant to serve its own agents
+ * has a token for that reason alone, so the role is asked for separately and
+ * refused when absent. 403, like the two neighbours: the request is
+ * well-formed, this deployment simply does not play that part.
+ */
+function requireServeReplicas(route: string): { error: string; status: number } | null {
+  if (SERVE_REPLICAS) return null;
+  log.warn(`${route}: refused, this broker is not configured to serve replicas`);
+  return {
+    error: `${route} is not served here: replication routes require serve_replicas to be enabled on this broker`,
+    status: 403,
+  };
+}
+
+/**
  * The three upstream-only routes again, on the credential side. A replica
  * writes content, and claims locks, for identities this broker cannot verify
  * itself: the shared broker_token IS what that relay rests on. A deployment
@@ -4551,6 +4598,8 @@ function handleRoadmapSyncPull(
 ): RoadmapSyncPullResponse | { error: string; status: number } {
   const refused = refuseWhenReplica("/roadmap/sync/pull");
   if (refused) return refused;
+  const notAnUpstream = requireServeReplicas("/roadmap/sync/pull");
+  if (notAnUpstream) return notAnUpstream;
   const unauthenticated = requireBrokerToken("/roadmap/sync/pull");
   if (unauthenticated) return unauthenticated;
   const replicaId = syncReplicaId(body.replica_id);
@@ -4755,6 +4804,8 @@ function relayHoldsLock(id: string, replicaId: string): boolean {
 function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
   const refused = refuseWhenReplica("/roadmap/sync/push");
   if (refused) return refused;
+  const notAnUpstream = requireServeReplicas("/roadmap/sync/push");
+  if (notAnUpstream) return notAnUpstream;
   const unauthenticated = requireBrokerToken("/roadmap/sync/push");
   if (unauthenticated) return unauthenticated;
   const replicaId = syncReplicaId(body.replica_id);
@@ -4880,6 +4931,8 @@ type SyncLockResult =
 function handleRoadmapSyncLock(body: RoadmapSyncLockRequest): SyncLockResult {
   const refused = refuseWhenReplica("/roadmap/sync/lock");
   if (refused) return refused;
+  const notAnUpstream = requireServeReplicas("/roadmap/sync/lock");
+  if (notAnUpstream) return notAnUpstream;
   const unauthenticated = requireBrokerToken("/roadmap/sync/lock");
   if (unauthenticated) return unauthenticated;
   const replicaId = syncReplicaId(body.replica_id);
@@ -5032,6 +5085,7 @@ function handleRoadmapSyncStatus(): RoadmapSyncStatus {
     pending_push: pendingPush,
     refused: syncPublished.refused,
     refused_locks: syncPublished.refused_locks,
+    queue_replaced: syncPublished.queue_replaced,
     locks,
   };
 }
@@ -5267,6 +5321,7 @@ interface SyncPublishedState {
   last_sync_at: string | null;
   refused: number;
   refused_locks: number;
+  queue_replaced: number;
 }
 let syncPublished: SyncPublishedState = {
   online: false,
@@ -5275,7 +5330,16 @@ let syncPublished: SyncPublishedState = {
   last_sync_at: null,
   refused: 0,
   refused_locks: 0,
+  queue_replaced: 0,
 };
+/**
+ * Broker-lifetime tally of the local queue positions the upstream order has
+ * overwritten -- the queue itself is never pushed. Monotonic and never reset
+ * while the process lives, so a poller that remembers the last value it read
+ * can tell "an offline reorder was just lost" from "one was lost an hour ago";
+ * a per-pass count would read as zero again on the very next tick.
+ */
+let syncQueueReplacedTotal = 0;
 let syncInFlight = false;
 let syncFailures = 0;
 let syncBackoffMs = SYNC_TICK_MS;
@@ -5318,6 +5382,25 @@ function upstreamErrorText(body: unknown): string {
   return "no error field";
 }
 
+let syncServeReplicasHinted = false;
+/**
+ * Said once per process, and only for the refusal a retry can never settle: an
+ * upstream that answers 403 naming `serve_replicas` is configured, reachable
+ * and authenticating this replica -- it simply does not play the upstream part.
+ * The pass still treats it as an unreachable upstream (the pull throws, the
+ * online hysteresis flips exactly as it does on a network cut), so without this
+ * line the operator would read "working offline" against a broker that answers
+ * every one of his own requests.
+ */
+function hintIfNotAnUpstream(status: number, body: unknown): void {
+  if (status !== 403 || syncServeReplicasHinted) return;
+  if (!upstreamErrorText(body).includes("serve_replicas")) return;
+  syncServeReplicasHinted = true;
+  log.error(
+    `roadmap sync: upstream is not configured to serve replicas: set serve_replicas: true on ${UPSTREAM_URL}`
+  );
+}
+
 async function upstreamPost<T>(path: string, body: unknown): Promise<{ status: number; body: T }> {
   const headers: Record<string, string> = { "content-type": "application/json" };
   // Same Bearer the other clients of this upstream present; absent when the
@@ -5331,13 +5414,16 @@ async function upstreamPost<T>(path: string, body: unknown): Promise<{ status: n
   });
   const text = await res.text();
   if (!text) return { status: res.status, body: null as T };
+  let parsed: T;
   try {
-    return { status: res.status, body: JSON.parse(text) as T };
+    parsed = JSON.parse(text) as T;
   } catch (e) {
     throw new Error(
       `${path} answered ${res.status} with a body that is not JSON: ${e instanceof Error ? e.message : String(e)}`
     );
   }
+  hintIfNotAnUpstream(res.status, parsed);
+  return { status: res.status, body: parsed };
 }
 
 /**
@@ -5354,6 +5440,20 @@ function localAuthor(name: string): string {
 }
 
 /**
+ * The contesting holders worth mirroring HERE. The upstream annotates a card
+ * with every replica whose claim it refused, and this replica's own agents are
+ * in that list precisely when they are the ones contesting -- a state the local
+ * row already carries as `lock_scope = 'contested'`. Echoing our own entry back
+ * would tell an agent that its own claim is somebody else's, so only the
+ * entries naming another replica land.
+ */
+function foreignContested(contested: readonly string[] | undefined): string[] {
+  if (!Array.isArray(contested)) return [];
+  const ownSuffix = `@${REPLICA_ID}`;
+  return contested.filter((entry) => !entry.endsWith(ownSuffix));
+}
+
+/**
  * Applies one pulled row. Returns true when a local queue position was
  * replaced, so the pass can report how much local ordering the upstream order
  * overwrote (§4: the queue is never pushed, and losing a local order must not
@@ -5365,6 +5465,10 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
   const contentJson = JSON.stringify(content);
   const createdBy = localAuthor(remote.created_by);
   const updatedBy = localAuthor(remote.updated_by);
+  // Written on every branch that touches the lock columns, and never on its
+  // own: it rides the statements that already write `queue`, so mirroring it
+  // costs no extra row version.
+  const contestedJson = JSON.stringify(foreignContested(remote.lock_contested_by));
   if (!local) {
     const lockedRemotely = remote.locked && remote.locked_by !== null;
     db.run(
@@ -5372,10 +5476,10 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
          (id, project_key, kind, title, description, rationale, context, priority, value,
           effort, status, tags, depends_on, created_by, updated_by, created_at, updated_at,
           deleted_at, queue, directive, target_peer_ids, inactive,
-          locked, locked_by, locked_group, locked_at, lock_scope,
+          locked, locked_by, locked_group, locked_at, lock_scope, lock_contested_by,
           sync_base_rev, sync_base, sync_dirty, sync_state)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-               ?, ?, ?, ?, ?, ?, ?, 0, 'clean')`,
+               ?, ?, ?, ?, ?, ?, ?, ?, 0, 'clean')`,
       [
         remote.id, remote.project_key, content.kind, content.title, content.description,
         content.rationale, content.context, content.priority, content.value, content.effort,
@@ -5385,7 +5489,7 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
         JSON.stringify(content.target_peer_ids), content.inactive ? 1 : 0,
         lockedRemotely ? 1 : 0, lockedRemotely ? remote.locked_by : null,
         lockedRemotely ? remote.locked_group : null, lockedRemotely ? remote.locked_at : null,
-        lockedRemotely ? "remote" : null,
+        lockedRemotely ? "remote" : null, contestedJson,
         remote.content_rev, contentJson,
       ]
     );
@@ -5445,21 +5549,33 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
       localScope === "contested" ||
       localScope === "release_pending");
   if (heldLocally) {
-    db.run("UPDATE roadmap_items SET queue = ? WHERE id = ?", [remote.queue, remote.id]);
+    // A card held HERE still shows who else wants it upstream: the local holder
+    // is the one who most needs to know the lock is disputed across machines.
+    db.run("UPDATE roadmap_items SET queue = ?, lock_contested_by = ? WHERE id = ?", [
+      remote.queue,
+      contestedJson,
+      remote.id,
+    ]);
   } else if (remote.locked && remote.locked_by !== null) {
     db.run(
       `UPDATE roadmap_items SET queue = ?, locked = 1, locked_by = ?, locked_group = ?,
-         locked_by_token = NULL, locked_at = ?, lock_scope = 'remote' WHERE id = ?`,
-      [remote.queue, remote.locked_by, remote.locked_group, remote.locked_at, remote.id]
+         locked_by_token = NULL, locked_at = ?, lock_scope = 'remote',
+         lock_contested_by = ? WHERE id = ?`,
+      [remote.queue, remote.locked_by, remote.locked_group, remote.locked_at, contestedJson, remote.id]
     );
   } else if (localScope === "remote") {
     db.run(
       `UPDATE roadmap_items SET queue = ?, locked = 0, locked_by = NULL, locked_group = NULL,
-         locked_by_token = NULL, locked_at = NULL, lock_scope = NULL WHERE id = ?`,
-      [remote.queue, remote.id]
+         locked_by_token = NULL, locked_at = NULL, lock_scope = NULL,
+         lock_contested_by = ? WHERE id = ?`,
+      [remote.queue, contestedJson, remote.id]
     );
   } else {
-    db.run("UPDATE roadmap_items SET queue = ? WHERE id = ?", [remote.queue, remote.id]);
+    db.run("UPDATE roadmap_items SET queue = ?, lock_contested_by = ? WHERE id = ?", [
+      remote.queue,
+      contestedJson,
+      remote.id,
+    ]);
   }
   return queueReplaced;
 }
@@ -5474,6 +5590,7 @@ function applyPulledPage(items: RoadmapSyncRow[], nextRev: number): void {
     // crash between the two would otherwise skip a page for good.
     syncMetaSet("upstream_cursor", String(nextRev));
     if (queueReplaced > 0) {
+      syncQueueReplacedTotal += queueReplaced;
       log.info(
         `roadmap sync: ${queueReplaced} local queue position(s) replaced by the upstream order`
       );
@@ -5819,6 +5936,7 @@ async function runSyncPass(): Promise<void> {
       last_sync_at: syncLastSyncAt,
       refused: syncRefusedPushes.size,
       refused_locks: syncRefusedLocks.size,
+      queue_replaced: syncQueueReplacedTotal,
     };
     syncInFlight = false;
     armSyncTimer(syncOnlineState === "offline" ? syncBackoffMs : SYNC_TICK_MS);
@@ -7859,6 +7977,10 @@ const server = Bun.serve<WsData>({
           peers: total,
           ws_clients: wsPool.size,
           mode: BROKER_MODE,
+          // Reported in every mode: it is what tells an operator (and a
+          // replica's operator) whether THIS broker will answer the
+          // replication routes at all, whatever shape it runs in.
+          serve_replicas: SERVE_REPLICAS,
           // Only a replica has an upstream to be online against; on the other
           // modes the field is absent rather than a misleading `true`.
           ...(BROKER_MODE === "replica" ? { upstream_online: syncOnlineState === "online" } : {}),
@@ -8205,7 +8327,7 @@ log.info(
   `activity_timeout=${ACTIVITY_TIMEOUT_MS / 1000}s, ws_idle=${WS_IDLE_TIMEOUT_SEC}s, ` +
   `active_stale=${ACTIVE_STALE_SEC}s, sweep_interval=${SWEEP_INTERVAL_SEC}s, ` +
   `lock_ttl=${LOCK_TTL_SEC}s, lock_grace=${LOCK_GRACE_SEC}s, ` +
-  `mode=${BROKER_MODE}` +
+  `mode=${BROKER_MODE}, serve_replicas=${SERVE_REPLICAS ? "on" : "off"}` +
   (BROKER_MODE === "replica" ? `, upstream=${UPSTREAM_URL}, sync_tick=${SYNC_TICK_MS}ms` : "") +
   `, auth=${BROKER_TOKEN ? "token" : "none"})`
 );

@@ -297,7 +297,23 @@ const EXPLICIT_REMOTE_BLOCKED_CHANNELS: readonly string[] = [
   // outcome (card c7df3781) -- same floor, same reasoning.
   'approvals:reply',
   'approvals:decline',
-  'approvals:allow'
+  'approvals:allow',
+  // A READ, and still host-only: the summary describes which broker every
+  // agent on the HOST machine talks to -- its URL, whether a bearer token is
+  // configured, which environment variables are forcing it. That is host
+  // configuration, not project data, and a phone has nothing to do with it:
+  // the checkbox that WRITES the same file (peersConfig:setOfflineReplica,
+  // tier 3) is already refused remotely, so leaving the read reachable only
+  // published the topology of the operator's machine over the LAN socket.
+  // Tier 0 stays honest about what the channel does; this floor is what
+  // decides who may do it.
+  //
+  // The GUARANTEE: no companion-reachable payload carries a broker URL or the
+  // token presence. Channel decisions are only two thirds of it -- this floor
+  // and the event floor below -- because a forwarded event like 'roadmap:sync'
+  // is refused nowhere; the third third is that RoadmapSyncStatus declares no
+  // upstream address for it to carry.
+  'peersConfig:get'
 ]
 
 /**
@@ -581,6 +597,28 @@ export const LIGHT_MODE_BLOCKED_EVENTS: ReadonlySet<string> = new Set([
   'pty:data',
   'session:thinking'
 ])
+
+/**
+ * EVENT channels never pushed to a remote client, whatever its mode. Separate
+ * from the invoke floor because an event is not requested: refusing the invoke
+ * says nothing about the same payload arriving unasked.
+ * 'peersConfig:summary' carries the very summary 'peersConfig:get' is refused
+ * for -- blocking the read and leaving the push open would hand the host's
+ * broker URL and token marker to the paired phone the moment the operator
+ * ticks the checkbox on the PC.
+ */
+export const REMOTE_BLOCKED_EVENTS: ReadonlySet<string> = new Set(['peersConfig:summary'])
+
+/**
+ * The single decision for the two reasons an event frame is withheld, so the
+ * server has one call site rather than a growing chain of early returns: a
+ * security floor that holds in every mode, and a bandwidth rule that applies
+ * only to a backgrounded client.
+ */
+export function shouldForwardEvent(channel: string, mode: 'full' | 'light'): boolean {
+  if (REMOTE_BLOCKED_EVENTS.has(channel)) return false
+  return !(mode === 'light' && LIGHT_MODE_BLOCKED_EVENTS.has(channel))
+}
 
 // ----- LAN-only guard (EXPLORATION §5.1.3: static, zero-maintenance) -----
 
