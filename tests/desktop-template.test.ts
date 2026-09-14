@@ -2,6 +2,7 @@ import { test, expect } from "bun:test";
 
 // Pure module (no electron / node), imports cleanly under bun.
 import {
+  templateApproval,
   toTemplate,
   templateToInputs,
   templateHasShellFields,
@@ -223,17 +224,43 @@ test("templateHasShellFields flags a bridge marker, whatever it names, and ignor
   expect(templateHasShellFields(mk({ name: "a", bridge: { toString: () => "" } }))).toBe(true);
 });
 
-// Belt to the predicate's braces: even an APPROVED template must not be able to
-// bridge a tile, because templateToInputs maps a fixed, explicit field list.
-test("templateToInputs never carries a bridge into a spawnable input", () => {
-  const raw = {
+test("a clodex bridge survives tile template parse and input round-trip", () => {
+  const template = toTemplate([{ name: "a", bridge: "clodex" }]);
+  expect(template.sessions).toEqual([{ name: "a", bridge: "clodex" }]);
+
+  const parsed = parseTemplate(JSON.parse(JSON.stringify(template)));
+  expect(parsed).not.toBeNull();
+  expect(templateToInputs(parsed!.template)).toEqual([{ name: "a", bridge: "clodex" }]);
+});
+
+test("parseTemplate rejects every bridge marker except clodex", () => {
+  for (const bridge of ["clodex-evil", "", 42]) {
+    expect(
+      parseTemplate({ type: TEMPLATE_TYPE, version: 1, sessions: [{ name: "a", bridge }] })
+    ).toBeNull();
+  }
+});
+
+test("template approval payload preserves legacy shape and records a clodex bridge", () => {
+  const plain: SessionTemplate = {
     type: TEMPLATE_TYPE,
     version: 1,
-    sessions: [{ name: "a", agent: "dev", bridge: "clodex" }],
+    sessions: [{ name: "dev", args: "--agent dev" }],
   };
-  const parsed = parseTemplate(raw);
-  expect(parsed).not.toBeNull();
-  const inputs = templateToInputs(parsed!.template);
-  expect(inputs[0]).not.toHaveProperty("bridge");
-  expect(inputs[0]).toEqual({ name: "a", agent: "dev" });
+  expect(templateApproval(plain)).toEqual({
+    hashPayload: [{ command: "", args: "--agent dev" }],
+    previewLines: ["• --agent dev"],
+  });
+  expect(JSON.stringify(templateApproval(plain).hashPayload)).toBe('[{"command":"","args":"--agent dev"}]');
+
+  const bridged: SessionTemplate = {
+    type: TEMPLATE_TYPE,
+    version: 1,
+    sessions: [{ name: "dev", bridge: "clodex" }],
+  };
+  expect(templateApproval(bridged)).toEqual({
+    hashPayload: [{ command: "", args: "", bridge: "clodex" }],
+    previewLines: ["• [clodex]"],
+  });
+  expect(JSON.stringify(templateApproval(bridged).hashPayload)).toBe('[{"command":"","args":"","bridge":"clodex"}]');
 });

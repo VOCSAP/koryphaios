@@ -214,6 +214,7 @@ import {
 } from './template-store'
 import {
   sessionsHaveShellFields,
+  templateApproval,
   templateHasShellFields,
   templateToInputs,
   toTemplate,
@@ -2308,13 +2309,12 @@ const resolveTemplateInputs = (path: string, attendance: CallerAttendance): Temp
     return { ok: false, reason: 'malformed' }
   }
   if (source === 'local' && templateHasShellFields(tpl)) {
+    const approval = templateApproval(tpl)
     const approvalOpts: ShellFieldApprovalOpts = {
       keyPart: 'template',
       basename: basename(path),
-      hashPayload: tpl.sessions.map((s) => ({ command: s.command ?? '', args: s.args ?? '' })),
-      previewLines: tpl.sessions
-        .filter((s) => (s.command && s.command.trim()) || (s.args && s.args.trim()))
-        .map((s) => `• ${[s.command, s.args].filter(Boolean).join(' ')}`),
+      hashPayload: approval.hashPayload,
+      previewLines: approval.previewLines,
       labelEn: 'Template',
       labelFr: 'Modèle',
       messageEn: 'This project template runs custom commands, executed in a shell.',

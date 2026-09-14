@@ -17,6 +17,7 @@ export const TEMPLATE_VERSION = 1
 export interface TemplateSession {
   name: string
   command?: string
+  bridge?: 'clodex'
   args?: string
   effort?: string
   color?: string
@@ -58,6 +59,7 @@ export interface SessionTemplate {
 interface DefLike {
   name: string
   command?: string
+  bridge?: 'clodex'
   args?: string
   effort?: string
   color?: string
@@ -70,6 +72,7 @@ interface DefLike {
 export interface TemplateInput {
   name?: string
   command?: string
+  bridge?: 'clodex'
   args?: string
   effort?: string
   color?: string
@@ -109,6 +112,7 @@ export function toTemplate(defs: readonly DefLike[], name?: string): SessionTemp
     sessions: defs.map((d) => {
       const s: TemplateSession = { name: d.name }
       if (d.command && d.command.trim()) s.command = d.command.trim()
+      if (d.bridge === 'clodex') s.bridge = 'clodex'
       if (d.args && d.args.trim()) s.args = d.args.trim()
       if (d.effort && d.effort.trim()) s.effort = d.effort.trim()
       if (d.color && d.color.trim()) s.color = d.color.trim()
@@ -132,6 +136,7 @@ export function templateToInputs(tpl: SessionTemplate): TemplateInput[] {
     const input: TemplateInput = {}
     if (s.name && s.name.trim()) input.name = s.name.trim()
     if (s.command && s.command.trim()) input.command = s.command.trim()
+    if (s.bridge === 'clodex') input.bridge = 'clodex'
     if (s.args && s.args.trim()) input.args = s.args.trim()
     if (s.effort && s.effort.trim()) input.effort = s.effort.trim()
     if (s.color && s.color.trim()) input.color = s.color.trim()
@@ -191,13 +196,25 @@ export function sessionsHaveShellFields(
  * behind operator approval before it can spawn (B4), mirroring the C19
  * launchCommand gate. `agent`/`model` are NOT shell-bearing here: they are
  * allow-listed + quoted at spawn (B6).
- * `TemplateSession` deliberately declares no `bridge` field and
- * `templateToInputs` copies no such field, so a template cannot bridge a tile
- * today; the predicate covers it anyway, since `parseTemplate` copies its
- * entries with a spread and an unknown key rides along at runtime.
  */
 export function templateHasShellFields(tpl: SessionTemplate): boolean {
   return sessionsHaveShellFields(tpl.sessions)
+}
+
+export function templateApproval(tpl: SessionTemplate): {
+  hashPayload: Array<{ command: string; args: string; bridge?: 'clodex' }>
+  previewLines: string[]
+} {
+  return {
+    hashPayload: tpl.sessions.map((s) => ({
+      command: s.command ?? '',
+      args: s.args ?? '',
+      ...(s.bridge === 'clodex' ? { bridge: s.bridge } : {})
+    })),
+    previewLines: tpl.sessions
+      .filter((s) => (s.command && s.command.trim()) || (s.args && s.args.trim()) || s.bridge === 'clodex')
+      .map((s) => `• ${[s.bridge === 'clodex' ? '[clodex]' : undefined, s.command, s.args].filter(Boolean).join(' ')}`)
+  }
 }
 
 function isTemplateSession(v: unknown): v is TemplateSession {
@@ -219,6 +236,7 @@ function isTemplateSession(v: unknown): v is TemplateSession {
     if (s[k] !== undefined && typeof s[k] !== 'string') return false
   }
   if (s.lead !== undefined && typeof s.lead !== 'boolean') return false
+  if (s.bridge !== undefined && s.bridge !== 'clodex') return false
   return true
 }
 

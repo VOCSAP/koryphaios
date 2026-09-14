@@ -295,12 +295,13 @@ function summarizeEntry(entry: SpawnPlanEntry, embedded: EmbeddedAgent | null): 
  * separate `command` field the shell-field-approval hash already covers, so
  * both are folded into `args` here for the operator to actually SEE what a
  * template entry runs, same reasoning as summarizeEntry's own `args`). A
+ * `[clodex]` prefix names the wrapper that changes the launch binary. A
  * `[lead]` prefix flags an entry that will take the window's crown (PLAN
  * C18) -- otherwise the dialog never says a tile is about to become lead.
  */
 function summarizeTemplateInput(input: TemplateInput): SpawnSummary {
   return {
-    name: (input.lead ? '[lead] ' : '') + (input.name ?? input.agent ?? 'peer'),
+    name: (input.bridge === 'clodex' ? '[clodex] ' : '') + (input.lead ? '[lead] ' : '') + (input.name ?? input.agent ?? 'peer'),
     agent: input.agent ?? '',
     embedded: '',
     model: input.model ?? '',

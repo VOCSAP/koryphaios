@@ -938,6 +938,17 @@ test("deck_apply_template: capCheck + ONE approveSpawn for the whole batch, owne
   }
 });
 
+test("deck_apply_template shows a clodex bridge in the agent approval recap", async () => {
+  const state = { sessions: [] as SessionRuntime[] };
+  const deps = makeDeps(state);
+  deps.resolveTemplate = () => ({ ok: true, inputs: [{ name: "bridge", bridge: "clodex" }] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+
+  await call(srv, "deck_apply_template", { path: "/t.json" });
+  expect(deps.approvals[0]![0]!.name).toBe("[clodex] bridge");
+});
+
 test("deck_apply_template: a foreign caller cannot close a template-spawned tile", async () => {
   const state = { sessions: [] as SessionRuntime[] };
   const deps = makeDeps(state);
@@ -1506,6 +1517,90 @@ test("deck_list_sessions: sessionView's `thinking` field carries 'working'/'idle
 // than one per mode.
 
 const INDEX_TS_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
+
+const RESOLVE_TEMPLATE_INPUTS_SIGNATURE =
+  /const resolveTemplateInputs = \(path: string, attendance: CallerAttendance\): TemplateResolveResult => \{/g;
+
+type TemplateResolverProbeDeps = Record<string, unknown>;
+
+function compileResolveTemplateInputs(
+  src: string,
+  deps: TemplateResolverProbeDeps
+): (path: string, attendance: string) => unknown {
+  const matches = [...src.matchAll(RESOLVE_TEMPLATE_INPUTS_SIGNATURE)];
+  if (matches.length !== 1) {
+    throw new Error(
+      `resolveTemplateInputs signature matched ${matches.length} times -- cannot execute an ambiguous source boundary`
+    );
+  }
+  const match = matches[0]!;
+  const body = extractBracedBody(src, match.index + match[0].length - 1);
+  const executableBody = body.replace(
+    /const approvalOpts:\s*ShellFieldApprovalOpts\s*=/,
+    "const approvalOpts ="
+  );
+  if (executableBody === body) {
+    throw new Error("resolveTemplateInputs approval options type annotation was not found");
+  }
+  return new Function(
+    ...Object.keys(deps),
+    `return (path, attendance) => {${executableBody}}`
+  )(...Object.values(deps)) as (path: string, attendance: string) => unknown;
+}
+
+test("resolveTemplateInputs passes bridge-aware approval options to the approval cache", () => {
+  const plain = {
+    type: "claude-peers-template",
+    version: 1,
+    sessions: [{ name: "dev", args: "--model clodex:openai-oauth:gpt-5.6-sol" }]
+  };
+  const bridged = {
+    type: "claude-peers-template",
+    version: 1,
+    sessions: [{ name: "dev", bridge: "clodex", args: "--model clodex:openai-oauth:gpt-5.6-sol" }]
+  };
+  const received: { hashPayload: unknown }[] = [];
+  const templateToInputsCalls: string[] = [];
+  let approvalVerdict = false;
+  const resolve = compileResolveTemplateInputs(readFileSync(INDEX_TS_PATH, "utf-8"), {
+    getConfig: () => ({ projectDir: "/project" }),
+    templateSource: () => "local",
+    reportError: () => {},
+    readTemplate: (path: string) => (path === "/plain.json" ? plain : bridged),
+    templateHasShellFields: () => true,
+    templateApproval: (tpl: typeof plain) => ({
+      hashPayload: tpl.sessions.map((s) => ({
+        command: "",
+        args: s.args ?? "",
+        ...(s.bridge === "clodex" ? { bridge: s.bridge } : {})
+      })),
+      previewLines: []
+    }),
+    basename: (path: string) => path,
+    refusesUnattendedApproval: () => false,
+    isShellFieldPreApproved: () => false,
+    journal: { add: () => {} },
+    confirmShellFieldApproval: (opts: { hashPayload: unknown }) => {
+      received.push(opts);
+      return approvalVerdict;
+    },
+    templateToInputs: () => {
+      templateToInputsCalls.push("called");
+      return [];
+    }
+  });
+
+  expect(resolve("/plain.json", "attended")).toEqual({ ok: false, reason: "refused" });
+  expect(templateToInputsCalls).toEqual([]);
+
+  approvalVerdict = true;
+  expect(resolve("/plain.json", "attended")).toEqual({ ok: true, inputs: [] });
+  expect(resolve("/bridged.json", "attended")).toEqual({ ok: true, inputs: [] });
+  expect(received.slice(1).map((opts) => opts.hashPayload)).toEqual([
+    [{ command: "", args: "--model clodex:openai-oauth:gpt-5.6-sol" }],
+    [{ command: "", args: "--model clodex:openai-oauth:gpt-5.6-sol", bridge: "clodex" }]
+  ]);
+});
 
 const CONFIRM_SPAWN_SHELL_FIELDS_SIGNATURE =
   /const confirmSpawnShellFields = \(\s*entry: \{ command\?: string; args\?: string \},\s*attendance: CallerAttendance\s*\): boolean => \{/g;
