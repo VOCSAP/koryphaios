@@ -519,11 +519,11 @@ test("release retries owner removal without stopping an already stopped server",
   const lifecycle = createClodexLifecycle(
     {
       ...f.deps,
-      remove: async (key) => {
+      removeIfEquals: async (key, expected) => {
         if (key === "clodex-lifecycle.owner" && rejectOwnerRemoval) {
           throw new Error("owner remove denied");
         }
-        await f.deps.remove(key);
+        return f.deps.removeIfEquals(key, expected);
       }
     },
     lease("a", 101)
@@ -534,6 +534,9 @@ test("release retries owner removal without stopping an already stopped server",
   expect(f.stopCount).toBe(1);
   expect(f.measureCount).toBe(1);
   expect(f.files.has("clodex-lifecycle.owner")).toBe(true);
+  expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(true);
+  expect(f.events).toContain("lifecycle-error");
+  expect(f.events).not.toContain("lock-error");
 
   rejectOwnerRemoval = false;
   expect(await lifecycle.release()).toEqual({ action: "stopped" });
@@ -844,11 +847,11 @@ test("a dead owned server retries owner cleanup before releasing its lease", asy
   const lifecycle = createClodexLifecycle(
     {
       ...f.deps,
-      remove: async (key) => {
+      removeIfEquals: async (key, expected) => {
         if (key === "clodex-lifecycle.owner" && rejectOwnerRemoval) {
           throw new Error("owner remove denied");
         }
-        await f.deps.remove(key);
+        return f.deps.removeIfEquals(key, expected);
       }
     },
     lease("a", 101)
@@ -946,6 +949,28 @@ test("CAS stale reclaim does not remove a replacement lock", async () => {
   });
   expect(f.files.get("clodex-lifecycle.lock")).toBe(replacement);
   expect(f.spawnCount).toBe(0);
+});
+
+test("a concurrent owner replacement survives failed owner cleanup", async () => {
+  const f = fixture();
+  const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
+  const replacement = { server: server(999) };
+
+  expect((await lifecycle.acquire(true)).action).toBe("acquired");
+  f.beforeRemoveIfEquals = (key) => {
+    if (key === "clodex-lifecycle.owner") f.files.set(key, replacement);
+  };
+
+  expect(await lifecycle.release()).toEqual({ action: "failed" });
+  expect(f.files.get("clodex-lifecycle.owner")).toBe(replacement);
+  expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(true);
+  expect(f.stopCount).toBe(1);
+
+  expect(await lifecycle.release()).toEqual({ action: "stopped" });
+  expect(f.files.get("clodex-lifecycle.owner")).toBe(replacement);
+  expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(false);
+  expect(f.stopCount).toBe(1);
+  expect(f.measureCount).toBe(1);
 });
 
 test("an instance serializes release behind an in-flight acquisition", async () => {

@@ -211,7 +211,7 @@ export function createClodexLifecycle(
     try {
       const owner = await deps.read<OwnerRecord>(OWNER_KEY);
       if (owner && sameServer(owner.server, server)) {
-        await deps.remove(OWNER_KEY);
+        return await deps.removeIfEquals(OWNER_KEY, owner);
       }
       return true;
     } catch (error) {

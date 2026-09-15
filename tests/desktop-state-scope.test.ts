@@ -175,6 +175,11 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     scope: "machine",
     reason: "legacy tile list, write-only (restore goes through workspaces); last-writer-wins without content leak, removal is an open question of the isolation brief",
   },
+  "clodex-lifecycle.lock": {
+    kind: "literal",
+    scope: "machine",
+    reason: "coordinates every Deck instance using the same per-profile CLODEX_HOME store, so lifecycle changes must serialize across windows",
+  },
   "operator.json": {
     kind: "literal",
     scope: "machine",
