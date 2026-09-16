@@ -157,6 +157,8 @@ import {
   writeEmbeddedAgentPrompt
 } from './team-embedded'
 import { startDesignEndpoint, type DesignEndpoint } from './design-endpoint'
+import { createClodexController } from './clodex-lifecycle-controller'
+import { createClodexControllerDeps } from './clodex-lifecycle-deps'
 import { ApprovalRuntime, armApprovalsAtStartup } from './approval-runtime'
 import { remoteApprovalsEnabled } from './approval-store'
 import {
@@ -3259,6 +3261,24 @@ app.whenReady().then(async () => {
   await startLoopbackBroker('startup')
   const armed = await armApprovalsAtStartup(approvals)
   journal.add('session', armed ? 'remote approvals armed' : 'remote approvals unavailable')
+  // Clodex proxy: fire-and-forget like the design endpoint above, so neither
+  // the window nor the restored tiles wait on a login-shell probe. Two limits
+  // of this wiring: the start is unconditional, no operator setting gates it,
+  // and quitting leaves the proxy running for the next launch to adopt.
+  void Promise.resolve()
+    .then(() =>
+      createClodexController(
+        createClodexControllerDeps({ shell: getConfig().shell, logsDir: app.getPath('logs') })
+      ).start(true)
+    )
+    .then((outcome) => {
+      if (outcome.action === 'failed') {
+        reportError('clodex-lifecycle', 'the clodex proxy could not be started')
+      } else if (outcome.action !== 'absent' && outcome.action !== 'disabled') {
+        journal.add('session', `clodex: proxy ${outcome.action}`)
+      }
+    })
+    .catch((e) => reportError('clodex-lifecycle', 'the clodex proxy could not be started', e))
   service.start()
   // Attach an auto-save workspace capturing whatever the service just restored.
   workspaces.start()

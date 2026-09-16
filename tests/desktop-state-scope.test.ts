@@ -185,6 +185,11 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     scope: "machine",
     reason: "the lease and owner store that lock guards, one per CLODEX_HOME; the Deck creates, names and writes it, unlike the clodex manifest sitting in the same directory",
   },
+  "clodex-proxy.log": {
+    kind: "literal",
+    scope: "machine",
+    reason: "output of the proxy the Deck launches, appended under app.getPath('logs'); one operator and one workstation, and two windows appending to it interleave lines without leaking anything",
+  },
   "operator.json": {
     kind: "literal",
     scope: "machine",
