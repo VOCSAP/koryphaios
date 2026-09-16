@@ -17,10 +17,14 @@ import {
   probeTcp,
   processStartedAt,
   proxyLogPath,
+  releaseBeforeQuit,
+  RELEASE_DEADLINE_MS,
   runCommand,
   toClodexChild,
   type ErrorSink
 } from "../desktop/src/main/clodex-lifecycle-deps.ts";
+import type { ClodexController } from "../desktop/src/main/clodex-lifecycle-controller.ts";
+import type { AcquireOutcome, ReleaseOutcome } from "../desktop/src/main/clodex-lifecycle.ts";
 import { createClodexProcessIo } from "../desktop/src/main/clodex-process-io.ts";
 
 type Trace = { scope: string; message: string; error?: unknown };
@@ -224,4 +228,69 @@ test("the proxy log is opened under the logs directory, and its absence is trace
 test("the liveness probe forwards the signal to the running process", () => {
   const deps = createClodexControllerDeps({ shell: "", logsDir: scratch() });
   expect(() => deps.kill(process.pid, 0)).not.toThrow();
+});
+
+/** A closing window with nothing left to do, a lease returned, one that hangs, one that throws. */
+function stopper(stop: () => Promise<ReleaseOutcome>): ClodexController {
+  return { start: async () => ({ action: "disabled" }) as AcquireOutcome, stop };
+}
+
+/** The runner cannot interrupt a promise that never settles, so the wait is bounded here. */
+async function settledWithin<T>(work: Promise<T>, ms: number): Promise<T | "never-settled"> {
+  return Promise.race([
+    work,
+    new Promise<"never-settled">((resolve) => setTimeout(() => resolve("never-settled"), ms))
+  ]);
+}
+
+test("a closing window with no controller releases nothing and says so", async () => {
+  const { onError, traces } = sink();
+  expect(await releaseBeforeQuit(null, RELEASE_DEADLINE_MS, async () => {}, onError)).toBe("idle");
+  expect(traces).toHaveLength(0);
+});
+
+test("a lease returned in time is not traced, and the cap is the one it was given", async () => {
+  const { onError, traces } = sink();
+  const waited: number[] = [];
+  const outcome = await releaseBeforeQuit(
+    stopper(async () => ({ action: "stopped" })),
+    RELEASE_DEADLINE_MS,
+    async (ms) => {
+      waited.push(ms);
+    },
+    onError
+  );
+  expect(outcome).toBe("done");
+  expect(waited).toEqual([RELEASE_DEADLINE_MS]);
+  expect(traces).toHaveLength(0);
+});
+
+test("a release that outlasts the cap is traced and still lets the window go", async () => {
+  const { onError, traces } = sink();
+  const outcome = await settledWithin(
+    releaseBeforeQuit(stopper(() => new Promise<ReleaseOutcome>(() => {})), 25, async () => {}, onError),
+    500
+  );
+  expect(outcome).toBe("expired");
+  expect(traces.map((t) => t.message)).toEqual([
+    "the clodex lease was left in place: its release outlasted 25 ms"
+  ]);
+});
+
+test("a release that throws is traced with its cause and still lets the window go", async () => {
+  const { onError, traces } = sink();
+  const boom = new Error("store unreachable");
+  const outcome = await settledWithin(
+    releaseBeforeQuit(
+      stopper(() => Promise.reject(boom)),
+      RELEASE_DEADLINE_MS,
+      () => new Promise<void>(() => {}),
+      onError
+    ),
+    500
+  );
+  expect(outcome).toBe("failed");
+  expect(traces.map((t) => [t.message, t.error])).toEqual([
+    ["the clodex lease could not be released", boom]
+  ]);
 });

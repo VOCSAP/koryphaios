@@ -157,9 +157,13 @@ import {
   writeEmbeddedAgentPrompt
 } from './team-embedded'
 import { startDesignEndpoint, type DesignEndpoint } from './design-endpoint'
-import { createClodexController } from './clodex-lifecycle-controller'
+import { createClodexController, type ClodexController } from './clodex-lifecycle-controller'
 import { announceModelsChanged } from './model-registry'
-import { createClodexControllerDeps } from './clodex-lifecycle-deps'
+import {
+  createClodexControllerDeps,
+  releaseBeforeQuit,
+  RELEASE_DEADLINE_MS
+} from './clodex-lifecycle-deps'
 import { ApprovalRuntime, armApprovalsAtStartup } from './approval-runtime'
 import { remoteApprovalsEnabled } from './approval-store'
 import {
@@ -469,6 +473,10 @@ const getDeckPluginDir = (): string => {
 // inherits the pair — nothing is persisted, nothing transits the broker (which
 // may be remote/headless: picks are a strictly local loop).
 let designServer: DesignEndpoint | null = null
+
+// Clodex proxy lifecycle, held for the whole run: the window-all-closed handler
+// releases its lease, and only a held controller can be asked to.
+let clodexController: ClodexController | null = null
 
 // Remote approvals (PLAN-notifications-mobiles N2.c). Armed at whenReady only
 // when the operator enabled it; `env()` always emits the key so a value
@@ -3265,13 +3273,15 @@ app.whenReady().then(async () => {
   // Clodex proxy: fire-and-forget like the design endpoint above, so neither
   // the window nor the restored tiles wait on a login-shell probe. Two limits
   // of this wiring: the start is unconditional, no operator setting gates it,
-  // and quitting leaves the proxy running for the next launch to adopt.
+  // and the lease is released when the last window closes, not on an explicit
+  // quit nor on macOS, where the proxy stays up for the next launch to adopt.
   void Promise.resolve()
-    .then(() =>
-      createClodexController(
+    .then(() => {
+      clodexController = createClodexController(
         createClodexControllerDeps({ shell: getConfig().shell, logsDir: app.getPath('logs') })
-      ).start(true)
-    )
+      )
+      return clodexController.start(true)
+    })
     .then((outcome) => {
       if (outcome.action === 'failed') {
         reportError('clodex-lifecycle', 'the clodex proxy could not be started')
@@ -3325,7 +3335,15 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     workspaces.releaseOnQuit()
     service.stop()
-    app.quit()
+    // The lease goes back before the quit, and the quit happens on every
+    // outcome: a release that cannot finish must never leave a running process
+    // with no window left to close it.
+    void releaseBeforeQuit(
+      clodexController,
+      RELEASE_DEADLINE_MS,
+      (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+      reportError
+    ).finally(() => app.quit())
   }
 })
 

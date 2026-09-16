@@ -14,7 +14,7 @@ import { connect } from 'node:net'
 import { hostname, platform } from 'node:os'
 import { dirname, join } from 'node:path'
 import { defaultClodexDeps } from './clodex-bridge'
-import type { ClodexControllerDeps } from './clodex-lifecycle-controller'
+import type { ClodexController, ClodexControllerDeps } from './clodex-lifecycle-controller'
 import type { SqliteConnection } from './clodex-lifecycle-io'
 import type { ClodexChild, ClodexSpawnOptions } from './clodex-process-io'
 import { reportError } from './log'
@@ -29,6 +29,17 @@ const RUN_TIMEOUT_MS = 15_000
 const RUN_MAX_OUTPUT = 1024 * 1024
 const CONNECT_TIMEOUT_MS = 2_000
 const MAX_PORT = 65_535
+
+/**
+ * Longest a closing window waits for the lease. Sized on the NOMINAL release,
+ * measured at 5 s of tree-stop confirmation plus two subprocesses of about
+ * 200 ms, with room for a login shell ten times slower on a loaded machine.
+ * It stays far under the lock budget of the controller, so an expiry can never
+ * be read as a contended store.
+ */
+export const RELEASE_DEADLINE_MS = 10_000
+
+export type ReleaseDeadline = 'idle' | 'done' | 'expired' | 'failed'
 
 export type ErrorSink = (scope: string, message: string, error?: unknown) => void
 
@@ -154,6 +165,39 @@ export function runCommand(
       }
     )
   })
+}
+
+/**
+ * Releases the lease of a closing window under a cap, and never rejects: the
+ * caller quits on every outcome, since a release that cannot finish must not
+ * leave a process behind with no window to close. An expiry does NOT cancel
+ * the release in flight, it only stops waiting for it, so the lease may
+ * outlive the window until another one reclaims it as stale.
+ */
+export async function releaseBeforeQuit(
+  controller: ClodexController | null,
+  capMs: number,
+  sleep: (ms: number) => Promise<void>,
+  onError: ErrorSink
+): Promise<ReleaseDeadline> {
+  if (!controller) return 'idle'
+  let failure: unknown
+  const outcome = await Promise.race([
+    controller.stop().then(
+      () => 'done' as const,
+      (error: unknown) => {
+        failure = error
+        return 'failed' as const
+      }
+    ),
+    sleep(capMs).then(() => 'expired' as const)
+  ])
+  if (outcome === 'expired') {
+    onError(SCOPE, `the clodex lease was left in place: its release outlasted ${capMs} ms`)
+  } else if (outcome === 'failed') {
+    onError(SCOPE, 'the clodex lease could not be released', failure)
+  }
+  return outcome
 }
 
 /**
