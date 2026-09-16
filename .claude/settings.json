@@ -1,4 +1,7 @@
 {
+  "env": {
+    "KLEOS_SPACE": "koryphaios"
+  },
   "hooks": {
     "PreToolUse": [
       {
@@ -12,7 +15,7 @@
       }
     ]
   },
-  "env": {
-    "KLEOS_SPACE": "koryphaios"
+  "enabledPlugins": {
+    "typescript-lsp@claude-plugins-official": true
   }
 }

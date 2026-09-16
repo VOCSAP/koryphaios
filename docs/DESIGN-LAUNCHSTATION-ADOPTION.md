@@ -178,8 +178,9 @@ Règles du contrat (à figer avec le skill) :
 - `${HOST}`/`${PORT}` : seule syntaxe de substitution (pas `{port}` ni
   `{{port}}`) ; substitués dans `command`, `url`, `health`, valeurs de `env`.
 - `env` : noms `[A-Z_][A-Z0-9_]*`, `PORT`/`HOST` réservés et refusés ;
-  `inheritEnv` : noms hérités de l'environnement du Deck, tout le reste est
-  coupé (baseline PATH comme Launch Station, décision 8.3).
+  `inheritEnv` : variables SUPPLÉMENTAIRES copiées depuis l'environnement du
+  Deck, en plus de ce que le login-shell de l'opérateur fournit déjà (décision
+  8.3 : pas de baseline coupée, `nvm`/`pyenv` doivent marcher).
 - `health` : facultatif, défaut = `url` ; prêt sur 200–399 ; `readyTimeoutSec`
   1–600, défaut 30.
 - Champs inconnus : refusés (un champ mal orthographié ne doit pas tomber en
@@ -193,9 +194,11 @@ Règles du contrat (à figer avec le skill) :
   → objet validé ou `{ error }` tracé par `reportError`, jamais `null` muet.
   Tout rejet nomme le champ. `NaN` rejeté explicitement (règle « nouveau
   validateur »).
-- Approbation : `resolveApprovedServe({ projectKey: \`${key}::serve\`,
-  … })` sur le modèle exact du bloc `worktreeInit` de `index.ts` ; hash du
-  JSON canonique (clés triées) pour qu'une modification du fichier redemande.
+- Approbation : `resolveApprovedLaunchCommand` (`launch-approval.ts`, déjà
+  générique) avec la clé `${key}::serve`, sur le modèle exact du bloc
+  `worktreeInit` de `index.ts` ; hash du JSON canonique (clés triées) des
+  seuls champs qui atteignent le shell : `command`, `cwd`, `env`,
+  `inheritEnv` (décision 8.2 ; changer `readyTimeoutSec` ne redemande pas).
   Le dialogue montre `command`, `cwd`, `env` : c'est ce qui va au shell.
 - Tests : `tests/desktop-serve-config.test.ts` (valide, chaque champ
   refusé, `NaN`, action multiple refusée, champ inconnu refusé, hash stable
@@ -219,8 +222,9 @@ Règles du contrat (à figer avec le skill) :
   `readyTimeoutSec` ; échec → arrêt du processus + erreur nommant l'URL et
   le dernier statut.
 - Arrêt : `SIGINT` sur le groupe (`-pid`), puis `SIGTERM` après 3 s, puis
-  `SIGKILL` après 3 s ; Windows : `taskkill /T /F` (pas de groupe POSIX ;
-  à vérifier sur le poste, question 8.4). Identité = PID + `spawn` time
+  `SIGKILL` après 3 s ; Windows : `taskkill /T /F /PID` sans étape `SIGINT`
+  (pas de groupe POSIX ; poste de l'opérateur, donc critère d'acceptation
+  avec test cross-platform par injection de `platform`, décision 8.4). Identité = PID + `spawn` time
   mémorisés ; on ne signale jamais un PID retrouvé par nom ou par port.
 - Invariant : **une instance par (projet, fenêtre Deck)** ; un second
   `start` renvoie l'état courant. Deux Decks sur le même projet = deux
@@ -252,8 +256,10 @@ Règles du contrat (à figer avec le skill) :
   « Demander à un agent » (pré-remplit le prompt de la tuile dockée, ou du
   superviseur, avec l'invocation du skill LS5 ; rien n'est auto-soumis, même
   règle que le picker d'élément).
-- i18n : clés `serve.*` dans `i18n.ts` avec parité de locale (`TESTING.md`).
-- Mobile : vue desktop-only (`mobile-views.ts`), cohérent avec LS3.
+- i18n : clés `serve.*` dans `i18n.ts` avec parité de locale
+  (`tests/desktop-i18n.test.ts`).
+- Mobile : la vue Browser est classée par `MobileViewMeta` dans
+  `mobile-views.ts` ; mécanisme distinct de la parité de locale.
 
 ### LS5 — Skill `project-serve` dans le playbook (`desktop/deck-plugin/skills/`)
 
@@ -319,6 +325,11 @@ projet courant dans le navigateur » qui cite ce brief. Le commit qui livre un
 chantier porte `Card <id8>.` en tête de corps.
 
 ## 8. Questions ouvertes à trancher sur le poste
+
+Tranchées le 2026-09-14 (opérateur) : 8.2 champs shell seulement, 8.3
+login-shell + `inheritEnv` en supplément, 8.4 Windows requis en v1. Les points
+1, 5 et 6 restent hors v1. Cartes : parent `8c320424`, LS1 `3c420805`,
+LS2 `9fb72acb`, LS3 `4d6ec4fb`, LS4 `0cc3d659`, LS5 `7e1a40bd`.
 
 1. Repli `userData` (par `project_key`) quand l'opérateur ne veut pas
    committer `serve.json` : v1 ou plus tard ? Si v1, l'ordre de précédence
