@@ -294,3 +294,44 @@ test("a release that throws is traced with its cause and still lets the window g
     ["the clodex lease could not be released", boom]
   ]);
 });
+
+test("a timer that cannot arm still lets the window go", async () => {
+  const { onError, traces } = sink();
+  const outcome = await settledWithin(
+    releaseBeforeQuit(
+      stopper(() => new Promise<ReleaseOutcome>(() => {})),
+      RELEASE_DEADLINE_MS,
+      () => Promise.reject(new Error("timer unavailable")),
+      onError
+    ),
+    500
+  );
+  expect(outcome).toBe("expired");
+  expect(traces).toHaveLength(1);
+});
+
+test("an expiry stops waiting for the release, it does not take it back", async () => {
+  const { onError } = sink();
+  let landed = false;
+  const outcome = await settledWithin(
+    releaseBeforeQuit(
+      stopper(
+        () =>
+          new Promise<ReleaseOutcome>((resolve) =>
+            setTimeout(() => {
+              landed = true;
+              resolve({ action: "stopped" });
+            }, 60)
+          )
+      ),
+      10,
+      (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+      onError
+    ),
+    500
+  );
+  expect(outcome).toBe("expired");
+  expect(landed).toBe(false);
+  await new Promise<void>((resolve) => setTimeout(resolve, 120));
+  expect(landed).toBe(true);
+});

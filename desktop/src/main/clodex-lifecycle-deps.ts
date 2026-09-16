@@ -190,7 +190,12 @@ export async function releaseBeforeQuit(
         return 'failed' as const
       }
     ),
-    sleep(capMs).then(() => 'expired' as const)
+    // Both legs answer, including a timer the caller could not arm: a race
+    // whose other half rejects would break the contract this function offers.
+    sleep(capMs).then(
+      () => 'expired' as const,
+      () => 'expired' as const
+    )
   ])
   if (outcome === 'expired') {
     onError(SCOPE, `the clodex lease was left in place: its release outlasted ${capMs} ms`)
