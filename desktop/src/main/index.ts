@@ -433,9 +433,11 @@ const setConfig = (patch: Partial<AppConfig>): AppConfig => {
       )
     }
   }
+  const autoStartWas = config.clodexAutoStart
   config = { ...config, ...patch }
   saveConfig(config)
   nativeTheme.themeSource = config.theme
+  if (config.clodexAutoStart !== autoStartWas) void applyClodexAutoStart(config.clodexAutoStart)
   broadcast('config:changed', sanitizeConfigForRenderer(config))
   return config
 }
@@ -477,6 +479,31 @@ let designServer: DesignEndpoint | null = null
 // Clodex proxy lifecycle, held for the whole run: the window-all-closed handler
 // releases its lease, and only a held controller can be asked to.
 let clodexController: ClodexController | null = null
+
+const ensureClodexController = (): ClodexController => {
+  if (!clodexController) {
+    clodexController = createClodexController(
+      createClodexControllerDeps({ shell: getConfig().shell, logsDir: app.getPath('logs') })
+    )
+  }
+  return clodexController
+}
+
+/**
+ * Operator toggled the setting mid-session. Enabling runs the same sequence as
+ * the launch; disabling gives the lease back, which stops the proxy only when
+ * this window owns it and no other window still holds one.
+ */
+const applyClodexAutoStart = async (enabled: boolean): Promise<void> => {
+  try {
+    const outcome = enabled
+      ? await ensureClodexController().start(true)
+      : await (clodexController?.stop() ?? Promise.resolve({ action: 'released' as const }))
+    journal.add('session', `clodex: auto-start ${enabled ? 'on' : 'off'} (${outcome.action})`)
+  } catch (err) {
+    reportError('clodex-lifecycle', 'the clodex auto-start toggle could not be applied', err)
+  }
+}
 
 // Remote approvals (PLAN-notifications-mobiles N2.c). Armed at whenReady only
 // when the operator enabled it; `env()` always emits the key so a value
@@ -3271,17 +3298,12 @@ app.whenReady().then(async () => {
   const armed = await armApprovalsAtStartup(approvals)
   journal.add('session', armed ? 'remote approvals armed' : 'remote approvals unavailable')
   // Clodex proxy: fire-and-forget like the design endpoint above, so neither
-  // the window nor the restored tiles wait on a login-shell probe. Two limits
-  // of this wiring: the start is unconditional, no operator setting gates it,
-  // and the lease is released when the last window closes, not on an explicit
-  // quit nor on macOS, where the proxy stays up for the next launch to adopt.
+  // the window nor the restored tiles wait on a login-shell probe. One limit of
+  // this wiring: the lease is released when the last window closes, not on an
+  // explicit quit nor on macOS, where the proxy stays up for the next launch to
+  // adopt.
   void Promise.resolve()
-    .then(() => {
-      clodexController = createClodexController(
-        createClodexControllerDeps({ shell: getConfig().shell, logsDir: app.getPath('logs') })
-      )
-      return clodexController.start(true)
-    })
+    .then(() => ensureClodexController().start(getConfig().clodexAutoStart))
     .then((outcome) => {
       if (outcome.action === 'failed') {
         reportError('clodex-lifecycle', 'the clodex proxy could not be started')

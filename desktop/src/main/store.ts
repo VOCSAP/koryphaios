@@ -15,6 +15,7 @@ import {
   DEFAULT_HELP_TARGET,
   DEFAULT_WAND_TARGET,
   legacyHelpTarget,
+  sanitizeClodexAutoStart,
   sanitizeUtilityTarget
 } from '@shared/models'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
@@ -28,6 +29,7 @@ const DEFAULT_CONFIG: AppConfig = {
   peerCommand: 'claudepeers',
   shell: '',
   interactiveShell: false,
+  clodexAutoStart: true,
   columns: 2,
   displayMode: '2x2',
   gridCols: 2,
@@ -141,6 +143,11 @@ export function loadConfig(): AppConfig {
   }
   // Hand-edited file: a non-hex glow value becomes a CSS variable, so clamp.
   cfg.glowColor = sanitizeGlowColor(cfg.glowColor)
+  // Whether Kory spawns a process is not decided by a stray string in the file.
+  cfg.clodexAutoStart = sanitizeClodexAutoStart(
+    raw.clodexAutoStart,
+    DEFAULT_CONFIG.clodexAutoStart
+  )
   // Corrupt/hand-edited value -> floor to the default; the real ceiling is
   // viewport-relative (renderer-only knowledge), clamped there on seed.
   if (!Number.isFinite(cfg.wfLaneHeight) || cfg.wfLaneHeight < WF_LANE_H_MIN) {

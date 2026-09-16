@@ -2,7 +2,12 @@ import { useEffect, useState } from 'react'
 import { BrokerSettings } from './BrokerSettings'
 import { NotificationChannels } from './NotificationChannels'
 import type { AppConfig, DisplayMode, LaunchPreset, ModelOption } from '@shared/types'
-import { targetKey, type LocalProviderConfig, type ProviderCatalog } from '@shared/models'
+import {
+  clodexSettingUnavailable,
+  targetKey,
+  type LocalProviderConfig,
+  type ProviderCatalog
+} from '@shared/models'
 import { ModelPicker } from './ModelPicker'
 import { DEFAULT_GLOW, DEFAULT_PALETTE } from '@shared/palette'
 import { GLYPH_ACTIONS } from './icons'
@@ -91,6 +96,7 @@ export function SettingsView(): React.JSX.Element {
   // Dropping the state is enough: the effect above refetches on the same tab,
   // which is where the operator watches the clodex section stop being greyed.
   useEffect(() => window.api.onModelsChanged(() => setCatalogs(null)), [])
+  const clodexUnavailable = clodexSettingUnavailable(catalogs)
 
   const commitProviders = (next: LocalProviderConfig[]): void => {
     setProviders(next)
@@ -467,6 +473,23 @@ export function SettingsView(): React.JSX.Element {
                   </button>
                 </div>
                 <small>{t('settings.modelsDetectionHelp')}</small>
+              </div>
+
+              <div className="field">
+                <label className="field field-check">
+                  <input
+                    type="checkbox"
+                    checked={config.clodexAutoStart}
+                    disabled={clodexUnavailable}
+                    onChange={(e) => set('clodexAutoStart', e.target.checked)}
+                  />
+                  <span>{t('settings.clodexAutoStart')}</span>
+                </label>
+                <small>
+                  {clodexUnavailable
+                    ? t('settings.clodexAutoStartAbsent')
+                    : t('settings.clodexAutoStartHelp')}
+                </small>
               </div>
 
               {/* Utility-inference targets (lot A): help+digest and the

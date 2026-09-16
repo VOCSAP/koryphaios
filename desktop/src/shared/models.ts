@@ -220,6 +220,30 @@ export function sanitizeTarget(raw: unknown, fallback: ModelTarget): ModelTarget
 }
 
 /**
+ * Stored clodex auto-start flag. Whether Kory spawns a process must not be
+ * decided by a hand-edited config carrying a string, a number or null, so
+ * anything that is not a real boolean takes the caller's default.
+ */
+export function sanitizeClodexAutoStart(raw: unknown, fallback: boolean): boolean {
+  return typeof raw === 'boolean' ? raw : fallback
+}
+
+/**
+ * Is the clodex auto-start setting unavailable on this machine? ONLY a measured
+ * absence greys it. An unknown catalog leaves the control active: the list is
+ * refetched on every catalog change, so greying on the gap would flicker the
+ * setting between active and greyed on a machine where the wrapper is
+ * perfectly installed, and a control that flickers teaches the operator not to
+ * trust what it shows. Briefly active where it could have been greyed costs
+ * nothing, since the lifecycle already does nothing when the wrapper is absent.
+ */
+export function clodexSettingUnavailable(catalogs: ProviderCatalog[] | null): boolean {
+  if (catalogs === null) return false
+  const section = catalogs.find((c) => c.id === CLODEX_PROVIDER_ID)
+  return section?.bridge?.installed === false
+}
+
+/**
  * Validate a stored/incoming UTILITY-inference target (help, wand, demo): same
  * rules as sanitizeTarget, plus a bridge provider is refused. Those inferences
  * spawn the plain CLI, which would answer from the frontier model instead of

@@ -6,6 +6,8 @@
 import { test, expect } from "bun:test";
 import {
   buildCatalogs,
+  clodexSettingUnavailable,
+  sanitizeClodexAutoStart,
   CLODEX_PROVIDER_ID,
   CLODEX_PROVIDER_NAME,
   favKey,
@@ -184,6 +186,30 @@ test("targetLabel: a provider id names the label whatever the CLI carries it", (
   ).toBe("clodex · clodex:openai-oauth:gpt-5.6-sol");
   // A local target with no provider id still degrades to the generic word.
   expect(targetLabel({ cli: "local", model: "m" })).toBe("local · m");
+});
+
+test("sanitizeClodexAutoStart keeps a real boolean and falls back on everything else", () => {
+  expect(sanitizeClodexAutoStart(true, false)).toBe(true);
+  expect(sanitizeClodexAutoStart(false, true)).toBe(false);
+  // Both fallbacks per value: with a single one, a clamp that always returned
+  // that literal would be indistinguishable from one that honours the default.
+  for (const raw of ["true", "false", "", 1, 0, null, undefined, {}, []]) {
+    expect(sanitizeClodexAutoStart(raw, true)).toBe(true);
+    expect(sanitizeClodexAutoStart(raw, false)).toBe(false);
+  }
+});
+
+test("clodexSettingUnavailable greys only on a measured absence, never on an unknown catalog", () => {
+  expect(clodexSettingUnavailable(buildCatalogs(NONE, [], bridge(ABSENT)))).toBe(true);
+  // Installed with the proxy down is NOT unavailable: starting it is exactly
+  // what the setting is for.
+  expect(clodexSettingUnavailable(buildCatalogs(NONE, [], bridge(IDLE)))).toBe(false);
+  expect(clodexSettingUnavailable(buildCatalogs(NONE, [], bridge(UP)))).toBe(false);
+  // The catalog is refetched on every change, so this gap recurs; greying on it
+  // would flicker the control on a machine where the wrapper is installed.
+  expect(clodexSettingUnavailable(null)).toBe(false);
+  // No bridge section at all is not evidence of an absent wrapper.
+  expect(clodexSettingUnavailable(buildCatalogs(NONE, [], []))).toBe(false);
 });
 
 test("sanitizeUtilityTarget: everything sanitizeTarget accepts, minus the bridges", () => {

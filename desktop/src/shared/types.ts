@@ -280,6 +280,8 @@ export interface AppConfig {
   shell: string
   /** Load the interactive shell / profile (alias resolution) with start-marker stripping. */
   interactiveShell: boolean
+  /** Start the clodex proxy at launch when its wrapper is installed and no server answers. */
+  clodexAutoStart: boolean
   /** Number of columns in the tile grid (legacy; custom mode uses gridCols/gridRows). */
   columns: number
   /** Tile layout mode. */
