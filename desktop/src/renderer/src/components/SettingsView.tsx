@@ -475,22 +475,20 @@ export function SettingsView(): React.JSX.Element {
                 <small>{t('settings.modelsDetectionHelp')}</small>
               </div>
 
-              <div className="field">
-                <label className="field field-check">
-                  <input
-                    type="checkbox"
-                    checked={config.clodexAutoStart}
-                    disabled={clodexUnavailable}
-                    onChange={(e) => set('clodexAutoStart', e.target.checked)}
-                  />
-                  <span>{t('settings.clodexAutoStart')}</span>
-                </label>
-                <small>
-                  {clodexUnavailable
-                    ? t('settings.clodexAutoStartAbsent')
-                    : t('settings.clodexAutoStartHelp')}
-                </small>
-              </div>
+              <label className="field field-check">
+                <input
+                  type="checkbox"
+                  checked={config.clodexAutoStart}
+                  disabled={clodexUnavailable}
+                  onChange={(e) => set('clodexAutoStart', e.target.checked)}
+                />
+                <span>{t('settings.clodexAutoStart')}</span>
+              </label>
+              <small className="field-check-help">
+                {clodexUnavailable
+                  ? t('settings.clodexAutoStartAbsent')
+                  : t('settings.clodexAutoStartHelp')}
+              </small>
 
               {/* Utility-inference targets (lot A): help+digest and the
                   roadmap context wand each pick any catalog model. Bridged
