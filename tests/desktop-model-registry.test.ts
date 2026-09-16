@@ -6,10 +6,12 @@
 
 import { test, expect, beforeEach } from "bun:test";
 import {
+  announceModelsChanged,
   buildDetectCommand,
   detectClis,
   detectClodex,
   discoverLocalModels,
+  FRONTIER_BINS,
   getCatalogs,
   modelsUrlCandidates,
   parseOllamaTags,
@@ -188,4 +190,54 @@ test("getCatalogs: refresh re-probes the bridge, a plain call reuses the cache",
   expect(calls()).toBe(1);
   await getCatalogs([], "", { clodexProbe: probe, refresh: true });
   expect(calls()).toBe(2);
+});
+
+/** Fills both caches, counting every CLI probe so a blunt reset is visible. */
+async function warmCaches(
+  clodexProbe: () => Promise<ClodexProbeResult>,
+  onCliProbe: () => void
+): Promise<void> {
+  await Promise.all([
+    detectClis("bash", {
+      probe: async () => {
+        onCliProbe();
+        return true;
+      }
+    }),
+    detectClodex("bash", { probe: clodexProbe })
+  ]);
+}
+
+test("announceModelsChanged drops the bridge cache before announcing, and leaves the CLI cache alone", async () => {
+  const clodex = countingProbe(BRIDGE_UP);
+  let cliProbes = 0;
+  await warmCaches(clodex.probe, () => cliProbes++);
+  await warmCaches(clodex.probe, () => cliProbes++);
+  expect(clodex.calls()).toBe(1);
+  expect(cliProbes).toBe(FRONTIER_BINS.length);
+
+  // Starting the refetch INSIDE the emit is what proves the order: detectClodex
+  // reads the cache before its first await, so a re-probe there can only come
+  // from an invalidation that already happened.
+  const started: Promise<unknown>[] = [];
+  announceModelsChanged(() => {
+    started.push(detectClodex("bash", { probe: clodex.probe }));
+  });
+  await Promise.all(started);
+  expect(clodex.calls()).toBe(2);
+
+  // Asking again AFTER the announcement is what makes the CLI count mean
+  // something: a blunt reset only shows up on the next detection, never on the
+  // probes that ran before it.
+  await warmCaches(clodex.probe, () => cliProbes++);
+  expect(cliProbes).toBe(FRONTIER_BINS.length);
+});
+
+test("announceModelsChanged announces exactly once per call", () => {
+  let announced = 0;
+  announceModelsChanged(() => announced++);
+  expect(announced).toBe(1);
+
+  announceModelsChanged(() => announced++);
+  expect(announced).toBe(2);
 });

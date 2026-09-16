@@ -1287,6 +1287,11 @@ export function BrowserView({ active }: { active: boolean }): React.JSX.Element 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recDialog])
 
+  // This view is mounted once and kept alive, so the guard above never fires
+  // again on its own: without this the picker would hold the catalog it read
+  // the first time the dialog opened, for the rest of the run.
+  useEffect(() => window.api.onModelsChanged(() => setRecCatalogs(null)), [])
+
   /** rAF pipeline drawing the browser-frame crop of `src` onto a canvas. */
   async function buildCropStream(
     src: MediaStream

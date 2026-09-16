@@ -2286,6 +2286,8 @@ export interface DeckApi {
   /** Poll the credentials probe (auth dialog, every ~2 s). */
   sandboxAuthProbe(): Promise<boolean | null>
   onSandboxChanged(cb: (status: SandboxStatus) => void): () => void
+  /** The model catalogs a surface holds are stale; refetch on the next need. */
+  onModelsChanged(cb: () => void): () => void
 
   // events (return an unsubscribe fn)
   onPtyData(cb: (e: PtyDataEvent) => void): () => void

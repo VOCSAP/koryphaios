@@ -88,6 +88,9 @@ export function SettingsView(): React.JSX.Element {
       void window.api.modelCatalogs().then(setCatalogs)
     }
   }, [active, catalogs])
+  // Dropping the state is enough: the effect above refetches on the same tab,
+  // which is where the operator watches the clodex section stop being greyed.
+  useEffect(() => window.api.onModelsChanged(() => setCatalogs(null)), [])
 
   const commitProviders = (next: LocalProviderConfig[]): void => {
     setProviders(next)

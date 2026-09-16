@@ -133,6 +133,7 @@ const api: DeckApi = {
   sandboxProjectionRemove: () => ipcRenderer.invoke('sandbox:projection-remove'),
   sandboxAuthProbe: () => ipcRenderer.invoke('sandbox:auth-probe'),
   onSandboxChanged: (cb: (status: SandboxStatus) => void) => subscribe('sandbox:changed', cb),
+  onModelsChanged: (cb: () => void) => subscribe('models:changed', cb),
 
   listWorkspaces: () => ipcRenderer.invoke('workspace:list'),
   saveWorkspace: (name?: string) => ipcRenderer.invoke('workspace:save', name),

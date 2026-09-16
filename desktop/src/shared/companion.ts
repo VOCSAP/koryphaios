@@ -194,6 +194,7 @@ export const COMPANION_MANIFEST = {
   // events
   onPtyData: { kind: 'event', channel: 'pty:data' },
   onSandboxChanged: { kind: 'event', channel: 'sandbox:changed' },
+  onModelsChanged: { kind: 'event', channel: 'models:changed' },
   onPtyExit: { kind: 'event', channel: 'pty:exit' },
   onSessionsChanged: { kind: 'event', channel: 'sessions:changed' },
   onSessionThinking: { kind: 'event', channel: 'session:thinking' },

@@ -158,6 +158,7 @@ import {
 } from './team-embedded'
 import { startDesignEndpoint, type DesignEndpoint } from './design-endpoint'
 import { createClodexController } from './clodex-lifecycle-controller'
+import { announceModelsChanged } from './model-registry'
 import { createClodexControllerDeps } from './clodex-lifecycle-deps'
 import { ApprovalRuntime, armApprovalsAtStartup } from './approval-runtime'
 import { remoteApprovalsEnabled } from './approval-store'
@@ -3276,6 +3277,9 @@ app.whenReady().then(async () => {
         reportError('clodex-lifecycle', 'the clodex proxy could not be started')
       } else if (outcome.action !== 'absent' && outcome.action !== 'disabled') {
         journal.add('session', `clodex: proxy ${outcome.action}`)
+        // The remaining outcomes all carry a reachable server, and a surface may
+        // already have probed the bridge while it was still down.
+        announceModelsChanged(() => broadcast('models:changed'))
       }
     })
     .catch((e) => reportError('clodex-lifecycle', 'the clodex proxy could not be started', e))

@@ -200,6 +200,20 @@ export async function getCatalogs(
   ])
 }
 
+/**
+ * Drops the bridge cache, then runs `announce`, which the caller wires to a
+ * `broadcast('models:changed')`. The order is the guarantee: a surface that
+ * refetches on the event would otherwise be served the very value the event
+ * declares stale, since the cache lives here and not in the renderer.
+ * resetDetectCache is deliberately not reused: it also drops the CLI detection,
+ * whose refill spawns one login shell per frontier binary. The channel name
+ * stays at the call site, where the producer-coverage scan can see it.
+ */
+export function announceModelsChanged(announce: () => void): void {
+  clodexCache = null
+  announce()
+}
+
 /** Test hook: reset the detection and bridge caches. */
 export function resetDetectCache(): void {
   detectCache = null
