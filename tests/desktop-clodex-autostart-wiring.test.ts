@@ -19,6 +19,11 @@ const settingsView = readFileSync(
   "utf8"
 );
 
+const lifecycleTs = readFileSync(
+  join(import.meta.dir, "..", "desktop", "src", "main", "clodex-lifecycle.ts"),
+  "utf8"
+);
+
 test("the clodex auto-start toggle is applied detached, never awaited by setConfig", () => {
   const marker = "void applyClodexAutoStart(";
   const callIdx = indexTs.indexOf(marker);
@@ -33,11 +38,35 @@ test("the session toggle announces the catalog change, like the startup path doe
   const decl = "const applyClodexAutoStart";
   const declIdx = indexTs.indexOf(decl);
   expect(declIdx).toBeGreaterThan(-1);
-  const body = extractBracedBody(indexTs, indexTs.indexOf("{", declIdx));
+  const braceIdx = indexTs.indexOf("{", declIdx);
+  // That brace is the BODY only while the signature carries none: a destructured
+  // parameter or an inline object type would move it, and the assertion below
+  // would then guard that object instead, silently.
+  expect(indexTs.slice(declIdx, braceIdx)).toContain("=>");
+  const body = extractBracedBody(indexTs, braceIdx);
   // Scoped to the toggle's own body: announceModelsChanged also has a startup
   // call site, and asserting on the whole file would pass on that one alone,
   // which is exactly the gap this pins.
   expect(body).toContain("announceModelsChanged(");
+});
+
+test("every release outcome is classified against the announce allow-list", () => {
+  const declIdx = lifecycleTs.indexOf("export type ReleaseOutcome");
+  expect(declIdx).toBeGreaterThan(-1);
+  // Bounded by the blank line, not by the first `;`: the `retained` branch
+  // carries one INSIDE its object type, which truncated the window and dropped
+  // the branches after it while leaving the scan green-looking.
+  const blank = /\r?\n\r?\n/.exec(lifecycleTs.slice(declIdx));
+  expect(blank).not.toBeNull();
+  const union = lifecycleTs.slice(declIdx, declIdx + blank!.index);
+  const actions = [...union.matchAll(/action:\s*"([^"]+)"/g)].map((m) => m[1]).sort();
+  // The release side announces on an ALLOW-list, so an unlisted new outcome
+  // stays silent. That direction is the harmful one: a proxy that stopped
+  // without an announce leaves every picker greyed for the rest of the run.
+  expect(
+    actions,
+    "a new release outcome must be classified: add it to the announce allow-list of applyClodexAutoStart when it means the proxy stopped, or leave it out deliberately"
+  ).toEqual(["failed", "released", "retained", "stopped"]);
 });
 
 test("the clodex checkbox row carries the attribute its dimming rule keys on", () => {

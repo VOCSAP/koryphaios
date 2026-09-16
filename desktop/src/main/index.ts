@@ -503,6 +503,8 @@ const applyClodexAutoStart = async (enabled: boolean): Promise<void> => {
     // The proxy just became reachable, or stopped being: the surfaces holding a
     // catalog read the bridge state before that and would keep it for the whole
     // run, since the probe is cached and nothing else invalidates it.
+    // Allow-list on the release side: a new outcome meaning the proxy stopped
+    // belongs here, or it stays silent and the pickers keep a dead bridge.
     const reachabilityChanged = enabled
       ? outcome.action !== 'failed' && outcome.action !== 'absent'
       : outcome.action === 'stopped'
