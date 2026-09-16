@@ -475,7 +475,7 @@ export function SettingsView(): React.JSX.Element {
                 <small>{t('settings.modelsDetectionHelp')}</small>
               </div>
 
-              <label className="field field-check">
+              <label className="field field-check" aria-disabled={clodexUnavailable}>
                 <input
                   type="checkbox"
                   checked={config.clodexAutoStart}

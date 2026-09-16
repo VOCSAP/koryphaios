@@ -500,6 +500,13 @@ const applyClodexAutoStart = async (enabled: boolean): Promise<void> => {
       ? await ensureClodexController().start(true)
       : await (clodexController?.stop() ?? Promise.resolve({ action: 'released' as const }))
     journal.add('session', `clodex: auto-start ${enabled ? 'on' : 'off'} (${outcome.action})`)
+    // The proxy just became reachable, or stopped being: the surfaces holding a
+    // catalog read the bridge state before that and would keep it for the whole
+    // run, since the probe is cached and nothing else invalidates it.
+    const reachabilityChanged = enabled
+      ? outcome.action !== 'failed' && outcome.action !== 'absent'
+      : outcome.action === 'stopped'
+    if (reachabilityChanged) announceModelsChanged(() => broadcast('models:changed'))
   } catch (err) {
     reportError('clodex-lifecycle', 'the clodex auto-start toggle could not be applied', err)
   }
