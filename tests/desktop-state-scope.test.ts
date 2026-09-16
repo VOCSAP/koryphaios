@@ -180,6 +180,11 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     scope: "machine",
     reason: "coordinates every Deck instance using the same per-profile CLODEX_HOME store, so lifecycle changes must serialize across windows",
   },
+  "koryphaios-clodex-lifecycle.db": {
+    kind: "literal",
+    scope: "machine",
+    reason: "the lease and owner store that lock guards, one per CLODEX_HOME; the Deck creates, names and writes it, unlike the clodex manifest sitting in the same directory",
+  },
   "operator.json": {
     kind: "literal",
     scope: "machine",
@@ -234,6 +239,11 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     kind: "constructor",
     scope: "machine",
     reason: "<file>.<pid>.<random>.tmp, the atomic-write sibling of whatever file is being replaced; keyed by pid AND call so two processes never share one",
+  },
+  storePath: {
+    kind: "constructor",
+    scope: "machine",
+    reason: "builds <clodexHome(env)>/koryphaios-clodex-lifecycle.db; every window sharing one CLODEX_HOME must serialize on the same store, so the name is deliberately not keyed by window",
   },
 };
 
