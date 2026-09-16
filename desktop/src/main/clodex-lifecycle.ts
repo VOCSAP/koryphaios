@@ -1,3 +1,12 @@
+import {
+  parseOwnerRecord,
+  sameOwner,
+  type OwnerRecord,
+  type ServerIdentity
+} from "./clodex-process-identity";
+
+export type { ServerIdentity } from "./clodex-process-identity";
+
 export const CLODEX_SERVER_COMMAND = ["clodex", "server", "--proxy"] as const;
 
 const LOCK_KEY = "clodex-lifecycle.lock";
@@ -14,16 +23,8 @@ export interface LeaseIdentity extends ProcessIdentity {
   runId: string;
 }
 
-export interface ServerIdentity extends ProcessIdentity {
-  port: number;
-}
-
 interface LeaseRecord extends LeaseIdentity {
   heartbeat: number;
-}
-
-interface OwnerRecord {
-  server: ServerIdentity;
 }
 
 export interface ClodexLifecycleEvent {
@@ -45,8 +46,13 @@ export interface ClodexLifecycleDeps {
   isAlive(identity: ProcessIdentity): Promise<boolean>;
   measureServer(pid: number): Promise<ServerIdentity | null>;
   tcpReady(server: ServerIdentity): Promise<boolean>;
-  spawn(command: string, args: string[]): Promise<ServerIdentity>;
-  stopTree(server: ServerIdentity): Promise<void>;
+  spawn(command: string, args: string[]): Promise<OwnerRecord>;
+  /**
+   * Must re-measure the root process stamp and refuse the kill when it differs from
+   * `owner.tree.root`: nothing else re-checks it, and a recycled pid is otherwise
+   * indistinguishable from the process we started.
+   */
+  stopTree(owner: OwnerRecord): Promise<void>;
   read<T>(key: string): Promise<T | null>;
   write<T>(key: string, value: T): Promise<void>;
   createExclusive<T>(key: string, value: T): Promise<boolean>;
@@ -80,12 +86,12 @@ export type ReleaseOutcome =
 interface HeldServer {
   server: ServerIdentity;
   manual: boolean;
-  ownerPersisted: boolean;
+  owner: OwnerRecord | null;
 }
 
 interface PendingCleanup {
   server: ServerIdentity;
-  ownerPersisted: boolean;
+  owner: OwnerRecord | null;
   serverStopped: boolean;
   leasePresent: boolean;
 }
@@ -126,6 +132,14 @@ export function createClodexLifecycle(
   };
 
   const leaseRecord = (): LeaseRecord => ({ ...identity, heartbeat: deps.now() });
+
+  const readOwner = async (): Promise<OwnerRecord | null> => {
+    const value = await deps.read<unknown>(OWNER_KEY);
+    if (value === null) return null;
+    const owner = parseOwnerRecord(value);
+    if (!owner) emit("lifecycle-error", new TypeError("Invalid Clodex owner record"));
+    return owner;
+  };
 
   const isStale = async (record: LeaseRecord): Promise<boolean> => {
     if (deps.now() - record.heartbeat <= staleMs) return false;
@@ -207,11 +221,11 @@ export function createClodexLifecycle(
     return true;
   };
 
-  const removeOwnedServer = async (server: ServerIdentity): Promise<boolean> => {
+  const removeOwnedServer = async (owner: OwnerRecord): Promise<boolean> => {
     try {
-      const owner = await deps.read<OwnerRecord>(OWNER_KEY);
-      if (owner && sameServer(owner.server, server)) {
-        return await deps.removeIfEquals(OWNER_KEY, owner);
+      const current = await readOwner();
+      if (current && sameOwner(current, owner)) {
+        return await deps.removeIfEquals(OWNER_KEY, current);
       }
       return true;
     } catch (error) {
@@ -220,17 +234,17 @@ export function createClodexLifecycle(
     }
   };
 
-  const stopOwnedServer = async (server: ServerIdentity): Promise<StopOutcome> => {
+  const stopOwnedServer = async (owner: OwnerRecord): Promise<StopOutcome> => {
     let measured: ServerIdentity | null;
     try {
-      measured = await deps.measureServer(server.pid);
+      measured = await deps.measureServer(owner.server.pid);
     } catch (error) {
       emit("lifecycle-error", error);
       return "failed";
     }
-    if (!measured || !sameServer(measured, server)) return "identity-mismatch";
+    if (!measured || !sameServer(measured, owner.server)) return "identity-mismatch";
     try {
-      await deps.stopTree(server);
+      await deps.stopTree(owner);
       return "stopped";
     } catch (error) {
       emit("kill-error", error);
@@ -264,7 +278,7 @@ export function createClodexLifecycle(
     if (!pending) return "clean";
 
     if (!pending.serverStopped) {
-      if (!pending.ownerPersisted) {
+      if (!pending.owner) {
         if (pending.leasePresent && !(await removeTrackedLease(pending))) return "failed";
         return "not-owner";
       }
@@ -273,16 +287,16 @@ export function createClodexLifecycle(
       if (otherLeases === "live") return "deferred";
       let owner: OwnerRecord | null;
       try {
-        owner = await deps.read<OwnerRecord>(OWNER_KEY);
+        owner = await readOwner();
       } catch (error) {
         emit("lifecycle-error", error);
         return "failed";
       }
-      if (!owner || !sameServer(owner.server, pending.server)) {
+      if (!owner || !sameOwner(owner, pending.owner)) {
         if (pending.leasePresent && !(await removeTrackedLease(pending))) return "failed";
         return "not-owner";
       }
-      const stopped = await stopOwnedServer(pending.server);
+      const stopped = await stopOwnedServer(pending.owner);
       if (stopped === "failed") return "failed";
       if (stopped === "identity-mismatch") {
         try {
@@ -295,15 +309,15 @@ export function createClodexLifecycle(
       pending.serverStopped = true;
     }
 
-    if (pending.ownerPersisted && !(await removeOwnedServer(pending.server))) return "failed";
-    pending.ownerPersisted = false;
+    if (pending.owner && !(await removeOwnedServer(pending.owner))) return "failed";
+    pending.owner = null;
     return "clean";
   };
 
   const finishPendingCleanup = async (): Promise<boolean> => {
     const pending = pendingCleanup;
     if (!pending) return true;
-    if (!pending.serverStopped || pending.ownerPersisted) return false;
+    if (!pending.serverStopped || pending.owner) return false;
     if (pending.leasePresent && !(await removeTrackedLease(pending))) return false;
     pendingCleanup = null;
     return true;
@@ -384,7 +398,7 @@ export function createClodexLifecycle(
           } else {
             pendingCleanup = {
               server: expired.server,
-              ownerPersisted: expired.ownerPersisted,
+              owner: expired.owner,
               serverStopped: true,
               leasePresent: true
             };
@@ -405,11 +419,12 @@ export function createClodexLifecycle(
         leaseWritten = true;
         const running = await deps.readServer();
         if (running && (await deps.isAlive(running))) {
-          const owner = await deps.read<OwnerRecord>(OWNER_KEY);
+          const owner = await readOwner();
+          const owned = owner && sameServer(owner.server, running) ? owner : null;
           activeHeld = {
             server: running,
-            manual: !owner || !sameServer(owner.server, running),
-            ownerPersisted: Boolean(owner && sameServer(owner.server, running))
+            manual: owned === null,
+            owner: owned
           };
           return activeHeld.manual
             ? { action: "adopted", server: running }
@@ -417,13 +432,16 @@ export function createClodexLifecycle(
         }
 
         stage = "spawn";
-        const server = await deps.spawn(CLODEX_SERVER_COMMAND[0], [...CLODEX_SERVER_COMMAND.slice(1)]);
-        started = { server, manual: false, ownerPersisted: false };
+        const spawned = await deps.spawn(CLODEX_SERVER_COMMAND[0], [...CLODEX_SERVER_COMMAND.slice(1)]);
+        const owner = parseOwnerRecord(spawned);
+        if (!owner) throw new TypeError("Invalid Clodex owner returned by spawn");
+        const server = owner.server;
+        started = { server, manual: false, owner: null };
         pendingCleanup = { ...started, serverStopped: false, leasePresent: true };
         stage = "ownership";
-        await deps.write<OwnerRecord>(OWNER_KEY, { server });
-        started.ownerPersisted = true;
-        pendingCleanup.ownerPersisted = true;
+        await deps.write<OwnerRecord>(OWNER_KEY, owner);
+        started.owner = owner;
+        pendingCleanup.owner = owner;
 
         stage = "ready";
         const readiness = await waitForReady(server);
@@ -467,16 +485,25 @@ export function createClodexLifecycle(
         return { action: "released" };
       }
 
-      if (releasing.ownerPersisted) {
-        const owner = await deps.read<OwnerRecord>(OWNER_KEY);
-        if (!owner || !sameServer(owner.server, releasing.server)) {
-          if (!(await removeTrackedLease())) return { action: "failed" };
-          activeHeld = null;
-          return { action: "retained", reason: "not-owner" };
-        }
+      if (!releasing.owner) {
+        if (!(await removeTrackedLease())) return { action: "failed" };
+        activeHeld = null;
+        return { action: "retained", reason: "not-owner" };
+      }
+      let owner: OwnerRecord | null;
+      try {
+        owner = await readOwner();
+      } catch (error) {
+        emit("lifecycle-error", error);
+        return { action: "failed" };
+      }
+      if (!owner || !sameOwner(owner, releasing.owner)) {
+        if (!(await removeTrackedLease())) return { action: "failed" };
+        activeHeld = null;
+        return { action: "retained", reason: "not-owner" };
       }
 
-      const stopped = await stopOwnedServer(releasing.server);
+      const stopped = await stopOwnedServer(releasing.owner);
       if (stopped === "failed") return { action: "failed" };
       if (stopped === "identity-mismatch") {
         try {
@@ -494,7 +521,7 @@ export function createClodexLifecycle(
       activeHeld = null;
       pendingCleanup = {
         server: releasing.server,
-        ownerPersisted: releasing.ownerPersisted,
+        owner: releasing.owner,
         serverStopped: true,
         leasePresent: true
       };

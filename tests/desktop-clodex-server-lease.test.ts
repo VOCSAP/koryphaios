@@ -6,6 +6,7 @@ import {
   type ProcessIdentity,
   type ServerIdentity
 } from "../desktop/src/main/clodex-lifecycle.ts";
+import type { OwnerRecord } from "../desktop/src/main/clodex-process-identity.ts";
 
 type Store = Map<string, unknown>;
 
@@ -97,12 +98,12 @@ function fixture() {
       runtime = server(800 + spawnCount);
       live.set(processKey(runtime), true);
       identities.set(runtime.pid, runtime);
-      return runtime;
+      return owner(runtime);
     },
     stopTree: async (candidate) => {
       stopCount++;
       if (stopError) throw stopError;
-      live.delete(processKey(candidate));
+      live.delete(processKey(candidate.server));
     },
     read: async <T>(key: string) => {
       if (readError || (key === "clodex-lifecycle.owner" && ownerReadError)) throw readError ?? ownerReadError;
@@ -137,7 +138,8 @@ function fixture() {
         removeIfEqualsError = null;
         throw error;
       }
-      if (files.get(key) !== expected) return false;
+      // The SQLite store compares canonical JSON, so a structural copy still matches.
+      if (!Bun.deepEquals(files.get(key), expected)) return false;
       files.delete(key);
       return true;
     },
@@ -284,6 +286,106 @@ test("disabled and absent Clodex leave no lease or event", async () => {
   expect(await lifecycle.acquire(true)).toEqual({ action: "absent" });
   expect(f.files.size).toBe(0);
   expect(f.events).toEqual([]);
+});
+
+const owner = (identity = server()) => ({
+  server: identity,
+  tree: {
+    platform: "win32" as const,
+    root: { pid: 600, creationUtc: "2026-09-15T12:34:56.789Z" },
+    runtime: { pid: identity.pid, creationUtc: "2026-09-15T12:34:57.789Z" }
+  }
+});
+
+test("a spawned owner snapshot is persisted and passed intact to stopTree", async () => {
+  const f = fixture();
+  const spawned = owner(server(800));
+  const stopped: OwnerRecord[] = [];
+  const lifecycle = createClodexLifecycle(
+    {
+      ...f.deps,
+      spawn: async () => {
+        f.runtime = spawned.server;
+        return spawned;
+      },
+      stopTree: async (candidate) => {
+        stopped.push(candidate);
+        f.live.delete(processKey(candidate.server));
+      }
+    } as ClodexLifecycleDeps,
+    lease("a", 101)
+  );
+
+  expect(await lifecycle.acquire(true)).toEqual({ action: "acquired", server: spawned.server });
+  expect(f.files.get("clodex-lifecycle.owner")).toEqual(spawned);
+  expect(await lifecycle.release()).toEqual({ action: "stopped" });
+  expect(stopped).toEqual([spawned]);
+});
+
+test("a legacy owner is visible, manual, and never grants kill authority", async () => {
+  const f = fixture();
+  f.runtime = server(701);
+  f.files.set("clodex-lifecycle.owner", { server: f.runtime });
+  const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
+
+  expect(await lifecycle.acquire(true)).toEqual({ action: "adopted", server: server(701) });
+  expect(await lifecycle.release()).toEqual({ action: "released" });
+  expect(f.stopCount).toBe(0);
+  expect(f.events).toContain("lifecycle-error");
+});
+
+test("a same-server owner with a different tree loses kill authority", async () => {
+  const f = fixture();
+  const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
+
+  expect((await lifecycle.acquire(true)).action).toBe("acquired");
+  const replacement: OwnerRecord = {
+    ...owner(f.runtime!),
+    tree: {
+      ...owner(f.runtime!).tree,
+      root: { pid: 601, creationUtc: "2026-09-15T12:34:58.789Z" }
+    }
+  };
+  f.files.set("clodex-lifecycle.owner", replacement);
+
+  expect(await lifecycle.release()).toEqual({ action: "retained", reason: "not-owner" });
+  expect(f.stopCount).toBe(0);
+  expect(f.files.get("clodex-lifecycle.owner")).toBe(replacement);
+});
+
+test("an owner naming another server leaves a running server manual", async () => {
+  const f = fixture();
+  f.runtime = server(701);
+  const stale = owner(server(999));
+  f.files.set("clodex-lifecycle.owner", stale);
+  const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
+
+  expect(await lifecycle.acquire(true)).toEqual({ action: "adopted", server: server(701) });
+  expect(await lifecycle.release()).toEqual({ action: "released" });
+  expect(f.stopCount).toBe(0);
+  expect(f.files.get("clodex-lifecycle.owner")).toBe(stale);
+  expect(f.live.has(processKey(server(701)))).toBe(true);
+});
+
+test("a spawn result without a tree fails before any ownership is persisted", async () => {
+  const f = fixture();
+  const lifecycle = createClodexLifecycle(
+    {
+      ...f.deps,
+      spawn: async () => {
+        const spawned = server(800);
+        f.runtime = spawned;
+        return { server: spawned } as unknown as OwnerRecord;
+      }
+    },
+    lease("a", 101)
+  );
+
+  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
+  expect(f.events).toContain("spawn-error");
+  expect(f.files.has("clodex-lifecycle.owner")).toBe(false);
+  expect(f.stopCount).toBe(0);
+  expect(f.live.has(processKey(server(800)))).toBe(true);
 });
 
 test("a live manual server is adopted and never stopped", async () => {
@@ -437,14 +539,14 @@ test("a reused pid with a different start time reclaims stale lock, lease, and o
   const stale = { ...lease("stale", 999, 1), heartbeat: 0 };
   f.files.set("clodex-lifecycle.lock", stale);
   f.files.set("clodex-lifecycle.leases/host-999-stale", stale);
-  f.files.set("clodex-lifecycle.owner", { server: { ...server(999), startedAt: 1 } });
+  f.files.set("clodex-lifecycle.owner", owner({ ...server(999), startedAt: 1 }));
   f.markAlive({ host: "host", pid: 999, startedAt: 2 });
   f.now = 100_000;
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101), { staleMs: 1 });
 
   expect((await lifecycle.acquire(true)).action).toBe("acquired");
   expect(f.files.has("clodex-lifecycle.leases/host-999-stale")).toBe(false);
-  expect(f.files.get("clodex-lifecycle.owner")).toEqual({ server: server(801) });
+  expect(f.files.get("clodex-lifecycle.owner")).toEqual(owner(server(801)));
 });
 
 test("every server-identity mismatch prevents termination", async () => {
@@ -567,7 +669,7 @@ test("a replaced current owner prevents a pending cleanup retry from stopping", 
   f.tcpReady = false;
   f.stopError = new Error("stop denied");
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101), { readinessAttempts: 1 });
-  const replacement = { server: server(999) };
+  const replacement = owner(server(999));
 
   expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
   expect(f.stopCount).toBe(1);
@@ -577,6 +679,30 @@ test("a replaced current owner prevents a pending cleanup retry from stopping", 
   expect(await lifecycle.release()).toEqual({ action: "retained", reason: "not-owner" });
   expect(f.stopCount).toBe(1);
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(false);
+  expect(f.files.get("clodex-lifecycle.owner")).toBe(replacement);
+  expect(f.live.has(processKey(f.runtime!))).toBe(true);
+});
+
+test("a same-server tree replacement prevents a pending cleanup retry from stopping", async () => {
+  const f = fixture();
+  f.tcpReady = false;
+  f.stopError = new Error("stop denied");
+  const lifecycle = createClodexLifecycle(f.deps, lease("a", 101), { readinessAttempts: 1 });
+
+  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
+  expect(f.stopCount).toBe(1);
+  const replacement: OwnerRecord = {
+    ...owner(f.runtime!),
+    tree: {
+      ...owner(f.runtime!).tree,
+      root: { pid: 601, creationUtc: "2026-09-15T12:34:58.789Z" }
+    }
+  };
+  f.files.set("clodex-lifecycle.owner", replacement);
+  f.stopError = null;
+
+  expect(await lifecycle.release()).toEqual({ action: "retained", reason: "not-owner" });
+  expect(f.stopCount).toBe(1);
   expect(f.files.get("clodex-lifecycle.owner")).toBe(replacement);
   expect(f.live.has(processKey(f.runtime!))).toBe(true);
 });
@@ -604,6 +730,21 @@ test("a pending owner read error remains retryable without another stop", async 
   expect(f.stopCount).toBe(2);
 });
 
+test("a held owner read error is traced as a lifecycle failure, not a lock failure", async () => {
+  const f = fixture();
+  const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
+
+  expect((await lifecycle.acquire(true)).action).toBe("acquired");
+  f.ownerReadError = new Error("owner read denied");
+
+  expect(await lifecycle.release()).toEqual({ action: "failed" });
+  expect(f.stopCount).toBe(0);
+  expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(true);
+  expect(f.files.has("clodex-lifecycle.owner")).toBe(true);
+  expect(f.events).toContain("lifecycle-error");
+  expect(f.events).not.toContain("lock-error");
+});
+
 test("each pending owner identity mismatch prevents a retry stop", async () => {
   const mismatches = [
     { host: "other-host" },
@@ -620,7 +761,7 @@ test("each pending owner identity mismatch prevents a retry stop", async () => {
 
     expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
     expect(f.stopCount).toBe(1);
-    f.files.set("clodex-lifecycle.owner", { server: { ...f.runtime!, ...mismatch } });
+    f.files.set("clodex-lifecycle.owner", owner({ ...f.runtime!, ...mismatch }));
     f.stopError = null;
 
     expect(await lifecycle.release()).toEqual({ action: "retained", reason: "not-owner" });
@@ -951,10 +1092,37 @@ test("CAS stale reclaim does not remove a replacement lock", async () => {
   expect(f.spawnCount).toBe(0);
 });
 
+test("a post-stop same-server tree replacement survives owner cleanup", async () => {
+  const f = fixture();
+  let replacement: OwnerRecord | null = null;
+  const lifecycle = createClodexLifecycle(
+    {
+      ...f.deps,
+      stopTree: async (candidate) => {
+        f.live.delete(processKey(candidate.server));
+        replacement = {
+          ...candidate,
+          tree: {
+            ...candidate.tree,
+            root: { pid: 601, creationUtc: "2026-09-15T12:34:58.789Z" }
+          }
+        };
+        f.files.set("clodex-lifecycle.owner", replacement);
+      }
+    },
+    lease("a", 101)
+  );
+
+  expect((await lifecycle.acquire(true)).action).toBe("acquired");
+  expect(await lifecycle.release()).toEqual({ action: "stopped" });
+  expect(f.files.get("clodex-lifecycle.owner")).toBe(replacement);
+  expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(false);
+});
+
 test("a concurrent owner replacement survives failed owner cleanup", async () => {
   const f = fixture();
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
-  const replacement = { server: server(999) };
+  const replacement = owner(server(999));
 
   expect((await lifecycle.acquire(true)).action).toBe("acquired");
   f.beforeRemoveIfEquals = (key) => {
