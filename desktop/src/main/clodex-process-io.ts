@@ -21,6 +21,7 @@ import {
   type WindowsProcessStamp
 } from "./clodex-process-identity";
 import { buildShellInvocation } from "./shell-command";
+import { canonicalPath } from "./worktree-service";
 
 /** Error scope of every trace emitted by this module. */
 const SCOPE = "clodex";
@@ -126,6 +127,21 @@ export interface PosixMeasurement extends PosixProcessStamp {
   pgid: number;
 }
 
+type TreeStamps =
+  | { root: WindowsProcessStamp; runtime: WindowsProcessStamp }
+  | { root: PosixMeasurement; runtime: PosixMeasurement };
+
+interface CimProcess {
+  pid: number;
+  parentPid: number;
+  creation: string;
+  image: string;
+}
+
+function sameCimProcess(a: CimProcess, b: CimProcess): boolean {
+  return a.pid === b.pid && a.parentPid === b.parentPid && a.creation === b.creation && a.image === b.image;
+}
+
 function requirePid(value: unknown): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
     throw new TypeError(`Clodex process id must be a positive integer, got ${String(value)}`);
@@ -134,6 +150,14 @@ function requirePid(value: unknown): number {
 }
 
 const WINDOWS_ABSOLUTE_RE = /^[A-Za-z]:[\\/]/;
+
+/** `/s` strips the first and last quote of the line, so the path goes unquoted. */
+const GLUED_PATH_RE = /^[A-Za-z]:[\\/][A-Za-z0-9._\\/-]*$/;
+
+const DOT_DOT_SEGMENT_RE = /(^|[\\/])\.\.([\\/]|$)/;
+
+/** `ProcessId|ParentProcessId|CreationDate|ExecutablePath`; the path is empty when unreadable. */
+const CIM_ROW_RE = /^(\d+)\|(\d+)\|([^|]*)\|(.*)$/;
 
 /** Windows env names are case-insensitive, a spread copy of `process.env` is not. */
 function envValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
@@ -184,13 +208,25 @@ function withAbsolutePath(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  * not cover. Both defend the command resolution cmd.exe performs, nothing
  * more: a Node descendant spawning a bare name through libuv still searches
  * its working directory. cmd.exe is named from an absolute SystemRoot and
- * ComSpec is ignored, since `/d /s /c` and the quoting are cmd.exe syntax and
- * the spawned binary is the root `taskkill /T` stops.
+ * ComSpec is ignored, since `/d /s /c` and the quoting are cmd.exe syntax.
+ *
+ * The outer cmd.exe is attached, so it gets a hidden console its descendants
+ * share; a detached one has none and the first console program below it opens
+ * a visible window. Attached, it dies with the Deck's job object, so it only
+ * relays: libuv lets its descendants leave that job silently, and the inner
+ * cmd.exe is the root `taskkill /T` stops.
  */
 function win32Invocation(env: NodeJS.ProcessEnv, line: string, makeDir: (path: string) => void) {
   const systemRoot = envValue(env, "SystemRoot");
   if (!systemRoot || !WINDOWS_ABSOLUTE_RE.test(systemRoot)) {
     throw new Error(`clodex server needs an absolute SystemRoot, got ${String(systemRoot)}`);
+  }
+  const cmd = `${systemRoot.replace(/[\\/]+$/, "")}\\System32\\cmd.exe`;
+  if (!GLUED_PATH_RE.test(cmd)) {
+    throw new Error(`clodex server cannot glue ${cmd} into a command line`);
+  }
+  if (DOT_DOT_SEGMENT_RE.test(cmd)) {
+    throw new Error(`clodex server refuses a cmd.exe path with a .. segment: ${cmd}`);
   }
   const home = clodexHome(env);
   if (!WINDOWS_ABSOLUTE_RE.test(home)) {
@@ -203,11 +239,16 @@ function win32Invocation(env: NodeJS.ProcessEnv, line: string, makeDir: (path: s
     throw new Error(`cannot create the clodex home ${home}: ${cause}`, { cause: error });
   }
   return {
-    file: `${systemRoot.replace(/[\\/]+$/, "")}\\System32\\cmd.exe`,
-    args: ["/d", "/s", "/c", line],
+    file: cmd,
+    args: ["/d", "/s", "/c", `${cmd} /d /s /c ${line}`],
     cwd: home,
     env: withEnvValue(withAbsolutePath(env), "NoDefaultCurrentDirectoryInExePath", "1")
   };
+}
+
+/** A stamp CREATION_STAMP_RE accepted, with its fraction padded so that string order is time order. */
+function instantKey(stamp: string): string {
+  return stamp.replace(/\.(\d+)Z$/, (_, fraction: string) => `.${fraction.padEnd(9, "0")}Z`);
 }
 
 function requirePositiveInteger(value: unknown): number | null {
@@ -379,24 +420,87 @@ export function createClodexProcessIo(
     return matches.length === 1 ? identityOf(matches[0]!) : null;
   };
 
-  const stampTree = async (
-    rootPid: number,
-    runtimePid: number
-  ): Promise<
-    | { root: WindowsProcessStamp; runtime: WindowsProcessStamp }
-    | { root: PosixMeasurement; runtime: PosixMeasurement }
-  > => {
-    if (deps.platform === "win32") {
-      return { root: await stampWin32(rootPid), runtime: await stampWin32(runtimePid) };
+  /** Rows of one CIM query; its creation dates are never compared with a Get-Process stamp. */
+  const listCim = async (filter: string, context: string): Promise<CimProcess[]> => {
+    const { code, stdout, stderr } = await deps.run("powershell.exe", [
+      "-NoLogo",
+      "-NoProfile",
+      "-Command",
+      `Get-CimInstance Win32_Process -Filter '${filter}' | ForEach-Object { "$($_.ProcessId)|$($_.ParentProcessId)|$($_.CreationDate.ToUniversalTime().ToString('o'))|$($_.ExecutablePath)" }`
+    ]);
+    if (code !== 0) throw new Error(`cannot list ${context} (exit ${code}): ${stderr.trim()}`);
+    const rows: CimProcess[] = [];
+    for (const raw of stdout.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (line === "") continue;
+      const match = CIM_ROW_RE.exec(line);
+      const pid = match ? requirePositiveInteger(Number(match[1])) : null;
+      const parentPid = match ? requirePositiveInteger(Number(match[2])) : null;
+      if (!match || pid === null || parentPid === null || !CREATION_STAMP_RE.test(match[3]!)) {
+        throw new Error(`unreadable listing of ${context}: ${line}`);
+      }
+      rows.push({ pid, parentPid, creation: match[3]!, image: match[4]! });
     }
-    return { root: await measurePosix(rootPid), runtime: await measurePosix(runtimePid) };
+    return rows;
   };
 
-  const buildOwner = (
-    record: RuntimeRecord,
-    stamps: Awaited<ReturnType<typeof stampTree>>,
-    rootPid: number
-  ): OwnerRecord => {
+  /**
+   * The relay's children are its conhost.exe and the inner cmd.exe, told apart
+   * by image path. A parent pid is only a number the OS may have reused, so a
+   * child created before the relay, in the same snapshot, belongs to an
+   * earlier holder of that pid. While `exited` is false the relay handle is
+   * still open and its pid cannot be reused. The candidate is re-read after
+   * its stamp, since the stamp is a second query its pid may have been reused
+   * in. Anything short of exactly one unchanged candidate is refused: the root
+   * is what a later stop kills.
+   */
+  const findWin32Root = async (relayPid: number, cmd: string, hasExited: () => boolean): Promise<WindowsProcessStamp> => {
+    const context = `the children of clodex relay ${relayPid}`;
+    const before = await stampWin32(relayPid);
+    const listing = await listCim(`ProcessId=${relayPid} or ParentProcessId=${relayPid}`, context);
+    const after = await stampWin32(relayPid);
+    if (hasExited() || after.creationUtc !== before.creationUtc) {
+      throw new Error(`clodex relay ${relayPid} left during the root discovery`);
+    }
+    const relays = listing.filter((row) => row.pid === relayPid);
+    if (relays.length !== 1) throw new Error(`the listing of ${context} holds ${relays.length} relay rows`);
+    const relay = relays[0]!;
+    const wanted = canonicalPath(cmd).toLowerCase();
+    const fresh = listing.filter(
+      (row) =>
+        row.pid !== relayPid &&
+        row.parentPid === relayPid &&
+        row.image !== "" &&
+        canonicalPath(row.image).toLowerCase() === wanted &&
+        instantKey(row.creation) >= instantKey(relay.creation)
+    );
+    if (fresh.length !== 1) {
+      throw new Error(`clodex relay ${relayPid} has ${fresh.length} inner cmd.exe candidates: none can be owned`);
+    }
+    const candidate = fresh[0]!;
+    const stamp = await stampWin32(candidate.pid);
+    const reread = await listCim(`ProcessId=${candidate.pid}`, `clodex root candidate ${candidate.pid}`);
+    const same = reread.length === 1 && sameCimProcess(reread[0]!, candidate);
+    if (!same || hasExited()) {
+      throw new Error(`clodex root candidate ${candidate.pid} changed while it was stamped`);
+    }
+    return stamp;
+  };
+
+  const discoverWin32Root = async (
+    relayPid: number,
+    cmd: string,
+    hasExited: () => boolean
+  ): Promise<WindowsProcessStamp> => {
+    try {
+      return await findWin32Root(relayPid, cmd, hasExited);
+    } catch (error) {
+      deps.onError(SCOPE, `refused to own a root under clodex relay ${relayPid}`, error);
+      throw error;
+    }
+  };
+
+  const buildOwner = (record: RuntimeRecord, stamps: TreeStamps, rootPid: number): OwnerRecord => {
     const server = identityOf(record);
     if (deps.platform === "win32") {
       const { root, runtime } = stamps as { root: WindowsProcessStamp; runtime: WindowsProcessStamp };
@@ -432,23 +536,23 @@ export function createClodexProcessIo(
       if (!COMMAND_TOKEN_RE.test(token)) throw new TypeError(`Unsafe clodex command token: ${token}`);
     }
     const line = [command, ...args].join(" ");
-    // A detached powershell.exe exits 0 without running its -Command; cmd.exe
-    // runs it and stays the root of the tree `taskkill /T` stops.
+    // PowerShell is never the launcher: a detached one exits 0 without running
+    // its -Command.
+    const win32 = deps.platform === "win32" ? win32Invocation(deps.env, line, deps.makeDir) : null;
     const invocation =
-      deps.platform === "win32"
-        ? win32Invocation(deps.env, line, deps.makeDir)
-        : buildShellInvocation({ command: line, shell: loginShell(), interactive: false }, deps.platform);
+      win32 ?? buildShellInvocation({ command: line, shell: loginShell(), interactive: false }, deps.platform);
     const sink = deps.openLog() ?? "ignore";
     const known = new Set(readRuntime().map((record) => record.pid));
     const child = deps.spawn(invocation.file, invocation.args, {
-      detached: true,
+      detached: win32 === null,
       windowsHide: true,
       stdio: ["ignore", sink, sink],
-      ...("cwd" in invocation ? { cwd: invocation.cwd, env: invocation.env } : {})
+      ...(win32 ? { cwd: win32.cwd, env: win32.env } : {})
     });
-    // Under a login shell the child is the shell, not node: this pid roots the
-    // tree, while the served pid is the one clodex registers for itself.
-    const rootPid = requirePid(child.pid);
+    // Under a login shell the child is the shell, not node: on posix this pid
+    // roots the tree, while the served pid is the one clodex registers for
+    // itself. On win32 it is the relay, which leaves only when the tree does.
+    const spawnedPid = requirePid(child.pid);
     child.unref();
     let exited = false;
     void child.exited.then(
@@ -457,7 +561,7 @@ export function createClodexProcessIo(
       },
       (error: unknown) => {
         exited = true;
-        deps.onError(SCOPE, `clodex server exit watch of pid ${rootPid} failed`, error);
+        deps.onError(SCOPE, `clodex server exit watch of pid ${spawnedPid} failed`, error);
       }
     );
 
@@ -469,7 +573,13 @@ export function createClodexProcessIo(
         }
         const record = fresh[0];
         if (record) {
-          const owner = parseOwnerRecord(buildOwner(record, await stampTree(rootPid, record.pid), rootPid));
+          const stamps: TreeStamps = win32
+            ? {
+                root: await discoverWin32Root(spawnedPid, win32.file, () => exited),
+                runtime: await stampWin32(record.pid)
+              }
+            : { root: await measurePosix(spawnedPid), runtime: await measurePosix(record.pid) };
+          const owner = parseOwnerRecord(buildOwner(record, stamps, spawnedPid));
           if (!owner) throw new TypeError("clodex server produced an unusable owner record");
           return owner;
         }
@@ -481,7 +591,7 @@ export function createClodexProcessIo(
       // Nothing owns that tree once this rejects, so the leak is only
       // actionable if every exit names the pid that stayed behind.
       const cause = error instanceof Error ? error.message : String(error);
-      const leaked = exited ? "" : `; pid ${rootPid} was left running`;
+      const leaked = exited ? "" : `; pid ${spawnedPid} was left running`;
       throw new Error(`${cause}${leaked}`, { cause: error });
     }
   };

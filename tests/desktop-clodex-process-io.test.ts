@@ -17,9 +17,13 @@ const HOME = "C:\\clodex-home";
 const RUNTIME = `${HOME}/server-runtime.json`;
 const HOST = "deck-host";
 const SYSTEM_ROOT = "C:\\Windows";
+const CMD = "C:\\Windows\\System32\\cmd.exe";
+const RELAY_PID = 950;
+const CONHOST_PID = 951;
 const ROOT_PID = 900;
 const SERVER_PID = 777;
 const PORT = 17_645;
+const RELAY_STAMP = "2026-09-16T07:14:50.1000000Z";
 const ROOT_STAMP = "2026-09-16T07:14:50.2270000Z";
 const SERVER_STAMP = "2026-09-16T07:14:51.5550000Z";
 const SERVER_STARTED = "2026-09-16T07:14:51.555Z";
@@ -58,11 +62,73 @@ function procStat(pid: number, pgrp: number, startToken: string): string {
   return `${pid} (node (proxy) ${tail.join(" ")} 0 0 20 0 1 0 ${startToken} 7 8 9\n`;
 }
 
-function windowsStamps(stamps: Record<number, string>): (file: string, args: string[]) => RunResult {
+/** A Win32_Process row; `created` is the CIM clock, deliberately not the Get-Process one. */
+interface CimRow {
+  pid: number;
+  parent: number;
+  created: string;
+  image: string;
+}
+
+const RELAY_ROW: CimRow = { pid: RELAY_PID, parent: 4, created: "2026-09-16T07:14:50.1000010Z", image: CMD };
+const CONHOST_ROW: CimRow = {
+  pid: CONHOST_PID,
+  parent: RELAY_PID,
+  created: "2026-09-16T07:14:50.1100000Z",
+  image: "C:\\Windows\\System32\\conhost.exe"
+};
+const ROOT_ROW: CimRow = {
+  pid: ROOT_PID,
+  parent: RELAY_PID,
+  created: "2026-09-16T07:14:50.2270010Z",
+  image: "C:\\WINDOWS\\system32\\cmd.exe"
+};
+const TABLE: CimRow[] = [RELAY_ROW, CONHOST_ROW, ROOT_ROW];
+
+interface WindowsWorld {
+  /** Get-Process answers per pid; an array is consumed one answer per call. */
+  stamps: Record<number, string | string[]>;
+  /** Rows every CIM query filters. */
+  table?: CimRow[];
+  /** Replaces the answer of the n-th CIM query (0-based). */
+  cim?: Record<number, RunResult | CimRow[]>;
+  onCim?: (query: number) => void;
+}
+
+const cimOutput = (rows: CimRow[]): RunResult => ({
+  code: 0,
+  stdout: rows.map((row) => `${row.pid}|${row.parent}|${row.created}|${row.image}\r\n`).join(""),
+  stderr: ""
+});
+
+function windowsStamps(
+  stamps: WindowsWorld["stamps"],
+  world: Omit<WindowsWorld, "stamps"> = {}
+): (file: string, args: string[]) => RunResult {
+  const table = world.table ?? TABLE;
+  const served: Record<number, number> = {};
+  let queries = 0;
   return (file, args) => {
     if (file !== "powershell.exe") return { code: 0, stdout: "", stderr: "" };
-    const pid = Number(/-Id (\d+)/.exec(args[3] ?? "")?.[1]);
-    const stamp = stamps[pid];
+    const command = args[3] ?? "";
+    const filter = /-Filter '([^']*)'/.exec(command)?.[1];
+    if (filter !== undefined) {
+      const query = queries++;
+      world.onCim?.(query);
+      const override = world.cim?.[query];
+      if (override && !Array.isArray(override)) return override;
+      const source = override ?? table;
+      const both = /^ProcessId=(\d+) or ParentProcessId=(\d+)$/.exec(filter);
+      const one = /^ProcessId=(\d+)$/.exec(filter);
+      if (both) return cimOutput(source.filter((row) => row.pid === Number(both[1]) || row.parent === Number(both[2])));
+      if (one) return cimOutput(source.filter((row) => row.pid === Number(one[1])));
+      return { code: 1, stdout: "", stderr: `unexpected filter ${filter}` };
+    }
+    const pid = Number(/-Id (\d+)/.exec(command)?.[1]);
+    const answer = stamps[pid];
+    const index = served[pid] ?? 0;
+    served[pid] = index + 1;
+    const stamp = Array.isArray(answer) ? answer[Math.min(index, answer.length - 1)] : answer;
     return stamp
       ? { code: 0, stdout: `${stamp}\r\n`, stderr: "" }
       : { code: 1, stdout: "", stderr: `no process with id ${pid}` };
@@ -123,7 +189,7 @@ function harness(init: HarnessInit = {}) {
     spawn: (file, args, options) => {
       spawns.push({ file, args, options });
       return {
-        pid: "childPid" in init ? init.childPid : ROOT_PID,
+        pid: "childPid" in init ? init.childPid : (init.platform ?? "win32") === "win32" ? RELAY_PID : ROOT_PID,
         exited,
         unref: () => {
           unrefs++;
@@ -311,11 +377,19 @@ test("measureServer refuses two records naming the same pid", async () => {
   expect(await h.io.measureServer(SERVER_PID)).toBeNull();
 });
 
-test("spawn owns the shell root and the registered server as two distinct processes", async () => {
+const registersServer = (files: Map<string, string>) =>
+  files.set(RUNTIME, JSON.stringify([record(SERVER_PID, PORT, SERVER_STARTED)]));
+
+const STAMPS = { [RELAY_PID]: RELAY_STAMP, [ROOT_PID]: ROOT_STAMP, [SERVER_PID]: SERVER_STAMP };
+
+const cimFilters = (runs: RunCall[]) =>
+  runs.map((call) => /-Filter '([^']*)'/.exec(call.args[3] ?? "")?.[1]).filter((filter) => filter !== undefined);
+
+test("spawn owns the inner cmd.exe root and the registered server as two distinct processes", async () => {
   const h = harness({
     log: 7,
     files: { [RUNTIME]: JSON.stringify([record(100, 9000, "2026-09-15T07:00:00.000Z")]) },
-    run: windowsStamps({ [ROOT_PID]: ROOT_STAMP, [SERVER_PID]: SERVER_STAMP }),
+    run: windowsStamps(STAMPS),
     onSleep: (files) =>
       files.set(
         RUNTIME,
@@ -323,12 +397,12 @@ test("spawn owns the shell root and the registered server as two distinct proces
       )
   });
   const owner = await h.io.spawn("clodex", ["server", "--proxy"]);
-  expect(owner).toEqual(winOwner());
+  expect(owner, "the persisted root stamp is the Get-Process one").toEqual(winOwner());
   expect(h.spawns[0]).toEqual({
-    file: "C:\\Windows\\System32\\cmd.exe",
-    args: ["/d", "/s", "/c", "clodex server --proxy"],
+    file: CMD,
+    args: ["/d", "/s", "/c", `${CMD} /d /s /c clodex server --proxy`],
     options: {
-      detached: true,
+      detached: false,
       windowsHide: true,
       stdio: ["ignore", 7, 7],
       cwd: HOME,
@@ -336,8 +410,178 @@ test("spawn owns the shell root and the registered server as two distinct proces
     }
   });
   expect(h.unrefs()).toBe(1);
+  expect(h.traces).toEqual([]);
+  const probes = h.runs.map((call) => /-Filter '([^']*)'|-Id (\d+)/.exec(call.args[3] ?? "")?.slice(1).find(Boolean));
+  expect(probes).toEqual([
+    String(RELAY_PID),
+    `ProcessId=${RELAY_PID} or ParentProcessId=${RELAY_PID}`,
+    String(RELAY_PID),
+    String(ROOT_PID),
+    `ProcessId=${ROOT_PID}`,
+    String(SERVER_PID)
+  ]);
 });
 
+interface Refusal {
+  stamps?: WindowsWorld["stamps"];
+  world?: Omit<WindowsWorld, "stamps">;
+  /** Ends the relay when the n-th CIM query runs. */
+  relayExitsAt?: number;
+}
+
+async function refusedRoot({ stamps = STAMPS, world = {}, relayExitsAt }: Refusal) {
+  let endRelay = () => {};
+  const h = harness({
+    run: windowsStamps(stamps, {
+      ...world,
+      onCim: (query) => {
+        if (query === relayExitsAt) endRelay();
+      }
+    }),
+    onSleep: registersServer
+  });
+  endRelay = h.endChild;
+  const failure = await h.io.spawn("clodex", ["server", "--proxy"]).then(
+    () => null,
+    (error: unknown) => error as Error
+  );
+  expect(failure, "the spawn owned a root it should have refused").not.toBeNull();
+  if (relayExitsAt === undefined) expect(failure!.message).toContain(`pid ${RELAY_PID} was left running`);
+  expect(h.traces.map((t) => t.message)).toEqual([`refused to own a root under clodex relay ${RELAY_PID}`]);
+  return { message: failure!.message, filters: cimFilters(h.runs) };
+}
+
+const EXTRA_ROOT: CimRow = { ...ROOT_ROW, pid: 901, image: CMD };
+
+test("the win32 root is refused when the relay has no inner cmd.exe child", async () => {
+  const { message } = await refusedRoot({ world: { table: [RELAY_ROW, CONHOST_ROW] } });
+  expect(message).toContain(`clodex relay ${RELAY_PID} has 0 inner cmd.exe candidates`);
+});
+
+test("the win32 root is refused when the relay has two inner cmd.exe children", async () => {
+  const { message } = await refusedRoot({ world: { table: [...TABLE, EXTRA_ROOT] } });
+  expect(message).toContain(`clodex relay ${RELAY_PID} has 2 inner cmd.exe candidates`);
+});
+
+test("the win32 root orders creations within one CIM snapshot, never against Get-Process", async () => {
+  const stale = { ...ROOT_ROW, created: "2026-09-16T07:14:50.1000009Z" };
+  const { message } = await refusedRoot({ world: { table: [RELAY_ROW, CONHOST_ROW, stale] } });
+  expect(message).toContain("has 0 inner cmd.exe candidates");
+
+  const picked = harness({
+    run: windowsStamps({ ...STAMPS, 901: ROOT_STAMP }, { table: [RELAY_ROW, CONHOST_ROW, stale, EXTRA_ROOT] }),
+    onSleep: registersServer
+  });
+  expect((await picked.io.spawn("clodex", ["server", "--proxy"])).tree.root.pid).toBe(901);
+
+  const earlierByGetProcess = "2026-09-16T07:14:50.0000000Z";
+  const h = harness({ run: windowsStamps({ ...STAMPS, [ROOT_PID]: earlierByGetProcess }), onSleep: registersServer });
+  expect((await h.io.spawn("clodex", ["server", "--proxy"])).tree.root).toEqual({
+    pid: ROOT_PID,
+    creationUtc: earlierByGetProcess
+  });
+});
+
+test("the win32 root orders creations by time, whatever their fraction length", async () => {
+  const h = harness({
+    run: windowsStamps(STAMPS, {
+      table: [
+        { ...RELAY_ROW, created: "2026-09-16T07:14:50.5Z" },
+        { ...ROOT_ROW, created: "2026-09-16T07:14:50.51Z" }
+      ]
+    }),
+    onSleep: registersServer
+  });
+  expect((await h.io.spawn("clodex", ["server", "--proxy"])).tree.root.pid).toBe(ROOT_PID);
+});
+
+test("the win32 root only counts children whose image is that cmd.exe", async () => {
+  const { message } = await refusedRoot({
+    world: {
+      table: [RELAY_ROW, CONHOST_ROW, { ...ROOT_ROW, image: "C:\\Temp\\cmd.exe" }, { ...EXTRA_ROOT, image: "" }]
+    }
+  });
+  expect(message).toContain("has 0 inner cmd.exe candidates");
+});
+
+test("the win32 root is refused when the snapshot does not hold exactly one relay row", async () => {
+  for (const table of [[CONHOST_ROW, ROOT_ROW], [RELAY_ROW, RELAY_ROW, ROOT_ROW]]) {
+    const { message } = await refusedRoot({ world: { table } });
+    expect(message).toContain(`holds ${table.filter((row) => row === RELAY_ROW).length} relay rows`);
+  }
+});
+
+test("the win32 root is refused when the relay cannot be measured", async () => {
+  const { message, filters } = await refusedRoot({ stamps: { [ROOT_PID]: ROOT_STAMP, [SERVER_PID]: SERVER_STAMP } });
+  expect(message).toContain(`Cannot measure the creation time of pid ${RELAY_PID}`);
+  expect(filters).toEqual([]);
+});
+
+test("the win32 root is refused when the relay stamp moves across the listing", async () => {
+  const { message } = await refusedRoot({
+    stamps: { ...STAMPS, [RELAY_PID]: [RELAY_STAMP, "2026-09-16T07:14:50.1000001Z"] }
+  });
+  expect(message).toContain(`clodex relay ${RELAY_PID} left during the root discovery`);
+});
+
+test("the win32 root is refused when the relay exits during the listing or during the candidate stamp", async () => {
+  const listing = await refusedRoot({ relayExitsAt: 0 });
+  expect(listing.message).toContain(`clodex relay ${RELAY_PID} left during the root discovery`);
+  expect(listing.filters).toHaveLength(1);
+  const reread = await refusedRoot({ relayExitsAt: 1 });
+  expect(reread.message).toContain(`clodex root candidate ${ROOT_PID} changed while it was stamped`);
+});
+
+test("the win32 root is refused when the candidate differs once re-read after its stamp", async () => {
+  const other = { code: 1, stdout: "", stderr: "access denied" };
+  for (const reread of [
+    [{ ...ROOT_ROW, parent: 42 }],
+    [{ ...ROOT_ROW, image: CMD }],
+    [{ ...ROOT_ROW, created: "2026-09-16T07:14:50.2270011Z" }],
+    [],
+    [ROOT_ROW, ROOT_ROW]
+  ]) {
+    const { message, filters } = await refusedRoot({ world: { cim: { 1: reread } } });
+    expect(message, JSON.stringify(reread)).toContain(`clodex root candidate ${ROOT_PID} changed while it was stamped`);
+    expect(filters).toEqual([`ProcessId=${RELAY_PID} or ParentProcessId=${RELAY_PID}`, `ProcessId=${ROOT_PID}`]);
+  }
+  const failed = await refusedRoot({ world: { cim: { 1: other } } });
+  expect(failed.message).toContain(`cannot list clodex root candidate ${ROOT_PID} (exit 1): access denied`);
+});
+
+test("the win32 root is refused when the listing fails or holds an unreadable row", async () => {
+  const failed = await refusedRoot({ world: { cim: { 0: { code: 1, stdout: "", stderr: "access denied" } } } });
+  expect(failed.message).toContain(`cannot list the children of clodex relay ${RELAY_PID} (exit 1): access denied`);
+  const created = ROOT_ROW.created;
+  for (const line of [
+    `${ROOT_PID} ${CMD}`,
+    `x|${RELAY_PID}|${created}|${CMD}`,
+    `0|${RELAY_PID}|${created}|${CMD}`,
+    `${ROOT_PID}|0|${created}|${CMD}`,
+    `${ROOT_PID}|${RELAY_PID}||${CMD}`,
+    `${ROOT_PID}|${RELAY_PID}|2026-09-16 07:14:50|${CMD}`,
+    "Get-CimInstance : invalid class"
+  ]) {
+    const stdout = `${cimOutput([RELAY_ROW, CONHOST_ROW]).stdout}${line}\r\n`;
+    const unread = await refusedRoot({ world: { cim: { 0: { code: 0, stdout, stderr: "" } } } });
+    expect(unread.message, line).toContain(`unreadable listing of the children of clodex relay ${RELAY_PID}`);
+  }
+});
+
+test("the win32 spawn refuses a SystemRoot it cannot glue unquoted into the command line", async () => {
+  for (const root of ["C:\\Program Files\\Win", "C:\\Win&calc", 'C:\\"Win"', "C:\\Win|x", "C:\\Win^x", "C:\\%Win%", "C:\\Win!x!"]) {
+    const h = harness({ env: { SystemRoot: root } });
+    await expect(h.io.spawn("clodex", ["server", "--proxy"]), root).rejects.toThrow(/cannot glue/);
+    expect(h.spawns, root).toHaveLength(0);
+  }
+  for (const root of ["C:\\Windows\\..\\Evil", "C:\\..", "C:/Windows/.."]) {
+    const h = harness({ env: { SystemRoot: root } });
+    await expect(h.io.spawn("clodex", ["server", "--proxy"]), root).rejects.toThrow(/\.\. segment/);
+    expect(h.spawns, root).toHaveLength(0);
+  }
+  const dotted = harness({ env: { SystemRoot: "C:\\Win..dows" } });
+  await expect(dotted.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow(/did not register a proxy in time/);
+});
 test("the win32 spawn disables the current-directory lookup whatever the inherited value", async () => {
   const h = harness({ env: { SYSTEMROOT: "C:\\Windows\\", nodefaultcurrentdirectoryinexepath: "0" } });
   await expect(h.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow(/did not register a proxy in time/);
@@ -446,17 +690,18 @@ test("the win32 spawn refuses to start without an absolute SystemRoot", async ()
   }
 });
 
-test("no detached win32 spawn goes through PowerShell, which exits without running its command", async () => {
+test("no win32 spawn goes through PowerShell, which exits without running its command when detached", async () => {
+  const launchers = /^(powershell|pwsh)(\.exe)?$/;
   for (const shell of [undefined, "", "powershell.exe", "pwsh.exe", "C:\\Program Files\\PowerShell\\7\\pwsh.exe"]) {
     const h = harness({ shell });
     await expect(h.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow();
     expect(h.spawns).toHaveLength(1);
     const spawned = h.spawns[0]!;
-    const binary = spawned.file.split(/[\\/]/).pop()!.toLowerCase();
-    expect(
-      spawned.options.detached && /^(powershell|pwsh)(\.exe)?$/.test(binary),
-      `SHELL=${String(shell)} spawned ${spawned.file} detached`
-    ).toBe(false);
+    const words = [spawned.file, ...spawned.args.flatMap((arg) => arg.split(/\s+/))];
+    const launched = words
+      .map((word) => word.replaceAll('"', "").split(/[\\/]/).pop()!.toLowerCase())
+      .filter((name) => launchers.test(name));
+    expect(launched, `SHELL=${String(shell)} spawned ${spawned.file} ${spawned.args.join(" ")}`).toEqual([]);
   }
 });
 
@@ -527,14 +772,14 @@ test("spawn refuses to own one of two proxies that appeared at once", async () =
       )
   });
   await expect(h.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow(
-    new RegExp(`none can be owned; pid ${ROOT_PID} was left running`)
+    new RegExp(`none can be owned; pid ${RELAY_PID} was left running`)
   );
 });
 
 test("spawn names the pid it leaves running when no proxy registers in time", async () => {
   const h = harness();
   await expect(h.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow(
-    new RegExp(`did not register a proxy in time; pid ${ROOT_PID} was left running`)
+    new RegExp(`did not register a proxy in time; pid ${RELAY_PID} was left running`)
   );
 });
 
@@ -544,7 +789,7 @@ test("spawn names the pid it leaves running when the owner cannot be measured", 
     onSleep: (files) => files.set(RUNTIME, JSON.stringify([record(SERVER_PID, PORT, SERVER_STARTED)]))
   });
   await expect(h.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow(
-    new RegExp(`Cannot measure the creation time of pid .*; pid ${ROOT_PID} was left running`)
+    new RegExp(`Cannot measure the creation time of pid .*; pid ${RELAY_PID} was left running`)
   );
 });
 
