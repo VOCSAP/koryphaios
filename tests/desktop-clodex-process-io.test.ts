@@ -306,11 +306,25 @@ test("spawn owns the shell root and the registered server as two distinct proces
   const owner = await h.io.spawn("clodex", ["server", "--proxy"]);
   expect(owner).toEqual(winOwner());
   expect(h.spawns[0]).toEqual({
-    file: "powershell.exe",
-    args: ["-NoLogo", "-NoProfile", "-Command", "clodex server --proxy"],
+    file: "cmd.exe",
+    args: ["/d", "/s", "/c", "clodex server --proxy"],
     options: { detached: true, windowsHide: true, stdio: ["ignore", 7, 7] }
   });
   expect(h.unrefs()).toBe(1);
+});
+
+test("no detached win32 spawn goes through PowerShell, which exits without running its command", async () => {
+  for (const shell of [undefined, "", "powershell.exe", "pwsh.exe", "C:\\Program Files\\PowerShell\\7\\pwsh.exe"]) {
+    const h = harness({ shell });
+    await expect(h.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow();
+    expect(h.spawns).toHaveLength(1);
+    const spawned = h.spawns[0]!;
+    const binary = spawned.file.split(/[\\/]/).pop()!.toLowerCase();
+    expect(
+      spawned.options.detached && /^(powershell|pwsh)(\.exe)?$/.test(binary),
+      `SHELL=${String(shell)} spawned ${spawned.file} detached`
+    ).toBe(false);
+  }
 });
 
 test("spawn on posix proves the root leads its own group", async () => {

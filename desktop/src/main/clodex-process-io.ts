@@ -189,7 +189,6 @@ export function createClodexProcessIo(
   const runtimePath = () => `${clodexHome(deps.env)}/${RUNTIME_FILE}`;
   /** The launcher resolves PATH the way the operator's login shell does. */
   const loginShell = (): string => {
-    if (deps.platform === "win32") return "";
     const shell = deps.env.SHELL?.trim();
     return shell && shell.length > 0 ? shell : "/bin/bash";
   };
@@ -349,10 +348,13 @@ export function createClodexProcessIo(
     for (const token of [command, ...args]) {
       if (!COMMAND_TOKEN_RE.test(token)) throw new TypeError(`Unsafe clodex command token: ${token}`);
     }
-    const invocation = buildShellInvocation(
-      { command: [command, ...args].join(" "), shell: loginShell(), interactive: false },
-      deps.platform
-    );
+    const line = [command, ...args].join(" ");
+    // A detached powershell.exe exits 0 without running its -Command; cmd.exe
+    // runs it and stays the root of the tree `taskkill /T` stops.
+    const invocation =
+      deps.platform === "win32"
+        ? { file: "cmd.exe", args: ["/d", "/s", "/c", line] }
+        : buildShellInvocation({ command: line, shell: loginShell(), interactive: false }, deps.platform);
     const sink = deps.openLog() ?? "ignore";
     const known = new Set(readRuntime().map((record) => record.pid));
     const child = deps.spawn(invocation.file, invocation.args, {
