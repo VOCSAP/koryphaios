@@ -350,6 +350,38 @@ test("the win32 spawn disables the current-directory lookup whatever the inherit
   expect(lookup).toEqual([["NoDefaultCurrentDirectoryInExePath", "1"]]);
 });
 
+test("the win32 spawn keeps only drive-absolute PATH entries, under the inherited key", async () => {
+  const inherited = [
+    "",
+    ".",
+    ".\\",
+    "C:\\Tools",
+    "bin",
+    "\\Windows",
+    "C:relative",
+    "\\\\server\\share\\bin",
+    '"C:\\Program Files\\x"',
+    '"C:\\odd;dir"',
+    '"sub;dir"',
+    "D:/forward",
+    ""
+  ].join(";");
+  const kept = ["C:\\Tools", '"C:\\Program Files\\x"', '"C:\\odd;dir"', "D:/forward"].join(";");
+  for (const key of ["Path", "PATH", "path"]) {
+    const h = harness({ env: { SystemRoot: SYSTEM_ROOT, [key]: inherited } });
+    await expect(h.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow(/did not register a proxy in time/);
+    const paths = Object.entries(h.spawns[0]!.options.env ?? {}).filter(([name]) => name.toLowerCase() === "path");
+    expect(paths, key).toEqual([[key, kept]]);
+  }
+});
+
+test("the win32 spawn adds no PATH the parent did not have", async () => {
+  const h = harness();
+  await expect(h.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow(/did not register a proxy in time/);
+  const names = Object.keys(h.spawns[0]!.options.env ?? {}).map((name) => name.toLowerCase());
+  expect(names).not.toContain("path");
+});
+
 test("the win32 spawn starts in the clodex home the runtime manifest is read from", async () => {
   // Without CLODEX_HOME the home derives from the real profile, absolute only on a Windows host.
   const homes = process.platform === "win32" ? [HOME, "D:\\Users\\op\\custom-clodex", null] : [HOME];
@@ -431,6 +463,7 @@ test("no detached win32 spawn goes through PowerShell, which exits without runni
 test("spawn on posix proves the root leads its own group", async () => {
   const h = harness({
     platform: "linux",
+    env: { PATH: ".:bin:/usr/bin" },
     files: {
       [`/proc/${ROOT_PID}/stat`]: procStat(ROOT_PID, ROOT_PID, "4455667"),
       [`/proc/${SERVER_PID}/stat`]: procStat(SERVER_PID, ROOT_PID, "4455999")
@@ -442,6 +475,9 @@ test("spawn on posix proves the root leads its own group", async () => {
   expect(h.spawns[0]?.file).toBe("/bin/bash");
   expect(h.spawns[0]?.args).toEqual(["-l", "-c", "clodex server --proxy"]);
   expect(h.spawns[0]?.options.detached).toBe(true);
+  expect(h.madeDirs).toEqual([]);
+  expect(h.spawns[0]?.options.cwd).toBeUndefined();
+  expect(h.spawns[0]?.options.env, "the posix child inherits the environment unfiltered").toBeUndefined();
 });
 
 test("spawn launches the shell named by the injected environment", async () => {

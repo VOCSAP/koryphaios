@@ -18,7 +18,7 @@ function withPathEntry(env: NodeJS.ProcessEnv, dir: string): NodeJS.ProcessEnv {
 }
 
 // This shell may export the variable, which hides the current-directory search
-// the planted case has to prove absent.
+// each planted case has to prove absent in the child.
 function withoutSafeSearch(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return Object.fromEntries(Object.entries(env).filter(([name]) => name.toLowerCase() !== SAFE_SEARCH));
 }
@@ -145,6 +145,36 @@ test.skipIf(process.platform !== "win32")(
     writeFileSync(join(home, `${WITNESS}.cmd`), `@echo PLANTED> "${hijacked}"\r\n`);
 
     const env = withoutSafeSearch(withPathEntry({ ...process.env, CLODEX_HOME: home }, onPath));
+    try {
+      await runOwnedSpawn(root, env, () => {
+        expect(existsSync(marker), "the clodex on PATH did not run").toBe(true);
+      });
+    } finally {
+      const ranPlanted = existsSync(hijacked);
+      rmSync(evidence, { recursive: true, force: true, maxRetries: 3 });
+      expect(ranPlanted, "the planted clodex ran").toBe(false);
+    }
+  },
+  30_000
+);
+
+test.skipIf(process.platform !== "win32")(
+  "a clodex planted in the clodex home is not run through an explicit dot entry leading the inherited PATH",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "kory-clodex-dot-plant-"));
+    const onPath = join(root, "path");
+    const home = join(root, "home");
+    mkdirSync(onPath);
+    mkdirSync(home);
+    const marker = join(root, "ran.txt");
+    const evidence = mkdtempSync(join(tmpdir(), "kory-clodex-evidence-"));
+    const hijacked = join(evidence, "hijacked.txt");
+    const script = join(onPath, "witness.mjs");
+    witnessScript(script, marker, home);
+    writeFileSync(join(onPath, `${WITNESS}.cmd`), `@"${process.execPath}" "${script}"\r\n`);
+    writeFileSync(join(home, `${WITNESS}.cmd`), `@echo PLANTED> "${hijacked}"\r\n`);
+
+    const env = withPathEntry(withPathEntry({ ...process.env, CLODEX_HOME: home }, onPath), ".");
     try {
       await runOwnedSpawn(root, env, () => {
         expect(existsSync(marker), "the clodex on PATH did not run").toBe(true);

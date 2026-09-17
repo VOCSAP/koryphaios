@@ -149,16 +149,43 @@ function withEnvValue(env: NodeJS.ProcessEnv, name: string, value: string): Node
 }
 
 /**
- * cmd.exe looks a bare command up in its working directory before PATH, so a
- * `clodex.cmd` in that directory would run in place of clodex. The defence is
- * `NoDefaultCurrentDirectoryInExePath`, which disables that lookup whatever the
- * directory holds. The child starts in the clodex home, resolved like the
- * runtime manifest is read: it is where a manual clodex run works and a
- * directory clodex can write. That home must be absolute, since a relative one
- * resolves against the caller's directory, and is created when missing.
- * cmd.exe is named by absolute path, so a missing or relative SystemRoot
- * throws; ComSpec is ignored: `/d /s /c` and the quoting are cmd.exe syntax,
- * and the spawned binary is the root `taskkill /T` stops.
+ * UNC entries are dropped too: a lookup through one reaches a remote host.
+ * A quoted entry may hold `;`, so the split tracks quotes.
+ */
+function absolutePathEntries(value: string): string {
+  const entries: string[] = [];
+  let current = "";
+  let quoted = false;
+  for (const char of value) {
+    if (char === '"') quoted = !quoted;
+    if (char === ";" && !quoted) {
+      entries.push(current);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  entries.push(current);
+  return entries.filter((entry) => WINDOWS_ABSOLUTE_RE.test(entry.replaceAll('"', ""))).join(";");
+}
+
+function withAbsolutePath(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const key = Object.keys(env).find((candidate) => candidate.toLowerCase() === "path");
+  if (key === undefined) return env;
+  return withEnvValue(env, key, absolutePathEntries(env[key] ?? ""));
+}
+
+/**
+ * The child runs in the clodex home because that is clodex's own directory; it
+ * must be absolute and is created when missing. The home is user-writable, so
+ * cmd.exe must not resolve `clodex` there: `NoDefaultCurrentDirectoryInExePath`
+ * disables its implicit current-directory lookup, and keeping only `X:\` PATH
+ * entries removes an explicit `.` or relative entry, which the variable does
+ * not cover. Both defend the command resolution cmd.exe performs, nothing
+ * more: a Node descendant spawning a bare name through libuv still searches
+ * its working directory. cmd.exe is named from an absolute SystemRoot and
+ * ComSpec is ignored, since `/d /s /c` and the quoting are cmd.exe syntax and
+ * the spawned binary is the root `taskkill /T` stops.
  */
 function win32Invocation(env: NodeJS.ProcessEnv, line: string, makeDir: (path: string) => void) {
   const systemRoot = envValue(env, "SystemRoot");
@@ -179,7 +206,7 @@ function win32Invocation(env: NodeJS.ProcessEnv, line: string, makeDir: (path: s
     file: `${systemRoot.replace(/[\\/]+$/, "")}\\System32\\cmd.exe`,
     args: ["/d", "/s", "/c", line],
     cwd: home,
-    env: withEnvValue(env, "NoDefaultCurrentDirectoryInExePath", "1")
+    env: withEnvValue(withAbsolutePath(env), "NoDefaultCurrentDirectoryInExePath", "1")
   };
 }
 
