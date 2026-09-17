@@ -13,6 +13,7 @@ import {
 const HOME = "/clodex-home";
 const RUNTIME = `${HOME}/server-runtime.json`;
 const HOST = "deck-host";
+const SYSTEM_ROOT = "C:\\Windows";
 const ROOT_PID = 900;
 const SERVER_PID = 777;
 const PORT = 17_645;
@@ -31,6 +32,7 @@ interface HarnessInit {
   denied?: number[];
   run?: (file: string, args: string[]) => RunResult;
   shell?: string;
+  env?: NodeJS.ProcessEnv;
   childPid?: number | undefined;
   log?: number | null;
   onSleep?: (files: Map<string, string>, alive: Set<number>) => void;
@@ -79,7 +81,11 @@ function harness(init: HarnessInit = {}) {
   const deps: ClodexProcessDeps = {
     platform: init.platform ?? "win32",
     hostname: () => HOST,
-    env: init.shell === undefined ? { CLODEX_HOME: HOME } : { CLODEX_HOME: HOME, SHELL: init.shell },
+    env: {
+      CLODEX_HOME: HOME,
+      ...(init.shell === undefined ? {} : { SHELL: init.shell }),
+      ...(init.env ?? { SystemRoot: SYSTEM_ROOT })
+    },
     sleep: async () => {
       sleeps++;
       init.onSleep?.(files, alive);
@@ -306,11 +312,49 @@ test("spawn owns the shell root and the registered server as two distinct proces
   const owner = await h.io.spawn("clodex", ["server", "--proxy"]);
   expect(owner).toEqual(winOwner());
   expect(h.spawns[0]).toEqual({
-    file: "cmd.exe",
+    file: "C:\\Windows\\System32\\cmd.exe",
     args: ["/d", "/s", "/c", "clodex server --proxy"],
-    options: { detached: true, windowsHide: true, stdio: ["ignore", 7, 7] }
+    options: {
+      detached: true,
+      windowsHide: true,
+      stdio: ["ignore", 7, 7],
+      cwd: "C:\\Windows\\System32",
+      env: { CLODEX_HOME: HOME, SystemRoot: SYSTEM_ROOT, NoDefaultCurrentDirectoryInExePath: "1" }
+    }
   });
   expect(h.unrefs()).toBe(1);
+});
+
+test("the win32 spawn disables the current-directory lookup whatever the inherited value", async () => {
+  const h = harness({ env: { SYSTEMROOT: "C:\\Windows\\", nodefaultcurrentdirectoryinexepath: "0" } });
+  await expect(h.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow();
+  const { file, options } = h.spawns[0]!;
+  expect(file).toBe("C:\\Windows\\System32\\cmd.exe");
+  expect(options.cwd).toBe("C:\\Windows\\System32");
+  const lookup = Object.entries(options.env ?? {}).filter(
+    ([key]) => key.toLowerCase() === "nodefaultcurrentdirectoryinexepath"
+  );
+  expect(lookup).toEqual([["NoDefaultCurrentDirectoryInExePath", "1"]]);
+});
+
+test("the win32 spawn takes an absolute ComSpec and ignores a relative one", async () => {
+  const absolute = harness({ env: { SystemRoot: SYSTEM_ROOT, COMSPEC: "D:\\Tools\\cmd.exe" } });
+  await expect(absolute.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow();
+  expect(absolute.spawns[0]!.file).toBe("D:\\Tools\\cmd.exe");
+
+  for (const comSpec of ["cmd.exe", ".\\cmd.exe", "\\Windows\\System32\\cmd.exe"]) {
+    const relative = harness({ env: { SystemRoot: SYSTEM_ROOT, ComSpec: comSpec } });
+    await expect(relative.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow();
+    expect(relative.spawns[0]!.file, `ComSpec=${comSpec}`).toBe("C:\\Windows\\System32\\cmd.exe");
+  }
+});
+
+test("the win32 spawn refuses to start without an absolute SystemRoot", async () => {
+  for (const env of [{}, { SystemRoot: "" }, { SystemRoot: "Windows" }, { ComSpec: "C:\\Windows\\System32\\cmd.exe" }]) {
+    const h = harness({ env, log: 7 });
+    await expect(h.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow(/absolute SystemRoot/);
+    expect(h.spawns, JSON.stringify(env)).toHaveLength(0);
+  }
 });
 
 test("no detached win32 spawn goes through PowerShell, which exits without running its command", async () => {

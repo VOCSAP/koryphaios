@@ -44,7 +44,7 @@ export type ReleaseDeadline = 'idle' | 'done' | 'expired' | 'failed'
 export type ErrorSink = (scope: string, message: string, error?: unknown) => void
 
 export interface ClodexDepsOptions {
-  /** Login shell the PATH probe and the proxy are launched through. */
+  /** Login shell of the PATH probe, and of the proxy on POSIX only: win32 launches it through cmd.exe. */
   shell: string
   /** Directory the proxy output file is opened in. */
   logsDir: string
@@ -212,10 +212,11 @@ export async function releaseBeforeQuit(
  */
 export function createClodexControllerDeps(options: ClodexDepsOptions): ClodexControllerDeps {
   const base = options.env ?? process.env
-  // The spawn takes its login shell from this environment, the probe takes it
-  // from the setting: without the override the two halves can resolve PATH
-  // through different shells, and a probe that finds the wrapper is followed
-  // by a launch that does not find the binary.
+  // On POSIX the spawn takes its login shell from this environment, the probe
+  // takes it from the setting: without the override the two halves can resolve
+  // PATH through different shells, and a probe that finds the wrapper is
+  // followed by a launch that does not find the binary. The win32 spawn runs
+  // through cmd.exe and ignores SHELL.
   const env = options.shell ? { ...base, SHELL: options.shell } : base
   const onError = options.onError ?? reportError
   const runId = options.runId ?? mintRunId()
@@ -249,7 +250,8 @@ export function createClodexControllerDeps(options: ClodexDepsOptions): ClodexCo
           detached: spawnOptions.detached,
           windowsHide: spawnOptions.windowsHide,
           stdio: spawnOptions.stdio,
-          env
+          cwd: spawnOptions.cwd,
+          env: spawnOptions.env ?? env
         }),
         onError
       ),

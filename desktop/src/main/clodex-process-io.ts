@@ -57,6 +57,10 @@ export interface ClodexSpawnOptions {
   detached: boolean;
   windowsHide: boolean;
   stdio: ["ignore", number | "ignore", number | "ignore"];
+  /** Working directory of the child; the caller's own when absent. */
+  cwd?: string;
+  /** Full environment of the child; the deps environment when absent. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface ClodexChild {
@@ -125,6 +129,44 @@ function requirePid(value: unknown): number {
     throw new TypeError(`Clodex process id must be a positive integer, got ${String(value)}`);
   }
   return value;
+}
+
+const WINDOWS_ABSOLUTE_RE = /^[A-Za-z]:[\\/]/;
+
+/** Windows env names are case-insensitive, a spread copy of `process.env` is not. */
+function envValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const lower = name.toLowerCase();
+  const key = Object.keys(env).find((candidate) => candidate.toLowerCase() === lower);
+  return key === undefined ? undefined : env[key];
+}
+
+function withEnvValue(env: NodeJS.ProcessEnv, name: string, value: string): NodeJS.ProcessEnv {
+  const lower = name.toLowerCase();
+  const kept = Object.entries(env).filter(([key]) => key.toLowerCase() !== lower);
+  return { ...Object.fromEntries(kept), [name]: value };
+}
+
+/**
+ * cmd.exe looks a bare command up in its working directory before PATH, so a
+ * `clodex.cmd` next to a portable Kory would run in place of clodex. The child
+ * therefore starts from System32, which only an administrator can write, with
+ * that lookup disabled, through a cmd.exe named by absolute path. A missing or
+ * relative SystemRoot throws: a bare `cmd.exe` would reopen the same lookup.
+ */
+function win32Invocation(env: NodeJS.ProcessEnv, line: string) {
+  const systemRoot = envValue(env, "SystemRoot");
+  if (!systemRoot || !WINDOWS_ABSOLUTE_RE.test(systemRoot)) {
+    throw new Error(`clodex server needs an absolute SystemRoot, got ${String(systemRoot)}`);
+  }
+  const system32 = `${systemRoot.replace(/[\\/]+$/, "")}\\System32`;
+  const comSpec = envValue(env, "ComSpec");
+  const file = comSpec && WINDOWS_ABSOLUTE_RE.test(comSpec) ? comSpec : `${system32}\\cmd.exe`;
+  return {
+    file,
+    args: ["/d", "/s", "/c", line],
+    cwd: system32,
+    env: withEnvValue(env, "NoDefaultCurrentDirectoryInExePath", "1")
+  };
 }
 
 function requirePositiveInteger(value: unknown): number | null {
@@ -353,14 +395,15 @@ export function createClodexProcessIo(
     // runs it and stays the root of the tree `taskkill /T` stops.
     const invocation =
       deps.platform === "win32"
-        ? { file: "cmd.exe", args: ["/d", "/s", "/c", line] }
+        ? win32Invocation(deps.env, line)
         : buildShellInvocation({ command: line, shell: loginShell(), interactive: false }, deps.platform);
     const sink = deps.openLog() ?? "ignore";
     const known = new Set(readRuntime().map((record) => record.pid));
     const child = deps.spawn(invocation.file, invocation.args, {
       detached: true,
       windowsHide: true,
-      stdio: ["ignore", sink, sink]
+      stdio: ["ignore", sink, sink],
+      ...("cwd" in invocation ? { cwd: invocation.cwd, env: invocation.env } : {})
     });
     // Under a login shell the child is the shell, not node: this pid roots the
     // tree, while the served pid is the one clodex registers for itself.
