@@ -132,6 +132,17 @@ jobs:
         # deleted. The strict rebuild below is the real ABI gate.
         run: npm install
 
+      # electron@43's package.json declares no postinstall script (measured:
+      # no "scripts" key at all): npm install alone never fetches the binary
+      # or writes node_modules/electron/path.txt. install.js is idempotent
+      # (exits 0 if already installed) and is the only thing that does.
+      - name: Install electron binary
+        working-directory: desktop
+        shell: bash
+        run: |
+          node node_modules/electron/install.js
+          test -f node_modules/electron/path.txt
+
       # tsconfig.node.json / tsconfig.web.json (main + preload + renderer)
       # were never type-checked in CI: electron.vite.config.ts has no checker
       # plugin, so `electron-vite build` below does not catch a type error.

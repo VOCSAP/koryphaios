@@ -5,14 +5,17 @@ import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 
 const REPO = join(import.meta.dir, "..");
-const ELECTRON_DIR = join(REPO, "desktop", "node_modules", "electron");
+const ELECTRON_PACKAGE = join(REPO, "desktop", "node_modules", "electron");
 // path.txt, not require: a mock.module("electron") in the same bun test
 // process would be returned instead of the path; it also covers darwin's Electron.app layout.
-const ELECTRON_PATH_FILE = join(ELECTRON_DIR, "path.txt");
-if (!existsSync(ELECTRON_PATH_FILE)) {
-  throw new Error(`electron's own path.txt is missing at ${ELECTRON_PATH_FILE} -- run npm install in desktop/ first`);
+// Called inside each test, not at module load: a throw here at load time would
+// kill every test() in the file before bun even registers them, so a missing
+// binary would report as ZERO tests instead of named failures.
+function electronBinary(): string {
+  const pointer = join(ELECTRON_PACKAGE, "path.txt");
+  expect(existsSync(pointer), `electron is not installed: ${pointer} is missing`).toBe(true);
+  return join(ELECTRON_PACKAGE, "dist", readFileSync(pointer, "utf-8").trim());
 }
-const ELECTRON = join(ELECTRON_DIR, "dist", readFileSync(ELECTRON_PATH_FILE, "utf-8").trim());
 const SOURCE = join(REPO, "desktop", "src", "main", "clodex-lifecycle-io.ts");
 const PROBE = join(import.meta.dir, "clodex-lifecycle-io-probe.cjs");
 const TSC = join(REPO, "desktop", "node_modules", "typescript", "bin", "tsc");
@@ -33,7 +36,7 @@ async function buildAdapter(): Promise<{ dir: string; file: string }> {
 }
 
 function runProbe(bundle: string, args: string[]) {
-  const result = spawnSync(ELECTRON, [PROBE, bundle, ...args], {
+  const result = spawnSync(electronBinary(), [PROBE, bundle, ...args], {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
     encoding: "utf-8",
     timeout: 10_000,
@@ -44,7 +47,7 @@ function runProbe(bundle: string, args: string[]) {
 
 function runProbeAsync(bundle: string, args: string[]) {
   return new Promise<unknown>((resolve, reject) => {
-    const child = spawn(ELECTRON, [PROBE, bundle, ...args], {
+    const child = spawn(electronBinary(), [PROBE, bundle, ...args], {
       env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -89,7 +92,7 @@ function typecheckFactory() {
 }
 
 test("SQLite records serialize values canonically and reject invalid stored JSON", async () => {
-  expect(existsSync(ELECTRON)).toBe(true);
+  electronBinary();
   const { dir, file } = await buildAdapter();
   const database = join(dir, "records.sqlite");
   try {
@@ -107,7 +110,7 @@ test("SQLite records serialize values canonically and reject invalid stored JSON
 });
 
 test("SQLite records apply busyTimeoutMs to the real DatabaseSync", async () => {
-  expect(existsSync(ELECTRON)).toBe(true);
+  electronBinary();
   const { dir, file } = await buildAdapter();
   const database = join(dir, "records.sqlite");
   try {
@@ -118,7 +121,7 @@ test("SQLite records apply busyTimeoutMs to the real DatabaseSync", async () => 
 });
 
 test("SQLite records reject sparse arrays before writing", async () => {
-  expect(existsSync(ELECTRON)).toBe(true);
+  electronBinary();
   const { dir, file } = await buildAdapter();
   const database = join(dir, "records.sqlite");
   try {
@@ -137,7 +140,7 @@ test("DatabaseSync satisfies the injected SQLite connection contract", () => {
 });
 
 test("two Electron processes share exactly one successful createExclusive", async () => {
-  expect(existsSync(ELECTRON)).toBe(true);
+  electronBinary();
   const { dir, file } = await buildAdapter();
   const database = join(dir, "records.sqlite");
   try {
@@ -153,7 +156,7 @@ test("two Electron processes share exactly one successful createExclusive", asyn
 });
 
 test("conditional deletion preserves a replacement and timed contention preserves the value", async () => {
-  expect(existsSync(ELECTRON)).toBe(true);
+  electronBinary();
   const { dir, file } = await buildAdapter();
   const database = join(dir, "records.sqlite");
   try {
