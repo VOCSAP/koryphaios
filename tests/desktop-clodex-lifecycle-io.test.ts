@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
-import { join, relative } from "node:path";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 const REPO = join(import.meta.dir, "..");
@@ -65,11 +65,16 @@ function runProbeAsync(bundle: string, args: string[]) {
 
 function typecheckFactory() {
   const dir = mkdtempSync(join(tmpdir(), "clodex-lifecycle-io-typecheck-"));
-  const source = relative(dir, SOURCE).replaceAll("\\", "/");
-  const importPath = source.startsWith(".") ? source : `./${source}`;
+  // A path mapping to SOURCE's own absolute path, not a relative() computed
+  // from dir: relative() returns an unusable absolute path when dir and
+  // SOURCE sit on different Windows drives (temp on C:, repo on D:), and on
+  // macOS tmpdir()'s /var/folders symlink to /private/var/folders makes a
+  // relative() count of ".." wrong once tsc resolves it through the real,
+  // deeper path. An absolute paths[] target sidesteps both: no relative
+  // math, no drive letter, no symlink depth to get right.
   writeFileSync(join(dir, "probe.ts"), [
     'import { DatabaseSync } from "node:sqlite";',
-    `import { createSqliteRecordStore } from "${importPath}";`,
+    'import { createSqliteRecordStore } from "clodex-lifecycle-io";',
     'createSqliteRecordStore(new DatabaseSync(":memory:"));',
   ].join("\n"));
   writeFileSync(join(dir, "tsconfig.json"), JSON.stringify({
@@ -83,6 +88,8 @@ function typecheckFactory() {
       allowImportingTsExtensions: true,
       types: ["node"],
       typeRoots: [TYPE_ROOTS],
+      baseUrl: ".",
+      paths: { "clodex-lifecycle-io": [SOURCE.replaceAll("\\", "/")] },
     },
     files: ["probe.ts"],
   }));
