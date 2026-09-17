@@ -152,6 +152,8 @@ function withEnvValue(env: NodeJS.ProcessEnv, name: string, value: string): Node
  * therefore starts from System32, which only an administrator can write, with
  * that lookup disabled, through a cmd.exe named by absolute path. A missing or
  * relative SystemRoot throws: a bare `cmd.exe` would reopen the same lookup.
+ * ComSpec is ignored: `/d /s /c` and the quoting are cmd.exe syntax, and the
+ * spawned binary is the root `taskkill /T` stops.
  */
 function win32Invocation(env: NodeJS.ProcessEnv, line: string) {
   const systemRoot = envValue(env, "SystemRoot");
@@ -159,10 +161,8 @@ function win32Invocation(env: NodeJS.ProcessEnv, line: string) {
     throw new Error(`clodex server needs an absolute SystemRoot, got ${String(systemRoot)}`);
   }
   const system32 = `${systemRoot.replace(/[\\/]+$/, "")}\\System32`;
-  const comSpec = envValue(env, "ComSpec");
-  const file = comSpec && WINDOWS_ABSOLUTE_RE.test(comSpec) ? comSpec : `${system32}\\cmd.exe`;
   return {
-    file,
+    file: `${system32}\\cmd.exe`,
     args: ["/d", "/s", "/c", line],
     cwd: system32,
     env: withEnvValue(env, "NoDefaultCurrentDirectoryInExePath", "1")
