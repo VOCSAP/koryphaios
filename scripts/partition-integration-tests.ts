@@ -1,10 +1,14 @@
-// Runs the complement of partition-pure-tests.ts's exemption deny-list: every
-// test file that spawns a daemon and binds a port.
-// Single shared `bun test` invocation, not one process per file: none of these
-// files register a global (happy-dom) or mock a module, so the process-global
-// leakage that forces per-file isolation elsewhere does not apply here.
-// Each file's own broker binds an OS-assigned ephemeral port, so running them
-// serially in one process is expected to be safe.
+// Runs the complement of partition-pure-tests.ts's exemption deny-list:
+// every test file that either spawns a daemon and binds a port, or needs a
+// desktop/node_modules native dependency not present until the "Install
+// desktop deps" step (which runs before this one, not before the
+// pure-module step) has installed it.
+// Single shared `bun test` invocation, not one process per file: none of
+// these files register a global (happy-dom) or mock a module, so the
+// process-global leakage that forces per-file isolation elsewhere does not
+// apply here. A daemon-spawning file's own broker binds an OS-assigned
+// ephemeral port, so running them serially in one process is expected to be
+// safe.
 import { readdirSync } from "node:fs";
 import { EXEMPTIONS, exemptedFiles, isExempt, listTestFiles, REPO_ROOT, TESTS_DIR } from "./pure-module-partition.ts";
 

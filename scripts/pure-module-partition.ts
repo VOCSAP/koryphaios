@@ -19,16 +19,30 @@ export interface Exemptions {
 // trusting free-text prose.
 export const INTEGRATION_STEP_NAME = "Bun tests (integration)";
 
+// Closed vocabulary: a reason must contain one of these two verbatim markers, naming the ONE property the coverage-audit guard checks against the real source.
+export const DAEMON_REASON_MARKER = "spawns a daemon and binds ports";
+export const NATIVE_DEPS_REASON_MARKER =
+  "needs a desktop/node_modules native dependency not present until the 'Install desktop deps' step has run";
+
+// Matches a desktop/node_modules dep by join-triple or by a single joined
+// path string -- known gaps named in the guard's own message.
+export const NATIVE_DEPS_SOURCE_RE =
+  /["']desktop["']\s*,\s*["']node_modules["']\s*,\s*["'](?:electron|typescript|\.bin)["']|["'][.\/\\]{0,4}desktop[/\\]+node_modules[/\\]+(?:electron|typescript|\.bin)[^"']*["']/;
+
 export const EXEMPTIONS: Exemptions = {
   familyPrefixes: {
-    "broker-": `spawns a daemon and binds ports; run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
-    "server-": `spawns a daemon and binds ports; run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
+    "broker-": `${DAEMON_REASON_MARKER}; run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
+    "server-": `${DAEMON_REASON_MARKER}; run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
   },
   exactFiles: {
     "approval-hook.test.ts":
-      `spawns a daemon and binds ports (imports startBroker from tests/_helper.ts); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
+      `${DAEMON_REASON_MARKER} (imports startBroker from tests/_helper.ts); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
     "mcp-roadmap-ack.test.ts":
-      `spawns a daemon and binds ports (imports startBroker from tests/_helper.ts, and Bun.spawn's \`bun server.ts\` directly); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
+      `${DAEMON_REASON_MARKER} (imports startBroker from tests/_helper.ts, and Bun.spawn's \`bun server.ts\` directly); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
+    "desktop-clodex-lifecycle-io.test.ts":
+      `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron and type-checks against desktop/node_modules/typescript); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
+    "desktop-clodex-spawn-win32.test.ts":
+      `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron directly); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
   },
 };
 

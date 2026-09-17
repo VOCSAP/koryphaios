@@ -156,26 +156,18 @@ jobs:
         working-directory: desktop
         run: npm run build
 
-      # Card f4a3ed1e: the complement of the "Bun tests (pure modules)" step
-      # above. 52+ tests/*.test.ts files (broker-/server- prefixes,
-      # approval-hook.test.ts, mcp-roadmap-ack.test.ts) spawn a daemon and
-      # bind a port each, so they are exempted from that step's shared-
-      # process batch on purpose (scripts/pure-module-partition.ts's
-      # EXEMPTIONS table) -- but until this step existed, nothing else
-      # played them either: they ran in NO CI job at all. Own step, own time
-      # budget, deliberately not merged into the pure-module batch (mixing
-      # daemon-spawning integration suites into that shared-process run
-      # would reintroduce port/timing coupling the pure-module partition
-      # exists to avoid).
+      # Complement of the "Bun tests (pure modules)" step above: files that
+      # spawn a daemon and bind a port, and files needing a desktop/node_modules
+      # dependency this step's prior "Install desktop deps" has already
+      # installed (scripts/pure-module-partition.ts's EXEMPTIONS table). Own
+      # step, own time budget, so port/timing coupling stays out of the
+      # pure-module shared-process batch.
       #
-      # Placed LAST, reviewer 2026-08-28: these 52+ files have never run on
-      # a Linux/macOS CI runner, so a first red here is expected and must
-      # not swallow the packaging signal this workflow exists to protect --
-      # every OS toolchain gate above (typecheck, node-pty ABI rebuild,
-      # electron-vite build) reports on its own merits first. Still
-      # BLOCKING (no continue-on-error): a decorative step here would be the
-      # exact fail-open shape this card exists to close, just moved one
-      # level up.
+      # Placed LAST so every OS toolchain gate above (typecheck, node-pty ABI
+      # rebuild, electron-vite build) reports on its own merits first, never
+      # swallowed behind this step's own red. Still BLOCKING (no
+      # continue-on-error): a decorative step here would be the exact
+      # fail-open shape this card exists to close, just moved one level up.
       #
       # scripts/pure-module-partition.ts's EXEMPTIONS reasons name this step
       # by this exact string; tests/desktop-ci-glob-coverage.test.ts's

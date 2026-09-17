@@ -1,18 +1,18 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawn, spawnSync } from "node:child_process";
 import { join, relative } from "node:path";
 import { tmpdir } from "node:os";
 
 const REPO = join(import.meta.dir, "..");
-const ELECTRON = join(
-  REPO,
-  "desktop",
-  "node_modules",
-  "electron",
-  "dist",
-  process.platform === "win32" ? "electron.exe" : "electron"
-);
+const ELECTRON_DIR = join(REPO, "desktop", "node_modules", "electron");
+// path.txt, not require: a mock.module("electron") in the same bun test
+// process would be returned instead of the path; it also covers darwin's Electron.app layout.
+const ELECTRON_PATH_FILE = join(ELECTRON_DIR, "path.txt");
+if (!existsSync(ELECTRON_PATH_FILE)) {
+  throw new Error(`electron's own path.txt is missing at ${ELECTRON_PATH_FILE} -- run npm install in desktop/ first`);
+}
+const ELECTRON = join(ELECTRON_DIR, "dist", readFileSync(ELECTRON_PATH_FILE, "utf-8").trim());
 const SOURCE = join(REPO, "desktop", "src", "main", "clodex-lifecycle-io.ts");
 const PROBE = join(import.meta.dir, "clodex-lifecycle-io-probe.cjs");
 const TSC = join(REPO, "desktop", "node_modules", "typescript", "bin", "tsc");

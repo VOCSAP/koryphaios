@@ -24,6 +24,9 @@ import {
   extractStepText,
   exemptedFiles as computeExemptedFiles,
   auditExemptionLocations,
+  DAEMON_REASON_MARKER,
+  NATIVE_DEPS_REASON_MARKER,
+  NATIVE_DEPS_SOURCE_RE,
 } from "../scripts/pure-module-partition.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..");
@@ -321,34 +324,165 @@ test("mutation proof: a reason naming the real integration step, running the rea
   expect(unlocatedReasons).toEqual([]);
 });
 
-test("every exempted file actually spawns a broker (measured property, not the family label)", () => {
-  // Checks the actual property the exemption claims (imports startBroker, or
-  // otherwise pulls in the broker test helper) rather than trusting the
-  // filename prefix, since a future non-broker file named broker-* would
-  // otherwise be silently exempted forever.
+/** The reason string EXEMPTIONS actually assigns to an exempted file, whichever table matched. */
+function reasonFor(file: string, exemptions: Exemptions): string {
+  if (file in exemptions.exactFiles) return exemptions.exactFiles[file]!;
+  const prefix = Object.keys(exemptions.familyPrefixes).find((p) => file.startsWith(p));
+  if (prefix === undefined) throw new Error(`${file} is exempt but matches neither exactFiles nor familyPrefixes`);
+  return exemptions.familyPrefixes[prefix]!;
+}
+
+/**
+ * Verifies the file's real source proves the ONE property its reason
+ * claims, from the closed two-marker vocabulary. Both markers present means
+ * both properties get checked, not one silently skipping the other; neither
+ * marker present is itself a failure, not a pass by omission.
+ */
+function unmetReasonClaims(file: string, reason: string, source: string): string[] {
+  const claimsDaemon = reason.includes(DAEMON_REASON_MARKER);
+  const claimsNativeDeps = reason.includes(NATIVE_DEPS_REASON_MARKER);
+  const unmet: string[] = [];
+  if (!claimsDaemon && !claimsNativeDeps) {
+    unmet.push(`${file}: reason names neither the daemon/port marker nor the native-deps marker`);
+  }
+  if (claimsDaemon && !/startBroker|_helper/.test(source)) {
+    unmet.push(`${file}: reason claims daemon/port but the source matches neither startBroker nor _helper`);
+  }
+  if (claimsNativeDeps && !NATIVE_DEPS_SOURCE_RE.test(source)) {
+    unmet.push(
+      `${file}: reason claims native desktop/node_modules dep but the source matches none of NATIVE_DEPS_SOURCE_RE's forms ` +
+        `(join triple, single joined path string) -- known gaps this regex does NOT cover: require.resolve(...), ` +
+        `createRequire("electron"|"typescript") (dropped: a mock.module("electron") elsewhere in the same bun test process ` +
+        `makes it return the mock, not the real path), node-pty's own binary resolution`,
+    );
+  }
+  return unmet;
+}
+
+test("every exempted file proves the ONE property its reason claims (daemon/port via startBroker|_helper, or a native desktop/node_modules dep via NATIVE_DEPS_SOURCE_RE)", () => {
   const files = exemptedFiles(EXEMPTIONS, REAL_FILES);
   expect(files.length).toBeGreaterThan(0);
-  for (const f of files) {
+  const allUnmet = files.flatMap((f) => {
     const source = readFileSync(join(TESTS_DIR, f), "utf-8");
-    expect(source).toMatch(/startBroker|_helper/);
-  }
+    return unmetReasonClaims(f, reasonFor(f, EXEMPTIONS), source);
+  });
+  expect(allUnmet).toEqual([]);
 });
 
-test("mutation proof, N2: an exempted file that does NOT spawn a broker is caught", () => {
+test("mutation proof: an exempted file wrongly claiming the daemon/port property is caught (does not spawn a broker)", () => {
   const noBrokerFile = "logger.test.ts";
   const source = readFileSync(join(TESTS_DIR, noBrokerFile), "utf-8");
   expect(source).not.toMatch(/startBroker|_helper/);
-  const mutatedExemptions: Exemptions = {
-    familyPrefixes: EXEMPTIONS.familyPrefixes,
-    exactFiles: { ...EXEMPTIONS.exactFiles, [noBrokerFile]: "placeholder reason, long enough" },
-  };
-  const files = exemptedFiles(mutatedExemptions, REAL_FILES);
-  expect(files).toContain(noBrokerFile);
-  const wronglyExempted = files.filter((f) => {
-    const src = readFileSync(join(TESTS_DIR, f), "utf-8");
-    return !/startBroker|_helper/.test(src);
-  });
-  expect(wronglyExempted).toContain(noBrokerFile);
+  const reason = `${DAEMON_REASON_MARKER}; placeholder location clause long enough to pass the length check`;
+  expect(unmetReasonClaims(noBrokerFile, reason, source)).toContain(
+    `${noBrokerFile}: reason claims daemon/port but the source matches neither startBroker nor _helper`,
+  );
+});
+
+test("mutation proof: an exempted file wrongly claiming the native-deps property is caught (no desktop/node_modules path segment)", () => {
+  const noNativeDepsFile = "logger.test.ts";
+  const source = readFileSync(join(TESTS_DIR, noNativeDepsFile), "utf-8");
+  expect(source).not.toMatch(NATIVE_DEPS_SOURCE_RE);
+  const reason = `${NATIVE_DEPS_REASON_MARKER}; placeholder location clause long enough to pass the length check`;
+  const unmet = unmetReasonClaims(noNativeDepsFile, reason, source);
+  expect(unmet.some((m) => m.startsWith(`${noNativeDepsFile}: reason claims native desktop/node_modules dep`))).toBe(true);
+});
+
+test("mutation proof: a reason naming NEITHER the daemon/port nor the native-deps marker is refused, not accepted by omission", () => {
+  const anyFile = "logger.test.ts";
+  const source = readFileSync(join(TESTS_DIR, anyFile), "utf-8");
+  const unlabelledReason = "placeholder reason, long enough, names no verifiable property at all";
+  expect(unmetReasonClaims(anyFile, unlabelledReason, source)).toContain(
+    `${anyFile}: reason names neither the daemon/port marker nor the native-deps marker`,
+  );
+});
+
+test("mutation proof: the native-deps regex matches the real desktop-clodex-lifecycle-io.test.ts source (positive control)", () => {
+  const source = readFileSync(join(TESTS_DIR, "desktop-clodex-lifecycle-io.test.ts"), "utf-8");
+  expect(source).toMatch(NATIVE_DEPS_SOURCE_RE);
+});
+
+test("mutation proof: the native-deps regex does not false-positive on a bare word mention with no desktop/node_modules path segment", () => {
+  const decoy = "// this comment just talks about electron and typescript in prose, not a path";
+  expect(decoy).not.toMatch(NATIVE_DEPS_SOURCE_RE);
+});
+
+// Every fixture below is built by concatenation, broken mid-token, so this
+// guard file's own on-disk text never contains the contiguous pattern it
+// audits every other file against (see the inverse-audit mutation proof
+// further down for the same self-match trap on a different fixture).
+
+test("mutation proof: a bare createRequire('electron') resolution does not match the native-deps pattern", () => {
+  const onlyCreateRequire = 'const ELECTRON = createRequire(join(REPO, "desktop", "package.' + 'json"))("electron");';
+  expect(onlyCreateRequire).not.toMatch(NATIVE_DEPS_SOURCE_RE);
+});
+
+test("mutation proof: a single joined path string with a forward-slash separator matches", () => {
+  const forwardSlashPath = '"../desktop/node_' + 'modules/electron/dist/electron.exe"';
+  expect(forwardSlashPath).toMatch(NATIVE_DEPS_SOURCE_RE);
+});
+
+test("mutation proof: a single joined path string with a backslash separator matches", () => {
+  const backslashPath = '"..\\\\desktop\\\\node_' + 'modules\\\\electron\\\\dist\\\\electron.exe"';
+  expect(backslashPath).toMatch(NATIVE_DEPS_SOURCE_RE);
+});
+
+test("mutation proof: the single-quote form of the join triple matches", () => {
+  const singleQuoteJoin = "join(REPO, 'desktop', 'node_" + "modules', 'electron', 'dist')";
+  expect(singleQuoteJoin).toMatch(NATIVE_DEPS_SOURCE_RE);
+});
+
+test("mutation proof: this guard file's own real source does not itself match NATIVE_DEPS_SOURCE_RE (fixtures above must stay split, not contiguous)", () => {
+  const ownSource = readFileSync(join(TESTS_DIR, "desktop-ci-glob-coverage.test.ts"), "utf-8");
+  expect(ownSource).not.toMatch(NATIVE_DEPS_SOURCE_RE);
+});
+
+// A non-exempt file matching NATIVE_DEPS_SOURCE_RE for a reason other than
+// "belongs in the integration step" must be named here with a real reason,
+// or the inverse-audit test below refuses it. Neither entry is exempted:
+// each already skips its own affected tests, by name, when the dependency
+// is absent -- a different mechanism than moving the whole file to another
+// CI step.
+const NATIVE_DEPS_ALLOWED_NONEXEMPT: Record<string, string> = {
+  "desktop-pty-coalescing.test.ts":
+    "spawns desktop/node_modules/electron directly for a live ConPTY probe, itself skipped by name on a platform or node-pty build that cannot run it",
+  "desktop-inbox-ack.test.ts":
+    "spawns desktop/node_modules/.bin/tsc directly for two compile-discipline tests, itself skipped by name when desktop/node_modules is not installed",
+};
+
+function wronglyNonExemptNativeDeps(
+  exemptions: Exemptions,
+  allowed: Record<string, string>,
+  files: string[],
+  readSource: (file: string) => string,
+): string[] {
+  return files.filter((f) => !isExempt(f, exemptions) && !(f in allowed) && NATIVE_DEPS_SOURCE_RE.test(readSource(f)));
+}
+
+test("the inverse holds: every non-exempt file matching NATIVE_DEPS_SOURCE_RE is either exempt or on the named allow-list (no silent third case)", () => {
+  const readSource = (f: string) => readFileSync(join(TESTS_DIR, f), "utf-8");
+  const offenders = wronglyNonExemptNativeDeps(EXEMPTIONS, NATIVE_DEPS_ALLOWED_NONEXEMPT, REAL_FILES, readSource);
+  expect(offenders).toEqual([]);
+});
+
+test("the allow-list itself carries no stale entry (each named file still exists and still matches the regex it was allow-listed for)", () => {
+  for (const f of Object.keys(NATIVE_DEPS_ALLOWED_NONEXEMPT)) {
+    expect(REAL_FILES).toContain(f);
+    const source = readFileSync(join(TESTS_DIR, f), "utf-8");
+    expect(source).toMatch(NATIVE_DEPS_SOURCE_RE);
+  }
+});
+
+test("mutation proof: a non-exempt, non-allow-listed file matching NATIVE_DEPS_SOURCE_RE is caught by the inverse audit", () => {
+  const fabricated = "a-brand-new-native-deps-file.test.ts";
+  // Built by concatenation, not written as one contiguous literal, so this
+  // guard file's own on-disk text does not itself match the pattern it
+  // audits every OTHER file against (the inverse-audit test above reads
+  // this very file's real bytes too).
+  const fabricatedSource = 'join(REPO, "desktop", "node_' + 'modules", "electron", "dist")';
+  const readSource = (f: string) => (f === fabricated ? fabricatedSource : readFileSync(join(TESTS_DIR, f), "utf-8"));
+  const offenders = wronglyNonExemptNativeDeps(EXEMPTIONS, NATIVE_DEPS_ALLOWED_NONEXEMPT, [...REAL_FILES, fabricated], readSource);
+  expect(offenders).toContain(fabricated);
 });
 
 test("every on-disk tests/*.test.ts file is either exempt or included in the computed partition (clean + contaminated)", () => {
