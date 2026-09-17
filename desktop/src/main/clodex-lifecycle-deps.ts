@@ -241,6 +241,9 @@ export function createClodexControllerDeps(options: ClodexDepsOptions): ClodexCo
         throw err
       }
     },
+    makeDir: (path: string) => {
+      mkdirSync(path, { recursive: true })
+    },
     kill: (pid: number, signal: number | NodeJS.Signals) => {
       process.kill(pid, signal)
     },

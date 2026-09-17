@@ -3,6 +3,9 @@
 // file read and signal injected. No test here starts or kills a real process.
 
 import { expect, test } from "bun:test";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { clodexHome } from "../desktop/src/main/clodex-bridge.ts";
 import type { OwnerRecord } from "../desktop/src/main/clodex-process-identity.ts";
 import {
   createClodexProcessIo,
@@ -10,7 +13,7 @@ import {
   type ClodexSpawnOptions
 } from "../desktop/src/main/clodex-process-io.ts";
 
-const HOME = "/clodex-home";
+const HOME = "C:\\clodex-home";
 const RUNTIME = `${HOME}/server-runtime.json`;
 const HOST = "deck-host";
 const SYSTEM_ROOT = "C:\\Windows";
@@ -33,6 +36,9 @@ interface HarnessInit {
   run?: (file: string, args: string[]) => RunResult;
   shell?: string;
   env?: NodeJS.ProcessEnv;
+  /** CLODEX_HOME of the deps environment; null leaves it unset. */
+  home?: string | null;
+  makeDir?: (path: string) => void;
   childPid?: number | undefined;
   log?: number | null;
   onSleep?: (files: Map<string, string>, alive: Set<number>) => void;
@@ -77,12 +83,14 @@ function harness(init: HarnessInit = {}) {
   });
   let unrefs = 0;
   let sleeps = 0;
+  const madeDirs: string[] = [];
+  const home = init.home === undefined ? HOME : init.home;
 
   const deps: ClodexProcessDeps = {
     platform: init.platform ?? "win32",
     hostname: () => HOST,
     env: {
-      CLODEX_HOME: HOME,
+      ...(home === null ? {} : { CLODEX_HOME: home }),
       ...(init.shell === undefined ? {} : { SHELL: init.shell }),
       ...(init.env ?? { SystemRoot: SYSTEM_ROOT })
     },
@@ -95,6 +103,10 @@ function harness(init: HarnessInit = {}) {
       return init.run?.(file, args) ?? { code: 0, stdout: "", stderr: "" };
     },
     readFile: (path) => files.get(path) ?? null,
+    makeDir: (path) => {
+      init.makeDir?.(path);
+      madeDirs.push(path);
+    },
     kill: (pid, signal) => {
       signals.push({ pid, signal });
       if (signal !== 0) return;
@@ -137,6 +149,7 @@ function harness(init: HarnessInit = {}) {
     spawns,
     signals,
     traces,
+    madeDirs,
     endChild: () => endChild(),
     unrefs: () => unrefs,
     sleeps: () => sleeps
@@ -318,7 +331,7 @@ test("spawn owns the shell root and the registered server as two distinct proces
       detached: true,
       windowsHide: true,
       stdio: ["ignore", 7, 7],
-      cwd: "C:\\Windows\\System32",
+      cwd: HOME,
       env: { CLODEX_HOME: HOME, SystemRoot: SYSTEM_ROOT, NoDefaultCurrentDirectoryInExePath: "1" }
     }
   });
@@ -330,11 +343,53 @@ test("the win32 spawn disables the current-directory lookup whatever the inherit
   await expect(h.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow(/did not register a proxy in time/);
   const { file, options } = h.spawns[0]!;
   expect(file).toBe("C:\\Windows\\System32\\cmd.exe");
-  expect(options.cwd).toBe("C:\\Windows\\System32");
+  expect(options.cwd).toBe(HOME);
   const lookup = Object.entries(options.env ?? {}).filter(
     ([key]) => key.toLowerCase() === "nodefaultcurrentdirectoryinexepath"
   );
   expect(lookup).toEqual([["NoDefaultCurrentDirectoryInExePath", "1"]]);
+});
+
+test("the win32 spawn starts in the clodex home the runtime manifest is read from", async () => {
+  // Without CLODEX_HOME the home derives from the real profile, absolute only on a Windows host.
+  const homes = process.platform === "win32" ? [HOME, "D:\\Users\\op\\custom-clodex", null] : [HOME];
+  for (const home of homes) {
+    const expected = clodexHome(home === null ? {} : { CLODEX_HOME: home });
+    const h = harness({ home });
+    await expect(h.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow(/did not register a proxy in time/);
+    expect(h.spawns[0]!.options.cwd, String(home)).toBe(expected);
+    expect(h.madeDirs, String(home)).toEqual([expected]);
+  }
+  expect(clodexHome({})).toBe(join(homedir(), ".clodex"));
+});
+
+test("the win32 spawn creates a missing clodex home before starting the child", async () => {
+  const spawnsAtCreation: number[] = [];
+  const h = harness({ makeDir: () => spawnsAtCreation.push(h.spawns.length) });
+  await expect(h.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow(/did not register a proxy in time/);
+  expect(spawnsAtCreation).toEqual([0]);
+  expect(h.spawns).toHaveLength(1);
+});
+
+test("the win32 spawn fails, naming the path, when the clodex home cannot be created", async () => {
+  const h = harness({
+    log: 7,
+    makeDir: (path) => {
+      throw Object.assign(new Error(`EACCES: permission denied, mkdir '${path}'`), { code: "EACCES" });
+    }
+  });
+  const failure = h.io.spawn("clodex", ["server", "--proxy"]);
+  await expect(failure).rejects.toThrow("cannot create the clodex home C:\\clodex-home: EACCES");
+  expect(h.spawns).toHaveLength(0);
+});
+
+test("the win32 spawn refuses a clodex home that is not absolute", async () => {
+  for (const home of ["clodex-home", ".\\clodex", "\\clodex-home", "C:clodex", "\\\\server\\share\\clodex"]) {
+    const h = harness({ home });
+    await expect(h.io.spawn("clodex", ["server", "--proxy"]), home).rejects.toThrow(/absolute clodex home/);
+    expect(h.madeDirs, home).toHaveLength(0);
+    expect(h.spawns, home).toHaveLength(0);
+  }
 });
 
 test("the win32 spawn ignores ComSpec, absolute or relative", async () => {

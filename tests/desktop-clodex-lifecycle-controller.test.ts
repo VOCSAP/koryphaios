@@ -78,6 +78,7 @@ function fixture(overrides: Partial<ClodexControllerDeps> = {}) {
       if (match) return stats.get(Number(match[1])) ?? null;
       return null;
     },
+    makeDir: () => {},
     kill: (pid: number) => {
       if (pid < 0) {
         for (const candidate of [...alive]) {

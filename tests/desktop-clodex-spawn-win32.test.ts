@@ -127,3 +127,33 @@ test.skipIf(process.platform !== "win32")(
   },
   30_000
 );
+
+test.skipIf(process.platform !== "win32")(
+  "a clodex planted in the clodex home, the child's working directory, is not the one the win32 spawn runs",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "kory-clodex-home-plant-"));
+    const onPath = join(root, "path");
+    const home = join(root, "home");
+    mkdirSync(onPath);
+    mkdirSync(home);
+    const marker = join(root, "ran.txt");
+    const evidence = mkdtempSync(join(tmpdir(), "kory-clodex-evidence-"));
+    const hijacked = join(evidence, "hijacked.txt");
+    const script = join(onPath, "witness.mjs");
+    witnessScript(script, marker, home);
+    writeFileSync(join(onPath, `${WITNESS}.cmd`), `@"${process.execPath}" "${script}"\r\n`);
+    writeFileSync(join(home, `${WITNESS}.cmd`), `@echo PLANTED> "${hijacked}"\r\n`);
+
+    const env = withoutSafeSearch(withPathEntry({ ...process.env, CLODEX_HOME: home }, onPath));
+    try {
+      await runOwnedSpawn(root, env, () => {
+        expect(existsSync(marker), "the clodex on PATH did not run").toBe(true);
+      });
+    } finally {
+      const ranPlanted = existsSync(hijacked);
+      rmSync(evidence, { recursive: true, force: true, maxRetries: 3 });
+      expect(ranPlanted, "the planted clodex ran").toBe(false);
+    }
+  },
+  30_000
+);

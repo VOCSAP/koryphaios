@@ -80,6 +80,8 @@ export interface ClodexProcessDeps {
   run(file: string, args: string[]): Promise<{ code: number; stdout: string; stderr: string }>;
   /** File content, or null when the file does not exist. Throws on any other failure. */
   readFile(path: string): string | null;
+  /** Create a directory and its missing parents; throws when it cannot. */
+  makeDir(path: string): void;
   /** `process.kill`: throws `ESRCH` when the pid is gone, `EPERM` when it is foreign. */
   kill(pid: number, signal: number | NodeJS.Signals): void;
   spawn(file: string, args: string[], options: ClodexSpawnOptions): ClodexChild;
@@ -148,23 +150,35 @@ function withEnvValue(env: NodeJS.ProcessEnv, name: string, value: string): Node
 
 /**
  * cmd.exe looks a bare command up in its working directory before PATH, so a
- * `clodex.cmd` next to a portable Kory would run in place of clodex. The child
- * therefore starts from System32, which only an administrator can write, with
- * that lookup disabled, through a cmd.exe named by absolute path. A missing or
- * relative SystemRoot throws: a bare `cmd.exe` would reopen the same lookup.
- * ComSpec is ignored: `/d /s /c` and the quoting are cmd.exe syntax, and the
- * spawned binary is the root `taskkill /T` stops.
+ * `clodex.cmd` in that directory would run in place of clodex. The defence is
+ * `NoDefaultCurrentDirectoryInExePath`, which disables that lookup whatever the
+ * directory holds. The child starts in the clodex home, resolved like the
+ * runtime manifest is read: it is where a manual clodex run works and a
+ * directory clodex can write. That home must be absolute, since a relative one
+ * resolves against the caller's directory, and is created when missing.
+ * cmd.exe is named by absolute path, so a missing or relative SystemRoot
+ * throws; ComSpec is ignored: `/d /s /c` and the quoting are cmd.exe syntax,
+ * and the spawned binary is the root `taskkill /T` stops.
  */
-function win32Invocation(env: NodeJS.ProcessEnv, line: string) {
+function win32Invocation(env: NodeJS.ProcessEnv, line: string, makeDir: (path: string) => void) {
   const systemRoot = envValue(env, "SystemRoot");
   if (!systemRoot || !WINDOWS_ABSOLUTE_RE.test(systemRoot)) {
     throw new Error(`clodex server needs an absolute SystemRoot, got ${String(systemRoot)}`);
   }
-  const system32 = `${systemRoot.replace(/[\\/]+$/, "")}\\System32`;
+  const home = clodexHome(env);
+  if (!WINDOWS_ABSOLUTE_RE.test(home)) {
+    throw new Error(`clodex server needs an absolute clodex home, got ${home}`);
+  }
+  try {
+    makeDir(home);
+  } catch (error) {
+    const cause = error instanceof Error ? error.message : String(error);
+    throw new Error(`cannot create the clodex home ${home}: ${cause}`, { cause: error });
+  }
   return {
-    file: `${system32}\\cmd.exe`,
+    file: `${systemRoot.replace(/[\\/]+$/, "")}\\System32\\cmd.exe`,
     args: ["/d", "/s", "/c", line],
-    cwd: system32,
+    cwd: home,
     env: withEnvValue(env, "NoDefaultCurrentDirectoryInExePath", "1")
   };
 }
@@ -395,7 +409,7 @@ export function createClodexProcessIo(
     // runs it and stays the root of the tree `taskkill /T` stops.
     const invocation =
       deps.platform === "win32"
-        ? win32Invocation(deps.env, line)
+        ? win32Invocation(deps.env, line, deps.makeDir)
         : buildShellInvocation({ command: line, shell: loginShell(), interactive: false }, deps.platform);
     const sink = deps.openLog() ?? "ignore";
     const known = new Set(readRuntime().map((record) => record.pid));
