@@ -1381,6 +1381,59 @@ test("DECK_CONTROL_TOOLS unset: every tool listed, unrestricted (zero regression
   expect(names.length).toBeGreaterThan(15);
 });
 
+test("initialize serves an instructions block that keeps its supervisor clauses, ends on the destructive-action rule, and only names tools that tools/list serves", async () => {
+  const srv = await startDeckControl(makeDeps({ sessions: [] }));
+  servers.push(srv);
+  const { send, recv } = await speakMcp({
+    DECK_CONTROL_URL: srv.url,
+    DECK_CONTROL_TOKEN: srv.token,
+    DECK_CONTROL_TOOLS: undefined
+  });
+
+  send({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "0" } }
+  });
+  const init = (await recv()) as { result?: { instructions?: unknown } };
+  const instructions = init.result?.instructions;
+  expect(typeof instructions, "initialize reply carries no instructions string").toBe("string");
+  const block = instructions as string;
+
+  const clauses: Array<[guarantee: string, fragment: string]> = [
+    ["the supervisor does not write code itself", "You do NOT write code yourself"],
+    ["the supervisor consults the shared roadmap before acting", "consult the shared roadmap (roadmap_* tools)"],
+    ["the supervisor picks agent profiles for what it spawns", "pick the right agent profiles"],
+    ["the supervisor coordinates through peer messaging", "coordinate through send_message / list_peers"],
+    ["spawning requires an explicit operator instruction", "never spawn without an explicit operator instruction"],
+    ["an operator question is not consent to spawn", "a question calls for a proposal plus confirmation"],
+    ["the team playbook is read before composing a team", "read deck_team_playbook before composing a team"]
+  ];
+  for (const [guarantee, fragment] of clauses) {
+    expect(block, `the served block no longer states that ${guarantee}: clause "${fragment}" is gone or reworded`).toContain(
+      fragment
+    );
+  }
+  const closing = "Destructive actions only work on what you created; ask the operator otherwise.";
+  expect(
+    block.trimEnd().endsWith(closing),
+    "the served block no longer ENDS with the destructive-action rule: it was truncated, its tail rewritten, or text was appended after it"
+  ).toBe(true);
+
+  send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+  const tools = (await recv()) as { result: { tools: { name: string }[] } };
+  const served = new Set(tools.result.tools.map((t) => t.name));
+  expect(served.size, "tools/list served no tool: the cross-check below would compare against nothing").toBeGreaterThan(0);
+  const mentioning = block.split(/[^A-Za-z0-9_-]+/).filter((t) => t.includes("deck_"));
+  const embedded = mentioning.filter((t) => !t.startsWith("deck_"));
+  expect(embedded, "a deck_ mention sits inside a longer word, so it cannot be cross-checked as a tool name").toEqual([]);
+  const named = [...new Set(mentioning)];
+  expect(named.length, "no deck_* tool is named in the block: the cross-check below would pass on nothing").toBeGreaterThan(0);
+  const dangling = named.filter((n) => !served.has(n));
+  expect(dangling, "instructions name deck_* tools that tools/list does not serve (renamed or removed tool)").toEqual([]);
+});
+
 test("DECK_CONTROL_TOOLS set: tools/list returns exactly the named subset, and tools/call refuses an excluded name", async () => {
   const srv = await startDeckControl(makeDeps({ sessions: [] }));
   servers.push(srv);
