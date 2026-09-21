@@ -147,9 +147,8 @@ human-readable register of open work. See `docs/agents/issue-tracker.md`.
 ### Triage labels
 
 The five default role strings (`needs-triage`, `needs-info`,
-`ready-for-agent`, `ready-for-human`, `wontfix`), carried as card tags until
-card `5d2b95cd` lands them in the card metadata. See
-`docs/agents/triage-labels.md`.
+`ready-for-agent`, `ready-for-human`, `wontfix`), carried by the card's own
+`triage` field. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 

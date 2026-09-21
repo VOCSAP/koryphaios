@@ -121,6 +121,7 @@ import type {
   RoadmapReorderRequest,
   RoadmapReorderResponse,
   RoadmapStatus,
+  RoadmapTriage,
   RoadmapUpsertRequest,
   RoadmapUpsertResponse,
   RoadmapContextAppendRequest,
@@ -210,6 +211,7 @@ import {
   RESERVED_PEER_IDS,
   ROADMAP_IMPORT_COLUMNS,
   ROADMAP_SYNC_CONTENT_FIELDS,
+  ROADMAP_TRIAGE_ROLES,
   type RoadmapImportColumn,
   isSentinelInstanceToken,
   SENTINEL_DEFINITIONS,
@@ -704,6 +706,7 @@ db.run(`
     value TEXT NOT NULL DEFAULT 'medium',
     effort TEXT NOT NULL DEFAULT 'medium',
     status TEXT NOT NULL DEFAULT 'idea',
+    triage TEXT,
     tags TEXT NOT NULL DEFAULT '[]',
     depends_on TEXT NOT NULL DEFAULT '[]',
     created_by TEXT NOT NULL DEFAULT '',
@@ -822,6 +825,15 @@ try {
 }
 try {
   db.run("ALTER TABLE roadmap_items ADD COLUMN lock_parked_by TEXT");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
+
+// Nullable with no DEFAULT: "never triaged" is a state of its own, distinct
+// from every role, and a default would claim a triage decision nobody made.
+try {
+  db.run("ALTER TABLE roadmap_items ADD COLUMN triage TEXT");
 } catch (e) {
   const msg = e instanceof Error ? e.message : String(e);
   if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
@@ -1095,6 +1107,52 @@ db.run(`
 `);
 
 db.run(`CREATE INDEX IF NOT EXISTS idx_roadmap_project ON roadmap_items(project_key, status)`);
+
+/**
+ * Promotes the triage vocabulary out of the free-text tag list and into its
+ * column, so one card cannot carry a role twice and disagree with itself.
+ * Deliberately AFTER the trigger definitions above: the promotion IS a content
+ * edit, so it must version the card and mark it dirty, or a replica would keep
+ * a promotion its upstream never learns about.
+ * Idempotent by construction -- it only reads cards that still carry a role
+ * tag, so the second startup matches nothing and writes nothing.
+ * A card carrying several role tags resolves by the order of the role list,
+ * where waiting on a human outranks being ready for anyone.
+ */
+{
+  const triageByPrecedence: readonly string[] = [
+    "needs-info",
+    "needs-triage",
+    "ready-for-human",
+    "ready-for-agent",
+    "wontfix",
+  ];
+  const rows = db
+    .query("SELECT id, tags FROM roadmap_items WHERE triage IS NULL AND tags LIKE '%\"%'")
+    .all() as { id: string; tags: string }[];
+  let promoted = 0;
+  for (const row of rows) {
+    let tags: string[];
+    try {
+      const parsed: unknown = JSON.parse(row.tags);
+      if (!Array.isArray(parsed)) continue;
+      tags = parsed.filter((t): t is string => typeof t === "string");
+    } catch (e) {
+      log.error(`triage migration: unreadable tags on ${row.id}: ${String(e)}`);
+      continue;
+    }
+    const role = triageByPrecedence.find((r) => tags.includes(r));
+    if (role === undefined) continue;
+    const kept = tags.filter((t) => !ROADMAP_TRIAGE_ROLES.includes(t as RoadmapTriage));
+    db.run("UPDATE roadmap_items SET triage = ?, tags = ? WHERE id = ?", [
+      role,
+      JSON.stringify(kept),
+      row.id,
+    ]);
+    promoted += 1;
+  }
+  if (promoted > 0) log.info(`triage migration: promoted ${promoted} card(s) from tag to column`);
+}
 
 /**
  * Single source of truth for the fts5 shadow columns: the virtual table DDL
@@ -2783,7 +2841,9 @@ type RoadmapRow = Omit<
   | "sync_state"
   | "lock_scope"
   | "lock_contested_by"
+  | "triage"
 > & {
+  triage: string | null;
   tags: string;
   depends_on: string;
   locked: number;
@@ -2822,6 +2882,11 @@ function readSyncState(raw: string | null): RoadmapSyncState {
   return raw === "conflict" ? "conflict" : "clean";
 }
 
+/** Same discipline: a hand-edited column reads as untriaged, never as a role. */
+function readTriage(raw: string | null): RoadmapTriage | null {
+  return ROADMAP_TRIAGE_ROLES.includes(raw as RoadmapTriage) ? (raw as RoadmapTriage) : null;
+}
+
 function readLockScope(raw: string | null): RoadmapLockScope | null {
   return ROADMAP_LOCK_SCOPES.includes(raw as RoadmapLockScope) ? (raw as RoadmapLockScope) : null;
 }
@@ -2853,6 +2918,7 @@ function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
     value: row.value,
     effort: row.effort,
     status: row.status,
+    triage: readTriage(row.triage),
     tags: parseList(row.tags),
     depends_on: parseList(row.depends_on),
     created_by: row.created_by,
@@ -3274,6 +3340,7 @@ function handleRoadmapList(
   const prioritiesEff = mergeEnumFilter(body.priority, body.priorities);
   const effortsEff = mergeEnumFilter<RoadmapLevel>(undefined, body.efforts);
   const valuesEff = mergeEnumFilter<RoadmapLevel>(undefined, body.values);
+  const triagesEff = mergeEnumFilter<RoadmapTriage>(undefined, body.triages);
   const tagsEff = mergeEnumFilter(body.tag, body.tags);
 
   if (
@@ -3281,9 +3348,10 @@ function handleRoadmapList(
     invalidValues(statusesEff, ROADMAP_STATUSES) ||
     invalidValues(prioritiesEff, ROADMAP_PRIORITIES) ||
     invalidValues(effortsEff, ROADMAP_LEVELS) ||
-    invalidValues(valuesEff, ROADMAP_LEVELS)
+    invalidValues(valuesEff, ROADMAP_LEVELS) ||
+    invalidValues(triagesEff, ROADMAP_TRIAGE_ROLES)
   ) {
-    return { error: "invalid kind/status/priority/effort/value filter", status: 400 };
+    return { error: "invalid kind/status/priority/effort/value/triage filter", status: 400 };
   }
 
   const includeArchived = !!body.include_archived;
@@ -3363,6 +3431,10 @@ function handleRoadmapList(
     sql += ` AND t.value IN (${valuesEff.map(() => "?").join(", ")})`;
     params.push(...valuesEff);
   }
+  if (triagesEff.length > 0) {
+    sql += ` AND t.triage IN (${triagesEff.map(() => "?").join(", ")})`;
+    params.push(...triagesEff);
+  }
   if (tagsEff.length > 0) {
     // Decision 4: tag lives in SQL (json_each), not a JS post-fetch filter --
     // one predicate engine, so bm25 ordering and every other filter compose
@@ -3406,6 +3478,26 @@ function refusesInactiveQueue(
   return storedInactive && nextQueue != null && nextQueue !== storedQueue;
 }
 
+/**
+ * The one place where the triage vocabulary and the MoSCoW one describe the
+ * same fact: a card nobody will action. They are kept consistent by REFUSING
+ * the contradiction, never by deriving one from the other -- a silent
+ * derivation would move a field the caller did not name, and put in the
+ * replication diff a change no one wrote.
+ * Judged on the RESULTING card, so a patch carrying only one of the two is
+ * still checked against the stored value of the other.
+ * The implication runs ONE way: 'wontfix' demands `wont`, while a `wont` card
+ * that nobody has triaged stays legal -- untriaged is a real state, and the
+ * reverse implication would refuse every pre-existing wont card at its next
+ * edit.
+ */
+function refusesTriageContradiction(
+  nextTriage: RoadmapTriage | null,
+  nextPriority: RoadmapPriority
+): boolean {
+  return nextTriage === "wontfix" && nextPriority !== "wont";
+}
+
 function handleRoadmapUpsert(
   body: RoadmapUpsertRequest
 ): RoadmapUpsertResponse | { error: string; status: number } {
@@ -3420,6 +3512,14 @@ function handleRoadmapUpsert(
     badEnum(body.status, ROADMAP_STATUSES)
   ) {
     return { error: "invalid kind/priority/value/effort/status", status: 400 };
+  }
+  // null is the legal "clear it" value, so it is normalised to undefined before
+  // the enum check the way `directive` is; anything else must be a role.
+  if (badEnum(body.triage ?? undefined, ROADMAP_TRIAGE_ROLES)) {
+    return {
+      error: `invalid triage (${ROADMAP_TRIAGE_ROLES.join("|")})`,
+      status: 400,
+    };
   }
   // Directive card fields (CT1). `directive` may be explicitly cleared (null);
   // any other non-enum value is rejected. target_peer_ids, when present, must be
@@ -3648,6 +3748,10 @@ function handleRoadmapUpsert(
       value: body.value ?? existing.value,
       effort: body.effort ?? existing.effort,
       status: nextStatus,
+      // `triage` in the body always decides, including an explicit null that
+      // sends the card back to untriaged; only its absence keeps the stored
+      // role.
+      triage: body.triage !== undefined ? body.triage : existing.triage,
       tags: cleanList(body.tags) ?? existing.tags,
       depends_on: cleanList(body.depends_on) ?? existing.depends_on,
       directive: nextDirective,
@@ -3657,6 +3761,12 @@ function handleRoadmapUpsert(
       inactive: nextInactive,
     };
     if (!next.title) return { error: "title cannot be empty", status: 400 };
+    if (refusesTriageContradiction(next.triage, next.priority)) {
+      return {
+        error: "triage 'wontfix' contradicts priority -- set priority to 'wont' or pick another triage",
+        status: 400,
+      };
+    }
 
     // Reuses the same lock resolution computed earlier rather than resolving a
     // second time -- two separate reads of the body drifting apart is what
@@ -3691,7 +3801,7 @@ function handleRoadmapUpsert(
     db.run(
       `UPDATE roadmap_items SET
          kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
-         value = ?, effort = ?, status = ?, tags = ?, depends_on = ?, queue = ?,
+         value = ?, effort = ?, status = ?, triage = ?, tags = ?, depends_on = ?, queue = ?,
          directive = ?, target_peer_ids = ?,
          locked = ?, locked_by = ?, locked_group = ?, locked_by_token = ?,
          locked_at = CASE WHEN ? = 0 THEN NULL ELSE COALESCE(?, datetime('now')) END,
@@ -3714,6 +3824,7 @@ function handleRoadmapUpsert(
         next.value,
         next.effort,
         next.status,
+        next.triage,
         JSON.stringify(next.tags),
         JSON.stringify(next.depends_on),
         next.queue,
@@ -3830,14 +3941,23 @@ function handleRoadmapUpsert(
   // RoadmapItem.locked_by_token's doc comment; never derived from `by`).
   const createLockedByToken = createLocked ? (author.instance_token ?? null) : null;
 
+  const createTriage = body.triage ?? null;
+  const createPriority = body.priority ?? "could";
+  if (refusesTriageContradiction(createTriage, createPriority)) {
+    return {
+      error: "triage 'wontfix' contradicts priority -- set priority to 'wont' or pick another triage",
+      status: 400,
+    };
+  }
+
   const id = randomUUID();
   db.run(
     `INSERT INTO roadmap_items
        (id, project_key, kind, title, description, rationale, context, priority, value,
-        effort, status, tags, depends_on, created_by, updated_by,
+        effort, status, triage, tags, depends_on, created_by, updated_by,
         created_at, updated_at, deleted_at, queue, directive, target_peer_ids, locked, locked_by, locked_group,
         locked_by_token, locked_at, operator_id, inactive, lock_parked_at, lock_parked_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?, ?, ?, ?, ?, ?, ?,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'), NULL, ?, ?, ?, ?, ?, ?, ?,
              CASE WHEN ? = 1 THEN datetime('now') ELSE NULL END, ?, ?, NULL, NULL)`,
     [
       id,
@@ -3847,10 +3967,11 @@ function handleRoadmapUpsert(
       body.description ?? "",
       body.rationale ?? "",
       body.context ?? "",
-      body.priority ?? "could",
+      createPriority,
       body.value ?? "medium",
       body.effort ?? "medium",
       createStatus,
+      createTriage,
       JSON.stringify(cleanList(body.tags) ?? []),
       JSON.stringify(cleanList(body.depends_on) ?? []),
       by,
@@ -4644,6 +4765,13 @@ function handleRoadmapImport(body: {
         value: it.value ?? existing?.value ?? "medium",
         effort: it.effort ?? existing?.effort ?? "medium",
         status: nextStatusVal,
+        // Normalised on the way in rather than trusted: the file is an
+        // untrusted input, and a role it invents must land as untriaged, not
+        // as a value the rest of the code switches on.
+        triage:
+          it.triage !== undefined
+            ? readTriage(typeof it.triage === "string" ? it.triage : null)
+            : (existing?.triage ?? null),
         tags: JSON.stringify(
           it.tags !== undefined ? (cleanList(it.tags) ?? []) : (existing?.tags ?? [])
         ),
@@ -5211,6 +5339,7 @@ function rowToSyncRow(row: RoadmapRow): RoadmapSyncRow {
     value: item.value,
     effort: item.effort,
     status: item.status,
+    triage: item.triage,
     tags: item.tags,
     depends_on: item.depends_on,
     created_by: item.created_by,
@@ -5306,6 +5435,16 @@ function validatePushItem(
       it.effort === undefined || it.status === undefined) {
     return { error: "item is missing kind/priority/value/effort/status", status: 400 };
   }
+  if (badEnum(it.triage ?? undefined, ROADMAP_TRIAGE_ROLES)) {
+    return { error: "item has an invalid triage", status: 400 };
+  }
+  // The same invariant the local write paths enforce, applied to the pushed
+  // card: a replica must not be the door through which a self-contradicting
+  // card enters the upstream. An older replica omits the key entirely, which
+  // reads as untriaged and can never contradict anything.
+  if (refusesTriageContradiction((it.triage as RoadmapTriage | undefined) ?? null, it.priority as RoadmapPriority)) {
+    return { error: "item has triage 'wontfix' with a priority that is not 'wont'", status: 400 };
+  }
   if (badEnum(it.directive ?? undefined, DIRECTIVE_COMMANDS)) {
     return { error: "item has an invalid directive", status: 400 };
   }
@@ -5360,6 +5499,9 @@ function validatePushItem(
       value: it.value as RoadmapLevel,
       effort: it.effort as RoadmapLevel,
       status: it.status as RoadmapStatus,
+      // A replica that predates the column omits the key; null is the right
+      // reading, since untriaged is exactly what such a card is.
+      triage: (it.triage as RoadmapTriage | undefined) ?? null,
       tags: cleanList(it.tags) ?? [],
       depends_on: cleanList(it.depends_on) ?? [],
       deleted_at: typeof it.deleted_at === "string" ? it.deleted_at : null,
@@ -5531,14 +5673,14 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
     db.run(
       `UPDATE roadmap_items SET
          kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
-         value = ?, effort = ?, status = ?, tags = ?, depends_on = ?, deleted_at = ?,
+         value = ?, effort = ?, status = ?, triage = ?, tags = ?, depends_on = ?, deleted_at = ?,
          directive = ?, target_peer_ids = ?, inactive = ?,
          queue = CASE WHEN ? = 1 THEN ? ELSE queue END,
          updated_by = ?, updated_at = ?
        WHERE id = ?`,
       [
         item.kind, item.title, item.description, item.rationale, item.context, item.priority,
-        item.value, item.effort, item.status, JSON.stringify(item.tags),
+        item.value, item.effort, item.status, item.triage, JSON.stringify(item.tags),
         JSON.stringify(item.depends_on), item.deleted_at, item.directive,
         JSON.stringify(item.target_peer_ids), item.inactive ? 1 : 0,
         item.queue !== undefined ? 1 : 0, item.queue ?? null,
@@ -5554,12 +5696,12 @@ function handleRoadmapSyncPush(body: RoadmapSyncPushRequest): SyncPushResult {
     db.run(
       `INSERT INTO roadmap_items
          (id, project_key, kind, title, description, rationale, context, priority, value,
-          effort, status, tags, depends_on, created_by, updated_by, created_at, updated_at,
+          effort, status, triage, tags, depends_on, created_by, updated_by, created_at, updated_at,
           deleted_at, queue, directive, target_peer_ids, locked, inactive)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
       [
         item.id, item.project_key, item.kind, item.title, item.description, item.rationale,
-        item.context, item.priority, item.value, item.effort, item.status,
+        item.context, item.priority, item.value, item.effort, item.status, item.triage,
         JSON.stringify(item.tags), JSON.stringify(item.depends_on), item.created_by,
         item.updated_by, item.created_at, item.updated_at, item.deleted_at,
         // A brand-new card has no upstream rank to lose, so an omitted key
@@ -5844,6 +5986,7 @@ function parseSyncRemote(id: string, raw: string | null): RoadmapSyncRow | null 
     value: content.value,
     effort: content.effort,
     status: content.status,
+    triage: content.triage,
     tags: content.tags,
     depends_on: content.depends_on,
     created_by: storedText(record.created_by),
@@ -5944,13 +6087,13 @@ function writeSyncContent(
   db.run(
     `UPDATE roadmap_items SET
        kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
-       value = ?, effort = ?, status = ?, tags = ?, depends_on = ?, deleted_at = ?,
+       value = ?, effort = ?, status = ?, triage = ?, tags = ?, depends_on = ?, deleted_at = ?,
        directive = ?, target_peer_ids = ?, inactive = ?,
        updated_by = ?, updated_at = ?
      WHERE id = ?`,
     [
       content.kind, content.title, content.description, content.rationale, content.context,
-      content.priority, content.value, content.effort, content.status,
+      content.priority, content.value, content.effort, content.status, content.triage,
       JSON.stringify(content.tags), JSON.stringify(content.depends_on), content.deleted_at,
       content.directive, JSON.stringify(content.target_peer_ids), content.inactive ? 1 : 0,
       updatedBy, updatedAt, id,
@@ -6182,16 +6325,16 @@ function applyPulledRow(remote: RoadmapSyncRow): boolean {
     db.run(
       `INSERT INTO roadmap_items
          (id, project_key, kind, title, description, rationale, context, priority, value,
-          effort, status, tags, depends_on, created_by, updated_by, created_at, updated_at,
+          effort, status, triage, tags, depends_on, created_by, updated_by, created_at, updated_at,
           deleted_at, queue, directive, target_peer_ids, inactive,
           locked, locked_by, locked_group, locked_at, lock_scope, lock_contested_by,
           sync_base_rev, sync_base, sync_dirty, sync_state)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                ?, ?, ?, ?, ?, ?, ?, ?, 0, 'clean')`,
       [
         remote.id, remote.project_key, content.kind, content.title, content.description,
         content.rationale, content.context, content.priority, content.value, content.effort,
-        content.status, JSON.stringify(content.tags), JSON.stringify(content.depends_on),
+        content.status, content.triage, JSON.stringify(content.tags), JSON.stringify(content.depends_on),
         createdBy, updatedBy, remote.created_at, remote.updated_at,
         content.deleted_at, remote.queue, content.directive,
         JSON.stringify(content.target_peer_ids), content.inactive ? 1 : 0,

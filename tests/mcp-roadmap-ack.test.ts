@@ -304,6 +304,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
       value: "high",
       effort: "low",
       status: "planned",
+      triage: "ready-for-agent",
       directive: "clear",
       tags: ["t1"], // 1 item
       depends_on: ["11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"], // 2
@@ -317,7 +318,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     // Self-updating coverage: every field in the domain must be named on the
     // "set:" line specifically (not merely somewhere in the whole ack, which
     // would also match a field that silently fell to the "defaults:" line).
-    expect(ROADMAP_ADD_ACK_FIELDS.length).toBe(13);
+    expect(ROADMAP_ADD_ACK_FIELDS.length).toBe(14);
     for (const field of ROADMAP_ADD_ACK_FIELDS) {
       expect(line).toContain(field);
     }
@@ -333,6 +334,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     expect(line).toContain("value -> high");
     expect(line).toContain("effort -> low");
     expect(line).toContain("status -> planned");
+    expect(line).toContain("triage -> ready-for-agent");
     expect(line).toContain("directive -> clear");
     expect(line).toContain("tags -> 1 item(s)");
     expect(line).toContain("depends_on -> 2 item(s)");
@@ -356,6 +358,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
       value: "low",
       effort: "high",
       status: "in_progress", // required for `locked: true` to actually take
+      triage: "needs-info",
       directive: "compact",
       tags: ["t2"], // 1 item
       depends_on: ["33333333-3333-3333-3333-333333333333", "44444444-4444-4444-4444-444444444444"], // 2
@@ -369,7 +372,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     const line = passedFieldsLine(text);
     expect(line).not.toBe("");
 
-    expect(ROADMAP_UPDATE_ACK_FIELDS.length).toBe(16);
+    expect(ROADMAP_UPDATE_ACK_FIELDS.length).toBe(17);
     for (const field of ROADMAP_UPDATE_ACK_FIELDS) {
       expect(line).toContain(field);
     }
@@ -383,6 +386,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     expect(line).toContain("value -> low");
     expect(line).toContain("effort -> high");
     expect(line).toContain("status -> in_progress");
+    expect(line).toContain("triage -> needs-info");
     expect(line).toContain("directive -> compact");
     expect(line).toContain("locked -> true");
     expect(line).toContain("release requested");

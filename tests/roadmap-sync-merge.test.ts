@@ -23,6 +23,7 @@ function content(overrides: Partial<RoadmapSyncContent> = {}): RoadmapSyncConten
     value: "medium",
     effort: "medium",
     status: "planned",
+    triage: null,
     tags: ["a"],
     depends_on: [],
     deleted_at: null,
@@ -33,7 +34,7 @@ function content(overrides: Partial<RoadmapSyncContent> = {}): RoadmapSyncConten
   };
 }
 
-test("pickSyncContent carries exactly the fifteen content fields, and copies the lists", () => {
+test("pickSyncContent carries exactly the sixteen content fields, and copies the lists", () => {
   const source = content({ tags: ["x", "y"] });
   const picked = pickSyncContent(source);
   expect(Object.keys(picked).sort()).toEqual([...ROADMAP_SYNC_CONTENT_FIELDS].sort());

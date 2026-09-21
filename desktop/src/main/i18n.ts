@@ -1058,6 +1058,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'roadmap.sync.field.value': 'Value',
   'roadmap.sync.field.effort': 'Effort',
   'roadmap.sync.field.status': 'Status',
+  'roadmap.sync.field.triage': 'Triage',
   'roadmap.sync.field.tags': 'Tags',
   'roadmap.sync.field.depends_on': 'Dependencies',
   'roadmap.sync.field.deleted_at': 'Deleted at',

@@ -658,6 +658,13 @@ const TOOLS = [
           type: "array" as const,
           items: { type: "string" as const, enum: ["low", "medium", "high"] },
         },
+        triages: {
+          type: "array" as const,
+          items: {
+            type: "string" as const,
+            enum: ["needs-triage", "needs-info", "ready-for-agent", "ready-for-human", "wontfix"],
+          },
+        },
         tags: {
           type: "array" as const,
           items: { type: "string" as const },
@@ -741,6 +748,12 @@ const TOOLS = [
           enum: ["idea", "planned", "in_progress", "done"],
           description: "Default idea.",
         },
+        triage: {
+          type: "string" as const,
+          enum: ["needs-triage", "needs-info", "ready-for-agent", "ready-for-human", "wontfix"],
+          description:
+            "Who the card waits on. ready-for-agent = specified enough to take as written. wontfix requires priority=wont.",
+        },
         tags: { type: "array" as const, items: { type: "string" as const } },
         depends_on: {
           type: "array" as const,
@@ -789,6 +802,11 @@ const TOOLS = [
         status: {
           type: "string" as const,
           enum: ["idea", "planned", "in_progress", "done", "archived"],
+        },
+        triage: {
+          type: "string" as const,
+          enum: ["needs-triage", "needs-info", "ready-for-agent", "ready-for-human", "wontfix"],
+          description: "Triage role. wontfix requires priority=wont.",
         },
         tags: { type: "array" as const, items: { type: "string" as const } },
         depends_on: { type: "array" as const, items: { type: "string" as const } },
@@ -1101,7 +1119,11 @@ export function formatRoadmapItemLine(i: RoadmapItem): string {
   // Card 7defe381 LOT 1: a marker present ONLY when the card is enqueued, so
   // the vast majority of unenqueued cards pay zero extra chars per turn.
   const queueRank = i.queue !== null ? ` queue:${i.queue}` : "";
-  return `[${i.id.slice(0, 8)}] ${i.kind} · ${i.priority} · value:${i.value} effort:${i.effort} · ${i.status}${queueRank}${lock}${alsoHeld}${inactive} — ${i.title}${tags}`;
+  // Same shape as queueRank: an untriaged card pays nothing. Worth its chars on
+  // the others because the role is what tells an agent whether the card is
+  // takeable AS WRITTEN, which no other field on this line answers.
+  const triage = i.triage !== null ? ` triage:${i.triage}` : "";
+  return `[${i.id.slice(0, 8)}] ${i.kind} · ${i.priority} · value:${i.value} effort:${i.effort} · ${i.status}${triage}${queueRank}${lock}${alsoHeld}${inactive} — ${i.title}${tags}`;
 }
 
 /**
@@ -1148,6 +1170,10 @@ function formatRoadmapItemDetail(i: RoadmapItem): string {
       ? `directive: /${i.directive} -> ${i.target_peer_ids.length ? i.target_peer_ids.join(", ") : "(no targets yet)"} (executed by the Deck when dispatched)`
       : "",
     i.depends_on.length ? `depends_on: ${i.depends_on.map((d) => d.slice(0, 8)).join(", ")}` : "",
+    // Spelled out here rather than left to the summary line above: 'ready-for-agent'
+    // is a claim about THIS card being specified enough to execute without asking,
+    // and an agent reading the detail is exactly the caller deciding that.
+    i.triage !== null ? `triage: ${i.triage} (who the card waits on)` : "triage: not triaged yet",
     i.locked ? `locked: by ${i.locked_by} since ${i.locked_at} (actively being worked on)` : "",
     i.inactive ? `inactive: this card is inactive -- do not claim it or move it to in_progress; only an operator-signed write can clear this` : "",
     `created: ${i.created_at} by ${i.created_by}`,
@@ -2007,6 +2033,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         priorities?: string[];
         efforts?: string[];
         values?: string[];
+        triages?: string[];
         tags?: string[];
         q?: string;
         q_deep?: boolean;
@@ -2025,6 +2052,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           priorities: a.priorities,
           efforts: a.efforts,
           values: a.values,
+          triages: a.triages,
           tags: a.tags,
           q: a.q,
           q_deep: a.q_deep,
@@ -2105,6 +2133,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           value: a.value,
           effort: a.effort,
           status: a.status,
+          triage: a.triage,
           tags: a.tags,
           depends_on: a.depends_on,
           directive: a.directive,
@@ -2146,6 +2175,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           value: a.value,
           effort: a.effort,
           status: a.status,
+          triage: a.triage,
           tags: a.tags,
           depends_on: a.depends_on,
           directive: a.directive,

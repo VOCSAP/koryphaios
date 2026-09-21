@@ -244,6 +244,95 @@ test("a card written on the replica reaches the upstream with its rank and its a
   ]);
 });
 
+// The four SQL statements that actually carry a content column across this
+// boundary are strings: the push UPDATE, the push INSERT, the pull's content
+// write and the pull's INSERT. Nothing type-checks them, and a column dropped
+// from one of them leaves the sending side perfectly healthy -- versioned,
+// marked dirty, every unit guard green -- while the value dies in transit.
+// These two tests are the only thing that reads the field on the OTHER broker.
+test("a triage role travels from the replica to its upstream, on a card born here", async () => {
+  const card = await createOn(replica, {
+    by: "agent-local",
+    title: "triaged on the replica",
+    triage: "ready-for-agent",
+  });
+  expect(card.triage).toBe("ready-for-agent");
+  const upstreamCard = await waitForItem(
+    "the role reaches the upstream",
+    upstream,
+    card.id,
+    (i) => i.title === "triaged on the replica" && i.triage === "ready-for-agent"
+  );
+  expect([
+    "a card BORN on a replica keeps its role through its first push",
+    upstreamCard.triage,
+  ]).toEqual(["a card BORN on a replica keeps its role through its first push", "ready-for-agent"]);
+});
+
+test("a triage role set upstream reaches the replica, and a later change follows it", async () => {
+  const card = await createOn(upstream, {
+    by: "agent-upstream",
+    title: "triaged upstream",
+    triage: "needs-info",
+  });
+  const arrived = await waitForItem(
+    "the role reaches the replica",
+    replica,
+    card.id,
+    (i) => i.triage === "needs-info"
+  );
+  expect(arrived.triage).toBe("needs-info");
+
+  // The second half: not the INSERT branch of the pull but its content-write
+  // branch, which is a different SQL statement and would fail separately.
+  await post<UpsertRes>(`${upstream.url}/roadmap/upsert`, {
+    id: card.id,
+    by: "agent-upstream",
+    triage: "ready-for-human",
+  });
+  const updated = await waitForItem(
+    "a role CHANGED upstream reaches the replica",
+    replica,
+    card.id,
+    (i) => i.triage === "ready-for-human"
+  );
+  expect([
+    "an existing card's role is updated by the pull, not only set at insert time",
+    updated.triage,
+  ]).toEqual([
+    "an existing card's role is updated by the pull, not only set at insert time",
+    "ready-for-human",
+  ]);
+});
+
+test("a role changed on the replica travels on a card the upstream ALREADY has", async () => {
+  // The third statement, and the one the two tests above never reach: a card
+  // born upstream exists on both sides, so the replica's push takes its UPDATE
+  // branch instead of its INSERT. Measured: dropping the column from that
+  // single statement leaves both tests above green.
+  const card = await createOn(upstream, {
+    by: "agent-upstream",
+    title: "triaged later from the replica",
+  });
+  await waitForItem("the card reaches the replica first", replica, card.id, (i) => i.title === "triaged later from the replica");
+
+  await post<UpsertRes>(`${replica.url}/roadmap/upsert`, {
+    id: card.id,
+    by: "agent-local",
+    triage: "needs-info",
+  });
+  const pushed = await waitForItem(
+    "the role set on the replica reaches the upstream",
+    upstream,
+    card.id,
+    (i) => i.triage === "needs-info"
+  );
+  expect([
+    "a role set on an ALREADY replicated card is carried by the push UPDATE",
+    pushed.triage,
+  ]).toEqual(["a role set on an ALREADY replicated card is carried by the push UPDATE", "needs-info"]);
+});
+
 test("both sides editing one card yields a conflict the operator resolves three ways", async () => {
   const cards: RoadmapItem[] = [];
   for (const choice of ["remote", "local", "merge_reopen"]) {

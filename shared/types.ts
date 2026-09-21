@@ -360,6 +360,23 @@ export type RoadmapStatus = "idea" | "planned" | "in_progress" | "done" | "archi
  * falls back to `compact` when it is absent (CT4).
  */
 export type RoadmapDirective = "clear" | "compact" | "magic_compact";
+/**
+ * Who the card is waiting on, orthogonal to `status` (where the work stands)
+ * and to `priority` (whether it is worth doing). 'ready-for-agent' is the one
+ * that carries a guarantee: the card is specified enough for an AFK agent to
+ * take it as written.
+ * 'wontfix' is the single role overlapping another field, and the two are held
+ * consistent by refusal, never by derivation -- see refusesTriageContradiction.
+ */
+export const ROADMAP_TRIAGE_ROLES = [
+  "needs-triage",
+  "needs-info",
+  "ready-for-agent",
+  "ready-for-human",
+  "wontfix",
+] as const;
+/** Derived from the list, never written twice: the validator and the type cannot drift apart. */
+export type RoadmapTriage = (typeof ROADMAP_TRIAGE_ROLES)[number];
 
 export interface RoadmapItem {
   /** uuid, immutable. */
@@ -384,6 +401,12 @@ export interface RoadmapItem {
   /** Complexity ("effort" badge). */
   effort: RoadmapLevel;
   status: RoadmapStatus;
+  /**
+   * Triage role, null while the card has never been triaged. A content field:
+   * it replicates and arbitrates like status, so two brokers cannot disagree
+   * on who a card is waiting for.
+   */
+  triage: RoadmapTriage | null;
   tags: string[];
   /** ids of items this one depends on. */
   depends_on: string[];
@@ -517,10 +540,12 @@ export type RoadmapSyncState = "clean" | "conflict";
 export type RoadmapLockScope = "local" | "global" | "contested" | "remote" | "release_pending";
 
 /**
- * The fifteen columns whose divergence between a replica and its upstream IS
+ * The sixteen columns whose divergence between a replica and its upstream IS
  * a conflict. `queue` (upstream wins), the lock columns (own protocol),
  * `updated_by`/`updated_at`/`created_*` (ride along, never decide) and
  * `operator_id` (never crosses) are deliberately absent.
+ * The Deck holds a hand-written copy of this list with no import relation to
+ * this one, so the two are pinned equal by a cross-file guard test.
  */
 export const ROADMAP_SYNC_CONTENT_FIELDS = [
   "kind",
@@ -532,6 +557,7 @@ export const ROADMAP_SYNC_CONTENT_FIELDS = [
   "value",
   "effort",
   "status",
+  "triage",
   "tags",
   "depends_on",
   "deleted_at",
@@ -846,6 +872,7 @@ export const ROADMAP_IMPORT_COLUMNS = [
   "value",
   "effort",
   "status",
+  "triage",
   "tags",
   "depends_on",
   "created_by",
@@ -927,6 +954,7 @@ export type RoadmapUpsertAckField =
   | "value"
   | "effort"
   | "status"
+  | "triage"
   | "directive"
   | "locked"
   | "release"
@@ -957,6 +985,7 @@ export const ROADMAP_UPSERT_ACK_FIELDS: Record<RoadmapUpsertAckField, RoadmapUps
   value: { category: "short", landed: (i) => i.value },
   effort: { category: "short", landed: (i) => i.effort },
   status: { category: "short", landed: (i) => i.status },
+  triage: { category: "short", landed: (i) => i.triage },
   directive: { category: "short", landed: (i) => i.directive },
   locked: { category: "short", landed: (i) => i.locked },
   // `release` is an intention, not a stored column: `locked`/`status`/the
@@ -986,6 +1015,7 @@ export const ROADMAP_ADD_ACK_FIELDS: readonly RoadmapUpsertAckField[] = [
   "value",
   "effort",
   "status",
+  "triage",
   "directive",
   "tags",
   "depends_on",
@@ -1041,6 +1071,8 @@ export interface RoadmapListRequest {
   /** No singular counterpart -- roadmap_list never had one for effort/value. */
   efforts?: RoadmapLevel[];
   values?: RoadmapLevel[];
+  /** Plural only, like efforts/values: a triage role never had a singular filter. */
+  triages?: RoadmapTriage[];
   tags?: string[];
   /**
    * Free-text search over title+description+tags (and, when `q_deep` is
@@ -1113,6 +1145,8 @@ export interface RoadmapUpsertRequest {
   value?: RoadmapLevel;
   effort?: RoadmapLevel;
   status?: RoadmapStatus;
+  /** Triage role; explicit null clears it back to untriaged. */
+  triage?: RoadmapTriage | null;
   tags?: string[];
   depends_on?: string[];
   /**

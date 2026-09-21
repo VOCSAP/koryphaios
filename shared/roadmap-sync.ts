@@ -30,6 +30,7 @@ export function pickSyncContent(item: RoadmapSyncContent): RoadmapSyncContent {
     value: item.value,
     effort: item.effort,
     status: item.status,
+    triage: item.triage,
     tags: [...item.tags],
     depends_on: [...item.depends_on],
     deleted_at: item.deleted_at,

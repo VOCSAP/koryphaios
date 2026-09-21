@@ -505,6 +505,18 @@ export type RoadmapLevel = 'low' | 'medium' | 'high'
 export type RoadmapStatus = 'idea' | 'planned' | 'in_progress' | 'done' | 'archived'
 /** The context/token-economy command a `directive` card runs (CT1, mirror of core). */
 export type RoadmapDirective = 'clear' | 'compact' | 'magic_compact'
+/**
+ * Who the card is waiting on (mirror of core), orthogonal to status and to
+ * priority. 'ready-for-agent' means specified enough for an AFK agent to take
+ * as written; 'wontfix' is held consistent with priority 'wont' by refusal
+ * broker-side, never derived here.
+ */
+export type RoadmapTriage =
+  | 'needs-triage'
+  | 'needs-info'
+  | 'ready-for-agent'
+  | 'ready-for-human'
+  | 'wontfix'
 
 export interface RoadmapItem {
   id: string
@@ -519,6 +531,8 @@ export interface RoadmapItem {
   value: RoadmapLevel
   effort: RoadmapLevel
   status: RoadmapStatus
+  /** Triage role; null while the card has never been triaged. */
+  triage: RoadmapTriage | null
   tags: string[]
   depends_on: string[]
   created_by: string
@@ -599,10 +613,12 @@ export type RoadmapSyncState = 'clean' | 'conflict'
 export type RoadmapLockScope = 'local' | 'global' | 'contested' | 'remote' | 'release_pending'
 
 /**
- * The fifteen columns whose divergence between a replica and its upstream IS
+ * The sixteen columns whose divergence between a replica and its upstream IS
  * a conflict, mirroring the core ROADMAP_SYNC_CONTENT_FIELDS. `queue`, the
  * lock columns, the attribution/timestamp columns and `operator_id` are
  * deliberately absent: they travel with a card without defining its content.
+ * Nothing imports the core list here, so the two are pinned equal by a
+ * cross-file guard test instead of by the compiler.
  */
 export const ROADMAP_SYNC_CONTENT_FIELDS = [
   'kind',
@@ -614,6 +630,7 @@ export const ROADMAP_SYNC_CONTENT_FIELDS = [
   'value',
   'effort',
   'status',
+  'triage',
   'tags',
   'depends_on',
   'deleted_at',

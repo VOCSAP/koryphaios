@@ -835,6 +835,7 @@
   "roadmap.sync.field.value": "Valeur",
   "roadmap.sync.field.effort": "Effort",
   "roadmap.sync.field.status": "Statut",
+  "roadmap.sync.field.triage": "Tri",
   "roadmap.sync.field.tags": "Étiquettes",
   "roadmap.sync.field.depends_on": "Dépendances",
   "roadmap.sync.field.deleted_at": "Supprimée le",

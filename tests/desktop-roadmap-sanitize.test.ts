@@ -179,14 +179,13 @@ test("id and project_key are STRUCTURAL: the item is dropped, not coerced", () =
 });
 
 test("PICK-LIST, not spread: an unknown broker field does not travel through", () => {
-  // RoadmapItem has 30 fields: the 27 of the e344fa79/c33a5968/edefff05
-  // lineage plus the offline-replica trio (sync_state, lock_scope,
-  // lock_contested_by). The pick-list covers all 30 (measured), so the next
-  // one broker-side is the 31st.
-  const item = sanitizeRoadmapItem({ ...wellFormed(), surprise_31st_field: "x" }) as RoadmapItem;
+  // The count is the assertion: the pick-list covers every field of
+  // RoadmapItem, so a key the broker adds without a line here must be absent
+  // from the result rather than reaching the renderer unvalidated.
+  const item = sanitizeRoadmapItem({ ...wellFormed(), surprise_extra_field: "x" }) as RoadmapItem;
   expect(item).not.toBeNull();
-  expect(Object.keys(item)).not.toContain("surprise_31st_field");
-  expect(Object.keys(item)).toHaveLength(30);
+  expect(Object.keys(item)).not.toContain("surprise_extra_field");
+  expect(Object.keys(item)).toHaveLength(31);
 });
 
 test("locked_group survives when the broker sends it, and coerces non-string to null", () => {
@@ -219,6 +218,20 @@ test("a non-string operator_id falls back to undefined", () => {
   expect(withNumber.operator_id).toBeUndefined();
   const withNull = sanitizeRoadmapItem({ ...wellFormed(), operator_id: null }) as RoadmapItem;
   expect(withNull.operator_id).toBeUndefined();
+});
+
+test("a triage role survives, and anything outside the vocabulary reads as untriaged", () => {
+  expect(sanitized({ triage: "ready-for-agent" }).triage).toBe("ready-for-agent");
+  // Untriaged is a real state, so every unusable shape lands there rather than
+  // on a default role the broker never assigned -- a fallback role would put
+  // words in the operator's mouth on a board they arbitrate from.
+  for (const bad of ["Ready-For-Agent", "ready", "", 42, null, ["needs-info"]]) {
+    expect([`triage ${JSON.stringify(bad)} must read as untriaged`, sanitized({ triage: bad }).triage]).toEqual([
+      `triage ${JSON.stringify(bad)} must read as untriaged`,
+      null,
+    ]);
+  }
+  expect(sanitized({}).triage).toBeNull();
 });
 
 // ---------------------------------------------------------------------------

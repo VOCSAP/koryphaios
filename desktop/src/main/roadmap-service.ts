@@ -159,6 +159,13 @@ const PRIORITIES = ['must', 'should', 'could', 'wont'] as const
 const LEVELS = ['low', 'medium', 'high'] as const
 const STATUSES = ['idea', 'planned', 'in_progress', 'done', 'archived'] as const
 const DIRECTIVES = ['clear', 'compact', 'magic_compact'] as const
+const TRIAGE_ROLES = [
+  'needs-triage',
+  'needs-info',
+  'ready-for-agent',
+  'ready-for-human',
+  'wontfix'
+] as const
 const SYNC_STATES = ['clean', 'conflict'] as const
 const LOCK_SCOPES = ['local', 'global', 'contested', 'remote', 'release_pending'] as const
 const SYNC_MODES = ['local', 'upstream', 'replica'] as const
@@ -228,6 +235,9 @@ export function sanitizeRoadmapItem(raw: unknown): RoadmapItem | null {
     value: oneOf(r.value, LEVELS, 'medium'),
     effort: oneOf(r.effort, LEVELS, 'medium'),
     status: oneOf(r.status, STATUSES, 'idea'),
+    // Untriaged is a real state, so an unknown or absent value reads as null
+    // rather than falling back to a role the broker never assigned.
+    triage: enumOrNull(r.triage, TRIAGE_ROLES),
     tags: strList(r.tags),
     depends_on: strList(r.depends_on),
     created_by: str(r.created_by),
@@ -615,6 +625,7 @@ function contentOf(item: RoadmapItem): RoadmapSyncContent {
     value: item.value,
     effort: item.effort,
     status: item.status,
+    triage: item.triage,
     tags: item.tags,
     depends_on: item.depends_on,
     deleted_at: item.deleted_at,
