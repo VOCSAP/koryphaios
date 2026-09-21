@@ -135,3 +135,23 @@ Read only the file/skill matching the area you touch:
   guards, never a comment; a new validator has every call path enumerated and rejects
   `NaN`. Full checklist with precedents: `TESTING.md`, "Reviewing a commit
   and auditing a guard".
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues are disabled on this repo: issues are cards of the shared
+claude-peers roadmap (`roadmap_*` MCP tools), with `BACKLOG.md` as the
+human-readable register of open work. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five default role strings (`needs-triage`, `needs-info`,
+`ready-for-agent`, `ready-for-human`, `wontfix`), carried as card tags until
+card `5d2b95cd` lands them in the card metadata. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` and one `docs/adr/` at the root, both created
+lazily. See `docs/agents/domain.md`.
