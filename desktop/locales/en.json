@@ -945,7 +945,7 @@
   "settings.modelsDetection": "Detected CLIs",
   "settings.modelsDetectionHelp": "A provider is offered in the model pickers only when its CLI is installed. Frontier model lists are curated in the app; local endpoints below are discovered dynamically.",
   "settings.clodexAutoStart": "Start the clodex proxy with Kory",
-  "settings.clodexAutoStartHelp": "Launches `clodex server --proxy` at startup when no server answers, and gives the lease back when the last window closes.",
+  "settings.clodexAutoStartHelp": "Launches `clodex server --proxy` at startup when no server answers, and attempts to give the lease back when Kory closes.",
   "settings.clodexAutoStartAbsent": "clodex is not installed on this machine, so there is no proxy for Kory to start here.",
   "settings.modelsRefresh": "Re-detect CLIs and endpoints",
   "settings.modelsDetected": "detected",

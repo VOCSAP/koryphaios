@@ -159,6 +159,7 @@ import {
 import { startDesignEndpoint, type DesignEndpoint } from './design-endpoint'
 import { createClodexController, type ClodexController } from './clodex-lifecycle-controller'
 import { announceModelsChanged } from './model-registry'
+import { createBeforeQuitHandler } from './before-quit'
 import {
   createClodexControllerDeps,
   releaseBeforeQuit,
@@ -476,8 +477,6 @@ const getDeckPluginDir = (): string => {
 // may be remote/headless: picks are a strictly local loop).
 let designServer: DesignEndpoint | null = null
 
-// Clodex proxy lifecycle, held for the whole run: the window-all-closed handler
-// releases its lease, and only a held controller can be asked to.
 let clodexController: ClodexController | null = null
 
 const ensureClodexController = (): ClodexController => {
@@ -3306,11 +3305,7 @@ app.whenReady().then(async () => {
   await startLoopbackBroker('startup')
   const armed = await armApprovalsAtStartup(approvals)
   journal.add('session', armed ? 'remote approvals armed' : 'remote approvals unavailable')
-  // Clodex proxy: fire-and-forget like the design endpoint above, so neither
-  // the window nor the restored tiles wait on a login-shell probe. One limit of
-  // this wiring: the lease is released when the last window closes, not on an
-  // explicit quit nor on macOS, where the proxy stays up for the next launch to
-  // adopt.
+  // Clodex proxy starts detached so neither the window nor restored tiles wait on a login-shell probe.
   void Promise.resolve()
     .then(() => ensureClodexController().start(getConfig().clodexAutoStart))
     .then((outcome) => {
@@ -3363,45 +3358,52 @@ app.whenReady().then(async () => {
 })
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    workspaces.releaseOnQuit()
-    service.stop()
-    // The lease goes back before the quit, and the quit happens on every
-    // outcome: a release that cannot finish must never leave a running process
-    // with no window left to close it.
-    void releaseBeforeQuit(
+  if (process.platform !== 'darwin') app.quit()
+})
+
+const runBeforeQuit = createBeforeQuitHandler({
+  effects: [
+    // The journal ring buffer lives in memory only: unflushed, the narrative of
+    // this run evaporates with the process.
+    { label: 'journal', run: () => flushJournalSnapshot(app.getPath('logs'), journal.toText()) },
+    { label: 'log', run: () => logInfo('main', 'quitting') },
+    {
+      label: 'timers',
+      run: () => {
+        if (inboxTimer) clearInterval(inboxTimer)
+        if (dispatchTimer) clearInterval(dispatchTimer)
+        if (lockWatchTimer) clearInterval(lockWatchTimer)
+        if (sessionStateKeepaliveTimer) clearInterval(sessionStateKeepaliveTimer)
+      }
+    },
+    { label: 'workspaces', run: () => workspaces.releaseOnQuit() },
+    { label: 'service', run: () => service.stop() },
+    // A stable group id does not make its peers stable, so session-scoped state
+    // dies with the window, ephemeral and custom scopes alike.
+    { label: 'sessionDir', run: () => sessionDir.close() },
+    {
+      label: 'sessionState',
+      run: () => removeSessionStateDir(appStateDir(), activeScope.groupId, reportSessionState)
+    },
+    { label: 'sandbox', run: () => sandbox.stopCurrentDetached() },
+    { label: 'controlServer', run: () => controlServer?.close() },
+    // Dropping the socket is itself the revocation: the phone sees it and shows
+    // "host disconnected".
+    { label: 'companionServer', run: () => void companionServer?.stop(true) },
+    // A stale credential surviving the app would keep raising approvals nobody
+    // applies.
+    { label: 'approvals', run: () => void approvals.disarm() },
+    { label: 'scopeEnv', run: () => activeScopeEnv.cleanup() }
+  ],
+  release: () =>
+    releaseBeforeQuit(
       clodexController,
       RELEASE_DEADLINE_MS,
       (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
       reportError
-    ).finally(() => app.quit())
-  }
+    ),
+  quit: () => app.quit(),
+  onError: reportError
 })
 
-app.on('before-quit', () => {
-  // Persist this run's journal (PLAN O3): the ring buffer is the only
-  // narrative of the run and would otherwise evaporate with the process.
-  flushJournalSnapshot(app.getPath('logs'), journal.toText())
-  logInfo('main', 'quitting')
-  if (inboxTimer) clearInterval(inboxTimer)
-  if (dispatchTimer) clearInterval(dispatchTimer)
-  if (lockWatchTimer) clearInterval(lockWatchTimer)
-  if (sessionStateKeepaliveTimer) clearInterval(sessionStateKeepaliveTimer)
-  workspaces.releaseOnQuit()
-  service.stop()
-  // Session-scoped state dies with the window, ephemeral and custom scopes
-  // alike: the group id may be stable, the peers behind it are not.
-  sessionDir.close()
-  removeSessionStateDir(appStateDir(), activeScope.groupId, reportSessionState)
-  // Persistent by design (docs/sandbox.md): closing the app STOPS the project
-  // container (detached, quit never waits on the engine) — it never removes it.
-  sandbox.stopCurrentDetached()
-  controlServer?.close()
-  // Ephemeral companion mode (MB2): closing the app IS the revocation — the
-  // phone sees the socket drop and shows "host disconnected".
-  void companionServer?.stop(true)
-  // Revoke this window's agent credential and delete its file: a stale
-  // credential surviving the app would keep raising approvals nobody applies.
-  void approvals.disarm()
-  activeScopeEnv.cleanup()
-})
+app.on('before-quit', (event) => runBeforeQuit(() => event.preventDefault()))
