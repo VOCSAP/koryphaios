@@ -8,6 +8,7 @@ import type {
   RoadmapQuery,
   RoadmapStatus
 } from '@shared/types'
+import { ROADMAP_TRIAGE_ROLES } from '@shared/types'
 import { GLYPH_ACTIONS, GLYPH_BADGES } from './icons'
 import { KIND_ICONS } from './RoadmapItemModal'
 import type { TFn } from '../i18n'
@@ -33,6 +34,10 @@ const KINDS: RoadmapKind[] = ['feature', 'bug', 'debt', 'idea', 'chore', 'direct
 const STATUSES: RoadmapStatus[] = ['idea', 'planned', 'in_progress', 'done']
 const PRIORITIES: RoadmapPriority[] = ['must', 'should', 'could', 'wont']
 const LEVELS: RoadmapLevel[] = ['low', 'medium', 'high']
+// A never-triaged card carries NULL, and the broker refuses any `triages` value
+// outside the enum, so an "untriaged" row here would be a checkbox answered
+// with a 400. That population is stated below the rows instead.
+const TRIAGES = ROADMAP_TRIAGE_ROLES
 
 function bucketCount(buckets: RoadmapFacetBucket[] | undefined, value: string): number | null {
   const b = buckets?.find((x) => x.value === value)
@@ -56,6 +61,7 @@ function FilterSection<T extends string>({
   onToggleValue,
   onReset,
   bodyHead,
+  bodyFoot,
   emptyLabel,
   t
 }: {
@@ -75,6 +81,9 @@ function FilterSection<T extends string>({
    *  away too -- a search box for a list that is not on screen is a control
    *  pointing at nothing. */
   bodyHead?: React.ReactNode
+  /** A statement about the rows, never a control: nothing here is clickable,
+   *  because what it describes is not something the operator can select. */
+  bodyFoot?: React.ReactNode
   /** Shown instead of the rows when `values` is empty. A section whose body
    *  can be narrowed needs this: silently rendering nothing reads as a broken
    *  panel, not as "no match". */
@@ -133,6 +142,7 @@ function FilterSection<T extends string>({
               </button>
             )
           })}
+          {bodyFoot}
         </div>
       )}
     </div>
@@ -181,6 +191,18 @@ export function RoadmapFilterPanel({
   // An ACTIVE tag survives the needle. Making a checked box disappear under a
   // text filter is the classic trap of this pattern: the filter stays applied
   // to the board while the only control that undoes it is gone from the panel.
+  // The triage column is the only nullable one, so its five buckets count the
+  // TRIAGED cards alone and whatever the reference set has left has never been
+  // triaged. The subtraction is only sound over the complete role set, so a
+  // dimension that is short of one is not turned into a smaller number, it is
+  // not stated at all. Clamped, because a reference total smaller than the
+  // buckets it was computed with must not print a negative population.
+  const triageIsComplete = facets?.triage.length === TRIAGES.length
+  const untriagedCount =
+    facets && triageIsComplete
+      ? Math.max(0, facets.reference_total - facets.triage.reduce((n, b) => n + b.count, 0))
+      : null
+
   const tagBuckets = (facets?.tags ?? []).filter(
     (b) => !tagNeedle || b.value.toLowerCase().includes(tagNeedle) || activeTags.includes(b.value)
   )
@@ -300,6 +322,25 @@ export function RoadmapFilterPanel({
             onToggleCollapse={() => toggleSection('statuses')}
             onToggleValue={(v) => setCriteria({ ...criteria, statuses: toggled(criteria.statuses, v) })}
             onReset={() => setCriteria({ ...criteria, statuses: undefined })}
+            t={t}
+          />
+          <FilterSection
+            titleKey="roadmap.filter.triage"
+            values={TRIAGES}
+            active={criteria.triages ?? []}
+            buckets={facets?.triage}
+            labelFor={(v) => t(`roadmap.triage.${v}`)}
+            collapsed={!!collapsed.triages}
+            onToggleCollapse={() => toggleSection('triages')}
+            onToggleValue={(v) => setCriteria({ ...criteria, triages: toggled(criteria.triages, v) })}
+            onReset={() => setCriteria({ ...criteria, triages: undefined })}
+            bodyFoot={
+              untriagedCount !== null && (
+                <div className="rm-filter-section-note">
+                  {t('roadmap.filter.untriaged', { count: untriagedCount })}
+                </div>
+              )
+            }
             t={t}
           />
           <FilterSection

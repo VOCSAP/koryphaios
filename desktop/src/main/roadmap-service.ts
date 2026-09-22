@@ -25,9 +25,11 @@ import type {
   RoadmapSyncResolution,
   RoadmapSyncRow,
   RoadmapSyncStatus,
+  RoadmapTriage,
   RoadmapUpsertFields,
   RoadmapUpsertResponse
 } from '../shared/types'
+import { ROADMAP_TRIAGE_ROLES } from '../shared/types'
 
 export { normalizeRemoteUrl }
 
@@ -326,7 +328,15 @@ export async function listRoadmap(
   return sanitizeList(res?.items, '/roadmap/list')
 }
 
-const FACET_DIMENSIONS = ['kind', 'priority', 'effort', 'value', 'status', 'tags'] as const
+const FACET_DIMENSIONS = [
+  'kind',
+  'priority',
+  'effort',
+  'value',
+  'status',
+  'triage',
+  'tags'
+] as const
 
 /**
  * A malformed individual bucket is dropped and traced, but a dimension that
@@ -359,22 +369,59 @@ function sanitizeFacetBucketList(raw: unknown[], dim: string, route: string): Ro
 }
 
 /**
+ * The triage dimension answers a question the other six do not: how many cards
+ * carry NO role. That number exists nowhere on the wire -- the panel gets it by
+ * subtracting these counts from `reference_total` -- so it is wrong the instant
+ * the dimension is incomplete, and wrong in the direction that INVENTS
+ * untriaged cards. Dropping a bad bucket the way the tolerant path does would
+ * therefore put a figure on screen that nothing measured, which is why this one
+ * dimension is all-or-nothing: the five roles, once each, counted by a
+ * non-negative whole number, or no facets at all.
+ */
+function strictTriageFacet(raw: unknown[]): RoadmapFacetBucket[] | null {
+  const seen = new Set<string>()
+  const out: RoadmapFacetBucket[] = []
+  for (const bucket of raw) {
+    if (!bucket || typeof bucket !== 'object' || Array.isArray(bucket)) return null
+    const b = bucket as Record<string, unknown>
+    if (typeof b.value !== 'string') return null
+    if (!ROADMAP_TRIAGE_ROLES.includes(b.value as RoadmapTriage)) return null
+    if (seen.has(b.value)) return null
+    if (typeof b.count !== 'number' || !Number.isInteger(b.count) || b.count < 0) return null
+    seen.add(b.value)
+    out.push({ value: b.value, count: b.count })
+  }
+  return seen.size === ROADMAP_TRIAGE_ROLES.length ? out : null
+}
+
+/**
  * Returns null rather than a partially-filled object: RoadmapFacets is nullable
  * exactly to distinguish an older broker that omits counters from a real
  * zero-count bucket.
- * Every one of the six dimensions must be a real array or the whole payload is
+ * Every one of the seven dimensions must be a real array or the whole payload is
  * rejected and traced — a single broken dimension must not report a false
- * all-zero facet set.
+ * all-zero facet set. `reference_total` is a row count, so a fractional or
+ * negative one is a broker nobody should believe: it is the minuend of the
+ * untriaged subtraction and would carry its own nonsense onto the screen.
  */
 export function sanitizeFacets(raw: unknown, route = '/roadmap/list (search)'): RoadmapFacets | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
   const r = raw as Record<string, unknown>
-  if (typeof r.reference_total !== 'number' || !Number.isFinite(r.reference_total)) return null
+  if (typeof r.reference_total !== 'number') return null
+  if (!Number.isInteger(r.reference_total) || r.reference_total < 0) return null
   for (const dim of FACET_DIMENSIONS) {
     if (!Array.isArray(r[dim])) {
       reportError('roadmap', `${route}: facets.${dim} was not an array; rejecting whole facets payload`)
       return null
     }
+  }
+  const triage = strictTriageFacet(r.triage as unknown[])
+  if (!triage) {
+    reportError(
+      'roadmap',
+      `${route}: facets.triage is not the five roles counted once each; rejecting whole facets payload`
+    )
+    return null
   }
   return {
     kind: sanitizeFacetBucketList(r.kind as unknown[], 'kind', route),
@@ -382,6 +429,7 @@ export function sanitizeFacets(raw: unknown, route = '/roadmap/list (search)'): 
     effort: sanitizeFacetBucketList(r.effort as unknown[], 'effort', route),
     value: sanitizeFacetBucketList(r.value as unknown[], 'value', route),
     status: sanitizeFacetBucketList(r.status as unknown[], 'status', route),
+    triage,
     tags: sanitizeFacetBucketList(r.tags as unknown[], 'tags', route),
     reference_total: r.reference_total
   }

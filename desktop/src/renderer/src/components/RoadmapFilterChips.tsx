@@ -18,22 +18,29 @@ interface Chip {
   onRemove: () => void
 }
 
-const ARRAY_KEYS = ['kinds', 'statuses', 'priorities', 'efforts', 'values', 'tags'] as const
+const ARRAY_KEYS = [
+  'kinds',
+  'statuses',
+  'triages',
+  'priorities',
+  'efforts',
+  'values',
+  'tags'
+] as const
 
 function removeFromArray<T extends string>(list: T[] | undefined, v: T): T[] | undefined {
   const next = (list ?? []).filter((x) => x !== v)
   return next.length > 0 ? next : undefined
 }
 
-// Dimension-prefixed label for each array key: efforts/values otherwise both
-// render bare `t('roadmap.level.<v>')` ('high'/'high'), two chips reading
-// identically with no way to tell which one a click would remove (review
-// round 2, point 7). kinds/statuses/priorities are unambiguous on their own
-// (their value sets never collide) but get the same prefix treatment for
-// consistency rather than special-casing tags/kinds out of it.
+// Every chip is prefixed by its dimension because efforts and values share the
+// same three level names: unprefixed, two chips would read 'high'/'high' with
+// nothing saying which one a click removes. The dimensions whose values never
+// collide are prefixed too, rather than carving out exceptions.
 const DIMENSION_LABEL: Record<(typeof ARRAY_KEYS)[number], string> = {
   kinds: 'roadmap.filter.kind',
   statuses: 'roadmap.filter.status',
+  triages: 'roadmap.filter.triage',
   priorities: 'roadmap.filter.priority',
   efforts: 'roadmap.filter.effort',
   values: 'roadmap.filter.value',
@@ -43,6 +50,7 @@ const DIMENSION_LABEL: Record<(typeof ARRAY_KEYS)[number], string> = {
 const VALUE_KEY: Record<(typeof ARRAY_KEYS)[number], string> = {
   kinds: 'roadmap.kind',
   statuses: 'roadmap.status',
+  triages: 'roadmap.triage',
   priorities: 'roadmap.priority',
   efforts: 'roadmap.level',
   values: 'roadmap.level',

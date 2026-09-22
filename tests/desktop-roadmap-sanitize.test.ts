@@ -323,12 +323,25 @@ test("an UNUSABLE item makes a single-item response THROW but only shrinks a lis
 });
 
 // ---------------------------------------------------------------------------
-// 5. sanitizeFacets (review round 2, point 2): a malformed dimension must
-//    reject the WHOLE payload, never degrade one dimension to `[]` while
-//    the other five look fine -- that silent partial object is
-//    indistinguishable from "this project has zero of every kind", the
-//    exact false-empty the filter panel cannot recover from on its own.
+// 5. sanitizeFacets. A malformed dimension rejects the WHOLE payload rather
+//    than degrading to `[]`, which would be indistinguishable from "this
+//    project has zero of every kind". The triage dimension is stricter still:
+//    the panel derives the untriaged population by subtracting its counts from
+//    reference_total, so anything short of the exact five roles makes that
+//    subtraction produce a number nothing measured.
 // ---------------------------------------------------------------------------
+
+const TRIAGE_ROLES = [
+  "needs-triage",
+  "needs-info",
+  "ready-for-agent",
+  "ready-for-human",
+  "wontfix"
+] as const;
+
+function triageBuckets(): Array<{ value: string; count: number }> {
+  return TRIAGE_ROLES.map((value) => ({ value, count: value === "ready-for-agent" ? 2 : 0 }));
+}
 
 function wellFormedFacets(): Record<string, unknown> {
   return {
@@ -337,9 +350,15 @@ function wellFormedFacets(): Record<string, unknown> {
     effort: [{ value: "low", count: 2 }],
     value: [{ value: "high", count: 1 }],
     status: [{ value: "planned", count: 4 }],
+    triage: triageBuckets(),
     tags: [{ value: "urgent", count: 1 }],
     reference_total: 12
   };
+}
+
+/** Replaces the triage dimension, the only one with an all-or-nothing rule. */
+function withTriage(buckets: unknown): Record<string, unknown> {
+  return { ...wellFormedFacets(), triage: buckets };
 }
 
 test("a well-formed facets payload survives unchanged", () => {
@@ -350,17 +369,26 @@ test("a well-formed facets payload survives unchanged", () => {
     effort: [{ value: "low", count: 2 }],
     value: [{ value: "high", count: 1 }],
     status: [{ value: "planned", count: 4 }],
+    triage: triageBuckets(),
     tags: [{ value: "urgent", count: 1 }],
     reference_total: 12
   });
 });
 
+test("a broker that never heard of triage costs the panel every counter, not a false zero", () => {
+  const { triage: _absent, ...older } = wellFormedFacets();
+  expect(
+    sanitizeFacets(older),
+    "an absent dimension read as empty would put the whole project on screen as never triaged"
+  ).toBeNull();
+});
+
 test("ONE malformed dimension rejects the WHOLE facets payload, not just that dimension", () => {
   const broken = { ...wellFormedFacets(), kind: "not-an-array" };
-  // Measured regression: before the fix this returned a valid-looking object
-  // with `kind: []`, reading as "zero features" instead of "broker sent
-  // garbage" -- both other dimensions being fine does not save it.
-  expect(sanitizeFacets(broken)).toBeNull();
+  expect(
+    sanitizeFacets(broken),
+    "degrading to kind:[] would read as 'zero features' instead of 'the broker sent garbage'"
+  ).toBeNull();
 });
 
 test("a malformed INDIVIDUAL bucket is dropped from its dimension, not the whole payload", () => {
@@ -369,12 +397,67 @@ test("a malformed INDIVIDUAL bucket is dropped from its dimension, not the whole
     kind: [{ value: "feature", count: 3 }, { value: 42, count: "nope" }, { count: 1 }]
   };
   const facets = sanitizeFacets(partial);
-  expect(facets).not.toBeNull();
-  // The two malformed buckets are dropped; the well-formed one and every
-  // OTHER dimension survive -- this is the case that must NOT reject the
-  // whole payload, distinguishing it from the test above.
+  expect(facets, "a bad bucket in a tolerant dimension must not cost the payload").not.toBeNull();
   expect(facets!.kind).toEqual([{ value: "feature", count: 3 }]);
   expect(facets!.priority).toEqual([{ value: "must", count: 1 }]);
+});
+
+test("a triage dimension missing one role rejects the whole payload", () => {
+  const short = triageBuckets().filter((b) => b.value !== "wontfix");
+  expect(
+    sanitizeFacets(withTriage(short)),
+    "four buckets summed against a five-role total invents untriaged cards"
+  ).toBeNull();
+});
+
+test("a duplicated triage bucket rejects the whole payload", () => {
+  const doubled = [...triageBuckets(), { value: "ready-for-agent", count: 2 }];
+  expect(
+    sanitizeFacets(withTriage(doubled)),
+    "a doubled bucket both inflates the sum and makes the role's own counter ambiguous"
+  ).toBeNull();
+});
+
+test("a triage bucket naming an unknown role rejects the whole payload", () => {
+  // Substituted for a canonical role, never appended: appending makes it six
+  // buckets, and cardinality alone would then do the refusing, leaving the
+  // enum check itself covered by nothing.
+  const alien = triageBuckets().map((b) =>
+    b.value === "wontfix" ? { value: "needs-coffee", count: b.count } : b
+  );
+  expect(alien, "the payload must stay five unique buckets, or this tests cardinality").toHaveLength(
+    5
+  );
+  expect(
+    sanitizeFacets(withTriage(alien)),
+    "a role this Deck cannot render still counts cards, so the remainder it leaves is wrong"
+  ).toBeNull();
+});
+
+test("a fractional or negative triage count rejects the whole payload", () => {
+  const fractional = triageBuckets().map((b) =>
+    b.value === "needs-info" ? { ...b, count: 1.5 } : b
+  );
+  expect(
+    sanitizeFacets(withTriage(fractional)),
+    "cards are whole: a fractional count would print a fractional untriaged population"
+  ).toBeNull();
+
+  const negative = triageBuckets().map((b) =>
+    b.value === "needs-info" ? { ...b, count: -3 } : b
+  );
+  expect(
+    sanitizeFacets(withTriage(negative)),
+    "a negative count passes Number.isFinite and would inflate the remainder"
+  ).toBeNull();
+});
+
+test("a fractional or negative reference_total rejects the whole payload", () => {
+  expect(
+    sanitizeFacets({ ...wellFormedFacets(), reference_total: 12.5 }),
+    "reference_total is a row count and the minuend of the untriaged subtraction"
+  ).toBeNull();
+  expect(sanitizeFacets({ ...wellFormedFacets(), reference_total: -1 })).toBeNull();
 });
 
 // ---------------------------------------------------------------------------

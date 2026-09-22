@@ -511,12 +511,15 @@ export type RoadmapDirective = 'clear' | 'compact' | 'magic_compact'
  * as written; 'wontfix' is held consistent with priority 'wont' by refusal
  * broker-side, never derived here.
  */
-export type RoadmapTriage =
-  | 'needs-triage'
-  | 'needs-info'
-  | 'ready-for-agent'
-  | 'ready-for-human'
-  | 'wontfix'
+export const ROADMAP_TRIAGE_ROLES = [
+  'needs-triage',
+  'needs-info',
+  'ready-for-agent',
+  'ready-for-human',
+  'wontfix'
+] as const
+/** Derived from the list, never written twice: the validator and the type cannot drift apart. */
+export type RoadmapTriage = (typeof ROADMAP_TRIAGE_ROLES)[number]
 
 export interface RoadmapItem {
   id: string
@@ -781,6 +784,8 @@ export interface RoadmapUpsertFields {
   value?: RoadmapLevel
   effort?: RoadmapLevel
   status?: RoadmapStatus
+  /** Triage role; explicit null clears it back to untriaged. */
+  triage?: RoadmapTriage | null
   tags?: string[]
   depends_on?: string[]
   /** kind 'directive' (CT1): the command to inject (required when kind='directive'). */
@@ -1006,6 +1011,7 @@ export interface RoadmapQuery {
   priorities?: RoadmapPriority[]
   efforts?: RoadmapLevel[]
   values?: RoadmapLevel[]
+  triages?: RoadmapTriage[]
   tags?: string[]
   q?: string
   q_deep?: boolean
@@ -1030,6 +1036,13 @@ export interface RoadmapFacets {
   effort: RoadmapFacetBucket[]
   value: RoadmapFacetBucket[]
   status: RoadmapFacetBucket[]
+  /**
+   * The only dimension whose column is NULLABLE: a never-triaged card lands in
+   * no bucket, so these five counts sum to LESS than `reference_total` and the
+   * difference is the untriaged population. Not a bucket, because the broker
+   * refuses a `triages` value outside the enum.
+   */
+  triage: RoadmapFacetBucket[]
   tags: RoadmapFacetBucket[]
   reference_total: number
 }

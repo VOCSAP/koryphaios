@@ -3323,6 +3323,10 @@ function computeRoadmapFacets(projectKey: string, includeArchived: boolean): Roa
     effort: fixedFacet("effort", ROADMAP_LEVELS),
     value: fixedFacet("value", ROADMAP_LEVELS),
     status: fixedFacet("status", ROADMAP_STATUSES),
+    // GROUP BY triage also produces a NULL group; `fixedFacet`'s lookup keeps
+    // only the five enum values, so never-triaged cards are counted in
+    // `reference_total` and in no bucket. The UI reads the difference.
+    triage: fixedFacet("triage", ROADMAP_TRIAGE_ROLES),
     tags,
     reference_total: referenceTotal,
   };

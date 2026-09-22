@@ -1099,7 +1099,7 @@ export interface RoadmapFacetBucket {
 /**
  * Flat (non drill-down) counts over the project's reference set: this
  * project's items after `include_archived` alone, nothing else. Fixed-enum
- * dimensions (kind/priority/effort/value/status) always list every enum
+ * dimensions (kind/priority/effort/value/status/triage) always list every enum
  * value, zero-count buckets included; `tags` is dynamic and lists only tags
  * that occur at least once.
  */
@@ -1109,6 +1109,15 @@ export interface RoadmapFacets {
   effort: RoadmapFacetBucket[];
   value: RoadmapFacetBucket[];
   status: RoadmapFacetBucket[];
+  /**
+   * The only NULLABLE column of the six: a never-triaged card carries no role
+   * and therefore lands in NO bucket. The five counts consequently sum to less
+   * than `reference_total`, and the difference IS the untriaged population --
+   * deliberately not a bucket of its own, because `/roadmap/list` refuses any
+   * `triages` value outside the enum, so a selectable "untriaged" row would be
+   * a control the broker answers with a 400.
+   */
+  triage: RoadmapFacetBucket[];
   tags: RoadmapFacetBucket[];
   /** Size of the reference set the counts above were computed over. */
   reference_total: number;

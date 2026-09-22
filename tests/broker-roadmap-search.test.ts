@@ -265,6 +265,46 @@ test("with_facets computes flat counts over the include_archived-only reference 
   expect(facets.tags.find((b) => b.value === "beta")!.count).toBe(1);
 });
 
+test("triage is a fixed-enum facet dimension whose buckets never cover the untriaged population", async () => {
+  const pk = "github.com/vocsap/roadmap-search-facets-triage";
+  async function addTo(fields: Record<string, unknown>): Promise<RoadmapItem> {
+    const res = await post<{ item: RoadmapItem }>(`${broker.url}/roadmap/upsert`, {
+      project_key: pk,
+      by: "test-peer",
+      ...fields,
+    });
+    expect(res.status).toBe(200);
+    return res.body.item;
+  }
+  await addTo({ title: "triaged agent-ready", kind: "feature", triage: "ready-for-agent" });
+  await addTo({ title: "triaged twin", kind: "feature", triage: "ready-for-agent" });
+  await addTo({ title: "never triaged", kind: "bug" });
+
+  const res = await post<RoadmapListResponse>(`${broker.url}/roadmap/list`, {
+    project_key: pk,
+    with_facets: true,
+  });
+  expect(res.status).toBe(200);
+  const facets = res.body.facets!;
+
+  const triageValues = facets.triage.map((b) => b.value).sort();
+  expect(
+    triageValues,
+    "a fixed-enum dimension emits every role, so a zero-count one is still a bucket",
+  ).toEqual(
+    ["needs-triage", "needs-info", "ready-for-agent", "ready-for-human", "wontfix"].sort(),
+  );
+  expect(facets.triage.find((b) => b.value === "ready-for-agent")!.count).toBe(2);
+  expect(facets.triage.find((b) => b.value === "needs-triage")!.count).toBe(0);
+
+  const triageTotal = facets.triage.reduce((n, b) => n + b.count, 0);
+  expect(facets.reference_total).toBe(3);
+  expect(
+    triageTotal,
+    "the never-triaged card is counted in the reference total and in no bucket, and that gap is the only place the Deck can read it",
+  ).toBe(2);
+});
+
 test("with_facets + include_archived:true widens the reference set the facets are computed over", async () => {
   const pk = "github.com/vocsap/roadmap-search-facets-archived";
   const res1 = await post<{ item: RoadmapItem }>(`${broker.url}/roadmap/upsert`, {

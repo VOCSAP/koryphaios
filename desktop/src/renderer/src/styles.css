@@ -2847,8 +2847,12 @@ svg.glyph {
 }
 
 /* A section narrowed to nothing says so. Rendering an empty body reads as a
-   panel that broke, not as a query that matched nothing. */
-.rm-filter-section-empty {
+   panel that broke, not as a query that matched nothing.
+   The note shares the recipe under its own name: it states a population the
+   rows above do NOT account for (the untriaged cards), so it must not read as
+   a row -- dimmer than a label, no checkbox, no hover, nothing to click. */
+.rm-filter-section-empty,
+.rm-filter-section-note {
   padding: 4px 2px 6px;
   color: var(--fg-dim);
   font-size: 11px;
@@ -3451,6 +3455,11 @@ svg.glyph {
 .rm-badge-effort-low { color: #3ec46d; border-color: color-mix(in srgb, #3ec46d 50%, transparent); }
 .rm-badge-status-in_progress { color: #e0b341; border-color: color-mix(in srgb, #e0b341 50%, transparent); }
 .rm-badge-status-done { color: #3ec46d; border-color: color-mix(in srgb, #3ec46d 50%, transparent); }
+/* Only the "go" role gets a colour, the same green as value-high/status-done:
+   ready-for-agent is the one triage state that changes what an operator does
+   (dispatch without rereading). The other four stay the default dim pill --
+   worth reading, not worth competing with priority/status for attention. */
+.rm-badge-triage-ready-for-agent { color: #3ec46d; border-color: color-mix(in srgb, #3ec46d 50%, transparent); }
 .rm-badge-tag { color: var(--accent); }
 
 /* Short item id, first in both badge rows (kanban card + detail modal): the

@@ -30,6 +30,7 @@ export function hasActiveCriteria(c: RoadmapQuery): boolean {
       c.priorities?.length ||
       c.efforts?.length ||
       c.values?.length ||
+      c.triages?.length ||
       c.tags?.length ||
       (c.q && c.q.trim() !== '')
   )
@@ -104,13 +105,27 @@ export function useRoadmapData(options: UseRoadmapDataOptions = {}): RoadmapData
       setBoard(all)
       return
     }
+    // clearTimeout only unmakes a debounce that has not fired yet. Once the
+    // request is in flight nothing cancels it, so without this flag its
+    // response would land on a board the operator has since changed -- clearing
+    // the last criterion puts the filtered list straight back. Both outcomes of
+    // a superseded run are dropped, the rejection too: the hook abandoned that
+    // request, so its failure is not the operator's to read.
+    let superseded = false
     const timer = setTimeout(() => {
       void window.api
         .roadmapSearch({ include_archived: includeArchived, ...criteria })
-        .then((res) => setBoard(res.items))
-        .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+        .then((res) => {
+          if (!superseded) setBoard(res.items)
+        })
+        .catch((e) => {
+          if (!superseded) setError(e instanceof Error ? e.message : String(e))
+        })
     }, DEBOUNCE_MS)
-    return () => clearTimeout(timer)
+    return () => {
+      superseded = true
+      clearTimeout(timer)
+    }
   }, [active, criteria, includeArchived, all])
 
   return {
