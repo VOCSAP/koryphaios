@@ -38,7 +38,11 @@ import {
   type GraphDraftScopeDeps,
   type GraphDraftPeerRow,
 } from "./shared/graph-draft-scope.ts";
-import { planRoadmapAppendText, ROADMAP_APPEND_RESULT_MAX_CHARS } from "./shared/roadmap-append.ts";
+import {
+  createSqliteRoadmapContextAppendCasStore,
+  mapRoadmapContextAppendFailure,
+  runRoadmapContextAppendCas,
+} from "./shared/roadmap-append-cas.ts";
 import { isValidQueueRank } from "./shared/roadmap-queue.ts";
 import {
   contentEquals,
@@ -4236,18 +4240,7 @@ function handleRoadmapLockRelease(
   return { released, failed };
 }
 
-/**
- * Single UPDATE statement, no SELECT-then-UPDATE: a prior read would
- * reintroduce the destructive read-modify-write this route removes, and would
- * let two concurrent appends silently overwrite each other.
- * COALESCE on the column matters because SQLite's NULL concatenation evaluates
- * to NULL, which would otherwise wipe a NULL value instead of appending to it.
- * updated_at is deliberately not touched -- it is an arbitration field the lock
- * sweep keys its TTL off, so touching it here would let a third party's note
- * silently extend another agent's lock.
- * No inactive guard (card c33a5968): this handler only ever touches context
- * and operator_id, never status or locked, so it cannot claim a card.
- */
+// Card c33a5968: append-context changes no work state, so an inactive card remains eligible.
 function handleRoadmapContextAppend(
   body: RoadmapContextAppendRequest
 ): RoadmapContextAppendResponse | { error: string; status: number } {
@@ -4262,49 +4255,23 @@ function handleRoadmapContextAppend(
     return { error: "text is required", status: 400 };
   }
 
-  // Pre-refuse cheaply (delimiter, per-call cap) with the SAME numbers the
-  // WHERE clause below re-derives for the result cap -- shared/roadmap-append.ts
-  // is the single source of truth for both, see its own header comment.
-  const nowIso = new Date().toISOString();
-  const textPlan = planRoadmapAppendText({ text: body.text, author: by, nowIso });
-  if (!textPlan.ok) {
-    return { error: textPlan.message, status: 400 };
+  const supersedes = body.supersedes;
+  if (supersedes !== undefined && (!Array.isArray(supersedes) || supersedes.some((target) => typeof target !== "string"))) {
+    return { error: "supersedes must be an array of target strings", status: 400 };
   }
 
-  // Card 562fd9b5 review delta: SET touches `context` ONLY (plus, since card
-  // edefff05, `operator_id` -- see the long comment above for why that
-  // addition does not reopen the lock-TTL hazard). `updated_by`/`updated_at`
-  // are deliberately left alone.
-  const res = db.run(
-    `UPDATE roadmap_items
-        SET context = COALESCE(context,'') || ?,
-            operator_id = COALESCE(?, operator_id)
-      WHERE id = ? AND length(COALESCE(context,'')) + length(?) <= ?`,
-    [
-      textPlan.appended,
-      author.operator_id ?? null,
-      body.id,
-      textPlan.appended,
-      ROADMAP_APPEND_RESULT_MAX_CHARS,
-    ]
-  );
-
-  if (res.changes === 0) {
-    // Existence check AFTER the failed write, not before it: distinguishes
-    // 404 (no such card) from 409 (cap exceeded) without ever informing
-    // what got written above.
-    const existing = getRoadmapItem(body.id);
-    if (!existing) return { error: "unknown roadmap item", status: 404 };
-    return {
-      error:
-        `append would push context over the ${ROADMAP_APPEND_RESULT_MAX_CHARS}-char cap -- ` +
-        `compact the context first via roadmap_update (if that tool is available to you), ` +
-        `\`bun cli.ts roadmap-import --force\` with a trimmed context, or ask the team lead`,
-      status: 409,
-    };
-  }
-
-  return { item: getRoadmapItem(body.id)! };
+  // The CAS store leaves updated_at untouched because lock TTL arbitration reads it.
+  const result = runRoadmapContextAppendCas({
+    id: body.id,
+    author: by,
+    text: body.text,
+    supersedes,
+    operatorId: author.operator_id ?? null,
+    now: () => new Date().toISOString(),
+    store: createSqliteRoadmapContextAppendCasStore(db),
+  });
+  if (result.ok) return { item: getRoadmapItem(body.id)! };
+  return mapRoadmapContextAppendFailure(result, getRoadmapItem(body.id) !== null);
 }
 
 // Workflow lane reorder: hard cap on the queue size a single rewrite may

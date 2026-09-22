@@ -1,8 +1,3 @@
-// Pure, deterministic module (no I/O, no Date.now()) so the MCP tool can
-// pre-refuse with the same numbers the broker enforces, without a round trip.
-
-export const ROADMAP_APPEND_PER_CALL_MAX_CHARS = 4000;
-
 /**
  * Cap on the resulting context length in characters, not bytes -- SQLite's
  * length() counts characters here; switching to a byte count would silently
@@ -19,26 +14,192 @@ export const ROADMAP_APPEND_RESULT_MAX_CHARS = 16000;
  */
 export const ROADMAP_APPEND_HEADER_OPEN = "<<<";
 export const ROADMAP_APPEND_HEADER_CLOSE = ">>>";
+export const ROADMAP_APPEND_BODY_TARGET = "body";
 
-/**
- * Attribution, not a signature: records who claimed the append, proven or not,
- * same as created_by/updated_by elsewhere.
- * Append is not idempotent -- a retried call after a timeout duplicates the
- * block -- so the timestamp is what makes that duplicate visible when the card
- * is read back.
- */
+const ROADMAP_APPEND_TIMESTAMP_PATTERN = "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z";
+const ROADMAP_APPEND_TARGET_PATTERN = `(?:${ROADMAP_APPEND_BODY_TARGET}|${ROADMAP_APPEND_TIMESTAMP_PATTERN})`;
+const ROADMAP_APPEND_HEADER_LINE_RE = new RegExp(
+  `^${ROADMAP_APPEND_HEADER_OPEN} append (${ROADMAP_APPEND_TIMESTAMP_PATTERN}) by ([a-z0-9:_-]+)(?: supersedes (${ROADMAP_APPEND_TARGET_PATTERN}(?:, ${ROADMAP_APPEND_TARGET_PATTERN})*))? ${ROADMAP_APPEND_HEADER_CLOSE}$`,
+  "gm",
+);
+
+export type RoadmapContextUnit =
+  | {
+      kind: "body";
+      target: typeof ROADMAP_APPEND_BODY_TARGET;
+      timestamp: null;
+      author: null;
+      supersedes: readonly string[];
+      raw: string;
+      length: number;
+    }
+  | {
+      kind: "append";
+      target: string;
+      timestamp: string;
+      author: string;
+      supersedes: readonly string[];
+      raw: string;
+      length: number;
+    };
+
+export type RoadmapSupersedeTargetErrorCode =
+  | "supersede_target_duplicate"
+  | "supersede_target_missing"
+  | "supersede_target_ambiguous";
+
+export type RoadmapSupersedeTargetValidation =
+  | { ok: true; targets: string[] }
+  | {
+      ok: false;
+      code: RoadmapSupersedeTargetErrorCode;
+      message: string;
+    };
+
 export function buildRoadmapAppendHeader(nowIso: string, author: string): string {
-  return `\n${ROADMAP_APPEND_HEADER_OPEN} append ${nowIso} by ${author} ${ROADMAP_APPEND_HEADER_CLOSE}\n`;
+  if (arguments.length > 2) {
+    throw new Error("supersession targets require planRoadmapContextAppend");
+  }
+  return buildValidatedRoadmapAppendHeader(nowIso, author, []);
 }
 
-export type RoadmapAppendTextErrorCode = "empty" | "too_long_single" | "contains_delimiter";
-export type RoadmapContextAppendErrorCode = RoadmapAppendTextErrorCode | "too_long_result";
+function buildValidatedRoadmapAppendHeader(nowIso: string, author: string, targets: readonly string[]): string {
+  const clause = targets.length === 0 ? "" : ` supersedes ${targets.join(", ")}`;
+  return `\n${ROADMAP_APPEND_HEADER_OPEN} append ${nowIso} by ${author}${clause} ${ROADMAP_APPEND_HEADER_CLOSE}\n`;
+}
+
+export function normalizeRoadmapSupersedeTargets(targets: readonly string[]): string[] {
+  return [...targets].sort((left, right) => {
+    if (left === ROADMAP_APPEND_BODY_TARGET) return right === ROADMAP_APPEND_BODY_TARGET ? 0 : -1;
+    if (right === ROADMAP_APPEND_BODY_TARGET) return 1;
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+}
+
+export function getUniqueRoadmapAppendTimestamp(context: string, nowIso: string): string {
+  const targets = new Set(
+    parseRoadmapContext(context)
+      .filter((unit) => unit.kind === "append")
+      .map((unit) => unit.target),
+  );
+  const timestamp = new Date(nowIso);
+  while (targets.has(timestamp.toISOString())) timestamp.setTime(timestamp.getTime() + 1);
+  return timestamp.toISOString();
+}
+
+export function parseRoadmapContext(context: string): RoadmapContextUnit[] {
+  const headers = [...context.matchAll(ROADMAP_APPEND_HEADER_LINE_RE)].map((match) => {
+    const headerIndex = match.index ?? 0;
+    const start = headerIndex > 0 && context[headerIndex - 1] === "\n" ? headerIndex - 1 : headerIndex;
+    return {
+      start,
+      timestamp: match[1] ?? "",
+      author: match[2] ?? "",
+      supersedes: match[3]?.split(", ") ?? [],
+    };
+  });
+  const firstHeader = headers[0];
+  const bodyRaw = context.slice(0, firstHeader?.start ?? context.length);
+  const units: RoadmapContextUnit[] = [
+    {
+      kind: "body",
+      target: ROADMAP_APPEND_BODY_TARGET,
+      timestamp: null,
+      author: null,
+      supersedes: [],
+      raw: bodyRaw,
+      length: codePointLength(bodyRaw),
+    },
+  ];
+
+  for (let index = 0; index < headers.length; index += 1) {
+    const header = headers[index]!;
+    const nextHeader = headers[index + 1];
+    const raw = context.slice(header.start, nextHeader?.start ?? context.length);
+    units.push({
+      kind: "append",
+      target: header.timestamp,
+      timestamp: header.timestamp,
+      author: header.author,
+      supersedes: header.supersedes,
+      raw,
+      length: codePointLength(raw),
+    });
+  }
+
+  return units;
+}
+
+export function resolveSupersededRoadmapContextTargets(units: readonly RoadmapContextUnit[]): Set<string> {
+  const superseded = new Set<string>();
+  for (const unit of units) {
+    for (const target of unit.supersedes) superseded.add(target);
+  }
+  return superseded;
+}
+
+export function getLivingRoadmapContextUnits(context: string): RoadmapContextUnit[] {
+  const units = parseRoadmapContext(context);
+  const superseded = resolveSupersededRoadmapContextTargets(units);
+  return units.filter((unit) => !superseded.has(unit.target));
+}
+
+export function getRoadmapContextLiveLength(context: string): number {
+  return getLivingRoadmapContextUnits(context).reduce((total, unit) => total + unit.length, 0);
+}
+
+export function validateRoadmapSupersedeTargets(
+  context: string,
+  targets: readonly string[],
+): RoadmapSupersedeTargetValidation {
+  const units = parseRoadmapContext(context);
+  const seen = new Set<string>();
+
+  for (const target of targets) {
+    if (seen.has(target)) {
+      return {
+        ok: false,
+        code: "supersede_target_duplicate",
+        message: `supersession target '${target}' is repeated`,
+      };
+    }
+    seen.add(target);
+
+    const occurrences = units.filter((unit) => unit.target === target).length;
+    if (occurrences === 0) {
+      return {
+        ok: false,
+        code: "supersede_target_missing",
+        message: `supersession target '${target}' does not exist`,
+      };
+    }
+    if (occurrences > 1) {
+      return {
+        ok: false,
+        code: "supersede_target_ambiguous",
+        message: `supersession target '${target}' is ambiguous`,
+      };
+    }
+  }
+
+  return { ok: true, targets: normalizeRoadmapSupersedeTargets(targets) };
+}
+
+export function getResultingRoadmapContextLiveLength(existingContext: string, appended: string): number {
+  return getRoadmapContextLiveLength(existingContext + appended);
+}
+
+function codePointLength(text: string): number {
+  return [...text].length;
+}
+
+export type RoadmapAppendTextErrorCode = "empty" | "contains_delimiter";
+export type RoadmapContextAppendErrorCode = RoadmapAppendTextErrorCode | RoadmapSupersedeTargetErrorCode;
 
 export type RoadmapAppendTextPlan =
   | {
       ok: true;
       header: string;
-      /** header + text, exactly what gets concatenated onto the existing context. */
       appended: string;
     }
   | {
@@ -52,8 +213,8 @@ export type RoadmapContextAppendPlan =
       ok: true;
       header: string;
       appended: string;
-      /** existingContext + appended -- the full new value of `context`. */
       result: string;
+      resultLiveLength: number;
     }
   | {
       ok: false;
@@ -61,15 +222,6 @@ export type RoadmapContextAppendPlan =
       message: string;
     };
 
-/**
- * Checks only the per-call cap; the result cap is enforced exclusively by the
- * broker's UPDATE ... WHERE length(...) <= 16000 clause, since the broker never
- * SELECTs existingContext to hand here.
- * That UPDATE must use COALESCE(context,'') -- NULL || text evaluates to NULL
- * in SQLite, which would silently discard the append.
- * Only the incoming text is checked for the delimiter marker, not existing
- * context, so a card's own prior append is never used to refuse a new one.
- */
 export function planRoadmapAppendText(opts: {
   text: string;
   author: string;
@@ -89,50 +241,31 @@ export function planRoadmapAppendText(opts: {
     };
   }
 
-  // Card 562fd9b5 review delta: [...text].length counts CODE POINTS, not
-  // UTF-16 code units. `text.length` alone would diverge from SQLite's
-  // length() (what the result cap enforces, char-by-char) by up to 2x on
-  // astral-plane text (emoji etc.), contradicting this module's own "unit
-  // is characters" documentation on the two caps -- fail-closed either way
-  // (a stricter count only refuses MORE), but the two caps must count the
-  // same thing for "unit: characters" to mean what it says everywhere.
-  const textCharLen = [...text].length;
-  if (textCharLen > ROADMAP_APPEND_PER_CALL_MAX_CHARS) {
-    return {
-      ok: false,
-      code: "too_long_single",
-      message: `append text is ${textCharLen} chars, over the ${ROADMAP_APPEND_PER_CALL_MAX_CHARS}-char per-call cap`,
-    };
-  }
-
   const header = buildRoadmapAppendHeader(nowIso, author);
   return { ok: true, header, appended: header + text };
 }
 
-/**
- * Full plan INCLUDING the result cap, for a caller that already has
- * `existingContext` in hand. NOT what the broker's own route calls (see
- * planRoadmapAppendText above for why) -- this exists for a caller with a
- * genuine, independent reason to already hold the current context, e.g. a
- * client pre-refusing against a RoadmapItem it fetched for another purpose.
- */
 export function planRoadmapContextAppend(opts: {
   existingContext: string;
   text: string;
   author: string;
   nowIso: string;
+  supersedes?: readonly string[];
 }): RoadmapContextAppendPlan {
   const textPlan = planRoadmapAppendText(opts);
   if (!textPlan.ok) return textPlan;
 
-  const result = opts.existingContext + textPlan.appended;
-  if (result.length > ROADMAP_APPEND_RESULT_MAX_CHARS) {
-    return {
-      ok: false,
-      code: "too_long_result",
-      message: `resulting context would be ${result.length} chars, over the ${ROADMAP_APPEND_RESULT_MAX_CHARS}-char cap`,
-    };
-  }
+  const validation = validateRoadmapSupersedeTargets(opts.existingContext, opts.supersedes ?? []);
+  if (!validation.ok) return validation;
 
-  return { ok: true, header: textPlan.header, appended: textPlan.appended, result };
+  const header = buildValidatedRoadmapAppendHeader(opts.nowIso, opts.author, validation.targets);
+  const appended = header + opts.text;
+  const result = opts.existingContext + appended;
+  return {
+    ok: true,
+    header,
+    appended,
+    result,
+    resultLiveLength: getResultingRoadmapContextLiveLength(opts.existingContext, appended),
+  };
 }

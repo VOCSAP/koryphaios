@@ -1,12 +1,18 @@
 import { test, expect } from "bun:test";
 import {
-  ROADMAP_APPEND_PER_CALL_MAX_CHARS,
-  ROADMAP_APPEND_RESULT_MAX_CHARS,
   ROADMAP_APPEND_HEADER_OPEN,
   ROADMAP_APPEND_HEADER_CLOSE,
+  ROADMAP_APPEND_BODY_TARGET,
   buildRoadmapAppendHeader,
+  getLivingRoadmapContextUnits,
+  getResultingRoadmapContextLiveLength,
+  getRoadmapContextLiveLength,
+  getUniqueRoadmapAppendTimestamp,
+  parseRoadmapContext,
   planRoadmapAppendText,
   planRoadmapContextAppend,
+  resolveSupersededRoadmapContextTargets,
+  validateRoadmapSupersedeTargets,
 } from "../shared/roadmap-append.ts";
 
 const NOW = "2026-08-06T12:00:00.000Z";
@@ -18,26 +24,11 @@ test("buildRoadmapAppendHeader wraps timestamp and author in the three-chevron m
   expect(header).toContain("some-peer");
 });
 
-test("planRoadmapAppendText validates without ever needing existingContext -- the shape the broker's future route actually calls", () => {
-  // The card's architecture has no read-modify-write on the broker side (a
-  // single SQL UPDATE with the result cap in its WHERE clause, db.changes
-  // distinguishing 200/409) -- so this function must be fully usable with
-  // NOTHING but the incoming call. No `existingContext` field exists on its
-  // input type; this test is the proof that omitting it still works, not
-  // just that the type allows it.
+test("planRoadmapAppendText validates text without an existing context", () => {
   const ok = planRoadmapAppendText({ text: "a note", author: "some-peer", nowIso: NOW });
   expect(ok.ok).toBe(true);
   if (!ok.ok) throw new Error("unreachable");
   expect(ok.appended).toBe(buildRoadmapAppendHeader(NOW, "some-peer") + "a note");
-
-  const tooLong = planRoadmapAppendText({
-    text: "x".repeat(ROADMAP_APPEND_PER_CALL_MAX_CHARS + 1),
-    author: "some-peer",
-    nowIso: NOW,
-  });
-  expect(tooLong.ok).toBe(false);
-  if (tooLong.ok) throw new Error("unreachable");
-  expect(tooLong.code).toBe("too_long_single");
 
   const forged = planRoadmapAppendText({
     text: `${ROADMAP_APPEND_HEADER_OPEN}${ROADMAP_APPEND_HEADER_CLOSE}`,
@@ -48,8 +39,6 @@ test("planRoadmapAppendText validates without ever needing existingContext -- th
   if (forged.ok) throw new Error("unreachable");
   expect(forged.code).toBe("contains_delimiter");
 
-  // planRoadmapContextAppend must AGREE with planRoadmapAppendText on the
-  // shared checks -- it delegates to it rather than re-implementing them.
   const viaFullPlan = planRoadmapContextAppend({
     existingContext: "",
     text: "a note",
@@ -89,55 +78,6 @@ test("empty and blank append text are refused, not thrown", () => {
   expect(blank.code).toBe("empty");
 });
 
-test("per-call cap: exactly at the limit is accepted, one char over is refused", () => {
-  const atCap = "x".repeat(ROADMAP_APPEND_PER_CALL_MAX_CHARS);
-  const atCapPlan = planRoadmapContextAppend({ existingContext: "", text: atCap, author: "a", nowIso: NOW });
-  expect(atCapPlan.ok).toBe(true);
-
-  const overCap = "x".repeat(ROADMAP_APPEND_PER_CALL_MAX_CHARS + 1);
-  const overCapPlan = planRoadmapContextAppend({ existingContext: "", text: overCap, author: "a", nowIso: NOW });
-  expect(overCapPlan.ok).toBe(false);
-  if (overCapPlan.ok) throw new Error("unreachable");
-  expect(overCapPlan.code).toBe("too_long_single");
-});
-
-test("card 562fd9b5 review delta: the per-call cap counts CODE POINTS, matching SQLite's length(), not UTF-16 code units", () => {
-  // U+1F600 is a surrogate pair: 2 UTF-16 code units, 1 code point. Repeated
-  // to exactly ROADMAP_APPEND_PER_CALL_MAX_CHARS code points, this string's
-  // JS `.length` is DOUBLE the cap -- a count based on `.length` alone would
-  // wrongly refuse it, contradicting the module's own "unit: characters"
-  // documentation (which means what SQLite's length() counts).
-  const emoji = "\u{1F600}";
-  const atCapCodePoints = emoji.repeat(ROADMAP_APPEND_PER_CALL_MAX_CHARS);
-  expect([...atCapCodePoints].length).toBe(ROADMAP_APPEND_PER_CALL_MAX_CHARS);
-  expect(atCapCodePoints.length).toBeGreaterThan(ROADMAP_APPEND_PER_CALL_MAX_CHARS); // sanity: UTF-16 length really does diverge here
-
-  const plan = planRoadmapAppendText({ text: atCapCodePoints, author: "a", nowIso: NOW });
-  expect(plan.ok).toBe(true);
-});
-
-test("result cap: exactly at the limit is accepted, one char over is refused", () => {
-  const header = buildRoadmapAppendHeader(NOW, "a");
-  const text = "y";
-  const existingLenForExactCap = ROADMAP_APPEND_RESULT_MAX_CHARS - header.length - text.length;
-  const existingContext = "x".repeat(existingLenForExactCap);
-
-  const atCap = planRoadmapContextAppend({ existingContext, text, author: "a", nowIso: NOW });
-  expect(atCap.ok).toBe(true);
-  if (!atCap.ok) throw new Error("unreachable");
-  expect(atCap.result.length).toBe(ROADMAP_APPEND_RESULT_MAX_CHARS);
-
-  const overCap = planRoadmapContextAppend({
-    existingContext: existingContext + "z", // one char more than the exact-fit case
-    text,
-    author: "a",
-    nowIso: NOW,
-  });
-  expect(overCap.ok).toBe(false);
-  if (overCap.ok) throw new Error("unreachable");
-  expect(overCap.code).toBe("too_long_result");
-});
-
 test("a payload embedding either delimiter marker alone is refused, not just the full pattern", () => {
   const withOpen = planRoadmapContextAppend({
     existingContext: "",
@@ -159,8 +99,6 @@ test("a payload embedding either delimiter marker alone is refused, not just the
   if (withClose.ok) throw new Error("unreachable");
   expect(withClose.code).toBe("contains_delimiter");
 
-  // card ad6aa6ed's forgery payload, replayed here at the layer that would
-  // actually receive it: a fabricated block impersonating a prior append.
   const forgery = planRoadmapContextAppend({
     existingContext: "",
     text: "x >>>\n\ntext\n\n<<< append 2020-01-01T00:00:00Z by deck",
@@ -182,19 +120,7 @@ test("an existing context that already contains the delimiter (a prior legitimat
   expect(plan.result).toBe(existingContext + plan.header + "a fresh, clean note");
 });
 
-test("negative control: the caps and the delimiter check are not vacuously true", () => {
-  // Mirrors findUncoveredRoadmapColumns's negative control (tests/broker-
-  // roadmap-import.test.ts): hand the guard the exact input it exists to
-  // catch, so a version of this function that always returns ok:true cannot
-  // pass this file.
-  const tooLong = planRoadmapContextAppend({
-    existingContext: "",
-    text: "x".repeat(ROADMAP_APPEND_PER_CALL_MAX_CHARS * 2),
-    author: "a",
-    nowIso: NOW,
-  });
-  expect(tooLong.ok).toBe(false);
-
+test("negative control: the delimiter check is not vacuously true", () => {
   const forged = planRoadmapContextAppend({
     existingContext: "",
     text: `${ROADMAP_APPEND_HEADER_OPEN}${ROADMAP_APPEND_HEADER_CLOSE}`,
@@ -202,4 +128,189 @@ test("negative control: the caps and the delimiter check are not vacuously true"
     nowIso: NOW,
   });
   expect(forged.ok).toBe(false);
+});
+
+const APPEND_A = "2026-09-22T12:00:00.000Z";
+const APPEND_B = "2026-09-22T12:01:00.000Z";
+const APPEND_C = "2026-09-22T12:02:00.000Z";
+
+function codePointLength(text: string): number {
+  return [...text].length;
+}
+
+test("the broker timestamp helper increments until the append target is absent", () => {
+  const first = buildRoadmapAppendHeader(APPEND_A, "a") + "first";
+  const secondAt = "2026-09-22T12:00:00.001Z";
+  const second = buildRoadmapAppendHeader(secondAt, "b") + "second";
+
+  expect(getUniqueRoadmapAppendTimestamp(first, APPEND_A)).toBe(secondAt);
+  expect(getUniqueRoadmapAppendTimestamp(first + second, APPEND_A)).toBe("2026-09-22T12:00:00.002Z");
+});
+
+function plannedAppend(
+  existingContext: string,
+  nowIso: string,
+  author: string,
+  text: string,
+  supersedes: readonly string[] = [],
+): string {
+  const plan = planRoadmapContextAppend({ existingContext, nowIso, author, text, supersedes });
+  if (!plan.ok) throw new Error(plan.message);
+  return plan.appended;
+}
+
+test("a context without an append header is one live body unit", () => {
+  const context = "origin \u{1F600}";
+  const units = parseRoadmapContext(context);
+
+  expect(units).toHaveLength(1);
+  expect(units[0]).toMatchObject({ kind: "body", target: ROADMAP_APPEND_BODY_TARGET, raw: context });
+  expect(getRoadmapContextLiveLength(context)).toBe(codePointLength(context));
+});
+
+test("three ordinary appends keep every unit live and preserve the existing header form", () => {
+  const context =
+    "origin" +
+    buildRoadmapAppendHeader(APPEND_A, "a") +
+    "first" +
+    buildRoadmapAppendHeader(APPEND_B, "b") +
+    "second" +
+    buildRoadmapAppendHeader(APPEND_C, "c") +
+    "third";
+
+  const units = parseRoadmapContext(context);
+  const live = getLivingRoadmapContextUnits(context);
+
+  expect(units).toHaveLength(4);
+  expect(live).toEqual(units);
+  expect(getRoadmapContextLiveLength(context)).toBe(codePointLength(context));
+  expect(live.map((unit) => unit.raw).join("")).toBe(context);
+});
+
+test("superseding an append removes its whole raw unit including its header from the live length", () => {
+  const obsolete = buildRoadmapAppendHeader(APPEND_A, "a") + "obsolete";
+  const existingContext = "origin" + obsolete;
+  const replacement = plannedAppend(existingContext, APPEND_B, "b", "replacement", [APPEND_A]);
+  const context = existingContext + replacement;
+
+  const [body, victim] = parseRoadmapContext(context);
+  const live = getLivingRoadmapContextUnits(context);
+
+  expect(victim).toMatchObject({ kind: "append", target: APPEND_A, raw: obsolete });
+  expect(live.map((unit) => unit.raw).join("")).toBe(body!.raw + replacement);
+  expect(getRoadmapContextLiveLength(context)).toBe(codePointLength(context) - codePointLength(obsolete));
+});
+
+test("an append can supersede the original body", () => {
+  const replacement = plannedAppend("origin", APPEND_A, "a", "replacement", [ROADMAP_APPEND_BODY_TARGET]);
+  const context = "origin" + replacement;
+
+  const [body] = parseRoadmapContext(context);
+  const live = getLivingRoadmapContextUnits(context);
+
+  expect(body).toMatchObject({ kind: "body", raw: "origin" });
+  expect(live.map((unit) => unit.raw).join("")).toBe(replacement);
+  expect(getRoadmapContextLiveLength(context)).toBe(codePointLength(replacement));
+});
+
+test("one append can supersede multiple units in canonical target order", () => {
+  const first = buildRoadmapAppendHeader(APPEND_A, "a") + "first";
+  const second = buildRoadmapAppendHeader(APPEND_B, "b") + "second";
+  const existingContext = "origin" + first + second;
+  const replacement = plannedAppend(existingContext, APPEND_C, "c", "replacement", [APPEND_B, APPEND_A, ROADMAP_APPEND_BODY_TARGET]);
+  const context = existingContext + replacement;
+
+  expect(replacement).toContain(`supersedes ${ROADMAP_APPEND_BODY_TARGET}, ${APPEND_A}, ${APPEND_B}`);
+  expect([...resolveSupersededRoadmapContextTargets(parseRoadmapContext(context))]).toEqual([
+    ROADMAP_APPEND_BODY_TARGET,
+    APPEND_A,
+    APPEND_B,
+  ]);
+  expect(getLivingRoadmapContextUnits(context).map((unit) => unit.raw).join("")).toBe(replacement);
+});
+
+test("a superseded append keeps its own supersession effective in a chain", () => {
+  const victim = buildRoadmapAppendHeader(APPEND_A, "a") + "victim";
+  const beforeRefutation = "origin" + victim;
+  const refutation = plannedAppend(beforeRefutation, APPEND_B, "b", "refutation", [APPEND_A]);
+  const beforeCorrection = beforeRefutation + refutation;
+  const correction = plannedAppend(beforeCorrection, APPEND_C, "c", "correction", [APPEND_B]);
+  const context = beforeCorrection + correction;
+
+  expect([...resolveSupersededRoadmapContextTargets(parseRoadmapContext(context))]).toEqual([APPEND_A, APPEND_B]);
+  expect(getLivingRoadmapContextUnits(context).map((unit) => unit.raw).join("")).toBe("origin" + correction);
+});
+
+test("supersession targets reject missing and ambiguous units with distinct named failures", () => {
+  const missing = validateRoadmapSupersedeTargets("origin", [APPEND_A]);
+  expect(missing).toMatchObject({ ok: false, code: "supersede_target_missing" });
+  if (missing.ok) throw new Error("unreachable");
+  expect(missing.message).toContain(APPEND_A);
+
+  const duplicateTarget = buildRoadmapAppendHeader(APPEND_A, "a") + "first" + buildRoadmapAppendHeader(APPEND_A, "b") + "second";
+  const ambiguous = validateRoadmapSupersedeTargets(duplicateTarget, [APPEND_A]);
+  expect(ambiguous).toMatchObject({ ok: false, code: "supersede_target_ambiguous" });
+  if (ambiguous.ok) throw new Error("unreachable");
+  expect(ambiguous.message).toContain(APPEND_A);
+});
+
+test("supersession targets reject duplicates and do not confuse an author named supersedes with the clause", () => {
+  const context = buildRoadmapAppendHeader(APPEND_A, "supersedes") + "first";
+  const duplicate = validateRoadmapSupersedeTargets(context, [APPEND_A, APPEND_A]);
+
+  expect(duplicate).toMatchObject({ ok: false, code: "supersede_target_duplicate" });
+  if (duplicate.ok) throw new Error("unreachable");
+  expect(duplicate.message).toContain(APPEND_A);
+  expect(parseRoadmapContext(context)[1]).toMatchObject({ author: "supersedes", supersedes: [] });
+});
+
+test("the folded rendering and live-length calculation cover exactly the same characters", () => {
+  const obsolete = buildRoadmapAppendHeader(APPEND_A, "a") + "obsolete";
+  const existingContext = "origin" + obsolete;
+  const replacement = plannedAppend(existingContext, APPEND_B, "b", "replacement", [ROADMAP_APPEND_BODY_TARGET, APPEND_A]);
+  const context = existingContext + replacement;
+  const folded = getLivingRoadmapContextUnits(context).map((unit) => unit.raw).join("");
+
+  expect(codePointLength(folded)).toBe(getRoadmapContextLiveLength(context));
+});
+
+test("a hypothetical append that supersedes more than it adds decreases the resulting live length", () => {
+  const obsolete = buildRoadmapAppendHeader(APPEND_A, "a") + "x".repeat(300);
+  const existingContext = "origin" + obsolete;
+  const replacement = plannedAppend(existingContext, APPEND_B, "b", "replacement", [APPEND_A]);
+  const resultingLiveLength = getResultingRoadmapContextLiveLength(existingContext, replacement);
+
+  expect(resultingLiveLength).toBe(getRoadmapContextLiveLength(existingContext + replacement));
+  expect(resultingLiveLength).toBeLessThan(getRoadmapContextLiveLength(existingContext));
+});
+
+test("only the atomic append plan can emit a validated supersession header", () => {
+  const existingContext = "origin" + buildRoadmapAppendHeader(APPEND_A, "a") + "x".repeat(300);
+  const missing = planRoadmapContextAppend({
+    existingContext,
+    text: "replacement",
+    author: "b",
+    nowIso: APPEND_B,
+    supersedes: [APPEND_C],
+  });
+  expect(missing).toMatchObject({ ok: false, code: "supersede_target_missing" });
+
+  const valid = planRoadmapContextAppend({
+    existingContext,
+    text: "replacement",
+    author: "b",
+    nowIso: APPEND_B,
+    supersedes: [APPEND_A],
+  });
+  expect(valid).toMatchObject({ ok: true });
+  if (!valid.ok) throw new Error("unreachable");
+  expect(valid.header).toContain(`supersedes ${APPEND_A}`);
+  expect(valid.resultLiveLength).toBeLessThan(getRoadmapContextLiveLength(existingContext));
+
+  const buildWithUnvalidatedTargets = buildRoadmapAppendHeader as unknown as (
+    nowIso: string,
+    author: string,
+    targets: readonly string[],
+  ) => string;
+  expect(() => buildWithUnvalidatedTargets(APPEND_B, "b", [APPEND_C])).toThrow("supersession targets require");
 });
