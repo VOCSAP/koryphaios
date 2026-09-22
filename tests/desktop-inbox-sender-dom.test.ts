@@ -89,10 +89,15 @@ function resetFakeStore(): void {
 // load.
 mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 
-// '@shared/types': only `inboxEntryKey` is a real (value) import in
-// InboxPanel.tsx; every other named import from this specifier there is
-// `import type`, erased before bun ever tries to resolve it at runtime.
+// mock.module freezes the exported-names list of a specifier for the whole
+// bun process on first materialization, not per importing file: a factory
+// exposing fewer names than the real module poisons every later file that
+// imports another value export of the same specifier. Re-export the real
+// module and only override the one symbol this fixture needs to control.
+import * as realSharedTypes from "../desktop/src/shared/types.ts";
+
 mock.module("@shared/types", () => ({
+  ...realSharedTypes,
   inboxEntryKey: () => {
     throw new Error("inboxEntryKey stub called -- fixture must stay kind:'approval' only");
   }
