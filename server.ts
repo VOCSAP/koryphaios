@@ -487,6 +487,8 @@ SHARED ROADMAP: a persistent backlog (features, bugs, debt, ideas) scoped to thi
 - Bug, debt or idea outside your task: roadmap_add, with the 'context' field filled.
 - Keep the status of items you work on current (roadmap_update: planned -> in_progress -> done). in_progress LOCKS the item under your peer_id: set it only when you really start, set it back to planned if you stop before finishing.
 - Team leads: a kind='directive' card (roadmap_add) lets the Deck reset a peer's context between items; queue it for a lead tile to run.
+- Set triage to say who the card awaits, separately from status and priority; ready-for-agent means it is specified enough to take without a human question, while needs-info awaits one.
+- Find executable work with roadmap_list triages:["ready-for-agent"].
 
 When you start, call set_summary to say what you are working on.`,
   }
