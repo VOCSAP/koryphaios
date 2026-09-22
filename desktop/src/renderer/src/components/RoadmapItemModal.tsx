@@ -156,6 +156,11 @@ function badges(item: RoadmapItem, t: TFn): React.JSX.Element {
       <span className={`rm-badge rm-badge-effort-${item.effort}`}>
         {t('roadmap.effort')}: {t(`roadmap.level.${item.effort}`)}
       </span>
+      {item.triage !== null && (
+        <span className={`rm-badge rm-badge-triage-${item.triage}`}>
+          {t(`roadmap.triage.${item.triage}`)}
+        </span>
+      )}
       {item.queue !== null && (
         <span className="rm-badge rm-badge-queue">{GLYPH_BADGES.clepsydra} #{item.queue}</span>
       )}

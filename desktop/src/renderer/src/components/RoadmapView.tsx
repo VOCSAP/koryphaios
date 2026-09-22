@@ -6,8 +6,10 @@ import type {
   RoadmapLevel,
   RoadmapPriority,
   RoadmapStatus,
+  RoadmapTriage,
   StopResult
 } from '@shared/types'
+import { ROADMAP_TRIAGE_ROLES } from '@shared/types'
 import { GLYPH_ACTIONS, GLYPH_BADGES, roleGlyph } from './icons'
 import { useDeck } from '../store'
 import { useT } from '../i18n'
@@ -37,6 +39,7 @@ const DIRECTIVES: RoadmapDirective[] = ['clear', 'compact', 'magic_compact']
 const PRIORITIES: RoadmapPriority[] = ['must', 'should', 'could', 'wont']
 const LEVELS: RoadmapLevel[] = ['low', 'medium', 'high']
 const STATUSES: RoadmapStatus[] = ['idea', 'planned', 'in_progress', 'done']
+const TRIAGES = ROADMAP_TRIAGE_ROLES
 
 /** Editable subset of an item, buffered in the form. */
 interface Draft {
@@ -47,6 +50,8 @@ interface Draft {
   value: RoadmapLevel
   effort: RoadmapLevel
   status: RoadmapStatus | 'archived'
+  /** null = untriaged; the broker refuses 'wontfix' unless priority is 'wont'. */
+  triage: RoadmapTriage | null
   description: string
   rationale: string
   context: string
@@ -67,6 +72,7 @@ const EMPTY_DRAFT: Draft = {
   value: 'medium',
   effort: 'medium',
   status: 'idea',
+  triage: null,
   description: '',
   rationale: '',
   context: '',
@@ -82,6 +88,7 @@ function toDraft(i: RoadmapItem): Draft {
     value: i.value,
     effort: i.effort,
     status: i.status,
+    triage: i.triage,
     description: i.description,
     rationale: i.rationale,
     context: i.context,
@@ -220,6 +227,7 @@ export function RoadmapView(): React.JSX.Element {
         effort: draft.effort,
         // 'archived' is only reachable through the Archive button, not the form.
         status: draft.status === 'archived' ? undefined : draft.status,
+        triage: draft.triage,
         description: draft.description,
         rationale: draft.rationale,
         context: draft.context,
@@ -919,6 +927,27 @@ export function RoadmapView(): React.JSX.Element {
                     {STATUSES.map((s) => (
                       <option key={s} value={s}>
                         {t(`roadmap.status.${s}`)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+              {!draftIsDirective && (
+                <label className="field">
+                  <span>{t('roadmap.fieldTriage')}</span>
+                  <select
+                    value={draft.triage ?? ''}
+                    onChange={(e) =>
+                      setDraft({
+                        ...draft,
+                        triage: e.target.value === '' ? null : (e.target.value as RoadmapTriage)
+                      })
+                    }
+                  >
+                    <option value="">{t('roadmap.triage.none')}</option>
+                    {TRIAGES.map((role) => (
+                      <option key={role} value={role}>
+                        {t(`roadmap.triage.${role}`)}
                       </option>
                     ))}
                   </select>
