@@ -272,6 +272,7 @@ const NOT_APP_STATE: Record<string, NotAppStateRule> = {
   availableLocales: { reason: "<code>.json locale bundles shipped with the app, read-only" },
   readDictFile: { reason: "<lang>.json locale bundle read from the app's locales dir, read-only" },
   transcriptPath: { reason: "~/.claude/projects/<cwd>/<id>.jsonl, Claude Code's own transcript, read for the resume digest" },
+  "serve.json": { reason: "a cloned repository's serve convention under .claude/claude-peers; its name is imposed by the project and the Deck only reads it" },
   "patch-state.json": { reason: "clodex's own manifest under its home (CLODEX_HOME or ~/.clodex), written by `clodex patch`; the Deck only reads it for patch freshness" },
   "server-runtime.json": { reason: "clodex's record of its live servers under the same home, written by `clodex server`; the Deck only reads it to adopt a proxy or to prove the identity of one it owns" },
   runtimePath: { reason: "builds the path of that clodex manifest under its home; the Deck writes nothing there, its own lifecycle records live in the SQLite store keyed by clodex-lifecycle.*" },
