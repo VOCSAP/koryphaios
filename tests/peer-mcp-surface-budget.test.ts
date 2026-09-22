@@ -97,6 +97,16 @@ describe("roadmap_list: the singular filters left the schema, not the handler", 
   });
 });
 
+describe("roadmap_append_context: compact guidance stays actionable", () => {
+  test("the description keeps overwrite and durable-fact guidance without the stale per-call cap", () => {
+    const schema = toolBlock(SRC, "roadmap_append_context");
+    expect(schema).toContain("roadmap_update replaces");
+    expect(schema).toContain("operator's next Save may overwrite appended text");
+    expect(schema).toContain("durable facts go in description/rationale");
+    expect(schema).not.toContain("Capped per call");
+  });
+});
+
 describe("graph_draft_prepare: the invite gate is a mono-carrier", () => {
   test("the operator-invited restriction still lives somewhere the model reads", () => {
     // Pins that a call to this tool is restricted to an operator-invited flow,

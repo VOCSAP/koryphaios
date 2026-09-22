@@ -89,7 +89,12 @@ import {
   GRAPH_DRAFT_SYSTEM_PROMPT,
   GRAPH_DRAFT_TIMEOUT_MS,
 } from "./shared/graph-draft.ts";
-import { buildRoadmapAppendHeader } from "./shared/roadmap-append.ts";
+import {
+  buildRoadmapAppendHeader,
+  getLivingRoadmapContextUnits,
+  getRoadmapContextLiveLength,
+  parseRoadmapContext,
+} from "./shared/roadmap-append.ts";
 import {
   runWaitForMessage,
   buildWaiter,
@@ -697,6 +702,7 @@ const TOOLS = [
       type: "object" as const,
       properties: {
         id: { type: "string" as const, description: "Item id, or a unique id prefix." },
+        raw_context: { type: "boolean" as const, description: "Return the raw context without folding superseded units." },
       },
       required: ["id"],
     },
@@ -841,26 +847,20 @@ const TOOLS = [
       required: ["id"],
     },
   },
-  // Four design facts the description used to spell out, kept here because
-  // they explain the shape without changing the call: (1) the call is NOT
-  // idempotent -- a retry after a lost response lands the block twice, and
-  // duplicates are accepted on purpose (compact later rather than block the
-  // retry); (2) the timestamped attribution header around every append is
-  // what makes such a duplicate visible, so it always ships; (3) the Deck's
-  // context textarea and the wand replace the WHOLE field on the operator's
-  // next Save, so appended blocks are not durable structure; (4) the call does
-  // not refresh updated_at, because updated_at drives the stale-lock TTL and a
-  // third party's append must not extend another agent's lock. A too-large
-  // append is refused with the remedies named in the refusal text.
   {
     name: "roadmap_append_context",
     description:
-      "Append a note to a roadmap item's context without replacing it (roadmap_update replaces). Use it to leave a note on ANOTHER agent's card: the work-lock does not block it. Not idempotent (a retry may land twice, accepted). The operator's next Save may overwrite appended text: durable facts go in description/rationale. Does not refresh updated_at.",
+      "Append a note to a roadmap item's context without replacing it (roadmap_update replaces). Use it to leave a note on another agent's card: the work-lock does not block it. Not idempotent; a retry may land twice. The operator's next Save may overwrite appended text: durable facts go in description/rationale. Does not refresh updated_at.",
     inputSchema: {
       type: "object" as const,
       properties: {
         id: { type: "string" as const, description: "Item id, or a unique id prefix." },
-        text: { type: "string" as const, description: "The note. Capped per call; the refusal names the limit." },
+        text: { type: "string" as const, description: "The note." },
+        supersedes: {
+          type: "array" as const,
+          items: { type: "string" as const },
+          description: "Existing context targets this append replaces.",
+        },
       },
       required: ["id", "text"],
     },
@@ -1161,13 +1161,32 @@ function formatRoadmapQueueOrder(items: RoadmapItem[]): string {
   return parts.join("\n\n");
 }
 
-function formatRoadmapItemDetail(i: RoadmapItem): string {
+function formatRoadmapContext(context: string, rawContext: boolean): string {
+  if (rawContext) return `context (raw agent briefing): ${context}`;
+
+  const livingUnits = getLivingRoadmapContextUnits(context);
+  const livingTargets = new Set(livingUnits.map((unit) => unit.target));
+  const supersededUnits = parseRoadmapContext(context).filter((unit) => !livingTargets.has(unit.target));
+  const lines = [
+    `context (living, ${getRoadmapContextLiveLength(context)} chars): ${livingUnits.map((unit) => unit.raw).join("")}`,
+  ];
+  if (supersededUnits.length > 0) {
+    lines.push(
+      `context superseded: ${supersededUnits.length} unit(s): ${supersededUnits
+        .map((unit) => unit.timestamp ?? "body")
+        .join(", ")}`
+    );
+  }
+  return lines.join("\n");
+}
+
+function formatRoadmapItemDetail(i: RoadmapItem, rawContext = false): string {
   const lines = [
     `${formatRoadmapItemLine(i)}`,
     `id: ${i.id}`,
     i.description ? `description: ${i.description}` : "",
     i.rationale ? `rationale: ${i.rationale}` : "",
-    i.context ? `context (agent briefing): ${i.context}` : "",
+    i.context ? formatRoadmapContext(i.context, rawContext) : "",
     i.kind === "directive"
       ? `directive: /${i.directive} -> ${i.target_peer_ids.length ? i.target_peer_ids.join(", ") : "(no targets yet)"} (executed by the Deck when dispatched)`
       : "",
@@ -2102,7 +2121,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     }
 
     case "roadmap_get": {
-      const a = args as { id: string };
+      const a = args as { id: string; raw_context?: boolean };
       try {
         const id = await resolveRoadmapId(a.id);
         const { items } = await brokerFetch<RoadmapListResponse>("/roadmap/list", {
@@ -2112,7 +2131,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         const item = items.find((i) => i.id === id);
         if (!item) throw new Error(`item ${id} vanished`);
         return {
-          content: [{ type: "text" as const, text: formatRoadmapItemDetail(item) }],
+          content: [{ type: "text" as const, text: formatRoadmapItemDetail(item, a.raw_context === true) }],
         };
       } catch (e) {
         return roadmapToolError(e);
@@ -2231,7 +2250,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     }
 
     case "roadmap_append_context": {
-      const a = args as { id: string; text: string };
+      const a = args as { id: string; text: string; supersedes?: string[] };
       try {
         const id = await resolveRoadmapId(a.id);
         const by = roadmapAuthor();
@@ -2240,6 +2259,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
           by,
           ...roadmapProof(),
           text: a.text,
+          supersedes: a.supersedes,
         });
         return {
           content: [{ type: "text" as const, text: formatRoadmapAppendAck(a.text, by, item) }],

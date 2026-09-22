@@ -13,6 +13,11 @@ import {
   ROADMAP_UPDATE_ACK_FIELDS,
   findUncoveredAckFields,
 } from "../shared/types.ts";
+import {
+  buildRoadmapAppendHeader,
+  getLivingRoadmapContextUnits,
+  getRoadmapContextLiveLength,
+} from "../shared/roadmap-append.ts";
 import { DECK_ONLY_TOOLS } from "../server.ts";
 
 /**
@@ -596,6 +601,68 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     const res = await callTool(h, "roadmap_update", { id, release: "yes" });
     expect(res.result?.isError).toBe(true);
     expect(res.result?.content?.[0]?.text).toContain("release must be a boolean");
+  }, 60_000);
+
+  test("roadmap_get folds superseded units by default and returns the raw context only on request", async () => {
+    const h = await boot();
+    const supersededAt = "2026-09-23T12:00:00.000Z";
+    const successorAt = "2026-09-23T12:00:01.000Z";
+    const supersededText = "obsolete evidence must not reach the default MCP read";
+    const successorText = `current ${String.fromCodePoint(0x1f600)} evidence remains in the default MCP read`;
+    const context =
+      "living body" +
+      buildRoadmapAppendHeader(supersededAt, "peer-a") +
+      supersededText +
+      `\n<<< append ${successorAt} by peer-b supersedes ${supersededAt} >>>\n` +
+      successorText;
+    const created = await callTool(h, "roadmap_add", { title: "folded roadmap context", context });
+    const id = ackText(created).match(/Roadmap item created: ([0-9a-f]{8})/)![1]!;
+    const livingContext = getLivingRoadmapContextUnits(context)
+      .map((unit) => unit.raw)
+      .join("");
+    const livingLength = getRoadmapContextLiveLength(context);
+
+    const folded = await callTool(h, "roadmap_get", { id });
+    expect(folded.result?.isError).toBeFalsy();
+    const foldedText = ackText(folded);
+    expect(foldedText).toContain(`context (living, ${livingLength} chars): ${livingContext}`);
+    expect(foldedText).toContain(`context superseded: 1 unit(s): ${supersededAt}`);
+    expect(foldedText).not.toContain(supersededText);
+
+    const raw = await callTool(h, "roadmap_get", { id, raw_context: true });
+    expect(raw.result?.isError).toBeFalsy();
+    expect(ackText(raw)).toContain(`context (raw agent briefing): ${context}`);
+  }, 60_000);
+
+  test("roadmap_append_context exposes supersedes and preserves its clause through MCP", async () => {
+    const h = await boot();
+    const listId = nextRpcId++;
+    h.send({ jsonrpc: "2.0", id: listId, method: "tools/list", params: {} });
+    const listed = await readUntil(h.reader, listId, h.buffer);
+    const tools = listed.result?.tools ?? [];
+    const appendFields = tools.find((tool) => tool.name === "roadmap_append_context")?.inputSchema?.properties ?? {};
+    const getFields = tools.find((tool) => tool.name === "roadmap_get")?.inputSchema?.properties ?? {};
+    expect(appendFields).toHaveProperty("supersedes");
+    expect(getFields).toHaveProperty("raw_context");
+
+    const supersededAt = "2026-09-23T12:01:00.000Z";
+    const supersededText = "obsolete append retained only for the raw audit";
+    const existingContext = buildRoadmapAppendHeader(supersededAt, "peer-a") + supersededText;
+    const created = await callTool(h, "roadmap_add", { title: "superseding append", context: existingContext });
+    const id = ackText(created).match(/Roadmap item created: ([0-9a-f]{8})/)![1]!;
+
+    const append = await callTool(h, "roadmap_append_context", {
+      id,
+      text: "the replacement append",
+      supersedes: [supersededAt],
+    });
+    expect(append.result?.isError).toBeFalsy();
+
+    const raw = await callTool(h, "roadmap_get", { id, raw_context: true });
+    expect(ackText(raw)).toContain(`supersedes ${supersededAt}`);
+
+    const folded = await callTool(h, "roadmap_get", { id });
+    expect(ackText(folded)).not.toContain(supersededText);
   }, 60_000);
 });
 

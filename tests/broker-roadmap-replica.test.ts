@@ -249,88 +249,108 @@ test("a card written on the replica reaches the upstream with its rank and its a
 // write and the pull's INSERT. Nothing type-checks them, and a column dropped
 // from one of them leaves the sending side perfectly healthy -- versioned,
 // marked dirty, every unit guard green -- while the value dies in transit.
-// These two tests are the only thing that reads the field on the OTHER broker.
-test("a triage role travels from the replica to its upstream, on a card born here", async () => {
+test("a context with supersedes travels from a replica-born card through the push INSERT", async () => {
+  const supersededAt = "2026-09-23T12:10:00.000Z";
+  const context =
+    "replica insert body" +
+    `\n<<< append ${supersededAt} by peer-a >>>\n` +
+    "obsolete replica insert evidence" +
+    `\n<<< append 2026-09-23T12:10:01.000Z by peer-b supersedes ${supersededAt} >>>\n` +
+    "current replica insert evidence";
   const card = await createOn(replica, {
     by: "agent-local",
-    title: "triaged on the replica",
+    title: "context born on the replica",
+    context,
     triage: "ready-for-agent",
   });
-  expect(card.triage).toBe("ready-for-agent");
   const upstreamCard = await waitForItem(
-    "the role reaches the upstream",
+    "the extended context reaches the upstream",
     upstream,
     card.id,
-    (i) => i.title === "triaged on the replica" && i.triage === "ready-for-agent"
+    (i) => i.context === context && i.triage === "ready-for-agent"
   );
-  expect([
-    "a card BORN on a replica keeps its role through its first push",
-    upstreamCard.triage,
-  ]).toEqual(["a card BORN on a replica keeps its role through its first push", "ready-for-agent"]);
+  expect([upstreamCard.context, upstreamCard.triage]).toEqual([context, "ready-for-agent"]);
 });
 
-test("a triage role set upstream reaches the replica, and a later change follows it", async () => {
+test("a context with supersedes written upstream reaches the replica through pull INSERT and content UPDATE", async () => {
+  const firstSupersededAt = "2026-09-23T12:11:00.000Z";
+  const initialContext =
+    "upstream insert body" +
+    `\n<<< append ${firstSupersededAt} by peer-a >>>\n` +
+    "obsolete upstream insert evidence" +
+    `\n<<< append 2026-09-23T12:11:01.000Z by peer-b supersedes ${firstSupersededAt} >>>\n` +
+    "current upstream insert evidence";
   const card = await createOn(upstream, {
     by: "agent-upstream",
-    title: "triaged upstream",
+    title: "context written upstream",
+    context: initialContext,
     triage: "needs-info",
   });
   const arrived = await waitForItem(
-    "the role reaches the replica",
+    "the extended context reaches the replica",
     replica,
     card.id,
-    (i) => i.triage === "needs-info"
+    (i) => i.context === initialContext && i.triage === "needs-info"
   );
-  expect(arrived.triage).toBe("needs-info");
+  expect([arrived.context, arrived.triage]).toEqual([initialContext, "needs-info"]);
 
-  // The second half: not the INSERT branch of the pull but its content-write
-  // branch, which is a different SQL statement and would fail separately.
+  const updatedSupersededAt = "2026-09-23T12:11:02.000Z";
+  const updatedContext =
+    "upstream update body" +
+    `\n<<< append ${updatedSupersededAt} by peer-c >>>\n` +
+    "obsolete upstream update evidence" +
+    `\n<<< append 2026-09-23T12:11:03.000Z by peer-d supersedes ${updatedSupersededAt} >>>\n` +
+    "current upstream update evidence";
   await post<UpsertRes>(`${upstream.url}/roadmap/upsert`, {
     id: card.id,
     by: "agent-upstream",
+    context: updatedContext,
     triage: "ready-for-human",
   });
   const updated = await waitForItem(
-    "a role CHANGED upstream reaches the replica",
+    "an updated extended context reaches the replica",
     replica,
     card.id,
-    (i) => i.triage === "ready-for-human"
+    (i) => i.context === updatedContext && i.triage === "ready-for-human"
   );
-  expect([
-    "an existing card's role is updated by the pull, not only set at insert time",
-    updated.triage,
-  ]).toEqual([
-    "an existing card's role is updated by the pull, not only set at insert time",
-    "ready-for-human",
-  ]);
+  expect([updated.context, updated.triage]).toEqual([updatedContext, "ready-for-human"]);
 });
 
-test("a role changed on the replica travels on a card the upstream ALREADY has", async () => {
-  // The third statement, and the one the two tests above never reach: a card
-  // born upstream exists on both sides, so the replica's push takes its UPDATE
-  // branch instead of its INSERT. Measured: dropping the column from that
-  // single statement leaves both tests above green.
+test("a context with supersedes changed on the replica travels through the push UPDATE", async () => {
+  const initialSupersededAt = "2026-09-23T12:12:00.000Z";
+  const initialContext =
+    "push update body" +
+    `\n<<< append ${initialSupersededAt} by peer-a >>>\n` +
+    "obsolete push update evidence" +
+    `\n<<< append 2026-09-23T12:12:01.000Z by peer-b supersedes ${initialSupersededAt} >>>\n` +
+    "current push update evidence";
   const card = await createOn(upstream, {
     by: "agent-upstream",
-    title: "triaged later from the replica",
+    title: "context changed on the replica",
+    context: initialContext,
   });
-  await waitForItem("the card reaches the replica first", replica, card.id, (i) => i.title === "triaged later from the replica");
+  await waitForItem("the card reaches the replica first", replica, card.id, (i) => i.context === initialContext);
 
+  const updatedSupersededAt = "2026-09-23T12:12:02.000Z";
+  const updatedContext =
+    "replica push update body" +
+    `\n<<< append ${updatedSupersededAt} by peer-c >>>\n` +
+    "obsolete replica push update evidence" +
+    `\n<<< append 2026-09-23T12:12:03.000Z by peer-d supersedes ${updatedSupersededAt} >>>\n` +
+    "current replica push update evidence";
   await post<UpsertRes>(`${replica.url}/roadmap/upsert`, {
     id: card.id,
     by: "agent-local",
+    context: updatedContext,
     triage: "needs-info",
   });
   const pushed = await waitForItem(
-    "the role set on the replica reaches the upstream",
+    "the updated extended context reaches the upstream",
     upstream,
     card.id,
-    (i) => i.triage === "needs-info"
+    (i) => i.context === updatedContext && i.triage === "needs-info"
   );
-  expect([
-    "a role set on an ALREADY replicated card is carried by the push UPDATE",
-    pushed.triage,
-  ]).toEqual(["a role set on an ALREADY replicated card is carried by the push UPDATE", "needs-info"]);
+  expect([pushed.context, pushed.triage]).toEqual([updatedContext, "needs-info"]);
 });
 
 test("both sides editing one card yields a conflict the operator resolves three ways", async () => {
