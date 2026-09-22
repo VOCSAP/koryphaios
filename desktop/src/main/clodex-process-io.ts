@@ -44,6 +44,35 @@ const DIGITS_RE = /^\d+$/;
 
 /** The command line is glued into a shell invocation: nothing else may reach it. */
 const COMMAND_TOKEN_RE = /^[A-Za-z0-9._-]+$/;
+const PROXY_ARGUMENT_RE = /^--[A-Za-z0-9][A-Za-z0-9._-]*(?:=[A-Za-z0-9._,-]+)?$/;
+/** Admitted flags cannot change proxy listening, upstream peer, or credential. */
+const ALLOWED_PROXY_ARGUMENT_NAMES = new Set(["--ws-diagnostics", "--no-discovery"]);
+const ALLOWED_PROXY_ARGUMENTS_MESSAGE = "Clodex proxy arguments accept only --ws-diagnostics and --no-discovery";
+const MAX_PROXY_ARGUMENT_CHARS = 4096;
+const MAX_PROXY_ARGUMENT_TOKENS = 64;
+
+function isAllowedProxyArgument(token: string): boolean {
+  return PROXY_ARGUMENT_RE.test(token) && ALLOWED_PROXY_ARGUMENT_NAMES.has(token);
+}
+
+export function parseClodexProxyArgs(raw: unknown): string[] {
+  if (typeof raw !== "string") throw new TypeError("Clodex proxy arguments must be a string");
+  if (raw.length > MAX_PROXY_ARGUMENT_CHARS) {
+    throw new RangeError(`Clodex proxy arguments allow at most ${MAX_PROXY_ARGUMENT_CHARS} characters`);
+  }
+  if (raw === "") return [];
+  const tokens = raw.split(" ");
+  if (tokens.length > MAX_PROXY_ARGUMENT_TOKENS) {
+    throw new RangeError(`Clodex proxy arguments allow at most ${MAX_PROXY_ARGUMENT_TOKENS} tokens`);
+  }
+  if (tokens.some((token) => !PROXY_ARGUMENT_RE.test(token))) {
+    throw new TypeError(`Unsafe Clodex proxy argument: ${raw}`);
+  }
+  if (tokens.some((token) => !isAllowedProxyArgument(token))) {
+    throw new TypeError(ALLOWED_PROXY_ARGUMENTS_MESSAGE);
+  }
+  return tokens;
+}
 
 /** Fields of `/proc/<pid>/stat` are numbered from 1, and the first two go with `comm`. */
 const PROC_PGRP_INDEX = 5 - 3;
@@ -532,8 +561,12 @@ export function createClodexProcessIo(
     if (deps.platform !== "win32" && deps.platform !== "linux" && deps.platform !== "darwin") {
       throw new Error(`clodex server cannot be owned on ${deps.platform}`);
     }
-    for (const token of [command, ...args]) {
-      if (!COMMAND_TOKEN_RE.test(token)) throw new TypeError(`Unsafe clodex command token: ${token}`);
+    if (!COMMAND_TOKEN_RE.test(command)) throw new TypeError(`Unsafe clodex command token: ${command}`);
+    for (const token of args) {
+      if (token === "server" || token === "--proxy") continue;
+      if (isAllowedProxyArgument(token)) continue;
+      if (PROXY_ARGUMENT_RE.test(token)) throw new TypeError(ALLOWED_PROXY_ARGUMENTS_MESSAGE);
+      throw new TypeError(`Unsafe clodex command token: ${token}`);
     }
     const line = [command, ...args].join(" ");
     // PowerShell is never the launcher: a detached one exits 0 without running

@@ -167,7 +167,7 @@ function fixture(overrides: Partial<ClodexControllerDeps> = {}) {
 test("a disabled setting opens no database and probes nothing", async () => {
   const f = fixture();
 
-  expect(await f.controller().start(false)).toEqual({ action: "disabled" });
+  expect(await f.controller().start(false, "")).toEqual({ action: "disabled" });
   expect(f.opens).toEqual([]);
   expect(f.probes).toEqual([]);
   expect(f.traces).toEqual([]);
@@ -177,7 +177,7 @@ test("an absent wrapper leaves no database behind", async () => {
   const f = fixture();
   f.installed = false;
 
-  expect(await f.controller().start(true)).toEqual({ action: "absent" });
+  expect(await f.controller().start(true, "")).toEqual({ action: "absent" });
   expect(f.probes).toEqual(["clodex-claude"]);
   expect(f.opens).toEqual([]);
 });
@@ -194,7 +194,7 @@ test("the store is resolved under the clodex home, not under userData", async ()
   f.runtime = [{ pid: 9002, port: 17_000, mode: "proxy", startedAt: PROXY_STARTED_AT }];
   f.alive.add(9002);
 
-  expect((await f.controller().start(true)).action).toBe("adopted");
+  expect((await f.controller().start(true, "")).action).toBe("adopted");
   expect(f.opens).toEqual([STORE_PATH]);
 });
 
@@ -202,7 +202,7 @@ test("an unusable lease identity refuses to start before touching anything", asy
   for (const broken of [{ pid: Number.NaN }, { startedAt: Number.NaN }, { runId: "" }, { hostname: () => "" }]) {
     const f = fixture(broken as Partial<ClodexControllerDeps>);
 
-    expect(await f.controller().start(true)).toEqual({ action: "failed" });
+    expect(await f.controller().start(true, "")).toEqual({ action: "failed" });
     expect(f.opens).toEqual([]);
     expect(f.probes).toEqual([]);
     expect(f.traces.map((trace) => trace.scope)).toEqual(["clodex-lifecycle"]);
@@ -217,13 +217,13 @@ test("a database that cannot be opened fails the start and is retried by the nex
   f.openError = new Error("database is unavailable");
   const controller = f.controller();
 
-  expect(await controller.start(true)).toEqual({ action: "failed" });
+  expect(await controller.start(true, "")).toEqual({ action: "failed" });
   expect(f.opens).toEqual([STORE_PATH]);
   expect(f.traces.map((trace) => trace.message)).toContain(
     "the clodex lifecycle lock could not be taken or released"
   );
 
-  expect((await controller.start(true)).action).toBe("adopted");
+  expect((await controller.start(true, "")).action).toBe("adopted");
   expect(f.opens).toEqual([STORE_PATH, STORE_PATH]);
 });
 
@@ -233,7 +233,7 @@ test("a manually started proxy is adopted and never stopped", async () => {
   f.alive.add(9002);
   const controller = f.controller();
 
-  expect(await controller.start(true)).toEqual({
+  expect(await controller.start(true, "")).toEqual({
     action: "adopted",
     server: { host: "host", pid: 9002, startedAt: Date.parse(PROXY_STARTED_AT), port: 17_000 }
   });
@@ -248,7 +248,7 @@ test("a held lock is waited out for the full budget, sleeping the chosen interva
   await store.write(LOCK_KEY, { host: "host", pid: 777, startedAt: 400, runId: "other", heartbeat: 10_000 });
   f.alive.add(777);
 
-  expect(await f.controller().start(true)).toEqual({ action: "failed" });
+  expect(await f.controller().start(true, "")).toEqual({ action: "failed" });
   expect(f.sleeps.length).toBe(180);
   expect(new Set(f.sleeps)).toEqual(new Set([250]));
   expect(f.traces.map((trace) => trace.message)).toContain(
@@ -262,7 +262,7 @@ test("the lock budget is a duration, so a shorter sleep buys proportionally more
   await store.write(LOCK_KEY, { host: "host", pid: 777, startedAt: 400, runId: "other", heartbeat: 10_000 });
   f.alive.add(777);
 
-  expect(await f.controller({ sleepMs: 50 }).start(true)).toEqual({ action: "failed" });
+  expect(await f.controller({ sleepMs: 50 }).start(true, "")).toEqual({ action: "failed" });
   expect(f.sleeps.length).toBe(900);
   expect(new Set(f.sleeps)).toEqual(new Set([50]));
 });
@@ -273,7 +273,7 @@ test("an unusable sleep interval is traced and falls back to the default one", a
   await store.write(LOCK_KEY, { host: "host", pid: 777, startedAt: 400, runId: "other", heartbeat: 10_000 });
   f.alive.add(777);
 
-  expect(await f.controller({ sleepMs: 0 }).start(true)).toEqual({ action: "failed" });
+  expect(await f.controller({ sleepMs: 0 }).start(true, "")).toEqual({ action: "failed" });
   expect(f.sleeps.length).toBe(180);
   expect(new Set(f.sleeps)).toEqual(new Set([250]));
   expect(f.traces.map((trace) => trace.message)).toContain("ignoring an unusable clodex sleep interval: 0");
@@ -289,7 +289,7 @@ test("a spawned proxy is owned end to end and its readiness is a TCP connect on 
   };
   const controller = f.controller();
 
-  expect(await controller.start(true)).toEqual({
+  expect(await controller.start(true, "")).toEqual({
     action: "acquired",
     server: { host: "host", pid: 9002, startedAt: Date.parse(PROXY_STARTED_AT), port: 17_000 }
   });
@@ -313,10 +313,10 @@ test("a second window sharing the store reuses the proxy instead of spawning ano
     f.alive.add(9002);
   };
   const first = f.controller();
-  expect((await first.start(true)).action).toBe("acquired");
+  expect((await first.start(true, "")).action).toBe("acquired");
 
   const second = createClodexController({ ...f.deps, pid: 4243, runId: "run-b" }, {});
-  expect((await second.start(true)).action).toBe("reused");
+  expect((await second.start(true, "")).action).toBe("reused");
   expect(f.spawns.length).toBe(1);
 });
 
@@ -330,7 +330,7 @@ test("a proxy that never accepts a connection ends on the bounded attempt count"
     f.alive.add(9002);
   };
 
-  expect(await f.controller({ readinessAttempts: 3 }).start(true)).toEqual({ action: "failed" });
+  expect(await f.controller({ readinessAttempts: 3 }).start(true, "")).toEqual({ action: "failed" });
   expect(f.connects).toEqual([17_000, 17_000, 17_000]);
   expect(f.traces.map((trace) => trace.message)).toContain(
     "the clodex proxy did not accept a connection in time"

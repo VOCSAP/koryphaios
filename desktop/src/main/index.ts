@@ -496,7 +496,7 @@ const ensureClodexController = (): ClodexController => {
 const applyClodexAutoStart = async (enabled: boolean): Promise<void> => {
   try {
     const outcome = enabled
-      ? await ensureClodexController().start(true)
+      ? await ensureClodexController().start(true, getConfig().clodexProxyArgs)
       : await (clodexController?.stop() ?? Promise.resolve({ action: 'released' as const }))
     journal.add('session', `clodex: auto-start ${enabled ? 'on' : 'off'} (${outcome.action})`)
     // The proxy just became reachable, or stopped being: the surfaces holding a
@@ -3307,7 +3307,7 @@ app.whenReady().then(async () => {
   journal.add('session', armed ? 'remote approvals armed' : 'remote approvals unavailable')
   // Clodex proxy starts detached so neither the window nor restored tiles wait on a login-shell probe.
   void Promise.resolve()
-    .then(() => ensureClodexController().start(getConfig().clodexAutoStart))
+    .then(() => ensureClodexController().start(getConfig().clodexAutoStart, getConfig().clodexProxyArgs))
     .then((outcome) => {
       if (outcome.action === 'failed') {
         reportError('clodex-lifecycle', 'the clodex proxy could not be started')

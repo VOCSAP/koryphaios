@@ -82,7 +82,7 @@ export interface ClodexControllerOptions extends ClodexProcessOptions {
 }
 
 export interface ClodexController {
-  start(enabled: boolean): Promise<AcquireOutcome>;
+  start(enabled: boolean, proxyArgs: string): Promise<AcquireOutcome>;
   stop(): Promise<ReleaseOutcome>;
 }
 
@@ -195,10 +195,10 @@ export function createClodexController(
   };
 
   return {
-    async start(enabled: boolean): Promise<AcquireOutcome> {
+    async start(enabled: boolean, proxyArgs: string): Promise<AcquireOutcome> {
       const engine = resolveLifecycle();
       if (!engine) return { action: "failed" };
-      return engine.acquire(enabled);
+      return engine.acquire(enabled, proxyArgs);
     },
     async stop(): Promise<ReleaseOutcome> {
       if (!lifecycle) return { action: "released" };

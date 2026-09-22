@@ -4,6 +4,7 @@ import {
   type OwnerRecord,
   type ServerIdentity
 } from "./clodex-process-identity";
+import { parseClodexProxyArgs } from "./clodex-process-io";
 
 export type { ServerIdentity } from "./clodex-process-identity";
 
@@ -116,7 +117,7 @@ export function createClodexLifecycle(
   deps: ClodexLifecycleDeps,
   identity: LeaseIdentity,
   options: ClodexLifecycleOptions = {}
-): { acquire(enabled: boolean): Promise<AcquireOutcome>; release(): Promise<ReleaseOutcome> } {
+): { acquire(enabled: boolean, proxyArgs: string): Promise<AcquireOutcome>; release(): Promise<ReleaseOutcome> } {
   const staleMs = options.staleMs ?? 30_000;
   const readinessAttempts = options.readinessAttempts ?? 20;
   const lockAttempts = options.lockAttempts ?? 20;
@@ -369,7 +370,7 @@ export function createClodexLifecycle(
     return { action: "stopped" };
   };
 
-  const acquireImpl = async (enabled: boolean): Promise<AcquireOutcome> => {
+  const acquireImpl = async (enabled: boolean, proxyArgs: string): Promise<AcquireOutcome> => {
     if (!enabled) return { action: "disabled" };
 
     try {
@@ -432,7 +433,8 @@ export function createClodexLifecycle(
         }
 
         stage = "spawn";
-        const spawned = await deps.spawn(CLODEX_SERVER_COMMAND[0], [...CLODEX_SERVER_COMMAND.slice(1)]);
+        const extraArgs = parseClodexProxyArgs(proxyArgs);
+        const spawned = await deps.spawn(CLODEX_SERVER_COMMAND[0], [...CLODEX_SERVER_COMMAND.slice(1), ...extraArgs]);
         const owner = parseOwnerRecord(spawned);
         if (!owner) throw new TypeError("Invalid Clodex owner returned by spawn");
         const server = owner.server;
@@ -544,8 +546,8 @@ export function createClodexLifecycle(
   };
 
   return {
-    acquire(enabled: boolean): Promise<AcquireOutcome> {
-      return serialize(() => acquireImpl(enabled));
+    acquire(enabled: boolean, proxyArgs: string): Promise<AcquireOutcome> {
+      return serialize(() => acquireImpl(enabled, proxyArgs));
     },
     release(): Promise<ReleaseOutcome> {
       return serialize(releaseImpl);

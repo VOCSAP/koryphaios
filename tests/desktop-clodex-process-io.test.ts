@@ -9,6 +9,7 @@ import { clodexHome } from "../desktop/src/main/clodex-bridge.ts";
 import type { OwnerRecord } from "../desktop/src/main/clodex-process-identity.ts";
 import {
   createClodexProcessIo,
+  parseClodexProxyArgs,
   type ClodexProcessDeps,
   type ClodexSpawnOptions
 } from "../desktop/src/main/clodex-process-io.ts";
@@ -241,6 +242,41 @@ const posixOwner = (over: Partial<{ rootToken: string; pgid: number }> = {}): Ow
   }
 });
 
+test("proxy arguments reject a value beyond the named length limit", () => {
+  expect(() => parseClodexProxyArgs(`--providers=${"a".repeat(4096)}`)).toThrow("at most 4096 characters");
+});
+
+test("proxy arguments reject more than the named token limit", () => {
+  expect(() => parseClodexProxyArgs(Array.from({ length: 65 }, () => "--ws-diagnostics").join(" "))).toThrow(
+    "at most 64 tokens"
+  );
+});
+
+test("proxy arguments accept the admitted diagnostics and discovery flags", () => {
+  expect(parseClodexProxyArgs("--ws-diagnostics --no-discovery")).toEqual([
+    "--ws-diagnostics",
+    "--no-discovery"
+  ]);
+});
+
+test("proxy arguments reject a structurally valid flag absent from the allow-list", () => {
+  expect(() => parseClodexProxyArgs("--providers=openai")).toThrow(
+    "accept only --ws-diagnostics and --no-discovery"
+  );
+});
+
+test("proxy arguments reject a listening exposure by name", () => {
+  expect(() => parseClodexProxyArgs("--listen=0.0.0.0")).toThrow(
+    "accept only --ws-diagnostics and --no-discovery"
+  );
+});
+
+test("proxy arguments reject a value on a flag the Clodex parser accepts only bare", () => {
+  expect(() => parseClodexProxyArgs("--ws-diagnostics=verbose")).toThrow(
+    "accept only --ws-diagnostics and --no-discovery"
+  );
+});
+
 test("stampWin32 asks one source and keeps its seven fraction digits verbatim", async () => {
   const h = harness({ run: windowsStamps({ [ROOT_PID]: ROOT_STAMP }) });
   const stamp = await h.io.stampWin32(ROOT_PID);
@@ -396,11 +432,16 @@ test("spawn owns the inner cmd.exe root and the registered server as two distinc
         JSON.stringify([record(100, 9000, "2026-09-15T07:00:00.000Z"), record(SERVER_PID, PORT, SERVER_STARTED)])
       )
   });
-  const owner = await h.io.spawn("clodex", ["server", "--proxy"]);
+  const owner = await h.io.spawn("clodex", ["server", "--proxy", "--ws-diagnostics", "--no-discovery"]);
   expect(owner, "the persisted root stamp is the Get-Process one").toEqual(winOwner());
   expect(h.spawns[0]).toEqual({
     file: CMD,
-    args: ["/d", "/s", "/c", `${CMD} /d /s /c clodex server --proxy`],
+    args: [
+      "/d",
+      "/s",
+      "/c",
+      `${CMD} /d /s /c clodex server --proxy --ws-diagnostics --no-discovery`
+    ],
     options: {
       detached: false,
       windowsHide: true,
@@ -715,10 +756,14 @@ test("spawn on posix proves the root leads its own group", async () => {
     },
     onSleep: (files) => files.set(RUNTIME, JSON.stringify([record(SERVER_PID, PORT, SERVER_STARTED)]))
   });
-  const owner = await h.io.spawn("clodex", ["server", "--proxy"]);
+  const owner = await h.io.spawn("clodex", ["server", "--proxy", "--ws-diagnostics", "--no-discovery"]);
   expect(owner).toEqual(posixOwner());
   expect(h.spawns[0]?.file).toBe("/bin/bash");
-  expect(h.spawns[0]?.args).toEqual(["-l", "-c", "clodex server --proxy"]);
+  expect(h.spawns[0]?.args).toEqual([
+    "-l",
+    "-c",
+    "clodex server --proxy --ws-diagnostics --no-discovery"
+  ]);
   expect(h.spawns[0]?.options.detached).toBe(true);
   expect(h.madeDirs).toEqual([]);
   expect(h.spawns[0]?.options.cwd).toBeUndefined();
@@ -791,6 +836,14 @@ test("spawn names the pid it leaves running when the owner cannot be measured", 
   await expect(h.io.spawn("clodex", ["server", "--proxy"])).rejects.toThrow(
     new RegExp(`Cannot measure the creation time of pid .*; pid ${RELAY_PID} was left running`)
   );
+});
+
+test("spawn rejects a structurally valid listening exposure absent from the name allow-list", async () => {
+  const h = harness();
+  await expect(h.io.spawn("clodex", ["server", "--proxy", "--listen=0.0.0.0"])).rejects.toThrow(
+    "accept only --ws-diagnostics and --no-discovery"
+  );
+  expect(h.spawns).toHaveLength(0);
 });
 
 test("spawn refuses a command token that is not a plain word", async () => {

@@ -53,8 +53,10 @@ export function SettingsView(): React.JSX.Element {
   // round-trip per keystroke). Seeded from config; resynced if it changes under us.
   const [projectDir, setProjectDir] = useState(config.projectDir)
   const [shell, setShell] = useState(config.shell)
+  const [clodexProxyArgs, setClodexProxyArgs] = useState(config.clodexProxyArgs)
   useEffect(() => setProjectDir(config.projectDir), [config.projectDir])
   useEffect(() => setShell(config.shell), [config.shell])
+  useEffect(() => setClodexProxyArgs(config.clodexProxyArgs), [config.clodexProxyArgs])
 
   // launchCommand lives in the (global) launch config, not AppConfig. presets +
   // models are carried through unchanged so saving the command preserves them.
@@ -489,6 +491,18 @@ export function SettingsView(): React.JSX.Element {
                   ? t('settings.clodexAutoStartAbsent')
                   : t('settings.clodexAutoStartHelp')}
               </small>
+
+              <label className="field" aria-disabled={clodexUnavailable}>
+                <span>{t('settings.clodexProxyArgs')}</span>
+                <input
+                  value={clodexProxyArgs}
+                  disabled={clodexUnavailable}
+                  placeholder={t('settings.clodexProxyArgsPlaceholder')}
+                  onChange={(e) => setClodexProxyArgs(e.target.value)}
+                  onBlur={() => set('clodexProxyArgs', clodexProxyArgs)}
+                />
+                <small>{t('settings.clodexProxyArgsHelp')}</small>
+              </label>
 
               {/* Utility-inference targets (lot A): help+digest and the
                   roadmap context wand each pick any catalog model. Bridged

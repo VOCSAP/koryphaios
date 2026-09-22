@@ -281,12 +281,75 @@ test("disabled and absent Clodex leave no lease or event", async () => {
   const f = fixture();
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
 
-  expect(await lifecycle.acquire(false)).toEqual({ action: "disabled" });
+  expect(await lifecycle.acquire(false, "")).toEqual({ action: "disabled" });
   f.installed = false;
-  expect(await lifecycle.acquire(true)).toEqual({ action: "absent" });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "absent" });
   expect(f.files.size).toBe(0);
   expect(f.events).toEqual([]);
 });
+
+test("a new proxy receives accepted extra arguments", async () => {
+  const f = fixture();
+  const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
+
+  expect(await lifecycle.acquire(true, "--ws-diagnostics --no-discovery")).toMatchObject({
+    action: "acquired"
+  });
+  expect(f.spawnArgs).toEqual([["clodex", "server", "--proxy", "--ws-diagnostics", "--no-discovery"]]);
+});
+
+test("a listening exposure is rejected before proxy spawn", async () => {
+  const f = fixture();
+  const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
+
+  expect(await lifecycle.acquire(true, "--listen=0.0.0.0")).toEqual({ action: "failed" });
+  expect(f.spawnCount).toBe(0);
+  expect(f.events).toEqual(["spawn-error"]);
+});
+
+test("invalid extra arguments refuse the spawn", async () => {
+  const f = fixture();
+  const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
+
+  expect(await lifecycle.acquire(true, "--ws-diagnostics; whoami")).toEqual({ action: "failed" });
+  expect(f.spawnCount).toBe(0);
+  expect(f.events).toEqual(["spawn-error"]);
+});
+
+test("unsafe extra argument forms never spawn a proxy", async () => {
+  for (const raw of [
+    "--ws-diagnostics; whoami",
+    "--ws-diagnostics & whoami",
+    "--ws-diagnostics `whoami`",
+    "--ws-diagnostics $(whoami)",
+    '--providers="openai"',
+    "--ws-diagnostics\n--providers=openai",
+    "providers=openai",
+    "--ws-diagnostics  --providers=openai",
+    "--providers=openai:anthropic"
+  ]) {
+    const f = fixture();
+    const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
+
+    expect(await lifecycle.acquire(true, raw), raw).toEqual({ action: "failed" });
+    expect(f.spawnCount, raw).toBe(0);
+    expect(f.events, raw).toEqual(["spawn-error"]);
+  }
+});
+
+for (const [label, raw] of [
+  ["newline", "--ws-diagnostics\n"],
+  ["tab", "--ws-diagnostics\t"]
+]) {
+  test(`a terminal ${label} never spawns a proxy`, async () => {
+    const f = fixture();
+    const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
+
+    expect(await lifecycle.acquire(true, raw), raw).toEqual({ action: "failed" });
+    expect(f.spawnCount, raw).toBe(0);
+    expect(f.events, raw).toEqual(["spawn-error"]);
+  });
+}
 
 const owner = (identity = server()) => ({
   server: identity,
@@ -316,7 +379,7 @@ test("a spawned owner snapshot is persisted and passed intact to stopTree", asyn
     lease("a", 101)
   );
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "acquired", server: spawned.server });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "acquired", server: spawned.server });
   expect(f.files.get("clodex-lifecycle.owner")).toEqual(spawned);
   expect(await lifecycle.release()).toEqual({ action: "stopped" });
   expect(stopped).toEqual([spawned]);
@@ -328,7 +391,7 @@ test("a legacy owner is visible, manual, and never grants kill authority", async
   f.files.set("clodex-lifecycle.owner", { server: f.runtime });
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "adopted", server: server(701) });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "adopted", server: server(701) });
   expect(await lifecycle.release()).toEqual({ action: "released" });
   expect(f.stopCount).toBe(0);
   expect(f.events).toContain("lifecycle-error");
@@ -338,7 +401,7 @@ test("a same-server owner with a different tree loses kill authority", async () 
   const f = fixture();
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
 
-  expect((await lifecycle.acquire(true)).action).toBe("acquired");
+  expect((await lifecycle.acquire(true, "")).action).toBe("acquired");
   const replacement: OwnerRecord = {
     ...owner(f.runtime!),
     tree: {
@@ -360,7 +423,7 @@ test("an owner naming another server leaves a running server manual", async () =
   f.files.set("clodex-lifecycle.owner", stale);
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "adopted", server: server(701) });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "adopted", server: server(701) });
   expect(await lifecycle.release()).toEqual({ action: "released" });
   expect(f.stopCount).toBe(0);
   expect(f.files.get("clodex-lifecycle.owner")).toBe(stale);
@@ -381,7 +444,7 @@ test("a spawn result without a tree fails before any ownership is persisted", as
     lease("a", 101)
   );
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
   expect(f.events).toContain("spawn-error");
   expect(f.files.has("clodex-lifecycle.owner")).toBe(false);
   expect(f.stopCount).toBe(0);
@@ -393,7 +456,7 @@ test("a live manual server is adopted and never stopped", async () => {
   f.runtime = server(701);
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "adopted", server: server(701) });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "adopted", server: server(701) });
   expect(await lifecycle.release()).toEqual({ action: "released" });
   expect(f.spawnCount).toBe(0);
   expect(f.stopCount).toBe(0);
@@ -407,11 +470,11 @@ test("automatic acquisition uses the literal proxy command once across concurren
     const first = createClodexLifecycle(f.deps, lease("a", 101));
     const second = createClodexLifecycle(f.deps, lease("b", 102));
 
-    const [a, b] = await Promise.all([first.acquire(true), second.acquire(true)]);
+    const [a, b] = await Promise.all([first.acquire(true, ""), second.acquire(true, "")]);
     expect([a.action, b.action].sort()).toEqual(["acquired", "reused"]);
     expect(f.spawnArgs).toEqual([["clodex", "server", "--proxy"]]);
     expect(f.tcpAttempts).toBe(1);
-    expect((await first.acquire(true)).action).toBe("reused");
+    expect((await first.acquire(true, "")).action).toBe("reused");
     expect(f.spawnCount).toBe(1);
   } finally {
     if (previous === undefined) delete process.env.CLODEX_BINARY;
@@ -424,10 +487,10 @@ test("the lease lock covers the full spawn operation", async () => {
   f.blockSpawn();
   const first = createClodexLifecycle(f.deps, lease("a", 101));
   const second = createClodexLifecycle(f.deps, lease("b", 102));
-  const firstAcquire = first.acquire(true);
+  const firstAcquire = first.acquire(true, "");
   await f.waitForSpawn();
   f.blockSleeps();
-  const secondAcquire = second.acquire(true);
+  const secondAcquire = second.acquire(true, "");
 
   let phase: "sleep" | "spawn";
   try {
@@ -453,8 +516,8 @@ test("only the final live lease stops a Kory-owned server in either release orde
     const f = fixture();
     const a = createClodexLifecycle(f.deps, lease("a", 101));
     const b = createClodexLifecycle(f.deps, lease("b", 102));
-    await a.acquire(true);
-    await b.acquire(true);
+    await a.acquire(true, "");
+    await b.acquire(true, "");
     f.markAlive(lease("a", 101));
     f.markAlive(lease("b", 102));
 
@@ -476,9 +539,9 @@ test("fresh dead peers, then final live release purges both and stops once", asy
   const b = createClodexLifecycle(f.deps, bIdentity);
   const c = createClodexLifecycle(f.deps, cIdentity);
 
-  await a.acquire(true);
-  await b.acquire(true);
-  await c.acquire(true);
+  await a.acquire(true, "");
+  await b.acquire(true, "");
+  await c.acquire(true, "");
   f.markAlive(aIdentity);
   f.markAlive(bIdentity);
   f.markAlive(cIdentity);
@@ -502,8 +565,8 @@ test("a replaced dead peer lease fails safely", async () => {
   const a = createClodexLifecycle(f.deps, aIdentity);
   const b = createClodexLifecycle(f.deps, bIdentity);
 
-  await a.acquire(true);
-  await b.acquire(true);
+  await a.acquire(true, "");
+  await b.acquire(true, "");
   f.markAlive(aIdentity);
   f.markAlive(bIdentity);
   f.live.delete(processKey(bIdentity));
@@ -527,7 +590,7 @@ test("an aged lock and lease with the exact live identity remain protected", asy
   f.now = 100_000;
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101), { staleMs: 1, lockAttempts: 1 });
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
   expect(f.events).toContain("lock-timeout");
   expect(f.files.has("clodex-lifecycle.lock")).toBe(true);
   expect(f.files.has("clodex-lifecycle.leases/host-999-active")).toBe(true);
@@ -544,7 +607,7 @@ test("a reused pid with a different start time reclaims stale lock, lease, and o
   f.now = 100_000;
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101), { staleMs: 1 });
 
-  expect((await lifecycle.acquire(true)).action).toBe("acquired");
+  expect((await lifecycle.acquire(true, "")).action).toBe("acquired");
   expect(f.files.has("clodex-lifecycle.leases/host-999-stale")).toBe(false);
   expect(f.files.get("clodex-lifecycle.owner")).toEqual(owner(server(801)));
 });
@@ -560,7 +623,7 @@ test("every server-identity mismatch prevents termination", async () => {
   for (const [, mismatch] of mismatches) {
     const f = fixture();
     const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
-    await lifecycle.acquire(true);
+    await lifecycle.acquire(true, "");
     const owned = f.runtime!;
     f.identities.set(owned.pid, mismatch(owned));
 
@@ -574,7 +637,7 @@ test("a read-server failure removes the acquired lease and reports an event", as
   f.readServerError = new Error("runtime read denied");
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(false);
   expect(f.events).toEqual(["lifecycle-error"]);
 });
@@ -596,7 +659,7 @@ test("release retries a lease removal that failed during cleanup without a held 
     lease("a", 101)
   );
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(true);
 
   rejectLeaseRemoval = false;
@@ -610,8 +673,8 @@ test("pending cleanup blocks acquisition instead of returning reused", async () 
   f.stopError = new Error("stop denied");
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101), { readinessAttempts: 1 });
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
-  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
   expect(f.spawnCount).toBe(1);
 });
 
@@ -631,7 +694,7 @@ test("release retries owner removal without stopping an already stopped server",
     lease("a", 101)
   );
 
-  await lifecycle.acquire(true);
+  await lifecycle.acquire(true, "");
   expect(await lifecycle.release()).toEqual({ action: "failed" });
   expect(f.stopCount).toBe(1);
   expect(f.measureCount).toBe(1);
@@ -653,7 +716,7 @@ test("a missing current owner prevents a pending cleanup retry from stopping", a
   f.stopError = new Error("stop denied");
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101), { readinessAttempts: 1 });
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
   expect(f.stopCount).toBe(1);
   f.files.delete("clodex-lifecycle.owner");
   f.stopError = null;
@@ -671,7 +734,7 @@ test("a replaced current owner prevents a pending cleanup retry from stopping", 
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101), { readinessAttempts: 1 });
   const replacement = owner(server(999));
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
   expect(f.stopCount).toBe(1);
   f.files.set("clodex-lifecycle.owner", replacement);
   f.stopError = null;
@@ -689,7 +752,7 @@ test("a same-server tree replacement prevents a pending cleanup retry from stopp
   f.stopError = new Error("stop denied");
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101), { readinessAttempts: 1 });
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
   expect(f.stopCount).toBe(1);
   const replacement: OwnerRecord = {
     ...owner(f.runtime!),
@@ -713,7 +776,7 @@ test("a pending owner read error remains retryable without another stop", async 
   f.stopError = new Error("stop denied");
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101), { readinessAttempts: 1 });
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
   expect(f.stopCount).toBe(1);
   f.ownerReadError = new Error("owner read denied");
   f.stopError = null;
@@ -734,7 +797,7 @@ test("a held owner read error is traced as a lifecycle failure, not a lock failu
   const f = fixture();
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
 
-  expect((await lifecycle.acquire(true)).action).toBe("acquired");
+  expect((await lifecycle.acquire(true, "")).action).toBe("acquired");
   f.ownerReadError = new Error("owner read denied");
 
   expect(await lifecycle.release()).toEqual({ action: "failed" });
@@ -759,7 +822,7 @@ test("each pending owner identity mismatch prevents a retry stop", async () => {
     f.stopError = new Error("stop denied");
     const lifecycle = createClodexLifecycle(f.deps, lease("a", 101), { readinessAttempts: 1 });
 
-    expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
+    expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
     expect(f.stopCount).toBe(1);
     f.files.set("clodex-lifecycle.owner", owner({ ...f.runtime!, ...mismatch }));
     f.stopError = null;
@@ -776,7 +839,7 @@ test("owner-write failure relinquishes an unpersisted server without stopping it
   f.ownerWriteError = new Error("owner write denied");
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
   expect(f.stopCount).toBe(0);
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(false);
   expect(f.files.has("clodex-lifecycle.owner")).toBe(false);
@@ -790,10 +853,10 @@ test("an unpersisted ownership failure does not block later adoption", async () 
   f.ownerWriteError = new Error("owner write denied");
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
   f.ownerWriteError = null;
 
-  expect((await lifecycle.acquire(true)).action).toBe("adopted");
+  expect((await lifecycle.acquire(true, "")).action).toBe("adopted");
   expect(f.stopCount).toBe(0);
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(true);
   expect(f.live.has(processKey(f.runtime!))).toBe(true);
@@ -805,7 +868,7 @@ test("readiness timeout retains its lease until persisted ownership is terminate
   f.stopError = new Error("stop denied");
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101), { readinessAttempts: 2 });
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
   expect(f.events).toContain("readiness-timeout");
   expect(f.events).toContain("kill-error");
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(true);
@@ -820,12 +883,12 @@ test("an exited active server is not reused and is reacquired", async () => {
   const f = fixture();
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
 
-  expect((await lifecycle.acquire(true)).action).toBe("acquired");
+  expect((await lifecycle.acquire(true, "")).action).toBe("acquired");
   const exited = f.runtime!;
   f.live.clear();
   expect(await f.deps.measureServer(exited.pid)).toBeNull();
 
-  expect((await lifecycle.acquire(true)).action).toBe("acquired");
+  expect((await lifecycle.acquire(true, "")).action).toBe("acquired");
   expect(f.spawnCount).toBe(2);
 });
 
@@ -834,14 +897,14 @@ test("premature exit and spawn failure clean up their lease", async () => {
   exited.tcpReady = false;
   exited.onTcpReady = () => exited.live.clear();
   const exitLifecycle = createClodexLifecycle(exited.deps, lease("a", 101), { readinessAttempts: 2 });
-  expect((await exitLifecycle.acquire(true)).action).toBe("failed");
+  expect((await exitLifecycle.acquire(true, "")).action).toBe("failed");
   expect(exited.events).toContain("server-exited");
   expect(exited.files.has("clodex-lifecycle.leases/host-101-a")).toBe(false);
 
   const spawned = fixture();
   spawned.spawnError = new Error("spawn denied");
   const spawnLifecycle = createClodexLifecycle(spawned.deps, lease("a", 101));
-  expect(await spawnLifecycle.acquire(true)).toEqual({ action: "failed" });
+  expect(await spawnLifecycle.acquire(true, "")).toEqual({ action: "failed" });
   expect(spawned.events).toContain("spawn-error");
   expect(spawned.files.has("clodex-lifecycle.leases/host-101-a")).toBe(false);
 });
@@ -854,12 +917,12 @@ test("lock failures and kill failures are visible", async () => {
       throw new Error("lock denied");
     }
   };
-  expect((await createClodexLifecycle(lockDeps, lease("a", 101)).acquire(true)).action).toBe("failed");
+  expect((await createClodexLifecycle(lockDeps, lease("a", 101)).acquire(true, "")).action).toBe("failed");
   expect(lock.events).toContain("lock-error");
 
   const kill = fixture();
   const lifecycle = createClodexLifecycle(kill.deps, lease("a", 101));
-  await lifecycle.acquire(true);
+  await lifecycle.acquire(true, "");
   kill.stopError = new Error("kill denied");
   expect((await lifecycle.release()).action).toBe("failed");
   expect(kill.events).toContain("kill-error");
@@ -871,13 +934,13 @@ test("a failed stop retains the lease before a reused acquisition", async () => 
   const f = fixture();
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
 
-  await lifecycle.acquire(true);
+  await lifecycle.acquire(true, "");
   f.stopError = new Error("stop denied");
   expect(await lifecycle.release()).toEqual({ action: "failed" });
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(true);
 
   f.stopError = null;
-  expect((await lifecycle.acquire(true)).action).toBe("reused");
+  expect((await lifecycle.acquire(true, "")).action).toBe("reused");
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(true);
 });
 
@@ -885,11 +948,11 @@ test("a release decision that abandons ownership removes its lease before later 
   const f = fixture();
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
 
-  await lifecycle.acquire(true);
+  await lifecycle.acquire(true, "");
   f.files.delete("clodex-lifecycle.owner");
   expect(await lifecycle.release()).toEqual({ action: "retained", reason: "not-owner" });
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(false);
-  expect((await lifecycle.acquire(true)).action).toBe("adopted");
+  expect((await lifecycle.acquire(true, "")).action).toBe("adopted");
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(true);
 });
 
@@ -897,13 +960,13 @@ test("a release list failure retains the lease before a reused acquisition", asy
   const f = fixture();
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
 
-  await lifecycle.acquire(true);
+  await lifecycle.acquire(true, "");
   f.listError = new Error("lease list denied");
   expect(await lifecycle.release()).toEqual({ action: "failed" });
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(true);
 
   f.listError = null;
-  expect((await lifecycle.acquire(true)).action).toBe("reused");
+  expect((await lifecycle.acquire(true, "")).action).toBe("reused");
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(true);
 });
 
@@ -914,9 +977,9 @@ test("a persisted pending cleanup does not stop a server while a peer holds a le
   const failedOwner = createClodexLifecycle(f.deps, lease("a", 101), { readinessAttempts: 1 });
   const peer = createClodexLifecycle(f.deps, lease("b", 102));
 
-  expect(await failedOwner.acquire(true)).toEqual({ action: "failed" });
+  expect(await failedOwner.acquire(true, "")).toEqual({ action: "failed" });
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(true);
-  expect((await peer.acquire(true)).action).toBe("reused");
+  expect((await peer.acquire(true, "")).action).toBe("reused");
   f.markAlive(lease("b", 102));
 
   f.stopError = null;
@@ -932,14 +995,14 @@ test("a deferred release permits the same instance to reacquire while its peer l
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101), { readinessAttempts: 1 });
   const peer = createClodexLifecycle(f.deps, lease("b", 102));
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
-  expect((await peer.acquire(true)).action).toBe("reused");
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
+  expect((await peer.acquire(true, "")).action).toBe("reused");
   f.markAlive(lease("b", 102));
   f.stopError = null;
 
   expect(await lifecycle.release()).toEqual({ action: "released" });
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(false);
-  expect((await lifecycle.acquire(true)).action).toBe("reused");
+  expect((await lifecycle.acquire(true, "")).action).toBe("reused");
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(true);
   expect(f.stopCount).toBe(1);
   expect(f.live.has(processKey(f.runtime!))).toBe(true);
@@ -966,8 +1029,8 @@ test("a failed deferred lease removal retains cleanup for a later stop and acqui
   f.tcpReady = false;
   f.stopError = new Error("stop denied");
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
-  expect((await peer.acquire(true)).action).toBe("reused");
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
+  expect((await peer.acquire(true, "")).action).toBe("reused");
   f.markAlive(lease("b", 102));
   f.stopError = null;
 
@@ -978,7 +1041,7 @@ test("a failed deferred lease removal retains cleanup for a later stop and acqui
   expect(await lifecycle.release()).toEqual({ action: "stopped" });
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(false);
   f.tcpReady = true;
-  expect((await lifecycle.acquire(true)).action).toBe("acquired");
+  expect((await lifecycle.acquire(true, "")).action).toBe("acquired");
   expect(f.spawnCount).toBe(2);
 });
 
@@ -998,7 +1061,7 @@ test("a dead owned server retries owner cleanup before releasing its lease", asy
     lease("a", 101)
   );
 
-  await lifecycle.acquire(true);
+  await lifecycle.acquire(true, "");
   f.live.clear();
   expect(await lifecycle.release()).toEqual({ action: "failed" });
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(true);
@@ -1015,7 +1078,7 @@ test("an unreadable lock record is a lock error rather than a timeout", async ()
   f.files.set("clodex-lifecycle.lock", { ...lease("other", 999), heartbeat: 10_000 });
   f.readError = new Error("lock record unreadable");
 
-  expect(await createClodexLifecycle(f.deps, lease("a", 101), { lockAttempts: 1 }).acquire(true)).toEqual({
+  expect(await createClodexLifecycle(f.deps, lease("a", 101), { lockAttempts: 1 }).acquire(true, "")).toEqual({
     action: "failed"
   });
   expect(f.events).toEqual(["lock-error"]);
@@ -1026,7 +1089,7 @@ test("a failed unlock is retried without deleting a live replacement lock", asyn
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101), { lockAttempts: 1, staleMs: 1 });
   f.removeIfEqualsError = new Error("unlock denied");
 
-  expect((await lifecycle.acquire(true)).action).toBe("acquired");
+  expect((await lifecycle.acquire(true, "")).action).toBe("acquired");
   const failedUnlock = f.files.get("clodex-lifecycle.lock");
   expect(failedUnlock).not.toBeNull();
   expect(f.events).toEqual(["lock-error"]);
@@ -1038,7 +1101,7 @@ test("a failed unlock is retried without deleting a live replacement lock", asyn
     if (key === "clodex-lifecycle.lock" && expected === failedUnlock) f.files.set(key, replacement);
   };
 
-  expect(await lifecycle.acquire(true)).toEqual({ action: "failed" });
+  expect(await lifecycle.acquire(true, "")).toEqual({ action: "failed" });
   expect(f.files.get("clodex-lifecycle.lock")).toBe(replacement);
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(true);
   expect(f.events).toEqual(["lock-error", "lock-timeout"]);
@@ -1049,8 +1112,8 @@ test("a failed unlock is retried before reusing a held server", async () => {
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101), { lockAttempts: 1 });
   f.removeIfEqualsError = new Error("unlock denied");
 
-  expect((await lifecycle.acquire(true)).action).toBe("acquired");
-  expect((await lifecycle.acquire(true)).action).toBe("reused");
+  expect((await lifecycle.acquire(true, "")).action).toBe("acquired");
+  expect((await lifecycle.acquire(true, "")).action).toBe("reused");
   expect(f.files.has("clodex-lifecycle.lock")).toBe(false);
 });
 
@@ -1063,7 +1126,7 @@ test("two concurrent stale-lock reclaimers produce a single server", async () =>
   f.blockSpawn();
   const first = createClodexLifecycle(f.deps, lease("a", 101), { staleMs: 1, lockAttempts: 2 });
   const second = createClodexLifecycle(f.deps, lease("b", 102), { staleMs: 1, lockAttempts: 2 });
-  const acquiring = [first.acquire(true), second.acquire(true)];
+  const acquiring = [first.acquire(true, ""), second.acquire(true, "")];
 
   await f.waitForLockRemovals();
   f.releaseLockRemovals();
@@ -1085,7 +1148,7 @@ test("CAS stale reclaim does not remove a replacement lock", async () => {
     if (key === "clodex-lifecycle.lock") f.files.set(key, replacement);
   };
 
-  expect(await createClodexLifecycle(f.deps, lease("a", 101), { staleMs: 1, lockAttempts: 1 }).acquire(true)).toEqual({
+  expect(await createClodexLifecycle(f.deps, lease("a", 101), { staleMs: 1, lockAttempts: 1 }).acquire(true, "")).toEqual({
     action: "failed"
   });
   expect(f.files.get("clodex-lifecycle.lock")).toBe(replacement);
@@ -1113,7 +1176,7 @@ test("a post-stop same-server tree replacement survives owner cleanup", async ()
     lease("a", 101)
   );
 
-  expect((await lifecycle.acquire(true)).action).toBe("acquired");
+  expect((await lifecycle.acquire(true, "")).action).toBe("acquired");
   expect(await lifecycle.release()).toEqual({ action: "stopped" });
   expect(f.files.get("clodex-lifecycle.owner")).toBe(replacement);
   expect(f.files.has("clodex-lifecycle.leases/host-101-a")).toBe(false);
@@ -1124,7 +1187,7 @@ test("a concurrent owner replacement survives failed owner cleanup", async () =>
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
   const replacement = owner(server(999));
 
-  expect((await lifecycle.acquire(true)).action).toBe("acquired");
+  expect((await lifecycle.acquire(true, "")).action).toBe("acquired");
   f.beforeRemoveIfEquals = (key) => {
     if (key === "clodex-lifecycle.owner") f.files.set(key, replacement);
   };
@@ -1145,7 +1208,7 @@ test("an instance serializes release behind an in-flight acquisition", async () 
   const f = fixture();
   f.blockSpawn();
   const lifecycle = createClodexLifecycle(f.deps, lease("a", 101));
-  const acquiring = lifecycle.acquire(true);
+  const acquiring = lifecycle.acquire(true, "");
   await f.waitForSpawn();
   const releasing = lifecycle.release();
   f.releaseSpawn();

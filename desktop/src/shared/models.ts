@@ -228,6 +228,11 @@ export function sanitizeClodexAutoStart(raw: unknown, fallback: boolean): boolea
   return typeof raw === 'boolean' ? raw : fallback
 }
 
+/** Content is validated at spawn because stored configuration is untrusted at use time. */
+export function sanitizeClodexProxyArgs(raw: unknown, fallback: string): string {
+  return typeof raw === 'string' ? raw : fallback
+}
+
 /**
  * Is the clodex auto-start setting unavailable on this machine? ONLY a measured
  * absence greys it. An unknown catalog leaves the control active: the list is

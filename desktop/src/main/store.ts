@@ -16,6 +16,7 @@ import {
   DEFAULT_WAND_TARGET,
   legacyHelpTarget,
   sanitizeClodexAutoStart,
+  sanitizeClodexProxyArgs,
   sanitizeUtilityTarget
 } from '@shared/models'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
@@ -30,6 +31,7 @@ const DEFAULT_CONFIG: AppConfig = {
   shell: '',
   interactiveShell: false,
   clodexAutoStart: true,
+  clodexProxyArgs: '',
   columns: 2,
   displayMode: '2x2',
   gridCols: 2,
@@ -147,6 +149,10 @@ export function loadConfig(): AppConfig {
   cfg.clodexAutoStart = sanitizeClodexAutoStart(
     raw.clodexAutoStart,
     DEFAULT_CONFIG.clodexAutoStart
+  )
+  cfg.clodexProxyArgs = sanitizeClodexProxyArgs(
+    raw.clodexProxyArgs,
+    DEFAULT_CONFIG.clodexProxyArgs
   )
   // Corrupt/hand-edited value -> floor to the default; the real ceiling is
   // viewport-relative (renderer-only knowledge), clamped there on seed.
