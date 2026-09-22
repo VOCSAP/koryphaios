@@ -50,6 +50,18 @@ calling session only relays the result.
   `effort` (low/medium/high), `status` (idea/planned/in_progress/done) --
   default to `could`/`medium`/`medium`/`idea` when the input gives no signal,
   rather than asking.
+- `triage` -- use the canonical roles and field values in
+  `docs/agents/triage-labels.md`; do not reproduce its role table here. For an
+  operator's free-prose request, infer the role from the ask, but resolve doubt
+  to `needs-triage`, never to a promise. For a diagnosed agent handoff, use
+  `ready-for-agent` only when another session can take the card without
+  rereading; use `needs-info` or `ready-for-human` when a human decision is
+  still needed. When both could apply, `needs-info` takes precedence.
+  `ready-for-agent` is an engagement, never a default or a
+  courtesy: do not upgrade the confidence you were given. A card may
+  legitimately have no role because it has never been triaged. The broker
+  refuses the contradictory `wontfix` / non-`wont` priority write with 400;
+  set `priority: wont` whenever you set `triage: wontfix`.
 
 ## Confidence markers (reuse verbatim, never invent new ones)
 

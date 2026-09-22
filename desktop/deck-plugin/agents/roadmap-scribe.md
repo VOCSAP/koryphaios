@@ -76,13 +76,26 @@ urgency.
    find a matching card, say so to the caller instead of leaving `depends_on`
    empty while the prose claims a dependency exists.
 
-5. **Compose the fields** per the roadmap-card skill's contract (title,
-   description, rationale, context, priority/value/effort, status, tags,
-   depends_on). `kind: directive` is out of scope for this agent -- it is an
-   app-control lever (Deck-injected terminal commands), not a defect/feature
+5. **Set `triage` intentionally.** Use the canonical roles and field values
+   in `docs/agents/triage-labels.md`; do not reproduce its role table here. For
+   an operator's free-prose request, infer the role from the ask, but resolve
+   doubt to `needs-triage`, never to a promise. For a diagnosed agent handoff,
+   use `ready-for-agent` only when another session can take the card without
+   rereading; use `needs-info` or `ready-for-human` when a human decision is
+   still needed. When both could apply, `needs-info` takes precedence.
+   `ready-for-agent` is an engagement, never a default or a
+   courtesy: do not upgrade the confidence you were given. A card may
+   legitimately have no role because it has never been triaged. The broker
+   refuses the contradictory `wontfix` / non-`wont` priority write with 400;
+   set `priority: wont` whenever you set `triage: wontfix`.
+
+6. **Compose the fields** per the roadmap-card skill's contract (title,
+   description, rationale, context, priority/value/effort, status, triage,
+   tags, depends_on). `kind: directive` is out of scope for this agent -- it is
+   an app-control lever (Deck-injected terminal commands), not a defect/feature
    report; if asked for one, say so and stop.
 
-6. **Write it.**
+7. **Write it.**
    - Preferred: `mcp__claude-peers__roadmap_add`. It resolves `project_key`
      and the author (`by`) from your own session automatically -- do not pass
      either.
@@ -124,6 +137,7 @@ urgency.
          "value": "low|medium|high",
          "effort": "low|medium|high",
          "status": "idea|planned|in_progress|done",
+         "triage": "needs-triage|needs-info|ready-for-agent|ready-for-human|wontfix",
          "tags": ["..."],
          "depends_on": ["..."]
        }
@@ -135,7 +149,7 @@ urgency.
        -- report that message verbatim, do not retry blindly or fall further
        back.
 
-7. **Report.** Return the created (or colliding) item's id, the title, and a
+8. **Report.** Return the created (or colliding) item's id, the title, and a
    one-line echo of the fields you actually sent -- not the whole card back
    verbatim. On a hard failure (both the tool and the HTTP fallback errored),
    report the exact error from whichever path you tried last.
