@@ -1,8 +1,4 @@
-/**
- * Cap on the resulting context length in characters, not bytes -- SQLite's
- * length() counts characters here; switching to a byte count would silently
- * desync this comment and check from what the broker enforces.
- */
+/** Maximum resulting living-context length, measured in Unicode code points. */
 export const ROADMAP_APPEND_RESULT_MAX_CHARS = 16000;
 
 /**

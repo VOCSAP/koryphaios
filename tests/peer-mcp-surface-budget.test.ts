@@ -7,10 +7,9 @@ import { test, expect, describe } from "bun:test";
 
 const SRC = await Bun.file(new URL("../server.ts", import.meta.url)).text();
 
-// Chars, not tokens: no tokenizer in the test runner, and the ratio is stable
-// enough for a cap (measured ~1.25 tokens per 4 chars on this JSON-ish text).
-// Headroom above the post-lot measure (~17 800) is deliberately small, so a
-// single verbose description fails rather than ten small ones accumulating.
+// Use characters because the test runner has no tokenizer; keep the ceiling
+// tight enough that one verbose description fails before small additions
+// accumulate.
 const CEILING_CHARS = 19_000;
 // Below this, the extractor lost a block: a full TOOLS array cannot fit in so little.
 const FLOOR_CHARS = 8_000;

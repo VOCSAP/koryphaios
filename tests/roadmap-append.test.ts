@@ -264,7 +264,7 @@ test("supersession targets reject duplicates and do not confuse an author named 
   expect(parseRoadmapContext(context)[1]).toMatchObject({ author: "supersedes", supersedes: [] });
 });
 
-test("the folded rendering and live-length calculation cover exactly the same characters", () => {
+test("getLivingRoadmapContextUnits' concatenated raw units and getRoadmapContextLiveLength agree on codepoint count", () => {
   const obsolete = buildRoadmapAppendHeader(APPEND_A, "a") + "obsolete";
   const existingContext = "origin" + obsolete;
   const replacement = plannedAppend(existingContext, APPEND_B, "b", "replacement", [ROADMAP_APPEND_BODY_TARGET, APPEND_A]);

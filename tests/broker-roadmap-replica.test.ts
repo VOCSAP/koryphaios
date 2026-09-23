@@ -249,7 +249,7 @@ test("a card written on the replica reaches the upstream with its rank and its a
 // write and the pull's INSERT. Nothing type-checks them, and a column dropped
 // from one of them leaves the sending side perfectly healthy -- versioned,
 // marked dirty, every unit guard green -- while the value dies in transit.
-test("a context with supersedes travels from a replica-born card through the push INSERT", async () => {
+test("a context with supersedes, and the triage it was created with, travel from a replica-born card through the push INSERT", async () => {
   const supersededAt = "2026-09-23T12:10:00.000Z";
   const context =
     "replica insert body" +
@@ -272,7 +272,7 @@ test("a context with supersedes travels from a replica-born card through the pus
   expect([upstreamCard.context, upstreamCard.triage]).toEqual([context, "ready-for-agent"]);
 });
 
-test("a context with supersedes written upstream reaches the replica through pull INSERT and content UPDATE", async () => {
+test("a context with supersedes and its triage, written upstream, reach the replica through pull INSERT and content UPDATE", async () => {
   const firstSupersededAt = "2026-09-23T12:11:00.000Z";
   const initialContext =
     "upstream insert body" +
@@ -316,7 +316,7 @@ test("a context with supersedes written upstream reaches the replica through pul
   expect([updated.context, updated.triage]).toEqual([updatedContext, "ready-for-human"]);
 });
 
-test("a context with supersedes changed on the replica travels through the push UPDATE", async () => {
+test("a context with supersedes and a triage change, made on the replica, travel through the push UPDATE", async () => {
   const initialSupersededAt = "2026-09-23T12:12:00.000Z";
   const initialContext =
     "push update body" +

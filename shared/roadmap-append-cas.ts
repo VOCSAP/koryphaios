@@ -68,7 +68,7 @@ export function mapRoadmapContextAppendFailure(
       return { error: "unknown roadmap item", status: 404 };
     case "concurrent_change":
       return itemExists
-        ? { error: "context changed concurrently; retry the append", status: 409 }
+        ? { error: "card content changed concurrently (content_rev); retry the append", status: 409 }
         : { error: "unknown roadmap item", status: 404 };
     case "live_cap":
       return {
