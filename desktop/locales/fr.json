@@ -592,6 +592,8 @@
   "roadmap.fieldContextPlaceholder": "Objectif / Contraintes / Pointeurs (fichiers) / Critères d'acceptation — tout ce que le prochain agent ne peut pas redécouvrir seul",
   "roadmap.wandTitle": "Rédiger avec l'IA : une passe haiku en lecture seule ancre le briefing dans les fichiers du projet (rien n'est enregistré avant Enregistrer)",
   "roadmap.wandBusy": "Rédaction du briefing depuis les fichiers du projet…",
+  "roadmap.contextExpiredBodyPrefix": "Enregistrement bloqué : le texte avant le premier append vivant serait absorbé par du contexte périmé.",
+  "roadmap.contextChangedMarkers": "Enregistrement bloqué : les marqueurs de contexte ont changé. Conservez chaque en-tête d’append vivant intact.",
   "roadmap.editTitle": "Modifier l'item",
   "roadmap.createTitle": "Nouvel item roadmap",
   "roadmap.save": "Enregistrer",

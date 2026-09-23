@@ -895,7 +895,7 @@ export function registerIpc({
       target: getConfig().wandTarget,
       system: WAND_SYSTEM_PROMPT,
       prompt: buildWandPrompt(
-        draft ?? { title: '', kind: '', description: '', rationale: '', context: '' }
+        draft ?? { title: '', kind: '', description: '', rationale: '', context: '', mode: 'replace' }
       ),
       kind: 'wand'
     })

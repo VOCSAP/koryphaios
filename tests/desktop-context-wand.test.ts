@@ -15,6 +15,7 @@ const DRAFT = {
   description: "Login breaks on Safari",
   rationale: "Blocks EU users",
   context: "",
+  mode: "replace" as const,
 };
 
 test("system prompt forces the four-section briefing pattern and read-only stance", () => {
@@ -42,6 +43,13 @@ test("buildWandPrompt preserves an operator draft and caps oversized fields", ()
 
   const huge = buildWandPrompt({ ...DRAFT, description: "x".repeat(10_000) });
   expect(huge.length).toBeLessThan(6_000);
+});
+
+test("buildWandPrompt asks for an addendum when the editor preserves marked context", () => {
+  const prompt = buildWandPrompt({ ...DRAFT, context: "living context", mode: "append" });
+
+  expect(prompt).toContain("append-only addendum");
+  expect(prompt).not.toContain("Draft the `context` field");
 });
 
 test("the wand's claude target composes into the C9 read-only harness", () => {

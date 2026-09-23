@@ -33,7 +33,8 @@ export default defineConfig({
     root: resolve(__dirname, 'src/renderer'),
     resolve: {
       alias: {
-        '@shared': resolve(__dirname, 'src/shared')
+        '@shared': resolve(__dirname, 'src/shared'),
+        '@roadmap-append': resolve(__dirname, '../shared/roadmap-append.ts')
       }
     },
     plugins: [react()],

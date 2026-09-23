@@ -7,7 +7,10 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "jsx": "react-jsx",
     "baseUrl": ".",
-    "paths": { "@shared/*": ["src/shared/*"] },
+    "paths": {
+      "@shared/*": ["src/shared/*"],
+      "@roadmap-append": ["../shared/roadmap-append.ts"]
+    },
     "types": ["node"],
     "strict": true,
     "noUncheckedIndexedAccess": true,
@@ -22,6 +25,7 @@
     "src/renderer/src/**/*.tsx",
     "src/shared/**/*.ts",
     "src/preload/index.d.ts",
-    "design-client/**/*.ts"
+    "design-client/**/*.ts",
+    "../shared/roadmap-append.ts"
   ]
 }

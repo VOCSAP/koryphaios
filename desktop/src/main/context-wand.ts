@@ -18,7 +18,7 @@ export const WAND_SYSTEM_PROMPT = [
     '- Objective: 1-3 sentences, what done looks like. Constraints: scope boundaries, what NOT to touch, decisions already made. Pointers: relevant files/modules/tests with their repo-relative paths, and the existing pattern to imitate when there is one. Acceptance criteria: a short checklist making "done" verifiable.',
     '- Keep the whole briefing under ~30 lines. Prefer citing specifics (paths, function names) over prose.'
   ].join('\n'),
-  "If the operator provided a context draft, PRESERVE its intentions and decisions: refine, structure and complete it (especially Pointers, from the code) rather than replacing it. Operator knowledge you cannot rediscover in the repo is the most valuable part of the briefing.",
+  "If the operator provided a context draft, PRESERVE its intentions and decisions: refine, structure and complete it (especially Pointers, from the code) rather than replacing it. When the user message requests an append-only addendum, output only the new material and do not restate the draft. Operator knowledge you cannot rediscover in the repo is the most valuable part of the briefing.",
   'Write in the language of the item (title/description/draft); keep file paths and code identifiers as-is.'
 ].join('\n\n')
 
@@ -34,8 +34,11 @@ function clip(v: unknown): string {
 
 /** The user-message side of the wand call: the item as delimited data. */
 export function buildWandPrompt(draft: WandDraft): string {
+  const append = draft.mode === "append";
   const lines = [
-    'Draft the `context` field for this roadmap item:',
+    append
+      ? "Write an append-only addendum for this roadmap item."
+      : 'Draft the `context` field for this roadmap item:',
     '',
     `Title: ${clip(draft.title)}`,
     `Kind: ${clip(draft.kind)}`,

@@ -827,6 +827,8 @@ export interface RoadmapWandDraft {
   rationale: string
   /** Current content of the context textarea ('' when starting fresh). */
   context: string
+  /** Replace an unmarked draft or append an addendum to a marked context. */
+  mode: "replace" | "append"
 }
 
 /**

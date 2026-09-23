@@ -23,6 +23,11 @@ import { RoadmapFilterChips } from './RoadmapFilterChips'
 import { WorkflowLane } from './WorkflowLane'
 import { hasActiveCriteria, useRoadmapData } from '../roadmap-data'
 import { buildAppendToQueue, buildInsertIntoQueue, buildStackIntoQueue } from '@shared/workflow'
+import {
+  getRoadmapContextEditorProjection,
+  parseRoadmapContext,
+  reconcileRoadmapContextForSave
+} from '@roadmap-append'
 
 // The container owns mutation logic, modals and the Workflow lane, consumes one
 // shared roadmap-data hook also used by the mobile list layout, and renders the
@@ -55,6 +60,8 @@ interface Draft {
   description: string
   rationale: string
   context: string
+  contextSource: string
+  contextMode: 'living' | 'raw'
   tags: string
   /** kind 'directive' (CT5): the command + the peers it targets. */
   directive?: RoadmapDirective | null
@@ -76,10 +83,13 @@ const EMPTY_DRAFT: Draft = {
   description: '',
   rationale: '',
   context: '',
+  contextSource: '',
+  contextMode: 'living',
   tags: ''
 }
 
 function toDraft(i: RoadmapItem): Draft {
+  const context = getRoadmapContextEditorProjection(i.context)
   return {
     id: i.id,
     title: i.title,
@@ -91,7 +101,9 @@ function toDraft(i: RoadmapItem): Draft {
     triage: i.triage,
     description: i.description,
     rationale: i.rationale,
-    context: i.context,
+    context: context.context,
+    contextSource: i.context,
+    contextMode: context.mode,
     tags: i.tags.join(', '),
     directive: i.directive,
     target_peer_ids: i.target_peer_ids
@@ -212,6 +224,18 @@ export function RoadmapView(): React.JSX.Element {
 
   const save = async (): Promise<void> => {
     if (!draft || !draft.title.trim()) return
+    const context = draft.id === undefined
+      ? { ok: true as const, context: draft.context }
+      : reconcileRoadmapContextForSave(draft.contextSource, draft.context)
+    if (!context.ok) {
+      showToast(
+        context.code === 'expired_body_prefix'
+          ? 'roadmap.contextExpiredBodyPrefix'
+          : 'roadmap.contextChangedMarkers',
+        'error'
+      )
+      return
+    }
     const tags = draft.tags
       .split(',')
       .map((s) => s.trim())
@@ -230,7 +254,7 @@ export function RoadmapView(): React.JSX.Element {
         triage: draft.triage,
         description: draft.description,
         rationale: draft.rationale,
-        context: draft.context,
+        context: context.context,
         tags,
         depends_on: draft.depends_on,
         // Directive card fields (CT5): send only for a directive kind; switching
@@ -448,6 +472,11 @@ export function RoadmapView(): React.JSX.Element {
   // nothing is saved until the operator hits Save.
   const wand = async (): Promise<void> => {
     if (!draft || wandBusy) return
+    const mode = [draft.contextSource, draft.context].some((context) =>
+      parseRoadmapContext(context).some((unit) => unit.kind === 'append')
+    )
+      ? 'append'
+      : 'replace'
     setWandBusy(true)
     try {
       const proposed = await window.api.roadmapWand({
@@ -455,10 +484,14 @@ export function RoadmapView(): React.JSX.Element {
         kind: draft.kind,
         description: draft.description,
         rationale: draft.rationale,
-        context: draft.context
+        context: draft.context,
+        mode
       })
       // The draft may have been closed while the wand ran: drop the result.
-      setDraft((d) => (d ? { ...d, context: proposed } : d))
+      setDraft((d) => (d ? {
+        ...d,
+        context: mode === 'append' && d.context ? `${d.context}\n\n${proposed}` : proposed
+      } : d))
       setMutationError(null)
     } catch (e) {
       setMutationError(e instanceof Error ? e.message : String(e))

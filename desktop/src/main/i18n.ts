@@ -780,6 +780,10 @@ export const EN_DEFAULTS: Record<string, string> = {
   'roadmap.wandTitle':
     'Draft with AI: a read-only haiku pass grounds the briefing in the project files (nothing is saved until you hit Save)',
   'roadmap.wandBusy': 'Drafting the briefing from the project files…',
+  'roadmap.contextExpiredBodyPrefix':
+    'Save blocked: text before the first live append would be absorbed by expired context.',
+  'roadmap.contextChangedMarkers':
+    'Save blocked: context markers were changed. Keep every live append header intact.',
   'roadmap.editTitle': 'Edit item',
   'roadmap.createTitle': 'New roadmap item',
   'roadmap.save': 'Save',

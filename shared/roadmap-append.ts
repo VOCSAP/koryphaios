@@ -52,6 +52,24 @@ export type RoadmapSupersedeTargetValidation =
       message: string;
     };
 
+export type RoadmapContextEditorProjection = {
+  mode: "living" | "raw";
+  context: string;
+};
+
+export type RoadmapContextReconciliation =
+  | { ok: true; context: string }
+  | {
+      ok: false;
+      code:
+        | "ambiguous_target"
+        | "expired_body_prefix"
+        | "living_header_changed"
+        | "missing_living_unit"
+        | "unexpected_editor_unit";
+      message: string;
+    };
+
 export function buildRoadmapAppendHeader(nowIso: string, author: string): string {
   if (arguments.length > 2) {
     throw new Error("supersession targets require planRoadmapContextAppend");
@@ -138,6 +156,101 @@ export function getLivingRoadmapContextUnits(context: string): RoadmapContextUni
   const units = parseRoadmapContext(context);
   const superseded = resolveSupersededRoadmapContextTargets(units);
   return units.filter((unit) => !superseded.has(unit.target));
+}
+
+function hasAmbiguousRoadmapContextTargets(units: readonly RoadmapContextUnit[]): boolean {
+  const targets = new Set<string>();
+  for (const unit of units) {
+    if (targets.has(unit.target)) return true;
+    targets.add(unit.target);
+  }
+  return false;
+}
+
+export function getRoadmapContextEditorProjection(context: string): RoadmapContextEditorProjection {
+  const units = parseRoadmapContext(context);
+  if (hasAmbiguousRoadmapContextTargets(units)) return { mode: "raw", context };
+  const superseded = resolveSupersededRoadmapContextTargets(units);
+  return {
+    mode: "living",
+    context: units
+      .filter((unit) => !superseded.has(unit.target))
+      .map((unit) => unit.raw)
+      .join("")
+  };
+}
+
+export function reconcileRoadmapContextForSave(
+  originalContext: string,
+  editedContext: string,
+): RoadmapContextReconciliation {
+  const originalUnits = parseRoadmapContext(originalContext);
+  if (hasAmbiguousRoadmapContextTargets(originalUnits)) return { ok: true, context: editedContext };
+
+  const editedUnits = parseRoadmapContext(editedContext);
+  if (hasAmbiguousRoadmapContextTargets(editedUnits)) {
+    return {
+      ok: false,
+      code: "ambiguous_target",
+      message: "the edited context contains duplicate append targets"
+    };
+  }
+
+  const superseded = resolveSupersededRoadmapContextTargets(originalUnits);
+  const editedByTarget = new Map(editedUnits.map((unit) => [unit.target, unit]));
+  const livingTargets = new Set(
+    originalUnits.filter((unit) => !superseded.has(unit.target)).map((unit) => unit.target),
+  );
+  const body = originalUnits[0]!;
+  if (superseded.has(body.target) && editedByTarget.get(body.target)?.raw !== "") {
+    return {
+      ok: false,
+      code: "expired_body_prefix",
+      message: "text before the first live append would be absorbed by the expired body"
+    };
+  }
+
+  for (const unit of editedUnits) {
+    if (livingTargets.has(unit.target)) continue;
+    if (unit.target === ROADMAP_APPEND_BODY_TARGET && superseded.has(unit.target) && unit.raw === "") continue;
+    return {
+      ok: false,
+      code: "unexpected_editor_unit",
+      message: `the edited context contains a unit that is not currently living: ${unit.target}`
+    };
+  }
+
+  for (const unit of originalUnits) {
+    if (superseded.has(unit.target)) continue;
+    const edited = editedByTarget.get(unit.target);
+    if (!edited) {
+      return {
+        ok: false,
+        code: "missing_living_unit",
+        message: `the edited context is missing a living unit: ${unit.target}`
+      };
+    }
+    if (
+      unit.kind === "append" &&
+      (edited.kind !== "append" ||
+        edited.author !== unit.author ||
+        edited.supersedes.length !== unit.supersedes.length ||
+        edited.supersedes.some((target, index) => target !== unit.supersedes[index]))
+    ) {
+      return {
+        ok: false,
+        code: "living_header_changed",
+        message: `the edited context changes a living append header: ${unit.target}`
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    context: originalUnits
+      .map((unit) => (superseded.has(unit.target) ? unit.raw : editedByTarget.get(unit.target)!.raw))
+      .join("")
+  };
 }
 
 export function getRoadmapContextLiveLength(context: string): number {

@@ -5,12 +5,14 @@ import {
   ROADMAP_APPEND_BODY_TARGET,
   buildRoadmapAppendHeader,
   getLivingRoadmapContextUnits,
+  getRoadmapContextEditorProjection,
   getResultingRoadmapContextLiveLength,
   getRoadmapContextLiveLength,
   getUniqueRoadmapAppendTimestamp,
   parseRoadmapContext,
   planRoadmapAppendText,
   planRoadmapContextAppend,
+  reconcileRoadmapContextForSave,
   resolveSupersededRoadmapContextTargets,
   validateRoadmapSupersedeTargets,
 } from "../shared/roadmap-append.ts";
@@ -313,4 +315,95 @@ test("only the atomic append plan can emit a validated supersession header", () 
     targets: readonly string[],
   ) => string;
   expect(() => buildWithUnvalidatedTargets(APPEND_B, "b", [APPEND_C])).toThrow("supersession targets require");
+});
+
+test("editor reconciliation keeps a superseded append at its timestamp-identified structural position", () => {
+  const obsolete = buildRoadmapAppendHeader(APPEND_A, "a") + "obsolete";
+  const live = plannedAppend("origin" + obsolete, APPEND_B, "b", "current", [APPEND_A]);
+  const original = "origin" + obsolete + live;
+  const editedLive = "origin" + live.replace("current", "edited current");
+
+  expect(getRoadmapContextEditorProjection(original)).toEqual({ mode: "living", context: "origin" + live });
+  expect(reconcileRoadmapContextForSave(original, editedLive)).toEqual({
+    ok: true,
+    context: "origin" + obsolete + live.replace("current", "edited current")
+  });
+});
+
+test("editor reconciliation leaves an unedited expired context byte-for-byte unchanged", () => {
+  const obsolete = buildRoadmapAppendHeader(APPEND_A, "a") + "obsolete";
+  const live = plannedAppend("origin" + obsolete, APPEND_B, "b", "current", [APPEND_A]);
+  const original = "origin" + obsolete + live;
+  const projection = getRoadmapContextEditorProjection(original);
+
+  expect(reconcileRoadmapContextForSave(original, projection.context)).toEqual({ ok: true, context: original });
+});
+
+test("editor reconciliation refuses text before a superseded body instead of folding it into expired content", () => {
+  const live = plannedAppend("origin", APPEND_A, "a", "replacement", [ROADMAP_APPEND_BODY_TARGET]);
+  const result = reconcileRoadmapContextForSave("origin" + live, "operator note" + live);
+
+  expect(result).toMatchObject({ ok: false, code: "expired_body_prefix" });
+});
+
+test("an ambiguous timestamp falls back to the raw editor context", () => {
+  const first = buildRoadmapAppendHeader(APPEND_A, "a") + "first";
+  const second = buildRoadmapAppendHeader(APPEND_A, "b") + "second";
+  const original = "origin" + first + second;
+
+  expect(getRoadmapContextEditorProjection(original)).toEqual({ mode: "raw", context: original });
+  expect(reconcileRoadmapContextForSave(original, original)).toEqual({ ok: true, context: original });
+});
+
+function reconciliationWithEditedLiveHeader(transform: (live: string) => string) {
+  const obsolete = buildRoadmapAppendHeader(APPEND_A, "a") + "obsolete";
+  const live = plannedAppend("origin" + obsolete, APPEND_B, "b", "current", [APPEND_A]);
+  return reconcileRoadmapContextForSave("origin" + obsolete + live, "origin" + transform(live));
+}
+
+test("editor reconciliation refuses a live append that removes a supersedes target", () => {
+  const result = reconciliationWithEditedLiveHeader((live) => live.replace(` supersedes ${APPEND_A}`, ""));
+
+  expect(result).toMatchObject({ ok: false, code: "living_header_changed" });
+});
+
+test("editor reconciliation refuses a live append that adds a supersedes target", () => {
+  const result = reconciliationWithEditedLiveHeader((live) => live.replace(` supersedes ${APPEND_A}`, ` supersedes ${APPEND_A}, ${APPEND_C}`));
+
+  expect(result).toMatchObject({ ok: false, code: "living_header_changed" });
+});
+
+test("editor reconciliation refuses a live append whose author changes", () => {
+  const result = reconciliationWithEditedLiveHeader((live) => live.replace("by b", "by changed-author"));
+
+  expect(result).toMatchObject({ ok: false, code: "living_header_changed" });
+});
+
+test("editor reconciliation refuses a live append whose supersedes target changes at the same length", () => {
+  const result = reconciliationWithEditedLiveHeader((live) =>
+    live.replace(`supersedes ${APPEND_A}`, `supersedes ${APPEND_C}`)
+  );
+
+  expect(result).toMatchObject({ ok: false, code: "living_header_changed" });
+});
+
+test("editor reconciliation refuses a change to a later supersedes target", () => {
+  const obsolete = buildRoadmapAppendHeader(APPEND_A, "a") + "obsolete";
+  const live = plannedAppend(
+    "origin" + obsolete,
+    APPEND_B,
+    "b",
+    "current",
+    [ROADMAP_APPEND_BODY_TARGET, APPEND_A]
+  );
+  const original = "origin" + obsolete + live;
+  const edited = live.replace(
+    `supersedes ${ROADMAP_APPEND_BODY_TARGET}, ${APPEND_A}`,
+    `supersedes ${ROADMAP_APPEND_BODY_TARGET}, ${APPEND_C}`
+  );
+
+  expect(reconcileRoadmapContextForSave(original, edited)).toMatchObject({
+    ok: false,
+    code: "living_header_changed"
+  });
 });
