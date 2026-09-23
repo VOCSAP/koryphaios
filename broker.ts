@@ -43,6 +43,10 @@ import {
   mapRoadmapContextAppendFailure,
   runRoadmapContextAppendCas,
 } from "./shared/roadmap-append-cas.ts";
+import {
+  createSqliteRoadmapContextDocumentCasStore,
+  runRoadmapContextDocumentDeportCas,
+} from "./shared/roadmap-context-document-cas.ts";
 import { isValidQueueRank } from "./shared/roadmap-queue.ts";
 import {
   contentEquals,
@@ -130,6 +134,11 @@ import type {
   RoadmapUpsertResponse,
   RoadmapContextAppendRequest,
   RoadmapContextAppendResponse,
+  RoadmapContextDocument,
+  RoadmapContextDocumentDeportRequest,
+  RoadmapContextDocumentDeportResponse,
+  RoadmapContextDocumentGetRequest,
+  RoadmapContextDocumentGetResponse,
   GraphDraft,
   GraphDraftAddRequest,
   GraphDraftAddResponse,
@@ -723,6 +732,36 @@ db.run(`
     target_peer_ids TEXT NOT NULL DEFAULT '[]'
   )
 `);
+
+// Documents retain complete context units outside the mutable card context.
+// They deliberately carry the parent and project as values, not foreign keys:
+// a replica can persist an immutable document before its parent card arrives.
+db.run(`
+  CREATE TABLE IF NOT EXISTS roadmap_context_documents (
+    id TEXT PRIMARY KEY,
+    roadmap_item_id TEXT NOT NULL,
+    project_key TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )
+`);
+db.run(
+  "CREATE INDEX IF NOT EXISTS idx_roadmap_context_documents_item ON roadmap_context_documents(roadmap_item_id, project_key)"
+);
+db.run(`
+  CREATE TABLE IF NOT EXISTS roadmap_context_document_units (
+    id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    source_target TEXT NOT NULL,
+    raw TEXT NOT NULL,
+    deported_at TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    UNIQUE(document_id, source_target)
+  )
+`);
+db.run(
+  "CREATE INDEX IF NOT EXISTS idx_roadmap_context_document_units_document ON roadmap_context_document_units(document_id, position)"
+);
 
 try {
   db.run("ALTER TABLE roadmap_items ADD COLUMN queue INTEGER");
@@ -3007,6 +3046,51 @@ function getRoadmapRow(id: string): RoadmapRow | null {
   return db.query("SELECT * FROM roadmap_items WHERE id = ?").get(id) as RoadmapRow | null;
 }
 
+type RoadmapContextDocumentRow = {
+  id: string;
+  roadmap_item_id: string;
+  project_key: string;
+  created_by: string;
+  created_at: string;
+};
+
+type RoadmapContextDocumentUnitRow = {
+  id: string;
+  source_target: string;
+  raw: string;
+  deported_at: string;
+  position: number;
+};
+
+function getRoadmapContextDocument(
+  roadmapItemId: string,
+  projectKey: string,
+  documentId: string,
+): RoadmapContextDocument | null {
+  const row = db
+    .query(
+      `SELECT id, roadmap_item_id, project_key, created_by, created_at
+         FROM roadmap_context_documents
+        WHERE id = ? AND roadmap_item_id = ? AND project_key = ?`,
+    )
+    .get(documentId, roadmapItemId, projectKey) as RoadmapContextDocumentRow | null;
+  if (!row) return null;
+  const units = db
+    .query(
+      `SELECT id, source_target, raw, deported_at, position
+         FROM roadmap_context_document_units
+        WHERE document_id = ?
+        ORDER BY position`,
+    )
+    .all(documentId) as RoadmapContextDocumentUnitRow[];
+  return { ...row, units };
+}
+
+function getRoadmapItemForProject(id: string, projectKey: string): RoadmapItem | null {
+  const row = getRoadmapRow(id);
+  return row?.project_key === projectKey ? rowToRoadmapItem(row) : null;
+}
+
 /**
  * Resolves WHO is writing before deciding whether the caller may act as it: a
  * presented instance_token wins over `by`, a sentinel token is refused
@@ -4272,6 +4356,74 @@ function handleRoadmapContextAppend(
   });
   if (result.ok) return { item: getRoadmapItem(body.id)! };
   return mapRoadmapContextAppendFailure(result, getRoadmapItem(body.id) !== null);
+}
+
+function resolveRoadmapContextDocumentParent(body: {
+  id?: unknown;
+  project_key?: unknown;
+}): RoadmapItem | { error: string; status: number } {
+  if (typeof body.id !== "string" || !body.id) return { error: "id is required", status: 400 };
+  const projectKey = typeof body.project_key === "string" ? body.project_key : "";
+  const projectKeyCheck = validateProjectKey(projectKey);
+  if (!projectKeyCheck.ok) return { error: `project_key is invalid (${projectKeyCheck.reason})`, status: 400 };
+  const item = getRoadmapItemForProject(body.id, projectKey);
+  if (!item) return { error: "unknown roadmap item in this project", status: 404 };
+  return item;
+}
+
+function handleRoadmapContextDocumentGet(
+  body: RoadmapContextDocumentGetRequest,
+): RoadmapContextDocumentGetResponse | { error: string; status: number } {
+  const parent = resolveRoadmapContextDocumentParent(body);
+  if ("error" in parent) return parent;
+  if (typeof body.document_id !== "string" || !ROADMAP_ID_REGEX.test(body.document_id)) {
+    return { error: "document_id is missing or malformed", status: 400 };
+  }
+  try {
+    const document = getRoadmapContextDocument(parent.id, parent.project_key, body.document_id);
+    if (!document) return { error: "unknown context document", status: 404 };
+    return { document };
+  } catch (error) {
+    log.error("/roadmap/context-document/get: document read failed", error);
+    return { error: "context document read failed", status: 500 };
+  }
+}
+
+// Card c33a5968: context-only write cannot claim an inactive card.
+function handleRoadmapContextDocumentDeport(
+  body: RoadmapContextDocumentDeportRequest,
+): RoadmapContextDocumentDeportResponse | { error: string; status: number } {
+  const parent = resolveRoadmapContextDocumentParent(body);
+  if ("error" in parent) return parent;
+  const author = resolveRoadmapAuthor(body, "/roadmap/context-document/deport");
+  if ("error" in author) return author;
+  if (!Array.isArray(body.targets) || body.targets.some((target) => typeof target !== "string")) {
+    return { error: "targets must be an array of context target strings", status: 400 };
+  }
+
+  try {
+    const result = runRoadmapContextDocumentDeportCas({
+      id: parent.id,
+      projectKey: parent.project_key,
+      targets: body.targets,
+      author: author.by,
+      operatorId: author.operator_id ?? null,
+      now: () => new Date().toISOString(),
+      nextId: randomUUID,
+      store: createSqliteRoadmapContextDocumentCasStore(db),
+    });
+    if (result.ok) {
+      const item = getRoadmapItemForProject(parent.id, parent.project_key);
+      if (!item) return { error: "unknown roadmap item in this project", status: 404 };
+      return { item, document: result.document };
+    }
+    if (result.code === "unknown_roadmap_item") return { error: result.message, status: 404 };
+    if (result.code === "concurrent_change") return { error: result.message, status: 409 };
+    return { error: result.message, status: 400 };
+  } catch (error) {
+    log.error("/roadmap/context-document/deport: document deportation failed", error);
+    return { error: "context document deportation failed", status: 500 };
+  }
 }
 
 // Workflow lane reorder: hard cap on the queue size a single rewrite may
@@ -9580,6 +9732,20 @@ const server = Bun.serve<WsData>({
         }
         case "/roadmap/append-context": {
           const result = handleRoadmapContextAppend(body as RoadmapContextAppendRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/context-document/get": {
+          const result = handleRoadmapContextDocumentGet(body as RoadmapContextDocumentGetRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/context-document/deport": {
+          const result = handleRoadmapContextDocumentDeport(body as RoadmapContextDocumentDeportRequest);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }

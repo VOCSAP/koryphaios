@@ -58,6 +58,7 @@ function discoverRoadmapRoutes(source: string): string[] {
 const READ_ROUTES = new Set([
   "/roadmap/list",
   "/roadmap/export",
+  "/roadmap/context-document/get",
   "/roadmap/sync/pull",
   "/roadmap/sync/status",
   "/roadmap/sync/conflicts",
@@ -114,6 +115,12 @@ const GUARDED_PROBES: Record<string, (ctx: ProbeCtx) => Record<string, unknown>>
   // it as EXEMPT here would silently stop testing that its author check
   // actually refuses impersonation.
   "/roadmap/append-context": (c) => ({ id: c.itemId, by: c.victimPeerId, text: "x" }),
+  "/roadmap/context-document/deport": (c) => ({
+    id: c.itemId,
+    project_key: PK,
+    by: c.victimPeerId,
+    targets: ["body"],
+  }),
   // The author is resolved before the replica-only check, so this probe reaches
   // the identity guard on any broker, replica or not.
   "/roadmap/sync/resolve": (c) => ({ id: c.itemId, by: c.victimPeerId, choice: "local" }),
@@ -162,6 +169,8 @@ function unclassifiedRoutes(routes: string[]): string[] {
 const EXPECTED_ROUTES = [
   "/roadmap/append-context",
   "/roadmap/archive",
+  "/roadmap/context-document/deport",
+  "/roadmap/context-document/get",
   "/roadmap/export",
   "/roadmap/import",
   "/roadmap/list",
@@ -415,6 +424,7 @@ const REPLICATION_INACTIVE_HANDLERS = new Set([
 const EXEMPT_INACTIVE_HANDLERS = new Set([
   "handleRoadmapArchive",
   "handleRoadmapContextAppend",
+  "handleRoadmapContextDocumentDeport",
   "handleRoadmapLockPark",
   "handleRoadmapLockRelease",
   "handleRoadmapReorder",
@@ -432,6 +442,7 @@ const EXEMPT_INACTIVE_HANDLERS = new Set([
  */
 const READ_ONLY_INACTIVE_HANDLERS = new Set([
   "handleRoadmapList",
+  "handleRoadmapContextDocumentGet",
   "handleRoadmapExport",
   "handleRoadmapSyncPull",
   "handleRoadmapSyncStatus",
@@ -451,6 +462,8 @@ function unclassifiedInactiveHandlers(handlers: string[]): string[] {
 const EXPECTED_INACTIVE_HANDLERS = [
   "handleRoadmapArchive",
   "handleRoadmapContextAppend",
+  "handleRoadmapContextDocumentDeport",
+  "handleRoadmapContextDocumentGet",
   "handleRoadmapExport",
   "handleRoadmapImport",
   "handleRoadmapList",

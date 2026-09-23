@@ -1210,6 +1210,46 @@ export interface RoadmapContextAppendResponse {
   item: RoadmapItem;
 }
 
+export interface RoadmapContextDocumentUnit {
+  id: string;
+  source_target: string;
+  raw: string;
+  deported_at: string;
+  position: number;
+}
+
+export interface RoadmapContextDocument {
+  id: string;
+  roadmap_item_id: string;
+  project_key: string;
+  created_by: string;
+  created_at: string;
+  units: RoadmapContextDocumentUnit[];
+}
+
+export interface RoadmapContextDocumentGetRequest {
+  id: string;
+  project_key: string;
+  document_id: string;
+}
+
+export interface RoadmapContextDocumentGetResponse {
+  document: RoadmapContextDocument;
+}
+
+export interface RoadmapContextDocumentDeportRequest {
+  id: string;
+  project_key: string;
+  by: string;
+  instance_token?: string;
+  targets: string[];
+}
+
+export interface RoadmapContextDocumentDeportResponse {
+  item: RoadmapItem;
+  document: RoadmapContextDocument;
+}
+
 export interface RoadmapArchiveRequest {
   id: string;
   by: string;

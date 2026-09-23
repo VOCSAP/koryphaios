@@ -95,6 +95,16 @@ function seededDb(): Database {
 
 const NOW = `datetime('now')`;
 
+const EXPECTED_PROJECT_KEY_TABLES = [
+  "approval_session_tokens",
+  "dispatch_requests",
+  "graph_drafts",
+  "peers",
+  "pending_approvals",
+  "roadmap_context_documents",
+  "roadmap_items",
+];
+
 function insertRoadmapItem(db: Database, id: string, projectKey: string): void {
   db.run(
     `INSERT INTO roadmap_items (id, project_key, kind, title, created_at, updated_at) VALUES (?, ?, 'idea', 'test item', ${NOW}, ${NOW})`,
@@ -142,30 +152,15 @@ function insertDispatchRequest(db: Database, id: string, projectKey: string): vo
 
 test("discovery finds every real project_key-bearing table in broker.ts's schema, none else", () => {
   const db = seededDb();
-  // Deriving the table list from source means this assertion changes on its own
-  // if broker.ts adds, removes, or renames a project_key column.
-  // dispatch_requests belongs in this list: its project_key is copied at
-  // add-time from the proven peers row, and a peer migrated without migrating
-  // this table would leave old mixed-case requests invisible to the Deck.
-  expect(discoverProjectKeyTables(db)).toEqual([
-    "approval_session_tokens",
-    "dispatch_requests",
-    "graph_drafts",
-    "peers",
-    "pending_approvals",
-    "roadmap_items"
-  ]);
+  expect(discoverProjectKeyTables(db)).toEqual(EXPECTED_PROJECT_KEY_TABLES);
 });
 
-test("a table added AFTER this module is written is still discovered -- proves no hardcoded list", () => {
+test("a table added after this module is written is still discovered", () => {
   const db = seededDb();
   db.run(`CREATE TABLE future_widget_table (id TEXT PRIMARY KEY, project_key TEXT NOT NULL)`);
   const tables = discoverProjectKeyTables(db);
   expect(tables).toContain("future_widget_table");
-  // 6 real tables in broker.ts's schema (see the assertion above) + this one.
-  // Card bf76d37f took it from 5+1 to 6+1, and the fact that THIS test is what
-  // reported the change is the guarantee it exists to give.
-  expect(tables.length).toBe(7);
+  expect(tables).toHaveLength(EXPECTED_PROJECT_KEY_TABLES.length + 1);
 });
 
 test("a column named in a different case (PROJECT_KEY) is still discovered -- PRAGMA table_info preserves declared casing, matching must not", () => {
