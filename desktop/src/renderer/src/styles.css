@@ -593,6 +593,67 @@ body {
   color: var(--fg-dim);
 }
 
+/* Model badge + context ring: the tile's own statusLine
+   report. Same right-hand badge column as .row-lead/.row-role, `flex: 0 0
+   auto` so a long model name never squeezes .row-main, mono like every other
+   short runtime label in the app (peer id, branch). Border+text tint, not
+   fill, per DESIGN.md's badge primitive. */
+.row-model {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--fg-dim);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+
+/* Context-fill ring (ContextRing.tsx): a 13px SVG next to the model badge,
+   filled clockwise by contextPct. Colour = severity: same 70/90 bands and
+   tones as the nav-rail amphora gauge (.usage-warn/.usage-hot in this file),
+   read on the USED side here. The dim track ring
+   is always drawn so the badge keeps a stable footprint even at 0%. */
+.context-ring {
+  flex: 0 0 auto;
+}
+
+.context-ring-track {
+  fill: none;
+  stroke: var(--border);
+  stroke-width: 1.6;
+}
+
+.context-ring-fill {
+  fill: none;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+.context-ring-normal .context-ring-fill {
+  stroke: var(--fg-dim);
+}
+
+.context-ring-warn .context-ring-fill {
+  stroke: var(--action-prompt);
+}
+
+.context-ring-critical .context-ring-fill {
+  stroke: var(--danger);
+}
+
+/* Unknown reading (before the first statusLine report, or just after
+   /compact): the dim track alone would read as "empty/0%", which is a
+   measured value, not the absence of one -- the dashed stroke is what marks
+   it as unmeasured instead. */
+.context-ring-unknown .context-ring-fill {
+  stroke: var(--fg-dim);
+  opacity: 0.6;
+}
+
 /* Quota badge under the peer id while a session sits at the limit screen. */
 .row-quota {
   font-size: 11px;

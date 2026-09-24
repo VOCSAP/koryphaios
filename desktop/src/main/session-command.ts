@@ -69,6 +69,12 @@ export interface SessionCommandInput {
    * supervisor's role at harness level (PLAN C8).
    */
   appendSystemPromptFile?: string
+  /**
+   * Path to a generated settings file (the Deck's statusLine), emitted as
+   * `--settings "<path>"` on BOTH fresh and resume: command-line settings are
+   * not restored by --fork-session and outrank user/project/local settings.
+   */
+  settingsFile?: string
   mode: SpawnMode
 }
 
@@ -93,6 +99,12 @@ function mcpConfigFlag(mcpConfig?: string): string {
 function appendSystemPromptFlag(path?: string): string {
   const p = path?.trim()
   return p ? ` --append-system-prompt-file "${p}"` : ''
+}
+
+/** ` --settings "<path>"` when set, otherwise empty. */
+function settingsFlag(path?: string): string {
+  const p = path?.trim()
+  return p ? ` --settings "${p}"` : ''
 }
 
 /** ` --plugin-dir "<dir>"` when a plugin dir is set, otherwise empty. */
@@ -165,16 +177,16 @@ export function buildSessionCommandLine(input: SessionCommandInput): string {
 
   if (input.mode === 'resume' && input.prevSessionId) {
     // No args / --agent / --model: Claude auto-restores them on --fork-session.
-    // --effort, --mcp-config and --append-system-prompt-file are the
-    // exceptions (not auto-restored).
+    // --effort, --mcp-config, --append-system-prompt-file and --settings are
+    // the exceptions (not auto-restored).
     // Ids are double-quoted even though they are UUID-shaped by construction:
     // prevSessionId can originate from the desk-session back-channel, whose file
     // lives in a dir mounted into sandbox containers (validated in
     // desk-session.ts). Quoting is the second lock on that door.
-    return `${base}${pluginFlag(input.pluginDir)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)} --resume "${input.prevSessionId}" --fork-session --session-id "${input.sessionId}"${effortFlag(input.effort)}`
+    return `${base}${pluginFlag(input.pluginDir)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)}${settingsFlag(input.settingsFile)} --resume "${input.prevSessionId}" --fork-session --session-id "${input.sessionId}"${effortFlag(input.effort)}`
   }
 
-  let line = `${base}${pluginFlag(input.pluginDir)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)} --session-id "${input.sessionId}"`
+  let line = `${base}${pluginFlag(input.pluginDir)}${mcpConfigFlag(input.mcpConfig)}${appendSystemPromptFlag(input.appendSystemPromptFile)}${settingsFlag(input.settingsFile)} --session-id "${input.sessionId}"`
   const extra = input.args?.trim()
   if (extra) line += ` ${extra}`
   line += effortFlag(input.effort)

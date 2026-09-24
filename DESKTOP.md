@@ -25,6 +25,20 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   SPAWN time (`session-service.ts`'s `resolveBaseCommand`, rewritten by
   `withClodexWrapper` in `session-kind.ts`), never at create time — so it
   still follows a launch-config change made after the tile was created.
+- **Session status (model badge + context ring)**: each non-sandbox Claude
+  Code tile launches with `--settings` pointing at a shared
+  `deck-statusline-<sha12>.json` (`statusline-settings.ts`) whose `statusLine`
+  runs `desk-statusline.mjs` every 5 s. The hook writes the statusLine stdin
+  fields (model, `context_window.used_percentage`, window size) to
+  `~/.claude/peers/desk-status-<token>.json`, then chains the operator's
+  statusLine from the GLOBAL `~/.claude/settings.json` only (hostile input #1).
+  The 4 s peer poll decodes that file strictly (`session-status-file.ts`,
+  `shared/session-status.ts`: no symlink, size cap, charset-restricted model
+  strings, pct clamped) into `SessionRuntime.liveStatus`, rendered in the
+  Sidebar row as a model badge and `ContextRing.tsx` (70/90 bands, dashed when
+  unknown). A `/model` switch shows within ~5 s + one poll. Cost: the
+  `--settings` statusLine replaces the operator's `refreshInterval`, so a
+  chained operator statusLine also runs every 5 s in every tile (4 s timeout).
 - **Sandbox mode (🏺 Docker rail view, SBX1–SBX5)**: per-project
   toggle that runs NEW sessions inside a persistent Docker/Podman container
   (`kory-sbx-<hash12>`, project bind-mounted at `/work`, `sleep infinity` +

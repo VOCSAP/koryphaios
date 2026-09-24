@@ -148,6 +148,26 @@ export interface SessionRuntime extends SessionDef {
    * always wins. Never persisted.
    */
   claudeLaunch: boolean
+  /**
+   * Model and context-window fill last reported by the tile's own statusLine
+   * run, null until the first report or when the tile does not carry the
+   * Deck statusLine (sandbox, non-claude command). Never persisted.
+   */
+  liveStatus: SessionLiveStatus | null
+}
+
+/** One statusLine report, validated main-side before it reaches the renderer. */
+export interface SessionLiveStatus {
+  /** Claude Code's `model.display_name` (e.g. "Opus"), charset-restricted. */
+  model: string
+  /** Claude Code's `model.id`, charset-restricted, for the tooltip. */
+  modelId: string
+  /** `context_window.used_percentage`, clamped to [0, 100]; null early in a session and right after /compact. */
+  contextPct: number | null
+  /** `context_window.context_window_size` in tokens, null when absent. */
+  contextWindow: number | null
+  /** Epoch ms the statusLine run wrote this report. */
+  at: number
 }
 
 /** Lightweight workspace row for the restore picker (no sessions payload). */

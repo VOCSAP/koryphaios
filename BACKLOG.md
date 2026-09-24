@@ -412,6 +412,9 @@ l'opérateur sur une machine avec affichage.
     connues traitées, p.ex. via un accusé par peer). Le double-traitement d'une
     MÊME tuile est impossible (une tuile vit dans un seul Deck), donc pas de
     double-injection ; le risque est l'inverse (injection manquée).
+- [ ] **Affichage de l'état de session (statusLine, badge modèle + anneau de contexte)** — logique implémentée (`session-status-file.ts`, chaînage operator-only, validation stricte, `ContextRing.tsx`). Validations terrain uniquement :
+  - Sur Windows natif, vérifier que la commande `statusLine` hérite de `CLAUDE_PEERS_DESK_SESSION` et que le chaînage de la commande `statusLine` globale de l'opérateur fonctionne.
+  - Mesurer la latence réelle du badge modèle après un `/model` : refresh ~5 s + poll ~4 s.
 
 ---
 
@@ -498,6 +501,12 @@ l'opérateur sur une machine avec affichage.
       (compte perso migré Antigravity). Si un besoin orga apparaît, le provider
       `retrieveUserQuota` de gemini-cli se greffe dans `usage-service.ts` sur
       le même modèle.
+
+### 3.1 ter Affichage d'état de session (reporté)
+
+- [ ] **Badge modèle + anneau de contexte, résiduel** — limité aux tuiles Claude Code non-sandbox :
+  - Affichage du modèle et de l'anneau de contexte dans la vue MobileAgents (companion, mobile/tablets).
+  - Commandes `statusLine` définies UNIQUEMENT dans les settings projet/locaux ne sont jamais chaînées (choix de sécurité, hostile input #1) — documenter ce comportement ou proposer un opt-in délibéré.
 
 ### 3.1 bis Approbations distantes (lots N0→N4, livrés 2026-07-26)
 
@@ -1020,6 +1029,7 @@ et « pas de traduction auto Windows -> Linux des hooks », voir handoffs Kleos
       à l'apparition des credentials mais à la fin de l'onboarding
       (`hasCompletedOnboarding`) ; vérifier qu'un nouvel agent n'affiche plus
       « Select login method » après un login mené au bout.
+- [ ] **Badge modèle + anneau de contexte en mode sandbox** : exclus aujourd'hui (pas de `--settings` pour une tuile sandbox). Il faut un chemin de settings côté conteneur et une copie du hook dans le volume.
 
 **Encore à implémenter (nice-to-have v2, roadmap broker `4085b661` — ne pas
 démarrer sans besoin confirmé)**

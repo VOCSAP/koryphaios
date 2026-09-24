@@ -18,6 +18,7 @@ import { buildAppMenu } from './menu'
 import { safeExternalUrl } from './external-url'
 import { SessionService } from './session-service'
 import { createMissingDirTracker, deckPluginDirFor } from './session-command'
+import { statusLineHookPath, writeStatusLineSettings } from './statusline-settings'
 import { registerIpc, resolveDocsDir } from './ipc'
 import { parseCliContext } from './cli-context'
 import { computeScope, buildScopeEnv, resolveAdoptedScope, type Scope, type ScopeEnv } from './scope'
@@ -590,6 +591,36 @@ const service = new SessionService(
     write: (token, callerId, allowedTools) => controlDeps.writeTeamLeadMcpConfig(token, callerId, allowedTools)
   })
 )
+
+// statusLine settings for `--settings`: resolved at every spawn, like
+// getDeckPluginDir, so a hook bundle built or deleted mid-run is picked up. A
+// missing plugin dir is already reported by getDeckPluginDir; any other
+// unavailability is reported once per episode.
+const statusLineUnavailableTracker = createMissingDirTracker()
+const getStatusLineSettingsFile = (): string => {
+  const pluginDir = getDeckPluginDir()
+  if (!pluginDir) return ''
+  const hook = statusLineHookPath(pluginDir)
+  let file: string | null = null
+  let why = ''
+  let err: unknown
+  if (!existsSync(hook)) {
+    why = `statusLine script missing (${hook}) -- run \`npm run build:hook\`; tiles show no model or context fill`
+  } else {
+    try {
+      file = writeStatusLineSettings(appStateDir(), hook)
+      if (!file) {
+        why = `statusLine script or settings path cannot be quoted into a command (${hook}, ${appStateDir()}); tiles show no model or context fill`
+      }
+    } catch (e) {
+      why = 'failed to write the statusLine settings file; tiles show no model or context fill'
+      err = e
+    }
+  }
+  if (statusLineUnavailableTracker.check(file !== null)) reportError('session', why, err)
+  return file ?? ''
+}
+service.setStatusLineSettingsProvider(getStatusLineSettingsFile)
 
 // Activity journal (PLAN C14): per-window narration of spawns, exits, quota
 // episodes, attention screens, worktree ops, announces… Ring-buffered, never

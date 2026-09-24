@@ -6,6 +6,7 @@ import type {
   AppConfig,
   CreateSessionInput,
   SessionDef,
+  SessionLiveStatus,
   SessionRuntime,
   SessionStatus
 } from '@shared/types'
@@ -38,6 +39,8 @@ import {
   type TranscriptEntry
 } from './session-transcript'
 import { clearDeskSessionId, readDeskSessionId } from './desk-session'
+import { clearStatusFile, pollStatusFile, readStatusFile } from './session-status-file'
+import { sameLiveStatus } from '@shared/session-status'
 import { ScreenGuard } from './screen-model'
 import { gracefulClose } from './session-close'
 import { createOscParser, type OscSnapshot } from './detect/osc'
@@ -83,6 +86,17 @@ interface RuntimeState {
    * broadcast. null => no announce.
    */
   announce: JoinAnnounceIntent | null
+  /** Last validated statusLine report (model + context fill); null when none or not alive. */
+  liveStatus: SessionLiveStatus | null
+  /**
+   * True while the status file keeps failing to read or decode, so the failure
+   * is reported once per episode instead of on every poll tick.
+   */
+  liveStatusFaulted: boolean
+  /** This spawn was given the Deck's statusLine (`--settings`); set by startPty. */
+  liveStatusEnabled: boolean
+  /** Epoch ms of this spawn; reports older than it belong to the previous process. */
+  spawnedAt: number
 }
 
 const PEER_POLL_MS = 4000
@@ -444,6 +458,29 @@ export class SessionService extends EventEmitter {
   /** Peers dir the sandbox containers write into, or null when sandbox is off. */
   private sandboxPeersDir: () => string | null = () => null
 
+  /**
+   * Returns the path of the statusLine settings file for `--settings`, or ''
+   * when unavailable (the provider reports why). Injected by index.ts, which
+   * owns the app-state dir and the plugin dir.
+   */
+  private getStatusLineSettings: () => string = () => ''
+
+  setStatusLineSettingsProvider(provider: () => string): void {
+    this.getStatusLineSettings = provider
+  }
+
+  /**
+   * `--settings` file for this spawn: only for a tile that runs Claude Code on
+   * the host. A sandboxed tile writes its status inside the container, which
+   * the host path in the file does not reach, so it gets no flag. The
+   * supervisor is never sandboxed.
+   */
+  private statusLineSettingsFor(def: SessionDef, base: string): string | undefined {
+    if (!isClaudeLaunch(base)) return undefined
+    if (!def.supervisor && this.sandboxPeersDir() !== null) return undefined
+    return this.getStatusLineSettings() || undefined
+  }
+
   setSandboxProvider(
     provider: SandboxProvider,
     transcripts?: SandboxTranscriptLookup,
@@ -657,7 +694,11 @@ export class SessionService extends EventEmitter {
         agent,
         model,
         effort: def.effort ?? ''
-      }
+      },
+      liveStatus: null,
+      liveStatusFaulted: false,
+      liveStatusEnabled: false,
+      spawnedAt: 0
     })
     this.spawnSession(def, 'fresh')
     this.broadcast()
@@ -865,7 +906,11 @@ export class SessionService extends EventEmitter {
         claudeLaunch: this.resolveClaudeLaunch(d),
         // Restored peers were already announced on their original join -> no
         // re-announce on restore.
-        announce: null
+        announce: null,
+        liveStatus: null,
+        liveStatusFaulted: false,
+        liveStatusEnabled: false,
+        spawnedAt: 0
       })
     }
     this.persist()
@@ -1163,6 +1208,8 @@ export class SessionService extends EventEmitter {
     // process's history owes the new one nothing.
     def.sessionIdHistory = []
 
+    const settingsFile = this.statusLineSettingsFor(def, base)
+
     let command: string
     if (effective === 'resume') {
       // Fork the previous claude session into a fresh id (collision avoidance).
@@ -1176,6 +1223,7 @@ export class SessionService extends EventEmitter {
         pluginDir: this.getPluginDir(),
         mcpConfig: def.mcpConfig,
         appendSystemPromptFile: def.appendSystemPromptFile,
+        settingsFile,
         mode: 'resume'
       })
     } else {
@@ -1189,6 +1237,7 @@ export class SessionService extends EventEmitter {
         pluginDir: this.getPluginDir(),
         mcpConfig: def.mcpConfig,
         appendSystemPromptFile: def.appendSystemPromptFile,
+        settingsFile,
         mode: 'fresh'
       })
       // The prompt is recorded here rather than passed via argv, since Windows'
@@ -1287,6 +1336,16 @@ export class SessionService extends EventEmitter {
     // Drop any stale back-channel file from a previous run so discovery cannot
     // read an old id; the core rewrites it with the fresh minted id at register.
     clearDeskSessionId(def.id, this.peersDirFor(def))
+    // Same for the statusLine report: the new process must not show the old
+    // one's model until its own first statusLine run.
+    const clearErr = clearStatusFile(def.id, this.peersDirFor(def))
+    if (clearErr) reportError('session', `failed to clear the stale status file of "${def.name}"`, clearErr)
+    if (r) {
+      r.liveStatus = null
+      r.liveStatusFaulted = false
+      r.liveStatusEnabled = settingsFile !== undefined
+      r.spawnedAt = Date.now()
+    }
     try {
       this.pty.spawn(
         def.id,
@@ -1326,7 +1385,8 @@ export class SessionService extends EventEmitter {
       // Read from RuntimeState, never recomputed here (card fd1914cc
       // correction) -- single source of truth, frozen at spawn by startPty.
       // No runtime yet: leans "it's claude" (see isClaudeSession's doc).
-      claudeLaunch: r?.claudeLaunch ?? true
+      claudeLaunch: r?.claudeLaunch ?? true,
+      liveStatus: r?.liveStatus ?? null
     }
   }
 
@@ -1558,6 +1618,7 @@ export class SessionService extends EventEmitter {
     for (const def of this.defs) {
       const r = this.runtime.get(def.id)
       if (!r) continue
+      if (this.pollLiveStatus(def, r)) changed = true
       const knownIds = def.sessionIdHistory && def.sessionIdHistory.length ? def.sessionIdHistory : [def.sessionId]
       const next = this.pty.isAlive(def.id)
         ? resolvePeerIdAmong(def.cwd, knownIds, this.peersDirFor(def))
@@ -1589,6 +1650,34 @@ export class SessionService extends EventEmitter {
       }
     }
     if (changed) this.broadcast()
+  }
+
+  /**
+   * Refresh one tile's statusLine report from its status file. Returns true
+   * when the displayed value changed. A dead tile shows no report.
+   */
+  private pollLiveStatus(def: SessionDef, r: RuntimeState): boolean {
+    let next: SessionLiveStatus | null = null
+    const read = pollStatusFile(
+      { alive: this.pty.isAlive(def.id), enabled: r.liveStatusEnabled, spawnedAt: r.spawnedAt },
+      () => readStatusFile(def.id, this.peersDirFor(def))
+    )
+    if (read.kind === 'ok') {
+      next = read.status
+      r.liveStatusFaulted = false
+    } else if (read.kind === 'absent') {
+      r.liveStatusFaulted = false
+    } else if (!r.liveStatusFaulted) {
+      r.liveStatusFaulted = true
+      if (read.kind === 'error') {
+        reportError('session', `failed to read the status file of "${def.name}"`, read.error)
+      } else {
+        reportError('session', `status file of "${def.name}" refused (${read.reason})`)
+      }
+    }
+    if (sameLiveStatus(r.liveStatus, next)) return false
+    r.liveStatus = next
+    return true
   }
 
   /**

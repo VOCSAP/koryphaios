@@ -7,6 +7,7 @@ import { formatPeerTable } from '../peer-table'
 import { formatClock, useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ContextMenu } from './ContextMenu'
+import { ContextRing } from './ContextRing'
 import { CreateMenu } from './CreateMenu'
 import { MessageBar } from './MessageBar'
 
@@ -247,6 +248,27 @@ export function SessionRow({
         <span className="row-lead" title={t('sidebar.leadTitle')}>
           {GLYPH_BADGES.laurel}
         </span>
+      )}
+      {/* Model + context fill: the tile's own statusLine
+          report, null until the first one arrives or when the tile carries
+          no Deck statusLine (sandbox, non-claude command) -- both badges
+          vanish together rather than showing a stale or guessed reading.
+          Dropped folded like the row actions: the model name needs width the
+          rail does not have, and showing the ring alone without its model
+          label would read as an unexplained dot. */}
+      {!collapsed && session.liveStatus && (
+        <span
+          className="row-model"
+          title={t('sidebar.modelBadgeTitle', { modelId: session.liveStatus.modelId })}
+        >
+          {session.liveStatus.model}
+        </span>
+      )}
+      {!collapsed && session.liveStatus && (
+        <ContextRing
+          pct={session.liveStatus.contextPct}
+          contextWindow={session.liveStatus.contextWindow}
+        />
       )}
       {/* Row actions: dropped folded rather than shrunk. They are hover-revealed
           affordances acting on a row the rail no longer names; not rendering
