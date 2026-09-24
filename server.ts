@@ -29,8 +29,16 @@ import type {
   RoadmapUpsertResponse,
   RoadmapArchiveResponse,
   RoadmapContextAppendResponse,
+  RoadmapContextDocument,
+  RoadmapContextDocumentListResponse,
   RoadmapUpsertAckField,
   SendMessageResponse,
+} from "./shared/types.ts";
+import {
+  formatRoadmapContextDocumentHeader,
+  formatRoadmapContextDocumentOmission,
+  ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS,
+  type RoadmapContextDocumentOmissions,
 } from "./shared/types.ts";
 import {
   generateSummary,
@@ -703,6 +711,10 @@ const TOOLS = [
       properties: {
         id: { type: "string" as const, description: "Item id, or a unique id prefix." },
         raw_context: { type: "boolean" as const, description: "Return the raw context without folding superseded units." },
+        with_documents: {
+          type: "boolean" as const,
+          description: "Include immutable context documents when this card has them. Default false.",
+        },
       },
       required: ["id"],
     },
@@ -1180,13 +1192,41 @@ function formatRoadmapContext(context: string, rawContext: boolean): string {
   return lines.join("\n");
 }
 
-function formatRoadmapItemDetail(i: RoadmapItem, rawContext = false): string {
+function formatRoadmapContextDocuments(
+  documents: readonly RoadmapContextDocument[],
+  omitted?: RoadmapContextDocumentOmissions,
+): string {
+  const rendered = documents.map(
+    (document) => `${formatRoadmapContextDocumentHeader(document)}\n${document.units.map((unit) => unit.raw).join("")}`,
+  );
+  if (omitted && omitted.document_count > 0) {
+    rendered.push(formatRoadmapContextDocumentOmission(omitted));
+  }
+  const section = rendered.join("\n\n");
+  if (section.length > ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS) {
+    throw new Error("context document section exceeds its output budget");
+  }
+  return section;
+}
+
+function formatRoadmapItemDetail(
+  i: RoadmapItem,
+  rawContext = false,
+  documentCount = 0,
+  documents?: readonly RoadmapContextDocument[],
+  omittedDocuments?: RoadmapContextDocumentOmissions,
+): string {
   const lines = [
     `${formatRoadmapItemLine(i)}`,
     `id: ${i.id}`,
     i.description ? `description: ${i.description}` : "",
     i.rationale ? `rationale: ${i.rationale}` : "",
     i.context ? formatRoadmapContext(i.context, rawContext) : "",
+    documents
+      ? formatRoadmapContextDocuments(documents, omittedDocuments)
+      : documentCount > 0
+        ? `context documents available: ${documentCount}; call roadmap_get with with_documents: true to read them.`
+        : "",
     i.kind === "directive"
       ? `directive: /${i.directive} -> ${i.target_peer_ids.length ? i.target_peer_ids.join(", ") : "(no targets yet)"} (executed by the Deck when dispatched)`
       : "",
@@ -2121,7 +2161,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
     }
 
     case "roadmap_get": {
-      const a = args as { id: string; raw_context?: boolean };
+      const a = args as { id: string; raw_context?: boolean; with_documents?: boolean };
       try {
         const id = await resolveRoadmapId(a.id);
         const { items } = await brokerFetch<RoadmapListResponse>("/roadmap/list", {
@@ -2130,8 +2170,34 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
         });
         const item = items.find((i) => i.id === id);
         if (!item) throw new Error(`item ${id} vanished`);
+        const documentList = await brokerFetch<RoadmapContextDocumentListResponse>("/roadmap/context-document/list", {
+          id,
+          project_key: roadmapProjectKey(),
+          include_documents: a.with_documents === true,
+        });
+        if (a.with_documents === true && !documentList.documents) {
+          throw new Error("context document read returned no documents");
+        }
+        const omittedDocuments =
+          documentList.omitted_document_count === undefined
+            ? undefined
+            : {
+                document_count: documentList.omitted_document_count,
+                document_ids: documentList.omitted_document_ids ?? [],
+              };
         return {
-          content: [{ type: "text" as const, text: formatRoadmapItemDetail(item, a.raw_context === true) }],
+          content: [
+            {
+              type: "text" as const,
+              text: formatRoadmapItemDetail(
+                item,
+                a.raw_context === true,
+                documentList.document_count,
+                documentList.documents,
+                omittedDocuments,
+              ),
+            },
+          ],
         };
       } catch (e) {
         return roadmapToolError(e);

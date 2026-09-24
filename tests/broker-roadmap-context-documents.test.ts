@@ -11,7 +11,13 @@ import {
   isValidRoadmapContextDocumentText,
   runRoadmapContextDocumentDeportCas,
 } from "../shared/roadmap-context-document-cas.ts";
-import type { RoadmapContextDocument, RoadmapItem } from "../shared/types.ts";
+import {
+  formatRoadmapContextDocumentHeader,
+  formatRoadmapContextDocumentOmission,
+  ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS,
+  type RoadmapContextDocument,
+  type RoadmapItem,
+} from "../shared/types.ts";
 
 let broker: TestBroker;
 
@@ -29,6 +35,12 @@ const OTHER_PK = "github.com/vocsap/another-context-documents-repo";
 type UpsertResponse = { item: RoadmapItem };
 type DocumentResponse = { item: RoadmapItem; document: RoadmapContextDocument };
 type DocumentGetResponse = { document: RoadmapContextDocument };
+type DocumentListResponse = {
+  document_count: number;
+  documents?: RoadmapContextDocument[];
+  omitted_document_count?: number;
+  omitted_document_ids?: string[];
+};
 type ErrorResponse = { error: string };
 
 async function seed(body: Record<string, unknown> = {}): Promise<RoadmapItem> {
@@ -52,6 +64,14 @@ function deport(body: Record<string, unknown>) {
 function getDocument(body: Record<string, unknown>) {
   return post<DocumentGetResponse | ErrorResponse>(`${broker.url}/roadmap/context-document/get`, {
     project_key: PK,
+    ...body,
+  });
+}
+
+function listDocuments(body: Record<string, unknown>) {
+  return post<DocumentListResponse | ErrorResponse>(`${broker.url}/roadmap/context-document/list`, {
+    project_key: PK,
+    include_documents: true,
     ...body,
   });
 }
@@ -90,6 +110,232 @@ test("deportation stores an immutable document, rewrites context, and links the 
   } finally {
     db.close();
   }
+});
+
+test("documents are read in creation order with an id tie-break without the read index", async () => {
+  const item = await seed();
+  const db = new Database(broker.dbPath);
+  const documents = [
+    ["20000000-0000-4000-8000-000000000002", "2026-09-24T00:00:00.000Z"],
+    ["30000000-0000-4000-8000-000000000003", "2026-09-24T00:00:01.000Z"],
+    ["10000000-0000-4000-8000-000000000001", "2026-09-24T00:00:01.000Z"],
+  ] as const;
+  try {
+    for (const [documentId, createdAt] of documents) {
+      db.run(
+        "INSERT INTO roadmap_context_documents (id, roadmap_item_id, project_key, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+        [documentId, item.id, PK, "fixture-author", createdAt],
+      );
+    }
+    db.run("DROP INDEX idx_roadmap_context_documents_read");
+  } finally {
+    db.close();
+  }
+
+  try {
+    const response = await listDocuments({ id: item.id });
+    expect(response.status).toBe(200);
+    expect((response.body as DocumentListResponse).documents!.map((document) => document.id)).toEqual([
+      "20000000-0000-4000-8000-000000000002",
+      "10000000-0000-4000-8000-000000000001",
+      "30000000-0000-4000-8000-000000000003",
+    ]);
+  } finally {
+    const restore = new Database(broker.dbPath);
+    try {
+      restore.run(
+        "CREATE INDEX idx_roadmap_context_documents_read ON roadmap_context_documents(roadmap_item_id, project_key, created_at, id)",
+      );
+    } finally {
+      restore.close();
+    }
+  }
+});
+
+test("units are read in position order without the unit index", async () => {
+  const item = await seed();
+  const documentId = "21000000-0000-4000-8000-000000000002";
+  const createdAt = "2026-09-24T00:00:00.000Z";
+  const db = new Database(broker.dbPath);
+  try {
+    db.run(
+      "INSERT INTO roadmap_context_documents (id, roadmap_item_id, project_key, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+      [documentId, item.id, PK, "fixture-author", createdAt],
+    );
+    db.run(
+      "INSERT INTO roadmap_context_document_units (id, document_id, source_target, raw, deported_at, position) VALUES (?, ?, ?, ?, ?, ?)",
+      [`${documentId}-unit-a`, documentId, "2026-09-24T00:00:01.000Z", "second", createdAt, 1],
+    );
+    db.run(
+      "INSERT INTO roadmap_context_document_units (id, document_id, source_target, raw, deported_at, position) VALUES (?, ?, ?, ?, ?, ?)",
+      [`${documentId}-unit-z`, documentId, "body", "first", createdAt, 0],
+    );
+    db.run("DROP INDEX idx_roadmap_context_document_units_document");
+  } finally {
+    db.close();
+  }
+
+  try {
+    const response = await listDocuments({ id: item.id });
+    expect(response.status).toBe(200);
+    expect((response.body as DocumentListResponse).documents![0]!.units).toMatchObject([
+      { raw: "first", position: 0 },
+      { raw: "second", position: 1 },
+    ]);
+  } finally {
+    const restore = new Database(broker.dbPath);
+    try {
+      restore.run(
+        "CREATE INDEX idx_roadmap_context_document_units_document ON roadmap_context_document_units(document_id, position)",
+      );
+    } finally {
+      restore.close();
+    }
+  }
+});
+
+test("document listing omits documents that exceed its output budget", async () => {
+  const item = await seed();
+  const db = new Database(broker.dbPath);
+  const firstId = "70000000-0000-4000-8000-000000000007";
+  const secondId = "80000000-0000-4000-8000-000000000008";
+  try {
+    for (const [id, raw, createdAt] of [
+      [firstId, "a".repeat(ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS), "2026-09-24T00:00:00.000Z"],
+      [secondId, "must not be loaded", "2026-09-24T00:00:01.000Z"],
+    ] as const) {
+      db.run(
+        "INSERT INTO roadmap_context_documents (id, roadmap_item_id, project_key, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+        [id, item.id, PK, "fixture-author", createdAt],
+      );
+      db.run(
+        "INSERT INTO roadmap_context_document_units (id, document_id, source_target, raw, deported_at, position) VALUES (?, ?, ?, ?, ?, ?)",
+        [`${id}-unit`, id, "body", raw, createdAt, 0],
+      );
+    }
+  } finally {
+    db.close();
+  }
+
+  const response = await listDocuments({ id: item.id });
+  expect(response.status).toBe(200);
+  expect(response.body).toEqual({
+    document_count: 2,
+    documents: [],
+    omitted_document_count: 2,
+    omitted_document_ids: [firstId, secondId],
+  });
+});
+
+test("document listing reserves the omission trailer before it includes a document", async () => {
+  const item = await seed();
+  const db = new Database(broker.dbPath);
+  const firstId = "81000000-0000-4000-8000-000000000008";
+  const secondId = "82000000-0000-4000-8000-000000000008";
+  const firstCreatedAt = "2026-09-24T00:00:00.000Z";
+  const secondCreatedAt = "2026-09-24T00:00:01.000Z";
+  const omission = formatRoadmapContextDocumentOmission({
+    document_count: 1,
+    document_ids: [secondId],
+  });
+  const firstRaw = "a".repeat(
+    ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS -
+      formatRoadmapContextDocumentHeader({ id: firstId, created_at: firstCreatedAt, created_by: "fixture-author" }).length -
+      2 -
+      omission.length +
+      1,
+  );
+  try {
+    for (const [id, raw, createdAt] of [
+      [firstId, firstRaw, firstCreatedAt],
+      [secondId, "x", secondCreatedAt],
+    ] as const) {
+      db.run(
+        "INSERT INTO roadmap_context_documents (id, roadmap_item_id, project_key, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+        [id, item.id, PK, "fixture-author", createdAt],
+      );
+      db.run(
+        "INSERT INTO roadmap_context_document_units (id, document_id, source_target, raw, deported_at, position) VALUES (?, ?, ?, ?, ?, ?)",
+        [`${id}-unit`, id, "body", raw, createdAt, 0],
+      );
+    }
+  } finally {
+    db.close();
+  }
+
+  const response = await listDocuments({ id: item.id });
+  expect(response.status).toBe(200);
+  expect(response.body).toEqual({
+    document_count: 2,
+    documents: [],
+    omitted_document_count: 2,
+    omitted_document_ids: [firstId, secondId],
+  });
+});
+
+test("document listing bounds omitted identifiers while keeping their count exact", async () => {
+  const item = await seed();
+  const db = new Database(broker.dbPath);
+  const ids = Array.from(
+    { length: 21 },
+    (_, index) => `90000000-0000-4000-8000-${String(index + 9).padStart(12, "0")}`,
+  );
+  try {
+    for (const [index, id] of ids.entries()) {
+      const createdAt = `2026-09-24T00:00:${String(index).padStart(2, "0")}.000Z`;
+      db.run(
+        "INSERT INTO roadmap_context_documents (id, roadmap_item_id, project_key, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+        [id, item.id, PK, "fixture-author", createdAt],
+      );
+      db.run(
+        "INSERT INTO roadmap_context_document_units (id, document_id, source_target, raw, deported_at, position) VALUES (?, ?, ?, ?, ?, ?)",
+        [
+          `${id}-unit`,
+          id,
+          "body",
+          index === 0 ? "a".repeat(ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS) : "x",
+          createdAt,
+          0,
+        ],
+      );
+    }
+  } finally {
+    db.close();
+  }
+
+  const response = await listDocuments({ id: item.id });
+  expect(response.status).toBe(200);
+  expect(response.body).toMatchObject({
+    document_count: 21,
+    documents: [],
+    omitted_document_count: 21,
+    omitted_document_ids: ids.slice(0, 20),
+  });
+});
+
+test("document listing reports availability without returning units unless requested", async () => {
+  const item = await seed({ context: "counted context" });
+  const created = await deport({ id: item.id, by: "fixture-author", targets: ["body"] });
+  expect(created.status).toBe(200);
+
+  const availability = await post<DocumentListResponse | ErrorResponse>(`${broker.url}/roadmap/context-document/list`, {
+    project_key: PK,
+    id: item.id,
+  });
+  expect(availability.status).toBe(200);
+  expect(availability.body).toEqual({ document_count: 1 });
+
+  const expanded = await listDocuments({ id: item.id });
+  expect(expanded.status).toBe(200);
+  expect(expanded.body).toMatchObject({ document_count: 1, documents: [expect.anything()] });
+
+  const invalid = await post<ErrorResponse>(`${broker.url}/roadmap/context-document/list`, {
+    project_key: PK,
+    id: item.id,
+    include_documents: "true",
+  });
+  expect(invalid.status).toBe(400);
+  expect(invalid.body.error).toBe("include_documents must be a boolean");
 });
 
 test("a document cannot be read through another project or another card", async () => {

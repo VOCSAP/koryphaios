@@ -7,9 +7,12 @@
 // raw-args ack lies on all five.
 
 import { test, expect, describe, afterAll } from "bun:test";
+import { Database } from "bun:sqlite";
+import { join } from "node:path";
 import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
 import {
   ROADMAP_ADD_ACK_FIELDS,
+  ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS,
   ROADMAP_UPDATE_ACK_FIELDS,
   findUncoveredAckFields,
 } from "../shared/types.ts";
@@ -634,6 +637,151 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     expect(ackText(raw)).toContain(`context (raw agent briefing): ${context}`);
   }, 60_000);
 
+  test("roadmap_get advertises and returns ordered raw context documents only when requested", async () => {
+    const h = await boot();
+    const created = await callTool(h, "roadmap_add", { title: "document read probe", context: "live context" });
+    const prefix = ackText(created).match(/Roadmap item created: ([0-9a-f]{8})/)![1]!;
+    const db = new Database(h.b.dbPath);
+    try {
+      const parent = db.query("SELECT id, project_key FROM roadmap_items WHERE id LIKE ?").get(`${prefix}%`) as {
+        id: string;
+        project_key: string;
+      };
+      const documents = [
+        ["20000000-0000-4000-8000-000000000002", "2026-09-24T00:00:00.000Z", "document one"],
+        ["10000000-0000-4000-8000-000000000001", "2026-09-24T00:00:01.000Z", "document two"],
+      ] as const;
+      for (const [documentId, createdAt, raw] of documents) {
+        db.run(
+          "INSERT INTO roadmap_context_documents (id, roadmap_item_id, project_key, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+          [documentId, parent.id, parent.project_key, "probe", createdAt],
+        );
+        db.run(
+          "INSERT INTO roadmap_context_document_units (id, document_id, source_target, raw, deported_at, position) VALUES (?, ?, ?, ?, ?, ?)",
+          [`${documentId}-unit`, documentId, "body", raw, createdAt, 0],
+        );
+      }
+    } finally {
+      db.close();
+    }
+
+    const defaultRead = await callTool(h, "roadmap_get", { id: prefix });
+    const defaultText = ackText(defaultRead);
+    expect(defaultRead.result?.isError).toBeFalsy();
+    expect(defaultText).toContain("context documents available: 2; call roadmap_get with with_documents: true to read them.");
+    expect(defaultText).not.toContain("document one");
+    expect(defaultText).not.toContain("document two");
+
+    const requested = await callTool(h, "roadmap_get", { id: prefix, with_documents: true });
+    const requestedText = ackText(requested);
+    expect(requested.result?.isError).toBeFalsy();
+    expect(requestedText).toContain("context document 20000000 (created 2026-09-24T00:00:00.000Z by probe):\ndocument one");
+    expect(requestedText).toContain("context document 10000000 (created 2026-09-24T00:00:01.000Z by probe):\ndocument two");
+    expect(requestedText.indexOf("document one")).toBeLessThan(requestedText.indexOf("document two"));
+
+    const raw = await callTool(h, "roadmap_get", { id: prefix, raw_context: true, with_documents: true });
+    expect(ackText(raw)).toContain("context (raw agent briefing): live context");
+    expect(ackText(raw)).toContain("document one");
+  }, 60_000);
+
+  test("roadmap_get preserves whole documents and names omitted documents at the output cap", async () => {
+    const h = await boot();
+    const created = await callTool(h, "roadmap_add", { title: "document output cap" });
+    const prefix = ackText(created).match(/Roadmap item created: ([0-9a-f]{8})/)![1]!;
+    const db = new Database(h.b.dbPath);
+    const firstId = "30000000-0000-4000-8000-000000000003";
+    const omittedIds = Array.from(
+      { length: 21 },
+      (_, index) => `40000000-0000-4000-8000-${String(index + 4).padStart(12, "0")}`,
+    );
+    const firstCreatedAt = "2026-09-24T00:00:00.000Z";
+    const omissionLine = `context documents omitted: ${omittedIds.length} document(s): ${omittedIds
+      .slice(0, 20)
+      .map((id) => id.slice(0, 8))
+      .join(", ")}, and 1 more`;
+    const firstHeader = `context document ${firstId.slice(0, 8)} (created ${firstCreatedAt} by probe):\n`;
+    const firstRaw = "a".repeat(65_536 - firstHeader.length - 2 - omissionLine.length);
+    try {
+      const parent = db.query("SELECT id, project_key FROM roadmap_items WHERE id LIKE ?").get(`${prefix}%`) as {
+        id: string;
+        project_key: string;
+      };
+      for (const [documentId, raw, createdAt] of [
+        [firstId, firstRaw, firstCreatedAt],
+        ...omittedIds.map((id, index) => [id, "x", `2026-09-24T00:00:${String(index + 1).padStart(2, "0")}.000Z`] as const),
+      ] as const) {
+        db.run(
+          "INSERT INTO roadmap_context_documents (id, roadmap_item_id, project_key, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+          [documentId, parent.id, parent.project_key, "probe", createdAt],
+        );
+        db.run(
+          "INSERT INTO roadmap_context_document_units (id, document_id, source_target, raw, deported_at, position) VALUES (?, ?, ?, ?, ?, ?)",
+          [`${documentId}-unit`, documentId, "body", raw, createdAt, 0],
+        );
+      }
+    } finally {
+      db.close();
+    }
+
+    const response = await callTool(h, "roadmap_get", { id: prefix, with_documents: true });
+    const text = ackText(response);
+    expect(response.result?.isError).toBeFalsy();
+    expect(text).toContain(firstRaw);
+    expect(text).not.toContain(`context document ${omittedIds[0]!.slice(0, 8)} (`);
+    expect(text).toContain(omissionLine);
+  }, 60_000);
+
+  test("roadmap_get omits a supplementary-plane context document that exceeds the UTF-8 budget", async () => {
+    const h = await boot();
+    const created = await callTool(h, "roadmap_add", { title: "UTF-8 document output cap" });
+    const prefix = ackText(created).match(/Roadmap item created: ([0-9a-f]{8})/)![1]!;
+    const documentId = "50000000-0000-4000-8000-000000000005";
+    const createdAt = "2026-09-24T00:00:00.000Z";
+    const header = `context document ${documentId.slice(0, 8)} (created ${createdAt} by probe):`;
+    const raw = `😀${"a".repeat(ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS - header.length - 2)}`;
+    const db = new Database(h.b.dbPath);
+    try {
+      const parent = db.query("SELECT id, project_key FROM roadmap_items WHERE id LIKE ?").get(`${prefix}%`) as {
+        id: string;
+        project_key: string;
+      };
+      db.run(
+        "INSERT INTO roadmap_context_documents (id, roadmap_item_id, project_key, created_by, created_at) VALUES (?, ?, ?, ?, ?)",
+        [documentId, parent.id, parent.project_key, "probe", createdAt],
+      );
+      db.run(
+        "INSERT INTO roadmap_context_document_units (id, document_id, source_target, raw, deported_at, position) VALUES (?, ?, ?, ?, ?, ?)",
+        [`${documentId}-unit`, documentId, "body", raw, createdAt, 0],
+      );
+    } finally {
+      db.close();
+    }
+
+    const response = await callTool(h, "roadmap_get", { id: prefix, with_documents: true });
+    const text = ackText(response);
+    expect(response.result?.isError).toBeFalsy();
+    expect(text).not.toContain(raw);
+    expect(text).toContain(`context documents omitted: 1 document(s): ${documentId.slice(0, 8)}`);
+  }, 60_000);
+
+  test("roadmap_get reports a document read failure to the agent and the broker log", async () => {
+    const h = await boot();
+    const created = await callTool(h, "roadmap_add", { title: "document read failure" });
+    const prefix = ackText(created).match(/Roadmap item created: ([0-9a-f]{8})/)![1]!;
+    const db = new Database(h.b.dbPath);
+    try {
+      db.run("DROP TABLE roadmap_context_document_units");
+    } finally {
+      db.close();
+    }
+
+    const response = await callTool(h, "roadmap_get", { id: prefix, with_documents: true });
+    expect(response.result?.isError).toBe(true);
+    expect(ackText(response)).toContain("context document read failed");
+    const log = await Bun.file(join(h.b.tmpDir, "logs", "broker.log")).text();
+    expect(log).toContain("/roadmap/context-document/list: document read failed");
+  }, 60_000);
+
   test("roadmap_append_context exposes supersedes and preserves its clause through MCP", async () => {
     const h = await boot();
     const listId = nextRpcId++;
@@ -644,6 +792,7 @@ describe("roadmap_add/roadmap_update MCP ack", () => {
     const getFields = tools.find((tool) => tool.name === "roadmap_get")?.inputSchema?.properties ?? {};
     expect(appendFields).toHaveProperty("supersedes");
     expect(getFields).toHaveProperty("raw_context");
+    expect(getFields).toHaveProperty("with_documents");
 
     const supersededAt = "2026-09-23T12:01:00.000Z";
     const supersededText = "obsolete append retained only for the raw audit";

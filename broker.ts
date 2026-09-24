@@ -13,6 +13,12 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import { brokerMode, isLoopbackBrokerUrl, loadConfig, upstreamUrl } from "./shared/config.ts";
 import { createLogger, coreLogDir } from "./shared/logger.ts";
 import { validateProjectKey } from "./shared/project-key.ts";
+import {
+  formatRoadmapContextDocumentHeader,
+  formatRoadmapContextDocumentOmission,
+  ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS,
+  ROADMAP_CONTEXT_DOCUMENT_OMITTED_ID_MAX,
+} from "./shared/types.ts";
 import { mirrorStaleSec, mirrorStaleWarning } from "./shared/peer-staleness.ts";
 import { loadOrCreateSecretKey, openSecret, sealSecret, secretHint } from "./shared/secret-box.ts";
 import { NotificationRegistry, type RegistryStore } from "./notify/registry.ts";
@@ -142,6 +148,8 @@ import type {
   RoadmapContextDocumentDeportResponse,
   RoadmapContextDocumentGetRequest,
   RoadmapContextDocumentGetResponse,
+  RoadmapContextDocumentListRequest,
+  RoadmapContextDocumentListResponse,
   RoadmapContextDocumentSyncPullRequest,
   RoadmapContextDocumentSyncPullResponse,
   RoadmapContextDocumentSyncPushRequest,
@@ -757,6 +765,9 @@ db.run(`
 `);
 db.run(
   "CREATE INDEX IF NOT EXISTS idx_roadmap_context_documents_item ON roadmap_context_documents(roadmap_item_id, project_key)"
+);
+db.run(
+  "CREATE INDEX IF NOT EXISTS idx_roadmap_context_documents_read ON roadmap_context_documents(roadmap_item_id, project_key, created_at, id)"
 );
 db.run(
   "CREATE INDEX IF NOT EXISTS idx_roadmap_context_documents_sync_rev ON roadmap_context_documents(sync_rev)"
@@ -3134,9 +3145,28 @@ type RoadmapContextDocumentUnitRow = {
   position: number;
 };
 
+type RoadmapContextDocumentReadSummary = RoadmapContextDocumentRow & {
+  raw_bytes: number;
+};
+
+type RoadmapContextDocumentReadUnitRow = RoadmapContextDocumentUnitRow & {
+  document_id: string;
+};
+
 type RoadmapContextDocumentSyncStorageRow = RoadmapContextDocumentRow & {
   sync_rev: number;
 };
+
+function getRoadmapContextDocumentUnits(documentId: string): RoadmapContextDocumentUnitRow[] {
+  return db
+    .query(
+      `SELECT id, source_target, raw, deported_at, position
+         FROM roadmap_context_document_units
+        WHERE document_id = ?
+        ORDER BY position`,
+    )
+    .all(documentId) as RoadmapContextDocumentUnitRow[];
+}
 
 function getRoadmapContextDocument(
   roadmapItemId: string,
@@ -3151,15 +3181,118 @@ function getRoadmapContextDocument(
     )
     .get(documentId, roadmapItemId, projectKey) as RoadmapContextDocumentRow | null;
   if (!row) return null;
+  return { ...row, units: getRoadmapContextDocumentUnits(documentId) };
+}
+
+function countRoadmapContextDocuments(roadmapItemId: string, projectKey: string): number {
+  const row = db
+    .query(
+      `SELECT COUNT(*) AS count
+         FROM roadmap_context_documents
+        WHERE roadmap_item_id = ? AND project_key = ?`,
+    )
+    .get(roadmapItemId, projectKey) as { count: number };
+  return row.count;
+}
+
+function getRoadmapContextDocumentReadSummaries(
+  roadmapItemId: string,
+  projectKey: string,
+): RoadmapContextDocumentReadSummary[] {
+  return db
+    .query(
+      `SELECT d.id, d.roadmap_item_id, d.project_key, d.created_by, d.created_at,
+              COALESCE(s.raw_bytes, 0) AS raw_bytes
+         FROM roadmap_context_documents d
+         LEFT JOIN (
+           SELECT u.document_id, SUM(LENGTH(CAST(u.raw AS BLOB))) AS raw_bytes
+             FROM roadmap_context_document_units u
+             JOIN roadmap_context_documents p ON p.id = u.document_id
+            WHERE p.roadmap_item_id = ? AND p.project_key = ?
+            GROUP BY u.document_id
+         ) s ON s.document_id = d.id
+        WHERE d.roadmap_item_id = ? AND d.project_key = ?
+        ORDER BY d.created_at ASC, d.id ASC`,
+    )
+    .all(roadmapItemId, projectKey, roadmapItemId, projectKey)
+    .map((row) => {
+      const summary = row as RoadmapContextDocumentReadSummary;
+      return { ...summary, raw_bytes: Number(summary.raw_bytes) };
+    });
+}
+
+function materializeRoadmapContextDocuments(
+  summaries: readonly RoadmapContextDocumentReadSummary[],
+): RoadmapContextDocument[] {
+  if (summaries.length === 0) return [];
+  const documentIds = summaries.map((summary) => summary.id);
+  const unitsByDocumentId = new Map<string, RoadmapContextDocumentUnitRow[]>(
+    documentIds.map((id) => [id, []]),
+  );
   const units = db
     .query(
-      `SELECT id, source_target, raw, deported_at, position
+      `SELECT document_id, id, source_target, raw, deported_at, position
          FROM roadmap_context_document_units
-        WHERE document_id = ?
-        ORDER BY position`,
+        WHERE document_id IN (${documentIds.map(() => "?").join(", ")})
+        ORDER BY document_id ASC, position ASC`,
     )
-    .all(documentId) as RoadmapContextDocumentUnitRow[];
-  return { ...row, units };
+    .all(...documentIds) as RoadmapContextDocumentReadUnitRow[];
+  for (const { document_id, ...unit } of units) {
+    unitsByDocumentId.get(document_id)!.push(unit);
+  }
+  return summaries.map(({ raw_bytes: _rawBytes, ...document }) => ({
+    ...document,
+    units: unitsByDocumentId.get(document.id)!,
+  }));
+}
+
+function getRoadmapContextDocumentsWithinOutputBudget(
+  roadmapItemId: string,
+  projectKey: string,
+): RoadmapContextDocumentListResponse {
+  const summaries = getRoadmapContextDocumentReadSummaries(roadmapItemId, projectKey);
+  const document_count = summaries.length;
+  const selected: RoadmapContextDocumentReadSummary[] = [];
+  let sectionChars = 0;
+
+  for (const [index, summary] of summaries.entries()) {
+    const omittedCountAfter = document_count - index - 1;
+    const omission =
+      omittedCountAfter > 0
+        ? {
+            document_count: omittedCountAfter,
+            document_ids: summaries
+              .slice(index + 1, index + 1 + ROADMAP_CONTEXT_DOCUMENT_OMITTED_ID_MAX)
+              .map((document) => document.id),
+          }
+        : undefined;
+    const documentChars = formatRoadmapContextDocumentHeader(summary).length + 1 + summary.raw_bytes;
+    const separatorChars = selected.length > 0 ? 2 : 0;
+    const omissionChars = omission ? 2 + formatRoadmapContextDocumentOmission(omission).length : 0;
+    if (sectionChars + separatorChars + documentChars + omissionChars > ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS) {
+      break;
+    }
+    sectionChars += separatorChars + documentChars;
+    selected.push(summary);
+  }
+
+  const omitted_document_count = document_count - selected.length;
+  if (omitted_document_count === 0) {
+    return {
+      document_count,
+      documents: materializeRoadmapContextDocuments(selected),
+    };
+  }
+
+  const omitted_document_ids = summaries
+    .slice(selected.length, selected.length + ROADMAP_CONTEXT_DOCUMENT_OMITTED_ID_MAX)
+    .map((summary) => summary.id);
+  return {
+    document_count,
+    documents: materializeRoadmapContextDocuments(selected),
+    omitted_document_count,
+    omitted_document_ids,
+  };
 }
 
 function getRoadmapContextDocumentSyncRow(documentId: string): RoadmapContextDocumentSyncRow | null {
@@ -4481,6 +4614,25 @@ function handleRoadmapContextDocumentGet(
     return { document };
   } catch (error) {
     log.error("/roadmap/context-document/get: document read failed", error);
+    return { error: "context document read failed", status: 500 };
+  }
+}
+
+function handleRoadmapContextDocumentList(
+  body: RoadmapContextDocumentListRequest,
+): RoadmapContextDocumentListResponse | { error: string; status: number } {
+  const parent = resolveRoadmapContextDocumentParent(body);
+  if ("error" in parent) return parent;
+  if (body.include_documents !== undefined && typeof body.include_documents !== "boolean") {
+    return { error: "include_documents must be a boolean", status: 400 };
+  }
+  try {
+    if (body.include_documents === true) {
+      return getRoadmapContextDocumentsWithinOutputBudget(parent.id, parent.project_key);
+    }
+    return { document_count: countRoadmapContextDocuments(parent.id, parent.project_key) };
+  } catch (error) {
+    log.error("/roadmap/context-document/list: document read failed", error);
     return { error: "context document read failed", status: 500 };
   }
 }
@@ -10135,6 +10287,13 @@ const server = Bun.serve<WsData>({
         }
         case "/roadmap/context-document/get": {
           const result = handleRoadmapContextDocumentGet(body as RoadmapContextDocumentGetRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/context-document/list": {
+          const result = handleRoadmapContextDocumentList(body as RoadmapContextDocumentListRequest);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }

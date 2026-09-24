@@ -1227,6 +1227,26 @@ export interface RoadmapContextDocument {
   units: RoadmapContextDocumentUnit[];
 }
 
+export const ROADMAP_CONTEXT_DOCUMENT_OUTPUT_MAX_CHARS = 65_536;
+export const ROADMAP_CONTEXT_DOCUMENT_OMITTED_ID_MAX = 20;
+
+export interface RoadmapContextDocumentOmissions {
+  document_count: number;
+  document_ids: string[];
+}
+
+export function formatRoadmapContextDocumentHeader(
+  document: Pick<RoadmapContextDocument, "id" | "created_at" | "created_by">,
+): string {
+  return `context document ${document.id.slice(0, 8)} (created ${document.created_at} by ${document.created_by}):`;
+}
+
+export function formatRoadmapContextDocumentOmission(omitted: RoadmapContextDocumentOmissions): string {
+  const ids = omitted.document_ids.slice(0, ROADMAP_CONTEXT_DOCUMENT_OMITTED_ID_MAX).map((id) => id.slice(0, 8));
+  const more = omitted.document_count - ids.length;
+  return `context documents omitted: ${omitted.document_count} document(s): ${[...ids, ...(more > 0 ? [`and ${more} more`] : [])].join(", ")}`;
+}
+
 export interface RoadmapContextDocumentGetRequest {
   id: string;
   project_key: string;
@@ -1235,6 +1255,19 @@ export interface RoadmapContextDocumentGetRequest {
 
 export interface RoadmapContextDocumentGetResponse {
   document: RoadmapContextDocument;
+}
+
+export interface RoadmapContextDocumentListRequest {
+  id: string;
+  project_key: string;
+  include_documents?: boolean;
+}
+
+export interface RoadmapContextDocumentListResponse {
+  document_count: number;
+  documents?: RoadmapContextDocument[];
+  omitted_document_count?: number;
+  omitted_document_ids?: string[];
 }
 
 export interface RoadmapContextDocumentDeportRequest {
