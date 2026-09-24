@@ -45,8 +45,11 @@ import {
 } from "./shared/roadmap-append-cas.ts";
 import {
   createSqliteRoadmapContextDocumentCasStore,
+  isValidRoadmapContextDocumentText,
   runRoadmapContextDocumentDeportCas,
+  validateRoadmapContextDocumentLimits,
 } from "./shared/roadmap-context-document-cas.ts";
+import { ROADMAP_APPEND_RESULT_MAX_CHARS } from "./shared/roadmap-append.ts";
 import { isValidQueueRank } from "./shared/roadmap-queue.ts";
 import {
   contentEquals,
@@ -139,6 +142,11 @@ import type {
   RoadmapContextDocumentDeportResponse,
   RoadmapContextDocumentGetRequest,
   RoadmapContextDocumentGetResponse,
+  RoadmapContextDocumentSyncPullRequest,
+  RoadmapContextDocumentSyncPullResponse,
+  RoadmapContextDocumentSyncPushRequest,
+  RoadmapContextDocumentSyncPushResponse,
+  RoadmapContextDocumentSyncRow,
   GraphDraft,
   GraphDraftAddRequest,
   GraphDraftAddResponse,
@@ -742,11 +750,16 @@ db.run(`
     roadmap_item_id TEXT NOT NULL,
     project_key TEXT NOT NULL,
     created_by TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    sync_rev INTEGER NOT NULL DEFAULT 0,
+    sync_dirty INTEGER NOT NULL DEFAULT 1
   )
 `);
 db.run(
   "CREATE INDEX IF NOT EXISTS idx_roadmap_context_documents_item ON roadmap_context_documents(roadmap_item_id, project_key)"
+);
+db.run(
+  "CREATE INDEX IF NOT EXISTS idx_roadmap_context_documents_sync_rev ON roadmap_context_documents(sync_rev)"
 );
 db.run(`
   CREATE TABLE IF NOT EXISTS roadmap_context_document_units (
@@ -762,6 +775,17 @@ db.run(`
 db.run(
   "CREATE INDEX IF NOT EXISTS idx_roadmap_context_document_units_document ON roadmap_context_document_units(document_id, position)"
 );
+for (const col of [
+  "sync_rev INTEGER NOT NULL DEFAULT 0",
+  "sync_dirty INTEGER NOT NULL DEFAULT 1",
+]) {
+  try {
+    db.run(`ALTER TABLE roadmap_context_documents ADD COLUMN ${col}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+  }
+}
 
 try {
   db.run("ALTER TABLE roadmap_items ADD COLUMN queue INTEGER");
@@ -917,7 +941,8 @@ for (const col of [
 // the triggers below draw from), `applying` ('1' while a replication write is
 // in flight, so the content trigger does not mark it dirty), `mode` (read by
 // the two lock triggers, which only exist on a replica), `replica_id` and
-// `upstream_cursor`.
+// `upstream_cursor`, `context_document_rev_seq` and
+// `upstream_context_document_cursor`.
 db.run(`
   CREATE TABLE IF NOT EXISTS roadmap_sync_meta (
     key TEXT PRIMARY KEY,
@@ -926,8 +951,10 @@ db.run(`
 `);
 for (const [key, value] of [
   ["rev_seq", "0"],
+  ["context_document_rev_seq", "0"],
   ["applying", "0"],
   ["upstream_cursor", "0"],
+  ["upstream_context_document_cursor", "0"],
 ]) {
   db.run("INSERT OR IGNORE INTO roadmap_sync_meta (key, value) VALUES (?, ?)", [key!, value!]);
 }
@@ -997,6 +1024,27 @@ const backfillRevs = db.transaction(() => {
 const backfilled = backfillRevs();
 if (backfilled > 0) log.info(`migration: numbered ${backfilled} roadmap row(s) into the replication sequence`);
 
+const backfillContextDocumentRevs = db.transaction(() => {
+  const rows = db
+    .query("SELECT rowid AS rid FROM roadmap_context_documents WHERE sync_rev = 0 ORDER BY rowid")
+    .all() as { rid: number }[];
+  const current = (
+    db.query("SELECT MAX(sync_rev) AS rev FROM roadmap_context_documents").get() as { rev: number | null }
+  ).rev ?? 0;
+  let seq = Math.max(parseInt(syncMetaGet("context_document_rev_seq") ?? "0", 10), current);
+  const stamp = db.prepare("UPDATE roadmap_context_documents SET sync_rev = ? WHERE rowid = ?");
+  for (const row of rows) {
+    seq += 1;
+    stamp.run(seq, row.rid);
+  }
+  syncMetaSet("context_document_rev_seq", String(seq));
+  return rows.length;
+});
+const contextDocumentsBackfilled = backfillContextDocumentRevs();
+if (contextDocumentsBackfilled > 0) {
+  log.info(`migration: numbered ${contextDocumentsBackfilled} context document(s) into the replication sequence`);
+}
+
 db.run(`CREATE INDEX IF NOT EXISTS idx_roadmap_rev ON roadmap_items(rev)`);
 
 // Revision stamping lives in TRIGGERS, not in a helper each handler calls: a
@@ -1045,6 +1093,10 @@ const SYNC_PENDING_PUSH_WHERE = "sync_state = 'clean' AND (sync_dirty = 1 OR syn
 const NEXT_REV = "(SELECT CAST(value AS INTEGER) FROM roadmap_sync_meta WHERE key = 'rev_seq')";
 const BUMP_REV_SEQ =
   "UPDATE roadmap_sync_meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'rev_seq';";
+const NEXT_CONTEXT_DOCUMENT_REV =
+  "(SELECT CAST(value AS INTEGER) FROM roadmap_sync_meta WHERE key = 'context_document_rev_seq')";
+const BUMP_CONTEXT_DOCUMENT_REV_SEQ =
+  "UPDATE roadmap_sync_meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) WHERE key = 'context_document_rev_seq';";
 const IS_APPLYING = "COALESCE((SELECT value FROM roadmap_sync_meta WHERE key = 'applying'), '0') = '1'";
 const IS_REPLICA = "COALESCE((SELECT value FROM roadmap_sync_meta WHERE key = 'mode'), '') = 'replica'";
 
@@ -1059,6 +1111,8 @@ for (const name of [
   "roadmap_lock_scope_ai",
   "roadmap_lock_scope_au",
   "roadmap_lock_release_au",
+  "roadmap_context_document_sync_rev_ai",
+  "roadmap_context_document_unit_sync_rev_ai",
   "roadmap_fts_ai",
   "roadmap_fts_ad",
   "roadmap_fts_au",
@@ -1146,6 +1200,24 @@ db.run(`
     UPDATE roadmap_items
        SET lock_scope = 'release_pending', lock_release_owner = old.locked_by
      WHERE rowid = new.rowid;
+  END
+`);
+
+db.run(`
+  CREATE TRIGGER roadmap_context_document_sync_rev_ai AFTER INSERT ON roadmap_context_documents BEGIN
+    ${BUMP_CONTEXT_DOCUMENT_REV_SEQ}
+    UPDATE roadmap_context_documents
+       SET sync_rev = ${NEXT_CONTEXT_DOCUMENT_REV}, sync_dirty = 1
+     WHERE rowid = new.rowid;
+  END
+`);
+
+db.run(`
+  CREATE TRIGGER roadmap_context_document_unit_sync_rev_ai AFTER INSERT ON roadmap_context_document_units BEGIN
+    ${BUMP_CONTEXT_DOCUMENT_REV_SEQ}
+    UPDATE roadmap_context_documents
+       SET sync_rev = ${NEXT_CONTEXT_DOCUMENT_REV}, sync_dirty = 1
+     WHERE id = new.document_id;
   END
 `);
 
@@ -3062,6 +3134,10 @@ type RoadmapContextDocumentUnitRow = {
   position: number;
 };
 
+type RoadmapContextDocumentSyncStorageRow = RoadmapContextDocumentRow & {
+  sync_rev: number;
+};
+
 function getRoadmapContextDocument(
   roadmapItemId: string,
   projectKey: string,
@@ -3074,6 +3150,26 @@ function getRoadmapContextDocument(
         WHERE id = ? AND roadmap_item_id = ? AND project_key = ?`,
     )
     .get(documentId, roadmapItemId, projectKey) as RoadmapContextDocumentRow | null;
+  if (!row) return null;
+  const units = db
+    .query(
+      `SELECT id, source_target, raw, deported_at, position
+         FROM roadmap_context_document_units
+        WHERE document_id = ?
+        ORDER BY position`,
+    )
+    .all(documentId) as RoadmapContextDocumentUnitRow[];
+  return { ...row, units };
+}
+
+function getRoadmapContextDocumentSyncRow(documentId: string): RoadmapContextDocumentSyncRow | null {
+  const row = db
+    .query(
+      `SELECT id, roadmap_item_id, project_key, created_by, created_at, sync_rev
+         FROM roadmap_context_documents
+        WHERE id = ?`,
+    )
+    .get(documentId) as RoadmapContextDocumentSyncStorageRow | null;
   if (!row) return null;
   const units = db
     .query(
@@ -5699,6 +5795,231 @@ function relayedAuthor(name: string, replicaId: string): string {
   return knownHere ? `via:${replicaId.slice(0, RELAY_ID_CHARS)}:${name}` : name;
 }
 
+type ImmutableContextDocumentResult =
+  | { ok: true }
+  | { ok: false; error: string; status: number };
+
+function validateContextDocumentSync(
+  raw: unknown,
+): { document: RoadmapContextDocument } | { error: string; status: number } {
+  if (typeof raw !== "object" || raw === null) return { error: "document is required", status: 400 };
+  const document = raw as Record<string, unknown>;
+  if (typeof document.id !== "string" || !ROADMAP_ID_REGEX.test(document.id)) {
+    return { error: "document.id is missing or malformed", status: 400 };
+  }
+  if (typeof document.roadmap_item_id !== "string" || !ROADMAP_ID_REGEX.test(document.roadmap_item_id)) {
+    return { error: "document.roadmap_item_id is missing or malformed", status: 400 };
+  }
+  const projectKey = typeof document.project_key === "string" ? document.project_key : "";
+  const projectKeyCheck = validateProjectKey(projectKey);
+  if (!projectKeyCheck.ok) return { error: `document.project_key is invalid (${projectKeyCheck.reason})`, status: 400 };
+  const author = normalizeAuthorIdentity(typeof document.created_by === "string" ? document.created_by : "");
+  if (!author.ok) return { error: "document.created_by is empty or outside [a-z0-9:_-]", status: 400 };
+  if (typeof document.created_at !== "string" || Number.isNaN(Date.parse(document.created_at))) {
+    return { error: "document.created_at is not a parsable timestamp", status: 400 };
+  }
+  if (!Array.isArray(document.units) || document.units.length === 0) {
+    return { error: "document.units must be a non-empty array", status: 400 };
+  }
+  const unitIds = new Set<string>();
+  const targets = new Set<string>();
+  const positions = new Set<number>();
+  const units: RoadmapContextDocument["units"] = [];
+  for (const rawUnit of document.units) {
+    if (typeof rawUnit !== "object" || rawUnit === null) return { error: "document.units contains an invalid unit", status: 400 };
+    const unit = rawUnit as Record<string, unknown>;
+    if (typeof unit.id !== "string" || !ROADMAP_ID_REGEX.test(unit.id)) {
+      return { error: "document.units contains a unit with a malformed id", status: 400 };
+    }
+    if (unitIds.has(unit.id)) return { error: "document.units repeats a unit id", status: 400 };
+    if (
+      typeof unit.source_target !== "string" ||
+      !unit.source_target ||
+      targets.has(unit.source_target) ||
+      (unit.source_target !== "body" && Number.isNaN(Date.parse(unit.source_target)))
+    ) {
+      return { error: "document.units repeats or has an invalid source_target", status: 400 };
+    }
+    if (
+      typeof unit.raw !== "string" ||
+      unit.raw.length > ROADMAP_APPEND_RESULT_MAX_CHARS ||
+      !isValidRoadmapContextDocumentText(unit.raw)
+    ) {
+      return { error: "document.units contains invalid, oversized, or NUL-bearing text", status: 400 };
+    }
+    if (typeof unit.deported_at !== "string" || Number.isNaN(Date.parse(unit.deported_at))) {
+      return { error: "document.units contains a unit with an unparsable deported_at", status: 400 };
+    }
+    if (
+      typeof unit.position !== "number" ||
+      !Number.isInteger(unit.position) ||
+      unit.position < 0 ||
+      positions.has(unit.position)
+    ) {
+      return { error: "document.units contains a unit with an invalid position", status: 400 };
+    }
+    unitIds.add(unit.id);
+    targets.add(unit.source_target);
+    positions.add(unit.position);
+    units.push({
+      id: unit.id,
+      source_target: unit.source_target,
+      raw: unit.raw,
+      deported_at: unit.deported_at,
+      position: unit.position,
+    });
+  }
+  for (let position = 0; position < units.length; position += 1) {
+    if (!positions.has(position)) {
+      return { error: "document.units positions must cover 0 through n-1", status: 400 };
+    }
+  }
+  const limits = validateRoadmapContextDocumentLimits(units);
+  if (!limits.ok) return { error: limits.message, status: 400 };
+  return {
+    document: {
+      id: document.id,
+      roadmap_item_id: document.roadmap_item_id,
+      project_key: projectKey,
+      created_by: author.value,
+      created_at: document.created_at,
+      units,
+    },
+  };
+}
+
+function contextDocumentMetadataMatches(
+  existing: RoadmapContextDocumentSyncStorageRow,
+  document: RoadmapContextDocument,
+): boolean {
+  return existing.roadmap_item_id === document.roadmap_item_id &&
+    existing.project_key === document.project_key &&
+    existing.created_by === document.created_by &&
+    existing.created_at === document.created_at;
+}
+
+function contextDocumentUnitMatches(
+  existing: RoadmapContextDocumentUnitRow,
+  incoming: RoadmapContextDocument["units"][number],
+): boolean {
+  return existing.source_target === incoming.source_target &&
+    existing.raw === incoming.raw &&
+    existing.deported_at === incoming.deported_at &&
+    existing.position === incoming.position;
+}
+
+// A document is immutable: an exact repeat is accepted, and each new deportation has a new id.
+function insertOrVerifyImmutableContextDocument(document: RoadmapContextDocument): ImmutableContextDocumentResult {
+  const existing = db
+    .query(
+      `SELECT id, roadmap_item_id, project_key, created_by, created_at, sync_rev
+         FROM roadmap_context_documents
+        WHERE id = ?`,
+    )
+    .get(document.id) as RoadmapContextDocumentSyncStorageRow | null;
+  if (existing) {
+    if (!contextDocumentMetadataMatches(existing, document)) {
+      return { error: "document id already exists with different immutable metadata", status: 409, ok: false };
+    }
+    const storedUnits = db
+      .query(
+        `SELECT id, source_target, raw, deported_at, position
+           FROM roadmap_context_document_units
+          WHERE document_id = ?`,
+      )
+      .all(document.id) as RoadmapContextDocumentUnitRow[];
+    if (storedUnits.length !== document.units.length) {
+      return { error: "document id already exists with a different immutable unit set", status: 409, ok: false };
+    }
+    const storedById = new Map(storedUnits.map((unit) => [unit.id, unit]));
+    for (const unit of document.units) {
+      const stored = storedById.get(unit.id);
+      if (!stored || !contextDocumentUnitMatches(stored, unit)) {
+        return { error: "document id already exists with a different immutable unit set", status: 409, ok: false };
+      }
+    }
+    return { ok: true };
+  }
+
+  db.run(
+    `INSERT INTO roadmap_context_documents
+       (id, roadmap_item_id, project_key, created_by, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+    [
+      document.id,
+      document.roadmap_item_id,
+      document.project_key,
+      document.created_by,
+      document.created_at,
+    ],
+  );
+  const insertUnit = db.prepare(
+    `INSERT INTO roadmap_context_document_units
+       (id, document_id, source_target, raw, deported_at, position)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  for (const unit of document.units) {
+    insertUnit.run(unit.id, document.id, unit.source_target, unit.raw, unit.deported_at, unit.position);
+  }
+  return { ok: true };
+}
+
+function handleRoadmapContextDocumentSyncPull(
+  body: RoadmapContextDocumentSyncPullRequest,
+): RoadmapContextDocumentSyncPullResponse | { error: string; status: number } {
+  const refused = refuseWhenReplica("/roadmap/context-document/sync/pull");
+  if (refused) return refused;
+  const notAnUpstream = requireServeReplicas("/roadmap/context-document/sync/pull");
+  if (notAnUpstream) return notAnUpstream;
+  const unauthenticated = requireBrokerToken("/roadmap/context-document/sync/pull");
+  if (unauthenticated) return unauthenticated;
+  const replicaId = syncReplicaId(body.replica_id);
+  if (typeof replicaId !== "string") return replicaId;
+  const since = syncInteger(body.since_rev, "since_rev", 0);
+  if (typeof since !== "number") return since;
+  let limit = SYNC_PULL_LIMIT_MAX;
+  if (body.limit !== undefined) {
+    const asked = syncInteger(body.limit, "limit", 1);
+    if (typeof asked !== "number") return asked;
+    limit = Math.min(asked, SYNC_PULL_LIMIT_MAX);
+  }
+  const rows = db
+    .query("SELECT id FROM roadmap_context_documents WHERE sync_rev > ? ORDER BY sync_rev LIMIT ?")
+    .all(since, limit) as { id: string }[];
+  const documents = rows.map((row) => getRoadmapContextDocumentSyncRow(row.id)!);
+  const next_rev = documents.length > 0 ? documents[documents.length - 1]!.sync_rev : since;
+  return { documents, next_rev };
+}
+
+function handleRoadmapContextDocumentSyncPush(
+  body: RoadmapContextDocumentSyncPushRequest,
+): RoadmapContextDocumentSyncPushResponse | { error: string; status: number } {
+  const refused = refuseWhenReplica("/roadmap/context-document/sync/push");
+  if (refused) return refused;
+  const notAnUpstream = requireServeReplicas("/roadmap/context-document/sync/push");
+  if (notAnUpstream) return notAnUpstream;
+  const unauthenticated = requireBrokerToken("/roadmap/context-document/sync/push");
+  if (unauthenticated) return unauthenticated;
+  const replicaId = syncReplicaId(body.replica_id);
+  if (typeof replicaId !== "string") return replicaId;
+  const validated = validateContextDocumentSync(body.document);
+  if ("error" in validated) return validated;
+  const document = {
+    ...validated.document,
+    created_by: relayedAuthor(validated.document.created_by, replicaId),
+  };
+  if (forgesRelayedAuthor(document.created_by, replicaId)) {
+    return {
+      error: `document.created_by claims a relay this replica does not own -- only 'via:${replicaId.slice(0, RELAY_ID_CHARS)}:' may be pushed from here`,
+      status: 400,
+    };
+  }
+  const accept = db.transaction(() => insertOrVerifyImmutableContextDocument(document));
+  const result = accept() as ImmutableContextDocumentResult;
+  if (!result.ok) return result;
+  return { document: getRoadmapContextDocumentSyncRow(document.id)! };
+}
+
 /**
  * Whether this replica is the live relay of the card's work-lock. Asked in SQL,
  * against the same fragment the sweep reads: a stored timestamp compared in JS
@@ -6611,6 +6932,53 @@ async function syncPullPass(): Promise<void> {
   log.warn("roadmap sync: pull stopped at the page cap, continuing on the next pass");
 }
 
+function applyPulledContextDocument(remote: RoadmapContextDocumentSyncRow): void {
+  const validated = validateContextDocumentSync(remote);
+  if ("error" in validated) throw new Error(`context document pull contains an invalid document: ${validated.error}`);
+  const document = { ...validated.document, created_by: localAuthor(validated.document.created_by) };
+  const result = insertOrVerifyImmutableContextDocument(document);
+  if (!result.ok) throw new Error(`context document pull refused: ${result.error}`);
+  db.run("UPDATE roadmap_context_documents SET sync_dirty = 0 WHERE id = ?", [document.id]);
+}
+
+function applyPulledContextDocumentPage(
+  documents: RoadmapContextDocumentSyncRow[],
+  nextRev: number,
+): void {
+  withApplying(() => {
+    for (const document of documents) {
+      try {
+        applyPulledContextDocument(document);
+      } catch (error) {
+        log.error("roadmap sync: context document pull skipped an invalid document", error);
+      }
+    }
+    syncMetaSet("upstream_context_document_cursor", String(nextRev));
+  });
+}
+
+async function syncContextDocumentPullPass(): Promise<void> {
+  for (let page = 0; page < 100; page++) {
+    const stored = parseInt(syncMetaGet("upstream_context_document_cursor") ?? "0", 10);
+    const since = Number.isFinite(stored) ? stored : 0;
+    const res = await upstreamPost<RoadmapContextDocumentSyncPullResponse>("/roadmap/context-document/sync/pull", {
+      replica_id: REPLICA_ID,
+      since_rev: since,
+      limit: SYNC_PULL_LIMIT_MAX,
+    });
+    if (res.status !== 200 || !res.body || !Array.isArray(res.body.documents)) {
+      const message = `context document pull refused (${res.status}): ${upstreamErrorText(res.body)}`;
+      const reason = classifyUpstreamStatus(res.status);
+      if (reason) throw new RoadmapSyncOfflineError(message, reason);
+      throw new Error(message);
+    }
+    const nextRev = typeof res.body.next_rev === "number" ? res.body.next_rev : since;
+    applyPulledContextDocumentPage(res.body.documents, nextRev);
+    if (res.body.documents.length < SYNC_PULL_LIMIT_MAX) return;
+  }
+  log.warn("roadmap sync: context document pull stopped at the page cap, continuing on the next pass");
+}
+
 /**
  * Cards the upstream refused with a 4xx that is NOT a conflict: a validation
  * refusal, which retrying cannot settle and which says nothing about the
@@ -6737,14 +7105,40 @@ async function syncPushPass(): Promise<void> {
   }
 }
 
+async function syncContextDocumentPushPass(): Promise<void> {
+  const rows = db
+    .query(
+      "SELECT id FROM roadmap_context_documents WHERE sync_dirty = 1 ORDER BY sync_rev LIMIT ?",
+    )
+    .all(SYNC_PUSH_BATCH) as { id: string }[];
+  for (const row of rows) {
+    const document = getRoadmapContextDocumentSyncRow(row.id);
+    if (!document) continue;
+    const sentRev = document.sync_rev;
+    const res = await upstreamPost<RoadmapContextDocumentSyncPushResponse>(
+      "/roadmap/context-document/sync/push",
+      { replica_id: REPLICA_ID, document },
+    );
+    if (res.status === 200) {
+      db.run(
+        "UPDATE roadmap_context_documents SET sync_dirty = CASE WHEN sync_rev = ? THEN 0 ELSE sync_dirty END WHERE id = ?",
+        [sentRev, document.id],
+      );
+      continue;
+    }
+    const message = `context document push refused (${res.status}) for document ${document.id}: ${upstreamErrorText(res.body)}`;
+    if (res.status >= 400 && res.status < 500) {
+      log.error(message);
+      continue;
+    }
+    throw new Error(message);
+  }
+}
+
 /**
- * A refused push. `item: null` means the upstream no longer has the row this
- * copy derives from: the base is dropped so the next pass offers the card as
- * a new one rather than retrying a fast-forward that can never succeed.
- * A refusal by the upstream WORK-LOCK is never auto-resolved: the revisions
- * may well be reconcilable, but the card cannot be written at all until the
- * holder lets go, so the operator has to see it -- resolving it 'local' simply
- * sends it back into the same refusal, which is the intended behaviour.
+ * `item: null` drops the base rather than retrying a fast-forward without an
+ * upstream row. A work-lock refusal is never auto-resolved because the
+ * upstream cannot write until its holder releases it.
  */
 function recordPushDivergence(
   row: RoadmapRow,
@@ -7477,7 +7871,9 @@ async function runSyncPass(): Promise<void> {
   syncInFlight = true;
   try {
     await syncPullPass();
+    await syncContextDocumentPullPass();
     await syncPushPass();
+    await syncContextDocumentPushPass();
     await syncLockPass();
     await federationPass();
     syncLastSyncAt = new Date().toISOString();
@@ -9746,6 +10142,20 @@ const server = Bun.serve<WsData>({
         }
         case "/roadmap/context-document/deport": {
           const result = handleRoadmapContextDocumentDeport(body as RoadmapContextDocumentDeportRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/context-document/sync/pull": {
+          const result = handleRoadmapContextDocumentSyncPull(body as RoadmapContextDocumentSyncPullRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/roadmap/context-document/sync/push": {
+          const result = handleRoadmapContextDocumentSyncPush(body as RoadmapContextDocumentSyncPushRequest);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }

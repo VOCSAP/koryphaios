@@ -18,6 +18,10 @@ import {
 } from "./_helper.ts";
 import type {
   RegisterResponse,
+  RoadmapContextDocument,
+  RoadmapContextDocumentDeportResponse,
+  RoadmapContextDocumentGetResponse,
+  RoadmapContextDocumentSyncPushResponse,
   RoadmapItem,
   RoadmapSyncConflictsResponse,
   RoadmapSyncStatus,
@@ -60,6 +64,8 @@ let upstreamBlocked = false;
 let pullSuppressed = false;
 /** Mirrors `pullSuppressed` for the push route: a transport 503, retried later, never a refusal. */
 let pushSuppressed = false;
+let documentPullIncludesInvalid = false;
+let documentPullImmutableConflict: { documentId: string; unit: RoadmapContextDocument["units"][number] } | null = null;
 
 beforeAll(async () => {
   // The upstream takes the ROLE explicitly (serve_replicas) on top of the token:
@@ -86,11 +92,29 @@ beforeAll(async () => {
       const headers: Record<string, string> = { "content-type": "application/json" };
       const auth = req.headers.get("authorization");
       if (auth) headers.authorization = auth;
-      return fetch(`${upstream.url}${url.pathname}${url.search}`, {
+      const body = req.method === "POST" ? await req.text() : undefined;
+      const response = await fetch(`${upstream.url}${url.pathname}${url.search}`, {
         method: req.method,
         headers,
-        body: req.method === "POST" ? await req.text() : undefined,
+        body,
       });
+      if (
+        (documentPullIncludesInvalid || documentPullImmutableConflict) &&
+        url.pathname === "/roadmap/context-document/sync/pull" &&
+        req.method === "POST"
+      ) {
+        const payload = await response.json() as { documents: RoadmapContextDocument[]; next_rev: number };
+        const documents: unknown[] = payload.documents.map((document) => {
+          if (!documentPullImmutableConflict || document.id !== documentPullImmutableConflict.documentId) return document;
+          return { ...document, units: [...document.units, documentPullImmutableConflict.unit] };
+        });
+        if (documentPullIncludesInvalid) documents.unshift({ id: "broken-document", units: [] });
+        return new Response(JSON.stringify({ ...payload, documents }), {
+          status: response.status,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return response;
     },
   });
   replica = await startBroker({
@@ -133,6 +157,51 @@ async function pollUntil<T>(
 async function itemOn(broker: TestBroker, id: string): Promise<RoadmapItem | undefined> {
   const res = await post<ListRes>(`${broker.url}/roadmap/list`, { project_key: PK });
   return res.body.items.find((i) => i.id === id);
+}
+
+function localDocumentCounts(broker: TestBroker, documentId: string): { documents: number; units: number } {
+  const db = new Database(broker.dbPath);
+  try {
+    const documents = (
+      db.query("SELECT COUNT(*) AS n FROM roadmap_context_documents WHERE id = ?").get(documentId) as { n: number }
+    ).n;
+    const units = (
+      db.query("SELECT COUNT(*) AS n FROM roadmap_context_document_units WHERE document_id = ?").get(documentId) as { n: number }
+    ).n;
+    return { documents, units };
+  } finally {
+    db.close();
+  }
+}
+
+function localDocumentState(broker: TestBroker, documentId: string): { createdBy: string; syncDirty: number } | undefined {
+  const db = new Database(broker.dbPath);
+  try {
+    const row = db
+      .query("SELECT created_by, sync_dirty FROM roadmap_context_documents WHERE id = ?")
+      .get(documentId) as { created_by: string; sync_dirty: number } | null;
+    return row ? { createdBy: row.created_by, syncDirty: row.sync_dirty } : undefined;
+  } finally {
+    db.close();
+  }
+}
+
+function localContentRev(broker: TestBroker, id: string): number {
+  const db = new Database(broker.dbPath);
+  try {
+    return (db.query("SELECT content_rev FROM roadmap_items WHERE id = ?").get(id) as { content_rev: number }).content_rev;
+  } finally {
+    db.close();
+  }
+}
+
+function localSyncMeta(broker: TestBroker, key: string): number {
+  const db = new Database(broker.dbPath);
+  try {
+    return Number((db.query("SELECT value FROM roadmap_sync_meta WHERE key = ?").get(key) as { value: string }).value);
+  } finally {
+    db.close();
+  }
 }
 
 /** Waits for a card to satisfy a predicate on one of the two brokers. */
@@ -242,6 +311,232 @@ test("a card written on the replica reaches the upstream with its rank and its a
     "agent-local",
     "offline work",
   ]);
+});
+
+test("a context document deported on the replica reaches the upstream through document push", async () => {
+  const card = await createOn(replica, {
+    by: "agent-document-local",
+    title: "document born on replica",
+    context: "replica document source",
+  });
+  const deported = await post<RoadmapContextDocumentDeportResponse>(
+    `${replica.url}/roadmap/context-document/deport`,
+    { id: card.id, project_key: PK, by: "agent-document-local", targets: ["body"] },
+  );
+  expect(["the local deport succeeds", deported.status]).toEqual(["the local deport succeeds", 200]);
+
+  await waitForItem(
+    "the linked card reaches the upstream",
+    upstream,
+    card.id,
+    (item) => item.context.includes(deported.body.document.id),
+  );
+  const document = await pollUntil("the document push reaches the upstream", 15_000, async () => {
+    const res = await post<RoadmapContextDocumentGetResponse>(
+      `${upstream.url}/roadmap/context-document/get`,
+      { id: card.id, project_key: PK, document_id: deported.body.document.id },
+    );
+    return { done: res.status === 200, value: res };
+  });
+  expect([
+    "the pushed document carries its immutable source unit",
+    document.body.document.units.map((unit) => unit.raw),
+  ]).toEqual(["the pushed document carries its immutable source unit", ["replica document source"]]);
+});
+
+test("a pulled document is clean and restores this replica's relayed author", async () => {
+  const documentId = "document-replica-relayed-author";
+  const pushed = await post<RoadmapContextDocumentSyncPushResponse>(
+    `${upstream.url}/roadmap/context-document/sync/push`,
+    {
+      replica_id: replicaId,
+      document: {
+        id: documentId,
+        roadmap_item_id: "card-replica-relayed-author",
+        project_key: PK,
+        created_by: `via:${replicaId.slice(0, 8)}:agent-relayed`,
+        created_at: "2026-09-24T01:00:00.000Z",
+        units: [{
+          id: "unit-replica-relayed-author",
+          source_target: "body",
+          raw: "restored provenance",
+          deported_at: "2026-09-24T01:00:00.000Z",
+          position: 0,
+        }],
+      },
+    },
+  );
+  expect(pushed.status).toBe(200);
+  const state = await pollUntil("the replica stores a clean document under its local author", 15_000, async () => {
+    const current = localDocumentState(replica, documentId);
+    return { done: current?.createdBy === "agent-relayed" && current.syncDirty === 0, value: current };
+  });
+  expect(state).toEqual({ createdBy: "agent-relayed", syncDirty: 0 });
+});
+
+test("an invalid pulled document does not block later documents in the same sync pass", async () => {
+  const documentId = "document-replica-invalid-neighbor";
+  documentPullIncludesInvalid = true;
+  try {
+    const pushed = await post<RoadmapContextDocumentSyncPushResponse>(
+      `${upstream.url}/roadmap/context-document/sync/push`,
+      {
+        replica_id: replicaId,
+        document: {
+          id: documentId,
+          roadmap_item_id: "card-replica-invalid-neighbor",
+          project_key: PK,
+          created_by: "agent-upstream",
+          created_at: "2026-09-24T01:01:00.000Z",
+          units: [{
+            id: "unit-replica-invalid-neighbor",
+            source_target: "body",
+            raw: "valid document after an invalid neighbor",
+            deported_at: "2026-09-24T01:01:00.000Z",
+            position: 0,
+          }],
+        },
+      },
+    );
+    expect(pushed.status).toBe(200);
+    const state = await pollUntil("the valid document survives an invalid neighbor", 3_000, async () => {
+      const current = localDocumentState(replica, documentId);
+      return { done: current?.syncDirty === 0, value: current };
+    });
+    expect(state?.createdBy).toBe("agent-upstream");
+  } finally {
+    documentPullIncludesInvalid = false;
+  }
+});
+
+test("a pulled document with the same id and an extra unit is logged and never extends the local document", async () => {
+  await goOffline();
+  try {
+    const card = await createOn(replica, {
+      by: "agent-immutable-pull",
+      title: "immutable pull conflict",
+      context: "local immutable document",
+    });
+    const local = await post<RoadmapContextDocumentDeportResponse>(
+      `${replica.url}/roadmap/context-document/deport`,
+      { id: card.id, project_key: PK, by: "agent-immutable-pull", targets: ["body"] },
+    );
+    expect(local.status).toBe(200);
+    const document = local.body.document;
+    const upstreamInsert = await post<RoadmapContextDocumentSyncPushResponse>(
+      `${upstream.url}/roadmap/context-document/sync/push`,
+      { replica_id: replicaId, document },
+    );
+    expect(upstreamInsert.status).toBe(200);
+
+    const logPath = join(replica.tmpDir, "logs", "broker.log");
+    const logStart = readFileSync(logPath, "utf-8").length;
+    documentPullImmutableConflict = {
+      documentId: document.id,
+      unit: {
+        id: "forged-pulled-unit",
+        source_target: "2026-09-24T01:02:00.000Z",
+        raw: "forged immutable extension",
+        deported_at: document.created_at,
+        position: 1,
+      },
+    };
+    await goOnline();
+
+    const settled = await pollUntil("the forged immutable pull is logged without extending the local document", 15_000, async () => {
+      const logged = readFileSync(logPath, "utf-8").slice(logStart).includes("different immutable unit set");
+      const counts = localDocumentCounts(replica, document.id);
+      return { done: logged && counts.units === 1, value: { logged, counts } };
+    });
+    expect(settled).toEqual({ logged: true, counts: { documents: 1, units: 1 } });
+  } finally {
+    documentPullImmutableConflict = null;
+    if (upstreamBlocked) await goOnline();
+  }
+});
+
+test("a pulled document survives before its card and its repeated units remain a set", async () => {
+  pullSuppressed = true;
+  const cardCursorBeforeDocumentPull = localSyncMeta(replica, "upstream_cursor");
+  const documentCursorBeforeDocumentPull = localSyncMeta(replica, "upstream_context_document_cursor");
+  try {
+    const card = await createOn(upstream, {
+      by: "agent-document-upstream",
+      title: "card arrives after document",
+      context: "upstream document source",
+    });
+    const deported = await post<RoadmapContextDocumentDeportResponse>(
+      `${upstream.url}/roadmap/context-document/deport`,
+      { id: card.id, project_key: PK, by: "agent-document-upstream", targets: ["body"] },
+    );
+    expect(["the upstream deport succeeds", deported.status]).toEqual(["the upstream deport succeeds", 200]);
+
+    await pollUntil("the orphan document reaches the replica", 15_000, async () => {
+      const counts = localDocumentCounts(replica, deported.body.document.id);
+      return { done: counts.documents === 1 && counts.units === 1, value: counts };
+    });
+    expect([
+      "the document cursor advances independently while card pull is suppressed",
+      localSyncMeta(replica, "upstream_cursor"),
+      localSyncMeta(replica, "upstream_context_document_cursor") > documentCursorBeforeDocumentPull,
+    ]).toEqual([
+      "the document cursor advances independently while card pull is suppressed",
+      cardCursorBeforeDocumentPull,
+      true,
+    ]);
+    expect(await itemOn(replica, card.id)).toBeUndefined();
+
+    pullSuppressed = false;
+    await waitForItem(
+      "the parent card reaches the replica after the document",
+      replica,
+      card.id,
+      (item) => item.context.includes(deported.body.document.id),
+    );
+    const linked = await post<RoadmapContextDocumentGetResponse>(
+      `${replica.url}/roadmap/context-document/get`,
+      { id: card.id, project_key: PK, document_id: deported.body.document.id },
+    );
+    expect([
+      "the ordinary document route resolves the link after its parent arrives",
+      linked.status,
+      linked.body.document.units.map((unit) => unit.raw),
+    ]).toEqual([
+      "the ordinary document route resolves the link after its parent arrives",
+      200,
+      ["upstream document source"],
+    ]);
+
+    const contentRevBeforeDuplicatePull = localContentRev(replica, card.id);
+    const db = new Database(replica.dbPath);
+    db.run("UPDATE roadmap_sync_meta SET value = '0' WHERE key = 'upstream_context_document_cursor'");
+    db.close();
+    const repeated = await pollUntil("the replica re-pulls the document without duplication", 15_000, async () => {
+      const connection = new Database(replica.dbPath);
+      try {
+        const cursor = (
+          connection.query("SELECT value FROM roadmap_sync_meta WHERE key = 'upstream_context_document_cursor'").get() as {
+            value: string;
+          }
+        ).value;
+        const counts = localDocumentCounts(replica, deported.body.document.id);
+        return { done: Number(cursor) > 0 && counts.units === 1, value: { cursor, ...counts } };
+      } finally {
+        connection.close();
+      }
+    });
+    expect([
+      "a document delivered twice still has one immutable unit and leaves its card revision unchanged",
+      repeated.units,
+      localContentRev(replica, card.id),
+    ]).toEqual([
+      "a document delivered twice still has one immutable unit and leaves its card revision unchanged",
+      1,
+      contentRevBeforeDuplicatePull,
+    ]);
+  } finally {
+    pullSuppressed = false;
+  }
 });
 
 // The four SQL statements that actually carry a content column across this

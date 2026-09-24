@@ -15,8 +15,12 @@ import {
   FIXTURE_OPERATOR_ID,
   type TestBroker,
 } from "./_helper.ts";
+import { buildRoadmapAppendHeader } from "../shared/roadmap-append.ts";
 import type {
   RegisterResponse,
+  RoadmapContextDocument,
+  RoadmapContextDocumentSyncPullResponse,
+  RoadmapContextDocumentSyncPushResponse,
   RoadmapItem,
   RoadmapSyncLockClaimResponse,
   RoadmapSyncLockReleaseResponse,
@@ -84,6 +88,42 @@ function pushItem(overrides: Partial<RoadmapSyncPushItem> & { id: string }): Roa
     updated_at: "2026-01-01T00:00:00.000Z",
     ...overrides,
   };
+}
+
+function syncDocument(id: string, units: RoadmapContextDocument["units"]): RoadmapContextDocument {
+  return {
+    id,
+    roadmap_item_id: "card-document-sync",
+    project_key: PK,
+    created_by: "cli:document-host:document-user",
+    created_at: "2026-09-23T14:00:00.000Z",
+    units,
+  };
+}
+
+function documentTimestamp(index: number): string {
+  return new Date(Date.UTC(2026, 8, 23, 14, 0, index)).toISOString();
+}
+
+function documentUnits(prefix: string, count: number, raw: string): RoadmapContextDocument["units"] {
+  return Array.from({ length: count }, (_, position) => ({
+    id: `${prefix}-unit-${position}`,
+    source_target: position === 0 ? "body" : documentTimestamp(position),
+    raw,
+    deported_at: "2026-09-23T14:00:00.000Z",
+    position,
+  }));
+}
+
+function documentableContext(count: number, text: string): { context: string; targets: string[] } {
+  const targets = ["body"];
+  let context = text;
+  for (let index = 1; index < count; index += 1) {
+    const target = documentTimestamp(index);
+    targets.push(target);
+    context += `${buildRoadmapAppendHeader(target, "agent-local")}${text}`;
+  }
+  return { context, targets };
 }
 
 function pull(b: TestBroker, since_rev: number, limit?: number) {
@@ -1777,6 +1817,330 @@ test("a replica broker refuses to serve the upstream sync routes, and answers st
   } finally {
     await stopBroker(replica);
     await stopBroker(upstream);
+  }
+}, 30_000);
+
+test("context document sync routes require the upstream serving role", async () => {
+  const b = await startPlainBroker({ CLAUDE_PEERS_BROKER_TOKEN: TOKEN });
+  try {
+    const document = syncDocument("document-sync-role", [{
+      id: "unit-sync-role",
+      source_target: "body",
+      raw: "role guard",
+      deported_at: "2026-09-23T14:00:00.000Z",
+      position: 0,
+    }]);
+    const pullResponse = await post<{ error?: string }>(`${b.url}/roadmap/context-document/sync/pull`, {
+      replica_id: R1,
+      since_rev: 0,
+    });
+    const pushResponse = await post<{ error?: string }>(`${b.url}/roadmap/context-document/sync/push`, {
+      replica_id: R1,
+      document,
+    });
+    expect([pullResponse.status, pushResponse.status]).toEqual([403, 403]);
+  } finally {
+    await stopBroker(b);
+  }
+}, 30_000);
+
+test("context document sync accepts only an exact immutable repeat", async () => {
+  const b = await startBroker();
+  try {
+    const firstUnit = {
+      id: "unit-sync-first",
+      source_target: "body",
+      raw: "first immutable unit",
+      deported_at: "2026-09-23T14:00:00.000Z",
+      position: 0,
+    };
+    const document = syncDocument("document-sync-direct", [firstUnit]);
+    const inserted = await post<RoadmapContextDocumentSyncPushResponse>(
+      `${b.url}/roadmap/context-document/sync/push`,
+      { replica_id: R1, document },
+    );
+    expect([
+      "the document insert keeps an unknown CLI author unchanged",
+      inserted.status,
+      inserted.body.document.created_by,
+      inserted.body.document.units.map((unit) => unit.id),
+    ]).toEqual([
+      "the document insert keeps an unknown CLI author unchanged",
+      200,
+      "cli:document-host:document-user",
+      ["unit-sync-first"],
+    ]);
+
+    const secondUnit = {
+      id: "unit-sync-second",
+      source_target: "2026-09-23T14:00:01.000Z",
+      raw: "second immutable unit",
+      deported_at: "2026-09-23T14:00:00.000Z",
+      position: 1,
+    };
+    const repeated = await post<RoadmapContextDocumentSyncPushResponse>(
+      `${b.url}/roadmap/context-document/sync/push`,
+      { replica_id: R1, document },
+    );
+    const expanded = { ...document, units: [firstUnit, secondUnit] };
+    const updated = await post<{ error?: string }>(
+      `${b.url}/roadmap/context-document/sync/push`,
+      { replica_id: R1, document: expanded },
+    );
+    expect([
+      "exact duplicate delivery succeeds but an existing document refuses a new unit",
+      repeated.status,
+      repeated.body.document.units.map((unit) => unit.id),
+      updated.status,
+    ]).toEqual([
+      "exact duplicate delivery succeeds but an existing document refuses a new unit",
+      200,
+      ["unit-sync-first"],
+      409,
+    ]);
+
+    const conflict = await post<{ error?: string }>(`${b.url}/roadmap/context-document/sync/push`, {
+      replica_id: R1,
+      document: { ...document, units: [{ ...firstUnit, raw: "forged replacement" }] },
+    });
+    expect([
+      "an existing unit id with different immutable text is rejected",
+      conflict.status,
+      conflict.body.error?.includes("different immutable unit set"),
+    ]).toEqual(["an existing unit id with different immutable text is rejected", 409, true]);
+
+    const pulled = await post<RoadmapContextDocumentSyncPullResponse>(
+      `${b.url}/roadmap/context-document/sync/pull`,
+      { replica_id: R2, since_rev: 0 },
+    );
+    expect([
+      "pull returns the original immutable unit set",
+      pulled.status,
+      pulled.body.documents.find((candidate) => candidate.id === document.id)?.units.map((unit) => unit.id),
+    ]).toEqual([
+      "pull returns the original immutable unit set",
+      200,
+      ["unit-sync-first"],
+    ]);
+  } finally {
+    await stopBroker(b);
+  }
+}, 30_000);
+
+test("context document sync relays a deck author and refuses a foreign relay", async () => {
+  const b = await startBroker();
+  try {
+    const document = syncDocument("document-sync-author", [{
+      id: "unit-sync-author",
+      source_target: "body",
+      raw: "author provenance",
+      deported_at: "2026-09-23T14:00:00.000Z",
+      position: 0,
+    }]);
+    const deck = await post<RoadmapContextDocumentSyncPushResponse>(
+      `${b.url}/roadmap/context-document/sync/push`,
+      { replica_id: R1, document: { ...document, created_by: "deck" } },
+    );
+    const foreign = await post<{ error?: string }>(
+      `${b.url}/roadmap/context-document/sync/push`,
+      { replica_id: R1, document: { ...document, id: "document-sync-foreign", created_by: "via:otherrep:x" } },
+    );
+    expect([deck.status, deck.body.document.created_by, foreign.status]).toEqual([200, "via:replica-:deck", 400]);
+  } finally {
+    await stopBroker(b);
+  }
+}, 30_000);
+
+test("context document sync rejects malformed immutable unit shape", async () => {
+  const b = await startBroker();
+  try {
+    const unit = {
+      id: "unit-sync-shape",
+      source_target: "body",
+      raw: "valid",
+      deported_at: "2026-09-23T14:00:00.000Z",
+      position: 0,
+    };
+    const rawNul = await post<{ error?: string }>(
+      `${b.url}/roadmap/context-document/sync/push`,
+      { replica_id: R1, document: syncDocument("document-sync-nul", [{ ...unit, raw: `bad${String.fromCharCode(0)}text` }]) },
+    );
+    const sourceTarget = await post<{ error?: string }>(
+      `${b.url}/roadmap/context-document/sync/push`,
+      { replica_id: R1, document: syncDocument("document-sync-target", [{ ...unit, id: "unit-sync-target", source_target: "not-a-timestamp" }]) },
+    );
+    const positions = await post<{ error?: string }>(
+      `${b.url}/roadmap/context-document/sync/push`,
+      { replica_id: R1, document: syncDocument("document-sync-position", [{ ...unit, id: "unit-sync-position", position: 1 }]) },
+    );
+    expect([rawNul.status, sourceTarget.status, positions.status]).toEqual([400, 400, 400]);
+  } finally {
+    await stopBroker(b);
+  }
+}, 30_000);
+
+test("context document sync rejects more than 64 immutable units", async () => {
+  const b = await startBroker();
+  try {
+    const response = await post<{ error?: string }>(
+      `${b.url}/roadmap/context-document/sync/push`,
+      {
+        replica_id: R1,
+        document: syncDocument("document-sync-unit-count", documentUnits("unit-count", 65, "x")),
+      },
+    );
+    expect([response.status, response.body.error?.includes("64")]).toEqual([400, true]);
+  } finally {
+    await stopBroker(b);
+  }
+}, 30_000);
+
+test("context document sync rejects immutable units whose total raw text exceeds 65536 characters", async () => {
+  const b = await startBroker();
+  try {
+    const response = await post<{ error?: string }>(
+      `${b.url}/roadmap/context-document/sync/push`,
+      {
+        replica_id: R1,
+        document: syncDocument("document-sync-total-size", documentUnits("total-size", 5, "x".repeat(15_000))),
+      },
+    );
+    expect([response.status, response.body.error?.includes("65536")]).toEqual([400, true]);
+  } finally {
+    await stopBroker(b);
+  }
+}, 30_000);
+
+test("local deportation refuses more than 64 selected units without changing the context", async () => {
+  const b = await startBroker();
+  try {
+    const source = documentableContext(65, "x");
+    const created = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: "agent-local",
+      title: "local unit count cap",
+      context: source.context,
+    });
+    const refused = await post<{ error?: string }>(`${b.url}/roadmap/context-document/deport`, {
+      id: created.body.item.id,
+      project_key: PK,
+      by: "agent-local",
+      targets: source.targets,
+    });
+    const db = new Database(b.dbPath, { readonly: true });
+    try {
+      const stored = db.query("SELECT context FROM roadmap_items WHERE id = ?").get(created.body.item.id) as { context: string };
+      const documents = db.query("SELECT COUNT(*) AS n FROM roadmap_context_documents WHERE roadmap_item_id = ?")
+        .get(created.body.item.id) as { n: number };
+      expect([refused.status, refused.body.error?.includes("64"), stored.context, documents.n]).toEqual([
+        400,
+        true,
+        source.context,
+        0,
+      ]);
+    } finally {
+      db.close();
+    }
+  } finally {
+    await stopBroker(b);
+  }
+}, 30_000);
+
+test("local deportation refuses raw document text above 65536 characters without changing the context", async () => {
+  const b = await startBroker();
+  try {
+    const source = documentableContext(5, "x".repeat(15_000));
+    const created = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: PK,
+      by: "agent-local",
+      title: "local total size cap",
+      context: source.context,
+    });
+    const refused = await post<{ error?: string }>(`${b.url}/roadmap/context-document/deport`, {
+      id: created.body.item.id,
+      project_key: PK,
+      by: "agent-local",
+      targets: source.targets,
+    });
+    const db = new Database(b.dbPath, { readonly: true });
+    try {
+      const stored = db.query("SELECT context FROM roadmap_items WHERE id = ?").get(created.body.item.id) as { context: string };
+      const documents = db.query("SELECT COUNT(*) AS n FROM roadmap_context_documents WHERE roadmap_item_id = ?")
+        .get(created.body.item.id) as { n: number };
+      expect([refused.status, refused.body.error?.includes("65536"), stored.context, documents.n]).toEqual([
+        400,
+        true,
+        source.context,
+        0,
+      ]);
+    } finally {
+      db.close();
+    }
+  } finally {
+    await stopBroker(b);
+  }
+}, 30_000);
+
+test("context document sync bounds one unit by the roadmap context cap", async () => {
+  const b = await startBroker();
+  try {
+    const response = await post<{ error?: string }>(
+      `${b.url}/roadmap/context-document/sync/push`,
+      {
+        replica_id: R1,
+        document: syncDocument("document-sync-cap", [{
+          id: "unit-sync-cap",
+          source_target: "body",
+          raw: "x".repeat(16_001),
+          deported_at: "2026-09-23T14:00:00.000Z",
+          position: 0,
+        }]),
+      },
+    );
+    expect(response.status).toBe(400);
+  } finally {
+    await stopBroker(b);
+  }
+}, 30_000);
+
+test("context document sync rejects every valid immutable-field divergence", async () => {
+  const b = await startBroker();
+  try {
+    const [bodyUnit, appendUnit] = documentUnits("immutable-field", 2, "original");
+    const document = syncDocument("document-sync-immutable-fields", [bodyUnit!, appendUnit!]);
+    const inserted = await post<RoadmapContextDocumentSyncPushResponse>(
+      `${b.url}/roadmap/context-document/sync/push`,
+      { replica_id: R1, document },
+    );
+    expect(inserted.status).toBe(200);
+
+    const cases: readonly [string, RoadmapContextDocument][] = [
+      ["roadmap_item_id", { ...document, roadmap_item_id: "card-document-sync-other" }],
+      ["project_key", { ...document, project_key: "github.com/vocsap/other-sync-routes-repo" }],
+      ["created_by", { ...document, created_by: "cli:other-host:other-user" }],
+      ["created_at", { ...document, created_at: "2026-09-23T14:00:01.000Z" }],
+      [
+        "source_target",
+        { ...document, units: [{ ...bodyUnit!, source_target: "2026-09-23T14:00:02.000Z" }, appendUnit!] },
+      ],
+      [
+        "deported_at",
+        { ...document, units: [{ ...bodyUnit!, deported_at: "2026-09-23T14:00:01.000Z" }, appendUnit!] },
+      ],
+      [
+        "position",
+        { ...document, units: [{ ...bodyUnit!, position: 1 }, { ...appendUnit!, position: 0 }] },
+      ],
+    ];
+    for (const [field, divergent] of cases) {
+      const refused = await post<{ error?: string }>(`${b.url}/roadmap/context-document/sync/push`, {
+        replica_id: R1,
+        document: divergent,
+      });
+      expect([field, refused.status]).toEqual([field, 409]);
+    }
+  } finally {
+    await stopBroker(b);
   }
 }, 30_000);
 

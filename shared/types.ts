@@ -1250,6 +1250,32 @@ export interface RoadmapContextDocumentDeportResponse {
   document: RoadmapContextDocument;
 }
 
+/** Immutable document plus the separate cursor that replicas page on. */
+export interface RoadmapContextDocumentSyncRow extends RoadmapContextDocument {
+  sync_rev: number;
+}
+
+export interface RoadmapContextDocumentSyncPullRequest {
+  replica_id: string;
+  /** Exclusive lower bound on `sync_rev`; 0 on first sync. */
+  since_rev: number;
+  limit?: number;
+}
+
+export interface RoadmapContextDocumentSyncPullResponse {
+  documents: RoadmapContextDocumentSyncRow[];
+  next_rev: number;
+}
+
+export interface RoadmapContextDocumentSyncPushRequest {
+  replica_id: string;
+  document: RoadmapContextDocument;
+}
+
+export interface RoadmapContextDocumentSyncPushResponse {
+  document: RoadmapContextDocumentSyncRow;
+}
+
 export interface RoadmapArchiveRequest {
   id: string;
   by: string;

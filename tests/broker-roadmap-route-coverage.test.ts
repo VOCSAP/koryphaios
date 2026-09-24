@@ -59,6 +59,7 @@ const READ_ROUTES = new Set([
   "/roadmap/list",
   "/roadmap/export",
   "/roadmap/context-document/get",
+  "/roadmap/context-document/sync/pull",
   "/roadmap/sync/pull",
   "/roadmap/sync/status",
   "/roadmap/sync/conflicts",
@@ -93,7 +94,11 @@ const READ_ROUTES = new Set([
  * `/roadmap/sync/resolve` is the opposite case and sits in GUARDED_PROBES: it
  * is the OPERATOR arbitrating, i.e. an ordinary Deck write.
  */
-const EXEMPT_ROUTES = new Set<string>(["/roadmap/sync/push", "/roadmap/sync/lock"]);
+const EXEMPT_ROUTES = new Set<string>([
+  "/roadmap/context-document/sync/push",
+  "/roadmap/sync/push",
+  "/roadmap/sync/lock",
+]);
 
 /** Write routes that must refuse an unproven author, with a well-formed body. */
 const GUARDED_PROBES: Record<string, (ctx: ProbeCtx) => Record<string, unknown>> = {
@@ -171,6 +176,8 @@ const EXPECTED_ROUTES = [
   "/roadmap/archive",
   "/roadmap/context-document/deport",
   "/roadmap/context-document/get",
+  "/roadmap/context-document/sync/pull",
+  "/roadmap/context-document/sync/push",
   "/roadmap/export",
   "/roadmap/import",
   "/roadmap/list",
@@ -234,6 +241,23 @@ test("the author-exempt replication routes are not open: with no broker_token th
   // that would otherwise be accepted (the push inserts, the claim is well
   // formed) and no author to prove anywhere in it.
   const probes: Record<string, Record<string, unknown>> = {
+    "/roadmap/context-document/sync/push": {
+      replica_id: "replica-coverage",
+      document: {
+        id: "document-coverage-exempt",
+        roadmap_item_id: "card-coverage-exempt",
+        project_key: PK,
+        created_by: "deck",
+        created_at: "2026-01-01T00:00:00.000Z",
+        units: [{
+          id: "unit-coverage-exempt",
+          source_target: "body",
+          raw: "context",
+          deported_at: "2026-01-01T00:00:00.000Z",
+          position: 0,
+        }],
+      },
+    },
     "/roadmap/sync/push": {
       replica_id: "replica-coverage",
       expected_content_rev: null,
@@ -276,6 +300,14 @@ test("the author-exempt replication routes are not open: with no broker_token th
     expect([route, res.status]).toEqual([route, 403]);
     expect([route, (res.body.error ?? "").includes("broker_token")]).toEqual([route, true]);
   }
+});
+
+test("context document sync pull is not served without a broker token", async () => {
+  const res = await post<{ error?: string }>(`${broker.url}/roadmap/context-document/sync/pull`, {
+    replica_id: "replica-coverage",
+    since_rev: 0,
+  });
+  expect([res.status, res.body.error?.includes("broker_token")]).toEqual([403, true]);
 });
 
 test("every guarded write route refuses an author it cannot prove", async () => {
@@ -412,6 +444,7 @@ const GUARDED_INACTIVE_HANDLERS = new Set([
  * tests/broker-roadmap-sync-routes.test.ts.
  */
 const REPLICATION_INACTIVE_HANDLERS = new Set([
+  "handleRoadmapContextDocumentSyncPush",
   "handleRoadmapSyncPush",
   "handleRoadmapSyncResolve",
 ]);
@@ -443,6 +476,7 @@ const EXEMPT_INACTIVE_HANDLERS = new Set([
 const READ_ONLY_INACTIVE_HANDLERS = new Set([
   "handleRoadmapList",
   "handleRoadmapContextDocumentGet",
+  "handleRoadmapContextDocumentSyncPull",
   "handleRoadmapExport",
   "handleRoadmapSyncPull",
   "handleRoadmapSyncStatus",
@@ -464,6 +498,8 @@ const EXPECTED_INACTIVE_HANDLERS = [
   "handleRoadmapContextAppend",
   "handleRoadmapContextDocumentDeport",
   "handleRoadmapContextDocumentGet",
+  "handleRoadmapContextDocumentSyncPull",
+  "handleRoadmapContextDocumentSyncPush",
   "handleRoadmapExport",
   "handleRoadmapImport",
   "handleRoadmapList",

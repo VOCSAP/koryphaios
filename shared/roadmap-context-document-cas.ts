@@ -12,6 +12,33 @@ import type {
 } from "./types.ts";
 
 export const ROADMAP_CONTEXT_DOCUMENT_CAS_ATTEMPTS = 4;
+export const MAX_CONTEXT_DOCUMENT_UNITS = 64;
+export const MAX_CONTEXT_DOCUMENT_TOTAL_CHARS = 65_536;
+
+export type RoadmapContextDocumentLimitFailure =
+  | { ok: false; code: "document_too_many_units"; message: string }
+  | { ok: false; code: "document_total_too_large"; message: string };
+
+export function validateRoadmapContextDocumentLimits(
+  units: readonly RoadmapContextDocumentUnit[],
+): { ok: true } | RoadmapContextDocumentLimitFailure {
+  if (units.length > MAX_CONTEXT_DOCUMENT_UNITS) {
+    return {
+      ok: false,
+      code: "document_too_many_units",
+      message: `context document exceeds MAX_CONTEXT_DOCUMENT_UNITS (${MAX_CONTEXT_DOCUMENT_UNITS})`,
+    };
+  }
+  const totalChars = units.reduce((total, unit) => total + unit.raw.length, 0);
+  if (totalChars > MAX_CONTEXT_DOCUMENT_TOTAL_CHARS) {
+    return {
+      ok: false,
+      code: "document_total_too_large",
+      message: `context document exceeds MAX_CONTEXT_DOCUMENT_TOTAL_CHARS (${MAX_CONTEXT_DOCUMENT_TOTAL_CHARS})`,
+    };
+  }
+  return { ok: true };
+}
 
 export type RoadmapContextDocumentCasRow = {
   context: string | null;
@@ -41,7 +68,9 @@ export type RoadmapContextDocumentDeportResult =
         | "targets_required"
         | "invalid_document_text"
         | "selected_unit_supersedes_remaining"
-        | "living_context_too_large";
+        | "living_context_too_large"
+        | "document_too_many_units"
+        | "document_total_too_large";
       message: string;
     }
   | { ok: false; code: "supersede_target_duplicate" | "supersede_target_missing" | "supersede_target_ambiguous"; message: string };
@@ -128,6 +157,8 @@ function planRoadmapContextDocumentDeport(opts: {
       position,
     })),
   };
+  const limits = validateRoadmapContextDocumentLimits(document.units);
+  if (!limits.ok) return limits;
   return { ok: true, document, context: link.result };
 }
 
