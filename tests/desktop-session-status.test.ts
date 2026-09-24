@@ -13,8 +13,10 @@ import {
   statusFileName,
 } from "../desktop/src/shared/session-status.ts";
 import {
+  STATUS_SILENCE_MS,
   clearStatusFile,
   pollStatusFile,
+  statusSilenceOverdue,
   readStatusFile,
   type StatusFileRead,
 } from "../desktop/src/main/session-status-file.ts";
@@ -144,6 +146,33 @@ test("decoder: model / model_id outside the charset are rejected, never sanitize
   expect(decodeStatusFile(file({ model: "x".repeat(64) }))?.model, "64-char model accepted").toBe("x".repeat(64));
 });
 
+test("model charset: Unicode letters/numbers and the middle dot pass; hostile classes are refused", () => {
+  const accepted = ["Opus 4.6 \u00B7 1M", "Sonnet 4.5 [1m]", "claude-opus-4-1+beta", "Modèle 3 (préversion)", "模型 2"];
+  for (const ok of accepted) {
+    expect(decodeStatusFile(file({ model: ok }))?.model, `${JSON.stringify(ok)} accepted`).toBe(ok);
+  }
+  expect(
+    decodeStatusFile(encodeStatusFromPayload({ model: { id: "claude-opus-4-6", display_name: "Opus 4.6 \u00B7 1M" } }, 1000)!)?.model,
+    "a non-ASCII display_name is kept by the writer, not replaced by the id",
+  ).toBe("Opus 4.6 \u00B7 1M");
+  const rejected: Record<string, string[]> = {
+    "control char": ["Opus\u0000", "Opus\u0007", "Opus\t4", "Opus\u001b[31m", "Opus\u007f", "Opus\u0085"],
+    "bidi override/isolate": ["Opus\u202A", "Opus\u202B", "Opus\u202C", "Opus\u202D", "Opus\u202E4", "Opus\u2066", "Opus\u2067", "Opus\u2068", "Opus\u2069"],
+    "zero-width": ["Op\u200Bus", "Op\u200Cus", "Op\u200Dus", "Op\u2060us", "\uFEFFOpus"],
+    quote: ["O'pus", 'O"pus', "O\u2019pus", "O\u201Cpus"],
+    backslash: ["Opus\\4"],
+    "angle bracket": ["<Opus", "Opus>"],
+    dollar: ["$Opus"],
+    backtick: ["Opus`"],
+    "length cap": ["\u00E9".repeat(65)],
+  };
+  for (const [cls, values] of Object.entries(rejected)) {
+    for (const bad of values) {
+      expect(decodeStatusFile(file({ model: bad })), `${cls}: ${JSON.stringify(bad)} rejected`).toBeNull();
+    }
+  }
+});
+
 test("decoder: wrong version, bad at, garbage and oversized input are rejected", () => {
   expect(decodeStatusFile(file({ v: 2 })), "future version rejected").toBeNull();
   expect(decodeStatusFile(file({ v: "1" })), "string version rejected").toBeNull();
@@ -247,6 +276,19 @@ test("pollStatusFile drops a report written before this spawn", () => {
   expect(pollStatusFile({ alive: true, enabled: true, spawnedAt: 1000 }, () => OK), "report at the spawn instant accepted").toEqual(OK);
   const bad: StatusFileRead = { kind: "invalid", reason: "rejected" };
   expect(pollStatusFile({ alive: true, enabled: true, spawnedAt: 5000 }, () => bad), "refusals pass through for reporting").toEqual(bad);
+});
+
+test("statusSilenceOverdue: once, for a live statusLine tile with no report past the grace period", () => {
+  const base = { alive: true, enabled: true, spawnedAt: 1_000_000, now: 1_000_000 + STATUS_SILENCE_MS, reported: false, warned: false };
+  expect(statusSilenceOverdue(base), "silent past the grace period").toBe(true);
+  expect(statusSilenceOverdue({ ...base, now: base.now - 1 }), "still inside the grace period").toBe(false);
+  expect(statusSilenceOverdue({ ...base, reported: true }), "a report arrived").toBe(false);
+  expect(statusSilenceOverdue({ ...base, warned: true }), "already warned for this spawn").toBe(false);
+  expect(statusSilenceOverdue({ ...base, alive: false }), "dead tile").toBe(false);
+  expect(statusSilenceOverdue({ ...base, enabled: false }), "spawn without --settings").toBe(false);
+  expect(statusSilenceOverdue({ ...base, spawnedAt: 0 }), "never spawned").toBe(false);
+  expect(statusSilenceOverdue({ ...base, spawnedAt: Number.NaN }), "NaN spawnedAt").toBe(false);
+  expect(statusSilenceOverdue({ ...base, now: Number.NaN }), "NaN now").toBe(false);
 });
 
 test("clearStatusFile removes the file and tolerates its absence", () => {

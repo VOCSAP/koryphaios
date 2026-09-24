@@ -11,10 +11,10 @@
 // session's cwd. Failures never reach the status bar: they go to the rotated
 // statusline.log in the claude-peers log dir.
 
-import { spawn, spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { type ChildProcess, spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, win32 } from "node:path";
 import { coreLogDir, createLogger, type Logger } from "../../shared/logger.ts";
 import { encodeStatusFromPayload, statusFileName } from "../src/shared/session-status.ts";
 
@@ -117,6 +117,64 @@ function readGlobalCommand(log: Logger): string | null {
 /** Grace after the kill before the pipes are abandoned (a child that left the group). */
 const KILL_GRACE_MS = 500;
 
+/** Program + argv that run the operator's statusLine command string. */
+export interface ChainShell {
+  file: string;
+  args: string[];
+}
+
+/** Env var Claude Code reads for the Git Bash location on Windows (setup docs). */
+export const GIT_BASH_ENV = "CLAUDE_CODE_GIT_BASH_PATH";
+
+/**
+ * A bash.exe under System32/SysWOW64/Sysnative or WindowsApps is the WSL
+ * launcher, not Git Bash: it would run the command inside a Linux distro.
+ */
+const WSL_BASH_DIR = /[\\/](system32|syswow64|sysnative|windowsapps)[\\/]/i;
+
+function isUsableGitBash(p: string, exists: (p: string) => boolean): boolean {
+  return p.length > 0 && !WSL_BASH_DIR.test(p) && exists(p);
+}
+
+/** The win32 PATH value; a copied env object loses Windows' case-insensitive lookup. */
+function winPathVar(env: Record<string, string | undefined>): string {
+  const key = Object.keys(env).find((k) => k.toUpperCase() === "PATH");
+  return (key && env[key]) || "";
+}
+
+/** Git Bash from `git.exe` on PATH: <Git>\cmd\git.exe or <Git>\bin\git.exe => <Git>\bin\bash.exe. */
+function gitBashFromPath(env: Record<string, string | undefined>, exists: (p: string) => boolean): string | null {
+  for (const raw of winPathVar(env).split(";")) {
+    const dir = raw.trim().replace(/^"(.*)"$/, "$1");
+    if (!dir || !exists(win32.join(dir, "git.exe"))) continue;
+    const leaf = win32.basename(dir).toLowerCase();
+    if (leaf !== "cmd" && leaf !== "bin") continue;
+    const bash = win32.join(win32.dirname(dir), "bin", "bash.exe");
+    if (isUsableGitBash(bash, exists)) return bash;
+  }
+  return null;
+}
+
+/**
+ * How to run the operator's statusLine, mirroring Claude Code (statusline
+ * docs, "Windows configuration"): on win32 through Git Bash when installed,
+ * else PowerShell; `sh -c` elsewhere. Whether Claude Code passes `-c` or
+ * `-lc` to Git Bash is not documented: `-c` is used.
+ */
+export function chainShellFor(
+  platform: NodeJS.Platform,
+  env: Record<string, string | undefined>,
+  exists: (p: string) => boolean,
+  command: string,
+): ChainShell {
+  if (platform !== "win32") return { file: "/bin/sh", args: ["-c", command] };
+  const configured = env[GIT_BASH_ENV]?.trim();
+  const bash =
+    (configured && isUsableGitBash(configured, exists) ? configured : null) ?? gitBashFromPath(env, exists);
+  if (bash) return { file: bash, args: ["-c", command] };
+  return { file: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-Command", command] };
+}
+
 /**
  * Kill the chained command and everything it started: on POSIX the child leads
  * its own process group, so `sleep 12 | cat` loses the sleep too; on win32
@@ -130,7 +188,27 @@ function killTree(pid: number, log: Logger): void {
       process.kill(-pid, "SIGKILL");
     }
   } catch (e) {
-    log.warn(`failed to kill the timed-out operator statusLine (pid ${pid})`, e);
+    log.warn(`failed to kill the operator statusLine (pid ${pid})`, e);
+  }
+}
+
+/** The chained command in flight, killed with its group if this hook is cancelled. */
+let inFlight: ChildProcess | null = null;
+
+/**
+ * Claude Code cancels a running statusLine when a newer update fires. The
+ * chained command leads its own process group on POSIX, so it would outlive
+ * this process: take its group down, then exit. On win32 the cancel is a
+ * TerminateProcess, which runs no handler; the chained tree is left there.
+ */
+export function installCancelHandlers(log: Logger): void {
+  const signals: NodeJS.Signals[] = ["SIGTERM", "SIGINT", "SIGHUP"];
+  for (const sig of signals) {
+    process.on(sig, () => {
+      const pid = inFlight?.pid;
+      if (pid !== undefined && inFlight?.exitCode === null && inFlight.signalCode === null) killTree(pid, log);
+      process.exit(128 + (sig === "SIGHUP" ? 1 : sig === "SIGINT" ? 2 : 15));
+    });
   }
 }
 
@@ -142,19 +220,19 @@ function runChained(command: string, raw: string, log: Logger): Promise<Buffer> 
     const finish = (): void => {
       if (settled) return;
       settled = true;
+      inFlight = null;
       clearTimeout(killTimer);
       clearTimeout(abandonTimer);
       resolve(Buffer.concat(out));
     };
-    // How Claude Code itself shells a statusLine on win32 is unconfirmed, so the
-    // chaining there is best-effort through node's default shell.
-    const child = spawn(command, {
-      shell: true,
+    const shell = chainShellFor(process.platform, process.env, existsSync, command);
+    const child = spawn(shell.file, shell.args, {
       detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "ignore"],
       windowsHide: true,
       env: { ...process.env, [CHAINED_ENV]: "1" },
     });
+    inFlight = child;
     let abandonTimer: ReturnType<typeof setTimeout> | undefined;
     const killTimer = setTimeout(() => {
       log.warn(`operator statusLine timed out after ${CHAIN_TIMEOUT_MS} ms`);
@@ -166,7 +244,7 @@ function runChained(command: string, raw: string, log: Logger): Promise<Buffer> 
     }, CHAIN_TIMEOUT_MS);
     child.stdout?.on("data", (c: Buffer) => out.push(c));
     child.on("error", (e) => {
-      log.warn("operator statusLine failed to start", e);
+      log.warn(`operator statusLine failed to start (${shell.file})`, e);
       finish();
     });
     child.on("close", finish);
@@ -191,6 +269,7 @@ async function chainOperatorStatusLine(raw: string, log: Logger): Promise<void> 
 async function main(): Promise<void> {
   if (isChainedInvocation()) return;
   const log = createLogger({ dir: coreLogDir(), name: "statusline", mirrorToConsole: false });
+  installCancelHandlers(log);
   let raw = "";
   try {
     raw = await readStdin();

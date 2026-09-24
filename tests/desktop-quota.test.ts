@@ -13,6 +13,7 @@ import {
   type QuotaResumeDueEvent
 } from "../desktop/src/main/quota.ts";
 
+const DEFAULT_PERIODIC_FOR_TEST = 15 * 60_000;
 const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
@@ -160,10 +161,12 @@ test("detects a message split across two PTY chunks (rolling buffer)", () => {
 });
 
 test("busy cues end the episode (manual or auto resume) and re-arm detection", () => {
-  const d = new QuotaDetector(() => todayAt(9, 0));
+  let now = todayAt(9, 0);
+  const d = new QuotaDetector(() => now);
   const ev = collect(d);
   d.feed("s1", MINUTES_FORMAT);
   expect(ev.limits.length).toBe(1);
+  now += 2000; // past the window where cues still belong to the limited turn
   d.feed("s1", "⠹ working… esc to interrupt");
   expect(ev.clears).toEqual(["s1"]);
   // A fresh limit after the episode ended starts a NEW episode.
@@ -187,7 +190,7 @@ test("resume-due fires once when the parsed reset is already past (<1h)", async 
 });
 
 test("unknown reset time -> periodic resume-due while the episode lasts", async () => {
-  const d = new QuotaDetector(Date.now, 25); // 25ms periodic for the test
+  const d = new QuotaDetector(Date.now, 25, 0); // 25ms periodic, no busy grace
   const ev = collect(d);
   d.feed("s1", "You've hit your limit");
   expect(ev.limits[0].resetAt).toBeNull();
@@ -236,17 +239,10 @@ test("a real limit screen (plain text, no OSC wrapper) still triggers detectRate
   expect(detectRateLimit(stripAnsi(chunk), Date.now())).not.toBeNull();
 });
 
-// Card 1aa69066 (H2) review, blocker F3: BUSY_RE's fast path (the
-// `st.limited` branch in feed()) tests the raw per-chunk delta immediately,
-// before the accumulated-buffer re-strip runs -- a stateless per-chunk regex
-// cannot remove an escape sequence whose terminator has not arrived yet, so
-// a braille glyph fragmented across two chunks leaked into BUSY_RE's input
-// and falsely ended an OPEN rate-limit episode (which then disarms the
-// auto-resume timer for real). MEASURED (reviewer, mutation review):
-// reverting BUSY_RE to read raw `stripped` left this file's tests green --
-// none of them fragment the OSC that carries the glyph.
-test("an OSC-carried braille glyph FRAGMENTED across two chunks does not falsely end an open limit episode", () => {
-  const d = new QuotaDetector();
+// The busy cue reads the escape-safe delta: an OSC head whose terminator has
+// not arrived yet must not leak its payload as screen text.
+test("busy text carried inside an OSC title FRAGMENTED across two chunks does not falsely end an open limit episode", () => {
+  const d = new QuotaDetector(Date.now, DEFAULT_PERIODIC_FOR_TEST, 0);
   const limitEv: unknown[] = [];
   const clearEv: unknown[] = [];
   d.on("limit", (e: QuotaLimitEvent) => limitEv.push(e));
@@ -255,10 +251,11 @@ test("an OSC-carried braille glyph FRAGMENTED across two chunks does not falsely
   d.feed("s1", "5-hour limit reached · resets 2pm\n");
   expect(limitEv.length).toBe(1);
 
-  const osc = "\x1b]0;⣋ Claude is thinking\x07";
-  d.feed("s1", osc.slice(0, 12)); // carries the glyph, no terminator yet
+  // Idle title glyph, so only a leak of its payload as screen text could clear.
+  const osc = "\x1b]0;✳ (3s · esc to interrupt)\x07";
+  d.feed("s1", osc.slice(0, 12)); // carries "(3s ·", no terminator yet
   d.feed("s1", osc.slice(12)); // the terminator
-  expect(clearEv.length).toBe(0); // still limited, no false clear
+  expect(clearEv.length, "an OSC payload leaked into the busy text cue").toBe(0);
 
   d.stop();
 });

@@ -25,7 +25,7 @@
   "sidebar.autoResumeOn": "Activer l'auto-relance quota",
   "sidebar.autoResumeOff": "Désactiver l'auto-relance quota",
   "sidebar.autoResumeNative": "Forcer la reprise quota (le réglage global ne s'applique pas à cette session Claude)",
-  "sidebar.modelBadgeTitle": "Modèle : {modelId}",
+  "sidebar.modelBadgeTitle": "Modèle : {model} ({modelId})",
   "sidebar.contextRingTitle": "Contexte : {pct} % de {tokens} tokens",
   "sidebar.contextRingTitlePctOnly": "Contexte : {pct} %",
   "sidebar.contextRingUnknown": "Contexte : inconnu",

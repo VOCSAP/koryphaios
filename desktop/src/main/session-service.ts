@@ -39,7 +39,13 @@ import {
   type TranscriptEntry
 } from './session-transcript'
 import { clearDeskSessionId, readDeskSessionId } from './desk-session'
-import { clearStatusFile, pollStatusFile, readStatusFile } from './session-status-file'
+import {
+  clearStatusFile,
+  pollStatusFile,
+  readStatusFile,
+  statusSilenceMessage,
+  statusSilenceOverdue
+} from './session-status-file'
 import { sameLiveStatus } from '@shared/session-status'
 import { ScreenGuard } from './screen-model'
 import { gracefulClose } from './session-close'
@@ -97,6 +103,10 @@ interface RuntimeState {
   liveStatusEnabled: boolean
   /** Epoch ms of this spawn; reports older than it belong to the previous process. */
   spawnedAt: number
+  /** A status file (valid or refused) was seen since this spawn. */
+  liveStatusSeen: boolean
+  /** The "no report since spawn" warning was already raised for this spawn. */
+  liveStatusSilenceWarned: boolean
 }
 
 const PEER_POLL_MS = 4000
@@ -346,6 +356,7 @@ export class SessionService extends EventEmitter {
       // non-interactive zombie. A non-zero exit (crash) is kept on screen in the
       // 'exited' state so the error stays visible and the tile can be restarted.
       if (exitCode === 0) {
+        if (def) this.dropStatusFile(def)
         this.defs = this.defs.filter((d) => d.id !== id)
         this.runtime.delete(id)
         this.persist()
@@ -698,7 +709,9 @@ export class SessionService extends EventEmitter {
       liveStatus: null,
       liveStatusFaulted: false,
       liveStatusEnabled: false,
-      spawnedAt: 0
+      spawnedAt: 0,
+      liveStatusSeen: false,
+      liveStatusSilenceWarned: false
     })
     this.spawnSession(def, 'fresh')
     this.broadcast()
@@ -731,6 +744,7 @@ export class SessionService extends EventEmitter {
       this.activityTrackers.get(id)?.stop()
       this.activityTrackers.delete(id)
       this.pendingPrompt.delete(id)
+      this.dropStatusFile(def)
       this.defs = this.defs.filter((d) => d.id !== id)
       this.runtime.delete(id)
       this.outputAt.delete(id)
@@ -910,7 +924,9 @@ export class SessionService extends EventEmitter {
         liveStatus: null,
         liveStatusFaulted: false,
         liveStatusEnabled: false,
-        spawnedAt: 0
+        spawnedAt: 0,
+        liveStatusSeen: false,
+        liveStatusSilenceWarned: false
       })
     }
     this.persist()
@@ -1345,6 +1361,8 @@ export class SessionService extends EventEmitter {
       r.liveStatusFaulted = false
       r.liveStatusEnabled = settingsFile !== undefined
       r.spawnedAt = Date.now()
+      r.liveStatusSeen = false
+      r.liveStatusSilenceWarned = false
     }
     try {
       this.pty.spawn(
@@ -1652,16 +1670,37 @@ export class SessionService extends EventEmitter {
     if (changed) this.broadcast()
   }
 
+  /** A tile closed for good leaves no status file behind in the peers dir. */
+  private dropStatusFile(def: SessionDef): void {
+    const err = clearStatusFile(def.id, this.peersDirFor(def))
+    if (err) reportError('session', `failed to remove the status file of "${def.name}"`, err)
+  }
+
   /**
    * Refresh one tile's statusLine report from its status file. Returns true
    * when the displayed value changed. A dead tile shows no report.
    */
   private pollLiveStatus(def: SessionDef, r: RuntimeState): boolean {
     let next: SessionLiveStatus | null = null
+    const alive = this.pty.isAlive(def.id)
     const read = pollStatusFile(
-      { alive: this.pty.isAlive(def.id), enabled: r.liveStatusEnabled, spawnedAt: r.spawnedAt },
+      { alive, enabled: r.liveStatusEnabled, spawnedAt: r.spawnedAt },
       () => readStatusFile(def.id, this.peersDirFor(def))
     )
+    if (read.kind !== 'absent') r.liveStatusSeen = true
+    if (
+      statusSilenceOverdue({
+        alive,
+        enabled: r.liveStatusEnabled,
+        spawnedAt: r.spawnedAt,
+        now: Date.now(),
+        reported: r.liveStatusSeen,
+        warned: r.liveStatusSilenceWarned
+      })
+    ) {
+      r.liveStatusSilenceWarned = true
+      reportError('session', statusSilenceMessage(def.name))
+    }
     if (read.kind === 'ok') {
       next = read.status
       r.liveStatusFaulted = false

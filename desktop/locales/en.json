@@ -25,7 +25,7 @@
   "sidebar.autoResumeOn": "Enable quota auto-resume",
   "sidebar.autoResumeOff": "Disable quota auto-resume",
   "sidebar.autoResumeNative": "Force quota auto-resume (the global setting doesn't apply to this Claude session)",
-  "sidebar.modelBadgeTitle": "Model: {modelId}",
+  "sidebar.modelBadgeTitle": "Model: {model} ({modelId})",
   "sidebar.contextRingTitle": "Context: {pct}% of {tokens} tokens",
   "sidebar.contextRingTitlePctOnly": "Context: {pct}%",
   "sidebar.contextRingUnknown": "Context: unknown",

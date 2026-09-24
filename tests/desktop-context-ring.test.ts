@@ -1,8 +1,8 @@
 import { test, expect } from "bun:test";
 
-// PLAN live-status, Lot B -- pure geometry/severity for the sidebar's
-// context-fill ring. No React/DOM import in the module under test, so it
-// loads under bun test from the repo root exactly like peer-table.ts.
+// Pure geometry/severity for the sidebar's context-fill ring. No React/DOM
+// import in the module under test, so it loads under bun test from the repo
+// root exactly like peer-table.ts.
 import {
   clampPct,
   formatTokens,

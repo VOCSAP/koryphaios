@@ -16,7 +16,14 @@ export const STATUS_FILE_MAX_BYTES = 4096
 /** Largest context window accepted, in tokens. */
 export const STATUS_MAX_CONTEXT_WINDOW = 10_000_000
 
-const MODEL_RE = /^[A-Za-z0-9 ._()[\]:/-]{1,64}$/
+/**
+ * Model names: Unicode letters/numbers plus a small punctuation set, so a
+ * display name like "Opus 4.6 · 1M" passes. Everything else is refused:
+ * control and format chars (bidi overrides, zero-width), quotes, backslash,
+ * angle brackets, `$` and backtick. Rendered as React text; this is defence in
+ * depth, not escaping.
+ */
+const MODEL_RE = /^[\p{L}\p{N} ._()[\]:/+\u00B7-]{1,64}$/u
 
 /**
  * Same rule as shared/peer-cache.ts `sanitizeSessionId` and main's

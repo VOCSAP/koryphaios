@@ -259,7 +259,10 @@ export function SessionRow({
       {!collapsed && session.liveStatus && (
         <span
           className="row-model"
-          title={t('sidebar.modelBadgeTitle', { modelId: session.liveStatus.modelId })}
+          title={t('sidebar.modelBadgeTitle', {
+            model: session.liveStatus.model,
+            modelId: session.liveStatus.modelId
+          })}
         >
           {session.liveStatus.model}
         </span>

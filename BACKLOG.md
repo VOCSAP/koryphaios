@@ -415,6 +415,8 @@ l'opérateur sur une machine avec affichage.
 - [ ] **Affichage de l'état de session (statusLine, badge modèle + anneau de contexte)** — logique implémentée (`session-status-file.ts`, chaînage operator-only, validation stricte, `ContextRing.tsx`). Validations terrain uniquement :
   - Sur Windows natif, vérifier que la commande `statusLine` hérite de `CLAUDE_PEERS_DESK_SESSION` et que le chaînage de la commande `statusLine` globale de l'opérateur fonctionne.
   - Mesurer la latence réelle du badge modèle après un `/model` : refresh ~5 s + poll ~4 s.
+  - Détection d'occupation sans le hint `esc to interrupt` (masqué par tout statusLine) : `detect/busy.ts` lit la ligne du spinner et le titre ◐◑. Non mesuré : le clear de l'attention après une réponse à un prompt de permission, et une reprise de quota dont le tour dure moins de 1,5 s.
+  - Windows natif : chaînage du statusLine opérateur via Git Bash puis PowerShell (`chainShellFor`), stdin vers une commande native sous PowerShell non testé ; une annulation par Claude Code (TerminateProcess) laisse vivre l'arbre chaîné.
 
 ---
 

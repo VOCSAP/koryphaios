@@ -865,7 +865,7 @@ export const EN_DEFAULTS: Record<string, string> = {
   'toast.inboxDeleted': 'Message deleted',
   'worktrees.diff': 'Diff',
   'sidebar.viewDiff': 'View diff',
-  'sidebar.modelBadgeTitle': 'Model: {modelId}',
+  'sidebar.modelBadgeTitle': 'Model: {model} ({modelId})',
   'sidebar.contextRingTitle': 'Context: {pct}% of {tokens} tokens',
   'sidebar.contextRingTitlePctOnly': 'Context: {pct}%',
   'sidebar.contextRingUnknown': 'Context: unknown',

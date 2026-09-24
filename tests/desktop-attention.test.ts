@@ -303,30 +303,25 @@ test("card c8d69928 residu 1b: purgeScreenMemory actually empties the buffer, ob
   d.stop();
 });
 
-// Card 1aa69066 (H2): OSC sequences must be stripped, closing a false clear
-// BUSY_RE could otherwise produce from a braille glyph carried inside an OSC
-// title -- Claude Code's own OSC 0 title is measured to carry the spinner
-// glyph (docs/DESIGN-NOTIFY-EVENTS.md), which is exactly BUSY_RE's braille
-// range. Direction 1 (presence): stripAnsi actually removes an OSC sequence.
-// Direction 2 (regression): a real waiting episode does NOT get cleared by
-// OSC-carried noise alone -- only a busy cue in the actual screen content
-// should end it.
+// OSC sequences are not screen content: busy text carried inside a title
+// must not clear a waiting episode, whole or fragmented (the incremental
+// stripper holds back an unterminated sequence instead of leaking its bytes).
 test("stripAnsi removes an OSC sequence, not just CSI", () => {
   const withOsc = "\x1b]0;⣋title\x07plain screen text";
   expect(stripAnsi(withOsc)).toBe("plain screen text");
 });
 
-test("an OSC-carried braille glyph does not spuriously clear a real waiting episode", () => {
+test("busy text carried inside an OSC title does not spuriously clear a real waiting episode", () => {
   const d = new AttentionDetector();
   const events = collect(d);
 
   d.feed("s1", PERMISSION_SCREEN);
   expect(events).toEqual([{ id: "s1", waiting: true }]);
 
-  // The braille glyph lives ONLY inside the OSC 0 title payload, never in
+  // The busy text lives ONLY inside the OSC 0 title payload, never in
   // the plain screen text -- a real busy cue would be plain-text, this is
   // exactly the OSC-noise case the fix distinguishes from the real thing.
-  d.feed("s1", "\x1b]0;⣋ Claude is thinking\x07");
+  d.feed("s1", "\x1b]0;✳ (3s · esc to interrupt)\x07");
   expect(events).toEqual([{ id: "s1", waiting: true }]); // still waiting, no false clear
 
   // A genuine plain-text busy cue still clears it, unaffected by the fix.
@@ -338,25 +333,15 @@ test("an OSC-carried braille glyph does not spuriously clear a real waiting epis
   d.stop();
 });
 
-// Card 1aa69066 (H2) review, blocker F3: the test above only exercises the
-// OSC sequence arriving WHOLE within one feed() call -- BUSY_RE's fast path
-// tests the raw per-chunk delta immediately (before the accumulated-buffer
-// re-strip runs), and a complete single-chunk OSC is already fully stripped
-// by that per-chunk regex, so it never distinguished the fix from the bug.
-// MEASURED (reviewer, mutation review): reverting BUSY_RE to read raw
-// `stripped` left this file's tests green. This is the FRAGMENTED case: the
-// braille glyph's introducer arrives in one chunk with no terminator yet, so
-// a stateless per-chunk regex cannot remove it and the raw glyph leaks
-// straight into BUSY_RE's input on that same chunk.
-test("an OSC-carried braille glyph FRAGMENTED across two chunks still does not spuriously clear a real waiting episode", () => {
+test("busy text carried inside an OSC title FRAGMENTED across two chunks still does not spuriously clear a real waiting episode", () => {
   const d = new AttentionDetector();
   const events = collect(d);
 
   d.feed("s1", PERMISSION_SCREEN);
   expect(events).toEqual([{ id: "s1", waiting: true }]);
 
-  const osc = "\x1b]0;⣋ Claude is thinking\x07";
-  d.feed("s1", osc.slice(0, 12)); // carries the glyph, no terminator yet
+  const osc = "\x1b]0;✳ (3s · esc to interrupt)\x07";
+  d.feed("s1", osc.slice(0, 12)); // carries "(3s ·", no terminator yet
   d.feed("s1", osc.slice(12)); // the terminator
   expect(events).toEqual([{ id: "s1", waiting: true }]); // still waiting, no false clear
 

@@ -109,3 +109,38 @@ export function pollStatusFile(gate: StatusPollGate, read: () => StatusFileRead)
   if (res.kind === 'ok' && res.status.at < gate.spawnedAt) return { kind: 'absent' }
   return res
 }
+
+/** How long a statusLine-enabled tile may stay without any report before it is flagged. */
+export const STATUS_SILENCE_MS = 60_000
+
+/** What the poll knows when deciding whether a tile's statusLine has gone silent. */
+export interface StatusSilenceState {
+  alive: boolean
+  enabled: boolean
+  spawnedAt: number
+  now: number
+  /** A status file (valid or not) was seen since this spawn. */
+  reported: boolean
+  /** The silence was already reported for this spawn. */
+  warned: boolean
+}
+
+/**
+ * True once, per spawn, when a tile given the Deck's statusLine is still alive
+ * STATUS_SILENCE_MS after its spawn and has produced no status file at all:
+ * the hook is not running (bun missing, hooks disabled by policy, workspace
+ * not trusted) and the badge would otherwise stay off without a trace.
+ */
+export function statusSilenceOverdue(s: StatusSilenceState): boolean {
+  if (!s.alive || !s.enabled || s.reported || s.warned) return false
+  if (!Number.isFinite(s.spawnedAt) || s.spawnedAt <= 0 || !Number.isFinite(s.now)) return false
+  return s.now - s.spawnedAt >= STATUS_SILENCE_MS
+}
+
+/** The operator-facing explanation for a silent statusLine. */
+export function statusSilenceMessage(name: string): string {
+  return (
+    `no statusLine report from "${name}" ${STATUS_SILENCE_MS / 1000} s after spawn, model/context badge off: ` +
+    'bun not on the PATH Claude Code sees, disableAllHooks or allowManagedHooksOnly set, or the workspace not trusted yet'
+  )
+}

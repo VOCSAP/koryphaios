@@ -7,7 +7,7 @@
 
 import { EventEmitter } from 'node:events'
 import { detectChannelsWarning } from './startup-ack'
-import { createSafeStripper } from './detect/safe-strip'
+import { createBusyCue, type BusyCue } from './detect/busy'
 
 export interface AttentionEvent {
   id: string
@@ -32,9 +32,6 @@ const ANSI_RE = /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b\n]{0,4096}(?:\x07|\x1
 export function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '')
 }
-
-// A running turn means the operator answered (or the wait screen is gone).
-const BUSY_RE = /esc to interrupt|[⠀-⣿]/i
 
 // Waiting screens, deliberately narrow: ONLY strong screen-level cues, since
 // a running turn can stream prose/code containing question-like sentences.
@@ -81,18 +78,8 @@ const MAX_BUF = 4096
 interface SessionState {
   buf: string
   waiting: boolean
-  /**
-   * Card 1aa69066 review, blocker F3: BUSY_RE's fast path tests the RAW
-   * per-chunk delta, immediately, before the accumulated-buffer re-strip
-   * (F2) even runs -- deliberately, for responsiveness. A stateless regex
-   * strip on that single chunk cannot remove an escape sequence whose
-   * terminator has not arrived yet, so its raw bytes (including any glyph
-   * it carries, e.g. Claude Code's own OSC 0 title spinner) would otherwise
-   * leak straight into BUSY_RE's input. This per-session incremental
-   * stripper holds back any not-yet-resolved sequence instead -- see
-   * detect/safe-strip.ts's own header comment.
-   */
-  safe: ReturnType<typeof createSafeStripper>
+  /** A running turn means the operator answered (or the wait screen is gone). */
+  busy: BusyCue
 }
 
 /**
@@ -106,16 +93,14 @@ export class AttentionDetector extends EventEmitter {
   feed(id: string, data: string): void {
     let st = this.sessions.get(id)
     if (!st) {
-      st = { buf: '', waiting: false, safe: createSafeStripper() }
+      st = { buf: '', waiting: false, busy: createBusyCue({ title: false }) }
       this.sessions.set(id, st)
     }
     const stripped = stripAnsi(data)
-    // See SessionState.safe's doc comment: BUSY_RE must never read raw
-    // bytes from an escape sequence that has not resolved yet.
-    const busySafe = st.safe.feed(data)
+    const busy = st.busy.feed(data)
 
     if (st.waiting) {
-      if (BUSY_RE.test(busySafe)) {
+      if (busy) {
         st.waiting = false
         st.buf = ''
         this.emit('attention', { id, waiting: false } satisfies AttentionEvent)
@@ -145,7 +130,7 @@ export class AttentionDetector extends EventEmitter {
     // A busy cue invalidates the accumulated context (a wait screen never
     // coexists with a running turn) but the SAME chunk may already carry the
     // prompt that follows the turn's end -- so reset FIRST, then append.
-    if (BUSY_RE.test(busySafe)) st.buf = ''
+    if (busy) st.buf = ''
     // Re-strip the accumulated buffer, same reasoning as the branch above.
     st.buf = stripAnsi((st.buf + stripped).slice(-MAX_BUF))
     if (detectWaiting(st.buf)) {

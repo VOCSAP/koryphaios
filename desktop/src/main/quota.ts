@@ -6,7 +6,7 @@
 // two PTY chunks.
 
 import { EventEmitter } from 'node:events'
-import { createSafeStripper } from './detect/safe-strip'
+import { createBusyCue, type BusyCue } from './detect/busy'
 
 export interface QuotaLimitEvent {
   id: string
@@ -34,10 +34,6 @@ const ANSI_RE = /\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b\n]{0,4096}(?:\x07|\x1
 export function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '')
 }
-
-// Busy cues (thinking.ts): a running turn means the rate-limit episode is over
-// -- either the user resumed manually or our injected "continue" was accepted.
-const BUSY_RE = /esc to interrupt|[⠀-⣿]/i
 
 // Time-capturing patterns, tried in order. Group 1 = clock ("2pm", "10:30am").
 const TIME_PATTERNS = [
@@ -108,6 +104,13 @@ export function detectRateLimit(text: string, nowMs: number): RateLimitMatch | n
 const MAX_BUF = 4096
 /** Retry cadence when the reset time could not be parsed (autoclaude: 15 min). */
 const DEFAULT_PERIODIC_MS = 15 * 60_000
+/**
+ * Busy cues arriving this soon after the limit screen belong to the turn that
+ * printed it: the renderer flushes a last spinner-row frame and title tick
+ * after the turn's final content. A resumed turn keeps painting both, so a
+ * real resume still ends the episode once this window has passed.
+ */
+const DEFAULT_BUSY_GRACE_MS = 1500
 
 interface SessionState {
   buf: string
@@ -116,17 +119,14 @@ interface SessionState {
   /** One-shot guard for the known-reset case (re-armed per episode). */
   sent: boolean
   timer: NodeJS.Timeout | null
+  /** now() when the current episode opened. */
+  limitedAt: number
   /**
-   * Card 1aa69066 review, blocker F3: BUSY_RE's fast path (feed()'s
-   * `st.limited` branch) tests the RAW per-chunk delta immediately, before
-   * the accumulated-buffer re-strip (F2) runs -- a stateless regex strip on
-   * a single chunk cannot remove an escape sequence whose terminator has
-   * not arrived yet, so its raw bytes (e.g. a braille glyph carried by
-   * Claude Code's own OSC 0 title) would otherwise leak straight into
-   * BUSY_RE's input and falsely end an open episode. See
-   * detect/safe-strip.ts's own header comment.
+   * A running turn ends the episode: the user resumed manually or the
+   * injected "continue" was accepted. Title cue on: a limit screen only
+   * appears once its turn has ended.
    */
-  safe: ReturnType<typeof createSafeStripper>
+  busy: BusyCue
 }
 
 /**
@@ -143,7 +143,8 @@ export class QuotaDetector extends EventEmitter {
 
   constructor(
     private now: () => number = Date.now,
-    private periodicMs: number = DEFAULT_PERIODIC_MS
+    private periodicMs: number = DEFAULT_PERIODIC_MS,
+    private busyGraceMs: number = DEFAULT_BUSY_GRACE_MS
   ) {
     super()
   }
@@ -151,21 +152,14 @@ export class QuotaDetector extends EventEmitter {
   feed(id: string, data: string): void {
     const st = this.state(id)
     const stripped = stripAnsi(data)
-    // st.safe must be fed on every chunk unconditionally, not only while
-    // st.limited is true: an incremental state machine fed a filtered stream
-    // drifts out of sync with the real byte stream.
-    // The chunk that opens an episode can itself carry an unterminated OSC
-    // head, so skipping it here would desynchronize st.safe before st.limited
-    // even flips true.
-    const busySafe = st.safe.feed(data)
+    // Fed on every chunk, not only while limited: its escape and OSC parsers
+    // must see the whole byte stream to stay in sync with it.
+    const busy = st.busy.feed(data)
 
     if (st.limited) {
-      // A running turn (spinner / interrupt hint) means the episode is over --
-      // manual resume or accepted auto-continue. Detection stays quiet while
-      // limited so a redrawn limit screen cannot re-trigger a fresh episode.
-      // BUSY_RE reads the escape-safe delta, not raw `stripped` -- see
-      // SessionState.safe's doc comment.
-      if (BUSY_RE.test(busySafe)) this.endEpisode(id, st)
+      // Detection stays quiet while limited so a redrawn limit screen cannot
+      // re-trigger a fresh episode.
+      if (busy && this.now() - st.limitedAt >= this.busyGraceMs) this.endEpisode(id, st)
       return
     }
 
@@ -177,6 +171,7 @@ export class QuotaDetector extends EventEmitter {
     if (!match) return
 
     st.limited = true
+    st.limitedAt = this.now()
     st.resetAt = match.resetAt
     st.sent = false
     st.buf = '' // stale text must not re-trigger after the episode ends
@@ -199,7 +194,7 @@ export class QuotaDetector extends EventEmitter {
   private state(id: string): SessionState {
     let st = this.sessions.get(id)
     if (!st) {
-      st = { buf: '', limited: false, resetAt: null, sent: false, timer: null, safe: createSafeStripper() }
+      st = { buf: '', limited: false, resetAt: null, sent: false, timer: null, limitedAt: 0, busy: createBusyCue({ title: true }) }
       this.sessions.set(id, st)
     }
     return st

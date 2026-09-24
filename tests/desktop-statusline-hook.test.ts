@@ -6,6 +6,8 @@ import { join } from "node:path";
 
 import {
   CHAINED_ENV,
+  GIT_BASH_ENV,
+  chainShellFor,
   globalSettingsPath,
   isChainedInvocation,
   pickGlobalStatusLineCommand,
@@ -208,4 +210,107 @@ test.skipIf(process.platform === "win32")("real script: a timed-out operator com
   const alive = state !== "" && !state.startsWith("Z");
   if (alive) process.kill(pid, "SIGKILL");
   expect(alive, "the grandchild sleep is not left orphaned").toBe(false);
+}, 20000);
+
+// ----- which shell runs the operator's command -----
+
+function existsIn(...paths: string[]): (p: string) => boolean {
+  const set = new Set(paths.map((p) => p.toLowerCase()));
+  return (p) => set.has(p.toLowerCase());
+}
+
+test("chainShellFor: POSIX runs the command through sh -c", () => {
+  for (const plat of ["linux", "darwin"] as const) {
+    expect(chainShellFor(plat, { [GIT_BASH_ENV]: "C:\\Git\\bin\\bash.exe" }, () => true, "echo hi"), `${plat} ignores Git Bash`).toEqual({
+      file: "/bin/sh",
+      args: ["-c", "echo hi"],
+    });
+  }
+});
+
+test("chainShellFor: win32 honours CLAUDE_CODE_GIT_BASH_PATH when the file exists", () => {
+  const bash = "D:\\Tools\\Git\\bin\\bash.exe";
+  expect(chainShellFor("win32", { [GIT_BASH_ENV]: bash }, existsIn(bash), "echo hi"), "configured Git Bash").toEqual({
+    file: bash,
+    args: ["-c", "echo hi"],
+  });
+  expect(
+    chainShellFor("win32", { [GIT_BASH_ENV]: bash }, existsIn(), "echo hi").file,
+    "a configured path that does not exist is not used",
+  ).toBe("powershell.exe");
+});
+
+test("chainShellFor: win32 derives Git Bash from git.exe on PATH (cmd\\ and bin\\ layouts)", () => {
+  const viaCmd = chainShellFor(
+    "win32",
+    { Path: "C:\\Windows\\System32;C:\\Program Files\\Git\\cmd" },
+    existsIn("C:\\Program Files\\Git\\cmd\\git.exe", "C:\\Program Files\\Git\\bin\\bash.exe"),
+    "echo hi",
+  );
+  expect(viaCmd, "<Git>\\cmd\\git.exe => <Git>\\bin\\bash.exe, PATH read case-insensitively").toEqual({
+    file: "C:\\Program Files\\Git\\bin\\bash.exe",
+    args: ["-c", "echo hi"],
+  });
+  const viaBin = chainShellFor(
+    "win32",
+    { PATH: '"E:\\Git\\bin"' },
+    existsIn("E:\\Git\\bin\\git.exe", "E:\\Git\\bin\\bash.exe"),
+    "x",
+  );
+  expect(viaBin.file, "<Git>\\bin\\git.exe, quoted PATH entry").toBe("E:\\Git\\bin\\bash.exe");
+});
+
+test("chainShellFor: win32 never picks the WSL bash.exe", () => {
+  const wsl = "C:\\Windows\\System32\\bash.exe";
+  const apps = "C:\\Users\\u\\AppData\\Local\\Microsoft\\WindowsApps\\bash.exe";
+  expect(chainShellFor("win32", { [GIT_BASH_ENV]: wsl }, existsIn(wsl), "x").file, "System32 bash via env is WSL").toBe(
+    "powershell.exe",
+  );
+  expect(chainShellFor("win32", { [GIT_BASH_ENV]: apps }, existsIn(apps), "x").file, "WindowsApps bash is WSL").toBe(
+    "powershell.exe",
+  );
+  // git.exe found in a System32-like dir must not derive the WSL launcher either.
+  expect(
+    chainShellFor("win32", { PATH: "C:\\Windows\\System32\\bin" }, existsIn("C:\\Windows\\System32\\bin\\git.exe", wsl), "x").file,
+    "derived path under System32 refused",
+  ).toBe("powershell.exe");
+});
+
+test("chainShellFor: win32 without Git Bash falls back to PowerShell", () => {
+  expect(chainShellFor("win32", { PATH: "C:\\Windows\\System32" }, existsIn(), "echo hi"), "PowerShell fallback").toEqual({
+    file: "powershell.exe",
+    args: ["-NoProfile", "-NonInteractive", "-Command", "echo hi"],
+  });
+});
+
+test.skipIf(process.platform === "win32")("real script: cancelling the hook (SIGTERM) kills the chained command's group", async () => {
+  const home = tmpDir();
+  const pidFile = join(home, "sleep.pid");
+  operatorSettings(home, `echo $$ > "${pidFile}.tmp"; mv "${pidFile}.tmp" "${pidFile}"; exec sleep 30`);
+  const proc = Bun.spawn(["bun", HOOK], {
+    stdin: new Blob([PAYLOAD]),
+    stdout: "pipe",
+    stderr: "pipe",
+    env: {
+      PATH: process.env.PATH ?? "",
+      HOME: home,
+      CLAUDE_CONFIG_DIR: join(home, "cfg"),
+      CLAUDE_PEERS_LOG_DIR: join(home, "logs"),
+    },
+  });
+  const deadline = Date.now() + 3000;
+  while (!existsSync(pidFile) && Date.now() < deadline) await Bun.sleep(20);
+  expect(existsSync(pidFile), "the chained command started").toBe(true);
+  const pid = Number(readFileSync(pidFile, "utf-8").trim());
+  const killedAt = Date.now();
+  proc.kill("SIGTERM");
+  const code = await proc.exited;
+  expect(Date.now() - killedAt, "the hook exits on the cancel, not at the chain timeout").toBeLessThan(2000);
+  expect(code, "exit status reports the signal").toBe(143);
+  await Bun.sleep(100);
+  // A killed orphan may linger as a zombie where PID 1 does not reap (containers): that counts as dead.
+  const state = spawnSync("ps", ["-o", "stat=", "-p", String(pid)], { encoding: "utf-8" }).stdout.trim();
+  const alive = state !== "" && !state.startsWith("Z");
+  if (alive) process.kill(pid, "SIGKILL");
+  expect(alive, "the chained sleep does not outlive the cancelled hook").toBe(false);
 }, 20000);

@@ -593,15 +593,19 @@ body {
   color: var(--fg-dim);
 }
 
-/* Model badge + context ring: the tile's own statusLine
-   report. Same right-hand badge column as .row-lead/.row-role, `flex: 0 0
-   auto` so a long model name never squeezes .row-main, mono like every other
-   short runtime label in the app (peer id, branch). Border+text tint, not
-   fill, per DESIGN.md's badge primitive. */
+/* Model badge + context ring: the tile's own statusLine report. Same
+   right-hand badge column as .row-lead/.row-role. Capped at 11ch with an
+   ellipsis (full id in the title) so a long display name such as
+   "Sonnet 4.5 (1M context)" never squeezes .row-main. Mono like every other
+   short runtime label (peer id, branch). Border+text tint, not fill, per
+   DESIGN.md's badge primitive. */
 .row-model {
-  display: inline-flex;
-  align-items: center;
-  flex: 0 0 auto;
+  display: inline-block;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 11ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
   font-family: var(--mono);
   font-size: 10px;
   line-height: 1;
