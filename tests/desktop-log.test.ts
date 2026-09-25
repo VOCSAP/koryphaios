@@ -1,6 +1,3 @@
-// PLAN-observabilite-erreurs O3: main-process rolling log + journal snapshot
-// (desktop/src/main/log.ts -- pure module, electron-free).
-
 import { test, expect, beforeEach, afterEach } from "bun:test";
 import {
   mkdtempSync,
@@ -11,9 +8,15 @@ import {
   utimesSync,
   existsSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
-import { createRollingLogger, flushJournalSnapshot } from "../desktop/src/main/log";
+import {
+  createJournalWriter,
+  createPersistentJournal,
+  createRollingLogger,
+  initDeckLog,
+  logWarn,
+} from "../desktop/src/main/log";
 
 let dir: string;
 
@@ -44,29 +47,99 @@ test("rolling logger writes leveled lines and rotates at maxBytes", () => {
   expect(readFileSync(join(dir, "main.log"), "utf-8")).toContain("entry-19");
 });
 
-test("flushJournalSnapshot writes a stamped file and prunes old snapshots", () => {
-  const stale = join(dir, "journal-old.log");
-  writeFileSync(stale, "old run\n");
-  // Anchored on fixedNow, not the wall clock: using Date.now() lets the
-  // fixture's age shrink as the calendar advances past fixedNow, silently
-  // stopping the prune from firing.
-  const tenDaysAgo = (fixedNow().getTime() - 10 * 24 * 3600 * 1000) / 1000;
-  utimesSync(stale, tenDaysAgo, tenDaysAgo);
-  const recent = join(dir, "journal-recent.log");
-  writeFileSync(recent, "recent run\n");
+test("journal writers persist entries immediately in distinct run files", () => {
+  const first = createJournalWriter({ dir, now: fixedNow });
+  const second = createJournalWriter({ dir, now: fixedNow });
 
-  const path = flushJournalSnapshot(dir, "line 1\nline 2", 7, fixedNow);
+  first.write({ id: 1, at: fixedNow().getTime(), kind: "quota", text: "session limited" });
+  first.write({ id: 2, at: fixedNow().getTime(), kind: "session", text: "session resumed" });
+  second.write({ id: 1, at: fixedNow().getTime(), kind: "session", text: "session spawned" });
 
-  expect(path).not.toBeNull();
-  expect(readFileSync(path!, "utf-8")).toBe("line 1\nline 2\n");
-  expect(existsSync(stale)).toBe(false);
-  expect(existsSync(recent)).toBe(true);
+  const firstText = readFileSync(first.file, "utf-8");
+  expect(first.file).not.toBe(second.file);
+  expect(firstText).toContain("[quota] session limited");
+  expect(firstText.indexOf("[quota] session limited")).toBeLessThan(firstText.indexOf("[session] session resumed"));
+  expect(readFileSync(second.file, "utf-8")).toContain("[session] session spawned");
 });
 
-test("flushJournalSnapshot skips empty journals and never throws", () => {
-  expect(flushJournalSnapshot(dir, "   ", 7, fixedNow)).toBeNull();
-  // Unwritable dir (a regular file in the way): best-effort null.
-  const blocked = join(dir, "not-a-dir");
-  writeFileSync(blocked, "occupied");
-  expect(flushJournalSnapshot(join(blocked, "logs"), "text", 7, fixedNow)).toBeNull();
+test("persistent journal writes each added entry to disk", () => {
+  const journal = createPersistentJournal({
+    dir,
+    now: fixedNow,
+    entryNow: () => fixedNow().getTime(),
+  });
+
+  journal.add("quota", "session limited");
+
+  const file = readdirSync(dir).find((entry) => entry.startsWith("journal-"));
+  expect(file).toBeDefined();
+  expect(readFileSync(join(dir, file!), "utf-8")).toContain("[quota] session limited");
+});
+
+test("journal writer rotates its run file and prunes expired runs", () => {
+  const stale = join(dir, "journal-old.log");
+  writeFileSync(stale, "old run\n");
+  const tenDaysAgo = (fixedNow().getTime() - 10 * 24 * 3600 * 1000) / 1000;
+  utimesSync(stale, tenDaysAgo, tenDaysAgo);
+  const writer = createJournalWriter({
+    dir,
+    maxBytes: 150,
+    maxFiles: 2,
+    now: fixedNow,
+  });
+
+  for (let i = 0; i < 20; i++) {
+    writer.write({ id: i + 1, at: fixedNow().getTime(), kind: "session", text: `entry-${i}` });
+  }
+
+  const name = basename(writer.file);
+  expect(readdirSync(dir).filter((entry) => entry === name || entry.startsWith(`${name}.`)).sort()).toEqual([
+    name,
+    `${name}.1`,
+  ].sort());
+  expect(existsSync(stale)).toBe(false);
+
+  rmSync(writer.file);
+  rmSync(`${writer.file}.1`);
+  writer.write({ id: 21, at: fixedNow().getTime(), kind: "session", text: "recreated" });
+  expect(readFileSync(writer.file, "utf-8")).toContain("[session] recreated");
+  for (let i = 0; i < 20; i++) {
+    writer.write({ id: i + 22, at: fixedNow().getTime(), kind: "session", text: `recovered-${i}` });
+  }
+  expect(existsSync(`${writer.file}.1`)).toBe(true);
+});
+
+test("journal writer reports an unavailable target once through main.log", () => {
+  const journalDir = join(dir, "journal-logs");
+  const main = initDeckLog(dir);
+  const writer = createJournalWriter({
+    dir: journalDir,
+    now: fixedNow,
+    onWriteFailure: (file, error) => logWarn("journal", `cannot persist ${file}`, error),
+  });
+  rmSync(journalDir, { recursive: true, force: true });
+  writeFileSync(journalDir, "occupied");
+
+  writer.write({ id: 1, at: fixedNow().getTime(), kind: "error", text: "first" });
+  writer.write({ id: 2, at: fixedNow().getTime(), kind: "error", text: "second" });
+
+  const warnings = readFileSync(main.file, "utf-8").match(/cannot persist/g) ?? [];
+  expect(warnings).toHaveLength(1);
+});
+
+test("journal writer reports prune and write failures independently through main.log", () => {
+  const journalDir = join(dir, "occupied");
+  const main = initDeckLog(dir);
+  writeFileSync(journalDir, "occupied");
+  const writer = createJournalWriter({
+    dir: journalDir,
+    now: fixedNow,
+    onWriteFailure: (file, error) => logWarn("journal", `cannot persist ${file}`, error),
+  });
+
+  writer.write({ id: 1, at: fixedNow().getTime(), kind: "error", text: "first" });
+  writer.write({ id: 2, at: fixedNow().getTime(), kind: "error", text: "second" });
+
+  const warnings = readFileSync(main.file, "utf-8").match(/cannot persist/g) ?? [];
+  expect(warnings).toHaveLength(2);
 });

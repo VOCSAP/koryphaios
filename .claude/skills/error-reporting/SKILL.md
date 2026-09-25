@@ -54,11 +54,11 @@ All logs are size-rotated (5 MiB × 3 files) — never add an unbounded log file
 - **Destructive reads persist before ack**: the operator-inbox drain re-queues
   the batch (`pendingInboxWrites` in index.ts) when the disk write fails.
   Imitate that pattern for any new consume-once data.
-- **Journal at quit**: `flushJournalSnapshot` in `before-quit` writes
-  `journal-<date>.log` (pruned after 7 days). New journal kinds go in BOTH
-  `desktop/src/main/journal.ts` and the mirror in `desktop/src/shared/types.ts`
-  + the `KINDS` filter in JournalView + `journal.kind.*` i18n keys (3 files —
-  see TESTING.md locale parity).
+- **Journal persistence**: each entry appends synchronously to a run-specific
+  journal file. Files rotate at 5 MiB x3 and journal runs older than 7 days are
+  pruned.
+- **New journal kinds**: update the shared `JournalKind`, the JournalView
+  filter, and the `journal.kind.*` translations.
 
 ## Acceptable silent catches (documented best-effort)
 
@@ -70,6 +70,6 @@ log it.
 ## Tests that guard all this
 
 `tests/logger.test.ts` (rotation), `tests/broker-logging.test.ts` (broker.log
-+ 500-survival), `tests/desktop-log.test.ts` (main.log + journal snapshot),
++ 500-survival), `tests/desktop-log.test.ts` (main.log + journal persistence),
 `tests/desktop-broker-health.test.ts` (banner hysteresis),
 `tests/desktop-inbox-store.test.ts` (persist-failure callback).

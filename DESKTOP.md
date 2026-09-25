@@ -441,8 +441,9 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   `StatusBanner`. Outages are a banner (state), never toasts (events).
 - Toast policy: `showToast` is reserved for direct user-action outcomes,
   throttled per key; `error` variant carries raw text (`{ raw: true }`).
-- The activity journal flushes to `logs/journal-<date>.log` at quit (pruned
-  after 7 days). Full conventions: `.claude/skills/error-reporting/`.
+- The activity journal synchronously appends each entry to a run-specific
+  `logs/journal-<timestamp>-<uuid>.log`; journal files rotate at 5 MiB x3 and
+  expired runs are pruned after 7 days.
 
 ## Renderer view conventions (canvas views especially)
 

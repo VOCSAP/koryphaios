@@ -235,11 +235,6 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     scope: "machine",
     reason: "<name>.log under app.getPath('logs'), the size-rotated main log; one operator, one workstation, one log",
   },
-  flushJournalSnapshot: {
-    kind: "constructor",
-    scope: "machine",
-    reason: "journal-<stamp>.log under the logs dir at quit, pruned after 7 days; stamped per run so two windows never collide",
-  },
   tempFileName: {
     kind: "constructor",
     scope: "machine",

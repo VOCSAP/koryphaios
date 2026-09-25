@@ -1,7 +1,5 @@
-// PLAN C14: activity journal ring buffer (desktop/src/main/journal).
-
 import { test, expect } from "bun:test";
-import { Journal, JOURNAL_CAP } from "../desktop/src/main/journal.ts";
+import { Journal, JOURNAL_CAP, type JournalEntry } from "../desktop/src/main/journal.ts";
 
 test("add/list accumulate in order with monotonic ids and the injected clock", () => {
   let clock = 1000
@@ -14,6 +12,15 @@ test("add/list accumulate in order with monotonic ids and the injected clock", (
   expect(all.map((e) => e.text)).toEqual(["a spawned", "a limited"])
   expect(all.map((e) => e.at)).toEqual([1000, 2000])
   expect(all[1]!.id).toBeGreaterThan(all[0]!.id)
+})
+
+test("add sends the completed entry to its synchronous persistence sink", () => {
+  const written: JournalEntry[] = []
+  const j = new Journal(10, () => 1000, (entry) => written.push(entry))
+
+  j.add("quota", "session limited")
+
+  expect(written).toEqual([{ id: 1, at: 1000, kind: "quota", text: "session limited" }])
 })
 
 test("list(kind) filters; list() returns a copy (no aliasing)", () => {
@@ -35,7 +42,6 @@ test("the ring buffer caps at the configured size, dropping the oldest", () => {
   for (let i = 1; i <= 8; i++) j.add("session", `e${i}`)
   const texts = j.list().map((e) => e.text)
   expect(texts).toEqual(["e4", "e5", "e6", "e7", "e8"])
-  // Ids keep growing across the drop (they are not recycled).
   expect(j.list()[0]!.id).toBe(4)
 })
 
@@ -47,7 +53,6 @@ test("toText renders one ISO line per entry", () => {
 
 test("default cap constant is applied", () => {
   const j = new Journal(undefined as unknown as number, () => 0)
-  // undefined -> default parameter JOURNAL_CAP
   for (let i = 0; i < JOURNAL_CAP + 20; i++) j.add("session", `e${i}`)
   expect(j.list().length).toBe(JOURNAL_CAP)
 })

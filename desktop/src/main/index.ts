@@ -142,8 +142,7 @@ import {
   isWithinDir,
   sandboxPromptRoot
 } from './sandbox-prompt'
-import { Journal } from './journal'
-import { flushJournalSnapshot, initDeckLog, logInfo, logWarn, onDeckError, reportError } from './log'
+import { createPersistentJournal, initDeckLog, logInfo, logWarn, onDeckError, reportError } from './log'
 import {
   startDeckControl,
   type DeckControlDeps,
@@ -591,15 +590,12 @@ const service = new SessionService(
   })
 )
 
-// Activity journal (PLAN C14): per-window narration of spawns, exits, quota
-// episodes, attention screens, worktree ops, announces… Ring-buffered, never
-// persisted. Fed here + in ipc.ts; read by the Journal rail view.
-const journal = new Journal()
+const journal = createPersistentJournal({
+  dir: app.getPath('logs'),
+  onWriteFailure: (file, error) => logWarn('journal', `cannot persist ${file}`, error)
+})
 
-// Route every reportError() into the journal (PLAN O3): failures show up in
-// the Journal view next to the activity they interrupted.
 onDeckError((scope, text) => journal.add('error', `[${scope}] ${text}`))
-// After the journal hook, so a startup failure here reaches the Journal view.
 initSessionState()
 
 service.on('created', (r: SessionRuntime) => {
@@ -3363,9 +3359,6 @@ app.on('window-all-closed', () => {
 
 const runBeforeQuit = createBeforeQuitHandler({
   effects: [
-    // The journal ring buffer lives in memory only: unflushed, the narrative of
-    // this run evaporates with the process.
-    { label: 'journal', run: () => flushJournalSnapshot(app.getPath('logs'), journal.toText()) },
     { label: 'log', run: () => logInfo('main', 'quitting') },
     {
       label: 'timers',

@@ -1,15 +1,4 @@
-// Rolling main-process log + central error reporting (PLAN-observabilite O3).
-//
-// In a packaged Electron app there is no terminal: every console.error is lost.
-// This module gives the main process an on-disk, size-bounded trail under
-// app.getPath('logs') and a single reportError() entry point that fans out to
-// the file, the console (dev runs) and the activity journal.
-//
-// Mirrors shared/logger.ts (repo root) with Node fs only -- duplicated rather
-// than imported, like broker-client.ts mirrors shared/config.ts, because the
-// desktop tsconfig/vite roots stop at desktop/src. No electron imports so it
-// is unit-testable under `bun test`: index.ts injects the directory.
-
+import { randomUUID } from 'node:crypto'
 import {
   appendFileSync,
   existsSync,
@@ -17,10 +6,10 @@ import {
   readdirSync,
   renameSync,
   statSync,
-  unlinkSync,
-  writeFileSync
+  unlinkSync
 } from 'node:fs'
 import { join } from 'node:path'
+import { Journal, type JournalEntry } from './journal'
 
 export type LogLevel = 'info' | 'warn' | 'error'
 
@@ -28,6 +17,11 @@ export interface RollingLogger {
   info(message: string, context?: unknown): void
   warn(message: string, context?: unknown): void
   error(message: string, context?: unknown): void
+  readonly file: string
+}
+
+export interface JournalWriter {
+  write(entry: JournalEntry): void
   readonly file: string
 }
 
@@ -53,6 +47,21 @@ export interface RollingLoggerOptions {
   maxFiles?: number
   mirrorToConsole?: boolean
   now?: () => Date
+  onWriteFailure?: (file: string, error: unknown) => void
+}
+
+export interface JournalWriterOptions {
+  dir: string
+  keepDays?: number
+  maxBytes?: number
+  maxFiles?: number
+  now?: () => Date
+  onWriteFailure?: (file: string, error: unknown) => void
+}
+
+export interface PersistentJournalOptions extends JournalWriterOptions {
+  cap?: number
+  entryNow?: () => number
 }
 
 export function createRollingLogger(options: RollingLoggerOptions): RollingLogger {
@@ -111,7 +120,15 @@ export function createRollingLogger(options: RollingLoggerOptions): RollingLogge
     } catch (e) {
       if (!warnedWriteFailure) {
         warnedWriteFailure = true
-        console.error(`[log] cannot write ${file}: ${e instanceof Error ? e.message : String(e)}`)
+        if (options.onWriteFailure) {
+          try {
+            options.onWriteFailure(file, e)
+          } catch {
+            console.error(`[log] cannot write ${file}: ${e instanceof Error ? e.message : String(e)}`)
+          }
+        } else {
+          console.error(`[log] cannot write ${file}: ${e instanceof Error ? e.message : String(e)}`)
+        }
       }
     }
   }
@@ -124,21 +141,73 @@ export function createRollingLogger(options: RollingLoggerOptions): RollingLogge
   }
 }
 
-// ----- Singleton wiring (index.ts initializes, everyone reports) -----
-
 let current: RollingLogger | null = null
 let errorListener: ((scope: string, text: string) => void) | null = null
 
-/** Bind the main-process logger to a directory (app.getPath('logs')). */
 export function initDeckLog(dir: string): RollingLogger {
   current = createRollingLogger({ dir, name: 'main' })
   return current
 }
 
-/**
- * Register the journal hook: every reportError() also lands as an 'error'
- * journal entry so the operator sees failures in the Journal view.
- */
+function journalLine(entry: JournalEntry): string {
+  return `[${entry.kind}] ${entry.text}`
+}
+
+function pruneJournalFiles(dir: string, keepDays: number, now: () => Date): void {
+  mkdirSync(dir, { recursive: true })
+  const cutoff = now().getTime() - keepDays * 24 * 3600 * 1000
+  for (const entry of readdirSync(dir)) {
+    if (!/^journal-.*\.log(?:\.\d+)?$/.test(entry)) continue
+    if (statSync(join(dir, entry)).mtimeMs < cutoff) unlinkSync(join(dir, entry))
+  }
+}
+
+export function createJournalWriter(options: JournalWriterOptions): JournalWriter {
+  const now = options.now ?? (() => new Date())
+  const keepDays = options.keepDays ?? 7
+  const stamp = now().toISOString().replace(/[:.]/g, '-')
+  let warnedPruneFailure = false
+  let warnedWriteFailure = false
+  const emitFailure = (file: string, error: unknown): void => {
+    try {
+      if (options.onWriteFailure) options.onWriteFailure(file, error)
+      else console.error(`[log] cannot write ${file}: ${error instanceof Error ? error.message : String(error)}`)
+    } catch {
+      console.error(`[log] cannot write ${file}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  const reportPruneFailure = (file: string, error: unknown): void => {
+    if (warnedPruneFailure) return
+    warnedPruneFailure = true
+    emitFailure(file, error)
+  }
+  const reportWriteFailure = (file: string, error: unknown): void => {
+    if (warnedWriteFailure) return
+    warnedWriteFailure = true
+    emitFailure(file, error)
+  }
+  const logger = createRollingLogger({
+    dir: options.dir,
+    name: `journal-${stamp}-${randomUUID()}`,
+    maxBytes: options.maxBytes,
+    maxFiles: options.maxFiles,
+    mirrorToConsole: false,
+    now,
+    onWriteFailure: reportWriteFailure
+  })
+  try {
+    pruneJournalFiles(options.dir, keepDays, now)
+  } catch (error) {
+    reportPruneFailure(logger.file, error)
+  }
+  return { file: logger.file, write: (entry) => logger.info(journalLine(entry)) }
+}
+
+export function createPersistentJournal(options: PersistentJournalOptions): Journal {
+  const writer = createJournalWriter(options)
+  return new Journal(options.cap, options.entryNow, writer.write)
+}
+
 export function onDeckError(listener: (scope: string, text: string) => void): void {
   errorListener = listener
 }
@@ -152,10 +221,6 @@ export function logWarn(scope: string, message: string, context?: unknown): void
   else console.error(`[${scope}] ${message}`, context)
 }
 
-/**
- * Central error sink for the main process: file + console (dev) + journal.
- * Never throws. Use for every caught failure that would otherwise stay silent.
- */
 export function reportError(scope: string, message: string, error?: unknown): void {
   try {
     if (current) current.error(`[${scope}] ${message}`, error)
@@ -167,38 +232,5 @@ export function reportError(scope: string, message: string, error?: unknown): vo
     errorListener?.(scope, `${message}${detail}`)
   } catch {
     // A reporting failure must never cascade.
-  }
-}
-
-/**
- * Persist the activity journal at quit (PLAN O3): one journal-<date>.log per
- * run under the logs dir, pruned after keepDays so the footprint stays
- * bounded. Returns the written path (or null on failure -- best-effort, quit
- * must proceed).
- */
-export function flushJournalSnapshot(
-  dir: string,
-  text: string,
-  keepDays = 7,
-  now: () => Date = () => new Date()
-): string | null {
-  try {
-    mkdirSync(dir, { recursive: true })
-    const cutoff = now().getTime() - keepDays * 24 * 3600 * 1000
-    for (const entry of readdirSync(dir)) {
-      if (!/^journal-.*\.log$/.test(entry)) continue
-      try {
-        if (statSync(join(dir, entry)).mtimeMs < cutoff) unlinkSync(join(dir, entry))
-      } catch {
-        // Best-effort prune.
-      }
-    }
-    if (!text.trim()) return null
-    const stamp = now().toISOString().replace(/[:.]/g, '-')
-    const path = join(dir, `journal-${stamp}.log`)
-    writeFileSync(path, text + '\n', 'utf-8')
-    return path
-  } catch {
-    return null
   }
 }
