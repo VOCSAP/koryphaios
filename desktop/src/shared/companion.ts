@@ -106,6 +106,14 @@ export const COMPANION_MANIFEST = {
   explorerList: { kind: 'invoke', channel: 'explorer:list' },
   explorerRead: { kind: 'invoke', channel: 'explorer:read' },
 
+  // guard rules (Settings > Rules)
+  rulesList: { kind: 'invoke', channel: 'rules:list' },
+  rulesSetEnabled: { kind: 'invoke', channel: 'rules:set-enabled' },
+  rulesSaveGlobal: { kind: 'invoke', channel: 'rules:save-global' },
+  rulesSaveRepo: { kind: 'invoke', channel: 'rules:save-repo' },
+  rulesApproveRepo: { kind: 'invoke', channel: 'rules:approve-repo' },
+  rulesTest: { kind: 'invoke', channel: 'rules:test' },
+
   // embedded browser + window mirror (desktop-only feature, blocked remotely)
   getBrowserPreloadPath: { kind: 'invoke', channel: 'browser:preload-path' },
   captureBrowser: { kind: 'invoke', channel: 'browser:capture' },
@@ -210,6 +218,7 @@ export const COMPANION_MANIFEST = {
   onFocusSession: { kind: 'event', channel: 'session:focus' },
   onDesignPick: { kind: 'event', channel: 'design:pick' },
   onConfigChanged: { kind: 'event', channel: 'config:changed' },
+  onRulesChanged: { kind: 'event', channel: 'rules:changed' },
   onMenuSettings: { kind: 'event', channel: 'menu:settings' },
   onMenuNewClear: { kind: 'event', channel: 'menu:new-clear' },
   onMenuSave: { kind: 'event', channel: 'menu:save' },
@@ -349,6 +358,7 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'explorer:roots': 0,
   'explorer:list': 0,
   'explorer:read': 0,
+  'rules:list': 0,
   'template:list': 0,
   'template:read': 0,
   'snippet:list': 0,
@@ -490,6 +500,16 @@ export const CHANNEL_TIERS: Readonly<Record<string, 0 | 1 | 2 | 3>> = {
   'sandbox:custom-save': 3,
   'sandbox:overlay-generate': 3,
   'sandbox:projection-remove': 3,
+  // Trust-changing: each one weakens or reshapes the guard rules every agent
+  // runs under (a toggle, a rules file, an approval of repo content).
+  'rules:set-enabled': 3,
+  'rules:save-global': 3,
+  'rules:save-repo': 3,
+  'rules:approve-repo': 3,
+  // Changes nothing, but runs an arbitrary regex (in a worker with a
+  // deadline): kept off the remote surface so a paired phone cannot burn
+  // host CPU with it.
+  'rules:test': 3,
   'companion:start': 3,
   'companion:stop': 3,
   'companion:devices': 3,

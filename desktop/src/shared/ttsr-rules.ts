@@ -13,20 +13,35 @@ import { createHash } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
-export const TTSR_SOURCES = ['kory', 'user', 'repo'] as const
-export type TtsrSource = (typeof TTSR_SOURCES)[number]
+import {
+  TTSR_EVENTS,
+  TTSR_FIELDS,
+  TTSR_MODES,
+  TTSR_SOURCES,
+  TTSR_TOOLS,
+  type TtsrEffectiveFile,
+  type TtsrEffectiveRule,
+  type TtsrEvent,
+  type TtsrField,
+  type TtsrMode,
+  type TtsrRule,
+  type TtsrRuleFile,
+  type TtsrSource,
+  type TtsrTool
+} from './ttsr-types'
 
-export const TTSR_EVENTS = ['PreToolUse', 'PostToolUse'] as const
-export type TtsrEvent = (typeof TTSR_EVENTS)[number]
-
-export const TTSR_TOOLS = ['Edit', 'MultiEdit', 'Write', 'NotebookEdit', 'Bash'] as const
-export type TtsrTool = (typeof TTSR_TOOLS)[number]
-
-export const TTSR_FIELDS = ['added', 'command', 'file_path', 'output'] as const
-export type TtsrField = (typeof TTSR_FIELDS)[number]
-
-export const TTSR_MODES = ['deny', 'warn'] as const
-export type TtsrMode = (typeof TTSR_MODES)[number]
+export { TTSR_EVENTS, TTSR_FIELDS, TTSR_MODES, TTSR_SOURCES, TTSR_TOOLS }
+export type {
+  TtsrEffectiveFile,
+  TtsrEffectiveRule,
+  TtsrEvent,
+  TtsrField,
+  TtsrMode,
+  TtsrRule,
+  TtsrRuleFile,
+  TtsrSource,
+  TtsrTool
+}
 
 export const TTSR_FILE_VERSION = 1
 /** Max rules in one global or repo rules file. */
@@ -42,37 +57,6 @@ export const MAX_ID_CHARS = 64
 export const FIELD_CAP = 256 * 1024
 /** Cap of the text the hook hands back to Claude Code (deny reason or context). */
 export const MAX_HOOK_TEXT_CHARS = 4000
-
-/** One rule as written in a global or repo rules file (id not yet prefixed). */
-export interface TtsrRule {
-  id: string
-  event: TtsrEvent
-  tools: TtsrTool[]
-  field: TtsrField
-  /** Project-relative globs (`**`, `*`, `?`); a leading `!` excludes. */
-  paths?: string[]
-  pattern: string
-  flags?: string
-  mode: TtsrMode
-  message: string
-}
-
-export interface TtsrRuleFile {
-  version: 1
-  rules: TtsrRule[]
-}
-
-/** A rule once loaded: `id` stays the file's id, `qualifiedId` is `<source>/<id>`. */
-export interface TtsrEffectiveRule extends TtsrRule {
-  source: TtsrSource
-  qualifiedId: string
-}
-
-/** The per-tile file the Deck writes and the hook reads. */
-export interface TtsrEffectiveFile {
-  version: 1
-  rules: TtsrEffectiveRule[]
-}
 
 export type TtsrParseResult<T> = { ok: true; file: T } | { ok: false; errors: string[] }
 

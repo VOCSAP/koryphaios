@@ -89,6 +89,14 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     wiring: [{ callee: "writeDemoMcpConfig", dirArg: { prop: "dir" } }],
     reason: "per-run demo-control URL and token of this window's embedded browser; same swap hazard as supervisor-mcp.json",
   },
+  ttsrEffectiveFileName: {
+    kind: "constructor",
+    scope: "session",
+    module: "ttsr-service.ts",
+    wiring: [{ callee: "TtsrService", dirArg: { prop: "sessionDir" } }],
+    reason:
+      "compiled guard rules of one tile (<desk id>.json under ttsr/): a restored workspace reuses desk ids, so at the root two windows would overwrite each other's rules",
+  },
   "demo-scenario.md": {
     kind: "literal",
     scope: "session",
@@ -112,6 +120,16 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     kind: "literal",
     scope: "project",
     reason: "operator-approved repo-sourced launch commands, sha256 per project_key; the trust decision follows the repo",
+  },
+  "ttsr-approvals.json": {
+    kind: "literal",
+    scope: "project",
+    reason: "operator-approved repo guard-rule files, a set of sha256 per project_key; the trust decision follows the repo, every window on it shares it",
+  },
+  ttsrSandboxCopyName: {
+    kind: "constructor",
+    scope: "project",
+    reason: "ttsr-<session uuid>.json in the project container's run dir, a copy of a tile's rules; the uuid is minted per spawn, so two windows on one container never share one",
   },
   "sandbox.json": {
     kind: "literal",
@@ -190,6 +208,11 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     scope: "machine",
     reason: "output of the proxy the Deck launches, appended under app.getPath('logs'); one operator and one workstation, and two windows appending to it interleave lines without leaking anything",
   },
+  "ttsr-rules.json": {
+    kind: "literal",
+    scope: "machine",
+    reason: "the operator's own guard rules under the global config dir, applied in every project; one operator, one file, polled by every window",
+  },
   "operator.json": {
     kind: "literal",
     scope: "machine",
@@ -267,6 +290,7 @@ const NOT_APP_STATE: Record<string, NotAppStateRule> = {
   availableLocales: { reason: "<code>.json locale bundles shipped with the app, read-only" },
   readDictFile: { reason: "<lang>.json locale bundle read from the app's locales dir, read-only" },
   transcriptPath: { reason: "~/.claude/projects/<cwd>/<id>.jsonl, Claude Code's own transcript, read for the resume digest" },
+  "rules.json": { reason: "a repository's guard rules under .claude/claude-peers, read as hostile repo content and written only on an explicit operator save; never under userData" },
   "serve.json": { reason: "a cloned repository's serve convention under .claude/claude-peers; its name is imposed by the project and the Deck only reads it" },
   "patch-state.json": { reason: "clodex's own manifest under its home (CLODEX_HOME or ~/.clodex), written by `clodex patch`; the Deck only reads it for patch freshness" },
   "server-runtime.json": { reason: "clodex's record of its live servers under the same home, written by `clodex server`; the Deck only reads it to adopt a proxy or to prove the identity of one it owns" },

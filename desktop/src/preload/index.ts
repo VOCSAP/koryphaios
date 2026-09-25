@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AppConfig,
+  TtsrRulesList,
+  TtsrTestOptions,
   BrokerStatusEvent,
   CreateSessionInput,
   DeckApi,
@@ -174,6 +176,15 @@ const api: DeckApi = {
   explorerRoots: () => ipcRenderer.invoke('explorer:roots'),
   explorerList: (root: string, rel: string) => ipcRenderer.invoke('explorer:list', root, rel),
   explorerRead: (root: string, rel: string) => ipcRenderer.invoke('explorer:read', root, rel),
+  rulesList: () => ipcRenderer.invoke('rules:list'),
+  rulesSetEnabled: (toggleKey: string, enabled: boolean) =>
+    ipcRenderer.invoke('rules:set-enabled', toggleKey, enabled),
+  rulesSaveGlobal: (text: string) => ipcRenderer.invoke('rules:save-global', text),
+  rulesSaveRepo: (projectDir: string, text: string) => ipcRenderer.invoke('rules:save-repo', projectDir, text),
+  rulesApproveRepo: (projectDir: string, hash: string) =>
+    ipcRenderer.invoke('rules:approve-repo', projectDir, hash),
+  rulesTest: (rule: unknown, sampleText: string, opts?: TtsrTestOptions) =>
+    ipcRenderer.invoke('rules:test', rule, sampleText, opts),
   getBrowserPreloadPath: () => ipcRenderer.invoke('browser:preload-path'),
   captureBrowser: (webContentsId: number) => ipcRenderer.invoke('browser:capture', webContentsId),
   saveAnnotation: (dataUrl: string) => ipcRenderer.invoke('browser:save-annotation', dataUrl),
@@ -262,6 +273,7 @@ const api: DeckApi = {
   onFocusSession: (cb: (id: string) => void) => subscribe('session:focus', cb),
   onDesignPick: (cb: (event: DesignPickEvent) => void) => subscribe('design:pick', cb),
   onConfigChanged: (cb: (config: AppConfig) => void) => subscribe('config:changed', cb),
+  onRulesChanged: (cb: (list: TtsrRulesList) => void) => subscribe('rules:changed', cb),
   onMenuSettings: (cb: () => void) => subscribe('menu:settings', () => cb()),
   onMenuNewClear: (cb: () => void) => subscribe('menu:new-clear', () => cb()),
   onMenuSave: (cb: () => void) => subscribe('menu:save', () => cb()),

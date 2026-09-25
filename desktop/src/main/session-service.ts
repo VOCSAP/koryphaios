@@ -434,6 +434,19 @@ export class SessionService extends EventEmitter {
     this.launchCommand = command
   }
 
+  // ----- guard rules -----
+
+  /**
+   * Path of the tile's compiled guard-rules file, '' for none. Injected by
+   * index.ts (the rules service), called once per spawn before the sandbox
+   * wrap; the provider never throws (it traces and returns '').
+   */
+  private ttsrFile: (def: SessionDef) => string = () => ''
+
+  setTtsrProvider(provider: (def: SessionDef) => string): void {
+    this.ttsrFile = provider
+  }
+
   // ----- sandbox mode (PLAN-SANDBOX SBX1/SBX3) -----
 
   /** Injected after construction (index.ts) — a setter, like setLaunchCommand. */
@@ -1232,6 +1245,9 @@ export class SessionService extends EventEmitter {
     // literal, both of which would change the declaration's exact text that
     // the sibling role-env test's structural scan of startPty() depends on.
     if (peerToolsValue !== undefined) Object.assign(sessionEnv, { CLAUDE_PEERS_TOOLS: peerToolsValue })
+    // Always exported, '' included: a value inherited from the process that
+    // launched the Deck must never point a tile at another tile's rules.
+    Object.assign(sessionEnv, { CLAUDE_PEERS_TTSR_FILE: this.ttsrFile(def) })
 
     // Sandbox mode (SBX1): wrap the composed command in a `docker exec` into
     // the project container. The supervisor is exempt — it pilots the Deck

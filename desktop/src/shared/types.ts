@@ -378,6 +378,13 @@ export interface AppConfig {
   roleChoices: string[]
   /** OpenAI-compatible local endpoints (Ollama, LiteLLM…) added in Settings (C29). */
   localProviders: import('./models').LocalProviderConfig[]
+  /**
+   * Guard-rule toggle keys the operator switched OFF: `kory/<id>`,
+   * `user/<id>`, `repo/<project_key>/<id>`. A list of DISABLED keys, so a
+   * rule added later, in any source, is active by default. Sanitized main-side
+   * (store.ts, setConfig); change it through `rulesSetEnabled`.
+   */
+  ttsrDisabled: string[]
 }
 
 /** A selectable language for the settings picker: stable code + native label. */
@@ -1871,6 +1878,105 @@ export interface UsageSnapshot {
   usedProviders: UsageProviderId[]
 }
 
+// ----- guard rules (TTSR): Settings > Rules, `rules:*` channels -----
+
+/** One guard rule as listed by `rulesList`. */
+export interface TtsrRuleRow {
+  /** `<source>/<id>`: the name the session hook reports when the rule fires. */
+  qualifiedId: string
+  source: import('./ttsr-types').TtsrSource
+  /**
+   * Key to pass to `rulesSetEnabled`. A repo rule's key embeds its project
+   * key, so the same id in two projects is two toggles.
+   */
+  toggleKey: string
+  /** The operator's "Active" checkbox: false when `toggleKey` is in `ttsrDisabled`. */
+  enabled: boolean
+  /**
+   * What the hook actually applies: `enabled` and, for a repo rule, its file
+   * approved. Supervisor tiles apply Kory rules only, whatever this says.
+   */
+  active: boolean
+  /** The rule as written in its file (Kory rules: read-only built-ins). */
+  rule: import('./ttsr-types').TtsrRule
+}
+
+/**
+ * State of a rules file. Global file: 'absent' | 'invalid' | 'valid'. Repo
+ * file: 'absent' | 'invalid' | 'pending' (valid, hash not approved for this
+ * project) | 'approved'. An invalid file loads NO rule at all.
+ */
+export type TtsrFileStatus = 'absent' | 'invalid' | 'valid' | 'pending' | 'approved'
+
+export interface TtsrFileState {
+  /** Absolute path of the file on this machine. */
+  path: string
+  status: TtsrFileStatus
+  /** sha256 of the file bytes (the approval unit), null when absent or unreadable. */
+  hash: string | null
+  /** Every validation error (`status === 'invalid'`), empty otherwise. */
+  errors: string[]
+  /** File text as read, for the editor (kept when invalid so it can be fixed), null when absent. */
+  text: string | null
+}
+
+/** One project of the live tiles, with its repo rules file. */
+export interface TtsrRepoProject {
+  /**
+   * Canonical project root (git toplevel of the tiles' cwd). Pass it back
+   * verbatim to `rulesSaveRepo` / `rulesApproveRepo`.
+   */
+  projectDir: string
+  /** Approvals and repo toggles are keyed by it; two worktrees may share it. */
+  projectKey: string
+  /** Desk session ids of the tiles running in this project. */
+  sessionIds: string[]
+  file: TtsrFileState
+  /** The file's rules when it is valid (pending or approved), [] otherwise. */
+  rules: TtsrRuleRow[]
+}
+
+/** Full state of the three sources; also the payload of `onRulesChanged`. */
+export interface TtsrRulesList {
+  kory: TtsrRuleRow[]
+  global: { file: TtsrFileState; rules: TtsrRuleRow[] }
+  projects: TtsrRepoProject[]
+}
+
+/** Save of a rules file: refused with every validation error, or written with its new hash. */
+export type TtsrSaveResult = { ok: true; hash: string } | { ok: false; errors: string[] }
+
+/**
+ * Approval of a repo file. 'stale': the file changed since the hash was read
+ * (re-read the list and ask again); 'invalid' / 'absent': nothing to approve.
+ */
+export type TtsrApproveResult = { ok: true } | { ok: false; reason: 'stale' | 'invalid' | 'absent' }
+
+export interface TtsrTestOptions {
+  /** Tool simulated; defaults to the rule's first tool, must be one of its tools. */
+  tool?: import('./ttsr-types').TtsrTool
+  /** Project-relative path ("desktop/src/x.ts") checked against the rule's `paths`. */
+  filePath?: string
+}
+
+/**
+ * Result of `rulesTest`. `ok: false`: the rule itself is invalid (same
+ * validator as the files). `timedOut`: the regex exceeded the deadline on the
+ * sample, a sign of catastrophic backtracking. `pathMatched` is null when no
+ * `filePath` was given or the rule has no `paths`.
+ */
+export type TtsrTestResult =
+  | { ok: false; errors: string[] }
+  | { ok: true; timedOut: true }
+  | {
+      ok: true
+      timedOut: false
+      matched: boolean
+      /** First match: its offset in the sample and the matched text (cut to 200 chars). */
+      match: { index: number; text: string } | null
+      pathMatched: boolean | null
+    }
+
 export interface DeckApi {
   // sessions
   listSessions(): Promise<SessionRuntime[]>
@@ -2022,6 +2128,32 @@ export interface DeckApi {
   explorerList(root: string, rel: string): Promise<ExplorerEntry[]>
   /** Read one file (capped, binary-sniffed). */
   explorerRead(root: string, rel: string): Promise<ExplorerFile>
+
+  // guard rules (TTSR): Settings > Rules. Every write is tier 3 (never remote).
+  /** The three sources, their files' state and every rule's toggle. */
+  rulesList(): Promise<TtsrRulesList>
+  /**
+   * Flip one rule's "Active" toggle (a `TtsrRuleRow.toggleKey`); rejects a
+   * malformed key. Recompiles every tile; returns the new list.
+   */
+  rulesSetEnabled(toggleKey: string, enabled: boolean): Promise<TtsrRulesList>
+  /** Validate then write the operator's global rules file (whole JSON text). */
+  rulesSaveGlobal(text: string): Promise<TtsrSaveResult>
+  /**
+   * Validate then write a project's `.claude/claude-peers/rules.json`.
+   * `projectDir` is re-validated main-side (a live tile's project root or an
+   * allowed work dir). The operator authored the content, so the new hash is
+   * approved in the same call.
+   */
+  rulesSaveRepo(projectDir: string, text: string): Promise<TtsrSaveResult>
+  /** Approve a pending repo file; refused unless `hash` is the file's CURRENT hash. */
+  rulesApproveRepo(projectDir: string, hash: string): Promise<TtsrApproveResult>
+  /**
+   * Validate one rule object (the fields of a rules-file entry) and run it
+   * against `sampleText` placed in the rule's field, the regex isolated in a
+   * worker with a hard deadline.
+   */
+  rulesTest(rule: unknown, sampleText: string, opts?: TtsrTestOptions): Promise<TtsrTestResult>
 
   // embedded browser (PLAN D1): absolute path of the webview guest preload.
   getBrowserPreloadPath(): Promise<string>
@@ -2364,6 +2496,8 @@ export interface DeckApi {
   /** External-app element pick received by the design endpoint (D2b). */
   onDesignPick(cb: (event: DesignPickEvent) => void): () => void
   onConfigChanged(cb: (config: AppConfig) => void): () => void
+  /** Guard rules changed (file edit seen by the poll, toggle, save, approval, tile closed). */
+  onRulesChanged(cb: (list: TtsrRulesList) => void): () => void
   /** Fired when the Edit > Settings… menu item (or Ctrl/Cmd+,) is chosen. */
   onMenuSettings(cb: () => void): () => void
   /** Fired when the File > New (clear) menu item is chosen (renderer confirms). */

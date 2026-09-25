@@ -21,7 +21,8 @@ import type {
   SessionRuntime,
   StopMode,
   StopReport,
-  StopResult
+  StopResult,
+  TtsrTestOptions
 } from '@shared/types'
 import { inboxEntryKey } from '@shared/types'
 import { ROADMAP_SYNC_RESOLUTIONS } from '@shared/roadmap-sync'
@@ -83,6 +84,8 @@ import {
 } from './demo-driver'
 import { markProviderUsed } from './usage-service'
 import { listExplorerDir, readExplorerFile } from './explorer-service'
+import type { TtsrProjectRef, TtsrService } from './ttsr-service'
+import { isTtsrToggleKey } from './ttsr-toggles'
 import {
   canonicalPath,
   createWorktree,
@@ -256,6 +259,8 @@ interface IpcDeps {
    * never a second lazy-start guard.
    */
   ensureControlServer: () => Promise<unknown>
+  /** Guard rules (Settings > Rules): sources, approvals, per-tile compile. */
+  ttsr: TtsrService
 }
 
 export function registerIpc({
@@ -287,7 +292,8 @@ export function registerIpc({
   purgeInboxSession,
   inboxDelete,
   ensureControlServer,
-  sessionStateDir
+  sessionStateDir,
+  ttsr
 }: IpcDeps): void {
   // ----- sessions -----
   regHandle('sessions:list', () => service.list())
@@ -1057,6 +1063,46 @@ export function registerIpc({
   regHandle('explorer:read', async (_e, root: string, rel: string) =>
     readExplorerFile(await explorerRoot(root), typeof rel === 'string' ? rel : '')
   )
+
+  // ----- guard rules (TTSR) -----
+  // A `projectDir` crosses the renderer/companion boundary and becomes the
+  // directory a rules file is written into: it must be a live tile's project
+  // root (derived main-side from the tile cwd) or an allowed work dir, whose
+  // project root is then resolved main-side.
+  const rulesProject = async (dir: unknown): Promise<TtsrProjectRef> => {
+    if (typeof dir !== 'string' || dir.length === 0 || dir.includes('\0')) throw new Error('rules: invalid projectDir')
+    return ttsr.knownProject(dir) ?? ttsr.projectFor(await requireWorkDir(dir))
+  }
+  const requireText = (text: unknown): string => {
+    if (typeof text !== 'string') throw new Error('rules: file text must be a string')
+    return text
+  }
+  regHandle('rules:list', () => ttsr.list())
+  regHandle('rules:set-enabled', (_e, toggleKey: unknown, enabled: unknown) => {
+    if (!isTtsrToggleKey(toggleKey)) throw new Error('rules: malformed toggle key')
+    if (typeof enabled !== 'boolean') throw new Error('rules: enabled must be a boolean')
+    const current = getConfig().ttsrDisabled ?? []
+    const next = enabled ? current.filter((k) => k !== toggleKey) : [...current.filter((k) => k !== toggleKey), toggleKey]
+    setConfig({ ttsrDisabled: next })
+    journal.add('session', `guard rule ${toggleKey} ${enabled ? 'enabled' : 'disabled'}`)
+    return ttsr.list()
+  })
+  regHandle('rules:save-global', (_e, text: unknown) => ttsr.saveGlobal(requireText(text)))
+  regHandle('rules:save-repo', async (_e, dir: unknown, text: unknown) =>
+    ttsr.saveRepo(await rulesProject(dir), requireText(text))
+  )
+  regHandle('rules:approve-repo', async (_e, dir: unknown, hash: unknown) => {
+    if (typeof hash !== 'string') throw new Error('rules: hash must be a string')
+    return ttsr.approveRepo(await rulesProject(dir), hash)
+  })
+  regHandle('rules:test', (_e, rule: unknown, sampleText: unknown, opts: unknown) => {
+    if (typeof sampleText !== 'string') throw new Error('rules: sample text must be a string')
+    const o = typeof opts === 'object' && opts !== null ? (opts as Record<string, unknown>) : {}
+    return ttsr.test(rule, sampleText, {
+      ...(typeof o.tool === 'string' ? { tool: o.tool as TtsrTestOptions['tool'] } : {}),
+      ...(typeof o.filePath === 'string' ? { filePath: o.filePath } : {})
+    })
+  })
 
   // ----- activity journal (PLAN C14) -----
   regHandle('journal:list', (_e, kind?: string | null) =>
