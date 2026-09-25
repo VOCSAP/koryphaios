@@ -11,12 +11,13 @@
     "claude-peers-desk": "./bin/launch.js"
   },
   "scripts": {
-    "build:hook": "bun build hooks/desk-backchannel-hook.ts --target=node --outfile=deck-plugin/hooks/desk-backchannel-hook.mjs && bun build hooks/approval-hook.ts --target=node --outfile=deck-plugin/hooks/approval-hook.mjs && bun build hooks/roadmap-guard-hook.ts --target=node --outfile=deck-plugin/hooks/roadmap-guard-hook.mjs",
+    "build:hook": "bun build hooks/desk-backchannel-hook.ts --target=node --outfile=deck-plugin/hooks/desk-backchannel-hook.mjs && bun build hooks/approval-hook.ts --target=node --outfile=deck-plugin/hooks/approval-hook.mjs && bun build hooks/roadmap-guard-hook.ts --target=node --outfile=deck-plugin/hooks/roadmap-guard-hook.mjs && bun build hooks/ttsr-hook.ts --target=node --outfile=deck-plugin/hooks/ttsr-hook.mjs",
+    "build:cli": "bun build cli/kory-rules.ts --target=node --outfile=deck-plugin/bin/kory-rules.mjs",
     "build:mcp": "bun build mcp/deck-control-mcp.ts --target=node --outfile=deck-plugin/mcp/deck-control-mcp.mjs && bun build mcp/demo-browser-mcp.ts --target=node --outfile=deck-plugin/mcp/demo-browser-mcp.mjs && bun build ../server-deck.ts --target=node --outfile=deck-plugin/mcp/server-deck.mjs",
     "build:design": "bun build design-client/deck-design.ts --target=browser --outfile=deck-plugin/design/deck-design.js",
-    "dev": "npm run build:hook && npm run build:mcp && npm run build:design && electron-vite dev",
+    "dev": "npm run build:hook && npm run build:cli && npm run build:mcp && npm run build:design && electron-vite dev",
     "start": "electron-vite preview",
-    "build": "npm run build:hook && npm run build:mcp && npm run build:design && electron-vite build && node scripts/write-build-info.js",
+    "build": "npm run build:hook && npm run build:cli && npm run build:mcp && npm run build:design && electron-vite build && node scripts/write-build-info.js",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:node && npm run typecheck:web",

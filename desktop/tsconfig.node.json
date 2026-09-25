@@ -41,6 +41,7 @@
     "../shared/approval-client.ts",
     "../shared/peer-cache.ts",
     "hooks/**/*.ts",
-    "mcp/**/*.ts"
+    "mcp/**/*.ts",
+    "cli/**/*.ts"
   ]
 }

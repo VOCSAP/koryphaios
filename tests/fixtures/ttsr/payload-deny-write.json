@@ -1,0 +1,9 @@
+{
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "cwd": "/project",
+  "tool_input": {
+    "file_path": "/project/src/a.ts",
+    "content": "const token = \"SECRET_TOKEN_abc123\";\n"
+  }
+}
