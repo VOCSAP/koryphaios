@@ -359,6 +359,12 @@ export interface AppConfig {
   leadPattern: string
   /** System notification when a session waits for the operator (PLAN C11). */
   notifyAttention: boolean
+  /**
+   * Launch Claude Code tiles with the Deck statusLine (`--settings`) that
+   * feeds the session list's model badge and context ring. It replaces Claude
+   * Code's footer hints in the tile; read at each spawn.
+   */
+  liveStatusLine: boolean
   /** Remote approvals: notify a phone when a session blocks, and accept the
    * answer back. Opt-in; a project can only restrict it, never enable it. */
   mobileApprovals: boolean

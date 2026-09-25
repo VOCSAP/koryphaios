@@ -17,13 +17,19 @@ export const STATUS_FILE_MAX_BYTES = 4096
 export const STATUS_MAX_CONTEXT_WINDOW = 10_000_000
 
 /**
- * Model names: Unicode letters/numbers plus a small punctuation set, so a
+ * Display names: Unicode letters/numbers plus a small punctuation set, so a
  * display name like "Opus 4.6 · 1M" passes. Everything else is refused:
  * control and format chars (bidi overrides, zero-width), quotes, backslash,
  * angle brackets, `$` and backtick. Rendered as React text; this is defence in
  * depth, not escaping.
  */
-const MODEL_RE = /^[\p{L}\p{N} ._()[\]:/+\u00B7-]{1,64}$/u
+const MODEL_NAME_RE = /^[\p{L}\p{N} ._()[\]:/+\u00B7-]{1,64}$/u
+
+/**
+ * Model ids: the same class without the space, plus `@` for Vertex ids
+ * (`claude-opus-4-1@20250805`), and 200 chars for Bedrock inference-profile ARNs.
+ */
+const MODEL_ID_RE = /^[\p{L}\p{N}._()[\]:/+@\u00B7-]{1,200}$/u
 
 /**
  * Same rule as shared/peer-cache.ts `sanitizeSessionId` and main's
@@ -42,12 +48,25 @@ export function statusFileName(token: string | undefined | null): string {
   return safe ? `desk-status-${safe}.json` : ''
 }
 
+/**
+ * `desk-statusline-cache-<sanitized token>.json`: the hook's cache of the
+ * operator's chained statusLine output, or '' when the token sanitizes to nothing.
+ */
+export function statusLineCacheFileName(token: string | undefined | null): string {
+  const safe = sanitizeStatusToken(token)
+  return safe ? `desk-statusline-cache-${safe}.json` : ''
+}
+
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
-function validModel(v: unknown): string | null {
-  return typeof v === 'string' && MODEL_RE.test(v) ? v : null
+function validModelName(v: unknown): string | null {
+  return typeof v === 'string' && MODEL_NAME_RE.test(v) ? v : null
+}
+
+function validModelId(v: unknown): string | null {
+  return typeof v === 'string' && MODEL_ID_RE.test(v) ? v : null
 }
 
 /** null unless a finite number; clamped to [0, 100]. */
@@ -69,8 +88,10 @@ function validSize(v: unknown): number | null {
 export function encodeStatusFromPayload(payload: unknown, now: number): string | null {
   if (!isRecord(payload) || !isRecord(payload.model)) return null
   if (!Number.isFinite(now) || now <= 0) return null
-  const modelId = validModel(payload.model.id)
-  const model = validModel(payload.model.display_name) ?? modelId
+  const modelId = validModelId(payload.model.id)
+  // The id stands in for an unusable display name only when it also passes the
+  // display rule; a Vertex/Bedrock id without a display name reports nothing.
+  const model = validModelName(payload.model.display_name) ?? validModelName(modelId)
   if (!modelId || !model) return null
   const ctx = isRecord(payload.context_window) ? payload.context_window : {}
   return JSON.stringify({
@@ -98,8 +119,8 @@ export function decodeStatusFile(raw: string): SessionLiveStatus | null {
     return null
   }
   if (!isRecord(parsed) || parsed.v !== STATUS_FILE_VERSION) return null
-  const model = validModel(parsed.model)
-  const modelId = validModel(parsed.model_id)
+  const model = validModelName(parsed.model)
+  const modelId = validModelId(parsed.model_id)
   const at = parsed.at
   if (!model || !modelId) return null
   if (typeof at !== 'number' || !Number.isFinite(at) || at <= 0) return null

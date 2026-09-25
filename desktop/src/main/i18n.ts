@@ -338,6 +338,9 @@ export const EN_DEFAULTS: Record<string, string> = {
   'attention.badge': 'needs you',
   'attention.dismiss': 'Dismiss (mark as no longer waiting)',
   'settings.notifyAttention': 'System notification when a session waits for your input',
+  'settings.liveStatusLine': 'Show model and context fill in the session list',
+  'settings.liveStatusLineHelp':
+    "Replaces Claude Code's footer hints (? for shortcuts, esc to interrupt) in each tile. Takes effect the next time a tile starts.",
   'settings.spawnMode': 'Supervisor agent spawns',
   'settings.spawnModeHandsFree': 'Hands-free',
   'settings.spawnModeHandsFreeHelp':

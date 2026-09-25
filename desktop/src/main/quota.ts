@@ -108,9 +108,16 @@ const DEFAULT_PERIODIC_MS = 15 * 60_000
  * Busy cues arriving this soon after the limit screen belong to the turn that
  * printed it: the renderer flushes a last spinner-row frame and title tick
  * after the turn's final content. A resumed turn keeps painting both, so a
- * real resume still ends the episode once this window has passed.
+ * real resume still ends the episode once this window has passed. Once
+ * 'resume-due' has fired for the episode the window shrinks to the two bounds
+ * below: a reset time already past fires it at once, and the injected turn may
+ * be shorter than the window.
  */
 const DEFAULT_BUSY_GRACE_MS = 1500
+/** autoResume writes 'continue' + Enter this long after 'resume-due'; no resumed turn can paint before. */
+const RESUME_KEYSTROKE_MS = 100
+/** Recorded turns paint their last spinner frame up to ~210 ms after their final content row. */
+const LIMIT_TAIL_MS = 300
 
 interface SessionState {
   buf: string
@@ -121,6 +128,8 @@ interface SessionState {
   timer: NodeJS.Timeout | null
   /** now() when the current episode opened. */
   limitedAt: number
+  /** now() when 'resume-due' last fired in the current episode, or null. */
+  resumeDueAt: number | null
   /**
    * A running turn ends the episode: the user resumed manually or the
    * injected "continue" was accepted. Title cue on: a limit screen only
@@ -159,7 +168,7 @@ export class QuotaDetector extends EventEmitter {
     if (st.limited) {
       // Detection stays quiet while limited so a redrawn limit screen cannot
       // re-trigger a fresh episode.
-      if (busy && this.now() - st.limitedAt >= this.busyGraceMs) this.endEpisode(id, st)
+      if (busy && this.busyEndsEpisode(st)) this.endEpisode(id, st)
       return
     }
 
@@ -174,6 +183,7 @@ export class QuotaDetector extends EventEmitter {
     st.limitedAt = this.now()
     st.resetAt = match.resetAt
     st.sent = false
+    st.resumeDueAt = null
     st.buf = '' // stale text must not re-trigger after the episode ends
     this.armTimer(id, st)
     this.emit('limit', { id, resetAt: st.resetAt } satisfies QuotaLimitEvent)
@@ -194,10 +204,20 @@ export class QuotaDetector extends EventEmitter {
   private state(id: string): SessionState {
     let st = this.sessions.get(id)
     if (!st) {
-      st = { buf: '', limited: false, resetAt: null, sent: false, timer: null, limitedAt: 0, busy: createBusyCue({ title: true }) }
+      st = { buf: '', limited: false, resetAt: null, sent: false, timer: null, limitedAt: 0, resumeDueAt: null, busy: createBusyCue({ title: true }) }
       this.sessions.set(id, st)
     }
     return st
+  }
+
+  private busyEndsEpisode(st: SessionState): boolean {
+    const now = this.now()
+    if (now - st.limitedAt >= this.busyGraceMs) return true
+    return (
+      st.resumeDueAt !== null &&
+      now >= st.resumeDueAt + RESUME_KEYSTROKE_MS &&
+      now - st.limitedAt >= LIMIT_TAIL_MS
+    )
   }
 
   private endEpisode(id: string, st: SessionState): void {
@@ -218,6 +238,7 @@ export class QuotaDetector extends EventEmitter {
         st.timer = null
         if (st.limited && !st.sent) {
           st.sent = true
+          st.resumeDueAt = this.now()
           this.emit('resume-due', { id } satisfies QuotaResumeDueEvent)
         }
       }, delay)
@@ -226,6 +247,7 @@ export class QuotaDetector extends EventEmitter {
       st.timer = setTimeout(() => {
         st.timer = null
         if (!st.limited) return
+        st.resumeDueAt = this.now()
         this.emit('resume-due', { id } satisfies QuotaResumeDueEvent)
         this.armTimer(id, st)
       }, this.periodicMs)

@@ -224,6 +224,8 @@
   "attention.badge": "t'attend",
   "attention.dismiss": "Ignorer (ne plus considérer comme en attente)",
   "settings.notifyAttention": "Notification système quand une session attend ta réponse",
+  "settings.liveStatusLine": "Afficher le modèle et le remplissage du contexte dans la liste des sessions",
+  "settings.liveStatusLineHelp": "Remplace les indications en pied de Claude Code (? for shortcuts, esc to interrupt) dans chaque tuile. Prend effet au prochain démarrage d'une tuile.",
   "settings.spawnMode": "Spawns d'agents du superviseur",
   "settings.spawnModeHandsFree": "Mains libres",
   "settings.spawnModeHandsFreeHelp": "Le superviseur lance les agents que tu lui demandes, sans confirmation de l'app. Chaque lancement reste visible (tuile + journal).",

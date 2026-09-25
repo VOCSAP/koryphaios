@@ -33,14 +33,38 @@ export function stripAnsi(s: string): string {
   return s.replace(ANSI_RE, '')
 }
 
+// Workspace trust prompt, both wordings. The current one ("Quick safety check")
+// is an unnumbered chooser whose words, and on ConPTY whose rows, are placed by
+// cursor moves the stripper deletes, hence `\s*` and no required line break;
+// both options are required, in order, so prose saying "I trust this folder"
+// does not raise.
+const TRUST_PATTERNS = [
+  /\bdo you trust the files\b/i,
+  /No,\s*exit\s*(?:\u276f\s*)?Yes,\s*I\s*trust\s*this\s*folder\b/i
+]
+
+// The welcome banner ("Claude Code v2.1.282"; cursor moves may eat the spaces)
+// that the CLI paints once the trust prompt is accepted. Accepting runs no turn,
+// so no busy cue ends that episode.
+const WELCOME_BANNER_RE = /Claude\s*Code\s*v\d+\.\d+\.\d+/
+
+/** The part of `text` after the first trust prompt in it, or null when it holds none. */
+function afterTrustPrompt(text: string): string | null {
+  for (const re of TRUST_PATTERNS) {
+    const m = re.exec(text)
+    if (m) return text.slice(m.index + m[0].length)
+  }
+  return null
+}
+
 // Waiting screens, deliberately narrow: ONLY strong screen-level cues, since
 // a running turn can stream prose/code containing question-like sentences.
-// The numbered-chooser selector ("❯ 1.") covers tool-permission prompts, plan
-// approvals and AskUserQuestion menus; the trust prompt has its own wording.
+// The numbered-chooser selector ("\u276f 1.") covers tool-permission prompts,
+// plan approvals and AskUserQuestion menus; the trust prompt has its own.
 // Free-text questions without a menu are NOT detected (accepted v1 limit).
 const WAITING_PATTERNS = [
-  /❯\s*1\./, // selected first option of a numbered chooser
-  /\bdo you trust the files\b/i
+  /\u276f\s*1\./, // selected first option of a numbered chooser
+  ...TRUST_PATTERNS
 ]
 
 // Exempts only the dev-channels startup warning's own two-cue screen (title and
@@ -53,7 +77,7 @@ const WAITING_PATTERNS = [
 // it.
 export function detectWaiting(text: string): boolean {
   if (detectChannelsWarning(text)) {
-    return /\bdo you trust the files\b/i.test(text)
+    return TRUST_PATTERNS.some((re) => re.test(text))
   }
   return WAITING_PATTERNS.some((re) => re.test(text))
 }
@@ -67,10 +91,10 @@ function stillWaiting(text: string): boolean {
   return WAITING_PATTERNS.some((re) => re.test(text))
 }
 
-// Load-bearing for one of four ways a raised flag clears: a busy cue,
-// purgeScreenMemory on the dev-channels ack, the operator dismissing it by
-// hand, or the raising pattern sliding out of this window once it fills.
-// The fourth path is real but bounded and rare; comparing against the current
+// Load-bearing for one of five ways a raised flag clears: a busy cue,
+// purgeScreenMemory on the dev-channels ack, the welcome screen following a
+// trust prompt, the operator dismissing it by hand, or the raising pattern
+// sliding out of this window once it fills. The last path is real but bounded and rare; comparing against the current
 // screen instead of a cumulative buffer would remove it but is out of scope
 // here.
 const MAX_BUF = 4096
@@ -106,19 +130,19 @@ export class AttentionDetector extends EventEmitter {
         this.emit('attention', { id, waiting: false } satisfies AttentionEvent)
         return
       }
-      // Fallback clearer (card 4f0143ff, scope b): some dismissals never
-      // produce a busy cue -- e.g. startup-ack.ts auto-Enters the
-      // dev-channels dialog, which just returns to an idle prompt, no turn
-      // ever runs. Re-scan the retained buffer with `stillWaiting`, NOT
-      // `detectWaiting` (review of 4f0143ff, team-lead's asymmetry finding):
-      // clearing must never go through the dev-channels exemption, only
-      // through positive evidence the raising pattern is gone. See
-      // `stillWaiting`'s own comment for the measured reverse-order bug this
-      // avoids.
+      // Fallback clearer: some dismissals never produce a busy cue (the
+      // dev-channels auto-ack, an accepted trust prompt), so the retained
+      // buffer is re-scanned with `stillWaiting`, never `detectWaiting`:
+      // clearing must never go through the dev-channels exemption.
       // Re-strip the accumulated buffer (not just `stripped`, the per-chunk
       // delta): closes the cross-chunk OSC fragmentation gap, see the
       // comment on `stripAnsi` above.
       st.buf = stripAnsi((st.buf + stripped).slice(-MAX_BUF))
+      // The welcome screen painted after the trust prompt means it was
+      // answered: drop the prompt's text but re-scan what followed it, so a
+      // repainted prompt or a chooser drawn after the banner holds the flag.
+      const afterTrust = afterTrustPrompt(st.buf)
+      if (afterTrust !== null && WELCOME_BANNER_RE.test(afterTrust)) st.buf = afterTrust
       if (!stillWaiting(st.buf)) {
         st.waiting = false
         st.buf = ''

@@ -192,6 +192,16 @@ export function SettingsView(): React.JSX.Element {
               <label className="field field-check">
                 <input
                   type="checkbox"
+                  checked={config.liveStatusLine !== false}
+                  onChange={(e) => set('liveStatusLine', e.target.checked)}
+                />
+                <span>{t('settings.liveStatusLine')}</span>
+              </label>
+              <small className="field-check-help">{t('settings.liveStatusLineHelp')}</small>
+
+              <label className="field field-check">
+                <input
+                  type="checkbox"
                   checked={config.mobileApprovals === true}
                   onChange={(e) => set('mobileApprovals', e.target.checked)}
                 />

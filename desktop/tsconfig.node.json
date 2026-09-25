@@ -42,6 +42,7 @@
     "../shared/peer-cache.ts",
     "../shared/logger.ts",
     "hooks/**/*.ts",
-    "mcp/**/*.ts"
+    "mcp/**/*.ts",
+    "scripts/win-verify/**/*.ts"
   ]
 }

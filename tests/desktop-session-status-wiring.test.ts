@@ -4,7 +4,7 @@
 // line, store.ts (electron) by a no-op persist; the `@shared/*` aliases, which
 // bun does not resolve from desktop/, are pointed at the real modules.
 import { test, expect, mock, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -19,6 +19,8 @@ interface FakeProc {
   file: string;
   args: string[];
   exit(code: number): void;
+  /** Deliver PTY output as node-pty's onData would. */
+  output(data: string): void;
 }
 const spawned: FakeProc[] = [];
 let nextPid = 40000;
@@ -26,12 +28,17 @@ let nextPid = 40000;
 mock.module("node-pty", () => ({
   spawn(file: string, args: string[]) {
     let onExit: ((e: { exitCode: number }) => void) | null = null;
+    let onData: ((d: string) => void) | null = null;
     const proc: FakeProc & Record<string, unknown> = {
       pid: nextPid++,
       file,
       args,
       exit: (code: number) => onExit?.({ exitCode: code }),
-      onData: () => ({ dispose() {} }),
+      output: (d: string) => onData?.(d),
+      onData: (cb: (d: string) => void) => {
+        onData = cb;
+        return { dispose() {} };
+      },
       onExit: (cb: (e: { exitCode: number }) => void) => {
         onExit = cb;
         return { dispose() {} };
@@ -51,7 +58,7 @@ mock.module(join(import.meta.dir, "..", "desktop", "src", "main", "store.ts"), (
 const { SessionService } = await import("../desktop/src/main/session-service.ts");
 const { encodeProjectDir } = await import("../desktop/src/main/session-transcript.ts");
 const { STATUS_FILE_VERSION } = await import("../desktop/src/shared/session-status.ts");
-const { STATUS_SILENCE_MS } = await import("../desktop/src/main/session-status-file.ts");
+const { STATUS_SILENCE_MS, STALE_STATUS_FILE_MS } = await import("../desktop/src/main/session-status-file.ts");
 const { onDeckError } = await import("../desktop/src/main/log.ts");
 
 const SETTINGS = "/deck/state/deck-statusline-abc.json";
@@ -64,12 +71,17 @@ afterEach(() => {
   spawned.length = 0;
 });
 
-function setup(opts: { sandboxPeersDir?: string } = {}) {
+function setup(opts: { sandboxPeersDir?: string; liveStatusLine?: boolean } = {}) {
   const home = mkdtempSync(join(tmpdir(), "kory-status-wiring-"));
   tmpDirs.push(home);
   const cwd = join(home, "proj");
   mkdirSync(cwd, { recursive: true });
-  const config = { projectDir: cwd, shell: "/bin/sh", interactiveShell: false } as never;
+  const config = {
+    projectDir: cwd,
+    shell: "/bin/sh",
+    interactiveShell: false,
+    ...(opts.liveStatusLine === undefined ? {} : { liveStatusLine: opts.liveStatusLine }),
+  } as never;
   const svc = new SessionService(() => config, () => ({}), "claude", () => "", home);
   services.push(svc);
   svc.setStatusLineSettingsProvider(() => SETTINGS);
@@ -157,14 +169,18 @@ test("the status file is removed when the tile is closed for good", async () => 
   const { svc, peersDir } = setup();
   const rt = svc.create({});
   writeStatus(peersDir, rt.id, "Opus", Date.now() + 1);
+  writeFileSync(join(peersDir, `desk-statusline-cache-${rt.id}.json`), "{}");
   spawned.at(-1)!.exit(0); // clean /exit auto-closes the tile
   expect(existsSync(join(peersDir, `desk-status-${rt.id}.json`)), "clean exit leaves no status file").toBe(false);
+  expect(existsSync(join(peersDir, `desk-statusline-cache-${rt.id}.json`)), "clean exit leaves no statusLine cache").toBe(false);
 
   const rt2 = svc.create({});
   writeStatus(peersDir, rt2.id, "Opus", Date.now() + 1);
   spawned.at(-1)!.exit(1); // crashed: stays as a dead tile
+  writeFileSync(join(peersDir, `desk-statusline-cache-${rt2.id}.json`), "{}");
   await svc.remove(rt2.id);
   expect(existsSync(join(peersDir, `desk-status-${rt2.id}.json`)), "remove leaves no status file").toBe(false);
+  expect(existsSync(join(peersDir, `desk-statusline-cache-${rt2.id}.json`)), "remove leaves no statusLine cache").toBe(false);
 });
 
 test("silent statusLine: reported once per spawn after the grace period, never once a report arrived", () => {
@@ -195,4 +211,95 @@ test("silent statusLine: reported once per spawn after the grace period, never o
   runtime.get(shell.id)!.spawnedAt = Date.now() - STATUS_SILENCE_MS - 1;
   poll(svc);
   expect(silent().filter((e) => e.includes('"shell"')), "a tile without --settings is never flagged").toEqual([]);
+});
+
+test("liveStatusLine off: no --settings on any spawn, and a status file found is never shown", () => {
+  const { svc, peersDir, home, cwd } = setup({ liveStatusLine: false });
+  const rt = svc.create({});
+  expect(lastLine(), "fresh spawn without the Deck statusLine").not.toContain("--settings");
+  svc.create({ supervisor: true } as never);
+  expect(lastLine(), "supervisor spawn without the Deck statusLine").not.toContain("--settings");
+  writeStatus(peersDir, rt.id, "Opus", Date.now() + 1);
+  poll(svc);
+  expect(svc.list().find((s) => s.id === rt.id)!.liveStatus, "no statusLine installed: liveStatus stays null").toBeNull();
+
+  const projDir = join(home, ".claude", "projects", encodeProjectDir(cwd));
+  mkdirSync(projDir, { recursive: true });
+  writeFileSync(join(projDir, `${rt.sessionId}.jsonl`), "{}\n");
+  spawned.find((p) => p.args.join(" ").includes(rt.sessionId))!.exit(1);
+  svc.restart(rt.id);
+  expect(lastLine(), "resume path taken").toContain("--fork-session");
+  expect(lastLine(), "resume spawn without the Deck statusLine").not.toContain("--settings");
+});
+
+test("liveStatusLine explicitly on behaves as the default", () => {
+  const { svc } = setup({ liveStatusLine: true });
+  svc.create({});
+  expect(lastLine(), "flag passed when the setting is on").toContain(`--settings "${SETTINGS}"`);
+});
+
+test("silent statusLine: no warning while the tile waits on the operator; clock restarts when it stops", () => {
+  const errors: string[] = [];
+  onDeckError((_scope, text) => errors.push(text));
+  const { svc } = setup();
+  const internals = svc as unknown as {
+    runtime: Map<string, { spawnedAt: number; liveStatusAttentionAt: number }>;
+    attentionDetector: { emit(ev: string, e: unknown): void };
+  };
+  const silent = (): string[] => errors.filter((e) => e.includes("no statusLine report") && e.includes('"trusting"'));
+
+  const rt = svc.create({ name: "trusting" });
+  internals.runtime.get(rt.id)!.spawnedAt = Date.now() - 3 * STATUS_SILENCE_MS;
+  const trustCapture: Array<{ data: string }> = JSON.parse(
+    readFileSync(join(import.meta.dir, "pty-harness", "fixtures", "trust-dialog-quick-safety-check.json"), "utf-8"),
+  );
+  const pty = spawned.at(-1)!;
+  for (const c of trustCapture.slice(0, 4)) pty.output(c.data);
+  expect(svc.list().find((s) => s.id === rt.id)!.needsAttention, "the real trust dialog bytes raise attention").toBe(true);
+  poll(svc);
+  expect(silent(), "trust dialog on screen: no warning though the spawn is old").toEqual([]);
+  internals.runtime.get(rt.id)!.liveStatusAttentionAt = Date.now() - 2 * STATUS_SILENCE_MS;
+  poll(svc);
+  expect(silent(), "dialog still on screen minutes later: no warning").toEqual([]);
+
+  internals.attentionDetector.emit("attention", { id: rt.id, waiting: false });
+  poll(svc);
+  expect(silent(), "attention just cleared: the 60 s clock restarts").toEqual([]);
+
+  internals.runtime.get(rt.id)!.liveStatusAttentionAt = Date.now() - STATUS_SILENCE_MS - 1;
+  poll(svc);
+  poll(svc);
+  expect(silent().length, "silent 60 s after the attention cleared: warned exactly once").toBe(1);
+
+  internals.attentionDetector.emit("attention", { id: rt.id, waiting: true });
+  internals.attentionDetector.emit("attention", { id: rt.id, waiting: false });
+  internals.runtime.get(rt.id)!.liveStatusAttentionAt = Date.now() - STATUS_SILENCE_MS - 1;
+  poll(svc);
+  expect(silent().length, "still at most once per spawn").toBe(1);
+});
+
+test("start and restore sweep old status leftovers of unknown tiles, keep fresh foreign and own files", () => {
+  const { svc, peersDir } = setup();
+  mkdirSync(peersDir, { recursive: true });
+  const old = (Date.now() - STALE_STATUS_FILE_MS - 60_000) / 1000;
+  const put = (name: string, mtimeS?: number): string => {
+    const p = join(peersDir, name);
+    writeFileSync(p, "{}");
+    if (mtimeS !== undefined) utimesSync(p, mtimeS, mtimeS);
+    return p;
+  };
+  const oldForeign = put("desk-status-gone-tile.json", old);
+  const oldForeignCache = put("desk-statusline-cache-gone-tile.json.77.tmp", old);
+  const freshForeign = put("desk-status-other-deck-tile.json");
+  svc.start();
+  expect(existsSync(oldForeign), "old foreign status file swept at start").toBe(false);
+  expect(existsSync(oldForeignCache), "old foreign cache temp swept at start").toBe(false);
+  expect(existsSync(freshForeign), "fresh foreign file (another live Deck) kept").toBe(true);
+
+  const restored = { ...svc.create({ name: "r" }), id: "restored-tile" };
+  const ownOld = put("desk-statusline-cache-restored-tile.json", old);
+  const oldForeign2 = put("desk-statusline-cache-gone-2.json", old);
+  svc.restoreFrom([restored as never]);
+  expect(existsSync(oldForeign2), "old foreign cache swept at restore").toBe(false);
+  expect(existsSync(ownOld), "a restored tile's own file is never swept").toBe(true);
 });

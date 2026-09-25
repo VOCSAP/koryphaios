@@ -259,3 +259,117 @@ test("busy text carried inside an OSC title FRAGMENTED across two chunks does no
 
   d.stop();
 });
+
+// A spinner-row frame as the CLI paints it, with a statusLine (no footer hint).
+const SPINNER_FRAME = "\x1b[22;1H✶\x1b[1CEnchanting…\x1b[2C(0s · thinking)";
+
+test("once resume-due fired, a busy frame inside the post-limit window ends the episode", async () => {
+  const t0 = new Date(2026, 0, 1, 9, 0).getTime();
+  let now = t0;
+  const d = new QuotaDetector(() => now);
+  const ev = collect(d);
+  const clears: string[] = [];
+  d.on("clear", (e: { id: string }) => clears.push(e.id));
+  d.feed("s1", "You've hit your limit · resets 9am (Europe/London)"); // reset already due
+  await waitUntil(() => ev.dues.length >= 1);
+  now = t0 + 100;
+  expect(ev.dues, "a reset time already past must fire resume-due at once").toEqual(["s1"]);
+  now = t0 + 300;
+  d.feed("s1", SPINNER_FRAME);
+  expect(clears, "the resumed turn's busy frame was swallowed by the post-limit window").toEqual(["s1"]);
+  d.stop();
+});
+
+test("without resume-due, a busy frame inside the post-limit window does not end the episode", () => {
+  const t0 = new Date(2026, 0, 1, 9, 0).getTime();
+  let now = t0;
+  const d = new QuotaDetector(() => now);
+  const ev = collect(d);
+  const clears: string[] = [];
+  d.on("clear", (e: { id: string }) => clears.push(e.id));
+  d.feed("s1", "You've hit your limit · resets 10pm (Europe/London)");
+  now = t0 + 300;
+  d.feed("s1", SPINNER_FRAME);
+  expect(clears, "a trailing frame of the limited turn ended the episode").toEqual([]);
+  expect(ev.dues).toEqual([]);
+  now = t0 + 1600;
+  d.feed("s1", SPINNER_FRAME);
+  expect(clears, "a busy frame after the window must end the episode").toEqual(["s1"]);
+  d.stop();
+});
+
+test("a new episode re-applies the post-limit window after a resumed one", async () => {
+  const t0 = new Date(2026, 0, 1, 9, 0).getTime();
+  let now = t0;
+  const d = new QuotaDetector(() => now);
+  const ev = collect(d);
+  const clears: string[] = [];
+  d.on("clear", (e: { id: string }) => clears.push(e.id));
+  d.feed("s1", "You've hit your limit · resets 9am (Europe/London)");
+  await waitUntil(() => ev.dues.length >= 1);
+  now = t0 + 300;
+  d.feed("s1", SPINNER_FRAME);
+  expect(clears).toEqual(["s1"]);
+  now = t0 + 10_000;
+  d.feed("s1", "You've hit your limit · resets 10pm (Europe/London)");
+  now = t0 + 10_200;
+  d.feed("s1", SPINNER_FRAME);
+  expect(clears, "the previous episode's resume leaked into the next one's window").toEqual(["s1"]);
+  d.stop();
+});
+
+test("a periodic resume-due also lifts the post-limit window", async () => {
+  const t0 = new Date(2026, 0, 1, 9, 0).getTime();
+  let now = t0;
+  const d = new QuotaDetector(() => now, 20);
+  const ev = collect(d);
+  const clears: string[] = [];
+  d.on("clear", (e: { id: string }) => clears.push(e.id));
+  d.feed("s1", "You've hit your limit");
+  await waitUntil(() => ev.dues.length >= 1);
+  now = t0 + 300;
+  d.feed("s1", SPINNER_FRAME);
+  expect(clears, "the retried turn's busy frame was swallowed by the post-limit window").toEqual(["s1"]);
+  d.stop();
+});
+
+test("an immediate resume-due does not let the limited turn's own trailing frame end the episode", async () => {
+  const t0 = new Date(2026, 0, 1, 9, 0).getTime();
+  let now = t0;
+  const d = new QuotaDetector(() => now);
+  const ev = collect(d);
+  const clears: string[] = [];
+  d.on("clear", (e: { id: string }) => clears.push(e.id));
+  d.feed("s1", "You've hit your limit · resets 9am (Europe/London)"); // reset already due
+  await waitUntil(() => ev.dues.length >= 1);
+  expect(ev.dues).toEqual(["s1"]);
+  now = t0 + 70;
+  d.feed("s1", SPINNER_FRAME);
+  expect(clears, "the limited turn's trailing spinner frame ended the episode").toEqual([]);
+  now = t0 + 200; // past the keystrokes, still inside the observed tail
+  d.feed("s1", SPINNER_FRAME);
+  expect(clears, "a late trailing frame of the limited turn ended the episode").toEqual([]);
+  now = t0 + 400;
+  d.feed("s1", SPINNER_FRAME);
+  expect(clears, "the resumed turn's busy frame must end the episode").toEqual(["s1"]);
+  d.stop();
+});
+
+test("after a late resume-due, a busy frame before the injected keystrokes does not end the episode", async () => {
+  const t0 = new Date(2026, 0, 1, 9, 0).getTime();
+  let now = t0;
+  const d = new QuotaDetector(() => now, 20);
+  const ev = collect(d);
+  const clears: string[] = [];
+  d.on("clear", (e: { id: string }) => clears.push(e.id));
+  d.feed("s1", "You've hit your limit");
+  now = t0 + 500; // the periodic resume-due fires at this clock
+  await waitUntil(() => ev.dues.length >= 1);
+  now = t0 + 550;
+  d.feed("s1", SPINNER_FRAME);
+  expect(clears, "a frame painted before 'continue' was typed ended the episode").toEqual([]);
+  now = t0 + 650;
+  d.feed("s1", SPINNER_FRAME);
+  expect(clears, "a busy frame after the keystrokes must end the episode").toEqual(["s1"]);
+  d.stop();
+});

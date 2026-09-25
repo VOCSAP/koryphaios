@@ -36,9 +36,17 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   `shared/session-status.ts`: no symlink, size cap, charset-restricted model
   strings, pct clamped) into `SessionRuntime.liveStatus`, rendered in the
   Sidebar row as a model badge and `ContextRing.tsx` (70/90 bands, dashed when
-  unknown). A `/model` switch shows within ~5 s + one poll. Cost: the
-  `--settings` statusLine replaces the operator's `refreshInterval`, so a
-  chained operator statusLine also runs every 5 s in every tile (4 s timeout).
+  unknown). A `/model` switch shows within ~5 s + one poll. The chained
+  output is cached per tile (`desk-statusline-cache-<token>.json`, keyed on the
+  payload minus `cost.total_*duration_ms`): the operator command re-runs only
+  on a key change or when its own `refreshInterval` elapses (any completed
+  run is cached whatever its exit code; a timed-out or unstartable command is
+  backed off for 30 s); an output over 32 KiB is printed but not cached, so
+  that command re-runs on every 5 s tick. Status/cache
+  leftovers of unknown tiles older than 24 h are swept at start/restore (the
+  peers dir is shared with other live Decks). Settings > General
+  `liveStatusLine` (default on) drops `--settings` at the next spawn, giving
+  the tile back Claude Code's footer hints.
 - **Sandbox mode (🏺 Docker rail view, SBX1–SBX5)**: per-project
   toggle that runs NEW sessions inside a persistent Docker/Podman container
   (`kory-sbx-<hash12>`, project bind-mounted at `/work`, `sleep infinity` +

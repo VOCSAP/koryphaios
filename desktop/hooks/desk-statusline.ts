@@ -6,17 +6,32 @@
 //  2. Keep the operator's own status line: run the statusLine command from the
 //     GLOBAL user settings only, with the same stdin, and print its stdout
 //     unchanged. Project/local settings come from a possibly cloned repo and
-//     are never executed from here.
+//     are never executed from here. The Deck refreshes every few seconds, so
+//     the output is cached per tile and the command re-runs only when the
+//     payload changes or the operator's own refreshInterval elapses.
 // Must run under bun; imports resolve relative to this file regardless of the
 // session's cwd. Failures never reach the status bar: they go to the rotated
 // statusline.log in the claude-peers log dir.
 
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  closeSync,
+  constants,
+  existsSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, win32 } from "node:path";
 import { coreLogDir, createLogger, type Logger } from "../../shared/logger.ts";
-import { encodeStatusFromPayload, statusFileName } from "../src/shared/session-status.ts";
+import { encodeStatusFromPayload, statusFileName, statusLineCacheFileName } from "../src/shared/session-status.ts";
 
 /** Set for the chained operator command, so a loop back into this script is a no-op. */
 export const CHAINED_ENV = "KORY_STATUSLINE_CHAINED";
@@ -42,17 +57,42 @@ export function globalSettingsPath(
  * absent, not `type: "command"`, or not a non-empty string.
  */
 export function pickGlobalStatusLineCommand(settingsJson: unknown): string | null {
+  return pickGlobalStatusLine(settingsJson)?.command ?? null;
+}
+
+/** The operator's statusLine: its command, and its own refresh period in ms (null = events only). */
+export interface OperatorStatusLine {
+  command: string;
+  refreshMs: number | null;
+}
+
+/**
+ * The operator's statusLine from parsed GLOBAL settings (same acceptance as
+ * pickGlobalStatusLineCommand). `refreshInterval` counts only as a finite
+ * number of seconds >= 1, the documented minimum; anything else means none.
+ */
+export function pickGlobalStatusLine(settingsJson: unknown): OperatorStatusLine | null {
   if (typeof settingsJson !== "object" || settingsJson === null) return null;
   const sl = (settingsJson as Record<string, unknown>).statusLine;
   if (typeof sl !== "object" || sl === null) return null;
-  const { type, command } = sl as Record<string, unknown>;
+  const { type, command, refreshInterval } = sl as Record<string, unknown>;
   if (type !== "command" || typeof command !== "string" || !command.trim()) return null;
-  return command;
+  const refreshMs =
+    typeof refreshInterval === "number" && Number.isFinite(refreshInterval) && refreshInterval >= 1
+      ? refreshInterval * 1000
+      : null;
+  return { command, refreshMs };
 }
 
 /** Where the report for `token` is written, or null when the token sanitizes to nothing. */
 export function statusFileTarget(token: string | undefined, home: string = homedir()): string | null {
   const name = statusFileName(token);
+  return name ? join(home, ".claude", "peers", name) : null;
+}
+
+/** Where the chained-output cache for `token` lives, next to its status file; null without a token. */
+export function chainCacheTarget(token: string | undefined, home: string = homedir()): string | null {
+  const name = statusLineCacheFileName(token);
   return name ? join(home, ".claude", "peers", name) : null;
 }
 
@@ -97,7 +137,7 @@ function reportStatus(raw: string, log: Logger): void {
   }
 }
 
-function readGlobalCommand(log: Logger): string | null {
+function readGlobalStatusLine(log: Logger): OperatorStatusLine | null {
   const file = globalSettingsPath();
   let text: string;
   try {
@@ -107,11 +147,175 @@ function readGlobalCommand(log: Logger): string | null {
     return null;
   }
   try {
-    return pickGlobalStatusLineCommand(JSON.parse(text));
+    // Windows editors (Notepad, PowerShell 5.1 Set-Content) prefix a UTF-8 BOM that JSON.parse rejects.
+    return pickGlobalStatusLine(JSON.parse(text.replace(/^\uFEFF/, "")));
   } catch (e) {
     log.warn(`${file} is not valid JSON, operator statusLine not chained`, e);
     return null;
   }
+}
+
+// ----- chained-output cache -----
+
+export const CHAIN_CACHE_VERSION = 1;
+
+/** Largest cached operator output; a bigger one is printed but not cached. */
+export const CHAIN_CACHE_MAX_OUT = 32 * 1024;
+
+/** Largest cache file read back (base64 output plus the envelope). */
+export const CHAIN_CACHE_MAX_BYTES = 64 * 1024;
+
+/**
+ * Payload fields left out of the cache key. Per the statusLine field list,
+ * these two are the only wall-clock counters: they grow on every refresh tick
+ * with no event behind them, while every other field changes only on an event.
+ */
+export const VOLATILE_COST_FIELDS = ["total_duration_ms", "total_api_duration_ms"] as const;
+
+/**
+ * Cache key: the operator command plus the payload without its volatile
+ * fields. A payload that is not a JSON object is keyed on its raw text.
+ */
+export function chainCacheKey(command: string, raw: string): string {
+  let payload: unknown = raw;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+      const copy = { ...(parsed as Record<string, unknown>) };
+      const cost = copy.cost;
+      if (typeof cost === "object" && cost !== null && !Array.isArray(cost)) {
+        const c = { ...(cost as Record<string, unknown>) };
+        for (const f of VOLATILE_COST_FIELDS) delete c[f];
+        copy.cost = c;
+      }
+      payload = copy;
+    }
+  } catch {
+    // Not JSON: keyed on the raw text below; reportStatus already logged it.
+  }
+  return createHash("sha256").update(JSON.stringify({ command, payload })).digest("hex");
+}
+
+/**
+ * What a cache entry holds: "output" serves `out` while the key holds;
+ * "backoff" (timed out or failed to start) serves nothing until
+ * CHAIN_BACKOFF_MS has passed; "marker" serves nothing and always re-runs, it
+ * only carries `gitBashWarned` when the output was too large to cache.
+ */
+export type ChainCacheState = "output" | "backoff" | "marker";
+
+export interface ChainCache {
+  key: string;
+  /** Epoch ms the cached run started. */
+  at: number;
+  state: ChainCacheState;
+  out: Buffer;
+  /** Exit code of the run behind an "output" entry; null otherwise. */
+  exitCode: number | null;
+  /** CLAUDE_CODE_GIT_BASH_PATH value already reported as unusable, so it is logged once. */
+  gitBashWarned: string | null;
+}
+
+/**
+ * A timed-out or unstartable command is retried only after this, whatever the
+ * payload: relaunching it on every 5 s tick would keep one 4 s run per tile.
+ */
+export const CHAIN_BACKOFF_MS = 30_000;
+
+export function encodeChainCache(c: ChainCache): string {
+  return JSON.stringify({
+    v: CHAIN_CACHE_VERSION,
+    key: c.key,
+    at: c.at,
+    state: c.state,
+    out: c.out.toString("base64"),
+    ...(c.exitCode !== null ? { exitCode: c.exitCode } : {}),
+    ...(c.gitBashWarned !== null ? { gitBashWarned: c.gitBashWarned } : {}),
+  });
+}
+
+const HEX64 = /^[0-9a-f]{64}$/;
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/**
+ * Strict decode: the file sits in a shared directory any local process can
+ * write, so anything off-shape is refused (the command then runs) rather than
+ * repaired.
+ */
+export function decodeChainCache(text: string): ChainCache | null {
+  if (text.length === 0 || text.length > CHAIN_CACHE_MAX_BYTES) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // Refused like any other off-shape content; the caller logs the refusal.
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  const { v, key, at, state, out, exitCode, gitBashWarned } = parsed as Record<string, unknown>;
+  if (v !== CHAIN_CACHE_VERSION) return null;
+  if (typeof key !== "string" || !HEX64.test(key)) return null;
+  if (typeof at !== "number" || !Number.isFinite(at) || at <= 0) return null;
+  if (state !== "output" && state !== "backoff" && state !== "marker") return null;
+  if (typeof out !== "string" || out.length % 4 !== 0 || !BASE64.test(out)) return null;
+  const buf = Buffer.from(out, "base64");
+  if (buf.length > CHAIN_CACHE_MAX_OUT) return null;
+  if (state !== "output" && buf.length > 0) return null;
+  if (exitCode !== undefined && (state !== "output" || !Number.isSafeInteger(exitCode))) return null;
+  if (gitBashWarned !== undefined && (typeof gitBashWarned !== "string" || gitBashWarned.length > 4096)) return null;
+  return {
+    key,
+    at,
+    state,
+    out: buf,
+    exitCode: (exitCode as number | undefined) ?? null,
+    gitBashWarned: gitBashWarned ?? null,
+  };
+}
+
+export type ChainCacheRead =
+  | { kind: "absent" }
+  | { kind: "ok"; cache: ChainCache }
+  | { kind: "refused"; reason: string }
+  | { kind: "error"; error: unknown };
+
+/** Symlinks refused (O_NOFOLLOW, POSIX), a FIFO cannot block (O_NONBLOCK); both 0 on win32. */
+const CACHE_READ_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+
+/** Read and decode the cache file. Never throws. */
+export function readChainCache(path: string): ChainCacheRead {
+  let fd: number | null = null;
+  try {
+    fd = openSync(path, CACHE_READ_FLAGS);
+    const st = fstatSync(fd);
+    if (!st.isFile()) return { kind: "refused", reason: "not a regular file" };
+    if (st.size > CHAIN_CACHE_MAX_BYTES) return { kind: "refused", reason: `over ${CHAIN_CACHE_MAX_BYTES} bytes` };
+    const buf = Buffer.alloc(st.size);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    const cache = decodeChainCache(buf.subarray(0, n).toString("utf-8"));
+    return cache ? { kind: "ok", cache } : { kind: "refused", reason: "malformed content" };
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException | null)?.code;
+    if (code === "ENOENT") return { kind: "absent" };
+    if (code === "ELOOP") return { kind: "refused", reason: "symlink" };
+    return { kind: "error", error: e };
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
+/**
+ * Whether the operator command must run instead of serving `cache`: no cache,
+ * a marker-only entry, a cache from the future (clock moved back), a backoff
+ * that has elapsed, and for an output entry a different key or the operator's
+ * own refreshInterval elapsed since the cached run.
+ */
+export function shouldRunChained(cache: ChainCache | null, key: string, now: number, refreshMs: number | null): boolean {
+  if (!cache || cache.state === "marker") return true;
+  if (!Number.isFinite(now) || now < cache.at) return true;
+  if (cache.state === "backoff") return now - cache.at >= CHAIN_BACKOFF_MS;
+  if (cache.key !== key) return true;
+  return refreshMs !== null && now - cache.at >= refreshMs;
 }
 
 /** Grace after the kill before the pipes are abandoned (a child that left the group). */
@@ -121,6 +325,8 @@ const KILL_GRACE_MS = 500;
 export interface ChainShell {
   file: string;
   args: string[];
+  /** Set when CLAUDE_CODE_GIT_BASH_PATH names a file that is missing or the WSL launcher. */
+  ignoredGitBash?: string;
 }
 
 /** Env var Claude Code reads for the Git Bash location on Windows (setup docs). */
@@ -142,14 +348,22 @@ function winPathVar(env: Record<string, string | undefined>): string {
   return (key && env[key]) || "";
 }
 
-/** Git Bash from `git.exe` on PATH: <Git>\cmd\git.exe or <Git>\bin\git.exe => <Git>\bin\bash.exe. */
+/**
+ * Git Bash from `git.exe` on PATH: <Git>\cmd\git.exe or <Git>\bin\git.exe
+ * => <Git>\bin\bash.exe; a Scoop shim <scoop>\shims\git.exe =>
+ * <scoop>\apps\git\current\bin\bash.exe. Any other dir holding a git.exe
+ * says nothing about where bash.exe is.
+ */
 function gitBashFromPath(env: Record<string, string | undefined>, exists: (p: string) => boolean): string | null {
   for (const raw of winPathVar(env).split(";")) {
     const dir = raw.trim().replace(/^"(.*)"$/, "$1");
     if (!dir || !exists(win32.join(dir, "git.exe"))) continue;
     const leaf = win32.basename(dir).toLowerCase();
-    if (leaf !== "cmd" && leaf !== "bin") continue;
-    const bash = win32.join(win32.dirname(dir), "bin", "bash.exe");
+    const root = win32.dirname(dir);
+    let bash: string;
+    if (leaf === "cmd" || leaf === "bin") bash = win32.join(root, "bin", "bash.exe");
+    else if (leaf === "shims") bash = win32.join(root, "apps", "git", "current", "bin", "bash.exe");
+    else continue;
     if (isUsableGitBash(bash, exists)) return bash;
   }
   return null;
@@ -169,10 +383,11 @@ export function chainShellFor(
 ): ChainShell {
   if (platform !== "win32") return { file: "/bin/sh", args: ["-c", command] };
   const configured = env[GIT_BASH_ENV]?.trim();
-  const bash =
-    (configured && isUsableGitBash(configured, exists) ? configured : null) ?? gitBashFromPath(env, exists);
-  if (bash) return { file: bash, args: ["-c", command] };
-  return { file: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-Command", command] };
+  const configuredOk = !!configured && isUsableGitBash(configured, exists);
+  const ignored = configured && !configuredOk ? { ignoredGitBash: configured } : {};
+  const bash = (configuredOk ? configured : null) ?? gitBashFromPath(env, exists);
+  if (bash) return { file: bash, args: ["-c", command], ...ignored };
+  return { file: "powershell.exe", args: ["-NoProfile", "-NonInteractive", "-Command", command], ...ignored };
 }
 
 /**
@@ -212,20 +427,27 @@ export function installCancelHandlers(log: Logger): void {
   }
 }
 
-/** Run the operator's command with `raw` on stdin; resolves with its stdout (possibly partial). */
-function runChained(command: string, raw: string, log: Logger): Promise<Buffer> {
+export interface ChainedRun {
+  /** Stdout, possibly partial. */
+  out: Buffer;
+  /** Exit code when the command ended on its own; null when killed by the timeout or never started. */
+  exitCode: number | null;
+}
+
+/** Run the operator's command with `raw` on stdin. */
+function runChained(shell: ChainShell, raw: string, log: Logger): Promise<ChainedRun> {
   return new Promise((resolve) => {
     const out: Buffer[] = [];
     let settled = false;
+    let exitCode: number | null = null;
     const finish = (): void => {
       if (settled) return;
       settled = true;
       inFlight = null;
       clearTimeout(killTimer);
       clearTimeout(abandonTimer);
-      resolve(Buffer.concat(out));
+      resolve({ out: Buffer.concat(out), exitCode });
     };
-    const shell = chainShellFor(process.platform, process.env, existsSync, command);
     const child = spawn(shell.file, shell.args, {
       detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "ignore"],
@@ -247,23 +469,88 @@ function runChained(command: string, raw: string, log: Logger): Promise<Buffer> 
       log.warn(`operator statusLine failed to start (${shell.file})`, e);
       finish();
     });
-    child.on("close", finish);
+    child.on("close", (code) => {
+      if (abandonTimer === undefined) exitCode = code;
+      finish();
+    });
     child.stdin?.on("error", (e) => log.warn("operator statusLine did not take its stdin", e));
     child.stdin?.end(raw);
   });
 }
 
-async function chainOperatorStatusLine(raw: string, log: Logger): Promise<void> {
-  const command = readGlobalCommand(log);
-  if (!command) return;
-  let out: Buffer;
-  try {
-    out = await runChained(command, raw, log);
-  } catch (e) {
-    log.warn("operator statusLine could not be spawned", e);
+function loadChainCache(path: string | null, log: Logger): ChainCache | null {
+  if (!path) return null;
+  const res = readChainCache(path);
+  if (res.kind === "ok") return res.cache;
+  if (res.kind === "refused") log.warn(`statusLine cache ${path} refused (${res.reason}), operator command re-run`);
+  if (res.kind === "error") log.warn(`failed to read the statusLine cache ${path}, operator command re-run`, res.error);
+  return null;
+}
+
+/** Everything chainOperatorStatusLine reads from its environment, injectable for tests. */
+export interface ChainDeps {
+  platform: NodeJS.Platform;
+  env: Record<string, string | undefined>;
+  home: string;
+  now: () => number;
+  exists: (p: string) => boolean;
+  run: (shell: ChainShell, raw: string, log: Logger) => Promise<ChainedRun>;
+  write: (chunk: Buffer) => void;
+}
+
+const defaultChainDeps = (): ChainDeps => ({
+  platform: process.platform,
+  env: process.env,
+  home: homedir(),
+  now: Date.now,
+  exists: existsSync,
+  run: runChained,
+  write: (chunk) => {
+    process.stdout.write(chunk);
+  },
+});
+
+/** The cache entry a finished run leaves behind. */
+export function chainCacheAfterRun(key: string, at: number, run: ChainedRun, gitBashWarned: string | null): ChainCache {
+  if (run.exitCode === null) return { key, at, state: "backoff", out: Buffer.alloc(0), exitCode: null, gitBashWarned };
+  if (run.out.length > CHAIN_CACHE_MAX_OUT) {
+    return { key, at, state: "marker", out: Buffer.alloc(0), exitCode: null, gitBashWarned };
+  }
+  return { key, at, state: "output", out: run.out, exitCode: run.exitCode, gitBashWarned };
+}
+
+export async function chainOperatorStatusLine(
+  op: OperatorStatusLine,
+  raw: string,
+  log: Logger,
+  deps: ChainDeps = defaultChainDeps(),
+): Promise<void> {
+  const cachePath = chainCacheTarget(deps.env.CLAUDE_PEERS_DESK_SESSION, deps.home);
+  const key = chainCacheKey(op.command, raw);
+  const now = deps.now();
+  const cached = loadChainCache(cachePath, log);
+  if (cached && !shouldRunChained(cached, key, now, op.refreshMs)) {
+    if (cached.out.length > 0) deps.write(cached.out);
     return;
   }
-  if (out.length > 0) process.stdout.write(out);
+  const shell = chainShellFor(deps.platform, deps.env, deps.exists, op.command);
+  if (shell.ignoredGitBash !== undefined && cached?.gitBashWarned !== shell.ignoredGitBash) {
+    log.warn(`${GIT_BASH_ENV}=${shell.ignoredGitBash} is missing or the WSL launcher; running with ${shell.file}`);
+  }
+  let run: ChainedRun;
+  try {
+    run = await deps.run(shell, raw, log);
+  } catch (e) {
+    log.warn("operator statusLine could not be spawned", e);
+    run = { out: Buffer.alloc(0), exitCode: null };
+  }
+  if (run.out.length > 0) deps.write(run.out);
+  if (!cachePath) return;
+  try {
+    writeStatusFile(cachePath, encodeChainCache(chainCacheAfterRun(key, now, run, shell.ignoredGitBash ?? null)));
+  } catch (e) {
+    log.warn(`failed to write the statusLine cache ${cachePath}`, e);
+  }
 }
 
 async function main(): Promise<void> {
@@ -277,7 +564,8 @@ async function main(): Promise<void> {
     log.error("failed to read the statusLine payload from stdin", e);
   }
   reportStatus(raw, log);
-  await chainOperatorStatusLine(raw, log);
+  const op = readGlobalStatusLine(log);
+  if (op) await chainOperatorStatusLine(op, raw, log);
 }
 
 // Only run when executed directly, so tests can import the pure helpers.

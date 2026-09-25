@@ -1,5 +1,5 @@
 import { test, expect, afterEach } from "bun:test";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, symlinkSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, symlinkSync, readFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -11,11 +11,15 @@ import {
   sameLiveStatus,
   sanitizeStatusToken,
   statusFileName,
+  statusLineCacheFileName,
 } from "../desktop/src/shared/session-status.ts";
 import {
+  STALE_STATUS_FILE_MS,
   STATUS_SILENCE_MS,
   clearStatusFile,
+  clearStatusLineCache,
   pollStatusFile,
+  sweepStaleStatusFiles,
   statusSilenceOverdue,
   readStatusFile,
   type StatusFileRead,
@@ -138,10 +142,12 @@ test("decoder: invalid size degrades to null", () => {
 });
 
 test("decoder: model / model_id outside the charset are rejected, never sanitized", () => {
-  for (const bad of ["Opus;rm -rf ~", "$(id)", "`x`", "a\"b", "<img>", "x".repeat(65), "", "Opus\n"]) {
+  for (const bad of ["Opus;rm -rf ~", "$(id)", "`x`", "a\"b", "<img>", "", "Opus\n"]) {
     expect(decodeStatusFile(file({ model: bad })), `model ${JSON.stringify(bad)} rejects the whole report`).toBeNull();
     expect(decodeStatusFile(file({ model_id: bad })), `model_id ${JSON.stringify(bad)} rejects the whole report`).toBeNull();
   }
+  expect(decodeStatusFile(file({ model: "x".repeat(65) })), "65-char display name rejected").toBeNull();
+  expect(decodeStatusFile(file({ model_id: "x".repeat(201) })), "201-char model id rejected").toBeNull();
   expect(decodeStatusFile(file({ model: 42 })), "non-string model rejected").toBeNull();
   expect(decodeStatusFile(file({ model: "x".repeat(64) }))?.model, "64-char model accepted").toBe("x".repeat(64));
 });
@@ -170,6 +176,38 @@ test("model charset: Unicode letters/numbers and the middle dot pass; hostile cl
     for (const bad of values) {
       expect(decodeStatusFile(file({ model: bad })), `${cls}: ${JSON.stringify(bad)} rejected`).toBeNull();
     }
+  }
+});
+
+test("model id rule: Vertex and Bedrock ids pass, hostile classes and the space are refused", () => {
+  const vertex = "claude-opus-4-1@20250805";
+  const bedrock =
+    "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0";
+  const bedrockApp =
+    "arn:aws:bedrock:eu-west-3:123456789012:application-inference-profile/" + "a1b2c3d4e5f6".repeat(10);
+  expect(bedrockApp.length > 64 && bedrockApp.length <= 200, "fixture exceeds the display cap").toBe(true);
+  for (const id of [vertex, bedrock, bedrockApp, "x".repeat(200)]) {
+    expect(decodeStatusFile(file({ model_id: id }))?.modelId, `${id.slice(0, 40)}... accepted as model_id`).toBe(id);
+  }
+  expect(
+    decodeStatusFile(encodeStatusFromPayload({ model: { id: vertex, display_name: "Opus 4.1" } }, 1000)!)?.modelId,
+    "writer keeps a Vertex id",
+  ).toBe(vertex);
+  expect(
+    decodeStatusFile(encodeStatusFromPayload({ model: { id: bedrock, display_name: "Sonnet 4.5" } }, 1000)!)?.modelId,
+    "writer keeps a Bedrock ARN",
+  ).toBe(bedrock);
+  expect(decodeStatusFile(file({ model: vertex })), "`@` stays refused in a display name").toBeNull();
+  expect(
+    encodeStatusFromPayload({ model: { id: vertex } }, 1000),
+    "an id the display rule refuses never stands in for the display name",
+  ).toBeNull();
+  const hostile = [
+    "claude\u0000", "claude\u202Eopus", "claude\u200Bopus", "claude'opus", 'claude"opus', "claude\\opus",
+    "<claude>", "$claude", "claude`", "claude opus", "claude\topus",
+  ];
+  for (const bad of hostile) {
+    expect(decodeStatusFile(file({ model_id: bad })), `model_id ${JSON.stringify(bad)} rejected`).toBeNull();
   }
 });
 
@@ -279,7 +317,16 @@ test("pollStatusFile drops a report written before this spawn", () => {
 });
 
 test("statusSilenceOverdue: once, for a live statusLine tile with no report past the grace period", () => {
-  const base = { alive: true, enabled: true, spawnedAt: 1_000_000, now: 1_000_000 + STATUS_SILENCE_MS, reported: false, warned: false };
+  const base = {
+    alive: true,
+    enabled: true,
+    spawnedAt: 1_000_000,
+    now: 1_000_000 + STATUS_SILENCE_MS,
+    reported: false,
+    warned: false,
+    needsAttention: false,
+    lastAttentionAt: 0,
+  };
   expect(statusSilenceOverdue(base), "silent past the grace period").toBe(true);
   expect(statusSilenceOverdue({ ...base, now: base.now - 1 }), "still inside the grace period").toBe(false);
   expect(statusSilenceOverdue({ ...base, reported: true }), "a report arrived").toBe(false);
@@ -291,6 +338,28 @@ test("statusSilenceOverdue: once, for a live statusLine tile with no report past
   expect(statusSilenceOverdue({ ...base, now: Number.NaN }), "NaN now").toBe(false);
 });
 
+test("statusSilenceOverdue: silent while the tile waits on the operator, clock restarts when it stops", () => {
+  const base = {
+    alive: true,
+    enabled: true,
+    spawnedAt: 1_000_000,
+    now: 1_000_000 + 5 * STATUS_SILENCE_MS,
+    reported: false,
+    warned: false,
+    needsAttention: true,
+    lastAttentionAt: 1_000_000 + 5 * STATUS_SILENCE_MS,
+  };
+  expect(statusSilenceOverdue(base), "trust dialog on screen: no statusLine expected").toBe(false);
+  expect(
+    statusSilenceOverdue({ ...base, lastAttentionAt: base.spawnedAt + 1 }),
+    "still waiting long after the wait began: no warning",
+  ).toBe(false);
+  const cleared = { ...base, needsAttention: false };
+  expect(statusSilenceOverdue({ ...cleared, now: base.lastAttentionAt + STATUS_SILENCE_MS - 1 }), "inside the restarted clock").toBe(false);
+  expect(statusSilenceOverdue({ ...cleared, now: base.lastAttentionAt + STATUS_SILENCE_MS }), "restarted clock elapsed").toBe(true);
+  expect(statusSilenceOverdue({ ...cleared, lastAttentionAt: Number.NaN }), "NaN attention stamp falls back to the spawn").toBe(true);
+});
+
 test("clearStatusFile removes the file and tolerates its absence", () => {
   const dir = tmpDir();
   const p = join(dir, "desk-status-tile-1.json");
@@ -298,6 +367,64 @@ test("clearStatusFile removes the file and tolerates its absence", () => {
   expect(clearStatusFile("tile-1", dir), "clearing an existing file reports no error").toBeNull();
   expect(existsSync(p), "stale status file removed before respawn").toBe(false);
   expect(clearStatusFile("tile-1", dir), "clearing a missing file reports no error").toBeNull();
+});
+
+test("clearStatusLineCache removes the tile's cache file and tolerates its absence", () => {
+  const dir = tmpDir();
+  const p = join(dir, statusLineCacheFileName("tile-1"));
+  expect(p.endsWith("desk-statusline-cache-tile-1.json"), "cache file named after the token").toBe(true);
+  writeFileSync(p, "{}");
+  expect(clearStatusLineCache("tile-1", dir), "no error").toBeNull();
+  expect(existsSync(p), "cache removed").toBe(false);
+  expect(clearStatusLineCache("tile-1", dir), "missing cache: no error").toBeNull();
+});
+
+test("sweepStaleStatusFiles: only old files of unknown tiles go; fresh foreign and own files stay", () => {
+  const dir = tmpDir();
+  const now = Date.now();
+  const old = (now - STALE_STATUS_FILE_MS - 60_000) / 1000;
+  const fresh = (now - STALE_STATUS_FILE_MS + 60_000) / 1000;
+  const put = (name: string, mtimeS: number): string => {
+    const p = join(dir, name);
+    writeFileSync(p, "{}");
+    utimesSync(p, mtimeS, mtimeS);
+    return name;
+  };
+  const kept = [
+    put("desk-status-foreign-fresh.json", fresh),
+    put("desk-statusline-cache-foreign-fresh.json", fresh),
+    put("desk-status-own.json", old),
+    put("desk-statusline-cache-own.json", old),
+    put("desk-status-own.json.4242.tmp", old),
+    put("desk-session-foreign-old.json", old),
+    put("desk-status-foreign.json.bak", old),
+  ];
+  mkdirSync(join(dir, "desk-status-dir.json"));
+  utimesSync(join(dir, "desk-status-dir.json"), old, old);
+  const removed = [
+    put("desk-status-foreign-old.json", old),
+    put("desk-statusline-cache-foreign-old.json", old),
+    put("desk-status-foreign-old.json.123.tmp", old),
+    put("desk-statusline-cache-foreign-old.json.9.tmp", old),
+  ];
+  const res = sweepStaleStatusFiles(dir, ["own"], now);
+  expect(res.errors, "no failure").toEqual([]);
+  expect(res.removed.sort(), "exactly the old foreign status/cache files and their temp leftovers").toEqual([...removed].sort());
+  for (const name of kept) expect(existsSync(join(dir, name)), `${name} kept`).toBe(true);
+  expect(existsSync(join(dir, "desk-status-dir.json")), "a directory is never removed").toBe(true);
+  for (const name of removed) expect(existsSync(join(dir, name)), `${name} removed`).toBe(false);
+});
+
+test("sweepStaleStatusFiles: known ids match through the token sanitizer; missing dir and bad clock are no-ops", () => {
+  const dir = tmpDir();
+  const old = (Date.now() - 2 * STALE_STATUS_FILE_MS) / 1000;
+  const name = statusFileName("a/b");
+  writeFileSync(join(dir, name), "{}");
+  utimesSync(join(dir, name), old, old);
+  expect(sweepStaleStatusFiles(dir, ["a/b"], Date.now()).removed, "raw def id sanitized before matching").toEqual([]);
+  expect(sweepStaleStatusFiles(join(dir, "missing"), [], Date.now()), "missing peers dir").toEqual({ removed: [], errors: [] });
+  expect(sweepStaleStatusFiles(dir, [], Number.NaN).removed, "NaN clock sweeps nothing").toEqual([]);
+  expect(existsSync(join(dir, name)), "file survived the no-op calls").toBe(true);
 });
 
 // ----- --settings file -----

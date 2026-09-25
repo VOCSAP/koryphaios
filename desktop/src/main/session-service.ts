@@ -41,10 +41,12 @@ import {
 import { clearDeskSessionId, readDeskSessionId } from './desk-session'
 import {
   clearStatusFile,
+  clearStatusLineCache,
   pollStatusFile,
   readStatusFile,
   statusSilenceMessage,
-  statusSilenceOverdue
+  statusSilenceOverdue,
+  sweepStaleStatusFiles
 } from './session-status-file'
 import { sameLiveStatus } from '@shared/session-status'
 import { ScreenGuard } from './screen-model'
@@ -107,6 +109,8 @@ interface RuntimeState {
   liveStatusSeen: boolean
   /** The "no report since spawn" warning was already raised for this spawn. */
   liveStatusSilenceWarned: boolean
+  /** Epoch ms of the last needsAttention transition this spawn (0 = none); restarts the silence clock. */
+  liveStatusAttentionAt: number
 }
 
 const PEER_POLL_MS = 4000
@@ -411,6 +415,7 @@ export class SessionService extends EventEmitter {
       const r = this.runtime.get(id)
       if (!r || r.needsAttention === waiting) return
       r.needsAttention = waiting
+      r.liveStatusAttentionAt = Date.now()
       this.emit('attention', { id, waiting })
       this.broadcast()
     })
@@ -484,9 +489,11 @@ export class SessionService extends EventEmitter {
    * `--settings` file for this spawn: only for a tile that runs Claude Code on
    * the host. A sandboxed tile writes its status inside the container, which
    * the host path in the file does not reach, so it gets no flag. The
-   * supervisor is never sandboxed.
+   * supervisor is never sandboxed. Off entirely when the operator turned
+   * `liveStatusLine` off (the statusLine hides Claude Code's footer hints).
    */
   private statusLineSettingsFor(def: SessionDef, base: string): string | undefined {
+    if (this.getConfig().liveStatusLine === false) return undefined
     if (!isClaudeLaunch(base)) return undefined
     if (!def.supervisor && this.sandboxPeersDir() !== null) return undefined
     return this.getStatusLineSettings() || undefined
@@ -539,6 +546,7 @@ export class SessionService extends EventEmitter {
 
   /** Start the peer_id poll. No auto-restore: the app opens empty (see ctor). */
   start(): void {
+    this.sweepStatusFiles()
     this.pollTimer = setInterval(() => this.pollPeerIds(), PEER_POLL_MS)
   }
 
@@ -711,7 +719,8 @@ export class SessionService extends EventEmitter {
       liveStatusEnabled: false,
       spawnedAt: 0,
       liveStatusSeen: false,
-      liveStatusSilenceWarned: false
+      liveStatusSilenceWarned: false,
+      liveStatusAttentionAt: 0
     })
     this.spawnSession(def, 'fresh')
     this.broadcast()
@@ -926,10 +935,12 @@ export class SessionService extends EventEmitter {
         liveStatusEnabled: false,
         spawnedAt: 0,
         liveStatusSeen: false,
-        liveStatusSilenceWarned: false
+        liveStatusSilenceWarned: false,
+        liveStatusAttentionAt: 0
       })
     }
     this.persist()
+    this.sweepStatusFiles()
     for (const d of this.defs) this.spawnSession(d, 'resume')
     this.broadcast()
     return this.list()
@@ -1051,6 +1062,7 @@ export class SessionService extends EventEmitter {
     const r = this.runtime.get(id)
     if (!r || !r.needsAttention) return
     r.needsAttention = false
+    r.liveStatusAttentionAt = Date.now()
     this.attentionDetector.clear(id)
     this.emit('attention', { id, waiting: false, manual: true } satisfies AttentionEvent)
     this.broadcast()
@@ -1363,6 +1375,7 @@ export class SessionService extends EventEmitter {
       r.spawnedAt = Date.now()
       r.liveStatusSeen = false
       r.liveStatusSilenceWarned = false
+      r.liveStatusAttentionAt = 0
     }
     try {
       this.pty.spawn(
@@ -1670,10 +1683,28 @@ export class SessionService extends EventEmitter {
     if (changed) this.broadcast()
   }
 
-  /** A tile closed for good leaves no status file behind in the peers dir. */
+  /** A tile closed for good leaves no status or statusLine cache file behind in the peers dir. */
   private dropStatusFile(def: SessionDef): void {
     const err = clearStatusFile(def.id, this.peersDirFor(def))
     if (err) reportError('session', `failed to remove the status file of "${def.name}"`, err)
+    const cacheErr = clearStatusLineCache(def.id, this.peersDirFor(def))
+    if (cacheErr) reportError('session', `failed to remove the statusLine cache of "${def.name}"`, cacheErr)
+  }
+
+  /**
+   * Remove old status/cache leftovers of tiles this Deck does not know, from
+   * the host peers dir the hook writes into. Age-gated (sweepStaleStatusFiles):
+   * the dir is shared with other live Decks whose tiles are unknown here.
+   */
+  private sweepStatusFiles(): void {
+    const res = sweepStaleStatusFiles(
+      this.peersDir(),
+      this.defs.map((d) => d.id),
+      Date.now()
+    )
+    for (const { file, error } of res.errors) {
+      reportError('session', `failed to sweep a stale statusLine file (${file})`, error)
+    }
   }
 
   /**
@@ -1695,7 +1726,9 @@ export class SessionService extends EventEmitter {
         spawnedAt: r.spawnedAt,
         now: Date.now(),
         reported: r.liveStatusSeen,
-        warned: r.liveStatusSilenceWarned
+        warned: r.liveStatusSilenceWarned,
+        needsAttention: r.needsAttention,
+        lastAttentionAt: r.liveStatusAttentionAt
       })
     ) {
       r.liveStatusSilenceWarned = true

@@ -32,6 +32,7 @@ of the question.
 | [settings.md](settings.md) | Every configurable option: the Settings page, config files, launch configuration, data locations |
 | [faq.md](faq.md) | Troubleshooting and frequently asked questions |
 | [streamdeck.md](streamdeck.md) | Stream Deck + integration: not shipped, an intention sketch (bridge design, key list, security note). Read before picking up any `#streamdeck` roadmap card, not as a description of a current feature |
+| [windows-live-status-verification.md](windows-live-status-verification.md) | Developer procedure (French), not a feature description: field measurements on native Windows of the model badge / context ring statusLine chain, busy detection under a statusLine, and the scripts in `scripts/win-verify/` |
 
 ## Conventions used in these pages
 

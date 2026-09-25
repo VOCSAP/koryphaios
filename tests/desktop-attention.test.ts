@@ -347,3 +347,137 @@ test("busy text carried inside an OSC title FRAGMENTED across two chunks still d
 
   d.stop();
 });
+
+// ----- current trust prompt ("Quick safety check"), real capture -----
+
+type Chunk = { t: number; data: string };
+const loadFixture = (name: string): Chunk[] =>
+  JSON.parse(readFileSync(join(import.meta.dir, "pty-harness", "fixtures", name), "utf-8"));
+
+test("the current trust prompt raises attention (real Claude Code 2.1.282 capture, words placed by cursor moves)", () => {
+  const chunks = loadFixture("trust-dialog-quick-safety-check.json");
+  const dialog = chunks.findIndex((c) => stripAnsi(c.data).includes("safety"));
+  expect(dialog, "the capture holds the dialog paint").toBeGreaterThanOrEqual(0);
+  const d = new AttentionDetector();
+  const events = collect(d);
+  chunks.slice(0, dialog).forEach((c) => d.feed("s", c.data));
+  expect(events, "nothing before the dialog is painted").toEqual([]);
+  d.feed("s", chunks[dialog]!.data);
+  expect(events, "the dialog paint raises exactly once").toEqual([{ id: "s", waiting: true }]);
+});
+
+test("the current trust prompt raises with its rows placed by cursor positioning (ConPTY shape, no line break)", () => {
+  const screen =
+    "\u001b[9;2H❯\u001b[9;4HNo,\u001b[9;8Hexit\u001b[10;4HYes,\u001b[10;9HI\u001b[10;11Htrust\u001b[10;17Hthis\u001b[10;22Hfolder";
+  expect(detectWaiting(stripAnsi(screen)), "rows joined without CR/LF").toBe(true);
+  expect(detectWaiting("No, exit\n❯ Yes, I trust this folder"), "selector moved to the second option").toBe(true);
+});
+
+test("prose about trusting a folder does not raise", () => {
+  for (const prose of [
+    "Yes, I trust this folder structure; the tests cover it.",
+    "I trust this folder, so no, exit is not needed.",
+    "Quick safety check: is this project one you trust?",
+    "No, exit codes are ignored here.",
+  ]) {
+    expect(detectWaiting(prose), prose).toBe(false);
+    const d = new AttentionDetector();
+    const events = collect(d);
+    d.feed("s", `● ${prose}\r\n`);
+    expect(events, `streamed: ${prose}`).toEqual([]);
+  }
+});
+
+test("whole real turns (with and without a statusLine) never raise attention", () => {
+  for (const name of [
+    "turn-with-statusline-count.json",
+    "turn-with-statusline-hi.json",
+    "turn-no-statusline-count.json",
+    "turn-no-statusline-hi.json",
+  ]) {
+    const d = new AttentionDetector();
+    const events = collect(d);
+    for (const c of loadFixture(name)) d.feed("s", c.data);
+    expect(events, name).toEqual([]);
+  }
+});
+
+// ----- accepted trust prompt: the welcome screen clears the flag -----
+
+const trustDialogChunks = (): { before: Chunk[]; dialog: Chunk; after: Chunk[] } => {
+  const chunks = loadFixture("trust-dialog-quick-safety-check.json");
+  const i = chunks.findIndex((c) => stripAnsi(c.data).includes("safety"));
+  expect(i, "the capture holds the dialog paint").toBeGreaterThanOrEqual(0);
+  return { before: chunks.slice(0, i), dialog: chunks[i]!, after: chunks.slice(i + 1) };
+};
+
+/** The welcome screen up to its first idle prompt, before any keystroke (real capture). */
+const WELCOME_PAINT: Chunk[] = (() => {
+  const chunks = loadFixture("turn-with-statusline-hi.json");
+  const typed = chunks.findIndex((c) => stripAnsi(c.data).includes("reply with"));
+  const welcome = chunks.slice(0, typed);
+  const joined = stripAnsi(welcome.map((c) => c.data).join(""));
+  expect(joined, "the slice holds the banner").toMatch(/Claude\s*Code\s*v2\.1\.282/);
+  expect(joined, "the slice holds the idle prompt").toMatch(/\u276f\s*Try/);
+  return welcome;
+})();
+
+test("accepting the trust prompt clears the flag once the welcome screen is painted (real captures)", () => {
+  const { before, dialog, after } = trustDialogChunks();
+  const d = new AttentionDetector();
+  const events = collect(d);
+  for (const c of [...before, dialog, ...after]) d.feed("s", c.data);
+  expect(events, "the dialog raises").toEqual([{ id: "s", waiting: true }]);
+  for (const c of WELCOME_PAINT) d.feed("s", c.data);
+  expect(events, "the welcome screen after the dialog must clear it").toEqual([
+    { id: "s", waiting: true },
+    { id: "s", waiting: false }
+  ]);
+  // Re-armed: nothing of the dialog is left to recombine with later output.
+  d.feed("s", PERMISSION_SCREEN);
+  expect(events.length).toBe(3);
+});
+
+test("a repaint of the trust prompt does not clear it, even with the banner painted above it", () => {
+  const { before, dialog, after } = trustDialogChunks();
+  for (const lead of [[], WELCOME_PAINT]) {
+    const d = new AttentionDetector();
+    const events = collect(d);
+    for (const c of [...lead, ...before, dialog, ...after]) d.feed("s", c.data);
+    expect(events, `dialog's own tail, banner first: ${lead.length > 0}`).toEqual([{ id: "s", waiting: true }]);
+    d.feed("s", dialog.data);
+    expect(events, `repaint, banner first: ${lead.length > 0}`).toEqual([{ id: "s", waiting: true }]);
+    // A full redraw carrying the banner above the still-open prompt.
+    d.feed("s", WELCOME_PAINT.map((c) => c.data).join("") + dialog.data);
+    expect(events, `redraw with banner, banner first: ${lead.length > 0}`).toEqual([{ id: "s", waiting: true }]);
+  }
+});
+
+test("a chooser painted after the welcome screen still holds the flag", () => {
+  const { before, dialog } = trustDialogChunks();
+  const d = new AttentionDetector();
+  const events = collect(d);
+  for (const c of [...before, dialog]) d.feed("s", c.data);
+  d.feed("s", WELCOME_PAINT.map((c) => c.data).join("") + PERMISSION_SCREEN);
+  expect(events).toEqual([{ id: "s", waiting: true }]);
+});
+
+// ----- the dev-channels exemption still lets a trust prompt raise -----
+
+test("with the dev-channels warning in the window, both trust wordings still raise", () => {
+  const newWording = stripAnsi(trustDialogChunks().dialog.data);
+  expect(detectWaiting(CHANNELS_WARNING), "the warning alone stays exempted").toBe(false);
+  expect(detectWaiting(`${CHANNELS_WARNING}\n${newWording}`), "current wording").toBe(true);
+  expect(detectWaiting(`${CHANNELS_WARNING}\n${TRUST_SCREEN}`), "old wording").toBe(true);
+  expect(detectWaiting(`${newWording}\n${CHANNELS_WARNING}`), "warning painted after the prompt").toBe(true);
+});
+
+test("the current trust prompt painted after the dev-channels warning raises (detector)", () => {
+  const { dialog } = trustDialogChunks();
+  const d = new AttentionDetector();
+  const events = collect(d);
+  d.feed("s", CHANNELS_WARNING);
+  expect(events, "the warning alone is exempted").toEqual([]);
+  d.feed("s", dialog.data);
+  expect(events).toEqual([{ id: "s", waiting: true }]);
+});

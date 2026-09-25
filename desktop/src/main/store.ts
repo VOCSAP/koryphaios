@@ -62,6 +62,9 @@ const DEFAULT_CONFIG: AppConfig = {
   leadPattern: 'team-lead',
   // System notification when a session waits for the operator (PLAN C11).
   notifyAttention: true,
+  // Model badge + context ring in the session list: on by default; turning it
+  // off gives the tiles back Claude Code's footer hints at their next spawn.
+  liveStatusLine: true,
   // Remote approvals (PLAN-notifications-mobiles): opt-in — it sends the
   // question outside the machine, so it is never on by default.
   mobileApprovals: false,
@@ -159,6 +162,8 @@ export function loadConfig(): AppConfig {
   if (!Number.isFinite(cfg.wfLaneHeight) || cfg.wfLaneHeight < WF_LANE_H_MIN) {
     cfg.wfLaneHeight = WF_LANE_H_DEFAULT
   }
+  // Whether a spawn carries --settings is not decided by a stray string in the file.
+  if (typeof cfg.liveStatusLine !== 'boolean') cfg.liveStatusLine = DEFAULT_CONFIG.liveStatusLine
   delete (cfg as { helpModel?: string }).helpModel
   return cfg
 }
