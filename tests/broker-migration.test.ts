@@ -1,10 +1,44 @@
 import { test, expect, afterAll } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
 import { Database } from "bun:sqlite";
 import type { RoadmapItem } from "../shared/types.ts";
 
 const brokers: TestBroker[] = [];
-afterAll(async () => { for (const b of brokers) await stopBroker(b); });
+const seededDirs: string[] = [];
+afterAll(async () => {
+  for (const b of brokers) await stopBroker(b);
+  for (const d of seededDirs) rmSync(d, { recursive: true, force: true });
+});
+
+test("broker boots on a db whose roadmap_context_documents predates the sync columns", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cp-legacy-docs-"));
+  seededDirs.push(dir);
+  const dbPath = join(dir, "peers.db");
+  const seed = new Database(dbPath);
+  seed.run(
+    "CREATE TABLE roadmap_context_documents (id TEXT PRIMARY KEY, roadmap_item_id TEXT NOT NULL, project_key TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL)"
+  );
+  seed.close();
+
+  const b = await startBroker({ CLAUDE_PEERS_DB: dbPath });
+  brokers.push(b);
+
+  const db = new Database(dbPath, { readonly: true });
+  const cols = (db.query("PRAGMA table_info(roadmap_context_documents)").all() as { name: string }[]).map(
+    (c) => c.name
+  );
+  const index = db
+    .query("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_roadmap_context_documents_sync_rev'")
+    .get();
+  db.close();
+  expect(cols, "legacy roadmap_context_documents was not migrated with the sync columns").toEqual(
+    expect.arrayContaining(["sync_rev", "sync_dirty"])
+  );
+  expect(index, "sync_rev index missing after migrating a legacy roadmap_context_documents").toBeTruthy();
+});
 
 test("migration adds claude_cli_pid column to peers", async () => {
   const b = await startBroker();

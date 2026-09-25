@@ -769,9 +769,6 @@ db.run(
 db.run(
   "CREATE INDEX IF NOT EXISTS idx_roadmap_context_documents_read ON roadmap_context_documents(roadmap_item_id, project_key, created_at, id)"
 );
-db.run(
-  "CREATE INDEX IF NOT EXISTS idx_roadmap_context_documents_sync_rev ON roadmap_context_documents(sync_rev)"
-);
 db.run(`
   CREATE TABLE IF NOT EXISTS roadmap_context_document_units (
     id TEXT PRIMARY KEY,
@@ -797,6 +794,9 @@ for (const col of [
     if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
   }
 }
+db.run(
+  "CREATE INDEX IF NOT EXISTS idx_roadmap_context_documents_sync_rev ON roadmap_context_documents(sync_rev)"
+);
 
 try {
   db.run("ALTER TABLE roadmap_items ADD COLUMN queue INTEGER");
