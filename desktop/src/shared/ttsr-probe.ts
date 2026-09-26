@@ -92,13 +92,47 @@ export function matchIsolated(
 const CLASS_ESCAPES: Record<string, string> = { w: 'a', W: '-', d: '0', D: 'a', s: ' ', S: 'a', n: '\n', t: '\t', r: '\r' }
 
 /**
+ * Characters of each Unicode property a pattern names (`\\p{Lu}`,
+ * `\\p{Script=Greek}` falls to the default): a run the property accepts is
+ * what makes `\\p{Lu}{0,99}\\p{Lu}{0,99}` backtrack.
+ */
+const PROPERTY_SEEDS: Record<string, string[]> = {
+  Lu: ['A'],
+  Uppercase_Letter: ['A'],
+  Lt: ['\u01c5'],
+  Ll: ['a'],
+  Lowercase_Letter: ['a'],
+  L: ['a', 'A', '\u00e9'],
+  Letter: ['a', 'A', '\u00e9'],
+  Alphabetic: ['a', 'A', '\u00e9'],
+  N: ['0'],
+  Nd: ['0'],
+  Number: ['0'],
+  Decimal_Number: ['0'],
+  P: ['.'],
+  Punctuation: ['.'],
+  S: ['+'],
+  Symbol: ['+'],
+  Z: [' '],
+  Zs: [' '],
+  White_Space: [' '],
+  Extended_Pictographic: ['\u{1f600}'],
+  Emoji: ['\u{1f600}'],
+  Emoji_Presentation: ['\u{1f600}']
+}
+/** An unknown or negated property: a spread of scripts and classes. */
+const PROPERTY_FALLBACK = ['a', 'A', '0', '.', ' ', '\u00e9', '\u03b1', '\u4e2d', '\u{1f600}']
+/** Non-ASCII seeds added for a `u`-flag pattern: `.` and negated classes then match whole code points. */
+const UNICODE_SEEDS = ['\u00e9', '\u{1f600}']
+
+/**
  * The seeds the probe repeats into adversarial inputs: every character the
  * pattern can match literally or through a class (\w gives 'a', \s ' ', ...),
  * its literal runs ("git", "ab"), pairs of its first literal characters, and
  * a few defaults. A backtracking blow-up needs a long run of characters the
  * pattern keeps accepting; these are those characters.
  */
-export function probeSeeds(pattern: string): string[] {
+export function probeSeeds(pattern: string, flags = ''): string[] {
   const chars: string[] = []
   const runs: string[] = []
   let run = ''
@@ -120,9 +154,12 @@ export function probeSeeds(pattern: string): string[] {
         run += ch
         i += hex
       } else if (n === 'p' || n === 'P') {
-        add('a')
+        const close = pattern[i + 1] === '{' ? pattern.indexOf('}', i) : -1
+        const name = close > i ? pattern.slice(i + 2, close) : ''
+        const known = n === 'p' ? PROPERTY_SEEDS[name.replace(/^General_Category=|^gc=/, '')] : undefined
+        for (const c of known ?? PROPERTY_FALLBACK) add(c)
         endRun()
-        if (pattern[i + 1] === '{') i = Math.max(i, pattern.indexOf('}', i))
+        if (close > i) i = close
       } else if (CLASS_ESCAPES[n] !== undefined) {
         add(CLASS_ESCAPES[n]!)
         endRun()
@@ -157,17 +194,21 @@ export function probeSeeds(pattern: string): string[] {
   }
   endRun()
   const literal = chars.slice(0, 4)
-  for (const d of ['a', ' ', 'x', '0', '\n']) add(d)
+  for (const d of ['a', 'A', ' ', 'x', '0', '\n']) add(d)
+  if (flags.includes('u') || flags.includes('v')) for (const d of UNICODE_SEEDS) add(d)
   const pairs: string[] = []
   for (let i = 0; i < literal.length; i++) for (let j = i + 1; j < literal.length; j++) pairs.push(literal[i]! + literal[j]!)
   const seeds: string[] = []
-  for (const s of [...chars.slice(0, 12), ...runs.slice(0, 6), ...pairs]) if (!seeds.includes(s)) seeds.push(s)
+  for (const s of [...chars.slice(0, 20), ...runs.slice(0, 6), ...pairs]) if (!seeds.includes(s)) seeds.push(s)
   return seeds
 }
 
-/** Each seed repeated to PROBE_INPUT_CHARS, then a character that ends any match attempt late. */
-export function probeInputs(pattern: string, length: number = PROBE_INPUT_CHARS): string[] {
-  return probeSeeds(pattern).map((s) => s.repeat(Math.ceil(length / s.length)).slice(0, length) + '\u0001')
+/**
+ * Each seed repeated to `length` UTF-16 units (whole seeds, so no surrogate
+ * pair is cut), then a character that ends any match attempt late.
+ */
+export function probeInputs(pattern: string, length: number = PROBE_INPUT_CHARS, flags = ''): string[] {
+  return probeSeeds(pattern, flags).map((s) => s.repeat(Math.max(1, Math.floor(length / s.length))) + '\u0001')
 }
 
 const PROBE_WORKER = `
@@ -232,7 +273,7 @@ export async function probeRulesSpeed(rules: readonly TtsrRule[], opts: ProbeOpt
     index,
     pattern: r.pattern,
     flags: r.flags ?? '',
-    inputs: probeInputs(r.pattern, opts.inputChars)
+    inputs: probeInputs(r.pattern, opts.inputChars, r.flags ?? '')
   }))
   let pending = jobs
   while (pending.length > 0) {

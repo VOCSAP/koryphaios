@@ -1078,6 +1078,8 @@
   "rules.editRawFile": "Éditer le fichier",
   "rules.addRule": "Ajouter une règle",
   "rules.absentHint": "Aucun fichier de règles pour l'instant. Un agent peut en créer un avec la skill repo-rules, ou en ajouter une ici.",
+  "rules.approvedRemoved": "Le fichier de règles approuvé de ce projet a été supprimé : ses règles ne s'appliquent plus.",
+  "rules.approvedChanged": "Le fichier de règles approuvé de ce projet a été modifié sur disque : ses règles ne s'appliquent plus tant que vous n'approuvez pas le nouveau contenu.",
   "rules.approve": "Approuver",
   "rules.toggleDisabledPending": "Cette règle est inactive jusqu'à l'approbation de son fichier.",
   "rules.deleteConfirmTitle": "Supprimer cette règle ?",
@@ -1108,5 +1110,10 @@
   "rules.testPathNotMatched": "chemin non concordant",
   "rules.deleteRule": "Supprimer la règle",
   "rules.rawJsonEditor": "Éditer le fichier brut",
-  "rules.rawJsonHelp": "Le fichier ne se lit pas ou échoue à la validation. Éditez son texte JSON directement puis enregistrez."
+  "rules.rawJsonHelp": "Le fichier ne se lit pas ou échoue à la validation. Éditez son texte JSON directement puis enregistrez.",
+  "rules.editDisabledPending": "Approuvez ce fichier avant de modifier ses règles.",
+  "rules.addDisabledPending": "Approuvez ce fichier avant d'ajouter une règle.",
+  "rules.saveStale": "Le fichier a changé sur disque depuis son ouverture. Rechargé — votre modification n'a pas été enregistrée.",
+  "rules.savePending": "Le statut d'approbation de ce fichier a changé depuis son ouverture. Rechargé — votre modification n'a pas été enregistrée.",
+  "rules.savedPendingApproval": "Enregistré. Ce fichier doit encore être approuvé pour que ses règles s'activent."
 }

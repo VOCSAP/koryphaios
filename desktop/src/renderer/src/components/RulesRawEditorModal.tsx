@@ -11,11 +11,16 @@ import { useT } from '../i18n'
 interface Props {
   target: RuleEditTarget
   initialText: string
+  /** `file.hash` of the file state this editor was opened from; null when the file was absent. */
+  expectedHash: string | null
   onClose: () => void
-  onSaved: () => void
+  /** `approved` mirrors the save result: false when the fixed file is now saved but still pending approval. */
+  onSaved: (approved: boolean) => void
+  /** The save was refused because the file moved under us: the parent reloads instead of retrying. */
+  onConflict: (reason: 'stale' | 'pending') => void
 }
 
-export function RulesRawEditorModal({ target, initialText, onClose, onSaved }: Props): React.JSX.Element {
+export function RulesRawEditorModal({ target, initialText, expectedHash, onClose, onSaved, onConflict }: Props): React.JSX.Element {
   const t = useT()
   const [text, setText] = useState(initialText)
   const [errors, setErrors] = useState<string[]>([])
@@ -25,8 +30,12 @@ export function RulesRawEditorModal({ target, initialText, onClose, onSaved }: P
     setSaving(true)
     setErrors([])
     try {
-      const res = target.kind === 'global' ? await window.api.rulesSaveGlobal(text) : await window.api.rulesSaveRepo(target.projectDir, text)
-      if (res.ok) onSaved()
+      const res =
+        target.kind === 'global'
+          ? await window.api.rulesSaveGlobal(text, expectedHash)
+          : await window.api.rulesSaveRepo(target.projectDir, text, expectedHash)
+      if (res.ok) onSaved(res.approved)
+      else if (res.reason === 'stale' || res.reason === 'pending') onConflict(res.reason)
       else setErrors(res.errors)
     } catch (e) {
       window.api.reportError('rules', `save raw file failed: ${String(e)}`)

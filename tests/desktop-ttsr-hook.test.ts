@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { decide, parseHookPayload, runHook, trace, type HookPayload } from "../desktop/hooks/ttsr-hook.ts";
+import { decide, parseHookPayload, readExisting, runHook, trace, type HookPayload } from "../desktop/hooks/ttsr-hook.ts";
 import { KORY_EFFECTIVE_RULES } from "../desktop/src/shared/ttsr-builtin";
 
 const DESKTOP_DIR = resolve(import.meta.dir, "..", "desktop");
@@ -156,6 +156,36 @@ test("decide(): paths are relative to the git toplevel even when the session run
   expect(decide(outside), "outside a repository the project dir itself is the root").toMatchObject({
     hookSpecificOutput: { permissionDecision: "deny" },
   });
+});
+
+test("readExisting(): a regular file is read (capped), a missing one is null", () => {
+  const dir = makeTmpDir("ttsr-existing-");
+  const f = join(dir, "a.ts");
+  writeFileSync(f, "const a = 1\n");
+  expect(readExisting(f)).toBe("const a = 1\n");
+  expect(readExisting(join(dir, "missing.ts"))).toBeNull();
+});
+
+test("readExisting(): a symlinked Write target is read as absent, never followed (strict side)", () => {
+  const dir = makeTmpDir("ttsr-existing-");
+  const legacy = join(dir, "legacy.ts");
+  writeFileSync(legacy, "try { x() } catch (e) {}\n");
+  const link = join(dir, "sym.ts");
+  symlinkSync(legacy, link);
+  expect(
+    readExisting(link),
+    "a symlink must not lend its target's legacy matches to the new content: null means the whole new content is judged"
+  ).toBeNull();
+});
+
+test.skipIf(process.platform === "win32")("readExisting(): a FIFO Write target returns null at once instead of blocking the hook", () => {
+  const dir = makeTmpDir("ttsr-existing-");
+  const fifo = join(dir, "target.ts");
+  const mk = spawnSync("mkfifo", [fifo]);
+  if (mk.status !== 0) throw new Error(`mkfifo failed: ${mk.stderr}`);
+  const t0 = Date.now();
+  expect(readExisting(fifo), "a FIFO is read as absent (strict side), never opened for a blocking read").toBeNull();
+  expect(Date.now() - t0, "readExisting on a FIFO must not wait for a writer").toBeLessThan(1000);
 });
 
 test("trace(): writes to $CLAUDE_PEERS_TTSR_LOG when set, and never throws when the path is unwritable", () => {

@@ -408,3 +408,14 @@ test('revokeAll clears the device set and returns the revoked credentials', () =
   expect(auth.credCount).toBe(0)
   expect(auth.listDevices()).toEqual([])
 })
+
+// Guard rules: every rules:* write changes what the agents are allowed to do
+// (disabling a Kory deny, approving repo rules, rewriting a rules file) and
+// must never be reachable from a paired phone; only the listing is a read.
+test('rules:* writes are tier 3 and remote-blocked; rules:list is a tier-0 read', () => {
+  for (const ch of ['rules:set-enabled', 'rules:save-global', 'rules:save-repo', 'rules:approve-repo', 'rules:test']) {
+    expect(CHANNEL_TIERS[ch], `${ch} changes (or runs) guard rules: tier 3`).toBe(3)
+    expect(REMOTE_BLOCKED_CHANNELS.has(ch), `${ch} must be refused to a remote companion`).toBe(true)
+  }
+  expect(CHANNEL_TIERS['rules:list'], 'rules:list is a read').toBe(0)
+})

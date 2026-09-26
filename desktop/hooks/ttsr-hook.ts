@@ -13,7 +13,8 @@
 // a Kory deny that runs before it.
 
 import { spawnSync } from "node:child_process";
-import { appendFileSync, closeSync, openSync, readFileSync, readSync } from "node:fs";
+import { appendFileSync, lstatSync, readFileSync } from "node:fs";
+import { readBounded } from "../src/shared/ttsr-fs.ts";
 import {
   buildHookOutput,
   evaluate,
@@ -98,23 +99,31 @@ export function projectRootOf(payload: HookPayload): string {
 
 /**
  * Current content of a Write target (its first bytes), null when it does not
- * exist. An unreadable target is traced and read as absent: the rules then
- * judge the whole new content, the strict side.
+ * exist. Anything but a regular file reached without a symlink (a symlink,
+ * a FIFO, a device) is read as absent without being opened for real: the
+ * rules then judge the whole new content, the strict side, and a FIFO can
+ * never block the hook. The target is opened once, non-blocking, never
+ * following a symlink, and checked on the descriptor. An unreadable target
+ * is traced and read as absent too.
  */
 export function readExisting(path: string): string | null {
-  let fd: number;
   try {
-    fd = openSync(path, "r");
+    const st = lstatSync(path);
+    if (st.isSymbolicLink()) return null;
+    if (!st.isFile()) {
+      trace(`Write target ${path} is not a regular file, its whole new content is checked`);
+      return null;
+    }
+    const res = readBounded(path, { cap: EXISTING_READ_BYTES, overflow: "truncate" });
+    if (res.kind === "absent") return null;
+    if (res.kind === "refused") {
+      trace(`Write target ${path} ${res.reason}, its whole new content is checked`);
+      return null;
+    }
+    return res.bytes.toString("utf8");
   } catch (e) {
     if (!isMissing(e)) trace(`cannot read the Write target ${path}, its whole new content is checked: ${errorText(e)}`);
     return null;
-  }
-  try {
-    const buf = Buffer.alloc(EXISTING_READ_BYTES);
-    const n = readSync(fd, buf, 0, buf.length, 0);
-    return buf.subarray(0, n).toString("utf8");
-  } finally {
-    closeSync(fd);
   }
 }
 

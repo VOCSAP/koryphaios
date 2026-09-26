@@ -51,20 +51,34 @@ change, free-text inputs on blur.
 On-demand guard rules (TTSR): a `PreToolUse`/`PostToolUse` hook matches a
 tool call against a regex and denies it or injects the rule's message, so a
 convention only costs tokens the day it fires. Three sources, one table per
-source (id, hook, a Voir/Éditer button, an Active checkbox):
+source (id, hook, a View/Edit button, an Active checkbox):
 
 | Source | Written by | Activation |
 |---|---|---|
 | **Kory** | built into the app | read-only, toggle only |
 | **Global** | the operator, from this page | the Active checkbox |
-| **Repo** (`.claude/claude-peers/rules.json`) | an agent (`repo-rules` skill) or a human | approval (hash-based) here, then the Active checkbox |
+| **Repo** (`.claude/claude-peers/rules.json`) | an agent (`repo-rules` skill) or a human | approval (hash-based), then the Active checkbox |
 
-Éditer/Ajouter opens a form (event, tools, field, path globs, pattern, flags,
-mode, message) with a Tester zone (sample text + optional file path) that
-calls the same engine the hook uses. Saving rewrites the whole file for that
-source; an invalid file falls back to a raw-JSON editor. A pending repo file
-shows an Approuver button; approving again after the file changed is refused
-as stale and the list is refreshed.
+A repo file's rules are **active by default once its file is approved**; the
+Active checkbox *disables* one, it does not turn the file on. While a repo
+file is pending or invalid, its rules are View-only (Edit, Add a rule and
+Delete are disabled with a tooltip) until it is approved: the operator can
+inspect what would run, but not change it blind. Edit/Add opens a form
+(event, tools, field, path globs, pattern, flags, mode, message) with a Test
+zone (sample text + optional file path) that calls the same engine the hook
+uses. Saving rewrites the whole file for that source; an invalid file falls
+back to a raw-JSON editor, and saving it successfully still leaves the file
+pending approval if it wasn't approved or absent to start with.
+
+Outside this page, the operator also approves a repo file through a minimal
+dialog shown when a tile starts or when its `rules.json` changes underneath
+it — this page is not the only approval path. Approval is per file *hash*,
+not per file: any change to an approved file — including an agent's edit, an
+`Add rule` from here, or a revert to an older version — puts it back to
+pending and is surfaced to the operator; a deleted approved file drops its
+rules back to none. Approving again after the file changed on disk since it
+was read is refused as stale and the table is refreshed instead of silently
+approving the wrong content.
 
 ## Config files
 

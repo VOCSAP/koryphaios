@@ -18,7 +18,13 @@ import { join } from "node:path";
 
 // Node-only modules (no electron), import under bun.
 import {
+  BoundedMap,
+  BoundedSet,
   REPO_RULES_REL,
+  TTSR_LOG_LINE_CHARS,
+  TTSR_LOG_MINUTE_LINES,
+  TTSR_PROBE_CONCURRENCY,
+  TTSR_PROMPT_INTERVAL_MS,
   TtsrService,
   defaultResolveProject,
   repoRulesPathForWrite,
@@ -28,13 +34,15 @@ import {
 } from "../desktop/src/main/ttsr-service";
 import {
   TTSR_APPROVALS_PER_KEY,
+  emptyTtsrApprovals,
   isTtsrApproved,
   readTtsrApprovals,
   withTtsrApproval,
 } from "../desktop/src/main/ttsr-approvals";
 import { TTSR_DISABLED_MAX, isTtsrToggleKey, sanitizeTtsrDisabled, ttsrToggleKey } from "../desktop/src/main/ttsr-toggles";
 import { matchIsolated } from "../desktop/src/main/ttsr-regex-worker";
-import { parseEffectiveFile, parseRulesFile, rulesHash } from "../desktop/src/shared/ttsr-rules";
+import { MAX_FILE_BYTES, parseEffectiveFile, parseRulesFile, rulesHash } from "../desktop/src/shared/ttsr-rules";
+import { readBounded } from "../desktop/src/shared/ttsr-fs";
 import { KORY_RULES } from "../desktop/src/shared/ttsr-builtin";
 import { extractBracedBody } from "./_braced-body";
 
@@ -81,6 +89,7 @@ interface Harness {
   answer: { value: boolean };
   changed: { count: number };
   keys: Map<string, string>;
+  clock: { now: number };
 }
 
 /** Service on a throwaway dir; project root = the cwd itself, key from `keys` (default local:<root>). */
@@ -99,6 +108,7 @@ function harness(opts: Partial<TtsrServiceDeps> = {}): Harness {
     answer: { value: false },
     changed: { count: 0 },
     keys: new Map(),
+    clock: { now: 1_000_000 },
   };
   h.svc = new TtsrService({
     globalRulesFile: () => h.globalFile,
@@ -116,6 +126,7 @@ function harness(opts: Partial<TtsrServiceDeps> = {}): Harness {
     onChanged: () => h.changed.count++,
     resolveProject: (cwd) => ({ root: cwd, projectKey: h.keys.get(cwd) ?? `local:${cwd}` }),
     defer: (fn) => fn(),
+    now: () => h.clock.now,
     // Synchronous "all fast" verdict; the worker probe has its own tests below.
     probeRules: () => [],
     ...opts,
@@ -254,6 +265,7 @@ describe("repo rules and approvals", () => {
     expect(h.svc.list().projects[0]!.file.status).toBe("approved");
 
     // One character changes: the poll sees it and withdraws the rules.
+    h.clock.now += TTSR_PROMPT_INTERVAL_MS;
     const edited = text.replace("forbidden-token", "forbidden-tokem");
     writeRepoRules(cwd, edited);
     h.svc.tick();
@@ -273,7 +285,8 @@ describe("repo rules and approvals", () => {
     await flush();
     expect(effective(path)).toEqual([...KORY_IDS, "repo/r-one"]);
     const stored = JSON.parse(readFileSync(h.approvalsFile, "utf8"));
-    expect(stored[`local:${cwd}`]).toEqual([rulesHash(text)]);
+    expect(stored.keys[`local:${cwd}`]).toEqual([rulesHash(text)]);
+    expect(stored.roots[cwd], "approving sets the hash this root applies").toBe(rulesHash(text));
   });
 
   test("approveRepo refuses a hash that is not the file's current hash (no approving stale content)", () => {
@@ -323,7 +336,8 @@ describe("repo rules and approvals", () => {
     expect(effective(pa)).toEqual([...KORY_IDS, "repo/r-one"]);
     expect(effective(pb), "approving worktree B must not revoke worktree A").toEqual([...KORY_IDS, "repo/r-one", "repo/r-two"]);
     const stored = readTtsrApprovals(h.approvalsFile, (m) => h.errors.push(m));
-    expect(stored["github.com/o/r"]).toEqual([rulesHash(a), rulesHash(b)]);
+    expect(stored.keys["github.com/o/r"]).toEqual([rulesHash(a), rulesHash(b)]);
+    expect(stored.roots, "each worktree root applies its own approved hash").toEqual({ [wtA]: rulesHash(a), [wtB]: rulesHash(b) });
   });
 
   test("repo toggles are keyed by project: disabling r-one in project A leaves r-one of project B active", () => {
@@ -365,11 +379,11 @@ describe("repo rules and approvals", () => {
 
 describe("approvals store", () => {
   test("keeps the most recent hashes per key, set semantics, re-approval moves a hash to the end", () => {
-    let a = {};
+    let a = emptyTtsrApprovals();
     const hashes = Array.from({ length: TTSR_APPROVALS_PER_KEY + 5 }, (_, i) => rulesHash(`v${i}`));
     for (const h of hashes) a = withTtsrApproval(a, "k", h);
     a = withTtsrApproval(a, "k", hashes[10]!);
-    const kept = (a as Record<string, string[]>).k!;
+    const kept = a.keys.k!;
     expect(kept).toHaveLength(TTSR_APPROVALS_PER_KEY);
     expect(kept.at(-1)).toBe(hashes[10]!);
     expect(new Set(kept).size).toBe(kept.length);
@@ -381,15 +395,21 @@ describe("approvals store", () => {
     const d = tmp();
     const f = join(d, "a.json");
     const errs: string[] = [];
-    expect(readTtsrApprovals(join(d, "missing.json"), (m) => errs.push(m))).toEqual({});
+    expect(readTtsrApprovals(join(d, "missing.json"), (m) => errs.push(m))).toEqual(emptyTtsrApprovals());
     expect(errs, "a missing store is the normal first run, not an error").toEqual([]);
     writeFileSync(f, "{ torn");
-    expect(readTtsrApprovals(f, (m) => errs.push(m))).toEqual({});
+    expect(readTtsrApprovals(f, (m) => errs.push(m))).toEqual(emptyTtsrApprovals());
     expect(errs[0]).toContain("not valid JSON");
     const good = rulesHash("x");
     writeFileSync(f, JSON.stringify({ k: [good, "nothex", good], "": [good], j: "x" }));
-    expect(readTtsrApprovals(f, (m) => errs.push(m))).toEqual({ k: [good] });
+    expect(readTtsrApprovals(f, (m) => errs.push(m)), "a version-1 store reads as keys with no root").toEqual({ keys: { k: [good] }, roots: {} });
     expect(errs[1]).toContain("dropped");
+    writeFileSync(f, JSON.stringify({ version: 2, keys: { k: [good] }, roots: { "/p": good, "rel/p": good, "/q": "nothex" } }));
+    expect(readTtsrApprovals(f, (m) => errs.push(m)), "a root must be absolute and map to a sha256").toEqual({
+      keys: { k: [good] },
+      roots: { "/p": good },
+    });
+    expect(errs[2]).toContain("dropped 2");
   });
 });
 
@@ -424,10 +444,9 @@ describe("paths and symlinks", () => {
     expect(h.prompts).toEqual([]);
     expect(h.svc.list().projects[0]!.file.errors[0]).toContain("symlink");
     expect(() => repoRulesPathForWrite(cwd)).toThrow(/symlink/);
-    const res = await h.svc
-      .saveRepo({ root: cwd, projectKey: `local:${cwd}` }, fileOf(rule("r-two")))
-      .catch((e: Error) => e.message);
-    expect(String(res)).toContain("symlink");
+    const res = await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, fileOf(rule("r-two")), null);
+    expect(res.ok, "a save over a symlinked leaf is refused").toBe(false);
+    expect((res as { errors: string[] }).errors.join("\n")).toContain("symlink");
     expect(readFileSync(target, "utf8"), "the write must not go through the symlink").toContain("r-one");
   });
 
@@ -473,11 +492,15 @@ describe("operator saves", () => {
   test("saveGlobal validates through the shared parser, writes, recompiles", async () => {
     const h = harness();
     const bad = fileOf({ ...rule("g-one"), extra: 1 });
-    expect(await h.svc.saveGlobal(bad)).toEqual({ ok: false, errors: (parseRulesFile(bad) as { errors: string[] }).errors });
+    expect(await h.svc.saveGlobal(bad, null)).toEqual({
+      ok: false,
+      reason: "invalid",
+      errors: (parseRulesFile(bad) as { errors: string[] }).errors,
+    });
     expect(existsSync(h.globalFile)).toBe(false);
     const path = h.svc.fileFor({ id: randomUUID(), cwd: tmp() });
     const good = fileOf(rule("g-one"));
-    expect(await h.svc.saveGlobal(good)).toEqual({ ok: true, hash: rulesHash(good) });
+    expect(await h.svc.saveGlobal(good, null)).toEqual({ ok: true, hash: rulesHash(good), approved: true });
     expect(readFileSync(h.globalFile, "utf8")).toBe(good);
     expect(effective(path)).toEqual([...KORY_IDS, "user/g-one"]);
   });
@@ -487,7 +510,11 @@ describe("operator saves", () => {
     const cwd = tmp();
     const path = h.svc.fileFor({ id: randomUUID(), cwd });
     const text = fileOf(rule("r-one"));
-    expect(await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text)).toEqual({ ok: true, hash: rulesHash(text) });
+    expect(await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text, null)).toEqual({
+      ok: true,
+      hash: rulesHash(text),
+      approved: true,
+    });
     expect(readFileSync(join(cwd, REPO_RULES_REL), "utf8")).toBe(text);
     expect(effective(path)).toEqual([...KORY_IDS, "repo/r-one"]);
   });
@@ -655,9 +682,13 @@ describe("the three call sites validate through the shared parser", () => {
     const text = fileOf(typo);
     const expected = (parseRulesFile(text) as { errors: string[] }).errors;
     const h = harness();
-    expect(await h.svc.saveGlobal(text)).toEqual({ ok: false, errors: expected });
+    expect(await h.svc.saveGlobal(text, null)).toEqual({ ok: false, reason: "invalid", errors: expected });
     const cwd = tmp();
-    expect(await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text)).toEqual({ ok: false, errors: expected });
+    expect(await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text, null)).toEqual({
+      ok: false,
+      reason: "invalid",
+      errors: expected,
+    });
     mkdirSync(join(h.dir, "config"), { recursive: true });
     writeFileSync(h.globalFile, text);
     writeRepoRules(cwd, text);
@@ -686,12 +717,12 @@ describe("pattern timing gate (worker probe)", () => {
     const h = harness(real);
     const text = fileOf(rule("g-slow", { pattern: SLOW }));
     expect(parseRulesFile(text).ok, "precondition: the synchronous parser accepts it").toBe(true);
-    const res = await h.svc.saveGlobal(text);
+    const res = await h.svc.saveGlobal(text, null);
     expect(res.ok, "a slow pattern must not reach the global file").toBe(false);
     expect((res as { errors: string[] }).errors.join("\n")).toContain('rules[0] "g-slow": pattern: too slow');
     expect(existsSync(h.globalFile)).toBe(false);
     const cwd = tmp();
-    const repo = await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text);
+    const repo = await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text, null);
     expect(repo.ok, "a slow pattern must not reach the repo file").toBe(false);
     expect(existsSync(join(cwd, REPO_RULES_REL))).toBe(false);
   }, 20000);
@@ -740,7 +771,7 @@ describe("hook trace logs", () => {
     const after = hook().slice(3);
     expect(after.length, "at most TTSR_LOG_TICK_LINES lines plus one summary per pass").toBe(21);
     expect(after[0]).toBe(`ttsr-hook: tile ${id}: l0`);
-    expect(after[20]).toContain("+30 more lines");
+    expect(after[20]).toContain("+30 more lines suppressed");
   });
 
   test("a sandbox log replaced by a symlink is refused, never followed", () => {
@@ -755,6 +786,345 @@ describe("hook trace logs", () => {
     symlinkSync(secret, join(run, `ttsr-${sid}.log`));
     h.svc.tick();
     expect(h.errors.join("\n"), "a host file must never be forwarded through a planted symlink").not.toContain("TOKEN=abc");
-    expect(h.errors.join("\n")).toContain("not a regular file");
+    expect(h.errors.join("\n")).toContain("is a symlink, not read");
+  });
+});
+
+describe("repo rules: any change re-requires approval (per canonical root)", () => {
+  const two = (): { v1: string; v2: string } => ({
+    v1: fileOf(rule("weak")),
+    v2: fileOf(rule("weak"), rule("strict", { pattern: "strict-token" })),
+  });
+
+  test("reverting to an OLDER approved hash is pending again, traced once, and prompts after the interval", async () => {
+    const h = harness();
+    const cwd = tmp();
+    const ref: TtsrProjectRef = { root: cwd, projectKey: `local:${cwd}` };
+    const { v1, v2 } = two();
+    writeRepoRules(cwd, v1);
+    const path = h.svc.fileFor({ id: randomUUID(), cwd });
+    expect(h.svc.approveRepo(ref, rulesHash(v1))).toEqual({ ok: true });
+    writeRepoRules(cwd, v2);
+    h.svc.tick();
+    expect(h.svc.approveRepo(ref, rulesHash(v2))).toEqual({ ok: true });
+    expect(effective(path)).toEqual([...KORY_IDS, "repo/weak", "repo/strict"]);
+    const errs = h.errors.length;
+    const prompts = h.prompts.length;
+    h.clock.now += TTSR_PROMPT_INTERVAL_MS;
+    writeRepoRules(cwd, v1);
+    h.svc.tick();
+    await flush();
+    expect(effective(path), "an agent reverting to an older approved version must not weaken the rules silently").toEqual(KORY_IDS);
+    expect(h.svc.list().projects[0]!.file.status).toBe("pending");
+    expect(h.svc.list().projects[0]!.file.previousHash).toBe(rulesHash(v2));
+    expect(h.prompts.slice(prompts).map((p) => p.hash), "the revert asks the operator again").toEqual([rulesHash(v1)]);
+    const traced = h.errors.slice(errs).filter((e) => e.includes("no longer apply"));
+    expect(traced, "losing applied rules is an operator-visible trace, once per transition").toHaveLength(1);
+    expect(h.journal.some((j) => j.includes("no longer apply"))).toBe(true);
+    const total = h.errors.filter((e) => e.includes("no longer apply")).length;
+    h.svc.tick();
+    expect(h.errors.filter((e) => e.includes("no longer apply")), "an unchanged file is not traced again").toHaveLength(total);
+  });
+
+  test("deleting an applied file is traced and flagged removedApproved in rules:list", () => {
+    const h = harness();
+    const cwd = tmp();
+    const { v1 } = two();
+    const p = writeRepoRules(cwd, v1);
+    h.svc.fileFor({ id: randomUUID(), cwd });
+    h.svc.approveRepo({ root: cwd, projectKey: `local:${cwd}` }, rulesHash(v1));
+    rmSync(p);
+    h.svc.tick();
+    const file = h.svc.list().projects[0]!.file;
+    expect(file.status).toBe("absent");
+    expect(file.removedApproved, "a deleted approved file must stay visible in Settings").toBe(true);
+    expect(file.previousHash).toBe(rulesHash(v1));
+    expect(h.errors.filter((e) => e.includes("the file was deleted")), "the deletion is traced once").toHaveLength(1);
+    // The same approved content coming back applies again, without a prompt.
+    writeRepoRules(cwd, v1);
+    h.svc.tick();
+    expect(h.svc.list().projects[0]!.file.status).toBe("approved");
+    expect(h.svc.list().projects[0]!.file.removedApproved).toBeUndefined();
+  });
+
+  test("a NEW worktree applies a key-approved hash and adopts it; another key-approved hash there is pending", () => {
+    const h = harness();
+    const wtA = tmp();
+    const wtB = tmp();
+    h.keys.set(wtA, "github.com/o/r");
+    h.keys.set(wtB, "github.com/o/r");
+    const { v1, v2 } = two();
+    writeRepoRules(wtA, v1);
+    h.svc.fileFor({ id: randomUUID(), cwd: wtA });
+    h.svc.approveRepo({ root: wtA, projectKey: "github.com/o/r" }, rulesHash(v1));
+    writeRepoRules(wtA, v2);
+    h.svc.tick();
+    h.svc.approveRepo({ root: wtA, projectKey: "github.com/o/r" }, rulesHash(v2));
+    writeRepoRules(wtB, v2);
+    const pb = h.svc.fileFor({ id: randomUUID(), cwd: wtB });
+    expect(effective(pb), "a new worktree of an approved project applies its approved file").toEqual([
+      ...KORY_IDS,
+      "repo/weak",
+      "repo/strict",
+    ]);
+    expect(readTtsrApprovals(h.approvalsFile, () => {}).roots[wtB], "the adopted hash becomes wtB's current").toBe(rulesHash(v2));
+    writeRepoRules(wtB, v1);
+    h.svc.tick();
+    expect(effective(pb), "once adopted, an older key-approved hash is pending at that root").toEqual(KORY_IDS);
+  });
+});
+
+describe("operator saves: base hash and approval rules", () => {
+  test("saveGlobal and saveRepo refuse a stale base (the file changed since the editor opened it)", async () => {
+    const h = harness();
+    mkdirSync(join(h.dir, "config"), { recursive: true });
+    const g1 = fileOf(rule("g-one"));
+    writeFileSync(h.globalFile, g1);
+    h.svc.tick();
+    const g2 = fileOf(rule("g-two"));
+    expect(await h.svc.saveGlobal(g2, null), "saving over a file the editor did not see").toMatchObject({ ok: false, reason: "stale" });
+    expect(readFileSync(h.globalFile, "utf8")).toBe(g1);
+    expect(await h.svc.saveGlobal(g2, rulesHash(g1))).toEqual({ ok: true, hash: rulesHash(g2), approved: true });
+
+    const cwd = tmp();
+    const ref: TtsrProjectRef = { root: cwd, projectKey: `local:${cwd}` };
+    h.svc.fileFor({ id: randomUUID(), cwd });
+    const r1 = fileOf(rule("r-one"));
+    expect(await h.svc.saveRepo(ref, r1, null)).toEqual({ ok: true, hash: rulesHash(r1), approved: true });
+    const agent = fileOf(rule("r-one", { mode: "warn" }));
+    writeRepoRules(cwd, agent);
+    const mine = fileOf(rule("r-one"), rule("r-two"));
+    expect(await h.svc.saveRepo(ref, mine, rulesHash(r1)), "the agent rewrote the file after the editor opened it").toMatchObject({
+      ok: false,
+      reason: "stale",
+    });
+    expect(readFileSync(join(cwd, REPO_RULES_REL), "utf8")).toBe(agent);
+  });
+
+  test("saveRepo over a PENDING base is refused: the operator would approve agent content unseen", async () => {
+    const h = harness();
+    const cwd = tmp();
+    const ref: TtsrProjectRef = { root: cwd, projectKey: `local:${cwd}` };
+    const agent = fileOf(rule("r-agent"));
+    writeRepoRules(cwd, agent);
+    h.svc.fileFor({ id: randomUUID(), cwd });
+    const res = await h.svc.saveRepo(ref, fileOf(rule("r-agent"), rule("r-mine")), rulesHash(agent));
+    expect(res, "a pending base must be reviewed and approved first").toMatchObject({ ok: false, reason: "pending" });
+    expect(readFileSync(join(cwd, REPO_RULES_REL), "utf8")).toBe(agent);
+  });
+
+  test("saveRepo over an INVALID base writes the file but leaves it pending (approved: false)", async () => {
+    const h = harness();
+    const cwd = tmp();
+    const ref: TtsrProjectRef = { root: cwd, projectKey: `local:${cwd}` };
+    const broken = "{ not json";
+    writeRepoRules(cwd, broken);
+    const path = h.svc.fileFor({ id: randomUUID(), cwd });
+    const fixed = fileOf(rule("r-fixed"));
+    expect(await h.svc.saveRepo(ref, fixed, rulesHash(broken))).toEqual({ ok: true, hash: rulesHash(fixed), approved: false });
+    expect(readFileSync(join(cwd, REPO_RULES_REL), "utf8")).toBe(fixed);
+    expect(effective(path), "content fixed from an invalid (possibly agent-written) base is not approved by the save").toEqual(KORY_IDS);
+    expect(h.svc.list().projects[0]!.file.status).toBe("pending");
+  });
+
+  test("the IPC handlers pass expectedHash through, validated as null or a sha256", () => {
+    const src = readFileSync(join(import.meta.dir, "..", "desktop", "src", "main", "ipc.ts"), "utf8");
+    const anchor = src.indexOf("const requireExpectedHash = (hash: unknown): string | null =>");
+    expect(anchor, "ipc.ts must validate expectedHash in requireExpectedHash").toBeGreaterThan(-1);
+    const body = extractBracedBody(src, src.indexOf("{", anchor));
+    expect(body, "expectedHash crossing the renderer boundary must be validated main-side").toContain("/^[0-9a-f]{64}$/");
+    expect(src).toContain("ttsr.saveGlobal(requireText(text), requireExpectedHash(expectedHash))");
+    expect(src).toContain("ttsr.saveRepo(await rulesProject(dir), requireText(text), requireExpectedHash(expectedHash))");
+  });
+});
+
+describe("hostile files: no hang, no read outside, bounded", () => {
+  test("readBounded refuses a symlink leaf, a non-regular file, a file past the cap and a replaced inode", () => {
+    const d = tmp();
+    const f = join(d, "f.json");
+    writeFileSync(f, "x".repeat(100));
+    const ok = readBounded(f, { cap: 100 });
+    expect(ok.kind).toBe("ok");
+    expect(readBounded(f, { cap: 99 }), "a file past the cap is refused, not read").toMatchObject({ kind: "refused" });
+    expect(readBounded(f, { cap: 10, overflow: "truncate" })).toMatchObject({ kind: "ok", truncated: true });
+    const link = join(d, "l.json");
+    symlinkSync(f, link);
+    expect(readBounded(link, { cap: 1000 }), "a symlink leaf is never followed").toMatchObject({ kind: "refused", reason: "is a symlink" });
+    expect(readBounded(link, { cap: 1000, follow: true }).kind).toBe("ok");
+    expect(readBounded(d, { cap: 1000 }), "a directory is not a regular file").toMatchObject({ kind: "refused" });
+    const st = lstatSync(f);
+    expect(readBounded(f, { cap: 1000, expect: { dev: st.dev, ino: st.ino + 1 } }), "an inode other than the lstat's is refused").toMatchObject({
+      kind: "refused",
+    });
+    expect(readBounded(join(d, "missing"), { cap: 1 })).toEqual({ kind: "absent" });
+  });
+
+  test.skipIf(process.platform === "win32")("a FIFO as repo rules.json or as a hook log never blocks Deck main", () => {
+    const h = harness();
+    const cwd = tmp();
+    mkdirSync(join(cwd, ".claude", "claude-peers"), { recursive: true });
+    const mk = spawnSync("mkfifo", [join(cwd, REPO_RULES_REL)]);
+    if (mk.status !== 0) throw new Error(`mkfifo failed: ${mk.stderr}`);
+    const id = randomUUID();
+    const t0 = Date.now();
+    h.svc.fileFor({ id, cwd });
+    expect(h.svc.list().projects[0]!.file.status, "a FIFO rules file is invalid, never opened for a blocking read").toBe("invalid");
+    const log = h.svc.logPathOf(id);
+    mkdirSync(join(log, ".."), { recursive: true });
+    spawnSync("mkfifo", [log]);
+    h.svc.tick();
+    expect(Date.now() - t0, "no FIFO may block the rules poll").toBeLessThan(2000);
+    expect(h.errors.join("\n")).toContain("is not a regular file, not read");
+  });
+
+  test("a repo rules file larger than the cap is invalid without being read", () => {
+    const h = harness();
+    const cwd = tmp();
+    writeRepoRules(cwd, " ".repeat(MAX_FILE_BYTES + 1));
+    h.svc.fileFor({ id: randomUUID(), cwd });
+    const file = h.svc.list().projects[0]!.file;
+    expect(file.status).toBe("invalid");
+    expect(file.text, "an oversized file must not be loaded").toBeNull();
+    expect(file.errors.join("\n")).toContain("exceeds");
+  });
+
+  test("repoRulesPathForWrite creates nothing outside when .claude points outside the root", () => {
+    const cwd = tmp();
+    const outside = tmp();
+    symlinkSync(outside, join(cwd, ".claude"), "junction");
+    expect(() => repoRulesPathForWrite(cwd)).toThrow(/outside the project root/);
+    expect(existsSync(join(outside, "claude-peers")), "no directory may be created through the symlink before the check").toBe(false);
+    const dangling = tmp();
+    symlinkSync(join(outside, "not-yet"), join(dangling, ".claude"), "junction");
+    expect(() => repoRulesPathForWrite(dangling)).toThrow(/symlink|outside/);
+    expect(existsSync(join(outside, "not-yet")), "a dangling symlink is not followed by mkdir").toBe(false);
+  });
+
+  test("a host effective file modified or deleted outside the Deck is rewritten, with a trace", () => {
+    const h = harness();
+    const path = h.svc.fileFor({ id: randomUUID(), cwd: tmp() });
+    writeFileSync(path, JSON.stringify({ version: 1, rules: [] }));
+    h.svc.tick();
+    expect(effective(path), "an emptied effective file must be restored on the next poll").toEqual(KORY_IDS);
+    rmSync(path);
+    h.svc.tick();
+    expect(effective(path), "a deleted effective file must be restored on the next poll").toEqual(KORY_IDS);
+    expect(h.errors.filter((e) => e.includes("modified or removed outside the Deck"))).toHaveLength(2);
+  });
+});
+
+describe("dialogs, memos and probe workers are bounded", () => {
+  test("one open dialog per root; a change meanwhile is coalesced; the interval holds later ones", async () => {
+    const h = harness();
+    const cwd = tmp();
+    let close: (v: boolean) => void = () => {};
+    const svc = new TtsrService({
+      globalRulesFile: () => h.globalFile,
+      approvalsFile: () => h.approvalsFile,
+      sessionDir: () => join(h.dir, "state", "sessions", "g"),
+      getDisabled: () => [],
+      reportError: (s, m) => h.errors.push(`${s}: ${m}`),
+      journal: () => {},
+      promptApproval: (req) => {
+        h.prompts.push(req);
+        return new Promise<boolean>((r) => (close = r));
+      },
+      onChanged: () => {},
+      resolveProject: (c) => ({ root: c, projectKey: `local:${c}` }),
+      defer: (fn) => fn(),
+      now: () => h.clock.now,
+      probeRules: () => [],
+    });
+    writeRepoRules(cwd, fileOf(rule("a")));
+    svc.fileFor({ id: randomUUID(), cwd });
+    for (let i = 0; i < 5; i++) {
+      h.clock.now += TTSR_PROMPT_INTERVAL_MS;
+      writeRepoRules(cwd, fileOf(rule(`b${i}`)));
+      svc.tick();
+    }
+    expect(h.prompts, "an agent rewriting its file must not stack dialogs for one root").toHaveLength(1);
+    close(false);
+    await flush();
+    expect(h.prompts.map((p) => p.rules[0]!.id), "closing re-evaluates the CURRENT content only").toEqual(["a", "b4"]);
+    close(false);
+    await flush();
+    writeRepoRules(cwd, fileOf(rule("c")));
+    svc.tick();
+    await flush();
+    expect(h.prompts, "a change inside the interval waits in Settings, no dialog").toHaveLength(2);
+  });
+
+  test("per-run memos are bounded structures", () => {
+    const h = harness();
+    const svc = h.svc as unknown as Record<string, unknown>;
+    for (const name of ["prompted", "reportedInvalid"]) {
+      expect(svc[name] instanceof BoundedSet, `${name} must be bounded: every agent rewrite mints a new key`).toBe(true);
+    }
+    for (const name of ["probes", "lastPromptAt"]) {
+      expect(svc[name] instanceof BoundedMap, `${name} must be bounded: every agent rewrite mints a new key`).toBe(true);
+    }
+    const set = new BoundedSet(3);
+    for (const k of ["a", "b", "c", "d"]) set.add(k);
+    expect(set.has("a"), "the oldest entry is evicted past the cap").toBe(false);
+    expect(set.has("d")).toBe(true);
+    const map = new BoundedMap<number>(2);
+    map.set("a", 1);
+    map.set("b", 2);
+    map.set("c", 3);
+    expect(map.size).toBe(2);
+    expect(map.get("a")).toBeUndefined();
+  });
+
+  test(`at most TTSR_PROBE_CONCURRENCY probes run at once; the rest queue`, async () => {
+    const releases: Array<() => void> = [];
+    let started = 0;
+    const h = harness({
+      probeRules: () => {
+        started++;
+        return new Promise<string[]>((r) => releases.push(() => r([])));
+      },
+    });
+    const dirs = Array.from({ length: 5 }, () => tmp());
+    dirs.forEach((d, i) => {
+      writeRepoRules(d, fileOf(rule(`r${i}`)));
+      h.svc.fileFor({ id: randomUUID(), cwd: d });
+    });
+    expect(started, "each probe holds a worker thread: the count must be capped").toBe(TTSR_PROBE_CONCURRENCY);
+    releases.shift()!();
+    await flush();
+    expect(started, "a finished probe lets the next queued one start").toBe(TTSR_PROBE_CONCURRENCY + 1);
+    while (releases.length > 0) {
+      releases.shift()!();
+      await flush();
+    }
+    expect(started).toBe(5);
+  });
+});
+
+describe("hook log forwarding is sanitized and rate-limited per tile", () => {
+  test("control characters neutralized, lines truncated, <= TTSR_LOG_MINUTE_LINES per minute then one summary", () => {
+    const h = harness();
+    const id = randomUUID();
+    h.svc.fileFor({ id, cwd: tmp() });
+    const log = h.svc.logPathOf(id);
+    mkdirSync(join(log, ".."), { recursive: true });
+    writeFileSync(log, `evil \u001b[2J\u202etext ${"z".repeat(2000)}\n`);
+    h.svc.tick();
+    const hook = (): string[] => h.errors.filter((e) => e.startsWith("ttsr-hook: "));
+    const first = hook()[0]!;
+    expect(first, "an escape sequence from a sandbox log must not reach the Deck log raw").not.toContain("\u001b");
+    expect(first).not.toContain("\u202e");
+    expect(first.length, "a forwarded line is truncated").toBeLessThan(TTSR_LOG_LINE_CHARS + 100);
+    for (let t = 0; t < 15; t++) {
+      appendFileSync(log, Array.from({ length: 30 }, (_, i) => `t${t}-${i}`).join("\n") + "\n");
+      h.svc.tick();
+    }
+    const lines = hook().filter((l) => !l.includes("suppressed"));
+    expect(lines.length, "per-minute cap on forwarded lines of one tile").toBeLessThanOrEqual(TTSR_LOG_MINUTE_LINES);
+    const before = hook().length;
+    h.clock.now += 60_000;
+    h.svc.tick();
+    const summary = hook().slice(before);
+    expect(summary.some((l) => /\+\d+ more lines suppressed/.test(l)), "the suppressed count is reported once the window rolls").toBe(true);
   });
 });

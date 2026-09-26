@@ -179,8 +179,10 @@ const api: DeckApi = {
   rulesList: () => ipcRenderer.invoke('rules:list'),
   rulesSetEnabled: (toggleKey: string, enabled: boolean) =>
     ipcRenderer.invoke('rules:set-enabled', toggleKey, enabled),
-  rulesSaveGlobal: (text: string) => ipcRenderer.invoke('rules:save-global', text),
-  rulesSaveRepo: (projectDir: string, text: string) => ipcRenderer.invoke('rules:save-repo', projectDir, text),
+  rulesSaveGlobal: (text: string, expectedHash: string | null) =>
+    ipcRenderer.invoke('rules:save-global', text, expectedHash),
+  rulesSaveRepo: (projectDir: string, text: string, expectedHash: string | null) =>
+    ipcRenderer.invoke('rules:save-repo', projectDir, text, expectedHash),
   rulesApproveRepo: (projectDir: string, hash: string) =>
     ipcRenderer.invoke('rules:approve-repo', projectDir, hash),
   rulesTest: (rule: unknown, sampleText: string, opts?: TtsrTestOptions) =>

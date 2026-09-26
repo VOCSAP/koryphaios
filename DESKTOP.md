@@ -433,14 +433,28 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   (`<projectDir>/.claude/claude-peers/rules.json`, agent- or human-authored).
   Shared engine (`shared/ttsr-rules.ts`, node builtins only): validator,
   field extraction, evaluation, hash. A repo file is a cloned-repo value
-  (hostile input #1): the hook never sees it until its sha256 is approved for
-  that project key (`main/ttsr-approvals.ts`); any edit re-stages it as
-  pending. `main/ttsr-service.ts` compiles one effective file per tile
-  (`CLAUDE_PEERS_TTSR_FILE`), never a per-project file (two worktrees may
-  diverge). Settings > Rules (`RulesSettings.tsx`) lists the three sources,
-  toggles them (`rules:set-enabled`), edits/approves a file
+  (hostile input #1): the hook never sees it until approved
+  (`main/ttsr-approvals.ts`). Each canonical project root records the ONE
+  hash it applies; any other content there, an older approved version
+  included, is pending again (a dialog, at most one open per root and one
+  per minute, showing every field of every rule in full, or only "Open
+  Settings" when too long). A root with no hash yet (new worktree) applies
+  and adopts a hash already approved for its project key. An applied file
+  that changes or disappears is journaled and traced once
+  (`reportError('ttsr')`); `rules:list` then carries `file.previousHash`
+  and, for a deletion, `file.removedApproved`. Every read of a file an
+  agent can write (repo rules, sandbox hook logs, Write targets in the hook)
+  goes through `shared/ttsr-fs.ts` `readBounded`: one open, no follow, no
+  block, checks on the descriptor, capped. `main/ttsr-service.ts` compiles
+  one effective file per tile (`CLAUDE_PEERS_TTSR_FILE`), never a
+  per-project file (two worktrees may diverge), and rewrites it if touched
+  outside the Deck. Settings > Rules (`RulesSettings.tsx`) lists the three
+  sources, toggles them (`rules:set-enabled`), edits/approves a file
   (`rules:save-global`/`save-repo`/`approve-repo`), and tests a draft rule
-  against a sample (`rules:test`, a worker with a deadline). The `kory-rules`
+  against a sample (`rules:test`, a worker with a deadline). A save carries
+  the hash the editor opened (`null` = absent): refused `stale` if the file
+  changed, `pending` if the repo file holds unapproved content; saving over
+  an invalid repo file writes it but leaves it pending. The `kory-rules`
   CLI (`desktop/cli/kory-rules.ts`) and the `repo-rules` skill let an agent
   author a repo rule without touching the Deck; it stays inactive until the
   operator approves it here.

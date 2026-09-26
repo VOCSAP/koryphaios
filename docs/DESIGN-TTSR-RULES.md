@@ -413,11 +413,27 @@ foi.
 - **Vitesse des motifs** : le validateur synchrone ne suffit pas contre le
   ReDoS. Une sonde chronométrée (worker, budget par entrée, échéance dure)
   passe chaque motif sur des entrées adversariales construites à partir du
-  motif ; elle tourne dans `kory-rules check`, aux enregistrements depuis le
-  Deck et à chaque chargement d'un fichier global ou de dépôt, avant toute
-  compilation ou approbation. Le hook évalue les `deny` d'abord, règles Kory
-  en tête, et s'arrête au premier : une règle lente ne peut plus annuler un
-  blocage Kory. Le champ `command` est plafonné à 16 Kio.
+  motif (longues répétitions de ses caractères littéraux, des caractères de
+  ses classes et propriétés Unicode, de graines par défaut, dont une
+  majuscule, un chiffre et, avec le flag `u`, des caractères non ASCII) ;
+  elle tourne dans `kory-rules check`, aux enregistrements depuis le Deck et
+  à chaque chargement d'un fichier global ou de dépôt, avant toute
+  compilation ou approbation. C'est une heuristique : elle écarte les
+  explosions déclenchées par la répétition d'une graine ou d'une paire, pas
+  tout motif lent (une entrée qui alterne trois classes, par exemple, peut
+  lui échapper). La garantie tient ailleurs : le hook évalue les `deny`
+  d'abord, règles Kory en tête, et s'arrête au premier, donc une règle lente
+  peut retarder le hook mais ne peut plus annuler un blocage Kory. Le champ
+  `command` est plafonné à 16 Kio.
+- **Approbation par racine** : le magasin garde, en plus de l'ensemble des
+  hashes approuvés par `project_key`, le hash appliqué par chaque racine
+  canonique de projet. Toute autre version à cette racine, y compris une
+  version antérieurement approuvée, repasse en attente ; une racine sans
+  hash (nouveau worktree) applique et adopte un hash déjà approuvé pour sa
+  clé. Un fichier appliqué qui change ou disparaît est tracé une fois. Le
+  dialogue d'approbation montre tous les champs de toutes les règles en
+  entier, ou renvoie vers Réglages > Règles quand c'est trop long ; au plus
+  un dialogue ouvert par racine et un par minute.
 - **`Write` et le code existant** (§8.5 tranché) : une règle `added` ne se
   déclenche sur un `Write` que si le nouveau contenu contient plus
   d'occurrences du motif que le fichier actuel sur disque. Seul ce que l'agent

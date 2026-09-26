@@ -159,11 +159,11 @@ function baseList(projectFileStatus: "approved" | "pending" | "invalid" | "absen
 
 let setEnabledCalls: Array<[string, boolean]> = [];
 let approveCalls: Array<[string, string]> = [];
-let saveGlobalCalls: string[] = [];
-let saveRepoCalls: Array<[string, string]> = [];
+let saveGlobalCalls: Array<[string, string | null]> = [];
+let saveRepoCalls: Array<[string, string, string | null]> = [];
 let currentList: TtsrRulesList = baseList();
 let approveResult: TtsrApproveResult = { ok: true };
-let saveResult: TtsrSaveResult = { ok: true, hash: "newhash" };
+let saveResult: TtsrSaveResult = { ok: true, hash: "newhash", approved: true };
 let reportedErrors: Array<[string, string]> = [];
 
 function installApi(): void {
@@ -173,12 +173,12 @@ function installApi(): void {
       setEnabledCalls.push([toggleKey, enabled]);
       return Promise.resolve(currentList);
     },
-    rulesSaveGlobal: (text: string) => {
-      saveGlobalCalls.push(text);
+    rulesSaveGlobal: (text: string, expectedHash: string | null) => {
+      saveGlobalCalls.push([text, expectedHash]);
       return Promise.resolve(saveResult);
     },
-    rulesSaveRepo: (projectDir: string, text: string) => {
-      saveRepoCalls.push([projectDir, text]);
+    rulesSaveRepo: (projectDir: string, text: string, expectedHash: string | null) => {
+      saveRepoCalls.push([projectDir, text, expectedHash]);
       return Promise.resolve(saveResult);
     },
     rulesApproveRepo: (projectDir: string, hash: string) => {
@@ -205,7 +205,7 @@ beforeEach(() => {
   reportedErrors = [];
   currentList = baseList();
   approveResult = { ok: true };
-  saveResult = { ok: true, hash: "newhash" };
+  saveResult = { ok: true, hash: "newhash", approved: true };
   fakeUseDeck.setState(initialFakeState(), true);
   installApi();
   container = document.createElement("div");
@@ -332,11 +332,183 @@ test("saving an edited global rule rebuilds the WHOLE file, keeping other rules 
   });
 
   expect(saveGlobalCalls.length).toBe(1);
-  const written = JSON.parse(saveGlobalCalls[0]!) as { version: number; rules: TtsrRule[] };
+  const [savedText, savedHash] = saveGlobalCalls[0]!;
+  const written = JSON.parse(savedText) as { version: number; rules: TtsrRule[] };
   expect(written.version).toBe(1);
   expect(written.rules).toHaveLength(1);
   expect(written.rules[0]!.id).toBe("no-console-log");
   expect(written.rules[0]!.message).toBe("Use the shared log sink, never console.log.");
   // Untouched fields survive the rebuild verbatim.
   expect(written.rules[0]!.pattern).toBe(globalRule().pattern);
+  // (minor 6) the hash passed is the one the file had when the modal was opened.
+  expect(savedHash).toBe("globalhash");
+});
+
+test("(M3) two worktrees sharing a project_key: editing project B's row saves to B's projectDir and B's hash", async () => {
+  const rowFor = (projectDir: string, hash: string) => ({
+    qualifiedId: "repo/no-emoji-ui",
+    source: "repo" as const,
+    toggleKey: `repo:${projectDir}:no-emoji-ui`,
+    enabled: true,
+    active: true,
+    rule: repoRule(),
+  });
+  const projectA = {
+    projectDir: "/worktree-a",
+    projectKey: "shared-key",
+    sessionIds: ["sA"],
+    file: {
+      path: "/worktree-a/.claude/claude-peers/rules.json",
+      status: "approved" as const,
+      hash: "hash-a",
+      errors: [],
+      text: JSON.stringify({ version: 1, rules: [repoRule()] }, null, 2),
+    },
+    rules: [rowFor("/worktree-a", "hash-a")],
+  };
+  const projectB = {
+    projectDir: "/worktree-b",
+    projectKey: "shared-key",
+    sessionIds: ["sB"],
+    file: {
+      path: "/worktree-b/.claude/claude-peers/rules.json",
+      status: "approved" as const,
+      hash: "hash-b",
+      errors: [],
+      text: JSON.stringify({ version: 1, rules: [repoRule()] }, null, 2),
+    },
+    rules: [rowFor("/worktree-b", "hash-b")],
+  };
+  currentList = { ...baseList(), projects: [projectA, projectB] };
+  await mount();
+
+  const editButtons = [...container.querySelectorAll("button")].filter(
+    (b) => b.textContent === "rules.edit"
+  ) as HTMLButtonElement[];
+  // One repo Edit button per project section (plus the global one, already exercised above).
+  const repoEditButtons = editButtons.slice(-2);
+  expect(repoEditButtons.length).toBe(2);
+  act(() => {
+    repoEditButtons[1]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+
+  const saveBtn = [...container.querySelectorAll("button")].find((b) => b.textContent === "common.save")!;
+  act(() => {
+    saveBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+
+  expect(saveRepoCalls.length).toBe(1);
+  const [savedDir, , savedHash] = saveRepoCalls[0]!;
+  expect(savedDir).toBe("/worktree-b");
+  expect(savedHash).toBe("hash-b");
+});
+
+test("(M4b) a pending repo file locks Edit/Add to View-only until approved", async () => {
+  currentList = baseList("pending");
+  await mount();
+
+  // The repo row's action button reads View, not Edit, while the file is pending.
+  const repoSection = [...container.querySelectorAll("section.rules-section")].find((s) =>
+    s.textContent?.includes("rules.badgePending")
+  )!;
+  const viewButtons = [...repoSection.querySelectorAll("button")].filter((b) => b.textContent === "rules.view");
+  expect(viewButtons.length).toBeGreaterThan(0);
+  const editButtons = [...repoSection.querySelectorAll("button")].filter((b) => b.textContent === "rules.edit");
+  expect(editButtons.length).toBe(0);
+
+  // Add a rule is present but disabled, with a tooltip naming what it guards.
+  const addBtn = [...repoSection.querySelectorAll("button")].find((b) => b.textContent === "rules.addRule") as
+    | HTMLButtonElement
+    | undefined;
+  expect(addBtn).not.toBeUndefined();
+  expect(addBtn!.disabled).toBe(true);
+  expect(addBtn!.title).toBe("rules.addDisabledPending");
+
+  // Opening the row shows a read-only modal: no Save, no Delete.
+  act(() => {
+    viewButtons[0]!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  const saveBtn = [...container.querySelectorAll("button")].find((b) => b.textContent === "common.save");
+  expect(saveBtn).toBeUndefined();
+  const deleteBtn = [...container.querySelectorAll("button")].find((b) => b.textContent === "rules.deleteRule");
+  expect(deleteBtn).toBeUndefined();
+});
+
+test("(minor 6) a stale save reloads the list and warns the operator instead of overwriting", async () => {
+  saveResult = { ok: false, reason: "stale", errors: [] };
+  await mount();
+  const editBtn = [...container.querySelectorAll("button")].find((b) => b.textContent === "rules.edit")!;
+  act(() => {
+    editBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  const saveBtn = [...container.querySelectorAll("button")].find((b) => b.textContent === "common.save")!;
+  act(() => {
+    saveBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(container.textContent).toContain("rules.saveStale");
+  // Refused as stale is not a silent error swallow, but it is also not reported as one:
+  // the operator sees the notice, nothing goes to the error sink.
+  expect(reportedErrors).toEqual([]);
+});
+
+test("(minor 6) a save refused as pending tells the operator, distinct from a stale one", async () => {
+  saveResult = { ok: false, reason: "pending", errors: [] };
+  await mount();
+  const editBtn = [...container.querySelectorAll("button")].find((b) => b.textContent === "rules.edit")!;
+  act(() => {
+    editBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  const saveBtn = [...container.querySelectorAll("button")].find((b) => b.textContent === "common.save")!;
+  act(() => {
+    saveBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(container.textContent).toContain("rules.savePending");
+});
+
+test("saving from a raw editor with approved:false tells the operator the file is still pending", async () => {
+  saveResult = { ok: true, hash: "fixedhash", approved: false };
+  currentList = baseList("invalid");
+  await mount();
+  const editRawBtn = [...container.querySelectorAll("button")].find((b) => b.textContent === "rules.editRawFile")!;
+  act(() => {
+    editRawBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  const saveBtn = [...container.querySelectorAll("button")].find((b) => b.textContent === "common.save")!;
+  act(() => {
+    saveBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
+  await act(async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  expect(container.textContent).toContain("rules.savedPendingApproval");
+});
+
+test("a removed approved repo file is surfaced, not shown as a plain absent file", async () => {
+  const removed = baseList("absent");
+  removed.projects[0].file = { ...removed.projects[0].file, removedApproved: true, previousHash: "oldhash" };
+  currentList = removed;
+  await mount();
+  expect(container.textContent, "deleting an approved rules file must be visible to the operator").toContain("rules.approvedRemoved");
+});
+
+test("a replaced approved repo file is surfaced as changed, not as a plain pending file", async () => {
+  const changed = baseList("pending");
+  changed.projects[0].file = { ...changed.projects[0].file, previousHash: "oldhash" };
+  currentList = changed;
+  await mount();
+  expect(container.textContent, "changing an approved rules file must be visible to the operator").toContain("rules.approvedChanged");
+  expect(container.textContent).not.toContain("rules.approvedRemoved");
 });

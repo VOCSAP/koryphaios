@@ -689,3 +689,35 @@ describe("buildHookOutput", () => {
     expect(out).toEqual({ hookSpecificOutput: { hookEventName: "PostToolUse", additionalContext: "[repo/d] msg repo/d" } });
   });
 });
+
+describe("timing probe seeds", () => {
+  test("a Unicode property yields characters it accepts; defaults include an uppercase letter and a digit", async () => {
+    const { probeSeeds } = await import("../desktop/src/shared/ttsr-probe");
+    expect(probeSeeds("\\p{Lu}+x", "u"), "\\p{Lu} must be probed with uppercase runs, the only ones it accepts").toContain("A");
+    expect(probeSeeds("\\p{Ll}+x", "u")).toContain("a");
+    expect(probeSeeds("\\p{Nd}+x", "u")).toContain("0");
+    expect(probeSeeds("\\p{Extended_Pictographic}+x", "u"), "an emoji property needs an emoji seed").toContain("\u{1f600}");
+    const unknown = probeSeeds("\\p{Script=Greek}+x", "u");
+    expect(unknown.length, "an unknown property falls back to several scripts").toBeGreaterThan(5);
+    expect(unknown).toContain("α");
+    expect(probeSeeds("x"), "default seeds").toEqual(expect.arrayContaining(["a", "A", "0"]));
+    expect(probeSeeds(".+x", "u"), "a u-flag pattern also gets a non-ASCII seed").toContain("é");
+  });
+
+  test("the probe rejects cubic \\p{Lu} and bounded [A-Z] repetitions the old 'a'-only seeds let through", async () => {
+    const { probeRulesSpeed } = await import("../desktop/src/shared/ttsr-probe");
+    const mk = (pattern: string, flags?: string) => ({
+      id: "r",
+      event: "PreToolUse" as const,
+      tools: ["Bash" as const],
+      field: "command" as const,
+      pattern,
+      ...(flags ? { flags } : {}),
+      mode: "deny" as const,
+      message: "Do not do this; do the other thing instead.",
+    });
+    const errors = await probeRulesSpeed([mk("\\p{Lu}{0,99}\\p{Lu}{0,99}\\p{Lu}{0,99};", "u"), mk("[A-Z]{0,200}[A-Z]{0,200}[A-Z]{0,200};")]);
+    expect(errors, "both slow patterns must be refused by the timing gate").toHaveLength(2);
+    for (const e of errors) expect(e).toContain("too slow");
+  }, 30000);
+});

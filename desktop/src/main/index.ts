@@ -35,7 +35,8 @@ import {
   type SecretCipher
 } from './scope-secrets'
 import { applyProviderKeyPatch, sanitizeProviders } from './provider-secrets'
-import { GLOBAL_RULES_FILE, TtsrService, type TtsrApprovalRequest } from './ttsr-service'
+import { GLOBAL_RULES_FILE, REPO_RULES_REL, TtsrService, type TtsrApprovalRequest } from './ttsr-service'
+import { approvalDialogBody, displaySafe } from './ttsr-dialog'
 import { sanitizeTtsrDisabled } from './ttsr-toggles'
 import {
   globalConfigDir,
@@ -724,19 +725,39 @@ function composeSandboxAppendPrompt(sessionId: string, command: string, launch: 
 }
 
 /**
- * Minimal approval of a pending repo rules file, one per (project key, hash)
- * per run: asynchronous, never on the spawn path. "Not now" leaves the file
- * pending; Settings > Rules offers the approval again.
+ * Approval dialog of a pending repo rules file: asynchronous, never on the
+ * spawn path, at most one open per project root (TtsrService). It shows every
+ * field of every rule in full, agent text neutralized: the operator approves
+ * exactly what he reads. Too long for a dialog, it offers no Approve at all,
+ * only Settings > Rules. "Not now" leaves the file pending.
  */
 async function promptTtsrApproval(req: TtsrApprovalRequest): Promise<boolean> {
   const isFr = isFrLocale()
-  const cut = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max - 1)}…` : text)
-  const shown = req.rules.slice(0, 10)
-  const lines = shown.map((r) => `• ${r.id} [${r.mode}, ${r.event} ${r.tools.join('/')}]\n  ${cut(r.message, 160)}`)
-  if (req.rules.length > shown.length) {
-    lines.push(isFr ? `(+${req.rules.length - shown.length} autres règles)` : `(+${req.rules.length - shown.length} more rules)`)
+  const body = approvalDialogBody(req.rules, isFr)
+  const where = isFr
+    ? `Projet : ${displaySafe(req.projectDir)}\nFichier : ${REPO_RULES_REL}`
+    : `Project: ${displaySafe(req.projectDir)}\nFile: ${REPO_RULES_REL}`
+  const win = mainWindow
+  const show = (options: Electron.MessageBoxOptions): Promise<Electron.MessageBoxReturnValue> =>
+    win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options)
+  if (!body.fits) {
+    const { response } = await show({
+      type: 'warning',
+      buttons: isFr ? ['Ouvrir Réglages › Règles', 'Plus tard'] : ['Open Settings › Rules', 'Not now'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Koryphaios',
+      message: isFr
+        ? 'Ce dépôt définit ses propres règles de garde pour les agents.'
+        : 'This repository defines its own guard rules for agents.',
+      detail: isFr
+        ? `${where}\n\n${req.rules.length} règle(s), trop longues pour cette fenêtre. Relis-les et approuve-les dans Réglages › Règles ; d'ici là elles ne s'appliquent pas.`
+        : `${where}\n\n${req.rules.length} rule(s), too long for this dialog. Review and approve them in Settings › Rules; until then they do not apply.`
+    })
+    if (response === 0) mainWindow?.webContents.send('menu:settings')
+    return false
   }
-  const options: Electron.MessageBoxOptions = {
+  const { response } = await show({
     type: 'warning',
     buttons: isFr ? ['Approuver', 'Plus tard'] : ['Approve', 'Not now'],
     defaultId: 1,
@@ -746,11 +767,9 @@ async function promptTtsrApproval(req: TtsrApprovalRequest): Promise<boolean> {
       ? 'Ce dépôt définit ses propres règles de garde pour les agents.'
       : 'This repository defines its own guard rules for agents.',
     detail: isFr
-      ? `Projet : ${req.projectDir}\nFichier : .claude/claude-peers/rules.json\n\n${lines.join('\n')}\n\nUne règle « deny » bloque l'appel d'outil de l'agent ; une règle « warn » lui injecte son message. Toute modification du fichier demandera une nouvelle approbation. N'approuve que si tu fais confiance à ce dépôt.`
-      : `Project: ${req.projectDir}\nFile: .claude/claude-peers/rules.json\n\n${lines.join('\n')}\n\nA "deny" rule blocks the agent's tool call; a "warn" rule injects its message. Any change to the file asks for approval again. Approve only if you trust this repository.`
-  }
-  const win = mainWindow
-  const { response } = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options)
+      ? `${where}\n\n${body.text}\n\nUne règle « deny » bloque l'appel d'outil de l'agent ; une règle « warn » lui injecte son message. Toute modification du fichier demandera une nouvelle approbation. N'approuve que si tu fais confiance à ce dépôt.`
+      : `${where}\n\n${body.text}\n\nA "deny" rule blocks the agent's tool call; a "warn" rule injects its message. Any change to the file asks for approval again. Approve only if you trust this repository.`
+  })
   return response === 0
 }
 

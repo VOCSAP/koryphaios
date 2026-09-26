@@ -1087,9 +1087,15 @@ export function registerIpc({
     journal.add('session', `guard rule ${toggleKey} ${enabled ? 'enabled' : 'disabled'}`)
     return ttsr.list()
   })
-  regHandle('rules:save-global', (_e, text: unknown) => ttsr.saveGlobal(requireText(text)))
-  regHandle('rules:save-repo', async (_e, dir: unknown, text: unknown) =>
-    ttsr.saveRepo(await rulesProject(dir), requireText(text))
+  const requireExpectedHash = (hash: unknown): string | null => {
+    if (hash === null || (typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash))) return hash
+    throw new Error('rules: expectedHash must be null or a sha256 hex string')
+  }
+  regHandle('rules:save-global', (_e, text: unknown, expectedHash: unknown) =>
+    ttsr.saveGlobal(requireText(text), requireExpectedHash(expectedHash))
+  )
+  regHandle('rules:save-repo', async (_e, dir: unknown, text: unknown, expectedHash: unknown) =>
+    ttsr.saveRepo(await rulesProject(dir), requireText(text), requireExpectedHash(expectedHash))
   )
   regHandle('rules:approve-repo', async (_e, dir: unknown, hash: unknown) => {
     if (typeof hash !== 'string') throw new Error('rules: hash must be a string')

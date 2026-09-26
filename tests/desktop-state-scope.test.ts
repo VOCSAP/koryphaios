@@ -132,7 +132,7 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
   "ttsr-approvals.json": {
     kind: "literal",
     scope: "project",
-    reason: "operator-approved repo guard-rule files, a set of sha256 per project_key; the trust decision follows the repo, every window on it shares it",
+    reason: "operator-approved repo guard-rule files: a set of sha256 per project_key and the hash each canonical project root applies; the trust decision follows the repo, every window on it shares it",
   },
   ttsrSandboxCopyName: {
     kind: "constructor",

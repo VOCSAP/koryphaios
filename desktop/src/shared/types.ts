@@ -1918,6 +1918,18 @@ export interface TtsrFileState {
   errors: string[]
   /** File text as read, for the editor (kept when invalid so it can be fixed), null when absent. */
   text: string | null
+  /**
+   * Repo file only: hash of the approved file this project root applied
+   * before, when the file on disk is no longer it (changed: `status` is
+   * 'pending' or 'invalid'; deleted: 'absent'). Absent otherwise.
+   */
+  previousHash?: string
+  /**
+   * Repo file only: true when `status` is 'absent' because a file this root
+   * applied was removed. The rules it held no longer apply; the UI shows the
+   * removal instead of a plain "no file".
+   */
+  removedApproved?: boolean
 }
 
 /** One project of the live tiles, with its repo rules file. */
@@ -1943,8 +1955,17 @@ export interface TtsrRulesList {
   projects: TtsrRepoProject[]
 }
 
-/** Save of a rules file: refused with every validation error, or written with its new hash. */
-export type TtsrSaveResult = { ok: true; hash: string } | { ok: false; errors: string[] }
+/**
+ * Save of a rules file. Written: its new hash, `approved` true when the rules
+ * are in effect (always for the global file; a repo file saved over a pending
+ * or invalid base stays pending). Refused: 'invalid' (validation or timing
+ * errors), 'stale' (the file on disk is no longer the one the editor opened:
+ * reload), 'pending' (the repo file on disk holds unapproved content: review
+ * and approve it first), 'io' (unreadable file, unsafe path, write failure).
+ */
+export type TtsrSaveResult =
+  | { ok: true; hash: string; approved: boolean }
+  | { ok: false; reason: 'invalid' | 'stale' | 'pending' | 'io'; errors: string[] }
 
 /**
  * Approval of a repo file. 'stale': the file changed since the hash was read
@@ -2137,15 +2158,21 @@ export interface DeckApi {
    * malformed key. Recompiles every tile; returns the new list.
    */
   rulesSetEnabled(toggleKey: string, enabled: boolean): Promise<TtsrRulesList>
-  /** Validate then write the operator's global rules file (whole JSON text). */
-  rulesSaveGlobal(text: string): Promise<TtsrSaveResult>
+  /**
+   * Validate then write the operator's global rules file (whole JSON text).
+   * `expectedHash`: the file hash the editor was opened on (`null`: absent);
+   * refused as 'stale' when the file on disk differs.
+   */
+  rulesSaveGlobal(text: string, expectedHash: string | null): Promise<TtsrSaveResult>
   /**
    * Validate then write a project's `.claude/claude-peers/rules.json`.
    * `projectDir` is re-validated main-side (a live tile's project root or an
-   * allowed work dir). The operator authored the content, so the new hash is
-   * approved in the same call.
+   * allowed work dir). `expectedHash` as for `rulesSaveGlobal`. The new hash
+   * is approved in the same call only when the base was absent or the file
+   * this root applies; a pending base is refused ('pending'), an invalid base
+   * is overwritten but the result stays pending (`approved: false`).
    */
-  rulesSaveRepo(projectDir: string, text: string): Promise<TtsrSaveResult>
+  rulesSaveRepo(projectDir: string, text: string, expectedHash: string | null): Promise<TtsrSaveResult>
   /** Approve a pending repo file; refused unless `hash` is the file's CURRENT hash. */
   rulesApproveRepo(projectDir: string, hash: string): Promise<TtsrApproveResult>
   /**

@@ -1283,6 +1283,8 @@ export const EN_DEFAULTS: Record<string, string> = {
   'rules.editRawFile': 'Edit the file',
   'rules.addRule': 'Add a rule',
   'rules.absentHint': 'No rules file yet. An agent can create one with the repo-rules skill, or add one here.',
+  'rules.approvedRemoved': 'The approved rules file of this project was deleted: its rules no longer apply.',
+  'rules.approvedChanged': 'The approved rules file of this project was changed on disk: its rules no longer apply until you approve the new content.',
   'rules.approve': 'Approve',
   'rules.toggleDisabledPending': 'This rule is inactive until its file is approved.',
   'rules.deleteConfirmTitle': 'Delete this rule?',
@@ -1314,6 +1316,11 @@ export const EN_DEFAULTS: Record<string, string> = {
   'rules.deleteRule': 'Delete rule',
   'rules.rawJsonEditor': 'Edit the raw file',
   'rules.rawJsonHelp': 'The file does not parse or fails validation. Edit its JSON text directly and save.',
+  'rules.editDisabledPending': 'Review and approve this file before editing its rules.',
+  'rules.addDisabledPending': 'Review and approve this file before adding a rule.',
+  'rules.saveStale': 'The file changed on disk since you opened it. Reloaded — your edit was not saved.',
+  'rules.savePending': "This file's approval status changed since you opened it. Reloaded — your edit was not saved.",
+  'rules.savedPendingApproval': 'Saved. This file still needs approval before its rules become active.',
 }
 
 /**

@@ -58,13 +58,28 @@ interface Props {
   rule: TtsrRule | null
   /** Every OTHER rule already in the target file's rules array (raw, unqualified). */
   existingRules: TtsrRule[]
+  /** `file.hash` of the file state this modal was opened from; null when the file was absent. */
+  expectedHash: string | null
   onClose: () => void
-  onSaved: () => void
+  /** `approved` mirrors the save result: false when the file is now saved but still pending approval. */
+  onSaved: (approved: boolean) => void
+  /** The save was refused because the file moved under us: the parent reloads instead of retrying. */
+  onConflict: (reason: 'stale' | 'pending') => void
   /** Present only in 'edit' mode: asks the parent for a delete confirmation. */
   onDeleteRequested?: () => void
 }
 
-export function RuleEditorModal({ mode, target, rule, existingRules, onClose, onSaved, onDeleteRequested }: Props): React.JSX.Element {
+export function RuleEditorModal({
+  mode,
+  target,
+  rule,
+  existingRules,
+  expectedHash,
+  onClose,
+  onSaved,
+  onConflict,
+  onDeleteRequested
+}: Props): React.JSX.Element {
   const t = useT()
   const readOnly = mode === 'view'
 
@@ -159,9 +174,14 @@ export function RuleEditorModal({ mode, target, rule, existingRules, onClose, on
       const originalId = rule?.id ?? null
       const others = originalId !== null ? existingRules.filter((r) => r.id !== originalId) : existingRules
       const text = JSON.stringify({ version: 1, rules: [...others, draft] }, null, 2) + '\n'
-      const res = target.kind === 'global' ? await window.api.rulesSaveGlobal(text) : await window.api.rulesSaveRepo(target.projectDir, text)
+      const res =
+        target.kind === 'global'
+          ? await window.api.rulesSaveGlobal(text, expectedHash)
+          : await window.api.rulesSaveRepo(target.projectDir, text, expectedHash)
       if (res.ok) {
-        onSaved()
+        onSaved(res.approved)
+      } else if (res.reason === 'stale' || res.reason === 'pending') {
+        onConflict(res.reason)
       } else {
         setSaveErrors(res.errors)
       }
