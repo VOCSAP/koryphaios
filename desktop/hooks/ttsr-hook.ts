@@ -5,20 +5,28 @@
 //
 // Fails open on every internal error, and never exits 2 (Claude Code treats
 // exit 2 as a block): a bug here must never stop a session from working.
-// This hook has no Deck log sink of its own -- it traces to
-// $CLAUDE_PEERS_TTSR_LOG when set (best effort) and always to stderr, which
-// Claude Code surfaces in verbose/debug mode.
+// Traces go to stderr and to $CLAUDE_PEERS_TTSR_LOG, a per-tile file the Deck
+// tails into its own error log.
+//
+// Deny rules run first, Kory rules first among them, and the first deny ends
+// the evaluation: a slow user or repo rule can hold the hook up, never cancel
+// a Kory deny that runs before it.
 
-import { appendFileSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { appendFileSync, closeSync, openSync, readFileSync, readSync } from "node:fs";
 import {
   buildHookOutput,
   evaluate,
+  FIELD_CAP,
+  hookEvaluationOrder,
   parseEffectiveFile,
   type TtsrEvent,
 } from "../src/shared/ttsr-rules.ts";
 
 const TTSR_FILE_ENV = "CLAUDE_PEERS_TTSR_FILE";
 const TTSR_LOG_ENV = "CLAUDE_PEERS_TTSR_LOG";
+/** Bytes of a Write target read to compare with the new content: the cap in UTF-16 units, 4 bytes each at worst. */
+const EXISTING_READ_BYTES = FIELD_CAP * 4;
 
 export interface HookPayload {
   hook_event_name?: string;
@@ -27,10 +35,19 @@ export interface HookPayload {
   cwd?: string;
 }
 
+function errorText(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+function isMissing(e: unknown): boolean {
+  const code = (e as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
 /**
- * Traces one line: always to stderr, and best-effort to $CLAUDE_PEERS_TTSR_LOG
- * when it is set. Never throws -- a broken log path must not turn a fail-open
- * trace into a fresh failure that the caller then has to fail open on too.
+ * Traces one line: always to stderr, and to $CLAUDE_PEERS_TTSR_LOG when it
+ * is set. Never throws -- a broken log path must not turn a fail-open trace
+ * into a fresh failure; the log failure itself is written to stderr.
  */
 export function trace(message: string): void {
   const line = `[ttsr-hook] ${message}`;
@@ -39,30 +56,73 @@ export function trace(message: string): void {
   if (!logPath) return;
   try {
     appendFileSync(logPath, `${new Date().toISOString()} ${line}\n`);
-  } catch {
-    // Best effort only: the stderr write above already carries the trace.
+  } catch (e) {
+    process.stderr.write(`[ttsr-hook] cannot append to ${logPath}: ${errorText(e)}\n`);
   }
 }
 
+/** The hook input, or {} (traced) when stdin is not a JSON object. */
 export function parseHookPayload(raw: string): HookPayload {
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(raw || "{}");
-    return parsed && typeof parsed === "object" ? (parsed as HookPayload) : {};
-  } catch {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    trace(`stdin is not JSON (${raw.length} chars), no rule applied: ${errorText(e)}`);
     return {};
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    trace(`stdin is not a JSON object, no rule applied`);
+    return {};
+  }
+  return parsed as HookPayload;
 }
 
-function projectDirOf(payload: HookPayload): string {
-  return process.env.CLAUDE_PROJECT_DIR || payload.cwd || process.cwd();
+/**
+ * Project root the `paths` globs are relative to: the git toplevel of the
+ * session's project dir, as the Deck and the CLI compute it, so a session
+ * launched in a subdirectory still matches `src/**`. Outside a repository
+ * the dir itself. Only called when a rule with `paths` needs it.
+ */
+export function projectRootOf(payload: HookPayload): string {
+  const dir = process.env.CLAUDE_PROJECT_DIR || payload.cwd || process.cwd();
+  const res = spawnSync("git", ["rev-parse", "--show-toplevel"], {
+    cwd: dir,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: 3000,
+  });
+  if (res.error) trace(`git rev-parse failed in ${dir}, taking it as the project root: ${res.error.message}`);
+  const top = res.status === 0 && typeof res.stdout === "string" ? res.stdout.trim() : "";
+  return top || dir;
+}
+
+/**
+ * Current content of a Write target (its first bytes), null when it does not
+ * exist. An unreadable target is traced and read as absent: the rules then
+ * judge the whole new content, the strict side.
+ */
+export function readExisting(path: string): string | null {
+  let fd: number;
+  try {
+    fd = openSync(path, "r");
+  } catch (e) {
+    if (!isMissing(e)) trace(`cannot read the Write target ${path}, its whole new content is checked: ${errorText(e)}`);
+    return null;
+  }
+  try {
+    const buf = Buffer.alloc(EXISTING_READ_BYTES);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    return buf.subarray(0, n).toString("utf8");
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**
  * Builds the hook's stdout decision, or null for no decision (falls through
  * to the normal permission flow). Reads and evaluates the effective rules
- * file named by $CLAUDE_PEERS_TTSR_FILE. Can throw on a genuinely unexpected
- * condition (evaluate() throws on an unexpected filesystem error while
- * canonicalizing a path) -- the caller traces and fails open on that.
+ * file named by $CLAUDE_PEERS_TTSR_FILE. A rule that could not be evaluated
+ * is traced and skipped; the others still run.
  */
 export function decide(payload: HookPayload): Record<string, unknown> | null {
   const event = payload.hook_event_name as TtsrEvent | undefined;
@@ -76,10 +136,10 @@ export function decide(payload: HookPayload): Record<string, unknown> | null {
   let text: string;
   try {
     text = readFileSync(filePath, "utf8");
-  } catch {
-    // Missing/unreadable effective file: no rules to apply. This is the
-    // expected steady state outside a Deck tile (or a narrow race with the
-    // Deck rewriting it), not an error worth tracing.
+  } catch (e) {
+    // Missing: no rules for this tile (outside a Deck tile, or the Deck
+    // removed it). Anything else is a fault worth a trace.
+    if (!isMissing(e)) trace(`cannot read effective rules file ${filePath}, no rules applied: ${errorText(e)}`);
     return null;
   }
 
@@ -89,17 +149,30 @@ export function decide(payload: HookPayload): Record<string, unknown> | null {
     return null;
   }
 
-  // Cheap pre-filter before evaluate()'s field extraction and path
-  // canonicalization: most tool calls match no rule at all for this
-  // event+tool, and this check alone touches neither the filesystem nor a
-  // single regex.
-  const applicable = parsed.file.rules.some(
+  // Cheap pre-filter: most tool calls match no rule at all for this
+  // event+tool, and this check touches neither the filesystem nor a regex.
+  const applicable = parsed.file.rules.filter(
     (r) => r.event === event && (r.tools as readonly string[]).includes(tool)
   );
-  if (!applicable) return null;
+  if (applicable.length === 0) return null;
 
-  const result = evaluate(parsed.file.rules, payload, projectDirOf(payload));
+  const result = evaluate(hookEvaluationOrder(applicable), payload, () => projectRootOf(payload), {
+    stopAtFirstDeny: true,
+    readExisting,
+  });
+  for (const err of result.errors) trace(`rule not evaluated: ${err}`);
   return buildHookOutput(event, result);
+}
+
+/** What the hook prints for one stdin text ('' for no decision); fails open with a trace. */
+export function runHook(raw: string, decideFn: (p: HookPayload) => Record<string, unknown> | null = decide): string {
+  try {
+    const decision = decideFn(parseHookPayload(raw));
+    return decision ? JSON.stringify(decision) : "";
+  } catch (e) {
+    trace(`internal error, failing open: ${errorText(e)}`);
+    return "";
+  }
 }
 
 async function readStdin(): Promise<string> {
@@ -108,24 +181,14 @@ async function readStdin(): Promise<string> {
   return raw;
 }
 
-async function main(): Promise<void> {
-  const payload = parseHookPayload(await readStdin());
-  let decision: Record<string, unknown> | null = null;
-  try {
-    decision = decide(payload);
-  } catch (e) {
-    trace(`internal error, failing open: ${(e as Error).message}`);
-    decision = null;
-  }
-  if (decision) process.stdout.write(JSON.stringify(decision));
-  // No decision -> no stdout, exit 0: normal permission flow applies.
-}
-
 if (import.meta.main) {
-  // Fail open unconditionally, exit 0 always -- never exit 2, which Claude
-  // Code treats as a block. decide()'s own try/catch already traces an
-  // evaluation error; this outer catch only covers a stdin-read failure.
-  void main()
-    .catch((e) => trace(`fatal, failing open: ${(e as Error).message}`))
+  // Exit 0 always, never 2 (a block): no decision means the normal
+  // permission flow applies.
+  void readStdin()
+    .then((raw) => {
+      const out = runHook(raw);
+      if (out) process.stdout.write(out);
+    })
+    .catch((e) => trace(`fatal, failing open: ${errorText(e)}`))
     .finally(() => process.exit(0));
 }

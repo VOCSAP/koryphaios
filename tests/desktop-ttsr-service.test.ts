@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
+  appendFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -115,6 +116,8 @@ function harness(opts: Partial<TtsrServiceDeps> = {}): Harness {
     onChanged: () => h.changed.count++,
     resolveProject: (cwd) => ({ root: cwd, projectKey: h.keys.get(cwd) ?? `local:${cwd}` }),
     defer: (fn) => fn(),
+    // Synchronous "all fast" verdict; the worker probe has its own tests below.
+    probeRules: () => [],
     ...opts,
   });
   return h;
@@ -162,6 +165,7 @@ describe("effective file per tile", () => {
       promptApproval: async () => false,
       onChanged: () => {},
       resolveProject: (cwd) => ({ root: cwd, projectKey: `local:${cwd}` }),
+      probeRules: () => [],
     });
     const id = randomUUID();
     const path = svc.fileFor({ id, cwd: tmp() });
@@ -210,11 +214,18 @@ describe("effective file per tile", () => {
     const path = h.svc.fileFor({ id, cwd: tmp() });
     const run = join(h.dir, "run");
     const sid = randomUUID();
-    expect(h.svc.projectIntoSandbox(id, sid, run)).toBe(`/kory-run/ttsr-${sid}.json`);
+    expect(h.svc.projectIntoSandbox(id, sid, run)).toEqual({
+      file: `/kory-run/ttsr-${sid}.json`,
+      log: `/kory-run/ttsr-${sid}.log`,
+    });
     expect(existsSync(join(run, `ttsr-${sid}.json`))).toBe(true);
+    writeFileSync(join(run, `ttsr-${sid}.log`), "x\n");
+    writeFileSync(h.svc.logPathOf(id), "y\n");
     h.svc.remove(id);
     expect(existsSync(path)).toBe(false);
     expect(existsSync(join(run, `ttsr-${sid}.json`))).toBe(false);
+    expect(existsSync(join(run, `ttsr-${sid}.log`)), "the sandbox hook log goes with the tile").toBe(false);
+    expect(existsSync(path.replace(/\.json$/, ".log")), "the host hook log goes with the tile").toBe(false);
     expect(h.svc.effectivePathOf(id)).toBeNull();
   });
 });
@@ -413,13 +424,9 @@ describe("paths and symlinks", () => {
     expect(h.prompts).toEqual([]);
     expect(h.svc.list().projects[0]!.file.errors[0]).toContain("symlink");
     expect(() => repoRulesPathForWrite(cwd)).toThrow(/symlink/);
-    const res = (() => {
-      try {
-        return h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, fileOf(rule("r-two")));
-      } catch (e) {
-        return (e as Error).message;
-      }
-    })();
+    const res = await h.svc
+      .saveRepo({ root: cwd, projectKey: `local:${cwd}` }, fileOf(rule("r-two")))
+      .catch((e: Error) => e.message);
     expect(String(res)).toContain("symlink");
     expect(readFileSync(target, "utf8"), "the write must not go through the symlink").toContain("r-one");
   });
@@ -463,24 +470,24 @@ describe("paths and symlinks", () => {
 });
 
 describe("operator saves", () => {
-  test("saveGlobal validates through the shared parser, writes, recompiles", () => {
+  test("saveGlobal validates through the shared parser, writes, recompiles", async () => {
     const h = harness();
     const bad = fileOf({ ...rule("g-one"), extra: 1 });
-    expect(h.svc.saveGlobal(bad)).toEqual({ ok: false, errors: (parseRulesFile(bad) as { errors: string[] }).errors });
+    expect(await h.svc.saveGlobal(bad)).toEqual({ ok: false, errors: (parseRulesFile(bad) as { errors: string[] }).errors });
     expect(existsSync(h.globalFile)).toBe(false);
     const path = h.svc.fileFor({ id: randomUUID(), cwd: tmp() });
     const good = fileOf(rule("g-one"));
-    expect(h.svc.saveGlobal(good)).toEqual({ ok: true, hash: rulesHash(good) });
+    expect(await h.svc.saveGlobal(good)).toEqual({ ok: true, hash: rulesHash(good) });
     expect(readFileSync(h.globalFile, "utf8")).toBe(good);
     expect(effective(path)).toEqual([...KORY_IDS, "user/g-one"]);
   });
 
-  test("saveRepo writes the file and approves its new hash in the same call", () => {
+  test("saveRepo writes the file and approves its new hash in the same call", async () => {
     const h = harness();
     const cwd = tmp();
     const path = h.svc.fileFor({ id: randomUUID(), cwd });
     const text = fileOf(rule("r-one"));
-    expect(h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text)).toEqual({ ok: true, hash: rulesHash(text) });
+    expect(await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text)).toEqual({ ok: true, hash: rulesHash(text) });
     expect(readFileSync(join(cwd, REPO_RULES_REL), "utf8")).toBe(text);
     expect(effective(path)).toEqual([...KORY_IDS, "repo/r-one"]);
   });
@@ -497,7 +504,7 @@ describe("sandbox copy", () => {
     const victim = join(h.dir, "victim.txt");
     writeFileSync(victim, "untouched");
     symlinkSync(victim, join(run, `ttsr-${sid}.json`));
-    expect(h.svc.projectIntoSandbox(id, sid, run)).toBe(`/kory-run/ttsr-${sid}.json`);
+    expect(h.svc.projectIntoSandbox(id, sid, run).file).toBe(`/kory-run/ttsr-${sid}.json`);
     const copy = join(run, `ttsr-${sid}.json`);
     expect(lstatSync(copy).isSymbolicLink(), "the planted symlink must be replaced, not followed").toBe(false);
     expect(readFileSync(victim, "utf8")).toBe("untouched");
@@ -520,7 +527,7 @@ describe("sandbox copy", () => {
     const cwd = tmp();
     h.svc.fileFor({ id, cwd });
     const run = join(h.dir, "run");
-    expect(h.svc.projectIntoSandbox(id, "x/../y", run)).toBe("");
+    expect(h.svc.projectIntoSandbox(id, "x/../y", run)).toEqual({ file: "", log: "" });
     expect(h.errors.join("\n")).toContain("is not a uuid");
     const first = randomUUID();
     h.svc.projectIntoSandbox(id, first, run);
@@ -561,7 +568,7 @@ describe("rule test (isolated regex)", () => {
 describe("wiring", () => {
   const SESSION_SERVICE = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
 
-  test("startPty exports CLAUDE_PEERS_TTSR_FILE on every spawn, after sessionEnv, before the sandbox wrap", () => {
+  test("startPty exports CLAUDE_PEERS_TTSR_FILE and CLAUDE_PEERS_TTSR_LOG on every spawn, after sessionEnv, before the sandbox wrap", () => {
     const src = readFileSync(SESSION_SERVICE, "utf8");
     const m = /private startPty\([^)]*\)[^{]*\{/.exec(src);
     expect(m, "startPty() not found in session-service.ts").not.toBeNull();
@@ -570,10 +577,16 @@ describe("wiring", () => {
       .split("\n")
       .map((l) => l.replace(/\/\/.*/, ""))
       .join("\n");
-    const refs = [...code.matchAll(/CLAUDE_PEERS_TTSR_FILE/g)];
-    expect(refs.length, "exactly one code reference: an unconditional Object.assign onto sessionEnv").toBe(1);
-    const assign = code.indexOf("Object.assign(sessionEnv, { CLAUDE_PEERS_TTSR_FILE: this.ttsrFile(def) })");
-    expect(assign, "the env value must come from the injected provider, unconditionally").toBeGreaterThan(-1);
+    for (const name of ["CLAUDE_PEERS_TTSR_FILE", "CLAUDE_PEERS_TTSR_LOG"]) {
+      const refs = [...code.matchAll(new RegExp(name, "g"))];
+      expect(refs.length, `exactly one code reference to ${name}: an unconditional Object.assign onto sessionEnv`).toBe(1);
+    }
+    const provider = code.indexOf("const ttsr = this.ttsrFiles(def)");
+    expect(provider, "both values must come from one call of the injected provider").toBeGreaterThan(-1);
+    const assign = code.indexOf(
+      "Object.assign(sessionEnv, { CLAUDE_PEERS_TTSR_FILE: ttsr.file, CLAUDE_PEERS_TTSR_LOG: ttsr.log })"
+    );
+    expect(assign, "the env values must come from the injected provider, unconditionally").toBeGreaterThan(provider);
     const before = code.slice(0, assign);
     expect(/\bif\s*\([^)]*\)\s*$/.test(before.trimEnd()), "the assignment must not sit behind an if").toBe(false);
     expect(assign, "set after the sessionEnv literal").toBeGreaterThan(code.indexOf("const sessionEnv = {"));
@@ -630,20 +643,21 @@ describe("the three call sites validate through the shared parser", () => {
     const file = join(dir, "rules.json");
     const text = fileOf(typo, { ...rule("two"), mode: "block" });
     writeFileSync(file, text);
-    const res = spawnSync(process.execPath, [CLI, "check", file], { encoding: "utf8" });
+    // Run from the rules file's own directory: the CLI reads only files of the project it runs in.
+    const res = spawnSync(process.execPath, [CLI, "check", file], { encoding: "utf8", cwd: dir });
     expect(res.status).toBe(1);
     const errors = (parseRulesFile(text) as { errors: string[] }).errors;
     expect(errors.length).toBeGreaterThan(1);
     for (const e of errors) expect(res.stdout, `CLI output must list: ${e}`).toContain(e);
   });
 
-  test("Deck main: global load, repo load and both saves report the shared parser's errors", () => {
+  test("Deck main: global load, repo load and both saves report the shared parser's errors", async () => {
     const text = fileOf(typo);
     const expected = (parseRulesFile(text) as { errors: string[] }).errors;
     const h = harness();
-    expect(h.svc.saveGlobal(text)).toEqual({ ok: false, errors: expected });
+    expect(await h.svc.saveGlobal(text)).toEqual({ ok: false, errors: expected });
     const cwd = tmp();
-    expect(h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text)).toEqual({ ok: false, errors: expected });
+    expect(await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text)).toEqual({ ok: false, errors: expected });
     mkdirSync(join(h.dir, "config"), { recursive: true });
     writeFileSync(h.globalFile, text);
     writeRepoRules(cwd, text);
@@ -652,5 +666,95 @@ describe("the three call sites validate through the shared parser", () => {
     const list = h.svc.list();
     expect(list.global.file.errors).toEqual(expected);
     expect(list.projects[0]!.file.errors).toEqual(expected);
+  });
+});
+
+describe("pattern timing gate (worker probe)", () => {
+  // Cubic backtracking: seconds on 4 Ki word characters, while the validator
+  // (no nested quantifier) lets it through.
+  const SLOW = "\\w+\\w+\\w+x";
+  const until = async (cond: () => boolean, ms = 15000): Promise<void> => {
+    const t0 = Date.now();
+    while (!cond()) {
+      if (Date.now() - t0 > ms) throw new Error("condition not reached in time");
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  };
+  const real = { probeRules: undefined } as Partial<TtsrServiceDeps>;
+
+  test("saveGlobal and saveRepo refuse a slow pattern the parser accepts, and write nothing", async () => {
+    const h = harness(real);
+    const text = fileOf(rule("g-slow", { pattern: SLOW }));
+    expect(parseRulesFile(text).ok, "precondition: the synchronous parser accepts it").toBe(true);
+    const res = await h.svc.saveGlobal(text);
+    expect(res.ok, "a slow pattern must not reach the global file").toBe(false);
+    expect((res as { errors: string[] }).errors.join("\n")).toContain('rules[0] "g-slow": pattern: too slow');
+    expect(existsSync(h.globalFile)).toBe(false);
+    const cwd = tmp();
+    const repo = await h.svc.saveRepo({ root: cwd, projectKey: `local:${cwd}` }, text);
+    expect(repo.ok, "a slow pattern must not reach the repo file").toBe(false);
+    expect(existsSync(join(cwd, REPO_RULES_REL))).toBe(false);
+  }, 20000);
+
+  test("a slow repo file on disk is never compiled nor prompted; a fast one is, once timed", async () => {
+    const h = harness(real);
+    h.answer.value = true;
+    const slowDir = tmp();
+    writeRepoRules(slowDir, fileOf(rule("r-slow", { pattern: SLOW })));
+    const fastDir = tmp();
+    writeRepoRules(fastDir, fileOf(rule("r-fast")));
+    const slowPath = h.svc.fileFor({ id: randomUUID(), cwd: slowDir });
+    const fastPath = h.svc.fileFor({ id: randomUUID(), cwd: fastDir });
+    expect(h.prompts, "no prompt before the patterns are timed").toEqual([]);
+    await until(() => effective(fastPath).includes("repo/r-fast"));
+    await until(() => h.svc.list().projects.some((p) => p.file.status === "invalid"));
+    expect(effective(slowPath), "a slow repo file contributes no rule").toEqual(KORY_IDS);
+    expect(h.prompts.map((p) => p.projectDir), "only the fast file reaches the operator").toEqual([fastDir]);
+    const slow = h.svc.list().projects.find((p) => p.projectDir === slowDir)!;
+    expect(slow.file.errors.join("\n")).toContain("too slow");
+  }, 20000);
+
+  test("the Kory built-ins pass the probe", async () => {
+    const { probeRulesSpeed } = await import("../desktop/src/shared/ttsr-probe");
+    expect(await probeRulesSpeed(KORY_RULES), "a built-in slow enough to fail the probe would hold every hook call up").toEqual([]);
+  }, 20000);
+});
+
+describe("hook trace logs", () => {
+  test("new lines of a tile's host log reach reportError('ttsr-hook'), bounded per pass, truncation restarts", () => {
+    const h = harness();
+    const id = randomUUID();
+    h.svc.fileFor({ id, cwd: tmp() });
+    const log = h.svc.logPathOf(id);
+    expect(log.endsWith(`${id}.log`), "the log lives next to the tile's effective file").toBe(true);
+    mkdirSync(join(log, ".."), { recursive: true });
+    writeFileSync(log, "one\ntwo\npartial");
+    h.svc.tick();
+    const hook = (): string[] => h.errors.filter((e) => e.startsWith("ttsr-hook: "));
+    expect(hook(), "complete lines only; a partial line waits").toEqual([`ttsr-hook: tile ${id}: one`, `ttsr-hook: tile ${id}: two`]);
+    writeFileSync(log, "z\n");
+    h.svc.tick();
+    expect(hook()[2], "a truncated log is read again from its start").toBe(`ttsr-hook: tile ${id}: z`);
+    appendFileSync(log, Array.from({ length: 50 }, (_, i) => `l${i}`).join("\n") + "\n");
+    h.svc.tick();
+    const after = hook().slice(3);
+    expect(after.length, "at most TTSR_LOG_TICK_LINES lines plus one summary per pass").toBe(21);
+    expect(after[0]).toBe(`ttsr-hook: tile ${id}: l0`);
+    expect(after[20]).toContain("+30 more lines");
+  });
+
+  test("a sandbox log replaced by a symlink is refused, never followed", () => {
+    const h = harness();
+    const id = randomUUID();
+    h.svc.fileFor({ id, cwd: tmp() });
+    const run = join(h.dir, "run");
+    const sid = randomUUID();
+    expect(h.svc.projectIntoSandbox(id, sid, run).log).toBe(`/kory-run/ttsr-${sid}.log`);
+    const secret = join(h.dir, "host-secret.txt");
+    writeFileSync(secret, "TOKEN=abc\n");
+    symlinkSync(secret, join(run, `ttsr-${sid}.log`));
+    h.svc.tick();
+    expect(h.errors.join("\n"), "a host file must never be forwarded through a planted symlink").not.toContain("TOKEN=abc");
+    expect(h.errors.join("\n")).toContain("not a regular file");
   });
 });

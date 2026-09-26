@@ -6,8 +6,9 @@
 //
 // Pure module: Node builtins only, no electron and no `@shared/*` alias, so it
 // bundles with `bun build --target=node` and imports under `bun test`. It has no
-// log sink of its own: invalid input comes back as errors, and an unexpected
-// filesystem failure is thrown for the caller to trace.
+// log sink of its own: invalid input and a rule that could not be evaluated
+// come back as errors for the caller to trace. The pattern timing gate lives
+// in ttsr-probe.ts (a worker, asynchronous); parseRulesFile stays synchronous.
 
 import { createHash } from 'node:crypto'
 import { realpathSync } from 'node:fs'
@@ -55,6 +56,17 @@ export const MAX_MESSAGE_CHARS = 400
 export const MAX_ID_CHARS = 64
 /** Each extracted string is cut to this many UTF-16 code units before any regex runs. */
 export const FIELD_CAP = 256 * 1024
+/**
+ * Lower cap for a Bash command line: a real command is short, and every
+ * regex cost grows with the input. The price is that a rule does not see
+ * past the first 16 Ki characters of a longer command (a big heredoc).
+ */
+export const COMMAND_CAP = 16 * 1024
+/**
+ * Strings that occur in almost every tool call: a pattern matching any of
+ * them would fire on essentially everything.
+ */
+export const TRIVIAL_SAMPLES: readonly string[] = ['a', 'x y', '\n', '0', '_']
 /** Cap of the text the hook hands back to Claude Code (deny reason or context). */
 export const MAX_HOOK_TEXT_CHARS = 4000
 
@@ -69,6 +81,25 @@ export interface TtsrMatch {
 export interface TtsrResult {
   denies: TtsrMatch[]
   warns: TtsrMatch[]
+}
+
+/** What evaluate() returns: the matches, plus one entry per rule it could not evaluate. */
+export interface TtsrEvaluation extends TtsrResult {
+  /** `<qualifiedId>: <reason>`; such a rule did not fire, the others still ran. */
+  errors: string[]
+}
+
+export interface TtsrEvaluateOptions {
+  /** Return as soon as one deny matches: the hook needs one deny, not all of them. */
+  stopAtFirstDeny?: boolean
+  /**
+   * Current content of a Write target, null when it does not exist. When
+   * given, an `added` rule on Write fires only if the new content holds more
+   * occurrences of a match than the file already does: rewriting a file never
+   * blames the agent for text it did not add. May throw; the rule is then
+   * reported in `errors` and does not fire.
+   */
+  readExisting?: (absPath: string) => string | null
 }
 
 export type TtsrHookOutput =
@@ -284,7 +315,12 @@ function validateRule(
       err('pattern', `does not compile: ${(e as Error).message}`)
     }
     if (re) {
+      const trivial = TRIVIAL_SAMPLES.find((sample) => re!.test(sample))
       if (re.test('')) err('pattern', 'matches the empty string, so it would fire on every call')
+      else if (trivial !== undefined)
+        err('pattern', `matches the trivial text ${JSON.stringify(trivial)}, so it would fire on almost every call`)
+      if (!((flags as string | undefined) ?? '').includes('u') && /(?:^|[^\\])(?:\\\\)*\\[pP]\{/.test(pattern))
+        err('pattern', 'uses \\p{...} or \\P{...} without the "u" flag, where it means a literal "p{...}"; add "u" to flags')
       if (hasNestedQuantifier(pattern))
         err('pattern', 'has a nested unbounded quantifier such as (a+)+ (catastrophic backtracking risk)')
     }
@@ -410,12 +446,13 @@ export function parseEffectiveFile(text: string): TtsrParseResult<TtsrEffectiveF
   return { ok: true, file: { version: 1, rules } }
 }
 
-function cap(s: string): string {
-  return s.length > FIELD_CAP ? s.slice(0, FIELD_CAP) : s
+/** The cap applied to the strings of `field` before any regex runs. */
+export function fieldCap(field: TtsrField): number {
+  return field === 'command' ? COMMAND_CAP : FIELD_CAP
 }
 
-function pushString(out: string[], v: unknown): void {
-  if (typeof v === 'string') out.push(cap(v))
+function capTo(s: string, max: number): string {
+  return s.length > max ? s.slice(0, max) : s
 }
 
 /** Absolute or cwd-relative target path of a file tool, or null. */
@@ -426,13 +463,17 @@ function targetPath(input: Record<string, unknown>): string | null {
 
 /**
  * The strings a rule's regex is tested against, per tool, each capped at
- * FIELD_CAP. `payload` is the raw hook input from Claude Code (untrusted JSON).
+ * fieldCap(field). `payload` is the raw hook input from Claude Code (untrusted JSON).
  */
 export function extractField(payload: unknown, field: TtsrField): string[] {
   if (!isObject(payload)) return []
   const tool = payload.tool_name
   const input = isObject(payload.tool_input) ? payload.tool_input : {}
   const out: string[] = []
+  const max = fieldCap(field)
+  const pushString = (o: string[], v: unknown): void => {
+    if (typeof v === 'string') o.push(capTo(v, max))
+  }
   switch (field) {
     case 'added':
       if (tool === 'Edit') pushString(out, input.new_string)
@@ -448,7 +489,7 @@ export function extractField(payload: unknown, field: TtsrField): string[] {
     case 'file_path':
       if (oneOf(TEXT_TOOLS, tool)) {
         const p = targetPath(input)
-        if (p !== null) out.push(cap(p))
+        if (p !== null) out.push(capTo(p, max))
       }
       break
     case 'output':
@@ -559,50 +600,143 @@ function pathsAllow(c: Compiled, rel: string): boolean {
   return !c.exclude.some((r) => r.test(rel))
 }
 
+/** Where a tool call lands: its path under the project (null when outside), and its canonical absolute path. */
+interface Target {
+  rel: string | null
+  abs: string
+}
+
 /**
- * Runs `rules` against one hook payload. `paths` filters on the tool's target
- * file, relative to `projectDir`, both canonicalized; a target outside the
- * project never matches a rule that has `paths`. Throws on an unexpected
- * filesystem error (see canonicalizePath): the caller fails open and traces it.
+ * `paths` verdict for a target. No target (Bash without a cwd) never matches.
+ * A target outside the project never matches a rule with an include glob; an
+ * exclusion-only rule ("everywhere except *.md") still applies there, its
+ * exclusions tested against the absolute path.
+ */
+function pathsAllowTarget(c: Compiled, target: Target | null): boolean {
+  if (target === null) return false
+  if (target.rel !== null) return pathsAllow(c, target.rel)
+  if (c.include.length > 0) return false
+  const abs = target.abs.split(sep).join('/').replace(/^\/+/, '')
+  return !c.exclude.some((r) => r.test(abs))
+}
+
+/** Occurrences of each distinct match of `re` in `text`. */
+function matchCounts(re: RegExp, text: string): Map<string, number> {
+  const g = new RegExp(re.source, re.flags.includes('g') ? re.flags : `${re.flags}g`)
+  const counts = new Map<string, number>()
+  for (const m of text.matchAll(g)) counts.set(m[0], (counts.get(m[0]) ?? 0) + 1)
+  return counts
+}
+
+/** True when `next` holds some match of `re` more often than `before` does. */
+function addsMatch(re: RegExp, next: string, before: string): boolean {
+  const old = matchCounts(re, before)
+  for (const [text, n] of matchCounts(re, next)) if (n > (old.get(text) ?? 0)) return true
+  return false
+}
+
+/**
+ * The order the hook evaluates rules in: every deny before any warn, and
+ * within a mode Kory, then user, then repo rules. With `stopAtFirstDeny`,
+ * a slow user or repo rule can then delay but never cancel a Kory deny, and
+ * no warn runs once a deny is known.
+ */
+export function hookEvaluationOrder(rules: readonly TtsrEffectiveRule[]): TtsrEffectiveRule[] {
+  const rank = (r: TtsrEffectiveRule): number => (r.mode === 'deny' ? 0 : 3) + TTSR_SOURCES.indexOf(r.source)
+  return [...rules].sort((a, b) => rank(a) - rank(b))
+}
+
+/**
+ * Runs `rules` against one hook payload, in the given order. `paths` filters
+ * on the tool's target file (Bash: the session cwd) relative to the project
+ * root, both canonicalized. `projectDir` may be a function: it is then called
+ * at most once, and only when a rule with `paths` has matched its field, so a
+ * costly root lookup is not paid on calls no such rule matches. A failure
+ * while resolving a path or reading a Write target is confined to the rules
+ * that needed it: they do not fire and are listed in `errors`.
  */
 export function evaluate(
   rules: readonly TtsrEffectiveRule[],
   payload: unknown,
-  projectDir: string
-): TtsrResult {
-  const result: TtsrResult = { denies: [], warns: [] }
+  projectDir: string | (() => string),
+  opts: TtsrEvaluateOptions = {}
+): TtsrEvaluation {
+  const result: TtsrEvaluation = { denies: [], warns: [], errors: [] }
   if (!isObject(payload)) return result
   const event = payload.hook_event_name
   const tool = payload.tool_name
-  let root: string | null = null
-  let relTarget: string | null | undefined
+  const input = isObject(payload.tool_input) ? payload.tool_input : {}
+  const cwd = typeof payload.cwd === 'string' && payload.cwd.length > 0 ? payload.cwd : null
 
-  const relativeTarget = (): string | null => {
-    if (relTarget !== undefined) return relTarget
-    root ??= canonicalizePath(projectDir)
-    const input = isObject(payload.tool_input) ? payload.tool_input : {}
-    const cwd = typeof payload.cwd === 'string' && payload.cwd.length > 0 ? payload.cwd : null
-    // Bash has no target file: `paths` filters on the session cwd instead.
-    const raw = tool === 'Bash' ? cwd : targetPath(input)
-    if (raw === null) relTarget = null
-    else {
-      const abs = isAbsolute(raw) ? raw : resolve(cwd ?? projectDir, raw)
-      relTarget = projectRelative(root, canonicalizePath(abs))
+  let root: string | null = null
+  const projectRoot = (): string => {
+    root ??= canonicalizePath(typeof projectDir === 'string' ? projectDir : projectDir())
+    return root
+  }
+  // Bash has no target file: `paths` filters on the session cwd instead.
+  const rawTarget = tool === 'Bash' ? cwd : targetPath(input)
+  const absTarget = (): string | null => {
+    if (rawTarget === null) return null
+    return isAbsolute(rawTarget) ? rawTarget : resolve(cwd ?? projectRoot(), rawTarget)
+  }
+  let target: { value: Target | null } | { error: unknown } | undefined
+  const resolveTarget = (): Target | null => {
+    if (target === undefined) {
+      try {
+        const abs = absTarget()
+        if (abs === null) target = { value: null }
+        else {
+          const canon = canonicalizePath(abs)
+          target = { value: { rel: projectRelative(projectRoot(), canon), abs: canon } }
+        }
+      } catch (e) {
+        target = { error: e }
+      }
     }
-    return relTarget
+    if ('error' in target) throw target.error
+    return target.value
+  }
+  let existing: { value: string | null } | undefined
+  const existingContent = (read: (p: string) => string | null): string | null => {
+    if (existing === undefined) {
+      const abs = absTarget()
+      existing = { value: abs === null ? null : read(abs) }
+    }
+    return existing.value
+  }
+
+  const fires = (rule: TtsrEffectiveRule): boolean => {
+    const c = compiled(rule)
+    const hasPaths = rule.paths !== undefined && rule.paths.length > 0
+    // Paths first when the root is already known (cheap); otherwise the regex
+    // first, so the root lookup only runs for a rule that matched.
+    const pathsFirst = hasPaths && (root !== null || typeof projectDir === 'string')
+    if (pathsFirst && !pathsAllowTarget(c, resolveTarget())) return false
+    const texts = extractField(payload, rule.field)
+    if (!texts.some((s) => c.re.test(s))) return false
+    if (hasPaths && !pathsFirst && !pathsAllowTarget(c, resolveTarget())) return false
+    if (rule.field === 'added' && tool === 'Write' && opts.readExisting && texts.length === 1) {
+      const before = existingContent(opts.readExisting)
+      if (before !== null) return addsMatch(c.re, texts[0]!, capTo(before, FIELD_CAP))
+    }
+    return true
   }
 
   for (const rule of rules) {
     if (rule.event !== event || !oneOf(rule.tools, tool)) continue
-    const c = compiled(rule)
-    if (rule.paths && rule.paths.length > 0) {
-      const rel = relativeTarget()
-      if (rel === null || !pathsAllow(c, rel)) continue
+    let hit: boolean
+    try {
+      hit = fires(rule)
+    } catch (e) {
+      result.errors.push(`${rule.qualifiedId}: ${(e as Error).message ?? String(e)}`)
+      continue
     }
-    if (!extractField(payload, rule.field).some((s) => c.re.test(s))) continue
+    if (!hit) continue
     const match: TtsrMatch = { qualifiedId: rule.qualifiedId, mode: rule.mode, message: rule.message }
-    if (rule.mode === 'deny') result.denies.push(match)
-    else result.warns.push(match)
+    if (rule.mode === 'deny') {
+      result.denies.push(match)
+      if (opts.stopAtFirstDeny) return result
+    } else result.warns.push(match)
   }
   return result
 }

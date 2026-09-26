@@ -92,9 +92,13 @@ test("the repo-rules skill's CLI path matches build:cli's kory-rules.ts outfile"
 
   // The body's own example invocations must cite the same path, not a
   // hand-typed guess that happens to differ from the declared tool.
-  const bodyRefs = [...skillText.matchAll(/\$\{CLAUDE_PLUGIN_ROOT\}\/(bin\/kory-rules\.mjs)/g)];
-  expect(bodyRefs.length).toBeGreaterThan(0);
-  for (const m of bodyRefs) expect(m[1]).toBe(cliOutfile);
+  // Any bin/*.mjs reference counts, so a renamed or mistyped bundle is caught.
+  const bodyRefs = [...skillText.matchAll(/(?:\$\{CLAUDE_PLUGIN_ROOT\}\/)?(bin\/[\w.-]+\.mjs)/g)];
+  expect(bodyRefs.length).toBeGreaterThan(1);
+  for (const m of bodyRefs) {
+    expect(m[1], `SKILL.md cites ${m[0]}, which is not the CLI bundle build:cli writes`).toBe(cliOutfile);
+    expect(m[0], `SKILL.md cites ${m[0]} without the \${CLAUDE_PLUGIN_ROOT} prefix`).toStartWith("${CLAUDE_PLUGIN_ROOT}/");
+  }
 });
 
 test("repo-rules skill frontmatter declares name and a short trigger description", () => {

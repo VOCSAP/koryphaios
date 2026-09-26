@@ -437,14 +437,15 @@ export class SessionService extends EventEmitter {
   // ----- guard rules -----
 
   /**
-   * Path of the tile's compiled guard-rules file, '' for none. Injected by
-   * index.ts (the rules service), called once per spawn before the sandbox
-   * wrap; the provider never throws (it traces and returns '').
+   * Paths of the tile's compiled guard-rules file and of the hook's trace
+   * log, '' for none. Injected by index.ts (the rules service), called once
+   * per spawn before the sandbox wrap; the provider never throws (it traces
+   * and returns '').
    */
-  private ttsrFile: (def: SessionDef) => string = () => ''
+  private ttsrFiles: (def: SessionDef) => { file: string; log: string } = () => ({ file: '', log: '' })
 
-  setTtsrProvider(provider: (def: SessionDef) => string): void {
-    this.ttsrFile = provider
+  setTtsrProvider(provider: (def: SessionDef) => { file: string; log: string }): void {
+    this.ttsrFiles = provider
   }
 
   // ----- sandbox mode (PLAN-SANDBOX SBX1/SBX3) -----
@@ -1246,8 +1247,9 @@ export class SessionService extends EventEmitter {
     // the sibling role-env test's structural scan of startPty() depends on.
     if (peerToolsValue !== undefined) Object.assign(sessionEnv, { CLAUDE_PEERS_TOOLS: peerToolsValue })
     // Always exported, '' included: a value inherited from the process that
-    // launched the Deck must never point a tile at another tile's rules.
-    Object.assign(sessionEnv, { CLAUDE_PEERS_TTSR_FILE: this.ttsrFile(def) })
+    // launched the Deck must never point a tile at another tile's rules or log.
+    const ttsr = this.ttsrFiles(def)
+    Object.assign(sessionEnv, { CLAUDE_PEERS_TTSR_FILE: ttsr.file, CLAUDE_PEERS_TTSR_LOG: ttsr.log })
 
     // Sandbox mode (SBX1): wrap the composed command in a `docker exec` into
     // the project container. The supervisor is exempt — it pilots the Deck

@@ -9,10 +9,11 @@
 // An agent edits the JSON with its normal editing tool, then runs `check`.
 
 import { spawnSync } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { readFileSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { probeRulesSpeed } from "../src/shared/ttsr-probe.ts";
 import {
-  FIELD_CAP,
+  fieldCap,
   globToRegExp,
   parseEffectiveFile,
   parseRulesFile,
@@ -55,9 +56,43 @@ function gitRoot(cwd: string): string | null {
   return runGit(cwd, ["rev-parse", "--show-toplevel"]);
 }
 
+function projectRoot(): string {
+  return gitRoot(process.cwd()) ?? process.cwd();
+}
+
 function defaultRulesPath(): string {
-  const root = gitRoot(process.cwd()) ?? process.cwd();
-  return join(root, DEFAULT_RULES_RELPATH);
+  return join(projectRoot(), DEFAULT_RULES_RELPATH);
+}
+
+/**
+ * `p` (relative to the cwd) once its real path is known to sit inside the
+ * project root: the CLI runs with pre-approved permissions, so it must not
+ * become a way to read any file on the machine. Usage error otherwise.
+ */
+function requireInsideProject(p: string, what: string): string {
+  const root = projectRoot();
+  let real: string;
+  let realRoot: string;
+  try {
+    real = realpathSync(resolve(p));
+    realRoot = realpathSync(root);
+  } catch (e) {
+    fail(`cannot read ${what} ${p}: ${(e as Error).message}`);
+  }
+  const rel = relative(realRoot, real);
+  if (rel !== "" && (isAbsolute(rel) || rel.split(sep)[0] === "..")) {
+    usageError(`${what} ${p} is outside the project (${realRoot}); only files of this repository can be read`);
+  }
+  return real;
+}
+
+/** Validation of a rules file: the shared parser, then the timing probe of every pattern. */
+async function validateRulesText(text: string): Promise<{ ok: true; rules: TtsrRule[] } | { ok: false; errors: string[] }> {
+  const parsed = parseRulesFile(text);
+  if (!parsed.ok) return { ok: false, errors: parsed.errors };
+  const slow = await probeRulesSpeed(parsed.file.rules);
+  if (slow.length > 0) return { ok: false, errors: slow };
+  return { ok: true, rules: parsed.file.rules };
 }
 
 function readTextFile(path: string): string {
@@ -71,20 +106,20 @@ function readTextFile(path: string): string {
 // --- check ---
 
 async function cmdCheck(args: string[]): Promise<void> {
-  const filePath = args[0] ?? defaultRulesPath();
+  const filePath = args[0] !== undefined ? requireInsideProject(args[0], "rules file") : defaultRulesPath();
   let text: string;
   try {
     text = readFileSync(filePath, "utf8");
   } catch (e) {
     fail(`cannot read ${filePath}: ${(e as Error).message}`);
   }
-  const parsed = parseRulesFile(text);
+  const parsed = await validateRulesText(text);
   if (!parsed.ok) {
     process.stdout.write(`invalid: ${filePath}\n`);
     for (const err of parsed.errors) process.stdout.write(`  ${err}\n`);
     process.exit(1);
   }
-  const byMode = parsed.file.rules.reduce(
+  const byMode = parsed.rules.reduce(
     (acc, r) => {
       acc[r.mode]++;
       return acc;
@@ -92,12 +127,18 @@ async function cmdCheck(args: string[]): Promise<void> {
     { deny: 0, warn: 0 }
   );
   process.stdout.write(
-    `valid: ${filePath} -- ${parsed.file.rules.length} rule(s) (${byMode.deny} deny, ${byMode.warn} warn)\n`
+    `valid: ${filePath} -- ${parsed.rules.length} rule(s) (${byMode.deny} deny, ${byMode.warn} warn)\n`
   );
 }
 
 // --- list ---
 
+function isMissing(e: unknown): boolean {
+  const code = (e as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+/** The tile's effective rules; null when not in a tile, or (with a note) when the Deck wrote none. */
 function readEffectiveRules(): { rules: TtsrEffectiveRule[] } | null {
   const filePath = process.env[TTSR_FILE_ENV];
   if (!filePath) return null;
@@ -105,6 +146,12 @@ function readEffectiveRules(): { rules: TtsrEffectiveRule[] } | null {
   try {
     text = readFileSync(filePath, "utf8");
   } catch (e) {
+    if (isMissing(e)) {
+      process.stdout.write(
+        `note: the effective rules file ${filePath} (from $${TTSR_FILE_ENV}) does not exist; the Deck has not compiled rules for this session.\n`
+      );
+      return null;
+    }
     fail(`cannot read effective rules file ${filePath} (from $${TTSR_FILE_ENV}): ${(e as Error).message}`);
   }
   const parsed = parseEffectiveFile(text);
@@ -139,12 +186,13 @@ function sameRule(a: TtsrRule, b: TtsrRule): boolean {
 }
 
 async function cmdList(args: string[]): Promise<void> {
-  const filePath = args[0] ?? defaultRulesPath();
+  const filePath = args[0] !== undefined ? requireInsideProject(args[0], "rules file") : defaultRulesPath();
   let repoRules: TtsrRule[] = [];
   let haveFile = true;
   try {
     statSync(filePath);
-  } catch {
+  } catch (e) {
+    if (!isMissing(e)) fail(`cannot stat ${filePath}: ${(e as Error).message}`);
     haveFile = false;
   }
   if (haveFile) {
@@ -156,7 +204,7 @@ async function cmdList(args: string[]): Promise<void> {
   }
 
   const effective = readEffectiveRules();
-  if (!effective) {
+  if (!effective && process.env[TTSR_FILE_ENV] === undefined) {
     process.stdout.write(
       `$${TTSR_FILE_ENV} is not set (not running inside a Kory tile); repo rule approval status is unknown.\n`
     );
@@ -166,15 +214,17 @@ async function cmdList(args: string[]): Promise<void> {
     process.stdout.write(`repo rules (${filePath}):\n`);
     for (const r of repoRules) {
       let status: string;
-      if (!effective) status = "unknown (no Kory tile)";
+      if (!effective) status = "unknown (no compiled rules for this session)";
       else {
         const active = effective.rules.find((e) => e.qualifiedId === `repo/${r.id}`);
-        status = active && sameRule(r, active) ? "active" : "pending-approval";
+        // The effective file only holds active rules: pending approval and
+        // disabled by the operator look the same from here.
+        status = active && sameRule(r, active) ? "active" : "inactive (pending approval or disabled by the operator)";
       }
       process.stdout.write(`  ${r.id}  [${r.event} ${r.tools.join(",")}]  ${status}\n`);
     }
     process.stdout.write(
-      "  (repo rule approval happens in the Deck, Settings > Rules -- editing this file never activates a rule by itself)\n"
+      "  (approval and the on/off switch live in the Deck, Settings > Rules -- editing this file never activates a rule by itself)\n"
     );
   }
 
@@ -240,15 +290,17 @@ async function cmdTest(args: string[]): Promise<void> {
   let tool: TtsrTool | undefined;
   let pathArg: string | undefined;
   let expect: "match" | "none" | undefined;
+  const valueOf = (flag: string, i: number): string => {
+    const v = rest[i];
+    if (v === undefined) usageError(`${flag} requires a value`);
+    return v;
+  };
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
-    if (a === "--text") text = rest[++i];
-    else if (a === "--file") {
-      const p = rest[++i];
-      if (!p) usageError("--file requires a path");
-      text = readTextFile(p);
-    } else if (a === "--tool") tool = rest[++i] as TtsrTool;
-    else if (a === "--path") pathArg = rest[++i];
+    if (a === "--text") text = valueOf("--text", ++i);
+    else if (a === "--file") text = readTextFile(requireInsideProject(valueOf("--file", ++i), "--file"));
+    else if (a === "--tool") tool = valueOf("--tool", ++i) as TtsrTool;
+    else if (a === "--path") pathArg = valueOf("--path", ++i);
     else if (a === "--expect") {
       const v = rest[++i];
       if (v !== "match" && v !== "none") usageError('--expect must be "match" or "none"');
@@ -269,8 +321,18 @@ async function cmdTest(args: string[]): Promise<void> {
   if (!(TTSR_TOOLS as readonly string[]).includes(effectiveTool)) {
     usageError(`"${effectiveTool}" is not a known tool (${TTSR_TOOLS.join(", ")})`);
   }
+  // Without a target the `paths` filter would drop the rule and every test
+  // would read "none", whatever the pattern.
+  if (rule.paths && rule.paths.length > 0 && pathArg === undefined && rule.field !== "file_path") {
+    usageError(
+      effectiveTool === "Bash"
+        ? `rule "${id}" has paths (${rule.paths.join(", ")}): for Bash they filter on the directory the command runs in, ` +
+            'so pass --path <repo-relative dir>, e.g. --path desktop'
+        : `rule "${id}" has paths (${rule.paths.join(", ")}): pass --path <repo-relative file> for the file the edit targets, e.g. --path src/a.ts`
+    );
+  }
 
-  const projectDir = gitRoot(process.cwd()) ?? process.cwd();
+  const projectDir = projectRoot();
   const payload = buildSyntheticPayload(rule, effectiveTool, text, pathArg, projectDir);
   const qualified = qualifyRule("repo", rule);
   const result = evaluate([qualified], payload, projectDir);
@@ -320,45 +382,51 @@ async function cmdScan(args: string[]): Promise<void> {
   if (!parsed.ok) fail(`invalid: ${filePath}\n${parsed.errors.join("\n")}`);
   const rule = findRule(parsed.file.rules, id);
 
-  const repoRoot = gitRoot(process.cwd()) ?? process.cwd();
+  const repoRoot = projectRoot();
   const allFiles = gitLsFiles(repoRoot);
   const compiled = compilePaths(rule.paths);
   const candidates = rule.paths ? allFiles.filter((f) => pathsAllow(compiled, f)) : allFiles;
 
-  const re = new RegExp(rule.pattern, `${rule.flags ?? ""}g`.replace(/g+/g, "g"));
+  // Same semantics as the hook on a Write of the whole file: one test of the
+  // content cut to the field cap; the g regex only locates lines for display.
+  const re = new RegExp(rule.pattern, rule.flags ?? "");
+  const reAll = new RegExp(rule.pattern, `${rule.flags ?? ""}g`);
+  const cap = fieldCap(rule.field);
   const perFile: Array<{ file: string; lines: number }> = [];
   let skipped = 0;
+  let unreadable = 0;
   for (const file of candidates) {
     let buf: Buffer;
     try {
       buf = readFileSync(join(repoRoot, file));
-    } catch {
-      skipped++;
+    } catch (e) {
+      // A tracked file deleted from the work tree is expected; anything else is reported.
+      if (!isMissing(e)) process.stderr.write(`warning: cannot read ${file}: ${(e as Error).message}\n`);
+      unreadable++;
       continue;
     }
-    if (buf.byteLength > FIELD_CAP) {
-      skipped++;
-      continue;
-    }
-    // Cheap binary heuristic: a NUL byte in a text file is vanishingly rare
-    // and exactly what git itself treats as the binary signal.
+    // A NUL byte is what git itself treats as binary: such a file is never written by Edit/Write.
     if (buf.includes(0)) {
       skipped++;
       continue;
     }
-    const content = buf.toString("utf8");
-    let lines = 0;
-    for (const line of content.split("\n")) {
-      re.lastIndex = 0;
-      if (re.test(line)) lines++;
+    const full = buf.toString("utf8");
+    const content = full.length > cap ? full.slice(0, cap) : full;
+    if (!re.test(content)) continue;
+    const lines = new Set<number>();
+    let line = 1;
+    let scanned = 0;
+    for (const m of content.matchAll(reAll)) {
+      for (; scanned < m.index; scanned++) if (content.charCodeAt(scanned) === 10) line++;
+      lines.add(line);
     }
-    if (lines > 0) perFile.push({ file, lines });
+    perFile.push({ file, lines: Math.max(lines.size, 1) });
   }
 
   perFile.sort((a, b) => b.lines - a.lines);
   const totalLines = perFile.reduce((n, f) => n + f.lines, 0);
   process.stdout.write(
-    `${candidates.length} file(s) in scope (of ${allFiles.length} tracked, ${skipped} skipped as binary/oversized): ` +
+    `${candidates.length} file(s) in scope (of ${allFiles.length} tracked, ${skipped} skipped as binary, ${unreadable} missing): ` +
       `${perFile.length} file(s) match, ${totalLines} matching line(s)\n`
   );
   for (const f of perFile.slice(0, SCAN_TOP_FILES)) process.stdout.write(`  ${f.file}  (${f.lines})\n`);
@@ -383,6 +451,11 @@ Usage:
                                         run one rule against a synthetic payload
   kory-rules scan <id>                 count matches of one rule's pattern across tracked files
   kory-rules --help                    this text
+
+check also times every pattern on adversarial input and rejects one that
+backtracks (too slow for the hook).
+test: a rule with "paths" needs --path (the edited file, or for Bash the
+directory the command runs in, relative to the repository root).
 
 Exit codes: check/test -- 0 met, 1 not met; usage error -- 2.
 `;

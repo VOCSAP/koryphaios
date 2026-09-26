@@ -754,8 +754,12 @@ async function promptTtsrApproval(req: TtsrApprovalRequest): Promise<boolean> {
   return response === 0
 }
 
-// Every spawn (create, restore, restart) compiles the tile's rules file here.
-service.setTtsrProvider((def) => ttsr.fileFor({ id: def.id, cwd: def.cwd, supervisor: def.supervisor === true }))
+// Every spawn (create, restore, restart) compiles the tile's rules file here;
+// the hook traces into a per-tile log the rules poll forwards to reportError.
+service.setTtsrProvider((def) => {
+  const file = ttsr.fileFor({ id: def.id, cwd: def.cwd, supervisor: def.supervisor === true })
+  return { file, log: file ? ttsr.logPathOf(def.id) : '' }
+})
 
 // SBX1: wrap sandboxed spawns. The scope-secret file is read HERE (host-side,
 // with a trace on failure) so the pure env translator stays fs-free.
@@ -773,6 +777,9 @@ service.setSandboxProvider(
             `session cwd is outside the sandbox mount (${cwdHost} not under ${launch.workSource})`
           )
         }
+        const ttsrInContainer = env.CLAUDE_PEERS_TTSR_FILE
+          ? ttsr.projectIntoSandbox(env.CLAUDE_PEERS_DESK_SESSION ?? '', sessionId, launch.runDirHost)
+          : { file: '', log: '' }
         sandbox.writeLaunchScript(sessionId, {
           // Card a79c7696 volet 1: `command` still carries --plugin-dir
           // pointing at the HOST deck-plugin path (session-command.ts's
@@ -791,11 +798,11 @@ service.setSandboxProvider(
               }
             }),
             ...containerBrokerEnv(),
-            // The host rules file does not exist in the container: a copy in
-            // the mounted run dir replaces it ('' when the tile has none).
-            CLAUDE_PEERS_TTSR_FILE: env.CLAUDE_PEERS_TTSR_FILE
-              ? ttsr.projectIntoSandbox(env.CLAUDE_PEERS_DESK_SESSION ?? '', sessionId, launch.runDirHost)
-              : ''
+            // The host rules file and log do not exist in the container: a
+            // copy and a log in the mounted run dir replace them ('' when the
+            // tile has no rules).
+            CLAUDE_PEERS_TTSR_FILE: ttsrInContainer.file,
+            CLAUDE_PEERS_TTSR_LOG: ttsrInContainer.log
           }
         })
         return sandbox.execCommand(launch, sessionId)

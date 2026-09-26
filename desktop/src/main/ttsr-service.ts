@@ -14,7 +14,19 @@
 // under bun test on a throwaway directory.
 
 import { spawnSync } from 'node:child_process'
-import { lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  rmSync,
+  statSync
+} from 'node:fs'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import {
   canonicalizePath,
@@ -46,7 +58,7 @@ import type {
 import { writeFileAtomic } from './atomic-write'
 import { isTtsrApproved, readTtsrApprovals, withTtsrApproval, writeTtsrApprovals, type TtsrApprovals } from './ttsr-approvals'
 import { ttsrToggleKey } from './ttsr-toggles'
-import { matchIsolated, type IsolatedMatchResult } from './ttsr-regex-worker'
+import { matchIsolated, probeRulesSpeed, type IsolatedMatchResult } from './ttsr-regex-worker'
 import { isValidSandboxSessionId } from './sandbox-prompt'
 import { SANDBOX_RUN_DIR } from './sandbox-command'
 import { computeDeckProjectKey } from './roadmap-service'
@@ -67,6 +79,22 @@ export function ttsrEffectiveFileName(deskId: string): string {
 export function ttsrSandboxCopyName(sessionId: string): string {
   return `ttsr-${sessionId}.json`
 }
+
+/** Hook trace log of a tile, next to its effective file. */
+export function ttsrLogFileName(deskId: string): string {
+  return `${deskId}.log`
+}
+
+/** Hook trace log of a sandboxed spawn, in the container run dir. */
+export function ttsrSandboxLogName(sessionId: string): string {
+  return `ttsr-${sessionId}.log`
+}
+
+/** Bytes of one hook log read per poll pass; the rest waits for the next pass. */
+export const TTSR_LOG_TICK_BYTES = 16 * 1024
+/** Hook log lines forwarded per log per poll pass; the rest are counted. */
+export const TTSR_LOG_TICK_LINES = 20
+const TTSR_LOG_LINE_CHARS = 1000
 
 /** Poll period of the rules files (repo, global, approvals). */
 export const TTSR_POLL_MS = 2000
@@ -115,6 +143,11 @@ export interface TtsrServiceDeps {
   resolveProject?: (cwd: string) => TtsrProjectRef
   /** Isolated regex runner for `test()`; injectable for tests. */
   matchIsolated?: (pattern: string, flags: string, texts: readonly string[]) => Promise<IsolatedMatchResult>
+  /**
+   * Adversarial timing gate of a file's rules (errors, [] when fast); a
+   * synchronous result is applied at once. Defaults to the worker probe.
+   */
+  probeRules?: (rules: readonly TtsrRule[]) => string[] | Promise<string[]>
   /** Defers the approval prompt off the spawn path; defaults to setImmediate. */
   defer?: (fn: () => void) => void
 }
@@ -129,6 +162,8 @@ interface FileSnapshot {
   hash: string | null
   errors: string[]
   rules: TtsrRule[]
+  /** The timing probe passed: only then are the rules compiled, prompted, approved in effect. */
+  probed: boolean
 }
 
 interface ProjectState {
@@ -140,7 +175,20 @@ interface ProjectState {
 interface SandboxCopy {
   path: string
   sig: string
+  /** Host path of the container-side hook log. */
+  log: LogTail
 }
+
+/** A hook trace log the poll forwards to the Deck's error sink. */
+interface LogTail {
+  path: string
+  offset: number
+  ino: number | null
+  /** Last fault reported for this log, so one fault is reported once. */
+  fault: string | null
+}
+
+type ProbeVerdict = { done: false; promise: Promise<string[]> } | { done: true; errors: string[] }
 
 interface TileState {
   id: string
@@ -150,9 +198,10 @@ interface TileState {
   /** Last content written to the effective file. */
   written: string | null
   sandbox: SandboxCopy | null
+  log: LogTail
 }
 
-const ABSENT: FileSnapshot = { sig: 'absent', status: 'absent', text: null, hash: null, errors: [], rules: [] }
+const ABSENT: FileSnapshot = { sig: 'absent', status: 'absent', text: null, hash: null, errors: [], rules: [], probed: true }
 
 /**
  * Change signature of a file: ino, size, mtime, link-ness. `follow` stats the
@@ -208,10 +257,14 @@ export class TtsrService {
   private timer: NodeJS.Timeout | null = null
   private readonly defer: (fn: () => void) => void
   private readonly match: NonNullable<TtsrServiceDeps['matchIsolated']>
+  private readonly probeRules: NonNullable<TtsrServiceDeps['probeRules']>
+  /** Timing verdict per file hash: one probe per content per run. */
+  private readonly probes = new Map<string, ProbeVerdict>()
 
   constructor(private readonly deps: TtsrServiceDeps) {
     this.defer = deps.defer ?? ((fn) => setImmediate(fn))
     this.match = deps.matchIsolated ?? matchIsolated
+    this.probeRules = deps.probeRules ?? probeRulesSpeed
     this.global = this.readRulesFile(deps.globalRulesFile(), null)
     this.reloadApprovals()
   }
@@ -255,14 +308,19 @@ export class TtsrService {
       // A respawn drops the previous spawn's sandbox copy; the sandbox wrap of
       // this spawn projects a fresh one when the tile is sandboxed.
       const prev = this.tiles.get(spec.id)
-      if (prev) this.dropSandboxCopy(prev)
+      if (prev) {
+        this.drainLog(prev, prev.log)
+        this.dropSandboxCopy(prev)
+      }
+      const dir = join(this.deps.sessionDir(), TTSR_EFFECTIVE_SUBDIR)
       const tile: TileState = {
         id: spec.id,
         supervisor,
         project,
-        effectivePath: join(this.deps.sessionDir(), TTSR_EFFECTIVE_SUBDIR, ttsrEffectiveFileName(spec.id)),
+        effectivePath: join(dir, ttsrEffectiveFileName(spec.id)),
         written: null,
-        sandbox: null
+        sandbox: null,
+        log: newLogTail(join(dir, ttsrLogFileName(spec.id)))
       }
       this.tiles.set(spec.id, tile)
       if (project) {
@@ -278,23 +336,30 @@ export class TtsrService {
     }
   }
 
+  /** Host path of the tile's hook trace log (CLAUDE_PEERS_TTSR_LOG), or '' when the tile is unknown. */
+  logPathOf(deskId: string): string {
+    return this.tiles.get(deskId)?.log.path ?? ''
+  }
+
   /**
    * Copies the tile's effective file into the sandbox run dir (mounted at
-   * /kory-run) and returns its container path, or '' with a trace. The copy is
-   * named by the spawn's session id, minted per spawn: the run dir belongs to
-   * the project container and is shared by every Deck window on that project,
-   * where two restored workspaces may carry the same desk id.
+   * /kory-run) and returns the container paths of the copy and of the hook
+   * log, both '' with a trace on failure. Named by the spawn's session id,
+   * minted per spawn: the run dir belongs to the project container and is
+   * shared by every Deck window on that project, where two restored
+   * workspaces may carry the same desk id.
    */
-  projectIntoSandbox(deskId: string, sessionId: string, runDirHost: string): string {
+  projectIntoSandbox(deskId: string, sessionId: string, runDirHost: string): { file: string; log: string } {
+    const none = { file: '', log: '' }
     const tile = this.tiles.get(deskId)
     try {
       if (!tile || tile.written === null) {
         this.deps.reportError('ttsr', `no guard rules in the sandbox: tile ${deskId} has no compiled rules file`)
-        return ''
+        return none
       }
       if (!isValidSandboxSessionId(sessionId)) {
         this.deps.reportError('ttsr', `no guard rules in the sandbox: session id ${JSON.stringify(sessionId)} is not a uuid`)
-        return ''
+        return none
       }
       const name = ttsrSandboxCopyName(sessionId)
       const path = join(runDirHost, name)
@@ -303,12 +368,13 @@ export class TtsrService {
       // The rename replaces whatever sits at `path`, a symlink planted from
       // inside the container included, instead of writing through it.
       writeFileAtomic(path, tile.written, { mode: 0o644 })
-      tile.sandbox = { path, sig: statSig(path) }
-      return `${SANDBOX_RUN_DIR}/${name}`
+      const logName = ttsrSandboxLogName(sessionId)
+      tile.sandbox = { path, sig: statSig(path), log: newLogTail(join(runDirHost, logName)) }
+      return { file: `${SANDBOX_RUN_DIR}/${name}`, log: `${SANDBOX_RUN_DIR}/${logName}` }
     } catch (e) {
       this.deps.reportError('ttsr', `guard rules not delivered to the sandbox for tile ${deskId}`, e)
       if (tile) tile.sandbox = null
-      return ''
+      return none
     }
   }
 
@@ -317,10 +383,12 @@ export class TtsrService {
     const tile = this.tiles.get(deskId)
     if (!tile) return
     this.tiles.delete(deskId)
+    this.drainLog(tile, tile.log)
     try {
       rmSync(tile.effectivePath, { force: true })
+      rmSync(tile.log.path, { force: true })
     } catch (e) {
-      this.deps.reportError('ttsr', `could not delete the guard rules file of tile ${deskId}`, e)
+      this.deps.reportError('ttsr', `could not delete the guard rules files of tile ${deskId}`, e)
     }
     this.dropSandboxCopy(tile)
     this.pruneProjects()
@@ -364,15 +432,21 @@ export class TtsrService {
       }
     }
     if (changed) this.recompileAll()
-    for (const tile of this.tiles.values()) this.checkSandboxCopy(tile)
+    for (const tile of this.tiles.values()) {
+      this.checkSandboxCopy(tile)
+      this.drainLog(tile, tile.log)
+      if (tile.sandbox) this.drainLog(tile, tile.sandbox.log)
+    }
   }
 
   // ----- operator actions -----
 
-  /** Validates, writes the global rules file, recompiles every tile. */
-  saveGlobal(text: string): TtsrSaveResult {
+  /** Validates (parser, then timing probe), writes the global rules file, recompiles every tile. */
+  async saveGlobal(text: string): Promise<TtsrSaveResult> {
     const parsed = parseRulesFile(text)
     if (!parsed.ok) return { ok: false, errors: parsed.errors }
+    const slow = await this.probeErrors(rulesHash(text), parsed.file.rules)
+    if (slow.length > 0) return { ok: false, errors: slow }
     const path = this.deps.globalRulesFile()
     mkdirSync(dirname(path), { recursive: true })
     writeFileAtomic(path, text)
@@ -387,9 +461,11 @@ export class TtsrService {
    * this content from the Deck, so its new hash is approved in the same call.
    * Refuses a symlinked leaf and a parent directory resolving outside the root.
    */
-  saveRepo(project: TtsrProjectRef, text: string): TtsrSaveResult {
+  async saveRepo(project: TtsrProjectRef, text: string): Promise<TtsrSaveResult> {
     const parsed = parseRulesFile(text)
     if (!parsed.ok) return { ok: false, errors: parsed.errors }
+    const slow = await this.probeErrors(rulesHash(text), parsed.file.rules)
+    if (slow.length > 0) return { ok: false, errors: slow }
     const path = repoRulesPathForWrite(project.root)
     writeFileAtomic(path, text)
     const hash = rulesHash(text)
@@ -500,7 +576,7 @@ export class TtsrService {
       }
     }
     const kory = KORY_EFFECTIVE_RULES.map((r) => row('kory', r, true))
-    const globalRows = this.global.status === 'ok' ? this.global.rules.map((r) => row('user', r, true)) : []
+    const globalRows = this.global.status === 'ok' ? this.global.rules.map((r) => row('user', r, this.global.probed)) : []
     const projects: TtsrRepoProject[] = []
     for (const state of this.projects.values()) {
       const sessionIds = [...this.tiles.values()]
@@ -535,8 +611,10 @@ export class TtsrService {
     }
   }
 
+  /** Approved AND timed: a repo file's rules take effect only then. */
   private isApproved(state: ProjectState): boolean {
-    return state.snap.status === 'ok' && state.snap.hash !== null && isTtsrApproved(this.approvals, state.key, state.snap.hash)
+    const snap = state.snap
+    return snap.status === 'ok' && snap.probed && snap.hash !== null && isTtsrApproved(this.approvals, state.key, snap.hash)
   }
 
   private refreshProject(ref: TtsrProjectRef): ProjectState {
@@ -577,7 +655,7 @@ export class TtsrService {
     const disabled = new Set(this.deps.getDisabled())
     const rules: TtsrEffectiveRule[] = KORY_EFFECTIVE_RULES.filter((r) => !disabled.has(ttsrToggleKey('kory', r.id)))
     if (tile.supervisor) return { version: 1, rules }
-    if (this.global.status === 'ok') {
+    if (this.global.status === 'ok' && this.global.probed) {
       for (const r of this.global.rules) {
         if (!disabled.has(ttsrToggleKey('user', r.id))) rules.push(qualifyRule('user', r))
       }
@@ -629,8 +707,10 @@ export class TtsrService {
 
   private dropSandboxCopy(tile: TileState): void {
     if (!tile.sandbox) return
+    this.drainLog(tile, tile.sandbox.log)
     try {
       rmSync(tile.sandbox.path, { force: true })
+      rmSync(tile.sandbox.log.path, { force: true })
     } catch (e) {
       this.deps.reportError('ttsr', `could not delete the sandbox guard rules of tile ${tile.id}`, e)
     }
@@ -650,7 +730,8 @@ export class TtsrService {
       }
       return
     }
-    if (snap.status !== 'ok' || snap.hash === null || this.isApproved(state)) return
+    // Never ask the operator to approve rules that have not been timed yet.
+    if (snap.status !== 'ok' || !snap.probed || snap.hash === null || this.isApproved(state)) return
     const promptKey = `${state.key}\n${snap.hash}`
     if (this.prompted.has(promptKey)) return
     this.prompted.add(promptKey)
@@ -672,6 +753,113 @@ export class TtsrService {
     })
   }
 
+  /** Timing errors of a file's rules, probing once per hash. */
+  private probeErrors(hash: string, rules: readonly TtsrRule[]): Promise<string[]> {
+    const v = this.probeVerdict(hash, rules)
+    return v.done ? Promise.resolve(v.errors) : v.promise
+  }
+
+  /**
+   * The probe verdict of a content, starting its probe when unknown. When an
+   * asynchronous probe settles, every file holding that content is re-read
+   * (now with a verdict) and the tiles are recompiled.
+   */
+  private probeVerdict(hash: string, rules: readonly TtsrRule[]): ProbeVerdict {
+    const known = this.probes.get(hash)
+    if (known) return known
+    let out: string[] | Promise<string[]>
+    try {
+      out = this.probeRules(rules)
+    } catch (e) {
+      out = [`file: the pattern timing check failed: ${(e as Error).message}`]
+      this.deps.reportError('ttsr', 'guard rules timing check failed', e)
+    }
+    if (Array.isArray(out)) {
+      const done: ProbeVerdict = { done: true, errors: out }
+      this.probes.set(hash, done)
+      return done
+    }
+    const promise = out
+      .catch((e: unknown) => {
+        this.deps.reportError('ttsr', 'guard rules timing check failed', e)
+        return [`file: the pattern timing check failed: ${(e as Error).message}`]
+      })
+      .then((errors) => {
+        this.probes.set(hash, { done: true, errors })
+        this.onProbed(hash)
+        return errors
+      })
+    const pending: ProbeVerdict = { done: false, promise }
+    this.probes.set(hash, pending)
+    return pending
+  }
+
+  private onProbed(hash: string): void {
+    try {
+      if (this.global.hash === hash) this.global = this.readRulesFile(this.deps.globalRulesFile(), null)
+      for (const state of this.projects.values()) {
+        if (state.snap.hash !== hash) continue
+        state.snap = this.readRulesFile(join(state.root, REPO_RULES_REL), state.root)
+        this.maybePrompt(state)
+      }
+      this.recompileAll()
+    } catch (e) {
+      this.deps.reportError('ttsr', 'could not apply a guard rules timing verdict', e)
+    }
+  }
+
+  /**
+   * Forwards the new complete lines of a hook trace log to the error sink,
+   * at most TTSR_LOG_TICK_BYTES per pass. A log that shrank or was replaced
+   * is read again from its start. The sandbox log sits in a directory the
+   * container writes: a symlink or non-file there is refused, never followed.
+   */
+  private drainLog(tile: TileState, log: LogTail): void {
+    let fd: number | null = null
+    const fault = (what: string, e?: unknown): void => {
+      const tag = `${what}:${(e as NodeJS.ErrnoException | undefined)?.code ?? ''}`
+      if (log.fault === tag) return
+      log.fault = tag
+      this.deps.reportError('ttsr', `hook log ${log.path} of tile ${tile.id}: ${what}`, e)
+    }
+    try {
+      let st: ReturnType<typeof lstatSync>
+      try {
+        st = lstatSync(log.path)
+      } catch (e) {
+        const code = (e as NodeJS.ErrnoException).code
+        if (code === 'ENOENT' || code === 'ENOTDIR') return
+        throw e
+      }
+      if (!st.isFile()) return fault('not a regular file, not read')
+      if (log.ino !== null && st.ino !== log.ino) log.offset = 0
+      if (st.size < log.offset) log.offset = 0
+      log.ino = st.ino
+      if (st.size === log.offset) return
+      fd = openSync(log.path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0))
+      if (fstatSync(fd).ino !== st.ino) return fault('replaced while being read, retried next pass')
+      const buf = Buffer.alloc(Math.min(st.size - log.offset, TTSR_LOG_TICK_BYTES))
+      const n = readSync(fd, buf, 0, buf.length, log.offset)
+      const nl = buf.lastIndexOf(0x0a, n - 1)
+      // Only whole lines, unless one line alone fills the read.
+      const take = nl >= 0 ? nl + 1 : n === TTSR_LOG_TICK_BYTES ? n : 0
+      if (take === 0) return
+      log.offset += take
+      log.fault = null
+      const lines = buf.subarray(0, take).toString('utf8').split('\n').filter((l) => l.trim() !== '')
+      for (const line of lines.slice(0, TTSR_LOG_TICK_LINES)) {
+        this.deps.reportError('ttsr-hook', `tile ${tile.id}: ${line.slice(0, TTSR_LOG_LINE_CHARS)}`)
+      }
+      if (lines.length > TTSR_LOG_TICK_LINES) {
+        this.deps.reportError('ttsr-hook', `tile ${tile.id}: (+${lines.length - TTSR_LOG_TICK_LINES} more lines in ${log.path})`)
+      }
+    } catch (e) {
+      fault('cannot be read', e)
+    } finally {
+      if (fd !== null) closeSync(fd)
+    }
+  }
+
   /**
    * Reads one rules file. `root` set = repo file: the leaf must not be a
    * symlink and must resolve inside the root. Never a partial result: an
@@ -686,7 +874,8 @@ export class TtsrService {
       text,
       hash: text === null ? null : rulesHash(text),
       errors,
-      rules: []
+      rules: [],
+      probed: true
     })
     if (sig.startsWith('error:')) {
       const tag = `${path}\n${sig}`
@@ -705,21 +894,25 @@ export class TtsrService {
       if (!st.isFile()) return invalid(['file: is not a regular file'])
       if (st.size > MAX_FILE_BYTES) return invalid([`file: ${st.size} bytes exceeds the ${MAX_FILE_BYTES}-byte limit`])
       const text = readFileSync(path, 'utf8')
+      const hash = rulesHash(text)
       const parsed = parseRulesFile(text)
-      if (!parsed.ok) {
+      const verdict = parsed.ok ? this.probeVerdict(hash, parsed.file.rules) : null
+      const errors = !parsed.ok ? parsed.errors : verdict !== null && verdict.done ? verdict.errors : []
+      if (errors.length > 0) {
         if (root === null) {
-          const tag = `${path}\n${rulesHash(text)}`
+          const tag = `${path}\n${hash}`
           if (!this.reportedInvalid.has(tag)) {
             this.reportedInvalid.add(tag)
             this.deps.reportError(
               'ttsr',
-              `global guard rules rejected (${parsed.errors.length} error(s)), none loaded: ${path}: ${parsed.errors.slice(0, 3).join('; ')}`
+              `global guard rules rejected (${errors.length} error(s)), none loaded: ${path}: ${errors.slice(0, 3).join('; ')}`
             )
           }
         }
-        return invalid(parsed.errors, text)
+        return invalid(errors, text)
       }
-      return { sig, status: 'ok', text, hash: rulesHash(text), errors: [], rules: parsed.file.rules }
+      const rules = parsed.ok ? parsed.file.rules : []
+      return { sig, status: 'ok', text, hash, errors: [], rules, probed: verdict?.done === true }
     } catch (e) {
       this.deps.reportError('ttsr', `cannot read ${path}`, e)
       return invalid([`file: cannot read: ${(e as Error).message}`])
@@ -749,6 +942,18 @@ export function repoRulesPathForWrite(root: string): string {
   if (leaf?.isSymbolicLink()) throw new Error(`refusing to write ${path}: it is a symlink`)
   if (leaf && !leaf.isFile()) throw new Error(`refusing to write ${path}: it is not a regular file`)
   return path
+}
+
+/** A tail of `path` starting at its current end: lines already there belong to an earlier spawn. */
+function newLogTail(path: string): LogTail {
+  try {
+    const st = lstatSync(path)
+    if (st.isFile()) return { path, offset: st.size, ino: st.ino, fault: null }
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code
+    if (code !== 'ENOENT' && code !== 'ENOTDIR') throw e
+  }
+  return { path, offset: 0, ino: null, fault: null }
 }
 
 function checkRelativePath(p: unknown): string | null {

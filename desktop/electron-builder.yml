@@ -30,10 +30,9 @@ extraResources:
   # into the roadmap-scribe agent). Dropping this directory costs all of them, not
   # just one hook. Loaded into every Deck session via --plugin-dir (resolved LIVE
   # from process.resourcesPath when packaged, see index.ts getDeckPluginDir --
-  # re-checked at every spawn, not cached at boot, card d02c8e96). The hook
-  # bundles (.mjs) are produced by `npm run build:hook`, the CLI bundle by
-  # `npm run build:cli`, both of which run before packaging via the
-  # build/package scripts.
+  # re-checked at every spawn, not cached at boot). The hook bundles (.mjs) are
+  # produced by `npm run build:hook`, the CLI bundle by `npm run build:cli`,
+  # both of which run before packaging via the build/package scripts.
   # tests/desktop-electron-builder-resources.test.ts reads this extraResources
   # list to guard against a packaging run silently dropping an entry.
   - from: deck-plugin

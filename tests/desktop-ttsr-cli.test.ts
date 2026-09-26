@@ -3,7 +3,7 @@
 // exactly how the repo-rules skill invokes it.
 
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -257,7 +257,7 @@ test("list: with a matching effective file, the repo rule reads active, plus kor
   expect(result.stdout).toContain("kory/empty-catch");
 });
 
-test("list: an edited-since-approval repo rule reads pending-approval, not active", async () => {
+test("list: an edited-since-approval repo rule reads inactive, not active", async () => {
   const dir = await repoWith(VALID_RULE);
   const effectivePath = join(dir, "effective.json");
   const staleRule = { ...VALID_RULE.rules[0], message: "a different, older message" };
@@ -267,5 +267,78 @@ test("list: an edited-since-approval repo rule reads pending-approval, not activ
   );
   const result = await runCli(["list"], dir, { CLAUDE_PEERS_TTSR_FILE: effectivePath });
   expect(result.exitCode).toBe(0);
-  expect(result.stdout).toContain("pending-approval");
+  expect(result.stdout, "the CLI cannot tell pending from disabled: it must not claim either").toContain(
+    "inactive (pending approval or disabled by the operator)"
+  );
+});
+
+test("list: an effective file named but missing exits 0 with a note", async () => {
+  const dir = await repoWith(VALID_RULE);
+  const result = await runCli(["list"], dir, { CLAUDE_PEERS_TTSR_FILE: join(dir, "gone.json") });
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout).toContain("does not exist");
+  expect(result.stdout).toContain("no-emoji-ui");
+});
+
+// --- read containment, argument errors, paths without --path ---
+
+test("check and test --file refuse a file outside the repository (exit 2), even through a symlink", async () => {
+  const dir = await repoWith(VALID_RULE);
+  const outside = mkdtempSync(join(tmpdir(), "kory-rules-outside-"));
+  tmpDirs.push(outside);
+  writeFileSync(join(outside, "secret.txt"), "EMOJI_MARK");
+  symlinkSync(join(outside, "secret.txt"), join(dir, "link.txt"));
+  for (const args of [
+    ["check", join(outside, "secret.txt")],
+    ["check", "link.txt"],
+    ["test", "no-emoji-ui", "--file", join(outside, "secret.txt"), "--path", "src/a.txt"],
+    ["test", "no-emoji-ui", "--file", "link.txt", "--path", "src/a.txt"],
+  ]) {
+    const result = await runCli(args, dir);
+    expect(result.exitCode, `kory-rules ${args.join(" ")} must not read outside the repository`).toBe(2);
+    expect(result.stderr).toContain("is outside the project");
+  }
+});
+
+test("test: --text without a value is a usage error naming --text", async () => {
+  const dir = await repoWith(VALID_RULE);
+  const result = await runCli(["test", "no-emoji-ui", "--text"], dir);
+  expect(result.exitCode).toBe(2);
+  expect(result.stderr).toContain("--text requires a value");
+});
+
+test("test: a rule with paths and no --path is a usage error, not a silent none", async () => {
+  const dir = await repoWith(VALID_RULE);
+  const result = await runCli(["test", "no-emoji-ui", "--text", "EMOJI_MARK", "--expect", "none"], dir);
+  expect(result.exitCode, "without a target the paths filter would drop the rule and every test would read none").toBe(2);
+  expect(result.stderr).toContain("--path <repo-relative file>");
+  const bash = await repoWith({
+    version: 1,
+    rules: [{ ...VALID_RULE.rules[0], id: "no-npm", tools: ["Bash"], field: "command", pattern: "^npm\\b" }],
+  });
+  const b = await runCli(["test", "no-npm", "--text", "npm i"], bash);
+  expect(b.exitCode).toBe(2);
+  expect(b.stderr).toContain("directory the command runs in");
+  expect((await runCli(["test", "no-npm", "--text", "npm i", "--path", "src", "--expect", "match"], bash)).exitCode).toBe(0);
+});
+
+test("check: a pattern that backtracks is rejected as too slow (exit 1)", async () => {
+  const dir = await repoWith({ version: 1, rules: [{ ...VALID_RULE.rules[0], pattern: "\\w+\\w+\\w+x" }] });
+  const result = await runCli(["check"], dir);
+  expect(result.exitCode, "check must run the timing probe, not only the parser").toBe(1);
+  expect(result.stdout).toContain('rules[0] "no-emoji-ui": pattern: too slow');
+}, 20000);
+
+test("scan: tests each whole file like the hook (a match across lines, a file past the cap), lines for display only", async () => {
+  const dir = await repoWith({ version: 1, rules: [{ ...VALID_RULE.rules[0], pattern: "BEGIN\\nEND" }] });
+  writeFileSync(join(dir, "src", "multi.txt"), "x\nBEGIN\nEND\n");
+  writeFileSync(join(dir, "src", "big.txt"), "a".repeat(300 * 1024) + "\nBEGIN\nEND\n");
+  writeFileSync(join(dir, "src", "bigearly.txt"), "BEGIN\nEND\n" + "a".repeat(300 * 1024));
+  await git(dir, "add", "src");
+  await git(dir, "commit", "-q", "-m", "more");
+  const result = await runCli(["scan", "no-emoji-ui"], dir);
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout, "a match spanning two lines is found").toContain("src/multi.txt  (1)");
+  expect(result.stdout, "a large file is scanned up to the cap, not skipped").toContain("src/bigearly.txt  (1)");
+  expect(result.stdout, "past the cap the hook does not look either").not.toContain("src/big.txt");
 });

@@ -1,10 +1,12 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 // Node-only modules (no electron / no @shared alias), import under bun.
 import {
+  COMMAND_CAP,
   FIELD_CAP,
   MAX_FILE_BYTES,
   MAX_HOOK_TEXT_CHARS,
@@ -13,6 +15,7 @@ import {
   evaluate,
   extractField,
   hasNestedQuantifier,
+  hookEvaluationOrder,
   globToRegExp,
   parseEffectiveFile,
   parseRulesFile,
@@ -126,6 +129,14 @@ describe("parseRulesFile: one case per rejection", () => {
   for (const p of ["(a+)+", "(\\w*)*", "(x+)*", "(?:ab+c){2,}", "((a+)b)+"]) {
     test(`nested quantifier ${p}`, () => expectRejected({ ...base(), pattern: p }, "nested unbounded quantifier"));
   }
+  for (const p of ["a", "\\s", "\\d", "_", "\\n", "[a-z]", "x"])
+    test(`pattern ${p} matching trivial text`, () => expectRejected({ ...base(), pattern: p }, "matches the trivial text"));
+  test("\\p{...} without the u flag", () => {
+    expectRejected({ ...base(), pattern: "\\p{Extended_Pictographic}" }, 'without the "u" flag');
+    expectRejected({ ...base(), pattern: "x\\P{L}" }, 'without the "u" flag');
+    expect(parseRulesFile(fileOf([{ ...base(), pattern: "\\p{Extended_Pictographic}", flags: "u" }])).ok).toBe(true);
+    expect(parseRulesFile(fileOf([{ ...base(), pattern: "\\\\p\\{x\\}" }])).ok, "an escaped backslash before p is not \\p").toBe(true);
+  });
   test("disallowed flag", () => expectRejected({ ...base(), flags: "g" }, 'flag "g" is not allowed'));
   test("duplicate flag", () => expectRejected({ ...base(), flags: "ii" }, 'flag "i" is repeated'));
   test("flags not a string", () => expectRejected({ ...base(), flags: 1 }, "flags: must be a string"));
@@ -230,9 +241,12 @@ describe("extractField", () => {
     ).toEqual(["out", "err"]);
   });
 
-  test("each string is capped at FIELD_CAP", () => {
+  test("each string is capped at FIELD_CAP, a Bash command at the lower COMMAND_CAP", () => {
     const [s] = extractField({ tool_name: "Write", tool_input: { content: "x".repeat(FIELD_CAP + 10) } }, "added");
     expect(s!.length).toBe(FIELD_CAP);
+    const [c] = extractField({ tool_name: "Bash", tool_input: { command: "x".repeat(FIELD_CAP) } }, "command");
+    expect(c!.length).toBe(COMMAND_CAP);
+    expect(COMMAND_CAP).toBeLessThan(FIELD_CAP);
   });
 
   test("hostile shapes yield nothing", () => {
@@ -264,32 +278,100 @@ describe("built-in Kory rules", () => {
   const write = (content: string): Record<string, unknown> => pre("Write", { file_path: "/x/a.ts", content });
   const bash = (command: string): Record<string, unknown> => pre("Bash", { command });
 
+  // Literals the rules match are assembled at runtime, so this file itself
+  // never holds one (the tracked-files guard below reads it too).
+  const CATCH = "catch";
+  const EMPTY = "{" + "}";
   const cases: Array<[string, Record<string, unknown>[], Record<string, unknown>[]]> = [
     [
       "empty-catch",
-      [write("try { x() } catch {}"), write("try { x() } catch (e) { }"), write("p.catch(() => {})"), write("p.catch((err) => { })")],
-      [write("try { x() } catch (e) { log(e) }"), write("p.catch((e) => report(e))")],
+      [
+        write(`try { x() } ${CATCH} ${EMPTY}`),
+        write(`try { x() } ${CATCH} (e) { }`),
+        write(`p.${CATCH}(() => ${EMPTY})`),
+        write(`p.${CATCH}((err) => { })`),
+        write(`p.${CATCH}(async () => ${EMPTY})`),
+        write(`p.${CATCH}((_e: unknown) => ${EMPTY})`),
+        write(`p.${CATCH}(function () ${EMPTY})`),
+        write(`try { x() } ${CATCH} (e) { /* ignore */ }`),
+        write(`try { x() } ${CATCH} (e) {\n  // noop\n}`),
+      ],
+      [
+        write(`try { x() } ${CATCH} (e) { log(e) }`),
+        write(`p.${CATCH}((e) => report(e))`),
+        write(`try { x() } ${CATCH} {\n  // not a git repo: the caller falls back to the cwd\n}`),
+        write(`expect(src).not.toContain('${CATCH} ${EMPTY}')`),
+        pre("Write", { file_path: "/x/README.md", content: `never write \`${CATCH} ${EMPTY}\`` }),
+        pre("Write", { file_path: "/x/doc.mdx", content: `${CATCH} ${EMPTY}` }),
+      ],
     ],
     ["control-byte", [write("a\x1b[0m"), write("nul\x00"), write("bell\x07")], [write("a\\x1b[0m"), write("tab\tnewline\n")]],
     [
       "git-add-all",
-      [bash("git add -A"), bash("git add ."), bash("git add --all && git commit"), bash("git -C repo add -v .")],
-      [bash("git add src/a.ts"), bash("git add ./src/a.ts"), bash("git add -p")],
+      [
+        bash("git add -A"),
+        bash("git add ."),
+        bash("git add --all && git commit"),
+        bash("git -C repo add -v ."),
+        bash("cd x && git add -A && git commit -m y"),
+        bash("git -c core.x=y add -A"),
+        bash("git --no-pager add -A"),
+        bash("git add -- ."),
+        bash("GIT_TRACE=1 git add -A"),
+        bash("(cd x; git add .)"),
+      ],
+      [
+        bash("git add src/a.ts"),
+        bash("git add ./src/a.ts"),
+        bash("git add -p"),
+        bash(`git commit -m "feat: deny git add -A and git add ."`),
+        bash("echo 'never run git add -A'"),
+        bash("git add f.ts && echo ."),
+        bash(`git add f.ts && git commit -m "see -A"`),
+        bash("grep -rn 'git add -A' ."),
+      ],
     ],
     [
       "git-no-verify",
-      [bash("git commit --no-verify -m x"), bash("git push --no-verify")],
-      [bash("git commit -m 'verify'"), bash("grep no-verify-foo x")],
+      [
+        bash("git commit --no-verify -m x"),
+        bash("git push --no-verify"),
+        bash("git commit -n -m x"),
+        bash("git commit -an -m x"),
+        bash("git -c k=v commit --no-verify"),
+      ],
+      [
+        bash("git commit -m 'verify'"),
+        bash("grep no-verify-foo x"),
+        bash("grep -rn -- --no-verify ."),
+        bash("rg '--no-verify' src"),
+        bash(`git commit -m "docs: why --no-verify is banned"`),
+        bash("git push -n origin x"),
+        bash("git merge -n topic"),
+        bash("git commit -uno -m x"),
+      ],
     ],
     [
       "git-force-push",
-      [bash("git push --force"), bash("git push -f origin main"), bash("git push origin +main"), bash("git push -uf origin x")],
+      [
+        bash("git push --force"),
+        bash("git push -f origin main"),
+        bash("git push origin +main"),
+        bash("git push -uf origin x"),
+        bash("git -c k=v push --force"),
+        bash("git --no-pager push --force"),
+        bash("git push --force-if-includes --force"),
+      ],
       [
         bash("git push --force-with-lease"),
         bash("git push --force-with-lease=main:abc origin main"),
         bash("git push -u origin feat-f"),
         bash("git push --follow-tags"),
         bash("git push && rm -f x"),
+        bash(`git commit -m "docs: explain why git push --force is banned"`),
+        bash(`git log --grep "git push --force"`),
+        bash(`echo "do not git push --force"`),
+        bash("git push -o ci.skip origin x"),
       ],
     ],
     [
@@ -297,10 +379,25 @@ describe("built-in Kory rules", () => {
       [
         write(`const k = "${"sk-" + "ant-"}api03-abcdefghijkl"`),
         write(`t = ${"gh" + "p_"}${"a".repeat(36)}`),
-        write(`id = ${"AK" + "IA"}IOSFODNN7EXAMPLE`),
+        write(`t = ${"gh" + "o_"}abcdefghijklmnopqrstuvwxyz0123`),
+        write(`t = ${"gh" + "s_"}abcdefghijklmnopqrstuvwxyz0123`),
+        write(`t = ${"gh" + "u_"}abcdefghijklmnopqrstuvwxyz0123`),
+        write(`t = ${"gh" + "r_"}abcdefghijklmnopqrstuvwxyz0123`),
+        write(`k = ${"sk-" + "proj-"}abcdefghijklmnopqrstuvwxyz`),
+        write(`s = ${"xo" + "xb-"}1234-5678-abcdefgh`),
+        write(`s = ${"xo" + "xp-"}1234-5678-abcdefgh`),
+        write(`id = ${"AK" + "IA"}QWERTYUIOPASDFGH`),
         write(`${"-----BEGIN " + "RSA PRIVATE"} KEY-----`),
       ],
-      [write("const k = process.env.ANTHROPIC_API_KEY"), write("-----BEGIN PUBLIC KEY-----")],
+      [
+        write("const k = process.env.ANTHROPIC_API_KEY"),
+        write("-----BEGIN PUBLIC KEY-----"),
+        write(`id = ${"AK" + "IA"}IOSFODNN7EXAMPLE`),
+        write(`export ANTHROPIC_API_KEY=${"sk-" + "ant-"}xxxxxxxxxx`),
+        write(`export ANTHROPIC_API_KEY=${"sk-" + "ant-"}api03-XXXXXXXXXXXX`),
+        write(`t = ${"gh" + "p_"}${"x".repeat(36)}`),
+        write(`t = ${"gh" + "p_"}${"0".repeat(36)}`),
+      ],
     ],
   ];
 
@@ -312,7 +409,7 @@ describe("built-in Kory rules", () => {
   }
 
   test("built-ins apply to MultiEdit: any one edit triggers", () => {
-    const p = pre("MultiEdit", { file_path: "/x/a.ts", edits: [{ new_string: "ok" }, { new_string: "catch {}" }] });
+    const p = pre("MultiEdit", { file_path: "/x/a.ts", edits: [{ new_string: "ok" }, { new_string: `x ${CATCH} ${EMPTY}` }] });
     expect(firesKory("empty-catch", p)).toBe(true);
   });
 });
@@ -394,6 +491,140 @@ describe("evaluate", () => {
     expect(globToRegExp("desktop/**").test("desktopx")).toBe(false);
     expect(globToRegExp("a?.ts").test("ab.ts")).toBe(true);
     expect(globToRegExp("a.ts").test("abts")).toBe(false);
+  });
+});
+
+describe("evaluate: hook order, short-circuit, failures, Write over an existing file", () => {
+  const rule = (id: string, over: Partial<TtsrRule>, source: "kory" | "repo" | "user" = "repo"): TtsrEffectiveRule =>
+    qualifyRule(source, { ...(base() as unknown as TtsrRule), id, ...over });
+  const write = (file_path: string, content: string) => pre("Write", { file_path, content });
+
+  test("hookEvaluationOrder: denies before warns, Kory then user then repo, stable within a group", () => {
+    const rules = [
+      rule("w1", { mode: "warn" }, "kory"),
+      rule("d-repo", {}, "repo"),
+      rule("d-user", {}, "user"),
+      rule("d-kory", {}, "kory"),
+      rule("d-kory-2", {}, "kory"),
+      rule("w2", { mode: "warn" }, "repo"),
+    ];
+    expect(hookEvaluationOrder(rules).map((r) => r.qualifiedId)).toEqual([
+      "kory/d-kory",
+      "kory/d-kory-2",
+      "user/d-user",
+      "repo/d-repo",
+      "kory/w1",
+      "repo/w2",
+    ]);
+  });
+
+  test("stopAtFirstDeny: the first deny ends the evaluation, no later rule or warn runs", () => {
+    let calls = 0;
+    const later = rule("later", { paths: ["**"] });
+    const rules = hookEvaluationOrder([rule("w", { mode: "warn" }, "user"), later, rule("first", {}, "kory")]);
+    const res = evaluate(rules, write("/x/a.ts", "foo"), () => (calls++, "/x"), { stopAtFirstDeny: true });
+    expect(res.denies.map((d) => d.qualifiedId)).toEqual(["kory/first"]);
+    expect(res.warns, "no warn is evaluated once a deny is known").toEqual([]);
+    expect(calls, "a rule after the first deny must not even resolve the project root").toBe(0);
+  });
+
+  test("the project root function runs lazily, once, and only after a rule with paths matched its field", () => {
+    let calls = 0;
+    const root = () => (calls++, "/x");
+    const scoped = [rule("a", { paths: ["src/**"] }), rule("b", { paths: ["src/**"], pattern: "bar" })];
+    evaluate(scoped, write("/x/src/a.ts", "nothing here"), root);
+    expect(calls, "no field matched: no root lookup").toBe(0);
+    const res = evaluate(scoped, write("/x/src/a.ts", "foo bar"), root);
+    expect(res.denies).toHaveLength(2);
+    expect(calls, "resolved once for every rule of the call").toBe(1);
+  });
+
+  test("a path that cannot be canonicalized (ELOOP) skips that rule with an error; the other rules still deny", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ttsr-loop-"));
+    tmpRoots.push(dir);
+    symlinkSync(join(dir, "b"), join(dir, "a"));
+    symlinkSync(join(dir, "a"), join(dir, "b"));
+    const rules = [rule("scoped", { paths: ["src/**"] }), rule("plain", {}, "kory")];
+    const res = evaluate(rules, write(join(dir, "a", "x.ts"), "foo"), dir);
+    expect(res.denies.map((d) => d.qualifiedId), "one rule's path failure must not cancel another rule's deny").toEqual([
+      "kory/plain",
+    ]);
+    expect(res.errors).toHaveLength(1);
+    expect(res.errors[0]).toMatch(/^repo\/scoped: .*(ELOOP|loop)/i);
+  });
+
+  test("Write over an existing file fires only on a match the file did not already hold", () => {
+    const r = rule("no-foo", {});
+    const old = "a foo\nb\n";
+    const readExisting = () => old;
+    expect(evaluate([r], write("/x/a.ts", old), "/x", { readExisting }).denies, "rewriting the same content").toHaveLength(0);
+    expect(evaluate([r], write("/x/a.ts", `${old}c\n`), "/x", { readExisting }).denies, "an unrelated addition").toHaveLength(0);
+    expect(evaluate([r], write("/x/a.ts", `${old}foo\n`), "/x", { readExisting }).denies, "a second occurrence").toHaveLength(1);
+    expect(evaluate([r], write("/x/a.ts", "foo"), "/x", { readExisting: () => null }).denies, "a new file").toHaveLength(1);
+    const edit = pre("Edit", { file_path: "/x/a.ts", new_string: "foo" });
+    expect(evaluate([r], edit, "/x", { readExisting }).denies, "Edit is untouched: new_string is all added text").toHaveLength(1);
+    const failing = evaluate([r, rule("other", { pattern: "a foo" }, "kory")], write("/x/a.ts", `${old}foo`), "/x", {
+      readExisting: () => {
+        throw new Error("EISDIR: illegal operation on a directory");
+      },
+    });
+    expect(failing.errors.map((e) => e.split(":")[0])).toEqual(["repo/no-foo", "kory/other"]);
+    expect(failing.denies).toEqual([]);
+  });
+
+  test("an exclusion-only rule still applies outside the project, its exclusions tested on the absolute path", () => {
+    const r = rule("r", { paths: ["!**/*.md"] });
+    expect(evaluate([r], write("/elsewhere/a.ts", "foo"), "/x").denies).toHaveLength(1);
+    expect(evaluate([r], write("/elsewhere/a.md", "foo"), "/x").denies).toHaveLength(0);
+    const inc = rule("i", { paths: ["**"] });
+    expect(evaluate([inc], write("/elsewhere/a.ts", "foo"), "/x").denies, "an include glob never matches outside").toHaveLength(0);
+  });
+});
+
+describe("the repository's own tracked files (false-positive guard of the built-ins)", () => {
+  const REPO = resolve(import.meta.dir, "..");
+  const denies = KORY_EFFECTIVE_RULES.filter((r) => r.mode === "deny");
+  const write = (file_path: string, content: string) => pre("Write", { file_path, content });
+  // `git ls-files --eol`: "i/<eol> w/<eol> attr/<attr>\t<path>", i/-text = binary for git.
+  const listed = spawnSync("git", ["ls-files", "--eol", "-z"], { cwd: REPO, encoding: "utf8" });
+  const textFiles = listed.stdout
+    .split("\0")
+    .filter((e) => e.includes("\t") && !e.startsWith("i/-text"))
+    .map((e) => e.slice(e.indexOf("\t") + 1));
+  const contentOf = (rel: string): string | null => {
+    try {
+      return readFileSync(join(REPO, rel), "utf8");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw e;
+    }
+  };
+
+  test("git lists the tracked text files", () => {
+    expect(listed.status, listed.stderr).toBe(0);
+    expect(textFiles.length).toBeGreaterThan(100);
+  });
+
+  test("no built-in deny fires on a Write of any tracked file's current content", () => {
+    for (const rel of textFiles) {
+      const content = contentOf(rel);
+      if (content === null) continue;
+      const abs = join(REPO, rel);
+      const res = evaluate(denies, write(abs, content), REPO, { readExisting: () => content });
+      expect(res.denies.map((d) => d.qualifiedId), `a Write of the current content of ${rel} would be denied`).toEqual([]);
+      expect(res.errors, `rules not evaluated on ${rel}`).toEqual([]);
+    }
+  });
+
+  test("secret-literal and control-byte fire on no tracked file even as brand-new content (placeholders excluded)", () => {
+    const pure = denies.filter((r) => r.id === "secret-literal" || r.id === "control-byte");
+    expect(pure).toHaveLength(2);
+    for (const rel of textFiles) {
+      const content = contentOf(rel);
+      if (content === null) continue;
+      const res = evaluate(pure, write(join(REPO, rel), content), REPO);
+      expect(res.denies.map((d) => d.qualifiedId), `writing ${rel} as a new file would be denied`).toEqual([]);
+    }
   });
 });
 

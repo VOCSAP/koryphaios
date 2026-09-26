@@ -77,12 +77,23 @@ One full example -- ban a debug print left in committed code:
 
 1. Edit `.claude/claude-peers/rules.json` with your normal edit tool (there
    is no `add` command -- editing the JSON directly is already shorter).
-2. `bun "${CLAUDE_PLUGIN_ROOT}/bin/kory-rules.mjs" check` -- fixes every
+2. `bun "${CLAUDE_PLUGIN_ROOT}/bin/kory-rules.mjs" check` -- fix every
    reported error; a typo'd field name is rejected, not silently ignored.
+   `check` also times each pattern on long adversarial input: "too slow"
+   means nested or adjacent repetitions (`\w+\w+x`, `(a|aa)+`) -- bound or
+   anchor them. A pattern matching everyday text (`a`, `\s`, `\d`) is
+   rejected too: it would fire on almost every call.
 3. `bun "${CLAUDE_PLUGIN_ROOT}/bin/kory-rules.mjs" test <id> --text "..." --expect match`
    on a case that should trigger it, and
    `... test <id> --text "..." --expect none` on one that should not. Both
-   must pass before moving on.
+   must pass before moving on. Options:
+   - `--path <repo-relative path>` -- REQUIRED when the rule has `paths`:
+     the file the edit targets (`--path src/ui/a.tsx`), or for a `Bash` rule
+     the directory the command runs in (`--path desktop`). Test one path
+     inside the globs and one outside.
+   - `--tool <Edit|MultiEdit|Write|NotebookEdit|Bash>` -- which of the
+     rule's `tools` to simulate (default: the first one).
+   - `--file <repo file>` instead of `--text`, to test a file's content.
 4. `bun "${CLAUDE_PLUGIN_ROOT}/bin/kory-rules.mjs" scan <id>` -- for a `deny`
    rule targeting `Write`, a nonzero match count means it would block a future
    rewrite of code that already exists. Narrow the pattern or the `paths`
@@ -92,6 +103,12 @@ One full example -- ban a debug print left in committed code:
    active or as done -- until approved it has no effect at all, and an
    operator-visible approval step is the design's safety valve for a rule an
    agent wrote itself.
+
+`bun "${CLAUDE_PLUGIN_ROOT}/bin/kory-rules.mjs" list` shows each repo rule as
+`active` or `inactive (pending approval or disabled by the operator)`: it
+cannot tell the two apart. Mention an inactive rule once, when you have just
+written or changed it; otherwise the operator may have switched it off on
+purpose -- do not ask again.
 
 ## Never do this
 

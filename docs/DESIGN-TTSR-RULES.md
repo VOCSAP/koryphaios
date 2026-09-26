@@ -386,3 +386,53 @@ sans UI dédiée.
 - Règles de dépôt appliquées sans approbation, quelle que soit l'option.
 - Outil MCP de gestion des règles : son coût par tour n'est pas justifié pour
   un usage aussi ponctuel.
+
+## 11. Écarts entre ce brief et l'implémentation
+
+Le code livré s'écarte du brief sur les points suivants ; ce sont eux qui font
+foi.
+
+- **Toggles** : une seule liste `ttsrDisabled` (pas de `ttsrEnabled`), clés
+  `kory/<id>`, `user/<id>`, `repo/<project_key>/<id>`. Une règle de dépôt est
+  active dès que son fichier est approuvé, sauf désactivation ; deux projets
+  portant le même id de règle ne partagent pas de toggle.
+- **Fichier effectif** : `sessions/<groupId>/ttsr/<def.id>.json` (répertoire de
+  session de la fenêtre), pas `userData` : `userData` est partagé entre
+  fenêtres, et une tuile restaurée réutilise son `def.id`. La trace du hook
+  (`CLAUDE_PEERS_TTSR_LOG`) est à côté, relue par le poller du Deck et versée
+  dans `reportError('ttsr-hook', …)`.
+- **Superviseur** : règles Kory seules (§8.2 tranché).
+- **Sandbox** (§8.1 tranché) : copie dans le répertoire d'exécution du
+  conteneur (`/kory-run/ttsr-<sessionId>.json`, montage déjà existant et
+  possédé par le Deck), aucun nouveau montage ; rafraîchie à chaque
+  recompilation, restaurée si le conteneur la modifie.
+- **Racine du projet côté hook** : toplevel git de `CLAUDE_PROJECT_DIR`,
+  calculé seulement quand une règle à `paths` a déjà correspondu, pour être
+  cohérent avec le Deck et le CLI quand la session est lancée dans un
+  sous-répertoire.
+- **Vitesse des motifs** : le validateur synchrone ne suffit pas contre le
+  ReDoS. Une sonde chronométrée (worker, budget par entrée, échéance dure)
+  passe chaque motif sur des entrées adversariales construites à partir du
+  motif ; elle tourne dans `kory-rules check`, aux enregistrements depuis le
+  Deck et à chaque chargement d'un fichier global ou de dépôt, avant toute
+  compilation ou approbation. Le hook évalue les `deny` d'abord, règles Kory
+  en tête, et s'arrête au premier : une règle lente ne peut plus annuler un
+  blocage Kory. Le champ `command` est plafonné à 16 Kio.
+- **`Write` et le code existant** (§8.5 tranché) : une règle `added` ne se
+  déclenche sur un `Write` que si le nouveau contenu contient plus
+  d'occurrences du motif que le fichier actuel sur disque. Seul ce que l'agent
+  ajoute est jugé ; `Edit` et `MultiEdit` sont inchangés.
+- **Règles Kory** : les commandes git ne sont reconnues qu'en position de
+  commande (une mention dans un message de commit ou un motif de grep ne
+  déclenche pas) ; `empty-catch` exclut le Markdown et accepte un catch dont
+  le commentaire s'explique ; `secret-literal` exclut les valeurs d'exemple
+  documentées. Un test parcourt `git ls-files` et vérifie qu'aucune règle
+  Kory ne bloque la réécriture d'un fichier suivi.
+- **Validation** : rejet aussi des motifs qui correspondent à un échantillon
+  banal (`a`, `x y`, `\n`, `0`, `_`) et de `\p{…}` sans le flag `u` ;
+  `rules:test` s'exécute dans un worker avec échéance, jamais sur le thread
+  principal d'Electron ; `kory-rules check` et `test --file` refusent un
+  fichier hors de la racine git.
+- **`kory-rules list`** : ne distingue pas « en attente » de « désactivée »
+  (le fichier effectif ne contient que les règles actives) et l'annonce comme
+  telle ; la skill demande à l'agent de ne pas relancer l'opérateur.

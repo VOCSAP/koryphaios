@@ -97,6 +97,14 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     reason:
       "compiled guard rules of one tile (<desk id>.json under ttsr/): a restored workspace reuses desk ids, so at the root two windows would overwrite each other's rules",
   },
+  ttsrLogFileName: {
+    kind: "constructor",
+    scope: "session",
+    module: "ttsr-service.ts",
+    wiring: [{ callee: "TtsrService", dirArg: { prop: "sessionDir" } }],
+    reason:
+      "guard-rule hook trace log of one tile (<desk id>.log next to its rules), tailed into this window's error log; same desk-id reuse hazard",
+  },
   "demo-scenario.md": {
     kind: "literal",
     scope: "session",
@@ -130,6 +138,11 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     kind: "constructor",
     scope: "project",
     reason: "ttsr-<session uuid>.json in the project container's run dir, a copy of a tile's rules; the uuid is minted per spawn, so two windows on one container never share one",
+  },
+  ttsrSandboxLogName: {
+    kind: "constructor",
+    scope: "project",
+    reason: "ttsr-<session uuid>.log in the project container's run dir, the hook trace log of one sandboxed spawn; per-spawn uuid, never shared",
   },
   "sandbox.json": {
     kind: "literal",
