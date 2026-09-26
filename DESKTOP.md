@@ -424,6 +424,26 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   and therefore decides nothing. Resuming a host needs no change on this side:
   `connectRemoteApi` already boots from a stored credential, so the shell
   seeds `COMPANION_CRED_STORAGE_KEY` before navigating.
+- **Guard rules (TTSR, `docs/DESIGN-TTSR-RULES.md`)**: a `PreToolUse`/
+  `PostToolUse` hook (`desktop/hooks/ttsr-hook.ts`) matches a tool call's
+  input against a regex and denies it or injects the rule's message, paid in
+  tokens only the day it fires. Three sources: Kory built-ins
+  (`shared/ttsr-builtin.ts`, read-only), the operator's global file
+  (`<globalConfigDir>/ttsr-rules.json`), and a repo file
+  (`<projectDir>/.claude/claude-peers/rules.json`, agent- or human-authored).
+  Shared engine (`shared/ttsr-rules.ts`, node builtins only): validator,
+  field extraction, evaluation, hash. A repo file is a cloned-repo value
+  (hostile input #1): the hook never sees it until its sha256 is approved for
+  that project key (`main/ttsr-approvals.ts`); any edit re-stages it as
+  pending. `main/ttsr-service.ts` compiles one effective file per tile
+  (`CLAUDE_PEERS_TTSR_FILE`), never a per-project file (two worktrees may
+  diverge). Settings > Rules (`RulesSettings.tsx`) lists the three sources,
+  toggles them (`rules:set-enabled`), edits/approves a file
+  (`rules:save-global`/`save-repo`/`approve-repo`), and tests a draft rule
+  against a sample (`rules:test`, a worker with a deadline). The `kory-rules`
+  CLI (`desktop/cli/kory-rules.ts`) and the `repo-rules` skill let an agent
+  author a repo rule without touching the Deck; it stays inactive until the
+  operator approves it here.
 
 ## Error reporting & logs (PLAN-observabilite O3–O6)
 

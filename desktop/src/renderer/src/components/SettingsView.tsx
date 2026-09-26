@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { BrokerSettings } from './BrokerSettings'
 import { NotificationChannels } from './NotificationChannels'
+import { RulesSettings } from './RulesSettings'
 import type { AppConfig, DisplayMode, LaunchPreset, ModelOption } from '@shared/types'
 import {
   clodexSettingUnavailable,
@@ -21,14 +22,15 @@ import { useT } from '../i18n'
 // Edit > Settings…). Changes apply live -- discrete inputs on change, free-text
 // inputs on blur -- so switching the language is instant (no Save button).
 
-type Category = 'general' | 'appearance' | 'terminal' | 'models' | 'broker'
+type Category = 'general' | 'appearance' | 'terminal' | 'models' | 'broker' | 'rules'
 
 const CATEGORIES: { id: Category; key: string }[] = [
   { id: 'general', key: 'settings.catGeneral' },
   { id: 'appearance', key: 'settings.catAppearance' },
   { id: 'terminal', key: 'settings.catTerminal' },
   { id: 'models', key: 'settings.catModels' },
-  { id: 'broker', key: 'settings.catBroker' }
+  { id: 'broker', key: 'settings.catBroker' },
+  { id: 'rules', key: 'settings.catRules' }
 ]
 
 const DISPLAY_MODE_KEYS: { value: DisplayMode; key: string }[] = [
@@ -612,6 +614,10 @@ export function SettingsView(): React.JSX.Element {
               claude-peers file on every visit, and on a companion client it
               must not read it at all. */}
           {active === 'broker' && <BrokerSettings />}
+
+          {/* Mounted only while open, like Broker: rulesList() re-reads the
+              three sources on every visit. */}
+          {active === 'rules' && <RulesSettings />}
         </div>
       </div>
     </div>

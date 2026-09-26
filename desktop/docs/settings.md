@@ -46,6 +46,26 @@ change, free-text inputs on blur.
 | **Roadmap context-wand model** | The read-only inference drafting item briefings; Haiku default |
 | Favorites (★ in pickers) | Pin models to the top of every model picker |
 
+### Rules
+
+On-demand guard rules (TTSR): a `PreToolUse`/`PostToolUse` hook matches a
+tool call against a regex and denies it or injects the rule's message, so a
+convention only costs tokens the day it fires. Three sources, one table per
+source (id, hook, a Voir/Éditer button, an Active checkbox):
+
+| Source | Written by | Activation |
+|---|---|---|
+| **Kory** | built into the app | read-only, toggle only |
+| **Global** | the operator, from this page | the Active checkbox |
+| **Repo** (`.claude/claude-peers/rules.json`) | an agent (`repo-rules` skill) or a human | approval (hash-based) here, then the Active checkbox |
+
+Éditer/Ajouter opens a form (event, tools, field, path globs, pattern, flags,
+mode, message) with a Tester zone (sample text + optional file path) that
+calls the same engine the hook uses. Saving rewrites the whole file for that
+source; an invalid file falls back to a raw-JSON editor. A pending repo file
+shows an Approuver button; approving again after the file changed is refused
+as stale and the list is refreshed.
+
 ## Config files
 
 ### Global app config
