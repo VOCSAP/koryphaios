@@ -1,7 +1,7 @@
 // TTSR ("Time Traveling Stream Rules") hook: matches the incoming PreToolUse
 // or PostToolUse call against the per-tile effective rules file the Deck
 // compiled (kory + global + approved repo rules) and denies the call or
-// injects the matched rule text, per desktop/src/shared/ttsr-rules.ts.
+// injects the matched rule text, through the shared rules engine.
 //
 // Fails open on every internal error, and never exits 2 (Claude Code treats
 // exit 2 as a block): a bug here must never stop a session from working.

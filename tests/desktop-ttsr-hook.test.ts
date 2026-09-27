@@ -6,7 +6,7 @@
 import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { decide, parseHookPayload, readExisting, runHook, trace, type HookPayload } from "../desktop/hooks/ttsr-hook.ts";
 import { KORY_EFFECTIVE_RULES } from "../desktop/src/shared/ttsr-builtin";
@@ -99,7 +99,7 @@ test("parseHookPayload degrades malformed/empty stdin to {} instead of throwing,
 test("decide(): an effective file that exists but cannot be read (a directory) is traced, not silently skipped", () => {
   const dir = makeTmpDir("ttsr-eisdir-");
   process.env.CLAUDE_PEERS_TTSR_FILE = dir;
-  process.env.CLAUDE_PEERS_TTSR_LOG = join(dir, "..", `${dir.split("/").pop()}.log`);
+  process.env.CLAUDE_PEERS_TTSR_LOG = join(dir, "..", `${basename(dir)}.log`);
   tmpDirs.push(process.env.CLAUDE_PEERS_TTSR_LOG);
   expect(decide(loadJson<HookPayload>("payload-deny-write.json"))).toBeNull();
   expect(readFileSync(process.env.CLAUDE_PEERS_TTSR_LOG, "utf-8")).toContain(`cannot read effective rules file ${dir}`);

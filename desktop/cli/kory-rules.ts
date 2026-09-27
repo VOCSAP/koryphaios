@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 // `kory-rules`: the agent-facing CLI for a repo's TTSR rules file
 // (.claude/claude-peers/rules.json), run through the `repo-rules` skill.
-// Wraps the shared engine (desktop/src/shared/ttsr-rules.ts) so validation,
+// Wraps the shared rules engine so validation,
 // path/field semantics and matching stay identical to what the plugin hook
 // actually enforces at runtime -- this CLI never reimplements them.
 //

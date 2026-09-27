@@ -65,6 +65,10 @@ describe("parseRulesFile: accepts", () => {
     if (res.ok) expect(res.file.rules[0]!.paths).toEqual(["desktop/src/renderer/**", "!**/*.test.ts"]);
   });
 
+  test("a pattern of exactly 512 characters", () => {
+    expect(parseRulesFile(fileOf([{ ...base(), pattern: "q".repeat(512) }])).ok).toBe(true);
+  });
+
   test("a PostToolUse warn on Bash output", () => {
     const res = parseRulesFile(
       fileOf([{ ...base(), event: "PostToolUse", tools: ["Bash"], field: "output", mode: "warn" }]),
@@ -151,6 +155,16 @@ describe("parseRulesFile: one case per rejection", () => {
   test("paths ** inside a segment", () => expectRejected({ ...base(), paths: ["src/a**"] }, "whole segment"));
   test("message empty", () => expectRejected({ ...base(), message: "  " }, "message: must be a non-empty string"));
   test("message too long", () => expectRejected({ ...base(), message: "x".repeat(401) }, "at most 400"));
+  test("pattern too long", () => expectRejected({ ...base(), pattern: "q".repeat(513) }, "pattern: must be at most 512 characters"));
+  test("pattern too long is refused before it is compiled", () => {
+    const errors = errorsOf(fileOf([{ ...base(), pattern: "(".repeat(513) }]));
+    expect(errors).toEqual(['rules[0] "no-foo": pattern: must be at most 512 characters']);
+  });
+  test("a built-in pattern over the cap copied into a rules file is refused", () => {
+    const long = KORY_RULES.find((r) => r.pattern.length > 512);
+    if (!long) throw new Error("no built-in exceeds 512 characters: this test no longer proves the cap has no exemption");
+    expectRejected({ ...long }, `rules[0] "${long.id}": pattern: must be at most 512 characters`);
+  });
 
   test("collects every error, each naming the rule and the field", () => {
     const errors = errorsOf(fileOf([{ ...base(), mode: "nope" }, { ...base(), id: "two", pattern: "(" , message: "" }]));
@@ -266,8 +280,8 @@ function firesKory(id: string, payload: Record<string, unknown>): boolean {
 }
 
 describe("built-in Kory rules", () => {
-  test("every built-in passes the file validator", () => {
-    const res = parseRulesFile(JSON.stringify({ version: 1, rules: KORY_RULES }));
+  test("every built-in passes the effective-file validator", () => {
+    const res = parseEffectiveFile(JSON.stringify({ version: 1, rules: KORY_EFFECTIVE_RULES }));
     if (!res.ok) throw new Error(`built-in rules must validate: ${res.errors.join("; ")}`);
     expect(KORY_RULES.map((r) => r.id).sort()).toEqual(
       ["control-byte", "empty-catch", "git-add-all", "git-force-push", "git-no-verify", "secret-literal"],

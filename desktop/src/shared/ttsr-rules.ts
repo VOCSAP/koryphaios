@@ -7,8 +7,8 @@
 // Pure module: Node builtins only, no electron and no `@shared/*` alias, so it
 // bundles with `bun build --target=node` and imports under `bun test`. It has no
 // log sink of its own: invalid input and a rule that could not be evaluated
-// come back as errors for the caller to trace. The pattern timing gate lives
-// in ttsr-probe.ts (a worker, asynchronous); parseRulesFile stays synchronous.
+// come back as errors for the caller to trace. The pattern timing gate runs
+// asynchronously in a worker, so parseRulesFile stays synchronous.
 
 import { createHash } from 'node:crypto'
 import { realpathSync } from 'node:fs'
@@ -53,6 +53,8 @@ export const MAX_FILE_BYTES = 64 * 1024
 export const MAX_EFFECTIVE_RULES = 2 * MAX_RULES + 50
 export const MAX_EFFECTIVE_BYTES = 4 * MAX_FILE_BYTES
 export const MAX_MESSAGE_CHARS = 400
+/** Cap on a global or repo rule's pattern, checked before the regex is compiled on the Deck main thread. */
+export const MAX_PATTERN_CHARS = 512
 export const MAX_ID_CHARS = 64
 /** Each extracted string is cut to this many UTF-16 code units before any regex runs. */
 export const FIELD_CAP = 256 * 1024
@@ -213,12 +215,15 @@ function validateFlags(flags: string): string | null {
 /**
  * Validates one rule, pushing every problem into `errors`. Returns a fresh rule
  * holding only the known fields, or null when anything is wrong.
+ * `patternCap` is null only for the Deck-compiled effective file, whose rules
+ * already went through parseRulesFile or are Kory code longer than the cap.
  */
 function validateRule(
   raw: unknown,
   label: string,
   allowedKeys: readonly string[],
-  errors: string[]
+  errors: string[],
+  patternCap: number | null
 ): TtsrRule | null {
   if (!isObject(raw)) {
     errors.push(`${label}: must be an object`)
@@ -307,6 +312,7 @@ function validateRule(
   }
 
   if (typeof pattern !== 'string' || pattern.length === 0) err('pattern', 'must be a non-empty string')
+  else if (patternCap !== null && pattern.length > patternCap) err('pattern', `must be at most ${patternCap} characters`)
   else if (flagsOk) {
     let re: RegExp | null = null
     try {
@@ -392,7 +398,7 @@ export function parseRulesFile(text: string): TtsrParseResult<TtsrRuleFile> {
   const rules: TtsrRule[] = []
   const seen = new Map<string, number>()
   raws.forEach((raw, i) => {
-    const rule = validateRule(raw, `rules[${i}]`, RULE_KEYS, errors)
+    const rule = validateRule(raw, `rules[${i}]`, RULE_KEYS, errors, MAX_PATTERN_CHARS)
     const id = isObject(raw) && typeof raw.id === 'string' ? raw.id : null
     if (id !== null) {
       const first = seen.get(id)
@@ -419,7 +425,7 @@ export function parseEffectiveFile(text: string): TtsrParseResult<TtsrEffectiveF
   const seen = new Map<string, number>()
   raws.forEach((raw, i) => {
     const label = `rules[${i}]`
-    const rule = validateRule(raw, label, EFFECTIVE_RULE_KEYS, errors)
+    const rule = validateRule(raw, label, EFFECTIVE_RULE_KEYS, errors, null)
     if (!isObject(raw)) return
     const { source, qualifiedId } = raw
     const at = typeof raw.id === 'string' ? `${label} "${raw.id}"` : label

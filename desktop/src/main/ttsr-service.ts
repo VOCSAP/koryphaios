@@ -33,7 +33,7 @@ import {
   type TtsrTool
 } from '../shared/ttsr-rules'
 import { KORY_EFFECTIVE_RULES } from '../shared/ttsr-builtin'
-import { readBounded } from '../shared/ttsr-fs'
+import { fileIdentity, fileIdentityMismatch, readBounded, type FileIdentity } from '../shared/ttsr-fs'
 import type {
   TtsrApproveResult,
   TtsrFileState,
@@ -1179,13 +1179,13 @@ export class TtsrService {
       return invalid([`file: cannot stat (${sig.slice(6)})`])
     }
     try {
-      let expect: { dev: number; ino: number } | undefined
+      let expect: FileIdentity | undefined
       if (root !== null) {
-        const st = lstatSync(path)
+        const st = lstatSync(path, { bigint: true })
         if (st.isSymbolicLink()) return invalid(['file: is a symlink; a repo rules file must be a regular file'])
         if (!st.isFile()) return invalid(['file: is not a regular file'])
         if (!within(root, realpathSync.native(dirname(path)))) return invalid(['file: resolves outside the project root'])
-        expect = { dev: st.dev, ino: st.ino }
+        expect = fileIdentity(st)
       }
       const res = readBounded(path, { cap: MAX_FILE_BYTES, follow: root === null, expect })
       if (res.kind === 'absent') return ABSENT
@@ -1200,10 +1200,9 @@ export class TtsrService {
         // containment check and the open: the inode read must still be the
         // one found at the contained path.
         const realDir = realpathSync.native(dirname(path))
-        const again = within(root, realDir) ? lstatSync(join(realDir, basename(path))) : null
-        if (!again || again.dev !== res.stat.dev || again.ino !== res.stat.ino) {
-          return invalid(['file: was replaced while being read'])
-        }
+        const again = within(root, realDir) ? lstatSync(join(realDir, basename(path)), { bigint: true }) : null
+        const mismatch = again ? fileIdentityMismatch(fileIdentity(again), res.identity) : 'was replaced while being read'
+        if (mismatch) return invalid([`file: ${mismatch}`])
       }
       const text = res.bytes.toString('utf8')
       const hash = rulesHash(text)

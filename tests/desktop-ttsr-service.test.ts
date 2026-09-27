@@ -42,7 +42,7 @@ import {
 import { TTSR_DISABLED_MAX, isTtsrToggleKey, sanitizeTtsrDisabled, ttsrToggleKey } from "../desktop/src/main/ttsr-toggles";
 import { matchIsolated } from "../desktop/src/main/ttsr-regex-worker";
 import { MAX_FILE_BYTES, parseEffectiveFile, parseRulesFile, rulesHash } from "../desktop/src/shared/ttsr-rules";
-import { readBounded } from "../desktop/src/shared/ttsr-fs";
+import { fileIdentityMismatch, readBounded } from "../desktop/src/shared/ttsr-fs";
 import { KORY_RULES } from "../desktop/src/shared/ttsr-builtin";
 import { extractBracedBody } from "./_braced-body";
 
@@ -582,11 +582,15 @@ describe("rule test (isolated regex)", () => {
   });
 
   test("a catastrophic regex times out in the worker instead of hanging the caller", async () => {
+    // JSC's Yarr gives up past its matchLimit and reports no match (https://github.com/oven-sh/bun/issues/42603), so one exec is capped near the deadline; eight stack well past it.
     const t0 = Date.now();
-    const res = await matchIsolated("(a|a)*c", "", ["a".repeat(40)], 300);
+    const res = await matchIsolated("(a|a)*c", "", Array(8).fill("a".repeat(40)), 300);
     expect(res).toEqual({ timedOut: true });
     expect(Date.now() - t0, "the deadline must bound the call").toBeLessThan(3000);
-    const h = harness();
+  });
+
+  test("a worker timeout reaches the rule tester as a timed-out result, not as a miss", async () => {
+    const h = harness({ matchIsolated: async () => ({ timedOut: true }) });
     const viaService = await h.svc.test(rule("t-slow", { pattern: "(a|a)*c" }), "a".repeat(40));
     expect(viaService).toEqual({ ok: true, timedOut: true });
   });
@@ -952,11 +956,26 @@ describe("hostile files: no hang, no read outside, bounded", () => {
     expect(readBounded(link, { cap: 1000 }), "a symlink leaf is never followed").toMatchObject({ kind: "refused", reason: "is a symlink" });
     expect(readBounded(link, { cap: 1000, follow: true }).kind).toBe("ok");
     expect(readBounded(d, { cap: 1000 }), "a directory is not a regular file").toMatchObject({ kind: "refused" });
-    const st = lstatSync(f);
-    expect(readBounded(f, { cap: 1000, expect: { dev: st.dev, ino: st.ino + 1 } }), "an inode other than the lstat's is refused").toMatchObject({
+    const st = lstatSync(f, { bigint: true });
+    expect(readBounded(f, { cap: 1000, expect: { dev: st.dev, ino: st.ino + 1n } }), "an inode other than the lstat's is refused").toMatchObject({
       kind: "refused",
     });
+    expect(readBounded(f, { cap: 1000, expect: { dev: st.dev, ino: st.ino } }).kind, "the lstat's own inode is read").toBe("ok");
     expect(readBounded(join(d, "missing"), { cap: 1 })).toEqual({ kind: "absent" });
+  });
+
+  test("file identity is compared exactly past 2^53, and an unnamed file is never proven identical", () => {
+    const mft = 0x1234n;
+    const ntfsIno = (sequence: bigint): bigint => (sequence << 48n) | mft;
+    const a = { dev: 7n, ino: ntfsIno(733n) };
+    const b = { dev: 7n, ino: ntfsIno(733n) + 1n };
+    expect(Number(a.ino), "premise: the number form rounds these two NTFS file ids together").toBe(Number(b.ino));
+
+    expect(fileIdentityMismatch(a, b)).toBe("was replaced while being read");
+    expect(fileIdentityMismatch(a, { ...a })).toBeNull();
+    expect(fileIdentityMismatch(a, { dev: 8n, ino: a.ino })).toBe("was replaced while being read");
+    expect(fileIdentityMismatch({ dev: 7n, ino: 0n }, { dev: 7n, ino: 0n })).toBe("file identity cannot be verified");
+    expect(fileIdentityMismatch(a, { dev: 7n, ino: 0n })).toBe("file identity cannot be verified");
   });
 
   test.skipIf(process.platform === "win32")("a FIFO as repo rules.json or as a hook log never blocks Deck main", () => {
