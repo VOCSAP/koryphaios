@@ -17,33 +17,16 @@ urgency.
 
 ## Procedure
 
-1. **Resolve `project_key`.** Run `git remote get-url origin` in the target
-   repo. Normalize it the same way the broker does: strip a trailing `.git`,
-   strip the scheme (`https://`, `ssh://`, `git://`), collapse the SCP form
-   (`user@host:owner/repo` -> `host/owner/repo`), then **lowercase the WHOLE
-   key, host AND owner/repo path**.
-   Example: `git@github.com:VOCSAP/koryphaios.git` -> `github.com/vocsap/koryphaios`.
-   No remote -> tell the caller you cannot resolve a project_key and stop
-   rather than guessing one.
-
-   **Why the casing is not a detail, measured 2026-08-27.** The broker stores
-   the `project_key` you send VERBATIM (`handleRoadmapUpsert`, `broker.ts`),
-   while every read path (`roadmap_get`, `roadmap_list`, the Deck's Roadmap
-   view) works on the fully lowercased form. Any other casing therefore CREATES
-   A PHANTOM PROJECT: the write succeeds, returns a perfectly credible id, and
-   the card exists for nobody. This page used to say "lowercase only the host",
-   and its example was the phantom bucket itself: `roadmap-export` on
-   `github.com/vocsap/koryphaios` returns 314 cards, on
-   `github.com/VOCSAP/koryphaios` it returns the 3 cards lost that way. Do not
-   "restore" the old rule: the whole key is lowercased since card `69e5a3e0`
-   (see the comment at the top of `shared/project-key.ts`).
-
-   Better still, do not compose the key at all when you can avoid it: the
-   `roadmap_add` MCP tool resolves it from the live session, and
-   `resolveProjectKey`/`normalizeRemoteUrl` (`shared/project-key.ts`) is the
-   single producer. Hand-composing it here makes this page a SECOND producer,
-   which is exactly how the divergence above happened. Card `51fd7b65` tracks
-   closing that door for good.
+1. **Resolve `project_key`, never compose it.** Read it from
+   `mcp__claude-peers__whoami`: its `project_key` is the key your session's
+   roadmap is scoped by, derived by the same code as `roadmap_add` and the CLI
+   (a normalized git remote, or a `local:<hex>` key for a repo without one).
+   You need it only for the duplicate-check fallback of step 2; both write
+   paths of step 7 derive it themselves. If `whoami` is unavailable, tell the
+   caller you cannot resolve a project_key and stop rather than building one
+   from `git remote`: the broker refuses a key that is not all lowercase with
+   a 400 whose message names the expected form, and any other hand-made
+   variation reads an empty roadmap.
 
 2. **Duplicate check (mandatory, before writing).** Call `roadmap_list`
    (optionally filtered by an obvious `kind`/`tag`) and scan titles/context for
@@ -103,14 +86,16 @@ urgency.
      happens: the MCP server advertises the tool unconditionally, but a
      session's actual tool set is filtered by its own invocation, independent
      of what the server offers) or the call errors as unavailable: use
-     `bun cli.ts roadmap-add --input <payload.json>` from the claude-peers
-     repo root, over Bash. The CLI resolves the broker URL and the broker's
+     `bun <claude-peers>/cli.ts roadmap-add --input <payload.json>` over Bash,
+     with the TARGET repo as working directory: the verb derives
+     `project_key` from the repo it runs in, so leave `project_key` out of
+     the payload (a value that differs from the derived one is refused before
+     any network call). The CLI resolves the broker URL and the broker's
      secret internally, the same way every other `cli.ts` command does --
      never source that secret or the broker URL yourself, and never
      construct the HTTP request or a secret-bearing header by hand. Unlike
-     the MCP tool, this verb cannot infer `project_key`/`by` from a live
-     session, so
-     both are required fields in the payload you write.
+     the MCP tool, this verb cannot infer `by` from a live session, so it is
+     a required field in the payload you write.
      - `by`: call `mcp__claude-peers__whoami` for your own peer_id if that
        tool is available; otherwise use a plainly-labelled fallback like
        `"<role>-unregistered"` -- never fabricate a peer_id that looks like a
@@ -126,7 +111,6 @@ urgency.
        ```bash
        cat > /tmp/roadmap-card.json << 'EOF'
        {
-         "project_key": "github.com/owner/repo",
          "by": "your-peer-id-or-fallback",
          "title": "...",
          "kind": "feature|bug|debt|idea|chore",
@@ -142,7 +126,7 @@ urgency.
          "depends_on": ["..."]
        }
        EOF
-       bun cli.ts roadmap-add --input /tmp/roadmap-card.json
+       bun <claude-peers>/cli.ts roadmap-add --input /tmp/roadmap-card.json
        ```
        Success prints the created card's JSON (with its `id`) to stdout. A
        failure prints `roadmap-add failed: ...` to stderr and exits non-zero
