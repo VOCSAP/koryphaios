@@ -7,16 +7,22 @@
 // literal string, not on a resolved filesystem path.
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
+const originalTimeZone = process.env.TZ;
+process.env.TZ = "America/Los_Angeles";
+
 GlobalRegistrator.register();
 
 // GlobalRegistrator.register() replaces globalThis.fetch repo-wide for the rest
 // of this bun test process; the paired unregister is required by the repo-wide
 // teardown scan.
 afterAll(async () => {
+  setSystemTime();
+  if (originalTimeZone === undefined) delete process.env.TZ;
+  else process.env.TZ = originalTimeZone;
   await GlobalRegistrator.unregister();
 });
 
-import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, expect, jest, mock, setSystemTime, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased before bun resolves it
 import { mockStore, storeMockStubs } from "./_store-mock";
 
@@ -126,6 +132,8 @@ let container: HTMLDivElement;
 let root: Root;
 
 beforeEach(() => {
+  jest.useFakeTimers();
+  setSystemTime(new Date("2026-01-02T12:00:00.000Z"));
   resetFakeStore();
   container = document.createElement("div");
   document.body.appendChild(container);
@@ -137,6 +145,8 @@ afterEach(() => {
     root.unmount();
   });
   container.remove();
+  jest.useRealTimers();
+  setSystemTime();
 });
 
 function approval(overrides: Partial<FakeApproval> = {}): FakeApproval {
@@ -149,11 +159,15 @@ function approval(overrides: Partial<FakeApproval> = {}): FakeApproval {
   };
 }
 
-function renderPanel(a: FakeApproval, sessions: FakeSession[]): void {
+function renderApprovals(approvals: FakeApproval[], sessions: FakeSession[]): void {
   act(() => {
-    fakeUseDeck.setState({ pendingApprovals: [a], sessions });
+    fakeUseDeck.setState({ pendingApprovals: approvals, sessions });
     root.render(React.createElement(InboxPanel));
   });
+}
+
+function renderPanel(a: FakeApproval, sessions: FakeSession[]): void {
+  renderApprovals([a], sessions);
 }
 
 function senderSpan(): HTMLElement | null {
@@ -193,4 +207,57 @@ test("unresolved sender with an EMPTY tile_ref -> senderUnresolvedEmpty text, no
   expect(span).not.toBeNull();
   expect(span!.textContent).toBe("inbox.senderUnresolvedEmpty");
   expect(span!.querySelector("code")).toBeNull();
+});
+
+test("timestamps use local calendar days and refresh after local midnight", async () => {
+  expect(Intl.DateTimeFormat().resolvedOptions().timeZone).toBe("America/Los_Angeles");
+  // setSystemTime() alone does not survive advanceTimersToNextTimer() on bun
+  // 1.3.13: it patches Date but not the fake-timer engine's own anchor, so
+  // the clock snaps back to real time the moment a timer is advanced.
+  // Re-anchoring via useFakeTimers({ now }) keeps both in sync.
+  jest.useFakeTimers({ now: new Date("2026-01-03T07:59:59.000Z") });
+  const currentLocalDayAt = "2026-01-02T12:00:00.000Z";
+  const priorLocalDayAt = "2026-01-02T06:00:00.000Z";
+  // Local midnight for the fixture's America/Los_Angeles TZ (fixed above),
+  // one second after the frozen system time.
+  const expectedLocalMidnight = Date.parse("2026-01-03T08:00:00.000Z");
+  renderApprovals(
+    [
+      approval({ id: "apr-current-local-day", created_at: currentLocalDayAt }),
+      approval({ id: "apr-prior-local-day", created_at: priorLocalDayAt })
+    ],
+    []
+  );
+
+  const timestamps = (): (string | null)[] =>
+    [...container.querySelectorAll(".inbox-entry-time")].map((node) => node.textContent);
+  expect(timestamps()).toEqual([
+    new Date(currentLocalDayAt).toLocaleTimeString(),
+    new Date(priorLocalDayAt).toLocaleString()
+  ]);
+
+  await act(async () => {
+    jest.advanceTimersToNextTimer();
+  });
+
+  expect(Date.now()).toBe(expectedLocalMidnight);
+  expect(timestamps()).toEqual([
+    new Date(currentLocalDayAt).toLocaleString(),
+    new Date(priorLocalDayAt).toLocaleString()
+  ]);
+  expect(jest.getTimerCount()).toBe(1);
+
+  // A foreign timer (React's scheduler, happy-dom) can appear during the
+  // component's lifetime under gate-scale load, so the count right before
+  // unmount -- not a pre-mount baseline -- is what the delta must match.
+  const beforeUnmount = jest.getTimerCount();
+  act(() => {
+    root.unmount();
+  });
+  expect(beforeUnmount - jest.getTimerCount()).toBe(1);
+
+  expect(() => {
+    jest.advanceTimersToNextTimer();
+  }).not.toThrow();
+  expect(timestamps()).toEqual([]);
 });

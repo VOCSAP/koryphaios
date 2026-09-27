@@ -29,6 +29,15 @@ function entryAt(e: InboxEntry): string {
   return e.approval.created_at
 }
 
+function listTimestamp(e: InboxEntry, today: Date): string {
+  const at = new Date(entryAt(e))
+  const isToday =
+    at.getFullYear() === today.getFullYear() &&
+    at.getMonth() === today.getMonth() &&
+    at.getDate() === today.getDate()
+  return isToday ? at.toLocaleTimeString() : at.toLocaleString()
+}
+
 /** Full text of an entry — the modal body and the list excerpt share it. */
 function entryText(e: InboxEntry): string {
   if (e.kind === 'message') return e.message.text
@@ -88,6 +97,15 @@ export function InboxPanel(): React.JSX.Element {
   const canAnswerVerdict = !(remote && VERDICT_BLOCKED_REMOTELY)
   const [openKey, setOpenKey] = useState<string | null>(null)
   const [sending, setSending] = useState(false)
+  const [today, setToday] = useState(() => new Date())
+
+  useEffect(() => {
+    const now = new Date()
+    const nextMidnight = new Date(now)
+    nextMidnight.setHours(24, 0, 0, 0)
+    const timer = setTimeout(() => setToday(new Date()), nextMidnight.getTime() - now.getTime())
+    return () => clearTimeout(timer)
+  }, [today])
 
   // One list, two wire channels: 'inbox:new' (messages, and the events that
   // will join it) and 'approvals:pending'. Blocking questions ride on TOP
@@ -297,9 +315,7 @@ export function InboxPanel(): React.JSX.Element {
                       nothing (a check lands in the actions) = acked. */}
                   <span className={`inbox-entry-dot is-${state}`} title={t(`inbox.state.${state}`)} />
                   <span className="inbox-entry-from">{senderOf(e)}</span>
-                  <span className="inbox-entry-time">
-                    {new Date(entryAt(e)).toLocaleTimeString()}
-                  </span>
+                  <span className="inbox-entry-time">{listTimestamp(e, today)}</span>
                 </span>
                 <span className="inbox-entry-excerpt">{entryText(e)}</span>
               </span>
