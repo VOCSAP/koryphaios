@@ -29,6 +29,8 @@ interface FakeDeckState {
   dismissOfflineBanner(): void;
   roadmapSync: { status: RoadmapSyncStatus; conflicts: unknown[] };
   setView(view: string): void;
+  mobile: boolean;
+  openRoadmapConflictsFilter(): void;
 }
 
 function initialFakeState(): FakeDeckState {
@@ -41,12 +43,18 @@ function initialFakeState(): FakeDeckState {
     dismissOfflineBanner: () => {},
     roadmapSync: { status: { mode: "local" }, conflicts: [] },
     setView: () => {},
+    mobile: false,
+    openRoadmapConflictsFilter: () => {},
   };
 }
 
 const fakeUseDeck = create<FakeDeckState>(() => initialFakeState());
 
-mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
+mockStore({
+  useDeck: fakeUseDeck,
+  ...storeMockStubs,
+  roadmapConflictCount: (s: FakeDeckState): number => s.roadmapSync.conflicts.length,
+});
 
 // StatusBanner.tsx's only VALUE import through the `@shared/*` tsconfig-only
 // alias (not resolved by bun test from the repo root) is status-banner.
@@ -127,4 +135,39 @@ test("the remote error detail is rendered regardless of which of the three cause
   expect(container.textContent).toContain(
     "replication routes require serve_replicas to be enabled on this broker"
   );
+});
+
+function clickConflictsButton(): void {
+  const button = [...container.querySelectorAll("button")].find(
+    (b) => b.textContent === "banner.openRoadmap"
+  );
+  expect(button, "the conflicts banner must carry its open-the-roadmap button").toBeDefined();
+  act(() => {
+    button!.click();
+  });
+}
+
+test("desktop: the conflicts banner button opens the roadmap FILTERED on the conflicts, not the bare view", () => {
+  const calls: string[] = [];
+  fakeUseDeck.setState({
+    roadmapSync: { status: { mode: "replica", online: true }, conflicts: [{}] },
+    setView: (v) => calls.push(`setView:${v}`),
+    openRoadmapConflictsFilter: () => calls.push("openRoadmapConflictsFilter"),
+  });
+  mountBanner();
+  clickConflictsButton();
+  expect(calls).toEqual(["openRoadmapConflictsFilter"]);
+});
+
+test("mobile: the conflicts banner button only switches view, RoadmapList has no filter row to show a narrowing", () => {
+  const calls: string[] = [];
+  fakeUseDeck.setState({
+    mobile: true,
+    roadmapSync: { status: { mode: "replica", online: true }, conflicts: [{}] },
+    setView: (v) => calls.push(`setView:${v}`),
+    openRoadmapConflictsFilter: () => calls.push("openRoadmapConflictsFilter"),
+  });
+  mountBanner();
+  clickConflictsButton();
+  expect(calls).toEqual(["setView:roadmap"]);
 });

@@ -9,17 +9,20 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 
-import { startBroker, stopBroker, type TestBroker } from "./_helper.ts";
+import { post, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
 import {
   normalizeRemoteUrl,
+  appendRoadmapContext,
   computeDeckProjectKey,
   configureRoadmapSigner,
   resetRoadmapSigner,
   listRoadmap,
   upsertRoadmap,
   archiveRoadmap,
-  reorderRoadmap
+  reorderRoadmap,
+  RoadmapRequestError
 } from "../desktop/src/main/roadmap-service.ts";
+import { isRoadmapStaleSaveError } from "../shared/roadmap-append.ts";
 import { normalizeRemoteUrl as coreNormalize } from "../shared/summarize.ts";
 import { buildAuthProof, deriveOperatorId, generateCredential } from "../shared/approval.ts";
 
@@ -143,6 +146,68 @@ test("list/upsert/archive round-trip against a live broker", async () => {
 // upsertRoadmap relies on `...fields` spread to carry inactive onto the wire; a
 // pick-list there would silently drop the field with no type or runtime error,
 // so only a real round trip proves it survives.
+test("appendRoadmapContext signs and persists a Deck-authored context note", async () => {
+  const endpoint = { url: broker.url, token: null };
+  const key = "github.com/acme/deck-context-append";
+  const created = await upsertRoadmap(endpoint, key, { title: "context target" });
+
+  const appended = await appendRoadmapContext(endpoint, created.id, "unresolved directive target");
+  expect(appended.context).toContain("unresolved directive target");
+  expect(appended.updated_by).toBe("deck");
+
+  const stored = (await listRoadmap(endpoint, key, {})).find((item) => item.id === created.id);
+  expect(stored?.context).toContain("unresolved directive target");
+});
+
+test("a Deck Save carrying a revision an append moved is rejected as a stale save the renderer recognizes", async () => {
+  const endpoint = { url: broker.url, token: null };
+  const key = "github.com/acme/deck-stale-save";
+  const opened = await upsertRoadmap(endpoint, key, { title: "stale save target", context: "operator context" });
+  expect(opened.content_rev).toBeNumber();
+
+  await appendRoadmapContext(endpoint, opened.id, "concurrent agent fact");
+  const rejection = await upsertRoadmap(endpoint, key, {
+    id: opened.id,
+    context: "operator context, edited",
+    expected_content_rev: opened.content_rev
+  }).then(
+    () => null,
+    (e: unknown) => e
+  );
+
+  expect(rejection).toBeInstanceOf(RoadmapRequestError);
+  expect((rejection as RoadmapRequestError).status).toBe(409);
+  expect(isRoadmapStaleSaveError(String(rejection))).toBe(true);
+  const stored = (await listRoadmap(endpoint, key, {})).find((item) => item.id === opened.id);
+  expect(stored?.context).toContain("concurrent agent fact");
+  expect(stored?.context).not.toContain("edited");
+});
+
+test("a Deck Save merged onto an agent's claim keeps the agent's lock", async () => {
+  const endpoint = { url: broker.url, token: null };
+  const key = "github.com/acme/deck-save-after-claim";
+  const opened = await upsertRoadmap(endpoint, key, { title: "claimed meanwhile", status: "planned" });
+
+  const claim = await post<{ item?: { locked: boolean; locked_by: string | null } }>(`${broker.url}/roadmap/upsert`, {
+    id: opened.id,
+    by: "agent-x",
+    status: "in_progress",
+  });
+  expect(claim.status).toBe(200);
+  const claimed = (await listRoadmap(endpoint, key, {})).find((item) => item.id === opened.id)!;
+  expect({ locked: claimed.locked, locked_by: claimed.locked_by }).toEqual({ locked: true, locked_by: "agent-x" });
+
+  const saved = await upsertRoadmap(endpoint, key, {
+    id: opened.id,
+    title: "title edited by the operator",
+    status: "in_progress",
+    expected_content_rev: claimed.content_rev,
+  });
+
+  expect(saved.title).toBe("title edited by the operator");
+  expect({ locked: saved.locked, locked_by: saved.locked_by }).toEqual({ locked: true, locked_by: "agent-x" });
+});
+
 test("upsertRoadmap threads `inactive` through to the broker, same call shape as toggleInactive", async () => {
   const endpoint = { url: broker.url, token: null };
   const key = "github.com/acme/deck-inactive-test";

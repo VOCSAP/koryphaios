@@ -75,6 +75,7 @@ import { deckBrokerMode } from './broker-client'
 import { ensureLoopbackBroker, locateBrokerScript, RespawnThrottle, withPathEntry } from './broker-spawn'
 import { createInboxSessionTracker, purgeInboxSessionCore } from './inbox-session'
 import {
+  appendRoadmapContext,
   computeDeckProjectKey,
   configureRoadmapSigner,
   fetchRoadmapConflicts,
@@ -88,7 +89,6 @@ import {
   canAutoDispatchNext,
   composeAssignText,
   composeStopText,
-  composeUnresolvedContext,
   dispatchNormalWave,
   firstQueued,
   nextBarrierPending,
@@ -1843,19 +1843,8 @@ const dispatchNextInner = async (): Promise<DispatchResult> => {
           execute: executeDirective,
           journal: (line) => journal.add('dispatch', line),
           reportError: (message, error) => reportError('dispatch', message, error),
-          // noteUnresolved's upsert replaces context wholesale (a full column
-          // replace server-side), rather than the atomic append-context route,
-          // so composeUnresolvedContext itself must carry the prior text
-          // forward.
-          // Any write to this card's context by another agent landing between
-          // the top-of-loop roadmap read and this upsert is silently
-          // overwritten; unbounded in the number of wave members, though in
-          // practice today a wave is usually a single directive.
           noteUnresolved: async (item) => {
-            await upsertRoadmap(endpoint, key, {
-              id: item.id,
-              context: composeUnresolvedContext(item.context, unresolvedDirectiveNote(item))
-            })
+            await appendRoadmapContext(endpoint, item.id, unresolvedDirectiveNote(item))
           }
         }))
       )

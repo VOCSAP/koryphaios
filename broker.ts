@@ -55,7 +55,7 @@ import {
   runRoadmapContextDocumentDeportCas,
   validateRoadmapContextDocumentLimits,
 } from "./shared/roadmap-context-document-cas.ts";
-import { ROADMAP_APPEND_RESULT_MAX_CHARS } from "./shared/roadmap-append.ts";
+import { formatRoadmapStaleSaveError, ROADMAP_APPEND_RESULT_MAX_CHARS } from "./shared/roadmap-append.ts";
 import { isValidQueueRank } from "./shared/roadmap-queue.ts";
 import {
   contentEquals,
@@ -3051,6 +3051,7 @@ function rowToRoadmapItem(row: RoadmapRow): RoadmapItem {
     updated_by: row.updated_by,
     created_at: row.created_at,
     updated_at: row.updated_at,
+    content_rev: row.content_rev,
     deleted_at: row.deleted_at,
     queue: row.queue,
     directive: row.directive ?? null,
@@ -3871,6 +3872,12 @@ function handleRoadmapUpsert(
   if (body.inactive !== undefined && typeof body.inactive !== "boolean") {
     return { error: "inactive must be a boolean", status: 400 };
   }
+  if (
+    body.expected_content_rev !== undefined &&
+    (!Number.isSafeInteger(body.expected_content_rev) || body.expected_content_rev < 0)
+  ) {
+    return { error: "expected_content_rev must be a non-negative integer", status: 400 };
+  }
   if (body.release !== undefined && typeof body.release !== "boolean") {
     return { error: "release must be a boolean", status: 400 };
   }
@@ -3879,6 +3886,7 @@ function handleRoadmapUpsert(
     // Partial patch: omitted fields keep their value; project_key never moves.
     const existing = getRoadmapItem(body.id);
     if (!existing) return { error: "unknown roadmap item", status: 404 };
+    const compareContentRevision = body.expected_content_rev !== undefined;
 
     // Card e344fa79: the caller's OWN group -- `undefined` (author.group_id
     // unresolved: an operator/deck-signed write, or an unproven claim with
@@ -4119,7 +4127,7 @@ function handleRoadmapUpsert(
     // preserves whatever the last SIGNED write recorded, instead of erasing
     // it -- the column means "last operator to sign a write", and an
     // ordinary agent's write does not un-happen that fact.
-    db.run(
+    const write = db.run(
       `UPDATE roadmap_items SET
          kind = ?, title = ?, description = ?, rationale = ?, context = ?, priority = ?,
          value = ?, effort = ?, status = ?, triage = ?, tags = ?, depends_on = ?, queue = ?,
@@ -4134,7 +4142,7 @@ function handleRoadmapUpsert(
            WHEN ? = 'archived' THEN COALESCE(deleted_at, datetime('now'))
            ELSE NULL
          END
-       WHERE id = ?`,
+       WHERE id = ?${compareContentRevision ? " AND content_rev = ?" : ""}`,
       [
         next.kind,
         next.title,
@@ -4164,8 +4172,15 @@ function handleRoadmapUpsert(
         next.updated_by,
         next.status,
         body.id,
+        ...(compareContentRevision ? [body.expected_content_rev!] : []),
       ]
     );
+    if (compareContentRevision && write.changes === 0) {
+      return {
+        error: formatRoadmapStaleSaveError("the card changed since it was opened; reload it before saving again"),
+        status: 409,
+      };
+    }
     // The lock this write leaves behind is a LOCAL one: this route never sets a
     // relay, so a card that was dropped or handed to another holder keeps
     // neither the relay pointer nor the contest raised against the holder that

@@ -2,6 +2,7 @@ import { test, expect, beforeAll, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
 import { startBroker, stopBroker, post, type TestBroker } from "./_helper.ts";
 import type { RoadmapItem } from "../shared/types.ts";
+import { ROADMAP_STALE_SAVE_MARKER } from "../shared/roadmap-append.ts";
 import {
   createSqliteRoadmapContextAppendCasStore,
   mapRoadmapContextAppendFailure,
@@ -289,6 +290,120 @@ test("an append increments content_rev, the comparison key used by the route", a
   } finally {
     db.close();
   }
+});
+
+test("a stale context save returns 409 and preserves the intervening append", async () => {
+  const opened = await seed({ context: "operator context at open" });
+  const db = new Database(broker.dbPath, { readonly: true });
+  let expectedContentRev: number;
+  try {
+    expectedContentRev = (db.query("SELECT content_rev FROM roadmap_items WHERE id = ?").get(opened.id) as {
+      content_rev: number;
+    }).content_rev;
+  } finally {
+    db.close();
+  }
+
+  const appended = await append({ id: opened.id, by: "agent", text: "concurrent agent fact" });
+  expect(appended.status).toBe(200);
+
+  const staleSave = await post<UpsertRes | AppendErr>(`${broker.url}/roadmap/upsert`, {
+    id: opened.id,
+    by: "seed-fixture",
+    context: "operator context at open\noperator draft",
+    expected_content_rev: expectedContentRev,
+  });
+
+  expect(staleSave.status).toBe(409);
+  expect((staleSave.body as AppendErr).error).toContain(ROADMAP_STALE_SAVE_MARKER);
+  expect((opened as RoadmapItem & { content_rev?: number }).content_rev).toBe(expectedContentRev);
+  const after = (await listAll()).find((item) => item.id === opened.id)!;
+  expect(after.context).toContain("concurrent agent fact");
+  expect(after.context).not.toContain("operator draft");
+});
+
+test("a Deck status transition without a revision is not refused by a concurrent append", async () => {
+  const opened = await seed({ context: "operator context at open" });
+  const appended = await append({ id: opened.id, by: "agent", text: "concurrent agent fact" });
+  expect(appended.status).toBe(200);
+
+  // The shape the dispatcher sends when it starts a card: no content revision.
+  const statusWrite = await post<UpsertRes | AppendErr>(`${broker.url}/roadmap/upsert`, {
+    id: opened.id,
+    by: "seed-fixture",
+    status: "in_progress",
+    queue: null,
+  });
+
+  expect(statusWrite.status).toBe(200);
+  const after = (await listAll()).find((item) => item.id === opened.id)!;
+  expect(after.status).toBe("in_progress");
+  expect(after.context).toContain("concurrent agent fact");
+});
+
+test("a stale revision refuses a write that carries no context", async () => {
+  const opened = await seed({ context: "operator context at open" });
+  const expectedContentRev = (opened as RoadmapItem & { content_rev?: number }).content_rev;
+  expect(expectedContentRev).toBeNumber();
+  const appended = await append({ id: opened.id, by: "agent", text: "concurrent agent fact" });
+  expect(appended.status).toBe(200);
+
+  const staleTitle = await post<UpsertRes | AppendErr>(`${broker.url}/roadmap/upsert`, {
+    id: opened.id,
+    by: "seed-fixture",
+    title: "renamed from a stale form",
+    expected_content_rev: expectedContentRev,
+  });
+
+  expect(staleTitle.status).toBe(409);
+  expect((staleTitle.body as AppendErr).error).toContain(ROADMAP_STALE_SAVE_MARKER);
+  const after = (await listAll()).find((item) => item.id === opened.id)!;
+  expect(after.title).toBe(opened.title);
+  expect(after.context).toContain("concurrent agent fact");
+});
+
+test("a current revision is accepted and the save lands", async () => {
+  const opened = await seed({ context: "operator context at open" });
+  const save = await post<UpsertRes | AppendErr>(`${broker.url}/roadmap/upsert`, {
+    id: opened.id,
+    by: "seed-fixture",
+    context: "operator context at open\noperator draft",
+    expected_content_rev: (opened as RoadmapItem & { content_rev?: number }).content_rev,
+  });
+
+  expect(save.status).toBe(200);
+  const after = (await listAll()).find((item) => item.id === opened.id)!;
+  expect(after.context).toBe("operator context at open\noperator draft");
+});
+
+test("a context save without a revision remains accepted and replaces context", async () => {
+  const item = await seed({ context: "operator context at open" });
+  const save = await post<UpsertRes | AppendErr>(`${broker.url}/roadmap/upsert`, {
+    id: item.id,
+    by: "seed-fixture",
+    context: "legacy context save",
+  });
+
+  expect(save.status).toBe(200);
+  const after = (await listAll()).find((candidate) => candidate.id === item.id)!;
+  expect(after.context).toBe("legacy context save");
+});
+
+test("a context save refuses an invalid expected content revision", async () => {
+  const item = await seed({ context: "operator context at open" });
+  for (const invalid of [-1, 1.5, "3", null]) {
+    const save = await post<UpsertRes | AppendErr>(`${broker.url}/roadmap/upsert`, {
+      id: item.id,
+      by: "seed-fixture",
+      context: "operator draft",
+      expected_content_rev: invalid,
+    });
+
+    expect({ invalid, status: save.status }).toEqual({ invalid, status: 400 });
+    expect((save.body as AppendErr).error).toContain("expected_content_rev");
+  }
+  const after = (await listAll()).find((candidate) => candidate.id === item.id)!;
+  expect(after.context).toBe("operator context at open");
 });
 
 test("live cap boundary: resulting lengths 15999 and 16000 succeed, 16001 is refused", async () => {

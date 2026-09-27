@@ -588,12 +588,12 @@ test("card e344fa79: rowToRoadmapItem's response covers every roadmap_items colu
   // merge base, the relay heartbeat. They belong to the sync protocol, not to
   // the card an agent or the Deck reads, so the public projection drops them
   // ON PURPOSE -- listed here one by one so a column added later still has to
-  // be classified rather than silently joining them. The three replication
-  // fields the operator DOES see (sync_state, lock_scope, lock_contested_by)
-  // are absent from this list precisely because they must be emitted.
+  // be classified rather than silently joining them. The replication fields
+  // the operator DOES see (sync_state, lock_scope, lock_contested_by) are
+  // absent from this list precisely because they must be emitted, and so is
+  // content_rev: the Deck Save sends it back as its compare-and-swap revision.
   const INTERNAL_ONLY_COLUMNS = [
     "rev",
-    "content_rev",
     "sync_base_rev",
     "sync_base",
     "sync_dirty",

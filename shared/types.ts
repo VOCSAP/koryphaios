@@ -415,6 +415,7 @@ export interface RoadmapItem {
   updated_by: string;
   created_at: string;
   updated_at: string;
+  content_rev?: number;
   /** Set when archived (soft delete, reversible); null otherwise. */
   deleted_at: string | null;
   /**
@@ -1150,6 +1151,8 @@ export interface RoadmapUpsertRequest {
   description?: string;
   rationale?: string;
   context?: string;
+  /** Compare-and-swap: the write is refused with a stale-save 409 if the card's content_rev moved. */
+  expected_content_rev?: number;
   priority?: RoadmapPriority;
   value?: RoadmapLevel;
   effort?: RoadmapLevel;

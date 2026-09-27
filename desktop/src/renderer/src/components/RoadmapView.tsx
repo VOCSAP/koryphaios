@@ -11,7 +11,7 @@ import type {
 } from '@shared/types'
 import { ROADMAP_TRIAGE_ROLES } from '@shared/types'
 import { GLYPH_ACTIONS, GLYPH_BADGES, roleGlyph } from './icons'
-import { useDeck } from '../store'
+import { roadmapConflictCount, useDeck } from '../store'
 import { useT } from '../i18n'
 import { ConfirmDialog } from './ConfirmDialog'
 import { ContextMenu, type ContextMenuItem } from './ContextMenu'
@@ -25,8 +25,11 @@ import { hasActiveCriteria, useRoadmapData } from '../roadmap-data'
 import { buildAppendToQueue, buildInsertIntoQueue, buildStackIntoQueue } from '@shared/workflow'
 import {
   getRoadmapContextEditorProjection,
+  isRoadmapStaleSaveError,
   parseRoadmapContext,
-  reconcileRoadmapContextForSave
+  rebaseRoadmapContextDraft,
+  reconcileRoadmapContextForSave,
+  type RoadmapContextDraftRebase
 } from '@roadmap-append'
 
 // The container owns mutation logic, modals and the Workflow lane, consumes one
@@ -47,7 +50,7 @@ const STATUSES: RoadmapStatus[] = ['idea', 'planned', 'in_progress', 'done']
 const TRIAGES = ROADMAP_TRIAGE_ROLES
 
 /** Editable subset of an item, buffered in the form. */
-interface Draft {
+export interface Draft {
   id?: string
   title: string
   kind: RoadmapKind
@@ -62,6 +65,7 @@ interface Draft {
   context: string
   contextSource: string
   contextMode: 'living' | 'raw'
+  contentRev?: number
   tags: string
   /** kind 'directive' (CT5): the command + the peers it targets. */
   directive?: RoadmapDirective | null
@@ -70,6 +74,72 @@ interface Draft {
   depends_on?: string[]
   /** Queue slot the created item is inserted at (lane create flows). */
   insertAtQueue?: number
+  /** The card's fields when this edit form was opened: the base of a reload's merge. */
+  opened?: DraftFields
+}
+
+/**
+ * What a stale-save reload does with each Draft field. Every key of Draft must
+ * be classified here or this does not compile, so a field added to the form
+ * cannot silently skip the three-way merge. `creation-only` fields are never
+ * loaded by toDraft for an edit, so an edit has nothing of theirs to merge.
+ */
+const DRAFT_FIELD_ROLES = {
+  id: 'identity',
+  title: 'merged',
+  kind: 'merged',
+  priority: 'merged',
+  value: 'merged',
+  effort: 'merged',
+  status: 'merged',
+  triage: 'merged',
+  description: 'merged',
+  rationale: 'merged',
+  tags: 'merged',
+  directive: 'merged',
+  target_peer_ids: 'merged',
+  context: 'context',
+  contextSource: 'context',
+  contextMode: 'context',
+  contentRev: 'revision',
+  depends_on: 'creation-only',
+  insertAtQueue: 'creation-only',
+  opened: 'merge-base'
+} as const satisfies Record<
+  keyof Draft,
+  'identity' | 'merged' | 'context' | 'revision' | 'creation-only' | 'merge-base'
+>
+type Roles = typeof DRAFT_FIELD_ROLES
+export type MergedField = { [K in keyof Roles]: Roles[K] extends 'merged' ? K : never }[keyof Roles]
+type DraftFields = Pick<Draft, MergedField>
+
+/** The label the form shows for each merged field, named when an edit overrode a concurrent change. */
+const MERGED_FIELDS: Record<MergedField, string> = {
+  title: 'roadmap.fieldTitle',
+  kind: 'roadmap.fieldKind',
+  priority: 'roadmap.fieldPriority',
+  value: 'roadmap.value',
+  effort: 'roadmap.effort',
+  status: 'roadmap.fieldStatus',
+  triage: 'roadmap.fieldTriage',
+  description: 'roadmap.fieldDescription',
+  rationale: 'roadmap.fieldRationale',
+  tags: 'roadmap.fieldTags',
+  directive: 'roadmap.fieldDirective',
+  target_peer_ids: 'roadmap.fieldTargets'
+}
+export const MERGED_FIELD_NAMES = (Object.keys(DRAFT_FIELD_ROLES) as Array<keyof Roles>).filter(
+  (f): f is MergedField => DRAFT_FIELD_ROLES[f] === 'merged'
+)
+
+function draftFields(d: Draft): DraftFields {
+  const fields: Partial<Record<MergedField, unknown>> = {}
+  for (const f of MERGED_FIELD_NAMES) fields[f] = d[f]
+  return fields as DraftFields
+}
+
+function sameField(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
 }
 
 const EMPTY_DRAFT: Draft = {
@@ -88,7 +158,12 @@ const EMPTY_DRAFT: Draft = {
   tags: ''
 }
 
-function toDraft(i: RoadmapItem): Draft {
+export function toDraft(i: RoadmapItem): Draft {
+  const draft = toDraftFields(i)
+  return { ...draft, opened: draftFields(draft) }
+}
+
+function toDraftFields(i: RoadmapItem): Draft {
   const context = getRoadmapContextEditorProjection(i.context)
   return {
     id: i.id,
@@ -104,10 +179,36 @@ function toDraft(i: RoadmapItem): Draft {
     context: context.context,
     contextSource: i.context,
     contextMode: context.mode,
+    contentRev: i.content_rev,
     tags: i.tags.join(', '),
     directive: i.directive,
     target_peer_ids: i.target_peer_ids
   }
+}
+
+type DraftRebase =
+  | { ok: true; draft: Draft; keptOverFresh: MergedField[] }
+  | Exclude<RoadmapContextDraftRebase, { ok: true }>
+
+/**
+ * The draft carried onto the card as it is now, merged three ways per field
+ * against what the form opened: a field the operator left alone takes the
+ * card's current value, an edited one keeps the edit, and `keptOverFresh`
+ * names the edits that overrode a concurrent change so the form can say so.
+ * The compare-and-swap basis and the merge base both move to the fresh card.
+ */
+export function rebaseDraft(draft: Draft, fresh: RoadmapItem): DraftRebase {
+  const context = rebaseRoadmapContextDraft(draft.contextSource, fresh.context, draft.context)
+  if (!context.ok) return context
+  const current = toDraft(fresh)
+  const merged: Draft = { ...current, context: context.context, insertAtQueue: draft.insertAtQueue }
+  const keptOverFresh: MergedField[] = []
+  for (const f of MERGED_FIELD_NAMES) {
+    if (draft.opened === undefined || sameField(draft[f], draft.opened[f])) continue
+    ;(merged as unknown as Record<MergedField, unknown>)[f] = draft[f]
+    if (!sameField(current[f], draft.opened[f]) && !sameField(current[f], draft[f])) keptOverFresh.push(f)
+  }
+  return { ok: true, draft: merged, keptOverFresh }
 }
 
 /**
@@ -159,6 +260,14 @@ export function RoadmapView(): React.JSX.Element {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   // Form state: null = closed; a Draft without id = create; with id = edit.
   const [draft, setDraft] = useState<Draft | null>(null)
+  // The last Save of this draft was refused because the card moved under it.
+  const [staleSave, setStaleSave] = useState(false)
+  // Edits a reload kept over a change the card received meanwhile.
+  const [keptOverFresh, setKeptOverFresh] = useState<MergedField[]>([])
+  useEffect(() => {
+    setStaleSave(false)
+    setKeptOverFresh([])
+  }, [draft?.id, draft === null])
   const [confirmArchive, setConfirmArchive] = useState<RoadmapItem | null>(null)
   // Card f95ccfa6: the exact SHOWN population at the moment the button was
   // clicked (RoadmapBoard's own already-filtered 'done' rows) -- never
@@ -220,6 +329,31 @@ export function RoadmapView(): React.JSX.Element {
     clearRoadmapSeed()
   }, [roadmapSeed, clearRoadmapSeed])
 
+  // The conflict banner's request: narrow to the conflicted cards, archived
+  // ones included since a conflicted archived card is invisible otherwise. The
+  // archive toggle the operator had is restored when the filter is lifted.
+  const conflictsSeed = useDeck((s) => s.roadmapConflictsSeed)
+  const clearConflictsSeed = useDeck((s) => s.clearRoadmapConflictsSeed)
+  const syncConflictCount = useDeck(roadmapConflictCount)
+  const [conflictsOnly, setConflictsOnly] = useState(false)
+  const [archivedBeforeConflicts, setArchivedBeforeConflicts] = useState(false)
+  useEffect(() => {
+    if (!conflictsSeed) return
+    if (!conflictsOnly) setArchivedBeforeConflicts(includeArchived)
+    setCriteria({})
+    setHideInactive(false)
+    setIncludeArchived(true)
+    setConflictsOnly(true)
+    clearConflictsSeed()
+  }, [conflictsSeed, clearConflictsSeed, conflictsOnly, includeArchived, setCriteria, setIncludeArchived])
+  const clearConflicts = (): void => {
+    setConflictsOnly(false)
+    setIncludeArchived(archivedBeforeConflicts)
+  }
+  const shown = board.filter(
+    (i) => (!hideInactive || !i.inactive) && (!conflictsOnly || i.sync_state === 'conflict')
+  )
+
   const selected = queue.all.find((i) => i.id === selectedId) ?? null
 
   const save = async (): Promise<void> => {
@@ -255,6 +389,7 @@ export function RoadmapView(): React.JSX.Element {
         description: draft.description,
         rationale: draft.rationale,
         context: context.context,
+        expected_content_rev: draft.id === undefined ? undefined : draft.contentRev,
         tags,
         depends_on: draft.depends_on,
         // Directive card fields (CT5): send only for a directive kind; switching
@@ -290,6 +425,41 @@ export function RoadmapView(): React.JSX.Element {
         setSelectedId(saved.id)
         showToast('toast.roadmapSaved')
       }
+      await refresh()
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      if (draft.id !== undefined && isRoadmapStaleSaveError(message)) {
+        setStaleSave(true)
+        return
+      }
+      setMutationError(message)
+    }
+  }
+
+  const reloadStaleDraft = async (): Promise<void> => {
+    if (!draft || draft.id === undefined) return
+    try {
+      const fresh = (await window.api.roadmapList({ include_archived: true })).find(
+        (i) => i.id === draft.id
+      )
+      if (!fresh) {
+        showToast('roadmap.staleSaveGone', 'error')
+        return
+      }
+      const rebased = rebaseDraft(draft, fresh)
+      if (!rebased.ok) {
+        if (rebased.code === 'edited_unit_superseded') {
+          showToast(t('roadmap.staleSaveSupersededEdited', { target: rebased.target }), 'error', {
+            raw: true
+          })
+        } else {
+          showToast('roadmap.staleSaveUnmergeable', 'error')
+        }
+        return
+      }
+      setDraft(rebased.draft)
+      setStaleSave(false)
+      setKeptOverFresh(rebased.keptOverFresh)
       await refresh()
     } catch (e) {
       setMutationError(e instanceof Error ? e.message : String(e))
@@ -742,6 +912,9 @@ export function RoadmapView(): React.JSX.Element {
         hideInactive={hideInactive}
         setHideInactive={setHideInactive}
         hiddenInactiveCount={hideInactive ? board.filter((i) => i.inactive).length : 0}
+        conflictsOnly={conflictsOnly}
+        conflictCount={conflictsOnly ? shown.length : 0}
+        onClearConflicts={clearConflicts}
         t={t}
       />
 
@@ -759,18 +932,24 @@ export function RoadmapView(): React.JSX.Element {
 
         <div className="roadmap-main">
           <RoadmapBoard
-            items={hideInactive ? board.filter((i) => !i.inactive) : board}
+            items={shown}
             showArchived={includeArchived}
             // Card 442084b7 review B1: hideInactive is a THIRD filter
             // dimension alongside `criteria`/includeArchived and must count
             // as "active" everywhere the others do -- omitting it here was
             // the exact D1 regression (a narrow filter making the board look
             // fully empty with no explanation) this prop exists to prevent.
-            hasActiveFilters={hasActiveCriteria(criteria) || hideInactive}
+            hasActiveFilters={hasActiveCriteria(criteria) || hideInactive || conflictsOnly}
             onClearFilters={() => {
               setCriteria({})
               setHideInactive(false)
+              if (conflictsOnly) clearConflicts()
             }}
+            emptyFilteredText={
+              conflictsOnly && syncConflictCount > 0
+                ? t('roadmap.filter.conflictsNoneVisible', { count: syncConflictCount })
+                : undefined
+            }
             loaded={loaded}
             error={error}
             dragId={dragId}
@@ -1075,8 +1254,25 @@ export function RoadmapView(): React.JSX.Element {
                 </label>
               </>
             )}
+            {staleSave && (
+              <small className="field-error rm-stale-save" role="alert">
+                {t('roadmap.staleSave')}
+              </small>
+            )}
+            {keptOverFresh.length > 0 && (
+              <small className="field-error rm-stale-kept" role="alert">
+                {t('roadmap.staleSaveKeptFields', {
+                  fields: keptOverFresh.map((f) => t(MERGED_FIELDS[f])).join(', ')
+                })}
+              </small>
+            )}
             <div className="modal-actions">
               <button onClick={() => setDraft(null)}>{t('common.cancel')}</button>
+              {staleSave && (
+                <button className="rm-stale-save-reload" onClick={() => void reloadStaleDraft()}>
+                  {t('roadmap.staleSaveReload')}
+                </button>
+              )}
               <button className="primary" disabled={!draft.title.trim()} onClick={() => void save()}>
                 {draft.id ? t('roadmap.save') : t('roadmap.create')}
               </button>

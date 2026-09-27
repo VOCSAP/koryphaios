@@ -12,6 +12,24 @@ export const ROADMAP_APPEND_HEADER_OPEN = "<<<";
 export const ROADMAP_APPEND_HEADER_CLOSE = ">>>";
 export const ROADMAP_APPEND_BODY_TARGET = "body";
 
+/**
+ * Leads the 409 of an upsert whose expected_content_rev is stale. Electron's
+ * IPC keeps the message text but drops the HTTP status, so the Deck recognizes
+ * the refusal by this token, at the start of the text or right after the
+ * `<ErrorName>: ` that Electron's wrapper puts before the cause (the main
+ * handler replies with `error.toString()`, so the name is the thrown class's).
+ */
+export const ROADMAP_STALE_SAVE_MARKER = "roadmap-stale-save";
+const ROADMAP_STALE_SAVE_RE = new RegExp(`(?:^|: )${ROADMAP_STALE_SAVE_MARKER}: `);
+
+export function formatRoadmapStaleSaveError(detail: string): string {
+  return `${ROADMAP_STALE_SAVE_MARKER}: ${detail}`;
+}
+
+export function isRoadmapStaleSaveError(message: string): boolean {
+  return ROADMAP_STALE_SAVE_RE.test(message);
+}
+
 const ROADMAP_APPEND_TIMESTAMP_PATTERN = "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z";
 const ROADMAP_APPEND_TARGET_PATTERN = `(?:${ROADMAP_APPEND_BODY_TARGET}|${ROADMAP_APPEND_TIMESTAMP_PATTERN})`;
 const ROADMAP_APPEND_HEADER_LINE_RE = new RegExp(
@@ -251,6 +269,51 @@ export function reconcileRoadmapContextForSave(
       .map((unit) => (superseded.has(unit.target) ? unit.raw : editedByTarget.get(unit.target)!.raw))
       .join("")
   };
+}
+
+export type RoadmapContextDraftRebase =
+  | { ok: true; context: string }
+  | { ok: false; code: "raw_projection" }
+  | { ok: false; code: "edited_unit_superseded"; target: string };
+
+/**
+ * Carries an editor draft onto a card that changed since the draft was opened.
+ * An untouched draft takes the fresh projection. An edited one keeps the
+ * operator's text and gains every living unit the fresh card added, so the
+ * next reconcile sees them instead of refusing them as missing. A unit the
+ * fresh card superseded leaves the draft when the operator left it as opened
+ * (or emptied it); an edited one is refused by name, since keeping it would
+ * revive what the supersession retired and dropping it would lose the edit.
+ * A raw projection on either side is refused: the save would then write the
+ * draft verbatim, so no merge can keep every unit.
+ */
+export function rebaseRoadmapContextDraft(
+  openedContext: string,
+  freshContext: string,
+  editedContext: string,
+): RoadmapContextDraftRebase {
+  const opened = getRoadmapContextEditorProjection(openedContext);
+  const fresh = getRoadmapContextEditorProjection(freshContext);
+  if (editedContext === opened.context) return { ok: true, context: fresh.context };
+  if (opened.mode === "raw" || fresh.mode === "raw") return { ok: false, code: "raw_projection" };
+  const openedUnits = parseRoadmapContext(openedContext);
+  const openedRaw = new Map(openedUnits.map((unit) => [unit.target, unit.raw]));
+  const supersededNow = resolveSupersededRoadmapContextTargets(parseRoadmapContext(freshContext));
+  const kept: string[] = [];
+  for (const unit of parseRoadmapContext(editedContext)) {
+    if (!supersededNow.has(unit.target)) {
+      kept.push(unit.raw);
+      continue;
+    }
+    if (unit.raw !== "" && unit.raw !== openedRaw.get(unit.target)) {
+      return { ok: false, code: "edited_unit_superseded", target: unit.target };
+    }
+  }
+  const added = getLivingRoadmapContextUnits(freshContext)
+    .filter((unit) => !openedRaw.has(unit.target))
+    .map((unit) => unit.raw)
+    .join("");
+  return { ok: true, context: kept.join("") + added };
 }
 
 export function getRoadmapContextLiveLength(context: string): number {

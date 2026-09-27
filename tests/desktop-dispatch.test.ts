@@ -10,7 +10,6 @@ import {
   composeDispatchText,
   composeMultiDispatchText,
   composeStopText,
-  composeUnresolvedContext,
   dispatchNormalWave,
   firstQueued,
   nextBarrierPending,
@@ -566,23 +565,6 @@ test("runDirectiveWave: noteUnresolved throwing is reported, not fatal -- the wa
   expect(reported[0]!.error).toBeInstanceOf(Error);
 });
 
-test("composeUnresolvedContext: appends the given note to existing context", () => {
-  const out = composeUnresolvedContext("Some operator-written context.", UNRESOLVED_TARGET_NOTE);
-  expect(out).toBe(`Some operator-written context.\n\n${UNRESOLVED_TARGET_NOTE}`);
-});
-
-test("composeUnresolvedContext: empty context gets the note ALONE, no leading blank separator", () => {
-  const out = composeUnresolvedContext("", UNRESOLVED_TARGET_NOTE);
-  expect(out).toBe(UNRESOLVED_TARGET_NOTE);
-});
-
-test("composeUnresolvedContext: a card re-queued and failed again the SAME way carries the note ONCE, not twice", () => {
-  const once = composeUnresolvedContext("Context.", UNRESOLVED_TARGET_NOTE);
-  const twice = composeUnresolvedContext(once, UNRESOLVED_TARGET_NOTE);
-  expect(twice).toBe(`Context.\n\n${UNRESOLVED_TARGET_NOTE}`);
-  expect(twice.split(UNRESOLVED_TARGET_NOTE)).toHaveLength(2); // one occurrence only
-});
-
 // Card 249ed831, reviewer round 2 point 5: two distinct causes, two distinct
 // (and mutually exclusive) recommendations.
 
@@ -592,34 +574,6 @@ test("unresolvedDirectiveNote: empty target_peer_ids gets the 'set targets first
 
 test("unresolvedDirectiveNote: a requested-but-unreachable target gets the re-queue note", () => {
   expect(unresolvedDirectiveNote(item({ target_peer_ids: ["peer-a"] }))).toBe(UNRESOLVED_TARGET_NOTE);
-});
-
-test("composeUnresolvedContext: a card whose failure reason CHANGED between attempts carries only the NEW note", () => {
-  const firstFailure = composeUnresolvedContext("Context.", NO_TARGET_REQUESTED_NOTE);
-  const secondFailure = composeUnresolvedContext(firstFailure, UNRESOLVED_TARGET_NOTE);
-  expect(secondFailure).toBe(`Context.\n\n${UNRESOLVED_TARGET_NOTE}`);
-  expect(secondFailure).not.toContain(NO_TARGET_REQUESTED_NOTE);
-});
-
-// Reviewer round 3: the strip must be SYMMETRIC with the append. The append
-// is conditional (an empty existingContext gets the note with no leading
-// separator), so a strip that only recognizes the PREFIXED form would never
-// re-find a note stored on an originally-empty context -- the exact bug this
-// pair of round-trips exists to catch, starting from `""` where the earlier
-// "Context." round-trips above stay blind to it.
-
-test("composeUnresolvedContext: empty-context round trip, SAME cause, carries the note ONCE, not twice", () => {
-  const once = composeUnresolvedContext("", UNRESOLVED_TARGET_NOTE);
-  const twice = composeUnresolvedContext(once, UNRESOLVED_TARGET_NOTE);
-  expect(twice).toBe(UNRESOLVED_TARGET_NOTE);
-  expect(twice.split(UNRESOLVED_TARGET_NOTE)).toHaveLength(2); // one occurrence only
-});
-
-test("composeUnresolvedContext: empty-context round trip, cause CHANGED, carries only the NEW note -- never both", () => {
-  const firstFailure = composeUnresolvedContext("", NO_TARGET_REQUESTED_NOTE);
-  const secondFailure = composeUnresolvedContext(firstFailure, UNRESOLVED_TARGET_NOTE);
-  expect(secondFailure).toBe(UNRESOLVED_TARGET_NOTE);
-  expect(secondFailure).not.toContain(NO_TARGET_REQUESTED_NOTE);
 });
 
 function mockDeps(opts: { announceReturns?: number; failIds?: Set<string> } = {}) {

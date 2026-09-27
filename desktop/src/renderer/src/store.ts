@@ -176,6 +176,12 @@ interface DeckState {
    */
   roadmapSeed: { title: string; kind: RoadmapKind; description: string } | null
   /**
+   * The conflict banner asked the Roadmap view to narrow itself to the cards
+   * in conflict. A one-shot request: RoadmapView consumes it, the filter
+   * itself lives in that view like its other filters.
+   */
+  roadmapConflictsSeed: boolean
+  /**
    * Embedded browser (PLAN D1): session docked next to the browser pane, or
    * null for a full-width browser. Set by the tile's 🌐 button.
    */
@@ -297,6 +303,10 @@ interface DeckState {
   openRoadmapDraft(seed: { title: string; kind: RoadmapKind; description: string }): void
   /** RoadmapView consumed the seed. */
   clearRoadmapSeed(): void
+  /** Jump to the roadmap view filtered on this project's conflicted cards. */
+  openRoadmapConflictsFilter(): void
+  /** RoadmapView consumed the conflicts-filter request. */
+  clearRoadmapConflictsSeed(): void
   setSelected(id: string | null): void
   setMaximized(id: string | null): void
   openSearch(open: boolean): void
@@ -531,6 +541,7 @@ export const useDeck = create<DeckState>((set, get) => ({
   diffTarget: null,
   helpSeed: null,
   roadmapSeed: null,
+  roadmapConflictsSeed: false,
   browserPairedId: null,
   browserOpened: false,
   recordingSince: null,
@@ -841,6 +852,8 @@ export const useDeck = create<DeckState>((set, get) => ({
   clearHelpSeed: () => set({ helpSeed: null }),
   openRoadmapDraft: (seed) => set({ roadmapSeed: seed, view: 'roadmap' }),
   clearRoadmapSeed: () => set({ roadmapSeed: null }),
+  openRoadmapConflictsFilter: () => set({ roadmapConflictsSeed: true, view: 'roadmap' }),
+  clearRoadmapConflictsSeed: () => set({ roadmapConflictsSeed: false }),
   setSelected: (id) => set({ selectedId: id }),
   setMaximized: (id) => set({ maximizedId: id }),
   openSearch: (open) => set({ searchOpen: open }),

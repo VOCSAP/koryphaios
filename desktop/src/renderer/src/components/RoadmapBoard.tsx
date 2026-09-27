@@ -184,6 +184,8 @@ export interface RoadmapBoardProps {
    */
   hasActiveFilters: boolean
   onClearFilters: () => void
+  /** Replaces the generic "no card matches" line when a filter knows why it is empty. */
+  emptyFilteredText?: string
   loaded: boolean
   error: string | null
   dragId: string | null
@@ -214,6 +216,7 @@ export function RoadmapBoard({
   showArchived,
   hasActiveFilters,
   onClearFilters,
+  emptyFilteredText,
   loaded,
   error,
   dragId,
@@ -240,7 +243,7 @@ export function RoadmapBoard({
 
       {loaded && items.length === 0 && !error && hasActiveFilters && (
         <p className="roadmap-empty">
-          {t('roadmap.emptyFiltered')}{' '}
+          {emptyFilteredText ?? t('roadmap.emptyFiltered')}{' '}
           <button type="button" className="rm-empty-clear-filters" onClick={onClearFilters}>
             {t('roadmap.filter.clearAll')}
           </button>

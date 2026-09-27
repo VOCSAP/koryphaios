@@ -185,7 +185,17 @@ test("PICK-LIST, not spread: an unknown broker field does not travel through", (
   const item = sanitizeRoadmapItem({ ...wellFormed(), surprise_extra_field: "x" }) as RoadmapItem;
   expect(item).not.toBeNull();
   expect(Object.keys(item)).not.toContain("surprise_extra_field");
-  expect(Object.keys(item)).toHaveLength(31);
+  expect(Object.keys(item)).toHaveLength(32);
+});
+
+test("content_rev survives as the Save's revision, and a malformed one is dropped rather than coerced", () => {
+  expect(sanitized({ content_rev: 17 }).content_rev).toBe(17);
+  expect(sanitized({ content_rev: 0 }).content_rev).toBe(0);
+  expect(sanitized({ content_rev: -1 }).content_rev).toBeUndefined();
+  expect(sanitized({ content_rev: 1.5 }).content_rev).toBeUndefined();
+  expect(sanitized({ content_rev: "17" }).content_rev).toBeUndefined();
+  expect(sanitized({ content_rev: Number.NaN }).content_rev).toBeUndefined();
+  expect(sanitized({}).content_rev).toBeUndefined();
 });
 
 test("locked_group survives when the broker sends it, and coerces non-string to null", () => {

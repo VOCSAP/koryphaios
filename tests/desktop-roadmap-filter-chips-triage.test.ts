@@ -54,6 +54,9 @@ function mount(): void {
         hideInactive: false,
         setHideInactive: () => {},
         hiddenInactiveCount: 0,
+        conflictsOnly: false,
+        conflictCount: 0,
+        onClearConflicts: () => {},
         t
       })
     );

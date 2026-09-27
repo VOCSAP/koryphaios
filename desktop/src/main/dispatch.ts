@@ -220,15 +220,8 @@ export async function dispatchNormalWave(
 }
 
 /**
- * Two distinct constant notes, never merged or built with per-run detail: an
- * empty target_peer_ids can't be fixed by re-queuing, an unreachable target
- * can.
- * Kept as fixed strings rather than appended detail because the context field
- * is a full uncapped replace, so a growing note could grow without bound across
- * repeated failures.
- * composeUnresolvedContext strips any prior occurrence of either note before
- * appending, so a card whose failure reason changes between attempts never
- * accumulates both.
+ * Two distinct fixed notes: an empty target_peer_ids can't be fixed by
+ * re-queuing, an unreachable target can.
  */
 export const UNRESOLVED_TARGET_NOTE =
   '[dispatch] marked done with no live target resolved -- nothing was injected. Safe to re-queue once the requested target is reachable: no live session was touched.'
@@ -236,26 +229,9 @@ export const UNRESOLVED_TARGET_NOTE =
 export const NO_TARGET_REQUESTED_NOTE =
   '[dispatch] marked done with zero target_peer_ids set -- nothing was ever requested, so nothing was injected. Re-queuing alone will NOT fix this: set target_peer_ids first.'
 
-const KNOWN_UNRESOLVED_NOTES = [UNRESOLVED_TARGET_NOTE, NO_TARGET_REQUESTED_NOTE]
-
-/** Picks the note that matches WHY nothing was injected (card 249ed831). */
+/** Picks the note that matches why nothing was injected. */
 export function unresolvedDirectiveNote(item: RoadmapItem): string {
   return item.target_peer_ids.length === 0 ? NO_TARGET_REQUESTED_NOTE : UNRESOLVED_TARGET_NOTE
-}
-
-/**
- * An empty existingContext gets the note alone, with no leading blank
- * separator, so it doesn't read as a formatting bug.
- * The strip must remove both the prefixed and the bare form since the append is
- * conditional on that same empty-context case -- otherwise a note posed on an
- * empty context is never recognized on the next failure.
- */
-export function composeUnresolvedContext(existingContext: string, note: string): string {
-  const stripped = KNOWN_UNRESOLVED_NOTES.reduce(
-    (acc, n) => acc.split(`\n\n${n}`).join('').split(n).join(''),
-    existingContext
-  )
-  return stripped ? `${stripped}\n\n${note}` : note
 }
 
 export interface DirectiveWaveDeps {

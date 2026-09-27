@@ -74,6 +74,12 @@ export interface RoadmapFilterChipsProps {
    * on/off.
    */
   hiddenInactiveCount: number
+  /** Narrowed to the cards in replication conflict (set by the conflict banner). */
+  conflictsOnly: boolean
+  /** Conflicted cards currently shown; only read while `conflictsOnly`. */
+  conflictCount: number
+  /** Lifts the conflict filter; the view restores its own archive toggle. */
+  onClearConflicts: () => void
   t: TFn
 }
 
@@ -85,9 +91,20 @@ export function RoadmapFilterChips({
   hideInactive,
   setHideInactive,
   hiddenInactiveCount,
+  conflictsOnly,
+  conflictCount,
+  onClearConflicts,
   t
 }: RoadmapFilterChipsProps): React.JSX.Element {
   const chips: Chip[] = []
+
+  if (conflictsOnly) {
+    chips.push({
+      key: 'conflictsOnly',
+      label: t('roadmap.filter.conflictsOnly', { count: conflictCount }),
+      onRemove: onClearConflicts
+    })
+  }
 
   if (criteria.q && criteria.q.trim() !== '') {
     chips.push({
@@ -161,6 +178,7 @@ export function RoadmapFilterChips({
           title={t('roadmap.filter.removeChip')}
           onClick={c.onRemove}
         >
+          {c.key === 'conflictsOnly' && GLYPH_BADGES.scales}
           <span className="rm-filter-chip-label">{c.label}</span>
           {GLYPH_ACTIONS.close}
         </button>
@@ -170,6 +188,7 @@ export function RoadmapFilterChips({
           type="button"
           className="rm-filter-chip rm-filter-chip-clear"
           onClick={() => {
+            if (conflictsOnly) onClearConflicts()
             setCriteria({})
             setIncludeArchived(false)
             setHideInactive(false)

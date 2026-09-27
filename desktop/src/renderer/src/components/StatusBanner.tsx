@@ -38,6 +38,10 @@ export function StatusBanner(): React.JSX.Element | null {
   // board showing none.
   const conflicts = useDeck(roadmapConflictCount)
   const setView = useDeck((s) => s.setView)
+  // The mobile roadmap (RoadmapList) has no filter row to show the narrowing
+  // on, so there the button only switches view.
+  const mobile = useDeck((s) => s.mobile)
+  const openConflicts = useDeck((s) => s.openRoadmapConflictsFilter)
 
   const kind = bannerKind({
     brokerUp: status === null ? null : status.up,
@@ -78,7 +82,10 @@ export function StatusBanner(): React.JSX.Element | null {
         <span className="status-banner-text">
           {GLYPH_BADGES.scales} {t('banner.roadmapConflicts', { count: conflicts })}
         </span>
-        <button className="status-banner-action" onClick={() => setView('roadmap')}>
+        <button
+          className="status-banner-action"
+          onClick={() => (mobile ? setView('roadmap') : openConflicts())}
+        >
           {t('banner.openRoadmap')}
         </button>
       </div>

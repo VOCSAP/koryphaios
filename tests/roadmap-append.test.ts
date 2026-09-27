@@ -12,9 +12,12 @@ import {
   parseRoadmapContext,
   planRoadmapAppendText,
   planRoadmapContextAppend,
+  rebaseRoadmapContextDraft,
   reconcileRoadmapContextForSave,
   resolveSupersededRoadmapContextTargets,
   validateRoadmapSupersedeTargets,
+  formatRoadmapStaleSaveError,
+  isRoadmapStaleSaveError,
 } from "../shared/roadmap-append.ts";
 
 const NOW = "2026-08-06T12:00:00.000Z";
@@ -406,4 +409,84 @@ test("editor reconciliation refuses a change to a later supersedes target", () =
     ok: false,
     code: "living_header_changed"
   });
+});
+
+test("the stale-save refusal is recognized in the exact text Electron hands the renderer", () => {
+  const brokerText = formatRoadmapStaleSaveError("the card changed since it was opened");
+  expect(isRoadmapStaleSaveError(brokerText)).toBe(true);
+  expect(
+    isRoadmapStaleSaveError(`Error invoking remote method 'roadmap:upsert': RoadmapRequestError: ${brokerText}`)
+  ).toBe(true);
+  expect(isRoadmapStaleSaveError(`Error invoking remote method 'roadmap:upsert': Error: ${brokerText}`)).toBe(true);
+});
+
+test("a message that only mentions the stale-save token in prose is not a stale-save refusal", () => {
+  expect(isRoadmapStaleSaveError("roadmap request failed: 409")).toBe(false);
+  expect(isRoadmapStaleSaveError("the operator read about roadmap-stale-save: in the docs")).toBe(false);
+  expect(isRoadmapStaleSaveError("roadmap-stale-save without its separator")).toBe(false);
+});
+
+test("rebasing an edited draft keeps the operator's text and every append the card gained", () => {
+  const opened = "operator context at open";
+  const agentAppend = plannedAppend(opened, APPEND_A, "agent", "concurrent agent fact");
+  const fresh = opened + agentAppend;
+  const edited = "operator context at open, edited";
+
+  const rebased = rebaseRoadmapContextDraft(opened, fresh, edited);
+
+  expect(rebased).toEqual({ ok: true, context: edited + agentAppend });
+  const saved = reconcileRoadmapContextForSave(fresh, edited + agentAppend);
+  expect(saved).toEqual({ ok: true, context: edited + agentAppend });
+});
+
+test("rebasing an untouched draft shows the card as it is now", () => {
+  const opened = "operator context at open";
+  const fresh = opened + plannedAppend(opened, APPEND_A, "agent", "concurrent agent fact");
+
+  expect(rebaseRoadmapContextDraft(opened, fresh, opened)).toEqual({
+    ok: true,
+    context: getRoadmapContextEditorProjection(fresh).context
+  });
+});
+
+function supersededMeanwhile(): { firstAppend: string; opened: string; superseding: string; fresh: string } {
+  const firstAppend = plannedAppend("origin", APPEND_A, "a", "first");
+  const opened = "origin" + firstAppend;
+  const superseding = plannedAppend(opened, APPEND_B, "b", "replacement", [APPEND_A]);
+  return { firstAppend, opened, superseding, fresh: opened + superseding };
+}
+
+test("a unit the card superseded meanwhile leaves an edited draft when the operator left it as opened", () => {
+  const { opened, superseding, fresh } = supersededMeanwhile();
+  const edited = "origin, edited" + opened.slice("origin".length);
+
+  const rebased = rebaseRoadmapContextDraft(opened, fresh, edited);
+
+  expect(rebased).toEqual({ ok: true, context: "origin, edited" + superseding });
+  expect(reconcileRoadmapContextForSave(fresh, "origin, edited" + superseding)).toEqual({
+    ok: true,
+    context: "origin, edited" + opened.slice("origin".length) + superseding
+  });
+});
+
+test("an edited unit the card superseded meanwhile is refused by name, never merged or dropped", () => {
+  const { firstAppend, opened, fresh } = supersededMeanwhile();
+  const edited = "origin" + firstAppend.replace("first", "first, edited");
+
+  expect(rebaseRoadmapContextDraft(opened, fresh, edited)).toEqual({
+    ok: false,
+    code: "edited_unit_superseded",
+    target: APPEND_A
+  });
+});
+
+test("an edited draft cannot be rebased onto a raw projection, so nothing is merged blind", () => {
+  const first = buildRoadmapAppendHeader(APPEND_A, "a") + "first";
+  const duplicate = buildRoadmapAppendHeader(APPEND_A, "b") + "second";
+  const opened = "origin";
+  const fresh = "origin" + first + duplicate;
+
+  expect(getRoadmapContextEditorProjection(fresh).mode).toBe("raw");
+  expect(rebaseRoadmapContextDraft(opened, fresh, "origin, edited")).toEqual({ ok: false, code: "raw_projection" });
+  expect(rebaseRoadmapContextDraft(opened, fresh, "origin")).toEqual({ ok: true, context: fresh });
 });

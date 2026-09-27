@@ -19,6 +19,7 @@ import * as sharedRole from "../desktop/src/shared/role.ts";
 import * as sharedTemplateApply from "../desktop/src/shared/template-apply-outcome.ts";
 import * as sharedWorkspaceRestore from "../desktop/src/shared/workspace-restore-outcome.ts";
 import * as roadmapAppend from "../shared/roadmap-append.ts";
+import { sanitizeRoadmapItem } from "../desktop/src/main/roadmap-service.ts";
 import type { RoadmapItem, RoadmapUpsertFields, RoadmapWandDraft } from "../desktop/src/shared/types.ts";
 
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
@@ -63,7 +64,9 @@ const fakeUseDeck = create<FakeState>(() => ({
 }));
 mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 
-const { RoadmapView } = await import("../desktop/src/renderer/src/components/RoadmapView");
+const { RoadmapView, toDraft, rebaseDraft, MERGED_FIELD_NAMES } = await import(
+  "../desktop/src/renderer/src/components/RoadmapView"
+);
 
 const APPEND_A = "2026-09-22T12:00:00.000Z";
 const APPEND_B = "2026-09-22T12:01:00.000Z";
@@ -107,12 +110,16 @@ function item(patch: Partial<RoadmapItem>): RoadmapItem {
 let board: RoadmapItem[] = [];
 let upserts: RoadmapUpsertFields[] = [];
 let wandDrafts: RoadmapWandDraft[] = [];
+let upsertFailure: Error | null = null;
+let listed: RoadmapItem[] = [];
 
 function installApi(): void {
   (globalThis as unknown as { window: { api: Record<string, unknown> } }).window.api = {
     roadmapSearch: () => Promise.resolve({ items: board, facets: null }),
+    roadmapList: () => Promise.resolve(listed),
     roadmapUpsert: (fields: RoadmapUpsertFields) => {
       upserts.push(fields);
+      if (upsertFailure) return Promise.reject(upsertFailure);
       return Promise.resolve(item({ ...board[0], ...fields } as Partial<RoadmapItem>));
     },
     roadmapReorder: () => Promise.resolve([]),
@@ -132,6 +139,8 @@ beforeEach(() => {
   board = [];
   upserts = [];
   wandDrafts = [];
+  upsertFailure = null;
+  listed = [];
   toasts.length = 0;
   installApi();
   container = document.createElement("div");
@@ -260,6 +269,179 @@ test("Save without an edit preserves a context containing expired units byte-for
   expect(upserts[0]!.context).toBe(original);
 });
 
+test("Save carries the sanitized content revision with the draft", async () => {
+  const card = sanitizeRoadmapItem({
+    ...item({ context: "operator context at open" }),
+    content_rev: 17
+  });
+  if (!card) throw new Error("sanitizer rejected the test card");
+  await mountWith(card);
+  await openEditForm();
+  await setContext("operator draft");
+  await save();
+
+  expect(upserts).toHaveLength(1);
+  expect((upserts[0] as RoadmapUpsertFields & { expected_content_rev?: number }).expected_content_rev).toBe(17);
+});
+
+test("a Save refused for another reason keeps the draft open and shows the refusal on the error banner", async () => {
+  await mountWith(item({ context: "operator context at open" }));
+  await openEditForm();
+  await setContext("operator draft");
+  upsertFailure = new Error("Error invoking remote method 'roadmap:upsert': RoadmapRequestError: unknown roadmap item");
+  await save();
+  await act(async () => {
+    await Promise.resolve();
+  });
+
+  expect(contextTextarea().value).toBe("operator draft");
+  expect(container.querySelector(".roadmap-error")).not.toBeNull();
+  expect(container.querySelector(".rm-stale-save")).toBeNull();
+});
+
+const STALE_SAVE_IPC_ERROR = new Error(
+  "Error invoking remote method 'roadmap:upsert': RoadmapRequestError: " +
+    roadmapAppend.formatRoadmapStaleSaveError("the card changed since it was opened; reload it before saving again")
+);
+
+async function flush(): Promise<void> {
+  await act(async () => {
+    await Promise.resolve();
+  });
+}
+
+test("a stale-revision Save keeps the draft, names the stale revision and offers a reload", async () => {
+  await mountWith(item({ context: "operator context at open", content_rev: 4 }));
+  await openEditForm();
+  await setContext("operator draft");
+  upsertFailure = STALE_SAVE_IPC_ERROR;
+  await save();
+  await flush();
+
+  expect(contextTextarea().value).toBe("operator draft");
+  expect(container.querySelector(".rm-stale-save")?.textContent).toBe("roadmap.staleSave");
+  expect(container.querySelector(".rm-stale-save-reload")).not.toBeNull();
+  expect(container.querySelector(".roadmap-error")).toBeNull();
+});
+
+test("reloading a stale draft carries the operator's text onto the fresh card, and the next Save keeps the agent append", async () => {
+  const opened = "operator context at open";
+  await mountWith(item({ context: opened, content_rev: 4 }));
+  await openEditForm();
+  await setContext(opened + ", edited");
+  upsertFailure = STALE_SAVE_IPC_ERROR;
+  await save();
+  await flush();
+
+  const agentAppend = roadmapAppend.buildRoadmapAppendHeader(APPEND_A, "agent") + "concurrent agent fact";
+  listed = [item({ context: opened + agentAppend, content_rev: 5 })];
+  upsertFailure = null;
+  await act(async () => {
+    (container.querySelector(".rm-stale-save-reload") as HTMLButtonElement).click();
+    await Promise.resolve();
+  });
+  await flush();
+
+  expect(contextTextarea().value).toBe(opened + ", edited" + agentAppend);
+  expect(container.querySelector(".rm-stale-save")).toBeNull();
+  await save();
+
+  expect(upserts).toHaveLength(2);
+  const retry = upserts[1] as RoadmapUpsertFields & { expected_content_rev?: number };
+  expect(retry.context).toBe(opened + ", edited" + agentAppend);
+  expect(retry.expected_content_rev).toBe(5);
+});
+
+async function setPriority(priority: string): Promise<void> {
+  const select = [...container.querySelectorAll(".rm-modal-form select")].find((s) =>
+    s.querySelector(`option[value="${priority}"]`)
+  ) as HTMLSelectElement | undefined;
+  if (!select) throw new Error("the edit form rendered no priority select");
+  const nativeSetter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+  if (!nativeSetter) throw new Error("select has no native value setter");
+  await act(async () => {
+    nativeSetter.call(select, priority);
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+}
+
+test("a reload keeps an agent's claim the operator never touched, and names the edit that overrode a concurrent change", async () => {
+  fakeUseDeck.setState({ dict: { "roadmap.staleSaveKeptFields": "kept over a concurrent change: {fields}" } });
+  try {
+    await mountWith(item({ status: "planned", priority: "could", content_rev: 4 }));
+    await openEditForm();
+    await setTitle("title edited by the operator");
+    await setPriority("should");
+    upsertFailure = STALE_SAVE_IPC_ERROR;
+    await save();
+    await flush();
+
+    listed = [
+      item({
+        status: "in_progress",
+        priority: "must",
+        locked: true,
+        locked_by: "agent-x",
+        content_rev: 5
+      })
+    ];
+    upsertFailure = null;
+    await act(async () => {
+      (container.querySelector(".rm-stale-save-reload") as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(container.querySelector(".rm-stale-kept")?.textContent).toBe(
+      "kept over a concurrent change: roadmap.fieldPriority"
+    );
+    await save();
+
+    expect(upserts).toHaveLength(2);
+    const retry = upserts[1] as RoadmapUpsertFields & { expected_content_rev?: number };
+    expect(retry.status).toBe("in_progress");
+    expect(retry.title).toBe("title edited by the operator");
+    expect(retry.priority).toBe("should");
+    expect(retry.expected_content_rev).toBe(5);
+  } finally {
+    act(() => {
+      fakeUseDeck.setState({ dict: {} });
+    });
+  }
+});
+
+async function reloadOnto(fresh: RoadmapItem): Promise<void> {
+  listed = [fresh];
+  await act(async () => {
+    (container.querySelector(".rm-stale-save-reload") as HTMLButtonElement).click();
+    await Promise.resolve();
+  });
+  await flush();
+}
+
+test("a second reload merges against the card of the first reload, so an agent's later change still wins over an untouched field", async () => {
+  await mountWith(item({ status: "planned", content_rev: 4 }));
+  await openEditForm();
+  await setTitle("title edited by the operator");
+  upsertFailure = STALE_SAVE_IPC_ERROR;
+  await save();
+  await flush();
+  await reloadOnto(item({ status: "in_progress", locked: true, locked_by: "agent-x", content_rev: 5 }));
+
+  await save();
+  await flush();
+  await reloadOnto(item({ status: "done", content_rev: 6 }));
+  upsertFailure = null;
+  await save();
+
+  expect(upserts).toHaveLength(3);
+  const last = upserts[2] as RoadmapUpsertFields & { expected_content_rev?: number };
+  expect(last.status).toBe("done");
+  expect(last.title).toBe("title edited by the operator");
+  expect(last.expected_content_rev).toBe(6);
+  expect(container.querySelector(".rm-stale-kept")).toBeNull();
+});
+
 test("Save refuses text before a structurally expired body instead of losing it", async () => {
   const plan = roadmapAppend.planRoadmapContextAppend({
     existingContext: "origin",
@@ -334,4 +516,81 @@ test("wand appends when a creation draft receives an append header", async () =>
     expect.objectContaining({ context: marked, mode: "append" })
   ]);
   expect(contextTextarea().value).toBe(marked + "\n\nwand addendum");
+});
+
+// Written by hand from the edit form's Save payload, never derived from the
+// merge table: a field dropped from the table must fail here, not vanish.
+const EDITED_VALUE_PER_SAVED_FIELD: Record<string, unknown> = {
+  title: "title edited by the operator",
+  kind: "bug",
+  priority: "must",
+  value: "high",
+  effort: "low",
+  status: "done",
+  triage: "ready-for-agent",
+  description: "description edited",
+  rationale: "rationale edited",
+  tags: "edited-tag",
+  directive: "compact",
+  target_peer_ids: ["edited-peer"]
+};
+
+function directiveCard(patch: Partial<RoadmapItem> = {}): RoadmapItem {
+  return item({
+    kind: "directive",
+    directive: "clear",
+    target_peer_ids: ["peer-a", "peer-b"],
+    tags: ["original-tag"],
+    content_rev: 4,
+    ...patch
+  });
+}
+
+test("the reload merge covers exactly the fields the edit form saves", () => {
+  expect(([...MERGED_FIELD_NAMES] as string[]).sort()).toEqual(Object.keys(EDITED_VALUE_PER_SAVED_FIELD).sort());
+});
+
+test("dependencies are never loaded into an edit draft, so a reload has none to merge", () => {
+  expect(toDraft(item({ depends_on: ["parent-card"] })).depends_on).toBeUndefined();
+});
+
+for (const [field, edited] of Object.entries(EDITED_VALUE_PER_SAVED_FIELD)) {
+  test(`a reload onto a card whose ${field} did not move keeps the operator's ${field} edit`, () => {
+    const card = directiveCard();
+    const draft = { ...toDraft(card), [field]: edited };
+
+    const rebased = rebaseDraft(draft, { ...card, content_rev: 5 });
+
+    if (!rebased.ok) throw new Error(`reload refused: ${rebased.code}`);
+    expect((rebased.draft as unknown as Record<string, unknown>)[field]).toEqual(edited);
+    expect(rebased.draft.contentRev).toBe(5);
+    expect(rebased.keptOverFresh).toEqual([]);
+  });
+}
+
+test("peers equal in value but rebuilt as new arrays are not reported as an override", () => {
+  const card = directiveCard();
+  const draft = { ...toDraft(card), title: "title edited by the operator", target_peer_ids: ["peer-a", "peer-b"] };
+
+  const rebased = rebaseDraft(draft, { ...card, target_peer_ids: ["peer-a", "peer-b"], content_rev: 5 });
+
+  if (!rebased.ok) throw new Error(`reload refused: ${rebased.code}`);
+  expect(rebased.keptOverFresh).toEqual([]);
+  expect(rebased.draft.target_peer_ids).toEqual(["peer-a", "peer-b"]);
+});
+
+test("an operator and an agent making the same change meanwhile is no override to report", async () => {
+  await mountWith(item({ priority: "could", content_rev: 4 }));
+  await openEditForm();
+  await setPriority("must");
+  upsertFailure = STALE_SAVE_IPC_ERROR;
+  await save();
+  await flush();
+  upsertFailure = null;
+  await reloadOnto(item({ priority: "must", content_rev: 5 }));
+
+  expect(container.querySelector(".rm-stale-save")).toBeNull();
+  expect(container.querySelector(".rm-stale-kept")).toBeNull();
+  await save();
+  expect((upserts[1] as RoadmapUpsertFields).priority).toBe("must");
 });

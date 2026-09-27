@@ -292,8 +292,9 @@ test("a well-formed conflict keeps both sides and the upstream revisions", () =>
 
 test("the local side is accepted as a plain item OR as an upstream row", () => {
   // The broker may serve `local` as a bare RoadmapItem or as the row shape
-  // carrying rev/content_rev; either way the two extra counters are dropped by
-  // the pick-list and the card renders. What must NEVER travel is the
+  // carrying rev/content_rev; either way the card renders. `rev` is dropped by
+  // the pick-list; content_rev is an item field (the Save's compare-and-swap
+  // revision) and stays the LOCAL row's own counter. What must NEVER travel is the
   // attribution half: locked_by_token and operator_id do not cross in any
   // direction, so a row shaped without them is not a degraded conflict.
   const asRow = wellFormedItem({ title: "local title", rev: 12, content_rev: 9 });
@@ -302,7 +303,7 @@ test("the local side is accepted as a plain item OR as an upstream row", () => {
   expect(conflict).toBeDefined();
   expect(conflict!.local.title).toBe("local title");
   expect(Object.keys(conflict!.local)).not.toContain("rev");
-  expect(Object.keys(conflict!.local)).not.toContain("content_rev");
+  expect(conflict!.local.content_rev).toBe(9);
   expect(Object.keys(conflict!.local)).not.toContain("locked_by_token");
 });
 

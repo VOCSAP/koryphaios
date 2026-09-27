@@ -544,6 +544,7 @@ export interface RoadmapItem {
   updated_by: string
   created_at: string
   updated_at: string
+  content_rev?: number
   deleted_at: string | null
   /** Dispatch-queue position (PLAN C15), 1-based; null = not queued. */
   queue: number | null
@@ -782,6 +783,8 @@ export interface RoadmapUpsertFields {
   description?: string
   rationale?: string
   context?: string
+  /** Compare-and-swap: any write carrying it is refused as a stale save if the card's content_rev moved. */
+  expected_content_rev?: number
   priority?: RoadmapPriority
   value?: RoadmapLevel
   effort?: RoadmapLevel
@@ -1063,6 +1066,9 @@ export interface RoadmapSearchResult {
   facets: RoadmapFacets | null
 }
 export interface RoadmapUpsertResponse {
+  item: RoadmapItem
+}
+export interface RoadmapContextAppendResponse {
   item: RoadmapItem
 }
 export interface RoadmapArchiveResponse {

@@ -10,6 +10,7 @@ import { normalizeRemoteUrl, resolveProjectKey } from '../../../shared/project-k
 import type { BrokerEndpoint } from './broker-client'
 import type {
   RoadmapArchiveResponse,
+  RoadmapContextAppendResponse,
   RoadmapFacetBucket,
   RoadmapFacets,
   RoadmapItem,
@@ -246,6 +247,10 @@ export function sanitizeRoadmapItem(raw: unknown): RoadmapItem | null {
     updated_by: str(r.updated_by),
     created_at: str(r.created_at),
     updated_at: str(r.updated_at),
+    content_rev:
+      typeof r.content_rev === 'number' && Number.isSafeInteger(r.content_rev) && r.content_rev >= 0
+        ? r.content_rev
+        : undefined,
     deleted_at: nullableStr(r.deleted_at),
     queue: queuePos(r.queue),
     locked: r.locked === true,
@@ -473,6 +478,19 @@ export async function upsertRoadmap(
     })
   )
   return sanitizeOne(res?.item, '/roadmap/upsert')
+}
+
+export async function appendRoadmapContext(
+  endpoint: BrokerEndpoint,
+  id: string,
+  text: string
+): Promise<RoadmapItem> {
+  const res = await roadmapPost<RoadmapContextAppendResponse>(
+    endpoint,
+    '/roadmap/append-context',
+    signedAsOperator({ id, by: DECK_AUTHOR, text })
+  )
+  return sanitizeOne(res?.item, '/roadmap/append-context')
 }
 
 /**
