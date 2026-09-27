@@ -452,3 +452,55 @@ foi.
 - **`kory-rules list`** : ne distingue pas « en attente » de « désactivée »
   (le fichier effectif ne contient que les règles actives) et l'annonce comme
   telle ; la skill demande à l'agent de ne pas relancer l'opérateur.
+- **Poll, pas watcher** (§4.2, §7 P4) : le `rules.json` du dépôt, le fichier
+  global et le magasin d'approbations sont relus toutes les 2 s
+  (`TTSR_POLL_MS`, `ttsr-service.ts`) et re-hachés ; les tuiles concernées
+  sont recompilées et `rules:changed` diffusé. Raison : le Deck n'a aucun
+  `fs.watch` en service dont reprendre les garde-fous, et un poll voit les
+  écritures faites depuis l'intérieur d'un conteneur sur `/work`, ce qu'un
+  watcher hôte ne garantit pas selon le moteur et le système de fichiers.
+  Conséquence : une modification met jusqu'à 2 s à retirer ses règles.
+- **Canaux IPC** : noms en kebab (`rules:list`, `rules:set-enabled`,
+  `rules:save-global`, `rules:save-repo`, `rules:approve-repo`,
+  `rules:test`). `rules:list` est un canal de lecture (tier 0) ; les cinq
+  autres sont tier 3 et refusés au companion, `rules:test` compris : il ne
+  modifie rien, mais exécute une regex arbitraire, et un téléphone appairé ne
+  doit pas pouvoir consommer du CPU hôte par ce biais.
+- **Durcissements hors brief**, détaillés dans `DESKTOP.md` (« Guard rules ») :
+  - tout fichier qu'un agent peut écrire (`rules.json` du dépôt, cible d'un
+    `Write` côté hook, journal du hook en sandbox) est lu par `readBounded`
+    (`shared/ttsr-fs.ts`) : une seule ouverture, taille plafonnée, contrôles
+    sur le descripteur (`fstat`). Sur POSIX l'ouverture ne suit pas de lien et
+    ne bloque pas (`O_NOFOLLOW`, `O_NONBLOCK`) ; sous Windows, où ces drapeaux
+    n'existent pas, seuls le refus `lstat` préalable et les contrôles `fstat`
+    s'appliquent, avec une fenêtre entre les deux ;
+  - un `rules.json` ou un `.claude/` qui est un lien symbolique, ou qui se
+    résout hors de la racine du projet, est refusé en lecture comme en
+    écriture ;
+  - le journal du hook (`CLAUDE_PEERS_TTSR_LOG`) est relu par le poller,
+    caractères de contrôle neutralisés, lignes tronquées, au plus
+    `TTSR_LOG_MINUTE_LINES` par minute et par tuile puis une ligne de synthèse ;
+  - tout texte d'origine agent affiché dans le dialogue d'approbation passe
+    par `displaySafe` (`ttsr-dialog.ts`) : sauts de ligne, caractères de
+    contrôle, bidi et invisibles ne peuvent pas façonner le texte du Deck.
+- **Ce que le TTSR n'est pas** : un contrôle de sécurité contre un agent
+  sandboxé. `/kory-run` est monté en écriture dans le conteneur ; l'agent peut
+  réécrire sa copie du fichier effectif entre deux passages du poll, qui la
+  restaure et le trace, mais les appels d'outils émis dans cet intervalle ne
+  sont pas gardés. Cette restauration ne se déclenche que sur un changement de
+  signature stat (inode, type, taille, mtime) : une réécriture par fichier
+  neuf puis renommage est détectée ; seule une réécriture en place qui
+  conserve taille et mtime n'est ni restaurée ni tracée. Le TTSR est une aide à la discipline d'un agent coopératif
+  (règles Kory, globales, de dépôt approuvées) ; l'isolement d'un agent
+  supposé compromis relève de la sandbox elle-même (`desktop/docs/sandbox.md`),
+  jamais d'un hook qu'il exécute lui-même.
+- **Sondes P0** : (a) latence mesurée à ~33 ms par invocation sans règle et
+  ~35 ms avec les six règles Kory, dominée par le démarrage de bun ;
+  (c) couverte par la livraison sandbox ci-dessus ; (b) et (d) mesurées sur
+  Claude Code 2.1.283, `claude -p` headless (haiku), plugin jetable :
+  (b) OUI, un `warn` sans `permissionDecision` livre son `additionalContext`
+  verbatim au modèle (mot de code reproduit) ; (d) OUI avec réserve, un `deny`
+  TTSR tient au milieu de 14 hooks `PreToolUse` Bash, hooks globaux de
+  l'opérateur compris, mais la précédence `deny` contre `deny` face à un autre
+  hook qui décide à temps n'est pas mesurée (le hook global concurrent a
+  expiré sans décider).
