@@ -511,7 +511,11 @@ body {
   text-align: center;
 }
 
+/* A query container so the right-hand badges can yield to the name by width
+   (.row-model below), and the positioning box of the .row-actions overlay. */
 .row {
+  position: relative;
+  container: session-row / inline-size;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -521,7 +525,10 @@ body {
   user-select: none;
 }
 
-.row:hover {
+/* :focus-within tints the row like a hover so the revealed .row-actions,
+   whose background follows the row's, never sits bare over the badges. */
+.row:hover,
+.row:focus-within {
   background: var(--bg-3);
 }
 
@@ -538,10 +545,12 @@ body {
   box-shadow: inset 0 0 0 1px var(--accent, #4f86ff);
 }
 
+/* The name has the priority in the row: this floor is what the badges to its
+   right shrink and then disappear to preserve. */
 .row-main {
   display: flex;
   flex-direction: column;
-  min-width: 0;
+  min-width: 9ch;
   flex: 1;
 }
 
@@ -595,8 +604,8 @@ body {
 
 /* Model badge + context ring: the tile's own statusLine report. Same
    right-hand badge column as .row-lead/.row-role. Capped at 11ch with an
-   ellipsis (full id in the title) so a long display name such as
-   "Sonnet 4.5 (1M context)" never squeezes .row-main. Mono like every other
+   ellipsis (full id in the title), and shrinkable below that before the name
+   gives up its floor. Mono like every other
    short runtime label (peer id, branch). Border+text tint, not fill, per
    DESIGN.md's badge primitive. */
 .row-model {
@@ -614,6 +623,14 @@ body {
   border-radius: 8px;
   padding: 2px 6px;
   white-space: nowrap;
+}
+
+/* Below this width even an ellipsized badge would leave the name under its
+   floor, so the badge goes and the ring's label carries the model instead. */
+@container session-row (max-width: 199px) {
+  .row-model {
+    display: none;
+  }
 }
 
 /* Context-fill ring (ContextRing.tsx): a 13px SVG next to the model badge,
@@ -677,8 +694,39 @@ body {
   padding: 2px 4px;
 }
 
-.row-btn {
+/* Hover-revealed row buttons as an overlay on the row's right edge, like
+   .palette-remove and .wf-port: hidden, they reserve no width, which in flow
+   they took from the name. The background follows the row's own (hover,
+   selected, focused) so the badges beneath never show through. Hidden, it
+   also lets clicks through to the row. */
+.row-actions {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 0 6px;
+  border-radius: 0 6px 6px 0;
+  background: inherit;
   opacity: 0;
+  pointer-events: none;
+}
+
+.row:hover .row-actions,
+.row:focus-within .row-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Renaming focuses .row-edit, and :focus-within would lay the opaque overlay
+   over the end of the text and the caret. */
+.row:has(.row-edit) .row-actions {
+  display: none;
+}
+
+.row-btn {
   border: none;
   background: transparent;
   color: var(--fg-dim);
@@ -686,10 +734,6 @@ body {
   font-size: 13px;
   padding: 2px 4px;
   border-radius: 4px;
-}
-
-.row:hover .row-btn {
-  opacity: 1;
 }
 
 .row-btn:hover {
@@ -5719,18 +5763,10 @@ svg.glyph {
   cursor: pointer;
 }
 
-.tc-card .tc-remove {
-  opacity: 1;
-}
-
 .tc-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 6px 10px;
-}
-
-.template-row-btn {
-  opacity: 1;
 }
 
 /* ---------- Embedded browser view (PLAN D1) ---------- */

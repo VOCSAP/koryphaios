@@ -271,49 +271,50 @@ export function SessionRow({
         <ContextRing
           pct={session.liveStatus.contextPct}
           contextWindow={session.liveStatus.contextWindow}
+          model={session.liveStatus.model}
         />
       )}
       {/* Row actions: dropped folded rather than shrunk. They are hover-revealed
           affordances acting on a row the rail no longer names; not rendering
           them also keeps them out of the tab order, which hiding them with
           `visibility` would not. */}
-      {!collapsed && !editing && (
-        <button
-          className="row-btn"
-          title={t('sidebar.renameTitle')}
-          onClick={(e) => {
-            e.stopPropagation()
-            setDraft(session.name)
-            setEditing(true)
-          }}
-        >
-          {GLYPH_ACTIONS.edit}
-        </button>
-      )}
       {!collapsed && (
-        <button
-          className="row-btn"
-          title={maximizedId === session.id ? t('common.restore') : t('common.maximize')}
-          onClick={(e) => {
-            e.stopPropagation()
-            setSelected(session.id)
-            setMaximized(maximizedId === session.id ? null : session.id)
-          }}
-        >
-          {maximizedId === session.id ? GLYPH_ACTIONS.restore : GLYPH_ACTIONS.expand}
-        </button>
-      )}
-      {!collapsed && (
-        <button
-          className="row-btn row-btn-danger"
-          title={t('sidebar.removeTitle')}
-          onClick={(e) => {
-            e.stopPropagation()
-            setConfirmingDelete(true)
-          }}
-        >
-          {GLYPH_ACTIONS.close}
-        </button>
+        <span className="row-actions">
+          {!editing && (
+            <button
+              className="row-btn"
+              title={t('sidebar.renameTitle')}
+              onClick={(e) => {
+                e.stopPropagation()
+                setDraft(session.name)
+                setEditing(true)
+              }}
+            >
+              {GLYPH_ACTIONS.edit}
+            </button>
+          )}
+          <button
+            className="row-btn"
+            title={maximizedId === session.id ? t('common.restore') : t('common.maximize')}
+            onClick={(e) => {
+              e.stopPropagation()
+              setSelected(session.id)
+              setMaximized(maximizedId === session.id ? null : session.id)
+            }}
+          >
+            {maximizedId === session.id ? GLYPH_ACTIONS.restore : GLYPH_ACTIONS.expand}
+          </button>
+          <button
+            className="row-btn row-btn-danger"
+            title={t('sidebar.removeTitle')}
+            onClick={(e) => {
+              e.stopPropagation()
+              setConfirmingDelete(true)
+            }}
+          >
+            {GLYPH_ACTIONS.close}
+          </button>
+        </span>
       )}
       {confirmingDelete && (
         <ConfirmDialog

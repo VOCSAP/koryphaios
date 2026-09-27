@@ -12,15 +12,18 @@ const CIRCUMFERENCE = 2 * Math.PI * RADIUS
 
 export function ContextRing({
   pct,
-  contextWindow
+  contextWindow,
+  model
 }: {
   pct: number | null
   contextWindow: number | null
+  /** Named in the label: the row hides its model badge when narrow, the ring stays. */
+  model?: string
 }): React.JSX.Element {
   const t = useT()
   const severity = ringSeverity(pct)
   const { dasharray, dashoffset } = ringDash(pct, CIRCUMFERENCE)
-  const label =
+  const fill =
     pct === null
       ? t('sidebar.contextRingUnknown')
       : contextWindow !== null
@@ -29,6 +32,7 @@ export function ContextRing({
             tokens: formatTokens(contextWindow)
           })
         : t('sidebar.contextRingTitlePctOnly', { pct: Math.round(clampPct(pct)) })
+  const label = model ? `${model} · ${fill}` : fill
 
   return (
     <svg
