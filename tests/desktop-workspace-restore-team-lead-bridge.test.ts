@@ -10,7 +10,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  agentFromRestoredArgs,
+  effectiveAgent,
   isTeamLeadAgent,
   resolveMcpConfig,
   type MintTeamLeadBridge
@@ -25,34 +25,44 @@ import { extractBracedBody } from "./_braced-body";
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
 const IPC_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "ipc.ts");
 
-// ----- agentFromRestoredArgs: bounded extraction, fails closed -----
+// ----- effectiveAgent on a restored SessionDef.args: bounded extraction -----
 
 test("recovers the agent from the exact --agent \"value\" shape create() writes", () => {
-  expect(agentFromRestoredArgs('--agent "team-lead"')).toBe("team-lead");
-  expect(agentFromRestoredArgs('--agent "team-lead" --model "opus"')).toBe("team-lead");
-  expect(agentFromRestoredArgs('--model "opus" --agent "reviewer" --effort "high"')).toBe("reviewer");
+  expect(effectiveAgent(undefined, '--agent "team-lead"').agent).toBe("team-lead");
+  expect(effectiveAgent(undefined, '--agent "team-lead" --model "opus"').agent).toBe("team-lead");
+  expect(effectiveAgent(undefined, '--model "opus" --agent "reviewer" --effort "high"').agent).toBe("reviewer");
 });
 
-test("returns undefined on zero matches", () => {
-  expect(agentFromRestoredArgs("")).toBeUndefined();
-  expect(agentFromRestoredArgs("--model \"opus\"")).toBeUndefined();
+test("returns undefined, not ambiguous, on zero matches", () => {
+  expect(effectiveAgent(undefined, "")).toEqual({ agent: undefined });
+  expect(effectiveAgent(undefined, "--model \"opus\"")).toEqual({ agent: undefined });
 });
 
-test("fails closed on more than one --agent occurrence rather than taking the first (hand-edited workspace file)", () => {
-  expect(agentFromRestoredArgs('--agent "team-lead" --agent "developer"')).toBeUndefined();
+test("takes the LAST canonical --agent, the one the CLI runs, when create() appended an args --agent after the agent field", () => {
+  expect(effectiveAgent(undefined, '--agent "developer" --agent "team-lead"').agent).toBe("team-lead");
+  expect(effectiveAgent(undefined, '--agent "team-lead" --agent "developer"').agent).toBe("developer");
 });
 
-test("fails closed on missing quotes, empty value, or a glued suffix", () => {
-  expect(agentFromRestoredArgs("--agent team-lead")).toBeUndefined();
-  expect(agentFromRestoredArgs('--agent ""')).toBeUndefined();
-  expect(agentFromRestoredArgs('--agent "team-lead"x')).toBeUndefined();
-  expect(agentFromRestoredArgs('x--agent "team-lead"')).toBeUndefined();
+test("reads the legacy unquoted --agent value, the args being a plain token sequence", () => {
+  expect(effectiveAgent(undefined, "--agent team-lead")).toEqual({ agent: "team-lead" });
+});
+
+test("a glued suffix names another agent than team-lead, so it resolves nothing and reports nothing", () => {
+  expect(effectiveAgent(undefined, '--agent "team-lead"x')).toEqual({ agent: undefined });
+});
+
+test("is ambiguous on an empty value or a shell separator", () => {
+  for (const args of ['--agent "team-lead" --agent ""', '--agent "team-lead" ; true']) {
+    const r = effectiveAgent(undefined, args);
+    expect(r.agent, args).toBeUndefined();
+    expect(r.ambiguity, args).toBeDefined();
+  }
 });
 
 test("card 6363bd69: the recovered value round-trips through the SAME isTeamLeadAgent predicate every other route uses", () => {
-  expect(isTeamLeadAgent(agentFromRestoredArgs('--agent "team-lead"'))).toBe(true);
-  expect(isTeamLeadAgent(agentFromRestoredArgs('--agent "reviewer"'))).toBe(false);
-  expect(isTeamLeadAgent(agentFromRestoredArgs(""))).toBe(false);
+  expect(isTeamLeadAgent(effectiveAgent(undefined, '--agent "team-lead"').agent)).toBe(true);
+  expect(isTeamLeadAgent(effectiveAgent(undefined, '--agent "reviewer"').agent)).toBe(false);
+  expect(isTeamLeadAgent(effectiveAgent(undefined, "").agent)).toBe(false);
 });
 
 // ----- WorkspaceService.hasTeamLeadAgentSession: real class, real fs -----
@@ -117,6 +127,18 @@ test("hasTeamLeadAgentSession: false when no session is the team-lead agent", ()
   expect(svc.hasTeamLeadAgentSession(ws.id)).toBe(false);
 });
 
+test("hasTeamLeadAgentSession: true when the team-lead --agent comes last, false when it is overridden or not plain", () => {
+  const proj = freshProject();
+  const svc = new WorkspaceService(minimalDeps(proj));
+  const last = sampleWorkspace([["--agent", '"developer"', "--agent", '"team-lead"']]);
+  const overridden = sampleWorkspace([["--agent", '"team-lead"', "--agent", '"developer"']]);
+  const notPlain = sampleWorkspace([["--agent", '"team-lead"', ";", "true"]]);
+  for (const ws of [last, overridden, notPlain]) saveWorkspace(proj, ws);
+  expect(svc.hasTeamLeadAgentSession(last.id)).toBe(true);
+  expect(svc.hasTeamLeadAgentSession(overridden.id)).toBe(false);
+  expect(svc.hasTeamLeadAgentSession(notPlain.id)).toBe(false);
+});
+
 test("hasTeamLeadAgentSession: false for an unknown workspace id", () => {
   const proj = freshProject();
   const svc = new WorkspaceService(minimalDeps(proj));
@@ -125,11 +147,11 @@ test("hasTeamLeadAgentSession: false for an unknown workspace id", () => {
 
 // ----- restoreFrom()'s new mint loop: session-service.ts imports node-pty,
 // not bun-test-importable -- extracted verbatim and executed with the REAL
-// resolveMcpConfig/isTeamLeadAgent/agentFromRestoredArgs injected (never
+// resolveMcpConfig/isTeamLeadAgent/effectiveAgent injected (never
 // reimplemented), only mintTeamLeadBridge/reportError stubbed. -----
 
 const RESTORE_LOOP_HEAD = "for (const d of this.defs) {";
-const RESTORE_LOOP_NEXT_LINE = "const agent = agentFromRestoredArgs(d.args)";
+const RESTORE_LOOP_NEXT_LINE = "const { agent, ambiguity } = effectiveAgent(undefined, d.args)";
 
 /**
  * `for (const d of this.defs) {` alone is not unique (5 occurrences in
@@ -151,39 +173,63 @@ function extractRestoreMintLoopBody(src: string): string {
   return extractBracedBody(src, forOpenIdx);
 }
 
-test("card 6363bd69 wiring: restoreFrom()'s real mint loop grants mcpConfig only to the team-lead-agent def, using the injected real predicates", () => {
+interface RestoredDefStub {
+  name: string;
+  args: string;
+  mcpConfig: string | undefined;
+}
+
+function runRestoreMintLoop(defs: RestoredDefStub[]): { mintCalls: number; reports: string[] } {
   const src = readFileSync(SESSION_SERVICE_PATH, "utf-8");
   const loopBody = extractRestoreMintLoopBody(src);
   const wrapped = `for (const d of this.defs) {${loopBody}}`;
 
-  const mintCalls: string[] = [];
+  let mintCalls = 0;
   const mint: MintTeamLeadBridge = () => {
-    mintCalls.push("called");
+    mintCalls++;
     return { mcpConfig: "/state/team-lead-mcp-xyz.json", callerId: "team-lead-xyz" };
   };
-  const reportCalls: unknown[] = [];
-  const report = (...args: unknown[]) => reportCalls.push(args);
+  const reports: string[] = [];
+  const report = (_scope: string, message: string) => reports.push(message);
 
   // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
-  const run = new Function("resolveMcpConfig", "isTeamLeadAgent", "agentFromRestoredArgs", "reportError", wrapped) as (
+  const run = new Function("resolveMcpConfig", "isTeamLeadAgent", "effectiveAgent", "reportError", wrapped) as (
     resolveMcpConfigFn: typeof resolveMcpConfig,
     isTeamLeadAgentFn: typeof isTeamLeadAgent,
-    agentFromRestoredArgsFn: typeof agentFromRestoredArgs,
+    effectiveAgentFn: typeof effectiveAgent,
     reportErrorFn: typeof report
   ) => void;
+  run.call({ defs, mintTeamLeadBridge: mint }, resolveMcpConfig, isTeamLeadAgent, effectiveAgent, report);
+  return { mintCalls, reports };
+}
 
-  const leadDef = { args: '--agent "team-lead"', mcpConfig: undefined as string | undefined };
-  const otherDef = { args: '--agent "reviewer"', mcpConfig: undefined as string | undefined };
-  const stub = { defs: [leadDef, otherDef], mintTeamLeadBridge: mint };
+test("card 6363bd69 wiring: restoreFrom()'s real mint loop grants mcpConfig only to the team-lead-agent def, using the injected real predicates", () => {
+  const leadDef = { name: "lead", args: '--agent "team-lead"', mcpConfig: undefined as string | undefined };
+  const otherDef = { name: "rev", args: '--agent "reviewer"', mcpConfig: undefined as string | undefined };
 
-  run.call(stub, resolveMcpConfig, isTeamLeadAgent, agentFromRestoredArgs, report);
+  const r = runRestoreMintLoop([leadDef, otherDef]);
 
   expect(leadDef.mcpConfig, "the team-lead-agent def must be minted a fresh bridge").toBe(
     "/state/team-lead-mcp-xyz.json"
   );
   expect(otherDef.mcpConfig, "a non-team-lead def must never be minted a bridge").toBeUndefined();
-  expect(mintCalls.length).toBe(1);
-  expect(reportCalls.length).toBe(0);
+  expect(r.mintCalls).toBe(1);
+  expect(r.reports).toEqual([]);
+});
+
+test("restoreFrom()'s mint loop follows the last --agent and refuses an ambiguous one with a report naming the session", () => {
+  const overriddenToLead = { name: "a", args: '--agent "developer" --agent "team-lead"', mcpConfig: undefined as string | undefined };
+  const overriddenAway = { name: "b", args: '--agent "team-lead" --agent "developer"', mcpConfig: undefined as string | undefined };
+  const ambiguous = { name: "hand-edited lead", args: '--agent "team-lead" ; true', mcpConfig: undefined as string | undefined };
+
+  const r = runRestoreMintLoop([overriddenToLead, overriddenAway, ambiguous]);
+
+  expect(overriddenToLead.mcpConfig).toBe("/state/team-lead-mcp-xyz.json");
+  expect(overriddenAway.mcpConfig).toBeUndefined();
+  expect(ambiguous.mcpConfig).toBeUndefined();
+  expect(r.mintCalls).toBe(1);
+  expect(r.reports).toHaveLength(1);
+  expect(r.reports[0]).toContain("hand-edited lead");
 });
 
 // ----- ipc.ts's workspace:restore: ensureControlServer() gated on

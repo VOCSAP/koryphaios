@@ -203,7 +203,7 @@ import {
   writeSupervisorSystemPrompt,
   writeTeamLeadMcpConfig
 } from './supervisor'
-import { buildMintTeamLeadBridge, isTeamLeadAgent } from './team-lead-bridge'
+import { buildMintTeamLeadBridge, effectiveAgent, isTeamLeadAgent } from './team-lead-bridge'
 import { sweepTeamLeadMcpConfigs, teamLeadInstanceToken, teamLeadMcpConfigFileName } from './team-lead-mcp-sweep'
 import {
   createWorktree,
@@ -2727,7 +2727,7 @@ const controlDeps: DeckControlDeps = {
       // necessarily already up here -- this call only ever arrives through
       // it -- so unlike the operator route there is no ensureControlServer()
       // to start proactively.
-      { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }
+      { teamLeadDeckBridge: isTeamLeadAgent(effectiveAgent(input.agent, input.args).agent) }
     )
   },
   saveTemplate: (name, local) => {

@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { extractBracedBody, extractParenBody } from "./_braced-body";
 import {
+  effectiveAgent,
   isTeamLeadAgent,
   wantsTeamLeadBridge,
   resolveMcpConfig,
@@ -20,6 +21,7 @@ import {
   type DeckControlServerLike
 } from "../desktop/src/main/team-lead-bridge";
 import { TEAM_LEAD_DECK_TOOLS, writeTeamLeadMcpConfig } from "../desktop/src/main/supervisor";
+import { sanitizeFlagValue } from "../desktop/src/main/session-command";
 
 const SESSION_SERVICE_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "session-service.ts");
 const INDEX_PATH = join(import.meta.dir, "..", "desktop", "src", "main", "index.ts");
@@ -40,19 +42,24 @@ test("marker true + agent team-lead + no existing mcpConfig -> mints and uses th
   expect(report).not.toHaveBeenCalled();
 });
 
-test("PROOF 1: marker FALSE -> no mcpConfig, mint never called", () => {
-  // resolveMcpConfig itself never knows or cares *why* marker is false: a
-  // caller that never computes it (diff:review, roadmap:import-plan), or one
-  // that computed isTeamLeadAgent(input.agent) as false for a non-team-lead
-  // entry, must produce the identical no-bridge result -- even though the
-  // mint function IS wired and WOULD return a valid bridge, it must never be
-  // reached.
+test("marker FALSE for a resolved team-lead refuses the bridge and reports the degradation", () => {
   const mint = mock(fakeMint({ mcpConfig: "/state/should-not-be-used.json", callerId: "x" }));
-  const report = mock(() => {});
+  const report = mock((_scope: string, _message: string) => {});
   const result = resolveMcpConfig({}, "team-lead", false, mint, report);
   expect(result).toBeUndefined();
   expect(mint).not.toHaveBeenCalled();
-  expect(report).not.toHaveBeenCalled();
+  expect(report).toHaveBeenCalledTimes(1);
+  expect(report.mock.calls[0]?.[1]).toContain("marker");
+});
+
+test("an ambiguous --agent argument refuses the bridge and identifies the session in the report", () => {
+  const mint = mock(fakeMint({ mcpConfig: "/state/should-not-be-used.json", callerId: "x" }));
+  const report = mock((_scope: string, _message: string) => {});
+  const result = resolveMcpConfig({ name: "template lead" }, "", false, mint, report, "args contain a backslash");
+  expect(result).toBeUndefined();
+  expect(mint).not.toHaveBeenCalled();
+  expect(report).toHaveBeenCalledTimes(1);
+  expect(report.mock.calls[0]?.[1]).toContain("template lead");
 });
 
 test("PROOF (Q1 non-regression): a stray `teamLeadDeckBridge` JSON property ON `input` itself has NO effect -- only the separate `marker` parameter can grant the bridge", () => {
@@ -71,7 +78,7 @@ test("PROOF (Q1 non-regression): a stray `teamLeadDeckBridge` JSON property ON `
   const result = resolveMcpConfig(hostileInput, "team-lead", false, mint, report);
   expect(result).toBeUndefined();
   expect(mint).not.toHaveBeenCalled();
-  expect(report).not.toHaveBeenCalled();
+  expect(report).toHaveBeenCalledTimes(1);
 });
 
 test("marker true but agent is NOT team-lead -> no mcpConfig, mint never called", () => {
@@ -149,6 +156,183 @@ test("isTeamLeadAgent: exact match only, not a prefix/substring, and false on em
   expect(isTeamLeadAgent("Team-Lead")).toBe(false);
   expect(isTeamLeadAgent("")).toBe(false);
   expect(isTeamLeadAgent(undefined)).toBe(false);
+});
+
+const NOT_PLAIN = "not a plain sequence";
+
+test("effectiveAgent follows the last --agent argument and fails closed on one without a value", () => {
+  expect(effectiveAgent("team-lead", '--agent "developer"')).toEqual({ agent: "developer" });
+  expect(effectiveAgent("developer", '--agent "developer" --agent "team-lead"')).toEqual({ agent: "team-lead" });
+  const valueless = effectiveAgent("team-lead", '--agent --model "opus"');
+  expect(valueless.agent).toBeUndefined();
+  expect(valueless.ambiguity).toContain("not followed by a simple value");
+});
+
+test("effectiveAgent keeps the agent field when args carry no --agent, and reads an args-only agent", () => {
+  expect(effectiveAgent("team-lead", '--model "opus"')).toEqual({ agent: "team-lead" });
+  expect(effectiveAgent("team-lead", undefined)).toEqual({ agent: "team-lead" });
+  expect(effectiveAgent(undefined, '--agent "team-lead" --model "opus"')).toEqual({ agent: "team-lead" });
+  expect(effectiveAgent("", '--agent "team-leader"')).toEqual({ agent: "team-leader" });
+});
+
+test("effectiveAgent is ambiguous on an empty value, a glued suffix, or an --agent= form", () => {
+  for (const args of ['--agent ""', '--agent "team-lead"x', "--agent=team-lead"]) {
+    const r = effectiveAgent("team-lead", args);
+    expect(r.agent, args).toBeUndefined();
+    expect(r.ambiguity, args).toContain(NOT_PLAIN);
+  }
+});
+
+test("effectiveAgent reports no ambiguity when no team-lead bridge is at stake", () => {
+  expect(effectiveAgent("developer", "--foo $(echo x) # y")).toEqual({ agent: undefined });
+  expect(effectiveAgent(undefined, '--agent --model "opus"')).toEqual({ agent: undefined });
+});
+
+// Each args below makes the shell (or cmd.exe) run something other than what a
+// text reading of --agent sees; the reason names the rule that refused it.
+const SHELL_AMBIGUOUS_ARGS: ReadonlyArray<readonly [string, string]> = [
+  ['--ag"e"nt evil', NOT_PLAIN],
+  ["--ag${U}ent evil", NOT_PLAIN],
+  ["--{agent,} evil", NOT_PLAIN],
+  ["--agen? evil", NOT_PLAIN],
+  ["--agen[t] evil", NOT_PLAIN],
+  ['--agent "evil" ; --agent "team-lead"', NOT_PLAIN],
+  ['"x --agent "team-lead" y"', NOT_PLAIN],
+  ["--ag^ent evil", NOT_PLAIN],
+  ['--ag""ent "evil"', NOT_PLAIN],
+  ["--ag''ent \"evil\"", NOT_PLAIN],
+  ['--a\\gent "evil"', NOT_PLAIN],
+  ['--agent "evil" # --agent "team-lead"', NOT_PLAIN],
+  ['--agent "team-lead" $(echo --agent evil)', NOT_PLAIN],
+  ['--agent "team-lead" `echo --agent evil`', NOT_PLAIN],
+  ["--agent  evil", NOT_PLAIN],
+  ['--agents \'{"team-lead":{"prompt":"x"}}\'', NOT_PLAIN],
+  ["--agents profiles.json", "--agents"],
+  ["--append-system-prompt --agent team-lead", "right after another flag"],
+  ["--model @q --agent team-lead", NOT_PLAIN]
+];
+
+test("effectiveAgent fails closed on every shell construct that can desynchronise the text reading from the CLI", () => {
+  for (const [args, motif] of SHELL_AMBIGUOUS_ARGS) {
+    const r = effectiveAgent("team-lead", args);
+    expect(r.agent, args).toBeUndefined();
+    expect(r.ambiguity, args).toContain(motif);
+  }
+});
+
+// Every distinct args shape found in the persisted templates, workspaces and
+// sessions files on the development machine, plus the legacy unquoted form.
+const KORY_PRODUCED_TEAM_LEAD_ARGS: readonly string[] = [
+  '--agent "team-lead"',
+  "--agent team-lead",
+  '--agent team-lead --model "opus[1m]"',
+  '--agent "team-lead" --model "clodex:openai-oauth:gpt-5.6-sol"',
+  '--agent "developer" --agent "team-lead"'
+];
+
+// create() imports node-pty and cannot be loaded under bun test, so its two
+// statements deciding the bridge are extracted verbatim and executed with the
+// real effectiveAgent/resolveMcpConfig/sanitizeFlagValue injected.
+function extractCreateBridgeDecision(src: string): string {
+  const head = "const launched = effectiveAgent(agent, input.args)";
+  const start = src.indexOf(head);
+  if (start === -1 || src.indexOf(head, start + 1) !== -1) {
+    throw new Error(`session-service.ts: expected exactly 1 "${head}"`);
+  }
+  const callHead = "const mcpConfig = resolveMcpConfig(";
+  const callIdx = src.indexOf(callHead, start);
+  if (callIdx === -1 || callIdx - start > 200) throw new Error(`"${callHead}" does not follow "${head}"`);
+  const openIdx = callIdx + callHead.length - 1;
+  return `${src.slice(start, openIdx)}(${extractParenBody(src, openIdx)})`;
+}
+
+function runCreateBridgeDecision(agent: string, input: { args?: string; name?: string }, marker: boolean) {
+  const src = readFileSync(SESSION_SERVICE_PATH, "utf-8");
+  const mintCalls: string[] = [];
+  const reports: string[] = [];
+  // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
+  const run = new Function(
+    "effectiveAgent",
+    "resolveMcpConfig",
+    "sanitizeFlagValue",
+    "reportError",
+    "agent",
+    "input",
+    "opts",
+    `${extractCreateBridgeDecision(src)}\nreturn mcpConfig`
+  );
+  const mcpConfig = run.call(
+    {
+      mintTeamLeadBridge: () => {
+        mintCalls.push("called");
+        return { mcpConfig: "/state/team-lead-mcp-create.json", callerId: "team-lead-create" };
+      }
+    },
+    effectiveAgent,
+    resolveMcpConfig,
+    sanitizeFlagValue,
+    (_scope: string, message: string) => reports.push(message),
+    agent,
+    input,
+    { teamLeadDeckBridge: marker }
+  ) as string | undefined;
+  return { mcpConfig, mintCalls: mintCalls.length, reports };
+}
+
+test("create() mints the bridge for a template entry whose agent is carried only in args", () => {
+  const r = runCreateBridgeDecision("", { args: '--agent "team-lead"', name: "lead" }, true);
+  expect(r.mcpConfig).toBe("/state/team-lead-mcp-create.json");
+  expect(r.mintCalls).toBe(1);
+});
+
+test("create() refuses the bridge to team-leader in args, to an agent field overridden by args, and to an ambiguous --agent", () => {
+  expect(runCreateBridgeDecision("", { args: '--agent "team-leader"' }, true)).toEqual({
+    mcpConfig: undefined,
+    mintCalls: 0,
+    reports: []
+  });
+  expect(runCreateBridgeDecision("team-lead", { args: '--agent "developer"' }, true)).toEqual({
+    mcpConfig: undefined,
+    mintCalls: 0,
+    reports: []
+  });
+  const ambiguous = runCreateBridgeDecision("", { args: '--agent "team-lead" ; true', name: "template lead" }, true);
+  expect(ambiguous.mcpConfig).toBeUndefined();
+  expect(ambiguous.mintCalls).toBe(0);
+  expect(ambiguous.reports).toHaveLength(1);
+  expect(ambiguous.reports[0]).toContain("template lead");
+});
+
+for (const [args, motif] of SHELL_AMBIGUOUS_ARGS) {
+  test(`create() mints no bridge for a team-lead tile whose args hide the agent behind ${motif}: ${args}`, () => {
+    const r = runCreateBridgeDecision("team-lead", { args, name: "shell lead" }, true);
+    expect(r.mcpConfig).toBeUndefined();
+    expect(r.mintCalls).toBe(0);
+    expect(r.reports).toHaveLength(1);
+    expect(r.reports[0]).toContain("shell lead");
+    expect(r.reports[0]).toContain(motif);
+  });
+}
+
+for (const args of KORY_PRODUCED_TEAM_LEAD_ARGS) {
+  test(`negative control: create() still mints exactly once for the Kory-produced args ${args}`, () => {
+    const r = runCreateBridgeDecision("", { args, name: "shell lead" }, true);
+    expect(r).toEqual({ mcpConfig: "/state/team-lead-mcp-create.json", mintCalls: 1, reports: [] });
+  });
+}
+
+test("create() reports nothing for a developer tile whose args only mention team-lead in prose", () => {
+  expect(
+    runCreateBridgeDecision("developer", { args: '--append-system-prompt "report to the team-lead"', name: "dev" }, false)
+  ).toEqual({ mcpConfig: undefined, mintCalls: 0, reports: [] });
+});
+
+test("create() mints no bridge and reports nothing for a non-team-lead tile with shell constructs in its args", () => {
+  expect(runCreateBridgeDecision("developer", { args: "--foo $(echo x) # y", name: "dev" }, false)).toEqual({
+    mcpConfig: undefined,
+    mintCalls: 0,
+    reports: []
+  });
 });
 
 // TEAM_LEAD_DECK_TOOLS is compared against the live export, not a hand-copied
@@ -327,7 +511,12 @@ test("negative control: the checker REJECTS a synthetic body where the call is d
 // Accepts both input.agent and the optional-chained input?.agent -- both are
 // real call sites in this repo, so only one form would false-positive on the
 // other.
-const LINKED_MARKER = /teamLeadDeckBridge\s*:\s*isTeamLeadAgent\(input\??\.agent\)\s*[,}]/;
+const LINKED_MARKER =
+  /teamLeadDeckBridge\s*:\s*isTeamLeadAgent\((?:input\??\.agent|effectiveAgent\(input\??\.agent,\s*input\??\.args\)\.agent)\)\s*[,}]/;
+// Template entries exported by the Deck carry the agent only in args, so both
+// template routes must resolve it through effectiveAgent, never input.agent alone.
+const TEMPLATE_LINKED_MARKER =
+  /teamLeadDeckBridge\s*:\s*isTeamLeadAgent\(effectiveAgent\(input\.agent,\s*input\.args\)\.agent\)\s*[,}]/;
 
 /** A mis-balanced extraction (e.g. a stray brace inside a string literal) reads as "could not extract", never as a guard violation. */
 function extractFnBody(src: string, fnMatch: RegExpExecArray | null, fileLabel: string, anchorLabel: string):
@@ -341,7 +530,7 @@ function extractFnBody(src: string, fnMatch: RegExpExecArray | null, fileLabel: 
   }
 }
 
-function checkAllCallsCarryLinkedMarker(body: string, anchorLabel: string): string | null {
+function checkAllCallsCarryLinkedMarker(body: string, anchorLabel: string, marker: RegExp = LINKED_MARKER): string | null {
   const calls = [...body.matchAll(/createSessionWithWorktree\(/g)];
   if (calls.length === 0) return `createSessionWithWorktree( call not found inside ${anchorLabel}`;
   for (const call of calls) {
@@ -352,8 +541,8 @@ function checkAllCallsCarryLinkedMarker(body: string, anchorLabel: string): stri
     } catch (e) {
       return `could not extract a createSessionWithWorktree(...) call's args inside ${anchorLabel}: ${(e as Error).message}`;
     }
-    if (!LINKED_MARKER.test(args)) {
-      return `a createSessionWithWorktree(...) call inside ${anchorLabel} does not carry a linked "teamLeadDeckBridge: isTeamLeadAgent(input.agent)" argument`;
+    if (!marker.test(args)) {
+      return `a createSessionWithWorktree(...) call inside ${anchorLabel} does not carry a linked teamLeadDeckBridge argument matching ${marker.source}`;
     }
   }
   return null;
@@ -365,6 +554,7 @@ interface WiringCheckSpec {
   anchorLabel: string;
   /** Runs on the extracted body before the linked-marker scan; return a reason string to fail early (e.g. template:apply's ensureControlServer() requirement). */
   extraCheck?: (body: string) => string | null;
+  marker?: RegExp;
 }
 
 /**
@@ -382,18 +572,19 @@ function checkWiring(src: string, spec: WiringCheckSpec): string | null {
     const reason = spec.extraCheck(extracted.body);
     if (reason) return reason;
   }
-  return checkAllCallsCarryLinkedMarker(extracted.body, spec.anchorLabel);
+  return checkAllCallsCarryLinkedMarker(extracted.body, spec.anchorLabel, spec.marker);
 }
 
 export function checkSpawnTemplateEntryWiring(src: string): string | null {
   return checkWiring(src, {
     anchor: /spawnTemplateEntry:\s*async\s*\(input,\s*opts\)\s*=>\s*\{/,
     fileLabel: "index.ts",
-    anchorLabel: "spawnTemplateEntry"
+    anchorLabel: "spawnTemplateEntry",
+    marker: TEMPLATE_LINKED_MARKER
   });
 }
 
-test("index.ts's spawnTemplateEntry passes a linked isTeamLeadAgent(input.agent) as opts.teamLeadDeckBridge to createSessionWithWorktree", () => {
+test("index.ts's spawnTemplateEntry passes a linked isTeamLeadAgent(effectiveAgent(input.agent, input.args).agent) as opts.teamLeadDeckBridge to createSessionWithWorktree", () => {
   const src = readFileSync(INDEX_PATH, "utf-8");
   const reason = checkSpawnTemplateEntryWiring(src);
   expect(reason).toBeNull();
@@ -501,11 +692,59 @@ test("MUTATION PROOF: the checker REJECTS an inverted marker and an unused-predi
     "  spawnTemplateEntry: async (input, opts) => {",
     "    return createSessionWithWorktree(",
     "      service, getConfig().projectDir, input, undefined, getWorktreeInit(), sandboxGate, warmSandboxTranscripts,",
-    "      { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }",
+    "      { teamLeadDeckBridge: isTeamLeadAgent(effectiveAgent(input.agent, input.args).agent) }",
     "    )",
     "  },"
   ].join("\n");
   expect(checkSpawnTemplateEntryWiring(real)).toBeNull();
+});
+
+test("MUTATION PROOF: both template checkers REJECT a marker read from input.agent alone, which misses an args-only template entry", () => {
+  const agentFieldOnly = [
+    "  spawnTemplateEntry: async (input, opts) => {",
+    "    return createSessionWithWorktree(",
+    "      service, getConfig().projectDir, input, undefined, getWorktreeInit(), sandboxGate, warmSandboxTranscripts,",
+    "      { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }",
+    "    )",
+    "  },"
+  ].join("\n");
+  expect(checkSpawnTemplateEntryWiring(agentFieldOnly)).toContain("does not carry a linked teamLeadDeckBridge");
+
+  const applyAgentFieldOnly = [
+    "  regHandle('template:apply', async (_e, path, mode) => {",
+    "    if (inputs.some((i) => isTeamLeadAgent(effectiveAgent(i.agent, i.args).agent))) {",
+    "      await ensureControlServer()",
+    "    }",
+    "    for (const input of inputs) {",
+    "      await createSessionWithWorktree(",
+    "        service, getConfig().projectDir, input, undefined, getWorktreeInit(), undefined, undefined,",
+    "        { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }",
+    "      )",
+    "    }",
+    "  })"
+  ].join("\n");
+  expect(checkTemplateApplyWiring(applyAgentFieldOnly)).toContain("does not carry a linked teamLeadDeckBridge");
+  expect(checkTemplateApplyWiring(applyAgentFieldOnly.replace(
+    "isTeamLeadAgent(input.agent)",
+    "isTeamLeadAgent(effectiveAgent(input.agent, input.args).agent)"
+  ))).toBeNull();
+});
+
+test("MUTATION PROOF (template:apply): the checker REJECTS an ensureControlServer() pre-check that reads i.agent alone", () => {
+  const mutated = [
+    "  regHandle('template:apply', async (_e, path, mode) => {",
+    "    if (inputs.some((i) => isTeamLeadAgent(i.agent))) {",
+    "      await ensureControlServer()",
+    "    }",
+    "    for (const input of inputs) {",
+    "      await createSessionWithWorktree(",
+    "        service, getConfig().projectDir, input, undefined, getWorktreeInit(), undefined, undefined,",
+    "        { teamLeadDeckBridge: isTeamLeadAgent(effectiveAgent(input.agent, input.args).agent) }",
+    "      )",
+    "    }",
+    "  })"
+  ].join("\n");
+  expect(checkTemplateApplyWiring(mutated)).toContain("pre-check");
 });
 
 test("MUTATION PROOF: the checker REJECTS a body with a second, unguarded createSessionWithWorktree(...) call", () => {
@@ -541,14 +780,20 @@ export function checkTemplateApplyWiring(src: string): string | null {
     anchor: /regHandle\(\s*'template:apply'[\s\S]*?=>\s*\{/,
     fileLabel: "ipc.ts",
     anchorLabel: "template:apply",
-    extraCheck: (body) =>
-      /ensureControlServer\(\)/.test(body)
-        ? null
-        : "template:apply no longer calls ensureControlServer() -- a template-opened team-lead tile could mint against a server never started"
+    marker: TEMPLATE_LINKED_MARKER,
+    extraCheck: (body) => {
+      if (!/ensureControlServer\(\)/.test(body)) {
+        return "template:apply no longer calls ensureControlServer() -- a template-opened team-lead tile could mint against a server never started";
+      }
+      if (!/inputs\.some\(\(i\)\s*=>\s*isTeamLeadAgent\(effectiveAgent\(i\.agent,\s*i\.args\)\.agent\)\)/.test(body)) {
+        return "template:apply's ensureControlServer() pre-check does not resolve the agent through effectiveAgent(i.agent, i.args) -- an args-only team-lead would mint against a server never started";
+      }
+      return null;
+    }
   });
 }
 
-test("ipc.ts's template:apply calls ensureControlServer() and passes a linked isTeamLeadAgent(input.agent) on every createSessionWithWorktree call", () => {
+test("ipc.ts's template:apply calls ensureControlServer() and passes a linked isTeamLeadAgent(effectiveAgent(input.agent, input.args).agent) on every createSessionWithWorktree call", () => {
   const src = readFileSync(IPC_PATH, "utf-8");
   const reason = checkTemplateApplyWiring(src);
   expect(reason).toBeNull();
@@ -573,7 +818,9 @@ test("negative control: the checker REJECTS a synthetic template:apply that neve
 test("negative control: the checker REJECTS a synthetic template:apply that grants the bridge unconditionally", () => {
   const mutated = [
     "  regHandle('template:apply', async (_e, path, mode) => {",
-    "    await ensureControlServer()",
+    "    if (inputs.some((i) => isTeamLeadAgent(effectiveAgent(i.agent, i.args).agent))) {",
+    "      await ensureControlServer()",
+    "    }",
     "    for (const input of inputs) {",
     "      await createSessionWithWorktree(",
     "        service, getConfig().projectDir, input, undefined, getWorktreeInit(), undefined, undefined,",
@@ -589,29 +836,33 @@ test("negative control: the checker REJECTS a synthetic template:apply that gran
 test("MUTATION PROOF (template:apply): the checker REJECTS an inverted marker", () => {
   const mutated = [
     "  regHandle('template:apply', async (_e, path, mode) => {",
-    "    await ensureControlServer()",
+    "    if (inputs.some((i) => isTeamLeadAgent(effectiveAgent(i.agent, i.args).agent))) {",
+    "      await ensureControlServer()",
+    "    }",
     "    for (const input of inputs) {",
     "      await createSessionWithWorktree(",
     "        service, getConfig().projectDir, input, undefined, getWorktreeInit(), undefined, undefined,",
-    "        { teamLeadDeckBridge: !isTeamLeadAgent(input.agent) }",
+    "        { teamLeadDeckBridge: !isTeamLeadAgent(effectiveAgent(input.agent, input.args).agent) }",
     "      )",
     "    }",
     "  })"
   ].join("\n");
-  expect(checkTemplateApplyWiring(mutated)).not.toBeNull();
+  expect(checkTemplateApplyWiring(mutated)).toContain("does not carry a linked teamLeadDeckBridge");
 });
 
 test("MUTATION PROOF (template:apply): the checker REJECTS a body with a second, unguarded createSessionWithWorktree(...) call", () => {
   const mutated = [
     "  regHandle('template:apply', async (_e, path, mode) => {",
-    "    await ensureControlServer()",
+    "    if (inputs.some((i) => isTeamLeadAgent(effectiveAgent(i.agent, i.args).agent))) {",
+    "      await ensureControlServer()",
+    "    }",
     "    if (legacyInputs.length) {",
     "      createSessionWithWorktree(service, getConfig().projectDir, legacyInputs[0], undefined, getWorktreeInit())",
     "    }",
     "    for (const input of inputs) {",
     "      await createSessionWithWorktree(",
     "        service, getConfig().projectDir, input, undefined, getWorktreeInit(), undefined, undefined,",
-    "        { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }",
+    "        { teamLeadDeckBridge: isTeamLeadAgent(effectiveAgent(input.agent, input.args).agent) }",
     "      )",
     "    }",
     "  })"

@@ -63,7 +63,7 @@ import {
 } from './roadmap-service'
 import { validateReorderWaves } from './roadmap-reorder-validate'
 import { createSessionWithWorktree } from './create-session'
-import { isTeamLeadAgent } from './team-lead-bridge'
+import { effectiveAgent, isTeamLeadAgent } from './team-lead-bridge'
 import { composePlanImportPrompt } from './import-plan'
 import { collectDiff, collectFileDiff, composeDiffReviewPrompt } from './diff-service'
 import { clearReviewState, readReviewState, validatePersistedReview, writeReviewState } from './review-state-service'
@@ -1359,7 +1359,7 @@ export function registerIpc({
     // (see that handler above). A failure here must not block the batch from
     // opening at all, only mean the team-lead tile(s) in it open without the
     // bridge.
-    if (inputs.some((i) => isTeamLeadAgent(i.agent))) {
+    if (inputs.some((i) => isTeamLeadAgent(effectiveAgent(i.agent, i.args).agent))) {
       try {
         await ensureControlServer()
       } catch (e) {
@@ -1378,7 +1378,7 @@ export function registerIpc({
         getWorktreeInit(),
         undefined,
         undefined,
-        { teamLeadDeckBridge: isTeamLeadAgent(input.agent) }
+        { teamLeadDeckBridge: isTeamLeadAgent(effectiveAgent(input.agent, input.args).agent) }
       )
     }
     return inputs.length

@@ -43,7 +43,7 @@ import { gracefulClose } from './session-close'
 import { createOscParser, type OscSnapshot } from './detect/osc'
 import { createActivityTracker, ACTIVITY_IDLE_MS, type Activity } from './detect/activity'
 import { reportError } from './log'
-import { agentFromRestoredArgs, isTeamLeadAgent, resolveMcpConfig, type MintTeamLeadBridge } from './team-lead-bridge'
+import { effectiveAgent, isTeamLeadAgent, resolveMcpConfig, type MintTeamLeadBridge } from './team-lead-bridge'
 import { DEFAULT_PALETTE, paletteColor } from '@shared/palette'
 import { sanitizeRole } from '@shared/role'
 import { reconcileOrder } from '@shared/reorder'
@@ -588,12 +588,14 @@ export class SessionService extends EventEmitter {
     // through untouched.
     // Kept in team-lead-bridge.ts, a module with no @shared import, so it stays
     // testable under a plain bun test run.
+    const launched = effectiveAgent(agent, input.args)
     const mcpConfig = resolveMcpConfig(
       input,
-      agent,
+      sanitizeFlagValue(launched.agent ?? ''),
       opts?.teamLeadDeckBridge === true,
       this.mintTeamLeadBridge,
-      reportError
+      reportError,
+      launched.ambiguity
     )
     // Strict enum, like every other agent-/companion-reachable field that
     // reaches a command line: only the exact string requests the wrapper. It is
@@ -846,8 +848,15 @@ export class SessionService extends EventEmitter {
     // round-trip -- args is the only surviving signal, recovered through the
     // SAME isTeamLeadAgent predicate every other route decides the bridge with.
     for (const d of this.defs) {
-      const agent = agentFromRestoredArgs(d.args)
-      d.mcpConfig = resolveMcpConfig({}, agent ?? '', isTeamLeadAgent(agent), this.mintTeamLeadBridge, reportError)
+      const { agent, ambiguity } = effectiveAgent(undefined, d.args)
+      d.mcpConfig = resolveMcpConfig(
+        { name: d.name },
+        agent ?? '',
+        isTeamLeadAgent(agent),
+        this.mintTeamLeadBridge,
+        reportError,
+        ambiguity
+      )
     }
     for (const d of this.defs) {
       this.runtime.set(d.id, {

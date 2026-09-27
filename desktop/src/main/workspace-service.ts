@@ -36,7 +36,7 @@ import {
 } from './workspace-lock'
 import { fromWorkspaceSessions, joinArgs, toWorkspaceSessions } from './workspace-session-map'
 import { logWarn, reportError } from './log'
-import { agentFromRestoredArgs, isTeamLeadAgent } from './team-lead-bridge'
+import { effectiveAgent, isTeamLeadAgent } from './team-lead-bridge'
 
 /**
  * Whether a restore() caller has an operator at the desktop app who could
@@ -427,7 +427,7 @@ export class WorkspaceService {
   hasTeamLeadAgentSession(id: string): boolean {
     const ws = loadWorkspace(this.deps.projectDir, id)
     if (!ws) return false
-    return ws.sessions.some((s) => isTeamLeadAgent(agentFromRestoredArgs(joinArgs(s.args))))
+    return ws.sessions.some((s) => isTeamLeadAgent(effectiveAgent(undefined, joinArgs(s.args)).agent))
   }
 
   /**

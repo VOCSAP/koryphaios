@@ -15,6 +15,7 @@ import { TEAM_LEAD_DECK_TOOLS } from './supervisor'
 export interface TeamLeadBridgeInput {
   /** Already-trimmed, may be empty/undefined -- an explicit value always wins. */
   mcpConfig?: string
+  name?: string
 }
 
 export type MintTeamLeadBridge = () => { mcpConfig: string; callerId: string } | null
@@ -32,18 +33,63 @@ export function isTeamLeadAgent(agent: string | undefined): boolean {
   return agent === 'team-lead'
 }
 
+export interface EffectiveAgent {
+  agent: string | undefined
+  /** Set, with the reason, when a bridge is at stake and `args` cannot be read reliably; `agent` is then undefined. */
+  ambiguity?: string
+}
+
+const FLAG_TOKEN = /^--[a-z][a-z-]*$/
+// Unquoted values exclude brackets (a glob), a leading dash (a flag lookalike)
+// and a leading @ (a PowerShell splat).
+const BARE_VALUE_TOKEN = /^[A-Za-z0-9._:/][A-Za-z0-9._:@/-]*$/
+const QUOTED_VALUE_TOKEN = /^"[A-Za-z0-9._:@/[\]-]+"$/
+
+function isValueToken(token: string | undefined): token is string {
+  return token !== undefined && (BARE_VALUE_TOKEN.test(token) || QUOTED_VALUE_TOKEN.test(token))
+}
+
+function namesTeamLeadAsAgent(source: string): boolean {
+  const words = source.split(/\s+/)
+  return words.some((w, i) => i > 0 && words[i - 1] === '--agent' && isTeamLeadAgent(w.replace(/^"(.*)"$/, '$1')))
+}
+
 /**
- * Card 6363bd69: workspace restore is the one caller with no
- * CreateSessionInput.agent to read directly -- it only has the already-built
- * SessionDef.args string. Bounded to the EXACT shape `create()` writes
- * (`--agent "value"`, sanitizeFlagValue-restricted so `value` can never
- * itself contain a `"` or whitespace): returns undefined, never a guess, on
- * zero matches, on more than one (a hand-edited workspace file is untrusted
- * input), or on anything short of that exact quoted form.
+ * The agent the CLI will actually run: `args` is appended after the
+ * `--agent` built from `agent`, and the CLI keeps the LAST `--agent`, so the
+ * last `--agent` in `args` wins over `agent`. The text reading only matches
+ * the shell's when `args` is an allow-listed sequence of flags and simple
+ * values separated by single spaces; when a team-lead bridge is at stake (the
+ * agent field, or a word right after an --agent, is team-lead), any other
+ * shape yields an ambiguity instead of a guess.
+ * A consistency check on text, not a security barrier: the barrier is the
+ * shell-field approval every non-empty args goes through.
  */
-export function agentFromRestoredArgs(args: string): string | undefined {
-  const matches = [...args.matchAll(/(?:^|\s)--agent "([^"\s]+)"(?=\s|$)/g)]
-  return matches.length === 1 ? matches[0]?.[1] : undefined
+export function effectiveAgent(agent: string | undefined, args: string | undefined): EffectiveAgent {
+  const source = (args ?? '').trim()
+  if (!source) return { agent }
+  const bridgeAtStake = isTeamLeadAgent(agent) || namesTeamLeadAsAgent(source)
+  const refuse = (reason: string): EffectiveAgent =>
+    bridgeAtStake ? { agent: undefined, ambiguity: `args ${reason}` } : { agent: undefined }
+
+  const tokens = source.split(' ')
+  if (!tokens.every((t) => FLAG_TOKEN.test(t) || isValueToken(t))) {
+    return refuse('are not a plain sequence of flags and simple values')
+  }
+  let resolved = agent
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] === '--agents') return refuse('contain --agents, which can redefine an agent profile')
+    if (tokens[i] !== '--agent') continue
+    // The arity of the preceding flag is unknown here: the CLI may take this
+    // --agent as that flag's value.
+    if (i > 0 && FLAG_TOKEN.test(tokens[i - 1]!)) {
+      return refuse('contain an --agent right after another flag, which may consume it as its value')
+    }
+    const value = tokens[i + 1]
+    if (!isValueToken(value)) return refuse('contain an --agent not followed by a simple value')
+    resolved = value.startsWith('"') ? value.slice(1, -1) : value
+  }
+  return { agent: resolved }
 }
 
 /**
@@ -74,11 +120,22 @@ export function resolveMcpConfig(
   sanitizedAgent: string,
   marker: boolean,
   mint: MintTeamLeadBridge,
-  report: (scope: string, message: string, error?: unknown) => void
+  report: (scope: string, message: string, error?: unknown) => void,
+  ambiguity?: string
 ): string | undefined {
   const explicit = input.mcpConfig?.trim() || undefined
   if (explicit) return explicit
-  if (!wantsTeamLeadBridge(input, sanitizedAgent, marker)) return undefined
+  const sessionName = input.name?.trim() || 'unnamed session'
+  if (ambiguity) {
+    report('session', `team-lead deck-control bridge refused for ${sessionName}: ${ambiguity}`)
+    return undefined
+  }
+  if (!wantsTeamLeadBridge(input, sanitizedAgent, marker)) {
+    if (isTeamLeadAgent(sanitizedAgent) && !marker) {
+      report('session', `team-lead deck-control bridge refused for ${sessionName}: trusted marker is absent`)
+    }
+    return undefined
+  }
   try {
     const bridge = mint()
     if (bridge) return bridge.mcpConfig

@@ -219,7 +219,7 @@ endroit à toucher.
 `session-service.ts`, composition de `sessionEnv` dans le chemin de spawn :
 `Object.assign(sessionEnv, { CLAUDE_PEERS_ASK_OPERATOR_TOOL: ... })` si et
 seulement si `def.supervisor === true` OU
-`isTeamLeadAgent(agentFromRestoredArgs(def.args))` (`team-lead-bridge.ts`, le
+`isTeamLeadAgent(effectiveAgent(undefined, def.args).agent)` (`team-lead-bridge.ts`, le
 prédicat qui décide déjà le pont team-lead). Sinon la clé est OMISE, jamais
 `''` (même règle que `CLAUDE_PEERS_TOOLS`). Même forme `Object.assign` que
 `CLAUDE_PEERS_TOOLS` : le test structurel de `startPty()`
@@ -411,7 +411,7 @@ Commande : `bun test tests/approval-hook.test.ts`.
 - `desktop/src/main/session-env.ts` : `ASK_OPERATOR_TOOL_ENV`,
   `askOperatorToolName()`, et le prédicat pur
   `tileCarriesAskOperator(def: { supervisor?: boolean; args?: string })`
-  (superviseur OU team-lead par `agentFromRestoredArgs` + `isTeamLeadAgent`).
+  (superviseur OU team-lead par `effectiveAgent` + `isTeamLeadAgent`).
 - `session-service.ts` : `Object.assign` conditionnel dans `sessionEnv`.
 - `desktop/hooks/ask-operator-redirect-hook.ts` : `parseHookPayload`,
   `resolveRedirectTool(env): string | null` (regex), `buildDecision(payload,
