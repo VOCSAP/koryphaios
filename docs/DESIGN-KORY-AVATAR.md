@@ -395,9 +395,13 @@ qui ne sont que les etats 2, 4 et le cerveau :
   message du broker est la cle commune, le `group_id` la qualifie (deux
   Decks, deux groupes, jamais de collision d'id inter-groupes puisque l'id est
   global au broker, mais le message n'appartient qu'a un groupe).
-- **Demander** : champ texte libre, reponse en bulle, historique de la
-  session du cerveau en dessous. Une commande `/` minimale : `/decks`,
-  `/focus <deck>`, `/quiet 1h`.
+- **Demander** : un selecteur de Deck (label + projet, ou « tous »), un
+  champ texte libre, la reponse en bulle. **Sans cerveau**, le texte est
+  relaye a l'INTERLOCUTEUR du Deck choisi (§4.5) et la bulle affiche en
+  fil, sous la question, les messages que cet interlocuteur adresse ensuite a
+  `operator`. **Avec cerveau** (lot B1), le cerveau choisit lui-meme les
+  Decks a interroger, attend leurs reponses et synthetise. Une commande `/`
+  minimale : `/decks`, `/focus <deck>`, `/quiet 1h`.
 
 `Echap` ou un clic ailleurs referme la bulle ; l'avatar seul reste.
 
@@ -428,6 +432,61 @@ deja la :
   Deck reclame. Le compteur dans le titre de l'icone (tooltip) et
   `setBadgeCount` la ou l'OS le supporte.
 
+### 4.5 Le dialogue avec un Deck : le superviseur et le team-lead sont les interlocuteurs
+
+**DECIDE (operateur, 2026-09-27).** L'avatar porte la voix de l'operateur vers
+chaque Deck et en rapporte les nouvelles, pour deux gestes : **interroger**
+(« ou en est le travail sur kleos ? ») et **instruire** (« on fait une pause,
+arrete le travail »). Ses interlocuteurs sont **le superviseur et le
+team-lead** du Deck, pas les autres peers. Ce n'est pas une interdiction
+gardee par un guard : c'est la definition de qui est LEGITIME dans le dialogue
+operateur / avatar, comme le superviseur est aujourd'hui le seul a qui le Deck
+adresse ses acks de spawn et le team-lead le seul a qui il dispatche. L'UI
+n'offre donc que ces cibles, et les outils du cerveau prennent un `deck`,
+jamais un `peer_id`.
+
+**Le canal existe deja, et il est deja du bon cote du jeton lecture seule.**
+- Descendant (operateur -> interlocuteur) : `POST /announce` cible
+  (`sendAnnounce` avec `toPeerId`, `broker-client.ts`), le meme appel que
+  `announceToSupervisor` et `announceToLead` dans `index.ts`, authentifie par
+  `group_id` + secret que l'avatar detient depuis le branchement. Aucun appel
+  entrant sur le Deck.
+- Montant (interlocuteur -> operateur) : l'agent repond par
+  `send_message('operator')`, qui tombe dans l'inbox du groupe ; l'avatar la
+  lit par son curseur. La reponse est **aussi** visible dans l'inbox du Deck,
+  ce qui est voulu : l'operateur a parle depuis l'avatar, le Deck en garde la
+  trace.
+- **Qui est l'interlocuteur** : le Deck le sait (`s.supervisor`, `s.lead` sur
+  ses tuiles ; la resolution de `announceToLead` : le team-lead designe, a
+  defaut l'unique session active) et le pousse dans son etat de branchement
+  `{supervisor_peer_id, lead_peer_ids}`. L'avatar ne resout jamais un peer
+  lui-meme (il n'est pas un peer, `/list-peers` lui est ferme, `/admin/peers`
+  exige un token). Regle de choix : une QUESTION va au superviseur (il a
+  `deck_list_agents` et la vue globale du Deck), une INSTRUCTION de travail va
+  au team-lead quand il existe, sinon au superviseur ; l'operateur peut forcer
+  la cible.
+
+**Cadrage du message.** Comme tout ce que le Deck envoie a un agent, le texte
+libre de l'operateur est enveloppe par une CONSTANTE de code (regle C8), par
+exemple : « Operator message relayed by the Kory avatar. Reply to the
+operator with send_message('operator'); an instruction from the operator is
+consent. » Le texte de l'operateur n'est jamais interpole dans autre chose
+qu'un corps de message (entree hostile n°4 : il traverse le broker en JSON,
+jamais une ligne de commande ni un script).
+
+**Correlation question / reponse.** Aucun identifiant n'est impose a l'agent :
+la bulle affiche, sous la question, les messages de CET interlocuteur recus
+APRES elle, dans ce groupe. C'est le regime pauvre assume ; une correlation
+textuelle (`[avatar:xxxx]` a echoer) serait un capteur textuel de plus et
+l'agent peut l'oublier. Le fil par Deck suffit a l'usage decrit.
+
+**Consequence sur le cerveau (lot B1).** Il n'est plus le seul moyen de
+repondre a « ou en est kleos ? » : sans lui, l'operateur choisit le Deck et
+pose la question au superviseur, qui repond. Le cerveau n'apporte que le
+ROUTAGE (« kleos » -> le Deck dont le label ou le projet correspond) et la
+SYNTHESE quand plusieurs Decks sont interroges. Il descend d'un cran dans les
+priorites ; le dialogue relaye devient le lot A4.
+
 ---
 
 ## 5. Cas d'usage supplementaires, vus de la chaise de l'operateur
@@ -440,9 +499,12 @@ deja la :
    mon texte. La fenetre Kory n'a jamais pris le focus.
 3. **Trier plusieurs demandes d'un coup.** Trois Decks, cinq questions ; la
    bulle les enfile par Deck, je les traite en sequence, le compteur descend.
-4. **« Ou en est-on ? »** Question libre au cerveau ; il appelle
-   `deck_list_agents` sur chaque Deck et repond en trois lignes. Sans cerveau
-   (lot A), le meme clic droit donne la version tabulaire.
+4. **« Ou en est-on sur kleos ? »** Je choisis le Deck kleos dans la bulle,
+   je pose la question ; le superviseur de ce Deck repond dans le fil. Avec
+   le cerveau, je tape la phrase telle quelle et il trouve le Deck.
+4b. **« On fait une pause, arretez. »** Meme bulle, cible « tous » : chaque
+   team-lead (a defaut le superviseur) recoit l'instruction et fait ce que sa
+   regle de consentement lui permet ; les reponses arrivent Deck par Deck.
 5. **Reprendre la main sur un Deck precis** depuis le tray, sans chercher la
    fenetre derriere dix autres.
 6. **Partage d'ecran / demo.** Un mode « discret » : l'avatar masque le
@@ -453,9 +515,10 @@ deja la :
    est morte avant de partir.
 8. **Un poste, deux comptes OS.** Chaque compte a son avatar (repertoire
    d'etat par utilisateur, rien a coder : precedent `operator.json`).
-9. **Le superviseur local reste le pilote.** L'avatar ne spawne rien ; s'il
-   faut agir, il ANNONCE au superviseur du Deck concerne (`deck_announce`),
-   qui garde la regle de consentement. Un seul cerveau decide par Deck.
+9. **Le superviseur local reste le pilote.** L'avatar ne spawne rien ; il
+   RELAIE la voix de l'operateur au superviseur ou au team-lead du Deck
+   concerne (§4.5), qui gardent leur regle de consentement. Un seul cerveau
+   decide par Deck.
 
 ---
 
@@ -463,10 +526,12 @@ deja la :
 
 1. **Savoir qui je suis** : un `avatar_id` minte par lancement, un port, un
    jeton, publies dans `avatar.json` ; savoir que je suis SEUL (verrou `wx`).
-2. **Savoir qui est branche** : pour chaque Deck `{deck_id minte par
-   lancement, label, project_key, group_id, pid, deck_control_url, jeton
-   restreint}` ; un battement de coeur ou une probe pid pour savoir qu'il vit
-   encore ; un detachement explicite a sa sortie (`before-quit.ts`).
+2. **Savoir qui est branche, et a qui parler** : pour chaque Deck `{deck_id
+   minte par lancement, label, project_key, group_id, pid, deck_control_url,
+   jeton restreint}` plus, dans chaque etat pousse, `{supervisor_peer_id,
+   lead_peer_ids}` (§4.5) ; un battement de coeur ou une probe pid pour
+   savoir qu'il vit encore ; un detachement explicite a sa sortie
+   (`before-quit.ts`).
 3. **Recevoir les etats sans les deviner** : les compteurs d'activite pousses
    par le Deck sur changement ; la liste `pending` des approbations par
    `project_key` ; le Courrier par curseur propre. Aucun octet de PTY, aucun
@@ -584,7 +649,21 @@ nommes ; les tests exigibles aussi.
   avatar sans le marquer `seen` ; un `seen` avatar ne produit AUCUN message
   vers le Deck.
 
-### Lot B1 : le cerveau
+### Lot A4 : le dialogue relaye (§4.5)
+
+- Onglet « Demander » sans cerveau : selecteur de Deck (ou « tous »), envoi
+  par `/announce` cible sous l'enveloppe constante `AVATAR_RELAY_TEXT`,
+  choix superviseur / team-lead selon question ou instruction, fil des
+  reponses de l'interlocuteur par Deck.
+- Cote Deck : `supervisor_peer_id` et `lead_peer_ids` dans l'etat pousse,
+  recalcules a chaque changement de tuile (spawn, exit, designation d'un lead).
+- Tests : la cible resolue pour `{question, instruction} x {lead present, lead
+  absent, aucune session}` ; un texte d'operateur contenant des guillemets, des
+  retours a la ligne et une sequence `$(...)` arrive intact dans le corps JSON
+  et nulle part ailleurs ; un Deck sans interlocuteur affiche « personne a qui
+  parler dans ce Deck » plutot qu'un envoi silencieux perdu.
+
+### Lot B1 : le cerveau (routage et synthese)
 
 - `avatar-brain.ts` : spawn via la chaine `model-adapters.ts` (cible
   `config.avatarTarget`, `sanitizeUtilityTarget`, `excludeKinds bridge`),
@@ -593,7 +672,11 @@ nommes ; les tests exigibles aussi.
   `--input-format stream-json`.
 - Pont `avatar-control-mcp.ts` derive de `deck-control-mcp.ts`, outils
   `avatar_list_decks`, `avatar_deck_call(deck, tool, args)` (allow-list
-  re-verifiee cote avatar PUIS cote Deck), `avatar_inbox_list`.
+  re-verifiee cote avatar PUIS cote Deck), `avatar_inbox_list`,
+  `avatar_ask_deck(deck, text)` et `avatar_instruct_deck(deck, text)` qui
+  empruntent le relais du lot A4 (superviseur pour l'un, team-lead pour
+  l'autre) et attendent la premiere reponse de l'interlocuteur avec un delai
+  borne. Aucun outil ne prend un `peer_id`.
 - Bulle « Demander », « ... » pendant le tour, erreurs visibles (timeout,
   fournisseur absent, quota). **Desactive par defaut** (DECIDE, 2026-09-27) :
   l'onglet affiche le texte de §3.1 et le reglage qui l'active.
@@ -637,6 +720,10 @@ reponse. Chacune est reportee a l'endroit du document qu'elle tranche.
    NON CONFIRMEE et ne change pas la posture (§3.1 point 4).
 6. **Personnage** : le masque du coryphee ; d'autres peaux plus tard, d'ou la
    separation etats / rendu exigee des le lot A2 (§7).
+7. **Interlocuteurs** : l'avatar interroge et instruit le superviseur et le
+   team-lead de chaque Deck, jamais les autres peers ; legitimite du dialogue,
+   pas interdiction gardee. Canal : `/announce` cible descendant, inbox
+   `operator` montant, interlocuteurs pousses par le Deck (§4.5, lot A4).
 
 Reste ouvert, a mesurer au lot 0 : transparence et always-on-top sur le poste
 (Linux, Windows) ; auto-compaction d'un `claude -p --input-format
