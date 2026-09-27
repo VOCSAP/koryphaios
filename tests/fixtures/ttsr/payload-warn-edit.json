@@ -1,0 +1,10 @@
+{
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Edit",
+  "cwd": "/project",
+  "tool_input": {
+    "file_path": "/project/src/b.ts",
+    "old_string": "log(x)",
+    "new_string": "console.error('debug', x)"
+  }
+}

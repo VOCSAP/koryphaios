@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "no-secret",
+      "event": "PreToolUse",
+      "tools": ["Write"],
+      "field": "added",
+      "pattern": "SECRET_TOKEN",
+      "mode": "deny",
+      "message": "Do not write SECRET_TOKEN into a file: read it from the environment instead.",
+      "source": "kory",
+      "qualifiedId": "kory/no-secret"
+    },
+    {
+      "id": "no-console-error",
+      "event": "PreToolUse",
+      "tools": ["Edit"],
+      "field": "added",
+      "pattern": "console\\.error\\(",
+      "mode": "warn",
+      "message": "Use the project logger instead of console.error.",
+      "source": "repo",
+      "qualifiedId": "repo/no-console-error"
+    }
+  ]
+}

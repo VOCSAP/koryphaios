@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "id": "typo-field",
+      "event": "PreToolUse",
+      "tools": ["Write"],
+      "field": "added",
+      "patern": "oops",
+      "mode": "deny",
+      "message": "This rule has a typo'd field name and must be rejected in bloc.",
+      "source": "repo",
+      "qualifiedId": "repo/typo-field"
+    }
+  ]
+}

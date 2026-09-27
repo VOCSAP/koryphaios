@@ -43,6 +43,7 @@
     "../shared/logger.ts",
     "hooks/**/*.ts",
     "mcp/**/*.ts",
-    "scripts/win-verify/**/*.ts"
+    "scripts/win-verify/**/*.ts",
+    "cli/**/*.ts"
   ]
 }

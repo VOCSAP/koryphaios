@@ -245,9 +245,17 @@ test("Object.hasOwn behavior: a prototype-chain tool_name (toString) is treated 
 
 test("hooks.json's PreToolUse matcher set equals the .ts source's TOOL_TEXT_FIELDS key set", () => {
   const hooksJson = JSON.parse(readFileSync(HOOKS_JSON, "utf-8")) as {
-    hooks: { PreToolUse?: Array<{ matcher: string }> };
+    hooks: { PreToolUse?: Array<{ matcher: string; hooks: Array<{ command: string }> }> };
   };
-  const matcherSet = new Set((hooksJson.hooks.PreToolUse ?? []).map((e) => e.matcher));
+  // Scoped to entries that actually run roadmap-guard-hook: hooks.json's
+  // PreToolUse list also carries other hooks (e.g. the TTSR hook's own
+  // Edit|MultiEdit|Write|NotebookEdit|Bash entry) that this cross-check has
+  // nothing to say about.
+  const matcherSet = new Set(
+    (hooksJson.hooks.PreToolUse ?? [])
+      .filter((e) => e.hooks.some((h) => h.command.includes("roadmap-guard-hook")))
+      .map((e) => e.matcher)
+  );
 
   const src = readFileSync(HOOK_TS, "utf-8");
   const declMatch = /const TOOL_TEXT_FIELDS[^{]*\{/.exec(src);
