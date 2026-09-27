@@ -11,7 +11,9 @@ mesurable. Les decisions qui reviennent a l'operateur sont listees en §10.
 
 Etiquettes : **MESURE** (commande executee, sortie citee), **DEDUIT** (lu
 dans le code, chemin + symbole), **PROPOSE** (choix de l'architecte, a
-ratifier), **NON CONFIRME** (aucune source fiable en session).
+ratifier), **DECIDE (operateur, 2026-09-27)** (tranche par l'operateur en
+reponse aux six questions de §10), **NON CONFIRME** (aucune source fiable
+en session).
 
 Vocabulaire : un **Deck** est une fenetre Kory (un processus Electron, un
 `group_id`, un superviseur). L'**avatar** est le processus unique du poste
@@ -177,7 +179,13 @@ Consequences, par ordre de certitude :
    inference), et elle est **facultative** : l'avatar rend tout son service
    d'affichage et d'inbox sans cerveau (§7, lot A1/A2).
 4. **OpenAI / autres** : aucune information confirmee en session sur les
-   conditions d'OpenAI pour un usage equivalent de `codex exec`. La chaine
+   conditions d'OpenAI pour un usage equivalent de `codex exec`. L'operateur
+   rapporte qu'OpenAI tolererait l'usage de ses abonnements dans OpenClaw ;
+   ce n'est **NON CONFIRME** par aucune source lue ici, et une tolerance
+   accordee a un produit tiers ne s'etend pas d'elle-meme a un autre. Le
+   brief garde donc la meme posture pour les deux fournisseurs : le binaire
+   officiel (`claude`, `codex`) lance par l'operateur, jamais l'API sous
+   abonnement. La chaine
    `model-providers` existante permet de cibler `codex`, `gemini`, ou un
    endpoint local par cle API ; le cerveau de l'avatar doit passer par cette
    chaine (`config.<x>Target`, `sanitizeUtilityTarget`) plutot que d'inventer
@@ -206,10 +214,17 @@ consequences de conception :
 - **Le cerveau parle a chaque Deck avec un jeton RESTREINT** minte par ce Deck
   (`mintCaller('avatar', allowedTools)`), jamais le jeton historique du
   superviseur local. La liste blanche est fixee cote Deck : le Deck decide ce
-  que l'avatar peut faire chez lui, l'avatar ne peut pas l'elargir. Un premier
-  perimetre : lecture (`deck_list_agents`, `deck_list_sessions`), `deck_announce`
-  vers le superviseur local, et rien de destructif (`deck_close_session`,
-  `deck_remove_worktree` exclus) tant que l'operateur n'a pas ouvert le cran.
+  que l'avatar peut faire chez lui, l'avatar ne peut pas l'elargir.
+  **DECIDE (operateur, 2026-09-27)** : le jeton est **lecture seule**
+  (`deck_list_agents`, `deck_list_sessions`, `deck_list_worktrees`,
+  `deck_list_templates`, `deck_list_models`, `deck_list_presets`), aucun
+  outil qui spawne, ferme, ecrit ou annonce. Consequence verifiee : l'avatar
+  n'a pas besoin d'ecrire chez le Deck pour rendre son service. Repondre a un
+  agent passe par le broker (`/announce` cible, l'avatar detient le secret du
+  groupe depuis le branchement) ; regler une approbation ou une question
+  `ask_operator` passe par `/approval/claim` avec la cle operateur ; mettre
+  une fenetre Deck au premier plan est une COMMANDE que le Deck vient
+  CHERCHER (§4.4), jamais un appel entrant sur `deck-control`.
 - **Compaction et contexte** : NON CONFIRME que l'auto-compaction du CLI
   s'applique en mode `--print` longue duree. A mesurer au lot B1 ; le repli
   est un `--resume` + `--fork-session` quand la session depasse un seuil de
@@ -246,8 +261,8 @@ l'etre, meme asymetrie que `mobileApprovals`). Chaque element affiche par
 l'avatar porte l'etiquette de son Deck (label + `project_key`, le badge
 `host · project` de `notify/format.ts` existe deja pour cela).
 
-Ce point est **la premiere question de §10** : sans cette ratification, le
-lot A2 (inbox agregee) ne doit pas demarrer.
+**DECIDE (operateur, 2026-09-27)** : lecture ratifiee. L'avatar est un objet
+MACHINE ; le Deck reste isole et ephemere ; le branchement est le geste.
 
 ### 3.5 « Lance au demarrage d'une session Kory » : qui possede l'avatar ?
 
@@ -258,9 +273,11 @@ utilisateur OS, decouvert et lance sur le modele exact du broker loopback
 6 s). Fichier de rendez-vous `avatar.json` `{pid, port, token}` dans le
 repertoire d'etat MACHINE, cree en `wx` avec reprise sur pid mort (le
 protocole de `config.json.lock` existe deja). Le premier Deck le lance, les
-suivants s'y branchent. L'avatar **survit** a la fermeture d'un Deck ; il se
-ferme depuis le tray, ou de lui-meme quand le dernier Deck se detache SI le
-reglage `avatar.stayAlone` est faux (§10).
+suivants s'y branchent. **DECIDE (operateur, 2026-09-27)** : l'avatar
+**survit** a la fermeture du dernier Deck et ne se ferme que depuis le tray
+(ou par la fin de session OS). Seul, il prend l'etat « Seul » de §4.2 (yeux
+entierement fermes, orchestra vide), qui le distingue d'« Endormi » (des
+Decks branches, aucun agent au travail).
 
 Choix du conteneur : **Electron** (fenetre transparente sans cadre,
 `alwaysOnTop`, `skipTaskbar`, `Tray`, `Notification`), embarque dans le meme
@@ -328,7 +345,8 @@ visage.
 | 3 | **Perdu** (niveau B) | masque tragique, une pastille grise avec `warning` ; pour un quota, une `clepsydra` | tuile `exited` non voulue ; `rateLimited` | relance de la tuile ; `resumeAt` atteint et tuile repartie | ambre `#e0b341` (quota), violet `#b678ff` (perdu) |
 | 4 | **Courrier** (niveau C) | expression neutre, badge caducee avec compteur | messages inbox non lus (curseur avatar) | lecture depuis la bulle, ou `seen` propage par le Deck | accent `--accent` |
 | 5 | **Travaille** | yeux qui parcourent, respiration reguliere, pastilles qui pulsent en rythme avec leur agent | compteur `working > 0` d'au moins un Deck | `working == 0` partout pendant `ACTIVITY_IDLE_MS` | vert `#3ec46d` sur les pastilles |
-| 6 | **Endormi** | yeux fermes, respiration lente, orchestra a peine visible | `working == 0` partout, aucun etat 1-4 | tout ce qui precede | `--fg-dim` |
+| 6 | **Endormi** | yeux mi-clos, respiration lente, orchestra a peine visible (les choreutes sont la, ils attendent) | `working == 0` partout, aucun etat 1-4, au moins un Deck branche | tout ce qui precede | `--fg-dim` |
+| 7 | **Seul** | yeux **entierement fermes**, aucune respiration, orchestra VIDE, masque legerement incline | aucun Deck branche (**DECIDE**, 2026-09-27) | un `attach` | `--fg-dim`, plus sombre qu'Endormi |
 | -- | **Accompli** (transitoire, 3 s) | laurier qui apparait et s'efface | une carte de roadmap passe `done` par un agent ; un lot se termine | minuterie (transitoire, PAS un etat : R2 ne s'applique pas a un ornement) | or, mais un ORNEMENT, pas un halo : ne pas confondre avec « Reclame » |
 | -- | **Reflechit** (bulle) | « ... » anime DANS la bulle, jamais sur le visage | un tour du cerveau en cours | fin du tour, erreur, ou annulation | accent |
 
@@ -357,10 +375,26 @@ qui ne sont que les etats 2, 4 et le cerveau :
   dans le PTY comme aujourd'hui. Pour une question `ask_operator`, la reponse
   suit `announceTo` du Deck proprietaire via son `deck-control`. Le composant
   de rendu est celui de `InboxPanel.tsx`, elargi ; on ne reinvente pas l'UI.
-- **Courrier** : les messages des agents, memes gestes `seen`/`acked`, mais
-  l'acquittement de l'avatar ne propage PAS au Deck (deux curseurs, deux
-  journaux ; un « lu ici » n'est pas un « lu la-bas » : afficher les deux
-  etats plutot que les fusionner). Question ouverte §10.
+- **Courrier** : les messages des agents, memes gestes `seen`/`acked`.
+  **DECIDE (operateur, 2026-09-27)** : un message LU dans l'avatar n'est pas
+  lu dans le Deck (deux curseurs, deux journaux, `seen`/`acked` ne
+  traversent pas) ; en revanche une **REPONSE** donnee d'un cote fait
+  disparaitre la notification des deux cotes. Trois cas, trois mecanismes :
+  - une approbation ou une question `ask_operator` : deja vrai par
+    construction, `claim` la sort de `pending` broker-side et les deux
+    lecteurs le voient au poll suivant ;
+  - un message de Courrier repondu DANS LE DECK (`announceTo`) : le Deck
+    pousse `{replied: <message id>}` a l'avatar sur le protocole de
+    branchement, l'avatar retire le message de son compteur (il reste lisible
+    dans l'onglet, marque « repondu depuis <deck> ») ;
+  - un message repondu DANS L'AVATAR (`/announce` cible via le secret du
+    groupe) : l'avatar publie `{replied: <message id>}` dans le flux de
+    commandes que le Deck vient chercher (§4.4), le Deck marque l'entree
+    `acked` avec la mention « repondu depuis l'avatar ».
+  `replied` est donc le SEUL etat qui traverse, dans les deux sens ; l'id de
+  message du broker est la cle commune, le `group_id` la qualifie (deux
+  Decks, deux groupes, jamais de collision d'id inter-groupes puisque l'id est
+  global au broker, mais le message n'appartient qu'a un groupe).
 - **Demander** : champ texte libre, reponse en bulle, historique de la
   session du cerveau en dessous. Une commande `/` minimale : `/decks`,
   `/focus <deck>`, `/quiet 1h`.
@@ -375,9 +409,13 @@ deja la :
 - Afficher / masquer l'avatar ; **premier plan** (bascule `alwaysOnTop`) ;
   **quitter**.
 - **Un sous-menu par Deck branche** : label, projet, compteur
-  travaille/reclame ; cliquer **met la fenetre du Deck au premier plan**
-  (nouvel appel `deck-control` `focus_window`, ou le Deck expose un
-  `show()` sur le protocole de branchement).
+  travaille/reclame ; cliquer **met la fenetre du Deck au premier plan**.
+  Le jeton `deck-control` etant lecture seule, la commande ne rentre pas par
+  la : le Deck tient une connexion sortante vers l'avatar (WebSocket ou
+  long-poll sur l'endpoint de branchement) et y recoit un flux de commandes
+  qu'il a CONSENTIES a l'attache (`focus`, `replied`), enumere par une
+  pick-list cote Deck. L'avatar ne peut rien demander qui ne soit dans cette
+  liste.
 - **Ne pas deranger** 30 min / 1 h / jusqu'a demain : gele les rebonds et
   le halo, PAS les compteurs (R2 : l'etat reste visible, il cesse de bouger).
 - **Verrouiller la position** / **taille** (S, M, L) / **opacite au repos**.
@@ -453,6 +491,13 @@ deja la :
 
 ## 7. Autres axes
 
+- **D'autres personnages plus tard** (**DECIDE**, 2026-09-27 : le masque
+  d'abord, d'autres « peaux » ensuite). Consequence de structure des le lot
+  A2 : la machine d'etats (`shared/avatar-state.ts`, pure) ne connait aucun
+  dessin ; un personnage est un module de RENDU qui recoit `AvatarState` et
+  rien d'autre. Un second personnage ne touche ni les etats, ni le
+  protocole, ni le tray. Un test exige que chaque peau rende les huit etats
+  de §4.2 (couverture, pas seulement sensibilite).
 - **Une v0 sans personnage** : le protocole de branchement + le tray seul
   (icone a etat, sous-menu par Deck, compteurs) livre deja les cas 1, 5 et 7
   de §5. Il permet de valider le protocole et l'agregation avant un pixel de
@@ -498,15 +543,19 @@ nommes ; les tests exigibles aussi.
   loopback `POST /attach|/detach|/state` (Bearer, JSON, tailles bornees,
   `deck_control_url` re-valide loopback-only : entree hostile n°3).
 - Cote Deck : `ensureAvatar()` au demarrage sur le modele de
-  `ensureLoopbackBroker` ; `mintCaller('avatar', ALLOW_LIST)` ;
-  pousser les compteurs d'activite (derives de `SessionRuntime`, pur et
-  teste) ; `detach` dans `before-quit.ts` ; reglages `avatar.autoAttach`
-  (global) / opt-out projet.
+  `ensureLoopbackBroker` ; `mintCaller('avatar', AVATAR_READONLY_TOOLS)`
+  (constante code, outils `deck_list_*` seulement) ; pousser les compteurs
+  d'activite (derives de `SessionRuntime`, pur et teste) ; ouvrir la
+  connexion sortante qui recoit les commandes consenties (`focus` en A1,
+  `replied` en A3), pick-list `AVATAR_COMMANDS` cote Deck ; `detach` dans
+  `before-quit.ts` ; reglages `avatar.autoAttach` (global) / opt-out projet.
 - Tray : icone a etat, sous-menu par Deck, DND, quitter. Aucune animation.
 - Tests : pur `shared/avatar-state.ts` (agregation + priorite des etats, R1/R2
-  : un Deck muet devient suspect, jamais efface) ; `desktop-state-scope`
-  classe `avatar.json` et `avatar-settings.json` en MACHINE ; allow-list
-  du jeton `avatar` enumeree par un test qui rejette les outils destructifs.
+  : un Deck muet devient suspect, jamais efface ; zero Deck = « Seul », pas
+  « Endormi ») ; `desktop-state-scope` classe `avatar.json` et
+  `avatar-settings.json` en MACHINE ; `AVATAR_READONLY_TOOLS` compare a la
+  liste des 18 outils par un test qui refuse tout nom ne commencant pas par
+  `deck_list_` ; une commande hors `AVATAR_COMMANDS` est rejetee et tracee.
 - Skills : `add-deck-view` (canal IPC), `error-reporting`.
 
 ### Lot A2 : le personnage et les etats
@@ -517,19 +566,23 @@ nommes ; les tests exigibles aussi.
   respecte), les six etats + « Accompli », tooltips textuels.
 - Skill `deck-design` ; verifier §5 regle 8 (empreinte de patte).
 
-### Lot A3 : inbox agregee (bloque par §10 Q1)
+### Lot A3 : inbox agregee
 
 - L'avatar lit `POST /operator-inbox` par groupe avec son `session_id`, et
   `/approval/list` par `project_key` avec la cle operateur ; range par
   `group_id`.
 - Bulle « Reclame » et « Courrier » sur `InboxPanel.tsx` reutilise et elargi ;
-  `claim` par la cle operateur ; reponse `ask_operator` via le `deck-control`
-  proprietaire ; navigation entre elements ; suppression des toasts OS du Deck
-  quand l'avatar est visible.
+  `claim` par la cle operateur (approbations ET questions `ask_operator`) ;
+  reponse a un message de Courrier par `/announce` cible avec le secret du
+  groupe ; propagation `replied` dans les deux sens (§4.3) ; navigation
+  entre elements ; suppression des toasts OS du Deck quand l'avatar est
+  visible.
 - Tests : le tri par `group_id` avec deux Decks meme projet ; un `claim` 409
   (le telephone a gagne) rend la carte « reglee ailleurs » et ne reste pas
   `pending` a l'ecran ; aucun payload avatar->Deck ne porte le secret d'un
-  autre groupe.
+  autre groupe ; un `replied` recu du Deck retire le message du compteur
+  avatar sans le marquer `seen` ; un `seen` avatar ne produit AUCUN message
+  vers le Deck.
 
 ### Lot B1 : le cerveau
 
@@ -542,7 +595,8 @@ nommes ; les tests exigibles aussi.
   `avatar_list_decks`, `avatar_deck_call(deck, tool, args)` (allow-list
   re-verifiee cote avatar PUIS cote Deck), `avatar_inbox_list`.
 - Bulle « Demander », « ... » pendant le tour, erreurs visibles (timeout,
-  fournisseur absent, quota).
+  fournisseur absent, quota). **Desactive par defaut** (DECIDE, 2026-09-27) :
+  l'onglet affiche le texte de §3.1 et le reglage qui l'active.
 - Skill `model-providers`. Test : le prompt contient la clause « ne spawne
   jamais, delegue au superviseur local » ; la config MCP n'est jamais
   reecrite pendant la vie du processus.
@@ -564,22 +618,26 @@ nommes ; les tests exigibles aussi.
 
 ---
 
-## 10. Questions a l'operateur
+## 10. Decisions de l'operateur (2026-09-27)
 
-1. **Agregation vs isolation (bloquant pour A3).** Ratifier la lecture §3.4 :
-   le Deck reste isole, l'avatar est un objet MACHINE alimente par
-   branchement explicite, `autoAttach` global on / opt-out par projet ?
-2. **Vie de l'avatar** : se ferme quand le dernier Deck se detache, ou reste
-   (pour « ouvrir un Kory recent ») ? Proposition : reste, reglage
-   `avatar.stayAlone` on.
-3. **Acquittement croise** : un message lu dans la bulle est-il marque `seen`
-   dans le Deck (il faut un appel `deck-control`), ou les deux etats restent
-   distincts et affiches ? Proposition : distincts en A3, croise en B2 si le
-   besoin se confirme.
-4. **Perimetre du jeton `avatar`** : lecture + `deck_announce` + focus fenetre
-   seulement en v1 ? Proposition : oui.
-5. **Le cerveau par defaut** : `claude` (meme classe que l'aide et la
-   baguette), ou desactive tant que la question §3.1 point 3 n'est pas
-   tranchee par l'operateur en connaissance de cause ? Proposition : desactive
-   par defaut, activable dans Settings avec le texte de §3.1 affiche.
-6. **Le personnage** : masque du coryphee (propose) ou chouette ?
+Les six questions posees par la premiere version de ce brief, et leur
+reponse. Chacune est reportee a l'endroit du document qu'elle tranche.
+
+1. **Agregation vs isolation** : ratifie. Le Deck reste isole, l'avatar est
+   un objet MACHINE alimente par branchement explicite (§3.4).
+2. **Vie de l'avatar** : il survit au dernier Deck ; etat « Seul », yeux
+   entierement fermes (§3.5, §4.2 ligne 7).
+3. **Acquittement croise** : `seen`/`acked` ne traversent pas ; une REPONSE
+   donnee d'un cote eteint la notification des deux cotes (§4.3).
+4. **Jeton `deck-control` de l'avatar** : lecture seule, `deck_list_*`
+   uniquement ; toute action passe par le broker ou par le flux de commandes
+   que le Deck vient chercher (§3.2, §4.4).
+5. **Cerveau** : desactive par defaut, activable dans Settings avec le texte
+   de §3.1 (§8, lot B1). La tolerance OpenAI rapportee pour OpenClaw reste
+   NON CONFIRMEE et ne change pas la posture (§3.1 point 4).
+6. **Personnage** : le masque du coryphee ; d'autres peaux plus tard, d'ou la
+   separation etats / rendu exigee des le lot A2 (§7).
+
+Reste ouvert, a mesurer au lot 0 : transparence et always-on-top sur le poste
+(Linux, Windows) ; auto-compaction d'un `claude -p --input-format
+stream-json` longue duree ; lisibilite du masque a 120 px en monochrome.
