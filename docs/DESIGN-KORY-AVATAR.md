@@ -12,8 +12,12 @@ mesurable. Les decisions qui reviennent a l'operateur sont listees en §10.
 Etiquettes : **MESURE** (commande executee, sortie citee), **DEDUIT** (lu
 dans le code, chemin + symbole), **PROPOSE** (choix de l'architecte, a
 ratifier), **DECIDE (operateur, 2026-09-27)** (tranche par l'operateur en
-reponse aux six questions de §10), **NON CONFIRME** (aucune source fiable
-en session).
+reponse aux questions de §10), **NON CONFIRME** (aucune source fiable en
+session).
+
+Toute MESURE restant a faire (§8, lot 0) se fait **sur le poste de
+l'operateur**, jamais depuis une session cloud : la transparence, le tray, le
+compositeur, la cle operateur cote broker et le CLI installe sont ceux du PC.
 
 Vocabulaire : un **Deck** est une fenetre Kory (un processus Electron, un
 `group_id`, un superviseur). L'**avatar** est le processus unique du poste
@@ -219,14 +223,14 @@ consequences de conception :
   (`deck_list_agents`, `deck_list_sessions`, `deck_list_worktrees`,
   `deck_list_templates`, `deck_list_models`, `deck_list_presets`), aucun
   outil qui spawne, ferme, ecrit ou annonce. Consequence verifiee : l'avatar
-  n'a pas besoin d'ecrire chez le Deck pour rendre son service. Repondre a un
-  agent passe par le broker (`/announce` cible, l'avatar detient le secret du
-  groupe depuis le branchement) ; regler une approbation ou une question
+  n'a pas besoin d'ecrire chez le Deck pour rendre son service. Parler a un
+  agent passe par le broker (le peer `avatar` du groupe, §4.5, enregistre
+  avec le secret recu au branchement) ; regler une approbation ou une question
   `ask_operator` passe par `/approval/claim` avec la cle operateur ; mettre
   une fenetre Deck au premier plan est une COMMANDE que le Deck vient
   CHERCHER (§4.4), jamais un appel entrant sur `deck-control`.
 - **Compaction et contexte** : NON CONFIRME que l'auto-compaction du CLI
-  s'applique en mode `--print` longue duree. A mesurer au lot B1 ; le repli
+  s'applique en mode `--print` longue duree. A mesurer au lot 0 ; le repli
   est un `--resume` + `--fork-session` quand la session depasse un seuil de
   tours, exactement le geste de `session-command.ts` pour les tuiles.
 
@@ -238,7 +242,7 @@ inter-groupes. Trois architectures possibles :
 
 | | Principe | Ce que cela coute | Verdict |
 |---|---|---|---|
-| **A. Les Decks se branchent sur l'avatar** (ce que l'operateur decrit litteralement) | Chaque Deck, au demarrage, trouve l'avatar (ou le lance) et lui remet `{deck_id, label, project_key, group_id, secret, deck_control_url, jeton restreint}` sur un endpoint loopback authentifie. L'avatar lit l'inbox de chaque groupe avec **son propre curseur** (`session_id` distinct), les approbations par `project_key` avec la cle operateur, et recoit les etats d'activite POUSSES par le Deck. | Un protocole Deck<->avatar nouveau ; un secret de groupe qui quitte la memoire de son Deck pour celle de l'avatar (meme poste, meme utilisateur OS). | **PROPOSE.** Ne touche pas au broker, respecte « approbations locales », et le branchement est un ACTE (voir 3.4). |
+| **A. Les Decks se branchent sur l'avatar** (ce que l'operateur decrit litteralement) | Chaque Deck, au demarrage, trouve l'avatar (ou le lance) et lui remet `{deck_id, label, project_key, group_id, secret, deck_control_url, jeton restreint}` sur un endpoint loopback authentifie. L'avatar lit l'inbox de chaque groupe avec **son propre curseur** (`session_id` distinct), les approbations par `project_key` avec la cle operateur, et recoit les etats d'activite POUSSES par le Deck. | Un protocole Deck<->avatar nouveau ; un secret de groupe qui quitte la memoire de son Deck pour celle de l'avatar (meme poste, meme utilisateur OS). | **RETENU** (decisions 1 et 8). Ne touche au broker que pour le peer `avatar` (§4.5), respecte « approbations locales », et le branchement est un ACTE (voir 3.4). |
 | B. Route admin broker « tout voir » | Nouvelles routes gardees par `BROKER_TOKEN`. | Contredit l'isolation par groupe et la regle « pas de store broker pour approbations/notifications » ; en mode `remote`/`replica` exposerait a distance ce qui doit rester local ; force un token la ou il n'y en a pas. | Ecarte. |
 | C. L'avatar EST un Deck sans tuiles | Reutiliser `index.ts` avec un mode `--avatar`. | `index.ts` est monolithique (~3500 lignes), couple a la fenetre principale ; on heriterait de tout ce qu'un Deck fait (pollers, spawn du broker, etc.). | Ecarte en v1 ; garder la question d'un partage de MODULES (pas de processus). |
 
@@ -372,8 +376,9 @@ qui ne sont que les etats 2, 4 et le cerveau :
   compteur « 2 / 5 », les trois gestes existants (`allow` / `deny` /
   reponse texte) qui appellent `POST /approval/claim` avec la cle operateur
   MACHINE (comme le telephone), puis le Deck proprietaire livre le verdict
-  dans le PTY comme aujourd'hui. Pour une question `ask_operator`, la reponse
-  suit `announceTo` du Deck proprietaire via son `deck-control`. Le composant
+  dans le PTY comme aujourd'hui. Une question `ask_operator` EST une
+  approbation de kind `question` : le `claim` porte la reponse texte et
+  l'outil la rend a l'agent comme valeur de retour, sans frappe. Le composant
   de rendu est celui de `InboxPanel.tsx`, elargi ; on ne reinvente pas l'UI.
 - **Courrier** : les messages des agents, memes gestes `seen`/`acked`.
   **DECIDE (operateur, 2026-09-27)** : un message LU dans l'avatar n'est pas
@@ -387,19 +392,24 @@ qui ne sont que les etats 2, 4 et le cerveau :
     pousse `{replied: <message id>}` a l'avatar sur le protocole de
     branchement, l'avatar retire le message de son compteur (il reste lisible
     dans l'onglet, marque « repondu depuis <deck> ») ;
-  - un message repondu DANS L'AVATAR (`/announce` cible via le secret du
-    groupe) : l'avatar publie `{replied: <message id>}` dans le flux de
+  - un message repondu DANS L'AVATAR (`send_message` depuis le peer `avatar`
+    du groupe vers l'expediteur, §4.5 ; l'agent voit une reponse de
+    `avatar`) : l'avatar publie `{replied: <message id>}` dans le flux de
     commandes que le Deck vient chercher (§4.4), le Deck marque l'entree
-    `acked` avec la mention « repondu depuis l'avatar ».
+    `acked` avec la mention « repondu depuis l'avatar ». Tant que le peer
+    `avatar` n'est pas livre (lot A4), l'onglet Courrier de l'avatar est en
+    LECTURE SEULE : pas de bouton repondre, plutot qu'un relais par `/announce`
+    qui ferait parler le nom `deck`.
   `replied` est donc le SEUL etat qui traverse, dans les deux sens ; l'id de
   message du broker est la cle commune, le `group_id` la qualifie (deux
   Decks, deux groupes, jamais de collision d'id inter-groupes puisque l'id est
   global au broker, mais le message n'appartient qu'a un groupe).
 - **Demander** : un selecteur de Deck (label + projet, ou « tous »), un
   champ texte libre, la reponse en bulle. **Sans cerveau**, le texte est
-  relaye a l'INTERLOCUTEUR du Deck choisi (§4.5) et la bulle affiche en
-  fil, sous la question, les messages que cet interlocuteur adresse ensuite a
-  `operator`. **Avec cerveau** (lot B1), le cerveau choisit lui-meme les
+  envoye a l'INTERLOCUTEUR du Deck choisi depuis le peer `avatar` (§4.5) et
+  la bulle affiche en fil, sous la question, les messages que cet
+  interlocuteur adresse ensuite a `avatar`, pousses par le WebSocket.
+  **Avec cerveau** (lot B1), le cerveau choisit lui-meme les
   Decks a interroger, attend leurs reponses et synthetise. Une commande `/`
   minimale : `/decks`, `/focus <deck>`, `/quiet 1h`.
 
@@ -555,7 +565,7 @@ repondre a « ou en est kleos ? » : sans lui, l'operateur choisit le Deck et
 pose la question au superviseur, qui repond. Le cerveau n'apporte que le
 ROUTAGE (« kleos » -> le Deck dont le label ou le projet correspond) et la
 SYNTHESE quand plusieurs Decks sont interroges. Il descend d'un cran dans les
-priorites ; le dialogue relaye devient le lot A4.
+priorites ; le dialogue par le peer `avatar` est le lot A4.
 
 ---
 
@@ -606,10 +616,12 @@ priorites ; le dialogue relaye devient le lot A4.
    par le Deck sur changement ; la liste `pending` des approbations par
    `project_key` ; le Courrier par curseur propre. Aucun octet de PTY, aucun
    titre de terminal.
-4. **Pouvoir agir sur le bon objet** : la cle operateur pour `claim` ; le
-   `deck-control` du Deck proprietaire pour annoncer, repondre a un
-   `ask_operator`, mettre sa fenetre au premier plan. Toujours resoudre
-   l'OBJET (cette approbation, ce Deck) avant de verifier « puis-je agir sur
+4. **Pouvoir agir sur le bon objet** : la cle operateur pour `claim`
+   (approbations et questions `ask_operator`) ; le peer `avatar` du groupe
+   pour parler aux interlocuteurs et repondre a un message de Courrier ; le
+   flux de commandes consenties pour mettre une fenetre Deck au premier plan.
+   Jamais d'ecriture sur `deck-control`. Toujours resoudre l'OBJET (cette
+   approbation, ce Deck, ce groupe) avant de verifier « puis-je agir sur
    LUI » (CLAUDE.md, « what happens when there are two? »).
 5. **Un cerveau facultatif** : un processus `claude -p --input-format
    stream-json` (ou l'adaptateur d'un autre fournisseur), un prompt systeme
@@ -664,12 +676,34 @@ priorites ; le dialogue relaye devient le lot A4.
 Chaque lot est livrable et utile seul. Les skills du depot a lire sont
 nommes ; les tests exigibles aussi.
 
-### Lot 0 : decisions et mesures (pas de code)
+Ordre recommande : 0, A1, A2, A4, A3, B1, B2. A4 passe avant A3 parce que
+le bouton « repondre » du Courrier et l'onglet « Demander » reposent sur le
+peer `avatar` ; A3 livre avant A4 reste utile (lecture + `claim`) mais sans
+reponse au Courrier.
 
-- Ratifier §10. Mesurer la transparence/always-on-top sur le poste (Linux
-  compositeur, Windows clic-a-travers). Mesurer l'auto-compaction de
-  `claude -p --input-format stream-json` sur 50 tours. Dessiner le masque et
-  l'orchestra en monochrome a 120 px, tester les six etats a 2 m de l'ecran.
+### Lot 0 : mesures sur le poste de l'operateur (pas de code)
+
+Toutes ces mesures se font SUR LE PC, jamais depuis une session cloud.
+
+- **Cle operateur cote broker** : `operator.json` existe-t-il sur le poste, et
+  `approval_operators` connait-il sa cle publique sans que les approbations
+  distantes soient activees ? Commande : lire la table du broker loopback
+  (`bun cli.ts status` puis une requete SQLite sur le fichier du broker) et
+  citer la sortie. La reponse decide si `/register` d'un nom reserve pinne
+  la cle (TOFU) ou la verifie contre une inscription existante.
+- **Transparence / always-on-top / tray** : une fenetre Electron
+  `transparent: true, frame: false, alwaysOnTop: true, skipTaskbar: true` +
+  `Tray` sur le poste reel (compositeur Linux, clic-a-travers Windows avec
+  `setIgnoreMouseEvents(true, { forward: true })`). Sortie : capture + verdict
+  par OS.
+- **Auto-compaction du CLI en `--print` longue duree** : 50 tours sur un
+  `claude -p --input-format stream-json --output-format stream-json
+  --session-id <uuid>` avec le CLI installe sur le poste ; noter si un
+  evenement de compaction apparait dans le flux et si `--resume <uuid>` reprend
+  apres un kill du processus.
+- **Le masque** : dessiner masque + orchestra en monochrome a 120 px sur gris
+  moyen, rendre les huit etats de §4.2, verifier a 2 m de l'ecran et contre
+  la regle 8 de `DESIGN.md` §5 (empreinte de patte).
 
 ### Lot A1 : processus avatar, branchement, tray (sans personnage, sans inbox)
 
@@ -698,7 +732,8 @@ nommes ; les tests exigibles aussi.
 - Fenetre transparente sans cadre, `alwaysOnTop`, `skipTaskbar`,
   deplacable, position persistee, opacite au repos.
 - SVG du masque + orchestra, animations CSS (`prefers-reduced-motion`
-  respecte), les six etats + « Accompli », tooltips textuels.
+  respecte), les huit etats de §4.2 + « Accompli » et « Reflechit »,
+  tooltips textuels ; machine d'etats pure separee du rendu (§7).
 - Skill `deck-design` ; verifier §5 regle 8 (empreinte de patte).
 
 ### Lot A3 : inbox agregee
@@ -708,10 +743,10 @@ nommes ; les tests exigibles aussi.
   `group_id`.
 - Bulle « Reclame » et « Courrier » sur `InboxPanel.tsx` reutilise et elargi ;
   `claim` par la cle operateur (approbations ET questions `ask_operator`) ;
-  reponse a un message de Courrier par `/announce` cible avec le secret du
-  groupe ; propagation `replied` dans les deux sens (§4.3) ; navigation
-  entre elements ; suppression des toasts OS du Deck quand l'avatar est
-  visible.
+  reponse a un message de Courrier depuis le peer `avatar` du groupe (lot A4 ;
+  sans lui, l'onglet est en lecture seule) ; propagation `replied` dans les
+  deux sens (§4.3) ; navigation entre elements ; suppression des toasts OS du
+  Deck quand l'avatar est visible.
 - Tests : le tri par `group_id` avec deux Decks meme projet ; un `claim` 409
   (le telephone a gagne) rend la carte « reglee ailleurs » et ne reste pas
   `pending` a l'ecran ; aucun payload avatar->Deck ne porte le secret d'un
@@ -789,8 +824,8 @@ nommes ; les tests exigibles aussi.
 
 ## 10. Decisions de l'operateur (2026-09-27)
 
-Les six questions posees par la premiere version de ce brief, et leur
-reponse. Chacune est reportee a l'endroit du document qu'elle tranche.
+Les huit questions posees au fil de l'echange, et leur reponse. Chacune est
+reportee a l'endroit du document qu'elle tranche.
 
 1. **Agregation vs isolation** : ratifie. Le Deck reste isole, l'avatar est
    un objet MACHINE alimente par branchement explicite (§3.4).
@@ -818,6 +853,14 @@ reponse. Chacune est reportee a l'endroit du document qu'elle tranche.
    garantie broker non. Reste a verifier au lot 0 : la cle operateur est-elle
    connue du broker sans approbations distantes activees ?
 
-Reste ouvert, a mesurer au lot 0 : transparence et always-on-top sur le poste
-(Linux, Windows) ; auto-compaction d'un `claude -p --input-format
-stream-json` longue duree ; lisibilite du masque a 120 px en monochrome.
+Reste ouvert, a mesurer au lot 0 SUR LE POSTE : la cle operateur cote broker
+sans approbations distantes ; transparence, always-on-top et tray (Linux,
+Windows) ; auto-compaction d'un `claude -p --input-format stream-json` longue
+duree et reprise par `--resume` ; lisibilite du masque a 120 px en monochrome.
+
+Ce que l'echange a ecarte, pour ne pas le reproposer : une route admin
+broker « tout voir » (§3.3 B) ; l'avatar comme Deck sans tuiles (§3.3 C) ;
+le relais du dialogue par l'inbox `operator` (§4.5) ; un peer `avatar`
+visible + instruction (§4.5) ; un second predicat d'activite cote avatar
+(§7) ; la chouette, le Herme, la lyre, le personnage complet (§4.1) ; un TTL
+qui efface un etat (R2) ; un son par defaut ; une notification OS doublee.
