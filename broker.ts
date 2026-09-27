@@ -4221,6 +4221,12 @@ function handleRoadmapUpsert(
   if (!createProjectKeyCheck.ok) {
     return { error: `project_key is invalid (${createProjectKeyCheck.reason})`, status: 400 };
   }
+  // Every producer emits a lowercase key (a normalized remote, or the
+  // local:<hex> fallback): a miscased key is a hand-typed one that would open
+  // a phantom project.
+  if (rawCreateProjectKey !== rawCreateProjectKey.toLowerCase()) {
+    return { error: `project_key must be lowercase: "${rawCreateProjectKey.toLowerCase()}"`, status: 400 };
+  }
   const projectKey = rawCreateProjectKey;
   const title = typeof body.title === "string" ? body.title.trim() : "";
   if (!title) return { error: "title is required", status: 400 };
@@ -4910,13 +4916,16 @@ function handleRoadmapImport(body: {
 }): { imported: number; skipped: string[] } | { error: string; status: number } {
   const rawImportProjectKey = typeof body.project_key === "string" ? body.project_key : "";
   if (!rawImportProjectKey) return { error: "project_key is required", status: 400 };
-  // Card c92614ed lot L0: same refuse-don't-trim discipline as the create
-  // branch above -- one project_key value re-keys the WHOLE batch, so a
-  // silently-trimmed value here would move every imported item to a
-  // different key than the caller declared.
+  // Same refuse-don't-trim and lowercase discipline as the create branch
+  // above: one project_key value re-keys the WHOLE batch, so a silently
+  // altered value here would move every imported item to a different key
+  // than the caller declared.
   const importProjectKeyCheck = validateProjectKey(rawImportProjectKey);
   if (!importProjectKeyCheck.ok) {
     return { error: `project_key is invalid (${importProjectKeyCheck.reason})`, status: 400 };
+  }
+  if (rawImportProjectKey !== rawImportProjectKey.toLowerCase()) {
+    return { error: `project_key must be lowercase: "${rawImportProjectKey.toLowerCase()}"`, status: 400 };
   }
   const projectKey = rawImportProjectKey;
   if (!Array.isArray(body.items)) return { error: "items must be an array", status: 400 };

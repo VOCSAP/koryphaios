@@ -317,6 +317,84 @@ test("roadmap/upsert (create): a legitimate non-ASCII project_key with internal 
   }
 });
 
+test("roadmap/upsert (create): a miscased project_key is refused with 400 naming the lowercase form, nothing created", async () => {
+  const b = await startBroker();
+  try {
+    const miscased = "github.com/VOCSAP/project-key-probe";
+    const res = await post<{ error: string }>(`${b.url}/roadmap/upsert`, {
+      project_key: miscased, by: "l0-author", title: "should never land in a phantom bucket",
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("github.com/vocsap/project-key-probe");
+
+    const db = new Database(b.dbPath, { readonly: true });
+    try {
+      const row = db.query("SELECT COUNT(*) AS n FROM roadmap_items").get() as { n: number };
+      expect(row.n).toBe(0);
+    } finally {
+      db.close();
+    }
+  } finally {
+    await stopBroker(b);
+  }
+});
+
+test("roadmap/upsert (create): a non-ASCII uppercase letter in project_key is refused too, not only A-Z", async () => {
+  const b = await startBroker();
+  try {
+    const res = await post<{ error: string }>(`${b.url}/roadmap/upsert`, {
+      project_key: "github.com/acme/Élan", by: "l0-author", title: "should never land in a phantom bucket",
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("github.com/acme/élan");
+  } finally {
+    await stopBroker(b);
+  }
+});
+
+// Green before and after the case guard: it fails only if the guard is built on
+// normalizeRemoteUrl(k) === k, which strips a trailing .git from a key that every
+// producer legitimately derives from a remote ending in .git.git.
+test("roadmap/upsert (create): a lowercase project_key ending in .git still creates the item (negative control)", async () => {
+  const b = await startBroker();
+  try {
+    const legitKey = "github.com/vocsap/repo.git";
+    const res = await post<UpsertRes>(`${b.url}/roadmap/upsert`, {
+      project_key: legitKey, by: "l0-author", title: "legit .git-suffixed project_key",
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.item.project_key).toBe(legitKey);
+  } finally {
+    await stopBroker(b);
+  }
+});
+
+test("roadmap/import: a miscased project_key refuses the whole batch with 400 naming the lowercase form", async () => {
+  const b = await startBroker();
+  try {
+    const miscased = "github.com/VOCSAP/project-key-probe";
+    const id = crypto.randomUUID();
+    const res = await post<{ error: string }>(`${b.url}/roadmap/import`, {
+      project_key: miscased, by: "l0-importer",
+      items: [
+        { id, kind: "feature", title: "should never land", priority: "could", value: "medium", effort: "medium", status: "idea" },
+      ],
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain("github.com/vocsap/project-key-probe");
+
+    const db = new Database(b.dbPath, { readonly: true });
+    try {
+      const row = db.query("SELECT COUNT(*) AS n FROM roadmap_items WHERE id = ?").get(id) as { n: number };
+      expect(row.n).toBe(0);
+    } finally {
+      db.close();
+    }
+  } finally {
+    await stopBroker(b);
+  }
+});
+
 test("roadmap/import: a project_key with a control character refuses the whole batch with 400", async () => {
   const b = await startBroker();
   try {
