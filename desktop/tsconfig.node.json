@@ -40,7 +40,10 @@
     "../shared/project-key.ts",
     "../shared/approval-client.ts",
     "../shared/peer-cache.ts",
+    "../shared/logger.ts",
     "hooks/**/*.ts",
-    "mcp/**/*.ts"
+    "mcp/**/*.ts",
+    "scripts/win-verify/**/*.ts",
+    "cli/**/*.ts"
   ]
 }

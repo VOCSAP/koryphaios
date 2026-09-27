@@ -25,6 +25,28 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   SPAWN time (`session-service.ts`'s `resolveBaseCommand`, rewritten by
   `withClodexWrapper` in `session-kind.ts`), never at create time — so it
   still follows a launch-config change made after the tile was created.
+- **Session status (model badge + context ring)**: each non-sandbox Claude
+  Code tile launches with `--settings` pointing at a shared
+  `deck-statusline-<sha12>.json` (`statusline-settings.ts`) whose `statusLine`
+  runs `desk-statusline.mjs` every 5 s. The hook writes the statusLine stdin
+  fields (model, `context_window.used_percentage`, window size) to
+  `~/.claude/peers/desk-status-<token>.json`, then chains the operator's
+  statusLine from the GLOBAL `~/.claude/settings.json` only (hostile input #1).
+  The 4 s peer poll decodes that file strictly (`session-status-file.ts`,
+  `shared/session-status.ts`: no symlink, size cap, charset-restricted model
+  strings, pct clamped) into `SessionRuntime.liveStatus`, rendered in the
+  Sidebar row as a model badge and `ContextRing.tsx` (70/90 bands, dashed when
+  unknown). A `/model` switch shows within ~5 s + one poll. The chained
+  output is cached per tile (`desk-statusline-cache-<token>.json`, keyed on the
+  payload minus `cost.total_*duration_ms`): the operator command re-runs only
+  on a key change or when its own `refreshInterval` elapses (any completed
+  run is cached whatever its exit code; a timed-out or unstartable command is
+  backed off for 30 s); an output over 32 KiB is printed but not cached, so
+  that command re-runs on every 5 s tick. Status/cache
+  leftovers of unknown tiles older than 24 h are swept at start/restore (the
+  peers dir is shared with other live Decks). Settings > General
+  `liveStatusLine` (default on) drops `--settings` at the next spawn, giving
+  the tile back Claude Code's footer hints.
 - **Sandbox mode (🏺 Docker rail view, SBX1–SBX5)**: per-project
   toggle that runs NEW sessions inside a persistent Docker/Podman container
   (`kory-sbx-<hash12>`, project bind-mounted at `/work`, `sleep infinity` +
@@ -424,6 +446,40 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   and therefore decides nothing. Resuming a host needs no change on this side:
   `connectRemoteApi` already boots from a stored credential, so the shell
   seeds `COMPANION_CRED_STORAGE_KEY` before navigating.
+- **Guard rules (TTSR, `docs/DESIGN-TTSR-RULES.md`)**: a `PreToolUse`/
+  `PostToolUse` hook (`desktop/hooks/ttsr-hook.ts`) matches a tool call's
+  input against a regex and denies it or injects the rule's message, paid in
+  tokens only the day it fires. Three sources: Kory built-ins
+  (`shared/ttsr-builtin.ts`, read-only), the operator's global file
+  (`<globalConfigDir>/ttsr-rules.json`), and a repo file
+  (`<projectDir>/.claude/claude-peers/rules.json`, agent- or human-authored).
+  Shared engine (`shared/ttsr-rules.ts`, node builtins only): validator,
+  field extraction, evaluation, hash. A repo file is a cloned-repo value
+  (hostile input #1): the hook never sees it until approved
+  (`main/ttsr-approvals.ts`). Each canonical project root records the ONE
+  hash it applies; any other content there, an older approved version
+  included, is pending again (a dialog, at most one open per root and one
+  per minute, showing every field of every rule in full, or only "Open
+  Settings" when too long). A root with no hash yet (new worktree) applies
+  and adopts a hash already approved for its project key. An applied file
+  that changes or disappears is journaled and traced once
+  (`reportError('ttsr')`); `rules:list` then carries `file.previousHash`
+  and, for a deletion, `file.removedApproved`. Every read of a file an
+  agent can write (repo rules, sandbox hook logs, Write targets in the hook)
+  goes through `shared/ttsr-fs.ts` `readBounded`: one open, no follow, no
+  block, checks on the descriptor, capped. `main/ttsr-service.ts` compiles
+  one effective file per tile (`CLAUDE_PEERS_TTSR_FILE`), never a
+  per-project file (two worktrees may diverge), and rewrites it if touched
+  outside the Deck. Settings > Rules (`RulesSettings.tsx`) lists the three
+  sources, toggles them (`rules:set-enabled`), edits/approves a file
+  (`rules:save-global`/`save-repo`/`approve-repo`), and tests a draft rule
+  against a sample (`rules:test`, a worker with a deadline). A save carries
+  the hash the editor opened (`null` = absent): refused `stale` if the file
+  changed, `pending` if the repo file holds unapproved content; saving over
+  an invalid repo file writes it but leaves it pending. The `kory-rules`
+  CLI (`desktop/cli/kory-rules.ts`) and the `repo-rules` skill let an agent
+  author a repo rule without touching the Deck; it stays inactive until the
+  operator approves it here.
 
 ## Error reporting & logs (PLAN-observabilite O3–O6)
 

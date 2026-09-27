@@ -18,6 +18,7 @@ import { buildAppMenu } from './menu'
 import { safeExternalUrl } from './external-url'
 import { SessionService } from './session-service'
 import { createMissingDirTracker, deckPluginDirFor } from './session-command'
+import { statusLineHookPath, writeStatusLineSettings } from './statusline-settings'
 import { registerIpc, resolveDocsDir } from './ipc'
 import { parseCliContext } from './cli-context'
 import { computeScope, buildScopeEnv, resolveAdoptedScope, type Scope, type ScopeEnv } from './scope'
@@ -35,7 +36,11 @@ import {
   type SecretCipher
 } from './scope-secrets'
 import { applyProviderKeyPatch, sanitizeProviders } from './provider-secrets'
+import { GLOBAL_RULES_FILE, REPO_RULES_REL, TtsrService, type TtsrApprovalRequest } from './ttsr-service'
+import { approvalDialogBody, displaySafe } from './ttsr-dialog'
+import { sanitizeTtsrDisabled } from './ttsr-toggles'
 import {
+  globalConfigDir,
   globalLaunchCommand,
   globalWorktreeInit,
   type MagicCompactMode,
@@ -313,6 +318,20 @@ const appStateDir = (): string => join(app.getPath('userData'), APP_STATE_SUBDIR
 // directory was removed throws into its own error sink instead of
 // recreating it.
 const sessionDir = createSessionDirAccessor({ stateDir: appStateDir, groupId: () => activeScope.groupId })
+
+// Guard rules (TTSR): one compiled rules file per tile, under this window's
+// session dir so it dies with the window. Created before setConfig, which
+// recompiles on a toggle change.
+const ttsr = new TtsrService({
+  globalRulesFile: () => join(globalConfigDir(process.env), GLOBAL_RULES_FILE),
+  approvalsFile: () => join(appStateDir(), 'ttsr-approvals.json'),
+  sessionDir,
+  getDisabled: () => config.ttsrDisabled ?? [],
+  reportError,
+  journal: (text) => journal.add('session', `guard rules: ${text}`),
+  promptApproval: (req) => promptTtsrApproval(req),
+  onChanged: () => broadcast('rules:changed', ttsr.list())
+})
 const SESSION_STATE_KEEPALIVE_MS = 60 * 60_000
 let sessionStateKeepaliveTimer: NodeJS.Timeout | null = null
 
@@ -433,11 +452,17 @@ const setConfig = (patch: Partial<AppConfig>): AppConfig => {
       )
     }
   }
+  // Toggle keys become a guard-rules decision: only well-formed keys persist.
+  if (patch.ttsrDisabled !== undefined) {
+    patch = { ...patch, ttsrDisabled: sanitizeTtsrDisabled(patch.ttsrDisabled) }
+  }
   const autoStartWas = config.clodexAutoStart
+  const ttsrDisabledWas = (config.ttsrDisabled ?? []).join('\n')
   config = { ...config, ...patch }
   saveConfig(config)
   nativeTheme.themeSource = config.theme
   if (config.clodexAutoStart !== autoStartWas) void applyClodexAutoStart(config.clodexAutoStart)
+  if ((config.ttsrDisabled ?? []).join('\n') !== ttsrDisabledWas) ttsr.recompileAll()
   broadcast('config:changed', sanitizeConfigForRenderer(config))
   return config
 }
@@ -590,6 +615,36 @@ const service = new SessionService(
   })
 )
 
+// statusLine settings for `--settings`: resolved at every spawn, like
+// getDeckPluginDir, so a hook bundle built or deleted mid-run is picked up. A
+// missing plugin dir is already reported by getDeckPluginDir; any other
+// unavailability is reported once per episode.
+const statusLineUnavailableTracker = createMissingDirTracker()
+const getStatusLineSettingsFile = (): string => {
+  const pluginDir = getDeckPluginDir()
+  if (!pluginDir) return ''
+  const hook = statusLineHookPath(pluginDir)
+  let file: string | null = null
+  let why = ''
+  let err: unknown
+  if (!existsSync(hook)) {
+    why = `statusLine script missing (${hook}) -- run \`npm run build:hook\`; tiles show no model or context fill`
+  } else {
+    try {
+      file = writeStatusLineSettings(appStateDir(), hook)
+      if (!file) {
+        why = `statusLine script or settings path cannot be quoted into a command (${hook}, ${appStateDir()}); tiles show no model or context fill`
+      }
+    } catch (e) {
+      why = 'failed to write the statusLine settings file; tiles show no model or context fill'
+      err = e
+    }
+  }
+  if (statusLineUnavailableTracker.check(file !== null)) reportError('session', why, err)
+  return file ?? ''
+}
+service.setStatusLineSettingsProvider(getStatusLineSettingsFile)
+
 const journal = createPersistentJournal({
   dir: app.getPath('logs'),
   onWriteFailure: (file, error) => logWarn('journal', `cannot persist ${file}`, error)
@@ -700,6 +755,62 @@ function composeSandboxAppendPrompt(sessionId: string, command: string, launch: 
   return rewrite.command
 }
 
+/**
+ * Approval dialog of a pending repo rules file: asynchronous, never on the
+ * spawn path, at most one open per project root (TtsrService). It shows every
+ * field of every rule in full, agent text neutralized: the operator approves
+ * exactly what he reads. Too long for a dialog, it offers no Approve at all,
+ * only Settings > Rules. "Not now" leaves the file pending.
+ */
+async function promptTtsrApproval(req: TtsrApprovalRequest): Promise<boolean> {
+  const isFr = isFrLocale()
+  const body = approvalDialogBody(req.rules, isFr)
+  const where = isFr
+    ? `Projet : ${displaySafe(req.projectDir)}\nFichier : ${REPO_RULES_REL}`
+    : `Project: ${displaySafe(req.projectDir)}\nFile: ${REPO_RULES_REL}`
+  const win = mainWindow
+  const show = (options: Electron.MessageBoxOptions): Promise<Electron.MessageBoxReturnValue> =>
+    win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options)
+  if (!body.fits) {
+    const { response } = await show({
+      type: 'warning',
+      buttons: isFr ? ['Ouvrir Réglages › Règles', 'Plus tard'] : ['Open Settings › Rules', 'Not now'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Koryphaios',
+      message: isFr
+        ? 'Ce dépôt définit ses propres règles de garde pour les agents.'
+        : 'This repository defines its own guard rules for agents.',
+      detail: isFr
+        ? `${where}\n\n${req.rules.length} règle(s), trop longues pour cette fenêtre. Relis-les et approuve-les dans Réglages › Règles ; d'ici là elles ne s'appliquent pas.`
+        : `${where}\n\n${req.rules.length} rule(s), too long for this dialog. Review and approve them in Settings › Rules; until then they do not apply.`
+    })
+    if (response === 0) mainWindow?.webContents.send('menu:settings')
+    return false
+  }
+  const { response } = await show({
+    type: 'warning',
+    buttons: isFr ? ['Approuver', 'Plus tard'] : ['Approve', 'Not now'],
+    defaultId: 1,
+    cancelId: 1,
+    title: 'Koryphaios',
+    message: isFr
+      ? 'Ce dépôt définit ses propres règles de garde pour les agents.'
+      : 'This repository defines its own guard rules for agents.',
+    detail: isFr
+      ? `${where}\n\n${body.text}\n\nUne règle « deny » bloque l'appel d'outil de l'agent ; une règle « warn » lui injecte son message. Toute modification du fichier demandera une nouvelle approbation. N'approuve que si tu fais confiance à ce dépôt.`
+      : `${where}\n\n${body.text}\n\nA "deny" rule blocks the agent's tool call; a "warn" rule injects its message. Any change to the file asks for approval again. Approve only if you trust this repository.`
+  })
+  return response === 0
+}
+
+// Every spawn (create, restore, restart) compiles the tile's rules file here;
+// the hook traces into a per-tile log the rules poll forwards to reportError.
+service.setTtsrProvider((def) => {
+  const file = ttsr.fileFor({ id: def.id, cwd: def.cwd, supervisor: def.supervisor === true })
+  return { file, log: file ? ttsr.logPathOf(def.id) : '' }
+})
+
 // SBX1: wrap sandboxed spawns. The scope-secret file is read HERE (host-side,
 // with a trace on failure) so the pure env translator stays fs-free.
 service.setSandboxProvider(
@@ -716,6 +827,9 @@ service.setSandboxProvider(
             `session cwd is outside the sandbox mount (${cwdHost} not under ${launch.workSource})`
           )
         }
+        const ttsrInContainer = env.CLAUDE_PEERS_TTSR_FILE
+          ? ttsr.projectIntoSandbox(env.CLAUDE_PEERS_DESK_SESSION ?? '', sessionId, launch.runDirHost)
+          : { file: '', log: '' }
         sandbox.writeLaunchScript(sessionId, {
           // Card a79c7696 volet 1: `command` still carries --plugin-dir
           // pointing at the HOST deck-plugin path (session-command.ts's
@@ -733,7 +847,12 @@ service.setSandboxProvider(
                 return null
               }
             }),
-            ...containerBrokerEnv()
+            ...containerBrokerEnv(),
+            // The host rules file and log do not exist in the container: a
+            // copy and a log in the mounted run dir replace them ('' when the
+            // tile has no rules).
+            CLAUDE_PEERS_TTSR_FILE: ttsrInContainer.file,
+            CLAUDE_PEERS_TTSR_LOG: ttsrInContainer.log
           }
         })
         return sandbox.execCommand(launch, sessionId)
@@ -770,6 +889,7 @@ const sandboxGate = async (): Promise<string | null> => {
 
 service.on('removed', ({ id, name }: { id: string; name: string }) => {
   journal.add('session', `session "${name}" closed`)
+  ttsr.remove(id)
   // Revokes a team-lead tile's minted deck-control token/callerId and deletes
   // its team-lead-mcp file only on final removal, not on crash or non-zero exit
   // (which emit 'exit', not 'removed') — a crashed tile is kept as a
@@ -3276,7 +3396,8 @@ app.whenReady().then(async () => {
     sandboxGate,
     sandboxWarmTranscripts: warmSandboxTranscripts,
     purgeInboxSession,
-    inboxDelete
+    inboxDelete,
+    ttsr
   })
   // Arm remote approvals BEFORE service.start(): restored sessions spawn there,
   // and a session spawned without the credential path would never produce an
@@ -3335,6 +3456,8 @@ app.whenReady().then(async () => {
       reportSessionState('keepalive touch failed', e)
     }
   }, SESSION_STATE_KEEPALIVE_MS)
+  // Guard rules: repo/global rules files and the approvals store, polled.
+  ttsr.start()
   createWindow()
 
   app.on('activate', () => {
@@ -3358,6 +3481,9 @@ const runBeforeQuit = createBeforeQuitHandler({
         if (sessionStateKeepaliveTimer) clearInterval(sessionStateKeepaliveTimer)
       }
     },
+    // Before sessionDir closes: stops the poll and removes the sandbox copies,
+    // which live in the container run dir, not in the session dir.
+    { label: 'ttsr', run: () => ttsr.stop() },
     { label: 'workspaces', run: () => workspaces.releaseOnQuit() },
     { label: 'service', run: () => service.stop() },
     // A stable group id does not make its peers stable, so session-scoped state

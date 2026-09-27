@@ -217,12 +217,11 @@ function findSourcePictographs(root: string, files: string[]): string[] {
   return [...hits];
 }
 
-// Every entry below is exempted, not un-triaged: 10 are main/preload process
+// Every entry below is exempted, not un-triaged: 9 are main/preload process
 // strings (journal lines, prompts, banners) not governed by DESIGN.md's
 // rendered-UI rule; 5 are comment-only mentions verified as such.
 // This baseline may only ever shrink, never grow.
 const KNOWN_SOURCE_PICTOGRAPHS: string[] = [
-  "main/attention.ts U+276F",
   "main/explorer-service.ts U+1F4C1",
   "main/index.ts U+1F4F1",
   "main/index.ts U+2387",

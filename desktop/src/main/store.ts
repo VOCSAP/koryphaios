@@ -22,6 +22,7 @@ import {
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
 import { reportError } from './log'
 import { WF_LANE_H_DEFAULT, WF_LANE_H_MIN } from '@shared/workflow'
+import { sanitizeTtsrDisabled } from './ttsr-toggles'
 
 const DEFAULT_CONFIG: AppConfig = {
   projectDir: homedir(),
@@ -62,6 +63,9 @@ const DEFAULT_CONFIG: AppConfig = {
   leadPattern: 'team-lead',
   // System notification when a session waits for the operator (PLAN C11).
   notifyAttention: true,
+  // Model badge + context ring in the session list: on by default; turning it
+  // off gives the tiles back Claude Code's footer hints at their next spawn.
+  liveStatusLine: true,
   // Remote approvals (PLAN-notifications-mobiles): opt-in — it sends the
   // question outside the machine, so it is never on by default.
   mobileApprovals: false,
@@ -84,7 +88,9 @@ const DEFAULT_CONFIG: AppConfig = {
   localProviders: [],
   // Operator-added peer roles (card a2f61172): the built-in list lives in
   // shared/role.ts, this only carries what the operator typed via "Other…".
-  roleChoices: []
+  roleChoices: [],
+  // Guard rules: every rule is active until the operator switches it off.
+  ttsrDisabled: []
 }
 
 function dataDir(): string {
@@ -159,6 +165,10 @@ export function loadConfig(): AppConfig {
   if (!Number.isFinite(cfg.wfLaneHeight) || cfg.wfLaneHeight < WF_LANE_H_MIN) {
     cfg.wfLaneHeight = WF_LANE_H_DEFAULT
   }
+  // Whether a spawn carries --settings is not decided by a stray string in the file.
+  if (typeof cfg.liveStatusLine !== 'boolean') cfg.liveStatusLine = DEFAULT_CONFIG.liveStatusLine
+  // Hand-edited file: only well-formed toggle keys survive.
+  cfg.ttsrDisabled = sanitizeTtsrDisabled(raw.ttsrDisabled)
   delete (cfg as { helpModel?: string }).helpModel
   return cfg
 }

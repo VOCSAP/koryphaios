@@ -412,6 +412,13 @@ l'opérateur sur une machine avec affichage.
     connues traitées, p.ex. via un accusé par peer). Le double-traitement d'une
     MÊME tuile est impossible (une tuile vit dans un seul Deck), donc pas de
     double-injection ; le risque est l'inverse (injection manquée).
+- [ ] **Affichage de l'état de session (statusLine, badge modèle + anneau de contexte)** — logique implémentée (`session-status-file.ts`, chaînage operator-only, validation stricte, `ContextRing.tsx`). Validations terrain uniquement :
+  - Sur Windows natif, vérifier que la commande `statusLine` hérite de `CLAUDE_PEERS_DESK_SESSION` et que le chaînage de la commande `statusLine` globale de l'opérateur fonctionne.
+  - Mesurer la latence réelle du badge modèle après un `/model` : refresh ~5 s + poll ~4 s.
+  - Détection d'occupation sans le hint `esc to interrupt` (masqué par tout statusLine) : `detect/busy.ts` lit la ligne du spinner et le titre ◐◑. Non mesuré : le clear de l'attention après une réponse à un prompt de permission.
+  - Windows natif : chaînage du statusLine opérateur via Git Bash puis PowerShell (`chainShellFor`), stdin vers une commande native sous PowerShell non testé ; une annulation par Claude Code (TerminateProcess) laisse vivre l'arbre chaîné.
+  - Procédure complète de vérification Windows (mesures M1 à M7, scripts `desktop/scripts/win-verify/`) : `desktop/docs/windows-live-status-verification.md`.
+- [ ] **`classifyInjectGuard` refuse toute injection après le premier tour** (`desktop/src/main/screen-model.ts`, `classifyInjectGuard`) — `lines.findIndex` prend le PREMIER chevron `\u276F` de l'écran, c'est-à-dire la ligne `❯ <texte>` de l'opérateur restée dans l'historique, et non la zone de saisie courante en bas : le curseur n'est jamais juste au-dessus, l'écran est classé `modal` et les directives/injections du Deck sont refusées. Même mésinterprétation pour la pause (`interrupt(id, 'pause')`, `session-service.ts` ~1575) : `mode === 'pause'` refuse dès que `screenGuard.classify(id) === 'modal'`. La fermeture (`remove(id)`, `session-service.ts` ~775-781) N'EST PAS refusée dans ce cas : quand l'écran est classé `modal`, `remove()` prend la branche `isModal()` et appelle `forceCleanup()`, qui tue directement la tuile (kill du pty, pas de tentative de `/exit` via `gracefulClose`) au lieu de fermer proprement. Reproduit par simulation (écho ligne 6, composer ligne 19, curseur 18) et confirmé sur 4 captures réelles (état final `modal`, curseur une ligne au-dessus du vrai composer, avec un `❯` échoué qui vient en premier). Piste : ancrer sur le DERNIER chevron / les lignes du bas. Mérite sa propre carte roadmap ; détail et repro dans `desktop/docs/windows-live-status-verification.md` §4.
 
 ---
 
@@ -498,6 +505,12 @@ l'opérateur sur une machine avec affichage.
       (compte perso migré Antigravity). Si un besoin orga apparaît, le provider
       `retrieveUserQuota` de gemini-cli se greffe dans `usage-service.ts` sur
       le même modèle.
+
+### 3.1 ter Affichage d'état de session (reporté)
+
+- [ ] **Badge modèle + anneau de contexte, résiduel** — limité aux tuiles Claude Code non-sandbox :
+  - Affichage du modèle et de l'anneau de contexte dans la vue MobileAgents (companion, mobile/tablets).
+  - Commandes `statusLine` définies UNIQUEMENT dans les settings projet/locaux ne sont jamais chaînées (choix de sécurité, hostile input #1) — documenter ce comportement ou proposer un opt-in délibéré.
 
 ### 3.1 bis Approbations distantes (lots N0→N4, livrés 2026-07-26)
 
@@ -1020,6 +1033,7 @@ et « pas de traduction auto Windows -> Linux des hooks », voir handoffs Kleos
       à l'apparition des credentials mais à la fin de l'onboarding
       (`hasCompletedOnboarding`) ; vérifier qu'un nouvel agent n'affiche plus
       « Select login method » après un login mené au bout.
+- [ ] **Badge modèle + anneau de contexte en mode sandbox** : exclus aujourd'hui (pas de `--settings` pour une tuile sandbox). Il faut un chemin de settings côté conteneur et une copie du hook dans le volume.
 
 **Encore à implémenter (nice-to-have v2, roadmap broker `4085b661` — ne pas
 démarrer sans besoin confirmé)**

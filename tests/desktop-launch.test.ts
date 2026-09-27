@@ -317,6 +317,40 @@ test("--mcp-config and --append-system-prompt-file are emitted on both modes", (
   expect(resume).toContain("--resume \"id-old\" --fork-session");
 });
 
+test("--settings is emitted on both modes when set, absent when unset", () => {
+  const fresh = buildSessionCommandLine({
+    baseCommand: "claude",
+    sessionId: "id-1",
+    settingsFile: "/state/deck-statusline-abc.json",
+    mode: "fresh"
+  });
+  expect(fresh, "fresh line carries the statusLine settings").toBe(
+    'claude --settings "/state/deck-statusline-abc.json" --session-id "id-1"'
+  );
+  const resume = buildSessionCommandLine({
+    baseCommand: "claude",
+    sessionId: "id-new",
+    prevSessionId: "id-old",
+    settingsFile: "/state/deck-statusline-abc.json",
+    mode: "resume"
+  });
+  expect(resume, "resume line re-passes the statusLine settings (not restored by --fork-session)").toContain(
+    '--settings "/state/deck-statusline-abc.json"'
+  );
+  for (const settingsFile of [undefined, "", "   "]) {
+    for (const mode of ["fresh", "resume"] as const) {
+      const line = buildSessionCommandLine({
+        baseCommand: "claude",
+        sessionId: "id-new",
+        prevSessionId: "id-old",
+        settingsFile,
+        mode
+      });
+      expect(line, `no --settings flag on ${mode} for ${JSON.stringify(settingsFile)}`).not.toContain("--settings");
+    }
+  }
+});
+
 // ----- initial prompt (PLAN C2), quoting helper still used by the headless
 // antigravity adapter (model-adapters.ts) -----
 

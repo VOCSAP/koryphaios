@@ -6,6 +6,7 @@ import type {
   AppConfig,
   CreateSessionInput,
   SessionDef,
+  SessionLiveStatus,
   SessionRuntime,
   SessionStatus
 } from '@shared/types'
@@ -38,6 +39,16 @@ import {
   type TranscriptEntry
 } from './session-transcript'
 import { clearDeskSessionId, readDeskSessionId } from './desk-session'
+import {
+  clearStatusFile,
+  clearStatusLineCache,
+  pollStatusFile,
+  readStatusFile,
+  statusSilenceMessage,
+  statusSilenceOverdue,
+  sweepStaleStatusFiles
+} from './session-status-file'
+import { sameLiveStatus } from '@shared/session-status'
 import { ScreenGuard } from './screen-model'
 import { gracefulClose } from './session-close'
 import { createOscParser, type OscSnapshot } from './detect/osc'
@@ -83,6 +94,23 @@ interface RuntimeState {
    * broadcast. null => no announce.
    */
   announce: JoinAnnounceIntent | null
+  /** Last validated statusLine report (model + context fill); null when none or not alive. */
+  liveStatus: SessionLiveStatus | null
+  /**
+   * True while the status file keeps failing to read or decode, so the failure
+   * is reported once per episode instead of on every poll tick.
+   */
+  liveStatusFaulted: boolean
+  /** This spawn was given the Deck's statusLine (`--settings`); set by startPty. */
+  liveStatusEnabled: boolean
+  /** Epoch ms of this spawn; reports older than it belong to the previous process. */
+  spawnedAt: number
+  /** A status file (valid or refused) was seen since this spawn. */
+  liveStatusSeen: boolean
+  /** The "no report since spawn" warning was already raised for this spawn. */
+  liveStatusSilenceWarned: boolean
+  /** Epoch ms of the last needsAttention transition this spawn (0 = none); restarts the silence clock. */
+  liveStatusAttentionAt: number
 }
 
 const PEER_POLL_MS = 4000
@@ -332,6 +360,7 @@ export class SessionService extends EventEmitter {
       // non-interactive zombie. A non-zero exit (crash) is kept on screen in the
       // 'exited' state so the error stays visible and the tile can be restarted.
       if (exitCode === 0) {
+        if (def) this.dropStatusFile(def)
         this.defs = this.defs.filter((d) => d.id !== id)
         this.runtime.delete(id)
         this.persist()
@@ -386,6 +415,7 @@ export class SessionService extends EventEmitter {
       const r = this.runtime.get(id)
       if (!r || r.needsAttention === waiting) return
       r.needsAttention = waiting
+      r.liveStatusAttentionAt = Date.now()
       this.emit('attention', { id, waiting })
       this.broadcast()
     })
@@ -434,6 +464,20 @@ export class SessionService extends EventEmitter {
     this.launchCommand = command
   }
 
+  // ----- guard rules -----
+
+  /**
+   * Paths of the tile's compiled guard-rules file and of the hook's trace
+   * log, '' for none. Injected by index.ts (the rules service), called once
+   * per spawn before the sandbox wrap; the provider never throws (it traces
+   * and returns '').
+   */
+  private ttsrFiles: (def: SessionDef) => { file: string; log: string } = () => ({ file: '', log: '' })
+
+  setTtsrProvider(provider: (def: SessionDef) => { file: string; log: string }): void {
+    this.ttsrFiles = provider
+  }
+
   // ----- sandbox mode (PLAN-SANDBOX SBX1/SBX3) -----
 
   /** Injected after construction (index.ts) — a setter, like setLaunchCommand. */
@@ -443,6 +487,31 @@ export class SessionService extends EventEmitter {
   private sandboxTranscripts: SandboxTranscriptLookup = () => null
   /** Peers dir the sandbox containers write into, or null when sandbox is off. */
   private sandboxPeersDir: () => string | null = () => null
+
+  /**
+   * Returns the path of the statusLine settings file for `--settings`, or ''
+   * when unavailable (the provider reports why). Injected by index.ts, which
+   * owns the app-state dir and the plugin dir.
+   */
+  private getStatusLineSettings: () => string = () => ''
+
+  setStatusLineSettingsProvider(provider: () => string): void {
+    this.getStatusLineSettings = provider
+  }
+
+  /**
+   * `--settings` file for this spawn: only for a tile that runs Claude Code on
+   * the host. A sandboxed tile writes its status inside the container, which
+   * the host path in the file does not reach, so it gets no flag. The
+   * supervisor is never sandboxed. Off entirely when the operator turned
+   * `liveStatusLine` off (the statusLine hides Claude Code's footer hints).
+   */
+  private statusLineSettingsFor(def: SessionDef, base: string): string | undefined {
+    if (this.getConfig().liveStatusLine === false) return undefined
+    if (!isClaudeLaunch(base)) return undefined
+    if (!def.supervisor && this.sandboxPeersDir() !== null) return undefined
+    return this.getStatusLineSettings() || undefined
+  }
 
   setSandboxProvider(
     provider: SandboxProvider,
@@ -491,6 +560,7 @@ export class SessionService extends EventEmitter {
 
   /** Start the peer_id poll. No auto-restore: the app opens empty (see ctor). */
   start(): void {
+    this.sweepStatusFiles()
     this.pollTimer = setInterval(() => this.pollPeerIds(), PEER_POLL_MS)
   }
 
@@ -659,7 +729,14 @@ export class SessionService extends EventEmitter {
         agent,
         model,
         effort: def.effort ?? ''
-      }
+      },
+      liveStatus: null,
+      liveStatusFaulted: false,
+      liveStatusEnabled: false,
+      spawnedAt: 0,
+      liveStatusSeen: false,
+      liveStatusSilenceWarned: false,
+      liveStatusAttentionAt: 0
     })
     this.spawnSession(def, 'fresh')
     this.broadcast()
@@ -692,6 +769,7 @@ export class SessionService extends EventEmitter {
       this.activityTrackers.get(id)?.stop()
       this.activityTrackers.delete(id)
       this.pendingPrompt.delete(id)
+      this.dropStatusFile(def)
       this.defs = this.defs.filter((d) => d.id !== id)
       this.runtime.delete(id)
       this.outputAt.delete(id)
@@ -874,10 +952,18 @@ export class SessionService extends EventEmitter {
         claudeLaunch: this.resolveClaudeLaunch(d),
         // Restored peers were already announced on their original join -> no
         // re-announce on restore.
-        announce: null
+        announce: null,
+        liveStatus: null,
+        liveStatusFaulted: false,
+        liveStatusEnabled: false,
+        spawnedAt: 0,
+        liveStatusSeen: false,
+        liveStatusSilenceWarned: false,
+        liveStatusAttentionAt: 0
       })
     }
     this.persist()
+    this.sweepStatusFiles()
     for (const d of this.defs) this.spawnSession(d, 'resume')
     this.broadcast()
     return this.list()
@@ -999,6 +1085,7 @@ export class SessionService extends EventEmitter {
     const r = this.runtime.get(id)
     if (!r || !r.needsAttention) return
     r.needsAttention = false
+    r.liveStatusAttentionAt = Date.now()
     this.attentionDetector.clear(id)
     this.emit('attention', { id, waiting: false, manual: true } satisfies AttentionEvent)
     this.broadcast()
@@ -1172,6 +1259,8 @@ export class SessionService extends EventEmitter {
     // process's history owes the new one nothing.
     def.sessionIdHistory = []
 
+    const settingsFile = this.statusLineSettingsFor(def, base)
+
     let command: string
     if (effective === 'resume') {
       // Fork the previous claude session into a fresh id (collision avoidance).
@@ -1185,6 +1274,7 @@ export class SessionService extends EventEmitter {
         pluginDir: this.getPluginDir(),
         mcpConfig: def.mcpConfig,
         appendSystemPromptFile: def.appendSystemPromptFile,
+        settingsFile,
         mode: 'resume'
       })
     } else {
@@ -1198,6 +1288,7 @@ export class SessionService extends EventEmitter {
         pluginDir: this.getPluginDir(),
         mcpConfig: def.mcpConfig,
         appendSystemPromptFile: def.appendSystemPromptFile,
+        settingsFile,
         mode: 'fresh'
       })
       // The prompt is recorded here rather than passed via argv, since Windows'
@@ -1241,6 +1332,10 @@ export class SessionService extends EventEmitter {
     // literal, both of which would change the declaration's exact text that
     // the sibling role-env test's structural scan of startPty() depends on.
     if (peerToolsValue !== undefined) Object.assign(sessionEnv, { CLAUDE_PEERS_TOOLS: peerToolsValue })
+    // Always exported, '' included: a value inherited from the process that
+    // launched the Deck must never point a tile at another tile's rules or log.
+    const ttsr = this.ttsrFiles(def)
+    Object.assign(sessionEnv, { CLAUDE_PEERS_TTSR_FILE: ttsr.file, CLAUDE_PEERS_TTSR_LOG: ttsr.log })
 
     // Sandbox mode (SBX1): wrap the composed command in a `docker exec` into
     // the project container. The supervisor is exempt — it pilots the Deck
@@ -1296,6 +1391,19 @@ export class SessionService extends EventEmitter {
     // Drop any stale back-channel file from a previous run so discovery cannot
     // read an old id; the core rewrites it with the fresh minted id at register.
     clearDeskSessionId(def.id, this.peersDirFor(def))
+    // Same for the statusLine report: the new process must not show the old
+    // one's model until its own first statusLine run.
+    const clearErr = clearStatusFile(def.id, this.peersDirFor(def))
+    if (clearErr) reportError('session', `failed to clear the stale status file of "${def.name}"`, clearErr)
+    if (r) {
+      r.liveStatus = null
+      r.liveStatusFaulted = false
+      r.liveStatusEnabled = settingsFile !== undefined
+      r.spawnedAt = Date.now()
+      r.liveStatusSeen = false
+      r.liveStatusSilenceWarned = false
+      r.liveStatusAttentionAt = 0
+    }
     try {
       this.pty.spawn(
         def.id,
@@ -1335,7 +1443,8 @@ export class SessionService extends EventEmitter {
       // Read from RuntimeState, never recomputed here (card fd1914cc
       // correction) -- single source of truth, frozen at spawn by startPty.
       // No runtime yet: leans "it's claude" (see isClaudeSession's doc).
-      claudeLaunch: r?.claudeLaunch ?? true
+      claudeLaunch: r?.claudeLaunch ?? true,
+      liveStatus: r?.liveStatus ?? null
     }
   }
 
@@ -1567,6 +1676,7 @@ export class SessionService extends EventEmitter {
     for (const def of this.defs) {
       const r = this.runtime.get(def.id)
       if (!r) continue
+      if (this.pollLiveStatus(def, r)) changed = true
       const knownIds = def.sessionIdHistory && def.sessionIdHistory.length ? def.sessionIdHistory : [def.sessionId]
       const next = this.pty.isAlive(def.id)
         ? resolvePeerIdAmong(def.cwd, knownIds, this.peersDirFor(def))
@@ -1598,6 +1708,75 @@ export class SessionService extends EventEmitter {
       }
     }
     if (changed) this.broadcast()
+  }
+
+  /** A tile closed for good leaves no status or statusLine cache file behind in the peers dir. */
+  private dropStatusFile(def: SessionDef): void {
+    const err = clearStatusFile(def.id, this.peersDirFor(def))
+    if (err) reportError('session', `failed to remove the status file of "${def.name}"`, err)
+    const cacheErr = clearStatusLineCache(def.id, this.peersDirFor(def))
+    if (cacheErr) reportError('session', `failed to remove the statusLine cache of "${def.name}"`, cacheErr)
+  }
+
+  /**
+   * Remove old status/cache leftovers of tiles this Deck does not know, from
+   * the host peers dir the hook writes into. Age-gated (sweepStaleStatusFiles):
+   * the dir is shared with other live Decks whose tiles are unknown here.
+   */
+  private sweepStatusFiles(): void {
+    const res = sweepStaleStatusFiles(
+      this.peersDir(),
+      this.defs.map((d) => d.id),
+      Date.now()
+    )
+    for (const { file, error } of res.errors) {
+      reportError('session', `failed to sweep a stale statusLine file (${file})`, error)
+    }
+  }
+
+  /**
+   * Refresh one tile's statusLine report from its status file. Returns true
+   * when the displayed value changed. A dead tile shows no report.
+   */
+  private pollLiveStatus(def: SessionDef, r: RuntimeState): boolean {
+    let next: SessionLiveStatus | null = null
+    const alive = this.pty.isAlive(def.id)
+    const read = pollStatusFile(
+      { alive, enabled: r.liveStatusEnabled, spawnedAt: r.spawnedAt },
+      () => readStatusFile(def.id, this.peersDirFor(def))
+    )
+    if (read.kind !== 'absent') r.liveStatusSeen = true
+    if (
+      statusSilenceOverdue({
+        alive,
+        enabled: r.liveStatusEnabled,
+        spawnedAt: r.spawnedAt,
+        now: Date.now(),
+        reported: r.liveStatusSeen,
+        warned: r.liveStatusSilenceWarned,
+        needsAttention: r.needsAttention,
+        lastAttentionAt: r.liveStatusAttentionAt
+      })
+    ) {
+      r.liveStatusSilenceWarned = true
+      reportError('session', statusSilenceMessage(def.name))
+    }
+    if (read.kind === 'ok') {
+      next = read.status
+      r.liveStatusFaulted = false
+    } else if (read.kind === 'absent') {
+      r.liveStatusFaulted = false
+    } else if (!r.liveStatusFaulted) {
+      r.liveStatusFaulted = true
+      if (read.kind === 'error') {
+        reportError('session', `failed to read the status file of "${def.name}"`, read.error)
+      } else {
+        reportError('session', `status file of "${def.name}" refused (${read.reason})`)
+      }
+    }
+    if (sameLiveStatus(r.liveStatus, next)) return false
+    r.liveStatus = next
+    return true
   }
 
   /**
