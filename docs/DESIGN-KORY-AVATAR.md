@@ -480,6 +480,30 @@ APRES elle, dans ce groupe. C'est le regime pauvre assume ; une correlation
 textuelle (`[avatar:xxxx]` a echoer) serait un capteur textuel de plus et
 l'agent peut l'oublier. Le fil par Deck suffit a l'usage decrit.
 
+**A l'usage, concretement.** « Repondre a `operator` » veut dire que l'agent
+POSTE UN MESSAGE DANS L'INBOX : `operator` est un nom reserve du broker, un
+`send_message` vers lui range le message dans la boite du groupe adressee au
+sentinelle operateur (`OPERATOR_INSTANCE_TOKEN`, `handleSendMessage`), celle
+que le Deck vide toutes les `INBOX_POLL_MS` = 10 s dans son Courrier. Les
+agents savent deja faire ce geste : leur instruction de demarrage dit
+« Special recipient 'operator': send_message with to_peer_id 'operator'
+reaches the HUMAN operator's desktop inbox » (`server.ts`). L'enveloppe est
+neanmoins necessaire, parce que le message descendant porte l'expediteur
+`deck`, nom reserve SANS boite : l'agent ne peut pas « repondre a
+l'expediteur », il faut lui nommer `operator`. Trois consequences :
+
+- **Latence** = reflexion de l'agent + intervalle de sondage. L'avatar a son
+  propre curseur : pendant qu'une question est ouverte il sonde plus vite
+  (2 s), puis revient a 10 s. Aucun push possible, le `/ws` du broker est
+  reserve aux peers.
+- **Pas de double comptage** : un message de l'interlocuteur qui arrive
+  pendant une question ouverte est rendu dans le fil « Demander » et marque
+  `seen` dans l'onglet Courrier de l'avatar ; dans le Deck il reste un
+  message de Courrier ordinaire, non lu (decision 3).
+- **Attente sans garantie** : l'agent peut ne jamais repondre. La bulle
+  montre « ... » puis, apres un delai, « pas de reponse encore » ; la
+  question ne disparait jamais d'elle-meme (R2).
+
 **Consequence sur le cerveau (lot B1).** Il n'est plus le seul moyen de
 repondre a « ou en est kleos ? » : sans lui, l'operateur choisit le Deck et
 pose la question au superviseur, qui repond. Le cerveau n'apporte que le
