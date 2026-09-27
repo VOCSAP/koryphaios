@@ -221,6 +221,15 @@ test("timestamps use local calendar days and refresh after local midnight", asyn
   // Local midnight for the fixture's America/Los_Angeles TZ (fixed above),
   // one second after the frozen system time.
   const expectedLocalMidnight = Date.parse("2026-01-03T08:00:00.000Z");
+  const expectedDelayToMidnightMs = expectedLocalMidnight - Date.now();
+
+  // jest.getTimerCount() counts every fake timer in the process, so it is
+  // not reliable at gate scale (a foreign timer -- React's scheduler,
+  // happy-dom -- can inflate or shrink it). Identify the component's OWN
+  // midnight timer by its delay instead, and check its own clearTimeout call.
+  const setTimeoutSpy = jest.spyOn(globalThis, "setTimeout");
+  const clearTimeoutSpy = jest.spyOn(globalThis, "clearTimeout");
+
   renderApprovals(
     [
       approval({ id: "apr-current-local-day", created_at: currentLocalDayAt }),
@@ -236,6 +245,13 @@ test("timestamps use local calendar days and refresh after local midnight", asyn
     new Date(priorLocalDayAt).toLocaleString()
   ]);
 
+  const midnightTimerCalls = setTimeoutSpy.mock.calls.filter(
+    (call) => call[1] === expectedDelayToMidnightMs
+  );
+  expect(midnightTimerCalls).toHaveLength(1);
+  const midnightTimerId =
+    setTimeoutSpy.mock.results[setTimeoutSpy.mock.calls.indexOf(midnightTimerCalls[0]!)]!.value;
+
   await act(async () => {
     jest.advanceTimersToNextTimer();
   });
@@ -245,19 +261,17 @@ test("timestamps use local calendar days and refresh after local midnight", asyn
     new Date(currentLocalDayAt).toLocaleString(),
     new Date(priorLocalDayAt).toLocaleString()
   ]);
-  expect(jest.getTimerCount()).toBe(1);
 
-  // A foreign timer (React's scheduler, happy-dom) can appear during the
-  // component's lifetime under gate-scale load, so the count right before
-  // unmount -- not a pre-mount baseline -- is what the delta must match.
-  const beforeUnmount = jest.getTimerCount();
   act(() => {
     root.unmount();
   });
-  expect(beforeUnmount - jest.getTimerCount()).toBe(1);
+  expect(clearTimeoutSpy).toHaveBeenCalledWith(midnightTimerId);
 
   expect(() => {
     jest.advanceTimersToNextTimer();
   }).not.toThrow();
   expect(timestamps()).toEqual([]);
+
+  setTimeoutSpy.mockRestore();
+  clearTimeoutSpy.mockRestore();
 });
