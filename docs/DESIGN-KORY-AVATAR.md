@@ -445,64 +445,105 @@ adresse ses acks de spawn et le team-lead le seul a qui il dispatche. L'UI
 n'offre donc que ces cibles, et les outils du cerveau prennent un `deck`,
 jamais un `peer_id`.
 
-**Le canal existe deja, et il est deja du bon cote du jeton lecture seule.**
-- Descendant (operateur -> interlocuteur) : `POST /announce` cible
-  (`sendAnnounce` avec `toPeerId`, `broker-client.ts`), le meme appel que
-  `announceToSupervisor` et `announceToLead` dans `index.ts`, authentifie par
-  `group_id` + secret que l'avatar detient depuis le branchement. Aucun appel
-  entrant sur le Deck.
-- Montant (interlocuteur -> operateur) : l'agent repond par
-  `send_message('operator')`, qui tombe dans l'inbox du groupe ; l'avatar la
-  lit par son curseur. La reponse est **aussi** visible dans l'inbox du Deck,
-  ce qui est voulu : l'operateur a parle depuis l'avatar, le Deck en garde la
-  trace.
-- **Qui est l'interlocuteur** : le Deck le sait (`s.supervisor`, `s.lead` sur
-  ses tuiles ; la resolution de `announceToLead` : le team-lead designe, a
-  defaut l'unique session active) et le pousse dans son etat de branchement
-  `{supervisor_peer_id, lead_peer_ids}`. L'avatar ne resout jamais un peer
-  lui-meme (il n'est pas un peer, `/list-peers` lui est ferme, `/admin/peers`
-  exige un token). Regle de choix : une QUESTION va au superviseur (il a
-  `deck_list_agents` et la vue globale du Deck), une INSTRUCTION de travail va
-  au team-lead quand il existe, sinon au superviseur ; l'operateur peut forcer
-  la cible.
+**Le canal : un peer `avatar` par groupe, cache, prouve par la cle operateur.**
+(**PROPOSE par l'operateur, 2026-09-27**, a la place du relais par
+`/announce` + inbox `operator` de la premiere version ; ratification en §10
+Q8, parce qu'il touche le broker.)
 
-**Cadrage du message.** Comme tout ce que le Deck envoie a un agent, le texte
-libre de l'operateur est enveloppe par une CONSTANTE de code (regle C8), par
-exemple : « Operator message relayed by the Kory avatar. Reply to the
-operator with send_message('operator'); an instruction from the operator is
-consent. » Le texte de l'operateur n'est jamais interpole dans autre chose
-qu'un corps de message (entree hostile n°4 : il traverse le broker en JSON,
-jamais une ligne de commande ni un script).
+La premiere version faisait transiter le dialogue par l'inbox `operator`.
+L'operateur a objecte, a raison : **l'inbox est la boite d'ATTENTION de
+l'humain, pas une messagerie**. Y faire passer « ou en est kleos ? » et sa
+reponse noie les questions bloquantes sous du bavardage de statut, ce que
+`DESIGN-NOTIFY-EVENTS.md` nomme comme le defaut qui detruit la valeur du
+canal. Le dialogue prend donc le canal des peers :
 
-**Correlation question / reponse.** Aucun identifiant n'est impose a l'agent :
-la bulle affiche, sous la question, les messages de CET interlocuteur recus
-APRES elle, dans ce groupe. C'est le regime pauvre assume ; une correlation
-textuelle (`[avatar:xxxx]` a echoer) serait un capteur textuel de plus et
-l'agent peut l'oublier. Le fil par Deck suffit a l'usage decrit.
+- A chaque branchement, l'avatar s'enregistre (`POST /register`) dans le
+  groupe du Deck avec le secret recu, sous `peer_id = 'avatar'`,
+  `role = 'avatar'`, son propre `pid` (le nettoyage PID-dead du broker le
+  reape s'il meurt), `host`, et tient le `/heartbeat`. Au detachement,
+  `/disconnect`. Un `instance_token` par groupe, jamais expose (regle
+  d'identite d'`ARCHITECTURE.md`).
+- **Descendant** : `send_message(to_peer_id = <interlocuteur>)` depuis ce
+  token, le message arrivant a l'agent comme un `<channel source="claude-peers">`
+  ordinaire avec `from_peer_id = 'avatar'`. L'agent le voit donc EXACTEMENT
+  comme un message de peer et repond par le reflexe qu'il a deja
+  (`server.ts` : « reply now with send_message to its from_peer_id »). Le
+  nom `deck`, sans boite, disparait du dialogue.
+- **Montant** : la reponse arrive sur le WebSocket `/ws` que l'avatar ouvre
+  avec son token, **poussee en temps reel** (plus de sondage, plus de latence
+  de 10 s), et reste relisible par `/poll-messages`. La mecanique A du broker
+  (repondre acquitte ce qu'on a recu) s'applique telle quelle.
+- **L'inbox `operator` garde son role** : questions bloquantes,
+  `ask_operator`, approbations, trouvailles. L'onglet Courrier de l'avatar la
+  lit toujours par curseur ; le fil « Demander » ne la touche plus. Le
+  double comptage de la premiere version n'existe plus.
 
-**A l'usage, concretement.** « Repondre a `operator` » veut dire que l'agent
-POSTE UN MESSAGE DANS L'INBOX : `operator` est un nom reserve du broker, un
-`send_message` vers lui range le message dans la boite du groupe adressee au
-sentinelle operateur (`OPERATOR_INSTANCE_TOKEN`, `handleSendMessage`), celle
-que le Deck vide toutes les `INBOX_POLL_MS` = 10 s dans son Courrier. Les
-agents savent deja faire ce geste : leur instruction de demarrage dit
-« Special recipient 'operator': send_message with to_peer_id 'operator'
-reaches the HUMAN operator's desktop inbox » (`server.ts`). L'enveloppe est
-neanmoins necessaire, parce que le message descendant porte l'expediteur
-`deck`, nom reserve SANS boite : l'agent ne peut pas « repondre a
-l'expediteur », il faut lui nommer `operator`. Trois consequences :
+**Ce que « cache » et « avatar » exigent du broker.** Trois changements,
+petits mais reels, qui annulent la clause « ne modifie pas le broker » de §9 :
 
-- **Latence** = reflexion de l'agent + intervalle de sondage. L'avatar a son
-  propre curseur : pendant qu'une question est ouverte il sonde plus vite
-  (2 s), puis revient a 10 s. Aucun push possible, le `/ws` du broker est
-  reserve aux peers.
-- **Pas de double comptage** : un message de l'interlocuteur qui arrive
-  pendant une question ouverte est rendu dans le fil « Demander » et marque
-  `seen` dans l'onglet Courrier de l'avatar ; dans le Deck il reste un
-  message de Courrier ordinaire, non lu (decision 3).
-- **Attente sans garantie** : l'agent peut ne jamais repondre. La bulle
-  montre « ... » puis, apres un delai, « pas de reponse encore » ; la
-  question ne disparait jamais d'elle-meme (R2).
+1. **`avatar` rejoint `RESERVED_PEER_IDS`** (`deck`, `operator`, `system`).
+   Sans cela un agent peut `set_id('avatar')`, ou s'enregistrer sous ce nom
+   avant que l'avatar ne se branche (l'avatar recevrait `avatar-2`), et
+   parler au superviseur AVEC LA VOIX DE L'OPERATEUR : l'enveloppe dit qu'une
+   instruction de l'avatar vaut consentement, ce nom est donc une identite
+   sensible. `deriveDefaultId` et `set_id` refusent deja les noms reserves.
+2. **Enregistrer un nom reserve exige une preuve** : `/register` sous
+   `avatar` porte un `auth` Ed25519 de l'operateur (`buildAuthProof`, kind
+   `operator`, celui de `approval-service.ts`), verifie par le broker.
+   Precedent : la branche « nom reserve signe » de `resolveRoadmapAuthor`
+   (`deck`/`operator`/`system`). **A VERIFIER au lot 0** : la cle publique de
+   l'operateur n'est peut-etre connue du broker (`approval_operators`) qu'une
+   fois les approbations distantes activees ; sinon la premiere inscription
+   la PINNE (TOFU, comme un secret de groupe) et les suivantes doivent
+   correspondre.
+3. **Un drapeau `hidden`** sur la ligne `peers`, pose a l'enregistrement du
+   nom reserve, et **une projection qui EXCLUT** : `handleListPeers` (un
+   agent ne le voit jamais, quel que soit le scope), les cibles d'un
+   `/announce` de groupe, `/group-stats`, et le relais de federation
+   (`/federation/sync` ne presente jamais un peer cache a l'upstream : sinon
+   l'avatar d'un poste apparait aux agents d'un autre). Le ciblage direct
+   `send_message('avatar')` reste resolu : cacher n'est pas rendre
+   injoignable. `/admin/peers` le montre (diagnostic `cli.ts`). C'est une
+   OMIT-projection, donc elle degrade en fuite : le test enumere chaque
+   lecture de `peers` publiee et exige que `hidden = 1` en soit absent
+   (regle de couverture de `TESTING.md`), et `toPublicPeer` reste la
+   pick-list comparee au schema.
+
+**Variante sans `hidden`, si l'on veut differer le point 3** : un peer
+`avatar` visible, `role = 'avatar'`, et une ligne dans l'instruction de
+demarrage des agents (« un peer `avatar` est la voix de l'operateur ; ne lui
+ecris que pour repondre »). Fonctionnel, mais un agent qui le voit peut lui
+ecrire : la regle ci-dessous les rend inoffensifs, pas invisibles.
+
+**Ce que l'avatar accepte de recevoir.** Un message d'un interlocuteur
+(superviseur ou team-lead d'un Deck branche) est affiche dans le fil de ce
+Deck. Un message de tout autre peer est **journalise et affiche avec la
+marque « non sollicite »**, sans notification ni rebond : le canal avatar
+n'est pas un contournement de l'inbox, un agent qui veut l'attention de
+l'humain garde `operator`. Il n'y a pas de guard qui refuse, il y a une
+lecture qui ne recompense pas.
+
+**Qui est l'interlocuteur.** Etant un peer, l'avatar peut faire `list_peers`
+lui-meme et lire les `role`. Le Deck reste neanmoins la source AUTORITAIRE
+(`s.supervisor`, `s.lead` sur ses tuiles, resolution de `announceToLead`) et
+pousse `{supervisor_peer_id, lead_peer_ids}` dans son etat : un `role` est
+declare par l'agent, une tuile est connue du Deck. `list_peers` sert de
+verification croisee, jamais de decision. Regle de choix inchangee : une
+QUESTION va au superviseur, une INSTRUCTION de travail au team-lead s'il
+existe, sinon au superviseur ; l'operateur peut forcer.
+
+**Cadrage du message.** Le texte de l'operateur reste enveloppe par une
+CONSTANTE de code (C8), reduite a l'essentiel puisque l'expediteur parle de
+lui-meme : « Message from the human operator, spoken through the Kory
+avatar. An instruction from this peer is operator consent. Reply to
+'avatar'. » Jamais interpole ailleurs qu'un corps JSON (entree hostile n°4).
+La ligne d'instruction de demarrage de `server.ts` gagne une phrase qui
+nomme le peer `avatar` et son statut, comme elle nomme deja `operator`.
+
+**Correlation question / reponse.** Aucun identifiant impose : le fil par Deck
+montre, sous la question, les messages de CET interlocuteur recus apres elle.
+**Attente sans garantie** : « ... » puis « pas de reponse encore » apres un
+delai ; la question ne disparait jamais d'elle-meme (R2).
 
 **Consequence sur le cerveau (lot B1).** Il n'est plus le seul moyen de
 repondre a « ou en est kleos ? » : sans lui, l'operateur choisit le Deck et
@@ -673,19 +714,32 @@ nommes ; les tests exigibles aussi.
   avatar sans le marquer `seen` ; un `seen` avatar ne produit AUCUN message
   vers le Deck.
 
-### Lot A4 : le dialogue relaye (§4.5)
+### Lot A4 : le dialogue par le peer `avatar` (§4.5)
 
-- Onglet « Demander » sans cerveau : selecteur de Deck (ou « tous »), envoi
-  par `/announce` cible sous l'enveloppe constante `AVATAR_RELAY_TEXT`,
-  choix superviseur / team-lead selon question ou instruction, fil des
-  reponses de l'interlocuteur par Deck.
-- Cote Deck : `supervisor_peer_id` et `lead_peer_ids` dans l'etat pousse,
-  recalcules a chaque changement de tuile (spawn, exit, designation d'un lead).
-- Tests : la cible resolue pour `{question, instruction} x {lead present, lead
-  absent, aucune session}` ; un texte d'operateur contenant des guillemets, des
-  retours a la ligne et une sequence `$(...)` arrive intact dans le corps JSON
-  et nulle part ailleurs ; un Deck sans interlocuteur affiche « personne a qui
-  parler dans ce Deck » plutot qu'un envoi silencieux perdu.
+- **Broker (skill `add-broker-feature`)** : `avatar` dans
+  `RESERVED_PEER_IDS` ; `/register` d'un nom reserve exige la preuve
+  operateur (branche signee, precedent `resolveRoadmapAuthor`) ; colonne
+  `hidden` + exclusion de `handleListPeers`, des cibles d'annonce de groupe,
+  de `/group-stats` et de `/federation/sync` ; `toPublicPeer` inchange en
+  pick-list. Une phrase dans l'instruction de demarrage de `server.ts`.
+- **Avatar** : un peer par groupe branche (register, heartbeat, WS, disconnect
+  au detachement, PID reel) ; onglet « Demander » : selecteur de Deck (ou
+  « tous »), envoi par `send_message` sous l'enveloppe constante
+  `AVATAR_VOICE_TEXT`, cible superviseur / team-lead selon question ou
+  instruction, fil des reponses poussees par le WS, marque « non sollicite »
+  pour les autres expediteurs.
+- **Deck** : `supervisor_peer_id` et `lead_peer_ids` dans l'etat pousse,
+  recalcules a chaque changement de tuile.
+- Tests : un `set_id('avatar')` et un `/register` sans preuve sous ce nom
+  sont refuses ; un peer `hidden` n'apparait dans AUCUNE lecture publiee de
+  `peers` (enumeration des requetes, pas un seul cas) et n'est jamais relaye
+  par `/federation/sync` ; `send_message('avatar')` depuis l'interlocuteur
+  arrive ; la cible resolue pour `{question, instruction} x {lead present,
+  lead absent, aucune session}` ; un texte d'operateur avec guillemets,
+  retours a la ligne et `$(...)` arrive intact dans le corps JSON et nulle
+  part ailleurs ; un Deck sans interlocuteur affiche « personne a qui parler
+  dans ce Deck » plutot qu'un envoi perdu ; la mort de l'avatar rend ses peers
+  dormants au balayage PID suivant.
 
 ### Lot B1 : le cerveau (routage et synthese)
 
@@ -717,7 +771,10 @@ nommes ; les tests exigibles aussi.
 
 ## 9. Ce que ce brief ne fait PAS
 
-- Il ne modifie pas le broker : aucune route, aucune table.
+- Il ne modifie le broker que pour le peer `avatar` (§4.5, lot A4) : un nom
+  reserve, une preuve a l'enregistrement, un drapeau `hidden` et sa
+  projection. Aucune route nouvelle, aucune table nouvelle, aucun store
+  d'approbation ou de notification.
 - Il ne donne a l'avatar aucun pouvoir de spawn ni de fermeture : ces gestes
   restent aux superviseurs locaux et a l'operateur dans le Deck.
 - Il ne persiste ni approbation ni Courrier.
@@ -746,8 +803,14 @@ reponse. Chacune est reportee a l'endroit du document qu'elle tranche.
    separation etats / rendu exigee des le lot A2 (§7).
 7. **Interlocuteurs** : l'avatar interroge et instruit le superviseur et le
    team-lead de chaque Deck, jamais les autres peers ; legitimite du dialogue,
-   pas interdiction gardee. Canal : `/announce` cible descendant, inbox
-   `operator` montant, interlocuteurs pousses par le Deck (§4.5, lot A4).
+   pas interdiction gardee ; interlocuteurs pousses par le Deck (§4.5).
+8. **Canal du dialogue (PROPOSE par l'operateur, a ratifier avec son cout
+   broker)** : un peer `avatar` cache par groupe, a la place du relais par
+   l'inbox `operator`, qui reste la boite d'attention. Cout : `avatar` nom
+   reserve, preuve operateur a l'enregistrement, drapeau `hidden` exclu de
+   toute lecture publiee et de la federation (§4.5, lot A4). Point a
+   verifier au lot 0 : la cle operateur est-elle connue du broker sans
+   approbations distantes activees ?
 
 Reste ouvert, a mesurer au lot 0 : transparence et always-on-top sur le poste
 (Linux, Windows) ; auto-compaction d'un `claude -p --input-format
