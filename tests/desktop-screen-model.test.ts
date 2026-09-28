@@ -37,6 +37,12 @@ function screenBeforeMarker(fixture: string, stopAtMarker: RegExp) {
   return screen
 }
 
+function screenFromFixture(fixture: string) {
+  const screen = makeScreen(COLS, ROWS)
+  for (const c of load(fixture)) screen.feed(c.data)
+  return screen
+}
+
 describe('classifyInjectGuard against real captures (tests/pty-harness/fixtures)', () => {
   test('trust dialog, ESC branch: modal, evaluated on the screen BEFORE injectCommand writes anything', () => {
     const screen = screenBeforeMarker('dialog-open-with-esc.json', /injectCommand sequence/)
@@ -85,14 +91,13 @@ describe('classifyInjectGuard fail-closed defaults (D2: unclassifiable = modal, 
 
   test('a chevron on the very first row (no row above it to hold the cursor) -> modal, not a crash', () => {
     const screen = makeScreen(COLS, ROWS)
-    screen.feed('\x1b[1;1H❯')
+    screen.feed(`\x1b[1;1H${String.fromCodePoint(0x276f)}`)
     expect(classifyInjectGuard(screen)).toBe('modal')
   })
 
-  test('a chevron row present but the cursor sitting elsewhere (not one row above it) -> modal', () => {
+  test('a chevron row present but the cursor elsewhere -> modal', () => {
     const screen = makeScreen(COLS, ROWS)
-    // Row 5 (0-indexed): the chevron. Cursor left on row 10, far from row 4.
-    screen.feed('\x1b[6;1H❯\x1b[11;1H')
+    screen.feed(`\x1b[6;1H${String.fromCodePoint(0x276f)}\x1b[11;1H`)
     expect(classifyInjectGuard(screen)).toBe('modal')
   })
 
@@ -102,17 +107,84 @@ describe('classifyInjectGuard fail-closed defaults (D2: unclassifiable = modal, 
   })
 })
 
-describe('classifyInjectGuard synthetic composer shape (hand-authored bytes, not a live CLI -- team-lead: deterministic fixtures only)', () => {
-  test('cursor exactly one row above the chevron -> clear, the minimal shape the real fixtures share', () => {
-    const screen = makeScreen(COLS, ROWS)
-    // Row 5: content row (cursor lands here after the write). Row 6: chevron.
-    screen.feed('\x1b[6;3Hhello\x1b[7;1H❯\x1b[6;8H')
+describe('classifyInjectGuard reduced ConPTY composer fixture', () => {
+  const chevron = String.fromCodePoint(0x276f)
+  const horizontal = String.fromCodePoint(0x2500)
+  const border = horizontal.repeat(COLS)
+  const esc = String.fromCharCode(27)
+  const composer = () => screenFromFixture('composer-2.1.283-reduced.json')
+
+  const feedComposer = (screen: ReturnType<typeof makeScreen>, row: number): void => {
+    screen.feed(`${esc}[${row};1H${border}${esc}[${row + 1};1H${chevron}${esc}[${row + 2};1H${border}`)
+  }
+
+  test('replays the captured full-width composer as clear', () => {
+    expect(classifyInjectGuard(composer())).toBe('clear')
+  })
+
+  test('recognizes the captured composer below a historical chevron', () => {
+    const screen = composer()
+    screen.feed(`${esc}[6;1H${chevron} historical prompt${esc}[15;3H`)
     expect(classifyInjectGuard(screen)).toBe('clear')
   })
 
-  test('cursor one row BELOW the chevron (not above) -> modal, the relation is directional', () => {
-    const screen = makeScreen(COLS, ROWS)
-    screen.feed('\x1b[6;1H❯\x1b[7;1Hx')
+  test('rejects a short upper border around the captured composer', () => {
+    const screen = composer()
+    screen.feed(`${esc}[14;1H${horizontal.repeat(COLS - 1)}${esc}[K${esc}[15;3H`)
     expect(classifyInjectGuard(screen)).toBe('modal')
+  })
+
+  test('rejects a short lower border around the captured composer', () => {
+    const screen = composer()
+    screen.feed(`${esc}[16;1H${horizontal.repeat(COLS - 1)}${esc}[K${esc}[15;3H`)
+    expect(classifyInjectGuard(screen)).toBe('modal')
+  })
+
+  test('rejects a picker above the captured composer', () => {
+    const screen = composer()
+    screen.feed(`${esc}[6;1H${chevron} 5. Haiku${esc}[15;3H`)
+    expect(classifyInjectGuard(screen)).toBe('modal')
+  })
+
+  test('rejects a dialog alongside the captured composer', () => {
+    const screen = composer()
+    screen.feed(`${esc}[2;1H╭${horizontal.repeat(COLS - 2)}╮${esc}[4;1H╰${horizontal.repeat(COLS - 2)}╯${esc}[15;3H`)
+    expect(classifyInjectGuard(screen)).toBe('modal')
+  })
+
+  test('rejects a lower picker when an older composer remains above it', () => {
+    const screen = composer()
+    feedComposer(screen, 5)
+    screen.feed(`${esc}[31;1H${chevron} 5. Haiku${esc}[15;3H`)
+    expect(classifyInjectGuard(screen)).toBe('modal')
+  })
+
+  test('rejects the captured composer when its cursor is on the lower border', () => {
+    const screen = composer()
+    screen.feed(`${esc}[16;3H`)
+    expect(classifyInjectGuard(screen)).toBe('modal')
+  })
+})
+
+describe('makeScreen deferred wrap after erasure', () => {
+  for (const [name, sequence] of [
+    ['EL default', '\x1b[K'],
+    ['EL mode 1', '\x1b[1K'],
+    ['EL mode 2', '\x1b[2K'],
+    ['ED default', '\x1b[J'],
+    ['ED mode 1', '\x1b[1J'],
+    ['ED mode 2', '\x1b[2J']
+  ]) {
+    test(`${name} clears a pending wrap`, () => {
+      const screen = makeScreen(3, 2)
+      screen.feed(`abc${sequence}X`)
+      expect(screen.cursor().cy).toBe(0)
+    })
+  }
+
+  test('ED mode 3 preserves a pending wrap', () => {
+    const screen = makeScreen(3, 2)
+    screen.feed('abc\x1b[3JX')
+    expect(screen.cursor().cy).toBe(1)
   })
 })

@@ -266,32 +266,36 @@ describe("SessionService.interrupt()'s pause-only screen-state gate (card 120148
   test("the real extracted interrupt() body: on a MODAL tile, mode='pause' refuses and writes nothing, mode='hard' still writes the bare Escape", () => {
     const body = extractInterruptBody(readFileSync(SESSION_SERVICE_PATH, 'utf-8'))
     // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
-    const interrupt = new Function('id', 'mode', body) as (
+    const interrupt = new Function('logInfo', 'id', 'mode', body) as (
       this: unknown,
+      logInfo: (scope: string, message: string) => void,
       id: string,
       mode: 'pause' | 'hard'
     ) => string
+    const logInfo = () => undefined
 
     const pauseCase = makeInterruptStub({ classify: 'modal' })
-    expect(interrupt.call(pauseCase.self, 'tile-a', 'pause')).toBe('refused-modal')
+    expect(interrupt.call(pauseCase.self, logInfo, 'tile-a', 'pause')).toBe('refused-modal')
     expect(pauseCase.writes).toEqual([])
 
     const hardCase = makeInterruptStub({ classify: 'modal' })
-    expect(interrupt.call(hardCase.self, 'tile-a', 'hard')).toBe('interrupted')
+    expect(interrupt.call(hardCase.self, logInfo, 'tile-a', 'hard')).toBe('interrupted')
     expect(hardCase.writes).toEqual(['\x1b'])
   })
 
   test("the real extracted interrupt() body: a non-modal, non-attention, non-rateLimited tile interrupts cleanly under EITHER mode", () => {
     const body = extractInterruptBody(readFileSync(SESSION_SERVICE_PATH, 'utf-8'))
     // eslint-disable-next-line no-new-func -- extracted from the real source text, not user input
-    const interrupt = new Function('id', 'mode', body) as (
+    const interrupt = new Function('logInfo', 'id', 'mode', body) as (
       this: unknown,
+      logInfo: (scope: string, message: string) => void,
       id: string,
       mode: 'pause' | 'hard'
     ) => string
+    const logInfo = () => undefined
 
     const pauseCase = makeInterruptStub({ classify: 'clear' })
-    expect(interrupt.call(pauseCase.self, 'tile-a', 'pause')).toBe('interrupted')
+    expect(interrupt.call(pauseCase.self, logInfo, 'tile-a', 'pause')).toBe('interrupted')
     expect(pauseCase.writes).toEqual(['\x1b'])
   })
 

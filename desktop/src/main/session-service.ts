@@ -53,7 +53,7 @@ import { ScreenGuard } from './screen-model'
 import { gracefulClose } from './session-close'
 import { createOscParser, type OscSnapshot } from './detect/osc'
 import { createActivityTracker, ACTIVITY_IDLE_MS, type Activity } from './detect/activity'
-import { reportError } from './log'
+import { logInfo, reportError } from './log'
 import { effectiveAgent, isTeamLeadAgent, resolveMcpConfig, type MintTeamLeadBridge } from './team-lead-bridge'
 import { DEFAULT_PALETTE, paletteColor } from '@shared/palette'
 import { sanitizeRole } from '@shared/role'
@@ -550,8 +550,13 @@ export class SessionService extends EventEmitter {
     this.pty.spawn(id, cwd, opts, {})
   }
 
-  killUtility(id: string): void {
+  private killWithTrace(id: string, reason: string): void {
+    logInfo('session', `pty kill ${id}: ${reason}`)
     this.pty.kill(id)
+  }
+
+  killUtility(id: string): void {
+    this.killWithTrace(id, 'utility terminal')
   }
 
   isUtilityAlive(id: string): boolean {
@@ -759,7 +764,7 @@ export class SessionService extends EventEmitter {
       if (!def) return
       this.emit('removed', { id: def.id, name: def.name })
       if (def.sessionId) this.registry.release(def.sessionId)
-      this.pty.kill(id)
+      this.killWithTrace(id, 'force cleanup')
       this.thinkingDetector.clear(id)
       this.quotaDetector.clear(id)
       this.attentionDetector.clear(id)
@@ -799,7 +804,7 @@ export class SessionService extends EventEmitter {
       await gracefulClose({
         write: (data) => this.pty.write(id, data),
         isAlive: () => this.pty.isAlive(id),
-        kill: () => this.pty.kill(id),
+        kill: () => this.killWithTrace(id, 'close escalation'),
         delay: (ms) => new Promise((res) => setTimeout(res, ms)),
         exitGraceMs: CLOSE_EXIT_GRACE_MS,
         interruptGraceMs: CLOSE_INTERRUPT_GRACE_MS,
@@ -1541,26 +1546,19 @@ export class SessionService extends EventEmitter {
     const idle = await this.waitIdle(id, idleWaitMs)
     if (!this.pty.isAlive(id)) return 'no-terminal'
     if (!idle) return 'busy-timeout'
-    // Refuses the whole sequence, not just the Escape, when the tile looks like
-    // a modal dialog: a bare Escape can quit the CLI outright, and the paste
-    // alone can silently confirm whatever option is highlighted.
-    // Union of two independently-sourced signals (a geometric screen read, and
-    // the text-pattern needs-attention detector), neither trusted alone: either
-    // saying modal refuses, both must say non-modal to proceed.
-    // A false refusal only costs one more idle cycle; the union cannot produce
-    // a false negative that a single signal would have caught.
-    if (this.screenGuard.classify(id) === 'modal') return 'refused-modal'
-    if (this.runtime.get(id)?.needsAttention) return 'refused-modal'
-    // Third refusal signal (card 63ca372f's own contract: idle AND NOT
-    // needsAttention AND NOT rateLimited), closing the gap the other two
-    // never covered. autoResume (this same file) writes a bare Escape then,
-    // 100ms later via its own setTimeout, 'continue' + '\r' on a rateLimited
-    // tile with no coordination with this method -- a directive injected
-    // into that same tile during that window would interleave two
-    // independent writers on one PTY. Refusing here (reusing 'refused-modal':
-    // this is still "do not write into this tile right now", not a new
-    // outcome) closes the window by never starting the second writer.
-    if (this.runtime.get(id)?.rateLimited) return 'refused-modal'
+    // Escape or pasted text can change a modal selection, so every refusal blocks both writes.
+    if (this.screenGuard.classify(id) === 'modal') {
+      logInfo('session', `command injection refused-modal for ${id}: screen guard`)
+      return 'refused-modal'
+    }
+    if (this.runtime.get(id)?.needsAttention) {
+      logInfo('session', `command injection refused-modal for ${id}: needs attention`)
+      return 'refused-modal'
+    }
+    if (this.runtime.get(id)?.rateLimited) {
+      logInfo('session', `command injection refused-modal for ${id}: rate limited`)
+      return 'refused-modal'
+    }
     this.pty.write(id, '\x1b')
     await new Promise((res) => setTimeout(res, DIRECTIVE_SETTLE_MS))
     if (!this.pty.isAlive(id)) return 'no-terminal'
@@ -1599,12 +1597,18 @@ export class SessionService extends EventEmitter {
   interrupt(id: string, mode: 'pause' | 'hard'): 'interrupted' | 'no-terminal' | 'refused-modal' {
     if (!this.pty.isAlive(id)) return 'no-terminal'
     if (mode === 'pause') {
-      if (this.screenGuard.classify(id) === 'modal') return 'refused-modal'
-      if (this.runtime.get(id)?.needsAttention) return 'refused-modal'
-      // Third refusal signal: without it, a Pause landing during a quota-resume
-      // window races autoResume's own raw ESC write, and a second bare ESC can
-      // kill the session instead of interrupting it.
-      if (this.runtime.get(id)?.rateLimited) return 'refused-modal'
+      if (this.screenGuard.classify(id) === 'modal') {
+        logInfo('session', `pause interruption refused-modal for ${id}: screen guard`)
+        return 'refused-modal'
+      }
+      if (this.runtime.get(id)?.needsAttention) {
+        logInfo('session', `pause interruption refused-modal for ${id}: needs attention`)
+        return 'refused-modal'
+      }
+      if (this.runtime.get(id)?.rateLimited) {
+        logInfo('session', `pause interruption refused-modal for ${id}: rate limited`)
+        return 'refused-modal'
+      }
     }
     this.pty.write(id, '\x1b')
     return 'interrupted'

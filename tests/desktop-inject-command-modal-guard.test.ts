@@ -17,6 +17,18 @@ function extractInjectCommandBody(src: string): string {
   return extractBracedBody(src, fnMatch.index + fnMatch[0].length - 1)
 }
 
+function extractRemoveBody(src: string): string {
+  const fnMatch = /async remove\(id: string\): Promise<void> \{/.exec(src)
+  if (!fnMatch) throw new Error('remove() not found in session-service.ts -- has it been renamed?')
+  return extractBracedBody(src, fnMatch.index + fnMatch[0].length - 1)
+}
+
+function extractKillWithTraceBody(src: string): string {
+  const fnMatch = /private killWithTrace\(id: string, reason: string\): void \{/.exec(src)
+  if (!fnMatch) throw new Error('killWithTrace() not found in session-service.ts')
+  return extractBracedBody(src, fnMatch.index + fnMatch[0].length - 1)
+}
+
 const ESC_WRITE = /this\.pty\.write\(id,\s*'\\x1b'\)/
 const SCREEN_GUARD_CHECK = /this\.screenGuard\.classify\(id\)\s*===\s*'modal'/
 const ATTENTION_CHECK = /this\.runtime\.get\(id\)\?\.needsAttention/
@@ -48,6 +60,28 @@ function guardIsWiredBeforeEscape(body: string): boolean {
 test("injectCommand's screen-state guard runs BEFORE the Escape write and refuses on either signal (real file)", () => {
   const body = extractInjectCommandBody(readFileSync(SESSION_SERVICE_PATH, 'utf-8'))
   expect(guardIsWiredBeforeEscape(body)).toBe(true)
+})
+
+test('every modal refusal and SessionService kill path logs a static reason before acting (real file)', () => {
+  const src = readFileSync(SESSION_SERVICE_PATH, 'utf-8')
+  const removeBody = extractRemoveBody(src)
+  const killBody = extractKillWithTraceBody(src)
+  const refusals = [...src.matchAll(/return 'refused-modal'/g)]
+  const refusalBlocks = [
+    ...src.matchAll(
+      /if \((?:[^()]|\([^()]*\))*\) \{\s*logInfo\('session', `[^$`]*refused-modal for \$\{id\}: [^$`]+`\)\s*return 'refused-modal'/g
+    )
+  ]
+
+  expect(refusals.length).toBeGreaterThan(0)
+  expect(refusalBlocks).toHaveLength(refusals.length)
+
+  expect(killBody.indexOf('logInfo')).toBeGreaterThan(-1)
+  expect(killBody.indexOf('logInfo')).toBeLessThan(killBody.indexOf('this.pty.kill(id)'))
+  expect([...src.matchAll(/this\.pty\.kill\(id\)/g)]).toHaveLength(1)
+  expect(removeBody).toContain("this.killWithTrace(id, 'force cleanup')")
+  expect(removeBody).toContain("kill: () => this.killWithTrace(id, 'close escalation')")
+  expect(src).toContain("this.killWithTrace(id, 'utility terminal')")
 })
 
 test("'refused-modal' is a member of DirectiveOutcome (real file)", () => {
@@ -163,87 +197,60 @@ test('screenGuard.feed is wired into the central pty data handler alongside the 
 // Whether session-service.ts's remove() (or any other boundary) actually calls
 // screenGuard.clear(id) at runtime is not verified here: SessionService isn't
 // bun-test-importable, so that wiring gap is a separate open item.
-test('a tile id reused after ScreenGuard.clear() gets a fresh classification, never the dead grid a leaked entry would produce', () => {
+test('a tile id reused after ScreenGuard.clear() gets a fresh classification', () => {
   const guard = new ScreenGuard()
   const id = 'tile-reused'
+  const esc = String.fromCharCode(27)
+  const chevron = String.fromCodePoint(0x276f)
+  const border = String.fromCodePoint(0x2500).repeat(120)
 
-  // First PTY life: a composer painted low on the screen (content row 5,
-  // chevron row 6) -- classifies correctly while this life is live.
-  guard.feed(id, '\x1b[5;1Hold draft\x1b[6;1H❯\x1b[5;10H')
+  guard.resize(id, 120, 40)
+  guard.feed(id, `${esc}[5;1H${border}${esc}[6;1H${chevron}old draft${esc}[7;1H${border}${esc}[6;10H`)
   expect(guard.classify(id)).toBe('clear')
 
-  // The boundary call every PTY-life end must make (remove(), stop(),
-  // closeAll(), restoreFrom(), the pty-exit handler, restart's fresh spawn).
   guard.clear(id)
 
-  // The reused id's composer paints lower (row 20/21) than the original (row 6)
-  // on purpose: if clear() were skipped, the leaked screen's stale chevron at
-  // row 6 would win the topmost-match search and flip the verdict to 'modal',
-  // so same-position composers would prove nothing either way.
-  guard.feed(id, '\x1b[20;1Hnew draft\x1b[21;1H❯\x1b[20;10H')
+  guard.resize(id, 120, 40)
+  guard.feed(id, `${esc}[20;1H${border}${esc}[21;1H${chevron}new draft${esc}[22;1H${border}${esc}[21;10H`)
   expect(guard.classify(id)).toBe('clear')
 })
 
-// ----- Review-round finding on 63ca372f/120148eb: ScreenGuard.feed built its
-// Screen at makeScreen's fixed default and was never told about a real
-// resize, so a tile taller than that default froze classifyInjectGuard at
-// 'modal' forever (CUP addressing is absolute -- once content/cursor rows
-// clamp to the same last row, cy===chevronRow-1 becomes structurally
-// impossible). screen-model.ts is a pure module (no electron/node-pty
-// import, per its own header comment) -- these are real behavioural tests
-// against makeScreen/classifyInjectGuard/ScreenGuard, not a source scan.
-
-describe('ScreenGuard.resize (card 120148eb review finding: the grid must track the real terminal size, not a fixed default)', () => {
-  // 1-indexed CUP rows for a composer taller than the OLD 120x40 default
-  // but still within the NEW 400x200 default. Used by the three tests below
-  // that are specifically about that default's own generosity.
-  const CONTENT_ROW = 101 // 0-indexed 100
-  const CHEVRON_ROW = 102 // 0-indexed 101
-  const feedComposer = (feed: (data: string) => void): void => {
-    feed(`\x1b[${CONTENT_ROW};1Hsome draft text`)
-    feed(`\x1b[${CHEVRON_ROW};1H❯`)
-    // Real captures show the terminal cursor back on the CONTENT row (one
-    // above the chevron), not left on the chevron row -- see
-    // classifyInjectGuard's own doc for why that relationship, not the
-    // glyph's mere presence, is what it tests.
-    feed(`\x1b[${CONTENT_ROW};5H`)
+describe('ScreenGuard.resize', () => {
+  const TOP_ROW = 101
+  const CHEVRON_ROW = 102
+  const TALL_TOP_ROW = 250
+  const TALL_CHEVRON_ROW = 251
+  const esc = String.fromCharCode(27)
+  const chevron = String.fromCodePoint(0x276f)
+  const border = String.fromCodePoint(0x2500).repeat(120)
+  const feedComposer = (feed: (data: string) => void, topRow: number, chevronRow: number): void => {
+    feed(`${esc}[${topRow};1H${border}`)
+    feed(`${esc}[${chevronRow};1H${chevron}draft`)
+    feed(`${esc}[${chevronRow + 1};1H${border}`)
+    feed(`${esc}[${chevronRow};5H`)
   }
+  const feedDefaultComposer = (feed: (data: string) => void): void => feedComposer(feed, TOP_ROW, CHEVRON_ROW)
+  const feedTallComposer = (feed: (data: string) => void): void => feedComposer(feed, TALL_TOP_ROW, TALL_CHEVRON_ROW)
 
-  // TALL_CONTENT_ROW/TALL_CHEVRON_ROW sit past ScreenGuard's default 400x200
-  // grid reach, used only by the resize/NaN-rejection tests: an inert resize()
-  // clamps both rows to the default's last row and misclassifies, while a real
-  // resize() covers them -- only this composer can tell whether resize()
-  // actually ran.
-  const TALL_CONTENT_ROW = 250 // 0-indexed 249, beyond the default's rows-1=199
-  const TALL_CHEVRON_ROW = 251 // 0-indexed 250
-  const feedTallComposer = (feed: (data: string) => void): void => {
-    feed(`\x1b[${TALL_CONTENT_ROW};1Hsome draft text`)
-    feed(`\x1b[${TALL_CHEVRON_ROW};1H❯`)
-    feed(`\x1b[${TALL_CONTENT_ROW};5H`)
-  }
-
-  test('a Screen fixed at the pre-fix 120x40 default misclassifies this composer as modal (the exact defect the review found)', () => {
+  test('a 120x40 Screen classifies an out-of-bounds composer as modal', () => {
     const screen = makeScreen(120, 40)
-    feedComposer(screen.feed)
-    // Both the content row (101) and the chevron row (102) clamp to the
-    // last real row (39), landing the chevron on TOP of the content and the
-    // final cursor CUP on that same clamped row -- cy(39) !== chevronRow(39)-1.
+    feedDefaultComposer(screen.feed)
     expect(classifyInjectGuard(screen)).toBe('modal')
   })
 
-  test('the SAME composer classifies correctly once the Screen is built at its real size', () => {
+  test('a composer is clear when the Screen covers its rows', () => {
     const screen = makeScreen(120, 300)
-    feedComposer(screen.feed)
+    feedDefaultComposer(screen.feed)
     expect(classifyInjectGuard(screen)).toBe('clear')
   })
 
-  test("makeScreen()'s own default (no args -- what ScreenGuard.feed builds before any resize() call has ever happened) is now generous enough to cover this composer between any (re)creation of a tile's Screen and the next resize", () => {
+  test('the default Screen refuses a composer until its terminal width is configured', () => {
     const screen = makeScreen()
-    feedComposer(screen.feed)
-    expect(classifyInjectGuard(screen)).toBe('clear')
+    feedDefaultComposer(screen.feed)
+    expect(classifyInjectGuard(screen)).toBe('modal')
   })
 
-  test('ScreenGuard.resize rebuilds the tracked Screen at the real size, so classify() sees the fixed geometry (RED-proof target: strip resize() to a no-op and this goes red)', () => {
+  test('ScreenGuard.resize classifies a composer at the configured size', () => {
     const guard = new ScreenGuard()
     guard.resize('tile-tall', 120, 300)
     feedTallComposer((data) => guard.feed('tile-tall', data))
@@ -261,18 +268,8 @@ describe('ScreenGuard.resize (card 120148eb review finding: the grid must track 
   test('resize() rejects non-finite/invalid dims explicitly, leaving the tracked Screen untouched (cols/rows are IPC-sourced -- a bare `cols < 1` comparison against NaN is false and would let it through into `new Array(NaN)`, which throws)', () => {
     const guard = new ScreenGuard()
     guard.resize('tile-x', 120, 300)
-    // Tall composer (past the 400x200 default's own reach, D7): if an
-    // invalid resize() silently replaced the tracked Screen with a fresh
-    // default-sized one instead of leaving it untouched, this composer
-    // would misclassify too, same as the resize-RED-proof above -- the
-    // 101/102 composer could not tell "untouched" from "replaced by a
-    // generous-enough default" apart.
     feedTallComposer((data) => guard.feed('tile-x', data))
     expect(guard.classify('tile-x')).toBe('clear')
-    // None of these may crash (proves NaN is rejected before `new Array`)
-    // or silently replace the tracked Screen with a blank one (proves the
-    // real composer survives -- a replaced/blank Screen has no chevron
-    // painted at all, which classifies 'modal', not 'clear').
     guard.resize('tile-x', Number.NaN, 300)
     guard.resize('tile-x', 120, Number.NaN)
     guard.resize('tile-x', 0, 300)

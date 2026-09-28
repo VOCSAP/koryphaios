@@ -9,6 +9,7 @@ export interface Screen {
   feed(data: string): void
   /** Rendered rows, trailing whitespace trimmed, top to bottom. */
   lines(): string[]
+  columns(): number
   text(): string
   cursor(): { cy: number; cx: number }
 }
@@ -26,41 +27,41 @@ export function makeScreen(cols = 400, rows = 200): Screen {
   const grid: string[][] = Array.from({ length: rows }, () => new Array(cols).fill(' '))
   let cy = 0
   let cx = 0
+  let wrapPending = false
   const clampY = (y: number): number => Math.max(0, Math.min(rows - 1, y))
   const clampX = (x: number): number => Math.max(0, Math.min(cols - 1, x))
 
   function put(ch: string): void {
     if (ch === '\n') {
       cy = clampY(cy + 1)
+      wrapPending = false
       return
     }
     if (ch === '\r') {
       cx = 0
+      wrapPending = false
       return
     }
     if (ch === '\b') {
       cx = clampX(cx - 1)
+      wrapPending = false
       return
     }
     if (ch === '\t') {
       cx = clampX(cx + 8 - (cx % 8))
+      wrapPending = false
       return
     }
     if (ch < ' ') return
-    // cy is always clamped into [0, rows-1] just above, so this row exists in
-    // every real call; noUncheckedIndexedAccess still types it optional. A
-    // missing row is treated as a real absence, not asserted away: skip the
-    // paint (nothing corrupts) but still advance the cursor, same as a
-    // successful write would -- consistent with the fail-closed spirit of
-    // the guard this model feeds (an unreadable cell must never fabricate
-    // plausible-looking screen content, it must degrade toward "unknown").
-    const row = grid[cy]
-    if (row) row[cx] = ch
-    cx++
-    if (cx >= cols) {
+    if (wrapPending) {
       cx = 0
       cy = clampY(cy + 1)
+      wrapPending = false
     }
+    const row = grid[cy]
+    if (row) row[cx] = ch
+    if (cx === cols - 1) wrapPending = true
+    else cx++
   }
 
   function feed(data: string): void {
@@ -108,24 +109,31 @@ export function makeScreen(cols = 400, rows = 200): Screen {
         case 'f':
           cy = clampY((nums[0] === undefined ? 1 : nums[0]) - 1)
           cx = clampX((nums[1] === undefined ? 1 : nums[1]) - 1)
+          wrapPending = false
           break
         case 'A':
           cy = clampY(cy - n)
+          wrapPending = false
           break
         case 'B':
           cy = clampY(cy + n)
+          wrapPending = false
           break
         case 'C':
           cx = clampX(cx + n)
+          wrapPending = false
           break
         case 'D':
           cx = clampX(cx - n)
+          wrapPending = false
           break
         case 'G':
           cx = clampX(n - 1)
+          wrapPending = false
           break
         case 'd':
           cy = clampY(n - 1)
+          wrapPending = false
           break
         case 'K': {
           // cy is always clamped into [0, rows-1], so this row always
@@ -133,6 +141,7 @@ export function makeScreen(cols = 400, rows = 200): Screen {
           // own row lookup above -- an unreadable row degrades to "erase
           // nothing" rather than crashing the feed.
           const row = grid[cy]
+          wrapPending = false
           if (row) {
             const mode = nums[0] || 0
             if (mode === 0) for (let x = cx; x < cols; x++) row[x] = ' '
@@ -143,6 +152,7 @@ export function makeScreen(cols = 400, rows = 200): Screen {
         }
         case 'J': {
           const mode = nums[0] || 0
+          if (mode !== 3) wrapPending = false
           const from = mode === 0 ? cy : 0
           const to = mode === 1 ? cy : rows - 1
           for (let y = from; y <= to; y++) {
@@ -167,34 +177,44 @@ export function makeScreen(cols = 400, rows = 200): Screen {
       .join('\n')
   }
 
-  return { feed, lines, text, cursor: () => ({ cy, cx }) }
+  return { feed, lines, columns: () => cols, text, cursor: () => ({ cy, cx }) }
 }
 
-/**
- * 'clear' -> injectCommand's existing ESC+settle+paste sequence is safe to
- * run unchanged. 'modal' -> refuse the whole sequence, neither the ESC nor
- * the paste (see classifyInjectGuard's own doc for why both destroy on this
- * one).
- */
 export type InjectGuardState = 'clear' | 'modal'
 
-/**
- * Non-modal iff the cursor sits one row above the composer's chevron marker:
- * the trust/config dialog paints the same glyph but leaves the cursor three
- * rows below it, on the footer. No confirmed match defaults to modal (fail
- * closed): the @-mention picker and the tool-permission prompt could not be
- * captured. Combined at the call site with a second, independent signal,
- * since this geometric rule comes from five captures, not a swept domain,
- * and a future CLI layout could defeat it silently.
- */
 export function classifyInjectGuard(screen: Screen): InjectGuardState {
+  const horizontal = String.fromCodePoint(0x2500)
+  const chevron = String.fromCodePoint(0x276f)
+  const dialogTopLeft = String.fromCodePoint(0x256d)
+  const dialogTopRight = String.fromCodePoint(0x256e)
+  const dialogBottomLeft = String.fromCodePoint(0x2570)
+  const dialogBottomRight = String.fromCodePoint(0x256f)
   const lines = screen.lines()
-  // U+276F is the chevron cursor glyph, escaped rather than painted
-  // literally into this source file (see this function's own doc above).
-  const chevronRow = lines.findIndex((l) => /^\s*\u276F/.test(l))
-  if (chevronRow <= 0) return 'modal'
   const { cy } = screen.cursor()
-  return cy === chevronRow - 1 ? 'clear' : 'modal'
+  const isBorder = (line: string): boolean =>
+    [...line].length === screen.columns() && [...line].every((character) => character === horizontal)
+  const isPicker = (line: string): boolean => new RegExp(`^\\s*${chevron}\\s+\\d+\\.`).test(line)
+  const isDialogTop = (line: string): boolean => line.trimStart().startsWith(dialogTopLeft) && line.trimEnd().endsWith(dialogTopRight)
+  const isDialogBottom = (line: string): boolean =>
+    line.trimStart().startsWith(dialogBottomLeft) && line.trimEnd().endsWith(dialogBottomRight)
+
+  if (lines.some(isPicker) || (lines.some(isDialogTop) && lines.some(isDialogBottom))) return 'modal'
+
+  const top = lines[cy - 1]
+  const composer = lines[cy]
+  const bottom = lines[cy + 1]
+  if (
+    top !== undefined &&
+    composer !== undefined &&
+    bottom !== undefined &&
+    isBorder(top) &&
+    composer.trimStart().startsWith(chevron) &&
+    isBorder(bottom)
+  ) {
+    return 'clear'
+  }
+
+  return 'modal'
 }
 
 /**
