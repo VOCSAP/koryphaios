@@ -327,6 +327,16 @@ n'efface pas ses etats, il les rend **suspects** (torche eteinte sur sa
 pastille) ; le detachement explicite ou la mort du processus (probe
 `process.kill(pid, 0)` cote avatar) est l'extincteur non textuel.
 
+Le push sur changement est complété par la répétition du snapshot courant
+toutes les 5 s. Après 15 s sans `/state` valide pour CE branchement, mesurées
+par une horloge monotone locale à l'avatar, le Deck devient suspect. Le
+retour d'un snapshot valide rétablit sa fraîcheur. Ces délais qualifient la
+liaison, jamais l'activité des agents : les derniers compteurs sont
+conservés, non remplacés par zéro. Un détachement explicite ou une mort de
+processus confirmée retire le Deck ; un échec de probe non concluant ne
+prouve pas sa mort. Les valeurs 5 s / 15 s sont les paramètres techniques
+retenus pour A1, non une mesure de performance.
+
 ---
 
 ## 4. Le personnage : proposition de design
@@ -368,7 +378,7 @@ visage.
 
 | Priorite | Etat | Ce que voit l'operateur | Source | Extincteur | Couleur |
 |---|---|---|---|---|---|
-| 1 | **Panne** : broker injoignable, ou un Deck qui ne repond plus | masque grise, fissure, orchestra eteinte ; pastille du Deck avec `torchOut` | `/health` en echec ; probe pid du Deck | retour a `/health` OK ; detachement propre | rouge banniere `#a03030` |
+| 1 | **Panne** : au moins un Deck branché a une liaison suspecte ou un broker injoignable | masque grisé, fissure ; seules les pastilles des Decks concernés portent `torchOut`, les autres restent actives | fraîcheur du `/state` par branchement ; `/health` par broker | snapshot valide pour la liaison ; `/health` OK pour le broker ; retrait explicite du Deck ou mort confirmée | rouge bannière `#a03030` |
 | 2 | **Reclame** (niveau A) | sourcils leves, yeux tournes vers l'operateur, halo or, badge compteur ; petit rebond a chaque NOUVEL episode, puis immobile | approbation `pending` ; `ask_operator` ; `attention` du Deck | l'approbation quitte `pending` ; le Deck baisse `waiting` | or `--glow` (c'est SA couleur) |
 | 3 | **Perdu** (niveau B) | masque tragique, une pastille grise avec `warning` ; pour un quota, une `clepsydra` | tuile `exited` non voulue ; `rateLimited` | relance de la tuile ; `resumeAt` atteint et tuile repartie | ambre `#e0b341` (quota), violet `#b678ff` (perdu) |
 | 4 | **Courrier** (niveau C) | expression neutre, badge caducee avec compteur | messages inbox non lus (curseur avatar) | lecture depuis la bulle, ou `seen` propage par le Deck | accent `--accent` |
@@ -377,6 +387,13 @@ visage.
 | 7 | **Seul** | yeux **entierement fermes**, aucune respiration, orchestra VIDE, masque legerement incline | aucun Deck branche (**DECIDE**, 2026-09-27) | un `attach` | `--fg-dim`, plus sombre qu'Endormi |
 | -- | **Accompli** (transitoire, 3 s) | laurier qui apparait et s'efface | une carte de roadmap passe `done` par un agent ; un lot se termine | minuterie (transitoire, PAS un etat : R2 ne s'applique pas a un ornement) | or, mais un ORNEMENT, pas un halo : ne pas confondre avec « Reclame » |
 | -- | **Reflechit** (bulle) | « ... » anime DANS la bulle, jamais sur le visage | un tour du cerveau en cours | fin du tour, erreur, ou annulation | accent |
+
+**DÉCIDÉ (opérateur, 2026-09-28, décision 20).** Le visage résume l'existence
+d'une panne, pas une panne de tous les Decks. Un broker défaillant affecte
+seulement les Decks qui l'utilisent ; une liaison Deck défaillante n'affecte
+pas ses voisins. Les motifs de panne restent indépendants : un heartbeat
+ne guérit pas un broker injoignable. Quand il ne reste aucun Deck branché,
+l'état est « Seul ».
 
 Regle de lecture : **le visage porte l'urgence, l'orchestra porte le volume,
 les badges portent le detail**. Trois couches, trois questions (« dois-je
@@ -779,19 +796,43 @@ regarder la planche des masques a 2 m et dire lequel se lit.
   branches ; renommable dans le Deck, transmis au branchement suivant ;
   l'infobulle porte le chemin complet et le broker. Ni jeton `deck-control`
   ni `deck_control_url` (decision 12, palier B1).
+  Le branchement porte aussi `projectDir` (chemin complet, métadonnée) et
+  `deckPid` (probe et cible du geste de premier plan). Sa clé est
+  `{deckRunId, broker_url}`, où `deckRunId` est minté une fois par lancement
+  du Deck, conservé aux reconnexions, jamais persisté. Un nouvel attach de
+  cette même run remplace sa connexion, sans créer un deuxième Deck ; un
+  autre lancement n'hérite pas de ses compteurs ni commandes. Ni le nom,
+  ni le chemin, ni le groupe ne sont une clé de Deck.
+
+  Le nom est celui du workspace courant sauvegardé, sauvegarde automatique
+  incluse ; sinon c'est le nom du dossier. Aucun test sur `pinned`, aucune
+  heuristique sur la forme du nom ne prétend identifier un nom humain.
+  Un renommage explicite prend le pas sur le nom automatique ; la règle de
+  transmission au branchement suivant reste inchangée.
 - Cote Deck : `ensureAvatar()` au demarrage sur le modele de
   `ensureLoopbackBroker` ; pousser les compteurs
   d'activite (derives de `SessionRuntime`, pur et teste) ; ouvrir la
   connexion sortante qui recoit les commandes consenties (`focus` en A1,
   `replied` en A3), pick-list `AVATAR_COMMANDS` cote Deck ; `detach` dans
-  `before-quit.ts` ; reglages `avatar.autoAttach` (global) / opt-out projet.
+  `before-quit.ts` ; `avatar.autoAttach=true` par défaut globalement
+  (décision 1, §3.4), avec opt-out projet prioritaire. Ne pas confondre ce
+  réglage avec le démarrage à l'ouverture de session OS, off par défaut.
 - Tray : icone a etat, sous-menu par Deck, DND, quitter. Aucune animation.
 - Tests : pur `shared/avatar-state.ts` (agregation + priorite des etats, R1/R2
   : un Deck muet devient suspect, jamais efface ; zero Deck = « Seul », pas
   « Endormi ») ; `desktop-state-scope` classe `avatar.json` et
   `avatar-settings.json` en MACHINE ; un branchement de `protocol_version`
   inconnue est refuse et trace, jamais accepte en silence ; un doublon de nom
-  prend « (2) » ; une panne est rendue PAR Deck (par broker), jamais globale ; une commande hors `AVATAR_COMMANDS` est rejetee et tracee.
+  prend « (2) » ; une panne est rendue PAR Deck (par broker), sans dégrader
+  les autres Decks ; le visage résume la présence d'une panne ; une commande
+  hors `AVATAR_COMMANDS` est rejetee et tracee.
+- Gate Windows de premier plan : clic réel sur l'item Tray du Deck choisi,
+  menu fermé, cession du droit via `AllowSetForegroundWindow(deckPid)`, puis
+  commande consentie `focus`. Vérifier le PID de la fenêtre effectivement
+  au premier plan, pas seulement le retour des API. Tester deux Decks du
+  même projet ; le mauvais Deck ne doit jamais recevoir le focus.
+  La preuve obtenue par clic dans une fenêtre ne ferme pas ce gate Tray.
+  Un échec du geste reste visible et tracé, jamais annoncé comme un succès.
 - Skills : `add-deck-view` (canal IPC), `error-reporting`.
 
 ### Palier A2 : le personnage et les etats
@@ -959,6 +1000,15 @@ Second tour (seance de questions sur ce brief) :
 19. **Instructions du cerveau** : aucun outil ne produit la Voix ; le
    cerveau propose un brouillon, le bouton « Envoyer en mon nom » l'envoie ;
    prompt en constante de code (§4.5, palier B1).
+
+Arbitrage complémentaire (2026-09-28) :
+
+20. **Visage Panne : option A, choix opérateur.** Le visage passe à Panne
+    dès qu'au moins un Deck branché a une liaison suspecte ou un broker
+    injoignable. Seules les pastilles des Decks concernés portent
+    `torchOut` ; les autres Decks ne sont pas dégradés, leur activité reste
+    visible. Le visage résume la présence d'une panne, pas une panne de
+    tous les Decks. Zéro Deck reste « Seul » (§4.2, §8 palier A1).
 
 Reste ouvert, a mesurer au palier 0 SUR LE POSTE : transparence,
 always-on-top, tray et passage au premier plan (Windows) ; auto-compaction d'un `claude -p --input-format stream-json` longue
