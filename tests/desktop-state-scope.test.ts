@@ -201,6 +201,21 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     scope: "machine",
     reason: "app settings under userData/config (store.ts), protected by the inter-process file lock; the same name also names the launch config and a repo's peers config, which are not app state",
   },
+  "avatar.json": {
+    kind: "literal",
+    scope: "machine",
+    reason: "the one-user Avatar rendezvous (pid, loopback port and bearer token); every Deck on this workstation must discover the same Avatar process",
+  },
+  "avatar-settings.json": {
+    kind: "literal",
+    scope: "machine",
+    reason: "global Avatar auto-attach choice and project opt-outs are operator settings shared by every Deck on this workstation",
+  },
+  lockFile: {
+    kind: "constructor",
+    scope: "machine",
+    reason: "the sibling lock serializes writes to the machine-shared Avatar settings file across every Deck window",
+  },
   "sessions.json": {
     kind: "literal",
     scope: "machine",

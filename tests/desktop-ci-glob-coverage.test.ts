@@ -216,6 +216,12 @@ test("the integration step carries no continue-on-error / if: neutralization (pr
   expect(stepText).not.toMatch(/^\s*if:/m);
 });
 
+test("the workflow has no display-server dependency before the mandatory Electron integration step", () => {
+  expect(REAL_WORKFLOW_TEXT).not.toContain("Xvfb");
+  expect(REAL_WORKFLOW_TEXT).not.toContain("DISPLAY=:99");
+  expect(REAL_WORKFLOW_TEXT).not.toContain("/tmp/.X11-unix");
+});
+
 test("mutation proof, N4 (reviewer 2026-08-28): a step renamed to a SUPERSTRING of the claimed name is NOT matched -- the marker is anchored to end-of-line, not a substring search", () => {
   // The exact composition the reviewer measured: renaming the step to carry
   // an OS qualifier while adding a conditional -- a continue-on-error/if:

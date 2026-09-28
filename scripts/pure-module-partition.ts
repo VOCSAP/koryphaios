@@ -43,6 +43,8 @@ export const EXEMPTIONS: Exemptions = {
       `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron and type-checks against desktop/node_modules/typescript); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
     "desktop-clodex-spawn-win32.test.ts":
       `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron directly); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
+    "desktop-avatar-transport.test.ts":
+      `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron for its permanent TLS regression); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
   },
 };
 
