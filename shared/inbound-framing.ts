@@ -66,7 +66,7 @@ export function renderPeerMessage(text: string): string {
 // Kept as a separate constant from PEER_INBOUND_NOTE, which is pinned by exact
 // equality in a test, so the two guarantees stay independently editable.
 export const LEAD_DIRECTIVE_NOTE =
-  "\n\n[claude-peers] If the peer that just replied has finished its task and its context is now stale, consider forcing a /clear on it.";
+  "\n\n[claude-peers] If the peer that just replied has finished its task and its context is now stale, consider a /clear on it with deck_run_directive.";
 
 // Card 75d38381: triggers the routing rule at the moment the decision is
 // actually made (message reception), rather than relying on a role

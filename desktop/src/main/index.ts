@@ -104,8 +104,7 @@ import {
   unresolvedDirectiveNote,
   type DispatchedEntry
 } from './dispatch'
-import { directiveKeys, isDirectiveCommand, resolveDirectiveTargets } from './directive'
-import { unreachedTargets, unreachedTargetsText } from './directive-journal'
+import { createDirectiveBindings, type DirectiveRunDeps } from './directive-run'
 import { decidePeerAnnounce } from './peer-rotation'
 import { ownsIdleLock } from './idle-lock'
 import type {
@@ -1831,102 +1830,24 @@ const runMagicCompact = async (
   journal.add('dispatch', `magic_compact -> "${peerId}": ${why}, fell back to /compact (${o})`)
 }
 
-/**
- * Executes a directive card by typing the command into the terminals of its
- * live targets, fire-and-forget per target so the dispatch loop never blocks;
- * it never announces to the lead. Returns what the card reached, read from
- * resolveDirectiveTargets's own buckets.
- * Must never reject: there is no await, so the only way to a rejected promise
- * is a synchronous throw in this prelude. sanitizeRoadmapItem has already
- * typed every field of item, and the two fs-touching calls swallow their own
- * errors and return false/null.
- */
-const executeDirective = async (item: RoadmapItem): Promise<DirectiveDispatch> => {
-  const cmd = item.directive
-  // Re-validate the enum Deck-side (hostile input #2: broker response field).
-  if (!isDirectiveCommand(cmd)) {
-    reportError('dispatch', `directive card "${item.title}" carries no valid command; skipped`)
-    // `directive: null` is the discriminant for "refused BEFORE any
-    // resolution": both lists are empty because no bucket was ever computed,
-    // not because every requested id was reached.
-    return { id: item.id, title: item.title, directive: null, injected: [], unreached: [] }
-  }
-  const keys = directiveKeys(cmd)
-  // Audit fix #8 (card 6c380073, dev2's directive.ts): `ambiguous` is READ
-  // from resolveDirectiveTargets's own output, never re-derived here --
-  // re-filtering service.list() a second time would be a second liveness
-  // predicate, the exact drift this lot exists to close.
-  const { matched, missing, ambiguous } = resolveDirectiveTargets(item.target_peer_ids, service.list())
-  if (matched.length === 0) {
-    // A collision (id resolved to MORE THAN ONE live tile) is a live target
-    // refused for safety, not an absent one -- "no live target" is FALSE in
-    // that case (the target exists, twice) and misleads whoever reads the
-    // journal into thinking the peer_id was simply wrong. Both categories are
-    // always reported: an earlier version of this branch listed ONLY the
-    // ambiguous ids and silently dropped the plainly-absent ones, which is
-    // why the wording now lives in a pure, probed function
-    // (directive-journal.ts) instead of inline here.
-    const detail = unreachedTargetsText(missing, ambiguous) || `requested: ${item.target_peer_ids.join(', ') || 'none'}`
-    journal.add('dispatch', `directive ${keys} "${item.title}": ${detail}`)
-    return {
-      id: item.id,
-      title: item.title,
-      directive: cmd,
-      injected: [],
-      unreached: unreachedTargets(missing, ambiguous)
-    }
-  }
-  // Resolve the magic-compact decision ONCE per card (not per target): both
-  // resolveFeatures (config reads) and the plugin fs scan are invariant across
-  // the card's targets. CLAUDE_CONFIG_DIR is honored so a relocated ~/.claude
-  // is still probed.
-  let magicMode: MagicCompactMode = 'off'
-  let useMagic = false
-  if (cmd === 'magic_compact') {
-    magicMode = resolveFeatures(config.projectDir).magicCompact
+const directiveRunDeps: DirectiveRunDeps = {
+  listSessions: () => service.list(),
+  injectCommand: (tileId, keys) => service.injectCommand(tileId, keys),
+  runMagicCompact: (tileId, peerId, useMagic, mode) => runMagicCompact(tileId, peerId, useMagic, mode),
+  // CLAUDE_CONFIG_DIR is honored so a relocated ~/.claude is still probed.
+  resolveMagic: () => {
+    const mode = resolveFeatures(config.projectDir).magicCompact
     const claudeConfigDir = process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude')
-    useMagic = magicMode === 'on' || (magicMode === 'auto' && magicCompactPluginPresent(claudeConfigDir))
-  }
-  for (const t of matched) {
-    if (cmd === 'magic_compact') {
-      void runMagicCompact(t.id, t.peerId, useMagic, magicMode).catch((e) =>
-        reportError('dispatch', `magic_compact failed for "${t.peerId}"`, e)
-      )
-    } else {
-      void service
-        .injectCommand(t.id, keys)
-        .then((outcome) => journal.add('dispatch', `directive ${keys} -> "${t.peerId}": ${outcome}`))
-        .catch((e) => reportError('dispatch', `directive injection failed for "${t.peerId}"`, e))
-    }
-  }
-  if (missing.length > 0) {
-    // Same composition as the no-match branch above, from the same pure
-    // function -- two call sites, one wording, so neither can drop a category
-    // the other reports.
-    journal.add('dispatch', `directive ${keys} "${item.title}": ${unreachedTargetsText(missing, ambiguous)}`)
-  }
-  return {
-    id: item.id,
-    title: item.title,
-    directive: cmd,
-    injected: matched.map((t) => ({ tileId: t.id, peerId: t.peerId })),
-    unreached: unreachedTargets(missing, ambiguous)
-  }
+    return { mode, useMagic: mode === 'on' || (mode === 'auto' && magicCompactPluginPresent(claudeConfigDir)) }
+  },
+  journal: (line) => journal.add('dispatch', line),
+  reportError: (message, error) => reportError('dispatch', message, error)
 }
 
-// Multi-dispatch (roadmap card 5852c074): sends the WHOLE head wave (all
-// items sharing the queue's head rank, wavesOf in shared/workflow) to the
-// team-lead per call, not just its first member. splitWave/dispatchNormalWave
-// (./dispatch) hold the pure decision/orchestration logic so they stay
-// bun-testable; this function only drives the Electron-coupled network calls
-// and owns the dispatchedIds mutation (single source of truth, as before).
+const directiveBindings = createDirectiveBindings(directiveRunDeps)
+const executeDirective = async (item: RoadmapItem): Promise<DirectiveDispatch> => directiveBindings.executeDirective(item)
+
 const dispatchNextInner = async (): Promise<DispatchResult> => {
-  // Card bf76d37f: declared OUTSIDE the try, and accumulated across guard
-  // iterations, because the drain can execute several all-directive waves
-  // before it returns -- possibly through the empty-queue exit, or through the
-  // outer catch. Every one of those exits must still report the directives
-  // this call already ran; resetting per wave, or scoping this to the try,
-  // would drop exactly the work the caller cannot otherwise see.
   const executedDirectives: DirectiveDispatch[] = []
   const announcedMembers: DispatchedWaveMember[] = []
   // Attached to EVERY exit rather than to the success path only. Each half is
@@ -2800,6 +2721,7 @@ const controlDeps: DeckControlDeps = {
   },
   listSessions: () => service.list(),
   sandboxExec: (command) => sandbox.supervisorExec(command),
+  runDirective: directiveBindings.runDirective,
   restartSession: (id) => void service.restart(id),
   closeSession: (id) => service.remove(id),
   createWorktree: async (branch) => {

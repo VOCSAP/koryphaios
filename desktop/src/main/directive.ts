@@ -20,8 +20,17 @@ export const DIRECTIVE_KEYS: Record<RoadmapDirective, string> = {
   magic_compact: '/magic-compact'
 }
 
-/** Peer-id charset guard mirroring the broker's PEER_ID_REGEX (defense in depth). */
-const PEER_ID_RE = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/
+export const DIRECTIVE_ACCEPTS_PROMPT: Record<RoadmapDirective, boolean> = {
+  clear: false,
+  compact: true,
+  magic_compact: false
+}
+
+export function directiveCommands(): RoadmapDirective[] {
+  return Object.keys(DIRECTIVE_KEYS) as RoadmapDirective[]
+}
+
+export const PEER_ID_RE = /^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$/
 
 /** True when `cmd` is a known directive command (re-validates a broker value). */
 export function isDirectiveCommand(cmd: unknown): cmd is RoadmapDirective {

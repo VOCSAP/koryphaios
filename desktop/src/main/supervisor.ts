@@ -81,19 +81,12 @@ export interface SupervisorMcpConfigInput {
   controlToken: string
 }
 
-/**
- * card ff091064: deck-control tool subset for the team-lead tile, spawn and
- * close only; inventory, worktrees, templates, sandbox and announce stay
- * supervisor-only.
- * deck_restart_session is deliberately excluded: a team-lead has no reason to
- * restart a tile it did not spawn, including the operator's own.
- * Tool allow-list enforcement also runs server-side, so this array is not the
- * only barrier even if it were widened.
- */
+/** deck_restart_session stays excluded because a team-lead cannot restart tiles it did not spawn. */
 export const TEAM_LEAD_DECK_TOOLS = [
   'deck_spawn_session',
   'deck_spawn_team',
-  'deck_close_session'
+  'deck_close_session',
+  'deck_run_directive'
 ] as const
 
 /**

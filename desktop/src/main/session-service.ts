@@ -1526,8 +1526,8 @@ export class SessionService extends EventEmitter {
   /**
    * Types a command the way the operator would: dismiss any open menu, settle,
    * then one write carrying the text and its submit keystroke.
-   * command is always a code constant chosen by the caller, never a value from
-   * the broker, a repo, or a peer.
+   * A directive command has a code-constant prefix; any appended prompt was
+   * sanitized before this boundary.
    * Gated on the tile being idle so a directive never interrupts a live turn;
    * if it never falls idle within the deadline the command is not sent and
    * 'busy-timeout' is returned.

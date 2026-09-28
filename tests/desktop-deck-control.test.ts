@@ -14,6 +14,7 @@ import {
   type SpawnSummary
 } from "../desktop/src/main/deck-control.ts";
 import { EMBEDDED_AGENTS, getEmbeddedAgent } from "../desktop/src/main/team-embedded.ts";
+import { directiveCommands } from "../desktop/src/main/directive.ts";
 import { sanitizeRole } from "../desktop/src/shared/role.ts";
 import {
   writeSupervisorMcpConfig,
@@ -94,6 +95,13 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   leadMcpCalls: { token: string; callerId: string; allowedTools: readonly string[] }[];
   revokedLeadCallerIds: string[];
   spawnOpts: { checkpoint: boolean; hasLead: boolean }[];
+  directiveRuns: {
+    directive: string;
+    peerIds: string[];
+    prompt: string | undefined;
+    callerId: string;
+    excludeSupervisor?: boolean;
+  }[];
 } {
   const closed: string[] = [];
   const removedWt: string[] = [];
@@ -101,19 +109,13 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
   const approvals: SpawnSummary[][] = [];
   const spawnInputs: CreateSessionInput[] = [];
   const restarted: string[] = [];
-  // Card 89cb66f9 (review round 1): captures what deck-control.ts ACTUALLY
-  // passes as `opts` to spawnTemplateEntry -- the previous stub threw it
-  // away, so a mutation of `checkpoint`/`hasLead` in the case body stayed
-  // green under every test.
   const spawnOpts: { checkpoint: boolean; hasLead: boolean }[] = [];
-  // Card 6c380073 audit fix #3: captures what spawnEntry ACTUALLY passes to
-  // writeTeamLeadMcpConfig, so a test can assert the real identity/scope
-  // instead of only the stub's fixed return value (the coverage gap the
-  // audit named -- the previous stub threw its args away entirely).
   const leadMcpCalls: { token: string; callerId: string; allowedTools: readonly string[] }[] = [];
   const revokedLeadCallerIds: string[] = [];
+  const directiveRuns: { directive: string; peerIds: string[]; prompt: string | undefined; callerId: string }[] = [];
   let n = 0;
   return {
+    directiveRuns,
     closed,
     removedWt,
     acked,
@@ -179,11 +181,6 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
       acked.push(id);
     },
     writeEmbeddedPrompt: (id) => `/state/embedded-agent-${id}.md`,
-    // Return value stays the OLD fixed string on purpose -- the pre-existing
-    // "embedded spawn" test below asserts this exact literal for TWO
-    // successive team-lead spawns. What changed is that the real
-    // (token, callerId, allowedTools) spawnEntry passes are now CAPTURED
-    // rather than discarded, so a caller can assert on them separately.
     writeTeamLeadMcpConfig: (token, callerId, allowedTools) => {
       leadMcpCalls.push({ token, callerId, allowedTools });
       return "/state/team-lead-mcp.json";
@@ -191,10 +188,11 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
     revokeTeamLeadMcpConfig: (callerId) => {
       revokedLeadCallerIds.push(callerId);
     },
-    // Card 6c380073 audit fix #1c: unrestricted by default (mirrors "no
-    // shell-field gate in play" for tests not exercising it); tests below
-    // that DO care override this per-call.
-    confirmSpawnShellFields: () => true
+    confirmSpawnShellFields: () => true,
+    runDirective: (directive, peerIds, prompt, callerId) => {
+      directiveRuns.push({ directive, peerIds, prompt, callerId });
+      return { injected: peerIds.map((p) => ({ tileId: `tile-${p}`, peerId: p })), unreached: [] };
+    }
   };
 }
 
@@ -2343,4 +2341,122 @@ test("deck_spawn_session passes the RAW resolved entry as approveSpawn's `plan` 
     plan[0]!.announce,
     "'announce' has no field on SpawnSummary at all -- it must still reach approveSpawn via `plan`"
   ).toBe("tell the operator");
+});
+
+test("deck_run_directive forwards the validated arguments and the server-known callerId", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const res = await call(srv, "deck_run_directive", {
+    directive: "compact",
+    peer_ids: ["alpha", "beta"],
+    prompt: "keep the API decisions"
+  });
+  expect(res.status).toBe(200);
+  expect(res.body.result).toEqual({ directive: "compact", injected: ["alpha", "beta"], unreached: [] });
+  expect(deps.directiveRuns).toEqual([
+    { directive: "compact", peerIds: ["alpha", "beta"], prompt: "keep the API decisions", callerId: "supervisor" }
+  ]);
+});
+
+test("deck_run_directive refuses a hostile directive, a prompt on clear, and bad peer_ids before running anything", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const cases: [Record<string, unknown>, string][] = [
+    [{ directive: "rm -rf", peer_ids: ["alpha"] }, "directive must be one of"],
+    [{ directive: "clear", peer_ids: ["alpha"], prompt: "do more" }, "does not accept a prompt"],
+    [{ directive: "magic_compact", peer_ids: ["alpha"], prompt: "5" }, "does not accept a prompt"],
+    [{ directive: "clear", peer_ids: [] }, "peer_ids"],
+    [{ directive: "compact", peer_ids: ["alpha"], prompt: "x".repeat(501) }, "500"]
+  ];
+  for (const [args, reason] of cases) {
+    const res = await call(srv, "deck_run_directive", args);
+    expect(res.status, JSON.stringify(args)).toBe(400);
+    expect(res.body.error, JSON.stringify(args)).toContain(reason);
+  }
+  expect(deps.directiveRuns).toEqual([]);
+});
+
+test("deck_run_directive is refused at POST /call to a caller whose allow-list omits it, and runs nothing", async () => {
+  const deps = makeDeps({ sessions: [] });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const limited = srv.mintCaller("worker", ["deck_list_sessions"]);
+  const refused = await call(srv, "deck_run_directive", { directive: "clear", peer_ids: ["alpha"] }, limited.token);
+  expect(refused.status).toBe(403);
+  expect(deps.directiveRuns).toEqual([]);
+
+  const lead = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
+  const allowed = await call(srv, "deck_run_directive", { directive: "clear", peer_ids: ["alpha"] }, lead.token);
+  expect(allowed.status).toBe(200);
+  expect(deps.directiveRuns.map((r) => r.callerId)).toEqual([lead.callerId]);
+});
+
+test("a restricted caller leaves the supervisor unreached while the unrestricted supervisor can target it", async () => {
+  const state = {
+    sessions: [
+      fakeSession("supervisor", { peerId: "supervisor-peer", supervisor: true }),
+      fakeSession("worker", { peerId: "worker-peer" })
+    ]
+  };
+  const deps = makeDeps(state);
+  deps.runDirective = (_directive, peerIds, _prompt, _callerId, excludeSupervisor?: boolean) => {
+    const reached = peerIds.filter((peerId) =>
+      state.sessions.some((session) => session.peerId === peerId && (!excludeSupervisor || !session.supervisor))
+    );
+    return {
+      injected: reached.map((peerId) => ({ tileId: `tile-${peerId}`, peerId })),
+      unreached: peerIds
+        .filter((peerId) => !reached.includes(peerId))
+        .map((peerId) => ({ peerId, reason: "no-live-target" as const }))
+    };
+  };
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const lead = srv.mintCaller("team-lead", TEAM_LEAD_DECK_TOOLS);
+
+  const restricted = await call(srv, "deck_run_directive", { directive: "clear", peer_ids: ["supervisor-peer", "worker-peer"] }, lead.token);
+  expect(restricted.body.result).toEqual({
+    directive: "clear",
+    injected: ["worker-peer"],
+    unreached: [{ peerId: "supervisor-peer", reason: "no-live-target" }]
+  });
+
+  const unrestricted = await call(srv, "deck_run_directive", { directive: "clear", peer_ids: ["supervisor-peer"] });
+  expect(unrestricted.body.result).toEqual({ directive: "clear", injected: ["supervisor-peer"], unreached: [] });
+});
+
+test("the MCP bridge serves deck_run_directive with the card directive enum and a description within budget", async () => {
+  const srv = await startDeckControl(makeDeps({ sessions: [] }));
+  servers.push(srv);
+  const { send, recv } = await speakMcp({
+    DECK_CONTROL_URL: srv.url,
+    DECK_CONTROL_TOKEN: srv.token,
+    DECK_CONTROL_TOOLS: undefined
+  });
+  send({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+  const listed = (await recv()) as {
+    result: {
+      tools: {
+        name: string;
+        description: string;
+        inputSchema: {
+          properties: {
+            directive?: { enum?: string[] };
+            peer_ids?: { minItems?: number; maxItems?: number };
+            prompt?: { maxLength?: number };
+          };
+          required?: string[];
+        };
+      }[];
+    };
+  };
+  const tool = listed.result.tools.find((t) => t.name === "deck_run_directive");
+  expect(tool, "deck_run_directive is not served by tools/list").toBeDefined();
+  expect(tool!.description.length).toBeLessThanOrEqual(450);
+  expect([...(tool!.inputSchema.properties.directive?.enum ?? [])].sort()).toEqual(directiveCommands().sort());
+  expect(tool!.inputSchema.properties.peer_ids).toEqual(expect.objectContaining({ minItems: 1, maxItems: 16 }));
+  expect(tool!.inputSchema.properties.prompt).toEqual(expect.objectContaining({ maxLength: 500 }));
+  expect(tool!.inputSchema.required).toEqual(["directive", "peer_ids"]);
 });

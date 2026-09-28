@@ -8,6 +8,8 @@
 // tool, and a set-but-empty value is distinct from unset and exposes zero.
 
 import { createInterface } from 'node:readline'
+import { DIRECTIVE_ACCEPTS_PROMPT, directiveCommands } from '../src/main/directive'
+import { DIRECTIVE_MAX_TARGETS, DIRECTIVE_PROMPT_MAX } from '../src/main/directive-run'
 
 const CONTROL_URL = process.env.DECK_CONTROL_URL ?? ''
 const CONTROL_TOKEN = process.env.DECK_CONTROL_TOKEN ?? ''
@@ -164,6 +166,32 @@ const TOOLS = [
           description: 'Peer id of the tile, instead of id (must resolve to exactly one live tile).'
         }
       }
+    }
+  },
+  {
+    name: 'deck_run_directive',
+    description:
+      'Run a directive on live peer tiles now, without a roadmap card: the same effect as a kind=directive card reaching the dispatch queue. clear resets context for free, compact costs one inference, magic_compact uses the plugin and falls back to compact. A peer_id carried by no live tile or by several is reported unreached, never guessed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        directive: { type: 'string', enum: directiveCommands() },
+        peer_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          minItems: 1,
+          maxItems: DIRECTIVE_MAX_TARGETS,
+          description: 'Target peer_ids, from list_peers.'
+        },
+        prompt: {
+          type: 'string',
+          maxLength: DIRECTIVE_PROMPT_MAX,
+          description: `One line, max ${DIRECTIVE_PROMPT_MAX} code points, typed after the command. Only for: ${directiveCommands()
+            .filter((d) => DIRECTIVE_ACCEPTS_PROMPT[d])
+            .join(', ')}.`
+        }
+      },
+      required: ['directive', 'peer_ids']
     }
   },
   {

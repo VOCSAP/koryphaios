@@ -1,11 +1,3 @@
-// A source scan proves which symbols a call site reads but not their
-// composition: with nothing matched and at least one ambiguous id, a prior
-// wording listed only the ambiguous ones and silently dropped the
-// plainly-absent ones -- a real loss, since runDirectiveWave is
-// mark-then-execute and this line is the operator's only report.
-// Three probes (absent only, ambiguous only, both together) cover this; only
-// the third would have caught the composition defect.
-
 import { test, expect } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -14,6 +6,8 @@ import {
   unreachedTargets,
   unreachedTargetsText
 } from "../desktop/src/main/directive-journal.ts";
+import { runDirectiveOn, type DirectiveRunDeps } from "../desktop/src/main/directive-run.ts";
+import type { SessionRuntime } from "../desktop/src/shared/types.ts";
 
 test("absent ids only: every requested id is named", () => {
   const text = unreachedTargetsText(["host-absent", "gone-peer"], []);
@@ -51,23 +45,15 @@ test("nothing unreached yields an empty string, so the caller can skip journalin
 // real call site uses it rather than re-composing its own. Weak by nature
 // (it cannot prove the arguments are the right ones), which is exactly why
 // the probes above exist alongside it.
-test("executeDirective journals through unreachedTargetsText at BOTH of its call sites (real file)", () => {
+test("runDirectiveOn journals through unreachedTargetsText at BOTH of its call sites (real file)", () => {
   const src = readFileSync(
-    join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"),
+    join(import.meta.dir, "..", "desktop", "src", "main", "directive-run.ts"),
     "utf-8"
   );
-  // Symbol + module, not the whole import statement: the specifier list grew a
-  // sibling (unreachedTargets, card bf76d37f) and will grow again.
   expect(src).toMatch(/import \{[^}]*\bunreachedTargetsText\b[^}]*\} from '\.\/directive-journal'/);
   const calls = src.match(/unreachedTargetsText\(missing, ambiguous\)/g) ?? [];
-  // One per branch: the no-match early return, and the partial-miss tail.
   expect(calls.length).toBe(2);
 });
-
-// ---------------------------------------------------------------------------
-// Card bf76d37f: the same split, as DATA, so the buckets travel back to the
-// caller instead of being journaled and then thrown away.
-// ---------------------------------------------------------------------------
 
 test("unreachedTargets: absent and ambiguous are distinct reasons, never conflated", () => {
   expect(unreachedTargets(["dup-peer", "host-absent"], ["dup-peer"])).toEqual([
@@ -120,23 +106,29 @@ test("dispatchedTargetsTail: counts only, singular/plural, and an explicit zero"
   expect(dispatchedTargetsTail(0, 3)).toBe("no target reached, 3 unreached");
 });
 
-// executeDirective's own module imports electron and cannot be imported under
-// bun test, so its return value is the one thing here that only a source scan
-// can cover -- weak by nature, since it cannot prove the values are actually
-// right.
-// The behavior it feeds is instead probed directly, against a live call,
-// elsewhere.
-test("SOURCE SCAN (weak): executeDirective returns the resolver's buckets on every path", () => {
-  const src = readFileSync(
-    join(import.meta.dir, "..", "desktop", "src", "main", "index.ts"),
-    "utf-8"
-  );
-  expect(src).toMatch(/import \{[^}]*\bunreachedTargets\b[^}]*\} from '\.\/directive-journal'/);
-  expect(src).toContain("const executeDirective = async (item: RoadmapItem): Promise<DirectiveDispatch> =>");
-  // One per resolved path: the no-match early return and the final return.
-  // The third path (invalid command) resolves nothing and returns null.
-  expect((src.match(/unreached: unreachedTargets\(missing, ambiguous\)/g) ?? []).length).toBe(2);
-  // The matched tiles are PROJECTED from the resolver's own output, never
-  // re-derived from a second liveness pass over service.list().
-  expect(src).toContain("injected: matched.map((t) => ({ tileId: t.id, peerId: t.peerId }))");
+test("runDirectiveOn reports absent and ambiguous targets in the result and journal", () => {
+  const sessions = [
+    { id: "one", peerId: "twin", status: "running" },
+    { id: "two", peerId: "twin", status: "running" }
+  ] as SessionRuntime[];
+  const journal: string[] = [];
+  const deps: DirectiveRunDeps = {
+    listSessions: () => sessions,
+    injectCommand: async () => "written",
+    runMagicCompact: async () => undefined,
+    resolveMagic: () => ({ useMagic: false, mode: "off" }),
+    journal: (line) => journal.push(line),
+    reportError: () => undefined
+  };
+  const result = runDirectiveOn("clear", ["gone", "twin"], undefined, "reset", deps);
+  expect(result).toEqual({
+    injected: [],
+    unreached: [
+      { peerId: "gone", reason: "no-live-target" },
+      { peerId: "twin", reason: "ambiguous" }
+    ]
+  });
+  expect(journal).toEqual([
+    'directive /clear "reset": no live target: gone; refused: 1 ambiguous (matched more than one live tile): twin'
+  ]);
 });

@@ -421,8 +421,13 @@ test("MUTATION PROOF (Q4): widening or emptying the allow-list passed to mintCal
   }
 });
 
-test("TEAM_LEAD_DECK_TOOLS is exactly the 3 spawn/close tools -- restart deliberately excluded (Card ff091064)", () => {
-  expect([...TEAM_LEAD_DECK_TOOLS]).toEqual(["deck_spawn_session", "deck_spawn_team", "deck_close_session"]);
+test("TEAM_LEAD_DECK_TOOLS exposes spawn, close and run-directive but not restart", () => {
+  expect([...TEAM_LEAD_DECK_TOOLS]).toEqual([
+    "deck_spawn_session",
+    "deck_spawn_team",
+    "deck_close_session",
+    "deck_run_directive"
+  ]);
 });
 
 // Weakest guard in this repo's own hierarchy (source scan only), used because

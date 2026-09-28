@@ -173,6 +173,11 @@ describe("card 7defe381 lot B1: LEAD_DIRECTIVE_NOTE, gated on recipientRole === 
     expect(LEAD_DIRECTIVE_NOTE.startsWith("\n\n[claude-peers] ")).toBe(true);
   });
 
+  test("LEAD_DIRECTIVE_NOTE names the tool that runs /clear directly", () => {
+    expect(LEAD_DIRECTIVE_NOTE).toContain("deck_run_directive");
+    expect(LEAD_DIRECTIVE_NOTE).toContain("/clear");
+  });
+
   test("recipientRole 'team-lead' appends LEAD_DIRECTIVE_NOTE after PEER_INBOUND_NOTE on an ordinary peer message", () => {
     const out = renderInbound("some-peer", BODY, "team-lead");
     expect(out).toBe(`${BODY}${PEER_INBOUND_NOTE}${ROUTING_REMINDER_NOTE}${LEAD_DIRECTIVE_NOTE}`);

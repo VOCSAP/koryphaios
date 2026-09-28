@@ -14,6 +14,7 @@ import type {
   CreateSessionInput,
   LaunchPreset,
   ModelOption,
+  RoadmapDirective,
   SandboxExecResponse,
   SessionRuntime,
   TemplateSummary
@@ -22,6 +23,7 @@ import type { WorktreeInfo } from './worktree-service'
 import type { TemplateInput, TemplateResolveResult } from '../shared/template'
 import { templateInputsOrEmpty } from '../shared/template-apply-outcome'
 import { resolveDirectiveTargets } from './directive'
+import { parseRunDirectiveArgs, type DirectiveRunResult } from './directive-run'
 import { EMBEDDED_AGENTS, getEmbeddedAgent, type EmbeddedAgent } from './team-embedded'
 import { TEAM_PLAYBOOK } from './team-embedded'
 import { TEAM_LEAD_DECK_TOOLS } from './supervisor'
@@ -174,6 +176,13 @@ export interface DeckControlDeps {
    * sandbox service hands it to the container's bash as one argv element.
    */
   sandboxExec(command: string): Promise<SandboxExecResponse>
+  runDirective(
+    directive: RoadmapDirective,
+    peerIds: string[],
+    prompt: string | undefined,
+    callerId: string,
+    excludeSupervisor?: boolean
+  ): DirectiveRunResult
 }
 
 export interface DeckControlServer {
@@ -715,6 +724,17 @@ export function startDeckControl(
         // file. Revoking here too would be a second, divergence-prone path to
         // the same guarantee.
         return { ok: true }
+      }
+
+      case 'deck_run_directive': {
+        const { directive, peerIds, prompt } = parseRunDirectiveArgs(args)
+        const run = deps.runDirective(directive, peerIds, prompt, callerId, restricted)
+        return {
+          directive,
+          injected: run.injected.map((t) => t.peerId),
+          unreached: run.unreached,
+          ...(run.error ? { error: run.error } : {})
+        }
       }
 
       case 'deck_create_worktree': {
