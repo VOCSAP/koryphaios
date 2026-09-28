@@ -16,6 +16,7 @@ import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased before bun resolves it
 import { mockStore, storeMockStubs } from "./_store-mock";
 import * as sharedReorder from "../desktop/src/shared/reorder.ts";
+import * as sharedModels from "../desktop/src/shared/models.ts";
 
 // Dynamic import: must run AFTER GlobalRegistrator.register() above (react-dom
 // inspects window/document at import time).
@@ -100,6 +101,7 @@ mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 // materialization for the whole run, so a partial factory here would starve
 // a later file that needs another export (session-service's reconcileOrder).
 mock.module("@shared/reorder", () => sharedReorder);
+mock.module("@shared/models", () => sharedModels);
 
 // Sidebar.tsx module-level imports CreateMenu (used by Sidebar(), never by
 // SessionRow), whose own import graph (ModelPicker.tsx -> '@shared/models',

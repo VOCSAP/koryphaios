@@ -352,3 +352,49 @@ export function resolveFavorites(
   }
   return out
 }
+
+/**
+ * Default version of each model family, as the operator names it. A session
+ * running a family's default is labelled by the family alone; any other
+ * version keeps its number. Edit here when a family's default moves.
+ */
+export const MODEL_FAMILY_DEFAULTS = {
+  claude: { opus: '5.5', sonnet: '5', haiku: '4.5' },
+  clodex: { sol: '5.6', terra: '5.6' }
+} as const satisfies Record<'claude' | 'clodex', Record<string, string>>
+
+const CONTEXT_SUFFIX_RE = /\[1m\]$/i
+const CLAUDE_ID_RE = /^claude-([a-z]+)-(\d{1,2}(?:-\d{1,2})*)(?:[-@]\d{8})?$/
+const CLODEX_ID_RE = /^clodex:[^:]*:(.+)$/
+const CLODEX_MODEL_RE = /^gpt-(\d+(?:\.\d+)*)-([a-z]+)$/
+
+function familyDefault(table: Readonly<Record<string, string>>, family: string): string | null {
+  return Object.prototype.hasOwnProperty.call(table, family) ? (table[family] ?? null) : null
+}
+
+/**
+ * Short badge label for a live session's model. Works on the stable id, not
+ * the display name, which carries suffixes like "(1M context)"; the `[1m]`
+ * and date suffixes of an id are not versions. Anything unrecognised falls
+ * back to `displayName`, never to an invented label.
+ */
+export function shortModelLabel(modelId: string, displayName: string): string {
+  const id = modelId.trim().replace(CONTEXT_SUFFIX_RE, '')
+  const clodex = CLODEX_ID_RE.exec(id)
+  if (clodex) {
+    const model = clodex[1]!.replace(CONTEXT_SUFFIX_RE, '')
+    if (!model) return displayName
+    const m = CLODEX_MODEL_RE.exec(model)
+    const def = m ? familyDefault(MODEL_FAMILY_DEFAULTS.clodex, m[2]!) : null
+    if (!m || def === null) return model
+    return m[1] === def ? m[2]! : `${m[2]} ${m[1]}`
+  }
+  const claude = CLAUDE_ID_RE.exec(id)
+  if (!claude) return displayName
+  const family = claude[1]!
+  const def = familyDefault(MODEL_FAMILY_DEFAULTS.claude, family)
+  if (def === null) return displayName
+  const version = claude[2]!.replace(/-/g, '.')
+  const name = family.charAt(0).toUpperCase() + family.slice(1)
+  return version === def ? name : `${name} ${version}`
+}

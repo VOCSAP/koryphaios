@@ -15,6 +15,7 @@ import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased before bun resolves it
 import { mockStore, storeMockStubs } from "./_store-mock";
 import * as sharedReorder from "../desktop/src/shared/reorder.ts";
+import * as sharedModels from "../desktop/src/shared/models.ts";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -57,6 +58,7 @@ function initialFakeState(): FakeDeckState {
 const fakeUseDeck = create<FakeDeckState>(() => initialFakeState());
 mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 mock.module("@shared/reorder", () => sharedReorder);
+mock.module("@shared/models", () => sharedModels);
 mock.module("../desktop/src/renderer/src/components/CreateMenu.tsx", () => ({
   CreateMenu: () => {
     throw new Error("CreateMenu stub rendered -- this file only mounts SessionRow");

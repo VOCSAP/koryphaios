@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { SessionRuntime } from '@shared/types'
 import { moveBeside } from '@shared/reorder'
+import { shortModelLabel } from '@shared/models'
 import { GLYPH_ACTIONS, GLYPH_BADGES, GLYPHS, PithosGlyph, roleGlyph } from './icons'
 import { useDeck } from '../store'
 import { formatPeerTable } from '../peer-table'
@@ -264,7 +265,7 @@ export function SessionRow({
             modelId: session.liveStatus.modelId
           })}
         >
-          {session.liveStatus.model}
+          {shortModelLabel(session.liveStatus.modelId, session.liveStatus.model)}
         </span>
       )}
       {!collapsed && session.liveStatus && (
