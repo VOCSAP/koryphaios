@@ -291,8 +291,7 @@ connaitre. **PROPOSE** : l'avatar est un **processus separe**, un par
 utilisateur OS, decouvert et lance sur le modele exact du broker loopback
 (`ensureLoopbackBroker` : sonder `/health`, sinon spawner detache, attendre
 6 s). Fichier de rendez-vous `avatar.json` `{pid, port, token}` dans le
-repertoire d'etat MACHINE, cree en `wx` avec reprise sur pid mort (le
-protocole de `config.json.lock` existe deja). Le premier Deck le lance, les
+repertoire d'etat MACHINE, cree en `wx` avec reprise sur pid mort. Le premier Deck le lance, les
 suivants s'y branchent. **DECIDE (operateur, 2026-09-27)** : l'avatar
 **survit** a la fermeture du dernier Deck et ne se ferme que depuis le tray
 (ou par la fin de session OS). Seul, il prend l'etat « Seul » de §4.2 (yeux
@@ -787,7 +786,7 @@ regarder la planche des masques a 2 m et dire lequel se lit.
 ### Palier A1 : processus avatar, branchement, tray (sans personnage, sans inbox)
 
 - `desktop/src/avatar/` : point d'entree `kory --avatar`, `avatar.json`
-  (verrou `wx`, reprise pid mort : imiter `peers-config-store.ts`), endpoint
+  (verrou `wx`, reprise pid mort), endpoint
   loopback `POST /attach|/detach|/state` (Bearer, JSON, tailles bornees).
   Le branchement porte `protocol_version` (decision 13), `broker_url` du Deck
   (decision 16 ; l'identite d'un Deck branche inclut son broker) et son

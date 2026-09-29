@@ -1140,10 +1140,11 @@ par le broker local) et arbitre les conflits dans le Deck. Reste ouvert :
       ne sert jamais ces routes même si `serve_replicas: true` est aussi posé
       dessus (avertissement au démarrage).
 - [x] **Écriture de `config.json` sans verrou inter-processus** (résiduel) —
-      livré : un verrou fichier inter-processus (`.lock`, `O_EXCL`) protège
-      désormais chaque écriture de `config.json`, avec reprise si le PID
-      détenteur est mort et le verrou vieux de ~10 s, un nombre de tentatives
-      borné, et un nom de fichier temporaire unique par écrivain.
+      livré : chaque écriture de `config.json` se fait sous le verrou
+      d'écriture SQLite de `config.json.lock.sqlite` (`BEGIN IMMEDIATE`,
+      `withFileLock`), libéré par le système à la mort du détenteur, sans
+      reprise de verrou périmé ; attente bornée (`busy_timeout` 1 s) et nom
+      de fichier temporaire unique par écrivain.
 - [x] **`peersConfig:get` lisible par un companion distant appairé**
       (résiduel) — livré : plus aucun payload atteignable par un companion ne
       porte `brokerUrl`, `hasToken` ou `upstream_url` -- le canal `peersConfig:get`

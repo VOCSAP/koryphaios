@@ -192,7 +192,7 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
   lockPath: {
     kind: "constructor",
     scope: "project",
-    reason: "<id>.lock next to a workspace JSON (workspace-lock.ts) and <config.json>.lock (peers-config-store.ts): sidecars of the file they guard",
+    reason: "<id>.lock next to a workspace JSON (workspace-lock.ts) and <file>.lock.sqlite (file-lock.ts): sidecars of the file they guard",
   },
 
   // ----- MACHINE: belongs to the operator and the workstation -----
@@ -210,11 +210,6 @@ const STATE_SCOPES: Record<string, StateFileRule> = {
     kind: "literal",
     scope: "machine",
     reason: "global Avatar auto-attach choice and project opt-outs are operator settings shared by every Deck on this workstation",
-  },
-  lockFile: {
-    kind: "constructor",
-    scope: "machine",
-    reason: "the sibling lock serializes writes to the machine-shared Avatar settings file across every Deck window",
   },
   "sessions.json": {
     kind: "literal",

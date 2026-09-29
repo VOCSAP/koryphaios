@@ -1,7 +1,8 @@
 import { afterEach, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { Database } from 'bun:sqlite'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import {
   avatarAutoAttachEnabled,
   projectAvatarSettings,
@@ -19,14 +20,6 @@ function settingsFile(): string {
   const dir = mkdtempSync(join(tmpdir(), 'kory-avatar-settings-'))
   dirs.push(dir)
   return join(dir, 'avatar-settings.json')
-}
-
-async function waitForFile(file: string): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (existsSync(file)) return
-    await Bun.sleep(10)
-  }
-  throw new Error(`timed out waiting for ${file}`)
 }
 
 test('auto-attach defaults to enabled when no setting has been persisted', () => {
@@ -83,86 +76,33 @@ test('reports a directory-creation failure as an Avatar settings failure', () =>
   )
 })
 
-test('serializes a settings update behind an existing cross-process write lock', async () => {
+test('a write refused by a held lock names the lock failure and leaves the file untouched', () => {
   const file = settingsFile()
-  const lockFile = `${file}.lock`
-  const script = join(dirname(file), 'hold-settings-lock.mjs')
-  writeFileSync(script, [
-    "import { rmSync, writeFileSync } from 'node:fs'",
-    'const [file, lockFile] = process.argv.slice(2)',
-    "writeFileSync(lockFile, JSON.stringify({ pid: process.pid, at: Date.now() }), { flag: 'wx' })",
-    'setTimeout(() => {',
-    "  writeFileSync(file, JSON.stringify({ autoAttach: false, projects: {} }))",
-    '  rmSync(lockFile)',
-    '}, 50)'
-  ].join('\n'))
-  const holder = Bun.spawn([process.execPath, script, file, lockFile])
-  await waitForFile(lockFile)
-
-  writeProjectAvatarSettings(file, 'project-a', { optOut: true })
-  expect(await holder.exited).toBe(0)
-  expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({
-    autoAttach: false,
-    projects: { 'project-a': { optOut: true } }
-  })
-})
-
-test('recovers a stale settings lock from this process', () => {
-  const file = settingsFile()
-  const lockFile = `${file}.lock`
-  writeFileSync(lockFile, JSON.stringify({ pid: process.pid, at: Date.now() - 11_000 }), { flag: 'wx' })
-
-  writeAvatarAutoAttach(file, false)
-
-  expect(existsSync(lockFile)).toBe(false)
-  expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ autoAttach: false, projects: {} })
-})
-
-test('recovers an empty settings lock after its mtime expires', () => {
-  const file = settingsFile()
-  const lockFile = `${file}.lock`
-  writeFileSync(lockFile, '', { flag: 'wx' })
-  const staleAt = new Date(Date.now() - 11_000)
-  utimesSync(lockFile, staleAt, staleAt)
-
-  expect(writeProjectAvatarSettings(file, 'empty', { optOut: true })).toEqual({ optOut: true })
-  expect(existsSync(lockFile)).toBe(false)
-})
-
-test('recovers a malformed settings lock after its mtime expires', () => {
-  const file = settingsFile()
-  const lockFile = `${file}.lock`
-  writeFileSync(lockFile, '{', { flag: 'wx' })
-  const staleAt = new Date(Date.now() - 11_000)
-  utimesSync(lockFile, staleAt, staleAt)
-
-  expect(writeProjectAvatarSettings(file, 'malformed', { optOut: true })).toEqual({ optOut: true })
-  expect(existsSync(lockFile)).toBe(false)
-})
-
-test('rejects a live stale lock after a bounded wait', async () => {
-  const file = settingsFile()
-  const lockFile = `${file}.lock`
-  const script = join(dirname(file), 'hold-live-settings-lock.mjs')
-  writeFileSync(script, [
-    "import { writeFileSync } from 'node:fs'",
-    'const lockFile = process.argv[2]',
-    "writeFileSync(lockFile, JSON.stringify({ pid: process.pid, at: Date.now() - 11_000 }), { flag: 'wx' })",
-    'setInterval(() => {}, 1_000)'
-  ].join('\n'))
-  const holder = Bun.spawn([process.execPath, script, lockFile])
-  await waitForFile(lockFile)
-
+  writeAvatarAutoAttach(file, true)
+  const holder = new Database(`${file}.lock.sqlite`)
+  holder.run('BEGIN IMMEDIATE')
   try {
     const startedAt = Date.now()
-    expect(() => writeAvatarAutoAttach(file, false)).toThrow('Avatar settings could not be written')
-    const elapsed = Date.now() - startedAt
-    expect(elapsed).toBeGreaterThanOrEqual(500)
-    expect(elapsed).toBeLessThan(3_000)
+    expect(() => writeAvatarAutoAttach(file, false)).toThrow(
+      /^Avatar settings could not be written: another process is writing .*retry/
+    )
+    expect(Date.now() - startedAt).toBeLessThan(3_000)
   } finally {
-    holder.kill()
-    await holder.exited
+    holder.run('ROLLBACK')
+    holder.close()
   }
+  expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ autoAttach: true, projects: {} })
+  writeAvatarAutoAttach(file, false)
+  expect(avatarAutoAttachEnabled(file, 'project-a')).toBe(false)
+})
+
+test('a lock file left by the previous lock protocol neither blocks the write nor is deleted', () => {
+  const file = settingsFile()
+  const legacyLock = `${file}.lock`
+  writeFileSync(legacyLock, JSON.stringify({ pid: process.pid, at: Date.now() }))
+
+  expect(writeProjectAvatarSettings(file, 'project-a', { optOut: true })).toEqual({ optOut: true })
+  expect(existsSync(legacyLock)).toBe(true)
 })
 
 test('a malformed setting cannot silently opt a project out', () => {

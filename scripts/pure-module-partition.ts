@@ -41,6 +41,8 @@ export const EXEMPTIONS: Exemptions = {
       `${DAEMON_REASON_MARKER} (imports startBroker from tests/_helper.ts, and Bun.spawn's \`bun server.ts\` directly); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
     "desktop-clodex-lifecycle-io.test.ts":
       `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron and type-checks against desktop/node_modules/typescript); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
+    "desktop-file-lock-electron.test.ts":
+      `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron to prove the node:sqlite lock against a bun holder); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
     "desktop-clodex-spawn-win32.test.ts":
       `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron directly); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
     "desktop-avatar-transport.test.ts":

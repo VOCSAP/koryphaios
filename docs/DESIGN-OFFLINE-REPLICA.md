@@ -661,23 +661,22 @@ adversariale :
   telephone n'a aucun usage de l'URL/etat du broker -- seul le Deck lui-meme
   (l'operateur devant son poste) en a besoin.
 - Ecriture de `config.json` (residuel `BACKLOG.md` §3.9) : les ecritures
-  concurrentes de DEUX FENETRES KORY passent desormais par un verrou fichier
-  INTER-PROCESSUS (`config.json.lock`, cree avec `O_EXCL` -- echoue si le
-  fichier existe deja, donc jamais deux detenteurs a la fois) avant toute
-  sequence lecture-modification-ecriture. C'est une convention COTE DECK, pas
-  une propriete du fichier : `cli.ts` et `shared/config.ts` n'ecrivent jamais
-  ce fichier aujourd'hui et n'implementent pas ce protocole de verrou -- tout
-  futur ecrivain cote coeur devrait adopter le meme protocole `.lock` pour
-  rester sans danger vis-a-vis du Deck. Reprise du verrou dans trois cas :
-  le PID qui le detient est mort (`process.kill(pid, 0)` echoue) ET le verrou
-  a plus d'environ 10 s (mort probable, pas juste lent -- une fenetre qui
-  vient de demarrer ne doit pas se faire voler son verrou tout frais) ; le
-  verrou porte NOTRE PROPRE pid (verrou laisse par ce meme processus lors
-  d'un crash pendant une ecriture precedente) ; le fichier de verrou est
-  ILLISIBLE ou VIDE, auquel cas ni le pid ni son age ne peuvent etre lus et
-  seul le mtime du fichier tranche (meme delai d'environ 10 s). Nombre de
-  tentatives BORNE avant d'abandonner avec une erreur explicite plutot qu'une
-  attente infinie ; nom de fichier temporaire de l'ecriture atomique UNIQUE
+  concurrentes de DEUX FENETRES KORY passent par un verrou INTER-PROCESSUS
+  pris avant toute sequence lecture-modification-ecriture : le verrou
+  d'ecriture SQLite d'une base voisine `config.json.lock.sqlite`, tenu par
+  `BEGIN IMMEDIATE` pendant toute la sequence (`withFileLock`, partage avec
+  les reglages de l'avatar). Le systeme libere ce verrou a la mort de son
+  detenteur : il n'existe donc ni verrou perime a reprendre ni suppression
+  d'un verrou par un autre ecrivain. Une reprise par suppression du chemin ne
+  le garantit pas : deux ecrivains qui jugent le meme verrou mort, et le
+  second supprime le verrou tout frais du premier. C'est une convention COTE
+  DECK, pas une propriete du fichier : `cli.ts` et `shared/config.ts`
+  n'ecrivent jamais ce fichier aujourd'hui -- tout futur ecrivain cote coeur
+  devrait prendre le meme verrou pour rester sans danger vis-a-vis du Deck.
+  Attente BORNEE (`busy_timeout`, 1 s) avant d'abandonner avec une erreur
+  explicite plutot qu'une attente infinie ; un fichier de verrou qui n'est
+  pas une base SQLite n'est jamais supprime automatiquement, l'erreur le
+  nomme pour l'operateur ; nom de fichier temporaire de l'ecriture atomique UNIQUE
   par ecrivain (pas de collision entre deux ecritures concurrentes qui se
   disputeraient le meme nom provisoire).
 

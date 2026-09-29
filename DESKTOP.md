@@ -287,23 +287,23 @@ Electron + React 19 + zustand, xterm terminals over node-pty. Sources in
   the same file `server.ts`, `cli.ts` and every non-Kory session read, so the
   channel is tier 3 / remote-blocked and the help text says plainly that the
   change only reaches sessions and brokers started afterwards. Two Kory windows
-  writing it at once is closed by an exclusive `config.json.lock` created with
-  `wx`, holding `{ pid, at }` -- a DECK-SIDE convention, not a property of the
-  file format: `cli.ts` and `shared/config.ts` never write this file and do
-  not implement the lock protocol, so a window and a `cli.ts` invocation can
-  still race each other, and any future core writer would need to adopt the
-  same `.lock` protocol to close that gap. Taken over when it is older than
-  10 s AND its process is gone (`process.kill(pid, 0)`, EPERM reading as
-  alive), or when it names OUR OWN pid (this same process's lock, left behind
-  by a crash mid-write on a prior run), or -- since neither check applies to a
-  file with nothing to read -- an empty or malformed lock file expires on
-  mtime alone (an EMPTY one silently: `wx` publishes the lock before its body,
-  so a reader between the two legitimately sees zero bytes, and tracing that
-  would journal a line on every contended save); retried 20 × 50 ms before an
-  explicit refusal whose message names the recovery ("… a lock left behind by a
-  crashed writer is taken over after 10 s, so retry in a few seconds" — it
-  reaches the operator verbatim, since `guarded()` toasts the IPC error raw),
-  and released in a `finally`;
+  writing it at once is closed by `withFileLock` (`file-lock.ts`, shared with
+  `avatar-settings.ts`): SQLite's write lock on a sibling
+  `config.json.lock.sqlite`, taken by `BEGIN IMMEDIATE` around the whole
+  read-modify-write. The OS drops that lock when its holder dies, so there is
+  no stale lock to take over and nothing ever deletes another writer's lock --
+  which a pathname-based takeover could not guarantee (two writers judging the
+  same dead lock, the second deleting the first one's fresh lock). A
+  DECK-SIDE convention, not a property of the file format: `cli.ts` and
+  `shared/config.ts` never write this file, and any future core writer would
+  need to take the same lock. The wait is bounded by `busy_timeout` (1 s),
+  then an explicit refusal ("another process is writing …; retry in a few
+  seconds" -- it reaches the operator verbatim, since `guarded()` toasts the
+  IPC error raw). A lock file that is not a SQLite database is never deleted
+  automatically: the refusal names it for the operator to delete. A nested
+  lock of the same file in one process throws at once instead of waiting on
+  itself. `node:sqlite` in Electron, `bun:sqlite` under the bun test runner;
+
   `writeFileAtomic` names its temp file `<file>.<pid>.<random>.tmp` so a lost
   race cannot publish another process's buffer. A queue position lost to the
   upstream order (`queue_replaced`, cumulative and part of the broadcast
