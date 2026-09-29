@@ -68,10 +68,11 @@ function harness(overrides: Partial<AvatarClientOptions> = {}) {
     rendezvous: rendezvous(),
     sessions: [] as SessionRuntime[],
     focusCalls: 0,
-    status: {} as Record<string, number>
+    status: {} as Record<string, number>,
+    deck: { ...deck }
   }
   const client = createAvatarClient({
-    deck,
+    deck: () => live.deck,
     autoAttachEnabled: () => true,
     rendezvous: () => live.rendezvous,
     sessions: () => live.sessions,
@@ -376,6 +377,33 @@ test('does not report an application close code once the socket was bound', asyn
   const { client, socket, reports } = await boundHarness()
   socket.close(4410, 'superseded')
   expect(reports).toEqual([])
+  await client.stop()
+})
+
+test('a renamed Deck re-attaches once under the same identity, keeping its socket', async () => {
+  const { client, posts, sockets, heartbeat, live } = await boundHarness()
+  live.deck = { ...deck, deckName: 'Renamed workspace' }
+  heartbeat.tick?.()
+  await flush()
+  heartbeat.tick?.()
+  await flush()
+  const attaches = posts.filter((post) => post.path === '/attach')
+  expect(attaches).toEqual([
+    { path: '/attach', body: { protocol_version: 1, ...deck } },
+    { path: '/attach', body: { protocol_version: 1, ...deck, deckName: 'Renamed workspace' } }
+  ])
+  expect(sockets).toHaveLength(1)
+  expect(sockets[0]!.closed).toBeUndefined()
+  await client.stop()
+})
+
+test('keeps the identity taken at creation even if the provider later changes it', async () => {
+  const { client, posts, heartbeat, live } = await boundHarness()
+  live.deck = { ...deck, deckRunId: 'deck-run-other', broker_url: 'http://127.0.0.1:7900', deckName: 'Renamed' }
+  heartbeat.tick?.()
+  await flush()
+  expect(posts.at(-2)).toEqual({ path: '/attach', body: { protocol_version: 1, ...deck, deckName: 'Renamed' } })
+  expect(posts.at(-1)).toMatchObject({ path: '/state', body: { identity } })
   await client.stop()
 })
 

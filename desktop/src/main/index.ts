@@ -2966,7 +2966,8 @@ const avatarOptions = deckAvatarClientOptions({
   stateDir: appStateDir(),
   brokerUrl: resolveBrokerEndpoint().url,
   sessions: () => service.list(),
-  window: () => mainWindow
+  window: () => mainWindow,
+  workspaceName: () => workspaces.currentWorkspaceName
 })
 const avatarClient = createAvatarClient(avatarOptions)
 let avatarDetach: Promise<void> = Promise.resolve()

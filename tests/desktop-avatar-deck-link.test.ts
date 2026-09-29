@@ -46,6 +46,7 @@ function deps(overrides: Partial<DeckAvatarLinkDeps> = {}): DeckAvatarLinkDeps {
     brokerUrl: 'http://127.0.0.1:7899',
     sessions: () => [],
     window: () => null,
+    workspaceName: () => null,
     ...overrides
   }
 }
@@ -79,20 +80,55 @@ test('auto-attach reads the state-dir settings file for this project key, projec
 
 test('builds a Deck identity the attach parser accepts, with an absolute projectDir and a bounded name', () => {
   const longName = `${'n'.repeat(70)}&co`
-  const options = deckAvatarClientOptions(deps({ projectDir: join('relative', longName) }))
-  expect(isAbsolute(options.deck.projectDir)).toBe(true)
-  expect(options.deck.deckName).toBe('n'.repeat(64))
-  expect(options.deck.deckPid).toBe(process.pid)
-  expect(() => parseAvatarAttachRequest({ protocol_version: 1, ...options.deck })).not.toThrow()
+  const deck = deckAvatarClientOptions(deps({ projectDir: join('relative', longName) })).deck()
+  expect(isAbsolute(deck.projectDir)).toBe(true)
+  expect(deck.deckName).toBe('n'.repeat(64))
+  expect(deck.deckPid).toBe(process.pid)
+  expect(() => parseAvatarAttachRequest({ protocol_version: 1, ...deck })).not.toThrow()
 })
 
 test('never ends the bounded Deck name on half of a surrogate pair', () => {
   const name = `${'a'.repeat(63)}\u{1F600}`
   const options = deckAvatarClientOptions(deps({ projectDir: join('relative', name) }))
-  expect(options.deck.deckName).toBe('a'.repeat(63))
-  expect(deckAvatarClientOptions(deps({ projectDir: join('relative', `${'a'.repeat(62)}\u{1F600}`) })).deck.deckName).toBe(
+  expect(options.deck().deckName).toBe('a'.repeat(63))
+  expect(deckAvatarClientOptions(deps({ projectDir: join('relative', `${'a'.repeat(62)}\u{1F600}`) })).deck().deckName).toBe(
     `${'a'.repeat(62)}\u{1F600}`
   )
+})
+
+test('falls back to the folder when the workspace name is not a string', () => {
+  for (const hostile of [123, {}, [], null, undefined, true]) {
+    const options = deckAvatarClientOptions(deps({ projectDir: 'C:/work/example', workspaceName: () => hostile as unknown as string }))
+    expect(() => options.deck()).not.toThrow()
+    expect(options.deck().deckName).toBe('example')
+  }
+})
+
+test('removes C0, C1 and bidi control characters that could disguise a Tray label', () => {
+  const invisible = [0x00, 0x07, 0x1b, 0x1f, 0x7f, 0x85, 0x9f, 0x202a, 0x202d, 0x202e, 0x2066, 0x2069].map((code) =>
+    String.fromCharCode(code)
+  )
+  const disguised = `Al${invisible.join('')}pha`
+  const options = deckAvatarClientOptions(deps({ projectDir: 'C:/work/example', workspaceName: () => disguised }))
+  expect(options.deck().deckName).toBe('Alpha')
+
+  const onlyControls = deckAvatarClientOptions(deps({ projectDir: 'C:/work/example', workspaceName: () => invisible.join('') }))
+  expect(onlyControls.deck().deckName).toBe('example')
+})
+
+test('names the Deck after its current workspace, read at every call, else after its folder', () => {
+  let workspace: string | null = null
+  const options = deckAvatarClientOptions(deps({ projectDir: 'C:/work/example', workspaceName: () => workspace }))
+  expect(options.deck().deckName).toBe('example')
+
+  workspace = 'Alpha & Beta'
+  expect(options.deck().deckName).toBe('Alpha & Beta')
+
+  workspace = `${'w'.repeat(63)}\u{1F600}${'tail'.repeat(5)}`
+  expect(options.deck().deckName).toBe('w'.repeat(63))
+
+  workspace = ''
+  expect(options.deck().deckName).toBe('example')
 })
 
 test('the quit waits at most three seconds for the Avatar detach, and says so when it gives up', async () => {

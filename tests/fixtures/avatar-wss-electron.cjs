@@ -110,7 +110,7 @@ async function run() {
   }
   let focused = 0
   const client = createAvatarClient({
-    deck,
+    deck: () => deck,
     autoAttachEnabled: () => true,
     rendezvous: () => rendezvous,
     sessions: () => [],

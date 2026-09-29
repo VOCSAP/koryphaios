@@ -183,6 +183,7 @@ export class WorkspaceService {
    *  reference `currentBootInstant` advances from afterward. */
   private readonly bootAnchorProcessUptime: number
   private currentId: string | null = null
+  private persistedName: { id: string; name: string } | null = null
   private heartbeatTimer: NodeJS.Timeout | null = null
   private pruneTimer: NodeJS.Timeout | null = null
 
@@ -210,6 +211,12 @@ export class WorkspaceService {
 
   get currentWorkspaceId(): string | null {
     return this.currentId
+  }
+
+  /** Name last persisted for the CURRENT workspace; null when none is current or it was never persisted under that id. */
+  get currentWorkspaceName(): string | null {
+    if (!this.persistedName || this.persistedName.id !== this.currentId) return null
+    return typeof this.persistedName.name === 'string' ? this.persistedName.name : null
   }
 
   /**
@@ -529,6 +536,7 @@ export class WorkspaceService {
       this.currentId = null
       return { ok: false, reason: 'lock-race' }
     }
+    this.persistedName = { id, name: ws.name }
     // Recapture right after restoring a non-empty workspace (ws.sessions.length
     // > 0, guarded above) must not itself come back empty -- that would mean
     // restoreFrom silently produced nothing, exactly the defect this card
@@ -642,6 +650,7 @@ export class WorkspaceService {
       sessions: toWorkspaceSessions(this.deps.service.captureSessions())
     }
     const saved = saveWorkspace(this.deps.projectDir, ws)
+    this.persistedName = { id: saved.id, name: saved.name }
     return {
       id: saved.id,
       name: saved.name,

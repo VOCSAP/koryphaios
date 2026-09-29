@@ -28,7 +28,8 @@ export interface AvatarClientSocket {
 export type AvatarPost = (rendezvous: AvatarRendezvous, path: string, body: unknown) => Promise<number>
 
 export interface AvatarClientOptions {
-  deck: Omit<AvatarAttachRequest, 'protocol_version'>
+  /** Re-read at every sync for its name; deckRunId and broker_url are taken once, at creation. */
+  deck(): Omit<AvatarAttachRequest, 'protocol_version'>
   autoAttachEnabled(): boolean
   rendezvous(): AvatarRendezvous | null
   sessions(): SessionRuntime[]
@@ -107,8 +108,10 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
   const info = options.info ?? logInfo
   const link = failureEpisode(report, info, 'Avatar link restored')
   const webSocket = failureEpisode(report, info, 'Avatar WebSocket restored')
-  const identity: AvatarDeckIdentity = { deckRunId: options.deck.deckRunId, broker_url: options.deck.broker_url }
+  const initialDeck = options.deck()
+  const identity: AvatarDeckIdentity = { deckRunId: initialDeck.deckRunId, broker_url: initialDeck.broker_url }
   let attachedRunId: string | null = null
+  let attachedName: string | null = null
   let socket: AvatarClientSocket | null = null
   let lastPushed: string | null = null
   let stopHeartbeat: (() => void) | null = null
@@ -193,17 +196,22 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
       attachedRunId = null
       return
     }
-    if (attachedRunId !== rendezvous.avatarRunId) {
-      const status = await post(rendezvous, '/attach', { protocol_version: AVATAR_PROTOCOL_VERSION, ...options.deck })
+    const deck = { ...options.deck(), ...identity }
+    const avatarChanged = attachedRunId !== rendezvous.avatarRunId
+    if (avatarChanged || deck.deckName !== attachedName) {
+      const status = await post(rendezvous, '/attach', { protocol_version: AVATAR_PROTOCOL_VERSION, ...deck })
       if (status !== 200) {
         link.fail(`Avatar refused the attach with status ${status}`)
         return
       }
-      attachedRunId = rendezvous.avatarRunId
-      lastPushed = null
-      const previous = socket
-      socket = null
-      previous?.close(1000, 'Avatar restarted')
+      attachedName = deck.deckName
+      if (avatarChanged) {
+        attachedRunId = rendezvous.avatarRunId
+        lastPushed = null
+        const previous = socket
+        socket = null
+        previous?.close(1000, 'Avatar restarted')
+      }
     }
     if (!socket) openSocket(rendezvous)
 
