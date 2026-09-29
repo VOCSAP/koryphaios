@@ -167,6 +167,7 @@ import { announceModelsChanged } from './model-registry'
 import { createBeforeQuitHandler } from './before-quit'
 import { createAvatarClient } from './avatar-client'
 import { boundedAvatarDetach, deckAvatarClientOptions } from './avatar-deck-link'
+import { avatarLaunchCommand, ensureAvatar, spawnDetachedAvatar } from './avatar-ensure'
 import {
   createClodexControllerDeps,
   releaseBeforeQuit,
@@ -2957,19 +2958,52 @@ const syncExportTemplateEnabled = (): void => {
 }
 service.on('changed', syncExportTemplateEnabled)
 
-const avatarClient = createAvatarClient(
-  deckAvatarClientOptions({
-    deckRunId: randomUUID(),
-    projectDir: cliContext.projectDir,
-    projectKey: computeDeckProjectKey(cliContext.projectDir),
-    stateDir: appStateDir(),
-    brokerUrl: resolveBrokerEndpoint().url,
-    sessions: () => service.list(),
-    window: () => mainWindow
-  })
-)
+const avatarOptions = deckAvatarClientOptions({
+  deckRunId: randomUUID(),
+  projectDir: cliContext.projectDir,
+  projectKey: computeDeckProjectKey(cliContext.projectDir),
+  stateDir: appStateDir(),
+  brokerUrl: resolveBrokerEndpoint().url,
+  sessions: () => service.list(),
+  window: () => mainWindow
+})
+const avatarClient = createAvatarClient(avatarOptions)
 let avatarDetach: Promise<void> = Promise.resolve()
 service.on('changed', () => avatarClient.sessionsChanged())
+
+async function startAvatarProcess(): Promise<void> {
+  const outcome = await ensureAvatar({
+    autoAttachEnabled: avatarOptions.autoAttachEnabled,
+    rendezvous: avatarOptions.rendezvous,
+    launch: () =>
+      avatarLaunchCommand({
+        execPath: process.execPath,
+        mainDir: __dirname,
+        env: process.env,
+        homeDir: homedir(),
+        isPackaged: app.isPackaged
+      }),
+    spawn: (launch) => spawnDetachedAvatar(spawnProcess, launch, reportError),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+  })
+  switch (outcome.action) {
+    case 'already-running':
+      journal.add('session', 'avatar: already running')
+      break
+    case 'started':
+      journal.add('session', 'avatar: started')
+      break
+    case 'unsupported-packaged':
+      reportError('avatar', 'a packaged Deck cannot start the Avatar yet: run `kory --avatar`')
+      break
+    case 'no-rendezvous':
+      logWarn('avatar', `no Avatar rendezvous ${outcome.waitedMs} ms after spawning; the client keeps retrying`)
+      break
+    case 'failed':
+      reportError('avatar', `the Avatar did not start: ${outcome.reason}`)
+      break
+  }
+}
 
 // Continuously auto-save the live workspace (debounced) as sessions change, but
 // only once there are non-supervisor sessions -- launching supervisor-only must
@@ -3384,6 +3418,9 @@ app.whenReady().then(async () => {
   ttsr.start()
   createWindow()
   avatarClient.start()
+  void startAvatarProcess()
+    .then(() => avatarClient.sessionsChanged())
+    .catch((e) => reportError('avatar', 'Avatar startup check failed', e))
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
