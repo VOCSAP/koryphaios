@@ -16,6 +16,7 @@ import {
   createRollingLogger,
   initDeckLog,
   logWarn,
+  reportError,
 } from "../desktop/src/main/log";
 
 let dir: string;
@@ -142,4 +143,18 @@ test("journal writer reports prune and write failures independently through main
 
   const warnings = readFileSync(main.file, "utf-8").match(/cannot persist/g) ?? [];
   expect(warnings).toHaveLength(2);
+});
+
+test("main.log never carries a value from a reported error message, stack or context", () => {
+  const tails = ["Q7vX2mR9kL4pW8nZ3cT6", "H5jN1bF8sD3gY6uE0aK9"];
+  const anthropicKey = ["sk", "ant", "api03", tails[0]].join("-");
+  const main = initDeckLog(dir);
+
+  reportError("graph", `inference with Bearer ${tails[1]} failed`, new Error(`provider rejected ${anthropicKey}`));
+  logWarn("graph", "provider config", { apiKey: tails[1] });
+
+  const text = readFileSync(main.file, "utf-8");
+  expect(text).toContain("provider rejected [redacted]");
+  expect(text).toMatch(/\n\s+at /);
+  for (const tail of tails) expect(text, `value ${tail} left in clear in main.log`).not.toContain(tail);
 });

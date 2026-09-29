@@ -1,3 +1,5 @@
+import { MAX_LOGGED_CHARS, redactSecrets } from './log-redact'
+
 export type JournalKind =
   | 'session'
   | 'quota'
@@ -32,7 +34,7 @@ export class Journal {
   ) {}
 
   add(kind: JournalKind, text: string): JournalEntry {
-    const entry: JournalEntry = { id: ++this.seq, at: this.now(), kind, text }
+    const entry: JournalEntry = { id: ++this.seq, at: this.now(), kind, text: redactSecrets(text.slice(0, MAX_LOGGED_CHARS)) }
     this.entries.push(entry)
     if (this.entries.length > this.cap) {
       this.entries.splice(0, this.entries.length - this.cap)
