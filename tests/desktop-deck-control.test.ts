@@ -27,7 +27,7 @@ import {
 } from "../desktop/src/main/supervisor.ts";
 import type { CreateSessionInput } from "../desktop/src/shared/types.ts";
 import type { DeckControlSession as SessionRuntime } from "../desktop/src/main/deck-control.ts";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { extractBracedBody } from "./_braced-body";
@@ -1657,7 +1657,8 @@ test("deck-control-mcp speaks MCP over stdio and forwards tools/call", async () 
 // without this suite needing an update.
 
 async function speakMcp(
-  env: Record<string, string | undefined>
+  env: Record<string, string | undefined>,
+  script = "desktop/mcp/deck-control-mcp.ts"
 ): Promise<{
   send: (msg: unknown) => void;
   recv: () => Promise<Record<string, unknown>>;
@@ -1666,7 +1667,7 @@ async function speakMcp(
   for (const [key, value] of Object.entries(env)) {
     if (value !== undefined) extra[key] = value;
   }
-  const proc = Bun.spawn(["bun", "desktop/mcp/deck-control-mcp.ts"], {
+  const proc = Bun.spawn(["bun", script], {
     env: scrubEnv(tmpdir(), extra),
     stdin: "pipe",
     stdout: "pipe",
@@ -2967,4 +2968,77 @@ test("the MCP bridge serves deck_run_directive with the card directive enum and 
   expect(tool!.inputSchema.properties.peer_ids).toEqual(expect.objectContaining({ minItems: 1, maxItems: 16 }));
   expect(tool!.inputSchema.properties.prompt).toEqual(expect.objectContaining({ maxLength: 500 }));
   expect(tool!.inputSchema.required).toEqual(["directive", "peer_ids"]);
+});
+
+// ----- per-turn surface budget -----
+// What the model reads on every turn, measured on the wire: the initialize
+// instructions plus the JSON of tools/list, in characters (no tokenizer here).
+// Each mode has its own ceiling, about 10% over what it serves today. When a
+// ceiling breaks, shorten the text; never raise the ceiling.
+const SUPERVISOR_CEILING_CHARS = 11_000;
+const SUPERVISOR_FLOOR_CHARS = 6_000;
+const TEAM_LEAD_CEILING_CHARS = 5_600;
+const TEAM_LEAD_FLOOR_CHARS = 3_000;
+const TEAM_LEAD_TOOLS_ENV = TEAM_LEAD_DECK_TOOLS.join(",");
+
+async function servedSurface(tools: string | undefined, script?: string): Promise<number> {
+  const { send, recv } = await speakMcp(
+    { DECK_CONTROL_URL: "http://127.0.0.1:1", DECK_CONTROL_TOKEN: "unused", DECK_CONTROL_TOOLS: tools },
+    script
+  );
+  send({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+  const initialized = (await recv()) as { result: { instructions: string } };
+  send({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+  const listed = (await recv()) as { result: { tools: unknown[] } };
+  return initialized.result.instructions.length + JSON.stringify(listed.result.tools).length;
+}
+
+test("the supervisor surface stays between its floor and its ceiling, even run from a team-lead tile", async () => {
+  const ambient = process.env.DECK_CONTROL_TOOLS;
+  process.env.DECK_CONTROL_TOOLS = TEAM_LEAD_TOOLS_ENV;
+  let total: number;
+  try {
+    total = await servedSurface(undefined);
+  } finally {
+    if (ambient === undefined) delete process.env.DECK_CONTROL_TOOLS;
+    else process.env.DECK_CONTROL_TOOLS = ambient;
+  }
+  expect(total, "below the floor, the bridge served a truncated surface").toBeGreaterThan(SUPERVISOR_FLOOR_CHARS);
+  expect(total, "shorten the instructions or tool descriptions; never raise the ceiling").toBeLessThanOrEqual(SUPERVISOR_CEILING_CHARS);
+});
+
+test("the team-lead surface stays between its floor and its ceiling", async () => {
+  const total = await servedSurface(TEAM_LEAD_TOOLS_ENV);
+  expect(total, "below the floor, the bridge served a truncated surface").toBeGreaterThan(TEAM_LEAD_FLOOR_CHARS);
+  expect(total, "shorten the instructions or tool descriptions; never raise the ceiling").toBeLessThanOrEqual(TEAM_LEAD_CEILING_CHARS);
+});
+
+test("the surface measure follows each mode's own tools: a subset tool counts twice, another tool only for the supervisor", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "deck-surface-"));
+  try {
+    const mainDir = join(import.meta.dir, "..", "desktop", "src", "main").replaceAll("\\", "/");
+    // The copy lives outside the repo, so its relative imports are pinned to the real modules.
+    const source = readFileSync(join(import.meta.dir, "..", "desktop", "mcp", "deck-control-mcp.ts"), "utf-8").replaceAll(
+      "'../src/main/",
+      `'${mainDir}/`
+    );
+    const filler = "x".repeat(2_000);
+    const inflate = (tool: string) => {
+      const marker = `name: '${tool}',`;
+      expect(source, `${tool} is not declared in the bridge`).toContain(marker);
+      const script = join(dir, `${tool}.ts`);
+      writeFileSync(script, source.replace(marker, `${marker} description_padding: '${filler}',`), "utf-8");
+      return script;
+    };
+    const [supervisor, teamLead] = [await servedSurface(undefined), await servedSurface(TEAM_LEAD_TOOLS_ENV)];
+    const inSubset = inflate("deck_close_session");
+    const outside = inflate("deck_list_sessions");
+    const padding = `"description_padding":"${filler}",`.length;
+    expect(await servedSurface(undefined, inSubset)).toBe(supervisor + padding);
+    expect(await servedSurface(TEAM_LEAD_TOOLS_ENV, inSubset)).toBe(teamLead + padding);
+    expect(await servedSurface(undefined, outside)).toBe(supervisor + padding);
+    expect(await servedSurface(TEAM_LEAD_TOOLS_ENV, outside)).toBe(teamLead);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

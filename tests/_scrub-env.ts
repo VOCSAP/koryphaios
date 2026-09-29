@@ -29,8 +29,12 @@ export function scrubEnv(
       throw new Error(`scrubEnv: extra.${k} re-injects the real ambient ${k}; pass a scratch directory instead`);
     }
   }
+  // DECK_CONTROL_* too: a supervisor or team-lead tile running the tests holds
+  // a live Deck control URL and token that no child may inherit.
   const scrubbed = Object.fromEntries(
-    Object.entries(process.env).filter(([k]) => !k.startsWith("CLAUDE_PEERS_"))
+    Object.entries(process.env).filter(
+      ([k]) => !k.startsWith("CLAUDE_PEERS_") && !k.toUpperCase().startsWith("DECK_CONTROL_")
+    )
   ) as Record<string, string>;
   return {
     ...scrubbed,

@@ -144,7 +144,7 @@ function buildDeckControlMcpConfig(
  * every supervisor spawn so the per-launch control URL/token stay current.
  * ELECTRON_RUN_AS_NODE makes the Electron binary behave as plain node, so the
  * MCP server runs without any bundled runtime, packaged or dev. Unrestricted
- * tool surface (no DECK_CONTROL_TOOLS): the supervisor keeps all 18 tools.
+ * tool surface (no DECK_CONTROL_TOOLS): the supervisor keeps every tool.
  */
 export function writeSupervisorMcpConfig(input: SupervisorMcpConfigInput): string {
   const config = buildDeckControlMcpConfig(input)

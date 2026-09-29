@@ -84,3 +84,19 @@ test("a legitimate override -- a DIFFERENT directory the caller owns -- still wi
     rmSync(ownedDir, { recursive: true, force: true });
   }
 });
+
+test("an ambient Deck control URL, token or tool list never reaches a child, unless the caller sets it", () => {
+  const keys = ["DECK_CONTROL_URL", "DECK_CONTROL_TOKEN", "DECK_CONTROL_TOOLS"] as const;
+  const saved = Object.fromEntries(keys.map((k) => [k, process.env[k]]));
+  try {
+    for (const k of keys) process.env[k] = `ambient-${k}`;
+    const env = scrubEnv(scratchDir);
+    for (const k of keys) expect(env[k], `${k} inherited from the tile running the tests`).toBeUndefined();
+    expect(scrubEnv(scratchDir, { DECK_CONTROL_TOKEN: "set-by-caller" }).DECK_CONTROL_TOKEN).toBe("set-by-caller");
+  } finally {
+    for (const k of keys) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
+  }
+});
