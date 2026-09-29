@@ -11,7 +11,7 @@ import type { SessionRuntime } from '../shared/types'
 import { projectAvatarCounters } from './avatar-counters'
 import type { AvatarRendezvous } from './avatar-registry'
 import { avatarHttpsRequestOptions, connectAvatarWss } from './avatar-transport'
-import { reportError } from './log'
+import { logInfo, reportError } from './log'
 
 export const AVATAR_REQUEST_TIMEOUT_MS = 3_000
 export const AVATAR_FOCUS_TIMEOUT_MS = 2_000
@@ -21,7 +21,7 @@ export interface AvatarClientSocket {
   close(code?: number, reason?: string): void
   on(event: 'open', listener: () => void): unknown
   on(event: 'message', listener: (data: RawData) => void): unknown
-  on(event: 'close', listener: () => void): unknown
+  on(event: 'close', listener: (code: number) => void): unknown
   on(event: 'error', listener: (error: Error) => void): unknown
 }
 
@@ -38,6 +38,7 @@ export interface AvatarClientOptions {
   every?: (ms: number, tick: () => void) => () => void
   after?: (ms: number, fire: () => void) => () => void
   report?: typeof reportError
+  info?: typeof logInfo
 }
 
 export interface AvatarClient {
@@ -70,6 +71,27 @@ function afterTimeout(ms: number, fire: () => void): () => void {
   return () => clearTimeout(timer)
 }
 
+interface FailureEpisode {
+  fail(message: string, error?: unknown): void
+  ok(): void
+}
+
+function failureEpisode(report: typeof reportError, info: typeof logInfo, restored: string): FailureEpisode {
+  let failing: string | null = null
+  return {
+    fail(message, error) {
+      if (failing === message) return
+      failing = message
+      report('avatar-client', message, error)
+    },
+    ok() {
+      if (failing === null) return
+      failing = null
+      info('avatar-client', restored)
+    }
+  }
+}
+
 function rawText(data: RawData): string {
   if (Array.isArray(data)) return Buffer.concat(data).toString('utf8')
   if (data instanceof ArrayBuffer) return Buffer.from(data).toString('utf8')
@@ -82,6 +104,9 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
   const connect = options.connect ?? ((rendezvous: AvatarRendezvous) => connectAvatarWss(rendezvous, '/ws'))
   const every = options.every ?? everyInterval
   const after = options.after ?? afterTimeout
+  const info = options.info ?? logInfo
+  const link = failureEpisode(report, info, 'Avatar link restored')
+  const webSocket = failureEpisode(report, info, 'Avatar WebSocket restored')
   const identity: AvatarDeckIdentity = { deckRunId: options.deck.deckRunId, broker_url: options.deck.broker_url }
   let attachedRunId: string | null = null
   let socket: AvatarClientSocket | null = null
@@ -90,7 +115,9 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
   let chain = Promise.resolve()
 
   const enqueue = (work: () => Promise<void>): Promise<void> => {
-    chain = chain.then(work).catch((error: unknown) => report('avatar-client', 'Avatar link failed', error))
+    chain = chain.then(work).catch((error: unknown) => {
+      link.fail('Avatar link failed', error)
+    })
     return chain
   }
 
@@ -120,6 +147,7 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
       }
       if (frame.type === 'bound') {
         bound = true
+        webSocket.ok()
         return
       }
       if (!bound) {
@@ -151,10 +179,11 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
         }
       )
     })
-    current.on('close', () => {
+    current.on('close', (code) => {
       if (socket === current) socket = null
+      if (!bound && code >= 4000) webSocket.fail(`Avatar closed the WebSocket before bound with code ${code}`)
     })
-    current.on('error', (error) => report('avatar-client', 'Avatar WebSocket error', error))
+    current.on('error', (error) => webSocket.fail('Avatar WebSocket error', error))
   }
 
   const sync = async (force: boolean): Promise<void> => {
@@ -167,7 +196,7 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
     if (attachedRunId !== rendezvous.avatarRunId) {
       const status = await post(rendezvous, '/attach', { protocol_version: AVATAR_PROTOCOL_VERSION, ...options.deck })
       if (status !== 200) {
-        report('avatar-client', `Avatar refused the attach with status ${status}`)
+        link.fail(`Avatar refused the attach with status ${status}`)
         return
       }
       attachedRunId = rendezvous.avatarRunId
@@ -184,10 +213,11 @@ export function createAvatarClient(options: AvatarClientOptions): AvatarClient {
     const status = await post(rendezvous, '/state', snapshot)
     if (status !== 200) {
       if (status === 409) attachedRunId = null
-      report('avatar-client', `Avatar refused the state with status ${status}`)
+      link.fail(`Avatar refused the state with status ${status}`)
       return
     }
     lastPushed = serialized
+    link.ok()
   }
 
   return {

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import {
@@ -164,6 +165,8 @@ import { startDesignEndpoint, type DesignEndpoint } from './design-endpoint'
 import { createClodexController, type ClodexController } from './clodex-lifecycle-controller'
 import { announceModelsChanged } from './model-registry'
 import { createBeforeQuitHandler } from './before-quit'
+import { createAvatarClient } from './avatar-client'
+import { boundedAvatarDetach, deckAvatarClientOptions } from './avatar-deck-link'
 import {
   createClodexControllerDeps,
   releaseBeforeQuit,
@@ -2954,6 +2957,20 @@ const syncExportTemplateEnabled = (): void => {
 }
 service.on('changed', syncExportTemplateEnabled)
 
+const avatarClient = createAvatarClient(
+  deckAvatarClientOptions({
+    deckRunId: randomUUID(),
+    projectDir: cliContext.projectDir,
+    projectKey: computeDeckProjectKey(cliContext.projectDir),
+    stateDir: appStateDir(),
+    brokerUrl: resolveBrokerEndpoint().url,
+    sessions: () => service.list(),
+    window: () => mainWindow
+  })
+)
+let avatarDetach: Promise<void> = Promise.resolve()
+service.on('changed', () => avatarClient.sessionsChanged())
+
 // Continuously auto-save the live workspace (debounced) as sessions change, but
 // only once there are non-supervisor sessions -- launching supervisor-only must
 // not mint/clobber a workspace (the previous run stays restorable until the
@@ -3366,6 +3383,7 @@ app.whenReady().then(async () => {
   // Guard rules: repo/global rules files and the approvals store, polled.
   ttsr.start()
   createWindow()
+  avatarClient.start()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -3392,6 +3410,12 @@ const runBeforeQuit = createBeforeQuitHandler({
     // which live in the container run dir, not in the session dir.
     { label: 'ttsr', run: () => ttsr.stop() },
     { label: 'workspaces', run: () => workspaces.releaseOnQuit() },
+    {
+      label: 'avatar',
+      run: () => {
+        avatarDetach = avatarClient.stop()
+      }
+    },
     { label: 'service', run: () => service.stop() },
     // A stable group id does not make its peers stable, so session-scoped state
     // dies with the window, ephemeral and custom scopes alike.
@@ -3411,12 +3435,15 @@ const runBeforeQuit = createBeforeQuitHandler({
     { label: 'scopeEnv', run: () => activeScopeEnv.cleanup() }
   ],
   release: () =>
-    releaseBeforeQuit(
-      clodexController,
-      RELEASE_DEADLINE_MS,
-      (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
-      reportError
-    ),
+    Promise.all([
+      releaseBeforeQuit(
+        clodexController,
+        RELEASE_DEADLINE_MS,
+        (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+        reportError
+      ),
+      boundedAvatarDetach(avatarDetach, (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)), reportError)
+    ]),
   quit: () => app.quit(),
   onError: reportError
 })
