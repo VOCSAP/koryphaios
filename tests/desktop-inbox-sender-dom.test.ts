@@ -101,6 +101,7 @@ mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 // imports another value export of the same specifier. Re-export the real
 // module and only override the one symbol this fixture needs to control.
 import * as realSharedTypes from "../desktop/src/shared/types.ts";
+import * as realSharedCompanion from "../desktop/src/shared/companion.ts";
 
 mock.module("@shared/types", () => ({
   ...realSharedTypes,
@@ -115,6 +116,7 @@ mock.module("@shared/types", () => ({
 // and its two siblings) -- an empty Set means "nothing blocked remotely",
 // which is irrelevant here since `remote` stays false in every fixture.
 mock.module("@shared/companion", () => ({
+  ...realSharedCompanion,
   COMPANION_MANIFEST: {
     approvalReply: { channel: "deck-only" },
     approvalDecline: { channel: "deck-only" },

@@ -18,6 +18,7 @@ import * as sharedRoadmapSync from "../desktop/src/shared/roadmap-sync.ts";
 import * as sharedRole from "../desktop/src/shared/role.ts";
 import * as sharedTemplateApply from "../desktop/src/shared/template-apply-outcome.ts";
 import * as sharedWorkspaceRestore from "../desktop/src/shared/workspace-restore-outcome.ts";
+import * as roadmapAppend from "../shared/roadmap-append.ts";
 import type { RoadmapItem, RoadmapUpsertFields } from "../desktop/src/shared/types.ts";
 
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
@@ -33,6 +34,7 @@ mock.module("@shared/roadmap-sync", () => sharedRoadmapSync);
 mock.module("@shared/role", () => sharedRole);
 mock.module("@shared/template-apply-outcome", () => sharedTemplateApply);
 mock.module("@shared/workspace-restore-outcome", () => sharedWorkspaceRestore);
+mock.module("@roadmap-append", () => roadmapAppend);
 
 interface FakeState {
   dict: Record<string, string>;

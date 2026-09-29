@@ -11,7 +11,7 @@ afterAll(async () => {
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased, no runtime resolution
 import { mockStore, storeMockStubs } from "./_store-mock";
-import { PICK_BUDGET } from "../desktop/src/shared/pick-security.ts";
+import * as realPickSecurity from "../desktop/src/shared/pick-security.ts";
 import type { ElementPick, PickAnnotationIntent, PickAnnotationPriority, PickNote } from "../desktop/src/shared/types.ts";
 
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
@@ -49,7 +49,7 @@ mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 // resolves fine -- pick-security.ts has zero imports of its own, per its
 // header comment) rather than hand-duplicating the budget, so this test
 // stays honest about the actual cap.
-mock.module("@shared/pick-security", () => ({ PICK_BUDGET }));
+mock.module("@shared/pick-security", () => realPickSecurity);
 
 const { PickContextDialog } = await import(
   "../desktop/src/renderer/src/components/PickContextDialog"

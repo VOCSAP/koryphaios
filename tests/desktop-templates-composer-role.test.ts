@@ -18,6 +18,7 @@ afterAll(async () => {
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased, no runtime resolution
 import { mockStore, storeMockStubs } from "./_store-mock";
+import * as realSharedTemplate from "../desktop/src/shared/template.ts";
 
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
 
@@ -50,10 +51,7 @@ mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 // @shared/template and @shared/role are tsconfig-only aliases bun test does not
 // resolve. The role module is faithfully reimplemented here (not stubbed) so
 // mergeRoleChoices' real behavior populates the select.
-mock.module("@shared/template", () => ({
-  TEMPLATE_TYPE: "koryphaios.template",
-  TEMPLATE_VERSION: 1
-}));
+mock.module("@shared/template", () => realSharedTemplate);
 mock.module("@shared/role", () => {
   const TEAM_LEAD_ROLE = "team-lead";
   const BUILTIN_ROLES = [

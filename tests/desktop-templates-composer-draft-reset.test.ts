@@ -15,6 +15,7 @@ afterAll(async () => {
 import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
 import type { Root } from "../desktop/tests-support/react-test-harness"; // type-only: erased, no runtime resolution
 import { mockStore, storeMockStubs } from "./_store-mock";
+import * as realSharedTemplate from "../desktop/src/shared/template.ts";
 
 const { act, React, createRoot, create } = await import("../desktop/tests-support/react-test-harness");
 
@@ -70,14 +71,9 @@ function resetFakeStore(): void {
 
 mockStore({ useDeck: fakeUseDeck, ...storeMockStubs });
 
-// @shared/template's TEMPLATE_TYPE/TEMPLATE_VERSION are aliased only in
-// desktop's own tsconfig, unresolved when bun test runs from the repo root.
-// Placeholder values are fine here since this file never calls save(), the only
-// place they're read.
-mock.module("@shared/template", () => ({
-  TEMPLATE_TYPE: "koryphaios.template",
-  TEMPLATE_VERSION: 1
-}));
+// @shared/template is aliased only in desktop's own tsconfig, unresolved when
+// bun test runs from the repo root; the real module is re-exported whole.
+mock.module("@shared/template", () => realSharedTemplate);
 
 // Card 0b9e0b07 lot B: TemplateComposer now also imports mergeRoleChoices
 // from '@shared/role' (same alias-resolution gap as above). Full, faithful

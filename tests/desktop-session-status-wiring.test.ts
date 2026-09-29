@@ -53,6 +53,9 @@ mock.module("node-pty", () => ({
 }));
 mock.module(join(import.meta.dir, "..", "desktop", "src", "main", "store.ts"), () => ({
   saveSessions: () => {},
+  loadConfig: () => ({}),
+  saveConfig: () => {},
+  DEFAULT_CONFIG: {},
 }));
 
 const { SessionService } = await import("../desktop/src/main/session-service.ts");

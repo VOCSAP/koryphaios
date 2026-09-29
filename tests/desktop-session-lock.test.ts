@@ -34,7 +34,12 @@ mock.module("node-pty", () => ({
     };
   }
 }));
-mock.module(join(DESKTOP_SRC, "main", "store.ts"), () => ({ saveSessions: () => {} }));
+mock.module(join(DESKTOP_SRC, "main", "store.ts"), () => ({
+  saveSessions: () => {},
+  loadConfig: () => ({}),
+  saveConfig: () => {},
+  DEFAULT_CONFIG: {}
+}));
 
 const { SessionService } = await import("../desktop/src/main/session-service.ts");
 const { toWorkspaceSessions } = await import("../desktop/src/main/workspace-session-map.ts");
