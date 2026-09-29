@@ -27,7 +27,7 @@ const projects: string[] = []
 const logsDir = mkdtempSync(join(tmpdir(), 'cp-serve-logs-'))
 
 function createProject(): string {
-  const project = mkdtempSync(join(tmpdir(), 'cp-serve-config-'))
+  const project = realpathSync.native(mkdtempSync(join(tmpdir(), 'cp-serve-config-')))
   mkdirSync(join(project, '.claude', 'claude-peers'), { recursive: true })
   mkdirSync(join(project, 'web'), { recursive: true })
   projects.push(project)
@@ -346,7 +346,7 @@ test('requires one explicit approval before exposing a repository serve config',
 })
 
 test('canonicalizes a symlinked project prefix before accepting cwd', async () => {
-  const outer = mkdtempSync(join(tmpdir(), 'cp-serve-link-'))
+  const outer = realpathSync.native(mkdtempSync(join(tmpdir(), 'cp-serve-link-')))
   const realProject = join(outer, 'project')
   const linkedProject = join(outer, 'via-link')
   mkdirSync(join(realProject, '.claude', 'claude-peers'), { recursive: true })

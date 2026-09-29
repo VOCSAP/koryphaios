@@ -74,8 +74,10 @@ function requireInsideProject(p: string, what: string): string {
   let real: string;
   let realRoot: string;
   try {
-    real = realpathSync(resolve(p));
-    realRoot = realpathSync(root);
+    // The native realpath expands Windows 8.3 names; the JS one keeps them, so
+    // a short-name cwd would read as outside the long-form git root.
+    real = realpathSync.native(resolve(p));
+    realRoot = realpathSync.native(root);
   } catch (e) {
     fail(`cannot read ${what} ${p}: ${(e as Error).message}`);
   }

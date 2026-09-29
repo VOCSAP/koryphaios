@@ -52,7 +52,7 @@ afterAll(() => {
 });
 
 function tmp(prefix = "ttsr-svc-"): string {
-  const d = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  const d = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
   roots.push(d);
   return d;
 }
