@@ -4,6 +4,8 @@
 // recipient actually reads.
 
 import { test, expect, describe, afterAll } from "bun:test";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import { startBroker, stopBroker, post, scrubEnv, type TestBroker } from "./_helper.ts";
 import { computeGroupId, computeGroupSecretHash } from "../shared/config.ts";
 import { DECK_PEER_ID } from "../shared/types.ts";
@@ -12,6 +14,234 @@ import { DECK_NO_REPLY_NOTE, LEAD_DIRECTIVE_NOTE } from "../shared/inbound-frami
 const FORCED_GROUP = "inbound-framing-e2e-spec-c599a9c5";
 const GROUP_ID = computeGroupId(FORCED_GROUP);
 const GROUP_HASH = computeGroupSecretHash(FORCED_GROUP);
+const TESTS_DIR = import.meta.dir;
+
+type TargetSpawn = { call: string };
+type SourceView = { code: string; strings: string[] };
+
+const PROCESS_LAUNCH = /(?<![\w$.])(?:Bun\.(?:spawn|spawnSync)|spawnSync|spawn|execFile|fork|exec)\b/g;
+const SERVER_ARTIFACT = /\bserver(?:-deck)?\.(?:ts|[cm]?js)\b/;
+
+function sourceWithoutCommentsAndStrings(source: string): SourceView {
+  let code = "";
+  const strings: string[] = [];
+  for (let i = 0; i < source.length; i++) {
+    const character = source[i] ?? "";
+    const next = source[i + 1] ?? "";
+    if (character === "'" || character === '"' || character === "`") {
+      const quote = character;
+      let value = "";
+      i++;
+      for (; i < source.length; i++) {
+        const stringCharacter = source[i] ?? "";
+        if (stringCharacter === "\\") {
+          value += stringCharacter + (source[i + 1] ?? "");
+          i++;
+          continue;
+        }
+        if (stringCharacter === quote) break;
+        value += stringCharacter;
+      }
+      if (source[i] !== quote) throw new Error("unterminated string in spawn discipline scan");
+      code += `__STRING_${strings.length}__`;
+      strings.push(value);
+      continue;
+    }
+    if (character === "/" && next === "/") {
+      while (i < source.length && source[i] !== "\n") i++;
+      code += "\n";
+      continue;
+    }
+    if (character === "/" && next !== "*" && /(?:^|[([{:;,=!&|?])\s*$/.test(code)) {
+      let inClass = false;
+      i++;
+      for (; i < source.length; i++) {
+        const regexCharacter = source[i] ?? "";
+        if (regexCharacter === "\\") {
+          i++;
+          continue;
+        }
+        if (regexCharacter === "[") inClass = true;
+        if (regexCharacter === "]") inClass = false;
+        if (regexCharacter === "/" && !inClass) {
+          while (/[a-z]/i.test(source[i + 1] ?? "")) i++;
+          break;
+        }
+      }
+      if (source[i] === undefined) throw new Error("unterminated regular expression in spawn discipline scan");
+      code += "__REGEX__";
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      i += 2;
+      while (i < source.length && !(source[i] === "*" && (source[i + 1] ?? "") === "/")) {
+        code += source[i] === "\n" ? "\n" : " ";
+        i++;
+      }
+      if (i >= source.length) throw new Error("unterminated comment in spawn discipline scan");
+      i++;
+      continue;
+    }
+    code += character;
+  }
+  return { code, strings };
+}
+
+function extractCall(source: string, start: number): string {
+  const prefix = source
+    .slice(start)
+    .match(/^(?:Bun\.(?:spawn|spawnSync)|spawnSync|spawn|execFile|fork|exec)\s*\(/);
+  if (!prefix) throw new Error("unrecognized process launch in spawn discipline scan");
+  const open = start + prefix[0].lastIndexOf("(");
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    const character = source[i] ?? "";
+    if (character === "(") depth++;
+    if (character === ")" && --depth === 0) return source.slice(start, i + 1);
+  }
+  throw new Error("unterminated process launch in spawn discipline scan");
+}
+
+function targetSpawns(file: string, source: string): TargetSpawn[] {
+  let view: SourceView;
+  try {
+    view = sourceWithoutCommentsAndStrings(source);
+  } catch (error) {
+    throw new Error(`${file}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const { code, strings } = view;
+  if (!strings.some((value) => SERVER_ARTIFACT.test(value))) return [];
+  const spawns: TargetSpawn[] = [];
+  for (const match of code.matchAll(PROCESS_LAUNCH)) {
+    const start = match.index;
+    if (start === undefined) continue;
+    const suffix = code.slice(start + match[0].length);
+    if (!/^\s*(?:\(|\?\.\s*\()/.test(suffix)) continue;
+    const call = /^\s*\(/.test(suffix) ? extractCall(code, start) : "";
+    spawns.push({ call });
+  }
+  return spawns;
+}
+
+function topLevelArgument(call: string, wantedIndex: number): string {
+  const open = call.indexOf("(");
+  let depth = 0;
+  let start = open + 1;
+  let index = 0;
+  for (let i = start; i < call.length; i++) {
+    const character = call[i] ?? "";
+    if (character === "(" || character === "[" || character === "{") {
+      depth++;
+      continue;
+    }
+    if (character === ")" || character === "]" || character === "}") {
+      if (character === ")" && depth === 0) return index === wantedIndex ? call.slice(start, i).trim() : "";
+      depth--;
+      continue;
+    }
+    if (character === "," && depth === 0) {
+      if (index === wantedIndex) return call.slice(start, i).trim();
+      start = i + 1;
+      index++;
+    }
+  }
+  return "";
+}
+
+function usesScrubbedEnv(spawn: TargetSpawn): boolean {
+  const options = topLevelArgument(spawn.call, spawn.call.startsWith("Bun.") ? 1 : 2);
+  return options.startsWith("{") && /\benv\s*:\s*scrubEnv\s*\(/.test(options);
+}
+
+function testFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) return testFiles(path);
+    return entry.isFile() ? [path] : [];
+  });
+}
+
+test("every process launch in a server test isolates its inherited peer environment", () => {
+  const spawns = testFiles(TESTS_DIR).flatMap((file) => {
+    const source = readFileSync(file, "utf-8");
+    const relativeFile = relative(TESTS_DIR, file).replaceAll("\\", "/");
+    return targetSpawns(file, source).map((spawn) => ({ spawn, relativeFile }));
+  });
+  expect(spawns.length).toBeGreaterThan(0);
+  const uncovered = spawns.filter(({ spawn }) => !usesScrubbedEnv(spawn));
+  expect(uncovered.map(({ relativeFile }) => relativeFile)).toEqual([]);
+});
+
+describe("spawn discipline scanner", () => {
+  test("recognizes every launch in a test that builds and starts a server-deck bundle", () => {
+    const source = `
+      const outfile = join(tmpdir(), "server-deck.mjs");
+      Bun.spawn(["bun", "build", "server-deck.ts", \`--outfile=\${outfile}\`], { env: scrubEnv(tmpdir()) });
+      Bun.spawn(["node", outfile], { env: scrubEnv(tmpdir()) });
+    `;
+
+    expect(targetSpawns("bundle.test.ts", source)).toHaveLength(2);
+  });
+
+  test("recognizes spawnSync of a server", () => {
+    const source = `Bun.spawnSync(["bun", "server.ts"], { env: scrubEnv(tmpdir()) });`;
+
+    expect(targetSpawns("sync.test.ts", source)).toHaveLength(1);
+  });
+
+  test("rejects an optional process launch form it does not understand", () => {
+    const source = `Bun.spawn?.(["bun", "server.ts"], { env: scrubEnv(tmpdir()) });`;
+    const [spawn] = targetSpawns("optional.test.ts", source);
+
+    expect(spawn).toBeDefined();
+    expect(usesScrubbedEnv(spawn!)).toBeFalse();
+  });
+
+  test("does not accept scrubEnv named only in a comment", () => {
+    const source = `
+      // const env = scrubEnv(tmpdir());
+      Bun.spawn(["bun", "server.ts"], { env });
+    `;
+    const [spawn] = targetSpawns("comment.test.ts", source);
+
+    expect(spawn).toBeDefined();
+    expect(usesScrubbedEnv(spawn!)).toBeFalse();
+  });
+
+  test("does not accept scrubEnv named only in argv", () => {
+    const source = `Bun.spawn(["bun", "server.ts", JSON.stringify({ env: scrubEnv(tmpdir()) })], { env: process.env });`;
+    const [spawn] = targetSpawns("argv.test.ts", source);
+
+    expect(spawn).toBeDefined();
+    expect(usesScrubbedEnv(spawn!)).toBeFalse();
+  });
+
+  test("rejects a shadowed env rebuilt from process.env", () => {
+    const source = `
+      const env = scrubEnv(tmpdir());
+      {
+        const env = { ...process.env };
+        Bun.spawn(["bun", "server.ts"], { env });
+      }
+    `;
+    const [spawn] = targetSpawns("shadow.test.ts", source);
+
+    expect(spawn).toBeDefined();
+    expect(usesScrubbedEnv(spawn!)).toBeFalse();
+  });
+
+  test("rejects an env reassigned after scrubEnv", () => {
+    const source = `
+      let env = scrubEnv(tmpdir());
+      env = { ...process.env };
+      Bun.spawn(["bun", "server.ts"], { env });
+    `;
+    const [spawn] = targetSpawns("reassigned.test.ts", source);
+
+    expect(spawn).toBeDefined();
+    expect(usesScrubbedEnv(spawn!)).toBeFalse();
+  });
+});
 
 const brokers: TestBroker[] = [];
 const procs: ReturnType<typeof Bun.spawn>[] = [];
@@ -98,24 +328,16 @@ async function readNotification(p: Peer, method: string): Promise<JsonRpcRespons
   throw new Error(`no JSON-RPC notification with method ${method}`);
 }
 
-/**
- * Deletes CLAUDE_PEERS_ROLE from the inherited env before spawning: unlike the
- * broker's own env scrub, this spreads the whole process.env, so a developer's
- * own shell setting would otherwise leak into any test that doesn't pass its
- * own role.
- */
 async function spawnPeer(b: TestBroker, extraEnv: Record<string, string> = {}): Promise<Peer> {
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    CLAUDE_PEERS_BROKER_URL: b.url,
-    CLAUDE_PEERS_PORT: String(b.port),
-    CLAUDE_PEERS_FORCE_GROUP: FORCED_GROUP,
-  };
-  delete env.CLAUDE_PEERS_APPROVAL_FILE;
-  delete env.CLAUDE_PEERS_ROLE;
-  Object.assign(env, extraEnv);
-
-  const proc = Bun.spawn(["bun", "server.ts"], { env, stdio: ["pipe", "pipe", "pipe"] });
+  const proc = Bun.spawn(["bun", "server.ts"], {
+    env: scrubEnv(b.tmpDir, {
+      CLAUDE_PEERS_BROKER_URL: b.url,
+      CLAUDE_PEERS_PORT: String(b.port),
+      CLAUDE_PEERS_FORCE_GROUP: FORCED_GROUP,
+      ...extraEnv,
+    }),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   procs.push(proc);
   const reader = proc.stdout.getReader();
   const buffer = { text: "" };
@@ -202,12 +424,6 @@ async function peerIdOf(p: Peer): Promise<string> {
   return m[1];
 }
 
-/**
- * Poll check_messages until the recipient reports at least one message.
- * check_messages is asserted on rather than the WS push because it is THE path
- * this lot rewired: it used to re-implement the sender-class branching inline
- * and now calls the shared enforcer. The other two paths already called it.
- */
 async function awaitInbound(p: Peer): Promise<string> {
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
@@ -219,7 +435,7 @@ async function awaitInbound(p: Peer): Promise<string> {
 }
 
 describe("deck framing survives to the recipient, through check_messages", () => {
-  test("a broadcast announce arrives FRAMED, with the note the card rewrote", async () => {
+  test("a broadcast announcement reaches check_messages with framing", async () => {
     const b = await startBroker();
     brokers.push(b);
     const recipient = await spawnPeer(b);
@@ -285,7 +501,7 @@ describe("deck framing survives to the recipient, through check_messages", () =>
     expect(content).toContain("free to message any peer");
   }, 90_000);
 
-  test("the WS PUSH delivers the PEER note on a plain peer message (spec_ec5cf671)", async () => {
+  test("the WS push delivers the peer note on a plain peer message", async () => {
     // Same reason as the test above: the pull-shaped control further down
     // cannot see a push that hands the raw text to the notification. Hardcoded
     // literals, not the constant.
@@ -335,13 +551,6 @@ describe("deck framing survives to the recipient, through check_messages", () =>
   }, 90_000);
 
   test("an ordinary peer-to-peer message arrives with the PEER note and neither sentinel framing", async () => {
-    // THE NEGATIVE CONTROL, re-aimed by spec_ec5cf671. Without it, a
-    // check_messages that applied the DECK framing to every message would
-    // satisfy both tests above. A plain peer now carries its own note (what to
-    // tell the operator), so the control pins: body present, peer note
-    // present, and neither the deck nor the operator header. Asserted on a
-    // hardcoded literal, not on the constant, for the reason stated on the
-    // WS-push test.
     const b = await startBroker();
     brokers.push(b);
     const sender = await spawnPeer(b);
@@ -368,20 +577,8 @@ describe("deck framing survives to the recipient, through check_messages", () =>
   }, 90_000);
 });
 
-// spec_e028bad2, card 7defe381 lot B1 -- LEAD_DIRECTIVE_NOTE, the FIFTH,
-// ROLE-conditioned note added to renderInbound's third argument. The suite
-// above already end-to-ends the sender-class framing (deck/operator/peer);
-// this block re-runs the same real-broker/real-peer harness for the
-// orthogonal axis: the RECIPIENT's own broker-normalized role, carried by
-// CLAUDE_PEERS_ROLE -> server.ts's myRole. Same reasoning as the file
-// header: a source scan for "renderInbound(" would not tell you whether the
-// THIRD argument at a given call site is really myRole or a swapped-in
-// null/literal, so each of the four receive paths gets a real assertion on
-// what a recipient process actually reads, plus a mutation-proof matrix
-// (see the team-lead dispatch this batch answers) run against a disposable
-// mirror, never against this checkout.
-describe("the team-lead directive note (card 7defe381 lot B1) reaches only a team-lead recipient", () => {
-  test("negative control: a recipient with NO role gets neither the peer note's team-lead suffix, via check_messages", async () => {
+describe("the team-lead directive note reaches team-lead recipients", () => {
+  test("a recipient without a role receives no team-lead note", async () => {
     const b = await startBroker();
     brokers.push(b);
     const sender = await spawnPeer(b);
@@ -399,7 +596,7 @@ describe("the team-lead directive note (card 7defe381 lot B1) reaches only a tea
     expect(received).not.toContain(LEAD_DIRECTIVE_NOTE.trim());
   }, 90_000);
 
-  test("PATH 1/4 -- the WS PUSH delivers the team-lead note to a team-lead recipient", async () => {
+  test("the WS push delivers the team-lead note", async () => {
     const b = await startBroker();
     brokers.push(b);
     const sender = await spawnPeer(b);
@@ -418,16 +615,7 @@ describe("the team-lead directive note (card 7defe381 lot B1) reaches only a tea
     expect(content).toContain(LEAD_DIRECTIVE_NOTE.trim());
   }, 90_000);
 
-  test("PATH 2/4 -- the FALLBACK POLL delivers the team-lead note while the recipient's WS is down", async () => {
-    // No test seam exists for server.ts's private `wsConnected` variable.
-    // A first version of this test tried CLAUDE_PEERS_WS_IDLE_TIMEOUT_SEC to
-    // force-close the idle socket; a swap-mutation diagnostic (mutating the
-    // WS-push call site instead of this one, in the same test) proved that
-    // version was silently exercising WS push the whole time -- see
-    // killAndRestartBroker's header for the measurement and the reasoning.
-    // A hard broker-process kill sidesteps the uncertainty: it drops the
-    // recipient's TCP connection unconditionally, independent of any
-    // broker-internal idle/ping behaviour.
+  test("a fallback poll delivers the team-lead note", async () => {
     const b = await startBroker();
     brokers.push(b);
     const sender = await spawnPeer(b);
@@ -450,7 +638,7 @@ describe("the team-lead directive note (card 7defe381 lot B1) reaches only a tea
     expect(content).toContain(LEAD_DIRECTIVE_NOTE.trim());
   }, 90_000);
 
-  test("PATH 3/4 -- check_messages delivers the team-lead note (formatInboundLine)", async () => {
+  test("check_messages delivers the team-lead note", async () => {
     const b = await startBroker();
     brokers.push(b);
     const sender = await spawnPeer(b);
@@ -467,7 +655,7 @@ describe("the team-lead directive note (card 7defe381 lot B1) reaches only a tea
     expect(received).toContain(LEAD_DIRECTIVE_NOTE.trim());
   }, 90_000);
 
-  test("PATH 4/4 -- wait_for_message's MATCHED branch delivers the team-lead note (formatInboundLine)", async () => {
+  test("wait_for_message delivers the team-lead note", async () => {
     const b = await startBroker();
     brokers.push(b);
     const sender = await spawnPeer(b);

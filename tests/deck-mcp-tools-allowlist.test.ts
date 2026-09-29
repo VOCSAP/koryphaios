@@ -61,8 +61,10 @@ async function readUntil(
 async function bootRestricted() {
   const dir = mkdtempSync(join(tmpdir(), "cp-deck-tools-allowlist-"));
   dirs.push(dir);
-  const env = scrubEnv(dir, { CLAUDE_PEERS_TOOLS: "graph_draft_prepare" });
-  const proc = Bun.spawn(["bun", "server-deck.ts"], { env, stdio: ["pipe", "pipe", "pipe"] });
+  const proc = Bun.spawn(["bun", "server-deck.ts"], {
+    env: scrubEnv(dir, { CLAUDE_PEERS_TOOLS: "graph_draft_prepare" }),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   procs.push(proc);
   const reader = proc.stdout.getReader();
   const buffer = { text: "" };

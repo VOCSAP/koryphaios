@@ -30,6 +30,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { extractBracedBody } from "./_braced-body";
+import { scrubEnv } from "./_scrub-env.ts";
 import {
   arbitrateSpawnApproval,
   arbitrateSpawnGrant,
@@ -1237,11 +1238,10 @@ test("deck-control-mcp speaks MCP over stdio and forwards tools/call", async () 
   servers.push(srv);
 
   const proc = Bun.spawn(["bun", "desktop/mcp/deck-control-mcp.ts"], {
-    env: {
-      ...process.env,
+    env: scrubEnv(tmpdir(), {
       DECK_CONTROL_URL: srv.url,
-      DECK_CONTROL_TOKEN: srv.token
-    },
+      DECK_CONTROL_TOKEN: srv.token,
+    }),
     stdin: "pipe",
     stdout: "pipe",
     stderr: "ignore"
@@ -1324,13 +1324,12 @@ async function speakMcp(
   send: (msg: unknown) => void;
   recv: () => Promise<Record<string, unknown>>;
 }> {
-  const merged: Record<string, string | undefined> = { ...process.env, ...env };
-  // Explicit `undefined` means "force absent even if the outer process
-  // happens to carry it" -- distinct from simply omitting the key, which
-  // would only mean "no opinion" and could leak an inherited value.
-  for (const k of Object.keys(merged)) if (merged[k] === undefined) delete merged[k];
+  const extra: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined) extra[key] = value;
+  }
   const proc = Bun.spawn(["bun", "desktop/mcp/deck-control-mcp.ts"], {
-    env: merged as Record<string, string>,
+    env: scrubEnv(tmpdir(), extra),
     stdin: "pipe",
     stdout: "pipe",
     stderr: "ignore"

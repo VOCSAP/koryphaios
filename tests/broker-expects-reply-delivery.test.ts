@@ -71,13 +71,14 @@ async function readUntil(
 
 /** Spawn one `bun server.ts` MCP peer against an already-running broker. */
 async function spawnPeer(b: TestBroker): Promise<Peer> {
-  const env = scrubEnv(b.tmpDir, {
-    CLAUDE_PEERS_BROKER_URL: b.url,
-    CLAUDE_PEERS_PORT: String(b.port),
-    CLAUDE_PEERS_FORCE_GROUP: FORCED_GROUP,
+  const proc = Bun.spawn(["bun", "server.ts"], {
+    env: scrubEnv(b.tmpDir, {
+      CLAUDE_PEERS_BROKER_URL: b.url,
+      CLAUDE_PEERS_PORT: String(b.port),
+      CLAUDE_PEERS_FORCE_GROUP: FORCED_GROUP,
+    }),
+    stdio: ["pipe", "pipe", "pipe"],
   });
-
-  const proc = Bun.spawn(["bun", "server.ts"], { env, stdio: ["pipe", "pipe", "pipe"] });
   procs.push(proc);
   const reader = proc.stdout.getReader();
   const buffer = { text: "" };

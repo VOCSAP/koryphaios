@@ -1,13 +1,8 @@
-// Card c9269fef lot L2-bis, MAJOR 1: set_id is a third mutator of myPeerId
-// (alongside boot and switch_group) and must keep the per-tile
-// session-identity file in step, or a companion process reading it after a
-// rename routes a reply to whichever peer later claims the freed name.
-
 import { test, expect, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startBroker, stopBroker, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
 import { readSessionIdentityFile } from "../shared/peer-cache.ts";
 
 const brokers: TestBroker[] = [];
@@ -66,18 +61,14 @@ test("set_id updates the per-tile identity file to the renamed peer_id", async (
   dirs.push(homeDir);
   const deskSession = "probe-set-id";
 
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    CLAUDE_PEERS_BROKER_URL: b.url,
-    CLAUDE_PEERS_PORT: String(b.port),
-    CLAUDE_PEERS_DESK_SESSION: deskSession,
-    // Confirmed to control os.homedir() on this platform (USERPROFILE wins
-    // over HOME on win32) -- isolates the identity file from the real one.
-    USERPROFILE: homeDir,
-    HOME: homeDir,
-  };
-
-  const proc = Bun.spawn(["bun", "server.ts"], { env, stdio: ["pipe", "pipe", "pipe"] });
+  const proc = Bun.spawn(["bun", "server.ts"], {
+    env: scrubEnv(homeDir, {
+      CLAUDE_PEERS_BROKER_URL: b.url,
+      CLAUDE_PEERS_PORT: String(b.port),
+      CLAUDE_PEERS_DESK_SESSION: deskSession,
+    }),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   procs.push(proc);
   const reader = proc.stdout.getReader();
   const buffer = { text: "" };

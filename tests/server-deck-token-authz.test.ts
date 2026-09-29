@@ -1,12 +1,8 @@
-// Card c9269fef lot L3: graph_draft_send and roadmap_dispatch require a
-// PROVEN peer identity (instance_token), resolved by server-deck.ts from the
-// per-tile session-identity file at call time, never by self-registering.
-
 import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, scrubEnv, type TestBroker } from "./_helper.ts";
 import { writeSessionIdentityFile } from "../shared/peer-cache.ts";
 
 const brokers: TestBroker[] = [];
@@ -104,18 +100,14 @@ async function bootDeck(
     );
   }
 
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    CLAUDE_PEERS_BROKER_URL: b.url,
-    CLAUDE_PEERS_PORT: String(b.port),
-    CLAUDE_PEERS_DESK_SESSION: opts.deskSession,
-    // Confirmed to control os.homedir() on this platform (USERPROFILE wins
-    // over HOME on win32).
-    USERPROFILE: homeDir,
-    HOME: homeDir,
-  };
-
-  const proc = Bun.spawn(["bun", "server-deck.ts"], { env, stdio: ["pipe", "pipe", "pipe"] });
+  const proc = Bun.spawn(["bun", "server-deck.ts"], {
+    env: scrubEnv(homeDir, {
+      CLAUDE_PEERS_BROKER_URL: b.url,
+      CLAUDE_PEERS_PORT: String(b.port),
+      CLAUDE_PEERS_DESK_SESSION: opts.deskSession,
+    }),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   procs.push(proc);
   const reader = proc.stdout.getReader();
   const buffer = { text: "" };

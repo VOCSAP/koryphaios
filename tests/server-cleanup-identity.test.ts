@@ -1,15 +1,9 @@
-// Card c9269fef lot L3: cleanup() must delete the per-tile identity file
-// alongside its /disconnect POST -- unlike peer_id/group_id, the
-// instance_token has no status filter downstream (findPeerByInstanceToken),
-// so a token surviving past disconnect would let a companion process act as
-// a peer that is actually dead.
-
 import { test, expect, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { access, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startBroker, stopBroker, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, scrubEnv, type TestBroker } from "./_helper.ts";
 import { readSessionIdentityFile, sessionIdentityFileName } from "../shared/peer-cache.ts";
 
 /** Scans EVERY file left in `dir`, not just the expected path: a deletion
@@ -79,16 +73,14 @@ test("cleanup() (triggered by stdin close, the same path Claude Code exiting tak
   dirs.push(homeDir);
   const deskSession = "probe-cleanup";
 
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    CLAUDE_PEERS_BROKER_URL: b.url,
-    CLAUDE_PEERS_PORT: String(b.port),
-    CLAUDE_PEERS_DESK_SESSION: deskSession,
-    USERPROFILE: homeDir,
-    HOME: homeDir,
-  };
-
-  const proc = Bun.spawn(["bun", "server.ts"], { env, stdio: ["pipe", "pipe", "pipe"] });
+  const proc = Bun.spawn(["bun", "server.ts"], {
+    env: scrubEnv(homeDir, {
+      CLAUDE_PEERS_BROKER_URL: b.url,
+      CLAUDE_PEERS_PORT: String(b.port),
+      CLAUDE_PEERS_DESK_SESSION: deskSession,
+    }),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   procs.push(proc);
   const reader = proc.stdout.getReader();
   const buffer = { text: "" };

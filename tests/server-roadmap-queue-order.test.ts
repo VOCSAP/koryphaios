@@ -67,12 +67,13 @@ async function boot(): Promise<Harness> {
   const b = await startBroker();
   brokers.push(b);
 
-  const env = scrubEnv(b.tmpDir, {
-    CLAUDE_PEERS_BROKER_URL: b.url,
-    CLAUDE_PEERS_PORT: String(b.port),
+  const proc = Bun.spawn(["bun", "server.ts"], {
+    env: scrubEnv(b.tmpDir, {
+      CLAUDE_PEERS_BROKER_URL: b.url,
+      CLAUDE_PEERS_PORT: String(b.port),
+    }),
+    stdio: ["pipe", "pipe", "pipe"],
   });
-
-  const proc = Bun.spawn(["bun", "server.ts"], { env, stdio: ["pipe", "pipe", "pipe"] });
   procs.push(proc);
   const reader = proc.stdout.getReader();
   const buffer = { text: "" };

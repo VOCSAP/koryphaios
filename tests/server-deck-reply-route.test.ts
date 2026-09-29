@@ -1,12 +1,8 @@
-// Card c9269fef lot L2-bis: server-deck.ts resolves its own reply routing
-// identity from the per-tile session-identity file, read lazily on every
-// ask_operator call rather than cached at boot.
-
 import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startBroker, stopBroker, post, livePid, type TestBroker } from "./_helper.ts";
+import { startBroker, stopBroker, post, livePid, scrubEnv, type TestBroker } from "./_helper.ts";
 import {
   buildAuthProof,
   deriveOperatorId,
@@ -21,6 +17,7 @@ async function getGitRoot(cwd: string): Promise<string | null> {
   try {
     const proc = Bun.spawn(["git", "rev-parse", "--show-toplevel"], {
       cwd,
+      env: scrubEnv(tmpdir()),
       stdout: "pipe",
       stderr: "ignore",
     });
@@ -86,6 +83,19 @@ async function readUntil(
     buffer.text += decoder.decode(value, { stream: true });
   }
   throw new Error(`no JSON-RPC response with id ${wantedId}`);
+}
+
+async function readBeforeWait(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  id: number,
+  buffer: { text: string }
+): Promise<JsonRpcResponse> {
+  return Promise.race([
+    readUntil(reader, id, buffer),
+    Bun.sleep(1_000).then(() => {
+      throw new Error("ask_operator did not report the channel fallback before waiting");
+    }),
+  ]);
 }
 
 /** Register a plain peer (no WS needed: status='active' is set unconditionally at insert). */
@@ -180,20 +190,15 @@ async function bootDeck(
     })
   );
 
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-    CLAUDE_PEERS_BROKER_URL: b.url,
-    CLAUDE_PEERS_PORT: String(b.port),
-    CLAUDE_PEERS_APPROVAL_FILE: credFile,
-    CLAUDE_PEERS_DESK_SESSION: opts.deskSession,
-    // Points readSessionIdentityFile's default homedir() at our isolated
-    // fixture instead of the real one -- confirmed to control os.homedir()
-    // on this platform (USERPROFILE wins over HOME on win32).
-    USERPROFILE: homeDir,
-    HOME: homeDir,
-  };
-
-  const proc = Bun.spawn(["bun", "server-deck.ts"], { env, stdio: ["pipe", "pipe", "pipe"] });
+  const proc = Bun.spawn(["bun", "server-deck.ts"], {
+    env: scrubEnv(homeDir, {
+      CLAUDE_PEERS_BROKER_URL: b.url,
+      CLAUDE_PEERS_PORT: String(b.port),
+      CLAUDE_PEERS_APPROVAL_FILE: credFile,
+      CLAUDE_PEERS_DESK_SESSION: opts.deskSession,
+    }),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   procs.push(proc);
   const reader = proc.stdout.getReader();
   const stderr = pumpStderr(proc);
@@ -311,7 +316,29 @@ describe("server-deck.ts ask_operator reply routing", () => {
     expect(h.stderr.text).not.toContain("instanceToken");
   }, 30_000);
 
-  test("MEASURE: a stale identity file pointing at a dormant peer still resolves to pty (no file deletion needed on cleanup for this lot)", async () => {
+  test("a channel request that falls back to PTY warns the agent before waiting", async () => {
+    const b = await startBroker();
+    brokers.push(b);
+    const groupId = "deck-reply-route-group-warning";
+    const { peerId, instanceToken } = await registerTestPeer(b, groupId);
+    expect((await post(`${b.url}/disconnect`, { instance_token: instanceToken })).status).toBe(200);
+
+    const h = await bootDeck(b, { deskSession: "probe-warning", identity: { peerId, groupId, instanceToken } });
+    h.send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "ask_operator", arguments: { title: "Fallback", question: "Can you see this?" } },
+    });
+
+    const res = await readBeforeWait(h.reader, 1, h.buffer);
+    const text = res.result?.content?.[0]?.text ?? "";
+    expect(res.result?.isError).toBeFalsy();
+    expect(text).toContain("not be pushed");
+    expect(text).toContain("ask_operator_wait");
+  }, 30_000);
+
+  test("a stale identity routes the reply to PTY", async () => {
     const b = await startBroker();
     brokers.push(b);
     const groupId = "deck-reply-route-group-stale";

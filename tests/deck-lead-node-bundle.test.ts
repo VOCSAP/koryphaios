@@ -14,6 +14,7 @@ import { test, expect, afterAll } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { scrubEnv } from "./_scrub-env.ts";
 
 const dirs: string[] = [];
 const procs: ReturnType<typeof Bun.spawn>[] = [];
@@ -69,12 +70,12 @@ test("the node-bundled server-deck.mjs starts under node, answers initialize, an
 
   const build = Bun.spawn(
     ["bun", "build", "server-deck.ts", "--target=node", `--outfile=${outfile}`],
-    { cwd: process.cwd(), stdout: "pipe", stderr: "pipe" }
+    { cwd: process.cwd(), env: scrubEnv(outDir), stdout: "pipe", stderr: "pipe" }
   );
   const buildExit = await build.exited;
   expect(buildExit).toBe(0);
 
-  const proc = Bun.spawn(["node", outfile], { stdio: ["pipe", "pipe", "pipe"] });
+  const proc = Bun.spawn(["node", outfile], { env: scrubEnv(outDir), stdio: ["pipe", "pipe", "pipe"] });
   procs.push(proc);
 
   const stderrChunks: string[] = [];
@@ -127,9 +128,7 @@ test("the node-bundled server-deck.mjs starts under node, answers initialize, an
     "kind='directive' card filed and queued with the core server's roadmap tools is executed here, by roadmap_dispatch"
   );
 
-  // R2's control: this line is only ever emitted by the config loader's
-  // catch branch (a Bun-only API throwing under node) -- must be silent now
-  // that both B2 sites are node:fs/node:child_process.
+  // This diagnostic is emitted only when Node evaluates a Bun-only config path.
   expect(stderrChunks.join("")).not.toContain("Bun is not defined");
 
   send({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });

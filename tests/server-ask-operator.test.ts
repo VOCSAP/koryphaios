@@ -1,8 +1,3 @@
-// ask_operator over a real MCP stdio session against a real broker
-// (PLAN-notifications-mobiles N2.b). The spawned server-deck.ts gets a
-// CLAUDE_PEERS_DESK_SESSION and a scoped USERPROFILE/HOME; no identity file
-// is written since ask_operator/ask_operator_wait need no proven peer.
-
 import { test, expect, describe, afterAll } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,19 +13,11 @@ import type { Approval } from "../shared/types.ts";
 import { resolveProjectKey } from "../shared/project-key.ts";
 import { computeProjectKey } from "../shared/summarize.ts";
 
-// Computes the expected project_key dynamically by mirroring server.ts's own
-// resolution (cwd plus git root) rather than hardcoding a literal, since
-// server.ts cannot be imported here.
-// A wrong-but-non-empty literal would be worse than an empty one: the broker
-// would return 200 with a silently empty list, indistinguishable from 'not
-// raised yet'.
-
-/** Mirrors server.ts's private, unexported getGitRoot() -- same command,
- * same shape, kept local since server.ts cannot be imported (see above). */
 async function getGitRoot(cwd: string): Promise<string | null> {
   try {
     const proc = Bun.spawn(["git", "rev-parse", "--show-toplevel"], {
       cwd,
+      env: scrubEnv(tmpdir()),
       stdout: "pipe",
       stderr: "ignore",
     });
@@ -161,9 +148,10 @@ async function boot(withCredential: boolean): Promise<Harness> {
     );
     extra.CLAUDE_PEERS_APPROVAL_FILE = credFile;
   }
-  const env = scrubEnv(dir, extra);
-
-  const proc = Bun.spawn(["bun", "server-deck.ts"], { env, stdio: ["pipe", "pipe", "pipe"] });
+  const proc = Bun.spawn(["bun", "server-deck.ts"], {
+    env: scrubEnv(dir, extra),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   procs.push(proc);
   const reader = proc.stdout.getReader();
   const buffer = { text: "" };
@@ -209,9 +197,6 @@ async function claim(
 ): Promise<number> {
   const body: Record<string, unknown> = {
     id,
-    // Card 1def56da: an OPERATOR credential declares the project it acts on, on
-    // /approval/claim as on the other three routes. Same value the approval was
-    // filed under, or the claim resolves nothing and returns 404.
     project_key: SPAWNED_SERVER_PROJECT_KEY,
     via: "telegram",
     answer_kind,

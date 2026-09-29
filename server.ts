@@ -1438,13 +1438,6 @@ async function handleAskOperator(name: string, args: unknown, identity: Companio
       content: [
         {
           type: "text" as const,
-          // Card 469f3176: the credential is armed unconditionally at Deck
-          // startup and inherited by every session spawned AFTER that (the
-          // env var travels at spawn time only). This refusal therefore no
-          // longer means "no remote channel configured" -- it means THIS
-          // session predates the arming, so it never inherited
-          // CLAUDE_PEERS_APPROVAL_FILE. Naming the real cause here, not a
-          // stale one, since a wrong-but-plausible reason is worse than none.
           text: "This session started before remote approvals were armed, so it never inherited the credential. Restart the session to pick it up, or ask the operator directly, on screen.",
         },
       ],
@@ -1452,7 +1445,6 @@ async function handleAskOperator(name: string, args: unknown, identity: Companio
     };
   }
 
-  /** Sign + POST an approval route with this session's restricted credential. */
   const signedPost = async <T>(path: string, payload: Record<string, unknown>): Promise<T> => {
     const body = { ...payload, public_key: cred.publicKey };
     const auth = buildAuthProof(cred.privateKey, body, {
@@ -1481,8 +1473,7 @@ async function handleAskOperator(name: string, args: unknown, identity: Companio
         question: question.slice(0, APPROVAL_QUESTION_MAX),
         options: Array.isArray(rawOptions) ? rawOptions.slice(0, 10).map(String) : [],
         session_ref: cred.sessionRef,
-        // A GUARDED REQUEST: this tool re-reads its own verdict, so it must
-        // never be satisfied by someone else's row (chantier 3189b002).
+        // The caller may only wait on its own new approval.
         merge: "never",
         // Belt and braces: the tool returns the answer directly, but if the
         // agent stops polling its ticket the broker still hands it over as
@@ -1501,6 +1492,16 @@ async function handleAskOperator(name: string, args: unknown, identity: Companio
         },
       });
       approvalId = created.approval.id;
+      if (identity.peerId && "reply_route" in created.approval && created.approval.reply_route === "pty") {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `The operator was notified, but the channel reply route fell back to PTY, so their answer will not be pushed to this session. Call ask_operator_wait with ticket "${approvalId}" to keep waiting.`,
+            },
+          ],
+        };
+      }
     } else {
       approvalId = String((args as { ticket?: unknown }).ticket ?? "").trim();
       if (!approvalId) {

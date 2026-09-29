@@ -87,15 +87,14 @@ function spawnServer(
   role: string | undefined,
   extraEnv: Record<string, string> = {}
 ): ReturnType<typeof Bun.spawn> {
-  const env: Record<string, string> = scrubEnv(b.tmpDir, {
-    CLAUDE_PEERS_BROKER_URL: b.url,
-    CLAUDE_PEERS_PORT: String(b.port),
-    ...extraEnv,
-  });
-  if (role !== undefined) env.CLAUDE_PEERS_ROLE = role;
   const proc = Bun.spawn(["bun", SERVER_PATH], {
     cwd,
-    env,
+    env: scrubEnv(b.tmpDir, {
+      CLAUDE_PEERS_BROKER_URL: b.url,
+      CLAUDE_PEERS_PORT: String(b.port),
+      ...extraEnv,
+      ...(role === undefined ? {} : { CLAUDE_PEERS_ROLE: role }),
+    }),
     // stdin must stay an open pipe: an immediate EOF makes server.ts read it
     // as "Claude Code closed" and shut down right after registering, which
     // would flip the row dormant before the poll below observes it active

@@ -117,13 +117,14 @@ let nextRpcId = 1;
 // host+cwd+tty, so two harnesses booted this way are genuinely distinct,
 // independently proven identities.
 async function bootOnBroker(b: TestBroker, extraEnv: Record<string, string> = {}): Promise<Harness> {
-  const env = scrubEnv(b.tmpDir, {
-    CLAUDE_PEERS_BROKER_URL: b.url,
-    CLAUDE_PEERS_PORT: String(b.port),
-    ...extraEnv,
+  const proc = Bun.spawn(["bun", "server.ts"], {
+    env: scrubEnv(b.tmpDir, {
+      CLAUDE_PEERS_BROKER_URL: b.url,
+      CLAUDE_PEERS_PORT: String(b.port),
+      ...extraEnv,
+    }),
+    stdio: ["pipe", "pipe", "pipe"],
   });
-
-  const proc = Bun.spawn(["bun", "server.ts"], { env, stdio: ["pipe", "pipe", "pipe"] });
   procs.push(proc);
   const reader = proc.stdout.getReader();
   const buffer = { text: "" };

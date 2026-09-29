@@ -43,15 +43,17 @@ test("a server.ts spawned through scrubEnv writes its session-identity file unde
   const scratchIdentityFile = join(scratch, ".claude", "peers", sessionIdentityFileName(token));
   const realIdentityFile = join(homedir(), ".claude", "peers", sessionIdentityFileName(token));
 
-  const env = scrubEnv(scratch, {
-    CLAUDE_PEERS_BROKER_URL: b.url,
-    CLAUDE_PEERS_PORT: String(b.port),
-    CLAUDE_PEERS_DESK_SESSION: token,
-  });
   // stdin stays open ("pipe", never .end()'d): "ignore" reads as immediate
   // EOF, which server.ts treats as "Claude Code closed" and races its own
   // cleanup()/delete against the register write this test is trying to catch.
-  const proc = Bun.spawn(["bun", "server.ts"], { env, stdio: ["pipe", "ignore", "ignore"] });
+  const proc = Bun.spawn(["bun", "server.ts"], {
+    env: scrubEnv(scratch, {
+      CLAUDE_PEERS_BROKER_URL: b.url,
+      CLAUDE_PEERS_PORT: String(b.port),
+      CLAUDE_PEERS_DESK_SESSION: token,
+    }),
+    stdio: ["pipe", "ignore", "ignore"],
+  });
   procs.push(proc);
 
   // Poll the scratch path: proves the write mechanism actually fired (a

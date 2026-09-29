@@ -9,7 +9,9 @@
 import { test, expect, describe } from "bun:test";
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { scrubEnv } from "./_scrub-env.ts";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = join(fileURLToPath(new URL(".", import.meta.url)), "..");
@@ -28,7 +30,11 @@ function domainTokensIn(source: string): string[] {
  * one domain token.
  */
 function scanRepoForTokenHits(): Array<{ file: string; tokens: string[] }> {
-  const result = spawnSync("git", ["ls-files", "--cached"], { cwd: REPO_ROOT, encoding: "utf-8" });
+  const result = spawnSync("git", ["ls-files", "--cached"], {
+    cwd: REPO_ROOT,
+    encoding: "utf-8",
+    env: scrubEnv(tmpdir()),
+  });
   if (result.status !== 0) throw new Error(`git ls-files failed: ${result.stderr}`);
   const files = result.stdout
     .split("\n")

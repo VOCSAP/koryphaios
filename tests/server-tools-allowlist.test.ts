@@ -79,9 +79,10 @@ async function boot(toolsEnv: string | undefined): Promise<Harness> {
     CLAUDE_PEERS_PORT: String(b.port),
   };
   if (toolsEnv !== undefined) extra.CLAUDE_PEERS_TOOLS = toolsEnv;
-  const env = scrubEnv(b.tmpDir, extra);
-
-  const proc = Bun.spawn(["bun", "server.ts"], { env, stdio: ["pipe", "pipe", "pipe"] });
+  const proc = Bun.spawn(["bun", "server.ts"], {
+    env: scrubEnv(b.tmpDir, extra),
+    stdio: ["pipe", "pipe", "pipe"],
+  });
   procs.push(proc);
   const reader = proc.stdout.getReader();
   const buffer = { text: "" };
