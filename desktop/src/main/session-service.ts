@@ -11,8 +11,9 @@ import type {
   SessionStatus
 } from '@shared/types'
 import { PtyManager } from './pty-manager'
-import { resolvePeerIdAmong } from './peer-state'
 import { saveSessions } from './store'
+import { fetchTilePeers, type BrokerEndpoint } from './broker-client'
+import { PEER_POLL_MS, TilePeerPoller } from './peer-state'
 import {
   buildSessionCommandLine,
   encodeInitialPromptKeystrokes,
@@ -113,7 +114,17 @@ interface RuntimeState {
   liveStatusAttentionAt: number
 }
 
-const PEER_POLL_MS = 4000
+
+/**
+ * What /tile-peers needs from the app: read at every tick, since a restore
+ * can adopt another scope after construction.
+ */
+export interface TilePeerScope {
+  groupId: string
+  secret: string
+  endpoint: BrokerEndpoint
+}
+
 /** Discovery: poll cadence + deadline to capture Claude's real (minted) session id. */
 const DISCOVERY_POLL_MS = 800
 const DISCOVERY_DEADLINE_MS = 30_000
@@ -258,6 +269,7 @@ export class SessionService extends EventEmitter {
    */
   private pendingPrompt = new Map<string, string>()
   private pollTimer: NodeJS.Timeout | null = null
+  private peerPoller: TilePeerPoller | null = null
 
   /**
    * Epoch ms of the last PTY output per session (PLAN K2): the "is the agent
@@ -318,7 +330,9 @@ export class SessionService extends EventEmitter {
      * caller before create() runs; a null return means no bridge for this
      * spawn, not a fatal error.
      */
-    private mintTeamLeadBridge: MintTeamLeadBridge = () => null
+    private mintTeamLeadBridge: MintTeamLeadBridge = () => null,
+    /** Null leaves every tile without a peer_id. */
+    private getTilePeerScope: (() => TilePeerScope) | null = null
   ) {
     super()
     // Starts empty: the previous run is recovered explicitly through a
@@ -1679,39 +1693,46 @@ export class SessionService extends EventEmitter {
     let changed = false
     for (const def of this.defs) {
       const r = this.runtime.get(def.id)
-      if (!r) continue
-      if (this.pollLiveStatus(def, r)) changed = true
-      const knownIds = def.sessionIdHistory && def.sessionIdHistory.length ? def.sessionIdHistory : [def.sessionId]
-      const next = this.pty.isAlive(def.id)
-        ? resolvePeerIdAmong(def.cwd, knownIds, this.peersDirFor(def))
-        : null
-      if (next !== r.peerId) {
-        // Fires for any transition to a live id, carrying the previous one,
-        // rather than only on first resolution: a rotated id (e.g. after
-        // /clear) now reaches the consumer instead of changing silently.
-        // Nothing is emitted when a tile loses its id: there is no id to
-        // announce and naming an empty one would be believed.
-        // A restored tile now also reaches the consumer at its first
-        // resolution; harmless because the spawn-ack path is only armed after
-        // create(), so a restored tile never has an ack pending.
-        if (next) {
-          // `id` rides along for the supervisor spawn-ack loop (TS3), which
-          // the consumer keeps pinned to first resolution.
-          this.emit('peer-resolved', {
-            id: def.id,
-            peerId: next,
-            previousPeerId: r.peerId,
-            intent: r.announce
-          })
-          // One-shot: consume the join intent so a later rotation or set_id
-          // rename re-announces as a ROTATION, never a second join.
-          r.announce = null
-        }
-        r.peerId = next
-        changed = true
-      }
+      if (r && this.pollLiveStatus(def, r)) changed = true
     }
     if (changed) this.broadcast()
+    void this.refreshPeerIds()
+  }
+
+  /** Resolve through broker ownership because descendants can overwrite local identity caches. */
+  private async refreshPeerIds(): Promise<void> {
+    const getScope = this.getTilePeerScope
+    if (!getScope) return
+    this.peerPoller ??= new TilePeerPoller({
+      tileIds: () => this.defs.map((d) => d.id),
+      isAlive: (id) => this.pty.isAlive(id),
+      currentPeer: (id) => this.runtime.get(id)?.peerId,
+      fetch: (deskSessions) => {
+        const { endpoint, groupId, secret } = getScope()
+        return fetchTilePeers({ groupId, secret, deskSessions }, { endpoint })
+      },
+      setPeer: (id, next) => this.applyPeerId(id, next),
+      report: (e) =>
+        reportError('session', 'could not resolve tile peer ids from the broker, keeping the last known ones', e)
+    })
+    if (await this.peerPoller.tick()) this.broadcast()
+  }
+
+  private applyPeerId(id: string, next: string | null): void {
+    const r = this.runtime.get(id)
+    if (!r) return
+    if (next !== r.peerId) {
+      if (next) {
+        this.emit('peer-resolved', {
+          id,
+          peerId: next,
+          previousPeerId: r.peerId,
+          intent: r.announce
+        })
+        r.announce = null
+      }
+      r.peerId = next
+    }
   }
 
   /** A tile closed for good leaves no status or statusLine cache file behind in the peers dir. */

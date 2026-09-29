@@ -1627,6 +1627,24 @@ export interface DispatchRequestResolveRequest {
   outcome?: DispatchRequestOutcome;
 }
 
+export interface TilePeersRequest {
+  group_id?: unknown;
+  group_secret_hash?: unknown;
+  /** Array of `{ desk_session }`, each tile's CLAUDE_PEERS_DESK_SESSION token. */
+  tiles?: unknown;
+}
+
+/** The peer a tile's OWN registration is bound to; never echoes the tile token. */
+export interface TilePeer {
+  peer_id: string;
+  status: "active" | "dormant";
+}
+
+export interface TilePeersResponse {
+  /** Index-aligned with the request's tiles; null = no binding, or ambiguous. */
+  peers: (TilePeer | null)[];
+}
+
 export interface DispatchRequestResolveResponse {
   request: DispatchRequest;
 }

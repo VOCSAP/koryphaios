@@ -600,7 +600,7 @@ const service = new SessionService(
   }),
   safeLaunchCommand,
   getDeckPluginDir,
-  undefined, // home: default (homedir()) -- unused by index.ts, kept positional per session-service.ts's existing append-at-the-end convention.
+  undefined,
   // Both getters are wrapped in an arrow function on purpose: controlServer and
   // controlDeps are declared further down this file (TDZ), and the arrow only
   // reads them when called, not at construction.
@@ -611,6 +611,11 @@ const service = new SessionService(
   buildMintTeamLeadBridge({
     getControlServer: () => controlServer,
     write: (token, callerId, allowedTools) => controlDeps.writeTeamLeadMcpConfig(token, callerId, allowedTools)
+  }),
+  () => ({
+    groupId: activeScope.groupId,
+    secret: activeScope.secret,
+    endpoint: resolveBrokerEndpoint()
   })
 )
 

@@ -172,6 +172,9 @@ import type {
   DispatchRequestResolveRequest,
   DispatchRequestResolveResponse,
   DispatchRequestStatus,
+  TilePeer,
+  TilePeersRequest,
+  TilePeersResponse,
   DispatchedCard,
   Approval,
   ApprovalAddRequest,
@@ -698,6 +701,15 @@ if (peerSessionsColumnAdded) {
     `migration 3d121a74: peer_sessions purged for the widened identity key -- ${purged} session row(s) dropped, ${undelivered} undelivered message(s) now unreachable (peers untouched, tokens age out via the dormant TTL)`
   );
 }
+
+// Separate hash: the Deck does not know a sandboxed tile's host and cwd.
+try {
+  db.run("ALTER TABLE peer_sessions ADD COLUMN desk_session_hash TEXT NOT NULL DEFAULT ''");
+} catch (e) {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (!msg.includes("duplicate column name")) log.error(`migration: ${msg}`);
+}
+db.run(`CREATE INDEX IF NOT EXISTS idx_sessions_desk ON peer_sessions(group_id, desk_session_hash)`);
 
 // Keyed by session_id, not group_id or operator_id: operator_id is deliberately
 // shared across one person's machines, so keying on it would let two Decks of
@@ -2123,13 +2135,19 @@ const purgeDeliveredFederatedStmt = db.prepare(
 );
 
 const upsertPeerSession = db.prepare(`
-  INSERT INTO peer_sessions (session_key, instance_token, group_id, host, cwd, last_active_at, cc_session_id)
-  VALUES (?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO peer_sessions (session_key, instance_token, group_id, host, cwd, last_active_at, cc_session_id, desk_session_hash)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT (session_key) DO UPDATE SET
     instance_token = excluded.instance_token,
     last_active_at = excluded.last_active_at,
-    cc_session_id = excluded.cc_session_id
+    cc_session_id = excluded.cc_session_id,
+    desk_session_hash = excluded.desk_session_hash
 `);
+
+function deskSessionHash(deskSession: unknown): string {
+  const token = typeof deskSession === "string" ? deskSession.trim() : "";
+  return token ? createHash("sha256").update(token).digest("hex") : "";
+}
 
 // --- TTL purge of undelivered messages ---
 
@@ -2321,7 +2339,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
         normalizedRole,
         existingPeer.instance_token
       );
-      upsertPeerSession.run(sk, existingPeer.instance_token, groupId, body.host, body.cwd, now, ccSessionId);
+      upsertPeerSession.run(sk, existingPeer.instance_token, groupId, body.host, body.cwd, now, ccSessionId, deskSessionHash(body.desk_session));
       return {
         peer_id: existingPeer.peer_id,
         instance_token: existingPeer.instance_token,
@@ -2383,7 +2401,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
       body.claude_cli_pid ?? null,
       normalizedRole
     );
-    upsertPeerSession.run(sk, session.instance_token, groupId, body.host, body.cwd, now, ccSessionId);
+    upsertPeerSession.run(sk, session.instance_token, groupId, body.host, body.cwd, now, ccSessionId, deskSessionHash(body.desk_session));
     return { peer_id: reusedId, instance_token: session.instance_token, role: normalizedRole };
   }
 
@@ -2408,7 +2426,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse | { error: stri
     body.claude_cli_pid ?? null,
     normalizedRole
   );
-  upsertPeerSession.run(sk, newToken, groupId, body.host, body.cwd, now, ccSessionId);
+  upsertPeerSession.run(sk, newToken, groupId, body.host, body.cwd, now, ccSessionId, deskSessionHash(body.desk_session));
   return { peer_id: newPeerId, instance_token: newToken, role: normalizedRole };
 }
 
@@ -10017,6 +10035,41 @@ function handleDispatchRequestResolve(
   return { request };
 }
 
+const TILE_PEERS_MAX = 64;
+
+function handleTilePeers(body: TilePeersRequest | null): TilePeersResponse | { error: string; status: number } {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return { error: "tile-peers: the body must be a JSON object", status: 400 };
+  }
+  const groupId = typeof body.group_id === "string" ? body.group_id : "";
+  if (!groupId) return { error: "group_id is required", status: 400 };
+  if (isTofuExemptGroup(groupId) || !groupExists(groupId)) {
+    return { error: `tile-peers: group '${groupId}' pins no secret on this broker`, status: 403 };
+  }
+  const providedHash = typeof body.group_secret_hash === "string" ? body.group_secret_hash : null;
+  const secretError = checkGroupSecret(groupId, providedHash);
+  if (secretError) return secretError;
+  if (!Array.isArray(body.tiles) || body.tiles.length > TILE_PEERS_MAX) {
+    return { error: `tiles must be an array of at most ${TILE_PEERS_MAX} entries`, status: 400 };
+  }
+  const byHash = db.query(
+    "SELECT DISTINCT instance_token FROM peer_sessions WHERE group_id = ? AND desk_session_hash = ? LIMIT 2"
+  );
+  const peerOf = db.query("SELECT peer_id, status FROM peers WHERE instance_token = ? AND group_id = ?");
+
+  const peers = body.tiles.map((tile): TilePeer | null => {
+    const entry = (tile ?? {}) as { desk_session?: unknown };
+    const hash = deskSessionHash(entry.desk_session);
+    if (!hash) return null;
+    const tokens = (byHash.all(groupId, hash) as { instance_token: string }[]).map((r) => r.instance_token);
+    if (tokens.length !== 1) return null;
+    const peer = peerOf.get(tokens[0]!, groupId) as { peer_id: string; status: string } | null;
+    if (!peer) return null;
+    return { peer_id: peer.peer_id, status: peer.status === "active" ? "active" : "dormant" };
+  });
+  return { peers };
+}
+
 function handleGroupStats(): GroupStatsResponse {
   const rows = db.query(
     "SELECT group_id, COUNT(*) AS active_peers FROM peers WHERE status = 'active' GROUP BY group_id"
@@ -10522,6 +10575,13 @@ const server = Bun.serve<WsData>({
         }
         case "/dispatch-request/resolve": {
           const result = handleDispatchRequestResolve(body as DispatchRequestResolveRequest);
+          if ("error" in result) {
+            return Response.json({ error: result.error }, { status: result.status });
+          }
+          return Response.json(result);
+        }
+        case "/tile-peers": {
+          const result = handleTilePeers(body as TilePeersRequest | null);
           if ("error" in result) {
             return Response.json({ error: result.error }, { status: result.status });
           }

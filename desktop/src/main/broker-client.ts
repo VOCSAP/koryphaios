@@ -19,7 +19,10 @@ import type {
   DispatchRequestListRequest,
   DispatchRequestListResponse,
   DispatchRequestOutcome,
-  DispatchRequestResolveRequest
+  DispatchRequestResolveRequest,
+  TilePeer,
+  TilePeersRequest,
+  TilePeersResponse
 } from '../../../shared/types'
 import type { DeckBrokerMode } from '../shared/types'
 
@@ -414,6 +417,70 @@ export async function resolveDispatchRequest(
     body: JSON.stringify(body)
   })
   if (!res.ok) throw new Error(`dispatch-request/resolve failed: ${res.status}`)
+}
+
+export interface TilePeerQueryParams {
+  groupId: string
+  secret: string
+  deskSessions: string[]
+  /** Defaults to TILE_PEERS_TIMEOUT_MS. */
+  timeoutMs?: number
+}
+
+/** Below the Deck's 4 s peer poll, so a hung broker never holds the next tick back. */
+export const TILE_PEERS_TIMEOUT_MS = 3000
+
+function pickTilePeer(entry: unknown, index: number): TilePeer | null {
+  if (entry === null) return null
+  const e = entry as { peer_id?: unknown; status?: unknown } | undefined
+  if (
+    !e ||
+    typeof e !== 'object' ||
+    typeof e.peer_id !== 'string' ||
+    !e.peer_id ||
+    (e.status !== 'active' && e.status !== 'dormant')
+  ) {
+    throw new Error(`tile-peers: entry ${index} is neither null nor a {peer_id, status} binding`)
+  }
+  return { peer_id: e.peer_id, status: e.status }
+}
+
+/**
+ * POST /tile-peers: the peer each tile's own registration is bound to,
+ * index-aligned with `params.deskSessions`. Throws on a non-2xx, a timeout or
+ * a malformed body, so a caller never mistakes a broker failure for "no tile
+ * is registered".
+ */
+export async function fetchTilePeers(
+  params: TilePeerQueryParams,
+  deps: AnnounceDeps
+): Promise<(TilePeer | null)[]> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (deps.endpoint.token) headers['Authorization'] = `Bearer ${deps.endpoint.token}`
+  const f = deps.fetchFn ?? fetch
+  const body: TilePeersRequest = {
+    group_id: params.groupId,
+    group_secret_hash: computeGroupSecretHash(params.secret),
+    tiles: params.deskSessions.map((deskSession) => ({ desk_session: deskSession }))
+  }
+  const res = await f(`${deps.endpoint.url}/tile-peers`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(params.timeoutMs ?? TILE_PEERS_TIMEOUT_MS)
+  })
+  if (res.status === 404) {
+    throw new Error(
+      'tile-peers failed: 404, this broker has no /tile-peers route: it is older than the Deck. Quit the Deck (it owns and relaunches the broker), advance the broker checkout, then start the Deck again'
+    )
+  }
+  if (!res.ok) throw new Error(`tile-peers failed: ${res.status}`)
+  const parsed = (await res.json()) as Partial<TilePeersResponse> | null
+  const peers: unknown = parsed?.peers
+  if (!Array.isArray(peers) || peers.length !== params.deskSessions.length) {
+    throw new Error('tile-peers: response is not aligned with the request')
+  }
+  return peers.map(pickTilePeer)
 }
 
 /**
