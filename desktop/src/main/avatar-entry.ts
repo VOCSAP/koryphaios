@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import { app } from 'electron'
+import { startAvatarBrokerProbe, type AvatarBrokerProbe } from './avatar-broker-probe'
 import { generateAvatarRunCertificate } from './avatar-certificate'
 import { configureAvatarLifetime, type AvatarLifetimeLease } from './avatar-lifetime'
 import { ensureAvatarPrivateDir } from './avatar-private-dir'
@@ -9,6 +10,7 @@ import { startAvatarServer, type AvatarServer } from './avatar-server'
 import { releaseAvatarResources } from './avatar-quit'
 import { createAvatarTray, type AvatarTray } from './avatar-tray'
 import { createAvatarQuitHandler } from './avatar-quit-handler'
+import { resolveBrokerEndpoint } from './broker-client'
 import { initDeckLog, logInfo, reportError } from './log'
 import { installProcessFailureGuard } from './process-failure-guard'
 import { APP_STATE_SUBDIR } from './migrate-data-dir'
@@ -25,6 +27,7 @@ const stateDir = join(deckUserData, APP_STATE_SUBDIR)
 let owner: AvatarRegistryOwner | null = null
 let server: AvatarServer | null = null
 let tray: AvatarTray | null = null
+let brokerProbe: AvatarBrokerProbe | null = null
 
 async function startAvatar(): Promise<void> {
   if (!lifetime) {
@@ -38,6 +41,11 @@ async function startAvatar(): Promise<void> {
   const token = randomBytes(32).toString('base64url')
   const state = new AvatarState({ now: Date.now })
   server = await startAvatarServer({ avatarRunId, certificate, state, token })
+  brokerProbe = startAvatarBrokerProbe({
+    brokerUrls: () => server?.attachedDecks().map((deck) => deck.broker_url) ?? [],
+    knownBrokerUrls: () => [resolveBrokerEndpoint().url],
+    setBrokerReachable: (brokerUrl, reachable) => state.setBrokerReachable(brokerUrl, reachable)
+  })
 
   const claim = claimAvatarRegistry(
     stateDir,
@@ -68,6 +76,8 @@ function disposeAvatarTray(): void {
 }
 
 async function stopAvatar(): Promise<void> {
+  brokerProbe?.stop()
+  brokerProbe = null
   const currentServer = server
   const currentOwner = owner
   const currentLifetime = lifetime

@@ -3,9 +3,12 @@ import type { AvatarDeckCounters, AvatarDeckIdentity, AvatarDeckSnapshot } from 
 
 export const AVATAR_PROTOCOL_VERSION = 1
 export const MAX_AVATAR_COUNTER = 1_000_000
-export const MAX_AVATAR_ATTACHMENTS = 1_000_000
+export const MAX_AVATAR_ATTACHMENTS = 64
+export const AVATAR_COMMANDS = ['focus'] as const
 
 const MAX_DECK_RUN_ID_LENGTH = 64
+const MAX_AVATAR_REQUEST_ID_LENGTH = 64
+const MAX_AVATAR_COMMAND_ERROR_LENGTH = 256
 const MAX_DECK_NAME_LENGTH = 64
 const MAX_PROJECT_DIR_LENGTH = 4_096
 const DECK_RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -19,7 +22,35 @@ export interface AvatarAttachRequest {
   deckName: string
 }
 
-export type AvatarProtocolErrorCode = 'unsupported_protocol_version' | 'invalid_attach_request'
+export interface AvatarBindFrame extends AvatarDeckIdentity {
+  type: 'bind'
+  protocol_version: typeof AVATAR_PROTOCOL_VERSION
+}
+
+export interface AvatarBoundFrame {
+  type: 'bound'
+}
+
+export interface AvatarCommandFrame extends AvatarDeckIdentity {
+  type: 'command'
+  requestId: string
+  command: (typeof AVATAR_COMMANDS)[number]
+}
+
+export interface AvatarCommandResultFrame {
+  type: 'command_result'
+  requestId: string
+  ok: boolean
+  error?: string
+}
+
+export type AvatarDeckFrame = AvatarBindFrame | AvatarCommandResultFrame
+export type AvatarServerFrame = AvatarBoundFrame | AvatarCommandFrame
+
+export type AvatarProtocolErrorCode =
+  | 'unsupported_protocol_version'
+  | 'invalid_attach_request'
+  | 'invalid_avatar_frame'
 
 export class AvatarProtocolError extends Error {
   constructor(
@@ -155,4 +186,102 @@ export function parseAvatarStateRequest(value: unknown): AvatarDeckSnapshot {
     counters: parseAvatarDeckCounters(input.counters),
     unread: requiredCounter(input.unread)
   }
+}
+
+function invalidAvatarFrame(): never {
+  throw new AvatarProtocolError('invalid_avatar_frame', 'invalid Avatar WebSocket frame')
+}
+
+function frameRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) invalidAvatarFrame()
+  return value as Record<string, unknown>
+}
+
+function frameString(value: unknown, maxLength: number): string {
+  if (typeof value !== 'string' || value.length === 0 || value.length > maxLength) invalidAvatarFrame()
+  return value
+}
+
+function frameDeckIdentity(input: Record<string, unknown>): AvatarDeckIdentity {
+  const deckRunId = frameString(input.deckRunId, MAX_DECK_RUN_ID_LENGTH)
+  if (!DECK_RUN_ID_PATTERN.test(deckRunId)) invalidAvatarFrame()
+
+  const brokerUrl = frameString(input.broker_url, MAX_PROJECT_DIR_LENGTH)
+  try {
+    const url = new URL(brokerUrl)
+    if ((url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password) {
+      return { deckRunId, broker_url: brokerUrl }
+    }
+  } catch {
+    invalidAvatarFrame()
+  }
+  return invalidAvatarFrame()
+}
+
+function frameProtocolVersion(value: unknown): typeof AVATAR_PROTOCOL_VERSION {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value)) invalidAvatarFrame()
+  if (value !== AVATAR_PROTOCOL_VERSION) {
+    throw new AvatarProtocolError('unsupported_protocol_version', `unsupported Avatar protocol version ${value}`)
+  }
+  return value
+}
+
+function frameRequestId(value: unknown): string {
+  const requestId = frameString(value, MAX_AVATAR_REQUEST_ID_LENGTH)
+  if (!DECK_RUN_ID_PATTERN.test(requestId)) invalidAvatarFrame()
+  return requestId
+}
+
+function frameCommand(value: unknown): (typeof AVATAR_COMMANDS)[number] {
+  if (!(AVATAR_COMMANDS as readonly string[]).includes(value as string)) invalidAvatarFrame()
+  return value as (typeof AVATAR_COMMANDS)[number]
+}
+
+function parseAvatarCommandFrame(input: Record<string, unknown>): AvatarCommandFrame {
+  return {
+    type: 'command',
+    requestId: frameRequestId(input.requestId),
+    command: frameCommand(input.command),
+    ...frameDeckIdentity(input)
+  }
+}
+
+export function parseAvatarDeckFrame(value: unknown): AvatarDeckFrame {
+  const input = frameRecord(value)
+  if (input.type === 'bind') {
+    return {
+      type: 'bind',
+      protocol_version: frameProtocolVersion(input.protocol_version),
+      ...frameDeckIdentity(input)
+    }
+  }
+  if (input.type === 'command_result') {
+    const result: AvatarCommandResultFrame = {
+      type: 'command_result',
+      requestId: frameRequestId(input.requestId),
+      ok: typeof input.ok === 'boolean' ? input.ok : invalidAvatarFrame()
+    }
+    if (input.error !== undefined) result.error = frameString(input.error, MAX_AVATAR_COMMAND_ERROR_LENGTH)
+    return result
+  }
+  return invalidAvatarFrame()
+}
+
+/** requestId of a well-formed command whose only defect is a command outside AVATAR_COMMANDS, else null. */
+export function unsupportedAvatarCommandRequestId(value: unknown): string | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const input = value as Record<string, unknown>
+  if (input.type !== 'command' || (AVATAR_COMMANDS as readonly unknown[]).includes(input.command)) return null
+  try {
+    return parseAvatarCommandFrame({ ...input, command: AVATAR_COMMANDS[0] }).requestId
+  } catch {
+    return null
+  }
+}
+
+export function parseAvatarServerFrame(value: unknown): AvatarServerFrame {
+  const input = frameRecord(value)
+  if (input.type === 'bound') return { type: 'bound' }
+  if (input.type === 'command') return parseAvatarCommandFrame(input)
+  return invalidAvatarFrame()
 }

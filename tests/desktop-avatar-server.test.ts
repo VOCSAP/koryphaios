@@ -4,11 +4,15 @@ import { request } from 'node:https'
 import { connect } from 'node:tls'
 import { generateAvatarRunCertificate } from '../desktop/src/main/avatar-certificate.ts'
 import {
+  createAvatarSocketHub,
   installAvatarServerErrorReporter,
   MAX_AVATAR_REQUEST_BYTES,
   observeAvatarRequest,
   startAvatarServer,
-  type AvatarServer
+  type AvatarDeckSocket,
+  type AvatarServer,
+  type AvatarSocketHub,
+  type AvatarSocketHubOptions
 } from '../desktop/src/main/avatar-server.ts'
 import { AvatarState } from '../desktop/src/shared/avatar-state.ts'
 import { MAX_AVATAR_ATTACHMENTS, MAX_AVATAR_COUNTER } from '../desktop/src/shared/avatar-protocol.ts'
@@ -259,6 +263,25 @@ test('keeps distinct broker identities with the same Deck run id attached', asyn
   }
 })
 
+test('refuses and traces the attach beyond sixty-four Decks while re-attaching a known Deck', async () => {
+  const { server, reports } = await openServer()
+  try {
+    expect(MAX_AVATAR_ATTACHMENTS).toBe(64)
+    for (let index = 0; index < MAX_AVATAR_ATTACHMENTS; index += 1) {
+      expect((await post(server, '/attach', JSON.stringify({ ...attach, deckRunId: `deck-run-${index}` }))).status).toBe(200)
+    }
+    expect(await post(server, '/attach', JSON.stringify({ ...attach, deckRunId: 'deck-run-overflow' }))).toEqual({
+      status: 409,
+      body: { error: 'too_many_attached_decks' }
+    })
+    expect((await post(server, '/attach', JSON.stringify({ ...attach, deckRunId: 'deck-run-0' }))).status).toBe(200)
+    expect(server.attachedDecks()).toHaveLength(MAX_AVATAR_ATTACHMENTS)
+    expect(reports).toEqual(['rejected Avatar attachment limit'])
+  } finally {
+    await server.close()
+  }
+})
+
 test('binds the Avatar server to IPv4 loopback only', async () => {
   const { server } = await openServer()
   try {
@@ -356,5 +379,233 @@ test('rejects an oversized Content-Length before the request body arrives', asyn
     expect(await postHeadersOnly(server, '/attach', MAX_AVATAR_REQUEST_BYTES + 1)).toBe(413)
   } finally {
     await server.close()
+  }
+})
+
+const deck = { deckRunId: attach.deckRunId, broker_url: attach.broker_url }
+const otherDeck = { deckRunId: 'deck-run-2', broker_url: 'http://127.0.0.1:7900' }
+const bindFrame = (identity: { deckRunId: string; broker_url: string }) => ({ type: 'bind', protocol_version: 1, ...identity })
+
+class FakeDeckSocket extends EventEmitter implements AvatarDeckSocket {
+  readyState = 1
+  sent: Record<string, unknown>[] = []
+  closed: { code: number; reason: string } | undefined
+
+  send(data: string, callback?: (error?: Error) => void): void {
+    this.sent.push(JSON.parse(data) as Record<string, unknown>)
+    callback?.()
+  }
+
+  close(code: number, reason: string): void {
+    if (this.closed) return
+    this.closed = { code, reason }
+    this.readyState = 3
+    this.emit('close')
+  }
+
+  receive(frame: unknown): void {
+    this.emit('message', Buffer.from(JSON.stringify(frame)), false)
+  }
+}
+
+function openHub(options: Partial<AvatarSocketHubOptions> = {}): {
+  hub: AvatarSocketHub
+  reports: string[]
+  attachedDecks: Array<{ deckRunId: string; broker_url: string }>
+} {
+  const reports: string[] = []
+  const attachedDecks = [deck, otherDeck]
+  const hub = createAvatarSocketHub({
+    isAttached: (identity) =>
+      attachedDecks.some((candidate) => candidate.deckRunId === identity.deckRunId && candidate.broker_url === identity.broker_url),
+    report: (_scope, message) => reports.push(message),
+    bindTimeoutMs: 1_000,
+    commandResultTimeoutMs: 1_000,
+    ...options
+  })
+  return { hub, reports, attachedDecks }
+}
+
+function boundSocket(hub: AvatarSocketHub, identity = deck): FakeDeckSocket {
+  const socket = new FakeDeckSocket()
+  hub.accept(socket)
+  socket.receive(bindFrame(identity))
+  return socket
+}
+
+function settledWithin<T>(promise: Promise<T>, ms = 500): Promise<T> {
+  return Promise.race([
+    promise,
+    Bun.sleep(ms).then(() => {
+      throw new Error(`focusDeck was still pending after ${ms} ms`)
+    })
+  ])
+}
+
+function lastRequestId(socket: FakeDeckSocket): string {
+  const requestId = socket.sent.at(-1)?.requestId
+  if (typeof requestId !== 'string') throw new Error('the Avatar sent no command with a requestId')
+  return requestId
+}
+
+test('binds an attached Deck then relays its focus command result', async () => {
+  const { hub } = openHub()
+  const socket = boundSocket(hub)
+  try {
+    expect(socket.sent).toEqual([{ type: 'bound' }])
+    const focus = hub.focusDeck(deck)
+    expect(socket.sent[1]).toMatchObject({ type: 'command', command: 'focus', ...deck })
+    const requestId = lastRequestId(socket)
+    socket.receive({ type: 'command_result', requestId, ok: false, error: 'window gone' })
+    await expect(settledWithin(focus)).resolves.toEqual({ requestId, ok: false, error: 'window gone' })
+  } finally {
+    socket.close(1000, 'test done')
+  }
+})
+
+test('traces then closes a bind whose protocol version is unsupported', () => {
+  const { hub, reports } = openHub()
+  const socket = new FakeDeckSocket()
+  hub.accept(socket)
+  socket.receive({ ...bindFrame(deck), protocol_version: 2 })
+  expect(socket.closed).toEqual({ code: 4409, reason: 'unsupported version' })
+  expect(socket.sent).toEqual([])
+  expect(reports).toEqual(['unsupported Avatar protocol version 2'])
+})
+
+test('traces then closes a command received before bound', () => {
+  const { hub, reports } = openHub()
+  const socket = new FakeDeckSocket()
+  hub.accept(socket)
+  socket.receive({ type: 'command', requestId: 'request-1', command: 'focus', ...deck })
+  expect(socket.closed).toEqual({ code: 4401, reason: 'bind required' })
+  expect(reports).toEqual(['rejected Avatar command before bind'])
+})
+
+test('traces then closes a bind for a Deck that was never attached', () => {
+  const { hub, reports } = openHub()
+  const socket = new FakeDeckSocket()
+  hub.accept(socket)
+  socket.receive(bindFrame({ deckRunId: 'deck-run-unknown', broker_url: deck.broker_url }))
+  expect(socket.closed).toEqual({ code: 4403, reason: 'Deck not attached' })
+  expect(socket.sent).toEqual([])
+  expect(reports).toEqual(['rejected Avatar WebSocket bind for an unattached Deck'])
+})
+
+test('traces then closes a socket that misses the bind deadline', async () => {
+  const { hub, reports } = openHub({ bindTimeoutMs: 10 })
+  const socket = new FakeDeckSocket()
+  hub.accept(socket)
+  await Bun.sleep(40)
+  expect(socket.closed).toEqual({ code: 4408, reason: 'bind timeout' })
+  expect(reports).toEqual(['rejected Avatar WebSocket bind timeout'])
+})
+
+test('rejects a focus whose command_result misses its deadline', async () => {
+  const { hub } = openHub({ commandResultTimeoutMs: 10 })
+  const socket = boundSocket(hub)
+  try {
+    await expect(settledWithin(hub.focusDeck(deck))).rejects.toThrow('Avatar command result timed out')
+  } finally {
+    socket.close(1000, 'test done')
+  }
+})
+
+test('never replays a command to the socket that reconnects after a disconnect', async () => {
+  const { hub } = openHub()
+  const first = boundSocket(hub)
+  const focus = hub.focusDeck(deck)
+  first.close(1006, 'lost')
+  await expect(settledWithin(focus)).rejects.toThrow('Avatar Deck WebSocket disconnected')
+
+  const second = boundSocket(hub)
+  try {
+    await Bun.sleep(20)
+    expect(second.sent).toEqual([{ type: 'bound' }])
+  } finally {
+    second.close(1000, 'test done')
+  }
+})
+
+test('a second bind of the same Deck supersedes the first socket, traced, with its own close code', async () => {
+  const { hub, reports } = openHub()
+  const first = boundSocket(hub)
+  const stranded = hub.focusDeck(deck)
+  const second = boundSocket(hub)
+  try {
+    expect(first.closed).toEqual({ code: 4410, reason: 'superseded' })
+    expect(reports).toEqual(['replaced the Avatar WebSocket of a Deck that bound again'])
+    await expect(settledWithin(stranded)).rejects.toThrow('Avatar Deck WebSocket superseded')
+    const focus = hub.focusDeck(deck)
+    expect(first.sent).toHaveLength(2)
+    const requestId = lastRequestId(second)
+    second.receive({ type: 'command_result', requestId, ok: true })
+    await expect(settledWithin(focus)).resolves.toEqual({ requestId, ok: true })
+  } finally {
+    second.close(1000, 'test done')
+  }
+})
+
+test('traces and ignores a late or unknown command_result without closing the channel', async () => {
+  const { hub, reports } = openHub({ commandResultTimeoutMs: 10 })
+  const socket = boundSocket(hub)
+  try {
+    const expired = hub.focusDeck(deck)
+    const expiredId = lastRequestId(socket)
+    await expect(settledWithin(expired)).rejects.toThrow('Avatar command result timed out')
+    const live = hub.focusDeck(deck)
+    const liveId = lastRequestId(socket)
+    socket.receive({ type: 'command_result', requestId: expiredId, ok: true })
+    socket.receive({ type: 'command_result', requestId: 'never-issued', ok: true })
+    socket.receive({ type: 'command_result', requestId: liveId, ok: true })
+    await expect(settledWithin(live)).resolves.toEqual({ requestId: liveId, ok: true })
+    expect(socket.closed).toBeUndefined()
+    expect(reports).toEqual([
+      'ignored an Avatar command result with an unknown or expired requestId',
+      'ignored an Avatar command result with an unknown or expired requestId'
+    ])
+  } finally {
+    socket.close(1000, 'test done')
+  }
+})
+
+test('detach closes the bound socket, rejects its pending commands, and focusDeck then refuses the Deck', async () => {
+  const { hub, attachedDecks } = openHub()
+  const socket = boundSocket(hub)
+  const pending = hub.focusDeck(deck)
+  attachedDecks.splice(attachedDecks.indexOf(deck), 1)
+  hub.detach(deck)
+  expect(socket.closed).toEqual({ code: 4410, reason: 'detached' })
+  await expect(settledWithin(pending)).rejects.toThrow('Avatar Deck detached')
+  await expect(settledWithin(hub.focusDeck(deck))).rejects.toThrow('Avatar Deck is not attached')
+})
+
+test('focusDeck refuses a Deck no longer attached even while its socket is still bound', async () => {
+  const { hub, attachedDecks } = openHub()
+  const socket = boundSocket(hub)
+  try {
+    attachedDecks.splice(attachedDecks.indexOf(deck), 1)
+    await expect(settledWithin(hub.focusDeck(deck))).rejects.toThrow('Avatar Deck is not attached')
+    expect(socket.sent).toEqual([{ type: 'bound' }])
+  } finally {
+    socket.close(1000, 'test done')
+  }
+})
+
+test('closes and traces a second bind on an already bound socket', () => {
+  const { hub, reports } = openHub()
+  const socket = boundSocket(hub)
+  socket.receive(bindFrame(deck))
+  expect(socket.closed).toEqual({ code: 4400, reason: 'invalid frame' })
+  expect(reports).toEqual(['rejected a second Avatar WebSocket bind on a bound socket'])
+})
+
+test('A1 binds any attached identity a socket declares, without proving Deck ownership', () => {
+  const { hub } = openHub()
+  const socket = boundSocket(hub, otherDeck)
+  try {
+    expect(socket.sent).toEqual([{ type: 'bound' }])
+  } finally {
+    socket.close(1000, 'test done')
   }
 })

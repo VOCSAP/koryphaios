@@ -1,11 +1,14 @@
-import { timingSafeEqual } from 'node:crypto'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { createServer, type Server } from 'node:https'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Duplex } from 'node:stream'
+import { WebSocket, WebSocketServer, type RawData } from 'ws'
 import {
   AVATAR_PROTOCOL_VERSION,
   AvatarProtocolError,
   MAX_AVATAR_ATTACHMENTS,
   parseAvatarAttachRequest,
+  parseAvatarDeckFrame,
   parseAvatarDetachRequest,
   parseAvatarStateRequest,
   type AvatarAttachRequest
@@ -15,6 +18,8 @@ import { AvatarState, type AvatarDeckIdentity } from '../shared/avatar-state'
 import { reportError } from './log'
 
 export const MAX_AVATAR_REQUEST_BYTES = 64 * 1024
+export const AVATAR_BIND_TIMEOUT_MS = 5_000
+export const AVATAR_COMMAND_RESULT_TIMEOUT_MS = 3_000
 
 export interface AvatarServerOptions {
   avatarRunId: string
@@ -22,15 +27,24 @@ export interface AvatarServerOptions {
   state: AvatarState
   token: string
   port?: number
+  bindTimeoutMs?: number
+  commandResultTimeoutMs?: number
   report?: typeof reportError
 }
 
 export interface AvatarAttachedDeck extends AvatarAttachRequest {}
 
+export interface AvatarCommandResult {
+  requestId: string
+  ok: boolean
+  error?: string
+}
+
 export interface AvatarServer {
   readonly host: string
   readonly port: number
   attachedDecks(): AvatarAttachedDeck[]
+  focusDeck(identity: AvatarDeckIdentity): Promise<AvatarCommandResult>
   close(): Promise<void>
 }
 
@@ -45,6 +59,40 @@ class AvatarRequestError extends Error {
 
 interface AvatarServerErrorEmitter {
   on(event: 'error', listener: (error: Error) => void): unknown
+}
+
+interface PendingAvatarCommand {
+  resolve(result: AvatarCommandResult): void
+  reject(error: Error): void
+  timeout: ReturnType<typeof setTimeout>
+}
+
+export interface AvatarDeckSocket {
+  readonly readyState: number
+  send(data: string, callback?: (error?: Error) => void): void
+  close(code: number, reason: string): void
+  on(event: 'message', listener: (data: RawData, isBinary: boolean) => void): unknown
+  on(event: 'close', listener: () => void): unknown
+  on(event: 'error', listener: (error: Error) => void): unknown
+}
+
+export interface AvatarSocketHubOptions {
+  isAttached(identity: AvatarDeckIdentity): boolean
+  report: typeof reportError
+  bindTimeoutMs: number
+  commandResultTimeoutMs: number
+}
+
+export interface AvatarSocketHub {
+  accept(socket: AvatarDeckSocket): void
+  focusDeck(identity: AvatarDeckIdentity): Promise<AvatarCommandResult>
+  detach(identity: AvatarDeckIdentity): void
+}
+
+interface BoundAvatarSocket {
+  ws: AvatarDeckSocket
+  identity: AvatarDeckIdentity
+  pending: Map<string, PendingAvatarCommand>
 }
 
 export function observeAvatarRequest(request: Promise<void>, report: typeof reportError): void {
@@ -118,7 +166,10 @@ function readJson(request: IncomingMessage): Promise<unknown> {
 
 export async function startAvatarServer(options: AvatarServerOptions): Promise<AvatarServer> {
   const attached = new Map<string, AvatarAttachedDeck>()
+  const sockets = new Set<WebSocket>()
   const report = options.report ?? reportError
+  const bindTimeoutMs = options.bindTimeoutMs ?? AVATAR_BIND_TIMEOUT_MS
+  const commandResultTimeoutMs = options.commandResultTimeoutMs ?? AVATAR_COMMAND_RESULT_TIMEOUT_MS
 
   const reject = (response: ServerResponse, status: number, body: Record<string, unknown>, message: string): void => {
     report('avatar-server', message)
@@ -167,6 +218,7 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
         const identity = parseAvatarDetachRequest(body)
         const key = deckKey(identity)
         const detached = attached.delete(key)
+        hub.detach(identity)
         options.state.detach(identity)
         sendJson(response, 200, { ok: true, detached })
         return
@@ -205,12 +257,42 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
     }
   }
 
+  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_AVATAR_REQUEST_BYTES })
+  const hub = createAvatarSocketHub({
+    isAttached: (identity) => attached.has(deckKey(identity)),
+    report,
+    bindTimeoutMs,
+    commandResultTimeoutMs
+  })
+
   const server: Server = createServer(
     { cert: options.certificate.certPem, key: options.certificate.keyPem },
     (request, response) => {
       observeAvatarRequest(handle(request, response), report)
     }
   )
+  server.on('upgrade', (request: IncomingMessage, socket: Duplex, head: Buffer) => {
+    if (request.url !== '/ws') {
+      report('avatar-server', 'rejected Avatar WebSocket request for an unknown route')
+      socket.destroy()
+      return
+    }
+    if (request.headers.origin !== undefined) {
+      report('avatar-server', 'rejected Avatar WebSocket request with an Origin header')
+      socket.destroy()
+      return
+    }
+    if (!sameBearerToken(request.headers.authorization, options.token)) {
+      report('avatar-server', 'rejected unauthorized Avatar WebSocket request')
+      socket.destroy()
+      return
+    }
+    wss.handleUpgrade(request, socket, head, (webSocket) => {
+      sockets.add(webSocket)
+      webSocket.on('close', () => sockets.delete(webSocket))
+      hub.accept(webSocket)
+    })
+  })
 
   return new Promise((resolve, rejectListen) => {
     server.once('error', rejectListen)
@@ -226,11 +308,180 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
         host: address.address,
         port: address.port,
         attachedDecks: () => [...attached.values()].map((deck) => ({ ...deck })),
+        focusDeck: hub.focusDeck,
         close: () =>
           new Promise((resolveClose, rejectClose) => {
-            server.close((error) => (error ? rejectClose(error) : resolveClose()))
+            for (const socket of sockets) socket.terminate()
+            server.close((serverError) => {
+              wss.close((wssError) => {
+                const error = serverError ?? wssError
+                if (error) rejectClose(error)
+                else resolveClose()
+              })
+            })
           })
       })
     })
   })
+}
+
+export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSocketHub {
+  const boundSockets = new Map<string, BoundAvatarSocket>()
+  const { report, bindTimeoutMs, commandResultTimeoutMs } = options
+
+  const releaseBoundSocket = (bound: BoundAvatarSocket, error: Error): void => {
+    if (boundSockets.get(deckKey(bound.identity)) === bound) {
+      boundSockets.delete(deckKey(bound.identity))
+    }
+    for (const pending of bound.pending.values()) {
+      clearTimeout(pending.timeout)
+      pending.reject(error)
+    }
+    bound.pending.clear()
+  }
+
+  const unbind = (bound: BoundAvatarSocket, code: number, reason: string, error: Error): void => {
+    releaseBoundSocket(bound, error)
+    bound.ws.close(code, reason)
+  }
+
+  const detach = (identity: AvatarDeckIdentity): void => {
+    const bound = boundSockets.get(deckKey(identity))
+    if (bound) unbind(bound, 4410, 'detached', new Error('Avatar Deck detached'))
+  }
+
+  const closeSocket = (socket: AvatarDeckSocket, code: number, reason: string, message: string, error?: unknown): void => {
+    report('avatar-server', message, error)
+    socket.close(code, reason)
+  }
+
+  const accept = (socket: AvatarDeckSocket): void => {
+    let bound: BoundAvatarSocket | undefined
+    const bindDeadline = setTimeout(() => {
+      if (!bound) closeSocket(socket, 4408, 'bind timeout', 'rejected Avatar WebSocket bind timeout')
+    }, bindTimeoutMs)
+
+    socket.on('message', (data, isBinary) => {
+      if (isBinary) {
+        closeSocket(socket, 4400, 'invalid frame', 'rejected invalid Avatar WebSocket frame')
+        return
+      }
+
+      let input: unknown
+      try {
+        const text = Array.isArray(data)
+          ? Buffer.concat(data).toString('utf8')
+          : data instanceof ArrayBuffer
+            ? Buffer.from(data).toString('utf8')
+            : data.toString('utf8')
+        input = JSON.parse(text) as unknown
+      } catch (error) {
+        closeSocket(socket, 4400, 'invalid frame', 'rejected invalid Avatar WebSocket frame', error)
+        return
+      }
+
+      if (!bound && input && typeof input === 'object' && !Array.isArray(input) && (input as { type?: unknown }).type === 'command') {
+        closeSocket(socket, 4401, 'bind required', 'rejected Avatar command before bind')
+        return
+      }
+
+      let frame: ReturnType<typeof parseAvatarDeckFrame>
+      try {
+        frame = parseAvatarDeckFrame(input)
+      } catch (error) {
+        const closeCode = error instanceof AvatarProtocolError && error.code === 'unsupported_protocol_version' ? 4409 : 4400
+        closeSocket(
+          socket,
+          closeCode,
+          closeCode === 4409 ? 'unsupported version' : 'invalid frame',
+          error instanceof Error ? error.message : 'rejected invalid Avatar WebSocket frame',
+          error
+        )
+        return
+      }
+
+      if (!bound) {
+        if (frame.type !== 'bind') {
+          closeSocket(socket, 4401, 'bind required', 'rejected Avatar WebSocket frame before bind')
+          return
+        }
+        if (!options.isAttached(frame)) {
+          closeSocket(socket, 4403, 'Deck not attached', 'rejected Avatar WebSocket bind for an unattached Deck')
+          return
+        }
+        clearTimeout(bindDeadline)
+        bound = { ws: socket, identity: { deckRunId: frame.deckRunId, broker_url: frame.broker_url }, pending: new Map() }
+        const previous = boundSockets.get(deckKey(bound.identity))
+        if (previous) {
+          report('avatar-server', 'replaced the Avatar WebSocket of a Deck that bound again')
+          unbind(previous, 4410, 'superseded', new Error('Avatar Deck WebSocket superseded'))
+        }
+        boundSockets.set(deckKey(bound.identity), bound)
+        socket.send(JSON.stringify({ type: 'bound' }))
+        return
+      }
+
+      if (frame.type !== 'command_result') {
+        closeSocket(socket, 4400, 'invalid frame', 'rejected a second Avatar WebSocket bind on a bound socket')
+        return
+      }
+      const pending = bound.pending.get(frame.requestId)
+      if (!pending) {
+        report('avatar-server', 'ignored an Avatar command result with an unknown or expired requestId')
+        return
+      }
+      bound.pending.delete(frame.requestId)
+      clearTimeout(pending.timeout)
+      const result: AvatarCommandResult = {
+        requestId: frame.requestId,
+        ok: frame.ok,
+        ...(frame.error === undefined ? {} : { error: frame.error })
+      }
+      pending.resolve(result)
+    })
+
+    socket.on('close', () => {
+      clearTimeout(bindDeadline)
+      if (bound) releaseBoundSocket(bound, new Error('Avatar Deck WebSocket disconnected'))
+    })
+    socket.on('error', (error) => report('avatar-server', 'Avatar WebSocket error', error))
+  }
+
+  const focusDeck = (identity: AvatarDeckIdentity): Promise<AvatarCommandResult> => {
+    if (!options.isAttached(identity)) return Promise.reject(new Error('Avatar Deck is not attached'))
+    const bound = boundSockets.get(deckKey(identity))
+    if (!bound || bound.ws.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new Error('Avatar Deck is not bound'))
+    }
+
+    const requestId = randomUUID()
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        bound.pending.delete(requestId)
+        reject(new Error('Avatar command result timed out'))
+      }, commandResultTimeoutMs)
+      bound.pending.set(requestId, { resolve, reject, timeout })
+      try {
+        bound.ws.send(
+          JSON.stringify({ type: 'command', requestId, command: 'focus', deckRunId: identity.deckRunId, broker_url: identity.broker_url }),
+          (error) => {
+            if (!error) return
+            const pending = bound.pending.get(requestId)
+            if (!pending) return
+            bound.pending.delete(requestId)
+            clearTimeout(pending.timeout)
+            pending.reject(error)
+          }
+        )
+      } catch (error) {
+        const pending = bound.pending.get(requestId)
+        if (!pending) return
+        bound.pending.delete(requestId)
+        clearTimeout(pending.timeout)
+        pending.reject(error instanceof Error ? error : new Error('Avatar command could not be sent'))
+      }
+    })
+  }
+
+  return { accept, focusDeck, detach }
 }

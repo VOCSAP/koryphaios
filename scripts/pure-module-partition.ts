@@ -47,6 +47,8 @@ export const EXEMPTIONS: Exemptions = {
       `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron for its permanent TLS regression); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
     "desktop-avatar-launch.test.ts":
       `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron for launch and singleton profile regressions); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
+    "desktop-avatar-wss.test.ts":
+      `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron for its end-to-end TLS WebSocket regression); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
   },
 };
 

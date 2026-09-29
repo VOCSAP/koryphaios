@@ -2,10 +2,14 @@ import { expect, test } from 'bun:test'
 import {
   AVATAR_PROTOCOL_VERSION,
   AvatarProtocolError,
+  AVATAR_COMMANDS,
   MAX_AVATAR_COUNTER,
   escapeAvatarTrayLabel,
   parseAvatarAttachRequest,
-  parseAvatarStateRequest
+  parseAvatarDeckFrame,
+  parseAvatarServerFrame,
+  parseAvatarStateRequest,
+  unsupportedAvatarCommandRequestId
 } from '../desktop/src/shared/avatar-protocol.ts'
 
 const validAttach = {
@@ -117,4 +121,52 @@ test('escapes every ampersand in a validated Deck name for the Tray menu', () =>
   expect(parseAvatarAttachRequest({ ...validAttach, deckName: 'A & B' }).deckName).toBe('A & B')
   expect(escapeAvatarTrayLabel('A & B & C')).toBe('A && B && C')
   expect(escapeAvatarTrayLabel('&A&&')).toBe('&&A&&&&')
+})
+
+test('accepts versioned bind, focus command, and command result frames', () => {
+  const identity = { deckRunId: validAttach.deckRunId, broker_url: validAttach.broker_url }
+  expect(AVATAR_COMMANDS).toEqual(['focus'])
+  expect(parseAvatarDeckFrame({ type: 'bind', protocol_version: 1, ...identity })).toEqual({
+    type: 'bind',
+    protocol_version: 1,
+    ...identity
+  })
+  expect(parseAvatarServerFrame({ type: 'bound' })).toEqual({ type: 'bound' })
+  expect(parseAvatarServerFrame({ type: 'command', requestId: 'request-1', command: 'focus', ...identity })).toEqual({
+    type: 'command',
+    requestId: 'request-1',
+    command: 'focus',
+    ...identity
+  })
+  expect(parseAvatarDeckFrame({ type: 'command_result', requestId: 'request-1', ok: false, error: 'focus failed' })).toEqual({
+    type: 'command_result',
+    requestId: 'request-1',
+    ok: false,
+    error: 'focus failed'
+  })
+})
+
+test('rejects invalid WebSocket frame versions, commands, and result shapes', () => {
+  const identity = { deckRunId: validAttach.deckRunId, broker_url: validAttach.broker_url }
+  expect(() => parseAvatarDeckFrame({ type: 'bind', protocol_version: 2, ...identity })).toThrow(
+    /unsupported Avatar protocol version 2/
+  )
+  for (const frame of [
+    { type: 'command', requestId: 'request-1', command: 'restart', ...identity },
+    { type: 'command', requestId: '', command: 'focus', ...identity },
+    { type: 'command_result', requestId: 'request-1', ok: 'true' },
+    { type: 'unknown' }
+  ]) {
+    expect(() => parseAvatarServerFrame(frame)).toThrow(/invalid Avatar WebSocket frame/)
+  }
+})
+
+test('reads the requestId of a command refused only for being outside AVATAR_COMMANDS', () => {
+  const identity = { deckRunId: validAttach.deckRunId, broker_url: validAttach.broker_url }
+  expect(unsupportedAvatarCommandRequestId({ type: 'command', requestId: 'request-9', command: 'restart', ...identity })).toBe('request-9')
+  expect(unsupportedAvatarCommandRequestId({ type: 'command', requestId: 'request-9', command: 'focus', ...identity })).toBeNull()
+  expect(unsupportedAvatarCommandRequestId({ type: 'command', requestId: '', command: 'restart', ...identity })).toBeNull()
+  expect(unsupportedAvatarCommandRequestId({ type: 'command', requestId: 'request-9', command: 'restart', deckRunId: 'bad id' })).toBeNull()
+  expect(unsupportedAvatarCommandRequestId({ type: 'bound', requestId: 'request-9', command: 'restart' })).toBeNull()
+  expect(unsupportedAvatarCommandRequestId(null)).toBeNull()
 })
