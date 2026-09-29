@@ -188,3 +188,36 @@ describe('makeScreen deferred wrap after erasure', () => {
     expect(screen.cursor().cy).toBe(1)
   })
 })
+
+describe('makeScreen scrolls at the last row', () => {
+  test('a line feed on the last row shifts the grid up and keeps the cursor on that row', () => {
+    const screen = makeScreen(3, 2)
+    screen.feed('a\r\nb\r\nc')
+    expect(screen.lines()).toEqual(['b', 'c'])
+    expect(screen.cursor().cy).toBe(1)
+  })
+
+  test('an autowrap past the last cell of the last row scrolls instead of overwriting that row', () => {
+    const screen = makeScreen(3, 2)
+    screen.feed('abc\r\ndefX')
+    expect(screen.lines()).toEqual(['def', 'X'])
+  })
+
+  test('an idle composer after history scrolled is clear (reduced 80x14 capture of /release-notes then /context, text anonymized)', () => {
+    const screen = makeScreen(80, 14)
+    for (const c of load('scroll-context-2.1.284-reduced.json')) screen.feed(c.data)
+    expect(
+      classifyInjectGuard(screen),
+      `composer must sit on the cursor row after scrolling; rows around the cursor: ${JSON.stringify(
+        screen.lines().slice(screen.cursor().cy - 1, screen.cursor().cy + 2)
+      )}`
+    ).toBe('clear')
+  })
+
+  test('a picker painted at the bottom after history scrolled is modal', () => {
+    const screen = makeScreen(80, 14)
+    for (const c of load('scroll-context-2.1.284-reduced.json')) screen.feed(c.data)
+    screen.feed(`\x1b[14;1H\r\n${String.fromCodePoint(0x276f)} 1. Yes`)
+    expect(classifyInjectGuard(screen)).toBe('modal')
+  })
+})

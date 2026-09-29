@@ -23,7 +23,7 @@ import type { WorktreeInfo } from './worktree-service'
 import type { TemplateInput, TemplateResolveResult } from '../shared/template'
 import { templateInputsOrEmpty } from '../shared/template-apply-outcome'
 import { resolveDirectiveTargets } from './directive'
-import { parseRunDirectiveArgs, type DirectiveRunResult } from './directive-run'
+import { parseRunDirectiveArgs, type DeckDirectiveRunResult } from './directive-run'
 import { EMBEDDED_AGENTS, getEmbeddedAgent, type EmbeddedAgent } from './team-embedded'
 import { TEAM_PLAYBOOK } from './team-embedded'
 import { TEAM_LEAD_DECK_TOOLS } from './supervisor'
@@ -186,7 +186,7 @@ export interface DeckControlDeps {
     prompt: string | undefined,
     callerId: string,
     excludeSupervisor?: boolean
-  ): DirectiveRunResult
+  ): Promise<DeckDirectiveRunResult>
 }
 
 export interface DeckControlServer {
@@ -779,10 +779,12 @@ export function startDeckControl(
 
       case 'deck_run_directive': {
         const { directive, peerIds, prompt } = parseRunDirectiveArgs(args)
-        const run = deps.runDirective(directive, peerIds, prompt, callerId, restricted)
+        const run = await deps.runDirective(directive, peerIds, prompt, callerId, restricted)
         return {
           directive,
           injected: run.injected.map((t) => t.peerId),
+          refused: run.refused.map((t) => ({ peerId: t.peerId, reason: t.reason })),
+          pending: run.pending.map((t) => t.peerId),
           unreached: run.unreached,
           ...(run.error ? { error: run.error } : {})
         }

@@ -1,0 +1,254 @@
+[
+  {
+    "t": 10,
+    "data": "\u001b[?9001h\u001b[?1004h"
+  },
+  {
+    "t": 279,
+    "data": "\u001b[?25l\u001b[2J\u001b[m\u001b[H\u001b[?25h"
+  },
+  {
+    "t": 1502,
+    "data": "\u001b[?25l\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\u001b[H\u001b[?25h"
+  },
+  {
+    "t": 1516,
+    "data": "\u001b[?2004h\u001b[?2031h\u001b[?1004h"
+  },
+  {
+    "t": 1517,
+    "data": "\u001b[?25l"
+  },
+  {
+    "t": 1517,
+    "data": "\u001b[<u\u001b[>5u\u001b[>4;2m"
+  },
+  {
+    "t": 1621,
+    "data": "\u001b[>0q"
+  },
+  {
+    "t": 1621,
+    "data": "\u001b[?u"
+  },
+  {
+    "t": 2022,
+    "data": "\u001b[>4m\u001b[<u\u001b[?2031l\u001b[?2004l"
+  },
+  {
+    "t": 2081,
+    "data": "\u001b[?2004h\u001b[?2031h\u001b[?1004h"
+  },
+  {
+    "t": 2082,
+    "data": "\u001b[<u\u001b[>5u\u001b[>4;2m"
+  },
+  {
+    "t": 2159,
+    "data": "\u001b[?2026h\u001b[?2026l"
+  },
+  {
+    "t": 2159,
+    "data": "\u001b[38;2;215;119;87m x\u001b[48;2;0;0;0mxxxxxx\u001b[m\u001b[1m\u001b[3Cxxxxxx\u001b[1Cxxxx\u001b[38;2;153;153;153m\u001b[22m\u001b[1Cx2.1.284\u001b[38;2;215;119;87m\r\nxx\u001b[48;2;0;0;0mxxxxx\u001b[49mxx\u001b[38;2;153;153;153m\u001b[2Cxxxx\u001b[1C5.5\u001b[1Cx1x\u001b[1Cxxxxxxxx\u001b[1Cxxxx\u001b[1Cxxxxxx\u001b[1Cxxxxxx\u001b[1Cx\u001b[1Cxxxxxx\u001b[1Cxxx\u001b[38;2;215;119;87m\r\n xx\u001b[3Cxx\u001b[38;2;153;153;153m\u001b[3Cxxxxxxxxxxxxxxxxxxxxxx\u001b[38;2;136;136;136m\u001b[6;1H────────────────────────────────────────────────────────────────────────────────\u001b[m\r\n❯x\u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[38;2;255;193;7m\u001b[9;3Hx\u001b[1Cxxxxxxxxxx\u001b[1Cxxxxxx\u001b[1Cxx\u001b[1Cxxx\u001b[1Cx\u001b[1Cxxxxxxxxx\u001b[1Cxxxxxxxxxxxxxxxxxxxxxxxxx\u001b[1Cxxxxxx \u001b[38;2;153;153;153mx\u001b[1Cxx\u001b[38;2;255;193;7m\u001b[10;3Hxx\u001b[1Cxxxx\u001b[1Cxxxx\u001b[1Cxx \u001b[38;2;153;153;153mxxxxxxxxxx\u001b[1Cxx\u001b[1Cxxxxxx\u001b[22Cx\u001b[1Cxxxxxx\u001b[1Cx\u001b[1Cxxxxxxx\u001b[7;3H\u001b[?25h"
+  },
+  {
+    "t": 2172,
+    "data": "\u001b[m"
+  },
+  {
+    "t": 3888,
+    "data": "\u001b[>0q"
+  },
+  {
+    "t": 4011,
+    "data": "\u001b[?25l\u001b[38;2;215;119;87m\u001b[H x\u001b[48;2;0;0;0mxxxxxx\u001b[m   \u001b[1mxxxxxx\u001b[22m \u001b[1mxxxx\u001b[22m \u001b[38;2;153;153;153mx2.1.284\u001b[K\u001b[38;2;215;119;87m\r\nxx\u001b[48;2;0;0;0mxxxxx\u001b[49mxx  \u001b[38;2;153;153;153mxxxx 5.5 x1x xxxxxxxx xxxx xxxxxx xxxxxx x xxxxxx xxx\u001b[K\u001b[38;2;215;119;87m\r\n xx   xx   \u001b[38;2;153;153;153mxxxxxxxxxxxxxxxxxxxxxx\u001b[K\u001b[m\r\n\u001b[K\r\n\u001b[K\u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[m\r\n❯x\u001b[K\u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[m\r\n  \u001b[38;2;255;193;7mx xxxxxxxxxx xxxxxx xx xxx x xxxxxxxxx xxxxxxxxxxxxxxxxxxxxxxxxx xxxxxx \u001b[38;2;153;153;153mx xx  \u001b[m\r\n  \u001b[38;2;255;193;7mxx xxxx xxxx xx \u001b[38;2;153;153;153mxxxxxxxxxx xx xxxxxx                      x xxxxxx x xxxxxxx  \u001b[m\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\u001b[7;3H\u001b[?25h"
+  },
+  {
+    "t": 4216,
+    "data": "\u001b[?2026h\u001b[?2026l"
+  },
+  {
+    "t": 4216,
+    "data": "\u001b[?25l\u001b[38;2;153;153;153m\u001b[10;3Hxxxxxx\u001b[30X\u001b[38;2;255;193;7m\u001b[11;3Hxx\u001b[1Cxxxx\u001b[1Cxxxx\u001b[1Cxx \u001b[38;2;153;153;153mxxxxxxxxxx\u001b[1Cxx\u001b[1Cxxxxxx\u001b[7;3H\u001b[?25h"
+  },
+  {
+    "t": 4227,
+    "data": "\u001b[m"
+  },
+  {
+    "t": 8011,
+    "data": "\u001b[?25l\u001b[38;2;215;119;87m\u001b[H x\u001b[48;2;0;0;0mxxxxxx\u001b[m   \u001b[1mxxxxxx\u001b[22m \u001b[1mxxxx\u001b[22m \u001b[38;2;153;153;153mx2.1.284\u001b[K\u001b[38;2;215;119;87m\r\nxx\u001b[48;2;0;0;0mxxxxx\u001b[49mxx  \u001b[38;2;153;153;153mxxxx 5.5 x1x xxxxxxxx xxxx xxxxxx xxxxxx x xxxxxx xxx\u001b[K\u001b[38;2;215;119;87m\r\n xx   xx   \u001b[38;2;153;153;153mxxxxxxxxxxxxxxxxxxxxxx\u001b[K\u001b[m\r\n\u001b[K\r\n\u001b[K\u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[m\r\n❯x\u001b[K\u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[m\r\n  \u001b[38;2;255;193;7mx xxxxxxxxxx xxxxxx xx xxx x xxxxxxxxx xxxxxxxxxxxxxxxxxxxxxxxxx xxxxxx \u001b[38;2;153;153;153mx xx  \u001b[m\r\n  \u001b[38;2;153;153;153mxxxxxx                                                    x xxxxxx x xxxxxxx  \u001b[m\r\n  \u001b[38;2;255;193;7mxx xxxx xxxx xx \u001b[38;2;153;153;153mxxxxxxxxxx xx xxxxxx\u001b[K\u001b[m\r\n\u001b[K\r\n\u001b[K\r\n\u001b[K\u001b[7;3H\u001b[?25h"
+  },
+  {
+    "t": 9678,
+    "data": "\u001b[?2026h\u001b[?2026l"
+  },
+  {
+    "t": 9678,
+    "data": "\u001b[?25l\u001b[38;2;153;153;153m\u001b[5;1H  x xxxxxxxxxxxxxxxxxxxxx xxxxx xxxxxxxxxxxxxxxx xx xxxxxxx xxxx xxxxxxx \u001b[m\r\n     \u001b[38;2;153;153;153mxxxxxxxx. xxx xxxxxxxxxxx xx xxxx x xxxxxxxxx xxxxx xxxxxxx xxx xxxxx.     \u001b[m\r\n\u001b[K\u001b[9;1H❯x\u001b[K\u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[38;2;255;193;7m\u001b[11;3Hx xxxxxxxxxx\u001b[1Cxxxxxx xx xxx x xxxxxxxxx xxxxxxxxxxxxxxxxxxxxxxxxx xxxxxx \u001b[38;2;153;153;153mx xx\u001b[12;3Hxxxxxx\u001b[52Cx\u001b[1Cxxxxxx\u001b[1Cx\u001b[1Cxxxxxxx\u001b[38;2;255;193;7m\u001b[13;3Hxx\u001b[1Cxxxx\u001b[1Cxxxx\u001b[1Cxx \u001b[38;2;153;153;153mxxxxxxxxxx\u001b[1Cxx\u001b[1Cxxxxxx\u001b[9;3H\u001b[?25h"
+  },
+  {
+    "t": 9694,
+    "data": "\u001b[m"
+  },
+  {
+    "t": 12102,
+    "data": "\u001b[?2026h\u001b[?2026l"
+  },
+  {
+    "t": 12102,
+    "data": "\u001b[?25l\u001b[12;61H\u001b[K\u001b[9;3H\u001b[?25h"
+  },
+  {
+    "t": 15010,
+    "data": "\u001b[?25l\u001b[38;2;215;119;87m\u001b[H x\u001b[48;2;0;0;0mxxxxxx\u001b[m   \u001b[1mxxxxxx\u001b[22m \u001b[1mxxxx\u001b[22m \u001b[38;2;153;153;153mx2.1.284\u001b[K\u001b[38;2;215;119;87m\r\nxx\u001b[48;2;0;0;0mxxxxx\u001b[49mxx  \u001b[38;2;153;153;153mxxxx 5.5 x1x xxxxxxxx xxxx xxxxxx xxxxxx x xxxxxx xxx\u001b[K\u001b[38;2;215;119;87m\r\n xx   xx   \u001b[38;2;153;153;153mxxxxxxxxxxxxxxxxxxxxxx\u001b[K\u001b[m\r\n\u001b[K\u001b[38;2;153;153;153m\r\n  x xxxxxxxxxxxxxxxxxxxxx xxxxx xxxxxxxxxxxxxxxx xx xxxxxxx xxxx xxxxxxx        \u001b[m\r\n     \u001b[38;2;153;153;153mxxxxxxxx. xxx xxxxxxxxxxx xx xxxx x xxxxxxxxx xxxxx xxxxxxx xxx xxxxx.     \u001b[m\r\n\u001b[K\u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[m\r\n❯x\u001b[K\u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[m  \u001b[38;2;255;193;7mx xxxxxxxxxx xxxxxx xx xxx x xxxxxxxxx xxxxxxxxxxxxxxxxxxxxxxxxx xxxxxx \u001b[38;2;153;153;153mx xx  \u001b[m\r\n  \u001b[38;2;153;153;153mxxxxxx\u001b[K\u001b[m\r\n  \u001b[38;2;255;193;7mxx xxxx xxxx xx \u001b[38;2;153;153;153mxxxxxxxxxx xx xxxxxx\u001b[K\u001b[m\r\n\u001b[K\u001b[9;3H\u001b[?25h"
+  },
+  {
+    "t": 16011,
+    "data": "\u001b[?2004h\u001b[<u\u001b[>5u\u001b[>4;2m"
+  },
+  {
+    "t": 16054,
+    "data": "\u001b[?25l\u001b[?2026h\u001b[38;2;177;185;249mxxxxxxxxxxxxxx\u001b[12;3Hx\u001b[1mxxxxxxxxxxxxx\u001b[22m                  xxxx xxxxxxx xxxxx\u001b[m\u001b[13;3H\u001b[K\u001b[78C\r\n\n\u001b[80C\r\n\u001b[80C\r\n\u001b[80C\r\n\u001b[80C\u001b[?2026l"
+  },
+  {
+    "t": 16054,
+    "data": "\r\n\u001b[4;17H\u001b[?25h"
+  },
+  {
+    "t": 16837,
+    "data": "\u001b[?2026h\u001b[?2026l"
+  },
+  {
+    "t": 16852,
+    "data": "\u001b[?25l\u001b[38;2;80;80;80m\u001b[48;2;55;55;55m\u001b[3;1H❯ \u001b[38;2;153;153;153mxxxxxxxxxxxxxx                                                                \u001b[m\r\n\u001b[K\u001b[38;2;215;119;87m\r\nx \u001b[38;2;235;159;127mxxx\u001b[38;2;215;119;87mxxxxxx                                                                     \u001b[m\u001b[6;3H\u001b[K\u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[38;2;153;153;153m❯x\u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[38;2;255;193;7m\u001b[10;3Hx xxxxxxxxxx xxxxxx xx xxx x xxxxxxxxx xxxxxxxxxxxxxxxxxxxxxxxxx xxxxxx \u001b[38;2;153;153;153mx xx\u001b[11;3Hxxxxxx\u001b[38;2;255;193;7m\u001b[12;3Hxx xxxx xxxx xx \u001b[38;2;153;153;153mxxxxxxxxxx xx xxxxxx\u001b[m\r\n\u001b[K\r\n\u001b[K\u001b[8;3H\u001b[?25h"
+  },
+  {
+    "t": 16985,
+    "data": "\u001b[?2026h\u001b[?2026l\u001b[?25l\u001b[38;2;215;119;87m\u001b[5;1Hx\u001b[3Cx\u001b[8;3H\u001b[?25h"
+  },
+  {
+    "t": 17007,
+    "data": "\u001b[m"
+  },
+  {
+    "t": 17088,
+    "data": "\u001b[?2026h\u001b[?2026l\u001b[?25l\u001b[38;2;215;119;87m\u001b[5;1Hx\u001b[8;3H\u001b[?25h"
+  },
+  {
+    "t": 17101,
+    "data": "\u001b[m"
+  },
+  {
+    "t": 17118,
+    "data": "\u001b[?25l\u001b[?2026h\u001b[38;2;177;185;249m\u001b[5;1H────────────────────────────────────────────────────────────────────────────────\u001b[1m\u001b[6;3Hxxxxxxx xxxxx\u001b[m\r\n\u001b[K\r\n  \u001b[38;2;153;153;153mxxxxxx x xxxxxxx xx xxxx xxx xxxxx.\u001b[m\r\n\u001b[K\u001b[10;3H\u001b[K\u001b[38;2;177;185;249m\n❯ xxxx xxx\u001b[38;2;153;153;153m\u001b[10C406 xxxxxxxx\u001b[m\u001b[12;3H  xxxxxxx 2.1.284   \u001b[38;2;153;153;153m100 xxxxx\u001b[K\u001b[m\u001b[13;5Hxxxxxxx\u001b[1C2.1.283\u001b[38;2;153;153;153m\u001b[3C94\u001b[1Cxxxxx\u001b[14;5Hx\u001b[1C404\u001b[1Cxxxx\u001b[1Cxxxxx\u001b[m\r\n\u001b[80C\r\n  \u001b[38;2;153;153;153m\u001b[3mxxxxx\u001b[m \u001b[38;2;153;153;153m\u001b[3mxx\u001b[m \u001b[38;2;153;153;153m\u001b[3mxxxxxxx\u001b[m \u001b[38;2;153;153;153m\u001b[3mx\u001b[m \u001b[38;2;153;153;153m\u001b[3mxxx\u001b[m \u001b[38;2;153;153;153m\u001b[3mxx\u001b[m \u001b[38;2;153;153;153m\u001b[3mxxxxxx\u001b[m\u001b[K\u001b[46C\u001b[?2026l"
+  },
+  {
+    "t": 17131,
+    "data": "\r\n\u001b[80C"
+  },
+  {
+    "t": 19567,
+    "data": "\u001b[?2026h\u001b[?2026l"
+  },
+  {
+    "t": 19567,
+    "data": "\u001b[38;2;215;119;87m\u001b[H x\u001b[48;2;0;0;0mxxxxxx\u001b[m   \u001b[1mxxxxxx\u001b[22m \u001b[1mxxxx\u001b[22m \u001b[38;2;153;153;153mx2.1.284\u001b[K\u001b[38;2;215;119;87m\r\nxx\u001b[48;2;0;0;0mxxxxx\u001b[49mxx  \u001b[38;2;153;153;153mxxxx 5.5 x1x xxxxxxxx xxxx xxxxxx xxxxxx x xxxxxx xxx\u001b[K\u001b[38;2;215;119;87m\r\n xx   xx   \u001b[38;2;153;153;153mxxxxxxxxxxxxxxxxxxxxxx\u001b[K\u001b[m\r\n\u001b[K\u001b[38;2;153;153;153m\r\n  x xxxxxxxxxxxxxxxxxxxxx xxxxx xxxxxxxxxxxxxxxx xx xxxxxxx xxxx xxxxxxx        \u001b[m\r\n     \u001b[38;2;153;153;153mxxxxxxxx. xxx xxxxxxxxxxx xx xxxx x xxxxxxxxx xxxxx xxxxxxx xxx xxxxx.     \u001b[m\r\n\u001b[K\u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[m\r\n❯x\u001b[K\u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[m\r\n  \u001b[38;2;255;193;7mx xxxxxxxxxx xxxxxx xx xxx x xxxxxxxxx xxxxxxxxxxxxxxxxxxxxxxxxx xxxxxx \u001b[38;2;153;153;153mx xx  \u001b[m\r\n  \u001b[38;2;153;153;153mxxxxxx                                                    x xxxxxx x xxxxxxx  \u001b[m\r\n  \u001b[38;2;255;193;7mxx xxxx xxxx xx \u001b[38;2;153;153;153mxxxxxxxxxx xx xxxxxx\u001b[K\u001b[m\r\n\u001b[K\u001b[9;3H\u001b[?25h"
+  },
+  {
+    "t": 22527,
+    "data": "\u001b[?25l\u001b[?2026h\u001b[38;2;177;185;249mxxxxxxxx\u001b[12;3Hx\u001b[1mxxxxxxx\u001b[22m                        xxxxxxxxx xxxxxxx \u001b[1mxxxxxxx\u001b[22m xxxxx xx x xxxxxxx\u001b[m\u001b[13;3H\u001b[32X\u001b[38;2;177;185;249m\u001b[32Cxxxx\u001b[38;2;153;153;153m\u001b[14;3Hxxxxxxxxxxxxxxxxxxxx\u001b[12Cxxxxxx\u001b[1Cxx\u001b[m\u001b[1m\u001b[1Cxxxxxxx\u001b[38;2;153;153;153m\u001b[22mx\u001b[1Cxxxxx\u001b[1Cxxxxx\u001b[1Cxxxxxxx\u001b[1Cxx\u001b[m\r\n\u001b[38;2;153;153;153m\u001b[34Cxxxxxxxxxxxxx x xxxxxx xx xxxxxxxxxxxxxxxxxx  \u001b[m\r\n  \u001b[38;2;153;153;153mxxxxxxxxxxxxxxxxxxxx            xxxxxxxxxx xxxxxxxxxx xxxxxxxx xxx\u001b[K\u001b[12C\u001b[m\r\n\u001b[38;2;153;153;153m\u001b[34Cxxxxxxxxxx xxxxxxxx xxxx. xxxxx xxxxxxxxx.xx  \u001b[m\r\n\u001b[80C\u001b[?2026l\r\n\u001b[4;11H\u001b[?25h"
+  },
+  {
+    "t": 23327,
+    "data": "\u001b[?2026h\u001b[?2026l"
+  },
+  {
+    "t": 23346,
+    "data": "\u001b[?25l\u001b[38;2;80;80;80m\u001b[48;2;55;55;55m\u001b[3;1H❯ \u001b[38;2;153;153;153mxxxxxxxx                                                                      \u001b[m\r\n\u001b[K\u001b[38;2;215;119;87m\r\nx x\u001b[38;2;235;159;127mxxx\u001b[38;2;215;119;87mxxxxxx\u001b[K\u001b[m\u001b[6;3H\u001b[K\u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[38;2;153;153;153m❯x\u001b[m\u001b[32C\u001b[K\u001b[38;2;136;136;136m\r\n────────────────────────────────────────────────────────────────────────────────\u001b[38;2;255;193;7m\u001b[10;3Hx xxxxxxxxxx xxxxxx xx xxx x xxxxxxxxx xxxxxxxxxxxxxxxxxxxxxxxxx xxxxxx \u001b[38;2;153;153;153mx x\u001b[11;3Hxxxxxx                                                    x xxxxxx x xxxxxxx\u001b[38;2;255;193;7m\u001b[12;3Hxx xxxx xxxx xx \u001b[38;2;153;153;153mxxxxxxxxxx xx xxxxxx\u001b[K\u001b[m\r\n\u001b[K\r\n\u001b[K\u001b[8;3H\u001b[?25h"
+  },
+  {
+    "t": 23376,
+    "data": "\u001b[?2026h\u001b[?2026l"
+  },
+  {
+    "t": 23376,
+    "data": "\u001b[?25l\u001b[38;2;215;119;87m\u001b[5;1Hx\u001b[38;2;235;159;127m\u001b[1Cx\u001b[38;2;215;119;87m\u001b[2Cx\u001b[8;3H\u001b[?25h"
+  },
+  {
+    "t": 23393,
+    "data": "\u001b[m"
+  },
+  {
+    "t": 23578,
+    "data": "\u001b[?2026h\u001b[?2026l\u001b[?25l\u001b[38;2;215;119;87m\u001b[5;5Hx\u001b[8;3H\u001b[?25h"
+  },
+  {
+    "t": 23598,
+    "data": "\u001b[m"
+  },
+  {
+    "t": 23816,
+    "data": "\u001b[?2026h\u001b[?2026l"
+  },
+  {
+    "t": 23816,
+    "data": "\u001b[?25l\u001b[38;2;215;119;87m\u001b[5;1Hx\u001b[2Cx\u001b[8;3H\u001b[?25h"
+  },
+  {
+    "t": 23830,
+    "data": "\u001b[m"
+  },
+  {
+    "t": 23916,
+    "data": "\u001b[?2026h\u001b[?2026l"
+  },
+  {
+    "t": 23916,
+    "data": "\u001b[?25l\u001b[38;2;215;119;87m\u001b[5;1Hx\u001b[1Cx\u001b[8;3H\u001b[?25h"
+  },
+  {
+    "t": 23924,
+    "data": "\u001b[m"
+  },
+  {
+    "t": 24032,
+    "data": "\u001b[?2026h\u001b[?2026l"
+  },
+  {
+    "t": 24032,
+    "data": "\u001b[?25l\u001b[38;2;215;119;87m\u001b[5;1Hx\u001b[8;3H\u001b[?25h"
+  },
+  {
+    "t": 24049,
+    "data": "\u001b[m"
+  },
+  {
+    "t": 24254,
+    "data": "\u001b[?2026h\u001b[?2026l\u001b[?25l\u001b[38;2;215;119;87m\u001b[5;1Hx\u001b[8;3H\u001b[?25h"
+  },
+  {
+    "t": 24267,
+    "data": "\u001b[m"
+  },
+  {
+    "t": 24368,
+    "data": "\u001b[?2026h\u001b[?2026l"
+  },
+  {
+    "t": 24368,
+    "data": "\u001b[?25l\u001b[38;2;215;119;87m\u001b[5;1Hx\u001b[8;3H\u001b[?25h"
+  },
+  {
+    "t": 24391,
+    "data": "\u001b[m"
+  },
+  {
+    "t": 24496,
+    "data": "\u001b[?25l\u001b[?2026h\u001b[48;2;55;55;55m\u001b[3;2H \u001b[38;2;255;255;255mxxxxxxxx\u001b[m\u001b[1C                                                                     \u001b[38;2;153;153;153m  x  \u001b[m\u001b[1mxxxxxxx xxxxx\u001b[22m\r\n \u001b[1C   \u001b[38;2;136;136;136mx \u001b[38;2;153;153;153mx \u001b[38;2;177;185;249mx \u001b[38;2;215;119;87mx\u001b[1Cx \u001b[38;2;255;193;7mx \u001b[38;2;130;125;189mx \u001b[38;2;153;153;153mx x x x x x x x x x x x x \u001b[m\u001b[2Cxxxx\u001b[1C5.5\u001b[1Cx1x\u001b[1Cxxxxxxxx\u001b[38;2;153;153;153m\u001b[6;6Hx x x x x x x x x x x x x x x x x x x x \u001b[2Cxxxxxxxxxxxx5x5x1xx\u001b[m\r\n     \u001b[38;2;153;153;153mx x x x x x x x x x x x x x x x x x x x   38xx1x xxxxxx x4xx\u001b[K\u001b[m\r\n  \u001b[38;2;153;153;153m\u001b[3Cx x x x x x x x x x x x x x x x x x x x \u001b[m\r\n     \u001b[38;2;153;153;153mx x x x x x x x x x x x x x x x x x x x   \u001b[3mxxxxxxxxx xxxxx xx xxxxxxxx\u001b[m      \u001b[10;3H   \u001b[38;2;153;153;153mx x x x x x x x x x x x x x x x x x x x   \u001b[38;2;136;136;136mx \u001b[mxxxxxx xxxxxxx \u001b[38;2;153;153;153m2.6x xxxxxx\u001b[m\u001b[1C    \u001b[11;3H   \u001b[38;2;153;153;153mx0.3xx\u001b[m\u001b[49C\u001b[K\u001b[12;3H   \u001b[38;2;153;153;153mx x x x x x x x x x x x\u001b[1Cx x x x x x x x \u001b[2Cx\u001b[m\u001b[1Cxxxxxx\u001b[1Cxxxxxx\u001b[38;2;153;153;153m\u001b[1C6.1x xxxxxx \u001b[13;6Hx0.6xx\u001b[14;6Hx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[1Cx\u001b[38;2;177;185;249m\u001b[3Cx\u001b[m\u001b[1Cxxxxxx\u001b[1Cxxxxxxx\u001b[38;2;153;153;153m\u001b[1C5.3x\u001b[1Cxxxxxx\u001b[m\r\n     \u001b[38;2;153;153;153mx0.5xx\u001b[K\u001b[69C\u001b[m\r\n     \u001b[38;2;153;153;153mx x x x x x x x x x x x x x x x x x x x   \u001b[38;2;215;119;87mx \u001b[mxxxxxx xxxxxx \u001b[38;2;153;153;153m12.2x xxxxxx     \u001b[m\r\n     \u001b[38;2;153;153;153mx1.2xx\u001b[K\u001b[69C\u001b[m\r\n     \u001b[38;2;153;153;153mx x x x x x x x x x x x x x x x x x x x   \u001b[38;2;255;193;7mx \u001b[mxxxxxxx \u001b[38;2;153;153;153m6.9x xxxxxx x0.7xx     \u001b[m\r\n\u001b[38;2;130;125;189m\u001b[47Cx \u001b[mxxxxxxxxx \u001b[38;2;153;153;153m5.1x xxxxxx x0.5xx   \u001b[m\r\n\u001b[38;2;153;153;153m\u001b[47Cx \u001b[mxxxx xxxxxx \u001b[38;2;153;153;153m929x x92.9xx       \u001b[m\r\n\u001b[38;2;153;153;153m\u001b[47Cx xxxxxxxxxxx xxxxxxx 33x xxxxxx \u001b[m\r\n     \u001b[38;2;153;153;153mx3.3xx\u001b[K\u001b[69C\u001b[m\r\n\u001b[80C\r\n     \u001b[1mxxxxxxxxxxxx\u001b[22m \u001b[1mxxxxxxx\u001b[22m \u001b[38;2;153;153;153m1x xxxxxx\u001b[K\u001b[45C\u001b[m\r\n\u001b[80C\r\n     \u001b[1mxxxxxx\u001b[22m \u001b[1mxxxxxx\u001b[38;2;153;153;153m\u001b[22m x .xxxxxxxxxxxxxx\u001b[K\u001b[44C\u001b[m\r\n\u001b[80C\r\n     \u001b[38;2;153;153;153mxxxxxxx\u001b[K\u001b[68C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxx \u001b[38;2;153;153;153m109 xxxxxx\u001b[K\u001b[52C\u001b[m\r\n\u001b[80C\r\n     \u001b[38;2;153;153;153mxxxx\u001b[K\u001b[71C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxx5xxxxxxxxxx \u001b[38;2;153;153;153m452 xxxxxx\u001b[K\u001b[49C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxx \u001b[38;2;153;153;153m366 xxxxxx\u001b[K\u001b[48C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153m363 xxxxxx\u001b[K\u001b[46C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxx \u001b[38;2;153;153;153m349 xxxxxx\u001b[K\u001b[50C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxx \u001b[38;2;153;153;153m286 xxxxxx\u001b[K\u001b[51C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153m286 xxxxxx\u001b[K\u001b[45C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxx \u001b[38;2;153;153;153m276 xxxxxx\u001b[K\u001b[51C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxx \u001b[38;2;153;153;153m240 xxxxxx\u001b[K\u001b[49C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153m230 xxxxxx\u001b[K\u001b[45C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxx \u001b[38;2;153;153;153m209 xxxxxx\u001b[K\u001b[48C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxx \u001b[38;2;153;153;153m202 xxxxxx\u001b[K\u001b[53C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153m200 xxxxxx\u001b[K\u001b[46C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxx \u001b[38;2;153;153;153m195 xxxxxx\u001b[K\u001b[52C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153m193 xxxxxx\u001b[K\u001b[45C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxx \u001b[38;2;153;153;153m190 xxxxxx\u001b[K\u001b[50C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153m176 xxxxxx\u001b[K\u001b[45C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxx \u001b[38;2;153;153;153m175 xxxxxx\u001b[K\u001b[51C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxx \u001b[38;2;153;153;153m169 xxxxxx\u001b[K\u001b[49C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxx \u001b[38;2;153;153;153m149 xxxxxx\u001b[K\u001b[52C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxx \u001b[38;2;153;153;153m132 xxxxxx\u001b[K\u001b[53C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxx \u001b[38;2;153;153;153m116 xxxxxx\u001b[K\u001b[52C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxx \u001b[38;2;153;153;153m102 xxxxxx\u001b[K\u001b[53C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxx \u001b[38;2;153;153;153m99 xxxxxx\u001b[K\u001b[55C\u001b[m\r\n\u001b[80C\r\n     \u001b[1mxxxxxx\u001b[22m \u001b[1mxxxxx\u001b[38;2;153;153;153m\u001b[22m x xxxxxxx\u001b[K\u001b[53C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mx.xxxxxxxxxxxxx.xxx \u001b[38;2;153;153;153m8x xxxxxx\u001b[K\u001b[44C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxx.xxx \u001b[38;2;153;153;153m4.1x xxxxxx\u001b[K\u001b[51C\u001b[m\r\n\u001b[80C\r\n     \u001b[1mxxxxxx\u001b[38;2;153;153;153m\u001b[22m x xxxxxxx\u001b[K\u001b[59C\u001b[m\r\n\u001b[80C\r\n     \u001b[38;2;153;153;153mxxxxxxx\u001b[K\u001b[68C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxx \u001b[38;2;153;153;153mx280 xxxxxx\u001b[K\u001b[48C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxx \u001b[38;2;153;153;153mx170 xxxxxx\u001b[K\u001b[49C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx170 xxxxxx\u001b[K\u001b[47C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx160 xxxxxx\u001b[K\u001b[45C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxx \u001b[38;2;153;153;153mx150 xxxxxx\u001b[K\u001b[51C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx140 xxxxxx\u001b[K\u001b[47C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx120 xxxxxx\u001b[K\u001b[45C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx120 xxxxxx\u001b[K\u001b[43C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx110 xxxxxx\u001b[K\u001b[42C\u001b[m\r\n\u001b[80C\r\n     \u001b[38;2;153;153;153mxxxx\u001b[K\u001b[71C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx350 xxxxxx\u001b[K\u001b[44C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx320 xxxxxx\u001b[K\u001b[41C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx310 xxxxxx\u001b[K\u001b[39C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx310 xxxxxx\u001b[K\u001b[45C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx260 xxxxxx\u001b[K\u001b[40C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx250 xxxxxx\u001b[K\u001b[38C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxx \u001b[38;2;153;153;153mx240 xxxxxx\u001b[K\u001b[55C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx220 xxxxxx\u001b[K\u001b[47C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx210 xxxxxx\u001b[K\u001b[41C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx210 xxxxxx\u001b[K\u001b[44C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxx \u001b[38;2;153;153;153mx200 xxxxxx\u001b[K\u001b[51C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxx \u001b[38;2;153;153;153mx190 xxxxxx\u001b[K\u001b[51C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx170 xxxxxx\u001b[K\u001b[46C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx170 xxxxxx\u001b[K\u001b[46C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxx \u001b[38;2;153;153;153mx170 xxxxxx\u001b[K\u001b[51C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx140 xxxxxx\u001b[K\u001b[44C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxx \u001b[38;2;153;153;153mx140 xxxxxx\u001b[K\u001b[48C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx90 xxxxxx\u001b[K\u001b[31C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx70 xxxxxx\u001b[K\u001b[36C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx60 xxxxxx\u001b[K\u001b[44C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx40 xxxxxx\u001b[K\u001b[29C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx40 xxxxxx\u001b[K\u001b[47C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx40 xxxxxx\u001b[K\u001b[26C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx 20 xxxxxx\u001b[K\u001b[39C\u001b[m\r\n\u001b[80C\r\n     \u001b[38;2;153;153;153mxxxxxx xxxxxxxxxxxxxxxxxxxxxx\u001b[K\u001b[46C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx130 xxxxxx\u001b[K\u001b[21C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx30 xxxxxx\u001b[K\u001b[24C\u001b[m\r\n\u001b[80C\r\n     \u001b[38;2;153;153;153mxxxxxx xxxxxxxxxxxxxxxxxx\u001b[K\u001b[50C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx130 xxxxxx\u001b[K\u001b[29C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx40 xxxxxx\u001b[K\u001b[34C\u001b[m\r\n\u001b[80C\r\n     \u001b[38;2;153;153;153mxxxxxx xxxxxxxxxxxxx\u001b[K\u001b[55C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx 20 xxxxxx\u001b[K\u001b[37C\u001b[m\r\n\u001b[80C\r\n     \u001b[38;2;153;153;153mxxxxxx xxxxxxxxxxxxxxxxxxx\u001b[K\u001b[49C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx150 xxxxxx\u001b[K\u001b[31C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx110 xxxxxx\u001b[K\u001b[36C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx100 xxxxxx\u001b[K\u001b[27C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx90 xxxxxx\u001b[K\u001b[35C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx70 xxxxxx\u001b[K\u001b[34C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx60 xxxxxx\u001b[K\u001b[28C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx60 xxxxxx\u001b[K\u001b[28C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx60 xxxxxx\u001b[K\u001b[35C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx60 xxxxxx\u001b[K\u001b[40C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx50 xxxxxx\u001b[K\u001b[25C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx40 xxxxxx\u001b[K\u001b[18C\u001b[m\r\n\u001b[80C\r\n     \u001b[38;2;153;153;153mxxxxxxxx\u001b[K\u001b[67C\u001b[m\r\n     \u001b[38;2;153;153;153mx \u001b[mxxxxxxxxxxxxxxxxx \u001b[38;2;153;153;153mx80 xxxxxx\u001b[K\u001b[45C\u001b[m\r\n\u001b[80C\r\n\u001b[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────\u001b[m\r\n❯x\u001b[78C\r\n\u001b[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────\u001b[m\r\n  \u001b[38;2;255;193;7mx xxxxxxxxxx xxxxxx xx xxx x xxxxxxxxx xxxxxxxxxxxxxxxxxxxxxxxxx xxxxxx \u001b[38;2;153;153;153mx xx  \u001b[m\r\n  \u001b[38;2;153;153;153mxxxxxx                                                    x xxxxxx x xxxxxxx  \u001b[m\r\n  \u001b[38;2;255;193;7mxx xxxx xxxx xx \u001b[38;2;153;153;153mxxxxxxxxxx xx xxxxxx\u001b[K\u001b[42C\u001b[?2026l"
+  },
+  {
+    "t": 24500,
+    "data": "\u001b[m\r\n\u001b[9;3H\u001b[?25h"
+  }
+]

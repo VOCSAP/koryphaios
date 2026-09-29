@@ -173,7 +173,7 @@ const TOOLS = [
   {
     name: 'deck_run_directive',
     description:
-      'Run a directive on live peer tiles now, without a roadmap card: the same effect as a kind=directive card reaching the dispatch queue. clear resets context for free, compact costs one inference, magic_compact uses the plugin and falls back to compact. A peer_id carried by no live tile or by several is reported unreached, never guessed.',
+      'Run a directive on live peer tiles now, no roadmap card. clear is free, compact costs one inference, magic_compact uses the plugin, else compact. Result: injected = typed; refused = not typed (refused-modal|busy-timeout|no-terminal|error); pending = still queued; typed when the tile falls idle unless refused then (up to 120 s); do not resend; magic_compact is always pending; unreached = no single live tile carries that peer_id.',
     inputSchema: {
       type: 'object',
       properties: {

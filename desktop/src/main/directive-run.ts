@@ -1,5 +1,6 @@
 import type { DirectiveDispatch, RoadmapDirective, SessionRuntime, UnreachedDirectiveTarget } from '../shared/types'
 import type { MagicCompactMode } from './launch-config'
+import type { DirectiveOutcome } from './session-service'
 import {
   DIRECTIVE_ACCEPTS_PROMPT,
   directiveCommands,
@@ -12,10 +13,18 @@ import { unreachedTargets, unreachedTargetsText } from './directive-journal'
 
 export const DIRECTIVE_PROMPT_MAX = 500
 export const DIRECTIVE_MAX_TARGETS = 16
+/**
+ * How long deck_run_directive waits for injection outcomes before reporting a
+ * target pending. Far below the 120 s idle wait on purpose: a caller targeting
+ * its own tile keeps it busy for as long as the tool call lasts.
+ */
+export const DIRECTIVE_REPORT_WAIT_MS = 5_000
+/** How long injectCommand waits for a busy tile to fall idle before 'busy-timeout'. */
+export const DIRECTIVE_IDLE_WAIT_MS = 120_000
 
 export interface DirectiveRunDeps {
   listSessions(): SessionRuntime[]
-  injectCommand(tileId: string, keys: string): Promise<string>
+  injectCommand(tileId: string, keys: string): Promise<DirectiveOutcome>
   runMagicCompact(tileId: string, peerId: string, useMagic: boolean, mode: MagicCompactMode): Promise<void>
   /** Called once per run, and only for magic_compact. */
   resolveMagic(): { useMagic: boolean; mode: MagicCompactMode }
@@ -25,6 +34,31 @@ export interface DirectiveRunDeps {
 
 export interface DirectiveRunResult {
   injected: { tileId: string; peerId: string }[]
+  unreached: UnreachedDirectiveTarget[]
+  error?: 'directive execution failed'
+}
+
+type DirectiveTarget = { tileId: string; peerId: string }
+
+/** 'refused-modal' also covers needsAttention and rateLimited; 'error' is a rejected injection. */
+export type DirectiveRefusalReason = Exclude<DirectiveOutcome, 'written'> | 'error'
+
+/**
+ * deck_run_directive's result: `injected` holds only targets whose command was
+ * written; `pending` did not settle within DIRECTIVE_REPORT_WAIT_MS and is
+ * still queued behind the tile's idle wait, magic_compact always included.
+ */
+export interface DeckDirectiveRunResult {
+  injected: DirectiveTarget[]
+  refused: (DirectiveTarget & { reason: DirectiveRefusalReason })[]
+  pending: DirectiveTarget[]
+  unreached: UnreachedDirectiveTarget[]
+  error?: 'directive execution failed'
+}
+
+interface DirectiveLaunch {
+  /** `outcome` is null for magic_compact, whose result only reaches the journal. */
+  launched: (DirectiveTarget & { outcome: Promise<DirectiveOutcome | 'error'> | null })[]
   unreached: UnreachedDirectiveTarget[]
   error?: 'directive execution failed'
 }
@@ -114,19 +148,19 @@ function reportDirectiveError(deps: DirectiveRunDeps, message: string, error: un
   deps.reportError(message, error)
 }
 
-function failedDirectiveRun(deps: DirectiveRunDeps, error: unknown): DirectiveRunResult {
+function failedDeckDirectiveRun(deps: DirectiveRunDeps, error: unknown): DeckDirectiveRunResult {
   reportDirectiveError(deps, 'directive execution failed', error)
-  return { injected: [], unreached: [], error: 'directive execution failed' }
+  return { injected: [], refused: [], pending: [], unreached: [], error: 'directive execution failed' }
 }
 
-export function runDirectiveOn(
+function launchDirective(
   cmd: RoadmapDirective,
   peerIds: string[],
   prompt: string | undefined,
   label: string,
   deps: DirectiveRunDeps
-): DirectiveRunResult {
-  const injected: { tileId: string; peerId: string }[] = []
+): DirectiveLaunch {
+  const launched: DirectiveLaunch['launched'] = []
   try {
     const keys = directiveKeys(cmd)
     const typed = prompt ? `${keys} ${prompt}` : keys
@@ -134,7 +168,7 @@ export function runDirectiveOn(
     if (matched.length === 0) {
       const detail = unreachedTargetsText(missing, ambiguous) || `requested: ${peerIds.join(', ') || 'none'}`
       deps.journal(`directive ${keys} "${label}": ${detail}`)
-      return { injected: [], unreached: unreachedTargets(missing, ambiguous) }
+      return { launched: [], unreached: unreachedTargets(missing, ambiguous) }
     }
     const magic = cmd === 'magic_compact' ? deps.resolveMagic() : null
     for (const t of matched) {
@@ -142,25 +176,71 @@ export function runDirectiveOn(
         void deps
           .runMagicCompact(t.id, t.peerId, magic.useMagic, magic.mode)
           .catch((e) => reportDirectiveError(deps, `magic_compact failed for "${t.peerId}"`, e))
+        launched.push({ tileId: t.id, peerId: t.peerId, outcome: null })
       } else {
-        void deps
-          .injectCommand(t.id, typed)
-          .then((outcome) => deps.journal(`directive ${keys} -> "${t.peerId}": ${outcome}`))
-          .catch((e) => reportDirectiveError(deps, `directive injection failed for "${t.peerId}"`, e))
+        const outcome = deps.injectCommand(t.id, typed).then(
+          (o): DirectiveOutcome => {
+            try {
+              deps.journal(`directive ${keys} -> "${t.peerId}": ${o}`)
+            } catch (e) {
+              reportDirectiveError(deps, `directive journal failed for "${t.peerId}"`, e)
+            }
+            return o
+          },
+          (e): 'error' => {
+            reportDirectiveError(deps, `directive injection failed for "${t.peerId}"`, e)
+            return 'error'
+          }
+        )
+        launched.push({ tileId: t.id, peerId: t.peerId, outcome })
       }
-      injected.push({ tileId: t.id, peerId: t.peerId })
     }
     if (missing.length > 0) {
       deps.journal(`directive ${keys} "${label}": ${unreachedTargetsText(missing, ambiguous)}`)
     }
-    return {
-      injected,
-      unreached: unreachedTargets(missing, ambiguous)
-    }
+    return { launched, unreached: unreachedTargets(missing, ambiguous) }
   } catch (e) {
     reportDirectiveError(deps, 'directive execution failed', e)
-    return { injected, unreached: [], error: 'directive execution failed' }
+    return { launched, unreached: [], error: 'directive execution failed' }
   }
+}
+
+/** Card path: fire-and-forget, `injected` lists every target the command was launched at. */
+export function runDirectiveOn(
+  cmd: RoadmapDirective,
+  peerIds: string[],
+  prompt: string | undefined,
+  label: string,
+  deps: DirectiveRunDeps
+): DirectiveRunResult {
+  const run = launchDirective(cmd, peerIds, prompt, label, deps)
+  return {
+    injected: run.launched.map(({ tileId, peerId }) => ({ tileId, peerId })),
+    unreached: run.unreached,
+    ...(run.error ? { error: run.error } : {})
+  }
+}
+
+async function settleLaunch(run: DirectiveLaunch, waitMs: number): Promise<DeckDirectiveRunResult> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const cap = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), waitMs)
+  })
+  let outcomes: (DirectiveOutcome | 'error' | null)[]
+  try {
+    outcomes = await Promise.all(run.launched.map((t) => (t.outcome ? Promise.race([t.outcome, cap]) : null)))
+  } finally {
+    clearTimeout(timer)
+  }
+  const result: DeckDirectiveRunResult = { injected: [], refused: [], pending: [], unreached: run.unreached }
+  run.launched.forEach(({ tileId, peerId }, i) => {
+    const outcome = outcomes[i] ?? null
+    if (outcome === null) result.pending.push({ tileId, peerId })
+    else if (outcome === 'written') result.injected.push({ tileId, peerId })
+    else result.refused.push({ tileId, peerId, reason: outcome })
+  })
+  if (run.error) result.error = run.error
+  return result
 }
 
 export function executeDirectiveItem(
@@ -176,24 +256,26 @@ export function executeDirectiveItem(
   return { id: item.id, title: item.title, directive: cmd, ...run }
 }
 
-export function runDirectiveForCaller(
+export async function runDirectiveForCaller(
   cmd: RoadmapDirective,
   peerIds: string[],
   prompt: string | undefined,
   callerId: string,
   deps: DirectiveRunDeps,
-  options: { excludeSupervisor?: boolean } = {}
-): DirectiveRunResult {
+  options: { excludeSupervisor?: boolean; reportWaitMs?: number } = {}
+): Promise<DeckDirectiveRunResult> {
   const scopedDeps = options.excludeSupervisor
     ? { ...deps, listSessions: () => deps.listSessions().filter((session) => !session.supervisor) }
     : deps
+  let run: DirectiveLaunch
   try {
     const promptNote = prompt ? ` with prompt ${JSON.stringify(prompt)}` : ''
     scopedDeps.journal(`directive ${directiveKeys(cmd)} requested by ${callerId} for ${peerIds.join(', ')}${promptNote}`)
-    return runDirectiveOn(cmd, peerIds, prompt, `deck_run_directive by ${callerId}`, scopedDeps)
+    run = launchDirective(cmd, peerIds, prompt, `deck_run_directive by ${callerId}`, scopedDeps)
   } catch (e) {
-    return failedDirectiveRun(scopedDeps, e)
+    return failedDeckDirectiveRun(scopedDeps, e)
   }
+  return settleLaunch(run, options.reportWaitMs ?? DIRECTIVE_REPORT_WAIT_MS)
 }
 
 export function createRunDirectiveAdapter(
@@ -205,7 +287,7 @@ export function createRunDirectiveAdapter(
   prompt: string | undefined,
   callerId: string,
   excludeSupervisor?: boolean
-) => DirectiveRunResult {
+) => Promise<DeckDirectiveRunResult> {
   return (directive, peerIds, prompt, callerId, excludeSupervisor = false) =>
     run(directive, peerIds, prompt, callerId, deps, { excludeSupervisor })
 }

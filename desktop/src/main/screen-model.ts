@@ -30,10 +30,17 @@ export function makeScreen(cols = 400, rows = 200): Screen {
   let wrapPending = false
   const clampY = (y: number): number => Math.max(0, Math.min(rows - 1, y))
   const clampX = (x: number): number => Math.max(0, Math.min(cols - 1, x))
+  const scrollUp = (): void => {
+    grid.shift()
+    grid.push(new Array(cols).fill(' '))
+  }
 
   function put(ch: string): void {
     if (ch === '\n') {
-      cy = clampY(cy + 1)
+      // A line feed on the last row scrolls, as on a real terminal: clamping
+      // instead leaves the grid one row off its cursor once history scrolls.
+      if (cy === rows - 1) scrollUp()
+      else cy++
       wrapPending = false
       return
     }
@@ -55,7 +62,8 @@ export function makeScreen(cols = 400, rows = 200): Screen {
     if (ch < ' ') return
     if (wrapPending) {
       cx = 0
-      cy = clampY(cy + 1)
+      if (cy === rows - 1) scrollUp()
+      else cy++
       wrapPending = false
     }
     const row = grid[cy]

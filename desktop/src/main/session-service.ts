@@ -51,6 +51,7 @@ import {
 } from './session-status-file'
 import { sameLiveStatus } from '@shared/session-status'
 import { ScreenGuard } from './screen-model'
+import { DIRECTIVE_IDLE_WAIT_MS } from './directive-run'
 import { gracefulClose } from './session-close'
 import { createOscParser, type OscSnapshot } from './detect/osc'
 import { createActivityTracker, ACTIVITY_IDLE_MS, type Activity } from './detect/activity'
@@ -155,7 +156,6 @@ function pushSessionIdHistory(history: string[] | undefined, realId: string): st
  * DIRECTIVE_IDLE_POLL_MS) for it to fall idle, else reports a skip.
  * DIRECTIVE_SETTLE_MS mirrors the autoResume settle between Escape and the text.
  */
-const DIRECTIVE_IDLE_WAIT_MS = 120_000
 const DIRECTIVE_IDLE_POLL_MS = 500
 const DIRECTIVE_SETTLE_MS = 120
 

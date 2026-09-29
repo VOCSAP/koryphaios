@@ -197,9 +197,14 @@ function makeDeps(state: { sessions: SessionRuntime[] }): DeckControlDeps & {
       revokedLeadCallerIds.push(callerId);
     },
     confirmSpawnShellFields: () => true,
-    runDirective: (directive, peerIds, prompt, callerId) => {
+    runDirective: async (directive, peerIds, prompt, callerId) => {
       directiveRuns.push({ directive, peerIds, prompt, callerId });
-      return { injected: peerIds.map((p) => ({ tileId: `tile-${p}`, peerId: p })), unreached: [] };
+      return {
+        injected: peerIds.map((p) => ({ tileId: `tile-${p}`, peerId: p })),
+        refused: [],
+        pending: [],
+        unreached: []
+      };
     }
   };
 }
@@ -2820,7 +2825,13 @@ test("deck_run_directive forwards the validated arguments and the server-known c
     prompt: "keep the API decisions"
   });
   expect(res.status).toBe(200);
-  expect(res.body.result).toEqual({ directive: "compact", injected: ["alpha", "beta"], unreached: [] });
+  expect(res.body.result).toEqual({
+    directive: "compact",
+    injected: ["alpha", "beta"],
+    refused: [],
+    pending: [],
+    unreached: []
+  });
   expect(deps.directiveRuns).toEqual([
     { directive: "compact", peerIds: ["alpha", "beta"], prompt: "keep the API decisions", callerId: "supervisor" }
   ]);
@@ -2868,12 +2879,14 @@ test("a restricted caller leaves the supervisor unreached while the unrestricted
     ]
   };
   const deps = makeDeps(state);
-  deps.runDirective = (_directive, peerIds, _prompt, _callerId, excludeSupervisor?: boolean) => {
+  deps.runDirective = async (_directive, peerIds, _prompt, _callerId, excludeSupervisor?: boolean) => {
     const reached = peerIds.filter((peerId) =>
       state.sessions.some((session) => session.peerId === peerId && (!excludeSupervisor || !session.supervisor))
     );
     return {
       injected: reached.map((peerId) => ({ tileId: `tile-${peerId}`, peerId })),
+      refused: [],
+      pending: [],
       unreached: peerIds
         .filter((peerId) => !reached.includes(peerId))
         .map((peerId) => ({ peerId, reason: "no-live-target" as const }))
@@ -2887,11 +2900,39 @@ test("a restricted caller leaves the supervisor unreached while the unrestricted
   expect(restricted.body.result).toEqual({
     directive: "clear",
     injected: ["worker-peer"],
+    refused: [],
+    pending: [],
     unreached: [{ peerId: "supervisor-peer", reason: "no-live-target" }]
   });
 
   const unrestricted = await call(srv, "deck_run_directive", { directive: "clear", peer_ids: ["supervisor-peer"] });
-  expect(unrestricted.body.result).toEqual({ directive: "clear", injected: ["supervisor-peer"], unreached: [] });
+  expect(unrestricted.body.result).toEqual({
+    directive: "clear",
+    injected: ["supervisor-peer"],
+    refused: [],
+    pending: [],
+    unreached: []
+  });
+});
+
+test("deck_run_directive relays refused and pending targets apart from the injected ones", async () => {
+  const deps = makeDeps({ sessions: [] });
+  deps.runDirective = async () => ({
+    injected: [{ tileId: "t-a", peerId: "alpha" }],
+    refused: [{ tileId: "t-b", peerId: "beta", reason: "refused-modal" }],
+    pending: [{ tileId: "t-c", peerId: "gamma" }],
+    unreached: [{ peerId: "delta", reason: "no-live-target" as const }]
+  });
+  const srv = await startDeckControl(deps);
+  servers.push(srv);
+  const res = await call(srv, "deck_run_directive", { directive: "clear", peer_ids: ["alpha", "beta", "gamma", "delta"] });
+  expect(res.body.result).toEqual({
+    directive: "clear",
+    injected: ["alpha"],
+    refused: [{ peerId: "beta", reason: "refused-modal" }],
+    pending: ["gamma"],
+    unreached: [{ peerId: "delta", reason: "no-live-target" }]
+  });
 });
 
 test("the MCP bridge serves deck_run_directive with the card directive enum and a description within budget", async () => {
