@@ -24,10 +24,11 @@ export const DAEMON_REASON_MARKER = "spawns a daemon and binds ports";
 export const NATIVE_DEPS_REASON_MARKER =
   "needs a desktop/node_modules native dependency not present until the 'Install desktop deps' step has run";
 
-// Matches a desktop/node_modules dep by join-triple or by a single joined
-// path string -- known gaps named in the guard's own message.
+// Matches a desktop/node_modules dep by join-triple, by a single joined path
+// string, or by a path string to desktop/electron.vite.config (it imports
+// electron-vite) -- known gaps named in the guard's own message.
 export const NATIVE_DEPS_SOURCE_RE =
-  /["']desktop["']\s*,\s*["']node_modules["']\s*,\s*["'](?:electron|typescript|\.bin)["']|["'][.\/\\]{0,4}desktop[/\\]+node_modules[/\\]+(?:electron|typescript|\.bin)[^"']*["']/;
+  /["']desktop["']\s*,\s*["']node_modules["']\s*,\s*["'](?:electron|typescript|\.bin)["']|["'][.\/\\]{0,4}desktop[/\\]+node_modules[/\\]+(?:electron|typescript|\.bin)[^"']*["']|["'][.\/\\]{0,4}desktop[/\\]+electron\.vite\.config(?:\.[cm]?ts)?["']/;
 
 export const EXEMPTIONS: Exemptions = {
   familyPrefixes: {
@@ -45,6 +46,8 @@ export const EXEMPTIONS: Exemptions = {
       `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron to prove the node:sqlite lock against a bun holder); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
     "desktop-cwd-exe-search.test.ts":
       `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron to run entry.ts against a planted executable); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
+    "desktop-main-entry.test.ts":
+      `${NATIVE_DEPS_REASON_MARKER} (imports desktop/electron.vite.config.ts, which imports electron-vite from desktop/node_modules); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
     "desktop-clodex-spawn-win32.test.ts":
       `${NATIVE_DEPS_REASON_MARKER} (spawns desktop/node_modules/electron directly); run by the '${INTEGRATION_STEP_NAME}' step in desktop-build.yml, not the pure-module matrix`,
     "desktop-avatar-transport.test.ts":
