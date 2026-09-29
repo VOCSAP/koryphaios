@@ -158,7 +158,7 @@ test("collectFileDiff does not dump a symlink pointing outside the repo", async 
     return; // platform without symlink perms
   }
   const diff = await collectFileDiff(repo, "leak.txt", null);
-  // isRepoRelative passes (lexically inside), but the realpath gate blocks the
+  // isRepoRelative passes (lexically inside), but the symlink-resolving gate blocks the
   // --no-index content dump, so the secret never appears.
   expect(diff.text).not.toContain("TOP SECRET");
   rmSync(join(repo, "leak.txt"));

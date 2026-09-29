@@ -116,7 +116,7 @@ test("runHook(): a decide() that throws fails open with a trace, never a decisio
 });
 
 test("decide(): a rule whose path cannot be resolved (ELOOP) is traced and skipped; another rule still denies", () => {
-  const dir = realpathSync(makeTmpDir("ttsr-eloop-"));
+  const dir = realpathSync.native(makeTmpDir("ttsr-eloop-"));
   symlinkSync(join(dir, "b"), join(dir, "a"));
   symlinkSync(join(dir, "a"), join(dir, "b"));
   const eff = join(dir, "eff.json");
@@ -137,7 +137,7 @@ test("decide(): a rule whose path cannot be resolved (ELOOP) is traced and skipp
 });
 
 test("decide(): paths are relative to the git toplevel even when the session runs in a subdirectory", () => {
-  const repo = realpathSync(makeTmpDir("ttsr-subdir-"));
+  const repo = realpathSync.native(makeTmpDir("ttsr-subdir-"));
   expect(spawnSync("git", ["init", "-q"], { cwd: repo }).status).toBe(0);
   mkdirSync(join(repo, "src", "ui"), { recursive: true });
   const eff = join(repo, "eff.json");
@@ -151,7 +151,7 @@ test("decide(): paths are relative to the git toplevel even when the session run
   expect(decide(payload), "a session launched in src/ must still see src/ui/** as src/ui/**, like the Deck and the CLI").toMatchObject({
     hookSpecificOutput: { permissionDecision: "deny" },
   });
-  process.env.CLAUDE_PROJECT_DIR = realpathSync(makeTmpDir("ttsr-nogit-"));
+  process.env.CLAUDE_PROJECT_DIR = realpathSync.native(makeTmpDir("ttsr-nogit-"));
   const outside = { ...payload, tool_input: { ...payload.tool_input, file_path: join(process.env.CLAUDE_PROJECT_DIR, "src", "ui", "x.tsx") } };
   expect(decide(outside), "outside a repository the project dir itself is the root").toMatchObject({
     hookSpecificOutput: { permissionDecision: "deny" },

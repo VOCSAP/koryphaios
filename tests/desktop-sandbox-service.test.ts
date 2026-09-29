@@ -273,7 +273,7 @@ test("audit fix 3: isValidSandboxSessionId accepts a uuid, rejects shell-hostile
 });
 
 // Root and target are real tmpdir trees, not mocked: isWithinDir makes real
-// realpathSync calls, so symlink containment is exercised for real.
+// symlink-resolving calls, so symlink containment is exercised for real.
 let containDir: string;
 let outsideDir: string;
 beforeEach(() => {
@@ -301,7 +301,7 @@ test("audit fix 1 bis: isWithinDir follows a symlink to its REAL target, not its
   const linkInsideRoot = join(containDir, "looks-local.md");
   symlinkSync(outsideSecret, linkInsideRoot);
 
-  // Lexically under containDir, but realpath resolves outside it -- must be refused.
+  // Lexically under containDir, but the resolved target lies outside it -- must be refused.
   expect(isWithinDir(containDir, linkInsideRoot)).toBe(false);
 });
 

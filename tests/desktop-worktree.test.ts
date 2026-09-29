@@ -102,7 +102,7 @@ test("paths survive a symlinked repo prefix (macOS /var, Windows 8.3)", async ()
   // 'junction' is the dir-symlink flavour Windows allows without privileges;
   // the type argument is ignored on POSIX.
   symlinkSync(real, link, "junction");
-  expect(link).not.toBe(realpathSync(link));
+  expect(link).not.toBe(realpathSync.native(link));
 
   try {
     // Everything is driven through the SYMLINKED path, as a user's projectDir

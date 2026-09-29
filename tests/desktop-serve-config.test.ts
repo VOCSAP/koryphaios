@@ -99,7 +99,7 @@ test('accepts a complete v1 serve.json and resolves the action cwd', async () =>
 
   expect(config.version).toBe(1)
   expect(config.actions).toHaveLength(1)
-  expect(config.actions[0]!.cwd).toBe(realpathSync(join(project, 'web')))
+  expect(config.actions[0]!.cwd).toBe(realpathSync.native(join(project, 'web')))
   expect(config.actions[0]!.port).toBe('auto')
 })
 
@@ -356,7 +356,7 @@ test('canonicalizes a symlinked project prefix before accepting cwd', async () =
   try {
     writeServeJson(linkedProject, validServeJson())
     const config = await validConfig(linkedProject)
-    expect(config.actions[0]!.cwd).toBe(realpathSync(join(realProject, 'web')))
+    expect(config.actions[0]!.cwd).toBe(realpathSync.native(join(realProject, 'web')))
   } finally {
     rmSync(outer, { recursive: true, force: true })
   }

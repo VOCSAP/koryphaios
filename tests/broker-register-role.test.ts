@@ -137,7 +137,7 @@ test(
   async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sessionCwd = realpathSync(mkdtempSync(join(tmpdir(), "cp-register-role-fresh-")));
+    const sessionCwd = realpathSync.native(mkdtempSync(join(tmpdir(), "cp-register-role-fresh-")));
     tmpDirs.push(sessionCwd);
 
     spawnServer(b, sessionCwd, "lead");
@@ -156,7 +156,7 @@ test(
   async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sessionCwd = realpathSync(mkdtempSync(join(tmpdir(), "cp-register-role-diff-")));
+    const sessionCwd = realpathSync.native(mkdtempSync(join(tmpdir(), "cp-register-role-diff-")));
     tmpDirs.push(sessionCwd);
 
     const proc1 = spawnServer(b, sessionCwd, "lead");
@@ -191,7 +191,7 @@ test(
   async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sessionCwd = realpathSync(mkdtempSync(join(tmpdir(), "cp-register-role-empty-")));
+    const sessionCwd = realpathSync.native(mkdtempSync(join(tmpdir(), "cp-register-role-empty-")));
     tmpDirs.push(sessionCwd);
 
     const proc1 = spawnServer(b, sessionCwd, "lead");
@@ -223,7 +223,7 @@ test(
   async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sessionCwd = realpathSync(mkdtempSync(join(tmpdir(), "cp-register-role-malformed-")));
+    const sessionCwd = realpathSync.native(mkdtempSync(join(tmpdir(), "cp-register-role-malformed-")));
     tmpDirs.push(sessionCwd);
 
     // trim() leaves this value unchanged, so it must be caught by ROLE_REGEX
@@ -248,7 +248,7 @@ test(
   async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sessionCwd = realpathSync(mkdtempSync(join(tmpdir(), "cp-register-role-explicit-empty-")));
+    const sessionCwd = realpathSync.native(mkdtempSync(join(tmpdir(), "cp-register-role-explicit-empty-")));
     tmpDirs.push(sessionCwd);
 
     spawnServer(b, sessionCwd, ""); // CLAUDE_PEERS_ROLE="" -- present but empty
@@ -267,7 +267,7 @@ test(
   async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sessionCwd = realpathSync(mkdtempSync(join(tmpdir(), "cp-register-role-whoami-")));
+    const sessionCwd = realpathSync.native(mkdtempSync(join(tmpdir(), "cp-register-role-whoami-")));
     tmpDirs.push(sessionCwd);
 
     const proc1 = spawnServer(b, sessionCwd, "lead");
@@ -328,7 +328,7 @@ test(
   async () => {
     const b = await startBroker();
     brokers.push(b);
-    const sessionCwd = realpathSync(mkdtempSync(join(tmpdir(), "cp-register-role-switchgroup-")));
+    const sessionCwd = realpathSync.native(mkdtempSync(join(tmpdir(), "cp-register-role-switchgroup-")));
     tmpDirs.push(sessionCwd);
 
     // A dedicated, isolated user config dir with a real named
@@ -337,7 +337,7 @@ test(
     // resume tests above, the resulting peers row is a FRESH insert whose
     // role comes straight from THIS call's own body -- write-once cannot mask
     // an omission here the way it does on a same-group switch_group("default").
-    // NOT wrapped in realpathSync, unlike the seven sessionCwd above, and that
+    // NOT canonicalised, unlike the seven sessionCwd above, and that
     // is deliberate: this path is never compared to anything -- it only serves
     // as the base of a join() and of a file read (server.ts reads
     // <base>/claude-peers/config.json), both of which traverse a symlink fine.

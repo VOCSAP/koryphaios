@@ -109,7 +109,7 @@ test("collectSources: file content capped, command executed in projectDir, error
   // Compare canonically: mkdtemp hands back a symlinked prefix on macOS
   // (/var -> /private/var) and an 8.3 short name on Windows, while the child
   // process reports the real path.
-  expect(realpathSync(out[2]!.content.trim())).toBe(realpathSync(dir));
+  expect(realpathSync.native(out[2]!.content.trim())).toBe(realpathSync.native(dir));
   expect(out[2]!.error).toBeUndefined();
   expect(out[3]!.error).toBeTruthy();
 });

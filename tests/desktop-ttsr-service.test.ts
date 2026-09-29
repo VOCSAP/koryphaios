@@ -469,10 +469,10 @@ describe("paths and symlinks", () => {
     symlinkSync(real, link, "junction");
     const h = harness({ resolveProject: undefined });
     const ref = h.svc.projectFor(link);
-    expect(ref.root).toBe(realpathSync(real));
+    expect(ref.root).toBe(realpathSync.native(real));
     h.svc.fileFor({ id: randomUUID(), cwd: link });
-    expect(h.svc.knownProject(link)?.root).toBe(realpathSync(real));
-    expect(h.svc.knownProject(real)?.root).toBe(realpathSync(real));
+    expect(h.svc.knownProject(link)?.root).toBe(realpathSync.native(real));
+    expect(h.svc.knownProject(real)?.root).toBe(realpathSync.native(real));
   });
 
   test("defaultResolveProject takes the git toplevel of a subdirectory", () => {
@@ -482,7 +482,7 @@ describe("paths and symlinks", () => {
     mkdirSync(join(repo, "sub", "deeper"), { recursive: true });
     const errs: string[] = [];
     const ref = defaultResolveProject(join(repo, "sub", "deeper"), (m) => errs.push(m));
-    expect(ref.root).toBe(realpathSync(repo));
+    expect(ref.root).toBe(realpathSync.native(repo));
     expect(ref.projectKey.startsWith("local:")).toBe(true);
     expect(errs).toEqual([]);
   });
