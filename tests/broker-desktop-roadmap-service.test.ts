@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 
-import { post, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
+import { post, scrubEnv, startBroker, stopBroker, type TestBroker } from "./_helper.ts";
 import {
   normalizeRemoteUrl,
   appendRoadmapContext,
@@ -86,20 +86,21 @@ test("normalizeRemoteUrl mirrors the core implementation on the doc examples", (
 
 test("computeDeckProjectKey uses the normalized origin remote of a git dir", () => {
   const dir = tmpDir();
-  execFileSync("git", ["init", "-q"], { cwd: dir });
-  execFileSync("git", ["remote", "add", "origin", "git@github.com:acme/widget.git"], { cwd: dir });
+  execFileSync("git", ["init", "-q"], { cwd: dir, env: scrubEnv(dir) });
+  execFileSync("git", ["remote", "add", "origin", "git@github.com:acme/widget.git"], { cwd: dir, env: scrubEnv(dir) });
   expect(computeDeckProjectKey(dir)).toBe("github.com/acme/widget");
 });
 
 test("computeDeckProjectKey falls back to local:<hash of git root>, matching server.ts", () => {
   const dir = tmpDir();
-  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["init", "-q"], { cwd: dir, env: scrubEnv(dir) });
   // server.ts fallback: local: + sha256(gitRoot ?? cwd)[:16]. git may report a
   // symlink-resolved root (e.g. /private/var on macOS), so hash the same value
   // the service actually read.
   const gitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
     cwd: dir,
-    encoding: "utf-8"
+    encoding: "utf-8",
+    env: scrubEnv(dir)
   }).trim();
   const expected = `local:${createHash("sha256").update(gitRoot, "utf-8").digest("hex").slice(0, 16)}`;
   expect(computeDeckProjectKey(dir)).toBe(expected);
