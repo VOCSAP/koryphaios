@@ -136,9 +136,11 @@ function sameBearerToken(authorization: string | undefined, token: string): bool
   return provided.length === expected.length && timingSafeEqual(provided, expected)
 }
 
+/** An explicit length: without it, bun 1.4.0 hands the client of a refused request a body it cannot parse. */
 function sendJson(response: ServerResponse, status: number, body: Record<string, unknown>): void {
-  response.writeHead(status, { 'content-type': 'application/json' })
-  response.end(JSON.stringify(body))
+  const payload = JSON.stringify(body)
+  response.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) })
+  response.end(payload)
 }
 
 function contentLengthExceedsLimit(request: IncomingMessage): boolean {
