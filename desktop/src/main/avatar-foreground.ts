@@ -1,11 +1,10 @@
 import { execFile } from 'node:child_process'
 import { win32 } from 'node:path'
 import { reportError } from './log'
+import { system32Dir } from './windows-system-root'
 
 export const ALLOW_FOREGROUND_TIMEOUT_MS = 5_000
 const MAX_POWERSHELL_INT = 0x7fffffff
-const WINDOWS_ABSOLUTE_RE = /^[A-Za-z]:[\\/]/
-const DOT_DOT_SEGMENT_RE = /(^|[\\/])\.\.([\\/]|$)/
 
 export const ALLOW_FOREGROUND_SCRIPT = [
   "Add-Type -Namespace KoryAvatar -Name Foreground -MemberDefinition '[DllImport(\"user32.dll\")] public static extern bool AllowSetForegroundWindow(int dwProcessId);'",
@@ -38,9 +37,9 @@ export function isForegroundPid(pid: number): boolean {
 
 /** Null unless SystemRoot is an absolute drive path: a bare name would let the cwd supply powershell.exe. */
 export function windowsPowerShellPath(systemRoot: string | undefined): { system32: string; powershell: string } | null {
-  if (!systemRoot || !WINDOWS_ABSOLUTE_RE.test(systemRoot) || DOT_DOT_SEGMENT_RE.test(systemRoot)) return null
-  const system32 = win32.join(systemRoot, 'System32')
-  return { system32, powershell: win32.join(system32, 'WindowsPowerShell', 'v1.0', 'powershell.exe') }
+  const system32 = system32Dir(systemRoot)
+  if (!system32.ok) return null
+  return { system32: system32.dir, powershell: win32.join(system32.dir, 'WindowsPowerShell', 'v1.0', 'powershell.exe') }
 }
 
 /**

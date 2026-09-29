@@ -1,9 +1,10 @@
 const { request } = require('node:https')
-const { startAvatarServer } = require(process.argv[2])
+const { deckSocketEndpoints, startAvatarServer } = require(process.argv[2])
 const { createAvatarClient, postAvatarJson } = require(process.argv[3])
 const { connectAvatarWss } = require(process.argv[4])
 const { generateAvatarRunCertificate } = require(process.argv[5])
 const { AvatarState } = require(process.argv[6])
+const { loopbackSocketOwner, runSocketOwnerHelper } = require(process.argv[7])
 
 const deck = {
   deckRunId: 'deck-run-e2e',
@@ -73,6 +74,35 @@ async function detachedCloseCode(rendezvous, postAvatarJson) {
   return closed
 }
 
+/** The server reads the Deck-side port on the real upgraded socket, and netstat names this process as its owner. */
+async function boundSocketEnds(rendezvous, server, postAvatarJson) {
+  const other = { ...deck, deckRunId: 'deck-run-port' }
+  const identity = { deckRunId: other.deckRunId, broker_url: other.broker_url }
+  if ((await postAvatarJson(rendezvous, '/attach', { protocol_version: 1, ...other })) !== 200) throw new Error('attach refused')
+  const socket = connectAvatarWss(rendezvous, '/ws')
+  const closed = new Promise((resolve) => socket.once('close', resolve))
+  await new Promise((resolve, reject) => {
+    socket.once('open', () => socket.send(JSON.stringify({ type: 'bind', protocol_version: 1, ...identity })))
+    socket.once('message', resolve)
+    socket.once('error', reject)
+  })
+  const clientPort = socket._socket.localPort
+  const ends = deckSocketEndpoints(server, identity)
+  const owner =
+    process.platform === 'win32'
+      ? (await loopbackSocketOwner(ends.local, ends.remote, { env: process.env, run: runSocketOwnerHelper })) === process.pid
+      : 'not windows'
+  const result = {
+    boundPortIsClientPort: server.boundRemotePort(identity) === clientPort,
+    localEndIsClient: ends.local.port === clientPort,
+    remoteEndIsServer: ends.remote.port === server.port,
+    ownerIsThisProcess: owner
+  }
+  if ((await postAvatarJson(rendezvous, '/detach', identity)) !== 200) throw new Error('detach refused')
+  await closed
+  return result
+}
+
 async function focusOnceBound(server) {
   const deadline = Date.now() + 5_000
   for (;;) {
@@ -129,6 +159,7 @@ async function run() {
     }
     const oversizedCloseCode = await oversizedFrameCloseCode(rendezvous)
     const detachCloseCode = await detachedCloseCode(rendezvous, postAvatarJson)
+    const socketEnds = await boundSocketEnds(rendezvous, server, postAvatarJson)
     client.start()
     const focus = await focusOnceBound(server)
     const attachedBeforeStop = server.attachedDecks().length
@@ -138,6 +169,7 @@ async function run() {
       upgrades,
       oversizedCloseCode,
       detachCloseCode,
+      socketEnds,
       focusOk: focus.ok,
       focused,
       attachedBeforeStop,

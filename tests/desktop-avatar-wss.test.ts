@@ -15,7 +15,8 @@ test('Electron carries attach, bind, bound, focus command and result over the re
     join(repo, 'desktop', 'src', 'main', 'avatar-client.ts'),
     join(repo, 'desktop', 'src', 'main', 'avatar-transport.ts'),
     join(repo, 'desktop', 'src', 'main', 'avatar-certificate.ts'),
-    join(repo, 'desktop', 'src', 'shared', 'avatar-state.ts')
+    join(repo, 'desktop', 'src', 'shared', 'avatar-state.ts'),
+    join(repo, 'desktop', 'src', 'main', 'avatar-socket-owner.ts')
   ]
 
   try {
@@ -46,6 +47,12 @@ test('Electron carries attach, bind, bound, focus command and result over the re
       upgrades: { wrongRoute: 'destroyed', withOrigin: 'destroyed', wrongBearer: 'destroyed' },
       oversizedCloseCode: 1009,
       detachCloseCode: 4410,
+      socketEnds: {
+        boundPortIsClientPort: true,
+        localEndIsClient: true,
+        remoteEndIsServer: true,
+        ownerIsThisProcess: process.platform === 'win32' ? true : 'not windows'
+      },
       focusOk: true,
       focused: 1,
       attachedBeforeStop: 1,

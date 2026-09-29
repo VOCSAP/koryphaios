@@ -1,8 +1,9 @@
 import { afterEach, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, win32 } from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { system32Dir } from '../desktop/src/main/windows-system-root.ts'
 import {
   AVATAR_REGISTRY_FILE,
   AVATAR_REGISTRY_VERSION,
@@ -231,7 +232,9 @@ test('owner release removes its own generation', () => {
 const CURRENT_TEST_SID = 'S-1-5-21-111-222-333-1001'
 
 function windowsBinary(name: string): string {
-  return join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', name)
+  const system32 = system32Dir(process.env.SystemRoot)
+  if (!system32.ok) throw new Error(`the real icacls test needs an absolute SystemRoot, got ${String(process.env.SystemRoot)}`)
+  return win32.join(system32.dir, name)
 }
 
 function currentWindowsSid(): string {
@@ -287,6 +290,41 @@ test('requires a protected SID-only ACL and configures it before publishing secr
       readWindowsAcl: () => acl
     })).toThrow('Avatar private directory could not be established')
   }
+})
+
+test('a SystemRoot the working directory could complete stops the private directory before anything is spawned', () => {
+  for (const systemRoot of [undefined, '', 'rel', 'C:\\Windows\\..\\rel']) {
+    const reported: string[] = []
+    onDeckError((_scope, text) => reported.push(text))
+    try {
+      expect(() => ensureAvatarPrivateDir(freshDir(), { platform: 'win32', env: { SystemRoot: systemRoot } })).toThrow(
+        'Avatar private directory could not be established'
+      )
+    } finally {
+      onDeckError(() => {})
+    }
+    expect(reported, String(systemRoot)).toEqual([
+      `cannot establish the Avatar private directory: refused to start whoami.exe: SystemRoot is not an absolute path (${String(systemRoot)})`
+    ])
+  }
+})
+
+test.skipIf(process.platform !== 'win32')('a whoami.exe planted under a relative SystemRoot is never executed', () => {
+  const cwd = freshDir()
+  mkdirSync(join(cwd, 'rel', 'System32'), { recursive: true })
+  copyFileSync(windowsBinary('whoami.exe'), join(cwd, 'rel', 'System32', 'whoami.exe'))
+  const reported: string[] = []
+  const previousCwd = process.cwd()
+  process.chdir(cwd)
+  onDeckError((_scope, text) => reported.push(text))
+  try {
+    expect(() => ensureAvatarPrivateDir(freshDir(), { env: { SystemRoot: 'rel' } })).toThrow()
+  } finally {
+    onDeckError(() => {})
+    process.chdir(previousCwd)
+  }
+  expect(reported.join('\n'), 'the planted whoami ran: the failure moved on to icacls').not.toContain('icacls')
+  expect(reported.join('\n')).toContain('refused to start whoami.exe')
 })
 
 test.skipIf(process.platform !== 'win32')('creates a protected Avatar directory verified by real icacls output', () => {

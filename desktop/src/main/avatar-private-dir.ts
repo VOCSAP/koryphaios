@@ -1,8 +1,9 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, win32 } from 'node:path'
 import { tmpdir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { reportError } from './log'
+import { system32Dir } from './windows-system-root'
 
 export const AVATAR_PRIVATE_DIR = 'avatar'
 
@@ -13,6 +14,7 @@ export interface WindowsAclSnapshot {
 
 export interface AvatarPrivateDirDeps {
   platform: NodeJS.Platform
+  env: Record<string, string | undefined>
   currentUserSid(): string
   setWindowsAcl(dir: string, sid: string): void
   readWindowsAcl(dir: string): WindowsAclSnapshot
@@ -21,23 +23,30 @@ export interface AvatarPrivateDirDeps {
 const SID_RE = /\bS-\d-(?:\d+-)*\d+\b/i
 const ALLOWED_WINDOWS_ACL_SIDS = new Set(['SY', 'BA'])
 
-function windowsBinary(name: string): string {
-  return join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', name)
+/** Throws before anything is spawned when SystemRoot would let the working directory supply the binary. */
+function windowsBinary(env: Record<string, string | undefined>, name: string): { file: string; cwd: string } {
+  const system32 = system32Dir(env.SystemRoot)
+  if (!system32.ok) {
+    throw new Error(`refused to start ${name}: SystemRoot is not an absolute path (${String(env.SystemRoot)})`)
+  }
+  return { file: win32.join(system32.dir, name), cwd: system32.dir }
 }
 
-function currentWindowsUserSid(): string {
-  const output = execFileSync(windowsBinary('whoami.exe'), ['/user'], { encoding: 'utf8' })
+function currentWindowsUserSid(env: Record<string, string | undefined>): string {
+  const whoami = windowsBinary(env, 'whoami.exe')
+  const output = execFileSync(whoami.file, ['/user'], { encoding: 'utf8', cwd: whoami.cwd })
   const sid = output.match(SID_RE)?.[0]
   if (!sid) throw new Error('Could not resolve the current Windows SID')
   return sid.toUpperCase()
 }
 
-function readWindowsAclSnapshot(dir: string): WindowsAclSnapshot {
+function readWindowsAclSnapshot(env: Record<string, string | undefined>, dir: string): WindowsAclSnapshot {
+  const icacls = windowsBinary(env, 'icacls.exe')
   const tempDir = mkdtempSync(join(tmpdir(), 'kory-avatar-acl-'))
   const savedAcl = join(tempDir, 'avatar.acl')
   try {
-    const display = execFileSync(windowsBinary('icacls.exe'), [dir], { encoding: 'utf8' })
-    execFileSync(windowsBinary('icacls.exe'), [dir, '/save', savedAcl], { stdio: 'ignore' })
+    const display = execFileSync(icacls.file, [dir], { encoding: 'utf8', cwd: icacls.cwd })
+    execFileSync(icacls.file, [dir, '/save', savedAcl], { stdio: 'ignore', cwd: icacls.cwd })
     return { display, sddl: readFileSync(savedAcl, 'utf16le') }
   } finally {
     rmSync(tempDir, { recursive: true, force: true })
@@ -45,15 +54,19 @@ function readWindowsAclSnapshot(dir: string): WindowsAclSnapshot {
 }
 
 function defaultDeps(overrides: Partial<AvatarPrivateDirDeps>): AvatarPrivateDirDeps {
+  const env = overrides.env ?? process.env
   return {
     platform: process.platform,
-    currentUserSid: currentWindowsUserSid,
+    env,
+    currentUserSid: () => currentWindowsUserSid(env),
     setWindowsAcl: (dir, sid) => {
-      execFileSync(windowsBinary('icacls.exe'), [dir, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`], {
-        stdio: 'ignore'
+      const icacls = windowsBinary(env, 'icacls.exe')
+      execFileSync(icacls.file, [dir, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`], {
+        stdio: 'ignore',
+        cwd: icacls.cwd
       })
     },
-    readWindowsAcl: readWindowsAclSnapshot,
+    readWindowsAcl: (dir) => readWindowsAclSnapshot(env, dir),
     ...overrides
   }
 }

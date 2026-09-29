@@ -14,6 +14,7 @@ import {
   type AvatarAttachRequest
 } from '../shared/avatar-protocol'
 import type { AvatarRunCertificate } from './avatar-certificate'
+import type { TcpEndpoint } from './avatar-socket-owner'
 import { AvatarState, type AvatarDeckIdentity } from '../shared/avatar-state'
 import { reportError } from './log'
 
@@ -46,6 +47,8 @@ export interface AvatarServer {
   attachedDecks(): AvatarAttachedDeck[]
   focusDeck(identity: AvatarDeckIdentity): Promise<AvatarCommandResult>
   isDeckBound(identity: AvatarDeckIdentity): boolean
+  /** The Deck-side port of the Deck's open bound WebSocket, or null. */
+  boundRemotePort(identity: AvatarDeckIdentity): number | null
   close(): Promise<void>
 }
 
@@ -85,16 +88,33 @@ export interface AvatarSocketHubOptions {
 }
 
 export interface AvatarSocketHub {
-  accept(socket: AvatarDeckSocket): void
+  /** `remotePort` is the Deck-side TCP port of the upgraded connection, null when the transport has none. */
+  accept(socket: AvatarDeckSocket, remotePort: number | null): void
   focusDeck(identity: AvatarDeckIdentity): Promise<AvatarCommandResult>
   detach(identity: AvatarDeckIdentity): void
   isDeckBound(identity: AvatarDeckIdentity): boolean
+  boundRemotePort(identity: AvatarDeckIdentity): number | null
 }
 
 interface BoundAvatarSocket {
   ws: AvatarDeckSocket
   identity: AvatarDeckIdentity
   pending: Map<string, PendingAvatarCommand>
+  remotePort: number | null
+}
+
+/**
+ * The two ends of a bound Deck's WebSocket as netstat names them, Deck side
+ * first: the owner read on the local end is the Deck process. Null while the
+ * Deck has no open bound socket.
+ */
+export function deckSocketEndpoints(
+  server: Pick<AvatarServer, 'port' | 'boundRemotePort'>,
+  identity: AvatarDeckIdentity
+): { local: TcpEndpoint; remote: TcpEndpoint } | null {
+  const deckPort = server.boundRemotePort(identity)
+  if (deckPort === null) return null
+  return { local: { address: '127.0.0.1', port: deckPort }, remote: { address: '127.0.0.1', port: server.port } }
 }
 
 export function observeAvatarRequest(request: Promise<void>, report: typeof reportError): void {
@@ -289,10 +309,11 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
       socket.destroy()
       return
     }
+    const remotePort = (socket as Duplex & { remotePort?: number }).remotePort ?? null
     wss.handleUpgrade(request, socket, head, (webSocket) => {
       sockets.add(webSocket)
       webSocket.on('close', () => sockets.delete(webSocket))
-      hub.accept(webSocket)
+      hub.accept(webSocket, remotePort)
     })
   })
 
@@ -312,6 +333,7 @@ export async function startAvatarServer(options: AvatarServerOptions): Promise<A
         attachedDecks: () => [...attached.values()].map((deck) => ({ ...deck })),
         focusDeck: hub.focusDeck,
         isDeckBound: hub.isDeckBound,
+        boundRemotePort: hub.boundRemotePort,
         close: () =>
           new Promise((resolveClose, rejectClose) => {
             for (const socket of sockets) socket.terminate()
@@ -358,7 +380,7 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
     socket.close(code, reason)
   }
 
-  const accept = (socket: AvatarDeckSocket): void => {
+  const accept = (socket: AvatarDeckSocket, remotePort: number | null): void => {
     let bound: BoundAvatarSocket | undefined
     const bindDeadline = setTimeout(() => {
       if (!bound) closeSocket(socket, 4408, 'bind timeout', 'rejected Avatar WebSocket bind timeout')
@@ -413,7 +435,12 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
           return
         }
         clearTimeout(bindDeadline)
-        bound = { ws: socket, identity: { deckRunId: frame.deckRunId, broker_url: frame.broker_url }, pending: new Map() }
+        bound = {
+          ws: socket,
+          identity: { deckRunId: frame.deckRunId, broker_url: frame.broker_url },
+          pending: new Map(),
+          remotePort
+        }
         const previous = boundSockets.get(deckKey(bound.identity))
         if (previous) {
           report('avatar-server', 'replaced the Avatar WebSocket of a Deck that bound again')
@@ -489,5 +516,10 @@ export function createAvatarSocketHub(options: AvatarSocketHubOptions): AvatarSo
   const isDeckBound = (identity: AvatarDeckIdentity): boolean =>
     boundSockets.get(deckKey(identity))?.ws.readyState === WebSocket.OPEN
 
-  return { accept, focusDeck, detach, isDeckBound }
+  const boundRemotePort = (identity: AvatarDeckIdentity): number | null => {
+    const bound = boundSockets.get(deckKey(identity))
+    return bound && bound.ws.readyState === WebSocket.OPEN ? bound.remotePort : null
+  }
+
+  return { accept, focusDeck, detach, isDeckBound, boundRemotePort }
 }

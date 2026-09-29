@@ -5,6 +5,7 @@ import { connect } from 'node:tls'
 import { generateAvatarRunCertificate } from '../desktop/src/main/avatar-certificate.ts'
 import {
   createAvatarSocketHub,
+  deckSocketEndpoints,
   installAvatarServerErrorReporter,
   MAX_AVATAR_REQUEST_BYTES,
   observeAvatarRequest,
@@ -426,9 +427,9 @@ function openHub(options: Partial<AvatarSocketHubOptions> = {}): {
   return { hub, reports, attachedDecks }
 }
 
-function boundSocket(hub: AvatarSocketHub, identity = deck): FakeDeckSocket {
+function boundSocket(hub: AvatarSocketHub, identity = deck, remotePort: number | null = 50_000): FakeDeckSocket {
   const socket = new FakeDeckSocket()
-  hub.accept(socket)
+  hub.accept(socket, remotePort)
   socket.receive(bindFrame(identity))
   return socket
 }
@@ -466,7 +467,7 @@ test('binds an attached Deck then relays its focus command result', async () => 
 test('traces then closes a bind whose protocol version is unsupported', () => {
   const { hub, reports } = openHub()
   const socket = new FakeDeckSocket()
-  hub.accept(socket)
+  hub.accept(socket, 50_000)
   socket.receive({ ...bindFrame(deck), protocol_version: 2 })
   expect(socket.closed).toEqual({ code: 4409, reason: 'unsupported version' })
   expect(socket.sent).toEqual([])
@@ -476,7 +477,7 @@ test('traces then closes a bind whose protocol version is unsupported', () => {
 test('traces then closes a command received before bound', () => {
   const { hub, reports } = openHub()
   const socket = new FakeDeckSocket()
-  hub.accept(socket)
+  hub.accept(socket, 50_000)
   socket.receive({ type: 'command', requestId: 'request-1', command: 'focus', ...deck })
   expect(socket.closed).toEqual({ code: 4401, reason: 'bind required' })
   expect(reports).toEqual(['rejected Avatar command before bind'])
@@ -485,7 +486,7 @@ test('traces then closes a command received before bound', () => {
 test('traces then closes a bind for a Deck that was never attached', () => {
   const { hub, reports } = openHub()
   const socket = new FakeDeckSocket()
-  hub.accept(socket)
+  hub.accept(socket, 50_000)
   socket.receive(bindFrame({ deckRunId: 'deck-run-unknown', broker_url: deck.broker_url }))
   expect(socket.closed).toEqual({ code: 4403, reason: 'Deck not attached' })
   expect(socket.sent).toEqual([])
@@ -495,7 +496,7 @@ test('traces then closes a bind for a Deck that was never attached', () => {
 test('traces then closes a socket that misses the bind deadline', async () => {
   const { hub, reports } = openHub({ bindTimeoutMs: 10 })
   const socket = new FakeDeckSocket()
-  hub.accept(socket)
+  hub.accept(socket, 50_000)
   await Bun.sleep(40)
   expect(socket.closed).toEqual({ code: 4408, reason: 'bind timeout' })
   expect(reports).toEqual(['rejected Avatar WebSocket bind timeout'])
@@ -610,6 +611,19 @@ test('reports a Deck bound only between its bind and its disconnect', () => {
   expect(hub.isDeckBound(deck)).toBe(false)
 })
 
+test('the Deck-side port of the current bound socket is the one reported, and only while it is open', () => {
+  const { hub } = openHub()
+  expect(hub.boundRemotePort(deck)).toBeNull()
+  const first = boundSocket(hub, deck, 50_001)
+  expect(hub.boundRemotePort(deck)).toBe(50_001)
+  expect(hub.boundRemotePort(otherDeck)).toBeNull()
+  const second = boundSocket(hub, deck, 50_002)
+  expect(first.closed, 'the superseded socket is closed').not.toBeNull()
+  expect(hub.boundRemotePort(deck), 'a re-bound Deck is checked on its new socket').toBe(50_002)
+  second.close(1000, 'test done')
+  expect(hub.boundRemotePort(deck)).toBeNull()
+})
+
 test('A1 binds any attached identity a socket declares, without proving Deck ownership', () => {
   const { hub } = openHub()
   const socket = boundSocket(hub, otherDeck)
@@ -618,4 +632,13 @@ test('A1 binds any attached identity a socket declares, without proving Deck own
   } finally {
     socket.close(1000, 'test done')
   }
+})
+
+test('the Deck side of a bound socket is the local end netstat must read, the Avatar side the remote end', () => {
+  const server = { port: 50_100, boundRemotePort: (identity: { deckRunId: string }) => (identity.deckRunId === deck.deckRunId ? 50_123 : null) }
+  expect(deckSocketEndpoints(server, deck)).toEqual({
+    local: { address: '127.0.0.1', port: 50_123 },
+    remote: { address: '127.0.0.1', port: 50_100 }
+  })
+  expect(deckSocketEndpoints(server, otherDeck)).toBeNull()
 })

@@ -8,6 +8,8 @@ export interface DeckFocusGestureDeps {
   attachedDecks(): AvatarAttachRequest[]
   isAlive(pid: number): boolean
   isDeckBound(identity: AvatarDeckIdentity): boolean
+  /** The process owning the Deck's bound WebSocket; null when it cannot be told. Windows only. */
+  socketOwnerPid(identity: AvatarDeckIdentity): Promise<number | null>
   allowForeground(pid: number): Promise<boolean>
   focusDeck(identity: AvatarDeckIdentity): Promise<AvatarCommandResult>
   report?: typeof reportError
@@ -47,8 +49,24 @@ export function createDeckFocusGesture(deps: DeckFocusGestureDeps): (identity: A
       report('avatar-focus', `refused to focus Deck ${identity.deckRunId}: it is not bound to the Avatar`)
       return
     }
-    if (deps.platform === 'win32' && !(await deps.allowForeground(deck.deckPid))) {
-      report('avatar-focus', `could not cede the foreground to Deck ${identity.deckRunId}; its window may only flash`)
+    if (deps.platform === 'win32') {
+      let owner: number | null
+      try {
+        owner = await deps.socketOwnerPid(identity)
+      } catch (error) {
+        report('avatar-focus', `refused to focus Deck ${identity.deckRunId}: the owner of its WebSocket could not be read`, error)
+        return
+      }
+      if (owner !== deck.deckPid) {
+        report(
+          'avatar-focus',
+          `refused to focus Deck ${identity.deckRunId}: its WebSocket belongs to process ${owner ?? 'unknown'}, not to the declared ${deck.deckPid}`
+        )
+        return
+      }
+      if (!(await deps.allowForeground(deck.deckPid))) {
+        report('avatar-focus', `could not cede the foreground to Deck ${identity.deckRunId}; its window may only flash`)
+      }
     }
     try {
       const result = await deps.focusDeck(identity)

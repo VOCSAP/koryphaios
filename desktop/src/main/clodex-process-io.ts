@@ -11,6 +11,7 @@
 // killed one is not. All IO is injected so the decisions run under `bun test`
 // without electron and without spawning anything.
 
+import { win32 } from "node:path";
 import { clodexHome } from "./clodex-bridge";
 import type { ProcessIdentity } from "./clodex-lifecycle";
 import {
@@ -22,6 +23,7 @@ import {
 } from "./clodex-process-identity";
 import { buildShellInvocation } from "./shell-command";
 import { canonicalPath } from "./worktree-service";
+import { system32Dir } from "./windows-system-root";
 
 /** Error scope of every trace emitted by this module. */
 const SCOPE = "clodex";
@@ -183,8 +185,6 @@ const WINDOWS_ABSOLUTE_RE = /^[A-Za-z]:[\\/]/;
 /** `/s` strips the first and last quote of the line, so the path goes unquoted. */
 const GLUED_PATH_RE = /^[A-Za-z]:[\\/][A-Za-z0-9._\\/-]*$/;
 
-const DOT_DOT_SEGMENT_RE = /(^|[\\/])\.\.([\\/]|$)/;
-
 /** `ProcessId|ParentProcessId|CreationDate|ExecutablePath`; the path is empty when unreadable. */
 const CIM_ROW_RE = /^(\d+)\|(\d+)\|([^|]*)\|(.*)$/;
 
@@ -247,15 +247,16 @@ function withAbsolutePath(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
  */
 function win32Invocation(env: NodeJS.ProcessEnv, line: string, makeDir: (path: string) => void) {
   const systemRoot = envValue(env, "SystemRoot");
-  if (!systemRoot || !WINDOWS_ABSOLUTE_RE.test(systemRoot)) {
+  const system32 = system32Dir(systemRoot);
+  if (!system32.ok && system32.reason === "not-absolute") {
     throw new Error(`clodex server needs an absolute SystemRoot, got ${String(systemRoot)}`);
   }
-  const cmd = `${systemRoot.replace(/[\\/]+$/, "")}\\System32\\cmd.exe`;
+  if (!system32.ok) {
+    throw new Error(`clodex server refuses a cmd.exe path with a .. segment: ${String(systemRoot)}`);
+  }
+  const cmd = win32.join(system32.dir, "cmd.exe");
   if (!GLUED_PATH_RE.test(cmd)) {
     throw new Error(`clodex server cannot glue ${cmd} into a command line`);
-  }
-  if (DOT_DOT_SEGMENT_RE.test(cmd)) {
-    throw new Error(`clodex server refuses a cmd.exe path with a .. segment: ${cmd}`);
   }
   const home = clodexHome(env);
   if (!WINDOWS_ABSOLUTE_RE.test(home)) {

@@ -7,8 +7,9 @@ import { createDeckFocusGesture, deckProcessIsAlive } from './avatar-focus-gestu
 import { allowForegroundWindow, runForegroundHelper } from './avatar-foreground'
 import { configureAvatarLifetime, type AvatarLifetimeLease } from './avatar-lifetime'
 import { ensureAvatarPrivateDir } from './avatar-private-dir'
+import { loopbackSocketOwner, runSocketOwnerHelper } from './avatar-socket-owner'
 import { claimAvatarRegistry, type AvatarRegistryOwner } from './avatar-registry'
-import { startAvatarServer, type AvatarServer } from './avatar-server'
+import { deckSocketEndpoints, startAvatarServer, type AvatarServer } from './avatar-server'
 import { releaseAvatarResources } from './avatar-quit'
 import { createAvatarTray, type AvatarTray } from './avatar-tray'
 import { createAvatarQuitHandler } from './avatar-quit-handler'
@@ -68,6 +69,11 @@ async function startAvatar(): Promise<void> {
     attachedDecks: () => server?.attachedDecks() ?? [],
     isAlive: deckProcessIsAlive,
     isDeckBound: (identity) => server?.isDeckBound(identity) ?? false,
+    socketOwnerPid: async (identity) => {
+      const ends = server ? deckSocketEndpoints(server, identity) : null
+      if (!ends) return null
+      return loopbackSocketOwner(ends.local, ends.remote, { env: process.env, run: runSocketOwnerHelper })
+    },
     allowForeground: (pid) => allowForegroundWindow(pid, { platform: process.platform, env: process.env, run: runForegroundHelper }),
     focusDeck: (identity) => (server ? server.focusDeck(identity) : Promise.reject(new Error('Avatar server stopped')))
   })

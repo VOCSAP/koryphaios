@@ -34,6 +34,10 @@ function harness(overrides: Partial<DeckFocusGestureDeps> = {}) {
     attachedDecks: () => [deck],
     isAlive: () => true,
     isDeckBound: () => true,
+    socketOwnerPid: async () => {
+      calls.push('owner')
+      return deck.deckPid
+    },
     allowForeground: async (pid) => {
       calls.push(`allow:${pid}`)
       return true
@@ -52,9 +56,34 @@ function harness(overrides: Partial<DeckFocusGestureDeps> = {}) {
 test('cedes the foreground to the Deck pid before sending the focus command', async () => {
   const { gesture, calls, reports, infos } = harness()
   await gesture(identity)
-  expect(calls).toEqual(['allow:4242', 'focus:deck-run-1'])
+  expect(calls).toEqual(['owner', 'allow:4242', 'focus:deck-run-1'])
   expect(reports).toEqual([])
   expect(infos).toEqual(['Deck deck-run-1 brought to front'])
+})
+
+test('refuses and traces a Deck whose WebSocket another process owns, ceding nothing', async () => {
+  const { gesture, calls, reports } = harness({ socketOwnerPid: async () => 5151 })
+  await gesture(identity)
+  expect(calls, 'the declared pid must never receive the foreground right').toEqual([])
+  expect(reports).toEqual([
+    'refused to focus Deck deck-run-1: its WebSocket belongs to process 5151, not to the declared 4242'
+  ])
+})
+
+test('refuses when the owner of the WebSocket cannot be told, or cannot be read', async () => {
+  const unknown = harness({ socketOwnerPid: async () => null })
+  await unknown.gesture(identity)
+  expect(unknown.calls).toEqual([])
+  expect(unknown.reports).toEqual([
+    'refused to focus Deck deck-run-1: its WebSocket belongs to process unknown, not to the declared 4242'
+  ])
+
+  const unreadable = harness({ socketOwnerPid: () => Promise.reject(new Error('netstat timed out')) })
+  await unreadable.gesture(identity)
+  expect(unreadable.calls).toEqual([])
+  expect(unreadable.reports).toEqual([
+    'refused to focus Deck deck-run-1: the owner of its WebSocket could not be read'
+  ])
 })
 
 test('refuses and traces a Deck detached since the menu was built', async () => {
