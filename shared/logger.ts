@@ -1,5 +1,5 @@
 /**
- * Node builtins only (no Bun.file, no electron imports) so this runs in both
+ * Node builtins and pure modules only (no Bun.file, no electron imports) so this runs in both
  * the core (Bun) and the Electron main process, and is unit-testable with an
  * injected directory.
  * Size-based rotation: <name>.log shifts to .log.1 ... .log.<maxFiles-1> when
@@ -20,6 +20,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { MAX_LOGGED_CHARS, redactSecrets } from "../desktop/src/shared/log-redact.ts";
 
 export type LogLevel = "info" | "warn" | "error";
 
@@ -123,9 +124,12 @@ export function createLogger(options: LoggerOptions): Logger {
   }
 
   function write(level: LogLevel, prefix: string, message: string, context?: unknown): void {
-    const line =
-      `${now().toISOString()} ${level.toUpperCase().padEnd(5)} ` +
-      `${prefix}${message}${renderContext(context)}`;
+    const line = redactSecrets(
+      (
+        `${now().toISOString()} ${level.toUpperCase().padEnd(5)} ` +
+        `${prefix}${message}${renderContext(context)}`
+      ).slice(0, MAX_LOGGED_CHARS)
+    );
     if (mirror) {
       // console.error for warn/error keeps the current stderr behavior of the
       // broker/server; info goes to stdout.
@@ -156,6 +160,28 @@ export function createLogger(options: LoggerOptions): Logger {
   }
 
   return make("");
+}
+
+/**
+ * For a process whose stdout carries a protocol (server.ts, MCP over stdio):
+ * the tagged line goes to stderr, masked like the file, and the entry to the
+ * file log.
+ */
+export function stderrMirror(
+  fileLog: Logger,
+  tag: string
+): { log(msg: string): void; logError(msg: string, e?: unknown): void } {
+  const stderrLine = (msg: string): string => redactSecrets(`[${tag}] ${msg}`.slice(0, MAX_LOGGED_CHARS));
+  return {
+    log: (msg) => {
+      console.error(stderrLine(msg));
+      fileLog.info(msg);
+    },
+    logError: (msg, e) => {
+      console.error(stderrLine(msg));
+      fileLog.error(msg, e);
+    },
+  };
 }
 
 /**

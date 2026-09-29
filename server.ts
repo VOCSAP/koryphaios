@@ -67,7 +67,7 @@ import {
   writeSessionIdentityFile,
   deleteSessionIdentityFile,
 } from "./shared/peer-cache.ts";
-import { createLogger, coreLogDir } from "./shared/logger.ts";
+import { createLogger, coreLogDir, stderrMirror } from "./shared/logger.ts";
 import {
   DECK_PEER_ID,
   DECK_INSTANCE_TOKEN,
@@ -224,16 +224,17 @@ async function ensureBroker(): Promise<void> {
 // Rolling file log (PLAN-observabilite-erreurs O1/O2). stdout carries the MCP
 // stdio protocol, so the console mirror is disabled and both helpers keep the
 // historical stderr line themselves.
-const fileLog = createLogger({ dir: coreLogDir(), name: "server", mirrorToConsole: false });
+const serverLog = stderrMirror(
+  createLogger({ dir: coreLogDir(), name: "server", mirrorToConsole: false }),
+  "claude-peers"
+);
 
 function log(msg: string) {
-  console.error(`[claude-peers] ${msg}`);
-  fileLog.info(msg);
+  serverLog.log(msg);
 }
 
 function logError(msg: string, e?: unknown) {
-  console.error(`[claude-peers] ${msg}`);
-  fileLog.error(msg, e);
+  serverLog.logError(msg, e);
 }
 
 // Last-resort safety nets: Bun exits on unhandled rejections; leave a trace
@@ -2497,7 +2498,7 @@ async function main() {
   // Deck back-channel: hand the real minted session id to the per-tile token file
   // so the Deck maps tile -> session id deterministically (no-op outside the Deck).
   await writeDeskSessionId();
-  log(`Registered as peer '${myPeerId}' (instance ${myInstanceToken.slice(0, 8)})`);
+  log(`Registered as peer '${myPeerId}'`);
 
   // Background summary upgrade.
   (async () => {
